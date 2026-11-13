@@ -6,7 +6,7 @@
  */
 import { z } from "zod";
 
-import { embeddingProfileCatalog, visionProfileCatalog } from "./embedding.js";
+import { DEFAULT_VISION_PROFILE, embeddingProfileCatalog, visionProfileCatalog } from "./embedding.js";
 import { pipelineFeatureOverridesSchema } from "./pipeline.js";
 
 /** Dotted paths under `pipeline` that name a backend model, provider or route. */
@@ -36,11 +36,31 @@ function readPath(root: unknown, path: string): { present: boolean; value: unkno
   return parent && Object.hasOwn(parent, key) ? { present: true, value: parent[key] } : { present: false, value: undefined };
 }
 
-/** True when a raw field value actually chooses something (null, `{}` and the `auto` route choose nothing). */
-function chooses(path: ManagedPipelineModelPath, value: unknown): boolean {
+/** The model URI and target a profile already implies (the schema fills them in), for the raw section's profile. */
+function profileDefaults(rawPipeline: unknown, head: string): { modelUri?: string; target?: string } | undefined {
+  const section = record(record(rawPipeline)?.[head]);
+  if (head === "embedding") {
+    const profile = typeof section?.profile === "string" ? section.profile : "cheapest-hosted";
+    return embeddingProfileCatalog[profile as keyof typeof embeddingProfileCatalog]?.config;
+  }
+  if (head === "vision") {
+    const profile = typeof section?.profile === "string" ? section.profile : DEFAULT_VISION_PROFILE;
+    return visionProfileCatalog[profile as keyof typeof visionProfileCatalog]?.config;
+  }
+  return undefined;
+}
+
+/**
+ * True when a raw field value actually chooses something. Null, `{}`, the `auto` route, and a model URI or target
+ * equal to what the section's profile already implies (a normalized pipeline read back and saved) choose nothing.
+ */
+function chooses(rawPipeline: unknown, path: ManagedPipelineModelPath, value: unknown): boolean {
   if (value === null || value === undefined) return false;
   if (path === "textGeneration.models") return Object.keys(record(value) ?? {}).length > 0;
   if (path === "visualPages.route") return value !== "auto";
+  const [head, key] = path.split(".") as [string, string];
+  const defaults = profileDefaults(rawPipeline, head);
+  if (defaults && (key === "modelUri" || key === "target") && defaults[key] === value) return false;
   return true;
 }
 
@@ -50,7 +70,7 @@ function chooses(path: ManagedPipelineModelPath, value: unknown): boolean {
  */
 export function managedPipelineModelPaths(rawPipeline: unknown): string[] {
   return MANAGED_PIPELINE_MODEL_PATHS
-    .filter(path => { const { present, value } = readPath(rawPipeline, path); return present && chooses(path, value); })
+    .filter(path => { const { present, value } = readPath(rawPipeline, path); return present && chooses(rawPipeline, path, value); })
     .map(path => `pipeline.${path}`);
 }
 

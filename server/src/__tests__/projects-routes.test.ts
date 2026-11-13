@@ -810,7 +810,7 @@ describe("projectsRoutes validation", () => {
       credentials: "include",
       body: {
         sessionId: "session-1",
-        model: "anthropic/claude-haiku-5.5",
+        tier: "smart",
       },
       fetch: async (input, init) =>
         app.request(new Request(input, init as RequestInit)),
@@ -838,7 +838,7 @@ describe("projectsRoutes validation", () => {
         userId: "demo-user",
         query: "What changed?",
         sessionId: "session-1",
-        model: "anthropic/claude-haiku-5.5",
+        tier: "smart",
         onTextDelta: expect.any(Function),
       }),
     );
@@ -905,7 +905,7 @@ describe("projectsRoutes validation", () => {
           },
         ],
         sessionId: "session-1",
-        model: "anthropic/claude-haiku-5.5",
+        tier: "smart",
       }),
     });
 
@@ -1444,5 +1444,91 @@ describe("project tags API", () => {
   it("requires a read scope", async () => {
     expect((await buildApp({ orgId: "org-a", scopes: [] }).request("/projects/one/tags")).status).toBe(403);
     expect(listProjectTagsMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("managed model fields on project routes", () => {
+  const send = (app: Hono, path: string, method: string, body: unknown) => app.request(path, {
+    method, headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+  });
+
+  beforeEach(() => {
+    getProjectMock.mockReset();
+    createProjectMock.mockReset();
+    updateProjectMock.mockReset();
+    updateProjectSearchSettingsForUserMock.mockReset();
+    getProjectSearchSettingsForUserMock.mockReset();
+  });
+
+  it("refuses backend models, providers and routes on create and update, naming categories and never echoing the value", async () => {
+    getProjectMock.mockResolvedValue({ id: "ws-1", orgId: "org-1" });
+    const cases: Array<[Hono, string, string, unknown]> = [
+      [buildApp(), "/projects", "POST", { name: "Contracts", pipeline: { vision: { modelUri: "llm://openrouter/google/gemini-2.5-flash-lite" } } }],
+      [buildApp(), "/projects", "POST", { name: "Contracts", pipeline: { visualPages: { route: "gemini" } } }],
+      [buildApp(), "/projects/ws-1", "PATCH", { pipeline: { textGeneration: { model: "z-ai/glm-5.3-flash" } } }],
+      [buildApp({ orgId: "org-1", scopes: ["projects:manage"] }), "/projects/ws-1", "PATCH", { pipeline: { embedding: { profile: "good-fast-local", modelUri: "llm://openrouter/perplexity/pplx-embed-v1-0.6b" } } }],
+      [buildApp({ orgId: "org-1", scopes: ["projects:manage"] }), "/projects/ws-1", "PATCH", { pipeline: { structuredExtraction: { model: "llm://private/gpu1/acme/model" } } }],
+    ];
+    for (const [app, path, method, body] of cases) {
+      const response = await send(app, path, method, body);
+      expect(response.status, JSON.stringify(body)).toBe(400);
+      const json = await response.json();
+      expect(json.error.code).toBe("model_not_allowed");
+      expect(json.error.message).toContain("pipeline.quality");
+      expect(json.error.message).not.toMatch(/gemini-2|glm-5|pplx|acme/);
+    }
+    expect(createProjectMock).not.toHaveBeenCalled();
+    expect(updateProjectMock).not.toHaveBeenCalled();
+  });
+
+  it("checks the key's organization and scope before reading the body", async () => {
+    getProjectMock.mockResolvedValue({ id: "ws-1", orgId: "org-1" });
+    const body = { pipeline: { textGeneration: { model: "z-ai/glm-5.3-flash" } } };
+    expect((await send(buildApp({ orgId: "org-2", scopes: ["projects:manage"] }), "/projects/ws-1", "PATCH", body)).status).toBe(404);
+    expect((await send(buildApp({ orgId: "org-1", scopes: ["search:deep"] }), "/projects/ws-1", "PATCH", body)).status).toBe(403);
+    expect((await send(buildApp({ orgId: "org-1", scopes: ["projects:manage"], keyType: "client" }), "/projects/ws-1", "PATCH", body)).status).toBe(403);
+    expect(updateProjectMock).not.toHaveBeenCalled();
+  });
+
+  it("lets category changes through", async () => {
+    getProjectMock.mockResolvedValue({ id: "ws-1", orgId: "org-1" });
+    const response = await send(buildApp(), "/projects/ws-1", "PATCH", { pipeline: { quality: "good", embedding: { profile: "good-fast-local" } } });
+    expect(response.status).not.toBe(400);
+  });
+
+  it("omits managed model fields when a customer reads a project", async () => {
+    getProjectMock.mockResolvedValue({ id: "ws-1", orgId: "org-1", pipeline: {
+      quality: "auto",
+      vision: { profile: "good-fast-hosted", modelUri: "llm://openrouter/google/gemini-2.5-flash-lite", target: "hosted", remoteFallbackModelUri: null },
+      embedding: { profile: "cheapest-hosted", modelUri: "llm://openrouter/perplexity/pplx-embed-v1-0.6b", target: "hosted" },
+      textGeneration: { model: "qwen/qwen3.5-flash-02-23", models: {} },
+      visualPages: { route: "gemini", coarseFallback: false },
+    } });
+    for (const app of [buildApp(), buildApp({ orgId: "org-1", scopes: ["search:deep"] })]) {
+      const response = await app.request("/projects/ws-1");
+      expect(response.status).toBe(200);
+      const text = await response.text();
+      expect(text).not.toMatch(/llm:\/\/|gemini|perplexity|qwen/);
+      expect(JSON.parse(text).pipeline).toMatchObject({ quality: "auto", vision: { profile: "good-fast-hosted" }, embedding: { profile: "cheapest-hosted" } });
+    }
+  });
+
+  it("takes the reranker as a category and refuses rerank providers and models", async () => {
+    getProjectMock.mockResolvedValue({ id: "ws-1", orgId: "org-1", name: "Legal", slug: "legal" });
+    for (const retrievalDefaults of [{ rerankProvider: "deepinfra" }, { rerankModel: "Qwen/Qwen3-Reranker-0.6B" }]) {
+      const response = await send(buildApp(), "/projects/ws-1/search-settings", "PATCH", { retrievalDefaults });
+      expect(response.status).toBe(400);
+      expect((await response.json()).error.code).toBe("model_not_allowed");
+    }
+    expect(updateProjectSearchSettingsForUserMock).not.toHaveBeenCalled();
+    updateProjectSearchSettingsForUserMock.mockResolvedValue({ projectId: "ws-1", retrievalDefaults: { useRerank: true, rerankProvider: "deepinfra", rerankModel: "Qwen/Qwen3-Reranker-0.6B" } });
+    const response = await send(buildApp(), "/projects/ws-1/search-settings", "PATCH", { retrievalDefaults: { reranker: "model", useRerank: true } });
+    expect(response.status).toBe(200);
+    expect(updateProjectSearchSettingsForUserMock).toHaveBeenCalledWith(expect.objectContaining({
+      input: { retrievalDefaults: { useRerank: true, rerankProvider: "deepinfra", rerankModel: "Qwen/Qwen3-Reranker-0.6B" } },
+    }));
+    const text = await response.text();
+    expect(text).not.toMatch(/deepinfra|Qwen/);
+    expect(JSON.parse(text).retrievalDefaults).toEqual({ useRerank: true, reranker: "model" });
   });
 });

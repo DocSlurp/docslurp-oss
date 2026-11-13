@@ -18,8 +18,8 @@ describe("managed pipeline model fields", () => {
     expect(managedPipelineModelPaths({
       textGeneration: { model: "qwen/qwen3.5-flash-02-23", models: { "document-summary": "x/y" } },
       structuredExtraction: { model: "llm://openrouter/x/y" },
-      embedding: { profile: "cheapest-hosted", modelUri: "llm://openrouter/perplexity/pplx-embed-v1-0.6b", target: "hosted" },
-      vision: { modelUri: "llm://openrouter/x/y", target: "hosted", remoteFallbackModelUri: "llm://openrouter/x/z" },
+      embedding: { profile: "good-fast-local", modelUri: "llm://openrouter/perplexity/pplx-embed-v1-0.6b", target: "hosted" },
+      vision: { modelUri: "llm://openrouter/x/y", target: "local", remoteFallbackModelUri: "llm://openrouter/x/z" },
       visualPages: { route: "gemini" },
     })).toEqual([
       "pipeline.textGeneration.model", "pipeline.textGeneration.models", "pipeline.structuredExtraction.model",
@@ -33,6 +33,9 @@ describe("managed pipeline model fields", () => {
       quality: "good", inferenceLane: "backfill", embedding: { profile: "good-fast-local" }, vision: { profile: "cheapest-hosted", remoteFallbackModelUri: null },
       textGeneration: { model: null, models: {} }, structuredExtraction: { model: null }, visualPages: { route: "auto", coarseFallback: true },
     })).toEqual([]);
+    // A normalized pipeline read back and saved carries each profile's own URI and target: not a model choice.
+    expect(managedPipelineModelPaths(normalizePipelineFeatures(defaultPipelineFeatures))).toEqual([]);
+    expect(managedPipelineModelPaths({ embedding: { profile: "fastest-local", modelUri: "llm://transformers.js/Xenova/gte-small", target: "local" } })).toEqual([]);
     expect(managedPipelineModelPaths(undefined)).toEqual([]);
     expect(managedPipelineModelPaths("nope")).toEqual([]);
   });

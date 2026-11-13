@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const sqlMock = Object.assign(vi.fn(), { json: (value: unknown) => value });
+const sqlMock: any = Object.assign(vi.fn(), { json: (value: unknown) => value, begin: vi.fn(async (run: (tx: unknown) => unknown) => run(sqlMock)) });
 vi.mock("../db.js", () => ({ sql: sqlMock }));
 
 const { setRequestActor } = await import("../lib/request-actor.js");
@@ -31,7 +31,7 @@ const serverKey = (overrides: Record<string, unknown> = {}) => ({
 });
 
 describe("platform-admin managed model route", () => {
-  beforeEach(() => { sqlMock.mockReset(); });
+  beforeEach(() => { sqlMock.mockReset(); sqlMock.begin.mockClear(); });
 
   it("lets a platform-admin session map a tier to a reviewed model", async () => {
     sqlMock.mockResolvedValueOnce([{ chat: {} }]).mockResolvedValueOnce([]);
@@ -56,6 +56,31 @@ describe("platform-admin managed model route", () => {
     const unknownTier = await put(adminSession, { chat: { premium: "anthropic/claude-haiku-5.5" } });
     expect(unknownTier.status).toBe(400);
     expect(sqlMock).not.toHaveBeenCalled();
+  });
+
+  it("lets a platform admin set a private or catalog vision model, validated by the pipeline schema", async () => {
+    sqlMock.mockResolvedValueOnce([{ chat: {}, pipeline: {} }]).mockResolvedValue([]);
+    const ok = await put(adminSession, { pipeline: { vision: { modelUri: "llm://openrouter/google/gemini-2.5-flash-lite" }, textGeneration: { model: "qwen/qwen3.5-flash-02-23" } } });
+    expect(ok.status, await ok.clone().text()).toBe(200);
+    sqlMock.mockReset();
+    sqlMock.mockResolvedValueOnce([{ chat: {}, pipeline: {} }]);
+    const bad = await put(adminSession, { pipeline: { vision: { modelUri: "not a uri" } } });
+    expect(bad.status).toBe(400);
+  });
+
+  it("refuses prohibited pipeline models and embedding changes once documents exist", async () => {
+    expect((await put(adminSession, { pipeline: { textGeneration: { model: "openai/gpt-6-sol-pro" } } })).status).toBe(400);
+    expect(sqlMock).not.toHaveBeenCalled();
+    sqlMock.mockResolvedValueOnce([{ chat: {}, pipeline: {} }]).mockResolvedValueOnce([{ count: 3 }]);
+    const embedding = await put(adminSession, { pipeline: { embedding: { modelUri: "llm://openrouter/perplexity/pplx-embed-v1-0.6b" } } });
+    expect(embedding.status).toBe(400);
+    expect((await embedding.json()).error.message).toContain("re-index");
+  });
+
+  it("never lets an API key or owner set pipeline models", async () => {
+    for (const actor of [memberSession, serverKey()]) {
+      expect((await put(actor, { pipeline: { vision: { modelUri: "llm://openrouter/google/gemini-2.5-flash-lite" } } })).status).toBe(403);
+    }
   });
 
   it("answers 404 for a missing project", async () => {

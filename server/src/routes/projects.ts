@@ -1624,6 +1624,8 @@ export const projectsRoutes = new Hono()
     "/:projectId/estimate",
     zValidator("json", updateProjectSchema, validationHook),
     async (c) => {
+      const managed = refuseManagedPipelineFields(c, (await c.req.json().catch(() => null) as { pipeline?: unknown } | null)?.pipeline);
+      if (managed) return managed;
       const userId = c.get("sessionUser").id;
       const project = await getProject(c.req.param("projectId"), userId);
       if (!project) return apiErrorResponse(c, 404, "project_not_found", "Project not found");
