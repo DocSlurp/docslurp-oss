@@ -1,4 +1,4 @@
-import { CHAT_TIERS, SPEED_BOOST_CHAT_TIERS } from "./project-chat-models.js";
+import { CHAT_TIERS } from "./project-chat-models.js";
 import { geoPredicateSchema } from "./geo.js";
 import { projectSettingsProposalSchema } from "./project-settings-proposal.js";
 import { z } from "zod";
@@ -118,8 +118,12 @@ export const projectSchema = z.object({
   archivedAt: z.string().nullable().default(null),
   /** The organization's default project receives requests that omit a projectId. */
   isDefault: z.boolean().default(false),
-  /** Chat tiers whose model has a fast route under this project's mapping: where Speed boost speeds up answers. */
-  chatSpeedBoostTiers: z.array(z.enum(CHAT_TIERS)).default(() => [...SPEED_BOOST_CHAT_TIERS]),
+  /**
+   * Chat tiers whose model has a fast route under this project's mapping: where Speed boost speeds up answers. The
+   * server always sends it; optional in the type so a client-built record need not (read a missing list as the
+   * defaults, SPEED_BOOST_CHAT_TIERS).
+   */
+  chatSpeedBoostTiers: z.array(z.enum(CHAT_TIERS)).optional(),
   lastActivityAt: z.string(),
   createdAt: z.string(),
   updatedAt: z.string(),
