@@ -17,6 +17,9 @@ import { runArtifactRoot } from "../lib/artifact-root.js";
 import { quarantineScanSnapshotEnabled, type CommandRunner } from "../tools/runner.js";
 import { trustedTempDownloadPattern } from "../lib/temp-file-names.js";
 import { sha256Bytes, verifyStagedSource } from "../sandbox/source-integrity.js";
+import { chartExportActive, chartExportConfigOf } from "../chart-export/config.js";
+import { chartExportInlineEnabled, type InlineChartRequest } from "../chart-export/inline.js";
+import { deterministicSourceKind } from "../chart-export/vm-extractor.js";
 import { applyParseSource, clearParseSource, originalSourceForQuarantine } from "../lib/parse-source.js";
 
 export class QuarantineStage implements Stage {
@@ -77,7 +80,8 @@ export class QuarantineStage implements Stage {
               verifyStagedSource(original, scannedSha256);
               // The API only glanced at this file; this is the first full look, before any parser.
               // One inspection of the bytes (in the parser VM in production) serves the intake check and the scan.
-              const inspection = await inspectQuarantine({ bytes, filename: document.filename, tempFile, runner: this.runner, policy: this.config, ...(signal ? { signal } : {}) });
+              const charts = inlineChartRequest(state.run.pipeline, document.mimeType);
+              const inspection = await inspectQuarantine({ bytes, filename: document.filename, tempFile, runner: this.runner, policy: this.config, ...(charts ? { charts } : {}), ...(signal ? { signal } : {}) });
               const verified = verifyIntakeFileFacts(document, inspection);
               const artifact = await scanDocumentForQuarantine({
                 inspection,
@@ -121,6 +125,12 @@ export class QuarantineStage implements Stage {
               }
               if (accepted) applyParseSource(document, decision);
               else clearParseSource(document);
+              // Inline charts stay only on an accepted document whose verified type is still the kind they were read as.
+              const verifiedMime = verified && !verified.refused ? verified.facts.mimeType : document.mimeType;
+              if (accepted && charts && inspection.charts && deterministicSourceKind(verifiedMime) === charts.kind) {
+                artifact.chartInline = { ...inspection.charts, kind: charts.kind };
+                console.log(`[chart-export] inline document=${document.id} kind=${charts.kind} status=${inspection.charts.status} ${inspection.charts.status === "ok" ? `visuals=${inspection.charts.result.visuals.length} ms=${inspection.charts.ms}` : `reason=${inspection.charts.reason}`}`);
+              }
 
               await this.storage.putArtifactJson(key, artifact);
               const artifactUri = this.storage.uri(key);
@@ -152,4 +162,14 @@ export class QuarantineStage implements Stage {
       );
     });
   }
+}
+
+/**
+ * The inline chart request for a document (DOCSLURP_CHART_EXPORT_INLINE=1): only while the run's chart export tier is
+ * active and the document was declared a kind the free rungs read; null otherwise (the inspection runs as before).
+ */
+export function inlineChartRequest(pipeline: unknown, mimeType: string, env: Readonly<Record<string, string | undefined>> = process.env): InlineChartRequest | null {
+  if (!chartExportInlineEnabled(env) || !chartExportActive(pipeline, env)) return null;
+  const kind = deterministicSourceKind(mimeType);
+  return kind ? { kind, diagrams: chartExportConfigOf(pipeline, env).diagrams !== false } : null;
 }

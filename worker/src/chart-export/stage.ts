@@ -58,6 +58,8 @@ export interface ChartExportPassInput {
   legacyPages: ReadonlyArray<{ pageNumber: number; route?: string | null }>;
   /** Quarantine's free presence counts (Office chart parts): stats with export off, the VM signal with export on. */
   presence?: DeterministicVisualResult["presence"];
+  /** The quarantine guest's inline chart answer for the source (DOCSLURP_CHART_EXPORT_INLINE). */
+  inline?: import("./inline.js").StoredInlineCharts | null;
   /** Page raster (the caller cleans it up through `release`). */
   pageImage: (pageNumber: number) => Promise<PageImage | null>;
   /** Crops a page raster to a placement in page points; null when cropping is unavailable (the page is used). */
@@ -170,6 +172,7 @@ export async function prepareChartExport(input: ChartExportPassInput): Promise<P
           candidates: session.candidates.length,
         },
         ...(figures.index ? { dopplerFiguresIndex: figures.index } : {}),
+        ...(input.inline ? { inline: input.inline } : {}),
         ...(input.recordUsage ? { recordUsage: input.recordUsage } : {}),
         diagrams: session.config.diagrams,
         ...(input.signal ? { signal: input.signal } : {}),

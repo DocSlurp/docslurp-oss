@@ -20,6 +20,7 @@ import type { CommandRunner } from "../tools/runner.js";
 import { cleanupTempFile, keyFromStorageUri, type ArtifactStore } from "../tools/storage.js";
 import { ChartExtractRefusedError, extractDeterministicVisualsBatch, extractDeterministicVisualsFile, MAX_BATCH_INPUTS, type DeterministicInputKind } from "./extractors/host.js";
 import type { DeterministicVisual, DeterministicVisualResult as GuestResult } from "./extractors/types.js";
+import { chartExportInlineEnabled, inlineNeedsStandalone } from "./inline.js";
 import type { DeterministicVisualExtractor, DeterministicVisualInput, DeterministicVisualPartial, DeterministicVisualResult } from "./types.js";
 
 /** SVG figures sent to the guest per document (one batched VM run). */
@@ -185,7 +186,19 @@ export function createVmDeterministicVisualExtractor(deps: VmExtractorDeps): Det
     };
 
     const sourceKind = deterministicSourceKind(document.mimeType);
-    const reason = sourceKind ? sourceRunReason(sourceKind, input.signals) : null;
+    // Inline answer from the quarantine guest for this very kind (DOCSLURP_CHART_EXPORT_INLINE): the source was already
+    // read in the VM it booted for quarantine, so it is used as is and no parser VM runs for the source. Only an answer
+    // too big to carry inline goes to the standalone guest, which has the larger result allowance.
+    const inline = sourceKind && input.inline && input.inline.kind === sourceKind ? input.inline : null;
+    const useInline = inline !== null && !inlineNeedsStandalone(inline);
+    if (useInline) {
+      if (inline.status === "ok") {
+        results.push(inline.result);
+        for (const visual of inline.result.visuals) partials.push(toPartial(visual, null));
+      }
+      log(`[chart-export] parser VM skipped ${context} kind=${sourceKind} reason=inline-${inline.status}${inline.status === "ok" ? ` visuals=${inline.result.visuals.length}` : ` detail=${inline.reason}`}`);
+    }
+    const reason = sourceKind && !useInline ? (inline ? "inline-result-too-large" : sourceRunReason(sourceKind, input.signals)) : null;
     if (sourceKind && document.sourceKey && reason) {
       const path = await stageSourceFile(
         deps.storage,
@@ -205,8 +218,19 @@ export function createVmDeterministicVisualExtractor(deps: VmExtractorDeps): Det
       } finally {
         await cleanupTempFile(path).catch(() => undefined);
       }
-    } else if (sourceKind) {
+    } else if (sourceKind && !useInline) {
       log(`[chart-export] parser VM skipped ${context} kind=${sourceKind} reason=no-chart-signal`);
+    }
+
+    // Inline mode: Doppler figure SVGs carry no text today, so the standalone batch exports nothing and would only boot a
+    // VM. Their extraction moves into the Doppler VM's own figure pass (words beside each figure); until that guest ships,
+    // they are counted, not sent.
+    if (chartExportInlineEnabled()) {
+      const listed = input.artifacts.dopplerFiguresIndexUri || input.dopplerFiguresIndex !== undefined
+        ? (await svgFigures(deps, input.artifacts.dopplerFiguresIndexUri, Math.max(1, document.pageCount), input.dopplerFiguresIndex)).length
+        : 0;
+      if (listed > 0) log(`[chart-export] svg figures not sent ${context} figures=${listed} reason=inline-mode`);
+      return { partials, presence: presenceOf(results, listed) };
     }
 
     const figures = await svgFigures(deps, input.artifacts.dopplerFiguresIndexUri, Math.max(1, document.pageCount), input.dopplerFiguresIndex);

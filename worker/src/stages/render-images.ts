@@ -27,6 +27,7 @@ import {
 import { recordPageFacts } from "../pipeline/page-facts.js";
 import { freeVisualCandidateStats } from "../chart-export/free-stats.js";
 import { chartExportActive } from "../chart-export/config.js";
+import { freeInlineMode } from "../chart-export/inline.js";
 
 export class RenderImagesStage implements Stage {
   readonly name = "render-images";
@@ -139,7 +140,8 @@ export class RenderImagesStage implements Stage {
    * figure index and quarantine counts the document has slots for. Best effort.
    */
   private async freeVisualCandidates(state: import("../pipeline/pipeline.js").WorkflowState, document: import("../models.js").Document, classification: AdaptiveRoutingDecisionSurface | null) {
-    if (chartExportActive(state.run.pipeline)) return null;
+    // Export on: vision-extract records what it exported, except free-tier inline documents it skips for want of a signal.
+    if (chartExportActive(state.run.pipeline) && !freeInlineMode(state.run.pipeline)) return null;
     try {
       return await freeVisualCandidateStats({ storage: this.storage, ledger: state.artifactLedger, document, run: state.run, classification });
     } catch (error) {

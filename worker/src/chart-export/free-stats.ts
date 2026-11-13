@@ -18,6 +18,7 @@ import { keyFromStorageUri, type ArtifactStore } from "../tools/storage.js";
 import { ChartExportSession } from "./session.js";
 import { runChartExportPass, type ChartExportPassInput } from "./stage.js";
 import type { DeterministicVisualResult } from "./types.js";
+import { readStoredInlineCharts, type StoredInlineCharts } from "./inline.js";
 import { deterministicSourceKind } from "./vm-extractor.js";
 
 type Storage = Pick<ArtifactStore, "bucket" | "getJson">;
@@ -34,9 +35,20 @@ async function readJson(storage: Storage, uri: string | undefined): Promise<unkn
 
 /** Office chart parts counted by the quarantine inspection (zip entry names, parser VM). */
 export async function quarantineChartPresence(storage: Storage, ledger: DocumentArtifactLedger, documentId: string): Promise<DeterministicVisualResult["presence"]> {
-  const artifact = await readJson(storage, ledger.readDocument(documentId, "quarantine"));
-  const parts = (artifact as { archive?: { chartParts?: unknown } } | null)?.archive?.chartParts;
-  return Number.isSafeInteger(parts) && (parts as number) > 0 ? { officeChartParts: parts as number } : {};
+  return (await quarantineChartFacts(storage, ledger, documentId)).presence;
+}
+
+/**
+ * One read of the quarantine artifact for chart export: the Office chart part count and the inline chart answer
+ * (DOCSLURP_CHART_EXPORT_INLINE), validated again on the way out of storage.
+ */
+export async function quarantineChartFacts(storage: Storage, ledger: DocumentArtifactLedger, documentId: string): Promise<{ presence: DeterministicVisualResult["presence"]; inline: StoredInlineCharts | null }> {
+  const artifact = await readJson(storage, ledger.readDocument(documentId, "quarantine")) as { archive?: { chartParts?: unknown }; chartInline?: unknown } | null;
+  const parts = artifact?.archive?.chartParts;
+  return {
+    presence: Number.isSafeInteger(parts) && (parts as number) > 0 ? { officeChartParts: parts as number } : {},
+    inline: artifact?.chartInline === undefined ? null : readStoredInlineCharts(artifact.chartInline),
+  };
 }
 
 /** The stored route plan in any router mode (labels only; nothing executes it here). */

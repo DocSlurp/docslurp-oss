@@ -93,7 +93,8 @@ import {
   type PageImage,
   type PreparedChartExport,
 } from "../chart-export/stage.js";
-import { quarantineChartPresence, storedRoutePlan } from "../chart-export/free-stats.js";
+import { quarantineChartFacts, storedRoutePlan } from "../chart-export/free-stats.js";
+import { freeInlineMode, inlineHasWork } from "../chart-export/inline.js";
 import type { ChartModelClient } from "../chart-export/types.js";
 import { deterministicSourceKind } from "../chart-export/vm-extractor.js";
 import chartSharp from "../tools/isolated-image.js";
@@ -1705,7 +1706,12 @@ export class VisionExtractStage implements Stage {
    * rasters. Documents run one at a time under a cost cap, like the vision path, so the cap cannot be overshot.
    */
   private async runChartExportOnly(state: WorkflowState, signal?: AbortSignal): Promise<void> {
+    const freeInline = freeInlineMode(state.run.pipeline);
     await runDocuments(healthyDocuments(state), (state.run.pipeline.maxCostCents ?? 0) > 0 ? 1 : state.docConcurrency, async (document) => {
+      if (freeInline && !(await this.freeInlineHasWork(state, document))) {
+        console.log(`[extract-debug] stage=${this.name} document=${document.id} chart-export-skipped=free-no-signal`);
+        return;
+      }
       if (isCostCapExceeded(state)) {
         console.log(`[extract-debug] stage=${this.name} document=${document.id} chart-export-skipped=cost-cap`);
         return;
@@ -1716,6 +1722,18 @@ export class VisionExtractStage implements Stage {
           stats: { pages: 0, skipped: true, reason: "chart-export-only", selectedPages: [] },
         })));
     });
+  }
+
+  /**
+   * Free tier, inline mode: whether the pass has anything to do for this document. A previous export to replace, an
+   * inline answer with visuals (or one too big to carry inline), or a chart-capable source from a run whose quarantine
+   * predates inline mode. PDFs and images have nothing: their figures move to the Doppler VM (not sent in inline mode).
+   */
+  private async freeInlineHasWork(state: WorkflowState, document: import("../models.js").Document): Promise<boolean> {
+    if (state.artifactLedger.readDocument(document.id, "chart-export")) return true;
+    if (deterministicSourceKind(document.mimeType) === null) return false;
+    const { inline } = await quarantineChartFacts(this.storage, state.artifactLedger, document.id);
+    return inline === null || inlineHasWork(inline);
   }
 
   /**
@@ -1900,9 +1918,11 @@ export class VisionExtractStage implements Stage {
     // Without routed vision, any stored plan (shadow included) still names the chart and diagram pages.
     const routedPlan = routed?.plan ?? await storedRoutePlan(this.storage, state.artifactLedger, document.id);
     const adaptive = routedPlan ? null : await this.loadAdaptiveRouting(state, document.id);
-    const presence = deterministicSourceKind(document.mimeType) === "office"
-      ? await quarantineChartPresence(this.storage, state.artifactLedger, document.id)
-      : undefined;
+    // One quarantine artifact read: Office presence, and the inline chart answer for any chart-capable source.
+    const facts = deterministicSourceKind(document.mimeType) !== null
+      ? await quarantineChartFacts(this.storage, state.artifactLedger, document.id)
+      : null;
+    const presence = deterministicSourceKind(document.mimeType) === "office" ? facts?.presence : undefined;
     return {
       session,
       document,
@@ -1912,6 +1932,7 @@ export class VisionExtractStage implements Stage {
       routedPlan,
       legacyPages: adaptive?.pages ?? [],
       ...(presence ? { presence } : {}),
+      ...(facts?.inline ? { inline: facts.inline } : {}),
       pageImage: async (pageNumber) => {
         const [raster] = await this.rasters.renderSelectedPages({ document, runId: state.run.id, pageNumbers: [pageNumber], signal });
         if (!raster) return null;
