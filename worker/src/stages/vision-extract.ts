@@ -1866,7 +1866,12 @@ export class VisionExtractStage implements Stage {
           stats: {
             ...result.stats,
             [VISUAL_CANDIDATE_STATS_KEY]: pass.stats,
-            chartExport: { ...totals, lowConfidenceCandidates: pass.lowConfidence, changedPages: pass.changedPages, artifactUri: pass.artifactUri },
+            chartExport: {
+              ...totals, lowConfidenceCandidates: pass.lowConfidence, changedPages: pass.changedPages, artifactUri: pass.artifactUri,
+              // Repeated pictures read once (readsAvoided: placements served by another placement's read, never charged).
+              dedupe: pass.dedupe,
+              ...(pass.facts ? { factsCandidates: pass.facts } : {}),
+            },
           },
         };
       } catch (error) {
