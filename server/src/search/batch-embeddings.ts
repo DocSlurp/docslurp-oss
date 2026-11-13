@@ -10,6 +10,7 @@ import { loadSearchProjectContext } from "./session-setup.js";
 import { resolveProjectRetrievalControls } from "./project-retrieval-session.js";
 import { effectiveSearchMode } from "./search-mode.js";
 import { currentRequestSearchLimits } from "../lib/request-context.js";
+import type { SearchAccessScope } from "./access-scope.js";
 
 /** Options that make a search embed something other than its query text. */
 function embedsQueryText(options: SearchOptions): boolean {
@@ -31,7 +32,7 @@ function embedsQueryText(options: SearchOptions): boolean {
  * SEARCH_LANCEDB_NATIVE_PROJECTS).
  */
 export async function prefetchBatchQueryEmbeddings(
-  items: Array<{ query: string; projectId: string; options: SearchOptions }>,
+  items: Array<{ query: string; projectId: string; options: SearchOptions; scope: SearchAccessScope }>,
   userId: string,
   signal?: AbortSignal,
 ): Promise<{ prefetched: number; calls: number }> {
@@ -40,7 +41,7 @@ export async function prefetchBatchQueryEmbeddings(
   // limits: each of those embeds only after its limit admits it, so a key past its limit spends nothing.
   const limited = new Set((currentRequestSearchLimits()?.rules ?? []).map((rule) => rule.mode));
   for (const item of items.filter(item => {
-    const mode = effectiveSearchMode(item.options);
+    const mode = effectiveSearchMode(item.options, item.scope.modeCeiling);
     return !item.options.filters?.geo && mode !== "keyword" && !limited.has(mode);
   })) byProject.set(item.projectId, [...(byProject.get(item.projectId) ?? []), item]);
   let prefetched = 0;
@@ -49,7 +50,7 @@ export async function prefetchBatchQueryEmbeddings(
     // With native search off for the project, each search embeds its own query.
     if (group.length < 2 || !searchLanceDbNativeEnabled(projectId)) return;
     try {
-      const context = await loadSearchProjectContext(projectId, userId);
+      const context = await loadSearchProjectContext(projectId, userId, group[0]!.scope);
       const { pipeline } = context.indexing;
       const privacyMode = pipeline.privacyMode;
       const orgId = context.scope.orgId;

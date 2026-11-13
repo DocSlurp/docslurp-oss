@@ -9,6 +9,15 @@ vi.mock("../lib/request-actor.js", () => ({
   assertApiKeyProjectAccess: mocks.access, getRequestActor: vi.fn(), actorHasAnyApiKeyScope: vi.fn(),
   resolveActorProjectId: async (_actor: unknown, projectId?: string) => projectId ?? "default-project",
 }));
+// The route's one access read: refused when mocks.access answers a Response (its status), granted otherwise.
+vi.mock("../lib/search-access.js", () => ({
+  authorizeActorProjectSearch: async (_actor: unknown, projectId: string) => {
+    const denied = await mocks.access(undefined, projectId);
+    if (denied) return { ok: false, status: denied.status };
+    return { ok: true, access: { projectId, orgId: "org-1", projectOwnerUserId: "user", orgRole: "owner", projectRole: null, pipeline: {} },
+      scope: { orgId: "org-1", projectIds: "org", modeCeiling: null } };
+  },
+}));
 const { searchRoutes, projectChatRoutes } = await import("../routes/search.js");
 function app() {
   const server = new Hono();
@@ -71,7 +80,7 @@ describe("batch retrieval and canonical chat", () => {
     const result = await app().request("/v1/search", json({ queries: [{ ...queries[0], documentId: "doc", filenameContains: "manual", tags: "one,two", limit: 3, hyde: true }] }));
     expect(result.status).toBe(200);
     expect(mocks.search).toHaveBeenCalledWith("one", "user", expect.objectContaining({ limit: 3, useHyDE: true,
-      filters: expect.objectContaining({ documentId: "doc", filenameContains: "manual", tags: ["one", "two"] }) }));
+      filters: expect.objectContaining({ documentId: "doc", filenameContains: "manual", tags: ["one", "two"] }) }), expect.objectContaining({ orgId: expect.any(String) }));
   });
   it("does not start retrieval for an already disconnected request", async () => {
     const controller = new AbortController(); controller.abort();
@@ -118,7 +127,8 @@ describe("batch retrieval and canonical chat", () => {
     mocks.chat.mockResolvedValue({ answer: "answer", citations: [] });
     expect((await app().request(path, json({ q: "hello", project: "project", sessionId: "session", model: "model" }))).status).toBe(200);
     expect(mocks.chat).toHaveBeenCalledWith({ query: "hello", projectId: "project", userId: "user", sessionId: "session", model: "model",
-      actor: undefined, allowAgentTools: true, signal: expect.any(AbortSignal) });
+      actor: undefined, allowAgentTools: true, signal: expect.any(AbortSignal),
+      scope: { orgId: "org-1", projectIds: "org", modeCeiling: null } });
   });
   it.each([{ q: 7, project: "project" }, { q: "hello", project: {} }, { q: "hello", project: "project", model: "x".repeat(257) },
     { q: "hello", project: "project", sessionId: 42 }, { q: "x".repeat(16001), project: "project" }])("rejects malformed chat before service calls: %j", async body => {

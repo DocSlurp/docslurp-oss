@@ -1,5 +1,6 @@
 /** Browser-safe, closed vocabulary. Never use an exception's text as public copy. */
 export const PUBLIC_ERROR_MESSAGES = {
+  chatCapacityUnavailable: "Chat is temporarily unavailable. Please try again in a few seconds.",
   chatToolFailed: "A required tool failed. The task is blocked. No successful answer or action has been confirmed. Try again after resolving the error.",
   noSpeech: "No speech was detected. Try again.",
   noAudio: "No audio was recorded. Try again.",

@@ -3,6 +3,9 @@ import {afterAll,beforeAll,describe,expect,it,vi} from "vitest";
 import {createHash} from "node:crypto";
 import {canonicalGeoProjectionJson,type GeoPredicate} from "@docslurp/shared";
 import type {SearchFilters} from "../search/filters.js";
+/** The explicit search access scope every search caller passes (search/access-scope.ts). */
+const TEST_SEARCH_SCOPE = { orgId: "q-o", projectIds: "org", modeCeiling: null } as const;
+
 const native=vi.hoisted(()=>({search:vi.fn(async()=>[])}));
 vi.mock("../search/lancedb.js",()=>({lanceDbVectorSearch:native.search,warmLanceDbSearch:vi.fn(async()=>{})}));
 vi.mock("../lib/ai.js",async original=>({...await original<typeof import("../lib/ai.js")>(),
@@ -56,9 +59,9 @@ describe.skipIf(!process.env.GEO_TEST_SOCKET)("real spatial retrieval integratio
   expect((await resolve(tenant,{geo:radius,documentId:'near',documentIds:['far']},schema)).documentIds).toEqual([]);
  });
  it("actual hybrid retrieval refuses outsiders and preserves scope under expansion options",async()=>{
-  await expect(search.hybridSearch('budget','q-other',{filters:{projectId:'q-w',geo:radius},queryVector:[1,0]})).rejects.toThrow();
+  await expect(search.hybridSearch('budget','q-other',{filters:{projectId:'q-w',geo:radius},queryVector:[1,0]}, TEST_SEARCH_SCOPE)).rejects.toThrow();
   const result=await search.hybridSearch('budget','q-u',{filters:{projectId:'q-w',geo:radius},queryVector:[1,0],minScore:0,
-   useRerank:false,queryRewrite:false,selfQuery:false,enableGraphExpansion:true,enableCommunityExpansion:true,summarySeed:true});
+   useRerank:false,queryRewrite:false,selfQuery:false,enableGraphExpansion:true,enableCommunityExpansion:true,summarySeed:true}, TEST_SEARCH_SCOPE);
   expect(result.results.length).toBeGreaterThan(0);
   expect(result.results.every(row=>row.citation.documentId==='near')).toBe(true);
  });
@@ -95,7 +98,7 @@ describe.skipIf(!process.env.GEO_TEST_SOCKET)("real spatial retrieval integratio
   const {withSearchSignal}=await import("../search/query-bounds.js");
   const {finalizeSearchSessionExecution,searchResultsToChunks}=await import("../search/session-execution.js");
   const filters=await resolve(tenant,{geo:radius},schema);
-  const baseline=await search.hybridSearch("budget","q-u",{filters:{projectId:"q-w",geo:radius},queryVector:[1,0],minScore:0,useRerank:false,parentRetrieval:false,queryRewrite:false,selfQuery:false});
+  const baseline=await search.hybridSearch("budget","q-u",{filters:{projectId:"q-w",geo:radius},queryVector:[1,0],minScore:0,useRerank:false,parentRetrieval:false,queryRewrite:false,selfQuery:false}, TEST_SEARCH_SCOPE);
   expect(baseline.results.length).toBeGreaterThan(0);
   const blocker=await db.reserve();
   const previous=process.env.SEARCH_STATEMENT_TIMEOUT_MS;
@@ -113,7 +116,7 @@ describe.skipIf(!process.env.GEO_TEST_SOCKET)("real spatial retrieval integratio
    process.env.SEARCH_STATEMENT_TIMEOUT_MS=mode==="timeout"?"100":"8000";
    if(mode==="abort")timer=setTimeout(()=>controller.abort(),200);
    const work=async()=>{
-    if(["parent","lexical","progressive","graph-evidence"].includes(target))return search.hybridSearch("budget","q-u",{filters:{projectId:"q-w",geo:radius},queryVector:[1,0],minScore:0,useRerank:false,parentRetrieval:target==="parent",queryRewrite:false,selfQuery:false,enableGraphExpansion:target==="graph-evidence"});
+    if(["parent","lexical","progressive","graph-evidence"].includes(target))return search.hybridSearch("budget","q-u",{filters:{projectId:"q-w",geo:radius},queryVector:[1,0],minScore:0,useRerank:false,parentRetrieval:target==="parent",queryRewrite:false,selfQuery:false,enableGraphExpansion:target==="graph-evidence"}, TEST_SEARCH_SCOPE);
     return finalizeSearchSessionExecution({query:"budget",userId:"q-u",projectId:"q-w",filters,options:{parentRetrieval:true},chunks:searchResultsToChunks(baseline.results),availability:baseline.availability,effectiveQuery:"budget",selfQueryReasons:[],session:{sessionId:"parent-test",persist:vi.fn(),usageEvents:()=>[],diagnostics:()=>({})}} as never);
    };
    const started=Date.now();

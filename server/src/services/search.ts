@@ -45,6 +45,7 @@ import { decodeLanceChunkHydration } from "@docslurp/shared/lancedb-hydration";
 import {
   loadEligibleDocuments,
   matchesServingHash,
+  excludedTableDocuments,
   nativeScopeSupported,
   scopeEligibleDocuments,
   type EligibleDocument,
@@ -89,8 +90,10 @@ import {
 } from "../search/query-bounds.js";
 import { FOLDED_INDEX_NAME, foldedIndexReady, foldedUnindexedTimeoutMs } from "../search/folded-index.js";
 import { collectSearchTimings, countSearchEvent, recordSearchPhase, timePhase, type SearchTimings } from "../search/timings.js";
+import { assertSearchAccessScope, type SearchAccessScope } from "../search/access-scope.js";
 
 export { CrossProjectScopeError, MissingProjectScopeError, ProjectNotFoundError } from "../search/session-setup.js";
+export { MissingSearchAccessScopeError, searchAccessScopeFor, type SearchAccessScope } from "../search/access-scope.js";
 
 export interface SearchChunk {
   id: string;
@@ -1157,6 +1160,7 @@ async function nativeVectorSearch(
     embeddingModel: embedding.model,
     queryVector,
     documentIds: scope.searchDocumentIds,
+    excludedDocumentIds: excludedTableDocuments(set, scope.searchDocumentIds),
     limit: options.limit ?? 20,
     privacyMode: context.privacyMode,
     hydrate: true,
@@ -1229,7 +1233,7 @@ async function nativeTextSearch(
     try {
       result = await lanceDbFullTextSearch({
         orgId: context.orgId, projectId: context.projectId, embeddingModel: embedding.model, dimension: embedding.dimensions, query,
-        documentIds: scope.searchDocumentIds, limit,
+        documentIds: scope.searchDocumentIds, excludedDocumentIds: excludedTableDocuments(set, scope.searchDocumentIds), limit,
       });
     } catch (error) {
       if (isSearchAborted(error) || (options.filters?.geo && isSearchBoundError(error))) throw error;
@@ -1814,7 +1818,14 @@ function withSearchSlotTimed<T>(signal: AbortSignal | undefined, fn: () => Promi
   }, admission);
 }
 
-export async function hybridSearch(rawQuery: string, userId: string, options: SearchOptions = {}): Promise<SearchResponse> {
+/**
+ * One search. `scope` is required: the module verifies the searched project
+ * against it (org, allowlist, the user's own access) and refuses without one
+ * (search/access-scope.ts).
+ */
+export async function hybridSearch(rawQuery: string, userId: string, options: SearchOptions, scope: SearchAccessScope): Promise<SearchResponse> {
+  // Refused before anything runs or is counted: an absent scope is never "everything".
+  assertSearchAccessScope(scope);
   // Postgres text cannot hold NUL, so a query carrying one failed every lexical lookup with a 500.
   const query = stripNulBytes(rawQuery);
   const activity: SearchActivity = { id: randomUUID(), groupId: options.rootSessionId ?? randomUUID(), query, status: "loading" };
@@ -1828,11 +1839,11 @@ export async function hybridSearch(rawQuery: string, userId: string, options: Se
     const signal = currentSearchSignal() ?? getDeferredContext()?.signal ?? currentRequestSignal();
     // Per-mode key limits count root searches only (sub-searches of decomposition and multi-hop are part of one).
     if (!options.rootSessionId) {
-      const searchMode = effectiveSearchMode(options);
+      const searchMode = effectiveSearchMode(options, scope.modeCeiling);
       await consumeSearchModeLimit(searchMode, searchMode === "keyword" ? options.keywordQueries?.length ?? 1 : 1);
     }
     const { value: result, timings } = await collectSearchTimings(() => withSearchSignal(signal, () =>
-      withSearchSlotTimed(signal, () => executeHybridSearch(query, userId, { ...options, rootSessionId: activity.groupId }), searchAdmission(options))));
+      withSearchSlotTimed(signal, () => executeHybridSearch(query, userId, { ...options, rootSessionId: activity.groupId }, scope), searchAdmission(options))));
     result.timings = timings;
     console.info(`[search-timing] ${Object.entries(timings).map(([key, ms]) => `${key.replace(/Ms$/, "")}=${ms}`).join(" ")} results=${result.results.length}`);
     // Price card: one search per root query (sub-searches of decomposition and
@@ -1890,9 +1901,10 @@ async function chargeSearch(result: SearchResponse, userId: string, searchId: st
 async function executeHybridSearch(
   query: string,
   userId: string,
-  options: SearchOptions = {},
+  options: SearchOptions,
+  scope: SearchAccessScope,
 ): Promise<SearchResponse> {
-  const setup = await timePhase("setup", () => resolveSearchSetup(userId, options));
+  const setup = await timePhase("setup", () => resolveSearchSetup(userId, options, scope));
   if (projectOrgs.size < 50_000) projectOrgs.set(setup.normalizedScope.projectId, `org:${setup.normalizedScope.orgId}`);
   const wholeCorpusFallback = async (filters = setup.resolvedOptions.filters): Promise<SearchResult[]> => {
     const corpusCtx = await loadProjectWholeCorpusContext({
@@ -1955,7 +1967,8 @@ async function executeHybridSearch(
           },
           chunks,
         ),
-      runSearch: hybridSearch,
+      // Sub-searches (decomposition, stepback, multi-hop) stay inside the same access scope.
+      runSearch: (subQuery, subUserId, subOptions) => hybridSearch(subQuery, subUserId, subOptions, scope),
       vectorSearch: ({ queryVector, userId, projectId, options, query }) => keywordOnly
         ? Promise.resolve([])
         : timePhase("vector", () => servedVectorSearch({

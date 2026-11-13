@@ -4,6 +4,7 @@ import { adapterQuery, runSearchAdapter, SearchCompatibilityError, type SearchPr
 import { apiKeyAuth } from "../middleware/api-key-auth.js";
 import { apiKeyHasAnyScope, loadApiKeyScopedProject } from "../lib/api-key-authorization.js";
 import { hybridSearch } from "../services/search.js";
+import { searchAccessScopeFor } from "../search/access-scope.js";
 import { publicSearchResponse } from "../lib/search-usage.js";
 import { searchOptions, searchQueryText } from "../lib/search-input.js";
 import { resolveActorProjectId } from "../lib/request-actor.js";
@@ -20,8 +21,9 @@ async function execute(c: Context, provider: SearchProvider, requestedProjectId:
     throw error;
   });
   const project = projectId ? await loadApiKeyScopedProject(projectId, key) : null;
-  if (!project || !projectId) return Response.json({ error: "Project not found" }, { status: 404 });
-  return await runSearchAdapter(provider, projectId, params, async input => publicSearchResponse(await hybridSearch(searchQueryText(input.q), key.userId, searchOptions({ ...input, projectId, hyde: false, rerank: false, mmr: false, parentRetrieval: false, summarySeed: false, compression: false, queryRewrite: false, queryDecompose: false, stepback: false, selfQuery: false, iterativeMultiHop: false, graphExpansion: false, communityExpansion: false }))));
+  const scope = project ? searchAccessScopeFor({ type: "apiKey", apiKey: key }, project) : null;
+  if (!project || !projectId || !scope) return Response.json({ error: "Project not found" }, { status: 404 });
+  return await runSearchAdapter(provider, projectId, params, async input => publicSearchResponse(await hybridSearch(searchQueryText(input.q), key.userId, searchOptions({ ...input, projectId, hyde: false, rerank: false, mmr: false, parentRetrieval: false, summarySeed: false, compression: false, queryRewrite: false, queryDecompose: false, stepback: false, selfQuery: false, iterativeMultiHop: false, graphExpansion: false, communityExpansion: false }), scope)));
 }
 export const searchCompatRoutes = new Hono()
   .onError((error, c) => {

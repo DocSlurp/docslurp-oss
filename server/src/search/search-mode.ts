@@ -9,12 +9,15 @@ import type { SearchOptions } from "../services/search.js";
  * The mode this search runs in: what the caller asked for (default `deep`, the project's own settings), never more
  * than the request's API key allows. The ceiling comes from the request context, which `setRequestActor` fills from the
  * key's `search:<mode>` scope, so every route that reaches the search service (REST, compat clients, MCP) is held to it
- * even if the route passed no mode. Searches a chat turn runs belong to the answer, which the `chat` scope governs.
+ * even if the route passed no mode; the explicit search access scope (search/access-scope.ts) carries the same ceiling.
+ * Searches a chat turn runs belong to the answer, which the `chat` scope governs.
  */
-export function effectiveSearchMode(options: Pick<SearchOptions, "searchMode">): SearchMode {
+export function effectiveSearchMode(options: Pick<SearchOptions, "searchMode">, scopeCeiling: SearchMode | null = null): SearchMode {
   const requested = options.searchMode ?? "deep";
-  const ceiling = currentChatTurn() ? null : currentRequestSearchCeiling();
-  return ceiling ? narrowerSearchMode(requested, ceiling) : requested;
+  if (currentChatTurn()) return requested;
+  // The explicit access scope's ceiling and the request context's, whichever is narrower.
+  return [scopeCeiling, currentRequestSearchCeiling()].reduce<SearchMode>(
+    (mode, ceiling) => ceiling ? narrowerSearchMode(mode, ceiling) : mode, requested);
 }
 
 /**
