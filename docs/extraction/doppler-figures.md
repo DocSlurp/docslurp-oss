@@ -286,7 +286,7 @@ version 2 is held to fewer entries and its parse is reserved from the worker bud
 ## Asset ledger
 
 Every image Doppler reports for a document, whether or not it has a file, is a row of `document_assets` (migration
-0141; 0148 lets an unlinked image carry `scan-not-copyable`), and the document's extraction level is a row of `document_extraction_levels`. The figure step **queues** the write
+0141; 0150 lets an unlinked image carry `scan-not-copyable`), and the document's extraction level is a row of `document_extraction_levels`. The figure step **queues** the write
 on the run's state; the store writes it in one transaction after the stage checkpoint that records the Markdown and the
 image slots commits, never before (`worker/src/db/document-asset-ledger.ts`, `Store.writeProgress`). `markdown_complete`
 is whether that committed checkpoint holds the document's Markdown. An attempt that fails or is escalated drops its queued

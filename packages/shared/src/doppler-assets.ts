@@ -302,7 +302,7 @@ type EntryFields = z.infer<z.ZodObject<typeof entryShape>>;
 /**
  * The reason an image's status allows: `not-extracted` needs one of DOPPLER_ASSET_REASONS (or `other`, version 1 only),
  * `unlinked` has none or one of DOPPLER_UNLINKED_REASONS (`scan-not-copyable` only on a `background` image), and
- * `extracted` has none. The manifest entry, the ledger row and the database (migration 0148) apply the same rule.
+ * `extracted` has none. The manifest entry, the ledger row and the database (migration 0150) apply the same rule.
  */
 function dopplerStatusReasonOk(status: string, reason: string | null, fate: string): boolean {
   if (status === "not-extracted") return reason !== null && !(DOPPLER_UNLINKED_REASONS as readonly string[]).includes(reason);

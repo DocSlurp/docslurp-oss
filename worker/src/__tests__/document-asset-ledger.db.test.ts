@@ -382,7 +382,7 @@ describe("tenant isolation", () => {
       .rejects.toMatchObject({ code: "23514" });
   });
 
-  it("the database takes scan-not-copyable only on an unlinked background image (migration 0148)", async () => {
+  it("the database takes scan-not-copyable only on an unlinked background image (migration 0150)", async () => {
     const unlinked = (id: string, fate: string, reason: string | null) => sql`insert into document_assets (document_id, org_id, project_id, asset_id, page_number, kind, fate, status, reason)
       values ('doc-a', 'org-a', 'proj-a', ${id}, 1, 'picture', ${fate}, 'unlinked', ${reason})`;
     await unlinked("p1.1", "background", "scan-not-copyable");
