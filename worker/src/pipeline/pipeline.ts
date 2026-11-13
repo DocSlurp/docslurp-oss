@@ -68,6 +68,8 @@ export interface CheckpointStore {
   setPageStageComplete(runId: string, documentId: string, stageName: string, pageNumber: number): Promise<void>;
   getCompletedPages(runId: string, documentId: string, stageName: string): Promise<Set<number>>;
   recordPrivacyAudit?(entries: readonly PrivacyAuditEntry[]): Promise<void>;
+  /** Document asset ledger and extraction level (db/document-asset-ledger.ts), in one org-scoped transaction. */
+  writeDocumentAssetLedger?(write: import("../db/document-asset-ledger.js").DocumentAssetLedgerWrite): Promise<void>;
   /** Per-page ingest facts (ingest report); best effort, idempotent per (document, page). */
   upsertPageFacts?(rows: readonly PageFactUpsert[]): Promise<void>;
   /** Reserves Fast page-image renders from the run's shared budget (db/fast-page-image-budget.ts). */

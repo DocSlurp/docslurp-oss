@@ -22,7 +22,7 @@ import { dopplerBinDir, dopplerConverterPath } from "../tools/doppler.js";
 import path from "node:path";
 import { dopplerImageExtractEnabled } from "./doppler-figures.js";
 import {
-  DOPPLER_IMAGE_EXTRACT_ENV, localPdfModeRequested, PDF_EXTRACTION_UNCONFIGURED, resolvePdfMode, sandboxedPdfConfigured, type EmbeddedImageFacts, type EmbeddedImageMediaType, type MediaMap, type OrientationResultRecord,
+  DOPPLER_BUILD, DOPPLER_IMAGE_EXTRACT_ENV, localPdfModeRequested, PDF_EXTRACTION_UNCONFIGURED, resolvePdfMode, sandboxedPdfConfigured, type EmbeddedImageFacts, type EmbeddedImageMediaType, type MediaMap, type OrientationResultRecord,
 } from "@docslurp/shared";
 
 import { SandboxRunError, type SandboxResult } from "../sandbox/types.js";
@@ -326,25 +326,44 @@ const reportedOcrPages = new WeakMap<SandboxedPdfJob, number[]>();
 const reportedLayoutFacts = new WeakMap<SandboxedPdfJob, Map<number, PageLayoutFacts>>();
 const reportedFigures = new WeakMap<SandboxedPdfJob, SandboxedPdfFigureOutcome>();
 
-/** What a figure request came back as. `reason` is telemetry only (bounded, control characters removed). */
-export type SandboxedPdfFigureOutcome = ({ status: "extracted" } | { status: "failed"; reason: string }) & { confined?: boolean };
+/**
+ * What a figure request came back as. `extracted`: every image the run linked was written (Doppler exit 0). `partial`:
+ * Doppler wrote the Markdown and some images, kept the folder and says per image why the rest are missing (exit 5 with
+ * manifest version 2). `failed`: no folder to trust (exit 6, or version 1's exit 5). `reason` is telemetry only (bounded,
+ * control characters removed); `exitCode` and `build` (the Doppler version or commit) are recorded when the provider says.
+ */
+export type SandboxedPdfFigureOutcome = ({ status: "extracted" } | { status: "partial" } | { status: "failed"; reason: string }) & {
+  confined?: boolean;
+  exitCode?: number;
+  build?: string;
+};
 const MAX_FIGURE_REASON_CHARS = 500;
+
+/** Parse a provider's figure outcome (untrusted). Anything that is not a recognised answer is a failure. */
+export function parseSandboxedPdfFigureOutcome(raw: unknown, maxReasonChars = MAX_FIGURE_REASON_CHARS): SandboxedPdfFigureOutcome {
+  const value = raw as { status?: unknown; reason?: unknown; confined?: unknown; exitCode?: unknown; build?: unknown } | undefined;
+  const extra = {
+    ...(typeof value?.confined === "boolean" ? { confined: value.confined } : {}),
+    ...(Number.isSafeInteger(value?.exitCode) && (value!.exitCode as number) >= 0 && (value!.exitCode as number) <= 255 ? { exitCode: value!.exitCode as number } : {}),
+    ...(typeof value?.build === "string" && DOPPLER_BUILD.test(value.build) ? { build: value.build } : {}),
+  };
+  if (value?.status === "extracted") return { status: "extracted", ...extra };
+  if (value?.status === "partial") return { status: "partial", ...extra };
+  if (value?.status === "failed") {
+    // eslint-disable-next-line no-control-regex
+    const reason = typeof value.reason === "string" ? value.reason.replace(/[\u0000-\u001f\u007f-\u009f]+/g, " ").slice(0, maxReasonChars) : "";
+    return { status: "failed", reason: reason || "unspecified", ...extra };
+  }
+  // A provider that was asked and did not answer extracted nothing the host may trust.
+  return { status: "failed", reason: "provider-reported-no-figure-outcome" };
+}
 
 function figureOutcome(job: SandboxedPdfJob, raw: unknown): SandboxedPdfFigureOutcome | undefined {
   if (!job.figures) {
     if (raw !== undefined) throw new SandboxRunError("Sandboxed PDF provider returned unrequested figures");
     return undefined;
   }
-  const value = raw as { status?: unknown; reason?: unknown; confined?: unknown } | undefined;
-  const confined = typeof value?.confined === "boolean" ? { confined: value.confined } : {};
-  if (value?.status === "extracted") return { status: "extracted", ...confined };
-  if (value?.status === "failed") {
-    // eslint-disable-next-line no-control-regex
-    const reason = typeof value.reason === "string" ? value.reason.replace(/[\u0000-\u001f\u007f-\u009f]+/g, " ").slice(0, MAX_FIGURE_REASON_CHARS) : "";
-    return { status: "failed", reason: reason || "unspecified", ...confined };
-  }
-  // A provider that was asked and did not answer extracted nothing the host may trust.
-  return { status: "failed", reason: "provider-reported-no-figure-outcome" };
+  return parseSandboxedPdfFigureOutcome(raw);
 }
 
 /**

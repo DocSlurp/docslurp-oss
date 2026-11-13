@@ -16,8 +16,9 @@ import { lstat, open, readdir } from "node:fs/promises";
 import path from "node:path";
 import {
   DOPPLER_FIGURE_FILE_NAME, DOPPLER_FIGURE_LIMITS, DOPPLER_FIGURE_MEDIA_TYPES, DOPPLER_FIGURES_INDEX_SLOT, DOPPLER_FIGURES_INDEX_VERSION,
-  DOPPLER_FIGURES_MANIFEST, dopplerFigureFileName, dopplerImageExtractEnabled, dopplerFigureManifestSchema, dopplerFigureSlot,
-  dopplerImageMarkerIds, type DopplerFigureEntry, type DopplerFigureFormat, type DopplerFigureRecord,
+  DOPPLER_FIGURES_MANIFEST, DOPPLER_MANIFEST_V2_LIMITS, dopplerFigureFileName, dopplerImageExtractEnabled, dopplerFigureSlot,
+  dopplerImageMarkerIds, dopplerLedgerAssets, parseDopplerManifest, type DocumentAsset, type DopplerFigureFormat, type DopplerFigureRecord,
+  type DopplerManifest,
 } from "@docslurp/shared";
 
 import { documentArtifactRoot } from "../lib/artifact-root.js";
@@ -34,6 +35,7 @@ export class DopplerFigureRejection extends Error {
 }
 
 export interface DopplerFigureFile {
+  /** The image that owns the file (its id names the stored object). */
   id: string;
   format: DopplerFigureFormat;
   mediaType: string;
@@ -42,9 +44,15 @@ export interface DopplerFigureFile {
 }
 
 export interface DopplerFigureSet {
-  entries: DopplerFigureEntry[];
+  /** The parsed manifest, version 1 (`doppler-figures@1`) or 2 (Doppler's own). */
+  manifest: DopplerManifest;
+  /** One ledger row per image the manifest reports (storage keys are added when the files are stored). */
+  assets: DocumentAsset[];
   files: DopplerFigureFile[];
 }
+
+/** How the provider says the figure step ended; the manifest must agree. */
+export type DopplerFigureExpectation = "complete" | "partial";
 
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
@@ -92,52 +100,94 @@ async function readExactFile(file: string, expected: number | null, cap: number)
   }
 }
 
+/** Version 2 page folders and the file names inside them. */
+const PAGE_DIR = /^page-[0-9]{4,10}$/;
+const PAGE_FILE = /^(?:image|figure)-[0-9]{3,7}\.(?:webp|svg|png|jpg)$/;
+
 /**
- * Validate a provider's figure folder completely, or throw DopplerFigureRejection. Rules: the folder is a real directory
- * holding only `manifest.json` and `<id>.<format>` regular files (no links, directories or other names); the manifest
- * parses strictly; every figure's page is in the document; the files present are exactly the ones the manifest names;
- * each file's size equals `bytes` (within the caps), its SHA-256 equals `sha256`, and its leading bytes carry its format's
- * signature.
+ * Validate a provider's figure folder completely, or throw DopplerFigureRejection.
+ *
+ * Version 1 (`doppler-figures@1`): a real directory holding only `manifest.json` and `<id>.<format>` regular files.
+ * Version 2 (Doppler's manifest): `manifest.json` and `page-NNNN` real directories holding only
+ * `(image|figure)-NNN.<format>` regular files. Either way: no links, no other names or nesting; the manifest parses
+ * strictly; every image's page is in the document; the files present are exactly the ones the manifest says were
+ * extracted; each file's size equals `bytes` (within the caps), its SHA-256 equals `sha256`, and its leading bytes carry
+ * its format's signature. `expect` is what the provider reported: a complete run (exit 0) must not hand back a partial
+ * manifest, and a partial one (exit 5) must hand back a version 2 manifest that says it is incomplete.
  */
-export async function readDopplerFigureDir(dir: string, args: { pageCount: number; signal?: AbortSignal }): Promise<DopplerFigureSet> {
+export async function readDopplerFigureDir(
+  dir: string,
+  args: { pageCount: number; signal?: AbortSignal; expect?: DopplerFigureExpectation },
+): Promise<DopplerFigureSet> {
   const info = await lstat(dir).catch(() => null);
   if (!info || !info.isDirectory() || info.isSymbolicLink()) throw new DopplerFigureRejection("not-a-directory");
   const listed = await readdir(dir, { withFileTypes: true });
   if (listed.length > DOPPLER_FIGURE_LIMITS.maxFiles + 1) throw new DopplerFigureRejection("too-many-files");
-  const present = new Set<string>();
+  const flat = new Set<string>();
+  const pageDirs: string[] = [];
   let hasManifest = false;
   for (const dirent of listed) {
+    if (dirent.isDirectory() && PAGE_DIR.test(dirent.name)) { pageDirs.push(dirent.name); continue; }
     if (!dirent.isFile()) throw new DopplerFigureRejection("unexpected-entry");
     if (dirent.name === DOPPLER_FIGURES_MANIFEST) { hasManifest = true; continue; }
     if (!DOPPLER_FIGURE_FILE_NAME.test(dirent.name)) throw new DopplerFigureRejection("unexpected-file");
-    present.add(dirent.name);
+    flat.add(dirent.name);
   }
   if (!hasManifest) throw new DopplerFigureRejection("missing-manifest");
-  const raw = await readExactFile(path.join(dir, DOPPLER_FIGURES_MANIFEST), null, DOPPLER_FIGURE_LIMITS.maxManifestBytes);
+  const raw = await readExactFile(path.join(dir, DOPPLER_FIGURES_MANIFEST), null, DOPPLER_MANIFEST_V2_LIMITS.maxManifestBytes);
   let json: unknown;
   try { json = JSON.parse(raw.toString("utf8")); } catch { throw new DopplerFigureRejection("manifest-not-json"); }
-  const parsed = dopplerFigureManifestSchema.safeParse(json);
-  if (!parsed.success) throw new DopplerFigureRejection("manifest-invalid");
-  const entries = parsed.data.images;
+  const manifest = parseDopplerManifest(json);
+  if (!manifest) throw new DopplerFigureRejection("manifest-invalid");
+  if (manifest.version === 1 && raw.length > DOPPLER_FIGURE_LIMITS.maxManifestBytes) throw new DopplerFigureRejection("oversized-file");
+  const complete = manifest.version === 1 || manifest.manifest.complete;
+  if ((args.expect === "partial" && complete) || (args.expect === "complete" && !complete)) throw new DopplerFigureRejection("outcome-mismatch");
   const pageCount = Number.isSafeInteger(args.pageCount) && args.pageCount > 0 ? args.pageCount : 0;
-  if (entries.some((entry) => entry.page > pageCount)) throw new DopplerFigureRejection("page-outside-document");
-  const named = entries.filter((entry) => entry.file !== null);
-  const expected = new Set(named.map((entry) => dopplerFigureFileName(entry.id, entry.format!)));
+  if (manifest.manifest.images.some((entry) => entry.page > pageCount)) throw new DopplerFigureRejection("page-outside-document");
+
+  // Where each extracted image's file must be, relative to the folder, by the id that owns it.
+  const expected = new Map<string, { id: string; format: DopplerFigureFormat; bytes: number; sha256: string }>();
+  const present = new Set<string>();
+  if (manifest.version === 1) {
+    if (pageDirs.length > 0) throw new DopplerFigureRejection("unexpected-entry");
+    for (const entry of manifest.manifest.images) {
+      if (entry.file === null) continue;
+      expected.set(dopplerFigureFileName(entry.id, entry.format!), { id: entry.id, format: entry.format!, bytes: entry.bytes!, sha256: entry.sha256! });
+    }
+    for (const name of flat) present.add(name);
+  } else {
+    if (flat.size > 0) throw new DopplerFigureRejection("unexpected-file");
+    if (pageDirs.length > DOPPLER_MANIFEST_V2_LIMITS.maxPageDirs) throw new DopplerFigureRejection("too-many-files");
+    for (const entry of manifest.manifest.images) {
+      if (entry.status !== "extracted") continue;
+      expected.set(entry.path!, { id: entry.id, format: entry.format!, bytes: entry.bytes, sha256: entry.sha256! });
+    }
+    for (const pageDir of pageDirs) {
+      args.signal?.throwIfAborted();
+      const inner = await readdir(path.join(dir, pageDir), { withFileTypes: true });
+      if (present.size + inner.length > DOPPLER_FIGURE_LIMITS.maxFiles) throw new DopplerFigureRejection("too-many-files");
+      for (const dirent of inner) {
+        if (!dirent.isFile()) throw new DopplerFigureRejection("unexpected-entry");
+        if (!PAGE_FILE.test(dirent.name)) throw new DopplerFigureRejection("unexpected-file");
+        present.add(`${pageDir}/${dirent.name}`);
+      }
+    }
+  }
   if (expected.size !== present.size || [...present].some((name) => !expected.has(name))) throw new DopplerFigureRejection("files-do-not-match-manifest");
   const files: DopplerFigureFile[] = [];
   let total = 0;
-  for (const entry of named) {
+  for (const [relative, entry] of expected) {
     args.signal?.throwIfAborted();
-    const format = entry.format!;
-    const bytes = await readExactFile(path.join(dir, dopplerFigureFileName(entry.id, format)), entry.bytes, DOPPLER_FIGURE_LIMITS.maxFileBytes);
+    // `relative` comes from the validated manifest (a fixed pattern derived from ids), never from the listing.
+    const bytes = await readExactFile(path.join(dir, relative), entry.bytes, DOPPLER_FIGURE_LIMITS.maxFileBytes);
     total += bytes.length;
     if (total > DOPPLER_FIGURE_LIMITS.maxTotalBytes) throw new DopplerFigureRejection("total-bytes");
     const sha256 = createHash("sha256").update(bytes).digest("hex");
     if (sha256 !== entry.sha256) throw new DopplerFigureRejection("sha256-mismatch");
-    if (!dopplerFigureMagicMatches(format, bytes)) throw new DopplerFigureRejection("wrong-magic");
-    files.push({ id: entry.id, format, mediaType: DOPPLER_FIGURE_MEDIA_TYPES[format], bytes, sha256 });
+    if (!dopplerFigureMagicMatches(entry.format, bytes)) throw new DopplerFigureRejection("wrong-magic");
+    files.push({ id: entry.id, format: entry.format, mediaType: DOPPLER_FIGURE_MEDIA_TYPES[entry.format], bytes, sha256 });
   }
-  return { entries, files };
+  return { manifest, assets: dopplerLedgerAssets(manifest), files };
 }
 
 /** The storage key of one figure file: the document's tenant-scoped artifact root, the document id and the figure's file name. */
@@ -147,9 +197,24 @@ export function dopplerFigureStorageKey(document: { id: string; userId: string; 
   return `${documentArtifactRoot(document, runId)}/doppler-figures/${document.id}/${fileName}`;
 }
 
-/** Index records: one per manifest entry, with the slot of the file it shows (its own, or the figure it repeats). */
-export function dopplerFigureRecords(entries: readonly DopplerFigureEntry[]): DopplerFigureRecord[] {
-  return entries.map((entry) => {
+/** Index records: one per manifest entry, with the slot of the file it shows (its own, or the one it shares). */
+export function dopplerFigureRecords(manifest: DopplerManifest): DopplerFigureRecord[] {
+  if (manifest.version === 2) {
+    const assets = dopplerLedgerAssets(manifest);
+    return manifest.manifest.images.map((entry, i) => {
+      const fileOf = assets[i]!.fileOf;
+      const format = entry.status === "extracted" ? entry.format : null;
+      return {
+        id: entry.id, page: entry.page, bbox: entry.bbox, kind: entry.kind, fate: entry.fate, format,
+        mediaType: format ? DOPPLER_FIGURE_MEDIA_TYPES[format] : null, bytes: entry.bytes, sha256: entry.sha256,
+        width: entry.width, height: entry.height, fileOf, slot: fileOf ? dopplerFigureSlot(fileOf) : null,
+        ...(entry.fallback === undefined ? {} : { fallback: entry.fallback }),
+        ...(entry.error === undefined ? {} : { error: entry.error }),
+        ...(entry.reason === undefined ? {} : { skipped: entry.reason }),
+      };
+    });
+  }
+  return manifest.manifest.images.map((entry) => {
     const fileOf = entry.file !== null ? entry.id : entry.repeat_of ?? null;
     return {
       id: entry.id, page: entry.page, bbox: entry.bbox, kind: entry.kind, fate: entry.fate, format: entry.format,
@@ -205,6 +270,8 @@ export interface StoredDopplerFigures {
   indexUri: string;
   /** Artifact slots to record for the document: the index and one per stored file. */
   slots: Array<{ slot: string; uri: string }>;
+  /** Storage key of each stored file, by the id that owns it (for the asset ledger). */
+  keys: Map<string, string>;
   stats: DopplerFigureStats;
 }
 
@@ -220,7 +287,8 @@ export async function storeDopplerFigures(args: {
 }): Promise<StoredDopplerFigures> {
   const started = Date.now();
   const slots: StoredDopplerFigures["slots"] = [];
-  const records = dopplerFigureRecords(args.figures.entries);
+  const records = dopplerFigureRecords(args.figures.manifest);
+  const keys = new Map<string, string>();
   const resolvable = new Set(records.filter((record) => record.fileOf).map((record) => record.id));
   const markers = dopplerImageMarkerIds(args.markdown);
   const indexKey = dopplerFigureStorageKey(args.document, args.runId, "index.json");
@@ -235,6 +303,7 @@ export async function storeDopplerFigures(args: {
       written.push(key);
       await args.storage.putBytes(key, file.bytes, file.mediaType);
       slots.push({ slot: dopplerFigureSlot(file.id), uri: args.storage.uri(key) });
+      keys.set(file.id, key);
     }
     args.signal?.throwIfAborted();
     phase = "store-index-failed";
@@ -270,5 +339,5 @@ export async function storeDopplerFigures(args: {
     markersResolved: markers.filter((id) => resolvable.has(id)).length,
     storeMs: Date.now() - started,
   };
-  return { indexUri: args.storage.uri(indexKey), slots, stats };
+  return { indexUri: args.storage.uri(indexKey), slots, keys, stats };
 }

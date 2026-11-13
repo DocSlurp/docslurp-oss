@@ -21,9 +21,10 @@ import {
   acceptSandboxedPdfBatchEvent, assertSingleScopeBatch, batchFileJob, batchUsageOf, sandboxedPdfBatchProvider, unfinishedBatchFiles,
   type SandboxedPdfBatchEvent, type SandboxedPdfBatchFile, type SandboxedPdfBatchJob, type SandboxedPdfBatchProvider,
 } from "../extractors/sandboxed-pdf-batch.js";
-import { sandboxedPdfLayoutFacts, sandboxedPdfProvider, type SandboxedPdfJob, type SandboxedPdfResult } from "../extractors/plugins.js";
+import { sandboxedPdfLayoutFacts, sandboxedPdfProvider, type SandboxedPdfFigureOutcome, type SandboxedPdfJob, type SandboxedPdfResult } from "../extractors/plugins.js";
 import type { PageLayoutFacts } from "../lib/page-layout-facts.js";
 import { DopplerFigureRejection, readDopplerFigureDir, storeDopplerFigures, type DopplerFigureStorage } from "../extractors/doppler-figures.js";
+import { ledgerWriteForFailedFigures, ledgerWriteForStoredFigures, recordFigureLedger } from "../db/document-asset-ledger.js";
 import { planFirstPassBatches, type FirstPassBatchLimits } from "../temporal/first-pass-batches.js";
 import { sniffedPdf } from "../lib/sniffed-pdf.js";
 import { trustedTempDownloadPattern } from "../lib/temp-file-names.js";
@@ -298,7 +299,7 @@ export async function runFirstPassBatch(deps: FirstPassBatchDeps, input: { runId
     const ready: string[] = [];
     /** Documents whose text layer misses pages: extracted now, embedded by the stage loop after OCR or vision. */
     const extractOnly = new Set<string>();
-    const figureReady = new Map<string, string>();
+    const figureReady = new Map<string, { dir: string; outcome: SandboxedPdfFigureOutcome }>();
     /** Documents the publish gate passed (figures are stored only for these). */
     const cleared = new Set<string>();
     let drainFailure: unknown;
@@ -366,7 +367,7 @@ export async function runFirstPassBatch(deps: FirstPassBatchDeps, input: { runId
         return;
       }
       if (event.phase === "figures") {
-        if (event.figures.status === "extracted" && file.figures) figureReady.set(file.documentId, file.figures.dir);
+        if (file.figures) figureReady.set(file.documentId, { dir: file.figures.dir, outcome: event.figures });
         return;
       }
       const textMs = now() - started;
@@ -426,21 +427,33 @@ export async function runFirstPassBatch(deps: FirstPassBatchDeps, input: { runId
     }
 
     // Figures: stored only for documents whose text was extracted and whose publish gate passed, never failing a document.
-    for (const [documentId, dir] of figureReady) {
+    for (const [documentId, { dir, outcome }] of figureReady) {
       const document = documents.get(documentId)!;
       if (!results.has(key(input.runId, documentId)) || !cleared.has(documentId)) continue;
       const markdown = await readFile(files.find((f) => f.documentId === documentId)!.output, "utf8").catch(() => "");
       await runDocumentStage(state, document, FIRST_PASS_FIGURES_STAGE, `${documentId}:${FIRST_PASS_FIGURES_STAGE}`, "figures stored", async () => {
+        // The asset ledger records whatever happened (every image and why, or a failed images level), never failing the document.
+        const ledger = async (build: Parameters<typeof recordFigureLedger>[0]["build"]) => {
+          const status = await recordFigureLedger({ store: state.store, run: state.run, documentId, build, signal: batch.signal });
+          return status === "unsupported" ? {} : { ledger: status };
+        };
+        if (outcome.status === "failed") {
+          console.warn(`[first-pass] figures document=${documentId} status=extraction-failed`);
+          const recorded = await ledger((scope) => ledgerWriteForFailedFigures({ scope, outcome }));
+          return { stats: { dopplerFigures: { status: "extraction-failed", ...recorded } } };
+        }
         try {
-          const figures = await readDopplerFigureDir(dir, { pageCount: document.pageCount, signal: batch.signal });
+          const figures = await readDopplerFigureDir(dir, { pageCount: document.pageCount, signal: batch.signal, expect: outcome.status === "partial" ? "partial" : "complete" });
           const stored = await storeDopplerFigures({ storage: deps.storage as unknown as DopplerFigureStorage, document, runId: input.runId, figures, markdown, signal: batch.signal });
           for (const { slot, uri } of stored.slots) state.artifactLedger.recordDocument(documentId, slot, uri);
-          return { artifactUri: stored.indexUri, stats: { dopplerFigures: stored.stats } };
+          const recorded = await ledger((scope) => ledgerWriteForStoredFigures({ scope, manifest: figures.manifest, assets: figures.assets, keys: stored.keys, outcome }));
+          return { artifactUri: stored.indexUri, stats: { dopplerFigures: { ...stored.stats, manifestVersion: figures.manifest.version, ...recorded } } };
         } catch (error) {
           if (batch.signal.aborted) throw error;
           const rule = error instanceof DopplerFigureRejection ? error.rule : "store-failed";
           console.warn(`[first-pass] figures document=${documentId} status=failed rule=${rule}`);
-          return { stats: { dopplerFigures: { status: "failed", rule } } };
+          const recorded = await ledger((scope) => ledgerWriteForFailedFigures({ scope, outcome }));
+          return { stats: { dopplerFigures: { status: "failed", rule, ...recorded } } };
         }
       }, batch.signal);
     }

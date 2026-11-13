@@ -4,6 +4,7 @@ import { reserveOrientationAttempt } from "../lib/image-orientation.js";
 import { EMBEDDED_IMAGE_TARGETS, embeddedImageGraph, resolveEmbeddedImageRequest } from "../extractors/embedded-images.js";
 import { anchorImageMarkdownFile } from "../extractors/image-markdown.js";
 import { DopplerFigureRejection, DopplerFigureStoreError, dopplerImageExtractEnabled, readDopplerFigureDir, storeDopplerFigures } from "../extractors/doppler-figures.js";
+import { ledgerPagesFromLayoutFacts, ledgerWriteForFailedFigures, ledgerWriteForStoredFigures, recordFigureLedger } from "../db/document-asset-ledger.js";
 import {
   SANDBOXED_PDF_MAX_MARKDOWN_BYTES, VM_PDF_EXTRACTOR_ID, requireSandboxedPdfProvider, sandboxedPdfFigures, sandboxedPdfProvider, sandboxedPdfLayoutFacts, sandboxedPdfOcrPages,
 } from "../extractors/plugins.js";
@@ -59,7 +60,7 @@ import {
 } from "../pipeline/checkpoints.js";
 import { healthyDocuments } from "../pipeline/document-health.js";
 import { buildCanonicalDocumentFromMarkdown } from "../lib/canonical-document.js";
-import type { CanonicalDocument } from "@docslurp/shared";
+import type { CanonicalDocument, DocumentAsset, DopplerManifest } from "@docslurp/shared";
 import { enrichCanonicalDocumentWithPptx, enrichCanonicalDocumentWithXlsx } from "../lib/office-structure.js";
 import {
   enrichCanonicalDocumentWithBestParser,
@@ -1005,7 +1006,7 @@ export class ExtractMarkdownStage implements Stage {
                   // Doppler figures of the winning VM candidate: validated whole, stored under the document's artifact root, and
                   // recorded as document artifact slots so the artifact and PII guards (and the file proxy) apply to each file.
                   const dopplerFigures = winningCandidate.figures
-                    ? await this.storeWinningDopplerFigures({ document, runId: state.run.id, candidate: winningCandidate, markdown: winningText, signal })
+                    ? await this.storeWinningDopplerFigures({ document, runId: state.run.id, candidate: winningCandidate, markdown: winningText, signal, state })
                     : null;
                   for (const { slot, uri } of dopplerFigures?.slots ?? []) state.artifactLedger.recordDocument(document.id, slot, uri);
                   if (graph) {
@@ -2981,7 +2982,29 @@ export class ExtractMarkdownStage implements Stage {
    */
   private async storeWinningDopplerFigures(args: {
     document: import("../models.js").Document; runId: string; candidate: ExtractedCandidate; markdown: string; signal?: AbortSignal;
+    state?: import("../pipeline/pipeline.js").WorkflowState;
   }): Promise<{ slots: Array<{ slot: string; uri: string }>; stats: Record<string, unknown> }> {
+    const result = await this.storeWinningDopplerFiguresOnly(args);
+    const outcome = args.candidate.figures!.outcome;
+    // The first pass answers its own documents' figures (and their ledger): a served result's placeholder records nothing.
+    if (!args.state || (outcome.status === "failed" && outcome.reason.startsWith("first-pass:"))) return result.figures;
+    // The asset ledger: every image Doppler reported and the document's extraction level, in one org-scoped transaction.
+    const pages = ledgerPagesFromLayoutFacts(args.candidate.layoutFacts);
+    const ledger = await recordFigureLedger({
+      store: args.state.store, run: args.state.run, documentId: args.document.id, signal: args.signal,
+      build: (scope) => result.stored
+        ? ledgerWriteForStoredFigures({ scope, ...result.stored, outcome, pages })
+        : ledgerWriteForFailedFigures({ scope, outcome, pages }),
+    });
+    return { slots: result.figures.slots, stats: { ...result.figures.stats, ...(ledger === "unsupported" ? {} : { ledger }) } };
+  }
+
+  private async storeWinningDopplerFiguresOnly(args: {
+    document: import("../models.js").Document; runId: string; candidate: ExtractedCandidate; markdown: string; signal?: AbortSignal;
+  }): Promise<{
+    figures: { slots: Array<{ slot: string; uri: string }>; stats: Record<string, unknown> };
+    stored?: { manifest: DopplerManifest; assets: DocumentAsset[]; keys: Map<string, string> };
+  }> {
     const figures = args.candidate.figures!;
     const started = Date.now();
     // Whether Doppler's renderer confined itself (pdfregions Landlock + seccomp inside the VM): telemetry until it is required.
@@ -2989,28 +3012,30 @@ export class ExtractMarkdownStage implements Stage {
     if (figures.outcome.status === "failed") {
       console.warn(`[doppler-figures] document=${args.document.id} status=extraction-failed confined=${imagesConfined} reason=${JSON.stringify(figures.outcome.reason)}`);
       pushPerfMetric({ metric: "doppler-figures-failed", value: 1, unit: "count", tags: ["doppler-figures", "extraction-failed"], metadata: { documentId: args.document.id } });
-      return { slots: [], stats: { status: "extraction-failed", imagesConfined } };
+      return { figures: { slots: [], stats: { status: "extraction-failed", imagesConfined } } };
     }
     let validated;
     try {
-      validated = await readDopplerFigureDir(figures.dir, { pageCount: args.document.pageCount, signal: args.signal });
+      validated = await readDopplerFigureDir(figures.dir, {
+        pageCount: args.document.pageCount, signal: args.signal, expect: figures.outcome.status === "partial" ? "partial" : "complete",
+      });
     } catch (error) {
       if (args.signal?.aborted) throw error;
-      if (!(error instanceof DopplerFigureRejection)) return this.dopplerFiguresFailed(args.document.id, "read-failed", imagesConfined, error);
+      if (!(error instanceof DopplerFigureRejection)) return { figures: this.dopplerFiguresFailed(args.document.id, "read-failed", imagesConfined, error) };
       console.warn(`[doppler-figures] document=${args.document.id} status=rejected rule=${error.rule} confined=${imagesConfined}`);
       pushPerfMetric({ metric: "doppler-figures-failed", value: 1, unit: "count", tags: ["doppler-figures", "rejected"], metadata: { documentId: args.document.id, rule: error.rule } });
-      return { slots: [], stats: { status: "rejected", rule: error.rule, imagesConfined } };
+      return { figures: { slots: [], stats: { status: "rejected", rule: error.rule, imagesConfined } } };
     }
     let stored;
     try {
       stored = await storeDopplerFigures({ storage: this.storage, document: args.document, runId: args.runId, figures: validated, markdown: args.markdown, signal: args.signal });
     } catch (error) {
       if (args.signal?.aborted || !(error instanceof DopplerFigureStoreError)) throw error;
-      return this.dopplerFiguresFailed(args.document.id, error.reason, imagesConfined, error.cause, error.cleanup);
+      return { figures: this.dopplerFiguresFailed(args.document.id, error.reason, imagesConfined, error.cause, error.cleanup) };
     }
-    const stats = { ...stored.stats, imagesConfined, validateMs: Date.now() - started - stored.stats.storeMs };
-    console.log(`[doppler-figures] document=${args.document.id} status=stored entries=${stats.entries} files=${stats.files} bytes=${stats.bytes} markers=${stats.markers} resolved=${stats.markersResolved} confined=${imagesConfined} ms=${Date.now() - started}`);
-    return { slots: stored.slots, stats };
+    const stats = { ...stored.stats, imagesConfined, manifestVersion: validated.manifest.version, validateMs: Date.now() - started - stored.stats.storeMs };
+    console.log(`[doppler-figures] document=${args.document.id} status=stored version=${validated.manifest.version} entries=${stats.entries} files=${stats.files} bytes=${stats.bytes} markers=${stats.markers} resolved=${stats.markersResolved} confined=${imagesConfined} ms=${Date.now() - started}`);
+    return { figures: { slots: stored.slots, stats }, stored: { manifest: validated.manifest, assets: validated.assets, keys: stored.keys } };
   }
 
   /**

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { DOPPLER_FIGURE_LIMITS, dopplerFigureUrls, imageAnchorsToAltText, resolveDopplerImageMarkers } from "@docslurp/shared";
+import { DOPPLER_FIGURE_LIMITS, DOPPLER_MANIFEST_V2_LIMITS, dopplerFigureUrls, imageAnchorsToAltText, resolveDopplerImageMarkers } from "@docslurp/shared";
 
 import { buildCanonicalDocumentFromMarkdown } from "../lib/canonical-document.js";
 
@@ -108,7 +108,7 @@ describe("storeDopplerFigures: a failed upload stores nothing", () => {
 describe("readDopplerFigureDir: the happy path", () => {
   it("accepts the fixture folder: raster, vector, PNG fallback, a repeat and a failed figure", async () => {
     const set = await readDopplerFigureDir(dir, { pageCount: 5 });
-    expect(set.entries.map((e) => e.id)).toEqual(["p3.1", "p3.g2", "p4.1", "p5.g1", "p5.2"]);
+    expect(set.assets.map((e) => e.assetId)).toEqual(["p3.1", "p3.g2", "p4.1", "p5.g1", "p5.2"]);
     expect(set.files.map((f) => [f.id, f.format, f.mediaType])).toEqual([
       ["p3.1", "webp", "image/webp"], ["p3.g2", "svg", "image/svg+xml"], ["p5.g1", "png", "image/png"],
     ]);
@@ -198,7 +198,11 @@ describe("readDopplerFigureDir: hostile folders", () => {
   it("refuses a manifest that is not JSON, is oversized or is missing", async () => {
     await writeFile(path.join(dir, "manifest.json"), "{nope");
     expect(await rejection()).toBe("manifest-not-json");
-    await writeFile(path.join(dir, "manifest.json"), Buffer.alloc(DOPPLER_FIGURE_LIMITS.maxManifestBytes + 1, 0x20));
+    await writeFile(path.join(dir, "manifest.json"), Buffer.alloc(DOPPLER_MANIFEST_V2_LIMITS.maxManifestBytes + 1, 0x20));
+    expect(await rejection()).toBe("oversized-file");
+    // A valid version 1 manifest past version 1's own cap (whitespace keeps it valid JSON) is refused too.
+    const v1 = Buffer.from(JSON.stringify(await JSON.parse(await readFile(path.join(FIXTURE, "manifest.json"), "utf8"))));
+    await writeFile(path.join(dir, "manifest.json"), Buffer.concat([v1, Buffer.alloc(DOPPLER_FIGURE_LIMITS.maxManifestBytes, 0x20)]));
     expect(await rejection()).toBe("oversized-file");
     await rm(path.join(dir, "manifest.json"));
     expect(await rejection()).toBe("missing-manifest");

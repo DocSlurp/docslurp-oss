@@ -13,7 +13,7 @@
 import { SandboxRunError } from "../sandbox/types.js";
 import type { UsageEvent } from "../models.js";
 import {
-  acceptSandboxedPdfResult, sandboxedPdfProvider, type SandboxedPdfFigureOutcome, type SandboxedPdfJob, type SandboxedPdfResult,
+  acceptSandboxedPdfResult, parseSandboxedPdfFigureOutcome, sandboxedPdfProvider, type SandboxedPdfFigureOutcome, type SandboxedPdfJob, type SandboxedPdfResult,
 } from "./plugins.js";
 
 /** One PDF of a batch. Paths are absolute and distinct; `documentId` stays on the host and never reaches the VM. */
@@ -201,13 +201,10 @@ export function acceptSandboxedPdfBatchEvent(job: SandboxedPdfBatchJob, raw: unk
     case "figures": {
       if (!job.options.figures) fail("figures were not requested");
       if (before !== "text") fail("figures before text");
-      const figures = (event as { figures?: { status?: unknown; reason?: unknown; confined?: unknown } }).figures;
-      const confined = typeof figures?.confined === "boolean" ? { confined: figures.confined } : {};
       seen.set(index as number, "figures");
-      if (figures?.status === "extracted") return { index: index as number, phase: "figures", figures: { status: "extracted", ...confined } };
-      // eslint-disable-next-line no-control-regex
-      const reason = typeof figures?.reason === "string" ? figures.reason.replace(/[\u0000-\u001f\u007f-\u009f]+/g, " ").slice(0, 200) : "";
-      return { index: index as number, phase: "figures", figures: { status: "failed", reason: reason || "unspecified", ...confined } };
+      const figures = (event as { figures?: { status?: unknown } }).figures;
+      // No answer, or an unknown one, is a failure (the reason stays telemetry only).
+      return { index: index as number, phase: "figures", figures: parseSandboxedPdfFigureOutcome(figures?.status === undefined ? { ...figures, status: "failed", reason: "unspecified" } : figures, 200) };
     }
     case "failed": {
       // A file may fail after its text (its figures never came): the text stands, the figures count as failed.
