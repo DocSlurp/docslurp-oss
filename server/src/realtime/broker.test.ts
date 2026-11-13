@@ -49,7 +49,7 @@ it("re-projects only the subscriptions whose project or run scope moved", async 
   const authorize = vi.fn(async () => "org");
   const backend: RealtimeBackend = { authorize, project, listen: async () => async () => {},
     revisions: async () => new Map([["org", orgRevision]]),
-    scopeRevisions: vi.fn(async keys => new Map(keys.map(key => [`${key.orgId}\u0000${key.scope}`, scopes.get(`${key.orgId}\u0000${key.scope}`) ?? "0"]))) };
+    scopeRevisions: vi.fn(async (keys: Array<{ orgId: string; scope: string }>) => new Map<string, string>(keys.map(key => [`${key.orgId}\u0000${key.scope}`, scopes.get(`${key.orgId}\u0000${key.scope}`) ?? "0"]))) };
   const broker = new RealtimeBroker(backend, 60_000);
   const seen: string[] = [];
   const subscribe = (label: string, resource: Parameters<RealtimeBroker["subscribe"]>[1]) => broker.subscribe("user", resource, async () => { seen.push(label); });
