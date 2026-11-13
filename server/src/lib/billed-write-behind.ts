@@ -165,6 +165,8 @@ export function writeBehindWithinCap(credits: number, write: () => Promise<void>
   })().then((abandoned) => {
     allowance.pending -= 1;
     if (!abandoned) allowance.credits = Math.max(0, allowance.credits - cost);
+    // Fractional cents leave float residue: with nothing in flight only the loss debt remains.
+    if (allowance.pending === 0) allowance.credits = allowance.lostCredits;
     releaseIfIdle(orgId, allowance);
   });
   pending.add(settled);
