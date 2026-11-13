@@ -76,9 +76,10 @@ const FIGURE_SVG_CSP = "default-src 'none'; style-src 'unsafe-inline'; sandbox; 
  * index as JSON, the page facts and the Markdown as text. All of them still pass the artifact check (recorded slot,
  * project, organization, PII withholding) like any other artifact.
  */
-const DOPPLER_FOLDER_FILE_KEY = /\/doppler\/[A-Za-z0-9-]{1,64}\/(images\/manifest\.json|images\/page-facts\.jsonl|document\.md|index\.json)$/;
+const DOPPLER_FOLDER_FILE_KEY = /\/doppler\/[A-Za-z0-9-]{1,64}\/(images\/manifest\.jsonl?|images\/page-facts\.jsonl|document\.md|index\.json)$/;
 const DOPPLER_FOLDER_FILE_TYPES: Readonly<Record<string, string>> = {
   "images/manifest.json": "application/json; charset=utf-8",
+  "images/manifest.jsonl": "text/plain; charset=utf-8",
   "index.json": "application/json; charset=utf-8",
   "images/page-facts.jsonl": "text/plain; charset=utf-8",
   "document.md": "text/markdown; charset=utf-8",

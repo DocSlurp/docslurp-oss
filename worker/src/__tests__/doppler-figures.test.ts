@@ -9,7 +9,7 @@ import { DOPPLER_FIGURE_LIMITS, DOPPLER_MANIFEST_V2_LIMITS, dopplerFigureUrls, i
 import { buildCanonicalDocumentFromMarkdown } from "../lib/canonical-document.js";
 
 import {
-  DopplerFigureRejection, DopplerFigureStoreError, dopplerFigureMagicMatches, dopplerFigureStorageKey, dopplerImageExtractEnabled, readDopplerFigureDir, storeDopplerFigures,
+  DopplerFigureRejection, DopplerFigureStoreError, disposeDopplerFigureSet, dopplerFigureMagicMatches, dopplerFolderKey, readLedgerSpill, dopplerImageExtractEnabled, readDopplerFigureDir, storeDopplerFigures,
 } from "../extractors/doppler-figures.js";
 import {
   acceptSandboxedPdfResult, assertExtractorPluginConfiguration, registerExtractorPlugin, resetExtractorPluginsForTest, sandboxedPdfFigures,
@@ -34,9 +34,11 @@ async function manifest(): Promise<{ version: string; images: Array<Record<strin
 async function writeManifest(value: unknown): Promise<void> {
   await writeFile(path.join(dir, "manifest.json"), JSON.stringify(value));
 }
+/** Read the folder and store it (hashes and signatures are checked while files stream to storage). */
 async function rejection(pageCount = 10): Promise<string> {
   try {
-    await readDopplerFigureDir(dir, { pageCount });
+    const set = await readDopplerFigureDir(dir, { pageCount });
+    await storeDopplerFigures({ storage: { putBytes: async () => {}, putJson: async () => {}, uri: (key) => key }, document: DOC, runId: "run-1", figures: set, markdown: "" });
   } catch (error) {
     if (error instanceof DopplerFigureRejection) return error.rule;
     throw error;
@@ -48,7 +50,12 @@ describe("storeDopplerFigures: a failed upload stores nothing", () => {
   const recordingStorage = (fail: { bytes?: string; json?: boolean }, withDelete = true) => {
     const live = new Set<string>();
     const storage = {
-      putBytes: vi.fn(async (key: string) => { if (fail.bytes && key.endsWith(fail.bytes)) throw new Error("boom"); live.add(key); }),
+      putBytes: vi.fn(async (key: string) => {
+        if (fail.bytes && key.endsWith(fail.bytes)) throw new Error("boom");
+        live.add(key);
+        // The index write lands, then fails: it must be removed too.
+        if (fail.json && key.endsWith("/index.json")) throw new Error("boom");
+      }),
       putJson: vi.fn(async (key: string) => { live.add(key); if (fail.json) throw new Error("boom"); }),
       uri: (key: string) => `s3://bucket/${key}`,
       ...(withDelete ? { deleteKeys: vi.fn(async (keys: string[]) => { for (const key of keys) live.delete(key); }) } : {}),
@@ -58,11 +65,12 @@ describe("storeDopplerFigures: a failed upload stores nothing", () => {
 
   it("an object failure deletes the files already written and names the phase", async () => {
     const set = await readDopplerFigureDir(dir, { pageCount: 5 });
-    const { storage, live } = recordingStorage({ bytes: "/p5.g1.png" });
+    const { storage, live } = recordingStorage({ bytes: "/page-0005/figure-001.png" });
     const error = await storeDopplerFigures({ storage, document: DOC, runId: "run-1", figures: set, markdown: "" }).catch((e) => e);
     expect(error).toBeInstanceOf(DopplerFigureStoreError);
     expect(error).toMatchObject({ reason: "store-object-failed", cleanup: "deleted" });
-    expect(storage.putJson).not.toHaveBeenCalled();
+    // Nothing after the files (the manifest, the index) is written once a file failed.
+    expect(storage.putBytes.mock.calls.some(([key]) => String(key).endsWith("manifest.json") || String(key).endsWith("index.json"))).toBe(false);
     expect(live.size).toBe(0);
   });
 
@@ -96,7 +104,7 @@ describe("storeDopplerFigures: a failed upload stores nothing", () => {
     const set = await readDopplerFigureDir(dir, { pageCount: 5 });
     const controller = new AbortController();
     const { storage, live } = recordingStorage({});
-    storage.putJson.mockImplementationOnce(async (key: string) => { live.add(key); controller.abort(); });
+    storage.putBytes.mockImplementation(async (key: string) => { live.add(key); if (key.endsWith("/index.json")) controller.abort(); });
     const error = await storeDopplerFigures({ storage, document: DOC, runId: "run-1", figures: set, markdown: "", signal: controller.signal }).catch((e) => e);
     expect(error).not.toBeInstanceOf(DopplerFigureStoreError);
     expect(error.name).toBe("AbortError");
@@ -108,34 +116,46 @@ describe("storeDopplerFigures: a failed upload stores nothing", () => {
 describe("readDopplerFigureDir: the happy path", () => {
   it("accepts the fixture folder: raster, vector, PNG fallback, a repeat and a failed figure", async () => {
     const set = await readDopplerFigureDir(dir, { pageCount: 5 });
-    expect(set.assets.map((e) => e.assetId)).toEqual(["p3.1", "p3.g2", "p4.1", "p5.g1", "p5.2"]);
+    expect(set.version).toBe(1);
     expect(set.files.map((f) => [f.id, f.format, f.mediaType])).toEqual([
       ["p3.1", "webp", "image/webp"], ["p3.g2", "svg", "image/svg+xml"], ["p5.g1", "png", "image/png"],
     ]);
-    for (const file of set.files) expect(createHash("sha256").update(file.bytes).digest("hex")).toBe(file.sha256);
+    // The reader keeps no bytes: each file is hashed while it uploads.
+    for (const file of set.files) expect(createHash("sha256").update(await readFile(path.join(dir, file.relative))).digest("hex")).toBe(file.sha256);
+    // The ledger rows are spilled in id order.
+    const rows = [];
+    for await (const row of readLedgerSpill(set.ledger.spill)) rows.push(row.assetId);
+    expect(rows).toEqual(["p3.1", "p3.g2", "p4.1", "p5.2", "p5.g1"]);
+    await disposeDopplerFigureSet(set);
   });
 
   it("stores figures under the document's artifact root, keyed by ids, with an index and slots", async () => {
     const set = await readDopplerFigureDir(dir, { pageCount: 5 });
     const put = new Map<string, { bytes: Buffer; type: string }>();
-    const json = new Map<string, unknown>();
     const storage = {
       putBytes: vi.fn(async (key: string, data: Uint8Array, type: string) => { put.set(key, { bytes: Buffer.from(data), type }); }),
-      putJson: vi.fn(async (key: string, value: unknown) => { json.set(key, value); }),
+      putJson: vi.fn(async () => {}),
       uri: (key: string) => `s3://bucket/${key}`,
     };
     const markdown = "A\n\n![image](doppler-image:p3.1)\n\n![image](doppler-image:p3.g2)\f![image](doppler-image:p4.1)\f![image](doppler-image:p5.2) ![image](doppler-image:p9.9)";
     const stored = await storeDopplerFigures({ storage, document: DOC, runId: "run-1", figures: set, markdown });
-    const root = `user-1/run-1/doppler-figures/${DOC.id}`;
-    expect([...put.keys()]).toEqual([`${root}/p3.1.webp`, `${root}/p3.g2.svg`, `${root}/p5.g1.png`]);
-    expect(put.get(`${root}/p3.g2.svg`)!.type).toBe("image/svg+xml");
+    const root = `user-1/run-1/doppler/${DOC.id}`;
+    // Version 1 files land at the page paths a version 2 or 3 run would use; the manifest bytes as received; the index last.
+    expect([...put.keys()].sort()).toEqual([
+      `${root}/images/manifest.json`, `${root}/images/page-0003/figure-002.svg`, `${root}/images/page-0003/image-001.webp`,
+      `${root}/images/page-0005/figure-001.png`, `${root}/index.json`,
+    ]);
+    expect([...put.keys()].at(-1)).toBe(`${root}/index.json`);
+    expect(put.get(`${root}/images/page-0003/figure-002.svg`)!.type).toBe("image/svg+xml");
+    expect(put.get(`${root}/images/manifest.json`)!.bytes.equals(await readFile(path.join(dir, "manifest.json")))).toBe(true);
     expect(stored.slots).toEqual([
       { slot: "doppler-figures", uri: `s3://bucket/${root}/index.json` },
-      { slot: "doppler-figure:p3.1", uri: `s3://bucket/${root}/p3.1.webp` },
-      { slot: "doppler-figure:p3.g2", uri: `s3://bucket/${root}/p3.g2.svg` },
-      { slot: "doppler-figure:p5.g1", uri: `s3://bucket/${root}/p5.g1.png` },
+      { slot: "doppler-figure:p3.1", uri: `s3://bucket/${root}/images/page-0003/image-001.webp` },
+      { slot: "doppler-figure:p3.g2", uri: `s3://bucket/${root}/images/page-0003/figure-002.svg` },
+      { slot: "doppler-figure:p5.g1", uri: `s3://bucket/${root}/images/page-0005/figure-001.png` },
+      { slot: "doppler-manifest", uri: `s3://bucket/${root}/images/manifest.json` },
     ]);
-    const index = json.get(`${root}/index.json`) as { markers: string[]; figures: Array<{ id: string; fileOf: string | null; slot: string | null; bbox: number[] }> };
+    const index = JSON.parse(put.get(`${root}/index.json`)!.bytes.toString()) as { markers: string[]; figures: Array<{ id: string; fileOf: string | null; slot: string | null; bbox: number[] }> };
     // p5.2 failed (no file) and p9.9 is not in the manifest: neither marker resolves.
     expect(index.markers).toEqual(["p3.1", "p3.g2", "p4.1"]);
     expect(index.figures.find((f) => f.id === "p4.1")).toMatchObject({ fileOf: "p3.1", slot: "doppler-figure:p3.1" });
@@ -144,11 +164,14 @@ describe("readDopplerFigureDir: the happy path", () => {
     expect(stored.stats).toMatchObject({ status: "stored", entries: 5, files: 3, markers: 5, markersResolved: 3, byFormat: { webp: 1, svg: 1, png: 1 } });
   });
 
-  it("builds keys only from ids", () => {
-    expect(dopplerFigureStorageKey(DOC, "run-1", "p3.1.webp")).toBe(`user-1/run-1/doppler-figures/${DOC.id}/p3.1.webp`);
-    expect(dopplerFigureStorageKey({ ...DOC, artifactRoot: "extracts/org-1/ex-1" }, "run-1", "p3.1.webp")).toBe(`extracts/org-1/ex-1/doppler-figures/${DOC.id}/p3.1.webp`);
-    expect(() => dopplerFigureStorageKey(DOC, "run-1", "../../x.webp")).toThrow();
-    expect(() => dopplerFigureStorageKey({ ...DOC, id: "../other" }, "run-1", "p3.1.webp")).toThrow();
+  it("builds keys only from ids and the document's tenant root", () => {
+    expect(dopplerFolderKey(DOC, "run-1", { id: "p3.1", format: "webp" })).toBe(`user-1/run-1/doppler/${DOC.id}/images/page-0003/image-001.webp`);
+    expect(dopplerFolderKey(DOC, "run-1", { id: "p12345.g7", format: "svg" })).toBe(`user-1/run-1/doppler/${DOC.id}/images/page-12345/figure-007.svg`);
+    expect(dopplerFolderKey({ ...DOC, artifactRoot: "extracts/org-1/ex-1" }, "run-1", "manifestV3")).toBe(`extracts/org-1/ex-1/doppler/${DOC.id}/images/manifest.jsonl`);
+    expect(dopplerFolderKey(DOC, "run-1", "markdown")).toBe(`user-1/run-1/doppler/${DOC.id}/document.md`);
+    expect(() => dopplerFolderKey(DOC, "run-1", { id: "../../x", format: "webp" })).toThrow();
+    expect(() => dopplerFolderKey({ ...DOC, id: "../other" }, "run-1", "manifest")).toThrow();
+    expect(() => dopplerFolderKey({ ...DOC, artifactRoot: "../escape" }, "run-1", "manifest")).toThrow();
   });
 });
 
@@ -339,11 +362,11 @@ describe("golden folders from a real Doppler run (fixtures/doppler-golden, see P
   async function storeAndResolve(name: string, pageCount: number) {
     const { folder, markdown } = await asGuestHandsIt(name);
     const set = await readDopplerFigureDir(folder, { pageCount });
-    const json = new Map<string, any>();
-    const storage = { putBytes: async () => {}, putJson: async (key: string, value: unknown) => { json.set(key, value); }, uri: (key: string) => `s3://bucket/${key}` };
+    const put = new Map<string, Buffer>();
+    const storage = { putBytes: async (key: string, data: Uint8Array) => { put.set(key, Buffer.from(data)); }, putJson: async () => {}, uri: (key: string) => `s3://bucket/${key}` };
     const stored = await storeDopplerFigures({ storage, document: DOC, runId: "run-1", figures: set, markdown });
-    const index = [...json.values()][0] as { figures: Array<{ id: string; fileOf: string | null; skipped?: string }> };
-    const artifacts = stored.slots.map(({ slot, uri }) => ({ slot: `${DOC.id}:${slot}`, url: `/v1/files/t/${uri.split("/").pop()}` }));
+    const index = JSON.parse([...put.entries()].find(([key]) => key.endsWith("/index.json"))![1].toString()) as { figures: Array<{ id: string; fileOf: string | null; skipped?: string }> };
+    const artifacts = stored.slots.map(({ slot, uri }) => ({ slot: `${DOC.id}:${slot}`, url: `/v1/files/t/${uri.split("/").slice(-2).join("/")}` }));
     const urls = dopplerFigureUrls(DOC.id, artifacts, index.figures);
     return { set, index, markdown, resolved: resolveDopplerImageMarkers(markdown, (id) => urls.get(id)), urls };
   }
@@ -352,16 +375,16 @@ describe("golden folders from a real Doppler run (fixtures/doppler-golden, see P
     const { set, index, resolved, urls } = await storeAndResolve("repeats", 4);
     expect(set.files.map((f) => f.id)).toEqual(["p1.1", "p3.1"]);
     expect(index.figures.filter((f) => f.skipped === "repeat").map((f) => [f.id, f.fileOf])).toEqual([["p2.1", "p1.1"], ["p3.2", "p3.1"], ["p4.1", "p1.1"]]);
-    expect(urls.get("p4.1")).toBe("/v1/files/t/p1.1.webp");
+    expect(urls.get("p4.1")).toBe("/v1/files/t/page-0001/image-001.webp");
     expect(resolved).not.toContain("doppler-image:");
-    expect(resolved.match(/!\[image\]\(\/v1\/files\/t\/p[13]\.1\.webp\)/g)).toHaveLength(5);
+    expect(resolved.match(/!\[image\]\(\/v1\/files\/t\/page-000[13]\/image-001\.webp\)/g)).toHaveLength(5);
   });
 
   it("typst: a raster and an SVG resolve; figures Doppler skipped by fate keep `skipped` and no file", async () => {
     const { set, index, resolved } = await storeAndResolve("typst", 4);
     expect(set.files.map((f) => [f.id, f.mediaType])).toEqual([["p1.1", "image/webp"], ["p3.g1", "image/svg+xml"]]);
     expect(index.figures.filter((f) => f.skipped).map((f) => [f.id, f.skipped, f.fileOf])).toEqual([["p2.1", "fate", null], ["p4.1", "fate", null]]);
-    expect(resolved).toContain("](/v1/files/t/p3.g1.svg)");
+    expect(resolved).toContain("](/v1/files/t/page-0003/figure-001.svg)");
     expect(resolved).not.toContain("doppler-image:");
   });
 

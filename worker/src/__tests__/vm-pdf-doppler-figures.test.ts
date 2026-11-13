@@ -5,7 +5,7 @@ import { Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { acceptSandboxedPdfResult, registerExtractorPlugin, resetExtractorPluginsForTest, type SandboxedPdfResult } from "../extractors/plugins.js";
+import { acceptSandboxedPdfResult, markFirstPassServedFigures, registerExtractorPlugin, resetExtractorPluginsForTest, type SandboxedPdfResult } from "../extractors/plugins.js";
 import { ExtractMarkdownStage } from "../stages/extract-markdown.js";
 
 const FIXTURE = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "doppler-figures");
@@ -26,7 +26,7 @@ function registerProvider(figures: boolean) {
  */
 type StorageFaults = { putBytes?: (key: string) => boolean; putJson?: (key: string) => boolean };
 
-async function runStage(vm: (job: any) => Promise<Partial<SandboxedPdfResult>>, faults: StorageFaults = {}) {
+async function runStage(vm: (job: any) => Promise<Partial<SandboxedPdfResult>>, faults: StorageFaults = {}, options: { markServed?: boolean } = {}) {
   const { defaultPipelineFeatures, defaultDocumentExtractionConfig } = await import("@docslurp/shared");
   const { WorkflowState } = await import("../pipeline/pipeline.js");
   const dir = await mkdtemp(path.join(tmpdir(), "vm-figures-stage-"));
@@ -58,6 +58,7 @@ async function runStage(vm: (job: any) => Promise<Partial<SandboxedPdfResult>>, 
   const jobs: any[] = [];
   const run = vi.fn(async (plan: any) => {
     jobs.push(structuredClone(plan.sandboxedPdf));
+    if (options.markServed) markFirstPassServedFigures(plan.sandboxedPdf);
     await writeFile(plan.sandboxedPdf.output, MARKDOWN);
     const result = await vm(plan.sandboxedPdf);
     acceptSandboxedPdfResult(plan.sandboxedPdf, { stdout: "", stderr: "", exitCode: 0, ...result }, 5);
@@ -83,10 +84,11 @@ async function runStage(vm: (job: any) => Promise<Partial<SandboxedPdfResult>>, 
   const stageState = state.documentStage(DOC_ID, "extract-markdown");
   const ledger = state.artifactLedger.all() as Record<string, string>;
   const markdown = [...objects.entries()].find(([key]) => key === `u/r/markdown/${DOC_ID}.vm-pdf.md`)?.[1].bytes.toString();
-  return { jobs, objects, json, stageState, ledger, markdown };
+  return { jobs, objects, json, stageState, ledger, markdown, state, pending: state.pendingAssetLedger.get(DOC_ID) };
 }
 
-const figureRoot = `u/r/doppler-figures/${DOC_ID}`;
+const folderRoot = `u/r/doppler/${DOC_ID}`;
+const figureRoot = `${folderRoot}/images`;
 
 beforeEach(() => resetExtractorPluginsForTest());
 afterEach(() => { resetExtractorPluginsForTest(); vi.unstubAllEnvs(); vi.restoreAllMocks(); });
@@ -100,9 +102,11 @@ describe("Doppler figures in the extraction stage", () => {
     expect(out.jobs[0].figures).toBeUndefined();
     expect(out.stageState?.status).toBe("completed");
     expect(out.stageState?.stats?.dopplerFigures).toBeUndefined();
-    expect([...out.objects.keys()].some((key) => key.includes("doppler-figures"))).toBe(false);
+    expect([...out.objects.keys()].some((key) => key.includes("/doppler/"))).toBe(false);
     expect(Object.keys(out.ledger).some((slot) => slot.includes("doppler-figure"))).toBe(false);
     expect(out.markdown).toBe(MARKDOWN);
+    // MEDIUM-3: the committed Markdown still gets its images level, `disabled`, with no assets.
+    expect(out.pending).toMatchObject({ level: { imagesStatus: "disabled", manifest: null }, assets: [] });
   });
 
   it("flag on: validates the folder, stores figures under the document root with fixed types and records each slot", async () => {
@@ -115,12 +119,23 @@ describe("Doppler figures in the extraction stage", () => {
     expect(out.stageState?.stats?.dopplerFigures).toMatchObject({ imagesConfined: false });
     expect(out.jobs[0].figures.dir).toMatch(/\.doppler-figures-/);
     expect(out.stageState?.status).toBe("completed");
-    expect(out.objects.get(`${figureRoot}/p3.1.webp`)?.type).toBe("image/webp");
-    expect(out.objects.get(`${figureRoot}/p3.g2.svg`)?.type).toBe("image/svg+xml");
-    expect(out.objects.get(`${figureRoot}/p5.g1.png`)?.type).toBe("image/png");
-    expect(out.ledger[`${DOC_ID}:doppler-figure:p3.g2`]).toBe(`s3://test/${figureRoot}/p3.g2.svg`);
-    expect(out.ledger[`${DOC_ID}:doppler-figures`]).toBe(`s3://test/${figureRoot}/index.json`);
-    expect(out.json.get(`${figureRoot}/index.json`).markers).toEqual(["p3.1", "p3.g2", "p4.1"]);
+    expect(out.objects.get(`${figureRoot}/page-0003/image-001.webp`)?.type).toBe("image/webp");
+    expect(out.objects.get(`${figureRoot}/page-0003/figure-002.svg`)?.type).toBe("image/svg+xml");
+    expect(out.objects.get(`${figureRoot}/page-0005/figure-001.png`)?.type).toBe("image/png");
+    expect(out.ledger[`${DOC_ID}:doppler-figure:p3.g2`]).toBe(`s3://test/${figureRoot}/page-0003/figure-002.svg`);
+    expect(out.ledger[`${DOC_ID}:doppler-figures`]).toBe(`s3://test/${folderRoot}/index.json`);
+    expect(out.ledger[`${DOC_ID}:doppler-manifest`]).toBe(`s3://test/${figureRoot}/manifest.json`);
+    expect(out.ledger[`${DOC_ID}:doppler-markdown`]).toBe(`s3://test/${folderRoot}/document.md`);
+    // document.md is Doppler's output exactly; source.json points at the source and is not a slot.
+    expect(out.objects.get(`${folderRoot}/document.md`)?.bytes.toString()).toBe(MARKDOWN);
+    expect(out.json.get(`${folderRoot}/source.json`)).toMatchObject({ sourceKey: "u/source.pdf", pageCount: 5, mimeType: "application/pdf" });
+    expect(Object.values(out.ledger).some((uri) => uri.endsWith("/source.json"))).toBe(false);
+    expect(JSON.parse(out.objects.get(`${folderRoot}/index.json`)!.bytes.toString()).markers).toEqual(["p3.1", "p3.g2", "p4.1"]);
+    // The ledger write waits for the checkpoint: queued with the reader's spill and the stored manifest.
+    expect(out.stageState?.stats?.dopplerFigures).toMatchObject({ ledger: "queued" });
+    expect(out.pending).toMatchObject({ level: { imagesStatus: "complete", manifestVersion: 1, manifest: { key: `${figureRoot}/manifest.json` } }, assets: { rows: 5 } });
+    // The job told Doppler the host's caps for this document and the images/ link prefix.
+    expect(out.jobs[0].figures.limits).toMatchObject({ linkPrefix: "images/", imagesMaxFileBytes: 8 * 1024 * 1024 });
     expect(out.stageState?.stats?.dopplerFigures).toMatchObject({ status: "stored", files: 3, markers: 3, markersResolved: 3 });
     // The stored Markdown is Doppler's, byte for byte: markers resolve at read time.
     expect(out.markdown).toBe(MARKDOWN);
@@ -135,7 +150,8 @@ describe("Doppler figures in the extraction stage", () => {
     expect(out.markdown).toBe(MARKDOWN);
     expect([...out.objects.keys()].some((key) => key.includes("doppler-figures"))).toBe(false);
     expect(Object.keys(out.ledger).some((slot) => slot.includes("doppler-figure"))).toBe(false);
-    expect(out.stageState?.stats?.dopplerFigures).toEqual({ status: "extraction-failed", imagesConfined: true });
+    expect(out.stageState?.stats?.dopplerFigures).toEqual({ status: "extraction-failed", imagesConfined: true, ledger: "queued" });
+    expect(out.pending).toMatchObject({ level: { imagesStatus: "failed" }, assets: [] });
     expect(JSON.stringify(out.stageState?.stats)).not.toContain("pdfregions");
     expect(warn.mock.calls.some(([line]) => String(line).includes("[doppler-figures]") && String(line).includes("pdfregions: limit hit (memory)"))).toBe(true);
   });
@@ -149,8 +165,9 @@ describe("Doppler figures in the extraction stage", () => {
       return { figures: { status: "extracted" } };
     });
     expect(out.stageState?.status).toBe("completed");
-    expect(out.stageState?.stats?.dopplerFigures).toEqual({ status: "rejected", rule: "size-mismatch", imagesConfined: null });
-    expect([...out.objects.keys()].some((key) => key.includes("doppler-figures"))).toBe(false);
+    expect(out.stageState?.stats?.dopplerFigures).toEqual({ status: "rejected", rule: "size-mismatch", imagesConfined: null, ledger: "queued" });
+    expect([...out.objects.keys()].some((key) => key.includes("/doppler/"))).toBe(false);
+    expect(out.pending).toMatchObject({ level: { imagesStatus: "failed" }, assets: [] });
     expect(out.markdown).toBe(MARKDOWN);
   });
 
@@ -163,12 +180,13 @@ describe("Doppler figures in the extraction stage", () => {
     registerProvider(true);
     vi.stubEnv("DOCSLURP_DOPPLER_IMAGE_EXTRACT", "1");
     const warn = vi.spyOn(console, "warn");
-    const out = await runStage(figureFolder, { putBytes: (key) => key.endsWith("/p3.g2.svg") });
+    const out = await runStage(figureFolder, { putBytes: (key) => key.endsWith("/page-0003/figure-002.svg") });
     expect(out.stageState?.status).toBe("completed");
     expect(out.markdown).toBe(MARKDOWN);
-    expect(out.stageState?.stats?.dopplerFigures).toEqual({ status: "failed", reason: "store-object-failed", cleanup: "deleted", imagesConfined: true });
-    expect([...out.objects.keys()].some((key) => key.includes("doppler-figures"))).toBe(false);
-    expect([...out.json.keys()].some((key) => key.includes("doppler-figures"))).toBe(false);
+    expect(out.stageState?.stats?.dopplerFigures).toEqual({ status: "failed", reason: "store-object-failed", cleanup: "deleted", imagesConfined: true, ledger: "queued" });
+    expect([...out.objects.keys()].some((key) => key.includes("/doppler/"))).toBe(false);
+    expect([...out.json.keys()].some((key) => key.includes("/doppler/"))).toBe(false);
+    expect(out.pending).toMatchObject({ level: { imagesStatus: "failed" }, assets: [] });
     expect(Object.keys(out.ledger).some((slot) => slot.includes("doppler-figure"))).toBe(false);
     // Other document artifacts are still recorded.
     expect(out.ledger[`${DOC_ID}:markdown-manifest`]).toBeTruthy();
@@ -182,13 +200,29 @@ describe("Doppler figures in the extraction stage", () => {
   it("a failed figure index upload keeps the Markdown and leaves no index or figure visible", async () => {
     registerProvider(true);
     vi.stubEnv("DOCSLURP_DOPPLER_IMAGE_EXTRACT", "1");
-    const out = await runStage(figureFolder, { putJson: (key) => key === `${figureRoot}/index.json` });
+    const out = await runStage(figureFolder, { putBytes: (key) => key === `${folderRoot}/index.json` });
     expect(out.stageState?.status).toBe("completed");
     expect(out.markdown).toBe(MARKDOWN);
-    expect(out.stageState?.stats?.dopplerFigures).toEqual({ status: "failed", reason: "store-index-failed", cleanup: "deleted", imagesConfined: true });
-    expect(out.json.has(`${figureRoot}/index.json`)).toBe(false);
-    expect([...out.objects.keys()].some((key) => key.includes("doppler-figures"))).toBe(false);
+    expect(out.stageState?.stats?.dopplerFigures).toEqual({ status: "failed", reason: "store-index-failed", cleanup: "deleted", imagesConfined: true, ledger: "queued" });
+    expect([...out.objects.keys()].some((key) => key.includes("/doppler/"))).toBe(false);
     expect(Object.keys(out.ledger).some((slot) => slot.includes("doppler-figure"))).toBe(false);
     expect(out.ledger[`${DOC_ID}:markdown-manifest`]).toBeTruthy();
+  });
+
+  it("a first-pass placeholder (a host-only mark on the job) stores nothing and queues no ledger write", async () => {
+    registerProvider(true);
+    vi.stubEnv("DOCSLURP_DOPPLER_IMAGE_EXTRACT", "1");
+    const out = await runStage(async () => ({ figures: { status: "failed", reason: "figures-stored-by-first-pass" } }), {}, { markServed: true });
+    expect(out.stageState?.status).toBe("completed");
+    expect(out.stageState?.stats?.dopplerFigures).toBeUndefined();
+    expect(out.pending).toBeUndefined();
+  });
+
+  it("LOW-6: a provider reason that starts with `first-pass:` is an ordinary failure and still writes the failed level", async () => {
+    registerProvider(true);
+    vi.stubEnv("DOCSLURP_DOPPLER_IMAGE_EXTRACT", "1");
+    const out = await runStage(async () => ({ figures: { status: "failed", reason: "first-pass:figures-stored-separately" } }));
+    expect(out.stageState?.stats?.dopplerFigures).toMatchObject({ status: "extraction-failed", ledger: "queued" });
+    expect(out.pending).toMatchObject({ level: { imagesStatus: "failed" }, assets: [] });
   });
 });

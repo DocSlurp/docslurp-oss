@@ -22,7 +22,7 @@ import { dopplerBinDir, dopplerConverterPath } from "../tools/doppler.js";
 import path from "node:path";
 import { dopplerImageExtractEnabled } from "./doppler-figures.js";
 import {
-  DOPPLER_BUILD, DOPPLER_IMAGE_EXTRACT_ENV, localPdfModeRequested, PDF_EXTRACTION_UNCONFIGURED, resolvePdfMode, sandboxedPdfConfigured, type EmbeddedImageFacts, type EmbeddedImageMediaType, type MediaMap, type OrientationResultRecord,
+  DOPPLER_BUILD, DOPPLER_IMAGE_EXTRACT_ENV, type DopplerImageLimits, localPdfModeRequested, PDF_EXTRACTION_UNCONFIGURED, resolvePdfMode, sandboxedPdfConfigured, type EmbeddedImageFacts, type EmbeddedImageMediaType, type MediaMap, type OrientationResultRecord,
 } from "@docslurp/shared";
 
 import { SandboxRunError, type SandboxResult } from "../sandbox/types.js";
@@ -45,12 +45,15 @@ export interface SandboxedPdfJob {
   /** Return embedded images beside the Markdown, from the same VM job. Bounds in pixels, 1..4096. */
   embeddedImages?: { minWidth: number; minHeight: number };
   /**
-   * Return Doppler's figure crops (`pdftomarkdown --images-dir`) from the same VM job: the provider writes the validated
-   * folder (`manifest.json` plus `<id>.<format>` files, docs/extraction/doppler-figures.md) into `dir`, which the host
-   * created empty, and reports `figures` on its result. Only when the provider declares `figures` and
-   * DOCSLURP_DOPPLER_IMAGE_EXTRACT is on.
+   * Return Doppler's images (`pdftomarkdown --images-dir`) from the same VM job: the provider writes the folder
+   * (`manifest.json` plus `page-NNNN/(image|figure)-NNN.<format>` files, docs/extraction/doppler-figures.md) into `dir`,
+   * which the host created empty, and reports `figures` on its result. Only when the provider declares `figures` and
+   * DOCSLURP_DOPPLER_IMAGE_EXTRACT is on. `limits` are the host's caps for this document as Doppler flags
+   * (`--images-max`, `--images-max-bytes`, `--images-max-file-bytes`, `--scan-max`, `--scan-max-bytes`,
+   * `--images-doc-max-bytes`, `--images-batch-pages`, `--images-link-prefix`): a provider passes them so that Doppler's own
+   * budgets stop it (a resumable `budget`/`doc_budget`) before the host would refuse the folder.
    */
-  figures?: { dir: string };
+  figures?: { dir: string; limits?: DopplerImageLimits };
 }
 
 export interface SandboxedPdfRunContext {
@@ -356,6 +359,18 @@ export function parseSandboxedPdfFigureOutcome(raw: unknown, maxReasonChars = MA
   }
   // A provider that was asked and did not answer extracted nothing the host may trust.
   return { status: "failed", reason: "provider-reported-no-figure-outcome" };
+}
+
+/**
+ * Jobs whose figure answer is the first pass's placeholder (pipeline/first-pass.ts serveFirstPassResult): the first pass
+ * stores that document's figures and ledger itself. A host-only mark on the job object, never anything the provider sends.
+ */
+const firstPassServedJobs = new WeakSet<SandboxedPdfJob>();
+export function markFirstPassServedFigures(job: SandboxedPdfJob): void {
+  firstPassServedJobs.add(job);
+}
+export function firstPassServedFigures(job: SandboxedPdfJob | undefined): boolean {
+  return !!job && firstPassServedJobs.has(job);
 }
 
 function figureOutcome(job: SandboxedPdfJob, raw: unknown): SandboxedPdfFigureOutcome | undefined {

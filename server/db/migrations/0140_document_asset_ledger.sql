@@ -107,9 +107,9 @@ CREATE TABLE IF NOT EXISTS document_extraction_levels (
   -- folder, or nothing usable), disabled (figures off for the run).
   images_status text NOT NULL DEFAULT 'none' CHECK (images_status IN ('none', 'complete', 'partial', 'resumable', 'failed', 'disabled')),
   images_exit_code smallint CHECK (images_exit_code BETWEEN 0 AND 255),
-  manifest_version smallint CHECK (manifest_version IN (1, 2)),
+  manifest_version smallint CHECK (manifest_version IN (1, 2, 3)),
   doppler_build text CHECK (doppler_build ~ '^[0-9A-Za-z][0-9A-Za-z._+-]{0,63}$'),
-  -- The stored manifest (`<artifact root>/doppler/<document>/images/manifest.json`, the validated bytes unchanged) and
+  -- The stored manifest (`<artifact root>/doppler/<document>/images/manifest.jsonl`, the validated bytes unchanged) and
   -- its SHA-256: with the files, what a resume worker downloads as its DIR.
   manifest_key text CHECK (char_length(manifest_key) <= 512),
   manifest_sha256 text CHECK (manifest_sha256 ~ '^[0-9a-f]{64}$'),
@@ -138,9 +138,12 @@ CREATE TABLE IF NOT EXISTS document_extraction_levels (
   CONSTRAINT document_extraction_levels_counts_check
     CHECK (assets_total = assets_extracted + assets_not_extracted + assets_unlinked AND assets_resumable <= assets_not_extracted),
   CONSTRAINT document_extraction_levels_status_resumable_check CHECK ((images_status = 'resumable') = (assets_resumable > 0)),
+  -- The stored manifest is `images/manifest.jsonl` (version 3) or `images/manifest.json` (versions 1 and 2).
   CONSTRAINT document_extraction_levels_manifest_check CHECK ((manifest_key IS NULL) = (manifest_sha256 IS NULL)
-    AND (manifest_key IS NULL OR (right(manifest_key, char_length('/doppler/' || document_id || '/images/manifest.json'))
-      = '/doppler/' || document_id || '/images/manifest.json'
+    AND (manifest_key IS NULL OR ((right(manifest_key, char_length('/doppler/' || document_id || '/images/manifest.jsonl'))
+        = '/doppler/' || document_id || '/images/manifest.jsonl'
+      OR right(manifest_key, char_length('/doppler/' || document_id || '/images/manifest.json'))
+        = '/doppler/' || document_id || '/images/manifest.json')
       AND position('..' in manifest_key) = 0 AND position('//' in manifest_key) = 0 AND left(manifest_key, 1) <> '/')))
 );
 --> statement-breakpoint

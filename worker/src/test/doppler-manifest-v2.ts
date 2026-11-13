@@ -78,3 +78,33 @@ export async function writeV2Folder(dir: string, manifest: unknown, files: Reado
   }
   await writeFile(path.join(dir, "manifest.json"), typeof manifest === "string" ? manifest : JSON.stringify(manifest));
 }
+
+/**
+ * The same images as `manifest.jsonl` (`doppler-images/3`): a header line, one image line per entry (in id order), one
+ * batch line per batch, and the end line with the hash of every byte before it. `mutateLines` bends the text lines
+ * before the end line is hashed (unless `rawEnd` replaces the end line too).
+ */
+export function v3Text(manifest: V2Manifest, options: { pages?: [number, number] | null; mutateLines?: (lines: string[]) => void; endPatch?: Record<string, unknown>; omitEnd?: boolean } = {}): string {
+  const { version: _v, images, batches, totals, complete, resumable, ...rest } = manifest as V2Manifest & { complete: boolean; resumable: boolean };
+  const header = {
+    type: "header", schema: "doppler-images/3", source_sha256: rest.source_sha256, settings_sha256: rest.settings_sha256, link_prefix: rest.link_prefix,
+    pages: options.pages ?? null, dpi: rest.dpi, min_side_pt: rest.min_side_pt, repeats: rest.repeats, scan_pages: rest.scan_pages, scan_dpi: rest.scan_dpi,
+    scan_max_dpi: rest.scan_max_dpi, batch_pages: rest.batch_pages, deadline_ms: rest.deadline_ms, resumes: rest.resumes,
+  };
+  const lines = [JSON.stringify(header), ...images.map((entry) => JSON.stringify({ type: "image", ...entry })), ...batches.map((batch) => JSON.stringify({ type: "batch", pages: batch.pages, status: batch.status, cut_page: batch.cut_page ?? null }))];
+  options.mutateLines?.(lines);
+  const body = lines.map((line) => `${line}\n`).join("");
+  if (options.omitEnd) return body;
+  const end = { type: "end", complete, resumable, totals, images: images.length, batches: batches.length, sha256: createHash("sha256").update(body).digest("hex"), ...options.endPatch };
+  return `${body}${JSON.stringify(end)}\n`;
+}
+
+/** Write a version 3 folder: `manifest.jsonl` and the page files. */
+export async function writeV3Folder(dir: string, text: string, files: ReadonlyMap<string, Buffer>): Promise<void> {
+  await mkdir(dir, { recursive: true });
+  for (const [relative, bytes] of files) {
+    await mkdir(path.join(dir, path.dirname(relative)), { recursive: true });
+    await writeFile(path.join(dir, relative), bytes);
+  }
+  await writeFile(path.join(dir, "manifest.jsonl"), text);
+}

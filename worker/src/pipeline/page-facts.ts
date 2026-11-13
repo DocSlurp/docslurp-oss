@@ -73,6 +73,38 @@ export interface PageFactUpsert {
   factsSource?: string | null;
   visionStatus?: PageVisionStatus | null;
   visionTextBytes?: number | null;
+  /** Routing facts (document_page_facts.text_layer / scan_class, migration 0140): closed enums; absent keeps the stored value. */
+  textLayer?: PageTextLayer | null;
+  scanClass?: PageScanClass | null;
+}
+
+export const PAGE_TEXT_LAYERS = ["none", "invisible", "visible", "mixed"] as const;
+export type PageTextLayer = (typeof PAGE_TEXT_LAYERS)[number];
+export const PAGE_SCAN_CLASSES = ["none", "single", "tiled", "layered"] as const;
+export type PageScanClass = (typeof PAGE_SCAN_CLASSES)[number];
+
+/**
+ * Per-page text layers (and scan classes, when known) from validated layout facts, whatever the figure setting: the
+ * routing facts land in document_page_facts through the ordinary page-facts write, never through the asset ledger.
+ * Values outside the closed enums are dropped.
+ */
+export function buildRoutingPageFacts(args: {
+  documentId: string;
+  runId: string;
+  pageCount: number;
+  layoutFacts: ReadonlyMap<number, { textLayer?: string | null; scanClass?: string | null }> | undefined;
+}): PageFactUpsert[] {
+  if (!args.layoutFacts) return [];
+  const max = Math.min(Math.max(0, Math.trunc(args.pageCount)) || PAGE_FACTS_MAX_PAGES, PAGE_FACTS_MAX_PAGES);
+  const rows: PageFactUpsert[] = [];
+  for (const [pageNumber, facts] of args.layoutFacts) {
+    if (!Number.isSafeInteger(pageNumber) || pageNumber < 1 || pageNumber > max) continue;
+    const textLayer = (PAGE_TEXT_LAYERS as readonly string[]).includes(facts.textLayer ?? "") ? facts.textLayer as PageTextLayer : undefined;
+    const scanClass = (PAGE_SCAN_CLASSES as readonly string[]).includes(facts.scanClass ?? "") ? facts.scanClass as PageScanClass : undefined;
+    if (!textLayer && !scanClass) continue;
+    rows.push({ documentId: args.documentId, runId: args.runId, pageNumber, ...(textLayer ? { textLayer } : {}), ...(scanClass ? { scanClass } : {}) });
+  }
+  return rows.sort((a, b) => a.pageNumber - b.pageNumber);
 }
 
 /** Hard ceiling on rows per document so a pathological page count stays cheap. */
