@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
-  DOPPLER_PAGE_FACTS_MAX_BYTES, DOPPLER_PAGE_FACTS_MAX_LINE_BYTES, dopplerPageFactsArtifact, dopplerPageFactsByteBudget, dopplerPageFactsMode,
+  DOPPLER_PAGE_FACTS_MAX_BYTES, DOPPLER_PAGE_FACTS_MAX_LINE_BYTES, dopplerPageFactsArtifact, dopplerPageFactsJsonl, dopplerPageFactsByteBudget, dopplerPageFactsMode,
   parseDopplerPageFacts, readDopplerPageFactsArtifact, type DopplerPageFactsDocument,
 } from "./doppler-page-facts.js";
 import { pageLayoutFactsFromDopplerFacts } from "./doppler-page-facts-layout.js";
@@ -119,7 +119,7 @@ describe("parseDopplerPageFacts: hostile input", () => {
   });
 
   it("refuses oversized input before parsing it, at the per-page budget and the absolute ceiling", () => {
-    expect(dopplerPageFactsByteBudget(1)).toBe(8 * 1024 * 1024 + 12 * 1024);
+    expect(dopplerPageFactsByteBudget(1)).toBe(256 * 1024 + 12 * 1024);
     expect(dopplerPageFactsByteBudget(100_000)).toBe(DOPPLER_PAGE_FACTS_MAX_BYTES);
     const big = fullFixture() + " ".repeat(dopplerPageFactsByteBudget(3));
     const parseSpy = vi.spyOn(JSON, "parse");
@@ -142,6 +142,35 @@ describe("parseDopplerPageFacts: hostile input", () => {
     // U+0131 would become 0x31 ("1") if only its low byte were kept.
     const line = JSON.stringify(textPage(1)).replace("\"page\":1,", "\"page\":\u0131,");
     expect(parse(jsonl([docLine(), line]), 1).pages.size).toBe(0);
+  });
+
+  it("counts blank lines toward the line cap, so padding buys no parse time", () => {
+    expect(parseDopplerPageFacts(JSON.stringify(docLine()) + "\n".repeat(40), { pageCount: 3 })).toEqual({ ok: false, reason: "too-many-lines" });
+  });
+
+  it("reads a typed array's length through the intrinsic getters, not the object's own (council #358 A6)", () => {
+    class Liar extends Uint8Array { override get byteLength() { return 1; } }
+    const big = Liar.from(Buffer.from(fullFixture() + " ".repeat(dopplerPageFactsByteBudget(3))));
+    expect(parseDopplerPageFacts(big, { pageCount: 3 })).toEqual({ ok: false, reason: "oversized" });
+    expect(parseDopplerPageFacts(new Uint16Array(4), { pageCount: 3 })).toEqual({ ok: false, reason: "unsupported-input" });
+    expect(parse(new Uint8Array(Buffer.from(fullFixture()))).pages.size).toBe(3);
+  });
+
+  it("keeps the run line's build stamps only as a version and a hex commit (council #358 A5)", () => {
+    const facts = parse(jsonl([docLine(), textPage(1), runLine({ version: "SSN-078-05-1120", commit: "Acme-salary-250000" })]), 1);
+    expect(facts.run).toEqual({ pagesEmitted: 3, pagesFailed: 0 });
+    expect(JSON.stringify(dopplerPageFactsArtifact("doc-1", facts))).not.toMatch(/SSN|salary/);
+  });
+
+  it("re-serializes only what it kept: canonical lines that parse to the same facts", () => {
+    const facts = parse(jsonl([docLine(), textPage(1, { note: "x" }), { schema: SCHEMA, type: "page", page: 2, error: "failed", parseWarnings: ["page-failed"], unusualFeatures: [] }, scanPage(3), runLine()]));
+    const lines = dopplerPageFactsJsonl(facts);
+    expect(lines).not.toContain("PRODUCER-MARKER");
+    expect(lines).not.toContain("\"note\"");
+    const again = parse(lines);
+    expect(again.doc).toEqual(facts.doc);
+    expect([...again.pages.entries()]).toEqual([...facts.pages.entries()]);
+    expect(again.run).toEqual(facts.run);
   });
 
   it("refuses a stream with more lines than the page count allows", () => {

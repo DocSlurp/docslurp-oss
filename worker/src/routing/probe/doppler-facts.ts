@@ -18,7 +18,8 @@
  * - `textLayerStatus` ← the probe's rule (features.ts textLayerStatus) on these values, then `ocr-layer` for text over a page
  *   image (isOcrLayer) or an all-invisible layer over a full-page image (`invisibleOverFullPageImage`), and `suspect` for an
  *   `ok` layer drawn with `no-tounicode` fonts. `unknown` without the `text` family.
- * - `widthPt`, `heightPt`, `rotation` ← `geometry` (612 × 792, 0 when absent, as the probe's failed row).
+ * - `widthPt`, `heightPt`, `rotation` ← `geometry` (612 × 792, 0 when absent, as the probe's failed row; a side outside
+ *   1..14,400 pt is the default size too, since routing divides by it).
  * - `unusualFeatures` ← page and doc features, renamed to the probe's vocabulary (`javascript-present` → `javascript`,
  *   `embedded-files` → `attachment`); `needsAttention` from the probe's ATTENTION_FEATURES.
  * - `probeMs` ← `factsMs` (0 without timing).
@@ -48,7 +49,10 @@ export function probeRowFromDopplerPage(page: DopplerPageFacts, doc: DopplerDocF
   const img = page.failed ? undefined : page.images;
   const vec = page.failed ? undefined : page.vectors;
   const fonts = page.failed ? undefined : page.fonts;
-  const geo = page.failed ? undefined : page.geometry;
+  // A page side outside 1..14,400 pt is not a size routing can divide by: the probe's default page instead.
+  const rawGeo = page.failed ? undefined : page.geometry;
+  const sized = (n: number) => n >= 1 && n <= 14_400;
+  const geo = rawGeo && sized(rawGeo.widthPt) && sized(rawGeo.heightPt) ? rawGeo : undefined;
   const chars = t?.charCount ?? 0;
   const words = t?.wordCount ?? 0;
   const textUnmapped = Math.min(1, (t?.replacementCharRatio ?? 0) + (t?.privateUseRatio ?? 0));
@@ -97,7 +101,7 @@ export function probeRowFromDopplerPage(page: DopplerPageFacts, doc: DopplerDocF
     smallestFontPt: fonts?.smallestPt ?? null,
     widthPt: geo?.widthPt ?? 612,
     heightPt: geo?.heightPt ?? 792,
-    rotation: geo?.rotation ?? 0,
+    rotation: rawGeo?.rotation ?? 0,
     probeMs: page.factsMs ?? 0,
     unusualFeatures: unusual,
     needsAttention: unusual.some((name) => ATTENTION_FEATURES.has(name)) || unusual.includes("probe-error"),

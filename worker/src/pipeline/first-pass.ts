@@ -376,7 +376,8 @@ export async function runFirstPassBatch(deps: FirstPassBatchDeps, input: { runId
       timings.pages += event.pages;
       // The measured count first: recorded and authorized before anything that bills.
       await recordBatchPageCount(deps.store, state, document, event.pages, event.processedPages);
-      const resentFacts = pageFactsForResend(sent?.pageFacts, event.processedPages ?? event.pages);
+      // Page facts go on as the validated canonical lines (never the guest's raw bytes), to be accepted again when served.
+      const resentFacts = pageFactsForResend(batchFileJob(job, event.index)!);
       const cached: CachedResult = { markdownPath: file.output, result: { ...event.result, ...(sent?.layoutFacts !== undefined ? { layoutFacts: sent.layoutFacts } : {}), ...(resentFacts !== undefined ? { pageFacts: resentFacts } : {}) } };
       if (persistResults) await persistBatchResult(deps.storage, state, document, cached);
       results.set(key(input.runId, file.documentId), cached);

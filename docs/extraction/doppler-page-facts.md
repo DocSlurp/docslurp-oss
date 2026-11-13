@@ -14,15 +14,20 @@ of a batch carries them on its text event). This page describes how the worker t
 The facts come from a VM that read a customer file, so the worker treats every byte as hostile. The reader
 (`worker/src/lib/doppler-page-facts.ts`, `parseDopplerPageFacts`):
 
-- refuses input over a byte budget before parsing it: 8 MiB plus 12 KiB per page, at most 64 MiB; a stream with more lines
-  than the page count needs; and a missing or malformed doc line;
+- refuses input over a byte budget before parsing it: 256 KiB plus 12 KiB per page, at most 64 MiB and never more than
+  the line cap of full-length lines; a stream with more lines (blank ones included) than the page count needs; and a
+  missing or malformed doc line. Without a page count the host measured, facts are dropped;
 - drops a line that is over 64 KiB, not printable ASCII (the contract escapes everything else), not JSON, of another
   schema or type, out of order, outside the host's page count, or unterminated at the end of the stream; a page that
   appears twice is unknown;
 - accepts finite numbers only, ratios in 0..1, non-negative integer counts, closed enums (an unknown enum value is
   dropped, as the contract asks) and bounded lists; a family that fails any check, or whose counts contradict each
   other, is absent (unknown) while the rest of the page stands;
-- never reads `producer` or `creator`, the only document strings in the stream, nor any field it does not know.
+- never reads `producer` or `creator`, the only document strings in the stream, nor any field it does not know; the run
+  line's `version` and `commit` are kept only as a dotted version and a hex commit.
+
+Facts that must be handed on (the first pass's stored batch result) go as canonical lines re-serialized from what the
+reader kept (`dopplerPageFactsJsonl`), never as the guest's bytes.
 
 Page counts for billing and limits stay the host's own (pdfpagecount). The facts' `pageCount` is kept only as
 `reportedPageCount`. Missing or malformed facts never authorize a read or raise a charge.
@@ -38,6 +43,10 @@ Page counts for billing and limits stay the host's own (pdfpagecount). The facts
   `PageLayoutFacts` are stored as `page-layout-facts` with `source: "vm-pdf-facts"`.
 
 An unrecognised value is `off`, logged as an error.
+
+In every mode the facts never size a charge: page-equivalent billing reads page sizes only from layout facts the VM's
+walker measured. `use` does let valid facts steer routing where no walker facts exist, as layout facts do: a page the
+facts show without words can be read by OCR or vision for the project that asked for it, billed by the host's page count.
 
 ## Mappings
 

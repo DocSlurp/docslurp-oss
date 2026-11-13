@@ -248,7 +248,7 @@ describe("the sandboxed PDF route on the worker host", () => {
       const h = await harness({ markdown: "OneTwoThree", ...provider });
       h.state.artifactLedger.record(VISION_ROUTING_VERSION_SLOT, "v3");
       const recordPageEquivalents = vi.fn(async () => 3);
-      (h.state.store as Record<string, unknown>).recordPageEquivalents = recordPageEquivalents;
+      (h.state.store as unknown as Record<string, unknown>).recordPageEquivalents = recordPageEquivalents;
       try {
         await h.stage.run(h.state);
         expect(h.state.documentStage("doc-1", "extract-markdown")?.status).toBe("completed");

@@ -366,7 +366,8 @@ export function acceptSandboxedPdfResult(job: SandboxedPdfJob, result: Sandboxed
   const figures = figureOutcome(job, result.figures);
   if (figures) reportedFigures.set(job, figures);
   if (result.figures !== undefined) result = { ...result, figures: undefined };
-  acceptSandboxedPdfPageFacts(job, result.pageFacts, Number.isSafeInteger(pages) && pages > 0 ? pages : MAX_REPORTED_PAGES);
+  // Bounded by the host's own count only: without one, the facts are dropped rather than bounded by the ceiling.
+  acceptSandboxedPdfPageFacts(job, result.pageFacts, pages);
   if (result.pageFacts !== undefined) result = { ...result, pageFacts: undefined };
   if (result.layoutFacts !== undefined) {
     // Routing evidence, not billing evidence: a malformed payload is dropped (routing then has no layout facts), never repaired.

@@ -19,7 +19,7 @@
 export const DOPPLER_PAGE_FACTS_SCHEMA = "doppler-page-facts/1";
 
 /** Byte budget: a base for the doc and run lines plus a per-page allowance (a full-level page with 32 image items is ~10 KB), under an absolute ceiling. */
-export const DOPPLER_PAGE_FACTS_BASE_BYTES = 8 * 1024 * 1024;
+export const DOPPLER_PAGE_FACTS_BASE_BYTES = 256 * 1024;
 export const DOPPLER_PAGE_FACTS_BYTES_PER_PAGE = 12 * 1024;
 export const DOPPLER_PAGE_FACTS_MAX_BYTES = 64 * 1024 * 1024;
 /** One line (a full-level page with 32 image items and 32 clusters is a few KiB). */
@@ -32,7 +32,12 @@ const LINE_SLACK = 16;
 /** The byte budget for a document of `pageCount` pages (host-measured). */
 export function dopplerPageFactsByteBudget(pageCount: number): number {
   const pages = Number.isSafeInteger(pageCount) && pageCount > 0 ? Math.min(pageCount, DOPPLER_PAGE_FACTS_MAX_PAGES) : 1;
-  return Math.min(DOPPLER_PAGE_FACTS_MAX_BYTES, DOPPLER_PAGE_FACTS_BASE_BYTES + DOPPLER_PAGE_FACTS_BYTES_PER_PAGE * pages);
+  return Math.min(
+    DOPPLER_PAGE_FACTS_MAX_BYTES,
+    DOPPLER_PAGE_FACTS_BASE_BYTES + DOPPLER_PAGE_FACTS_BYTES_PER_PAGE * pages,
+    // No valid stream is longer than its line cap of full-length lines.
+    (pages + 2 + LINE_SLACK) * (DOPPLER_PAGE_FACTS_MAX_LINE_BYTES + 1),
+  );
 }
 
 // ── Vocabularies (closed sets; unknown values are dropped) ──
@@ -266,8 +271,9 @@ export interface DopplerRunFacts {
   pagesEmitted: number;
   pagesFailed: number;
   stop?: "max-pages";
-  version: string;
-  commit: string;
+  /** Doppler's build, kept only as a dotted version and a hex commit (anything else is dropped). */
+  version?: string;
+  commit?: string;
   totalMs?: number;
   peakRssKiB?: number;
 }
@@ -506,7 +512,9 @@ export function validateDopplerPage(value: unknown, pageCount: number): DopplerP
 }
 
 const LANG = /^[A-Za-z]{2,8}(-[A-Za-z0-9]{1,8}){0,4}$/;
-const BUILD = /^[A-Za-z0-9._+-]{0,64}$/;
+/** The run line's build stamps, narrowed so they cannot carry free text: a dotted version and a hex commit. */
+const VERSION = /^[0-9]{1,4}(\.[0-9]{1,4}){0,3}$/;
+const COMMIT = /^[0-9a-f]{0,40}$/;
 
 /** Validate the doc line (or a stored doc summary). `producer` and `creator` are never read. */
 export function validateDopplerDoc(value: unknown): DopplerDocFacts | null {
@@ -562,9 +570,9 @@ export function validateDopplerDoc(value: unknown): DopplerDocFacts | null {
 export function validateDopplerRun(value: unknown): DopplerRunFacts | null {
   return family<DopplerRunFacts>(value, {
     pagesEmitted: count, pagesFailed: count,
-    version: (v) => typeof v === "string" && BUILD.test(v) ? v : undefined,
-    commit: (v) => typeof v === "string" && BUILD.test(v) ? v : undefined,
   }, {
+    version: (v) => typeof v === "string" && VERSION.test(v) ? v : undefined,
+    commit: (v) => typeof v === "string" && COMMIT.test(v) ? v : undefined,
     stop: (v) => oneOf(["max-pages"] as const, v),
     totalMs: (v) => nonNegative(v, 86_400_000),
     peakRssKiB: (v) => count(v),
@@ -572,6 +580,13 @@ export function validateDopplerRun(value: unknown): DopplerRunFacts | null {
 }
 
 // ── Lines ──
+
+const TypedArrayPrototype = Object.getPrototypeOf(Uint8Array.prototype) as object;
+const typedArrayGetter = (name: PropertyKey) => Object.getOwnPropertyDescriptor(TypedArrayPrototype, name)!.get!;
+const TYPED_ARRAY_TAG = typedArrayGetter(Symbol.toStringTag) as (this: unknown) => string | undefined;
+const TYPED_ARRAY_LENGTH = typedArrayGetter("byteLength");
+const TYPED_ARRAY_OFFSET = typedArrayGetter("byteOffset");
+const TYPED_ARRAY_BUFFER = typedArrayGetter("buffer");
 
 /** A line's bytes are printable ASCII only (the contract escapes everything else; `\r` before `\n` is tolerated). */
 function asciiLine(bytes: Uint8Array, start: number, end: number): boolean {
@@ -607,9 +622,11 @@ export function parseDopplerPageFacts(input: unknown, options: { pageCount: numb
     // UTF-8, so a character above U+007E stays non-ASCII bytes the line check refuses (latin1 would keep its low byte only).
     bytes = Buffer.from(input, "utf8");
     if (bytes.byteLength > budget) return { ok: false, reason: "oversized" };
-  } else if (input instanceof Uint8Array) {
-    if (input.byteLength > budget) return { ok: false, reason: "oversized" };
-    bytes = input;
+  } else if (ArrayBuffer.isView(input) && TYPED_ARRAY_TAG.call(input) === "Uint8Array") {
+    // The intrinsic getters, not the object's: a subclass or proxy cannot misreport its length.
+    const length = TYPED_ARRAY_LENGTH.call(input) as number;
+    if (length > budget) return { ok: false, reason: "oversized" };
+    bytes = Buffer.from(TYPED_ARRAY_BUFFER.call(input) as ArrayBuffer, TYPED_ARRAY_OFFSET.call(input) as number, length);
   } else {
     return { ok: false, reason: "unsupported-input" };
   }
@@ -632,8 +649,9 @@ export function parseDopplerPageFacts(input: unknown, options: { pageCount: numb
     const end = newline > start && bytes[newline - 1] === 0x0d ? newline - 1 : newline;
     const lineStart = start;
     start = newline + 1;
-    if (end === lineStart) continue;
+    // Blank lines count too: padding cannot buy parse time beyond the line cap.
     if (++lines > maxLines) return { ok: false, reason: "too-many-lines" };
+    if (end === lineStart) continue;
     const usable = end - lineStart <= DOPPLER_PAGE_FACTS_MAX_LINE_BYTES && asciiLine(bytes, lineStart, end);
     const value = usable ? parseLine(decoder.toString("latin1", lineStart, end)) : null;
 
@@ -674,6 +692,23 @@ export function parseDopplerPageFacts(input: unknown, options: { pageCount: numb
     ok: true,
     facts: { doc, pages, run, summary: { pageCount, pagesKnown: pages.size, pagesFailed: failed, linesDropped, complete: run !== null } },
   };
+}
+
+/**
+ * The validated facts as canonical doppler-page-facts/1 lines (only what the reader kept: no document strings, no unknown
+ * fields), for a caller that must hand facts on to be accepted again (the first pass's stored batch result).
+ */
+export function dopplerPageFactsJsonl(facts: Pick<DopplerPageFactsDocument, "doc" | "pages" | "run">): string {
+  const header = { schema: DOPPLER_PAGE_FACTS_SCHEMA };
+  const { reportedPageCount, ...doc } = facts.doc;
+  const lines: unknown[] = [{ ...header, type: "doc", ...doc, ...(reportedPageCount !== undefined ? { pageCount: reportedPageCount } : {}) }];
+  for (const page of [...facts.pages.values()].sort((a, b) => a.page - b.page)) {
+    const { failed, ...rest } = page;
+    lines.push(failed ? { ...header, type: "page", page: page.page, error: "failed", parseWarnings: page.parseWarnings, unusualFeatures: page.unusualFeatures }
+      : { ...header, type: "page", ...rest });
+  }
+  if (facts.run) lines.push({ ...header, type: "run", ...facts.run });
+  return lines.map((line) => JSON.stringify(line) + "\n").join("");
 }
 
 // ── Stored artifact ──

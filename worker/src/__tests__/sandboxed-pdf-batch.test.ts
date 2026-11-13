@@ -7,7 +7,6 @@ import {
   type SandboxedPdfBatchJob,
 } from "../extractors/sandboxed-pdf-batch.js";
 import { pageFactsForResend, sandboxedPdfPageFacts } from "../extractors/sandboxed-pdf-page-facts.js";
-import { dopplerPageFactsByteBudget } from "../lib/doppler-page-facts.js";
 import { docLine, jsonl, runLine, textPage } from "../test/doppler-page-facts-fixture.js";
 
 function job(files = 3, figures = false): SandboxedPdfBatchJob {
@@ -134,13 +133,23 @@ describe("acceptSandboxedPdfBatchEvent", () => {
     expect(sandboxedPdfPageFacts(batchFileJob(j, 1)!)).toBeUndefined();
   });
 
-  it("keeps raw facts for a resend only within the document's budget and never in off mode (council #358 L3)", () => {
-    const facts = jsonl([docLine(), textPage(1), runLine()]);
-    expect(pageFactsForResend(facts, 1, {})).toBe(facts);
-    expect(pageFactsForResend(Buffer.from(facts), 1, {})).toBe(facts);
-    expect(pageFactsForResend(facts, 1, { DOCSLURP_DOPPLER_PAGE_FACTS: "off" })).toBeUndefined();
-    expect(pageFactsForResend("x".repeat(dopplerPageFactsByteBudget(1) + 1), 1, {})).toBeUndefined();
-    expect(pageFactsForResend({ length: 1 }, 1, {})).toBeUndefined();
+  it("hands facts on only as validated canonical lines, never the guest's raw bytes (council #358 A2, B-L3)", () => {
+    const j = job();
+    acceptSandboxedPdfBatchEvent(j, text(0, 1, { pageFacts: jsonl([docLine({ title: "secret" }), textPage(1, { note: "secret" }), runLine()]) }));
+    const resent = pageFactsForResend(batchFileJob(j, 0)!)!;
+    expect(resent).not.toMatch(/secret|PRODUCER-MARKER|producer/);
+    expect(resent.split("\n").filter(Boolean)).toHaveLength(3);
+    // Refused facts are not handed on at all.
+    acceptSandboxedPdfBatchEvent(j, text(1, 1, { pageFacts: "garbage\n" }));
+    expect(pageFactsForResend(batchFileJob(j, 1)!)).toBeUndefined();
+  });
+
+  it("drops facts when the host has no page count of its own (council #358 A4)", () => {
+    const single = { input: "/a", output: "/b" };
+    for (const pages of [0, Number.NaN, -1]) {
+      acceptSandboxedPdfResult(single, { exitCode: 0, stdout: "", stderr: "", pageFacts: jsonl([docLine(), textPage(1)]) }, pages);
+      expect(sandboxedPdfPageFacts(single)).toBeUndefined();
+    }
   });
 
   it("forgets a job's earlier page facts when a later result for it is refused (council #358 L4)", () => {

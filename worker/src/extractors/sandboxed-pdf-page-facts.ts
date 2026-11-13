@@ -9,7 +9,7 @@
  * - DOCSLURP_DOPPLER_PAGE_FACTS: `off` drops them unread; `store` (default) keeps them for the page-facts artifact; `use`
  *   also lets them stand in for layout facts when the provider returned none.
  */
-import { parseDopplerPageFacts, dopplerPageFactsByteBudget, dopplerPageFactsMode, type DopplerPageFactsDocument } from "../lib/doppler-page-facts.js";
+import { parseDopplerPageFacts, dopplerPageFactsJsonl, dopplerPageFactsMode, type DopplerPageFactsDocument } from "../lib/doppler-page-facts.js";
 import { pageLayoutFactsFromDopplerFacts } from "../lib/doppler-page-facts-layout.js";
 import type { PageLayoutFacts } from "../lib/page-layout-facts.js";
 
@@ -27,7 +27,19 @@ export function acceptSandboxedPdfPageFacts(job: Job, raw: unknown, pages: numbe
   if (raw === undefined) return;
   const mode = dopplerPageFactsMode(env);
   if (mode === "off") return;
-  const parsed = parseDopplerPageFacts(raw, { pageCount: pages });
+  // Without a page count the host measured, facts have nothing to be bounded by: unknown.
+  if (!Number.isSafeInteger(pages) || pages < 1) {
+    console.warn("[vm-pdf] page facts dropped: no host page count");
+    return;
+  }
+  let parsed: ReturnType<typeof parseDopplerPageFacts>;
+  try {
+    parsed = parseDopplerPageFacts(raw, { pageCount: pages });
+  } catch {
+    // The reader does not throw on bytes; an exotic object a plugin built might. Unknown, never a refused run.
+    console.warn("[vm-pdf] page facts refused reason=unreadable; continuing without them");
+    return;
+  }
   if (!parsed.ok) {
     console.warn(`[vm-pdf] page facts refused reason=${parsed.reason}; continuing without them`);
     return;
@@ -56,14 +68,10 @@ export function sandboxedPdfPageFactsLayout(job: Job): Map<number, PageLayoutFac
 }
 
 /**
- * The raw facts in a form that survives JSON storage (the first pass keeps a batch result to serve it again, where it is
- * accepted again): a string within the reader's absolute ceiling, or undefined.
+ * The job's validated facts as canonical lines, for a caller that hands them on to be accepted again (the first pass's
+ * stored batch result): never the guest's raw bytes. Undefined when the job has none (refused, absent, or off).
  */
-export function pageFactsForResend(raw: unknown, pages: number, env: NodeJS.ProcessEnv = process.env): string | undefined {
-  // Nothing is kept that the reader would not accept anyway: off mode, or over this document's budget.
-  if (dopplerPageFactsMode(env) === "off") return undefined;
-  const maxBytes = dopplerPageFactsByteBudget(pages);
-  if (typeof raw === "string") return raw.length <= maxBytes ? raw : undefined;
-  if (raw instanceof Uint8Array && raw.byteLength <= maxBytes) return Buffer.from(raw.buffer, raw.byteOffset, raw.byteLength).toString("latin1");
-  return undefined;
+export function pageFactsForResend(job: Job): string | undefined {
+  const facts = accepted.get(job)?.facts;
+  return facts ? dopplerPageFactsJsonl(facts) : undefined;
 }

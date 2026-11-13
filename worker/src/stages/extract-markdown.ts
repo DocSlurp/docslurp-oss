@@ -675,9 +675,9 @@ export class ExtractMarkdownStage implements Stage {
                   // A VM-extracted PDF's page areas come from its layout facts (the page boxes the walker measured in the VM);
                   // a host-rendered page records its area when rendered. Either way it is recorded and authorized here.
                   const pageEquivalents = await recordExtractedPageEquivalents(state, document, format, winningText, [],
-                    // Billing input: only the walker's own layout facts. Doppler page facts (DOCSLURP_DOPPLER_PAGE_FACTS=use) are
-                    // routing evidence and never size a charge.
-                    { extractor: winningCandidate.label, ...(winningCandidate.layoutFacts && winningCandidate.layoutFactsSource !== "vm-pdf-facts" ? { pageSizesPt: winningCandidate.layoutFacts } : {}) });
+                    // Billing input: only layout facts the VM's walker measured (source vm-pdf, fail closed). Doppler page facts
+                    // (DOCSLURP_DOPPLER_PAGE_FACTS=use) are routing evidence and never size a charge.
+                    { extractor: winningCandidate.label, ...(winningCandidate.layoutFacts && winningCandidate.layoutFactsSource === "vm-pdf" ? { pageSizesPt: winningCandidate.layoutFacts } : {}) });
                   // Office, EPUB and spreadsheet files arrive counted as one page. Count what the extractor read, from its own
                   // output (no other parser runs and the source is not read again), and record it as documents.billing_pages
                   // before features and the completion charge read it (page-base-fee.ts). The page basis (page_count) stays what
