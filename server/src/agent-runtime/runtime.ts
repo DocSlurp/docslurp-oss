@@ -7,6 +7,22 @@ import { NativeOperations } from "./native-operations.js";
 import { createNativeOperationPolicy } from "./operation-policy.js";
 import { createProjectChatExecutor } from "./project-chat-executor.js";
 import { durableRedisUrl } from "./durability-policy.js";
+import { chatTurnTimeBudget } from "../services/chat-turn-deadline.js";
+
+/** Teardown after the drain: native settlement, Redis and pool shutdown. */
+export const NATIVE_CHAT_TEARDOWN_MS=5000;
+/**
+ * How long a stopping executor lets accepted turns run: one full turn deadline
+ * plus room to publish the final result (CHAT_EXECUTOR_DRAIN_MS overrides,
+ * 0 to 900000; 0 restores the immediate interrupt). The process supervisor's
+ * kill timeout must exceed this plus NATIVE_CHAT_TEARDOWN_MS.
+ */
+export function nativeChatDrainMs(env:NodeJS.ProcessEnv=process.env):number {
+  const raw=env.CHAT_EXECUTOR_DRAIN_MS?.trim();
+  const parsed=raw ? Number(raw) : Number.NaN;
+  if(Number.isInteger(parsed)&&parsed>=0&&parsed<=900_000)return parsed;
+  return chatTurnTimeBudget(env).turnDeadlineMs+5_000;
+}
 
 let producer: Promise<Awaited<ReturnType<typeof createRuntime>>> | undefined;
 async function createRuntime(worker: boolean) {
@@ -33,7 +49,12 @@ export async function nativeOperations(resolveActor:()=>Promise<RequestActor|nul
   const host=await nativeChatRuntime();
   return new NativeOperations(host.mastra.backgroundTaskManager!,host.pubsub,createNativeOperationPolicy(resolveActor));
 }
-export async function runNativeChatWorker(signal:AbortSignal) {
+/**
+ * Runs the executor until `signal` aborts, then drains: no new task is claimed,
+ * running turns finish (up to `drainMs`, or until `force` aborts), and only then
+ * does native shutdown abort what is left.
+ */
+export async function runNativeChatWorker(signal:AbortSignal,options:{force?:AbortSignal;drainMs?:number}={}) {
   if(process.env.DOCSLURP_DURABLE_CHAT!=="1")throw new Error("durable_chat_not_enabled");
   const host=await createRuntime(true);
   // Application identity retention only; native manager cleanup owns task/result
@@ -50,6 +71,10 @@ export async function runNativeChatWorker(signal:AbortSignal) {
     await cleanup();
     console.info("[native-chat] worker_ready");
     if(!signal.aborted)await new Promise<void>(resolve=>signal.addEventListener("abort",()=>resolve(),{once:true}));
+    const drainMs=options.drainMs ?? nativeChatDrainMs();
+    console.info(`[native-chat] draining drain_ms=${drainMs}`);
+    const idle=await host.drain(drainMs,options.force);
+    console.info(`[native-chat] drained idle=${idle}`);
   } finally {clearInterval(timer);await host.close();}
 }
 

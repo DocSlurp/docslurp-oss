@@ -262,7 +262,7 @@ const mcpAdapterRoutes = new Hono()
       if (toolId === "chat" && !inChatAgentContext()) {
         const limited = await enforceActorCategoryRateLimit(c, "chat-ai");
         if (limited) return limited;
-        slot = acquireChatSlot(c);
+        slot = await acquireChatSlot(c);
         if (!slot) {
           c.header("Retry-After", "5");
           return adapterError(c, 429, "Too many chat requests in progress for this key; wait for one to finish", "rate_limited");
