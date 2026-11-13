@@ -1,5 +1,7 @@
 import { safeHttpFailure, retryAfterSeconds } from "./http-failure.js";
 import { readSse } from "./sse.js";
+import { searchResultId, type SearchStreamEvent } from "./search-stream.js";
+export * from "./search-stream.js";
 import { assertBrowserSafeApiKey, assertSecureApiOrigin } from "./keys.js";
 export { apiKeyKind, assertBrowserSafeApiKey, assertSecureApiOrigin, PRIVATE_API_KEY_PREFIX, PUBLIC_API_KEY_PREFIX, UnsafeApiKeyError, type ApiKeyKind } from "./keys.js";
 import type { RunProgressSnapshot, ProjectState, OrganizationRecord, OrganizationDetails, OrganizationAccess, OrganizationMembership, OrganizationMember, OrganizationRole, OrganizationApiKey, CreateOrganizationInput, UpdateOrganizationInput, OrganizationInvite, CreateOrganizationInviteInput } from "./state.js";
@@ -623,6 +625,33 @@ export type SearchInput = {
 /** Await the response metadata or iterate its hits; both share one request. */
 export type SearchRequest = Promise<SearchResponse> & AsyncIterable<SearchResult>;
 
+export type SearchStreamInput = Omit<SearchInput, "q"> & {
+  /** One query. Batches and keyword arrays use `search()`. */
+  q: string;
+  /** Ask for per-leg and per-phase timings on `search.phase`, `search.hits` and `search.done`. */
+  stats?: boolean;
+};
+
+export type SearchStreamOptions = RequestOptions & {
+  /**
+   * `auto` (default) streams and falls back to `POST /v1/search` when the stream endpoint is unavailable or drops
+   * before `search.results`. `sse` never falls back. `json` skips the stream and synthesizes the same events from
+   * one JSON response.
+   */
+  transport?: "auto" | "sse" | "json";
+};
+
+/**
+ * The events of one search, then its answer. Iterate it once for `search.started`, `search.phase`, `search.hits`,
+ * `search.results` and `search.done`; `response` resolves with the final body, the same one `search()` returns.
+ * Awaiting `response` without iterating drives the stream itself. Iteration throws on `search.error`.
+ */
+export type SearchStream = AsyncIterable<SearchStreamEvent> & {
+  readonly response: Promise<SearchResponse>;
+  /** Which transport produced the events: `sse`, or `json` after a fallback. Meaningful once events have arrived. */
+  readonly transport: "sse" | "json";
+};
+
 export type SearchUsage = {
   inputTokens: number;
   outputTokens: number;
@@ -881,6 +910,12 @@ export class DocSlurpRunError extends Error {
     this.name = "DocSlurpRunError";
   }
 }
+
+const SEARCH_STREAM_EVENT_TYPES: ReadonlySet<string> = new Set(["search.started", "search.phase", "search.hits", "search.results", "search.error", "search.done"]);
+/** Internal: carries the typed error of a `search.error` event out of the stream loop without triggering the fallback. */
+class SearchStreamFailure { constructor(readonly cause: DocSlurpApiError) {} }
+/** Internal: the stream ended without `search.results`. */
+class SearchStreamDropped extends Error { constructor() { super("DocSlurp search stream ended before search.results"); } }
 
 export class DocSlurpTimeoutError extends Error {
   constructor(message: string, readonly run?: ProjectRun) {
@@ -1743,6 +1778,89 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     return Object.assign(response, { async *[Symbol.asyncIterator]() { yield* (await response).results; } });
   }
 
+
+  /** Events of one streamed search, falling back once to the JSON endpoint (see {@link SearchStreamOptions}). */
+  function searchStream(input: SearchStreamInput, options: SearchStreamOptions = {}): SearchStream {
+    rejectLegacyProjectOptions(input);
+    rejectUncopyableIntakeSelection(input);
+    if (typeof input?.q !== "string") throw new TypeError("searchStream accepts one query string; use search() for batches.");
+    if ("queries" in input) throw new TypeError("searchStream does not accept a queries batch; use search().");
+    const transportMode = options.transport ?? "auto";
+    if (!["auto", "sse", "json"].includes(transportMode)) throw new RangeError("Invalid search stream transport");
+    const { transport: _transport, ...requestOptions } = options;
+    const target = inProject(input);
+    const { stats, ...searchFields } = target;
+    let used: "sse" | "json" = transportMode === "json" ? "json" : "sse";
+    let settle!: { resolve(value: SearchResponse): void; reject(error: unknown): void };
+    const response = new Promise<SearchResponse>((resolve, reject) => { settle = { resolve, reject }; });
+    response.catch(() => {}); // A caller that only iterates never sees an unhandled rejection from this promise.
+    let final: SearchResponse | undefined;
+    const startedAt = Date.now();
+    let seq = 0;
+    let searchId: string | undefined;
+    let startedSent = false;
+
+    async function* events(): AsyncGenerator<SearchStreamEvent> {
+      try {
+        let streamed = false;
+        if (transportMode !== "json") {
+          try {
+            const body = JSON.stringify({ ...searchFields, ...(stats === undefined ? {} : { stats }) });
+            for await (const frame of streamEventsAt("/v1/search/stream", requestOptions, {}, body)) {
+              const event = frame.data as unknown as SearchStreamEvent;
+              if (!event || !SEARCH_STREAM_EVENT_TYPES.has(event.type)) continue;
+              if (typeof event.searchId === "string") searchId = event.searchId;
+              if (typeof event.seq === "number") seq = Math.max(seq, event.seq + 1);
+              if (event.type === "search.started") startedSent = true;
+              if (event.type === "search.error") {
+                const { code, status } = event.error ?? {};
+                const failure = new DocSlurpApiError(publicHttpError(status ?? 500), typeof status === "number" ? status : 500, { error: { code } });
+                throw new SearchStreamFailure(failure);
+              }
+              if (event.type === "search.results") { final = event.response; streamed = true; }
+              yield event;
+              if (event.type === "search.done") break;
+            }
+            if (!streamed) throw new SearchStreamDropped();
+          } catch (error) {
+            if (error instanceof SearchStreamFailure) throw error.cause;
+            // The caller's abort and the deadline are final; an unavailable or dropped stream falls back once.
+            if (options.signal?.aborted || error instanceof DocSlurpTimeoutError) throw error;
+            // Auth, billing, rate-limit and validation refusals are real answers, not a missing endpoint.
+            const unavailable = error instanceof DocSlurpApiError && ([404, 405, 406, 501].includes(error.status) || error.status < 300);
+            if (error instanceof DocSlurpApiError && !unavailable) throw error;
+            if (transportMode === "sse" && !streamed) throw error;
+          }
+          if (streamed) return;
+        }
+        used = "json";
+        const body = await request<SearchResponse>("/v1/search", jsonRequest("POST", searchFields), requestOptions);
+        final = body;
+        const envelope = () => ({ searchId: searchId ??= `json-${body.sessionId}`, seq: seq++, elapsedMs: Date.now() - startedAt });
+        if (!startedSent) yield { ...envelope(), type: "search.started", protocol: 1, projectId: searchFields.project ?? clientProject, cached: false };
+        yield { ...envelope(), type: "search.results", ids: body.results.map(result => searchResultId(result.citation)), response: body };
+        yield { ...envelope(), type: "search.done", sessionId: body.sessionId, resultCount: body.results.length };
+      } catch (error) {
+        settle.reject(error);
+        throw error;
+      } finally {
+        if (final) settle.resolve(final);
+        else settle.reject(new Error("DocSlurp search stream closed before search.results"));
+      }
+    }
+
+    let iterator: AsyncGenerator<SearchStreamEvent> | undefined;
+    const open = () => iterator ??= events();
+    return {
+      [Symbol.asyncIterator]: open,
+      get transport() { return used; },
+      get response() {
+        if (!iterator) void (async () => { try { for await (const _event of open()) { /* drain */ } } catch { /* surfaced through response */ } })();
+        return response;
+      },
+    };
+  }
+
   function upload(input: Array<Blob | File | UploadFileInput>, options?: UploadOptions): Promise<UploadResponse>;
   function upload(input: UploadUrlsInput, options?: UploadOptions): Promise<UploadResponse>;
   function upload(input: UploadInput, options?: UploadOptions): Promise<UploadResponse>;
@@ -2442,6 +2560,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     },
 
     search,
+    searchStream,
 
     upload,
 

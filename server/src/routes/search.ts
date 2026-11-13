@@ -1,9 +1,9 @@
 import { chatOperationRoutes, durableChatLaunchHandler } from "./chat-operations.js";
 import { GeoSearchError } from "../search/geo-scope.js";
-import { geoPredicateSchema } from "@docslurp/shared";
+import { geoPredicateSchema, SEARCH_STREAM_PROTOCOL, searchResultId } from "@docslurp/shared";
 import { reportPublicError } from "../lib/public-errors.js";
 import { chatSessionForRequest, CHAT_SESSION_TOKEN_HEADER } from "../lib/chat-session-tokens.js";
-import { apiErrorResponse, nativeApiErrors, withApiErrorDetails } from "../lib/api-error.js";
+import { apiErrorResponse, envelopeForError, nativeApiErrors, withApiErrorDetails } from "../lib/api-error.js";
 import { Hono, type Context } from "hono";
 import { batchSearchInputSchema, searchFormError, searchInputSchema, searchOptions, searchQueryText, projectChatRequestSchema, type SearchInput } from "../lib/search-input.js";
 import { streamSSE } from "hono/streaming";
@@ -44,6 +44,8 @@ import type { SearchAccessScope } from "../search/access-scope.js";
 export { clearSearchResponseCacheForTests } from "../search/response-cache.js";
 import { SearchCapacityError, withSearchAdmissionGroup } from "../search/search-limiter.js";
 import { SearchModeLimitError } from "../search/search-mode-limits.js";
+import { withSearchStreamSink, type SearchStreamSink } from "../search/stream-events.js";
+import { withSearchSignal } from "../search/query-bounds.js";
 import { awaitSearchSessionWrites } from "../search/session.js";
 import { randomUUID } from "node:crypto";
 import { env } from "../config.js";
@@ -440,7 +442,7 @@ function requestApiKeyId(c: Context): string | null | undefined {
  * API key's scopes first; the cache never serves a request that has not passed them.
  * `memo` shares access and privacy lookups across the searches of one request or batch.
  */
-async function retrieve(body: SearchInput & { projectId: string }, scope: SearchAccessScope, userId: string, actorApiKeyId: string | null | undefined, deferred: DeferredRequestContext | undefined, memo: CacheScopeMemo): Promise<SearchData> {
+async function lookupRetrieve(body: SearchInput & { projectId: string }, scope: SearchAccessScope, userId: string, actorApiKeyId: string | null | undefined, deferred: DeferredRequestContext | undefined, memo: CacheScopeMemo): Promise<SearchLookup> {
   // A capability changes the policy a cached answer was produced under: never share across it.
   const ttl = deferred?.policy || body.geo ? 0 : searchResponseCacheTtlMs();
   const apiKeyId = cacheableApiKeyId(actorApiKeyId, currentRequestApiKeyId());
@@ -450,94 +452,297 @@ async function retrieve(body: SearchInput & { projectId: string }, scope: Search
     : null;
   const cached = ticket ? readCachedResponse(ticket, ttl) as SearchData | undefined : undefined;
   if (cached) {
-    return {
+    return { hit: {
       ...cached,
       usage: { ...cached.usage, inputTokens: 0, outputTokens: 0, totalTokens: 0, costCents: 0, costSource: "none" },
       timings: { cachedMs: 0, totalMs: 0 },
+    }, run: async () => { throw new Error("cached search has nothing to run"); } };
+  }
+  return { run: async () => {
+    const search = () => hybridSearch(searchQueryText(body.q), userId, searchOptions(body), scope);
+    const data = publicSearchResponse(await (deferred ? withDeferredContext(deferred, search) : search()));
+    // A response with pages still materializing must not be replayed as final.
+    if (ticket && data.availability?.status === "complete" && !(data.deferred && data.deferred.pendingPages > 0)) {
+      await storeResponse(ticket, data, data.availability?.scope?.projectId);
+    }
+    return data;
+  } };
+}
+
+async function retrieve(body: SearchInput & { projectId: string }, scope: SearchAccessScope, userId: string, actorApiKeyId: string | null | undefined, deferred: DeferredRequestContext | undefined, memo: CacheScopeMemo): Promise<SearchData> {
+  const lookup = await lookupRetrieve(body, scope, userId, actorApiKeyId, deferred, memo);
+  return lookup.hit ?? lookup.run();
+}
+
+/** A single-query search that passed every up-front check; `GET`/`POST /v1/search` and the stream run it identically. */
+interface PreparedSearch {
+  userId: string;
+  projectId: string;
+  /** Hits per leg event: the request's effective `limit`. */
+  limit: number;
+  deferred: DeferredRequestContext;
+  /** The response-cache read (POST only: GET never uses the cache). A hit is a ready body; otherwise `run` searches. */
+  lookup(): Promise<SearchLookup>;
+}
+type SearchLookup = { hit?: SearchData; run: () => Promise<SearchData> };
+const DEFAULT_SEARCH_LIMIT = 20;
+
+/** GET input checks and project authorization, answered before anything runs. */
+async function prepareGetSearch(c: Context): Promise<PreparedSearch | Response> {
+  const query = c.req.query("q");
+  if (!query) {
+    return apiErrorResponse(c, 400, "invalid_request", "Missing query parameter 'q'");
+  }
+
+  const userId = c.get("sessionUser")?.id;
+  if (!userId) {
+    return apiErrorResponse(c, 401, "unauthorized", "Missing session");
+  }
+  const projectId = await resolveActorProjectId(
+    getRequestActor(c),
+    c.req.query("project"),
+    c.req.query("orgId"),
+  );
+  const authorized = await authorizeProject(c, projectId);
+  if (authorized instanceof Response) return authorized;
+  const runId = c.req.query("runId");
+  const limit = c.req.query("limit");
+  const variant = c.req.query("variant");
+
+  // Retrieval flags are tri-state: omitted flags fall back to the project's
+  // Retrieval Controls (provider-backed enhancements default off there).
+  let flags: ReturnType<typeof parseRetrievalQueryFlags>;
+  try {
+    flags = parseRetrievalQueryFlags((name) => c.req.query(name));
+  } catch (error) {
+    if (error instanceof InvalidRetrievalQueryError) return apiErrorResponse(c, 400, "invalid_request", error.message);
+    throw error;
+  }
+
+  const filters = parseFilters({
+    documentId: c.req.query("documentId") ?? "",
+    runId: runId ?? "",
+    projectId,
+    filenameContains: c.req.query("filenameContains") ?? "",
+    mimeTypes: c.req.query("mimeTypes") ?? "",
+    tags: c.req.query("tags") ?? "",
+    pageFrom: c.req.query("pageFrom") ?? "",
+    pageTo: c.req.query("pageTo") ?? "",
+    language: c.req.query("language") ?? "",
+    heading: c.req.query("heading") ?? "",
+    dateFrom: c.req.query("dateFrom") ?? "",
+    dateTo: c.req.query("dateTo") ?? "",
+  });
+
+  const rawGeo = c.req.query("geo");
+  if (rawGeo !== undefined) {
+    try {
+      if (rawGeo.length > 262144) throw new Error("too large");
+      filters.geo = geoPredicateSchema.parse(JSON.parse(rawGeo));
+    } catch { return apiErrorResponse(c,400,"invalid_request","Invalid spatial predicate"); }
+  }
+
+  const deferred = await deferredRequestContext(c, projectId);
+  if ("response" in deferred) return deferred.response;
+  const effectiveLimit = clampSearchLimit(limit ? Number(limit) : undefined);
+  return { userId, projectId, limit: effectiveLimit ?? DEFAULT_SEARCH_LIMIT, deferred: deferred.context,
+    lookup: async () => ({ run: async () => publicSearchResponse(await withDeferredContext(deferred.context, () => hybridSearch(query, userId, {
+      runId: runId || undefined,
+      limit: effectiveLimit,
+      ...flags,
+      filters,
+      variant: variant || undefined,
+    }, authorized.scope))) }) };
+}
+
+/** POST input checks (already-parsed single-query body) and project authorization, answered before anything runs. */
+async function preparePostSearch(c: Context, input: SearchInput): Promise<PreparedSearch | Response> {
+  const userId = c.get("sessionUser")?.id;
+  if (!userId) return apiErrorResponse(c, 401, "unauthorized", "Missing session");
+  const projectId = await resolveActorProjectId(getRequestActor(c), input.project, input.orgId);
+  const authorized = await authorizeProject(c, projectId);
+  if (authorized instanceof Response) return authorized;
+  const deferred = await deferredRequestContext(c, projectId);
+  if ("response" in deferred) return deferred.response;
+  // The route's access read stands in for the response cache's ticket lookup (same query, same request).
+  const memo = createCacheScopeMemo();
+  primeCacheScope(memo, userId, authorized.access);
+  return { userId, projectId, limit: input.limit ?? DEFAULT_SEARCH_LIMIT, deferred: deferred.context,
+    lookup: () => lookupRetrieve({ ...input, projectId }, authorized.scope, userId, requestApiKeyId(c), deferred.context, memo) };
+}
+
+/** An expected failure as the JSON response it always was; anything else is rethrown for the error envelope. */
+function expectedFailureResponse(c: Context, error: unknown): Response {
+  const failure = expectedSearchFailure(error);
+  if (failure) return apiErrorResponse(c, failure.status, failure.apiCode, failure.message);
+  throw error;
+}
+
+/** `stats` as a query value: absent is false, `true`/`1` and `false`/`0` are accepted, anything else is invalid. */
+function parseStatsFlag(value: unknown): boolean | undefined {
+  if (value === undefined) return false;
+  if (typeof value === "boolean") return value;
+  if (value === "true" || value === "1") return true;
+  if (value === "false" || value === "0") return false;
+  return undefined;
+}
+
+/**
+ * `GET`/`POST /v1/search/stream`: the same search as `GET`/`POST /v1/search`,
+ * as server-sent events (contract: packages/shared/src/search-stream.ts).
+ *
+ * Every refusal the JSON endpoint makes happens before the stream opens, with
+ * the same status and body. The search starts before the stream does and the
+ * stream opens at its first event (or when the search settles, whichever is
+ * first), so a refusal the search itself raises before reporting anything
+ * (a mode limit, no capacity, a bad scope) is still a real status, never a
+ * 200 stream. Only a failure after the first event becomes `search.error`.
+ */
+async function searchStreamHandler(c: Context) {
+  const fromBody = c.req.method === "POST";
+  let statsValue: unknown;
+  let prepared: PreparedSearch | Response;
+  if (fromBody) {
+    const input = await c.req.json().catch(() => null);
+    if (!input || typeof input !== "object" || Array.isArray(input)) return apiErrorResponse(c, 400, "invalid_request", "Invalid search input");
+    if ("queries" in input) return apiErrorResponse(c, 400, "invalid_request", "Streaming search takes one query (q); use POST /v1/search for a queries batch.");
+    const formError = searchFormError(input as Record<string, unknown>);
+    if (formError) return apiErrorResponse(c, 400, "invalid_request", formError);
+    const { stats, ...rest } = input as Record<string, unknown>;
+    statsValue = stats;
+    const parsed = searchInputSchema.safeParse(rest);
+    if (!parsed.success) return apiErrorResponse(c, 400, "invalid_request", "Invalid search input", { issues: parsed.error.issues });
+    if (parseStatsFlag(statsValue) === undefined) return apiErrorResponse(c, 400, "invalid_request", "Invalid search input: stats must be a boolean");
+    prepared = await preparePostSearch(c, parsed.data);
+  } else {
+    statsValue = c.req.query("stats");
+    if (parseStatsFlag(statsValue) === undefined) return apiErrorResponse(c, 400, "invalid_request", "Invalid stats: expected true or false");
+    prepared = await prepareGetSearch(c);
+  }
+  if (prepared instanceof Response) return prepared;
+  const stats = parseStatsFlag(statsValue) === true;
+  const { projectId, deferred } = prepared;
+
+  let lookup: SearchLookup;
+  try {
+    lookup = await prepared.lookup();
+  } catch (error) {
+    return expectedFailureResponse(c, error);
+  }
+
+  const searchId = randomUUID();
+  const startedAt = performance.now();
+  let seq = 0;
+  const stamp = <T extends object>(event: T) => ({ ...event, searchId, seq: seq++, elapsedMs: Math.round(performance.now() - startedAt) });
+  const started = stamp({ type: "search.started" as const, protocol: SEARCH_STREAM_PROTOCOL, projectId, cached: Boolean(lookup.hit) });
+  c.header("Cache-Control", "no-cache");
+  c.header("X-Accel-Buffering", "no");
+
+  type Outcome = { ok: true; data: SearchData } | { ok: false; error: unknown };
+  const abort = new AbortController();
+  // Events stamped before the stream is attached wait here; after it, each is written in order.
+  const buffered: Array<Record<string, unknown> & { type: string; seq: number }> = [];
+  let writeEvent: ((event: Record<string, unknown> & { type: string; seq: number }) => void) | null = null;
+  let aborted = false;
+  let opened!: () => void;
+  const firstEvent = new Promise<void>((resolve) => { opened = resolve; });
+
+  let outcome: Promise<Outcome>;
+  if (lookup.hit) {
+    outcome = Promise.resolve({ ok: true, data: lookup.hit });
+  } else {
+    const signal = AbortSignal.any([c.req.raw.signal, abort.signal]);
+    deferred.signal = signal;
+    const sink: SearchStreamSink = {
+      stats,
+      hitLimit: prepared.limit,
+      emit(body) {
+        if (aborted) return;
+        const event = stamp(body) as Record<string, unknown> & { type: string; seq: number };
+        if (writeEvent) writeEvent(event);
+        else { buffered.push(event); opened(); }
+      },
     };
+    outcome = withSearchStreamSink(sink, () => withSearchSignal(signal, lookup.run))
+      .then((data): Outcome => ({ ok: true, data }), (error: unknown): Outcome => ({ ok: false, error }));
   }
-  const search = () => hybridSearch(searchQueryText(body.q), userId, searchOptions(body), scope);
-  const data = publicSearchResponse(await (deferred ? withDeferredContext(deferred, search) : search()));
-  // A response with pages still materializing must not be replayed as final.
-  if (ticket && data.availability?.status === "complete" && !(data.deferred && data.deferred.pendingPages > 0)) {
-    await storeResponse(ticket, data, data.availability?.scope?.projectId);
+
+  if (!lookup.hit) {
+    // Opens at the first event, or once the search has settled. A failure before any event is the JSON endpoint's refusal.
+    const first = await Promise.race([firstEvent.then(() => null), outcome]);
+    if (first && !first.ok) {
+      abort.abort();
+      return expectedFailureResponse(c, first.error);
+    }
   }
-  return data;
+
+  return streamSSE(c, async (stream) => {
+    stream.onAbort(() => { aborted = true; abort.abort(); });
+    let chain: Promise<unknown> = Promise.resolve();
+    const send = (event: { type: string; seq: number }) => {
+      chain = chain
+        .then(() => aborted ? undefined : stream.writeSSE({ event: event.type, id: String(event.seq), data: JSON.stringify(event) }))
+        .catch(() => undefined);
+    };
+    send(started);
+    for (const event of buffered.splice(0)) send(event);
+    writeEvent = send;
+    const result = await outcome;
+    // Leg events first, in emission order, then the authoritative list.
+    await chain;
+    writeEvent = null;
+    if (aborted) return;
+    if (!result.ok) {
+      send(stamp({ type: "search.error" as const, error: await publicStreamError(c, result.error) }));
+      await chain;
+      return;
+    }
+    const data = result.data;
+    send(stamp({ type: "search.results" as const, ids: data.results.map((item) => searchResultId(item.citation)), response: data }));
+    const timings = stats && data.timings && typeof data.timings === "object"
+      ? Object.fromEntries(Object.entries(data.timings as Record<string, unknown>).filter((entry): entry is [string, number] => typeof entry[1] === "number"))
+      : undefined;
+    send(stamp({ type: "search.done" as const, sessionId: data.sessionId, resultCount: data.results.length, ...(timings ? { timings } : {}) }));
+    await chain;
+  });
+}
+
+/**
+ * The code, public message and status the JSON endpoint would answer with for
+ * this error. Raw error text goes to telemetry only.
+ */
+async function publicStreamError(c: Context, error: unknown): Promise<{ code: string; message: string; status: number }> {
+  const expected = expectedSearchFailure(error);
+  let response: Response;
+  if (expected) {
+    response = apiErrorResponse(c, expected.status, expected.apiCode, expected.message);
+  } else {
+    // Load shedding and disconnects are expected outcomes: keep them out of error reports (as searchError does).
+    const quiet = error instanceof SearchCapacityError || error instanceof SearchModeLimitError || (error instanceof Error && error.name === "AbortError");
+    if (!quiet) reportPublicError(error);
+    const status = error instanceof SearchCapacityError ? 503 : error instanceof SearchModeLimitError ? 429
+      : (error as { statusCode?: unknown } | null)?.statusCode;
+    response = envelopeForError(c, error, typeof status === "number" ? status : 500);
+  }
+  const body = await response.clone().json().catch(() => null) as { error?: { code?: unknown; message?: unknown } } | null;
+  return { code: typeof body?.error?.code === "string" ? body.error.code : "internal_error",
+    message: typeof body?.error?.message === "string" ? body.error.message : PUBLIC_ERROR_MESSAGES.unexpected, status: response.status };
 }
 
 export const searchRoutes = new Hono()
   .use("*", nativeApiErrors)
   .get("/", async (c) => {
-    const query = c.req.query("q");
-    if (!query) {
-      return apiErrorResponse(c, 400, "invalid_request", "Missing query parameter 'q'");
-    }
-
-    const userId = c.get("sessionUser")?.id;
-    if (!userId) {
-      return apiErrorResponse(c, 401, "unauthorized", "Missing session");
-    }
-    const projectId = await resolveActorProjectId(
-      getRequestActor(c),
-      c.req.query("project"),
-      c.req.query("orgId"),
-    );
-    const authorized = await authorizeProject(c, projectId);
-    if (authorized instanceof Response) return authorized;
-    const runId = c.req.query("runId");
-    const limit = c.req.query("limit");
-    const variant = c.req.query("variant");
-
-    // Retrieval flags are tri-state: omitted flags fall back to the project's
-    // Retrieval Controls (provider-backed enhancements default off there).
-    let flags: ReturnType<typeof parseRetrievalQueryFlags>;
+    const prepared = await prepareGetSearch(c);
+    if (prepared instanceof Response) return prepared;
     try {
-      flags = parseRetrievalQueryFlags((name) => c.req.query(name));
+      return c.json(await (await prepared.lookup()).run());
     } catch (error) {
-      if (error instanceof InvalidRetrievalQueryError) return apiErrorResponse(c, 400, "invalid_request", error.message);
-      throw error;
-    }
-
-    const filters = parseFilters({
-      documentId: c.req.query("documentId") ?? "",
-      runId: runId ?? "",
-      projectId,
-      filenameContains: c.req.query("filenameContains") ?? "",
-      mimeTypes: c.req.query("mimeTypes") ?? "",
-      tags: c.req.query("tags") ?? "",
-      pageFrom: c.req.query("pageFrom") ?? "",
-      pageTo: c.req.query("pageTo") ?? "",
-      language: c.req.query("language") ?? "",
-      heading: c.req.query("heading") ?? "",
-      dateFrom: c.req.query("dateFrom") ?? "",
-      dateTo: c.req.query("dateTo") ?? "",
-    });
-
-    const rawGeo = c.req.query("geo");
-    if (rawGeo !== undefined) {
-      try {
-        if (rawGeo.length > 262144) throw new Error("too large");
-        filters.geo = geoPredicateSchema.parse(JSON.parse(rawGeo));
-      } catch { return apiErrorResponse(c,400,"invalid_request","Invalid spatial predicate"); }
-    }
-
-    const deferred = await deferredRequestContext(c, projectId);
-    if ("response" in deferred) return deferred.response;
-    try {
-      const response = await withDeferredContext(deferred.context, () => hybridSearch(query, userId, {
-        runId: runId || undefined,
-        limit: clampSearchLimit(limit ? Number(limit) : undefined),
-        ...flags,
-        filters,
-        variant: variant || undefined,
-      }, authorized.scope));
-      return c.json(publicSearchResponse(response));
-    } catch (error) {
-      const failure = expectedSearchFailure(error);
-      if (failure) return apiErrorResponse(c, failure.status, failure.apiCode, failure.message);
-      throw error;
+      return expectedFailureResponse(c, error);
     }
   })
+  .get("/stream", searchStreamHandler)
+  // The query travels in the body, not the URL, where proxies, logs and history keep it.
+  .post("/stream", searchStreamHandler)
   .post("/", async (c) => {
     const input = await c.req.json().catch(() => null);
     // One query (`q`) or up to 20 (`queries`): the same endpoint serves both, never mixed.
@@ -554,22 +759,13 @@ export const searchRoutes = new Hono()
     if (!parsed.success) {
       return apiErrorResponse(c, 400, "invalid_request", "Invalid search input", { issues: parsed.error.issues });
     }
-    const userId = c.get("sessionUser")?.id;
-    if (!userId) return apiErrorResponse(c, 401, "unauthorized", "Missing session");
-    const projectId = await resolveActorProjectId(getRequestActor(c), parsed.data.project, parsed.data.orgId);
-    const authorized = await authorizeProject(c, projectId);
-    if (authorized instanceof Response) return authorized;
-    const deferred = await deferredRequestContext(c, projectId);
-    if ("response" in deferred) return deferred.response;
-    // The route's access read stands in for the response cache's ticket lookup (same query, same request).
-    const memo = createCacheScopeMemo();
-    primeCacheScope(memo, userId, authorized.access);
+    const prepared = await preparePostSearch(c, parsed.data);
+    if (prepared instanceof Response) return prepared;
     try {
-      return c.json(await retrieve({ ...parsed.data, projectId }, authorized.scope, userId, requestApiKeyId(c), deferred.context, memo));
+      const lookup = await prepared.lookup();
+      return c.json(lookup.hit ?? await lookup.run());
     } catch (error) {
-      const failure = expectedSearchFailure(error);
-      if (failure) return apiErrorResponse(c, failure.status, failure.apiCode, failure.message);
-      throw error;
+      return expectedFailureResponse(c, error);
     }
   })
   .post("/aggregate", async (c) => {

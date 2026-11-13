@@ -159,6 +159,7 @@ Run `docslurp` with no arguments, or `docslurp --help`, for built-in usage.
 | `status <run-id>` | Print progress for a run | `--watch` |
 | `runs` | List the runs you can access | None |
 | `search <query>` | Retrieve cited passages from a project | `--project`, `--min-score <0..1>` (relevance floor; `0` turns it off), `--json` or `--context` |
+| `search <query> --stream` | Print each retrieval leg's hits as it lands (stderr), then the final ranking (stdout) | `--stats` (per-leg milliseconds), `--json` (one event per line); falls back to the plain JSON search if streaming is unavailable |
 | `search --queries-file <file>` | Run up to 20 questions in one request | `--project`, `--concurrency`, `--json` or `--context` |
 | `chat <question>` | Write a cited answer | `--project`, `--session`, `--json` |
 | `mcp-server` (alias `mcp`) | Serve DocSlurp agent tools over stdio | `--api-url`, `--api-key` |

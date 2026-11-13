@@ -92,7 +92,7 @@ function usage(): void {
   docslurp jobs watch <jobId> [--timeout <seconds>]
   docslurp status <runId> [--api-url <url>] [--watch] [--timeout <seconds>]
   docslurp runs [--limit <1-100>] [--cursor <nextCursor>] [--api-url <url>]
-  docslurp search <query> [--project <id|slug|name>] [--min-score <0..1>] [--mode <keyword|hybrid|deep>] [--json | --context]
+  docslurp search <query> [--project <id|slug|name>] [--min-score <0..1>] [--mode <keyword|hybrid|deep>] [--stream [--stats]] [--json | --context]
   docslurp search --queries-file <queries.json> [--project <id|slug|name>] [--concurrency <1..4>] [--json | --context]
   docslurp chat <question> [--project <id|slug|name>] [--session <id>] [--tier fastest|balanced|smart] [--reasoning none|minimal|low|medium|high] [--json]
   docslurp mcp-server [--api-url <url>] [--api-key <key>]   (alias: docslurp mcp)
@@ -298,7 +298,7 @@ function parseCliArgs(argv: string[]) {
   while (i < argv.length) {
     const arg = argv[i];
     if (/^--(?:workspace(?:-id|-name)?|new-workspace)(?:=|$)/.test(arg ?? "")) throw new Error("Legacy workspace flags are no longer supported; use --project or --new-project.");
-    if (arg === "--watch" || arg === "--json" || arg === "--context" || arg === "--estimate" || arg === "--device" || arg === "--force") {
+    if (arg === "--watch" || arg === "--json" || arg === "--context" || arg === "--estimate" || arg === "--device" || arg === "--force" || arg === "--stream" || arg === "--stats") {
       flags[arg.slice(2)] = true;
       i++;
     } else if (arg === "--no-browser") {
@@ -1199,11 +1199,132 @@ async function searchCommand(query: string, flags: Record<string, string | boole
   if (minScore !== undefined && !(minScore >= 0 && minScore <= 1)) throw new Error("--min-score must be a number from 0 to 1.");
   const mode = typeof flags.mode === "string" ? flags.mode.trim() : undefined;
   if (flags.mode !== undefined && !["keyword", "hybrid", "deep"].includes(mode ?? "")) throw new Error("--mode must be keyword, hybrid or deep.");
+  if (flags.stats && !flags.stream) throw new Error("--stats requires --stream.");
+  if (flags.stream) {
+    await searchStreamCommand({ q: query, ...(project ? { project } : {}), ...(minScore === undefined ? {} : { minScore }), ...(mode ? { mode } : {}), ...(flags.stats ? { stats: true } : {}) }, flags);
+    return;
+  }
   const params = new URLSearchParams({ q: query, ...(project ? { project } : {}), ...(minScore === undefined ? {} : { minScore: String(minScore) }), ...(mode ? { mode } : {}) });
   const response = await apiFetch(`/v1/search?${params.toString()}`, flags);
   if (!response.ok) throw await responseFailure(response);
   const data = await response.json() as CliSearchResponse;
   if (flags.json) console.log(JSON.stringify(data)); else printSearch(data, flags);
+}
+
+
+type CliSearchStreamEvent = { type: string; searchId?: string; seq?: number; elapsedMs?: number; [key: string]: unknown };
+
+/** Complete SSE frames from a byte stream: handles CRLF, comments, split chunks and multi-line data. */
+async function* sseFrames(body: AsyncIterable<Uint8Array>): AsyncGenerator<{ event: string; data: string }> {
+  const decoder = new TextDecoder();
+  let buffer = "";
+  const frame = (block: string) => {
+    let event = "message";
+    const data: string[] = [];
+    for (const line of block.split("\n")) {
+      if (!line || line.startsWith(":")) continue;
+      const colon = line.indexOf(":");
+      const field = colon < 0 ? line : line.slice(0, colon);
+      const value = colon < 0 ? "" : line.slice(colon + 1).replace(/^ /, "");
+      if (field === "event") event = value;
+      else if (field === "data") data.push(value);
+    }
+    return data.length ? { event, data: data.join("\n") } : null;
+  };
+  for await (const chunk of body) {
+    buffer = (buffer + decoder.decode(chunk, { stream: true })).replace(/\r\n?/g, (m, offset, whole) => (m === "\r" && offset === whole.length - 1 ? m : "\n"));
+    if (buffer.length > 1_048_576) throw new Error("DocSlurp SSE frame exceeds 1 MiB");
+    let split: number;
+    while ((split = buffer.indexOf("\n\n")) >= 0) {
+      const parsed = frame(buffer.slice(0, split));
+      buffer = buffer.slice(split + 2);
+      if (parsed) yield parsed;
+    }
+  }
+  const rest = frame(buffer.replace(/\r/g, "\n"));
+  if (rest) yield rest;
+}
+
+/**
+ * `search --stream`: prints each retrieval leg's hits to stderr as they land (completion order, provisional), then the final ranked list
+ * to stdout exactly as without `--stream`. With `--json` stdout is one event per line (NDJSON). Falls back to `GET /v1/search` when the
+ * stream endpoint is unavailable or the connection drops before `search.results`.
+ */
+async function searchStreamCommand(input: { q: string; project?: string; minScore?: number; mode?: string; stats?: boolean }, flags: Record<string, string | boolean>): Promise<void> {
+  const json = flags.json === true;
+  const started = Date.now();
+  let final: CliSearchResponse | undefined;
+  let seq = 0;
+  const emit = (event: CliSearchStreamEvent) => { if (json) console.log(JSON.stringify(event)); };
+  const note = (line: string) => { if (!json) console.error(line); };
+  const unavailable = (response: Response) => [404, 405, 406, 501].includes(response.status) || (response.ok && !response.headers.get("content-type")?.includes("text/event-stream"));
+  let fallbackReason: string | undefined;
+  {
+    const response = await apiFetch("/v1/search/stream", flags, {
+      method: "POST", headers: { "Content-Type": "application/json", Accept: "text/event-stream" }, body: JSON.stringify(input),
+    }, Number(flags.timeout ?? 120) * 1000);
+    if (unavailable(response)) {
+      await response.body?.cancel().catch(() => undefined);
+      fallbackReason = "stream endpoint unavailable";
+    } else if (!response.ok) throw await responseFailure(response);
+    else if (!response.body) fallbackReason = "stream endpoint unavailable";
+    else {
+      try {
+        for await (const frame of sseFrames(response.body as unknown as AsyncIterable<Uint8Array>)) {
+          let event: CliSearchStreamEvent;
+          try { event = JSON.parse(frame.data); } catch { continue; }
+          if (!event || typeof event.type !== "string") continue;
+          if (typeof event.seq === "number") seq = Math.max(seq, event.seq + 1);
+          if (event.type === "search.error") {
+            const error = event.error as { code?: string; status?: number } | undefined;
+            const status = typeof error?.status === "number" ? error.status : 500;
+            emit(event);
+            throw new CliApiError(status, safeHttpFailure(status, { error: { code: error?.code } }));
+          }
+          if (event.type === "search.hits") {
+            emit(event);
+            const hits = (event.hits as Array<{ legRank: number; result: CliSearchResponse["results"][number] }>) ?? [];
+            const stats = event.stats as { ms?: number; candidates?: number; cacheHit?: boolean; timedOut?: boolean } | undefined;
+            const detail = flags.stats && stats ? ` ${stats.ms}ms${stats.candidates === undefined ? "" : `, ${stats.candidates} candidates`}${stats.cacheHit ? ", cached" : ""}${stats.timedOut ? ", timed out" : ""}` : "";
+            note(`[${String(event.leg)}] ${hits.length} hit${hits.length === 1 ? "" : "s"}${event.truncated ? "+" : ""}${detail}`);
+            for (const hit of hits) {
+              const page = hit.result.citation.pageNumbers?.length ? hit.result.citation.pageNumbers.join(", ") : hit.result.citation.pageNumber ?? "-";
+              note(`  ${String(event.leg)} #${hit.legRank + 1} ${hit.result.citation.filename} (p.${page}) ${hit.result.text.slice(0, 100).replace(/\n/g, " ")}`);
+            }
+          } else if (event.type === "search.phase") {
+            emit(event);
+            const stats = event.stats as { ms?: number } | undefined;
+            if (flags.stats) note(`[${String(event.phase)}] ${stats?.ms}ms`);
+          } else if (event.type === "search.results") {
+            emit(event);
+            final = (event.response as CliSearchResponse);
+          } else if (event.type === "search.started" || event.type === "search.done") {
+            emit(event);
+            if (event.type === "search.done" && flags.stats && event.timings) note(`timings: ${Object.entries(event.timings as Record<string, number>).map(([name, ms]) => `${name} ${ms}ms`).join(", ")}`);
+          }
+        }
+        if (!final) fallbackReason = "stream ended before the final results";
+      } catch (error) {
+        if (error instanceof CliApiError || final) throw error;
+        fallbackReason = "stream dropped before the final results";
+      }
+    }
+  }
+  if (!final) {
+    note(`Falling back to the JSON search (${fallbackReason ?? "stream unavailable"}).`);
+    const params = new URLSearchParams({ q: input.q, ...(input.project ? { project: input.project } : {}), ...(input.minScore === undefined ? {} : { minScore: String(input.minScore) }), ...(input.mode ? { mode: input.mode } : {}) });
+    const response = await apiFetch(`/v1/search?${params.toString()}`, flags);
+    if (!response.ok) throw await responseFailure(response);
+    final = await response.json() as CliSearchResponse;
+    const sessionId = String((final as { sessionId?: unknown }).sessionId ?? "");
+    const envelope = () => ({ searchId: `json-${sessionId}`, seq: seq++, elapsedMs: Date.now() - started });
+    emit({ ...envelope(), type: "search.results", response: final });
+    emit({ ...envelope(), type: "search.done", sessionId, resultCount: final.results.length });
+  }
+  if (!json) {
+    if (flags.context !== true) console.log(flags.stats ? `\nFinal ranking (${Date.now() - started}ms):` : "\nFinal ranking:");
+    printSearch(final, flags);
+  }
 }
 
 const CHAT_TIERS = ["fastest", "balanced", "smart"] as const;

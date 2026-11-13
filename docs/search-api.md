@@ -117,6 +117,54 @@ The batch contains 1–20 queries; concurrency is an integer from 1 to 8, defaul
 
 Every item independently checks the API key's search scope and organization/project access. Item error codes include `FORBIDDEN` (403), `PROJECT_NOT_FOUND` (404), `SEARCH_LIMIT_EXCEEDED` (429, the key's limit for the item's mode), `INVALID_SEARCH_SCOPE` (400), `INVALID_RETRIEVAL_QUERY` (400), `SEARCH_FAILED` (500), and `SEARCH_UNAVAILABLE` (503, the process-wide search limit is full; retry shortly). Unexpected internal errors are sanitized. Disconnecting prevents queued retrieval from starting; in-flight retrieval may finish and record usage. Unstarted items carry `REQUEST_ABORTED` (499) if a response remains deliverable.
 
+## Streaming search
+
+`POST /v1/search/stream` (or `GET /v1/search/stream` with query parameters) runs the same search as `POST /v1/search` and reports it as Server-Sent Events. Each retrieval leg's hits are sent the moment the leg finishes, so a client can show passages while slower legs, fusion and reranking are still running. It takes the fields of a single `POST /v1/search` request (no `queries` batch) plus `stats`. It needs the same key scopes as `/v1/search`, and the search is billed the same.
+
+Each event has an SSE `event:` name equal to its `type`, an `id:` equal to `seq`, and a JSON `data:` body. Every body also carries `searchId` (the same on all events of one stream), `seq` (0-based, increasing) and `elapsedMs` (since the server accepted the request).
+
+| Event | Meaning |
+| --- | --- |
+| `search.started` | First event: `protocol`, `projectId`, and `cached` (a recent identical answer was reused; `search.results` follows at once with no hits). |
+| `search.phase` | A step that is not a retrieval leg took `stats.ms`: `queue`, `setup`, `plan`, `prepare`, `embed`, `retrieve`, `fuse`, `rerank` or `finalize`. `subSearch` is set for a sub-search of decomposition, step-back or multi-hop. |
+| `search.hits` | One leg landed: `leg` (`lexical`, `vector`, `graph`, `community`, `progressive-page`, `completed-page` or `deferred`), its `hits` best first (each `{id, legRank, result}`), `truncated` when the leg found more than `limit`, and `stats` when requested. |
+| `search.results` | The answer: `ids` in final rank order and `response`, exactly the body `POST /v1/search` returns. |
+| `search.error` | The search failed after the stream opened: `error: {code, message, status}`. Nothing follows it. |
+| `search.done` | Last event: `sessionId`, `resultCount`, and `timings` (phase times of the whole search) when `stats` is set. |
+
+Ordering guarantees:
+
+- `search.started` is first. `search.phase` and `search.hits` follow in completion order, which is not rank order: a fast keyword leg can land before the vector leg, and a leg that finds nothing sends an empty `hits`.
+- Hits are provisional. The same passage can arrive from several legs under the same `id`, and the final list can drop, add or reorder passages. Only `search.results` is the answer.
+- `search.results` comes before `search.done`. A request that is refused before the stream opens (authentication, scope, validation, rate limit) gets an ordinary JSON error response with its HTTP status, not an event stream.
+- Unknown event types and fields may be added; ignore what you don't recognize.
+
+Set `stats: true` for per-leg and per-phase milliseconds, candidate counts and cache or timeout flags. Without it those fields are omitted.
+
+If the stream endpoint is unavailable (404, 405, 406 or 501, or a response that is not `text/event-stream`), or the connection drops before `search.results`, call `POST /v1/search`: it returns the same final body. The [SDK](https://docslurp.io/docs/packages/sdk) and [CLI](https://docslurp.io/docs/packages/cli) do this for you.
+
+```bash
+curl -N https://docslurp.io/v1/search/stream \
+  -H "Authorization: Bearer $DOCSLURP_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: text/event-stream' \
+  -d '{"q": "Which regions drove the Q3 earnings beat?", "stats": true}'
+```
+
+```ts
+import { createDocSlurpClient, mergeSearchStream, emptySearchStreamView } from "@docslurp/sdk";
+
+const client = createDocSlurpClient();
+const stream = client.searchStream({ q: "Which regions drove the Q3 earnings beat?", stats: true });
+
+let view = emptySearchStreamView();
+for await (const event of stream) {
+  view = mergeSearchStream(view, event); // provisional hits, deduplicated across legs
+  render(view.hits, { final: view.final });
+}
+const response = await stream.response; // the POST /v1/search body
+```
+
 ## Errors
 
 Every error from the native JSON API (`/v1/*`, including authentication, rate limits, CORS and request-size rejections) answers with one envelope:

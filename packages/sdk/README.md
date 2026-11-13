@@ -137,6 +137,25 @@ console.log(followup.answer);
 
 This continues the quickstart. Send follow-ups in a session one at a time, and omit `sessionId` to start a new chat. `chat()` returns a promise with the whole answer. `chatStream()` takes the same input (except `retrieval` and `agent`) and yields a retrieval `status` event, a `message` event with the whole `ChatResponse`, then `done`; it throws if the stream ends before `done`. To stream the answer token by token as it's written, use the [OpenAI-compatible chat API](https://docslurp.io/docs/chat).
 
+### Show results as each retrieval leg lands
+
+`search()` waits for every leg, fusion and reranking. `searchStream()` yields each leg's hits as soon as it finishes, in completion order, then the authoritative list. Hits are provisional until `search.results`; `mergeSearchStream()` deduplicates them across legs and swaps in the final order. Await `stream.response` for the same body `search()` returns. See the [event reference](https://docslurp.io/docs/search-api#streaming-search).
+
+```ts
+import { createDocSlurpClient, emptySearchStreamView, mergeSearchStream } from "@docslurp/sdk";
+
+const client = createDocSlurpClient();
+const stream = client.searchStream({ q: "Which regions drove the Q3 earnings beat?", stats: true });
+let view = emptySearchStreamView();
+for await (const event of stream) {
+  view = mergeSearchStream(view, event);
+  console.log(event.type, view.hits.map(hit => `${hit.result.citation.filename} [${hit.legs.join("+")}]`));
+}
+const { results } = await stream.response;
+```
+
+If the stream endpoint is unavailable, or the connection drops before `search.results`, the SDK calls `POST /v1/search` once and synthesizes `search.started`, `search.results` and `search.done`, so your loop doesn't change (`stream.transport` is then `"json"`). Authentication, billing, rate-limit and validation errors are thrown as `DocSlurpApiError`, as is a `search.error` event, and aborting through `signal` stops the request without a fallback. Pass `{ transport: "json" }` to skip streaming or `{ transport: "sse" }` to never fall back.
+
 ### Upload several files without reading them all into RAM
 
 ```js
@@ -450,6 +469,8 @@ Environment variables are read once, when the client is created, and only on the
 | `streamActivity(options?)` | Async iterable of account activity events, filtered by `types` and project UUID | Same as `getRun` |
 | `search(input, request?)` | Async iterable of hits; await for `{ results, availability, sessionId, usage }` | Any search scope (`search:keyword`, `search:hybrid`, `search:deep`); `mode` picks a cheaper one |
 | `search({ queries, concurrency? }, options?)` | `{ results: [{ ok, data?, error? }] }` | Any search scope (`search:keyword`, `search:hybrid`, `search:deep`); `mode` picks a cheaper one |
+| `searchStream({ q, stats?, ...filters }, { transport?, signal?, timeoutMs? }?)` | Async iterable of typed `search.*` events (hits per retrieval leg as they land); `await stream.response` for the final `search()` body. Falls back to `POST /v1/search` when streaming is unavailable | Same as `search` |
+| `mergeSearchStream(view, event)` | Pure fold of events into a view model: hits deduplicated across legs, replaced by the authoritative list on `search.results` | None |
 | `chat({ q, project?, sessionId? }, request?)` | Answer, citations, availability, session IDs, usage, runtime | `chat` |
 | `chatStream(input, request?)` | Async iterable of `status`, `message` (the full `ChatResponse`) and `done` events; sends `q`, `project`, `sessionId`, `sessionToken`, `model`, `filters` and `speedBoost`, not `retrieval` or `agent` | `chat` |
 | `listDocuments({ project?, runId?, tags? }?, request?)` | Document records, newest first | `artifacts` |

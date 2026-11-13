@@ -58,6 +58,8 @@ import { embedQuery } from "../search/session-planner.js";
 import type { SearchFilters } from "../search/filters.js";
 import { type SearchUsageEvent } from "../search/session.js";
 import { searchChunkToResult } from "../search/session-execution.js";
+import { skippedLeg } from "../search/retrieval-adapters.js";
+import { currentSearchStreamSink, withSearchStreamSubSearch } from "../search/stream-events.js";
 import { runSearchSession, type SearchSessionRunnerAdapters } from "../search/session-runner.js";
 import {
   resolveSearchSetup,
@@ -1957,6 +1959,10 @@ async function executeHybridSearch(
     return set.pageOnlyCompletedDocuments > 0;
   };
 
+  // Streaming: one 0-based index per sub-search of this search (decomposition, stepback, multi-hop).
+  let subSearches = 0;
+  const labelSubSearch = <T>(run: () => Promise<T>): Promise<T> =>
+    currentSearchStreamSink()?.subSearch === undefined ? withSearchStreamSubSearch(subSearches++, run) : run();
   const response = await withFanoutSettled(fanout, () => runSearchSession({
     query,
     userId,
@@ -1978,9 +1984,9 @@ async function executeHybridSearch(
           chunks,
         ),
       // Sub-searches (decomposition, stepback, multi-hop) stay inside the same access scope.
-      runSearch: (subQuery, subUserId, subOptions) => hybridSearch(subQuery, subUserId, subOptions, scope),
+      runSearch: (subQuery, subUserId, subOptions) => labelSubSearch(() => hybridSearch(subQuery, subUserId, subOptions, scope)),
       vectorSearch: ({ queryVector, userId, projectId, options, query }) => keywordOnly
-        ? Promise.resolve([])
+        ? Promise.resolve(skippedLeg())
         : timePhase("vector", () => servedVectorSearch({
           projectId,
           pipeline: setup.projectPipeline,
@@ -2000,19 +2006,19 @@ async function executeHybridSearch(
           ? fanout.search("text", (term, depth) => nativeTextOrLegacy(term, { ...options, limit: depth }, fanoutPostgresTextSearch), options.limit ?? 20)
           : nativeTextOrLegacy(query, options)),
       graphNeighborSearch: ({ query, projectId, options }) => mode !== "deep"
-        ? Promise.resolve([])
+        ? Promise.resolve(skippedLeg())
         : timePhase("graph", () => graphNeighborSearch(query, projectId, options)),
       communitySummarySearch: ({ query, projectId, options }) => mode !== "deep"
-        ? Promise.resolve([])
+        ? Promise.resolve(skippedLeg())
         : timePhase("community", () => communitySummarySearch(query, projectId, options)),
       // A keyword fan-out runs the page-text legs per query too (Postgres, on the fan-out's Postgres slots).
       progressivePageSearch: ({ query, userId, options }) => skipProgressive
-        ? Promise.resolve([])
+        ? Promise.resolve(skippedLeg())
         : timePhase("progressive", () => fanout
           ? fanout.search("progressive", (term, depth) => withKeywordFanoutPostgresSlot(() => progressivePageSearch(term, userId, { ...options, limit: depth })), options.limit ?? 20)
           : progressivePageSearch(query, userId, options)),
       completedPageSearch: async (args) => {
-        if (!args.shouldSearch || !await pageOnlyCompleted()) return [];
+        if (!args.shouldSearch || !await pageOnlyCompleted()) return skippedLeg();
         return fanout
           ? fanout.search("completed", (term, depth) => withKeywordFanoutPostgresSlot(() => completedPageSearch({ ...args, query: term, options: { ...args.options, limit: depth } })), args.options.limit ?? 20)
           : completedPageSearch(args);
