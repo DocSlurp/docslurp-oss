@@ -287,3 +287,14 @@ test("SDK events and ids match the shared search stream contract", { skip: share
   const parsed = withBodyless.map(e => searchStreamEventSchema.parse(e));
   assert.equal(foldSearchStream(parsed).status, "complete");
 });
+
+test("searchStream accepts a search.results frame larger than 1 MiB", async () => {
+  const big = { ...A, text: "x".repeat(3 * 1_048_576) };
+  const body = { results: [big], sessionId: "sess", usage: {}, availability: null };
+  const events = [frames[0], { ...env(1), type: "search.results", ids: [id(big)], response: body }, { ...env(2), type: "search.done", sessionId: "sess", resultCount: 1 }];
+  const text = sse(events);
+  const chunks = []; for (let i = 0; i < text.length; i += 65536) chunks.push(text.slice(i, i + 65536));
+  const stream = make(async () => sseResponse(chunks)).searchStream({ q: "x" });
+  assert.deepEqual((await collect(stream)).map(e => e.type), ["search.started", "search.results", "search.done"]);
+  assert.equal((await stream.response).results[0].text.length, 3 * 1_048_576);
+});

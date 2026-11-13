@@ -11,6 +11,18 @@ import { startMigratedPostgres } from "@docslurp/worker/testing";
  * (keyword mode never needs either). The caller is a real session actor
  * (`setRequestActor`) and project access is the real `authorizeActorProjectSearch`.
  */
+// Lets a test make the fusion step (after every leg has emitted) fail, to model a late failure of the search.
+const fusion = vi.hoisted(() => ({ fail: false }));
+vi.mock("../search/rrf.js", async (original) => {
+  const actual = await original<typeof import("../search/rrf.js")>();
+  return {
+    ...actual,
+    reciprocalRankFusion: ((...args: Parameters<typeof actual.reciprocalRankFusion>) => {
+      if (fusion.fail) throw new Error("fusion exploded: select secret from internals");
+      return actual.reciprocalRankFusion(...args);
+    }) as typeof actual.reciprocalRankFusion,
+  };
+});
 vi.mock("../search/lancedb.js", () => ({
   lanceDbVectorSearch: vi.fn().mockResolvedValue([]),
   warmLanceDbSearch: vi.fn(async () => {}),
@@ -225,6 +237,76 @@ describe("POST /v1/search/stream end to end", () => {
     expect(json.status).toBe(200);
     const jsonResponse = await json.json();
     expect(stable(final.response)).toEqual(stable(jsonResponse));
+  });
+
+  describe("billing a search that fails after passages were delivered", () => {
+    const charges = async () => sql<{ id: string; org_id: string | null; project_id: string | null; amount: string }[]>`
+      select id, org_id, project_id, amount from usage_events where metric = 'search-query' order by created_at`;
+    const settle = () => vi.waitFor(() => { expect(writeBehind.billedWriteBehindPending()).toBe(0); }, { timeout: 5000 });
+    const failing = async <T,>(run: () => T | Promise<T>) => { fusion.fail = true; try { return await run(); } finally { fusion.fail = false; } };
+
+    it("charges once, to the authorized org and project, when the search fails after hits were sent", async () => {
+      const before = (await charges()).length;
+      const text = await failing(async () => (await post("/v1/search/stream", BODY)).text());
+      await settle();
+      const events = frames(text).map((frame) => JSON.parse(frame.data) as { type: string; hits?: unknown[]; error?: { message: string } });
+      expect(events.some((event) => event.type === "search.hits" && (event.hits?.length ?? 0) > 0)).toBe(true);
+      expect(events.at(-1)!.type).toBe("search.error");
+      expect(text).not.toContain("secret");
+      const rows = (await charges()).slice(before);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ org_id: "org-a", project_id: "proj-a" });
+      expect(rows[0]!.id).toMatch(/^search:/);
+      // The search is not charged a second time by a repeat flush of the write-behind queue.
+      await settle();
+      expect((await charges()).slice(before)).toHaveLength(1);
+    });
+
+    it("charges nothing when the search fails before any hits were sent", async () => {
+      const before = (await charges()).length;
+      // A project that is not the caller's: refused before the stream opens, never charged.
+      const refused = await failing(() => post("/v1/search/stream", { ...BODY, project: "proj-b" }));
+      expect([403, 404]).toContain(refused.status);
+      await refused.text();
+      await settle();
+      expect((await charges()).length).toBe(before);
+    });
+
+    it("charges nothing when a late failure follows only legs that found nothing", async () => {
+      const before = (await charges()).length;
+      const text = await failing(async () => (await post("/v1/search/stream", { ...BODY, q: "zzzqqqnomatch" })).text());
+      await settle();
+      const events = frames(text).map((frame) => JSON.parse(frame.data) as { type: string; hits?: unknown[] });
+      if (events.some((event) => event.type === "search.hits")) {
+        expect(events.filter((event) => event.type === "search.hits").every((event) => event.hits!.length === 0)).toBe(true);
+        expect(events.at(-1)!.type).toBe("search.error");
+      }
+      expect((await charges()).length).toBe(before);
+    });
+
+    it("still charges a successful stream exactly once", async () => {
+      const before = (await charges()).length;
+      expect((await (await post("/v1/search/stream", BODY)).text())).toContain("search.done");
+      await settle();
+      expect((await charges()).length - before).toBe(1);
+    });
+
+    it("charges when the client leaves after delivery and the detached search then fails (as the detached-timeout abort does)", async () => {
+      const before = (await charges()).length;
+      vi.stubEnv("SEARCH_STREAM_DETACHED_TIMEOUT_MS", "1000");
+      try {
+        fusion.fail = true;
+        const response = await post("/v1/search/stream", BODY);
+        const reader = response.body!.getReader();
+        // Read until a hits frame arrived, then leave: the search is detached and fails (the fusion error stands in for the timeout abort).
+        let seen = "";
+        const decoder = new TextDecoder();
+        while (!seen.includes("event: search.hits")) { const chunk = await reader.read(); if (chunk.done) break; seen += decoder.decode(chunk.value); }
+        await reader.cancel();
+        await settle();
+        await vi.waitFor(async () => { expect((await charges()).length - before).toBe(1); }, { timeout: 5000 });
+      } finally { fusion.fail = false; vi.unstubAllEnvs(); vi.stubEnv("SEARCH_SESSION_WRITE_BEHIND", "0"); }
+    });
   });
 
   it("surfaces page-stage hits next to chunk hits (page-only document)", async () => {

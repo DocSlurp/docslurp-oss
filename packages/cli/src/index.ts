@@ -1215,7 +1215,7 @@ async function searchCommand(query: string, flags: Record<string, string | boole
 type CliSearchStreamEvent = { type: string; searchId?: string; seq?: number; elapsedMs?: number; [key: string]: unknown };
 
 /** Complete SSE frames from a byte stream: handles CRLF, comments, split chunks and multi-line data. */
-async function* sseFrames(body: AsyncIterable<Uint8Array>): AsyncGenerator<{ event: string; data: string }> {
+async function* sseFrames(body: AsyncIterable<Uint8Array>, maxFrameBytes = 1_048_576): AsyncGenerator<{ event: string; data: string }> {
   const decoder = new TextDecoder();
   let buffer = "";
   const frame = (block: string) => {
@@ -1233,7 +1233,7 @@ async function* sseFrames(body: AsyncIterable<Uint8Array>): AsyncGenerator<{ eve
   };
   for await (const chunk of body) {
     buffer = (buffer + decoder.decode(chunk, { stream: true })).replace(/\r\n?/g, (m, offset, whole) => (m === "\r" && offset === whole.length - 1 ? m : "\n"));
-    if (buffer.length > 1_048_576) throw new Error("DocSlurp SSE frame exceeds 1 MiB");
+    if (buffer.length > maxFrameBytes) throw new Error(`DocSlurp SSE frame exceeds ${Math.round(maxFrameBytes / 1_048_576)} MiB`);
     let split: number;
     while ((split = buffer.indexOf("\n\n")) >= 0) {
       const parsed = frame(buffer.slice(0, split));
@@ -1284,7 +1284,7 @@ async function searchStreamCommand(input: { q: string; project?: string; minScor
         // The first leg and rank of each hit body already printed, for hits a later leg reports by id only.
         const printed = new Map<string, string>();
         try {
-          for await (const frame of sseFrames(response.body as unknown as AsyncIterable<Uint8Array>)) {
+          for await (const frame of sseFrames(response.body as unknown as AsyncIterable<Uint8Array>, 32 * 1_048_576)) {
             received = true;
             let event: CliSearchStreamEvent;
             try { event = JSON.parse(frame.data); } catch { throw interrupted("sent a malformed event"); }
@@ -1332,7 +1332,7 @@ async function searchStreamCommand(input: { q: string; project?: string; minScor
           // The answer arrived: a later drop does not matter. Otherwise nothing is retried once the stream started.
           if (final) { /* print it below */ }
           else if (error instanceof CliApiError || (error instanceof Error && error.message.startsWith("The search stream "))) throw error;
-          else if (received || (error instanceof Error && /exceeds 1 MiB/.test(error.message))) throw interrupted(error instanceof Error && /exceeds 1 MiB/.test(error.message) ? "sent an oversized event" : "dropped");
+          else if (received || (error instanceof Error && /exceeds \d+ MiB/.test(error.message))) throw interrupted(error instanceof Error && /exceeds \d+ MiB/.test(error.message) ? "sent an oversized event" : "dropped");
           else fallbackReason = "stream dropped before any event";
         }
       }

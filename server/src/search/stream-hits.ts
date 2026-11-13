@@ -86,14 +86,15 @@ export function createProvisionalHitPolicy(args: {
         const legRank = hits.length;
         if (budget.sent.has(id) || seen.has(id)) {
           hits.push({ id, legRank });
+          seen.add(id);
         } else if (newBodies > 0) {
           const result = qualifyCommunityResults([searchChunkToResult(annotated)], args.filters, args.runId)[0]!;
           hits.push({ id: searchResultId(result), legRank, result });
           newBodies--;
+          seen.add(id);
         } else {
-          truncated = true; // stream-wide body cap reached: omit the hit
+          truncated = true; // stream-wide body cap reached: omit the hit; a later duplicate must not reference a body never sent
         }
-        seen.add(id);
       }
       return { hits, truncated };
     },

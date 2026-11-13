@@ -31,7 +31,7 @@ vi.mock("../lib/search-access.js", () => ({
   },
 }));
 const { searchRoutes } = await import("../routes/search.js");
-const { emitSearchStreamEvent } = await import("../search/stream-events.js");
+const { currentSearchStreamDelivery, emitSearchStreamEvent } = await import("../search/stream-events.js");
 const { currentSearchSignal } = await import("../search/query-bounds.js");
 
 function app(user: { id: string } | null = { id: "user" }) {
@@ -48,6 +48,9 @@ const finalBody = (timings?: Record<string, number>) => ({
 });
 // Minimal fixtures: the route never inspects hit bodies, so the full result type is not built here.
 const hit = (documentId: string, legRank = 0) => ({ id: searchResultId(result(documentId)), legRank, result: result(documentId) as never });
+
+/** A leg that found nothing: opens the stream (it is a hits event) without delivering any passage. */
+const emptyHits = () => emitSearchStreamEvent(() => ({ type: "search.hits", leg: "vector", hits: [], truncated: false }));
 
 async function events(response: Response) {
   const text = await response.text();
@@ -145,7 +148,7 @@ describe("search stream", () => {
 
   it("answers a mid-stream failure with one public search.error and no raw text", async () => {
     mocks.search.mockImplementation(async () => {
-      emitSearchStreamEvent(() => ({ type: "search.phase", phase: "plan", stats: { ms: 1 } }));
+      emptyHits();
       await new Promise((resolve) => setTimeout(resolve, 5));
       throw new Error("select * from secret_table failed: password=hunter2");
     });
@@ -153,7 +156,7 @@ describe("search stream", () => {
     expect(text).not.toContain("hunter2");
     expect(text).not.toContain("secret_table");
     const frames = text.split("\n\n").filter(Boolean).map((f) => JSON.parse(f.split("\n").find((l) => l.startsWith("data:"))!.slice(5)));
-    expect(frames.map((f) => f.type)).toEqual(["search.started", "search.phase", "search.error"]);
+    expect(frames.map((f) => f.type)).toEqual(["search.started", "search.hits", "search.error"]);
     expect(frames.at(-1).error).toMatchObject({ status: 500, message: expect.not.stringContaining("hunter2") });
     expect(frames.map((f) => f.seq)).toEqual([0, 1, 2]);
     expect(mocks.report).toHaveBeenCalledTimes(1);
@@ -173,9 +176,9 @@ describe("search stream", () => {
     let searchSignal: AbortSignal | undefined;
     mocks.search.mockImplementation(async () => {
       searchSignal = currentSearchSignal();
-      emitSearchStreamEvent(() => ({ type: "search.phase", phase: "plan", stats: { ms: 1 } }));
+      emptyHits();
       await new Promise<void>((resolve) => searchSignal!.addEventListener("abort", () => resolve()));
-      emitSearchStreamEvent(() => ({ type: "search.phase", phase: "rerank", stats: { ms: 1 } }));
+      emptyHits();
       return finalBody();
     });
     const response = await app().request("/v1/search/stream", post({ q: "x", project: "p" }));
@@ -192,11 +195,11 @@ describe("search stream", () => {
     const phaseEmit = () => emitSearchStreamEvent(() => ({ type: "search.phase", phase: "plan", stats: { ms: 1 } }));
     afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
 
-    it("a disconnect after phase-only events still aborts the search (nothing delivered)", async () => {
+    it("a disconnect after a leg that found nothing still aborts the search (nothing delivered)", async () => {
       let signal: AbortSignal | undefined;
       mocks.search.mockImplementation(async () => {
         signal = currentSearchSignal();
-        phaseEmit();
+        emptyHits();
         await new Promise<void>((resolve) => signal!.addEventListener("abort", () => resolve()));
         throw new Error("aborted");
       });
@@ -206,7 +209,7 @@ describe("search stream", () => {
       await reader.cancel();
       await vi.waitFor(() => expect(signal?.aborted).toBe(true));
       await vi.waitFor(() => expect(logLines(info)).toHaveLength(1));
-      expect(logLines(info)[0]).toMatch(/outcome=aborted cached=false ttfhMs=- /);
+      expect(logLines(info)[0]).toMatch(/outcome=aborted detached=- cached=false ttfhMs=- /);
     });
 
     it("a disconnect after the first search.hits lets the search finish detached, with the work completed and one detached log line", async () => {
@@ -232,7 +235,7 @@ describe("search stream", () => {
       await vi.waitFor(() => expect(logLines(info)).toHaveLength(1));
       expect(finished).toBe(true);
       expect(signal?.aborted).toBe(false);
-      expect(logLines(info)[0]).toMatch(/sessionId=session-1 requestId=- outcome=detached cached=false ttfhMs=\d+ events=\d+ bytes=\d+ totalMs=\d+$/);
+      expect(logLines(info)[0]).toMatch(/sessionId=session-1 requestId=- outcome=detached detached=ok cached=false ttfhMs=\d+ events=\d+ bytes=\d+ totalMs=\d+$/);
       expect(logLines(info)[0]).not.toContain("contracts");
     });
 
@@ -247,7 +250,7 @@ describe("search stream", () => {
           await new Promise<void>((resolve) => signal!.addEventListener("abort", () => resolve()));
           throw new Error("raw boom");
         });
-        vi.spyOn(console, "info").mockImplementation(() => undefined);
+        const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
         const reader = (await app().request("/v1/search/stream", post({ q: "x", project: "p" }))).body!.getReader();
         await reader.read(); await reader.read();
         await reader.cancel();
@@ -256,19 +259,21 @@ describe("search stream", () => {
         await vi.advanceTimersByTimeAsync(1500);
         expect(signal?.aborted).toBe(true);
         await vi.waitFor(() => expect(mocks.report).toHaveBeenCalledTimes(1));
+        await vi.waitFor(() => expect(logLines(info)).toHaveLength(1));
+        expect(logLines(info)[0]).toContain("outcome=detached detached=timeout");
       } finally { delete process.env.SEARCH_STREAM_DETACHED_TIMEOUT_MS; }
     });
 
     it("writes a keepalive comment every 15 s while the search is quiet", async () => {
       vi.useFakeTimers({ toFake: ["setTimeout", "setInterval", "clearTimeout", "clearInterval"] });
       let release!: () => void;
-      mocks.search.mockImplementation(async () => { phaseEmit(); await new Promise<void>((resolve) => { release = resolve; }); return finalBody(); });
+      mocks.search.mockImplementation(async () => { emptyHits(); await new Promise<void>((resolve) => { release = resolve; }); return finalBody(); });
       vi.spyOn(console, "info").mockImplementation(() => undefined);
       const reader = (await app().request("/v1/search/stream", post({ q: "x", project: "p" }))).body!.getReader();
       const decoder = new TextDecoder();
       const read = async () => decoder.decode((await reader.read()).value);
       expect(await read()).toContain("event: search.started");
-      expect(await read()).toContain("event: search.phase");
+      expect(await read()).toContain("event: search.hits");
       await vi.advanceTimersByTimeAsync(15_000);
       expect(await read()).toBe(": keepalive\n\n");
       release();
@@ -284,19 +289,78 @@ describe("search stream", () => {
       await app().request("/v1/search/stream", post({ q: "x", project: "p" })); // never read
       await vi.advanceTimersByTimeAsync(16_000);
       await vi.waitFor(() => expect(logLines(info)).toHaveLength(1));
-      expect(logLines(info)[0]).toContain("outcome=aborted");
+      expect(logLines(info)[0]).toContain("outcome=stalled");
       expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it("a detached search that fails on its own is logged detached=error", async () => {
+      let release!: () => void;
+      mocks.search.mockImplementation(async () => {
+        hitsEmit();
+        await new Promise<void>((resolve) => { release = resolve; });
+        throw new Error("late failure");
+      });
+      const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
+      const reader = (await app().request("/v1/search/stream", post({ q: "x", project: "p" }))).body!.getReader();
+      await reader.read(); await reader.read();
+      await reader.cancel();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      release();
+      await vi.waitFor(() => expect(logLines(info)).toHaveLength(1));
+      expect(logLines(info)[0]).toContain("outcome=detached detached=error");
+    });
+
+    it("tells the engine whether passages were delivered: written hits count, an empty leg does not", async () => {
+      const seen: boolean[] = [];
+      mocks.search.mockImplementation(async () => {
+        const delivery = currentSearchStreamDelivery()!;
+        emptyHits();
+        await delivery.settle?.();
+        seen.push(delivery.contentDelivered);
+        hitsEmit();
+        // Billing waits for the write queue, so a failure right after the hits still sees them as delivered.
+        await delivery.settle?.();
+        seen.push(delivery.contentDelivered);
+        throw new Error("late failure");
+      });
+      const frames = await events(await app().request("/v1/search/stream", post({ q: "x", project: "p" })));
+      expect(frames.map((f) => f.event)).toEqual(["search.started", "search.hits", "search.hits", "search.error"]);
+      expect(seen).toEqual([false, true]);
+    });
+
+    it("a client that left before the hits were written is not billed for them, and no event is built for it", async () => {
+      let signal: AbortSignal | undefined;
+      let delivered: boolean | undefined;
+      const build = vi.fn(() => null);
+      let release!: () => void;
+      mocks.search.mockImplementation(async () => {
+        signal = currentSearchSignal();
+        const delivery = currentSearchStreamDelivery()!;
+        emptyHits();
+        await new Promise<void>((resolve) => { release = resolve; });
+        emitSearchStreamEvent(build); // the client is gone: not even built
+        await delivery.settle?.();
+        delivered = delivery.contentDelivered;
+        throw new Error("aborted");
+      });
+      const reader = (await app().request("/v1/search/stream", post({ q: "x", project: "p" }))).body!.getReader();
+      await reader.read();
+      await reader.cancel();
+      await vi.waitFor(() => expect(signal?.aborted).toBe(true));
+      release();
+      await vi.waitFor(() => expect(delivered).toBe(false));
+      expect(build).not.toHaveBeenCalled();
     });
 
     it("a leg event after the outcome is decided consumes no seq", async () => {
       mocks.search.mockImplementation(async () => {
-        phaseEmit();
+        emptyHits();
         setTimeout(() => emitSearchStreamEvent(() => ({ type: "search.phase", phase: "rerank", stats: { ms: 1 } })), 30);
         throw new Error("leg failed");
       });
       const frames = await events(await app().request("/v1/search/stream", post({ q: "x", project: "p" })));
       await new Promise((resolve) => setTimeout(resolve, 60));
-      expect(frames.map((f) => f.event)).toEqual(["search.started", "search.phase", "search.error"]);
+      expect(frames.map((f) => f.event)).toEqual(["search.started", "search.hits", "search.error"]);
       expect(frames.map((f) => f.data.seq)).toEqual([0, 1, 2]);
     });
 
@@ -304,7 +368,7 @@ describe("search stream", () => {
       const okText = await (await app().request("/v1/search/stream", post({ q: "x", project: "p" }))).text();
       expect(okText.match(/retry: 86400000/g)).toHaveLength(1);
       expect(okText.split("\n\n").find((f) => f.includes("search.done"))).toContain("retry: 86400000");
-      mocks.search.mockImplementation(async () => { phaseEmit(); throw new Error("x"); });
+      mocks.search.mockImplementation(async () => { emptyHits(); throw new Error("x"); });
       const errText = await (await app().request("/v1/search/stream", post({ q: "x", project: "p" }))).text();
       expect(errText.split("\n\n").find((f) => f.includes("search.error"))).toContain("retry: 86400000");
       expect(errText.match(/retry:/g)).toHaveLength(1);
@@ -313,12 +377,12 @@ describe("search stream", () => {
     it("logs one line per stream for done and error outcomes, without query text", async () => {
       const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
       await (await app().request("/v1/search/stream", post({ q: "secret query", project: "p" }))).text();
-      mocks.search.mockImplementation(async () => { phaseEmit(); throw new Error("x"); });
+      mocks.search.mockImplementation(async () => { emptyHits(); throw new Error("x"); });
       await (await app().request("/v1/search/stream", post({ q: "secret query", project: "p" }))).text();
       await vi.waitFor(() => expect(logLines(info)).toHaveLength(2));
       const [done, error] = logLines(info);
-      expect(done).toMatch(/^\[search-stream\] searchId=\S+ sessionId=session-1 requestId=- outcome=done cached=false ttfhMs=- events=3 bytes=\d+ totalMs=\d+$/);
-      expect(error).toMatch(/outcome=error cached=false ttfhMs=- events=3 /);
+      expect(done).toMatch(/^\[search-stream\] searchId=\S+ sessionId=session-1 requestId=- outcome=done detached=- cached=false ttfhMs=- events=3 bytes=\d+ totalMs=\d+$/);
+      expect(error).toMatch(/outcome=error detached=- cached=false ttfhMs=- events=3 /);
       expect(logLines(info).join()).not.toContain("secret");
     });
 
@@ -333,6 +397,53 @@ describe("search stream", () => {
       mocks.ticket.mockImplementation(async () => { await new Promise((resolve) => setTimeout(resolve, 40)); return { ticket: true }; });
       const frames = await events(await app().request("/v1/search/stream", post({ q: "x", project: "p" })));
       expect(frames[0]!.data.elapsedMs).toBeGreaterThanOrEqual(35);
+    });
+  });
+
+  describe("stats and refusals", () => {
+    it("with stats, a refusal after a phase event is still the JSON status, not a 200 stream", async () => {
+      const { ProjectNotFoundError } = await import("../services/search.js");
+      mocks.search.mockImplementation(async () => {
+        emitSearchStreamEvent(() => ({ type: "search.phase", phase: "queue", stats: { ms: 1 } }));
+        throw new ProjectNotFoundError();
+      });
+      const response = await app().request("/v1/search/stream", post({ q: "x", project: "p", stats: true }));
+      expect(response.status).toBe(404);
+      expect(response.headers.get("content-type")).not.toContain("event-stream");
+      expect(await response.json()).toHaveProperty("error");
+    });
+
+    it("with stats, phase events wait for the first hits event and are replayed in order", async () => {
+      mocks.search.mockImplementation(async () => {
+        emitSearchStreamEvent(() => ({ type: "search.phase", phase: "queue", stats: { ms: 1 } }));
+        emitSearchStreamEvent(() => ({ type: "search.phase", phase: "setup", stats: { ms: 2 } }));
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        emptyHits();
+        return finalBody();
+      });
+      const frames = await events(await app().request("/v1/search/stream", post({ q: "x", project: "p", stats: true })));
+      expect(frames.map((f) => f.event)).toEqual(["search.started", "search.phase", "search.phase", "search.hits", "search.results", "search.done"]);
+      expect(frames.map((f) => f.data.seq)).toEqual([0, 1, 2, 3, 4, 5]);
+    });
+  });
+
+  describe("Last-Event-ID", () => {
+    it("answers a reconnect with 204 and runs no search (POST and GET)", async () => {
+      const post204 = await app().request("/v1/search/stream", post({ q: "x", project: "p" }, { "Last-Event-ID": "4" }));
+      expect(post204.status).toBe(204);
+      expect(await post204.text()).toBe("");
+      const get204 = await app().request("/v1/search/stream?q=x&project=p", { headers: { "Last-Event-ID": "4" } });
+      expect(get204.status).toBe(204);
+      expect(mocks.search).not.toHaveBeenCalled();
+      expect(mocks.ticket).not.toHaveBeenCalled();
+    });
+
+    it("still requires a session, and a first request without the header streams", async () => {
+      const unauthenticated = await app(null).request("/v1/search/stream", post({ q: "x", project: "p" }, { "Last-Event-ID": "1" }));
+      expect(unauthenticated.status).toBe(401);
+      const first = await app().request("/v1/search/stream", post({ q: "x", project: "p" }));
+      expect(first.headers.get("content-type")).toContain("event-stream");
+      await first.text();
     });
   });
 

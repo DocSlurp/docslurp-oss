@@ -59,7 +59,7 @@ import type { SearchFilters } from "../search/filters.js";
 import { type SearchUsageEvent } from "../search/session.js";
 import { searchChunkToResult } from "../search/session-execution.js";
 import { skippedLeg } from "../search/retrieval-adapters.js";
-import { currentSearchStreamSink, withSearchStreamSubSearch } from "../search/stream-events.js";
+import { currentSearchStreamDelivery, currentSearchStreamSink, noteSearchStreamProject, withSearchStreamSubSearch } from "../search/stream-events.js";
 import { runSearchSession, type SearchSessionRunnerAdapters } from "../search/session-runner.js";
 import {
   resolveSearchSetup,
@@ -1838,6 +1838,8 @@ export async function hybridSearch(rawQuery: string, userId: string, options: Se
   activity.aggregate = Boolean(options.queryDecompose || options.stepback || options.iterativeMultiHop);
   const report = options.onSearchActivity;
   report?.(activity);
+  // Set once the success path has started its charge, so a charge that throws is never followed by the failure path's.
+  let chargeStarted = false;
   try {
     // Root searches wait for a process-wide slot (search/search-limiter.ts); the wait is timed as `queueMs`.
     // Search SQL is cancelled when the request (or chat turn) aborts (search/query-bounds.ts).
@@ -1854,7 +1856,10 @@ export async function hybridSearch(rawQuery: string, userId: string, options: Se
     // Price card: one search per root query (sub-searches of decomposition and
     // multi-hop are part of it); LLM query strategies count as the provider's searchUnits.
     // Searches a chat turn runs are part of the chat answer's price.
-    if (!options.rootSessionId && !currentChatTurn()) await chargeSearch(result, userId, activity.id);
+    if (!options.rootSessionId && !currentChatTurn()) {
+      chargeStarted = true;
+      await chargeSearch(searchChargeOf(result, userId, activity));
+    }
     report?.({ ...activity, status: "success", runtimeMs: Date.now() - started, resultCount: result.results.length,
       inputTokens: result.usageEvents?.reduce((sum, event) => sum + (event.inputTokens ?? 0), 0),
       outputTokens: result.usageEvents?.reduce((sum, event) => sum + (event.outputTokens ?? 0), 0),
@@ -1862,8 +1867,79 @@ export async function hybridSearch(rawQuery: string, userId: string, options: Se
     return result;
   } catch (error) {
     report?.({ ...activity, status: "error", runtimeMs: Date.now() - started });
+    // Same condition as the success path's charge.
+    if (!chargeStarted && !options.rootSessionId && !currentChatTurn()) await chargeFailedSearchAfterDelivery(userId, options, scope, activity);
     throw error;
   }
+}
+
+/**
+ * A streamed search that failed after the client already received passages
+ * (`/v1/search/stream` sends hits as each leg lands) is billed like a completed
+ * one: the content was delivered. Nothing is charged when nothing was delivered
+ * (the search fails before any hits frame was written) or outside a stream.
+ *
+ * The charge is rebuilt without the result: the organization is the authorized
+ * scope's (never the client's), the project is the one the search resolved from
+ * that scope, the mode is the ceiling-clamped one `consumeSearchModeLimit`
+ * used, and a keyword fan-out counts one search per query. Whether an LLM query
+ * strategy ran is unknowable here, so it is charged at the mode's non-LLM rate.
+ * It never throws: a failed charge is logged and the search's own error stands.
+ */
+async function chargeFailedSearchAfterDelivery(userId: string, options: SearchOptions, scope: SearchAccessScope, activity: SearchActivity): Promise<void> {
+  const delivery = currentSearchStreamDelivery();
+  if (!delivery) return;
+  try {
+    await delivery.settle?.();
+    if (!delivery.contentDelivered) return;
+    if (!delivery.projectId) {
+      console.error(`[search] delivered search failed without a resolved project; not charged search=${activity.id}`);
+      return;
+    }
+    const mode = effectiveSearchMode(options, scope.modeCeiling);
+    await chargeSearch({
+      userId,
+      searchId: activity.id,
+      sessionId: activity.groupId,
+      projectId: delivery.projectId,
+      orgId: scope.orgId,
+      mode,
+      searches: mode === "keyword" ? options.keywordQueries?.length || 1 : 1,
+      llmStrategies: false,
+    });
+  } catch (error) {
+    console.error(`[search] charge after failed delivered search failed search=${activity.id}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+/** What billing needs from one root search; the success path reads it from the result, the failure path from the authorized scope. */
+interface SearchChargeInput {
+  userId: string;
+  /** The charge id is `search:<searchId>`: one search is never charged twice. */
+  searchId: string;
+  sessionId: string;
+  projectId: string;
+  /** Null only when no organization could be resolved (the charge is then written before the response). */
+  orgId: string | null;
+  mode: SearchMode | undefined;
+  /** One per query of a keyword fan-out, otherwise 1. */
+  searches: number;
+  llmStrategies: boolean;
+}
+
+function searchChargeOf(result: SearchResponse, userId: string, activity: SearchActivity): SearchChargeInput | null {
+  const projectId = result.availability?.scope?.projectId;
+  if (!projectId) return null;
+  return {
+    userId,
+    searchId: activity.id,
+    sessionId: result.sessionId,
+    projectId,
+    orgId: result.scopeOrgId ?? currentRequestOrgId() ?? null,
+    mode: result.searchMode,
+    searches: result.keywordQueries?.length || 1,
+    llmStrategies: (result.usageEvents ?? []).some((event) => (event.outputTokens ?? 0) > 0),
+  };
 }
 
 /**
@@ -1873,26 +1949,22 @@ export async function hybridSearch(rawQuery: string, userId: string, options: Se
  * provider's searchUnits. Query embeddings and strategy tokens are our cost, recorded
  * non-billable by the Search Session journal.
  */
-async function chargeSearch(result: SearchResponse, userId: string, searchId: string): Promise<void> {
-  const projectId = result.availability?.scope?.projectId;
-  if (!projectId) return;
-  const llmStrategies = (result.usageEvents ?? []).some((event) => (event.outputTokens ?? 0) > 0);
+async function chargeSearch(input: SearchChargeInput | null): Promise<void> {
+  if (!input) return;
+  const { userId, searchId, sessionId, projectId, orgId, mode, searches, llmStrategies } = input;
   // API-key keyword and hybrid searches are charged in batches (lean-logging.ts).
-  // A keyword fan-out is one search per query it ran.
-  const searches = result.keywordQueries?.length || 1;
-  if (!llmStrategies && leanSearchLogging(result.searchMode)) {
-    enqueueSearchCharge({ userId, orgId: null, projectId, mode: result.searchMode! }, searches);
+  if (!llmStrategies && leanSearchLogging(mode)) {
+    enqueueSearchCharge({ userId, orgId, projectId, mode: mode! }, searches);
     return;
   }
-  const llmMode = result.searchMode ?? "deep";
+  const llmMode = mode ?? "deep";
   const credits = searchCredits(searches, { llmStrategies, mode: llmMode });
-  const orgId = result.scopeOrgId ?? currentRequestOrgId() ?? null;
   // Committed after the response within SEARCH_WRITE_BEHIND_MAX_CREDITS, retried until it lands; the id makes a retry idempotent.
   await writeBehindWithinCap(credits, async () => {
     await recordUnitCharge({
       userId,
       // The organization is fixed now: a project deleted before a deferred write commits must still be debited.
-      scope: { projectId, orgId, sessionId: result.sessionId },
+      scope: { projectId, orgId, sessionId },
       charge: {
         id: `search:${searchId}`,
         metric: BILLABLE_UNIT_METRICS.search,
@@ -1906,7 +1978,7 @@ async function chargeSearch(result: SearchResponse, userId: string, searchId: st
     // Deferred against this org's own allowance; without an org the charge is written before the response.
     orgId,
     // A failed charge never fails the search the user already has.
-    onError: (error, attempt) => console.error(`[search] charge failed session=${result.sessionId} attempt=${attempt + 1}: ${error instanceof Error ? error.message : String(error)}`),
+    onError: (error, attempt) => console.error(`[search] charge failed session=${sessionId} attempt=${attempt + 1}: ${error instanceof Error ? error.message : String(error)}`),
   }).done;
 }
 
@@ -1917,6 +1989,7 @@ async function executeHybridSearch(
   scope: SearchAccessScope,
 ): Promise<SearchResponse> {
   const setup = await timePhase("setup", () => resolveSearchSetup(userId, options, scope));
+  noteSearchStreamProject(setup.normalizedScope.projectId);
   if (projectOrgs.size < 50_000) projectOrgs.set(setup.normalizedScope.projectId, `org:${setup.normalizedScope.orgId}`);
   const wholeCorpusFallback = async (filters = setup.resolvedOptions.filters): Promise<SearchResult[]> => {
     const corpusCtx = await loadProjectWholeCorpusContext({

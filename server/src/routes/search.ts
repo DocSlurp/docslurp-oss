@@ -44,7 +44,7 @@ import type { SearchAccessScope } from "../search/access-scope.js";
 export { clearSearchResponseCacheForTests } from "../search/response-cache.js";
 import { SearchCapacityError, withSearchAdmissionGroup } from "../search/search-limiter.js";
 import { SearchModeLimitError } from "../search/search-mode-limits.js";
-import { withSearchStreamSink, type SearchStreamSink } from "../search/stream-events.js";
+import { withSearchStreamSink, type SearchStreamDelivery, type SearchStreamSink } from "../search/stream-events.js";
 import { withSearchSignal } from "../search/query-bounds.js";
 import { awaitSearchSessionWrites } from "../search/session.js";
 import { randomUUID } from "node:crypto";
@@ -593,10 +593,17 @@ function parseStatsFlag(value: unknown): boolean | undefined {
  *
  * Every refusal the JSON endpoint makes happens before the stream opens, with
  * the same status and body. The search starts before the stream does and the
- * stream opens at its first event (or when the search settles, whichever is
- * first), so a refusal the search itself raises before reporting anything
- * (a mode limit, no capacity, a bad scope) is still a real status, never a
- * 200 stream. Only a failure after the first event becomes `search.error`.
+ * stream opens at its first `search.hits` event (or when the search settles,
+ * whichever is first). Phase events (`stats: true` emits one before setup) wait
+ * in a buffer and are replayed in order once it opens, so a refusal the search
+ * itself raises before reporting any hits (a mode limit, no capacity, a bad
+ * scope, an unknown project) is still a real status, never a 200 stream. Only
+ * a failure after the first hits event becomes `search.error`.
+ *
+ * A request carrying `Last-Event-ID` is a reconnect of a finished or broken
+ * stream. The stream cannot resume and re-running would bill again, so it is
+ * answered `204 No Content` (which tells `EventSource` to stop reconnecting)
+ * before any search work.
  */
 async function searchStreamHandler(c: Context) {
   const handlerStart = performance.now();
@@ -604,6 +611,10 @@ async function searchStreamHandler(c: Context) {
   // A GET carries a cookie without any CSRF check, so a cross-site page could start (and bill) a search: same guard as GET /v1/chat/stream.
   if (!fromBody && getRequestActor(c).type === "session" && !sameOriginBrowserRequest(c)) {
     return apiErrorResponse(c, 403, "forbidden", "Cross-site request rejected");
+  }
+  if (c.req.header("last-event-id") !== undefined) {
+    if (!c.get("sessionUser")?.id) return apiErrorResponse(c, 401, "unauthorized", "Missing session");
+    return c.body(null, 204);
   }
   let statsValue: unknown;
   let prepared: PreparedSearch | Response;
@@ -650,19 +661,54 @@ async function searchStreamHandler(c: Context) {
   let clientGone = false;
   // The search function has returned or thrown: no further event is stamped or kept.
   let settled = false;
-  // A `search.hits` event with hits has been written: the client has seen passages, so the search must finish (and be charged).
-  let contentDelivered = false;
+  // `delivery.contentDelivered`: a `search.hits` frame with hits has been written, so the client holds passages and the
+  // search must finish (and is billed even if it then fails: the engine reads this, see chargeFailedSearchAfterDelivery).
+  const delivery: SearchStreamDelivery = { contentDelivered: false };
+  // Hits events with at least one hit that the sink accepted; zero means nothing can have reached the wire.
+  let contentFramesAccepted = 0;
+  // Content frames inside `stream.write` right now, and whether billing already gave up waiting for them.
+  let contentWritesInFlight = 0;
+  let settleGaveUp = false;
   let detachTimer: ReturnType<typeof setTimeout> | undefined;
+  let detachTimedOut = false;
   let opened!: () => void;
   const firstEvent = new Promise<void>((resolve) => { opened = resolve; });
+  // Resolve when the stream callback has attached, and when the client has left.
+  let attachedNow!: () => void;
+  const attached = new Promise<void>((resolve) => { attachedNow = resolve; });
+  let goneNow!: () => void;
+  const gone = new Promise<void>((resolve) => { goneNow = resolve; });
+  let drainWrites: () => Promise<unknown> = () => Promise.resolve();
 
   const onClientGone = () => {
     if (clientGone) return;
     clientGone = true;
+    goneNow();
     if (settled) return;
-    if (!contentDelivered) { abort.abort(); return; }
+    // A content frame still being written may have reached the client: the search keeps running, under the overall bound
+    // below, and a write that then fails aborts it (see enqueue). Only a client that has seen nothing aborts it at once.
+    if (!delivery.contentDelivered && contentWritesInFlight === 0) { abort.abort(); return; }
     // Delivered content is billed: let the search finish detached from the client, under an overall bound.
-    detachTimer = setTimeout(() => abort.abort(), searchStreamDetachedTimeoutMs());
+    detachTimer = setTimeout(() => { detachTimedOut = true; abort.abort(); }, searchStreamDetachedTimeoutMs());
+  };
+
+  /**
+   * Billing asks this when a root search fails: has the client received passages? Every accepted content frame is
+   * either written (flag set right after the write resolves), dropped (client gone, reader stalled) or still being
+   * written; waiting for the write queue, bounded, makes the flag exact. A write still in flight at the bound may
+   * have reached the socket, so it counts as delivered.
+   */
+  delivery.settle = async () => {
+    if (contentFramesAccepted === 0 || delivery.contentDelivered) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timedOut = await Promise.race([
+      Promise.race([attached, gone]).then(() => drainWrites()).then(() => false),
+      new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(true), SEARCH_STREAM_FLUSH_TIMEOUT_MS); }),
+    ]);
+    if (timer) clearTimeout(timer);
+    if (!timedOut) return;
+    settleGaveUp = true; // a content frame that is written after this is not billed for, so it is not written
+    if (contentWritesInFlight > 0) delivery.contentDelivered = true;
   };
 
   let outcome: Promise<Outcome>;
@@ -674,11 +720,19 @@ async function searchStreamHandler(c: Context) {
     const sink: SearchStreamSink = {
       stats,
       hitLimit: prepared.limit,
+      delivery,
+      closed: () => settled || clientGone,
       emit(body) {
         if (settled || clientGone) return;
         const event = stamp(body) as StreamEvent;
+        const hasContent = body.type === "search.hits" && body.hits.length > 0;
+        if (hasContent) contentFramesAccepted++;
         if (writeEvent) writeEvent(event);
-        else { buffered.push(event); opened(); }
+        else {
+          buffered.push(event);
+          // The stream opens at the first hits event; phase events wait for it.
+          if (body.type === "search.hits") opened();
+        }
       },
     };
     outcome = withSearchStreamSink(sink, () => withSearchSignal(abort.signal, lookup.run))
@@ -690,9 +744,10 @@ async function searchStreamHandler(c: Context) {
   }
 
   if (!lookup.hit) {
-    // Opens at the first event, or once the search has settled. A failure before any event is the JSON endpoint's refusal.
+    // Opens at the first hits event, or once the search has settled. A failure before any hits event is the JSON endpoint's refusal.
     const first = await Promise.race([firstEvent.then(() => null), outcome]);
-    if (first && !first.ok) {
+    // Hits already accepted are streamed even if the search has failed since: the client is entitled to (and billed for) them.
+    if (first && !first.ok && !buffered.some((event) => event.type === "search.hits")) {
       abort.abort();
       return expectedFailureResponse(c, first.error);
     }
@@ -705,6 +760,7 @@ async function searchStreamHandler(c: Context) {
     let ttfhMs: number | undefined;
     let sessionId: string | undefined;
     let label: "done" | "error" | "aborted" | "detached" = "aborted";
+    let detached: "ok" | "error" | "timeout" | undefined;
     let stalled = false;
     let pending = 0;
     let chain: Promise<unknown> = Promise.resolve();
@@ -712,15 +768,31 @@ async function searchStreamHandler(c: Context) {
       pending++;
       chain = chain.then(async () => {
         if (clientGone || stalled) return;
-        if (event?.type === "search.hits" && Array.isArray(event.hits) && event.hits.length > 0 && ttfhMs === undefined) {
-          contentDelivered = true;
-          ttfhMs = Math.round(performance.now() - handlerStart);
+        const hasContent = event?.type === "search.hits" && Array.isArray(event.hits) && event.hits.length > 0;
+        if (hasContent && settleGaveUp) return;
+        if (hasContent) contentWritesInFlight++;
+        try {
+          await stream.write(frame);
+          // Only a write that succeeded delivered anything: a client that is already gone must not pin the search.
+          if (hasContent) {
+            delivery.contentDelivered = true;
+            ttfhMs ??= Math.round(performance.now() - handlerStart);
+          }
+        } catch (error) {
+          // The write failed because the client is gone and it never received passages: nothing is owed, so stop the search.
+          if (hasContent && clientGone && !delivery.contentDelivered && !settled) {
+            if (detachTimer) clearTimeout(detachTimer);
+            abort.abort();
+          }
+          throw error;
+        } finally {
+          if (hasContent) contentWritesInFlight--;
         }
-        await stream.write(frame);
         bytes += Buffer.byteLength(frame);
         if (event) eventCount++;
       }).catch(() => undefined).finally(() => { pending--; });
     };
+    drainWrites = () => chain;
     const send = (event: StreamEvent, retry?: number) => {
       enqueue(`event: ${event.type}\ndata: ${JSON.stringify(event)}\nid: ${event.seq}${retry === undefined ? "" : `\nretry: ${retry}`}\n\n`, event);
     };
@@ -738,13 +810,15 @@ async function searchStreamHandler(c: Context) {
       send(started);
       for (const event of buffered.splice(0)) send(event);
       writeEvent = send;
+      attachedNow();
       const result = await outcome;
       writeEvent = null;
       if (clientGone) {
         // Nobody is listening. A detached search that failed is reported once, never written.
         if (!result.ok) await publicStreamError(c, result.error).catch(() => undefined);
         else sessionId = result.data.sessionId;
-        label = contentDelivered ? "detached" : "aborted";
+        label = delivery.contentDelivered ? "detached" : "aborted";
+        if (label === "detached") detached = result.ok ? "ok" : detachTimedOut ? "timeout" : "error";
         return;
       }
       // Leg events first, in emission order, then the authoritative list.
@@ -774,7 +848,8 @@ async function searchStreamHandler(c: Context) {
       if (detachTimer) clearTimeout(detachTimer);
       c.req.raw.signal.removeEventListener("abort", onClientGone);
       const totalMs = Math.round(performance.now() - handlerStart);
-      console.info(`[search-stream] searchId=${searchId} sessionId=${sessionId ?? "-"} requestId=${getRequestId(c) ?? "-"} outcome=${label} cached=${cached} ttfhMs=${ttfhMs ?? "-"} events=${eventCount} bytes=${bytes} totalMs=${totalMs}`);
+      const outcomeLabel = stalled ? "stalled" : label;
+      console.info(`[search-stream] searchId=${searchId} sessionId=${sessionId ?? "-"} requestId=${getRequestId(c) ?? "-"} outcome=${outcomeLabel} detached=${detached ?? "-"} cached=${cached} ttfhMs=${ttfhMs ?? "-"} events=${eventCount} bytes=${bytes} totalMs=${totalMs}`);
     }
   });
   response.headers.set("Cache-Control", "no-cache, no-transform");

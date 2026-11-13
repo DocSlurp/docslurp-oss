@@ -236,6 +236,29 @@ describe("stream hit identity and dedupe", () => {
     expect(events.flatMap((event) => event.hits).filter((hit) => hit.result)).toHaveLength(6);
   });
 
+  it("never references a body the stream-wide cap kept back, even for a later duplicate in the same leg", () => {
+    const chunks = [chunk("a"), chunk("a"), chunk("b")];
+    // No body budget left: nothing is sent, and the duplicate must not become a body-less reference to an unsent body.
+    expect(policy().select("lexical", chunks, open(20, new Set(), 0))).toMatchObject({ hits: [], truncated: true });
+    // One body left: `a` gets it, its duplicate references it, `b` is held back.
+    const { hits, truncated } = policy().select("lexical", chunks, open(20, new Set(), 1));
+    expect(hits.map((hit) => [hit.id, Boolean(hit.result)])).toEqual([[searchChunkId(chunk("a")), true], [searchChunkId(chunk("a")), false]]);
+    expect(truncated).toBe(true);
+  });
+
+  it("builds no event for a stream that has closed", async () => {
+    const select = vi.fn(() => ({ hits: [], truncated: false }));
+    const s = sink();
+    let closed = false;
+    await withSearchStreamSink({ ...s.sink, closed: () => closed }, async () => {
+      await retrieveEvidence([adapter("lexical", async () => [chunk("a")])], context({ select }));
+      closed = true;
+      await retrieveEvidence([adapter("vector", async () => [chunk("b")])], context({ select }));
+    });
+    expect(select).toHaveBeenCalledTimes(1);
+    expect(s.events).toHaveLength(1);
+  });
+
   it("converts only the hits it sends", () => {
     const chunks = [chunk("a"), chunk("b"), chunk("c"), chunk("d")];
     const sent = new Set(["document:doc-a:0"]);

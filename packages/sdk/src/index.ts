@@ -11,6 +11,9 @@ export type * from "./ingest-report.js";
 import type { DocumentVersionEntry, DocumentViewerPayload } from "./document.js";
 export type * from "./document.js";
 
+/** One `search.results` frame is the whole search response, so the search stream accepts far larger frames than other streams (1 MiB). */
+const SEARCH_STREAM_MAX_FRAME_BYTES = 32 * 1_048_576;
+
 export type DocSlurpFetch = typeof fetch;
 
 /** Mirrors projectTemplateKeySchema on the server. */
@@ -1406,7 +1409,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     }
   }
 
-  async function* streamEventsAt(path: string, streamOptions: RequestOptions = {}, extraHeaders: Record<string, string> = {}, jsonBody?: string): AsyncGenerator<RunStreamEvent> {
+  async function* streamEventsAt(path: string, streamOptions: RequestOptions = {}, extraHeaders: Record<string, string> = {}, jsonBody?: string, maxFrameBytes?: number): AsyncGenerator<RunStreamEvent> {
     const bound = deadline(positiveDuration(streamOptions.timeoutMs ?? 300_000, "timeoutMs"), streamOptions.signal);
     let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
     const onAbort = () => { void reader?.cancel().catch(() => {}); };
@@ -1440,7 +1443,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
       reader = response.body.getReader();
       bound.signal.addEventListener("abort", onAbort, { once: true });
       bound.signal.throwIfAborted();
-      for await (const frame of readSse(reader)) {
+      for await (const frame of readSse(reader, maxFrameBytes)) {
         bound.signal.throwIfAborted();
         const data: unknown = JSON.parse(frame.data);
         if (!data || typeof data !== "object" || Array.isArray(data)) throw new Error("Invalid DocSlurp event payload");
@@ -1815,7 +1818,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
         if (transportMode !== "json") {
           try {
             const body = JSON.stringify({ ...searchFields, ...(stats === undefined ? {} : { stats }) });
-            for await (const frame of streamEventsAt("/v1/search/stream", requestOptions, {}, body)) {
+            for await (const frame of streamEventsAt("/v1/search/stream", requestOptions, {}, body, SEARCH_STREAM_MAX_FRAME_BYTES)) {
               received = true;
               const event = frame.data as unknown as SearchStreamEvent;
               if (!event || !SEARCH_STREAM_EVENT_TYPES.has(event.type)) continue;
@@ -1836,7 +1839,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
             // A drop after search.results keeps the answer.
             if (final) return;
             // After the first frame: a drop, a malformed frame or a stream without search.results is an error, never a second search.
-            const malformed = error instanceof SyntaxError || (error instanceof Error && error.message === "Invalid DocSlurp event payload") || (error instanceof Error && /exceeds 1 MiB/.test(error.message));
+            const malformed = error instanceof SyntaxError || (error instanceof Error && error.message === "Invalid DocSlurp event payload") || (error instanceof Error && /exceeds \d+ MiB/.test(error.message));
             if (received || malformed) throw interrupted();
             // Not started: only a missing endpoint or a non-stream 2xx may fall back. Auth, billing, rate-limit and validation refusals are real answers.
             if (error instanceof DocSlurpApiError) {

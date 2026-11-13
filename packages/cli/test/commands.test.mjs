@@ -544,6 +544,14 @@ test("search --stream prints legs as they land and the final ranking; --stats ad
   assert.match(result.stdout, /earnings\.pdf \(p\.4\)/);
 });
 
+test("search --stream accepts a search.results frame larger than 1 MiB", async () => {
+  const big = { ...streamHit, text: "y".repeat(3 * 1_048_576) };
+  const events = streamEvents.map((e) => e.type === "search.results" ? { ...e, response: { ...streamFinal, results: [big] } } : e);
+  const result = await invokeStream(["search", "revenue", "--stream", "--json"], (_req, res) => writeSse(res, events, 65536));
+  assert.equal(result.code, 0, result.stderr);
+  assert.deepEqual(result.stdout.trim().split("\n").map((line) => JSON.parse(line).type), events.map((e) => e.type));
+});
+
 test("search --stream --json prints one event per line", async () => {
   const result = await invokeStream(["search", "revenue", "--stream", "--json"], (_req, res) => writeSse(res, streamEvents));
   assert.equal(result.code, 0, result.stderr);
