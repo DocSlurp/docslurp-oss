@@ -23,6 +23,7 @@ import {
 } from "../extractors/sandboxed-pdf-batch.js";
 import { markFirstPassServedFigures, sandboxedPdfLayoutFacts, sandboxedPdfProvider, type SandboxedPdfFigureOutcome, type SandboxedPdfJob, type SandboxedPdfResult } from "../extractors/plugins.js";
 import type { PageLayoutFacts } from "../lib/page-layout-facts.js";
+import { pageFactsForResend } from "../extractors/sandboxed-pdf-page-facts.js";
 import { DopplerFigureRejection, disposeDopplerFigureSet, dopplerSourcePointer, readDopplerFigureDir, storeDopplerFigures, type DopplerFigureStorage } from "../extractors/doppler-figures.js";
 import { ledgerWriteForFailedFigures, ledgerWriteForStoredFigures, queueAssetLedger } from "../db/document-asset-ledger.js";
 import { planFirstPassBatches, type FirstPassBatchLimits } from "../temporal/first-pass-batches.js";
@@ -386,7 +387,9 @@ export async function runFirstPassBatch(deps: FirstPassBatchDeps, input: { runId
       timings.pages += event.pages;
       // The measured count first: recorded and authorized before anything that bills.
       await recordBatchPageCount(deps.store, state, document, event.pages, event.processedPages);
-      const cached: CachedResult = { markdownPath: file.output, result: { ...event.result, ...(sent?.layoutFacts !== undefined ? { layoutFacts: sent.layoutFacts } : {}) } };
+      // Page facts go on as the validated canonical lines (never the guest's raw bytes), to be accepted again when served.
+      const resentFacts = pageFactsForResend(batchFileJob(job, event.index)!);
+      const cached: CachedResult = { markdownPath: file.output, result: { ...event.result, ...(sent?.layoutFacts !== undefined ? { layoutFacts: sent.layoutFacts } : {}), ...(resentFacts !== undefined ? { pageFacts: resentFacts } : {}) } };
       if (persistResults) await persistBatchResult(deps.storage, state, document, cached);
       results.set(key(input.runId, file.documentId), cached);
       cachedKeys.push(key(input.runId, file.documentId));

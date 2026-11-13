@@ -233,17 +233,14 @@ describe("OpenRouter credential isolation", () => {
 
   it("never sends another provider's credential to OpenRouter", () => {
     vi.stubEnv("OPENROUTER_API_KEY", undefined);
-    vi.stubEnv("OPENROUTER_KEY", undefined);
+    vi.stubEnv("OPENROUTER_KEY", "removed-alias-test-key");
     vi.stubEnv("ANTHROPIC_API_KEY", "anthropic-only-test-key");
     expect(resolveOpenRouterApiKey()).toBeUndefined();
   });
 
-  it("accepts OpenRouter credentials and its legacy alias", () => {
+  it("reads only OPENROUTER_API_KEY", () => {
     vi.stubEnv("OPENROUTER_API_KEY", "router-primary-test-key");
-    vi.stubEnv("OPENROUTER_KEY", "router-alias-test-key");
     expect(resolveOpenRouterApiKey()).toBe("router-primary-test-key");
-    vi.stubEnv("OPENROUTER_API_KEY", undefined);
-    expect(resolveOpenRouterApiKey()).toBe("router-alias-test-key");
   });
 });
 
