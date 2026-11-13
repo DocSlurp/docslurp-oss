@@ -19,6 +19,7 @@ import { ApiKeyPolicyError, ClientKeyProjectsRequiredError, validateApiKey, type
 export { ApiKeyPolicyError, ClientKeyProjectsRequiredError };
 import { validateOAuthApiToken } from "../services/mcp-oauth.js";
 import { ensureDefaultProject, findProjectForInput, getProject, type ProjectInputScope } from "../services/projects.js";
+import { getProjectAccess, type ProjectAccess } from "../services/organizations.js";
 import { invalidProjectInputError, ProjectAccessError, projectInputNotFoundError } from "../services/default-project.js";
 
 export interface SessionUser {
@@ -274,34 +275,45 @@ export function assertActorProjectOrgScope(
   }
 }
 
-export async function loadActorScopedProject(
-  projectRef: string,
-  actor: RequestActor,
-  options: { refineNames?: boolean } = {},
-): Promise<ProjectRecord | null> {
+async function actorProjectRefId(projectRef: string, actor: RequestActor): Promise<string | undefined> {
   // A blank reference (e.g. a missing stored ID) is never the default project here.
-  if (!projectRef?.trim()) return null;
+  if (!projectRef?.trim()) return undefined;
   const ref = parseProjectInput(projectRef);
-  const projectId = ref.kind === "id"
+  return ref.kind === "id"
     ? ref.id
     : ref.kind === "default"
       ? await resolveActorProjectId(actor, null)
       : ref.kind === "slug"
         ? (await findProjectForInput(ref, actorProjectScope(actor)))?.id
         : undefined;
-  if (!projectId) return null;
-  const project = await getProject(projectId, actor.userId, options);
-  if (!project) {
-    return null;
-  }
+}
 
-  if (actor.type === "apiKey" && !apiKeyCanUseProject(actor.apiKey, project)) {
-    return null;
-  }
-
-  addTraceMetadata({ projectId: project.id, orgId: project.orgId });
+function admitActorProject<T extends { orgId: string }>(actor: RequestActor, projectId: string, project: T | null): T | null {
+  if (!project) return null;
+  if (actor.type === "apiKey" && !apiKeyCanUseProject(actor.apiKey, { id: projectId, orgId: project.orgId })) return null;
+  addTraceMetadata({ projectId, orgId: project.orgId });
   setCurrentRequestOrgId(project.orgId);
   return project;
+}
+
+export async function loadActorScopedProject(
+  projectRef: string,
+  actor: RequestActor,
+  options: { refineNames?: boolean } = {},
+): Promise<ProjectRecord | null> {
+  const projectId = await actorProjectRefId(projectRef, actor);
+  if (!projectId) return null;
+  return admitActorProject(actor, projectId, await getProject(projectId, actor.userId, options));
+}
+
+/**
+ * The access decision loadActorScopedProject makes (same reference resolution, membership rule and key allowlist),
+ * without the project record: no corpus, run and activity summary is read, so an access check stays one indexed query.
+ */
+export async function loadActorScopedProjectAccess(projectRef: string, actor: RequestActor): Promise<ProjectAccess | null> {
+  const projectId = await actorProjectRefId(projectRef, actor);
+  if (!projectId) return null;
+  return admitActorProject(actor, projectId, await getProjectAccess(projectId, actor.userId));
 }
 
 /**
@@ -325,8 +337,8 @@ export async function assertApiKeyProjectAccess(
   if (!actorHasAnyApiKeyScope(actor, scope === "search" ? [...SEARCH_SCOPES] : [scope])) {
     return apiErrorResponse(c, 403, "forbidden", "Forbidden");
   }
-  const project = await loadActorScopedProject(projectId, actor);
-  return project ? null : apiErrorResponse(c, 404, "project_not_found", "Project not found");
+  const access = await loadActorScopedProjectAccess(projectId, actor);
+  return access ? null : apiErrorResponse(c, 404, "project_not_found", "Project not found");
 }
 
 /**
