@@ -239,26 +239,28 @@ export async function withKeywordFanoutPostgresSlot<T>(fn: () => Promise<T>): Pr
   }
 }
 
+/** Shared by every leg of one fan-out: the first failure anywhere stops all of them from starting queries. */
+interface FanoutFailure { failure: { error: unknown } | null }
+
 /**
- * Runs `fn` over `items`, at most `limit` at once. After the first failure no further item starts; the call waits
- * for the ones already running and then rethrows, so no work outlives the search (and its admission slot).
+ * Runs `fn` over `items`, at most `limit` at once. After the first failure (in this call or any call sharing
+ * `state`) no further item starts; the call waits for the ones already running and then rethrows.
  */
-async function mapWithLimit<T, R>(items: readonly T[], limit: number, fn: (item: T, index: number) => Promise<R>): Promise<R[]> {
+async function mapWithLimit<T, R>(items: readonly T[], limit: number, fn: (item: T, index: number) => Promise<R>, state: FanoutFailure = { failure: null }): Promise<R[]> {
   const results = new Array<R>(items.length);
   let next = 0;
-  let failure: { error: unknown } | null = null;
   const worker = async () => {
-    while (!failure && next < items.length) {
+    while (!state.failure && next < items.length) {
       const index = next++;
       try {
         results[index] = await fn(items[index]!, index);
       } catch (error) {
-        failure ??= { error };
+        state.failure ??= { error };
       }
     }
   };
   await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
-  if (failure) throw (failure as { error: unknown }).error;
+  if (state.failure) throw state.failure.error;
   return results;
 }
 
@@ -289,10 +291,15 @@ export function createKeywordFanout(rawTerms: readonly string[]) {
   const matched = new Map<string, Set<number>>();
   const hitsByLeg = new Map<string, number[]>();
   const distinct = [...new Set(terms)];
+  const state: FanoutFailure = { failure: null };
+  const running = new Set<Promise<unknown>>();
   return {
     async search(leg: string, run: (term: string, depth: number) => Promise<SearchChunk[]>, limit: number): Promise<SearchChunk[]> {
       const depth = keywordFanoutDepth(limit, distinct.length);
-      const lists = await mapWithLimit(distinct, keywordFanoutConcurrency(), (term) => run(term, depth));
+      const mapped = mapWithLimit(distinct, keywordFanoutConcurrency(), (term) => run(term, depth), state);
+      running.add(mapped);
+      void mapped.catch(() => undefined).finally(() => running.delete(mapped));
+      const lists = await mapped;
       const hits = terms.map(() => 0);
       const best = new Map<string, number>();
       distinct.forEach((term, distinctIndex) => {
@@ -314,6 +321,14 @@ export function createKeywordFanout(rawTerms: readonly string[]) {
       return reciprocalRankFusion(lists).slice(0, limit)
         .map((chunk, index) => ({ ...chunk, score: 1 / (60 + index + 1), lexicalMatch: "partial" as const, queryRelevance: best.get(chunk.id) ?? 0 }));
     },
+    /**
+     * Waits until no leg has a query running. A failing leg makes the search reject while other legs are still
+     * finishing; the search awaits this before it returns or throws, so no fan-out work outlives its admission slot.
+     */
+    async settle(): Promise<void> {
+      if (!state.failure && running.size > 0) state.failure = { error: new Error("keyword fan-out search ended") };
+      while (running.size > 0) await Promise.allSettled([...running]);
+    },
     annotate(response: SearchResponse): void {
       response.keywordQueries = terms.map((q, index) => ({ q, hits: [...hitsByLeg.values()].reduce((sum, hits) => sum + hits[index]!, 0) }));
       response.results = response.results.map((result) => {
@@ -322,6 +337,15 @@ export function createKeywordFanout(rawTerms: readonly string[]) {
       });
     },
   };
+}
+
+/** Runs the search, then (success or failure) waits for every fan-out query still running. */
+async function withFanoutSettled<T>(fanout: { settle(): Promise<void> } | null, run: () => Promise<T>): Promise<T> {
+  try {
+    return await run();
+  } finally {
+    await fanout?.settle();
+  }
 }
 
 /** What the relevance floor did to this search. */
@@ -1911,7 +1935,7 @@ async function executeHybridSearch(
     return set.pageOnlyCompletedDocuments > 0;
   };
 
-  const response = await runSearchSession({
+  const response = await withFanoutSettled(fanout, () => runSearchSession({
     query,
     userId,
     options: setup.resolvedOptions,
@@ -2002,7 +2026,7 @@ async function executeHybridSearch(
           }
         : {}),
     },
-  });
+  }));
   // The mode the search ran in: billing categories and the public response read it.
   response.searchMode = mode;
   fanout?.annotate(response);

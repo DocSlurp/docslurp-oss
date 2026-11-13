@@ -127,4 +127,25 @@ describe("keyword fan-out", () => {
     expect(response.keywordQueries).toEqual([{ q: "x", hits: 3 }, { q: "y", hits: 1 }]);
     expect(response.results.map((item) => item.matchedQueries)).toEqual([[0], [1]]);
   });
+
+  it("a failure in one leg stops every leg, and settle waits for queries still running in any of them", async () => {
+    const fanout = createKeywordFanout(Array.from({ length: 100 }, (_, i) => `t${i}`));
+    let pageStarted = 0;
+    let pageRunning = 0;
+    // The page-text leg is slow; the chunk leg fails at once.
+    const page = fanout.search("progressive", async () => {
+      pageStarted += 1; pageRunning += 1;
+      try { await new Promise((resolve) => setTimeout(resolve, 15)); return []; } finally { pageRunning -= 1; }
+    }, 20);
+    void page.catch(() => undefined);
+    const text = fanout.search("text", async () => { throw new Error("statement timeout"); }, 20);
+    // What Promise.all in the retrieval stage sees: the search rejects while the page leg is still running.
+    await expect(Promise.all([text, page])).rejects.toThrow("statement timeout");
+    expect(pageRunning).toBeGreaterThan(0);
+    await fanout.settle();
+    expect(pageRunning).toBe(0);
+    // The page leg started only its first wave: the other leg's failure stopped it.
+    expect(pageStarted).toBe(16);
+    await expect(page).rejects.toThrow("statement timeout");
+  });
 });
