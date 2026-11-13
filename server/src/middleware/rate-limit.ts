@@ -1118,7 +1118,9 @@ export async function consumeFeatureRateLimits(args: {
     const windowMs = args.windows[index]!.windowMs;
     return { index, retryAfterSeconds: Math.max(1, Math.ceil((windowMs - (now % windowMs)) / 1000)) };
   };
-  const weight = Math.max(1, Math.floor(args.weight ?? 1));
+  const rawWeight = Math.floor(args.weight ?? 1);
+  // Non-finite or non-positive weights count as 1 (as the store does); NaN must not skip the size check below.
+  const weight = Number.isFinite(rawWeight) ? Math.max(1, rawWeight) : 1;
   const tooSmall = args.windows.findIndex((window) => window.limit <= 0 || window.limit < weight);
   if (tooSmall >= 0) return retryFor(tooSmall);
   // API_RATE_LIMIT_ENABLED=false turns off request limits, not this floor:
