@@ -10,7 +10,7 @@
 //
 //   node performance/chart-export-free-rungs/run-guest-in-modal-vm.mjs [--startup-only] [extra inputs dir]...
 // --startup-only measures worker and whole-guest startup with and without the optional compile cache, and stops.
-import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -44,6 +44,7 @@ try {
   for (const f of ["chart-export-extract.mjs", "chart-export-worker.mjs"]) await put(`${repo}worker/scripts/${f}`, `/bench/hooked/scripts/${f}`);
   await put(`${repo}worker/dist/chart-export/guest.bundle.mjs`, "/bench/worker/dist/chart-export/guest.bundle.mjs");
   for (const f of ["chart-export-extract.mjs", "chart-export-worker.mjs"]) await put(`${repo}worker/scripts/${f}`, `/bench/worker/scripts/${f}`);
+  await put(`${repo}worker/scripts/chart-guest-compile-cache.mjs`, "/bench/worker/scripts/chart-guest-compile-cache.mjs");
   for (const f of ["marker-cap-bench.mjs", "guest-repro-run.mjs", "worker-startup.mjs", "guest-startup.mjs"]) await put(`${here}${f}`, `/bench/${f}`);
   for (const dir of inputDirs) {
     for (const name of readdirSync(dir)) for (const f of ["input", "meta.json"]) await put(path.join(dir, name, f), `/in/${path.basename(dir)}/${name}/${f}`);
@@ -64,6 +65,17 @@ try {
     for (const [fault, extraEnv] of [["crash:svg[50]", {}], ["hang:svg[50]", { DOCSLURP_CHART_GUEST_TEST_UNIT_MS: "2000" }], ["oom:svg[50]", {}]]) {
       const out = await exec(["node", "/bench/guest-repro-run.mjs", "/bench/hooked", "/in/fault"], { DOCSLURP_CHART_GUEST_TEST_FAULT: fault, ...extraEnv });
       process.stdout.write(out.replace(/"name":"legit"/, `"name":"legit+${fault}"`));
+    }
+    // Council r10: a crash after a 64 KB part name (field caps on reassembly) and after the output budget fills (stable
+    // unit ids on resume), when those inputs are among the extra directories.
+    for (const [name, fault] of [["longLocEpub", "crash:z.xhtml#svg"], ["divergeEpub", "crash:c.xhtml#"]]) {
+      for (const dir of extra) {
+        if (!inputDirs.some((d) => existsSync(path.join(d, name)))) continue;
+        await exec(["sh", "-c", `test -d ${dir}/${name} && mkdir -p /in/f-${name} && cp -r ${dir}/${name} /in/f-${name}/`]);
+      }
+      if (!inputDirs.some((d) => existsSync(path.join(d, name)))) continue;
+      const out = await exec(["node", "/bench/guest-repro-run.mjs", "/bench/hooked", `/in/f-${name}`], { DOCSLURP_CHART_GUEST_TEST_FAULT: fault });
+      process.stdout.write(out.replace(`"name":"${name}"`, `"name":"${name}+${fault}"`));
     }
   }
 } finally {

@@ -19,7 +19,9 @@ function run(dir) {
   writeFileSync(request, JSON.stringify({ kind: meta.kind, diagrams: true, budgetMs: 45_000 }));
   return new Promise((resolve) => {
     const t0 = Date.now();
-    const child = spawn("node", ["--disallow-code-generation-from-strings", guest, path.join(dir, "input"), request, output], { stdio: ["ignore", "ignore", "pipe"] });
+    const env = { ...process.env };
+    delete env.NODE_COMPILE_CACHE; // the guest refuses an inherited compile cache
+    const child = spawn(process.execPath, ["--disallow-code-generation-from-strings", guest, path.join(dir, "input"), request, output], { stdio: ["ignore", "ignore", "pipe"], env });
     let peakKb = 0, err = "";
     child.stderr.on("data", (d) => { err = (err + d).slice(-400); });
     const poll = setInterval(() => { peakKb = Math.max(peakKb, peakOf(child.pid)); }, 25);

@@ -4,7 +4,8 @@
 import { describe, expect, it } from "vitest";
 
 import { CHART_EXTRACT_LIMITS } from "../limits.js";
-import { mergeDeferred, reassembleUnits, resultVisualBytes, resumeSkipList, visualBytes, type FailedUnit, type FinishedUnit } from "../reassemble.js";
+import { validateDeterministicResult } from "../host.js";
+import { fitResult, MAX_RESULT_BYTES, mergeDeferred, reassembleUnits, resultVisualBytes, resumeSkipList, visualBytes, type FailedUnit, type FinishedUnit } from "../reassemble.js";
 import { emptyVisual, type DeterministicDeferral, type DeterministicVisualResult } from "../types.js";
 import type { UnitDelta } from "../index.js";
 
@@ -58,13 +59,13 @@ describe("reassembleUnits", () => {
     const visual = (k: number) => {
       const v = emptyVisual("svg-geometry", `svg[${k}]`);
       v.reason = random() < 0.2 ? "图".repeat(int(60)) + "😀" : null;
-      v.digest = "x".repeat(int(4000));
+      v.digest = "x".repeat(int(CHART_EXTRACT_LIMITS.maxDigestChars));
       return v;
     };
     const deferral = (): DeterministicDeferral => ({ svgIndex: int(500), count: 1 + int(5), reason: REASONS[int(REASONS.length)]! });
     const delta = (): UnitDelta => {
       const visuals = Array.from({ length: int(random() < 0.05 ? 300 : 4) }, (_, k) => visual(k));
-      return { visuals, refusals: Array.from({ length: int(random() < 0.05 ? 1200 : 3) }, (_, k) => ({ locator: `p${k}`, reason: "svg-too-dense" })), deferred: Array.from({ length: int(3) }, deferral), overflow: int(3), bytes: visuals.reduce((n, v) => n + visualBytes(v), 0) };
+      return { visuals, refusals: Array.from({ length: int(random() < 0.05 ? 1200 : 3) }, (_, k) => ({ locator: `p${k}`, reason: "svg-too-dense" })), deferred: Array.from({ length: int(3) }, deferral), overflow: int(3), bytes: visuals.reduce((n, v) => n + visualBytes(v), 0), full: null };
     };
     let differing = 0;
     for (let s = 0; s < 2000; s++) {
@@ -101,8 +102,8 @@ describe("reassembleUnits", () => {
 
   it("charges finished units and failed units in the resume skip list", () => {
     const v = emptyVisual("svg-geometry", "svg[0]");
-    const done = new Map<number, FinishedUnit>([[3, { worker: 0, delta: { visuals: [v], refusals: [], deferred: [], overflow: 0, bytes: visualBytes(v) } }]]);
-    expect(resumeSkipList(done, [5])).toEqual([[3, { visuals: 1, bytes: visualBytes(v) }], [5, { visuals: 0, bytes: 0 }]]);
+    const done = new Map<number, FinishedUnit>([[3, { worker: 0, delta: { visuals: [v], refusals: [], deferred: [], overflow: 0, bytes: visualBytes(v), full: "output-limit" } }]]);
+    expect(resumeSkipList(done, [5])).toEqual([[3, { visuals: 1, bytes: visualBytes(v), full: "output-limit" }], [5, { visuals: 0, bytes: 0, full: null }]]);
   });
 
   it("merges per-input reasons and counts bytes as the extractor does", () => {
@@ -111,5 +112,42 @@ describe("reassembleUnits", () => {
     const v = emptyVisual("svg-geometry", "图😀");
     expect(visualBytes(v)).toBe(Buffer.byteLength(JSON.stringify(v)));
     expect(resultVisualBytes({ visuals: [v, v] })).toBe(2 * visualBytes(v));
+  });
+
+  it("caps every field after a failure exactly as the normal path does, and the host accepts it (council r10 M1)", () => {
+    const long = "L".repeat(64_000);
+    const v = { ...emptyVisual("svg-geometry", `${long}#svg[0]`), sheet: long, generator: long, reason: long, digest: long };
+    const delta: UnitDelta = { visuals: [v], refusals: Array.from({ length: 1200 }, () => ({ locator: long, reason: long })), deferred: [], overflow: 0, bytes: visualBytes(v), full: null };
+    const r = reassembleUnits({ done: new Map([[0, { delta, worker: 0 }]]), failed: [{ id: 1, svgIndex: 1, reason: "unit-crashed" }], final: null, lastWorker: 1, unplaced: { svgIndex: 2, locator: long }, outputBudget: CHART_EXTRACT_LIMITS.maxOutputBytes });
+    expect(() => validateDeterministicResult(JSON.parse(JSON.stringify(r)))).not.toThrow();
+    expect(r.visuals[0]!.locator).toHaveLength(512);
+    expect(r.visuals[0]!.digest).toHaveLength(CHART_EXTRACT_LIMITS.maxDigestChars);
+    expect(r.refusals).toHaveLength(1000);
+    expect(r.refusals.every((x) => x.locator.length === 512 && x.reason.length === 120)).toBe(true);
+    expect(r.overflow).toBe(201);
+    expect(Buffer.byteLength(JSON.stringify(r))).toBeLessThan(MAX_RESULT_BYTES);
+  });
+
+  it("fitResult holds a result to its size budget, counting what it cuts, never throwing", () => {
+    const visuals = Array.from({ length: 50 }, (_, k) => ({ ...emptyVisual("svg-geometry", `svg[${k}]`), digest: "d".repeat(3000) }));
+    const refusals = Array.from({ length: 200 }, (_, k) => ({ locator: `p${k}`.padEnd(400, "x"), reason: "svg-too-dense" }));
+    const r: DeterministicVisualResult = { schemaVersion: "chart-export-deterministic@v1", visuals, refusals, deferred: [{ svgIndex: 3, count: 2, reason: "output-limit" }] };
+    expect(fitResult(r, 10 * 1024 * 1024)).toBe(r);
+    // Refusals go first, then visuals.
+    const a = fitResult(r, Buffer.byteLength(JSON.stringify(r)) - 20_000);
+    expect(a.visuals).toHaveLength(50);
+    expect(a.refusals.length).toBeLessThan(200);
+    expect(a.overflow).toBe(200 - a.refusals.length);
+    const b = fitResult(r, 80_000);
+    expect(Buffer.byteLength(JSON.stringify(b))).toBeLessThanOrEqual(80_000);
+    expect(b.refusals).toEqual([]);
+    expect(b.overflow).toBe(200);
+    const cut = 50 - b.visuals.length;
+    expect(cut).toBeGreaterThan(0);
+    expect(b.deferred).toEqual([{ svgIndex: 0, count: 2 + cut, reason: "output-limit" }]);
+    // Even a budget too small for anything returns counts, not an exception.
+    const c = fitResult(r, 10);
+    expect(c.visuals).toEqual([]);
+    expect(c.deferred).toEqual([{ svgIndex: 0, count: 50, reason: "output-limit" }]);
   });
 });

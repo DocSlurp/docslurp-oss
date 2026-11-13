@@ -4,6 +4,7 @@ import { asciiLower, indexFrom, type ScanWork } from "./scan.js";
 import { extractOfficeCharts } from "./office-chart-xml.js";
 import { openZipPackage } from "./safe-zip.js";
 import { clamp01, finalizeChart, utf8Bytes } from "./spec-utils.js";
+import { capRefusal, capVisual } from "./result-caps.js";
 import { buildScene } from "./svg-scene.js";
 import { approximateVertexMarkers, prepareSvgChart, withoutVertexMarkers, type PreparedSvgChart, type SvgChartAnalysis } from "./svg-geometry.js";
 import { detectDiagramGenerator, graphvizDiagram, mermaidFlowchart } from "./svg-diagram.js";
@@ -53,10 +54,15 @@ export interface UnitDelta {
   overflow: number;
   /** Serialized bytes of `visuals` (charged to the output budget). */
   bytes: number;
+  /** Whether the input was full (and why) when this unit ended: replayed on resume, never re-derived (council r10 L1). */
+  full: "visual-limit" | "output-limit" | null;
 }
 
-/** What a skipped unit had produced: its visuals count and their bytes, charged again so budgets stay where they were. */
-export interface UnitCharge { visuals: number; bytes: number }
+/**
+ * What a skipped unit had produced: its visuals count and their bytes, charged again so budgets stay where they were,
+ * and the input's full state after it, so a resumed worker takes exactly the path the first one took (same unit ids).
+ */
+export interface UnitCharge { visuals: number; bytes: number; full?: "visual-limit" | "output-limit" | null }
 
 export interface UnitControl {
   /** Units not to run again (finished by an earlier worker, or failed in it), with what each produced. */
@@ -122,8 +128,9 @@ function runUnit(acc: Acc, locator: string, svg: boolean, fn: () => void) {
     if (svg) acc.svgs++;
     acc.baseVisuals += skipped.visuals;
     acc.bytes += skipped.bytes;
-    if (acc.visuals.length + acc.baseVisuals >= CHART_EXTRACT_LIMITS.maxVisuals) { acc.full = true; acc.fullReason = "visual-limit"; }
-    else if (acc.bytes >= acc.budget) { acc.full = true; acc.fullReason = "output-limit"; }
+    // The full state the first worker had after this unit: re-deriving it from counts differs (the first worker sets it
+    // only when a visual fails to fit), which shifted later unit ids (council r10 L1).
+    if (skipped.full) { acc.full = true; acc.fullReason = skipped.full; }
     return;
   }
   const v0 = acc.visuals.length, r0 = acc.refusals.length, o0 = acc.overflow, b0 = acc.bytes;
@@ -135,7 +142,11 @@ function runUnit(acc: Acc, locator: string, svg: boolean, fn: () => void) {
     const before = i < d0.length && d0[i]!.reason === d.reason ? d0[i]!.count : 0;
     if (d.count > before) deferred.push({ svgIndex: d.svgIndex, count: d.count - before, reason: d.reason });
   });
-  ctl.onDone(id, { visuals: acc.visuals.slice(v0), refusals: acc.refusals.slice(r0), deferred, overflow: acc.overflow - o0, bytes: acc.bytes - b0 });
+  // Capped exactly as the result is, so a delta is bounded on the wire and in any reassembly (council r10 M1). Refusals
+  // past the result's 1,000 are counted, not carried.
+  const refused = acc.refusals.slice(r0);
+  const room = Math.max(0, 1000 - r0);
+  ctl.onDone(id, { visuals: acc.visuals.slice(v0).map(capVisual), refusals: refused.slice(0, room).map(capRefusal), deferred, overflow: acc.overflow - o0 + Math.max(0, refused.length - room), bytes: acc.bytes - b0, full: acc.full ? acc.fullReason : null });
 }
 
 /**
@@ -479,11 +490,10 @@ export function extractDeterministicVisuals(input: DeterministicVisualInput, opt
   // Media SVGs / EPUB parts past the package cap: counted (as parts), never silently skipped (council r6 L1).
   addDeferral(acc, "package-part-limit", partsDropped, false);
   const { visuals, refusals } = acc;
-  const cap = (s: string | null, n: number) => (s === null ? null : s.slice(0, n));
   return {
     schemaVersion: "chart-export-deterministic@v1",
-    visuals: visuals.map((v) => ({ ...v, locator: v.locator.slice(0, 512), sheet: cap(v.sheet, 200), generator: cap(v.generator, 40), reason: cap(v.reason, 120), digest: cap(v.digest, CHART_EXTRACT_LIMITS.maxDigestChars) })),
-    refusals: refusals.slice(0, 1000).map((r) => ({ locator: r.locator.slice(0, 512), reason: r.reason.slice(0, 120) })),
+    visuals: visuals.map(capVisual),
+    refusals: refusals.slice(0, 1000).map(capRefusal),
     // Refusals past the 1,000 kept, and embedded-spec candidates past their caps or the deadline: one count.
     ...(acc.overflow + Math.max(0, refusals.length - 1000) > 0 ? { overflow: acc.overflow + Math.max(0, refusals.length - 1000) } : {}),
     // Only when something was deferred, so every other result keeps today's exact shape (and older hosts accept it).

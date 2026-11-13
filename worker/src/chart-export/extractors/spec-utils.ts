@@ -16,8 +16,8 @@ export function utf8Bytes(s: string): number {
   return n;
 }
 
-/** Serialized bytes charged per point besides its label: `{"x":…,"y":…,"z":…},` with numbers. */
-const POINT_OVERHEAD_BYTES = 64;
+/** Bytes reserved per chart for everything but series and points (title, axes, source, summary, keys). */
+const CHART_ENVELOPE_BYTES = 4096;
 
 type ChartType = ChartSpec["chartType"];
 type Axis = ChartSpec["xAxis"];
@@ -53,32 +53,49 @@ function axis(partial: Partial<Axis> | undefined, scale: Axis["scale"]): Axis {
   };
 }
 
+type Point = { x: string | number; y: number | null; z?: number | null };
+
+function cleanPoint(p: DraftSeries["points"][number]): Point {
+  const point: Point = {
+    x: typeof p.x === "number" ? (Number.isFinite(p.x) ? p.x : cleanLabel(String(p.x))) : cleanLabel(p.x),
+    y: typeof p.y === "number" && Number.isFinite(p.y) ? p.y : null,
+  };
+  if (p.z !== undefined) point.z = typeof p.z === "number" && Number.isFinite(p.z) ? p.z : null;
+  return point;
+}
+
 /** Clamp a draft into the contract's limits and validate it; never throws. */
 export function finalizeChart(draft: DraftChart): FinalizedChart {
   let truncated = draft.series.length > VISUAL_SPEC_LIMITS.maxSeries;
-  // One budget per chart, in series order: points kept and their serialized size (council r9 H1). Past it the rest is
-  // cut, the chart kept and marked truncated; ordinary charts are far under it and unchanged.
-  let points = 0, bytes = 0;
-  const series = draft.series.slice(0, VISUAL_SPEC_LIMITS.maxSeries).map((s, i) => {
+  // One budget per chart (council r9 H1): at most maxChartPoints points and maxChartBytes serialized. Each point is
+  // charged its real JSON size (escapes included) and each series its own keys (council r10 L2). Points are taken a row
+  // at a time across the series (round-robin), so a chart over the budget keeps every series, each cut to the same
+  // length, instead of its first few whole. Ordinary charts are far under the budget and unchanged.
+  const drafts = draft.series.slice(0, VISUAL_SPEC_LIMITS.maxSeries);
+  const series = drafts.map((s, i) => {
     if (s.points.length > VISUAL_SPEC_LIMITS.maxPointsPerSeries) truncated = true;
-    const name = cleanLabel(s.name) || `Series ${i + 1}`;
-    bytes += utf8Bytes(name) + POINT_OVERHEAD_BYTES;
-    const kept: Array<{ x: string | number; y: number | null; z?: number | null }> = [];
-    for (const p of s.points.slice(0, VISUAL_SPEC_LIMITS.maxPointsPerSeries)) {
-      const point: { x: string | number; y: number | null; z?: number | null } = {
-        x: typeof p.x === "number" ? (Number.isFinite(p.x) ? p.x : cleanLabel(String(p.x))) : cleanLabel(p.x),
-        y: typeof p.y === "number" && Number.isFinite(p.y) ? p.y : null,
-      };
-      if (p.z !== undefined) point.z = typeof p.z === "number" && Number.isFinite(p.z) ? p.z : null;
-      const cost = (typeof point.x === "string" ? utf8Bytes(point.x) : 0) + POINT_OVERHEAD_BYTES;
-      if (points + 1 > CHART_EXTRACT_LIMITS.maxChartPoints || bytes + cost > CHART_EXTRACT_LIMITS.maxChartBytes) { truncated = true; break; }
+    return { name: cleanLabel(s.name) || `Series ${i + 1}`, mark: s.mark ?? null, axis: s.axis ?? "y", points: [] as Point[] };
+  });
+  const lengths = drafts.map((s) => Math.min(s.points.length, VISUAL_SPEC_LIMITS.maxPointsPerSeries));
+  let points = 0;
+  let bytes = CHART_ENVELOPE_BYTES;
+  for (const s of series) bytes += utf8Bytes(JSON.stringify(s)) + 1;
+  const rows = Math.max(0, ...lengths);
+  let full = bytes > CHART_EXTRACT_LIMITS.maxChartBytes;
+  for (let r = 0; r < rows && !full; r++) {
+    for (let k = 0; k < series.length; k++) {
+      if (r >= lengths[k]!) continue;
+      const point = cleanPoint(drafts[k]!.points[r]!);
+      const cost = utf8Bytes(JSON.stringify(point)) + 1;
+      if (points + 1 > CHART_EXTRACT_LIMITS.maxChartPoints || bytes + cost > CHART_EXTRACT_LIMITS.maxChartBytes) { full = true; break; }
       points++;
       bytes += cost;
-      kept.push(point);
+      series[k]!.points.push(point);
     }
-    return { name, mark: s.mark ?? null, axis: s.axis ?? "y", points: kept };
-  }).filter((s) => s.points.length > 0);
-  if (!series.length) return { spec: null, truncated, reason: "no-series" };
+  }
+  if (full) truncated = true;
+  const kept = series.filter((s) => s.points.length > 0);
+  if (!kept.length) return { spec: null, truncated, reason: "no-series" };
   const candidate = {
     kind: "chart" as const,
     chartType: draft.chartType,
@@ -86,7 +103,7 @@ export function finalizeChart(draft: DraftChart): FinalizedChart {
     xAxis: axis(draft.xAxis, "band"),
     yAxis: axis(draft.yAxis, "linear"),
     y2Axis: draft.y2Axis ? axis(draft.y2Axis, "linear") : null,
-    series,
+    series: kept,
     source: cleanLabelOrNull(draft.source ?? null),
     summary: cleanLabel(draft.summary ?? "", VISUAL_SPEC_LIMITS.maxSummaryChars),
   };

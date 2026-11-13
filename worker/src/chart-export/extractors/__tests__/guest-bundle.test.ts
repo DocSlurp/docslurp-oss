@@ -2,9 +2,9 @@
 // scripts/bundle-chart-guest.mjs); every other test imports src/. This runs the real guest script on Office, SVG,
 // embedded-spec and batch inputs and requires output byte-identical to in-process extraction from src/. CI builds the
 // worker before the worker suites, so the bundle must exist there; a local run without a build skips.
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { copyFile, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, copyFile, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -13,7 +13,8 @@ import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { extractDeterministicVisuals } from "../index.js";
-import { barPlot, chartXml, docx, genericBar, linePlot, matplotlibBar, MERMAID_FLOWCHART, pptx, vegaBar, xlsx } from "./fixtures.js";
+import { validateDeterministicResult } from "../host.js";
+import { barPlot, chartXml, docx, genericBar, linePlot, matplotlibBar, MERMAID_FLOWCHART, pptx, vegaBar, xlsx, zip } from "./fixtures.js";
 
 const run = promisify(execFile);
 const workerRoot = fileURLToPath(new URL("../../../../", import.meta.url));
@@ -31,6 +32,13 @@ describe.skipIf(!built)("chart-export guest bundle (the production guest)", () =
   beforeAll(async () => { dir = await mkdtemp(path.join(process.env.TMPDIR || os.tmpdir(), "chart-guest-")); });
   afterAll(async () => { await rm(dir, { recursive: true, force: true }); });
 
+  /** The test's environment without an inherited compile cache (the guest refuses one; production passes no env). */
+  const guestEnv = (extra: Record<string, string>) => {
+    const env: Record<string, string | undefined> = { ...process.env, ...extra };
+    if (!("NODE_COMPILE_CACHE" in extra)) delete env.NODE_COMPILE_CACHE;
+    return env;
+  };
+
   async function guest(kind: string, files: Array<string | Uint8Array>, extra: Record<string, unknown> = {}, env: Record<string, string> = {}, script = guestScript): Promise<string> {
     const inputs: string[] = [];
     for (const [k, body] of files.entries()) {
@@ -42,7 +50,7 @@ describe.skipIf(!built)("chart-export guest bundle (the production guest)", () =
     const output = path.join(dir, `output-${Math.random().toString(36).slice(2)}.json`);
     await writeFile(request, JSON.stringify({ kind, ...extra }));
     // As the host runs it: V8 code generation from strings disabled (eval, the Function constructor).
-    await run(process.execPath, ["--disallow-code-generation-from-strings", script, inputs[0]!, request, output, ...inputs.slice(1)], { cwd: workerRoot, env: { ...process.env, ...env } });
+    await run(process.execPath, ["--disallow-code-generation-from-strings", script, inputs[0]!, request, output, ...inputs.slice(1)], { cwd: workerRoot, env: guestEnv(env) });
     return readFile(output, "utf8");
   }
 
@@ -118,18 +126,72 @@ describe.skipIf(!built)("chart-export guest bundle (the production guest)", () =
     expect(JSON.parse(stdout)).toEqual({ calls: 0, visuals: 1, spec: true });
   });
 
-  describe("optional V8 compile cache (off unless the request names a directory)", () => {
+  describe("optional V8 compile cache (off unless the request names a directory the guest cannot write)", () => {
     const bytes = () => xlsx("S", [["q", "v"], ["Q1", 1], ["Q2", 2], ["Q3", 3]], chart);
+    /** Run the guest directly (argv as the host passes it), returning stdout-free output and stderr. */
+    async function guestRaw(b: Uint8Array, request: Record<string, unknown>, env: Record<string, string> = {}, wrap: string[] = []): Promise<{ out: string; stderr: string }> {
+      const input = path.join(dir, `cc-in-${Math.random().toString(36).slice(2)}`);
+      const req = path.join(dir, `cc-req-${Math.random().toString(36).slice(2)}.json`);
+      const output = path.join(dir, `cc-out-${Math.random().toString(36).slice(2)}.json`);
+      await writeFile(input, b);
+      await writeFile(req, JSON.stringify({ kind: "office", ...request }));
+      const argv = [process.execPath, "--disallow-code-generation-from-strings", guestScript, input, req, output];
+      const [cmd, ...args] = wrap.length ? [...wrap, ...argv] : argv;
+      const { stderr } = await run(cmd!, args, { cwd: workerRoot, env: guestEnv(env) });
+      return { out: await readFile(output, "utf8"), stderr };
+    }
 
-    it("gives identical output, writes the cache, and reuses it", async () => {
-      const cache = path.join(dir, "compile-cache");
+    it("a writable directory is not used: same output, nothing written, the reason logged", async () => {
+      const cache = path.join(dir, "cc-writable");
+      await mkdir(cache);
       const b = bytes();
-      const want = JSON.stringify(extractDeterministicVisuals({ kind: "office", bytes: b }));
-      expect(await guest("office", [b], { compileCacheDir: cache })).toBe(want);
-      const entries = await readdir(cache, { recursive: true });
-      expect(entries.length).toBeGreaterThan(0);
-      // Warm: the same output again.
-      expect(await guest("office", [b], { compileCacheDir: cache })).toBe(want);
+      const { out, stderr } = await guestRaw(b, { compileCacheDir: cache });
+      expect(out).toBe(JSON.stringify(extractDeterministicVisuals({ kind: "office", bytes: b })));
+      expect(stderr).toMatch(/compile cache disabled: (writable|owned by the guest user)/);
+      expect(await readdir(cache)).toEqual([]);
+    });
+
+    it("a read-only directory the guest user owns is not used (it could chmod it back)", async () => {
+      if (!process.getuid || process.getuid() === 0) return;
+      const cache = path.join(dir, "cc-owned");
+      await mkdir(cache);
+      await chmod(cache, 0o555);
+      try {
+        const { stderr } = await guestRaw(bytes(), { compileCacheDir: cache });
+        expect(stderr).toMatch(/compile cache disabled: owned by the guest user/);
+      } finally { await chmod(cache, 0o755); }
+    });
+
+    it("a missing directory is not used", async () => {
+      const { stderr } = await guestRaw(bytes(), { compileCacheDir: path.join(dir, "cc-missing") });
+      expect(stderr).toMatch(/compile cache disabled: unreadable/);
+    });
+
+    it("refuses a compile cache inherited through the environment", async () => {
+      await expect(guestRaw(bytes(), {}, { NODE_COMPILE_CACHE: path.join(dir, "cc-env") })).rejects.toThrow(/inherited compile cache/);
+    });
+
+    // A prepared cache on a read-only mount, as production would mount it: a user and mount namespace (`unshare -rm`)
+    // gives a read-only bind mount without privileges. Skipped where unavailable.
+    const canUnshare = (() => { try { execFileSync("unshare", ["-rm", "true"], { stdio: "ignore" }); return true; } catch { return false; } })();
+    it.skipIf(!canUnshare)("a prepared cache on a read-only mount is used by the parent and the worker, unchanged, with identical output", async () => {
+      const cache = path.join(dir, "cc-prepared");
+      // Node keys the cache by uid, so it is prepared as the user the guest runs as (here uid 0 in the namespace).
+      await run("unshare", ["-r", process.execPath, "--disallow-code-generation-from-strings", path.join(workerRoot, "scripts/chart-guest-compile-cache.mjs"), cache], { cwd: workerRoot, env: guestEnv({}) });
+      const before = (await readdir(cache, { recursive: true })).sort();
+      expect(before.length).toBeGreaterThan(0);
+      const b = bytes();
+      const q = (x: string) => `'${x.replace(/'/g, "'\\''")}'`;
+      const input = path.join(dir, "cc-ro-in"), req = path.join(dir, "cc-ro-req.json"), output = path.join(dir, "cc-ro-out.json");
+      await writeFile(input, b);
+      await writeFile(req, JSON.stringify({ kind: "office", compileCacheDir: cache }));
+      const script = `mount --bind ${q(cache)} ${q(cache)} && mount -o remount,bind,ro ${q(cache)} && exec ${q(process.execPath)} --disallow-code-generation-from-strings ${q(guestScript)} ${q(input)} ${q(req)} ${q(output)}`;
+      const { stderr } = await run("unshare", ["-rm", "sh", "-c", script], { cwd: workerRoot, env: guestEnv({ NODE_DEBUG_NATIVE: "COMPILE_CACHE" }) });
+      expect(stderr).not.toMatch(/compile cache disabled/);
+      // Node's own compile-cache log: the bundle's cached code was accepted in the parent and in the worker.
+      expect(stderr.match(/guest\.bundle\.mjs was accepted/g)).toHaveLength(2);
+      expect(await readFile(output, "utf8")).toBe(JSON.stringify(extractDeterministicVisuals({ kind: "office", bytes: b })));
+      expect((await readdir(cache, { recursive: true })).sort()).toEqual(before);
     });
 
     it("leaves code generation from strings blocked with a warm cache", async () => {
@@ -199,6 +261,52 @@ describe.skipIf(!built)("chart-export guest bundle (the production guest)", () =
       const out = JSON.parse(await faulty("html", [html], { DOCSLURP_CHART_GUEST_TEST_FAULT: "oom:svg[2]", DOCSLURP_CHART_GUEST_TEST_HEAP_MB: "64" }));
       expect(out.visuals.map((v: { locator: string }) => v.locator)).toEqual(["svg[0]", "svg[1]"]);
       expect(out.deferred).toEqual([{ svgIndex: 2, count: 1, reason: "unit-crashed" }]);
+    });
+
+    // Council r10 M1: after a unit failure the reassembled result is held to the same field caps and size cap as the
+    // normal path, so the host accepts it and the surviving visuals are kept.
+    it("a 64 KB part name with a crashed unit: locators capped, the host accepts the result, the chart survives", async () => {
+      const long = "d".repeat(64_000);
+      const bar = genericBar(["a", "b"], [1, 2], 4);
+      const bytes = zip({ [`${long}/a.xhtml`]: `<html><body>${bar}<p>x</p></body></html>`, [`${long}/b.svg`]: "<svg><g></svg>", "z.xhtml": `<html><body>${bar}</body></html>` });
+      const out = JSON.parse(await faulty("epub", [bytes], { DOCSLURP_CHART_GUEST_TEST_FAULT: "crash:z.xhtml#svg" }));
+      expect(() => validateDeterministicResult(out)).not.toThrow();
+      expect(out.visuals).toHaveLength(1);
+      expect(out.refusals).toHaveLength(1);
+      expect(Math.max(...out.visuals.map((v: { locator: string }) => v.locator.length), ...out.refusals.map((r: { locator: string }) => r.locator.length))).toBe(512);
+      expect(out.deferred).toEqual([{ svgIndex: 2, count: 1, reason: "unit-crashed" }]);
+    });
+
+    it("refusal flooding with 64 KB locators after a crash stays a valid, bounded result (no throw, no guest-unavailable)", async () => {
+      // 398 broken inline SVGs (two pages, under the per-page cap) under a 64 KB directory name (≈ 25 MB of locators
+      // uncapped), then a crashing unit.
+      const long = "e".repeat(64_000);
+      const bar = genericBar(["a", "b"], [1, 2], 4);
+      const broken = `<html><body>${"<svg><g></svg>".repeat(199)}</body></html>`;
+      const bytes = zip({ [`${long}/a.xhtml`]: broken, [`${long}/b.xhtml`]: broken, "z.xhtml": `<html><body>${bar}</body></html>` });
+      const raw = await faulty("epub", [bytes], { DOCSLURP_CHART_GUEST_TEST_FAULT: "crash:z.xhtml#svg" });
+      expect(Buffer.byteLength(raw)).toBeLessThan(1024 * 1024);
+      const out = JSON.parse(raw);
+      expect(() => validateDeterministicResult(out)).not.toThrow();
+      expect(out.refusals).toHaveLength(398);
+      expect(out.refusals.every((r: { locator: string }) => r.locator.length <= 512)).toBe(true);
+      expect(out.deferred).toEqual([{ svgIndex: 398, count: 1, reason: "unit-crashed" }]);
+    });
+
+    // Council r10 L1: a crash after the output budget fills resumes on the same unit ids: one unit counted once, every
+    // SVG counted.
+    it("fill the output budget, then crash a later unit: exactly one unit-crashed, nothing double-counted or lost", async () => {
+      const vl = (seed: number) => JSON.stringify({ $schema: "https://vega.github.io/schema/vega-lite/v5.json", mark: "bar", data: { values: Array.from({ length: 2000 }, (_, i) => ({ a: (`R${seed}-${i}-` + "x".repeat(200)).slice(0, 200), b: i })) }, encoding: { x: { field: "a", type: "nominal" }, y: { field: "b", type: "quantitative" } } });
+      const page = (n: number, seed: number) => `<html><body>${Array.from({ length: n }, (_, k) => `<script type="application/json">${vl(seed * 100 + k)}</script>`).join("")}</body></html>`;
+      const bytes = zip({ "a1.xhtml": page(10, 1), "a2.xhtml": page(10, 2), "a3.xhtml": page(10, 3), "b.svg": genericBar(["a", "b"], [1, 2], 4), "c.xhtml": `<html><body><script type="application/json">${vl(9)}</script></body></html>` });
+      const plainOut = extractDeterministicVisuals({ kind: "epub", bytes });
+      const total = (r: { deferred?: Array<{ count: number }> }) => (r.deferred ?? []).reduce((n, d) => n + d.count, 0);
+      const out = JSON.parse(await faulty("epub", [bytes], { DOCSLURP_CHART_GUEST_TEST_FAULT: "crash:c.xhtml#" }));
+      expect(out.visuals).toEqual(JSON.parse(JSON.stringify(plainOut.visuals)));
+      expect(out.deferred.filter((d: { reason: string }) => d.reason === "unit-crashed")).toEqual([expect.objectContaining({ count: 1 })]);
+      // c's chart is lost to the crash instead of to the budget; every other count is the same.
+      expect(total(out)).toBe(total(plainOut));
+      expect(() => validateDeterministicResult(out)).not.toThrow();
     });
 
     it("an Office chart part that crashes loses only that part", async () => {
