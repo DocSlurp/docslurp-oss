@@ -95,6 +95,7 @@ import {
 } from "../chart-export/stage.js";
 import { quarantineChartFacts, storedRoutePlan } from "../chart-export/free-stats.js";
 import { CHART_INLINE_SLOT, chartInlineSlotHasWork, freeInlineMode } from "../chart-export/inline.js";
+import { FIGURE_CHARTS_SLOT, figureChartsSlotHasWork } from "../chart-export/figure-charts.js";
 import type { ChartModelClient } from "../chart-export/types.js";
 import { chartExportFreeVmCap } from "../db/chart-export-free-vm-cap.js";
 import { deterministicSourceKind } from "../chart-export/vm-extractor.js";
@@ -1726,13 +1727,15 @@ export class VisionExtractStage implements Stage {
   }
 
   /**
-   * Free tier, inline mode: whether the pass has anything to do for this document: a previous export to replace, or an
-   * inline answer with visuals (or one too big to carry inline). PDFs and images have nothing: their figures move to the
-   * Doppler VM (not sent in inline mode). A source quarantined before inline mode was on gets no free charts.
+   * Free tier, inline mode: whether the pass has anything to do for this document: a previous export to replace, an
+   * inline answer with visuals (or one too big to carry inline), or figure charts from the Doppler VM (protocol 15) with
+   * visuals. Anything else does no chart work. A source quarantined before inline mode was on gets no free charts.
    */
   private freeInlineHasWork(state: WorkflowState, document: import("../models.js").Document): boolean {
     // Ledger only, no reads: quarantine records the chart-inline slot exactly when its inline answer has work.
-    return Boolean(state.artifactLedger.readDocument(document.id, "chart-export")) || chartInlineSlotHasWork(state.artifactLedger.readDocument(document.id, CHART_INLINE_SLOT));
+    return Boolean(state.artifactLedger.readDocument(document.id, "chart-export"))
+      || chartInlineSlotHasWork(state.artifactLedger.readDocument(document.id, CHART_INLINE_SLOT))
+      || figureChartsSlotHasWork(state.artifactLedger.readDocument(document.id, FIGURE_CHARTS_SLOT));
   }
 
   /**

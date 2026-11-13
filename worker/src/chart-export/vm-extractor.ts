@@ -21,6 +21,7 @@ import { cleanupTempFile, keyFromStorageUri, type ArtifactStore } from "../tools
 import { ChartExtractRefusedError, extractDeterministicVisualsBatch, extractDeterministicVisualsFile, MAX_BATCH_INPUTS, type DeterministicInputKind } from "./extractors/host.js";
 import type { DeterministicVisual, DeterministicVisualResult as GuestResult } from "./extractors/types.js";
 import { chartExportInlineEnabled, inlineNeedsStandalone } from "./inline.js";
+import { FIGURE_CHARTS_SLOT, readStoredFigureCharts } from "./figure-charts.js";
 import type { DeterministicVisualExtractor, DeterministicVisualInput, DeterministicVisualPartial, DeterministicVisualResult } from "./types.js";
 
 /** SVG figures sent to the guest per document (one batched VM run). */
@@ -245,14 +246,27 @@ export function createVmDeterministicVisualExtractor(deps: VmExtractorDeps): Det
       log(`[chart-export] parser VM skipped ${context} kind=${sourceKind} reason=no-chart-signal`);
     }
 
-    // Inline mode: Doppler figure SVGs carry no text today, so the standalone batch exports nothing and would only boot a
-    // VM. Their extraction moves into the Doppler VM's own figure pass (words beside each figure); until that guest ships,
-    // they are counted, not sent.
+    // Inline mode: figure SVGs never go to a standalone VM run (they carry no text, so it would export nothing). Their charts
+    // come from the Doppler VM's own figure pass (protocol 15, words beside each figure), stored by extract-markdown under
+    // FIGURE_CHARTS_SLOT and validated again here; page and box come from the host's figure index.
     if (chartExportInlineEnabled()) {
       const listed = input.artifacts.dopplerFiguresIndexUri || input.dopplerFiguresIndex !== undefined
         ? (await svgFigures(deps, input.artifacts.dopplerFiguresIndexUri, Math.max(1, document.pageCount), input.dopplerFiguresIndex)).length
         : 0;
-      if (listed > 0) log(`[chart-export] svg figures not sent ${context} figures=${listed} reason=inline-mode`);
+      const chartsUri = input.artifacts.artifactUri?.(FIGURE_CHARTS_SLOT) ?? null;
+      const chartsKey = chartsUri ? keyFromStorageUri(chartsUri, deps.storage.bucket) : null;
+      const charts = chartsKey ? readStoredFigureCharts(await deps.storage.getJson(chartsKey).catch(() => null)) : null;
+      if (charts?.status === "ok") {
+        for (const figure of charts.figures) {
+          if (figure.page > Math.max(1, document.pageCount)) continue;
+          results.push(figure.result);
+          const box = figureBox(figure.bbox);
+          for (const visual of figure.result.visuals) partials.push(toPartial(visual, figure.page, figure.result.visuals.length === 1 ? box : null));
+          for (const d of figure.result.deferred ?? []) deferred.push({ input: "doppler-figure", locator: d.locator, reason: d.reason, pageNumber: figure.page, figureId: figure.id });
+        }
+        if (charts.ms !== null) input.recordUsage?.(chartExportVmUsageEvent({ documentId: document.id, wallTimeMs: charts.ms, reason: "doppler-figure-charts", inputs: charts.figures.length, outcome: "ok" }));
+        log(`[chart-export] doppler figure charts ${context} figures=${charts.figures.length} visuals=${charts.figures.reduce((n, f) => n + f.result.visuals.length, 0)}`);
+      } else if (listed > 0) log(`[chart-export] svg figures not sent ${context} figures=${listed} reason=inline-mode${charts ? ` charts=${charts.reason}` : ""}`);
       if (deferred.length) log(`[chart-export] visuals deferred ${context} count=${deferred.length}`);
       return { partials, presence: presenceOf(results, listed), ...(deferred.length ? { deferred: deferred.slice(0, 1000) } : {}) };
     }

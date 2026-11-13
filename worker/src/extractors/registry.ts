@@ -33,7 +33,7 @@ export interface ExtractedCandidate {
   /** The extractor already charged its OCR reads through the ledger (the OCR engine does); the stage must not again. */
   ocrCharged?: boolean;
   /** Doppler figures the sandboxed PDF provider returned from the same VM job: the folder (unvalidated) and the outcome. */
-  figures?: { dir: string; outcome: import("./plugins.js").SandboxedPdfFigureOutcome };
+  figures?: { dir: string; outcome: import("./plugins.js").SandboxedPdfFigureOutcome; /** The job asked for charts.json (figures.charts). */ charts?: boolean };
 }
 
 export interface CandidateExecutors {

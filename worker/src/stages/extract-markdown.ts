@@ -1,3 +1,4 @@
+import { FIGURE_CHARTS_SCHEMA, FIGURE_CHARTS_SLOT, figureChartsHaveWork, figureChartsObjectName, figureChartsRequest, takeFigureCharts, validateFigureCharts, type TakenFigureCharts } from "../chart-export/figure-charts.js";
 import { createHash } from "node:crypto";
 import { committedDocumentUris, countDeferredPdfPages, firstPassServesDocument, primeFirstPassResults, readMarkdownSlotBytes } from "../pipeline/first-pass.js";
 import { reserveOrientationAttempt } from "../lib/image-orientation.js";
@@ -38,7 +39,7 @@ import {
   type ExtractionContract,
   type ExtractionArtifactRef,
 } from "@docslurp/shared";
-import { readJsonFile } from "../tools/storage.js";
+import { keyFromStorageUri, readJsonFile } from "../tools/storage.js";
 import { documentArtifactRoot, runArtifactRoot } from "../lib/artifact-root.js";
 import { pushPerfMetric } from "../lib/perf-context.js";
 import { buildExtractionContract } from "../lib/extraction-contract.js";
@@ -541,7 +542,9 @@ export class ExtractMarkdownStage implements Stage {
                     if (!prepared?.plan.sandboxedPdf) continue;
                     const dir = await mkdtemp(path.join(path.dirname(prepared.plan.sandboxedPdf.output), ".doppler-figures-"));
                     candidateDirs.push(dir);
-                    prepared.plan.sandboxedPdf.figures = { dir, limits: dopplerImageLimits(document.pageCount) };
+                    // Charts from the figure SVGs in the same VM (protocol 15), only when the run's chart tier asks for them.
+                    const charts = figureChartsRequest(state.run.pipeline, sandboxedPdfProvider(), document.pageCount);
+                    prepared.plan.sandboxedPdf.figures = { dir, limits: dopplerImageLimits(document.pageCount), ...(charts ? { charts } : {}) };
                   }
                 }
                 const [resultA, resultB] = await this.collectCandidateResults({
@@ -2142,7 +2145,7 @@ export class ExtractMarkdownStage implements Stage {
       ...(ocrPages ? { ocrPages: [...ocrPages] } : {}),
       ...(layoutFacts ? { layoutFacts, ...(layoutFactsSource ? { layoutFactsSource } : {}) } : {}),
       ...(pageFacts ? { pageFacts } : {}),
-      ...(plan.sandboxedPdf?.figures && figureOutcome ? { figures: { dir: plan.sandboxedPdf.figures.dir, outcome: figureOutcome } } : {}),
+      ...(plan.sandboxedPdf?.figures && figureOutcome ? { figures: { dir: plan.sandboxedPdf.figures.dir, outcome: figureOutcome, ...(plan.sandboxedPdf.figures.charts ? { charts: true } : {}) } } : {}),
     };
   }
 
@@ -3176,6 +3179,8 @@ export class ExtractMarkdownStage implements Stage {
       pushPerfMetric({ metric: "doppler-figures-failed", value: 1, unit: "count", tags: ["doppler-figures", "extraction-failed"], metadata: { documentId: args.document.id } });
       return { figures: { slots: [], stats: { status: "extraction-failed", imagesConfined } } };
     }
+    // charts.json leaves the folder first, so the folder's strict validation sees exactly what it did before charts.
+    const takenCharts = figures.charts ? await takeFigureCharts(figures.dir) : null;
     let validated;
     try {
       validated = await readDopplerFigureDir(figures.dir, {
@@ -3212,9 +3217,37 @@ export class ExtractMarkdownStage implements Stage {
       if (!(error instanceof DopplerFigureStoreError)) throw error;
       return { figures: this.dopplerFiguresFailed(args.document.id, error.reason, imagesConfined, error.cause, error.cleanup) };
     }
-    const stats = { ...stored.stats, imagesConfined, manifestVersion: validated.version, validateMs: Date.now() - started - stored.stats.storeMs };
+    const charts = figures.charts ? await this.storeFigureCharts(args.document.id, stored, takenCharts) : null;
+    const stats = { ...stored.stats, imagesConfined, manifestVersion: validated.version, validateMs: Date.now() - started - stored.stats.storeMs, ...(charts ? { charts } : {}) };
     console.log(`[doppler-figures] document=${args.document.id} status=stored version=${validated.version} entries=${stats.entries} files=${stats.files} bytes=${stats.bytes} markers=${stats.markers} resolved=${stats.markersResolved} confined=${imagesConfined} ms=${Date.now() - started}`);
     return { figures: { slots: stored.slots, stats }, stored: { set: validated, stored } };
+  }
+
+  /**
+   * Validate the guest's figure charts against the figure index just stored and store them beside it, adding their slot.
+   * Never fails the figures: a refusal or a store failure is a stat, and the free pass simply finds no figure charts.
+   */
+  private async storeFigureCharts(
+    documentId: string, stored: import("../extractors/doppler-figures.js").StoredDopplerFigures, taken: TakenFigureCharts,
+  ): Promise<Record<string, unknown>> {
+    try {
+      const indexKey = keyFromStorageUri(stored.indexUri, this.storage.bucket);
+      if (!indexKey) return { status: "failed", reason: "index-key" };
+      const index = await this.storage.getJson<{ figures?: unknown }>(indexKey);
+      const charts = validateFigureCharts(taken, Array.isArray(index?.figures) ? index.figures : []) ?? { schemaVersion: FIGURE_CHARTS_SCHEMA, status: "refused" as const, reason: "missing" };
+      const work = figureChartsHaveWork(charts);
+      const key = path.posix.join(path.posix.dirname(indexKey), figureChartsObjectName(documentId, work));
+      await this.storage.putJson(key, charts);
+      const uri = this.storage.uri(key);
+      stored.slots.push({ slot: FIGURE_CHARTS_SLOT, uri });
+      stored.objectKeys.push(key);
+      const visuals = charts.status === "ok" ? charts.figures.reduce((n, f) => n + f.result.visuals.length, 0) : 0;
+      console.log(`[doppler-figures] document=${documentId} charts=${charts.status}${charts.status === "ok" ? ` figures=${charts.figures.length} visuals=${visuals}` : ` reason=${charts.reason}`}`);
+      return charts.status === "ok" ? { status: "ok", figures: charts.figures.length, visuals, ms: charts.ms } : { status: "refused", reason: charts.reason };
+    } catch (error) {
+      console.warn(`[doppler-figures] document=${documentId} charts=failed error=${error instanceof Error ? error.name : "error"}`);
+      return { status: "failed", reason: "store" };
+    }
   }
 
   /**
