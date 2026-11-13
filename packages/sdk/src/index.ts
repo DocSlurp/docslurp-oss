@@ -815,7 +815,11 @@ export type FigureResumeRequest = {
   grantsLeft: number;
 };
 /** Answer of {@link DocSlurpClient.resumeProjectFigures}: how many were queued, already queued, and whether more remain. */
-export type ProjectFigureResumeRequest = { projectId: string; status: "queued" | "off"; queued: number; alreadyQueued: number; capped: boolean };
+export type ProjectFigureResumeRequest = {
+  projectId: string; status: "queued" | "off"; queued: number; alreadyQueued: number; capped: boolean;
+  /** Documents with figures left that this request did not queue, by block reason (a bulk request never grants). */
+  blocked: Partial<Record<string, number>>;
+};
 
 /** Input of {@link DocSlurpClient.reprocessRun}: all stages, from one stage on, or only the listed stages. */
 export type ReprocessRunInput = { stageFrom?: string; stages?: string[]; speedBoost?: boolean; chartExport?: ChartExportOverride };

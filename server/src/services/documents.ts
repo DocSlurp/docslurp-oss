@@ -18,6 +18,7 @@ import { sql } from "../db.js";
 import { notifySearchEligibilityChanged } from "../search/eligibility-hint.js";
 import { getArtifactText, parseArtifactUri } from "../lib/artifacts.js";
 import { fileUrlForArtifact } from "../lib/file-urls.js";
+import { documentFigureResumeState, type FigureResumeStateView } from "./figure-resume.js";
 import { documentWithholdsUri, withheldArtifactUrisFromMetadata } from "./pii-artifact-guard.js";
 import { andSqlFragments, type SqlFragment } from "../lib/sql-fragments.js";
 import { decodeListCursor, encodeListCursor } from "../lib/list-cursor.js";
@@ -530,6 +531,8 @@ export interface DocumentViewerPayload {
   };
   /** Present for audio/video: stats for the media focus view ("This recording"). */
   media?: MediaSummary | null;
+  /** The figure resume state while the document's figures are resumable (why resumes stopped, when, grants left); else null. */
+  figureResume: FigureResumeStateView | null;
   run: Pick<ProjectRun, "id" | "projectId" | "stage" | "status" | "updatedAt"> | null;
   usage: {
     document: {
@@ -1302,6 +1305,7 @@ export async function getDocumentViewerPayload(docId: string, userId: string): P
           basis: usageBasis
         };
 
+  const figureResume = await documentFigureResumeState({ orgId: row.org_id, documentId: docId });
   const media = await readMediaSummary({
     summaryUri: run?.artifacts?.[`${docId}:media-summary`] ?? null,
     withheld,
@@ -1329,6 +1333,7 @@ export async function getDocumentViewerPayload(docId: string, userId: string): P
       pageTextCount: pageStats?.page_text_count ?? 0
     },
     ...(media ? { media } : {}),
+    figureResume,
     run: run
       ? {
           id: run.id,

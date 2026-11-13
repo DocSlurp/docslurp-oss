@@ -17,12 +17,20 @@
  *     each launch's timeout is capped by what is left;
  *   - per unit (a shard, a gap or the unsharded document): its own pages' share of the allowance, clamped to
  *     [3, UNIT_RESUME_CEILING];
- *   - no progress: noProgressLimit resumes in a row that add no file and close no work stop the document.
+ *   - no progress: noProgressLimit launched resumes in a row whose gain is under the minimum stop the document. A gain is
+ *     work closed (resumable images settled, gaps filled, shards completed) or files added; it counts only when it is at
+ *     least minProgressPercent of one unit's share of the work left (and one item: a resume runs one unit, so a document with
+ *     many shards is never measured against its whole backlog), and added files count only with minProgressBytes in all.
  *
  * A stopped document is blocked with a reason code (`attempts`, `vm-budget`, `no-progress`), logged and counted
  * (`resume.capped`). A reprocess (a new, customer-paid run) clears every block. A single-document request clears a cap
  * block too, by granting one extension (half the base caps again, at least the floors), at most maxGrants times per
- * run: a request can buy more VM time, but a bounded amount. Org concurrency and the org daily VM budget apply on top.
+ * run: a request can buy more VM time, but a bounded amount (FIGURE_RESUME_HARD.documentVmMs caps the VM budget grants
+ * included). DOCSLURP_FIGURE_RESUME_MAX_GRANTS=0 is the kill switch: no request extends a budget. Org concurrency and the
+ * org daily VM budget apply on top.
+ *
+ * An override outside its bounds (or unparsable) falls back to the default with a warning, never a silent clamp: a typo
+ * such as 12000 for 120 must not widen a cost knob.
  */
 import { dopplerAssetCaps } from "./doppler-assets.js";
 import { DOPPLER_FIGURE_LIMITS } from "./doppler-figures.js";
@@ -56,6 +64,10 @@ export const FIGURE_RESUME_HARD = {
   unitResumes: 64,
   /** Resume launches of one document, grants included (document_extraction_levels.resume_vm_launches is CHECKed at 1000). */
   documentLaunches: 512,
+  /** Resume VM time of one document per run, grants included: no env value or grant count passes it (12 hours). */
+  documentVmMs: 12 * 3_600_000,
+  /** Grants per run (document_extraction_levels.resume_grants is CHECKed at this). */
+  grants: 10,
 } as const;
 
 /** Per-unit resumes: the floor is FIGURE_RESUME_LIMITS.maxAttempts, the ceiling this. */
@@ -73,8 +85,11 @@ export const FIGURE_RESUME_BUDGET_ENV = {
   vmMsPerLaunch: { name: "DOCSLURP_FIGURE_RESUME_VM_MS_PER_LAUNCH", fallback: 3_000, min: 0, max: 120_000 },
   vmHeadroom: { name: "DOCSLURP_FIGURE_RESUME_VM_HEADROOM", fallback: 2, min: 1, max: 16 },
   docVmSecondsFloor: { name: "DOCSLURP_FIGURE_RESUME_DOC_VM_SECONDS_FLOOR", fallback: 180, min: 60, max: 3_600 },
-  docVmSecondsCeiling: { name: "DOCSLURP_FIGURE_RESUME_DOC_VM_SECONDS_CEILING", fallback: 4 * 3_600, min: 60, max: 24 * 3_600 },
+  docVmSecondsCeiling: { name: "DOCSLURP_FIGURE_RESUME_DOC_VM_SECONDS_CEILING", fallback: 4 * 3_600, min: 60, max: 12 * 3_600 },
   noProgressLimit: { name: "DOCSLURP_FIGURE_RESUME_NO_PROGRESS", fallback: 3, min: 1, max: 32 },
+  minProgressPercent: { name: "DOCSLURP_FIGURE_RESUME_MIN_PROGRESS_PERCENT", fallback: 5, min: 0, max: 50 },
+  minProgressBytes: { name: "DOCSLURP_FIGURE_RESUME_MIN_PROGRESS_BYTES", fallback: 4_096, min: 0, max: 1_048_576 },
+  /** 0 is the kill switch: no request extends a budget. */
   maxGrants: { name: "DOCSLURP_FIGURE_RESUME_MAX_GRANTS", fallback: 2, min: 0, max: 10 },
 } as const;
 
@@ -89,19 +104,29 @@ export function isFigureResumeBudgetBlock(reason: unknown): reason is (typeof FI
   return (FIGURE_RESUME_BUDGET_BLOCKS as readonly unknown[]).includes(reason);
 }
 
-function boundedInt(raw: string | undefined, fallback: number, min: number, max: number): number {
+const warned = new Set<string>();
+/**
+ * An integer override in [min, max]; anything else (unparsable, `1e3`, `05`, out of range) is the default, with one
+ * warning per variable and value (L3: never a silent clamp that widens a cost knob).
+ */
+function boundedInt(name: string, raw: string | undefined, fallback: number, min: number, max: number): number {
   const trimmed = (raw ?? "").trim();
   if (trimmed === "") return fallback;
   const value = Number.parseInt(trimmed, 10);
-  if (!Number.isSafeInteger(value) || String(value) !== trimmed) return fallback;
-  return Math.min(max, Math.max(min, value));
+  if (Number.isSafeInteger(value) && String(value) === trimmed && value >= min && value <= max) return value;
+  const key = `${name}=${trimmed}`;
+  if (!warned.has(key) && warned.size < 256) {
+    warned.add(key);
+    console.warn(`[figure-resume] ${name}=${JSON.stringify(trimmed.slice(0, 16))} is not an integer in ${min}..${max}; using the default ${fallback}`);
+  }
+  return fallback;
 }
 
-/** The per-document budget configuration, each value clamped to its bounds (an unparsable value keeps the default). */
+/** The per-document budget configuration (an override outside its bounds keeps the default, with a warning). */
 export function figureResumeBudgetConfig(env: Env = process.env): FigureResumeBudgetConfig {
   const read = (key: keyof typeof FIGURE_RESUME_BUDGET_ENV) => {
     const spec = FIGURE_RESUME_BUDGET_ENV[key];
-    return boundedInt(env[spec.name], spec.fallback, spec.min, spec.max);
+    return boundedInt(spec.name, env[spec.name], spec.fallback, spec.min, spec.max);
   };
   const launchFloor = read("launchFloor");
   const docVmSecondsFloor = read("docVmSecondsFloor");
@@ -114,6 +139,8 @@ export function figureResumeBudgetConfig(env: Env = process.env): FigureResumeBu
     docVmSecondsFloor,
     docVmSecondsCeiling: Math.max(docVmSecondsFloor, read("docVmSecondsCeiling")),
     noProgressLimit: read("noProgressLimit"),
+    minProgressPercent: read("minProgressPercent"),
+    minProgressBytes: read("minProgressBytes"),
     maxGrants: read("maxGrants"),
   };
 }
@@ -160,7 +187,27 @@ export function figureResumeLaunchVmMs(args: { pageCount: number; units?: number
 export function figureResumeVmBudgetMs(args: { pageCount: number; units?: number; grants?: number }, config: FigureResumeBudgetConfig = figureResumeBudgetConfig()): number {
   const estimate = config.vmHeadroom * figureResumeExpectedPasses(args.pageCount) * figureResumeLaunchVmMs(args, config);
   const base = clamp(estimate, config.docVmSecondsFloor * 1000, config.docVmSecondsCeiling * 1000);
-  return base + grantsOf(args.grants ?? 0) * grantStep(base, config.docVmSecondsFloor * 1000);
+  const granted = base + Math.min(FIGURE_RESUME_HARD.grants, grantsOf(args.grants ?? 0)) * grantStep(base, config.docVmSecondsFloor * 1000);
+  return Math.min(FIGURE_RESUME_HARD.documentVmMs, granted);
+}
+
+/**
+ * Whether one launched resume made progress worth another (L1). `before`/`after` are the document's open work (resumable
+ * images, gaps, shards not complete); `units` its resume units (a resume runs one); `added` and `addedBytes` what the
+ * resume stored. The minimum gain is minProgressPercent of one unit's share of the work left, and at least one item.
+ * Closed work counts as is; added files count only when they carry at least minProgressBytes in all (a source that yields
+ * one tiny figure a pass does not reset the stop).
+ */
+export function figureResumeProgressed(
+  args: { before: number; after: number; added: number; addedBytes: number; units?: number },
+  config: FigureResumeBudgetConfig = figureResumeBudgetConfig(),
+): boolean {
+  const before = Math.max(0, args.before);
+  const share = before / Math.max(1, Math.trunc(args.units ?? 1));
+  const minGain = Math.max(1, Math.ceil((share * config.minProgressPercent) / 100));
+  const closed = Math.max(0, before - Math.max(0, args.after));
+  const added = args.addedBytes >= config.minProgressBytes ? Math.max(0, args.added) : 0;
+  return Math.max(closed, added) >= minGain;
 }
 
 /**
@@ -175,15 +222,15 @@ export function figureResumeUnitCap(pages: number, grants = 0): number {
 
 /** Resume VM milliseconds one organization may use per UTC day. */
 export function figureResumeOrgDailyVmMs(env: Env = process.env): number {
-  return boundedInt(env[FIGURE_RESUME_ORG_DAILY_ENV], FIGURE_RESUME_LIMITS.orgDailyVmMinutes, 0, 24 * 60) * 60_000;
+  return boundedInt(FIGURE_RESUME_ORG_DAILY_ENV, env[FIGURE_RESUME_ORG_DAILY_ENV], FIGURE_RESUME_LIMITS.orgDailyVmMinutes, 0, 24 * 60) * 60_000;
 }
 /** Resumes running at once across the fleet (live leases). */
 export function figureResumeGlobalMax(env: Env = process.env): number {
-  return boundedInt(env[FIGURE_RESUME_GLOBAL_ENV], FIGURE_RESUME_LIMITS.globalMax, 1, 256);
+  return boundedInt(FIGURE_RESUME_GLOBAL_ENV, env[FIGURE_RESUME_GLOBAL_ENV], FIGURE_RESUME_LIMITS.globalMax, 1, 256);
 }
 /** Resumes one worker runs at once. */
 export function figureResumeConcurrency(env: Env = process.env): number {
-  return boundedInt(env[FIGURE_RESUME_CONCURRENCY_ENV], FIGURE_RESUME_LIMITS.concurrency, 1, 16);
+  return boundedInt(FIGURE_RESUME_CONCURRENCY_ENV, env[FIGURE_RESUME_CONCURRENCY_ENV], FIGURE_RESUME_LIMITS.concurrency, 1, 16);
 }
 
 /** Backoff before the next attempt after `attempts` resumes (the last delay repeats). */

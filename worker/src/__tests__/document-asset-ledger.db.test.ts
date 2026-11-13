@@ -203,6 +203,7 @@ describe("writing the ledger", () => {
     expect(await listResumableDocuments(sql, { orgId: "org-a" })).toEqual([]);
   });
 
+  // DOCUMENT_ASSET_RESUME_CAP (the backstop, 64) writes in a row: an explicit timeout, never the 5 s default.
   it("a hostile manifest that reports resumes:0 and stays resumable forever leaves the queue at the host's cap", async () => {
     await store.writeDocumentAssetLedger(await figureWrite(A, { partial: true }));
     for (let i = 1; i <= DOCUMENT_ASSET_RESUME_CAP; i += 1) {
@@ -216,7 +217,7 @@ describe("writing the ledger", () => {
     // A fresh run (not a resume) starts the count again.
     await store.writeDocumentAssetLedger(await figureWrite(A, { partial: true }));
     expect(await level("doc-a")).toMatchObject({ resumes: 0 });
-  });
+  }, 60_000);
 
   it("a version 1 folder maps into the ledger with what it has", async () => {
     const dir = await mkdtemp(path.join(work, "v1-"));
@@ -637,7 +638,7 @@ describe("sharded documents: a record per shard, the level is the aggregate, res
     await expect(store.writeDocumentAssetLedger(resume())).rejects.toMatchObject({ rule: "resume-cap" });
     // A shard resume may not write another shard's pages.
     await expect(store.writeDocumentAssetLedger({ ...resume(), assets: (await inMemory(full)).assets })).rejects.toMatchObject({ rule: expect.stringMatching(/invalid-assets|resume-cap/) });
-  });
+  }, 60_000);
 
   it("refuses a shard record whose key is not its folder's, or ranges that overlap", async () => {
     const write = await shardedWrite();

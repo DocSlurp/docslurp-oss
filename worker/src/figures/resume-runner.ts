@@ -41,7 +41,7 @@ import type { Sql } from "postgres";
 import {
   DOPPLER_STORE_LAYOUT, dopplerFigureSlot, dopplerImageExtractEnabled, dopplerImageLimits, dopplerShardFolder, figureAuditWrites,
   figureGcDeletes, figureResumeBackoffMs, figureResumeBudgetConfig, figureResumeConcurrency, figureResumeDeployEnabled, figureResumeGlobalMax,
-  figureResumeLaunchCap as launchCapFor, figureResumeOrgDailyVmMs, figureResumeUnitCap, figureResumeVmBudgetMs, parseDopplerFigureId,
+  figureResumeLaunchCap as launchCapFor, figureResumeOrgDailyVmMs, figureResumeProgressed, figureResumeUnitCap, figureResumeVmBudgetMs, parseDopplerFigureId,
   projectFigureResumeMode, projectFiguresOff, FIGURE_RESUME_LIMITS, type FigureResumeBlockReason,
 } from "@docslurp/shared";
 import { recordFigureTelemetry } from "@docslurp/shared/observability";
@@ -279,8 +279,8 @@ async function release(
       resume_vm_ms::float8 as resume_vm_ms, resume_stalls, resume_grants
     from document_extraction_levels where ${fenced(sql, row)}`;
   if (!level) return;
-  // No progress (R3-L3 follow-up): a launched resume that added no file and closed no work, failed ones included. Any
-  // progress resets the count; past noProgressLimit in a row the document stops `no-progress`.
+  // No progress (R3-L3 follow-up, L1): a launched resume whose gain is under the minimum (figureResumeProgressed), failed
+  // ones included. Enough progress resets the count; past noProgressLimit in a row the document stops `no-progress`.
   const stalls = progress.launched ? (progress.progressed ? 0 : level.resume_stalls + 1) : level.resume_stalls;
   // Failures count per unit (R2-M3): one failing shard never blocks the others; the level's total is kept for telemetry.
   const retry = outcome === "retry";
@@ -404,6 +404,7 @@ async function resumeClaimed(deps: FigureResumeDeps, row: ClaimedLevel): Promise
   let exhausted = false;
   let vmMs = 0;
   let added = 0;
+  let addedBytes = 0;
   let unitKey: string | undefined;
   let before: { work: number; launches: number } | null = null;
   try {
@@ -441,6 +442,7 @@ async function resumeClaimed(deps: FigureResumeDeps, row: ClaimedLevel): Promise
       const result = await resumeUnit(deps, row, scope, document, unit);
       vmMs = result.vmMs;
       added = result.added;
+      addedBytes = result.addedBytes ?? 0;
       outcome = result.outcome;
       blocked = result.blocked;
     }
@@ -460,11 +462,13 @@ async function resumeClaimed(deps: FigureResumeDeps, row: ClaimedLevel): Promise
     console.warn(`[doppler-figures] resume ${outcome === "blocked" ? "stale" : "failed"} doc=${row.document_id} rule=${rule}`);
   } finally {
     if (outcome !== "lost") {
-      // Progress: a file added, or less work left (a unit closed, a gap filled, resumable images settled). Only a resume
-      // that launched a VM (its launch counted, whatever happened after) counts toward the no-progress stop.
+      // Progress (L1): work closed (a unit, a gap, resumable images settled) or files added, at least the minimum gain
+      // (figureResumeProgressed: a share of the work left, and real bytes for files). Only a resume that launched a VM
+      // (its launch counted, whatever happened after) counts toward the no-progress stop.
       const after = before ? await remainingWork(deps.sql, row).catch(() => before) : null;
       const launched = !!before && !!after && after.launches > before.launches;
-      const progressed = added > 0 || (!!before && !!after && after.work < before.work);
+      const progressed = !!before && !!after
+        && figureResumeProgressed({ before: before.work, after: after.work, added, addedBytes, units: Math.max(1, row.shards + row.gap_count) }, figureResumeBudgetConfig(deps.env ?? process.env));
       await release(deps.sql, row, outcome, blocked, exhausted, unitKey, { launched, progressed }, deps.env ?? process.env)
         .catch((error) => console.warn(`[doppler-figures] resume release-failed doc=${row.document_id} error=${error instanceof Error ? error.name : typeof error}`));
     }
@@ -632,7 +636,7 @@ function reasonSlug(reason: unknown): string {
 async function resumeUnit(
   deps: FigureResumeDeps, claimed: ClaimedLevel, scope: DocumentAssetLedgerScope, document: { id: string; userId: string; runId: string; artifactRoot: string | null },
   unit: ResumeUnit,
-): Promise<{ outcome: Outcome; blocked?: string; vmMs: number; added: number }> {
+): Promise<{ outcome: Outcome; blocked?: string; vmMs: number; added: number; addedBytes?: number }> {
   const row = claimed;
   if (!row.source_sha256) return { outcome: "blocked", blocked: "refused", vmMs: 0, added: 0 };
   // The bytes to convert are quarantine's decision for this document (R6-H1), resolved by the loader's own rule.
@@ -770,7 +774,7 @@ async function resumeUnit(
             and exists (select 1 from document_extraction_levels l where ${fenced(deps.sql, row)})`;
       }
       console.log(`[doppler-figures] resume unit doc=${row.document_id} pages=${asked[0]}-${asked[1]}${unit.gap ? " gap" : ""} added=${result.stats.files} bytes=${result.stats.bytes} vmMs=${vmMs}`);
-      return { outcome: "done", vmMs, added: result.stats.files };
+      return { outcome: "done", vmMs, added: result.stats.files, addedBytes: result.stats.bytes };
     } finally {
       await disposeDopplerFigureSet(set);
     }

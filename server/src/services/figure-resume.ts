@@ -47,14 +47,17 @@ const STICKY_BLOCKS = ["unscanned"] as const;
  * Live, completed documents of the scope whose current level has figure work left (the unsharded document's resumable
  * images, a resumable shard, or a gap), the Markdown committed. `budget`:
  *   - `exclude`: not blocked by a budget stop (`attempts`, `vm-budget`, `no-progress`) or `unscanned` (bulk, counts);
- *   - `grantable`: a budget-blocked document still counts while it has request grants left (one document's request).
+ *   - `grantable`: a budget-blocked document still counts while it has request grants left (one document's request);
+ *   - `blocked`: only documents a budget stop or `unscanned` holds (what a bulk request skipped, by reason).
  * The page-scaled caps themselves are the runner's (it re-checks everything at claim and blocks with a reason, never
  * starting a VM past them).
  */
-export function resumableWhere(scope: FigureResumeScope, budget: "exclude" | "grantable" = "exclude") {
+export function resumableWhere(scope: FigureResumeScope, budget: "exclude" | "grantable" | "blocked" = "exclude") {
   const maxGrants = figureResumeBudgetConfig().maxGrants;
   const blocks = sql.array([...FIGURE_RESUME_BUDGET_BLOCKS]);
-  const blockOk = budget === "exclude"
+  const blockOk = budget === "blocked"
+    ? sql`(l.resume_blocked = any(${blocks}::text[]) or l.resume_blocked = any(${sql.array([...STICKY_BLOCKS])}::text[]))`
+    : budget === "exclude"
     ? sql`(l.resume_blocked is null or not (l.resume_blocked = any(${blocks}::text[]) or l.resume_blocked = any(${sql.array([...STICKY_BLOCKS])}::text[])))`
     : sql`(l.resume_blocked is null or not (l.resume_blocked = any(${sql.array([...STICKY_BLOCKS])}::text[]))) and (l.resume_blocked is null
         or not (l.resume_blocked = any(${blocks}::text[])) or l.resume_grants < ${maxGrants})`;
@@ -126,12 +129,29 @@ export async function requestDocumentFigureResume(scope: FigureResumeScope & { d
   return result;
 }
 
-/** Queue up to `limit` (at most 100) of a project's resumable documents, oldest first. */
-export async function requestProjectFigureResumes(scope: FigureResumeScope & { limit?: number }): Promise<{ status: "queued" | "off"; queued: number; alreadyQueued: number; capped: boolean }> {
+/** A bulk request's answer: what it queued, and the documents it skipped because a budget stop (or `unscanned`) holds them. */
+export interface ProjectFigureResumeResult {
+  status: "queued" | "off";
+  queued: number;
+  alreadyQueued: number;
+  capped: boolean;
+  /** Documents with figure work left that this request did not queue, by block reason (only reasons present). */
+  blocked: Partial<Record<FigureResumeBlockReason, number>>;
+}
+
+/**
+ * Queue up to `limit` (at most 100) of a project's resumable documents, oldest first. Never grants: a budget-blocked
+ * document is left blocked and counted in `blocked` (one document's request can grant).
+ */
+export async function requestProjectFigureResumes(scope: FigureResumeScope & { limit?: number }): Promise<ProjectFigureResumeResult> {
   assertScope(scope);
   const limit = Math.min(Math.max(Math.floor(scope.limit ?? FIGURE_RESUME_LIMITS.bulkMax) || 1, 1), FIGURE_RESUME_LIMITS.bulkMax);
   const mode = await projectMode(scope);
-  if (!mode || mode === "off") return { status: "off", queued: 0, alreadyQueued: 0, capped: false };
+  if (!mode || mode === "off") return { status: "off", queued: 0, alreadyQueued: 0, capped: false, blocked: {} };
+  const blockedRows = await sql<{ reason: FigureResumeBlockReason; n: number }[]>`
+    select l.resume_blocked as reason, count(*)::int as n from document_extraction_levels l join documents d on d.id = l.document_id
+    where ${resumableWhere(scope, "blocked")} group by l.resume_blocked order by l.resume_blocked`;
+  const blocked = Object.fromEntries(blockedRows.map((row) => [row.reason, row.n])) as ProjectFigureResumeResult["blocked"];
   const [already] = await sql<{ n: number }[]>`
     select count(*)::int as n from document_extraction_levels l join documents d on d.id = l.document_id
     where ${resumableWhere(scope)} and l.resume_after is not null and l.resume_blocked is null`;
@@ -144,13 +164,40 @@ export async function requestProjectFigureResumes(scope: FigureResumeScope & { l
   const capped = picked.length > limit;
   const ids = picked.slice(0, limit).map((row) => row.document_id);
   const queued = ids.length === 0 ? [] : await sql<{ document_id: string }[]>`
-    update document_extraction_levels l set resume_after = now(), resume_blocked = null
+    update document_extraction_levels l set resume_after = now(), resume_blocked = null, resume_blocked_at = null
     from documents d
     where l.document_id = any(${sql.array(ids)}::text[]) and ${resumableWhere(scope)} and l.resume_after is null
     returning l.document_id`;
   const count = Math.min(queued.length, limit);
-  console.log(`[doppler-figures] resume requested project=${scope.projectId} org=${scope.orgId} queued=${count} already=${already?.n ?? 0} capped=${capped}`);
-  return { status: "queued", queued: count, alreadyQueued: already?.n ?? 0, capped };
+  const skipped = blockedRows.map((row) => `${row.reason}:${row.n}`).join(",") || "none";
+  console.log(`[doppler-figures] resume requested project=${scope.projectId} org=${scope.orgId} queued=${count} already=${already?.n ?? 0} capped=${capped} blocked=${skipped}`);
+  return { status: "queued", queued: count, alreadyQueued: already?.n ?? 0, capped, blocked };
+}
+
+/** A document's figure resume state for its detail and asset-ledger reads (fixed reason codes, no internals). */
+export interface FigureResumeStateView {
+  /** Queued for the runner now. */
+  queued: boolean;
+  /** Why resumes stopped, or null. */
+  blocked: FigureResumeBlockReason | null;
+  blockedAt: string | null;
+  /** Extensions a single-document request may still grant this run (budget blocks only). */
+  grantsLeft: number;
+}
+
+/**
+ * The resume state of a document's current level, scoped by organization and document, or null when it has nothing left
+ * to resume (no level, or its figures are not resumable).
+ */
+export async function documentFigureResumeState(scope: { orgId: string; documentId: string }): Promise<FigureResumeStateView | null> {
+  if (!scope || typeof scope.orgId !== "string" || !ID.test(scope.orgId) || typeof scope.documentId !== "string" || !ID.test(scope.documentId)) return null;
+  const [level] = await sql<{ queued: boolean; blocked: FigureResumeBlockReason | null; blocked_at: string | null; grants: number }[]>`
+    select l.resume_after is not null and l.resume_blocked is null as queued, l.resume_blocked as blocked,
+      to_char(l.resume_blocked_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') as blocked_at, l.resume_grants as grants
+    from document_extraction_levels l join documents d on d.id = l.document_id and d.org_id = l.org_id and d.run_id is not distinct from l.run_id
+    where l.document_id = ${scope.documentId} and l.org_id = ${scope.orgId} and l.images_status = 'resumable' and l.assets_current`;
+  if (!level) return null;
+  return { queued: level.queued, blocked: level.blocked, blockedAt: level.blocked_at, grantsLeft: Math.max(0, figureResumeBudgetConfig().maxGrants - level.grants) };
 }
 
 /** How many of a project's documents a resume could finish now (for the chat's offer and the settings read). */

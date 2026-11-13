@@ -1,7 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
-  FIGURE_RESUME_HARD, figureResumeBudgetConfig, figureResumeExpectedPasses, figureResumeLaunchCap, figureResumeOrgDailyVmMs,
+  FIGURE_RESUME_BUDGET_ENV, FIGURE_RESUME_HARD, figureResumeBudgetConfig, figureResumeConcurrency, figureResumeGlobalMax, figureResumeProgressed, figureResumeExpectedPasses, figureResumeLaunchCap, figureResumeOrgDailyVmMs,
   figureResumeUnitCap, figureResumeVmBudgetMs, isFigureResumeBudgetBlock,
 } from "../figure-resume-limits.js";
 
@@ -48,19 +48,66 @@ describe("figure resume limits", () => {
     expect(figureResumeUnitCap(100_000, 100)).toBe(FIGURE_RESUME_HARD.unitResumes);
   });
 
-  it("env overrides are clamped to their bounds; garbage keeps the default; floors never exceed ceilings", () => {
-    expect(figureResumeBudgetConfig({ DOCSLURP_FIGURE_RESUME_LAUNCH_CEILING: "99999" }).launchCeiling).toBe(FIGURE_RESUME_HARD.documentLaunches);
-    expect(figureResumeBudgetConfig({ DOCSLURP_FIGURE_RESUME_LAUNCH_FLOOR: "0" }).launchFloor).toBe(1);
+  it("L3: an override outside its bounds or unparsable keeps the default and warns once; floors never exceed ceilings", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    expect(figureResumeBudgetConfig({ DOCSLURP_FIGURE_RESUME_LAUNCH_CEILING: "99999" }).launchCeiling).toBe(128);
+    expect(figureResumeBudgetConfig({ DOCSLURP_FIGURE_RESUME_LAUNCH_FLOOR: "0" }).launchFloor).toBe(3);
     expect(figureResumeBudgetConfig({ DOCSLURP_FIGURE_RESUME_NO_PROGRESS: "two" }).noProgressLimit).toBe(3);
     expect(figureResumeBudgetConfig({ DOCSLURP_FIGURE_RESUME_NO_PROGRESS: "2.5" }).noProgressLimit).toBe(3);
-    expect(figureResumeBudgetConfig({ DOCSLURP_FIGURE_RESUME_MAX_GRANTS: "-1" }).maxGrants).toBe(0);
+    expect(figureResumeBudgetConfig({ DOCSLURP_FIGURE_RESUME_MAX_GRANTS: "-1" }).maxGrants).toBe(2);
+    // The kill switch is in range.
+    expect(figureResumeBudgetConfig({ DOCSLURP_FIGURE_RESUME_MAX_GRANTS: "0" }).maxGrants).toBe(0);
+    // A typo on an org or fleet cost knob is the default, never the bound.
+    expect(figureResumeOrgDailyVmMs({ DOCSLURP_FIGURE_RESUME_ORG_DAILY_VM_MINUTES: "12000" })).toBe(120 * 60_000);
+    expect(figureResumeGlobalMax({ DOCSLURP_FIGURE_RESUME_GLOBAL_MAX: "800" })).toBe(8);
+    expect(figureResumeConcurrency({ DOCSLURP_FIGURE_RESUME_CONCURRENCY: "0" })).toBe(2);
+    const lines = warn.mock.calls.map((call) => String(call[0]));
+    expect(lines.some((line) => line.includes("DOCSLURP_FIGURE_RESUME_ORG_DAILY_VM_MINUTES") && line.includes("default 120"))).toBe(true);
+    // One warning per variable and value.
+    const before = warn.mock.calls.length;
+    figureResumeGlobalMax({ DOCSLURP_FIGURE_RESUME_GLOBAL_MAX: "800" });
+    expect(warn.mock.calls.length).toBe(before);
+    warn.mockRestore();
     const inverted = figureResumeBudgetConfig({ DOCSLURP_FIGURE_RESUME_LAUNCH_FLOOR: "20", DOCSLURP_FIGURE_RESUME_LAUNCH_CEILING: "5",
       DOCSLURP_FIGURE_RESUME_DOC_VM_SECONDS_FLOOR: "600", DOCSLURP_FIGURE_RESUME_DOC_VM_SECONDS_CEILING: "120" });
     expect([inverted.launchFloor, inverted.launchCeiling, inverted.docVmSecondsFloor, inverted.docVmSecondsCeiling]).toEqual([20, 20, 600, 600]);
     const tuned = figureResumeBudgetConfig({ DOCSLURP_FIGURE_RESUME_VM_MS_PER_PAGE: "150", DOCSLURP_FIGURE_RESUME_VM_HEADROOM: "1", DOCSLURP_FIGURE_RESUME_VM_MS_PER_LAUNCH: "0" });
     expect(figureResumeVmBudgetMs({ pageCount: 20_000, units: 32 }, tuned)).toBe(63 * 625 * 150);
     expect(figureResumeOrgDailyVmMs({})).toBe(120 * 60_000);
-    expect(figureResumeOrgDailyVmMs({ DOCSLURP_FIGURE_RESUME_ORG_DAILY_VM_MINUTES: "5000" })).toBe(24 * 60 * 60_000);
+    expect(figureResumeOrgDailyVmMs({ DOCSLURP_FIGURE_RESUME_ORG_DAILY_VM_MINUTES: "1440" })).toBe(24 * 60 * 60_000);
+  });
+
+  it("M1: with every override at its maximum and any grant count, the hard ceilings hold", () => {
+    const max = Object.fromEntries(Object.values(FIGURE_RESUME_BUDGET_ENV).map((spec) => [spec.name, String(spec.max)]));
+    const config = figureResumeBudgetConfig(max);
+    expect(config).toMatchObject({ launchCeiling: 512, docVmSecondsCeiling: 12 * 3_600, maxGrants: 10 });
+    for (const pageCount of [1, 10, 1_000, 20_000, 100_000]) {
+      for (const units of [0, 1, 32, 256]) {
+        for (const grants of [0, 1, 10, 100, 1_000_000]) {
+          expect(figureResumeVmBudgetMs({ pageCount, units, grants }, config)).toBeLessThanOrEqual(FIGURE_RESUME_HARD.documentVmMs);
+          expect(figureResumeLaunchCap({ pageCount, units, grants }, config)).toBeLessThanOrEqual(FIGURE_RESUME_HARD.documentLaunches);
+          expect(figureResumeUnitCap(pageCount, grants)).toBeLessThanOrEqual(FIGURE_RESUME_HARD.unitResumes);
+        }
+      }
+    }
+    expect(figureResumeVmBudgetMs({ pageCount: 20_000, grants: 10 }, config)).toBe(FIGURE_RESUME_HARD.documentVmMs);
+    expect(FIGURE_RESUME_BUDGET_ENV.maxGrants.max).toBe(FIGURE_RESUME_HARD.grants);
+    expect(FIGURE_RESUME_BUDGET_ENV.docVmSecondsCeiling.max * 1000).toBeLessThanOrEqual(FIGURE_RESUME_HARD.documentVmMs);
+  });
+
+  it("L1: progress needs a minimum gain: 5% of one unit's share of the work left (at least one item), and real bytes for files", () => {
+    // Closing work counts as is.
+    expect(figureResumeProgressed({ before: 1, after: 0, added: 0, addedBytes: 0 }, defaults)).toBe(true);
+    expect(figureResumeProgressed({ before: 1_000, after: 950, added: 0, addedBytes: 0 }, defaults)).toBe(true);
+    expect(figureResumeProgressed({ before: 1_000, after: 951, added: 0, addedBytes: 0 }, defaults)).toBe(false);
+    // One tiny figure a pass is no progress; one real one on a small document is.
+    expect(figureResumeProgressed({ before: 5, after: 5, added: 1, addedBytes: 40 }, defaults)).toBe(false);
+    expect(figureResumeProgressed({ before: 5, after: 5, added: 1, addedBytes: 50_000 }, defaults)).toBe(true);
+    // A 128-shard document: one shard's honest resume (under 1% of the whole backlog) is progress; one file a pass is not.
+    expect(figureResumeProgressed({ before: 30_000, after: 29_766, added: 234, addedBytes: 20_000_000, units: 128 }, defaults)).toBe(true);
+    expect(figureResumeProgressed({ before: 30_000, after: 30_000, added: 1, addedBytes: 500_000, units: 128 }, defaults)).toBe(false);
+    expect(figureResumeProgressed({ before: 30_000, after: 30_000, added: 1, addedBytes: 500_000, units: 1 }, defaults)).toBe(false);
+    expect(figureResumeProgressed({ before: 0, after: 0, added: 0, addedBytes: 0 }, defaults)).toBe(false);
   });
 
   it("only the three budget stops are grantable", () => {

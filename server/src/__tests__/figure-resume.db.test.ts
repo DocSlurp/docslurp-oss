@@ -162,12 +162,31 @@ describe("POST /documents/:id/assets/resume", () => {
     expect(audit!.metadata).toMatchObject({ status: "capped", reason: "attempts", granted: false });
   });
 
+  it("L4: the document detail and its asset ledger show the block reason, when it was set and the grants left; other tenants see nothing", async () => {
+    await resumableDocument("doc-a");
+    await sql`update document_extraction_levels set resume_blocked = 'no-progress', resume_blocked_at = now(), resume_grants = 1 where document_id = 'doc-a'`;
+    const assetsRes = await app.request("/documents/doc-a/assets", { headers: { "x-test-user": "ua" } });
+    expect(assetsRes.status).toBe(200);
+    const assets = await assetsRes.json() as { level: { resume: Record<string, unknown> } };
+    expect(assets.level.resume).toMatchObject({ queued: false, blocked: "no-progress", grantsLeft: 1 });
+    expect(Date.parse(String(assets.level.resume.blockedAt))).toBeGreaterThan(0);
+    // The document detail (getDocumentViewerPayload's `figureResume`) reads the same scoped state.
+    expect(await service.documentFigureResumeState({ orgId: "org-a", documentId: "doc-a" })).toMatchObject({ blocked: "no-progress", grantsLeft: 1 });
+    expect((await app.request("/documents/doc-a/assets", { headers: { "x-test-user": "ub" } })).status).toBe(404);
+    expect(await service.documentFigureResumeState({ orgId: "org-b", documentId: "doc-a" })).toBeNull();
+    // A level that is no longer current: no state.
+    await sql`update document_extraction_levels set assets_current = false where document_id = 'doc-a'`;
+    expect(await service.documentFigureResumeState({ orgId: "org-a", documentId: "doc-a" })).toBeNull();
+  });
+
   it("bulk requests and the backstop never grant: a budget-blocked document is left blocked", async () => {
     await resumableDocument("doc-a");
     await resumableDocument("doc-b2");
     await sql`update document_extraction_levels set resume_blocked = 'vm-budget', updated_at = now() - interval '1 hour' where document_id = 'doc-a'`;
     await sql`update document_extraction_levels set updated_at = now() - interval '1 hour' where document_id = 'doc-b2'`;
-    expect(await (await app.request("/projects/proj-a/figures/resume", { method: "POST", headers: { "x-test-user": "ua" } })).json()).toMatchObject({ queued: 1 });
+    // L4: the bulk answer counts what it skipped, by reason.
+    expect(await (await app.request("/projects/proj-a/figures/resume", { method: "POST", headers: { "x-test-user": "ua" } })).json())
+      .toMatchObject({ queued: 1, blocked: { "vm-budget": 1 } });
     service.resetFigureResumeBackstopForTest();
     await sql`update document_extraction_levels set resume_after = null`;
     expect(await service.sweepFigureResumeQueue()).toBe(1);
@@ -223,11 +242,13 @@ describe("POST /projects/:id/figures/resume", () => {
 
   it("L10: the document past the cap keeps its block reason (selected, never updated and put back)", async () => {
     for (let i = 0; i < 3; i += 1) await resumableDocument(`e-${i}`);
-    await sql`update document_extraction_levels set resume_blocked = 'stale', updated_at = now() - (interval '1 minute' * (3 - substr(document_id, 3)::int))`;
+    await sql`update document_extraction_levels set resume_blocked = 'stale', resume_blocked_at = now(), updated_at = now() - (interval '1 minute' * (3 - substr(document_id, 3)::int))`;
     const res = await app.request("/projects/proj-a/figures/resume?limit=2", { method: "POST", headers: { "x-test-user": "ua" } });
     expect(await res.json()).toMatchObject({ queued: 2, capped: true });
-    expect(await sql`select document_id, resume_blocked, resume_after is not null as q from document_extraction_levels order by document_id`).toEqual([
-      { document_id: "e-0", resume_blocked: null, q: true }, { document_id: "e-1", resume_blocked: null, q: true }, { document_id: "e-2", resume_blocked: "stale", q: false },
+    // L2: a cleared block also clears its timestamp.
+    expect(await sql`select document_id, resume_blocked, resume_blocked_at is not null as at, resume_after is not null as q from document_extraction_levels order by document_id`).toEqual([
+      { document_id: "e-0", resume_blocked: null, at: false, q: true }, { document_id: "e-1", resume_blocked: null, at: false, q: true },
+      { document_id: "e-2", resume_blocked: "stale", at: true, q: false },
     ]);
   });
 

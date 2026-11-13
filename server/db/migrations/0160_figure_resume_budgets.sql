@@ -12,7 +12,15 @@ ALTER TABLE document_extraction_levels ADD COLUMN IF NOT EXISTS resume_vm_ms big
 --> statement-breakpoint
 ALTER TABLE document_extraction_levels ADD COLUMN IF NOT EXISTS resume_stalls integer NOT NULL DEFAULT 0 CHECK (resume_stalls BETWEEN 0 AND 1000);
 --> statement-breakpoint
-ALTER TABLE document_extraction_levels ADD COLUMN IF NOT EXISTS resume_grants integer NOT NULL DEFAULT 0 CHECK (resume_grants BETWEEN 0 AND 100);
+ALTER TABLE document_extraction_levels ADD COLUMN IF NOT EXISTS resume_grants integer NOT NULL DEFAULT 0;
+--> statement-breakpoint
+-- At most FIGURE_RESUME_HARD.grants (10, DOCSLURP_FIGURE_RESUME_MAX_GRANTS's bound), by name, so a database that applied an
+-- earlier version of this migration (CHECK at 100) converges.
+DO $$
+BEGIN
+  ALTER TABLE document_extraction_levels DROP CONSTRAINT IF EXISTS document_extraction_levels_resume_grants_check;
+  ALTER TABLE document_extraction_levels ADD CONSTRAINT document_extraction_levels_resume_grants_check CHECK (resume_grants BETWEEN 0 AND 10);
+END $$;
 --> statement-breakpoint
 ALTER TABLE document_extraction_levels ADD COLUMN IF NOT EXISTS resume_blocked_at timestamptz;
 --> statement-breakpoint
