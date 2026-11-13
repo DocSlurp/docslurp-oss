@@ -74,14 +74,16 @@ const DOPPLER_FIGURE_KEY = /\/doppler\/[A-Za-z0-9-]{1,64}\/images\/page-[0-9]{4,
 const FIGURE_SVG_CSP = "default-src 'none'; style-src 'unsafe-inline'; sandbox; frame-ancestors 'self'";
 /**
  * The folder's other files, typed by their fixed names and never rendered as active content: the manifest and the
- * index as JSON, the Markdown as text. (The provider's page facts are never stored.) All of them still pass the artifact check (recorded slot,
+ * index as JSON, the Markdown and the page facts as text. (The page facts are the host's canonical lines re-serialized from
+ * validated facts, never the provider's file.) All of them still pass the artifact check (recorded slot,
  * project, organization, PII withholding) like any other artifact.
  */
-const DOPPLER_FOLDER_FILE_KEY = /\/doppler\/[A-Za-z0-9-]{1,64}\/(images\/manifest\.jsonl?|images\/shards\/[0-9]{4,10}-[0-9]{4,10}\/manifest\.jsonl|document\.md|index\.json)$/;
+const DOPPLER_FOLDER_FILE_KEY = /\/doppler\/[A-Za-z0-9-]{1,64}\/(images\/manifest\.jsonl?|images\/shards\/[0-9]{4,10}-[0-9]{4,10}\/manifest\.jsonl|images\/page-facts\.jsonl|document\.md|index\.json)$/;
 const DOPPLER_FOLDER_FILE_TYPES: Readonly<Record<string, string>> = {
   "images/manifest.json": "application/json; charset=utf-8",
   "images/manifest.jsonl": "text/plain; charset=utf-8",
   "index.json": "application/json; charset=utf-8",
+  "images/page-facts.jsonl": "text/plain; charset=utf-8",
   "document.md": "text/markdown; charset=utf-8",
 };
 

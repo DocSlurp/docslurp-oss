@@ -237,11 +237,20 @@ describe("file proxy", () => {
       expect(open).not.toHaveBeenCalled();
     });
 
-    it("page facts are no folder file: never typed as text, whatever stored them (owner decision: not stored at all)", async () => {
+    it("serves the host's canonical page facts as text, typed by name, only through the artifact check (#358)", async () => {
+      const path = () => `/v1/files/${token({ uri: folderUri("images/page-facts.jsonl"), name: "page-facts.jsonl" })}/page-facts.jsonl`;
+      // Whatever type the object was stored with, it is plain text and never rendered as active content.
       open.mockResolvedValue(object("{}", { ContentType: "text/html" }));
-      const res = await get(`/v1/files/${token({ uri: folderUri("images/page-facts.jsonl"), name: "page-facts.jsonl" })}/page-facts.jsonl`);
-      expect(res.headers.get("content-type")).toBe("application/octet-stream");
-      expect(res.headers.get("content-disposition")).toMatch(/^attachment;/);
+      const res = await get(path());
+      expect(res.status).toBe(200);
+      expect(res.headers.get("content-type")).toBe("text/plain; charset=utf-8");
+      expect(res.headers.get("content-disposition")).not.toMatch(/^attachment;/);
+      // PII-withheld, another tenant's, or never recorded: the same 404, and the object is never opened.
+      access.mockResolvedValue(false);
+      open.mockClear();
+      expect((await get(path())).status).toBe(404);
+      expect(open).not.toHaveBeenCalled();
+      access.mockResolvedValue(true);
     });
 
     it("HIGH-1 defense in depth: no folder file of a document that is not completed, even when the artifact check passes", async () => {
@@ -249,7 +258,7 @@ describe("file proxy", () => {
         statuses.clear();
         if (status) statuses.set(DOC, status);
         for (const [uri, name] of [[figureUri("p3.g2.svg"), "p3.g2.svg"], [folderUri("document.md"), "document.md"], [folderUri("index.json"), "index.json"],
-          [folderUri("images/manifest.jsonl"), "manifest.jsonl"]] as const) {
+          [folderUri("images/manifest.jsonl"), "manifest.jsonl"], [folderUri("images/page-facts.jsonl"), "page-facts.jsonl"]] as const) {
           open.mockClear();
           const res = await get(`/v1/files/${token({ uri, name })}/${name}`);
           expect(res.status, `${status} ${name}`).toBe(404);

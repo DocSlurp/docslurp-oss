@@ -57,7 +57,8 @@ export type SandboxedPdfBatchEvent =
   /**
    * The file's Markdown is written to its `output`; `pages` is the structural count the VM measured (what bills and is
    * authorized). `processedPages`, when the converter read fewer pages than that (1..pages-1), is the number of page slots in
-   * the Markdown; the host flags the document partially extracted, as for a single-file run.
+   * the Markdown; the host flags the document partially extracted, as for a single-file run. `result.pageFacts` (Doppler's
+   * page facts, SandboxedPdfResult) is accepted like a single-file run's, bounded by those slots: routing evidence only.
    */
   | { index: number; phase: "text"; pages: number; processedPages?: number; result: SandboxedPdfResult }
   /** The file's figures (only when the job asked for them), after its text. `extracted`: `figures.dir` holds them. */
