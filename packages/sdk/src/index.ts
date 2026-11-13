@@ -667,6 +667,23 @@ export function formatSearchContext(response: SearchResponse): string {
   }).join("\n\n");
 }
 
+/** DocSlurp's chat tiers, fastest first. */
+export const CHAT_TIERS = ["fastest", "balanced", "smart"] as const;
+export type ChatTier = (typeof CHAT_TIERS)[number];
+
+/** Thrown before any request when chat input names a backend model; send `tier` instead. */
+export class DocSlurpManagedModelError extends Error {
+  readonly code = "model_not_allowed";
+  constructor() {
+    super(`Chat models are managed by DocSlurp. Send tier (${CHAT_TIERS.join(", ")}) instead of a model.`);
+    this.name = "DocSlurpManagedModelError";
+  }
+}
+
+function assertNoBackendModel(input: object): void {
+  if (Object.hasOwn(input, "model") && (input as { model?: unknown }).model !== undefined) throw new DocSlurpManagedModelError();
+}
+
 export type ChatInput = {
   filters?: {geo?:GeoPredicate;documentIds?:string[];mimeTypes?:string[];tags?:string[];dateFrom?:string;dateTo?:string};
   /** Explicit opt-in: speed-boosted processing, billed at the speed-boost rate (docslurp.io/pricing); omitted/false keeps standard routing. */
@@ -678,14 +695,14 @@ export type ChatInput = {
   /** Project ID, slug or name; omitted: the client project. */
   project?: string;
   /**
-   * Chat model for this request, as an `llm://` model URI such as
-   * `llm://openrouter/anthropic/claude-haiku-5.5` (the bare OpenRouter id also
-   * works). Omitted: the default. Add `?reasoning=low|medium|high` (OpenRouter's
-   * native effort names; default `none`, the fastest answer) for long multi-part
-   * questions. An unavailable model or option is refused with HTTP 400
-   * `model_not_allowed`, never replaced by the default.
+   * Chat tier for this request: `fastest` (default), `balanced` or `smart`. DocSlurp manages the model behind each
+   * tier; backend model ids are not accepted (the server answers 400 `model_not_allowed`).
    */
-  model?: string;
+  tier?: ChatTier;
+  /** How much the answering model reasons: `none` (default, fastest), `minimal`, `low`, `medium` or `high`. */
+  reasoning?: "none" | "minimal" | "low" | "medium" | "high";
+  /** Not accepted: backend models are managed by DocSlurp. Use `tier`. */
+  model?: never;
   /** Search-agent budgets and modes for this turn (`chat()` only; `chatStream` ignores them); non-admin callers can only lower the budgets. */
   agent?: {
     /** Model steps, 1-12 (default 8). The last step always answers. */
@@ -2284,7 +2301,8 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
       return request(`/v1/organizations/${encodeURIComponent(orgId)}/api-keys`, { method: "DELETE" }, options);
     },
 
-    chat(input: ChatInput, requestOptions?: RequestOptions): Promise<ChatResponse> {
+    async chat(input: ChatInput, requestOptions?: RequestOptions): Promise<ChatResponse> {
+      assertNoBackendModel(input);
       return request<ChatResponse>("/v1/chat", {
         body: JSON.stringify(inProject(input)),
         headers: { "Content-Type": "application/json" },
@@ -2302,6 +2320,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
      * browser history.
      */
     async *chatStream(input: ChatInput, requestOptions: RequestOptions = {}): AsyncGenerator<ChatStreamEvent> {
+      assertNoBackendModel(input);
       const target = inProject(input);
       // The session grant goes in a header, never the URL or the body, as before.
       const { sessionToken, ...body } = target;

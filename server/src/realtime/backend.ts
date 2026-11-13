@@ -1,6 +1,6 @@
 import { realtimeCanaryOrgAllowed } from "./rollout-scope.js";
 import { readPageImageReadiness } from "../services/page-image-readiness.js";
-import { realtimeSuggestionsSnapshotSchema } from "@docslurp/shared";
+import { customerPipelineView, realtimeSuggestionsSnapshotSchema } from "@docslurp/shared";
 import { readProjectSuggestions } from "../services/project-suggestions.js";
 import type { RealtimeBackend, DashboardResource } from "./broker.js";
 import { sql } from "../db.js";
@@ -11,6 +11,7 @@ import { getAuthorizedProjectRecord } from "../services/projects.js";
 import { listDocumentIndexEntries, getRealtimeViewerPayload } from "../services/documents.js";
 import { mapProjectRun, type ProjectRunRow } from "../services/run-records.js";
 import { buildRunProgressSnapshot } from "../services/runs.js";
+import { redactOperatorRun } from "../services/progress-snapshot.js";
 import { realtimeRunProgress, realtimeRunRecord } from "./run-projection.js";
 import { realtimeScopeKey } from "./broker.js";
 
@@ -139,7 +140,11 @@ export const realtimeBackend: RealtimeBackend = {
           where r.org_id = ${orgId} and docslurp_project_access(w.id, ${userId})
           order by (r.status in ('queued','processing')) desc, r.updated_at desc, r.id limit 201`;
         const costs = await runUsageCostSummaries(runs.slice(0, 200).map(run => run.id));
-        return { runs: runs.slice(0, 200).map(run => realtimeRunRecord(mapProjectRun(run, costs.get(run.id)))), truncated: runs.length > 200 };
+        // Customers never see backend models: run pipelines lose their managed model fields, and model keys and ids go,
+        // exactly as on the REST and SSE activity paths. Platform operators see the raw records.
+        const operator = await isConfiguredAdminUserSql(sql, userId);
+        const view = (run: ReturnType<typeof mapProjectRun>) => operator ? run : redactOperatorRun(run);
+        return { runs: runs.slice(0, 200).map(run => realtimeRunRecord(view(mapProjectRun(run, costs.get(run.id))))), truncated: runs.length > 200 };
       }
       case "suggestions": return realtimeSuggestionsSnapshotSchema.parse(await readProjectSuggestions(userId, resource.projectId, { limit: 8 }));
       case "page-image": return await readPageImageReadiness(userId, resource);
@@ -151,7 +156,9 @@ export const realtimeBackend: RealtimeBackend = {
       case "project": {
         const project = await getAuthorizedProjectRecord(resource.projectId, orgId);
         if (!project) throw new Error("not_found");
-        return project;
+        // The REST routes return publicProjectView; the socket applies the same customer view (no managed model fields).
+        if (await isConfiguredAdminUserSql(sql, userId)) return project;
+        return { ...project, pipeline: customerPipelineView(project.pipeline) };
       }
       case "documents": return await listDocumentIndexEntries({ userId, orgId,
         projectId: resource.projectId, limit: 50, offset: resource.page * 50 });

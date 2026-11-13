@@ -1,4 +1,4 @@
-import { deferredProfilesEnabled, isBillingEnforced, PUBLIC_ERROR_MESSAGES, publicDiagnostics, publicDocumentError } from "@docslurp/shared";
+import { deferredProfilesEnabled, isBillingEnforced, PUBLIC_ERROR_MESSAGES, publicDiagnostics, publicDocumentError, resolveManagedPipeline, parseManagedPipelineOverrides, storedManagedPipeline, stripManagedPipelineFields, type ManagedPipelineOverrides } from "@docslurp/shared";
 import { chartExportDefaults, upgradeStoredPipelineChartExport } from "@docslurp/shared";
 import { markProjectAutoNamed } from "./project-naming.js";
 import { forgetProjectProviderPolicy } from "../lib/provider-policy.js";
@@ -42,6 +42,8 @@ import {
   validateModeSwitch,
 } from "./project-indexing-mode.js";
 import { buildRunProgressSnapshot, withRunCosts } from "./runs.js";
+import { parseStoredChatTierModels } from "./managed-models.js";
+import { speedBoostChatTiers } from "@docslurp/shared/project-chat-models";
 import {
   canEditProject,
   canManageProject,
@@ -72,6 +74,8 @@ type ProjectRow = {
   template_key: ProjectTemplateKey | null;
   system_prompt: string | null;
   pipeline: ProjectRecord["pipeline"] | null;
+  /** Platform-admin model overrides (managed-models.ts); never part of the customer record. */
+  managed_models?: { pipeline?: unknown; chat?: unknown } | null;
   monthly_budget_cents: number | null;
   artifact_retention_days?: number | null;
   run_retention_days?: number | null;
@@ -285,8 +289,19 @@ function parseProjectTemplateKey(value: string | null): ProjectRecord["templateK
   return parsed.success ? parsed.data : null;
 }
 
+/** The project's explicit admin model overrides (projects.managed_models.pipeline), or null. */
+export async function loadManagedPipelineOverrides(projectId: string, client: ProjectSqlClient | typeof sql = sql): Promise<ManagedPipelineOverrides | null> {
+  const [row] = await (client as typeof sql)<{ managed: unknown }[]>`select managed_models -> 'pipeline' as managed from projects where id = ${projectId}`;
+  return parseManagedPipelineOverrides(row?.managed, `project ${projectId}`);
+}
+
 function mapProject(row: ProjectRow): ProjectRecord {
-  const pipeline = normalizeStoredPipelineFeatures(row.pipeline ?? defaultPipelineFeatures, `project ${row.id}`);
+  // Stored model values are never trusted: only the explicit admin overrides apply (managed-pipeline-models.ts).
+  const pipeline = resolveManagedPipeline(
+    row.pipeline ?? defaultPipelineFeatures,
+    parseManagedPipelineOverrides(row.managed_models?.pipeline, `project ${row.id}`),
+    `project ${row.id}`,
+  ).pipeline;
   return projectSchema.parse({
     id: row.id,
     orgId: row.org_id,
@@ -324,6 +339,7 @@ function mapProject(row: ProjectRow): ProjectRecord {
     latestRunStatus: row.latest_run_status,
     archivedAt: row.archived_at ?? null,
     isDefault: row.is_default ?? false,
+    chatSpeedBoostTiers: speedBoostChatTiers(parseStoredChatTierModels(row.managed_models && typeof row.managed_models === "object" ? (row.managed_models as { chat?: unknown }).chat : null, row.id)),
     slug: row.slug,
     lastActivityAt: row.last_activity_at,
     createdAt: row.created_at,
@@ -406,7 +422,7 @@ export async function createProject(input: CreateProjectInput): Promise<ProjectR
       ${name},
       ${parsed.templateKey ?? null},
       ${parsed.systemPrompt ?? null},
-      ${sql.json(JSON.parse(JSON.stringify(withoutStageSelection(pipeline))))},
+      ${sql.json(stripManagedPipelineFields(JSON.parse(JSON.stringify(withoutStageSelection(pipeline)))))},
       coalesce(${slug}::text, generate_project_slug())
     )
     returning
@@ -417,6 +433,7 @@ export async function createProject(input: CreateProjectInput): Promise<ProjectR
       template_key,
       system_prompt,
       pipeline,
+      managed_models,
       0::int as document_count,
       0::int as total_page_count,
       0::int as indexed_page_count,
@@ -658,6 +675,7 @@ async function readProject(projectId: string, orgId: string): Promise<ProjectRec
       w.template_key,
       w.system_prompt,
       w.pipeline,
+      w.managed_models,
       w.monthly_budget_cents,
       w.artifact_retention_days,
       w.run_retention_days,
@@ -766,6 +784,7 @@ export async function listProjects(userId: string): Promise<ProjectRecord[]> {
       w.template_key,
       w.system_prompt,
       w.pipeline,
+      w.managed_models,
       w.monthly_budget_cents,
       w.artifact_retention_days,
       w.run_retention_days,
@@ -992,7 +1011,12 @@ export async function resolveUpdatedPipeline(
         : current.pipeline),
   );
   if (parsed.summaries !== undefined) draftPipeline.summarize = parsed.summaries;
-  const pipeline = applyProjectTemplateLocks(draftPipeline, template);
+  // Managed model fields (backend models, providers, routes) are never a customer choice: keep the stored ones
+  // (platform-admin settings) across every edit; the routes refuse them in requests.
+  // Managed model fields (backend models, providers, routes) are never a customer choice: whatever the draft holds
+  // (a request, a template, a version snapshot) is dropped, and only the project's explicit admin overrides apply.
+  const overrides = await loadManagedPipelineOverrides(projectId);
+  const pipeline = resolveManagedPipeline(applyProjectTemplateLocks(draftPipeline, template), overrides, `project ${projectId}`).pipeline;
   // The schema defaults a missing indexingMode to "full", so a pipeline edit must not
   // flip the mode: only an explicit request (options) changes it. Flag off pins "full".
   // With the flag off the stored raw mode is preserved (only the effective mode is coerced).
@@ -1048,6 +1072,11 @@ export async function updateProject(
   const nextAutoConfirm = parsed.autoConfirmReindex ?? current.autoConfirmReindex ?? false;
   const nextAllowChina = parsed.allowChinaProviders ?? current.allowChinaProviders ?? true;
   const client = options.client ?? sql;
+  // What the row stores: the pipeline without managed fields, plus the explicit overrides that validate against it, so
+  // readers of projects.pipeline (search, graph rebuild) see the overrides and current defaults for everything else.
+  const overrides = await loadManagedPipelineOverrides(projectId, client);
+  const managed = resolveManagedPipeline(withoutStageSelection(pipeline), overrides, `project ${projectId}`);
+  const storedPipeline = storedManagedPipeline(managed.pipeline, overrides, managed.applied);
 
   await client`
     with current_month_spend as (
@@ -1061,7 +1090,7 @@ export async function updateProject(
       slug = ${nextSlug},
       template_key = ${parsed.templateKey ?? (parsed.templateKey === null ? null : current.templateKey)},
       system_prompt = ${parsed.systemPrompt ?? (parsed.systemPrompt === null ? null : current.systemPrompt)},
-      pipeline = ${sql.json(JSON.parse(JSON.stringify(withoutStageSelection(pipeline))))},
+      pipeline = ${sql.json(storedPipeline as never)},
       monthly_budget_cents = ${nextBudget},
       artifact_retention_days = ${nextArtifactRetention},
       run_retention_days = ${nextRunRetention},
@@ -1204,7 +1233,7 @@ export async function cloneProject(
     throw new ProjectAccessError(403, "project_forbidden", "Forbidden");
   }
 
-  return await createProject({
+  const clone = await createProject({
     userId,
     orgId: current.orgId,
     name: name?.trim() || buildClonedProjectName(current.name),
@@ -1212,6 +1241,19 @@ export async function cloneProject(
     systemPrompt: current.systemPrompt,
     pipeline: current.pipeline,
   });
+  // The copy keeps the source's explicit admin model overrides (createProject stored the pipeline without them).
+  const overrides = await loadManagedPipelineOverrides(projectId);
+  const [source] = await sql<{ managed: unknown }[]>`select managed_models as managed from projects where id = ${projectId}`;
+  if (source?.managed && typeof source.managed === "object" && Object.keys(source.managed).length) {
+    const managed = resolveManagedPipeline(clone.pipeline, overrides, `project ${clone.id}`);
+    await sql`
+      update projects set managed_models = ${sql.json(source.managed as never)},
+        pipeline = ${sql.json(storedManagedPipeline(managed.pipeline, overrides, managed.applied) as never)}
+      where id = ${clone.id}
+    `;
+    return (await getProject(clone.id, userId)) ?? clone;
+  }
+  return clone;
 }
 
 export async function listProjectVersions(

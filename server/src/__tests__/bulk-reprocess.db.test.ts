@@ -196,3 +196,27 @@ describe("stored pipelines the strict schemas now reject (round 5 M1)", () => {
     });
   });
 });
+
+describe("bulk reprocess never replays an old run snapshot's model values", () => {
+  it("creates the new run on the current defaults and the project's explicit overrides", async () => {
+    const legacy = {
+      ...defaultPipelineFeatures,
+      vision: { profile: "good-fast-hosted", modelUri: "llm://openrouter/deepseek/deepseek-v4.1-flash-1017", target: "hosted", remoteFallbackModelUri: null },
+      textGeneration: { model: "z-ai/glm-5.3-flash", models: { "document-summary": "qwen/qwen3.5-flash-02-23" } },
+      visualPages: { route: "gemini", coarseFallback: false },
+    };
+    await seedDocument("legacy", legacy);
+    await sql`update projects set managed_models = ${sql.json({ pipeline: { structuredExtraction: { model: "llm://private/gpu1/acme/extract" } } })} where id = 'w'`;
+    try {
+      const result = await bulkReprocessDocuments(["legacy"], "u");
+      expect(result.failed).toEqual([]);
+      const [run] = await sql<{ pipeline: Record<string, Record<string, unknown>> }[]>`select pipeline from project_runs where kind = 'bulk-reprocess' order by created_at desc limit 1`;
+      expect(run!.pipeline.vision!.modelUri).not.toMatch(/deepseek/);
+      expect(run!.pipeline.textGeneration).toMatchObject({ model: null, models: {} });
+      expect(run!.pipeline.visualPages!.route).toBe("auto");
+      expect(run!.pipeline.structuredExtraction!.model).toBe("llm://private/gpu1/acme/extract");
+    } finally {
+      await sql`update projects set managed_models = '{}'::jsonb where id = 'w'`;
+    }
+  });
+});

@@ -38,7 +38,7 @@ export const PUBLIC_ERROR_MESSAGES = {
   organizationMissing: "We couldn’t find that organization. It may have been moved or removed.",
   chatDisabled: "Chat is turned off for this project. Enable it in project settings.",
   searchScope: "Search must stay within a single project.",
-  modelNotAllowed: "That chat model isn’t available for this request. Omit model to use the default.",
+  modelNotAllowed: "DocSlurp manages the models behind each tier and category. Send a chat tier (fastest, balanced or smart) or a pipeline category instead of a model.",
   chatDeadline: "The chat turn reached its time limit. The task is blocked; no successful answer or action has been confirmed.",
   creditExhausted: "Your organization is out of credits. Buy credits to continue.",
   budgetPaused: "The monthly budget cap has been reached, so AI processing is paused. Raise the budget to resume.",

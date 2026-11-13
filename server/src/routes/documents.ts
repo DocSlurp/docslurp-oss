@@ -12,7 +12,7 @@ import {
   apiKeyHasAnyScope,
   assertApiKeyProjectScope
 } from "../lib/api-key-authorization.js";
-import { getRequestActor, resolveActorProjectFilter } from "../lib/request-actor.js";
+import { getRequestActor, isPlatformAdminActor, resolveActorProjectFilter } from "../lib/request-actor.js";
 import { requestIp, requestUserAgent } from "../lib/request-context.js";
 import { appendAuditLog } from "../services/audit-log.js";
 import { requestDocumentFigureResume } from "../services/figure-resume.js";
@@ -56,6 +56,7 @@ import { estimateDocumentReprocess, singleProjectOf } from "../services/work-est
 import { apiKeyCanUpdateContent, CONTENT_UPDATE_SCOPE_MESSAGE } from "../lib/content-update-access.js";
 import { apiKeyCanUseProject } from "../lib/api-key-project-scope.js";
 import { DocumentAssetQueryError, getDocumentAssetLedger } from "../services/document-assets.js";
+import { redactOperatorRun } from "../services/progress-snapshot.js";
 
 const bulkSchema = z.object({
   speedBoost: z.boolean().optional(),
@@ -630,7 +631,9 @@ export const documentsRoutes = new Hono()
           return await jobStatusForMutation(meta, runs.map((run) => run.id), userId);
         })()
       : null;
-    return c.json({ runs, failed, warnings, ...(job ? { job } : {}) }, 201);
+    // Created runs as customers read them (no managed model fields or model keys), as on GET /v1/runs.
+    const operator = await isPlatformAdminActor(getRequestActor(c));
+    return c.json({ runs: operator ? runs : runs.map((run) => redactOperatorRun(run)), failed, warnings, ...(job ? { job } : {}) }, 201);
   });
 
 // Reads, full-index (policy-gated) and content updates (server keys with ingest); the router guard above rejects other API key writes.

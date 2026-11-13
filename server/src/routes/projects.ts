@@ -24,7 +24,8 @@ import {
   chatSearchFiltersSchema,
   createProjectInviteSchema,
   createProjectSchema,
-  updateProjectSearchSettingsSchema,
+  publicUpdateProjectSearchSettingsSchema,
+  customerSearchSettingsView,
   updateProjectMemberSchema,
   updateProjectSchema,
   projectTemplates,
@@ -38,8 +39,11 @@ import {
   isProhibitedRoutingModelId,
 } from "@docslurp/shared";
 
-import { chatModelRefused, ChatModelNotAllowedError } from "../lib/chat-model-policy.js";
-import { actorHasAnyApiKeyScope, getRequestActor, apiKeyCanUseProject, isFirstPartyAppActor, type RequestActor } from "../lib/request-actor.js";
+import { chatModelRefused, ChatModelNotAllowedError, SpeedBoostUnavailableError } from "../lib/chat-model-policy.js";
+import { publicProjectView } from "../lib/public-project.js";
+import { managedPipelineFieldMessage, managedPipelineModelPaths } from "@docslurp/shared";
+import { CHAT_REASONING_LEVELS, CHAT_TIERS } from "@docslurp/shared/project-chat-models";
+import { actorHasAnyApiKeyScope, getRequestActor, apiKeyCanUseProject, isFirstPartyAppActor, isPlatformAdminActor, type RequestActor } from "../lib/request-actor.js";
 import { requestIp, requestUserAgent } from "../lib/request-context.js";
 import { isProjectChatAgent } from "../lib/mastra.js";
 import { chatVoiceRoutes } from "./chat-voice.js";
@@ -146,6 +150,12 @@ const chatFeedbackSchema = z.object({
   model: optionalText(200),
 });
 
+/** A chat turn's category choice: the tier and reasoning level. Backend models are never a customer choice. */
+const chatTierChoiceSchema = z.object({
+  tier: z.enum(CHAT_TIERS).optional(),
+  reasoning: z.enum(CHAT_REASONING_LEVELS).optional(),
+});
+
 const cloneProjectSchema = z.object({
   name: z.string().trim().min(1).max(120).optional(),
 });
@@ -168,7 +178,10 @@ type ProjectChatPostBody = {
   speedBoost?: boolean;
   messages?: ProjectChatUIMessage[];
   sessionId?: string;
+  /** Operator evaluation only; customers send `tier`. */
   model?: string;
+  tier?: unknown;
+  reasoning?: unknown;
   /** Thread retrieval overrides from the composer. */
   retrieval?: unknown;
   /** Composer filters (documents, types, tags, dates). */
@@ -300,6 +313,8 @@ async function createProjectAgentChatResponse(c: Context) {
   if (await chatModelRefused(getRequestActor(c), body.model, project.id)) {
     return apiErrorResponse(c, 400, "model_not_allowed", new ChatModelNotAllowedError().message);
   }
+  const choice = chatTierChoiceSchema.safeParse({ tier: body.tier, reasoning: body.reasoning });
+  if (!choice.success) return apiErrorResponse(c, 400, "invalid_request", "Invalid tier or reasoning", { issues: choice.error.issues });
 
   return createUIMessageStreamResponse({
     headers: {
@@ -414,7 +429,7 @@ async function createProjectAgentChatResponse(c: Context) {
               } });
             },
             sessionId: body.sessionId,
-            model: body.model, speedBoost: body.speedBoost === true,
+            model: body.model, tier: choice.data.tier, reasoning: choice.data.reasoning, speedBoost: body.speedBoost === true,
             ...(scope.retrieval ? { retrieval: scope.retrieval } : {}),
             ...(scope.filters ? { filters: scope.filters } : {}),
             onSearchActivity: (activity) => {
@@ -600,6 +615,18 @@ function findProhibitedModelId(value: unknown): string | null {
 }
 
 /**
+ * Backend models, providers and routes in a pipeline are managed settings: a request naming one is refused (for every
+ * caller; platform admins use /v1/admin/projects), with the paths and the categories to use instead. The refused
+ * values are logged, never echoed.
+ */
+function refuseManagedPipelineFields(c: Context, rawPipeline: unknown): Response | null {
+  const paths = managedPipelineModelPaths(rawPipeline);
+  if (!paths.length) return null;
+  console.warn(`[managed-models] refused pipeline fields=${paths.join(",")} user=${getRequestActor(c).userId}`);
+  return apiErrorResponse(c, 400, "model_not_allowed", managedPipelineFieldMessage(paths), { paths });
+}
+
+/**
  * API-key gate for the search-settings mutation and its estimate, the same as
  * PATCH /:projectId: a server key with the opt-in projects:manage scope
  * (403 otherwise), bound to the project's organization and allowlist (404
@@ -621,6 +648,16 @@ async function denySearchSettingsApiKey(
   }
   return null;
 }
+
+/** Rerank providers and models are managed: a request naming one is refused, pointing to `reranker`. */
+const refuseManagedSearchFields: MiddlewareHandler = async (c, next) => {
+  const raw = await c.req.json().catch(() => null) as { retrievalDefaults?: Record<string, unknown> } | null;
+  const named = ["rerankProvider", "rerankModel"].filter(key => raw?.retrievalDefaults && Object.hasOwn(raw.retrievalDefaults, key));
+  if (named.length) {
+    return apiErrorResponse(c, 400, "model_not_allowed", `${named.map(key => `retrievalDefaults.${key}`).join(", ")} ${named.length === 1 ? "is" : "are"} managed by DocSlurp. Use retrievalDefaults.reranker (keyword or model) instead.`, { paths: named.map(key => `retrievalDefaults.${key}`) });
+  }
+  await next();
+};
 
 /** Runs the search-settings key gate before body validation, so a refused key gets 403/404, never a schema 400. */
 const searchSettingsKeyGate: MiddlewareHandler = async (c, next) => {
@@ -690,9 +727,9 @@ export const projectsRoutes = new Hono()
     }
     if (actor.type === "session") await ensurePersonalDefaultProject(userId);
     const projects = await listProjects(userId);
-    return c.json({ projects: actor.type === "apiKey"
+    return c.json({ projects: (actor.type === "apiKey"
       ? projects.filter((project) => apiKeyCanUseProject(actor.apiKey, project))
-      : projects });
+      : projects).map(project => publicProjectView(project, actor)) });
   })
   .get("/board", async (c) => {
     const userId = c.get("sessionUser").id;
@@ -734,7 +771,11 @@ export const projectsRoutes = new Hono()
         c.req.param("projectId"),
         userId,
       );
-      return c.json({ versions });
+      // Snapshots hold the stored pipeline of their time, model ids and private aliases included: customers get the
+      // category view (rollback drops snapshot model values too; services/projects.ts).
+      const actor = getRequestActor(c);
+      if (await isPlatformAdminActor(actor)) return c.json({ versions });
+      return c.json({ versions: versions.map((version) => ({ ...version, snapshot: version.snapshot ? publicProjectView(version.snapshot, actor) : version.snapshot })) });
     } catch (error) {
       return apiStatusError(c, 404, reportPublicError(error));
     }
@@ -814,7 +855,7 @@ export const projectsRoutes = new Hono()
           userAgent: requestUserAgent(c),
         },
       });
-      return c.json({ recommendationId: body.recommendationId, patch: result.recommendation.patch, pipeline: result.pipeline });
+      return c.json(publicProjectView({ recommendationId: body.recommendationId, patch: result.recommendation.patch, pipeline: result.pipeline }, getRequestActor(c)));
     } catch (error) {
       if (error instanceof IngestReportActionError) return apiStatusError(c, error.status, error.message);
       throw error;
@@ -897,7 +938,7 @@ export const projectsRoutes = new Hono()
       return apiErrorResponse(c, 404, "project_not_found", "Project not found");
     }
 
-    return c.json(project);
+    return c.json(publicProjectView(project, getRequestActor(c)));
   })
   .get("/:projectId/search-settings", async (c) => {
     const userId = c.get("sessionUser").id;
@@ -910,7 +951,7 @@ export const projectsRoutes = new Hono()
       return apiErrorResponse(c, 404, "project_not_found", "Project not found");
     }
 
-    return c.json(settings);
+    return c.json(customerSearchSettingsView(settings));
   })
   .get("/:projectId/search/stream", async (c) => {
     const query = c.req.query("q");
@@ -1091,13 +1132,15 @@ export const projectsRoutes = new Hono()
   .post("/", zValidator("json", createProjectSchema, validationHook), async (c) => {
     const userId = c.get("sessionUser").id;
     const valid = c.req.valid("json");
-    const prohibitedModel = findProhibitedModelId(valid.pipeline);
-    if (prohibitedModel) {
-      return apiErrorResponse(c, 400, "invalid_request", `Model "${prohibitedModel}" is not permitted in pipeline configuration`);
-    }
     // The schema defaults a missing pipeline.indexingMode to "full"; only an explicit
     // mode in the raw body may override the organization default.
     const raw = await c.req.json().catch(() => null) as { pipeline?: { indexingMode?: unknown } } | null;
+    const managed = refuseManagedPipelineFields(c, raw?.pipeline);
+    if (managed) return managed;
+    const prohibitedModel = findProhibitedModelId(valid.pipeline);
+    if (prohibitedModel) {
+      return apiErrorResponse(c, 400, "invalid_request", "A model in this pipeline configuration is not permitted");
+    }
     const explicit = indexingModeSchema.safeParse(raw?.pipeline?.indexingMode).success;
     const { indexingMode: _defaulted, ...pipelineWithoutMode } = valid.pipeline ?? ({} as NonNullable<typeof valid.pipeline>);
     const input = {
@@ -1126,7 +1169,7 @@ export const projectsRoutes = new Hono()
         userAgent: requestUserAgent(c),
       },
     });
-    return c.json(project, 201);
+    return c.json(publicProjectView(project, getRequestActor(c)), 201);
   })
   .post(
     "/:projectId/clone",
@@ -1160,7 +1203,7 @@ export const projectsRoutes = new Hono()
             userAgent: requestUserAgent(c),
           },
         });
-        return c.json(project, 201);
+        return c.json(publicProjectView(project, getRequestActor(c)), 201);
       } catch (error) {
         return apiStatusError(c, 400, reportPublicError(error));
       }
@@ -1193,7 +1236,7 @@ export const projectsRoutes = new Hono()
           },
         });
 
-        return c.json(project);
+        return c.json(publicProjectView(project, getRequestActor(c)));
       } catch (error) {
         return projectMutationError(c, error);
       }
@@ -1225,7 +1268,7 @@ export const projectsRoutes = new Hono()
           },
         });
 
-        return c.json(project);
+        return c.json(publicProjectView(project, getRequestActor(c)));
       } catch (error) {
         return projectMutationError(c, error);
       }
@@ -1358,6 +1401,8 @@ export const projectsRoutes = new Hono()
       speedBoost?: boolean;
       sessionId?: string;
       model?: string;
+      tier?: unknown;
+      reasoning?: unknown;
       retrievalOnly?: boolean;
       retrieval?: unknown;
       filters?: unknown;
@@ -1370,6 +1415,8 @@ export const projectsRoutes = new Hono()
     if (body.speedBoost !== undefined && typeof body.speedBoost !== "boolean") return apiStatusError(c, 400, "speedBoost must be a boolean");
     const scope = parseChatScope(body);
     if (!scope) return apiStatusError(c, 400, "Invalid retrieval or filters");
+    const choice = chatTierChoiceSchema.safeParse({ tier: body.tier, reasoning: body.reasoning });
+    if (!choice.success) return apiErrorResponse(c, 400, "invalid_request", "Invalid tier or reasoning", { issues: choice.error.issues });
 
     const userId = c.get("sessionUser").id;
     const authorized = await authorizeActorProjectSearch(getRequestActor(c), c.req.param("projectId"), "chat");
@@ -1392,12 +1439,13 @@ export const projectsRoutes = new Hono()
         answerIngestReport: getRequestActor(c).type === "session",
         agent: composerAgentModes(body, getRequestActor(c)),
         sessionId: body.sessionId,
-        model: body.model, speedBoost: body.speedBoost === true,
+        model: body.model, tier: choice.data.tier, reasoning: choice.data.reasoning, speedBoost: body.speedBoost === true,
         ...(scope.retrieval ? { retrieval: scope.retrieval } : {}),
         ...(scope.filters ? { filters: scope.filters } : {}),
       });
     } catch (error) {
       if (error instanceof ChatModelNotAllowedError) return apiErrorResponse(c, 400, "model_not_allowed", error.message);
+      if (error instanceof SpeedBoostUnavailableError) return apiErrorResponse(c, 400, "speed_boost_unavailable", error.message);
       if (error instanceof ProjectChatDisabledError) return apiErrorResponse(c, 403, "chat_disabled", error.message);
       throw error;
     }
@@ -1456,7 +1504,7 @@ export const projectsRoutes = new Hono()
           },
         });
 
-        return c.json(project);
+        return c.json(publicProjectView(project, getRequestActor(c)));
       } catch (error) {
         return apiStatusError(c, 400, reportPublicError(error));
       }
@@ -1465,7 +1513,8 @@ export const projectsRoutes = new Hono()
   .patch(
     "/:projectId/search-settings",
     searchSettingsKeyGate,
-    zValidator("json", updateProjectSearchSettingsSchema, validationHook),
+    refuseManagedSearchFields,
+    zValidator("json", publicUpdateProjectSearchSettingsSchema, validationHook),
     async (c) => {
       const userId = c.get("sessionUser").id;
       const actor = getRequestActor(c);
@@ -1497,7 +1546,7 @@ export const projectsRoutes = new Hono()
         },
       });
 
-      return c.json(settings);
+      return c.json(customerSearchSettingsView(settings));
     },
   )
   .patch(
@@ -1518,9 +1567,11 @@ export const projectsRoutes = new Hono()
           return apiErrorResponse(c, 404, "project_not_found", "Project not found");
         }
       }
+      const managed = refuseManagedPipelineFields(c, (await c.req.json().catch(() => null) as { pipeline?: unknown } | null)?.pipeline);
+      if (managed) return managed;
       const prohibitedModel = findProhibitedModelId(c.req.valid("json").pipeline);
       if (prohibitedModel) {
-        return apiErrorResponse(c, 400, "invalid_request", `Model "${prohibitedModel}" is not permitted in pipeline configuration`);
+        return apiErrorResponse(c, 400, "invalid_request", "A model in this pipeline configuration is not permitted");
       }
       // The schema defaults a missing pipeline.indexingMode to "full", so read the raw body
       // to tell an explicit mode change (and `indexAll`) from an unrelated pipeline edit.
@@ -1614,13 +1665,15 @@ export const projectsRoutes = new Hono()
         },
       });
 
-      return c.json({ ...project, ...(indexingJob ? { indexingJob } : {}), ...(applied.job ? { job: applied.job } : {}) });
+      return c.json({ ...publicProjectView(project, getRequestActor(c)), ...(indexingJob ? { indexingJob } : {}), ...(applied.job ? { job: applied.job } : {}) });
     },
   )
   .post(
     "/:projectId/estimate",
     zValidator("json", updateProjectSchema, validationHook),
     async (c) => {
+      const managed = refuseManagedPipelineFields(c, (await c.req.json().catch(() => null) as { pipeline?: unknown } | null)?.pipeline);
+      if (managed) return managed;
       const userId = c.get("sessionUser").id;
       const project = await getProject(c.req.param("projectId"), userId);
       if (!project) return apiErrorResponse(c, 404, "project_not_found", "Project not found");
@@ -1644,7 +1697,8 @@ export const projectsRoutes = new Hono()
     "/:projectId/search-settings/estimate",
     // Same gates as the PATCH. The MCP in-process forward bypasses sessionAuth, so they run here.
     searchSettingsKeyGate,
-    zValidator("json", updateProjectSearchSettingsSchema, validationHook),
+    refuseManagedSearchFields,
+    zValidator("json", publicUpdateProjectSearchSettingsSchema, validationHook),
     async (c) => {
       const userId = c.get("sessionUser").id;
       const projectId = String(c.req.param("projectId"));

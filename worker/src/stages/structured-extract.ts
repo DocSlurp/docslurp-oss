@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 
 import { acceptedGeoSource, geoSchemaFields } from "../db/geo-final-source.js";
 import { geoProviderSchema, validateGeoAnnotations } from "@docslurp/shared";
-import { resolvePipelineTextModel } from "@docslurp/shared";
+import { resolveAllowedStructuredExtractionModel } from "@docslurp/shared";
 import type { Config } from "../config.js";
 import { generateOpenRouterText } from "../lib/ai.js";
 import { textModelApiKey, textUsageLabels } from "../lib/text-model-route.js";
@@ -208,7 +208,7 @@ export class StructuredExtractStage implements Stage {
 
     const schemaDef = structuredSchemaFromJsonSchema(outputSchema);
     const extractionConfig = { ...state.run.pipeline.structuredExtraction,
-      model: state.run.pipeline.structuredExtraction.model ?? resolvePipelineTextModel(state.run.pipeline, "structured-extraction", this.config.textGenerationModel),
+      model: resolveAllowedStructuredExtractionModel(state.run.pipeline, this.config.textGenerationModel),
     };
     if (!textModelApiKey(this.config.openRouterApiKey, extractionConfig.model)) {
       console.log("structured-extract: skipping, OPENROUTER_API_KEY not set");

@@ -1,5 +1,5 @@
 import type { Sql } from "postgres";
-import { applyDefaultVisionOverride, normalizeStoredPipelineFeatures, type MaterializePagesInput } from "@docslurp/shared";
+import { applyDefaultVisionOverride, normalizeStoredPipelineFeatures, parseManagedPipelineOverrides, resolveManagedPipeline, type MaterializePagesInput } from "@docslurp/shared";
 
 import { isMissingDocumentError } from "../db/missing-document.js";
 import { recordMaterializedPageFee, staleStampSql } from "../db/page-base-fee.js";
@@ -50,8 +50,9 @@ async function withSourcePipeline<R extends { id: string; kind?: string; pipelin
     select (pipeline = '{}'::jsonb) as empty from project_runs where id = ${run.id}
   `;
   if (own && !own.empty) return run;
-  const [source] = await sql<{ pipeline: Record<string, unknown> | null }[]>`
-    select coalesce(nullif(r.pipeline, '{}'::jsonb), nullif(w.pipeline, '{}'::jsonb)) as pipeline
+  const [source] = await sql<{ pipeline: Record<string, unknown> | null; managed: unknown }[]>`
+    select coalesce(nullif(r.pipeline, '{}'::jsonb), nullif(w.pipeline, '{}'::jsonb)) as pipeline,
+      w.managed_models -> 'pipeline' as managed
     from documents d
     left join project_runs r on r.id = d.run_id
     left join projects w on w.id = d.project_id
@@ -60,7 +61,15 @@ async function withSourcePipeline<R extends { id: string; kind?: string; pipelin
   if (!source?.pipeline) {
     throw new Error(`materialize run ${run.id} has no pipeline and document ${documentId} has no source pipeline; refusing to run on defaults`);
   }
-  return { ...run, pipeline: applyDefaultVisionOverride(normalizeStoredPipelineFeatures(source.pipeline as never, `document ${documentId} source pipeline`)) };
+  // Like every run the app creates (run-creation.ts), model values in the source snapshot are history, not
+  // configuration: they are dropped, and only the project's explicit admin overrides and current defaults apply.
+  const label = `document ${documentId} source pipeline`;
+  const managed = resolveManagedPipeline(
+    normalizeStoredPipelineFeatures(source.pipeline as never, label),
+    parseManagedPipelineOverrides(source.managed, `project of document ${documentId}`),
+    label,
+  );
+  return { ...run, pipeline: applyDefaultVisionOverride(managed.pipeline) };
 }
 
 /**

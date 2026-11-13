@@ -438,7 +438,7 @@ A figure pass can leave images resumable: a batch or document budget, a deadline
 runner (`worker/src/figures/resume-runner.ts`) finishes them in the background.
 
 **Queueing.** A document is queued in the same transaction that commits its resumable level
-(`document_extraction_levels.resume_after`, migration 0157), when its project's `pipeline.figureResume` is `auto` (the
+(`document_extraction_levels.resume_after`, migration 0159), when its project's `pipeline.figureResume` is `auto` (the
 default). A backstop sweep in the API's maintenance sweeper (`figure-resume-enqueue`) re-queues any the commit missed.
 `manual` projects queue only on request, and `off` projects (or projects whose figures are off) never do. Requests:
 
