@@ -10,6 +10,7 @@ import { notifySignup } from "../lib/signup-notifications.js";
 import { getInvitePreview, listOrganizations } from "../services/organizations.js";
 import { listProjects } from "../services/projects.js";
 import { apiStatusError } from "../lib/api-error.js";
+import { publicProjectView } from "../lib/public-project.js";
 
 /**
  * Endpoints the dashboard (a separate process in hosting mode b) reads over HTTP
@@ -29,7 +30,8 @@ export const dashboardRoutes = new Hono().get("/", async (c) => {
   c.header("Cache-Control", "private, no-store");
   const isOperator = actor.user.isAdmin === true;
   const [organizations, projects] = await Promise.all([listOrganizations(actor.userId), listProjects(actor.userId, { refineNames: false })]);
-  return c.json({ isOperator, isAdmin: isOperator, organizations, projects });
+  // Projects as customers read them (no managed model fields), as on GET /v1/projects; operators see them whole.
+  return c.json({ isOperator, isAdmin: isOperator, organizations, projects: projects.map((project) => publicProjectView(project, actor)) });
 });
 
 /** GET /v1/invites/:token?kind=organization|project: what the accept page offers. The token is the credential. */

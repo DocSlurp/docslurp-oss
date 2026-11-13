@@ -36,6 +36,8 @@ import {
 import { spendAwareErrorHandler } from "./billing/spend-guard.js";
 import { loadIngestReport, summarizeIngestReport } from "./ingest-report.js";
 import { dispatchWebTool, isWebToolId } from "./web/mcp-web-tools.js";
+import { customerPipelineGuard } from "../middleware/customer-pipeline-guard.js";
+import { customerPipelineView } from "@docslurp/shared";
 
 export { mcpManifest };
 
@@ -119,9 +121,11 @@ const mcpAdapterRoutes = new Hono()
       const project = await loadActorScopedProject(await resolveActorProjectId(actor, typeof body.project === "string" ? body.project : undefined), actor);
       if (!project) return adapterError(c, 404, "Project not found", "project_not_found");
       const settings = await getProjectSearchSettings(project.id, actor.userId);
+      // The customer view first: chartExport (and any later section) never carries a managed model field.
+      const visible = customerPipelineView(project.pipeline);
       return c.json({ projectId: project.id,
-        pipeline: Object.fromEntries(Object.keys(projectSettingsPipelinePatchSchema.shape).map(key => [key, key === "mediaVideo" ? { enabled: project.pipeline.mediaVideo?.enabled !== false }
-          : project.pipeline[key as keyof typeof project.pipeline]])),
+        pipeline: Object.fromEntries(Object.keys(projectSettingsPipelinePatchSchema.shape).map(key => [key, key === "mediaVideo" ? { enabled: visible.mediaVideo?.enabled !== false }
+          : visible[key as keyof typeof visible]])),
         chat: settings.chat, retrieval: settings.retrievalDefaults });
     }
 
@@ -428,7 +432,7 @@ export function createMcpDispatcher(actor: RequestActor) {
   const adapters = new Hono().use("*", async (c, next) => {
     setRequestActor(c, actor);
     await next();
-  }).route("/", mcpAdapterRoutes);
+  }).use("*", customerPipelineGuard).route("/", mcpAdapterRoutes);
   return async (path: string, init?: RequestInit) => adapters.request(`http://mcp.internal${path}`, init);
 }
 

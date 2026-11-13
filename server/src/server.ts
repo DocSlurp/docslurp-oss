@@ -52,6 +52,7 @@ import { webRoutes } from "./routes/web.js";
 import { projectGraphRoutes } from "./routes/project-graph.js";
 import { artifactsRoutes } from "./routes/artifacts.js";
 import { inviteRoutes, metaRoutes, dashboardRoutes, waitlistRoutes } from "./routes/frontend.js";
+import { customerPipelineGuard } from "./middleware/customer-pipeline-guard.js";
 import { filesRoutes } from "./routes/files.js";
 import { capabilitiesRoutes } from "./routes/capabilities.js";
 import { notificationsRoutes } from "./routes/notifications.js";
@@ -185,6 +186,9 @@ export function createApiApp(): Hono {
   // The Algolia adapter reads JSON itself; bound it like the other compat adapters.
   app.use("/compat/algolia/*", nativeBodyLimit(256 * 1024));
   app.use("*", rejectNulBytes);
+  // Backstop: no JSON response to a non-operator carries a pipeline's managed model fields (routes return customer views).
+  app.use("/v1/*", customerPipelineGuard);
+  app.use("/dashboard/*", customerPipelineGuard);
   app.use("/v1/*", rejectLegacyProjectSelection);
   // `/v1/projects/:slug|default/...` → resolved project UUID routes.
   const projectRefs = projectRefPath([projectsRoutes, chatInstructionsRoutes, connectorsRoutes, secretsRoutes, projectGraphRoutes]);
