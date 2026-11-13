@@ -71,7 +71,7 @@ try {
     for (const [name, fault] of [["longLocEpub", "crash:z.xhtml#svg"], ["divergeEpub", "crash:c.xhtml#"]]) {
       for (const dir of extra) {
         if (!inputDirs.some((d) => existsSync(path.join(d, name)))) continue;
-        await exec(["sh", "-c", `test -d ${dir}/${name} && mkdir -p /in/f-${name} && cp -r ${dir}/${name} /in/f-${name}/`]);
+        await exec(["sh", "-c", `if test -d ${dir}/${name}; then mkdir -p /in/f-${name} && cp -r ${dir}/${name} /in/f-${name}/; fi`]);
       }
       if (!inputDirs.some((d) => existsSync(path.join(d, name)))) continue;
       const out = await exec(["node", "/bench/guest-repro-run.mjs", "/bench/hooked", `/in/f-${name}`], { DOCSLURP_CHART_GUEST_TEST_FAULT: fault });
