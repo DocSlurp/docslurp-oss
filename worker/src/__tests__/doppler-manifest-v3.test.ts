@@ -620,6 +620,41 @@ describe("sharded documents: one manifest per shard", () => {
     expect(() => run(0)).toThrow(/too-many-lines/);
   });
 
+  it("R3b-L1: the folder-wide context allowance never exceeds the entry cap, however many shards the VM publishes", async () => {
+    const { DOPPLER_SHARD_CONTEXT_LINES, dopplerAssetCaps } = await import("@docslurp/shared");
+    // Single-page shards, each with a full per-shard allowance of context lines on the other pages.
+    let ownRows = 0;
+    const folder = (pages: number) => (full: ReturnType<typeof base>) => Array.from({ length: pages }, (_, i) => {
+      // No cross-shard repeat (the fixture's p2.1 repeats p1.1, which single-page shards cannot hold).
+      const m = { ...full, images: full.images.filter((e) => e.reason !== "repeat") } as ReturnType<typeof base>;
+      ownRows = m.images.length;
+      const own = i + 1;
+      const others = Array.from({ length: pages }, (_, j) => j + 1).filter((page) => page !== own);
+      const context = Array.from({ length: DOPPLER_SHARD_CONTEXT_LINES }, (_, n) => {
+        const page = others[n % others.length]!;
+        const index = 100 + Math.floor(n / others.length);
+        return {
+          ...m.images.find((e) => e.id === "p2.2")!, id: `p${page}.${index}`, page, kind: "picture", fate: "inline", status: "not-extracted", reason: "pages",
+          format: "webp", source: null, bytes: 0, sha256: null, width: 0, height: 0,
+          path: `page-${String(page).padStart(4, "0")}/image-${String(index).padStart(3, "0")}.webp`,
+          link: `images/page-${String(page).padStart(4, "0")}/image-${String(index).padStart(3, "0")}.webp`,
+        } as never;
+      });
+      return { range: [own, own] as [number, number], text: v3ShardText(m, [own, own], { context }) };
+    });
+    // 8 shards x 2048 = 16,384 context lines: within dopplerAssetCaps(8).entries (16,512). Accepted, with no context row.
+    expect(8 * DOPPLER_SHARD_CONTEXT_LINES).toBeLessThanOrEqual(dopplerAssetCaps(8).entries);
+    const set = await shardRule(folder(8), { pageCount: 8 }) as DopplerFigureSet;
+    expect(typeof set === "string" ? set : "set").toBe("set");
+    let rows = 0;
+    for await (const _row of readLedgerSpill(set.ledger.spill)) rows += 1;
+    expect(rows).toBe(ownRows);
+    await disposeDopplerFigureSet(set);
+    // 9 shards x 2048 = 18,432 > dopplerAssetCaps(9).entries (16,528): the folder is refused, not given 9 allowances.
+    expect(9 * DOPPLER_SHARD_CONTEXT_LINES).toBeGreaterThan(dopplerAssetCaps(9).entries);
+    expect(await shardRule(folder(9), { pageCount: 9 })).toBe("manifest-too-many-lines");
+  }, 180_000);
+
   it("LOW-5: shards start at page 1, leave no hole, and end within the document", async () => {
     // Page 2 has no file (a repeat and furniture), so a 1-1 + 3-3 split would otherwise drop its rows silently.
     expect(await shardRule((m) => [{ range: [1, 1], text: v3ShardText(m, [1, 1]) }, { range: [3, 3], text: v3ShardText(m, [3, 3]) }])).toBe("shards-not-contiguous");

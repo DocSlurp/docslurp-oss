@@ -517,7 +517,8 @@ export async function readDopplerFigureDir(
       // Every manifest of the folder counts against one byte cap, and toward the folder's total bytes.
       let bytesLeft = caps.manifestV3Bytes;
       // Context-page lines (a shard's -f/-l pages) have their own bounded allowance, outside both caps (R3-L2).
-      let contextLinesLeft = (hasShards ? jobs.length : 0) * DOPPLER_SHARD_CONTEXT_LINES;
+      // Folder-wide, never more than the entry cap itself, however many shards the VM published (R3b-L1).
+      let contextLinesLeft = Math.min(caps.entries, (hasShards ? jobs.length : 0) * DOPPLER_SHARD_CONTEXT_LINES);
       let contextBytesLeft = contextLinesLeft * DOPPLER_SHARD_CONTEXT_LINE_BYTES;
       let first: DopplerManifestV3Header | null = null;
       for (const job of jobs) {
