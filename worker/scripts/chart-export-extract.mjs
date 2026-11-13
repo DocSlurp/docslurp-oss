@@ -3,8 +3,9 @@
 // parser VM in production. With `batch: N` in the request (SVG only), the first input plus the N-1 trailing inputs are
 // extracted one by one, each under its own size limit, and the output is one result per input, in order.
 import { readFile, stat, writeFile } from "node:fs/promises";
-import { extractDeterministicVisuals } from "../dist/chart-export/extractors/index.js";
-import { CHART_EXTRACT_LIMITS } from "../dist/chart-export/extractors/limits.js";
+// One bundled module (built from dist/chart-export/extractors/guest-entry.js): loads in a fraction of the CPU the
+// separate ESM files take, which matters because every VM command starts a fresh process.
+import { CHART_EXTRACT_LIMITS, extractDeterministicVisuals } from "../dist/chart-export/guest.bundle.mjs";
 const [input, requestPath, output, ...more] = process.argv.slice(2);
 if ((await stat(requestPath)).size > 4096) throw new Error("chart extract request exceeds limit");
 const request = JSON.parse(await readFile(requestPath, "utf8"));
