@@ -293,7 +293,7 @@ and the distinction between existing project chat logic and native ownership.
 
 ### Revision publication and ingestion lock independence
 
-Migration 0145 adds a `scope` to every counter: `''` is the organization (written
+Migration 0143 adds a `scope` to every counter: `''` is the organization (written
 on every change, exactly as before, and the only scope `realtime_revisions` reads),
 `project:<id>` and `run:<id>` are written alongside it by the same triggers for a
 change's project and run. `realtime_scope_revisions` aggregates them. The broker
@@ -305,6 +305,18 @@ whenever the organization revision moves (membership, sharing and project change
 all move it), so authorization is checked as often as before. Folded per-scope
 checkpoints are kept (one row per project and run); the compactor folds them with
 the organization's counters under the same 256-row bound.
+
+Page, chunk and page-stage rows (`document_pages`, `document_chunks`,
+`page_stage_states`) arrive thousands per statement, so from 0143 they publish
+through statement-level triggers with transition tables
+(`realtime_statement_changed()`, triggers `realtime_changed_insert`, `_update`
+and `_delete`): one pass over the statement's distinct documents and runs, then one
+counter row per distinct organization and scope. The counters written are the ones
+the row trigger left behind (every row after the first of a transaction was already
+a no-op), so each affected scope still moves by one per transaction and a statement
+that changes no row moves nothing. A 20,000-row chunk insert spent about 1.5 s in
+the row trigger and spends about 10 ms in the statement trigger. Every other source
+table keeps its row trigger.
 
 Migration 0120 preserves `realtime_revisions` as an aggregate read view while
 writers insert one counter per organization/transaction. Independent transactions

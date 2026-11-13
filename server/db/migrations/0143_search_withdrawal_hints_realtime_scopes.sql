@@ -222,8 +222,8 @@ BEGIN
     'usage_events','credit_ledger','credit_debits_pending','credit_leases','interactive_spend_holds',
     'project_members','project_search_settings','query_suggestions',
     'project_run_events','project_run_stage_states','performance_log',
-    'document_run_stage_states','page_stage_states','document_tags',
-    'document_summaries','document_pages','document_chunks') THEN
+    'document_run_stage_states','document_tags','document_summaries') THEN
+    -- page_stage_states, document_pages and document_chunks: realtime_statement_changed() below.
     RAISE EXCEPTION 'Unsupported realtime source';
   END IF;
   -- Old and new rows both: a move between scopes updates both collections.
@@ -250,9 +250,9 @@ BEGIN
     ELSE
       document_value := source.document_id;
       SELECT org_id, project_id, run_id INTO organization_id, project_value, run_value FROM public.documents WHERE id=document_value;
-      -- Stage, page and chunk rows name the run that wrote them (a reindex run, too).
+      -- Stage rows name the run that wrote them (a reindex run, too).
       -- Nested: one expression referencing source.run_id fails on tables without it.
-      IF TG_TABLE_NAME IN ('document_run_stage_states','page_stage_states','document_pages','document_chunks') THEN
+      IF TG_TABLE_NAME='document_run_stage_states' THEN
         IF source.run_id IS NOT NULL THEN run_value := source.run_id; END IF;
       END IF;
     END IF;
@@ -263,6 +263,62 @@ BEGIN
       ON CONFLICT(org_id,scope,transaction_id) DO NOTHING;
       PERFORM public.realtime_record_change(organization_id);
     END IF;
+  END LOOP;
+  RETURN NULL;
+END $$;
+--> statement-breakpoint
+-- Page, chunk and page-stage rows arrive thousands per statement. As row triggers
+-- they ran the lookup and both counter inserts once per row, although every row
+-- after the first of a transaction is a no-op (ON CONFLICT DO NOTHING): a
+-- 20,000-row document_chunks insert spent 1.7-1.9 s in the trigger. These three
+-- tables use statement triggers with transition tables instead: one pass over the
+-- statement's distinct (document, run) pairs, then one counter row per distinct
+-- (organization, scope). The rows written are exactly those the row trigger left
+-- behind, so subscribers see the same revisions: each affected scope moves by one
+-- per transaction, and a statement that changes no row moves nothing.
+-- A trigger with a transition table takes one event, hence three per table.
+CREATE OR REPLACE FUNCTION realtime_statement_changed() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,pg_temp AS $$
+DECLARE
+  document_ids text[];
+  run_ids text[];
+  organization_ids text[];
+  organization_id text;
+BEGIN
+  IF TG_TABLE_SCHEMA<>'public' OR TG_RELID<>pg_catalog.to_regclass('public.'||pg_catalog.quote_ident(TG_TABLE_NAME))
+    OR TG_NAME<>'realtime_changed_'||pg_catalog.lower(TG_OP) OR TG_WHEN<>'AFTER' OR TG_LEVEL<>'STATEMENT' OR TG_NARGS<>0 THEN
+    RAISE EXCEPTION 'untrusted realtime trigger source' USING ERRCODE='42501';
+  END IF;
+  IF TG_TABLE_NAME NOT IN ('page_stage_states','document_pages','document_chunks') THEN
+    RAISE EXCEPTION 'Unsupported realtime source';
+  END IF;
+  -- Old and new rows both: a row moved between documents or runs updates both scopes.
+  IF TG_OP='INSERT' THEN
+    SELECT array_agg(t.document_id), array_agg(t.run_id) INTO document_ids, run_ids
+    FROM (SELECT DISTINCT document_id, run_id FROM new_rows) AS t;
+  ELSIF TG_OP='DELETE' THEN
+    SELECT array_agg(t.document_id), array_agg(t.run_id) INTO document_ids, run_ids
+    FROM (SELECT DISTINCT document_id, run_id FROM old_rows) AS t;
+  ELSE
+    SELECT array_agg(t.document_id), array_agg(t.run_id) INTO document_ids, run_ids
+    FROM (SELECT document_id, run_id FROM old_rows UNION SELECT document_id, run_id FROM new_rows) AS t;
+  END IF;
+  IF document_ids IS NULL THEN RETURN NULL; END IF;
+  -- The row names the run that wrote it (a reindex run, too); else the document's run.
+  WITH scopes AS MATERIALIZED (
+    SELECT DISTINCT d.org_id, d.project_id, coalesce(t.run_id, d.run_id) AS run_id
+    FROM unnest(document_ids, run_ids) AS t(document_id, run_id)
+    JOIN public.documents d ON d.id=t.document_id
+    WHERE d.org_id IS NOT NULL
+  ), recorded AS (
+    INSERT INTO public.realtime_revision_counters(org_id,scope,revision,transaction_id)
+    SELECT DISTINCT s.org_id, scoped, 1, txid_current()
+    FROM scopes s, unnest(ARRAY['project:'||s.project_id, 'run:'||s.run_id]) AS scoped WHERE scoped IS NOT NULL
+    ON CONFLICT(org_id,scope,transaction_id) DO NOTHING
+  )
+  SELECT array_agg(DISTINCT s.org_id) INTO organization_ids FROM scopes s;
+  IF organization_ids IS NULL THEN RETURN NULL; END IF;
+  FOREACH organization_id IN ARRAY organization_ids LOOP
+    PERFORM public.realtime_record_change(organization_id);
   END LOOP;
   RETURN NULL;
 END $$;
@@ -314,7 +370,12 @@ END $$;
 --> statement-breakpoint
 -- CREATE OR REPLACE keeps each function's owner (docslurp_realtime_publisher) and ACL;
 -- restate the revocations, and expose the new view exactly like realtime_revisions.
-REVOKE ALL ON FUNCTION public.realtime_changed(),public.realtime_search_session_changed(),
+-- The new statement function gets the same owner the same way 0120 did it: the
+-- publisher may create in the schema only for the duration of the ownership change.
+GRANT CREATE ON SCHEMA public TO docslurp_realtime_publisher;
+ALTER FUNCTION public.realtime_statement_changed() OWNER TO docslurp_realtime_publisher;
+REVOKE CREATE ON SCHEMA public FROM docslurp_realtime_publisher;
+REVOKE ALL ON FUNCTION public.realtime_changed(),public.realtime_statement_changed(),public.realtime_search_session_changed(),
   public.realtime_materialization_changed(),public.realtime_record_change(text),
   public.realtime_fold_committed(text),public.realtime_compact_revisions(text) FROM PUBLIC;
 REVOKE ALL ON public.realtime_revision_counters,public.realtime_revisions,public.realtime_scope_revisions FROM PUBLIC;
@@ -325,8 +386,26 @@ BEGIN
   FOREACH runtime_role IN ARRAY ARRAY['docslurp_app','docslurp_worker'] LOOP
     IF NOT EXISTS(SELECT 1 FROM pg_catalog.pg_roles WHERE rolname=runtime_role) THEN CONTINUE; END IF;
     EXECUTE format('REVOKE ALL ON public.realtime_scope_revisions FROM %I',runtime_role);
+    EXECUTE format('REVOKE ALL ON FUNCTION public.realtime_statement_changed() FROM %I',runtime_role);
     IF runtime_role='docslurp_app' THEN
       EXECUTE format('GRANT SELECT ON public.realtime_scope_revisions TO %I',runtime_role);
     END IF;
+  END LOOP;
+END $$;
+--> statement-breakpoint
+-- Last, so the SHARE ROW EXCLUSIVE lock each trigger change takes on these ingest
+-- tables is held for as little of the migration transaction as possible. Row and
+-- statement triggers swap in one transaction: no change goes unrecorded.
+DO $$
+DECLARE source text;
+BEGIN
+  FOREACH source IN ARRAY ARRAY['page_stage_states','document_pages','document_chunks'] LOOP
+    EXECUTE format('DROP TRIGGER IF EXISTS realtime_changed ON public.%I', source);
+    EXECUTE format('CREATE OR REPLACE TRIGGER realtime_changed_insert AFTER INSERT ON public.%I
+      REFERENCING NEW TABLE AS new_rows FOR EACH STATEMENT EXECUTE FUNCTION public.realtime_statement_changed()', source);
+    EXECUTE format('CREATE OR REPLACE TRIGGER realtime_changed_update AFTER UPDATE ON public.%I
+      REFERENCING OLD TABLE AS old_rows NEW TABLE AS new_rows FOR EACH STATEMENT EXECUTE FUNCTION public.realtime_statement_changed()', source);
+    EXECUTE format('CREATE OR REPLACE TRIGGER realtime_changed_delete AFTER DELETE ON public.%I
+      REFERENCING OLD TABLE AS old_rows FOR EACH STATEMENT EXECUTE FUNCTION public.realtime_statement_changed()', source);
   END LOOP;
 END $$;
