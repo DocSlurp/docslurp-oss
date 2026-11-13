@@ -237,8 +237,9 @@ BEGIN
       document_value := source.document_id;
       SELECT org_id, project_id, run_id INTO organization_id, project_value, run_value FROM public.documents WHERE id=document_value;
       -- Stage, page and chunk rows name the run that wrote them (a reindex run, too).
-      IF TG_TABLE_NAME IN ('document_run_stage_states','page_stage_states','document_pages','document_chunks') AND source.run_id IS NOT NULL THEN
-        run_value := source.run_id;
+      -- Nested: one expression referencing source.run_id fails on tables without it.
+      IF TG_TABLE_NAME IN ('document_run_stage_states','page_stage_states','document_pages','document_chunks') THEN
+        IF source.run_id IS NOT NULL THEN run_value := source.run_id; END IF;
       END IF;
     END IF;
     IF organization_id IS NOT NULL THEN
