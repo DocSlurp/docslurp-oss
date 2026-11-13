@@ -462,3 +462,21 @@ describe("resume from stored state (HIGH-2)", () => {
 
 // Keep the shared row type in use (the writer re-validates it).
 export type { DocumentAsset };
+
+describe("routing page facts go through the page-facts write (MEDIUM-6)", () => {
+  it("text_layer and scan_class land whatever the figure setting, and a later write without them keeps them", async () => {
+    const { buildRoutingPageFacts } = await import("../pipeline/page-facts.js");
+    const layout = new Map<number, { textLayer?: string | null; scanClass?: string | null }>([
+      [1, { textLayer: "visible" }], [3, { textLayer: "invisible", scanClass: "single" }], [2, { textLayer: "lots" }], [9, { textLayer: "none" }],
+    ]);
+    const rows = buildRoutingPageFacts({ documentId: "doc-a", runId: "run-a", pageCount: 3, layoutFacts: layout });
+    // Out-of-vocabulary values and pages outside the document are dropped.
+    expect(rows.map((row) => [row.pageNumber, row.textLayer, row.scanClass])).toEqual([[1, "visible", undefined], [3, "invisible", "single"]]);
+    await store.upsertPageFacts(rows);
+    await store.upsertPageFacts([{ documentId: "doc-a", runId: "run-a", pageNumber: 3, textBytes: 10, wordCount: 2, imageCount: 1, factsSource: "pdftotext" }]);
+    expect(await sql`select page_number, text_layer, scan_class from document_page_facts where document_id = 'doc-a' order by page_number`).toEqual([
+      { page_number: 1, text_layer: "visible", scan_class: null }, { page_number: 3, text_layer: "invisible", scan_class: "single" },
+    ]);
+    await sql`delete from document_page_facts where document_id = 'doc-a'`;
+  });
+});
