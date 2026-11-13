@@ -4,9 +4,15 @@
 // inside the parser VM in production, under the same V8 flags as the guest (--disallow-code-generation-from-strings is
 // process-wide) and with zod jitless (the bundle's first import).
 import { readFile } from "node:fs/promises";
-import { parentPort } from "node:worker_threads";
+import module from "node:module";
+import { parentPort, workerData } from "node:worker_threads";
 
-import { extractDeterministicVisuals, setGuestDeadline, testHooks } from "../dist/chart-export/guest.bundle.mjs";
+// Optional V8 compile cache, off unless the caller passes a directory (validated by the parent): enabled before the
+// bundle loads, so each worker reuses the bundle's compiled code instead of compiling it again. It caches compilation
+// of this fixed module file only; it does not touch --disallow-code-generation-from-strings or jitless.
+if (typeof workerData?.compileCacheDir === "string") module.enableCompileCache(workerData.compileCacheDir);
+// A fixed path, loaded after the cache is enabled. Messages sent before the listener below is attached are queued.
+const { extractDeterministicVisuals, setGuestDeadline, testHooks } = await import("../dist/chart-export/guest.bundle.mjs");
 
 // Fault injection for the containment tests only: `testHooks` is null in the production bundle (a build-time constant),
 // so `task.fault` is ignored there whatever sends it. "<crash|hang|oom>:<locator substring>".
