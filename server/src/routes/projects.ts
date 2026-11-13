@@ -99,7 +99,6 @@ import {
   getProjectSearchSettingsForUser,
   updateProjectSearchSettingsForUser,
 } from "../services/search-controls.js";
-import { hybridSearch } from "../services/search.js";
 import { parseFilters } from "../search/filters.js";
 import { searchHitStatementTimeout } from "../search/timings.js";
 import {
@@ -168,8 +167,6 @@ const projectConfirmationSchema = z.object({
   confirmationText: z.string().trim().min(1).max(240),
 });
 
-const PROJECT_SEARCH_STREAM_POLL_MS = 2000;
-const PROJECT_SEARCH_STREAM_TIMEOUT_MS = 15000;
 const PROJECT_CHAT_STREAM_KEEPALIVE_MS = 10000;
 
 type ProjectChatResponseValue = Awaited<ReturnType<typeof chatProject>>;
@@ -952,124 +949,6 @@ export const projectsRoutes = new Hono()
     }
 
     return c.json(customerSearchSettingsView(settings));
-  })
-  .get("/:projectId/search/stream", async (c) => {
-    const query = c.req.query("q");
-    const userId = c.get("sessionUser").id;
-    if (!query) {
-      return apiStatusError(c, 400, "Missing q");
-    }
-
-    const authorized = await authorizeActorProjectSearch(getRequestActor(c), c.req.param("projectId"), "search");
-    if (!authorized.ok) {
-      return apiErrorResponse(c, 404, "project_not_found", "Project not found");
-    }
-
-    const runId = c.req.query("runId");
-    const limit = c.req.query("limit");
-    const variant = c.req.query("variant");
-    // Omitted flags stay undefined so the project's retrieval defaults apply
-    // (they used to become false); graph and multi-hop flags are honoured too.
-    let flags: ReturnType<typeof parseRetrievalQueryFlags>;
-    try {
-      flags = parseRetrievalQueryFlags((name) => c.req.query(name));
-    } catch (error) {
-      if (error instanceof InvalidRetrievalQueryError) return apiStatusError(c, 400, error.message);
-      throw error;
-    }
-    const rootSessionId = c.req.query("sessionId") ?? randomUUID();
-
-    const filters = parseFilters({
-      documentId: c.req.query("documentId") ?? "",
-      runId: runId ?? "",
-      projectId: c.req.param("projectId"),
-      filenameContains: c.req.query("filenameContains") ?? "",
-      mimeTypes: c.req.query("mimeTypes") ?? "",
-      tags: c.req.query("tags") ?? "",
-      pageFrom: c.req.query("pageFrom") ?? "",
-      pageTo: c.req.query("pageTo") ?? "",
-      language: c.req.query("language") ?? "",
-      heading: c.req.query("heading") ?? "",
-      dateFrom: c.req.query("dateFrom") ?? "",
-      dateTo: c.req.query("dateTo") ?? "",
-    });
-
-    c.header("Cache-Control", "no-cache");
-    c.header("X-Accel-Buffering", "no");
-
-    return streamSSE(c, async (stream) => {
-      await stream.writeSSE({
-        event: "status",
-        data: JSON.stringify({
-          stage: "retrieval",
-          message: "Running project search",
-        }),
-      });
-
-      const deadline = Date.now() + PROJECT_SEARCH_STREAM_TIMEOUT_MS;
-      let latestResponse: Awaited<ReturnType<typeof hybridSearch>> | null =
-        null;
-
-      while (Date.now() < deadline && !stream.aborted) {
-        latestResponse = await hybridSearch(query, userId, {
-          runId: runId || undefined,
-          limit: limit ? Number(limit) : undefined,
-          ...flags,
-          filters,
-          variant: variant || undefined,
-          rootSessionId,
-        }, authorized.scope);
-
-        await stream.writeSSE({
-          event: "results",
-          data: JSON.stringify({
-            results: latestResponse.results,
-            sessionId: latestResponse.sessionId,
-            availability: latestResponse.availability,
-          }),
-        });
-
-        const activeRunCount =
-          (latestResponse.availability?.coverage.queuedRuns ?? 0) +
-          (latestResponse.availability?.coverage.processingRuns ?? 0);
-        if (
-          latestResponse.availability?.status === "complete" ||
-          latestResponse.availability?.status === "empty" ||
-          activeRunCount === 0 ||
-          // A statement that hit SEARCH_STATEMENT_TIMEOUT_MS would time out again on the next poll.
-          searchHitStatementTimeout(latestResponse)
-        ) {
-          break;
-        }
-
-        await stream.writeSSE({
-          event: "status",
-          data: JSON.stringify({
-            stage: "indexing",
-            message:
-              latestResponse.availability?.message ??
-              "Waiting for more searchable content",
-            availability: latestResponse.availability,
-            pollMs: PROJECT_SEARCH_STREAM_POLL_MS,
-          }),
-        });
-
-        await stream.sleep(PROJECT_SEARCH_STREAM_POLL_MS);
-      }
-
-      // The latest snapshot is already persisted and delivered. Finalization
-      // must not repeat retrieval (or incur another embedding/model call).
-      if (!latestResponse || stream.aborted) return;
-
-      await stream.writeSSE({
-        event: "done",
-        data: JSON.stringify({
-          sessionId: latestResponse.sessionId,
-          resultCount: latestResponse.results.length,
-          availability: latestResponse.availability,
-        }),
-      });
-    });
   })
   .post("/:projectId/chat/:agentId", async (c) => {
     const agentId = c.req.param("agentId");
