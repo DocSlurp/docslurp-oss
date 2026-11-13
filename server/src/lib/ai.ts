@@ -115,10 +115,7 @@ type LocalEmbeddingPipelineFactory = (
 ) => Promise<LocalEmbeddingPipeline>;
 
 export function resolveOpenRouterApiKey(): string | undefined {
-  return (
-    process.env.OPENROUTER_API_KEY ??
-    process.env.OPENROUTER_KEY
-  );
+  return process.env.OPENROUTER_API_KEY;
 }
 
 function resolveLocalTransformersJsDtype(): string {

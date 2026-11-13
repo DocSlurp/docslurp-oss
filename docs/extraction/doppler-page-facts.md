@@ -45,13 +45,58 @@ Page counts for billing and limits stay the host's own (pdfpagecount). The facts
   the reader does not know. The file proxy serves it as text, behind the same artifact and PII checks as the folder's
   other files. Malformed or refused facts write no object.
 - `use`: as `store`, and when the provider returned no layout facts the facts stand in for them: the mapped
-  `PageLayoutFacts` are stored as `page-layout-facts` with `source: "vm-pdf-facts"`.
+  `PageLayoutFacts` are stored as `page-layout-facts` with `source: "vm-pdf-facts"`. The facts also stand in for the host
+  probes the sandboxed route never runs (see [Routing evidence](#routing-evidence)).
 
 An unrecognised value is `off`, logged as an error.
 
 In every mode the facts never size a charge: page-equivalent billing reads page sizes only from layout facts the VM's
 walker measured. `use` does let valid facts steer routing where no walker facts exist, as layout facts do: a page the
 facts show without words can be read by OCR or vision for the project that asked for it, billed by the host's page count.
+
+## Routing evidence
+
+The sandboxed PDF route runs none of the host's Poppler probes: page facts' `pdfimages -list` and `pdftotext`, page triage's
+`pdfimages -list` and `pdfinfo` page sizes, the layout walker's `pdftotext -bbox-layout` run, and the OCR ledger's
+`pdftotext`. Without them it had no page-image evidence (classify-route saw a sparse scan page as `unknown`) and no per-page
+source rows in the ingest report. In `use` mode, `lib/doppler-page-facts-evidence.ts` builds both from the winning VM job's
+facts, with no command:
+
+- page-image evidence (`page-image-evidence`, `source: "doppler-facts"`, vision fallback on): the probe's sparse pages
+  (fewer than `sparsePageWords` words in the text layer, invisible OCR words included, as `pdftotext` reads them), each
+  with its significant, non-repeated image count and coverage under the probe's own rules (`minSignificantImagePixels`,
+  `minSignificantImageCoverage`, and the repeated-furniture rule over significant placements in the probe's listing scope).
+  No text-layer verdict: the probe judges the PDF's own layer, which facts do not carry, and judging the extracted Markdown or
+  OCR text instead would call math, tables or OCR output garbled. `embeddedImageBytes` and `drawnBytesPerPage` are null:
+  facts never read a stream, so the drawn-content hint stays off;
+- per-page rows in `document_page_facts` (`facts_source = 'doppler-facts'`): `word_count`, `image_count` (image rows, as
+  `pdfimages -list` counts them) and `text_bytes`, which is 0 for a page with no text layer and otherwise the extracted page's
+  whitespace-collapsed bytes, or null for a page a model read (its text is OCR output, not the layer).
+
+Only facts that cover the document count: a complete stream (a run line last), no dropped line, no failed page, no document
+error or lock, every page of the host's own count present with the `text` and `geometry` families and a complete
+`images.items` list. Any
+less, in any mode but `use`, or when another extractor won, nothing is built and the route goes without, as before; the
+stage records `dopplerFactsEvidence: { status: "skipped", reason }`.
+
+No page count, size or charge comes from the facts: the page count stays the host's, page-equivalent sizes stay the
+walker's, extract-markdown's Rich reads stay the provider's `ocrPages`, and the per-page rows are not written for a run
+without a page billing pin, which still bills pages with no text bytes and an image as scans at completion
+(`runBillsScansAtCompletion`). The evidence is routing evidence, though: like the probe's, it can make classify-route send a
+sparse scan page to a vision read, and that read bills Rich when it happens, for a project with vision fallback on. To keep a
+counting gap or hostile facts from turning text pages into reads, the facts must agree with the extraction: a page the facts
+call sparse while the winning extraction read `sparsePageWords` or more words from it without a model (the provider's OCR,
+host scan-fill and accepted critique pages are exempt) refuses the whole
+document's evidence (`words-disagree`), and an image never counts for more of the page than its own box covers.
+
+Commands the facts cannot retire, and why:
+
+| Command | Feeds | Kept because |
+|---|---|---|
+| `pdfpagecount`, `pdftotext -f 1 -l 1` | page count, Poppler acceptance | billing and limits use the host's own count |
+| layout walker (`pdfimages -list`, `pdftotext -bbox-layout`, `pdf_layout_facts.py`) | layout facts | page-equivalent billing reads the walker's page sizes; facts have no `wordsInside`, `bytesPerPixel`, table or grid boxes |
+| OCR ledger `pdftotext` | Rich reads of an extractor that OCRs without saying so | billing evidence; never on the sandboxed route |
+| `pdfinfo` before `pdftoppm` | render bounds, rendered page areas | bounds an untrusted render and sizes a charge |
 
 ## Mappings
 
@@ -70,3 +115,32 @@ classify-route and page-image evidence read the facts unchanged:
 
 `probeRowsFromDopplerFacts` (`worker/src/routing/probe/doppler-facts.ts`) builds the v2 router's `ProbeRow` with
 `probeEngine: "doppler-facts"` and no thumbnail; its header comment lists each field.
+
+## Page router
+
+With `DOCSLURP_DOPPLER_PAGE_FACTS=use` and the v2 page router in `shadow` or `active`, the router reads its page features
+from these facts instead of probing the PDF (`createDopplerFactsProbeRunner`, `worker/src/routing/probe/doppler-facts-runner.ts`):
+
+- route-pages reads the canonical facts extract-markdown already stored (`<artifactRoot>/doppler/<documentId>/images/page-facts.jsonl`,
+  slot `doppler-page-facts`; written in `store` and `use` before the stage commits). It reads only the address recorded in the current run's
+  `doppler-page-facts` slot, and only when that address is the key `dopplerFolderKey` gives for this run and document (a
+  file left at the key by a failed attempt or an earlier run, without a current-run slot, is never read), re-validates it with `parseDopplerPageFacts` bounded by the document's page count and
+  the reader's byte budget, and never opens the PDF.
+- Facts that are missing, refused, oversized, for an unreadable document, for fewer pages than the host counted, or with
+  every page failed are unavailable: no plan is written and the document keeps v3 routing (`page-route-fallback`). Missing
+  or refused facts never authorize a model read or a charge. Valid facts (including a failed page, as the native probe's
+  failed row) steer the plan like probe rows do, within the run's quality tier and cost cap. In `active` mode the facts must
+  cover every host page, so a locked row on a multi-page document is unavailable there. A doc line that says a user
+  password is required gives the locked row.
+- On a sandboxed deployment (the checks extract-markdown uses for `sandboxed-pdf-deployment` and for a project whose PDF
+  extractor order names vm-pdf, `sandboxed-pdf-route`, plus `NODE_ENV=production` or the service profile) every host-side PDF access in the router is refused before it happens: the native probe, its
+  encrypted-file byte scan, thumbnails, inset renders and clips and the table gate. A refusal is logged as an error and
+  recorded as `page-route-host-pdf-refused`. Without facts mode `use` a sandboxed deployment writes no plan.
+- Facts carry no pixels, so image decision models are skipped (`decision-model-skipped:no-host-pixels:<ids>`) and their
+  pages take the existing escalation path; text-only decision models still run.
+
+Shadow telemetry compares the facts-driven plan with v3. Each `page-route-decision` row carries `probeSource` and
+`shadowComparison` (`routerRoles`, `routerNeedsPixels`, `v3Route`, `v3OcrAuthorized`, `v3NeedsPixels`, `agreesWithV3`);
+`page-route-chunk-estimate` carries the document totals (`pages`, `compared`, `agree`, `routerOnlyPixels`, `v3OnlyPixels`).
+The router needs pixels for any role beyond `accept-text` or `skip`; v3 does for any route other than `straightforward-text`
+or an authorized OCR decision.

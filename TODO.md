@@ -78,3 +78,10 @@
 - [ ] Expand the table parity corpus to degraded scans, diverse financial layouts and cross-page continuation before broad parity claims. See docs/evals/table-preservation-2026-11-01.md.
 
 - Issue 319 durable chat follow-up: integrate the authorized operation provider with the realtime host and first-party client; supervise/drain the dedicated executor; add explicit subagent/retry/dependency launch APIs and link existing Temporal job results; finish council review and matched recovery/load acceptance before enabling the flag. See docs/durable-chat-operations.md.
+
+## Env and flag cleanup (2026-11-13)
+
+- [ ] Fail-open escape hatches (security-sensitive, council review): `DOCSLURP_PARSER_SANDBOX_ALLOW_UNISOLATED`, `DOCSLURP_SANDBOX_ALLOW_UNFILTERED_SOCKETS`, `QUARANTINE_FAIL_OPEN_ON_TOOL_MISSING`, `DOCSLURP_CLAMAV_FAIL_OPEN_ON_STALE_DB` (`scripts/start-worker.sh` turns it on by default outside production) and `WORKER_ALLOW_SLOT_MISMATCH`. For each, either refuse it at startup when `NODE_ENV=production` (with a negative test) or delete it, and record who still needs it (tests, local development).
+- [ ] Rename names that hide their meaning, updating `.env.example`, docs and any deploy config that sets them: `CHAT_INGEST_REPORT_NATURAL` (chat may answer "how did my files process?" with the ingest report), `MEDIA_CAPACITY_HOST_CLASS_APPROVED`, `DOCSLURP_DEFERRED_PROFILES`, `VISION_ORG_UNCHARGED_LIMIT_CENTS` and `SKIP_RUN_BUDGET_GUARDS_IN_DEV`. Pick names that say what the switch does.
+- [ ] Rename the `TEST_PRIVATE_GPU1_TOKEN`/`TEST_WORKER_GPU1_TOKEN` fixtures in `packages/shared/src/__tests__/private-endpoints.test.ts` so the names don't embed a machine number.
+- [ ] Drop the `PERPLEXITYAI_API_KEY` alias once production sets `PERPLEXITY_API_KEY` (app `TODO.md`, "Env and flag cleanup").
