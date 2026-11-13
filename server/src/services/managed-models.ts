@@ -83,7 +83,7 @@ export function managedPipelineModelProblem(path: string, model: string): string
     // admitted there means priced, input-billed, not Pro/Ultra. Availability (API keys) is the deployment's concern.
     const found = findDecisionModel(model.trim());
     if (!found) return "not a reviewed decision model";
-    const env = Object.fromEntries(found.availability.requiresEnv.map((key) => [key, "set"]));
+    const env = Object.fromEntries(found.availability.requiresEnv.map((key) => [key, true]));
     const rejected = buildDecisionModelCatalog({ env }).rejected.find((entry) => entry.modelId === found.id);
     return rejected ? `decision model refused (${rejected.reason})` : null;
   }
