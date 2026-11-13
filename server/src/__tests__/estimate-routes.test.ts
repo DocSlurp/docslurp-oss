@@ -420,6 +420,8 @@ describe("PATCH /v1/projects/:id through the real route stays non-breaking", () 
 
 describe("chart export tier: origin defaults, per-request override and its guards", () => {
   beforeEach(async () => {
+    // Billing on for every test here, whatever earlier tests unstubbed (credits are null when billing is off).
+    vi.stubEnv("STRIPE_SECRET_KEY", "sk_test_estimates");
     await seed();
     // The audit log references the key that made the change.
     await sql`insert into api_keys (id, user_id, org_id, key_hash, name, key_type) values ('k1', 'u1', 'o1', 'hash-chart-k1', 'chart', 'server') on conflict (id) do nothing`;
