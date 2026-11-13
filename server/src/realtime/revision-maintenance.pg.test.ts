@@ -126,10 +126,14 @@ it.skipIf(!url)("drains a long-transaction burst without further writes and boun
   await new Promise(resolve => setTimeout(resolve, 100));
   expect(await rows()).toBeGreaterThanOrEqual(300);
   await holder.query("commit");
+  // Each scope folds to one row: the organization ('') and the two projects written (0152's per-resource scopes).
+  const scopes = async () => (await owner.query("select scope, count(*)::int as n from realtime_revision_counters where org_id='publication' group by scope order by scope")).rows;
   const deadline = Date.now() + 5_000;
-  while (await rows() > 1 && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 20));
+  while (await rows() > 3 && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 20));
   await stop(); stop = undefined;
-  expect(await rows()).toBe(1);
+  expect(await scopes()).toEqual([
+    { scope: "", n: 1 }, { scope: "project:publication-holder", n: 1 }, { scope: "project:publication-writer", n: 1 },
+  ]);
   expect(BigInt(await read())).toBe(before + 301n);
   expect(await planRows()).toBe(1);
   expect(revisionMaintenanceMetrics.queries - queriesBefore).toBeLessThan(100);
