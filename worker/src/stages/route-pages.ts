@@ -36,12 +36,8 @@ import { allowHostedCall } from "../lib/privacy-guard.js";
 import { buildPageInputs, createProbeRunner, pageInputFromProbeRow, parseProbeOutput, type ProbeRunner } from "../routing/page-input.js";
 import { HostPdfRefusedError, sandboxedPdfReasonForRun, type SandboxedPdfReason } from "../routing/host-pdf-guard.js";
 import { documentExtractorRegistry } from "../extractors/registry.js";
-import {
-  ROUTING_PAGE_FACTS_SLOT,
-  createDopplerFactsProbeRunner,
-  routingPageFactsKey,
-  type FactsProbeRunner,
-} from "../routing/probe/doppler-facts-runner.js";
+import { createDopplerFactsProbeRunner, type FactsProbeRunner } from "../routing/probe/doppler-facts-runner.js";
+import { DOPPLER_PAGE_FACTS_SLOT, dopplerFolderKey } from "../extractors/doppler-figures.js";
 import { dopplerPageFactsMode } from "../lib/doppler-page-facts.js";
 import { readRoutingFlags, type TableGateMode } from "../routing/flags.js";
 import { PAGE_ROUTE_TABLE_GATE_METRIC, runTableGateShadow } from "../routing/gates/shadow.js";
@@ -99,7 +95,7 @@ export type RouteProbeSource = "doppler-facts" | "native-probe";
 export interface RoutePagesDeps {
   /** Host-side native probe (non-sandboxed deployments, facts mode not `use`). Never called on a sandboxed deployment. */
   probe?: ProbeRunner;
-  /** Doppler facts probe (DOCSLURP_DOPPLER_PAGE_FACTS=use); defaults to the document's stored ROUTING_PAGE_FACTS_SLOT. */
+  /** Doppler facts probe (DOCSLURP_DOPPLER_PAGE_FACTS=use); defaults to the document's stored `images/page-facts.jsonl` (DOPPLER_PAGE_FACTS_SLOT). */
   factsProbe?: FactsProbeRunner;
   /** Environment for the sandbox and facts-mode checks (tests); defaults to process.env. */
   env?: NodeJS.ProcessEnv;
@@ -813,12 +809,15 @@ export class RoutePagesStage implements Stage {
     throw new HostPdfRefusedError(operation, sandboxed);
   }
 
-  /** Reads the document's routing facts from the one key this run's extract-markdown writes them to. */
+  /**
+   * Reads the document's page facts from the one key this run's extract-markdown writes them to (the Doppler folder's
+   * `images/page-facts.jsonl`, the same dopplerFolderKey call that wrote them).
+   */
   private defaultFactsProbe(state: WorkflowState, document: Document): FactsProbeRunner {
-    const expected = routingPageFactsKey(runArtifactRoot(state.run, document.userId), document.id);
+    const expected = dopplerFolderKey(document, state.run.id, "pageFacts");
     return createDopplerFactsProbeRunner(async ({ documentId, maxBytes }) => {
       if (documentId !== document.id) return null;
-      const uri = state.artifactLedger.readDocument(document.id, ROUTING_PAGE_FACTS_SLOT);
+      const uri = state.artifactLedger.readDocument(document.id, DOPPLER_PAGE_FACTS_SLOT);
       const key = uri ? keyFromStorageUri(uri, this.storage.bucket) : null;
       // Only this run's own key for this document: a ledger entry pointing anywhere else is not read.
       if (!key || key !== expected) return null;

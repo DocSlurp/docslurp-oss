@@ -41,7 +41,9 @@ import { StorageObjectTooLargeError } from "../tools/storage.js";
 import { testCatalog } from "../routing/testing.js";
 import { pageInputFromProbeRow } from "../routing/page-input.js";
 import { HostPdfRefusedError, sandboxedPdfDeploymentReason } from "../routing/host-pdf-guard.js";
-import { ROUTING_PAGE_FACTS_SLOT, createDopplerFactsProbeRunner, routingPageFactsKey } from "../routing/probe/doppler-facts-runner.js";
+import { createDopplerFactsProbeRunner } from "../routing/probe/doppler-facts-runner.js";
+import { dopplerPageFactsJsonl, parseDopplerPageFacts } from "../lib/doppler-page-facts.js";
+import { DOPPLER_PAGE_FACTS_SLOT, dopplerFolderKey } from "../extractors/doppler-figures.js";
 import { docLine, figurePage, fullFixture, jsonl, runLine, scanPage, textPage } from "../test/doppler-page-facts-fixture.js";
 import { RoutePagesStage, type RoutePagesDeps } from "./route-pages.js";
 
@@ -49,7 +51,7 @@ const SANDBOXED = { DOCSLURP_PDF_MODE: "vm", DOCSLURP_DOPPLER_PAGE_FACTS: "use" 
 const document = {
   id: "doc", userId: "user", filename: "a.pdf", mimeType: "application/pdf", pageCount: 3, pageCountSource: "counted", sourceKey: "a.pdf",
 } as Document;
-const FACTS_KEY = routingPageFactsKey("user/run", "doc");
+const FACTS_KEY = dopplerFolderKey(document, "run", "pageFacts");
 
 const sources = { get: vi.fn(async () => ({ path: "/tmp/a.pdf", sha256: "x", sizeBytes: 1, cacheHit: true })) } as unknown as PdfSourceCache & {
   get: ReturnType<typeof vi.fn>;
@@ -84,7 +86,7 @@ function makeState(options: { mode?: PageRouterMode; pageRouter?: Partial<PageRo
   } as unknown as ProjectRun, [document]);
   state.docConcurrency = 1;
   const factsKey = options.factsKey === undefined ? FACTS_KEY : options.factsKey;
-  if (factsKey) state.artifactLedger.recordDocument("doc", ROUTING_PAGE_FACTS_SLOT, `s3://bucket/${factsKey}`);
+  if (factsKey) state.artifactLedger.recordDocument("doc", DOPPLER_PAGE_FACTS_SLOT, `s3://bucket/${factsKey}`);
   return state;
 }
 
@@ -187,7 +189,7 @@ describe("route-pages on a sandboxed deployment", () => {
   });
 
   it("a ledger entry pointing at another key is not read", async () => {
-    const { plan, metrics, storage } = await route({ facts: fullFixture(), factsKey: "other-user/run/routing-page-facts/doc.jsonl" });
+    const { plan, metrics, storage } = await route({ facts: fullFixture(), factsKey: "other-user/run/doppler/doc/images/page-facts.jsonl" });
     expect(storage.getBytes).not.toHaveBeenCalled();
     expect(plan).toBeNull();
     expect(metrics("page-route-fallback")[0]!.metadata).toMatchObject({ reason: "facts-missing" });
@@ -273,6 +275,19 @@ describe("route-pages on a sandboxed deployment", () => {
 });
 
 describe("golden decisions on fixture facts", () => {
+  it("reads back exactly what extract-markdown writes (dopplerPageFactsJsonl of the accepted facts)", async () => {
+    const accepted = parseDopplerPageFacts(fullFixture(), { pageCount: 3 });
+    if (!accepted.ok) throw new Error(accepted.reason);
+    const written = dopplerPageFactsJsonl(accepted.facts);
+    const direct = await createDopplerFactsProbeRunner(async () => Buffer.from(fullFixture()))({ documentId: "doc", pageCount: 3 });
+    const stored = await createDopplerFactsProbeRunner(async () => Buffer.from(written))({ documentId: "doc", pageCount: 3 });
+    expect(stored).toMatchObject({ status: "ok", locked: false, pagesKnown: 3 });
+    expect(stored).toEqual(direct);
+    const { plan } = await route({ facts: written });
+    expectNoHostPdfAccess();
+    expect(plan).not.toBeNull();
+  });
+
   it("maps the three fixture pages to stable page inputs", async () => {
     const result = await createDopplerFactsProbeRunner(async () => Buffer.from(fullFixture()))({ documentId: "doc", pageCount: 3 });
     expect(result.status).toBe("ok");

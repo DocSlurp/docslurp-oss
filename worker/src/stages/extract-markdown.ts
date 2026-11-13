@@ -1,9 +1,9 @@
 import { createHash } from "node:crypto";
-import { countDeferredPdfPages, firstPassServesDocument, primeFirstPassResults } from "../pipeline/first-pass.js";
+import { committedDocumentUris, countDeferredPdfPages, firstPassServesDocument, primeFirstPassResults } from "../pipeline/first-pass.js";
 import { reserveOrientationAttempt } from "../lib/image-orientation.js";
 import { EMBEDDED_IMAGE_TARGETS, embeddedImageGraph, resolveEmbeddedImageRequest } from "../extractors/embedded-images.js";
 import { anchorImageMarkdownFile } from "../extractors/image-markdown.js";
-import { DopplerFigureRejection, DopplerFigureStoreError, disposeDopplerFigureSet, dopplerImageExtractEnabled, dopplerSourcePointer, readDopplerFigureDir, storeDopplerFigures } from "../extractors/doppler-figures.js";
+import { DOPPLER_PAGE_FACTS_SLOT, DopplerFigureRejection, DopplerFigureStoreError, disposeDopplerFigureSet, dopplerFolderKey, dopplerSourcePointer, readDopplerFigureDir, storeDopplerFigures } from "../extractors/doppler-figures.js";
 import { ledgerWriteForFailedFigures, ledgerWriteForNoFigures, ledgerWriteForStoredFigures, queueAssetLedger } from "../db/document-asset-ledger.js";
 import {
   SANDBOXED_PDF_MAX_MARKDOWN_BYTES, VM_PDF_EXTRACTOR_ID, firstPassServedFigures, requireSandboxedPdfProvider, sandboxedPdfFigures, sandboxedPdfProvider, sandboxedPdfLayoutFacts, sandboxedPdfLayoutFactsSource, sandboxedPdfOcrPages,
@@ -60,7 +60,7 @@ import {
 } from "../pipeline/checkpoints.js";
 import { healthyDocuments } from "../pipeline/document-health.js";
 import { buildCanonicalDocumentFromMarkdown } from "../lib/canonical-document.js";
-import { dopplerImageLimits, type CanonicalDocument } from "@docslurp/shared";
+import { dopplerImageLimits, figuresEnabled, type CanonicalDocument } from "@docslurp/shared";
 import { enrichCanonicalDocumentWithPptx, enrichCanonicalDocumentWithXlsx } from "../lib/office-structure.js";
 import {
   enrichCanonicalDocumentWithBestParser,
@@ -118,8 +118,7 @@ import { processedPdfPages, reconcileProcessedPdfPages } from "../lib/pdf-page-c
 import { recordExtractedPageEquivalents } from "../lib/page-equivalents.js";
 import { collectPageLayoutFacts } from "../lib/page-layout-evidence.js";
 import { routingFactsWithDopplerFacts } from "../lib/doppler-page-facts-layout.js";
-import { dopplerPageFactsJsonl, dopplerPageFactsMode, type DopplerPageFactsDocument } from "../lib/doppler-page-facts.js";
-import { ROUTING_PAGE_FACTS_SLOT, routingPageFactsKey } from "../routing/probe/doppler-facts-runner.js";
+import { dopplerPageFactsJsonl } from "../lib/doppler-page-facts.js";
 import { sandboxedPdfPageFacts } from "../extractors/sandboxed-pdf-page-facts.js";
 import { PAGE_RENDITION, pageRenditionKey } from "../lib/page-rendition.js";
 import { extractorFailureReason, extractorFallbackFor, recordExtractorFallback } from "../lib/extractor-fallback.js";
@@ -392,7 +391,7 @@ export class ExtractMarkdownStage implements Stage {
             this.name,
             artifactSlot,
             "markdown extraction ready",
-            async (retryStrategy) => this.withImagesLevel(state, document, await (async () => {
+            async (retryStrategy) => this.withImagesLevel(state, document, async () => {
               // Fails this document, never the run, and before anything reads the source.
               if (hostPdf.length > 0) {
                 throw new Error(`extractor ${hostPdf.map((entry) => `${entry.id} (${entry.path.join(".")})`).join(", ")} refused for pdf: this deployment runs PDFs only in ${VM_PDF_EXTRACTOR_ID}`);
@@ -534,7 +533,7 @@ export class ExtractMarkdownStage implements Stage {
                 }
                 // Doppler figures (DOCSLURP_DOPPLER_IMAGE_EXTRACT): from the same VM job, into an empty host folder per candidate.
                 // A first-pass document's figures come from its batch and are stored by the first pass itself.
-                if (isPdf && dopplerImageExtractEnabled() && sandboxedPdfProvider()?.figures && !firstPassServesDocument(state.run.id, document.id)) {
+                if (isPdf && figuresEnabled(state.run.pipeline as { figures?: boolean | null }, process.env) && sandboxedPdfProvider()?.figures && !firstPassServesDocument(state.run.id, document.id)) {
                   for (const prepared of [isolated.primary.extractor, isolated.secondary?.extractor]) {
                     if (!prepared?.plan.sandboxedPdf) continue;
                     const dir = await mkdtemp(path.join(path.dirname(prepared.plan.sandboxedPdf.output), ".doppler-figures-"));
@@ -1016,12 +1015,13 @@ export class ExtractMarkdownStage implements Stage {
                     documentId: document.id, runId: state.run.id, pageCount: document.pageCount,
                     layoutFacts: routingFactsWithDopplerFacts(winningCandidate.layoutFacts, winningCandidate.pageFacts),
                   }));
-                  // The v2 page router's probe on a sandboxed deployment (DOCSLURP_DOPPLER_PAGE_FACTS=use): the winning job's
-                  // validated facts as canonical lines (never the guest's bytes). route-pages re-validates them and never opens
-                  // the PDF; without them it writes no plan and the document keeps v3 routing.
-                  if (isPdf && winningCandidate.pageFacts && dopplerPageFactsMode() === "use") {
-                    const routingFactsUri = await this.storeRoutingPageFacts(document, state, winningCandidate.pageFacts);
-                    if (routingFactsUri) state.artifactLedger.recordDocument(document.id, ROUTING_PAGE_FACTS_SLOT, routingFactsUri);
+                  // Doppler's page facts beside the figure manifest (`images/page-facts.jsonl`), as canonical lines re-serialized
+                  // from what the strict reader kept: never the guest's bytes, so no producer, creator or lang. Recorded as a
+                  // document artifact slot, so the file proxy's artifact and PII checks apply. Only in store and use modes (off
+                  // never parses facts, so none arrive here).
+                  if (isPdf && winningCandidate.pageFacts) {
+                    const pageFactsUri = await this.storeDopplerPageFactsFile(document, state.run.id, winningCandidate.pageFacts);
+                    if (pageFactsUri) state.artifactLedger.recordDocument(document.id, DOPPLER_PAGE_FACTS_SLOT, pageFactsUri);
                   }
                   // Doppler figures of the winning VM candidate: validated whole, stored under the document's artifact root, and
                   // recorded as document artifact slots so the artifact and PII guards (and the file proxy) apply to each file.
@@ -1311,7 +1311,7 @@ export class ExtractMarkdownStage implements Stage {
               } finally {
                 await Promise.all(candidateDirs.map((dir) => rm(dir, { recursive: true, force: true })));
               }
-            })()),
+            }),
             signal,
             {
               retryStrategies: this.tryResolveExtractorOrder(format, extractionConfig.order).slice(1),
@@ -1717,18 +1717,24 @@ export class ExtractMarkdownStage implements Stage {
     return this.storage.uri(key);
   }
 
-  /** Best effort: a failed write leaves the router without facts (v3 routing), never the document failed. */
-  private async storeRoutingPageFacts(
+  /**
+   * Write the validated page facts as `<artifact root>/doppler/<document>/images/page-facts.jsonl` (dopplerFolderKey, the
+   * document's own tenant-scoped root). Best effort: a failed write leaves no slot, and routing keeps its database rows.
+   */
+  private async storeDopplerPageFactsFile(
     document: import("../models.js").Document,
-    state: import("../pipeline/pipeline.js").WorkflowState,
-    facts: DopplerPageFactsDocument,
+    runId: string,
+    facts: import("../lib/doppler-page-facts.js").DopplerPageFactsDocument,
   ): Promise<string | null> {
-    const key = routingPageFactsKey(runArtifactRoot(state.run, document.userId), document.id);
+    const key = dopplerFolderKey(document, runId, "pageFacts");
     try {
-      await this.storage.streamText(key, dopplerPageFactsJsonl(facts), "application/x-ndjson");
+      const body = Buffer.from(dopplerPageFactsJsonl(facts), "utf8");
+      await this.storage.putBytes(key, body, "text/plain; charset=utf-8");
+      console.log(`[extract-debug] document=${document.id} dopplerPageFacts pages=${facts.summary.pagesKnown} failed=${facts.summary.pagesFailed} dropped=${facts.summary.linesDropped} complete=${facts.summary.complete} bytes=${body.byteLength}`);
       return this.storage.uri(key);
     } catch (error) {
-      console.warn(`[extract-markdown] document=${document.id} routing page facts not stored: ${error instanceof Error ? error.message.slice(0, 200) : String(error)}`);
+      rethrowIfTeardown(error);
+      console.warn(`[extract-markdown] page facts not stored document=${document.id}: ${error instanceof Error ? error.message : String(error)}`);
       return null;
     }
   }
@@ -3026,10 +3032,23 @@ export class ExtractMarkdownStage implements Stage {
   /** Documents whose figures (and ledger) the first pass owns in this attempt: a served placeholder. */
   private readonly firstPassLedger = new Set<string>();
 
-  private withImagesLevel<T>(state: import("../pipeline/pipeline.js").WorkflowState, document: import("../models.js").Document, result: T): T {
-    if (this.firstPassLedger.delete(`${state.run.id}\u0000${document.id}`)) return result;
+  private async withImagesLevel<T>(state: import("../pipeline/pipeline.js").WorkflowState, document: import("../models.js").Document, attempt: () => Promise<T>): Promise<T> {
+    // The mark is per attempt: one left by an attempt that threw must not make a later attempt skip its own level.
+    const key = `${state.run.id}\u0000${document.id}`;
+    this.firstPassLedger.delete(key);
+    let result: T;
+    try {
+      result = await attempt();
+    } catch (error) {
+      this.firstPassLedger.delete(key);
+      throw error;
+    }
+    if (this.firstPassLedger.delete(key)) return result;
     if (state.pendingAssetLedger.has(document.id)) return result;
-    const figuresOn = dopplerImageExtractEnabled() && !!sandboxedPdfProvider()?.figures;
+    // Figures for this run: the deploy flag, the provider, and the project not opted out (`figures: false`). A project
+    // that opted out gets `disabled` for every document, first-pass ones included (the batch asked for no figures), so
+    // an earlier resumable level leaves the resume queue and no new figure storage accrues.
+    const figuresOn = figuresEnabled(state.run.pipeline as { figures?: boolean | null }, process.env) && !!sandboxedPdfProvider()?.figures;
     if (figuresOn && firstPassServesDocument(state.run.id, document.id)) return result;
     queueAssetLedger(state, document.id, ledgerWriteForNoFigures(figuresOn ? "none" : "disabled"));
     return result;
@@ -3045,7 +3064,9 @@ export class ExtractMarkdownStage implements Stage {
     document: import("../models.js").Document; runId: string; candidate: ExtractedCandidate; markdown: string; signal?: AbortSignal;
     state?: import("../pipeline/pipeline.js").WorkflowState;
   }): Promise<{ slots: Array<{ slot: string; uri: string }>; stats: Record<string, unknown> }> {
-    const result = await this.storeWinningDopplerFiguresOnly(args);
+    const result = await this.storeWinningDopplerFiguresOnly({
+      ...args, ...(args.state ? { committedUris: committedDocumentUris(args.state, args.document.id) } : {}),
+    });
     const outcome = args.candidate.figures!.outcome;
     if (!args.state) return result.figures;
     // The asset ledger: every image Doppler reported and the document's extraction level, queued for this stage's
@@ -3059,6 +3080,7 @@ export class ExtractMarkdownStage implements Stage {
 
   private async storeWinningDopplerFiguresOnly(args: {
     document: import("../models.js").Document; runId: string; candidate: ExtractedCandidate; markdown: string; signal?: AbortSignal;
+    committedUris?: ReadonlySet<string>;
   }): Promise<{
     figures: { slots: Array<{ slot: string; uri: string }>; stats: Record<string, unknown> };
     stored?: { set: import("../extractors/doppler-figures.js").DopplerFigureSet; stored: Pick<import("../extractors/doppler-figures.js").StoredDopplerFigures, "manifest" | "manifests"> };
@@ -3087,10 +3109,13 @@ export class ExtractMarkdownStage implements Stage {
     }
     let stored;
     try {
-      // `document.md` is the candidate's output exactly as Doppler wrote it (before any sanitizing), so its links resolve.
+      // `document.md` is the winning candidate's file as this stage holds it: Doppler's output after the host's sanitizing
+      // (data URIs and front matter stripped, tables repaired) and before PII redaction. Its image links are Doppler's, so
+      // they resolve. It is recorded before the PII stage runs, so that stage withholds it when it redacts or blocks.
       stored = await storeDopplerFigures({
         storage: this.storage, document: args.document, runId: args.runId, figures: validated, markdown: args.markdown,
         dopplerMarkdownPath: args.candidate.tempTextPath, source: dopplerSourcePointer(args.document), signal: args.signal,
+        ...(args.committedUris ? { committedUris: args.committedUris } : {}),
       });
     } catch (error) {
       await disposeDopplerFigureSet(validated);

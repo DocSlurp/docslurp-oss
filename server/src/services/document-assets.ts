@@ -14,6 +14,34 @@ import { parseArtifactUri } from "@docslurp/shared";
 import { sql } from "../db.js";
 import { withheldArtifactUrisFromMetadata } from "./pii-artifact-guard.js";
 
+/** A document's Doppler folder (`<artifact root>/doppler/<document>/...`): the document id its key names, or null. */
+const DOPPLER_FOLDER_KEY = /(?:^|\/)doppler\/([A-Za-z0-9-]{1,64})\//;
+export function dopplerFolderDocumentId(uri: string): string | null {
+  return DOPPLER_FOLDER_KEY.exec(parseArtifactUri(uri)?.key ?? "")?.[1] ?? null;
+}
+
+/** The source pointer (`source.json`) names the upload's storage key: it is never served, whatever records it. */
+const DOPPLER_SOURCE_POINTER_KEY = /\/doppler\/[A-Za-z0-9-]{1,64}\/source\.json$/;
+export function isDopplerSourcePointer(uri: string): boolean {
+  return DOPPLER_SOURCE_POINTER_KEY.test(parseArtifactUri(uri)?.key ?? uri);
+}
+
+/**
+ * Defense in depth behind the artifact check (recorded slot, project, organization, PII withholding): a file of a
+ * document's Doppler folder is served only while the document it names is `completed` and not purged. A document still
+ * processing, blocked by its PII policy or failed serves none of it, whatever slot records the URI. URIs outside a
+ * Doppler folder are not this check's (true).
+ */
+export async function dopplerFolderServable(uri: string): Promise<boolean> {
+  if (isDopplerSourcePointer(uri)) return false;
+  if (!DOPPLER_FOLDER_KEY.test(parseArtifactUri(uri)?.key ?? "")) return true;
+  const documentId = dopplerFolderDocumentId(uri);
+  if (!documentId) return false;
+  const [row] = await sql<{ ok: boolean }[]>`
+    select true as ok from documents where id = ${documentId} and status = 'completed' and purged_at is null`;
+  return !!row?.ok;
+}
+
 export interface DocumentAssetScope {
   orgId: string;
   /** The document's project, when the caller already resolved it (an API key's project check). */

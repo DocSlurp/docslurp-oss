@@ -1,6 +1,7 @@
 /**
  * The v2 page router's probe on a sandboxed deployment: Doppler page facts the PDF VM already measured, read back from the
- * document's stored canonical facts (ROUTING_PAGE_FACTS_SLOT, written by extract-markdown in DOCSLURP_DOPPLER_PAGE_FACTS=use).
+ * document's stored canonical facts (`<artifact root>/doppler/<document>/images/page-facts.jsonl`, slot `doppler-page-facts`,
+ * written by extract-markdown in DOCSLURP_DOPPLER_PAGE_FACTS=store and use before the stage commits).
  *
  * Rules:
  * - Never opens the PDF: no native binding, no render, no byte scan of the source. Encryption comes from the facts' doc line.
@@ -14,13 +15,6 @@ import { dopplerPageFactsByteBudget, parseDopplerPageFacts, type DopplerPageFact
 import type { ProbeRow } from "../page-input.js";
 import { probeRowsFromDopplerFacts } from "./doppler-facts.js";
 
-/** Document artifact slot holding the canonical facts lines (dopplerPageFactsJsonl) the router reads. */
-export const ROUTING_PAGE_FACTS_SLOT = "routing-page-facts";
-
-/** The one storage key a document's routing facts live at, under its run's artifact root (runArtifactRoot). */
-export function routingPageFactsKey(artifactRoot: string, documentId: string): string {
-  return `${artifactRoot}/routing-page-facts/${documentId}.jsonl`;
-}
 
 export type FactsProbeUnavailable =
   | "no-host-page-count"

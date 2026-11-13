@@ -38,8 +38,12 @@ Page counts for billing and limits stay the host's own (pdfpagecount). The facts
 - `off`: facts a provider returns are dropped unread.
 - `store` (default): parsed, and each known page's text layer and scan class recorded in `document_page_facts`
   (`text_layer`, `scan_class`; migration 0141) through `upsertPageFacts`. The walker's layout facts give the text layer
-  when they have one; the facts give the scan class. Doppler's raw `page-facts.jsonl` is kept beside the figure
-  manifest when figures are on ([Doppler figures](doppler-figures.md)).
+  when they have one; the facts give the scan class. The facts themselves are stored as
+  `<artifact root>/doppler/<documentId>/images/page-facts.jsonl` (slot `doppler-page-facts`), beside the figure manifest
+  ([Doppler figures](doppler-figures.md)), whatever the figure setting: canonical lines re-serialized from what the
+  reader kept (`dopplerPageFactsJsonl`), never the guest's bytes, so without `producer`, `creator`, `lang` or any field
+  the reader does not know. The file proxy serves it as text, behind the same artifact and PII checks as the folder's
+  other files. Malformed or refused facts write no object.
 - `use`: as `store`, and when the provider returned no layout facts the facts stand in for them: the mapped
   `PageLayoutFacts` are stored as `page-layout-facts` with `source: "vm-pdf-facts"`.
 
@@ -72,9 +76,10 @@ classify-route and page-image evidence read the facts unchanged:
 With `DOCSLURP_DOPPLER_PAGE_FACTS=use` and the v2 page router in `shadow` or `active`, the router reads its page features
 from these facts instead of probing the PDF (`createDopplerFactsProbeRunner`, `worker/src/routing/probe/doppler-facts-runner.ts`):
 
-- extract-markdown stores the winning job's validated facts as canonical lines (`dopplerPageFactsJsonl`) at
-  `<artifactRoot>/routing-page-facts/<documentId>.jsonl` (slot `routing-page-facts`). route-pages reads only that key,
-  re-validates it with `parseDopplerPageFacts` bounded by the host's measured page count, and never opens the PDF.
+- route-pages reads the canonical facts extract-markdown already stored (`<artifactRoot>/doppler/<documentId>/images/page-facts.jsonl`,
+  slot `doppler-page-facts`; written in `store` and `use` before the stage commits). It reads only the key `dopplerFolderKey`
+  gives for this run and document, re-validates it with `parseDopplerPageFacts` bounded by the document's page count and
+  the reader's byte budget, and never opens the PDF.
 - Facts that are missing, refused, oversized, for an unreadable document, for fewer pages than the host counted, or with
   every page failed are unavailable: no plan is written and the document keeps v3 routing (`page-route-fallback`). Missing
   or refused facts never authorize a model read or a charge. Valid facts (including a failed page, as the native probe's
