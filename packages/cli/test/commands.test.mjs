@@ -458,7 +458,7 @@ test("--chart-export sends pipeline.chartExport on upload and ingest-url, chartE
     for (const bad of ["smart", "on", ""]) {
       result = await invoke(["upload", file, "--chart-export", bad], respond);
       assert.notEqual(result.code, 0);
-      assert.match(result.stderr, /--chart-export must be off, free or models/);
+      assert.match(result.stderr, /--chart-export must be off, free or models|--chart-export needs a value/);
       assert.deepEqual(result.requests, []);
     }
   } finally { await rm(dir, { recursive: true, force: true }); }
@@ -548,6 +548,32 @@ test("a flag can never swallow --estimate: unknown flags, --flag=value and missi
     assert.equal(upload.code, 0, upload.stderr);
     assert.deepEqual(upload.requests.map((r) => r.url), ["/v1/uploads/estimate"]);
   } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test("ingest-url checks every URL before sending anything: dash-led words, non-URLs, other schemes, credentials (council #387 r3)", async () => {
+  const respond = () => ({ body: { run: { id: "run" }, project: { id: "p", name: "P" }, documents: [{}] } });
+  const cases = [
+    ["-e", /looks like a flag/], ["-estimate", /looks like a flag/], ["\u2014estimate", /looks like a flag/], ["\u2013estimate", /looks like a flag/],
+    ["\u2212estimate", /looks like a flag/], ["\uFF0Destimate", /looks like a flag/],
+    ["q3-earnings.pdf", /is not a URL/], ["ftp://example.test/a.pdf", /not an http\(s\) URL/], ["https://user:pw@example.test/a.pdf", /credentials/],
+  ];
+  for (const [bad, message] of cases) {
+    for (const extra of [[], ["--estimate"]]) {
+      const result = await invoke(["ingest-url", "https://example.test/ok.pdf", bad, ...extra], respond);
+      assert.notEqual(result.code, 0, `${bad} ${extra.join(" ")}`);
+      assert.match(result.stderr, message, bad);
+      assert.deepEqual(result.requests, [], bad);
+    }
+  }
+});
+
+test("an empty flag value is an error, never a silent default (--project=)", async () => {
+  for (const args of [["ingest-url", "https://example.test/a.pdf", "--project="], ["search", "q", "--project="], ["ingest-url", "https://example.test/a.pdf", "--project", " "]]) {
+    const result = await invoke(args, () => ({ body: {} }));
+    assert.notEqual(result.code, 0, args.join(" "));
+    assert.match(result.stderr, /--project needs a value/);
+    assert.deepEqual(result.requests, []);
+  }
 });
 
 test("--estimate is refused on commands that do not estimate, before any request", async () => {

@@ -615,6 +615,12 @@ describe("inline chart plan and host validation", () => {
       expect(await inlineChartAdmission({ ...base, pipeline, store, hasCapability: () => false })).toEqual({ status: "refused", reason: "image-unsupported", ms: 0 });
     }
     expect(store.reserveChartExportFreeVmRun).not.toHaveBeenCalled();
+    // No sandbox known yet: refused the same way, and the log says the sandbox is not ready rather than blaming the image.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect(await inlineChartAdmission({ ...base, pipeline: free, store, hasCapability: () => "sandbox-not-ready" })).toEqual({ status: "refused", reason: "image-unsupported", ms: 0 });
+    expect(warn.mock.calls.flat().join(" ")).toMatch(/parser sandbox not ready/);
+    expect(warn.mock.calls.flat().join(" ")).not.toMatch(/image does not report/);
+    warn.mockRestore();
     // Free: one reservation against the org's hourly cap (the grant a standalone fallback reuses); granted goes ahead.
     const ok = grant(true);
     expect(await inlineChartAdmission({ ...base, pipeline: free, store: ok })).toBeNull();

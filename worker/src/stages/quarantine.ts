@@ -19,7 +19,7 @@ import { trustedTempDownloadPattern } from "../lib/temp-file-names.js";
 import { sha256Bytes, verifyQuarantineUpload } from "../sandbox/source-integrity.js";
 import { chartExportActive, chartExportConfigOf, chartExportModelsActive } from "../chart-export/config.js";
 import { chartExportFreeVmCap } from "../db/chart-export-free-vm-cap.js";
-import { parserImageHasCapability } from "../sandbox/startup.js";
+import { parserImageCapability } from "../sandbox/startup.js";
 import { CHART_INLINE_SLOT, chartExportInlineEnabled, chartInlineSlotValue, inlineHasWork, type InlineChartRequest, type InlineCharts } from "../chart-export/inline.js";
 import { INLINE_COMMAND_BUDGET_CAPABILITY } from "../chart-export/inline-guest.js";
 import { chartExportVmUsageEvent, deterministicSourceKind } from "../chart-export/vm-extractor.js";
@@ -188,7 +188,7 @@ export class QuarantineStage implements Stage {
   }
 }
 
-let imageWarned = false;
+const warned = new Set<string>();
 
 /**
  * Whether a wanted inline chart request may go to the guest, or the counted refusal that stands in for its answer
@@ -205,13 +205,19 @@ export async function inlineChartAdmission(args: {
   orgId: string | null;
   store: { reserveChartExportFreeVmRun?(a: { orgId: string; runId: string; documentId: string; perHour: number }): Promise<boolean> } | undefined;
   env?: Readonly<Record<string, string | undefined>>;
-  hasCapability?: (capability: string) => boolean;
+  hasCapability?: (capability: string) => boolean | "present" | "missing" | "sandbox-not-ready";
 }): Promise<InlineCharts | null> {
   const env = args.env ?? process.env;
-  const has = args.hasCapability ?? parserImageHasCapability;
-  if (!has(INLINE_COMMAND_BUDGET_CAPABILITY)) {
-    if (!imageWarned) console.warn(`[chart-export] inline charts refused: the parser image does not report ${INLINE_COMMAND_BUDGET_CAPABILITY} (DOCSLURP_CHART_EXPORT_INLINE=1 needs an image with core #387's guest)`);
-    imageWarned = true;
+  const raw = (args.hasCapability ?? parserImageCapability)(INLINE_COMMAND_BUDGET_CAPABILITY);
+  const state = raw === true ? "present" : raw === false ? "missing" : raw;
+  if (state !== "present") {
+    // Each cause logged once per process, in its own words: an image that lacks the guest, or no sandbox known yet.
+    if (!warned.has(state)) {
+      console.warn(state === "sandbox-not-ready"
+        ? "[chart-export] inline charts refused: parser sandbox not ready (none registered or initialized), so its capabilities are unknown"
+        : `[chart-export] inline charts refused: the parser image does not report ${INLINE_COMMAND_BUDGET_CAPABILITY} (DOCSLURP_CHART_EXPORT_INLINE=1 needs an image with core #387's guest)`);
+      warned.add(state);
+    }
     return { status: "refused", reason: "image-unsupported", ms: 0 };
   }
   if (chartExportModelsActive(args.pipeline, env)) return null;

@@ -62,10 +62,18 @@ export function setDefaultParserSandbox(sandbox: InitializedParserSandbox | unde
  * #387 r2 L1: a script running the pipeline on a remote provider must not skip the check).
  */
 export function parserImageHasCapability(capability: string, ...given: [InitializedParserSandbox | undefined] | []): boolean {
+  return parserImageCapability(capability, ...given) === "present";
+}
+
+/**
+ * Why a capability is or is not available: `present`; `missing` (a remote image that does not report it); or
+ * `sandbox-not-ready` (no sandbox registered or initialized yet, so nothing is known and nothing is assumed).
+ */
+export function parserImageCapability(capability: string, ...given: [InitializedParserSandbox | undefined] | []): "present" | "missing" | "sandbox-not-ready" {
   const sandbox = given.length ? given[0] : (registeredSandbox ?? lazyResolved);
-  if (!sandbox) return false;
-  if (sandbox.isolation.location !== "remote") return true;
-  return sandbox.capabilities?.includes(capability) === true;
+  if (!sandbox) return "sandbox-not-ready";
+  if (sandbox.isolation.location !== "remote") return "present";
+  return sandbox.capabilities?.includes(capability) === true ? "present" : "missing";
 }
 
 /** The registered sandbox, if any; never initializes one. */

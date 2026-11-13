@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import modal, { parserVmCapabilities } from "../providers/modal/index.js";
-import { initializeParserSandbox, parserImageHasCapability } from "../startup.js";
+import { initializeParserSandbox, parserImageCapability, parserImageHasCapability } from "../startup.js";
 import type { SandboxSession } from "../types.js";
 
 // Council G M4: the startup probe runs worker/scripts/parser-vm-contract.mjs in the VM and accepts only the parser-vm@5
@@ -87,6 +87,8 @@ describe("parser image capabilities (council #387 M1)", () => {
     expect(parserImageHasCapability("inline-command-budget", { isolation: { location: "local" } } as never)).toBe(true);
     // No sandbox known: fail closed (council #387 r2 L1).
     expect(parserImageHasCapability("inline-command-budget", undefined)).toBe(false);
+    expect(parserImageCapability("inline-command-budget", undefined)).toBe("sandbox-not-ready");
+    expect(parserImageCapability("inline-command-budget", { isolation: { location: "remote" }, capabilities: [] } as never)).toBe("missing");
   });
 });
 

@@ -336,7 +336,8 @@ function parseCliArgs(argv: string[]) {
       i++;
     } else if (VALUE_FLAGS.has(name)) {
       const value = eq >= 0 ? arg.slice(eq + 1) : argv[i + 1];
-      if (value === undefined || (eq < 0 && value.startsWith("--"))) throw new Error(`--${name} needs a value.`);
+      // An empty value is never meant (`--project=` would otherwise quietly mean the default project).
+      if (value === undefined || value.trim() === "" || (eq < 0 && value.startsWith("--"))) throw new Error(`--${name} needs a value.`);
       flags[camel(name)] = value;
       i += eq >= 0 ? 1 : 2;
     } else {
@@ -920,6 +921,9 @@ async function ingestUrlCommand(urls: string[], flags: Record<string, string | b
     process.exitCode = 1;
     return;
   }
+  // Every argument must be an http(s) URL, checked here before anything is sent (council #387 r3): a dash-led word such as
+  // `-e` or `—estimate` is a mistyped flag, never a URL to ingest.
+  assertIngestUrls(urls);
   if (flags.estimate === true) {
     // An estimate never starts an ingest (council #387 M1): sizes come from each URL's own headers, read from here.
     const files = await urlEstimateFiles(urls);
@@ -940,6 +944,20 @@ async function ingestUrlCommand(urls: string[], flags: Record<string, string | b
     return;
   }
   await printIntakeResult(response, flags);
+}
+
+/** Hyphen, the Unicode dashes and minus signs: an argument that starts with one is a mistyped flag. */
+const DASH_LED = /^[-\u2010-\u2015\u2212\uFE58\uFE63\uFF0D]/;
+
+/** Throws unless every argument is an absolute http(s) URL with a host and no credentials. */
+export function assertIngestUrls(urls: readonly string[]): void {
+  for (const raw of urls) {
+    if (DASH_LED.test(raw)) throw new Error(`${raw} looks like a flag, not a URL. Flags start with two ASCII hyphens (--estimate); run docslurp --help.`);
+    let url: URL;
+    try { url = new URL(raw); } catch { throw new Error(`${raw} is not a URL. ingest-url takes http(s) URLs.`); }
+    if ((url.protocol !== "https:" && url.protocol !== "http:") || !url.hostname) throw new Error(`${raw} is not an http(s) URL.`);
+    if (url.username || url.password) throw new Error(`${url.protocol}//${url.host}: URLs with credentials are not accepted.`);
+  }
 }
 
 /**
