@@ -24,7 +24,7 @@ import { CHART_EXPORT_LIMITS, chartExportActive, chartExportConfigOf, DETERMINIS
 import { CHART_EXPORT_USAGE_METRIC, exportVisual, parseSpecAnswer, type ExportVisualArgs } from "./generator.js";
 import { stripVisualGroups, visualBlock, visualBody, wrapVisualGroup } from "./markdown.js";
 import { DISTINCT_TEST_PRICING, installTestPricing, isAutomaticSelectionDenied, resetPricingProviderForTests, visionImageTokens, visionModelTokenPricing } from "@docslurp/shared";
-import { CHART_GENERATOR_CANDIDATES, DIAGRAM_GENERATOR_CANDIDATES, chartExportReasoning, chartExportVisionConfig, chartGeneratorPriceCeiling, selectGeneratorModel } from "./model-selection.js";
+import { CHART_GENERATOR_CANDIDATES, DIAGRAM_GENERATOR_CANDIDATES, chartExportReasoning, chartExportVisionConfig, chartGeneratorPriceCeiling, CHART_GENERATOR_MAX_OUTPUT_USD_PER_MTOK, selectGeneratorModel } from "./model-selection.js";
 import { sanitizeCsv, sanitizeMermaid, sanitizePython, sanitizeVegaLite } from "./sanitize.js";
 import { candidatesFromPlan, ChartExportSession, guardedScopesFromPlan, placementMatch } from "./session.js";
 import { clearChartExport, finishChartExport, prepareChartExport, runChartExportPass } from "./stage.js";
@@ -432,6 +432,10 @@ describe("generator model selection", () => {
     const derived = chartGeneratorPriceCeiling()!;
     expect(derived.outputUsdPerMTok).toBeCloseTo((0.005 * 1e6) / CHART_EXPORT_LIMITS.maxOutputTokensPerCall, 9);
     expect(derived.inputUsdPerMTok).toBeCloseTo((0.005 * 1e6) / CHART_EXPORT_LIMITS.maxImageTokensPerCall, 9);
+    // A stated output ceiling above the routing catalog's limit is capped at $49.99 (the lower one applies).
+    ceiling(0.11, 80);
+    expect(chartGeneratorPriceCeiling()).toEqual({ inputUsdPerMTok: 0.11, outputUsdPerMTok: 49.99 });
+    expect(CHART_GENERATOR_MAX_OUTPUT_USD_PER_MTOK).toBe(49.99);
     // Nothing charged per visual (the open default): no ceiling of its own.
     resetPricingProviderForTests();
     expect(chartGeneratorPriceCeiling()).toBeNull();
