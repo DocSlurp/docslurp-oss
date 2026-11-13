@@ -37,7 +37,7 @@ import {
   applySearchControls,
   recordZeroResultDiagnostics,
 } from "../services/search-controls.js";
-import { apiSearchHistoryRetentionDays, leanSearchLogging } from "./lean-logging.js";
+import { leanSearchHistory } from "./lean-logging.js";
 
 export interface SearchSessionExecutionInput {
   query: string;
@@ -441,7 +441,7 @@ export async function finalizeSearchSessionExecution(
       variant: input.variant,
       results: calibratedResults,
       chunks: input.chunks,
-      ...(leanSearchLogging(input.options.searchMode) ? { expiresInDays: apiSearchHistoryRetentionDays() } : {}),
+      ...leanSearchHistory(input.options.searchMode),
       metadata: {
         originalQuery: input.query,
         effectiveQuery: input.effectiveQuery,

@@ -25,7 +25,7 @@ async function makeKey(mode) {
   const id = `bench-${mode}-${randomBytes(4).toString("hex")}`;
   await sql`insert into api_keys (id, user_id, org_id, key_hash, name, key_type, scopes, rate_limit_ppd)
     values (${id}, 'benchu', 'benchorg', ${createHash("sha256").update(raw).digest("hex")}, ${id}, 'server', ${"{search:" + mode + "}"}::text[], 100000000)`;
-  return raw;
+  return { raw, id };
 }
 
 async function startServer(extraEnv, nodeArgs = []) {
@@ -55,7 +55,7 @@ async function one(key, project, mode, q) {
 }
 
 async function session(arm, mode, project, queries, warm, rep) {
-  const key = await makeKey(mode);
+  const { raw: key, id: keyId } = await makeKey(mode);
   const srv = await startServer({ ...(arm.env ?? {}), ...(arm.serverDir ? { __serverDir: arm.serverDir } : {}) }, arm.nodeArgs ?? []);
   const pid = srv.child.pid;
   try {
@@ -64,6 +64,7 @@ async function session(arm, mode, project, queries, warm, rep) {
     const i0 = snap(pid); await sleep(cfg.idleMs ?? 4000); const i1 = snap(pid);
     const idleRate = Object.fromEntries(Object.entries(diff(i0, i1)).map(([k, v]) => [k, k === "t" ? v : v / (i1.t - i0.t)]));
     await sql`select pg_stat_statements_reset()`;
+    const sessionStartEpoch = Date.now() / 1000;
     const s0 = snap(pid);
     const th0 = threadCpu(pid);
     const runs = [];
@@ -80,6 +81,13 @@ async function session(arm, mode, project, queries, warm, rep) {
     for (const k of Object.keys(idleRate)) if (k !== "t") idleRate[k] = Math.min(idleRate[k], post[k] / post.t);
     const d = diff(s0, s1);
     const cpu = Object.fromEntries(Object.entries(d).filter(([k]) => k !== "t").map(([k, v]) => [k, (v - idleRate[k] * d.t) / runs.length]));
+    // Rows this session's searches left behind (charges flush within SEARCH_CHARGE_BATCH_MS; drain waited longer).
+    const [usage] = await sql`select count(*)::int as rows, coalesce(sum(pg_column_size(u.*)), 0)::int as bytes from usage_events u where api_key_id = ${keyId}`;
+    const [hist] = await sql`select count(*)::int as rows, count(expires_at)::int as expiring, coalesce(sum(pg_column_size(s.*)), 0)::int as bytes,
+      (select count(*)::int from search_session_results r where r.session_id in (select id from search_sessions where created_at >= to_timestamp(${sessionStartEpoch}))) as result_rows
+      from search_sessions s where created_at >= to_timestamp(${sessionStartEpoch})`;
+    const retained = { usageRowsPerSearch: usage.rows / runs.length, usageBytesPerSearch: usage.bytes / runs.length, sessionsPerSearch: hist.rows / runs.length,
+      expiringShare: hist.rows ? hist.expiring / hist.rows : 0, sessionBytesPerSearch: hist.bytes / runs.length, resultRowsPerSearch: hist.result_rows / runs.length };
     const [st] = await sql`select coalesce(sum(calls),0)::float as calls, coalesce(sum(total_exec_time),0)::float as exec_ms from pg_stat_statements where query not ilike '%pg_stat_statements%'`;
     const top = await sql`select calls, round(total_exec_time::numeric,1)::float as ms, left(regexp_replace(query, '\\s+', ' ', 'g'), 140) as q from pg_stat_statements where query not ilike '%pg_stat_statements%' order by calls desc limit 25`;
     // Gate: an empty search is not a fast sample.
@@ -87,13 +95,14 @@ async function session(arm, mode, project, queries, warm, rep) {
     if (withResults < (cfg.minWithResults ?? 0.9)) throw new Error(`only ${(withResults * 100).toFixed(0)}% of searches returned results; corpus or setup is broken`);
     const walls = runs.map((r) => r.wall).sort((a, b) => a - b);
     const pct = (p) => walls[Math.min(walls.length - 1, Math.floor(p * walls.length))];
-    const res = { withResults, threads, arm: arm.name, mode, project, rep, n: runs.length, conc: cfg.concurrency, wallRunMs: tRun, qps: runs.length / (tRun / 1000),
+    const res = { withResults, threads, retained, arm: arm.name, mode, project, rep, n: runs.length, conc: cfg.concurrency, wallRunMs: tRun, qps: runs.length / (tRun / 1000),
       errors: runs.filter((r) => r.status !== 200).length, modes: [...new Set(runs.map((r) => r.mode))], errSample: runs.find((r) => r.err)?.err,
       cpuMsPerSearch: cpu, idleRatePerSec: Object.fromEntries(Object.entries(idleRate).filter(([k]) => k !== "t").map(([k, v]) => [k, v * 1000])),
       pg: { statementsPerSearch: st.calls / runs.length, execMsPerSearch: st.exec_ms / runs.length, top },
       latency: { p50: pct(0.5), p95: pct(0.95), mean: walls.reduce((a, b) => a + b, 0) / walls.length }, runs };
     console.log(`${arm.name.padEnd(14)} ${mode.padEnd(8)} ${project} rep${rep} n=${res.n} err=${res.errors} qps=${res.qps.toFixed(1)} cpu/search ms: ` +
       Object.entries(cpu).map(([k, v]) => `${k}=${v.toFixed(2)}`).join(" ") + ` | pg stmts=${res.pg.statementsPerSearch.toFixed(1)} exec=${res.pg.execMsPerSearch.toFixed(2)}ms | p50=${res.latency.p50.toFixed(0)}ms`);
+    console.log("  retained/search:", JSON.stringify(Object.fromEntries(Object.entries(retained).map(([k, v]) => [k, Number(v.toFixed(2))]))));
     console.log("  threads ms/search:", Object.entries(threads).map(([k, v]) => `${k}=${v.toFixed(1)}`).join(" "));
     if (res.errors) console.log("  err:", res.errSample, srv.log().slice(-1500));
     return res;

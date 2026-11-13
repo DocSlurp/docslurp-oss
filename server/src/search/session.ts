@@ -39,6 +39,8 @@ export interface PersistSearchSessionInput {
   metadata: SearchSessionMetadataInput;
   /** Days until the session (and its result rows) expires; omitted keeps it (lean-logging.ts). */
   expiresInDays?: number;
+  /** False skips the per-result rows (lean keyword searches); the session row keeps the result count. */
+  resultRows?: boolean;
 }
 
 export interface SearchSessionChunk {
@@ -378,7 +380,7 @@ class SqlSearchSessionJournal implements SearchSessionJournal {
       // retaining usage for every actual retrieval attempt under the root id.
       // A freshly inserted session has no result rows to replace.
       if (!sessions[0]!.inserted) await client`delete from search_session_results where session_id = ${this.sessionId}`;
-      if (input.chunks.length > 0) {
+      if (input.chunks.length > 0 && input.resultRows !== false) {
         const rows = input.chunks.map((c, i) => ({
           id: randomUUID(),
           session_id: this.sessionId,

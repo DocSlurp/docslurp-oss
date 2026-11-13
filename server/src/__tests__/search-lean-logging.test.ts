@@ -56,11 +56,18 @@ describe("lean search logging", () => {
     expect(lean.leanSearchLogging("keyword", { SEARCH_API_LEAN_LOGGING: "0" })).toBe(false);
   });
 
-  it("reads the history retention, defaulting to 30 days", () => {
-    expect(lean.apiSearchHistoryRetentionDays({})).toBe(30);
-    expect(lean.apiSearchHistoryRetentionDays({ SEARCH_API_HISTORY_RETENTION_DAYS: "7" })).toBe(7);
-    expect(lean.apiSearchHistoryRetentionDays({ SEARCH_API_HISTORY_RETENTION_DAYS: "0" })).toBe(30);
-    expect(lean.apiSearchHistoryRetentionDays({ SEARCH_API_HISTORY_RETENTION_DAYS: "junk" })).toBe(30);
+  it("keeps keyword history 7 days without result rows, hybrid 30 days with them", () => {
+    expect(lean.apiSearchHistoryRetentionDays("hybrid", {})).toBe(30);
+    expect(lean.apiSearchHistoryRetentionDays("keyword", {})).toBe(7);
+    expect(lean.apiSearchHistoryRetentionDays("hybrid", { SEARCH_API_HISTORY_RETENTION_DAYS: "14" })).toBe(14);
+    expect(lean.apiSearchHistoryRetentionDays("keyword", { SEARCH_API_KEYWORD_HISTORY_RETENTION_DAYS: "2" })).toBe(2);
+    expect(lean.apiSearchHistoryRetentionDays("hybrid", { SEARCH_API_HISTORY_RETENTION_DAYS: "0" })).toBe(30);
+    expect(lean.apiSearchHistoryRetentionDays("keyword", { SEARCH_API_KEYWORD_HISTORY_RETENTION_DAYS: "junk" })).toBe(7);
+    expect(lean.leanSearchHistory("keyword")).toEqual({ expiresInDays: 7, resultRows: false });
+    expect(lean.leanSearchHistory("hybrid")).toEqual({ expiresInDays: 30, resultRows: true });
+    expect(lean.leanSearchHistory("deep")).toBeNull();
+    context.apiKeyId = null;
+    expect(lean.leanSearchHistory("keyword")).toBeNull();
   });
 
   it("writes one charge per key, project and mode, scoped to that key", async () => {
@@ -103,7 +110,7 @@ describe("lean search logging", () => {
   });
 
   it("sums non-billable search usage per key and model, keeping every call's tokens", async () => {
-    const embed = (tokens: number) => ({ provider: "openrouter", model: "embed-small", metric: "embed-query", inputTokens: tokens, outputTokens: 0, costCents: tokens / 1e6, metadata: { billable: false } });
+    const embed = (tokens: number) => ({ provider: "openrouter", model: "embed-small", metric: "embed-query", amount: tokens, unit: "tokens", inputTokens: tokens, outputTokens: 0, costCents: tokens / 1e6, metadata: { billable: false } });
     lean.enqueueSearchUsage({ userId: "u", orgId: "o", projectId: "p" }, [embed(10), embed(14)]);
     lean.enqueueSearchUsage({ userId: "u", orgId: "o", projectId: "p" }, [{ ...embed(5), model: "embed-large" }]);
     expect(lean.pendingSearchUsageCalls()).toBe(3);
@@ -114,7 +121,7 @@ describe("lean search logging", () => {
   });
 
   it("never batches billable usage", () => {
-    expect(() => lean.enqueueSearchUsage({ userId: "u", orgId: "o", projectId: "p" }, [{ provider: "x", model: "m", metric: "llm", inputTokens: 1, outputTokens: 1, costCents: 1, metadata: {} }]))
+    expect(() => lean.enqueueSearchUsage({ userId: "u", orgId: "o", projectId: "p" }, [{ provider: "x", model: "m", metric: "llm", amount: 1, unit: "tokens", inputTokens: 1, outputTokens: 1, costCents: 1, metadata: {} }]))
       .toThrow(/non-billable/);
   });
 

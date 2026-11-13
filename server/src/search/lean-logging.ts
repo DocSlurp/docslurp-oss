@@ -10,8 +10,9 @@ import { currentRequestApiKeyId } from "../lib/request-context.js";
  * Lean logging for API-key keyword and hybrid searches, the cheap high-volume tiers. Two things a search otherwise
  * keeps forever cost more than the search itself at those prices, so for these searches:
  *
- * - Search history (the search_sessions row and its result rows) expires after SEARCH_API_HISTORY_RETENTION_DAYS
- *   (default 30); the maintenance sweep deletes it.
+ * - Search history expires: hybrid after SEARCH_API_HISTORY_RETENTION_DAYS (default 30), keyword after
+ *   SEARCH_API_KEYWORD_HISTORY_RETENTION_DAYS (default 7), and a keyword search keeps only its session row (query,
+ *   counts, timing), not a row per result. The maintenance sweep deletes expired sessions.
  * - The charge is batched: searches are counted in process and written as one usage event per
  *   (user, organization, project, key, mode) every SEARCH_CHARGE_BATCH_MS (default 5 s), instead of one per search.
  *   The search's own non-billable usage (the query embedding) is summed the same way, one event per key, provider,
@@ -28,10 +29,18 @@ export function leanSearchLogging(mode: SearchMode | undefined, env: NodeJS.Proc
   return (mode === "keyword" || mode === "hybrid") && Boolean(currentRequestApiKeyId()) && !currentChatTurn();
 }
 
-/** Days an API-key keyword or hybrid search stays in search history. */
-export function apiSearchHistoryRetentionDays(env: NodeJS.ProcessEnv = process.env): number {
-  const days = Number((env.SEARCH_API_HISTORY_RETENTION_DAYS ?? "").trim() || 30);
-  return Number.isFinite(days) && days >= 1 ? Math.floor(days) : 30;
+/** Days an API-key search in `mode` stays in search history. */
+export function apiSearchHistoryRetentionDays(mode: "keyword" | "hybrid", env: NodeJS.ProcessEnv = process.env): number {
+  const [name, fallback] = mode === "keyword" ? ["SEARCH_API_KEYWORD_HISTORY_RETENTION_DAYS", 7] : ["SEARCH_API_HISTORY_RETENTION_DAYS", 30];
+  const days = Number((env[name] ?? "").trim() || fallback);
+  return Number.isFinite(days) && days >= 1 ? Math.floor(days) : fallback;
+}
+
+/** How a lean search is kept in history, or null to keep it in full (lean-logging.ts). */
+export function leanSearchHistory(mode: SearchMode | undefined): { expiresInDays: number; resultRows: boolean } | null {
+  if (!leanSearchLogging(mode)) return null;
+  const leanMode = mode as "keyword" | "hybrid";
+  return { expiresInDays: apiSearchHistoryRetentionDays(leanMode), resultRows: leanMode !== "keyword" };
 }
 
 const BATCH_MS = (() => {
