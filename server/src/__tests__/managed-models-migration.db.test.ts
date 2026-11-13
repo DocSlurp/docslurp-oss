@@ -4,12 +4,12 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { applyRemainingMigrations, createMigratedDatabase } from "@docslurp/worker/testing";
 
 /**
- * Migration 0155 (managed models): operator private routes and index-bound embedding URIs move into explicit overrides;
+ * Migration 0158 (managed models): operator private routes and index-bound embedding URIs move into explicit overrides;
  * every other stored model value (legacy customer choices, former defaults such as the DeepSeek vision route) is removed
  * so the current defaults apply. It runs twice without change.
  */
 const MIGRATION = "managed_models";
-const migrationSql = readFileSync(new URL("../../db/migrations/0155_managed_models.sql", import.meta.url), "utf8");
+const migrationSql = readFileSync(new URL("../../db/migrations/0158_managed_models.sql", import.meta.url), "utf8");
 let db: Awaited<ReturnType<typeof createMigratedDatabase>>;
 
 const legacy = {
@@ -44,7 +44,7 @@ beforeAll(async () => {
 
 afterAll(async () => { await db?.close(); });
 
-describe("migration 0155 managed models", () => {
+describe("migration 0158 managed models", () => {
   it("keeps operator private routes as explicit overrides and drops every other stored model value", async () => {
     const { pipeline, managed } = await row("legacy");
     expect(managed).toEqual({ pipeline: {

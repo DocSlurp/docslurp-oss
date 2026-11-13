@@ -2,7 +2,7 @@
 
 - Chat takes `tier` (`fastest`, `balanced`, `smart`) and `reasoning` on `/v1/chat`, `/v1/chat/stream`, chat operations, MCP `chat` and `docslurp.tier`/`docslurp.reasoning` on `/v1/chat/completions`. A backend `model` is operator-evaluation only (platform admins, `DOCSLURP_CHAT_EVAL_ORG_IDS`); everyone else gets 400 `model_not_allowed` naming the tiers. Chat responses report the tier; backend ids stay in usage events, traces and logs.
 - Pipeline model, provider and route fields (`textGeneration.model(s)`, `structuredExtraction.model`, embedding/vision `modelUri`/`target`, `vision.remoteFallbackModelUri`, non-auto `visualPages.route`) and search `rerankProvider`/`rerankModel` are refused on public writes and omitted on reads; search settings take `retrievalDefaults.reranker` (`keyword` | `model`). Stored managed values survive customer edits.
-- Platform admins set the per-project tier map and managed pipeline models with `PUT /v1/admin/projects/:projectId/managed-models` (browser session only). Migration 0155 adds `projects.managed_models` and clears customer-chosen text models and visual-page routes.
+- Platform admins set the per-project tier map and managed pipeline models with `PUT /v1/admin/projects/:projectId/managed-models` (browser session only). Migration 0158 adds `projects.managed_models` and clears customer-chosen text models and visual-page routes.
 - SDK `ChatInput.tier`/`reasoning` (`model` typed `never`, refused at runtime); CLI `chat --tier/--reasoning`, `--model` refused.
 
 ## Serving path: indexed sessions, explicit scope, coalesced durable chat, shared chat caps (2026-11-13)
