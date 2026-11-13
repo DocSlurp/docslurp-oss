@@ -16,6 +16,14 @@ vi.mock("../services/projects.js", async original => ({
   findProjectForInput: vi.fn(async (ref: { id: string }) => ({ id: ref.id, orgId: "org-1" })),
   resolveProjectRef: vi.fn(async (id: string) => ({ id })),
 }));
+vi.mock("../services/organizations.js", async original => ({
+  ...await original<typeof import("../services/organizations.js")>(),
+  // The API-key access check reads access, not the project record: answer from the getProject mock.
+  getProjectAccess: vi.fn(async (id: string, userId: string) => {
+    const project = await (await import("../services/projects.js")).getProject(id, userId) as { id: string; orgId: string } | null;
+    return project ? { projectId: project.id, orgId: project.orgId, projectOwnerUserId: userId, isDefaultProject: false, orgRole: "owner", projectRole: null } : null;
+  }),
+}));
 vi.mock("../services/search-controls.js", () => ({ getProjectSearchSettings: vi.fn(async () => ({ ...defaultProjectSearchSettings, chat: { ...defaultProjectSearchSettings.chat, mode: "retrieval" } })) }));
 vi.mock("../services/search.js", async original => ({ ...await original<typeof import("../services/search.js")>(), hybridSearch: m.search, loadProjectWholeCorpusContext: vi.fn(async () => ({ eligible: false, results: [], stats: {} })) }));
 vi.mock("../lib/chat-agent-model.js", async original => ({ ...await original<typeof import("../lib/chat-agent-model.js")>(), createChatAgentModel: m.provider }));
@@ -28,7 +36,7 @@ const { projectChatRoutes } = await import("../routes/search.js");
 const { chatCompletionsRoutes } = await import("../routes/chat-completions.js");
 const id = "11111111-1111-4111-8111-111111111111";
 const foreign = "22222222-2222-4222-8222-222222222222";
-const key = { userId: "user-1", orgId: "org-1", keyId: "browser-key", keyType: "client", scopes: ["chat", "search"], projectIds: [id] };
+const key = { userId: "user-1", orgId: "org-1", keyId: "browser-key", keyType: "client", scopes: ["chat", "search:deep"], projectIds: [id] };
 const { apiKeyAuth } = await import("../middleware/api-key-auth.js");
 const app = new Hono().use("/v1/chat", apiKeyAuth).route("/v1/chat", projectChatRoutes).route("/v1", chatCompletionsRoutes);
 function request(path: string, extra = {}) {
@@ -78,7 +86,7 @@ for (const path of ["/v1/chat", "/v1/chat/completions"]) {
     expect(m.provider).not.toHaveBeenCalled(); expect(m.search).not.toHaveBeenCalled();
   });
   it(`${path} denies a search-only credential before composition`, async () => {
-    m.key.mockResolvedValue({ ...key, scopes: ["search"] });
+    m.key.mockResolvedValue({ ...key, scopes: ["search:deep"] });
     expect((await request(path)).status).toBe(403);
     expect(m.provider).not.toHaveBeenCalled(); expect(m.search).not.toHaveBeenCalled();
   });

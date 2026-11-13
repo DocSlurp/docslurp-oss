@@ -1,4 +1,4 @@
-import { searchCandidateDepthSchema, searchResultOrderSchema } from "@docslurp/shared";
+import { searchCandidateDepthSchema, searchModeSchema, searchResultOrderSchema, type SearchMode } from "@docslurp/shared";
 
 /**
  * Retrieval flags from a query string, shared by GET /v1/search and the
@@ -7,6 +7,7 @@ import { searchCandidateDepthSchema, searchResultOrderSchema } from "@docslurp/s
  * "false" (or "1"/"0") set it explicitly.
  */
 export interface RetrievalQueryFlags {
+  searchMode?: SearchMode;
   useHyDE?: boolean;
   useRerank?: boolean;
   candidateDepth?: number;
@@ -71,7 +72,12 @@ export function parseRetrievalQueryFlags(read: (name: string) => string | undefi
   if (resultOrder !== undefined && !searchResultOrderSchema.safeParse(resultOrder).success) {
     throw new InvalidRetrievalQueryError("resultOrder must be relevance or prompt");
   }
+  const rawMode = read("mode")?.trim();
+  if (rawMode && !searchModeSchema.safeParse(rawMode).success) {
+    throw new InvalidRetrievalQueryError("mode must be keyword, hybrid or deep");
+  }
   return {
+    searchMode: (rawMode || undefined) as SearchMode | undefined,
     candidateDepth,
     resultOrder: resultOrder as RetrievalQueryFlags["resultOrder"],
     useHyDE: flag("hyde"),

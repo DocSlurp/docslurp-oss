@@ -15,6 +15,7 @@ vi.mock("../services/api-keys.js", () => ({
   validateApiKey: vi.fn()
 }));
 
+vi.mock("../services/organizations.js", () => ({ getProjectAccess: vi.fn() }));
 vi.mock("../services/projects.js", () => ({ resolveProjectRef: vi.fn(async () => null), findProjectForInput: vi.fn(async (ref: { id?: string; slug?: string }) => ({ id: (ref.id ?? ref.slug)!, orgId: "org-1" })),
   getProject: vi.fn(),
   ensureDefaultProject: vi.fn(async () => ({ id: "ws-default" }))
@@ -23,12 +24,14 @@ vi.mock("../services/projects.js", () => ({ resolveProjectRef: vi.fn(async () =>
 const { auth } = await import("../lib/auth.js");
 const { validateApiKey } = await import("../services/api-keys.js");
 const { getProject } = await import("../services/projects.js");
+const { getProjectAccess } = await import("../services/organizations.js");
 const {
   actorHasAnyApiKeyScope,
   assertActorServerApiKey,
   ApiKeyProjectNotAllowedError,
   assertActorProjectOrgScope,
   loadActorScopedProject,
+  loadActorScopedProjectAccess,
   resolveActorProjectId,
   resolveApiKeyActor,
   resolveBetterAuthSessionActor
@@ -140,6 +143,28 @@ describe("request actor helpers", () => {
       userId: "user-1",
       apiKey: validatedKey
     })).resolves.toBeNull();
+  });
+
+  describe("access-only check (assertApiKeyProjectAccess)", () => {
+    const access = { projectId: "ws-1", orgId: "org-1", projectOwnerUserId: "user-1", isDefaultProject: false, orgRole: "owner" as const, projectRole: null };
+    const key = { type: "apiKey" as const, userId: "user-1", apiKey: validatedKey };
+
+    it("admits a key in the project's organization without loading the project record", async () => {
+      vi.mocked(getProjectAccess).mockResolvedValue(access);
+      await expect(loadActorScopedProjectAccess("ws-1", key)).resolves.toEqual(access);
+      expect(getProject).not.toHaveBeenCalled();
+    });
+
+    it("refuses a user without access, a key of another or no organization, and a project outside the allowlist", async () => {
+      vi.mocked(getProjectAccess).mockResolvedValue(null);
+      await expect(loadActorScopedProjectAccess("ws-1", key)).resolves.toBeNull();
+      vi.mocked(getProjectAccess).mockResolvedValue({ ...access, orgId: "org-2" });
+      await expect(loadActorScopedProjectAccess("ws-1", key)).resolves.toBeNull();
+      vi.mocked(getProjectAccess).mockResolvedValue(access);
+      await expect(loadActorScopedProjectAccess("ws-1", { ...key, apiKey: { ...validatedKey, orgId: "" } })).resolves.toBeNull();
+      await expect(loadActorScopedProjectAccess("ws-1", { ...key, apiKey: { ...validatedKey, projectIds: ["ws-9"] } })).resolves.toBeNull();
+      await expect(loadActorScopedProjectAccess("", key)).resolves.toBeNull();
+    });
   });
 
   describe("project allowlist (G-03)", () => {

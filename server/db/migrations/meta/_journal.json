@@ -967,6 +967,20 @@
       "when": 1794100800000,
       "tag": "0137_run_completion_overdraft",
       "breakpoints": true
+    },
+    {
+      "idx": 138,
+      "version": "7",
+      "when": 1794200000000,
+      "tag": "0138_search_mode_scopes",
+      "breakpoints": true
+    },
+    {
+      "idx": 139,
+      "version": "7",
+      "when": 1794300000000,
+      "tag": "0139_search_session_expiry",
+      "breakpoints": true
     }
   ]
 }

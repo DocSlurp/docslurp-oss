@@ -17,6 +17,7 @@ export const PUBLIC_ERROR_MESSAGES = {
   tooLarge: "This file is too large. Please choose a smaller file and try again.",
   rateLimit: "Please wait a moment before trying again.",
   spendLimit: "This API key has reached its spending limit for the current window. Try again later or raise the limit.",
+  searchLimit: "This API key has reached its search limit for this mode in the current window. Try again later, search in a cheaper mode, or raise the limit.",
   dailyPageLimit: "This API key has used its page allowance for today. Try again tomorrow or raise the limit.",
   ipBlocked: "Too many requests from this network. Try again later.",
   sessionRequired: "Sign in to your account to do this. API keys can’t perform this action.",

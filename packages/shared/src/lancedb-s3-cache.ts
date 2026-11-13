@@ -1,6 +1,6 @@
 // Server-only. Read-through disk cache for the immutable files Lance reads through the localhost S3 proxy.
 import { createHash, randomBytes } from "node:crypto";
-import { mkdir, readdir, readFile, rename, rm, stat, unlink, utimes, writeFile } from "node:fs/promises";
+import { mkdir, open, readdir, readFile, rename, rm, stat, unlink, utimes, writeFile, type FileHandle } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import type { IncomingHttpHeaders } from "node:http";
 
@@ -238,18 +238,30 @@ export class DiskBlockCache {
 
   hasBlock(id: string, index: number): boolean { return this.index.has(this.rel(id, String(index))); }
 
-  /** Reads a cached block. A missing, short or unreadable file is a miss and is removed. */
-  async readBlock(id: string, index: number, expectedLength: number): Promise<Buffer | undefined> {
+  /**
+   * Reads bytes [from, to) of a cached block without loading the rest of it: a warm search asks for many small ranges,
+   * and reading whole blocks to serve them moved megabytes per search through the heap (external memory that drove
+   * full garbage collections). A missing, short or unreadable file is a miss and is removed.
+   */
+  async readBlockRange(id: string, index: number, expectedLength: number, from: number, to: number): Promise<Buffer | undefined> {
     const rel = this.rel(id, String(index));
     if (!this.index.has(rel)) return undefined;
+    let handle: FileHandle | undefined;
     try {
-      const data = await readFile(this.abs(rel));
-      if (data.length !== expectedLength) throw new Error("length mismatch");
+      handle = await open(this.abs(rel), "r");
+      if ((await handle.stat()).size !== expectedLength) throw new Error("length mismatch");
+      const out = Buffer.allocUnsafe(to - from);
+      const { bytesRead } = await handle.read(out, 0, out.length, from);
+      if (bytesRead !== out.length) throw new Error("short read");
       this.touch(rel);
-      return data;
+      return out;
     } catch {
+      await handle?.close().catch(() => {});
+      handle = undefined;
       await this.remove(rel);
       return undefined;
+    } finally {
+      await handle?.close().catch(() => {});
     }
   }
 
@@ -440,9 +452,17 @@ export async function serveCachedRequest(request: CachedRequest): Promise<Cached
     for (let index = first; index <= last; index++) if (!have.has(index)) wanted.push(index);
     const missing: number[] = [];
     let fromDisk = 0;
+    // The part of block `index` this request serves, as offsets within the block.
+    const slice = (index: number) => ({
+      from: index === first ? range!.start - index * B : 0,
+      to: index === last ? range!.end - index * B + 1 : blockLength(index, known.size, B),
+    });
+    // Blocks read from disk hold only their served slice; filled blocks are whole.
+    const sliced = new Set<number>();
     await Promise.all(wanted.map(async (index) => {
-      const data = cache.hasBlock(id, index) ? await cache.readBlock(id, index, blockLength(index, known.size, B)) : undefined;
-      if (data) { have.set(index, data); fromDisk += data.length; } else missing.push(index);
+      const { from, to } = slice(index);
+      const data = cache.hasBlock(id, index) ? await cache.readBlockRange(id, index, blockLength(index, known.size, B), from, to) : undefined;
+      if (data) { have.set(index, data); sliced.add(index); fromDisk += data.length; } else missing.push(index);
     }));
     for (const [runStart, runEnd] of consecutiveRuns(missing.sort((a, b) => a - b)).flatMap(([s, e]) => splitRun(s, e, cache.maxSpanBlocks))) {
       const filled = await fill(runStart, runEnd);
@@ -456,8 +476,8 @@ export async function serveCachedRequest(request: CachedRequest): Promise<Cached
     for (let index = first; index <= last; index++) {
       const data = have.get(index);
       if (!data) return bypass("block-missing");
-      const from = index === first ? range.start - index * B : 0;
-      const to = index === last ? range.end - index * B + 1 : data.length;
+      if (sliced.has(index)) { parts.push(data); continue; }
+      const { from, to } = slice(index);
       parts.push(data.subarray(from, to));
     }
     const body = Buffer.concat(parts);

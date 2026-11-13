@@ -10,7 +10,7 @@ const sqlMock = vi.fn();
 
 // Scopes carried by the mocked API key; individual tests narrow this to prove the
 // compatibility admin surface requires `projects:manage` (SEC-2026-10-01).
-let keyScopes: string[] = ["search", "projects:manage"];
+let keyScopes: string[] = ["search:deep", "projects:manage"];
 
 vi.mock("../db.js", () => ({
   sql: Object.assign(sqlMock, {
@@ -100,7 +100,7 @@ describe("algolia compat", () => {
 
   beforeEach(() => {
     app = buildApp();
-    keyScopes = ["search", "projects:manage"];
+    keyScopes = ["search:deep", "projects:manage"];
     getProjectMock.mockReset();
     hybridSearchMock.mockReset();
     getProjectSearchSettingsMock.mockReset();
@@ -477,7 +477,7 @@ describe("algolia compat", () => {
   });
 
   it("denies settings/synonyms/rules/import mutations to a key without the projects:manage scope", async () => {
-    keyScopes = ["search"];
+    keyScopes = ["search:deep"];
     const auth = { "Content-Type": "application/json", Authorization: "Bearer test" };
     const settings = await app.request("/compat/algolia/1/indexes/ws-1/settings", { method: "PUT", headers: auth, body: JSON.stringify({ hitsPerPage: 20 }) });
     const synonyms = await app.request("/compat/algolia/1/indexes/ws-1/synonyms/batch", { method: "POST", headers: auth, body: JSON.stringify({ synonyms: [{ objectID: "s", type: "synonym", synonyms: ["a", "b"] }] }) });

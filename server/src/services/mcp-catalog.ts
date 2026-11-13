@@ -1,4 +1,5 @@
 import { projectSettingsProposalInputSchema } from "./project-settings-proposal-input.js";
+import { SEARCH_SCOPES, type SearchScope } from "../lib/search-tiers.js";
 import { z } from "zod";
 
 import { uploadBundleAvailable } from "../lib/mcp-ui-resources.js";
@@ -106,7 +107,7 @@ function searchToolInputSchema() {
   };
 }
 
-export type McpScope = "search" | "chat" | "ingest";
+export type McpScope = SearchScope | "chat" | "ingest";
 // Agent-safety hints live with the tool definition so every surface (remote MCP,
 // stdio, chat tools, WebMCP) reads the same values instead of inferring them per surface.
 // `consequential` (WebMCP's consequentialHint) marks calls a person should confirm:
@@ -155,20 +156,20 @@ const toolRank = (id: string) => { const rank = TOOL_ORDER.indexOf(id); return r
 /** The public MCP catalog, in TOOL_ORDER. Tool ids are the public names. */
 export function mcpTools(baseUrl: string): McpTool[] {
   const estimates: Omit<McpTool, "category" | "endpoint">[] = estimateToolDefinitions.map(({ name, title, description, inputSchema }) => ({
-    id: name, title, description, inputSchema, scopes: ["search", "ingest"],
+    id: name, title, description, inputSchema, scopes: [...SEARCH_SCOPES, "ingest"],
     keyAccess: (key) => apiKeyMayUseEstimateTool(name as EstimateToolName, key),
     annotations: READ_ONLY,
   }));
   const tools: Omit<McpTool, "category" | "endpoint">[] = [
-    { id: "getProjectSettings", title: "Read project settings", scopes: ["search", "ingest"], keyAccess: () => false, firstPartyAppOnly: true, annotations: READ_ONLY,
+    { id: "getProjectSettings", title: "Read project settings", scopes: [...SEARCH_SCOPES, "ingest"], keyAccess: () => false, firstPartyAppOnly: true, annotations: READ_ONLY,
       description: "Read current supported pipeline toggles, chat settings and retrieval defaults for the selected project. Use before proposing changes and to verify what is actually saved after the user applies a proposal. Does not expose secrets or change settings.",
       inputSchema: toolInputJsonSchema(z.object({ project: projectRef }).strict()) },
-    { id: "proposeProjectSettings", title: "Propose project settings", scopes: ["search", "ingest"],
+    { id: "proposeProjectSettings", title: "Propose project settings", scopes: [...SEARCH_SCOPES, "ingest"],
       // No API key of any type may list or call it: the signed-in app only.
       keyAccess: () => false, firstPartyAppOnly: true, annotations: READ_ONLY,
       description: "Prepare an exact project-settings change and impact for the signed-in chat's Apply card. Does not save settings or start work. Requires project editor access. Call proactively when configuration would help the user's goal, including enabling video frames. Safe chat changes (changes.chat): enabled, mode, answerStyle, citations, searchInstructions. Safe retrieval changes (changes.retrieval): resultCount, useRerank, useMmr, mmrLambda, candidateDepth, resultOrder. Allowed pipeline toggles: mediaVideo.enabled, chunkOverlap, summarize, embed, indexVectors, preserveTables, preserveCode, preserveImages, pdfRegionExtraction, visionFallback, and quality (fast reads the text layer only and keeps scanned pages as images, $0.05 per 1,000 pages; auto reads each page the cheapest faithful way, $0.05 to $2.50; good reads every page with vision, $2.50; a change applies to new uploads, while existing files need reprocessing). Example: {changes:{pipeline:{mediaVideo:{enabled:true}}}}. An ingest report recommendation that has a patch can be proposed as {changes:{pipeline:<patch>}}. The user applies the structured card; never claim the proposal has been applied. Existing-document reprocessing requires separate explicit consent. Available inside a project chat session only.",
       inputSchema: toolInputJsonSchema(projectSettingsProposalInputSchema) },
-    { id: "listProjects", title: "List projects", scopes: ["search", "ingest"], annotations: READ_ONLY,
+    { id: "listProjects", title: "List projects", scopes: [...SEARCH_SCOPES, "ingest"], annotations: READ_ONLY,
       description: "List projects you can access, including their IDs, slugs, default project, document/page counts and latest processing status. Pass a returned slug (or the name) as project in upload, search or chat. Does not call AI.",
       inputSchema: toolInputJsonSchema(listProjectsInput) },
     { id: "upload", title: "Upload documents", scopes: ["ingest"],
@@ -187,7 +188,7 @@ export function mcpTools(baseUrl: string): McpTool[] {
       annotations: { readOnly: false, destructive: false, idempotent: false, openWorld: false, consequential: true },
       description: "Legacy fallback for single-PUT sessions: verify uploaded files and start ingestion after every PUT succeeds. Normal uploads complete automatically; use getUploadStatus with sessionId instead. Pass sessionId and fileIds from upload. Do not use for multipart uploads.",
       inputSchema: toolInputJsonSchema(completeUploadInput) },
-    { id: "search", title: "Search documents", scopes: ["search"], annotations: READ_ONLY,
+    { id: "search", title: "Search documents", scopes: [...SEARCH_SCOPES], annotations: READ_ONLY,
       description: "Retrieve cited passages for one query (q) or up to 20 independent queries (queries). Supply exactly one form: q with top-level options, or queries (each item has its own q and options) with optional concurrency; a call with both is rejected. Batch results stay in input order with per-query errors; each query can select a project; concurrency (1-8, default 4) bounds parallel retrieval. Omitted project uses the default. Does not generate answers.",
       inputSchema: searchToolInputSchema() },
     { id: "chat", title: "Chat with project", scopes: ["chat"],
@@ -195,13 +196,13 @@ export function mcpTools(baseUrl: string): McpTool[] {
       description: "Generate a grounded answer with citations and token usage using the project's configured model. This calls AI and can incur cost; use search for your own LLM.",
       inputSchema: toolInputJsonSchema(projectChatInputSchema.omit({ agent: true })) },
     ...webMcpTools(),
-    { id: "getUploadStatus", title: "Check upload status", scopes: ["search", "ingest"], annotations: READ_ONLY,
+    { id: "getUploadStatus", title: "Check upload status", scopes: [...SEARCH_SCOPES, "ingest"], annotations: READ_ONLY,
       description: "Pass sessionId from upload to check file upload state and retrieve the automatic ingestion result containing project and run IDs. Then check ingestion progress with project and optional runId. Reports searchable pages, failures, costs and processing speed without AI calls. Use before search or chat when files are still processing.",
       inputSchema: toolInputJsonSchema(uploadStatusInput) },
-    { id: "getMediaEvidence", title: "Read video and audio transcripts", scopes: ["search"], annotations: READ_ONLY,
+    { id: "getMediaEvidence", title: "Read video and audio transcripts", scopes: [...SEARCH_SCOPES], annotations: READ_ONLY,
       description: "Read an indexed video or audio document's extracted transcript, timestamped frame descriptions and media summary. Use a documentId from getUploadStatus or search. Returns cited text and nextOffset for bounded continuation; does not run new AI or play raw video. Use this before claiming you cannot inspect an uploaded video. One logical page can contain many sampled frames.",
       inputSchema: toolInputJsonSchema(mediaEvidenceInput) },
-    { id: "suggestQueries", title: "Suggest search queries", scopes: ["search"], annotations: READ_ONLY,
+    { id: "suggestQueries", title: "Suggest search queries", scopes: [...SEARCH_SCOPES], annotations: READ_ONLY,
       description: "Read prior queries and suggestions without AI calls.",
       inputSchema: toolInputJsonSchema(suggestQueriesInput) },
     ...(deferredProfilesEnabled() ? [{ id: "fullIndex", title: "Index project fully", scopes: ["ingest" as const],
@@ -210,7 +211,7 @@ export function mcpTools(baseUrl: string): McpTool[] {
       inputSchema: toolInputJsonSchema(fullIndexInput) }] : []),
     ...estimates,
     { id: jobsGetToolDefinition.id, title: jobsGetToolDefinition.title, description: jobsGetToolDefinition.description,
-      inputSchema: jobsGetToolDefinition.inputSchema, scopes: ["search", "ingest"], annotations: READ_ONLY },
+      inputSchema: jobsGetToolDefinition.inputSchema, scopes: [...SEARCH_SCOPES, "ingest"], annotations: READ_ONLY },
   ];
   return tools
     .sort((a, b) => toolRank(a.id) - toolRank(b.id))
@@ -230,7 +231,7 @@ export function mcpManifest(baseUrl: string, scopes?: string[], keyType?: string
     server: {
       id: env.mcpServerId, title: "DocSlurp MCP", version: "0.1.0",
       transports: ["streamable-http", "stdio"], endpoint: `${baseUrl}/v1/mcp`,
-      auth: { type: "apiKey", scopes: ["search", "ingest"] },
+      auth: { type: "apiKey", scopes: [...SEARCH_SCOPES, "ingest"] },
     },
     capabilities: mcpTools(baseUrl).filter(tool => tool.firstPartyAppOnly
       ? firstPartyApp

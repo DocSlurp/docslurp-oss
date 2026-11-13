@@ -69,6 +69,14 @@ beforeEach(() => {
 });
 
 describe("aggregateProjectRagSearch spend", () => {
+  it("passes the requested mode to each search and lets a key's per-mode limit refuse the whole request", async () => {
+    await aggregateProjectRagSearch({ userId: "u1", orgId: "org-1", request: request({ mode: "keyword" }) });
+    expect(mocks.hybridSearch).toHaveBeenCalledWith(expect.any(String), "u1", expect.objectContaining({ searchMode: "keyword" }));
+    const { SearchModeLimitError } = await import("../search/search-mode-limits.js");
+    mocks.hybridSearch.mockRejectedValueOnce(new SearchModeLimitError("deep", { metric: "searches", mode: "deep", limit: 1, windowSeconds: 60 }, 30));
+    await expect(aggregateProjectRagSearch({ userId: "u1", orgId: "org-1", request: request({}) })).rejects.toBeInstanceOf(SearchModeLimitError);
+  });
+
   it("runs no model-calling step for a default request", async () => {
     const response = await aggregateProjectRagSearch({ userId: "u1", orgId: "org-1", request: request({}) });
     expect(response.answer).toBeNull();

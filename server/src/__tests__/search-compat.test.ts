@@ -4,7 +4,7 @@ const mocks=vi.hoisted(()=>({ search:vi.fn(), project:vi.fn(), scope:vi.fn() }))
 vi.mock('../middleware/api-key-auth.js',()=>({apiKeyAuth:async(c:any,next:any)=>{if(!c.req.header('Authorization'))return c.json({error:'Unauthorized'},401);c.set('apiKey',{userId:'u'});await next();}}));
 vi.mock('../lib/api-key-authorization.js',()=>({apiKeyHasAnyScope:mocks.scope,loadApiKeyScopedProject:mocks.project}));
 vi.mock('../services/search.js',()=>({hybridSearch:mocks.search}));
-vi.mock('../lib/request-actor.js',()=>({resolveActorProjectId:async(_actor:unknown,id:string)=>id}));
+vi.mock('../lib/request-actor.js',()=>({resolveActorProjectId:async(_actor:unknown,id:string)=>id,}));
 import { searchCompatRoutes } from '../routes/search-compat';
 const app=new Hono().route('/compat',searchCompatRoutes);
 const request=(path:string,body:unknown,key=true)=>app.request('/compat'+path,{method:'POST',headers:{'Content-Type':'application/json',...(key?{Authorization:'Bearer key'}:{})},body:JSON.stringify(body)});
@@ -14,6 +14,8 @@ describe('search compatibility routes',()=>{
     const res=await request('/meilisearch/indexes/ws/search',{q:'hello',limit:5});expect(res.status).toBe(200);
     const data=await res.json();expect(data.hits[0].text).toBe('hello');expect(data.docslurp.sessionId).toBe('session');expect(res.headers.get('Cache-Control')).toBe('private, no-store');
     expect(mocks.search.mock.calls[0][2].filters.projectId).toBe('ws');expect(mocks.search.mock.calls[0][2].useHyDE).toBe(false);
+    // Every search mode is a search key here; the search service holds each to its mode.
+    expect(mocks.scope).toHaveBeenCalledWith(expect.anything(),['search:keyword','search:hybrid','search:deep']);
   });
   it('requires auth and rejects inaccessible projects and scopes before search',async()=>{
     expect((await request('/pagefind/ws/search',{term:'x'},false)).status).toBe(401);

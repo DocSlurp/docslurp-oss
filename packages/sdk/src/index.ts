@@ -573,6 +573,11 @@ export type SearchInput = {
   limit?: number;
   /** Relevance floor, 0..1: drop results with a lower raw match strength. 0 disables it; omitted uses the project/server default. */
   minScore?: number;
+  /**
+   * `keyword` (keyword matching, no model calls), `hybrid` (adds vector search) or `deep` (adds graph expansion,
+   * hosted rerank and AI query strategies). Omitted: the most the key's search scope allows; never more.
+   */
+  mode?: "keyword" | "hybrid" | "deep";
   q: string;
   tags?: string;
   /** Project ID, slug or name; omitted: the client project. */
@@ -600,6 +605,8 @@ export type SearchResponse = {
   noMatch?: boolean;
   /** The floor applied and how many retrieved candidates it removed. */
   relevanceFloor?: { minScore: number; dropped: number };
+  /** The mode the search ran in: what was asked for, capped at the key's search scope. */
+  mode?: "keyword" | "hybrid" | "deep";
   results: SearchResult[];
   sessionId: string;
   /** Present for deferred (map/visual) projects. */

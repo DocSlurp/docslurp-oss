@@ -29,7 +29,7 @@ beforeAll(async () => {
   await sql`insert into organizations (id, name, slug, created_by_user_id) values ('o', 'Org', 'oauth-controls', 'u'), ('other', 'Other', 'oauth-other', 'u')`;
   await sql`insert into org_memberships (org_id, user_id, role) values ('o', 'u', 'owner'), ('other', 'u', 'owner')`;
   await sql`insert into api_keys (id, user_id, org_id, key_hash, name, key_type, scopes, rate_limit_ppd)
-    values ('key', 'u', 'o', 'unexported-key-hash', 'OAuth', 'server', ${sql.array(["search", "chat"])}, 10000)`;
+    values ('key', 'u', 'o', 'unexported-key-hash', 'OAuth', 'server', ${sql.array(["search:deep", "chat"])}, 10000)`;
   await sql`insert into mcp_oauth_clients (id, name, redirect_uris) values ('client', 'Client', '[]')`;
   await sql`insert into mcp_oauth_grants (id, client_id, user_id, org_id, resource, scopes, api_key_id)
     values ('grant', 'client', 'u', 'o', ${resource}, '["search", "chat"]', 'key')`;
@@ -41,7 +41,7 @@ beforeAll(async () => {
 
 beforeEach(async () => {
   await sql`update api_keys set expires_at = now() + interval '1 hour', revoked_at = null,
-    scopes = ${sql.array(["search", "chat"])}, rate_limit_rpm = 3, rate_limit_ppd = 17,
+    scopes = ${sql.array(["search:deep", "chat"])}, rate_limit_rpm = 3, rate_limit_ppd = 17,
     ip_allowlist = ${sql.array(["203.0.113.0/24"])}, max_output_tokens = 2000 where id = 'key'`;
   await sql`update mcp_oauth_grants set org_id = 'o', revoked_at = null where id = 'grant'`;
 });
@@ -83,7 +83,7 @@ describe.each(["mcp", "api"])("%s OAuth linked-key controls", (audience) => {
   });
 
   it("keeps live scope narrowing and rate caps without fallback permissions", async () => {
-    expect(await validate()).toMatchObject({ scopes: ["search", "chat"], rateLimitRpm: 3, rateLimitPpd: 17 });
+    expect(await validate()).toMatchObject({ scopes: ["search:deep", "chat"], rateLimitRpm: 3, rateLimitPpd: 17 });
     await sql`update api_keys set scopes = ${sql.array([])} where id = 'key'`;
     expect(await validate()).toMatchObject({ scopes: [], rateLimitRpm: 3, rateLimitPpd: 17 });
   });
@@ -92,7 +92,7 @@ describe.each(["mcp", "api"])("%s OAuth linked-key controls", (audience) => {
 it("passes trusted REST request IP context through actor resolution", async () => {
   await sql`update mcp_oauth_grants set client_id = 'docslurp-cli', resource = ${oauth.apiResource("")} where id = 'grant'`;
   const { resolveApiKeyActor } = await import("../lib/request-actor.js");
-  expect(await resolveApiKeyActor("Bearer dscli_test", context)).toMatchObject({ apiKey: { maxOutputTokens: 2000, scopes: ["search", "chat"] } });
+  expect(await resolveApiKeyActor("Bearer dscli_test", context)).toMatchObject({ apiKey: { maxOutputTokens: 2000, scopes: ["search:deep", "chat"] } });
   expect(await resolveApiKeyActor("Bearer dscli_test", { ip: "198.51.100.1" })).toBeNull();
   expect(await resolveApiKeyActor("Bearer dscli_test")).toBeNull();
 });

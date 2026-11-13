@@ -26,7 +26,7 @@ Search and chat need only a question:
 
 Without `project`, tools use the organization default project. Add `"project":"legal-contracts"` (a project ID, slug or name: `"Legal Contracts"` finds the same project) to target another one. The `upload` tool creates the project when a name matches none of yours, so agents should pass a new name only when the user asks for a new project; every other tool answers `project_not_found`. See [Projects](https://docslurp.io/docs/http#projects).
 
-Continue a chat by passing its returned `sessionId`. Search is independent of the answer model: pass the returned text and citations to any LLM for your own RAG workflow. Retrieval can incur embedding usage; chat additionally incurs generation usage. `search` requires the `search` scope and `chat` requires the `chat` scope; both check project access against the authenticated organization. An OAuth client that omits `scope` is granted all four MCP scopes (`search`, `chat`, `read`, `ingest`); request fewer to narrow it.
+Continue a chat by passing its returned `sessionId`. Search is independent of the answer model: pass the returned text and citations to any LLM for your own RAG workflow. Retrieval can incur embedding usage; chat additionally incurs generation usage. `search` requires a search scope (`search:keyword`, `search:hybrid` or `search:deep`, the most it may search; see [search modes](api-sdk.md#search-modes)) and `chat` requires the `chat` scope; both check project access against the authenticated organization. An OAuth client that omits `scope` is granted `search:deep`, `chat`, `read` and `ingest`; request fewer, or a cheaper search mode, to narrow it. The retired `search` scope is read as `search:deep`.
 
 Run multiple retrieval queries in one call:
 

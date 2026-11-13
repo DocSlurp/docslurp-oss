@@ -39,16 +39,32 @@ There are two kinds of API key. The prefix tells you, and secret scanners, where
 
 | Prefix | Type | Where it may live | Can do |
 | --- | --- | --- | --- |
-| `dslp_priv_` | Server key | Backend secrets, CI, agent configuration | The scopes you grant: `ingest`, `search`, `chat`, `artifacts`, and opt-in organization/project management |
-| `dslp_pub_` | Browser key | Page HTML and browser bundles | `search`, plus `chat` for an answer widget. Nothing else, ever: only on your allowed websites, and only in the projects you name |
+| `dslp_priv_` | Server key | Backend secrets, CI, agent configuration | The scopes you grant: `ingest`, one search mode (`search:keyword`, `search:hybrid` or `search:deep`), `chat`, `artifacts`, and opt-in organization/project management |
+| `dslp_pub_` | Browser key | Page HTML and browser bundles | One search mode, plus `chat` for an answer widget. Nothing else, ever: only on your allowed websites, and only in the projects you name |
 
-`search` returns passages. `chat` generates answers on your credits: `/v1/chat`, `/v1/chat/stream`, `/v1/chat/completions` (and its `/v1/models` list) and the MCP `chat` tool need it. Keys created before `chat` existed kept chat access wherever they had `search`.
+#### Search modes
+
+A key holds one search scope, the most it may search. Modes nest: a `search:deep` key may also search in hybrid or keyword mode.
+
+| Scope | Mode | What a search runs |
+| --- | --- | --- |
+| `search:keyword` | `keyword` | Keyword matching and the free BM25 rerank. Never embeds the query or calls a model. |
+| `search:hybrid` | `hybrid` | Keyword plus the query embedding and vector search, fused. No graph expansion, hosted reranker or LLM step. |
+| `search:deep` | `deep` | Everything the project and request turn on: graph and community expansion, the hosted reranker, deferred (on-demand) pages, and LLM query strategies (HyDE, rewriting, decomposition, stepback, self-query, compression, multi-hop). |
+
+Pass `mode` (`keyword`, `hybrid` or `deep`) on a search to run a cheaper mode; omitted, a search runs in the key's mode. A mode above the key's scope runs at the key's mode, and the response's `mode` says which mode ran. Project search settings never lift a search above its mode. Every passage-search endpoint takes any search scope: `/v1/search`, batches, `/v1/search/aggregate`, the Algolia, Meilisearch, Typesense and Pagefind compatible routes, and the MCP `search`, `listProjects`, `suggestQueries` and `getMediaEvidence` tools. Paid web tools and `/v1/capabilities` need `search:deep`. Keys created with the retired `search` scope became `search:deep`.
+
+A search is billed for the mode that ran, and the charge records it. On docslurp.io keyword search is the cheapest and deep the dearest; see [the price list](https://docslurp.io/pricing#rates) and [`GET /v1/billing/prices`](#credits-and-budgets). To cap what a key spends on each mode, give it [per-mode search limits](#rate-limits-and-headers).
+
+Keyword and hybrid searches run with an API key are logged lean, so the cheap tiers stay cheap to run. Their search history expires: keyword searches after 7 days, keeping the query, result count and timing but not each result; hybrid searches after 30 days, results included. Their charges and embedding usage are written in batches every few seconds, one usage record per key and mode, so usage views show a count of searches per record and a key's spend limit sees a search up to a few seconds late. Dashboard searches, chat answers and deep searches keep full history and a record per search. Self-hosters can change this with `SEARCH_API_LEAN_LOGGING`, `SEARCH_API_KEYWORD_HISTORY_RETENTION_DAYS`, `SEARCH_API_HISTORY_RETENTION_DAYS` and `SEARCH_CHARGE_BATCH_MS` (see `.env.example`).
+
+`chat` generates answers on your credits: `/v1/chat`, `/v1/chat/stream`, `/v1/chat/completions` (and its `/v1/models` list) and the MCP `chat` tool need it. A chat answer retrieves as chat always does (including any retrieval overrides it is sent), whatever the key's search mode, and per-mode search limits don't count it: a keyword key with `chat` can still make model calls through chat. Give a key `chat` only where answers are wanted; `/v1/search/aggregate` with `generateAnswer` needs a server key with `chat` and retrieves in the key's mode.
 
 ### Never embed a server key
 
 **Page HTML, JavaScript bundles and browser requests expose their credentials.**
 Use only a placeholder such as `dslp_pub_YOUR_BROWSER_KEY` in browser/embed setup,
-restricted to the intended projects, websites and `search`/`chat` scopes.
+restricted to the intended projects, websites and search/`chat` scopes.
 Keep `dslp_priv_` server keys behind a trusted backend. Minification does not
 hide them. Origin restrictions are browser controls; arbitrary HTTP clients can
 spoof `Origin`.
@@ -57,13 +73,13 @@ If a private key reaches a public page, revoke it immediately, remove it from
 client assets, and issue and deploy a replacement on the backend. Do not use
 overlapping rotation for a leaked key: it remains usable during the overlap.
 
-Web tools (`/v1/web/*` and the MCP and chat-agent web tools) make paid calls to the open web. Server keys use them with `search` (`ingest` for website ingestion). Browser keys never get them, nor `ingest` or `artifacts`: anyone can copy a browser key from your page source. A browser key saved earlier with those scopes retains only the `search` or `chat` permissions it already held. If none remain, it has no permissions: saving or rotating it never adds `search`. Edit its scopes explicitly to enable search or chat; default scopes apply only when creating a key.
+Web tools (`/v1/web/*` and the MCP and chat-agent web tools) make paid calls to the open web. Server keys use them with `search:deep` (`ingest` for website ingestion). Browser keys never get them, nor `ingest` or `artifacts`: anyone can copy a browser key from your page source. A browser key saved earlier with those scopes retains only the search and `chat` permissions it already held. If none remain, it has no permissions: saving or rotating it never adds a search scope. Edit its scopes explicitly to enable search or chat; default scopes apply only when creating a key.
 
 Controls per key type:
 
 | | Browser key | Server key |
 | --- | --- | --- |
-| Scopes | `search`, `chat` | Any, including opt-in organization and project management |
+| Scopes | One search mode, `chat` | Any, including opt-in organization and project management |
 | Projects | Required (`projectIds`) | Optional; empty means every project you can reach in the organization |
 | Where it works | Allowed websites (`allowedDomains`) | Anywhere, or only from an IP allowlist (`ipAllowlist`: addresses or CIDR ranges, up to 50) |
 | Chat output cap (`maxOutputTokens`) | 500, 1,000 (default) or 2,000 | 500, 1,000, 2,000, 4,000 or none (`null`, the default) |
@@ -97,13 +113,13 @@ Access tokens start with `dscli_` and last 15 minutes; refresh tokens (`dsclir_`
 
 | OAuth scope | Key scope it grants |
 | --- | --- |
-| `search` | `search` |
+| `search:keyword`, `search:hybrid`, `search:deep` | The same scope |
 | `chat` | `chat` |
 | `read` | `artifacts` |
 | `ingest` | `ingest` |
 | `web` | `web` |
 
-A CLI token needs `web` for the paid web tools; `search` alone does not unlock them (MCP-audience grants keep the older rule, where a server identity with `search` may use them). No OAuth scope grants `projects:manage`, `organizations:read` or `organizations:manage`, so a token cannot change project settings or manage an organization. Device approvals grant only `search` and `read` unless the approving user ticks the other requested scopes, and the device flow has no `verification_uri_complete`: the user always types the code. OAuth tokens, MCP-audience ones included, are never platform admins. An expired or revoked OAuth token gets `401` with `WWW-Authenticate: Bearer error="invalid_token"`, on compat routes too. OAuth tokens are never a dashboard session, so they never reach the app-only settings tools, and they cannot mint API keys or `/v1/capabilities` tokens that would outlive them. `GET /v1/whoami` returns the token's user, organization, default project, granted scopes and expiry.
+OAuth requests take one search mode; asking for several grants the widest, which the consent page shows. An authorization without `scope` asks for `search:deep chat read ingest`. Clients that saved the retired `search` scope keep working: it is read as `search:deep`, including when refreshing a grant. A CLI token needs `web` for the paid web tools; `search:deep` alone does not unlock them (MCP-audience grants keep the older rule, where a server identity with `search:deep` may use them). No OAuth scope grants `projects:manage`, `organizations:read` or `organizations:manage`, so a token cannot change project settings or manage an organization. Device approvals grant only the requested search mode and `read` unless the approving user ticks the other requested scopes, and the device flow has no `verification_uri_complete`: the user always types the code. OAuth tokens, MCP-audience ones included, are never platform admins. An expired or revoked OAuth token gets `401` with `WWW-Authenticate: Bearer error="invalid_token"`, on compat routes too. OAuth tokens are never a dashboard session, so they never reach the app-only settings tools, and they cannot mint API keys or `/v1/capabilities` tokens that would outlive them. `GET /v1/whoami` returns the token's user, organization, default project, granted scopes and expiry.
 
 In the SDK, pass `accessToken` as a string or as a provider `({ forceRefresh }) => token`; the client calls it per request and once more with `forceRefresh: true` after a 401. Without `apiKey`, `DOCSLURP_API_KEY` or `accessToken`, the SDK reads `DOCSLURP_TOKEN`. Revoke a login with `docslurp logout` (RFC 7009 `POST /oauth/mcp/revoke`) or from the connected apps list in your account.
 
@@ -111,7 +127,7 @@ The SDK, search adapters and search widget refuse to send a `dslp_priv_` key fro
 
 ## The complete HTTP flow
 
-This script uploads a file, waits for processing, and searches it. You need Bash, `curl`, `jq`, a `handbook.pdf` and a [server key](https://docslurp.io/app/api-keys) with the `ingest` and `search` scopes. The script stops on HTTP errors, on runs that fail or stop, and after a 10-minute polling deadline. It saves the returned IDs before polling and never repeats the upload on timeout.
+This script uploads a file, waits for processing, and searches it. You need Bash, `curl`, `jq`, a `handbook.pdf` and a [server key](https://docslurp.io/app/api-keys) with the `ingest` and `search:deep` scopes. The script stops on HTTP errors, on runs that fail or stop, and after a 10-minute polling deadline. It saves the returned IDs before polling and never repeats the upload on timeout.
 
 ```bash
 export DOCSLURP_API_KEY='dslp_priv_…'  # Your server key.
@@ -528,7 +544,7 @@ console.log(state.storage.sourceMb, state.storage.documentsWithUnknownSize);
 console.log(state.searches.latencyMs.p95, state.performance.pagesPerMinute);
 ```
 
-Omit the first argument (or pass `undefined` when you also pass options) to use the client's project: the `project` client option, then `DOCSLURP_PROJECT`, then `default`. For another project, pass a slug such as `"legal-contracts"` or a UUID. `recentWindowHours` is an integer from 1 to 720 and defaults to 24; HTTP enforces the same range. Bearer requests need a server key with the `ingest`, `search`, `artifacts` or `projects:manage` scope.
+Omit the first argument (or pass `undefined` when you also pass options) to use the client's project: the `project` client option, then `DOCSLURP_PROJECT`, then `default`. For another project, pass a slug such as `"legal-contracts"` or a UUID. `recentWindowHours` is an integer from 1 to 720 and defaults to 24; HTTP enforces the same range. Bearer requests need a server key with the `ingest`, `artifacts` or `projects:manage` scope or any search scope.
 
 ```bash
 curl --fail-with-body --silent --show-error --max-time 30 \
@@ -650,7 +666,7 @@ curl --fail-with-body --silent --show-error \
   -H "Authorization: Bearer $DOCSLURP_API_KEY"
 ```
 
-Bearer requests need a server key with the `ingest`, `search`, `artifacts` or `projects:manage` scope. Without `runId` or `documentIds` the report covers the current corpus (documents not superseded by a newer version), newest first, capped at 500 files and 20,000 pages read page by page; `scope.truncated` says when the cap applied.
+Bearer requests need a server key with the `ingest`, `artifacts` or `projects:manage` scope or any search scope. Without `runId` or `documentIds` the report covers the current corpus (documents not superseded by a newer version), newest first, capped at 500 files and 20,000 pages read page by page; `scope.truncated` says when the cap applied.
 
 | Field | Meaning |
 | --- | --- |
@@ -704,7 +720,7 @@ await client.bulkDocuments({ action: "delete", documentIds: removedIds });
 
 Use these endpoints to read and manage an organization, its members and its API keys. You need current membership in the organization; being shared on a project isn't enough.
 
-- Server keys need an explicit `organizations:read` or `organizations:manage` scope. The ordinary `ingest`, `search` and `artifacts` scopes don't cover organization endpoints.
+- Server keys need an explicit `organizations:read` or `organizations:manage` scope. The ordinary `ingest`, search and `artifacts` scopes don't cover organization endpoints.
 - A key only works for its own organization and never exceeds its user's current role.
 - Browser keys can't have organization scopes.
 
@@ -1032,11 +1048,14 @@ X-DocSlurp-Spend: "key-spend-1d";q=500;r=212;w=86400;u=usd-cents
 | Per key or signed-in user | `account-<category>` (`self-hosted-<category>` on self-hosted servers) | The per-category limit of the account table below, the same for every organization, capped by the key's requests per minute if it has one. |
 | Custom key windows | `key-requests-<window>` | All endpoints together, e.g. 1,000 requests per hour. |
 | Spend windows | `key-spend-<window>` (`X-DocSlurp-Spend`) | Credits the key's work was charged (pages, storage, searches, chat answers) in a rolling window. Once reached, uploads, search and chat return 429; reads keep working. If the spend can't be read (a database problem), those requests get a 503 `unavailable` with `Retry-After` instead of going through unchecked. |
+| Searches per mode | — (`Retry-After` only) | Searches in one mode (`keyword`, `hybrid` or `deep`), counted when each starts (a search that then fails still counts), in fixed windows aligned to the clock. Once reached, searches in that mode return 429 `search_limit_exceeded` (`details.mode`, `details.limit`, `details.windowSeconds`, `details.retryAfterSeconds`); a cheaper mode keeps working under its own limit. Each batch item and each project of `/v1/search/aggregate` counts as one search. Cached answers and the searches a chat turn runs don't count. Without a shared Redis limiter each server process counts separately. |
 | Daily pages | — | Uploads stop with `daily_page_limit` once the key's pages-per-day cap is used. |
 | Per visitor of a browser key | `client-visitor-<category>` | Browser (publishable) keys only: each visitor address gets a share of the key's budget per minute, by default 20 `chat-ai` and 120 `search`, so one visitor cannot use up a widget's whole allowance. A visitor is an IP address (an IPv6 /64), so people behind one office or NAT address share it; requests with no known address share one bucket. |
 | Chat in progress | `chat-concurrency` | AI chat turns still running or streaming at once. Browser keys: 16 per key and 3 per visitor address. Server keys: no default cap, so backend batch jobs aren't throttled; set one with a `concurrent` rule. A turn frees its slot when its response ends, the client disconnects, or the turn deadline plus 15 seconds passes, whichever is first. An MCP `chat` tool call counts as `chat-ai` and takes a slot too. |
 
 Custom request and spend windows are set per key on the API keys page (under "Permissions and limits", then "Advanced rate limits") or with `rateLimits` on `POST`/`PATCH /v1/api-keys`, e.g. `[{ "metric": "requests", "limit": 1000, "windowSeconds": 3600 }, { "metric": "spend", "limit": 500, "windowSeconds": 86400 }, { "metric": "concurrent", "limit": 32, "windowSeconds": 1 }]` (spend in US cents; `concurrent` caps chat turns in progress, per server process, and ignores `windowSeconds`; at most five rules, one per metric and window, windows up to 31 days). Spend is recorded when the work it pays for finishes and is refreshed every few seconds, so a request already running can carry a key slightly past its spend limit.
+
+Per-mode search limits use the `searches` metric with a `mode`, e.g. `[{ "metric": "searches", "mode": "deep", "limit": 1000, "windowSeconds": 86400 }, { "metric": "searches", "mode": "keyword", "limit": 100000, "windowSeconds": 86400 }]` for 1,000 deep and 100,000 keyword searches a day. A key takes up to 8 limits, one per metric, mode and window.
 
 Every account gets the same table, whatever its billing state: buying credits does not change it. A key's `rateLimitRpm` is an optional cap: omitted or `null` (the default) means the table's limits apply, and a number lowers every category to at most that many requests a minute. It never raises the limits. Set it on create, change it with `PATCH /v1/api-keys/:id`, and send `"rateLimitRpm": null` to remove it. Default per-minute limits on docslurp.io:
 
@@ -1051,7 +1070,7 @@ Every account gets the same table, whatever its billing state: buying credits do
 
 Per-IP limits count an IPv6 client as its /64. These are abuse protection, not a spending control: credits and budgets bound what you spend. No feature, model, media type, setting or rate limit depends on whether an organization has bought credits. Self-hosted deployments use their own, higher table, and operators can set `API_RATE_LIMIT_<TABLE>_<CATEGORY>_MAX` (for example `API_RATE_LIMIT_ACCOUNT_SEARCH_MAX`) or `API_RATE_LIMIT_<CATEGORY>_MAX`.
 
-Every 429 has `Retry-After` and the [error envelope](https://docslurp.io/docs/search-reference#errors) with `error.code` set to `rate_limited` (with `details.category` and `details.policy`, which names the table: `account-*`, `ip-*` or `self-hosted-*`), `spend_limit_exceeded`, `daily_page_limit` or `ip_temporarily_blocked`. On docslurp.io the details also carry `links` and the response a `Link` header (`rel="payment"` for billing, `rel="help"` for these docs), and the message says where to go:
+Every 429 has `Retry-After` and the [error envelope](https://docslurp.io/docs/search-reference#errors) with `error.code` set to `rate_limited` (with `details.category` and `details.policy`, which names the table: `account-*`, `ip-*` or `self-hosted-*`), `spend_limit_exceeded`, `search_limit_exceeded`, `daily_page_limit` or `ip_temporarily_blocked`. On docslurp.io the details also carry `links` and the response a `Link` header (`rel="payment"` for billing, `rel="help"` for these docs), and the message says where to go:
 
 ```json
 {
@@ -1072,7 +1091,7 @@ Every 429 has `Retry-After` and the [error envelope](https://docslurp.io/docs/se
 }
 ```
 
-`spend_limit_exceeded` and `daily_page_limit` are the key's own limits, so their `links.apiKeys` points at the API keys page. IP-level limits only link these docs. An IP is blocked for a while after an extreme burst or after repeatedly presenting invalid API keys, so stop and fix credentials rather than retrying 401s in a loop.
+`spend_limit_exceeded`, `search_limit_exceeded` and `daily_page_limit` are the key's own limits, so their `links.apiKeys` points at the API keys page. IP-level limits only link these docs. An IP is blocked for a while after an extreme burst or after repeatedly presenting invalid API keys, so stop and fix credentials rather than retrying 401s in a loop.
 
 ### Processing quality
 
@@ -1114,7 +1133,7 @@ DocSlurp is prepaid: there are no plans or subscriptions. 1 credit = 1 US cent. 
 
 The credits per Fast and Rich page are on [docslurp.io/pricing](https://docslurp.io/pricing) and in `GET /v1/billing/prices`.
 
-Audio and video minutes, storage, searches, chat answers, optional document features (summaries, structured fields, knowledge graph, propositions) and web tools are also charged per unit; [docslurp.io/pricing](https://docslurp.io/pricing) and `GET /v1/billing/prices` (no authentication) list the current prices, packs, top-up limits and the tier of each chat model. Optional features are charged when their stage actually runs. `POST /v1/uploads/estimate` estimates an upload before any bytes are sent: pass each file's page count, `durationSeconds` and `type` when known, or the file's profile from the offline profiler (`@docslurp/estimate`), and read `media` for audio and video. An estimate is never a charge: an upload is billed by what the worker measures. A file pays only for what it uses: there is no per-file minimum. A Word, slide, sheet or EPUB file arrives counted as one page; the worker measures its real pages after converting it and bills those. Searches inside a chat answer are part of the answer. An answer that never reaches you because of an error on our side is refunded.
+Audio and video minutes, storage, searches (priced by [search mode](#search-modes)), chat answers, optional document features (summaries, structured fields, knowledge graph, propositions) and web tools are also charged per unit; [docslurp.io/pricing](https://docslurp.io/pricing) and `GET /v1/billing/prices` (no authentication) list the current prices, packs, top-up limits and the tier of each chat model. Optional features are charged when their stage actually runs. `POST /v1/uploads/estimate` estimates an upload before any bytes are sent: pass each file's page count, `durationSeconds` and `type` when known, or the file's profile from the offline profiler (`@docslurp/estimate`), and read `media` for audio and video. An estimate is never a charge: an upload is billed by what the worker measures. A file pays only for what it uses: there is no per-file minimum. A Word, slide, sheet or EPUB file arrives counted as one page; the worker measures its real pages after converting it and bills those. Searches inside a chat answer are part of the answer. An answer that never reaches you because of an error on our side is refunded.
 
 Organizations that have bought credits (funded) run up to 250 workers at once; starter organizations run up to 50. Rate limits are the same for both. Larger ceilings and dedicated (private) machines are sold by sales.
 

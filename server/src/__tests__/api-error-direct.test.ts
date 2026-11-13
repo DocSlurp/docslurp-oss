@@ -34,7 +34,7 @@ async function expectEnvelope(response: Response, status: number, code: ApiError
 
 describe("native handlers emit the envelope directly", () => {
   it("apiKeyScopeMiddleware answers a missing scope as forbidden", async () => {
-    const app = withKey(["search"]).get("/guarded", apiKeyScopeMiddleware(["ingest"]), (c) => c.json({ ok: true }));
+    const app = withKey(["search:deep"]).get("/guarded", apiKeyScopeMiddleware(["ingest"]), (c) => c.json({ ok: true }));
     await expectEnvelope(await app.request("/guarded"), 403, "forbidden");
     const allowed = withKey(["ingest"]).get("/guarded", apiKeyScopeMiddleware(["ingest"]), (c) => c.json({ ok: true }));
     expect((await allowed.request("/guarded")).status).toBe(200);
@@ -53,8 +53,8 @@ describe("native handlers emit the envelope directly", () => {
     await expectEnvelope(await post("/v1/session-tools", "search", ["ingest"], {}), 403, "forbidden");
     expect(await (await post("/v1/mcp", "search", ["ingest"], {})).json()).toEqual({ error: expect.any(String) });
 
-    const invalid = await expectEnvelope(await post("/v1/session-tools", "listProjects", ["search"], { limit: "many" }), 400, "invalid_request");
+    const invalid = await expectEnvelope(await post("/v1/session-tools", "listProjects", ["search:deep"], { limit: "many" }), 400, "invalid_request");
     expect(invalid.details?.issues).toEqual([expect.objectContaining({ path: "limit" })]);
-    expect(await (await post("/v1/mcp", "listProjects", ["search"], { limit: "many" })).json()).toEqual({ error: expect.any(String) });
+    expect(await (await post("/v1/mcp", "listProjects", ["search:deep"], { limit: "many" })).json()).toEqual({ error: expect.any(String) });
   });
 });

@@ -18,8 +18,9 @@ function token(values: Record<string, string | undefined>) {
 beforeEach(() => { vi.stubEnv("NODE_ENV", "test"); vi.stubEnv("MCP_PUBLIC_URL", url); query.mockReset(); query.mockResolvedValue({ rows: [], rowCount: 1 }); });
 describe("MCP OAuth", () => {
   it("requests upload access in new default consent while respecting explicit read-only scopes", () => {
-    expect(parseScopes(null)).toEqual(["search", "chat", "read", "ingest"]);
-    expect(parseScopes("search read")).toEqual(["search", "read"]);
+    expect(parseScopes(null)).toEqual(["search:deep", "chat", "read", "ingest"]);
+    // The retired `search` is read as search:deep.
+    expect(parseScopes("search read")).toEqual(["search:deep", "read"]);
   });
   it("advertises PKCE and path-specific protected resource metadata", async () => { const res = await app.request(`${url}/.well-known/oauth-authorization-server`); expect((await res.json()).code_challenge_methods_supported).toEqual(["S256"]); expect((await (await app.request(`${url}/.well-known/oauth-protected-resource/v1/mcp`)).json()).resource).toBe(`${url}/v1/mcp`); });
   it("rejects unsafe redirect URIs", () => { expect(validRedirect("https://client.example/cb")).toBe(true); expect(validRedirect("http://127.0.0.1:1234/cb")).toBe(true); for (const uri of ["javascript:alert(1)", "https://user:pass@example.com", "https://example.com/#token", "http://remote.example/cb"])
@@ -69,9 +70,9 @@ describe("MCP OAuth", () => {
     expect(query.mock.calls[0]?.[0]).toContain("k.revoked_at IS NULL");
   });
   it("narrows MCP grants by current key scopes and caps", async () => {
-    query.mockResolvedValue({ rows: [{ api_key_id: "key", scopes: ["search", "read"], key_scopes: ["search", "chat"], key_rpm: 3, key_ppd: 9, key_materialization_policy: { maxPagesPerQuery: 2 } }] });
+    query.mockResolvedValue({ rows: [{ api_key_id: "key", scopes: ["search", "read"], key_scopes: ["search:deep", "chat"], key_rpm: 3, key_ppd: 9, key_materialization_policy: { maxPagesPerQuery: 2 } }] });
     expect(await validateMcpToken("token", `${url}/v1/mcp`)).toMatchObject({
-      scopes: ["search"], rateLimitRpm: 3, rateLimitPpd: 9, materializationPolicy: { maxPagesPerQuery: 2 },
+      scopes: ["search:deep"], rateLimitRpm: 3, rateLimitPpd: 9, materializationPolicy: { maxPagesPerQuery: 2 },
     });
     query.mockResolvedValue({ rows: [{ scopes: ["search"], key_scopes: null }] });
     expect((await validateMcpToken("token", `${url}/v1/mcp`))?.scopes).toEqual([]);
@@ -114,7 +115,7 @@ describe("MCP OAuth", () => {
     expect(bearerToken("bearer dsmcp_abc")).toBe("dsmcp_abc");
     expect(bearerToken("Bearer  dsmcp_abc ")).toBe("dsmcp_abc");
     expect(bearerToken("Basic abc")).toBe("");
-    expect(mcpBearerChallenge(url, false)).toBe(`Bearer resource_metadata="${url}/.well-known/oauth-protected-resource/v1/mcp", scope="search chat read ingest"`);
+    expect(mcpBearerChallenge(url, false)).toBe(`Bearer resource_metadata="${url}/.well-known/oauth-protected-resource/v1/mcp", scope="search:deep chat read ingest"`);
     expect(mcpBearerChallenge(url, true)).toMatch(/^Bearer error="invalid_token", error_description="[^"]+", resource_metadata=/);
   });
 

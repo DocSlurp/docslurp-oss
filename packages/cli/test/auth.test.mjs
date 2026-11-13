@@ -27,7 +27,7 @@ function fakeServer(options = {}) {
       state.issued++;
       state.access = `dscli_access_${state.issued}`;
       state.refresh = `dsclir_refresh_${state.issued}`;
-      return { access_token: state.access, refresh_token: state.refresh, token_type: "Bearer", expires_in: 900, scope: "search read" };
+      return { access_token: state.access, refresh_token: state.refresh, token_type: "Bearer", expires_in: 900, scope: "search:deep read" };
     };
     if (url.pathname === "/.well-known/oauth-authorization-server") {
       return send(200, {
@@ -76,7 +76,7 @@ function fakeServer(options = {}) {
     const bearer = request.headers.authorization?.replace(/^Bearer /, "");
     if (url.pathname === "/v1/whoami") {
       if (bearer !== state.access && !String(bearer).startsWith("env-") && !String(bearer).startsWith("key-")) return send(401, { error: "unauthorized" });
-      return send(200, { user: { id: "owner", email: "owner@example.test", name: "Owner" }, organization: { id: "org", name: "Acme" }, defaultProject: { id: "ws", name: "Default", slug: "default" }, credential: { type: "oauth", scopes: ["search", "read"], apiKeyScopes: ["search", "artifacts"], expiresAt: new Date(Date.now() + 900_000).toISOString() } });
+      return send(200, { user: { id: "owner", email: "owner@example.test", name: "Owner" }, organization: { id: "org", name: "Acme" }, defaultProject: { id: "ws", name: "Default", slug: "default" }, credential: { type: "oauth", scopes: ["search:deep", "read"], apiKeyScopes: ["search:deep", "artifacts"], expiresAt: new Date(Date.now() + 900_000).toISOString() } });
     }
     if (url.pathname === "/v1/search") return send(200, { results: [] });
     if (url.pathname === "/v1/mcp/tools") return send(bearer === state.access ? 200 : 401, { tools: [] });
@@ -155,7 +155,7 @@ test("login: loopback authorization code with PKCE, least-privilege scopes, priv
     const authorize = fake.state.authorize;
     assert.equal(authorize.get("client_id"), "docslurp-cli");
     assert.equal(authorize.get("code_challenge_method"), "S256");
-    assert.equal(authorize.get("scope"), "search read");
+    assert.equal(authorize.get("scope"), "search:deep read");
     assert.equal(authorize.get("resource"), `${url}/v1`);
     assert.match(authorize.get("redirect_uri"), /^http:\/\/127\.0\.0\.1:\d+\/callback$/);
     assert.ok(authorize.get("state").length >= 43);
@@ -179,7 +179,8 @@ test("login: --scopes is validated and forwarded", async () => {
     assert.match(bad.stderr, /Unknown scope admin/);
     const ok = await cli(["login", "--scopes", "search ingest"], { url, config: box.config, onStderr: browser(fake, url, (params, origin) => ({ code: "good-code", state: params.get("state"), iss: origin })) });
     assert.equal(ok.code, 0, ok.stderr);
-    assert.equal(fake.state.authorize.get("scope"), "search ingest");
+    // The retired `search` is sent as search:deep.
+    assert.equal(fake.state.authorize.get("scope"), "search:deep ingest");
   } finally { await fake.close(); await box.dispose(); }
 });
 
@@ -220,7 +221,7 @@ test("login --device: prints the code, honours slow_down and stores the login", 
     assert.equal(result.code, 0, result.stderr);
     assert.match(result.stderr, /WDJB-MJHT/);
     assert.match(result.stderr, /\/oauth\/mcp\/device/);
-    assert.equal(fake.state.deviceRequest.get("scope"), "search");
+    assert.equal(fake.state.deviceRequest.get("scope"), "search:deep");
     assert.equal(fake.state.devicePolls, 3);
     const polls = fake.state.requests.filter((r) => r.path === "/oauth/mcp/token");
     assert.equal(polls.length, 3);
@@ -352,7 +353,7 @@ test("auth token prints only the access token; whoami and auth status describe t
     const who = await cli(["whoami"], { url, config: box.config });
     assert.equal(who.code, 0, who.stderr);
     assert.match(who.stdout, /Signed in as owner@example\.test/);
-    assert.match(who.stdout, /Scopes: search read/);
+    assert.match(who.stdout, /Scopes: search:deep read/);
     assert.match(who.stdout, /Credential: stored login \(file .*credentials\.json\)/);
     assert.ok(!who.stdout.includes("dscli_access_1"));
     const status = await cli(["auth", "status", "--json"], { url, config: box.config, env: { DOCSLURP_TOKEN: "env-token" } });
@@ -568,7 +569,7 @@ test("login warns when the approval grants fewer scopes than requested", async (
   try {
     const result = await cli(["login", "--device", "--scopes", "search read chat ingest"], { url, config: box.config });
     assert.equal(result.code, 0, result.stderr);
-    assert.match(result.stderr, /granted only search read\. Not granted: chat ingest/);
+    assert.match(result.stderr, /granted only search:deep read\. Not granted: chat ingest/);
   } finally { await fake.close(); await box.dispose(); }
 });
 

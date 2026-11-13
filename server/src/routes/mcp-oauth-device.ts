@@ -36,7 +36,7 @@ import {
  * - The confirmation shows the client, the audience, the signed-in account,
  *   the code, when the request was made and from which IP (next to the
  *   approver's own), and asks the user to match the code with their terminal.
- * - Device approvals grant only `search` and `read` by default. Any other
+ * - Device approvals grant only the requested search mode and `read` by default. Any other
  *   requested scope (chat, ingest, web) is an unticked opt-in on the page.
  * - Approval is one-time: the row stops being pending, so a second approval
  *   (or a denial after approval) is refused.
@@ -46,7 +46,9 @@ import {
 export const deviceVerificationRoutes = new Hono();
 
 const SCOPE_COPY: Record<string, string> = {
-  search: "Search your documents and get cited passages",
+  "search:keyword": "Search your documents by keyword and get cited passages (no AI model calls)",
+  "search:hybrid": "Search your documents by keyword and meaning and get cited passages",
+  "search:deep": "Search your documents with AI query rewriting, graph expansion and reranking, and get cited passages (costs more per search)",
   read: "Read document text, pages, files, runs and exports",
   chat: "Ask questions and get generated answers (spends your credits)",
   ingest: "Upload documents and ingest URLs, and reprocess, retag or delete documents (spends your credits)",
