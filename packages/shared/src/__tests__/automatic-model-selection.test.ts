@@ -32,8 +32,25 @@ describe("models never selected automatically", () => {
     ]) expect(isAutomaticSelectionDenied(ref), ref).toBe(true);
   });
 
+  it("is not bypassed by percent-encoding, stacked variants, provider suffixes or the Fireworks spelling", () => {
+    for (const ref of [
+      // Council L1 probes (2026-11-13).
+      "llm://openrouter/deepseek%2Fdeepseek-v4.1-flash-1017",
+      "llm://openrouter/deepseek%252Fdeepseek-v4.1-flash-1017",
+      "deepseek%2fdeepseek-v4.1-flash",
+      "llm://openrouter/deepseek/deepseek%2Dv4%2E1-flash",
+      "deepseek/deepseek-v4.1-flash:nitro:free",
+      "deepseek/deepseek-v4.1-flash:extended:nitro",
+      "deepseek/deepseek-v4.1-flash@fireworks",
+      "deepseek/deepseek-v4.1-flash-1017@fireworks:nitro",
+      "accounts/fireworks/models/deepseek-v4p1-flash",
+      "llm://fireworks/accounts/fireworks/models/deepseek-v4p1-flash-1017",
+      "llm://openrouter/deepseek%2Fdeepseek-v4.1-flash%ZZ",
+    ]) expect(isAutomaticSelectionDenied(ref), ref).toBe(true);
+  });
+
   it("does not catch neighbouring models", () => {
-    for (const ref of ["deepseek/deepseek-v4-flash", "deepseek/deepseek-v4.1", "deepseek/deepseek-v4.1-pro", "z-ai/glm-5.3-flash", "openai/gpt-6-luna", "", null, undefined]) {
+    for (const ref of ["deepseek/deepseek-v4-flash", "deepseek/deepseek-v4.1", "deepseek/deepseek-v4.1-pro", "deepseek/deepseek-v4p1", "deepseek/deepseek-v4.1-flashy", "z-ai/glm-5.3-flash", "z-ai/glm-5.3-flash@wafer:nitro", "openai/gpt-6-luna", "", null, undefined]) {
       expect(isAutomaticSelectionDenied(ref), String(ref)).toBe(false);
     }
     expect(withoutAutomaticSelectionDenied(["openai/gpt-6-luna", "deepseek/deepseek-v4.1-flash-1017", "z-ai/glm-5.3-flash"]))

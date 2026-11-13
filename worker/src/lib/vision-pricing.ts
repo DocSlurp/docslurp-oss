@@ -17,7 +17,7 @@ import {
 
 import type { Config } from "../config.js";
 import { disputed } from "../media/accounting.js";
-import { visionMaxOutputTokens } from "../tools/vision-runtime.js";
+import { visionCallMaxOutputTokens, visionMaxOutputTokens } from "../tools/vision-runtime.js";
 
 /** Where `resolveChatCompletionsUrl` (tools/vision-runtime.ts) sends a route that has no base URL. */
 export const DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1";
@@ -348,8 +348,10 @@ export function visionRequestPricing(route: {
   inputTokens: number;
   /** `visionImageTokenBound(image, model)` of the request's image; unset: the largest raster's. */
   imageTokens?: number;
+  /** The call's own output cap (chart export), when lower than the model's: the weight uses the cap actually sent. */
+  maxOutputTokens?: number;
 }): VisionRequestPricing {
-  const outputTokens = visionMaxOutputTokens(route.model);
+  const outputTokens = visionCallMaxOutputTokens(route.model, route.maxOutputTokens);
   const priced = visionModelTokenPricing(route.model);
   if (isBilledVisionRoute(route.billing)) {
     if (route.billing === "unknown-hosted") throw new UnpricedVisionRouteError(route.model, "goes to a destination that is not OpenAI, OpenRouter or DeepInfra");

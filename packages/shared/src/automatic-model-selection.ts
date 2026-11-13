@@ -6,27 +6,53 @@
  * catalog offers it (for example as a project's configured model); that explicit choice is not affected.
  *
  * Entries are model families: the last path segment of a model id, matched with every build (`-1017`), variant
- * (`:nitro`) and provider route (`llm://openrouter/...?_provider=...`, `vlm:openrouter/...`). Every builder of an
+ * (`:nitro`, stacked `:extended:nitro`), provider suffix (`@fireworks`), percent-encoding (`deepseek%2Fdeepseek-...`) and
+ * provider route (`llm://openrouter/...?_provider=...`, `vlm:openrouter/...`). A family lists each provider's own
+ * spelling (Fireworks writes `v4p1` for `v4.1`). Every builder of an
  * automatic list filters through `isAutomaticSelectionDenied`, and automatic-model-selection.test.ts (shared) plus the
  * worker and server lists' own tests fail if a denied family appears in one.
  */
 export const NO_AUTOMATIC_SELECTION_MODEL_FAMILIES: readonly string[] = [
   // Owner decision 2026-11-13: never auto-escalate or fall back to DeepSeek V4.1 Flash, any build or route.
   "deepseek-v4.1-flash",
+  "deepseek-v4p1-flash",
 ];
 
-/** The model family of an id, URI or routing-target id: its last path segment, lower-cased, without query, fragment or variant. */
+/** Percent-decoding passes before matching (`%252F` is `/` encoded twice). */
+const MAX_DECODE_PASSES = 3;
+
+function percentDecoded(value: string): string {
+  let current = value;
+  for (let pass = 0; pass < MAX_DECODE_PASSES; pass += 1) {
+    let next: string;
+    try {
+      next = decodeURIComponent(current);
+    } catch {
+      // A malformed escape: decode each well-formed escape alone, so an encoded `/` still splits.
+      next = current.replace(/%[0-9a-f]{2}/gi, (escape) => String.fromCharCode(Number.parseInt(escape.slice(1), 16)));
+    }
+    if (next === current) break;
+    current = next;
+  }
+  return current;
+}
+
+/**
+ * The model family of an id, URI or routing-target id: percent-decoded, its last path segment, lower-cased, without
+ * query, fragment, any `:variant` (stacked ones too) or `@provider` suffix.
+ */
 export function modelFamilySegment(modelOrUri: string): string {
-  const withoutQuery = modelOrUri.trim().split(/[?#]/, 1)[0] ?? "";
+  const withoutQuery = percentDecoded(modelOrUri.trim()).split(/[?#]/, 1)[0] ?? "";
   const segment = withoutQuery.split("/").filter(Boolean).at(-1) ?? "";
-  return segment.toLowerCase().replace(/:[a-z0-9._-]+$/, "");
+  return (segment.toLowerCase().split(/[:@]/, 1)[0] ?? "").trim();
 }
 
 /** Whether automatic selection must never pick this model (any build, variant or route of a denied family). */
 export function isAutomaticSelectionDenied(modelOrUri: string | null | undefined): boolean {
   if (!modelOrUri) return false;
   const segment = modelFamilySegment(modelOrUri);
-  return NO_AUTOMATIC_SELECTION_MODEL_FAMILIES.some((family) => segment === family || segment.startsWith(`${family}-`));
+  // The family, then the end or any separator (`-1017` build, a stray `%` or `+`): never a longer name like `-flashy`.
+  return NO_AUTOMATIC_SELECTION_MODEL_FAMILIES.some((family) => segment.startsWith(family) && !/^[a-z0-9.]/.test(segment.slice(family.length)));
 }
 
 /** `models` without the denied ones, in order. */

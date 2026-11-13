@@ -60,6 +60,12 @@ const VISION_MAX_OUTPUT_TOKENS_CONFIGURED = (() => {
 export function visionMaxOutputTokens(model: string | undefined): number {
   return visionOutputCapForModel(model, { value: VISION_MAX_OUTPUT_TOKENS, configured: VISION_MAX_OUTPUT_TOKENS_CONFIGURED });
 }
+
+/** Output cap of one call: the model's cap, lowered (never raised) by a caller's own cap such as chart export's. */
+export function visionCallMaxOutputTokens(model: string | undefined, callCap?: number): number {
+  const modelCap = visionMaxOutputTokens(model);
+  return callCap !== undefined && Number.isInteger(callCap) && callCap >= 1 ? Math.min(modelCap, callCap) : modelCap;
+}
 import { open, readFile } from "node:fs/promises";
 
 import {
@@ -231,6 +237,11 @@ export async function executeVisionRuntime(args: {
    * evaluation measured). OpenRouter routes only; the fallback route gets the same value.
    */
   reasoning?: OpenRouterReasoning;
+  /**
+   * Output cap for this call, below the model's page-transcription cap (chart export sends its own, smaller cap). The
+   * lower of the two is sent as `max_tokens` and weighed by the attempt guard; the fallback route gets the same cap.
+   */
+  maxOutputTokens?: number;
 }): Promise<VisionExecutionResult> {
   const normalized = normalizeVisionConfig(args.vision, args.cfg, args.outputSchema);
   const selected = args.promptText !== undefined ? { ...normalized, prompt: args.promptText } : normalized;
@@ -356,7 +367,7 @@ function weightedGate(gate: VisionRequestGate, weightCents: number, route: Visio
 async function runRouteVisionRequest(
   route: VisionExecutionConfig,
   prompt: string,
-  args: { imagePath: string; mimeType?: string; outputPath: string; runner: CommandRunner; signal?: AbortSignal; cfg: Config; privacyMode: PrivacyMode; gate: VisionRequestGate | null; reasoning?: OpenRouterReasoning },
+  args: { imagePath: string; mimeType?: string; outputPath: string; runner: CommandRunner; signal?: AbortSignal; cfg: Config; privacyMode: PrivacyMode; gate: VisionRequestGate | null; reasoning?: OpenRouterReasoning; maxOutputTokens?: number },
 ): Promise<VisionExecutionResult> {
   // The prompt can carry tenant schema labels: bounded before anything is admitted or sent.
   assertVisionPromptSize(prompt);
@@ -381,7 +392,7 @@ async function runRouteVisionRequest(
 async function sendRouteVisionRequest(
   route: VisionExecutionConfig,
   prompt: string,
-  args: { imagePath: string; mimeType?: string; outputPath: string; runner: CommandRunner; signal?: AbortSignal; cfg: Config; privacyMode: PrivacyMode; gate: VisionRequestGate | null; reasoning?: OpenRouterReasoning },
+  args: { imagePath: string; mimeType?: string; outputPath: string; runner: CommandRunner; signal?: AbortSignal; cfg: Config; privacyMode: PrivacyMode; gate: VisionRequestGate | null; reasoning?: OpenRouterReasoning; maxOutputTokens?: number },
   billing: VisionRouteBilling,
   model: string,
   onUsageModel: (model: string) => void,
@@ -397,6 +408,7 @@ async function sendRouteVisionRequest(
     billing,
     inputTokens: visionInputTokenBound(imageSize, prompt, model),
     imageTokens: visionImageTokenBound(imageSize, model),
+    ...(args.maxOutputTokens ? { maxOutputTokens: args.maxOutputTokens } : {}),
   });
   const knownSize = Boolean(imageSize?.widthPx && imageSize.heightPx);
   console.log(
@@ -414,6 +426,7 @@ async function sendRouteVisionRequest(
     runtime: route.runtime,
     prompt,
     ...(args.reasoning ? { reasoning: args.reasoning } : {}),
+    ...(args.maxOutputTokens ? { maxOutputTokens: args.maxOutputTokens } : {}),
   };
   if (!isPrivate) {
     return await runVisionRequest({ ...base, model: route.model, baseUrl: route.baseUrl, apiKey: resolveVisionApiKey(billing, route.baseUrl, args.cfg), swapPolicy: args.cfg.visionModelSwapPolicy, maxPrice: pricing.maxPrice, streaming: args.cfg.visionStreaming });
@@ -575,6 +588,8 @@ export async function runVisionRequest(args: {
   maxPrice?: VisionMaxPrice | null;
   /** Overrides the model's page-transcription reasoning default (OpenRouter only). */
   reasoning?: OpenRouterReasoning;
+  /** Output cap for this call; the lower of it and the model's cap is sent (`visionCallMaxOutputTokens`). */
+  maxOutputTokens?: number;
 }): Promise<VisionRequestResult> {
   args = { ...args, model: isOpenRouterBaseUrl(args.baseUrl) ? speedBoostModel(resolveSupportedModelIdWithWarning(args.model), currentProviderPolicy().speedBoost === true) : resolveSupportedModelIdWithWarning(args.model) };
   return withObservation(
@@ -687,7 +702,7 @@ export async function runVisionRequest(args: {
           },
         ],
         temperature: 0,
-        max_tokens: visionMaxOutputTokens(args.model),
+        max_tokens: visionCallMaxOutputTokens(args.model, args.maxOutputTokens),
         // Page transcription never needs thinking: pin each verified model to its lowest accepted effort.
         ...(isOpenRouter ? (args.reasoning ? { reasoning: { ...args.reasoning } } : visionReasoningParams(args.model)) : {}),
         // Per-model routing restricted to providers measured to transcribe faithfully.

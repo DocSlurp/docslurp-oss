@@ -48,7 +48,7 @@ describe("hosted vision catalog", () => {
       "deepseek/deepseek-v4.1-flash-1017": { input: 0.3, output: 1.2, perPage: 0.103, checked: "2026-11-12", route: ["fireworks", "parasail"] },
       "xiaomi/mimo-v2.6-flash": { input: 0.14, output: 0.28, perPage: 0.056 },
       "openai/gpt-6-luna": { input: 0.1, output: 0.5, perPage: 0.061 },
-      "z-ai/glm-5.3-flash": { input: 0.15, output: 0.5, perPage: 0.073 },
+      "z-ai/glm-5.3-flash": { input: 0.15, output: 0.5, perPage: 0.073, checked: "2026-11-12", route: ["wafer/nvfp4", "friendli", "inference-net/fp4"] },
     };
     for (const [id, expected] of Object.entries(tuned)) {
       const uri = `llm://openrouter/${id}`;

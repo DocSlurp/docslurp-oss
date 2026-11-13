@@ -194,6 +194,11 @@ export interface PricingProvider {
     sandboxRatesObservedAt(provider: string): string | null;
     /** Infrastructure cost of one worker slot per hour in USD, for routing cost bounds; null when unknown. */
     workerSlotUsdPerHour(): number | null;
+    /**
+     * Highest output list price (USD per million tokens) a chart & diagram export generator may have for the worker to
+     * call it, or null to let core derive one from `visualExportCredits` (worker chart-export/model-selection.ts).
+     */
+    chartGeneratorMaxOutputUsdPerMTok(): number | null;
   };
 }
 
@@ -227,7 +232,7 @@ export function assertPricingProvider(value: unknown): asserts value is PricingP
   const cost = provider.internalCost;
   if (!cost || typeof cost.computeRates !== "function" || typeof cost.listCredits !== "function"
     || typeof cost.sandboxCostCents !== "function" || typeof cost.sandboxRatesObservedAt !== "function"
-    || typeof cost.workerSlotUsdPerHour !== "function") {
+    || typeof cost.workerSlotUsdPerHour !== "function" || typeof cost.chartGeneratorMaxOutputUsdPerMTok !== "function") {
     throw new Error(`pricing provider ${provider.id} has an incomplete internalCost`);
   }
 }
