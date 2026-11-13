@@ -15,6 +15,12 @@ export const CHART_EXTRACT_LIMITS = {
   /** SVG path data: commands across one document; vertices kept per path. */
   maxPathCommands: 200_000,
   maxPathVertices: 20_000,
+  /**
+   * svg-geometry marker/vertex de-duplication: point-to-vertex pair tests per SVG. Spread-out charts need a few per
+   * marker; only vertices packed into a few 3-unit cells come near this (a hostile input), and it stops them well inside
+   * the guest's timeout.
+   */
+  maxMarkerPairTests: 50_000_000,
   /** `<use>` expansion: references followed per document and nesting. */
   maxUseExpansions: 20_000,
   maxUseDepth: 8,

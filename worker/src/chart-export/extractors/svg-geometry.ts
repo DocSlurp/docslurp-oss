@@ -1,4 +1,4 @@
-import { CHART_EXTRACT_LIMITS } from "./limits.js";
+import { CHART_EXTRACT_LIMITS, ExtractLimitError } from "./limits.js";
 import { buildScene, type LinePrim, type PointPrim, type RectPrim, type Scene, type TextPrim } from "./svg-scene.js";
 import { clamp01, type DraftChart, type DraftSeries } from "./spec-utils.js";
 import { parseTickNumber } from "./text.js";
@@ -203,26 +203,40 @@ function findLegend(texts: TextPrim[], scene: Scene, exclude: Set<TextPrim>): Le
 
 /**
  * Points that do not sit on a line vertex (|dx| < 1.5 and |dy| < 1.5). Vertices are bucketed in 3-unit cells, so one
- * point checks only its own and the 8 neighbouring cells (the exact test still decides each pair): linear in points +
- * vertices instead of their product, which a hostile SVG could push to minutes.
+ * point tests only the vertices in its own and the 8 neighbouring cells; the exact test still decides each pair, and a
+ * non-finite coordinate never passes it, so such points and vertices are skipped. For vertices spread over the plot this
+ * is close to linear in points + vertices. Vertices packed into a few cells (a hostile SVG) still cost points × packed
+ * vertices, so every pair test counts against `maxMarkerPairTests` and the SVG is refused (`svg-marker-limit`) past it.
+ * `work` reports the pair tests run; `budget` is overridable only so tests can count the cap without running 5×10⁷ tests.
  */
-function withoutVertexMarkers(points: PointPrim[], lines: LinePrim[]): PointPrim[] {
+export function withoutVertexMarkers(points: PointPrim[], lines: LinePrim[], work: { pairTests: number } = { pairTests: 0 }, budget: number = CHART_EXTRACT_LIMITS.maxMarkerPairTests): PointPrim[] {
   if (!points.length || !lines.length) return points;
   const CELL = 3;
   const grid = new Map<string, Array<[number, number]>>();
   for (const l of lines) {
     for (const v of l.points) {
+      if (!Number.isFinite(v[0]) || !Number.isFinite(v[1])) continue;
       const key = `${Math.floor(v[0] / CELL)},${Math.floor(v[1] / CELL)}`;
       const bucket = grid.get(key);
       if (bucket) bucket.push(v); else grid.set(key, [v]);
     }
   }
+  const nearVertex = (bucket: Array<[number, number]> | undefined, px: number, py: number): boolean => {
+    if (!bucket) return false;
+    for (const [x, y] of bucket) {
+      if (++work.pairTests > budget) throw new ExtractLimitError("svg-marker-limit");
+      if (Math.abs(x - px) < 1.5 && Math.abs(y - py) < 1.5) return true;
+    }
+    return false;
+  };
   return points.filter((p) => {
+    if (!Number.isFinite(p.x) || !Number.isFinite(p.y)) return true;
     const cx = Math.floor(p.x / CELL), cy = Math.floor(p.y / CELL);
+    // Own cell first: a marker drawn on a vertex usually matches there.
+    if (nearVertex(grid.get(`${cx},${cy}`), p.x, p.y)) return false;
     for (let dx = -1; dx <= 1; dx++) {
       for (let dy = -1; dy <= 1; dy++) {
-        const bucket = grid.get(`${cx + dx},${cy + dy}`);
-        if (bucket && bucket.some(([x, y]) => Math.abs(x - p.x) < 1.5 && Math.abs(y - p.y) < 1.5)) return false;
+        if ((dx || dy) && nearVertex(grid.get(`${cx + dx},${cy + dy}`), p.x, p.y)) return false;
       }
     }
     return true;

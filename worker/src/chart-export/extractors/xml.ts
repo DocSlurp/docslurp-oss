@@ -34,13 +34,14 @@ export interface XmlParseOptions {
 
 const NAMED: Record<string, string> = { lt: "<", gt: ">", amp: "&", quot: "\"", apos: "'", nbsp: " " };
 
-// Character classes by code unit (the tokenizer's hot path; a RegExp test per character cost ~1/3 of a parse).
+// Character classes by code unit (the tokenizer's hot path; a RegExp test per character cost ~1/3 of a parse). Exported
+// for the exhaustive equivalence test against the regexes they replace.
 /** `[A-Za-z_:]` */
-const isNameStart = (c: number) => (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || c === 95 || c === 58;
+export const isNameStart = (c: number) => (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || c === 95 || c === 58;
 /** `[A-Za-z0-9_:.\-]` */
-const isNameChar = (c: number) => isNameStart(c) || (c >= 48 && c <= 57) || c === 46 || c === 45;
+export const isNameChar = (c: number) => isNameStart(c) || (c >= 48 && c <= 57) || c === 46 || c === 45;
 /** Exactly JavaScript's `\s`: ASCII whitespace plus the Unicode space separators, line terminators and BOM. */
-const isSpace = (c: number) => (c >= 9 && c <= 13) || c === 32 || c === 0xa0 || c === 0x1680 || (c >= 0x2000 && c <= 0x200a)
+export const isSpace = (c: number) => (c >= 9 && c <= 13) || c === 32 || c === 0xa0 || c === 0x1680 || (c >= 0x2000 && c <= 0x200a)
   || c === 0x2028 || c === 0x2029 || c === 0x202f || c === 0x205f || c === 0x3000 || c === 0xfeff;
 
 export function decodeEntities(value: string): string {
