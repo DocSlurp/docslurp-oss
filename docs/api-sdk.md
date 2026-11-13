@@ -1122,6 +1122,9 @@ Current Fast and Rich page prices are on [docslurp.io/pricing](https://docslurp.
 - **API, MCP, SDK and CLI calls** (API keys and OAuth tokens): `off`. Chart reading is off by default for API calls until its cost and speed match ingest without it; turn it on per project or per request.
 - **The DocSlurp app** (signed-in browser sessions, including chat uploads): `free`.
 
+A deployment can change these defaults without a code change: `DOCSLURP_CHART_EXPORT_API_DEFAULT=off|free` (default
+`off`) for API callers, and `DOCSLURP_CHART_EXPORT_APP_DEFAULT=free|off` (default `free`) for the app.
+
 **Precedence**, highest first:
 
 1. The request's own override (below).

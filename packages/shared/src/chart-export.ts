@@ -113,9 +113,19 @@ export function chartExportMachineDefault(env: Readonly<Record<string, string | 
   return env[CHART_EXPORT_API_DEFAULT_ENV_FLAG]?.trim().toLowerCase() === "free" ? "free" : "off";
 }
 
-/** The default tier for a run of `origin` on a project with no explicit tier: `free` for the app, else the machine default. */
+/**
+ * Deploy-wide default tier for app-origin runs on projects with no explicit tier: `free` (default) or `off`. Lets a
+ * deployment hold the app default off until the free steps pass their cost gate, without a code change.
+ */
+export const CHART_EXPORT_APP_DEFAULT_ENV_FLAG = "DOCSLURP_CHART_EXPORT_APP_DEFAULT";
+
+export function chartExportAppDefault(env: Readonly<Record<string, string | undefined>>): "off" | "free" {
+  return env[CHART_EXPORT_APP_DEFAULT_ENV_FLAG]?.trim().toLowerCase() === "off" ? "off" : "free";
+}
+
+/** The default tier for a run of `origin` on a project with no explicit tier: the app default (free) or the machine default (off). */
 export function defaultChartExportTier(origin: RunOrigin, env: Readonly<Record<string, string | undefined>>): ChartExportTier {
-  return origin === "app" ? "free" : chartExportMachineDefault(env);
+  return origin === "app" ? chartExportAppDefault(env) : chartExportMachineDefault(env);
 }
 
 /**

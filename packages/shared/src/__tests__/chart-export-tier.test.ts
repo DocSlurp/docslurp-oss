@@ -26,6 +26,10 @@ describe("chart export tier resolution", () => {
     for (const value of ["models", "on", "bogus", ""]) expect(defaultChartExportTier("machine", { DOCSLURP_CHART_EXPORT_API_DEFAULT: value })).toBe("off");
     // The app default never changes with the machine flag.
     expect(defaultChartExportTier("app", { DOCSLURP_CHART_EXPORT_API_DEFAULT: "off" })).toBe("free");
+    // The app default has its own flag (held off until the cost gate passes); only "off" changes it.
+    expect(defaultChartExportTier("app", { DOCSLURP_CHART_EXPORT_APP_DEFAULT: "off" })).toBe("off");
+    expect(defaultChartExportTier("app", { DOCSLURP_CHART_EXPORT_APP_DEFAULT: "models" })).toBe("free");
+    expect(defaultChartExportTier("machine", { DOCSLURP_CHART_EXPORT_APP_DEFAULT: "off", DOCSLURP_CHART_EXPORT_API_DEFAULT: "free" })).toBe("free");
   });
 
   it("precedence: request override, then project tier, then origin default", () => {
