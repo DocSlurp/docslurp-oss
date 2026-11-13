@@ -728,9 +728,16 @@ export const visionModelCatalog = [
     tags: ["hosted", "cost", "quality"],
     runtime: "openai-compatible",
     description:
-      "OpenAI GPT-6 Luna on OpenRouter; opt-in low-cost page extraction with high-detail images and a content-filter retry route.",
+      "OpenAI GPT-6 Luna on OpenRouter; the default page extraction model, with high-detail images and a content-filter retry route.",
     estimatedCostPerPageCents: 0.061,
-    tokenPricing: { inputUsdPerMillion: 0.1, outputUsdPerMillion: 0.5, checked: "2026-10-25" },
+    tokenPricing: {
+      inputUsdPerMillion: 0.11,
+      outputUsdPerMillion: 0.55,
+      checked: "2026-11-13",
+      basis: "pinned-route",
+      providers: ["openai", "amazon-bedrock/us-east-1", "azure/us"],
+    },
+    // Priced at the most expensive allowed host (the content-filter retry hosts, $0.11/$0.55), so max_price admits them.
     imageTokens: { kind: "patch", patchPx: 32, tokensPerPatch: 2.46, basis: "openai-patch-max-multiplier" },
   },
   {
