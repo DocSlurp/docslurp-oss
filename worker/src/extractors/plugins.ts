@@ -462,6 +462,25 @@ export function sandboxedPdfLayoutFacts(job: SandboxedPdfJob): Map<number, PageL
   return reportedLayoutFacts.get(job);
 }
 
+/**
+ * Figures a failed job salvaged (the provider's `error.figures`, published into `job.figures.dir`; only when the host
+ * declares `partial` in figureOutcomes): the shards that finished before the failure. Parsed as untrusted; anything but
+ * `extracted` or `partial` salvages nothing.
+ */
+const salvagedFigures = new WeakMap<SandboxedPdfJob, SandboxedPdfFigureOutcome>();
+export function noteSalvagedFigures(job: SandboxedPdfJob, error: unknown, pages: number): void {
+  salvagedFigures.delete(job);
+  const raw = (error as { figures?: unknown } | null)?.figures;
+  if (!job.figures || raw === undefined) return;
+  const outcome = parseSandboxedPdfFigureOutcome(raw, MAX_FIGURE_REASON_CHARS, pages);
+  if (outcome.status !== "failed") salvagedFigures.set(job, outcome);
+}
+export function sandboxedPdfSalvagedFigures(job: SandboxedPdfJob): SandboxedPdfFigureOutcome | undefined {
+  const outcome = salvagedFigures.get(job);
+  salvagedFigures.delete(job);
+  return outcome;
+}
+
 /** The figure outcome of a finished job that asked for figures, or undefined when it did not ask. */
 export function sandboxedPdfFigures(job: SandboxedPdfJob): SandboxedPdfFigureOutcome | undefined {
   return reportedFigures.get(job);

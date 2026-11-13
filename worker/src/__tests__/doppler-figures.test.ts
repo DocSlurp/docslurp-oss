@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DOPPLER_FIGURE_LIMITS, DOPPLER_MANIFEST_V2_LIMITS, dopplerFigureUrls, imageAnchorsToAltText, resolveDopplerImageMarkers } from "@docslurp/shared";
 
 import { buildCanonicalDocumentFromMarkdown } from "../lib/canonical-document.js";
+import { ByteBudget } from "../extractors/doppler-upload.js";
 
 import {
   DopplerFigureRejection, DopplerFigureStoreError, disposeDopplerFigureSet, dopplerFigureMagicMatches, dopplerFolderKey, readLedgerSpill, dopplerImageExtractEnabled, readDopplerFigureDir, storeDopplerFigures,
@@ -45,6 +46,39 @@ async function rejection(pageCount = 10): Promise<string> {
   }
   throw new Error("expected a rejection");
 }
+
+describe("storeDopplerFigures: the memory ceiling (LOW-6)", () => {
+  const budgets = (job = 64 * 1024 * 1024) => ({ job: new ByteBudget(job), worker: new ByteBudget(64 * 1024 * 1024), concurrency: 1 });
+
+  it("a failure deletes nothing, not even keys this call started writing (orphan GC is the only deleter)", async () => {
+    const set = await readDopplerFigureDir(dir, { pageCount: 5 });
+    const keyOf = (i: number) => dopplerFolderKey(DOC, "run-1", { id: set.files[i]!.id, format: set.files[i]!.format });
+    const storage = {
+      putBytes: vi.fn(async (key: string) => { if (key === keyOf(1)) throw new Error("boom"); }),
+      putJson: vi.fn(async () => {}),
+      uri: (key: string) => `s3://bucket/${key}`,
+      deleteKeys: vi.fn(async () => {}),
+    };
+    const error = await storeDopplerFigures({
+      storage, document: DOC, runId: "run-1", figures: set, markdown: "", budgets: budgets(), committedUris: new Set([`s3://bucket/${keyOf(0)}`]),
+    }).catch((e) => e);
+    expect(error).toMatchObject({ reason: "store-object-failed", cleanup: "kept" });
+    expect(storage.deleteKeys).not.toHaveBeenCalled();
+    await disposeDopplerFigureSet(set);
+  });
+
+  it("a whole-file upload larger than the budget is refused (no streaming store), never read at the clamped size", async () => {
+    const set = await readDopplerFigureDir(dir, { pageCount: 5 });
+    const put = vi.fn(async () => {});
+    const error = await storeDopplerFigures({
+      storage: { putBytes: put, putJson: async () => {}, uri: (key) => key }, document: DOC, runId: "run-1", figures: set, markdown: "", budgets: budgets(16),
+    }).catch((e) => e);
+    expect(error).toBeInstanceOf(DopplerFigureRejection);
+    expect(error.rule).toBe("file-over-memory-budget");
+    expect(put).not.toHaveBeenCalled();
+    await disposeDopplerFigureSet(set);
+  });
+});
 
 describe("storeDopplerFigures: a failed upload records nothing and deletes nothing", () => {
   const recordingStorage = (fail: { bytes?: string; json?: boolean }) => {

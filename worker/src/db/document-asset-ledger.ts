@@ -17,7 +17,7 @@ import type { JSONValue, Sql } from "postgres";
 import {
   DOCUMENT_IMAGES_STATUSES, DOPPLER_BUILD, DOPPLER_MANIFEST_V2_LIMITS, DOPPLER_MANIFEST_V3_FILE, DOPPLER_STORE_LAYOUT,
   addDocumentAssetCount, dopplerAssetStorageKey, emptyDocumentAssetCounts, isDocumentAssetRow, dopplerDocumentPrefix,
-  DOPPLER_FIGURE_GAP_REASONS, DOPPLER_FIGURE_GAPS_MAX, DOPPLER_SHARDS_MAX, dopplerShardFolder,
+  DOPPLER_FIGURE_GAP_REASONS, DOPPLER_FIGURE_GAPS_MAX, DOPPLER_SHARDS_MAX, dopplerShardFolder, dopplerShardsContiguous,
   parseDopplerFigureId, type DocumentAsset, type DocumentImagesStatus, type DopplerFigureGap, type DopplerManifestRunFacts,
 } from "@docslurp/shared";
 
@@ -88,8 +88,13 @@ export interface DocumentAssetLedgerWrite {
   levelOnly?: boolean;
 }
 
-/** Resumes a document may have before the resume queue leaves it alone (counted by the host, not the manifest). */
+/** Resumes a document (or one shard) may have before the resume queue leaves it alone (counted by the host, not the manifest). */
 export const DOCUMENT_ASSET_RESUME_CAP = 3;
+/** A sharded document's resumes across all its shards: `min(3 x shards, 12)`. Past it no shard of it is listed or resumed. */
+export const DOCUMENT_ASSET_RESUME_TOTAL_CAP = 12;
+export function documentResumeTotalCap(shards: number): number {
+  return Math.min(DOCUMENT_ASSET_RESUME_CAP * Math.max(1, shards), DOCUMENT_ASSET_RESUME_TOTAL_CAP);
+}
 
 export type DocumentAssetLedgerRule =
   | "invalid-scope" | "invalid-assets" | "invalid-level" | "scope-mismatch" | "key-mismatch" | "stale-write" | "resume-cap" | "write-mismatch"
@@ -130,8 +135,12 @@ function checkedRow(asset: LedgerAsset | DocumentAsset, spilled: boolean): Ledge
   return { ...row, storageKey };
 }
 
-/** Shard records re-validated: at most DOPPLER_SHARDS_MAX, sorted, not overlapping, each key exactly its folder's. */
-function checkedShards(shards: readonly LedgerShard[], imagesPrefix: string): LedgerShard[] {
+/**
+ * Shard records re-validated: at most DOPPLER_SHARDS_MAX, sorted, not overlapping, each key exactly its folder's. A full
+ * write's shards start at page 1 with no hole between them except where one of its gaps covers the hole whole
+ * (`contiguous`); a shard resume names one existing shard or lies inside a gap.
+ */
+function checkedShards(shards: readonly LedgerShard[], imagesPrefix: string, contiguous: { gaps: readonly DopplerFigureGap[] | null } | null): LedgerShard[] {
   if (!Array.isArray(shards) || shards.length > DOPPLER_SHARDS_MAX) throw new DocumentAssetLedgerError("invalid-level");
   let previous = 0;
   for (const shard of shards) {
@@ -148,6 +157,9 @@ function checkedShards(shards: readonly LedgerShard[], imagesPrefix: string): Le
       throw new DocumentAssetLedgerError("key-mismatch");
     }
     previous = shard.last;
+  }
+  if (contiguous && !dopplerShardsContiguous(shards.map((shard) => [shard.first, shard.last] as const), contiguous.gaps)) {
+    throw new DocumentAssetLedgerError("invalid-level");
   }
   return [...shards];
 }
@@ -229,6 +241,8 @@ export interface DocumentAssetLedgerResult { upserted: number; removed: number; 
 export async function writeDocumentAssetLedger(sql: Sql<Record<string, unknown>>, write: DocumentAssetLedgerWrite): Promise<DocumentAssetLedgerResult> {
   assertScope(write.scope);
   if (write.levelOnly) {
+    // The level only: no rows, no manifest and no shards (the shard rules apply to a full write).
+    if ((write.shards?.length ?? 0) > 0 || write.level.manifest) throw new DocumentAssetLedgerError("invalid-level");
     await writeFigureLevel(sql, {
       scope: write.scope, markdownComplete: write.level.markdownComplete, imagesStatus: write.level.imagesStatus,
       exitCode: write.level.imagesExitCode, build: write.level.dopplerBuild, gaps: write.level.gaps ?? null,
@@ -271,7 +285,8 @@ export async function writeDocumentAssetLedger(sql: Sql<Record<string, unknown>>
     const resuming = write.resume === true || shardResume !== null;
     // Earlier runs' figure folders, read before this write moves any row: queued for purge once it commits (fresh writes only).
     const oldFolders = resuming ? [] : await oldFigureFolders(tx, write.scope, root);
-    const shards = checkedShards(write.shards ?? [], `${prefix}${DOPPLER_STORE_LAYOUT.imagesFolder}`);
+    // A full write's shards start at page 1 with no hole except where one of its gaps covers it whole.
+    const shards = checkedShards(write.shards ?? [], `${prefix}${DOPPLER_STORE_LAYOUT.imagesFolder}`, shardResume ? null : { gaps: write.level.gaps ?? null });
     if (shards.length > 0 && write.level.manifest) throw new DocumentAssetLedgerError("invalid-level");
     const priorResumes = previous?.resumes ?? 0;
     if (write.resume === true && priorResumes >= DOCUMENT_ASSET_RESUME_CAP) throw new DocumentAssetLedgerError("resume-cap");
@@ -284,6 +299,11 @@ export async function writeDocumentAssetLedger(sql: Sql<Record<string, unknown>>
         select resumes from document_extraction_shards
         where document_id = ${documentId} and org_id = ${orgId} and project_id = ${projectId}
           and first_page = ${shardResume.first} and last_page = ${shardResume.last}`;
+      // The document's total across its shards (documentResumeTotalCap), for a shard's resume and a gap's alike.
+      const [total] = await tx<{ n: number; resumes: number }[]>`
+        select count(*)::int as n, coalesce(sum(resumes), 0)::int as resumes from document_extraction_shards
+        where document_id = ${documentId} and org_id = ${orgId} and project_id = ${projectId}`;
+      if ((total?.resumes ?? 0) >= documentResumeTotalCap(total?.n ?? 1)) throw new DocumentAssetLedgerError("resume-cap");
       if (existing) {
         if (existing.resumes >= DOCUMENT_ASSET_RESUME_CAP) throw new DocumentAssetLedgerError("resume-cap");
         shardResumes = existing.resumes + 1;
@@ -669,6 +689,11 @@ export async function listResumableDocuments(
         and lv.images_status = 'resumable' and lv.run_id is not distinct from s.run_id
       where s.org_id = ${args.orgId} and s.images_status = 'resumable' and s.resumes < ${DOCUMENT_ASSET_RESUME_CAP} ${project("s")}
         and d.superseded_at is null and d.archived_at is null and d.purged_at is null
+        -- The document's resumes across all its shards stay under min(3 x shards, 12) (documentResumeTotalCap).
+        and (select coalesce(sum(t.resumes), 0) from document_extraction_shards t
+             where t.document_id = s.document_id and t.org_id = s.org_id and t.project_id = s.project_id)
+          < least(${DOCUMENT_ASSET_RESUME_CAP}::int * (select count(*) from document_extraction_shards t
+             where t.document_id = s.document_id and t.org_id = s.org_id and t.project_id = s.project_id), ${DOCUMENT_ASSET_RESUME_TOTAL_CAP}::int)
       union all
       -- Gaps: page ranges with no manifest at all (a failed or over-share shard, the document's pass budget). Each is resumed
       -- by a fresh pass over its pages, which becomes that range's shard.
@@ -686,6 +711,11 @@ export async function listResumableDocuments(
           -- Only effective gaps: a gap a shard now covers is that shard's work (no duplicate unit).
           and not exists (select 1 from document_extraction_shards sc where sc.document_id = l.document_id and sc.org_id = l.org_id
             and sc.first_page <= (gap ->> 'last')::int and (gap ->> 'first')::int <= sc.last_page)
+          -- And the document's shard-resume total (documentResumeTotalCap) is not yet spent.
+          and (select coalesce(sum(t.resumes), 0) from document_extraction_shards t
+               where t.document_id = l.document_id and t.org_id = l.org_id and t.project_id = l.project_id)
+            < least(${DOCUMENT_ASSET_RESUME_CAP}::int * greatest(1, (select count(*) from document_extraction_shards t
+               where t.document_id = l.document_id and t.org_id = l.org_id and t.project_id = l.project_id))::int, ${DOCUMENT_ASSET_RESUME_TOTAL_CAP}::int)
       ) g
     ) work
     ${args.after ? sql`where (work.at, work.document_id, work.first_page) > (${args.after.updatedAt}::timestamptz, ${args.after.documentId}, ${args.after.firstPage ?? 0})` : sql``}
@@ -775,7 +805,7 @@ async function flushOne(
   }
 }
 
-// ---- Figures kept on every failure path: pending and stored rows, adopt, level-only writes (migration 0143) ----
+// ---- Figures kept on every failure path: pending and stored rows, adopt, level-only writes (migration 0147) ----
 
 type Tx = import("postgres").TransactionSql<Record<string, unknown>>;
 
@@ -1154,7 +1184,10 @@ export function figureLedgerHooks(
   };
 }
 
-/** SQL: the project's figures are on (`pipeline.figures`, default on). Mirrors projectFiguresEnabled (the deploy flag aside). */
+/**
+ * SQL: the project's figures are on (`pipeline.figures`, default on): figuresEnabled (#363) without the deploy flag. Fails
+ * closed on malformed shapes too (`"off"`, `{ enabled: false }`), so discovery never lists more than figuresEnabled runs.
+ */
 export function figuresOnSql(sql: Sql<Record<string, unknown>>, projectAlias: string) {
   const p = sql(projectAlias);
   return sql`(coalesce(${p}.pipeline -> 'figures', 'true'::jsonb) not in ('false'::jsonb, '"off"'::jsonb)

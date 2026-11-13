@@ -115,7 +115,7 @@ async function meterOrgDay(org: { id: string; created_by_user_id: string }, day:
           indexBytes: storage.indexBytes,
           sourceBytes: storage.sourceBytes,
           pages: storage.pages,
-          // Stored figure files, their index and manifest: measured from the asset ledger, included in objectBytes.
+          // Stored figure files and the folder files (manifests, document.md, index.json), measured: included in objectBytes.
           measuredArtifactBytes: storage.measuredArtifactBytes,
           // The rest of the artifact and index bytes are estimated from page counts.
           estimate: true,

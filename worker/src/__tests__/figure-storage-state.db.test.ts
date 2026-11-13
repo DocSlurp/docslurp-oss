@@ -14,13 +14,13 @@ import {
 import { Store } from "../db/store.js";
 import { listResumableDocuments, replaceUnvouchedObject } from "../db/document-asset-ledger.js";
 import { firstPassBatchOptions } from "../pipeline/first-pass.js";
-import { projectFiguresEnabled } from "@docslurp/shared";
+import { figuresEnabled } from "@docslurp/shared";
 import { DopplerFigureStoreError, downloadDopplerImagesDir, readDopplerFigureDir, readLedgerSpill, storeDopplerFigures } from "../extractors/doppler-figures.js";
 import { v2Manifest, v3Text, writeV3Folder, V2_SOURCE_SHA } from "../test/doppler-manifest-v2.js";
 import { createMigratedDatabase } from "../test/migrated-db.js";
 import { serveOnRandomPort } from "../test/migrated-postgres.js";
 
-// Figures kept on every failure path (migration 0143), with the worker's real Store over a migrated database and crash
+// Figures kept on every failure path (migration 0147), with the worker's real Store over a migrated database and crash
 // injection: pending rows before each upload step and stored after it; nothing deleted on failure; the next attempt
 // adopts by streamed SHA-256 with no VM; conditional creates never overwrite; a resume only adds; tenants never mix.
 let db: PGlite;
@@ -118,7 +118,7 @@ async function storeStep(storage: ReturnType<typeof memoryStorage>, options: { p
   const scope = options.scope ?? A;
   const set = await readDopplerFigureDir(await folder(options), { pageCount: 3, expect: options.partial ? "partial" : "complete" });
   const stored = await storeDopplerFigures({
-    storage, document: { id: scope.documentId, userId: scope === A ? "ua" : "ub", runId: scope.runId }, runId: scope.runId, figures: set, markdown: "",
+    storage, document: { id: scope.documentId, userId: scope.orgId === "org-a" ? "ua" : "ub", runId: scope.runId }, runId: scope.runId, figures: set, markdown: "",
     ledger: hooks(scope), signal: options.signal,
   });
   return { set, stored };
@@ -229,11 +229,17 @@ describe("conditional creates", () => {
     const storage = memoryStorage();
     const key = `${ROOT_A}/page-0001/image-001.webp`;
     storage.objects.set(key, Buffer.from("RIFF....WEBP other bytes"));
-    const error = await storeStep(storage).catch((e) => e);
-    expect(error).toMatchObject({ rule: "object-conflict" });
+    // Without the ledger (nothing can vouch that the bytes are unclaimed): refused, nothing overwritten or deleted.
+    const set = await readDopplerFigureDir(await folder({}), { pageCount: 3, expect: "complete" });
+    const error = await storeDopplerFigures({ storage, document: { id: "doc-a", userId: "ua", runId: "run-a" }, runId: "run-a", figures: set, markdown: "" }).catch((e) => e);
+    expect(error.cause ?? error).toMatchObject({ rule: "object-conflict" });
     expect(storage.objects.get(key)!.toString()).toBe("RIFF....WEBP other bytes");
     expect(storage.puts).not.toContain(key);
     expect(storage.deletes).toEqual([]);
+    // With the ledger and no stored row vouching for the key: repaired under the document's lock (replaced, then created).
+    await storeStep(storage);
+    expect(storage.objects.get(key)!.equals(v2Manifest().files.get("page-0001/image-001.webp")!)).toBe(true);
+    expect(storage.deletes).toEqual([key]);
     // The same bytes already there (a replayed upload): accepted, not rewritten.
     const same = memoryStorage();
     same.objects.set(key, v2Manifest().files.get("page-0001/image-001.webp")!);
@@ -413,10 +419,9 @@ describe("projects that opted out of figures", () => {
     try {
       expect(await listResumableDocuments(sql, { orgId: "org-a" })).toEqual([]);
       expect(firstPassBatchOptions({ figures: false } as never, { DOCSLURP_DOPPLER_IMAGE_EXTRACT: "1" }).figures).toBe(false);
-      expect(projectFiguresEnabled({ figures: false }, { DOCSLURP_DOPPLER_IMAGE_EXTRACT: "1" })).toBe(false);
-      expect(projectFiguresEnabled({ figures: { enabled: false } }, { DOCSLURP_DOPPLER_IMAGE_EXTRACT: "1" })).toBe(false);
-      expect(projectFiguresEnabled({}, { DOCSLURP_DOPPLER_IMAGE_EXTRACT: "1" })).toBe(true);
-      expect(projectFiguresEnabled({}, {})).toBe(false);
+      expect(figuresEnabled({ figures: false }, { DOCSLURP_DOPPLER_IMAGE_EXTRACT: "1" })).toBe(false);
+      expect(figuresEnabled({}, { DOCSLURP_DOPPLER_IMAGE_EXTRACT: "1" })).toBe(true);
+      expect(figuresEnabled({}, {})).toBe(false);
     } finally {
       await sql`update projects set pipeline = '{}'::jsonb where id = 'proj-a'`;
     }

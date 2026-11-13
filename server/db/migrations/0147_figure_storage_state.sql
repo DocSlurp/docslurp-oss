@@ -47,3 +47,10 @@ BEGIN
       AND (images_status <> 'resumable' OR assets_resumable > 0 OR assets_pending > 0 OR coalesce(jsonb_array_length(gaps), 0) > 0));
   END IF;
 END $$;
+--> statement-breakpoint
+-- An earlier run's figure folder (`<root>/doppler/<doc>/`), queued when a newer run's full figure write commits; the
+-- drainer re-checks that no ledger row or current level uses it before purging (worker/src/db/superseded-purge.ts).
+ALTER TABLE storage_cleanup_queue DROP CONSTRAINT IF EXISTS storage_cleanup_queue_kind_check;
+--> statement-breakpoint
+ALTER TABLE storage_cleanup_queue ADD CONSTRAINT storage_cleanup_queue_kind_check
+  CHECK (kind IN ('storage_prefix', 'vector_table', 'vector_prefix', 'vector_rows', 'upload_original', 'doppler_folder'));

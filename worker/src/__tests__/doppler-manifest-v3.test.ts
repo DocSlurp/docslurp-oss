@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -8,8 +8,9 @@ import v8 from "node:v8";
 import { runInNewContext } from "node:vm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { DopplerFigureRejection, readDopplerFigureDir, readLedgerSpill, storeDopplerFigures, type DopplerFigureSet } from "../extractors/doppler-figures.js";
+import { DopplerFigureRejection, downloadDopplerImagesDir, readDopplerFigureDir, readLedgerSpill, storeDopplerFigures, type DopplerFigureSet } from "../extractors/doppler-figures.js";
 import { ByteBudget } from "../extractors/doppler-upload.js";
+import { dopplerAssetCaps } from "@docslurp/shared";
 import { v2Manifest, v3ShardText, v3Text, writeShardedFolder, writeV3Folder } from "../test/doppler-manifest-v2.js";
 
 // Version 3 (`manifest.jsonl`, `doppler-images/3`): read line by line in fixed memory, every line checked as it arrives,
@@ -134,6 +135,30 @@ describe("manifest v3: reading", () => {
     m.totals.unlinked += extra;
     expect(await rule(v3Text(m))).toBe("manifest-too-many-lines");
   }, 30_000);
+
+  it("MEDIUM-2: a line padded past its type's cap is refused (real image lines are about 216 bytes)", async () => {
+    const pad = (line: string, to: number) => `{${" ".repeat(Math.max(0, to - line.length))}${line.slice(1)}`;
+    expect(await rule(v3Text(base(), { mutateLines: (lines) => { lines[1] = pad(lines[1]!, 3000); } }))).toBe("manifest-line-too-long");
+    expect(await rule(v3Text(base(), { mutateLines: (lines) => { lines[0] = pad(lines[0]!, 2100); } }))).toBe("manifest-line-too-long");
+    // Within the cap, padding is still valid JSON and accepted.
+    expect(await rule(v3Text(base(), { mutateLines: (lines) => { lines[1] = pad(lines[1]!, 1500); } }))).toBe("accepted");
+  });
+
+  it("MEDIUM-2: a padded manifest past the folder's manifest byte cap is refused before a line is read", async () => {
+    // 3 pages: min(64 MiB, 1 KiB x 16,432 entries) = about 16 MiB. 9,000 padded furniture lines of 1,900 bytes are each
+    // within every per-line cap and well under the line count cap, yet over 17 MB in all.
+    const m = base();
+    const furniture = m.images.find((e) => e.id === "p2.2")!;
+    const extra = 9_000;
+    for (let i = 0; i < extra; i += 1) m.images.splice(4 + i, 0, { ...furniture, id: `p2.${i + 3}` });
+    m.totals.images += extra;
+    m.totals.unlinked += extra;
+    const text = v3Text(m, { mutateLines: (lines) => {
+      for (let i = 1; i < lines.length; i += 1) if (lines[i]!.includes('"status":"unlinked"')) lines[i] = `{${" ".repeat(1900 - lines[i]!.length)}${lines[i]!.slice(1)}`;
+    } });
+    expect(text.length).toBeGreaterThan(dopplerAssetCaps(3).manifestV3Bytes);
+    expect(await rule(text)).toBe("oversized-file");
+  }, 60_000);
 
   it("reads a 100,000-line manifest within the fixed memory budget", async () => {
     const pages = 6400;
@@ -317,13 +342,13 @@ describe("a real Doppler run (fixtures/doppler-golden/v3-repeats, see PROVENANCE
 });
 
 describe("sharded documents: one manifest per shard", () => {
-  async function shardRule(build: (m: ReturnType<typeof base>, files: Map<string, Buffer>) => Array<{ range: [number, number]; text: string }>, options: { partial?: boolean } = {}) {
+  async function shardRule(build: (m: ReturnType<typeof base>, files: Map<string, Buffer>) => Array<{ range: [number, number]; text: string }>, options: { partial?: boolean; gaps?: Array<{ first: number; last: number; reason: "plugin:shard-over-share" }> } = {}) {
     const { manifest, files } = v2Manifest({ partial: options.partial });
     const shards = build(manifest, files);
     await rm(dir, { recursive: true, force: true });
     await writeShardedFolder(dir, shards, files);
     try {
-      return await readDopplerFigureDir(dir, { pageCount: 3 });
+      return await readDopplerFigureDir(dir, { pageCount: 3, gaps: options.gaps ?? null });
     } catch (error) {
       if (error instanceof DopplerFigureRejection) return error.rule;
       throw error;
@@ -377,6 +402,24 @@ describe("sharded documents: one manifest per shard", () => {
       try { await readDopplerFigureDir(dir, { pageCount: 3 }); return "accepted"; } catch (error) { return (error as DopplerFigureRejection).rule; }
     })).toBe("unexpected-entry");
   }, 60_000);
+
+  it("LOW-5: shards start at page 1, leave no hole, and end within the document", async () => {
+    // Page 2 has no file (a repeat and furniture), so a 1-1 + 3-3 split would otherwise drop its rows silently.
+    expect(await shardRule((m) => [{ range: [1, 1], text: v3ShardText(m, [1, 1]) }, { range: [3, 3], text: v3ShardText(m, [3, 3]) }])).toBe("shards-not-contiguous");
+    expect(await shardRule((m) => [{ range: [2, 3], text: v3ShardText(m, [2, 3]) }])).toBe("shards-not-contiguous");
+    expect(await shardRule((m) => [{ range: [1, 2], text: v3ShardText(m, [1, 2]) }, { range: [3, 4], text: v3ShardText(m, [3, 4]) }])).toBe("page-outside-document");
+  }, 60_000);
+
+  it("a hole is allowed only where a reported gap covers it whole (the #464 contract: a range with no manifest)", async () => {
+    const holed = (m: ReturnType<typeof base>) => [{ range: [1, 1] as [number, number], text: v3ShardText(m, [1, 1]) }, { range: [3, 3] as [number, number], text: v3ShardText(m, [3, 3]) }];
+    const gap = (first: number, last: number) => ({ first, last, reason: "plugin:shard-over-share" as const });
+    expect(await shardRule(holed, { gaps: [gap(2, 2)] }).then((r) => typeof r === "string" ? r : "set")).toBe("set");
+    // A leading hole covered by a gap passes the contiguity rule (page 1's files then do not match: refused for that).
+    expect(await shardRule((m) => [{ range: [2, 3], text: v3ShardText(m, [2, 3]) }], { gaps: [gap(1, 1)] })).not.toBe("shards-not-contiguous");
+    // A gap elsewhere, or one only partly covering the hole, excuses nothing.
+    expect(await shardRule(holed, { gaps: [gap(3, 3)] })).toBe("shards-not-contiguous");
+    expect(await shardRule((m) => [{ range: [3, 3], text: v3ShardText(m, [3, 3]) }], { gaps: [gap(2, 2)] })).toBe("shards-not-contiguous");
+  }, 60_000);
 });
 
 const m0 = () => v2Manifest().manifest;
@@ -401,5 +444,26 @@ describe("figure outcome gaps", () => {
   it("the plugin host says which outcomes this core accepts", async () => {
     const { createExtractorPluginHost } = await import("../extractors/plugins.js");
     expect(createExtractorPluginHost().figureOutcomes).toEqual(["extracted", "partial", "failed"]);
+  });
+});
+
+describe("LOW-7: the resume DIR must be new or empty", () => {
+  it("refuses a directory that already holds anything, or a symlink, before downloading a byte", async () => {
+    const reads: string[] = [];
+    const storage = { getBytes: async (key: string) => { reads.push(key); return Buffer.alloc(0); } };
+    const args = (target: string) => ({ storage, document: DOC, runId: "run-1", manifestSha256: "a".repeat(64), pageCount: 3, dir: target });
+    const full = path.join(work, "full");
+    await mkdir(full);
+    await writeFile(path.join(full, "manifest.jsonl"), "planted\n");
+    await expect(downloadDopplerImagesDir(args(full))).rejects.toMatchObject({ rule: "resume-dir-not-empty" });
+    const link = path.join(work, "link");
+    await symlink(work, link);
+    await expect(downloadDopplerImagesDir(args(link))).rejects.toMatchObject({ rule: "resume-dir-not-empty" });
+    expect(reads).toEqual([]);
+    // An empty or absent directory is accepted (the download then runs; here it fails on the fake manifest's hash).
+    const empty = path.join(work, "empty");
+    await mkdir(empty);
+    await expect(downloadDopplerImagesDir(args(empty))).rejects.toMatchObject({ rule: "manifest-changed" });
+    await expect(downloadDopplerImagesDir(args(path.join(work, "absent", "dir")))).rejects.toMatchObject({ rule: "manifest-changed" });
   });
 });
