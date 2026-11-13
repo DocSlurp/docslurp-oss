@@ -11,7 +11,7 @@ COPY worker/package.json worker/tsconfig.json worker/LICENSE ./worker/
 RUN pnpm install --frozen-lockfile
 COPY worker/src ./worker/src
 COPY worker/scripts/copy-routing-assets.mjs ./worker/scripts/copy-routing-assets.mjs
-COPY worker/scripts/bundle-chart-guest.mjs ./worker/scripts/bundle-chart-guest.mjs
+COPY worker/scripts/bundle-chart-guest.mjs worker/scripts/chart-guest-bundle.mjs ./worker/scripts/
 COPY scripts/lib/model-prices.json ./scripts/lib/model-prices.json
 RUN pnpm --filter @docslurp/worker build
 
