@@ -1,5 +1,5 @@
 import { DEFAULT_CHAT_REASONING, type ChatReasoningLevel } from "@docslurp/shared/project-chat-models";
-import { assertProviderAllowed, authorizePrivateModelCall, createOpenRouterReasoningFetch, createOpenRouterRoutingFetch, createOpenRouterUsageCapture, createOpenRouterChargeTotal, isPrivateModelUri, readProviderCharge, PRIVATE_MODEL_PROVIDER, resolveOpenRouterUsage, servedTextModel, regionFallbackUsageMetadata, resolveSupportedModelIdWithWarning, type PrivacyMode, type PrivateCallAuditScope, type ProviderTextUsage } from "@docslurp/shared";
+import { assertProviderAllowed, authorizePrivateModelCall, chatModelPromptAddendum, createOpenRouterReasoningFetch, createOpenRouterRoutingFetch, createOpenRouterUsageCapture, createOpenRouterChargeTotal, isPrivateModelUri, readProviderCharge, PRIVATE_MODEL_PROVIDER, resolveOpenRouterUsage, servedTextModel, regionFallbackUsageMetadata, resolveSupportedModelIdWithWarning, type PrivacyMode, type PrivateCallAuditScope, type ProviderTextUsage } from "@docslurp/shared";
 import { randomBytes } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -361,7 +361,8 @@ export async function generateOpenRouterDocumentText(args: {
             context: args.observability,
           }),
           model: provider(model),
-          system: args.system,
+          // Per-model answer guidance after the shared instructions (chat-model-prompts.ts).
+          system: [args.system, chatModelPromptAddendum(model)].filter(Boolean).join("\n\n") || undefined,
           prompt: `${args.prompt}\n\nProject evidence:\n\n${inlineDocuments}`,
           maxOutputTokens: args.maxOutputTokens,
           abortSignal: args.signal,

@@ -4,7 +4,7 @@ import { resolveProjectRef } from "./projects.js";
 import { chatAgentProviderOptions, createChatAgentModel, promptCacheBreakpoint } from "../lib/chat-agent-model.js";
 import { streamText, stepCountIs, wrapLanguageModel, type ModelMessage, type StopCondition, type ToolSet } from "ai";
 import { performance } from "node:perf_hooks";
-import { assertProviderAllowed, isProviderCallAllowed, CHAT_AGENT_BASE_STEPS, CHAT_AGENT_EXTENSION_INPUT_TOKENS, CHAT_AGENT_LIMIT_DEFAULTS, createOpenRouterUsageCapture, resolveOpenRouterUsage, type ChatAgentLimits, type ChatAgentModes, type ChatAgentStepUsage, type ChatAgentStopReason, type ChatAgentTimeBudgetDebug, type PrivacyMode, type ProjectChatTurn } from "@docslurp/shared";
+import { assertProviderAllowed, chatModelPromptAddendum, isProviderCallAllowed, CHAT_AGENT_BASE_STEPS, CHAT_AGENT_EXTENSION_INPUT_TOKENS, CHAT_AGENT_LIMIT_DEFAULTS, createOpenRouterUsageCapture, resolveOpenRouterUsage, type ChatAgentLimits, type ChatAgentModes, type ChatAgentStepUsage, type ChatAgentStopReason, type ChatAgentTimeBudgetDebug, type PrivacyMode, type ProjectChatTurn } from "@docslurp/shared";
 import { evalBaggageAttributes, recordChatAgentTelemetry, startTelemetrySpan, type TelemetrySpan } from "@docslurp/shared/observability";
 import type { RequestActor } from "../lib/request-actor.js";
 import { DEFAULT_CHAT_REASONING, type ChatReasoningLevel } from "@docslurp/shared/project-chat-models";
@@ -633,6 +633,8 @@ export async function runChatMcpAgent(args: {
     NO_SETTINGS_CITATIONS_INSTRUCTION,
     NO_VISIBLE_SELF_CORRECTION_INSTRUCTION,
     "If a needed action is absent from the tool catalog, say so. Keep the answer direct, grounded, and concise.",
+    // Per-model answer guidance (chat-model-prompts.ts): depends only on the model, so it stays in the cached prefix.
+    ...[chatModelPromptAddendum(args.model)].filter(Boolean),
     // Counts change between turns: after the static rules so provider prefix caching survives.
     ...(args.projectInventory ? [describeChatProjectInventory(args.projectInventory)] : []),
     composed?.project ?? args.projectInstructions ?? "",
