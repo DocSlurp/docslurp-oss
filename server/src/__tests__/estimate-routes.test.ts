@@ -629,9 +629,20 @@ describe("chart export tier: origin defaults, per-request override and its guard
     // An ingest-only key's plain reprocess: no 403 about a tier it never asked for.
     expect((await post(appFor("u1", server({ scopes: ["ingest"] })), "/v1/runs/run/reprocess", {})).status).toBe(201);
     expect(await latestRun()).toMatchObject({ origin: "machine", pipeline: { chartExport: { tier: "off" } } });
-    // The estimate prices the capped tier: no chart reads.
-    const estimate = await (await post(appFor("u1", server()), "/v1/runs/run/reprocess/estimate", {})).json() as { estimate: { basis: string } };
+    // The estimate prices the capped tier: no chart reads, and its quote labels the capped tier, not the run's old one (R3-L1).
+    const estimate = await (await post(appFor("u1", server()), "/v1/runs/run/reprocess/estimate", {})).json() as { estimate: { basis: string }; quote: { settings: { chartExport: string }; lines: Array<{ id: string }> } | null };
     expect(estimate.estimate.basis).not.toMatch(/chart export/);
+    expect(estimate.quote?.settings.chartExport).toBe("off");
+    expect(estimate.quote?.lines.some((line) => line.id === "charts")).toBe(false);
+    // The bulk reprocess estimate applies the same cap (R3-L2). The seeded documents use map indexing, which never runs
+    // vision-extract; make them fully indexed so the comparison prices chart reads at all.
+    await sql`update documents set indexing_mode = 'full' where id in ('d1', 'd2')`;
+    const bulk = await (await post(appFor("u1", undefined, { session: true }), "/v1/projects/w/documents/bulk/estimate", { action: "reprocess", documentIds: ["d1", "d2"] })).json() as { estimate: { basis: string } };
+    expect(bulk.estimate.basis).not.toMatch(/chart export/);
+    // While the project still reads charts with AI, the same bulk estimate prices them.
+    await setProjectTier("w", "models");
+    const billed = await (await post(appFor("u1", undefined, { session: true }), "/v1/projects/w/documents/bulk/estimate", { action: "reprocess", documentIds: ["d1", "d2"] })).json() as { estimate: { basis: string } };
+    expect(billed.estimate.basis).toMatch(/chart export/);
   });
 
   it("a contributor's plain reprocess of an old models run on a project now off runs at off (R2-M1)", async () => {

@@ -6,7 +6,7 @@
  * Imports only modules that do not need the pricing provider at load time (pricing-provider.ts imports the open default,
  * which imports this).
  */
-import { chatAnswerCredits, creditsToDollars, searchCredits, storageCreditsPerMonth, visualExportCredits } from "./billing.js";
+import { chatAnswerCredits, creditsToDollars, expectedVisualExportCredits, searchCredits, storageCreditsPerMonth } from "./billing.js";
 import { defaultChartExportConfig, type ChartExportFormat } from "./chart-export.js";
 import { expectedBillableVisuals } from "./chart-export-estimate.js";
 import type { EstimateLine, EstimateQuote, ProviderEstimateArgs } from "./estimate-quote.js";
@@ -138,8 +138,10 @@ function chartCredits(pages: { low: number; high: number }, documents: number, s
   const formats = settings.chartFormats?.length ? [...settings.chartFormats] : defaultChartExportConfig.formats;
   const config = { ...defaultChartExportConfig, formats, diagrams: settings.chartDiagrams ?? defaultChartExportConfig.diagrams };
   const at = (count: number) => expectedBillableVisuals({ config, pages: count, documents: Math.max(1, documents) });
+  // First reads plus the expected billed second reads (one repair or cut-off retry per chart at most), priced by the
+  // active provider: the same function the stage estimate (`chartExportCredits`) uses, so the line equals its credits.
   return ordered({
-    low: visualExportCredits({ visuals: at(pages.low).low, source: "vision", formats }),
-    high: visualExportCredits({ visuals: at(pages.high).high, source: "vision", formats }),
+    low: expectedVisualExportCredits({ visuals: at(pages.low).low, formats }),
+    high: expectedVisualExportCredits({ visuals: at(pages.high).high, formats }),
   });
 }

@@ -498,7 +498,7 @@ export class ChartExportSession {
     if (!this.selections.has(key)) {
       let selection: GeneratorSelection | null = null;
       try {
-        selection = selectGeneratorModel({ kind, catalog: this.input.catalog(), projectModel: null, envModel: this.input.envModel ?? null });
+        selection = selectGeneratorModel({ kind, catalog: this.input.catalog(), envModel: this.input.envModel ?? null });
       } catch (error) {
         console.warn(`[chart-export] generator catalog unavailable document=${this.input.documentId} error=${error instanceof Error ? error.message : String(error)}`);
       }

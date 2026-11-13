@@ -42,7 +42,7 @@ import { apiErrorResponse, apiStatusError } from "../lib/api-error.js";
 import { parseListLimit } from "../lib/list-cursor.js";
 import { inlineEstimate, jobMetaFor, jobStatusForMutation, recordJobMeta } from "../services/jobs.js";
 import { billingState } from "../services/config-change.js";
-import { estimateRunReprocess } from "../services/work-estimates.js";
+import { estimateRunReprocess, replayedRunPipeline } from "../services/work-estimates.js";
 import { apiKeyCanUpdateContent, CONTENT_UPDATE_SCOPE_MESSAGE } from "../lib/content-update-access.js";
 import { indexingModeErrorResponse } from "../lib/indexing-mode-error.js";
 import { IndexingModeError } from "../services/project-indexing-mode.js";
@@ -323,11 +323,13 @@ export const runsRoutes = new Hono()
     if (refused) return apiStatusError(c, 400, refused, { code: CHART_EXPORT_TIER_UNAVAILABLE_CODE, details: { field: "chartExport.tier" } });
     const estimate = await estimateRunReprocess({ runId: c.req.param("runId"), userId, options: body });
     if (!estimate) return apiStatusError(c, 404, "Run not found");
-    // The same quote shape as POST /v1/estimate, from the run's measured documents, with the request's tier override so
-    // `quote.settings.chartExport` labels the tier the estimate priced.
+    // The same quote shape as POST /v1/estimate, from the run's measured documents, quoting the pipeline the reprocess
+    // would run (the override, else the run's tier capped at what the project resolves to now), so
+    // `quote.settings.chartExport` labels the tier the estimate priced, never an old uncapped one (R3-L1).
+    const replayed = await replayedRunPipeline(run, body.chartExport?.tier ?? null);
     const quote = run.orgId
       ? await quoteStoredDocuments({
-        scope: { orgId: run.orgId, projectId: run.projectId, runId: run.id }, pipeline: run.pipeline, estimate, origin: runOriginOf(c),
+        scope: { orgId: run.orgId, projectId: run.projectId, runId: run.id }, pipeline: replayed, estimate, origin: runOriginOf(c),
         ...(body.chartExport ? { settings: { chartExport: body.chartExport.tier } } : {}),
       })
       : null;
