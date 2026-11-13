@@ -298,7 +298,7 @@ describe("version 1 maps into the ledger with what it has", () => {
     ]);
     expect(rows.every((row) => isDocumentAssetRow(row))).toBe(true);
     const { hostPageImagePagesOf } = await import("../db/document-asset-ledger.js");
-    expect(await hostPageImagePagesOf(rows)).toEqual([1, 2, 6]);
+    expect(await hostPageImagePagesOf(rows.map((row) => ({ ...row, storageKey: null })))).toEqual([1, 2, 6]);
   });
 
   it("files are extracted, repeats and errors not extracted, fate skips unlinked, unknown values other", () => {
