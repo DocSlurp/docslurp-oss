@@ -60,3 +60,14 @@ ALTER TABLE document_extraction_levels ADD COLUMN IF NOT EXISTS resume_unit_fail
 --> statement-breakpoint
 -- Resume VM time reserved at launch (the unit's capped timeout), settled to the real time when the VM returns (R2 adversarial 4).
 ALTER TABLE figure_resume_org_days ADD COLUMN IF NOT EXISTS reserved_ms bigint NOT NULL DEFAULT 0 CHECK (reserved_ms >= 0);
+--> statement-breakpoint
+-- The worker's resume runner reads, upserts and prunes its per-org daily VM budget; proposal uses are the API's apply
+-- path only. server/db/roles.mjs reconciles the same grants after every migration.
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'docslurp_worker') THEN
+    REVOKE ALL ON public.figure_resume_org_days FROM docslurp_worker;
+    GRANT SELECT, INSERT, UPDATE, DELETE ON public.figure_resume_org_days TO docslurp_worker;
+    REVOKE ALL ON public.figure_resume_proposal_uses FROM docslurp_worker;
+  END IF;
+END $$;
