@@ -18,7 +18,7 @@ const { setWebServiceDeps } = await import("../services/web/service.js");
 const { WebRouter } = await import("../services/web/router.js");
 const { env } = await import("../config.js");
 
-const restrictedKey = { type: "apiKey", userId: "user-1", apiKey: { id: "key-1", userId: "user-1", orgId: "org-1", scopes: ["ingest", "search"], projectIds: ["ws-allowed"] } } as never;
+const restrictedKey = { type: "apiKey", userId: "user-1", apiKey: { id: "key-1", userId: "user-1", orgId: "org-1", scopes: ["ingest", "search:deep"], projectIds: ["ws-allowed"] } } as never;
 
 function crawlSpy() {
   const run = vi.fn(async () => ({ data: { pages: [{ url: "https://a.test/", markdown: "# A" }] }, costUsd: 0.001, costSource: "reported" as const }));
@@ -90,7 +90,7 @@ describe("web tools and public client keys", () => {
 
   it("refuses a search-scoped client key before any provider call", async () => {
     const run = fetchSpy();
-    const response = await post(clientKey(["search", "chat"]), "/fetch", { urls: ["https://a.test/"] });
+    const response = await post(clientKey(["search:deep", "chat"]), "/fetch", { urls: ["https://a.test/"] });
     expect(response.status).toBe(403);
     expect(await response.json()).toMatchObject({ error: { code: "web_scope_required" } });
     expect(run).not.toHaveBeenCalled();
@@ -98,7 +98,7 @@ describe("web tools and public client keys", () => {
 
   it("refuses website ingestion to a client key with ingest but no web scope", async () => {
     const run = crawlSpy();
-    const response = await post(clientKey(["search", "ingest"]), "/ingest", { url: "https://a.test/" });
+    const response = await post(clientKey(["search:deep", "ingest"]), "/ingest", { url: "https://a.test/" });
     expect(response.status).toBe(403);
     expect(run).not.toHaveBeenCalled();
   });
@@ -106,7 +106,7 @@ describe("web tools and public client keys", () => {
   it("refuses unverified target fetching even for a key with web scope", async () => {
     const run = fetchSpy();
     scoped.mockResolvedValueOnce({ id: "ws-allowed", orgId: "org-1" });
-    const response = await post(clientKey(["search", "web"]), "/fetch", { urls: ["https://a.test/"] });
+    const response = await post(clientKey(["search:deep", "web"]), "/fetch", { urls: ["https://a.test/"] });
     expect(response.status).toBe(403);
     expect(await response.json()).toMatchObject({ error: { code: "forbidden" } });
     expect(run).not.toHaveBeenCalled();

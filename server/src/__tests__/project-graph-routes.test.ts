@@ -93,7 +93,7 @@ describe("project graph routes", () => {
 
   it("lets read-scoped API keys read but not change the graph", async () => {
     getStatusMock.mockResolvedValue({ projectId: "ws-1" });
-    const app = buildApp({ scopes: ["search"], keyType: "server" });
+    const app = buildApp({ scopes: ["search:deep"], keyType: "server" });
     expect((await app.request("/v1/projects/ws-1/graph")).status).toBe(200);
     const denied = await app.request("/v1/projects/ws-1/graph/rebuild", {
       method: "POST",

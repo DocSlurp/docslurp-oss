@@ -27,7 +27,7 @@ const answer = {
   citations: [{ text: "annual", score: 1, citation: { filename: "contract.pdf", documentId: "doc-1", pageNumber: 2 } }],
   availability: null, usage: { inputTokens: 19, outputTokens: 7, totalTokens: 26 },
 };
-const key = { userId: "user-1", orgId: "org-1", scopes: ["search", "chat"], keyType: "server", keyId: "key-1" };
+const key = { userId: "user-1", orgId: "org-1", scopes: ["search:deep", "chat"], keyType: "server", keyId: "key-1" };
 function app() { return new Hono().route("/v1", chatCompletionsRoutes); }
 function request(body: unknown) {
   return app().request("/v1/chat/completions", { method: "POST", headers: { Authorization: "Bearer dslp_test", "Content-Type": "application/json" }, body: JSON.stringify(body) });
@@ -62,7 +62,7 @@ describe("OpenAI-compatible project chat", () => {
   });
   it("rejects malformed boost and does not let boost bypass the key scope", async () => {
     expect((await request(input({ docslurp: { speedBoost: "true" } }))).status).toBe(400);
-    validateApiKey.mockResolvedValueOnce({ ...key, scopes: ["search"] });
+    validateApiKey.mockResolvedValueOnce({ ...key, scopes: ["search:deep"] });
     expect((await request(input({ docslurp: { speedBoost: true } }))).status).toBe(403);
     expect(chatProject).not.toHaveBeenCalled();
   });
@@ -79,7 +79,7 @@ describe("OpenAI-compatible project chat", () => {
     expect(chatProject).not.toHaveBeenCalled();
   });
   it("refuses search-only keys: answers need the chat scope", async () => {
-    validateApiKey.mockResolvedValueOnce({ ...key, scopes: ["search"] });
+    validateApiKey.mockResolvedValueOnce({ ...key, scopes: ["search:deep"] });
     const response = await request(input());
     expect(response.status).toBe(403);
     expect(await response.json()).toMatchObject({ error: { type: "permission_error", code: "insufficient_scope", message: "API key needs chat access" } });

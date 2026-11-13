@@ -229,7 +229,7 @@ Limit the watch with these options:
 
 `getRunProgress` returns the same full snapshot without opening a stream. `streamRun` is the raw stream of run, stage and document events; it has no polling fallback and no replay.
 
-`getProjectState` needs a signed-in session or a server key with the `ingest`, `search`, `artifacts` or `projects:manage` scope. Without one, it uses the client's project (the `project` option, then `DOCSLURP_PROJECT`, then `default`). `recentWindowHours` is an integer from 1 to 720 and defaults to 24.
+`getProjectState` needs a signed-in session or a server key with the `ingest`, `artifacts` or `projects:manage` scope or any search scope. Without one, it uses the client's project (the `project` option, then `DOCSLURP_PROJECT`, then `default`). `recentWindowHours` is an integer from 1 to 720 and defaults to 24.
 
 - Indexed pages are unique page numbers with nonblank page or chunk text in completed documents' current runs, capped at each document's known page count. They don't measure vector embedding coverage.
 - Documents with unknown page counts are counted separately, not guessed.
@@ -290,7 +290,7 @@ Add DocSlurp search, chat and a document viewer to your site as React components
 | `createOfflineSearchBundle()` | Builds a JSON bundle (and optionally a LanceDB table) for offline search. |
 | `createOfflineSearchClient()` | Searches that bundle in the browser or in Node. |
 
-Search and chat take `apiUrl` (default `https://docslurp.io`), a `dslp_pub_` browser `clientKey` (with the `search` scope; `ChatEmbed` also needs `chat`), and `project` (an ID, slug or name, or `default`; default `default`; the custom elements' attribute is also `project`). Browser integrations reject server and untyped legacy keys. API origins must use HTTPS, except exact localhost/loopback addresses for development.
+Search and chat take `apiUrl` (default `https://docslurp.io`), a `dslp_pub_` browser `clientKey` (with a search scope such as `search:hybrid`; `ChatEmbed` also needs `chat`), and `project` (an ID, slug or name, or `default`; default `default`; the custom elements' attribute is also `project`). Browser integrations reject server and untyped legacy keys. API origins must use HTTPS, except exact localhost/loopback addresses for development.
 
 For `ViewerEmbed`, pass `apiUrl=""` for the same-origin API and `documentId`, with no `clientKey`. On your own site, authenticate users in a backend proxy and authorize each requested document there. Keep the server key in that backend. Proxy both document metadata and artifact URLs (rewrite artifact URLs to same-origin authenticated routes): the viewer iframe uses cookies and cannot attach a bearer header. Never put server credentials into an embed or an artifact URL.
 
@@ -430,7 +430,7 @@ Environment variables are read once, when the client is created, and only on the
 | `getExtract(id, request?)` / `listExtracts({ limit? }?)` | Extract record / records | `ingest` or `artifacts` |
 | `deleteExtract(id, request?)` | `{ extract }`, expired now | `ingest` |
 | `getExtractDownloadUrl(id, request?)` | Two-minute signed zip URL | Server key with `artifacts` |
-| `listProjects(options?)` | Accessible project records | `ingest`, `search`, `artifacts` or `projects:manage` |
+| `listProjects(options?)` | Accessible project records | `ingest`, `artifacts`, `projects:manage` or any search scope |
 | `getProject(id, options?)` | Project record | Same as listing |
 | `listProjectTags(project?, request?)` | `[{ tag, documentCount }]` | Same as listing |
 | `createUploadSession(input, options?)` | Session ID, status and signed transfer descriptors | `ingest` |
@@ -439,17 +439,17 @@ Environment variables are read once, when the client is created, and only on the
 | `completeUploadFile(id, input, options?)` | Stored-file verification; required at EOF for custom unknown-size transfers | `ingest` |
 | `completeUploadSession(id, options?)` | Explicit fallback for ingestion acceptance; normal uploads finalize automatically | `ingest` |
 | `abortUploadSession(id, options?)` | Cleanup confirmation | `ingest` |
-| `getRun(runId, request?)` | Run record (not the progress envelope) | Any of `ingest`, `search`, `artifacts` |
-| `listRuns(request?)` | Your recent runs, newest first | Server key with any of `ingest`, `search`, `artifacts` |
+| `getRun(runId, request?)` | Run record (not the progress envelope) | `ingest`, `artifacts` or any search scope |
+| `listRuns(request?)` | Your recent runs, newest first | Server key with `ingest`, `artifacts` or any search scope |
 | `getRunProgress(runId, request?)` | Full typed progress snapshot | Same as `getRun` |
 | `streamProgress(runId, options?)` | Async iterable of full snapshots with polling fallback | Same as `getRun` |
-| `getProjectState(project?, options?)` | Current project counts, MB, searches, recent performance and usage | Server key with any of `ingest`, `search`, `artifacts`, `projects:manage` |
-| `getIngestReport(project?, { runId?, documentIds? })` | How files processed: pages, bytes and text per page, images, vision, searchable pages with reasons, settings and recommendations (no AI) | Server key with any of `ingest`, `search`, `artifacts`, `projects:manage` |
+| `getProjectState(project?, options?)` | Current project counts, MB, searches, recent performance and usage | Server key with `ingest`, any search scope, `artifacts`, `projects:manage` |
+| `getIngestReport(project?, { runId?, documentIds? })` | How files processed: pages, bytes and text per page, images, vision, searchable pages with reasons, settings and recommendations (no AI) | Server key with `ingest`, any search scope, `artifacts`, `projects:manage` |
 | `waitForRun(runId, options?)` | Completed run, or throws | Same as `getRun` |
 | `streamRun(runId, options?)` | Async iterable of `{ event, id?, data }` | Same as `getRun` |
 | `streamActivity(options?)` | Async iterable of account activity events, filtered by `types` and project UUID | Same as `getRun` |
-| `search(input, request?)` | Async iterable of hits; await for `{ results, availability, sessionId, usage }` | `search` |
-| `search({ queries, concurrency? }, options?)` | `{ results: [{ ok, data?, error? }] }` | `search` |
+| `search(input, request?)` | Async iterable of hits; await for `{ results, availability, sessionId, usage }` | Any search scope (`search:keyword`, `search:hybrid`, `search:deep`); `mode` picks a cheaper one |
+| `search({ queries, concurrency? }, options?)` | `{ results: [{ ok, data?, error? }] }` | Any search scope (`search:keyword`, `search:hybrid`, `search:deep`); `mode` picks a cheaper one |
 | `chat({ q, project?, sessionId? }, request?)` | Answer, citations, availability, session IDs, usage, runtime | `chat` |
 | `chatStream(input, request?)` | Async iterable of `status`, `message` (the full `ChatResponse`) and `done` events; sends `q`, `project`, `sessionId`, `sessionToken`, `model`, `filters` and `speedBoost`, not `retrieval` or `agent` | `chat` |
 | `listDocuments({ project?, runId?, tags? }?, request?)` | Document records, newest first | `artifacts` |
@@ -1145,7 +1145,7 @@ Complete illustrative result when there are no active keys:
 
 When keys are revoked, `keys` lists them in the shape above with `revokedAt` set, and `revokedCount` is how many. Revoking needs an owner or admin, and keys need `organizations:manage`. It also revokes the key making the request.
 
-Organization scopes are opt-in and never part of the default `ingest`, `search`, `chat` and `artifacts` set. To grant one, create or update a server key on the [API keys](https://docslurp.io/app/api-keys) page, or from a signed-in session with `POST /v1/api-keys` or `PATCH /v1/api-keys/:id`. Use `scopes: ["organizations:read"]` to read, or `["organizations:manage"]` to read and make changes. Only owners and admins can grant `organizations:manage`, and browser keys can't have organization scopes. The SDK has no methods for creating keys; see the [HTTP reference](https://docslurp.io/docs/http).
+Organization scopes are opt-in and never part of the default `ingest`, `search:deep`, `chat` and `artifacts` set. To grant one, create or update a server key on the [API keys](https://docslurp.io/app/api-keys) page, or from a signed-in session with `POST /v1/api-keys` or `PATCH /v1/api-keys/:id`. Use `scopes: ["organizations:read"]` to read, or `["organizations:manage"]` to read and make changes. Only owners and admins can grant `organizations:manage`, and browser keys can't have organization scopes. The SDK has no methods for creating keys; see the [HTTP reference](https://docslurp.io/docs/http).
 
 ## Timeouts, cancellation, and errors
 

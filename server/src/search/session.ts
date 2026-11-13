@@ -13,6 +13,7 @@ import type { SearchFilters } from "./filters.js";
 import { currentChatSessionId } from "../lib/chat-agent-context.js";
 import { reportPublicError } from "../lib/public-errors.js";
 import { trackCurrentChatTurnWrite } from "../lib/chat-turn-context.js";
+import { enqueueSearchUsage } from "./lean-logging.js";
 
 export type SearchUsageEvent = UsageEvent;
 
@@ -36,6 +37,10 @@ export interface PersistSearchSessionInput {
   results: readonly unknown[];
   chunks: readonly SearchSessionChunk[];
   metadata: SearchSessionMetadataInput;
+  /** Days until the session (and its result rows) expires; omitted keeps it (lean-logging.ts). */
+  expiresInDays?: number;
+  /** False skips the per-result rows (lean keyword searches); the session row keeps the result count. */
+  resultRows?: boolean;
 }
 
 export interface SearchSessionChunk {
@@ -286,6 +291,12 @@ class SqlSearchSessionJournal implements SearchSessionJournal {
   async persist(input: PersistSearchSessionInput): Promise<void> {
     // Snapshot now: the metadata and duration describe the search as it answered.
     const durationMs = Date.now() - this.startedAtMs;
+    // Lean searches (expiring history) sum their non-billable usage into per-key batches (lean-logging.ts).
+    const projectId = this.scope.projectId ?? input.metadata.projectId;
+    if (input.expiresInDays && projectId) {
+      const events = this.usage.divert((event) => event.metadata?.billable === false);
+      if (events.length > 0) enqueueSearchUsage({ userId: input.userId, orgId: this.scope.orgId ?? null, projectId }, events);
+    }
     if (this.writeBehind) {
       await this.flushUsageInline(input.userId, this.scope.projectId ?? input.metadata.projectId);
     }
@@ -337,14 +348,15 @@ class SqlSearchSessionJournal implements SearchSessionJournal {
         ? client`'enc:pgp:v1:' || encode(pgp_sym_encrypt(${input.query}, ${encryptionKey}), 'base64')`
         : redactedSearchQuery(input.query);
       const sessions = await client<{ id: string; inserted: boolean }[]>`
-        insert into search_sessions (id, user_id, query, variant, result_count, metadata)
+        insert into search_sessions (id, user_id, query, variant, result_count, metadata, expires_at)
         values (
           ${this.sessionId},
           ${input.userId},
           ${storedQuery},
           ${input.variant ?? null},
           ${input.results.length},
-          ${metadataJson}::text::jsonb
+          ${metadataJson}::text::jsonb,
+          ${input.expiresInDays ? client`now() + make_interval(days => ${input.expiresInDays})` : null}
         )
         on conflict (id) do update set
           result_count = excluded.result_count,
@@ -368,7 +380,7 @@ class SqlSearchSessionJournal implements SearchSessionJournal {
       // retaining usage for every actual retrieval attempt under the root id.
       // A freshly inserted session has no result rows to replace.
       if (!sessions[0]!.inserted) await client`delete from search_session_results where session_id = ${this.sessionId}`;
-      if (input.chunks.length > 0) {
+      if (input.chunks.length > 0 && input.resultRows !== false) {
         const rows = input.chunks.map((c, i) => ({
           id: randomUUID(),
           session_id: this.sessionId,

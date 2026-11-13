@@ -1297,7 +1297,7 @@ export const apiKeys = pgTable(
     name: text().notNull(),
     keyType: text("key_type").default("server").notNull(),
     allowedDomains: text("allowed_domains").array().default([]).notNull(),
-    scopes: text().array().default(["ingest", "search", "artifacts"]).notNull(),
+    scopes: text().array().default(["ingest", "search:deep", "artifacts"]).notNull(),
     /** Optional per-key requests-per-minute cap; null means the plan's limits apply. */
     rateLimitRpm: integer("rate_limit_rpm"),
     rateLimitPpd: integer("rate_limit_ppd").default(10000).notNull(),
@@ -1386,8 +1386,11 @@ export const searchSessions = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true, mode: "string" })
       .defaultNow()
       .notNull(),
+    /** API-key keyword and hybrid searches only (0139); the maintenance sweep deletes the session after it. */
+    expiresAt: timestamp("expires_at", { withTimezone: true, mode: "string" }),
   },
   (table) => [
+    index("search_sessions_expires_at_idx").on(table.expiresAt).where(sql`expires_at is not null`),
     index("search_sessions_user_id_created_at_idx").using(
       "btree",
       table.userId.asc().nullsLast().op("text_ops"),
@@ -2029,6 +2032,7 @@ export const chatAnswerEvidenceSpans = pgTable(
       .notNull(),
   },
   (table) => [
+    index("chat_answer_evidence_spans_search_session_idx").on(table.searchSessionId).where(sql`search_session_id is not null`),
     index("chat_answer_evidence_spans_answer_id_idx").using(
       "btree",
       table.answerId.asc().nullsLast().op("int4_ops"),
@@ -2440,6 +2444,7 @@ export const searchZeroResults = pgTable(
       .notNull(),
   },
   (table) => [
+    index("search_zero_results_session_idx").on(table.sessionId),
     index("search_zero_results_user_idx").using(
       "btree",
       table.userId.asc().nullsLast().op("text_ops"),
@@ -3559,7 +3564,7 @@ export const documentPageStates = pgTable(
 );
 
 /**
- * Document asset ledger (migration 0138, docs/extraction/doppler-figures.md "Asset ledger"): one row per image Doppler
+ * Document asset ledger (migration 0140, docs/extraction/doppler-figures.md "Asset ledger"): one row per image Doppler
  * reports for a document, extracted or not. Tenant scope is tied to the document by the composite foreign key on
  * documents (id, project_id, org_id); CHECK constraints (closed enums, bounds, status consistency) live in the migration.
  */
@@ -3602,7 +3607,7 @@ export const documentAssets = pgTable("document_assets", {
   index("document_assets_run_idx").on(table.runId).where(sql`run_id IS NOT NULL`),
 ]);
 
-/** How far a document's text, page facts and images got (migration 0138); one row per document, written with its assets. */
+/** How far a document's text, page facts and images got (migration 0140); one row per document, written with its assets. */
 export const documentExtractionLevels = pgTable("document_extraction_levels", {
   documentId: text("document_id").primaryKey().notNull(),
   orgId: text("org_id").notNull(),

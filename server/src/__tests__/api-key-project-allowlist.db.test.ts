@@ -36,7 +36,7 @@ afterAll(async () => {
   await stop?.();
 });
 
-const create = (userId: string, projectIds: string[], orgId = "team") => keys.createApiKey(userId, "k", { orgId, projectIds, scopes: ["search"] });
+const create = (userId: string, projectIds: string[], orgId = "team") => keys.createApiKey(userId, "k", { orgId, projectIds, scopes: ["search:deep"] });
 
 describe("API key project allowlist", () => {
   it("accepts the default project, one the member was added to, and any project for an admin", async () => {

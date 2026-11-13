@@ -1,7 +1,7 @@
 import { requestIp } from "../lib/request-context.js";
 import type { MiddlewareHandler } from "hono";
 import { ApiKeyPolicyError, resolveApiKeyActor, setRequestActor } from "../lib/request-actor.js";
-import { MCP_SCOPES, mcpOrigin, mcpResource, validateMcpToken } from "../services/mcp-oauth.js";
+import { MCP_DEFAULT_SCOPES, mcpOrigin, mcpResource, validateMcpToken } from "../services/mcp-oauth.js";
 import { enforceAuthenticatedApiRateLimit } from "./rate-limit.js";
 
 /** RFC 6750 §2.1: the auth scheme is case-insensitive. */
@@ -18,7 +18,7 @@ export function bearerToken(header: string | undefined): string {
 export function mcpBearerChallenge(requestUrl: string, presented: boolean): string {
   const params = [
     `resource_metadata="${mcpOrigin(requestUrl)}/.well-known/oauth-protected-resource/v1/mcp"`,
-    `scope="${MCP_SCOPES.join(" ")}"`,
+    `scope="${MCP_DEFAULT_SCOPES.join(" ")}"`,
   ];
   if (presented) params.unshift(`error="invalid_token"`, `error_description="The access token is invalid, expired or revoked"`);
   return `Bearer ${params.join(", ")}`;

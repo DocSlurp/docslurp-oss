@@ -273,7 +273,7 @@ describe("chatProject", () => {
     });
     hybridSearch.mockResolvedValue({ sessionId: "search-1", results: [] });
     const query = "Enable search reranking for this project";
-    const actor = { type: "apiKey", userId: "user-1", apiKey: { keyId: "key-1", userId: "user-1", orgId: "org-1", keyType, scopes: ["search", "chat", "projects:manage"], projectIds: [], allowedDomains: [], rateLimitRpm: null, rateLimitPpd: 0, rateLimits: [] } } as never;
+    const actor = { type: "apiKey", userId: "user-1", apiKey: { keyId: "key-1", userId: "user-1", orgId: "org-1", keyType, scopes: ["search:deep", "chat", "projects:manage"], projectIds: [], allowedDomains: [], rateLimitRpm: null, rateLimitPpd: 0, rateLimits: [] } } as never;
     await chatProject({ projectId: "ws-1", userId: "user-1", query, history: [], actor, agent: { suggestions: true } as never });
     expect(configureSearchFromChat).not.toHaveBeenCalled();
     // No key type renames the customer's project from a message.
@@ -282,8 +282,8 @@ describe("chatProject", () => {
 
   it.each([
     { name: "app session", actor: appSessionActor, expected: true },
-    { name: "server key", actor: { type: "apiKey", userId: "user-1", apiKey: { keyId: "k", userId: "user-1", orgId: "org-1", keyType: "server", scopes: ["search", "chat", "projects:manage"], projectIds: [], allowedDomains: [], rateLimitRpm: null, rateLimitPpd: 0, rateLimits: [] } } as never, expected: false },
-    { name: "client key", actor: { type: "apiKey", userId: "user-1", apiKey: { keyId: "k", userId: "user-1", orgId: "org-1", keyType: "client", scopes: ["search", "chat"], projectIds: [], allowedDomains: ["example.com"], rateLimitRpm: null, rateLimitPpd: 0, rateLimits: [] } } as never, expected: false },
+    { name: "server key", actor: { type: "apiKey", userId: "user-1", apiKey: { keyId: "k", userId: "user-1", orgId: "org-1", keyType: "server", scopes: ["search:deep", "chat", "projects:manage"], projectIds: [], allowedDomains: [], rateLimitRpm: null, rateLimitPpd: 0, rateLimits: [] } } as never, expected: false },
+    { name: "client key", actor: { type: "apiKey", userId: "user-1", apiKey: { keyId: "k", userId: "user-1", orgId: "org-1", keyType: "client", scopes: ["search:deep", "chat"], projectIds: [], allowedDomains: ["example.com"], rateLimitRpm: null, rateLimitPpd: 0, rateLimits: [] } } as never, expected: false },
   ])("runs suggestions mode only for the first-party app ($name), whatever agent.suggestions says", async ({ actor, expected }) => {
     sqlMock.mockResolvedValue([]);
     getProject.mockResolvedValue({ id: "ws-1", orgId: "org-1", systemPrompt: null });
@@ -307,7 +307,7 @@ describe("chatProject", () => {
         stats: { documentCount: 0, chunkCount: 0, tokenEstimate: 0, charEstimate: 0, maxDocuments: 12, maxChunks: 24, maxTokens: 12000, maxChars: 60000 },
       });
       hybridSearch.mockResolvedValue({ sessionId: "search-1", results: [] });
-      const visitor = { type: "apiKey", userId: "user-1", apiKey: { keyId: "pub-1", userId: "user-1", orgId: "org-1", keyType: "client", scopes: ["search", "chat"], projectIds: ["ws-1"], allowedDomains: ["docs.example.com"], rateLimitRpm: null, rateLimitPpd: 0, rateLimits: [] } } as never;
+      const visitor = { type: "apiKey", userId: "user-1", apiKey: { keyId: "pub-1", userId: "user-1", orgId: "org-1", keyType: "client", scopes: ["search:deep", "chat"], projectIds: ["ws-1"], allowedDomains: ["docs.example.com"], rateLimitRpm: null, rateLimitPpd: 0, rateLimits: [] } } as never;
       const first = await chatProject({ projectId: "ws-1", userId: "user-1", query: "hello", history: [], actor: visitor });
       expect(first.sessionToken).toEqual(expect.any(String));
       sqlMock.mockClear();
@@ -344,7 +344,7 @@ describe("chatProject", () => {
     const previous = process.env.OPENROUTER_API_KEY;
     process.env.OPENROUTER_API_KEY = "fake";
     try {
-      const actor = { type: "apiKey", userId: "user-1", apiKey: { keyId: "k", userId: "user-1", orgId: "org-1", keyType, scopes: ["search", "chat"], projectIds: ["ws-1"], allowedDomains: [], rateLimitRpm: null, rateLimitPpd: 0, rateLimits: [], ...(cap === undefined ? {} : { maxOutputTokens: cap }) } } as never;
+      const actor = { type: "apiKey", userId: "user-1", apiKey: { keyId: "k", userId: "user-1", orgId: "org-1", keyType, scopes: ["search:deep", "chat"], projectIds: ["ws-1"], allowedDomains: [], rateLimitRpm: null, rateLimitPpd: 0, rateLimits: [], ...(cap === undefined ? {} : { maxOutputTokens: cap }) } } as never;
       await chatProject({ projectId: "ws-1", userId: "user-1", query: "Find evidence", history: [], actor, ...(requested ? { maxOutputTokens: requested } : {}) });
       expect((runChatMcpAgent.mock.calls.at(-1)![0] as { maxOutputTokens: number }).maxOutputTokens).toBe(expected);
     } finally {
@@ -996,7 +996,7 @@ describe("chatProject", () => {
         await onTextDelta?.("unreviewed answer");
         return { text: "unreviewed answer", usage: { inputTokens: 10, outputTokens: 4 }, sources: [] };
       });
-      const actor = { type: "apiKey", userId: "user-1", apiKey: { keyId: "pub-1", userId: "user-1", orgId: "org-1", keyType: "client", scopes: ["search", "chat"], projectIds: ["ws-1"], allowedDomains: ["docs.example.com"], rateLimitRpm: null, rateLimitPpd: 0, rateLimits: [] } } as never;
+      const actor = { type: "apiKey", userId: "user-1", apiKey: { keyId: "pub-1", userId: "user-1", orgId: "org-1", keyType: "client", scopes: ["search:deep", "chat"], projectIds: ["ws-1"], allowedDomains: ["docs.example.com"], rateLimitRpm: null, rateLimitPpd: 0, rateLimits: [] } } as never;
       const deltas: string[] = [];
       const pending = chatProject({ projectId: "ws-1", userId: "user-1", query: "What is the warranty?", actor, allowAgentTools: false, history: [], onTextDelta: delta => { deltas.push(delta); } });
       await vi.waitFor(() => expect(provider).toHaveBeenCalledOnce());

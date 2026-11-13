@@ -10,7 +10,7 @@ const { sealCapabilityToken, resetCapabilityKeyForTests } = await import("../lib
 
 const now = 1_900_000_000_000;
 const pipeline = defaultPipelineFeatures;
-const clientKey = { keyId: "client-1", userId: "u", orgId: "org-1", keyType: "client", allowedDomains: ["a.com"], scopes: ["search"], rateLimitRpm: 1, rateLimitPpd: 1, rateLimits: [], projectIds: [] } as ValidatedKey;
+const clientKey = { keyId: "client-1", userId: "u", orgId: "org-1", keyType: "client", allowedDomains: ["a.com"], scopes: ["search:deep"], rateLimitRpm: 1, rateLimitPpd: 1, rateLimits: [], projectIds: [] } as ValidatedKey;
 const claims = (over: Partial<CapabilityClaims> = {}): CapabilityClaims => ({
   v: 1, orgId: "org-1", projectIds: ["ws-a"], policy: {}, issuedByKeyId: "key-1", exp: Math.floor(now / 1000) + 600, jti: "j", ...over,
 });
@@ -23,7 +23,7 @@ describe("resolveMaterializationPolicy", () => {
     resetCapabilityKeyForTests();
     resetIssuerKeyCacheForTests();
     live.fn.mockReset();
-    live.fn.mockResolvedValue({ keyType: "server", scopes: ["search"], projectIds: [], materializationPolicy: {} });
+    live.fn.mockResolvedValue({ keyType: "server", scopes: ["search:deep"], projectIds: [], materializationPolicy: {} });
   });
 
   it("uses key-type defaults and narrows by project and key", async () => {
@@ -43,7 +43,7 @@ describe("resolveMaterializationPolicy", () => {
   });
 
   it("a token can narrow, and the issuer's own policy applies", async () => {
-    live.fn.mockResolvedValue({ keyType: "server", scopes: ["search"], projectIds: [], materializationPolicy: { maxPagesPerQuery: 15 } });
+    live.fn.mockResolvedValue({ keyType: "server", scopes: ["search:deep"], projectIds: [], materializationPolicy: { maxPagesPerQuery: 15 } });
     const res = await resolve(sealCapabilityToken(claims({ policy: { maxCreditsPerQuery: 3 } })));
     expect(res).toMatchObject({ policy: { maxPagesPerQuery: 15, maxCreditsPerQuery: 3 } });
   });
@@ -64,7 +64,7 @@ describe("resolveMaterializationPolicy", () => {
     live.fn.mockResolvedValue(null);
     const token = sealCapabilityToken(claims());
     expect(await resolve(token)).toEqual({ error: "capability_invalid" });
-    live.fn.mockResolvedValue({ keyType: "server", scopes: ["search"], projectIds: [], materializationPolicy: {} });
+    live.fn.mockResolvedValue({ keyType: "server", scopes: ["search:deep"], projectIds: [], materializationPolicy: {} });
     expect(await resolve(token)).toEqual({ error: "capability_invalid" }); // cached 60 s
     expect(live.fn).toHaveBeenCalledTimes(1);
     expect(await resolve(token, { nowMs: now + 61_000 })).toHaveProperty("policy"); // cache expired, key looked up again
@@ -75,10 +75,10 @@ describe("resolveMaterializationPolicy", () => {
     live.fn.mockResolvedValue({ keyType: "server", scopes: ["ingest"], projectIds: [], materializationPolicy: {} });
     expect(await resolve(token)).toEqual({ error: "capability_invalid" });
     resetIssuerKeyCacheForTests();
-    live.fn.mockResolvedValue({ keyType: "server", scopes: ["search"], projectIds: ["ws-z"], materializationPolicy: {} });
+    live.fn.mockResolvedValue({ keyType: "server", scopes: ["search:deep"], projectIds: ["ws-z"], materializationPolicy: {} });
     expect(await resolve(token)).toEqual({ error: "capability_scope" });
     resetIssuerKeyCacheForTests();
-    live.fn.mockResolvedValue({ keyType: "client", scopes: ["search"], projectIds: [], materializationPolicy: {} });
+    live.fn.mockResolvedValue({ keyType: "client", scopes: ["search:deep"], projectIds: [], materializationPolicy: {} });
     expect(await resolve(token)).toEqual({ error: "capability_invalid" });
   });
 

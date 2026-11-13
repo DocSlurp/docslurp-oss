@@ -18,7 +18,7 @@ import { v2Manifest, writeV2Folder, V2_SETTINGS_SHA, V2_SOURCE_SHA } from "../te
 import { createMigratedDatabase } from "../test/migrated-db.js";
 import { serveOnRandomPort } from "../test/migrated-postgres.js";
 
-// The asset ledger (migration 0138) through the worker's real Store over a migrated database: org-scoped writes,
+// The asset ledger (migration 0140) through the worker's real Store over a migrated database: org-scoped writes,
 // idempotent re-runs and resumes, refusals that write nothing, and no way for one organization to touch another's rows.
 let db: PGlite;
 let server: PGLiteSocketServer;

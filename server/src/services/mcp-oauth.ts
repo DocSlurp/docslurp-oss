@@ -2,8 +2,27 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { parseIp } from "@docslurp/shared/client-ip";
 import type { PoolClient } from "pg";
 import { appDbPool } from "../lib/auth.js";
+import { isSearchScope, SEARCH_SCOPES } from "../lib/search-tiers.js";
 import { effectiveMaxOutputTokens, ipAllowed, parseApiKeyRateLimits, parseKeyMaterializationPolicy, type ValidatedKey } from "./api-keys.js";
-export const MCP_SCOPES = ["search", "chat", "read", "ingest"] as const;
+/**
+ * OAuth scopes. The search modes are the API-key scopes of the same name (lib/search-tiers.ts): a grant holds one,
+ * and it grants the modes below it too.
+ */
+export const MCP_SCOPES = [...SEARCH_SCOPES, "chat", "read", "ingest"] as const;
+/** What an authorization without a `scope` parameter asks for, and what MCP challenges advertise. */
+export const MCP_DEFAULT_SCOPES = ["search:deep", "chat", "read", "ingest"] as const;
+/** Retired scope names still accepted from clients that saved them; stored grants were migrated (0138). */
+const LEGACY_OAUTH_SCOPES: Readonly<Record<string, string>> = { search: "search:deep" };
+
+/**
+ * Requested scopes with retired names mapped and at most one search mode: the widest requested, which is what the
+ * consent page shows and the user approves.
+ */
+export function normalizeOAuthScopes(scopes: readonly string[]): string[] {
+  const mapped = [...new Set(scopes.map((scope) => LEGACY_OAUTH_SCOPES[scope] ?? scope))];
+  const widest = [...SEARCH_SCOPES].reverse().find((scope) => mapped.includes(scope));
+  return mapped.filter((scope) => !isSearchScope(scope) || scope === widest);
+}
 /**
  * First-party clients (the DocSlurp CLI) may also ask for `web`, which a
  * REST-audience token needs for paid web tools. MCP clients never see it:
@@ -37,7 +56,8 @@ export const OAUTH_TOKEN_PREFIX = { mcp: "dsmcp", api: "dscli" } as const;
  * change project settings, manage an organization or hold client-key web
  * access, whatever it was granted.
  *
- * - search -> search (passages, suggestions, read-only project listing)
+ * - search:keyword / search:hybrid / search:deep -> the same key scope (passages up to that mode,
+ *   suggestions, read-only project listing)
  * - chat   -> chat (generated answers on the owner's credits)
  * - read   -> artifacts (document text, pages, files, runs and exports)
  * - ingest -> ingest (uploads, URL ingest, reprocess, document retag/delete)
@@ -45,7 +65,9 @@ export const OAUTH_TOKEN_PREFIX = { mcp: "dsmcp", api: "dscli" } as const;
  *   need it explicitly; `search` alone does not unlock web tools for them.
  */
 export const OAUTH_TO_API_KEY_SCOPES: Readonly<Record<typeof FIRST_PARTY_SCOPES[number], readonly string[]>> = {
-  search: ["search"],
+  "search:keyword": ["search:keyword"],
+  "search:hybrid": ["search:hybrid"],
+  "search:deep": ["search:deep"],
   chat: ["chat"],
   read: ["artifacts"],
   ingest: ["ingest"],
@@ -55,7 +77,7 @@ export const OAUTH_TO_API_KEY_SCOPES: Readonly<Record<typeof FIRST_PARTY_SCOPES[
 export function oauthScopesToApiKeyScopes(scopes: readonly string[]): string[] {
   const mapped = new Set<string>();
   for (const scope of scopes) {
-    const target = OAUTH_TO_API_KEY_SCOPES[scope as typeof FIRST_PARTY_SCOPES[number]];
+    const target = OAUTH_TO_API_KEY_SCOPES[(LEGACY_OAUTH_SCOPES[scope] ?? scope) as typeof FIRST_PARTY_SCOPES[number]];
     // An unknown scope maps to nothing (fail closed), never to a default set.
     if (target) for (const value of target) mapped.add(value);
   }
@@ -72,9 +94,17 @@ export function allowedResources(url: string, client: { first_party?: boolean | 
   return client.first_party === true ? [mcpResource(url), apiResource(url)] : [mcpResource(url)];
 }
 
-/** The key scopes stored on a grant's internal key: raw scopes for MCP (unchanged), mapped scopes for the REST API. */
+/**
+ * MCP-audience grants keep their OAuth scope names as key scopes (the MCP catalog reads them directly); a retired
+ * name on a grant written before migration 0138 is read as its replacement.
+ */
+export function mcpGrantKeyScopes(scopes: readonly string[]): string[] {
+  return normalizeOAuthScopes(scopes);
+}
+
+/** The key scopes stored on a grant's internal key: MCP scopes for MCP, mapped scopes for the REST API. */
 export function grantKeyScopes(resource: string, scopes: readonly string[], url: string): string[] {
-  return resource === apiResource(url) ? oauthScopesToApiKeyScopes(scopes) : [...scopes];
+  return resource === apiResource(url) ? oauthScopesToApiKeyScopes(scopes) : mcpGrantKeyScopes(scopes);
 }
 
 export function validRedirect(value: unknown): value is string {
@@ -123,8 +153,8 @@ export function logTokenRejection(reason: string, details: { grantType: unknown;
 }
 
 export function parseScopes(value: string | null, allowed: readonly string[] = MCP_SCOPES): string[] {
-  // An omitted scope means the MCP set, never first-party extras such as `web`.
-  const scopes = [...new Set((value ?? MCP_SCOPES.join(" ")).split(/\s+/).filter(Boolean))];
+  // An omitted scope means the default MCP set, never first-party extras such as `web`.
+  const scopes = normalizeOAuthScopes((value ?? MCP_DEFAULT_SCOPES.join(" ")).split(/\s+/).filter(Boolean));
   if (!scopes.length || scopes.some(scope => !allowed.includes(scope))) {
     throw new Error("invalid_scope");
   }
@@ -178,7 +208,7 @@ export async function validateMcpToken(raw: string, resource: string, requestCon
   if (allowlist.length && !ipAllowed(requestContext?.ip, allowlist)) return null;
   return {
     keyId: row.api_key_id, userId: row.user_id, orgId: row.org_id,
-    keyType: "server", allowedDomains: [], scopes: (Array.isArray(row.scopes) ? row.scopes : []).filter((scope: string) => Array.isArray(row.key_scopes) && row.key_scopes.includes(scope)),
+    keyType: "server", allowedDomains: [], scopes: mcpGrantKeyScopes(Array.isArray(row.scopes) ? row.scopes : []).filter((scope: string) => Array.isArray(row.key_scopes) && row.key_scopes.includes(scope)),
     rateLimitRpm: row.key_rpm, rateLimitPpd: row.key_ppd, rateLimits: parseApiKeyRateLimits(row.key_rate_limits),
     materializationPolicy: parseKeyMaterializationPolicy(row.key_materialization_policy),
     projectIds: Array.isArray(row.key_project_ids) ? row.key_project_ids : [],
@@ -354,7 +384,7 @@ export async function recordDeviceAttemptFailure(db: Pick<PoolClient, "query">, 
  * approving user, so `chat` and `ingest` (credits, uploads, deletes) are
  * granted only when the user ticks them.
  */
-export const DEVICE_BASE_SCOPES = ["search", "read"] as const;
+export const DEVICE_BASE_SCOPES = [...SEARCH_SCOPES, "read"] as const;
 
 export function deviceGrantScopes(requested: readonly string[], optedIn: readonly string[]): string[] {
   return requested.filter((scope) => (DEVICE_BASE_SCOPES as readonly string[]).includes(scope) || optedIn.includes(scope));

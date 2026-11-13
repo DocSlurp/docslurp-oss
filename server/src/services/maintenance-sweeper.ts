@@ -6,6 +6,7 @@ import { sweepInterruptedConnectorSyncs } from "./connector-sync-recovery.js";
 import { sweepDocumentExports } from "./document-exports.js";
 import { sweepFeedbackReports } from "./feedback-reports.js";
 import { sweepExtracts } from "./extracts.js";
+import { sweepExpiredSearchSessions } from "./search-history-expiry.js";
 import { sweepSpendPausedRuns } from "./spend-paused-runs.js";
 import { sweepExpiredCreditLeases } from "./billing/credit-leases.js";
 import { sweepStaleQueuedRuns } from "./stale-queued-runs.js";
@@ -51,6 +52,8 @@ const sweeps: Array<[name: string, run: () => Promise<unknown>]> = [
   ["feedback-retention", () => sweepFeedbackReports()],
   // Extract mode: settle finished extracts (charge, download, email) and delete expired ones.
   ["extracts", () => sweepExtracts()],
+  // Expired API-key search history (lean-logging.ts); result rows and diagnostics cascade.
+  ["search-history-expiry", () => sweepExpiredSearchSessions()],
 ];
 
 let timer: ReturnType<typeof setInterval> | null = null;

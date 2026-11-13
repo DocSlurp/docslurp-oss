@@ -16,6 +16,7 @@ import type {
   TableCellValueType,
   TableChunkGranularity,
   ProjectChatFallbackReason,
+  SearchMode,
 } from "@docslurp/shared";
 import {
   BILLABLE_UNIT_METRICS,
@@ -35,6 +36,8 @@ import {
 import { sql, type SqlClient } from "../db.js";
 import { recordUnitCharge } from "../lib/ai-usage.js";
 import { currentChatTurn } from "../lib/chat-turn-context.js";
+import { effectiveSearchMode } from "../search/search-mode.js";
+import { consumeSearchModeLimit } from "../search/search-mode-limits.js";
 import { currentRequestSignal } from "../lib/request-context.js";
 import { jsonRecord } from "../lib/json-record.js";
 import { lanceDbFullTextSearch, lanceDbVectorSearch, warmLanceDbSearch, type LanceDbSearchHit } from "../search/lancedb.js";
@@ -70,6 +73,7 @@ import {
   servableInProgressVersion,
 } from "../search/eligibility.js";
 import { queryPhraseWindows } from "../search/relevance.js";
+import { enqueueSearchCharge, leanSearchLogging } from "../search/lean-logging.js";
 import { estimateTextTokens } from "../search/token-estimate.js";
 import { backoffWords, buildFoldedBackoffTsQuery, hasNonAscii } from "../search/text-fold.js";
 import { currentSearchAdmissionGroup, withSearchSlot, type SearchAdmission } from "../search/search-limiter.js";
@@ -174,6 +178,11 @@ export interface SearchOptions {
   suppressSessionLog?: boolean;
   rootSessionId?: string;
   /**
+   * Search mode (search/search-mode.ts): `keyword`, `hybrid` or `deep` (default). Never more than the request's
+   * API key allows; after setup it holds the mode the search actually runs in.
+   */
+  searchMode?: SearchMode;
+  /**
    * Relevance floor, 0..1: results whose raw relevance is lower are dropped.
    * 0 disables it. Omitted: the project default, else SEARCH_MIN_SCORE.
    */
@@ -200,6 +209,8 @@ export interface SearchResponse {
   timings?: SearchTimings;
   /** Present when the search touched deferred-mode documents (map/visual). */
   deferred?: DeferredSearchStats;
+  /** The mode the search ran in (keyword, hybrid or deep): the most the caller asked for and the key allows. */
+  searchMode?: SearchMode;
   /** Internal: the turn's calibrated vector relevance, for the chat scope decline. Not part of the public response. */
   scopeSignal?: ScopeSignal | null;
 }
@@ -1652,6 +1663,8 @@ export async function hybridSearch(rawQuery: string, userId: string, options: Se
     // Root searches wait for a process-wide slot (search/search-limiter.ts); the wait is timed as `queueMs`.
     // Search SQL is cancelled when the request (or chat turn) aborts (search/query-bounds.ts).
     const signal = currentSearchSignal() ?? getDeferredContext()?.signal ?? currentRequestSignal();
+    // Per-mode key limits count root searches only (sub-searches of decomposition and multi-hop are part of one).
+    if (!options.rootSessionId) await consumeSearchModeLimit(effectiveSearchMode(options));
     const { value: result, timings } = await collectSearchTimings(() => withSearchSignal(signal, () =>
       withSearchSlotTimed(signal, () => executeHybridSearch(query, userId, { ...options, rootSessionId: activity.groupId }), searchAdmission(options))));
     result.timings = timings;
@@ -1682,6 +1695,11 @@ async function chargeSearch(result: SearchResponse, userId: string, searchId: st
   const projectId = result.availability?.scope?.projectId;
   if (!projectId) return;
   const llmStrategies = (result.usageEvents ?? []).some((event) => (event.outputTokens ?? 0) > 0);
+  // API-key keyword and hybrid searches are charged in batches (lean-logging.ts).
+  if (!llmStrategies && leanSearchLogging(result.searchMode)) {
+    enqueueSearchCharge({ userId, orgId: null, projectId, mode: result.searchMode! });
+    return;
+  }
   try {
     await recordUnitCharge({
       userId,
@@ -1691,8 +1709,8 @@ async function chargeSearch(result: SearchResponse, userId: string, searchId: st
         metric: BILLABLE_UNIT_METRICS.search,
         amount: 1,
         unit: "search",
-        credits: searchCredits(1, { llmStrategies }),
-        metadata: { llmStrategies, searchUnits: searchUnits({ llmStrategies }) },
+        credits: searchCredits(1, { llmStrategies, mode: result.searchMode ?? "deep" }),
+        metadata: { llmStrategies, searchMode: result.searchMode ?? "deep", searchUnits: searchUnits({ llmStrategies, mode: result.searchMode ?? "deep" }) },
       },
     });
   } catch (error) {
@@ -1735,6 +1753,9 @@ async function executeHybridSearch(
   // Native search skips page branches the cached coverage says have nothing to serve.
   const pageOnlyDocuments = setup.availabilityRow?.page_only_documents;
   const skipProgressive = Boolean(native) && pageOnlyDocuments === 0;
+  // Below deep: no graph, community or deferred (model-materialized) legs. Keyword: no vector leg or index warm-up either.
+  const mode = setup.resolvedOptions.searchMode ?? "deep";
+  const keywordOnly = mode === "keyword";
   const pageOnlyCompleted = async (): Promise<boolean> => {
     if (!native) return true;
     const embedding = resolveEmbeddingRoute(native.pipeline.embedding);
@@ -1742,14 +1763,14 @@ async function executeHybridSearch(
     return set.pageOnlyCompletedDocuments > 0;
   };
 
-  return runSearchSession({
+  const response = await runSearchSession({
     query,
     userId,
     options: setup.resolvedOptions,
     setup,
     adapters: {
       parallelRetrieval: Boolean(native),
-      warmVectorIndex: native && process.env.SEARCH_LANCE_WARM !== "0" ? () => {
+      warmVectorIndex: native && !keywordOnly && process.env.SEARCH_LANCE_WARM !== "0" ? () => {
         const embedding = resolveEmbeddingRoute(native.pipeline.embedding);
         void warmLanceDbSearch({ orgId: native.orgId, projectId: native.projectId, embeddingModel: embedding.model, dimension: embedding.dimensions, hydrate: true });
       } : undefined,
@@ -1763,8 +1784,9 @@ async function executeHybridSearch(
           chunks,
         ),
       runSearch: hybridSearch,
-      vectorSearch: ({ queryVector, userId, projectId, options, query }) =>
-        timePhase("vector", () => servedVectorSearch({
+      vectorSearch: ({ queryVector, userId, projectId, options, query }) => keywordOnly
+        ? Promise.resolve([])
+        : timePhase("vector", () => servedVectorSearch({
           projectId,
           pipeline: setup.projectPipeline,
           indexConfigs: setup.indexConfigs,
@@ -1780,16 +1802,18 @@ async function executeHybridSearch(
         })),
       textSearch: ({ query, options }) =>
         timePhase("text", () => nativeTextOrLegacy(query, options)),
-      graphNeighborSearch: ({ query, projectId, options }) =>
-        timePhase("graph", () => graphNeighborSearch(query, projectId, options)),
-      communitySummarySearch: ({ query, projectId, options }) =>
-        timePhase("community", () => communitySummarySearch(query, projectId, options)),
+      graphNeighborSearch: ({ query, projectId, options }) => mode !== "deep"
+        ? Promise.resolve([])
+        : timePhase("graph", () => graphNeighborSearch(query, projectId, options)),
+      communitySummarySearch: ({ query, projectId, options }) => mode !== "deep"
+        ? Promise.resolve([])
+        : timePhase("community", () => communitySummarySearch(query, projectId, options)),
       progressivePageSearch: ({ query, userId, options }) => skipProgressive
         ? Promise.resolve([])
         : timePhase("progressive", () => progressivePageSearch(query, userId, options)),
       completedPageSearch: async (args) => args.shouldSearch && await pageOnlyCompleted() ? completedPageSearch(args) : [],
       wholeCorpusFallback,
-      ...(deferredProfilesEnabled()
+      ...(deferredProfilesEnabled() && mode === "deep"
         ? {
             deferredPageSearch: async (deferredArgs: Parameters<NonNullable<SearchSessionRunnerAdapters["deferredPageSearch"]>>[0]) => {
               const context = getDeferredContext();
@@ -1821,6 +1845,9 @@ async function executeHybridSearch(
         : {}),
     },
   });
+  // The mode the search ran in: billing categories and the public response read it.
+  response.searchMode = mode;
+  return response;
 }
 
 function readStringArray(value: unknown): string[] {

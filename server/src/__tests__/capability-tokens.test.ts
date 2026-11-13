@@ -71,7 +71,7 @@ vi.mock("../lib/request-actor.js", async () => {
 describe("POST /v1/capabilities", () => {
   const key = (keyType: "server" | "client") => ({
     type: "apiKey", userId: "u1",
-    apiKey: { keyId: "key-1", userId: "u1", orgId: "org-1", keyType, scopes: ["search"], projectIds: [], allowedDomains: [], rateLimitRpm: 1, rateLimitPpd: 1, rateLimits: [], materializationPolicy: { maxPagesPerQuery: 30 } },
+    apiKey: { keyId: "key-1", userId: "u1", orgId: "org-1", keyType, scopes: ["search:deep"], projectIds: [], allowedDomains: [], rateLimitRpm: 1, rateLimitPpd: 1, rateLimits: [], materializationPolicy: { maxPagesPerQuery: 30 } },
   });
   const post = async (body: unknown) => {
     const { capabilitiesRoutes } = await import("../routes/capabilities.js");

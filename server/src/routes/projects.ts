@@ -1,4 +1,5 @@
 import { quoteStoredDocuments } from "../services/stored-quote.js";
+import { SEARCH_SCOPES } from "../lib/search-tiers.js";
 import { projectRecommendationVisitsRoutes } from "./project-recommendation-visits.js";
 import { ChatToolBlockedError } from "../services/chat-tool-error.js";
 import { applyProjectSettingsProposalSchema } from "@docslurp/shared";
@@ -676,7 +677,7 @@ export const projectsRoutes = new Hono()
     // The project list exposes org internals (pipeline config, budgets,
     // systemPrompt), so a browser/client key must not read it even though it is
     // scope-compatible. Security finding SEC-2026-10-ROUND3-01.
-    if (actor.type === "apiKey" && (actor.apiKey.keyType !== "server" || !actorHasAnyApiKeyScope(actor, ["ingest", "search", "artifacts", "projects:manage"]))) {
+    if (actor.type === "apiKey" && (actor.apiKey.keyType !== "server" || !actorHasAnyApiKeyScope(actor, ["ingest", ...SEARCH_SCOPES, "artifacts", "projects:manage"]))) {
       return apiStatusError(c, 403, "Forbidden");
     }
     if (actor.type === "session") await ensurePersonalDefaultProject(userId);
@@ -732,7 +733,7 @@ export const projectsRoutes = new Hono()
   })
   .get("/:projectId/tags", async (c) => {
     const actor = getRequestActor(c);
-    if (actor.type === "apiKey" && (actor.apiKey.keyType !== "server" || !actorHasAnyApiKeyScope(actor, ["ingest", "search", "artifacts", "projects:manage"]))) {
+    if (actor.type === "apiKey" && (actor.apiKey.keyType !== "server" || !actorHasAnyApiKeyScope(actor, ["ingest", ...SEARCH_SCOPES, "artifacts", "projects:manage"]))) {
       return apiStatusError(c, 403, "Forbidden");
     }
     const project = await getProject(c.req.param("projectId"), actor.userId);
@@ -743,7 +744,7 @@ export const projectsRoutes = new Hono()
   })
   .get("/:projectId/state", zValidator("query", projectStateQuerySchema, validationHook), async (c) => {
     const actor = getRequestActor(c);
-    if (actor.type === "apiKey" && (actor.apiKey.keyType !== "server" || !actorHasAnyApiKeyScope(actor, ["ingest", "search", "artifacts", "projects:manage"]))) {
+    if (actor.type === "apiKey" && (actor.apiKey.keyType !== "server" || !actorHasAnyApiKeyScope(actor, ["ingest", ...SEARCH_SCOPES, "artifacts", "projects:manage"]))) {
       return apiStatusError(c, 403, "Forbidden");
     }
     const project = await getProject(c.req.param("projectId"), actor.userId);
@@ -758,7 +759,7 @@ export const projectsRoutes = new Hono()
   })
   .get("/:projectId/ingest-report", zValidator("query", ingestReportQuerySchema, validationHook), async (c) => {
     const actor = getRequestActor(c);
-    if (actor.type === "apiKey" && (actor.apiKey.keyType !== "server" || !actorHasAnyApiKeyScope(actor, ["ingest", "search", "artifacts", "projects:manage"]))) {
+    if (actor.type === "apiKey" && (actor.apiKey.keyType !== "server" || !actorHasAnyApiKeyScope(actor, ["ingest", ...SEARCH_SCOPES, "artifacts", "projects:manage"]))) {
       return apiStatusError(c, 403, "Forbidden");
     }
     const project = await getProject(c.req.param("projectId"), actor.userId);
@@ -847,7 +848,7 @@ export const projectsRoutes = new Hono()
   .get("/:projectId", async (c) => {
     const userId = c.get("sessionUser").id;
     const actor = getRequestActor(c);
-    if (actor.type === "apiKey" && (actor.apiKey.keyType !== "server" || !actorHasAnyApiKeyScope(actor, ["ingest", "search", "artifacts", "projects:manage"]))) {
+    if (actor.type === "apiKey" && (actor.apiKey.keyType !== "server" || !actorHasAnyApiKeyScope(actor, ["ingest", ...SEARCH_SCOPES, "artifacts", "projects:manage"]))) {
       return apiStatusError(c, 403, "Forbidden");
     }
     const project = await getProject(c.req.param("projectId"), userId);

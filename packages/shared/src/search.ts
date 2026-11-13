@@ -5,6 +5,7 @@ import { searchCitationSchema } from "./chunks.js";
 import {
   projectChatDebugSchema,
   projectChatModeSchema,
+  searchModeSchema,
 } from "./project.js";
 import { ingestReportSchema } from "./ingest-report.js";
 
@@ -160,6 +161,8 @@ export const aggregateProjectRagSearchRequestSchema = z
      * key also needs the `chat` scope (POST /v1/search/aggregate).
      */
     generateAnswer: z.boolean().default(false),
+    /** keyword, hybrid or deep; omitted: the most the caller's key allows (see searchModeSchema). */
+    mode: searchModeSchema.optional(),
     includePartial: z.boolean().default(true),
     hyde: z.boolean().default(false),
     rerank: z.boolean().default(true),

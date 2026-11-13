@@ -14,6 +14,7 @@ export function publicSearchResponse(response: SearchResponse) {
     sessionId: response.sessionId,
     availability: response.availability,
     noMatch: response.relevanceFloor?.noMatch ?? false,
+    ...(response.searchMode ? { mode: response.searchMode } : {}),
     ...(response.relevanceFloor ? { relevanceFloor: { minScore: response.relevanceFloor.minScore, dropped: response.relevanceFloor.dropped } } : {}),
     ...(response.timings ? { timings: response.timings } : {}),
     ...(response.deferred ? { deferred: response.deferred } : {}),

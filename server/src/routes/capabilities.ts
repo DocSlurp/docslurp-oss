@@ -1,3 +1,4 @@
+import { searchModeOfScopes } from "../lib/search-tiers.js";
 import { randomUUID } from "node:crypto";
 
 import { apiErrorResponse } from "../lib/api-error.js";
@@ -42,8 +43,9 @@ export const capabilitiesRoutes = new Hono().post("/", zValidator("json", bodySc
     if (actor.apiKey.oauth) {
       return apiErrorResponse(c, 403, "forbidden", "OAuth access tokens cannot mint search capabilities; use a server API key", { category: "capability_forbidden" });
     }
-    if (!actorHasAnyApiKeyScope(actor, ["search"])) {
-      return apiErrorResponse(c, 403, "forbidden", "API key needs the search scope", { category: "capability_forbidden" });
+    // A capability can open deferred (model-materialized) pages, which only deep search runs.
+    if (searchModeOfScopes(actor.apiKey.scopes) !== "deep") {
+      return apiErrorResponse(c, 403, "forbidden", "API key needs the search:deep scope", { category: "capability_forbidden" });
     }
   }
   const body = c.req.valid("json");
