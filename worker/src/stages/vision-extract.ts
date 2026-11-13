@@ -94,7 +94,7 @@ import {
   type PreparedChartExport,
 } from "../chart-export/stage.js";
 import { quarantineChartFacts, storedRoutePlan } from "../chart-export/free-stats.js";
-import { CHART_INLINE_SLOT, freeInlineMode } from "../chart-export/inline.js";
+import { CHART_INLINE_SLOT, chartInlineSlotHasWork, freeInlineMode } from "../chart-export/inline.js";
 import type { ChartModelClient } from "../chart-export/types.js";
 import { chartExportFreeVmCap } from "../db/chart-export-free-vm-cap.js";
 import { deterministicSourceKind } from "../chart-export/vm-extractor.js";
@@ -1732,7 +1732,7 @@ export class VisionExtractStage implements Stage {
    */
   private freeInlineHasWork(state: WorkflowState, document: import("../models.js").Document): boolean {
     // Ledger only, no reads: quarantine records the chart-inline slot exactly when its inline answer has work.
-    return Boolean(state.artifactLedger.readDocument(document.id, "chart-export") || state.artifactLedger.readDocument(document.id, CHART_INLINE_SLOT));
+    return Boolean(state.artifactLedger.readDocument(document.id, "chart-export")) || chartInlineSlotHasWork(state.artifactLedger.readDocument(document.id, CHART_INLINE_SLOT));
   }
 
   /**

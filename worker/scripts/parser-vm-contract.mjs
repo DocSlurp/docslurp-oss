@@ -5,13 +5,17 @@ import { fileURLToPath } from "node:url";
 for (const file of ["image-task.mjs", "pdf-structure.mjs", "quarantine-inspect.mjs", "chart-inline.mjs", "chart-inline-worker.mjs", "../dist/chart-export/inline-guest.js", "structured-json.mjs", "html-embeds.mjs", "table-cells.mjs", "vision-tables.mjs", "table-routing.mjs", "chart-export-extract.mjs", "../dist/chart-export/guest.bundle.mjs", "../dist/chart-export/extractors/index.js", "../dist/extractors/structured-json-guest.js", "../dist/routing/html-embeds-guest.js", "../dist/pipeline/table-cells-guest.js", "../dist/pipeline/vision-tables-guest.js", "../dist/pipeline/table-routing-guest.js", "../dist/pipeline/html-table-limits.js", "../dist/deferred/pdf-structure-guest.js", "../dist/lib/quarantine-bytes.js", "../dist/lib/archive-nesting.js", "../dist/lib/pdf-encryption-structure.js"]) await access(fileURLToPath(new URL(file, import.meta.url)));
 // The chart-export guest runs one bundled module: refuse a stale bundle (worker dist changed after it was built), then
 // import it and extract a built-in SVG and XLSX, so a bundle that is present but broken fails here, not per document.
-const { probeChartGuestBundle, verifyChartGuestBundle } = await import("./chart-guest-bundle.mjs");
+const { probeChartGuestBundle, probeInlineCharts, verifyChartGuestBundle, verifyCompileCache } = await import("./chart-guest-bundle.mjs");
 await verifyChartGuestBundle();
 await probeChartGuestBundle();
+// Inline charts (quarantine guest): the module imports and answers a built-in SVG; a shipped compile cache matches this
+// Node binary and bundle.
+await probeInlineCharts();
+await verifyCompileCache();
 // The table-routing guest scans with @docslurp/shared's scanner: the package must resolve from this image's worker.
 await access(fileURLToPath(import.meta.resolve("@docslurp/shared/page-table-routing")));
 // The chart-export and quarantine guests load only these @docslurp/shared modules (not the package index: ~0.3 s of CPU per run).
-for (const sub of ["chart-export", "file-sniff"]) await access(fileURLToPath(import.meta.resolve(`@docslurp/shared/${sub}`)));
+for (const sub of ["chart-export", "visual-spec", "file-sniff"]) await access(fileURLToPath(import.meta.resolve(`@docslurp/shared/${sub}`)));
 // parser-vm@4: quarantine inspection returns { sniffed, archive, pdf } (pdf: the /Encrypt check that sends an encrypted PDF to
 // the in-VM qpdf decryption, and encryptConflict, the council N-H1 structure check; archive: the nested-archive walk, which
 // walks tar and refuses nested 7z, bzip2 and xz); an older image is refused. qpdfVersion: the image's qpdf,

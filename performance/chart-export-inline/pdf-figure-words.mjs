@@ -10,11 +10,14 @@
 // merged into a run (a text layer's line: titles and multi-word labels stay whole). With truth.json (gen_pdf_truth.py),
 // each chart's categories and values are compared to the data it was drawn from. Prints JSON lines and a summary.
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 const [workerDir, pdftotext, pdf, imagesDir, marginArg, truthPath] = process.argv.slice(2);
+// DUMP_DIR: also write each figure's SVG and words (<n>.svg, <n>.words.json) for the in-VM probes (probe-doppler-node).
+const dumpDir = process.env.DUMP_DIR;
+if (dumpDir) mkdirSync(dumpDir, { recursive: true });
 const truth = truthPath ? JSON.parse(readFileSync(truthPath, "utf8")) : null;
 
 function runs(words) {
@@ -71,6 +74,11 @@ for (const line of readFileSync(path.join(imagesDir, "manifest.jsonl"), "utf8").
   const words = runs(pageWords(rec.page)
     .filter((w) => w.x1 >= x0 - margin && w.x0 <= x1 + margin && w.y1 >= y0 - margin && w.y0 <= y1 + margin))
     .map((w) => ({ ...w, ...(w.y1 - w.y0 >= 2 * (w.x1 - w.x0) && w.text.length > 1 ? { rotated: true } : {}) }));
+  if (dumpDir) {
+    const tag = `${path.basename(pdf, ".pdf")}-${rec.id}`;
+    writeFileSync(path.join(dumpDir, `${tag}.svg`), svg);
+    writeFileSync(path.join(dumpDir, `${tag}.words.json`), JSON.stringify(words));
+  }
   const t0 = performance.now();
   const bare = extractDeterministicVisuals({ kind: "svg", text: svg });
   const t1 = performance.now();

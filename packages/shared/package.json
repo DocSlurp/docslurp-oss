@@ -98,6 +98,10 @@
       "types": "./dist/chart-export.d.ts",
       "import": "./dist/chart-export.js"
     },
+    "./visual-spec": {
+      "types": "./dist/visual-spec.d.ts",
+      "import": "./dist/visual-spec.js"
+    },
     "./file-sniff": {
       "types": "./dist/file-sniff.d.ts",
       "import": "./dist/file-sniff.js"

@@ -1,4 +1,4 @@
-import type { DiagramSpec } from "@docslurp/shared/chart-export";
+import type { DiagramSpec } from "@docslurp/shared/visual-spec";
 
 import { finalizeDiagram } from "./spec-utils.js";
 import { parseTransform, apply, type Matrix, IDENTITY, multiply } from "./svg-path.js";

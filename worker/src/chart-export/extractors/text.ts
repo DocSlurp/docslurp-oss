@@ -1,4 +1,4 @@
-import { VISUAL_SPEC_LIMITS } from "@docslurp/shared/chart-export";
+import { VISUAL_SPEC_LIMITS } from "@docslurp/shared/visual-spec";
 
 /**
  * Labels from customer files are data: strip control and bidi-override characters, collapse whitespace and cap the

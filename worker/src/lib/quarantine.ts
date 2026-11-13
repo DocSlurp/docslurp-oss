@@ -1,5 +1,5 @@
 import path from "node:path";
-import { inlineChartsInProcess, validateInlineCharts, type InlineChartRequest, type StoredInlineCharts } from "../chart-export/inline.js";
+import { inlineChartsInProcess, inlinePages, validateInlineCharts, type InlineChartRequest, type StoredInlineCharts } from "../chart-export/inline.js";
 import { describeArchiveIssue, inspectQuarantineBytes, pdfHasEncryptName, type QuarantineInspection } from "./quarantine-bytes.js";
 export { sniffMimeType, inspectArchive, type QuarantineInspection } from "./quarantine-bytes.js";
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
@@ -433,7 +433,7 @@ async function inspectInVm(args: InspectArgs): Promise<QuarantineInspection> {
       quarantineMaxTotalUncompressedBytes: args.policy.quarantineMaxTotalUncompressedBytes,
       quarantineMaxSingleEntryBytes: args.policy.quarantineMaxSingleEntryBytes,
       quarantineMaxExpansionRatio: args.policy.quarantineMaxExpansionRatio,
-    }, ...(args.charts ? { charts: { kind: args.charts.kind, diagrams: args.charts.diagrams } } : {}) }), { mode: 0o600 });
+    }, ...(args.charts ? { charts: { kind: args.charts.kind, diagrams: args.charts.diagrams, ...inlinePages(args.charts.pages) } } : {}) }), { mode: 0o600 });
     await args.runner.run({ binary: "node", args: [path.join(resolveScriptsDir(), "quarantine-inspect.mjs"), args.tempFile, options, output], available: true, readOnlyInputs: true, timeoutMs: 60_000 }, args.signal);
     if ((await stat(output)).size > (args.charts ? 6 : 2) * 1024 * 1024) throw new Error("quarantine inspection result exceeds limit");
     const result = JSON.parse(await readFile(output, "utf8")) as QuarantineInspection;
@@ -441,6 +441,8 @@ async function inspectInVm(args: InspectArgs): Promise<QuarantineInspection> {
     // Asked for and missing (an image whose guest predates inline charts) stays missing: vision-extract then runs as before.
     const charts = (result as { charts?: unknown }).charts;
     delete (result as { charts?: unknown }).charts;
+    // The inspection proper keeps its own 2 MiB bound; only the chart answer gets the extra allowance.
+    if (Buffer.byteLength(JSON.stringify(result)) > 2 * 1024 * 1024) throw new Error("quarantine inspection result exceeds limit");
     if (args.charts && charts !== undefined) result.charts = validateInlineCharts(charts);
     const sniffed = result?.sniffed as unknown as Record<string, unknown> | null;
     if (!sniffed || typeof sniffed !== "object" || Object.keys(sniffed).some((key) => !["mimeType", "container", "encoding"].includes(key))

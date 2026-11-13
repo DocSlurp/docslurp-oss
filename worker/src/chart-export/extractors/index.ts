@@ -42,7 +42,8 @@ export function wordsAsTexts(words: readonly SvgWord[] | undefined): TextPrim[] 
   if (words.length > CHART_EXTRACT_LIMITS.maxSvgWords) throw new ExtractLimitError("svg-words-limit");
   const out: TextPrim[] = [];
   for (const [i, w] of words.entries()) {
-    const text = typeof w?.text === "string" ? w.text.replace(/\s+/g, " ").trim().slice(0, 200) : "";
+    // Cut before normalizing, so one huge word costs no more than a short one.
+    const text = typeof w?.text === "string" ? w.text.slice(0, 1000).replace(/\s+/g, " ").trim().slice(0, 200) : "";
     const box = [w?.x0, w?.y0, w?.x1, w?.y1];
     if (!text || !box.every((n) => typeof n === "number" && Number.isFinite(n)) || !(w.x1 >= w.x0 && w.y1 > w.y0)) continue;
     const rotated = w.rotated === true;

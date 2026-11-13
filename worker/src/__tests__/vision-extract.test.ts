@@ -633,6 +633,22 @@ describe("chart export in vision-extract (real pass, fake model client)", () => 
     }
   });
 
+  it("free tier, inline mode: a chart-inline slot that says none does no work (council L4)", async () => {
+    vi.stubEnv("DOCSLURP_CHART_EXPORT", "on");
+    vi.stubEnv("DOCSLURP_CHART_EXPORT_INLINE", "1");
+    const calls: unknown[] = [];
+    const previous = setDeterministicVisualExtractor(async (input) => { calls.push(input); return { partials: [] }; });
+    try {
+      const { stage, state, storage } = await setup({ visionFallback: false, quality: "fast", chartExport: { ...CHART_EXPORT, tier: "free" } });
+      state.artifactLedger.recordDocument("doc-c", "chart-inline", "s3://b/u/run-c/quarantine/doc-c.json#chart-inline=none");
+      await stage.run(state);
+      expect(calls).toEqual([]);
+      expect(storage.reads).toEqual([]);
+    } finally {
+      setDeterministicVisualExtractor(previous);
+    }
+  });
+
   it("free tier, inline mode: the chart-inline signal from quarantine runs the pass", async () => {
     vi.stubEnv("DOCSLURP_CHART_EXPORT", "on");
     vi.stubEnv("DOCSLURP_CHART_EXPORT_INLINE", "1");
@@ -643,7 +659,7 @@ describe("chart export in vision-extract (real pass, fake model client)", () => 
     });
     try {
       const { stage, state, storage } = await setup({ visionFallback: false, quality: "fast", chartExport: { ...CHART_EXPORT, tier: "free" } });
-      state.artifactLedger.recordDocument("doc-c", "chart-inline", "s3://b/u/run-c/quarantine/doc-c.json");
+      state.artifactLedger.recordDocument("doc-c", "chart-inline", "s3://b/u/run-c/quarantine/doc-c.json#chart-inline=work");
       await stage.run(state);
       expect(calls).toHaveLength(1);
       expect(markdownOf(storage, state).charts).toHaveLength(1);

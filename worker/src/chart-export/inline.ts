@@ -15,6 +15,16 @@ import { INLINE_CHART_KINDS, INLINE_REFUSE_REASONS, INLINE_SKIP_REASONS, inlineC
 /** Document artifact slot recorded by quarantine when the inline answer has work (points at the quarantine artifact). */
 export const CHART_INLINE_SLOT = "chart-inline";
 
+/** The slot's value: the quarantine artifact's URI plus whether the inline answer has work. */
+export function chartInlineSlotValue(artifactUri: string, work: boolean): string {
+  return `${artifactUri}#chart-inline=${work ? "work" : "none"}`;
+}
+
+/** Whether a recorded slot value says the free pass has work. */
+export function chartInlineSlotHasWork(value: string | undefined): boolean {
+  return typeof value === "string" && value.endsWith("#chart-inline=work");
+}
+
 export function chartExportInlineEnabled(env: Readonly<Record<string, string | undefined>> = process.env): boolean {
   return env.DOCSLURP_CHART_EXPORT_INLINE?.trim() === "1";
 }
@@ -28,7 +38,13 @@ export function freeInlineMode(pipeline: unknown, env: Readonly<Record<string, s
   return chartExportInlineEnabled(env) && chartExportActive(pipeline, env) && !chartExportModelsActive(pipeline, env);
 }
 
-export interface InlineChartRequest { kind: InlineChartKind; diagrams: boolean }
+/** `pages`: the document's page count as the host knows it, which scales the guest's SVG budget (capped by the guest). */
+export interface InlineChartRequest { kind: InlineChartKind; diagrams: boolean; pages?: number }
+
+/** The page count a request may carry: a sane integer or nothing (the same rule as the standalone guest). */
+export function inlinePages(pages: unknown): { pages?: number } {
+  return Number.isSafeInteger(pages) && (pages as number) > 0 && (pages as number) <= 100_000 ? { pages: pages as number } : {};
+}
 
 export type InlineCharts =
   | { status: "ok"; ms: number; result: GuestResult }
@@ -99,6 +115,6 @@ export function inlineChartsInProcess(bytes: Buffer, request: InlineChartRequest
   const input = plan.packaged
     ? { kind: request.kind as "office" | "epub", bytes }
     : { kind: request.kind as "svg" | "html" | "json", text: text ?? bytes.toString("utf8") };
-  const result = validateDeterministicResult(guestExtract(input, { diagrams: request.diagrams }));
+  const result = validateDeterministicResult(guestExtract(input, { diagrams: request.diagrams, ...inlinePages(request.pages) }));
   return { status: "ok", ms: Math.round(performance.now() - started), result };
 }

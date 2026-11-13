@@ -5,14 +5,37 @@ const [input, optionsPath, output] = process.argv.slice(2);
 if ((await stat(input)).size > 500 * 1024 * 1024 || (await stat(optionsPath)).size > 64 * 1024) throw new Error("quarantine input exceeds limit");
 const options = JSON.parse(await readFile(optionsPath, "utf8"));
 const bytes = await readFile(input);
-const inspection = inspectQuarantineBytes(bytes, options.filename, options.policy);
-// Inline chart extraction (DOCSLURP_CHART_EXPORT_INLINE): only when the host asks, after the inspection is complete,
-// isolated in a worker thread (chart-inline.mjs). It never changes the inspection and never fails this command.
-if (options.charts && typeof options.charts === "object") {
-  const { inlineCharts } = await import("./chart-inline.mjs");
-  inspection.charts = await inlineCharts(bytes, options.charts, inspection).catch(() => ({ status: "refused", reason: "worker-failed", ms: 0 }));
+const charts = options.charts && typeof options.charts === "object" ? options.charts : null;
+const refused = (reason) => ({ status: "refused", reason, ms: 0 });
+
+// Inline chart extraction (DOCSLURP_CHART_EXPORT_INLINE): only when the host asks. Everything about it, the module load
+// included, is inside a try: a chart failure (a missing or broken module, a worker crash) is a chart refusal and never
+// fails this command. An SVG's worker starts before the inspection (its plan almost always passes); it gets no bytes
+// until the plan has passed, and is ended if the plan skips.
+let chartModule = null;
+let prestarted = null;
+if (charts) {
+  try {
+    chartModule = await import("./chart-inline.mjs");
+    if (charts.kind === "svg") prestarted = chartModule.startChartWorker();
+  } catch {
+    chartModule = null;
+  }
 }
-const result = JSON.stringify(inspection);
-// 2 MiB for the inspection, plus the inline chart result's own bound when it was asked for.
-if (Buffer.byteLength(result) > (options.charts ? 6 : 2) * 1024 * 1024) throw new Error("quarantine result exceeds limit");
+const inspection = inspectQuarantineBytes(bytes, options.filename, options.policy);
+// The inspection's own bound, unchanged: 2 MiB without the chart answer.
+const own = JSON.stringify(inspection);
+if (Buffer.byteLength(own) > 2 * 1024 * 1024) throw new Error("quarantine result exceeds limit");
+let result = own;
+if (charts) {
+  let answer;
+  try {
+    answer = chartModule ? await chartModule.inlineCharts(bytes, charts, inspection, prestarted) : refused("worker-failed");
+  } catch {
+    answer = refused("worker-failed");
+  }
+  result = JSON.stringify({ ...inspection, charts: answer });
+  // The chart answer has its own allowance on top; over it, the answer becomes a refusal (never a failed command).
+  if (Buffer.byteLength(result) > 6 * 1024 * 1024) result = JSON.stringify({ ...inspection, charts: refused("result-too-large") });
+}
 await writeFile(output, result, { mode: 0o600 });

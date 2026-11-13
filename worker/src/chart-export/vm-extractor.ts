@@ -100,7 +100,7 @@ export const CHART_EXPORT_VM_USAGE_METRIC = "chart-export-vm";
  * `costRollup: "included"`: the sandbox provider's or the runner's own compute event already carries the authoritative
  * cost, so this one attributes it to chart export without counting it twice. Never a customer charge.
  */
-export function chartExportVmUsageEvent(args: { documentId: string; wallTimeMs: number; reason: string; inputs: number; outcome: "ok" | "refused" | "failed" }): UsageEvent {
+export function chartExportVmUsageEvent(args: { documentId: string; wallTimeMs: number; reason: string; inputs: number; outcome: "ok" | "refused" | "failed"; stage?: "vision-extract" | "quarantine" }): UsageEvent {
   const profile = resolveWorkerDeploymentProfile();
   return buildLocalComputeUsageEvent({
     metric: CHART_EXPORT_VM_USAGE_METRIC,
@@ -108,7 +108,7 @@ export function chartExportVmUsageEvent(args: { documentId: string; wallTimeMs: 
     observation: buildAllocatedResourceObservation({ profile, wallTimeMs: Math.max(0, args.wallTimeMs) }),
     costRollup: "included",
     metadata: {
-      stage: "vision-extract",
+      stage: args.stage ?? "vision-extract",
       scope: "document",
       documentId: args.documentId,
       measurement: "allocated-capacity",
@@ -215,6 +215,8 @@ export function createVmDeterministicVisualExtractor(deps: VmExtractorDeps): Det
       if (inline.status === "ok") {
         results.push(inline.result);
         for (const visual of inline.result.visuals) partials.push(toPartial(visual, null));
+        // SVGs past the scene budget are recorded for the later deferred pass, exactly as from the standalone guest.
+        for (const d of inline.result.deferred ?? []) deferred.push({ input: "source", locator: d.locator, reason: d.reason, pageNumber: null, figureId: null });
       }
       log(`[chart-export] parser VM skipped ${context} kind=${sourceKind} reason=inline-${inline.status}${inline.status === "ok" ? ` visuals=${inline.result.visuals.length}` : ` detail=${inline.reason}`}`);
     }
@@ -231,7 +233,7 @@ export function createVmDeterministicVisualExtractor(deps: VmExtractorDeps): Det
       );
       try {
         await guard(reason, 1, async () => {
-          const result = await extractDeterministicVisualsFile({ inputPath: path, kind: sourceKind, options, runner: deps.runner, log, context: `${context} reason=${reason}`, ...(input.signal ? { signal: input.signal } : {}) });
+          const result = await extractDeterministicVisualsFile({ inputPath: path, kind: sourceKind, options: { ...options, pages: Math.max(1, document.pageCount) }, runner: deps.runner, log, context: `${context} reason=${reason}`, ...(input.signal ? { signal: input.signal } : {}) });
           results.push(result);
           for (const visual of result.visuals) partials.push(toPartial(visual, null));
           for (const d of result.deferred ?? []) deferred.push({ input: "source", locator: d.locator, reason: d.reason, pageNumber: null, figureId: null });
@@ -251,7 +253,8 @@ export function createVmDeterministicVisualExtractor(deps: VmExtractorDeps): Det
         ? (await svgFigures(deps, input.artifacts.dopplerFiguresIndexUri, Math.max(1, document.pageCount), input.dopplerFiguresIndex)).length
         : 0;
       if (listed > 0) log(`[chart-export] svg figures not sent ${context} figures=${listed} reason=inline-mode`);
-      return { partials, presence: presenceOf(results, listed) };
+      if (deferred.length) log(`[chart-export] visuals deferred ${context} count=${deferred.length}`);
+      return { partials, presence: presenceOf(results, listed), ...(deferred.length ? { deferred: deferred.slice(0, 1000) } : {}) };
     }
 
     const figures = await svgFigures(deps, input.artifacts.dopplerFiguresIndexUri, Math.max(1, document.pageCount), input.dopplerFiguresIndex);

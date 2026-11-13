@@ -74,9 +74,21 @@ describe("quarantine stage: inline chart extraction", () => {
     expect(f.artifacts.get("infected.svg")?.chartInline).toBeUndefined();
     expect(f.artifacts.get("notes.pdf")?.chartInline).toBeUndefined();
     // The ledger signal later stages read without a fetch: only where there is something to export.
-    expect(f.state.artifactLedger.readDocument("chart.svg", "chart-inline")).toMatch(/quarantine\/chart\.svg\.json$/);
+    expect(f.state.artifactLedger.readDocument("chart.svg", "chart-inline")).toMatch(/quarantine\/chart\.svg\.json#chart-inline=work$/);
+    // Council L3: the inline time is a cost-only event in the run's ledger, scoped to the document, never billable.
+    const events = f.state.usageLedger.snapshot().filter((e) => e.metric === "chart-export-vm");
+    expect(events).toHaveLength(1);
+    expect(events[0]!.metadata).toMatchObject({ stage: "quarantine", documentId: "chart.svg", reason: "inline", outcome: "ok", billable: false });
     expect(f.state.artifactLedger.readDocument("infected.svg", "chart-inline")).toBeUndefined();
     expect(f.state.artifactLedger.readDocument("notes.pdf", "chart-inline")).toBeUndefined();
+  });
+
+  it("rewrites a stale work slot from an earlier run to none when nothing is asked (council L4)", async () => {
+    vi.stubEnv("DOCSLURP_CHART_EXPORT", "on");
+    const f = await fixture({ chartExport: { tier: "free" } });
+    f.state.artifactLedger.recordDocument("chart.svg", "chart-inline", "s3://test/old/quarantine/chart.svg.json#chart-inline=work");
+    await f.stage.run(f.state);
+    expect(f.state.artifactLedger.readDocument("chart.svg", "chart-inline")).toMatch(/#chart-inline=none$/);
   });
 
   it.each([

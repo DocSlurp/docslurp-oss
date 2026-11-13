@@ -108,3 +108,63 @@ export async function probeChartGuestBundle() {
   }
   if (!(guest.CHART_EXTRACT_LIMITS?.maxTextBytes > 0)) throw new Error("chart guest bundle probe failed: no limits export");
 }
+
+// ---- Compile cache --------------------------------------------------------------------------------------------------
+// A V8 compile cache for the bundle, built at image build time with the image's own Node (builder and runtime stages pin
+// the same node image digest) and read, never written, by the inline chart worker in the VM. Node checks each entry
+// against the source and its own version, so a mismatch only loses the speed-up; the key file lets the startup contract
+// refuse an image whose cache was built for another Node or bundle.
+export const COMPILE_CACHE_DIR = path.join(WORKER_ROOT, "dist/chart-export/compile-cache");
+const COMPILE_CACHE_KEY = path.join(COMPILE_CACHE_DIR, "key.json");
+
+async function fileSha256(file) {
+  const hash = createHash("sha256");
+  const { createReadStream } = await import("node:fs");
+  for await (const chunk of createReadStream(file)) hash.update(chunk);
+  return hash.digest("hex");
+}
+
+export async function compileCacheKey() {
+  return { node: process.version, nodeSha256: await fileSha256(process.execPath), bundleSha256: await fileSha256(BUNDLE_PATH) };
+}
+
+/** Populate the cache by loading the bundle in a worker thread, the way the inline chart worker does, then write the key. */
+export async function buildCompileCache() {
+  const { rm, mkdir, writeFile } = await import("node:fs/promises");
+  const { spawnSync } = await import("node:child_process");
+  await rm(COMPILE_CACHE_DIR, { recursive: true, force: true });
+  await mkdir(COMPILE_CACHE_DIR, { recursive: true });
+  const script = `import { Worker } from "node:worker_threads";
+await new Promise((resolve, reject) => {
+  const w = new Worker(${JSON.stringify(`import(${JSON.stringify(pathToFileURL(BUNDLE_PATH).href)}).then(() => process.exit(0))`)}, { eval: true });
+  w.once("exit", (code) => (code === 0 ? resolve() : reject(new Error("worker exit " + code)))); w.once("error", reject);
+});`;
+  const run = spawnSync(process.execPath, ["--input-type=module", "-e", script], { env: { ...process.env, NODE_COMPILE_CACHE: COMPILE_CACHE_DIR }, encoding: "utf8" });
+  if (run.status !== 0) throw new Error(`chart guest compile cache: ${run.stderr.slice(0, 500)}`);
+  await writeFile(COMPILE_CACHE_KEY, `${JSON.stringify(await compileCacheKey(), null, 2)}\n`);
+}
+
+/** Startup contract: an image that ships a cache must ship one built for this Node binary and this bundle. */
+export async function verifyCompileCache() {
+  const raw = await readFile(COMPILE_CACHE_KEY, "utf8").catch(() => null);
+  if (raw === null) return { present: false };
+  const want = JSON.parse(raw);
+  const have = await compileCacheKey();
+  for (const k of ["node", "nodeSha256", "bundleSha256"]) {
+    if (want[k] !== have[k]) throw new Error(`chart guest compile cache was built for another ${k} (rebuild the image)`);
+  }
+  return { present: true };
+}
+
+/**
+ * Imports the inline chart module the quarantine guest loads (scripts/chart-inline.mjs and dist/chart-export/inline-guest.js)
+ * and runs it once on the built-in SVG through a real worker thread, so a missing, stale or broken module fails the image
+ * at startup instead of turning every chart answer into a refusal.
+ */
+export async function probeInlineCharts() {
+  const { inlineCharts } = await import(pathToFileURL(path.join(WORKER_ROOT, "scripts/chart-inline.mjs")).href);
+  const inspection = { sniffed: { mimeType: "image/svg+xml", container: null, encoding: "utf-8" }, archive: null };
+  const answer = await inlineCharts(Buffer.from(PROBE_SVG), { kind: "svg", diagrams: true }, inspection);
+  const got = answer.status === "ok" ? answer.result.visuals.map((v) => `${v.source}:${v.spec?.chartType ?? "none"}`).join(",") : `${answer.status}:${answer.reason}`;
+  if (got !== "svg-geometry:bar") throw new Error(`inline chart probe failed: ${got || "no visuals"}`);
+}

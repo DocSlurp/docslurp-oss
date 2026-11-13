@@ -39,7 +39,7 @@ const ALLOWED = [
   /^dist\/chart-export\/extractors\/[\w-]+\.js$/,
   /^dist\/lib\/(quarantine-bytes|archive-nesting|pdf-encryption-structure)\.js$/,
   /^dist\/tools\/clam-limits\.js$/,
-  /^\.\.\/packages\/shared\/dist\/(chart-export|file-sniff|file-formats)\.js$/,
+  /^\.\.\/packages\/shared\/dist\/(chart-export|visual-spec|file-sniff|file-formats)\.js$/,
   /(^|\/)node_modules\/(\.pnpm\/zod@[^/]+\/node_modules\/)?zod\//,
 ];
 const inputs = Object.keys(result.metafile.inputs);
@@ -63,3 +63,7 @@ if (loader) throw new Error(`chart guest bundle: contains \`${loader[1]}\`; the 
 if (output.bytes > BUNDLE_MAX_BYTES) throw new Error(`chart guest bundle: ${output.bytes} bytes exceeds the ${BUNDLE_MAX_BYTES}-byte budget`);
 
 await writeFile(INPUTS_PATH, `${JSON.stringify(await bundleManifest(inputs), null, 2)}\n`);
+
+// The bundle's compile cache, built with this Node (the image's own: builder and runtime stages share the node digest).
+const { buildCompileCache } = await import("./chart-guest-bundle.mjs");
+await buildCompileCache();

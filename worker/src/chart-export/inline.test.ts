@@ -3,7 +3,7 @@
 // use of an inline answer (no parser VM run for the source).
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -13,6 +13,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest
 
 import { barPlot, chartXml, docx, genericBar, pptx, xlsx } from "./extractors/__tests__/fixtures.js";
 import { extractDeterministicVisuals } from "./extractors/index.js";
+import { CHART_EXTRACT_LIMITS } from "./extractors/limits.js";
 import { chartExportInlineEnabled, freeInlineMode, inlineChartsInProcess, inlineHasWork, readStoredInlineCharts, validateInlineCharts } from "./inline.js";
 import { INLINE_CHART_LIMITS, inlineChartPlan, inlineDeadlineMs } from "./inline-guest.js";
 import { createVmDeterministicVisualExtractor } from "./vm-extractor.js";
@@ -104,13 +105,15 @@ describe.skipIf(!built)("inline charts in the quarantine guest (real scripts, re
   }, 60_000);
 
   describe("hostile extraction stays bounded and never fails the inspection", () => {
-    // Like the real worker: say "ready" after start-up, then do the (hostile) work.
-    async function hostile(body: string, ready = true): Promise<Record<string, unknown>> {
+    // Like the real worker: say "ready" after start-up, then do the (hostile) work once the file arrives.
+    // `size`: the input's size, which sets the deadline (0.5 s + 2 ms/KiB); the memory tests need time to allocate.
+    async function hostile(body: string, ready = true, size = 6): Promise<Record<string, unknown>> {
       const file = path.join(dir, `worker-${Math.random().toString(36).slice(2)}.mjs`);
-      await writeFile(file, `import { parentPort } from "node:worker_threads";\n${ready ? "parentPort.postMessage(\"ready\");\n" : ""}${body}\n`);
+      await writeFile(file, `import { parentPort } from "node:worker_threads";\n${ready ? `parentPort.postMessage("ready");\nparentPort.once("message", (job) => {\n${body}\n});` : body}\n`);
       const { inlineCharts } = await import(pathToFileURL(path.join(workerRoot, "scripts/chart-inline.mjs")).href);
       const inspection = { sniffed: { encoding: "utf-8", container: null }, archive: null };
-      return await inlineCharts(Buffer.from("<svg/>"), { kind: "svg", diagrams: true }, inspection, pathToFileURL(file));
+      const input = size === 6 ? Buffer.from("<svg/>") : Buffer.from(`<svg>${" ".repeat(size - 11)}</svg>`);
+      return await inlineCharts(input, { kind: "svg", diagrams: true }, inspection, null, pathToFileURL(file));
     }
     it("a spinning extractor hits the deadline", async () => {
       const started = Date.now();
@@ -121,11 +124,28 @@ describe.skipIf(!built)("inline charts in the quarantine guest (real scripts, re
     it("a worker that never gets ready is stopped at the start-up allowance", async () => {
       expect(await hostile("for (;;) {}", false)).toMatchObject({ status: "refused", reason: "deadline" });
     }, 30_000);
-    it("a memory-hungry extractor is stopped by its heap limit", async () => {
+    it("a JS-heap-hungry extractor is stopped (heap limit or memory watchdog)", async () => {
       const out = await hostile("const keep = []; for (;;) keep.push(new Array(1e5).fill({ a: Math.random() }));");
       expect(out).toMatchObject({ status: "refused" });
-      expect(["worker-failed", "deadline"]).toContain(out.reason);
+      expect(["worker-failed", "memory-limit", "deadline"]).toContain(out.reason);
     }, 60_000);
+    it("off-heap memory (Buffers) the heap limit does not see is stopped by the RSS watchdog (council M2)", async () => {
+      const before = process.memoryUsage.rss();
+      // 16 MiB at a time, touched so the pages are real, with a pause so the parent's watchdog gets its turn.
+      const out = await hostile("const keep = []; const step = () => { const b = Buffer.alloc(16 * 1024 * 1024, 1); keep.push(b); setImmediate(step); }; step();", true, 4 * 1024 * 1024);
+      expect(out).toMatchObject({ status: "refused", reason: "memory-limit" });
+      // The bound held: the process grew by no more than the budget plus one poll's worth of allocation.
+      expect(process.memoryUsage.rss() - before).toBeLessThan((INLINE_CHART_LIMITS.maxRssGrowthMb + 256) * 1024 * 1024);
+    }, 60_000);
+    it("off-heap memory allocated in one synchronous burst is stopped too", async () => {
+      const out = await hostile("const keep = []; for (;;) keep.push(Buffer.alloc(16 * 1024 * 1024, 1));", true, 4 * 1024 * 1024);
+      expect(out).toMatchObject({ status: "refused" });
+      expect(["memory-limit", "worker-failed"]).toContain(out.reason);
+    }, 60_000);
+    it("the file is transferred to the worker, not copied", async () => {
+      const out = await hostile("parentPort.postMessage(JSON.stringify({ schemaVersion: 'x', visuals: [], refusals: [], transferred: job.buffer instanceof ArrayBuffer && job.buffer.byteLength === 6 }));");
+      expect(out).toMatchObject({ status: "ok", result: { transferred: true } });
+    }, 30_000);
     it("a throwing extractor is a refusal with a machine reason only", async () => {
       expect(await hostile("throw new Error('secret document text');")).toMatchObject({ status: "refused", reason: "worker-failed" });
     }, 30_000);
@@ -135,6 +155,43 @@ describe.skipIf(!built)("inline charts in the quarantine guest (real scripts, re
     it("non-JSON is refused", async () => {
       expect(await hostile("parentPort.postMessage('{not json');")).toMatchObject({ status: "refused", reason: "result-invalid" });
     }, 30_000);
+  });
+
+  it("a broken inline module is a chart refusal, never a failed quarantine command (council M1)", async () => {
+    // The quarantine script and a chart-inline.mjs that throws on import, next to the real dist.
+    const root = await mkdtemp(path.join(dir, "broken-"));
+    await mkdir(path.join(root, "scripts"));
+    await symlink(path.join(workerRoot, "dist"), path.join(root, "dist"));
+    await copyFile(path.join(workerRoot, "scripts/quarantine-inspect.mjs"), path.join(root, "scripts/quarantine-inspect.mjs"));
+    await writeFile(path.join(root, "scripts/chart-inline.mjs"), "throw new SyntaxError('stale inline-guest.js');\n");
+    const tag = Math.random().toString(36).slice(2);
+    const input = path.join(dir, `${tag}.svg`);
+    const options = path.join(dir, `${tag}-options.json`);
+    const output = path.join(dir, `${tag}-out.json`);
+    await writeFile(input, genericBar(["North", "South"], [4, 6], 8));
+    await writeFile(options, JSON.stringify({ filename: "c.svg", policy: POLICY, charts: { kind: "svg", diagrams: true } }));
+    await run(process.execPath, [path.join(root, "scripts/quarantine-inspect.mjs"), input, options, output]);
+    const out = JSON.parse(await readFile(output, "utf8"));
+    expect(out.charts).toEqual({ status: "refused", reason: "worker-failed", ms: 0 });
+    expect(out.sniffed).toBeTruthy();
+  }, 60_000);
+
+  it("a prestarted SVG worker is ended when the plan skips; the command finishes", async () => {
+    const out = await inspect("x.svg", xlsx("S", [["q", "v"], ["A", 1]], chart), { kind: "svg", diagrams: true });
+    expect(out.charts).toEqual({ status: "skipped", reason: "not-text" });
+  }, 60_000);
+
+  it("pages reaches the extractor exactly as in the standalone guest", { timeout: 60_000, retry: 2 }, async () => {
+    const bytes = Buffer.from(genericBar(["North", "South", "East"], [12, 18, 9], 20));
+    const tag = Math.random().toString(36).slice(2);
+    const input = path.join(dir, `${tag}-in`);
+    const request = path.join(dir, `${tag}-req.json`);
+    const output = path.join(dir, `${tag}-res.json`);
+    await writeFile(input, bytes);
+    await writeFile(request, JSON.stringify({ kind: "svg", pages: 3 }));
+    await run(process.execPath, [path.join(workerRoot, "scripts/chart-export-extract.mjs"), input, request, output], { cwd: workerRoot });
+    const inline = await inspect("p.svg", bytes, { kind: "svg", diagrams: true, pages: 3 });
+    expect((inline.charts as { result: unknown }).result).toEqual(JSON.parse(await readFile(output, "utf8")));
   });
 });
 
@@ -147,17 +204,49 @@ describe("inline chart plan and host validation", () => {
     expect(inlineChartPlan("office", zip(0), 1000, () => "")).toEqual({ run: false, reason: "no-chart-parts" });
     expect(inlineChartPlan("office", zip(2, true), 1000, () => "")).toEqual({ run: false, reason: "archive-refused" });
     expect(inlineChartPlan("json", text, 10, () => "  [1,2]")).toEqual({ run: false, reason: "no-signal" });
-    expect(inlineChartPlan("json", text, 10, () => " {\"mark\":\"bar\"}")).toEqual({ run: true, packaged: false });
+    expect(inlineChartPlan("json", text, 10, () => " {\"mark\":\"bar\",\"data\":{}}")).toEqual({ run: true, packaged: false });
+    expect(inlineChartPlan("json", text, 10, () => " {\"mark\":\"bar\"}")).toEqual({ run: false, reason: "no-signal" });
     expect(inlineChartPlan("pdf", text, 10, () => "")).toEqual({ run: false, reason: "kind-unsupported" });
     expect(inlineDeadlineMs(0)).toBe(500);
     expect(inlineDeadlineMs(100 * 1024 * 1024)).toBe(10_000);
   });
 
-  it("the HTML and JSON prefilters are exact: skipped files extract nothing", () => {
-    for (const [kind, body] of [["html", "<html><p>Expansion to Tokyo.</p><pre>{\"mark\":\"bar\"}</pre></html>"], ["json", "[{\"mark\":\"bar\"}]"]] as const) {
-      expect(inlineChartPlan(kind, text, body.length, () => body)).toMatchObject({ run: false });
+  it("the HTML and JSON prefilters skip only files that extract nothing (council L1, M3)", () => {
+    const skipped: Array<readonly ["html" | "json", string]> = [
+      ["html", "<html><p>Expansion to Tokyo.</p><pre>{\"mark\":\"bar\"}</pre></html>"],
+      ["json", "[{\"mark\":\"bar\"}]"],
+      // An API export: an object with no $schema and no data member (classify needs one of them).
+      ["json", JSON.stringify({ orders: [{ id: 1, total: 12.5 }], next: null, title: "Bookings" })],
+      ["html", "{\"rows\": [1, 2, 3]}"],
+    ];
+    for (const [kind, body] of skipped) {
+      expect(inlineChartPlan(kind, text, Buffer.byteLength(body), () => body)).toMatchObject({ run: false, reason: "no-signal" });
       expect(extractDeterministicVisuals({ kind, text: body }).visuals).toEqual([]);
     }
+  });
+
+  it("runs on what the extractor reads: an HTML file that is a JSON spec, an escaped key", () => {
+    const spec = JSON.stringify(VEGA);
+    for (const [kind, body] of [["html", spec], ["json", spec], ["json", spec.replace("\"data\"", "\"\\u0064ata\"").replace("\"$schema\"", "\"\\u0024schema\"")]] as const) {
+      expect(inlineChartPlan(kind, text, Buffer.byteLength(body), () => body)).toEqual({ run: true, packaged: false });
+      expect(extractDeterministicVisuals({ kind, text: body }).visuals.length).toBeGreaterThan(0);
+    }
+  });
+
+  it("compares the decoded length with the limit, as the extractor does (multibyte text)", () => {
+    // 2 million three-byte characters: 6 MB of bytes but 2 M characters, under the 5 Mi-character limit.
+    const body = `<svg>${"€".repeat(2_000_000)}</svg>`;
+    expect(Buffer.byteLength(body)).toBeGreaterThan(CHART_EXTRACT_LIMITS.maxTextBytes);
+    expect(inlineChartPlan("svg", text, Buffer.byteLength(body), () => body)).toEqual({ run: true, packaged: false });
+    // Past three bytes per allowed character, the text is too long without decoding it.
+    expect(inlineChartPlan("svg", text, 3 * CHART_EXTRACT_LIMITS.maxTextBytes + 1, () => { throw new Error("decoded"); })).toEqual({ run: false, reason: "input-too-large" });
+  });
+
+  it("Office without chart parts is skipped even with SVG pictures (#363's host rule, kept on purpose)", () => {
+    const deck = docx([], { "word/media/image1.svg": genericBar(["A", "B"], [1, 2], 3) });
+    expect(inlineChartPlan("office", zip(0), deck.length, () => "")).toEqual({ run: false, reason: "no-chart-parts" });
+    // The extractor itself would read the picture: a documented difference, not an exact skip.
+    expect(extractDeterministicVisuals({ kind: "office", bytes: deck }).visuals.length).toBeGreaterThan(0);
   });
 
   it("refuses malformed guest answers without throwing", () => {
