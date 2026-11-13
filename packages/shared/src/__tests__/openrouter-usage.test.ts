@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createOpenRouterRoutingFetch, setOpenRouterProviderPolicyResolver } from "../openrouter-routing.js";
 import { CHINA_PROVIDER_SLUGS, NON_CHINA_PROVIDER_SLUGS } from "../provider-regions.js";
 import { setLiveModelPricesForTests } from "../live-model-prices.js";
-import { createOpenRouterReasoningFetch, lowestOpenRouterReasoning, openRouterReasoningParams, createOpenRouterUsageCapture, readProviderCharge, resolveOpenRouterUsage } from "../openrouter-usage.js";
+import { createOpenRouterReasoningFetch, lowestOpenRouterReasoning, reasoningTokenAllowance, withReasoningTokenAllowance, openRouterReasoningParams, createOpenRouterUsageCapture, readProviderCharge, resolveOpenRouterUsage } from "../openrouter-usage.js";
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); setLiveModelPricesForTests(null); });
 describe("OpenRouter thinking controls", () => {
   it("disables thinking without sending unsupported effort and preserves request and accounting options", async () => {
@@ -22,6 +22,35 @@ describe("OpenRouter thinking controls", () => {
     const init = { method: "GET" };
     await createOpenRouterReasoningFetch(baseFetch, "none")("https://openrouter.ai/api/v1/models", init);
     expect(baseFetch.mock.calls[0][1]).toBe(init);
+  });
+});
+describe("reasoning token allowance", () => {
+  const send = async (body: Record<string, unknown>, effort?: string) => {
+    const baseFetch = vi.fn<typeof fetch>().mockResolvedValue(new Response("{}"));
+    await createOpenRouterReasoningFetch(baseFetch, effort)("https://openrouter.ai/api/v1/chat/completions", { method: "POST", body: JSON.stringify(body) });
+    return JSON.parse(baseFetch.mock.calls[0][1]!.body as string);
+  };
+  it("adds a reasoning-mandatory model's floor reasoning to a floor-level output limit", async () => {
+    // A one-sentence 96-token limit was all reasoning for these models: empty or cut-off answers, still billed.
+    for (const effort of [undefined, "none"]) {
+      const inkling = await send({ model: "thinkingmachines/inkling-2-small", max_tokens: 96 }, effort);
+      expect(inkling).toMatchObject({ reasoning: { effort: "minimal" }, max_tokens: 96 + reasoningTokenAllowance("thinkingmachines/inkling-2-small") });
+      const oss = await send({ model: "openai/gpt-oss-120b", max_completion_tokens: 128 }, effort);
+      expect(oss.max_completion_tokens).toBe(128 + reasoningTokenAllowance("openai/gpt-oss-120b"));
+    }
+    expect(reasoningTokenAllowance("thinkingmachines/inkling-2-small")).toBeGreaterThanOrEqual(128);
+  });
+  it("leaves models that reason zero tokens at their floor, explicit efforts and limitless bodies unchanged", async () => {
+    expect((await send({ model: "deepseek/deepseek-v4.1-flash-1017", max_tokens: 96 }, "none")).max_tokens).toBe(96);
+    expect((await send({ model: "qwen/qwen3.5-flash-02-23", max_tokens: 96 })).max_tokens).toBe(96);
+    expect(await send({ model: "openai/gpt-oss-120b", max_tokens: 96, reasoning: { effort: "high" } })).toMatchObject({ max_tokens: 96 });
+    expect(await send({ model: "openai/gpt-oss-120b" }, "none")).not.toHaveProperty("max_tokens");
+    expect(reasoningTokenAllowance("vendor/unknown")).toBe(0);
+  });
+  it("re-bases a limit between models without double counting", () => {
+    const body = { model: "openai/gpt-oss-120b", max_tokens: 96 + 192 };
+    expect(withReasoningTokenAllowance(body, "qwen/qwen3.5-flash-02-23", "openai/gpt-oss-120b").max_tokens).toBe(96 + 192 - reasoningTokenAllowance("openai/gpt-oss-120b"));
+    expect(withReasoningTokenAllowance(body, "qwen/qwen3.5-flash-02-23")).toBe(body);
   });
 });
 describe("GPT-6 Luna chat reasoning", () => {
