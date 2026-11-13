@@ -3,6 +3,8 @@ import { createHash, randomUUID } from "node:crypto";
 import type { Context, MiddlewareHandler } from "hono";
 import { createClient } from "redis";
 
+import { PUBLIC_ERROR_MESSAGES } from "@docslurp/shared";
+
 import { middlewareErrorResponse } from "../lib/api-error.js";
 import { requestIp } from "../lib/request-context.js";
 import { classifyRateLimitCategory, rateLimitAddress } from "../lib/rate-limit-keys.js";
@@ -21,14 +23,21 @@ import { chatTurnTimeBudget } from "../services/chat-turn-deadline.js";
  * or the hard deadline (turn deadline + grace) passes, whichever comes first,
  * so a client that stops reading cannot hold a slot past the turn.
  *
- * Counts are cluster-wide when the limiter's Redis is configured
- * (API_RATE_LIMIT_REDIS_URL, REDIS_URL or the Upstash REST pair): each slot is
- * a lease in a Redis sorted set, taken and checked in one atomic script and
- * expiring on Redis time at the hard deadline, so a crashed process cannot hold
- * slots forever. Without Redis, counts are per process. When Redis is
- * configured but unreachable, production refuses capped turns (fail closed: a
- * per-process count would multiply the cap by the number of instances);
- * development and tests fall back to the per-process count.
+ * Counts are cluster-wide through a shared Redis, resolved in this order:
+ * API_RATE_LIMIT_REDIS_URL, REDIS_URL, the REST pair
+ * (API_RATE_LIMIT_REDIS_REST_URL + _TOKEN, or UPSTASH_REDIS_REST_URL + _TOKEN),
+ * then MASTRA_REDIS_URL (the durable-chat Redis, under its own key prefix).
+ * Each slot is a lease in a Redis sorted set, taken and checked in one atomic
+ * script and expiring on Redis time at the hard deadline, so a crashed process
+ * cannot hold slots forever.
+ *
+ * Production never counts per process by accident (N instances would allow N
+ * times every cap): with no shared backend, or half of a REST pair, the server
+ * refuses to start (assertChatConcurrencyBackend) unless
+ * CHAT_CONCURRENCY_LOCAL_ONLY=1 declares a single-instance deployment. When
+ * the configured backend is unreachable, production refuses capped turns with
+ * 503 `chat_capacity_unavailable` (fail closed). Development and tests fall
+ * back to the per-process count in both cases.
  *
  * Defaults: browser keys 16 per key and 3 per visitor; server keys 64 per key
  * (backend batch callers; a bound on runaway loops, not a quota), and any key
@@ -64,7 +73,9 @@ export interface ChatSlotBackend {
 /**
  * KEYS: counters. ARGV: hold ms, lease id, then one cap per key. Leases are
  * scored by their expiry on Redis's clock (never the caller's), expired leases
- * are dropped before counting, and the key itself expires after its latest lease.
+ * are dropped before counting, and each key expires at its latest lease expiry:
+ * the highest score in the set, never this lease's own hold, so a short lease
+ * cannot delete longer leases that are still live.
  */
 const ACQUIRE_SCRIPT = `
 local t = redis.call('TIME')
@@ -77,7 +88,8 @@ for i, key in ipairs(KEYS) do
 end
 for i, key in ipairs(KEYS) do
   redis.call('ZADD', key, now + hold, ARGV[2])
-  redis.call('PEXPIRE', key, hold)
+  local latest = redis.call('ZREVRANGE', key, 0, 0, 'WITHSCORES')
+  redis.call('PEXPIREAT', key, math.ceil(tonumber(latest[2])))
 end
 return 1
 `;
@@ -89,13 +101,23 @@ const sha = (script: string) => createHash("sha1").update(script).digest("hex");
 const ACQUIRE_SHA = sha(ACQUIRE_SCRIPT);
 const RELEASE_SHA = sha(RELEASE_SCRIPT);
 
-function redisKey(counter: ChatSlotCounter): string {
+/**
+ * Key prefix on the durable-chat Redis. That runtime's keys are
+ * `<namespace>:cache:` and `<namespace>:events`, and a namespace cannot contain
+ * `{`; these keys continue with `{<key id>}`, so the two can never collide
+ * whatever MASTRA_NAMESPACE is.
+ */
+export const DURABLE_REDIS_CHAT_SLOT_PREFIX = "docslurp-chat-slots";
+
+const limiterKeyPrefix = () => `${process.env.API_RATE_LIMIT_KEY_PREFIX ?? "api"}:chat-inflight`;
+
+function redisKey(counter: ChatSlotCounter, prefix: string): string {
   // Hash tag on the key id: every counter of one turn lives on one cluster slot.
-  return `${process.env.API_RATE_LIMIT_KEY_PREFIX ?? "api"}:chat-inflight:{${counter.tag}}:${counter.key}`;
+  return `${prefix}:{${counter.tag}}:${counter.key}`;
 }
 
-function scriptCall(script: "acquire" | "release", counters: ChatSlotCounter[], args: string[]): { sha: string; source: string; tail: string[] } {
-  const keys = counters.map(redisKey);
+function scriptCall(script: "acquire" | "release", counters: ChatSlotCounter[], args: string[], prefix = limiterKeyPrefix()): { sha: string; source: string; tail: string[] } {
+  const keys = counters.map((counter) => redisKey(counter, prefix));
   return script === "acquire"
     ? { sha: ACQUIRE_SHA, source: ACQUIRE_SCRIPT, tail: [String(keys.length), ...keys, ...args] }
     : { sha: RELEASE_SHA, source: RELEASE_SCRIPT, tail: [String(keys.length), ...keys, ...args] };
@@ -117,8 +139,8 @@ const createSlotRedisClient = (url: string) => createClient({ url, disableOfflin
   socket: { connectTimeout: REDIS_TIMEOUT_MS, reconnectStrategy: (retries: number) => Math.min(1_000 * 2 ** retries, 30_000) } });
 type SlotRedisClient = ReturnType<typeof createSlotRedisClient>;
 
-/** A node-redis backend (the limiter's REDIS_URL / API_RATE_LIMIT_REDIS_URL). */
-export function createRedisChatSlotBackend(url: string): ChatSlotBackend {
+/** A node-redis backend. `keyPrefix` defaults to the limiter's (`<API_RATE_LIMIT_KEY_PREFIX>:chat-inflight`). */
+export function createRedisChatSlotBackend(url: string, keyPrefix?: string): ChatSlotBackend {
   let client: SlotRedisClient | null = null;
   let connecting: Promise<SlotRedisClient> | null = null;
   let errorLogged = false;
@@ -152,12 +174,12 @@ export function createRedisChatSlotBackend(url: string): ChatSlotBackend {
   };
   return {
     async acquire(counters, holdMs, lease) {
-      const result: unknown = await withTimeout(run(scriptCall("acquire", counters, [String(holdMs), lease, ...counters.map((c) => String(c.cap))])), REDIS_TIMEOUT_MS);
+      const result: unknown = await withTimeout(run(scriptCall("acquire", counters, [String(holdMs), lease, ...counters.map((c) => String(c.cap))], keyPrefix)), REDIS_TIMEOUT_MS);
       if (result !== 0 && result !== 1) throw new Error("Redis returned an invalid chat-slot result");
       return result === 1;
     },
     async release(counters, lease) {
-      await withTimeout(run(scriptCall("release", counters, [lease])), REDIS_TIMEOUT_MS);
+      await withTimeout(run(scriptCall("release", counters, [lease], keyPrefix)), REDIS_TIMEOUT_MS);
     },
     async close() {
       const current = client;client = null;
@@ -198,24 +220,90 @@ function createUpstashChatSlotBackend(url: string, token: string): ChatSlotBacke
   };
 }
 
+/** Where chat slots are counted, from the environment alone (no connection is made). */
+export type ChatSlotBackendConfig =
+  | { kind: "redis"; url: string; source: "API_RATE_LIMIT_REDIS_URL" | "REDIS_URL" | "MASTRA_REDIS_URL"; keyPrefix?: string }
+  | { kind: "rest"; url: string; token: string }
+  | { kind: "none" };
+
+type SlotEnv = Record<string, string | undefined>;
+
+/** A REST URL without its token, or a token without its URL (either variable family). */
+function halfRestPair(env: SlotEnv): boolean {
+  const url = env.API_RATE_LIMIT_REDIS_REST_URL?.trim() || env.UPSTASH_REDIS_REST_URL?.trim();
+  const token = env.API_RATE_LIMIT_REDIS_REST_TOKEN?.trim() || env.UPSTASH_REDIS_REST_TOKEN?.trim();
+  return Boolean(url) !== Boolean(token);
+}
+
+/**
+ * The shared store for chat slots: API_RATE_LIMIT_REDIS_URL, REDIS_URL, a
+ * complete REST pair, then MASTRA_REDIS_URL. Half of a REST pair selects
+ * nothing (production refuses to start on it, see assertChatConcurrencyBackend).
+ */
+export function resolveChatSlotBackendConfig(env: SlotEnv = process.env): ChatSlotBackendConfig {
+  const limiterUrl = env.API_RATE_LIMIT_REDIS_URL?.trim();
+  if (limiterUrl) return { kind: "redis", url: limiterUrl, source: "API_RATE_LIMIT_REDIS_URL" };
+  const redisUrl = env.REDIS_URL?.trim();
+  if (redisUrl) return { kind: "redis", url: redisUrl, source: "REDIS_URL" };
+  const restUrl = env.API_RATE_LIMIT_REDIS_REST_URL?.trim() || env.UPSTASH_REDIS_REST_URL?.trim();
+  const restToken = env.API_RATE_LIMIT_REDIS_REST_TOKEN?.trim() || env.UPSTASH_REDIS_REST_TOKEN?.trim();
+  if (restUrl && restToken) return { kind: "rest", url: restUrl, token: restToken };
+  const durableUrl = env.MASTRA_REDIS_URL?.trim();
+  if (durableUrl) return { kind: "redis", url: durableUrl, source: "MASTRA_REDIS_URL", keyPrefix: DURABLE_REDIS_CHAT_SLOT_PREFIX };
+  return { kind: "none" };
+}
+
+/** CHAT_CONCURRENCY_LOCAL_ONLY=1: the operator declares one API instance, so per-process caps are the caps. */
+export function chatConcurrencyLocalOnly(env: SlotEnv = process.env): boolean {
+  return ["1", "true"].includes(env.CHAT_CONCURRENCY_LOCAL_ONLY?.trim().toLowerCase() ?? "");
+}
+
+const SHARED_BACKEND_VARIABLES = "API_RATE_LIMIT_REDIS_URL, REDIS_URL, API_RATE_LIMIT_REDIS_REST_URL with API_RATE_LIMIT_REDIS_REST_TOKEN "
+  + "(or UPSTASH_REDIS_REST_URL with UPSTASH_REDIS_REST_TOKEN), or MASTRA_REDIS_URL";
+
+/**
+ * Startup check (ensureApiStartup, before any traffic). Production refuses to
+ * start when chat caps would silently be per process: no shared backend, or
+ * half of a REST pair. CHAT_CONCURRENCY_LOCAL_ONLY=1 is the explicit
+ * single-instance opt-out and logs one warning. Returns how slots are counted.
+ */
+export function assertChatConcurrencyBackend(env: SlotEnv = process.env, log: Pick<Console, "warn"> = console): "shared" | "local" {
+  const config = resolveChatSlotBackendConfig(env);
+  if (env.NODE_ENV !== "production") return config.kind === "none" ? "local" : "shared";
+  const halfPair = halfRestPair(env);
+  if (!halfPair && config.kind !== "none") return "shared";
+  if (chatConcurrencyLocalOnly(env)) {
+    if (config.kind !== "none") return "shared";
+    log.warn("[chat-concurrency] backend=local: CHAT_CONCURRENCY_LOCAL_ONLY=1, so chat concurrency caps are counted per process. "
+      + "Run a single API instance, or N instances allow N times every cap.");
+    return "local";
+  }
+  if (halfPair) {
+    throw new Error("Chat concurrency: the Redis REST backend is half configured. Set both API_RATE_LIMIT_REDIS_REST_URL and "
+      + "API_RATE_LIMIT_REDIS_REST_TOKEN (or both UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN), or unset both. "
+      + "Set CHAT_CONCURRENCY_LOCAL_ONLY=1 only for a single API instance.");
+  }
+  throw new Error(`Chat concurrency: no shared Redis is configured, so chat caps would be counted per process. Set one of ${SHARED_BACKEND_VARIABLES}. `
+    + "Set CHAT_CONCURRENCY_LOCAL_ONLY=1 only for a single API instance.");
+}
+
 let configuredBackend: { signature: string; backend: ChatSlotBackend | null } | undefined;
 
-/** The shared backend the limiter's environment names, or null when none is configured. */
+/** The shared backend the environment names, or null when none is configured. */
 function sharedBackend(): ChatSlotBackend | null {
-  const restUrl = process.env.API_RATE_LIMIT_REDIS_REST_URL?.trim() || process.env.UPSTASH_REDIS_REST_URL?.trim();
-  const restToken = process.env.API_RATE_LIMIT_REDIS_REST_TOKEN?.trim() || process.env.UPSTASH_REDIS_REST_TOKEN?.trim();
-  const redisUrl = process.env.API_RATE_LIMIT_REDIS_URL?.trim() || process.env.REDIS_URL?.trim();
-  const signature = restUrl && restToken ? `rest:${restUrl}` : redisUrl ? `redis:${redisUrl}` : "";
+  const config = resolveChatSlotBackendConfig();
+  const signature = config.kind === "none" ? "" : `${config.kind}:${config.url}:${config.kind === "redis" ? config.keyPrefix ?? "" : ""}`;
   if (configuredBackend?.signature === signature) return configuredBackend.backend;
   void configuredBackend?.backend?.close?.().catch(() => undefined);
-  const backend = restUrl && restToken ? createUpstashChatSlotBackend(restUrl, restToken) : redisUrl ? createRedisChatSlotBackend(redisUrl) : null;
+  const backend = config.kind === "rest" ? createUpstashChatSlotBackend(config.url, config.token)
+    : config.kind === "redis" ? createRedisChatSlotBackend(config.url, config.keyPrefix) : null;
   configuredBackend = { signature, backend };
   return backend;
 }
 
 const inFlight = new Map<string, number>();
 
-/** Per-process counting: no Redis configured, or Redis down outside production. */
+/** Per-process counting: outside production, or production with CHAT_CONCURRENCY_LOCAL_ONLY=1. */
 function acquireLocal(counters: ChatSlotCounter[]): (() => void) | null {
   if (counters.some(({ key, cap }) => cap > 0 && (inFlight.get(key) ?? 0) >= cap)) return null;
   for (const { key } of counters) inFlight.set(key, (inFlight.get(key) ?? 0) + 1);
@@ -262,22 +350,34 @@ async function acquireShared(backend: ChatSlotBackend, counters: ChatSlotCounter
 /** Outcome of taking a slot: a release, a full cap, or a configured shared store that cannot answer (refuse). */
 export type ChatSlotAcquisition = { release: () => void } | "full" | "unavailable";
 
+/** One line per refused turn, with a stable prefix an alert can match. Never carries backend error text. */
+function logRefusal(reason: "backend-unavailable" | "backend-not-configured"): void {
+  console.error(`[chat-concurrency] status=refused reason=${reason}`);
+}
+
 /**
  * Takes one slot on every counter, cluster-wide through `backend` when one is
- * configured. Production never falls back to per-process counting while a
- * configured backend is down. The release is idempotent and also runs by
- * itself after `holdMs`.
+ * configured. Production never falls back to per-process counting: not while a
+ * configured backend is down, and not when none is configured (startup refuses
+ * that; this is the same refusal for a host that skipped the startup check),
+ * unless CHAT_CONCURRENCY_LOCAL_ONLY=1. The release is idempotent and also runs
+ * by itself after `holdMs`.
  */
 export async function acquireChatSlots(counters: ChatSlotCounter[], holdMs: number, backend: ChatSlotBackend | null = sharedBackend()): Promise<ChatSlotAcquisition> {
   let releaseNow: (() => void) | null;
   if (!backend) {
+    if (process.env.NODE_ENV === "production" && !chatConcurrencyLocalOnly()) {
+      logRefusal("backend-not-configured");
+      return "unavailable";
+    }
     releaseNow = acquireLocal(counters);
   } else {
     const shared = await acquireShared(backend, counters, holdMs);
     if (shared === "full") return "full";
     if (shared === "unavailable") {
       if (process.env.NODE_ENV === "production") {
-        console.error("[chat-concurrency] refused: Redis is configured but unavailable (per-process counting would multiply the cap by the instance count)");
+        // Per-process counting would multiply the cap by the instance count.
+        logRefusal("backend-unavailable");
         return "unavailable";
       }
       releaseNow = acquireLocal(counters);
@@ -357,14 +457,14 @@ export function chatSlotHoldMs(): number {
 
 /**
  * Takes a slot for a chat turn outside the HTTP middleware (the MCP `chat`
- * tool, answer-generating search). Null when a cap is full or the shared store
- * cannot answer in production; otherwise call the release when the turn ends.
+ * tool, answer-generating search). "full" when a cap is reached, "unavailable"
+ * when the shared store cannot answer in production; otherwise call the
+ * release when the turn ends.
  */
-export async function acquireChatSlot(c: Context): Promise<{ release: () => void } | null | "uncapped"> {
+export async function acquireChatSlot(c: Context): Promise<{ release: () => void } | "full" | "unavailable" | "uncapped"> {
   const keys = chatConcurrencyKeys(c);
   if (keys.length === 0) return "uncapped";
-  const slot = await acquireChatSlots(keys, chatSlotHoldMs());
-  return typeof slot === "string" ? null : slot;
+  return await acquireChatSlots(keys, chatSlotHoldMs());
 }
 
 declare module "hono" {
@@ -373,21 +473,36 @@ declare module "hono" {
   }
 }
 
-const RETRY_AFTER_SECONDS = 5;
+export const CHAT_SLOT_RETRY_AFTER_SECONDS = 5;
+export const CHAT_SLOTS_FULL_MESSAGE = "Too many chat requests in progress for this key; wait for one to finish";
+/** Public copy for a refused turn while the slot store is down; the cause stays in the logs. */
+export const CHAT_CAPACITY_UNAVAILABLE_MESSAGE = PUBLIC_ERROR_MESSAGES.chatCapacityUnavailable;
 
-/** `limited` shapes the 429 for protocol surfaces (the OpenAI-compatible route); default is the API error envelope. */
-export function createChatConcurrencyLimit(limited?: (c: Context) => Response): MiddlewareHandler {
+/**
+ * The native refusal for a slot that was not taken. A full cap is the caller's
+ * own limit (429 `rate_limited`); a slot store that cannot answer is ours
+ * (503 `chat_capacity_unavailable`), so clients and alerts can tell them apart.
+ */
+export function chatSlotRefusedResponse(c: Context, reason: "full" | "unavailable"): Response {
+  c.header("Retry-After", String(CHAT_SLOT_RETRY_AFTER_SECONDS));
+  const details = { category: "chat-ai", policy: "chat-concurrency", retryAfterSeconds: CHAT_SLOT_RETRY_AFTER_SECONDS };
+  return reason === "full"
+    ? middlewareErrorResponse(c, 429, "rate_limited", CHAT_SLOTS_FULL_MESSAGE, details)
+    : middlewareErrorResponse(c, 503, "chat_capacity_unavailable", CHAT_CAPACITY_UNAVAILABLE_MESSAGE, details);
+}
+
+/** `refused` shapes the refusal for protocol surfaces (the OpenAI-compatible route); default is the API error envelope. */
+export function createChatConcurrencyLimit(refused?: (c: Context, reason: "full" | "unavailable") => Response): MiddlewareHandler {
   return async (c, next) => {
     if (c.get("chatConcurrencyCounted") || classifyRateLimitCategory(c.req.method, c.req.path) !== "chat-ai") return next();
     const keys = chatConcurrencyKeys(c);
     if (keys.length === 0) return next();
     const slot = await acquireChatSlots(keys, chatSlotHoldMs());
     if (typeof slot === "string") {
-      // A full cap and an unreachable shared store both refuse (fail closed); only the log tells them apart.
-      c.header("Retry-After", String(RETRY_AFTER_SECONDS));
-      return limited?.(c) ?? middlewareErrorResponse(c, 429, "rate_limited", "Too many chat requests in progress for this key; wait for one to finish", {
-        category: "chat-ai", policy: "chat-concurrency", retryAfterSeconds: RETRY_AFTER_SECONDS,
-      });
+      // Both refuse (fail closed), with different statuses and codes.
+      if (!refused) return chatSlotRefusedResponse(c, slot);
+      c.header("Retry-After", String(CHAT_SLOT_RETRY_AFTER_SECONDS));
+      return refused(c, slot);
     }
     c.set("chatConcurrencyCounted", true);
     try {

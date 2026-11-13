@@ -10,6 +10,7 @@ import {
   chatConcurrencyLimit,
   chatTurnsInFlight,
   createRedisChatSlotBackend,
+  DURABLE_REDIS_CHAT_SLOT_PREFIX,
   resetChatConcurrency,
   type ChatSlotBackend,
 } from "../middleware/chat-concurrency.js";
@@ -81,6 +82,40 @@ describe.skipIf(!redisUrl)("cluster-wide chat slots (Redis)", () => {
     expect(await survivor.acquire(counters, 60_000, randomUUID())).toBe(true);
     // The key itself expires after its latest lease, so idle keys do not accumulate.
     expect(await inspect.pTTL(`api:chat-inflight:{${tag}}:key:${tag}`)).toBeGreaterThan(0);
+  });
+
+  it("keeps a long lease counted after a later, shorter lease expires", async () => {
+    const tag = randomUUID();
+    const counters = [{ key: `key:${tag}`, cap: 2, tag }];
+    const redisKey = `api:chat-inflight:{${tag}}:key:${tag}`;
+    const backend = processBackend();
+    // Heterogeneous holds: instances with different turn deadlines during a rollout.
+    expect(await backend.acquire(counters, 60_000, "long")).toBe(true);
+    expect(await backend.acquire(counters, 400, "short")).toBe(true);
+    // The key lives as long as its longest lease, not the newest one.
+    expect(await inspect.pTTL(redisKey)).toBeGreaterThan(50_000);
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    expect(await inspect.zScore(redisKey, "long")).not.toBeNull();
+    // The short lease is gone, the long one still holds one of the two slots.
+    expect(await backend.acquire(counters, 400, "second")).toBe(true);
+    expect(await backend.acquire(counters, 400, "third")).toBe(false);
+    expect(await inspect.pTTL(redisKey)).toBeGreaterThan(50_000);
+  });
+
+  it("counts under its own prefix on the durable-chat Redis", async () => {
+    for (const name of ["API_RATE_LIMIT_REDIS_REST_URL", "API_RATE_LIMIT_REDIS_REST_TOKEN", "API_RATE_LIMIT_REDIS_URL", "REDIS_URL", "UPSTASH_REDIS_REST_URL", "UPSTASH_REDIS_REST_TOKEN"]) vi.stubEnv(name, "");
+    vi.stubEnv("MASTRA_REDIS_URL", redisUrl);
+    vi.stubEnv("NODE_ENV", "production");
+    const tag = randomUUID();
+    const counters = [{ key: `key:${tag}`, cap: 1, tag }];
+    const slot = await acquireChatSlots(counters, 60_000);
+    expect(typeof slot).toBe("object");
+    expect(await acquireChatSlots(counters, 60_000)).toBe("full");
+    expect(chatTurnsInFlight(`key:${tag}`)).toBe(0);
+    expect(await inspect.zCard(`${DURABLE_REDIS_CHAT_SLOT_PREFIX}:{${tag}}:key:${tag}`)).toBe(1);
+    expect(await inspect.exists(`api:chat-inflight:{${tag}}:key:${tag}`)).toBe(0);
+    if (typeof slot === "object") slot.release();
+    await vi.waitFor(async () => expect(await inspect.zCard(`${DURABLE_REDIS_CHAT_SLOT_PREFIX}:{${tag}}:key:${tag}`)).toBe(0));
   });
 
   it("releases a shared slot when the client aborts its stream", async () => {

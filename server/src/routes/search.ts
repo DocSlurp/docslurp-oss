@@ -9,7 +9,7 @@ import { batchSearchInputSchema, searchFormError, searchInputSchema, searchOptio
 import { streamSSE } from "hono/streaming";
 import { assertCanSpend } from "../services/billing/spend-guard.js";
 import { enforceActorCategoryRateLimit } from "../middleware/rate-limit.js";
-import { acquireChatSlot } from "../middleware/chat-concurrency.js";
+import { acquireChatSlot, chatSlotRefusedResponse } from "../middleware/chat-concurrency.js";
 
 import { aggregateProjectRagSearchRequestSchema, deferredProfilesEnabled, PARSE_SOURCE_RESCAN_REASON, PUBLIC_ERROR_MESSAGES, type ApiErrorCode } from "@docslurp/shared";
 
@@ -593,15 +593,13 @@ export const searchRoutes = new Hono()
 
     // An answer is a chat turn: it spends the chat-ai allowance and holds a
     // chat slot like /v1/chat (the path alone classifies it as search).
-    let slot: { release: () => void } | null | "uncapped" = "uncapped";
+    let slot: { release: () => void } | "uncapped" = "uncapped";
     if (parsed.data.generateAnswer) {
       const limited = await enforceActorCategoryRateLimit(c, "chat-ai");
       if (limited) return limited;
-      slot = await acquireChatSlot(c);
-      if (!slot) {
-        c.header("Retry-After", "5");
-        return apiErrorResponse(c, 429, "rate_limited", "Too many chat requests in progress for this key; wait for one to finish");
-      }
+      const acquired = await acquireChatSlot(c);
+      if (acquired === "full" || acquired === "unavailable") return chatSlotRefusedResponse(c, acquired);
+      slot = acquired;
     }
 
     try {

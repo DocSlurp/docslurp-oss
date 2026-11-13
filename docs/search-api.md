@@ -105,7 +105,7 @@ Every error from the native JSON API (`/v1/*`, including authentication, rate li
 `code` is a closed set you can branch on:
 
 - Request and access: `invalid_request`, `unauthorized`, `forbidden`, `not_found`, `project_not_found`, `conflict`, `payload_too_large`, `session_required`, `mfa_required`, `REAUTH_REQUIRED` (a sensitive account action needs you to sign in again), `api_key_ip_not_allowed`, `client_key_projects_required`, `client_key_origin_not_allowed`, `invalid_search_scope`, `chat_disabled`, `chat_session_forbidden`, `model_not_allowed`, `chat_tool_failed` (HTTP 424: a required tool failed and the task is blocked), `chat_deadline_exceeded` (HTTP 424: a search-agent model/turn deadline was reached, even if partial text was streamed).
-- Limits: `rate_limited`, `spend_limit_exceeded`, `search_limit_exceeded`, `daily_page_limit`, `ip_temporarily_blocked`.
+- Limits: `rate_limited`, `spend_limit_exceeded`, `search_limit_exceeded`, `daily_page_limit`, `ip_temporarily_blocked`, `chat_capacity_unavailable` (HTTP 503: chat turns in progress couldn't be counted, so the turn was refused; retry after `Retry-After`).
 - Billing: `payment_required`, `credit_exhausted`, `project_budget_paused`, `org_budget_paused`, `minimum_credit_required`, `plan_not_entitled`.
 - Uploads and extracts: `unsupported_type`, `remote_format_disabled`, `file_too_large`, `unreadable_source`, `extract_not_found`, `extract_expired`, `retention_exceeds_cap`, `download_not_ready`, `download_failed`.
 - Web tools and privacy: `web_disabled`, `web_scope_required`, `url_blocked`, `privacy_mode_blocked`.
