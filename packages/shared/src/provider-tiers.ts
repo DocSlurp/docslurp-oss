@@ -22,6 +22,8 @@
  */
 import { CHAT_TIERS, type ChatTier } from "./project-chat-models.js";
 import { isAutomaticSelectionDenied } from "./automatic-model-selection.js";
+import { automaticModelCallProblem } from "./model-call-policy.js";
+import { MAX_OUTPUT_USD_PER_MTOK_EXCLUSIVE } from "./routing-targets.js";
 import { hostMatchesEndpoint, providerPool, type ProviderPool } from "./provider-pools.js";
 
 /** The customer tier vocabulary, reused for routing; there is no separate routing vocabulary. */
@@ -194,6 +196,9 @@ export function assertTierOptions(options: readonly TierOption[]): void {
     if (option.tiers.length === 0) throw new Error(`tier option ${option.id}: names no tier`);
     // A tier picks among its options automatically, so a model that is never selected automatically is never an option.
     if (isAutomaticSelectionDenied(option.model)) throw new Error(`tier option ${option.id}: ${option.model} is never selected automatically`);
+    // The call-time policy too: no Pro/Ultra, no model whose known output price reaches the $50 per 1M token cap.
+    const problem = automaticModelCallProblem(option.model);
+    if (problem) throw new Error(`tier option ${option.id}: ${option.model} is not allowed (${problem})`);
     if (option.evalScore !== null && !(option.evalScore >= 0 && option.evalScore <= 1)) throw new Error(`tier option ${option.id}: evalScore must be 0-1`);
     if ((option.evalScore === null) !== (option.evalRef === null)) throw new Error(`tier option ${option.id}: evalScore and evalRef go together`);
   }
@@ -213,6 +218,8 @@ export function eligibleHosts(option: TierOption, input: TierSelectionInput): Ra
     for (const observation of fresh) {
       if (!hostMatchesEndpoint(host, observation.endpoint)) continue;
       if (observation.inputUsdPerMTok === null || observation.outputUsdPerMTok === null) continue;
+      // A host that bills at or above the platform output cap is never chosen, whatever the margin.
+      if (observation.outputUsdPerMTok >= MAX_OUTPUT_USD_PER_MTOK_EXCLUSIVE) continue;
       if (observation.status !== null && observation.status < 0) continue;
       if (observation.uptime30m !== null && observation.uptime30m < minUptime) continue;
       const cost = unitCostUsd(input.unit, observation.inputUsdPerMTok, observation.outputUsdPerMTok);
@@ -264,8 +271,11 @@ const singleHost = (host: RankedHost): SingleHostPreferences => ({
  * observation, the first host of the first candidate (by eval score for "smart", else as listed).
  */
 export function selectTierRoute(input: TierSelectionInput): TierSelection {
+  // Options are asserted at load (assertTierOptions); the call-time policy is applied again here so an option list
+  // built elsewhere can never route a tier to a Pro/Ultra, denied or over-cap model.
   const candidates = input.options.filter((option) => option.capability === input.capability
-    && option.tiers.includes(input.tier) && (input.tier !== "smart" || option.evalScore !== null));
+    && option.tiers.includes(input.tier) && (input.tier !== "smart" || option.evalScore !== null)
+    && automaticModelCallProblem(option.model) === null);
   if (candidates.length === 0) return { basis: "none", reason: `no ${input.capability} option for tier ${input.tier}` };
   const observed = candidates.some((option) => input.observations.some((observation) => observation.model === option.model
     && input.now.getTime() - observation.observedAt.getTime() <= maxAgeOf(option, input)));

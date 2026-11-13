@@ -5,7 +5,10 @@
  * - page-ocr pools are the approved transcription pools of worker/src/tools/vision-model-profiles.ts (a worker test
  *   keeps them equal), so a tier never reaches a host the default route would not.
  * - chat pools: hosts serving the model at FP8 or better (or undisclosed, as the default chat routing allows), all
- *   from distinct providers.
+ *   from distinct providers. They are host candidates only: which model answers a chat tier is CHAT_TIER_MODELS
+ *   (project-chat-models.ts) plus a project's admin overrides, and nothing routes chat through these options yet.
+ * - Every option passes the call-time policy (model-call-policy.ts) at load and again at selection: no Pro/Ultra, no
+ *   denied model, no known output price at or above $50 per 1M tokens; a host observed at or above that cap is skipped.
  * - Pools are `llm://` entries, one per host (`?_provider=`); pool options (`_sort`, `_fallbacks`, `_timeout`,
  *   `_minUptime`, `_maxAge`, `_preferredMargin`) are written once, on the first entry. See provider-pools.ts.
  * - evalScore is the option's composite on its capability's tier benchmark: for page-ocr, the mean tolerant-markdown@v1

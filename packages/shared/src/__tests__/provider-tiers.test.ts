@@ -92,6 +92,24 @@ describe("tier selection", () => {
     expect(() => defineTierOptions([{ id: "bad", capability: "chat", pool: ["llm://openrouter/acme/m?_provider=a&_nope=1"], tiers: ["balanced"], evalScore: null, evalRef: null }])).toThrow(/^tier option bad: .*unknown pool option _nope/);
   });
 
+  it("never lists or routes to a Pro/Ultra model, and never to a host billing at or above the $50/M output cap", () => {
+    expect(() => defineTierOptions([{ id: "pro", capability: "chat", pool: entries("acme/chat-pro", ["deepinfra"]), tiers: ["smart"], evalScore: 0.99, evalRef: "run-pro" }])).toThrow(/not allowed \(prohibited model\)/);
+    expect(() => defineTierOptions([{ id: "ultra", capability: "chat", pool: entries("acme/chat-ultra", ["deepinfra"]), tiers: ["smart"], evalScore: 0.99, evalRef: "run-ultra" }])).toThrow(/not allowed/);
+    // An option list built without assertTierOptions still cannot route "smart" to a Pro model.
+    const pro = { ...ocrB, id: "ocr-pro", model: "acme/ocr-pro", pool: { ...ocrB.pool, model: "acme/ocr-pro" }, evalScore: 0.99, evalRef: "run-pro" } as TierOption;
+    const unchecked = selectTierRoute(base({ tier: "smart", options: [ocrA, pro], observations: [obs("acme/ocr-pro", "wafer/nvfp4", 0.1, 0.2), obs("acme/ocr-a", "fireworks", 0.3, 1.2)] }));
+    expect(unchecked.basis).toBe("live");
+    if (unchecked.basis === "live") expect(unchecked.option.id).toBe("ocr-a");
+    const staticPick = selectTierRoute(base({ tier: "smart", options: [ocrA, pro] }));
+    expect(staticPick.basis === "static" && staticPick.option.id).toBe("ocr-a");
+    // Smart's best-scored option only has an over-cap host: the next score serves, never the $60/M host.
+    const capped = selectTierRoute(base({ tier: "smart", observations: [obs("acme/ocr-b", "wafer/nvfp4", 1, 60), obs("acme/ocr-a", "fireworks", 0.3, 1.2)] }));
+    expect(capped.basis).toBe("live");
+    if (capped.basis === "live") expect(capped.option.id).toBe("ocr-a");
+    const onlyOverCap = selectTierRoute(base({ options: [ocrA], observations: [obs("acme/ocr-a", "fireworks", 1, 50)] }));
+    expect(onlyOverCap.basis).toBe("none");
+  });
+
   it("never routes to an observed endpoint outside the option's pool, however cheap", () => {
     const selection = selectTierRoute(base({ observations: [obs("acme/ocr-a", "cheap-unvetted", 0.001, 0.001), obs("acme/ocr-a", "parasail/fp8", 0.3, 1.2)], options: [ocrA] }));
     expect(selection.basis).toBe("live");
