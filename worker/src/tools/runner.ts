@@ -1,7 +1,7 @@
 import { serveFirstPassResult } from "../pipeline/first-pass.js";
 import { dopplerBinDir } from "./doppler.js";
 import {
-  acceptSandboxedPdfResult, requireSandboxedOcrProvider, requireSandboxedPdfProvider, type SandboxedOcrJob, type SandboxedPdfJob,
+  acceptSandboxedPdfResult, noteSalvagedFigures, requireSandboxedOcrProvider, requireSandboxedPdfProvider, type SandboxedOcrJob, type SandboxedPdfJob,
   type SandboxedPdfRunContext,
 } from "../extractors/plugins.js";
 import { dopplerConverterPath } from "./doppler.js";
@@ -1878,7 +1878,11 @@ export class CommandRunner {
       // The provider shards long documents itself and notes progress as shards finish.
       return {
         remote: provider.run(plan.sandboxedPdf, this.sandboxedPdfContext(pages, provider.shardProfile?.key), signal)
-          .then((result) => acceptSandboxedPdfResult(plan.sandboxedPdf!, result, pages)),
+          .then((result) => acceptSandboxedPdfResult(plan.sandboxedPdf!, result, pages), (error: unknown) => {
+            // A failed job may still hand back the shards that finished (`error.figures`): kept for the stage to store.
+            noteSalvagedFigures(plan.sandboxedPdf!, error, pages);
+            throw error;
+          }),
         timeoutMs: provider.timeoutMs(pages),
         release: async () => {},
       };
