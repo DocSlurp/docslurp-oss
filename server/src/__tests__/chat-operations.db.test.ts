@@ -77,9 +77,10 @@ it("bounds hostile launch payloads and refuses a foreign parent",async()=>{
 it("disconnect detaches an observer while the operation completes; another instance recovers", async () => {
   const actor = {type:"session" as const,userId:"u",sessionId:"browser",user:{id:"u",name:"Owner",email:"owner@example.test"}};
   await sql`insert into "session" (id,token,"userId","expiresAt") values ('browser','test-token','u',now()+interval '1 hour')`;
+  // Imported before the claim: a slow module load must not eat the 30 s execution lease.
+  const {createChatOperationProvider,authorizedChatOperationSnapshot} = await import("../services/chat-operation-access.js");
   const task = await ops.launchChatOperation({userId:"u",projectId:"w",orgId:"o",key:"disconnect_1",input:{q:"hello",authSessionId:"browser"}});
   const claim = await ops.claimChatOperation();
-  const {createChatOperationProvider,authorizedChatOperationSnapshot} = await import("../services/chat-operation-access.js");
   await ops.appendChatOperation(task.id, claim!.attempt_id!, "text", { text: "first" });
   const disconnected=new AbortController();
   const observer={snapshot:vi.fn(async()=>{}),append:vi.fn(async()=>{}),resync:vi.fn(async()=>{})};
