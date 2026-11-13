@@ -7,23 +7,26 @@ import { ChartExtractRefusedError, validateDeterministicResult } from "./extract
 import { buildVisualCandidateStats } from "./stats.js";
 
 const base = { schemaVersion: "chart-export-deterministic@v1", visuals: [], refusals: [] };
-const entry = { input: "doppler-figure" as const, svgIndex: 0, reason: "svg-document-limit" as const, pageNumber: 3, figureId: "p3.g0" };
+const entry = { input: "doppler-figure" as const, svgIndex: 400, count: 3, reason: "svg-document-limit" as const, pageNumber: 3, figureId: "p3.g0" };
 
 describe("deferred visuals", () => {
   it("accepts a guest result with deferred entries, and only well-formed ones", () => {
-    expect(validateDeterministicResult({ ...base, deferred: [{ svgIndex: 400, reason: "svg-document-limit" }] }).deferred).toEqual([{ svgIndex: 400, reason: "svg-document-limit" }]);
+    expect(validateDeterministicResult({ ...base, deferred: [{ svgIndex: 400, count: 39_600, reason: "svg-document-limit" }] }).deferred).toEqual([{ svgIndex: 400, count: 39_600, reason: "svg-document-limit" }]);
     // Today's shape still validates.
     expect(validateDeterministicResult({ ...base })).toEqual(base);
     for (const bad of [
       { ...base, deferred: [] }, // sent only when non-empty
-      { ...base, deferred: [{ svgIndex: 1, reason: "svg-document-limit", extra: 1 }] },
+      { ...base, deferred: [{ svgIndex: 1, count: 1, reason: "svg-document-limit", extra: 1 }] },
+      { ...base, deferred: [{ svgIndex: 1, reason: "svg-document-limit" }] }, // count is required
+      { ...base, deferred: [{ svgIndex: 1, count: 0, reason: "svg-document-limit" }] },
+      { ...base, deferred: [{ svgIndex: 1, count: 1.5, reason: "svg-document-limit" }] },
       // Closed reasons and an ordinal only: no guest strings (council r4 L1).
-      { ...base, deferred: [{ svgIndex: 1, reason: "svg-scene-budget" }] },
-      { ...base, deferred: [{ svgIndex: 1, reason: "<img src=x>" }] },
-      { ...base, deferred: [{ locator: "word/media/customer-name.svg", reason: "svg-document-limit" }] },
-      { ...base, deferred: [{ svgIndex: -1, reason: "svg-document-limit" }] },
-      { ...base, deferred: [{ svgIndex: 1.5, reason: "svg-document-limit" }] },
-      { ...base, deferred: Array.from({ length: 1001 }, (_, i) => ({ svgIndex: i, reason: "svg-document-limit" })) },
+      { ...base, deferred: [{ svgIndex: 1, count: 1, reason: "svg-scene-budget" }] },
+      { ...base, deferred: [{ svgIndex: 1, count: 1, reason: "<img src=x>" }] },
+      { ...base, deferred: [{ locator: "word/media/customer-name.svg", count: 1, reason: "svg-document-limit" }] },
+      { ...base, deferred: [{ svgIndex: -1, count: 1, reason: "svg-document-limit" }] },
+      { ...base, deferred: [{ svgIndex: 1.5, count: 1, reason: "svg-document-limit" }] },
+      { ...base, deferred: Array.from({ length: 1001 }, (_, i) => ({ svgIndex: i, count: 1, reason: "svg-document-limit" })) },
       { ...base, deferred: "svg" },
       { ...base, other: [] },
     ]) expect(() => validateDeterministicResult(bad)).toThrow(ChartExtractRefusedError);

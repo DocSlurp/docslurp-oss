@@ -7,7 +7,7 @@ import { buildScene } from "./svg-scene.js";
 import { approximateVertexMarkers, prepareSvgChart, withoutVertexMarkers, type PreparedSvgChart, type SvgChartAnalysis } from "./svg-geometry.js";
 import { detectDiagramGenerator, graphvizDiagram, mermaidFlowchart } from "./svg-diagram.js";
 import { emptyVisual, type DeterministicDeferral, type DeterministicRefusal, type DeterministicVisual, type DeterministicVisualResult } from "./types.js";
-import { parseXml } from "./xml.js";
+import { parseXml, type XmlNode } from "./xml.js";
 
 /*
  * Guest-side entry for the deterministic rungs (office-chart-xml, embedded-spec, svg-geometry). Pure: no I/O, no
@@ -42,8 +42,8 @@ export const DEFERRED_SVG_REASON = "svg-document-limit";
 /*
  * SVG handling is bounded per SVG, not scheduled: the density gate (`limits.ts`, checked in `handleSvg` and while
  * `buildScene` walks) skips an over-dense SVG at O(bytes) and keeps nothing; under it, one SVG's scene is at most
- * 4,000 primitives and 50,000 segments, so its analysis is bounded too. An input analyses at most `maxSvgsPerInput`
- * SVGs; later ones are deferred by ordinal. Every visual finished before a skipped, failed or deferred SVG is kept.
+ * 3,000 walked frames (every `<use>` re-walk counted), 4,000 primitives and 50,000 segments, so its analysis is
+ * bounded too. An input analyses at most `maxSvgsPerInput` SVGs; later ones are deferred as one counted ordinal range. Every visual finished before a skipped, failed or deferred SVG is kept.
  */
 interface Acc {
   visuals: DeterministicVisual[];
@@ -105,16 +105,21 @@ function embeddedHits(text: string, prefix: string, acc: Acc) {
 
 /** One SVG document → at most one visual (a diagram, an embedded spec, or a geometry chart). */
 function handleSvg(text: string, locator: string, options: DeterministicVisualOptions, acc: Acc) {
-  // Past the input's SVG count the SVG is not parsed: it is recorded by ordinal for a later pass, never dropped.
+  // Past the input's SVG count the SVG is not parsed: it is recorded for a later pass, never dropped. Deferred ordinals
+  // are contiguous, so one entry records them all as a range: { svgIndex: first, count }.
   const ordinal = acc.svgs++;
   if (ordinal >= CHART_EXTRACT_LIMITS.maxSvgsPerInput) {
-    acc.deferred.push({ svgIndex: ordinal, reason: DEFERRED_SVG_REASON });
+    const range = acc.deferred[0];
+    if (range) range.count++;
+    else acc.deferred.push({ svgIndex: ordinal, count: 1, reason: DEFERRED_SVG_REASON });
     return;
   }
   try {
     // Density gate, first check: raw bytes (the rest run while the scene is built).
     if (text.length > CHART_EXTRACT_LIMITS.maxSvgBytes) throw new ExtractLimitError("svg-too-large");
     const doc = parseXml(text, { keepComments: true });
+    // Density gate: elements, before the diagram (Mermaid / Graphviz) and geometry paths.
+    if (countElements(doc) > CHART_EXTRACT_LIMITS.maxSvgElements) throw new ExtractLimitError("svg-too-dense");
     const before = acc.visuals.length;
     if (/<(?:script|metadata)\b/i.test(text)) embeddedHits(text, `${locator}/`, acc);
     if (acc.visuals.length > before && acc.visuals.slice(before).some((v) => v.spec)) return;
@@ -140,6 +145,19 @@ function handleSvg(text: string, locator: string, options: DeterministicVisualOp
     if (error instanceof ExtractLimitError && error.reason === "visual-limit") throw error;
     acc.refusals.push({ locator, reason: refusalReason(error) });
   }
+}
+
+/** Elements in a parsed document, stopping as soon as the count passes the gate. */
+function countElements(doc: { children: XmlNode[] }): number {
+  let n = 0;
+  const stack: XmlNode[] = [...doc.children];
+  while (stack.length && n <= CHART_EXTRACT_LIMITS.maxSvgElements) {
+    const node = stack.pop()!;
+    if (node.type !== "element") continue;
+    n++;
+    for (const c of node.children) stack.push(c);
+  }
+  return n;
 }
 
 function buildSignatures(text: string): string {
@@ -224,7 +242,7 @@ export function extractDeterministicVisuals(input: DeterministicVisualInput, opt
     visuals: visuals.map((v) => ({ ...v, locator: v.locator.slice(0, 512), sheet: cap(v.sheet, 200), generator: cap(v.generator, 40), reason: cap(v.reason, 120), digest: cap(v.digest, CHART_EXTRACT_LIMITS.maxDigestChars) })),
     refusals: refusals.slice(0, 1000).map((r) => ({ locator: r.locator.slice(0, 512), reason: r.reason.slice(0, 120) })),
     // Only when something was deferred, so every other result keeps today's exact shape (and older hosts accept it).
-    ...(acc.deferred.length ? { deferred: acc.deferred.slice(0, 1000) } : {}),
+    ...(acc.deferred.length ? { deferred: acc.deferred } : {}),
   };
 }
 

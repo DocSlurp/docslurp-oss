@@ -191,13 +191,16 @@ export type ExportedVisual = z.infer<typeof exportedVisualSchema>;
 /**
  * A visual the free (deterministic) extractor deferred instead of finishing in the document's run, for a later
  * low-priority pass. `input` says what to re-read: the document's own source file, or one of its Doppler figure files
- * (`figureId`, the figure's own id; its slot is `doppler-figure:<figureId>`). `svgIndex` is the SVG's ordinal within that
- * input (document / package order), and `reason` a closed slug: nothing from the input's names or content is stored.
+ * (`figureId`, the figure's own id; its slot is `doppler-figure:<figureId>`). `svgIndex` is the first deferred SVG's
+ * ordinal within that input (document / package order), `count` how many from there, and `reason` a closed slug:
+ * nothing from the input's names or content is stored.
  */
 export const DEFERRED_VISUAL_REASONS = ["svg-document-limit"] as const;
 export const deferredVisualSchema = z.strictObject({
   input: z.enum(["source", "doppler-figure"]),
   svgIndex: z.number().int().nonnegative().max(1_000_000),
+  /** How many consecutive SVGs from `svgIndex` on were deferred. */
+  count: z.number().int().positive().max(1_000_000),
   reason: z.enum(DEFERRED_VISUAL_REASONS),
   pageNumber: z.number().int().positive().nullable(),
   figureId: z.string().max(200).nullable(),

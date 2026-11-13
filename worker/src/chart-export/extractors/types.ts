@@ -30,10 +30,11 @@ export interface DeterministicVisual {
 export interface DeterministicRefusal { locator: string; reason: string }
 
 /**
- * An SVG left for a later pass (never dropped): today one past the input's `maxSvgsPerInput`. Recorded by ordinal (its
- * position among the input's SVGs, in document / package order) and a closed reason, never by a name from the input.
+ * SVGs left for a later pass (never dropped): today those past the input's `maxSvgsPerInput`. Recorded as a range of
+ * ordinals (`svgIndex` = the first one's position among the input's SVGs in document / package order, `count` of them)
+ * and a closed reason, never by a name from the input.
  */
-export interface DeterministicDeferral { svgIndex: number; reason: "svg-document-limit" }
+export interface DeterministicDeferral { svgIndex: number; count: number; reason: "svg-document-limit" }
 
 export interface DeterministicVisualResult {
   schemaVersion: "chart-export-deterministic@v1";

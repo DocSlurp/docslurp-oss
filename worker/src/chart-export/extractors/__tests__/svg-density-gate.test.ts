@@ -6,7 +6,7 @@ import { APPROXIMATE_MARKER_REASON, DEFERRED_SVG_REASON, extractDeterministicVis
 import { CHART_EXTRACT_LIMITS } from "../limits.js";
 import { columnStacked, nearestTick } from "../svg-geometry.js";
 import type { RectPrim } from "../svg-scene.js";
-import { genericBar, matplotlibBar, matplotlibLine, matplotlibScatter, plotlyBar, rechartsLine, vegaBar, zip } from "./fixtures.js";
+import { genericBar, matplotlibBar, matplotlibLine, matplotlibScatter, MERMAID_FLOWCHART, plotlyBar, rechartsLine, vegaBar, zip } from "./fixtures.js";
 
 const L = CHART_EXTRACT_LIMITS;
 const html = (svgs: string[]) => `<html><body>${svgs.join("")}</body></html>`;
@@ -31,12 +31,88 @@ function heldSceneSvg(i: number): string {
 }
 
 describe("SVG density gate", () => {
-  it("sits at or above every measured legitimate maximum (551 chart SVGs: p99 / max)", () => {
-    expect(L.maxSvgBytes).toBeGreaterThanOrEqual(415_226); // p99 313,332
-    expect(L.maxSvgUseExpansions).toBeGreaterThanOrEqual(483); // p99 372
-    expect(L.maxSvgPrimitives).toBeGreaterThanOrEqual(2_113); // p99 1,782
-    expect(L.maxSvgPathSegments).toBeGreaterThanOrEqual(32_880); // p99 23,966 (every parsed path vertex, glyphs included)
-    expect(L.maxMarkerPairTests).toBeGreaterThanOrEqual(466); // p99 18
+  it("is pinned at about 2× the p99 of 551 legitimate chart SVGs (raising one must be a deliberate, re-measured change)", () => {
+    // svg-density-stats.mjs, measured p99 / max: bytes 313,332 / 415,226; <use> 372 / 483; primitives 1,782 / 2,113;
+    // segments 23,966 / 32,880; walked frames 1,357 / 1,753; elements 1,447 / 2,043; marker pair tests 18 / 466.
+    expect({
+      maxSvgBytes: L.maxSvgBytes, maxSvgUseExpansions: L.maxSvgUseExpansions, maxSvgPrimitives: L.maxSvgPrimitives,
+      maxSvgPathSegments: L.maxSvgPathSegments, maxSvgWalkedElements: L.maxSvgWalkedElements, maxSvgElements: L.maxSvgElements,
+      maxMarkerPairTests: L.maxMarkerPairTests, maxSvgsPerInput: L.maxSvgsPerInput,
+    }).toEqual({
+      maxSvgBytes: 655_360, maxSvgUseExpansions: 1_000, maxSvgPrimitives: 4_000, maxSvgPathSegments: 50_000,
+      maxSvgWalkedElements: 3_000, maxSvgElements: 3_000, maxMarkerPairTests: 100_000, maxSvgsPerInput: 400,
+    });
+  });
+
+  describe("passes at each limit and skips at limit + 1", () => {
+    const one = (text: string) => reasons(extractDeterministicVisuals({ kind: "svg", text }));
+    const SVG = (body: string) => `<svg xmlns="http://www.w3.org/2000/svg">${body}</svg>`;
+    it("bytes", () => {
+      const sized = (n: number) => { const shell = SVG("<!---->"); return SVG(`<!--${"x".repeat(n - shell.length)}-->`); };
+      expect(sized(L.maxSvgBytes).length).toBe(L.maxSvgBytes);
+      expect(one(sized(L.maxSvgBytes))).toEqual([]);
+      expect(one(sized(L.maxSvgBytes + 1))).toEqual(["svg-too-large"]);
+    });
+    it("<use> expansions", () => {
+      const uses = (n: number) => SVG(`<defs><g id="e"/></defs>${'<use href="#e"/>'.repeat(n)}`);
+      expect(one(uses(L.maxSvgUseExpansions))).toEqual([]);
+      expect(one(uses(L.maxSvgUseExpansions + 1))).toEqual(["svg-use-bomb"]);
+    });
+    it("expanded primitives (one path of many subpaths: few elements, many lines)", () => {
+      const subpaths = (n: number) => SVG(`<path stroke="#000" fill="none" d="${Array.from({ length: n }, (_, k) => `M${k} 0L${k + 1} 1`).join("")}"/>`);
+      expect(one(subpaths(L.maxSvgPrimitives))).toEqual([]);
+      expect(one(subpaths(L.maxSvgPrimitives + 1))).toEqual(["svg-too-dense"]);
+    });
+    it("path segments", () => {
+      // Paths of at most maxPathVertices vertices each, adding up to exactly n.
+      const segs = (n: number) => { const out: string[] = []; for (let left = n; left > 0; left -= L.maxPathVertices) { const k = Math.min(left, L.maxPathVertices); out.push(`<path stroke="#000" fill="none" d="M0 0${" L1 1".repeat(k - 1)}"/>`); } return SVG(out.join("")); };
+      expect(one(segs(L.maxSvgPathSegments))).toEqual([]);
+      expect(one(segs(L.maxSvgPathSegments + 1))).toEqual(["svg-too-dense"]);
+    });
+    it("walked frames (hidden children re-walked by <use>: few elements, many frames)", () => {
+      // Frames: svg + defs + 2 × (use + target g + n hidden children) = 6 + 2n; elements 5 + n. n = 1,497 is 3,000 frames.
+      // The extra frame comes first in document order, so the frame past the limit is inside the second <use>.
+      const walk = (n: number, extra = "") => SVG(`${extra}<defs><g id="g">${'<g display="none"/>'.repeat(n)}</g></defs><use href="#g"/><use href="#g"/>`);
+      expect(one(walk(1497))).toEqual([]);
+      expect(one(walk(1497, "<desc/>"))).toEqual(["svg-use-bomb"]);
+    });
+    it("parsed elements", () => {
+      const els = (n: number) => SVG("<desc/>".repeat(n - 1)); // + the <svg> itself
+      expect(one(els(L.maxSvgElements))).toEqual([]);
+      expect(one(els(L.maxSvgElements + 1))).toEqual(["svg-too-dense"]);
+    });
+  });
+
+  it("bounds <use> re-walks of children no other counter sees (council r5 H1): skipped, hidden, ill-transformed, nested", () => {
+    // 640 KiB SVGs whose <use> target holds tens of thousands of children that the walk drops before counting
+    // primitives: before the walk gate, 999 references walked ~34 million frames with every other gate passing.
+    const bypass = (child: string) => { const n = Math.floor((L.maxSvgBytes - 300 - 999 * 16) / child.length); return `<svg xmlns="http://www.w3.org/2000/svg"><defs><g id="g">${child.repeat(n)}</g></defs>${'<use href="#g"/>'.repeat(999)}</svg>`; };
+    for (const child of ["<desc/>", '<g display="none"/>', '<g transform="x"/>']) {
+      const svg = bypass(child);
+      expect(svg.length).toBeLessThanOrEqual(L.maxSvgBytes);
+      // The <use> target's children exceed the element gate on their own; the walk gate would stop it at frame 3,001.
+      expect(reasons(extractDeterministicVisuals({ kind: "svg", text: svg }))).toEqual(["svg-too-dense"]);
+    }
+    // 3 KB, few elements: 1 → 30 → 30 nested references over 450 empty groups, 405,000 frames unbounded.
+    const nested = `<svg xmlns="http://www.w3.org/2000/svg"><defs><g id="a0">${"<g/>".repeat(450)}</g><g id="a1">${'<use href="#a0"/>'.repeat(30)}</g><g id="a2">${'<use href="#a1"/>'.repeat(30)}</g></defs><use href="#a2"/></svg>`;
+    expect(nested.length).toBeLessThan(4000);
+    expect(reasons(extractDeterministicVisuals({ kind: "svg", text: nested }))).toEqual(["svg-use-bomb"]);
+    // The same shape with few hidden children per group but many references: under the element gate, stopped by the walk.
+    const reWalk = `<svg xmlns="http://www.w3.org/2000/svg"><defs><g id="g">${'<g display="none"/>'.repeat(1000)}</g></defs>${'<use href="#g"/>'.repeat(999)}</svg>`;
+    expect(reasons(extractDeterministicVisuals({ kind: "svg", text: reWalk }))).toEqual(["svg-use-bomb"]);
+  });
+
+  it("puts the Mermaid / Graphviz diagram path under the same gate, with linear id handling (council r5 M1)", () => {
+    const mermaid = (n: number, e: number, p: number) => `<svg xmlns="http://www.w3.org/2000/svg" id="mermaid-1">${Array.from({ length: n }, (_, k) => `<g class="node" id="flowchart-a${k}-0"/>`).join("")}${Array.from({ length: e }, (_, k) => `<path class="flowchart-link" data-id="L${"_b".repeat(p)}_${k}"/>`).join("")}</svg>`;
+    // The council's 0.47 MB shape: 7,600 nodes, 80 edges with 1,000-part ids. Over the element gate: skipped first.
+    expect(reasons(extractDeterministicVisuals({ kind: "svg", text: mermaid(7600, 80, 1000) }))).toEqual(["svg-too-dense"]);
+    // Under the gate, the same hostile ids: edge ids over 64 parts are not split at all, so the diagram path stays linear.
+    const r = extractDeterministicVisuals({ kind: "svg", text: mermaid(2900, 80, 1000) });
+    expect(r.refusals).toEqual([]);
+    // A real flowchart still resolves its edges.
+    const ok = extractDeterministicVisuals({ kind: "svg", text: MERMAID_FLOWCHART });
+    expect(ok.visuals[0]!.kind).toBe("diagram");
+    expect(ok.visuals[0]!.spec).not.toBeNull();
   });
 
   it("lets ordinary charts through untouched: no skip, no approximation", () => {
@@ -56,18 +132,18 @@ describe("SVG density gate", () => {
     expect(r.visuals.some((v) => v.reason === APPROXIMATE_MARKER_REASON)).toBe(false);
   });
 
-  it("skips the council's 100-SVG page as too dense, each at the primitive cap, with nothing held", () => {
+  it("skips the council's 100-SVG page (each SVG's 199 <use> copies stop at the walk gate), with nothing held", () => {
     const svg = packedSvg();
-    expect(svg.length).toBeLessThan(L.maxSvgBytes); // the byte gate passes it; the primitive gate stops it
+    expect(svg.length).toBeLessThan(L.maxSvgBytes); // the byte gate passes it; the walk gate stops it inside a <use>
     const r = extractDeterministicVisuals({ kind: "html", text: html(Array.from({ length: 100 }, () => svg)) });
     expect(r.visuals).toEqual([]);
-    expect(reasons(r)).toEqual(Array(100).fill("svg-too-dense"));
+    expect(reasons(r)).toEqual(Array(100).fill("svg-use-bomb"));
     expect(r.refusals.map((x) => x.locator)).toEqual(Array.from({ length: 100 }, (_, k) => `svg[${k}]`));
   });
 
   it("skips each SVG of the 40-copy batch on its own; a legitimate figure in the same batch still exports", () => {
     const results = [...Array.from({ length: 40 }, () => packedSvg()), genericBar(["a", "b"], [1, 2], 4)].map((text) => extractDeterministicVisuals({ kind: "svg", text }));
-    expect(results.slice(0, 40).map((r) => reasons(r)[0])).toEqual(Array(40).fill("svg-too-dense"));
+    expect(results.slice(0, 40).map((r) => reasons(r)[0])).toEqual(Array(40).fill("svg-use-bomb"));
     expect(results[40]!.refusals).toEqual([]);
     expect(results[40]!.visuals).toHaveLength(1);
   });
@@ -78,8 +154,8 @@ describe("SVG density gate", () => {
     expect(text.length).toBeLessThan(L.maxTextBytes);
     for (const svg of svgs) expect(svg.length).toBeLessThan(L.maxSvgBytes);
     const r = extractDeterministicVisuals({ kind: "html", text });
-    // Each SVG stops after about 40 of its 3,900 <use> copies: the 4,000-primitive gate trips before the 1,000-expansion
-    // budget does, so at most ~4,000 rects are ever built per SVG. Nothing is held between SVGs.
+    // Each SVG has over 5,000 elements (1,010 markers, 3,900 <use>), so the element gate skips it right after parsing:
+    // none of its 390k rects is ever built. Nothing is held between SVGs.
     expect(reasons(r)).toEqual(Array(17).fill("svg-too-dense"));
     expect(r.visuals).toEqual([]);
   });
@@ -98,7 +174,7 @@ describe("SVG density gate", () => {
   it("skips a giant SVG and keeps the 99 charts after it (no starvation, document order kept)", () => {
     const small = genericBar(["a", "b"], [1, 2], 4);
     const r = extractDeterministicVisuals({ kind: "html", text: html([packedSvg(), ...Array.from({ length: 99 }, () => small)]) });
-    expect(reasons(r)).toEqual(["svg-too-dense"]);
+    expect(reasons(r)).toEqual(["svg-use-bomb"]);
     expect(r.visuals.map((v) => v.locator)).toEqual(Array.from({ length: 99 }, (_, k) => `svg[${k + 1}]`));
   });
 
@@ -107,13 +183,14 @@ describe("SVG density gate", () => {
     expect(JSON.stringify(extractDeterministicVisuals({ kind: "html", text }))).toBe(JSON.stringify(extractDeterministicVisuals({ kind: "html", text })));
   });
 
-  it("defers SVGs past maxSvgsPerInput by ordinal and closed reason, never by name, without parsing them", () => {
+  it("defers SVGs past maxSvgsPerInput as one counted ordinal range, never by name, without parsing them", () => {
     // An EPUB with 3 chapters of 150 inline SVGs: 450 SVGs, over the 400 analysed per input.
     const tiny = '<svg xmlns="http://www.w3.org/2000/svg"><rect width="1" height="1"/></svg>';
     const chapter = `<html><body>${tiny.repeat(150)}</body></html>`;
     const epub = zip({ "mimetype": "application/epub+zip", "OEBPS/a.xhtml": chapter, "OEBPS/b.xhtml": chapter, "OEBPS/c-customer-name.xhtml": chapter });
     const r = extractDeterministicVisuals({ kind: "epub", bytes: epub });
-    expect(r.deferred).toEqual(Array.from({ length: 50 }, (_, k) => ({ svgIndex: 400 + k, reason: DEFERRED_SVG_REASON })));
+    // One entry covers every deferred SVG, however many (an EPUB can hold 200 × 200): none is dropped (council r5 L3).
+    expect(r.deferred).toEqual([{ svgIndex: 400, count: 50, reason: DEFERRED_SVG_REASON }]);
     expect(JSON.stringify(r.deferred)).not.toContain("customer-name");
   });
 });

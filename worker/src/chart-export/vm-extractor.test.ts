@@ -160,7 +160,7 @@ describe("VM deterministic extractor adapter", () => {
       { "run/index.json": figureIndex([{ id: "p2.g0", page: 2, format: "svg" }, { id: "p3.g0", page: 3, format: "svg" }]) },
     );
     const done = { schemaVersion: "chart-export-deterministic@v1", visuals: [{ source: "svg-geometry", kind: "chart", confidence: 0.9, spec: { kind: "chart", chartType: "bar", series: [{ name: "s", points: [{ x: "a", y: 1 }] }] }, digest: null, locator: "svg", slide: null, sheet: null, generator: null, reason: null }], refusals: [] };
-    const later = { schemaVersion: "chart-export-deterministic@v1", visuals: [], refusals: [], deferred: [{ svgIndex: 0, reason: "svg-document-limit" }] };
+    const later = { schemaVersion: "chart-export-deterministic@v1", visuals: [], refusals: [], deferred: [{ svgIndex: 400, count: 2, reason: "svg-document-limit" }] };
     const run = vi.fn(async (plan: { args: string[] }) => { await writeFile(plan.args[4]!, JSON.stringify({ schemaVersion: "chart-export-deterministic-batch@v1", results: [done, later] })); return { stdout: "", stderr: "" }; });
     const logs: string[] = [];
     const extract = createVmDeterministicVisualExtractor({ runner: { run } as never, storage: store, log: (m) => logs.push(m) });
@@ -171,8 +171,8 @@ describe("VM deterministic extractor adapter", () => {
     });
     // The finished figure is kept; the deferred one is recorded for the later pass.
     expect(result.partials).toHaveLength(1);
-    expect(result.deferred).toEqual([{ input: "doppler-figure", svgIndex: 0, reason: "svg-document-limit", pageNumber: 3, figureId: "p3.g0" }]);
-    expect(logs.join("\n")).toContain("visuals deferred document=doc-d count=1");
+    expect(result.deferred).toEqual([{ input: "doppler-figure", svgIndex: 400, count: 2, reason: "svg-document-limit", pageNumber: 3, figureId: "p3.g0" }]);
+    expect(logs.join("\n")).toContain("visuals deferred document=doc-d svgs=2");
   });
 
   it("reads a figure only from its own doppler-figure slot, never another artifact slot (adversarial L4)", async () => {
