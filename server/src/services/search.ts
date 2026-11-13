@@ -45,6 +45,7 @@ import { decodeLanceChunkHydration } from "@docslurp/shared/lancedb-hydration";
 import {
   loadEligibleDocuments,
   matchesServingHash,
+  excludedTableDocuments,
   nativeScopeSupported,
   scopeEligibleDocuments,
   type EligibleDocument,
@@ -996,6 +997,7 @@ async function nativeVectorSearch(
     embeddingModel: embedding.model,
     queryVector,
     documentIds: scope.searchDocumentIds,
+    excludedDocumentIds: excludedTableDocuments(set, scope.searchDocumentIds),
     limit: options.limit ?? 20,
     privacyMode: context.privacyMode,
     hydrate: true,
@@ -1066,7 +1068,7 @@ async function nativeTextSearch(
     try {
       result = await lanceDbFullTextSearch({
         orgId: context.orgId, projectId: context.projectId, embeddingModel: embedding.model, dimension: embedding.dimensions, query,
-        documentIds: scope.searchDocumentIds, limit,
+        documentIds: scope.searchDocumentIds, excludedDocumentIds: excludedTableDocuments(set, scope.searchDocumentIds), limit,
       });
     } catch (error) {
       if (isSearchAborted(error) || (options.filters?.geo && isSearchBoundError(error))) throw error;
