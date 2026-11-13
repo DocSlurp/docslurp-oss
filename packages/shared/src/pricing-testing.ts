@@ -95,6 +95,6 @@ export const DISTINCT_TEST_PRICING: Partial<PricingProvider> = {
     sandboxCostCents: ({ cores, memoryGib, seconds }) => (cores * 0.002 + memoryGib * 0.0005) * Math.max(0, seconds),
     sandboxRatesObservedAt: () => "2026-01-01",
     workerSlotUsdPerHour: () => 0.05,
-    chartGeneratorMaxOutputUsdPerMTok: () => 2,
+    chartGeneratorMaxPricesUsdPerMTok: () => ({ inputUsdPerMTok: 1, outputUsdPerMTok: 2 }),
   },
 };

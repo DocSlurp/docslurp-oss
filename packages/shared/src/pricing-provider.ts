@@ -119,6 +119,9 @@ export type ComputeRateOverrides = Partial<{
   storageCentsPerGbMonth: number;
 }>;
 
+/** Price ceilings for a chart & diagram export generator, USD per million tokens. */
+export type ChartGeneratorPriceCeiling = { inputUsdPerMTok: number; outputUsdPerMTok: number };
+
 export interface PricingProvider {
   apiVersion: typeof PRICING_PROVIDER_API_VERSION;
   /** Stable id for logs and receipts. `open` is reserved for the open default. */
@@ -195,10 +198,11 @@ export interface PricingProvider {
     /** Infrastructure cost of one worker slot per hour in USD, for routing cost bounds; null when unknown. */
     workerSlotUsdPerHour(): number | null;
     /**
-     * Highest output list price (USD per million tokens) a chart & diagram export generator may have for the worker to
-     * call it, or null to let core derive one from `visualExportCredits` (worker chart-export/model-selection.ts).
+     * Highest input and output list prices (USD per million tokens) a chart & diagram export generator may have for the
+     * worker to call it, or null to let core derive them from `visualExportCredits` (worker
+     * chart-export/model-selection.ts).
      */
-    chartGeneratorMaxOutputUsdPerMTok(): number | null;
+    chartGeneratorMaxPricesUsdPerMTok(): ChartGeneratorPriceCeiling | null;
   };
 }
 
@@ -232,7 +236,7 @@ export function assertPricingProvider(value: unknown): asserts value is PricingP
   const cost = provider.internalCost;
   if (!cost || typeof cost.computeRates !== "function" || typeof cost.listCredits !== "function"
     || typeof cost.sandboxCostCents !== "function" || typeof cost.sandboxRatesObservedAt !== "function"
-    || typeof cost.workerSlotUsdPerHour !== "function" || typeof cost.chartGeneratorMaxOutputUsdPerMTok !== "function") {
+    || typeof cost.workerSlotUsdPerHour !== "function" || typeof cost.chartGeneratorMaxPricesUsdPerMTok !== "function") {
     throw new Error(`pricing provider ${provider.id} has an incomplete internalCost`);
   }
 }

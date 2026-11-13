@@ -24,7 +24,7 @@ import { CHART_EXPORT_LIMITS, chartExportActive, chartExportConfigOf, DETERMINIS
 import { CHART_EXPORT_USAGE_METRIC, exportVisual, parseSpecAnswer, type ExportVisualArgs } from "./generator.js";
 import { stripVisualGroups, visualBlock, visualBody, wrapVisualGroup } from "./markdown.js";
 import { DISTINCT_TEST_PRICING, installTestPricing, isAutomaticSelectionDenied, resetPricingProviderForTests } from "@docslurp/shared";
-import { CHART_GENERATOR_CANDIDATES, DIAGRAM_GENERATOR_CANDIDATES, chartExportVisionConfig, chartGeneratorMaxOutputUsdPerMTok, selectGeneratorModel } from "./model-selection.js";
+import { CHART_GENERATOR_CANDIDATES, DIAGRAM_GENERATOR_CANDIDATES, chartExportVisionConfig, chartGeneratorPriceCeiling, selectGeneratorModel } from "./model-selection.js";
 import { sanitizeCsv, sanitizeMermaid, sanitizePython, sanitizeVegaLite } from "./sanitize.js";
 import { candidatesFromPlan, ChartExportSession, guardedScopesFromPlan, placementMatch } from "./session.js";
 import { clearChartExport, finishChartExport, prepareChartExport, runChartExportPass } from "./stage.js";
@@ -379,8 +379,8 @@ describe("generator model selection", () => {
     expect(chosen).toMatchObject({ reason: "preferred-candidate", modelUri: "llm://openrouter/z-ai/glm-5.3-flash" });
     const live = catalog.map((t) => t.ref.modelUri === "llm://openrouter/openai/gpt-6-luna" ? { ...t, pricing: { ...t.pricing, inputUsdPerMTok: 0.1, outputUsdPerMTok: 0.5 } } : t);
     expect(selectGeneratorModel({ kind: "diagram", catalog: live })?.modelUri).toBe("llm://openrouter/openai/gpt-6-luna");
-    // The provider's ceiling is $2/M output here: a preferred candidate priced at $3/M is skipped.
-    expect(chartGeneratorMaxOutputUsdPerMTok()).toBe(2);
+    // The provider's ceilings are $1/M input and $2/M output here: a preferred candidate priced at $3/M output is skipped.
+    expect(chartGeneratorPriceCeiling()).toEqual({ inputUsdPerMTok: 1, outputUsdPerMTok: 2 });
     const pricier = catalog.map((t) => t.ref.modelUri === "llm://openrouter/openai/gpt-6-luna" ? { ...t, pricing: { ...t.pricing, inputUsdPerMTok: 0.1, outputUsdPerMTok: 3 } } : t);
     expect(selectGeneratorModel({ kind: "chart", catalog: pricier })?.modelUri).toBe("llm://openrouter/z-ai/glm-5.3-flash");
     // Gemini 3.1 Flash Lite is admitted by the routing catalog but is no longer a chart generator (2026-11-13).
@@ -412,26 +412,34 @@ describe("generator model selection", () => {
     warn.mockRestore();
   });
 
-  it("takes the output-price ceiling from the pricing provider, derives one from the per-visual charge, or has none", () => {
-    const luna = catalog.map((t) => t.ref.modelUri === "llm://openrouter/openai/gpt-6-luna" ? { ...t, pricing: { ...t.pricing, inputUsdPerMTok: 0.1, outputUsdPerMTok: 0.5 } } : t);
-    // A provider ceiling below a candidate's output price refuses it.
-    installTestPricing({ ...DISTINCT_TEST_PRICING, internalCost: { ...DISTINCT_TEST_PRICING.internalCost!, chartGeneratorMaxOutputUsdPerMTok: () => 0.4 } });
+  it("takes input and output price ceilings from the pricing provider, derives them from the per-visual charge, or has none", () => {
+    const luna = catalog.map((t) => t.ref.modelUri === "llm://openrouter/openai/gpt-6-luna" ? { ...t, pricing: { ...t.pricing, inputUsdPerMTok: 0.11, outputUsdPerMTok: 0.55 } } : t);
+    const ceiling = (input: number, output: number) => installTestPricing({ ...DISTINCT_TEST_PRICING,
+      internalCost: { ...DISTINCT_TEST_PRICING.internalCost!, chartGeneratorMaxPricesUsdPerMTok: () => ({ inputUsdPerMTok: input, outputUsdPerMTok: output }) } });
+    // A ceiling below a candidate's output price refuses it; so does one below its input price (council round 2, L4).
+    ceiling(1, 0.5);
     expect(selectGeneratorModel({ kind: "chart", catalog: luna })?.modelUri).not.toBe("llm://openrouter/openai/gpt-6-luna");
-    installTestPricing({ ...DISTINCT_TEST_PRICING, internalCost: { ...DISTINCT_TEST_PRICING.internalCost!, chartGeneratorMaxOutputUsdPerMTok: () => 0.5 } });
+    ceiling(0.1, 1);
+    expect(selectGeneratorModel({ kind: "chart", catalog: luna })?.modelUri).not.toBe("llm://openrouter/openai/gpt-6-luna");
+    ceiling(0.11, 0.55);
     expect(selectGeneratorModel({ kind: "chart", catalog: luna })?.modelUri).toBe("llm://openrouter/openai/gpt-6-luna");
-    // Null: derived from the provider's per-visual charge, one answer at the per-call output cap costing the whole charge.
+    // Null: derived from the provider's per-visual charge (one call at the image limit, one answer at the output cap).
     installTestPricing({
       ...DISTINCT_TEST_PRICING,
       visualExportCredits: ({ visuals, callsPerVisual }) => visuals * callsPerVisual * 0.5,
-      internalCost: { ...DISTINCT_TEST_PRICING.internalCost!, chartGeneratorMaxOutputUsdPerMTok: () => null },
+      internalCost: { ...DISTINCT_TEST_PRICING.internalCost!, chartGeneratorMaxPricesUsdPerMTok: () => null },
     });
-    expect(chartGeneratorMaxOutputUsdPerMTok()).toBeCloseTo((0.005 * 1e6) / CHART_EXPORT_LIMITS.maxOutputTokensPerCall, 9);
+    const derived = chartGeneratorPriceCeiling()!;
+    expect(derived.outputUsdPerMTok).toBeCloseTo((0.005 * 1e6) / CHART_EXPORT_LIMITS.maxOutputTokensPerCall, 9);
+    expect(derived.inputUsdPerMTok).toBeCloseTo((0.005 * 1e6) / CHART_EXPORT_LIMITS.maxImageTokensPerCall, 9);
     // Nothing charged per visual (the open default): no ceiling of its own.
     resetPricingProviderForTests();
-    expect(chartGeneratorMaxOutputUsdPerMTok()).toBeNull();
+    expect(chartGeneratorPriceCeiling()).toBeNull();
     // An invalid stated ceiling fails closed.
-    installTestPricing({ ...DISTINCT_TEST_PRICING, internalCost: { ...DISTINCT_TEST_PRICING.internalCost!, chartGeneratorMaxOutputUsdPerMTok: () => Number.NaN } });
-    expect(() => selectGeneratorModel({ kind: "chart", catalog: luna })).toThrow(/invalid chart generator output price ceiling/);
+    for (const bad of [{ inputUsdPerMTok: Number.NaN, outputUsdPerMTok: 1 }, { inputUsdPerMTok: 1, outputUsdPerMTok: -1 }, 2 as never]) {
+      installTestPricing({ ...DISTINCT_TEST_PRICING, internalCost: { ...DISTINCT_TEST_PRICING.internalCost!, chartGeneratorMaxPricesUsdPerMTok: () => bad } });
+      expect(() => selectGeneratorModel({ kind: "chart", catalog: luna })).toThrow(/invalid chart generator price ceiling/);
+    }
   });
 
   it("lists only candidates with a list price at or under the test provider's ceiling", () => {
@@ -440,7 +448,7 @@ describe("generator model selection", () => {
       const id = uri.replace(/^llm:\/\/openrouter\//, "");
       expect(prices[id], id).toBeDefined();
       expect(prices[id]!.prohibited, id).toBeUndefined();
-      expect(prices[id]!.output, id).toBeLessThanOrEqual(chartGeneratorMaxOutputUsdPerMTok()!);
+      expect(prices[id]!.output, id).toBeLessThanOrEqual(chartGeneratorPriceCeiling()!.outputUsdPerMTok);
     }
   });
 

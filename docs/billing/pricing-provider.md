@@ -22,7 +22,7 @@ internal cost.
 | `qualityModePricing(mode)`, `publicPrices()` | the processing quality picker, `GET /v1/billing/prices` |
 | `estimateIngest(input)`, `quoteUpload(args)` | every work estimate, `POST /v1/uploads/estimate` |
 | `internalCost.*` | internal cost of local compute, remote sandboxes and worker slots (never a customer charge) |
-| `internalCost.chartGeneratorMaxOutputUsdPerMTok()` | chart & diagram export generator selection: the highest output list price (USD per 1M tokens) a generator may have. `null` lets core derive one from `visualExportCredits` (one answer at the per-call output cap costs the whole per-visual charge); with nothing charged per visual there is no ceiling of its own |
+| `internalCost.chartGeneratorMaxPricesUsdPerMTok()` | chart & diagram export generator selection: the highest input and output list prices (USD per 1M tokens) a generator may have; both must hold. `null` lets core derive them from `visualExportCredits` (one call at the image limit, or one answer at the output cap, costs the whole per-visual charge); with nothing charged per visual there is no ceiling of its own |
 
 `version` is stamped on every billable unit event (`metadata.priceCard`) and pinned on runs, so a receipt says which
 rules charged it.

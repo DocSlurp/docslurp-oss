@@ -103,7 +103,26 @@ export const CHART_EXPORT_LIMITS = {
   minRepairOutputTokens: 512,
   /** Characters of the invalid first answer echoed into the repair prompt (bounds the repair's input). */
   maxRepairEchoChars: 4_000,
+  /**
+   * Largest image a chart call sends, in the generator's own image tokens at the image's size (a letter page at 200 DPI
+   * is about 9,200 on a patch-priced model). A larger image, or one of unknown size, gets no model read: the visual
+   * keeps its deterministic or description fallback, and the page's own transcription is unaffected.
+   */
+  maxImageTokensPerCall: 10_240,
 } as const;
+
+/**
+ * Runtime options for one chart-export model call: its own output cap, the image limit, and exactly one billed request
+ * (no stream retry or streaming fallback; a cut-off answer comes back with `finishReason: "length"` so the generator
+ * can retry once at the larger cap). Used by the chart model client in `stages/vision-extract.ts`.
+ */
+export function chartCallRuntimeOptions(request: { maxOutputTokens?: number }): { maxOutputTokens: number; maxImageTokens: number; singleAttempt: true } {
+  return {
+    maxOutputTokens: request.maxOutputTokens ?? CHART_EXPORT_LIMITS.maxOutputTokensPerCall,
+    maxImageTokens: CHART_EXPORT_LIMITS.maxImageTokensPerCall,
+    singleAttempt: true,
+  };
+}
 
 /** Output cap of the repair after a first answer of `firstOutputTokens` (see `CHART_EXPORT_LIMITS`). */
 export function repairOutputTokenCap(firstOutputTokens: number): number {
