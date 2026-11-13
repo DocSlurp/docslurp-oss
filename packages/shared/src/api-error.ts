@@ -66,6 +66,7 @@ export const API_ERROR_CODES = [
   "client_key_origin_not_allowed",
   "api_key_ip_not_allowed",
   "model_not_allowed",
+  "chart_export_models_unavailable",
   "chat_deadline_exceeded",
   "chat_tool_failed",
   "invalid_search_scope",

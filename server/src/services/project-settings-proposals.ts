@@ -52,6 +52,7 @@ const PIPELINE_LABELS: Record<string, string> = {
   "mediaVideo.enabled": "Video frame analysis",
   quality: "Processing quality",
   "chartExport.tier": "Chart and diagram export",
+  figures: "Figure extraction",
   "chartExport.formats": "Chart export formats",
   "chartExport.diagrams": "Export diagrams",
 };

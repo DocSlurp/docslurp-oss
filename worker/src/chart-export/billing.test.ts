@@ -29,7 +29,7 @@ const BAR_SPEC = {
   x: { label: "Quarter", type: "category" }, y: { label: "USD m", type: "linear" },
   series: [{ name: "Revenue", points: [{ x: "Q1", y: 10 }, { x: "Q2", y: 12.5 }, { x: "Q3", y: 15 }] }],
 };
-const config: ChartExportConfig = { ...defaultChartExportConfig, enabled: true, formats: ["description", "mermaid", "csv"] };
+const config: ChartExportConfig = { ...defaultChartExportConfig, tier: "models", formats: ["description", "mermaid", "csv"] };
 const image = { path: "/nonexistent/chart.png", mimeType: "image/png" };
 const cand = (page: number): VisualCandidate => ({ id: `p${page}-page`, pageNumber: page, imageIndex: null, bbox: null, kind: "chart", detectedBy: "legacy-page-route" });
 

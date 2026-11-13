@@ -62,11 +62,13 @@ afterAll(async () => {
   vi.unstubAllEnvs();
 });
 
-function appFor(userId: string, key?: Key) {
+function appFor(userId: string, key?: Key, options: { session?: boolean } = {}) {
   const app = new Hono();
   app.use("*", async (c, next) => {
     c.set("sessionUser", { id: userId, email: `${userId}@x`, name: userId, image: null } as never);
     if (key) c.set("apiKey", { keyId: "k1", userId, projectIds: [], ...key } as never);
+    // A first-party app cookie session (the only `app` run origin).
+    if (options.session) c.set("requestActor", { type: "session", userId, sessionId: `s-${userId}`, user: { id: userId, email: `${userId}@x`, name: userId } } as never);
     await next();
   });
   app.route("/v1/runs", runsRoutes);
@@ -415,3 +417,115 @@ describe("PATCH /v1/projects/:id through the real route stays non-breaking", () 
     vi.unstubAllEnvs();
   });
 });
+
+describe("chart export tier: origin defaults, per-request override and its guards", () => {
+  beforeEach(async () => {
+    await seed();
+    // The audit log references the key that made the change.
+    await sql`insert into api_keys (id, user_id, org_id, key_hash, name, key_type) values ('k1', 'u1', 'o1', 'hash-chart-k1', 'chart', 'server') on conflict (id) do nothing`;
+  });
+  afterAll(() => { vi.unstubAllEnvs(); });
+  const server = (patch: Partial<Key> = {}): Key => ({ orgId: "o1", scopes: ["projects:manage", "ingest"], keyType: "server", ...patch });
+  const latestRun = async () => (await sql<{ pipeline: { chartExport?: { tier?: string } }; origin: string }[]>`
+    select pipeline, origin from project_runs where id <> 'run' order by created_at desc limit 1`)[0];
+  const runCount = async () => Number((await sql<{ n: number }[]>`select count(*)::int as n from project_runs`)[0]!.n);
+
+  it("stamps the resolved tier and origin on the run: app session free, API key off", async () => {
+    vi.stubEnv("DOCSLURP_CHART_EXPORT", "on");
+    expect((await post(appFor("u1", undefined, { session: true }), "/v1/runs/run/reprocess", {})).status).toBe(201);
+    expect(await latestRun()).toMatchObject({ origin: "app", pipeline: { chartExport: { tier: "free" } } });
+    expect((await post(appFor("u1", server()), "/v1/runs/run/reprocess", {})).status).toBe(201);
+    expect(await latestRun()).toMatchObject({ origin: "machine", pipeline: { chartExport: { tier: "off" } } });
+    // The deploy-wide machine default flips API callers to free without a code change.
+    vi.stubEnv("DOCSLURP_CHART_EXPORT_API_DEFAULT", "free");
+    expect((await post(appFor("u1", server()), "/v1/runs/run/reprocess", {})).status).toBe(201);
+    expect(await latestRun()).toMatchObject({ origin: "machine", pipeline: { chartExport: { tier: "free" } } });
+    vi.stubEnv("DOCSLURP_CHART_EXPORT_API_DEFAULT", "");
+  });
+
+  it("a request field cannot claim the app origin", async () => {
+    vi.stubEnv("DOCSLURP_CHART_EXPORT", "on");
+    expect((await post(appFor("u1", server()), "/v1/runs/run/reprocess", { origin: "app", runOrigin: "app" })).status).toBe(201);
+    expect(await latestRun()).toMatchObject({ origin: "machine", pipeline: { chartExport: { tier: "off" } } });
+  });
+
+  it("the per-request override wins over the run's and the origin's tier", async () => {
+    vi.stubEnv("DOCSLURP_CHART_EXPORT", "on");
+    expect((await post(appFor("u1", server()), "/v1/runs/run/reprocess", { chartExport: { tier: "free" } })).status).toBe(201);
+    expect(await latestRun()).toMatchObject({ origin: "machine", pipeline: { chartExport: { tier: "free" } } });
+    expect((await post(appFor("u1", undefined, { session: true }), "/v1/runs/run/reprocess", { chartExport: { tier: "off" } })).status).toBe(201);
+    expect(await latestRun()).toMatchObject({ origin: "app", pipeline: { chartExport: { tier: "off" } } });
+    expect((await post(appFor("u1", server()), "/v1/runs/run/reprocess", { chartExport: { tier: "models" } })).status).toBe(201);
+    expect(await latestRun()).toMatchObject({ pipeline: { chartExport: { tier: "models" } } });
+  });
+
+  it("refuses invalid values, model names, and models where the deploy switch is not on (no run created)", async () => {
+    const before = await runCount();
+    const key = appFor("u1", server());
+    vi.stubEnv("DOCSLURP_CHART_EXPORT", "on");
+    for (const body of [{ chartExport: { tier: "turbo" } }, { chartExport: { tier: "models", generatorModel: "llm://x/y" } }, { chartExport: "models" }]) {
+      expect((await post(key, "/v1/runs/run/reprocess", body)).status).toBe(400);
+      expect((await post(key, "/v1/runs/run/reprocess/estimate", body)).status).toBe(400);
+    }
+    for (const flag of ["free", "off"]) {
+      vi.stubEnv("DOCSLURP_CHART_EXPORT", flag);
+      const res = await post(key, "/v1/runs/run/reprocess", { chartExport: { tier: "models" } });
+      expect(res.status).toBe(400);
+      expect(await res.json()).toMatchObject({ error: { code: "chart_export_models_unavailable", message: expect.stringMatching(/not available/), details: { field: "chartExport.tier" } } });
+      expect(await (await post(key, "/v1/runs/run/reprocess/estimate", { chartExport: { tier: "models" } })).json()).toMatchObject({ error: { code: "chart_export_models_unavailable" } });
+      const estimate = await post(key, "/v1/runs/run/reprocess/estimate", { chartExport: { tier: "models" } });
+      expect(estimate.status).toBe(400);
+      // Free is always allowed (it never calls a model).
+      expect((await post(key, "/v1/runs/run/reprocess/estimate", { chartExport: { tier: "free" } })).status).toBe(200);
+    }
+    expect(await runCount()).toBe(before);
+  });
+
+  it("models needs spend allowance like any model-calling work", async () => {
+    vi.stubEnv("DOCSLURP_CHART_EXPORT", "on");
+    await sql`update organizations set credit_balance_cents = 0 where id = 'o1'`;
+    const before = await runCount();
+    const res = await post(appFor("u1", server()), "/v1/runs/run/reprocess", { chartExport: { tier: "models" } });
+    expect(res.status).toBe(402);
+    expect(await runCount()).toBe(before);
+  });
+
+  it("wrong-scope keys and other organizations cannot reprocess with an override", async () => {
+    vi.stubEnv("DOCSLURP_CHART_EXPORT", "on");
+    const before = await runCount();
+    const body = { chartExport: { tier: "models" } };
+    expect((await post(appFor("u1", server({ scopes: ["search:keyword"] })), "/v1/runs/run/reprocess", body)).status).toBe(403);
+    expect((await post(appFor("u1", server({ keyType: "client" })), "/v1/runs/run/reprocess", body)).status).toBe(403);
+    expect((await post(appFor("u2", server({ orgId: "o2", userId: "u2" })), "/v1/runs/run/reprocess", body)).status).toBe(404);
+    expect((await post(appFor("u1", server({ projectIds: ["wd"] })), "/v1/runs/run/reprocess", body)).status).toBe(404);
+    expect((await post(appFor("u2", server({ orgId: "o2", userId: "u2" })), "/v1/runs/run/reprocess/estimate", body)).status).toBe(404);
+    expect(await runCount()).toBe(before);
+  });
+
+  it("upload estimates resolve the tier for the caller and price only models", async () => {
+    vi.stubEnv("DOCSLURP_CHART_EXPORT", "on");
+    const files = [{ name: "a.pdf", size: 400_000, pages: 40, type: "application/pdf" }];
+    type Out = { estimate: { credits: { high: number } | null }; chartExport: { tier: string; source: string; credits: { high: number } | null } };
+    const api = await (await post(appFor("u1", server()), "/v1/uploads/estimate", { files, project: "w" })).json() as Out;
+    expect(api.chartExport).toMatchObject({ tier: "off", source: "default", credits: { high: 0 } });
+    const app = await (await post(appFor("u1", undefined, { session: true }), "/v1/uploads/estimate", { files, project: "w" })).json() as Out;
+    expect(app.chartExport).toMatchObject({ tier: "free", source: "default", credits: { high: 0 } });
+    expect(app.estimate.credits!.high).toBe(api.estimate.credits!.high);
+    const models = await (await post(appFor("u1", server()), "/v1/uploads/estimate", { files, project: "w", chartExport: { tier: "models" } })).json() as Out;
+    expect(models.chartExport).toMatchObject({ tier: "models", source: "request" });
+    expect(models.chartExport.credits!.high).toBeGreaterThan(0);
+    expect(models.estimate.credits!.high).toBeGreaterThan(api.estimate.credits!.high);
+    // An explicit project tier wins over both origin defaults.
+    for (const tier of ["off", "models"]) {
+      await sql`update projects set pipeline = jsonb_set(pipeline, '{chartExport}', ${sql.json({ tier, formats: ["description", "mermaid"], diagrams: true })}) where id = 'w'`;
+      for (const app of [appFor("u1", server()), appFor("u1", undefined, { session: true })]) {
+        const out = await (await post(app, "/v1/uploads/estimate", { files, project: "w" })).json() as Out;
+        expect(out.chartExport).toMatchObject({ tier, source: "project" });
+      }
+    }
+    vi.stubEnv("DOCSLURP_CHART_EXPORT", "free");
+    expect((await post(appFor("u1", server()), "/v1/uploads/estimate", { files, project: "w", chartExport: { tier: "models" } })).status).toBe(400);
+    expect((await post(appFor("u1", server()), "/v1/uploads/estimate", { files, project: "w", chartExport: { tier: "nope" } })).status).toBe(400);
+  });
+});
+

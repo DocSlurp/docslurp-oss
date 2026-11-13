@@ -7,6 +7,7 @@ import {
   extractionContractSchema,
   VISUAL_CANDIDATE_STATS_KEY,
   type ChartExportConfig,
+  type ResolvedChartExportConfig,
   type ChartExportFormat,
   type RoutePlan,
 } from "@docslurp/shared";
@@ -20,7 +21,7 @@ import { chartExportCallEstimate, estimateTargetCost } from "../routing/estimate
 import { createPolicyEstimator } from "../routing/policy.js";
 import { createBaselineEstimator } from "../routing/routers/baseline.js";
 import { makePage, testCatalog, testPack } from "../routing/testing.js";
-import { chartExportActive, chartExportConfigOf, DETERMINISTIC_HIGH_CONFIDENCE } from "./config.js";
+import { chartExportActive, chartExportConfigOf, chartExportModelsActive, DETERMINISTIC_HIGH_CONFIDENCE } from "./config.js";
 import { CHART_EXPORT_USAGE_METRIC, exportVisual, parseSpecAnswer, type ExportVisualArgs } from "./generator.js";
 import { stripVisualGroups, visualBlock, visualBody, wrapVisualGroup } from "./markdown.js";
 import { CHART_EXPORT_MAX_OUTPUT_USD_PER_MTOK, CHART_GENERATOR_CANDIDATES, DIAGRAM_GENERATOR_CANDIDATES, chartExportVisionConfig, selectGeneratorModel } from "./model-selection.js";
@@ -38,8 +39,8 @@ const BAR_SPEC = {
   summary: "Revenue grows every quarter, from 10 to 15.",
 };
 
-const config = (formats: ChartExportFormat[], extra: Partial<ChartExportConfig> = {}): ChartExportConfig => ({
-  ...defaultChartExportConfig, enabled: true, formats, ...extra,
+const config = (formats: ChartExportFormat[], extra: Partial<ResolvedChartExportConfig> = {}): ResolvedChartExportConfig => ({
+  ...defaultChartExportConfig, tier: "models", formats, ...extra,
 });
 
 const candidate: VisualCandidate = { id: "p2-i0", pageNumber: 2, imageIndex: 0, bbox: { x: 10, y: 20, width: 300, height: 200 }, kind: "chart", detectedBy: "router-inset" };
@@ -381,22 +382,32 @@ describe("generator model selection", () => {
     expect(config.remoteFallbackModelUri).toBeNull();
   });
 
-  it("reads the project option tolerantly", () => {
-    expect(chartExportConfigOf({}).enabled).toBe(false);
-    expect(chartExportConfigOf({ chartExport: { enabled: "yes" } }).enabled).toBe(false);
-    expect(chartExportConfigOf({ chartExport: { enabled: true } }).formats).toEqual(["description", "mermaid"]);
+  it("reads the run's option tolerantly: unstamped, malformed and legacy configs resolve as a machine run (off)", () => {
+    const on = { DOCSLURP_CHART_EXPORT: "on" };
+    expect(chartExportConfigOf({}, on).tier).toBe("off");
+    expect(chartExportConfigOf({ chartExport: { tier: "yes" } }, on).tier).toBe("off");
+    expect(chartExportConfigOf({ chartExport: { enabled: true } }, on).tier).toBe("off");
+    expect(chartExportConfigOf({ chartExport: { tier: "models", generatorModel: "llm://x/y" } }, on).tier).toBe("off");
+    expect(chartExportConfigOf({}, { ...on, DOCSLURP_CHART_EXPORT_API_DEFAULT: "free" }).tier).toBe("free");
+    expect(chartExportConfigOf({ chartExport: { tier: "models" } }, on).formats).toEqual(["description", "mermaid"]);
   });
 
-  it("is off everywhere while the DOCSLURP_CHART_EXPORT kill switch is off", () => {
-    const pipeline = { chartExport: { enabled: true } };
-    for (const flag of [undefined, "off", "false", "0", "no", ""]) {
-      const env = { DOCSLURP_CHART_EXPORT: flag };
-      expect(chartExportConfigOf(pipeline, env).enabled).toBe(false);
-      expect(chartExportActive(pipeline, env)).toBe(false);
+  it("caps the stamped tier with the DOCSLURP_CHART_EXPORT switch (off beats all, free caps models)", () => {
+    for (const tier of ["free", "models"] as const) {
+      const pipeline = { chartExport: { tier } };
+      for (const flag of [undefined, "off", "false", "0", "no", "", "bogus"]) {
+        const env = { DOCSLURP_CHART_EXPORT: flag };
+        expect(chartExportConfigOf(pipeline, env).tier).toBe("off");
+        expect(chartExportActive(pipeline, env)).toBe(false);
+        expect(chartExportModelsActive(pipeline, env)).toBe(false);
+      }
+      expect(chartExportConfigOf(pipeline, { DOCSLURP_CHART_EXPORT: "free" }).tier).toBe("free");
+      expect(chartExportModelsActive(pipeline, { DOCSLURP_CHART_EXPORT: "free" })).toBe(false);
+      expect(chartExportConfigOf(pipeline, { DOCSLURP_CHART_EXPORT: "on" }).tier).toBe(tier);
+      expect(chartExportActive(pipeline, { DOCSLURP_CHART_EXPORT: "on" })).toBe(true);
     }
-    expect(chartExportConfigOf(pipeline, { DOCSLURP_CHART_EXPORT: "on" }).enabled).toBe(true);
-    expect(chartExportActive(pipeline, { DOCSLURP_CHART_EXPORT: "on" })).toBe(true);
-    expect(chartExportActive({ chartExport: { enabled: false } }, { DOCSLURP_CHART_EXPORT: "on" })).toBe(false);
+    expect(chartExportModelsActive({ chartExport: { tier: "models" } }, { DOCSLURP_CHART_EXPORT: "on" })).toBe(true);
+    expect(chartExportActive({ chartExport: { tier: "off" } }, { DOCSLURP_CHART_EXPORT: "on" })).toBe(false);
   });
 });
 
@@ -457,7 +468,7 @@ describe("document pass", () => {
     const extractor = vi.fn(async () => ({ partials: [] }));
     const previous = setDeterministicVisualExtractor(extractor);
     try {
-      const session = new ChartExportSession({ documentId: "doc-1", config: defaultChartExportConfig, catalog: () => testCatalog(), client, recordUsage: () => undefined });
+      const session = new ChartExportSession({ documentId: "doc-1", config: { ...defaultChartExportConfig, tier: "off" }, catalog: () => testCatalog(), client, recordUsage: () => undefined });
       const result = await runChartExportPass({
         session, document: { id: "doc-1", userId: "u", mimeType: "application/pdf", pageCount: 3 }, run: { id: "run", storagePrefix: "u/run" },
         storage: storage as never, ledger, routedPlan: plan, legacyPages: [], pageImage: async () => null,
@@ -473,7 +484,7 @@ describe("document pass", () => {
 
   it("counts keyword-only legacy chart pages as low confidence, never as priced candidates", async () => {
     const storage = memoryStorage();
-    const session = new ChartExportSession({ documentId: "doc-1", config: defaultChartExportConfig, catalog: () => [], client: null, recordUsage: () => undefined });
+    const session = new ChartExportSession({ documentId: "doc-1", config: { ...defaultChartExportConfig, tier: "off" }, catalog: () => [], client: null, recordUsage: () => undefined });
     const result = await runChartExportPass({
       session, document: { id: "doc-1", userId: "u", mimeType: "application/pdf", pageCount: 3 }, run: { id: "run", storagePrefix: "u/run" },
       storage: storage as never, ledger: seedDocument(storage), routedPlan: null,
@@ -626,7 +637,7 @@ describe("duplicate visuals (council H2)", () => {
   });
 
   it("the same image found by the router and by image routing counts once (placement or index)", () => {
-    const session = new ChartExportSession({ documentId: "doc-1", config: defaultChartExportConfig, catalog: () => [], client: null, recordUsage: () => undefined });
+    const session = new ChartExportSession({ documentId: "doc-1", config: { ...defaultChartExportConfig, tier: "off" }, catalog: () => [], client: null, recordUsage: () => undefined });
     session.addCandidates([
       { id: "p2-i0", pageNumber: 2, imageIndex: 0, bbox: { x: 10, y: 10, width: 100, height: 80 }, kind: "chart", detectedBy: "router-inset" },
       { id: "p2-i1", pageNumber: 2, imageIndex: 1, bbox: null, kind: "diagram", detectedBy: "router-inset" },
@@ -1135,7 +1146,7 @@ describe("spend bounds (council M1/M2/M4)", () => {
   });
 
   it("Office chart parts seen with export off are priced as free", () => {
-    const session = new ChartExportSession({ documentId: "doc-1", config: defaultChartExportConfig, catalog: () => [], client: null, recordUsage: () => undefined });
+    const session = new ChartExportSession({ documentId: "doc-1", config: { ...defaultChartExportConfig, tier: "off" }, catalog: () => [], client: null, recordUsage: () => undefined });
     session.setDeterministic({ partials: [], presence: { officeChartParts: 3 } });
     expect(session.stats()).toMatchObject({ charts: 3, exported: 0, bySource: { "office-chart-xml": 3 } });
   });
