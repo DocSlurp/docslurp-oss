@@ -128,7 +128,13 @@ export type ChartModelPurpose = "spec" | "repair" | "direct";
 
 export interface ChartModelRequest {
   modelUri: string;
+  /** The whole prompt (bounded and priced as one text). */
   prompt: string;
+  /**
+   * The per-visual tail of `prompt` (a geometry digest, a previous answer), sent after the image; the rest of the
+   * prompt is fixed text sent first as the cacheable prefix. Absent: the whole prompt is fixed text.
+   */
+  requestText?: string;
   image: VisualImage;
   pageNumber: number;
   purpose: ChartModelPurpose;

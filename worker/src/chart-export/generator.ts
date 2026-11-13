@@ -25,7 +25,7 @@ import {
   MODEL_CONFIDENCE,
   formatsFor,
 } from "./config.js";
-import { assistedSpecPrompt, directPrompt, repairPrompt, specPrompt } from "./prompts.js";
+import { assistedSpecPrompt, directPrompt, promptText, repairPrompt, specPrompt, type ChartPromptParts } from "./prompts.js";
 import { renderVisual } from "./render-adapter.js";
 import { sanitizeFormatOutput, unfence } from "./sanitize.js";
 import type {
@@ -236,11 +236,11 @@ export async function exportVisual(args: ExportVisualArgs): Promise<ExportVisual
   let kind: VisualKind | null = args.candidate.kind ?? det?.partial.kind ?? null;
   let servedModel: string | null = null;
 
-  const call = async (purpose: ChartModelPurpose, prompt: string, format: ChartExportFormat | null): Promise<ChartModelResponse | null> => {
+  const call = async (purpose: ChartModelPurpose, prompt: ChartPromptParts, format: ChartExportFormat | null): Promise<ChartModelResponse | null> => {
     if (args.canCallModel && !args.canCallModel()) return null;
     try {
       const response = await client.complete({
-        modelUri, prompt, image, pageNumber: args.candidate.pageNumber, purpose, ...(format ? { format } : {}), ...(args.signal ? { signal: args.signal } : {}),
+        modelUri, prompt: promptText(prompt), ...(prompt.request ? { requestText: prompt.request } : {}), image, pageNumber: args.candidate.pageNumber, purpose, ...(format ? { format } : {}), ...(args.signal ? { signal: args.signal } : {}),
       });
       servedModel = response.model;
       calls.push({
@@ -272,7 +272,8 @@ export async function exportVisual(args: ExportVisualArgs): Promise<ExportVisual
   if (derivedFormats.length > 0 || (directFormats.length > 0 && kind === null)) {
     // A project without diagrams asks for charts only, so a diagram is answered `none` instead of a full spec.
     const promptOptions = { chartsOnly: !args.config.diagrams };
-    const first = await call("spec", digest ? assistedSpecPrompt(kind, digest, promptOptions) : specPrompt(kind, promptOptions), null);
+    const prompt: ChartPromptParts = digest ? assistedSpecPrompt(kind, digest, promptOptions) : { stable: specPrompt(kind, promptOptions) };
+    const first = await call("spec", prompt, null);
     let parsed = first ? parseSpecAnswer(first.text) : null;
     if (first) record(first, "spec", null, !!parsed && !("error" in parsed));
     if (parsed && "none" in parsed) return { visual: null, calls };
@@ -308,7 +309,7 @@ export async function exportVisual(args: ExportVisualArgs): Promise<ExportVisual
 
   // Direct formats: one call each, validated per format.
   for (const format of formatsFor(args.config, kind).filter((f) => modes[f] === "direct")) {
-    const response = await call("direct", directPrompt(format, kind), format);
+    const response = await call("direct", { stable: directPrompt(format, kind) }, format);
     if (!response) {
       skipped.push({ format, reason: "generator-failed" });
       continue;

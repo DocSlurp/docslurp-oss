@@ -1795,6 +1795,7 @@ export class VisionExtractStage implements Stage {
               outputSchema: null,
               gate,
               promptText: request.prompt,
+              ...(request.requestText ? { promptRequestText: request.requestText } : {}),
               ...(chartExportReasoning(request.modelUri) ? { reasoning: chartExportReasoning(request.modelUri)! } : {}),
               ...(request.signal ? { signal: request.signal } : {}),
             });

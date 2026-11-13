@@ -10,7 +10,7 @@ import type { Config } from "../config.js";
 import { CommandRunner } from "../tools/runner.js";
 import { MARKDOWN_LATEX_VISION_PROMPT, VISION_MODEL_PROFILES, visionPromptKeyForModel } from "../tools/vision-model-profiles.js";
 import { visionMaxPrice } from "../test/vision-max-price.js";
-import { executeVisionRuntime, resolveVisionPromptTemplate, visionPromptTemplates } from "../tools/vision-runtime.js";
+import { visionPromptFromMessages, executeVisionRuntime, resolveVisionPromptTemplate, visionPromptTemplates } from "../tools/vision-runtime.js";
 import { inAllowingRun } from "../test/provider-scope.js";
 
 const SNAPSHOT = "deepseek/deepseek-v4.1-flash-1017";
@@ -40,7 +40,7 @@ async function send(model: string, prompt?: string) {
     privacyMode: "standard",
   }));
   const body = bodies[0]!;
-  return { body, userText: body.messages[1].content[0].text as string };
+  return { body, userText: visionPromptFromMessages(body.messages) as string };
 }
 
 describe("per-model vision profiles", () => {

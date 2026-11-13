@@ -9,7 +9,7 @@ import type { Config } from "../config.js";
 import { CommandRunner } from "../tools/runner.js";
 import { unwrapWholeMarkdownFence } from "../tools/vision-markdown-fence.js";
 import { postProcessVisionText, visionModelProfile, visionPromptKeyForModel, visionReasoningParams } from "../tools/vision-model-profiles.js";
-import { executeVisionRuntime, visionPromptTemplates } from "../tools/vision-runtime.js";
+import { visionPromptFromMessages, executeVisionRuntime, visionPromptTemplates } from "../tools/vision-runtime.js";
 import { visionMaxPrice } from "../test/vision-max-price.js";
 import { inAllowingRun } from "../test/provider-scope.js";
 
@@ -79,8 +79,8 @@ describe("GPT-6 Luna vision profile", () => {
     const { bodies } = await run(LUNA, undefined, [ok]);
     const body = bodies[0]!;
     expect(body.reasoning).toEqual({ effort: "none" });
-    expect(body.messages[1].content[0].text).toBe(visionPromptTemplates["page-markdown-latex"]);
-    expect(body.messages[1].content[1].image_url.detail).toBe("high");
+    expect(visionPromptFromMessages(body.messages)).toBe(visionPromptTemplates["page-markdown-latex"]);
+    expect(body.messages[1].content[0].image_url.detail).toBe("high");
     expect(body.max_tokens).toBe(16384);
     expect(body.temperature).toBe(0);
     expect(Object.keys(body).sort()).toEqual(["max_tokens", "messages", "model", "provider", "reasoning", "stream", "stream_options", "temperature"]);
@@ -91,14 +91,14 @@ describe("GPT-6 Luna vision profile", () => {
   it("matches the golden default-prompt request body", async () => {
     const golden = JSON.parse(await readFile(join(import.meta.dirname, "fixtures/vision-request-bodies-luna.json"), "utf8")) as Record<string, unknown>;
     const { bodies } = await run(LUNA, undefined, [ok]);
-    bodies[0]!.messages[1].content[1].image_url.url = "<image>";
+    bodies[0]!.messages[1].content[0].image_url.url = "<image>";
     expect(bodies[0]).toEqual(golden[`${LUNA}|`]);
   });
 
   it("keeps an explicitly chosen template but still sends detail and reasoning", async () => {
     const { bodies } = await run(LUNA, "layout", [ok]);
-    expect(bodies[0]!.messages[1].content[0].text).toBe(visionPromptTemplates.layout);
-    expect(bodies[0]!.messages[1].content[1].image_url.detail).toBe("high");
+    expect(visionPromptFromMessages(bodies[0]!.messages)).toBe(visionPromptTemplates.layout);
+    expect(bodies[0]!.messages[1].content[0].image_url.detail).toBe("high");
   });
 
   it("unwraps a whole-page markdown fence in the result", async () => {
@@ -108,7 +108,7 @@ describe("GPT-6 Luna vision profile", () => {
 
   it("leaves unprofiled models without detail", async () => {
     const { bodies } = await run("google/gemini-3.1-flash-lite", undefined, [ok]);
-    expect(bodies[0]!.messages[1].content[1].image_url.detail).toBeUndefined();
+    expect(bodies[0]!.messages[1].content[0].image_url.detail).toBeUndefined();
   });
 
   it("retries a content-filtered page once on the profile's preferred route, keeps the retry text and sums both calls", async () => {
