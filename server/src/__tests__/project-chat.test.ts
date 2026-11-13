@@ -81,7 +81,6 @@ vi.mock("../lib/ai.js", () => ({
   resolveOpenRouterApiKey: vi.fn(
     () =>
       process.env.OPENROUTER_API_KEY ??
-      process.env.OPENROUTER_KEY ??
       process.env.ANTHROPIC_API_KEY,
   ),
   generateOpenRouterText: generateAnthropicText,
@@ -93,7 +92,7 @@ const { buildFallbackAnswer, buildModelFailoverOrder, buildNativeDocumentInputs,
   "../services/project-chat.js"
 );
 const { createSearchSessionJournal } = await import("../search/session.js");
-const MODEL_KEY_ENV = ["ANTHROPIC_API_KEY", "OPENROUTER_API_KEY", "OPENROUTER_KEY"] as const;
+const MODEL_KEY_ENV = ["ANTHROPIC_API_KEY", "OPENROUTER_API_KEY"] as const;
 const originalModelKeys = Object.fromEntries(MODEL_KEY_ENV.map(name => [name, process.env[name]]));
 
 function buildSearchSettings(

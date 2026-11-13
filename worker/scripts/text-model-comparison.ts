@@ -54,7 +54,7 @@ if (process.argv.includes("--validate")) {
   console.log(JSON.stringify({ directory, cases: cases.length, integrityPassed: integrity.passed, inferenceCalls: 0 }));
   process.exit(0);
 }
-const key = process.env.OPENROUTER_API_KEY ?? process.env.OPENROUTER_KEY;
+const key = process.env.OPENROUTER_API_KEY;
 assert(key, "OpenRouter credentials required");
 const budgetUsd = experiment.budgetUsd;
 const catalogResponse = await fetch("https://openrouter.ai/api/v1/models", { signal: AbortSignal.timeout(20_000) });
