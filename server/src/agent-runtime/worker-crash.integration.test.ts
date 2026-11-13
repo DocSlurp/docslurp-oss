@@ -176,3 +176,75 @@ it.runIf(!!url&&!!redis)("the actual executor entrypoint exits within its encomp
     expect(exitMs).toBeLessThan(6000);
   } finally {child.kill("SIGKILL");}
 },25000);
+
+it.runIf(!!url&&!!redis)("drains on stop: claims no new task, lets the running turn finish, then shuts down",async()=>{
+  if(new URL(url!).hostname!=="127.0.0.1"||new URL(redis!).hostname!=="127.0.0.1")throw new Error("loopback fixture only");
+  const pool=new Pool({connectionString:url,max:6});
+  const namespace=`native-drain:${randomUUID()}`;
+  const ran:Array<{worker:string;id:string}>=[];
+  let release!:()=>void;const gate=new Promise<void>(resolve=>{release=resolve;});
+  const aborted=new Set<string>();
+  const executor=(worker:string)=>({async execute(args:Record<string,unknown>,options?:{abortSignal?:AbortSignal}){
+    const id=String(args.operationId);ran.push({worker,id});
+    if(args.block===true)await new Promise<void>((resolve,reject)=>{
+      void gate.then(resolve);
+      options?.abortSignal?.addEventListener("abort",()=>{aborted.add(id);reject(new Error("interrupted"));},{once:true});
+    });
+    return {done:id};
+  }});
+  const producer=await createNativeChatHost({pool,redisUrl:redis!,namespace,worker:false});
+  const a=await createNativeChatHost({pool,redisUrl:redis!,namespace,worker:true,
+    configureBackgroundTasks(manager){manager.registerStaticExecutor("drainFixture",executor("a"));}});
+  let b:Awaited<ReturnType<typeof createNativeChatHost>>|undefined;
+  const manager=producer.mastra.backgroundTaskManager!;
+  const enqueue=async(id:string,block:boolean)=>(await manager.enqueue({agentId:"docslurp-project-chat",runId:id,toolCallId:id,
+    toolName:"drainFixture",args:{operationId:id,block},resourceId:"fixture",maxRetries:0,timeoutMs:60000})).task.id;
+  try {
+    const first=randomUUID();const firstTask=await enqueue(first,true);
+    await vi.waitFor(()=>expect(ran).toContainEqual({worker:"a",id:first}),{timeout:10000});
+    b=await createNativeChatHost({pool,redisUrl:redis!,namespace,worker:true,
+      configureBackgroundTasks(m){m.registerStaticExecutor("drainFixture",executor("b"));}});
+    let drained:boolean|undefined;
+    const draining=a.drain(30000).then(idle=>{drained=idle;});
+    // New work goes to the other worker while the draining one finishes its turn.
+    const second=randomUUID();const secondTask=await enqueue(second,false);
+    await vi.waitFor(async()=>expect((await manager.getTask(secondTask))?.status).toBe("completed"),{timeout:10000});
+    expect(ran.filter(r=>r.id===second)).toEqual([{worker:"b",id:second}]);
+    expect(drained).toBeUndefined();
+    expect((await manager.getTask(firstTask))?.status).toBe("running");
+    release();
+    await draining;
+    expect(drained).toBe(true);
+    await vi.waitFor(async()=>expect((await manager.getTask(firstTask))?.status).toBe("completed"),{timeout:10000});
+    expect(aborted.size).toBe(0);
+    expect(ran.filter(r=>r.id===first)).toHaveLength(1);
+  } finally {release();await a.close();await b?.close();await producer.close();await pool.end();}
+},60000);
+
+it.runIf(!!url&&!!redis)("a drain that reaches its limit leaves the turn to native shutdown, which interrupts it",async()=>{
+  if(new URL(url!).hostname!=="127.0.0.1"||new URL(redis!).hostname!=="127.0.0.1")throw new Error("loopback fixture only");
+  const pool=new Pool({connectionString:url,max:4});
+  const namespace=`native-drain-limit:${randomUUID()}`;
+  let started=false;let interrupted=false;
+  const producer=await createNativeChatHost({pool,redisUrl:redis!,namespace,worker:false});
+  const a=await createNativeChatHost({pool,redisUrl:redis!,namespace,worker:true,
+    configureBackgroundTasks(manager){manager.registerStaticExecutor("drainFixture",{async execute(_args,options){
+      started=true;
+      await new Promise<void>((_resolve,reject)=>options?.abortSignal?.addEventListener("abort",()=>{interrupted=true;reject(new Error("interrupted"));},{once:true}));
+      return {};
+    }});}});
+  const manager=producer.mastra.backgroundTaskManager!;
+  try {
+    const id=randomUUID();
+    const {task}=await manager.enqueue({agentId:"docslurp-project-chat",runId:id,toolCallId:id,toolName:"drainFixture",
+      args:{operationId:id},resourceId:"fixture",maxRetries:0,timeoutMs:60000});
+    await vi.waitFor(()=>expect(started).toBe(true),{timeout:10000});
+    const began=Date.now();
+    expect(await a.drain(600)).toBe(false);
+    expect(Date.now()-began).toBeLessThan(3000);
+    expect(interrupted).toBe(false);
+    await a.close();
+    expect(interrupted).toBe(true);
+    await vi.waitFor(async()=>expect(["cancelled","failed"]).toContain((await manager.getTask(task.id))?.status),{timeout:10000});
+  } finally {await a.close();await producer.close();await pool.end();}
+},40000);
