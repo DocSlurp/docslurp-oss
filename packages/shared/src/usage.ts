@@ -20,8 +20,13 @@ export interface AiUsageLedgerInput {
   provider: string;
   model: string;
   metric: string;
+  /** Every prompt token, cached or not (OpenAI/OpenRouter `prompt_tokens`; for Anthropic's native API add its cache reads and writes). */
   inputTokens?: number | null;
   outputTokens?: number | null;
+  /** Of `inputTokens`, those served from the provider's prompt cache. Defaults to `metadata.cachedInputTokens`. */
+  cachedInputTokens?: number | null;
+  /** Of `inputTokens`, those written to the provider's prompt cache. Defaults to `metadata.cacheWriteInputTokens`. */
+  cacheWriteInputTokens?: number | null;
   amount?: number;
   unit?: string;
   costCents?: number;
@@ -43,11 +48,17 @@ export interface AiUsageLedgerEvent {
 export interface AiUsagePricing {
   costPer1kInputTokens: number;
   costPer1kOutputTokens: number;
+  /** Rate for prompt tokens served from the prompt cache. Unset: cached tokens are priced as ordinary input. */
+  costPer1kCacheReadInputTokens?: number;
+  /** Rate for prompt tokens written to the prompt cache. Unset: priced as ordinary input. */
+  costPer1kCacheWriteInputTokens?: number;
   /** Rates for requests whose prompt exceeds the threshold (e.g. Claude Haiku 5.5 above 100K). */
   longContext?: {
     thresholdInputTokens: number;
     costPer1kInputTokens: number;
     costPer1kOutputTokens: number;
+    costPer1kCacheReadInputTokens?: number;
+    costPer1kCacheWriteInputTokens?: number;
   };
 }
 
@@ -83,12 +94,16 @@ export const defaultAiUsagePricingCatalog: AiUsagePricingCatalogEntry[] = [
     const pricing: AiUsagePricing = {
       costPer1kInputTokens: model.inputUsdPerMTok / 10,
       costPer1kOutputTokens: model.outputUsdPerMTok / 10,
+      costPer1kCacheReadInputTokens: model.cacheReadUsdPerMTok / 10,
+      costPer1kCacheWriteInputTokens: model.cacheWriteUsdPerMTok / 10,
       ...(model.longContext
         ? {
             longContext: {
               thresholdInputTokens: model.longContext.thresholdInputTokens,
               costPer1kInputTokens: model.longContext.inputUsdPerMTok / 10,
               costPer1kOutputTokens: model.longContext.outputUsdPerMTok / 10,
+              costPer1kCacheReadInputTokens: model.longContext.cacheReadUsdPerMTok / 10,
+              costPer1kCacheWriteInputTokens: model.longContext.cacheWriteUsdPerMTok / 10,
             },
           }
         : {}),
@@ -127,11 +142,35 @@ export const defaultAiUsagePricingCatalog: AiUsagePricingCatalogEntry[] = [
   },
 ];
 
+function tokenCount(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : undefined;
+}
+
+/**
+ * Prompt-cache token counts of an event: `cachedInputTokens` (served from the cache) and `cacheWriteInputTokens`
+ * (written to it), both included in `inputTokens`. Read from `metadata`, where the ledger stores them; zero when absent.
+ */
+export function aiUsageCacheTokens(event: { inputTokens?: number | null; metadata?: Record<string, unknown> | null }): { cachedInputTokens: number; cacheWriteInputTokens: number } {
+  const input = Math.max(0, event.inputTokens ?? 0);
+  const cached = Math.min(input, tokenCount(event.metadata?.cachedInputTokens) ?? 0);
+  const written = Math.min(input - cached, tokenCount(event.metadata?.cacheWriteInputTokens) ?? 0);
+  return { cachedInputTokens: cached, cacheWriteInputTokens: written };
+}
+
 export function buildAiUsageLedgerEvent(
   input: AiUsageLedgerInput,
 ): AiUsageLedgerEvent {
   const inputTokens = input.inputTokens ?? 0;
   const outputTokens = input.outputTokens ?? 0;
+  const metadata = { ...(input.metadata ?? {}) };
+  const cached = tokenCount(input.cachedInputTokens ?? metadata.cachedInputTokens);
+  const written = tokenCount(input.cacheWriteInputTokens ?? metadata.cacheWriteInputTokens);
+  delete metadata.cachedInputTokens;
+  delete metadata.cacheWriteInputTokens;
+  // Persisted in metadata (usage_events has no cache columns), clamped so they never exceed the prompt.
+  const cache = aiUsageCacheTokens({ inputTokens, metadata: { cachedInputTokens: cached, cacheWriteInputTokens: written } });
+  if (cache.cachedInputTokens > 0) metadata.cachedInputTokens = cache.cachedInputTokens;
+  if (cache.cacheWriteInputTokens > 0) metadata.cacheWriteInputTokens = cache.cacheWriteInputTokens;
 
   return {
     provider: input.provider,
@@ -142,7 +181,7 @@ export function buildAiUsageLedgerEvent(
     costCents: input.costCents ?? 0,
     inputTokens,
     outputTokens,
-    metadata: input.metadata ?? {},
+    metadata,
   };
 }
 
@@ -158,7 +197,7 @@ export function buildPricedAiUsageLedgerEvent(
   const { pricing, pricingSource } = resolveAiUsagePricingWithSource(event, options);
   return {
     ...event,
-    costCents: calculateAiUsageCostCents({ inputTokens: event.inputTokens, outputTokens: event.outputTokens, ...pricing }),
+    costCents: calculateAiUsageCostCents({ inputTokens: event.inputTokens, outputTokens: event.outputTokens, ...aiUsageCacheTokens(event), ...pricing }),
     metadata: { ...event.metadata, costSource: "estimate", pricingSource, pricing },
   };
 }
@@ -173,26 +212,36 @@ export function hasAiUsageLedgerTokens(event: AiUsageLedgerEvent): boolean {
     || Number(event.metadata?.providerCostCents ?? 0) > 0;
 }
 
+/**
+ * Cost in cents. `inputTokens` counts every prompt token; `cachedInputTokens` and `cacheWriteInputTokens` are the
+ * parts of it read from and written to the prompt cache, priced at the cache rates when the pricing lists them and
+ * at the input rate otherwise (never below what the provider charges for an unknown rate).
+ */
 export function calculateAiUsageCostCents(
   input: {
     inputTokens?: number | null;
     outputTokens?: number | null;
+    cachedInputTokens?: number | null;
+    cacheWriteInputTokens?: number | null;
   } & AiUsagePricing,
 ): number {
   const inputTokens = Math.max(0, input.inputTokens ?? 0);
   const outputTokens = Math.max(0, input.outputTokens ?? 0);
+  const cachedTokens = Math.min(inputTokens, Math.max(0, input.cachedInputTokens ?? 0));
+  const writeTokens = Math.min(inputTokens - cachedTokens, Math.max(0, input.cacheWriteInputTokens ?? 0));
   const rates =
     input.longContext && inputTokens > input.longContext.thresholdInputTokens
       ? input.longContext
       : input;
-  const inputRate = Number.isFinite(rates.costPer1kInputTokens)
-    ? Math.max(0, rates.costPer1kInputTokens)
-    : 0;
-  const outputRate = Number.isFinite(rates.costPer1kOutputTokens)
-    ? Math.max(0, rates.costPer1kOutputTokens)
-    : 0;
+  const finiteRate = (value: number | undefined, fallback: number) => value !== undefined && Number.isFinite(value) ? Math.max(0, value) : fallback;
+  const inputRate = finiteRate(rates.costPer1kInputTokens, 0);
+  const outputRate = finiteRate(rates.costPer1kOutputTokens, 0);
+  const cacheReadRate = finiteRate(rates.costPer1kCacheReadInputTokens, inputRate);
+  const cacheWriteRate = finiteRate(rates.costPer1kCacheWriteInputTokens, inputRate);
   const rawCost =
-    (inputTokens / 1000) * inputRate +
+    ((inputTokens - cachedTokens - writeTokens) / 1000) * inputRate +
+    (cachedTokens / 1000) * cacheReadRate +
+    (writeTokens / 1000) * cacheWriteRate +
     (outputTokens / 1000) * outputRate;
 
   return rawCost > 0 ? rawCost : 0;
@@ -204,12 +253,16 @@ export function estimateAiUsageCostCents(
     model?: string | null;
     inputTokens?: number | null;
     outputTokens?: number | null;
+    cachedInputTokens?: number | null;
+    cacheWriteInputTokens?: number | null;
   },
   options: AiUsagePricingOptions = {},
 ): number {
   return calculateAiUsageCostCents({
     inputTokens: input.inputTokens,
     outputTokens: input.outputTokens,
+    cachedInputTokens: input.cachedInputTokens,
+    cacheWriteInputTokens: input.cacheWriteInputTokens,
     ...resolveAiUsagePricingWithSource(input, options).pricing,
   });
 }
@@ -235,7 +288,9 @@ export function resolveAiUsagePricingWithSource(
     const live = liveModelPrice(input.model, { promptTokens: input.inputTokens ?? undefined, reference });
     if (live) {
       // USD per token to cents per 1K tokens.
-      return { pricing: { costPer1kInputTokens: live.input * 100_000, costPer1kOutputTokens: live.output * 100_000 }, pricingSource: "openrouter-live" };
+      return { pricing: { costPer1kInputTokens: live.input * 100_000, costPer1kOutputTokens: live.output * 100_000,
+        ...(live.cacheRead !== undefined ? { costPer1kCacheReadInputTokens: live.cacheRead * 100_000 } : {}),
+        ...(live.cacheWrite !== undefined ? { costPer1kCacheWriteInputTokens: live.cacheWrite * 100_000 } : {}) }, pricingSource: "openrouter-live" };
     }
   }
   return { pricing: resolveAiUsagePricing(input, options), pricingSource: matched ? "catalog" : "configured-fallback" };
@@ -265,6 +320,8 @@ export function resolveAiUsagePricing(
   return {
     costPer1kInputTokens: pricing.costPer1kInputTokens,
     costPer1kOutputTokens: pricing.costPer1kOutputTokens,
+    ...(pricing.costPer1kCacheReadInputTokens !== undefined ? { costPer1kCacheReadInputTokens: pricing.costPer1kCacheReadInputTokens } : {}),
+    ...(pricing.costPer1kCacheWriteInputTokens !== undefined ? { costPer1kCacheWriteInputTokens: pricing.costPer1kCacheWriteInputTokens } : {}),
     ...(pricing.longContext ? { longContext: pricing.longContext } : {}),
   };
 }
@@ -281,5 +338,9 @@ export function formatAiUsageConsoleLog(
     options.includeOutputTokens === false
       ? ""
       : ` output_tokens=${event.outputTokens}`;
-  return `[ai-usage] ${event.metric} model=${event.model} input_tokens=${event.inputTokens}${output}`;
+  // Cache fields only when the provider reported them, so existing parsers of the line keep working.
+  const cache = aiUsageCacheTokens(event);
+  const cached = cache.cachedInputTokens > 0 ? ` cached_input_tokens=${cache.cachedInputTokens}` : "";
+  const written = cache.cacheWriteInputTokens > 0 ? ` cache_write_input_tokens=${cache.cacheWriteInputTokens}` : "";
+  return `[ai-usage] ${event.metric} model=${event.model} input_tokens=${event.inputTokens}${output}${cached}${written}`;
 }
