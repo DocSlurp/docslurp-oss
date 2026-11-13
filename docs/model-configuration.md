@@ -348,12 +348,22 @@ The rules are:
   shaped, applied over any built-in profile for the same model id
   (`packages/shared/src/vision-request-profile.ts`). Fields:
   - `promptMode`: `"template"` (default) or `"image-only"`.
-  - `systemMessage`: send the worker's system message (default `true`).
+  - `systemMessage`: send the worker's system message (default `true`). Turn it
+    off only for OCR-specialist models trained on a single user turn; the
+    worker logs every request that uses a profile.
   - `temperature`, `topP`: sampling.
   - `maxOutputTokens`: a number, or `"server"` to send no `max_tokens`
-    (requires `contextTokens`, which then bounds admission).
+    (requires `contextTokens`, which then bounds admission). Set
+    `contextTokens` to at least the server's `--max-model-len`: vLLM then
+    rejects any request that could produce more. `"server"` applies to private
+    models only; a hosted route always sends a concrete cap.
   - `maxLongEdgePx`: the longest page-image edge, 256 to 4000; PDF pages render
     no larger, by lowering each page's DPI.
+
+  Profiles shape plain page transcription only. A request with a project output
+  schema or a task prompt (form fields, map OCR) keeps the worker's generic
+  request, so its instructions are never dropped. Built-in profiles apply to
+  private-endpoint models only.
 
   LightOnOCR-3 (`lightonai/LightOnOCR-3-0.8B`, `-4B`, `-1B`) has built-in
   profiles copied from LightOn's own client: image only, no system message,

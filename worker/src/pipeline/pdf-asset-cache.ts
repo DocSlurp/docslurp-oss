@@ -464,7 +464,10 @@ export class PdfRasterCache {
         if (rendered && missing.every((pageNumber) => rendered.has(pageNumber))) {
           const areas: PageEquivalentRow[] = [];
           for (const [pageNumber, page] of rendered) {
-            if (page.widthPx && page.heightPx) areas.push({ pageNumber, area: pageAreaEquivalents(page.widthPx, page.heightPx, page.dpi) });
+            // Billed from the page's point size, as the pdftoppm path is: a DPI lowered by the pixel bounds or a long-edge
+            // cap changes the pixels, never the page.
+            if (page.widthPt && page.heightPt) areas.push({ pageNumber, area: pageAreaEquivalentsPt(page.widthPt, page.heightPt) });
+            else if (page.widthPx && page.heightPx) areas.push({ pageNumber, area: pageAreaEquivalents(page.widthPx, page.heightPx, page.dpi) });
           }
           // Measured and authorized before any page is cached, outside the engine fallback: a refusal (an unfunded run is
           // paused) or a failed record stops here and leaves nothing a retry would skip.
@@ -558,7 +561,9 @@ export class PdfRasterCache {
         ...(isPdf ? {} : { customerOriginal: true }),
         mimeType: outputMimeType,
         engine: isPdf ? engineName : undefined,
-        dpi: isPdf ? dpi : undefined,
+        // A long-edge cap lowers each page's DPI from its own size: the requested DPI would mis-scale coordinates, so a
+        // capped render reports none.
+        dpi: isPdf && maxLongEdgePx === undefined ? dpi : undefined,
       };
     }));
   }

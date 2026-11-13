@@ -52,5 +52,6 @@ describe("long-edge cap for profiled vision models", () => {
     const dpi = longEdgeCappedDpi(612, 792, 300, 2_048);
     expect(render).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ dpi, maxEdgePx: 2_048 }));
     expect(out.get(1)!.dpi).toBe(dpi);
+    expect(out.get(1)).toMatchObject({ widthPt: 612, heightPt: 792 }); // billed from points, not px / fractional dpi
   });
 });

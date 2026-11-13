@@ -18,8 +18,11 @@ export interface NativeRenderedPage {
   widthPx: number | null;
   heightPx: number | null;
   mimeType: "image/png" | "image/jpeg";
-  /** The DPI this page actually rendered at (bounded, and lowered by `maxLongEdgePx`): page area billing divides by it. */
+  /** The DPI this page actually rendered at (bounded, and lowered by `maxLongEdgePx`). */
   dpi: number;
+  /** The page's measured size in points, when known: page-area billing uses it, as the pdftoppm path does. */
+  widthPt?: number;
+  heightPt?: number;
 }
 
 export interface NativeRenderOptions {
@@ -75,7 +78,7 @@ export async function renderPagesNative(
           format,
           ...(options.gray ? { gray: true } : {}),
         });
-        out.set(pageNumber, { pageNumber, bytes, ...imageDimensions(bytes), mimeType, dpi });
+        out.set(pageNumber, { pageNumber, bytes, ...imageDimensions(bytes), mimeType, dpi, widthPt: size.widthPt, heightPt: size.heightPt });
       }
     }));
   } finally {

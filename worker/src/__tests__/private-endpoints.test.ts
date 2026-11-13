@@ -20,7 +20,7 @@ import { currentPrivacyAuditScope, openRouterTextCall, runWithPrivacyAuditScope 
 import { textUsageLabels } from "../lib/text-model-route.js";
 import type { EmbeddingProfile } from "../models.js";
 import { embedTextChunks, type RemoteEmbeddingUsage } from "../stages/embedding-runtime.js";
-import { executeVisionRuntime, visionRenderLongEdge } from "../tools/vision-runtime.js";
+import { executeVisionRuntime, isPageTranscription, visionRenderLongEdge, visionRequestProfileForRoute } from "../tools/vision-runtime.js";
 import { priceVisionResult } from "../lib/guarded-vision-call.js";
 import { CommandRunner } from "../tools/runner.js";
 
@@ -222,7 +222,7 @@ describe("worker private endpoint vision", () => {
 });
 
 describe("worker private endpoint vision request profiles", () => {
-  async function sendPage(modelUri: string) {
+  async function sendPage(modelUri: string, extra: { prompt?: string; outputSchema?: Record<string, unknown> } = {}) {
     const calls = mockPrivateServer();
     const dir = await mkdtemp(join(tmpdir(), "private-vision-profile-"));
     const imagePath = join(dir, "page.png");
@@ -230,7 +230,8 @@ describe("worker private endpoint vision request profiles", () => {
     await executeVisionRuntime({
       imagePath,
       outputPath: `${imagePath}.json`, gate: null,
-      vision: visionConfigSchema.parse({ modelUri, prompt: "markdown" }),
+      ...(extra.outputSchema ? { outputSchema: extra.outputSchema } : {}),
+      vision: visionConfigSchema.parse({ modelUri, prompt: extra.prompt ?? "markdown" }),
       cfg: fromEnv(),
       runner: new CommandRunner(),
       privacyMode: "standard",
@@ -269,5 +270,24 @@ describe("worker private endpoint vision request profiles", () => {
     expect(edge("llm://private/gpu1/acme/tuned-vlm")).toBe(1_540);
     expect(edge("llm://private/gpu1/acme/plain-vlm")).toBeUndefined();
     expect(edge("llm://private/gpu1/acme/unregistered")).toBeUndefined();
+  });
+
+  it("keeps the generic request, prompt included, for anything but plain page transcription", async () => {
+    const critique = await sendPage("llm://private/gpu1/lightonai/LightOnOCR-3-0.8B", { prompt: "Compare this page with the extracted text below and list corrections." });
+    expect(critique.messages.map((message) => message.role)).toEqual(["system", "user"]);
+    expect(critique.messages[1]!.content).toEqual([expect.objectContaining({ type: "text" }), expect.objectContaining({ type: "image_url" })]);
+    expect(critique.temperature).toBe(0);
+    const schema = await sendPage("llm://private/gpu1/lightonai/LightOnOCR-3-0.8B", { outputSchema: { type: "object", properties: { total: { type: "string" } } } });
+    expect(schema.messages[schema.messages.length - 1]!.content).toEqual([expect.objectContaining({ type: "text" }), expect.objectContaining({ type: "image_url" })]);
+    expect(typeof schema.max_tokens).toBe("number");
+  });
+
+  it("classifies transcription prompts, and never applies built-in profiles to hosted routes", () => {
+    expect(isPageTranscription({ vision: {} })).toBe(true);
+    expect(isPageTranscription({ vision: { prompt: "<OCR>" } })).toBe(true);
+    expect(isPageTranscription({ vision: { prompt: "chart-data" } })).toBe(false);
+    expect(isPageTranscription({ vision: { prompt: "markdown" }, promptText: "Extract the chart" })).toBe(false);
+    expect(isPageTranscription({ vision: { prompt: "markdown" }, outputSchema: { type: "object" } })).toBe(false);
+    expect(visionRequestProfileForRoute({ provider: "openrouter", model: "lightonai/LightOnOCR-3-0.8B" })).toBeUndefined();
   });
 });

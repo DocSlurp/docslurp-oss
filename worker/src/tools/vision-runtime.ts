@@ -67,12 +67,32 @@ export function visionMaxOutputTokens(model: string | undefined): number {
  * profile, or a hosted model's `request` from vision-model-profiles.ts. Undefined keeps the generic request.
  */
 export function visionRequestProfileForRoute(route: { provider?: string; model: string; modelUri?: string }): VisionRequestProfile | undefined {
-  if (route.provider === PRIVATE_MODEL_PROVIDER && route.modelUri) {
+  if (route.provider === PRIVATE_MODEL_PROVIDER) {
+    if (!route.modelUri) return undefined;
     const lookup = lookupPrivateModelRoute({ ref: route.modelUri, capability: "vision" });
     if (!lookup.ok) return undefined;
     return visionRequestProfileFor(lookup.route.model.id, lookup.route.model.vision);
   }
-  return visionRequestProfileFor(route.model, visionModelProfile(route.model)?.request);
+  // Built-in profiles describe operator-served (private) models only; a hosted model takes its own reviewed profile,
+  // and a billed route always sends a concrete output cap: "server" (no max_tokens) would let a provider's own limit,
+  // not the admitted bound, decide what the call can cost.
+  const hosted = visionModelProfile(route.model)?.request;
+  if (!hosted) return undefined;
+  return hosted.maxOutputTokens === "server" ? { ...hosted, maxOutputTokens: hosted.contextTokens! } : hosted;
+}
+
+/** Prompt template keys that ask for a plain transcription of the page. */
+const PAGE_TRANSCRIPTION_PROMPTS = new Set(["<OCR>", "markdown", "markdown-latex", "markdown-transcription", "page-markdown-latex", "layout"]);
+
+/**
+ * Plain page transcription: a transcription template (or none), no output schema and no caller-supplied task prompt.
+ * Only these take a request profile; any other prompt (critique, chart data, schema fields) is sent as written.
+ */
+export function isPageTranscription(args: { vision: { prompt?: string }; outputSchema?: Record<string, unknown> | null; promptText?: string }): boolean {
+  if (args.promptText !== undefined) return false;
+  if (args.outputSchema && Object.keys(args.outputSchema).length > 0) return false;
+  const key = args.vision.prompt?.trim();
+  return !key || PAGE_TRANSCRIPTION_PROMPTS.has(key);
 }
 
 /** Longest page-image edge the vision model is profiled for, to render pages at; undefined renders at the default size. */
@@ -271,7 +291,7 @@ export async function executeVisionRuntime(args: {
   assertProviderAllowed(args.privacyMode, visionCall(selected));
 
   try {
-    return await runRouteVisionRequest(selected, selected.prompt, args);
+    return await runRouteVisionRequest(selected, selected.prompt, { ...args, transcription: isPageTranscription(args) });
   } catch (error) {
     // A refused request is not a route failure: the fallback route would be refused the same way. A route refused
     // for billing above its bound is the exception: the fallback is a different route with its own count.
@@ -309,7 +329,7 @@ export async function executeVisionRuntime(args: {
         remoteFallbackModelUri: null,
       }, args.cfg, args.outputSchema);
       assertProviderAllowed(args.privacyMode, visionCall(fallbackConfig));
-      fallback = await runRouteVisionRequest(fallbackConfig, selected.prompt, args);
+      fallback = await runRouteVisionRequest(fallbackConfig, selected.prompt, { ...args, transcription: isPageTranscription(args) });
     } catch (fallbackError) {
       if (primaryFailure && fallbackError && typeof fallbackError === "object") primaryFailures.set(fallbackError, primaryFailure);
       throw fallbackError;
@@ -390,7 +410,7 @@ function weightedGate(gate: VisionRequestGate, weightCents: number, route: Visio
 async function runRouteVisionRequest(
   route: VisionExecutionConfig,
   prompt: string,
-  args: { imagePath: string; mimeType?: string; outputPath: string; runner: CommandRunner; signal?: AbortSignal; cfg: Config; privacyMode: PrivacyMode; gate: VisionRequestGate | null; reasoning?: OpenRouterReasoning },
+  args: { imagePath: string; mimeType?: string; outputPath: string; runner: CommandRunner; signal?: AbortSignal; cfg: Config; privacyMode: PrivacyMode; gate: VisionRequestGate | null; reasoning?: OpenRouterReasoning; transcription?: boolean },
 ): Promise<VisionExecutionResult> {
   // The prompt can carry tenant schema labels: bounded before anything is admitted or sent.
   assertVisionPromptSize(prompt);
@@ -415,7 +435,7 @@ async function runRouteVisionRequest(
 async function sendRouteVisionRequest(
   route: VisionExecutionConfig,
   prompt: string,
-  args: { imagePath: string; mimeType?: string; outputPath: string; runner: CommandRunner; signal?: AbortSignal; cfg: Config; privacyMode: PrivacyMode; gate: VisionRequestGate | null; reasoning?: OpenRouterReasoning },
+  args: { imagePath: string; mimeType?: string; outputPath: string; runner: CommandRunner; signal?: AbortSignal; cfg: Config; privacyMode: PrivacyMode; gate: VisionRequestGate | null; reasoning?: OpenRouterReasoning; transcription?: boolean },
   billing: VisionRouteBilling,
   model: string,
   onUsageModel: (model: string) => void,
@@ -425,7 +445,8 @@ async function sendRouteVisionRequest(
   // this model, the route's enforced output cap and its model's price. A billed route outside the priced
   // catalog, or an unknown hosted destination, is refused here: nothing is admitted or sent.
   const imageSize = route.runtime === "local-cli" ? null : await readImageSize(args.imagePath);
-  const requestProfile = route.runtime === "local-cli" ? undefined : visionRequestProfileForRoute(route);
+  // Profiles describe page transcription: a schema-field or task prompt keeps the generic request, so it is never dropped.
+  const requestProfile = route.runtime === "local-cli" || args.transcription !== true ? undefined : visionRequestProfileForRoute(route);
   const pricing = visionRequestPricing({
     model,
     runtime: route.runtime,
@@ -704,6 +725,10 @@ export async function runVisionRequest(args: {
       // Streaming, degeneration abort and the single alternate-route retry live in vision-stream.ts.
       const isOpenRouter = isOpenRouterBaseUrl(args.baseUrl);
       const profile = args.requestProfile;
+      if (profile) {
+        console.log(`[vision-profile] model=${args.model} promptMode=${profile.promptMode ?? "template"} systemMessage=${profile.systemMessage ?? true} ` +
+          `temperature=${profile.temperature ?? 0} topP=${profile.topP ?? "default"} maxOutputTokens=${profile.maxOutputTokens ?? "shared"}`);
+      }
       const imagePart = {
         type: "image_url",
         image_url: {

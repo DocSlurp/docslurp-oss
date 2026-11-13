@@ -153,6 +153,7 @@ describe("PdfRasterCache with PDF_RASTER_ENGINE=native-pdf", () => {
     const native = await setup(engine);
     const a = await native.cache.renderSelectedPages({ document, runId: "r", pageNumbers: [1], maxLongEdgePx: 1_024 });
     expect(a[0]!.artifactKey).toContain("/v2-150dpi-edge1024-native-pdf/");
+    expect(a[0]!.dpi).toBeUndefined(); // the requested DPI would mis-scale coordinates on a capped render
     expect(stats.renders[0]).toMatchObject({ maxEdgePx: 1_024 });
     expect(stats.renders[0]!.dpi).toBeCloseTo(capped, 9);
     const uncapped = await native.cache.renderSelectedPages({ document, runId: "r", pageNumbers: [1] });
