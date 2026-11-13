@@ -164,6 +164,16 @@ export interface PricingProvider {
   featureCredits(feature: DocumentFeature, pages: number): number;
   /** Credits for chart & diagram export (per visual a generator model read, exported or not). */
   visualExportCredits(input: VisualExportChargeInput): number;
+  /**
+   * Credits for the second read of a model-read visual: the one repair of an invalid answer, or the one retry of an
+   * answer cut off at its output cap. Charged once per visual at most (a visual is at most two billed reads).
+   */
+  visualExportRetryCredits(): number;
+  /**
+   * Expected second reads per model-read visual, between 0 and 1, for estimates and quotes: they add this share of
+   * `visualExportRetryCredits()` to every model-read visual they price.
+   */
+  chartExportExpectedRetriesPerRead(): number;
   /** Multiplier on unit charges for the opt-in speed boost (1 when off). */
   speedBoostMultiplier(speedBoost: boolean): number;
   /** Share of the completion page charge a run pays, given the stages it executes and reuses. */
@@ -209,7 +219,8 @@ export interface PricingProvider {
 const REQUIRED_METHODS: ReadonlyArray<keyof PricingProvider> = [
   "pageCredits", "richPagesForOutputTokens", "mediaRichPages", "storageCreditsPerMonth", "extractRetentionCredits",
   "searchUnits", "searchCredits", "webSearchCredits", "webPageCredits", "webMapCredits", "chatModelTier",
-  "chatAnswerUnits", "chatAnswerCredits", "featureCredits", "visualExportCredits", "speedBoostMultiplier", "pageChargeShare",
+  "chatAnswerUnits", "chatAnswerCredits", "featureCredits", "visualExportCredits", "visualExportRetryCredits",
+  "chartExportExpectedRetriesPerRead", "speedBoostMultiplier", "pageChargeShare",
   "qualityModePricing", "publicPrices", "estimateIngest", "quoteUpload", "quote",
 ];
 

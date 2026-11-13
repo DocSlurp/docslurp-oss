@@ -9,5 +9,12 @@
  "inputs": {
   "repeats/source.pdf": "017a0711bbf5322f99af9446a18d1181da4e9f37e26961eadfbe75a9ed50ddb4",
   "typst/source.pdf": "d3a15f5479c004def97b2ee048dd2bff4d6a393864c0c89ab446d7189f92ad21"
+ },
+ "v3": {
+  "repository": "https://github.com/DocSlurp/doppler",
+  "branch": "feat/md-image-paths-scans",
+  "commit": "b4e8faceb",
+  "command": "PDFTOTEXT=build/utils/pdftotext PDFREGIONS=build/utils/pdfregions pdftomarkdown --images-dir images -- ../repeats/source.pdf > document.md",
+  "output": "v3-repeats/: document.md and images/ (manifest.jsonl, doppler-images/3, and the page folders) exactly as written"
  }
 }

@@ -23,8 +23,8 @@ import { makePage, testCatalog, testPack } from "../routing/testing.js";
 import { CHART_EXPORT_LIMITS, chartExportActive, chartExportConfigOf, DETERMINISTIC_HIGH_CONFIDENCE, repairOutputTokenCap } from "./config.js";
 import { CHART_EXPORT_USAGE_METRIC, exportVisual, parseSpecAnswer, type ExportVisualArgs } from "./generator.js";
 import { stripVisualGroups, visualBlock, visualBody, wrapVisualGroup } from "./markdown.js";
-import { DISTINCT_TEST_PRICING, installTestPricing, isAutomaticSelectionDenied, resetPricingProviderForTests } from "@docslurp/shared";
-import { CHART_GENERATOR_CANDIDATES, DIAGRAM_GENERATOR_CANDIDATES, chartExportVisionConfig, chartGeneratorPriceCeiling, selectGeneratorModel } from "./model-selection.js";
+import { DISTINCT_TEST_PRICING, installTestPricing, isAutomaticSelectionDenied, resetPricingProviderForTests, visionImageTokens, visionModelTokenPricing } from "@docslurp/shared";
+import { CHART_GENERATOR_CANDIDATES, DIAGRAM_GENERATOR_CANDIDATES, chartExportReasoning, chartExportVisionConfig, chartGeneratorPriceCeiling, selectGeneratorModel } from "./model-selection.js";
 import { sanitizeCsv, sanitizeMermaid, sanitizePython, sanitizeVegaLite } from "./sanitize.js";
 import { candidatesFromPlan, ChartExportSession, guardedScopesFromPlan, placementMatch } from "./session.js";
 import { clearChartExport, finishChartExport, prepareChartExport, runChartExportPass } from "./stage.js";
@@ -440,6 +440,18 @@ describe("generator model selection", () => {
       installTestPricing({ ...DISTINCT_TEST_PRICING, internalCost: { ...DISTINCT_TEST_PRICING.internalCost!, chartGeneratorMaxPricesUsdPerMTok: () => bad } });
       expect(() => selectGeneratorModel({ kind: "chart", catalog: luna })).toThrow(/invalid chart generator price ceiling/);
     }
+  });
+
+  it("prefers Luna, then Claude Haiku 5.5 with reasoning off, then GLM 5.3 Flash", () => {
+    expect([...CHART_GENERATOR_CANDIDATES]).toEqual([
+      "llm://openrouter/openai/gpt-6-luna",
+      "llm://openrouter/anthropic/claude-haiku-5.5",
+      "llm://openrouter/z-ai/glm-5.3-flash",
+    ]);
+    expect(chartExportReasoning("llm://openrouter/anthropic/claude-haiku-5.5")).toEqual({ enabled: false });
+    // Haiku is a priced, bounded vision catalog model: the worker can weigh and admit it.
+    expect(visionModelTokenPricing("anthropic/claude-haiku-5.5")).toMatchObject({ inputUsdPerMillion: 0.1, outputUsdPerMillion: 0.5 });
+    expect(visionImageTokens("anthropic/claude-haiku-5.5", null)).toBe(4_784);
   });
 
   it("lists only candidates with a list price at or under the test provider's ceiling", () => {

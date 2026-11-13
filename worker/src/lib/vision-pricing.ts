@@ -7,6 +7,7 @@ import {
   PRIVATE_MODEL_PROVIDER,
   VISION_MAX_OUTPUT_USD_PER_MILLION,
   visionImageTokens,
+  visionInputUsdPerMillion,
   readVisionModelUriOverride,
   resolveVisionRoute,
   visionListPriceCents,
@@ -290,7 +291,7 @@ export function maxCatalogWorstCaseVisionRequestCents(): number {
 export const LOCAL_VISION_REQUEST_WEIGHT_CENTS = 2;
 
 /** USD per million input (prompt and image) and output tokens. */
-export type VisionTokenPrice = Pick<VisionTokenPricing, "inputUsdPerMillion" | "outputUsdPerMillion">;
+export type VisionTokenPrice = Pick<VisionTokenPricing, "inputUsdPerMillion" | "outputUsdPerMillion" | "promptCacheWriteUsdPerMillion">;
 
 /**
  * OpenRouter `provider.max_price` for one request: the token prices the weight uses plus caps on the separate
@@ -309,7 +310,7 @@ export function maxCatalogVisionTokenPricing(): VisionTokenPrice {
   for (const spec of visionModelCatalog) {
     const pricing = visionModelTokenPricing(spec.id);
     if (!pricing) continue;
-    inputUsdPerMillion = Math.max(inputUsdPerMillion, pricing.inputUsdPerMillion);
+    inputUsdPerMillion = Math.max(inputUsdPerMillion, visionInputUsdPerMillion(pricing));
     outputUsdPerMillion = Math.max(outputUsdPerMillion, pricing.outputUsdPerMillion);
   }
   return { inputUsdPerMillion, outputUsdPerMillion };
@@ -388,7 +389,8 @@ export function visionRequestPricing(route: {
 }
 
 function centsAt(pricing: VisionTokenPrice, inputTokens: number, outputTokens: number): number {
-  return (inputTokens * pricing.inputUsdPerMillion + outputTokens * pricing.outputUsdPerMillion) / 1e4;
+  // Input at the cache-write rate where the route bills one on every request (visionInputUsdPerMillion).
+  return (inputTokens * visionInputUsdPerMillion(pricing) + outputTokens * pricing.outputUsdPerMillion) / 1e4;
 }
 
 /**

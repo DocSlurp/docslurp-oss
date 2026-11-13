@@ -736,9 +736,29 @@ export const visionModelCatalog = [
       checked: "2026-11-13",
       basis: "pinned-route",
       providers: ["openai", "amazon-bedrock/us-east-1", "azure/us"],
+      // OpenAI caches prompts of 1,024+ tokens automatically and the route reports a cache write of about the whole
+      // prompt on each call (2026-11-13): input is billed at the write rate, 1.25x base, $0.1375 at the dearest host.
+      promptCacheWriteUsdPerMillion: 0.1375,
     },
     // Priced at the most expensive allowed host (the content-filter retry hosts, $0.11/$0.55), so max_price admits them.
     imageTokens: { kind: "patch", patchPx: 32, tokensPerPatch: 2.46, basis: "openai-patch-max-multiplier" },
+  },
+  {
+    id: "anthropic/claude-haiku-5.5",
+    uri: "llm://openrouter/anthropic/claude-haiku-5.5",
+    label: "Claude Haiku 5.5",
+    target: "hosted",
+    tags: ["hosted", "cost", "quality"],
+    runtime: "openai-compatible",
+    description:
+      "Anthropic Claude Haiku 5.5 on OpenRouter; opt-in page extraction and a chart & diagram export generator.",
+    // Computed, not measured: a full-resolution image (4,784 tokens) plus about 500 prompt and 1,000 output tokens at list price.
+    estimatedCostPerPageCents: 0.11,
+    // OpenRouter list price, for prompts up to 100K tokens; max_price at this price keeps the $0.11/$0.55 regional hosts out.
+    tokenPricing: { inputUsdPerMillion: 0.1, outputUsdPerMillion: 0.5, checked: "2026-11-13" },
+    // High-resolution tier (Claude 4.7 and later models): images are downscaled to at most 2,576 px on the long edge and
+    // 4,784 visual tokens (platform.claude.com/docs/en/build-with-claude/vision, 2026-11-13).
+    imageTokens: { kind: "fixed", tokens: 4_784, basis: "anthropic-high-resolution-max" },
   },
   {
     id: "z-ai/glm-5.3-flash",
@@ -836,7 +856,20 @@ export type VisionTokenPricing = {
    */
   basis?: "pinned-route" | "provider-list";
   providers?: readonly string[];
+  /**
+   * The provider's prompt cache-write rate, when the route bills a cache write on effectively every request (OpenAI's
+   * automatic prompt caching on GPT-6 Luna reports `cache_write_tokens` of about the whole prompt on prompts of 1,024
+   * tokens or more, billed at the write rate). Estimates and the request guard price input at the higher of this and
+   * `inputUsdPerMillion` (`visionInputUsdPerMillion`), as the usage ledger prices reported writes. `max_price` still
+   * carries the base input price, which is what providers are filtered on.
+   */
+  promptCacheWriteUsdPerMillion?: number;
 };
+
+/** The input price estimates and the request guard use: the base rate, or the cache-write rate when the route bills one. */
+export function visionInputUsdPerMillion(pricing: Pick<VisionTokenPricing, "inputUsdPerMillion" | "promptCacheWriteUsdPerMillion">): number {
+  return Math.max(pricing.inputUsdPerMillion, pricing.promptCacheWriteUsdPerMillion ?? 0);
+}
 
 /** List token price of a cataloged hosted vision model (by id or `llm://` URI); null for local or unknown models. */
 export function visionModelTokenPricing(idOrUri: string): VisionTokenPricing | null {
@@ -851,7 +884,7 @@ export function visionListPriceCents(
 ): number | null {
   const pricing = visionModelTokenPricing(idOrUri);
   if (!pricing) return null;
-  return (usage.inputTokens * pricing.inputUsdPerMillion + usage.outputTokens * pricing.outputUsdPerMillion) / 1e4;
+  return (usage.inputTokens * visionInputUsdPerMillion(pricing) + usage.outputTokens * pricing.outputUsdPerMillion) / 1e4;
 }
 
 /**

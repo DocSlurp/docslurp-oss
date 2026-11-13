@@ -2,7 +2,10 @@
  * Chart & diagram export charges: one billable unit event (`BILLABLE_UNIT_METRICS.chartExport`) per visual the
  * generator model read, that is per candidate for which the provider answered at least one generator call, priced by
  * the pricing provider (`visualExportCredits`) by the formats requested when the call was made (at least one call's
- * worth). Estimates use the same unit: candidates a model reads (deterministic ones are free).
+ * worth). A visual whose answer needed its one repair, or its one retry after a cut-off answer, and got an answer to
+ * it, is billed a second read (`visualExportRetryCredits`) as its own event (`<id>:retry`): at most two billed reads per
+ * visual. Estimates price the same reads: candidates a model reads (deterministic ones are free) plus the provider's
+ * expected share of second reads (`expectedVisualExportCredits`).
  *
  * - Charged on calls answered, whatever the outcome: exported from the model's answer, fell back to a deterministic
  *   spec (security M3), answered `none`, invalid after the repair, or read as a diagram while the project exports no
@@ -19,6 +22,7 @@
 import {
   BILLABLE_UNIT_METRICS,
   chartExportModelCallsPerVisual,
+  visualExportRetryCredits,
   UNIT_CHARGE_PROVIDER,
   unitChargeMetadata,
   visualExportCredits,
@@ -48,7 +52,10 @@ export interface ChartExportAttempt {
 export interface ChartExportCharge {
   visualId: string;
   pageNumber: number;
+  /** First read: priced by the formats requested (`visualExportCredits`). */
   credits: number;
+  /** Second read (the visual's one answered repair or cut-off retry, `visualExportRetryCredits`); 0 when there was none. */
+  retryCredits: number;
   /** Generator calls the provider answered for this visual. */
   paidCalls: number;
   exported: boolean;
@@ -74,13 +81,17 @@ const ONE_CALL_FORMAT: ChartExportFormat = "description";
 /** Pure: the charge owed for each attempted candidate with at least one answered generator call. */
 export function chartExportCharges(args: {
   attempts: readonly ChartExportAttempt[];
-  calls: readonly Pick<ChartExportCallRecord, "visualId" | "responded">[];
+  calls: readonly Pick<ChartExportCallRecord, "visualId" | "responded" | "purpose">[];
   config: Pick<ChartExportConfig, "formats">;
   modes?: VisualExportModes;
 }): ChartExportCharge[] {
   const paid = new Map<string, number>();
+  const retried = new Set<string>();
   for (const call of args.calls) {
-    if (call.responded) paid.set(call.visualId, (paid.get(call.visualId) ?? 0) + 1);
+    if (!call.responded) continue;
+    paid.set(call.visualId, (paid.get(call.visualId) ?? 0) + 1);
+    // A repair or cut-off retry the provider answered is the visual's second read (the generator makes at most one).
+    if (call.purpose === "repair" || call.purpose === "expand") retried.add(call.visualId);
   }
   const seen = new Set<string>();
   const out: ChartExportCharge[] = [];
@@ -94,7 +105,8 @@ export function chartExportCharges(args: {
       formats: chargedFormats(args.config, attempt.kind, args.modes),
       ...(args.modes ? { modes: args.modes } : {}),
     });
-    out.push({ visualId: attempt.id, pageNumber: attempt.pageNumber, credits, paidCalls, exported: attempt.exported });
+    const retryCredits = retried.has(attempt.id) ? visualExportRetryCredits() : 0;
+    out.push({ visualId: attempt.id, pageNumber: attempt.pageNumber, credits, retryCredits, paidCalls, exported: attempt.exported });
   }
   return out;
 }
@@ -122,7 +134,7 @@ export function chargeChartExports(
   args: {
     documentId: string;
     attempts: readonly ChartExportAttempt[];
-    calls: readonly Pick<ChartExportCallRecord, "visualId" | "responded">[];
+    calls: readonly Pick<ChartExportCallRecord, "visualId" | "responded" | "purpose">[];
     config: Pick<ChartExportConfig, "formats">;
     modes?: VisualExportModes;
   },
@@ -145,13 +157,25 @@ export function chargeChartExports(
       outputTokens: 0,
       metadata: unitChargeMetadata({
         documentId: args.documentId, pageNumber: charge.pageNumber, visualId: charge.visualId, paidCalls: charge.paidCalls,
-        outcome: charge.exported ? "exported" : "not-exported",
+        outcome: charge.exported ? "exported" : "not-exported", read: "first",
       }),
     };
     state.usageLedger.enqueue(event);
-    charged[charge.visualId] = charge.credits;
+    if (charge.retryCredits > 0) {
+      // The second read is its own billable event (same metric and ledger), so receipts show both reads.
+      state.usageLedger.enqueue({
+        ...event,
+        id: `${event.id}:retry`,
+        costCents: charge.retryCredits,
+        metadata: unitChargeMetadata({
+          documentId: args.documentId, pageNumber: charge.pageNumber, visualId: charge.visualId, paidCalls: charge.paidCalls,
+          outcome: charge.exported ? "exported" : "not-exported", read: "retry",
+        }),
+      });
+    }
+    charged[charge.visualId] = charge.credits + charge.retryCredits;
     added = true;
-    total += charge.credits;
+    total += charge.credits + charge.retryCredits;
   }
   if (added) state.artifactLedger.record(slot, JSON.stringify(charged));
   return total;

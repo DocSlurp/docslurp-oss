@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 import { QUALITY_RANK } from "./quality.js";
-import { FIXED_OVERHEAD_SECONDS, estimateIngest, isBillingEnforced, visualExportCredits, type PipelineProfileId } from "./billing.js";
+import { expectedVisualExportCredits, FIXED_OVERHEAD_SECONDS, estimateIngest, isBillingEnforced, type PipelineProfileId } from "./billing.js";
 import type { VisualCandidateStats } from "./chart-export.js";
 import { chartExportAvailable } from "./chart-export.js";
 import { chartExportConfigOf, expectedBillableVisuals, type VisualExportModes } from "./chart-export-estimate.js";
@@ -291,12 +291,13 @@ function chartExportCredits(args: {
   const config = chartExportAvailable(args.env) ? chartExportConfigOf(args.features) : null;
   if (!config || !args.stages.some((stage) => CHART_EXPORT_CHARGING_STAGES.includes(stage))) return { low: 0, high: 0, note: null };
   const visuals = expectedBillableVisuals({ config, pages: args.pages, documents: args.documents, stats: args.visualStats ?? null });
-  const price = (count: number) => visualExportCredits({ visuals: count, source: "vision", formats: config.formats, ...(args.modes ? { modes: args.modes } : {}) });
+  // First reads plus the expected billed second reads (repairs and cut-off retries).
+  const price = (count: number) => expectedVisualExportCredits({ visuals: count, formats: config.formats, ...(args.modes ? { modes: args.modes } : {}) });
   const range = visuals.low === visuals.high ? `${visuals.low}` : `${visuals.low} to ${visuals.high}`;
   return {
     low: price(visuals.low),
     high: price(visuals.high),
-    note: `; chart export: ${range} model-read visuals (${visuals.basis === "measured" ? "recorded counts" : "per-page planning prior"})`,
+    note: `; chart export: ${range} model-read visuals (${visuals.basis === "measured" ? "recorded counts" : "per-page planning prior"}), each billed as one read, or two when it needs a repair`,
   };
 }
 

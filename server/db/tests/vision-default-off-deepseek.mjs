@@ -1,4 +1,4 @@
-// Migration 0141 moves projects stored with the old default vision model (DeepSeek V4.1 Flash 1017) to the new
+// Migration 0142 moves projects stored with the old default vision model (DeepSeek V4.1 Flash 1017) to the new
 // default, and leaves every other choice alone. Rollback-only, in an isolated schema.
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
@@ -27,7 +27,7 @@ try {
       noVision: { chunking: { size: 400 } },
     };
     for (const [id, pipeline] of Object.entries(rows)) await tx`insert into projects ${tx({ id, pipeline: tx.json(pipeline) })}`;
-    const migration = await readFile(new URL('../migrations/0141_vision_default_off_deepseek.sql', import.meta.url), 'utf8');
+    const migration = await readFile(new URL('../migrations/0142_vision_default_off_deepseek.sql', import.meta.url), 'utf8');
     for (const statement of migration.split('--> statement-breakpoint')) await tx.unsafe(statement);
     const byId = Object.fromEntries((await tx`select id, pipeline from projects`).map(row => [row.id, row.pipeline]));
     assert.equal(byId.defaultProfile.vision.modelUri, LUNA);

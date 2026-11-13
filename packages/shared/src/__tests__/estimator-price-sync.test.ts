@@ -15,6 +15,7 @@ import {
   creditsToDollars,
   defaultPipelineFeatures,
   estimatePipelineWork,
+  expectedVisualExportCredits,
   DISTINCT_TEST_PRICING,
   installTestPricing,
   resetPricingProviderForTests,
@@ -61,6 +62,22 @@ describe("running-job overdraft (core #345)", () => {
 // read (tokens and repair rate) is private: the app's pricing plugin pins it.
 
 // ---- Pending: changes still in flight. Turn each on (and adjust its fixture) when its branch lands. -------------------
+
+describe("chart export second reads (owner decision 2026-11-13)", () => {
+  it("prices a model-read visual as its first read plus the provider's expected share of a billed second read", () => {
+    installTestPricing({ ...DISTINCT_TEST_PRICING, visualExportCredits: ({ visuals, callsPerVisual }) => visuals * callsPerVisual * 0.1,
+      visualExportRetryCredits: () => 0.1, chartExportExpectedRetriesPerRead: () => 0.5 });
+    // One derived-format visual: 0.1 + 0.5 x 0.1 credits, i.e. 1.5 reads.
+    expect(expectedVisualExportCredits({ visuals: 1, formats: ["description", "mermaid"] })).toBeCloseTo(0.15, 9);
+    expect(expectedVisualExportCredits({ visuals: 10, formats: ["description"] })).toBeCloseTo(1.5, 9);
+    // A direct-mode format adds a first-read call, never a second read.
+    expect(expectedVisualExportCredits({ visuals: 1, formats: ["description", "csv"], modes: { csv: "direct" } })).toBeCloseTo(0.2 + 0.05, 9);
+    expect(expectedVisualExportCredits({ visuals: 0, formats: ["description"] })).toBe(0);
+    // A provider share outside 0..1 fails closed.
+    installTestPricing({ ...DISTINCT_TEST_PRICING, chartExportExpectedRetriesPerRead: () => 1.5 });
+    expect(() => expectedVisualExportCredits({ visuals: 1, formats: ["description"] })).toThrow(/expected chart retry share/);
+  });
+});
 
 describe("chart export tiers (core feat/chart-export-free-tier, not merged)", () => {
   it.todo("prices the `free` tier at 0 credits for any page count and visual stats");

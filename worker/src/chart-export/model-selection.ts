@@ -1,12 +1,11 @@
 /**
  * Generator model selection.
  *
- * - Default: the first admitted model of `CHART_GENERATOR_CANDIDATES`, in preference order. The order comes from the
- *   chart-export evaluation (2026-11-10): GPT-6 Luna at reasoning `none` scored best on held-out charts and diagrams;
- *   GLM 5.3 Flash is last for its unstable latency. A pure cheapest-first sort would have picked GLM. Gemini 3.1 Flash
- *   Lite scored second but was removed (2026-11-13) for its cost per read on real documents. DeepSeek V4.1 Flash was
- *   removed the same day: it is never selected automatically (automatic-model-selection.ts), so it is neither a
- *   candidate nor an accepted override.
+ * - Default: the first admitted model of `CHART_GENERATOR_CANDIDATES`, in preference order. GPT-6 Luna at reasoning
+ *   `none` scored best on held-out charts and diagrams in the 2026-11-10 evaluation; Claude Haiku 5.5 (reasoning off)
+ *   matched it on a 2026-11-13 development screen; GLM 5.3 Flash is last for its unstable latency. Removed: Gemini 3.1
+ *   Flash Lite (cost per read on real documents) and DeepSeek V4.1 Flash (never selected automatically,
+ *   automatic-model-selection.ts).
  * - Override: a configured model (project `chartExport.generatorModel`, else env `CHART_EXPORT_GENERATOR_MODEL`) is
  *   used only when it is one of the candidates, the routing-target catalog admits it (image input, a list price, not
  *   Pro/Ultra, runtime-accepted) and its input and output list prices are at most `chartGeneratorPriceCeiling()`. The
@@ -66,6 +65,9 @@ export function chartGeneratorPriceCeiling(): ChartGeneratorPriceCeiling | null 
  */
 export const CHART_GENERATOR_CANDIDATES: readonly string[] = [
   "llm://openrouter/openai/gpt-6-luna",
+  // Added 2026-11-13 from a 60-chart development screen (reasoning off): spec and description scores at parity with
+  // Luna, faster. Descriptive only: the held-out set was not yet run on it.
+  "llm://openrouter/anthropic/claude-haiku-5.5",
   "llm://openrouter/z-ai/glm-5.3-flash",
 ];
 assertNoAutomaticSelectionDenied("CHART_GENERATOR_CANDIDATES", CHART_GENERATOR_CANDIDATES);
@@ -159,6 +161,7 @@ export function chartExportVisionConfig(selection: VisionConfig, modelUri: strin
  */
 export const CHART_EXPORT_REASONING: Readonly<Record<string, OpenRouterReasoning>> = {
   "openai/gpt-6-luna": { effort: "none" },
+  "anthropic/claude-haiku-5.5": { enabled: false },
   "google/gemini-3.1-flash-lite": { effort: "minimal" },
 };
 

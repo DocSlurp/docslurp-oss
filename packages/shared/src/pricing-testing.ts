@@ -34,6 +34,8 @@ export const DISTINCT_TEST_PRICING: Partial<PricingProvider> = {
   chatAnswerCredits: () => 2,
   featureCredits: (feature, pages) => (feature === "documentSummary" ? 0.3 : 0.4 * Math.max(1, Math.ceil(Math.max(0, pages) / 8))),
   visualExportCredits: ({ visuals, callsPerVisual }) => Math.max(0, visuals) * Math.max(0, callsPerVisual) * 0.07,
+  visualExportRetryCredits: () => 0.07,
+  chartExportExpectedRetriesPerRead: () => 0.5,
   speedBoostMultiplier: (speedBoost) => (speedBoost ? 4 : 1),
   pageChargeShare: (plan) => (plan.reusedStages.length === 0 ? 1 : 0.5),
   extractRetentionCredits: (bytes, months) => (Math.max(0, bytes) / 1024 ** 3) * Math.max(0, months) * 11,
