@@ -18,6 +18,7 @@ import {
   assertNoAutomaticSelectionDenied,
   creditsToDollars,
   isAutomaticSelectionDenied,
+  MAX_OUTPUT_USD_PER_MTOK_EXCLUSIVE,
   pricing,
   visualExportCredits,
   type ChartGeneratorPriceCeiling,
@@ -40,6 +41,8 @@ import type { VisualKind } from "./types.js";
  *   at the image limit (`CHART_EXPORT_LIMITS.maxImageTokensPerCall`) costs the whole charge, and the output price at
  *   which one answer at the output cap (`maxOutputTokensPerCall`) does.
  * - Nothing charged per visual (the open default, billing off): no ceiling beyond the vision catalog's own limits.
+ * - Either way the output ceiling never exceeds `CHART_GENERATOR_MAX_OUTPUT_USD_PER_MTOK` (the routing catalog's own
+ *   output-price limit; the same $49.99 OpenRouter `max_price` ceiling as chat routing): the lower one applies.
  * - An invalid stated value throws (fail closed: the export pass fails and is logged; nothing is called).
  */
 export function chartGeneratorPriceCeiling(): ChartGeneratorPriceCeiling | null {
@@ -49,15 +52,18 @@ export function chartGeneratorPriceCeiling(): ChartGeneratorPriceCeiling | null 
     if (!stated || typeof stated !== "object" || !valid(stated.inputUsdPerMTok) || !valid(stated.outputUsdPerMTok)) {
       throw new Error("pricing provider returned an invalid chart generator price ceiling");
     }
-    return { inputUsdPerMTok: stated.inputUsdPerMTok, outputUsdPerMTok: stated.outputUsdPerMTok };
+    return { inputUsdPerMTok: stated.inputUsdPerMTok, outputUsdPerMTok: Math.min(stated.outputUsdPerMTok, CHART_GENERATOR_MAX_OUTPUT_USD_PER_MTOK) };
   }
   const chargeUsd = creditsToDollars(visualExportCredits({ visuals: 1, source: "vision", formats: ["description"] }));
   if (!(chargeUsd > 0)) return null;
   return {
     inputUsdPerMTok: (chargeUsd * 1_000_000) / CHART_EXPORT_LIMITS.maxImageTokensPerCall,
-    outputUsdPerMTok: (chargeUsd * 1_000_000) / CHART_EXPORT_LIMITS.maxOutputTokensPerCall,
+    outputUsdPerMTok: Math.min((chargeUsd * 1_000_000) / CHART_EXPORT_LIMITS.maxOutputTokensPerCall, CHART_GENERATOR_MAX_OUTPUT_USD_PER_MTOK),
   };
 }
+
+/** The highest output price any chart generator may have: just under the routing catalog's exclusive $50 limit. */
+export const CHART_GENERATOR_MAX_OUTPUT_USD_PER_MTOK = MAX_OUTPUT_USD_PER_MTOK_EXCLUSIVE - 0.01;
 
 /**
  * Admitted chart generators, in preference order. Every entry must have a list price in `scripts/lib/model-prices.json`

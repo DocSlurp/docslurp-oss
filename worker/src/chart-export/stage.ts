@@ -36,6 +36,7 @@ import { keyFromStorageUri, type ArtifactStore } from "../tools/storage.js";
 import { formatsFor } from "./config.js";
 import { toExtractionCharts } from "./contract.js";
 import { stripVisualGroups, visualBlock, wrapVisualGroup, type VisualGroupRef } from "./markdown.js";
+import { annotateImageObjects, candidatesFromPageFacts, chartFactsUse, loadChartFacts, type FactsCandidateResult } from "./facts-candidates.js";
 import { candidatesFromLegacyRoutes, candidatesFromMediaMap, candidatesFromPlan, guardedScopesFromPlan, type ChartExportSession } from "./session.js";
 import { deterministicVisualExtractor, type DeterministicVisualResult, type VisualCandidate, type VisualImage } from "./types.js";
 
@@ -43,7 +44,7 @@ export const CHART_EXPORT_ARTIFACT_SLOT = "chart-export";
 /** Suffix of the artifact a cleared document records (export turned off): nothing left to remove, no read needed. */
 const CLEARED_SUFFIX = ".cleared.json";
 
-type PassStorage = Pick<ArtifactStore, "bucket" | "getJson" | "putJson" | "putBytes" | "uri" | "deleteKeys">;
+type PassStorage = Pick<ArtifactStore, "bucket" | "getJson" | "putJson" | "putBytes" | "uri" | "deleteKeys"> & Partial<Pick<ArtifactStore, "getBytes">>;
 type PassDocument = Pick<Document, "id" | "userId" | "mimeType" | "pageCount"> & Partial<Pick<Document, "sourceKey" | "sourceSha256" | "originalSourceSha256" | "parseSourceDecision">>;
 
 export type PageImage = VisualImage & { release: () => Promise<void>; dpi?: number | null };
@@ -78,12 +79,18 @@ export interface PreparedChartExport {
   priorArtifactUri: string | null;
   /** The marked groups that artifact records (id and nonce): the only groups this export removes from the pages. */
   priorGroups?: VisualGroupRef[];
+  /** Candidates the Doppler page facts nominated, by rule (absent: no facts, or facts may not nominate). */
+  facts?: FactsCandidateResult["counts"];
 }
 
 export interface ChartExportPassResult {
   stats: VisualCandidateStats;
   /** Legacy keyword pages no other signal confirmed (counted apart; never exported or priced). */
   lowConfidence: number;
+  /** Candidates the page facts nominated, by rule (see `PreparedChartExport.facts`). */
+  facts?: FactsCandidateResult["counts"];
+  /** Repeated pictures: groups, their placements, and the model reads reuse avoided. */
+  dedupe: { groups: number; placements: number; readsAvoided: number };
   changedPages: number[];
   artifactUri: string | null;
 }
@@ -146,7 +153,22 @@ export async function prepareChartExport(input: ChartExportPassInput): Promise<P
   const media = await loadMediaMap(input.storage, input.ledger, document.id);
   session.addCandidates(candidatesFromMediaMap(media.map));
   const legacy = input.routedPlan ? [] : candidatesFromLegacyRoutes(input.legacyPages);
+  // Doppler page facts (DOCSLURP_DOPPLER_PAGE_FACTS): `use` lets page structure nominate crops where no router plan
+  // exists (the keyword route is a second vote); `store` and `use` both tie placements of one image object together so
+  // it is read once. No facts slot: no read, today's candidates.
+  const factsUse = chartFactsUse();
+  const facts = factsUse.dedupe ? await loadChartFacts(input.storage, input.ledger, document) : null;
+  let factsCounts: FactsCandidateResult["counts"] | undefined;
+  if (facts && factsUse.candidates && !input.routedPlan) {
+    const nominated = candidatesFromPageFacts(facts, new Set(legacy.map((c) => c.pageNumber)));
+    session.addCandidates(nominated.candidates);
+    factsCounts = nominated.counts;
+  }
   session.addCandidates(legacy);
+  if (facts) {
+    annotateImageObjects(session.candidates, facts);
+    session.invalidateGroups();
+  }
   // A Doppler figure confirms a keyword page; read only when the document has a figure index and a keyword page.
   const figures = legacy.length > 0 || session.runs
     ? await loadDopplerFigurePages(input.storage, input.ledger, document.id)
@@ -188,7 +210,7 @@ export async function prepareChartExport(input: ChartExportPassInput): Promise<P
   }
   session.resolveLegacyPages(figures.pages);
   const priorGroups = await priorVisualGroups(input.storage, priorArtifactUri);
-  return { mediaMapUri: media.uri, priorArtifactUri, priorGroups };
+  return { mediaMapUri: media.uri, priorArtifactUri, priorGroups, ...(factsCounts ? { facts: factsCounts } : {}) };
 }
 
 /** Exports what the body did not, replaces this document's visual groups, and stores the visuals artifact. */
@@ -200,8 +222,9 @@ export async function finishChartExport(input: ChartExportPassInput, prepared: P
   }
   const stats = session.stats();
   const lowConfidence = session.lowConfidence.length;
+  const extra = { dedupe: session.dedupeStats(), ...(prepared.facts ? { facts: prepared.facts } : {}) };
   const prior = prepared.priorArtifactUri && !prepared.priorArtifactUri.endsWith(CLEARED_SUFFIX) ? prepared.priorArtifactUri : null;
-  if (!session.runs || (session.visuals.length === 0 && !prior)) return { stats, lowConfidence, changedPages: [], artifactUri: null };
+  if (!session.runs || (session.visuals.length === 0 && !prior)) return { stats, lowConfidence, ...extra, changedPages: [], artifactUri: null };
   const applied = await applyVisualGroups(input, {
     visuals: session.visuals,
     keep: session.routedIds,
@@ -219,7 +242,7 @@ export async function finishChartExport(input: ChartExportPassInput, prepared: P
     markers: { nonce: session.markerNonce, ids: session.visuals.map((v) => v.id) },
   });
   input.ledger.recordDocument(document.id, CHART_EXPORT_ARTIFACT_SLOT, input.storage.uri(visualsKey));
-  return { stats, lowConfidence, changedPages: applied.changedPages, artifactUri: input.storage.uri(visualsKey) };
+  return { stats, lowConfidence, ...extra, changedPages: applied.changedPages, artifactUri: input.storage.uri(visualsKey) };
 }
 
 export async function runChartExportPass(input: ChartExportPassInput): Promise<ChartExportPassResult> {
@@ -261,7 +284,8 @@ async function exportPending(input: ChartExportPassInput): Promise<void> {
         // A whole-page candidate with a placed, middling figure reads that figure's crop, not the page.
         const focused = input.cropImage ? session.focusPageCandidate(candidate) : false;
         const crop = Boolean(candidate.bbox && input.cropImage);
-        const wantsImage = session.modelAvailable() && (crop || session.pageExportsLeft());
+        // A placement of a picture already read reuses that read: nothing to render.
+        const wantsImage = !session.servedByGroup(candidate) && session.modelAvailable() && (crop || session.pageExportsLeft());
         if (wantsImage && !pageLoaded) {
           pageLoaded = true;
           page = await input.pageImage(pageNumber).catch((error: unknown) => {
@@ -277,7 +301,9 @@ async function exportPending(input: ChartExportPassInput): Promise<void> {
           // No crop of the figure: the whole page is read, so the candidate is the page again (no digest, no pairing).
           if (!cropped && focused) candidate.bbox = null;
           // A placement that cannot be cropped falls back to the page, under the page cap.
-          image = cropped ?? (session.pageExportsLeft() ? image : null);
+          // A facts candidate was nominated for its crop alone: no crop, no read (never the whole page).
+          const factsNominated = candidate.detectedBy === "page-facts-vector" || candidate.detectedBy === "page-facts-image";
+          image = cropped ?? (!factsNominated && session.pageExportsLeft() ? image : null);
         }
         try {
           await session.exportWithImage(candidate, image, input.signal, { wholePage: Boolean(image) && !cropped });

@@ -109,9 +109,12 @@ export function chartExportExpectedRetriesPerRead(): number {
 }
 
 /**
- * Expected credits for `visuals` model-read visuals: their first reads (`visualExportCredits`) plus the expected share
- * of a billed second read each (`chartExportExpectedRetriesPerRead` x `visualExportRetryCredits`). Estimates and quotes
- * price chart export with this; the worker charges what each read actually made.
+ * Expected credits for `visuals` model-read visuals: their first reads (`visualExportCredits`: one per generator call
+ * their formats need) plus, when a derived spec call runs (some requested format is derived), the expected share of a
+ * billed second read each (`chartExportExpectedRetriesPerRead` x `visualExportRetryCredits`): only a spec call has a
+ * repair or cut-off retry. Estimates and quotes price chart export with this; the worker charges what each read made.
+ * Not modelled: an all-direct export of a visual of unknown kind runs an unbilled spec call first, whose repair or
+ * retry is billed as a second read.
  */
 export function expectedVisualExportCredits(args: {
   visuals: number;
@@ -120,6 +123,9 @@ export function expectedVisualExportCredits(args: {
 }): number {
   const first = visualExportCredits({ visuals: args.visuals, source: "vision", formats: args.formats, ...(args.modes ? { modes: args.modes } : {}) });
   if (first === 0) return 0;
+  // Unlisted formats are derived (chartExportModelCallsPerVisual); an all-direct export makes no spec call to repair.
+  const specCallRuns = args.formats.some((format) => args.modes?.[format] !== "direct");
+  if (!specCallRuns) return first;
   const visuals = Math.max(0, Math.trunc(Number.isFinite(args.visuals) ? args.visuals : 0));
   return first + visuals * chartExportExpectedRetriesPerRead() * visualExportRetryCredits();
 }

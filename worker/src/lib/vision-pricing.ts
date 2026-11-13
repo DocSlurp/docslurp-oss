@@ -273,8 +273,13 @@ export function configuredVisionModel(env: Record<string, string | undefined> = 
  */
 export function worstCaseVisionRequestCents(model: string): number | null {
   // The image counted twice: as prompt tokens, and as OpenRouter's per-image fee cap (`VisionMaxPrice.imageUsd`).
+  // The fee cap is priced at the base input rate (as `visionRequestPricing` sends it); prompt tokens at the rate the
+  // route bills (`visionInputUsdPerMillion`, the cache-write rate where one applies).
+  const pricing = visionModelTokenPricing(model);
+  const tokenCents = visionListPriceCents(model, { inputTokens: visionInputTokenBound(null, "", model), outputTokens: visionMaxOutputTokens(model) });
+  if (!pricing || tokenCents === null) return null;
   const imageFeeTokens = visionImageTokens(model, null) ?? 0;
-  return visionListPriceCents(model, { inputTokens: visionInputTokenBound(null, "", model) + imageFeeTokens, outputTokens: visionMaxOutputTokens(model) });
+  return tokenCents + (imageFeeTokens * pricing.inputUsdPerMillion) / 1e4;
 }
 
 /** The most expensive worst-case request across every priced catalog vision model. */

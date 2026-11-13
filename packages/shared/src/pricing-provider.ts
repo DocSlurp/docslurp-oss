@@ -166,7 +166,7 @@ export interface PricingProvider {
   visualExportCredits(input: VisualExportChargeInput): number;
   /**
    * Credits for the second read of a model-read visual: the one repair of an invalid answer, or the one retry of an
-   * answer cut off at its output cap. Charged once per visual at most (a visual is at most two billed reads).
+   * answer cut off at its output cap. Charged once per visual at most (a visual's first read plus at most one second read).
    */
   visualExportRetryCredits(): number;
   /**
