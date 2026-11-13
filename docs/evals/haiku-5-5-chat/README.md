@@ -204,12 +204,10 @@ CALIBRATION_JUDGE=openai/gpt-6.1-sol node scripts/model-calibration/judge.mjs --
 
 ## Integrity
 
-`scripts/evaluation-integrity-judge.mjs` was run on this branch with an authored manifest of the 30 cases: specific
-label names, gold answers only. The manifest is outside this repository.
+`scripts/evaluation-integrity-judge.mjs` passes on this branch (30 cases, 0 findings, 0 candidates). The authored
+manifest is outside this repository. It uses specific label names and document-specific gold: a number with its unit,
+or the source's wording. No gold string occurs in ordinary repository text, and none is quoted in code; a test fixture
+that had quoted one was changed.
 
-- Status: **blocked**, by 4 `labeled-answer` findings, none in a file this PR changes.
-  - Three LICENSE files contain "three years", a gold answer to the warranty question.
-  - `worker/scripts/compare-bge-m3-hosted.ts` contains "30 days" and "month".
-- Every such match also exists on `main`.
+- Re-scoring the stored `chat.answer` outputs with this gold changes no quality number above.
 - The addendum is general style guidance and names no case, document, field or value.
-- The gate cannot pass with this dataset without dropping those gold phrasings; that decision is the owner's.
