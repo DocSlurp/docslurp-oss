@@ -141,6 +141,15 @@ describe("POST /documents/:id/assets/resume", () => {
     expect(await queued("doc-a")).toBe(false);
   });
 
+  it("R6-H1 F3: no request clears an unscanned block (only a new run that records a parse decision does)", async () => {
+    await resumableDocument("doc-a");
+    await sql`update document_extraction_levels set resume_blocked = 'unscanned' where document_id = 'doc-a'`;
+    const res = await (await post("doc-a", { "x-test-user": "ua" })).json() as { status: string };
+    expect(res.status).not.toBe("queued");
+    expect(await (await app.request("/projects/proj-a/figures/resume", { method: "POST", headers: { "x-test-user": "ua" } })).json()).toMatchObject({ queued: 0 });
+    expect((await sql`select resume_blocked, resume_after is not null as q from document_extraction_levels where document_id = 'doc-a'`)[0]).toEqual({ resume_blocked: "unscanned", q: false });
+  });
+
   it("M1: a failed, cancelled or PII-blocked document, or one whose Markdown never committed, is not resumable", async () => {
     await resumableDocument("doc-a");
     for (const status of ["failed", "cancelled", "pii_blocked"]) {

@@ -27,14 +27,14 @@ function assertScope(scope: FigureResumeScope): void {
 
 /**
  * Live, completed documents of the scope whose current level a resume could finish: the Markdown committed, under the
- * lifetime VM launch cap, not blocked `attempts`, and some unit below its cap (the unsharded document, a resumable shard,
+ * lifetime VM launch cap, not blocked `attempts` or `unscanned`, and some unit below its cap (the unsharded document, a resumable shard,
  * or a gap). The runner re-checks all of it at claim.
  */
 function resumableWhere(scope: FigureResumeScope) {
   return sql`
     l.org_id = ${scope.orgId} and l.project_id = ${scope.projectId}
       and l.images_status = 'resumable' and l.assets_current and l.markdown_complete
-      and l.resume_vm_launches < ${FIGURE_RESUME_LIMITS.maxVmLaunches} and l.resume_blocked is distinct from 'attempts'
+      and l.resume_vm_launches < ${FIGURE_RESUME_LIMITS.maxVmLaunches} and coalesce(l.resume_blocked, '') not in ('attempts', 'unscanned')
       and d.id = l.document_id and d.org_id = l.org_id and d.project_id = l.project_id and d.run_id is not distinct from l.run_id
       and d.status = 'completed' and d.superseded_at is null and d.archived_at is null and d.purged_at is null
       and (
@@ -54,7 +54,8 @@ async function projectMode(scope: FigureResumeScope) {
  * Queue one document's resume now. `off` when the project's figures or resumes are off; `capped` when every unit spent
  * its attempts or the document its lifetime VM launches; `not-resumable` when nothing is left (or the document is not this
  * scope's: the route answers 404 for that before calling). A request clears only an earlier block reason other than the
- * cap and the backoff: it never resets a counter (H4: a request cannot buy more VM time).
+ * cap (`attempts`) and `unscanned` (no parse decision: only a new run that records one clears it, R6-H1 F3), and the
+ * backoff: it never resets a counter (H4: a request cannot buy more VM time).
  */
 export async function requestDocumentFigureResume(scope: FigureResumeScope & { documentId: string }): Promise<FigureResumeRequestStatus> {
   assertScope(scope);
@@ -79,7 +80,7 @@ export async function requestDocumentFigureResume(scope: FigureResumeScope & { d
   const updated = await sql`
     update document_extraction_levels l set resume_after = now(), resume_blocked = null
     from documents d
-    where l.document_id = ${scope.documentId} and ${resumableWhere(scope)} and (l.resume_blocked is distinct from 'attempts')
+    where l.document_id = ${scope.documentId} and ${resumableWhere(scope)} and (coalesce(l.resume_blocked, '') not in ('attempts', 'unscanned'))
     returning 1`;
   console.log(`[doppler-figures] resume requested doc=${scope.documentId} org=${scope.orgId} status=${updated.length > 0 ? "queued" : "not-resumable"}`);
   return updated.length > 0 ? "queued" : "not-resumable";

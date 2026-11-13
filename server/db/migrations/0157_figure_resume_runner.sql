@@ -7,7 +7,8 @@
 -- * resume_lease_until / resume_lease_owner: a claimed document (for update skip locked, at most one per organization);
 --   an expired lease is claimable again.
 -- * resume_blocked: why the runner stopped (attempts spent, figures or resume off for the project, the document moved to
---   another run); a request or a fresh pass clears it.
+--   another run, a refused source, or no parse decision from this build's quarantine: `unscanned`). A request clears it,
+--   except `attempts` and `unscanned`; a new run (a fresh, paid pass that records a parse decision) clears every reason.
 ALTER TABLE document_extraction_levels ADD COLUMN IF NOT EXISTS resume_after timestamptz;
 --> statement-breakpoint
 ALTER TABLE document_extraction_levels ADD COLUMN IF NOT EXISTS resume_lease_until timestamptz;
@@ -17,8 +18,15 @@ ALTER TABLE document_extraction_levels ADD COLUMN IF NOT EXISTS resume_lease_own
 -- Failed resume attempts (a VM or provider failure writes nothing, so #355's `resumes` counter does not move): blocked at 3.
 ALTER TABLE document_extraction_levels ADD COLUMN IF NOT EXISTS resume_failures integer NOT NULL DEFAULT 0 CHECK (resume_failures BETWEEN 0 AND 1000);
 --> statement-breakpoint
-ALTER TABLE document_extraction_levels ADD COLUMN IF NOT EXISTS resume_blocked text
-  CHECK (resume_blocked IN ('attempts', 'figures-off', 'resume-off', 'stale', 'refused', 'unscanned'));
+ALTER TABLE document_extraction_levels ADD COLUMN IF NOT EXISTS resume_blocked text;
+--> statement-breakpoint
+-- The reasons, by name, dropped and re-added so a database that applied an earlier version of this migration converges.
+DO $$
+BEGIN
+  ALTER TABLE document_extraction_levels DROP CONSTRAINT IF EXISTS document_extraction_levels_resume_blocked_check;
+  ALTER TABLE document_extraction_levels ADD CONSTRAINT document_extraction_levels_resume_blocked_check
+    CHECK (resume_blocked IN ('attempts', 'figures-off', 'resume-off', 'stale', 'refused', 'unscanned'));
+END $$;
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS document_extraction_levels_resume_queue_idx
   ON document_extraction_levels (resume_after, org_id) WHERE resume_after IS NOT NULL AND resume_blocked IS NULL;

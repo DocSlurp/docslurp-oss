@@ -565,10 +565,10 @@ async function resumeUnit(
   const row = claimed;
   if (!row.source_sha256) return { outcome: "blocked", blocked: "refused", vmMs: 0, added: 0 };
   // The bytes to convert are quarantine's decision for this document (R6-H1), resolved by the loader's own rule.
-  const parse = await documentParseSource(deps.sql, { orgId: row.org_id, documentId: row.document_id }, deps.env ?? process.env);
+  const parse = await documentParseSource(deps.sql, { orgId: row.org_id, documentId: row.document_id, runId: row.run_id }, deps.env ?? process.env);
   if (!parse || parse.parseSourceDecision === "unscanned" || isUnscannedParseSourceKey(parse.sourceKey)) {
-    // No decision from this build's quarantine (never scanned, refused, or rejected): no VM, blocked until a reprocess or
-    // a request after one records a decision (counted; never a silent drop).
+    // No decision from this build's quarantine (never scanned, refused, or rejected): no VM, blocked `unscanned` until a
+    // reprocess (a new run) records a decision; no request clears it (counted; never a silent drop).
     console.warn(`[doppler-figures] resume refused doc=${row.document_id} reason=parse-source-unscanned`);
     recordFigureTelemetry("resume.parse_source_refused", 1, { reason: "unscanned" });
     return { outcome: "blocked", blocked: "unscanned", vmMs: 0, added: 0 };

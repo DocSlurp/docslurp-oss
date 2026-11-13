@@ -35,4 +35,14 @@ describe("figure migrations", () => {
     }
     expect(await catalog()).toEqual(before);
   }, 600_000);
+
+  it("F4: a database that applied an earlier 0157 (resume_blocked CHECK without 'unscanned') converges on a re-run", async () => {
+    await db.exec(`alter table document_extraction_levels drop constraint if exists document_extraction_levels_resume_blocked_check;
+      alter table document_extraction_levels add constraint document_extraction_levels_resume_blocked_check
+        check (resume_blocked in ('attempts', 'figures-off', 'resume-off', 'stale', 'refused'))`);
+    const runner = readMigrationJournal().find((entry) => /_figure_resume_runner$/.test(entry.tag))!;
+    for (const statement of readFileSync(`${migrationsDir}${runner.tag}.sql`, "utf8").split("--> statement-breakpoint")) if (statement.trim()) await db.exec(statement);
+    const def = (await db.query<{ def: string }>(`select pg_get_constraintdef(oid) as def from pg_constraint where conname = 'document_extraction_levels_resume_blocked_check'`)).rows[0]!.def;
+    expect(def).toContain("unscanned");
+  }, 600_000);
 });

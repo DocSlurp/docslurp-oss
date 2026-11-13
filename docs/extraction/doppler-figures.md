@@ -496,7 +496,8 @@ the claimed unit:
    encrypted PDF that is its scanned copy; otherwise the upload exactly as the scan read it. It is staged with hash
    verification, and its hash must be the level's source digest (the bytes the figures were made from). The upload's
    key is never read. A document with no decision from this build's quarantine (never scanned, refused or rejected) is
-   blocked `unscanned` with no VM until a reprocess records one. A hash mismatch or a swapped object is `refused`.
+   blocked `unscanned` with no VM. No request clears that block; only a reprocess (a new run that records a decision)
+   does. A hash mismatch or a swapped object is `refused`.
 3. The folder is validated whole and must be exactly one shard folder for a range, or one manifest for the document.
    Anything else is refused before any upload.
 4. PII (see below).
