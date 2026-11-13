@@ -15,7 +15,10 @@ const DOC_A = "0b6f7e8c-3c1a-4f7e-9a51-2a1d3e4f5a6b";
 const DOC_B = "7d1c2b3a-4e5f-4a6b-8c9d-0e1f2a3b4c5d";
 const page = (doc: string, n: number) => `s3://bucket/u/r/pages/${doc}/page-${n}.png`;
 const render = (doc: string, n: number) => `s3://bucket/u/r/renders/${doc}/page-${n}-120.png`;
-const figure = (doc: string, n: number) => `s3://bucket/u/r/doppler-figures/${doc}/p${n}.0.webp`;
+// Doppler's folder layout: <root>/doppler/<doc>/images/page-NNNN/(image|figure)-MMM.<ext>, manifests beside them.
+const figure = (doc: string, n: number) => `s3://bucket/u/r/doppler/${doc}/images/page-${String(n).padStart(4, "0")}/image-001.webp`;
+const manifest = (doc: string) => `s3://bucket/u/r/doppler/${doc}/images/manifest.jsonl`;
+const shardManifest = (doc: string) => `s3://bucket/u/r/doppler/${doc}/images/shards/1-2/manifest.jsonl`;
 const markdown = (doc: string) => `s3://bucket/u/r/markdown/${doc}.md`;
 const source = (doc: string) => `s3://bucket/u/${doc}.pdf`;
 
@@ -30,11 +33,13 @@ const PAGE_SCOPED = (doc: string) => ({
 function artifactsFor(doc: string) {
   return {
     [`${doc}:markdown`]: markdown(doc),
+    [`${doc}:doppler-manifest`]: manifest(doc),
+    [`${doc}:doppler-manifest:1-2`]: shardManifest(doc),
     ...Object.fromEntries([1, 2, 3].flatMap((n) => [
       [`${doc}:page-${n}`, page(doc, n)],
       // Renders written after the scan: not on the withheld list.
       [`${doc}:raster-v3-reader-120dpi-page-${n}`, render(doc, n)],
-      [`${doc}:doppler-figure:p${n}.0`, figure(doc, n)],
+      [`${doc}:doppler-figure:p${n}.1`, figure(doc, n)],
     ])),
   };
 }
@@ -90,6 +95,24 @@ describe("page-scoped PII serving", () => {
     expect(await documents.userCanAccessArtifactUri(page(DOC_A, 2), "ua")).toBe(false);
     expect(await documents.userCanAccessArtifactUri(figure(DOC_A, 2), "ua")).toBe(false);
     expect(await documents.userCanAccessArtifactUri(render(DOC_A, 1), "ua")).toBe(true);
+  });
+
+  it("a figure on a withheld page stored after the scan (by slot or by key alone) is refused; manifests under images/ fail closed", async () => {
+    // The first pass stores figures after pii-detect: none of these is on the worker's withheld list.
+    await sql`update documents set metadata = ${sql.json({ pii: { ...PAGE_SCOPED(DOC_A).pii, withheldArtifactUris: [] } })} where id = ${DOC_A}`;
+    expect(await documents.userCanAccessArtifactUri(figure(DOC_A, 2), "ua")).toBe(false);
+    expect(await documents.userCanAccessArtifactUri(figure(DOC_A, 3), "ua")).toBe(true);
+    expect(await guard.artifactOnWithheldPage(figure(DOC_A, 2).replace("image-001", "figure-007"), ["pa"])).toBe(true);
+    expect(await guard.artifactOnWithheldPage(figure(DOC_A, 3).replace("image-001", "figure-007"), ["pa"])).toBe(false);
+    for (const uri of [manifest(DOC_A), shardManifest(DOC_A), `s3://bucket/u/r/doppler/${DOC_A}/images/page-0003/odd.bin`]) {
+      expect(await guard.artifactOnWithheldPage(uri, ["pa"]), uri).toBe(true);
+    }
+    // With nothing withheld, the folder's manifests are not refused by this check.
+    await sql`update documents set metadata = '{}'::jsonb where id = ${DOC_A}`;
+    expect(await guard.artifactOnWithheldPage(manifest(DOC_A), ["pa"])).toBe(false);
+    // Another tenant's project list never resolves the document.
+    await sql`update documents set metadata = ${sql.json(PAGE_SCOPED(DOC_A))} where id = ${DOC_A}`;
+    expect(await documents.userCanAccessArtifactUri(figure(DOC_A, 3), "ub")).toBe(false);
   });
 
   it("fails closed: a blocked document or a malformed outcome serves no page", async () => {

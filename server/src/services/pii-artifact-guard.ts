@@ -1,5 +1,6 @@
 import {
   filterPiiWithheldHits,
+  parseArtifactUri,
   isPageWithheld,
   piiWithholding,
   withheldPageOfSlot,
@@ -101,17 +102,29 @@ export async function artifactOnWithheldPage(uri: string, projectIds: readonly s
     const page = withheldPageOfSlot((row.slot ?? "").slice(row.document_id.length + 1));
     if (page !== null && isPageWithheld(withholding, page)) return true;
   }
-  const figure = DOPPLER_FIGURE_KEY_PAGE.exec(uri);
-  if (figure) {
-    const [, documentId, page] = figure;
+  // Doppler's folder (`<root>/doppler/<document>/images/...`) names the page in the key: a figure file stored after the
+  // scan is refused on a withheld page whether or not a slot records it. Under `images/`, a key whose page cannot be
+  // read (a manifest, a shard manifest, an unexpected name) is refused while the document withholds any page.
+  const folder = DOPPLER_IMAGES_KEY.exec(parseArtifactUri(uri)?.key ?? "");
+  if (folder) {
+    const [, documentId, rest] = folder;
     const [doc] = await sql<{ status: string | null; pii: unknown }[]>`
       select d.status, d.metadata->'pii' as pii from documents d
       where d.id = ${documentId!} and d.project_id = any(${sql.array([...projectIds])})
     `;
-    if (doc && isPageWithheld(piiWithholding({ status: doc.status, metadata: doc.pii === null || doc.pii === undefined ? {} : { pii: doc.pii } }), Number(page))) return true;
+    if (doc) {
+      const withholding = piiWithholding({ status: doc.status, metadata: doc.pii === null || doc.pii === undefined ? {} : { pii: doc.pii } });
+      if (withholding.scope === "document") return true;
+      if (withholding.scope === "pages") {
+        const page = DOPPLER_PAGE_FOLDER.exec(rest!);
+        if (!page || isPageWithheld(withholding, Number(page[1]))) return true;
+      }
+    }
   }
   return false;
 }
 
-/** `<root>/doppler-figures/<document>/p<page>.<n>.<ext>`: a figure's key names its document and page. */
-const DOPPLER_FIGURE_KEY_PAGE = /\/doppler-figures\/([A-Za-z0-9-]{1,64})\/p([1-9][0-9]{0,8})\.g?(?:0|[1-9][0-9]{0,5})\.[a-z]+$/;
+/** `<root>/doppler/<document>/images/<rest>`: Doppler's own folder layout (worker extractors/doppler-figures.ts). */
+const DOPPLER_IMAGES_KEY = /\/doppler\/([A-Za-z0-9-]{1,64})\/images\/(.+)$/;
+/** `page-NNNN/(image|figure)-MMM.<ext>`: the page a figure file belongs to. */
+const DOPPLER_PAGE_FOLDER = /^page-([0-9]{4,10})\/(?:image|figure)-[0-9]{3,7}\.[a-z]+$/;
