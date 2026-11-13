@@ -1,4 +1,5 @@
 import { flushErrorReporting, initializeWorkerErrorReporting, reportException } from "@docslurp/shared/error-reporting";
+import { sandboxedPdfProvider } from "../extractors/plugins.js";
 import { envFlags, formatEnvFlags } from "@docslurp/shared/env-flags";
 import { startLiveModelPriceRefresh } from "@docslurp/shared";
 import { initializeObservability, shutdownObservability, withBackgroundSpan } from "@docslurp/shared/observability";
@@ -546,6 +547,40 @@ async function main(): Promise<void> {
     : null;
   graphJobTimer?.unref();
 
+  // Figure resumes (figures/resume-runner.ts): every worker runs the runner (the fenced lease makes that safe), at most
+  // DOCSLURP_FIGURE_RESUME_CONCURRENCY at once here and one per organization fleet-wide; a no-op unless
+  // DOCSLURP_FIGURE_RESUME and DOCSLURP_DOPPLER_IMAGE_EXTRACT are on and the PDF provider can resume. The leader runs the
+  // audit and orphan GC every 30 minutes (dry run unless DOCSLURP_FIGURE_AUDIT / DOCSLURP_FIGURE_GC_DELETE) and the
+  // backlog gauges every minute; all of them emit on the OTel meter (recordFigureTelemetry).
+  let figureResumeRunning = false;
+  const figureProvider = () => {
+    const pdf = sandboxedPdfProvider();
+    return pdf?.figures?.resume ? { resume: pdf.figures.resume.bind(pdf.figures), timeoutMs: (pages: number) => pdf.timeoutMs(pages) } : null;
+  };
+  const runFigureResumes = () => {
+    if (figureResumeRunning) return;
+    figureResumeRunning = true;
+    withBackgroundSpan("figure-resume", () => store.runFigureResumes({ storage, provider: figureProvider(), workerId: workerIdentity }))
+      .catch((err) => console.error(`[doppler-figures] resume sweep failed: ${err instanceof Error ? err.name : typeof err}`))
+      .finally(() => { figureResumeRunning = false; });
+  };
+  const figureResumeTimer = setInterval(runFigureResumes, 30_000);
+  figureResumeTimer.unref();
+  const figureBacklogTimer = setInterval(onLeader(() => {
+    void withBackgroundSpan("figure-resume-backlog", () => store.figureResumeBacklog())
+      .catch((err) => console.error(`[doppler-figures] backlog gauge failed: ${err instanceof Error ? err.name : typeof err}`));
+  }), 60_000);
+  figureBacklogTimer.unref();
+  let figureAuditRunning = false;
+  const figureAuditTimer = setInterval(onLeader(() => {
+    if (figureAuditRunning) return;
+    figureAuditRunning = true;
+    withBackgroundSpan("figure-audit", () => store.auditFigureStorage({ storage, limit: 50 }))
+      .catch((err) => console.error(`[figure-audit] sweep failed: ${err instanceof Error ? err.name : typeof err}`))
+      .finally(() => { figureAuditRunning = false; });
+  }), 30 * 60_000);
+  figureAuditTimer.unref();
+
   // LanceDB maintenance runs off the index stage's critical path (lancedb-maintenance-pool.ts).
   // Drainers schedule it as they commit; this sweep catches tables that became due with no
   // drainer coming (traffic stopped) and checks lost to a crash or a shutdown drain timeout.
@@ -661,6 +696,9 @@ async function main(): Promise<void> {
     clearInterval(retentionTimer);
     if (purgeTimer) clearInterval(purgeTimer);
     if (graphJobTimer) clearInterval(graphJobTimer);
+    clearInterval(figureResumeTimer);
+    clearInterval(figureAuditTimer);
+    clearInterval(figureBacklogTimer);
     if (creditFlushTimer) clearInterval(creditFlushTimer);
     if (lanceSweepTimer) clearInterval(lanceSweepTimer);
     // Activities have drained; let background LanceDB maintenance finish (bounded) before

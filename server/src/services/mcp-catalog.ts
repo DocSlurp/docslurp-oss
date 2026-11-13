@@ -3,7 +3,7 @@ import { SEARCH_SCOPES, type SearchScope } from "../lib/search-tiers.js";
 import { z } from "zod";
 
 import { uploadBundleAvailable } from "../lib/mcp-ui-resources.js";
-import { CHART_EXPORT_OVERRIDE_DESCRIPTION, chartExportOverrideSchema, deferredProfilesEnabled, qualityModeSchema } from "@docslurp/shared";
+import { CHART_EXPORT_OVERRIDE_DESCRIPTION, chartExportOverrideSchema, deferredProfilesEnabled, figureResumeChatEnabled, figureResumeProposalInputSchema, qualityModeSchema } from "@docslurp/shared";
 
 import { env } from "../config.js";
 import { batchSearchInputSchema, searchInputSchema, projectChatInputSchema } from "../lib/search-input.js";
@@ -137,7 +137,7 @@ export interface McpTool {
 }
 
 /** Project settings tools: app-only, so a customer cannot expose them to its own end users. */
-export const FIRST_PARTY_APP_SETTINGS_TOOLS: ReadonlySet<string> = new Set(["getProjectSettings", "proposeProjectSettings"]);
+export const FIRST_PARTY_APP_SETTINGS_TOOLS: ReadonlySet<string> = new Set(["getProjectSettings", "proposeProjectSettings", "proposeFigureResume"]);
 
 /**
  * Listing order for every surface that keeps server order (tools/list, manifest, chat tools): discover → upload →
@@ -147,7 +147,7 @@ export const FIRST_PARTY_APP_SETTINGS_TOOLS: ReadonlySet<string> = new Set(["get
  */
 const TOOL_ORDER = [
   "listProjects", "upload", "getUploadStatus", "search", "chat", "openUploader", "extract", "getMediaEvidence", "suggestQueries",
-  "getProjectSettings", "proposeProjectSettings", "fullIndex",
+  "getProjectSettings", "proposeProjectSettings", "proposeFigureResume", "fullIndex",
   "webSearch", "webFetch", "webMap", "webCrawl", "ingestWebsite",
   "uploadEstimate", "fullIndexEstimate", "reprocessEstimate", "updateEstimate", "searchSettingsEstimate", "indexingModeEstimate", "graphRebuildEstimate",
   "getJob", "completeUpload",
@@ -170,6 +170,12 @@ export function mcpTools(baseUrl: string): McpTool[] {
       keyAccess: () => false, firstPartyAppOnly: true, annotations: READ_ONLY,
       description: "Prepare an exact project-settings change and impact for the signed-in chat's Apply card. Does not save settings or start work. Requires project editor access. Call proactively when configuration would help the user's goal, including enabling video frames. Safe chat changes (changes.chat): enabled, mode, answerStyle, citations, searchInstructions. Safe retrieval changes (changes.retrieval): resultCount, useRerank, useMmr, mmrLambda, candidateDepth, resultOrder. Allowed pipeline toggles: mediaVideo.enabled, chunkOverlap, summarize, embed, indexVectors, preserveTables, preserveCode, preserveImages, pdfRegionExtraction, visionFallback, figures (figure extraction from PDFs, on by default; off keeps existing figures until reprocess), chartExport.tier (off; free: exports charts that carry their own data at no charge; models: also reads other charts with AI, billed per chart; an unset tier uses this deployment's app default, which getProjectSettings and the project record report as chartExportDefaults.app and may be off; a tier the deployment does not offer is refused with chart_export_tier_unavailable), chartExport.formats, chartExport.diagrams, and quality (fast reads the text layer only and keeps scanned pages as images, $0.05 per 1,000 pages; auto reads each page the cheapest faithful way, $0.05 to $2.50; good reads every page with vision, $2.50; a change applies to new uploads, while existing files need reprocessing). Example: {changes:{pipeline:{mediaVideo:{enabled:true}}}}. An ingest report recommendation that has a patch can be proposed as {changes:{pipeline:<patch>}}. The user applies the structured card; never claim the proposal has been applied. Existing-document reprocessing requires separate explicit consent. Available inside a project chat session only.",
       inputSchema: toolInputJsonSchema(projectSettingsProposalInputSchema) },
+    // Listed only while the chat resume offer is on, like its call (mcp-tools.ts answers 404 otherwise).
+    ...(figureResumeChatEnabled() ? [{ id: "proposeFigureResume", title: "Propose finishing figures", scopes: [...SEARCH_SCOPES, "ingest" as const],
+      // No API key of any type may list or call it: the signed-in app only.
+      keyAccess: () => false, firstPartyAppOnly: true, annotations: READ_ONLY,
+      description: "Prepare the offer to finish extracting the figures a document's processing left out (getProjectSettings reports figures.resumableDocuments), for the signed-in chat's Apply card. Pass documentId for one document, or omit it for every such document in the project (at most 100 per Apply). It does not start anything: the user applies the card, and the service then runs it in the background at no charge (stored figures are billed as storage). Never claim it has been applied. Available inside a project chat session only.",
+      inputSchema: toolInputJsonSchema(figureResumeProposalInputSchema) }] : []),
     { id: "listProjects", title: "List projects", scopes: [...SEARCH_SCOPES, "ingest"], annotations: READ_ONLY,
       description: "List projects you can access, including their IDs, slugs, default project, document/page counts and latest processing status. Pass a returned slug (or the name) as project in upload, search or chat. Does not call AI.",
       inputSchema: toolInputJsonSchema(listProjectsInput) },

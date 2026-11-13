@@ -62,7 +62,7 @@ import { enforceRunSpend, enforceRunSpendForCharge, largestFundedCharge, pauseRu
 import { retryTransaction } from "./transaction-retry.js";
 import { consumeRunCreditLease, creditLeasesActive, RunCreditLeases, type LeaseObservation } from "./credit-lease.js";
 import { PostgresVisionAttemptBackend } from "./vision-attempt-store.js";
-import { assertParseSourceRecord, bindDocumentUpload, PARSE_SOURCE_SCAN_VERSION, resolveDocumentSource, type ParseSourceDecisionRecord } from "../lib/parse-source.js";
+import { assertParseSourceRecord, bindDocumentUpload, PARSE_SOURCE_SCAN_VERSION, resolveDocumentSource, type ParseSourceDecisionRecord, type ResolvedDocumentSource } from "../lib/parse-source.js";
 import {
   lexicalColumnProbe,
   resolveWorkerCapabilities,
@@ -3401,6 +3401,24 @@ export class Store {
     });
   }
 
+  /** Claims and runs queued figure resumes (figures/resume-runner.ts); a no-op while DOCSLURP_FIGURE_RESUME is off. */
+  async runFigureResumes(deps: Omit<import("../figures/resume-runner.js").FigureResumeDeps, "sql">): Promise<number> {
+    const { runFigureResumes } = await import("../figures/resume-runner.js");
+    return await runFigureResumes({ ...deps, sql: this.sql });
+  }
+
+  /** Orphan GC and the stored-figure audit (figures/resume-runner.ts). */
+  async auditFigureStorage(deps: { storage: import("../figures/resume-runner.js").FigureResumeStorage; limit?: number }) {
+    const { auditFigureStorage } = await import("../figures/resume-runner.js");
+    return await auditFigureStorage({ ...deps, sql: this.sql });
+  }
+
+  /** The resume backlog gauges (emitted on the OTel meter by figureResumeBacklog). */
+  async figureResumeBacklog() {
+    const { figureResumeBacklog } = await import("../figures/resume-runner.js");
+    return await figureResumeBacklog(this.sql);
+  }
+
   /** Claims and runs queued project graph rebuilds (see graph/rebuild-job.ts). */
   async runGraphJobs(options: GraphJobRunnerOptions): Promise<number> {
     return await runGraphJobs(this.sql, options);
@@ -4591,6 +4609,22 @@ function mapStageState(row: StageStateRow): StageState {
 
 function toDate(value: string | Date): Date {
   return value instanceof Date ? value : new Date(value);
+}
+
+/**
+ * The parse source of one document for a reader outside the stage pipeline (the figure resume runner): the loader's own
+ * resolution (lib/parse-source.ts resolveDocumentSource), so it is quarantine's decision and never the upload's key unless
+ * the scan read the upload itself. Org-scoped; null when the document is not the organization's. Only this module reads
+ * the upload's key (quarantine-council-r6 tripwire). Read for the claimed run only, and only while the document is completed
+ * (a reprocess or a failure since the claim reads nothing).
+ */
+export async function documentParseSource(
+  sql: Sql<Record<string, unknown>>, scope: { orgId: string; documentId: string; runId: string }, env: NodeJS.ProcessEnv = process.env,
+): Promise<ResolvedDocumentSource | null> {
+  const [row] = await sql<Array<{ id: string; source_key: string; source_sha256: string | null; parse_source_key: string | null; parse_source_sha256: string | null; parse_source_scan_version: number | null }>>`
+    select id, source_key, source_sha256, parse_source_key, parse_source_sha256, parse_source_scan_version
+    from documents where id = ${scope.documentId} and org_id = ${scope.orgId} and run_id = ${scope.runId} and status = 'completed'`;
+  return row ? resolveDocumentSource(row, env) : null;
 }
 
 /**

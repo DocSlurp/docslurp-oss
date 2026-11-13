@@ -3670,6 +3670,17 @@ export const documentExtractionLevels = pgTable("document_extraction_levels", {
   // Migration 0156: uploads a crash left pending (resumable work, adopted without a VM) and the folder files' bytes.
   assetsPending: integer("assets_pending").default(0).notNull(),
   folderBytes: bigint("folder_bytes", { mode: "number" }).default(0).notNull(),
+
+  // Migration 0159: the resume runner's queue and lease (one per document).
+  resumeAfter: timestamp("resume_after", { withTimezone: true, mode: "string" }),
+  resumeLeaseUntil: timestamp("resume_lease_until", { withTimezone: true, mode: "string" }),
+  resumeLeaseOwner: text("resume_lease_owner"),
+  resumeBlocked: text("resume_blocked"),
+  resumeFailures: integer("resume_failures").default(0).notNull(),
+  // Lifetime resume VM launches (reset only by a new run) and the audit cursor.
+  resumeVmLaunches: integer("resume_vm_launches").default(0).notNull(),
+  resumeUnitFailures: jsonb("resume_unit_failures").default({}).notNull(),
+  auditedAt: timestamp("audited_at", { withTimezone: true, mode: "string" }),
   gaps: jsonb(),
   shards: integer().default(0).notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
@@ -3689,6 +3700,22 @@ export const documentExtractionLevels = pgTable("document_extraction_levels", {
   index("document_extraction_levels_org_idx").on(table.orgId, table.projectId),
   index("document_extraction_levels_run_idx").on(table.runId).where(sql`run_id IS NOT NULL`),
 ]);
+
+/** Migration 0159: resume VM time per organization per UTC day (the runner's daily budget). */
+export const figureResumeOrgDays = pgTable("figure_resume_org_days", {
+  orgId: text("org_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
+  day: date().notNull(),
+  launches: integer().default(0).notNull(),
+  vmMs: bigint("vm_ms", { mode: "number" }).default(0).notNull(),
+  reservedMs: bigint("reserved_ms", { mode: "number" }).default(0).notNull(),
+}, (table) => [primaryKey({ columns: [table.orgId, table.day], name: "figure_resume_org_days_pkey" })]);
+
+/** Migration 0159: applied figure resume proposals (single-use chat tokens). */
+export const figureResumeProposalUses = pgTable("figure_resume_proposal_uses", {
+  jti: text().primaryKey().notNull(),
+  orgId: text("org_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
+  usedAt: timestamp("used_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
+}, (table) => [index("figure_resume_proposal_uses_used_idx").on(table.usedAt)]);
 
 /** Migration 0141: one row per shard manifest of a sharded document (resume runs per shard). */
 export const documentExtractionShards = pgTable("document_extraction_shards", {

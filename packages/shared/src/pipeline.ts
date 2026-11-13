@@ -488,6 +488,11 @@ export const pipelineFeaturesSchema = z
     firstPass: z.enum(["auto", "on", "off"]).default("auto"),
     /** After the first pass: `auto` runs the project's pipeline for what it did not finish; `none` stops when it finished everything. */
     afterFirstPass: z.enum(["auto", "none"]).default("auto"),
+    /**
+     * Finishing figures a pass left resumable (figure-resume.ts): `auto` queues a resume when a partial level commits,
+     * `manual` only on request (API, SDK, chat), `off` never. The deploy flag DOCSLURP_FIGURE_RESUME is the ceiling.
+     */
+    figureResume: z.enum(["auto", "manual", "off"]).default("auto"),
     indexingMode: indexingModeSchema.default("full"),
     materialization: materializationPolicyOverridesSchema.default({}),
     visualPages: z
@@ -712,6 +717,7 @@ export const defaultPipelineFeatures: PipelineFeatures = {
   speedBoost: false,
   firstPass: "auto",
   afterFirstPass: "auto",
+  figureResume: "auto",
   indexingMode: "full",
   materialization: {},
   visualPages: { route: "auto", coarseFallback: false },
@@ -1633,6 +1639,7 @@ const FIELD_SEED_STAGES: Record<keyof PipelineFeatures, readonly PipelineRunStag
   speedBoost: [],
   firstPass: [],
   afterFirstPass: [],
+  figureResume: [],
   indexingMode: [],
   materialization: [],
   visualPages: [],

@@ -205,6 +205,19 @@ export class ArtifactStore {
     };
   }
 
+  /** Size and last-modified time of an object, or null when it does not exist (the figure audit). */
+  async headObject(key: string): Promise<{ size: number; lastModified: Date | null } | null> {
+    validateStorageKey(key);
+    try {
+      const response = await this.client.send(new HeadObjectCommand({ Bucket: this.bucket, Key: key }));
+      return { size: Number(response.ContentLength ?? 0), lastModified: response.LastModified ?? null };
+    } catch (error) {
+      const e = error as { name?: string; $metadata?: { httpStatusCode?: number } };
+      if (e?.name === "NotFound" || e?.name === "NoSuchKey" || e?.$metadata?.httpStatusCode === 404) return null;
+      throw error;
+    }
+  }
+
   /** Streams an object without buffering it; `size` is the stored length when known. */
   async openStream(key: string, signal?: AbortSignal): Promise<{ stream: AsyncIterable<Uint8Array>; size: number | null }> {
     validateStorageKey(key);

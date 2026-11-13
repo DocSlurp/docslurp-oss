@@ -6,7 +6,9 @@ import { createHash } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-export const V2_SOURCE_SHA = "a".repeat(64);
+/** The source PDF's bytes as storage serves them in tests, and their sha256 (what manifests and parse decisions bind to). */
+export const V2_SOURCE_BYTES = Buffer.from("%PDF-1.7 doppler v2 test source\n");
+export const V2_SOURCE_SHA = createHash("sha256").update(V2_SOURCE_BYTES).digest("hex");
 export const V2_SETTINGS_SHA = "b".repeat(64);
 
 function webp(payload = 8): Buffer {
