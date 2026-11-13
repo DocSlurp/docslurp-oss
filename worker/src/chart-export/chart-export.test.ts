@@ -23,6 +23,7 @@ import { makePage, testCatalog, testPack } from "../routing/testing.js";
 import { chartExportActive, chartExportConfigOf, DETERMINISTIC_HIGH_CONFIDENCE } from "./config.js";
 import { CHART_EXPORT_USAGE_METRIC, exportVisual, parseSpecAnswer, type ExportVisualArgs } from "./generator.js";
 import { stripVisualGroups, visualBlock, visualBody, wrapVisualGroup } from "./markdown.js";
+import { isAutomaticSelectionDenied } from "@docslurp/shared";
 import { CHART_EXPORT_MAX_OUTPUT_USD_PER_MTOK, CHART_GENERATOR_CANDIDATES, DIAGRAM_GENERATOR_CANDIDATES, chartExportVisionConfig, selectGeneratorModel } from "./model-selection.js";
 import { sanitizeCsv, sanitizeMermaid, sanitizePython, sanitizeVegaLite } from "./sanitize.js";
 import { candidatesFromPlan, ChartExportSession, guardedScopesFromPlan, placementMatch } from "./session.js";
@@ -346,6 +347,12 @@ describe("generator model selection", () => {
     // Gemini 3.1 Flash Lite is admitted by the routing catalog but is no longer a chart generator (2026-11-13).
     expect(CHART_GENERATOR_CANDIDATES).not.toContain("llm://openrouter/google/gemini-3.1-flash-lite");
     expect(selectGeneratorModel({ kind: "chart", catalog, envModel: "google/gemini-3.1-flash-lite" })?.reason).toBe("preferred-candidate");
+    // DeepSeek V4.1 Flash is never selected automatically: not a candidate, and refused as an override even when admitted.
+    expect(CHART_GENERATOR_CANDIDATES.some((uri) => isAutomaticSelectionDenied(uri))).toBe(false);
+    expect(DIAGRAM_GENERATOR_CANDIDATES.some((uri) => isAutomaticSelectionDenied(uri))).toBe(false);
+    const withDeepSeek = [...catalog, { ...catalog.find((t) => t.ref.modelUri === "llm://openrouter/z-ai/glm-5.3-flash")!,
+      id: "vlm:openrouter/deepseek/deepseek-v4.1-flash-1017", ref: { modelUri: "llm://openrouter/deepseek/deepseek-v4.1-flash-1017" } }];
+    expect(selectGeneratorModel({ kind: "chart", catalog: withDeepSeek, envModel: "deepseek/deepseek-v4.1-flash-1017" })?.modelUri).not.toMatch(/deepseek/);
     const proOverride = selectGeneratorModel({ kind: "chart", catalog, projectModel: "llm://openrouter/openai/gpt-6-sol-pro" });
     expect(proOverride?.reason).toBe("preferred-candidate");
     // Admitted by the routing catalog, but not a chart generator: refused.

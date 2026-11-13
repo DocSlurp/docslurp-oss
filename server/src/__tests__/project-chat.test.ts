@@ -1817,7 +1817,8 @@ describe("chatProject", () => {
     });
 
     expect(response.answer).toBe("Fallback answer [1]");
-    expect(response.debug.model).toBe("deepseek/deepseek-v4.1-flash-1017");
+    // The failover model is GPT-6 Luna; DeepSeek V4.1 Flash is never a failover target (automatic-model-selection.ts).
+    expect(response.debug.model).toBe("openai/gpt-6-luna");
     expect(generateAnthropicDocumentText).toHaveBeenNthCalledWith(
       1,
       expect.objectContaining({
@@ -1827,7 +1828,7 @@ describe("chatProject", () => {
     expect(generateAnthropicDocumentText).toHaveBeenNthCalledWith(
       2,
       expect.objectContaining({
-        model: "deepseek/deepseek-v4.1-flash-1017",
+        model: "openai/gpt-6-luna",
       }),
     );
   });

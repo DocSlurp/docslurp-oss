@@ -5,7 +5,8 @@
  *   chart-export evaluation (2026-11-10): GPT-6 Luna at reasoning `none` scored best on held-out charts and diagrams;
  *   GLM 5.3 Flash is last for its unstable latency. A pure cheapest-first sort would have picked GLM. Gemini 3.1 Flash
  *   Lite scored second but was removed (2026-11-13) for its cost per read on real documents, where reads are larger
- *   than in the synthetic screen and often need a repair call.
+ *   than in the synthetic screen and often need a repair call. DeepSeek V4.1 Flash was removed the same day: it is never
+ *   selected automatically (automatic-model-selection.ts), so it is neither a candidate nor an accepted override.
  * - Override: a configured model (project `chartExport.generatorModel`, else env `CHART_EXPORT_GENERATOR_MODEL`) is
  *   used only when it is one of the candidates, the routing-target catalog admits it (image input, a list price, not
  *   Pro/Ultra, runtime-accepted) and its output list price is at most `CHART_EXPORT_MAX_OUTPUT_USD_PER_MTOK`. The
@@ -13,7 +14,7 @@
  * - Chart calls never fail over to the project's vision fallback model (`chartExportVisionConfig`): that model is
  *   priced for page reads, not for the flat per-visual charge.
  */
-import type { OpenRouterReasoning, RoutingTarget, VisionConfig } from "@docslurp/shared";
+import { assertNoAutomaticSelectionDenied, isAutomaticSelectionDenied, type OpenRouterReasoning, type RoutingTarget, type VisionConfig } from "@docslurp/shared";
 
 import { visionConfigForModel } from "../routing/routed-vision.js";
 import type { VisualKind } from "./types.js";
@@ -27,9 +28,9 @@ export const CHART_EXPORT_MAX_OUTPUT_USD_PER_MTOK = 2;
  */
 export const CHART_GENERATOR_CANDIDATES: readonly string[] = [
   "llm://openrouter/openai/gpt-6-luna",
-  "llm://openrouter/deepseek/deepseek-v4.1-flash-1017",
   "llm://openrouter/z-ai/glm-5.3-flash",
 ];
+assertNoAutomaticSelectionDenied("CHART_GENERATOR_CANDIDATES", CHART_GENERATOR_CANDIDATES);
 /** Diagrams scored best on the same order (2026-11-10 evaluation). */
 export const DIAGRAM_GENERATOR_CANDIDATES: readonly string[] = CHART_GENERATOR_CANDIDATES;
 
@@ -60,7 +61,8 @@ function admittedGenerator(target: RoutingTarget | undefined): target is Routing
     && !!target.ref.modelUri
     && target.pricing.inputUsdPerMTok !== undefined
     && target.pricing.outputUsdPerMTok !== undefined
-    && target.pricing.outputUsdPerMTok <= CHART_EXPORT_MAX_OUTPUT_USD_PER_MTOK;
+    && target.pricing.outputUsdPerMTok <= CHART_EXPORT_MAX_OUTPUT_USD_PER_MTOK
+    && !isAutomaticSelectionDenied(target.ref.modelUri);
 }
 
 function toSelection(target: RoutingTarget, reason: GeneratorSelection["reason"]): GeneratorSelection {
