@@ -142,10 +142,55 @@ export const OPENROUTER_LOWEST_REASONING: Readonly<Record<string, OpenRouterReas
   // 2026-11-06 probes on non-China hosts: `{ enabled: false }` and effort `none` return HTTP 400 "Reasoning is
   // mandatory"; `minimal` returns HTTP 200 with ~145 reasoning tokens (unset: ~750). The restricted fallback model.
   "openai/gpt-oss-120b": { effort: "minimal" },
+  // 2026-11-12 probes: `{ enabled: false }` and effort `none` return HTTP 400 "Reasoning is mandatory"; `minimal`
+  // is honoured on Together (~40 reasoning tokens on a one-sentence answer) and reasons ~150 on Cloudflare.
+  "thinkingmachines/inkling-2-small": { effort: "minimal" },
 };
 
 export function lowestOpenRouterReasoning(model: string | undefined): OpenRouterReasoning | undefined {
   return model ? OPENROUTER_LOWEST_REASONING[nitroBaseModel(model) ?? model] : undefined;
+}
+
+/**
+ * Reasoning tokens a model still spends at its floor, added to the caller's output limit so the limit stays a
+ * bound on the answer. OpenRouter counts reasoning against `max_tokens`, so a 96-token one-sentence limit is
+ * all reasoning for a model that cannot switch it off: it returns empty or truncated text, and the call is still
+ * billed. Measured at the floor in `OPENROUTER_LOWEST_REASONING` (median / max reasoning tokens per call):
+ * - openai/gpt-oss-120b, 2026-11-12, chunk preambles on 10 docs: 17 / 93; worker-text replay: up to ~145.
+ * - thinkingmachines/inkling-2-small, 2026-11-12, worker-text replay (48 cases x 2): preamble ~110, summaries
+ *   ~210-260, propositions ~270-350, graph extraction ~730-1,160; page images ~530.
+ * - z-ai/glm-5.3-flash, 2026-11-12, chunk preambles on 10 docs: 1 / 9.
+ * Models absent here reason 0 tokens at their floor (effort `none` / `enabled: false`) or have no verified floor.
+ * Only floor-level requests get the allowance; an explicit effort is the caller's own budget. Outliers past the
+ * allowance end with `finishReason: "length"`, which callers retry once with a larger limit.
+ */
+export const OPENROUTER_REASONING_TOKEN_ALLOWANCE: Readonly<Record<string, number>> = {
+  "openai/gpt-oss-120b": 192,
+  "thinkingmachines/inkling-2-small": 384,
+  "z-ai/glm-5.3-flash": 32,
+};
+
+export function reasoningTokenAllowance(model: string | undefined): number {
+  return model ? OPENROUTER_REASONING_TOKEN_ALLOWANCE[nitroBaseModel(model) ?? model] ?? 0 : 0;
+}
+
+const OUTPUT_LIMIT_FIELDS = ["max_tokens", "max_completion_tokens", "max_output_tokens"] as const;
+
+/**
+ * Re-bases a request body's output limit from `fromModel`'s reasoning allowance to `toModel`'s. Pass
+ * `fromModel: undefined` to add `toModel`'s allowance to a caller limit. Bodies without a limit are unchanged.
+ */
+export function withReasoningTokenAllowance<T extends Record<string, unknown>>(body: T, toModel: string | undefined, fromModel?: string): T {
+  const delta = reasoningTokenAllowance(toModel) - reasoningTokenAllowance(fromModel);
+  if (delta === 0) return body;
+  let next: Record<string, unknown> | undefined;
+  for (const field of OUTPUT_LIMIT_FIELDS) {
+    const limit = body[field];
+    if (typeof limit !== "number" || !Number.isFinite(limit) || limit <= 0) continue;
+    next ??= { ...body };
+    next[field] = Math.max(1, limit + delta);
+  }
+  return (next ?? body) as T;
 }
 
 /** Request-body fragment for page-transcription calls: the model's verified lowest reasoning, or nothing. */
@@ -173,13 +218,15 @@ export function createOpenRouterReasoningFetch(baseFetch: typeof fetch, effort?:
     } catch {
       return baseFetch(input, init);
     }
+    const model = typeof body.model === "string" ? body.model : undefined;
     if (floorWhenUnset) {
-      const floor = lowestOpenRouterReasoning(typeof body.model === "string" ? body.model : undefined);
+      const floor = lowestOpenRouterReasoning(model);
       if (!floor || body.reasoning !== undefined || body.reasoning_effort !== undefined) return baseFetch(input, init);
-      return baseFetch(input, { ...init, body: JSON.stringify({ ...body, reasoning: floor }) });
+      return baseFetch(input, { ...init, body: JSON.stringify(withReasoningTokenAllowance({ ...body, reasoning: floor }, model)) });
     }
-    const floor = lowestOpenRouterReasoning(typeof body.model === "string" ? body.model : undefined);
+    const floor = lowestOpenRouterReasoning(model);
     const original = init.body;
+    body = withReasoningTokenAllowance(body, model);
     body.reasoning = { ...body.reasoning };
     delete body.reasoning.effort;
     delete body.reasoning.enabled;

@@ -1,4 +1,4 @@
-import { lowestOpenRouterReasoning } from "./openrouter-usage.js";
+import { lowestOpenRouterReasoning, withReasoningTokenAllowance } from "./openrouter-usage.js";
 import { isProhibitedRoutingModelId } from "./routing-targets.js";
 import { nitroBaseModel, speedBoostMaxPrice } from "./project-chat-models.js";
 export { nitroBaseModel, speedBoostMaxPrice } from "./project-chat-models.js";
@@ -285,7 +285,8 @@ function withFallbackModel(body: Record<string, unknown>, fallback: string): Rec
   if (floor) next.reasoning = { ...floor, ...exclude };
   else if (reasoning) next.reasoning = Object.keys(exclude).length ? exclude : undefined;
   if (next.reasoning === undefined) delete next.reasoning;
-  return next;
+  // The floor-level output limit carried the requested model's reasoning allowance; carry the fallback's instead.
+  return withReasoningTokenAllowance(next, fallback, typeof body.model === "string" ? body.model : undefined);
 }
 
 export interface OpenRouterRoutingOptions {
