@@ -53,14 +53,17 @@ function validVisual(v: unknown): boolean {
 
 const validEntry = (r: unknown) => !!r && typeof r === "object" && !Array.isArray(r) && Object.keys(r).sort().join(",") === "locator,reason"
   && isStr((r as Record<string, unknown>).locator, 512) && isStr((r as Record<string, unknown>).reason, 120);
-/** A deferral is an ordinal and a closed reason only: nothing from the input's names reaches stats. */
-const validDeferral = (r: unknown) => !!r && typeof r === "object" && !Array.isArray(r) && Object.keys(r).sort().join(",") === "reason,svgIndex"
+/** A deferral is an ordinal range and a closed reason only: nothing from the input's names reaches stats. */
+const intIn = (v: unknown, min: number, max: number) => Number.isSafeInteger(v) && (v as number) >= min && (v as number) <= max;
+const validDeferral = (r: unknown) => !!r && typeof r === "object" && !Array.isArray(r) && Object.keys(r).sort().join(",") === "count,reason,svgIndex"
   && (r as Record<string, unknown>).reason === "svg-document-limit"
-  && Number.isSafeInteger((r as Record<string, unknown>).svgIndex) && ((r as Record<string, unknown>).svgIndex as number) >= 0 && ((r as Record<string, unknown>).svgIndex as number) <= 1_000_000;
+  && intIn((r as Record<string, unknown>).svgIndex, 0, 1_000_000) && intIn((r as Record<string, unknown>).count, 1, 1_000_000);
 
 /**
  * The guest runs with V8's code generation from strings disabled (`eval`, the Function constructor): the enforcement
  * behind the bundle build's source scan, which only guards against accidents. zod falls back to its interpreter.
+ * Only the VM guest gets it (and zod `jitless`, via guest-entry): the in-process paths below are for tests and local
+ * development, refused wherever parsing must stay in the VM (`vmOnlyParsing`), and are not this boundary.
  */
 export const GUEST_NODE_FLAGS = ["--disallow-code-generation-from-strings"];
 

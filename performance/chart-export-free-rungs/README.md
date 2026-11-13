@@ -107,20 +107,29 @@ Each was counted exactly as the gate counts it: after `<use>` expansion, every p
 | `<use>` expansions | 0 | 34 | 372 | 483 | **1,000** (`svg-use-bomb`) |
 | expanded primitives (rects, points, texts, polylines) | 145 | 755 | 1,782 | 2,113 | **4,000** (`svg-too-dense`) |
 | path segments (every parsed vertex) | 1,980 | 10,284 | 23,966 | 32,880 | **50,000** (`svg-too-dense`) |
+| frames walked (every `<use>` re-walk and skipped/hidden child; council r5 H1) | 125 | 606 | 1,357 | 1,753 | **3,000** (`svg-use-bomb` inside a `<use>`, else `svg-too-dense`) |
+| parsed elements (checked before the diagram and geometry paths; council r5 M1) | 146 | 657 | 1,447 | 2,043 | **3,000** (`svg-too-dense`) |
 | marker/vertex pair tests | 0 | 0 | 18 | 466 | **100,000** (over it: approximated, not skipped) |
 
-Run through the gated extractor, **0 of the 540 on-disk files** were skipped or approximated; the 11 generated ones are
-covered by the tests. The owner suggested 50–100 KB for the byte cap, but real Doppler figures reach 415 KB, so the
+Run through the gated extractor, **0 of the 551** were skipped or approximated.
+`performance/chart-export-free-rungs/svg-density-stats.mjs` reruns this measurement and that check from corpus paths,
+with the same counters the gate uses; the corpus stays outside the repository. The tests pin each limit with `toEqual`,
+and check that every gate passes at its limit and skips at limit + 1. The owner suggested 50–100 KB for the byte cap, but real Doppler figures reach 415 KB, so the
 measured value is used.
 
 **Checks**, cheap and hard, checked while parsing:
 - **Bytes:** checked before parsing.
+- **Elements:** counted right after parsing, before the Mermaid/Graphviz diagram path and the geometry path.
+- **Frames walked:** every frame the scene walk pops, counted before anything can skip it. A `<use>` re-walks its whole
+  target, so 999 references to a group of hidden children cost that many frames.
 - **`<use>` budget:** counted per expansion, and stops at the first one past the cap; the expansion is never
   materialised.
 - **Expanded primitives:** checked before each element is walked.
 - **Path segments:** added per parsed path. One giant path counts like many primitives.
 
-An SVG over any check is skipped with a closed reason at O(bytes), and nothing of it is kept.
+An SVG over any check is skipped with a closed reason, and nothing of it is kept. The walk is bounded by the frame count,
+not just by bytes. The diagram path is under the element check too, and its id handling is linear: node ids are a
+`Set`, an edge id with more than 64 parts is not split, and id collisions resume from the last suffix.
 
 **Quantization (considered, not adopted).** The owner suggested snapping coordinates to a 1/4096 viewBox grid and
 de-duplicating. Under the gate it isn't needed: an SVG holds at most 4,000 markers × 50,000 vertices, and the per-SVG
@@ -139,26 +148,39 @@ lossless (same answer for every marker). Output for ordinary charts is unchanged
 
 What remains:
 - one per-SVG pair cap (approximate over it);
-- one per-input count, `maxSvgsPerInput` = 400. An EPUB can hold 200 parts × 200 inline SVGs; later SVGs are recorded
-  in `deferred` by ordinal, not parsed.
+- one per-input count, `maxSvgsPerInput` = 400. An EPUB can hold 200 parts × 200 inline SVGs. Later SVGs are not
+  parsed; they are recorded as one counted range, `{ svgIndex: 400, count, reason: "svg-document-limit" }`, so none is
+  lost however many there are (council r5 L3).
 
-**Measured on the parser-VM shape.** Modal `runtime: "vm"`, 2 vCPU, 4 GiB, network blocked, Node 24.22.3. Each input
-runs in a fresh process with `--disallow-code-generation-from-strings` and a 1 GiB heap (`--max-old-space-size=1024`).
-Two runs:
+**Measured on the parser-VM shape** (council round 5 head). Modal `runtime: "vm"`, 2 vCPU, 4 GiB, network blocked,
+Node 24.22.3. Each input runs in a fresh process with `--disallow-code-generation-from-strings` and a 1 GiB heap
+(`--max-old-space-size=1024`), using `marker-cap-bench.mjs` modes:
 
-| input | size | wall time | peak RSS | exported | skipped | before the gate (round 4) |
+| input | size | wall time | peak RSS | exported | skipped / limited | before |
 |---|--:|--:|--:|--:|--:|---|
-| council's 100-SVG page (2,500 packed vertices × 19,900 markers each) | 3.8 MB | 0.72 / 0.57 s | 156 / 157 MB | 0 | 100 `svg-too-dense` | 4.9–6.5 s, ~490 MB, all approximated |
-| council's 40-copy SVG batch | 1.5 MB | 0.37 / 0.31 s | 120 / 128 MB | 0 | 40 `svg-too-dense` | 3.0 s, 314 MB, all approximated |
-| council's round-4 H1 page (17 SVGs, 390k `<use>` rects each) | 3.6 MB | 0.46 / 0.36 s | 182 / 181 MB | 0 | 17 `svg-too-dense` (~40 of 3,900 `<use>` walked) | **2,147 MB; OOM at a 1 GiB heap** |
-| council's round-4 M2 column (3,900 rects, one column) | 13 KB | 58 / 53 ms | 84 MB | 1 | 0 | over 3 minutes (quadratic check) |
-| 200 SVGs each just under the primitive gate (~3,980 rects) | 1.4 MB | 2.8 s | 314 MB | 200 | 0 | not measured |
-| 100 ordinary bar charts | 0.07 MB | 43 / 35 ms | 79 / 81 MB | 100 | 0 | same |
+| council's 100-SVG page (2,500 packed vertices × 19,900 `<use>` markers each) | 3.8 MB | 0.45 s | 154 MB | 0 | 100 `svg-use-bomb` | round 4: 4.9–6.5 s, ~490 MB |
+| council's 40-copy SVG batch | 1.5 MB | 0.25 s | 119 MB | 0 | 40 `svg-use-bomb` | round 4: 3.0 s |
+| round-4 H1 page (17 SVGs, 390k `<use>` rects each) | 3.6 MB | 0.08 s | 114 MB | 0 | 17 `svg-too-dense` (elements) | round 4: 2,147 MB, OOM |
+| round-4 M2 column (3,900 rects via 39 `<use>`) | 13 KB | 21 ms | 79 MB | 0 | 1 `svg-use-bomb` (walk) | round 4: over 3 min |
+| r5 H1: one 640 KiB SVG, 999 `<use>` × ~34k hidden children | 0.66 MB | 69 ms | 95 MB | 0 | 1 `svg-too-dense` | 6.9 s |
+| r5 H1: EPUB of 20 such SVGs | 13 MB | 0.41–0.46 s | 321–326 MB | 0 | 20 `svg-too-dense` | **129 s, timeout** |
+| r5 H1: HTML of 7 such SVGs (`<desc/>` children) | 4.6 MB | 0.28 s | 358 MB | 0 | 7 `svg-too-dense` | 48 s |
+| r5 H1: HTML of 200 3 KB nested-`<use>` SVGs | 0.64 MB | 0.22 s | 97 MB | 0 | 200 `svg-use-bomb` | 19.6 s |
+| r5 M1: hostile Mermaid, 7,600 nodes (and one at 2,900, under the gate) | 0.75 MB | 35 ms | 93 MB | 1 | 1 `svg-too-dense` | 1.15 s each |
+| r5 M1: EPUB of 200 hostile Mermaid SVGs under the gate | 56 MB | 1.0–1.3 s | 433–439 MB | 200 | 0 | ~230 s |
+| **worst gate-passing case:** EPUB, 200 parts × 2 SVGs, ~2,995 numeric tick texts each (council r5 L4) | 41 MB | **8.5–10.9 s** | 333–359 MB | 256 | input stops at the 256-visual output cap | — |
+| same, labels not numbers (no visual, so all 400 SVGs analysed) | 42 MB | 5.1 s | 388 MB | 0 | 0 | — |
+| EPUB, 200 parts × 2 SVGs, ~2,990 rects each | 57 MB | 2.9 s | **456 MB** | 256 | 256-visual output cap | — |
+| 100 ordinary bar charts | 0.07 MB | 35 ms | 80 MB | 100 | 0 | same |
 
-- **Worst case measured:** 314 MB and 2.8 s, for a document of 200 at-cap SVGs that pass the gate.
-- **The ceiling:** `maxSvgsPerInput` (400) is about twice that.
-- **The earlier 490 MB figure** was for the 100-SVG page under the round-4 schedule. It was not the worst case: the
-  held-scene page reached 2,147 MB.
+- **Worst case measured:** 10.9 s and 456 MB. That is under a fifth of the guest's 60 s timeout and under half the
+  1 GiB heap, and no input is lost.
+- **Bounded, not tuned:** the slowest shape is text-heavy SVGs at the element limit (~27 ms each on the VM), and an
+  input analyses at most 400 SVGs.
+- **The 256-visual output cap:** a pre-existing per-input limit (`maxVisuals`). When it is hit, the input reports
+  `visual-limit`, and the visuals already found are kept.
+- **Superseded figures:** the round-4 "314 MB / 2.8 s" row (200 rect SVGs via `<use>`) now fails the walk gate, and the
+  earlier 490 MB figure was not the worst case.
 
 ### Guest hardening: zod `jitless`, the V8 code-generation flag, code-loading guard, image check
 

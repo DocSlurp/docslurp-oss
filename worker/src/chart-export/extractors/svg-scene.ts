@@ -81,7 +81,7 @@ function deriveStyle(el: XmlElement, parent: Style): Style {
 const scaleOf = (m: Matrix) => Math.sqrt(Math.abs(m[0] * m[3] - m[1] * m[2])) || 1;
 
 /** What the density gate counted while building a scene (the measurement and the gate use the same counters). */
-export interface SceneGateCounts { useExpansions: number; primitives: number; segments: number }
+export interface SceneGateCounts { useExpansions: number; primitives: number; segments: number; walked: number }
 
 export function buildScene(root: XmlElement, counts?: SceneGateCounts): Scene {
   const scene: Scene = { texts: [], rects: [], lines: [], points: [], signatures: "", width: null, height: null };
@@ -111,12 +111,17 @@ export function buildScene(root: XmlElement, counts?: SceneGateCounts): Scene {
   let order = 0;
   let expansions = 0;
   let segments = 0;
+  // Every frame the walk pops, skipped, hidden and ill-transformed ones and every <use> re-walk included: the walk's
+  // real cost (a <use> of a group of 34k hidden children costs 34k pops whatever the other counters say).
+  let walked = 0;
   const base: Style = { fill: "#000000", stroke: null, fontSize: 10, anchor: "start", baseline: "", hidden: false };
 
   type Frame = { el: XmlElement; m: Matrix; style: Style; groups: string; useDepth: number };
   const stack: Frame[] = [{ el: svg, m: IDENTITY, style: base, groups: "", useDepth: 0 }];
   while (stack.length) {
     const { el, m: parentM, style: parentStyle, groups: parentGroups, useDepth } = stack.pop()!;
+    // Density gate, walk: counted before anything can skip the frame.
+    if (++walked > CHART_EXTRACT_LIMITS.maxSvgWalkedElements) throw new ExtractLimitError(useDepth > 0 ? "svg-use-bomb" : "svg-too-dense");
     if (SKIP.has(el.local)) continue;
     const t = parseTransform(el.attrs.transform);
     if (!t) continue;
@@ -230,7 +235,7 @@ export function buildScene(root: XmlElement, counts?: SceneGateCounts): Scene {
         break;
     }
   }
-  if (counts) Object.assign(counts, { useExpansions: expansions, primitives: scene.rects.length + scene.points.length + scene.texts.length + scene.lines.length, segments });
+  if (counts) Object.assign(counts, { useExpansions: expansions, primitives: scene.rects.length + scene.points.length + scene.texts.length + scene.lines.length, segments, walked });
   if (scene.rects.length + scene.points.length + scene.texts.length + scene.lines.length > CHART_EXTRACT_LIMITS.maxSvgPrimitives) throw new ExtractLimitError("svg-too-dense");
   if (segments > CHART_EXTRACT_LIMITS.maxSvgPathSegments) throw new ExtractLimitError("svg-too-dense");
   return scene;

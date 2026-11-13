@@ -61,7 +61,7 @@ describe("SVG work limits", () => {
     const one = `<path d="M0 0${" L1 1".repeat(9000)}"/>`;
     // 6 × 9,000 segments (270 KB): under the byte cap, over the 50,000-segment density gate.
     const many = `<svg xmlns="http://www.w3.org/2000/svg">${one.repeat(6)}</svg>`;
-    // The density gate (12,000 path segments per SVG) stops this before the document-wide path budget.
+    // The density gate (50,000 path segments per SVG) stops this before the document-wide path budget.
     expect(refusalOf(extractDeterministicVisuals({ kind: "svg", text: many }))).toEqual(["svg-too-dense"]);
   });
 

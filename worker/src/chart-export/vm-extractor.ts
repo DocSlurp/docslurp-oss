@@ -237,7 +237,7 @@ export function createVmDeterministicVisualExtractor(deps: VmExtractorDeps): Det
           const result = await extractDeterministicVisualsFile({ inputPath: path, kind: sourceKind, options, runner: deps.runner, log, context: `${context} reason=${reason}`, ...(input.signal ? { signal: input.signal } : {}) });
           results.push(result);
           for (const visual of result.visuals) partials.push(toPartial(visual, null));
-          for (const d of result.deferred ?? []) deferred.push({ input: "source", svgIndex: d.svgIndex, reason: d.reason, pageNumber: null, figureId: null });
+          for (const d of result.deferred ?? []) deferred.push({ input: "source", svgIndex: d.svgIndex, count: d.count, reason: d.reason, pageNumber: null, figureId: null });
         });
       } finally {
         await cleanupTempFile(path).catch(() => undefined);
@@ -293,7 +293,7 @@ export function createVmDeterministicVisualExtractor(deps: VmExtractorDeps): Det
             results.push(result);
             // One figure file holds one visual; when the guest reports several, none can claim the figure's placement.
             for (const visual of result.visuals) partials.push(toPartial(visual, staged[i]!.page, result.visuals.length === 1 ? staged[i]!.bbox : null));
-            for (const d of result.deferred ?? []) deferred.push({ input: "doppler-figure", svgIndex: d.svgIndex, reason: d.reason, pageNumber: staged[i]!.page, figureId: staged[i]!.id });
+            for (const d of result.deferred ?? []) deferred.push({ input: "doppler-figure", svgIndex: d.svgIndex, count: d.count, reason: d.reason, pageNumber: staged[i]!.page, figureId: staged[i]!.id });
           });
         });
       }
@@ -302,7 +302,11 @@ export function createVmDeterministicVisualExtractor(deps: VmExtractorDeps): Det
     }
     if (figures.length > sent.length && !guestDown && !capLogged) log(`[chart-export] svg figures capped ${context} figures=${figures.length} sent=${sent.length}`);
 
-    if (deferred.length) log(`[chart-export] visuals deferred ${context} count=${deferred.length}`);
+    if (deferred.length) log(`[chart-export] visuals deferred ${context} svgs=${deferred.reduce((n, d) => n + d.count, 0)}`);
+    // Density-gate skips per reason, so production can confirm legitimate charts pass (council r5 I2).
+    const gated: Record<string, number> = {};
+    for (const r of results.flatMap((x) => x.refusals)) if (/^svg-(too-large|too-dense|use-bomb)$/.test(r.reason)) gated[r.reason] = (gated[r.reason] ?? 0) + 1;
+    if (Object.keys(gated).length) log(`[chart-export] svg density gate skipped ${context} ${Object.entries(gated).map(([k, v]) => `${k}=${v}`).join(" ")}`);
     return { partials, presence: presenceOf(results, figures.length), ...(deferred.length ? { deferred: deferred.slice(0, 1000) } : {}) };
   };
 }

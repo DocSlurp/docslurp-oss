@@ -52,7 +52,8 @@ const rounded = (range: Range): Range => ({ low: round5(range.low), high: round5
 
 /**
  * Build the estimate. `ingest` is the provider's upload quote for these files and settings; `bytes` its stored-bytes
- * model; `validForMs` how long the quote holds (the provider's notice period for a price change).
+ * model; `validForMs` how long the provider expects these prices to stay current. Prices may change without notice, so
+ * `validUntil` is a freshness hint for re-quoting, never a price guarantee; billing follows what processing measures.
  */
 export function assembleEstimateQuote(args: ProviderEstimateArgs & {
   ingest: { estimate: CostEstimate; media: UploadMediaEstimate | null };

@@ -16,18 +16,24 @@ export const CHART_EXTRACT_LIMITS = {
   maxPathCommands: 200_000,
   maxPathVertices: 20_000,
   /**
-   * Density gate for one SVG, checked before and while its scene is built, in this order: raw bytes, `<use>`
-   * expansions, expanded primitives (rects, points, texts, polylines), path segments. Over any of them the SVG is
+   * Density gate for one SVG, checked before and while its scene is built: raw bytes; parsed elements (before the
+   * diagram and geometry paths); then, while walking, frames visited, `<use>` expansions, expanded primitives (rects,
+   * points, texts, polylines) and path segments. Over any of them the SVG is
    * skipped (`svg-too-large`, `svg-use-bomb`, `svg-too-dense`): O(bytes), nothing kept, and the rest of the input carries
    * on. Set at about 2× the p99 of 551 legitimate chart SVGs (real Doppler figures from public PDFs, arXiv figures,
    * #369's slice, matplotlib / Vega / Plotly / Recharts / Highcharts), counted exactly as the gate counts (after `<use>`
    * expansion; every parsed path vertex, glyph outlines included): p99 / max were 313 / 415 KB, 372 / 483 expansions,
-   * 1,782 / 2,113 primitives, 23,966 / 32,880 segments, so every one of them passes (performance/chart-export-free-rungs).
+   * 1,782 / 2,113 primitives, 23,966 / 32,880 segments, 1,357 / 1,753 walked frames, 1,447 / 2,043 elements, so every
+   * one of them passes (`performance/chart-export-free-rungs/svg-density-stats.mjs` reruns the measurement).
    */
   maxSvgBytes: 640 * 1024,
   maxSvgUseExpansions: 1_000,
   maxSvgPrimitives: 4_000,
   maxSvgPathSegments: 50_000,
+  /** Frames one SVG's scene walk may pop, every `<use>` re-walk and skipped, hidden or ill-transformed child included. */
+  maxSvgWalkedElements: 3_000,
+  /** Elements in one parsed SVG, checked before the diagram (Mermaid / Graphviz) and geometry paths. */
+  maxSvgElements: 3_000,
   /**
    * Marker/vertex pair tests one SVG may run (`withoutVertexMarkers`); over it the de-duplication is approximated
    * (`approximate-marker-dedup`, confidence capped below 0.85). Legitimate SVGs needed at most 466 (p99 18). This keeps a

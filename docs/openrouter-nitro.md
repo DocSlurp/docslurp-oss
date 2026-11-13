@@ -8,7 +8,7 @@ The eligible chat model families are:
 - `deepseek/deepseek-v4.1-flash-1017:nitro`
 - `openai/gpt-6-luna:nitro`
 
-Speed boost on GLM 5.3 Flash (the default chat model) answers with `deepseek/deepseek-v4.1-flash-1017:nitro`, which has many fast hosts, and bills at GLM's answer tier times the Speed boost multiplier. The response's `debug.model` names the model that answered. Naming `z-ai/glm-5.3-flash:nitro` explicitly keeps GLM.
+Speed boost answers with the chosen model's own Nitro variant: GLM 5.3 Flash (the default chat model) answers with `z-ai/glm-5.3-flash:nitro`, at GLM's answer tier times the Speed boost multiplier. No model is swapped for another (`SPEED_BOOST_MODEL_SWAPS` is empty), and a swap may never name a model that is never selected automatically ([model configuration](model-configuration.md#models-never-selected-automatically)). The response's `debug.model` names the model that answered.
 
 Pass `speedBoost: true` with either the base model ID or its listed Nitro variant. Naming `:nitro` without the flag is rejected. Boosted chat requests for unsupported models are rejected rather than silently routed normally. Each variant retains its base answer tier and reasoning policy; the 4× credit multiplier is applied separately.
 

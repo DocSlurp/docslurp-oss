@@ -1,9 +1,9 @@
-import type { ChatReasoningLevel } from "@docslurp/shared/project-chat-models";
+import { nitroBaseModel, type ChatReasoningLevel } from "@docslurp/shared/project-chat-models";
 import { resolveSpeedBoostChatModel, ChatModelNotAllowedError } from "../lib/chat-model-policy.js";
 import { reportPublicError } from "../lib/public-errors.js";
 import { getDeferredContext } from "../search/deferred/deferred-context.js";
 import { hostedApiKeyForProject, loadProjectPrivacyMode, openRouterCall, privacyModeOf, privateTextModelForProject } from "../lib/privacy.js";
-import { BILLABLE_UNIT_METRICS, chatAnswerCredits, chatAnswerUnits, chatModelTier, ingestReportFocusPages, parsePrivateModelUri, requestsIngestReport } from "@docslurp/shared";
+import { BILLABLE_UNIT_METRICS, chatAnswerCredits, chatAnswerUnits, chatModelTier, ingestReportFocusPages, parsePrivateModelUri, requestsIngestReport, withoutAutomaticSelectionDenied } from "@docslurp/shared";
 import type { PrivacyMode } from "@docslurp/shared";
 import { env } from "../config.js";
 import type { RequestActor } from "../lib/request-actor.js";
@@ -112,8 +112,24 @@ type ProjectChatRuntimeSummary = {
   totalMs: number;
 };
 
-const PROJECT_CHAT_FAILOVER_MODEL: ProjectChatModelId =
-  "deepseek/deepseek-v4.1-flash-1017";
+/**
+ * The model a failed chat answer retries on. GPT-6 Luna since 2026-11-13: DeepSeek V4.1 Flash is never selected
+ * automatically (automatic-model-selection.ts), so it is never a failover target; buildModelFailoverOrder also drops
+ * any such model after the caller's own choice.
+ */
+export const PROJECT_CHAT_FAILOVER_MODEL: ProjectChatModelId =
+  "openai/gpt-6-luna";
+/**
+ * Failover candidates in order (all standard answer tier). A turn retries on the first that is not the project's own
+ * model and is not denied, so a Luna project fails over to Claude Haiku 5.5, a different vendor stack. Haiku comes
+ * before GLM 5.3 Flash: in the 2026-11-13 chat-answer comparison (#343 harness, 30 cases, blind pairwise judge) it beat
+ * GLM on quality (held-out mean 5.00 vs 4.56) and latency (p50 0.88 s vs 2.8 s, p90 2.3 s vs 19.8 s), at parity with Luna.
+ */
+export const PROJECT_CHAT_FAILOVER_MODELS: readonly ProjectChatModelId[] = [
+  PROJECT_CHAT_FAILOVER_MODEL,
+  "anthropic/claude-haiku-5.5",
+  "z-ai/glm-5.3-flash",
+];
 const DEFAULT_PENDING_SEARCH_RETRY = {
   maxAttempts: 8,
   intervalMs: 2000,
@@ -483,11 +499,19 @@ function buildUsageSummary(args?: {
 }
 
 /** Eval models never fail over: a comparison must not silently measure another model. */
-function buildModelFailoverOrder(
+/**
+ * The models one chat turn tries, in order: the caller's choice, then the first failover candidate that differs from
+ * it and is not denied. At most two attempts.
+ */
+export function buildModelFailoverOrder(
   preferredModel: string,
   failover = true,
 ): string[] {
-  return failover ? [...new Set([preferredModel, PROJECT_CHAT_FAILOVER_MODEL])] : [preferredModel];
+  if (!failover) return [preferredModel];
+  // A Speed boost variant is the same model: a Luna Nitro project fails over to Haiku, never to plain Luna.
+  const base = nitroBaseModel(preferredModel) ?? preferredModel;
+  const next = withoutAutomaticSelectionDenied(PROJECT_CHAT_FAILOVER_MODELS).find((model) => model !== base);
+  return next ? [preferredModel, next] : [preferredModel];
 }
 
 async function generateProjectChatTextWithFailover(args: {
