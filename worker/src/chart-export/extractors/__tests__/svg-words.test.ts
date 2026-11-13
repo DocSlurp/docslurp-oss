@@ -58,3 +58,17 @@ describe("SVG figure + words (the PDF-figure seam)", () => {
     ]).map((t) => t.text.length)).toEqual([2, 200]);
   });
 });
+
+describe("word labels are cut on code points (council #369/#510 r4 L2)", () => {
+  it("an astral character at the cut is dropped whole, never left as a lone surrogate", () => {
+    for (const pad of [199, 198, 999]) {
+      const text = "x".repeat(pad) + "𝑥".repeat(4);
+      const [prim] = wordsAsTexts([{ text, x0: 0, y0: 0, x1: 10, y1: 10 }]);
+      const label = (prim as { text: string }).text;
+      expect(label.length).toBeLessThanOrEqual(200);
+      expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(label)).toBe(false);
+      expect(() => new TextEncoder().encode(label)).not.toThrow();
+      expect(Buffer.from(label, "utf8").toString("utf8")).toBe(label);
+    }
+  });
+});

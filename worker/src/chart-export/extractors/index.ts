@@ -40,12 +40,21 @@ export interface SvgWord { text: string; x0: number; y0: number; x1: number; y1:
  * baseline minus ~0.35 em). Bounded: at most `maxSvgWords`, each label cut to 1,000 characters before it is normalized
  * and to 200 after, non-finite or inverted boxes dropped.
  */
+/** `s` cut to at most `n` UTF-16 units without splitting a surrogate pair (a high surrogate left at the end is dropped). */
+function cutCodePoints(s: string, n: number): string {
+  if (s.length <= n) return s;
+  const c = s.charCodeAt(n - 1);
+  return s.slice(0, c >= 0xd800 && c <= 0xdbff ? n - 1 : n);
+}
+
 export function wordsAsTexts(words: readonly SvgWord[] | undefined): TextPrim[] {
   if (!words?.length) return [];
   if (words.length > CHART_EXTRACT_LIMITS.maxSvgWords) throw new ExtractLimitError("svg-words-limit");
   const out: TextPrim[] = [];
   for (const [i, w] of words.entries()) {
-    const text = typeof w?.text === "string" ? w.text.slice(0, 1000).replace(/\s+/g, " ").trim().slice(0, 200) : "";
+    // Cut on code points, never inside a surrogate pair (council #369/#510 r4 L2: a lone surrogate in a label broke the
+    // Doppler guest's re-encoding of the whole step).
+    const text = typeof w?.text === "string" ? cutCodePoints(cutCodePoints(w.text, 1000).replace(/\s+/g, " ").trim(), 200) : "";
     const box = [w?.x0, w?.y0, w?.x1, w?.y1];
     if (!text || !box.every((n) => typeof n === "number" && Number.isFinite(n)) || !(w.x1 >= w.x0 && w.y1 > w.y0)) continue;
     const rotated = w.rotated === true;

@@ -120,6 +120,14 @@ describe("validateFigureCharts against the host's figure index", () => {
     expect(figureChartsHaveWork(validateFigureCharts({ refused: "missing" }, INDEX))).toBe(true);
     expect(figureChartsHaveWork(validateFigureCharts({ refused: "missing" }, []))).toBe(false);
   });
+  it("council r4 M2: an answer of only counted losses is work (the free tier records them)", () => {
+    const refusalOnly = (reason: string) => ({ schemaVersion: "chart-export-deterministic@v1", visuals: [], refusals: [{ locator: "svg", reason }] });
+    for (const reason of ["time-budget", "figure-unavailable"]) {
+      expect(figureChartsHaveWork(validateFigureCharts(answer(["p2.g1", "p3.g1"], [refusalOnly(reason), refusalOnly(reason)]), INDEX))).toBe(true);
+    }
+    expect(figureChartsHaveWork(validateFigureCharts(answer(["p2.g1", "p3.g1"], [{ ...empty, overflow: 2 }, empty]), INDEX))).toBe(true);
+    expect(figureChartsHaveWork(validateFigureCharts(answer(["p2.g1", "p3.g1"], [refusalOnly("svg-too-dense"), empty]), INDEX))).toBe(false);
+  });
   it("names the stored object by its work bit", () => {
     expect(figureChartsObjectName("doc", true)).toBe("doc.charts.work.json");
     expect(figureChartsSlotHasWork("s3://b/x/doc.charts.work.json")).toBe(true);

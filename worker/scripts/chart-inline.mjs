@@ -66,13 +66,25 @@ async function guest(compileCacheDir) {
 }
 /** A count-only worker (past the deadline) gets this long: it parses nothing, it records what is left. */
 const COUNT_ONLY_MS = 1_000;
+/** How long a finished worker gets to exit before the next one starts anyway. */
+const TERMINATE_WAIT_MS = 1_000;
 const MAX_WORKERS = 8;
 
 /**
  * Run one unit worker until it returns a result, crashes, overruns or passes the memory budget; finished units go into
  * `done`. Resolves { result } | { failure: "timeout" | "crashed" | "exited", inflight }.
  */
-function runWorker(workerUrl, task, done, index, endsAt, rssLimit, onStart, compileCacheDir) {
+/**
+ * Run one unit worker until it returns a result, crashes, overruns or passes its memory budget; finished units go into
+ * `done`. Resolves only once the worker has exited (or after TERMINATE_WAIT_MS), so the next worker never starts beside a
+ * dying one. Bounds (council #369/#510 r4 L1, parity with #364's guest):
+ * - each unit at most `unitCapMs` (and never past the step);
+ * - memory: this worker's own baseline plus the growth budget, never past the step's hard ceiling. Before its first unit
+ *   the worker runs only our code, so only the ceiling applies then: memory a finished worker has not yet returned cannot
+ *   end the input;
+ * - messages after the worker is settled are ignored (#364 council r9 I1).
+ */
+function runWorker(workerUrl, task, done, index, endsAt, memory, onStart, compileCacheDir, unitCapMs) {
   return new Promise((resolve) => {
     // An empty environment, as #364's guest gives its workers.
     const worker = new Worker(workerUrl, {
@@ -94,21 +106,24 @@ function runWorker(workerUrl, task, done, index, endsAt, rssLimit, onStart, comp
       clearTimeout(unitTimer);
       clearTimeout(hardTimer);
       clearInterval(watch);
-      void worker.terminate().catch(() => undefined);
-      resolve(outcome);
+      const exited = worker.terminate().catch(() => undefined);
+      void Promise.race([exited, new Promise((r) => setTimeout(r, TERMINATE_WAIT_MS))]).then(() => resolve(outcome));
     };
+    const workerLimit = Math.min(memory.ceiling, process.memoryUsage.rss() + memory.growth);
     const left = () => Math.max(1, endsAt - performance.now());
     const hardTimer = setTimeout(() => finish({ failure: "timeout", inflight }), left());
     // The real memory bound (heap limits do not cover external memory): over it, the unit in flight is lost (crashed).
     const watch = setInterval(() => {
-      if (process.memoryUsage.rss() > rssLimit) finish({ failure: "crashed", inflight });
+      const rss = process.memoryUsage.rss();
+      if (rss > memory.ceiling || (inflight && rss > workerLimit)) finish({ failure: "crashed", inflight });
     }, INLINE_CHART_LIMITS.rssPollMs);
     worker.on("message", (m) => {
+      if (settled) return;
       if (m?.t === "start") {
         inflight = { id: m.id, locator: m.locator, svgIndex: m.svgIndex, svg: m.svg };
         onStart(inflight);
         clearTimeout(unitTimer);
-        unitTimer = setTimeout(() => finish({ failure: "timeout", inflight }), left());
+        unitTimer = setTimeout(() => finish({ failure: "timeout", inflight }), Math.min(left(), unitCapMs));
       } else if (m?.t === "done") {
         clearTimeout(unitTimer);
         done.set(m.id, { delta: m.delta, worker: index });
@@ -147,7 +162,12 @@ export async function inlineCharts(bytes, request, inspection, inputPath, worker
   const options = { diagrams: request.diagrams !== false };
   // One memory budget for the whole step, from the RSS before the first worker: a later worker never inherits the
   // headroom of memory an ended worker has not yet returned.
-  const rssLimit = process.memoryUsage.rss() + INLINE_CHART_LIMITS.maxRssGrowthMb * 1024 * 1024;
+  const growth = INLINE_CHART_LIMITS.maxRssGrowthMb * 1024 * 1024;
+  // Each worker may grow by `growth` from its own start; the whole step never past twice that from here.
+  const memory = { growth, ceiling: process.memoryUsage.rss() + 2 * growth };
+  // One unit at most a quarter of the step's deadline (at least 3 s, so a heap overrun ends as the crash it is): a hang loses itself, not the rest (as #364's 15 s
+  // per unit inside its 45 s budget).
+  const unitCapMs = Math.max(3_000, Math.floor(deadline / 4));
   const done = new Map();
   const failed = new Map();
   let final = null;
@@ -163,8 +183,8 @@ export async function inlineCharts(bytes, request, inspection, inputPath, worker
     // UnitControl.skip (#364 resumeSkipList): unit id to { visuals, bytes }, so a resumed worker carries the byte total.
     const skip = w === 0 ? [] : (await guest(compileCacheDir)).resumeSkipList(done, failed.keys());
     const task = { path: inputPath, kind, packaged: plan.packaged, options, skip, outputBudget: INLINE_OUTPUT_BUDGET, deadline: countOnly ? 0 : softDeadline, fault };
-    const outcome = await runWorker(workerUrl, task, done, w, countOnly ? performance.now() + COUNT_ONLY_MS : endsAt, rssLimit,
-      (unit) => { nextSvg = unit.svgIndex + (unit.svg ? 1 : 0); }, compileCacheDir);
+    const outcome = await runWorker(workerUrl, task, done, w, countOnly ? performance.now() + COUNT_ONLY_MS : endsAt, memory,
+      (unit) => { nextSvg = unit.svgIndex + (unit.svg ? 1 : 0); }, compileCacheDir, unitCapMs);
     lastWorker = w;
     if (outcome.result) { final = outcome.result; break; }
     if (outcome.inflight && !failed.has(outcome.inflight.id) && !countOnly) {

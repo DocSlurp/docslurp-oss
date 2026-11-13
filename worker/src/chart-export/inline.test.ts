@@ -255,7 +255,8 @@ parentPort.on("message", (task) => parentPort.postMessage({ t: "result", result:
 parentPort.on("message", () => { parentPort.postMessage({ t: "start", id: 0, locator: "svg", svgIndex: 0 }); const keep = []; const step = () => { keep.push(Buffer.alloc(16 * 1024 * 1024, 1)); setImmediate(step); }; step(); });`);
       const before = process.memoryUsage.rss();
       const out = await contained(Buffer.from(genericBar(["A", "B"], [1, 2], 3)), "svg", null, pathToFileURL(hog));
-      expect(process.memoryUsage.rss() - before).toBeLessThan((INLINE_CHART_LIMITS.maxRssGrowthMb + 256) * 1024 * 1024);
+      // The step's ceiling (twice the growth budget: each worker its own growth, council r4 L1) plus one poll's allocation.
+      expect(process.memoryUsage.rss() - before).toBeLessThan((2 * INLINE_CHART_LIMITS.maxRssGrowthMb + 256) * 1024 * 1024);
       // Every worker hogs, so each unit is lost in turn until the worker cap: never a failed inspection.
       expect(["ok", "refused"]).toContain(out.status);
     }, 60_000);
@@ -265,6 +266,31 @@ parentPort.on("message", () => { parentPort.postMessage({ t: "start", id: 0, loc
       const out = await contained(Buffer.from(genericBar(["A", "B"], [1, 2], 3)), "svg", null, pathToFileURL(dead));
       expect(out).toMatchObject({ status: "refused", reason: "worker-failed" });
       expect(JSON.stringify(out)).not.toContain("secret");
+    }, 60_000);
+    it("council r4 L1: a unit's memory a dead worker still holds does not end the input; a late message is ignored; a hang is capped per unit", async () => {
+      // Unit 0 holds 300 MB off-heap and stalls; the supervisor ends it. Later workers (a fresh process baseline each)
+      // place their units: the input is not lost as one unplaced count.
+      const heavy = path.join(dir, `heavy-${Math.random().toString(36).slice(2)}.mjs`);
+      await writeFile(heavy, `import { parentPort } from "node:worker_threads";
+parentPort.on("message", (task) => {
+  const skip = new Map(task.skip);
+  const units = [0, 1, 2].filter((id) => !skip.has(id));
+  for (const id of units) {
+    parentPort.postMessage({ t: "start", id, locator: "svg[" + id + "]", svgIndex: id, svg: true });
+    if (id === 0) { const keep = Buffer.alloc(300 * 1024 * 1024, 1); globalThis.keep = keep; for (;;); }
+    parentPort.postMessage({ t: "done", id, delta: { visuals: [], refusals: [], deferred: [], overflow: 0, bytes: 0 } });
+  }
+  parentPort.postMessage({ t: "result", result: { schemaVersion: "chart-export-deterministic@v1", visuals: [], refusals: [] } });
+  // A late message after the result: ignored.
+  parentPort.postMessage({ t: "done", id: 9, delta: { visuals: [{ bogus: true }], refusals: [], deferred: [], overflow: 0, bytes: 1 } });
+});`);
+      const started = Date.now();
+      const out = await contained(Buffer.from(genericBar(["A", "B"], [1, 2], 3)), "svg", null, pathToFileURL(heavy)) as { status: string; result: { visuals: unknown[]; deferred?: Array<{ reason: string; svgIndex: number; count: number }> } };
+      expect(out.status).toBe("ok");
+      // Only unit 0 is lost (a per-unit timeout, well inside the step), units 1-2 completed, nothing unplaced.
+      expect(out.result.deferred).toEqual([{ svgIndex: 0, count: 1, reason: "unit-timeout" }]);
+      expect(out.result.visuals).toEqual([]);
+      expect(Date.now() - started).toBeLessThan(INLINE_CHART_LIMITS.startupMs + 2 * INLINE_CHART_LIMITS.deadlineBaseMs + 5_000);
     }, 60_000);
     it("a compile cache inherited through NODE_COMPILE_CACHE refuses the charts; the inspection stands (#364)", async () => {
       const tag = Math.random().toString(36).slice(2);
@@ -499,12 +525,19 @@ describe("the extractor uses the inline answer instead of a parser VM run", () =
   it("skipped or refused (deadline): nothing exported, no VM run: a hostile file never earns a second, larger try", async () => {
     for (const inline of [{ kind: "svg", status: "skipped", reason: "no-signal" }, { kind: "svg", status: "refused", reason: "deadline", ms: 500 }]) {
       const { runs, deps, extract } = extractor();
-      expect((await extract(input(inline))).partials).toEqual([]);
+      const out = await extract(input(inline));
+      expect(out.partials).toEqual([]);
       expect(runs).toEqual([]);
       expect(deps.storage.downloadToTempFile).not.toHaveBeenCalled();
+      // A refusal lost the whole source: recorded as a deferral (council r4 L4); a skip is no loss.
+      expect(out.deferred ?? []).toEqual(inline.status === "refused" ? [{ input: "source", svgIndex: 0, count: 1, reason: "guest-unavailable", pageNumber: null, figureId: null }] : []);
     }
-    expect(inlineHasWork({ status: "refused", reason: "deadline", ms: 500 })).toBe(false);
+    // Council r4 M2: refusals and counted losses are work for the free tier (they are recorded); a clean empty answer is not.
+    expect(inlineHasWork({ status: "refused", reason: "deadline", ms: 500 })).toBe(true);
     expect(inlineHasWork({ status: "ok", ms: 1, result: { ...visuals, visuals: [] } })).toBe(false);
+    expect(inlineHasWork({ status: "ok", ms: 1, result: { ...visuals, visuals: [], deferred: [{ svgIndex: 0, count: 38, reason: "unit-crashed" }] } })).toBe(true);
+    expect(inlineHasWork({ status: "ok", ms: 1, result: { ...visuals, visuals: [], overflow: 3 } })).toBe(true);
+    expect(inlineHasWork({ status: "skipped", reason: "no-signal" })).toBe(false);
   });
 
   it("result-too-large is the one refusal that goes to the standalone guest", async () => {

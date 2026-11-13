@@ -188,8 +188,14 @@ export function readStoredFigureCharts(raw: unknown): StoredFigureCharts | null 
 export function figureChartsHaveWork(charts: StoredFigureCharts | null): boolean {
   if (!charts) return false;
   if (charts.missing > 0) return true;
-  return charts.status === "ok" && charts.figures.some((f) => f.result.visuals.length > 0 || (f.result.deferred?.length ?? 0) > 0);
+  // Visuals, counted losses, and the refusals vm-extractor records as per-figure deferrals (the Doppler child's
+  // time-budget and figure-unavailable): council #369/#510 r4 M2.
+  return charts.status === "ok" && charts.figures.some((f) => f.result.visuals.length > 0 || (f.result.deferred?.length ?? 0) > 0 || (f.result.overflow ?? 0) > 0
+    || f.result.refusals.some((r) => FIGURE_LOSS_REFUSALS.has(r.reason)));
 }
+
+/** The Doppler child's per-figure refusals that vm-extractor records as deferrals (see the inline-mode figure loop). */
+export const FIGURE_LOSS_REFUSALS = new Set(["time-budget", "figure-unavailable"]);
 
 /** Object name of the stored answer: the work bit is in the name, so the ledger alone says whether to look. */
 export function figureChartsObjectName(documentId: string, work: boolean): string {

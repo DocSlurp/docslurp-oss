@@ -137,7 +137,7 @@ export class QuarantineStage implements Stage {
                 if (inspection.charts.status !== "skipped") {
                   state.usageLedger.enqueue(chartExportVmUsageEvent({ documentId: document.id, wallTimeMs: inspection.charts.ms, reason: "inline", inputs: 1, outcome: inspection.charts.status === "ok" ? "ok" : "refused", stage: "quarantine" }));
                 }
-                console.log(`[chart-export] inline document=${document.id} kind=${charts.kind} status=${inspection.charts.status} ${inspection.charts.status === "ok" ? `visuals=${inspection.charts.result.visuals.length} ms=${inspection.charts.ms}` : `reason=${inspection.charts.reason}`}`);
+                console.log(`[chart-export] inline document=${document.id} kind=${charts.kind} status=${inspection.charts.status} ${inspection.charts.status === "ok" ? `visuals=${inspection.charts.result.visuals.length} deferred_svgs=${(inspection.charts.result.deferred ?? []).reduce((n, d) => n + d.count, 0)} overflow=${inspection.charts.result.overflow ?? 0} ms=${inspection.charts.ms}` : `reason=${inspection.charts.reason}`}`);
               }
 
               await this.storage.putArtifactJson(key, artifact);

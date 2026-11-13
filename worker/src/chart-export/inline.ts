@@ -91,10 +91,16 @@ export function inlineNeedsStandalone(charts: InlineCharts): boolean {
   return charts.status === "refused" && charts.reason === "result-too-large";
 }
 
-/** Whether the inline answer gives the free tier anything to export or retry. */
+/**
+ * Whether the inline answer gives the free tier anything to export, retry or record (council #369/#510 r4 M2): visuals,
+ * counted losses (deferrals, an overflow count), or a refusal (recorded as a deferral by vm-extractor, L4). Only a clean
+ * answer with nothing in it, or a skip, is no work.
+ */
 export function inlineHasWork(charts: InlineCharts | null): boolean {
   if (!charts) return false;
-  return charts.status === "ok" ? charts.result.visuals.length > 0 : inlineNeedsStandalone(charts);
+  if (charts.status === "refused") return true;
+  if (charts.status !== "ok") return false;
+  return charts.result.visuals.length > 0 || (charts.result.deferred?.length ?? 0) > 0 || (charts.result.overflow ?? 0) > 0;
 }
 
 /**
