@@ -115,3 +115,32 @@ classify-route and page-image evidence read the facts unchanged:
 
 `probeRowsFromDopplerFacts` (`worker/src/routing/probe/doppler-facts.ts`) builds the v2 router's `ProbeRow` with
 `probeEngine: "doppler-facts"` and no thumbnail; its header comment lists each field.
+
+## Page router
+
+With `DOCSLURP_DOPPLER_PAGE_FACTS=use` and the v2 page router in `shadow` or `active`, the router reads its page features
+from these facts instead of probing the PDF (`createDopplerFactsProbeRunner`, `worker/src/routing/probe/doppler-facts-runner.ts`):
+
+- route-pages reads the canonical facts extract-markdown already stored (`<artifactRoot>/doppler/<documentId>/images/page-facts.jsonl`,
+  slot `doppler-page-facts`; written in `store` and `use` before the stage commits). It reads only the address recorded in the current run's
+  `doppler-page-facts` slot, and only when that address is the key `dopplerFolderKey` gives for this run and document (a
+  file left at the key by a failed attempt or an earlier run, without a current-run slot, is never read), re-validates it with `parseDopplerPageFacts` bounded by the document's page count and
+  the reader's byte budget, and never opens the PDF.
+- Facts that are missing, refused, oversized, for an unreadable document, for fewer pages than the host counted, or with
+  every page failed are unavailable: no plan is written and the document keeps v3 routing (`page-route-fallback`). Missing
+  or refused facts never authorize a model read or a charge. Valid facts (including a failed page, as the native probe's
+  failed row) steer the plan like probe rows do, within the run's quality tier and cost cap. In `active` mode the facts must
+  cover every host page, so a locked row on a multi-page document is unavailable there. A doc line that says a user
+  password is required gives the locked row.
+- On a sandboxed deployment (the checks extract-markdown uses for `sandboxed-pdf-deployment` and for a project whose PDF
+  extractor order names vm-pdf, `sandboxed-pdf-route`, plus `NODE_ENV=production` or the service profile) every host-side PDF access in the router is refused before it happens: the native probe, its
+  encrypted-file byte scan, thumbnails, inset renders and clips and the table gate. A refusal is logged as an error and
+  recorded as `page-route-host-pdf-refused`. Without facts mode `use` a sandboxed deployment writes no plan.
+- Facts carry no pixels, so image decision models are skipped (`decision-model-skipped:no-host-pixels:<ids>`) and their
+  pages take the existing escalation path; text-only decision models still run.
+
+Shadow telemetry compares the facts-driven plan with v3. Each `page-route-decision` row carries `probeSource` and
+`shadowComparison` (`routerRoles`, `routerNeedsPixels`, `v3Route`, `v3OcrAuthorized`, `v3NeedsPixels`, `agreesWithV3`);
+`page-route-chunk-estimate` carries the document totals (`pages`, `compared`, `agree`, `routerOnlyPixels`, `v3OnlyPixels`).
+The router needs pixels for any role beyond `accept-text` or `skip`; v3 does for any route other than `straightforward-text`
+or an authorized OCR decision.
