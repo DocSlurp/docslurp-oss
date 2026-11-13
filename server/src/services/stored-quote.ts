@@ -73,6 +73,8 @@ export function storedQuoteFile(row: { mime_type: string; state: StoredPageState
     name: `${row.documents} stored ${row.documents === 1 ? "document" : "documents"} (${row.state === "assumed" ? "pages not measured" : row.state === "empty" ? "no pages" : "measured"})`,
     size: Number(row.bytes) || 0,
     type: row.mime_type,
+    // Every stored group, assumed ones included, is marked: never priced like a new upload (#481 L1).
+    stored: true as const,
   };
   const assetBytes = Math.max(0, Number(row.asset_bytes) || 0);
   const assets = assetBytes > 0 ? { assetBytes } : {};

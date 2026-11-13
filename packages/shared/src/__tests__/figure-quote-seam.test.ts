@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { defaultPipelineFeatures } from "../pipeline.js";
 import { openStoredBytes } from "../pricing-open.js";
-import { estimateProfileFor, type QuoteFile } from "../upload-quote.js";
+import { estimateProfileFor, quoteFileSchema, type QuoteFile } from "../upload-quote.js";
 
 // The neutral figure-storage seam the estimator needs (core #357, no numbers in OSS): stored-work quotes carry measured
 // figure bytes, and the profile says whether a run extracts figures (deploy flag and the project's opt-out).
@@ -24,5 +24,11 @@ describe("figure storage in quotes (core #357 on #355)", () => {
     const measured = openStoredBytes({ ...file, measured: { pages: 10, readPages: 10, assetBytes: 64 * 1024 * 1024 } }, pages, settings);
     expect(measured.low - base.low).toBe(64 * 1024 * 1024);
     expect(measured.high - base.high).toBe(64 * 1024 * 1024);
+  });
+
+  it("the stored marker is server-only: a client's quote file cannot carry it (so an upload is never priced as stored, nor the reverse)", () => {
+    const parsed = quoteFileSchema.parse({ name: "a.pdf", size: 10, stored: true, measured: { pages: 1, readPages: 0, assetBytes: 5 } });
+    expect("stored" in parsed).toBe(false);
+    expect("measured" in parsed).toBe(false);
   });
 });
