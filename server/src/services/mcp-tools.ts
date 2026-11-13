@@ -1,3 +1,4 @@
+import { chartExportDefaults } from "@docslurp/shared";
 import type { z } from "zod";
 import { getProjectSearchSettings } from "./search-controls.js";
 import { projectSettingsPipelinePatchSchema } from "./project-settings-proposal-input.js";
@@ -127,7 +128,9 @@ const mcpAdapterRoutes = new Hono()
       return c.json({ projectId: project.id,
         pipeline: Object.fromEntries(Object.keys(projectSettingsPipelinePatchSchema.shape).map(key => [key, key === "mediaVideo" ? { enabled: project.pipeline.mediaVideo?.enabled !== false }
           : project.pipeline[key as keyof typeof project.pipeline]])),
-        chat: settings.chat, retrieval: settings.retrievalDefaults });
+        chat: settings.chat, retrieval: settings.retrievalDefaults,
+        // What an unset chart tier runs as on this deployment, and which tiers a change may choose.
+        chartExportDefaults: chartExportDefaults(process.env) });
     }
 
     if (toolId === "proposeProjectSettings") {

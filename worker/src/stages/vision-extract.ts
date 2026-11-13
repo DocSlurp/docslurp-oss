@@ -95,6 +95,7 @@ import {
 } from "../chart-export/stage.js";
 import { quarantineChartPresence, storedRoutePlan } from "../chart-export/free-stats.js";
 import type { ChartModelClient } from "../chart-export/types.js";
+import { chartExportFreeVmCap } from "../db/chart-export-free-vm-cap.js";
 import { deterministicSourceKind } from "../chart-export/vm-extractor.js";
 import chartSharp from "../tools/isolated-image.js";
 import type { DocumentStageResult } from "../pipeline/checkpoints.js";
@@ -1925,6 +1926,17 @@ export class VisionExtractStage implements Stage {
       cropImage: (image, bbox) => this.cropChartImage(image, bbox),
       // Parser-VM time of the deterministic extractor: a cost-only event in this run's ledger, scoped to the document.
       recordUsage: (event) => { state.usageLedger.enqueue(event); },
+      // The per-org hourly cap on free-tier VM runs, shared by every worker. No store or no org: refused (fail closed).
+      reserveFreeVmRun: async () => {
+        const reserve = state.store?.reserveChartExportFreeVmRun?.bind(state.store);
+        if (!reserve || !state.run.orgId) return false;
+        try {
+          return await reserve({ orgId: state.run.orgId, runId: state.run.id, documentId: document.id, perHour: chartExportFreeVmCap() });
+        } catch (error) {
+          console.warn(`[chart-export] free VM reservation failed document=${document.id} error=${toError(error).message}`);
+          return false;
+        }
+      },
       ...(signal ? { signal } : {}),
     };
   }

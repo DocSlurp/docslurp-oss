@@ -61,10 +61,12 @@ Supported pipeline toggles are video frames, chunk overlap, summaries, embedding
 indexing, table/code/image preservation, PDF region extraction, vision
 fallback, figure extraction (`figures`; off keeps existing figures until reprocess)
 and chart export (`chartExport.tier`, `formats` and `diagrams`; no model can be named).
-In the app a project with no chart tier already runs the free steps, so a request
-like "turn on AI chart reading for this project" proposes
-`{"changes":{"pipeline":{"chartExport":{"tier":"models"}}}}`: a billed reindex with its
-estimate. Moving to `free` is an optional free reindex, and `off` applies to new uploads.
+A project with no chart tier runs the deployment's app default (`chartExportDefaults.app`
+in `getProjectSettings`), which may be `off`. A request like "turn on AI chart reading for this
+project" proposes `{"changes":{"pipeline":{"chartExport":{"tier":"models"}}}}`, a billed
+reindex with its estimate. When the effective tier is `off` and `chartExportDefaults.freeAvailable`
+is true, chat may offer `free` instead: an optional free reindex. `off` applies to new uploads.
+A tier the deployment does not offer is refused (`chart_export_tier_unavailable`).
 Then processing quality: `quality` (`fast` reads the text layer only and
 keeps scanned pages as page images, billed as Fast pages; `auto`, the default, reads
 each page the cheapest faithful way, Fast or Rich per page; `good` reads every page with

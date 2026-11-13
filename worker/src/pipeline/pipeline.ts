@@ -72,6 +72,8 @@ export interface CheckpointStore {
   upsertPageFacts?(rows: readonly PageFactUpsert[]): Promise<void>;
   /** Reserves Fast page-image renders from the run's shared budget (db/fast-page-image-budget.ts). */
   reserveFastPageImageRenders?(args: { runId: string; documentId: string; wanted: number; perRun: number }): Promise<number>;
+  /** Reserves one free-tier chart-export VM run against the org's hourly cap (db/chart-export-free-vm-cap.ts). */
+  reserveChartExportFreeVmRun?(args: { orgId: string; runId: string; documentId: string; perHour: number }): Promise<boolean>;
   /**
    * Stores the derived display title in documents.metadata unless one is already set
    * (re-runs do not churn it and a user rename wins). Returns whether it was written.

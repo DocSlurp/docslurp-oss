@@ -84,7 +84,7 @@ export interface DeterministicVisualInput {
   /**
    * Free signals from stored outputs that say whether the source can hold a deterministic chart. The parser VM runs on
    * the source only when one is present (an Office file with chart parts, an HTML/EPUB file with embed hints or a
-   * candidate, a standalone SVG/JSON document); see `vm-extractor.ts`.
+   * candidate; a standalone SVG/JSON document only with a candidate or an embed hint); see `vm-extractor.ts`.
    */
   signals?: { officeChartParts?: number; htmlEmbedHints?: boolean; candidates?: number };
   /** The parsed Doppler figure index when the caller already read it (saves a second read). */
@@ -94,6 +94,11 @@ export interface DeterministicVisualInput {
    * ledger. Never a customer charge.
    */
   recordUsage?: (event: UsageEvent) => void;
+  /**
+   * Admission for this document's guest runs (the per-org hourly free-tier VM cap): called once, before the first VM
+   * run; false skips every VM run of the document (logged), nothing parses on the host instead. Unset: admitted.
+   */
+  admitVmRun?: () => Promise<boolean>;
   signal?: AbortSignal;
 }
 

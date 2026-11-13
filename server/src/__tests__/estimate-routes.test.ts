@@ -473,8 +473,8 @@ describe("chart export tier: origin defaults, per-request override and its guard
       vi.stubEnv("DOCSLURP_CHART_EXPORT", flag);
       const res = await post(key, "/v1/runs/run/reprocess", { chartExport: { tier: "models" } });
       expect(res.status).toBe(400);
-      expect(await res.json()).toMatchObject({ error: { code: "chart_export_models_unavailable", message: expect.stringMatching(/not available/), details: { field: "chartExport.tier" } } });
-      expect(await (await post(key, "/v1/runs/run/reprocess/estimate", { chartExport: { tier: "models" } })).json()).toMatchObject({ error: { code: "chart_export_models_unavailable" } });
+      expect(await res.json()).toMatchObject({ error: { code: "chart_export_tier_unavailable", message: expect.stringMatching(/not available/), details: { field: "chartExport.tier" } } });
+      expect(await (await post(key, "/v1/runs/run/reprocess/estimate", { chartExport: { tier: "models" } })).json()).toMatchObject({ error: { code: "chart_export_tier_unavailable" } });
       const estimate = await post(key, "/v1/runs/run/reprocess/estimate", { chartExport: { tier: "models" } });
       expect(estimate.status).toBe(400);
       // Free is always allowed (it never calls a model).

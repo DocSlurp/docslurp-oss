@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 
-import { chartExportModelsAllowed, type ResolvedChartExportConfig, type RunOrigin } from "@docslurp/shared";
-import { stampRunChartExport } from "./chart-export-availability.js";
+import { chartExportModelsAllowed, upgradeStoredChartExport, type ResolvedChartExportConfig, type RunOrigin } from "@docslurp/shared";
+import { assertChartExportModelsCeiling, stampRunChartExport } from "./chart-export-availability.js";
 import {
   assertPipelineSpeedBoost,
   countedPagesForForecast,
@@ -22,7 +22,7 @@ import {
 import { sql as defaultSql, type SqlClient } from "../db.js";
 import { normalizeUploadPath } from "../lib/canonical-id.js";
 import { sanitizeUploadFilename } from "../lib/filenames.js";
-import { currentRequestId } from "../lib/request-context.js";
+import { currentRequestApiKeyId, currentRequestId } from "../lib/request-context.js";
 import { getAvailableCredits } from "./billing/credits.js";
 import {
   admitRunSpend,
@@ -30,7 +30,7 @@ import {
   SpendBlockedError,
   type SpendBlockedCode,
 } from "./billing/spend-guard.js";
-import { canContributeToProject, getProjectAccess } from "./organizations.js";
+import { canContributeToProject, canEditProject, getProjectAccess } from "./organizations.js";
 import { attributedUsage } from "./usage-attribution.js";
 import { buildRunProcessingPreview } from "./run-processing-preview.js";
 import { RunPipelineInvalidError, runLifecycle, type RunLifecycleRun, type RunStartOutcome } from "./run-lifecycle.js";
@@ -91,6 +91,11 @@ export interface CreateRunInput {
    * request field. It decides the chart export tier when neither the request nor the project sets one. Unset: machine.
    */
   origin?: RunOrigin;
+  /**
+   * The pipeline comes from a run that already resolved its chart export tier (reprocess): a present tier is kept as
+   * is instead of being resolved again (`stampRunChartExport` with `stamped`).
+   */
+  chartExportStamped?: boolean;
   priority?: number;
   sources: RunSources;
   /**
@@ -649,6 +654,12 @@ async function ensureCanonicalId(
 export function createRunCreation(deps: RunCreationDeps) {
   const { sql, start } = deps;
 
+  /** An unrevoked API key's scopes, or null (unknown, revoked, or an OAuth token id): the chart ceiling then refuses. */
+  async function activeApiKeyScopes(apiKeyId: string): Promise<readonly string[] | null> {
+    const [row] = await sql<{ scopes: string[] }[]>`select scopes from api_keys where id = ${apiKeyId} and revoked_at is null limit 1`;
+    return row?.scopes ?? null;
+  }
+
   async function insertRun(args: {
     id: string;
     orgId: string;
@@ -946,11 +957,25 @@ export function createRunCreation(deps: RunCreationDeps) {
     const sanitized = sanitizeStoredPipeline(requestedPipeline, `run creation in project ${request.projectId}`);
     // The chart export tier is resolved here, once per run (request override, project tier, origin default), and
     // stored on the run: a retry or resume reads it back, and the worker never re-resolves it.
-    const input: CreateRunInput = { ...request, pipeline: stampRunChartExport(sanitized, request.origin ?? "machine") };
+    const input: CreateRunInput = {
+      ...request,
+      pipeline: stampRunChartExport(sanitized, request.origin ?? "machine", process.env, { stamped: request.chartExportStamped === true }),
+    };
     assertPipelineSpeedBoost(input.pipeline);
     const access = await getProjectAccess(input.projectId, input.userId);
     if (!access) throw new Error("Project not found");
     if (!canContributeToProject(access, input.userId)) throw new Error("Forbidden");
+    // The project's explicit chart tier is a ceiling: `models` above a stored `off`/`free` needs editor rights (and, for
+    // an API key, the billed-features scope). Every run (upload, URL, extract, MCP, reprocess) lands here.
+    await assertChartExportModelsCeiling({
+      runTier: (input.pipeline.chartExport as ResolvedChartExportConfig | undefined)?.tier,
+      projectTier: (upgradeStoredChartExport((access.pipeline as { chartExport?: unknown } | null)?.chartExport) as { tier?: unknown } | null)?.tier,
+      canEdit: canEditProject(access, input.userId),
+      // Some intake paths do not thread the key id through; the request context always has it for a key request.
+      apiKeyId: input.apiKeyId ?? currentRequestApiKeyId(),
+      apiKeyScopes: activeApiKeyScopes,
+      context: `run creation project=${input.projectId}`,
+    });
     // Every caller (upload, extract, MCP, reprocess) lands here: a run pipeline that combines visual indexing
     // with Fast (or a refused privacy/PII policy) is refused whatever the project or request says
     // (IndexingModeError visual_mode_quality / visual_mode_privacy, 400).

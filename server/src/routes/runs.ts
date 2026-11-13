@@ -1,5 +1,6 @@
 import { quoteStoredDocuments } from "../services/stored-quote.js";
 import { chartExportOverrideError } from "../services/chart-export-availability.js";
+import { CHART_EXPORT_TIER_UNAVAILABLE_CODE } from "@docslurp/shared";
 import { runOriginOf } from "../lib/run-origin.js";
 import { SEARCH_SCOPES } from "../lib/search-tiers.js";
 import { reportPublicError } from "../lib/public-errors.js";
@@ -314,14 +315,21 @@ export const runsRoutes = new Hono()
     const denied = await denyRunContentUpdate(c, c.req.param("runId"));
     if (denied) return denied;
     const userId = c.get("sessionUser").id;
-    const refused = chartExportOverrideError(c.req.valid("json").chartExport?.tier, `reprocess estimate run=${c.req.param("runId")}`);
-    if (refused) return apiStatusError(c, 400, refused, { code: "chart_export_models_unavailable" });
-    const estimate = await estimateRunReprocess({ runId: c.req.param("runId"), userId, options: c.req.valid("json") });
-    if (!estimate) return apiStatusError(c, 404, "Run not found");
-    // The same quote shape as POST /v1/estimate, from the run's measured documents (estimateRunReprocess checked access).
+    const body = c.req.valid("json");
+    // Access first: a run the caller cannot see is a 404 before the tier is looked at.
     const run = await getRun(c.req.param("runId"), userId, { cost: false });
-    const quote = run?.orgId
-      ? await quoteStoredDocuments({ scope: { orgId: run.orgId, projectId: run.projectId, runId: run.id }, pipeline: run.pipeline, estimate })
+    if (!run) return apiStatusError(c, 404, "Run not found");
+    const refused = chartExportOverrideError(body.chartExport?.tier, `reprocess estimate run=${c.req.param("runId")}`);
+    if (refused) return apiStatusError(c, 400, refused, { code: CHART_EXPORT_TIER_UNAVAILABLE_CODE, details: { field: "chartExport.tier" } });
+    const estimate = await estimateRunReprocess({ runId: c.req.param("runId"), userId, options: body });
+    if (!estimate) return apiStatusError(c, 404, "Run not found");
+    // The same quote shape as POST /v1/estimate, from the run's measured documents, with the request's tier override so
+    // `quote.settings.chartExport` labels the tier the estimate priced.
+    const quote = run.orgId
+      ? await quoteStoredDocuments({
+        scope: { orgId: run.orgId, projectId: run.projectId, runId: run.id }, pipeline: run.pipeline, estimate, origin: runOriginOf(c),
+        ...(body.chartExport ? { settings: { chartExport: body.chartExport.tier } } : {}),
+      })
       : null;
     return c.json({ estimate, quote, billing: billingState() });
   })
@@ -337,7 +345,7 @@ export const runsRoutes = new Hono()
     );
     let reprocessed: Awaited<ReturnType<typeof reprocessRun>>;
     try {
-      reprocessed = await reprocessRun(c.req.param("runId"), userId, { ...body, origin: runOriginOf(c) });
+      reprocessed = await reprocessRun(c.req.param("runId"), userId, { ...body, origin: runOriginOf(c), apiKeyId: c.get("apiKey")?.keyId ?? null });
     } catch (error) {
       if (isReprocessRejectedError(error)) {
         return apiStatusError(c, error.statusCode, error.message, { code: error.code, details: error.details });

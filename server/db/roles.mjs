@@ -36,6 +36,8 @@ export const WORKER_TABLES = Object.freeze({
   api_key_usage: { privileges: DML, evidence: "worker/src/db/store.ts recordApiKeyPageUsage (upsert) and pruneOperationalLogs (delete); metering counters, no key material" },
   audit_log: { privileges: ["insert"], evidence: "worker/src/db/store.ts insert into audit_log" },
   billing_runtime: { privileges: ["select"], evidence: "worker/src/db/store.ts meteringEnforced" },
+  chart_export_free_vm_grants: { privileges: ["select", "insert"], evidence: "worker/src/db/chart-export-free-vm-cap.ts per-document grants of the per-org free VM cap" },
+  chart_export_free_vm_hours: { privileges: ["select", "insert", "update"], evidence: "worker/src/db/chart-export-free-vm-cap.ts per-org hourly free chart-export VM cap" },
   chunk_entities: { privileges: DML, evidence: "worker/src/db/store.ts graph writes; superseded-purge.ts" },
   credit_debits_pending: { privileges: DML, evidence: "worker/src/db/usage-event-store.ts enqueue_org_credit_debit / apply_pending_org_debits" },
   credit_leases: { privileges: DML, evidence: "worker/src/db/credit-lease.ts; grant_credit_lease(); project_runs lease triggers" },

@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 
 import type { RunOrigin } from "@docslurp/shared";
-import { stampRunChartExport } from "./chart-export-availability.js";
+import { groupByChartTier, sourceRunChartTiers, stampRunChartExport } from "./chart-export-availability.js";
+import { upgradeStoredChartExport } from "@docslurp/shared";
 import { isFirstPartyAppActor } from "../lib/first-party-app.js";
 import {
   pageCredits,
@@ -270,11 +271,27 @@ export async function commitIndexJobs(prepared: PreparedIndexJobs, userId: strin
     // Lock organization before project, matching other admission paths.
     await tx`select pg_advisory_xact_lock(spend_admission_lock_key(${prepared.orgId}))`;
     await tx`select pg_advisory_xact_lock(hashtextextended(${`full-index:${prepared.projectId}`}, 0))`;
+    // Chart tier: an explicit project tier applies to every document; with none, each document keeps the tier its
+    // source run stamped (as reprocess does), and only documents without one take the caller's origin default (M5).
+    const stamped: RunBatch[] = [];
     for (const batch of prepared.batches) {
+      const resolved = stampRunChartExport(batch.pipeline, origin);
+      if ((upgradeStoredChartExport(batch.pipeline.chartExport) as { tier?: unknown } | null)?.tier) {
+        stamped.push({ ...batch, pipeline: resolved });
+        continue;
+      }
+      const tiers = await sourceRunChartTiers(tx as never, { orgId: prepared.orgId, projectId: prepared.projectId }, batch.docs.map((doc) => doc.id));
+      for (const [tier, docs] of groupByChartTier(batch.docs, tiers, resolved.chartExport.tier ?? "off")) {
+        stamped.push({ ...batch, docs, pipeline: { ...resolved, chartExport: { ...resolved.chartExport, tier } } });
+      }
+    }
+    for (const batch of stamped) {
       const stageSubset = batch.pipeline.stageSubset ?? null;
       const busy = await inFlightSourceIds(tx as unknown as Client, prepared.projectId, batch.docs.map((doc) => doc.id), stageSubset);
       const docs = batch.docs.filter((doc) => !busy.has(doc.id));
       if (docs.length === 0) continue;
+      // The same spend decision as assertCanSpend (loadSpendStatus), under the admission lock: a `models` batch is refused
+      // here exactly as run creation would refuse it.
       const block = await admissionBlock(tx, prepared.orgId, prepared.projectId, { speedBoost: batch.pipeline.speedBoost === true });
       if (block) throw new SpendBlockedError(block.message, block.code);
       const runId = randomUUID();
@@ -282,10 +299,10 @@ export async function commitIndexJobs(prepared: PreparedIndexJobs, userId: strin
       await tx`
         insert into project_runs (id, org_id, user_id, project_id, kind, status, priority, stage,
           total_documents, processed_documents, pages_total, pages_processed, pipeline,
-          creation_ready_at, creation_expires_at)
+          creation_ready_at, creation_expires_at, origin)
         -- The documents are inserted in this transaction, so the manifest is complete when it commits.
         values (${runId}, ${prepared.orgId}, ${userId}, ${prepared.projectId}, 'full-index', 'queued', 0, 'queued',
-          ${docs.length}, 0, ${pages}, 0, ${tx.json(JSON.parse(JSON.stringify(stampRunChartExport(batch.pipeline, origin))))}, now(), null)
+          ${docs.length}, 0, ${pages}, 0, ${tx.json(JSON.parse(JSON.stringify(batch.pipeline)))}, now(), null, ${origin})
       `;
       for (const doc of docs) {
         const canonicalId = doc.canonical_id ?? doc.id;
