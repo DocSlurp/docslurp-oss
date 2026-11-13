@@ -6,13 +6,16 @@
  * - Eligibility is reviewed configuration: `TierOption` names its host pool as `llm://` entries (provider-pools.ts),
  *   which also give the model, and its measured eval score. Observations (prices, uptime, latency from the database) only rank and filter inside
  *   it; a host that is not in an option's pool is never sent a request, whatever the data says.
- * - The tier's customer price is fixed elsewhere; this module only receives a cost ceiling per unit of work
- *   (an answer, a page) and never selects an option whose live price for that unit is above it.
- * - Missing or stale observations fall back to the option's static pool, which is inside eligibility by
- *   construction. Fresh observations under which nothing fits the ceiling select nothing (fail closed): the caller
- *   refuses or uses its default route and reports it.
+ * - The tier's customer price is fixed elsewhere; this module receives what one unit of work (an answer, a page)
+ *   earns and never picks a host whose live cost for that unit leaves less than the minimum margin (default 10%).
+ * - A request goes to exactly one host: the fastest one that keeps the margin (see `selectTierRoute`). The other
+ *   hosts that also keep it are returned in rank order as `alternatives`, for the caller to retry with as a new
+ *   single-host request if that call fails; nothing is sent to them otherwise.
+ * - Missing or stale observations fall back to the option's first pool host (reviewed config lists the fastest
+ *   first), which is inside eligibility by construction. Fresh observations under which nothing keeps the margin
+ *   select nothing (fail closed): the caller refuses or uses its default route and reports it.
  */
-import { hostMatchesEndpoint, providerPool, providerPoolPreferences, type ProviderPool, type ProviderPoolPreferences } from "./provider-pools.js";
+import { hostMatchesEndpoint, providerPool, type ProviderPool } from "./provider-pools.js";
 
 export const ROUTE_TIERS = ["cheapest", "fastest", "best"] as const;
 export type RouteTier = (typeof ROUTE_TIERS)[number];
@@ -82,8 +85,10 @@ export interface TierSelectionInput {
   readonly tier: RouteTier;
   readonly options: readonly TierOption[];
   readonly observations: readonly EndpointObservation[];
-  /** Highest USD a unit of work may cost on the chosen host; null when the caller has no ceiling. */
-  readonly maxUnitCostUsd: number | null;
+  /** USD one unit of work earns at this tier's fixed price; null when the caller has no price (no margin check). */
+  readonly unitRevenueUsd: number | null;
+  /** Least share of `unitRevenueUsd` a host must leave as margin, unless the pool sets `_minMargin`. Default 0.10. */
+  readonly minMargin?: number;
   readonly unit: WorkUnit;
   readonly now: Date;
   /** Observations older than this are ignored, unless the pool sets `_maxAge`. Default 2 hours. */
@@ -94,7 +99,7 @@ export interface TierSelectionInput {
 
 export interface RankedHost {
   readonly host: string;
-  /** The cheapest serving endpoint of the host that fits the ceiling. */
+  /** The cheapest serving endpoint of the host that keeps the margin. */
   readonly endpoint: string;
   readonly unitCostUsd: number;
   readonly inputUsdPerMTok: number;
@@ -106,15 +111,30 @@ export type TierSelection =
   | {
     readonly basis: "live";
     readonly option: TierOption;
-    readonly hosts: readonly RankedHost[];
-    /** OpenRouter `provider`: the ranked hosts in order, nothing outside them, priced at most at the dearest one. */
-    readonly provider: { order: string[]; allow_fallbacks: false; max_price: { prompt: number; completion: number } };
+    /** The one host this request goes to. */
+    readonly host: RankedHost;
+    /** Other hosts of the option that keep the margin, in rank order: retry targets only, never sent alongside. */
+    readonly alternatives: readonly RankedHost[];
+    /** OpenRouter `provider` for `host` alone: no fallbacks, priced at most at its endpoint. */
+    readonly provider: SingleHostPreferences;
   }
-  | { readonly basis: "static"; readonly option: TierOption; readonly provider: ProviderPoolPreferences }
+  | { readonly basis: "static"; readonly option: TierOption; readonly provider: SingleHostPreferences }
   | { readonly basis: "none"; readonly reason: string };
+
+export interface SingleHostPreferences {
+  readonly order: [string];
+  readonly allow_fallbacks: false;
+  readonly max_price?: { prompt: number; completion: number };
+}
 
 const DEFAULT_MAX_AGE_MS = 2 * 3600 * 1000;
 const DEFAULT_MIN_UPTIME = 90;
+export const DEFAULT_MIN_MARGIN = 0.1;
+
+/** Highest unit cost that keeps `minMargin` of `unitRevenueUsd`; null when there is no revenue to measure against. */
+export function maxUnitCostForMargin(unitRevenueUsd: number | null, minMargin: number): number | null {
+  return unitRevenueUsd === null ? null : unitRevenueUsd * (1 - minMargin);
+}
 
 export function unitCostUsd(unit: WorkUnit, inputUsdPerMTok: number, outputUsdPerMTok: number): number {
   return (unit.inputTokens * inputUsdPerMTok + unit.outputTokens * outputUsdPerMTok) / 1e6;
@@ -133,11 +153,12 @@ export function assertTierOptions(options: readonly TierOption[]): void {
   }
 }
 
-/** The hosts of `option` that can serve now, under the ceiling, each at its cheapest fitting endpoint. */
 const maxAgeOf = (option: TierOption, input: TierSelectionInput) => option.pool.maxAgeMs ?? input.maxAgeMs ?? DEFAULT_MAX_AGE_MS;
 
+/** The hosts of `option` that can serve now and keep the margin, each at its cheapest such endpoint, in pool order. */
 export function eligibleHosts(option: TierOption, input: TierSelectionInput): RankedHost[] {
   const maxAge = maxAgeOf(option, input);
+  const ceiling = maxUnitCostForMargin(input.unitRevenueUsd, option.pool.minMargin ?? input.minMargin ?? DEFAULT_MIN_MARGIN);
   const minUptime = option.pool.minUptime ?? input.minUptime ?? DEFAULT_MIN_UPTIME;
   const fresh = input.observations.filter((observation) => observation.model === option.model
     && input.now.getTime() - observation.observedAt.getTime() <= maxAge);
@@ -150,7 +171,7 @@ export function eligibleHosts(option: TierOption, input: TierSelectionInput): Ra
       if (observation.status !== null && observation.status < 0) continue;
       if (observation.uptime30m !== null && observation.uptime30m < minUptime) continue;
       const cost = unitCostUsd(input.unit, observation.inputUsdPerMTok, observation.outputUsdPerMTok);
-      if (input.maxUnitCostUsd !== null && cost > input.maxUnitCostUsd + 1e-12) continue;
+      if (ceiling !== null && cost > ceiling + 1e-12) continue;
       if (!best || cost < best.unitCostUsd) {
         best = { host, endpoint: observation.endpoint, unitCostUsd: cost, inputUsdPerMTok: observation.inputUsdPerMTok,
           outputUsdPerMTok: observation.outputUsdPerMTok, latencyP50Ms: observation.latencyP50Ms };
@@ -161,16 +182,36 @@ export function eligibleHosts(option: TierOption, input: TierSelectionInput): Ra
   return hosts;
 }
 
-const byCost = (a: RankedHost, b: RankedHost) => a.unitCostUsd - b.unitCostUsd || a.host.localeCompare(b.host);
-/** Unknown latency sorts after every measured one; ties go to the cheaper host. */
-const byLatency = (a: RankedHost, b: RankedHost) =>
-  (a.latencyP50Ms ?? Number.POSITIVE_INFINITY) - (b.latencyP50Ms ?? Number.POSITIVE_INFINITY) || byCost(a, b);
+interface Candidate {
+  readonly option: TierOption;
+  /** Position of the option in the configured list, then of the host in its pool: the reviewed speed prior. */
+  readonly optionIndex: number;
+  readonly hostIndex: number;
+  readonly host: RankedHost;
+}
 
 /**
- * Pick the option and hosts for one request. Live: among options whose pools have an eligible host, "cheapest"
- * takes the lowest unit cost, "fastest" the lowest measured latency, "best" the highest eval score (cost breaks
- * ties); hosts are ranked the same way, at most the pool's `_maxHosts` (every eligible host when unset). Static: when no candidate option has a
- * fresh observation at all, the first candidate (by eval score for "best", else as listed) with its static pool.
+ * Fastest first: measured p50 latency (unmeasured after every measured host), then the reviewed order (options as
+ * listed, hosts as their pool lists them; config lists the faster first), then the cheaper.
+ */
+const bySpeed = (a: Candidate, b: Candidate) =>
+  (a.host.latencyP50Ms ?? Number.POSITIVE_INFINITY) - (b.host.latencyP50Ms ?? Number.POSITIVE_INFINITY)
+  || a.optionIndex - b.optionIndex || a.hostIndex - b.hostIndex
+  || a.host.unitCostUsd - b.host.unitCostUsd;
+
+const singleHost = (host: RankedHost): SingleHostPreferences => ({
+  order: [host.host],
+  allow_fallbacks: false,
+  // OpenRouter max_price is USD per million tokens: the host may not bill above the endpoint we priced.
+  max_price: { prompt: host.inputUsdPerMTok, completion: host.outputUsdPerMTok },
+});
+
+/**
+ * Pick the one host for one request. Every tier prefers speed: among the tier's options, the fastest serving host
+ * whose live unit cost keeps the minimum margin (default 10% of what the unit earns). The tier decides which
+ * options compete and the price, hence the cost ceiling; "best" first narrows to the highest eval score that has a
+ * host keeping the margin, then picks that option's fastest host. Static: when no candidate option has a fresh
+ * observation, the first host of the first candidate (by eval score for "best", else as listed).
  */
 export function selectTierRoute(input: TierSelectionInput): TierSelection {
   const candidates = input.options.filter((option) => option.capability === input.capability
@@ -180,29 +221,24 @@ export function selectTierRoute(input: TierSelectionInput): TierSelection {
     && input.now.getTime() - observation.observedAt.getTime() <= maxAgeOf(option, input)));
   if (!observed) {
     const option = input.tier === "best" ? [...candidates].sort((a, b) => b.evalScore! - a.evalScore!)[0]! : candidates[0]!;
-    return { basis: "static", option, provider: providerPoolPreferences(option.pool) };
+    return { basis: "static", option, provider: { order: [option.pool.hosts[0]!], allow_fallbacks: false } };
   }
-  const order = input.tier === "fastest" ? byLatency : byCost;
-  const ranked = candidates
-    .map((option) => ({ option, hosts: eligibleHosts(option, input).sort(order) }))
-    .filter((entry) => entry.hosts.length > 0)
-    .sort((a, b) => input.tier === "best"
-      ? b.option.evalScore! - a.option.evalScore! || byCost(a.hosts[0]!, b.hosts[0]!)
-      : order(a.hosts[0]!, b.hosts[0]!));
+  let ranked: Candidate[] = candidates.flatMap((option, optionIndex) => eligibleHosts(option, input)
+    .map((host) => ({ option, optionIndex, hostIndex: option.pool.hosts.indexOf(host.host), host })));
+  if (input.tier === "best" && ranked.length > 0) {
+    const top = Math.max(...ranked.map((entry) => entry.option.evalScore!));
+    ranked = ranked.filter((entry) => entry.option.evalScore === top);
+  }
+  ranked.sort(bySpeed);
   const chosen = ranked[0];
   if (!chosen) {
-    return { basis: "none", reason: `no ${input.capability} host for tier ${input.tier} is serving under the cost ceiling` };
+    return { basis: "none", reason: `no ${input.capability} host for tier ${input.tier} is serving within the margin` };
   }
-  const hosts = chosen.option.pool.maxHosts === null ? chosen.hosts : chosen.hosts.slice(0, chosen.option.pool.maxHosts);
   return {
     basis: "live",
     option: chosen.option,
-    hosts,
-    provider: {
-      order: hosts.map((host) => host.host),
-      allow_fallbacks: false,
-      // OpenRouter max_price is USD per million tokens: no host may bill above the dearest chosen endpoint.
-      max_price: { prompt: Math.max(...hosts.map((host) => host.inputUsdPerMTok)), completion: Math.max(...hosts.map((host) => host.outputUsdPerMTok)) },
-    },
+    host: chosen.host,
+    alternatives: ranked.slice(1).filter((entry) => entry.option === chosen.option).map((entry) => entry.host),
+    provider: singleHost(chosen.host),
   };
 }

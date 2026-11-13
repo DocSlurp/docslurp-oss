@@ -2,13 +2,13 @@
  * OpenRouter provider pools: the hosts a route may send a request to. A pool is reviewed configuration (a host
  * joins only after its output quality is measured and it is a disclosed subprocessor); live data may rank hosts
  * inside a pool but never adds one. Each host is a distinct provider, so a second entry adds real redundancy rather
- * than a second tag of the same infrastructure. There is no fixed size limit; `_maxHosts` bounds how many hosts one
- * live route sends.
+ * than a second tag of the same infrastructure. There is no fixed size limit. A request goes to one host of the pool
+ * (provider-tiers.ts picks it); the others are retry targets, never sent alongside.
  *
  * A pool is written as `llm://` model URIs, one per host:
  *
  *   llm://openrouter/deepseek/deepseek-v4.1-flash-1017?_provider=fireworks&_sort=latency&_timeout=60s
- *   llm://openrouter/deepseek/deepseek-v4.1-flash-1017?_provider=parasail#minUptime=95
+ *   llm://openrouter/deepseek/deepseek-v4.1-flash-1017?_provider=parasail#minUptime=95&minMargin=0.15
  *
  * - The path is the model (`llm://openrouter/<vendor>/<model>`); every entry names the same model.
  * - Plain query parameters (`?reasoning=low`) are model options, passed to the model call; every entry repeats the
@@ -27,7 +27,7 @@ export type ProviderPoolSort = "price" | "latency" | "throughput" | "order";
 const SORTS: readonly ProviderPoolSort[] = ["price", "latency", "throughput", "order"];
 
 /** Pool options, by URI key (without the `_`). `provider` is per entry; the rest are pool-wide. */
-export const PROVIDER_POOL_OPTION_KEYS = ["provider", "sort", "fallbacks", "timeout", "minUptime", "maxAge", "maxHosts"] as const;
+export const PROVIDER_POOL_OPTION_KEYS = ["provider", "sort", "fallbacks", "timeout", "minUptime", "maxAge", "minMargin"] as const;
 export type ProviderPoolOptionKey = (typeof PROVIDER_POOL_OPTION_KEYS)[number];
 
 export interface ProviderPool {
@@ -49,8 +49,8 @@ export interface ProviderPool {
   readonly minUptime: number | null;
   /** `_maxAge` (duration): observations older than this are ignored. Null: the caller's default. */
   readonly maxAgeMs: number | null;
-  /** `_maxHosts` (1+): most hosts one live route sends. Null: every eligible host. */
-  readonly maxHosts: number | null;
+  /** `_minMargin` (0-1): least share of a unit's revenue the chosen host must leave. Null: the caller's default (0.10). */
+  readonly minMargin: number | null;
 }
 
 /** The provider slug of a host: `amazon-bedrock/us-east-1` -> `amazon-bedrock`. */
@@ -172,14 +172,14 @@ export function parseProviderPool(uris: readonly string[]): { pool: ProviderPool
   const minUptimeValue = poolWide.get("minUptime");
   const minUptime = minUptimeValue === undefined ? null : Number(minUptimeValue);
   if (minUptime !== null && !(minUptimeValue!.trim() !== "" && minUptime >= 0 && minUptime <= 100)) problems.push("_minUptime must be 0-100");
-  const maxHostsValue = poolWide.get("maxHosts");
-  const maxHosts = maxHostsValue === undefined ? null : Number(maxHostsValue);
-  if (maxHosts !== null && !(Number.isInteger(maxHosts) && maxHosts >= 1)) problems.push("_maxHosts must be a whole number, 1 or more");
+  const minMarginValue = poolWide.get("minMargin");
+  const minMargin = minMarginValue === undefined ? null : Number(minMarginValue);
+  if (minMargin !== null && !(minMarginValue!.trim() !== "" && minMargin >= 0 && minMargin < 1)) problems.push("_minMargin must be 0 or more and below 1");
 
   if (problems.length) return { pool: null, problems };
   return {
     pool: Object.freeze({ uris: Object.freeze([...uris]), model, modelOptions: Object.freeze({ ...modelOptions }), hosts: Object.freeze(hosts),
-      sort, fallbackBeyondPool, timeoutMs, minUptime, maxAgeMs, maxHosts }),
+      sort, fallbackBeyondPool, timeoutMs, minUptime, maxAgeMs, minMargin }),
     problems,
   };
 }
