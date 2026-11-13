@@ -32,12 +32,7 @@ const LINE_SLACK = 16;
 /** The byte budget for a document of `pageCount` pages (host-measured). */
 export function dopplerPageFactsByteBudget(pageCount: number): number {
   const pages = Number.isSafeInteger(pageCount) && pageCount > 0 ? Math.min(pageCount, DOPPLER_PAGE_FACTS_MAX_PAGES) : 1;
-  return Math.min(
-    DOPPLER_PAGE_FACTS_MAX_BYTES,
-    DOPPLER_PAGE_FACTS_BASE_BYTES + DOPPLER_PAGE_FACTS_BYTES_PER_PAGE * pages,
-    // No valid stream is longer than its line cap of full-length lines.
-    (pages + 2 + LINE_SLACK) * (DOPPLER_PAGE_FACTS_MAX_LINE_BYTES + 1),
-  );
+  return Math.min(DOPPLER_PAGE_FACTS_MAX_BYTES, DOPPLER_PAGE_FACTS_BASE_BYTES + DOPPLER_PAGE_FACTS_BYTES_PER_PAGE * pages);
 }
 
 // ── Vocabularies (closed sets; unknown values are dropped) ──

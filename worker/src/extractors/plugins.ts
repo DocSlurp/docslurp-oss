@@ -366,9 +366,8 @@ export function acceptSandboxedPdfResult(job: SandboxedPdfJob, result: Sandboxed
   const figures = figureOutcome(job, result.figures);
   if (figures) reportedFigures.set(job, figures);
   if (result.figures !== undefined) result = { ...result, figures: undefined };
-  // Bounded by the host's own count only: without one, the facts are dropped rather than bounded by the ceiling.
-  acceptSandboxedPdfPageFacts(job, result.pageFacts, pages);
-  if (result.pageFacts !== undefined) result = { ...result, pageFacts: undefined };
+  const pageFacts = result.pageFacts;
+  if (pageFacts !== undefined) result = { ...result, pageFacts: undefined };
   if (result.layoutFacts !== undefined) {
     // Routing evidence, not billing evidence: a malformed payload is dropped (routing then has no layout facts), never repaired.
     const layout = parsePageLayoutFacts(result.layoutFacts, Number.isSafeInteger(pages) && pages > 0 ? pages : MAX_REPORTED_PAGES);
@@ -377,15 +376,19 @@ export function acceptSandboxedPdfResult(job: SandboxedPdfJob, result: Sandboxed
     result = { ...result, layoutFacts: undefined };
   }
   const raw: unknown = result.ocrPages;
-  if (raw === undefined) return result;
-  const bound = Number.isSafeInteger(pages) && pages > 0 ? pages : MAX_REPORTED_PAGES;
-  if (!Array.isArray(raw) || raw.length > bound ||
-      raw.some((page) => !Number.isSafeInteger(page) || page < 1 || page > bound) || new Set(raw).size !== raw.length) {
-    throw new SandboxRunError(`Sandboxed PDF provider returned invalid ocrPages (expected unique pages 1..${bound})`, result.usage);
+  let ocrPages: number[] | undefined;
+  if (raw !== undefined) {
+    const bound = Number.isSafeInteger(pages) && pages > 0 ? pages : MAX_REPORTED_PAGES;
+    if (!Array.isArray(raw) || raw.length > bound ||
+        raw.some((page) => !Number.isSafeInteger(page) || page < 1 || page > bound) || new Set(raw).size !== raw.length) {
+      throw new SandboxRunError(`Sandboxed PDF provider returned invalid ocrPages (expected unique pages 1..${bound})`, result.usage);
+    }
+    ocrPages = [...(raw as number[])].sort((a, b) => a - b);
+    reportedOcrPages.set(job, ocrPages);
   }
-  const ocrPages = [...(raw as number[])].sort((a, b) => a - b);
-  reportedOcrPages.set(job, ocrPages);
-  return { ...result, ocrPages };
+  // Last, once nothing else can refuse the result: page facts bounded by the host's own count only (without one, dropped).
+  acceptSandboxedPdfPageFacts(job, pageFacts, pages);
+  return ocrPages ? { ...result, ocrPages } : result;
 }
 
 /**

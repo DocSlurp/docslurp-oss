@@ -144,6 +144,12 @@ describe("acceptSandboxedPdfBatchEvent", () => {
     expect(pageFactsForResend(batchFileJob(j, 1)!)).toBeUndefined();
   });
 
+  it("records no page facts for a result refused over its ocrPages (council #358 recheck N1)", () => {
+    const single = { input: "/a", output: "/b" };
+    expect(() => acceptSandboxedPdfResult(single, { exitCode: 0, stdout: "", stderr: "", ocrPages: [9], pageFacts: jsonl([docLine(), textPage(1)]) }, 3)).toThrow("invalid ocrPages");
+    expect(sandboxedPdfPageFacts(single)).toBeUndefined();
+  });
+
   it("drops facts when the host has no page count of its own (council #358 A4)", () => {
     const single = { input: "/a", output: "/b" };
     for (const pages of [0, Number.NaN, -1]) {
