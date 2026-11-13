@@ -119,6 +119,9 @@ import { recordExtractedPageEquivalents } from "../lib/page-equivalents.js";
 import { collectPageLayoutFacts } from "../lib/page-layout-evidence.js";
 import { routingFactsWithDopplerFacts } from "../lib/doppler-page-facts-layout.js";
 import { sandboxedPdfPageFacts } from "../extractors/sandboxed-pdf-page-facts.js";
+import { dopplerPageFactsMode } from "../lib/doppler-page-facts.js";
+import { DOPPLER_FACTS_EVIDENCE_SOURCE, dopplerFactsCoverEvidence, pageFactRowsFromDopplerFacts, pageImageEvidenceFromDopplerFacts } from "../lib/doppler-page-facts-evidence.js";
+import { runBillsScansAtCompletion } from "../db/page-base-fee.js";
 import { PAGE_RENDITION, pageRenditionKey } from "../lib/page-rendition.js";
 import { extractorFailureReason, extractorFallbackFor, recordExtractorFallback } from "../lib/extractor-fallback.js";
 
@@ -975,8 +978,14 @@ export class ExtractMarkdownStage implements Stage {
                       : null;
                   const hostPdfProbes = isPdf && (sandboxedPdfRoute || winningCandidate.label === VM_PDF_EXTRACTOR_ID)
                     ? "skipped-sandboxed-route" as const : isPdf ? "ran" as const : "not-pdf" as const;
+                  // The sandboxed route runs no host probe. With DOCSLURP_DOPPLER_PAGE_FACTS=use, the winning VM job's validated page
+                  // facts stand in for them (page-image evidence, the ingest report's per-page rows) when they cover every page;
+                  // otherwise the route goes without, as before. No command runs either way.
+                  const factsEvidence = hostPdfProbes === "skipped-sandboxed-route"
+                    ? await this.recordDopplerFactsEvidence(document, state, winningCandidate, winningText)
+                    : null;
                   const pageImageEvidenceUri = hostPdfProbes === "skipped-sandboxed-route"
-                    ? this.skipHostPdfEvidence(document, "page-image-evidence", sandboxReason ?? "sandboxed-pdf-winner")
+                    ? factsEvidence?.pageImageEvidenceUri ?? this.skipHostPdfEvidence(document, "page-image-evidence", sandboxReason ?? "sandboxed-pdf-winner")
                     : await this.recordDocumentImageEvidence(document, tempFile, winningText, state, { isPdf, format }, signal);
                   // Every page OCR produced text for was read by a model: record the read per page, which is the only
                   // thing that bills a page Rich (db/page-base-fee.ts). Vision reading it too is the same page, charged
@@ -1220,6 +1229,8 @@ export class ExtractMarkdownStage implements Stage {
                       nativePdf: nativePdfStats,
                       // Host poppler probes (page facts, page-image evidence, OCR-ledger text layer) for this PDF.
                       hostPdfProbes,
+                      // Sandboxed route: whether Doppler page facts stood in for those probes, and why not.
+                      ...(factsEvidence ? { dopplerFactsEvidence: factsEvidence.stats } : {}),
                       ...ocrReadStats(ocrReadPages, winningCandidate.ocrPages ? "extractor-reported" : "inferred", scanFill?.pages ?? [], ocrFailedPages(state.artifactLedger, document.id).size),
                     },
                   };
@@ -1718,6 +1729,64 @@ export class ExtractMarkdownStage implements Stage {
     if (format !== "pdf") return null;
     if (resolvePdfExtractorSetting() === VM_PDF_EXTRACTOR_ID || sandboxedPdfConfigured()) return "sandboxed-pdf-deployment";
     return this.tryResolveExtractorOrder(format, configured).includes(VM_PDF_EXTRACTOR_ID) ? "sandboxed-pdf-route" : null;
+  }
+
+  /**
+   * Routing evidence from the winning sandboxed candidate's Doppler page facts (DOCSLURP_DOPPLER_PAGE_FACTS=use), in place of
+   * the host probes this route never runs: page-image evidence for classify-route (vision fallback on) and the ingest report's
+   * per-page source rows. Fails closed: another mode, another winner, or facts that do not cover every page of the host's own
+   * count with the families needed (lib/doppler-page-facts-evidence.ts) build nothing, and the route goes without, as before.
+   * Never billing: no size or read is recorded, and the rows are not written for a run that bills scanned pages from them at
+   * completion (runBillsScansAtCompletion). Never throws on facts; a storage failure is logged and the evidence is skipped.
+   */
+  private async recordDopplerFactsEvidence(
+    document: import("../models.js").Document,
+    state: import("../pipeline/pipeline.js").WorkflowState,
+    candidate: ExtractedCandidate,
+    winningText: string,
+  ): Promise<{ pageImageEvidenceUri: string | null; stats: Record<string, unknown> }> {
+    const skipped = (reason: string) => {
+      console.log(`[doppler-page-facts] document=${document.id} evidence=skipped reason=${reason}`);
+      return { pageImageEvidenceUri: null, stats: { status: "skipped", reason } };
+    };
+    const mode = dopplerPageFactsMode();
+    if (mode !== "use") return skipped(`mode-${mode}`);
+    if (candidate.label !== VM_PDF_EXTRACTOR_ID || !candidate.pageFacts) return skipped("no-facts");
+    const pageCount = Math.max(1, Math.trunc(document.pageCount) || 1);
+    const coverage = dopplerFactsCoverEvidence(candidate.pageFacts, pageCount);
+    if (!coverage.covered) return skipped(coverage.reason);
+    let pageImageEvidenceUri: string | null = null;
+    let evidencePages = 0;
+    let evidenceReason: string | null = null;
+    try {
+      if (!state.run.pipeline.visionFallback) evidenceReason = "vision-fallback-off";
+      else {
+        const pageTexts = pageAlignedTexts(winningText, pageCount);
+        const pages = pageTexts ? pageImageEvidenceFromDopplerFacts({ facts: candidate.pageFacts, pageCount, pageTexts }) : null;
+        if (!pageTexts) evidenceReason = "text-not-page-aligned";
+        else if (pages) {
+          pageImageEvidenceUri = await this.storePageImageEvidence(document, state, pages, DOPPLER_FACTS_EVIDENCE_SOURCE);
+          evidencePages = pages.length;
+        }
+      }
+    } catch (error) {
+      rethrowIfTeardown(error);
+      console.warn(`[doppler-page-facts] document=${document.id} page-image evidence not stored: ${error instanceof Error ? error.name : typeof error}`);
+      evidenceReason = "store-failed";
+    }
+    // A run without a page billing pin bills pages with no text bytes and an image as scans at completion: facts rows would
+    // raise its charge, so it keeps going without them.
+    const legacyBilling = runBillsScansAtCompletion(state);
+    const rows = legacyBilling ? [] : pageFactRowsFromDopplerFacts({ facts: candidate.pageFacts, pageCount, documentId: document.id, runId: state.run.id });
+    await recordPageFacts(state.store, rows);
+    console.log(`[doppler-page-facts] document=${document.id} evidence=built pages=${pageCount} evidencePages=${evidencePages} rows=${rows.length}${legacyBilling ? " rows-skipped=legacy-billing" : ""}`);
+    return {
+      pageImageEvidenceUri,
+      stats: {
+        status: "built", pages: pageCount, evidencePages, rows: rows.length,
+        ...(evidenceReason ? { evidenceSkipped: evidenceReason } : {}), ...(legacyBilling ? { rowsSkipped: "legacy-billing" } : {}),
+      },
+    };
   }
 
   /** Host PDF evidence the sandboxed route does without; logged with the reason so the gap is visible. */
