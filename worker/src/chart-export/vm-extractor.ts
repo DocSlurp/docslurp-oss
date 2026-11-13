@@ -6,8 +6,8 @@
  *
  * Inputs, each only when a free signal says it can hold a chart (a parser-VM boot is not free):
  * - the document source when its type can carry exact chart data: DOCX/PPTX/XLSX (`office`) with chart parts counted by
- *   quarantine; EPUB (`epub`) or HTML (`html`) with an embed hint or a detected candidate; a standalone SVG (`svg`) or
- *   JSON (`json`) document, which is itself the candidate;
+ *   quarantine; EPUB (`epub`), HTML (`html`), a standalone SVG (`svg`) or JSON (`json`) document with an embed hint or a
+ *   detected candidate (a file type alone never boots the VM);
  * - the stored Doppler SVG figures (`svg`), all in ONE guest run, each placed on the page the figure index records.
  */
 import { DOPPLER_FIGURE_LIMITS, dopplerFigureRecordSchema, dopplerFigureSlot, type BBox, type DopplerFigureRecord } from "@docslurp/shared";
@@ -129,7 +129,14 @@ export interface VmExtractorDeps {
  * Why the source goes to the guest, or null when no free signal says it can hold a chart (no VM run).
  */
 export function sourceRunReason(kind: DeterministicInputKind, signals: DeterministicVisualInput["signals"]): string | null {
-  if (kind === "svg" || kind === "json") return "standalone-document";
+  // A standalone SVG or JSON document is no longer a chart signal by its type alone (council M1: any caller could boot
+  // an unbilled VM per tiny file). It needs a signal the host already holds without parsing the bytes: a candidate from
+  // the router plan or media map, or an embed hint the parser VM recorded. Detecting a chart spec inside the guest that
+  // converts the document belongs with the inline-VM work (folding extraction into a VM the document already boots).
+  if (kind === "svg" || kind === "json") {
+    if (signals?.htmlEmbedHints) return "embed-hints";
+    return (signals?.candidates ?? 0) > 0 ? "candidates" : null;
+  }
   if (kind === "office") return (signals?.officeChartParts ?? 0) > 0 ? "office-chart-parts" : null;
   if (signals?.htmlEmbedHints) return "embed-hints";
   return (signals?.candidates ?? 0) > 0 ? "candidates" : null;
@@ -166,6 +173,18 @@ export function createVmDeterministicVisualExtractor(deps: VmExtractorDeps): Det
     const options = { diagrams: input.diagrams !== false };
     const context = `document=${document.id}`;
     let guestDown = false;
+    // One admission per document (the per-org free VM cap), asked before the first VM run and reused after.
+    let admitted: Promise<boolean> | null = null;
+    const admit = (): Promise<boolean> => (admitted ??= (input.admitVmRun ? input.admitVmRun() : Promise.resolve(true)));
+    let capLogged = false;
+
+    /** Asked before any bytes are staged for the guest: a refused document downloads nothing and boots no VM. */
+    const admittedToVm = async (): Promise<boolean> => {
+      if (await admit()) return true;
+      if (!capLogged) log(`[chart-export] parser VM skipped ${context} reason=org-free-vm-cap`);
+      capLogged = true;
+      return false;
+    };
 
     const guard = async (reason: string, inputs: number, run: () => Promise<void>): Promise<void> => {
       if (guestDown) return;
@@ -187,7 +206,11 @@ export function createVmDeterministicVisualExtractor(deps: VmExtractorDeps): Det
 
     const sourceKind = deterministicSourceKind(document.mimeType);
     const reason = sourceKind ? sourceRunReason(sourceKind, input.signals) : null;
-    if (sourceKind && document.sourceKey && reason) {
+    const sourceAdmitted = !!(sourceKind && document.sourceKey && reason) && await admittedToVm();
+    // A source the free-VM cap turned away is recorded, not just logged (council r8 L1).
+    if (sourceKind && document.sourceKey && reason && !sourceAdmitted) deferred.push({ input: "source", svgIndex: 0, count: 1, reason: "vm-cap", pageNumber: null, figureId: null });
+    if (sourceAdmitted && sourceKind && document.sourceKey && reason) {
+      let sourceRan = false;
       const path = await stageSourceFile(
         deps.storage,
         {
@@ -203,17 +226,21 @@ export function createVmDeterministicVisualExtractor(deps: VmExtractorDeps): Det
           results.push(result);
           for (const visual of result.visuals) partials.push(toPartial(visual, null));
           for (const d of result.deferred ?? []) deferred.push({ input: "source", svgIndex: d.svgIndex, count: d.count, reason: d.reason, pageNumber: null, figureId: null });
+          sourceRan = true;
         });
       } finally {
         await cleanupTempFile(path).catch(() => undefined);
       }
-    } else if (sourceKind) {
+      // A refused or failed run loses the whole source: recorded so the deferred pass can retry it (council r8 L1).
+      if (!sourceRan) deferred.push({ input: "source", svgIndex: 0, count: 1, reason: "guest-unavailable", pageNumber: null, figureId: null });
+    } else if (sourceKind && !(document.sourceKey && reason)) {
       log(`[chart-export] parser VM skipped ${context} kind=${sourceKind} reason=no-chart-signal`);
     }
 
     const figures = await svgFigures(deps, input.artifacts.dopplerFiguresIndexUri, Math.max(1, document.pageCount), input.dopplerFiguresIndex);
-    const sent = figures.slice(0, MAX_SVG_FIGURES_PER_DOCUMENT);
+    const sent = figures.length > 0 && await admittedToVm() ? figures.slice(0, MAX_SVG_FIGURES_PER_DOCUMENT) : [];
     const staged: Array<{ path: string; page: number; bbox: BBox | null; id: string }> = [];
+    const unavailable = new Set<string>();
     try {
       for (const figure of sent) {
         if (guestDown) break;
@@ -222,7 +249,7 @@ export function createVmDeterministicVisualExtractor(deps: VmExtractorDeps): Det
         const uri = slot ? input.artifacts.artifactUri?.(slot) ?? null : null;
         const key = uri ? keyFromStorageUri(uri, deps.storage.bucket) : null;
         // A figure with no readable file is recorded (council r7 L1), not silently skipped.
-        if (!key) { deferred.push({ input: "doppler-figure", svgIndex: 0, count: 1, reason: "figure-unavailable", pageNumber: figure.page, figureId: figure.id }); continue; }
+        if (!key) { unavailable.add(figure.id); deferred.push({ input: "doppler-figure", svgIndex: 0, count: 1, reason: "figure-unavailable", pageNumber: figure.page, figureId: figure.id }); continue; }
         staged.push({ path: await deps.storage.downloadToTempFile(key, "docslurp-chart-figure-*.svg"), page: figure.page, bbox: figureBox(figure.bbox), id: figure.id });
       }
       if (staged.length > 0) {
@@ -240,9 +267,15 @@ export function createVmDeterministicVisualExtractor(deps: VmExtractorDeps): Det
     } finally {
       await Promise.all(staged.map((s) => cleanupTempFile(s.path).catch(() => undefined)));
     }
-    if (figures.length > sent.length && !guestDown) log(`[chart-export] svg figures capped ${context} figures=${figures.length} sent=${sent.length}`);
-    // Figures past the per-document batch cap: recorded one by one, so the deferred pass can read each by its id.
-    for (const figure of figures.slice(sent.length)) deferred.push({ input: "doppler-figure", svgIndex: 0, count: 1, reason: "figure-batch-limit", pageNumber: figure.page, figureId: figure.id });
+    if (figures.length > sent.length && !guestDown && !capLogged) log(`[chart-export] svg figures capped ${context} figures=${figures.length} sent=${sent.length}`);
+    // Figures not run, recorded one by one so the deferred pass can read each by its id (council r7 L1, r8 L1): past
+    // the per-document batch cap, refused by the org's free-VM cap, or not run because the guest was down.
+    const ran = new Set(staged.map((s) => s.id));
+    for (const [k, figure] of figures.entries()) {
+      if (ran.has(figure.id) || unavailable.has(figure.id)) continue;
+      const reason = capLogged && sent.length === 0 ? "vm-cap" : guestDown ? "guest-unavailable" : k >= sent.length ? "figure-batch-limit" : null;
+      if (reason) deferred.push({ input: "doppler-figure", svgIndex: 0, count: 1, reason, pageNumber: figure.page, figureId: figure.id });
+    }
 
     // Per reason, so the log never adds SVGs, parts and visuals together (council r7 I1).
     if (deferred.length) {

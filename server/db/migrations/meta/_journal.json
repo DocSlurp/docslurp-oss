@@ -1009,6 +1009,13 @@
       "when": 1796000000000,
       "tag": "0150_doppler_scan_not_copyable",
       "breakpoints": true
+    },
+    {
+      "idx": 144,
+      "version": "7",
+      "when": 1796100000000,
+      "tag": "0151_chart_export_tier",
+      "breakpoints": true
     }
   ]
 }

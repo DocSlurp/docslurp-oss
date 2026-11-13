@@ -19,12 +19,15 @@ vi.mock("../db.js", () => ({
 
 vi.mock("../services/organizations.js", () => ({
   canContributeToProject: vi.fn(() => true),
+  canEditProject: vi.fn(() => true),
   getProjectAccess: getProjectAccessMock,
+  getProjectAccessWithPipeline: getProjectAccessMock,
   listAccessibleProjectIds: listAccessibleProjectIdsMock
 }));
 
 vi.mock("../lib/request-context.js", () => ({
-  currentRequestId: currentRequestIdMock
+  currentRequestId: currentRequestIdMock,
+  currentRequestApiKeyId: vi.fn(() => null)
 }));
 
 vi.mock("../lib/file-urls.js", () => ({
