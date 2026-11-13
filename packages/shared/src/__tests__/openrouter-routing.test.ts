@@ -18,6 +18,14 @@ function reachable(provider: Record<string, unknown>): string[] {
 }
 
 describe("OpenRouter provider routing", () => {
+  it("caps every routed request's output price under $50 per 1M, and a caller can lower it but not raise it", () => {
+    expect(withOpenRouterProviderPreferences({ model: "openai/gpt-6.1-sol" }).provider).toEqual({ max_price: { completion: 49.99 } });
+    expect(withOpenRouterProviderPreferences({ model: "openai/gpt-6.1-sol", provider: { max_price: { completion: 80, prompt: 3 } } }).provider)
+      .toEqual({ max_price: { completion: 49.99, prompt: 3 } });
+    expect(withOpenRouterProviderPreferences({ model: "openai/gpt-6.1-sol", provider: { max_price: { completion: 12 } } }).provider)
+      .toEqual({ max_price: { completion: 12 } });
+  });
+
   it("sends GLM and DeepSeek to their cheapest FP8-or-better host and leaves other models alone", () => {
     for (const model of ["z-ai/glm-5.3-flash", "deepseek/deepseek-v4.1-flash-1017"]) {
       expect(openRouterProviderPreferences(model)).toEqual(PRICE);
@@ -27,9 +35,9 @@ describe("OpenRouter provider routing", () => {
 
   it("allows China-based hosts by default: a price-routed request is not restricted", () => {
     const body = { model: "deepseek/deepseek-v4.1-flash-1017" };
-    expect(withOpenRouterProviderPreferences(body, { allowChinaProviders: true }).provider).toEqual(PRICE);
+    expect(withOpenRouterProviderPreferences(body, { allowChinaProviders: true }).provider).toEqual({ ...PRICE, max_price: { completion: 49.99 } });
     const plain = { model: "anthropic/claude-haiku-5.5" };
-    expect(withOpenRouterProviderPreferences(plain, { allowChinaProviders: true })).toBe(plain);
+    expect(withOpenRouterProviderPreferences(plain, { allowChinaProviders: true })).toEqual({ ...plain, provider: { max_price: { completion: 49.99 } } });
   });
 
   it("restricts an opted-out request to providers with a known non-China headquarters, for any model", () => {
@@ -63,7 +71,7 @@ describe("OpenRouter provider routing", () => {
     const url = "https://openrouter.ai/api/v1/chat/completions";
     setOpenRouterProviderPolicyResolver(async () => RESTRICTED);
     await routed(url, { method: "POST", body: JSON.stringify({ model: "openai/gpt-6-luna", messages: [] }) });
-    expect(JSON.parse(base.mock.calls[0]![1]!.body as string).provider).toEqual({ only: [...NON_CHINA_PROVIDER_SLUGS], ignore: [...CHINA_PROVIDER_SLUGS] });
+    expect(JSON.parse(base.mock.calls[0]![1]!.body as string).provider).toEqual({ only: [...NON_CHINA_PROVIDER_SLUGS], ignore: [...CHINA_PROVIDER_SLUGS], max_price: { completion: 49.99 } });
     // A restricted body that cannot carry the restriction is never sent.
     await expect(routed(url, { method: "POST", body: "not json" })).rejects.toThrow(ProviderRegionRefusedError);
     expect(base).toHaveBeenCalledTimes(1);
@@ -72,11 +80,11 @@ describe("OpenRouter provider routing", () => {
     expect(await currentOpenRouterProviderPolicy()).toEqual(RESTRICTED);
     await routed(url, { method: "POST", body: JSON.stringify({ model: "deepseek/deepseek-v4.1-flash" }) });
     expect(JSON.parse(base.mock.calls[1]![1]!.body as string).provider).toMatchObject({ only: [...NON_CHINA_PROVIDER_SLUGS] });
-    // Allowed: untouched.
+    // Allowed: no China restriction, only the output-price ceiling.
     setOpenRouterProviderPolicyResolver(() => ({ allowChinaProviders: true }));
     const init = { method: "POST", body: JSON.stringify({ model: "openai/gpt-6-luna" }) };
     await routed(url, init);
-    expect(base.mock.calls[2]![1]).toBe(init);
+    expect(JSON.parse(base.mock.calls[2]![1]!.body as string).provider).toEqual({ max_price: { completion: 49.99 } });
     await routed(url, { method: "POST", body: "not json" });
     expect(base.mock.calls[3]![1]!.body).toBe("not json");
     // No resolver at all (scripts, benchmarks): allowed.

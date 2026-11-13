@@ -2,7 +2,7 @@ import { chartExportActive, chartExportModelsActive } from "./config.js";
 import { extractDeterministicVisuals as guestExtract } from "./extractors/index.js";
 import { validateDeterministicResult } from "./extractors/host.js";
 import type { DeterministicVisualResult as GuestResult } from "./extractors/types.js";
-import { INLINE_CHART_KINDS, INLINE_REFUSE_REASONS, INLINE_SKIP_REASONS, inlineChartPlan, type InlineChartKind, type InlineInspectionView } from "./inline-guest.js";
+import { INLINE_CHART_KINDS, INLINE_CHART_LIMITS, INLINE_REFUSE_REASONS, INLINE_SKIP_REASONS, inlineChartPlan, type InlineChartKind, type InlineInspectionView } from "./inline-guest.js";
 
 /*
  * Inline chart extraction, host half (`DOCSLURP_CHART_EXPORT_INLINE=1`). The free chart rungs ride in the quarantine
@@ -109,6 +109,6 @@ export function inlineChartsInProcess(bytes: Buffer, request: InlineChartRequest
   const input = plan.packaged
     ? { kind: request.kind as "office" | "epub", bytes }
     : { kind: request.kind as "svg" | "html" | "json", text: text ?? bytes.toString("utf8") };
-  const result = validateDeterministicResult(guestExtract(input, { diagrams: request.diagrams }));
+  const result = validateDeterministicResult(guestExtract(input, { diagrams: request.diagrams, outputBudget: INLINE_CHART_LIMITS.outputBudget }));
   return { status: "ok", ms: Math.round(performance.now() - started), result };
 }

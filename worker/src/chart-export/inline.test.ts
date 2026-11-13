@@ -136,12 +136,29 @@ console.log(JSON.stringify({ status: out.status, calls: out.result?.calls, visua
   });
 
   describe("unit containment (#364's worker): a hostile unit loses only itself, never the inspection", () => {
+    // The production bundle compiles the fault hooks out (#364 council r9 L3): these tests run the same guest scripts
+    // beside a bundle built with them in, as #364's own containment tests do.
+    let hooked: string;
+    beforeAll(async () => {
+      hooked = path.join(dir, "hooked");
+      await mkdir(path.join(hooked, "scripts"), { recursive: true });
+      await mkdir(path.join(hooked, "dist/chart-export/extractors"), { recursive: true });
+      for (const f of ["chart-inline.mjs", "chart-export-worker.mjs", "chart-export-extract.mjs"]) await copyFile(path.join(workerRoot, "scripts", f), path.join(hooked, "scripts", f));
+      for (const f of ["inline-guest.js", "extractors/limits.js"]) await copyFile(path.join(workerRoot, "dist/chart-export", f), path.join(hooked, "dist/chart-export", f));
+      const { build } = await import("esbuild");
+      await build({
+        entryPoints: [path.join(workerRoot, "dist/chart-export/extractors/guest-entry.js")],
+        outfile: path.join(hooked, "dist/chart-export/guest.bundle.mjs"),
+        bundle: true, platform: "node", format: "esm", logLevel: "silent", absWorkingDir: workerRoot,
+        define: { __CHART_GUEST_TEST_HOOKS__: "true" },
+      });
+    }, 60_000);
     const deck = () => pptx([[1, chart], [2, chartXml({ title: "Expansion to Tokyo", plots: [barPlot([{ name: "Flights", cats: Q, vals: [3, 5, 8] }])] })]]);
     const officeInspection = (bytes: Uint8Array) => ({ sniffed: { encoding: null, container: "zip" }, archive: { kind: "zip", suspicious: false, inspectable: true, chartParts: 2, entryCount: 10 } });
     async function contained(bytes: Uint8Array, kind: string, fault: string | null, workerUrl?: URL): Promise<Record<string, unknown>> {
       const file = path.join(dir, `unit-${Math.random().toString(36).slice(2)}`);
       await writeFile(file, bytes);
-      const { inlineCharts } = await import(pathToFileURL(path.join(workerRoot, "scripts/chart-inline.mjs")).href);
+      const { inlineCharts } = await import(pathToFileURL(path.join(fault ? hooked : workerRoot, "scripts/chart-inline.mjs")).href);
       const inspection = kind === "office" ? officeInspection(bytes) : { sniffed: { encoding: "utf-8", container: null }, archive: null };
       if (fault) process.env.DOCSLURP_CHART_GUEST_TEST_FAULT = fault;
       try {
@@ -157,7 +174,7 @@ console.log(JSON.stringify({ status: out.status, calls: out.result?.calls, visua
       const output = path.join(dir, `${tag}-res.json`);
       await writeFile(input, bytes);
       await writeFile(request, JSON.stringify({ kind }));
-      await run(process.execPath, [path.join(workerRoot, "scripts/chart-export-extract.mjs"), input, request, output], { cwd: workerRoot, env: { ...process.env, DOCSLURP_CHART_GUEST_TEST_FAULT: fault } });
+      await run(process.execPath, [path.join(hooked, "scripts/chart-export-extract.mjs"), input, request, output], { cwd: workerRoot, env: { ...process.env, DOCSLURP_CHART_GUEST_TEST_FAULT: fault } });
       return JSON.parse(await readFile(output, "utf8"));
     }
     it.each([["crash", "unit-crashed"], ["oom", "unit-crashed"]])("a unit that %ss is lost alone and counted; the other chart stands; the same as the standalone guest", async (fault, reason) => {
@@ -170,6 +187,28 @@ console.log(JSON.stringify({ status: out.status, calls: out.result?.calls, visua
       expect(validateInlineCharts(out)).toMatchObject({ status: "ok" });
       expect(result).toEqual(await standaloneWith(bytes, "office", `${fault}:chart2`));
     }, 60_000);
+    it("the production bundle ignores the fault variable: nothing is lost", async () => {
+      const file = path.join(dir, `prod-${Math.random().toString(36).slice(2)}`);
+      const bytes = deck();
+      await writeFile(file, bytes);
+      const { inlineCharts } = await import(pathToFileURL(path.join(workerRoot, "scripts/chart-inline.mjs")).href);
+      process.env.DOCSLURP_CHART_GUEST_TEST_FAULT = "crash:chart2";
+      try {
+        const out = await inlineCharts(Buffer.from(bytes), { kind: "office", diagrams: true }, officeInspection(bytes), file);
+        expect((out as { result: { visuals: unknown[]; deferred?: unknown } }).result.visuals).toHaveLength(2);
+        expect((out as { result: { deferred?: unknown } }).result.deferred).toBeUndefined();
+      } finally {
+        delete process.env.DOCSLURP_CHART_GUEST_TEST_FAULT;
+      }
+    }, 60_000);
+    it("each worker gets the batch-wide output budget, an empty environment and the {visuals, bytes} skip map", async () => {
+      const echo = path.join(dir, `echo-${Math.random().toString(36).slice(2)}.mjs`);
+      await writeFile(echo, `import { parentPort } from "node:worker_threads";
+parentPort.on("message", (task) => parentPort.postMessage({ t: "result", result: { schemaVersion: "chart-export-deterministic@v1", visuals: [], refusals: [], echo: { outputBudget: task.outputBudget, env: Object.keys(process.env).length, skip: task.skip } } }));`);
+      const out = await contained(Buffer.from(genericBar(["A", "B"], [1, 2], 3)), "svg", null, pathToFileURL(echo));
+      expect((out as { result: { echo: unknown } }).result.echo).toEqual({ outputBudget: INLINE_CHART_LIMITS.outputBudget, env: 0, skip: [] });
+      expect(INLINE_CHART_LIMITS.outputBudget).toBeLessThan(INLINE_CHART_LIMITS.maxResultBytes);
+    }, 30_000);
     it("a unit that hangs is a unit-timeout, within the step's bound; the other chart stands", async () => {
       const started = Date.now();
       const out = await contained(deck(), "office", "hang:chart2");

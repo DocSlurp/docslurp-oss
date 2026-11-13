@@ -48,12 +48,24 @@ export function safeJsonParse(text: string): Json | undefined {
 }
 
 /** Top-level `{...}` and `[...]` regions in a script body (string- and comment-aware), in order. */
-export function jsonRegions(body: string, max: number = CHART_EXTRACT_LIMITS.maxJsonCandidates, stats?: EmbeddedScanStats): Array<{ start: number; text: string }> {
+export function jsonRegions(body: string, max: number = CHART_EXTRACT_LIMITS.maxJsonCandidates, stats?: EmbeddedScanStats, scan?: ScanBudget): Array<{ start: number; text: string }> {
+  // A shared scan budget stops the scan at `scan.left` characters; what it reached is charged after (council r9).
+  const end = scan ? Math.min(body.length, Math.max(0, scan.left)) : body.length;
+  const { out, scanned } = regionsUpTo(body, end, max, stats);
+  if (scan) { scan.left -= scanned; if (end < body.length) scan.exhausted = true; }
+  return out;
+}
+
+/** Characters one block's Plotly call windows may scan in all, and whether a scan was cut by it. */
+export interface ScanBudget { left: number; exhausted: boolean }
+
+function regionsUpTo(body: string, end: number, max: number, stats: EmbeddedScanStats | undefined): { out: Array<{ start: number; text: string }>; scanned: number } {
   const out: Array<{ start: number; text: string }> = [];
   let depth = 0;
   let start = -1;
   let quote = "";
-  for (let i = 0; i < body.length; i++) {
+  let i = 0;
+  for (; i < end; i++) {
     const c = body[i]!;
     if (quote) {
       if (c === "\\") { i++; continue; }
@@ -61,13 +73,13 @@ export function jsonRegions(body: string, max: number = CHART_EXTRACT_LIMITS.max
       continue;
     }
     if (c === "\"" || c === "'" || c === "`") { quote = c; continue; }
-    if (c === "/" && body[i + 1] === "/" && depth === 0) { const e = body.indexOf("\n", i); i = e < 0 ? body.length : e; continue; }
-    if (c === "/" && body[i + 1] === "*") { const e = body.indexOf("*/", i + 2); i = e < 0 ? body.length : e + 1; continue; }
+    if (c === "/" && body[i + 1] === "/" && depth === 0) { const e = body.indexOf("\n", i); i = e < 0 || e > end ? end : e; continue; }
+    if (c === "/" && body[i + 1] === "*") { const e = body.indexOf("*/", i + 2); i = e < 0 || e + 1 > end ? end : e + 1; continue; }
     if (c === "{" || c === "[") {
       if (depth === 0) start = i;
       depth++;
       // Too deep to be a spec: the rest of the body is not scanned, and that is counted (council r8 L1).
-      if (depth > CHART_EXTRACT_LIMITS.maxJsonDepth * 4) { if (stats) stats.overflow++; return out; }
+      if (depth > CHART_EXTRACT_LIMITS.maxJsonDepth * 4) { if (stats) stats.overflow++; return { out, scanned: i + 1 }; }
     } else if (c === "}" || c === "]") {
       if (depth === 0) continue;
       depth--;
@@ -76,12 +88,12 @@ export function jsonRegions(body: string, max: number = CHART_EXTRACT_LIMITS.max
         if (i + 1 - start > CHART_EXTRACT_LIMITS.maxJsonBytes) { if (stats) stats.overflow++; }
         else if (out.length < max) out.push({ start, text: body.slice(start, i + 1) });
         else if (stats) stats.overflow++;
-        else return out;
+        else return { out, scanned: i + 1 };
         start = -1;
       }
     }
   }
-  return out;
+  return { out, scanned: Math.min(i, end) };
 }
 
 // ---- Vega-Lite ----------------------------------------------------------------------------------------------------
@@ -543,16 +555,20 @@ function specsFromBlocks(blocks: EmbeddedBlock[], hits: EmbeddedSpecHit[], seen:
     let calls = 0;
     // A data region several calls point at is parsed once (offsets in this block; council r8 L2).
     const dataSeen = new Set<number>();
+    // The call windows share one scan budget per block: a call finds its data and layout in the first few regions, so
+    // ordinary pages use about one pass over the body; nested or unclosed calls that would each rescan a whole window
+    // stop at it, and the calls left are counted.
+    const scan: ScanBudget = { left: Math.max(16 * 1024 * 1024, 4 * block.body.length), exhausted: false };
     for (const call of block.body.matchAll(PLOTLY_CALL)) {
-      // Calls past 50 are counted, not run (council r8 L1).
-      if (++calls > 50) { stats.overflow++; continue; }
+      // Calls past 50, and calls after the scan budget ran out, are counted, not run (council r8 L1).
+      if (++calls > 50 || scan.exhausted) { stats.overflow++; continue; }
       // Scan from inside the call's parentheses so a call nested in a block is still found.
       // A window after the call: the data and layout regions are each at most maxJsonBytes, so nothing usable is cut,
       // and 50 calls cannot each rescan a whole 5 MiB body.
       const from = call.index! + call[0].length;
-      const after = jsonRegions(block.body.slice(from, from + 2 * CHART_EXTRACT_LIMITS.maxJsonBytes + 4096), 4);
+      const after = jsonRegions(block.body.slice(from, from + 2 * CHART_EXTRACT_LIMITS.maxJsonBytes + 4096), 4, undefined, scan);
       const dataRegion = after.find((r) => r.text.startsWith("["));
-      if (!dataRegion) continue;
+      if (!dataRegion) { if (scan.exhausted) stats.overflow++; continue; }
       if (dataSeen.has(from + dataRegion.start)) continue;
       dataSeen.add(from + dataRegion.start);
       const data = safeJsonParse(dataRegion.text);

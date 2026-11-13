@@ -36,6 +36,11 @@ export const INLINE_CHART_LIMITS = {
    */
   maxRssGrowthMb: 512,
   rssPollMs: 5,
+  /**
+   * Output budget of the inline answer's visuals (#364 `outputBudget`): their serialized bytes, inside maxResultBytes with
+   * room for up to 1,000 refusals and deferral entries. Past it a visual is counted (output-limit), never thrown.
+   */
+  outputBudget: 4 * 1024 * 1024 - 512 * 1024,
   /** The inspection's own JSON, without the chart answer (unchanged from before inline charts). */
   maxInspectionBytes: 2 * 1024 * 1024,
 } as const;

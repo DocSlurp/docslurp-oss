@@ -65,6 +65,15 @@ export const CHART_EXTRACT_LIMITS = {
   maxZipTotalBytes: 128 * 1024 * 1024,
   maxZipRatio: 200,
   maxZipDepth: 16,
+  /**
+   * Output size (council r9 H1: 32 series sharing one range of 2,000 long labels made one chart 39.5 MB). Per chart:
+   * points kept and their serialized UTF-8 size; past either the series are cut and the chart kept, `truncated`. Per
+   * input (and per guest batch): the visuals' serialized size; past it, later visuals are counted as `output-limit`, never
+   * thrown. 12 MiB keeps every result well under the host's 16 MiB result cap with the refusal and deferral lists.
+   */
+  maxChartPoints: 20_000,
+  maxChartBytes: 512 * 1024,
+  maxOutputBytes: 12 * 1024 * 1024,
   /** Workbook cells parsed for one input's chart references, embedded workbooks included (`workbook-too-large`). */
   maxWorkbookCells: 2_000_000,
   /** Chart parts / SVG files / HTML documents read from one package. */

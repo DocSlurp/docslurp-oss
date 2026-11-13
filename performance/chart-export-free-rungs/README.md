@@ -262,6 +262,71 @@ run by `run-guest-in-modal-vm.mjs` and `guest-repro-run.mjs` exactly as producti
 - **Superseded:** round 7's "12.1 s" walk-bound worst case still holds (12.2 s here), but round 8's Office and number
   repros were not bounded by it. They are now, and containment covers whatever is found next.
 
+### Output bounds (council round 9)
+
+Containment bounds what a unit may cost, not what it may produce. Round 9 found the gap: 32 series sharing one
+2,000-row range of 200-character labels serialize to 39.5 MB from an 85 KB XLSX, so the guest exited 1, and a 40-chart
+copy was killed out of memory at 3.7 GB. Output is now bounded at three levels, each one cuts or counts and never throws.
+
+- **Per chart.** `finalizeChart` keeps each chart within `maxChartPoints` (20,000) and `maxChartBytes` (512 KiB,
+  counted in UTF-8 bytes plus a fixed per-point overhead). Past either it cuts the chart, keeps it and marks it
+  `truncated`.
+- **Per input.** `pushVisual` keeps an input's visuals within `outputBudget` (default `maxOutputBytes`, 12 MiB, under the
+  16 MiB result cap and a small share of the VM's memory).
+  - A visual that does not fit is counted under the new closed reason `output-limit`.
+  - Once the input is full, later Office chart parts and SVGs are counted without being parsed.
+  - Bytes ride the resume skip list (`UnitCharge {visuals, bytes}`), so a worker restarted after a failure starts from
+    the right total.
+- **Per merge and per batch.** After a failure, the parent re-checks the same budget while merging units, counting
+  any excess as `output-limit` or `visual-limit`. The figures of one batch share one budget. The 16 MiB check stays,
+  as an assertion only.
+- **Per unit in the worker → parent stream.** A unit's message carries only the visuals that fit the budget, so it is
+  bounded by the same 12 MiB plus the capped refusal and deferral lists.
+
+**Cheaper on the way:**
+- **Office labels.** Series in one chart usually share one category range, so each distinct label is cleaned once per
+  chart. `cleanLabel` also skips its code-point copy when nothing needs cutting. Output is identical; the 40-chart
+  repro went from 25 s to 2.8 s locally.
+- **Plotly windows.** The call windows of one block share one scan budget: 4× the body, at least 16 MiB. A call finds
+  its data in the first few regions, so ordinary pages use about one pass. Nested or unclosed calls stop at the budget,
+  and the calls left are counted in `overflow`. The r8 Plotly EPUB went from 32–43 s to 14.9 s with the same 27
+  visuals.
+
+**Lows:**
+- **L1.** Failures no longer stop an input after 7 workers; workers continue until the deadline.
+- **L2.** A crash outside any unit is recorded as a counted `unit-crashed` deferral, as well as a refusal.
+- **L3.** The fault-injection hooks sit behind the build-time constant `__CHART_GUEST_TEST_HOOKS__`.
+  - The production bundle is built with it `false`; the bundle script and the image probe (`testHooks === null`)
+    both check this.
+  - Workers get an empty environment.
+  - No environment variable, `DOCSLURP_PARSER_ENV_ALLOWLIST` included, can enable the hooks; a test sets them all on
+    the production guest and gets the ordinary result.
+  - The containment tests and the Modal runner build their own hooks-enabled bundle beside copies of the guest
+    scripts.
+- **L4.** `richText` marks paragraph ancestors in one pass.
+
+**Measured on the parser-VM shape** (same harness as round 8; every round-5 to round-9 input in one run, 35 runs):
+
+| input | what | wall | peak RSS | result | outcome |
+|---|---|--:|--:|--:|---|
+| `amp1cjk` (85 KB XLSX) | 1 chart, 32 series × 2,000 CJK labels | 0.40 s | 121 MB | 0.49 MB | 1 chart, `truncated` (was exit 1, 39.5 MB) |
+| `amp2ascii` | 2 such charts, ASCII labels | 0.49 s | 143 MB | 0.86 MB | 2 charts, `truncated` |
+| `amp8small` | 8 charts, 300 rows | 0.43 s | 132 MB | 3.9 MB | 8 charts, `truncated` |
+| `amp40cjk` (129 KB) | 40 such charts | 1.4 s | 246 MB | **12.2 MB** | 25 charts, 15 counted `output-limit` (was OOM at 3.7 GB) |
+| `dash10` | legitimate 10-chart dashboard, 4 series × 365 dates | 0.36 s | 125 MB | 0.40 MB | 10 charts, none truncated |
+| `dash10wide` | 10 charts, 32 series × 2,000 dates | 0.91 s | 221 MB | 1.9 MB | 10 charts, each cut to 20,000 points |
+| `plotlyEpub` (20 MB) | r8 Plotly EPUB | **14.9 s** | 293 MB | 0.93 MB | 27 visuals, 2,925 calls counted in `overflow` |
+| `textEpub400` | gate-passing worst | 15.3 s | 282 MB | 0.20 MB | 256 exported, 144 `visual-limit` |
+| `embwb8` | 8 parts × 16 MB workbook | 4.1 s | 545 MB | — | 1 chart, 8 `workbook-too-large` |
+| `legit+oom:svg[50]` | injected out-of-memory | 3.6 s | **1,637 MB** | 65 KB | 99 exported, 1 `unit-crashed` |
+
+- **Every input exits 0.**
+- **Worst wall time:** 15.3 s (down from 32.2 s in round 8).
+- **Largest result:** 12.2 MB, inside the 12 MiB visual budget plus envelope, under the 16 MiB cap.
+- **Worst memory without injected faults:** 549 MB. With a fault it is 1,637 MB, the worker cap plus the parent.
+- **Every other round-5 to round-8 repro:** unchanged outcomes, within ±1 s of round 8.
+- **Startup:** 92 ms per input on this run (74 ms in round 8; the same order).
+
 ### Guest hardening: zod `jitless`, the V8 code-generation flag, code-loading guard, image check
 
 - **zod `jitless`, now effective (council r4 M1).**
@@ -355,6 +420,7 @@ with `for…of` destructuring, which the council measured as roughly 5–14× sl
 
 Three Modal VM runs: 9.8 s (failed: harness file missing), 108 s (3 arms) and 122 s (4 arms), 240 VM-seconds in all,
 within the test budget. No model calls.
+Round 9: two containment-proof VM runs (169 s and 99 s wall, one VM each). No model calls.
 
 ## Open findings (not changed here)
 

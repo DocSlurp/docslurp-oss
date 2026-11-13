@@ -15,6 +15,19 @@ import { INLINE_CHART_LIMITS, inlineChartPlan, inlineDeadlineMs } from "../dist/
 import { CHART_EXTRACT_LIMITS } from "../dist/chart-export/extractors/limits.js";
 
 const WORKER = new URL("./chart-export-worker.mjs", import.meta.url);
+/** The inline answer's output budget (INLINE_CHART_LIMITS.outputBudget); the byte total carries across worker restarts. */
+const INLINE_OUTPUT_BUDGET = INLINE_CHART_LIMITS.outputBudget;
+const visualBytes = (v) => Buffer.byteLength(JSON.stringify(v));
+/** Reasons merged into one entry per input when reassembling, as #364's chart-export-extract.mjs. */
+const MERGED_REASONS = new Set(["visual-limit", "output-limit", "package-part-limit", "guest-deadline-part"]);
+function mergeDeferred(list) {
+  const out = [];
+  for (const d of list) {
+    const same = MERGED_REASONS.has(d.reason) ? out.find((e) => e.reason === d.reason) : null;
+    if (same) { same.svgIndex = Math.min(same.svgIndex, d.svgIndex); same.count += d.count; } else out.push({ ...d });
+  }
+  return out.slice(0, 1000);
+}
 /** A count-only worker (past the deadline) gets this long: it parses nothing, it records what is left. */
 const COUNT_ONLY_MS = 1_000;
 const MAX_WORKERS = 8;
@@ -23,9 +36,11 @@ const MAX_WORKERS = 8;
  * Run one unit worker until it returns a result, crashes, overruns or passes the memory budget; finished units go into
  * `done`. Resolves { result } | { failure: "timeout" | "crashed" | "exited", inflight }.
  */
-function runWorker(workerUrl, task, done, index, endsAt, rssLimit) {
+function runWorker(workerUrl, task, done, index, endsAt, rssLimit, onStart) {
   return new Promise((resolve) => {
+    // An empty environment, as #364's guest gives its workers.
     const worker = new Worker(workerUrl, {
+      env: {},
       resourceLimits: {
         maxOldGenerationSizeMb: INLINE_CHART_LIMITS.maxOldGenerationSizeMb,
         maxYoungGenerationSizeMb: INLINE_CHART_LIMITS.maxYoungGenerationSizeMb,
@@ -52,7 +67,8 @@ function runWorker(workerUrl, task, done, index, endsAt, rssLimit) {
     }, INLINE_CHART_LIMITS.rssPollMs);
     worker.on("message", (m) => {
       if (m?.t === "start") {
-        inflight = { id: m.id, locator: m.locator, svgIndex: m.svgIndex };
+        inflight = { id: m.id, locator: m.locator, svgIndex: m.svgIndex, svg: m.svg };
+        onStart(inflight);
         clearTimeout(unitTimer);
         unitTimer = setTimeout(() => finish({ failure: "timeout", inflight }), left());
       } else if (m?.t === "done") {
@@ -68,14 +84,26 @@ function runWorker(workerUrl, task, done, index, endsAt, rssLimit) {
   });
 }
 
-/** Reassemble a contained run, exactly as #364's extractContained (chart-export-extract.mjs) does. */
-function reassemble(kind, done, failed, final, lastWorker, unplaced) {
+/**
+ * Reassemble a contained run as #364's extractContained (chart-export-extract.mjs) does: earlier workers' units, the
+ * failed units counted, an unplaced failure counted from the next SVG, the last worker's accounting, and the same output
+ * budget enforced while merging (past it a visual is output-limit, never thrown).
+ */
+function reassemble(kind, done, failed, final, lastWorker, unplaced, nextSvg, outputBudget) {
   const earlier = [...done].filter(([, d]) => !final || d.worker !== lastWorker).sort((a, b) => a[0] - b[0]).map(([, d]) => d.delta);
   const lost = [...failed.values()].sort((a, b) => a.id - b.id).map((f) => ({ svgIndex: f.svgIndex, count: 1, reason: f.reason }));
   const base = final ?? { schemaVersion: "chart-export-deterministic@v1", visuals: [], refusals: [], overflow: 0 };
-  const visuals = [...earlier.flatMap((d) => d.visuals), ...base.visuals].slice(0, CHART_EXTRACT_LIMITS.maxVisuals);
+  const visuals = [];
+  const deferredExtra = [];
+  let bytes = 0;
+  for (const v of [...earlier.flatMap((d) => d.visuals), ...base.visuals]) {
+    const size = visualBytes(v);
+    if (visuals.length >= CHART_EXTRACT_LIMITS.maxVisuals || bytes + size > outputBudget) { deferredExtra.push({ svgIndex: 0, count: 1, reason: visuals.length >= CHART_EXTRACT_LIMITS.maxVisuals ? "visual-limit" : "output-limit" }); continue; }
+    bytes += size;
+    visuals.push(v);
+  }
   const refusals = [...earlier.flatMap((d) => d.refusals), ...base.refusals, ...(unplaced ? [{ locator: kind, reason: "unit-crashed" }] : [])];
-  const deferred = [...earlier.flatMap((d) => d.deferred), ...lost, ...(base.deferred ?? [])].slice(0, 1000);
+  const deferred = mergeDeferred([...earlier.flatMap((d) => d.deferred), ...lost, ...(unplaced ? [{ svgIndex: nextSvg, count: 1, reason: "unit-crashed" }] : []), ...(base.deferred ?? []), ...deferredExtra]);
   const overflow = earlier.reduce((n, d) => n + d.overflow, 0) + (base.overflow ?? 0) + Math.max(0, refusals.length - 1000);
   return {
     schemaVersion: "chart-export-deterministic@v1",
@@ -114,11 +142,17 @@ export async function inlineCharts(bytes, request, inspection, inputPath, worker
   let lastWorker = 0;
   let unplaced = false;
   let failure = null;
+  let nextSvg = 0;
+  // Fault injection (tests only): forwarded as #364's guest does; the worker ignores it unless its bundle was built with
+  // the test hooks (the production bundle compiles them out).
+  const fault = process.env.DOCSLURP_CHART_GUEST_TEST_FAULT ?? null;
   for (let w = 0; ; w++) {
     const countOnly = performance.now() >= endsAt || w >= MAX_WORKERS - 1;
-    const skip = [...[...done].map(([id, d]) => [id, d.delta.visuals.length]), ...[...failed.keys()].map((id) => [id, 0])];
-    const task = { path: inputPath, kind, packaged: plan.packaged, options, skip, deadline: countOnly ? 0 : softDeadline };
-    const outcome = await runWorker(workerUrl, task, done, w, countOnly ? performance.now() + COUNT_ONLY_MS : endsAt, rssLimit);
+    // UnitControl.skip: unit id to { visuals, bytes }, so a resumed worker carries the output byte total (#364).
+    const skip = [...[...done].map(([id, d]) => [id, { visuals: d.delta.visuals.length, bytes: d.delta.bytes }]), ...[...failed.keys()].map((id) => [id, { visuals: 0, bytes: 0 }])];
+    const task = { path: inputPath, kind, packaged: plan.packaged, options, skip, outputBudget: INLINE_OUTPUT_BUDGET, deadline: countOnly ? 0 : softDeadline, fault };
+    const outcome = await runWorker(workerUrl, task, done, w, countOnly ? performance.now() + COUNT_ONLY_MS : endsAt, rssLimit,
+      (unit) => { nextSvg = unit.svgIndex + (unit.svg ? 1 : 0); });
     lastWorker = w;
     if (outcome.result) { final = outcome.result; break; }
     if (outcome.inflight && !failed.has(outcome.inflight.id) && !countOnly) {
@@ -131,7 +165,7 @@ export async function inlineCharts(bytes, request, inspection, inputPath, worker
   }
   // Nothing placed at all (the first worker never reached a unit): a refusal, as before containment.
   if (!final && done.size === 0 && failed.size === 0) return { status: "refused", reason: failure === "timeout" ? "deadline" : "worker-failed", ms: ms() };
-  const result = final && failed.size === 0 ? final : reassemble(kind, done, failed, final, lastWorker, unplaced);
+  const result = final && failed.size === 0 ? final : reassemble(kind, done, failed, final, lastWorker, unplaced, nextSvg, INLINE_OUTPUT_BUDGET);
   const json = JSON.stringify(result);
   if (Buffer.byteLength(json) > INLINE_CHART_LIMITS.maxResultBytes) return { status: "refused", reason: "result-too-large", ms: ms() };
   return { status: "ok", ms: ms(), result: JSON.parse(json) };

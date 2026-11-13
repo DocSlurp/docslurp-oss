@@ -6,15 +6,15 @@
 import { readFile } from "node:fs/promises";
 import { parentPort } from "node:worker_threads";
 
-import { extractDeterministicVisuals, setGuestDeadline } from "../dist/chart-export/guest.bundle.mjs";
+import { extractDeterministicVisuals, setGuestDeadline, testHooks } from "../dist/chart-export/guest.bundle.mjs";
 
-// Fault injection for the containment tests and the VM proof runs only: inert unless set, and the production guest runs
-// with an empty environment. "<crash|hang|oom>:<locator substring>" fails the first unit whose locator contains it.
-const FAULT = /^(crash|hang|oom):(.+)$/.exec(process.env.DOCSLURP_CHART_GUEST_TEST_FAULT ?? "");
-const injectFault = (locator) => {
-  if (!FAULT || !locator.includes(FAULT[2])) return;
-  if (FAULT[1] === "crash") process.exit(70); // like a native crash: the worker thread dies mid-unit
-  if (FAULT[1] === "hang") for (;;);
+// Fault injection for the containment tests only: `testHooks` is null in the production bundle (a build-time constant),
+// so `task.fault` is ignored there whatever sends it. "<crash|hang|oom>:<locator substring>".
+const injectFault = (fault, locator) => {
+  const f = testHooks && fault ? /^(crash|hang|oom):(.+)$/.exec(fault) : null;
+  if (!f || !locator.includes(f[2])) return;
+  if (f[1] === "crash") process.exit(70); // like a native crash: the worker thread dies mid-unit
+  if (f[1] === "hang") for (;;);
   const hog = [];
   for (;;) hog.push(new Array(1_000_000).fill(hog.length));
 };
@@ -25,8 +25,8 @@ parentPort.on("message", async (task) => {
   const input = task.packaged ? { kind: task.kind, bytes } : { kind: task.kind, text: bytes.toString("utf8") };
   const units = {
     skip: new Map(task.skip),
-    onStart: (id, locator, svgIndex, svg) => { parentPort.postMessage({ t: "start", id, locator, svgIndex, svg }); injectFault(locator); },
+    onStart: (id, locator, svgIndex, svg) => { parentPort.postMessage({ t: "start", id, locator, svgIndex, svg }); injectFault(task.fault, locator); },
     onDone: (id, delta) => parentPort.postMessage({ t: "done", id, delta }),
   };
-  parentPort.postMessage({ t: "result", result: extractDeterministicVisuals(input, { ...task.options, units }) });
+  parentPort.postMessage({ t: "result", result: extractDeterministicVisuals(input, { ...task.options, units, outputBudget: task.outputBudget }) });
 });

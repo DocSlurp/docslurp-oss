@@ -3,11 +3,13 @@
 // no secrets): uploads the built guest (bundle, chart-export-extract.mjs, chart-export-worker.mjs) and these benches,
 // measures worker startup, generates the earlier rounds' repro inputs in the VM (marker-cap-bench.mjs --write), adds
 // any extra input directories given (each <dir>/<name>/{input,meta.json}), runs every input through the real guest
-// (guest-repro-run.mjs), then repeats ordinary inputs with an injected crash, hang and out-of-memory in one unit.
+// (guest-repro-run.mjs), then repeats ordinary inputs with an injected crash, hang and out-of-memory in one unit. The
+// production bundle compiles the fault hooks out, so the fault runs use a second copy of the guest beside a bundle built
+// with them in (as guest-bundle.test.ts does).
 // Needs MODAL_TOKEN_ID / MODAL_TOKEN_SECRET and a built worker.
 //
 //   node performance/chart-export-free-rungs/run-guest-in-modal-vm.mjs [extra inputs dir]...
-import { readdirSync, readFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -28,7 +30,15 @@ const exec = async (args, env = {}) => {
   return out;
 };
 const put = async (from, to) => { await vm.filesystem.makeDirectory(path.dirname(to), { createParents: true }); await vm.filesystem.writeBytes(readFileSync(from), to); };
+const hookDir = mkdtempSync(path.join(process.env.TMPDIR || "/tmp", "chart-guest-hooked-"));
+const { build } = createRequire(`${repo}worker/package.json`)("esbuild");
+await build({
+  entryPoints: [`${repo}worker/dist/chart-export/extractors/guest-entry.js`], outfile: path.join(hookDir, "guest.bundle.mjs"),
+  bundle: true, platform: "node", format: "esm", logLevel: "silent", absWorkingDir: `${repo}worker`, define: { __CHART_GUEST_TEST_HOOKS__: "true" },
+});
 try {
+  await put(path.join(hookDir, "guest.bundle.mjs"), "/bench/hooked/dist/chart-export/guest.bundle.mjs");
+  for (const f of ["chart-export-extract.mjs", "chart-export-worker.mjs"]) await put(`${repo}worker/scripts/${f}`, `/bench/hooked/scripts/${f}`);
   await put(`${repo}worker/dist/chart-export/guest.bundle.mjs`, "/bench/worker/dist/chart-export/guest.bundle.mjs");
   for (const f of ["chart-export-extract.mjs", "chart-export-worker.mjs"]) await put(`${repo}worker/scripts/${f}`, `/bench/worker/scripts/${f}`);
   for (const f of ["marker-cap-bench.mjs", "guest-repro-run.mjs", "worker-startup.mjs"]) await put(`${here}${f}`, `/bench/${f}`);
@@ -45,9 +55,10 @@ try {
   await exec(["mkdir", "-p", "/in/fault"]);
   await exec(["cp", "-r", "/in/gen/legit", "/in/fault/legit"]);
   for (const [fault, extraEnv] of [["crash:svg[50]", {}], ["hang:svg[50]", { DOCSLURP_CHART_GUEST_TEST_UNIT_MS: "2000" }], ["oom:svg[50]", {}]]) {
-    const out = await exec(["node", "/bench/guest-repro-run.mjs", "/bench/worker", "/in/fault"], { DOCSLURP_CHART_GUEST_TEST_FAULT: fault, ...extraEnv });
+    const out = await exec(["node", "/bench/guest-repro-run.mjs", "/bench/hooked", "/in/fault"], { DOCSLURP_CHART_GUEST_TEST_FAULT: fault, ...extraEnv });
     process.stdout.write(out.replace(/"name":"legit"/, `"name":"legit+${fault}"`));
   }
 } finally {
   await vm.terminate();
+  rmSync(hookDir, { recursive: true, force: true });
 }

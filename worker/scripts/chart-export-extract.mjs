@@ -5,8 +5,9 @@
 import { readFile, stat, writeFile } from "node:fs/promises";
 import { Worker } from "node:worker_threads";
 // One bundled module (built from dist/chart-export/extractors/guest-entry.js): loads in a fraction of the CPU the
-// separate ESM files take, which matters because every VM command starts a fresh process.
-import { CHART_EXTRACT_LIMITS } from "../dist/chart-export/guest.bundle.mjs";
+// separate ESM files take, which matters because every VM command starts a fresh process. `testHooks` is null in the
+// production bundle (a build-time constant), so the test-only knobs below are inert there.
+import { CHART_EXTRACT_LIMITS, testHooks } from "../dist/chart-export/guest.bundle.mjs";
 const started = Date.now();
 const [input, requestPath, output, ...more] = process.argv.slice(2);
 if ((await stat(requestPath)).size > 4096) throw new Error("chart extract request exceeds limit");
@@ -26,22 +27,28 @@ const MAX_RESULT_BYTES = 16 * 1024 * 1024;
  * The worker streams every finished unit (an SVG, an embedded-spec scan, an Office chart part) here as it completes.
  * If a unit crashes the worker (exception, out of memory) or overruns its time, the worker is terminated, that one unit
  * is recorded as `unit-crashed` / `unit-timeout` (a counted, closed reason), and a fresh worker continues after it,
- * skipping every unit already finished or failed. Past the deadline, a last worker only counts what is left. So no
- * input can take the guest down: the document keeps every other visual, and every loss is counted.
+ * skipping every unit already finished or failed. Past the deadline, a last worker only counts what is left. Output is
+ * bounded too (council r9): each chart by `maxChartBytes`, each input and each batch by `maxOutputBytes`, past which
+ * visuals are counted as `output-limit`. So no input can take the guest down: the document keeps every other visual,
+ * and every loss is counted.
  */
 const WORKER = new URL("./chart-export-worker.mjs", import.meta.url);
 // Heap per worker: well inside the 4 GiB parser VM next to this small parent (measured legitimate peaks are < 600 MB).
-const RESOURCE_LIMITS = { maxOldGenerationSizeMb: Number(process.env.DOCSLURP_CHART_GUEST_TEST_HEAP_MB) > 0 ? Number(process.env.DOCSLURP_CHART_GUEST_TEST_HEAP_MB) : 1536, maxYoungGenerationSizeMb: 64 };
+const RESOURCE_LIMITS = { maxOldGenerationSizeMb: testHooks?.heapMb ?? 1536, maxYoungGenerationSizeMb: 64 };
 // Wall clock one unit may take (legitimate units take milliseconds; the gates bound hostile ones to seconds).
-const UNIT_TIMEOUT_MS = Number(process.env.DOCSLURP_CHART_GUEST_TEST_UNIT_MS) > 0 ? Number(process.env.DOCSLURP_CHART_GUEST_TEST_UNIT_MS) : 15_000;
+const UNIT_TIMEOUT_MS = testHooks?.unitMs ?? 15_000;
 // A worker started past the deadline only counts the rest; it gets this long.
 const COUNT_ONLY_MS = 5_000;
-const MAX_WORKERS_PER_INPUT = 8;
+// Failures do not stop the input: workers continue until the deadline (council r9 L1). This only guards a runaway loop.
+const MAX_WORKERS_PER_INPUT = 1_000;
+const MERGED_REASONS = new Set(["visual-limit", "output-limit", "package-part-limit", "guest-deadline-part"]);
+const visualBytes = (v) => Buffer.byteLength(JSON.stringify(v));
 
 /** Run one worker until it returns a result, crashes or overruns; record finished units into `done`. */
-function runWorker(task, done, workerIndex) {
+function runWorker(task, done, workerIndex, onStart) {
   return new Promise((resolve) => {
-    const worker = new Worker(WORKER, { resourceLimits: RESOURCE_LIMITS });
+    // No environment at all: nothing on the worker host can reach the extractor through it.
+    const worker = new Worker(WORKER, { resourceLimits: RESOURCE_LIMITS, env: {} });
     let inflight = null;
     let settled = false;
     const finish = (outcome) => {
@@ -56,8 +63,11 @@ function runWorker(task, done, workerIndex) {
     let unitTimer = null;
     const hardTimer = setTimeout(() => finish({ failure: "timeout", inflight }), task.deadline === 0 ? COUNT_ONLY_MS : remaining());
     worker.on("message", (m) => {
+      // A message after the worker was settled (a unit finishing in the tick its timer fired) is ignored (council r9 I1).
+      if (settled) return;
       if (m.t === "start") {
         inflight = { id: m.id, locator: m.locator, svgIndex: m.svgIndex, svg: m.svg };
+        onStart(inflight);
         clearTimeout(unitTimer);
         unitTimer = setTimeout(() => finish({ failure: "timeout", inflight }), Math.min(UNIT_TIMEOUT_MS, remaining()));
       } else if (m.t === "done") {
@@ -68,28 +78,45 @@ function runWorker(task, done, workerIndex) {
     });
     worker.on("error", () => finish({ failure: "crashed", inflight }));
     worker.on("exit", (code) => finish({ failure: code === 0 ? "exited" : "crashed", inflight }));
-    worker.postMessage(task);
+    worker.postMessage({ ...task, fault: testHooks?.fault ?? null });
   });
 }
 
-/** One input, contained: the worker's own result when nothing failed (identical to an uncontained run). */
-async function extractContained(path, kind, packaged) {
+/** Same-reason entries the extractor keeps one per input, merged again after a resume (council r9 I2). */
+function mergeDeferred(list) {
+  const out = [];
+  for (const d of list) {
+    const same = MERGED_REASONS.has(d.reason) ? out.find((e) => e.reason === d.reason) : null;
+    if (same) { same.svgIndex = Math.min(same.svgIndex, d.svgIndex); same.count += d.count; } else out.push({ ...d });
+  }
+  return out.slice(0, 1000);
+}
+
+/**
+ * One input, contained, its visuals inside `outputBudget` bytes: the worker's own result when nothing failed (identical
+ * to an uncontained run), otherwise the units each worker finished, the failed units counted, and the last worker's own
+ * accounting, re-checked against the same budget while merging.
+ */
+async function extractContained(path, kind, packaged, outputBudget) {
   const done = new Map();
   const failed = new Map();
   let final = null;
   let lastWorker = 0;
   let unplaced = false;
+  let nextSvg = 0;
   for (let w = 0; ; w++) {
     const countOnly = Date.now() >= deadline || w >= MAX_WORKERS_PER_INPUT - 1;
-    const skip = [...[...done].map(([id, d]) => [id, d.delta.visuals.length]), ...[...failed.keys()].map((id) => [id, 0])];
-    const outcome = await runWorker({ path, kind, packaged, options, skip, deadline: countOnly ? 0 : deadline }, done, w);
+    const skip = [...[...done].map(([id, d]) => [id, { visuals: d.delta.visuals.length, bytes: d.delta.bytes }]), ...[...failed.keys()].map((id) => [id, { visuals: 0, bytes: 0 }])];
+    const task = { path, kind, packaged, options, skip, outputBudget, deadline: countOnly ? 0 : deadline };
+    const outcome = await runWorker(task, done, w, (unit) => { nextSvg = unit.svgIndex + (unit.svg ? 1 : 0); });
     lastWorker = w;
     if (outcome.result) { final = outcome.result; break; }
     if (outcome.inflight && !failed.has(outcome.inflight.id) && !countOnly) {
       failed.set(outcome.inflight.id, { ...outcome.inflight, reason: outcome.failure === "timeout" ? "unit-timeout" : "unit-crashed" });
       continue;
     }
-    // A failure outside any unit, or in the counting worker: nothing more can be isolated.
+    // A failure outside any unit, or in the counting worker: nothing more can be isolated. Counted from here on as one
+    // deferred unit (a lower bound: the units after it are not enumerated), and refused (council r9 L2).
     unplaced = true;
     break;
   }
@@ -98,9 +125,18 @@ async function extractContained(path, kind, packaged) {
   const earlier = [...done].filter(([, d]) => !final || d.worker !== lastWorker).sort((a, b) => a[0] - b[0]).map(([, d]) => d.delta);
   const lost = [...failed.values()].sort((a, b) => a.id - b.id).map((f) => ({ svgIndex: f.svgIndex, count: 1, reason: f.reason }));
   const base = final ?? { schemaVersion: "chart-export-deterministic@v1", visuals: [], refusals: [], overflow: 0 };
-  const visuals = [...earlier.flatMap((d) => d.visuals), ...base.visuals].slice(0, CHART_EXTRACT_LIMITS.maxVisuals);
+  // The same output budget, enforced while merging: past it a visual is counted as output-limit, never thrown.
+  const visuals = [];
+  const deferredExtra = [];
+  let bytes = 0;
+  for (const v of [...earlier.flatMap((d) => d.visuals), ...base.visuals]) {
+    const size = visualBytes(v);
+    if (visuals.length >= CHART_EXTRACT_LIMITS.maxVisuals || bytes + size > outputBudget) { deferredExtra.push({ svgIndex: 0, count: 1, reason: visuals.length >= CHART_EXTRACT_LIMITS.maxVisuals ? "visual-limit" : "output-limit" }); continue; }
+    bytes += size;
+    visuals.push(v);
+  }
   const refusals = [...earlier.flatMap((d) => d.refusals), ...base.refusals, ...(unplaced ? [{ locator: kind, reason: "unit-crashed" }] : [])];
-  const deferred = [...earlier.flatMap((d) => d.deferred), ...lost, ...(base.deferred ?? [])].slice(0, 1000);
+  const deferred = mergeDeferred([...earlier.flatMap((d) => d.deferred), ...lost, ...(unplaced ? [{ svgIndex: nextSvg, count: 1, reason: "unit-crashed" }] : []), ...(base.deferred ?? []), ...deferredExtra]);
   const overflow = earlier.reduce((n, d) => n + d.overflow, 0) + (base.overflow ?? 0) + Math.max(0, refusals.length - 1000);
   return {
     schemaVersion: "chart-export-deterministic@v1",
@@ -117,11 +153,15 @@ if (request.batch !== undefined) {
   if (kind !== "svg" || !Number.isSafeInteger(batch) || batch < 1 || batch > 40 || more.length !== batch - 1) throw new Error("invalid chart extract batch");
   const refused = (reason) => ({ schemaVersion: "chart-export-deterministic@v1", visuals: [], refusals: [{ locator: "svg", reason }] });
   const results = [];
-  // Each figure runs contained: one bad figure never sinks the others; the host sees a machine reason only.
+  // Each figure runs contained: one bad figure never sinks the others; the host sees a machine reason only. The figures
+  // share one output budget, so the batch result stays inside one result's cap.
+  let left = CHART_EXTRACT_LIMITS.maxOutputBytes;
   for (const file of [input, ...more]) {
     if ((await stat(file)).size > CHART_EXTRACT_LIMITS.maxTextBytes) { results.push(refused("input-too-large")); continue; }
     try {
-      results.push(await extractContained(file, kind, false));
+      const result = await extractContained(file, kind, false, left);
+      left = Math.max(0, left - result.visuals.reduce((n, v) => n + visualBytes(v), 0));
+      results.push(result);
     } catch {
       results.push(refused("extract-failed"));
     }
@@ -130,7 +170,9 @@ if (request.batch !== undefined) {
 } else {
   if (more.length > 0) throw new Error("unexpected chart extract inputs");
   if ((await stat(input)).size > (packaged ? CHART_EXTRACT_LIMITS.maxPackageBytes : CHART_EXTRACT_LIMITS.maxTextBytes)) throw new Error("chart extract input exceeds limit");
-  json = JSON.stringify(await extractContained(input, kind, packaged));
+  json = JSON.stringify(await extractContained(input, kind, packaged, CHART_EXTRACT_LIMITS.maxOutputBytes));
 }
+// An assertion: the output budgets (visuals ≤ maxOutputBytes, ≤ 1,000 refusals and deferral entries) keep every result
+// well under this, so a result over it means a bug, not an input.
 if (Buffer.byteLength(json) > MAX_RESULT_BYTES) throw new Error("chart extract result exceeds limit");
 await writeFile(output, json, { mode: 0o600 });

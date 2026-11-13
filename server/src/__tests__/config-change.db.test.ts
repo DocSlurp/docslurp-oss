@@ -1,4 +1,5 @@
 import postgres from "postgres";
+import { normalizePipelineFeatures } from "@docslurp/shared";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { defaultPipelineFeatures, type PipelineFeatures } from "@docslurp/shared";
 import { startMigratedPostgres } from "@docslurp/worker/testing";
@@ -32,6 +33,9 @@ afterEach(() => vi.unstubAllEnvs());
 beforeEach(() => { failLease = "none"; vi.stubEnv("WORKER_CREDIT_LEASES", "off"); });
 
 const pipeline = (patch: Partial<PipelineFeatures> = {}): PipelineFeatures => ({ ...defaultPipelineFeatures, ...patch });
+/** An embedding config chosen by profile (a category): the model comes from the profile, never a raw URI. */
+const profileEmbedding = (profile: "fastest-local" | "cheapest-local") =>
+  normalizePipelineFeatures({ ...defaultPipelineFeatures, embedding: { profile } } as never).embedding;
 
 async function seed(args: { credits: number; autoConfirm?: boolean; documents?: number; vectorized?: boolean }) {
   await sql`delete from project_runs`;
@@ -55,7 +59,7 @@ async function seed(args: { credits: number; autoConfirm?: boolean; documents?: 
   }
 }
 
-const embeddingChange = () => ({ pipeline: pipeline({ embedding: { ...defaultPipelineFeatures.embedding, target: "local" as const, modelUri: "llm://transformers.js/Xenova/gte-small" as never } }) });
+const embeddingChange = () => ({ pipeline: pipeline({ embedding: profileEmbedding("fastest-local") }) });
 
 async function patch(input: Record<string, unknown>) {
   const plan = await change.planProjectChange({ projectId: "w", userId: "u1", input: input as never });

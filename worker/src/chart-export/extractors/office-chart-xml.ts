@@ -31,8 +31,20 @@ function richText(el: XmlElement | null): string | null {
   const tx = firstChild(el, "tx");
   const rich = firstChild(tx, "rich");
   if (rich) {
-    // Innermost paragraphs only (nested <a:p> each joined every <a:t> below it again), each cut before joining.
-    const paras = descendants(rich, "p").filter((p) => descendants(p, "p").length === 0)
+    // Innermost paragraphs only (nested <a:p> each joined every <a:t> below it again), each cut before joining. One
+    // pass marks every element with a <p> below it (council r9 L4: O(nodes), not O(depth × nodes)); innermost
+    // paragraphs have disjoint subtrees, so collecting their runs is O(nodes) too.
+    const parent = new Map<XmlElement, XmlElement>();
+    const ps: XmlElement[] = [];
+    const stack: XmlElement[] = [rich];
+    while (stack.length) {
+      const el = stack.pop()!;
+      for (let k = el.children.length - 1; k >= 0; k--) { const c = el.children[k]!; if (c.type === "element") { parent.set(c, el); stack.push(c); } }
+      if (el !== rich && el.local === "p") ps.push(el);
+    }
+    const hasP = new Set<XmlElement>();
+    for (const p of ps) for (let a = parent.get(p); a && a !== rich && !hasP.has(a); a = parent.get(a)) hasP.add(a);
+    const paras = ps.filter((p) => !hasP.has(p))
       .map((p) => descendants(p, "t").map((t) => textContent(t).slice(0, 4096)).join("").slice(0, 4096)).filter((s) => s.trim() !== "");
     const s = cleanLabel(paras.join(" "));
     return s || null;
@@ -150,6 +162,10 @@ export function parseChartXml(xml: string, resolve: RefResolver | null = null): 
   let resolvedAny = false;
   let missingSeries = 0;
   let totalSeries = 0;
+  // Series in one chart usually share one category range: clean each distinct label once (council r9 H1). Bounded by
+  // the labels of one chart part; cleanLabel is pure, so the result is identical.
+  const labels = new Map<string, string>();
+  const labelOf = (raw: string): string => { let l = labels.get(raw); if (l === undefined) { l = cleanLabel(raw); if (labels.size < CHART_EXTRACT_LIMITS.maxChartPoints) labels.set(raw, l); } return l; };
   let nonFinite = 0;
   let totalPoints = 0;
   let mismatched = false;
@@ -204,7 +220,7 @@ export function parseChartXml(xml: string, resolve: RefResolver | null = null): 
         let x: string | number;
         if (rawX === null || rawX === undefined || rawX === "") x = xyPlot ? k + 1 : String(k + 1);
         else if (typeof rawX === "number") x = dateCats && !xyPlot ? excelSerialToDate(rawX) ?? rawX : xyPlot ? rawX : String(rawX);
-        else x = xyPlot ? finiteOrNull(rawX) ?? cleanLabel(rawX) : cleanLabel(rawX);
+        else x = xyPlot ? finiteOrNull(rawX) ?? labelOf(rawX) : labelOf(rawX);
         if (!xyPlot && typeof x === "number") x = String(x);
         const point: DraftSeries["points"][number] = { x, y };
         if (sizes) point.z = typeof sizes.values[k] === "number" ? (sizes.values[k] as number) : finiteOrNull(String(sizes.values[k] ?? ""));

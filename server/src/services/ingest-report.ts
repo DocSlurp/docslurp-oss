@@ -694,8 +694,9 @@ export function buildConfigItems(pipeline: PipelineFeatures, observed: Observed)
       note: `${QUALITY_MODES[pipeline.quality].description} ${qualityModePriceRange(pipeline.quality)} per 1,000 pages.`,
     });
     items.push({
-      key: "vision.modelUri", label: "Vision model", value: model.replace(/^llm:\/\//, "") || "default",
-      note: perPage !== undefined ? `Catalog estimate ${formatCents(perPage)} per page.` : "No catalog price for this model.",
+      // The profile (a category), never the backend model id behind it.
+      key: "vision.profile", label: "Vision", value: visionProfileCatalog[pipeline.vision.profile]?.label ?? pipeline.vision.profile,
+      note: perPage !== undefined ? `Catalog estimate ${formatCents(perPage)} per page.` : "Estimated from the project's quality setting.",
     });
     if (pipeline.pageRouter?.mode && pipeline.pageRouter.mode !== "off") {
       items.push({ key: "pageRouter.mode", label: "Page router", value: pipeline.pageRouter.mode, note: "The decision-model router chooses an extractor per page; only active mode changes extraction." });

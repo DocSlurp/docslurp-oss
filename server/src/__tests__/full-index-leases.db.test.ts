@@ -91,3 +91,15 @@ it("prices a full index of a measured DOCX on its 300 billed pages and carries t
   const [copy] = await sql`select page_count, billing_pages, billing_pages_method, page_count_source, file_facts from documents where previous_version_id = 'fx-docx'`;
   expect(copy).toEqual({ page_count: 1, billing_pages: 300, billing_pages_method: 'pdf-conversion', page_count_source: 'assumed', file_facts: facts });
 });
+it("a full-index run drops model values from the stored pipeline it copies (managed models, round 3)", async () => {
+  await sql`update organizations set credit_balance_cents = 1000 where id = 'fx-org'`;
+  const stale = { ...defaultPipelineFeatures, indexingMode: 'map', embedding: { ...defaultPipelineFeatures.embedding, modelUri: 'llm://transformers.js/Xenova/bge-m3' }, pageRouter: { ...(defaultPipelineFeatures as { pageRouter?: object }).pageRouter, decisionModel: 'acme/stale-decider' } };
+  await sql`insert into projects(id,org_id,user_id,name,pipeline) values ('fx-a','fx-org','fx-user','fx-a',${sql.json(JSON.parse(JSON.stringify(stale)))})`;
+  await sql`insert into project_runs(id,org_id,user_id,project_id,kind,status,stage,pipeline,total_documents,pages_total) values ('run-stale','fx-org','fx-user','fx-a','bulk-upload','completed','completed',${sql.json(JSON.parse(JSON.stringify(stale)))},1,3)`;
+  await sql`insert into documents(id,org_id,user_id,project_id,run_id,filename,mime_type,source_key,status,page_count,indexing_mode) values ('fx-stale','fx-org','fx-user','fx-a','run-stale','doc.pdf','application/pdf','raw/fx.pdf','completed',3,'map')`;
+  const prepared = await svc.prepareFullIndex({ orgId: 'fx-org', projectId: 'fx-a', actor, policy });
+  const { runIds } = await svc.commitIndexJobs(prepared, 'fx-user');
+  expect(runIds.length).toBe(1);
+  const [run] = await sql<{ pipeline: unknown }[]>`select pipeline from project_runs where id = ${runIds[0]!}`;
+  expect(JSON.stringify(run!.pipeline)).not.toMatch(/bge-m3|stale-decider/);
+});
