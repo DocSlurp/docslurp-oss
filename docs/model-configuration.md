@@ -37,7 +37,9 @@ A request that names a backend model, provider or route (`model`, `docslurp.mode
 The concrete models are managed settings:
 
 - **Deployment defaults:** `CHAT_TIER_MODELS` in `packages/shared/src/project-chat-models.ts` (tier → reviewed catalog model, priced under the $50 per 1M output-token cap, never Pro/Ultra), the embedding and vision profile catalogs, and the environment variables below.
-- **Per project (platform admins only):** `PUT /v1/admin/projects/:projectId/managed-models` from a platform-admin browser session (`ADMIN_EMAILS`; API keys and OAuth tokens are refused). Body: `{"chat": {"<tier>": "<catalog id>" | null}, "pipeline": {"textGeneration": {"model", "models"}, "structuredExtraction": {"model"}, "vision": {"modelUri", "remoteFallbackModelUri"}, "embedding": {"modelUri"}}}`. Chat models must be reviewed catalog or eval models with a verified price under the cap. Pipeline values are validated by the pipeline schema (catalog URIs or operator `llm://private/...` routes). An embedding model change is refused once the project has documents; change the profile and re-index instead. Stored managed values survive customer edits; an embedding or vision override is kept only while its profile is unchanged.
+- **Per project (platform admins only):** `projects.managed_models` holds the only explicit choices, written only by `PUT /v1/admin/projects/:projectId/managed-models` (read with `GET` on the same path). Callers: a platform-admin browser session (`ADMIN_EMAILS`), or, for scripted and self-hosted setups, a server API key owned by a platform admin that carries the dedicated `admin:models` scope (client keys, OAuth tokens and keys without the scope are refused). Body: `{"chat": {"<tier>": "<catalog id>" | null}, "pipeline": {"textGeneration": {"model", "models"}, "structuredExtraction": {"model"}, "vision": {"modelUri", "remoteFallbackModelUri"}, "embedding": {"modelUri"}, "pageRouter": {"decisionModel"}} | null}`; `pipeline` replaces the overrides, `null` clears them. Every model must be outside the automatic-selection denylist, not Pro/Ultra and under the output-price cap; a hosted vision or embedding model must be a reviewed catalog entry and any other hosted model needs a verified price; operator `llm://private/...` routes are allowed. An override that conflicts with the project's pipeline (a hosted fallback under `local-only`, say) is refused. An embedding model change is refused once the project has documents; change the profile and re-index instead. Each change writes an `audit_log` row (`project.managed_models.updated`) with the before and after values. Clones copy the source's managed models.
+- **Everything else is a default:** any model value stored in a project pipeline, a run snapshot or a version snapshot that is not an explicit override is dropped when it is read, saved, rolled back or reprocessed, so the current profile and deployment defaults apply, including after a default changes. Migration 0146 moved operator private routes and index-bound embedding URIs into explicit overrides and removed the rest.
+- **At call time:** every text, structured-extraction and vision call in a run is checked again: an automatic-selection-denied, Pro/Ultra or over-cap model is refused and the stage fails loudly, whatever wrote the configuration.
 - **Operator evaluations:** see [chat tiers](search-api.md#tier) for `DOCSLURP_CHAT_EVAL_MODELS` and `DOCSLURP_CHAT_EVAL_ORG_IDS`.
 
 Where the managed and deployment settings accept URIs:
@@ -391,23 +393,28 @@ The rules are:
 
 A project refers to a private model as `llm://private/<alias>/<model-id>`.
 The model id can contain `/`. Private routes take no `?baseUrl=` parameter,
-because the registry supplies the URL and credentials.
+because the registry supplies the URL and credentials. Private models are
+managed settings: set them with the platform-admin route (a session, or a
+platform admin's server key with the `admin:models` scope), not the public
+project API, which refuses model fields.
 
-```json
-{
-  "pipeline": {
-    "privacyMode": "strict-privacy",
-    "embedding": { "modelUri": "llm://private/gpu1/Qwen/Qwen3-Embedding-0.6B" },
-    "vision": { "modelUri": "llm://private/gpu1/lightonai/LightOnOCR-3-0.8B", "prompt": "markdown" },
-    "textGeneration": { "model": "llm://private/gpu1/Qwen/Qwen3.6-35B-A3B-FP8" }
-  }
-}
+```bash
+curl -X PUT "$DOCSLURP_URL/v1/admin/projects/$PROJECT_ID/managed-models" \
+  -H "Authorization: Bearer $DOCSLURP_ADMIN_MODELS_KEY" -H "Content-Type: application/json" \
+  -d '{"pipeline": {
+        "embedding": { "modelUri": "llm://private/gpu1/Qwen/Qwen3-Embedding-0.6B" },
+        "vision": { "modelUri": "llm://private/gpu1/lightonai/LightOnOCR-3-0.8B" },
+        "textGeneration": { "model": "llm://private/gpu1/Qwen/Qwen3.6-35B-A3B-FP8" }
+      }}'
 ```
 
-The embedding and vision `target` is inferred as `private`. `textGeneration.model`
-and its per-task overrides accept either an OpenRouter id or a private route.
+Set the project's categories (`privacyMode: strict-privacy`, `vision.prompt`,
+the profiles) with the public `PATCH /v1/projects/:projectId` as usual; the
+embedding override needs a project without documents. The embedding and vision
+`target` is inferred as `private`. `textGeneration.model` and its per-task
+overrides accept either an OpenRouter id or a private route.
 Strict-privacy templates keep their local defaults. Point a template's
-project at private profiles by overriding these fields. Summaries and
+project at private models with the admin route. Summaries and
 propositions can then be turned back on.
 
 | Surface | Endpoint path | Notes |
