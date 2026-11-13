@@ -17,12 +17,12 @@ let finished = false;
 let running = false;
 
 /**
- * Fills search_sessions.project_id for sessions written before migration 0143, from metadata.projectId when that
+ * Fills search_sessions.project_id for sessions written before migration 0151, from metadata.projectId when that
  * project still exists. The migration only adds the column: updating every old row there held an exclusive lock on
  * a table every search writes to. Here each batch is its own short transaction, and one instance works at a time
  * (advisory lock), so the load on the database is one small UPDATE at a time.
  *
- * New sessions never need it (the insert sets the column, and the 0143 trigger covers writers that do not), so a
+ * New sessions never need it (the insert sets the column, and the 0151 trigger covers writers that do not), so a
  * process stops for good after one pass. A restarted process makes one more pass, which reads only the sessions
  * that legitimately have no project, through search_sessions_project_id_created_at_idx.
  */

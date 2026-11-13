@@ -27,6 +27,7 @@ import {
 import { recordPageFacts } from "../pipeline/page-facts.js";
 import { freeVisualCandidateStats } from "../chart-export/free-stats.js";
 import { chartExportActive } from "../chart-export/config.js";
+import { hostPageImagePagesOf } from "../db/document-asset-ledger.js";
 
 export class RenderImagesStage implements Stage {
   readonly name = "render-images";
@@ -209,8 +210,35 @@ export class RenderImagesStage implements Stage {
             },
           )
         : [];
-    const pageNumbers = isImage ? selected.filter((pageNumber) => pageNumber === 1) : selected;
+    // Pages Doppler left to the host's page image (a scan `--scan-pages copy` could not copy, or a scan copy that failed
+    // its checks): the Markdown has no image for them, so a project that keeps page images renders them here.
+    const hostPages = state.run.pipeline.preserveImages && isPdf ? await this.hostPageImagePages(state, document) : [];
+    const pageNumbers = isImage
+      ? selected.filter((pageNumber) => pageNumber === 1)
+      : hostPages.length > 0 ? [...new Set([...selected, ...hostPages])].sort((a, b) => a - b) : selected;
     return { pageNumbers, request, routed, keptAsImage: [] as number[], unreadPages: [] as number[] };
+  }
+
+  /**
+   * The document's pages whose image Doppler left to the host, read-only from its asset ledger: the write still waiting
+   * for a checkpoint when there is one (it replaces the stored map), else the stored ledger, scoped to the run's
+   * organization. Pages outside the document are dropped. A failed read renders nothing extra and is logged.
+   */
+  private async hostPageImagePages(state: import("../pipeline/pipeline.js").WorkflowState, document: import("../models.js").Document): Promise<number[]> {
+    // The run's organization scopes the read, as it scopes the ledger write (flushAssetLedger).
+    const orgId = state.run.orgId;
+    if (!orgId) return [];
+    const pageCount = Math.max(1, document.pageCount);
+    try {
+      const pending = state.pendingAssetLedger?.get(document.id);
+      const pages = pending
+        ? await hostPageImagePagesOf(pending.assets)
+        : state.store?.listHostPageImagePages ? await state.store.listHostPageImagePages({ orgId, documentId: document.id }) : [];
+      return pages.filter((pageNumber) => Number.isInteger(pageNumber) && pageNumber >= 1 && pageNumber <= pageCount);
+    } catch (error) {
+      console.warn(`[render-images] host page images unavailable document=${document.id} error=${error instanceof Error ? error.message : String(error)}`);
+      return [];
+    }
   }
 
   /**

@@ -3,16 +3,16 @@ import { describe, expect, it, vi } from "vitest";
 import { applyRemainingMigrations, createMigratedDatabase, serveOnRandomPort } from "@docslurp/worker/testing";
 
 /**
- * 0143: search sessions carry a real project_id. Project reads (list, detail,
+ * 0151: search sessions carry a real project_id. Project reads (list, detail,
  * telemetry, suggestions) count and date a project's sessions by it, through
  * (project_id, created_at); the metadata expression index 0087 built for
  * workspaceId (and 0132 only renamed) is gone. The migration is schema only:
  * a trigger fills the column for writers that do not set it, and the
  * maintenance sweep fills the sessions that existed before it.
  */
-describe("search_sessions.project_id (0143)", () => {
+describe("search_sessions.project_id (0151)", () => {
   it("adds the column without touching rows, fills old sessions from the sweep and new ones from the trigger", async () => {
-    const db = await createMigratedDatabase({ stopBefore: "0143_search_sessions_project_id" });
+    const db = await createMigratedDatabase({ stopBefore: "0151_search_sessions_project_id" });
     const { server, port } = await serveOnRandomPort(db);
     const sql = postgres(`postgres://postgres@127.0.0.1:${port}/postgres`, { max: 1, prepare: false, onnotice: () => {} });
     try {
@@ -28,7 +28,7 @@ describe("search_sessions.project_id (0143)", () => {
           ('ss-orphan','ss-user','q','{"projectId":"deleted-project"}', now() - interval '2 minutes'),
           ('ss-none','ss-user','q','{}', now() - interval '1 minute');
       `);
-      await applyRemainingMigrations(db, "0143_search_sessions_project_id");
+      await applyRemainingMigrations(db, "0151_search_sessions_project_id");
       const projectIds = async () =>
         Object.fromEntries((await db.query<{ id: string; project_id: string | null }>("SELECT id, project_id FROM search_sessions"))
           .rows.map((row) => [row.id, row.project_id]));

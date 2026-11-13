@@ -170,7 +170,7 @@ const AUTO_TITLE_SWEEP_LOCK = "project-auto-title-sweep";
  * After ingest: refines the automatic titles of projects whose current corpus
  * changed since the sweep last examined them. project_corpus_stats.updated_at
  * moves as documents complete (trigger-maintained); auto_title_checked_at is
- * the updated_at the sweep last saw (0145). A project is pending while the two
+ * the updated_at the sweep last saw (0153). A project is pending while the two
  * differ, with no lookback window, and the oldest change goes first: a project
  * the sweep cannot rename is marked examined like any other, so it cannot hold
  * a place in the queue, and an outage of any length is caught up afterwards.

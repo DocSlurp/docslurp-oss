@@ -199,7 +199,7 @@ export const projectCorpusStats = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" })
       .defaultNow()
       .notNull(),
-    /** The updated_at the automatic-title sweep last examined (0145); the project is pending while they differ. */
+    /** The updated_at the automatic-title sweep last examined (0153); the project is pending while they differ. */
     autoTitleCheckedAt: timestamp("auto_title_checked_at", { withTimezone: true, mode: "string" }),
   },
   (table) => [
