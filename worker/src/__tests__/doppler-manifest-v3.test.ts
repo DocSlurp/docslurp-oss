@@ -260,6 +260,54 @@ async function scanBook(count: number, bytes: number): Promise<void> {
   await writeV3Folder(dir, v3Text(m), files);
 }
 
+describe("--scan-pages copy (Doppler #39): a scan that cannot be copied is unlinked, reason scan-not-copyable", () => {
+  /** The fixture with `scan_pages: copy` and p2.2 a background scan Doppler left to the host's page rendering. */
+  const copyMode = () => {
+    const m = base();
+    m.scan_pages = "copy";
+    Object.assign(m.images.find((e) => e.id === "p2.2")!, { fate: "background", reason: "scan-not-copyable" });
+    return m;
+  };
+  const withEntry = (id: string, patch: Record<string, unknown>) => {
+    const m = copyMode();
+    Object.assign(m.images.find((e) => e.id === id)!, patch);
+    return v3Text(m);
+  };
+
+  it("accepts the header's copy mode and the unlinked background scan, and ledgers its reason", async () => {
+    await writeV3Folder(dir, v3Text(copyMode()), v2Manifest().files);
+    const set = await readDopplerFigureDir(dir, { pageCount: 3, expect: "complete" });
+    expect((await rowsOf(set)).find((r) => r.assetId === "p2.2")).toMatchObject({ status: "unlinked", reason: "scan-not-copyable", fate: "background", fileOf: null, linkPath: null });
+    expect(set.ledger.counts).toMatchObject({ unlinked: 1, resumable: 0 });
+    // The other scan modes still read.
+    for (const mode of ["image", "skip", "render"]) expect(await rule(v3Text({ ...base(), scan_pages: mode }))).toBe("accepted");
+  });
+
+  it("refuses scan-not-copyable anywhere but an unlinked background image, and any other reason on an unlinked one", async () => {
+    // On a not-extracted image (a repeat), on extracted ones (a picture, a copied page scan), and on an unlinked image
+    // whose fate is not background (furniture, page-scan).
+    expect(await rule(withEntry("p2.1", { reason: "scan-not-copyable" }))).toBe("manifest-image-invalid");
+    expect(await rule(withEntry("p1.1", { reason: "scan-not-copyable" }))).toBe("manifest-image-invalid");
+    expect(await rule(withEntry("p3.1", { reason: "scan-not-copyable" }))).toBe("manifest-image-invalid");
+    expect(await rule(withEntry("p2.2", { fate: "furniture" }))).toBe("manifest-image-invalid");
+    expect(await rule(withEntry("p2.2", { fate: "page-scan" }))).toBe("manifest-image-invalid");
+    // An unlinked image takes no not-extracted reason, and no reason outside the vocabulary.
+    expect(await rule(withEntry("p2.2", { reason: "min_side" }))).toBe("manifest-image-invalid");
+    expect(await rule(withEntry("p2.2", { reason: "scan_not_copyable" }))).toBe("manifest-image-invalid");
+    // An unlinked image may not carry a path and link (it would then be linked, not unlinked).
+    expect(await rule(withEntry("p2.2", { path: "page-0002/image-002.webp", link: "images/page-0002/image-002.webp", format: "webp" }))).toBe("manifest-image-invalid");
+    // An unlinked image never repeats another (Doppler never writes it): no repeat_of, so no fileOf or slot.
+    expect(await rule(withEntry("p2.2", { repeat_of: "p1.1" }))).toBe("manifest-image-invalid");
+    expect(await rule(withEntry("p2.2", { reason: undefined, fate: "furniture", repeat_of: "p1.1" }))).toBe("manifest-image-invalid");
+    // A vector is never a scan; a background mask is (a layered scan's stencil, as kinds.pdf below shows).
+    expect(await rule(withEntry("p2.2", { kind: "vector", id: "p2.g2" }))).toBe("manifest-image-invalid");
+    expect(await rule(withEntry("p2.2", { kind: "mask" }))).toBe("accepted");
+    // An unknown scan mode is refused.
+    expect(await rule(v3Text({ ...copyMode(), scan_pages: "copy-all" }))).not.toBe("accepted");
+    expect(await rule(v3Text(copyMode()))).toBe("accepted");
+  });
+});
+
 describe("storing: fixed memory, bounded concurrency, verified streams", () => {
   it("never holds more than the budget, never runs more uploads than the cap, and writes the manifest after every file", async () => {
     await scanBook(40, 1024 * 1024);
@@ -339,6 +387,74 @@ describe("a real Doppler run (fixtures/doppler-golden/v3-repeats, see PROVENANCE
     const links = [...markdown.matchAll(/\]\(([^)]+)\)/g)].map((m) => m[1]!);
     expect(links.length).toBeGreaterThan(0);
     for (const link of links) expect(objects.has(`${prefix}${link}`), link).toBe(true);
+  });
+});
+
+describe("a real Doppler --scan-pages copy run (fixtures/doppler-golden/v3-scan-copy, see PROVENANCE.json)", () => {
+  const GOLDEN = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "doppler-golden", "v3-scan-copy");
+
+  it("reads Doppler #39's manifest: the copied JPEG scan, the uncopyable scan left unlinked, and a born-digital picture", async () => {
+    const folder = path.join(work, "images");
+    await cp(path.join(GOLDEN, "images"), folder, { recursive: true });
+    const source = createHash("sha256").update(await readFile(path.join(GOLDEN, "source.pdf"))).digest("hex");
+    const set = await readDopplerFigureDir(folder, { pageCount: 3, expect: "complete", sourceSha256: source });
+    expect(set.version).toBe(3);
+    expect((await rowsOf(set)).map((r) => [r.assetId, r.fate, r.status, r.reason, r.source, r.format, r.fileOf])).toEqual([
+      ["p1.1", "page-scan", "extracted", null, "copy", "jpg", "p1.1"],
+      ["p2.1", "background", "unlinked", "scan-not-copyable", null, null, null],
+      ["p3.1", "block", "extracted", null, "render", "webp", "p3.1"],
+    ]);
+    const storage = slowStreamingStorage();
+    await storeDopplerFigures({ storage, document: DOC, runId: "run-1", figures: set, markdown: "", documentMarkdown: await readFile(path.join(GOLDEN, "document.md")) });
+    const prefix = `user-1/run-1/doppler/${DOC.id}/`;
+    const { objects } = storage.stats();
+    expect(objects.get(`${prefix}images/manifest.jsonl`)!.equals(await readFile(path.join(GOLDEN, "images", "manifest.jsonl")))).toBe(true);
+    // Only the two extracted images are stored; the uncopyable scan has no object.
+    expect([...objects.keys()].filter((key) => key.startsWith(`${prefix}images/page-`)).sort()).toEqual([
+      `${prefix}images/page-0001/image-001.jpg`, `${prefix}images/page-0003/image-001.webp`,
+    ]);
+    const markdown = objects.get(`${prefix}document.md`)!.toString();
+    const links = [...markdown.matchAll(/\]\(([^)]+)\)/g)].map((m) => m[1]!);
+    expect(links.length).toBe(2);
+    for (const link of links) expect(objects.has(`${prefix}${link}`), link).toBe(true);
+  });
+});
+
+describe("real Doppler --scan-pages copy runs on Doppler's own scan fixtures (see PROVENANCE.json)", () => {
+  const GOLDEN = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "doppler-golden");
+  async function read(name: string, pageCount: number) {
+    const folder = path.join(work, name);
+    await cp(path.join(GOLDEN, name, "images"), folder, { recursive: true });
+    const source = createHash("sha256").update(await readFile(path.join(GOLDEN, name, "source.pdf"))).digest("hex");
+    return await readDopplerFigureDir(folder, { pageCount, expect: "complete", sourceSha256: source });
+  }
+
+  it("a rebuilt cross-reference table: the linked page scan is not extracted (copy, xref) with no file and no batch line", async () => {
+    const set = await read("v3-scan-xref", 3);
+    expect((await rowsOf(set)).map((r) => [r.assetId, r.fate, r.status, r.reason, r.linkPath, r.fileOf, r.bytes])).toEqual([
+      ["p1.1", "page-scan", "not-extracted", "copy", "images/page-0001/image-001.jpg", null, null],
+      ["p2.1", "background", "unlinked", "scan-not-copyable", null, null, null],
+      ["p3.1", "background", "unlinked", "scan-not-copyable", null, null, null],
+    ]);
+    expect(set.ledger.counts).toMatchObject({ extracted: 0, notExtracted: 1, unlinked: 2, resumable: 0 });
+    expect(set.run).toMatchObject({ complete: true, resumable: false });
+  });
+
+  it("every kind of scan: copied, decoded, and left to the host, a layered scan's stencil reported as a background mask", async () => {
+    const set = await read("v3-scan-kinds", 7);
+    expect((await rowsOf(set)).map((r) => [r.assetId, r.kind, r.fate, r.status, r.reason, r.source])).toEqual([
+      ["p1.1", "picture", "page-scan", "extracted", null, "copy"],
+      ["p2.1", "picture", "page-scan", "extracted", null, "copy"],
+      ["p3.1", "picture", "background", "unlinked", "scan-not-copyable", null],
+      ["p4.1", "picture", "background", "unlinked", "scan-not-copyable", null],
+      ["p5.1", "picture", "background", "unlinked", "scan-not-copyable", null],
+      ["p5.2", "picture", "background", "unlinked", "scan-not-copyable", null],
+      ["p5.3", "picture", "background", "unlinked", "scan-not-copyable", null],
+      ["p5.4", "picture", "background", "unlinked", "scan-not-copyable", null],
+      ["p6.1", "picture", "background", "unlinked", "scan-not-copyable", null],
+      ["p6.2", "mask", "background", "unlinked", "scan-not-copyable", null],
+      ["p7.1", "picture", "page-scan", "extracted", null, "decode"],
+    ]);
   });
 });
 

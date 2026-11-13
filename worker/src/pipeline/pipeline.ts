@@ -74,6 +74,8 @@ export interface CheckpointStore {
   markAssetsPending?(args: Parameters<typeof import("../db/document-asset-ledger.js").markAssetsPending>[1]): Promise<unknown>;
   markAssetsStored?(args: Parameters<typeof import("../db/document-asset-ledger.js").markAssetsStored>[1]): Promise<unknown>;
   replaceUnvouchedObject?(args: Parameters<typeof import("../db/document-asset-ledger.js").replaceUnvouchedObject>[1]): Promise<void>;
+  /** Pages whose image Doppler left to the host (db/document-asset-ledger.ts listHostPageImagePages); read-only, org-scoped. */
+  listHostPageImagePages?(scope: { orgId: string; documentId: string }): Promise<number[]>;
   /**
    * PII withholding for artifacts written after the document's PII stage (the first pass's figure step): whether the
    * document's recorded PII outcome withholds artifacts (it redacted or blocked), and adding URIs to its withheld list.

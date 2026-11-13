@@ -3328,7 +3328,7 @@ export const storageMeterDays = pgTable(
     objectBytes: bigint("object_bytes", { mode: "number" }).default(0).notNull(),
     // You can use { mode: "bigint" } if numbers are exceeding js number limitations
     indexBytes: bigint("index_bytes", { mode: "number" }).default(0).notNull(),
-    // Of objectBytes, the figure bytes measured from the asset ledger (migration 0146).
+    // Of objectBytes, the figure bytes measured from the asset ledger (migration 0152).
     measuredArtifactBytes: bigint("measured_artifact_bytes", { mode: "number" }).default(0).notNull(),
     credits: numeric({ precision: 24, scale: 12, mode: "number" }).default(0).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "string" })
@@ -3595,7 +3595,7 @@ export const documentAssets = pgTable("document_assets", {
   linkPath: text("link_path"),
   fileOf: text("file_of"),
   storageKey: text("storage_key"),
-  // Migration 0147: none (no file), pending (written before its upload), stored (landed and checked; served and billed).
+  // Migration 0153: none (no file), pending (written before its upload), stored (landed and checked; served and billed).
   storageState: text("storage_state").default("none").notNull(),
   objNum: integer("obj_num"),
   objGen: integer("obj_gen"),
@@ -3648,9 +3648,9 @@ export const documentExtractionLevels = pgTable("document_extraction_levels", {
   sourceDecode: integer("source_decode").default(0).notNull(),
   sourceRender: integer("source_render").default(0).notNull(),
   assetBytes: bigint("asset_bytes", { mode: "number" }).default(0).notNull(),
-  // Migration 0147: false after a re-run that skipped the figure step (rows kept, not served, counted or billed).
+  // Migration 0153: false after a re-run that skipped the figure step (rows kept, not served, counted or billed).
   assetsCurrent: boolean("assets_current").default(true).notNull(),
-  // Migration 0147: uploads a crash left pending (resumable work, adopted without a VM) and the folder files' bytes.
+  // Migration 0153: uploads a crash left pending (resumable work, adopted without a VM) and the folder files' bytes.
   assetsPending: integer("assets_pending").default(0).notNull(),
   folderBytes: bigint("folder_bytes", { mode: "number" }).default(0).notNull(),
   gaps: jsonb(),
