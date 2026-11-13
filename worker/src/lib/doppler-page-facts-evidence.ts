@@ -71,7 +71,10 @@ const round = (value: number) => Math.round(value * 10_000) / 10_000;
 function itemCoverage(item: CoveredPage["images"]["items"][number], page: CoveredPage): number {
   const pageArea = page.geometry.widthPt * page.geometry.heightPt;
   if (!(pageArea > 0)) return 0;
-  const [x0, y0, x1, y1] = item.bbox;
+  // Clipped to the page first (either orientation, so a rotated page's box is never cut short): a box outside it covers nothing.
+  const side = Math.max(page.geometry.widthPt, page.geometry.heightPt);
+  const clip = (n: number) => Math.min(side, Math.max(0, n));
+  const [x0, y0, x1, y1] = item.bbox.map(clip) as [number, number, number, number];
   const boxShare = (Math.abs(x1 - x0) * Math.abs(y1 - y0)) / pageArea;
   return Math.max(0, Math.min(1, item.coverage, boxShare));
 }

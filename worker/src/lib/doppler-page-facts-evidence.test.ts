@@ -143,5 +143,8 @@ describe("Doppler page facts as page-image evidence", () => {
     const [evidence] = pageImageEvidenceFromDopplerFacts({ facts: forged, pageCount: 1, pageTexts: [""] }) ?? [];
     expect(evidence).toMatchObject({ pageNumber: 1, imageCount: 0, imageCoverage: 0, largestImageCoverage: 0 });
     expect(decidePageRaster({ nativeWords: 0, images: { count: 0, coverage: 0, largestCoverage: 0 } }).read).toBe(false);
+    const outside = { ...item(1, { px: [2000, 2000], dpi: 300, bbox: [0, 0, 612, 792], obj: 6 }), bbox: [20_000, 20_000, 40_000, 40_000], coverage: 1 };
+    const offPage = parse([docLine({ pageCount: 1 }), { ...page(1, 0, []), images: { imageCount: 1, imageCoverage: 1, largestImageCoverage: 1, fullPageImage: true, scan: "single", items: [outside], itemsTruncated: false, truncated: false } }, runLine({ pagesEmitted: 1 })], 1);
+    expect(pageImageEvidenceFromDopplerFacts({ facts: offPage, pageCount: 1, pageTexts: [""] })?.[0]).toMatchObject({ imageCount: 0, largestImageCoverage: 0 });
   });
 });
