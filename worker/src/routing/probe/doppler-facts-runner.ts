@@ -29,7 +29,8 @@ export type FactsProbeUnavailable =
   | "facts-read-failed"
   | `facts-refused:${string}`
   | "facts-unreadable-document"
-  | "facts-incomplete";
+  | "facts-incomplete"
+  | "facts-all-pages-failed";
 
 export type FactsProbeResult =
   | { status: "ok"; rows: ProbeRow[]; locked: boolean; pagesKnown: number; pagesFailed: number; linesDropped: number }
@@ -75,6 +76,8 @@ export function createDopplerFactsProbeRunner(read: FactsReader): FactsProbeRunn
     // Every page the host counted must be known (a failed page is known, as the probe's failed row): a partial plan would
     // leave pages the router never saw.
     if (facts.pages.size !== pageCount) return { status: "unavailable", reason: "facts-incomplete", detail: `${facts.pages.size}/${pageCount}` };
+    // Facts that know nothing about any page are no facts: v3 decides, not a row of failed pages.
+    if (facts.summary.pagesFailed >= pageCount) return { status: "unavailable", reason: "facts-all-pages-failed" };
     const rows = probeRowsFromDopplerFacts(facts, pageCount);
     if (rows.length !== pageCount) return { status: "unavailable", reason: "facts-incomplete", detail: `${rows.length}/${pageCount}` };
     // Facts rows never carry a thumbnail; strip one defensively so nothing downstream reads a host path.

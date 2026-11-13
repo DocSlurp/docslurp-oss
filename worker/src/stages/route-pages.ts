@@ -4,6 +4,7 @@ import path from "node:path";
 import { chartExportConfigOf, FORMAT_MODE } from "../chart-export/config.js";
 import {
   adaptiveRoutingDecisionSurfaceSchema,
+  defaultDocumentExtractionConfig,
   defaultPageRouterConfig,
   pageRouterDecisionModels,
   qualityAllowsPageReading,
@@ -33,7 +34,8 @@ import { isCostCapExceeded, runDocumentStage, runDocuments, runSpentCents } from
 import { healthyDocuments } from "../pipeline/document-health.js";
 import { allowHostedCall } from "../lib/privacy-guard.js";
 import { buildPageInputs, createProbeRunner, pageInputFromProbeRow, parseProbeOutput, type ProbeRunner } from "../routing/page-input.js";
-import { HostPdfRefusedError, sandboxedPdfDeploymentReason, type SandboxedPdfReason } from "../routing/host-pdf-guard.js";
+import { HostPdfRefusedError, sandboxedPdfReasonForRun, type SandboxedPdfReason } from "../routing/host-pdf-guard.js";
+import { documentExtractorRegistry } from "../extractors/registry.js";
 import {
   ROUTING_PAGE_FACTS_SLOT,
   createDopplerFactsProbeRunner,
@@ -238,7 +240,10 @@ export class RoutePagesStage implements Stage {
     // Where page features come from. DOCSLURP_DOPPLER_PAGE_FACTS=use: the facts the PDF VM measured, never the PDF itself.
     // Otherwise the host-side native probe, which a sandboxed deployment refuses outright (no plan, v3 routing).
     const env = this.deps.env ?? process.env;
-    const sandboxed = sandboxedPdfDeploymentReason(env);
+    const sandboxed = sandboxedPdfReasonForRun(() => documentExtractorRegistry.resolve("pdf", {
+      ...defaultDocumentExtractionConfig.order,
+      ...(state.run.pipeline.documentExtraction?.order ?? {}),
+    }.pdf), env);
     const factsMode = dopplerPageFactsMode(env);
     const probeSource: RouteProbeSource = factsMode === "use" ? "doppler-facts" : "native-probe";
     if (probeSource === "native-probe" && sandboxed) {
@@ -270,9 +275,17 @@ export class RoutePagesStage implements Stage {
           signal,
         });
         if (facts.status !== "ok") return this.fallback(state, document, mode, probeSource, facts.reason, sandboxed, facts.detail);
-        // A thumbnail is a host file path that pageInputFromProbeRow would open: refused before any row is built.
+        // A thumbnail is a host file path that pageInputFromProbeRow would open: refused on a sandboxed deployment, and
+        // dropped everywhere before any row is built.
         if (facts.rows.some((row) => row.thumbnail !== undefined)) guard("facts-thumbnail");
-        pages = await Promise.all(facts.rows.map((row) => pageInputFromProbeRow(row, routing, "pdf")));
+        const rows = facts.rows.map(({ thumbnail: _thumbnail, ...row }) => row);
+        // An active plan must cover every page the host counted (a locked row covers one): pages the router never saw
+        // would get no extraction at all.
+        const hostPages = hostPageCount(document);
+        if (mode === "active" && rows.length !== hostPages) {
+          return this.fallback(state, document, mode, probeSource, "facts-incomplete-for-active", sandboxed, `${rows.length}/${hostPages}`);
+        }
+        pages = await Promise.all(rows.map((row) => pageInputFromProbeRow(row, routing, "pdf")));
         factsSummary = { locked: facts.locked, pagesKnown: facts.pagesKnown, pagesFailed: facts.pagesFailed, linesDropped: facts.linesDropped };
       } else {
         guard("native-probe");
@@ -353,10 +366,13 @@ export class RoutePagesStage implements Stage {
       });
 
       if (mode === "active") assertCompleteActivePlan(plan);
+      const runTableGate = (this.deps.tableGate ?? readRoutingFlags().tableGate) === "shadow";
+      // Decide host access before anything is written, so a refusal never leaves an orphan plan.
+      if (runTableGate && pdfPath !== null) guard("table-gate-open");
       await this.storage.putJson(key, plan);
       const artifactUri = this.storage.uri(key);
       const comparison = this.recordDecisions(state, document, plan, pages, routerNote, timing, chainReport, { probeSource, routing });
-      const tableGate = (this.deps.tableGate ?? readRoutingFlags().tableGate) === "shadow"
+      const tableGate = runTableGate
         ? pdfPath !== null
           ? await this.shadowTableGate(state, document, pdfPath, plan, pages, catalog.targets, guard, signal)
           : { error: "skipped: no host PDF access" }
@@ -424,12 +440,15 @@ export class RoutePagesStage implements Stage {
       render: (pageNumber) => {
         const hit = cache.get(pageNumber);
         if (hit) return hit;
-        guard("inset-render");
         const pending = (async () => {
+          guard("inset-render");
           dir ??= await mkdtemp(path.join(tmpdir(), "docslurp-route-insets-"));
           const stdout = await probe({ pdfPath, pages: String(pageNumber), thumbDir: dir, thumbPx: INSET_RENDER_PX, signal });
           return parseProbeOutput(stdout).find((row) => row.pageNumber === pageNumber)?.thumbnail ?? null;
-        })().catch(() => null);
+        })().catch((error: unknown) => {
+          if (error instanceof HostPdfRefusedError) throw error;
+          return null;
+        });
         cache.set(pageNumber, pending);
         return pending;
       },
@@ -638,6 +657,7 @@ export class RoutePagesStage implements Stage {
     shadow: { probeSource: RouteProbeSource; routing: AdaptiveRoutingArtifact | null },
   ): ShadowComparisonSummary {
     const summary: ShadowComparisonSummary = { probeSource: shadow.probeSource, pages: pages.length, compared: 0, agree: 0, routerOnlyPixels: 0, v3OnlyPixels: 0 };
+    const v3ByPage = new Map((shadow.routing?.pages ?? []).map((entry) => [entry.pageNumber, entry] as const));
     const byPage = new Map<number, RoutePlan["assignments"]>();
     for (const assignment of plan.assignments) {
       byPage.set(assignment.pageNumber, [...(byPage.get(assignment.pageNumber) ?? []), assignment]);
@@ -649,7 +669,7 @@ export class RoutePagesStage implements Stage {
     for (const page of pages) {
       const pageNumber = page.features.pageNumber;
       const assignments = byPage.get(pageNumber) ?? [];
-      const comparison = compareWithV3(assignments, shadow.routing?.pages.find((entry) => entry.pageNumber === pageNumber), shadow.probeSource);
+      const comparison = compareWithV3(assignments, v3ByPage.get(pageNumber), shadow.probeSource);
       if (comparison.agreesWithV3 !== null) {
         summary.compared++;
         if (comparison.agreesWithV3) summary.agree++;

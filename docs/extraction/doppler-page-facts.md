@@ -75,11 +75,14 @@ from these facts instead of probing the PDF (`createDopplerFactsProbeRunner`, `w
 - extract-markdown stores the winning job's validated facts as canonical lines (`dopplerPageFactsJsonl`) at
   `<artifactRoot>/routing-page-facts/<documentId>.jsonl` (slot `routing-page-facts`). route-pages reads only that key,
   re-validates it with `parseDopplerPageFacts` bounded by the host's measured page count, and never opens the PDF.
-- Facts that are missing, refused, oversized, for an unreadable document or for fewer pages than the host counted are
-  unavailable: no plan is written and the document keeps v3 routing (`page-route-fallback`). They never authorize a model
-  read or a charge. A doc line that says a user password is required gives the locked row.
-- On a sandboxed deployment (the check extract-markdown uses for `sandboxed-pdf-deployment`, plus `NODE_ENV=production` or
-  the service profile) every host-side PDF access in the router is refused before it happens: the native probe, its
+- Facts that are missing, refused, oversized, for an unreadable document, for fewer pages than the host counted, or with
+  every page failed are unavailable: no plan is written and the document keeps v3 routing (`page-route-fallback`). Missing
+  or refused facts never authorize a model read or a charge. Valid facts (including a failed page, as the native probe's
+  failed row) steer the plan like probe rows do, within the run's quality tier and cost cap. In `active` mode the facts must
+  cover every host page, so a locked row on a multi-page document is unavailable there. A doc line that says a user
+  password is required gives the locked row.
+- On a sandboxed deployment (the checks extract-markdown uses for `sandboxed-pdf-deployment` and for a project whose PDF
+  extractor order names vm-pdf, `sandboxed-pdf-route`, plus `NODE_ENV=production` or the service profile) every host-side PDF access in the router is refused before it happens: the native probe, its
   encrypted-file byte scan, thumbnails, inset renders and clips and the table gate. A refusal is logged as an error and
   recorded as `page-route-host-pdf-refused`. Without facts mode `use` a sandboxed deployment writes no plan.
 - Facts carry no pixels, so image decision models are skipped (`decision-model-skipped:no-host-pixels:<ids>`) and their

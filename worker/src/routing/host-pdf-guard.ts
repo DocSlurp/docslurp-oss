@@ -11,7 +11,7 @@ import { resolvePdfExtractorSetting, sandboxedPdfConfigured } from "@docslurp/sh
 
 import { vmOnlyParsing } from "../lib/vm-only-parsing.js";
 
-export type SandboxedPdfReason = "sandboxed-pdf-deployment" | "vm-only-parsing" | "pdf-setting-unreadable";
+export type SandboxedPdfReason = "sandboxed-pdf-deployment" | "sandboxed-pdf-route" | "vm-only-parsing" | "pdf-setting-unreadable";
 
 export function sandboxedPdfDeploymentReason(env: NodeJS.ProcessEnv = process.env): SandboxedPdfReason | null {
   try {
@@ -20,6 +20,21 @@ export function sandboxedPdfDeploymentReason(env: NodeJS.ProcessEnv = process.en
     return "pdf-setting-unreadable";
   }
   return vmOnlyParsing(env) ? "vm-only-parsing" : null;
+}
+
+/**
+ * The deployment check plus the project's own choice: a PDF extractor order that names vm-pdf keeps that project's PDFs
+ * off the host (extract-markdown's `sandboxed-pdf-route`) even on a deployment that would otherwise parse on the host. An
+ * order that cannot be resolved is read as sandboxed.
+ */
+export function sandboxedPdfReasonForRun(resolvePdfOrder: () => readonly string[], env: NodeJS.ProcessEnv = process.env): SandboxedPdfReason | null {
+  const deployment = sandboxedPdfDeploymentReason(env);
+  if (deployment) return deployment;
+  try {
+    return resolvePdfOrder().includes("vm-pdf") ? "sandboxed-pdf-route" : null;
+  } catch {
+    return "pdf-setting-unreadable";
+  }
 }
 
 export const HOST_PDF_REFUSED_CODE = "HOST_PDF_REFUSED";

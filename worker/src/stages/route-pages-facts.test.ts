@@ -208,6 +208,38 @@ describe("route-pages on a sandboxed deployment", () => {
     expect(state.usageLedger.pendingCount).toBe(0);
   });
 
+  it("a project whose PDF order names vm-pdf is sandboxed even on a host-parsing deployment", async () => {
+    const storage = makeStorage(fullFixture());
+    const state = makeState();
+    (state.run.pipeline as { documentExtraction?: unknown }).documentExtraction = { order: { pdf: ["vm-pdf"] } };
+    await new RoutePagesStage(storage, cfg(), sources, undefined, { probe, catalog, renderClip, openNativePdf, tableGate: "shadow", env: {} as NodeJS.ProcessEnv }).run(state);
+    expectNoHostPdfAccess();
+    expect(storage.putJson).not.toHaveBeenCalled();
+    expect(state.pendingPerformance.find((e) => e.metric === "page-route-fallback")!.metadata).toMatchObject({ sandboxed: "sandboxed-pdf-route", reason: "facts-mode-store" });
+  });
+
+  it("facts with every page failed are unavailable: v3 decides", async () => {
+    const failed = (page: number) => ({ schema: "doppler-page-facts/1", type: "page", page, error: "failed", parseWarnings: [], unusualFeatures: [] });
+    const { plan, metrics } = await route({ facts: jsonl([docLine(), failed(1), failed(2), failed(3), runLine()]) });
+    expectNoHostPdfAccess();
+    expect(plan).toBeNull();
+    expect(metrics("page-route-fallback")[0]!.metadata).toMatchObject({ reason: "facts-all-pages-failed" });
+  });
+
+  it("active mode refuses a locked row that does not cover every host page", async () => {
+    const { plan, metrics } = await route({ facts: jsonl([docLine({ locked: true })]), mode: "active" });
+    expectNoHostPdfAccess();
+    expect(plan).toBeNull();
+    expect(metrics("page-route-fallback")[0]!.metadata).toMatchObject({ reason: "facts-incomplete-for-active", detail: "1/3" });
+  });
+
+  it("active mode plans from complete facts without touching the PDF", async () => {
+    const { plan } = await route({ facts: fullFixture(), mode: "active" });
+    expectNoHostPdfAccess();
+    expect(plan).toMatchObject({ mode: "active" });
+    expect(new Set(plan!.assignments.map((a) => a.pageNumber))).toEqual(new Set([1, 2, 3]));
+  });
+
   it("a storage failure is unavailable, never an error that reaches the native probe", async () => {
     const { plan, metrics } = await route({ facts: new Error("boom") });
     expectNoHostPdfAccess();
@@ -245,6 +277,7 @@ describe("golden decisions on fixture facts", () => {
     const result = await createDopplerFactsProbeRunner(async () => Buffer.from(fullFixture()))({ documentId: "doc", pageCount: 3 });
     expect(result.status).toBe("ok");
     const pages = await Promise.all((result as { rows: Parameters<typeof pageInputFromProbeRow>[0][] }).rows.map((row) => pageInputFromProbeRow(row, null)));
+    expect(pages.every((page) => page.features.provenance.probe === "doppler-facts")).toBe(true);
     expect(pages.map((page) => ({
       page: page.features.pageNumber,
       layer: page.textFacts.textLayerStatus,
