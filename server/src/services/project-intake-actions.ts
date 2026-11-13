@@ -9,6 +9,7 @@ import { createHash } from "node:crypto";
 import {
   documentTagsSchema,
   pipelineFeatureOverridesSchema,
+  publicPipelineFeatureOverridesSchema,
   sanitizeStoredPipeline,
   projectTemplateKeySchema,
   type ExtractRecord,
@@ -166,7 +167,7 @@ async function idempotently(
  * pipeline (and its template locks) instead of replacing it.
  */
 export function parseProjectIntakePipeline(raw: unknown): PipelineFeatureOverrides {
-  const parsed = pipelineFeatureOverridesSchema.safeParse(raw === undefined || raw === null ? {} : raw);
+  const parsed = publicPipelineFeatureOverridesSchema.safeParse(raw === undefined || raw === null ? {} : raw);
   if (!parsed.success) {
     throw new ProjectIntakeError("Invalid pipeline payload", 422, parsed.error.issues.map((issue) => ({
       path: ["pipeline", ...issue.path].join("."),

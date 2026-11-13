@@ -748,6 +748,35 @@ export type UpdateProjectSearchSettingsInput = z.infer<
   typeof updateProjectSearchSettingsSchema
 >;
 
+/**
+ * The reranker as customers choose it: `keyword` (local BM25) or `model` (the managed hosted reranker). The provider
+ * and model behind `model` are managed; public requests never name them.
+ */
+export const RERANKERS = ["keyword", "model"] as const;
+export type Reranker = (typeof RERANKERS)[number];
+
+/** Public search-settings updates: `retrievalDefaults.reranker` in place of a rerank provider and model. */
+export const publicUpdateProjectSearchSettingsSchema = updateProjectSearchSettingsSchema.extend({
+  retrievalDefaults: updateProjectSearchRetrievalDefaultsSchema.omit({ rerankProvider: true, rerankModel: true })
+    .extend({ reranker: z.enum(RERANKERS).optional() }).strict().optional(),
+}).transform(({ retrievalDefaults, ...rest }): UpdateProjectSearchSettingsInput => {
+  if (!retrievalDefaults) return rest;
+  const { reranker, ...defaults } = retrievalDefaults;
+  return {
+    ...rest,
+    retrievalDefaults: reranker === "model"
+      ? { ...defaults, rerankProvider: "deepinfra", rerankModel: "Qwen/Qwen3-Reranker-0.6B" }
+      : reranker === "keyword" ? { ...defaults, rerankProvider: "bm25" } : defaults,
+  };
+});
+
+/** Search settings as customers read them: `reranker` instead of the managed rerank provider and model. */
+export function customerSearchSettingsView<T extends { retrievalDefaults?: { rerankProvider?: string; rerankModel?: string } }>(settings: T): T {
+  if (!settings.retrievalDefaults) return settings;
+  const { rerankProvider, rerankModel: _model, ...defaults } = settings.retrievalDefaults;
+  return { ...settings, retrievalDefaults: { ...defaults, reranker: rerankProvider === "deepinfra" ? "model" : "keyword" } };
+}
+
 export const createOrganizationSchema = z.object({
   userId: z.string().default("demo-user"),
   name: z.string().trim().min(1).max(120),

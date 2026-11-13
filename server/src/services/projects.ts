@@ -1,4 +1,4 @@
-import { deferredProfilesEnabled, isBillingEnforced, PUBLIC_ERROR_MESSAGES, publicDiagnostics, publicDocumentError } from "@docslurp/shared";
+import { deferredProfilesEnabled, isBillingEnforced, PUBLIC_ERROR_MESSAGES, publicDiagnostics, publicDocumentError, carryManagedPipelineFields } from "@docslurp/shared";
 import { markProjectAutoNamed, refineProjectNames } from "./project-naming.js";
 import { forgetProjectProviderPolicy } from "../lib/provider-policy.js";
 import { jsonRecord } from "../lib/json-record.js";
@@ -977,7 +977,9 @@ export async function resolveUpdatedPipeline(
         : current.pipeline),
   );
   if (parsed.summaries !== undefined) draftPipeline.summarize = parsed.summaries;
-  const pipeline = applyProjectTemplateLocks(draftPipeline, template);
+  // Managed model fields (backend models, providers, routes) are never a customer choice: keep the stored ones
+  // (platform-admin settings) across every edit; the routes refuse them in requests.
+  const pipeline = carryManagedPipelineFields(applyProjectTemplateLocks(draftPipeline, template), current.pipeline as unknown as Record<string, unknown>);
   // The schema defaults a missing indexingMode to "full", so a pipeline edit must not
   // flip the mode: only an explicit request (options) changes it. Flag off pins "full".
   // With the flag off the stored raw mode is preserved (only the effective mode is coerced).
