@@ -1703,8 +1703,8 @@ async function chargeSearch(result: SearchResponse, userId: string, searchId: st
         metric: BILLABLE_UNIT_METRICS.search,
         amount: 1,
         unit: "search",
-        credits: searchCredits(1, { llmStrategies }),
-        metadata: { llmStrategies, searchMode: result.searchMode ?? "deep", searchUnits: searchUnits({ llmStrategies }) },
+        credits: searchCredits(1, { llmStrategies, mode: result.searchMode ?? "deep" }),
+        metadata: { llmStrategies, searchMode: result.searchMode ?? "deep", searchUnits: searchUnits({ llmStrategies, mode: result.searchMode ?? "deep" }) },
       },
     });
   } catch (error) {
