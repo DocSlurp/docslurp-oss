@@ -111,8 +111,8 @@ describe("POST /documents/:id/assets/resume", () => {
     // Wrong scope and a client key.
     const readOnly = await keys.createApiKey("ua", "read", { orgId: "org-a", scopes: ["artifacts"], keyType: "server" });
     expect((await post("doc-a", { authorization: `Bearer ${readOnly.rawKey}` })).status).toBe(403);
-    const client = await keys.createApiKey("ua", "client", { orgId: "org-a", scopes: ["ingest"], keyType: "client", allowedDomains: ["docs.example.com"] });
-    expect((await post("doc-a", { authorization: `Bearer ${client.rawKey}` })).status).toBe(403);
+    // A browser key can never hold ingest: refused when it is created (the route also requires a server key).
+    await expect(keys.createApiKey("ua", "client-ingest", { orgId: "org-a", scopes: ["ingest"], keyType: "client", allowedDomains: ["docs.example.com"] })).rejects.toThrow();
     // A revoked key never authenticates.
     const revoked = await keys.createApiKey("ua", "revoked", { orgId: "org-a", scopes: ["ingest"], keyType: "server" });
     await keys.revokeApiKey(revoked.key.id, "ua");
