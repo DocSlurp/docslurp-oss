@@ -8,7 +8,7 @@ import v8 from "node:v8";
 import { runInNewContext } from "node:vm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { DopplerFigureRejection, downloadDopplerImagesDir, readDopplerFigureDir, readLedgerSpill, storeDopplerFigures, type DopplerFigureSet } from "../extractors/doppler-figures.js";
+import { DopplerFigureRejection, disposeDopplerFigureSet, downloadDopplerImagesDir, readDopplerFigureDir, readLedgerSpill, storeDopplerFigures, type DopplerFigureSet } from "../extractors/doppler-figures.js";
 import { ByteBudget } from "../extractors/doppler-upload.js";
 import { dopplerAssetCaps } from "@docslurp/shared";
 import { v2Manifest, v3ShardText, v3Text, writeShardedFolder, writeV3Folder } from "../test/doppler-manifest-v2.js";
@@ -402,6 +402,32 @@ describe("sharded documents: one manifest per shard", () => {
       await writeFile(path.join(dir, "manifest.jsonl"), v3Text(m0()));
       try { await readDopplerFigureDir(dir, { pageCount: 3 }); return "accepted"; } catch (error) { return (error as DopplerFigureRejection).rule; }
     })).toBe("unexpected-entry");
+  }, 60_000);
+
+  it("context-page entries (real Doppler shards list their -f/-l pages as not-extracted `pages`) are counted, never rows; anything else out of range is refused", async () => {
+    // As the 130-page streamed fixture: shard 1-64 lists p70.1 and shard 65-128 lists p130.1, each not-extracted `pages`.
+    const ctx = (m: ReturnType<typeof base>, id: string, page: number, extra: Record<string, unknown> = {}) => ({
+      ...m.images.find((e) => e.id === "p2.2")!, id, page, kind: "picture", fate: "inline", status: "not-extracted", reason: "pages",
+      format: "webp", source: null, bytes: 0, sha256: null, width: 0, height: 0,
+      // As the fixture: the derived path and link, no file.
+      path: `page-${String(page).padStart(4, "0")}/image-${id.split(".")[1]!.padStart(3, "0")}.webp`,
+      link: `images/page-${String(page).padStart(4, "0")}/image-${id.split(".")[1]!.padStart(3, "0")}.webp`, ...extra,
+    }) as never;
+    const shards = (extra: Record<string, unknown> = {}) => (m: ReturnType<typeof base>) => [
+      { range: [1, 2] as [number, number], text: v3ShardText(m, [1, 2], { context: [ctx(m, "p3.9", 3, extra)] }) },
+      { range: [3, 3] as [number, number], text: v3ShardText(m, [3, 3], { context: [ctx(m, "p2.9", 2)] }) },
+    ];
+    const set = await shardRule(shards()) as DopplerFigureSet;
+    expect(typeof set === "string" ? set : "set").toBe("set");
+    const ids = new Set<string>();
+    for await (const row of readLedgerSpill(set.ledger.spill)) ids.add(row.assetId);
+    expect(ids.has("p3.9") || ids.has("p2.9")).toBe(false);
+    expect(set.files.map((file) => file.id).sort()).toEqual(["p1.1", "p1.g1", "p3.1"]);
+    await disposeDopplerFigureSet(set);
+    // Out of range and resumable, of another reason, or extracted: refused.
+    expect(await shardRule(shards({ resumable: true, reason: "budget" }))).toBe("manifest-shard-range");
+    expect(await shardRule(shards({ reason: "min_side" }))).toBe("manifest-shard-range");
+    expect(await shardRule(shards({ status: "extracted", reason: undefined, source: "render", bytes: 10, sha256: "a".repeat(64), width: 1, height: 1 }))).toBe("manifest-shard-range");
   }, 60_000);
 
   it("LOW-5: shards start at page 1, leave no hole, and end within the document", async () => {
