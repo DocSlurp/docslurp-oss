@@ -1060,7 +1060,13 @@ export function figureLedgerHooks(
   };
 }
 
-<<<<<<< HEAD
+/** SQL: the project's figures are on (`pipeline.figures`, default on). Mirrors projectFiguresEnabled (the deploy flag aside). */
+export function figuresOnSql(sql: Sql<Record<string, unknown>>, projectAlias: string) {
+  const p = sql(projectAlias);
+  return sql`(coalesce(${p}.pipeline -> 'figures', 'true'::jsonb) not in ('false'::jsonb, '"off"'::jsonb)
+    and coalesce(${p}.pipeline -> 'figures' ->> 'enabled', 'true') <> 'false')`;
+}
+
 // ---- The resume queue (migration 0144) ----
 
 /**
@@ -1069,9 +1075,7 @@ export function figureLedgerHooks(
  */
 export function projectAutoResumeSql(tx: Sql<Record<string, unknown>> | Tx, projectAlias: string) {
   const p = tx(projectAlias);
-  return tx`(coalesce(${p}.pipeline ->> 'figureResume', 'auto') = 'auto'
-    and coalesce(${p}.pipeline -> 'figures', 'true'::jsonb) not in ('false'::jsonb, '"off"'::jsonb)
-    and coalesce(${p}.pipeline -> 'figures' ->> 'enabled', 'true') <> 'false')`;
+  return tx`(coalesce(${p}.pipeline ->> 'figureResume', 'auto') = 'auto' and ${figuresOnSql(tx as Sql<Record<string, unknown>>, projectAlias)})`;
 }
 
 /**
@@ -1095,11 +1099,3 @@ async function queueFigureResume(tx: Tx, scope: DocumentAssetLedgerScope, resume
     where l.document_id = ${scope.documentId} and l.org_id = ${scope.orgId} and l.project_id = ${scope.projectId}
       and p.id = l.project_id and p.org_id = l.org_id`;
 }
-=======
-/** SQL: the project's figures are on (`pipeline.figures`, default on). Mirrors projectFiguresEnabled (the deploy flag aside). */
-export function figuresOnSql(sql: Sql<Record<string, unknown>>, projectAlias: string) {
-  const p = sql(projectAlias);
-  return sql`(coalesce(${p}.pipeline -> 'figures', 'true'::jsonb) not in ('false'::jsonb, '"off"'::jsonb)
-    and coalesce(${p}.pipeline -> 'figures' ->> 'enabled', 'true') <> 'false')`;
-}
->>>>>>> origin/feat/figure-resume-billing
