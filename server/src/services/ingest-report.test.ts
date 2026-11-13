@@ -808,9 +808,17 @@ describe("ingest report: chart export", () => {
     expect(parse({ chartExport: { tier: "off" } }).success).toBe(true);
     expect(parse({ figures: false }).success).toBe(true);
     expect(parse({ chartExport: { tier: "smart" } }).success).toBe(false);
-    expect(parse({ chartExport: { enabled: true } }).success).toBe(false);
-    expect(parse({ chartExport: { generatorModel: "llm://openrouter/some/model" } }).success).toBe(false);
-    expect(parse({ chartExport: { tier: "models", generatorModel: null } }).success).toBe(false);
+    // Patches stored before the tier (chat history, ingest reports) are upgraded: `enabled: true` is `models`, and a
+    // generator model is dropped, never carried into the proposal.
+    const chartExportOf = (pipeline: unknown) => {
+      const parsed = parse(pipeline);
+      expect(parsed.success).toBe(true);
+      return (parsed.data?.changes.pipeline as { chartExport?: unknown } | undefined)?.chartExport;
+    };
+    expect(chartExportOf({ chartExport: { enabled: true } })).toEqual({ tier: "models" });
+    expect(chartExportOf({ chartExport: { generatorModel: "llm://openrouter/some/model" } })).toEqual({});
+    expect(chartExportOf({ chartExport: { tier: "models", generatorModel: null } })).toEqual({ tier: "models" });
+    expect(chartExportOf({ chartExport: { tier: "off", enabled: true } })).toEqual({ tier: "off" });
     expect(parse({ chartExport: { formats: [] } }).success).toBe(false);
     expect(parse({ chartExport: { formats: ["png"] } }).success).toBe(false);
     expect(parse({ chartExport: { formats: ["csv", "csv"] } }).success).toBe(false);

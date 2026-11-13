@@ -43,7 +43,7 @@ export function readProjectVersionSnapshot(
     return null;
   }
 
-  // Snapshots saved before migration 0145 carry chartExport.enabled/generatorModel; the audit log is never rewritten,
+  // Snapshots saved before migration 0151 carry chartExport.enabled/generatorModel; the audit log is never rewritten,
   // so they are mapped on read (`enabled: true` -> tier `models`).
   const parsed = projectSchema.pick({
     name: true,

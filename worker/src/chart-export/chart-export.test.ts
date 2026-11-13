@@ -480,7 +480,7 @@ describe("generator model selection", () => {
     const on = { DOCSLURP_CHART_EXPORT: "on" };
     expect(chartExportConfigOf({}, on).tier).toBe("off");
     expect(chartExportConfigOf({ chartExport: { tier: "yes" } }, on).tier).toBe("off");
-    // Runs written before migration 0145 or by an older API during deploy skew keep the tier they were created with.
+    // Runs written before migration 0151 or by an older API during deploy skew keep the tier they were created with.
     expect(chartExportConfigOf({ chartExport: { enabled: true } }, on).tier).toBe("models");
     expect(chartExportConfigOf({ chartExport: { enabled: true } }, { DOCSLURP_CHART_EXPORT: "free" }).tier).toBe("free");
     expect(chartExportConfigOf({ chartExport: { tier: "models", enabled: false, generatorModel: null } }, on).tier).toBe("models");

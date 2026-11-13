@@ -46,7 +46,7 @@ export function warnChartExportSwitch(env: Readonly<Record<string, string | unde
  */
 export function chartExportConfigOf(pipeline: unknown, env: Readonly<Record<string, string | undefined>> = process.env): ResolvedChartExportConfig {
   const raw = pipeline && typeof pipeline === "object" ? (pipeline as { chartExport?: unknown }).chartExport : undefined;
-  // Runs written before migration 0145 or by an older API during a deploy carry `enabled`/`generatorModel`: mapped on
+  // Runs written before migration 0151 or by an older API during a deploy carry `enabled`/`generatorModel`: mapped on
   // read (`enabled: true` -> `models`), so a skew-window run keeps the tier it was created with.
   const parsed = raw === undefined || raw === null ? null : chartExportConfigSchema.safeParse(upgradeStoredChartExport(raw));
   const project = parsed?.success ? parsed.data : defaultChartExportConfig;

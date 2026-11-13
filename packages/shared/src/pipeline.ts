@@ -1119,7 +1119,7 @@ export function sanitizeStoredPipeline<T>(stored: T, source: string): T {
   if (!isPlainRecord(stored)) return stored;
   // Canonical ids drop retired extractors silently; a stored read reports what they named.
   const retired = isPlainRecord(stored.documentExtraction) ? dropRetiredExtractorIds(stored.documentExtraction).dropped : [];
-  // Legacy chart export keys (rows from before migration 0145 or from an older API during a deploy): mapped, not dropped.
+  // Legacy chart export keys (rows from before migration 0151 or from an older API during a deploy): mapped, not dropped.
   let next: Record<string, unknown> = upgradeStoredPipelineChartExport(withCanonicalExtractorIds(stored));
   const dropped: string[] = retired.map((entry) => `documentExtraction.${entry}`);
   if (isPlainRecord(next.documentExtraction)) {

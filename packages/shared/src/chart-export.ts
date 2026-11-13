@@ -341,7 +341,7 @@ export function chartExportOverrideRefusal(tier: ChartExportTier, env: Env): typ
 
 /**
  * Stored chart export config (projects, runs, upload sessions, settings snapshots in the audit log, saved chat proposals
- * and ingest-report patches) as the current schema reads it. Rows written before migration 0145, or by an older API
+ * and ingest-report patches) as the current schema reads it. Rows written before migration 0151, or by an older API
  * during a deploy, carry `enabled` and `generatorModel`: `enabled: true` with no `tier` becomes `tier: "models"`, and
  * both legacy keys are dropped. Applied on read, so a row the migration missed still parses. Request schemas stay
  * strict and never call this. Anything that is not an object is returned unchanged (strict parsing then rejects it).

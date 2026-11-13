@@ -1278,7 +1278,7 @@ export async function rollbackProjectVersion(
     name: snapshot.name,
     templateKey: snapshot.templateKey,
     systemPrompt: snapshot.systemPrompt,
-    // A snapshot saved before migration 0145 carries chartExport.enabled/generatorModel (the audit log is never
+    // A snapshot saved before migration 0151 carries chartExport.enabled/generatorModel (the audit log is never
     // rewritten): mapped on read so the strict settings schema accepts it.
     pipeline: upgradeStoredPipelineChartExport(snapshot.pipeline),
   });
