@@ -604,6 +604,7 @@ export async function listResumableDocuments(
         l.manifest_sha256, l.resumes, l.assets_resumable, l.last_cut_page, l.updated_at as at
       from document_extraction_levels l
       join documents d on d.id = l.document_id and d.org_id = l.org_id and d.project_id = l.project_id
+      join projects p on p.id = l.project_id and p.org_id = l.org_id and ${figuresOnSql(sql, "p")}
       where l.org_id = ${args.orgId} and l.images_status = 'resumable' and l.shards = 0 and l.resumes < ${DOCUMENT_ASSET_RESUME_CAP}
         and l.manifest_key is not null ${project("l")}
         and d.superseded_at is null and d.archived_at is null and d.purged_at is null
@@ -613,6 +614,7 @@ export async function listResumableDocuments(
       from document_extraction_shards s
       join documents d on d.id = s.document_id and d.org_id = s.org_id and d.project_id = s.project_id
       -- Only shards of the current level (MEDIUM-3: a re-run without the figure step takes the document off the queue).
+      join projects ps on ps.id = s.project_id and ps.org_id = s.org_id and ${figuresOnSql(sql, "ps")}
       join document_extraction_levels lv on lv.document_id = s.document_id and lv.org_id = s.org_id and lv.assets_current
         and lv.images_status = 'resumable' and lv.run_id is not distinct from s.run_id
       where s.org_id = ${args.orgId} and s.images_status = 'resumable' and s.resumes < ${DOCUMENT_ASSET_RESUME_CAP} ${project("s")}
@@ -1055,4 +1057,11 @@ export function figureLedgerHooks(
     pending: async (rows) => { await store.markAssetsPending!({ scope, rows }); },
     stored: async (files) => { await store.markAssetsStored!({ scope, files }); },
   };
+}
+
+/** SQL: the project's figures are on (`pipeline.figures`, default on). Mirrors projectFiguresEnabled (the deploy flag aside). */
+export function figuresOnSql(sql: Sql<Record<string, unknown>>, projectAlias: string) {
+  const p = sql(projectAlias);
+  return sql`(coalesce(${p}.pipeline -> 'figures', 'true'::jsonb) not in ('false'::jsonb, '"off"'::jsonb)
+    and coalesce(${p}.pipeline -> 'figures' ->> 'enabled', 'true') <> 'false')`;
 }

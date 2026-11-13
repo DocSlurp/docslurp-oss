@@ -16,6 +16,21 @@ import { z } from "zod";
 /** The worker flag that turns figure extraction on for VM PDF runs (default off). */
 export const DOPPLER_IMAGE_EXTRACT_ENV = "DOCSLURP_DOPPLER_IMAGE_EXTRACT";
 /** DOCSLURP_DOPPLER_IMAGE_EXTRACT: `1`/`true`/`on` enables, unset/`0`/`false`/`off` disables; anything else throws (loud). */
+/**
+ * Whether a project's documents get figures: the deploy flag (DOCSLURP_DOPPLER_IMAGE_EXTRACT) and the project's own
+ * opt-out (`pipeline.figures`, default on; #363). Fail closed on the opt-out's shape: `false`, `"off"` or
+ * `{ enabled: false }` all mean off. An opted-out project's documents get the `disabled` level, never sit in the resume
+ * queue and never add figure storage. (#363 adds the shared `figuresEnabled(project, env)`; this delegates to the same
+ * rule and is replaced by it when #363 lands.)
+ */
+export function projectFiguresEnabled(pipeline: unknown, env: Record<string, string | undefined> = process.env): boolean {
+  if (!dopplerImageExtractEnabled(env)) return false;
+  const figures = (pipeline as { figures?: unknown } | null | undefined)?.figures;
+  if (figures === false || figures === "off") return false;
+  if (figures && typeof figures === "object" && (figures as { enabled?: unknown }).enabled === false) return false;
+  return true;
+}
+
 export function dopplerImageExtractEnabled(env: Record<string, string | undefined> = process.env): boolean {
   const raw = env[DOPPLER_IMAGE_EXTRACT_ENV]?.trim().toLowerCase() ?? "";
   if (raw === "" || raw === "0" || raw === "false" || raw === "off") return false;

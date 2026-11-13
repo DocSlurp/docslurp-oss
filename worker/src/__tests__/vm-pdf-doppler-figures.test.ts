@@ -26,7 +26,7 @@ function registerProvider(figures: boolean) {
  */
 type StorageFaults = { putBytes?: (key: string) => boolean; putJson?: (key: string) => boolean };
 
-async function runStage(vm: (job: any) => Promise<Partial<SandboxedPdfResult>>, faults: StorageFaults = {}, options: { markServed?: boolean } = {}) {
+async function runStage(vm: (job: any) => Promise<Partial<SandboxedPdfResult>>, faults: StorageFaults = {}, options: { markServed?: boolean; pipeline?: Record<string, unknown> } = {}) {
   const { defaultPipelineFeatures, defaultDocumentExtractionConfig } = await import("@docslurp/shared");
   const { WorkflowState } = await import("../pipeline/pipeline.js");
   const dir = await mkdtemp(path.join(tmpdir(), "vm-figures-stage-"));
@@ -72,7 +72,7 @@ async function runStage(vm: (job: any) => Promise<Partial<SandboxedPdfResult>>, 
   internals.recordPageImageEvidence = async () => null;
   const doc = { id: DOC_ID, userId: "u", runId: "r", filename: "source.pdf", mimeType: "application/pdf", sourceKey: "u/source.pdf", status: "processing", extractionMode: "hybrid", pageCount: 5, createdAt: new Date(), updatedAt: new Date() };
   const state = WorkflowState.create({ id: "r", orgId: "o", userId: "u", kind: "bulk-upload", status: "processing", stage: "extract-markdown", totalDocuments: 1, processedDocuments: 0, pagesTotal: 5, pagesProcessed: 0, spentCents: 0,
-    pipeline: { ...defaultPipelineFeatures, quality: "fast", markdownExtraction: true, visionFallback: false,
+    pipeline: { ...defaultPipelineFeatures, ...(options.pipeline ?? {}), quality: "fast", markdownExtraction: true, visionFallback: false,
       documentExtraction: { ...defaultDocumentExtractionConfig, order: { pdf: ["vm-pdf"] } } },
     error: null, stats: {}, artifacts: {}, claimId: null, createdAt: new Date(), updatedAt: new Date() } as any, [doc as any]);
   state.artifactLedger.recordDocument(DOC_ID, "normalizedFormat", "pdf");
@@ -94,6 +94,16 @@ beforeEach(() => resetExtractorPluginsForTest());
 afterEach(() => { resetExtractorPluginsForTest(); vi.unstubAllEnvs(); vi.restoreAllMocks(); });
 
 describe("Doppler figures in the extraction stage", () => {
+  it("a project that opted out of figures (pipeline.figures false): no figure request, level disabled, no figure storage", async () => {
+    registerProvider(true);
+    vi.stubEnv("DOCSLURP_DOPPLER_IMAGE_EXTRACT", "1");
+    const out = await runStage(async () => ({}), {}, { pipeline: { figures: false } });
+    expect(out.jobs[0].figures).toBeUndefined();
+    expect(out.stageState?.status).toBe("completed");
+    expect([...out.objects.keys()].some((key) => key.includes("/doppler/"))).toBe(false);
+    expect(out.pending).toMatchObject({ level: { imagesStatus: "disabled" }, assets: [], levelOnly: true });
+  });
+
   it("flag off: no figure request, no figure objects or slots, Markdown unchanged", async () => {
     registerProvider(true);
     vi.stubEnv("DOCSLURP_DOPPLER_IMAGE_EXTRACT", "");

@@ -3,7 +3,7 @@ import { countDeferredPdfPages, firstPassServesDocument, primeFirstPassResults }
 import { reserveOrientationAttempt } from "../lib/image-orientation.js";
 import { EMBEDDED_IMAGE_TARGETS, embeddedImageGraph, resolveEmbeddedImageRequest } from "../extractors/embedded-images.js";
 import { anchorImageMarkdownFile } from "../extractors/image-markdown.js";
-import { DopplerFigureRejection, DopplerFigureStoreError, disposeDopplerFigureSet, dopplerImageExtractEnabled, dopplerSourcePointer, readDopplerFigureDir, storeDopplerFigures } from "../extractors/doppler-figures.js";
+import { DopplerFigureRejection, DopplerFigureStoreError, disposeDopplerFigureSet, dopplerSourcePointer, readDopplerFigureDir, storeDopplerFigures } from "../extractors/doppler-figures.js";
 import { figureLedgerHooks, ledgerWriteForFailedFigures, ledgerWriteForNoFigures, ledgerWriteForStoredFigures, queueAssetLedger } from "../db/document-asset-ledger.js";
 import {
   SANDBOXED_PDF_MAX_MARKDOWN_BYTES, VM_PDF_EXTRACTOR_ID, firstPassServedFigures, requireSandboxedPdfProvider, sandboxedPdfFigures, sandboxedPdfProvider, sandboxedPdfLayoutFacts, sandboxedPdfOcrPages,
@@ -60,7 +60,7 @@ import {
 } from "../pipeline/checkpoints.js";
 import { healthyDocuments } from "../pipeline/document-health.js";
 import { buildCanonicalDocumentFromMarkdown } from "../lib/canonical-document.js";
-import { dopplerImageLimits, type CanonicalDocument } from "@docslurp/shared";
+import { dopplerImageLimits, projectFiguresEnabled, type CanonicalDocument } from "@docslurp/shared";
 import { enrichCanonicalDocumentWithPptx, enrichCanonicalDocumentWithXlsx } from "../lib/office-structure.js";
 import {
   enrichCanonicalDocumentWithBestParser,
@@ -530,7 +530,7 @@ export class ExtractMarkdownStage implements Stage {
                 }
                 // Doppler figures (DOCSLURP_DOPPLER_IMAGE_EXTRACT): from the same VM job, into an empty host folder per candidate.
                 // A first-pass document's figures come from its batch and are stored by the first pass itself.
-                if (isPdf && dopplerImageExtractEnabled() && sandboxedPdfProvider()?.figures && !firstPassServesDocument(state.run.id, document.id)) {
+                if (isPdf && projectFiguresEnabled(state.run.pipeline) && sandboxedPdfProvider()?.figures && !firstPassServesDocument(state.run.id, document.id)) {
                   let early = true;
                   for (const prepared of [isolated.primary.extractor, isolated.secondary?.extractor]) {
                     if (!prepared?.plan.sandboxedPdf) continue;
@@ -3014,7 +3014,8 @@ export class ExtractMarkdownStage implements Stage {
   private withImagesLevel<T>(state: import("../pipeline/pipeline.js").WorkflowState, document: import("../models.js").Document, result: T): T {
     if (this.firstPassLedger.delete(`${state.run.id}\u0000${document.id}`)) return result;
     if (state.pendingAssetLedger.has(document.id)) return result;
-    const figuresOn = dopplerImageExtractEnabled() && !!sandboxedPdfProvider()?.figures;
+    // Off for the deployment or opted out by the project: `disabled` (off the resume queue, no figure storage).
+    const figuresOn = projectFiguresEnabled(state.run.pipeline) && !!sandboxedPdfProvider()?.figures;
     if (figuresOn && firstPassServesDocument(state.run.id, document.id)) return result;
     queueAssetLedger(state, document.id, ledgerWriteForNoFigures(figuresOn ? "none" : "disabled"));
     return result;

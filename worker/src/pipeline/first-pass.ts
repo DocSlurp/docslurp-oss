@@ -16,7 +16,7 @@ import { copyFile, cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/p
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { dopplerImageExtractEnabled, dopplerImageLimits, type PipelineFeatures } from "@docslurp/shared";
+import { dopplerImageLimits, projectFiguresEnabled, type PipelineFeatures } from "@docslurp/shared";
 import {
   acceptSandboxedPdfBatchEvent, assertSingleScopeBatch, batchFileJob, batchUsageOf, sandboxedPdfBatchProvider, unfinishedBatchFiles,
   type SandboxedPdfBatchEvent, type SandboxedPdfBatchFile, type SandboxedPdfBatchJob, type SandboxedPdfBatchProvider,
@@ -64,7 +64,8 @@ export function firstPassBatchOptions(pipeline: PipelineFeatures, env: NodeJS.Pr
     // Math reading stays behind its own deploy flag (default off) until the open council follow-up on the math reader is
     // closed (TODO.md: bound its scan on hostile pages); the project's request alone never turns it on.
     math: vmOptions?.math === true && env.DOCSLURP_FIRST_PASS_MATH?.trim().toLowerCase() === "on",
-    figures: dopplerImageExtractEnabled(env) && !!sandboxedPdfProvider()?.figures,
+    // The deploy flag and the project's figures opt-out (projectFiguresEnabled): an opted-out project stores none.
+    figures: projectFiguresEnabled(pipeline, env) && !!sandboxedPdfProvider()?.figures,
   };
 }
 

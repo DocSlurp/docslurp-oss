@@ -12,6 +12,9 @@ import {
   writeDocumentAssetLedger, type DocumentAssetLedgerScope,
 } from "../db/document-asset-ledger.js";
 import { Store } from "../db/store.js";
+import { listResumableDocuments } from "../db/document-asset-ledger.js";
+import { firstPassBatchOptions } from "../pipeline/first-pass.js";
+import { projectFiguresEnabled } from "@docslurp/shared";
 import { DopplerFigureStoreError, downloadDopplerImagesDir, readDopplerFigureDir, readLedgerSpill, storeDopplerFigures } from "../extractors/doppler-figures.js";
 import { v2Manifest, v3Text, writeV3Folder, V2_SOURCE_SHA } from "../test/doppler-manifest-v2.js";
 import { createMigratedDatabase } from "../test/migrated-db.js";
@@ -280,6 +283,27 @@ describe("resumes only add; levels are the current run's", () => {
     // The earlier run's rows and objects stay (unserved, unbilled) for the orphan GC or the run's purge.
     expect((await rows()).every((row) => row.run_id === "run-a")).toBe(true);
     expect(figureKeys(storage)).toHaveLength(3);
+  });
+});
+
+describe("projects that opted out of figures", () => {
+  it("never appear in resume discovery, and the first pass asks for no figures", async () => {
+    const storage = memoryStorage();
+    const { set, stored } = await storeStep(storage, { partial: true });
+    const full = ledgerWriteForStoredFigures({ set, stored, outcome: { status: "partial", exitCode: 5 } });
+    await writeDocumentAssetLedger(sql, { scope: A, level: { ...full.level, markdownComplete: true }, assets: full.assets });
+    expect(await listResumableDocuments(sql, { orgId: "org-a" })).toHaveLength(1);
+    await sql`update projects set pipeline = '{"figures": false}'::jsonb where id = 'proj-a'`;
+    try {
+      expect(await listResumableDocuments(sql, { orgId: "org-a" })).toEqual([]);
+      expect(firstPassBatchOptions({ figures: false } as never, { DOCSLURP_DOPPLER_IMAGE_EXTRACT: "1" }).figures).toBe(false);
+      expect(projectFiguresEnabled({ figures: false }, { DOCSLURP_DOPPLER_IMAGE_EXTRACT: "1" })).toBe(false);
+      expect(projectFiguresEnabled({ figures: { enabled: false } }, { DOCSLURP_DOPPLER_IMAGE_EXTRACT: "1" })).toBe(false);
+      expect(projectFiguresEnabled({}, { DOCSLURP_DOPPLER_IMAGE_EXTRACT: "1" })).toBe(true);
+      expect(projectFiguresEnabled({}, {})).toBe(false);
+    } finally {
+      await sql`update projects set pipeline = '{}'::jsonb where id = 'proj-a'`;
+    }
   });
 });
 
