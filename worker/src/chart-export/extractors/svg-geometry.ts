@@ -375,13 +375,15 @@ export interface PreparedSvgChart {
 }
 
 /** `work`: the marker pair-test counter (see `withoutVertexMarkers`). */
-export function analyzeSvgChart(root: XmlElement, work: MarkerWork = { pairTests: 0 }): SvgChartAnalysis {
-  const prepared = prepareSvgChart(root);
+export function analyzeSvgChart(root: XmlElement, work: MarkerWork = { pairTests: 0 }, extraTexts: readonly TextPrim[] = []): SvgChartAnalysis {
+  const prepared = prepareSvgChart(root, extraTexts);
   return prepared.complete(withoutVertexMarkers(prepared.markers, prepared.lines, work));
 }
 
-export function prepareSvgChart(root: XmlElement): PreparedSvgChart {
+export function prepareSvgChart(root: XmlElement, extraTexts: readonly TextPrim[] = []): PreparedSvgChart {
   const scene = buildScene(root);
+  // Text placed beside the SVG (a PDF figure's words): read exactly like the SVG's own <text>.
+  if (extraTexts.length) scene.texts.push(...extraTexts);
   const generator = detectGenerator(scene);
   const texts = scene.texts.filter((t) => t.text.length > 0);
 

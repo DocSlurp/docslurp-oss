@@ -110,3 +110,121 @@ export async function probeChartGuestBundle() {
   // The production bundle carries no fault hooks (a build-time constant; council r9 L3).
   if (guest.testHooks !== null) throw new Error("chart guest bundle probe failed: test hooks are enabled");
 }
+
+// ---- Compile cache --------------------------------------------------------------------------------------------------
+// A V8 compile cache for the bundle, built at image build time with the image's own Node (builder and runtime stages pin
+// the same node image digest) and read, never written, by the inline chart worker in the VM. Node checks each entry
+// against the source and its own version, so a mismatch only loses the speed-up; the key file lets the startup contract
+// refuse an image whose cache was built for another Node or bundle.
+export const COMPILE_CACHE_DIR = path.join(WORKER_ROOT, "dist/chart-export/compile-cache");
+const COMPILE_CACHE_KEY = path.join(COMPILE_CACHE_DIR, "key.json");
+
+async function fileSha256(file) {
+  const hash = createHash("sha256");
+  const { createReadStream } = await import("node:fs");
+  for await (const chunk of createReadStream(file)) hash.update(chunk);
+  return hash.digest("hex");
+}
+
+export async function compileCacheKey() {
+  return { node: process.version, nodeSha256: await fileSha256(process.execPath), bundleSha256: await fileSha256(BUNDLE_PATH) };
+}
+
+/**
+ * Populate the cache the way the guest loads it: a worker thread (as #364's unit workers) enables the cache, loads
+ * #364's worker script and the bundle, flushes, and exits, under the guest's V8 flag (a code cache built under other
+ * flags is rejected). V8 keys the cache directory by Node version, flags and uid, so at image build (as root) it is
+ * filled as the parser user (PARSER_UID, the uid the parser VM runs commands as) and then handed back to root, read-only:
+ * the inline path uses it only read-only (chart-inline.mjs readOnlyCompileCache). Not root: filled as the current user.
+ */
+/** The uid the parser VM runs commands as (sandbox/providers/modal: uid 10001). */
+export const PARSER_UID = 10001;
+export async function buildCompileCache() {
+  const { rm, mkdir, writeFile, mkdtemp, chown, chmod, readdir } = await import("node:fs/promises");
+  const asRoot = process.getuid?.() === 0;
+  const { tmpdir } = await import("node:os");
+  const { spawnSync } = await import("node:child_process");
+  await rm(COMPILE_CACHE_DIR, { recursive: true, force: true });
+  await mkdir(COMPILE_CACHE_DIR, { recursive: true });
+  const scratch = await mkdtemp(path.join(process.env.TMPDIR || tmpdir(), "chart-cache-"));
+  try {
+    const filler = path.join(scratch, "fill.mjs");
+    const main = path.join(scratch, "main.mjs");
+    await writeFile(filler, `import module from "node:module";
+module.enableCompileCache(${JSON.stringify(COMPILE_CACHE_DIR)});
+await import(${JSON.stringify(pathToFileURL(path.join(WORKER_ROOT, "scripts/chart-export-worker.mjs")).href)});
+module.flushCompileCache();
+process.exit(0);
+`);
+    await writeFile(main, `import { Worker } from "node:worker_threads";
+await new Promise((resolve, reject) => {
+  const w = new Worker(new URL(${JSON.stringify(pathToFileURL(filler).href)}), { env: {} });
+  w.once("exit", (code) => (code === 0 ? resolve() : reject(new Error("worker exit " + code)))); w.once("error", reject);
+});
+`);
+    if (asRoot) {
+      await chown(COMPILE_CACHE_DIR, PARSER_UID, PARSER_UID);
+      await chmod(scratch, 0o755);
+    }
+    const run = spawnSync(process.execPath, ["--disallow-code-generation-from-strings", main], { encoding: "utf8", ...(asRoot ? { uid: PARSER_UID, gid: PARSER_UID } : {}) });
+    if (run.status !== 0) throw new Error(`chart guest compile cache: ${run.stderr.slice(0, 500)}`);
+  } finally {
+    await rm(scratch, { recursive: true, force: true });
+  }
+  await writeFile(COMPILE_CACHE_KEY, `${JSON.stringify(await compileCacheKey(), null, 2)}\n`);
+  if (asRoot) {
+    // Back to root, read-only: no run can write what another document's run will load (#364 council r10).
+    const walk = async (dir) => {
+      await chown(dir, 0, 0);
+      await chmod(dir, 0o555);
+      for (const e of await readdir(dir, { withFileTypes: true })) {
+        const p = path.join(dir, e.name);
+        if (e.isDirectory()) await walk(p);
+        else { await chown(p, 0, 0); await chmod(p, 0o444); }
+      }
+    };
+    await walk(COMPILE_CACHE_DIR);
+  }
+}
+
+/** Startup contract: an image that ships a cache must ship one built for this Node binary and this bundle. */
+export async function verifyCompileCache() {
+  const raw = await readFile(COMPILE_CACHE_KEY, "utf8").catch(() => null);
+  if (raw === null) return { present: false };
+  const want = JSON.parse(raw);
+  const have = await compileCacheKey();
+  for (const k of ["node", "nodeSha256", "bundleSha256"]) {
+    if (want[k] !== have[k]) throw new Error(`chart guest compile cache was built for another ${k} (rebuild the image)`);
+  }
+  return { present: true };
+}
+
+/**
+ * Runs the real quarantine guest (scripts/quarantine-inspect.mjs, which loads scripts/chart-inline.mjs,
+ * dist/chart-export/inline-guest.js and a worker thread) on the built-in SVG, exactly as the host runs it: a fresh
+ * `node --disallow-code-generation-from-strings` process. A missing, stale or broken module, or one that needs code
+ * generation from strings, fails the image at startup instead of turning every chart answer into a refusal.
+ */
+export async function probeInlineCharts() {
+  const { mkdtemp, rm, writeFile } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { spawnSync } = await import("node:child_process");
+  const dir = await mkdtemp(path.join(tmpdir(), "chart-inline-probe-"));
+  try {
+    const input = path.join(dir, "probe.svg");
+    const options = path.join(dir, "options.json");
+    const output = path.join(dir, "out.json");
+    await writeFile(input, PROBE_SVG);
+    await writeFile(options, JSON.stringify({ filename: "probe.svg", charts: { kind: "svg", diagrams: true }, policy: {
+      quarantineFailOpenOnToolMissing: false, quarantineMaxArchiveEntries: 10, quarantineMaxArchiveDepth: 2,
+      quarantineMaxTotalUncompressedBytes: 1 << 20, quarantineMaxSingleEntryBytes: 1 << 20, quarantineMaxExpansionRatio: 10,
+    } }));
+    const run = spawnSync(process.execPath, ["--disallow-code-generation-from-strings", path.join(WORKER_ROOT, "scripts/quarantine-inspect.mjs"), input, options, output], { encoding: "utf8", timeout: 60_000 });
+    if (run.status !== 0) throw new Error("inline chart probe failed: the quarantine guest exited " + run.status);
+    const answer = JSON.parse(await readFile(output, "utf8")).charts;
+    const got = answer?.status === "ok" ? answer.result.visuals.map((v) => `${v.source}:${v.spec?.chartType ?? "none"}`).join(",") : `${answer?.status}:${answer?.reason}`;
+    if (got !== "svg-geometry:bar") throw new Error(`inline chart probe failed: ${got || "no visuals"}`);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}

@@ -68,3 +68,7 @@ if (text.includes("__CHART_GUEST_TEST_HOOKS__") || !/var testHooks = false \?/.t
 if (output.bytes > BUNDLE_MAX_BYTES) throw new Error(`chart guest bundle: ${output.bytes} bytes exceeds the ${BUNDLE_MAX_BYTES}-byte budget`);
 
 await writeFile(INPUTS_PATH, `${JSON.stringify(await bundleManifest(inputs), null, 2)}\n`);
+
+// The bundle's compile cache, built with this Node (the image's own: builder and runtime stages share the node digest).
+const { buildCompileCache } = await import("./chart-guest-bundle.mjs");
+await buildCompileCache();

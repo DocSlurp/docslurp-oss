@@ -20,6 +20,8 @@ import type { CommandRunner } from "../tools/runner.js";
 import { cleanupTempFile, keyFromStorageUri, type ArtifactStore } from "../tools/storage.js";
 import { ChartExtractRefusedError, extractDeterministicVisualsBatch, extractDeterministicVisualsFile, MAX_BATCH_INPUTS, type DeterministicInputKind } from "./extractors/host.js";
 import type { DeterministicVisual, DeterministicVisualResult as GuestResult } from "./extractors/types.js";
+import { chartExportInlineEnabled, inlineNeedsStandalone } from "./inline.js";
+import { FIGURE_CHARTS_SLOT, readStoredFigureCharts } from "./figure-charts.js";
 import type { DeterministicVisualExtractor, DeterministicVisualInput, DeterministicVisualPartial, DeterministicVisualResult } from "./types.js";
 
 /** SVG figures sent to the guest per document (one batched VM run). */
@@ -99,7 +101,7 @@ export const CHART_EXPORT_VM_USAGE_METRIC = "chart-export-vm";
  * `costRollup: "included"`: the sandbox provider's or the runner's own compute event already carries the authoritative
  * cost, so this one attributes it to chart export without counting it twice. Never a customer charge.
  */
-export function chartExportVmUsageEvent(args: { documentId: string; wallTimeMs: number; reason: string; inputs: number; outcome: "ok" | "refused" | "failed" }): UsageEvent {
+export function chartExportVmUsageEvent(args: { documentId: string; wallTimeMs: number; reason: string; inputs: number; outcome: "ok" | "refused" | "failed"; stage?: "vision-extract" | "quarantine" }): UsageEvent {
   const profile = resolveWorkerDeploymentProfile();
   return buildLocalComputeUsageEvent({
     metric: CHART_EXPORT_VM_USAGE_METRIC,
@@ -107,7 +109,7 @@ export function chartExportVmUsageEvent(args: { documentId: string; wallTimeMs: 
     observation: buildAllocatedResourceObservation({ profile, wallTimeMs: Math.max(0, args.wallTimeMs) }),
     costRollup: "included",
     metadata: {
-      stage: "vision-extract",
+      stage: args.stage ?? "vision-extract",
       scope: "document",
       documentId: args.documentId,
       measurement: "allocated-capacity",
@@ -205,7 +207,30 @@ export function createVmDeterministicVisualExtractor(deps: VmExtractorDeps): Det
     };
 
     const sourceKind = deterministicSourceKind(document.mimeType);
-    const reason = sourceKind ? sourceRunReason(sourceKind, input.signals) : null;
+    // Inline answer from the quarantine guest for this very kind (DOCSLURP_CHART_EXPORT_INLINE): the source was already
+    // read in the VM it booted for quarantine, so it is used as is and no parser VM runs for the source. Only an answer
+    // too big to carry inline goes to the standalone guest, which has the larger result allowance.
+    const inline = sourceKind && input.inline && input.inline.kind === sourceKind ? input.inline : null;
+    const useInline = inline !== null && !inlineNeedsStandalone(inline);
+    if (useInline) {
+      if (inline.status === "ok") {
+        results.push(inline.result);
+        for (const visual of inline.result.visuals) partials.push(toPartial(visual, null));
+        // SVGs past the scene budget are recorded for the later deferred pass, exactly as from the standalone guest.
+        for (const d of inline.result.deferred ?? []) deferred.push({ input: "source", svgIndex: d.svgIndex, count: d.count, reason: d.reason, pageNumber: null, figureId: null });
+      } else if (inline.status === "refused") {
+        // A refused inline answer (deadline, worker-failed, memory-limit, result-invalid, cache-inherited) lost the whole
+        // source: recorded as the standalone path records a failed run (council #369/#510 r4 L4).
+        deferred.push({ input: "source", svgIndex: 0, count: 1, reason: "guest-unavailable", pageNumber: null, figureId: null });
+      }
+      log(`[chart-export] parser VM skipped ${context} kind=${sourceKind} reason=inline-${inline.status}${inline.status === "ok" ? ` visuals=${inline.result.visuals.length}` : ` detail=${inline.reason}`}`);
+    }
+    // The standalone run: an inline answer too big to carry, or missing (an older image: #363's own signal decides), or no
+    // inline answer at all (inline mode off).
+    const reason = sourceKind && !useInline
+      ? (inline?.status === "refused" && inline.reason === "result-too-large" ? "inline-result-too-large" : sourceRunReason(sourceKind, input.signals))
+      : null;
+    if (inline?.status === "refused" && inline.reason === "answer-missing") log(`[chart-export] inline answer missing ${context} kind=${sourceKind} fallback=standalone`);
     const sourceAdmitted = !!(sourceKind && document.sourceKey && reason) && await admittedToVm();
     // A source the free-VM cap turned away is recorded, not just logged (council r8 L1).
     if (sourceKind && document.sourceKey && reason && !sourceAdmitted) deferred.push({ input: "source", svgIndex: 0, count: 1, reason: "vm-cap", pageNumber: null, figureId: null });
@@ -233,8 +258,56 @@ export function createVmDeterministicVisualExtractor(deps: VmExtractorDeps): Det
       }
       // A refused or failed run loses the whole source: recorded so the deferred pass can retry it (council r8 L1).
       if (!sourceRan) deferred.push({ input: "source", svgIndex: 0, count: 1, reason: "guest-unavailable", pageNumber: null, figureId: null });
-    } else if (sourceKind && !(document.sourceKey && reason)) {
+    } else if (sourceKind && !useInline && !(document.sourceKey && reason)) {
       log(`[chart-export] parser VM skipped ${context} kind=${sourceKind} reason=no-chart-signal`);
+    }
+
+    // Inline mode: figure SVGs never go to a standalone VM run (they carry no text, so it would export nothing). Their charts
+    // come from the Doppler VM's own figure pass (protocol 15, words beside each figure), stored by extract-markdown under
+    // FIGURE_CHARTS_SLOT and validated again here; page and box come from the host's figure index.
+    if (chartExportInlineEnabled()) {
+      const listedFigures = input.artifacts.dopplerFiguresIndexUri || input.dopplerFiguresIndex !== undefined
+        ? await svgFigures(deps, input.artifacts.dopplerFiguresIndexUri, Math.max(1, document.pageCount), input.dopplerFiguresIndex)
+        : [];
+      const listed = listedFigures.length;
+      const chartsUri = input.artifacts.artifactUri?.(FIGURE_CHARTS_SLOT) ?? null;
+      const chartsKey = chartsUri ? keyFromStorageUri(chartsUri, deps.storage.bucket) : null;
+      const charts = chartsKey ? readStoredFigureCharts(await deps.storage.getJson(chartsKey).catch(() => null)) : null;
+      if (charts?.status === "ok") {
+        for (const figure of charts.figures) {
+          if (figure.page > Math.max(1, document.pageCount)) continue;
+          results.push(figure.result);
+          const box = figureBox(figure.bbox);
+          for (const visual of figure.result.visuals) partials.push(toPartial(visual, figure.page, figure.result.visuals.length === 1 ? box : null));
+          for (const d of figure.result.deferred ?? []) deferred.push({ input: "doppler-figure", svgIndex: d.svgIndex, count: d.count, reason: d.reason, pageNumber: figure.page, figureId: figure.id });
+          // The Doppler child's per-figure losses (Doppler protocol 15), recorded per figure id: a file it could not
+          // read is `figure-unavailable` (a host-only reason), a figure past the chart step's budget a `guest-deadline`.
+          for (const r of figure.result.refusals) {
+            const reason = r.reason === "figure-unavailable" ? "figure-unavailable" : r.reason === "time-budget" ? "guest-deadline" : null;
+            if (reason) deferred.push({ input: "doppler-figure", svgIndex: 0, count: 1, reason, pageNumber: figure.page, figureId: figure.id });
+          }
+        }
+        // No usage event from the guest's own `ms` (council #510 L4): the Doppler VM's time is metered by the plugin
+        // (host-measured), which already includes the chart step.
+        log(`[chart-export] doppler figure charts ${context} figures=${charts.figures.length} visuals=${charts.figures.reduce((n, f) => n + f.result.visuals.length, 0)}`);
+      } else if (listed > 0) log(`[chart-export] svg figures not sent ${context} figures=${listed} reason=inline-mode${charts ? ` charts=${charts.reason}` : ""}`);
+      // Own SVG figures the in-VM chart pass left without a result (a refused shard, or a refused answer): each is a
+      // counted deferral, never a silent loss (council r3 M1). Only when the pass was asked (an answer is stored).
+      if (charts) {
+        const covered = new Set(charts.status === "ok" ? charts.figures.map((f) => f.id) : []);
+        let missing = 0;
+        for (const figure of listedFigures) {
+          if (covered.has(figure.id)) continue;
+          missing++;
+          deferred.push({ input: "doppler-figure", svgIndex: 0, count: 1, reason: "figure-charts-refused", pageNumber: figure.page, figureId: figure.id });
+        }
+        if (missing) log(`[chart-export] figure charts missing ${context} figures=${missing}${charts.status === "ok" ? ` refused_shards=${charts.refusedShards?.length ?? 0}` : ` reason=${charts.reason}`}`);
+      }
+      if (deferred.length) log(`[chart-export] visuals deferred ${context} svgs=${deferred.reduce((n, d) => n + d.count, 0)}`);
+      // Entries past the 1,000 kept, plus the guests' own overflow counts (the inline answer's and every figure's), as
+      // on the standalone path: one number, never silent.
+      const overflow = results.reduce((n, r) => n + (r.overflow ?? 0), 0) + Math.max(0, deferred.length - 1000);
+      return { partials, presence: presenceOf(results, listed), ...(deferred.length ? { deferred: deferred.slice(0, 1000) } : {}), ...(overflow > 0 ? { overflow } : {}) };
     }
 
     const figures = await svgFigures(deps, input.artifacts.dopplerFiguresIndexUri, Math.max(1, document.pageCount), input.dopplerFiguresIndex);

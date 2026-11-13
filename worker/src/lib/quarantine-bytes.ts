@@ -22,6 +22,8 @@ export interface QuarantineInspection {
    * and whether its readers could disagree on the encryption (pdf-encryption-structure.ts, council N-H1): refused.
    */
   pdf: { encryptName: boolean; encryptConflict: boolean } | null;
+  /** Inline chart extraction's answer, when the host asked for it (chart-export/inline.ts); validated by the host. */
+  charts?: import("../chart-export/inline.js").InlineCharts;
 }
 
 export function inspectQuarantineBytes(bytes: Buffer, filename: string, policy: QuarantinePolicy): QuarantineInspection {

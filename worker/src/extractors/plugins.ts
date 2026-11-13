@@ -54,7 +54,16 @@ export interface SandboxedPdfJob {
    * `--images-doc-max-bytes`, `--images-batch-pages`, `--images-link-prefix`): a provider passes them so that Doppler's own
    * budgets stop it (a resumable `budget`/`doc_budget`) before the host would refuse the folder.
    */
-  figures?: { dir: string; limits?: DopplerImageLimits };
+  figures?: {
+    dir: string; limits?: DopplerImageLimits;
+    /**
+     * Also extract charts from the figure SVGs in the same VM (the free chart rungs, given each figure's words), writing
+     * `charts.json` (FIGURE_CHARTS_FILE, doppler-figure-charts@1) into `dir` beside the figures. Only when the provider
+     * declares `figures.charts` and the run's chart tier asks for it (chart-export/figure-charts.ts figureChartsRequest).
+     * A provider must never fail the figures or the Markdown because the charts failed: it writes a refusal instead.
+     */
+    charts?: { diagrams: boolean };
+  };
 }
 
 export interface SandboxedPdfRunContext {
@@ -153,7 +162,11 @@ export interface SandboxedPdfExtractorProvider {
     read(output: string, signal?: AbortSignal): Promise<EmbeddedImageSet>;
   };
   /** Present when the provider can return Doppler figure crops beside the Markdown (SandboxedPdfJob.figures). */
-  figures?: { producerId: string };
+  figures?: {
+    producerId: string;
+    /** True when the provider can extract charts from its figures in the same VM (SandboxedPdfJob.figures.charts). */
+    charts?: boolean;
+  };
   /** Page-shard cost profile: calibration refines the prior from observed shard timings under `key`. */
   shardProfile?: { key: string; prior: ShardCostProfile };
   /**

@@ -5,7 +5,7 @@ import { extractOfficeCharts } from "./office-chart-xml.js";
 import { openZipPackage } from "./safe-zip.js";
 import { clamp01, finalizeChart, utf8Bytes } from "./spec-utils.js";
 import { capRefusal, capVisual } from "./result-caps.js";
-import { buildScene } from "./svg-scene.js";
+import { buildScene, type TextPrim } from "./svg-scene.js";
 import { approximateVertexMarkers, prepareSvgChart, withoutVertexMarkers, type PreparedSvgChart, type SvgChartAnalysis } from "./svg-geometry.js";
 import { detectDiagramGenerator, graphvizDiagram, mermaidFlowchart } from "./svg-diagram.js";
 import { emptyVisual, type DeterministicDeferral, type DeterministicRefusal, type DeterministicVisual, type DeterministicVisualResult } from "./types.js";
@@ -22,12 +22,46 @@ export type DeterministicVisualInput =
   | { kind: "office"; bytes: Uint8Array }
   /** EPUB package bytes (XHTML chapters and SVG files inside). */
   | { kind: "epub"; bytes: Uint8Array }
-  /** A standalone SVG document (upload, Doppler figure, extracted media). */
-  | { kind: "svg"; text: string }
+  /**
+   * A standalone SVG document (upload, Doppler figure, extracted media). `words`: text the SVG does not carry itself (a
+   * PDF figure's axis labels, which Doppler keeps in the Markdown), as boxes in the SVG's own user space, y down.
+   */
+  | { kind: "svg"; text: string; words?: readonly SvgWord[] }
   /** HTML or XHTML text (embedded specs and inline SVG). */
   | { kind: "html"; text: string }
   /** A standalone JSON file (Vega-Lite / Plotly spec). */
   | { kind: "json"; text: string };
+
+/** One word or text run placed on a figure: its box in the SVG's user units (y down); `rotated` for vertical labels. */
+export interface SvgWord { text: string; x0: number; y0: number; x1: number; y1: number; rotated?: boolean }
+
+/**
+ * Words as scene text: a box's centre, its height as the font size (the scene's own text positions are centres too:
+ * baseline minus ~0.35 em). Bounded: at most `maxSvgWords`, each label cut to 1,000 characters before it is normalized
+ * and to 200 after, non-finite or inverted boxes dropped.
+ */
+/** `s` cut to at most `n` UTF-16 units without splitting a surrogate pair (a high surrogate left at the end is dropped). */
+function cutCodePoints(s: string, n: number): string {
+  if (s.length <= n) return s;
+  const c = s.charCodeAt(n - 1);
+  return s.slice(0, c >= 0xd800 && c <= 0xdbff ? n - 1 : n);
+}
+
+export function wordsAsTexts(words: readonly SvgWord[] | undefined): TextPrim[] {
+  if (!words?.length) return [];
+  if (words.length > CHART_EXTRACT_LIMITS.maxSvgWords) throw new ExtractLimitError("svg-words-limit");
+  const out: TextPrim[] = [];
+  for (const [i, w] of words.entries()) {
+    // Cut on code points, never inside a surrogate pair (council #369/#510 r4 L2: a lone surrogate in a label broke the
+    // Doppler guest's re-encoding of the whole step).
+    const text = typeof w?.text === "string" ? cutCodePoints(cutCodePoints(w.text, 1000).replace(/\s+/g, " ").trim(), 200) : "";
+    const box = [w?.x0, w?.y0, w?.x1, w?.y1];
+    if (!text || !box.every((n) => typeof n === "number" && Number.isFinite(n)) || !(w.x1 >= w.x0 && w.y1 > w.y0)) continue;
+    const rotated = w.rotated === true;
+    out.push({ kind: "text", groups: "", order: 1_000_000 + i, text, x: (w.x0 + w.x1) / 2, y: (w.y0 + w.y1) / 2, anchor: "middle", fontSize: rotated ? w.x1 - w.x0 : w.y1 - w.y0, rotated, fill: null });
+  }
+  return out;
+}
 
 export interface DeterministicVisualOptions {
   /** Also extract diagrams (Mermaid / Graphviz SVG). Default true. */
@@ -232,7 +266,7 @@ function embeddedHits(hits: EmbeddedSpecHit[], prefix: string, acc: Acc) {
 }
 
 /** One SVG document → at most one visual (a diagram, an embedded spec, or a geometry chart). */
-function handleSvg(text: string, locator: string, options: DeterministicVisualOptions, acc: Acc) {
+function handleSvg(text: string, locator: string, options: DeterministicVisualOptions, acc: Acc, words?: readonly SvgWord[]) {
   // SVGs not analysed are recorded as counted ordinal ranges, never dropped: past the input's SVG count, past the output
   // cap, or past the guest's deadline (a backstop below the host timeout, so the input returns what it has).
   if (acc.svgs >= CHART_EXTRACT_LIMITS.maxSvgsPerInput) return addDeferral(acc, DEFERRED_SVG_REASON, 1, true);
@@ -269,7 +303,7 @@ function handleSvg(text: string, locator: string, options: DeterministicVisualOp
       }
       const svgRoot = doc.children.find((c) => c.type === "element" && c.local === "svg");
       if (!svgRoot || svgRoot.type !== "element") throw new ExtractLimitError("svg-no-root");
-      const v = analyzeGeometry(prepareSvgChart(svgRoot), locator);
+      const v = analyzeGeometry(prepareSvgChart(svgRoot, wordsAsTexts(words)), locator);
       if (v) pushVisual(acc, v);
     } catch (error) {
       if (error instanceof ExtractLimitError && error.reason === "visual-limit") throw error;
@@ -433,7 +467,7 @@ export function extractDeterministicVisuals(input: DeterministicVisualInput, opt
   let partsDropped = 0;
   try {
     switch (input.kind) {
-      case "svg": handleSvg(input.text, "svg", options, acc); break;
+      case "svg": handleSvg(input.text, "svg", options, acc, input.words); break;
       case "html": handleHtml(input.text, "", options, acc); break;
       case "json":
         if (input.text.length > CHART_EXTRACT_LIMITS.maxTextBytes) acc.refusals.push({ locator: "json", reason: "json-too-large" });

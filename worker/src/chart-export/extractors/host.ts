@@ -10,6 +10,7 @@ import type { CommandRunner } from "../../tools/runner.js";
 import { extractDeterministicVisuals as guestExtract, type DeterministicVisualInput, type DeterministicVisualOptions } from "./index.js";
 import { CHART_EXTRACT_LIMITS } from "./limits.js";
 import type { DeterministicVisualResult } from "./types.js";
+import { GUEST_NODE_FLAGS } from "../../sandbox/guest-node-flags.js";
 
 /*
  * Host side of the deterministic chart rungs. Customer bytes are parsed only by the guest entry
@@ -66,7 +67,7 @@ const validDeferral = (r: unknown) => !!r && typeof r === "object" && !Array.isA
  * Only the VM guest gets it (and zod `jitless`, via guest-entry): the in-process paths below are for tests and local
  * development, refused wherever parsing must stay in the VM (`vmOnlyParsing`), and are not this boundary.
  */
-const GUEST_NODE_FLAGS = ["--disallow-code-generation-from-strings"];
+export { GUEST_NODE_FLAGS };
 /** How far below the run's timeout the guest stops and returns what it has (VM exec, staging and result write fit). */
 const GUEST_DEADLINE_MARGIN_MS = 15_000;
 

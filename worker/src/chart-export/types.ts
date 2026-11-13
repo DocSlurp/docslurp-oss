@@ -104,6 +104,11 @@ export interface DeterministicVisualInput {
   /** The parsed Doppler figure index when the caller already read it (saves a second read). */
   dopplerFiguresIndex?: unknown;
   /**
+   * The source's inline answer from the quarantine guest (DOCSLURP_CHART_EXPORT_INLINE): when present for the source's
+   * kind, the extractor uses it and runs no parser VM for the source (except a `result-too-large` refusal).
+   */
+  inline?: import("./inline.js").StoredInlineCharts | null;
+  /**
    * Records a cost-only usage event (parser-VM time spent on this document's chart extraction) in the stage's usage
    * ledger. Never a customer charge.
    */

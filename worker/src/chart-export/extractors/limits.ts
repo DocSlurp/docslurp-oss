@@ -82,6 +82,8 @@ export const CHART_EXTRACT_LIMITS = {
   maxJsonBytes: 2 * 1024 * 1024,
   maxJsonCandidates: 200,
   maxJsonDepth: 64,
+  /** Words placed beside one SVG figure (a PDF figure's own text). */
+  maxSvgWords: 4000,
   /** Visuals returned from one input. */
   maxVisuals: 256,
   /** Geometry digest for the svg-assisted rung (~800 tokens). */

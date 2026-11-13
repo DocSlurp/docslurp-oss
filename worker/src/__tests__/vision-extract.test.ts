@@ -615,6 +615,60 @@ describe("chart export in vision-extract (real pass, fake model client)", () => 
     }
   });
 
+  it("free tier, inline mode: a document with no chart signal does no chart work at all (no reads, no extractor, no VM)", async () => {
+    vi.stubEnv("DOCSLURP_CHART_EXPORT", "on");
+    vi.stubEnv("DOCSLURP_CHART_EXPORT_INLINE", "1");
+    const calls: unknown[] = [];
+    const previous = setDeterministicVisualExtractor(async (input) => { calls.push(input); return { partials: [] }; });
+    try {
+      const { stage, state, storage, requests } = await setup({ visionFallback: false, quality: "fast", chartExport: { ...CHART_EXPORT, tier: "free" } });
+      await stage.run(state);
+      expect(calls).toEqual([]);
+      expect(requests).toEqual([]);
+      expect(storage.reads).toEqual([]);
+      expect(chartCharges(state)).toEqual([]);
+      expect(state.documentStage("doc-c", "vision-extract")).toBeUndefined();
+    } finally {
+      setDeterministicVisualExtractor(previous);
+    }
+  });
+
+  it("free tier, inline mode: a chart-inline slot that says none does no work (council L4)", async () => {
+    vi.stubEnv("DOCSLURP_CHART_EXPORT", "on");
+    vi.stubEnv("DOCSLURP_CHART_EXPORT_INLINE", "1");
+    const calls: unknown[] = [];
+    const previous = setDeterministicVisualExtractor(async (input) => { calls.push(input); return { partials: [] }; });
+    try {
+      const { stage, state, storage } = await setup({ visionFallback: false, quality: "fast", chartExport: { ...CHART_EXPORT, tier: "free" } });
+      state.artifactLedger.recordDocument("doc-c", "chart-inline", "s3://b/u/run-c/quarantine/doc-c.json#chart-inline=none");
+      await stage.run(state);
+      expect(calls).toEqual([]);
+      expect(storage.reads).toEqual([]);
+    } finally {
+      setDeterministicVisualExtractor(previous);
+    }
+  });
+
+  it("free tier, inline mode: the chart-inline signal from quarantine runs the pass", async () => {
+    vi.stubEnv("DOCSLURP_CHART_EXPORT", "on");
+    vi.stubEnv("DOCSLURP_CHART_EXPORT_INLINE", "1");
+    const calls: unknown[] = [];
+    const previous = setDeterministicVisualExtractor(async (input) => {
+      calls.push(input);
+      return { partials: [{ source: "office-chart-xml" as const, confidence: 0.99, spec: BAR as never, digest: null, pageNumber: 2, imageIndex: 0 }] };
+    });
+    try {
+      const { stage, state, storage } = await setup({ visionFallback: false, quality: "fast", chartExport: { ...CHART_EXPORT, tier: "free" } });
+      state.artifactLedger.recordDocument("doc-c", "chart-inline", "s3://b/u/run-c/quarantine/doc-c.json#chart-inline=work");
+      await stage.run(state);
+      expect(calls).toHaveLength(1);
+      expect(markdownOf(storage, state).charts).toHaveLength(1);
+      expect(chartCharges(state)).toEqual([]);
+    } finally {
+      setDeterministicVisualExtractor(previous);
+    }
+  });
+
   it("models tier is unchanged: the client is built and each model read is charged", async () => {
     installTestPricing(DISTINCT_TEST_PRICING);
     vi.stubEnv("DOCSLURP_CHART_EXPORT", "on");

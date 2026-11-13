@@ -1,4 +1,6 @@
 import path from "node:path";
+import { GUEST_NODE_FLAGS } from "../chart-export/extractors/host.js";
+import { inlineChartsInProcess, validateInlineCharts, type InlineChartRequest, type StoredInlineCharts } from "../chart-export/inline.js";
 import { describeArchiveIssue, inspectQuarantineBytes, pdfHasEncryptName, type QuarantineInspection } from "./quarantine-bytes.js";
 export { sniffMimeType, inspectArchive, type QuarantineInspection } from "./quarantine-bytes.js";
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
@@ -9,7 +11,7 @@ import { fileFactsFromSniff, quarantineFailureText, type FileFacts } from "@docs
 
 import type { Config } from "../config.js";
 import { DocumentStageError } from "../pipeline/checkpoints.js";
-import type { MalwareScanResult } from "../tools/runner.js";
+import { CommandExitError, type MalwareScanResult } from "../tools/runner.js";
 import type { CommandRunner } from "../tools/runner.js";
 import { vmOnlyParsing } from "./vm-only-parsing.js";
 import { isClamEncryptedAlert, isClamLimitAlert } from "../tools/clam-limits.js";
@@ -76,6 +78,11 @@ export interface QuarantineArtifact {
   } | null;
   decision: "accepted" | "quarantined";
   reasons: QuarantineReason[];
+  /**
+   * Inline chart extraction (DOCSLURP_CHART_EXPORT_INLINE): the guest's validated answer for an accepted document whose
+   * verified type is the kind it was asked for. Absent when not asked, refused documents, or a type change.
+   */
+  chartInline?: StoredInlineCharts;
 }
 
 
@@ -394,19 +401,33 @@ export function buildQuarantineStats(artifact: QuarantineArtifact): Record<strin
  * The bytes' inspection (sniff and ZIP checks): in the parser VM in production, in-process elsewhere. One inspection serves
  * the intake verification and the scan.
  */
-export async function inspectQuarantine(args: { bytes: Buffer; filename: string; tempFile: string; runner: CommandRunner; policy: QuarantinePolicy; signal?: AbortSignal }): Promise<QuarantineInspection> {
-  return vmOnlyParsing() ? await inspectInVm(args) : inspectQuarantineBytes(args.bytes, args.filename, args.policy);
+export async function inspectQuarantine(args: InspectArgs): Promise<QuarantineInspection> {
+  if (vmOnlyParsing()) return await inspectInVm(args);
+  const inspection: QuarantineInspection = inspectQuarantineBytes(args.bytes, args.filename, args.policy);
+  if (args.charts) {
+    // Local development and tests: the same plan and extractor in process; a failure is a refusal, as in the guest.
+    try { inspection.charts = inlineChartsInProcess(args.bytes, args.charts, inspection); }
+    catch { inspection.charts = { status: "refused", reason: "worker-failed", ms: 0 }; }
+  }
+  return inspection;
+}
+
+interface InspectArgs {
+  bytes: Buffer; filename: string; tempFile: string; runner: CommandRunner; policy: QuarantinePolicy; signal?: AbortSignal;
+  /** Inline chart extraction in the same guest process (DOCSLURP_CHART_EXPORT_INLINE): the declared kind and options. */
+  charts?: InlineChartRequest;
 }
 
 const SNIFF_CONTAINERS = new Set(["zip", "ole"]);
 const SNIFF_ENCODINGS = new Set(["utf-8", "utf-8-bom", "utf-16le", "utf-16be", "8-bit"]);
 
 /** MIME and ZIP inspection also consume hostile bytes and belong inside the VM. */
-async function inspectInVm(args: { bytes: Buffer; filename: string; tempFile: string; runner: CommandRunner; policy: QuarantinePolicy; signal?: AbortSignal }): Promise<QuarantineInspection> {
+async function inspectInVm(args: InspectArgs): Promise<QuarantineInspection> {
   const dir = await mkdtemp(path.join(tmpdir(), "docslurp-quarantine-"));
   try {
     const options = path.join(dir, "options.json");
     const output = path.join(dir, "inspection.json");
+    let inlineCrashed = false;
     await writeFile(options, JSON.stringify({ filename: args.filename, policy: {
       quarantineFailOpenOnToolMissing: args.policy.quarantineFailOpenOnToolMissing,
       quarantineMaxArchiveEntries: args.policy.quarantineMaxArchiveEntries,
@@ -414,10 +435,31 @@ async function inspectInVm(args: { bytes: Buffer; filename: string; tempFile: st
       quarantineMaxTotalUncompressedBytes: args.policy.quarantineMaxTotalUncompressedBytes,
       quarantineMaxSingleEntryBytes: args.policy.quarantineMaxSingleEntryBytes,
       quarantineMaxExpansionRatio: args.policy.quarantineMaxExpansionRatio,
-    } }), { mode: 0o600 });
-    await args.runner.run({ binary: "node", args: [path.join(resolveScriptsDir(), "quarantine-inspect.mjs"), args.tempFile, options, output], available: true, readOnlyInputs: true, timeoutMs: 60_000 }, args.signal);
-    if ((await stat(output)).size > 2 * 1024 * 1024) throw new Error("quarantine inspection result exceeds limit");
+    }, ...(args.charts ? { charts: { kind: args.charts.kind, diagrams: args.charts.diagrams } } : {}) }), { mode: 0o600 });
+    // V8 refuses code generation from strings in this command and in the inline chart worker it starts (worker threads take
+    // the flag from their process; it cannot be set per worker), as in every chart guest run (host.ts GUEST_NODE_FLAGS).
+    try {
+      await args.runner.run({ binary: "node", args: [...GUEST_NODE_FLAGS, path.join(resolveScriptsDir(), "quarantine-inspect.mjs"), args.tempFile, options, output], available: true, readOnlyInputs: true, timeoutMs: 60_000 }, args.signal);
+    } catch (error) {
+      // The guest writes the inspection before charts run (council r3 L1). When the command exited non-zero after that,
+      // with charts asked, the inspection stands and the charts are a refusal. Without charts, or with no inspection
+      // written (a timeout, an abort, a failure before the write), the command failed as before.
+      if (!args.charts || !(error instanceof CommandExitError) || error.exitCode === null || args.signal?.aborted || !(await stat(output).catch(() => null))) throw error;
+      inlineCrashed = true;
+    }
+    if ((await stat(output)).size > (args.charts ? 6 : 2) * 1024 * 1024) throw new Error("quarantine inspection result exceeds limit");
     const result = JSON.parse(await readFile(output, "utf8")) as QuarantineInspection;
+    // The chart answer is checked on its own and can only ever be dropped to a refusal: it never fails the inspection.
+    // Asked for and missing (an image whose guest predates inline charts): a counted refusal (answer-missing), never a
+    // silent skip; vm-extractor then runs #363's standalone path for the source (council r4 M3). parser-vm@5 also refuses
+    // such an image at the canary.
+    const charts = (result as { charts?: unknown }).charts;
+    delete (result as { charts?: unknown }).charts;
+    // The inspection proper keeps its own 2 MiB bound; only the chart answer gets the extra allowance.
+    if (Buffer.byteLength(JSON.stringify(result)) > 2 * 1024 * 1024) throw new Error("quarantine inspection result exceeds limit");
+    if (args.charts && inlineCrashed) result.charts = { status: "refused", reason: "worker-failed", ms: 0 };
+    else if (args.charts && charts !== undefined) result.charts = validateInlineCharts(charts);
+    else if (args.charts) result.charts = { status: "refused", reason: "answer-missing", ms: 0 };
     const sniffed = result?.sniffed as unknown as Record<string, unknown> | null;
     if (!sniffed || typeof sniffed !== "object" || Object.keys(sniffed).some((key) => !["mimeType", "container", "encoding"].includes(key))
       || !(sniffed.mimeType === null || typeof sniffed.mimeType === "string" && sniffed.mimeType.length <= 256 && /^[\w.+-]+\/[\w.+-]+$/.test(sniffed.mimeType))

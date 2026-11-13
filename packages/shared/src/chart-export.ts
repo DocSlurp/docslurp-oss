@@ -514,9 +514,10 @@ export type ExportedVisual = z.infer<typeof exportedVisualSchema>;
  * (`figureId`) past the per-document batch cap or without a readable file; for unit-crashed and unit-timeout, extraction
  * units (a chart part, an SVG, an embedded scan) whose isolated worker crashed, ran out of memory or overran its time;
  * for guest-unavailable and vm-cap (host-only), a source or figure whose guest run failed or the org's free-VM cap
- * turned away, recorded whole.
+ * turned away, recorded whole; for figure-charts-refused (host-only), one Doppler figure whose in-VM chart pass (Doppler
+ * protocol 15) returned no result: its shard's or its document's chart answer was refused.
  */
-export const DEFERRED_VISUAL_REASONS = ["svg-document-limit", "html-svg-limit", "guest-deadline", "visual-limit", "package-part-limit", "guest-deadline-part", "unit-crashed", "unit-timeout", "output-limit", "figure-batch-limit", "figure-unavailable", "guest-unavailable", "vm-cap"] as const;
+export const DEFERRED_VISUAL_REASONS = ["svg-document-limit", "html-svg-limit", "guest-deadline", "visual-limit", "package-part-limit", "guest-deadline-part", "unit-crashed", "unit-timeout", "output-limit", "figure-batch-limit", "figure-unavailable", "guest-unavailable", "vm-cap", "figure-charts-refused"] as const;
 /** The reasons the parser-VM guest itself may report (the figure reasons are the host's own). */
 export const GUEST_DEFERRAL_REASONS = ["svg-document-limit", "html-svg-limit", "guest-deadline", "visual-limit", "package-part-limit", "guest-deadline-part", "unit-crashed", "unit-timeout", "output-limit"] as const;
 export const deferredVisualSchema = z.strictObject({
