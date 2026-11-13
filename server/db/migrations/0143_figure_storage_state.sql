@@ -27,3 +27,16 @@ CREATE INDEX IF NOT EXISTS document_assets_pending_idx ON document_assets (org_i
 -- the document off the resume queue and stops serving, counting and billing the rows earlier attempts left, without
 -- deleting them (the orphan GC or the run's purge does that). Any figure write makes them current again.
 ALTER TABLE document_extraction_levels ADD COLUMN IF NOT EXISTS assets_current boolean NOT NULL DEFAULT true;
+--> statement-breakpoint
+-- Gaps (page ranges no shard returned a manifest for: a failed or over-share shard, the document's pass budget) are
+-- resumable work, like resumable images: a resume runs a fresh pass over the range, within the attempt and document caps.
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_catalog.pg_constraint WHERE conname = 'document_extraction_levels_status_resumable_check' AND conrelid = 'public.document_extraction_levels'::regclass) THEN
+    ALTER TABLE document_extraction_levels DROP CONSTRAINT document_extraction_levels_status_resumable_check;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_constraint WHERE conname = 'document_extraction_levels_resumable_work_check' AND conrelid = 'public.document_extraction_levels'::regclass) THEN
+    ALTER TABLE document_extraction_levels ADD CONSTRAINT document_extraction_levels_resumable_work_check
+      CHECK ((images_status = 'resumable') = (assets_resumable > 0 OR coalesce(jsonb_array_length(gaps), 0) > 0));
+  END IF;
+END $$;

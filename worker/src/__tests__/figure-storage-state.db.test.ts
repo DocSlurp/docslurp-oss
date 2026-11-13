@@ -64,6 +64,7 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await sql`delete from document_assets`;
+  await sql`delete from document_extraction_shards`;
   await sql`delete from document_extraction_levels`;
   await sql`update documents set run_id = 'run-a', status = 'processing' where id = 'doc-a'`;
 });
@@ -283,6 +284,46 @@ describe("resumes only add; levels are the current run's", () => {
     // The earlier run's rows and objects stay (unserved, unbilled) for the orphan GC or the run's purge.
     expect((await rows()).every((row) => row.run_id === "run-a")).toBe(true);
     expect(figureKeys(storage)).toHaveLength(3);
+  });
+});
+
+describe("gaps: page ranges with no manifest are resumable work", () => {
+  it("a gap makes the level resumable and a discovery unit; a gap resume creates its shard and clears the gap; outside a gap it is refused", async () => {
+    const storage = memoryStorage();
+    const { set, stored } = await storeStep(storage);
+    const full = ledgerWriteForStoredFigures({ set, stored, outcome: { status: "partial", exitCode: 5, gaps: [{ first: 2, last: 3, reason: "plugin:shard-over-share" }] } });
+    await writeDocumentAssetLedger(sql, { scope: A, level: { ...full.level, markdownComplete: true }, assets: full.assets });
+    expect(await level()).toMatchObject({ images_status: "resumable", assets_resumable: 0 });
+    const units = await listResumableDocuments(sql, { orgId: "org-a" });
+    expect(units).toEqual([expect.objectContaining({ documentId: "doc-a", gap: true, shard: { first: 2, last: 3 }, manifestSha256: null })]);
+    const shard = (first: number, last: number) => ({
+      first, last, manifestKey: `ua/run-a/doppler/doc-a/images/shards/${String(first).padStart(4, "0")}-${String(last).padStart(4, "0")}/manifest.jsonl`,
+      manifestSha256: "c".repeat(64), sourceSha256: V2_SOURCE_SHA, settingsSha256: "d".repeat(64), imagesStatus: "complete" as const,
+      assetsResumable: 0, lastCutPage: null, deadlineMs: null,
+    });
+    const level0 = { ...full.level, markdownComplete: true, manifest: null, gaps: [] };
+    // Outside every gap: refused, nothing changes.
+    await expect(writeDocumentAssetLedger(sql, { scope: A, level: level0, assets: [], resume: { first: 1, last: 1 }, shards: [shard(1, 1)] }))
+      .rejects.toMatchObject({ rule: "invalid-level" });
+    // The gap's fresh pass: its shard is created, the gap goes, the level is complete.
+    await writeDocumentAssetLedger(sql, { scope: A, level: level0, assets: [], resume: { first: 2, last: 3 }, shards: [shard(2, 3)] });
+    const [after] = await sql<{ images_status: string; gaps: unknown }[]>`select images_status, gaps from document_extraction_levels where document_id = 'doc-a'`;
+    expect(after).toMatchObject({ images_status: "complete" });
+    expect(after!.gaps ?? []).toEqual([]);
+    expect(await sql`select first_page, last_page, resumes from document_extraction_shards where document_id = 'doc-a'`).toEqual([{ first_page: 2, last_page: 3, resumes: 1 }]);
+    // Stored images of the other pages were never touched by the gap's resume.
+    expect((await rows()).filter((row) => row.status === "extracted").every((row) => row.storage_state === "stored")).toBe(true);
+  });
+
+  it("a re-run without the figure step clears gaps with the rest (off the queue)", async () => {
+    const storage = memoryStorage();
+    const { set, stored } = await storeStep(storage);
+    const full = ledgerWriteForStoredFigures({ set, stored, outcome: { status: "partial", exitCode: 5, gaps: [{ first: 3, last: 3, reason: "plugin:doc-pass-budget" }] } });
+    await writeDocumentAssetLedger(sql, { scope: A, level: { ...full.level, markdownComplete: true }, assets: full.assets });
+    const write = ledgerWriteForNoFigures("disabled");
+    await writeDocumentAssetLedger(sql, { scope: A, level: { ...write.level, markdownComplete: true }, assets: write.assets, levelOnly: true });
+    expect(await level()).toMatchObject({ images_status: "disabled" });
+    expect(await listResumableDocuments(sql, { orgId: "org-a" })).toEqual([]);
   });
 });
 
