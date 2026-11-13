@@ -75,13 +75,13 @@ describe("GPT-6 Luna vision profile", () => {
     expect(visionReasoningParams(LUNA)).toEqual({ reasoning: { effort: "none" } });
   });
 
-  it("sends its template, effort none, high image detail, 16k cap, temperature 0 and no other params", async () => {
+  it("sends its template, effort none, high image detail, 8k output ceiling (the default since 2026-11-13), temperature 0 and no other params", async () => {
     const { bodies } = await run(LUNA, undefined, [ok]);
     const body = bodies[0]!;
     expect(body.reasoning).toEqual({ effort: "none" });
     expect(body.messages[1].content[0].text).toBe(visionPromptTemplates["page-markdown-latex"]);
     expect(body.messages[1].content[1].image_url.detail).toBe("high");
-    expect(body.max_tokens).toBe(16384);
+    expect(body.max_tokens).toBe(8_192);
     expect(body.temperature).toBe(0);
     expect(Object.keys(body).sort()).toEqual(["max_tokens", "messages", "model", "provider", "reasoning", "stream", "stream_options", "temperature"]);
     // Only the price cap the guard weighed the request at.
