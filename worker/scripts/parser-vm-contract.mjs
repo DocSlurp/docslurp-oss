@@ -5,6 +5,8 @@ import { fileURLToPath } from "node:url";
 for (const file of ["image-task.mjs", "pdf-structure.mjs", "quarantine-inspect.mjs", "structured-json.mjs", "html-embeds.mjs", "table-cells.mjs", "vision-tables.mjs", "table-routing.mjs", "chart-export-extract.mjs", "../dist/chart-export/extractors/index.js", "../dist/extractors/structured-json-guest.js", "../dist/routing/html-embeds-guest.js", "../dist/pipeline/table-cells-guest.js", "../dist/pipeline/vision-tables-guest.js", "../dist/pipeline/table-routing-guest.js", "../dist/pipeline/html-table-limits.js", "../dist/deferred/pdf-structure-guest.js", "../dist/lib/quarantine-bytes.js", "../dist/lib/archive-nesting.js", "../dist/lib/pdf-encryption-structure.js"]) await access(fileURLToPath(new URL(file, import.meta.url)));
 // The table-routing guest scans with @docslurp/shared's scanner: the package must resolve from this image's worker.
 await access(fileURLToPath(import.meta.resolve("@docslurp/shared/page-table-routing")));
+// The chart-export and quarantine guests load only these @docslurp/shared modules (not the package index: ~0.3 s of CPU per run).
+for (const sub of ["chart-export", "file-sniff"]) await access(fileURLToPath(import.meta.resolve(`@docslurp/shared/${sub}`)));
 // parser-vm@4: quarantine inspection returns { sniffed, archive, pdf } (pdf: the /Encrypt check that sends an encrypted PDF to
 // the in-VM qpdf decryption, and encryptConflict, the council N-H1 structure check; archive: the nested-archive walk, which
 // walks tar and refuses nested 7z, bzip2 and xz); an older image is refused. qpdfVersion: the image's qpdf,

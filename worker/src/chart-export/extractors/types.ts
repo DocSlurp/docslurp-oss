@@ -1,4 +1,4 @@
-import type { VisualSpec } from "@docslurp/shared";
+import type { VisualSpec } from "@docslurp/shared/chart-export";
 
 export type DeterministicSource = "office-chart-xml" | "embedded-spec" | "svg-geometry";
 
