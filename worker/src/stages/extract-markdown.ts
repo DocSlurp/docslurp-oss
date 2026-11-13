@@ -118,6 +118,8 @@ import { processedPdfPages, reconcileProcessedPdfPages } from "../lib/pdf-page-c
 import { recordExtractedPageEquivalents } from "../lib/page-equivalents.js";
 import { collectPageLayoutFacts } from "../lib/page-layout-evidence.js";
 import { routingFactsWithDopplerFacts } from "../lib/doppler-page-facts-layout.js";
+import { dopplerPageFactsJsonl, dopplerPageFactsMode, type DopplerPageFactsDocument } from "../lib/doppler-page-facts.js";
+import { ROUTING_PAGE_FACTS_SLOT, routingPageFactsKey } from "../routing/probe/doppler-facts-runner.js";
 import { sandboxedPdfPageFacts } from "../extractors/sandboxed-pdf-page-facts.js";
 import { PAGE_RENDITION, pageRenditionKey } from "../lib/page-rendition.js";
 import { extractorFailureReason, extractorFallbackFor, recordExtractorFallback } from "../lib/extractor-fallback.js";
@@ -1014,6 +1016,13 @@ export class ExtractMarkdownStage implements Stage {
                     documentId: document.id, runId: state.run.id, pageCount: document.pageCount,
                     layoutFacts: routingFactsWithDopplerFacts(winningCandidate.layoutFacts, winningCandidate.pageFacts),
                   }));
+                  // The v2 page router's probe on a sandboxed deployment (DOCSLURP_DOPPLER_PAGE_FACTS=use): the winning job's
+                  // validated facts as canonical lines (never the guest's bytes). route-pages re-validates them and never opens
+                  // the PDF; without them it writes no plan and the document keeps v3 routing.
+                  if (isPdf && winningCandidate.pageFacts && dopplerPageFactsMode() === "use") {
+                    const routingFactsUri = await this.storeRoutingPageFacts(document, state, winningCandidate.pageFacts);
+                    if (routingFactsUri) state.artifactLedger.recordDocument(document.id, ROUTING_PAGE_FACTS_SLOT, routingFactsUri);
+                  }
                   // Doppler figures of the winning VM candidate: validated whole, stored under the document's artifact root, and
                   // recorded as document artifact slots so the artifact and PII guards (and the file proxy) apply to each file.
                   // A first-pass placeholder (a host-only mark on the job) stores nothing: the first pass stores those figures
@@ -1706,6 +1715,22 @@ export class ExtractMarkdownStage implements Stage {
     });
     console.log(`[extract-debug] document=${document.id} pageLayoutFacts source=${source} pages=${pages.size}${ms === null ? "" : ` ms=${ms}`}`);
     return this.storage.uri(key);
+  }
+
+  /** Best effort: a failed write leaves the router without facts (v3 routing), never the document failed. */
+  private async storeRoutingPageFacts(
+    document: import("../models.js").Document,
+    state: import("../pipeline/pipeline.js").WorkflowState,
+    facts: DopplerPageFactsDocument,
+  ): Promise<string | null> {
+    const key = routingPageFactsKey(runArtifactRoot(state.run, document.userId), document.id);
+    try {
+      await this.storage.streamText(key, dopplerPageFactsJsonl(facts), "application/x-ndjson");
+      return this.storage.uri(key);
+    } catch (error) {
+      console.warn(`[extract-markdown] document=${document.id} routing page facts not stored: ${error instanceof Error ? error.message.slice(0, 200) : String(error)}`);
+      return null;
+    }
   }
 
   /**

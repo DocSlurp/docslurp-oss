@@ -66,3 +66,27 @@ classify-route and page-image evidence read the facts unchanged:
 
 `probeRowsFromDopplerFacts` (`worker/src/routing/probe/doppler-facts.ts`) builds the v2 router's `ProbeRow` with
 `probeEngine: "doppler-facts"` and no thumbnail; its header comment lists each field.
+
+## Page router
+
+With `DOCSLURP_DOPPLER_PAGE_FACTS=use` and the v2 page router in `shadow` or `active`, the router reads its page features
+from these facts instead of probing the PDF (`createDopplerFactsProbeRunner`, `worker/src/routing/probe/doppler-facts-runner.ts`):
+
+- extract-markdown stores the winning job's validated facts as canonical lines (`dopplerPageFactsJsonl`) at
+  `<artifactRoot>/routing-page-facts/<documentId>.jsonl` (slot `routing-page-facts`). route-pages reads only that key,
+  re-validates it with `parseDopplerPageFacts` bounded by the host's measured page count, and never opens the PDF.
+- Facts that are missing, refused, oversized, for an unreadable document or for fewer pages than the host counted are
+  unavailable: no plan is written and the document keeps v3 routing (`page-route-fallback`). They never authorize a model
+  read or a charge. A doc line that says a user password is required gives the locked row.
+- On a sandboxed deployment (the check extract-markdown uses for `sandboxed-pdf-deployment`, plus `NODE_ENV=production` or
+  the service profile) every host-side PDF access in the router is refused before it happens: the native probe, its
+  encrypted-file byte scan, thumbnails, inset renders and clips and the table gate. A refusal is logged as an error and
+  recorded as `page-route-host-pdf-refused`. Without facts mode `use` a sandboxed deployment writes no plan.
+- Facts carry no pixels, so image decision models are skipped (`decision-model-skipped:no-host-pixels:<ids>`) and their
+  pages take the existing escalation path; text-only decision models still run.
+
+Shadow telemetry compares the facts-driven plan with v3. Each `page-route-decision` row carries `probeSource` and
+`shadowComparison` (`routerRoles`, `routerNeedsPixels`, `v3Route`, `v3OcrAuthorized`, `v3NeedsPixels`, `agreesWithV3`);
+`page-route-chunk-estimate` carries the document totals (`pages`, `compared`, `agree`, `routerOnlyPixels`, `v3OnlyPixels`).
+The router needs pixels for any role beyond `accept-text` or `skip`; v3 does for any route other than `straightforward-text`
+or an authorized OCR decision.
