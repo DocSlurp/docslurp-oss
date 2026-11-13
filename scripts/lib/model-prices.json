@@ -59,8 +59,10 @@
       "output": 0.5,
       "vision": true,
       "source": "https://openrouter.ai/api/v1/models",
-      "checked": "2026-11-12",
-      "contextWindow": 1050000
+      "checked": "2026-11-13",
+      "contextWindow": 1050000,
+      "cacheRead": 0.01,
+      "cacheWrite": 0.125
     },
     "z-ai/glm-5.3-flashx": {
       "input": 0.37,
@@ -180,9 +182,11 @@
       "output": 0.5,
       "vision": true,
       "source": "https://openrouter.ai/api/v1/models",
-      "checked": "2026-11-12",
+      "checked": "2026-11-13",
       "note": "$0.50/$2.50 above 100K prompt tokens",
-      "contextWindow": 1000000
+      "contextWindow": 1000000,
+      "cacheRead": 0.01,
+      "cacheWrite": 0.125
     },
     "inception/mercury-3": {
       "input": 0.1,

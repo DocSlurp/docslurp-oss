@@ -239,6 +239,7 @@ async function generateAggregateAnswer(args: {
   const generated = await generateOpenRouterDocumentText({
     apiKey,
     privacyMode,
+    evidenceScope: args.orgId,
     model: SEARCH_OPENROUTER_MODEL,
     system: [
       "Answer the user using only the supplied DocSlurp project excerpts.",

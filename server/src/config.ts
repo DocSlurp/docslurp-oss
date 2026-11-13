@@ -189,6 +189,8 @@ function validateProductionSecrets(): void {
   assertProductionSecret("STORAGE_URI secret key", storage.secretAccessKey);
   assertProductionSecret("METRICS_SECRET", process.env.METRICS_SECRET);
   assertProductionSecret("BETTER_AUTH_SECRET", process.env.BETTER_AUTH_SECRET, { minLength: 32 });
+  // Optional override of the evidence-tag and chat-salt key (else derived from BETTER_AUTH_SECRET); weak when set fails.
+  assertProductionSecret("EVIDENCE_TAG_KEY", process.env.EVIDENCE_TAG_KEY, { required: false, minLength: 32 });
   assertProductionSecret("CREDENTIALS_ENCRYPTION_KEY", process.env.CREDENTIALS_ENCRYPTION_KEY, { minLength: 32 });
   assertProductionSecret("SECRETS_ENCRYPTION_KEY", process.env.SECRETS_ENCRYPTION_KEY, { minLength: 32 });
   if (process.env.NODE_ENV === "production") {

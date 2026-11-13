@@ -2,6 +2,7 @@ import { nitroBaseModel, speedBoostMaxPrice } from "./project-chat-models.js";
 import { withServedProviderRegion } from "./provider-regions.js";
 import { chatModelPricePerToken } from "./chat-model-prices.js";
 import { liveModelPrice, refreshStaleLiveModelPrices } from "./live-model-prices.js";
+import { CACHE_WRITE_FALLBACK_MULTIPLIER } from "./usage.js";
 
 /** Provider charges are USD; the application ledger uses fractional USD cents. */
 export interface ProviderTextUsage {
@@ -15,6 +16,22 @@ function finiteNonnegative(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value) && value >= 0;
 }
 
+/**
+ * Prompt-cache token counts in a provider usage object, both included in the prompt count: Chat Completions
+ * (`prompt_tokens_details.cached_tokens` / `cache_write_tokens`, as OpenRouter normalises every upstream), the
+ * Responses API (`input_tokens_details`) and Anthropic's native usage (`cache_read_input_tokens` /
+ * `cache_creation_input_tokens`). Only positive counts are returned.
+ */
+export function readPromptCacheTokens(usage: unknown): { cachedInputTokens?: number; cacheWriteInputTokens?: number } {
+  if (!usage || typeof usage !== "object") return {};
+  const raw = usage as Record<string, any>;
+  const details = (raw.prompt_tokens_details ?? raw.input_tokens_details ?? {}) as Record<string, unknown>;
+  const pick = (...values: unknown[]) => values.find((value): value is number => finiteNonnegative(value) && value > 0);
+  const cached = pick(details.cached_tokens, raw.cache_read_input_tokens, raw.cached_tokens);
+  const written = pick(details.cache_write_tokens, details.cache_creation_tokens, raw.cache_creation_input_tokens);
+  return { ...(cached ? { cachedInputTokens: Math.floor(cached) } : {}), ...(written ? { cacheWriteInputTokens: Math.floor(written) } : {}) };
+}
+
 export function readProviderCharge(usage: unknown): Pick<ProviderTextUsage, "costCents" | "metadata"> {
   if (!usage || typeof usage !== "object") return {};
   const raw = usage as Record<string, unknown>;
@@ -25,7 +42,7 @@ export function readProviderCharge(usage: unknown): Pick<ProviderTextUsage, "cos
   // For ordinary routing the upstream amount is already included in cost.
   if (raw.is_byok === true && !finiteNonnegative(upstream)) return {};
   const total = raw.cost + (raw.is_byok === true && finiteNonnegative(upstream) ? upstream : 0);
-  return { costCents: total * 100, metadata: { costSource: "provider", providerCostUsd: total,
+  return { costCents: total * 100, metadata: { costSource: "provider", ...readPromptCacheTokens(raw), providerCostUsd: total,
     routerCreditCostUsd: raw.cost, upstreamInferenceCostUsd: upstream, isByok: raw.is_byok === true, providerUsage: raw } };
 }
 
@@ -45,6 +62,7 @@ async function resolveOpenRouterUsageInner(args: {
   receiptRetryDelaysMs?: readonly number[];
 }): Promise<ProviderTextUsage> {
   const base = { inputTokens: args.usage.inputTokens ?? 0, outputTokens: args.usage.outputTokens ?? 0 };
+  const cache = readPromptCacheTokens(args.usage.raw);
   const direct = readProviderCharge(args.usage.raw);
   if (direct.costCents !== undefined) return { ...base, ...direct, metadata: { ...direct.metadata, generationId: args.generationId ?? null, ...(args.providerName ? { providerName: args.providerName } : {}) } };
   if (args.generationId) {
@@ -67,7 +85,7 @@ async function resolveOpenRouterUsageInner(args: {
     const ceiling = speedBoostMaxPrice(nitroBase);
     return { ...base,
       costCents: (base.inputTokens * ceiling.prompt + base.outputTokens * ceiling.completion) / 10_000,
-      metadata: { costSource: "estimate", accountingStatus: "receipt-missing", reconciliationRequired: true,
+      metadata: { costSource: "estimate", accountingStatus: "receipt-missing", reconciliationRequired: true, ...cache,
         pricingSource: "nitro-endpoint-ceiling-estimate", generationId: args.generationId ?? null,
         ...(args.providerName ? { providerName: args.providerName } : {}) },
     };
@@ -79,13 +97,28 @@ async function resolveOpenRouterUsageInner(args: {
   const reference = chatModelPricePerToken(args.model);
   const live = liveModelPrice(args.model, { promptTokens: base.inputTokens, reference });
   const verified = live ? undefined : reference;
-  const pricing = live ? { input: live.input, output: live.output } : verified;
+  const pricing = live ? { input: live.input, output: live.output, cacheRead: live.cacheRead, cacheWrite: live.cacheWrite } : verified;
   return { ...base,
-    ...(pricing ? { costCents: (base.inputTokens * pricing.input + base.outputTokens * pricing.output) * 100 } : {}),
-    metadata: { costSource: pricing ? "estimate" : "unknown", reconciliationRequired: true, accountingStatus: "receipt-missing", generationId: args.generationId ?? null,
+    ...(pricing ? { costCents: estimateTextCostCents(base, cache, pricing) } : {}),
+    metadata: { costSource: pricing ? "estimate" : "unknown", reconciliationRequired: true, ...cache, accountingStatus: "receipt-missing", generationId: args.generationId ?? null,
       pricingSource: live ? "openrouter-live" : verified ? "model-prices" : "configured-fallback",
       ...(live?.override ? { pricingOverride: live.override } : {}), ...(pricing ? { pricingUsdPerToken: pricing } : {}) },
   };
+}
+
+/**
+ * Cost in cents of a call without a receipt: cached prompt tokens at the listed cache-read rate and cache writes at
+ * the cache-write rate. Unknown rates err high: reads at the input rate, writes at 1.25x it.
+ */
+function estimateTextCostCents(
+  base: { inputTokens: number; outputTokens: number },
+  cache: { cachedInputTokens?: number; cacheWriteInputTokens?: number },
+  price: { input: number; output: number; cacheRead?: number; cacheWrite?: number },
+): number {
+  const cached = Math.min(base.inputTokens, cache.cachedInputTokens ?? 0);
+  const written = Math.min(base.inputTokens - cached, cache.cacheWriteInputTokens ?? 0);
+  return ((base.inputTokens - cached - written) * price.input + cached * (price.cacheRead ?? price.input)
+    + written * (price.cacheWrite ?? price.input * CACHE_WRITE_FALLBACK_MULTIPLIER) + base.outputTokens * price.output) * 100;
 }
 
 /** The generation receipt, null when not (yet) available, "incomplete" when BYOK accounting lacks the upstream cost. */
@@ -105,6 +138,7 @@ async function fetchGenerationReceipt(apiKey: string, generationId: string, base
     costCents: charge.costCents,
     metadata: { ...charge.metadata, generationId,
       providerName: data.provider_name, cachedTokens: data.native_tokens_cached, reasoningTokens: data.native_tokens_reasoning,
+      ...(finiteNonnegative(data.native_tokens_cached) && data.native_tokens_cached > 0 ? { cachedInputTokens: Math.floor(data.native_tokens_cached) } : {}),
       upstreamInferenceCostUsd: data.upstream_inference_cost, isByok: data.is_byok },
   };
 }
