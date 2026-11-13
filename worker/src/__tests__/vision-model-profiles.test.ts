@@ -1,3 +1,4 @@
+import { TIER_OPTIONS, assertTierOptions } from "@docslurp/shared";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -119,6 +120,20 @@ describe("visual evidence prompt construction contract", () => {
         expect(visionPromptKeyForModel(key, model)).toBe(key);
         expect(resolveVisionPromptTemplate(visionPromptKeyForModel(key, model))).toBe(visionPromptTemplates[key as keyof typeof visionPromptTemplates]);
       }
+    }
+  });
+});
+
+describe("route tier options for page OCR", () => {
+  it("use exactly the approved transcription pool of the model's vision profile", () => {
+    assertTierOptions(TIER_OPTIONS);
+    const ocr = TIER_OPTIONS.filter((option) => option.capability === "page-ocr");
+    expect(ocr.length).toBeGreaterThan(0);
+    for (const option of ocr) {
+      const route = VISION_MODEL_PROFILES[option.model]?.openRouterProvider;
+      expect(route, option.id).toBeDefined();
+      const hosts = route && ("only" in route ? route.only : route.order);
+      expect([...option.pool.hosts], option.id).toEqual(hosts);
     }
   });
 });
