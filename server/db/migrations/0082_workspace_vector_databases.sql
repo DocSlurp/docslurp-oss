@@ -92,7 +92,8 @@ $$;
 --> statement-breakpoint
 UPDATE storage_cleanup_queue
 SET payload = payload || '{"legacyLayout": true}'::jsonb, attempts = 0, last_error = NULL
-WHERE kind = 'vector_table' AND NOT (payload ? 'workspaceId') AND NOT (payload ? 'uri');
+WHERE kind = 'vector_table' AND NOT (payload ? 'workspaceId') AND NOT (payload ? 'uri')
+  AND NOT (payload ? 'legacyLayout');
 --> statement-breakpoint
 -- <root>/<org>/vectors/<model>/<dims> -> <root>/<org>/<workspace>/vectors-<model>-<dims>
 UPDATE vector_index_outbox o

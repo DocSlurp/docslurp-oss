@@ -20,16 +20,168 @@ import {
   type DopplerFigureFormat, type DopplerFigureManifest,
 } from "./doppler-figures.js";
 
-/** Host-side bounds for a version 2 manifest (the guest has its own; these hold whatever it sends). */
+/** Absolute host-side bounds for a version 2 manifest; the per-document caps (`dopplerAssetCaps`) scale below them. */
 export const DOPPLER_MANIFEST_V2_LIMITS = {
   /** Every image Doppler reports, with or without a file (unlinked furniture and watermarks included). */
-  maxEntries: 16_384,
+  maxEntries: 131_072,
+  /** A version 2 manifest is one JSON value parsed whole: held to fewer entries than a streamed version 3 one. */
+  maxV2Entries: 65_536,
   maxBatches: 16_384,
-  maxManifestBytes: 8 * 1024 * 1024,
-  /** Page folders (`page-NNNN`) in the images folder. */
-  maxPageDirs: DOPPLER_FIGURE_LIMITS.maxFiles,
+  maxManifestBytes: 16 * 1024 * 1024,
+  maxFiles: 32_768,
+  maxTotalBytes: 4 * 1024 * 1024 * 1024,
+  /** One picture or figure file (`--images-max-file-bytes`). */
+  maxPictureFileBytes: 8 * 1024 * 1024,
+  /** One page scan copied or decoded from the PDF (`--scan-max-bytes`, which Doppler caps at 64 MiB per copy). */
+  maxScanFileBytes: 64 * 1024 * 1024,
+  /** `page-facts.jsonl` beside the manifest (doppler-page-facts/1 lines). */
+  maxPageFactsBytes: 64 * 1024 * 1024,
   maxLinkPrefixBytes: 128,
 } as const;
+
+/** The caps the host holds one document's images folder to, and passes to Doppler as its own limits. */
+export interface DopplerAssetCaps {
+  /** Files in the folder (pictures, figures and page scans). */
+  files: number;
+  /** `page-NNNN` folders. */
+  pageDirs: number;
+  totalBytes: number;
+  entries: number;
+  manifestBytes: number;
+  pictureFileBytes: number;
+  scanFileBytes: number;
+  pageFactsBytes: number;
+}
+
+const MIB = 1024 * 1024;
+
+/**
+ * Caps that grow with the document, bounded: a scanned book's page scans fit (one JPEG of up to about 1.25 MiB per page
+ * on top of the pictures' allowance), and a hostile manifest still cannot claim more than the absolute limits.
+ *
+ * - files `min(2048 + 2 x pages, 32768)`, page folders `min(pages, files)`
+ * - bytes `min(64 MiB + 1.25 MiB x pages, 4 GiB)`
+ * - entries (manifest lines) `min(16384 + 16 x pages, 131072)`. A version 3 manifest (`manifest.jsonl`) is read line by line
+ *   in fixed memory, so its size is bounded only by the line count and the 64 KiB line cap. A legacy version 2 manifest is
+ *   parsed whole: `min(8 MiB + 128 B x entries, 16 MiB)` (at 16 MiB, JSON.parse plus the strict schema peaks near 160 MB,
+ *   measured), and at most 65,536 entries
+ * - one file: 8 MiB for pictures and figures, 64 MiB for a page scan copied or decoded from the PDF
+ */
+export function dopplerAssetCaps(pageCount: number): DopplerAssetCaps {
+  const pages = Number.isSafeInteger(pageCount) && pageCount > 0 ? Math.min(pageCount, 1_000_000_000) : 0;
+  const L = DOPPLER_MANIFEST_V2_LIMITS;
+  const files = Math.min(2048 + 2 * pages, L.maxFiles);
+  const entries = Math.min(16_384 + 16 * pages, L.maxEntries);
+  return {
+    files,
+    pageDirs: Math.min(pages, files),
+    totalBytes: Math.min(64 * MIB + Math.floor(1.25 * MIB) * pages, L.maxTotalBytes),
+    entries,
+    manifestBytes: Math.min(8 * MIB + 128 * entries, L.maxManifestBytes),
+    pictureFileBytes: L.maxPictureFileBytes,
+    scanFileBytes: L.maxScanFileBytes,
+    pageFactsBytes: Math.min(MIB + 16 * 1024 * pages, L.maxPageFactsBytes),
+  };
+}
+
+/** The largest file one entry may own: a copied or decoded page scan may reach the scan cap, anything else the picture cap. */
+export function dopplerEntryFileCap(entry: { fate: string; source: string | null }, caps: Pick<DopplerAssetCaps, "pictureFileBytes" | "scanFileBytes">): number {
+  return entry.fate === "page-scan" && (entry.source === "copy" || entry.source === "decode") ? caps.scanFileBytes : caps.pictureFileBytes;
+}
+
+const ABSOLUTE_FILE_CAPS = {
+  pictureFileBytes: DOPPLER_MANIFEST_V2_LIMITS.maxPictureFileBytes,
+  scanFileBytes: DOPPLER_MANIFEST_V2_LIMITS.maxScanFileBytes,
+} as const;
+
+/** Pages per Doppler image batch (`--images-batch-pages`); the per-batch limits below are derived from it. */
+export const DOPPLER_IMAGES_BATCH_PAGES = 64;
+
+/**
+ * The limits the host passes to Doppler (`pdftomarkdown` flags) so that its own budgets stop it, resumably, before the
+ * host's caps would refuse the folder: Doppler's budgets are per batch, the host's per document, so the per-batch file
+ * budgets are the document's divided over its batches. The host refuses a folder only when Doppler exceeded these.
+ */
+export interface DopplerImageLimits {
+  /** `--images-batch-pages` */
+  batchPages: number;
+  /** `--images-max` (picture and figure files per batch) */
+  imagesMax: number;
+  /** `--images-max-bytes` (picture and figure bytes per batch) */
+  imagesMaxBytes: number;
+  /** `--images-max-file-bytes` */
+  imagesMaxFileBytes: number;
+  /** `--scan-max` (page scan files per batch: at most one per page) */
+  scanMax: number;
+  /** `--scan-max-bytes` (page scan bytes per batch; also one copy's cap, which Doppler holds to 64 MiB) */
+  scanMaxBytes: number;
+  /** `--images-doc-max-bytes` (every file of the document) */
+  imagesDocMaxBytes: number;
+  /** `--images-link-prefix`: the folder the stored Markdown's links resolve into (see `DOPPLER_STORE_LAYOUT`). */
+  linkPrefix: string;
+}
+
+export function dopplerImageLimits(pageCount: number): DopplerImageLimits {
+  const caps = dopplerAssetCaps(pageCount);
+  const batchPages = DOPPLER_IMAGES_BATCH_PAGES;
+  const batches = Math.max(1, Math.ceil(Math.max(1, caps.pageDirs) / batchPages));
+  // Every batch may write up to `batchPages` scans; what is left of the document's file cap is shared by the batches.
+  const imagesMax = Math.max(1, Math.floor(caps.files / batches) - batchPages);
+  return {
+    batchPages,
+    imagesMax,
+    imagesMaxBytes: Math.min(256 * MIB, caps.totalBytes),
+    imagesMaxFileBytes: caps.pictureFileBytes,
+    scanMax: batchPages,
+    scanMaxBytes: Math.min(caps.scanFileBytes * batchPages, caps.totalBytes),
+    imagesDocMaxBytes: caps.totalBytes,
+    linkPrefix: DOPPLER_STORE_LAYOUT.imagesFolder,
+  };
+}
+
+/**
+ * Where a document's Doppler output lives in object storage: Doppler's own folder layout under one prefix,
+ * `<artifact root>/doppler/<document id>/`, so a plain download of the folder is the conversion as Doppler wrote it.
+ *
+ *     document.md                          the Markdown exactly as Doppler wrote it (links `images/page-NNNN/...`)
+ *     source.json                          {sourceKey, sha256, pageCount, mimeType}: a pointer, never served
+ *     index.json                           DocSlurp's figure index (the `doppler-figures` slot)
+ *     images/manifest.json                 the validated manifest bytes, unchanged
+ *     images/page-facts.jsonl              doppler-page-facts/1 lines, when the provider returned them
+ *     images/page-NNNN/image-MMM.<ext>     pictures and page scans
+ *     images/page-NNNN/figure-KKK.<ext>    vector figures
+ *
+ * `images/` is the `--images-link-prefix` the host asks for, so every link of `document.md` resolves inside the folder
+ * with no rewriting, and `images/` (manifest plus page folders) is exactly the DIR `pdftomarkdown --images-resume` takes.
+ */
+export const DOPPLER_STORE_LAYOUT = {
+  folder: "doppler",
+  imagesFolder: "images/",
+  markdown: "document.md",
+  source: "source.json",
+  index: "index.json",
+  manifest: "manifest.json",
+  pageFacts: "page-facts.jsonl",
+} as const;
+
+const DOCUMENT_ID_SEGMENT = /^[A-Za-z0-9-]{1,64}$/;
+
+/** `<artifact root>/doppler/<document id>/`: the document's Doppler folder (with the trailing slash). */
+export function dopplerDocumentPrefix(artifactRoot: string, documentId: string): string {
+  if (typeof artifactRoot !== "string" || artifactRoot === "" || artifactRoot.startsWith("/") || artifactRoot.endsWith("/") ||
+      artifactRoot.split("/").some((segment) => segment === "" || segment === "." || segment === "..")) {
+    throw new Error("Invalid artifact root for a Doppler folder");
+  }
+  if (!DOCUMENT_ID_SEGMENT.test(documentId)) throw new Error("Invalid document id for a Doppler folder");
+  return `${artifactRoot}/${DOPPLER_STORE_LAYOUT.folder}/${documentId}/`;
+}
+
+/** The storage key of the file an image owns: the document's images folder plus its derived path. */
+export function dopplerAssetStorageKey(artifactRoot: string, documentId: string, ownerId: string, format: DopplerFigureFormat): string {
+  const relative = dopplerAssetPath(ownerId, format);
+  if (!relative) throw new Error("Invalid Doppler image id or format");
+  return `${dopplerDocumentPrefix(artifactRoot, documentId)}${DOPPLER_STORE_LAYOUT.imagesFolder}${relative}`;
+}
 
 export const DOPPLER_ASSET_KINDS = ["picture", "mask", "vector"] as const;
 export type DopplerAssetKind = (typeof DOPPLER_ASSET_KINDS)[number];
@@ -53,6 +205,8 @@ export const DOPPLER_ASSET_REASONS = [
 ] as const;
 export const DOPPLER_LEDGER_REASONS = [...DOPPLER_ASSET_REASONS, "other"] as const;
 export type DopplerLedgerReason = (typeof DOPPLER_LEDGER_REASONS)[number];
+/** The reasons that mean the image's batch (or the document) stopped, not anything about the image. */
+export const DOPPLER_BATCH_REASONS = ["budget", "doc_budget", "timeout", "deadline", "renderer", "aborted"] as const;
 /** The reasons a later `--images-resume` retries: the batch stopped, nothing about the image. */
 export const DOPPLER_RESUMABLE_REASONS = ["budget", "doc_budget", "timeout", "deadline", "aborted"] as const;
 
@@ -98,13 +252,13 @@ const pageNumber = z.number().int().min(1).max(1_000_000_000);
 const coordinate = z.number().finite().min(-1e9).max(1e9);
 const side = z.number().int().min(0).max(DOPPLER_FIGURE_LIMITS.maxSide);
 
-export const dopplerManifestV2EntrySchema = z.strictObject({
+const entryShape = {
   id: z.string().regex(DOPPLER_FIGURE_ID),
   page: pageNumber,
   bbox: z.tuple([coordinate, coordinate, coordinate, coordinate]),
   kind: z.enum(DOPPLER_ASSET_KINDS),
   fate: z.enum(DOPPLER_ASSET_FATES),
-  obj: z.tuple([count, count]).nullable(),
+  obj: z.tuple([z.number().int().min(0).max(2_147_483_647), z.number().int().min(0).max(65_535)]).nullable(),
   path: z.string().max(64).regex(DOPPLER_ASSET_PATH).nullable(),
   link: z.string().max(DOPPLER_MANIFEST_V2_LIMITS.maxLinkPrefixBytes + 64).nullable(),
   status: z.enum(DOPPLER_ASSET_STATUSES),
@@ -115,12 +269,16 @@ export const dopplerManifestV2EntrySchema = z.strictObject({
   repeat_of: z.string().regex(DOPPLER_FIGURE_ID).optional(),
   format: z.enum(DOPPLER_FIGURE_FORMATS).nullable(),
   source: z.enum(DOPPLER_ASSET_SOURCES).nullable(),
-  bytes: z.number().int().min(0).max(DOPPLER_FIGURE_LIMITS.maxFileBytes),
+  bytes: z.number().int().min(0).max(DOPPLER_MANIFEST_V2_LIMITS.maxScanFileBytes),
   sha256: z.string().regex(SHA256).nullable(),
   width: side,
   height: side,
   fallback: z.enum(DOPPLER_ASSET_FALLBACKS).optional(),
-}).superRefine((entry, ctx) => {
+};
+type EntryFields = z.infer<z.ZodObject<typeof entryShape>>;
+
+/** The rules every manifest entry obeys on its own (version 2 `images[]` and version 3 `image` lines). */
+function refineEntry(entry: EntryFields, ctx: z.RefinementCtx): void {
   const issue = (message: string) => ctx.addIssue({ code: "custom", message });
   const id = parseDopplerFigureId(entry.id);
   if (!id || id.pageNumber !== entry.page) issue("image id does not match its page");
@@ -129,8 +287,8 @@ export const dopplerManifestV2EntrySchema = z.strictObject({
   if (entry.status === "unlinked") {
     if (entry.path !== null || entry.link !== null) issue("an unlinked image has a path");
   } else {
-    // A linked image's path is derived from its own id or, for a repeat, the id whose path it shares; nothing else.
-    const owners = entry.repeat_of ? [entry.id, entry.repeat_of] : [entry.id];
+    // A linked image's path is derived from its own id or, for a repeat without a file, the id whose path it shares.
+    const owners = entry.repeat_of && entry.status !== "extracted" ? [entry.id, entry.repeat_of] : [entry.id];
     if (entry.path === null || entry.format === null || !owners.some((owner) => dopplerAssetPath(owner, entry.format!) === entry.path)) {
       issue("image path is not derived from its id");
     }
@@ -147,8 +305,26 @@ export const dopplerManifestV2EntrySchema = z.strictObject({
     issue("an image without a file reports file details");
   }
   if ((entry.source === "copy" || entry.source === "decode") && entry.fate !== "page-scan") issue("only page scans are copied or decoded");
-});
+  // A decoded scan is re-encoded (WebP or PNG); only a copy keeps the PDF's JPEG stream.
+  if (entry.source === "decode" && entry.format === "jpg") issue("a decoded scan is never a JPEG");
+  if (entry.bytes > dopplerEntryFileCap(entry, ABSOLUTE_FILE_CAPS)) issue("image file over its size limit");
+}
+
+export const dopplerManifestV2EntrySchema = z.strictObject(entryShape).superRefine(refineEntry);
 export type DopplerManifestV2Entry = z.infer<typeof dopplerManifestV2EntrySchema>;
+
+const batchShape = {
+  pages: z.tuple([pageNumber, pageNumber]),
+  status: z.enum(DOPPLER_BATCH_STATUSES),
+  cut_page: pageNumber.optional(),
+};
+const batchInOrder = (batch: { pages: [number, number]; cut_page?: number | null }) => batch.pages[0] <= batch.pages[1] &&
+  (batch.cut_page == null || (batch.cut_page >= batch.pages[0] && batch.cut_page <= batch.pages[1]));
+const totalsSchema = z.strictObject({
+  images: count, linked: count, extracted: count, not_extracted: count, unlinked: count, bytes: count, repeats: count,
+  fallbacks: count, scans: count, scan_bytes: count, batches: count, batches_cut: count,
+});
+type DopplerTotals = z.infer<typeof totalsSchema>;
 
 export const dopplerManifestV2Schema = z.strictObject({
   version: z.literal(2),
@@ -166,47 +342,54 @@ export const dopplerManifestV2Schema = z.strictObject({
   batch_pages: z.number().int().min(1).max(1_000_000_000),
   deadline_ms: z.number().int().min(0).max(24 * 3_600_000),
   complete: z.boolean(),
-  batches: z.array(z.strictObject({
-    pages: z.tuple([pageNumber, pageNumber]),
-    status: z.enum(DOPPLER_BATCH_STATUSES),
-    cut_page: pageNumber.optional(),
-  }).refine((batch) => batch.pages[0] <= batch.pages[1] &&
-      (batch.cut_page === undefined || (batch.cut_page >= batch.pages[0] && batch.cut_page <= batch.pages[1])), "batch pages out of order"))
-    .max(DOPPLER_MANIFEST_V2_LIMITS.maxBatches),
-  images: z.array(dopplerManifestV2EntrySchema).max(DOPPLER_MANIFEST_V2_LIMITS.maxEntries),
-  totals: z.strictObject({
-    images: count, linked: count, extracted: count, not_extracted: count, unlinked: count, bytes: count, repeats: count,
-    fallbacks: count, scans: count, scan_bytes: count, batches: count, batches_cut: count,
-  }),
+  batches: z.array(z.strictObject(batchShape).refine(batchInOrder, "batch pages out of order")).max(DOPPLER_MANIFEST_V2_LIMITS.maxBatches),
+  images: z.array(dopplerManifestV2EntrySchema).max(DOPPLER_MANIFEST_V2_LIMITS.maxV2Entries),
+  totals: totalsSchema,
 }).superRefine((manifest, ctx) => {
   const issue = (message: string) => ctx.addIssue({ code: "custom", message });
-  const ids = new Set<string>();
+  const byId = new Map<string, DopplerManifestV2Entry>();
   const filePaths = new Set<string>();
-  let files = 0;
-  let bytes = 0;
+  const sum = { files: 0, bytes: 0, linked: 0, repeats: 0, fallbacks: 0, scans: 0, scanBytes: 0, extracted: 0, notExtracted: 0, unlinked: 0 };
   for (const entry of manifest.images) {
-    if (ids.has(entry.id)) issue("duplicate image id");
-    ids.add(entry.id);
+    if (byId.has(entry.id)) issue("duplicate image id");
+    byId.set(entry.id, entry);
     if (entry.link !== null && entry.path !== null && entry.link !== `${manifest.link_prefix}${entry.path}`) issue("link is not the prefix and the path");
+    if (entry.path !== null) sum.linked += 1;
+    if (entry.reason === "repeat") sum.repeats += 1;
+    if (entry.fallback !== undefined) sum.fallbacks += 1;
     if (entry.status === "extracted") {
       // One file per path: a repeat links to its first placement's path and has no file of its own.
       if (filePaths.has(entry.path!)) issue("two images own one file");
       filePaths.add(entry.path!);
-      files += 1;
-      bytes += entry.bytes;
-    }
+      sum.extracted += 1;
+      sum.bytes += entry.bytes;
+      if (entry.fate === "page-scan") { sum.scans += 1; sum.scanBytes += entry.bytes; }
+    } else if (entry.status === "not-extracted") sum.notExtracted += 1;
+    else sum.unlinked += 1;
   }
   for (const entry of manifest.images) {
-    if (entry.repeat_of !== undefined && !ids.has(entry.repeat_of)) issue("repeat_of names no image");
+    if (entry.repeat_of === undefined) continue;
+    const target = byId.get(entry.repeat_of);
+    // A repeat names an image of this manifest that is not itself a repeat (no chains, so no cycles), and shares its path.
+    if (!target) issue("repeat_of names no image");
+    else if (target.repeat_of !== undefined) issue("repeat_of names a repeat");
   }
-  if (files > DOPPLER_FIGURE_LIMITS.maxFiles) issue("too many image files");
-  if (bytes > DOPPLER_FIGURE_LIMITS.maxTotalBytes) issue("image files exceed their total limit");
+  if (sum.extracted > DOPPLER_MANIFEST_V2_LIMITS.maxFiles) issue("too many image files");
+  if (sum.bytes > DOPPLER_MANIFEST_V2_LIMITS.maxTotalBytes) issue("image files exceed their total limit");
   if (manifest.resumable !== manifest.images.some((entry) => entry.resumable === true)) issue("resumable disagrees with the images");
-  if (manifest.complete && manifest.resumable) issue("a complete manifest has nothing to resume");
-  const counted = (status: DopplerAssetStatus) => manifest.images.filter((entry) => entry.status === status).length;
+  if (manifest.complete) {
+    // Complete: every batch finished and no image was left by a stopped batch.
+    if (manifest.resumable) issue("a complete manifest has nothing to resume");
+    if (manifest.batches.some((batch) => batch.status !== "ok")) issue("a complete manifest has a stopped batch");
+    if (manifest.images.some((entry) => entry.reason !== undefined && (DOPPLER_BATCH_REASONS as readonly string[]).includes(entry.reason))) {
+      issue("a complete manifest has images a stopped batch left");
+    }
+  }
   const totals = manifest.totals;
-  if (totals.images !== manifest.images.length || totals.extracted !== counted("extracted") ||
-      totals.not_extracted !== counted("not-extracted") || totals.unlinked !== counted("unlinked") || totals.batches !== manifest.batches.length) {
+  if (totals.images !== manifest.images.length || totals.extracted !== sum.extracted || totals.not_extracted !== sum.notExtracted ||
+      totals.unlinked !== sum.unlinked || totals.batches !== manifest.batches.length || totals.linked !== sum.linked ||
+      totals.bytes !== sum.bytes || totals.repeats !== sum.repeats || totals.fallbacks !== sum.fallbacks || totals.scans !== sum.scans ||
+      totals.scan_bytes !== sum.scanBytes || totals.batches_cut !== manifest.batches.filter((batch) => batch.status !== "ok").length) {
     issue("totals disagree with the images");
   }
 });
@@ -226,6 +409,242 @@ export function parseDopplerManifest(json: unknown): DopplerManifest | null {
   return parsed.success ? { version: 1, manifest: parsed.data } : null;
 }
 
+// ---- Version 3: manifest.jsonl (`doppler-images/3`), read line by line ----
+
+export const DOPPLER_IMAGES_V3_SCHEMA = "doppler-images/3";
+export const DOPPLER_MANIFEST_V3_FILE = "manifest.jsonl";
+/** Each line is one ASCII JSON object of at most this many bytes, `\n` included. */
+export const DOPPLER_MANIFEST_V3_LINE_BYTES = 64 * 1024;
+
+export const dopplerManifestV3HeaderSchema = z.strictObject({
+  type: z.literal("header"),
+  schema: z.literal(DOPPLER_IMAGES_V3_SCHEMA),
+  source_sha256: z.string().regex(SHA256),
+  settings_sha256: z.string().regex(SHA256),
+  link_prefix: z.string().max(DOPPLER_MANIFEST_V2_LIMITS.maxLinkPrefixBytes).refine(isDopplerLinkPrefix, "invalid link prefix"),
+  /** `--images-pages A-B`, or null for every converted page. */
+  pages: z.tuple([pageNumber, pageNumber]).refine(([a, b]) => a <= b, "pages out of order").nullable(),
+  dpi: z.number().int().min(1).max(4800),
+  min_side_pt: z.number().finite().min(0).max(1e6),
+  repeats: z.enum(["skip", "link", "keep"]),
+  scan_pages: z.enum(["image", "skip", "render"]),
+  scan_dpi: z.number().int().min(1).max(4800),
+  scan_max_dpi: z.number().int().min(1).max(4800),
+  batch_pages: z.number().int().min(1).max(1_000_000_000),
+  deadline_ms: z.number().int().min(0).max(24 * 3_600_000),
+  resumes: z.number().int().min(0).max(1_000_000),
+});
+export type DopplerManifestV3Header = z.infer<typeof dopplerManifestV3HeaderSchema>;
+export const dopplerManifestV3ImageSchema = z.strictObject({ type: z.literal("image"), ...entryShape }).superRefine(refineEntry);
+/** Every batch line carries `cut_page` (null when the batch finished). */
+export const dopplerManifestV3BatchSchema = z.strictObject({ type: z.literal("batch"), ...batchShape, cut_page: pageNumber.nullable() })
+  .refine(batchInOrder, "batch pages out of order");
+export const dopplerManifestV3EndSchema = z.strictObject({
+  type: z.literal("end"),
+  complete: z.boolean(),
+  resumable: z.boolean(),
+  totals: totalsSchema,
+  images: count,
+  batches: count,
+  /** SHA-256 of every byte before this line. */
+  sha256: z.string().regex(SHA256),
+});
+
+/** Why a version 3 manifest was refused: a fixed rule name, never anything read from it. */
+export class DopplerManifestV3Error extends Error {
+  constructor(readonly rule: string) {
+    super(`Doppler manifest refused: ${rule}`);
+    this.name = "DopplerManifestV3Error";
+  }
+}
+
+/** An extracted image's file, as a version 3 line names it. */
+export interface DopplerManifestFileEntry { id: string; path: string; format: DopplerFigureFormat; bytes: number; sha256: string; fate: string; source: string | null }
+
+/** What a whole version 3 manifest says, once its end line checked out. */
+export interface DopplerManifestV3Summary {
+  header: DopplerManifestV3Header;
+  complete: boolean;
+  resumable: boolean;
+  images: number;
+  batches: number;
+  lastCutPage: number | null;
+}
+
+/** id order: page, then pictures before figures, then index. */
+function idOrderKey(id: string): [number, number, number] {
+  const parsed = parseDopplerFigureId(id)!;
+  return [parsed.pageNumber, parsed.vector ? 1 : 0, parsed.index];
+}
+function idBefore(a: [number, number, number], b: [number, number, number]): boolean {
+  return a[0] < b[0] || (a[0] === b[0] && (a[1] < b[1] || (a[1] === b[1] && a[2] < b[2])));
+}
+
+/**
+ * Validates a version 3 manifest one line at a time, in fixed memory apart from two id sets bounded by the entry cap
+ * (the images a later repeat may name, and which of them own a file). The caller reads the lines (each at most 64 KiB,
+ * ASCII), hashes every byte before the end line, and passes each line's text and, for the end line, that hash.
+ *
+ * Order is header, images (strictly in id order, so no id repeats), batches, end. Each image line is checked on its own
+ * (the v2 entry rules) and against what came before (its link is the header's prefix plus its path; a repeat names an
+ * earlier linked image that is not itself a repeat), and becomes one ledger row. The end line must agree with the lines:
+ * the counts, every total, `complete` and `resumable`, and the hash.
+ */
+export class DopplerManifestV3Validator {
+  private state: "header" | "images" | "batches" | "done" = "header";
+  private header: DopplerManifestV3Header | null = null;
+  private lines = 0;
+  private lastId: [number, number, number] | null = null;
+  private lastBatchEnd = 0;
+  private lastCutPage: number | null = null;
+  private readonly repeatTargets = new Set<string>();
+  private readonly withFile = new Set<string>();
+  private readonly sum = { images: 0, linked: 0, extracted: 0, notExtracted: 0, unlinked: 0, bytes: 0, repeats: 0, fallbacks: 0, scans: 0, scanBytes: 0, batches: 0, cut: 0 };
+  private anyResumable = false;
+  private anyBatchReason = false;
+  private summary: DopplerManifestV3Summary | null = null;
+
+  constructor(private readonly limits: { maxLines: number; maxPage: number }) {}
+
+  /** The header line, once it has been accepted. */
+  get headerLine(): DopplerManifestV3Header | null {
+    return this.header;
+  }
+
+  private fail(rule: string): never {
+    throw new DopplerManifestV3Error(rule);
+  }
+
+  private parse(text: string): Record<string, unknown> {
+    let value: unknown;
+    try { value = JSON.parse(text); } catch { this.fail("line-not-json"); }
+    if (!value || typeof value !== "object" || Array.isArray(value)) this.fail("line-not-object");
+    return value as Record<string, unknown>;
+  }
+
+  /**
+   * One line (without its `\n`). Returns the image's ledger row and, when it owns a file, the file it names; nothing for
+   * other lines. `precedingSha256` is required for the end line: the hash of every byte before it.
+   */
+  accept(text: string, precedingSha256?: string): { row: DocumentAsset; file: DopplerManifestFileEntry | null; error?: string } | null {
+    if (this.state === "done") this.fail("line-after-end");
+    this.lines += 1;
+    if (this.lines > this.limits.maxLines + 2) this.fail("too-many-lines");
+    const value = this.parse(text);
+    const type = value.type;
+    if (type === "header") {
+      if (this.state !== "header") this.fail("lines-out-of-order");
+      if (value.schema !== DOPPLER_IMAGES_V3_SCHEMA) this.fail("schema");
+      const parsed = dopplerManifestV3HeaderSchema.safeParse(value);
+      if (!parsed.success) this.fail("header-invalid");
+      this.header = parsed.data;
+      this.state = "images";
+      return null;
+    }
+    if (this.state === "header") this.fail("lines-out-of-order");
+    if (type === "image") return this.image(value);
+    if (type === "batch") {
+      if (this.state !== "images" && this.state !== "batches") this.fail("lines-out-of-order");
+      this.state = "batches";
+      const parsed = dopplerManifestV3BatchSchema.safeParse(value);
+      if (!parsed.success) this.fail("batch-invalid");
+      const batch = parsed.data;
+      // A batch is a page range of `batch_pages` (its end may pass the last page); batches come in page order.
+      if (batch.pages[0] <= this.lastBatchEnd || batch.pages[0] > this.limits.maxPage) this.fail("lines-out-of-order");
+      this.lastBatchEnd = batch.pages[1];
+      this.sum.batches += 1;
+      if (this.sum.batches > DOPPLER_MANIFEST_V2_LIMITS.maxBatches) this.fail("too-many-lines");
+      if (batch.status !== "ok") this.sum.cut += 1;
+      if (batch.cut_page != null) this.lastCutPage = batch.cut_page;
+      return null;
+    }
+    if (type === "end") {
+      const parsed = dopplerManifestV3EndSchema.safeParse(value);
+      if (!parsed.success) this.fail("end-invalid");
+      this.end(parsed.data, precedingSha256);
+      return null;
+    }
+    this.fail("unknown-line-type");
+  }
+
+  private image(value: Record<string, unknown>): { row: DocumentAsset; file: DopplerManifestFileEntry | null; error?: string } {
+    if (this.state !== "images") this.fail("lines-out-of-order");
+    const parsed = dopplerManifestV3ImageSchema.safeParse(value);
+    if (!parsed.success) this.fail("image-invalid");
+    const entry = parsed.data;
+    const header = this.header!;
+    if (entry.page > this.limits.maxPage) this.fail("page-outside-document");
+    const key = idOrderKey(entry.id);
+    if (this.lastId && !idBefore(this.lastId, key)) this.fail("lines-out-of-order");
+    this.lastId = key;
+    if (entry.link !== null && entry.path !== null && entry.link !== `${header.link_prefix}${entry.path}`) this.fail("image-invalid");
+    if (entry.repeat_of !== undefined) {
+      // A repeat names an earlier linked image that is not itself a repeat (no chains, no cycles, no forward names).
+      if (!this.repeatTargets.has(entry.repeat_of)) this.fail("repeat-invalid");
+    } else if (entry.path !== null) {
+      this.repeatTargets.add(entry.id);
+    }
+    const s = this.sum;
+    s.images += 1;
+    if (entry.path !== null) s.linked += 1;
+    if (entry.reason === "repeat") s.repeats += 1;
+    if (entry.fallback !== undefined) s.fallbacks += 1;
+    if (entry.resumable) this.anyResumable = true;
+    if (entry.reason !== undefined && (DOPPLER_BATCH_REASONS as readonly string[]).includes(entry.reason)) this.anyBatchReason = true;
+    let file: DopplerManifestFileEntry | null = null;
+    if (entry.status === "extracted") {
+      s.extracted += 1;
+      s.bytes += entry.bytes;
+      if (entry.fate === "page-scan") { s.scans += 1; s.scanBytes += entry.bytes; }
+      this.withFile.add(entry.id);
+      file = { id: entry.id, path: entry.path!, format: entry.format!, bytes: entry.bytes, sha256: entry.sha256!, fate: entry.fate, source: entry.source };
+    } else if (entry.status === "not-extracted") s.notExtracted += 1;
+    else s.unlinked += 1;
+    const fileOf = entry.status === "extracted" ? entry.id
+      : entry.repeat_of !== undefined && this.withFile.has(entry.repeat_of) ? entry.repeat_of : null;
+    const row: DocumentAsset = {
+      assetId: entry.id, pageNumber: entry.page, kind: entry.kind, fate: entry.fate, status: entry.status,
+      reason: entry.reason ?? null, resumable: entry.resumable === true, source: entry.source,
+      format: entry.status === "unlinked" ? null : entry.format,
+      bytes: entry.status === "extracted" ? entry.bytes : null, sha256: entry.sha256,
+      width: entry.status === "extracted" ? entry.width : null, height: entry.status === "extracted" ? entry.height : null,
+      repeatOf: entry.repeat_of ?? null, fallback: entry.fallback ?? null, linkPath: entry.link, fileOf, obj: entry.obj, bbox: entry.bbox,
+    };
+    return { row, file, ...(entry.error !== undefined ? { error: entry.error } : {}) };
+  }
+
+  private end(end: z.infer<typeof dopplerManifestV3EndSchema>, precedingSha256: string | undefined): void {
+    if (this.state !== "images" && this.state !== "batches") this.fail("lines-out-of-order");
+    if (!precedingSha256 || end.sha256 !== precedingSha256) this.fail("hash-mismatch");
+    const s = this.sum;
+    if (end.images !== s.images || end.batches !== s.batches) this.fail("counts-mismatch");
+    const t: DopplerTotals = end.totals;
+    if (t.images !== s.images || t.linked !== s.linked || t.extracted !== s.extracted || t.not_extracted !== s.notExtracted ||
+        t.unlinked !== s.unlinked || t.bytes !== s.bytes || t.repeats !== s.repeats || t.fallbacks !== s.fallbacks || t.scans !== s.scans ||
+        t.scan_bytes !== s.scanBytes || t.batches !== s.batches || t.batches_cut !== s.cut) {
+      this.fail("totals-mismatch");
+    }
+    if (end.resumable !== this.anyResumable) this.fail("resumable-mismatch");
+    if (end.complete && (end.resumable || s.cut > 0 || this.anyBatchReason)) this.fail("complete-mismatch");
+    this.state = "done";
+    this.summary = { header: this.header!, complete: end.complete, resumable: end.resumable, images: s.images, batches: s.batches, lastCutPage: this.lastCutPage };
+  }
+
+  /** The whole manifest's summary; throws when the end line never came (a truncated manifest). */
+  finish(): DopplerManifestV3Summary {
+    if (this.state !== "done" || !this.summary) this.fail("missing-end-line");
+    return this.summary;
+  }
+}
+
+/** The run facts of a version 3 manifest. */
+export function dopplerManifestV3RunFacts(summary: DopplerManifestV3Summary): DopplerManifestRunFacts {
+  return {
+    sourceSha256: summary.header.source_sha256, settingsSha256: summary.header.settings_sha256, manifestResumes: summary.header.resumes,
+    lastCutPage: summary.lastCutPage, deadlineMs: summary.header.deadline_ms, complete: summary.complete, resumable: summary.resumable,
+  };
+}
+
 // ---- Ledger rows ----
 
 /** One ledger row as the worker writes it: validated manifest fields only, never free text from the document. */
@@ -239,7 +658,7 @@ export const documentAssetSchema = z.strictObject({
   resumable: z.boolean(),
   source: z.enum(DOPPLER_ASSET_SOURCES).nullable(),
   format: z.enum(DOPPLER_FIGURE_FORMATS).nullable(),
-  bytes: z.number().int().min(1).max(DOPPLER_FIGURE_LIMITS.maxFileBytes).nullable(),
+  bytes: z.number().int().min(1).max(DOPPLER_MANIFEST_V2_LIMITS.maxScanFileBytes).nullable(),
   sha256: z.string().regex(SHA256).nullable(),
   width: z.number().int().min(1).max(DOPPLER_FIGURE_LIMITS.maxSide).nullable(),
   height: z.number().int().min(1).max(DOPPLER_FIGURE_LIMITS.maxSide).nullable(),
@@ -249,6 +668,10 @@ export const documentAssetSchema = z.strictObject({
   linkPath: z.string().max(DOPPLER_MANIFEST_V2_LIMITS.maxLinkPrefixBytes + 64).refine(isDopplerAssetLink, "invalid link").nullable(),
   /** The id whose stored file this image shows (itself when it owns one); null when no file shows it. */
   fileOf: z.string().regex(DOPPLER_FIGURE_ID).nullable(),
+  /** The image object (`[num, gen]`), when Doppler names it: with `sha256`, a key for repeats across runs. */
+  obj: z.tuple([z.number().int().min(0).max(2_147_483_647), z.number().int().min(0).max(65_535)]).nullable(),
+  /** Page points, y down, page rotation applied. */
+  bbox: z.tuple([coordinate, coordinate, coordinate, coordinate]).nullable(),
 }).superRefine((row, ctx) => {
   const issue = (message: string) => ctx.addIssue({ code: "custom", message });
   if ((row.status === "not-extracted") !== (row.reason !== null)) issue("reason goes with not-extracted");
@@ -258,14 +681,52 @@ export const documentAssetSchema = z.strictObject({
   }
   if (row.status !== "extracted" && (row.bytes !== null || row.sha256 !== null || row.source !== null)) issue("no file, no file details");
   if (row.status === "unlinked" && row.linkPath !== null) issue("an unlinked image has no link");
+  if (row.bytes !== null && row.bytes > dopplerEntryFileCap(row, ABSOLUTE_FILE_CAPS)) issue("image file over its size limit");
+  if (row.source === "decode" && row.format === "jpg") issue("a decoded scan is never a JPEG");
+  if ((row.source === "copy" || row.source === "decode") && row.fate !== "page-scan") issue("only page scans are copied or decoded");
 });
 export type DocumentAsset = z.infer<typeof documentAssetSchema>;
+
+const ROW_KEYS = new Set(["assetId", "pageNumber", "kind", "fate", "status", "reason", "resumable", "source", "format", "bytes", "sha256",
+  "width", "height", "repeatOf", "fallback", "linkPath", "fileOf", "obj", "bbox"]);
+const oneOf = (list: readonly string[], value: unknown, nullable: boolean) => (nullable && value === null) || (typeof value === "string" && list.includes(value));
+const intIn = (value: unknown, min: number, max: number, nullable: boolean) =>
+  (nullable && value === null) || (typeof value === "number" && Number.isSafeInteger(value) && value >= min && value <= max);
+const figureId = (value: unknown, nullable: boolean) => (nullable && value === null) || (typeof value === "string" && DOPPLER_FIGURE_ID.test(value));
+
+/**
+ * The same rules as `documentAssetSchema`, without zod's per-row cost (the writer re-checks every row of a ledger write,
+ * up to 65,536 of them): exact keys, closed vocabularies, bounded numbers, and the status rules.
+ */
+export function isDocumentAssetRow(row: unknown): row is DocumentAsset {
+  if (!row || typeof row !== "object" || Object.getPrototypeOf(row) !== Object.prototype) return false;
+  const r = row as Record<string, unknown>;
+  const keys = Object.keys(r);
+  if (keys.length !== ROW_KEYS.size || !keys.every((key) => ROW_KEYS.has(key))) return false;
+  if (!figureId(r.assetId, false) || !intIn(r.pageNumber, 1, 1_000_000_000, false) || !oneOf(DOPPLER_ASSET_KINDS, r.kind, false) ||
+      !oneOf(DOPPLER_LEDGER_FATES, r.fate, false) || !oneOf(DOPPLER_ASSET_STATUSES, r.status, false) || !oneOf(DOPPLER_LEDGER_REASONS, r.reason, true) ||
+      typeof r.resumable !== "boolean" || !oneOf(DOPPLER_ASSET_SOURCES, r.source, true) || !oneOf(DOPPLER_FIGURE_FORMATS, r.format, true) ||
+      !intIn(r.bytes, 1, DOPPLER_MANIFEST_V2_LIMITS.maxScanFileBytes, true) || !(r.sha256 === null || (typeof r.sha256 === "string" && SHA256.test(r.sha256))) ||
+      !intIn(r.width, 1, DOPPLER_FIGURE_LIMITS.maxSide, true) || !intIn(r.height, 1, DOPPLER_FIGURE_LIMITS.maxSide, true) ||
+      !figureId(r.repeatOf, true) || !oneOf(DOPPLER_LEDGER_FALLBACKS, r.fallback, true) || !figureId(r.fileOf, true)) return false;
+  if (r.linkPath !== null && (typeof r.linkPath !== "string" || r.linkPath.length > DOPPLER_MANIFEST_V2_LIMITS.maxLinkPrefixBytes + 64 || !isDopplerAssetLink(r.linkPath))) return false;
+  if (r.obj !== null && !(Array.isArray(r.obj) && r.obj.length === 2 && intIn(r.obj[0], 0, 2_147_483_647, false) && intIn(r.obj[1], 0, 65_535, false))) return false;
+  if (r.bbox !== null && !(Array.isArray(r.bbox) && r.bbox.length === 4 && r.bbox.every((v) => typeof v === "number" && Number.isFinite(v) && v >= -1e9 && v <= 1e9))) return false;
+  // The status rules (documentAssetSchema's superRefine).
+  if ((r.status === "not-extracted") !== (r.reason !== null)) return false;
+  if (r.resumable && r.status !== "not-extracted") return false;
+  if (r.status === "extracted" && (r.bytes === null || r.sha256 === null || r.format === null || r.fileOf !== r.assetId)) return false;
+  if (r.status !== "extracted" && (r.bytes !== null || r.sha256 !== null || r.source !== null)) return false;
+  if (r.status === "unlinked" && r.linkPath !== null) return false;
+  if (r.bytes !== null && (r.bytes as number) > dopplerEntryFileCap(r as { fate: string; source: string | null }, ABSOLUTE_FILE_CAPS)) return false;
+  if (r.source === "decode" && r.format === "jpg") return false;
+  if ((r.source === "copy" || r.source === "decode") && r.fate !== "page-scan") return false;
+  return true;
+}
 
 /** The text the PDF's Markdown is built from, and how far its images got. */
 export const DOCUMENT_IMAGES_STATUSES = ["none", "complete", "partial", "resumable", "failed", "disabled"] as const;
 export type DocumentImagesStatus = (typeof DOCUMENT_IMAGES_STATUSES)[number];
-export const DOCUMENT_FACTS_LEVELS = ["none", "basic", "full"] as const;
-export type DocumentFactsLevel = (typeof DOCUMENT_FACTS_LEVELS)[number];
 export const PAGE_TEXT_LAYERS = ["none", "invisible", "visible", "mixed"] as const;
 export const PAGE_SCAN_CLASSES = ["none", "single", "tiled", "layered"] as const;
 
@@ -276,7 +737,8 @@ export const DOPPLER_BUILD = /^[0-9A-Za-z][0-9A-Za-z._+-]{0,63}$/;
 export interface DopplerManifestRunFacts {
   sourceSha256: string | null;
   settingsSha256: string | null;
-  resumes: number;
+  /** What the manifest says (telemetry only: the ledger counts resumes itself). */
+  manifestResumes: number;
   lastCutPage: number | null;
   deadlineMs: number | null;
   complete: boolean;
@@ -309,19 +771,21 @@ export function dopplerLedgerAssets(parsed: DopplerManifest): DocumentAsset[] {
       width: entry.status === "extracted" ? entry.width : null, height: entry.status === "extracted" ? entry.height : null,
       repeatOf: entry.repeat_of ?? null, fallback: entry.fallback ?? null, linkPath: entry.link,
       fileOf: entry.status === "extracted" ? entry.id : entry.path !== null ? owner.get(entry.path) ?? null : null,
+      obj: entry.obj, bbox: entry.bbox,
     }));
   }
   return parsed.manifest.images.map((entry): DocumentAsset => {
     const base = {
       assetId: entry.id, pageNumber: entry.page, kind: entry.kind, fate: v1Fate(entry.fate), resumable: false, linkPath: null,
-      repeatOf: entry.repeat_of ?? null,
+      repeatOf: entry.repeat_of ?? null, obj: null, bbox: entry.bbox,
       fallback: entry.fallback === undefined || entry.fallback === false ? null
         : typeof entry.fallback === "string" && (DOPPLER_ASSET_FALLBACKS as readonly string[]).includes(entry.fallback)
           ? entry.fallback as DopplerLedgerFallback : "other",
     } as const;
     if (entry.file !== null) {
       return {
-        ...base, status: "extracted", reason: null, source: entry.format === "jpg" ? "copy" : "render", format: entry.format,
+        // Version 1 says nothing of how a file was made: only a page scan's JPEG is a copy of the PDF's stream.
+        ...base, status: "extracted", reason: null, source: entry.format === "jpg" && base.fate === "page-scan" ? "copy" : "render", format: entry.format,
         bytes: entry.bytes, sha256: entry.sha256, width: Math.ceil(entry.width ?? 0) || null, height: Math.ceil(entry.height ?? 0) || null,
         fileOf: entry.id,
       };
@@ -338,12 +802,12 @@ export function dopplerLedgerAssets(parsed: DopplerManifest): DocumentAsset[] {
 /** The run facts of a parsed manifest (version 1 has none beyond being complete). */
 export function dopplerManifestRunFacts(parsed: DopplerManifest): DopplerManifestRunFacts {
   if (parsed.version === 1) {
-    return { sourceSha256: null, settingsSha256: null, resumes: 0, lastCutPage: null, deadlineMs: null, complete: true, resumable: false };
+    return { sourceSha256: null, settingsSha256: null, manifestResumes: 0, lastCutPage: null, deadlineMs: null, complete: true, resumable: false };
   }
   const m = parsed.manifest;
   const cut = m.batches.filter((batch) => batch.cut_page !== undefined).at(-1)?.cut_page ?? null;
   return {
-    sourceSha256: m.source_sha256, settingsSha256: m.settings_sha256, resumes: m.resumes, lastCutPage: cut,
+    sourceSha256: m.source_sha256, settingsSha256: m.settings_sha256, manifestResumes: m.resumes, lastCutPage: cut,
     deadlineMs: m.deadline_ms, complete: m.complete, resumable: m.resumable,
   };
 }
@@ -361,17 +825,25 @@ export interface DocumentAssetCounts {
   bytes: number;
 }
 
+export function emptyDocumentAssetCounts(): DocumentAssetCounts {
+  return { total: 0, extracted: 0, notExtracted: 0, unlinked: 0, resumable: 0, sourceCopy: 0, sourceDecode: 0, sourceRender: 0, bytes: 0 };
+}
+
+/** Add one row to running counts (a streamed ledger write counts as it goes). */
+export function addDocumentAssetCount(counts: DocumentAssetCounts, row: Pick<DocumentAsset, "status" | "resumable" | "source" | "bytes">): void {
+  counts.total += 1;
+  if (row.status === "extracted") counts.extracted += 1;
+  else if (row.status === "not-extracted") counts.notExtracted += 1;
+  else counts.unlinked += 1;
+  if (row.resumable) counts.resumable += 1;
+  if (row.source === "copy") counts.sourceCopy += 1;
+  else if (row.source === "decode") counts.sourceDecode += 1;
+  else if (row.source === "render") counts.sourceRender += 1;
+  counts.bytes += row.bytes ?? 0;
+}
+
 export function documentAssetCounts(rows: readonly DocumentAsset[]): DocumentAssetCounts {
-  const counts: DocumentAssetCounts = { total: rows.length, extracted: 0, notExtracted: 0, unlinked: 0, resumable: 0, sourceCopy: 0, sourceDecode: 0, sourceRender: 0, bytes: 0 };
-  for (const row of rows) {
-    if (row.status === "extracted") counts.extracted += 1;
-    else if (row.status === "not-extracted") counts.notExtracted += 1;
-    else counts.unlinked += 1;
-    if (row.resumable) counts.resumable += 1;
-    if (row.source === "copy") counts.sourceCopy += 1;
-    else if (row.source === "decode") counts.sourceDecode += 1;
-    else if (row.source === "render") counts.sourceRender += 1;
-    counts.bytes += row.bytes ?? 0;
-  }
+  const counts = emptyDocumentAssetCounts();
+  for (const row of rows) addDocumentAssetCount(counts, row);
   return counts;
 }

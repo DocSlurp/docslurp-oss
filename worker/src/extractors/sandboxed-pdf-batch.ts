@@ -29,8 +29,11 @@ export interface SandboxedPdfBatchFile {
   bytes: number;
   /** Intake's page estimate: sizes the batch only, never bills. The measured count arrives on the text event. */
   estimatedPages: number;
-  /** An empty folder the host created for this file's figures, when the job asks for figures. */
-  figures?: { dir: string };
+  /**
+   * An empty folder the host created for this file's figures, when the job asks for figures, and the host's caps for
+   * this file as Doppler limits (SandboxedPdfJob.figures.limits): the provider passes them to `pdftomarkdown`.
+   */
+  figures?: { dir: string; limits?: import("@docslurp/shared").DopplerImageLimits };
 }
 
 export interface SandboxedPdfBatchOptions {

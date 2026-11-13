@@ -7,13 +7,21 @@ ALTER TABLE documents ADD COLUMN IF NOT EXISTS index_config_hash text;
 --> statement-breakpoint
 ALTER TABLE organizations ADD COLUMN IF NOT EXISTS retain_document_versions integer;
 --> statement-breakpoint
-ALTER TABLE organizations ADD CONSTRAINT organizations_retain_document_versions_check
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'organizations_retain_document_versions_check' AND conrelid = 'organizations'::regclass) THEN
+    ALTER TABLE organizations ADD CONSTRAINT organizations_retain_document_versions_check
   CHECK (retain_document_versions IS NULL OR retain_document_versions BETWEEN 1 AND 100);
+  END IF;
+END $idem$;
 --> statement-breakpoint
 ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS retain_document_versions integer;
 --> statement-breakpoint
-ALTER TABLE workspaces ADD CONSTRAINT workspaces_retain_document_versions_check
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'workspaces_retain_document_versions_check' AND conrelid = 'workspaces'::regclass) THEN
+    ALTER TABLE workspaces ADD CONSTRAINT workspaces_retain_document_versions_check
   CHECK (retain_document_versions IS NULL OR retain_document_versions BETWEEN 1 AND 100);
+  END IF;
+END $idem$;
 --> statement-breakpoint
 -- The retention sweep only revisits archived chains of an organization or workspace whose retention
 -- setting or plan changed (retention_changed_at) since it was last fully applied (retention_swept_at).
@@ -34,7 +42,7 @@ BEGIN
   RETURN NEW;
 END $$;
 --> statement-breakpoint
-CREATE TRIGGER organizations_retention_changed BEFORE UPDATE ON organizations
+CREATE OR REPLACE TRIGGER organizations_retention_changed BEFORE UPDATE ON organizations
   FOR EACH ROW EXECUTE FUNCTION docslurp_org_retention_changed();
 --> statement-breakpoint
 CREATE OR REPLACE FUNCTION docslurp_workspace_retention_changed() RETURNS trigger LANGUAGE plpgsql AS $$
@@ -45,7 +53,7 @@ BEGIN
   RETURN NEW;
 END $$;
 --> statement-breakpoint
-CREATE TRIGGER workspaces_retention_changed BEFORE UPDATE ON workspaces
+CREATE OR REPLACE TRIGGER workspaces_retention_changed BEFORE UPDATE ON workspaces
   FOR EACH ROW EXECUTE FUNCTION docslurp_workspace_retention_changed();
 --> statement-breakpoint
 -- {index_config_hash: IndexConfig} for every index config a live document in the workspace is built with
@@ -64,8 +72,12 @@ CREATE INDEX IF NOT EXISTS workspace_runs_job_id_idx ON workspace_runs (job_id) 
 -- Set on a document created by a re-index/full-index of this source version; it replaces the source without taking a retention slot.
 ALTER TABLE documents ADD COLUMN IF NOT EXISTS reindex_of text;
 --> statement-breakpoint
-ALTER TABLE workspace_runs ADD CONSTRAINT workspace_runs_blocked_reason_check
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'workspace_runs_blocked_reason_check' AND conrelid = 'workspace_runs'::regclass) THEN
+    ALTER TABLE workspace_runs ADD CONSTRAINT workspace_runs_blocked_reason_check
   CHECK (blocked_reason IS NULL OR blocked_reason IN ('credits', 'budget', 'policy'));
+  END IF;
+END $idem$;
 --> statement-breakpoint
 -- Mirrors documentVersionKey in packages/shared: "path:" + first 32 hex chars of
 -- sha256(workspaceId || E'\n' || normPath || '/' || normName), where each part is

@@ -141,8 +141,12 @@ UPDATE search_sessions SET metadata=(metadata-'workspaceId'-'workspaceIds')
   || CASE WHEN metadata ? 'workspaceIds' THEN jsonb_build_object('projectIds',metadata->'workspaceIds') ELSE '{}'::jsonb END
 WHERE metadata ?| ARRAY['workspaceId','workspaceIds'];
 --> statement-breakpoint
-ALTER TABLE documents DROP CONSTRAINT documents_dedup_scope_check;
-ALTER TABLE documents ADD CONSTRAINT documents_dedup_scope_check CHECK (dedup_scope IN ('project','org')) NOT VALID;
+ALTER TABLE documents DROP CONSTRAINT IF EXISTS documents_dedup_scope_check;
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'documents_dedup_scope_check' AND conrelid = 'documents'::regclass) THEN
+    ALTER TABLE documents ADD CONSTRAINT documents_dedup_scope_check CHECK (dedup_scope IN ('project','org')) NOT VALID;
+  END IF;
+END $idem$;
 UPDATE documents SET dedup_scope='project' WHERE dedup_scope='workspace';
 ALTER TABLE documents VALIDATE CONSTRAINT documents_dedup_scope_check;
 UPDATE project_runs SET pause_reason='project_budget_paused' WHERE pause_reason='workspace_budget_paused';

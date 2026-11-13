@@ -10,6 +10,7 @@ import { sweepExpiredSearchSessions } from "./search-history-expiry.js";
 import { sweepSpendPausedRuns } from "./spend-paused-runs.js";
 import { sweepExpiredCreditLeases } from "./billing/credit-leases.js";
 import { sweepStaleQueuedRuns } from "./stale-queued-runs.js";
+import { sweepProviderObservations } from "./provider-observations.js";
 import { resumeOrganizationDeletions } from "./tenant-offboarding.js";
 import { requestWebhookOutboxDrain } from "./webhooks.js";
 
@@ -52,6 +53,8 @@ const sweeps: Array<[name: string, run: () => Promise<unknown>]> = [
   ["feedback-retention", () => sweepFeedbackReports()],
   // Extract mode: settle finished extracts (charge, download, email) and delete expired ones.
   ["extracts", () => sweepExtracts()],
+  // Route tiers: OpenRouter endpoint prices and uptime every 15 min (DOCSLURP_PROVIDER_OBSERVATIONS=1).
+  ["provider-observations", () => sweepProviderObservations()],
   // Expired API-key search history (lean-logging.ts); result rows and diagnostics cascade.
   ["search-history-expiry", () => sweepExpiredSearchSessions()],
 ];

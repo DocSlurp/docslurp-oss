@@ -5,6 +5,10 @@
 -- storage artifacts while a document still reuses them.
 ALTER TABLE "documents" ADD COLUMN IF NOT EXISTS "reused_from_document_id" text;
 --> statement-breakpoint
-ALTER TABLE "documents" ADD CONSTRAINT "documents_reused_from_document_id_fkey" FOREIGN KEY ("reused_from_document_id") REFERENCES "public"."documents"("id") ON DELETE set null ON UPDATE no action;
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'documents_reused_from_document_id_fkey' AND conrelid = '"documents"'::regclass) THEN
+    ALTER TABLE "documents" ADD CONSTRAINT "documents_reused_from_document_id_fkey" FOREIGN KEY ("reused_from_document_id") REFERENCES "public"."documents"("id") ON DELETE set null ON UPDATE no action;
+  END IF;
+END $idem$;
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "documents_reused_from_document_id_idx" ON "documents" USING btree ("reused_from_document_id") WHERE "reused_from_document_id" IS NOT NULL;

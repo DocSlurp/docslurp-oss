@@ -1,8 +1,8 @@
 -- One $20 starter grant per account, shared by web and API onboarding.
-CREATE UNIQUE INDEX credit_ledger_starter_credit_user_idx
+CREATE UNIQUE INDEX IF NOT EXISTS credit_ledger_starter_credit_user_idx
   ON credit_ledger (user_id) WHERE reason = 'new-account-starter-credit';
 --> statement-breakpoint
-CREATE FUNCTION grant_new_account_starter_credit() RETURNS trigger
+CREATE OR REPLACE FUNCTION grant_new_account_starter_credit() RETURNS trigger
 LANGUAGE plpgsql AS $$
 DECLARE
   grant_id text;
@@ -26,7 +26,7 @@ BEGIN
 END;
 $$;
 --> statement-breakpoint
-CREATE TRIGGER organizations_starter_credit
+CREATE OR REPLACE TRIGGER organizations_starter_credit
 AFTER INSERT ON organizations
 FOR EACH ROW WHEN (NEW.is_personal AND NEW.personal_owner_user_id IS NOT NULL)
 EXECUTE FUNCTION grant_new_account_starter_credit();

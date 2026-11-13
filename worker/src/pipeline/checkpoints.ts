@@ -1,3 +1,4 @@
+import { disposePendingAssetLedger } from "../db/document-asset-ledger.js";
 import type { GeoFinalSource } from "../db/geo-final-source.js";
 import { recordExtractorFallback } from "../lib/extractor-fallback.js";
 import { reportException, initializeWorkerErrorReporting } from "@docslurp/shared/error-reporting";
@@ -235,6 +236,7 @@ export function needsDocumentProgressCheckpoint(state: WorkflowState, now = Date
   return state.usageLedger.pendingCount > 0
     || state.vectorIndexes.length > 0
     || state.pendingParserEvaluations.length > 0
+    || state.pendingAssetLedger.size > 0
     || now - state.lastProgressFlushAt >= DOCUMENT_PROGRESS_CHECKPOINT_MS;
 }
 
@@ -315,6 +317,14 @@ export async function runDocumentStage(
 
   const attemptsToTry = buildDocumentStageAttempts(options?.retryStrategies ?? []);
   let lastFailure: DocumentStageFailure | undefined;
+  // An attempt that does not complete leaves no asset ledger write behind (it describes output that was not kept).
+  const ledgerBefore = state.pendingAssetLedger.get(document.id);
+  const dropAttemptLedger = () => {
+    const attempted = state.pendingAssetLedger.get(document.id);
+    if (attempted && attempted !== ledgerBefore) void disposePendingAssetLedger(attempted);
+    if (ledgerBefore) state.pendingAssetLedger.set(document.id, ledgerBefore);
+    else state.pendingAssetLedger.delete(document.id);
+  };
 
   for (const attempt of attemptsToTry) {
     console.log(
@@ -395,6 +405,7 @@ export async function runDocumentStage(
           plausibilityScore: plausibilityDecision.plausibilityScore,
         });
         recordRetryCount(state, document.id, attempt.attempt);
+        dropAttemptLedger();
         // The rejected attempt's output must not be served by dedup, to this document's retry or to a copy of it.
         releaseDocumentHashes(state, document.id);
         // Its extractor did not serve the document: the ingest report shows the fallback.
@@ -429,6 +440,7 @@ export async function runDocumentStage(
       // A teardown failure (thrown or latched) is the worker's, not the Document's: never retried
       // with another strategy, never persisted as a Document failure, rethrown below.
       const error = latchedTeardownError() ?? caught;
+      dropAttemptLedger();
       initializeWorkerErrorReporting();
       reportException(error, { runId: state.run.id, documentId: document.id, stage: stageName });
       lastFailure = documentStageFailure(error);

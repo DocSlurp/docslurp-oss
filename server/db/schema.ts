@@ -2427,6 +2427,8 @@ export const projectRuns = pgTable(
       foreignColumns: [user.id],
       name: "project_runs_user_id_fkey",
     }).onDelete("cascade"),
+    // Migration 0141: the key ledger rows' composite run foreign keys reference.
+    unique("project_runs_tenant_scope").on(table.id, table.projectId, table.orgId),
   ],
 );
 
@@ -3566,7 +3568,7 @@ export const documentPageStates = pgTable(
 );
 
 /**
- * Document asset ledger (migration 0140, docs/extraction/doppler-figures.md "Asset ledger"): one row per image Doppler
+ * Document asset ledger (migration 0141, docs/extraction/doppler-figures.md "Asset ledger"): one row per image Doppler
  * reports for a document, extracted or not. Tenant scope is tied to the document by the composite foreign key on
  * documents (id, project_id, org_id); CHECK constraints (closed enums, bounds, status consistency) live in the migration.
  */
@@ -3593,6 +3595,9 @@ export const documentAssets = pgTable("document_assets", {
   linkPath: text("link_path"),
   fileOf: text("file_of"),
   storageKey: text("storage_key"),
+  objNum: integer("obj_num"),
+  objGen: integer("obj_gen"),
+  bbox: doublePrecision().array(),
   createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
 }, (table) => [
@@ -3603,24 +3608,30 @@ export const documentAssets = pgTable("document_assets", {
     name: "document_assets_document_scope_fkey",
   }).onDelete("cascade").onUpdate("cascade"),
   foreignKey({ columns: [table.orgId], foreignColumns: [organizations.id], name: "document_assets_org_id_fkey" }).onDelete("cascade"),
-  foreignKey({ columns: [table.runId], foreignColumns: [projectRuns.id], name: "document_assets_run_id_fkey" }).onDelete("set null"),
-  index("document_assets_org_document_idx").on(table.orgId, table.documentId),
+  // ON DELETE SET NULL (run_id) in the migration: only the run column is cleared, never the tenant columns.
+  foreignKey({
+    columns: [table.runId, table.projectId, table.orgId],
+    foreignColumns: [projectRuns.id, projectRuns.projectId, projectRuns.orgId],
+    name: "document_assets_run_scope_fkey",
+  }),
+  index("document_assets_org_document_idx").on(table.orgId, table.documentId, table.pageNumber, table.assetId),
   index("document_assets_resumable_idx").on(table.orgId, table.documentId).where(sql`resumable`),
   index("document_assets_run_idx").on(table.runId).where(sql`run_id IS NOT NULL`),
 ]);
 
-/** How far a document's text, page facts and images got (migration 0140); one row per document, written with its assets. */
+/** Whether a document's Markdown is committed and how far its images got (migration 0141); one row per document. */
 export const documentExtractionLevels = pgTable("document_extraction_levels", {
   documentId: text("document_id").primaryKey().notNull(),
   orgId: text("org_id").notNull(),
   projectId: text("project_id").notNull(),
   runId: text("run_id"),
   markdownComplete: boolean("markdown_complete").default(false).notNull(),
-  factsLevel: text("facts_level").default("none").notNull(),
   imagesStatus: text("images_status").default("none").notNull(),
   imagesExitCode: smallint("images_exit_code"),
   manifestVersion: smallint("manifest_version"),
   dopplerBuild: text("doppler_build"),
+  manifestKey: text("manifest_key"),
+  manifestSha256: text("manifest_sha256"),
   sourceSha256: text("source_sha256"),
   settingsSha256: text("settings_sha256"),
   resumes: integer().default(0).notNull(),
@@ -3643,9 +3654,14 @@ export const documentExtractionLevels = pgTable("document_extraction_levels", {
     name: "document_extraction_levels_document_scope_fkey",
   }).onDelete("cascade").onUpdate("cascade"),
   foreignKey({ columns: [table.orgId], foreignColumns: [organizations.id], name: "document_extraction_levels_org_id_fkey" }).onDelete("cascade"),
-  foreignKey({ columns: [table.runId], foreignColumns: [projectRuns.id], name: "document_extraction_levels_run_id_fkey" }).onDelete("set null"),
+  foreignKey({
+    columns: [table.runId, table.projectId, table.orgId],
+    foreignColumns: [projectRuns.id, projectRuns.projectId, projectRuns.orgId],
+    name: "document_extraction_levels_run_scope_fkey",
+  }),
   index("document_extraction_levels_resumable_idx").on(table.orgId, table.updatedAt, table.documentId).where(sql`images_status = 'resumable'`),
   index("document_extraction_levels_org_idx").on(table.orgId, table.projectId),
+  index("document_extraction_levels_run_idx").on(table.runId).where(sql`run_id IS NOT NULL`),
 ]);
 
 export const documentMaps = pgTable(

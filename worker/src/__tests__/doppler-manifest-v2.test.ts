@@ -1,10 +1,17 @@
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { link, mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { DOPPLER_MANIFEST_V2_LIMITS, dopplerLedgerAssets, dopplerManifestV2Schema, parseDopplerManifest } from "@docslurp/shared";
+import { dopplerAssetCaps, dopplerImageLimits, dopplerLedgerAssets, dopplerManifestV2Schema, parseDopplerManifest } from "@docslurp/shared";
 
-import { DopplerFigureRejection, readDopplerFigureDir, storeDopplerFigures } from "../extractors/doppler-figures.js";
+import { DopplerFigureRejection, readDopplerFigureDir, readLedgerSpill, storeDopplerFigures, type DopplerFigureSet } from "../extractors/doppler-figures.js";
+
+async function rowsOf(set: DopplerFigureSet) {
+  const rows = [];
+  for await (const row of readLedgerSpill(set.ledger.spill)) rows.push(row);
+  return rows;
+}
 import { v2Manifest, writeV2Folder, type V2Manifest } from "../test/doppler-manifest-v2.js";
 
 const DOC = { id: "0b6f7e8c-3c1a-4f7e-9a51-2a1d3e4f5a6b", userId: "user-1", runId: "run-1" };
@@ -17,12 +24,13 @@ beforeEach(async () => {
 });
 afterEach(async () => { await rm(work, { recursive: true, force: true }); });
 
-async function rule(mutate: (m: V2Manifest, files: Map<string, Buffer>) => unknown = () => undefined, options: { partial?: boolean; expect?: "complete" | "partial"; pageCount?: number } = {}): Promise<string> {
+async function rule(mutate: (m: V2Manifest, files: Map<string, Buffer>) => unknown = () => undefined, options: { partial?: boolean; expect?: "complete" | "partial"; pageCount?: number; sourceSha256?: string } = {}): Promise<string> {
   const { manifest, files } = v2Manifest({ partial: options.partial });
   const replaced = mutate(manifest, files);
+  await rm(dir, { recursive: true, force: true });
   await writeV2Folder(dir, replaced ?? manifest, files);
   try {
-    await readDopplerFigureDir(dir, { pageCount: options.pageCount ?? 3, expect: options.expect });
+    await readDopplerFigureDir(dir, { pageCount: options.pageCount ?? 3, expect: options.expect, sourceSha256: options.sourceSha256 });
   } catch (error) {
     if (error instanceof DopplerFigureRejection) return error.rule;
     throw error;
@@ -35,9 +43,9 @@ describe("manifest v2: the happy path", () => {
     const { manifest, files } = v2Manifest();
     await writeV2Folder(dir, manifest, files);
     const set = await readDopplerFigureDir(dir, { pageCount: 3, expect: "complete" });
-    expect(set.manifest.version).toBe(2);
+    expect(set.version).toBe(2);
     expect(set.files.map((file) => [file.id, file.format])).toEqual([["p1.1", "webp"], ["p1.g1", "svg"], ["p3.1", "jpg"]]);
-    expect(set.assets.map((a) => [a.assetId, a.status, a.reason, a.source, a.fileOf, a.linkPath])).toEqual([
+    expect((await rowsOf(set)).map((a) => [a.assetId, a.status, a.reason, a.source, a.fileOf, a.linkPath])).toEqual([
       ["p1.1", "extracted", null, "render", "p1.1", "images/page-0001/image-001.webp"],
       ["p1.g1", "extracted", null, "render", "p1.g1", "images/page-0001/figure-001.svg"],
       ["p2.1", "not-extracted", "repeat", null, "p1.1", "images/page-0001/image-001.webp"],
@@ -46,24 +54,63 @@ describe("manifest v2: the happy path", () => {
     ]);
   });
 
-  it("stores a version 2 file under a key derived from the id that owns it, not from its path", async () => {
+  it("stores Doppler's own folder layout under the document's tenant root, keys derived from the owning ids", async () => {
     const { manifest, files } = v2Manifest();
     await writeV2Folder(dir, manifest, files);
     const set = await readDopplerFigureDir(dir, { pageCount: 3 });
     const keys: string[] = [];
+    const json = new Map<string, unknown>();
+    const markdown = "A\n\n![image](images/page-0001/image-001.webp)\n";
+    const markdownPath = path.join(work, "document.md");
+    await writeFile(markdownPath, markdown);
     const stored = await storeDopplerFigures({
-      storage: { putBytes: async (key) => { keys.push(key); }, putJson: async () => {}, uri: (key) => `s3://b/${key}` },
-      document: DOC, runId: "run-1", figures: set, markdown: "![image](images/page-0001/image-001.webp)",
+      storage: { putBytes: async (key) => { keys.push(key); }, putJson: async (key, value) => { keys.push(key); json.set(key, value); }, uri: (key) => `s3://b/${key}` },
+      document: DOC, runId: "run-1", figures: set, markdown, dopplerMarkdownPath: markdownPath,
+      source: { sourceKey: "uploads/s1/a.pdf", sha256: "a".repeat(64), pageCount: 3, mimeType: "application/pdf" },
     });
-    const root = `user-1/run-1/doppler-figures/${DOC.id}`;
-    expect(keys).toEqual([`${root}/p1.1.webp`, `${root}/p1.g1.svg`, `${root}/p3.1.jpg`]);
-    expect([...stored.keys]).toEqual([["p1.1", `${root}/p1.1.webp`], ["p1.g1", `${root}/p1.g1.svg`], ["p3.1", `${root}/p3.1.jpg`]]);
+    const root = `user-1/run-1/doppler/${DOC.id}`;
+    // Every image file first; then the manifest, the Markdown and the source pointer; the index last.
+    expect(keys.slice(0, 3).sort()).toEqual([`${root}/images/page-0001/figure-001.svg`, `${root}/images/page-0001/image-001.webp`, `${root}/images/page-0003/image-001.jpg`]);
+    expect(keys.slice(3, 6).sort()).toEqual([`${root}/document.md`, `${root}/images/manifest.json`, `${root}/source.json`]);
+    expect(keys[6]).toBe(`${root}/index.json`);
+    // The ledger's link path and the storage key share one relative path under the folder.
+    for (const asset of (await rowsOf(set)).filter((a) => a.status === "extracted")) expect(stored.keys.get(asset.assetId)).toBe(`${root}/${asset.linkPath}`);
+    expect(stored.manifest).toEqual({ key: `${root}/images/manifest.json`, sha256: createHash("sha256").update(await readFile(path.join(dir, "manifest.json"))).digest("hex") });
+    expect(json.get(`${root}/source.json`)).toEqual({ sourceKey: "uploads/s1/a.pdf", sha256: "a".repeat(64), pageCount: 3, mimeType: "application/pdf" });
+    // Slots for every served object, none for the source pointer.
+    expect(stored.slots.map((s) => s.slot)).toEqual(["doppler-figures", "doppler-figure:p1.1", "doppler-figure:p1.g1", "doppler-figure:p3.1", "doppler-manifest", "doppler-markdown"]);
+    expect(stored.slots.some((s) => s.uri.endsWith("/source.json"))).toBe(false);
+  });
+
+  it("an extract run's own prefix is the root (documentArtifactRoot)", async () => {
+    const { manifest, files } = v2Manifest();
+    await writeV2Folder(dir, manifest, files);
+    const set = await readDopplerFigureDir(dir, { pageCount: 3 });
+    const stored = await storeDopplerFigures({
+      storage: { putBytes: async () => {}, putJson: async () => {}, uri: (key) => `s3://b/${key}` },
+      document: { ...DOC, artifactRoot: "extracts/org-1/ex-1" }, runId: "run-1", figures: set, markdown: "",
+    });
+    expect(stored.keys.get("p1.1")).toBe(`extracts/org-1/ex-1/doppler/${DOC.id}/images/page-0001/image-001.webp`);
+  });
+
+  it("stores page-facts.jsonl beside the manifest, with its own slot", async () => {
+    const { manifest, files } = v2Manifest();
+    await writeV2Folder(dir, manifest, files);
+    await writeFile(path.join(dir, "page-facts.jsonl"), '{"schema":"doppler-page-facts/1"}\n');
+    const set = await readDopplerFigureDir(dir, { pageCount: 3 });
+    const put = new Map<string, Buffer>();
+    const stored = await storeDopplerFigures({
+      storage: { putBytes: async (key, data) => { put.set(key, Buffer.from(data)); }, putJson: async () => {}, uri: (key) => `s3://b/${key}` },
+      document: DOC, runId: "run-1", figures: set, markdown: "",
+    });
+    expect(put.get(`user-1/run-1/doppler/${DOC.id}/images/page-facts.jsonl`)?.toString()).toBe('{"schema":"doppler-page-facts/1"}\n');
+    expect(stored.slots.find((s) => s.slot === "doppler-page-facts")?.uri).toBe(`s3://b/user-1/run-1/doppler/${DOC.id}/images/page-facts.jsonl`);
   });
 
   it("accepts a partial folder (exit 5) and keeps its resumable images", async () => {
     expect(await rule(() => undefined, { partial: true, expect: "partial" })).toBe("accepted");
     const set = await readDopplerFigureDir(dir, { pageCount: 3, expect: "partial" });
-    expect(set.assets.find((a) => a.assetId === "p3.2")).toMatchObject({ status: "not-extracted", reason: "budget", resumable: true, fileOf: null });
+    expect((await rowsOf(set)).find((a) => a.assetId === "p3.2")).toMatchObject({ status: "not-extracted", reason: "budget", resumable: true, fileOf: null });
   });
 
   it("refuses a provider outcome the manifest contradicts", async () => {
@@ -98,7 +145,26 @@ describe("manifest v2: hostile or oversized manifests are refused", () => {
     ["a negative byte count", (m) => { entry(m, "p2.2").bytes = -1; }],
     ["a long string", (m) => { entry(m, "p1.1").error = "x".repeat(10_000); }],
     ["a sha256 that is not hex", (m) => { entry(m, "p1.1").sha256 = "Z".repeat(64); }],
-    ["too many images", (m) => { m.images = Array.from({ length: DOPPLER_MANIFEST_V2_LIMITS.maxEntries + 1 }, (_, i) => ({ ...entry(m, "p2.2"), id: `p2.${i + 10}` })); }],
+    ["a complete manifest with a stopped batch", (m) => { m.batches[1]!.status = "timeout"; m.totals.batches_cut = 1; }],
+    ["a complete manifest with an image a stopped batch left", (m) => { Object.assign(entry(m, "p2.1"), { reason: "renderer", repeat_of: undefined }); m.totals.repeats = 0; }],
+    ["a decoded scan written as JPEG", (m) => { entry(m, "p3.1").source = "decode"; }],
+    ["a picture over 8 MiB", (m) => { entry(m, "p1.1").bytes = 9 * 1024 * 1024; }],
+    ["an extracted image at the path of the image it repeats", (m) => {
+      const e = entry(m, "p1.g1");
+      Object.assign(e, { kind: "vector", repeat_of: "p1.1", path: "page-0001/image-001.webp", link: "images/page-0001/image-001.webp" });
+    }],
+    ["a repeat of a repeat", (m) => {
+      m.images.push({ ...entry(m, "p2.1"), id: "p2.3" , repeat_of: "p2.1" });
+      m.totals.images += 1; m.totals.linked += 1; m.totals.not_extracted += 1; m.totals.repeats += 1;
+    }],
+    ["a repeat cycle", (m) => { entry(m, "p2.1").repeat_of = "p2.1"; }],
+    ["totals.bytes that disagree", (m) => { m.totals.bytes += 1; }],
+    ["totals.linked that disagree", (m) => { m.totals.linked += 1; }],
+    ["totals.repeats that disagree", (m) => { m.totals.repeats = 0; }],
+    ["totals.fallbacks that disagree", (m) => { m.totals.fallbacks = 0; }],
+    ["totals.scans that disagree", (m) => { m.totals.scans = 0; }],
+    ["totals.scan_bytes that disagree", (m) => { m.totals.scan_bytes += 1; }],
+    ["totals.batches_cut that disagree", (m) => { m.totals.batches_cut = 1; }],
     ["a page outside the document", (m) => { entry(m, "p2.2").page = 4; entry(m, "p2.2").id = "p4.2"; }],
   ];
   for (const [name, mutate] of cases) {
@@ -107,8 +173,27 @@ describe("manifest v2: hostile or oversized manifests are refused", () => {
     });
   }
 
-  it("refuses an oversized manifest before parsing it", async () => {
-    expect(await rule((m) => JSON.stringify(m) + " ".repeat(DOPPLER_MANIFEST_V2_LIMITS.maxManifestBytes))).toBe("oversized-file");
+  it("the cases above are each the only change: the unchanged fixture passes", async () => {
+    expect(await rule()).toBe("accepted");
+  });
+
+  it("refuses an oversized manifest before parsing it (the cap scales with the page count)", async () => {
+    expect(await rule((m) => JSON.stringify(m) + " ".repeat(dopplerAssetCaps(3).manifestBytes))).toBe("oversized-file");
+  });
+
+  it("refuses more entries than the document's cap", async () => {
+    const extra = dopplerAssetCaps(3).entries;
+    expect(await rule((m) => {
+      const base = entry(m, "p2.2");
+      for (let i = 0; i < extra; i += 1) m.images.push({ ...base, id: `p2.${i + 10}` });
+      m.totals.images += extra; m.totals.unlinked += extra;
+    })).toBe("too-many-entries");
+  });
+
+  it("refuses a link prefix other than the images/ folder the host asks for, and a manifest of another PDF", async () => {
+    expect(await rule((m) => { m.link_prefix = "img/"; for (const e of m.images) if (e.link) e.link = `img/${e.path}`; })).toBe("link-prefix");
+    expect(await rule(() => undefined, { sourceSha256: "c".repeat(64) })).toBe("source-mismatch");
+    expect(await rule(() => undefined, { sourceSha256: "a".repeat(64) })).toBe("accepted");
   });
 
   it("refuses files the manifest does not name, misplaced files, links and nesting", async () => {
@@ -130,6 +215,35 @@ describe("manifest v2: hostile or oversized manifests are refused", () => {
     await rm(path.join(dir, "page-0002"));
     await mkdir(path.join(dir, "page-0001", "deeper"));
     await expect(readDopplerFigureDir(dir, { pageCount: 3 })).rejects.toMatchObject({ rule: "unexpected-entry" });
+  });
+
+  it("refuses a hard link (a file with a second name, possibly outside the folder)", async () => {
+    const { manifest, files } = v2Manifest();
+    await writeV2Folder(dir, manifest, files);
+    await link(path.join(dir, "page-0001", "image-001.webp"), path.join(work, "outside.webp"));
+    await expect(readDopplerFigureDir(dir, { pageCount: 3 })).rejects.toMatchObject({ rule: "hard-link" });
+  });
+
+  it("refuses a page folder swapped for a symlink after the listing", async () => {
+    const { manifest, files } = v2Manifest();
+    await writeV2Folder(dir, manifest, files);
+    const hooks = {
+      afterListing: async () => {
+        // Same files, outside the folder: the reader must not follow the swapped name out of it.
+        await rename(path.join(dir, "page-0001"), path.join(work, "moved-page"));
+        await symlink(path.join(work, "moved-page"), path.join(dir, "page-0001"));
+      },
+    };
+    await expect(readDopplerFigureDir(dir, { pageCount: 3, hooks })).rejects.toBeInstanceOf(DopplerFigureRejection);
+  });
+
+  it("refuses a page folder with more entries than the file cap, without listing it whole", async () => {
+    const { manifest, files } = v2Manifest();
+    await writeV2Folder(dir, manifest, files);
+    const cap = dopplerAssetCaps(3).files;
+    await mkdir(path.join(dir, "page-0002"), { recursive: true });
+    for (let i = 0; i < cap + 5; i += 1) await writeFile(path.join(dir, "page-0002", `image-${String(i + 100).padStart(5, "0")}.webp`), "");
+    await expect(readDopplerFigureDir(dir, { pageCount: 3 })).rejects.toMatchObject({ rule: "too-many-files" });
   });
 
   it("refuses a file that is a symlink inside a page folder", async () => {
@@ -154,6 +268,7 @@ describe("version 1 maps into the ledger with what it has", () => {
         { id: "p3.g1", page: 3, bbox: [0, 0, 10, 10], kind: "vector", fate: "block", file: null, format: null, bytes: null, sha256: null, width: null, height: null, error: "pixels" },
         { id: "p3.2", page: 3, bbox: [0, 0, 10, 10], kind: "picture", fate: "mystery", file: null, format: null, bytes: null, sha256: null, width: null, height: null, skipped: "novel" },
         { id: "p4.1", page: 4, bbox: [0, 0, 10, 10], kind: "picture", fate: "page-scan", file: "p4.1.jpg", format: "jpg", bytes: 10, sha256: "d".repeat(64), width: 1700, height: 2200, fallback: "raster" },
+        { id: "p5.1", page: 5, bbox: [0, 0, 10, 10], kind: "picture", fate: "block", file: "p5.1.jpg", format: "jpg", bytes: 10, sha256: "e".repeat(64), width: 17, height: 22 },
       ],
     });
     expect(parsed?.version).toBe(1);
@@ -164,11 +279,64 @@ describe("version 1 maps into the ledger with what it has", () => {
       ["p3.g1", "block", "not-extracted", "error", null, null, null, null],
       ["p3.2", "other", "not-extracted", "other", null, null, null, null],
       ["p4.1", "page-scan", "extracted", null, "copy", "p4.1", "other", null],
+      // A version 1 JPEG is a copy of the PDF's stream only for a page scan.
+      ["p5.1", "block", "extracted", null, "render", "p5.1", null, null],
     ]);
   });
 
   it("the v2 schema is strict about its own version", () => {
     expect(dopplerManifestV2Schema.safeParse({ ...v2Manifest().manifest, version: 3 }).success).toBe(false);
     expect(parseDopplerManifest({ ...v2Manifest().manifest, version: "2" })).toBeNull();
+  });
+});
+
+describe("caps scale with the document (HIGH-1)", () => {
+  it("accepts a scanned book of about 1 MiB JPEG pages past the old fixed 64 MiB total", async () => {
+    const pages = 72;
+    const jpeg = (n: number) => { const b = Buffer.alloc(1024 * 1024 - 4096 + n, 7); b[0] = 0xff; b[1] = 0xd8; b[2] = 0xff; b[b.length - 2] = 0xff; b[b.length - 1] = 0xd9; return b; };
+    const files = new Map<string, Buffer>();
+    const images: Array<Record<string, unknown>> = [];
+    for (let page = 1; page <= pages; page += 1) {
+      const rel = `page-${String(page).padStart(4, "0")}/image-001.jpg`;
+      const bytes = jpeg(page);
+      files.set(rel, bytes);
+      images.push({ id: `p${page}.1`, page, bbox: [0, 0, 612, 792], kind: "picture", fate: "page-scan", obj: [page + 10, 0], path: rel, link: `images/${rel}`,
+        status: "extracted", format: "jpg", source: "copy", bytes: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex"), width: 1700, height: 2200 });
+    }
+    const total = [...files.values()].reduce((sum, b) => sum + b.length, 0);
+    expect(total).toBeGreaterThan(64 * 1024 * 1024);
+    const { manifest } = v2Manifest();
+    Object.assign(manifest, {
+      images, batches: [{ pages: [1, 64], status: "ok" }, { pages: [65, 72], status: "ok" }],
+      totals: { images: pages, linked: pages, extracted: pages, not_extracted: 0, unlinked: 0, bytes: total, repeats: 0, fallbacks: 0, scans: pages, scan_bytes: total, batches: 2, batches_cut: 0 },
+    });
+    await writeV2Folder(dir, manifest, files);
+    const set = await readDopplerFigureDir(dir, { pageCount: pages, expect: "complete" });
+    expect(set.files).toHaveLength(pages);
+    // The same folder for a 3-page document is over that document's caps.
+    await expect(readDopplerFigureDir(dir, { pageCount: 3 })).rejects.toBeInstanceOf(DopplerFigureRejection);
+  }, 60_000);
+
+  it("a copied page scan may pass 8 MiB (up to 64 MiB); a picture may not", async () => {
+    const big = Buffer.alloc(20 * 1024 * 1024, 1); big[0] = 0xff; big[1] = 0xd8; big[2] = 0xff; big[big.length - 2] = 0xff; big[big.length - 1] = 0xd9;
+    const sha = createHash("sha256").update(big).digest("hex");
+    expect(await rule((m, files) => {
+      files.set("page-0003/image-001.jpg", big);
+      const scan = m.images.find((e) => e.id === "p3.1")!;
+      m.totals.bytes += big.length - (scan.bytes as number); m.totals.scan_bytes = big.length;
+      Object.assign(scan, { bytes: big.length, sha256: sha });
+    })).toBe("accepted");
+  }, 30_000);
+
+  it("derives Doppler's flags from the same caps", () => {
+    const limits = dopplerImageLimits(500);
+    const caps = dopplerAssetCaps(500);
+    expect(limits.imagesDocMaxBytes).toBe(caps.totalBytes);
+    expect(limits.imagesMaxFileBytes).toBe(8 * 1024 * 1024);
+    expect(limits.linkPrefix).toBe("images/");
+    // Every batch at its budgets still fits the document's file cap.
+    const batches = Math.ceil(500 / limits.batchPages);
+    expect(batches * (limits.imagesMax + limits.scanMax)).toBeLessThanOrEqual(caps.files);
+    expect(dopplerAssetCaps(1_000_000)).toMatchObject({ files: 32_768, totalBytes: 4 * 1024 ** 3, entries: 131_072, manifestBytes: 16 * 1024 ** 2 });
   });
 });

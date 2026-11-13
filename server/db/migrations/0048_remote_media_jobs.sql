@@ -1,5 +1,5 @@
 -- Durable admission before any remote request. Ambiguous requests never auto-resubmit.
-CREATE TABLE remote_media_jobs (
+CREATE TABLE IF NOT EXISTS remote_media_jobs (
   id text PRIMARY KEY,
   request_key text NOT NULL UNIQUE,
   org_id text NOT NULL REFERENCES organizations(id),
@@ -18,6 +18,6 @@ CREATE TABLE remote_media_jobs (
   updated_at timestamptz NOT NULL DEFAULT now()
 );
 --> statement-breakpoint
-CREATE INDEX remote_media_jobs_admission_idx ON remote_media_jobs(status, created_at);
+CREATE INDEX IF NOT EXISTS remote_media_jobs_admission_idx ON remote_media_jobs(status, created_at);
 --> statement-breakpoint
-CREATE INDEX remote_media_jobs_run_idx ON remote_media_jobs(run_id);
+CREATE INDEX IF NOT EXISTS remote_media_jobs_run_idx ON remote_media_jobs(run_id);

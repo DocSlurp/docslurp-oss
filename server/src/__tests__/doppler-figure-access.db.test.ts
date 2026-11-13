@@ -10,9 +10,14 @@ let documents: typeof import("../services/documents.js");
 
 const DOC_A = "0b6f7e8c-3c1a-4f7e-9a51-2a1d3e4f5a6b";
 const DOC_B = "7d1c2b3a-4e5f-4a6b-8c9d-0e1f2a3b4c5d";
-const figureA = `s3://bucket/ua/ra/doppler-figures/${DOC_A}/p3.g2.svg`;
-const figureB = `s3://bucket/ub/rb/doppler-figures/${DOC_B}/p1.1.webp`;
-const unrecorded = `s3://bucket/ua/ra/doppler-figures/${DOC_A}/p9.1.webp`;
+// Doppler's folder layout: `<artifact root>/doppler/<document>/images/page-NNNN/(image|figure)-NNN.<ext>`.
+const figureA = `s3://bucket/ua/ra/doppler/${DOC_A}/images/page-0003/figure-002.svg`;
+const figureB = `s3://bucket/ub/rb/doppler/${DOC_B}/images/page-0001/image-001.webp`;
+const unrecorded = `s3://bucket/ua/ra/doppler/${DOC_A}/images/page-0009/image-001.webp`;
+const manifestA = `s3://bucket/ua/ra/doppler/${DOC_A}/images/manifest.json`;
+const factsA = `s3://bucket/ua/ra/doppler/${DOC_A}/images/page-facts.jsonl`;
+const markdownA = `s3://bucket/ua/ra/doppler/${DOC_A}/document.md`;
+const sourceA = `s3://bucket/ua/ra/doppler/${DOC_A}/source.json`;
 
 /**
  * Doppler figure files are authorized exactly like every other document artifact: by their exact URI in the document's
@@ -30,7 +35,10 @@ describe("Doppler figure access", () => {
     await sql`insert into org_memberships (org_id, user_id, role) values ('oa', 'ua', 'owner'), ('ob', 'ub', 'owner')`;
     await sql`insert into projects (id, org_id, user_id, name) values ('pa', 'oa', 'ua', 'A'), ('pb', 'ob', 'ub', 'B')`;
     await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, artifacts) values
-      ('ra', 'oa', 'ua', 'pa', 'bulk-upload', 'completed', 'completed', '{}', ${sql.json({ [`${DOC_A}:doppler-figure:p3.g2`]: figureA, [`${DOC_A}:doppler-figures`]: `s3://bucket/ua/ra/doppler-figures/${DOC_A}/index.json` })}),
+      ('ra', 'oa', 'ua', 'pa', 'bulk-upload', 'completed', 'completed', '{}', ${sql.json({
+        [`${DOC_A}:doppler-figure:p3.g2`]: figureA, [`${DOC_A}:doppler-figures`]: `s3://bucket/ua/ra/doppler/${DOC_A}/index.json`,
+        [`${DOC_A}:doppler-manifest`]: manifestA, [`${DOC_A}:doppler-page-facts`]: factsA, [`${DOC_A}:doppler-markdown`]: markdownA,
+      })}),
       ('rb', 'ob', 'ub', 'pb', 'bulk-upload', 'completed', 'completed', '{}', ${sql.json({ [`${DOC_B}:doppler-figure:p1.1`]: figureB })})`;
     await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status) values
       (${DOC_A}, 'oa', 'ua', 'pa', 'ra', 'a.pdf', 'application/pdf', 'ua/a.pdf', 'completed'),
@@ -63,5 +71,21 @@ describe("Doppler figure access", () => {
     expect(await documents.userCanAccessArtifactUri(figureA, "ua")).toBe(true);
     await sql`update documents set metadata = ${sql.json({ pii: { withheldArtifactUris: [figureA] } })} where id = ${DOC_A}`;
     expect(await documents.userCanAccessArtifactUri(figureA, "ua")).toBe(false);
+    await sql`update documents set metadata = '{}'::jsonb where id = ${DOC_A}`;
+  });
+
+  it("authorizes the folder's manifest, page facts and Markdown like the figures, and withholds them under the PII policy", async () => {
+    for (const uri of [manifestA, factsA, markdownA]) {
+      expect(await documents.userCanAccessArtifactUri(uri, "ua"), uri).toBe(true);
+      expect(await documents.userCanAccessArtifactUri(uri, "ub"), uri).toBe(false);
+      expect(await documents.userCanAccessArtifactUri(uri, "ua", "ob"), uri).toBe(false);
+    }
+    await sql`update documents set metadata = ${sql.json({ pii: { withheldArtifactUris: [manifestA, factsA, markdownA] } })} where id = ${DOC_A}`;
+    for (const uri of [manifestA, factsA, markdownA]) expect(await documents.userCanAccessArtifactUri(uri, "ua"), uri).toBe(false);
+    await sql`update documents set metadata = '{}'::jsonb where id = ${DOC_A}`;
+  });
+
+  it("never authorizes the source pointer, which no slot records", async () => {
+    expect(await documents.userCanAccessArtifactUri(sourceA, "ua")).toBe(false);
   });
 });

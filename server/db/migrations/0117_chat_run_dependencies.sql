@@ -1,5 +1,5 @@
 -- Links are observations of independently owned shared materialization work.
-CREATE TABLE chat_run_dependencies (
+CREATE TABLE IF NOT EXISTS chat_run_dependencies (
   id text PRIMARY KEY,
   operation_id text NOT NULL REFERENCES chat_operations(id) ON DELETE CASCADE,
   run_id text NOT NULL REFERENCES workspace_runs(id) ON DELETE CASCADE,
@@ -8,10 +8,10 @@ CREATE TABLE chat_run_dependencies (
   created_at timestamptz NOT NULL DEFAULT now(),
   UNIQUE(operation_id,run_id)
 );
-CREATE INDEX chat_run_dependencies_operation ON chat_run_dependencies(operation_id);
+CREATE INDEX IF NOT EXISTS chat_run_dependencies_operation ON chat_run_dependencies(operation_id);
 
 --> statement-breakpoint
-CREATE FUNCTION realtime_materialization_changed() RETURNS trigger LANGUAGE plpgsql AS $$
+CREATE OR REPLACE FUNCTION realtime_materialization_changed() RETURNS trigger LANGUAGE plpgsql AS $$
 DECLARE organization_id text;
 BEGIN
   SELECT org_id INTO organization_id FROM documents WHERE id=coalesce(NEW.document_id,OLD.document_id);
@@ -24,12 +24,12 @@ BEGIN
   RETURN NULL;
 END $$;
 --> statement-breakpoint
-CREATE TRIGGER realtime_changed AFTER INSERT OR UPDATE OR DELETE ON document_page_states
+CREATE OR REPLACE TRIGGER realtime_changed AFTER INSERT OR UPDATE OR DELETE ON document_page_states
 FOR EACH ROW EXECUTE FUNCTION realtime_materialization_changed();
 
 --> statement-breakpoint
 -- Shared jobs still consume active-tree admission until their bounded dependency settles.
-CREATE FUNCTION chat_root_has_active_dependencies(root text) RETURNS boolean LANGUAGE sql STABLE AS $$
+CREATE OR REPLACE FUNCTION chat_root_has_active_dependencies(root text) RETURNS boolean LANGUAGE sql STABLE AS $$
   SELECT EXISTS (
     SELECT 1 FROM chat_run_dependencies d JOIN chat_operations c ON c.id=d.operation_id
     JOIN workspace_runs r ON r.id=d.run_id
