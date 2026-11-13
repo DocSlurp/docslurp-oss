@@ -327,7 +327,7 @@ export function fromEnv(): Config {
     textGenerationProfile: textGenerationProfileSchema.optional().parse(readEnv(process.env.DOCSLURP_TEXT_PROFILE)),
     perplexityApiKey: process.env.PERPLEXITY_API_KEY ?? process.env.PERPLEXITYAI_API_KEY,
     openRouterApiKey:
-      process.env.OPENROUTER_API_KEY ?? process.env.OPENROUTER_KEY ?? "",
+      process.env.OPENROUTER_API_KEY ?? "",
     plausibilityWarningThreshold: Number.parseFloat(
       process.env.PLAUSIBILITY_WARNING_THRESHOLD ?? "0.3",
     ),
