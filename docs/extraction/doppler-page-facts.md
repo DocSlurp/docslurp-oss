@@ -76,7 +76,8 @@ export exactly as it was.
 
 **Candidates (`use` only, and only without a router plan, which owns chart labels when it exists).** A page or region is
 a candidate from its structure, not its words. Each candidate carries the cluster or image box as its crop, so the model
-reads crops, never whole pages:
+reads that crop; a facts candidate whose crop cannot be made is not read at all (never the whole page). A page whose
+CropBox differs from its MediaBox, or whose size is outside 1–14,400 pt, gets no facts boxes (unknown):
 
 | rule | stands alone | needs the keyword route on its page |
 |---|---|---|
@@ -85,7 +86,7 @@ reads crops, never whole pages:
 
 Never candidates: a page with `uncoveredRatio` below 0.3 (underlines, boxes around text, ruled tables), thin rule-like
 clusters, a scan page's images, and furniture: an image `obj` or a cluster box that recurs on at least 3 pages and 20% of
-the pages with facts (logos, headers, borders). At most 4 candidates a page, largest first. The keyword route
+the pages with facts (logos, headers, borders). At most 4 candidates a page, largest first, and 500 a document. The keyword route
 (`chart-or-figure`) stays a vote: alone it is still low confidence; a facts candidate on its page replaces its whole-page
 read with crops. The thresholds are general structure limits (`FACTS_CANDIDATE_RULES`), set from the contract's field
 meanings, not from any evaluation document.
@@ -93,12 +94,26 @@ meanings, not from any evaluation document.
 Known gap: Doppler clusters only curved or diagonal drawing, so an axis-aligned bar chart drawn only with rectangles has no
 cluster box to crop and is left to the other signals.
 
-**One read per repeated picture (`store` and `use`).** Before a model reads a crop or an image, candidates are grouped by
-the facts' image object number and the media map's content hash (sha256), transitively, within the document only. The first
-placement whose read the provider answers stands for the group; the other placements reuse its visual with no call and no
-charge. A read that failed before an answer, or a whole-page read, stands for nothing. Visual candidate stats count a group
+**One read per repeated picture (`store` and `use`; `off` turns it off).** Before a model reads a crop or an image,
+candidates are grouped by the facts' image object number and the media map's content hash (sha256), transitively, within
+the document only. An image-backed candidate (image routing, a router image inset) takes a facts `obj` only when its box
+and the image's agree to IoU 0.9, and never from a stencil mask, the page's scan image, or two objects in one place; a
+vector cluster or router region never takes one. Only a placement the facts show nothing drawn over shares a read: no
+figure cluster crossing its box and no text over images on its page (one base image under different data points or
+labels is different pictures). Without facts for its page a placement is never grouped, so a document without facts
+reads as before. The first placement whose read the provider answers stands for the
+group; the other placements reuse its visual with no call and no charge. A read that failed before an answer, or a
+whole-page read (a crop that failed), stands for nothing; a placement waiting for it reads for itself, within the read
+cap checked again after the wait. Visual candidate stats count a group
 once (so measured estimates price the reads that will be made), and the stage stats record
 `chartExport.dedupe: { groups, placements, readsAvoided }` and, with `use`, `chartExport.factsCandidates` per rule.
 
 Charges are per read made, as before: a reused placement has no answered call, so it is never charged. Nothing about the
 facts sizes a charge.
+
+Known limits: clusters cover curved and diagonal drawing only, so an axis-aligned overlay (rectangles drawn over a base
+image) is not seen; one image object drawn with different clips (sprites, crops of one large image) is treated as one picture;
+a reused `none` answer leaves a later placement's middling deterministic spec unused; and the same chart image on many
+pages counts as furniture for nomination (other signals still list it, and it is then read once). In `use`, standalone
+vector candidates are a new source of reads that a first estimate built on the per-page prior does not see until stats
+are recorded; the read cap per document still bounds them.

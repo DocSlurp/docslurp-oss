@@ -37,7 +37,7 @@ import { formatsFor } from "./config.js";
 import { toExtractionCharts } from "./contract.js";
 import { stripVisualGroups, visualBlock, wrapVisualGroup, type VisualGroupRef } from "./markdown.js";
 import { annotateImageObjects, candidatesFromPageFacts, chartFactsUse, loadChartFacts, type FactsCandidateResult } from "./facts-candidates.js";
-import { candidatesFromLegacyRoutes, candidatesFromMediaMap, candidatesFromPlan, guardedScopesFromPlan, placementMatch, type ChartExportSession } from "./session.js";
+import { candidatesFromLegacyRoutes, candidatesFromMediaMap, candidatesFromPlan, guardedScopesFromPlan, type ChartExportSession } from "./session.js";
 import { deterministicVisualExtractor, type DeterministicVisualResult, type VisualCandidate, type VisualImage } from "./types.js";
 
 export const CHART_EXPORT_ARTIFACT_SLOT = "chart-export";
@@ -160,7 +160,10 @@ export async function prepareChartExport(input: ChartExportPassInput): Promise<P
     factsCounts = nominated.counts;
   }
   session.addCandidates(legacy);
-  if (facts) annotateImageObjects(session.candidates, facts, placementMatch);
+  if (facts) {
+    annotateImageObjects(session.candidates, facts);
+    session.invalidateGroups();
+  }
   // A Doppler figure confirms a keyword page; read only when the document has a figure index and a keyword page.
   const figures = legacy.length > 0 || session.enabled
     ? await loadDopplerFigurePages(input.storage, input.ledger, document.id)
@@ -292,7 +295,9 @@ async function exportPending(input: ChartExportPassInput): Promise<void> {
           // No crop of the figure: the whole page is read, so the candidate is the page again (no digest, no pairing).
           if (!cropped && focused) candidate.bbox = null;
           // A placement that cannot be cropped falls back to the page, under the page cap.
-          image = cropped ?? (session.pageExportsLeft() ? image : null);
+          // A facts candidate was nominated for its crop alone: no crop, no read (never the whole page).
+          const factsNominated = candidate.detectedBy === "page-facts-vector" || candidate.detectedBy === "page-facts-image";
+          image = cropped ?? (!factsNominated && session.pageExportsLeft() ? image : null);
         }
         try {
           await session.exportWithImage(candidate, image, input.signal, { wholePage: Boolean(image) && !cropped });

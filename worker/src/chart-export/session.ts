@@ -31,6 +31,7 @@ import {
 import { exportVisual } from "./generator.js";
 import { newVisualMarkerNonce, visualBody, wrapVisualGroup } from "./markdown.js";
 import { selectGeneratorModel, type GeneratorSelection } from "./model-selection.js";
+import { chartFactsUse } from "./facts-candidates.js";
 import { buildVisualCandidateStats } from "./stats.js";
 import type {
   ChartExportCallRecord,
@@ -62,6 +63,8 @@ export interface ChartExportSessionInput {
   onModelRead?: (attempt: ChartExportAttempt) => void;
   /** This export's visual marker nonce (default: fresh random); tests pin it. */
   markerNonce?: string;
+  /** One read per repeated picture (default: on unless DOCSLURP_DOPPLER_PAGE_FACTS is `off`). */
+  dedupeRepeated?: boolean;
 }
 
 export interface RoutedExportResult {
@@ -301,11 +304,16 @@ export class ChartExportSession {
   private capLogged = false;
   /**
    * One model read per repeated picture (`asset`: the facts' image object or the media map's hash): the read made for a
-   * group, by group key. A placement of the same picture reuses it instead of reading (and paying) again.
+   * group, under every asset key of the group (so a group that grows later still finds it). A placement of the same
+   * picture reuses it instead of reading (and paying) again.
    */
   private readonly groupReads = new Map<string, Promise<GroupRead | null>>();
-  /** Groups whose read the provider answered (settled). */
+  /** Asset keys whose group read the provider answered (settled). */
   private readonly groupsRead = new Set<string>();
+  /** Asset key -> every key of its group (union-find over the candidates), rebuilt when candidates change. */
+  private groupIndex: Map<string, readonly string[]> | null = null;
+  /** Repeated-picture reuse is on (`dedupeRepeated`, default: page facts not `off`). */
+  private readonly dedupe: boolean;
   /** Placements served by another placement's read (no call, no charge). */
   private readsReused = 0;
   private readonly client: ChartModelClient | null;
@@ -314,6 +322,7 @@ export class ChartExportSession {
 
   constructor(private readonly input: ChartExportSessionInput) {
     this.markerNonce = input.markerNonce ?? newVisualMarkerNonce();
+    this.dedupe = input.dedupeRepeated ?? chartFactsUse().dedupe;
     this.limits = { ...DEFAULT_CHART_EXPORT_LIMITS, ...input.limits };
     this.runBudget = input.runBudget ?? { calls: 0 };
     const inner = input.client;
@@ -353,6 +362,7 @@ export class ChartExportSession {
    */
   addGuardedScopes(scopes: readonly VisualCandidate[]): void {
     this.guarded.push(...scopes);
+    this.invalidateGroups();
     for (let i = this.candidates.length - 1; i >= 0; i -= 1) {
       if (this.isGuarded(this.candidates[i]!)) this.candidates.splice(i, 1);
     }
@@ -365,6 +375,7 @@ export class ChartExportSession {
 
   /** Adds candidates, one per picture: a later signal for a picture already listed only fills in its kind. */
   addCandidates(candidates: readonly VisualCandidate[]): void {
+    this.invalidateGroups();
     for (const candidate of candidates) {
       if (this.isGuarded(candidate)) continue;
       const prior = this.candidates.find((c) => !isPageLevel(c) && !isPageLevel(candidate) ? sameVisual(c, candidate) : c.id === candidate.id);
@@ -384,6 +395,7 @@ export class ChartExportSession {
    * label, image routing) is represented by that candidate. The rest are low-confidence: counted, never exported.
    */
   resolveLegacyPages(signalPages: ReadonlySet<number>): void {
+    this.invalidateGroups();
     for (let i = this.candidates.length - 1; i >= 0; i -= 1) {
       const candidate = this.candidates[i]!;
       if (!isPageLevel(candidate)) continue;
@@ -527,32 +539,52 @@ export class ChartExportSession {
     if (this.attempted.has(candidate.id) || this.visuals.some((v) => v.id === candidate.id)) return null;
     this.attempted.add(candidate.id);
     // A confident free spec needs no image, so no model is reached and no page export is spent.
-    const modelImage = image && this.readsLeft() && this.canCallModel() ? image : null;
+    let modelImage = image && this.readsLeft() && this.canCallModel() ? image : null;
     const partial = this.claimPartial(candidate, wholePage && modelImage !== null);
     // A picture another placement already had read: reuse that read (unless a confident free spec makes this one free).
-    const group = partial && confidentPartial(partial) ? null : this.groupKey(candidate);
+    const keys = partial && confidentPartial(partial) ? [] : this.groupKeys(candidate);
+    let mine: Promise<GroupRead | null> | null = null;
     let settle: ((read: GroupRead | null) => void) | null = null;
-    if (group) {
-      const prior = this.groupReads.get(group);
-      const read = prior ? await prior : null;
-      if (read) return this.reuseRead(candidate, read);
+    if (keys.length > 0) {
+      // Wait for the group's read in flight; one that stood for nothing (no answer) leaves the next placement to read.
+      for (let prior = this.priorRead(keys); prior; prior = this.priorRead(keys)) {
+        const read = await prior;
+        if (read) return this.reuseRead(candidate, read);
+        if (this.priorRead(keys) === prior) break;
+      }
+      // Caps may have changed while waiting: decide again whether this placement can be read.
+      modelImage = image && this.readsLeft() && this.canCallModel() ? image : null;
       // Only a placement that will be read stands for its group (concurrent placements wait for it).
-      if (modelImage) this.groupReads.set(group, new Promise((resolve) => { settle = resolve; }));
+      if (modelImage) {
+        mine = new Promise((resolve) => { settle = resolve; });
+        for (const key of keys) this.groupReads.set(key, mine);
+      }
     }
     let outcome: GroupRead | null = null;
     try {
       outcome = await this.read(candidate, modelImage, partial, signal, wholePage);
       return outcome?.visual ?? null;
     } finally {
-      // A read the provider never answered serves no other placement: the next one reads for itself.
-      if (settle) {
-        // A whole-page read may have answered for another visual on the page: it never stands for a picture.
-        const stands = outcome?.answered === true && !(wholePage && !candidate.bbox);
+      if (settle && mine) {
+        // A read the provider never answered serves no other placement, and a whole-page read (a crop that failed) may
+        // have answered for another visual on the page: neither stands for the picture.
+        const stands = outcome?.answered === true && !wholePage;
         (settle as (read: GroupRead | null) => void)(stands ? outcome : null);
-        if (stands) this.groupsRead.add(group!);
-        else this.groupReads.delete(group!);
+        for (const key of keys) {
+          if (stands) this.groupsRead.add(key);
+          else if (this.groupReads.get(key) === mine) this.groupReads.delete(key);
+        }
       }
     }
+  }
+
+  /** The read in flight or done for any key of a group. */
+  private priorRead(keys: readonly string[]): Promise<GroupRead | null> | null {
+    for (const key of keys) {
+      const prior = this.groupReads.get(key);
+      if (prior) return prior;
+    }
+    return null;
   }
 
   private async read(
@@ -589,36 +621,68 @@ export class ChartExportSession {
     return { visual: exported ? result.visual : null, answered };
   }
 
-  /**
-   * The group of pictures a candidate belongs to: candidates linked by a shared image object (`asset.obj`) or content
-   * hash (`asset.sha256`), transitively. Null without an asset identity. Within this document only.
-   */
-  private groupKey(candidate: VisualCandidate): string | null {
-    const keys = (c: VisualCandidate) => [
+  /** Drops the cached groups (candidates or their assets changed). */
+  invalidateGroups(): void {
+    this.groupIndex = null;
+  }
+
+  private static assetKeys(c: VisualCandidate): string[] {
+    // Only a placement the page facts show nothing drawn over: the crop then shows the image alone.
+    if (c.asset?.clean !== true) return [];
+    return [
       ...(c.asset?.obj !== undefined ? [`o:${c.asset.obj}`] : []),
       ...(c.asset?.sha256 ? [`s:${c.asset.sha256}`] : []),
     ];
-    const own = keys(candidate);
-    if (own.length === 0) return null;
-    const group = new Set(own);
-    // Grow the group through candidates sharing any key (an image with both an obj and a hash links the two).
-    for (let grew = true; grew;) {
-      grew = false;
+  }
+
+  /**
+   * Every asset key of the candidate's group: candidates linked by a shared image object (`asset.obj`) or content hash
+   * (`asset.sha256`), transitively (union-find, cached until candidates change). Empty without an asset identity or
+   * with reuse off. Within this document only.
+   */
+  private groupKeys(candidate: VisualCandidate): readonly string[] {
+    if (!this.dedupe) return [];
+    const own = ChartExportSession.assetKeys(candidate);
+    if (own.length === 0) return [];
+    if (!this.groupIndex) {
+      const parent = new Map<string, string>();
+      const find = (k: string): string => {
+        let root = k;
+        while (parent.get(root) !== root) root = parent.get(root)!;
+        for (let x = k; x !== root;) { const next = parent.get(x)!; parent.set(x, root); x = next; }
+        return root;
+      };
+      const add = (k: string) => { if (!parent.has(k)) parent.set(k, k); };
       for (const c of this.candidates) {
-        const ks = keys(c);
-        if (ks.some((k) => group.has(k)) && ks.some((k) => !group.has(k))) {
-          for (const k of ks) group.add(k);
-          grew = true;
+        const ks = ChartExportSession.assetKeys(c);
+        ks.forEach(add);
+        for (let i = 1; i < ks.length; i += 1) {
+          const a = find(ks[0]!);
+          const b = find(ks[i]!);
+          if (a !== b) parent.set(a, b);
         }
       }
+      const members = new Map<string, string[]>();
+      for (const k of parent.keys()) members.set(find(k), [...(members.get(find(k)) ?? []), k]);
+      const index = new Map<string, readonly string[]>();
+      for (const list of members.values()) { list.sort(); for (const k of list) index.set(k, list); }
+      this.groupIndex = index;
     }
-    return [...group].sort()[0]!;
+    const keys = new Set<string>();
+    for (const k of own) for (const member of this.groupIndex.get(k) ?? [k]) keys.add(member);
+    return [...keys].sort();
+  }
+
+  /** A stable name for the candidate's group (its smallest asset key), or null. */
+  private groupKey(candidate: VisualCandidate): string | null {
+    return this.groupKeys(candidate)[0] ?? null;
   }
 
   /** A placement served by its group's read: the same visual at this placement, with no call and no charge. */
   private reuseRead(candidate: VisualCandidate, read: GroupRead): ExportedVisual | null {
+    if (!read.visual) { this.readsReused += 1; return null; }
+    if (!this.exportsKind(read.visual.kind) || this.atLimit()) return null;
     this.readsReused += 1;
-    if (!read.visual || !this.exportsKind(read.visual.kind) || this.atLimit()) return null;
     const b = candidate.bbox;
     const visual: ExportedVisual = {
       ...read.visual,
@@ -633,8 +697,7 @@ export class ChartExportSession {
 
   /** Whether another placement of this candidate's picture was already read: it is served without an image. */
   servedByGroup(candidate: VisualCandidate): boolean {
-    const group = this.groupKey(candidate);
-    return group !== null && this.groupsRead.has(group);
+    return this.groupKeys(candidate).some((key) => this.groupsRead.has(key));
   }
 
   /** Repeated pictures: placements in groups of two or more, the groups, and the reads their reuse avoided. */
@@ -661,7 +724,8 @@ export class ChartExportSession {
     const listed = this.candidates.find((c) => sameVisual(c, candidate)) ?? candidate;
     const before = this.calls.length;
     const visual = await this.run(listed, args.image, args.signal);
-    const made = this.calls.slice(before);
+    // This visual's own calls only: a concurrent crop, or the group read this one waited for, made the others.
+    const made = this.calls.slice(before).filter((c) => c.visualId === listed.id);
     const calls = made.filter((c) => c.ok || c.costCents > 0);
     const usage = {
       inputTokens: calls.reduce((s, c) => s + c.inputTokens, 0),

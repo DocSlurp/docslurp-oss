@@ -58,6 +58,8 @@ export const FACTS_CANDIDATE_RULES = {
   furnitureMinShare: 0.2,
   /** Candidates per page, largest first. */
   maxPerPage: 4,
+  /** Candidates per document (bounds the work; reads are capped separately by the per-document read cap). */
+  maxPerDocument: 500,
 } as const;
 
 /** Whether page facts may nominate chart candidates (`use`); `store` only dedupes repeated images; `off` neither. */
@@ -66,10 +68,25 @@ export function chartFactsUse(env: NodeJS.ProcessEnv = process.env): { candidate
   return { candidates: mode === "use", dedupe: mode !== "off" };
 }
 
+/** Page sides the layout reader accepts (parsePageLayoutFacts): anything else is not a page a raster maps to. */
+const MIN_SIDE_PT = 1;
+const MAX_SIDE_PT = 14_400;
+
+/**
+ * Whether the page's facts boxes are in the space the page raster is cropped in. Facts boxes are MediaBox points, rotated,
+ * top-left origin; the raster shows the CropBox. A CropBox that differs from the MediaBox shifts every box: unknown.
+ */
+function placeable(page: DopplerPageFacts): boolean {
+  const g = page.geometry;
+  if (!g || !(g.widthPt >= MIN_SIDE_PT && g.widthPt <= MAX_SIDE_PT && g.heightPt >= MIN_SIDE_PT && g.heightPt <= MAX_SIDE_PT)) return false;
+  if (g.cropBox && g.mediaBox && g.cropBox.some((v, i) => Math.abs(v - g.mediaBox![i]!) > 0.5)) return false;
+  return true;
+}
+
 function toBBox(box: Box, page: DopplerPageFacts): BBox | null {
-  const w = page.geometry?.widthPt;
-  const h = page.geometry?.heightPt;
-  if (!w || !h || !(w > 0) || !(h > 0)) return null;
+  if (!placeable(page)) return null;
+  const w = page.geometry!.widthPt;
+  const h = page.geometry!.heightPt;
   const x0 = Math.max(0, Math.min(w, Math.min(box[0], box[2])));
   const x1 = Math.max(0, Math.min(w, Math.max(box[0], box[2])));
   const y0 = Math.max(0, Math.min(h, Math.min(box[1], box[3])));
@@ -161,34 +178,75 @@ export function candidatesFromPageFacts(facts: Pick<DopplerPageFactsDocument, "p
           area: share,
           c: {
             id: `p${page.page}-f${item.index}`, pageNumber: page.page, imageIndex: null, bbox, kind: null, detectedBy: "page-facts-image",
-            ...(item.obj !== undefined ? { asset: { obj: item.obj } } : {}),
+            ...(item.obj !== undefined ? { asset: { obj: item.obj, ...(overlaid(page, bbox) ? {} : { clean: true }) } } : {}),
           },
         });
       }
     }
     found.sort((a, b) => b.area - a.area);
     out.push(...found.slice(0, R.maxPerPage).map((f) => f.c));
+    if (out.length >= R.maxPerDocument) break;
   }
+  out.length = Math.min(out.length, R.maxPerDocument);
   return { candidates: out, counts };
 }
 
 /**
- * Gives each placed candidate the facts `obj` of the image under it (same page, matching box), so repeated placements
- * of one image object share a read. Candidates that already carry an `obj` keep it.
+ * Whether anything may be drawn over a placement: a figure cluster crossing its box, text over images on the page, or a
+ * page whose `text`/`vectors` facts are unknown. Clusters cover curved and diagonal drawing only; axis-aligned overlays
+ * (rectangles over a base image) are not seen.
  */
-export function annotateImageObjects(candidates: VisualCandidate[], facts: Pick<DopplerPageFactsDocument, "pages">, match: (a: BBox, b: BBox) => number): void {
+function overlaid(page: DopplerPageFacts, box: BBox): boolean {
+  if (!page.text || !page.vectors || page.vectors.clustersTruncated || !page.vectors.clusters) return true;
+  if ((page.text.textOverImageRatio ?? 1) > 0) return true;
+  return page.vectors.clusters.some((cluster) => {
+    const c = toBBox(cluster.bbox, page);
+    return c !== null && c.x < box.x + box.width && box.x < c.x + c.width && c.y < box.y + box.height && box.y < c.y + c.height;
+  });
+}
+
+/** Box overlap (IoU) an image-backed candidate must reach to take the facts image's object number. */
+export const OBJ_MATCH_MIN_IOU = 0.9;
+
+function iou(a: BBox, b: BBox): number {
+  const x = Math.max(0, Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x));
+  const y = Math.max(0, Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y));
+  const inter = x * y;
+  const union = a.width * a.height + b.width * b.height - inter;
+  return union > 0 ? inter / union : 0;
+}
+
+/**
+ * Gives each image-backed candidate (an embedded image image routing or the router placed) the facts `obj` of the image
+ * it is, so repeated placements of one image object share a read. The boxes must agree closely (`OBJ_MATCH_MIN_IOU`):
+ * a chart drawn over a background image, a vector cluster or a router region is never that image. Stencil masks and a
+ * page's scan image are never matched. Candidates that already carry an `obj` keep it.
+ */
+export function annotateImageObjects(candidates: VisualCandidate[], facts: Pick<DopplerPageFactsDocument, "pages">): void {
   for (const candidate of candidates) {
-    if (!candidate.bbox || candidate.asset?.obj !== undefined) continue;
-    const page = facts.pages.get(candidate.pageNumber);
-    if (!page || page.failed) continue;
-    let best: { obj: number; score: number } | null = null;
-    for (const item of page.images?.items ?? []) {
-      if (item.obj === undefined) continue;
-      const bbox = toBBox(item.bbox, page);
-      const score = bbox ? match(bbox, candidate.bbox) : 0;
-      if (score > 0 && (!best || score > best.score)) best = { obj: item.obj, score };
+    if (!candidate.bbox) continue;
+    const known = facts.pages.get(candidate.pageNumber);
+    // Reuse needs the facts' word that nothing is drawn over the placement (`clean`); without facts, never.
+    if (candidate.asset && known && !known.failed) {
+      candidate.asset = { ...candidate.asset, clean: !overlaid(known, candidate.bbox) && candidate.asset.clean !== false };
     }
-    if (best) candidate.asset = { ...candidate.asset, obj: best.obj };
+    if (candidate.asset?.obj !== undefined) continue;
+    const imageBacked = candidate.detectedBy === "image-routing" || (candidate.detectedBy === "router-inset" && candidate.imageIndex !== null);
+    if (!imageBacked) continue;
+    const page = facts.pages.get(candidate.pageNumber);
+    if (!page || page.failed || !page.images?.items) continue;
+    let best: { obj: number; score: number } | null = null;
+    let ambiguous = false;
+    for (const item of page.images.items) {
+      if (item.obj === undefined || item.imageMask || item.index === page.images.scanImage) continue;
+      const bbox = toBBox(item.bbox, page);
+      const score = bbox ? iou(bbox, candidate.bbox) : 0;
+      if (score < OBJ_MATCH_MIN_IOU) continue;
+      if (best && best.obj !== item.obj) ambiguous = true;
+      if (!best || score > best.score) best = { obj: item.obj, score };
+    }
+    // Two different objects in the same place (a stack of images): no identity rather than the wrong one.
+    if (best && !ambiguous) candidate.asset = { ...candidate.asset, obj: best.obj, clean: !overlaid(page, candidate.bbox) };
   }
 }
 

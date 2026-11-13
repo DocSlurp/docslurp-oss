@@ -8,7 +8,7 @@ import { DocumentArtifactLedger } from "../pipeline/artifact-ledger.js";
 import { testCatalog } from "../routing/testing.js";
 import { docLine, figurePage, jsonl, runLine, scanPage, textPage } from "../test/doppler-page-facts-fixture.js";
 import { chartExportCharges } from "./billing.js";
-import { candidatesFromPageFacts, CHART_FACTS_FORMAT, CHART_FACTS_SLOT, FACTS_CANDIDATE_RULES, loadChartFacts } from "./facts-candidates.js";
+import { annotateImageObjects, candidatesFromPageFacts, CHART_FACTS_FORMAT, CHART_FACTS_SLOT, FACTS_CANDIDATE_RULES, loadChartFacts } from "./facts-candidates.js";
 import { ChartExportSession } from "./session.js";
 import { runChartExportPass, type PageImage } from "./stage.js";
 import { setDeterministicVisualExtractor, type ChartModelClient, type ChartModelRequest, type VisualCandidate } from "./types.js";
@@ -94,7 +94,7 @@ describe("candidatesFromPageFacts", () => {
     const facts = parse([imagePage(1, 7)], 1);
     expect(candidatesFromPageFacts(facts, new Set()).candidates).toEqual([]);
     expect(candidatesFromPageFacts(facts, new Set([1])).candidates).toEqual([
-      { id: "p1-f1", pageNumber: 1, imageIndex: null, bbox: { x: 36, y: 36, width: 200, height: 100 }, kind: null, detectedBy: "page-facts-image", asset: { obj: 7 } },
+      { id: "p1-f1", pageNumber: 1, imageIndex: null, bbox: { x: 36, y: 36, width: 200, height: 100 }, kind: null, detectedBy: "page-facts-image", asset: { obj: 7, clean: true } },
     ]);
   });
 
@@ -256,12 +256,12 @@ describe("chart export with page facts", () => {
     expect(expectedBillableVisuals({ config: cfg, pages: 20, documents: 1, stats: result.stats })).toMatchObject({ low: 1, high: 1, basis: "measured" });
   });
 
-  it("groups by content hash without facts, and a read the provider never answered does not stand for the group", async () => {
+  it("groups by content hash, and a read the provider never answered does not stand for the group", async () => {
     const client = fakeClient([new Error("provider down"), JSON.stringify(BAR_SPEC)]);
     const session = new ChartExportSession({ documentId: "doc-1", config: config(), catalog: () => testCatalog(), client, recordUsage: () => undefined });
     const sha256 = "b".repeat(64);
     const placements = [1, 2, 3].map((page): VisualCandidate => ({
-      id: `p${page}-o0`, pageNumber: page, imageIndex: null, occurrence: 0, bbox: { x: 0, y: 0, width: 100, height: 100 }, kind: "chart", detectedBy: "image-routing", asset: { sha256 },
+      id: `p${page}-o0`, pageNumber: page, imageIndex: null, occurrence: 0, bbox: { x: 0, y: 0, width: 100, height: 100 }, kind: "chart", detectedBy: "image-routing", asset: { sha256, clean: true },
     }));
     session.addCandidates(placements);
     const image = { path: "/x.png", mimeType: "image/png" };
@@ -278,12 +278,91 @@ describe("chart export with page facts", () => {
     const cfg = config();
     const session = new ChartExportSession({ documentId: "doc-1", config: cfg, catalog: () => testCatalog(), client, recordUsage: () => undefined });
     session.addCandidates([1, 2].map((page): VisualCandidate => ({
-      id: `p${page}-f1`, pageNumber: page, imageIndex: null, bbox: { x: 0, y: 0, width: 100, height: 100 }, kind: null, detectedBy: "page-facts-image", asset: { obj: 5 },
+      id: `p${page}-f1`, pageNumber: page, imageIndex: null, bbox: { x: 0, y: 0, width: 100, height: 100 }, kind: null, detectedBy: "page-facts-image", asset: { obj: 5, clean: true },
     })));
     const image = { path: "/x.png", mimeType: "image/png" };
     for (const candidate of session.candidates) await session.exportWithImage(candidate, image);
     expect(client.requests).toHaveLength(1);
     expect(session.visuals).toEqual([]);
     expect(chartExportCharges({ attempts: [...session.modelReads.values()], calls: session.calls, config: cfg })).toHaveLength(1);
+  });
+
+  const placed = (page: number, extra: Partial<VisualCandidate> = {}): VisualCandidate => ({
+    id: `p${page}-o0`, pageNumber: page, imageIndex: null, occurrence: 0, bbox: { x: 0, y: 0, width: 100, height: 100 }, kind: "chart", detectedBy: "image-routing", asset: { sha256: "c".repeat(64), clean: true }, ...extra,
+  });
+  const image = { path: "/x.png", mimeType: "image/png" };
+
+  it("never ties a chart to a background image under it: vector clusters, regions and loose matches take no obj", () => {
+    // A full-bleed background (same obj on every page) behind a chart on each page.
+    const background = (page: number) => imagePage(page, 500, [0, 0, 612, 792]);
+    const facts = parse([background(1), background(2)], 2);
+    const candidates: VisualCandidate[] = [
+      { id: "p1-v0", pageNumber: 1, imageIndex: null, bbox: { x: 40, y: 40, width: 560, height: 700 }, kind: null, detectedBy: "page-facts-vector" },
+      { id: "p2-a0", pageNumber: 2, imageIndex: null, bbox: { x: 0, y: 0, width: 612, height: 792 }, kind: "chart", detectedBy: "router-region" },
+      { id: "p2-o0", pageNumber: 2, imageIndex: null, occurrence: 0, bbox: { x: 40, y: 40, width: 560, height: 700 }, kind: null, detectedBy: "image-routing" },
+      { id: "p1-o0", pageNumber: 1, imageIndex: null, occurrence: 0, bbox: { x: 0, y: 0, width: 612, height: 790 }, kind: null, detectedBy: "image-routing" },
+    ];
+    annotateImageObjects(candidates, facts);
+    expect(candidates.map((c) => c.asset?.obj)).toEqual([undefined, undefined, undefined, 500]);
+  });
+
+  it("a whole-page read (a crop that failed) never stands for the picture", async () => {
+    const client = fakeClient([JSON.stringify(BAR_SPEC), JSON.stringify(BAR_SPEC)]);
+    const session = new ChartExportSession({ documentId: "doc-1", config: config(), catalog: () => testCatalog(), client, recordUsage: () => undefined });
+    session.addCandidates([placed(1), placed(2)]);
+    await session.exportWithImage(session.candidates[0]!, image, undefined, { wholePage: true });
+    await session.exportWithImage(session.candidates[1]!, image);
+    expect(client.requests).toHaveLength(2);
+    expect(session.dedupeStats().readsAvoided).toBe(0);
+  });
+
+  it("concurrent placements wait for the group's read; after an unanswered read one reads again within the cap", async () => {
+    const client = fakeClient([new Error("provider down"), JSON.stringify(BAR_SPEC)]);
+    const session = new ChartExportSession({ documentId: "doc-1", config: config(), catalog: () => testCatalog(), client, recordUsage: () => undefined, limits: { maxModelReads: 1 } });
+    session.addCandidates([1, 2, 3, 4].map((page) => placed(page)));
+    await Promise.all(session.candidates.map((c) => session.exportWithImage(c, image)));
+    expect(client.requests).toHaveLength(2);
+    expect(session.modelReads.size).toBe(1);
+    expect(session.visuals).toHaveLength(3);
+    expect(session.dedupeStats()).toMatchObject({ readsAvoided: 2 });
+  });
+
+  it("with page facts off, repeated pictures are read as before (no reuse)", async () => {
+    vi.stubEnv("DOCSLURP_DOPPLER_PAGE_FACTS", "off");
+    const client = fakeClient([JSON.stringify(BAR_SPEC), JSON.stringify(BAR_SPEC)]);
+    const session = new ChartExportSession({ documentId: "doc-1", config: config(), catalog: () => testCatalog(), client, recordUsage: () => undefined });
+    session.addCandidates([placed(1), placed(2)]);
+    for (const c of session.candidates) await session.exportWithImage(c, image);
+    expect(client.requests).toHaveLength(2);
+    expect(session.stats().charts).toBe(2);
+  });
+
+  it("without the facts' word that nothing is drawn over it, a repeated hash is read per placement (unchanged)", async () => {
+    const client = fakeClient([JSON.stringify(BAR_SPEC), JSON.stringify(BAR_SPEC)]);
+    const session = new ChartExportSession({ documentId: "doc-1", config: config(), catalog: () => testCatalog(), client, recordUsage: () => undefined });
+    session.addCandidates([placed(1, { asset: { sha256: "d".repeat(64) } }), placed(2, { asset: { sha256: "d".repeat(64) } })]);
+    for (const c of session.candidates) await session.exportWithImage(c, image);
+    expect(client.requests).toHaveLength(2);
+  });
+
+  it("one image under different overlays (a cluster drawn over it) is not one picture", () => {
+    const overlay = (page: number) => {
+      const p = imagePage(page, 77);
+      return { ...p, vectors: { ...(p.vectors as object), clusters: [{ bbox: [50, 50, 200, 120], paths: 30, curves: 10, segments: 40 }], figureClusters: 1 } };
+    };
+    const facts = parse([overlay(1), imagePage(2, 77)], 2);
+    const candidates = [1, 2].map((page): VisualCandidate => ({
+      id: `p${page}-o0`, pageNumber: page, imageIndex: null, occurrence: 0, bbox: { x: 36, y: 36, width: 200, height: 100 }, kind: null, detectedBy: "image-routing", asset: { sha256: "e".repeat(64) },
+    }));
+    annotateImageObjects(candidates, facts);
+    expect(candidates.map((c) => c.asset)).toEqual([
+      { sha256: "e".repeat(64), obj: 77, clean: false },
+      { sha256: "e".repeat(64), obj: 77, clean: true },
+    ]);
+  });
+
+  it("does not place facts boxes on a page whose CropBox differs from its MediaBox", () => {
+    const shifted = figurePage(1, { geometry: { widthPt: 612, heightPt: 792, rotation: 0, userUnit: 1, mediaBox: [0, 0, 612, 792], cropBox: [36, 36, 576, 756] } });
+    expect(candidatesFromPageFacts(parse([shifted], 1), new Set()).candidates).toEqual([]);
   });
 });

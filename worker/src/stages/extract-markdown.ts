@@ -1018,10 +1018,18 @@ export class ExtractMarkdownStage implements Stage {
                   }));
                   // The validated facts as canonical lines (never the guest's bytes) for chart export: structural candidates
                   // and one read per repeated image. Re-read by the strict reader, bounded by the host's page count.
-                  if (winningCandidate.pageFacts) {
+                  // A reprocess whose winner returned no facts records an empty artifact, so an earlier run's facts are not read.
+                  if (winningCandidate.pageFacts || state.artifactLedger.readDocument(document.id, CHART_FACTS_SLOT)) {
                     const factsKey = `${runArtifactRoot(state.run, document.userId)}/doppler-page-facts/${document.id}.json`;
-                    await this.storage.putJson(factsKey, { format: CHART_FACTS_FORMAT, jsonl: dopplerPageFactsJsonl(winningCandidate.pageFacts) });
-                    state.artifactLedger.recordDocument(document.id, CHART_FACTS_SLOT, this.storage.uri(factsKey));
+                    try {
+                      await this.storage.putJson(factsKey, winningCandidate.pageFacts
+                        ? { format: CHART_FACTS_FORMAT, jsonl: dopplerPageFactsJsonl(winningCandidate.pageFacts) }
+                        : { format: CHART_FACTS_FORMAT, cleared: true });
+                      state.artifactLedger.recordDocument(document.id, CHART_FACTS_SLOT, this.storage.uri(factsKey));
+                    } catch (error) {
+                      // Optional enrichment: chart export then runs without facts.
+                      console.warn(`[extract-markdown] page facts artifact not stored document=${document.id} error=${error instanceof Error ? error.message : String(error)}`);
+                    }
                   }
                   // Doppler figures of the winning VM candidate: validated whole, stored under the document's artifact root, and
                   // recorded as document artifact slots so the artifact and PII guards (and the file proxy) apply to each file.
