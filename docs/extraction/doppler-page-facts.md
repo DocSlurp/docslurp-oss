@@ -45,13 +45,58 @@ Page counts for billing and limits stay the host's own (pdfpagecount). The facts
   the reader does not know. The file proxy serves it as text, behind the same artifact and PII checks as the folder's
   other files. Malformed or refused facts write no object.
 - `use`: as `store`, and when the provider returned no layout facts the facts stand in for them: the mapped
-  `PageLayoutFacts` are stored as `page-layout-facts` with `source: "vm-pdf-facts"`.
+  `PageLayoutFacts` are stored as `page-layout-facts` with `source: "vm-pdf-facts"`. The facts also stand in for the host
+  probes the sandboxed route never runs (see [Routing evidence](#routing-evidence)).
 
 An unrecognised value is `off`, logged as an error.
 
 In every mode the facts never size a charge: page-equivalent billing reads page sizes only from layout facts the VM's
 walker measured. `use` does let valid facts steer routing where no walker facts exist, as layout facts do: a page the
 facts show without words can be read by OCR or vision for the project that asked for it, billed by the host's page count.
+
+## Routing evidence
+
+The sandboxed PDF route runs none of the host's Poppler probes: page facts' `pdfimages -list` and `pdftotext`, page triage's
+`pdfimages -list` and `pdfinfo` page sizes, the layout walker's `pdftotext -bbox-layout` run, and the OCR ledger's
+`pdftotext`. Without them it had no page-image evidence (classify-route saw a sparse scan page as `unknown`) and no per-page
+source rows in the ingest report. In `use` mode, `lib/doppler-page-facts-evidence.ts` builds both from the winning VM job's
+facts, with no command:
+
+- page-image evidence (`page-image-evidence`, `source: "doppler-facts"`, vision fallback on): the probe's sparse pages
+  (fewer than `sparsePageWords` words in the text layer, invisible OCR words included, as `pdftotext` reads them), each
+  with its significant, non-repeated image count and coverage under the probe's own rules (`minSignificantImagePixels`,
+  `minSignificantImageCoverage`, and the repeated-furniture rule over significant placements in the probe's listing scope).
+  No text-layer verdict: the probe judges the PDF's own layer, which facts do not carry, and judging the extracted Markdown or
+  OCR text instead would call math, tables or OCR output garbled. `embeddedImageBytes` and `drawnBytesPerPage` are null:
+  facts never read a stream, so the drawn-content hint stays off;
+- per-page rows in `document_page_facts` (`facts_source = 'doppler-facts'`): `word_count`, `image_count` (image rows, as
+  `pdfimages -list` counts them) and `text_bytes`, which is 0 for a page with no text layer and otherwise the extracted page's
+  whitespace-collapsed bytes, or null for a page a model read (its text is OCR output, not the layer).
+
+Only facts that cover the document count: a complete stream (a run line last), no dropped line, no failed page, no document
+error or lock, every page of the host's own count present with the `text` and `geometry` families and a complete
+`images.items` list. Any
+less, in any mode but `use`, or when another extractor won, nothing is built and the route goes without, as before; the
+stage records `dopplerFactsEvidence: { status: "skipped", reason }`.
+
+No page count, size or charge comes from the facts: the page count stays the host's, page-equivalent sizes stay the
+walker's, extract-markdown's Rich reads stay the provider's `ocrPages`, and the per-page rows are not written for a run
+without a page billing pin, which still bills pages with no text bytes and an image as scans at completion
+(`runBillsScansAtCompletion`). The evidence is routing evidence, though: like the probe's, it can make classify-route send a
+sparse scan page to a vision read, and that read bills Rich when it happens, for a project with vision fallback on. To keep a
+counting gap or hostile facts from turning text pages into reads, the facts must agree with the extraction: a page the facts
+call sparse while the winning extraction read `sparsePageWords` or more words from it without a model (the provider's OCR,
+host scan-fill and accepted critique pages are exempt) refuses the whole
+document's evidence (`words-disagree`), and an image never counts for more of the page than its own box covers.
+
+Commands the facts cannot retire, and why:
+
+| Command | Feeds | Kept because |
+|---|---|---|
+| `pdfpagecount`, `pdftotext -f 1 -l 1` | page count, Poppler acceptance | billing and limits use the host's own count |
+| layout walker (`pdfimages -list`, `pdftotext -bbox-layout`, `pdf_layout_facts.py`) | layout facts | page-equivalent billing reads the walker's page sizes; facts have no `wordsInside`, `bytesPerPixel`, table or grid boxes |
+| OCR ledger `pdftotext` | Rich reads of an extractor that OCRs without saying so | billing evidence; never on the sandboxed route |
+| `pdfinfo` before `pdftoppm` | render bounds, rendered page areas | bounds an untrusted render and sizes a charge |
 
 ## Mappings
 
