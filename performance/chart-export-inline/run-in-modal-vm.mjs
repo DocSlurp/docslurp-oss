@@ -25,7 +25,7 @@ async function variant(name, { prestart }) {
   mkdirSync(w("dist/chart-export"), { recursive: true });
   await build({ ...common, entryPoints: [`${repo}worker/scripts/quarantine-inspect.mjs`], outfile: w("scripts/quarantine-inspect.mjs"), external: ["./chart-inline.mjs"] });
   await build({ ...common, entryPoints: [`${repo}worker/scripts/chart-inline.mjs`], outfile: w("scripts/chart-inline.mjs") });
-  for (const f of ["chart-inline-worker.mjs", "chart-guest-bundle.mjs"]) copyFileSync(`${repo}worker/scripts/${f}`, w(`scripts/${f}`));
+  for (const f of ["chart-export-worker.mjs", "chart-guest-bundle.mjs"]) copyFileSync(`${repo}worker/scripts/${f}`, w(`scripts/${f}`));
   copyFileSync(`${repo}worker/dist/chart-export/guest.bundle.mjs`, w("dist/chart-export/guest.bundle.mjs"));
   // The SVG pre-start variant (v3) was measured at ~1 ms per SVG and removed from the guest; v1/v2 remain.
   void prestart;

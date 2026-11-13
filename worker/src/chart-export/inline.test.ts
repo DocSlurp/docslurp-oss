@@ -112,12 +112,15 @@ describe.skipIf(!built)("inline charts in the quarantine guest (real scripts, re
 const Real = Function; let calls = 0;
 globalThis.Function = new Proxy(Real, { construct(t, a) { calls++; return Reflect.construct(t, a); }, apply(t, h, a) { calls++; return Reflect.apply(t, h, a); } });
 const post = parentPort.postMessage.bind(parentPort);
-parentPort.postMessage = (m, t) => post(typeof m === "string" && m !== "ready" ? JSON.stringify({ ...JSON.parse(m), calls }) : m, t);
-await import(${JSON.stringify(pathToFileURL(path.join(workerRoot, "scripts/chart-inline-worker.mjs")).href)});
+parentPort.postMessage = (m, t) => post(m && m.t === "result" ? { ...m, result: { ...m.result, calls } } : m, t);
+await import(${JSON.stringify(pathToFileURL(path.join(workerRoot, "scripts/chart-export-worker.mjs")).href)});
 `);
+    const svgFile = path.join(dir, `count-${Math.random().toString(36).slice(2)}.svg`);
+    await writeFile(svgFile, genericBar(["London", "Tokyo", "Austin"], [4, 6, 9], 10));
     const driver = `const { inlineCharts } = await import(${JSON.stringify(pathToFileURL(path.join(workerRoot, "scripts/chart-inline.mjs")).href)});
-const out = await inlineCharts(Buffer.from(${JSON.stringify(genericBar(["London", "Tokyo", "Austin"], [4, 6, 9], 10))}), { kind: "svg", diagrams: true },
-  { sniffed: { encoding: "utf-8", container: null }, archive: null }, new URL(${JSON.stringify(pathToFileURL(wrapper).href)}));
+const { readFile } = await import("node:fs/promises");
+const out = await inlineCharts(await readFile(${JSON.stringify(svgFile)}), { kind: "svg", diagrams: true },
+  { sniffed: { encoding: "utf-8", container: null }, archive: null }, ${JSON.stringify(svgFile)}, new URL(${JSON.stringify(pathToFileURL(wrapper).href)}));
 console.log(JSON.stringify({ status: out.status, calls: out.result?.calls, visuals: out.result?.visuals?.length }));`;
     // A file, not `-e`: worker threads inherit the parent's flags, and `--input-type` would break their loading.
     const driverFile = path.join(dir, `driver-${Math.random().toString(36).slice(2)}.mjs`);
@@ -132,59 +135,72 @@ console.log(JSON.stringify({ status: out.status, calls: out.result?.calls, visua
     expect((await run(process.execPath, ["--disallow-code-generation-from-strings", check])).stdout.trim()).toBe("true");
   });
 
-  describe("hostile extraction stays bounded and never fails the inspection", () => {
-    // Like the real worker: say "ready" after start-up, then do the (hostile) work once the file arrives.
-    // `size`: the input's size, which sets the deadline (0.5 s + 2 ms/KiB); the memory tests need time to allocate.
-    async function hostile(body: string, ready = true, size = 6): Promise<Record<string, unknown>> {
-      const file = path.join(dir, `worker-${Math.random().toString(36).slice(2)}.mjs`);
-      await writeFile(file, `import { parentPort } from "node:worker_threads";\n${ready ? `parentPort.postMessage("ready");\nparentPort.once("message", (job) => {\n${body}\n});` : body}\n`);
+  describe("unit containment (#364's worker): a hostile unit loses only itself, never the inspection", () => {
+    const deck = () => pptx([[1, chart], [2, chartXml({ title: "Expansion to Tokyo", plots: [barPlot([{ name: "Flights", cats: Q, vals: [3, 5, 8] }])] })]]);
+    const officeInspection = (bytes: Uint8Array) => ({ sniffed: { encoding: null, container: "zip" }, archive: { kind: "zip", suspicious: false, inspectable: true, chartParts: 2, entryCount: 10 } });
+    async function contained(bytes: Uint8Array, kind: string, fault: string | null, workerUrl?: URL): Promise<Record<string, unknown>> {
+      const file = path.join(dir, `unit-${Math.random().toString(36).slice(2)}`);
+      await writeFile(file, bytes);
       const { inlineCharts } = await import(pathToFileURL(path.join(workerRoot, "scripts/chart-inline.mjs")).href);
-      const inspection = { sniffed: { encoding: "utf-8", container: null }, archive: null };
-      const input = size === 6 ? Buffer.from("<svg/>") : Buffer.from(`<svg>${" ".repeat(size - 11)}</svg>`);
-      return await inlineCharts(input, { kind: "svg", diagrams: true }, inspection, pathToFileURL(file));
+      const inspection = kind === "office" ? officeInspection(bytes) : { sniffed: { encoding: "utf-8", container: null }, archive: null };
+      if (fault) process.env.DOCSLURP_CHART_GUEST_TEST_FAULT = fault;
+      try {
+        return await inlineCharts(Buffer.from(bytes), { kind, diagrams: true }, inspection, file, ...(workerUrl ? [workerUrl] : []));
+      } finally {
+        delete process.env.DOCSLURP_CHART_GUEST_TEST_FAULT;
+      }
     }
-    it("a spinning extractor hits the deadline", async () => {
+    async function standaloneWith(bytes: Uint8Array, kind: string, fault: string): Promise<unknown> {
+      const tag = Math.random().toString(36).slice(2);
+      const input = path.join(dir, `${tag}-in`);
+      const request = path.join(dir, `${tag}-req.json`);
+      const output = path.join(dir, `${tag}-res.json`);
+      await writeFile(input, bytes);
+      await writeFile(request, JSON.stringify({ kind }));
+      await run(process.execPath, [path.join(workerRoot, "scripts/chart-export-extract.mjs"), input, request, output], { cwd: workerRoot, env: { ...process.env, DOCSLURP_CHART_GUEST_TEST_FAULT: fault } });
+      return JSON.parse(await readFile(output, "utf8"));
+    }
+    it.each([["crash", "unit-crashed"], ["oom", "unit-crashed"]])("a unit that %ss is lost alone and counted; the other chart stands; the same as the standalone guest", async (fault, reason) => {
+      const bytes = deck();
+      const out = await contained(bytes, "office", `${fault}:chart2`);
+      expect(out.status).toBe("ok");
+      const result = (out as { result: { visuals: unknown[]; deferred?: Array<{ reason: string; count: number }> } }).result;
+      expect(result.visuals).toHaveLength(1);
+      expect(result.deferred).toEqual([expect.objectContaining({ reason, count: 1 })]);
+      expect(validateInlineCharts(out)).toMatchObject({ status: "ok" });
+      expect(result).toEqual(await standaloneWith(bytes, "office", `${fault}:chart2`));
+    }, 60_000);
+    it("a unit that hangs is a unit-timeout, within the step's bound; the other chart stands", async () => {
       const started = Date.now();
-      const out = await hostile("for (;;) {}");
-      expect(out).toMatchObject({ status: "refused", reason: "deadline" });
-      expect(Date.now() - started).toBeLessThan(INLINE_CHART_LIMITS.startupMs + inlineDeadlineMs(6) + 2_000);
-    }, 30_000);
-    it("a worker that never gets ready is stopped at the start-up allowance", async () => {
-      expect(await hostile("for (;;) {}", false)).toMatchObject({ status: "refused", reason: "deadline" });
-    }, 30_000);
-    it("a JS-heap-hungry extractor is stopped (heap limit or memory watchdog)", async () => {
-      const out = await hostile("const keep = []; for (;;) keep.push(new Array(1e5).fill({ a: Math.random() }));");
-      expect(out).toMatchObject({ status: "refused" });
-      expect(["worker-failed", "memory-limit", "deadline"]).toContain(out.reason);
+      const out = await contained(deck(), "office", "hang:chart2");
+      expect(out.status).toBe("ok");
+      const result = (out as { result: { visuals: unknown[]; deferred?: Array<{ reason: string }> } }).result;
+      expect(result.visuals).toHaveLength(1);
+      expect(result.deferred?.map((d) => d.reason)).toContain("unit-timeout");
+      expect(Date.now() - started).toBeLessThan(INLINE_CHART_LIMITS.startupMs + INLINE_CHART_LIMITS.deadlineMaxMs + 5_000);
     }, 60_000);
-    it("off-heap memory (Buffers) the heap limit does not see is stopped by the RSS watchdog (council M2)", async () => {
+    it("off-heap memory past the budget ends the worker; the unit is lost and counted, the bound held", async () => {
+      const hog = path.join(dir, `hog-${Math.random().toString(36).slice(2)}.mjs`);
+      await writeFile(hog, `import { parentPort } from "node:worker_threads";
+parentPort.on("message", () => { parentPort.postMessage({ t: "start", id: 0, locator: "svg", svgIndex: 0 }); const keep = []; const step = () => { keep.push(Buffer.alloc(16 * 1024 * 1024, 1)); setImmediate(step); }; step(); });`);
       const before = process.memoryUsage.rss();
-      // 16 MiB at a time, touched so the pages are real, with a pause so the parent's watchdog gets its turn.
-      const out = await hostile("const keep = []; const step = () => { const b = Buffer.alloc(16 * 1024 * 1024, 1); keep.push(b); setImmediate(step); }; step();", true, 4 * 1024 * 1024);
-      expect(out).toMatchObject({ status: "refused", reason: "memory-limit" });
-      // The bound held: the process grew by no more than the budget plus one poll's worth of allocation.
+      const out = await contained(Buffer.from(genericBar(["A", "B"], [1, 2], 3)), "svg", null, pathToFileURL(hog));
       expect(process.memoryUsage.rss() - before).toBeLessThan((INLINE_CHART_LIMITS.maxRssGrowthMb + 256) * 1024 * 1024);
+      // Every worker hogs, so each unit is lost in turn until the worker cap: never a failed inspection.
+      expect(["ok", "refused"]).toContain(out.status);
     }, 60_000);
-    it("off-heap memory allocated in one synchronous burst is stopped too, within the bound", async () => {
-      const before = process.memoryUsage.rss();
-      const out = await hostile("const keep = []; for (;;) keep.push(Buffer.alloc(16 * 1024 * 1024, 1));", true, 4 * 1024 * 1024);
-      expect(out).toMatchObject({ status: "refused" });
-      expect(["memory-limit", "worker-failed"]).toContain(out.reason);
-      // Council r2 L-a: the burst never escaped the watchdog's budget (plus one poll's worth of allocation).
-      expect(process.memoryUsage.rss() - before).toBeLessThan((INLINE_CHART_LIMITS.maxRssGrowthMb + 256) * 1024 * 1024);
+    it("a worker that never reaches a unit is a refusal with a machine reason only", async () => {
+      const dead = path.join(dir, `dead-${Math.random().toString(36).slice(2)}.mjs`);
+      await writeFile(dead, `throw new Error("secret document text");`);
+      const out = await contained(Buffer.from(genericBar(["A", "B"], [1, 2], 3)), "svg", null, pathToFileURL(dead));
+      expect(out).toMatchObject({ status: "refused", reason: "worker-failed" });
+      expect(JSON.stringify(out)).not.toContain("secret");
     }, 60_000);
-    it("the file is transferred to the worker, not copied", async () => {
-      const out = await hostile("parentPort.postMessage(JSON.stringify({ schemaVersion: 'x', visuals: [], refusals: [], transferred: job.buffer instanceof ArrayBuffer && job.buffer.byteLength === 6 }));");
-      expect(out).toMatchObject({ status: "ok", result: { transferred: true } });
-    }, 30_000);
-    it("a throwing extractor is a refusal with a machine reason only", async () => {
-      expect(await hostile("throw new Error('secret document text');")).toMatchObject({ status: "refused", reason: "worker-failed" });
-    }, 30_000);
     it("an answer over the inline allowance is refused as too large (the standalone guest takes it)", async () => {
-      expect(await hostile("parentPort.postMessage('x'.repeat(5 * 1024 * 1024));")).toMatchObject({ status: "refused", reason: "result-too-large" });
-    }, 30_000);
-    it("non-JSON is refused", async () => {
-      expect(await hostile("parentPort.postMessage('{not json');")).toMatchObject({ status: "refused", reason: "result-invalid" });
+      const big = path.join(dir, `big-${Math.random().toString(36).slice(2)}.mjs`);
+      await writeFile(big, `import { parentPort } from "node:worker_threads";
+parentPort.on("message", () => parentPort.postMessage({ t: "result", result: { schemaVersion: "chart-export-deterministic@v1", visuals: [], refusals: [{ locator: "x".repeat(5 * 1024 * 1024), reason: "x" }] } }));`);
+      expect(await contained(Buffer.from(genericBar(["A", "B"], [1, 2], 3)), "svg", null, pathToFileURL(big))).toMatchObject({ status: "refused", reason: "result-too-large" });
     }, 30_000);
   });
 
@@ -237,12 +253,18 @@ console.log(JSON.stringify({ status: out.status, calls: out.result?.calls, visua
     }
   }, 120_000);
 
-  it("the worker gets its own softer deadline inside the hard one (council r3 M2)", async () => {
+  it("the worker gets the extractor's own softer deadline inside the hard one (council r3 M2)", async () => {
     const file = path.join(dir, `worker-budget-${Math.random().toString(36).slice(2)}.mjs`);
-    await writeFile(file, `import { parentPort } from "node:worker_threads";\nparentPort.postMessage("ready");\nparentPort.once("message", (job) => parentPort.postMessage(JSON.stringify({ budgetMs: job.budgetMs })));\n`);
+    await writeFile(file, `import { parentPort } from "node:worker_threads";\nparentPort.on("message", (task) => parentPort.postMessage({ t: "result", result: { deadline: task.deadline } }));\n`);
+    const svg = path.join(dir, `budget-${Math.random().toString(36).slice(2)}.svg`);
+    await writeFile(svg, "<svg/>");
     const { inlineCharts } = await import(pathToFileURL(path.join(workerRoot, "scripts/chart-inline.mjs")).href);
-    const out = await inlineCharts(Buffer.from("<svg/>"), { kind: "svg", diagrams: true }, { sniffed: { encoding: "utf-8", container: null }, archive: null }, pathToFileURL(file));
-    expect(out).toMatchObject({ status: "ok", result: { budgetMs: Math.floor(inlineDeadlineMs(6) * INLINE_CHART_LIMITS.softDeadlineShare) } });
+    const before = Date.now();
+    const out = await inlineCharts(Buffer.from("<svg/>"), { kind: "svg", diagrams: true }, { sniffed: { encoding: "utf-8", container: null }, archive: null }, svg, pathToFileURL(file));
+    const soft = Math.floor(inlineDeadlineMs(6) * INLINE_CHART_LIMITS.softDeadlineShare) + INLINE_CHART_LIMITS.startupMs;
+    const deadline = (out as { result: { deadline: number } }).result.deadline;
+    expect(deadline).toBeGreaterThanOrEqual(before + soft);
+    expect(deadline).toBeLessThanOrEqual(Date.now() + soft);
   }, 30_000);
 
   it("an SVG declared kind on a ZIP is skipped before any worker starts; the command finishes", async () => {
