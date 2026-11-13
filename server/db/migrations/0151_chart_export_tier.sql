@@ -9,9 +9,8 @@
 --    CLI token, connector, internal). Set server-side from the authenticated principal; existing rows are `machine`.
 --
 -- Idempotent: rows are rewritten only while they still carry `enabled` or `generatorModel`; columns and constraints are
--- guarded. NOTE: numbered 0145 (journal idx stays positional, after #355's 0141 on main) to stay clear of the open
--- PRs (#357: 0142-0143, #365: 0144, #362: 0141). Whichever PR lands later renumbers and raises its journal `when`
--- above every earlier entry.
+-- guarded. Numbered 0151, after 0150 on main (journal idx 144). Migration PRs that land later renumber after it and
+-- raise their journal `when` above every earlier entry.
 
 ALTER TABLE upload_sessions ADD COLUMN IF NOT EXISTS origin text NOT NULL DEFAULT 'machine';
 ALTER TABLE project_runs ADD COLUMN IF NOT EXISTS origin text NOT NULL DEFAULT 'machine';
@@ -26,28 +25,28 @@ BEGIN
   END IF;
 END $$;
 
-CREATE OR REPLACE FUNCTION docslurp_chart_export_tier_0145(chart jsonb) RETURNS jsonb
+CREATE OR REPLACE FUNCTION docslurp_chart_export_tier_0151(chart jsonb) RETURNS jsonb
 LANGUAGE sql IMMUTABLE AS $fn$
   SELECT (chart - 'enabled' - 'generatorModel')
     || CASE WHEN chart -> 'enabled' = 'true'::jsonb AND NOT chart ? 'tier' THEN '{"tier":"models"}'::jsonb ELSE '{}'::jsonb END
 $fn$;
 
 UPDATE projects
-SET pipeline = jsonb_set(pipeline, '{chartExport}', docslurp_chart_export_tier_0145(pipeline -> 'chartExport'))
+SET pipeline = jsonb_set(pipeline, '{chartExport}', docslurp_chart_export_tier_0151(pipeline -> 'chartExport'))
 WHERE jsonb_typeof(pipeline -> 'chartExport') = 'object'
   AND (pipeline -> 'chartExport' ? 'enabled' OR pipeline -> 'chartExport' ? 'generatorModel');
 
 UPDATE upload_sessions
-SET pipeline = jsonb_set(pipeline, '{chartExport}', docslurp_chart_export_tier_0145(pipeline -> 'chartExport'))
+SET pipeline = jsonb_set(pipeline, '{chartExport}', docslurp_chart_export_tier_0151(pipeline -> 'chartExport'))
 WHERE jsonb_typeof(pipeline -> 'chartExport') = 'object'
   AND (pipeline -> 'chartExport' ? 'enabled' OR pipeline -> 'chartExport' ? 'generatorModel');
 
 UPDATE project_runs
-SET pipeline = jsonb_set(pipeline, '{chartExport}', docslurp_chart_export_tier_0145(pipeline -> 'chartExport'))
+SET pipeline = jsonb_set(pipeline, '{chartExport}', docslurp_chart_export_tier_0151(pipeline -> 'chartExport'))
 WHERE jsonb_typeof(pipeline -> 'chartExport') = 'object'
   AND (pipeline -> 'chartExport' ? 'enabled' OR pipeline -> 'chartExport' ? 'generatorModel');
 
-DROP FUNCTION IF EXISTS docslurp_chart_export_tier_0145(jsonb);
+DROP FUNCTION IF EXISTS docslurp_chart_export_tier_0151(jsonb);
 --> statement-breakpoint
 -- 3. Per-organization cap on free-tier chart-export parser-VM runs per hour (council M1). Each run boots an unbilled VM,
 --    so an org may start at most DOCSLURP_CHART_EXPORT_FREE_VM_RUNS_PER_ORG_HOUR of them per clock hour, shared by

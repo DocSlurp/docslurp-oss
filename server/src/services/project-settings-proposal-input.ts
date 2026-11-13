@@ -9,7 +9,7 @@ import { chartExportFormatSchema, chartExportTierSchema, CHART_EXPORT_FORMATS, m
  */
 function migrateLegacyPatch(value: unknown): unknown {
   if (!value || typeof value !== "object" || Array.isArray(value)) return value;
-  // Patches saved in chat history or an ingest report before migration 0145 carry chartExport.enabled/generatorModel.
+  // Patches saved in chat history or an ingest report before migration 0151 carry chartExport.enabled/generatorModel.
   value = upgradeStoredPipelineChartExport(value);
   const vision = (value as { vision?: unknown }).vision;
   const hadLegacyVision = !!vision && typeof vision === "object" && "forceAllPages" in vision;

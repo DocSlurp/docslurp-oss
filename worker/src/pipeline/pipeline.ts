@@ -70,6 +70,8 @@ export interface CheckpointStore {
   recordPrivacyAudit?(entries: readonly PrivacyAuditEntry[]): Promise<void>;
   /** Document asset ledger and extraction level (db/document-asset-ledger.ts), in one org-scoped transaction. */
   writeDocumentAssetLedger?(write: import("../db/document-asset-ledger.js").DocumentAssetLedgerWrite): Promise<unknown>;
+  /** Pages whose image Doppler left to the host (db/document-asset-ledger.ts listHostPageImagePages); read-only, org-scoped. */
+  listHostPageImagePages?(scope: { orgId: string; documentId: string }): Promise<number[]>;
   /**
    * PII withholding for artifacts written after the document's PII stage (the first pass's figure step): whether the
    * document's recorded PII outcome withholds artifacts (it redacted or blocked), and adding URIs to its withheld list.

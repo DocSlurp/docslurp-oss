@@ -69,7 +69,7 @@ describe("project-utils", () => {
     expect(readProjectVersionSnapshot({ snapshot: { name: "Broken" } })).toBeNull();
   });
 
-  it("restores a settings snapshot saved before migration 0145 (chartExport.enabled / generatorModel mapped on read)", () => {
+  it("restores a settings snapshot saved before migration 0151 (chartExport.enabled / generatorModel mapped on read)", () => {
     const legacy = (chartExport: Record<string, unknown>) => readProjectVersionSnapshot({
       snapshot: {
         name: "Q3 earnings",

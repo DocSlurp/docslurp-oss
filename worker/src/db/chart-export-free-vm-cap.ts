@@ -27,7 +27,7 @@ export class ChartExportFreeVmCapRefused extends Error {
  *
  * The document must be one of the run's own documents (same run, project and organization, and the run in `orgId`),
  * checked in the transaction before the cap is touched; any other combination throws and reserves nothing. Migration
- * 0145's grant trigger enforces the same rule.
+ * 0151's grant trigger enforces the same rule.
  */
 export async function reserveChartExportFreeVmRun(
   sql: Sql<Record<string, unknown>>,

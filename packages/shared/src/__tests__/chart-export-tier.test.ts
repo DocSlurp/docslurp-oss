@@ -130,7 +130,7 @@ describe("chart export tier resolution", () => {
     for (const bad of ["-1", "x", "20O", "2.5"]) expect(chartExportFreeVmCap({ DOCSLURP_CHART_EXPORT_FREE_VM_RUNS_PER_ORG_HOUR: bad })).toBe(0);
   });
 
-  it("maps legacy stored keys on read (rows written before migration 0145 or by an older API)", () => {
+  it("maps legacy stored keys on read (rows written before migration 0151 or by an older API)", () => {
     expect(upgradeStoredChartExport({ enabled: true, generatorModel: null, formats: ["csv"] })).toEqual({ tier: "models", formats: ["csv"] });
     expect(upgradeStoredChartExport({ enabled: false, generatorModel: "llm://x/y" })).toEqual({});
     // An explicit tier wins over a stale `enabled` written alongside it during deploy skew.
