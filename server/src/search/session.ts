@@ -36,6 +36,8 @@ export interface PersistSearchSessionInput {
   results: readonly unknown[];
   chunks: readonly SearchSessionChunk[];
   metadata: SearchSessionMetadataInput;
+  /** Days until the session (and its result rows) expires; omitted keeps it (lean-logging.ts). */
+  expiresInDays?: number;
 }
 
 export interface SearchSessionChunk {
@@ -337,14 +339,15 @@ class SqlSearchSessionJournal implements SearchSessionJournal {
         ? client`'enc:pgp:v1:' || encode(pgp_sym_encrypt(${input.query}, ${encryptionKey}), 'base64')`
         : redactedSearchQuery(input.query);
       const sessions = await client<{ id: string; inserted: boolean }[]>`
-        insert into search_sessions (id, user_id, query, variant, result_count, metadata)
+        insert into search_sessions (id, user_id, query, variant, result_count, metadata, expires_at)
         values (
           ${this.sessionId},
           ${input.userId},
           ${storedQuery},
           ${input.variant ?? null},
           ${input.results.length},
-          ${metadataJson}::text::jsonb
+          ${metadataJson}::text::jsonb,
+          ${input.expiresInDays ? client`now() + make_interval(days => ${input.expiresInDays})` : null}
         )
         on conflict (id) do update set
           result_count = excluded.result_count,

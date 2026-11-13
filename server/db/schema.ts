@@ -1385,8 +1385,11 @@ export const searchSessions = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true, mode: "string" })
       .defaultNow()
       .notNull(),
+    /** API-key keyword and hybrid searches only (0139); the maintenance sweep deletes the session after it. */
+    expiresAt: timestamp("expires_at", { withTimezone: true, mode: "string" }),
   },
   (table) => [
+    index("search_sessions_expires_at_idx").on(table.expiresAt).where(sql`expires_at is not null`),
     index("search_sessions_user_id_created_at_idx").using(
       "btree",
       table.userId.asc().nullsLast().op("text_ops"),

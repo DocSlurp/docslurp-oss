@@ -67,6 +67,7 @@ import { adminBillingRoutes } from "./routes/admin-billing.js";
 import { adminUsersRoutes } from "./routes/admin-users.js";
 import { clientSurfaceMiddleware, clientSurfaceRecorder } from "./services/client-surface.js";
 import { drainSearchSessionWrites as drainSessionWrites } from "./search/session.js";
+import { flushSearchCharges } from "./search/lean-logging.js";
 import { billingRoutes } from "./routes/billing.js";
 import { stripeWebhookRoutes } from "./routes/stripe-webhook.js";
 import { secretsRoutes } from "./routes/secrets.js";
@@ -120,7 +121,8 @@ export { IN_PROCESS_ENV_KEY } from "./lib/client-ip.js";
 export { forwardRequest } from "./lib/forward-request.js";
 /** Commit pending write-behind search writes (sessions, usage) before the host exits; resolves after `timeoutMs` at most. */
 export async function drainSearchSessionWrites(timeoutMs?: number): Promise<void> {
-  await Promise.all([drainSessionWrites(timeoutMs), clientSurfaceRecorder.flush()]);
+  // Batched search charges (lean-logging.ts) are written here too, so a deploy does not drop them.
+  await Promise.all([drainSessionWrites(timeoutMs), clientSurfaceRecorder.flush(), flushSearchCharges()]);
 }
 
 export function createApiApp(): Hono {

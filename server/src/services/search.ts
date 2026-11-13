@@ -73,6 +73,7 @@ import {
   servableInProgressVersion,
 } from "../search/eligibility.js";
 import { queryPhraseWindows } from "../search/relevance.js";
+import { enqueueSearchCharge, leanSearchLogging } from "../search/lean-logging.js";
 import { estimateTextTokens } from "../search/token-estimate.js";
 import { backoffWords, buildFoldedBackoffTsQuery, hasNonAscii } from "../search/text-fold.js";
 import { currentSearchAdmissionGroup, withSearchSlot, type SearchAdmission } from "../search/search-limiter.js";
@@ -1694,6 +1695,11 @@ async function chargeSearch(result: SearchResponse, userId: string, searchId: st
   const projectId = result.availability?.scope?.projectId;
   if (!projectId) return;
   const llmStrategies = (result.usageEvents ?? []).some((event) => (event.outputTokens ?? 0) > 0);
+  // API-key keyword and hybrid searches are charged in batches (lean-logging.ts).
+  if (!llmStrategies && leanSearchLogging(result.searchMode)) {
+    enqueueSearchCharge({ userId, orgId: null, projectId, mode: result.searchMode! });
+    return;
+  }
   try {
     await recordUnitCharge({
       userId,
