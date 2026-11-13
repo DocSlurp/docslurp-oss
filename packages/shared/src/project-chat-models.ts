@@ -139,17 +139,25 @@ export type ChatTier = (typeof CHAT_TIERS)[number];
 export const DEFAULT_CHAT_TIER: ChatTier = "fastest";
 
 /**
- * Managed default model for each tier. Every entry is a reviewed catalog model priced under the output-price cap and
- * outside NO_AUTOMATIC_SELECTION_MODEL_FAMILIES: a tier is a category the system resolves on the caller's behalf, so
- * it counts as automatic selection (owner, 2026-11-13: balanced moved off DeepSeek V4.1 Flash to GLM 5.3 Flash,
- * standard credit tier; live peak $0.225/$0.75 per 1M across 42 endpoints, list $0.15/$0.50).
+ * Managed default model for each tier: the single constant to change. Every entry is a reviewed catalog model priced
+ * under the output-price cap and outside NO_AUTOMATIC_SELECTION_MODEL_FAMILIES (a tier is resolved for the caller, so
+ * it counts as automatic selection). Owner, 2026-11-13: fastest Claude Haiku 5.5 (p50 0.88 s), balanced GPT-6 Luna
+ * (p50 1.16 s), smart GPT-6.1 Sol; GLM 5.3 Flash stays a failover entry only.
  */
 export const CHAT_TIER_MODELS: Readonly<Record<ChatTier, ProjectChatModelId>> = {
-  fastest: "z-ai/glm-5.3-flash",
-  balanced: "z-ai/glm-5.3-flash",
+  fastest: "anthropic/claude-haiku-5.5",
+  balanced: "openai/gpt-6-luna",
   smart: "openai/gpt-6.1-sol",
 };
 assertNoAutomaticSelectionDenied("CHAT_TIER_MODELS", Object.values(CHAT_TIER_MODELS));
+
+/** Tiers whose managed model has a reviewed fast-route (`:nitro`) variant: the tiers Speed boost can run. */
+export const SPEED_BOOST_CHAT_TIERS: readonly ChatTier[] = CHAT_TIERS.filter(tier => isProjectChatModelId(`${CHAT_TIER_MODELS[tier]}:nitro`));
+
+/** The refusal for Speed boost on a tier without a fast route: it names the tiers that have one. */
+export const SPEED_BOOST_UNAVAILABLE_MESSAGE = SPEED_BOOST_CHAT_TIERS.length
+  ? `Speed boost is available for the ${SPEED_BOOST_CHAT_TIERS.join(" and ")} tier${SPEED_BOOST_CHAT_TIERS.length === 1 ? "" : "s"}. Choose ${SPEED_BOOST_CHAT_TIERS.length === 1 ? "it" : "one of them"}, or turn Speed boost off.`
+  : "Speed boost isn't available for chat right now. Turn Speed boost off.";
 
 export function isChatTier(value: unknown): value is ChatTier {
   return typeof value === "string" && (CHAT_TIERS as readonly string[]).includes(value);

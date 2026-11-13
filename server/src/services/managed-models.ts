@@ -1,34 +1,36 @@
 /**
  * Managed model settings. Callers choose DocSlurp categories (chat tiers, quality, profiles); the concrete backend
- * model behind each category is a managed setting that only platform admins can change, per project, in
- * `projects.managed_models` (migration 0141). Backend ids are recorded in usage events, traces and logs, and never
- * returned to customers.
+ * model behind a category is a managed setting that only platform admins change, per project, in
+ * `projects.managed_models` (migration 0146): `chat` (tier -> model) and `pipeline` (explicit pipeline model overrides,
+ * managed-pipeline-models.ts). Backend ids are recorded in usage events, traces and logs, and never returned to
+ * customers.
  */
+import {
+  automaticModelCallProblem,
+  embeddingModelCatalogByUri,
+  isProhibitedRoutingModelId,
+  managedPipelineOverridesSchema,
+  parseManagedPipelineOverrides,
+  policyModelId,
+  resolveAiUsagePricingWithSource,
+  resolveManagedPipeline,
+  storedManagedPipeline,
+  visionModelCatalogByUri,
+  type ManagedPipelineOverrides,
+  type ProjectChatResponse,
+} from "@docslurp/shared";
 import { CHAT_TIERS, chatTierForModel, isChatTier, type ChatTier, type ChatTierModelMap } from "@docslurp/shared/project-chat-models";
-import { isProhibitedRoutingModelId, pipelineFeaturesSchema, type ProjectChatResponse } from "@docslurp/shared";
 import { z } from "zod";
 
 import { sql } from "../db.js";
 import { managedChatModelProblem } from "../lib/chat-model-policy.js";
+import { appendAuditLog } from "./audit-log.js";
 
-/** What platform admins may set: tier → reviewed chat model. Null clears a tier back to the managed default. */
-const modelRef = z.string().trim().min(1).max(220);
-/**
- * Managed pipeline fields platform admins may set: backend text, structured-extraction, vision and embedding models,
- * including operator-declared private routes (`llm://private/<alias>/<model>` from DOCSLURP_PRIVATE_MODEL_ENDPOINTS).
- * Null clears a field back to the profile or deployment default.
- */
-const managedPipelineUpdateSchema = z.object({
-  textGeneration: z.object({ model: modelRef.nullable().optional(), models: z.record(z.string(), modelRef).optional() }).strict().optional(),
-  structuredExtraction: z.object({ model: modelRef.nullable().optional() }).strict().optional(),
-  vision: z.object({ modelUri: modelRef.nullable().optional(), remoteFallbackModelUri: modelRef.nullable().optional() }).strict().optional(),
-  embedding: z.object({ modelUri: modelRef.nullable().optional() }).strict().optional(),
-}).strict();
-
+/** What platform admins may set. In `chat`, null clears a tier back to the managed default. `pipeline` replaces the overrides (null clears them). */
 export const managedModelsUpdateSchema = z.object({
   chat: z.partialRecord(z.enum(CHAT_TIERS), z.string().trim().min(1).max(200).nullable()).optional(),
-  pipeline: managedPipelineUpdateSchema.optional(),
-}).strict().refine(value => value.chat || value.pipeline, "Send chat or pipeline");
+  pipeline: managedPipelineOverridesSchema.nullable().optional(),
+}).strict().refine(value => value.chat !== undefined || value.pipeline !== undefined, "Send chat or pipeline");
 export type ManagedModelsUpdate = z.infer<typeof managedModelsUpdateSchema>;
 
 export class ManagedModelError extends Error {
@@ -36,7 +38,7 @@ export class ManagedModelError extends Error {
   constructor(message: string) { super(message); this.name = "ManagedModelError"; }
 }
 
-/** Stored mapping, validated on read too: an entry that no longer passes review (repriced, retired) is dropped and logged. */
+/** Stored mapping, validated on read too: an entry that no longer passes review (repriced, retired, denied) is dropped and logged. */
 export function parseStoredChatTierModels(value: unknown, projectId = "?"): ChatTierModelMap | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const map: ChatTierModelMap = {};
@@ -59,60 +61,111 @@ export async function loadProjectChatTierModels(projectId: string): Promise<Chat
   return parseStoredChatTierModels(row?.chat, projectId);
 }
 
+const PRIVATE_ROUTE = /^llm:\/\/private\//i;
+
 /**
- * Platform-admin path only (routes/admin-projects.ts). Validates every model before writing anything: chat models
- * against the reviewed catalog and price cap; pipeline models through the pipeline schema (catalog URIs, operator
- * private routes) and the Pro/Ultra prohibition. An embedding model change is refused once the project has
- * documents, since their vectors would no longer match the query embedding.
+ * Why a platform admin may not pin `model` to pipeline field `path`, or null. Never automatic-selection-denied, never
+ * Pro/Ultra (normalized) and never priced at or above the cap: an override applies to callers who only chose a
+ * category. A private operator route passes (the pipeline schema checks it against the operator registry); a hosted
+ * vision or embedding model must be a reviewed catalog entry; any other hosted model needs a verified price.
  */
-export async function setProjectManagedModels(projectId: string, update: ManagedModelsUpdate, adminUserId: string): Promise<{ chat: ChatTierModelMap; pipeline?: Record<string, unknown> } | null> {
+export function managedPipelineModelProblem(path: string, model: string): string | null {
+  const policy = automaticModelCallProblem(model);
+  if (policy) return policy;
+  if (isProhibitedRoutingModelId(model)) return "prohibited model";
+  if (PRIVATE_ROUTE.test(model.trim())) return null;
+  if (path.startsWith("vision.")) return visionModelCatalogByUri[model.trim()] ? null : "not a reviewed vision model";
+  if (path.startsWith("embedding.")) return embeddingModelCatalogByUri[model.trim()] ? null : "not a reviewed embedding model";
+  const { pricingSource } = resolveAiUsagePricingWithSource({ provider: "openrouter", model: policyModelId(model) });
+  return pricingSource === "configured-fallback" ? "no verified price" : null;
+}
+
+function overrideModels(overrides: ManagedPipelineOverrides): Array<[path: string, model: string]> {
+  const out: Array<[string, string]> = [];
+  for (const [section, fields] of Object.entries(overrides)) {
+    for (const [key, value] of Object.entries((fields ?? {}) as Record<string, unknown>)) {
+      if (typeof value === "string") out.push([`${section}.${key}`, value]);
+      else if (Array.isArray(value)) for (const item of value) out.push([`${section}.${key}`, String(item)]);
+      else if (value && typeof value === "object") for (const [task, item] of Object.entries(value)) out.push([`${section}.${key}.${task}`, String(item)]);
+    }
+  }
+  return out;
+}
+
+export type ManagedModelsRecord = { chat: Record<string, string>; pipeline: ManagedPipelineOverrides | null };
+
+function chatRecord(value: unknown): Record<string, string> {
+  return value && typeof value === "object" && !Array.isArray(value) ? { ...(value as Record<string, string>) } : {};
+}
+
+/** The project's managed models as stored (platform-admin read). */
+export async function getProjectManagedModels(projectId: string): Promise<ManagedModelsRecord | null> {
+  const [row] = await sql<Array<{ chat: unknown; pipeline: unknown }>>`
+    select managed_models -> 'chat' as chat, managed_models -> 'pipeline' as pipeline from projects where id = ${projectId}
+  `;
+  if (!row) return null;
+  return { chat: chatRecord(row.chat), pipeline: parseManagedPipelineOverrides(row.pipeline, `project ${projectId}`) };
+}
+
+/**
+ * Platform-admin path only (routes/admin-projects.ts). Validates every model before writing anything, rewrites the
+ * project's stored pipeline (strip managed fields, apply the new overrides, validate), and records an audit row with
+ * the before and after values. An override that conflicts with the project's pipeline (privacy mode, catalog) is a 400.
+ */
+export async function setProjectManagedModels(
+  projectId: string,
+  update: ManagedModelsUpdate,
+  actor: { userId: string; apiKeyId?: string | null; ipAddress?: string | null },
+): Promise<ManagedModelsRecord | null> {
   for (const [tier, model] of Object.entries(update.chat ?? {})) {
     if (model === null || model === undefined) continue;
     const problem = managedChatModelProblem(model);
     if (problem) throw new ManagedModelError(`chat.${tier}: ${problem}`);
   }
-  for (const value of JSON.stringify(update.pipeline ?? {}).match(/"([^"]+)"/g) ?? []) {
-    if (isProhibitedRoutingModelId(value.slice(1, -1).replace(/^llm:\/\/openrouter\//, ""))) throw new ManagedModelError("pipeline: prohibited model");
+  for (const [path, model] of overrideModels(update.pipeline ?? {})) {
+    const problem = managedPipelineModelProblem(path, model);
+    if (problem) throw new ManagedModelError(`pipeline.${path}: ${problem}`);
   }
   return sql.begin(async (tx) => {
-    const [row] = await tx<Array<{ chat: unknown; pipeline: unknown }>>`
-      select managed_models -> 'chat' as chat, pipeline from projects where id = ${projectId} for update
+    const [row] = await tx<Array<{ org_id: string; chat: unknown; overrides: unknown; pipeline: unknown }>>`
+      select org_id, managed_models -> 'chat' as chat, managed_models -> 'pipeline' as overrides, pipeline
+      from projects where id = ${projectId} for update
     `;
     if (!row) return null;
-    const current = row.chat && typeof row.chat === "object" && !Array.isArray(row.chat) ? { ...(row.chat as Record<string, string>) } : {};
+    const beforeChat = chatRecord(row.chat);
+    const chat = { ...beforeChat };
     for (const [tier, model] of Object.entries(update.chat ?? {})) {
-      if (model === null) delete current[tier];
-      else if (model !== undefined) current[tier] = model;
+      if (model === null) delete chat[tier];
+      else if (model !== undefined) chat[tier] = model;
     }
-    let pipeline: Record<string, unknown> | undefined;
-    if (update.pipeline) {
-      if (update.pipeline.embedding?.modelUri !== undefined) {
-        const [{ count }] = await tx<Array<{ count: number }>>`select count(*)::int as count from documents where project_id = ${projectId}`;
-        if (count > 0) throw new ManagedModelError("pipeline.embedding.modelUri: the project has documents; change the embedding profile and re-index instead");
-      }
-      const stored = (row.pipeline && typeof row.pipeline === "object" ? row.pipeline : {}) as Record<string, unknown>;
-      const merged: Record<string, unknown> = { ...stored };
-      for (const [section, fields] of Object.entries(update.pipeline)) {
-        const next = { ...((stored[section] as Record<string, unknown> | undefined) ?? {}) };
-        for (const [key, value] of Object.entries(fields as Record<string, unknown>)) {
-          if (value === null && key !== "model" && key !== "remoteFallbackModelUri") delete next[key];
-          else if (value !== undefined) next[key] = value;
-        }
-        merged[section] = next;
-      }
-      const parsed = pipelineFeaturesSchema.safeParse(merged);
-      if (!parsed.success) throw new ManagedModelError(`pipeline: ${parsed.error.issues.map(issue => `${issue.path.join(".")}: ${issue.message}`).join("; ")}`);
-      pipeline = JSON.parse(JSON.stringify(parsed.data)) as Record<string, unknown>;
+    const beforeOverrides = parseManagedPipelineOverrides(row.overrides, `project ${projectId}`);
+    const overrides = update.pipeline === undefined ? beforeOverrides : (update.pipeline && Object.keys(update.pipeline).length ? update.pipeline : null);
+    if (update.pipeline?.embedding?.modelUri !== undefined) {
+      const [{ count }] = await tx<Array<{ count: number }>>`select count(*)::int as count from documents where project_id = ${projectId}`;
+      if (count > 0) throw new ManagedModelError("pipeline.embedding.modelUri: the project has documents; change the embedding profile and re-index instead");
     }
-    await tx`
-      update projects
-      set managed_models = jsonb_set(coalesce(managed_models, '{}'::jsonb), '{chat}', ${tx.json(current)}::jsonb, true)
-        ${pipeline ? tx`, pipeline = ${tx.json(pipeline as never)}` : tx``}
-      where id = ${projectId}
-    `;
-    console.info(`[managed-models] set project=${projectId} by=${adminUserId} chat=${JSON.stringify(current)} pipeline=${JSON.stringify(update.pipeline ?? null)}`);
-    return { chat: current, ...(pipeline ? { pipeline: update.pipeline as Record<string, unknown> } : {}) };
+    const resolved = resolveManagedPipeline(row.pipeline, overrides, `project ${projectId}`);
+    if (resolved.dropped.length) throw new ManagedModelError(`pipeline: ${resolved.dropped.join(", ")} conflict with the project's pipeline (privacy mode or catalog)`);
+    const stored = storedManagedPipeline(resolved.pipeline, overrides, resolved.applied);
+    const managed = { chat, ...(overrides ? { pipeline: overrides } : {}) };
+    await tx`update projects set managed_models = ${tx.json(managed as never)}, pipeline = ${tx.json(stored as never)} where id = ${projectId}`;
+    await appendAuditLog({
+      orgId: row.org_id, userId: actor.userId, projectId, apiKeyId: actor.apiKeyId ?? null,
+      action: "project.managed_models.updated", resourceType: "project-managed-models", resourceId: projectId,
+      ipAddress: actor.ipAddress ?? null,
+      metadata: { before: { chat: beforeChat, pipeline: beforeOverrides }, after: { chat, pipeline: overrides } },
+    }, tx as never);
+    return { chat, pipeline: overrides };
   });
+}
+
+/** Clone: the copy keeps the source project's managed models (an explicit admin decision about that workload). */
+export async function copyProjectManagedModels(fromProjectId: string, toProjectId: string): Promise<void> {
+  await sql`
+    update projects set managed_models = source.managed_models
+    from (select managed_models from projects where id = ${fromProjectId}) source
+    where projects.id = ${toProjectId} and source.managed_models <> '{}'::jsonb
+  `;
 }
 
 /**

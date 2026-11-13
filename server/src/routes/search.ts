@@ -45,7 +45,7 @@ import { awaitSearchSessionWrites } from "../search/session.js";
 import { randomUUID } from "node:crypto";
 import { env } from "../config.js";
 import { activeTraceparent } from "@docslurp/shared/observability";
-import { chatModelRefused, ChatModelNotAllowedError } from "../lib/chat-model-policy.js";
+import { chatModelRefused, ChatModelNotAllowedError, SpeedBoostUnavailableError } from "../lib/chat-model-policy.js";
 
 function modelNotAllowed(c: Context): Response {
   return apiErrorResponse(c, 400, "model_not_allowed", new ChatModelNotAllowedError().message);
@@ -221,6 +221,7 @@ async function handleProjectChat(c: Context, mode: "public" | "grounded") {
   } catch (error) {
     const usage = await failChatTurn(turn, chatTurnFailureReason(error, signal));
     if (error instanceof ChatModelNotAllowedError) return modelNotAllowed(c);
+    if (error instanceof SpeedBoostUnavailableError) return apiErrorResponse(c, 400, "speed_boost_unavailable", error.message);
     const failure = expectedSearchFailure(error);
     if (failure) return apiErrorResponse(c, failure.status, failure.apiCode, failure.message, usage ? { usage } : undefined);
     throw usage ? withApiErrorDetails(error, { usage }) : error;

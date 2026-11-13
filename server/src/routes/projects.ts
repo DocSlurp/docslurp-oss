@@ -38,11 +38,11 @@ import {
   isProhibitedRoutingModelId,
 } from "@docslurp/shared";
 
-import { chatModelRefused, ChatModelNotAllowedError } from "../lib/chat-model-policy.js";
+import { chatModelRefused, ChatModelNotAllowedError, SpeedBoostUnavailableError } from "../lib/chat-model-policy.js";
 import { publicProjectView } from "../lib/public-project.js";
 import { managedPipelineFieldMessage, managedPipelineModelPaths } from "@docslurp/shared";
 import { CHAT_REASONING_LEVELS, CHAT_TIERS } from "@docslurp/shared/project-chat-models";
-import { actorHasAnyApiKeyScope, getRequestActor, apiKeyCanUseProject, isFirstPartyAppActor, type RequestActor } from "../lib/request-actor.js";
+import { actorHasAnyApiKeyScope, getRequestActor, apiKeyCanUseProject, isFirstPartyAppActor, isPlatformAdminActor, type RequestActor } from "../lib/request-actor.js";
 import { requestIp, requestUserAgent } from "../lib/request-context.js";
 import { isProjectChatAgent } from "../lib/mastra.js";
 import { chatVoiceRoutes } from "./chat-voice.js";
@@ -763,7 +763,11 @@ export const projectsRoutes = new Hono()
         c.req.param("projectId"),
         userId,
       );
-      return c.json({ versions });
+      // Snapshots hold the stored pipeline of their time, model ids and private aliases included: customers get the
+      // category view (rollback drops snapshot model values too; services/projects.ts).
+      const actor = getRequestActor(c);
+      if (await isPlatformAdminActor(actor)) return c.json({ versions });
+      return c.json({ versions: versions.map((version) => ({ ...version, snapshot: version.snapshot ? publicProjectView(version.snapshot, actor) : version.snapshot })) });
     } catch (error) {
       return apiStatusError(c, 404, reportPublicError(error));
     }
@@ -1399,6 +1403,7 @@ export const projectsRoutes = new Hono()
       });
     } catch (error) {
       if (error instanceof ChatModelNotAllowedError) return apiErrorResponse(c, 400, "model_not_allowed", error.message);
+      if (error instanceof SpeedBoostUnavailableError) return apiErrorResponse(c, 400, "speed_boost_unavailable", error.message);
       throw error;
     }
 

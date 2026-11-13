@@ -1,4 +1,4 @@
-import { publicDiagnostics, publicDocumentError, publicProcessingMessage, type ApiErrorCode } from "@docslurp/shared";
+import { publicDiagnostics, publicDocumentError, publicProcessingMessage, type ApiErrorCode, resolveManagedPipeline } from "@docslurp/shared";
 import {
   planRunControlUpdate,
   runLifecycle,
@@ -33,6 +33,7 @@ import {
   type ProjectRunRow,
 } from "./run-records.js";
 import { sql } from "../db.js";
+import { loadManagedPipelineOverrides } from "./projects.js";
 import { RUN_EVENTS_CHANNEL, RunEventHub, type RunEventHubRow } from "./run-event-hub.js";
 import { env as apiEnv } from "../config.js";
 import { getPipelineTemporalSnapshot } from "../lib/temporal.js";
@@ -385,9 +386,15 @@ export async function reprocessRun(
   const liveModes = new Set(docs.filter((doc) => !doc.superseded_at && doc.indexing_mode).map((doc) => doc.indexing_mode as string));
   const adoptedMode = liveModes.size === 1 ? effectiveIndexingMode([...liveModes][0] as PipelineFeatures["indexingMode"]) : null;
 
-  // A reprocess of a partial run starts from that run's full feature set.
+  // A reprocess of a partial run starts from that run's full feature set. The run snapshot's model values are history,
+  // never configuration: they are dropped, and the project's current explicit admin overrides and defaults apply.
+  const managed = resolveManagedPipeline(
+    withoutStageSelection(original.pipeline),
+    await loadManagedPipelineOverrides(original.projectId),
+    `run ${runId}`,
+  );
   const pipelineConfig: PipelineFeatures = {
-    ...(JSON.parse(JSON.stringify(withoutStageSelection(original.pipeline))) as PipelineFeatures),
+    ...(JSON.parse(JSON.stringify(managed.pipeline)) as PipelineFeatures),
     speedBoost: options?.speedBoost === true,
     ...(adoptedMode ? { indexingMode: adoptedMode } : {}),
     ...(options?.stages?.length ? { stageSubset: [...options.stages] } : {}),

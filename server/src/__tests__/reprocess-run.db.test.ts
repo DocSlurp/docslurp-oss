@@ -194,3 +194,26 @@ describe("reprocessRun", () => {
     expect(run?.pipeline.restartFromStage).toBe("extract-markdown");
   });
 });
+
+describe("reprocess never replays a run snapshot's model values", () => {
+  it("drops raw text models and the former DeepSeek vision default, and applies the project's explicit overrides", async () => {
+    const legacy = {
+      ...defaultPipelineFeatures,
+      vision: { profile: "good-fast-hosted", modelUri: "llm://openrouter/deepseek/deepseek-v4.1-flash-1017", target: "hosted", remoteFallbackModelUri: null },
+      textGeneration: { model: "z-ai/glm-5.3-flash", models: { "document-summary": "qwen/qwen3.5-flash-02-23" } },
+      structuredExtraction: { model: "openai/gpt-6.1-sol", supportingPrompt: null, maxOutputTokens: 4096 },
+    };
+    await seedSource();
+    await sql`update project_runs set pipeline = ${sql.json(legacy as unknown as postgres.JSONValue)} where id = 'run-src'`;
+    await sql`update projects set managed_models = ${sql.json({ pipeline: { textGeneration: { model: "llm://private/gpu1/acme/text" } } })} where id = 'w'`;
+    try {
+      const run = (await reprocessRun("run-src", "u1"))?.run;
+      const [stored] = await sql<{ pipeline: Record<string, Record<string, unknown>> }[]>`select pipeline from project_runs where id = ${run!.id}`;
+      expect(stored!.pipeline.vision!.modelUri).not.toMatch(/deepseek/);
+      expect(stored!.pipeline.textGeneration).toMatchObject({ model: "llm://private/gpu1/acme/text", models: {} });
+      expect(stored!.pipeline.structuredExtraction!.model).toBeNull();
+    } finally {
+      await sql`update projects set managed_models = '{}'::jsonb where id = 'w'`;
+    }
+  });
+});

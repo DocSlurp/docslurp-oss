@@ -1,3 +1,5 @@
+import { getRequestActor, isPlatformAdminActor } from "../lib/request-actor.js";
+import { chatTierForModel } from "@docslurp/shared/project-chat-models";
 import { getRetainedVersionStorage } from "../services/billing/retained-storage.js";
 import { reportPublicError } from "../lib/public-errors.js";
 import { Hono, type Context } from "hono";
@@ -104,6 +106,18 @@ async function audit(
 function parseLimit(value: string | undefined, fallback: number): number {
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+/** byModel collapsed to chat tiers and one neutral "processing" category, without per-model cost. */
+function customerCostBreakdown<T extends { byModel: Array<{ model: string; tokens: number; costCents: number }> }>(breakdown: T) {
+  const groups = new Map<string, number>();
+  for (const row of breakdown.byModel) {
+    const tier = chatTierForModel(row.model);
+    const category = tier ? `chat:${tier}` : "processing";
+    groups.set(category, (groups.get(category) ?? 0) + row.tokens);
+  }
+  const { byModel: _byModel, ...rest } = breakdown;
+  return { ...rest, byCategory: [...groups].map(([category, tokens]) => ({ category, tokens })) };
 }
 
 export const billingRoutes = new Hono()
@@ -263,7 +277,9 @@ export const billingRoutes = new Hono()
     if (!org) {
       return apiStatusError(c, 404, "No organization found");
     }
-    return c.json(await getRunCostBreakdown({ runId: c.req.param("runId"), orgId: org.id }));
+    const breakdown = await getRunCostBreakdown({ runId: c.req.param("runId"), orgId: org.id });
+    // Backend model ids and per-model provider cost are operator data: customers get chat tiers and a neutral category.
+    return c.json(await isPlatformAdminActor(getRequestActor(c)) ? breakdown : customerCostBreakdown(breakdown));
   })
 
   // ---------------------------------------------------------------- invoices & payment methods

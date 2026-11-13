@@ -1835,9 +1835,9 @@ describe("chatProject", () => {
     });
 
     expect(response.answer).toBe("Fallback answer [1]");
-    // GPT-6 Luna (#361's failover; DeepSeek V4.1 Flash is never a failover target) is no tier's model, so customers
-    // see the turn's tier, never the backend id.
-    expect(response.debug.model).toBe("smart");
+    // The failover model (GPT-6 Luna, #361; never DeepSeek V4.1 Flash) is the balanced tier's model, so customers see
+    // "balanced": the tier word of the model that answered, never the backend id.
+    expect(response.debug.model).toBe("balanced");
     expect(generateAnthropicDocumentText).toHaveBeenNthCalledWith(
       1,
       expect.objectContaining({

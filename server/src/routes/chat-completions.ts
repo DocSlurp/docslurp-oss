@@ -24,7 +24,7 @@ import { authenticatedByRoute } from "../lib/route-auth.js";
 import { env } from "../config.js";
 import { ChatToolBlockedError } from "../services/chat-tool-error.js";
 import { isChatTurnDeadlineError } from "../services/chat-turn-deadline.js";
-import { chatModelRefused, ChatModelNotAllowedError } from "../lib/chat-model-policy.js";
+import { chatModelRefused, ChatModelNotAllowedError, SpeedBoostUnavailableError } from "../lib/chat-model-policy.js";
 import { CHAT_REASONING_LEVELS, CHAT_TIERS } from "@docslurp/shared/project-chat-models";
 
 const textContent = z.union([
@@ -255,6 +255,7 @@ export const chatCompletionsRoutes = new Hono()
       } catch (error) {
         if (isSpendBlockedError(error)) return c.json(spendBlockedBody(c, error), 402);
         if (error instanceof ChatModelNotAllowedError) return c.json(errorBody(error.message, "invalid_request_error", error.code, "docslurp.model"), 400);
+        if (error instanceof SpeedBoostUnavailableError) return c.json(errorBody(error.message, "invalid_request_error", error.code, "docslurp.speedBoost"), 400);
         if (error instanceof ChatToolBlockedError) return c.json(errorBody(error.message, "server_error", error.code), error.statusCode);
         if (isChatTurnDeadlineError(error)) return c.json(errorBody(error.message, "timeout_error", error.code), error.statusCode);
         reportPublicError(error, { operation: "chat-completions" }, c.req.raw.signal);

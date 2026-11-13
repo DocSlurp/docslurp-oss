@@ -1,3 +1,4 @@
+import { customerPipelineView } from "@docslurp/shared";
 import {
   compilePipelinePlan,
   inferExecutionStageOrder,
@@ -347,8 +348,30 @@ export function redactOperatorEvent<E extends { progress?: unknown; stats?: unkn
 }
 
 /** A run (GET /runs, the activity stream) for a caller that is not a platform operator: its stats without worker diagnostics. */
-export function redactOperatorRun<R extends { stats?: unknown }>(run: R): R {
-  return "stats" in run ? { ...run, stats: redactOperatorKeys(run.stats) } : run;
+/** Keys that name a backend model or provider: kept for platform operators, removed for customers. */
+const MODEL_KEY = /^(?:model|models|modelUri|modelId|provider|resolvedModel|resolvedProvider|decisionModels?|generatorModel|remoteFallbackModelUri)$/i;
+
+/** Removes backend model and provider keys from a stats structure, at any depth (bounded like redactOperatorKeys). */
+export function redactModelKeys<T>(value: T, depth = 0): T {
+  if (value === null || typeof value !== "object") return value;
+  if (depth >= OPERATOR_KEY_MAX_DEPTH) return null as T;
+  if (Array.isArray(value)) return value.map((item) => redactModelKeys(item, depth + 1)) as T;
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .filter(([key]) => !MODEL_KEY.test(key))
+      .map(([key, item]) => [key, redactModelKeys(item, depth + 1)]),
+  ) as T;
+}
+
+/**
+ * A run as customers read it: operator machine stats removed, backend model and provider keys removed from its stats,
+ * and the managed model fields removed from its pipeline snapshot (managed-pipeline-models.ts).
+ */
+export function redactOperatorRun<R extends { stats?: unknown; pipeline?: unknown }>(run: R): R {
+  const out: R = { ...run };
+  if ("stats" in run) out.stats = redactOperatorKeys(redactModelKeys(run.stats));
+  if ("pipeline" in run && run.pipeline) out.pipeline = customerPipelineView(run.pipeline);
+  return out;
 }
 
 /**
@@ -367,8 +390,8 @@ export function redactOperatorRunFields(snapshot: ProjectRunProgressSnapshot): P
   };
   return {
     ...snapshot,
-    run: { ...snapshot.run, stats: redactOperatorKeys(snapshot.run.stats) },
-    stages: snapshot.stages.map((stage) => ({ ...stage, stats: redactOperatorKeys(stage.stats) })),
+    run: redactOperatorRun(snapshot.run),
+    stages: snapshot.stages.map((stage) => ({ ...stage, stats: redactOperatorKeys(redactModelKeys(stage.stats)) })),
     recentEvents: snapshot.recentEvents.map(redactOperatorEvent),
     stats: redactOperatorKeys(snapshot.stats),
     progress,

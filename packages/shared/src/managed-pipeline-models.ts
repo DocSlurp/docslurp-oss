@@ -1,13 +1,23 @@
 /**
  * Managed pipeline model fields. Customers configure categories (pipeline.quality, embedding.profile,
- * vision.profile, inferenceLane, retrieval `reranker`); the backend model, host or provider behind a category is a
- * managed setting. Platform admins may still set these fields (an internal path); the public API refuses them on write
- * and omits them on read. Usage events, traces and logs keep the concrete ids.
+ * vision.profile, inferenceLane, pageRouter.router, retrieval `reranker`); the backend model, host or provider behind
+ * a category is a managed setting. The public API refuses these fields on write and omits them on read. Usage
+ * events, traces and logs keep the concrete ids.
+ *
+ * Explicit overrides only: a backend model a platform admin chose lives in `projects.managed_models.pipeline`
+ * (ManagedPipelineOverrides), written only by the admin route. Every other stored model value is legacy or a former
+ * default and is dropped (resolveManagedPipeline), so the current profile and deployment defaults always apply and a
+ * future default change reaches every project. Nothing is inferred from "differs from today's default".
  */
 import { z } from "zod";
 
 import { DEFAULT_VISION_PROFILE, embeddingProfileCatalog, visionProfileCatalog } from "./embedding.js";
-import { pipelineFeatureOverridesSchema } from "./pipeline.js";
+import {
+  DEFAULT_PAGE_ROUTER_DECISION_MODELS,
+  normalizeStoredPipelineFeatures,
+  pipelineFeatureOverridesSchema,
+  type PipelineFeatures,
+} from "./pipeline.js";
 
 /** Dotted paths under `pipeline` that name a backend model, provider or route. */
 export const MANAGED_PIPELINE_MODEL_PATHS = [
@@ -20,11 +30,14 @@ export const MANAGED_PIPELINE_MODEL_PATHS = [
   "vision.target",
   "vision.remoteFallbackModelUri",
   "visualPages.route",
+  "pageRouter.decisionModel",
+  // Removed by the chart-export free tier change (#363); managed here until then so neither PR leaves it open.
+  "chartExport.generatorModel",
 ] as const;
 export type ManagedPipelineModelPath = (typeof MANAGED_PIPELINE_MODEL_PATHS)[number];
 
 /** The categories a refusal points callers to. */
-export const MANAGED_PIPELINE_CATEGORY_HINT = "pipeline.quality (fast, auto, good), pipeline.embedding.profile, pipeline.vision.profile and pipeline.inferenceLane";
+export const MANAGED_PIPELINE_CATEGORY_HINT = "pipeline.quality (fast, auto, good), pipeline.embedding.profile, pipeline.vision.profile, pipeline.pageRouter.router and pipeline.inferenceLane";
 
 function record(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
@@ -50,14 +63,20 @@ function profileDefaults(rawPipeline: unknown, head: string): { modelUri?: strin
   return undefined;
 }
 
+function sameList(value: unknown, list: readonly string[]): boolean {
+  return Array.isArray(value) && value.length === list.length && value.every((item, index) => item === list[index]);
+}
+
 /**
- * True when a raw field value actually chooses something. Null, `{}`, the `auto` route, and a model URI or target
- * equal to what the section's profile already implies (a normalized pipeline read back and saved) choose nothing.
+ * True when a raw field value actually chooses something. Null, `{}`, the `auto` route, the default decision-model
+ * list, and a model URI or target equal to what the section's profile already implies (a normalized pipeline read
+ * back and saved) choose nothing.
  */
 function chooses(rawPipeline: unknown, path: ManagedPipelineModelPath, value: unknown): boolean {
   if (value === null || value === undefined) return false;
   if (path === "textGeneration.models") return Object.keys(record(value) ?? {}).length > 0;
   if (path === "visualPages.route") return value !== "auto";
+  if (path === "pageRouter.decisionModel") return !sameList(value, DEFAULT_PAGE_ROUTER_DECISION_MODELS);
   const [head, key] = path.split(".") as [string, string];
   const defaults = profileDefaults(rawPipeline, head);
   if (defaults && (key === "modelUri" || key === "target") && defaults[key] === value) return false;
@@ -80,54 +99,8 @@ export function managedPipelineFieldMessage(paths: readonly string[]): string {
 
 type PipelineLike = Record<string, unknown>;
 
-/**
- * Copy the stored managed fields onto a pipeline a customer just saved, whose schema defaults refilled them. A stored
- * value is kept only where the incoming field is at its default (null, `{}`, the `auto` route, or the profile's own
- * URI): public routes refuse anything else, so a non-default incoming value comes from a trusted internal caller and
- * wins. An embedding or vision model URI is carried only when it was an explicit override of the stored profile's
- * default and the profile is unchanged; otherwise the new profile's default applies.
- */
-export function carryManagedPipelineFields<T extends PipelineLike>(next: T, stored: PipelineLike | null | undefined): T {
-  if (!stored) return next;
-  const out: PipelineLike = { ...next };
-  const section = (name: string) => { const value = { ...(record(out[name]) ?? {}) }; out[name] = value; return value; };
-  const nextText = record(out.textGeneration);
-  const storedText = record(stored.textGeneration);
-  if (storedText) {
-    if ((nextText?.model ?? null) === null && storedText.model) section("textGeneration").model = storedText.model;
-    if (Object.keys(record(nextText?.models) ?? {}).length === 0 && Object.keys(record(storedText.models) ?? {}).length) {
-      section("textGeneration").models = storedText.models;
-    }
-  }
-  const storedStructured = record(stored.structuredExtraction);
-  if (storedStructured?.model && (record(out.structuredExtraction)?.model ?? null) === null) section("structuredExtraction").model = storedStructured.model;
-  const storedVisual = record(stored.visualPages);
-  const nextRoute = record(out.visualPages)?.route;
-  if (typeof storedVisual?.route === "string" && storedVisual.route !== "auto" && (nextRoute === undefined || nextRoute === "auto")) {
-    section("visualPages").route = storedVisual.route;
-  }
-  for (const [name, catalog] of [["embedding", embeddingProfileCatalog], ["vision", visionProfileCatalog]] as const) {
-    const storedSection = record(stored[name]);
-    const nextSection = record(out[name]);
-    if (!storedSection || !nextSection || nextSection.profile !== storedSection.profile) continue;
-    const defaults = (catalog as Record<string, { config: { modelUri: string } } | undefined>)[String(storedSection.profile)]?.config;
-    const storedOverride = typeof storedSection.modelUri === "string" && storedSection.modelUri !== defaults?.modelUri;
-    const nextAtDefault = nextSection.modelUri === undefined || nextSection.modelUri === defaults?.modelUri;
-    if (storedOverride && nextAtDefault) {
-      const target = section(name);
-      target.modelUri = storedSection.modelUri;
-      if (storedSection.target !== undefined) target.target = storedSection.target;
-    }
-  }
-  const storedVision = record(stored.vision);
-  if (storedVision?.remoteFallbackModelUri && (record(out.vision)?.remoteFallbackModelUri ?? null) === null) {
-    section("vision").remoteFallbackModelUri = storedVision.remoteFallbackModelUri;
-  }
-  return out as T;
-}
-
-/** A pipeline as customers read it: managed model, provider and route fields removed. */
-export function customerPipelineView<T>(pipeline: T): T {
+/** A pipeline without any managed field: what is left is the customer's categories and settings. */
+export function stripManagedPipelineFields<T>(pipeline: T): T {
   const source = record(pipeline);
   if (!source) return pipeline;
   const out: PipelineLike = { ...source };
@@ -139,6 +112,107 @@ export function customerPipelineView<T>(pipeline: T): T {
     out[head] = rest;
   }
   return out as T;
+}
+
+/** A pipeline as customers read it: managed model, provider and route fields removed. */
+export const customerPipelineView = stripManagedPipelineFields;
+
+const overrideModelRef = z.string().trim().min(1).max(220);
+
+/**
+ * Backend models a platform admin chose for one project (projects.managed_models.pipeline). The only source of a
+ * managed pipeline value; written only by the admin route, which vets each model (server managed-models.ts).
+ */
+export const managedPipelineOverridesSchema = z.object({
+  textGeneration: z.object({ model: overrideModelRef.optional(), models: z.record(z.string(), overrideModelRef).optional() }).strict().optional(),
+  structuredExtraction: z.object({ model: overrideModelRef.optional() }).strict().optional(),
+  vision: z.object({ modelUri: overrideModelRef.optional(), remoteFallbackModelUri: overrideModelRef.optional() }).strict().optional(),
+  embedding: z.object({ modelUri: overrideModelRef.optional() }).strict().optional(),
+  pageRouter: z.object({ decisionModel: z.array(overrideModelRef).min(1).max(8).optional() }).strict().optional(),
+}).strict();
+export type ManagedPipelineOverrides = z.infer<typeof managedPipelineOverridesSchema>;
+
+type OverrideEntry = { section: string; key: string; value: unknown };
+
+function overrideEntries(overrides: ManagedPipelineOverrides | null | undefined): OverrideEntry[] {
+  const entries: OverrideEntry[] = [];
+  for (const [section, fields] of Object.entries(overrides ?? {})) {
+    for (const [key, value] of Object.entries(record(fields) ?? {})) {
+      if (value !== undefined) entries.push({ section, key, value });
+    }
+  }
+  return entries;
+}
+
+function overlay(base: PipelineLike, entries: readonly OverrideEntry[]): PipelineLike {
+  const out: PipelineLike = { ...base };
+  for (const { section, key, value } of entries) out[section] = { ...(record(out[section]) ?? {}), [key]: value };
+  return out;
+}
+
+/** Parses stored overrides; an unreadable value counts as none (logged), never as a model choice. */
+export function parseManagedPipelineOverrides(value: unknown, source: string): ManagedPipelineOverrides | null {
+  if (value === null || value === undefined) return null;
+  const parsed = managedPipelineOverridesSchema.safeParse(value);
+  if (parsed.success) return Object.keys(parsed.data).length ? parsed.data : null;
+  console.error(`[managed-models] unreadable managed pipeline overrides for ${source}; ignored`);
+  return null;
+}
+
+export type ResolvedManagedPipeline = {
+  /** The effective, validated pipeline: stored categories + explicit overrides + current defaults. */
+  pipeline: PipelineFeatures;
+  /** The overrides that survived validation, as dotted paths. */
+  applied: string[];
+  /** Overrides that conflict with the rest of the pipeline (a hosted fallback under local-only, say), dropped. */
+  dropped: string[];
+};
+
+/**
+ * The effective pipeline for a stored project or run pipeline: every managed field it holds is dropped, the explicit
+ * overrides are applied, and the result is validated. An override that makes the pipeline invalid (privacy mode,
+ * template, catalog) is dropped and logged, failing closed toward the stricter customer setting.
+ */
+export function resolveManagedPipeline(
+  stored: unknown,
+  overrides: ManagedPipelineOverrides | null | undefined,
+  source: string,
+): ResolvedManagedPipeline {
+  const base = stripManagedPipelineFields(record(stored) ?? {}) as PipelineLike;
+  const entries = overrideEntries(overrides);
+  const attempt = (kept: readonly OverrideEntry[]) => normalizeStoredPipelineFeatures(overlay(base, kept) as never, source);
+  const label = (entry: OverrideEntry) => `${entry.section}.${entry.key}`;
+  if (entries.length === 0) return { pipeline: attempt([]), applied: [], dropped: [] };
+  try {
+    return { pipeline: attempt(entries), applied: entries.map(label), dropped: [] };
+  } catch {
+    const kept: OverrideEntry[] = [];
+    const dropped: string[] = [];
+    for (const entry of entries) {
+      try {
+        attempt([...kept, entry]);
+        kept.push(entry);
+      } catch {
+        dropped.push(label(entry));
+      }
+    }
+    console.warn(`[managed-models] dropped overrides for ${source} that conflict with its pipeline: ${dropped.join(", ")}`);
+    return { pipeline: attempt(kept), applied: kept.map(label), dropped };
+  }
+}
+
+/**
+ * What a project row stores: the effective pipeline without any managed field, plus the overrides that applied. Readers
+ * that query `projects.pipeline` directly then see the overrides, and the schema fills current defaults for the rest.
+ */
+export function storedManagedPipeline(
+  effective: PipelineFeatures,
+  overrides: ManagedPipelineOverrides | null | undefined,
+  applied: readonly string[],
+): PipelineLike {
+  const keep = new Set(applied);
+  const entries = overrideEntries(overrides).filter(entry => keep.has(`${entry.section}.${entry.key}`));
+  return overlay(stripManagedPipelineFields(JSON.parse(JSON.stringify(effective)) as PipelineLike), entries);
 }
 
 /**

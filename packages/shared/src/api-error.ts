@@ -1,3 +1,4 @@
+import { SPEED_BOOST_UNAVAILABLE_MESSAGE } from "./project-chat-models.js";
 import { z } from "zod";
 import { PUBLIC_ERROR_MESSAGES } from "./public-errors.js";
 import { PARSE_SOURCE_RESCAN_MESSAGE } from "./parse-source-decision.js";
@@ -66,6 +67,7 @@ export const API_ERROR_CODES = [
   "client_key_origin_not_allowed",
   "api_key_ip_not_allowed",
   "model_not_allowed",
+  "speed_boost_unavailable",
   "chat_deadline_exceeded",
   "chat_tool_failed",
   "invalid_search_scope",
@@ -169,6 +171,7 @@ export const API_ERROR_PUBLIC_MESSAGES: Record<ApiErrorCode, string> = {
   api_key_ip_not_allowed: "This API key can't be used from this IP address. Add the address or its range to the key's IP allowlist, or call from an allowed server.",
   client_key_origin_not_allowed: "This browser API key isn't allowed on this website. Add the site to the key's allowed websites (for example docs.example.com, or *.example.com for its subdomains), or call DocSlurp from your server with a server key.",
   model_not_allowed: PUBLIC_ERROR_MESSAGES.modelNotAllowed,
+  speed_boost_unavailable: SPEED_BOOST_UNAVAILABLE_MESSAGE,
   chat_deadline_exceeded: PUBLIC_ERROR_MESSAGES.chatDeadline,
   chat_tool_failed: PUBLIC_ERROR_MESSAGES.chatToolFailed,
   invalid_search_scope: PUBLIC_ERROR_MESSAGES.searchScope,

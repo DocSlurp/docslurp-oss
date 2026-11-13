@@ -6,7 +6,7 @@ vi.mock("../services/organizations.js", () => ({ getProjectAccess }));
 
 const {
   ChatModelNotAllowedError, chatEvalAccess, chatModelRefused, chatTurnNeedsEvalAccess, configuredChatEvalModels, parseChatEvalModels,
-  managedChatModelProblem, resolveChatAgentLimits, resolveChatModelRequest, resolveSpeedBoostChatModel,
+  SpeedBoostUnavailableError, managedChatModelProblem, resolveChatAgentLimits, resolveChatModelRequest, resolveSpeedBoostChatModel,
 } = await import("./chat-model-policy.js");
 const { chatAgentProviderOptions } = await import("../services/chat-mcp-agent.js");
 
@@ -42,18 +42,18 @@ describe("DOCSLURP_CHAT_EVAL_MODELS", () => {
 
 describe("chat model resolution", () => {
   it("resolves tiers to managed models and the default tier when nothing is named", () => {
-    expect(resolveChatModelRequest({ requested: undefined, isAdmin: false, evalModels })).toMatchObject({ model: "z-ai/glm-5.3-flash", source: "default", tier: "fastest" });
+    expect(resolveChatModelRequest({ requested: undefined, isAdmin: false, evalModels })).toMatchObject({ model: "anthropic/claude-haiku-5.5", source: "default", tier: "fastest" });
     expect(resolveChatModelRequest({ requested: "  ", isAdmin: false, evalModels }).source).toBe("default");
-    expect(resolveChatModelRequest({ tier: "balanced", isAdmin: false })).toMatchObject({ model: "z-ai/glm-5.3-flash", source: "tier", tier: "balanced" });
+    expect(resolveChatModelRequest({ tier: "balanced", isAdmin: false })).toMatchObject({ model: "openai/gpt-6-luna", source: "tier", tier: "balanced" });
     expect(resolveChatModelRequest({ tier: "smart", isAdmin: false })).toMatchObject({ model: "openai/gpt-6.1-sol", tier: "smart" });
     expect(resolveChatModelRequest({ tier: "smart", reasoning: "high", isAdmin: false })).toMatchObject({ reasoning: "high" });
   });
 
   it("uses the project's managed mapping for a tier", () => {
-    const tierModels = { fastest: "anthropic/claude-haiku-5.5" };
-    expect(resolveChatModelRequest({ tier: "fastest", isAdmin: false, tierModels })).toMatchObject({ model: "anthropic/claude-haiku-5.5", tier: "fastest" });
-    expect(resolveChatModelRequest({ isAdmin: false, tierModels })).toMatchObject({ model: "anthropic/claude-haiku-5.5", source: "default" });
-    expect(resolveChatModelRequest({ tier: "balanced", isAdmin: false, tierModels }).model).toBe("z-ai/glm-5.3-flash");
+    const tierModels = { fastest: "openai/gpt-6-luna" };
+    expect(resolveChatModelRequest({ tier: "fastest", isAdmin: false, tierModels })).toMatchObject({ model: "openai/gpt-6-luna", tier: "fastest" });
+    expect(resolveChatModelRequest({ isAdmin: false, tierModels })).toMatchObject({ model: "openai/gpt-6-luna", source: "default" });
+    expect(resolveChatModelRequest({ tier: "smart", isAdmin: false, tierModels }).model).toBe("openai/gpt-6.1-sol");
   });
 
   it("refuses every backend model reference from callers without eval access, catalog ids included", () => {
@@ -110,8 +110,8 @@ describe("chat model resolution", () => {
 
   it("reads the allowlist from the environment for route pre-checks", async () => {
     vi.stubEnv("DOCSLURP_CHAT_EVAL_MODELS", "xiaomi/mimo-v2.6-flash");
-    expect(await chatModelRefused({ admin: true } as never, "xiaomi/mimo-v2.6-flash")).toBe(false);
-    expect(await chatModelRefused({ admin: false } as never, "xiaomi/mimo-v2.6-flash")).toBe(true);
+    expect(await chatModelRefused({ type: "session", admin: true } as never, "xiaomi/mimo-v2.6-flash")).toBe(false);
+    expect(await chatModelRefused({ type: "session", admin: false } as never, "xiaomi/mimo-v2.6-flash")).toBe(true);
     expect(await chatModelRefused(undefined, undefined)).toBe(false);
     expect(await chatModelRefused(undefined, "unknown/model")).toBe(true);
   });
@@ -125,7 +125,7 @@ describe("chat model resolution", () => {
   });
 
   it("reads the reasoning level from an eval model reference's options", () => {
-    expect(resolveChatModelRequest({ requested: undefined, isAdmin: false })).toMatchObject({ model: "z-ai/glm-5.3-flash", reasoning: "none" });
+    expect(resolveChatModelRequest({ requested: undefined, isAdmin: false })).toMatchObject({ model: "anthropic/claude-haiku-5.5", reasoning: "none" });
     expect(resolveChatModelRequest({ requested: "llm://openrouter/deepseek/deepseek-v4.1-flash-1017?reasoning=high", isAdmin: true }))
       .toEqual({ model: "deepseek/deepseek-v4.1-flash-1017", source: "catalog", reasoning: "high", tier: null });
     expect(resolveChatModelRequest({ requested: "z-ai/glm-5.3-flash?effort=low", isAdmin: true })).toMatchObject({ model: "z-ai/glm-5.3-flash", reasoning: "low" });
@@ -175,6 +175,11 @@ describe("DOCSLURP_CHAT_EVAL_ORG_IDS", () => {
     expect(await chatEvalAccess(session, "ws-eval")).toBe(false);
     expect(getProjectAccess).not.toHaveBeenCalled();
     expect(await chatEvalAccess({ ...session, admin: true } as never, "ws-plain")).toBe(true);
+  });
+
+  it("never gives a platform admin's API key eval access: an admin key chooses tiers like any programmatic caller", async () => {
+    expect(await chatEvalAccess({ ...key("server"), admin: true } as never, "ws-plain")).toBe(false);
+    expect(await chatModelRefused({ ...key("server"), admin: true } as never, "anthropic/claude-haiku-5.5", "ws-plain")).toBe(true);
   });
 
   it("pre-checks stream models against the turn's project", async () => {
@@ -228,8 +233,13 @@ describe("explicit Speed boost admission", () => {
     expect(resolveSpeedBoostChatModel("z-ai/glm-5.3-flash", true)).toBe("z-ai/glm-5.3-flash:nitro");
     expect(resolveSpeedBoostChatModel("z-ai/glm-5.3-flash:nitro", true)).toBe("z-ai/glm-5.3-flash:nitro");
   });
-  it.each(["openai/gpt-6-luna-pro", "arbitrary/model", "openai/gpt-6.1-sol"])("refuses unsupported boost %s before spending", (model) => {
-    expect(() => resolveSpeedBoostChatModel(model, true)).toThrow(ChatModelNotAllowedError);
+  it.each(["openai/gpt-6-luna-pro", "arbitrary/model", "openai/gpt-6.1-sol", "anthropic/claude-haiku-5.5"])("refuses unsupported boost %s before spending, naming the tiers that have one", (model) => {
+    expect(() => resolveSpeedBoostChatModel(model, true)).toThrow(SpeedBoostUnavailableError);
+    try { resolveSpeedBoostChatModel(model, true); } catch (error) {
+      expect(error).toMatchObject({ status: 400, code: "speed_boost_unavailable" });
+      expect((error as Error).message).toBe("Speed boost is available for the balanced tier. Choose it, or turn Speed boost off.");
+      expect((error as Error).message).not.toMatch(/omit model/i);
+    }
   });
 });
 

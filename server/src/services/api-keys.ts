@@ -66,7 +66,7 @@ export const API_KEY_MAX_IP_ALLOWLIST = 50;
  * Opt-in scopes; never granted by default. projects:manage renames projects and changes their settings.
  * `web` is client-key only: server keys use web tools through `search:deep`.
  */
-export const supportedApiKeyScopes = ["ingest", ...SEARCH_SCOPES, "chat", "artifacts", "web", "organizations:read", "organizations:manage", "projects:manage"] as const;
+export const supportedApiKeyScopes = ["ingest", ...SEARCH_SCOPES, "chat", "artifacts", "web", "organizations:read", "organizations:manage", "projects:manage", "admin:models"] as const;
 export const apiKeyTypes = ["server", "client"] as const;
 export type ApiKeyType = (typeof apiKeyTypes)[number];
 
@@ -420,6 +420,11 @@ function assertOrganizationKeyScopes(keyType: ApiKeyType, scopes: string[], role
   }
   if (keyType !== "client" && scopes.includes("web")) {
     throw new OrganizationError(400, "invalid_key_scope", "The web scope applies to client API keys; server keys use web tools with search:deep");
+  }
+  // admin:models reaches only the platform-admin managed-models route, which also requires the key's owner to be a
+  // platform admin (ADMIN_EMAILS); a browser key can never carry it.
+  if (keyType === "client" && scopes.includes("admin:models")) {
+    throw new OrganizationError(400, "invalid_key_scope", "Client API keys cannot manage models");
   }
   if (keyType === "client" && scopes.includes("projects:manage")) {
     throw new OrganizationError(400, "invalid_key_scope", "Client API keys cannot manage projects");

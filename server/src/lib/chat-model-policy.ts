@@ -16,6 +16,7 @@ import {
   CHAT_TIER_REQUIRED_MESSAGE,
   DEFAULT_CHAT_REASONING,
   DEFAULT_CHAT_TIER,
+  SPEED_BOOST_UNAVAILABLE_MESSAGE,
   chatTierForModel,
   chatTierModel,
   isProjectChatModelId,
@@ -40,6 +41,17 @@ export class ChatModelNotAllowedError extends Error {
   constructor() {
     super(CHAT_TIER_REQUIRED_MESSAGE);
     this.name = "ChatModelNotAllowedError";
+  }
+}
+
+/** Speed boost asked for on a tier whose model has no fast route. HTTP 400 `speed_boost_unavailable`, naming the tiers that have one. */
+export class SpeedBoostUnavailableError extends Error {
+  readonly status = 400 as const;
+  readonly statusCode = 400 as const;
+  readonly code = "speed_boost_unavailable" as const;
+  constructor() {
+    super(SPEED_BOOST_UNAVAILABLE_MESSAGE);
+    this.name = "SpeedBoostUnavailableError";
   }
 }
 
@@ -94,7 +106,9 @@ export function configuredChatEvalOrgIds(raw = process.env.DOCSLURP_CHAT_EVAL_OR
  */
 export async function chatEvalAccess(actor: RequestActor | undefined, projectId: string | undefined): Promise<boolean> {
   if (!actor) return false;
-  if (await isPlatformAdminActor(actor)) return true;
+  // A platform admin's own browser session only: an admin's API key is a programmatic caller like any other, so it
+  // chooses tiers (council L1). Ops-configured eval orgs below keep server-key access for evaluation harnesses.
+  if (actor.type === "session" && await isPlatformAdminActor(actor)) return true;
   const orgIds = configuredChatEvalOrgIds();
   if (!orgIds.size || !projectId) return false;
   if (actor.type === "apiKey" && actor.apiKey.keyType !== "server") return false;
@@ -212,7 +226,8 @@ export async function chatModelRefused(actor: RequestActor | undefined, model: s
  * honoured as named.
  */
 export function resolveSpeedBoostChatModel(model: string, enabled: boolean = false): string {
-  if ((model.endsWith(":nitro") && !enabled) || (enabled && !isSpeedBoostEligible(model))) throw new ChatModelNotAllowedError();
+  if (model.endsWith(":nitro") && !enabled) throw new ChatModelNotAllowedError();
+  if (enabled && !isSpeedBoostEligible(model)) throw new SpeedBoostUnavailableError();
   const swap = enabled ? SPEED_BOOST_MODEL_SWAPS[model] : undefined;
   return (swap && !isAutomaticSelectionDenied(swap) ? swap : undefined) ?? speedBoostModel(model, enabled);
 }
