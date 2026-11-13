@@ -4,6 +4,7 @@
  */
 import { CHART_TYPES, DIAGRAM_TYPES, VISUAL_SPEC_LIMITS, type ChartExportFormat } from "@docslurp/shared";
 
+import { CHART_EXPORT_LIMITS } from "./config.js";
 import type { VisualKind } from "./types.js";
 
 const CHART_SHAPE = `{"kind":"chart","chartType":one of ${JSON.stringify(CHART_TYPES)},"title":string|null,` +
@@ -69,46 +70,31 @@ export function specPrompt(kind: VisualKind | null, options: PromptOptions = {})
 }
 
 /**
- * A chart prompt split for prompt caching: `stable` is fixed text (identical for every visual of a kind, never document
- * data) and is sent before the image as the cacheable prefix; `request` is per-visual text (a geometry digest, a
- * previous answer) and is sent after the image. `promptText` is the whole prompt, as bounded and priced.
- */
-export interface ChartPromptParts {
-  stable: string;
-  request?: string;
-}
-
-export function promptText(parts: ChartPromptParts): string {
-  return parts.request ? `${parts.stable}\n\n${parts.request}` : parts.stable;
-}
-
-/**
  * Derived mode with a geometry digest (`svg-assisted`): the numbers come from the digest, the model only names and
- * types what it sees. The digest is our own bounded text built from parsed geometry, never raw SVG. The spec rules
- * come first (stable), the digest after the image (per visual).
+ * types what it sees. The digest is our own bounded text built from parsed geometry, never raw SVG.
  */
-export function assistedSpecPrompt(kind: VisualKind | null, digest: string, options: PromptOptions = {}): ChartPromptParts {
-  return {
-    stable: specPrompt(kind, options),
-    request: [
-      "Measured geometry of this visual (axis scales, tick labels and the value of every mark, read from the vector source):",
-      digest,
-      "Use these measured values as the data: do not re-estimate any number the digest gives. Use the image to name the " +
-        "chart type, series, axes, units and title, and to match each measured mark to its series and category.",
-    ].join("\n\n"),
-  };
+export function assistedSpecPrompt(kind: VisualKind | null, digest: string, options: PromptOptions = {}): string {
+  return [
+    kindLine(kind, options),
+    "Measured geometry of this visual (axis scales, tick labels and the value of every mark, read from the vector source):",
+    digest,
+    "Use these measured values as the data: do not re-estimate any number the digest gives. Use the image to name the " +
+      "chart type, series, axes, units and title, and to match each measured mark to its series and category.",
+    shapeFor(kind, options),
+    FIDELITY,
+    LIMITS,
+    "Return only the JSON object, with no prose and no code fence.",
+  ].join("\n\n");
 }
 
 /** One repair retry after an invalid spec: the problem is ours (schema text), never provider error text. */
-export function repairPrompt(kind: VisualKind | null, previous: string, problem: string, options: PromptOptions = {}): ChartPromptParts {
-  return {
-    stable: specPrompt(kind, options),
-    request: [
-      "Your previous answer was not a valid JSON object of the required shape.",
-      `Problem: ${problem}`,
-      `Previous answer (truncated):\n${previous.slice(0, 4000)}`,
-    ].join("\n\n"),
-  };
+export function repairPrompt(kind: VisualKind | null, previous: string, problem: string, options: PromptOptions = {}): string {
+  return [
+    "Your previous answer was not a valid JSON object of the required shape.",
+    `Problem: ${problem}`,
+    `Previous answer (truncated):\n${previous.slice(0, CHART_EXPORT_LIMITS.maxRepairEchoChars)}`,
+    specPrompt(kind, options),
+  ].join("\n\n");
 }
 
 const DIRECT: Record<ChartExportFormat, (kind: VisualKind | null) => string> = {

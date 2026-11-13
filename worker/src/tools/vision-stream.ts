@@ -211,8 +211,9 @@ export function alternateRouteBody(
   if (kind === "refusal" && preferred) {
     const order = preferred.order.filter((p) => !sameProvider(p, failingProvider));
     if (order.length > 0) {
-      // The retry route replaces failure-based ignores, but an org's China-provider restriction stays.
-      const { ignore, ...rest } = existing;
+      // The retry route replaces the first attempt's routing (its allowlist, sort and failure-based ignores); an org's
+      // China-provider restriction and the price ceiling stay.
+      const { ignore, only: _only, sort: _sort, ...rest } = existing;
       const kept = Array.isArray(ignore) ? ignore.filter((p) => (CHINA_PROVIDER_SLUGS as readonly unknown[]).includes(p)) : [];
       return { ...body, provider: { ...rest, order, allow_fallbacks: preferred.allow_fallbacks, ...(kept.length ? { ignore: kept } : {}) } };
     }
@@ -482,6 +483,13 @@ export interface GuardedCompletionArgs {
    * retries, the streaming fallback, the alternate-route retry); null only outside a run (benchmarks).
    */
   gate: VisionRequestGate | null;
+  /**
+   * One attempt only, and an answer cut off at its output cap (`finish_reason=length`) is returned, not retried or
+   * rejected: the caller decides what a cut-off means (chart export retries once at a larger cap). Any other rejected
+   * outcome (refusal, degenerate, provider error) throws after that one attempt. The caller sends no streaming body
+   * (no streaming fallback attempt), so the call is exactly one billed request.
+   */
+  singleAttempt?: boolean;
 }
 
 export interface GuardedCompletion {
@@ -683,7 +691,8 @@ export async function runGuardedChatCompletion(args: GuardedCompletionArgs): Pro
     );
   };
 
-  for (let index = 1; index <= 2; index++) {
+  const maxAttempts = args.singleAttempt ? 1 : 2;
+  for (let index = 1; index <= maxAttempts; index++) {
     let attempt: VisionAttempt;
     try {
       try {
@@ -745,9 +754,11 @@ export async function runGuardedChatCompletion(args: GuardedCompletionArgs): Pro
     log.push(summary);
     logAttempt(summary, args.model);
     if (!verdict) break;
+    // A single-attempt caller takes a cut-off answer as it is (its own tokens and finish reason).
+    if (args.singleAttempt && verdict.kind === "length") break;
     args.gate?.failed();
     console.warn(`[vision-stream] attempt ${index} rejected: ${verdict.kind} (${verdict.detail}) provider=${attempt.provider ?? "unknown"}`);
-    if (index === 2) throw rejected(index, verdict);
+    if (index === maxAttempts) throw rejected(index, verdict);
     if (args.openRouter) {
       const next = alternateRouteBody(args.body, attempt.provider, verdict.kind, args.preferredRetryRoute);
       if (!next) {

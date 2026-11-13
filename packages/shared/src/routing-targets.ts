@@ -1,3 +1,4 @@
+import { isAutomaticSelectionDenied } from "./automatic-model-selection.js";
 import type { AssignmentRole, DecisionModel, RoutingTarget } from "./page-routing.js";
 import {
   DECISION_MODEL_SCHEMA_VERSION,
@@ -64,6 +65,7 @@ export interface BuildRoutingTargetCatalogInput {
 export type RoutingAdmissionRejectionReason =
   | "non-free-disabled"
   | "prohibited-model"
+  | "automatic-selection-denied"
   | "output-price-too-high"
   | "missing-price"
   | "no-image-input"
@@ -323,6 +325,11 @@ export function buildRoutingTargetCatalog(
     const idsToCheck = [candidate.id, model].filter((v): v is string => !!v);
     if (idsToCheck.some(isProhibitedRoutingModelId)) {
       reject(candidate.id, "prohibited-model", "Pro/Ultra models are prohibited");
+      continue;
+    }
+    // The page router picks among admitted targets on its own: a model that is never selected automatically is never one.
+    if (idsToCheck.some(isAutomaticSelectionDenied)) {
+      reject(candidate.id, "automatic-selection-denied", "never selected automatically (automatic-model-selection.ts)");
       continue;
     }
 

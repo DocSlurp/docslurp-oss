@@ -91,6 +91,7 @@ export * from "./openrouter-prompt-cache.js";
 export * from "./chat-model-prompts.js";
 export * from "./openrouter-routing.js";
 export * from "./provider-pools.js";
+export * from "./automatic-model-selection.js";
 export * from "./provider-tiers.js";
 export * from "./tier-options.js";
 export * from "./provider-regions.js";

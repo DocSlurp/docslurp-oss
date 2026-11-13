@@ -23,9 +23,11 @@ import {
   DETERMINISTIC_STANDALONE_MIN_CONFIDENCE,
   FORMAT_MODE,
   MODEL_CONFIDENCE,
+  answerHitOutputCap,
   formatsFor,
+  repairOutputTokenCap,
 } from "./config.js";
-import { assistedSpecPrompt, directPrompt, promptText, repairPrompt, specPrompt, type ChartPromptParts } from "./prompts.js";
+import { assistedSpecPrompt, directPrompt, repairPrompt, specPrompt } from "./prompts.js";
 import { renderVisual } from "./render-adapter.js";
 import { sanitizeFormatOutput, unfence } from "./sanitize.js";
 import type {
@@ -236,11 +238,16 @@ export async function exportVisual(args: ExportVisualArgs): Promise<ExportVisual
   let kind: VisualKind | null = args.candidate.kind ?? det?.partial.kind ?? null;
   let servedModel: string | null = null;
 
-  const call = async (purpose: ChartModelPurpose, prompt: ChartPromptParts, format: ChartExportFormat | null): Promise<ChartModelResponse | null> => {
+  const call = async (
+    purpose: ChartModelPurpose,
+    prompt: string,
+    format: ChartExportFormat | null,
+    maxOutputTokens: number = CHART_EXPORT_LIMITS.maxOutputTokensPerCall,
+  ): Promise<ChartModelResponse | null> => {
     if (args.canCallModel && !args.canCallModel()) return null;
     try {
       const response = await client.complete({
-        modelUri, prompt: promptText(prompt), ...(prompt.request ? { requestText: prompt.request } : {}), image, pageNumber: args.candidate.pageNumber, purpose, ...(format ? { format } : {}), ...(args.signal ? { signal: args.signal } : {}),
+        modelUri, prompt, image, pageNumber: args.candidate.pageNumber, purpose, maxOutputTokens, ...(format ? { format } : {}), ...(args.signal ? { signal: args.signal } : {}),
       });
       servedModel = response.model;
       calls.push({
@@ -268,18 +275,28 @@ export async function exportVisual(args: ExportVisualArgs): Promise<ExportVisual
   let spec: VisualSpec | null = null;
   let confidence = source === "svg-assisted" ? MODEL_CONFIDENCE["svg-assisted"] : MODEL_CONFIDENCE.vision;
 
-  // Rungs 2/3, derived: one spec call (+ one repair), rendered to every derived format.
+  // Rungs 2/3, derived: one spec call (+ one bounded second call), rendered to every derived format. The second call is
+  // either one retry at a larger output cap when the spec was cut off at its cap, or one repair of an invalid spec, never
+  // both: a read makes at most two derived calls, each under its own output cap (CHART_EXPORT_LIMITS).
   if (derivedFormats.length > 0 || (directFormats.length > 0 && kind === null)) {
     // A project without diagrams asks for charts only, so a diagram is answered `none` instead of a full spec.
     const promptOptions = { chartsOnly: !args.config.diagrams };
-    const prompt: ChartPromptParts = digest ? assistedSpecPrompt(kind, digest, promptOptions) : { stable: specPrompt(kind, promptOptions) };
+    const prompt = digest ? assistedSpecPrompt(kind, digest, promptOptions) : specPrompt(kind, promptOptions);
     const first = await call("spec", prompt, null);
     let parsed = first ? parseSpecAnswer(first.text) : null;
     if (first) record(first, "spec", null, !!parsed && !("error" in parsed));
     if (parsed && "none" in parsed) return { visual: null, calls };
     let summary: string | null = parsed && "error" in parsed ? parsed.summary : null;
-    if (first && parsed && "error" in parsed) {
-      const repaired = await call("repair", repairPrompt(kind, first.text, parsed.error, promptOptions), null);
+    if (first && parsed && "error" in parsed && answerHitOutputCap(first, CHART_EXPORT_LIMITS.maxOutputTokensPerCall)) {
+      // Cut off at the cap: a repair would echo a truncated answer and be cut off the same way. One retry of the spec
+      // at the larger cap instead, and no further call.
+      const expanded = await call("expand", prompt, null, CHART_EXPORT_LIMITS.maxExpandedOutputTokens);
+      parsed = expanded ? parseSpecAnswer(expanded.text) : parsed;
+      if (expanded) record(expanded, "expand", null, !("error" in parsed));
+      if ("none" in parsed) return { visual: null, calls };
+      if ("error" in parsed) summary = parsed.summary ?? summary;
+    } else if (first && parsed && "error" in parsed) {
+      const repaired = await call("repair", repairPrompt(kind, first.text, parsed.error, promptOptions), null, repairOutputTokenCap(first.outputTokens));
       parsed = repaired ? parseSpecAnswer(repaired.text) : parsed;
       if (repaired) record(repaired, "repair", null, !("error" in parsed));
       if ("none" in parsed) return { visual: null, calls };
@@ -309,7 +326,7 @@ export async function exportVisual(args: ExportVisualArgs): Promise<ExportVisual
 
   // Direct formats: one call each, validated per format.
   for (const format of formatsFor(args.config, kind).filter((f) => modes[f] === "direct")) {
-    const response = await call("direct", { stable: directPrompt(format, kind) }, format);
+    const response = await call("direct", directPrompt(format, kind), format);
     if (!response) {
       skipped.push({ format, reason: "generator-failed" });
       continue;
