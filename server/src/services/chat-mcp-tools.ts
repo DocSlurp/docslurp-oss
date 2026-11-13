@@ -72,6 +72,8 @@ export interface ChatToolCallDetail extends ChatToolActivity {
 function modelQueries(supplied: Record<string, unknown>): string[] {
   const items = Array.isArray(supplied.queries) ? supplied.queries : [supplied];
   return items.slice(0, 20).map(item => item && typeof item === "object" ? (item as { q?: unknown }).q : undefined)
+    // A keyword fan-out (array q) is labelled by its queries joined.
+    .map(q => Array.isArray(q) && q.every(term => typeof term === "string") ? q.join(" · ") : q)
     .filter((q): q is string => typeof q === "string").map(q => q.slice(0, 1000));
 }
 
@@ -586,10 +588,15 @@ export function createChatMcpTools(args: {
           const { project: _project, projectId: _projectId, ...rest } = value as Record<string, unknown>;
           return rest;
         };
-        const modelSupplied = withoutProject(supplied);
+        // Chat turns run searches inside the answer's price and the turn's tool budget, which count one search per
+        // query: a keyword fan-out (array q) is sent as its joined text instead.
+        const joinFanout = (value: Record<string, unknown>) => Array.isArray(value.q)
+          ? { ...value, q: value.q.filter((term): term is string => typeof term === "string").join(" ") }
+          : value;
+        const modelSupplied = definition.id === "search" ? joinFanout(withoutProject(supplied)) : withoutProject(supplied);
         const body = definition.id === "search"
           ? Array.isArray(supplied.queries)
-            ? { ...modelSupplied, concurrency, queries: (supplied.queries as unknown[]).map(q => ({ ...withoutProject(q), ...searchDefaults, project: args.projectId })) }
+            ? { ...modelSupplied, concurrency, queries: (supplied.queries as unknown[]).map(q => ({ ...joinFanout(withoutProject(q)), ...searchDefaults, project: args.projectId })) }
             : { ...modelSupplied, ...searchDefaults, project: args.projectId }
           : { ...modelSupplied, project: args.projectId };
         const queries = definition.id === "search" ? modelQueries(supplied) : undefined;

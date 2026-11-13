@@ -46,6 +46,7 @@ import { vmOnlyParsing } from "../lib/vm-only-parsing.js";
 import type { CommandRunner } from "../tools/runner.js";
 import { resolveScriptsDir } from "../tools/scripts-dir.js";
 import { TABLE_ROUTING_MAX_PAGES } from "./table-routing-guest.js";
+import { GUEST_NODE_FLAGS } from "../sandbox/guest-node-flags.js";
 
 const MAX_BATCH_BYTES = 32 * 1024 * 1024;
 const MAX_RESULT_BYTES = 64 * 1024 * 1024;
@@ -117,7 +118,7 @@ async function runGuest(pages: string[], runner: Pick<CommandRunner, "run">, sig
   try {
     const input = path.join(dir, "pages.json"), output = path.join(dir, "scans.json");
     await writeFile(input, JSON.stringify(pages), { mode: 0o600 });
-    await runner.run({ binary: "node", args: [path.join(resolveScriptsDir(), "table-routing.mjs"), input, output], available: true, readOnlyInputs: true, timeoutMs: 60_000 }, signal);
+    await runner.run({ binary: "node", args: [...GUEST_NODE_FLAGS, path.join(resolveScriptsDir(), "table-routing.mjs"), input, output], available: true, readOnlyInputs: true, timeoutMs: 60_000 }, signal);
     if ((await stat(output)).size > MAX_RESULT_BYTES) throw new Error("table routing result exceeds limit");
     const parsed = JSON.parse(await readFile(output, "utf8")) as unknown;
     if (!Array.isArray(parsed) || parsed.length !== pages.length) throw new Error("invalid table routing result");

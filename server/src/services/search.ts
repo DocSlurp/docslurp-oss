@@ -35,10 +35,11 @@ import {
 
 import { sql, type SqlClient } from "../db.js";
 import { recordUnitCharge } from "../lib/ai-usage.js";
+import { writeBehindWithinCap } from "../lib/billed-write-behind.js";
 import { currentChatTurn } from "../lib/chat-turn-context.js";
 import { effectiveSearchMode } from "../search/search-mode.js";
 import { consumeSearchModeLimit } from "../search/search-mode-limits.js";
-import { currentRequestSignal } from "../lib/request-context.js";
+import { currentRequestOrgId, currentRequestSignal } from "../lib/request-context.js";
 import { jsonRecord } from "../lib/json-record.js";
 import { lanceDbFullTextSearch, lanceDbVectorSearch, warmLanceDbSearch, type LanceDbSearchHit } from "../search/lancedb.js";
 import { decodeLanceChunkHydration } from "@docslurp/shared/lancedb-hydration";
@@ -73,7 +74,7 @@ import {
   lexicalSearchableDocument,
   servableInProgressVersion,
 } from "../search/eligibility.js";
-import { queryPhraseWindows } from "../search/relevance.js";
+import { lexicalRelevance, phraseRelevance, queryPhraseWindows } from "../search/relevance.js";
 import { enqueueSearchCharge, leanSearchLogging } from "../search/lean-logging.js";
 import { estimateTextTokens } from "../search/token-estimate.js";
 import { backoffWords, buildFoldedBackoffTsQuery, hasNonAscii } from "../search/text-fold.js";
@@ -115,6 +116,11 @@ export interface SearchChunk {
    * OR backoff (may match on one term), "phrase" from the three-word phrase query.
    */
   lexicalMatch?: "partial" | "phrase";
+  /**
+   * Keyword fan-out: relevance (0..1) against the queries that retrieved this chunk, the best of them. Relevance
+   * scoring uses it instead of measuring against the fan-out's joined text (search/relevance.ts).
+   */
+  queryRelevance?: number;
   filename: string;
   pageNumbers: number[];
   blockIds: string[];
@@ -186,10 +192,164 @@ export interface SearchOptions {
    */
   searchMode?: SearchMode;
   /**
+   * Keyword fan-out (an array `q`): in keyword mode, one BM25 query per item, run in parallel under this one
+   * search's slot and scope and fused by reciprocal rank. The search's `query` is the items joined.
+   */
+  keywordQueries?: string[];
+  /**
    * Relevance floor, 0..1: results whose raw relevance is lower are dropped.
    * 0 disables it. Omitted: the project default, else SEARCH_MIN_SCORE.
    */
   minScore?: number;
+}
+
+export interface KeywordQueryOutcome {
+  q: string;
+  /** Chunks this query matched before fusion (at most the search's candidate limit). */
+  hits: number;
+}
+
+/** Parallel BM25 queries per keyword fan-out (SEARCH_KEYWORD_FANOUT_CONCURRENCY, default 16). */
+function keywordFanoutConcurrency(): number {
+  const parsed = Number(process.env.SEARCH_KEYWORD_FANOUT_CONCURRENCY);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? Math.min(parsed, 100) : 16;
+}
+
+/**
+ * Postgres full-text queries all keyword fan-outs in this process may run at once
+ * (SEARCH_KEYWORD_FANOUT_POSTGRES_CONCURRENCY, default 4). It is taken where Postgres actually runs: phrase and
+ * negation terms, the Postgres fallback when native BM25 is unavailable or misses, and documents not yet in LanceDB.
+ */
+function keywordFanoutPostgresConcurrency(): number {
+  const parsed = Number(process.env.SEARCH_KEYWORD_FANOUT_POSTGRES_CONCURRENCY);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? Math.min(parsed, 64) : 4;
+}
+
+let fanoutPostgresActive = 0;
+const fanoutPostgresQueue: Array<() => void> = [];
+
+export async function withKeywordFanoutPostgresSlot<T>(fn: () => Promise<T>): Promise<T> {
+  if (fanoutPostgresActive >= keywordFanoutPostgresConcurrency()) {
+    await new Promise<void>((resolve) => { fanoutPostgresQueue.push(resolve); });
+  } else {
+    fanoutPostgresActive += 1;
+  }
+  try {
+    return await fn();
+  } finally {
+    const next = fanoutPostgresQueue.shift();
+    // The slot passes straight to the next waiter; otherwise it is released.
+    if (next) next(); else fanoutPostgresActive -= 1;
+  }
+}
+
+/** Shared by every leg of one fan-out: the first failure anywhere stops all of them from starting queries. */
+interface FanoutFailure { failure: { error: unknown } | null }
+
+/**
+ * Runs `fn` over `items`, at most `limit` at once. After the first failure (in this call or any call sharing
+ * `state`) no further item starts; the call waits for the ones already running and then rethrows.
+ */
+async function mapWithLimit<T, R>(items: readonly T[], limit: number, fn: (item: T, index: number) => Promise<R>, state: FanoutFailure = { failure: null }): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  const worker = async () => {
+    while (!state.failure && next < items.length) {
+      const index = next++;
+      try {
+        results[index] = await fn(items[index]!, index);
+      } catch (error) {
+        state.failure ??= { error };
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  if (state.failure) throw state.failure.error;
+  return results;
+}
+
+const fanoutChunkKey = (documentId: string, chunkIndex: number) => `${documentId}\u0000${chunkIndex}`;
+
+/**
+ * Per-query candidate depth: the search's limit, shrunk so a fan-out fetches at most about 1,000 candidates in all
+ * (never fewer than 10 per query).
+ */
+function keywordFanoutDepth(limit: number, queries: number): number {
+  return Math.max(1, Math.min(limit, Math.max(10, Math.ceil(1_000 / Math.max(1, queries)))));
+}
+
+function chunkQueryRelevance(term: string, chunk: SearchChunk): number {
+  // A strict full-text hit contains every term of its own query.
+  if (chunk.lexicalMatch === undefined) return 1;
+  const haystack = [chunk.text, chunk.headingPath.join(" "), chunk.filename].join("\n");
+  return chunk.lexicalMatch === "phrase" ? phraseRelevance(term, haystack) : lexicalRelevance(term, haystack);
+}
+
+/**
+ * A keyword fan-out: each retrieval leg (BM25 chunks, page text) runs every distinct query with the caller's options
+ * (so scope and filters are the search's own), fuses the lists by reciprocal rank, scores each chunk against the
+ * queries that found it, and remembers which input queries matched which chunk.
+ */
+export function createKeywordFanout(rawTerms: readonly string[]) {
+  const terms = rawTerms.map((term) => stripNulBytes(term));
+  const matched = new Map<string, Set<number>>();
+  const hitsByLeg = new Map<string, number[]>();
+  const distinct = [...new Set(terms)];
+  const state: FanoutFailure = { failure: null };
+  const running = new Set<Promise<unknown>>();
+  return {
+    async search(leg: string, run: (term: string, depth: number) => Promise<SearchChunk[]>, limit: number): Promise<SearchChunk[]> {
+      const depth = keywordFanoutDepth(limit, distinct.length);
+      const mapped = mapWithLimit(distinct, keywordFanoutConcurrency(), (term) => run(term, depth), state);
+      running.add(mapped);
+      void mapped.catch(() => undefined).finally(() => running.delete(mapped));
+      const lists = await mapped;
+      const hits = terms.map(() => 0);
+      const best = new Map<string, number>();
+      distinct.forEach((term, distinctIndex) => {
+        const list = lists[distinctIndex]!;
+        for (const chunk of list) best.set(chunk.id, Math.max(best.get(chunk.id) ?? 0, chunkQueryRelevance(term, chunk)));
+        terms.forEach((input, index) => {
+          if (input !== term) return;
+          hits[index] = list.length;
+          for (const chunk of list) {
+            const key = fanoutChunkKey(chunk.documentId, chunk.chunkIndex);
+            const indexes = matched.get(key) ?? new Set<number>();
+            indexes.add(index);
+            matched.set(key, indexes);
+          }
+        });
+      });
+      hitsByLeg.set(leg, hits);
+      countSearchEvent(`keywordFanout:${leg}`);
+      return reciprocalRankFusion(lists).slice(0, limit)
+        .map((chunk, index) => ({ ...chunk, score: 1 / (60 + index + 1), lexicalMatch: "partial" as const, queryRelevance: best.get(chunk.id) ?? 0 }));
+    },
+    /**
+     * Waits until no leg has a query running. A failing leg makes the search reject while other legs are still
+     * finishing; the search awaits this before it returns or throws, so no fan-out work outlives its admission slot.
+     */
+    async settle(): Promise<void> {
+      if (!state.failure && running.size > 0) state.failure = { error: new Error("keyword fan-out search ended") };
+      while (running.size > 0) await Promise.allSettled([...running]);
+    },
+    annotate(response: SearchResponse): void {
+      response.keywordQueries = terms.map((q, index) => ({ q, hits: [...hitsByLeg.values()].reduce((sum, hits) => sum + hits[index]!, 0) }));
+      response.results = response.results.map((result) => {
+        const indexes = matched.get(fanoutChunkKey(result.citation.documentId, result.citation.chunkIndex));
+        return indexes ? { ...result, matchedQueries: [...indexes].sort((a, b) => a - b) } : result;
+      });
+    },
+  };
+}
+
+/** Runs the search, then (success or failure) waits for every fan-out query still running. */
+async function withFanoutSettled<T>(fanout: { settle(): Promise<void> } | null, run: () => Promise<T>): Promise<T> {
+  try {
+    return await run();
+  } finally {
+    await fanout?.settle();
+  }
 }
 
 /** What the relevance floor did to this search. */
@@ -214,6 +374,10 @@ export interface SearchResponse {
   deferred?: DeferredSearchStats;
   /** The mode the search ran in (keyword, hybrid or deep): the most the caller asked for and the key allows. */
   searchMode?: SearchMode;
+  /** Keyword fan-out: each query as sent and the chunks it matched before fusion. */
+  keywordQueries?: KeywordQueryOutcome[];
+  /** Internal: the organization the search was scoped to (billing stamps it on the charge). Not public. */
+  scopeOrgId?: string | null;
   /** Internal: the turn's calibrated vector relevance, for the chat scope decline. Not part of the public response. */
   scopeSignal?: ScopeSignal | null;
 }
@@ -1045,6 +1209,8 @@ async function nativeTextSearch(
   userId: string,
   context: NativeSearchContext,
   options: SearchOptions,
+  /** Postgres full-text search for the tail; a keyword fan-out passes one bounded by its Postgres slots. */
+  legacyTextSearch: typeof textSearch = textSearch,
 ): Promise<SearchChunk[] | null> {
   if (!nativeScopeSupported(options.filters)) return null;
   // The BM25 index has no positions and its query is plain terms: a quoted
@@ -1098,7 +1264,7 @@ async function nativeTextSearch(
   const requested = new Set(options.filters?.documentIds ?? []);
   const tailIds = tail.map((document) => document.id).filter((id) => requested.size === 0 || requested.has(id));
   if (tailIds.length === 0) return nativeChunks;
-  const tailChunks = await textSearch(query, userId, { ...options, filters: { ...options.filters, documentIds: tailIds } });
+  const tailChunks = await legacyTextSearch(query, userId, { ...options, filters: { ...options.filters, documentIds: tailIds } });
   if (nativeChunks.length === 0) return tailChunks;
   if (tailChunks.length === 0) return nativeChunks;
   return reciprocalRankFusion([nativeChunks, tailChunks]).slice(0, limit)
@@ -1675,7 +1841,10 @@ export async function hybridSearch(rawQuery: string, userId: string, options: Se
     // Search SQL is cancelled when the request (or chat turn) aborts (search/query-bounds.ts).
     const signal = currentSearchSignal() ?? getDeferredContext()?.signal ?? currentRequestSignal();
     // Per-mode key limits count root searches only (sub-searches of decomposition and multi-hop are part of one).
-    if (!options.rootSessionId) await consumeSearchModeLimit(effectiveSearchMode(options, scope.modeCeiling));
+    if (!options.rootSessionId) {
+      const searchMode = effectiveSearchMode(options, scope.modeCeiling);
+      await consumeSearchModeLimit(searchMode, searchMode === "keyword" ? options.keywordQueries?.length ?? 1 : 1);
+    }
     const { value: result, timings } = await collectSearchTimings(() => withSearchSignal(signal, () =>
       withSearchSlotTimed(signal, () => executeHybridSearch(query, userId, { ...options, rootSessionId: activity.groupId }, scope), searchAdmission(options))));
     result.timings = timings;
@@ -1707,27 +1876,36 @@ async function chargeSearch(result: SearchResponse, userId: string, searchId: st
   if (!projectId) return;
   const llmStrategies = (result.usageEvents ?? []).some((event) => (event.outputTokens ?? 0) > 0);
   // API-key keyword and hybrid searches are charged in batches (lean-logging.ts).
+  // A keyword fan-out is one search per query it ran.
+  const searches = result.keywordQueries?.length || 1;
   if (!llmStrategies && leanSearchLogging(result.searchMode)) {
-    enqueueSearchCharge({ userId, orgId: null, projectId, mode: result.searchMode! });
+    enqueueSearchCharge({ userId, orgId: null, projectId, mode: result.searchMode! }, searches);
     return;
   }
-  try {
+  const llmMode = result.searchMode ?? "deep";
+  const credits = searchCredits(searches, { llmStrategies, mode: llmMode });
+  const orgId = result.scopeOrgId ?? currentRequestOrgId() ?? null;
+  // Committed after the response within SEARCH_WRITE_BEHIND_MAX_CREDITS, retried until it lands; the id makes a retry idempotent.
+  await writeBehindWithinCap(credits, async () => {
     await recordUnitCharge({
       userId,
-      scope: { projectId, sessionId: result.sessionId },
+      // The organization is fixed now: a project deleted before a deferred write commits must still be debited.
+      scope: { projectId, orgId, sessionId: result.sessionId },
       charge: {
         id: `search:${searchId}`,
         metric: BILLABLE_UNIT_METRICS.search,
-        amount: 1,
+        amount: searches,
         unit: "search",
-        credits: searchCredits(1, { llmStrategies, mode: result.searchMode ?? "deep" }),
-        metadata: { llmStrategies, searchMode: result.searchMode ?? "deep", searchUnits: searchUnits({ llmStrategies, mode: result.searchMode ?? "deep" }) },
+        credits,
+        metadata: { llmStrategies, searchMode: llmMode, searchUnits: searchUnits({ llmStrategies, mode: llmMode }) },
       },
     });
-  } catch (error) {
+  }, {
+    // Deferred against this org's own allowance; without an org the charge is written before the response.
+    orgId,
     // A failed charge never fails the search the user already has.
-    console.error(`[search] charge failed session=${result.sessionId}: ${error instanceof Error ? error.message : String(error)}`);
-  }
+    onError: (error, attempt) => console.error(`[search] charge failed session=${result.sessionId} attempt=${attempt + 1}: ${error instanceof Error ? error.message : String(error)}`),
+  }).done;
 }
 
 async function executeHybridSearch(
@@ -1759,15 +1937,19 @@ async function executeHybridSearch(
   const nativeVectorOrLegacy = (vector: number[], options: SearchOptions, serving: IndexServing | null) => native
     ? nativeVectorSearch(vector, native, options, serving).then((chunks) => chunks ?? vectorSearch(vector, userId, native.projectId, options, serving, setup.privacyMode))
     : vectorSearch(vector, userId, setup.normalizedScope.projectId, options, serving, setup.privacyMode);
-  const nativeTextOrLegacy = (text: string, options: SearchOptions) => native
-    ? nativeTextSearch(text, userId, native, options).then((chunks) => chunks ?? textSearch(text, userId, options))
-    : textSearch(text, userId, options);
+  const nativeTextOrLegacy = (text: string, options: SearchOptions, legacy: typeof textSearch = textSearch) => native
+    ? nativeTextSearch(text, userId, native, options, legacy).then((chunks) => chunks ?? legacy(text, userId, options))
+    : legacy(text, userId, options);
+  // A keyword fan-out's Postgres legs share the process-wide fan-out Postgres slots.
+  const fanoutPostgresTextSearch: typeof textSearch = (text, user, options) => withKeywordFanoutPostgresSlot(() => textSearch(text, user, options));
   // Native search skips page branches the cached coverage says have nothing to serve.
   const pageOnlyDocuments = setup.availabilityRow?.page_only_documents;
   const skipProgressive = Boolean(native) && pageOnlyDocuments === 0;
   // Below deep: no graph, community or deferred (model-materialized) legs. Keyword: no vector leg or index warm-up either.
   const mode = setup.resolvedOptions.searchMode ?? "deep";
   const keywordOnly = mode === "keyword";
+  const keywordTerms = setup.resolvedOptions.keywordQueries;
+  const fanout = keywordOnly && keywordTerms && keywordTerms.length > 0 ? createKeywordFanout(keywordTerms) : null;
   const pageOnlyCompleted = async (): Promise<boolean> => {
     if (!native) return true;
     const embedding = resolveEmbeddingRoute(native.pipeline.embedding);
@@ -1775,7 +1957,7 @@ async function executeHybridSearch(
     return set.pageOnlyCompletedDocuments > 0;
   };
 
-  const response = await runSearchSession({
+  const response = await withFanoutSettled(fanout, () => runSearchSession({
     query,
     userId,
     options: setup.resolvedOptions,
@@ -1814,17 +1996,27 @@ async function executeHybridSearch(
           },
         })),
       textSearch: ({ query, options }) =>
-        timePhase("text", () => nativeTextOrLegacy(query, options)),
+        timePhase("text", () => fanout
+          ? fanout.search("text", (term, depth) => nativeTextOrLegacy(term, { ...options, limit: depth }, fanoutPostgresTextSearch), options.limit ?? 20)
+          : nativeTextOrLegacy(query, options)),
       graphNeighborSearch: ({ query, projectId, options }) => mode !== "deep"
         ? Promise.resolve([])
         : timePhase("graph", () => graphNeighborSearch(query, projectId, options)),
       communitySummarySearch: ({ query, projectId, options }) => mode !== "deep"
         ? Promise.resolve([])
         : timePhase("community", () => communitySummarySearch(query, projectId, options)),
+      // A keyword fan-out runs the page-text legs per query too (Postgres, on the fan-out's Postgres slots).
       progressivePageSearch: ({ query, userId, options }) => skipProgressive
         ? Promise.resolve([])
-        : timePhase("progressive", () => progressivePageSearch(query, userId, options)),
-      completedPageSearch: async (args) => args.shouldSearch && await pageOnlyCompleted() ? completedPageSearch(args) : [],
+        : timePhase("progressive", () => fanout
+          ? fanout.search("progressive", (term, depth) => withKeywordFanoutPostgresSlot(() => progressivePageSearch(term, userId, { ...options, limit: depth })), options.limit ?? 20)
+          : progressivePageSearch(query, userId, options)),
+      completedPageSearch: async (args) => {
+        if (!args.shouldSearch || !await pageOnlyCompleted()) return [];
+        return fanout
+          ? fanout.search("completed", (term, depth) => withKeywordFanoutPostgresSlot(() => completedPageSearch({ ...args, query: term, options: { ...args.options, limit: depth } })), args.options.limit ?? 20)
+          : completedPageSearch(args);
+      },
       wholeCorpusFallback,
       ...(deferredProfilesEnabled() && mode === "deep"
         ? {
@@ -1857,9 +2049,11 @@ async function executeHybridSearch(
           }
         : {}),
     },
-  });
+  }));
   // The mode the search ran in: billing categories and the public response read it.
   response.searchMode = mode;
+  fanout?.annotate(response);
+  response.scopeOrgId = setup.normalizedScope.orgId;
   return response;
 }
 

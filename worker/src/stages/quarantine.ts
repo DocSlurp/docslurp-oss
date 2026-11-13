@@ -17,6 +17,9 @@ import { runArtifactRoot } from "../lib/artifact-root.js";
 import { quarantineScanSnapshotEnabled, type CommandRunner } from "../tools/runner.js";
 import { trustedTempDownloadPattern } from "../lib/temp-file-names.js";
 import { sha256Bytes, verifyQuarantineUpload } from "../sandbox/source-integrity.js";
+import { chartExportActive, chartExportConfigOf } from "../chart-export/config.js";
+import { CHART_INLINE_SLOT, chartExportInlineEnabled, chartInlineSlotValue, inlineHasWork, type InlineChartRequest } from "../chart-export/inline.js";
+import { chartExportVmUsageEvent, deterministicSourceKind } from "../chart-export/vm-extractor.js";
 import { applyParseSource, clearParseSource, originalSourceForQuarantine } from "../lib/parse-source.js";
 
 export class QuarantineStage implements Stage {
@@ -79,7 +82,8 @@ export class QuarantineStage implements Stage {
               verifyQuarantineUpload(original, scannedSha256);
               // The API only glanced at this file; this is the first full look, before any parser.
               // One inspection of the bytes (in the parser VM in production) serves the intake check and the scan.
-              const inspection = await inspectQuarantine({ bytes, filename: document.filename, tempFile, runner: this.runner, policy: this.config, ...(signal ? { signal } : {}) });
+              const charts = inlineChartRequest(state.run.pipeline, document.mimeType, process.env);
+              const inspection = await inspectQuarantine({ bytes, filename: document.filename, tempFile, runner: this.runner, policy: this.config, ...(charts ? { charts } : {}), ...(signal ? { signal } : {}) });
               const verified = verifyIntakeFileFacts(document, inspection);
               const artifact = await scanDocumentForQuarantine({
                 inspection,
@@ -123,9 +127,29 @@ export class QuarantineStage implements Stage {
               }
               if (accepted) applyParseSource(document, decision);
               else clearParseSource(document);
+              // Inline charts stay only on an accepted document whose verified type is still the kind they were read as.
+              const verifiedMime = verified && !verified.refused ? verified.facts.mimeType : document.mimeType;
+              if (accepted && charts && inspection.charts && deterministicSourceKind(verifiedMime) === charts.kind) {
+                artifact.chartInline = { ...inspection.charts, kind: charts.kind };
+                // The inline worker's time (start-up included) is parser-VM time spent on chart export: a cost-only event,
+                // like the standalone guest's, attributed to the document. The quarantine command's own VM metering already
+                // carries the provider cost, so it rolls up as included, never twice, and is never a customer charge.
+                if (inspection.charts.status !== "skipped") {
+                  // `ms` is the guest's own measure (council r4 L3): attribution only; the event is cost-only, included, never
+                  // billable, and the quarantine command's VM time is metered with the command itself.
+                  state.usageLedger.enqueue(chartExportVmUsageEvent({ documentId: document.id, wallTimeMs: inspection.charts.ms, reason: "inline", inputs: 1, outcome: inspection.charts.status === "ok" ? "ok" : "refused", stage: "quarantine" }));
+                }
+                console.log(`[chart-export] inline document=${document.id} kind=${charts.kind} status=${inspection.charts.status} ${inspection.charts.status === "ok" ? `visuals=${inspection.charts.result.visuals.length} deferred_svgs=${(inspection.charts.result.deferred ?? []).reduce((n, d) => n + d.count, 0)} overflow=${inspection.charts.result.overflow ?? 0} ms=${inspection.charts.ms}` : `reason=${inspection.charts.reason}`}`);
+              }
 
               await this.storage.putArtifactJson(key, artifact);
               const artifactUri = this.storage.uri(key);
+              // A free signal later stages see without a read: the slot exists only when the inline answer has something
+              // to export (or must go to the standalone guest). It points at this artifact; no other file is written.
+              // The value says which: `#chart-inline=work` or `=none`. Quarantine re-runs in every run, so the slot is rewritten
+              // each time and a stale "work" from an earlier run cannot survive (the ledger has no delete).
+              if (artifact.chartInline) state.artifactLedger.recordDocument(document.id, CHART_INLINE_SLOT, chartInlineSlotValue(artifactUri, inlineHasWork(artifact.chartInline)));
+              else if (state.artifactLedger.readDocument(document.id, CHART_INLINE_SLOT)) state.artifactLedger.recordDocument(document.id, CHART_INLINE_SLOT, chartInlineSlotValue(artifactUri, false));
               if (verified && !verified.refused) {
                 // Persist what the bytes are over the API's provisional record; format-detect and routing read it.
                 if (!state.store?.setDocumentFileFacts) throw new Error("file facts verified but the store cannot persist them");
@@ -154,4 +178,14 @@ export class QuarantineStage implements Stage {
       );
     });
   }
+}
+
+/**
+ * The inline chart request for a document (DOCSLURP_CHART_EXPORT_INLINE=1): only while the run's chart export tier is
+ * active and the document was declared a kind the free rungs read; null otherwise (the inspection runs as before).
+ */
+export function inlineChartRequest(pipeline: unknown, mimeType: string, env: Readonly<Record<string, string | undefined>> = process.env): InlineChartRequest | null {
+  if (!chartExportInlineEnabled(env) || !chartExportActive(pipeline, env)) return null;
+  const kind = deterministicSourceKind(mimeType);
+  return kind ? { kind, diagrams: chartExportConfigOf(pipeline, env).diagrams !== false } : null;
 }

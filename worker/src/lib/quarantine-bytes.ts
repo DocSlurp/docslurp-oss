@@ -1,6 +1,6 @@
 import path from "node:path";
 
-import { sniffFileBytes, type SniffedBytes } from "@docslurp/shared";
+import { sniffFileBytes, type SniffedBytes } from "@docslurp/shared/file-sniff";
 
 import { CLAM_SCAN_LIMITS } from "../tools/clam-limits.js";
 import { findEmbeddedContainer, inspectNestedArchives, parseZip } from "./archive-nesting.js";
@@ -22,6 +22,8 @@ export interface QuarantineInspection {
    * and whether its readers could disagree on the encryption (pdf-encryption-structure.ts, council N-H1): refused.
    */
   pdf: { encryptName: boolean; encryptConflict: boolean } | null;
+  /** Inline chart extraction's answer, when the host asked for it (chart-export/inline.ts); validated by the host. */
+  charts?: import("../chart-export/inline.js").InlineCharts;
 }
 
 export function inspectQuarantineBytes(bytes: Buffer, filename: string, policy: QuarantinePolicy): QuarantineInspection {

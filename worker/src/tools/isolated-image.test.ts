@@ -12,12 +12,12 @@ describe("isolated production image processing", () => {
   it("stages encoded bytes and runs the transformation in the parser VM", async () => {
     let requestFile = "";
     mocks.run.mockImplementation(async (plan) => {
-      requestFile = plan.args[1];
+      requestFile = plan.args.filter((a: string) => !a.startsWith("--"))[1];
       const request = JSON.parse(await readFile(requestFile, "utf8"));
       expect(request.input).toEqual({ $bytes: Buffer.from("hostile bytes").toString("base64") });
       expect(request.operations).toEqual([{ method: "rotate", args: [] }, { method: "png", args: [] }]);
       expect(request.terminal).toBe("toBuffer");
-      await writeFile(plan.args[2], JSON.stringify({ $bytes: Buffer.from("guest output").toString("base64") }));
+      await writeFile(plan.args.filter((a: string) => !a.startsWith("--"))[2], JSON.stringify({ $bytes: Buffer.from("guest output").toString("base64") }));
     });
     expect(await image(Buffer.from("hostile bytes")).rotate().png().toBuffer()).toEqual(Buffer.from("guest output"));
     expect(mocks.hostDecode).not.toHaveBeenCalled();
@@ -36,10 +36,10 @@ describe("isolated production image processing", () => {
   it("uses separate staging for concurrent tenant work", async () => {
     const seen = new Set<string>();
     mocks.run.mockImplementation(async (plan) => {
-      expect(seen.has(plan.args[1])).toBe(false);
-      seen.add(plan.args[1]);
-      const request = JSON.parse(await readFile(plan.args[1], "utf8"));
-      await writeFile(plan.args[2], JSON.stringify({ $bytes: request.input.$bytes }));
+      expect(seen.has(plan.args.filter((a: string) => !a.startsWith("--"))[1])).toBe(false);
+      seen.add(plan.args.filter((a: string) => !a.startsWith("--"))[1]);
+      const request = JSON.parse(await readFile(plan.args.filter((a: string) => !a.startsWith("--"))[1], "utf8"));
+      await writeFile(plan.args.filter((a: string) => !a.startsWith("--"))[2], JSON.stringify({ $bytes: request.input.$bytes }));
     });
     const [a, b] = await Promise.all([image(Buffer.from("tenant A")).toBuffer(), image(Buffer.from("tenant B")).toBuffer()]);
     expect(a.toString()).toBe("tenant A"); expect(b.toString()).toBe("tenant B");

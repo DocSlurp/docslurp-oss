@@ -93,7 +93,9 @@ import {
   type PageImage,
   type PreparedChartExport,
 } from "../chart-export/stage.js";
-import { quarantineChartPresence, storedRoutePlan } from "../chart-export/free-stats.js";
+import { quarantineChartFacts, storedRoutePlan } from "../chart-export/free-stats.js";
+import { CHART_INLINE_SLOT, chartInlineSlotHasWork, freeInlineMode } from "../chart-export/inline.js";
+import { FIGURE_CHARTS_SLOT, figureChartsSlotHasWork } from "../chart-export/figure-charts.js";
 import type { ChartModelClient } from "../chart-export/types.js";
 import { chartExportFreeVmCap } from "../db/chart-export-free-vm-cap.js";
 import { deterministicSourceKind } from "../chart-export/vm-extractor.js";
@@ -1706,7 +1708,12 @@ export class VisionExtractStage implements Stage {
    * rasters. Documents run one at a time under a cost cap, like the vision path, so the cap cannot be overshot.
    */
   private async runChartExportOnly(state: WorkflowState, signal?: AbortSignal): Promise<void> {
+    const freeInline = freeInlineMode(state.run.pipeline);
     await runDocuments(healthyDocuments(state), (state.run.pipeline.maxCostCents ?? 0) > 0 ? 1 : state.docConcurrency, async (document) => {
+      if (freeInline && !this.freeInlineHasWork(state, document)) {
+        console.log(`[extract-debug] stage=${this.name} document=${document.id} chart-export-skipped=free-no-signal`);
+        return;
+      }
       if (isCostCapExceeded(state)) {
         console.log(`[extract-debug] stage=${this.name} document=${document.id} chart-export-skipped=cost-cap`);
         return;
@@ -1717,6 +1724,18 @@ export class VisionExtractStage implements Stage {
           stats: { pages: 0, skipped: true, reason: "chart-export-only", selectedPages: [] },
         })));
     });
+  }
+
+  /**
+   * Free tier, inline mode: whether the pass has anything to do for this document: a previous export to replace, an
+   * inline answer with visuals (or one too big to carry inline), or figure charts from the Doppler VM (protocol 15) with
+   * visuals. Anything else does no chart work. A source quarantined before inline mode was on gets no free charts.
+   */
+  private freeInlineHasWork(state: WorkflowState, document: import("../models.js").Document): boolean {
+    // Ledger only, no reads: quarantine records the chart-inline slot exactly when its inline answer has work.
+    return Boolean(state.artifactLedger.readDocument(document.id, "chart-export"))
+      || chartInlineSlotHasWork(state.artifactLedger.readDocument(document.id, CHART_INLINE_SLOT))
+      || figureChartsSlotHasWork(state.artifactLedger.readDocument(document.id, FIGURE_CHARTS_SLOT));
   }
 
   /**
@@ -1816,6 +1835,7 @@ export class VisionExtractStage implements Stage {
               costCents: priceVisionResult(result, this.cfg),
               latencyMs: result.latencyMs,
               finishReason: result.finishReason ?? null,
+              ...promptCacheCounts(result.costMetadata),
             };
           } catch (error) {
             // Refused before admission (image above the chart limit): nothing was sent, so there is no attempt to record.
@@ -1909,9 +1929,11 @@ export class VisionExtractStage implements Stage {
     // Without routed vision, any stored plan (shadow included) still names the chart and diagram pages.
     const routedPlan = routed?.plan ?? await storedRoutePlan(this.storage, state.artifactLedger, document.id);
     const adaptive = routedPlan ? null : await this.loadAdaptiveRouting(state, document.id);
-    const presence = deterministicSourceKind(document.mimeType) === "office"
-      ? await quarantineChartPresence(this.storage, state.artifactLedger, document.id)
-      : undefined;
+    // One quarantine artifact read: Office presence, and the inline chart answer for any chart-capable source.
+    const facts = deterministicSourceKind(document.mimeType) !== null
+      ? await quarantineChartFacts(this.storage, state.artifactLedger, document.id)
+      : null;
+    const presence = deterministicSourceKind(document.mimeType) === "office" ? facts?.presence : undefined;
     return {
       session,
       document,
@@ -1921,6 +1943,7 @@ export class VisionExtractStage implements Stage {
       routedPlan,
       legacyPages: adaptive?.pages ?? [],
       ...(presence ? { presence } : {}),
+      ...(facts?.inline ? { inline: facts.inline } : {}),
       pageImage: async (pageNumber) => {
         const [raster] = await this.rasters.renderSelectedPages({ document, runId: state.run.id, pageNumbers: [pageNumber], signal });
         if (!raster) return null;
@@ -2221,4 +2244,11 @@ async function settleAll(promises: Array<Promise<unknown>>): Promise<void> {
   const results = await Promise.allSettled(promises);
   const failed = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
   if (failed) throw failed.reason;
+}
+
+/** The prompt-cache counts a vision result's cost metadata carries (summed over its attempts), for chart usage rows. */
+function promptCacheCounts(metadata: Record<string, unknown> | undefined): { cachedInputTokens?: number; cacheWriteInputTokens?: number } {
+  const count = (value: unknown) => typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : undefined;
+  const cached = count(metadata?.cachedInputTokens), written = count(metadata?.cacheWriteInputTokens);
+  return { ...(cached ? { cachedInputTokens: cached } : {}), ...(written ? { cacheWriteInputTokens: written } : {}) };
 }

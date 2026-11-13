@@ -73,6 +73,14 @@ describe("lean search logging", () => {
     expect(lean.leanSearchHistory("keyword")).toBeNull();
   });
 
+  it("counts every query of a keyword fan-out as a search", async () => {
+    lean.enqueueSearchCharge({ userId: "u", orgId: "o", projectId: "p", mode: "keyword" }, 40);
+    lean.enqueueSearchCharge({ userId: "u", orgId: "o", projectId: "p", mode: "keyword" });
+    expect(lean.pendingSearchCharges()).toBe(41);
+    await lean.flushSearchCharges();
+    expect(charges.calls.map((call) => call.charge.amount)).toEqual([41]);
+  });
+
   it("writes one charge per key, project and mode, scoped to that key", async () => {
     for (let i = 0; i < 5; i += 1) lean.enqueueSearchCharge({ userId: "u", orgId: "o", projectId: "p", mode: "keyword" });
     lean.enqueueSearchCharge({ userId: "u", orgId: "o", projectId: "p", mode: "hybrid" });

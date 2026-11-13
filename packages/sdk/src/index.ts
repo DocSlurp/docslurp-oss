@@ -350,6 +350,8 @@ export type SearchResult = JsonObject & {
   parentText?: string;
   /** How this result was retrieved (deferred projects). */
   retrieval?: { stage: RetrievalStage; pageNumbers?: number[]; materialized?: boolean };
+  /** Keyword fan-out (array `q`): indexes into `q` of the queries this result matched. */
+  matchedQueries?: number[];
 };
 
 /** Reserved project ID for the organization's default project. */
@@ -608,7 +610,11 @@ export type SearchInput = {
    * hosted rerank and AI query strategies). Omitted: the most the key's search scope allows; never more.
    */
   mode?: "keyword" | "hybrid" | "deep";
-  q: string;
+  /**
+   * Query text, or up to 100 keyword queries run in parallel as one keyword-mode search and fused into one ranked
+   * list (`mode` must be `keyword` or omitted). Each result's `matchedQueries` lists the queries it matched.
+   */
+  q: string | string[];
   tags?: string;
   /** Project ID, slug or name; omitted: the client project. */
   project?: string;
@@ -637,6 +643,8 @@ export type SearchResponse = {
   relevanceFloor?: { minScore: number; dropped: number };
   /** The mode the search ran in: what was asked for, capped at the key's search scope. */
   mode?: "keyword" | "hybrid" | "deep";
+  /** Keyword fan-out (array `q`): each query as sent and how many chunks it matched before fusion. */
+  keywordQueries?: Array<{ q: string; hits: number }>;
   results: SearchResult[];
   sessionId: string;
   /** Present for deferred (map/visual) projects. */

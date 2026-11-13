@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { visualSpecSchema } from "@docslurp/shared";
+import { GUEST_DEFERRAL_REASONS, visualSpecSchema } from "@docslurp/shared";
 
 import { vmOnlyParsing } from "../../lib/vm-only-parsing.js";
 import { resolveScriptsDir } from "../../tools/scripts-dir.js";
@@ -10,6 +10,7 @@ import type { CommandRunner } from "../../tools/runner.js";
 import { extractDeterministicVisuals as guestExtract, type DeterministicVisualInput, type DeterministicVisualOptions } from "./index.js";
 import { CHART_EXTRACT_LIMITS } from "./limits.js";
 import type { DeterministicVisualResult } from "./types.js";
+import { GUEST_NODE_FLAGS } from "../../sandbox/guest-node-flags.js";
 
 /*
  * Host side of the deterministic chart rungs. Customer bytes are parsed only by the guest entry
@@ -51,15 +52,43 @@ function validVisual(v: unknown): boolean {
   return true;
 }
 
-/** Validate a guest result (also used on in-process results so both paths return the same shape). */
+const validEntry = (r: unknown) => !!r && typeof r === "object" && !Array.isArray(r) && Object.keys(r).sort().join(",") === "locator,reason"
+  && isStr((r as Record<string, unknown>).locator, 512) && isStr((r as Record<string, unknown>).reason, 120);
+/** A deferral is an ordinal range and a closed reason only: nothing from the input's names reaches stats. */
+const DEFERRAL_REASONS = new Set<string>(GUEST_DEFERRAL_REASONS);
+const intIn = (v: unknown, min: number, max: number) => Number.isSafeInteger(v) && (v as number) >= min && (v as number) <= max;
+const validDeferral = (r: unknown) => !!r && typeof r === "object" && !Array.isArray(r) && Object.keys(r).sort().join(",") === "count,reason,svgIndex"
+  && DEFERRAL_REASONS.has((r as Record<string, unknown>).reason as string)
+  && intIn((r as Record<string, unknown>).svgIndex, 0, 1_000_000) && intIn((r as Record<string, unknown>).count, 1, 1_000_000);
+
+/**
+ * The guest runs with V8's code generation from strings disabled (`eval`, the Function constructor): the enforcement
+ * behind the bundle build's source scan, which only guards against accidents. zod falls back to its interpreter.
+ * Only the VM guest gets it (and zod `jitless`, via guest-entry): the in-process paths below are for tests and local
+ * development, refused wherever parsing must stay in the VM (`vmOnlyParsing`), and are not this boundary.
+ */
+export { GUEST_NODE_FLAGS };
+/** How far below the run's timeout the guest stops and returns what it has (VM exec, staging and result write fit). */
+const GUEST_DEADLINE_MARGIN_MS = 15_000;
+
+/**
+ * Validate a guest result (also used on in-process results so both paths return the same shape). `deferred` is optional:
+ * the guest sends it only when it deferred something (an input past `maxSvgsPerInput`), so a result without it has
+ * exactly the earlier shape. Deploy the worker before the parser image: an older host refuses a result carrying it.
+ */
 export function validateDeterministicResult(raw: unknown): DeterministicVisualResult {
   const o = raw as Record<string, unknown> | null;
+  const keys = o && typeof o === "object" ? Object.keys(o).sort().join(",") : "";
   const ok = !!o && typeof o === "object" && !Array.isArray(o)
-    && Object.keys(o).sort().join(",") === "refusals,schemaVersion,visuals"
+    // Required keys, plus the optional `deferred` (non-empty) and `overflow` (a positive count), nothing else.
+    && keys.split(",").every((k) => ["deferred", "overflow", "refusals", "schemaVersion", "visuals"].includes(k))
+    && ["refusals", "schemaVersion", "visuals"].every((k) => k in o)
+    && (o.deferred === undefined || (Array.isArray(o.deferred) && o.deferred.length > 0 && o.deferred.length <= 1000 && o.deferred.every(validDeferral)))
+    && (o.overflow === undefined || intIn(o.overflow, 1, 1_000_000_000))
     && o.schemaVersion === "chart-export-deterministic@v1"
     && Array.isArray(o.visuals) && o.visuals.length <= CHART_EXTRACT_LIMITS.maxVisuals && o.visuals.every(validVisual)
     && Array.isArray(o.refusals) && o.refusals.length <= 1000
-    && o.refusals.every((r) => !!r && typeof r === "object" && Object.keys(r).sort().join(",") === "locator,reason" && isStr((r as Record<string, unknown>).locator, 512) && isStr((r as Record<string, unknown>).reason, 120));
+    && o.refusals.every(validEntry);
   if (!ok) throw new ChartExtractRefusedError("invalid-guest-result");
   return o as unknown as DeterministicVisualResult;
 }
@@ -109,9 +138,10 @@ export async function extractDeterministicVisualsFile(args: DeterministicFileArg
   try {
     const request = path.join(dir, "request.json");
     const output = path.join(dir, "result.json");
-    await writeFile(request, JSON.stringify({ kind: args.kind, diagrams: args.options?.diagrams !== false }), { mode: 0o600 });
+    // budgetMs: the guest returns what it has before this run's 60 s timeout (see setGuestDeadline).
+    await writeFile(request, JSON.stringify({ kind: args.kind, diagrams: args.options?.diagrams !== false, budgetMs: 60_000 - GUEST_DEADLINE_MARGIN_MS }), { mode: 0o600 });
     try {
-      await args.runner.run({ binary: "node", args: [path.join(resolveScriptsDir(), "chart-export-extract.mjs"), args.inputPath, request, output], available: true, readOnlyInputs: true, timeoutMs: 60_000 }, args.signal);
+      await args.runner.run({ binary: "node", args: [...GUEST_NODE_FLAGS, path.join(resolveScriptsDir(), "chart-export-extract.mjs"), args.inputPath, request, output], available: true, readOnlyInputs: true, timeoutMs: 60_000 }, args.signal);
     } catch (error) {
       args.signal?.throwIfAborted();
       log(`[chart-export] parser VM run failed${where} kind=${args.kind} error=${error instanceof Error ? error.name : "error"}`);
@@ -181,12 +211,12 @@ export async function extractDeterministicVisualsBatch(args: DeterministicBatchA
   try {
     const request = path.join(dir, "request.json");
     const output = path.join(dir, "result.json");
-    await writeFile(request, JSON.stringify({ kind: "svg", diagrams: args.options?.diagrams !== false, batch: args.inputPaths.length }), { mode: 0o600 });
     // argv: <first input> <request> <output> <more inputs...>: the single-input layout, extended.
     const [first, ...rest] = args.inputPaths;
     const timeoutMs = Math.min(180_000, 60_000 + 3_000 * rest.length);
+    await writeFile(request, JSON.stringify({ kind: "svg", diagrams: args.options?.diagrams !== false, batch: args.inputPaths.length, budgetMs: timeoutMs - GUEST_DEADLINE_MARGIN_MS }), { mode: 0o600 });
     try {
-      await args.runner.run({ binary: "node", args: [path.join(resolveScriptsDir(), "chart-export-extract.mjs"), first!, request, output, ...rest], available: true, readOnlyInputs: true, timeoutMs }, args.signal);
+      await args.runner.run({ binary: "node", args: [...GUEST_NODE_FLAGS, path.join(resolveScriptsDir(), "chart-export-extract.mjs"), first!, request, output, ...rest], available: true, readOnlyInputs: true, timeoutMs }, args.signal);
     } catch (error) {
       args.signal?.throwIfAborted();
       log(`[chart-export] parser VM run failed${where} kind=svg-batch inputs=${args.inputPaths.length} error=${error instanceof Error ? error.name : "error"}`);

@@ -6,6 +6,7 @@ import { markdownTables, repairMarkdownTables, scanPageTables, TABLE_HTML_UNSCAN
 import { buildAdaptiveRoutingDecisionSurface } from "../stages/classify-route.js";
 import { scanTableRoutingBatch } from "./table-routing-guest.js";
 import { repairDocumentTables, scanDocumentTables, validateTableScan } from "./table-routing-vm.js";
+import { GUEST_NODE_FLAGS } from "../sandbox/guest-node-flags.js";
 
 /** Run `fn` as the VM guest does: outside the service profile (the guest process has no production host environment). */
 function asGuest<T>(fn: () => T): T {
@@ -27,10 +28,10 @@ function vmRunner(transform?: (result: unknown[]) => unknown) {
   return {
     run: vi.fn(async (plan: { binary: string; args: string[] }) => {
       expect(plan.binary).toBe("node");
-      expect(plan.args[0]).toMatch(/table-routing\.mjs$/);
-      const pages = JSON.parse(await readFile(plan.args[1]!, "utf8"));
+      expect(plan.args[GUEST_NODE_FLAGS.length + 0]).toMatch(/table-routing\.mjs$/);
+      const pages = JSON.parse(await readFile(plan.args[GUEST_NODE_FLAGS.length + 1]!, "utf8"));
       const result = asGuest(() => scanTableRoutingBatch(pages));
-      await writeFile(plan.args[2]!, JSON.stringify(transform ? transform(result) : result));
+      await writeFile(plan.args[GUEST_NODE_FLAGS.length + 2]!, JSON.stringify(transform ? transform(result) : result));
       return { stdout: "", stderr: "" };
     }),
   };
