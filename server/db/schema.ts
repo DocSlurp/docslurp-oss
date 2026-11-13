@@ -3328,7 +3328,7 @@ export const storageMeterDays = pgTable(
     objectBytes: bigint("object_bytes", { mode: "number" }).default(0).notNull(),
     // You can use { mode: "bigint" } if numbers are exceeding js number limitations
     indexBytes: bigint("index_bytes", { mode: "number" }).default(0).notNull(),
-    // Of objectBytes, the figure bytes measured from the asset ledger (migration 0141).
+    // Of objectBytes, the figure bytes measured from the asset ledger (migration 0142).
     measuredArtifactBytes: bigint("measured_artifact_bytes", { mode: "number" }).default(0).notNull(),
     credits: numeric({ precision: 24, scale: 12, mode: "number" }).default(0).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "string" })
@@ -3568,7 +3568,7 @@ export const documentPageStates = pgTable(
 );
 
 /**
- * Document asset ledger (migration 0141, docs/extraction/doppler-figures.md "Asset ledger"): one row per image Doppler
+ * Document asset ledger (migration 0142, docs/extraction/doppler-figures.md "Asset ledger"): one row per image Doppler
  * reports for a document, extracted or not. Tenant scope is tied to the document by the composite foreign key on
  * documents (id, project_id, org_id); CHECK constraints (closed enums, bounds, status consistency) live in the migration.
  */
@@ -3619,7 +3619,7 @@ export const documentAssets = pgTable("document_assets", {
   index("document_assets_run_idx").on(table.runId).where(sql`run_id IS NOT NULL`),
 ]);
 
-/** Whether a document's Markdown is committed and how far its images got (migration 0141); one row per document. */
+/** Whether a document's Markdown is committed and how far its images got (migration 0142); one row per document. */
 export const documentExtractionLevels = pgTable("document_extraction_levels", {
   documentId: text("document_id").primaryKey().notNull(),
   orgId: text("org_id").notNull(),

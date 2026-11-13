@@ -43,7 +43,7 @@ export type OrgStorage = {
  * (archived rows are superseded), so nothing is double-counted. Purged rows
  * are excluded.
  *
- * Measured figure bytes (the asset ledger, migration 0140) follow the same liveness rules as source bytes: live
+ * Measured figure bytes (the asset ledger, migration 0141) follow the same liveness rules as source bytes: live
  * documents (completed, not superseded; extracts left out when asked) plus archived, not purged versions. One row per
  * document, so a document is counted at most once whichever branch matches. Every query is scoped by the org.
  */
