@@ -2,7 +2,7 @@ import { nitroBaseModel } from "./project-chat-models.js";
 
 /**
  * Per-model chat answer guidance appended to the shared chat instructions, for models whose defaults measurably
- * miss the shared style. Keyed by base model id (`:nitro` variants inherit). Every entry is general style guidance
+ * miss the shared style. Keyed by base model id (reviewed catalog `:nitro` variants inherit, via `nitroBaseModel`). Every entry is general style guidance
  * that names no document, field or benchmark value (evaluation integrity rules), and is placed at the end of the static
  * instructions so it never splits the cached prompt prefix.
  *
