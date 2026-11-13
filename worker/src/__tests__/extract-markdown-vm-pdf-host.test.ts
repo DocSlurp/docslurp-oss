@@ -378,6 +378,37 @@ describe("the sandboxed PDF route on the worker host", () => {
     } finally { await h.cleanup(); }
   });
 
+  it("never sizes a charge from walker-parity grids or centred words inside either (doppler #44 fields)", async () => {
+    vi.stubEnv("DOCSLURP_PDF_EXTRACTOR", "vm-pdf");
+    vi.stubEnv("DOCSLURP_DOPPLER_PAGE_FACTS", "use");
+    const huge = { widthPt: 14_000, heightPt: 14_000, rotation: 0, userUnit: 1 };
+    const page = (n: number) => {
+      const base = textPage(n, { geometry: huge });
+      const images = base.images as { items: Array<Record<string, unknown>> } & Record<string, unknown>;
+      const grid = { bbox: [0, 0, 14_000, 14_000], rows: 8_192, columns: 8_192, coverage: 1, hRules: 4_096, vRules: 4_096, outerSides: 4, connected: true };
+      return {
+        ...base,
+        images: { ...images, items: images.items.map((item) => ({ ...item, bbox: [0, 0, 14_000, 14_000], coverage: 1, px: [60_000, 60_000], visibleWordsCentredInside: 410, invisibleWordsCentredInside: 0 })) },
+        vectors: { ...(base.vectors as object), hRules: 1_000_000, vRules: 1_000_000, grids: Array.from({ length: 64 }, () => grid), gridsTruncated: false, unlistedRuledGrids: 0 },
+      };
+    };
+    const pageFacts = jsonl([docLine(), page(1), page(2), page(3), runLine()]);
+    const h = await harness({ markdown: "OneTwoThree", pageFacts });
+    h.state.artifactLedger.record(VISION_ROUTING_VERSION_SLOT, "v3");
+    const recordPageEquivalents = vi.fn(async () => 3);
+    (h.state.store as unknown as Record<string, unknown>).recordPageEquivalents = recordPageEquivalents;
+    try {
+      await h.stage.run(h.state);
+      expect(h.state.documentStage("doc-1", "extract-markdown")?.status).toBe("completed");
+      // The walker grids and centred counts reached the stored layout, and still sized nothing.
+      const stored = [...h.json.entries()].find(([key]) => key.includes("page-layout-facts/"))![1] as { source: string; pages: Array<{ grids: Array<{ rows: number }> | null; tableCoverage: number | null; images: Array<{ wordsInside: number | null }> | null }> };
+      expect(stored.source).toBe("vm-pdf-facts");
+      expect(stored.pages.every((p) => p.grids?.length === 64 && p.grids[0]!.rows === 4_095 && p.tableCoverage === 1)).toBe(true);
+      expect(stored.pages.every((p) => p.images?.[0]?.wordsInside === 410)).toBe(true);
+      expect(recordPageEquivalents).not.toHaveBeenCalled();
+    } finally { await h.cleanup(); }
+  });
+
   it("keeps the provider's own layout facts over page facts in use mode, and stores nothing with page facts off or malformed", async () => {
     vi.stubEnv("DOCSLURP_PDF_EXTRACTOR", "vm-pdf");
     vi.stubEnv("DOCSLURP_DOPPLER_PAGE_FACTS", "use");
