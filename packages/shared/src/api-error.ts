@@ -170,6 +170,7 @@ export const API_ERROR_PUBLIC_MESSAGES: Record<ApiErrorCode, string> = {
   api_key_ip_not_allowed: "This API key can't be used from this IP address. Add the address or its range to the key's IP allowlist, or call from an allowed server.",
   client_key_origin_not_allowed: "This browser API key isn't allowed on this website. Add the site to the key's allowed websites (for example docs.example.com, or *.example.com for its subdomains), or call DocSlurp from your server with a server key.",
   model_not_allowed: PUBLIC_ERROR_MESSAGES.modelNotAllowed,
+  chart_export_models_unavailable: "Reading charts with AI isn’t available on this deployment. Use the free chart steps or turn chart export off.",
   chat_deadline_exceeded: PUBLIC_ERROR_MESSAGES.chatDeadline,
   chat_tool_failed: PUBLIC_ERROR_MESSAGES.chatToolFailed,
   invalid_search_scope: PUBLIC_ERROR_MESSAGES.searchScope,

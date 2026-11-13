@@ -100,6 +100,11 @@ export const projectSchema = z.object({
   deferredIndexingAvailable: z.boolean().optional(),
   /** False on deployments that do not bill (self-hosted without Stripe): estimates are not prices. */
   billingEnforced: z.boolean().optional(),
+  /**
+   * This deployment's chart export defaults for a project with no tier: `app` (DocSlurp app uploads) and `machine`
+   * (API, MCP, SDK, CLI), plus whether the billed `models` tier is offered (`DOCSLURP_CHART_EXPORT=on`).
+   */
+  chartExportDefaults: z.object({ app: chartExportTierSchema, machine: chartExportTierSchema, modelsAvailable: z.boolean() }).optional(),
   /** Retained versions per document for this project; null inherits the organization's setting. */
   retainDocumentVersions: z.number().int().min(1).max(100).nullable().default(null),
   /**
