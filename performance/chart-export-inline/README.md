@@ -212,3 +212,43 @@ Median added time per document, by class (round 3 `now`):
 `pdf-figure-words.mjs` now reads a point's category from whichever coordinate is a string: the extractor writes
 `x` = category and `y` = value for horizontal bars too. With Doppler #41's tightened bar rule (3341aa747), the truth PDF
 still scores 52 of 60 values exact, 9 of 9 figures.
+
+## Unit containment re-measure (`results-vm-r4.json`, #364 faf4d33ba)
+
+- **Same slice** (106 documents, 207 pages), **same VM shape and prices**, five interleaved runs per arm.
+- **Arms:**
+  - `before`: round 3's guest pack, run as the driver runs a baseline (without the V8 flag);
+  - `now`: the contained guest, run as the host runs it.
+- The contained guest runs #364's unit worker (`chart-export-worker.mjs`), which streams units under the supervisor in
+  `chart-inline.mjs`.
+
+| | Σ added time | workers started | visuals | pages per $1, page-only (63,878) | counting each document's quarantine VM (8,591) | pages per minute (200) |
+|---|--:|--:|--:|--:|--:|--:|
+| round 3 `now` (one worker, no containment) | 3.52 s | 48 | 96 | 55,409 (−13.3%) | 8,418 (−2.0%) | 189.3 (−5.4%) |
+| **contained `now`** | **6.73 s** | **48** | **96** | **49,449 (−22.6%)** | **8,267 (−3.8%)** | **180.4 (−9.8%)** |
+
+Median added time per signalled document, contained `now`:
+
+| class | added |
+|---|--:|
+| Office | +133 ms |
+| EPUB | +135 ms |
+| SVG | +129 ms |
+
+Round 3 measured +65–67 ms for the same classes. Unsignalled documents are unchanged: HTML and JSON +7–9 ms, no inline
+kind 0 ms.
+
+- **The extra start-up is about +65 ms per signalled document,** with no failures in the slice: it is not restarts.
+- **What I know about it:**
+  - #364's worker does not enable the V8 compile cache, which the round 3 worker did (−10 to −18 ms measured then).
+  - The bundle is 11 KB larger.
+  - The rest is unattributed. A local comparison was too noisy on a loaded host to split it.
+- **Next step:** let #364's worker take a compile cache path, as round 3's did. That is an upstream change to #364's
+  file. Then measure each step in the VM (`probe-vm.mjs`) before tuning further.
+- **Visuals are unchanged** (96).
+- **Modal spend:** 121.5 VM-seconds.
+
+**The Doppler path** (app #510) contains units in the guest instead: the Python guest watches the chart child's progress
+lines and starts a fresh child after a lost figure. On the normal path it adds nothing: the step's median was 82.6 ms over
+9 real figures in a Modal VM, against about 116–125 ms for the uncontained child. A crash, an out-of-memory and a hang in
+one figure were each lost alone (`results-p15-units.json` in the app).
