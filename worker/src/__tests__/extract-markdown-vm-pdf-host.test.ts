@@ -12,6 +12,16 @@ import type { Document, ProjectRun } from "../models.js";
 import { WorkflowState } from "../pipeline/pipeline.js";
 import { ExtractMarkdownStage } from "../stages/extract-markdown.js";
 import type { CommandPlan, CommandRunner } from "../tools/runner.js";
+import { PRODUCER_MARKER, docLine, figurePage, fullFixture, jsonl, runLine, scanPage, textPage } from "../test/doppler-page-facts-fixture.js";
+import { PAGE_BILLING_RULES_SLOT } from "../db/page-base-fee.js";
+import { DOPPLER_PAGE_FACTS_SLOT } from "../extractors/doppler-figures.js";
+import { dopplerPageFactsJsonl, parseDopplerPageFacts } from "../lib/doppler-page-facts.js";
+
+function parseFacts(raw: string, pageCount: number) {
+  const parsed = parseDopplerPageFacts(raw, { pageCount });
+  if (!parsed.ok) throw new Error(parsed.reason);
+  return parsed.facts;
+}
 
 /**
  * A PDF routed to the sandboxed provider is never parsed on the worker host: the stage's real control flow (page facts,
@@ -28,11 +38,13 @@ function run(documentExtraction: Record<string, unknown> = {}): ProjectRun {
   } as ProjectRun;
 }
 
-async function harness(providerResult: { ocrPages?: unknown; layoutFacts?: unknown; markdown: string }, documentExtraction: Record<string, unknown> = {}) {
+async function harness(providerResult: { ocrPages?: unknown; layoutFacts?: unknown; pageFacts?: unknown; markdown: string }, documentExtraction: Record<string, unknown> = {}, documentOverrides: Partial<Document> = {}) {
   const scratch = await mkdtemp(path.join(tmpdir(), "docslurp-vm-pdf-host-test-"));
   const calls: string[] = [];
   const commands: CommandPlan[] = [];
   const json = new Map<string, unknown>();
+  const bytes = new Map<string, Buffer>();
+  let failPutBytes = false;
   const plan = (binary: string): CommandPlan => ({ binary, args: [], available: true });
   const target: Record<string, unknown> = {
     sandboxedPdfMarkdown: async (input: string, output: string) =>
@@ -44,7 +56,8 @@ async function harness(providerResult: { ocrPages?: unknown; layoutFacts?: unkno
       await writeFile(command.sandboxedPdf.output, providerResult.markdown);
       acceptSandboxedPdfResult(command.sandboxedPdf as SandboxedPdfJob,
         { exitCode: 0, stdout: "", stderr: "", ...(providerResult.ocrPages !== undefined ? { ocrPages: providerResult.ocrPages as number[] } : {}),
-          ...(providerResult.layoutFacts !== undefined ? { layoutFacts: providerResult.layoutFacts } : {}) }, 3);
+          ...(providerResult.layoutFacts !== undefined ? { layoutFacts: providerResult.layoutFacts } : {}),
+          ...(providerResult.pageFacts !== undefined ? { pageFacts: providerResult.pageFacts } : {}) }, 3);
       return { stdout: "", stderr: "" };
     },
   };
@@ -59,7 +72,7 @@ async function harness(providerResult: { ocrPages?: unknown; layoutFacts?: unkno
   }) as unknown as CommandRunner;
   const storage = {
     uri: (key: string) => `s3://test/${key}`,
-    putBytes: async () => undefined,
+    putBytes: async (key: string, data: Uint8Array) => { if (failPutBytes) throw new Error("storage down"); bytes.set(key, Buffer.from(data)); },
     putJson: async (key: string, value: unknown) => { json.set(key, value); },
     streamText: async () => undefined,
     createMultipartUploadStream: () => ({ writable: new Writable({ write(_chunk, _encoding, done) { done(); } }), done: Promise.resolve() }),
@@ -72,12 +85,12 @@ async function harness(providerResult: { ocrPages?: unknown; layoutFacts?: unkno
   internals.enrichOfficeStructure = async ({ document }: { document: unknown }) => document;
   const document = {
     id: "doc-1", userId: "user-1", runId: "run-1", filename: "scan.pdf", mimeType: "application/pdf", sourceKey: "raw/scan",
-    status: "processing", extractionMode: "hybrid", pageCount: 3, createdAt: new Date(), updatedAt: new Date(),
+    status: "processing", extractionMode: "hybrid", pageCount: 3, createdAt: new Date(), updatedAt: new Date(), ...documentOverrides,
   } as Document;
   const state = WorkflowState.create(run(documentExtraction), [document]);
   state.usageLedger.runId = "run-1";
   state.artifactLedger.recordDocument("doc-1", "normalizedFormat", "pdf");
-  const upsertPageFacts = vi.fn(async () => undefined);
+  const upsertPageFacts = vi.fn(async (_rows: unknown) => undefined);
   // A store that accepts every write, so page facts would be recorded if the stage probed for them.
   (state as { store?: unknown }).store = new Proxy({ upsertPageFacts, getCompletedPages: async () => new Set<number>() } as Record<string, unknown>, {
     get: (object, key) => (typeof key !== "string" || key === "then" ? undefined : object[key] ?? (async () => undefined)),
@@ -87,7 +100,7 @@ async function harness(providerResult: { ocrPages?: unknown; layoutFacts?: unkno
     ...calls.filter((name) => /^pdf|pageText|extractText|ocrPdf|images|info|render|rasteri[sz]e/i.test(name)),
     ...commands.filter((command) => !command.sandboxedPdf).map((command) => command.binary),
   ];
-  return { stage, state, calls, commands, json, hostPdf, richIds, upsertPageFacts, cleanup: () => rm(scratch, { recursive: true, force: true }) };
+  return { stage, state, calls, commands, json, bytes, failBytes: () => { failPutBytes = true; }, hostPdf, richIds, upsertPageFacts, cleanup: () => rm(scratch, { recursive: true, force: true }) };
 }
 
 describe("the sandboxed PDF route on the worker host", () => {
@@ -200,6 +213,171 @@ describe("the sandboxed PDF route on the worker host", () => {
     vi.restoreAllMocks();
   });
 
+  it("records the VM's Doppler page facts as per-page routing facts, without the document's strings, and bills nothing from them", async () => {
+    vi.stubEnv("DOCSLURP_PDF_EXTRACTOR", "vm-pdf");
+    // The facts claim more pages than the host counted (3): the extra page and the facts' own count are never used.
+    const pageFacts = jsonl([docLine({ pageCount: 50 }), textPage(1), textPage(2), textPage(3), textPage(4), runLine()]);
+    const h = await harness({ markdown: "One\fTwo\fThree", pageFacts: Buffer.from(pageFacts) });
+    h.state.artifactLedger.record(VISION_ROUTING_VERSION_SLOT, "v3");
+    try {
+      await h.stage.run(h.state);
+      expect(h.state.documentStage("doc-1", "extract-markdown")?.status).toBe("completed");
+      expect(h.hostPdf()).toEqual([]);
+      expect(h.richIds()).toEqual([]);
+      // One routing row per page the host counted (page 4 is past it): closed enums only.
+      const rows = h.upsertPageFacts.mock.calls.flatMap((call) => call[0] as Array<Record<string, unknown>>).filter((row) => row.scanClass !== undefined);
+      expect(rows).toEqual([1, 2, 3].map((pageNumber) => ({ documentId: "doc-1", runId: "run-1", pageNumber, textLayer: "visible", scanClass: "none" })));
+      const everything = JSON.stringify([...h.json.values(), ...h.upsertPageFacts.mock.calls]);
+      expect(everything).not.toContain("PRODUCER-MARKER");
+      expect(everything).not.toContain(PRODUCER_MARKER.slice(0, 10));
+      expect([...h.json.keys()].some((key) => key.includes("/page-facts/"))).toBe(false);
+      // store (the default): the facts never stand in for layout facts.
+      expect(h.state.artifactLedger.readDocument("doc-1", "page-layout-facts")).toBeUndefined();
+    } finally { await h.cleanup(); }
+  });
+
+  it("uploads the page facts as canonical lines under the document's own Doppler folder; a raw producer string never reaches storage", async () => {
+    vi.stubEnv("DOCSLURP_PDF_EXTRACTOR", "vm-pdf");
+    // The raw stream carries the document's strings, an unknown field and a page past the host's count.
+    const raw = jsonl([docLine({ lang: "en-US", title: PRODUCER_MARKER }), textPage(1, { note: PRODUCER_MARKER }), textPage(2), textPage(3), textPage(4), runLine()]);
+    for (const mode of ["store", "use"]) {
+      vi.stubEnv("DOCSLURP_DOPPLER_PAGE_FACTS", mode);
+      const h = await harness({ markdown: "One\fTwo\fThree", pageFacts: Buffer.from(raw) });
+      try {
+        await h.stage.run(h.state);
+        const uri = h.state.artifactLedger.readDocument("doc-1", DOPPLER_PAGE_FACTS_SLOT)!;
+        expect(uri).toBe("s3://test/user-1/run-1/doppler/doc-1/images/page-facts.jsonl");
+        const stored = h.bytes.get("user-1/run-1/doppler/doc-1/images/page-facts.jsonl")!.toString("utf8");
+        expect(stored).toBe(dopplerPageFactsJsonl(parseFacts(raw, 3)));
+        expect(stored.split("\n").filter(Boolean).map((line) => JSON.parse(line).type)).toEqual(["doc", "page", "page", "page", "run"]);
+        const everything = [...h.bytes.values()].map((b) => b.toString("latin1")).join("") + JSON.stringify([...h.json.values()]);
+        for (const leaked of ["PRODUCER-MARKER", PRODUCER_MARKER.slice(0, 10), "producer", "creator", "\"lang\"", "en-US", "\"note\""]) expect(everything).not.toContain(leaked);
+      } finally { await h.cleanup(); }
+    }
+  });
+
+  it("writes the page-facts file with figures off, before extract-markdown commits its checkpoint (what route-pages reads, #367)", async () => {
+    vi.stubEnv("DOCSLURP_PDF_EXTRACTOR", "vm-pdf");
+    vi.stubEnv("DOCSLURP_DOPPLER_IMAGE_EXTRACT", "0");
+    for (const mode of ["store", "use"]) {
+      vi.stubEnv("DOCSLURP_DOPPLER_PAGE_FACTS", mode);
+      const h = await harness({ markdown: "One\fTwo\fThree", pageFacts: fullFixture() });
+      // The stage's checkpoint commit: route-pages runs only after it, so the file must already be there.
+      const atCommit: boolean[] = [];
+      (h.state.store as unknown as Record<string, unknown>).completeDocumentStage = vi.fn(async (_state: unknown, documentId: string, stageName: string) => {
+        if (documentId === "doc-1" && stageName === "extract-markdown") atCommit.push(h.bytes.has("user-1/run-1/doppler/doc-1/images/page-facts.jsonl"));
+      });
+      try {
+        await h.stage.run(h.state);
+        expect(h.state.documentStage("doc-1", "extract-markdown")?.status).toBe("completed");
+        expect(h.commands.every((command) => !command.sandboxedPdf?.figures)).toBe(true);
+        expect(atCommit).toEqual([true]);
+        expect(h.state.artifactLedger.readDocument("doc-1", DOPPLER_PAGE_FACTS_SLOT)).toBe("s3://test/user-1/run-1/doppler/doc-1/images/page-facts.jsonl");
+      } finally { await h.cleanup(); }
+    }
+  });
+
+  it("writes no page-facts object for malformed, refused or off-mode facts, or when the write fails", async () => {
+    vi.stubEnv("DOCSLURP_PDF_EXTRACTOR", "vm-pdf");
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const cases: Array<[string, unknown, boolean]> = [
+      ["store", "garbage\n", false], ["store", jsonl([textPage(1), docLine()]), false], ["store", 42, false],
+      ["store", "x".repeat(2 * 1024 * 1024), false], ["off", fullFixture(), false], ["nonsense", fullFixture(), false], ["store", fullFixture(), true],
+    ];
+    for (const [mode, pageFacts, failWrite] of cases) {
+      vi.stubEnv("DOCSLURP_DOPPLER_PAGE_FACTS", mode);
+      const h = await harness({ markdown: "One\fTwo\fThree", pageFacts });
+      if (failWrite) h.failBytes();
+      try {
+        await h.stage.run(h.state);
+        expect(h.state.documentStage("doc-1", "extract-markdown")?.status, `${mode} ${String(pageFacts).slice(0, 20)}`).toBe("completed");
+        expect([...h.bytes.keys()].filter((key) => key.endsWith("page-facts.jsonl"))).toEqual([]);
+        expect(h.state.artifactLedger.readDocument("doc-1", DOPPLER_PAGE_FACTS_SLOT)).toBeUndefined();
+      } finally { await h.cleanup(); }
+    }
+    vi.restoreAllMocks();
+  });
+
+  it("keys the page-facts object under the document's own artifact root, never another tenant's", async () => {
+    vi.stubEnv("DOCSLURP_PDF_EXTRACTOR", "vm-pdf");
+    for (const [overrides, prefix] of [
+      [{ userId: "user-1" }, "user-1/run-1/doppler/doc-1/"],
+      [{ userId: "user-2" }, "user-2/run-1/doppler/doc-1/"],
+      [{ artifactRoot: "extracts/org-9/ex-1" }, "extracts/org-9/ex-1/doppler/doc-1/"],
+    ] as const) {
+      const h = await harness({ markdown: "One\fTwo\fThree", pageFacts: fullFixture() }, {}, overrides as Partial<Document>);
+      try {
+        await h.stage.run(h.state);
+        const keys = [...h.bytes.keys()].filter((key) => key.endsWith("page-facts.jsonl"));
+        expect(keys).toEqual([`${prefix}images/page-facts.jsonl`]);
+        expect(h.state.artifactLedger.readDocument("doc-1", DOPPLER_PAGE_FACTS_SLOT)).toBe(`s3://test/${keys[0]}`);
+      } finally { await h.cleanup(); }
+    }
+  });
+
+  it("with DOCSLURP_DOPPLER_PAGE_FACTS=use, stores layout facts mapped from page facts when the provider sent none", async () => {
+    vi.stubEnv("DOCSLURP_PDF_EXTRACTOR", "vm-pdf");
+    vi.stubEnv("DOCSLURP_DOPPLER_PAGE_FACTS", "use");
+    const h = await harness({ markdown: "OneTwoThree", pageFacts: fullFixture() });
+    h.state.artifactLedger.record(VISION_ROUTING_VERSION_SLOT, "v3");
+    try {
+      await h.stage.run(h.state);
+      const stored = [...h.json.entries()].find(([key]) => key.includes("page-layout-facts/"))![1] as { source: string; pages: Array<{ pageNumber: number; words: number }> };
+      expect(stored.source).toBe("vm-pdf-facts");
+      expect(stored.pages.map((page) => [page.pageNumber, page.words])).toEqual([[1, 410], [2, 300], [3, 8]]);
+      expect(h.richIds()).toEqual([]);
+    } finally { await h.cleanup(); }
+  });
+
+  it("never sizes a charge from page facts in use mode; the walker's own page sizes still do (council #358 M1)", async () => {
+    vi.stubEnv("DOCSLURP_PDF_EXTRACTOR", "vm-pdf");
+    vi.stubEnv("DOCSLURP_DOPPLER_PAGE_FACTS", "use");
+    const huge = { widthPt: 14_000, heightPt: 14_000, rotation: 0, userUnit: 1 };
+    const pageFacts = jsonl([docLine(), textPage(1, { geometry: huge }), textPage(2, { geometry: huge }), textPage(3, { geometry: huge }), runLine()]);
+    const walker = { version: "pdf-layout-facts@1", pages: [1, 2, 3].map((pageNumber) => ({ pageNumber, known: true, words: 1, widthPt: 14_000, heightPt: 14_000 })) };
+    for (const [provider, billed] of [[{ pageFacts }, false], [{ pageFacts, layoutFacts: walker }, true]] as const) {
+      const h = await harness({ markdown: "OneTwoThree", ...provider });
+      h.state.artifactLedger.record(VISION_ROUTING_VERSION_SLOT, "v3");
+      const recordPageEquivalents = vi.fn(async () => 3);
+      (h.state.store as unknown as Record<string, unknown>).recordPageEquivalents = recordPageEquivalents;
+      try {
+        await h.stage.run(h.state);
+        expect(h.state.documentStage("doc-1", "extract-markdown")?.status).toBe("completed");
+        expect(recordPageEquivalents.mock.calls.length > 0, JSON.stringify(Object.keys(provider))).toBe(billed);
+      } finally { await h.cleanup(); }
+    }
+  });
+
+  it("keeps the provider's own layout facts over page facts in use mode, and stores nothing with page facts off or malformed", async () => {
+    vi.stubEnv("DOCSLURP_PDF_EXTRACTOR", "vm-pdf");
+    vi.stubEnv("DOCSLURP_DOPPLER_PAGE_FACTS", "use");
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const layoutFacts = { version: "pdf-layout-facts@1", pages: [{ pageNumber: 2, known: true, words: 90, images: [], tables: [], grids: [], tableCoverage: 0 }] };
+    let h = await harness({ markdown: "OneTwoThree", pageFacts: fullFixture(), layoutFacts });
+    h.state.artifactLedger.record(VISION_ROUTING_VERSION_SLOT, "v3");
+    try {
+      await h.stage.run(h.state);
+      const stored = [...h.json.entries()].find(([key]) => key.includes("page-layout-facts/"))![1] as { source: string };
+      expect(stored.source).toBe("vm-pdf");
+    } finally { await h.cleanup(); }
+    for (const [mode, pageFacts] of [["off", fullFixture()], ["use", "garbage\n"], ["use", 42], ["use", "x".repeat(9 * 1024 * 1024)]] as const) {
+      vi.stubEnv("DOCSLURP_DOPPLER_PAGE_FACTS", mode);
+      h = await harness({ markdown: "Born digital\fScanned page read by OCR\f\f", pageFacts, ocrPages: [2] });
+      h.state.artifactLedger.record(VISION_ROUTING_VERSION_SLOT, "v3");
+      try {
+        await h.stage.run(h.state);
+        expect(h.state.documentStage("doc-1", "extract-markdown")?.status).toBe("completed");
+        // No routing row came from the facts (they carry the only scan class).
+        expect(h.upsertPageFacts.mock.calls.flat(2).some((row) => (row as { scanClass?: unknown }).scanClass !== undefined)).toBe(false);
+        expect(h.state.artifactLedger.readDocument("doc-1", "page-layout-facts")).toBeUndefined();
+        // Billing evidence is the provider's ocrPages alone, whatever happened to the facts.
+        expect(h.richIds()).toEqual(["rich:run-1:doc-1:2"]);
+      } finally { await h.cleanup(); }
+    }
+    vi.restoreAllMocks();
+  });
+
   it("refuses a provider result whose ocrPages fall outside the page count or repeat", () => {
     const job = { input: "/a", output: "/b" };
     for (const ocrPages of [[0], [4], [1, 1], [1.5], ["1"], "1"]) {
@@ -208,3 +386,129 @@ describe("the sandboxed PDF route on the worker host", () => {
     expect(acceptSandboxedPdfResult(job, { exitCode: 0, stdout: "", stderr: "", ocrPages: [3, 1] }, 3).ocrPages).toEqual([1, 3]);
   });
 });
+
+/**
+ * DOCSLURP_DOPPLER_PAGE_FACTS=use on the sandboxed route: the winning VM job's validated page facts stand in for the host probes
+ * the route never runs (page-image evidence, the ingest report's per-page rows), with no command, and only when they cover every
+ * page. Anything less keeps today's behaviour exactly; billing never moves.
+ */
+describe("Doppler page facts as routing evidence on the sandboxed route", () => {
+  afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks(); });
+
+  const covering = () => jsonl([docLine(), textPage(1), scanPage(2), figurePage(3), runLine()]);
+  /** A run with a page billing pin (every run this release starts): it bills Rich pages as they are read, never from page facts. */
+  async function pinned(provider: Parameters<typeof harness>[0]) {
+    const h = await harness(provider);
+    h.state.artifactLedger.record(PAGE_BILLING_RULES_SLOT, "test-pricing@1");
+    h.state.artifactLedger.record(VISION_ROUTING_VERSION_SLOT, "v3");
+    return h;
+  }
+  const sourceRows = (h: Awaited<ReturnType<typeof harness>>) =>
+    h.upsertPageFacts.mock.calls.flatMap((call) => call[0] as Array<Record<string, unknown>>).filter((row) => row.factsSource !== undefined);
+  const evidence = (h: Awaited<ReturnType<typeof harness>>) =>
+    [...h.json.entries()].find(([key]) => key.includes("/page-image-evidence/"))?.[1] as { source: string; drawnBytesPerPage: unknown; pages: Array<Record<string, unknown>> } | undefined;
+
+  it("builds page-image evidence and per-page ingest-report rows from covering facts, running no host command", async () => {
+    vi.stubEnv("DOCSLURP_PDF_EXTRACTOR", "vm-pdf");
+    vi.stubEnv("DOCSLURP_DOPPLER_PAGE_FACTS", "use");
+    const h = await pinned({ markdown: "Born digital text\fScanned page read by OCR\fA figure", pageFacts: covering(), ocrPages: [2] });
+    try {
+      await h.stage.run(h.state);
+      const checkpoint = h.state.documentStage("doc-1", "extract-markdown");
+      expect(checkpoint?.status).toBe("completed");
+      // The runner spy: only the provider's VM job ran; no host tool was even planned.
+      expect(h.commands.map((command) => command.binary)).toEqual(["test-vm"]);
+      expect(h.hostPdf()).toEqual([]);
+      expect(h.calls.filter((name) => /listImages|listPdfImages|pageText|pdfPageSizes|pdfWordBoxes|pdfLayoutFacts|pdfInfo/.test(name))).toEqual([]);
+      // Page triage's artifact, as the pdfimages probe writes it: page 3 is sparse (8 words); the logo drawn on every page is
+      // furniture; page 2's invisible OCR layer has 300 words, so it is not sparse (as pdftotext would read it).
+      expect(h.state.artifactLedger.readDocument("doc-1", "page-image-evidence")).toMatch(/page-image-evidence\/doc-1\.json$/);
+      expect(evidence(h)).toMatchObject({ source: "doppler-facts", drawnBytesPerPage: null, pages: [
+        { pageNumber: 3, wordCount: 8, imagesKnown: true, anyImageCount: 1, repeatedImageCount: 0, imageCount: 0, imageCoverage: 0, largestImageCoverage: 0, embeddedImageBytes: null },
+      ] });
+      // The ingest report's per-page rows: every page, no invented size.
+      expect(sourceRows(h)).toEqual([
+        { documentId: "doc-1", runId: "run-1", pageNumber: 1, textBytes: 17, wordCount: 410, imageCount: 1, factsSource: "doppler-facts" },
+        { documentId: "doc-1", runId: "run-1", pageNumber: 2, textBytes: null, wordCount: 300, imageCount: 2, factsSource: "doppler-facts" },
+        { documentId: "doc-1", runId: "run-1", pageNumber: 3, textBytes: 8, wordCount: 8, imageCount: 1, factsSource: "doppler-facts" },
+      ]);
+      expect(checkpoint?.stats).toMatchObject({ hostPdfProbes: "skipped-sandboxed-route", dopplerFactsEvidence: { status: "built", pages: 3, evidencePages: 1, rows: 3 } });
+    } finally { await h.cleanup(); }
+  });
+
+  it.each([
+    ["the stream was cut short (no run line)", () => jsonl([docLine(), textPage(1), scanPage(2), figurePage(3)]), "incomplete"],
+    ["a page is missing", () => jsonl([docLine(), textPage(1), scanPage(2), runLine({ pagesEmitted: 2 })]), "pages-missing"],
+    ["a page failed", () => jsonl([docLine(), textPage(1), scanPage(2), { schema: "doppler-page-facts/1", type: "page", page: 3, error: "failed", parseWarnings: [], unusualFeatures: [] }, runLine({ pagesFailed: 1 })]), "pages-failed"],
+    ["a line was dropped", () => jsonl([docLine(), textPage(1), scanPage(2), "{not json", figurePage(3), runLine()]), "lines-dropped"],
+    ["a page has no text family", () => { const page = textPage(3); delete page.text; return jsonl([docLine(), textPage(1), scanPage(2), page, runLine()]); }, "text-family-missing"],
+    ["a page's image list is truncated", () => jsonl([docLine(), textPage(1), scanPage(2), figurePage(3, { images: { ...(textPage().images as object), itemsTruncated: true } }), runLine()]), "images-family-incomplete"],
+    ["a page has no image list (basic level)", () => { const images = { ...(textPage().images as Record<string, unknown>) }; delete images.items; return jsonl([docLine(), textPage(1), scanPage(2), figurePage(3, { images }), runLine()]); }, "images-family-incomplete"],
+    ["the document is locked", () => jsonl([docLine({ locked: true }), textPage(1), scanPage(2), figurePage(3), runLine()]), "locked"],
+    // Facts call page 3 sparse (8 words) while the extraction read it as 40 words of text, not by OCR.
+    ["the facts disagree with the extracted text", () => covering(), "words-disagree", `One\fTwo\f${Array.from({ length: 40 }, (_, i) => `w${i}`).join(" ")}`],
+  ])("fails closed when %s: no evidence, no rows, and still no host command", async (_label, facts, reason, markdown = "One\fTwo\fThree") => {
+    vi.stubEnv("DOCSLURP_PDF_EXTRACTOR", "vm-pdf");
+    vi.stubEnv("DOCSLURP_DOPPLER_PAGE_FACTS", "use");
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const h = await pinned({ markdown, pageFacts: facts() });
+    try {
+      await h.stage.run(h.state);
+      const checkpoint = h.state.documentStage("doc-1", "extract-markdown");
+      expect(checkpoint?.status).toBe("completed");
+      expect(h.state.artifactLedger.readDocument("doc-1", "page-image-evidence")).toBeUndefined();
+      expect(sourceRows(h)).toEqual([]);
+      expect(h.commands.map((command) => command.binary)).toEqual(["test-vm"]);
+      expect(h.hostPdf()).toEqual([]);
+      expect(checkpoint?.stats).toMatchObject({ dopplerFactsEvidence: { status: "skipped", reason } });
+    } finally { await h.cleanup(); }
+  });
+
+  it.each([["store"], ["off"]])("builds nothing in %s mode (only use lets facts stand in for probes)", async (mode) => {
+    vi.stubEnv("DOCSLURP_PDF_EXTRACTOR", "vm-pdf");
+    vi.stubEnv("DOCSLURP_DOPPLER_PAGE_FACTS", mode);
+    const h = await pinned({ markdown: "One\fTwo\fThree", pageFacts: covering() });
+    try {
+      await h.stage.run(h.state);
+      expect(h.state.artifactLedger.readDocument("doc-1", "page-image-evidence")).toBeUndefined();
+      expect(sourceRows(h)).toEqual([]);
+      expect(h.state.documentStage("doc-1", "extract-markdown")?.stats).toMatchObject({ dopplerFactsEvidence: { status: "skipped", reason: `mode-${mode}` } });
+    } finally { await h.cleanup(); }
+  });
+
+  it("billing is unchanged by facts: the same Rich reads, no page-equivalent sizes from facts, no rows for a legacy-billed run", async () => {
+    vi.stubEnv("DOCSLURP_PDF_EXTRACTOR", "vm-pdf");
+    vi.stubEnv("DOCSLURP_DOPPLER_PAGE_FACTS", "use");
+    // Facts that would, if read for billing, size every page at the maximum and mark page 2 a scan with no text.
+    const huge = { widthPt: 14_000, heightPt: 14_000, rotation: 0, userUnit: 1 };
+    const scanNoText = scanPage(2, { geometry: huge, text: { ...(scanPage().text as object), charCount: 0, invisibleCharCount: 0, wordCount: 0, invisibleWordCount: 0, textLayer: "none" } });
+    const facts = jsonl([docLine(), textPage(1, { geometry: huge }), scanNoText, figurePage(3, { geometry: huge }), runLine()]);
+    const outcomes: Array<{ rich: unknown[]; equivalents: unknown[] }> = [];
+    for (const provider of [{}, { pageFacts: facts }]) {
+      const h = await pinned({ markdown: "Born digital text\f\fA figure", ocrPages: [2], ...provider });
+      const recordPageEquivalents = vi.fn(async () => 3);
+      (h.state.store as unknown as Record<string, unknown>).recordPageEquivalents = recordPageEquivalents;
+      try {
+        await h.stage.run(h.state);
+        expect(h.state.documentStage("doc-1", "extract-markdown")?.status).toBe("completed");
+        outcomes.push({ rich: h.richIds(), equivalents: recordPageEquivalents.mock.calls });
+      } finally { await h.cleanup(); }
+    }
+    // Billing evidence is the provider's ocrPages and the walker's sizes (none here) alone, facts or not.
+    expect(outcomes[1]).toEqual(outcomes[0]);
+    expect(outcomes[0]!.rich).toEqual(["rich:run-1:doc-1:2"]);
+    expect(outcomes[0]!.equivalents).toEqual([]);
+
+    // A run started before the page billing pin bills pages with no text bytes and an image as scans at completion
+    // (page-base-fee.ts): facts rows would raise its charge, so none are written. The evidence (routing) still is.
+    const h = await harness({ markdown: "Born digital text\f\fA figure", ocrPages: [2], pageFacts: facts });
+    h.state.artifactLedger.record(VISION_ROUTING_VERSION_SLOT, "v3");
+    try {
+      await h.stage.run(h.state);
+      expect(sourceRows(h)).toEqual([]);
+      expect(h.richIds()).toEqual(["rich:run-1:doc-1:2"]);
+      expect(h.state.documentStage("doc-1", "extract-markdown")?.stats).toMatchObject({ dopplerFactsEvidence: { status: "built", rows: 0, rowsSkipped: "legacy-billing" } });
+    } finally { await h.cleanup(); }
+  });
+});
+
