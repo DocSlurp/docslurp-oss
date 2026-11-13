@@ -145,8 +145,8 @@ export type DopplerShardCoverageRule = "shards-not-contiguous" | "gap-overlaps-s
  * - Every shard and gap lies inside `first..last` (`page-outside-document`); no gap overlaps a shard (`gap-overlaps-shard`).
  * - `partial` with declared gaps (a failed batch or shard publishes no folder: app #464): shards and gaps together cover
  *   every page of `first..last` exactly once, so a first, middle or trailing gap keeps the extracted shards.
- * - Otherwise (an `extracted` outcome, or no gap declared): the strict rule, shards from `first` with no hole, ending
- *   within `last`. A hole is never excused by a gap an `extracted` outcome declares.
+ * - Otherwise (an `extracted` outcome, or no gap declared): the strict rule, shards from `first` with no hole; an
+ *   extracted outcome's last shard ends at `last`. A hole is never excused by a gap an `extracted` outcome declares.
  * A gap holds no rows: it is never stored, billed or served; its resume publishes `shards/<first>-<last>/` for it.
  */
 export function dopplerShardCoverage(
@@ -164,6 +164,9 @@ export function dopplerShardCoverage(
       if (first !== next) return "shards-not-contiguous";
       next = last + 1;
     }
+    // An extracted outcome reaches the last asked page: a missing tail is not "complete" (it needs a declared gap, which
+    // only a partial outcome may carry).
+    if (!args.partial && next !== args.last + 1) return "shards-not-contiguous";
     return null;
   }
   const items = [...shards.map(([first, last]) => ({ first, last })), ...declared].sort((a, b) => a.first - b.first);

@@ -332,7 +332,9 @@ export async function writeDocumentAssetLedger(sql: Sql<Record<string, unknown>>
         if (gap.first < shardResume.first) outside.push({ ...gap, last: shardResume.first - 1 });
         if (gap.last > shardResume.last) outside.push({ ...gap, first: shardResume.last + 1 });
       }
-      levelGaps = [...outside, ...inside].sort((a, b) => a.first - b.first).slice(0, DOPPLER_FIGURE_GAPS_MAX);
+      levelGaps = [...outside, ...inside].sort((a, b) => a.first - b.first);
+      // Never truncated: a dropped range would be neither a shard nor a gap (lost work).
+      if (levelGaps.length > DOPPLER_FIGURE_GAPS_MAX) throw new DocumentAssetLedgerError("invalid-level");
     }
 
     // Defense in depth behind the composite foreign key: no row of this document may carry another scope.
@@ -484,8 +486,11 @@ export async function writeDocumentAssetLedger(sql: Sql<Record<string, unknown>>
     let imagesStatus = write.level.imagesStatus;
     // Gaps (pages a shard or the document's pass budget left with no manifest) are resumable work too, within the caps; a
     // gap a shard now covers is recorded but no longer work. Uploads a crash left pending are work as well (adopted, no VM).
+    // Only a complete shard covers a gap: a gap inside a partial shard (its inner gaps, e.g. a gap resume that came back
+    // partial) stays work, resumed as that shard's resume narrowed to the gap's pages.
     const covered = await tx<{ first_page: number; last_page: number }[]>`
-      select first_page, last_page from document_extraction_shards where document_id = ${documentId} and org_id = ${orgId} and project_id = ${projectId}`;
+      select first_page, last_page from document_extraction_shards where document_id = ${documentId} and org_id = ${orgId} and project_id = ${projectId}
+        and images_status = 'complete'`;
     const effectiveGaps = levelGaps.filter((gap) => !covered.some((shard) => shard.first_page <= gap.last && gap.first <= shard.last_page));
     const anyResumable = totals!.resumable > 0 || totals!.pending > 0 || effectiveGaps.length > 0;
     if (sharded) {
@@ -715,7 +720,7 @@ export async function listResumableDocuments(
           and d.superseded_at is null and d.archived_at is null and d.purged_at is null
           -- Only effective gaps: a gap a shard now covers is that shard's work (no duplicate unit).
           and not exists (select 1 from document_extraction_shards sc where sc.document_id = l.document_id and sc.org_id = l.org_id
-            and sc.first_page <= (gap ->> 'last')::int and (gap ->> 'first')::int <= sc.last_page)
+            and sc.images_status = 'complete' and sc.first_page <= (gap ->> 'last')::int and (gap ->> 'first')::int <= sc.last_page)
           -- And the document's shard-resume total (documentResumeTotalCap) is not yet spent.
           and (select coalesce(sum(t.resumes), 0) from document_extraction_shards t
                where t.document_id = l.document_id and t.org_id = l.org_id and t.project_id = l.project_id)
@@ -871,7 +876,7 @@ async function recountLevel(tx: Tx, scope: DocumentAssetLedgerScope, fallback: D
     cross join lateral jsonb_array_elements(coalesce(l.gaps, '[]'::jsonb)) gap
     where l.document_id = ${documentId} and l.org_id = ${orgId}
       and not exists (select 1 from document_extraction_shards s where s.document_id = l.document_id and s.org_id = l.org_id
-        and s.first_page <= (gap ->> 'last')::int and (gap ->> 'first')::int <= s.last_page)`;
+        and s.images_status = 'complete' and s.first_page <= (gap ->> 'last')::int and (gap ->> 'first')::int <= s.last_page)`;
   const work = t!.resumable > 0 || t!.pending > 0 || (gapRow?.n ?? 0) > 0;
   const status: DocumentImagesStatus = work ? "resumable"
     : t!.total === 0 ? (fallback ?? "none")
@@ -905,14 +910,19 @@ export async function writeFigureLevel(
   await sql.begin(async (tx) => {
     await lockAndCheck(tx, args.scope);
     if (args.imagesStatus === "none" || args.imagesStatus === "disabled") {
-      // The figure step did not run: off the resume queue (no gaps, no counts), and no row is current (none deleted).
+      // The figure step did not run: off the resume queue (no gaps, no counts), and no row is current (none deleted). A
+      // document that never stored a figure has nothing to hide: its level stays current, so only real figure documents
+      // are non-current (the audit's retention set, R2-M1).
+      const [held] = await tx<{ any: boolean }[]>`
+        select exists (select 1 from document_assets where document_id = ${documentId} and org_id = ${orgId} and storage_key is not null) as any`;
+      const current = !held?.any;
       const leveled = await tx`
         insert into document_extraction_levels (document_id, org_id, project_id, run_id, markdown_complete, images_status, images_exit_code,
           doppler_build, assets_current)
-        values (${documentId}, ${orgId}, ${projectId}, ${runId}, ${args.markdownComplete}, ${args.imagesStatus}, ${exitCode}, ${build}, false)
+        values (${documentId}, ${orgId}, ${projectId}, ${runId}, ${args.markdownComplete}, ${args.imagesStatus}, ${exitCode}, ${build}, ${current})
         on conflict (document_id) do update
         set run_id = excluded.run_id, markdown_complete = excluded.markdown_complete, images_status = excluded.images_status,
-            images_exit_code = excluded.images_exit_code, doppler_build = excluded.doppler_build, assets_current = false, gaps = null,
+            images_exit_code = excluded.images_exit_code, doppler_build = excluded.doppler_build, assets_current = excluded.assets_current, gaps = null,
             assets_total = 0, assets_extracted = 0, assets_not_extracted = 0, assets_unlinked = 0, assets_resumable = 0, assets_pending = 0,
             source_copy = 0, source_decode = 0, source_render = 0, asset_bytes = 0, folder_bytes = 0, updated_at = now()
         where document_extraction_levels.org_id = excluded.org_id and document_extraction_levels.project_id = excluded.project_id

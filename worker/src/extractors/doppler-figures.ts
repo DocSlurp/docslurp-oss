@@ -595,7 +595,13 @@ export async function readDopplerFigureDir(
       });
       releaseParse();
     }
-    if ((args.expect === "partial" && complete) || (args.expect === "complete" && !complete)) throw new DopplerFigureRejection("outcome-mismatch");
+    // A partial outcome is partial by its manifests or by its declared gaps (a failed range published no folder, so the
+    // shards that did publish may all be complete); a complete one has neither.
+    const gapsDeclared = (args.gaps?.length ?? 0) > 0;
+    if ((args.expect === "partial" && complete && !gapsDeclared) || (args.expect === "complete" && (!complete || gapsDeclared))) {
+      throw new DopplerFigureRejection("outcome-mismatch");
+    }
+    if (gapsDeclared) complete = false;
 
     const present = new Set<string>();
     if (version === 1) {
@@ -1018,7 +1024,7 @@ export async function storeDopplerFigures(args: {
     if (args.documentMarkdown) {
       const markdownKey = key("markdown");
       const bytes = args.documentMarkdown;
-      folderBytes += bytes.length;
+      // Not in folder_bytes: a copy of the Markdown slot, which the per-page artifact estimate already covers (L11).
       tail.push(async () => {
         written.push(markdownKey);
         await args.storage.putBytes(markdownKey, bytes, "text/markdown; charset=utf-8");

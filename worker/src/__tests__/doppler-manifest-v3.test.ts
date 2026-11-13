@@ -388,13 +388,15 @@ describe("sharded documents: one manifest per shard", () => {
       return [{ range: [1, 2], text: v3ShardText(m, [1, 2]) }, { range: [3, 3], text: v3ShardText(other, [3, 3]) }];
     })).toBe("shards-source-mismatch");
     expect(await shardRule((m) => [{ range: [1, 2], text: v3ShardText(m, [1, 2]) }, { range: [3, 3], text: v3ShardText({ ...m, dpi: 300 }, [3, 3]) }])).toBe("shards-settings-mismatch");
-    // Shard 3-3's manifest left out: page-0003's file has no owner.
-    expect(await shardRule((m) => [{ range: [1, 2], text: v3ShardText(m, [1, 2]) }])).toBe("files-do-not-match-manifest");
+    // Shard 3-3's manifest left out: the missing tail is refused before page-0003's ownerless file (R2 adversarial 8).
+    expect(await shardRule((m) => [{ range: [1, 2], text: v3ShardText(m, [1, 2]) }])).toBe("shards-not-contiguous");
+    // Declared as a gap of a partial outcome, the page-0003 file still has no owner.
+    expect(await shardRule((m) => [{ range: [1, 2], text: v3ShardText(m, [1, 2]) }], { partial: true, gaps: [{ first: 3, last: 3, reason: "plugin:shard-over-share" }] })).toBe("files-do-not-match-manifest");
     // An image line of page 3 in the 1-2 shard.
     expect(await shardRule((m) => [{ range: [1, 2], text: v3ShardText(m, [1, 2], { mutateLines: (lines) => {
       const p3 = JSON.stringify({ type: "image", ...m.images.find((e) => e.id === "p3.1") });
       lines.splice(lines.findIndex((l) => l.includes('"type":"batch"')), 0, p3);
-    } }) }])).toBe("manifest-shard-range");
+    } }) }, { range: [3, 3], text: v3ShardText(m, [3, 3]) }])).toBe("manifest-shard-range");
     // A header whose pages are not the folder's range.
     expect(await shardRule((m) => [{ range: [1, 2], text: v3ShardText(m, [1, 2]).replace('"pages":[1,2]', '"pages":[1,3]') }, { range: [3, 3], text: v3ShardText(m, [3, 3]) }])).toMatch(/^manifest-/);
     // Both a top-level manifest and shards.

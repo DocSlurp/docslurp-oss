@@ -408,6 +408,35 @@ async function inMemoryRows(set: Awaited<ReturnType<typeof readDopplerFigureDir>
   return out;
 }
 
+describe("council round 2 (#357)", () => {
+  it("R2-M1: a document whose figure step never ran keeps a current level (nothing to hide); only stored figures make it non-current", async () => {
+    await writeDocumentAssetLedger(sql, { scope: A, ...ledgerWriteForNoFigures("none"), level: { ...ledgerWriteForNoFigures("none").level, markdownComplete: true } });
+    expect((await sql`select assets_current from document_extraction_levels where document_id = 'doc-a'`)[0]).toEqual({ assets_current: true });
+    const storage = memoryStorage();
+    await storeStep(storage);
+    await writeDocumentAssetLedger(sql, { scope: A, ...ledgerWriteForNoFigures("disabled"), level: { ...ledgerWriteForNoFigures("disabled").level, markdownComplete: true } });
+    expect((await sql`select assets_current from document_extraction_levels where document_id = 'doc-a'`)[0]).toEqual({ assets_current: false });
+  });
+
+  it("R2-L8: a partial outcome where every shard failed (no folder, gaps covering the document) leaves gap-only resumable work", async () => {
+    const outcome = { status: "partial" as const, exitCode: 5, gaps: [{ first: 1, last: 3, reason: "plugin:shard-over-share" as const }] };
+    const failed = ledgerWriteForFailedFigures({ outcome });
+    await writeDocumentAssetLedger(sql, { scope: A, ...failed, level: { ...failed.level, markdownComplete: true } });
+    expect(await level()).toMatchObject({ images_status: "resumable" });
+    expect((await listResumableDocuments(sql, { orgId: "org-a" })).map((row) => row.shard)).toEqual([{ first: 1, last: 3 }]);
+  });
+
+  it("A-8: more than 128 gaps after a resume is refused, never truncated", async () => {
+    const many = Array.from({ length: 129 }, (_, i) => ({ first: 2 * i + 1, last: 2 * i + 1, reason: "other" as const }));
+    await expect(writeFigureLevelFor(many)).rejects.toMatchObject({ rule: "invalid-level" });
+  });
+});
+
+async function writeFigureLevelFor(gaps: Array<{ first: number; last: number; reason: "other" }>) {
+  const failed = ledgerWriteForFailedFigures({ outcome: { gaps } as never });
+  return await writeDocumentAssetLedger(sql, { scope: A, ...failed, level: { ...failed.level, markdownComplete: true } });
+}
+
 describe("projects that opted out of figures", () => {
   it("never appear in resume discovery, and the first pass asks for no figures", async () => {
     const storage = memoryStorage();
