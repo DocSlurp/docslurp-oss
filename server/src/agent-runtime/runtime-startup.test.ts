@@ -30,3 +30,13 @@ it("does not start a producer using only the rate-limit endpoint", async () => {
   await expect(runtime.nativeChatRuntime()).rejects.toThrow("native_chat_shared_transport_required");
   expect(state.create).not.toHaveBeenCalled();
 });
+
+it("drains for 25 s by default, so a single executor's deploy leaves a short claim gap", async () => {
+  runtime = await import("./runtime.js");
+  expect(runtime.nativeChatDrainMs({})).toBe(25_000);
+  // A long turn deadline no longer stretches the drain (it used to be the deadline plus 5 s).
+  expect(runtime.nativeChatDrainMs({ CHAT_AGENT_TURN_DEADLINE_MS: "100000" })).toBe(25_000);
+  expect(runtime.nativeChatDrainMs({ CHAT_EXECUTOR_DRAIN_MS: "105000" })).toBe(105_000);
+  expect(runtime.nativeChatDrainMs({ CHAT_EXECUTOR_DRAIN_MS: "0" })).toBe(0);
+  for (const invalid of ["-1", "900001", "1.5", "soon"]) expect(runtime.nativeChatDrainMs({ CHAT_EXECUTOR_DRAIN_MS: invalid })).toBe(25_000);
+});

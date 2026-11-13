@@ -262,7 +262,7 @@ describe("SearchSessionJournal", () => {
     expect(sqlMock).toHaveBeenCalledTimes(1);
     const insert = sqlMock.mock.calls[0]?.[0].join(" ");
     expect(insert).toContain("search_sessions.user_id = excluded.user_id");
-    expect(insert).toContain("search_sessions.metadata ->> 'projectId' = excluded.metadata ->> 'projectId'");
+    expect(insert).toContain("search_sessions.project_id = excluded.project_id");
     expect(insert).toContain("search_sessions.metadata ->> 'queryHash' = excluded.metadata ->> 'queryHash'");
   });
 });

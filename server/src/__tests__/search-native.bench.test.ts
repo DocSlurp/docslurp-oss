@@ -44,7 +44,9 @@ function quantile(values: number[], q: number): number {
 }
 
 describe.skipIf(!databaseUrl || !qrelsPath)("search native benchmark", () => {
-  const qrels = qrelsPath ? JSON.parse(readFileSync(qrelsPath, "utf8")) as { projectId: string; userId: string; queries: Query[] } : null;
+  const qrels = qrelsPath ? JSON.parse(readFileSync(qrelsPath, "utf8")) as { projectId: string; orgId?: string; userId: string; queries: Query[] } : null;
+  // The explicit search access scope (search/access-scope.ts): the qrels' org, or SEARCH_NATIVE_BENCH_ORG_ID.
+  const TEST_SEARCH_SCOPE = { orgId: qrels?.orgId ?? process.env.SEARCH_NATIVE_BENCH_ORG_ID ?? "", projectIds: "org", modeCeiling: null } as const;
   beforeAll(async () => {
     sql = postgres(databaseUrl!, { max: 20, prepare: false, onnotice: () => {}, debug: (_connection, query) => { statements += 1; if (!WRITE.test(query)) reads += 1; } });
     vi.doMock("../db.js", () => ({ sql }));
@@ -69,7 +71,7 @@ describe.skipIf(!databaseUrl || !qrelsPath)("search native benchmark", () => {
     const before = statements;
     const readsBefore = reads;
     const started = performance.now();
-    const response = await search.hybridSearch(query.q, qrels!.userId, { ...options, queryVector: query.vector, filters: { projectId: qrels!.projectId } });
+    const response = await search.hybridSearch(query.q, qrels!.userId, { ...options, queryVector: query.vector, filters: { projectId: qrels!.projectId } }, TEST_SEARCH_SCOPE);
     const ms = performance.now() - started;
     const onPath = statements - before;
     const readsOnPath = reads - readsBefore;
@@ -95,7 +97,7 @@ describe.skipIf(!databaseUrl || !qrelsPath)("search native benchmark", () => {
       while (next < queries.length) {
         const query = queries[next++]!;
         const started = performance.now();
-        await search.hybridSearch(query.q, qrels!.userId, { ...options, queryVector: query.vector, filters: { projectId: qrels!.projectId } });
+        await search.hybridSearch(query.q, qrels!.userId, { ...options, queryVector: query.vector, filters: { projectId: qrels!.projectId } }, TEST_SEARCH_SCOPE);
         concurrent.push(performance.now() - started);
       }
     }));

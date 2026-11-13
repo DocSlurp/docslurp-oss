@@ -4,6 +4,11 @@ import type { MaterializationPolicy } from "@docslurp/shared";
 
 const sqlMock = Object.assign(vi.fn(async () => []), { array: (values: unknown[]) => values });
 const chatProject = vi.fn();
+// Route access reads (lib/search-access.ts) answered from this file's getProject mock with the real scope rules.
+vi.mock("../lib/search-access.js", async () => {
+  const { authorizeFromProjectMock } = await import("./helpers/search-access.js");
+  return { authorizeActorProjectSearch: authorizeFromProjectMock(async (id, userId) => (await import("../services/projects.js")).getProject(id, userId)) };
+});
 vi.mock("../db.js", () => ({ sql: sqlMock }));
 vi.mock("../lib/temporal.js", () => ({ startMaterializeWorkflow: vi.fn() }));
 vi.mock("../services/search.js", () => ({ hybridSearch: vi.fn(), MissingProjectScopeError: class extends Error {} }));
