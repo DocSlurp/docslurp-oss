@@ -4,11 +4,12 @@ import { defaultChartExportConfig, expectedBillableVisuals, type BBox, type Char
 import { buildCanonicalDocumentFromMarkdown } from "../lib/canonical-document.js";
 import { parseDopplerPageFacts, type DopplerPageFactsDocument } from "../lib/doppler-page-facts.js";
 import { buildExtractionContract } from "../lib/extraction-contract.js";
+import { DOPPLER_PAGE_FACTS_SLOT } from "../extractors/doppler-figures.js";
 import { DocumentArtifactLedger } from "../pipeline/artifact-ledger.js";
 import { testCatalog } from "../routing/testing.js";
 import { docLine, figurePage, jsonl, runLine, scanPage, textPage } from "../test/doppler-page-facts-fixture.js";
 import { chartExportCharges } from "./billing.js";
-import { annotateImageObjects, candidatesFromPageFacts, CHART_FACTS_FORMAT, CHART_FACTS_SLOT, FACTS_CANDIDATE_RULES, loadChartFacts } from "./facts-candidates.js";
+import { annotateImageObjects, candidatesFromPageFacts, FACTS_CANDIDATE_RULES, loadChartFacts } from "./facts-candidates.js";
 import { ChartExportSession } from "./session.js";
 import { runChartExportPass, type PageImage } from "./stage.js";
 import { setDeterministicVisualExtractor, type ChartModelClient, type ChartModelRequest, type VisualCandidate } from "./types.js";
@@ -127,6 +128,12 @@ function memoryStorage() {
       if (!objects.has(key)) throw new Error(`missing ${key}`);
       return structuredClone(objects.get(key));
     },
+    async getBytes(key: string, options?: { maxBytes?: number }) {
+      if (!objects.has(key)) throw new Error(`missing ${key}`);
+      const bytes = Buffer.from(String(objects.get(key)), "utf8");
+      if (options?.maxBytes !== undefined && bytes.byteLength > options.maxBytes) throw new Error("over the read limit");
+      return bytes;
+    },
     async putJson(key: string, value: unknown) { objects.set(key, structuredClone(value)); },
     async putBytes(key: string, bytes: Buffer) { objects.set(key, bytes.toString("utf8")); },
     async deleteKeys() { /* unused */ },
@@ -143,8 +150,8 @@ function seed(storage: ReturnType<typeof memoryStorage>, pageCount: number, fact
   ledger.recordDocument("doc-1", "canonical-document", storage.uri("u/run/canonical.json"));
   ledger.recordDocument("doc-1", "extraction-contract", storage.uri("u/run/contract.json"));
   if (factsLines) {
-    storage.objects.set("u/run/facts.json", { format: CHART_FACTS_FORMAT, jsonl: jsonl([docLine({ pageCount }), ...factsLines, runLine({ pagesEmitted: pageCount })]) });
-    ledger.recordDocument("doc-1", CHART_FACTS_SLOT, storage.uri("u/run/facts.json"));
+    storage.objects.set("u/run/page-facts.jsonl", jsonl([docLine({ pageCount }), ...factsLines, runLine({ pagesEmitted: pageCount })]));
+    ledger.recordDocument("doc-1", DOPPLER_PAGE_FACTS_SLOT, storage.uri("u/run/page-facts.jsonl"));
   }
   return ledger;
 }
@@ -189,10 +196,16 @@ describe("chart export with page facts", () => {
     const storage = memoryStorage();
     const ledger = seed(storage, 1, [figurePage(1)]);
     expect(await loadChartFacts(storage as never, ledger, { id: "doc-1", pageCount: 1 })).not.toBeNull();
-    storage.objects.set("u/run/facts.json", { format: "other", jsonl: "" });
+    // Facts for more pages than the host counted keep only the host's pages.
+    const two = memoryStorage();
+    const twoLedger = seed(two, 2, [figurePage(1), figurePage(2)]);
+    expect([...(await loadChartFacts(two as never, twoLedger, { id: "doc-1", pageCount: 1 }))?.pages.keys() ?? []]).toEqual([1]);
+    storage.objects.set("u/run/page-facts.jsonl", "not facts\n");
     expect(await loadChartFacts(storage as never, ledger, { id: "doc-1", pageCount: 1 })).toBeNull();
-    storage.objects.set("u/run/facts.json", { format: CHART_FACTS_FORMAT, jsonl: "x".repeat(10_000_000) });
+    storage.objects.set("u/run/page-facts.jsonl", "x".repeat(10_000_000));
     expect(await loadChartFacts(storage as never, ledger, { id: "doc-1", pageCount: 1 })).toBeNull();
+    // A storage that cannot read bytes: no facts.
+    expect(await loadChartFacts({ bucket: storage.bucket }, ledger, { id: "doc-1", pageCount: 1 })).toBeNull();
   });
 
   it("in `store` mode facts nominate nothing (routing needs `use`)", async () => {

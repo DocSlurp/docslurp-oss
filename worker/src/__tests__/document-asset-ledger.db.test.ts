@@ -539,3 +539,61 @@ describe("sharded documents: a record per shard, the level is the aggregate, res
     expect(await shards()).toEqual([]);
   });
 });
+
+describe("LOW-5: shard ranges and the document's total resume cap", () => {
+  const H = "a".repeat(64);
+  async function insertShards(resumes: number[], resumableFrom = 0) {
+    for (const [i, n] of resumes.entries()) {
+      const page = i + 1;
+      const folder = `${String(page).padStart(4, "0")}-${String(page).padStart(4, "0")}`;
+      const resumable = i >= resumableFrom;
+      await sql`insert into document_extraction_shards (document_id, org_id, project_id, run_id, first_page, last_page, manifest_key, manifest_sha256,
+          source_sha256, settings_sha256, images_status, assets_resumable, resumes)
+        values ('doc-a', 'org-a', 'proj-a', 'run-a', ${page}, ${page}, ${`ua/run-a/doppler/doc-a/images/shards/${folder}/manifest.jsonl`}, ${H}, ${H}, ${H},
+          ${resumable ? "resumable" : "complete"}, ${resumable ? 1 : 0}, ${n})`;
+    }
+  }
+
+  it("a full write's shards start at page 1 and leave no hole", async () => {
+    const shard = (first: number, last: number) => ({
+      first, last, manifestKey: `ua/run-a/doppler/doc-a/images/shards/${String(first).padStart(4, "0")}-${String(last).padStart(4, "0")}/manifest.jsonl`,
+      manifestSha256: H, sourceSha256: H, settingsSha256: H, imagesStatus: "complete" as const, assetsResumable: 0, lastCutPage: null, deadlineMs: null,
+    });
+    const write = (shards: ReturnType<typeof shard>[]): DocumentAssetLedgerWrite => ({ ...complete(A, ledgerWriteForNoFigures("none")), shards });
+    await expect(store.writeDocumentAssetLedger(write([shard(1, 1), shard(3, 3)]))).rejects.toMatchObject({ rule: "invalid-level" });
+    await expect(store.writeDocumentAssetLedger(write([shard(2, 3)]))).rejects.toMatchObject({ rule: "invalid-level" });
+    expect(await sql`select 1 from document_extraction_shards where document_id = 'doc-a'`).toHaveLength(0);
+  });
+
+  it("past min(3 x shards, 12) resumes in all, no shard of the document is listed or resumed", async () => {
+    // Five shards: each under its own cap of 3, but 12 resumes in all (the absolute cap).
+    await insertShards([3, 3, 3, 2, 1], 3);
+    expect(await listResumableDocuments(sql, { orgId: "org-a" })).toEqual([]);
+    await sql`delete from document_extraction_shards`;
+    // Under the total, the resumable shards are listed.
+    await insertShards([3, 3, 2, 2, 1], 3);
+    expect((await listResumableDocuments(sql, { orgId: "org-a" })).map((row) => row.shard)).toEqual([{ first: 4, last: 4 }, { first: 5, last: 5 }]);
+    await sql`delete from document_extraction_shards`;
+  });
+});
+
+describe("PII withholding for files stored after the PII stage (HIGH-1)", () => {
+  it("withholds only under a recorded redact or block outcome, and appends URIs without dropping the stage's own", async () => {
+    await sql`update documents set metadata = '{}'::jsonb where id = 'doc-a'`;
+    expect(await store.documentPiiWithholds("doc-a")).toBe(false);
+    // Fail closed: no row, no answer to trust.
+    expect(await store.documentPiiWithholds("doc-missing")).toBe(true);
+    // No PII outcome to add to: refused, so the caller records nothing.
+    await expect(store.appendWithheldArtifactUris("doc-a", ["s3://b/x"])).rejects.toThrow(/no PII outcome/);
+    await sql`update documents set metadata = ${sql.json({ pii: { redacted: true, blocked: false, withheldArtifactUris: ["s3://b/ka"] } })} where id = 'doc-a'`;
+    expect(await store.documentPiiWithholds("doc-a")).toBe(true);
+    await store.appendWithheldArtifactUris("doc-a", ["s3://b/doppler/index.json", "s3://b/ka"]);
+    await store.appendWithheldArtifactUris("doc-a", ["s3://b/doppler/images/manifest.jsonl"]);
+    const [row] = await sql<{ metadata: { pii: { withheldArtifactUris: string[]; redacted: boolean } } }[]>`select metadata from documents where id = 'doc-a'`;
+    expect(row!.metadata.pii.withheldArtifactUris).toEqual(["s3://b/doppler/images/manifest.jsonl", "s3://b/doppler/index.json", "s3://b/ka"]);
+    expect(row!.metadata.pii.redacted).toBe(true);
+    await sql`update documents set metadata = ${sql.json({ pii: { blocked: true, redacted: false, withheldArtifactUris: [] } })} where id = 'doc-a'`;
+    expect(await store.documentPiiWithholds("doc-a")).toBe(true);
+    await sql`update documents set metadata = '{}'::jsonb where id = 'doc-a'`;
+  });
+});

@@ -22,14 +22,12 @@
  */
 import type { BBox } from "@docslurp/shared";
 
-import { dopplerPageFactsMode, parseDopplerPageFacts, type Box, type DopplerPageFacts, type DopplerPageFactsDocument } from "../lib/doppler-page-facts.js";
+import { DOPPLER_PAGE_FACTS_MAX_PAGES, dopplerPageFactsByteBudget, dopplerPageFactsMode, parseDopplerPageFacts, type Box, type DopplerPageFacts, type DopplerPageFactsDocument } from "../lib/doppler-page-facts.js";
+import { DOPPLER_PAGE_FACTS_SLOT } from "../extractors/doppler-figures.js";
 import type { DocumentArtifactLedger } from "../pipeline/artifact-ledger.js";
 import { keyFromStorageUri, type ArtifactStore } from "../tools/storage.js";
 import type { VisualCandidate } from "./types.js";
 
-/** Document artifact slot of the host's canonical facts (`{ format, jsonl }`, re-serialized by the strict reader). */
-export const CHART_FACTS_SLOT = "doppler-page-facts-canonical";
-export const CHART_FACTS_FORMAT = "doppler-page-facts/1";
 
 export const FACTS_CANDIDATE_RULES = {
   /** Shorter side of a figure cluster, in points: smaller is an icon, bullet, glyph or rule. */
@@ -250,23 +248,25 @@ export function annotateImageObjects(candidates: VisualCandidate[], facts: Pick<
   }
 }
 
-/** The document's facts from its canonical slot, re-read by the strict reader bounded by the host's page count. */
+/**
+ * The document's facts from its `doppler-page-facts` slot (canonical lines extract-markdown re-serialized from what the
+ * strict reader kept), read again by the same strict reader: bounded by the host's page count and its byte budget.
+ * No slot, a storage without byte reads, or a refused stream: null (today's behaviour).
+ */
 export async function loadChartFacts(
-  storage: Pick<ArtifactStore, "bucket" | "getJson">,
+  storage: Pick<ArtifactStore, "bucket"> & Partial<Pick<ArtifactStore, "getBytes">>,
   ledger: DocumentArtifactLedger,
   document: { id: string; pageCount: number },
 ): Promise<DopplerPageFactsDocument | null> {
-  const uri = ledger.readDocument(document.id, CHART_FACTS_SLOT);
+  const uri = ledger.readDocument(document.id, DOPPLER_PAGE_FACTS_SLOT);
   const key = uri ? keyFromStorageUri(uri, storage.bucket) : null;
-  if (!key || !Number.isSafeInteger(document.pageCount) || document.pageCount < 1) return null;
-  let stored: unknown;
+  if (!key || !storage.getBytes || !Number.isSafeInteger(document.pageCount) || document.pageCount < 1 || document.pageCount > DOPPLER_PAGE_FACTS_MAX_PAGES) return null;
+  let bytes: Buffer;
   try {
-    stored = await storage.getJson(key);
+    bytes = await storage.getBytes(key, { maxBytes: dopplerPageFactsByteBudget(document.pageCount) });
   } catch {
     return null;
   }
-  const record = stored as { format?: unknown; jsonl?: unknown } | null;
-  if (!record || record.format !== CHART_FACTS_FORMAT || typeof record.jsonl !== "string") return null;
-  const parsed = parseDopplerPageFacts(record.jsonl, { pageCount: document.pageCount });
+  const parsed = parseDopplerPageFacts(new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength), { pageCount: document.pageCount });
   return parsed.ok ? parsed.facts : null;
 }

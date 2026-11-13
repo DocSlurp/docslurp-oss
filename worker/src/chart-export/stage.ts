@@ -44,7 +44,7 @@ export const CHART_EXPORT_ARTIFACT_SLOT = "chart-export";
 /** Suffix of the artifact a cleared document records (export turned off): nothing left to remove, no read needed. */
 const CLEARED_SUFFIX = ".cleared.json";
 
-type PassStorage = Pick<ArtifactStore, "bucket" | "getJson" | "putJson" | "putBytes" | "uri" | "deleteKeys">;
+type PassStorage = Pick<ArtifactStore, "bucket" | "getJson" | "putJson" | "putBytes" | "uri" | "deleteKeys"> & Partial<Pick<ArtifactStore, "getBytes">>;
 type PassDocument = Pick<Document, "id" | "userId" | "mimeType" | "pageCount"> & Partial<Pick<Document, "sourceKey" | "sourceSha256" | "originalSourceSha256" | "parseSourceDecision">>;
 
 export type PageImage = VisualImage & { release: () => Promise<void>; dpi?: number | null };

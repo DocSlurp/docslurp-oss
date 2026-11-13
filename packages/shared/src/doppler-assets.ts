@@ -48,6 +48,11 @@ export interface DopplerAssetCaps {
   totalBytes: number;
   entries: number;
   manifestBytes: number;
+  /**
+   * Every `manifest.jsonl` of the folder together (one, or all shards): `min(64 MiB, 1 KiB x entries)`. Real lines are
+   * about 216 bytes; each line type has its own small cap too (DOPPLER_MANIFEST_V3_TYPE_LINE_BYTES).
+   */
+  manifestV3Bytes: number;
   pictureFileBytes: number;
   scanFileBytes: number;
   pageFactsBytes: number;
@@ -62,7 +67,8 @@ const MIB = 1024 * 1024;
  * - files `min(2048 + 2 x pages, 32768)`, page folders `min(pages, files)`
  * - bytes `min(64 MiB + 1.25 MiB x pages, 4 GiB)`
  * - entries (manifest lines) `min(16384 + 16 x pages, 131072)`. A version 3 manifest (`manifest.jsonl`) is read line by line
- *   in fixed memory, so its size is bounded only by the line count and the 64 KiB line cap. A legacy version 2 manifest is
+ *   in fixed memory; all of a folder's version 3 manifests together are at most `min(64 MiB, 1 KiB x entries)`, and each
+ *   line at most its type's cap (DOPPLER_MANIFEST_V3_TYPE_LINE_BYTES). A legacy version 2 manifest is
  *   parsed whole: `min(8 MiB + 128 B x entries, 16 MiB)` (at 16 MiB, JSON.parse plus the strict schema peaks near 160 MB,
  *   measured), and at most 65,536 entries
  * - one file: 8 MiB for pictures and figures, 64 MiB for a page scan copied or decoded from the PDF
@@ -78,6 +84,7 @@ export function dopplerAssetCaps(pageCount: number): DopplerAssetCaps {
     totalBytes: Math.min(64 * MIB + Math.floor(1.25 * MIB) * pages, L.maxTotalBytes),
     entries,
     manifestBytes: Math.min(8 * MIB + 128 * entries, L.maxManifestBytes),
+    manifestV3Bytes: Math.min(DOPPLER_MANIFEST_V3_MAX_BYTES, 1024 * entries),
     pictureFileBytes: L.maxPictureFileBytes,
     scanFileBytes: L.maxScanFileBytes,
     pageFactsBytes: Math.min(MIB + 16 * 1024 * pages, L.maxPageFactsBytes),
@@ -441,8 +448,15 @@ export function parseDopplerShardFolder(name: string): [number, number] | null {
   if (first < 1 || first > last || last > 1_000_000_000) return null;
   return dopplerShardFolder(first, last) === name ? [first, last] : null;
 }
-/** Each line is one ASCII JSON object of at most this many bytes, `\n` included. */
+/** Each line is one ASCII JSON object of at most this many bytes, `\n` included (the read buffer). */
 export const DOPPLER_MANIFEST_V3_LINE_BYTES = 64 * 1024;
+/** All of one folder's version 3 manifests together, at most (DopplerAssetCaps.manifestV3Bytes scales below it). */
+export const DOPPLER_MANIFEST_V3_MAX_BYTES = 64 * 1024 * 1024;
+/**
+ * Each line type's own cap, `\n` included: several times the largest real line (an image line is about 216 bytes, a
+ * header about 360), so whitespace padding cannot inflate a manifest to the line cap times the line count.
+ */
+export const DOPPLER_MANIFEST_V3_TYPE_LINE_BYTES = { header: 2048, image: 2048, batch: 1024, end: 2048 } as const;
 
 export const dopplerManifestV3HeaderSchema = z.strictObject({
   type: z.literal("header"),
@@ -562,8 +576,11 @@ export class DopplerManifestV3Validator {
     if (this.state === "done") this.fail("line-after-end");
     this.lines += 1;
     if (this.lines > this.limits.maxLines + 2) this.fail("too-many-lines");
+    const caps = DOPPLER_MANIFEST_V3_TYPE_LINE_BYTES;
+    if (text.length + 1 > Math.max(caps.header, caps.image, caps.batch, caps.end)) this.fail("line-too-long");
     const value = this.parse(text);
     const type = value.type;
+    if ((type === "header" || type === "image" || type === "batch" || type === "end") && text.length + 1 > caps[type]) this.fail("line-too-long");
     if (type === "header") {
       if (this.state !== "header") this.fail("lines-out-of-order");
       if (value.schema !== DOPPLER_IMAGES_V3_SCHEMA) this.fail("schema");

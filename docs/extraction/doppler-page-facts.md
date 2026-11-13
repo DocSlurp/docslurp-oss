@@ -38,8 +38,12 @@ Page counts for billing and limits stay the host's own (pdfpagecount). The facts
 - `off`: facts a provider returns are dropped unread.
 - `store` (default): parsed, and each known page's text layer and scan class recorded in `document_page_facts`
   (`text_layer`, `scan_class`; migration 0141) through `upsertPageFacts`. The walker's layout facts give the text layer
-  when they have one; the facts give the scan class. Doppler's raw `page-facts.jsonl` is kept beside the figure
-  manifest when figures are on ([Doppler figures](doppler-figures.md)).
+  when they have one; the facts give the scan class. The facts themselves are stored as
+  `<artifact root>/doppler/<documentId>/images/page-facts.jsonl` (slot `doppler-page-facts`), beside the figure manifest
+  ([Doppler figures](doppler-figures.md)), whatever the figure setting: canonical lines re-serialized from what the
+  reader kept (`dopplerPageFactsJsonl`), never the guest's bytes, so without `producer`, `creator`, `lang` or any field
+  the reader does not know. The file proxy serves it as text, behind the same artifact and PII checks as the folder's
+  other files. Malformed or refused facts write no object.
 - `use`: as `store`, and when the provider returned no layout facts the facts stand in for them: the mapped
   `PageLayoutFacts` are stored as `page-layout-facts` with `source: "vm-pdf-facts"`.
 
@@ -70,9 +74,8 @@ classify-route and page-image evidence read the facts unchanged:
 ## Chart and diagram candidates
 
 Chart export (`worker/src/chart-export/facts-candidates.ts`) reads the facts again from the document's
-`doppler-page-facts-canonical` slot: the canonical lines extract-markdown re-serialized from what the reader kept, parsed
-again by the same strict reader and bounded by the host's page count. No slot, or facts the reader refuses, leaves chart
-export exactly as it was.
+`doppler-page-facts` slot (the canonical lines above), through the same strict reader, bounded by the host's page count
+and byte budget. No slot, or facts the reader refuses, leaves chart export exactly as it was.
 
 **Candidates (`use` only, and only without a router plan, which owns chart labels when it exists).** A page or region is
 a candidate from its structure, not its words. Each candidate carries the cluster or image box as its crop, so the model

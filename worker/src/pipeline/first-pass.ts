@@ -16,7 +16,7 @@ import { copyFile, cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/p
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { dopplerImageExtractEnabled, dopplerImageLimits, type PipelineFeatures } from "@docslurp/shared";
+import { dopplerImageLimits, figuresEnabled, type PipelineFeatures } from "@docslurp/shared";
 import {
   acceptSandboxedPdfBatchEvent, assertSingleScopeBatch, batchFileJob, batchUsageOf, sandboxedPdfBatchProvider, unfinishedBatchFiles,
   type SandboxedPdfBatchEvent, type SandboxedPdfBatchFile, type SandboxedPdfBatchJob, type SandboxedPdfBatchProvider,
@@ -58,14 +58,17 @@ export function firstPassDrainConcurrency(env: NodeJS.ProcessEnv = process.env):
   return Number.isSafeInteger(value) ? Math.max(1, Math.min(16, value)) : 4;
 }
 
-/** The batch options a project's pipeline asks for: math only when the project requests it, figures when the deploy has them. */
+/**
+ * The batch options a project's pipeline asks for: math only when the project requests it, figures when the deploy has
+ * them and the project did not opt out (`figures: false`).
+ */
 export function firstPassBatchOptions(pipeline: PipelineFeatures, env: NodeJS.ProcessEnv = process.env): SandboxedPdfBatchJob["options"] {
   const vmOptions = (pipeline.documentExtraction?.options as Record<string, { math?: unknown } | undefined> | undefined)?.["vm-pdf"];
   return {
     // Math reading stays behind its own deploy flag (default off) until the open council follow-up on the math reader is
     // closed (TODO.md: bound its scan on hostile pages); the project's request alone never turns it on.
     math: vmOptions?.math === true && env.DOCSLURP_FIRST_PASS_MATH?.trim().toLowerCase() === "on",
-    figures: dopplerImageExtractEnabled(env) && !!sandboxedPdfProvider()?.figures,
+    figures: figuresEnabled(pipeline as { figures?: boolean | null }, env) && !!sandboxedPdfProvider()?.figures,
   };
 }
 
@@ -125,6 +128,11 @@ export function firstPassServesDocument(runId: string, documentId: string): bool
 
 export function resetFirstPassResultsForTest(): void {
   results.clear();
+}
+
+/** Test hook: the batch converted this document (firstPassServesDocument is true); nothing is served from it. */
+export function markFirstPassDocumentForTest(runId: string, documentId: string): void {
+  results.set(key(runId, documentId), { markdownPath: "", result: {} as SandboxedPdfResult });
 }
 
 // ── Planning ──
@@ -432,14 +440,15 @@ export async function runFirstPassBatch(deps: FirstPassBatchDeps, input: { runId
     }
 
     // Figures: stored only for documents whose text was extracted and whose publish gate passed, never failing a document.
+    // `document.md` is the document's Markdown slot as the drains committed it (the text the PII stage scanned), never the
+    // batch's raw output: the slots are read from a fresh state once.
+    const committed = figureReady.size > 0 ? await loadRunState(deps.store, input.runId, { hydrate: true }) : null;
     for (const [documentId, { dir, outcome }] of figureReady) {
       const document = documents.get(documentId)!;
       if (!results.has(key(input.runId, documentId)) || !cleared.has(documentId)) continue;
-      // The Markdown exactly as Doppler wrote it: stored as `document.md` beside the images, and read for its markers.
-      const markdownPath = files.find((f) => f.documentId === documentId)!.output;
-      const markdown = await readFile(markdownPath, "utf8").catch(() => "");
+      const markdownSlot = await readMarkdownSlotBytes(deps.storage, committed?.artifactLedger.readDocument(documentId, "markdown")).catch(() => null);
       await runDocumentStage(state, document, FIRST_PASS_FIGURES_STAGE, `${documentId}:${FIRST_PASS_FIGURES_STAGE}`, "figures stored", () =>
-        storeFirstPassFigures({ state, document, dir, outcome, markdownPath, markdown, storage: deps.storage as unknown as DopplerFigureStorage, runId: input.runId, signal: batch.signal })
+        storeFirstPassFigures({ state, document, dir, outcome, markdownSlot, storage: deps.storage as unknown as DopplerFigureStorage, runId: input.runId, signal: batch.signal })
       , batch.signal);
     }
 
@@ -632,7 +641,9 @@ export const __test = { textlessPages, cp };
  * images level). Never fails the document; cancellation still throws.
  */
 export async function storeFirstPassFigures(args: {
-  state: WorkflowState; document: Document; dir: string; outcome: SandboxedPdfFigureOutcome; markdownPath: string; markdown: string;
+  state: WorkflowState; document: Document; dir: string; outcome: SandboxedPdfFigureOutcome;
+  /** The bytes of the document's Markdown slot (readMarkdownSlotBytes), or null: `document.md` and the markers' source. */
+  markdownSlot: Buffer | null;
   storage: DopplerFigureStorage; runId: string; signal: AbortSignal;
 }): Promise<{ artifactUri?: string; stats: Record<string, unknown> }> {
   const { state, document, outcome } = args;
@@ -642,20 +653,44 @@ export async function storeFirstPassFigures(args: {
     const ledger = queueAssetLedger(state, documentId, ledgerWriteForFailedFigures({ outcome }));
     return { stats: { dopplerFigures: { status: "extraction-failed", ledger } } };
   }
+  // This step runs after the document's PII stage, so that stage's withheld list never saw these files. When the
+  // outcome withholds artifacts (redact_artifacts or block_indexing matched), every file stored here joins the list
+  // before any slot is recorded, and no `document.md` is stored. A store that cannot say or cannot add stores nothing
+  // (fail closed). Otherwise `document.md` is exactly the Markdown slot's bytes, the text the PII stage scanned.
+  const piiEnabled = !!state.run.pipeline?.piiPolicy?.enabled;
+  const pii = state.store;
+  if (piiEnabled && (!pii?.documentPiiWithholds || !pii.appendWithheldArtifactUris)) {
+    console.warn(`[first-pass] figures document=${documentId} status=failed rule=pii-unverifiable`);
+    const ledger = queueAssetLedger(state, documentId, ledgerWriteForFailedFigures({ outcome }));
+    return { stats: { dopplerFigures: { status: "failed", rule: "pii-unverifiable", ledger } } };
+  }
   let figures: Awaited<ReturnType<typeof readDopplerFigureDir>> | null = null;
   try {
+    const withhold = piiEnabled ? await pii!.documentPiiWithholds!(documentId) : false;
     figures = await readDopplerFigureDir(args.dir, {
       pageCount: document.pageCount, signal: args.signal, expect: outcome.status === "partial" ? "partial" : "complete",
       sourceSha256: document.sourceSha256 ?? null,
     });
+    const committedUris = committedDocumentUris(state, documentId);
     const stored = await storeDopplerFigures({
-      storage: args.storage, document, runId: args.runId, figures, markdown: args.markdown,
-      dopplerMarkdownPath: args.markdownPath, source: dopplerSourcePointer(document), signal: args.signal,
+      storage: args.storage, document, runId: args.runId, figures, markdown: args.markdownSlot?.toString("utf8") ?? "",
+      documentMarkdown: withhold ? null : args.markdownSlot, source: dopplerSourcePointer(document), signal: args.signal,
+      committedUris,
     });
+    if (withhold) {
+      try {
+        await pii!.appendWithheldArtifactUris!(documentId, stored.slots.map(({ uri }) => uri));
+      } catch (error) {
+        // Nothing records these objects: remove them (never a committed one) rather than leave them unreachable.
+        const removable = stored.objectKeys.filter((objectKey) => !committedUris.has(args.storage.uri(objectKey)));
+        if (removable.length > 0) await args.storage.deleteKeys?.(removable).catch(() => undefined);
+        throw error;
+      }
+    }
     for (const { slot, uri } of stored.slots) state.artifactLedger.recordDocument(documentId, slot, uri);
     // The ledger write takes over the reader's spill (it removes it once written).
     const ledger = queueAssetLedger(state, documentId, ledgerWriteForStoredFigures({ set: figures, stored, outcome }));
-    return { artifactUri: stored.indexUri, stats: { dopplerFigures: { ...stored.stats, manifestVersion: figures.version, ledger } } };
+    return { artifactUri: stored.indexUri, stats: { dopplerFigures: { ...stored.stats, manifestVersion: figures.version, ledger, ...(withhold ? { piiWithheld: true } : {}) } } };
   } catch (error) {
     await disposeDopplerFigureSet(figures);
     if (args.signal.aborted) throw error;
@@ -664,4 +699,23 @@ export async function storeFirstPassFigures(args: {
     const ledger = queueAssetLedger(state, documentId, ledgerWriteForFailedFigures({ outcome }));
     return { stats: { dopplerFigures: { status: "failed", rule, ledger } } };
   }
+}
+
+/**
+ * The bytes of a document's Markdown slot (the text the PII stage scans), for `document.md`; null when there is none or
+ * it is not a text object (a manifest).
+ */
+export async function readMarkdownSlotBytes(storage: Pick<ArtifactStore, "getBytes" | "bucket">, uri: string | undefined): Promise<Buffer | null> {
+  if (!uri) return null;
+  const objectKey = keyFromStorageUri(uri, storage.bucket);
+  if (!objectKey || objectKey.endsWith(".json")) return null;
+  return await storage.getBytes(objectKey);
+}
+
+/** URIs the document's artifact slots already record (committed objects a failed store must never delete). */
+export function committedDocumentUris(state: Pick<WorkflowState, "artifactLedger">, documentId: string): Set<string> {
+  const prefix = `${documentId}:`;
+  const uris = new Set<string>();
+  for (const [slot, uri] of Object.entries(state.artifactLedger.all() as Record<string, string>)) if (slot.startsWith(prefix)) uris.add(uri);
+  return uris;
 }
