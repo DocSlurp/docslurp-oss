@@ -679,7 +679,8 @@ describe("agent modes", () => {
 
   it("offers chart export only while it is off and a data question or unexported charts justify it", () => {
     const off = { enabled: false };
-    expect(chartExportSuggestionInstruction("Show the revenue trend by quarter as a chart", off)).toContain("chartExport: { enabled: true }");
+    expect(chartExportSuggestionInstruction("Show the revenue trend by quarter as a chart", off)).toContain('chartExport: { tier: "models" }');
+    expect(chartExportSuggestionInstruction("Show the revenue trend by quarter as a chart", off)).toContain("billed");
     expect(chartExportSuggestionInstruction("Who signed the lease?", off)).toBeNull();
     expect(chartExportSuggestionInstruction("Who signed the lease?", { enabled: false, unexportedVisuals: 7 })).toContain("ingest recorded 7 charts or diagrams in this project that were not exported");
     expect(chartExportSuggestionInstruction("Who signed the lease?", { enabled: false, unexportedVisuals: 1 })).toContain("1 chart or diagram in this project that was not exported");
@@ -690,19 +691,38 @@ describe("agent modes", () => {
     expect(text).not.toContain("generatorModel");
   });
 
+  it("states the deployment's real tier and offers free only where it is off and free is allowed (correctness M1)", () => {
+    const query = "Show the revenue trend by quarter as a chart";
+    // Production: app default off, explicit free refused. Never claims free steps run; proposes models only.
+    const production = chartExportSuggestionInstruction(query, { enabled: false, effectiveTier: "off", freeAvailable: false })!;
+    expect(production).toContain("Chart export is off for this project");
+    expect(production).not.toContain('tier: \"free\"');
+    expect(production).not.toContain("only charts that carry their own data are exported");
+    // Free allowed: offers it as the no-charge option, models stays available.
+    const open = chartExportSuggestionInstruction(query, { enabled: false, effectiveTier: "off", freeAvailable: true })!;
+    expect(open).toContain('chartExport: { tier: "free" }');
+    expect(open).toContain('chartExport: { tier: "models" }');
+    // Already on the free steps: only models is suggested.
+    const free = chartExportSuggestionInstruction(query, { enabled: false, effectiveTier: "free", freeAvailable: true })!;
+    expect(free).toContain("only charts that carry their own data are exported");
+    expect(free).not.toContain('tier: "free"');
+    // Unknown tier is treated as off, never assumed free.
+    expect(chartExportSuggestionInstruction(query, { enabled: false })).toContain("Chart export is off for this project");
+  });
+
   it("adds the chart export hint in suggestions mode only", async () => {
     mocks.manifestIds = ["search", "getProjectSettings", "proposeProjectSettings"];
     const query = "Chart the quarterly bookings trend";
     const on = new MockLanguageModelV4({ doStream: [answerStep("Ready")] });
     mocks.provider.mockReturnValue(on);
-    await runChatMcpAgent({ ...args, query, suggestions: true, projectInstructions: "Answer in British English.", chartExport: { enabled: false, unexportedVisuals: 3 } });
-    expect(systemText(on)).toContain("Chart export is off for this project");
+    await runChatMcpAgent({ ...args, query, suggestions: true, projectInstructions: "Answer in British English.", chartExport: { enabled: false, unexportedVisuals: 3, effectiveTier: "free" } });
+    expect(systemText(on)).toContain("Reading charts with AI is off for this project");
     // The per-question hint comes after the project instructions, keeping them in the cached prompt prefix.
-    expect(systemText(on).indexOf("Chart export is off")).toBeGreaterThan(systemText(on).indexOf("Answer in British English."));
+    expect(systemText(on).indexOf("Reading charts with AI is off")).toBeGreaterThan(systemText(on).indexOf("Answer in British English."));
     const offMode = new MockLanguageModelV4({ doStream: [answerStep("Ready")] });
     mocks.provider.mockReturnValue(offMode);
     await runChatMcpAgent({ ...args, query, chartExport: { enabled: false, unexportedVisuals: 3 } });
-    expect(systemText(offMode)).not.toContain("Chart export is off");
+    expect(systemText(offMode)).not.toContain("Reading charts with AI is off");
   });
 
   it("keeps settings facts uncited and answers free of visible self-corrections", async () => {

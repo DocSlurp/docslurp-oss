@@ -1671,6 +1671,8 @@ export async function bulkReprocessDocuments(
         speedBoost: options.speedBoost === true,
         // A partial source run's stage selection must not carry into a full re-run.
         pipeline: withoutStageSelection(first.pipeline ?? defaultPipelineFeatures),
+        // A replay: the run's stamped chart tier, capped at what the project resolves to now (never a billed surprise).
+        chartExportReplay: {},
         sources: { kind: "versionsOf", documentIds: group.map((doc) => doc.id) },
       });
       result.runs.push(created.run);

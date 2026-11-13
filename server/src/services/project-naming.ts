@@ -170,7 +170,7 @@ const AUTO_TITLE_SWEEP_LOCK = "project-auto-title-sweep";
  * After ingest: refines the automatic titles of projects whose current corpus
  * changed since the sweep last examined them. project_corpus_stats.updated_at
  * moves as documents complete (trigger-maintained); auto_title_checked_at is
- * the updated_at the sweep last saw (0153). A project is pending while the two
+ * the updated_at the sweep last saw (0154). A project is pending while the two
  * differ, with no lookback window, and the oldest change goes first: a project
  * the sweep cannot rename is marked examined like any other, so it cannot hold
  * a place in the queue, and an outage of any length is caught up afterwards.
@@ -184,7 +184,7 @@ export async function sweepProjectAutoTitles(options: { batchSize?: number; maxB
   let examined = 0;
   for (let i = 0; i < (options.maxBatches ?? AUTO_TITLE_SWEEP_MAX_BATCHES); i += 1) {
     // One transaction per batch: claim, read evidence, rename, checkpoint, commit. The claim row-locks each
-    // project's stats row, and a summary write locks the same row (0153 trigger), so the two serialize:
+    // project's stats row, and a summary write locks the same row (0154 trigger), so the two serialize:
     // - a summary written while the batch holds the row waits, then clears the checkpoint (pending again);
     // - a summary transaction already holding the row makes the claim skip it (still pending);
     // - a summary committed before the claim is visible to the evidence read.

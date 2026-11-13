@@ -9,7 +9,7 @@ import {
 } from "../config-change.js";
 import { affectedStages, defaultPipelineFeatures, normalizePipelineFeatures, pipelineFeaturesSchema, pipelineStagePlan, compilePipelinePlan } from "../index.js";
 
-const ctx = { documents: 3, pages: 120 };
+const ctx = { documents: 3, pages: 120, env: { DOCSLURP_CHART_EXPORT: "on" } };
 const base = normalizePipelineFeatures(defaultPipelineFeatures);
 const withF = (patch: Record<string, unknown>) => normalizePipelineFeatures({ ...base, ...patch } as never);
 
@@ -112,34 +112,84 @@ describe("analyzePipelineChange", () => {
     const order = compilePipelinePlan(withF({ summarize: true })).stageOrder;
     expect(impact.stages).toEqual(order.filter((s) => impact.stages.includes(s)));
   });
-  it("chart export: enabling or adding formats is recommended and re-runs vision-extract onward", () => {
-    const on = withF({ chartExport: { enabled: true } });
-    const enabled = analyzePipelineChange(base, on, ctx);
+  it("chart export: moving up a tier or adding formats recommends a reindex through vision-extract", () => {
+    const models = withF({ chartExport: { tier: "models" } });
+    const app = { ...ctx, origin: "app" as const };
+    const enabled = analyzePipelineChange(base, models, app);
     expect(enabled.kind).toBe("reindex-recommended");
     expect(enabled.stages[0]).toBe("vision-extract");
     expect(enabled.reasons.find((r) => r.field === "chartExport")?.effect).toMatch(/reprocess/);
-    const more = withF({ chartExport: { enabled: true, formats: ["description", "mermaid", "csv"] } });
-    expect(analyzePipelineChange(on, more, ctx).kind).toBe("reindex-recommended");
-    // Dropping a format, disabling, or changing only the generator applies to new uploads.
-    expect(analyzePipelineChange(more, on, ctx).kind).toBe("new-uploads");
-    expect(analyzePipelineChange(on, base, ctx).kind).toBe("new-uploads");
-    expect(analyzePipelineChange(on, withF({ chartExport: { enabled: true, generatorModel: "llm://openrouter/x/y" } }), ctx).kind).toBe("new-uploads");
+    const more = withF({ chartExport: { tier: "models", formats: ["description", "mermaid", "csv"] } });
+    expect(analyzePipelineChange(models, more, app).kind).toBe("reindex-recommended");
+    // Dropping a format, moving down a tier or turning it off applies to new uploads.
+    expect(analyzePipelineChange(more, models, app).kind).toBe("new-uploads");
+    expect(analyzePipelineChange(models, base, app).kind).toBe("new-uploads");
+    expect(analyzePipelineChange(models, withF({ chartExport: { tier: "free" } }), app).kind).toBe("new-uploads");
+    expect(analyzePipelineChange(base, withF({ chartExport: { tier: "off" } }), app).kind).toBe("new-uploads");
     // Formats edited while export is off do nothing to stored data.
-    expect(analyzePipelineChange(base, withF({ chartExport: { enabled: false, formats: ["csv"] } }), ctx).kind).toBe("new-uploads");
+    expect(analyzePipelineChange(base, withF({ chartExport: { tier: "off", formats: ["csv"] } }), app).kind).toBe("new-uploads");
   });
-  it("chart export: still recommends a reindex through vision-extract when vision fallback is off", () => {
+  it("chart export: an unset tier resolves for the caller's surface", () => {
+    const free = withF({ chartExport: { tier: "free" } });
+    const ctx = { documents: 3, pages: 120, env: { DOCSLURP_CHART_EXPORT: "on", DOCSLURP_CHART_EXPORT_FREE_EXPLICIT: "on" } };
+    // In the app the default is already free: setting it explicitly changes nothing stored.
+    expect(analyzePipelineChange(base, free, { ...ctx, origin: "app" }).kind).toBe("new-uploads");
+    // For API callers the default is off: free is an optional (free) reindex.
+    expect(analyzePipelineChange(base, free, { ...ctx, origin: "machine" }).kind).toBe("reindex-recommended");
+    // DOCSLURP_CHART_EXPORT_API_DEFAULT=free makes API callers' default free too.
+    expect(analyzePipelineChange(base, free, { ...ctx, origin: "machine", env: { ...ctx.env, DOCSLURP_CHART_EXPORT_API_DEFAULT: "free" } }).kind).toBe("new-uploads");
+  });
+  it("chart export: classification follows the production defaults (switch on, app default off, explicit free refused)", () => {
+    const production = { DOCSLURP_CHART_EXPORT: "on", DOCSLURP_CHART_EXPORT_APP_DEFAULT: "off" };
+    const app = { ...ctx, origin: "app" as const, env: production };
+    // Unset -> models: billed reads old documents gain on reprocess.
+    expect(analyzePipelineChange(base, withF({ chartExport: { tier: "models" } }), app).kind).toBe("reindex-recommended");
+    // A stored free counts as unset while explicit free is refused, so it changes nothing.
+    expect(analyzePipelineChange(base, withF({ chartExport: { tier: "free" } }), app).kind).toBe("new-uploads");
+    // With explicit free allowed, unset (off here) -> free is a reindex, not "new uploads only".
+    const freeOk = { ...app, env: { ...production, DOCSLURP_CHART_EXPORT_FREE_EXPLICIT: "on" } };
+    expect(analyzePipelineChange(base, withF({ chartExport: { tier: "free" } }), freeOk).kind).toBe("reindex-recommended");
+    // A typo in the app default fails closed (off), never free.
+    expect(analyzePipelineChange(base, withF({ chartExport: { tier: "free" } }), { ...freeOk, env: { ...freeOk.env, DOCSLURP_CHART_EXPORT_APP_DEFAULT: "of" } }).kind).toBe("reindex-recommended");
+    // Clients pass the server-reported defaults instead of an environment.
+    const reported = { app: "off" as const, machine: "off" as const, modelsAvailable: true, freeAvailable: true, ceiling: "on" as const };
+    expect(analyzePipelineChange(base, withF({ chartExport: { tier: "free" } }), { documents: 3, pages: 120, origin: "app", chartExportDefaults: reported }).kind).toBe("reindex-recommended");
+    // Under the switch off nothing runs, so no tier change recommends a reindex.
+    expect(analyzePipelineChange(base, withF({ chartExport: { tier: "models" } }), { documents: 3, pages: 120, origin: "app", chartExportDefaults: { ...reported, ceiling: "off" } }).kind).toBe("new-uploads");
+    // No defaults at all: conservative (nothing runs), never an assumed free.
+    expect(analyzePipelineChange(base, withF({ chartExport: { tier: "models" } }), { documents: 3, pages: 120, origin: "app" }).kind).toBe("new-uploads");
+  });
+  it("chart export: vision-extract runs unless the tier is explicitly off", () => {
     const noVision = withF({ visionFallback: false });
-    const on = withF({ visionFallback: false, chartExport: { enabled: true } });
-    const impact = analyzePipelineChange(noVision, on, ctx);
+    const off = withF({ visionFallback: false, chartExport: { tier: "off" } });
+    const models = withF({ visionFallback: false, chartExport: { tier: "models" } });
+    const impact = analyzePipelineChange(off, models, ctx);
     expect(impact.kind).toBe("reindex-recommended");
     expect(impact.stages).toContain("vision-extract");
-    expect(pipelineStagePlan.find((item) => item.stage === "vision-extract")!.isEnabled(noVision)).toBe(false);
-    expect(pipelineStagePlan.find((item) => item.stage === "vision-extract")!.isEnabled(on)).toBe(true);
+    const stage = pipelineStagePlan.find((item) => item.stage === "vision-extract")!;
+    expect(stage.isEnabled(off)).toBe(false);
+    expect(stage.isEnabled(noVision)).toBe(true);
+    expect(stage.isEnabled(models)).toBe(true);
   });
-  it("chart export defaults to off and rejects unknown keys", () => {
-    expect(base.chartExport).toEqual({ enabled: false, formats: ["description", "mermaid"], diagrams: true, generatorModel: null });
-    expect(() => pipelineFeaturesSchema.parse({ chartExport: { enabled: true, bogus: 1 } })).toThrow();
+  it("chart export: no concrete default is stored, and unknown keys and model names are refused", () => {
+    expect(base.chartExport).toEqual({ formats: ["description", "mermaid"], diagrams: true });
+    expect(base.chartExport.tier).toBeUndefined();
+    expect(() => pipelineFeaturesSchema.parse({ chartExport: { tier: "models", bogus: 1 } })).toThrow();
+    expect(() => pipelineFeaturesSchema.parse({ chartExport: { tier: "models", generatorModel: "llm://x/y" } })).toThrow();
+    expect(() => pipelineFeaturesSchema.parse({ chartExport: { enabled: true } })).toThrow();
+    expect(() => pipelineFeaturesSchema.parse({ chartExport: { tier: "turbo" } })).toThrow();
     expect(() => pipelineFeaturesSchema.parse({ chartExport: { formats: ["png"] } })).toThrow();
+  });
+  it("figures: on by default; turning on recommends a reindex, turning off applies to new uploads", () => {
+    expect(base.figures).toBe(true);
+    const off = withF({ figures: false });
+    const offImpact = analyzePipelineChange(base, off, ctx);
+    expect(offImpact.kind).toBe("new-uploads");
+    expect(offImpact.reasons.find((r) => r.field === "figures")?.effect).toMatch(/keep their figures until you reprocess/);
+    const on = analyzePipelineChange(off, base, ctx);
+    expect(on.kind).toBe("reindex-recommended");
+    expect(on.stages[0]).toBe("extract-markdown");
+    expect(() => pipelineFeaturesSchema.parse({ figures: "yes" })).toThrow();
   });
   it("is fast", () => {
     const after = withF({ summarize: true, chunkOverlap: true });

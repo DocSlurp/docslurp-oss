@@ -1,3 +1,4 @@
+import type { RunOrigin } from "@docslurp/shared";
 import {
   quoteSettingsForPipeline,
   quoteStoredWork,
@@ -88,6 +89,8 @@ export async function quoteStoredDocuments(args: {
   estimate: CostEstimate | null;
   settings?: Partial<QuoteSettings>;
   env?: EstimateEnv;
+  /** The caller's origin, for a project with no chart tier (`runOriginOf`). */
+  origin?: RunOrigin;
 }): Promise<EstimateQuote | null> {
   const files = await storedQuoteFiles(args.scope);
   if (files.length === 0) return null;
@@ -98,5 +101,6 @@ export async function quoteStoredDocuments(args: {
     ...(args.settings ? { settings: args.settings } : {}),
     workerSlots: await orgWorkerSlots(args.scope.orgId),
     env: args.env ?? process.env,
+    ...(args.origin ? { origin: args.origin } : {}),
   });
 }

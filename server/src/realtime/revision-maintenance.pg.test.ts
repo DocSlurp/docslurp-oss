@@ -126,7 +126,7 @@ it.skipIf(!url)("drains a long-transaction burst without further writes and boun
   await new Promise(resolve => setTimeout(resolve, 100));
   expect(await rows()).toBeGreaterThanOrEqual(300);
   await holder.query("commit");
-  // Each scope folds to one row: the organization ('') and the two projects written (0152's per-resource scopes).
+  // Each scope folds to one row: the organization ('') and the two projects written (0153's per-resource scopes).
   const scopes = async () => (await owner.query("select scope, count(*)::int as n from realtime_revision_counters where org_id='publication' group by scope order by scope")).rows;
   const deadline = Date.now() + 5_000;
   while (await rows() > 3 && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 20));

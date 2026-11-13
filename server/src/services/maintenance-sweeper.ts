@@ -59,7 +59,7 @@ const sweeps: Array<[name: string, run: () => Promise<unknown>]> = [
   ["provider-observations", () => sweepProviderObservations()],
   // Expired API-key search history (lean-logging.ts); result rows and diagnostics cascade.
   ["search-history-expiry", () => sweepExpiredSearchSessions()],
-  // search_sessions.project_id for sessions older than migration 0151, in short batches; stops when none are left.
+  // search_sessions.project_id for sessions older than migration 0152, in short batches; stops when none are left.
   ["search-session-project-backfill", () => sweepSearchSessionProjectBackfill()],
   // Automatic project titles from ingested content; project reads never rename (project-naming.ts).
   ["project-auto-titles", () => sweepProjectAutoTitles()],

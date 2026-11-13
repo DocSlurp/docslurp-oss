@@ -1,3 +1,4 @@
+import { chartExportDefaults } from "@docslurp/shared";
 import { env } from "../config.js";
 import type { z } from "zod";
 import { getProjectSearchSettings } from "./search-controls.js";
@@ -64,6 +65,11 @@ export const markSessionToolsSurface: MiddlewareHandler = async (c, next) => {
   await next();
 };
 
+/** The pipeline override an MCP upload or extract sends: quality and the chart export tier, nothing else. */
+function mcpPipelineOverride(input: { quality?: string; chartExport?: { tier: string } }): Record<string, unknown> {
+  return { ...(input.quality ? { quality: input.quality } : {}), ...(input.chartExport ? { chartExport: { tier: input.chartExport.tier } } : {}) };
+}
+
 const uploaderHidden = (c: Context) => c.get("mcpSurface") === "session-tools";
 
 function withoutUploader<T extends { capabilities: { id: string }[] }>(c: Context, manifest: T): T {
@@ -123,7 +129,9 @@ const mcpAdapterRoutes = new Hono()
       return c.json({ projectId: project.id,
         pipeline: Object.fromEntries(Object.keys(projectSettingsPipelinePatchSchema.shape).map(key => [key, key === "mediaVideo" ? { enabled: project.pipeline.mediaVideo?.enabled !== false }
           : project.pipeline[key as keyof typeof project.pipeline]])),
-        chat: settings.chat, retrieval: settings.retrievalDefaults });
+        chat: settings.chat, retrieval: settings.retrievalDefaults,
+        // What an unset chart tier runs as on this deployment, and which tiers a change may choose.
+        chartExportDefaults: chartExportDefaults(process.env) });
     }
 
     if (toolId === "proposeProjectSettings") {
@@ -191,6 +199,8 @@ const mcpAdapterRoutes = new Hono()
         : (await import("../routes/uploads.js")).uploadsRoutes;
       const native = new Hono().use("*", publicErrorMiddleware).use("*", async (inner, next) => {
         setRequestActor(inner, actor);
+        // MCP is a machine surface whatever authenticated it (WebMCP session tools included).
+        inner.set("runOrigin", "machine");
         await next();
       }).route("/", routes);
       native.onError(spendAwareErrorHandler);
@@ -210,7 +220,7 @@ const mcpAdapterRoutes = new Hono()
         }
         const form = new FormData();
         if (input.project) form.set("project", input.project);
-        if (input.quality) form.set("pipeline", JSON.stringify({ quality: input.quality }));
+        if (input.quality || input.chartExport) form.set("pipeline", JSON.stringify(mcpPipelineOverride(input)));
         for (const [name, value] of Object.entries(extractFields)) form.set(name, String(value));
         for (const file of decoded) form.append("files", new File([new Uint8Array(file.bytes!)], file.filename, { type: file.mimeType ?? "" }));
         return native.request("http://mcp.internal/bulk", { method: "POST", headers, body: form, signal: c.req.raw.signal });
@@ -219,7 +229,7 @@ const mcpAdapterRoutes = new Hono()
       return native.request(`http://mcp.internal/${input.urls ? "url" : "direct/sessions"}`, {
         method: "POST", headers, body: JSON.stringify({ project: input.project,
           ...(input.urls ? { urls: input.urls } : { files: input.files }),
-          ...(input.quality ? { pipeline: { quality: input.quality } } : {}),
+          ...(input.quality || input.chartExport ? { pipeline: mcpPipelineOverride(input) } : {}),
           ...extractFields,
         }), signal: c.req.raw.signal,
       });
