@@ -20,7 +20,7 @@ import { v2Manifest, v3Text, writeV3Folder, V2_SOURCE_SHA } from "../test/dopple
 import { createMigratedDatabase } from "../test/migrated-db.js";
 import { serveOnRandomPort } from "../test/migrated-postgres.js";
 
-// Figures kept on every failure path (migration 0153), with the worker's real Store over a migrated database and crash
+// Figures kept on every failure path (migration 0156), with the worker's real Store over a migrated database and crash
 // injection: pending rows before each upload step and stored after it; nothing deleted on failure; the next attempt
 // adopts by streamed SHA-256 with no VM; conditional creates never overwrite; a resume only adds; tenants never mix.
 let db: PGlite;

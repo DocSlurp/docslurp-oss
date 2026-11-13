@@ -1,4 +1,5 @@
 import { realtimeMetrics } from "./realtime/broker.js";
+import { chartExportDefaultsWarnings, chartExportSwitchWarning } from "@docslurp/shared";
 import { loadPricingProvider, pricingDurableStateFromSql } from "@docslurp/shared/pricing-loader";
 import { sql as pricingStateSql } from "./db.js";
 import { closeDirectUploadLockPool } from "./lib/direct-upload-locks.js";
@@ -28,7 +29,7 @@ import { setCurrentRequestError, requestContextMiddleware } from "./lib/request-
 import { multipartBodyLimit } from "./lib/upload-policy.js";
 import { emitPostHogApiLog } from "./lib/posthog-ai-observability.js";
 import { apiActorRateLimit, apiIpRateLimit, logRateLimitBackendAtStartup, warnSelfHostedBrowserKeysWithoutTrustedProxy } from "./middleware/rate-limit.js";
-import { chatConcurrencyLimit } from "./middleware/chat-concurrency.js";
+import { assertChatConcurrencyBackend, chatConcurrencyLimit } from "./middleware/chat-concurrency.js";
 import { sessionAuth } from "./middleware/session-auth.js";
 import { chatCompletionsRoutes } from "./routes/chat-completions.js";
 import { documentsRoutes } from "./routes/documents.js";
@@ -135,7 +136,7 @@ export function createApiApp(): Hono {
   app.onError(nativeErrorHandler((error, c) => {
     // The request span records it (message, stack) once the response is sent.
     setCurrentRequestError(error);
-    if (error instanceof QuoteSettingsError) return c.json({ error: error.message, code: "invalid_request" }, 400);
+    if (error instanceof QuoteSettingsError) return c.json({ error: error.message, code: error.code }, 400);
     return error instanceof UnreadableSourceError
       ? c.json({ error: error.message, code: error.code }, error.statusCode)
       : spendAwareErrorHandler(error, c);
@@ -297,7 +298,14 @@ async function stopApiBackgroundTasks(): Promise<void> {
 export function ensureApiStartup(): Promise<void> {
   if (!startupPromise) {
     startupPromise = (async () => {
+      // Environment only, so it runs first: production refuses to start when chat concurrency caps
+      // would be counted per process (no shared Redis, or half of a REST pair) without the explicit opt-out.
+      assertChatConcurrencyBackend();
       initializeObservability({ serviceName: "docslurp-api" });
+      // An unknown DOCSLURP_CHART_EXPORT (or default) value is off (fail closed); say so once.
+      const chartExportWarning = chartExportSwitchWarning(process.env);
+      if (chartExportWarning) console.warn(chartExportWarning);
+      for (const warning of chartExportDefaultsWarnings(process.env)) console.warn(warning);
       // The pricing provider (DOCSLURP_PRICING_PLUGIN) prices every quote and charge; the service profile refuses to
       // start without one rather than price with the open default.
       // Its durable state (pricing_provider_state, 0131) is read-only through this process's pool; only the operator raises it.

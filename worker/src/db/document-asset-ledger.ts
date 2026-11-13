@@ -31,7 +31,7 @@ export interface DocumentAssetLedgerScope {
   /** The run that wrote them: it must be the document's current run, of the same organization and project. */
   runId: string;
   /**
-   * The figure resume runner's lease token (migration 0154): when set, the write lands only while the document's resume
+   * The figure resume runner's lease token (migration 0157): when set, the write lands only while the document's resume
    * lease is still this one (a runner that lost its lease writes nothing: `stale-write`).
    */
   lease?: string;
@@ -865,7 +865,7 @@ async function flushOne(
   }
 }
 
-// ---- Figures kept on every failure path: pending and stored rows, adopt, level-only writes (migration 0153) ----
+// ---- Figures kept on every failure path: pending and stored rows, adopt, level-only writes (migration 0156) ----
 
 type Tx = import("postgres").TransactionSql<Record<string, unknown>>;
 
@@ -1346,7 +1346,7 @@ function byteCount(value: number): number {
   return value;
 }
 
-// ---- The resume queue (migration 0154) ----
+// ---- The resume queue (migration 0157) ----
 
 /**
  * SQL assignments for a level upsert (`excluded` is the new row): when the level moves to another run, its resume state

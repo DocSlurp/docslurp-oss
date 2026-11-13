@@ -199,6 +199,8 @@ export const projectCorpusStats = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" })
       .defaultNow()
       .notNull(),
+    /** The updated_at the automatic-title sweep last examined (0154); the project is pending while they differ. */
+    autoTitleCheckedAt: timestamp("auto_title_checked_at", { withTimezone: true, mode: "string" }),
   },
   (table) => [
     foreignKey({
@@ -1388,9 +1390,12 @@ export const searchSessions = pgTable(
       .notNull(),
     /** API-key keyword and hybrid searches only (0139); the maintenance sweep deletes the session after it. */
     expiresAt: timestamp("expires_at", { withTimezone: true, mode: "string" }),
+    /** The searched project (0141). Project reads filter and date sessions by it, never by metadata. */
+    projectId: text("project_id"),
   },
   (table) => [
     index("search_sessions_expires_at_idx").on(table.expiresAt).where(sql`expires_at is not null`),
+    index("search_sessions_project_id_created_at_idx").using("btree", table.projectId, table.createdAt, table.id),
     index("search_sessions_user_id_created_at_idx").using(
       "btree",
       table.userId.asc().nullsLast().op("text_ops"),
@@ -1405,6 +1410,11 @@ export const searchSessions = pgTable(
       columns: [table.userId],
       foreignColumns: [user.id],
       name: "search_sessions_user_id_fkey",
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.projectId],
+      foreignColumns: [projects.id],
+      name: "search_sessions_project_id_fkey",
     }).onDelete("cascade"),
   ],
 );
@@ -2218,6 +2228,8 @@ export const uploadSessions = pgTable(
     projectName: text("project_name"),
     templateKey: text("template_key"),
     pipeline: jsonb().default({}).notNull(),
+    /** Run origin from the authenticated principal: app (first-party session) or machine (migration 0141). */
+    origin: text().default("machine").notNull(),
     status: text().default("pending").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "string" })
       .defaultNow()
@@ -2327,6 +2339,8 @@ export const projectRuns = pgTable(
      */
     spentCents: numeric("spent_cents", { precision: 24, scale: 12, mode: "number" }).default(0).notNull(),
     pipeline: jsonb().default({}).notNull(),
+    /** Run origin from the authenticated principal: app (first-party session) or machine (migration 0141). */
+    origin: text().default("machine").notNull(),
     stats: jsonb().default({}).notNull(),
     artifacts: jsonb().default({}).notNull(),
     runId: text("run_id"),
@@ -3328,7 +3342,7 @@ export const storageMeterDays = pgTable(
     objectBytes: bigint("object_bytes", { mode: "number" }).default(0).notNull(),
     // You can use { mode: "bigint" } if numbers are exceeding js number limitations
     indexBytes: bigint("index_bytes", { mode: "number" }).default(0).notNull(),
-    // Of objectBytes, the figure bytes measured from the asset ledger (migration 0152).
+    // Of objectBytes, the figure bytes measured from the asset ledger (migration 0155).
     measuredArtifactBytes: bigint("measured_artifact_bytes", { mode: "number" }).default(0).notNull(),
     credits: numeric({ precision: 24, scale: 12, mode: "number" }).default(0).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "string" })
@@ -3595,7 +3609,7 @@ export const documentAssets = pgTable("document_assets", {
   linkPath: text("link_path"),
   fileOf: text("file_of"),
   storageKey: text("storage_key"),
-  // Migration 0153: none (no file), pending (written before its upload), stored (landed and checked; served and billed).
+  // Migration 0156: none (no file), pending (written before its upload), stored (landed and checked; served and billed).
   storageState: text("storage_state").default("none").notNull(),
   objNum: integer("obj_num"),
   objGen: integer("obj_gen"),
@@ -3649,13 +3663,13 @@ export const documentExtractionLevels = pgTable("document_extraction_levels", {
   sourceDecode: integer("source_decode").default(0).notNull(),
   sourceRender: integer("source_render").default(0).notNull(),
   assetBytes: bigint("asset_bytes", { mode: "number" }).default(0).notNull(),
-  // Migration 0153: false after a re-run that skipped the figure step (rows kept, not served, counted or billed).
+  // Migration 0156: false after a re-run that skipped the figure step (rows kept, not served, counted or billed).
   assetsCurrent: boolean("assets_current").default(true).notNull(),
-  // Migration 0153: uploads a crash left pending (resumable work, adopted without a VM) and the folder files' bytes.
+  // Migration 0156: uploads a crash left pending (resumable work, adopted without a VM) and the folder files' bytes.
   assetsPending: integer("assets_pending").default(0).notNull(),
   folderBytes: bigint("folder_bytes", { mode: "number" }).default(0).notNull(),
 
-  // Migration 0154: the resume runner's queue and lease (one per document).
+  // Migration 0157: the resume runner's queue and lease (one per document).
   resumeAfter: timestamp("resume_after", { withTimezone: true, mode: "string" }),
   resumeLeaseUntil: timestamp("resume_lease_until", { withTimezone: true, mode: "string" }),
   resumeLeaseOwner: text("resume_lease_owner"),
@@ -3685,7 +3699,7 @@ export const documentExtractionLevels = pgTable("document_extraction_levels", {
   index("document_extraction_levels_run_idx").on(table.runId).where(sql`run_id IS NOT NULL`),
 ]);
 
-/** Migration 0154: resume VM time per organization per UTC day (the runner's daily budget). */
+/** Migration 0157: resume VM time per organization per UTC day (the runner's daily budget). */
 export const figureResumeOrgDays = pgTable("figure_resume_org_days", {
   orgId: text("org_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
   day: date().notNull(),
@@ -3694,7 +3708,7 @@ export const figureResumeOrgDays = pgTable("figure_resume_org_days", {
   reservedMs: bigint("reserved_ms", { mode: "number" }).default(0).notNull(),
 }, (table) => [primaryKey({ columns: [table.orgId, table.day], name: "figure_resume_org_days_pkey" })]);
 
-/** Migration 0154: applied figure resume proposals (single-use chat tokens). */
+/** Migration 0157: applied figure resume proposals (single-use chat tokens). */
 export const figureResumeProposalUses = pgTable("figure_resume_proposal_uses", {
   jti: text().primaryKey().notNull(),
   orgId: text("org_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),

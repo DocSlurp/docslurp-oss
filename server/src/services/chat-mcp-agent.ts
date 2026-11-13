@@ -205,8 +205,15 @@ export function suggestionsInstruction(tools: { getUploadStatus: boolean }): str
 
 /** What suggestions mode knows about chart export before the turn: the project setting and free ingest signals. */
 export interface ChatChartExportContext {
-  /** `pipeline.chartExport.enabled`. */
+  /** Whether the project is on the billed `models` tier (`pipeline.chartExport.tier === "models"`). */
   enabled: boolean;
+  /**
+   * The tier app uploads into this project actually run with on this deployment (its explicit tier, else the
+   * deployment's app default, capped by the switch). Unset: treated as `off`, never assumed `free`.
+   */
+  effectiveTier?: "off" | "free" | "models";
+  /** Whether a project may choose `free` explicitly on this deployment (`DOCSLURP_CHART_EXPORT_FREE_EXPLICIT=on`). */
+  freeAvailable?: boolean;
   /** Charts/diagrams recorded at ingest that were not exported; null when unknown. */
   unexportedVisuals?: number | null;
 }
@@ -227,9 +234,17 @@ export function chartExportSuggestionInstruction(query: string, chartExport: Cha
     asked ? "this question asks for data points, trends, a table or a diagram" : null,
     unexported > 0 ? `ingest recorded ${unexported} chart${unexported === 1 ? "" : "s"} or diagram${unexported === 1 ? "" : "s"} in this project that ${unexported === 1 ? "was" : "were"} not exported as data` : null,
   ].filter(Boolean).join(", and ");
+  const effective = chartExport.effectiveTier ?? "off";
+  const state = effective === "free"
+    ? "Reading charts with AI is off for this project (only charts that carry their own data are exported, at no charge)"
+    : "Chart export is off for this project: no chart or diagram is exported as data";
+  const offerFree = effective === "off" && chartExport.freeAvailable === true
+    ? "If charts in these documents may carry their own data (Office charts, embedded chart specs, vector graphics), you may instead propose the free tier (chartExport: { tier: \"free\" }), which exports those at no charge and reads no chart with AI; say that existing documents gain it only after re-indexing."
+    : null;
   return [
-    `Chart export is off for this project, and ${evidence}.`,
-    "When the answer depends on values or structure inside a chart or diagram that the returned passages describe only as an image, a caption or a rough guess, you may prepare one proposal with proposeProjectSettings enabling chart export (pipeline change chartExport: { enabled: true }), say that it re-expresses charts and diagrams as a description, Mermaid and, if chosen, Vega-Lite, matplotlib or CSV, and that existing documents gain it only after re-indexing.",
+    `${state}, and ${evidence}.`,
+    ...(offerFree ? [offerFree] : []),
+    "When the answer depends on values or structure inside a chart or diagram that the returned passages describe only as an image, a caption or a rough guess, you may prepare one proposal with proposeProjectSettings turning on reading charts with AI (pipeline change chartExport: { tier: \"models\" }), say that it re-expresses charts and diagrams as a description, Mermaid and, if chosen, Vega-Lite, matplotlib or CSV, that each chart or diagram read this way is billed, and that existing documents gain it only after re-indexing.",
     "Do not propose it when the passages already give the needed numbers or steps as text or a table, and never claim chart values the evidence does not state.",
   ].join(" ");
 }

@@ -359,7 +359,7 @@ it("keeps earlier capped-page results in the partial manifest when a later page 
 
 describe("chart export in vision-extract (real pass, fake model client)", () => {
   const BAR = { kind: "chart", chartType: "bar", title: "Bookings", series: [{ name: "Bookings", points: [{ x: "Q1", y: 4 }, { x: "Q2", y: 6 }] }], summary: "Bookings rise from 4 to 6." };
-  const CHART_EXPORT = { enabled: true, formats: ["description", "csv"], diagrams: true, generatorModel: null };
+  const CHART_EXPORT = { tier: "models", formats: ["description", "csv"], diagrams: true };
   const estimate = { costUsd: 0, latencyMs: 0, pPass: 0.9 };
   const routePlan = {
     schemaVersion: "route-plan@v2", documentId: "doc-c", runId: "run-c", routerId: "baseline", routerKind: "baseline", mode: "shadow",
@@ -435,9 +435,9 @@ describe("chart export in vision-extract (real pass, fake model client)", () => 
 
   it("is inert with export off: no stage row, no storage read, no extra stats, no charge (kill switch or project option)", async () => {
     installTestPricing(DISTINCT_TEST_PRICING);
-    for (const [flag, enabled] of [["", true], ["off", true], ["0", true], ["on", false]] as const) {
+    for (const [flag, tier] of [["", "models"], ["off", "models"], ["0", "free"], ["bogus", "models"], ["on", "off"], ["free", "off"]] as const) {
       vi.stubEnv("DOCSLURP_CHART_EXPORT", flag);
-      const { stage, state, storage, requests } = await setup({ visionFallback: false, quality: "fast", chartExport: { ...CHART_EXPORT, enabled } });
+      const { stage, state, storage, requests } = await setup({ visionFallback: false, quality: "fast", chartExport: { ...CHART_EXPORT, tier } });
       await stage.run(state);
       expect(storage.reads).toEqual([]);
       expect(state.documentStage("doc-c", "vision-extract")).toBeUndefined();
@@ -566,6 +566,68 @@ describe("chart export in vision-extract (real pass, fake model client)", () => 
     expect(document.id).toBe("doc-c");
   });
 
+  it("free tier: builds no model client, renders no page and charges nothing, whatever the project or switch says", async () => {
+    installTestPricing(DISTINCT_TEST_PRICING);
+    try {
+      // The free tier on a fully on switch, and a models project under the free switch, behave the same.
+      for (const [flag, tier] of [["on", "free"], ["free", "models"], ["free", "free"]] as const) {
+        vi.stubEnv("DOCSLURP_CHART_EXPORT", flag);
+        const { stage, state, rendered, requests } = await setup({ visionFallback: false, quality: "fast", chartExport: { ...CHART_EXPORT, tier } });
+        const clientFactory = vi.spyOn(stage as unknown as { chartModelClient: () => unknown }, "chartModelClient");
+        await stage.run(state);
+        expect(clientFactory).not.toHaveBeenCalled();
+        expect(requests).toEqual([]);
+        expect(rendered).toEqual([]);
+        expect(chartCharges(state)).toEqual([]);
+        // No billable usage event of any kind from chart export.
+        expect(state.usageLedger.snapshot().filter((e) => e.metadata?.billable !== false && String(e.metric).startsWith("chart-export"))).toEqual([]);
+        // The candidates are still counted, so the app can offer reading them with AI.
+        const stats = state.documentStage("doc-c", "vision-extract")?.stats as Record<string, any>;
+        expect(stats.visualCandidates).toMatchObject({ charts: 2, exported: 0 });
+        vi.restoreAllMocks();
+      }
+    } finally {
+      resetPricingProviderForTests();
+    }
+  });
+
+  it("free tier: exports deterministic specs at 0 credits; a PDF with no signal never reaches the parser VM", async () => {
+    installTestPricing(DISTINCT_TEST_PRICING);
+    vi.stubEnv("DOCSLURP_CHART_EXPORT", "on");
+    const calls: Array<{ figures: unknown; signals: unknown }> = [];
+    const previous = setDeterministicVisualExtractor(async (input) => {
+      calls.push({ figures: input.artifacts.dopplerFiguresIndexUri, signals: input.signals });
+      return { partials: [{ source: "office-chart-xml" as const, confidence: 0.99, spec: BAR as never, digest: null, pageNumber: 2, imageIndex: 0 }] };
+    });
+    try {
+      const { stage, state, storage, requests } = await setup({ visionFallback: false, quality: "fast", chartExport: { ...CHART_EXPORT, tier: "free" } });
+      await stage.run(state);
+      expect(requests).toEqual([]);
+      expect(chartCharges(state)).toEqual([]);
+      const contract = markdownOf(storage, state);
+      expect(contract.charts).toHaveLength(1);
+      expect(contract.markdown).toContain("Bookings rise");
+      // A PDF has no Office parts or embed hints and this one no Doppler figure index: the VM adapter gets no signal.
+      expect(calls).toEqual([{ figures: null, signals: { officeChartParts: 0, htmlEmbedHints: false, candidates: 2 } }]);
+    } finally {
+      setDeterministicVisualExtractor(previous);
+      resetPricingProviderForTests();
+    }
+  });
+
+  it("models tier is unchanged: the client is built and each model read is charged", async () => {
+    installTestPricing(DISTINCT_TEST_PRICING);
+    vi.stubEnv("DOCSLURP_CHART_EXPORT", "on");
+    try {
+      const { stage, state, requests } = await setup({ visionFallback: false, quality: "fast", chartExport: CHART_EXPORT });
+      await stage.run(state);
+      expect(requests).toHaveLength(2);
+      expect(chartCharges(state)).toHaveLength(2);
+    } finally {
+      resetPricingProviderForTests();
+    }
+  });
+
   it("export off on a reprocess removes the earlier run's blocks and charts[] without a stage row", async () => {
     vi.stubEnv("DOCSLURP_CHART_EXPORT", "on");
     const first = await setup({ visionFallback: false, quality: "fast", chartExport: CHART_EXPORT });
@@ -573,7 +635,7 @@ describe("chart export in vision-extract (real pass, fake model client)", () => 
     expect(markdownOf(first.storage, first.state).markdown).toContain("<!-- docslurp:visual ");
     // The reprocess seeds the earlier run's artifacts (canonical, contract, chart-export slot) and turns export off.
     vi.stubEnv("DOCSLURP_CHART_EXPORT", "");
-    const second = WorkflowState.create({ ...first.state.run, id: "run-d", storagePrefix: "u/run-d", pipeline: { ...first.state.run.pipeline, chartExport: { ...CHART_EXPORT, enabled: false } } } as never, first.state.documents);
+    const second = WorkflowState.create({ ...first.state.run, id: "run-d", storagePrefix: "u/run-d", pipeline: { ...first.state.run.pipeline, chartExport: { ...CHART_EXPORT, tier: "off" } } } as never, first.state.documents);
     for (const [slot, uri] of Object.entries(first.state.artifactLedger.all())) second.artifactLedger.record(slot, uri);
     await first.stage.run(second);
     const contract = markdownOf(first.storage, second);

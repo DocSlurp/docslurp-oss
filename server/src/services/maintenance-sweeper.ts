@@ -7,6 +7,7 @@ import { sweepDocumentExports } from "./document-exports.js";
 import { sweepFeedbackReports } from "./feedback-reports.js";
 import { sweepExtracts } from "./extracts.js";
 import { sweepExpiredSearchSessions } from "./search-history-expiry.js";
+import { sweepSearchSessionProjectBackfill } from "./search-session-project-backfill.js";
 import { sweepSpendPausedRuns } from "./spend-paused-runs.js";
 import { sweepExpiredCreditLeases } from "./billing/credit-leases.js";
 import { sweepStaleQueuedRuns } from "./stale-queued-runs.js";
@@ -14,6 +15,7 @@ import { sweepProviderObservations } from "./provider-observations.js";
 import { resumeOrganizationDeletions } from "./tenant-offboarding.js";
 import { requestWebhookOutboxDrain } from "./webhooks.js";
 import { sweepFigureResumeQueue } from "./figure-resume.js";
+import { sweepProjectAutoTitles } from "./project-naming.js";
 
 /**
  * Periodic in-process recovery for work that can otherwise get stuck: queued
@@ -60,6 +62,10 @@ const sweeps: Array<[name: string, run: () => Promise<unknown>]> = [
   ["search-history-expiry", () => sweepExpiredSearchSessions()],
   // Figure resumes the commit-time enqueue missed (auto projects; every 10 min at most). The worker's runner claims them.
   ["figure-resume-enqueue", () => sweepFigureResumeQueue()],
+  // search_sessions.project_id for sessions older than migration 0152, in short batches; stops when none are left.
+  ["search-session-project-backfill", () => sweepSearchSessionProjectBackfill()],
+  // Automatic project titles from ingested content; project reads never rename (project-naming.ts).
+  ["project-auto-titles", () => sweepProjectAutoTitles()],
 ];
 
 let timer: ReturnType<typeof setInterval> | null = null;

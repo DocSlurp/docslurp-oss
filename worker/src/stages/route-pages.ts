@@ -535,7 +535,8 @@ export class RoutePagesStage implements Stage {
     const disallowedPrivacy = new Set<string>(args.privacyMode === "standard" ? [] : ["hosted"]);
     // Chart export replaces chart/diagram readings with generator calls: the planner prices those instead.
     const chartExportConfig = chartExportConfigOf(state.run.pipeline);
-    const chartExport = chartExportConfig.enabled ? { chartExport: { config: chartExportConfig, modes: FORMAT_MODE } } : {};
+    // Only the billed `models` tier sends chart crops to a generator; the free tier adds no model output to price.
+    const chartExport = chartExportConfig.tier === "models" ? { chartExport: { config: chartExportConfig, modes: FORMAT_MODE } } : {};
     const heuristic = () => new HeuristicRouter(ids);
     const baseline = (carry?: ConstructorParameters<typeof BaselineRouter>[0]["carry"]) => new BaselineRouter({
       pack: loadRuntimePolicyPack("baseline"),
