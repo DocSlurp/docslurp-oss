@@ -264,6 +264,12 @@ export function createVmDeterministicVisualExtractor(deps: VmExtractorDeps): Det
           const box = figureBox(figure.bbox);
           for (const visual of figure.result.visuals) partials.push(toPartial(visual, figure.page, figure.result.visuals.length === 1 ? box : null));
           for (const d of figure.result.deferred ?? []) deferred.push({ input: "doppler-figure", svgIndex: d.svgIndex, count: d.count, reason: d.reason, pageNumber: figure.page, figureId: figure.id });
+          // The Doppler child's per-figure losses (Doppler protocol 15), recorded per figure id: a file it could not
+          // read is `figure-unavailable` (a host-only reason), a figure past the chart step's budget a `guest-deadline`.
+          for (const r of figure.result.refusals) {
+            const reason = r.reason === "figure-unavailable" ? "figure-unavailable" : r.reason === "time-budget" ? "guest-deadline" : null;
+            if (reason) deferred.push({ input: "doppler-figure", svgIndex: 0, count: 1, reason, pageNumber: figure.page, figureId: figure.id });
+          }
         }
         // No usage event from the guest's own `ms` (council #510 L4): the Doppler VM's time is metered by the plugin
         // (host-measured), which already includes the chart step.

@@ -168,6 +168,23 @@ describe("the extractor reads figure charts in inline mode, with no VM run", () 
     } as never);
     expect(out.overflow).toBe(7);
     expect(out.deferred?.map((d: { reason: string }) => d.reason)).toEqual(["guest-deadline-part", "visual-limit"]);
+    // The child's per-figure losses: an unreadable file and a figure past the step's budget, each recorded per figure id.
+    const lost = (reason: string) => ({ ...empty, refusals: [{ locator: "svg", reason }] });
+    const stored2 = validateFigureCharts(answer(["p2.g1", "p3.g1"], [lost("figure-unavailable"), lost("time-budget")]), INDEX)!;
+    const extract2 = createVmDeterministicVisualExtractor({
+      runner: { run: vi.fn(async () => { throw new Error("no VM"); }) },
+      storage: { bucket: "b", getJson: vi.fn(async (key: string) => (key.endsWith(".charts.work.json") ? JSON.parse(JSON.stringify(stored2)) : { figures: INDEX })), downloadToTempFile: vi.fn() },
+      log: () => undefined,
+    } as never);
+    const out2 = await extract2({
+      document: { id: "d", mimeType: "application/pdf", pageCount: 3, sourceKey: "s" }, candidates: [], signals: {},
+      artifacts: { dopplerFiguresIndexUri: "s3://b/f/index.json", mediaMapUri: null, artifactUri: (slot: string) => (slot === FIGURE_CHARTS_SLOT ? "s3://b/f/d.charts.work.json" : null) },
+      recordUsage: () => undefined,
+    } as never);
+    expect(out2.deferred).toEqual([
+      { input: "doppler-figure", svgIndex: 0, count: 1, reason: "figure-unavailable", pageNumber: 2, figureId: "p2.g1" },
+      { input: "doppler-figure", svgIndex: 0, count: 1, reason: "guest-deadline", pageNumber: 3, figureId: "p3.g1" },
+    ]);
     // A guest cannot claim a host-only figure reason.
     const forged = { ...empty, deferred: [{ svgIndex: 0, count: 1, reason: "figure-charts-refused" }] };
     expect(validateFigureCharts(answer(["p2.g1"], [forged]), INDEX)).toMatchObject({ status: "refused", reason: "result-invalid" });
