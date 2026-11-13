@@ -37,12 +37,13 @@ describe("stale queued run sweeper", () => {
     // find expired, prune old expired rows) plus the hourly orphan scan on the first tick, and six for
     // two for hourly feedback retention on the first tick, and six for
     // the extract sweep (settle, charge, queue downloads, claim emails, claim expired extracts, re-list deleted ones),
-    // and one for expired API search history.
+    // and one for expired API search history, and one for the figure-resume backstop (first tick only: it runs at most
+    // every 10 minutes).
     await vi.advanceTimersByTimeAsync(60_000);
-    expect(sqlMock).toHaveBeenCalledTimes(23);
+    expect(sqlMock).toHaveBeenCalledTimes(24);
 
     await vi.advanceTimersByTimeAsync(60_000);
-    expect(sqlMock).toHaveBeenCalledTimes(43);
+    expect(sqlMock).toHaveBeenCalledTimes(44);
     vi.unstubAllEnvs();
   });
 
