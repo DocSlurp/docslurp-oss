@@ -13,6 +13,14 @@ import { WorkflowState } from "../pipeline/pipeline.js";
 import { ExtractMarkdownStage } from "../stages/extract-markdown.js";
 import type { CommandPlan, CommandRunner } from "../tools/runner.js";
 import { PRODUCER_MARKER, docLine, fullFixture, jsonl, runLine, textPage } from "../test/doppler-page-facts-fixture.js";
+import { DOPPLER_PAGE_FACTS_SLOT } from "../extractors/doppler-figures.js";
+import { dopplerPageFactsJsonl, parseDopplerPageFacts } from "../lib/doppler-page-facts.js";
+
+function parseFacts(raw: string, pageCount: number) {
+  const parsed = parseDopplerPageFacts(raw, { pageCount });
+  if (!parsed.ok) throw new Error(parsed.reason);
+  return parsed.facts;
+}
 
 /**
  * A PDF routed to the sandboxed provider is never parsed on the worker host: the stage's real control flow (page facts,
@@ -29,11 +37,13 @@ function run(documentExtraction: Record<string, unknown> = {}): ProjectRun {
   } as ProjectRun;
 }
 
-async function harness(providerResult: { ocrPages?: unknown; layoutFacts?: unknown; pageFacts?: unknown; markdown: string }, documentExtraction: Record<string, unknown> = {}) {
+async function harness(providerResult: { ocrPages?: unknown; layoutFacts?: unknown; pageFacts?: unknown; markdown: string }, documentExtraction: Record<string, unknown> = {}, documentOverrides: Partial<Document> = {}) {
   const scratch = await mkdtemp(path.join(tmpdir(), "docslurp-vm-pdf-host-test-"));
   const calls: string[] = [];
   const commands: CommandPlan[] = [];
   const json = new Map<string, unknown>();
+  const bytes = new Map<string, Buffer>();
+  let failPutBytes = false;
   const plan = (binary: string): CommandPlan => ({ binary, args: [], available: true });
   const target: Record<string, unknown> = {
     sandboxedPdfMarkdown: async (input: string, output: string) =>
@@ -61,7 +71,7 @@ async function harness(providerResult: { ocrPages?: unknown; layoutFacts?: unkno
   }) as unknown as CommandRunner;
   const storage = {
     uri: (key: string) => `s3://test/${key}`,
-    putBytes: async () => undefined,
+    putBytes: async (key: string, data: Uint8Array) => { if (failPutBytes) throw new Error("storage down"); bytes.set(key, Buffer.from(data)); },
     putJson: async (key: string, value: unknown) => { json.set(key, value); },
     streamText: async () => undefined,
     createMultipartUploadStream: () => ({ writable: new Writable({ write(_chunk, _encoding, done) { done(); } }), done: Promise.resolve() }),
@@ -74,7 +84,7 @@ async function harness(providerResult: { ocrPages?: unknown; layoutFacts?: unkno
   internals.enrichOfficeStructure = async ({ document }: { document: unknown }) => document;
   const document = {
     id: "doc-1", userId: "user-1", runId: "run-1", filename: "scan.pdf", mimeType: "application/pdf", sourceKey: "raw/scan",
-    status: "processing", extractionMode: "hybrid", pageCount: 3, createdAt: new Date(), updatedAt: new Date(),
+    status: "processing", extractionMode: "hybrid", pageCount: 3, createdAt: new Date(), updatedAt: new Date(), ...documentOverrides,
   } as Document;
   const state = WorkflowState.create(run(documentExtraction), [document]);
   state.usageLedger.runId = "run-1";
@@ -89,7 +99,7 @@ async function harness(providerResult: { ocrPages?: unknown; layoutFacts?: unkno
     ...calls.filter((name) => /^pdf|pageText|extractText|ocrPdf|images|info|render|rasteri[sz]e/i.test(name)),
     ...commands.filter((command) => !command.sandboxedPdf).map((command) => command.binary),
   ];
-  return { stage, state, calls, commands, json, hostPdf, richIds, upsertPageFacts, cleanup: () => rm(scratch, { recursive: true, force: true }) };
+  return { stage, state, calls, commands, json, bytes, failBytes: () => { failPutBytes = true; }, hostPdf, richIds, upsertPageFacts, cleanup: () => rm(scratch, { recursive: true, force: true }) };
 }
 
 describe("the sandboxed PDF route on the worker host", () => {
@@ -223,6 +233,65 @@ describe("the sandboxed PDF route on the worker host", () => {
       // store (the default): the facts never stand in for layout facts.
       expect(h.state.artifactLedger.readDocument("doc-1", "page-layout-facts")).toBeUndefined();
     } finally { await h.cleanup(); }
+  });
+
+  it("uploads the page facts as canonical lines under the document's own Doppler folder; a raw producer string never reaches storage", async () => {
+    vi.stubEnv("DOCSLURP_PDF_EXTRACTOR", "vm-pdf");
+    // The raw stream carries the document's strings, an unknown field and a page past the host's count.
+    const raw = jsonl([docLine({ lang: "en-US", title: PRODUCER_MARKER }), textPage(1, { note: PRODUCER_MARKER }), textPage(2), textPage(3), textPage(4), runLine()]);
+    for (const mode of ["store", "use"]) {
+      vi.stubEnv("DOCSLURP_DOPPLER_PAGE_FACTS", mode);
+      const h = await harness({ markdown: "One\fTwo\fThree", pageFacts: Buffer.from(raw) });
+      try {
+        await h.stage.run(h.state);
+        const uri = h.state.artifactLedger.readDocument("doc-1", DOPPLER_PAGE_FACTS_SLOT)!;
+        expect(uri).toBe("s3://test/user-1/run-1/doppler/doc-1/images/page-facts.jsonl");
+        const stored = h.bytes.get("user-1/run-1/doppler/doc-1/images/page-facts.jsonl")!.toString("utf8");
+        expect(stored).toBe(dopplerPageFactsJsonl(parseFacts(raw, 3)));
+        expect(stored.split("\n").filter(Boolean).map((line) => JSON.parse(line).type)).toEqual(["doc", "page", "page", "page", "run"]);
+        const everything = [...h.bytes.values()].map((b) => b.toString("latin1")).join("") + JSON.stringify([...h.json.values()]);
+        for (const leaked of ["PRODUCER-MARKER", PRODUCER_MARKER.slice(0, 10), "producer", "creator", "\"lang\"", "en-US", "\"note\""]) expect(everything).not.toContain(leaked);
+      } finally { await h.cleanup(); }
+    }
+  });
+
+  it("writes no page-facts object for malformed, refused or off-mode facts, or when the write fails", async () => {
+    vi.stubEnv("DOCSLURP_PDF_EXTRACTOR", "vm-pdf");
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const cases: Array<[string, unknown, boolean]> = [
+      ["store", "garbage\n", false], ["store", jsonl([textPage(1), docLine()]), false], ["store", 42, false],
+      ["store", "x".repeat(2 * 1024 * 1024), false], ["off", fullFixture(), false], ["nonsense", fullFixture(), false], ["store", fullFixture(), true],
+    ];
+    for (const [mode, pageFacts, failWrite] of cases) {
+      vi.stubEnv("DOCSLURP_DOPPLER_PAGE_FACTS", mode);
+      const h = await harness({ markdown: "One\fTwo\fThree", pageFacts });
+      if (failWrite) h.failBytes();
+      try {
+        await h.stage.run(h.state);
+        expect(h.state.documentStage("doc-1", "extract-markdown")?.status, `${mode} ${String(pageFacts).slice(0, 20)}`).toBe("completed");
+        expect([...h.bytes.keys()].filter((key) => key.endsWith("page-facts.jsonl"))).toEqual([]);
+        expect(h.state.artifactLedger.readDocument("doc-1", DOPPLER_PAGE_FACTS_SLOT)).toBeUndefined();
+      } finally { await h.cleanup(); }
+    }
+    vi.restoreAllMocks();
+  });
+
+  it("keys the page-facts object under the document's own artifact root, never another tenant's", async () => {
+    vi.stubEnv("DOCSLURP_PDF_EXTRACTOR", "vm-pdf");
+    for (const [overrides, prefix] of [
+      [{ userId: "user-1" }, "user-1/run-1/doppler/doc-1/"],
+      [{ userId: "user-2" }, "user-2/run-1/doppler/doc-1/"],
+      [{ artifactRoot: "extracts/org-9/ex-1" }, "extracts/org-9/ex-1/doppler/doc-1/"],
+    ] as const) {
+      const h = await harness({ markdown: "One\fTwo\fThree", pageFacts: fullFixture() }, {}, overrides as Partial<Document>);
+      try {
+        await h.stage.run(h.state);
+        const keys = [...h.bytes.keys()].filter((key) => key.endsWith("page-facts.jsonl"));
+        expect(keys).toEqual([`${prefix}images/page-facts.jsonl`]);
+        expect(h.state.artifactLedger.readDocument("doc-1", DOPPLER_PAGE_FACTS_SLOT)).toBe(`s3://test/${keys[0]}`);
+      } finally { await h.cleanup(); }
+    }
   });
 
   it("with DOCSLURP_DOPPLER_PAGE_FACTS=use, stores layout facts mapped from page facts when the provider sent none", async () => {

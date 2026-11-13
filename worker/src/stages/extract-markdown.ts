@@ -3,7 +3,7 @@ import { countDeferredPdfPages, firstPassServesDocument, primeFirstPassResults }
 import { reserveOrientationAttempt } from "../lib/image-orientation.js";
 import { EMBEDDED_IMAGE_TARGETS, embeddedImageGraph, resolveEmbeddedImageRequest } from "../extractors/embedded-images.js";
 import { anchorImageMarkdownFile } from "../extractors/image-markdown.js";
-import { DopplerFigureRejection, DopplerFigureStoreError, disposeDopplerFigureSet, dopplerImageExtractEnabled, dopplerSourcePointer, readDopplerFigureDir, storeDopplerFigures } from "../extractors/doppler-figures.js";
+import { DOPPLER_PAGE_FACTS_SLOT, DopplerFigureRejection, DopplerFigureStoreError, disposeDopplerFigureSet, dopplerFolderKey, dopplerImageExtractEnabled, dopplerSourcePointer, readDopplerFigureDir, storeDopplerFigures } from "../extractors/doppler-figures.js";
 import { ledgerWriteForFailedFigures, ledgerWriteForNoFigures, ledgerWriteForStoredFigures, queueAssetLedger } from "../db/document-asset-ledger.js";
 import {
   SANDBOXED_PDF_MAX_MARKDOWN_BYTES, VM_PDF_EXTRACTOR_ID, firstPassServedFigures, requireSandboxedPdfProvider, sandboxedPdfFigures, sandboxedPdfProvider, sandboxedPdfLayoutFacts, sandboxedPdfLayoutFactsSource, sandboxedPdfOcrPages,
@@ -118,6 +118,7 @@ import { processedPdfPages, reconcileProcessedPdfPages } from "../lib/pdf-page-c
 import { recordExtractedPageEquivalents } from "../lib/page-equivalents.js";
 import { collectPageLayoutFacts } from "../lib/page-layout-evidence.js";
 import { routingFactsWithDopplerFacts } from "../lib/doppler-page-facts-layout.js";
+import { dopplerPageFactsJsonl } from "../lib/doppler-page-facts.js";
 import { sandboxedPdfPageFacts } from "../extractors/sandboxed-pdf-page-facts.js";
 import { PAGE_RENDITION, pageRenditionKey } from "../lib/page-rendition.js";
 import { extractorFailureReason, extractorFallbackFor, recordExtractorFallback } from "../lib/extractor-fallback.js";
@@ -1014,6 +1015,14 @@ export class ExtractMarkdownStage implements Stage {
                     documentId: document.id, runId: state.run.id, pageCount: document.pageCount,
                     layoutFacts: routingFactsWithDopplerFacts(winningCandidate.layoutFacts, winningCandidate.pageFacts),
                   }));
+                  // Doppler's page facts beside the figure manifest (`images/page-facts.jsonl`), as canonical lines re-serialized
+                  // from what the strict reader kept: never the guest's bytes, so no producer, creator or lang. Recorded as a
+                  // document artifact slot, so the file proxy's artifact and PII checks apply. Only in store and use modes (off
+                  // never parses facts, so none arrive here).
+                  if (isPdf && winningCandidate.pageFacts) {
+                    const pageFactsUri = await this.storeDopplerPageFactsFile(document, state.run.id, winningCandidate.pageFacts);
+                    if (pageFactsUri) state.artifactLedger.recordDocument(document.id, DOPPLER_PAGE_FACTS_SLOT, pageFactsUri);
+                  }
                   // Doppler figures of the winning VM candidate: validated whole, stored under the document's artifact root, and
                   // recorded as document artifact slots so the artifact and PII guards (and the file proxy) apply to each file.
                   // A first-pass placeholder (a host-only mark on the job) stores nothing: the first pass stores those figures
@@ -1706,6 +1715,28 @@ export class ExtractMarkdownStage implements Stage {
     });
     console.log(`[extract-debug] document=${document.id} pageLayoutFacts source=${source} pages=${pages.size}${ms === null ? "" : ` ms=${ms}`}`);
     return this.storage.uri(key);
+  }
+
+  /**
+   * Write the validated page facts as `<artifact root>/doppler/<document>/images/page-facts.jsonl` (dopplerFolderKey, the
+   * document's own tenant-scoped root). Best effort: a failed write leaves no slot, and routing keeps its database rows.
+   */
+  private async storeDopplerPageFactsFile(
+    document: import("../models.js").Document,
+    runId: string,
+    facts: import("../lib/doppler-page-facts.js").DopplerPageFactsDocument,
+  ): Promise<string | null> {
+    const key = dopplerFolderKey(document, runId, "pageFacts");
+    try {
+      const body = Buffer.from(dopplerPageFactsJsonl(facts), "utf8");
+      await this.storage.putBytes(key, body, "text/plain; charset=utf-8");
+      console.log(`[extract-debug] document=${document.id} dopplerPageFacts pages=${facts.summary.pagesKnown} failed=${facts.summary.pagesFailed} dropped=${facts.summary.linesDropped} complete=${facts.summary.complete} bytes=${body.byteLength}`);
+      return this.storage.uri(key);
+    } catch (error) {
+      rethrowIfTeardown(error);
+      console.warn(`[extract-markdown] page facts not stored document=${document.id}: ${error instanceof Error ? error.message : String(error)}`);
+      return null;
+    }
   }
 
   /**
