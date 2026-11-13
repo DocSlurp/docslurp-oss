@@ -46,47 +46,40 @@ async function rejection(pageCount = 10): Promise<string> {
   throw new Error("expected a rejection");
 }
 
-describe("storeDopplerFigures: a failed upload stores nothing", () => {
-  const recordingStorage = (fail: { bytes?: string; json?: boolean }, withDelete = true) => {
+describe("storeDopplerFigures: a failed upload records nothing and keeps verified files", () => {
+  const recordingStorage = (fail: { bytes?: string; json?: boolean }) => {
     const live = new Set<string>();
     const storage = {
       putBytes: vi.fn(async (key: string) => {
-        if (fail.bytes && key.endsWith(fail.bytes)) throw new Error("boom");
+        if (fail.bytes && key.includes(fail.bytes)) throw new Error("boom");
         live.add(key);
-        // The index write lands, then fails: it must be removed too.
         if (fail.json && key.endsWith("/index.json")) throw new Error("boom");
       }),
       putJson: vi.fn(async (key: string) => { live.add(key); if (fail.json) throw new Error("boom"); }),
       uri: (key: string) => `s3://bucket/${key}`,
-      ...(withDelete ? { deleteKeys: vi.fn(async (keys: string[]) => { for (const key of keys) live.delete(key); }) } : {}),
+      deleteKeys: vi.fn(async (keys: string[]) => { for (const key of keys) live.delete(key); }),
     };
     return { storage, live };
   };
 
-  it("an object failure deletes the files already written and names the phase", async () => {
+  it("an object failure names the phase, writes nothing after the files and deletes nothing (the next attempt adopts)", async () => {
     const set = await readDopplerFigureDir(dir, { pageCount: 5 });
-    const { storage, live } = recordingStorage({ bytes: "/page-0005/figure-001.png" });
+    const { storage, live } = recordingStorage({ bytes: "/page-0005/figure-001." });
     const error = await storeDopplerFigures({ storage, document: DOC, runId: "run-1", figures: set, markdown: "" }).catch((e) => e);
     expect(error).toBeInstanceOf(DopplerFigureStoreError);
-    expect(error).toMatchObject({ reason: "store-object-failed", cleanup: "deleted" });
-    // Nothing after the files (the manifest, the index) is written once a file failed.
+    expect(error).toMatchObject({ reason: "store-object-failed", cleanup: "kept" });
     expect(storage.putBytes.mock.calls.some(([key]) => String(key).endsWith("manifest.json") || String(key).endsWith("index.json"))).toBe(false);
-    expect(live.size).toBe(0);
+    expect(storage.deleteKeys).not.toHaveBeenCalled();
+    expect([...live].every((key) => /\.[0-9a-f]{16}\.(webp|svg|png)$/.test(key))).toBe(true);
   });
 
-  it("an index failure deletes the files and the index, even when the index write landed", async () => {
+  it("an index failure keeps the files and deletes nothing", async () => {
     const set = await readDopplerFigureDir(dir, { pageCount: 5 });
     const { storage, live } = recordingStorage({ json: true });
     const error = await storeDopplerFigures({ storage, document: DOC, runId: "run-1", figures: set, markdown: "" }).catch((e) => e);
-    expect(error).toMatchObject({ reason: "store-index-failed", cleanup: "deleted" });
-    expect(live.size).toBe(0);
-  });
-
-  it("without deleteKeys the failure still reports, with cleanup unavailable", async () => {
-    const set = await readDopplerFigureDir(dir, { pageCount: 5 });
-    const { storage } = recordingStorage({ json: true }, false);
-    await expect(storeDopplerFigures({ storage, document: DOC, runId: "run-1", figures: set, markdown: "" }))
-      .rejects.toMatchObject({ reason: "store-index-failed", cleanup: "unavailable" });
+    expect(error).toMatchObject({ reason: "store-index-failed", cleanup: "kept" });
+    expect(storage.deleteKeys).not.toHaveBeenCalled();
+    expect(live.size).toBeGreaterThan(0);
   });
 
   it("cancellation stays an abort, not a figure failure", async () => {
@@ -97,18 +90,34 @@ describe("storeDopplerFigures: a failed upload stores nothing", () => {
     const error = await storeDopplerFigures({ storage, document: DOC, runId: "run-1", figures: set, markdown: "", signal: controller.signal }).catch((e) => e);
     expect(error).not.toBeInstanceOf(DopplerFigureStoreError);
     expect(error.name).toBe("AbortError");
-    expect(live.size).toBe(0);
+    expect(storage.deleteKeys).not.toHaveBeenCalled();
   });
 
-  it("cancellation during a successful final index write records no slots and removes everything written", async () => {
+  it("with ledger hooks: every file is recorded pending before its upload and stored after it, in steps", async () => {
     const set = await readDopplerFigureDir(dir, { pageCount: 5 });
-    const controller = new AbortController();
+    const events: string[] = [];
+    const { storage } = recordingStorage({});
+    storage.putBytes.mockImplementation(async (key: string) => { events.push(`put ${key.split("/").slice(-2).join("/")}`); });
+    await storeDopplerFigures({
+      storage, document: DOC, runId: "run-1", figures: set, markdown: "",
+      ledger: {
+        pending: async (rows) => { events.push(`pending ${rows.map((row) => row.assetId).join(",")}`); expect(rows.every((row) => row.storageKey.includes(row.sha256!.slice(0, 16)))).toBe(true); },
+        stored: async (files) => { events.push(`stored ${files.map((file) => file.id).join(",")}`); },
+      },
+    });
+    expect(events[0]).toBe("pending p3.1,p3.g2,p5.g1");
+    expect(events.indexOf("stored p3.1,p3.g2,p5.g1")).toBe(4);
+    expect(events.slice(1, 4).every((event) => event.startsWith("put page-000"))).toBe(true);
+  });
+
+  it("a failing pending record stops the upload before any file is written", async () => {
+    const set = await readDopplerFigureDir(dir, { pageCount: 5 });
     const { storage, live } = recordingStorage({});
-    storage.putBytes.mockImplementation(async (key: string) => { live.add(key); if (key.endsWith("/index.json")) controller.abort(); });
-    const error = await storeDopplerFigures({ storage, document: DOC, runId: "run-1", figures: set, markdown: "", signal: controller.signal }).catch((e) => e);
-    expect(error).not.toBeInstanceOf(DopplerFigureStoreError);
-    expect(error.name).toBe("AbortError");
-    expect(storage.deleteKeys).toHaveBeenCalledTimes(1);
+    const error = await storeDopplerFigures({
+      storage, document: DOC, runId: "run-1", figures: set, markdown: "",
+      ledger: { pending: async () => { throw new Error("db down"); }, stored: async () => {} },
+    }).catch((e) => e);
+    expect(error).toMatchObject({ reason: "store-object-failed", cleanup: "none" });
     expect(live.size).toBe(0);
   });
 });
@@ -140,20 +149,25 @@ describe("readDopplerFigureDir: the happy path", () => {
     const markdown = "A\n\n![image](doppler-image:p3.1)\n\n![image](doppler-image:p3.g2)\f![image](doppler-image:p4.1)\f![image](doppler-image:p5.2) ![image](doppler-image:p9.9)";
     const stored = await storeDopplerFigures({ storage, document: DOC, runId: "run-1", figures: set, markdown });
     const root = `user-1/run-1/doppler/${DOC.id}`;
-    // Version 1 files land at the page paths a version 2 or 3 run would use; the manifest bytes as received; the index last.
+    const sha = (id: string) => set.files.find((file) => file.id === id)!.sha256.slice(0, 16);
+    // Version 1 files land at the page paths a version 2 or 3 run would use, content-addressed; the canonical manifest;
+    // the index last.
     expect([...put.keys()].sort()).toEqual([
-      `${root}/images/manifest.json`, `${root}/images/page-0003/figure-002.svg`, `${root}/images/page-0003/image-001.webp`,
-      `${root}/images/page-0005/figure-001.png`, `${root}/index.json`,
+      `${root}/images/manifest.json`, `${root}/images/page-0003/figure-002.${sha("p3.g2")}.svg`, `${root}/images/page-0003/image-001.${sha("p3.1")}.webp`,
+      `${root}/images/page-0005/figure-001.${sha("p5.g1")}.png`, `${root}/index.json`,
     ]);
     expect([...put.keys()].at(-1)).toBe(`${root}/index.json`);
-    expect(put.get(`${root}/images/page-0003/figure-002.svg`)!.type).toBe("image/svg+xml");
-    expect(put.get(`${root}/images/manifest.json`)!.bytes.equals(await readFile(path.join(dir, "manifest.json")))).toBe(true);
+    expect(put.get(`${root}/images/page-0003/figure-002.${sha("p3.g2")}.svg`)!.type).toBe("image/svg+xml");
+    // The stored manifest is the canonical re-serialisation (same JSON value), never served: it has no slot.
+    const manifestBytes = put.get(`${root}/images/manifest.json`)!.bytes;
+    expect(JSON.parse(manifestBytes.toString())).toEqual(JSON.parse(await readFile(path.join(dir, "manifest.json"), "utf8")));
+    expect(stored.manifest.sha256).toBe(createHash("sha256").update(manifestBytes).digest("hex"));
+    expect(stored.storedBytes).toEqual({ manifest: manifestBytes.length, index: put.get(`${root}/index.json`)!.bytes.length });
     expect(stored.slots).toEqual([
       { slot: "doppler-figures", uri: `s3://bucket/${root}/index.json` },
-      { slot: "doppler-figure:p3.1", uri: `s3://bucket/${root}/images/page-0003/image-001.webp` },
-      { slot: "doppler-figure:p3.g2", uri: `s3://bucket/${root}/images/page-0003/figure-002.svg` },
-      { slot: "doppler-figure:p5.g1", uri: `s3://bucket/${root}/images/page-0005/figure-001.png` },
-      { slot: "doppler-manifest", uri: `s3://bucket/${root}/images/manifest.json` },
+      { slot: "doppler-figure:p3.1", uri: `s3://bucket/${root}/images/page-0003/image-001.${sha("p3.1")}.webp` },
+      { slot: "doppler-figure:p3.g2", uri: `s3://bucket/${root}/images/page-0003/figure-002.${sha("p3.g2")}.svg` },
+      { slot: "doppler-figure:p5.g1", uri: `s3://bucket/${root}/images/page-0005/figure-001.${sha("p5.g1")}.png` },
     ]);
     const index = JSON.parse(put.get(`${root}/index.json`)!.bytes.toString()) as { markers: string[]; figures: Array<{ id: string; fileOf: string | null; slot: string | null; bbox: number[] }> };
     // p5.2 failed (no file) and p9.9 is not in the manifest: neither marker resolves.
@@ -165,11 +179,15 @@ describe("readDopplerFigureDir: the happy path", () => {
   });
 
   it("builds keys only from ids and the document's tenant root", () => {
-    expect(dopplerFolderKey(DOC, "run-1", { id: "p3.1", format: "webp" })).toBe(`user-1/run-1/doppler/${DOC.id}/images/page-0003/image-001.webp`);
-    expect(dopplerFolderKey(DOC, "run-1", { id: "p12345.g7", format: "svg" })).toBe(`user-1/run-1/doppler/${DOC.id}/images/page-12345/figure-007.svg`);
+    const sha = "ab".repeat(32);
+    expect(dopplerFolderKey(DOC, "run-1", { id: "p3.1", format: "webp", sha256: sha })).toBe(`user-1/run-1/doppler/${DOC.id}/images/page-0003/image-001.abababababababab.webp`);
+    expect(dopplerFolderKey(DOC, "run-1", { id: "p12345.g7", format: "svg", sha256: sha })).toBe(`user-1/run-1/doppler/${DOC.id}/images/page-12345/figure-007.abababababababab.svg`);
+    // The digest is part of the key: never a path segment, never anything but 64 hex digits.
+    expect(() => dopplerFolderKey(DOC, "run-1", { id: "p3.1", format: "webp", sha256: "../../x" })).toThrow();
+    expect(() => dopplerFolderKey(DOC, "run-1", { id: "p3.1", format: "webp", sha256: "AB".repeat(32) })).toThrow();
     expect(dopplerFolderKey({ ...DOC, artifactRoot: "extracts/org-1/ex-1" }, "run-1", "manifestV3")).toBe(`extracts/org-1/ex-1/doppler/${DOC.id}/images/manifest.jsonl`);
     expect(dopplerFolderKey(DOC, "run-1", "markdown")).toBe(`user-1/run-1/doppler/${DOC.id}/document.md`);
-    expect(() => dopplerFolderKey(DOC, "run-1", { id: "../../x", format: "webp" })).toThrow();
+    expect(() => dopplerFolderKey(DOC, "run-1", { id: "../../x", format: "webp", sha256: "ab".repeat(32) })).toThrow();
     expect(() => dopplerFolderKey({ ...DOC, id: "../other" }, "run-1", "manifest")).toThrow();
     expect(() => dopplerFolderKey({ ...DOC, artifactRoot: "../escape" }, "run-1", "manifest")).toThrow();
   });
@@ -375,16 +393,16 @@ describe("golden folders from a real Doppler run (fixtures/doppler-golden, see P
     const { set, index, resolved, urls } = await storeAndResolve("repeats", 4);
     expect(set.files.map((f) => f.id)).toEqual(["p1.1", "p3.1"]);
     expect(index.figures.filter((f) => f.skipped === "repeat").map((f) => [f.id, f.fileOf])).toEqual([["p2.1", "p1.1"], ["p3.2", "p3.1"], ["p4.1", "p1.1"]]);
-    expect(urls.get("p4.1")).toBe("/v1/files/t/page-0001/image-001.webp");
+    expect(urls.get("p4.1")).toMatch(/^\/v1\/files\/t\/page-0001\/image-001\.[0-9a-f]{16}\.webp$/);
     expect(resolved).not.toContain("doppler-image:");
-    expect(resolved.match(/!\[image\]\(\/v1\/files\/t\/page-000[13]\/image-001\.webp\)/g)).toHaveLength(5);
+    expect(resolved.match(/!\[image\]\(\/v1\/files\/t\/page-000[13]\/image-001\.[0-9a-f]{16}\.webp\)/g)).toHaveLength(5);
   });
 
   it("typst: a raster and an SVG resolve; figures Doppler skipped by fate keep `skipped` and no file", async () => {
     const { set, index, resolved } = await storeAndResolve("typst", 4);
     expect(set.files.map((f) => [f.id, f.mediaType])).toEqual([["p1.1", "image/webp"], ["p3.g1", "image/svg+xml"]]);
     expect(index.figures.filter((f) => f.skipped).map((f) => [f.id, f.skipped, f.fileOf])).toEqual([["p2.1", "fate", null], ["p4.1", "fate", null]]);
-    expect(resolved).toContain("](/v1/files/t/page-0003/figure-001.svg)");
+    expect(resolved).toMatch(/\]\(\/v1\/files\/t\/page-0003\/figure-001\.[0-9a-f]{16}\.svg\)/);
     expect(resolved).not.toContain("doppler-image:");
   });
 

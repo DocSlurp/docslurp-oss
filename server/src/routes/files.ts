@@ -64,28 +64,30 @@ const PDF_CSP = "frame-ancestors 'self'";
 
 /**
  * A document's Doppler output lives in Doppler's own folder layout under `<artifact root>/doppler/<document>/`
- * (packages/shared DOPPLER_STORE_LAYOUT). Image files sit at `images/page-NNNN/(image|figure)-NNN.<format>`. Their type
+ * (packages/shared DOPPLER_STORE_LAYOUT). Image files sit at `images/page-NNNN/(image|figure)-NNN.<sha16>.<format>`
+ * (content-addressed, migration 0143). Their type
  * is fixed by that name, never by stored metadata or the bytes. They are the only SVG this proxy renders, and only with
  * a CSP that loads nothing and runs nothing (the VM's SVG allowlist is only a correctness filter: this CSP is what keeps
  * a compromised figure inert).
  */
-const DOPPLER_FIGURE_KEY = /\/doppler\/[A-Za-z0-9-]{1,64}\/images\/page-[0-9]{4,10}\/(?:image|figure)-[0-9]{3,7}\.(webp|svg|png|jpg)$/;
+const DOPPLER_FIGURE_KEY = /\/doppler\/[A-Za-z0-9-]{1,64}\/images\/page-[0-9]{4,10}\/(?:image|figure)-[0-9]{3,7}\.[0-9a-f]{16}\.(webp|svg|png|jpg)$/;
 const FIGURE_SVG_CSP = "default-src 'none'; style-src 'unsafe-inline'; sandbox; frame-ancestors 'self'";
 /**
  * The folder's other files, typed by their fixed names and never rendered as active content: the manifest and the
  * index as JSON, the page facts and the Markdown as text. All of them still pass the artifact check (recorded slot,
  * project, organization, PII withholding) like any other artifact.
  */
-const DOPPLER_FOLDER_FILE_KEY = /\/doppler\/[A-Za-z0-9-]{1,64}\/(images\/manifest\.jsonl?|images\/page-facts\.jsonl|document\.md|index\.json)$/;
+const DOPPLER_FOLDER_FILE_KEY = /\/doppler\/[A-Za-z0-9-]{1,64}\/(images\/page-facts\.jsonl|document\.md|index\.json)$/;
 const DOPPLER_FOLDER_FILE_TYPES: Readonly<Record<string, string>> = {
-  "images/manifest.json": "application/json; charset=utf-8",
-  "images/manifest.jsonl": "text/plain; charset=utf-8",
   "index.json": "application/json; charset=utf-8",
   "images/page-facts.jsonl": "text/plain; charset=utf-8",
   "document.md": "text/markdown; charset=utf-8",
 };
-/** The source pointer (`source.json`) names the upload's storage key: it is never served, whatever records it. */
-const DOPPLER_SOURCE_POINTER_KEY = /\/doppler\/[A-Za-z0-9-]{1,64}\/source\.json$/;
+/**
+ * Never served, whatever records them: the source pointer (`source.json`) names the upload's storage key, and the
+ * canonical manifest is the resume's input and ledger evidence (migration 0143), not a customer file.
+ */
+const DOPPLER_SOURCE_POINTER_KEY = /\/doppler\/[A-Za-z0-9-]{1,64}\/(source\.json|images\/manifest\.jsonl?)$/;
 
 export function dopplerFigureFormat(uri: string): DopplerFigureFormat | null {
   const match = DOPPLER_FIGURE_KEY.exec(parseArtifactUri(uri)?.key ?? "");

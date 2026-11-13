@@ -1002,6 +1002,13 @@
       "when": 1794600000000,
       "tag": "0142_figure_storage_billing",
       "breakpoints": true
+    },
+    {
+      "idx": 143,
+      "version": "7",
+      "when": 1794700000000,
+      "tag": "0143_figure_resume_ledger",
+      "breakpoints": true
     }
   ]
 }

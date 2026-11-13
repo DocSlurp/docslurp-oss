@@ -176,11 +176,68 @@ export function dopplerDocumentPrefix(artifactRoot: string, documentId: string):
   return `${artifactRoot}/${DOPPLER_STORE_LAYOUT.folder}/${documentId}/`;
 }
 
-/** The storage key of the file an image owns: the document's images folder plus its derived path. */
-export function dopplerAssetStorageKey(artifactRoot: string, documentId: string, ownerId: string, format: DopplerFigureFormat): string {
+/**
+ * The storage key of the file an image owns, content-addressed: the document's images folder plus the path derived from
+ * the id, with the first 16 hex digits of the file's SHA-256 before the format (`page-0003/image-001.<sha16>.webp`).
+ * A replayed upload writes identical bytes to the same key; a writer with other bytes can never overwrite a committed
+ * file. Doppler's own folder (and the Markdown's links) keep the plain path; the key is only ever derived, never listed.
+ */
+export function dopplerAssetStorageKey(artifactRoot: string, documentId: string, ownerId: string, format: DopplerFigureFormat, sha256: string): string {
   const relative = dopplerAssetPath(ownerId, format);
-  if (!relative) throw new Error("Invalid Doppler image id or format");
-  return `${dopplerDocumentPrefix(artifactRoot, documentId)}${DOPPLER_STORE_LAYOUT.imagesFolder}${relative}`;
+  if (!relative || typeof sha256 !== "string" || !SHA256_HEX.test(sha256)) throw new Error("Invalid Doppler image id, format or digest");
+  return `${dopplerDocumentPrefix(artifactRoot, documentId)}${DOPPLER_STORE_LAYOUT.imagesFolder}${dopplerContentPath(relative, sha256)}`;
+}
+
+const SHA256_HEX = /^[0-9a-f]{64}$/;
+
+/** `page-NNNN/image-NNN.<format>` with the content digest inserted: `page-NNNN/image-NNN.<sha16>.<format>`. */
+export function dopplerContentPath(relative: string, sha256: string): string {
+  const dot = relative.lastIndexOf(".");
+  return `${relative.slice(0, dot)}.${sha256.slice(0, 16)}${relative.slice(dot)}`;
+}
+
+/**
+ * The key of a range's canonical manifest, content-addressed: `<folder>/images/manifests/<first>-<last>.<sha16>.jsonl`
+ * (`.json` for a legacy version 1 or 2 manifest). A delivery of the same range and bytes lands on the same key.
+ */
+export function dopplerRangeManifestKey(artifactRoot: string, documentId: string, range: { first: number; last: number }, sha256: string, jsonl = true): string {
+  if (!Number.isSafeInteger(range.first) || !Number.isSafeInteger(range.last) || range.first < 1 || range.last < range.first ||
+      range.last > 999_999_999 || typeof sha256 !== "string" || !SHA256_HEX.test(sha256)) {
+    throw new Error("Invalid Doppler range manifest");
+  }
+  return `${dopplerDocumentPrefix(artifactRoot, documentId)}${DOPPLER_STORE_LAYOUT.imagesFolder}manifests/${range.first}-${range.last}.${sha256.slice(0, 16)}.${jsonl ? "jsonl" : "json"}`;
+}
+
+/** One range manifest the ledger holds (document_extraction_levels.ranges). */
+export interface DopplerFigureRange { first: number; last: number; key: string; sha256: string; bytes: number; complete: boolean }
+
+// ---- Shard gaps: page ranges a figure pass returned nothing for ----
+
+/** Why a page range has no manifest: its shard failed, timed out, went over its share, returned an invalid frame, or the document's pass budget ran out. */
+export const DOPPLER_FIGURE_GAP_REASONS = ["shard-failed", "shard-timeout", "shard-over-share", "frame-invalid", "doc-pass-budget"] as const;
+export type DopplerFigureGapReason = (typeof DOPPLER_FIGURE_GAP_REASONS)[number];
+export const DOPPLER_FIGURE_MAX_GAPS = 128;
+export interface DopplerFigureGap { first: number; last: number; reason: DopplerFigureGapReason }
+
+/**
+ * Validate gaps for a document of `pageCount` pages: at most 128, each `1 <= first <= last <= pageCount`, sorted and not
+ * overlapping, a reason from the closed list. Returns a fresh copy (only the three fields), or null when invalid.
+ */
+export function checkedDopplerFigureGaps(gaps: unknown, pageCount: number): DopplerFigureGap[] | null {
+  if (!Array.isArray(gaps) || gaps.length > DOPPLER_FIGURE_MAX_GAPS || !Number.isSafeInteger(pageCount) || pageCount < 1) return null;
+  const out: DopplerFigureGap[] = [];
+  let previous = 0;
+  for (const gap of gaps as unknown[]) {
+    if (!gap || typeof gap !== "object" || Array.isArray(gap)) return null;
+    const { first, last, reason } = gap as Record<string, unknown>;
+    if (!Number.isSafeInteger(first) || !Number.isSafeInteger(last) || typeof reason !== "string" ||
+        !(DOPPLER_FIGURE_GAP_REASONS as readonly string[]).includes(reason)) return null;
+    const a = first as number, b = last as number;
+    if (a < 1 || b < a || b > pageCount || a <= previous) return null;
+    previous = b;
+    out.push({ first: a, last: b, reason: reason as DopplerFigureGapReason });
+  }
+  return out;
 }
 
 export const DOPPLER_ASSET_KINDS = ["picture", "mask", "vector"] as const;

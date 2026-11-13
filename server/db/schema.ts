@@ -3595,6 +3595,8 @@ export const documentAssets = pgTable("document_assets", {
   linkPath: text("link_path"),
   fileOf: text("file_of"),
   storageKey: text("storage_key"),
+  // Migration 0143: none (no file), pending (written before its upload), stored (landed and checked; served and billed).
+  storageState: text("storage_state").default("none").notNull(),
   objNum: integer("obj_num"),
   objGen: integer("obj_gen"),
   bbox: doublePrecision().array(),
@@ -3646,6 +3648,13 @@ export const documentExtractionLevels = pgTable("document_extraction_levels", {
   sourceDecode: integer("source_decode").default(0).notNull(),
   sourceRender: integer("source_render").default(0).notNull(),
   assetBytes: bigint("asset_bytes", { mode: "number" }).default(0).notNull(),
+  // Migration 0143: the fence every resume compares and sets, shard gaps, and the index and manifest bytes in asset_bytes.
+  figuresGeneration: bigint("figures_generation", { mode: "number" }).default(1).notNull(),
+  gaps: jsonb("gaps").default([]).notNull(),
+  indexBytes: bigint("index_bytes", { mode: "number" }).default(0).notNull(),
+  manifestBytes: bigint("manifest_bytes", { mode: "number" }).default(0).notNull(),
+  // Range manifests of per-range deliveries ({first, last, key, sha256, bytes, complete}), at most 128.
+  ranges: jsonb("ranges").default([]).notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
 }, (table) => [
   foreignKey({

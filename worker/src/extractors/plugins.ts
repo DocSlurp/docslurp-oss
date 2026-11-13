@@ -53,7 +53,23 @@ export interface SandboxedPdfJob {
    * `--images-doc-max-bytes`, `--images-batch-pages`, `--images-link-prefix`): a provider passes them so that Doppler's own
    * budgets stop it (a resumable `budget`/`doc_budget`) before the host would refuse the folder.
    */
-  figures?: { dir: string; limits?: DopplerImageLimits };
+  figures?: {
+    dir: string;
+    limits?: DopplerImageLimits;
+    /**
+     * Host-side, never sent to the VM: store one finished range now. A provider that streams finished batches or shards
+     * out of the VM (each in its own empty folder it created under `dir`'s parent) calls it per range, as often as it
+     * likes: deliveries are idempotent. The host also delivers the final folder after the run. Resolves when the range is
+     * stored and committed; never throws for a figure failure (it is logged), only for cancellation.
+     */
+    deliver?: (delivery: import("./doppler-figures.js").DopplerFigureDelivery) => Promise<void>;
+    /**
+     * A retry or reprocess with the same PDF and settings: the stored canonical manifest of each range, downloaded to a
+     * host file. A provider that supports it runs `--images-resume` for that range with only the manifest (no figure
+     * files go back into the VM), so finished images are not redone.
+     */
+    resume?: { ranges: Array<{ first: number; last: number; manifest: string }> };
+  };
 }
 
 export interface SandboxedPdfRunContext {
@@ -138,7 +154,11 @@ export interface SandboxedPdfExtractorProvider {
     read(output: string, signal?: AbortSignal): Promise<EmbeddedImageSet>;
   };
   /** Present when the provider can return Doppler figure crops beside the Markdown (SandboxedPdfJob.figures). */
-  figures?: { producerId: string };
+  figures?: {
+    producerId: string;
+    /** The provider honours SandboxedPdfJob.figures.resume (`--images-resume` from a manifest-only folder per range). */
+    resume?: boolean;
+  };
   /** Page-shard cost profile: calibration refines the prior from observed shard timings under `key`. */
   shardProfile?: { key: string; prior: ShardCostProfile };
   /**
@@ -339,13 +359,19 @@ export type SandboxedPdfFigureOutcome = ({ status: "extracted" } | { status: "pa
   confined?: boolean;
   exitCode?: number;
   build?: string;
+  /**
+   * Page ranges a sharded run returned nothing for (a failed, timed-out or over-share shard): untrusted, checked against
+   * the document's page count by the stage (checkedDopplerFigureGaps) and dropped whole when invalid.
+   */
+  gaps?: unknown;
 };
 const MAX_FIGURE_REASON_CHARS = 500;
 
 /** Parse a provider's figure outcome (untrusted). Anything that is not a recognised answer is a failure. */
 export function parseSandboxedPdfFigureOutcome(raw: unknown, maxReasonChars = MAX_FIGURE_REASON_CHARS): SandboxedPdfFigureOutcome {
-  const value = raw as { status?: unknown; reason?: unknown; confined?: unknown; exitCode?: unknown; build?: unknown } | undefined;
+  const value = raw as { status?: unknown; reason?: unknown; confined?: unknown; exitCode?: unknown; build?: unknown; gaps?: unknown } | undefined;
   const extra = {
+    ...(Array.isArray(value?.gaps) && value.gaps.length > 0 ? { gaps: value.gaps } : {}),
     ...(typeof value?.confined === "boolean" ? { confined: value.confined } : {}),
     ...(Number.isSafeInteger(value?.exitCode) && (value!.exitCode as number) >= 0 && (value!.exitCode as number) <= 255 ? { exitCode: value!.exitCode as number } : {}),
     ...(typeof value?.build === "string" && DOPPLER_BUILD.test(value.build) ? { build: value.build } : {}),
