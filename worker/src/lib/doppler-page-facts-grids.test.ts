@@ -39,12 +39,12 @@ const TABLE = { bbox: [72, 100, 540, 400], rows: 6, columns: 4, coverage: 0.29 }
 describe("doppler page facts: ruled grids", () => {
   it("golden: maps grids to PageTables with their coverage, and tableCoverage to the union of their boxes", () => {
     const second = { bbox: [72, 500, 300, 700], rows: 2, columns: 3, coverage: 0.09 };
-    const layout = layoutOf(page({ vectors: { grids: [TABLE, second], gridsTruncated: false } }));
+    const layout = layoutOf(page({ vectors: { hRules: 12, vRules: 9, grids: [TABLE, second], gridsTruncated: false } }));
     // The coverage is measured from the box on the walker's 200 x 200 raster, not taken from the guest.
     expect(layout.grids).toEqual([{ rows: 6, columns: 4, coverage: 0.2964 }, { rows: 2, columns: 3, coverage: 0.0969 }]);
     expect(layout.tableCoverage).toBe(0.3933);
     // Overlapping grids count once.
-    expect(layoutOf(page({ vectors: { grids: [TABLE, TABLE], gridsTruncated: false } })).tableCoverage).toBe(0.2964);
+    expect(layoutOf(page({ vectors: { hRules: 14, vRules: 10, grids: [TABLE, TABLE], gridsTruncated: false } })).tableCoverage).toBe(0.2964);
   });
 
   it("golden: an empty, complete list proves there is no grid", () => {
@@ -160,19 +160,21 @@ describe("doppler page facts: words inside and bytes per pixel", () => {
     expect(scan.bytesPerPixel).toBe(0);
   });
 
-  it("whole-box counts stand only when the page's centre-based text over images agrees (the walker counts centres)", () => {
+  it("a low whole-box count stands only when no text centre lies over any image (the walker counts centres)", () => {
     const text = base.text as Record<string, unknown>;
     const at = (ratio: number | undefined, inside: number) => {
       const t = { ...text };
       if (ratio === undefined) delete t.textOverImageRatio; else t.textOverImageRatio = ratio;
       return layoutOf(textPage(1, { text: t, images: { ...images, items: [{ ...item, visibleWordsInside: inside, invisibleWordsInside: 0 }] } })).images![0]!.wordsInside;
     };
-    // 410 words, 2400 characters: about 5.85 characters a word.
     expect(at(0, 0)).toBe(0);
-    expect(at(5.85 / 2400, 0)).toBe(0);             // one word's worth over images: within the allowance
-    expect(at(3 * 5.86 / 2400, 0)).toBeNull();      // three words over images, none counted inside: a straddling label
-    expect(at(3 * 5.86 / 2400, 3)).toBe(3);
-    expect(at(undefined, 0)).toBeNull();            // no ratio (no oddtext family): unknown
+    expect(at(0, 2)).toBe(2);
+    expect(at(0.001, 0)).toBeNull();     // some text centred over an image: a straddling word the walker counts may be missing
+    expect(at(0.001, 2)).toBeNull();
+    expect(at(undefined, 1)).toBeNull(); // no ratio (no oddtext family): unknown
+    // Above the mixed-scan threshold a count only blocks a read, and the walker's is at least as high: it stands.
+    expect(at(0.5, 3)).toBe(3);
+    expect(at(undefined, 40)).toBe(40);
   });
 
   it("absent gives unknown (null), never 0", () => {
@@ -212,17 +214,14 @@ describe("doppler page facts: words inside and bytes per pixel", () => {
     expect(layoutOf(many).images).toBeNull();
   });
 
-  it("xref-repaired-earlier: px, dpi, bytesPerPixel, words inside and grids are unknown, so none can select a read", () => {
+  it("xref-repaired-earlier: the page keeps only its size; images, words, grids are unknown, so nothing on it selects a read", () => {
     const scanLike = { visibleWordsInside: 0, invisibleWordsInside: 0, bytesPerPixel: 0.02, bbox: [72, 300, 540, 700], coverage: 0.39, px: [1950, 1667], dpi: [300, 300], filter: "dct" };
     const vectorsWithGrid = { grids: [TABLE], gridsTruncated: false };
     const ok = layoutOf(page({ item: scanLike, vectors: vectorsWithGrid }));
     expect([ok.images![0]!.widthPx, ok.images![0]!.heightPx, ok.images![0]!.ppi, ok.images![0]!.bytesPerPixel, ok.images![0]!.wordsInside]).toEqual([1950, 1667, [300, 300], 0.02, 0]);
     expect(ok.grids).toHaveLength(1);
     const low = layoutOf(page({ item: scanLike, vectors: vectorsWithGrid, extra: { parseWarnings: ["xref-repaired-earlier"] } }));
-    const image = low.images![0]!;
-    expect([image.widthPx, image.heightPx, image.ppi, image.bytesPerPixel, image.wordsInside]).toEqual([0, 0, [null, null], null, null]);
-    expect(low.grids).toBeNull();
-    expect(low.tableCoverage).toBeNull();
+    expect(low).toEqual({ images: null, tables: null, words: null, grids: null, tableCoverage: null, widthPt: 612, heightPt: 792 });
     // An unknown warning value is still dropped, as the contract asks.
     expect(one(page({ extra: { parseWarnings: ["xref-repaired-earlier", "from-the-future"] } })).pages.get(1)!.parseWarnings).toEqual(["xref-repaired-earlier"]);
   });
@@ -247,13 +246,17 @@ describe("doppler page facts: words inside and bytes per pixel", () => {
     expect(surface(null).pages[0]?.ocrDecision?.authorized ?? false).toBe(false);
   });
 
-  it("per grid, the page's rules must allow it: shaded panels or sideless column lines larger than the rules are dropped", () => {
-    // 8 horizontal and 5 vertical rules on the page: a 6 x 4 table fits; 8 shaded panel bands with 2 columns do not.
+  it("grids must fit the page's thin rules together, and the page needs crossing rules", () => {
+    // 8 horizontal and 5 vertical rules: a 6 x 4 table takes 7 and 5; 8 shaded panel bands with 2 columns cannot be paid for.
     const panels = { bbox: [72, 420, 540, 760], rows: 8, columns: 2, coverage: 0.3 };
-    const layout = layoutOf(page({ vectors: { grids: [TABLE, panels], gridsTruncated: false } }));
-    expect(layout.grids).toEqual([{ rows: 6, columns: 4, coverage: 0.2964 }]);
-    const wide = { ...TABLE, columns: 5 };
-    expect(layoutOf(page({ vectors: { grids: [wide], gridsTruncated: false } })).grids).toEqual([]);
+    expect(layoutOf(page({ vectors: { grids: [TABLE, panels], gridsTruncated: false } })).grids).toEqual([{ rows: 6, columns: 4, coverage: 0.2964 }]);
+    // Two grids that each fit alone but not together: the second is dropped.
+    const small = { bbox: [72, 500, 300, 600], rows: 2, columns: 2, coverage: 0.05 };
+    expect(layoutOf(page({ vectors: { hRules: 9, vRules: 6, grids: [TABLE, small], gridsTruncated: false } })).grids).toHaveLength(1);
+    expect(layoutOf(page({ vectors: { hRules: 10, vRules: 8, grids: [TABLE, small], gridsTruncated: false } })).grids).toHaveLength(2);
+    expect(layoutOf(page({ vectors: { grids: [{ ...TABLE, columns: 5 }], gridsTruncated: false } })).grids).toEqual([]);
+    // Rules that never cross (zebra fills beside unrelated underlines): no grid.
+    expect(layoutOf(page({ vectors: { ruleGridScore: 0, hRules: 40, vRules: 40, grids: [TABLE], gridsTruncated: false } })).grids).toEqual([]);
   });
 });
 
@@ -304,7 +307,7 @@ const TRUTH: TruthPage[] = [
   },
   {
     name: "mixed scan: low-bpp DCT scan beside text", words: 240, grids: [], text: prose(240),
-    images: [logo, { bbox: placed(72, 300, [1950, 1250], 300), px: [1950, 1250], ppi: 300, filter: "dct", bpc: 8, colorSpace: "gray", streamBytes: 243_750, obj: 51, wordsInside: 1 }],
+    images: [logo, { bbox: placed(72, 300, [1950, 1250], 300), px: [1950, 1250], ppi: 300, filter: "dct", bpc: 8, colorSpace: "gray", streamBytes: 243_750, obj: 51, wordsInside: 0 }],
   },
   {
     name: "photo beside text", words: 240, grids: [], text: prose(240),
@@ -454,6 +457,18 @@ describe("parity: facts-mapped layout routes like the walker's", () => {
     expect(byName["two-column page with a centre divider"]!.route).not.toBe("table-heavy");
     expect(byName["labels overrunning a bilevel figure"]!.ocr?.authorized).toBe(false);
     expect(mapped.get(TRUTH.findIndex((t) => t.name.startsWith("labels overrunning")) + 1)!.images!.every((i) => i.wordsInside === null)).toBe(true);
+  });
+
+  it("is stricter than the walker, never looser, where whole-box counts cannot stand: a figure with one word over it", () => {
+    const pages: TruthPage[] = [{
+      name: "scan with one word over it", words: 240, grids: [], text: prose(240),
+      images: [{ bbox: placed(72, 300, [1950, 1250], 300), px: [1950, 1250], ppi: 300, filter: "ccitt", bpc: 1, colorSpace: "gray", streamBytes: 40_000, obj: 70, wordsInside: 1 }],
+    }];
+    const facts = parse(jsonl([docLine({ pageCount: 1 }), factsLine(pages[0]!, 1), runLine({ pagesEmitted: 1 })]), 1);
+    const walker = decisions(new Map([[1, walkerLayout(pages[0]!, new Set())]]), null, pages);
+    const fromFacts = decisions(pageLayoutFactsFromDopplerFacts(facts), null, pages);
+    expect(walker[0]!.ocr?.authorized).toBe(true);
+    expect(fromFacts[0]!.ocr?.authorized).toBe(false);
   });
 
   it("without the new fields (an older build) facts never fire a mixed-scan read and miss the drawn tables: the gap #42 closes", () => {

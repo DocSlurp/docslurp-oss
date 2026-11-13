@@ -13,29 +13,29 @@
  *   `bitsPerComponent`, `dpi` → `ppi` (non-positive → null), `filter` → `encoding` and `colorSpace` in the walker's
  *   `pdfimages -list` vocabulary, `repeated` from `obj` across the pages given (the walker's furniture rule).
  *   `wordsInside` ← `visibleWordsInside` + `invisibleWordsInside` (the walker counts every text-layer word whose centre is
- *   inside; Doppler a word whose whole box is, within 1 pt), null when the pair is absent, and null for every image of a
- *   page whose centre-based `textOverImageRatio` shows more text over images than the counts explain (a word straddling an
- *   edge, which the walker counts) or is absent (`wordsInsideCorroborated`). `bytesPerPixel` ← `bytesPerPixel`
- *   one to one, null when absent (never 0). Both are routing hints from what the file says: never a billing input. On a page
- *   marked `xref-repaired-earlier` (its facts may come from an object the file holds twice) the image's `px` (→ 0, as the
- *   layout reader reads an unknown size), `dpi` and `bytesPerPixel` are unknown, so they cannot select a mixed-scan read.
+ *   inside; Doppler a word whose whole box is, within 1 pt), null when the pair is absent; a count of at most
+ *   `mixedScanMaxWordsInside` stands only on a page whose centre-based `textOverImageRatio` is 0 (`wordsInside`).
+ *   `coverage` is capped by the image's own box over the page. `bytesPerPixel` ← `bytesPerPixel`
+ *   one to one, null when absent (never 0). Both are routing hints from what the file says: never a billing input.
  *   Null (unknown) when the list was not computed, is truncated, or holds fewer items than `imageCount`.
  * - `grids` ← `vectors.grids` as `PageTable`s (rows, columns, coverage of the box clipped to the page; the type has no box),
  *   keeping only grids of two or more columns: the walker's minimum grid (2 horizontals, 3 verticals). A one-column grid
  *   (parallel rules: form lines, lined paper) is weak evidence and not a table. Doppler's search also builds grids from
  *   shaded boxes and from inner column lines without outer sides, so on a page with fewer than 2 horizontal or 3 vertical
- *   rules (where the walker finds no grid) the grids are `[]` whatever the list says. Unknown (null) when the list is truncated,
+ *   rules (where the walker finds no grid) the grids are `[]` whatever the list says; elsewhere the page needs crossing
+ *   rules (`ruleGridScore` > 0) and the kept grids together must fit its rule counts. Unknown (null) when the list is truncated,
  *   at the drawing cap, or on a page whose CropBox differs from its MediaBox (the boxes are in MediaBox space). Without the
  *   list (older builds): `[]` only when the rule counts prove there is no grid (fewer than 2 horizontal or 3 vertical rules,
  *   no cap hit), otherwise null, never a guessed grid.
  * - `tables` ← null: tables come from the extractor's Markdown. `tableCoverage` ← the union of the kept grid boxes over the
  *   page on the walker's 200 x 200 raster (overlaps once) when the grids are known from the list, else null. The walker's
  *   value also covers the Markdown tables' boxes, so this is never larger than the walker's.
- * - A failed page (`error: failed`) is omitted: unknown.
+ * - A failed page (`error: failed`) is omitted: unknown. A page marked `xref-repaired-earlier` (any of its facts may come
+ *   from an object the file holds twice) keeps only its size: images, words, grids and table coverage are unknown.
  */
-import type { PageLayoutImage } from "@docslurp/shared";
+import { PAGE_RASTER_ROUTING, type PageLayoutImage } from "@docslurp/shared";
 
-import { dopplerPageExtent, dopplerPageFactsLowConfidence, type Box, type DopplerColorSpace, type DopplerImageFilter, type DopplerPageFacts, type DopplerPageFactsDocument, type DopplerScan, type DopplerTextLayer } from "./doppler-page-facts.js";
+import { dopplerPageExtent, dopplerPageFactsLowConfidence, type Box, type DopplerColorSpace, type DopplerImageFilter, type DopplerImageItem, type DopplerPageFacts, type DopplerPageFactsDocument, type DopplerScan, type DopplerTextLayer } from "./doppler-page-facts.js";
 import type { PageLayoutFacts } from "./page-layout-facts.js";
 
 /** The walker's `pdfimages -list` encodings (worker/scripts/pdf_layout_facts.py LISTING_ENCODINGS). */
@@ -80,21 +80,19 @@ function layoutImages(page: DopplerPageFacts, repeated: Set<number>): PageLayout
   const images = page.images;
   if (!images?.items || images.truncated || images.itemsTruncated || images.items.length < images.imageCount) return null;
   // Low confidence (an earlier page rebuilt the xref): sizes and stream ratios are unknown, so they authorize nothing.
-  const sizesUnknown = dopplerPageFactsLowConfidence(page);
-  const insideKnown = !sizesUnknown && wordsInsideCorroborated(page);
   const extent = dopplerPageExtent(page.geometry);
   return images.items.map((item) => ({
     bbox: [...item.bbox] as [number, number, number, number],
     coverage: boxCappedCoverage(item.coverage, item.bbox, extent),
-    widthPx: sizesUnknown ? 0 : item.px[0],
-    heightPx: sizesUnknown ? 0 : item.px[1],
+    widthPx: item.px[0],
+    heightPx: item.px[1],
     bitsPerComponent: item.bpc ?? null,
     colorSpace: COLOR[item.colorSpace],
     encoding: ENCODING[item.filter],
-    ppi: sizesUnknown ? [null, null] : [item.dpi[0] > 0 ? item.dpi[0] : null, item.dpi[1] > 0 ? item.dpi[1] : null],
-    bytesPerPixel: sizesUnknown ? null : item.bytesPerPixel ?? null,
+    ppi: [item.dpi[0] > 0 ? item.dpi[0] : null, item.dpi[1] > 0 ? item.dpi[1] : null],
+    bytesPerPixel: item.bytesPerPixel ?? null,
     repeated: item.obj !== undefined && repeated.has(item.obj),
-    wordsInside: insideKnown && item.visibleWordsInside !== undefined && item.invisibleWordsInside !== undefined ? item.visibleWordsInside + item.invisibleWordsInside : null,
+    wordsInside: wordsInside(page, item),
   }));
 }
 
@@ -111,22 +109,20 @@ function boxCappedCoverage(coverage: number, bbox: Box, extent: [number, number]
 }
 
 /**
- * Whether the images' whole-box word counts can stand for the walker's centre-inside counts on this page. Doppler counts a
- * word inside an image only when its whole box is (within 1 pt); the walker when its centre is. A word straddling the edge
- * (a label overrunning a figure) counts for the walker only, so a facts count can be lower, and a lower count can select a
- * mixed-scan read the walker would not. `text.textOverImageRatio` counts characters by centre over any image's cells: when
- * that is more text than the images' counts plus one average word explain, a centre-inside word may be missing, and every
- * count on the page is unknown. Without the ratio (no `oddtext` family) the counts are unknown too. Conservative: the
- * ratio's 64 x 64 cells reach past an image's edge, which only makes more counts unknown (fewer reads).
+ * An image's words inside as the walker would count them, or null. Doppler counts a word inside only when its whole box is
+ * (within 1 pt); the walker when its centre is, so a word straddling the edge (a label overrunning a figure) counts for
+ * the walker only and a facts count can be lower. Only a low count matters: `mixedScanImage` reads an image with at most
+ * `mixedScanMaxWordsInside` words inside. So a count above that stands (the walker's is at least as high), and a count at
+ * or below it stands only when the page's `text.textOverImageRatio` is 0: no character's centre lies in any image's cells,
+ * which reach past every image's edge, so no word's centre is inside any image and the walker's count is 0 as well.
+ * Otherwise (or without the ratio, or the pair) the count is unknown. Conservative: a caption beside a figure can make a
+ * count unknown and so skip a read the walker would make; never the reverse.
  */
-function wordsInsideCorroborated(page: DopplerPageFacts): boolean {
-  const text = page.text;
-  if (!text || text.textOverImageRatio === undefined) return false;
-  if (text.charCount === 0) return true;
-  let inside = 0;
-  for (const item of page.images?.items ?? []) inside += (item.visibleWordsInside ?? 0) + (item.invisibleWordsInside ?? 0);
-  const charsPerWord = text.charCount / Math.max(1, text.wordCount);
-  return text.textOverImageRatio * text.charCount <= (inside + 1) * charsPerWord;
+function wordsInside(page: DopplerPageFacts, item: DopplerImageItem): number | null {
+  if (item.visibleWordsInside === undefined || item.invisibleWordsInside === undefined) return null;
+  const count = item.visibleWordsInside + item.invisibleWordsInside;
+  if (count > PAGE_RASTER_ROUTING.mixedScanMaxWordsInside) return count;
+  return page.text?.textOverImageRatio === 0 ? count : null;
 }
 
 /** The page's width and height when its grid boxes can be placed on it (CropBox = MediaBox, sides in range), else null. */
@@ -207,12 +203,20 @@ function gridFacts(page: DopplerPageFacts): Pick<PageLayoutFacts, "grids" | "tab
   if (!size) return { grids: null, tableCoverage: null };
   const [w, h] = size;
   const clip = (b: Box): Box => [Math.min(w, Math.max(0, b[0])), Math.min(h, Math.max(0, b[1])), Math.min(w, Math.max(0, b[2])), Math.min(h, Math.max(0, b[3]))];
-  // Per grid, the walker's rules must be there too: a grid's rows need rows + 1 horizontal rules and its columns
-  // columns + 1 vertical ones (outer sides included). Shaded boxes (two bands each) and sideless column lines can make a
-  // Doppler grid larger than the page's rules allow; such a grid is not one the walker would find.
-  const kept = v.grids
-    .filter((g) => g.columns >= GRID_MIN_COLUMNS && g.rows + 1 <= v.hRules && g.columns + 1 <= v.vRules)
-    .map((g) => ({ ...g, bbox: clip(g.bbox) }));
+  // The walker's grid is built from thin rules that cross. Doppler's search also counts shaded boxes (two bands each) and
+  // column lines without outer sides, which the page's rule counts (thin rules only) do not hold. So the page must have
+  // crossing rules (`ruleGridScore` > 0), and the kept grids together must fit its rules: each takes rows + 1 horizontal
+  // and columns + 1 vertical rules (outer sides included) from the page's counts, in the search's order, and a grid the
+  // rules left cannot pay for is dropped. Rule positions are not in the facts, so a crafted page can still place unrelated
+  // rules to pay for a shaded grid; it could equally draw a real grid for the walker.
+  let hLeft = v.ruleGridScore > 0 ? v.hRules : 0, vLeft = v.ruleGridScore > 0 ? v.vRules : 0;
+  const kept: Array<(typeof v.grids)[number]> = [];
+  for (const g of v.grids) {
+    if (g.columns < GRID_MIN_COLUMNS || g.rows + 1 > hLeft || g.columns + 1 > vLeft) continue;
+    hLeft -= g.rows + 1;
+    vLeft -= g.columns + 1;
+    kept.push({ ...g, bbox: clip(g.bbox) });
+  }
   return {
     grids: kept.map((g) => ({ rows: g.rows, columns: g.columns, coverage: rasterUnionCoverage([g.bbox], w, h) })),
     tableCoverage: rasterUnionCoverage(kept.map((g) => g.bbox), w, h),
@@ -222,6 +226,14 @@ function gridFacts(page: DopplerPageFacts): Pick<PageLayoutFacts, "grids" | "tab
 /** One page's layout facts, or null when the page is unknown (failed). `repeated`: furniture image objects of the document. */
 export function pageLayoutFactsFromDopplerPage(page: DopplerPageFacts, repeated: Set<number> = new Set()): PageLayoutFacts | null {
   if (page.failed) return null;
+  if (dopplerPageFactsLowConfidence(page)) {
+    // Low confidence (`xref-repaired-earlier`): any fact of the page may come from the other body of an object the file
+    // holds twice. Nothing on it steers routing: images, words, grids are unknown; the page size is kept (never billed).
+    const low: PageLayoutFacts = { images: null, tables: null, words: null, grids: null, tableCoverage: null };
+    const g = page.geometry;
+    if (g && g.widthPt >= MIN_SIDE_PT && g.widthPt <= MAX_SIDE_PT && g.heightPt >= MIN_SIDE_PT && g.heightPt <= MAX_SIDE_PT) { low.widthPt = g.widthPt; low.heightPt = g.heightPt; }
+    return low;
+  }
   const out: PageLayoutFacts = {
     images: layoutImages(page, repeated),
     tables: null,
