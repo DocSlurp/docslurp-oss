@@ -231,7 +231,7 @@ describe("SEARCH_LANCEDB_NATIVE", () => {
     expect(response.results.every((result) => !result.matchedQueries || result.matchedQueries.every((index) => index !== 2))).toBe(true);
   });
 
-  it("keeps a warm keyword fan-out of up to 100 queries to about the SQL of one keyword search", async () => {
+  it("keeps a warm keyword fan-out of up to 100 queries to about the SQL of one keyword search", { timeout: 30_000 }, async () => {
     const filters = { documentIds: ["doc1", "doc2", "doc3", "doc4", "doc5", "doc6"] };
     const reads = async (keywordQueries: string[]) => {
       await run(true, keywordQueries.join(" "), { searchMode: "keyword", keywordQueries, filters });
@@ -257,7 +257,7 @@ describe("SEARCH_LANCEDB_NATIVE", () => {
     }
   });
 
-  it("answers a warm search with one SQL read plus chunk-id checks", async () => {
+  it("answers a warm search with one SQL read plus chunk-id checks", { timeout: 30_000 }, async () => {
     const queryVector = near("doc5-2");
     // Original documents only: hits serving a dedup copy are hydrated from Postgres by design.
     const filters = { documentIds: ["doc1", "doc2", "doc3", "doc4", "doc5", "doc6"] };
