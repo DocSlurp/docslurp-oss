@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { assertNoAutomaticSelectionDenied } from "./automatic-model-selection.js";
 import { lookupPrivateModelRoute, parsePrivateModelUri, PRIVATE_MODEL_PROVIDER } from "./private-endpoints.js";
 
 export const supportedEmbeddingModels = [
@@ -540,9 +541,16 @@ export const DEEPINFRA_VISION_BASE_URL = DEEPINFRA_EMBEDDING_BASE_URL;
  * change here: the profile label and description, the default config and the default-derived values follow.
  * It must be a hosted `visionModelCatalog` id (checked by the catalog tests).
  */
-// Tuned DeepSeek V4.1 Flash 1017 (US-hosted routes): best quality tier, fastest and cheaper per page than Gemini 3.1
-// Flash Lite on the 2026-10-22 vision holdout. Roll back without a deploy via DOCSLURP_VISION_MODEL_URI (app and worker).
-export const DEFAULT_OPENROUTER_VISION_MODEL = "deepseek/deepseek-v4.1-flash-1017";
+// Tuned GPT-6 Luna since 2026-11-13 (owner decision: the default is never DeepSeek V4.1 Flash, which is never selected
+// automatically; it stays an explicit catalog choice). On the 2026-10-22 vision holdout Luna had no significant deficit
+// against DeepSeek V4.1 Flash 1017 on content, reading order or math (math 0.994 vs 0.982), and a significant tolerant
+// tables deficit (-0.032); it is the cheapest allowed model at its most expensive host and about 3x slower per page.
+// Override without a deploy via DOCSLURP_VISION_MODEL_URI (app and worker).
+export const DEFAULT_OPENROUTER_VISION_MODEL = "openai/gpt-6-luna";
+/** The open-weights (MIT) model behind the `open-weights-hosted` profile. */
+export const OPEN_WEIGHTS_OPENROUTER_VISION_MODEL = "z-ai/glm-5.3-flash";
+// A built-in default is chosen by the system, not the caller: never a model that is never selected automatically.
+assertNoAutomaticSelectionDenied("vision defaults", [DEFAULT_OPENROUTER_VISION_MODEL, OPEN_WEIGHTS_OPENROUTER_VISION_MODEL]);
 /**
  * Hosted escalation read on DeepInfra's official endpoint (`llm://deepinfra/...`), billed per token like the
  * OpenRouter and OpenAI routes. DeepInfra list price checked 2026-11-04: $0.15/M input, $0.60/M output.
@@ -720,10 +728,37 @@ export const visionModelCatalog = [
     tags: ["hosted", "cost", "quality"],
     runtime: "openai-compatible",
     description:
-      "OpenAI GPT-6 Luna on OpenRouter; opt-in low-cost page extraction with high-detail images and a content-filter retry route.",
+      "OpenAI GPT-6 Luna on OpenRouter; the default page extraction model, with high-detail images and a content-filter retry route.",
     estimatedCostPerPageCents: 0.061,
-    tokenPricing: { inputUsdPerMillion: 0.1, outputUsdPerMillion: 0.5, checked: "2026-10-25" },
+    tokenPricing: {
+      inputUsdPerMillion: 0.11,
+      outputUsdPerMillion: 0.55,
+      checked: "2026-11-13",
+      basis: "pinned-route",
+      providers: ["openai", "amazon-bedrock/us-east-1", "azure/us"],
+      // OpenAI caches prompts of 1,024+ tokens automatically and the route reports a cache write of about the whole
+      // prompt on each call (2026-11-13): input is billed at the write rate, 1.25x base, $0.1375 at the dearest host.
+      promptCacheWriteUsdPerMillion: 0.1375,
+    },
+    // Priced at the most expensive allowed host (the content-filter retry hosts, $0.11/$0.55), so max_price admits them.
     imageTokens: { kind: "patch", patchPx: 32, tokensPerPatch: 2.46, basis: "openai-patch-max-multiplier" },
+  },
+  {
+    id: "anthropic/claude-haiku-5.5",
+    uri: "llm://openrouter/anthropic/claude-haiku-5.5",
+    label: "Claude Haiku 5.5",
+    target: "hosted",
+    tags: ["hosted", "cost", "quality"],
+    runtime: "openai-compatible",
+    description:
+      "Anthropic Claude Haiku 5.5 on OpenRouter; opt-in page extraction and a chart & diagram export generator.",
+    // Computed, not measured: a full-resolution image (4,784 tokens) plus about 500 prompt and 1,000 output tokens at list price.
+    estimatedCostPerPageCents: 0.11,
+    // OpenRouter list price, for prompts up to 100K tokens; max_price at this price keeps the $0.11/$0.55 regional hosts out.
+    tokenPricing: { inputUsdPerMillion: 0.1, outputUsdPerMillion: 0.5, checked: "2026-11-13" },
+    // High-resolution tier (Claude 4.7 and later models): images are downscaled to at most 2,576 px on the long edge and
+    // 4,784 visual tokens (platform.claude.com/docs/en/build-with-claude/vision, 2026-11-13).
+    imageTokens: { kind: "fixed", tokens: 4_784, basis: "anthropic-high-resolution-max" },
   },
   {
     id: "z-ai/glm-5.3-flash",
@@ -736,7 +771,15 @@ export const visionModelCatalog = [
       "Open-weights (MIT) Z.ai GLM multimodal model on OpenRouter; opt-in page extraction.",
     // Computed, not measured: ~3,000 input + 560 output tokens at current list price = 0.073 cents.
     estimatedCostPerPageCents: 0.073,
-    tokenPricing: { inputUsdPerMillion: 0.15, outputUsdPerMillion: 0.5, checked: "2026-10-25" },
+    // Priced at the most expensive host its vision profile allows (`only`: Wafer, Friendli, InferenceNet; Friendli lists
+    // $0.15/$0.50 per 1M), so the guard weight and max_price hold on every host it can route to.
+    tokenPricing: {
+      inputUsdPerMillion: 0.15,
+      outputUsdPerMillion: 0.5,
+      checked: "2026-11-12",
+      basis: "pinned-route",
+      providers: ["wafer/nvfp4", "friendli", "inference-net/fp4"],
+    },
     imageTokens: { kind: "fixed", tokens: 8_002, basis: "processor-max:glm5-next" },
   },
   {
@@ -813,7 +856,20 @@ export type VisionTokenPricing = {
    */
   basis?: "pinned-route" | "provider-list";
   providers?: readonly string[];
+  /**
+   * The provider's prompt cache-write rate, when the route bills a cache write on effectively every request (OpenAI's
+   * automatic prompt caching on GPT-6 Luna reports `cache_write_tokens` of about the whole prompt on prompts of 1,024
+   * tokens or more, billed at the write rate). Estimates and the request guard price input at the higher of this and
+   * `inputUsdPerMillion` (`visionInputUsdPerMillion`), as the usage ledger prices reported writes. `max_price` still
+   * carries the base input price, which is what providers are filtered on.
+   */
+  promptCacheWriteUsdPerMillion?: number;
 };
+
+/** The input price estimates and the request guard use: the base rate, or the cache-write rate when the route bills one. */
+export function visionInputUsdPerMillion(pricing: Pick<VisionTokenPricing, "inputUsdPerMillion" | "promptCacheWriteUsdPerMillion">): number {
+  return Math.max(pricing.inputUsdPerMillion, pricing.promptCacheWriteUsdPerMillion ?? 0);
+}
 
 /** List token price of a cataloged hosted vision model (by id or `llm://` URI); null for local or unknown models. */
 export function visionModelTokenPricing(idOrUri: string): VisionTokenPricing | null {
@@ -828,7 +884,7 @@ export function visionListPriceCents(
 ): number | null {
   const pricing = visionModelTokenPricing(idOrUri);
   if (!pricing) return null;
-  return (usage.inputTokens * pricing.inputUsdPerMillion + usage.outputTokens * pricing.outputUsdPerMillion) / 1e4;
+  return (usage.inputTokens * visionInputUsdPerMillion(pricing) + usage.outputTokens * pricing.outputUsdPerMillion) / 1e4;
 }
 
 /**
@@ -1024,13 +1080,13 @@ export const visionProfileCatalog = {
   },
   "open-weights-hosted": {
     label: "Open-weights hosted",
-    // Was Nemotron 3.5 Super VL, refused until its image-token bound has serving evidence (`refusedReason`).
-    description: `Open-weights (MIT) hosted route (${visionModelCatalogById[DEFAULT_OPENROUTER_VISION_MODEL].label}) through OpenRouter's US providers.`,
+    // Was Nemotron 3.5 Super VL (refused until its image-token bound has serving evidence), then the DeepSeek default.
+    description: `Open-weights (MIT) hosted route (${visionModelCatalogById[OPEN_WEIGHTS_OPENROUTER_VISION_MODEL].label}) through its measured OpenRouter hosts.`,
     tags: ["cost", "hosted", "open-weights"],
     config: {
       profile: "open-weights-hosted",
       target: "hosted",
-      modelUri: `llm://openrouter/${DEFAULT_OPENROUTER_VISION_MODEL}`,
+      modelUri: `llm://openrouter/${OPEN_WEIGHTS_OPENROUTER_VISION_MODEL}`,
     },
   },
 } as const satisfies Record<VisionProfileKey, {

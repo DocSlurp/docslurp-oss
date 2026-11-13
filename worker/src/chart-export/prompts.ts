@@ -4,6 +4,7 @@
  */
 import { CHART_TYPES, DIAGRAM_TYPES, VISUAL_SPEC_LIMITS, type ChartExportFormat } from "@docslurp/shared";
 
+import { CHART_EXPORT_LIMITS } from "./config.js";
 import type { VisualKind } from "./types.js";
 
 const CHART_SHAPE = `{"kind":"chart","chartType":one of ${JSON.stringify(CHART_TYPES)},"title":string|null,` +
@@ -91,7 +92,7 @@ export function repairPrompt(kind: VisualKind | null, previous: string, problem:
   return [
     "Your previous answer was not a valid JSON object of the required shape.",
     `Problem: ${problem}`,
-    `Previous answer (truncated):\n${previous.slice(0, 4000)}`,
+    `Previous answer (truncated):\n${previous.slice(0, CHART_EXPORT_LIMITS.maxRepairEchoChars)}`,
     specPrompt(kind, options),
   ].join("\n\n");
 }
