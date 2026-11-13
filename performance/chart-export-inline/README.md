@@ -103,7 +103,7 @@ in the parser VM's pooled lanes (reused across documents of the same activity, w
 
 ## Council round 2 re-measure (`results-vm-r2.json`, `results-probe-r2.json`)
 
-- **Slice:** the 95 documents above plus 11 realistic no-chart documents, 106 documents and 196 pages in all:
+- **Slice:** the 95 documents above plus 11 realistic no-chart documents, 106 documents and 207 pages in all:
   - 2 `{"data": ...}` envelopes;
   - 2 JSON:API documents, whose `data` items have `type`, which the extractor does read;
   - 3 `ensure_ascii` exports;
