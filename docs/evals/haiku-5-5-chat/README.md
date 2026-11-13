@@ -85,6 +85,8 @@ Core #370 changes the direct-answer prompt for every model:
 - The evidence now comes before the history and question.
 - Evidence tags are keyed per org.
 - Claude goes through Chat Completions.
+- (Round 3) The system prompt starts with a per-org keyed salt line, so tenant text never begins a shared cached
+  prefix.
 
 Re-run: `chat.answer` on all 30 cases, main's order vs the branch's order for each model. Haiku carries the addendum on
 both sides. The judge was **GPT-6.1 Sol** (not a Claude model), on dev, with a 6-pair order-swap check per model.
@@ -95,7 +97,20 @@ both sides. The judge was **GPT-6.1 Sol** (not a Claude model), on dev, with a 6
 | GPT-6 Luna | 0.98 → 0.98 | 4/4 → 4/4 | +0.00 ± 0.19 | 4/15/2 |
 | Claude Haiku 5.5 | 0.98 → 0.98 | 4/4 → 4/4 | −0.10 ± 0.19 | 3/14/4 |
 
-- Intervals are 95% normal approximations, and all include zero. No model regressed, so the order ships for all three.
+- Intervals are 95% normal approximations, and all include zero: **no regression detected** at this size (n = 21 dev
+  cases per model, intervals ±0.19-0.32). The order ships for all three models on that basis.
+- Deterministic checks, main → branch, all 30 cases:
+
+  | model | gold-passage citation | invalid citations | system-prompt leaks | injection case |
+  |---|---|---|---|---|
+  | GLM 5.3 Flash | 24/26 → 22/26 | 0 → 0 | 0 → 0 | gold cited, no leak, both orders |
+  | GPT-6 Luna | 22/26 → 21/26 | 0 → 0 | 0 → 0 | gold cited, no leak, both orders |
+  | Claude Haiku 5.5 | 23/26 → 23/26 | 0 → 0 | 0 → 0 | gold cited, no leak, both orders |
+
+- Round 3 re-ran the branch with the salt line (deterministic checks only, all 30 cases, three models):
+  - Gold recall, invalid citations, leaks, language and the injection case are unchanged.
+  - Gold-passage citation moved by 0 to 2 cases per model (Luna 21 → 19 of 26). Both of Luna's changes cite another
+    passage, and `cross-1` scores 0.5 in every run because the evidence lacks the FY2027 target.
 - One severe flag, on the GLM branch side: on one case GLM speculated that a missing fact sits in an unsupplied part of
   the document.
 - Gold-passage citation varied by one or two cases per model in each direction. In every such case the answer cited a
@@ -156,35 +171,48 @@ Each follow-up turn re-runs retrieval: top 5 corpus pages by term overlap with t
 
 ### Page and chart reads
 
-Shipped shape:
+**What ships** (round 3):
 
-- System message: the fixed instruction line plus the template or chart spec prompt, byte-identical across pages,
-  documents and tenants.
-- User message: the image, then any per-request text (schema labels, a chart digest).
+- **Claude page reads only, on OpenRouter**, use the cache-ordered shape:
+  - system: the fixed line plus the template, byte-identical across pages, documents and tenants;
+  - user: the image, then per-request text such as schema labels.
+- **Every other case keeps the original request byte for byte:** chart reads, every other model (GPT-6 Luna,
+  DeepSeek, the Qwen3-VL escalation, GLM, MiMo) and private routes.
+- **Claude is not yet in the priced page-read catalog**, so this shape has no production traffic until Haiku is added
+  there with its own vision eval.
 
-**Page reads** (8 rendered fixture pages; 4 fresh pages for Luna, since 4 were replays of an earlier probe):
+**Page reads** (8 rendered fixture pages; 4 fresh pages for Luna):
 
-| model | prefix read | pages per $1 (old shape → new) | output vs old shape |
+| model | prefix read | pages per $1 (original → cache-ordered) | output vs original |
 |---|---|---|---|
 | Claude Haiku 5.5 | 778 tokens from page 2 on | 1,894 → 2,147 (+13%) | same content; formatting differences on 2 pages |
-| GPT-6 Luna | none (~600-token prefix, under the 1,024 minimum) | 1,969 → 1,981 (unchanged) | word F1 0.95-1.0 per page |
+| GPT-6 Luna (not shipped) | none (~600-token prefix, under the 1,024 minimum) | 1,969 → 1,981 (unchanged) | word F1 0.95-1.0 per page |
 
 **Luna probe with a fixed prefix padded to 1,450 tokens:**
 
-- Luna reads it from the second page on, and input on warm pages falls ~12%.
-- The padding adds the tokens it saves, so pages per $1 barely moved: 2,129 → 2,142.
-- Making Luna page reads cacheable would need a genuinely longer fixed prompt, evaluated for quality. It is not done
-  here.
+- Luna reads it from the second page on.
+- The padding adds the tokens it saves: 2,129 → 2,142 pages per $1.
+- Luna page reads therefore stay at about **1,980 pages per $1**, unchanged.
 
-**Chart reads** (held-out, 60 charts, SPEC_V2, derived mode):
+**Chart reads: cache-ordered shape measured, not shipped.** Held-out, 60 charts, SPEC_V2, derived mode:
 
-| model | input served from cache | spec score (old → new) | visuals per $1 (old → new) |
+| model | input served from cache | spec score (original → cache-ordered) | visuals per $1 (original → cache-ordered) |
 |---|---:|---|---|
 | GPT-6 Luna | 0% | 0.976 → 0.983 | 3,605 → 3,552 |
 | Claude Haiku 5.5 | 65% | 0.979 → 0.964 | 2,786 → 3,751 (+35%) |
 
-- Haiku's drop is almost all one chart, where it returned null values (a decline) instead of readings. Across the other
-  59 charts the mean change is −0.004.
+The Haiku drop is caused by the shape. Repeated runs at temperature 0 (spec score; mean of 4 repeats for the first
+chart, 3 for the rest):
+
+| chart | original | cache-ordered |
+|---|---|---|
+| area (the one that returned nulls) | 0.95 (4 of 4) | 0.98, 0.83, 0.65, 0.30 (one all-null decline) |
+| donut | 0.90 | 0.78 |
+| scatter | 0.99 | 0.89 |
+| scatter | 0.99 | 0.89 |
+| bar | 1.00 | 1.00 |
+
+So chart reads keep the original shape for every model. The Haiku chart savings are given up for quality.
 
 ### Accounting
 
@@ -195,6 +223,8 @@ Shipped shape:
 - Provider receipts still win.
 
 ## Reproduce
+
+The chat commands need the calibration harness from core #343, which is not merged yet.
 
 ```sh
 # Paid. In a checkout of core #343 with this record's arms in run.mts and systemSuffix support in shim.mts:

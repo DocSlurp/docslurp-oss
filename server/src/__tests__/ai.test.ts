@@ -246,3 +246,26 @@ describe("OpenRouter credential isolation", () => {
     expect(resolveOpenRouterApiKey()).toBe("router-primary-test-key");
   });
 });
+
+it("starts each org's chat system prompt with its own salt: identical tenant text never shares a cached prefix across orgs", async () => {
+  const stream = () => ({
+    textStream: (async function* () { yield "Answer [1]"; })(),
+    usage: Promise.resolve({ inputTokens: 10, outputTokens: 2, raw: { cost: 0.0001 } }),
+    response: Promise.resolve({ id: "gen-test" }),
+    sources: Promise.resolve([]),
+  });
+  // Same project name, chat instructions and ingest instruction in both orgs.
+  const system = "Project: Falcon deal room. Answer formally and cite every figure.";
+  const args = { apiKey: "test", privacyMode: "standard" as const, system, prompt: "Q", maxOutputTokens: 100, documents: [{ title: "T", text: "x" }], model: "openai/gpt-6-luna" };
+  const systemFor = async (evidenceScope: string) => {
+    streamTextMock.mockReturnValueOnce(stream());
+    await generateOpenRouterDocumentText({ ...args, evidenceScope });
+    return streamTextMock.mock.calls.at(-1)?.[0].system as string;
+  };
+  const a1 = await systemFor("org-a"), a2 = await systemFor("org-a"), b = await systemFor("org-b");
+  expect(a1).toBe(a2);
+  expect(a1).not.toBe(b);
+  expect(a1.split("\n")[0]).toMatch(/^Workspace [0-9a-f]{16}\.$/);
+  expect(a1.indexOf(system)).toBeGreaterThan(a1.indexOf("Workspace"));
+  expect(b.split("\n")[0]).not.toBe(a1.split("\n")[0]);
+});

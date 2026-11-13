@@ -16,7 +16,7 @@ import {
   visionOutputCapForModel,
   visionPromptKeyForModel,
 } from "../tools/vision-model-profiles.js";
-import { visionPromptFromMessages, executeVisionRuntime, visionPromptTemplates } from "../tools/vision-runtime.js";
+import { executeVisionRuntime, visionPromptTemplates } from "../tools/vision-runtime.js";
 import { visionMaxPrice } from "../test/vision-max-price.js";
 import { inAllowingRun } from "../test/provider-scope.js";
 
@@ -90,7 +90,7 @@ describe("MiMo vision profile", () => {
 
   it("leaves other models' prompts unchanged", async () => {
     const other = await sentBody({ modelUri: "llm://openrouter/google/gemini-3.1-flash-lite" });
-    expect(visionPromptFromMessages(other.messages)).toBe(visionPromptTemplates["<OCR>"]);
+    expect(other.messages[1].content[0].text).toBe(visionPromptTemplates["<OCR>"]);
     expect(other.provider).toEqual({ max_price: visionMaxPrice("google/gemini-3.1-flash-lite") });
   });
 });

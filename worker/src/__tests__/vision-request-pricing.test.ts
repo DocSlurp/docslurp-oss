@@ -1,4 +1,3 @@
-import { visionPromptFromMessages } from "../tools/vision-runtime.js";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -147,7 +146,7 @@ describe("request weight from the actual prompt and image", () => {
     const labels = Array.from({ length: 100 }, (_, index) => `field_${index}_${"y".repeat(60)}`);
     const template = await read({ modelUri: `llm://openrouter/${MODEL}`, prompt: "schema-form-fields" });
     const labelled = await read({ modelUri: `llm://openrouter/${MODEL}`, prompt: "schema-form-fields", outputSchema: schemaOf(labels) });
-    const sentPrompt = visionPromptFromMessages(labelled.bodies[0]!.messages) as string;
+    const sentPrompt = labelled.bodies[0]!.messages[1].content[0].text as string;
     expect(sentPrompt.length).toBeGreaterThan(visionPromptTemplates["schema-form-fields"].length + 3_000);
     const expected = visionRequestPricing({
       model: MODEL, runtime: "openai-compatible", billing: "openrouter", inputTokens: visionInputTokenBound(null, sentPrompt, MODEL),
@@ -162,7 +161,7 @@ describe("request weight from the actual prompt and image", () => {
     const MODEL = "openai/gpt-6-luna";
     const small = await read({ modelUri: `llm://openrouter/${MODEL}`, image: pngHeader(1_000, 1_400) });
     const unknown = await read({ modelUri: `llm://openrouter/${MODEL}` });
-    const prompt = visionPromptFromMessages(small.bodies[0]!.messages) as string;
+    const prompt = small.bodies[0]!.messages[1].content[0].text as string;
     const at = (image: { widthPx: number; heightPx: number } | null) => visionRequestPricing({
       model: MODEL, runtime: "openai-compatible", billing: "openrouter", inputTokens: visionInputTokenBound(image, prompt, MODEL),
       imageTokens: visionImageTokenBound(image, MODEL),
@@ -181,7 +180,7 @@ describe("max_price on OpenRouter bodies", () => {
     const imageUsd = (2_240 * pricing.inputUsdPerMillion) / 1e6;
     expect(bodies[0]!.provider.max_price).toEqual({ prompt: pricing.inputUsdPerMillion, completion: pricing.outputUsdPerMillion, image: imageUsd, request: 0 });
     // The weight is those prices applied to the request's bound, plus one image fee at its cap.
-    const prompt = visionPromptFromMessages(bodies[0]!.messages) as string;
+    const prompt = bodies[0]!.messages[1].content[0].text as string;
     const bound = visionInputTokenBound(null, prompt, MODEL);
     expect(weights[0]).toBeCloseTo((bound * pricing.inputUsdPerMillion + visionMaxOutputTokens(MODEL) * pricing.outputUsdPerMillion) / 1e4 + imageUsd * 100, 10);
   });

@@ -39,13 +39,12 @@ async function requestBody(model: string, prompt?: string, reasoning?: { effort:
     ...(reasoning ? { reasoning } : {}),
   }));
   const body = bodies[0]!;
-  body.messages[1].content[0].image_url.url = "<image>";
+  body.messages[1].content[1].image_url.url = "<image>";
   return body;
 }
 
 describe("vision request bodies", () => {
-  // Golden bodies captured from the pre-registry-refactor HEAD (fake fetch, default and explicit `layout` prompts), moved
-  // to the prompt-cache shape (2026-11-13): the template joins the fixed system line and the image follows alone.
+  // Golden bodies captured from the pre-registry-refactor HEAD (fake fetch, default and explicit `layout` prompts).
   it("preserves full request bodies except the approved provider selection", async () => {
     const golden = JSON.parse(await readFile(join(import.meta.dirname, "fixtures/vision-request-bodies.json"), "utf8")) as Record<string, unknown>;
     const actual: Record<string, unknown> = {};

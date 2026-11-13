@@ -243,9 +243,18 @@ let evidenceTagKey: Buffer | null = null;
  * requires in production. Without either (local development and tests) a per-process random key: tags then stay
  * stable within one process only, which is still safe.
  */
+/** Minimum length of an explicit `EVIDENCE_TAG_KEY` (production startup refuses a shorter one, config.ts). */
+export const EVIDENCE_TAG_KEY_MIN_LENGTH = 32;
+
 function evidenceTagKeyBytes(): Buffer {
   if (evidenceTagKey) return evidenceTagKey;
-  const secret = process.env.EVIDENCE_TAG_KEY?.trim() || process.env.BETTER_AUTH_SECRET?.trim();
+  const explicit = process.env.EVIDENCE_TAG_KEY?.trim();
+  if (explicit && explicit.length < EVIDENCE_TAG_KEY_MIN_LENGTH) {
+    // Fail closed: a short key would make tags guessable. Startup refuses it in production; this guards other callers.
+    if (process.env.NODE_ENV === "production") throw new Error(`EVIDENCE_TAG_KEY must be at least ${EVIDENCE_TAG_KEY_MIN_LENGTH} characters`);
+    console.warn(`[evidence-tag] EVIDENCE_TAG_KEY shorter than ${EVIDENCE_TAG_KEY_MIN_LENGTH} characters is ignored`);
+  }
+  const secret = (explicit && explicit.length >= EVIDENCE_TAG_KEY_MIN_LENGTH ? explicit : undefined) || process.env.BETTER_AUTH_SECRET?.trim();
   evidenceTagKey = secret ? Buffer.from(hkdfSync("sha256", secret, "", "docslurp-evidence-tag-v1", 32)) : randomBytes(32);
   return evidenceTagKey;
 }
@@ -278,9 +287,21 @@ export function evidenceTagNonce(
 ): string {
   if (!scope) return randomBytes(16).toString("hex");
   const nonce = nonceOf(documents, scope);
-  const tag = `evidence-${nonce}`;
-  const named = documents.some((document) => document.title.includes(tag) || document.text.includes(tag) || (document.context ?? "").includes(tag));
+  const named = documents.some((document) => namesNonce(document.title, nonce) || namesNonce(document.text, nonce) || namesNonce(document.context ?? "", nonce));
   return named ? randomBytes(16).toString("hex") : nonce;
+}
+
+/**
+ * First line of a hosted chat system prompt: an org-keyed salt (HMAC under the evidence-tag key). Every tenant shares
+ * one provider account, so a cached system prefix that starts with tenant text (project name, chat instructions)
+ * would let one org detect another's identical text through cache hits. Starting each org's prefix with its own salt
+ * keeps reuse within the org and makes prefixes differ across orgs. No scope: a random line, so nothing is shared.
+ */
+export function chatSystemSaltLine(scope: string | null | undefined): string {
+  const salt = scope
+    ? createHmac("sha256", evidenceTagKeyBytes()).update("chat-prefix").update("\0").update(scope).digest("hex").slice(0, 16)
+    : randomBytes(8).toString("hex");
+  return `Workspace ${salt}.`;
 }
 
 /**
@@ -288,7 +309,23 @@ export function evidenceTagNonce(
  * coaxed into echoing a tag, or a user string carrying one, must never form a valid block next to the real evidence.
  */
 export function withoutEvidenceTags(text: string): string {
-  return text.replace(/evidence-[0-9a-f]{6,}/gi, "evidence");
+  return text.replace(EVIDENCE_TAG_NAME, "evidence");
+}
+
+/**
+ * An evidence tag name in any spelling a model can be coaxed to echo: hyphens of any kind, a soft hyphen, zero-width
+ * or other format characters, underscores or spaces between "evidence" and the hex. The hex run must hold a digit, so
+ * ordinary words ("evidence decade") are left alone.
+ */
+const EVIDENCE_TAG_NAME = /evidence[\s_\p{Pd}\p{Cf}\u2212\uFE63\uFF0D]*(?=[0-9a-f]*[0-9])[0-9a-f]{6,}/giu;
+
+/**
+ * Whether `text` carries `nonce` in any form: after NFKC, with everything but hex digits removed (format characters,
+ * separators, markup), so `</evidence‐n>`, `evidence_n`, `e v i d e n c e - n` and a bare `</n>` all count. A false
+ * positive only costs the call its cache (a random tag is used).
+ */
+export function namesNonce(text: string, nonce: string): boolean {
+  return text.normalize("NFKC").toLowerCase().replace(/[^0-9a-f]/g, "").includes(nonce.toLowerCase());
 }
 
 /**
@@ -400,7 +437,10 @@ export async function generateOpenRouterDocumentText(args: {
     sources: Array<Record<string, unknown>>;
   finishReason?: string;
   }> {
-    const inlineDocuments = formatEvidenceBlocks(args.documents, evidenceTagNonce(args.documents, args.evidenceScope));
+    // The question and history follow the evidence: if they carry this call's tag in any form (an echoed or obfuscated
+    // tag from an earlier turn), the call uses a random tag instead, so nothing outside the evidence can name it.
+    const keyed = evidenceTagNonce(args.documents, args.evidenceScope);
+    const inlineDocuments = formatEvidenceBlocks(args.documents, namesNonce(args.prompt, keyed) ? randomBytes(16).toString("hex") : keyed);
 
     return withObservation(
       {
@@ -425,7 +465,8 @@ export async function generateOpenRouterDocumentText(args: {
           // Chat Completions for models that cache only at explicit markers (OpenRouter ignores part markers on the
           // Responses API); the Responses API for the rest, as before.
           model: needsExplicitPromptCache(model) ? provider.chat(model) : provider(model),
-          system: [args.system, chatModelPromptAddendum(model)].filter(Boolean).join("\n\n") || undefined,
+          // The org salt comes first: nothing tenant-specific precedes it in the cached prefix.
+          system: [chatSystemSaltLine(args.evidenceScope), args.system, chatModelPromptAddendum(model)].filter(Boolean).join("\n\n"),
           // Stable first, per-request last: the evidence (byte-identical when a follow-up retrieves the same
           // documents, within one org) before the history and question, so providers with automatic prefix caching
           // can reuse it. Claude marks only the system prompt (openrouter-prompt-cache.ts).

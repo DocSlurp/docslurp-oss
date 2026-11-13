@@ -9,7 +9,7 @@ import type { Config } from "../config.js";
 import { CommandRunner } from "../tools/runner.js";
 import { insertMissingTableDelimiters } from "../tools/vision-table-delimiter.js";
 import { openRouterProviderParams, postProcessVisionText, visionModelProfile, visionOutputCapForModel, visionPromptKeyForModel, visionReasoningParams } from "../tools/vision-model-profiles.js";
-import { visionPromptFromMessages, executeVisionRuntime, visionPromptTemplates } from "../tools/vision-runtime.js";
+import { executeVisionRuntime, visionPromptTemplates } from "../tools/vision-runtime.js";
 import { visionMaxPrice } from "../test/vision-max-price.js";
 import { inAllowingRun } from "../test/provider-scope.js";
 
@@ -38,7 +38,7 @@ async function requestBody(model: string, prompt?: string) {
     privacyMode: "standard",
   }));
   const body = bodies[0]!;
-  body.messages[1].content[0].image_url.url = "<image>";
+  body.messages[1].content[1].image_url.url = "<image>";
   return body;
 }
 
@@ -94,7 +94,7 @@ describe("GLM 5.3 Flash vision profile", () => {
 
   it("keeps an explicitly chosen template but still sends the profile routing, reasoning and cap", async () => {
     const body = await requestBody(GLM, "layout");
-    expect(visionPromptFromMessages(body.messages)).toBe(visionPromptTemplates.layout);
+    expect(body.messages[1].content[0].text).toBe(visionPromptTemplates.layout);
     expect(body.provider).toEqual({ only: ["wafer/nvfp4", "friendli", "inference-net/fp4"], sort: "price", allow_fallbacks: true, max_price: visionMaxPrice(GLM) });
     expect(body.reasoning).toEqual({ effort: "minimal" });
     expect(body.max_tokens).toBe(8_192);
