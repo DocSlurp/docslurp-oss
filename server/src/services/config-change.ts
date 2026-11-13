@@ -30,7 +30,7 @@ import {
 import { sql } from "../db.js";
 import { loadVisualStatsForEstimate, VISUAL_CANDIDATES_DOCUMENT_LIMIT, type VisualEstimateStats } from "./visual-candidates.js";
 import { assertChartExportChangeAllowed, groupByChartTier, sourceRunChartTiers, stampRunChartExport } from "./chart-export-availability.js";
-import { upgradeStoredChartExport, type ChartExportTier, type RunOrigin } from "@docslurp/shared";
+import { explicitProjectChartTier, projectChartExportTierCap, upgradeStoredChartExport, type ChartExportTier, type RunOrigin } from "@docslurp/shared";
 import { notifySearchEligibilityChanged } from "../search/eligibility-hint.js";
 import { nextVersionNumber } from "./version-number.js";
 import { validateModeSwitch } from "./project-indexing-mode.js";
@@ -372,10 +372,14 @@ export async function createReindexRuns(args: {
   const { tx, project } = args;
   // A project with no chart tier: each document keeps the tier its source run stamped (as reprocess does), not the
   // tier of the surface that triggered this reindex (council M5). An explicit project tier applies to every document.
-  const inheritTier = !(upgradeStoredChartExport((project.pipeline as { chartExport?: unknown } | null)?.chartExport) as { tier?: unknown } | null)?.tier;
+  // "Explicit" uses the same rule as run resolution: a stored free the deployment does not allow counts as unset (R2-L4).
+  const projectChart = upgradeStoredChartExport((project.pipeline as { chartExport?: unknown } | null)?.chartExport) as { tier?: ChartExportTier } | null;
+  const inheritTier = !explicitProjectChartTier(projectChart, process.env);
   const allDocs = [...args.reusable.partial.flatMap((group) => group.docs), ...args.reusable.full];
   const sourceTiers = inheritTier ? await sourceRunChartTiers(tx as never, { orgId: project.orgId, projectId: project.id }, allDocs.map((doc) => doc.id)) : new Map<string, ChartExportTier>();
   const fallbackTier = (args.pipeline.chartExport as { tier?: ChartExportTier } | undefined)?.tier ?? "off";
+  // Inherited tiers never exceed what the project resolves to now (R2-M1).
+  const tierCap = projectChartExportTierCap(projectChart, process.env);
   const withTier = (pipeline: PipelineFeatures, tier: ChartExportTier): PipelineFeatures => ({ ...pipeline, chartExport: { ...pipeline.chartExport, tier } });
   const runIds: string[] = [];
   const queuedRunIds: string[] = [];
@@ -384,13 +388,13 @@ export async function createReindexRuns(args: {
   const fullPipeline = { ...withoutStageSelection(args.pipeline) } as PipelineFeatures;
   for (const group of args.reusable.partial) {
     const pipeline = { ...withoutStageSelection(args.pipeline), stageSubset: [...group.stages] } as PipelineFeatures;
-    for (const [tier, docs] of groupByChartTier(group.docs, sourceTiers, fallbackTier)) {
+    for (const [tier, docs] of groupByChartTier(group.docs, sourceTiers, fallbackTier, tierCap)) {
       for (let i = 0; i < docs.length; i += MAX_DOCUMENTS_PER_REINDEX_RUN) {
         batches.push({ docs: docs.slice(i, i + MAX_DOCUMENTS_PER_REINDEX_RUN), pipeline: withTier(pipeline, tier), partial: true });
       }
     }
   }
-  for (const [tier, docs] of groupByChartTier(args.reusable.full, sourceTiers, fallbackTier)) {
+  for (const [tier, docs] of groupByChartTier(args.reusable.full, sourceTiers, fallbackTier, tierCap)) {
     for (let i = 0; i < docs.length; i += MAX_DOCUMENTS_PER_REINDEX_RUN) {
       batches.push({ docs: docs.slice(i, i + MAX_DOCUMENTS_PER_REINDEX_RUN), pipeline: withTier(fullPipeline, tier), partial: false });
     }

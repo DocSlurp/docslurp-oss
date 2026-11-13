@@ -125,6 +125,30 @@ export const CHART_EXPORT_FREE_EXPLICIT_ENV_FLAG = "DOCSLURP_CHART_EXPORT_FREE_E
 
 type Env = Readonly<Record<string, string | undefined>>;
 
+/** Free-tier chart-export parser-VM runs one organization may start per clock hour, across every worker. */
+export const CHART_EXPORT_FREE_VM_CAP_ENV_FLAG = "DOCSLURP_CHART_EXPORT_FREE_VM_RUNS_PER_ORG_HOUR";
+export const DEFAULT_CHART_EXPORT_FREE_VM_RUNS_PER_ORG_HOUR = 200;
+
+/** A cap value as a non-negative integer, or null when it is not one. */
+export function parseChartExportFreeVmCap(raw: string): number | null {
+  const value = raw.trim();
+  if (!/^\d+$/.test(value)) return null;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) ? parsed : null;
+}
+
+/**
+ * The cap from `DOCSLURP_CHART_EXPORT_FREE_VM_RUNS_PER_ORG_HOUR`. Unset or empty: the default (200 per org-hour, about
+ * $0.023 of unbilled VM time at the measured $0.000114 per run). Anything that is not a non-negative integer is 0 (no
+ * free VM runs), failing toward lower cost like every other chart-export setting, and is named at startup by
+ * `chartExportDefaultsWarnings`.
+ */
+export function chartExportFreeVmCap(env: Env): number {
+  const raw = env[CHART_EXPORT_FREE_VM_CAP_ENV_FLAG];
+  if (raw === undefined || raw.trim() === "") return DEFAULT_CHART_EXPORT_FREE_VM_RUNS_PER_ORG_HOUR;
+  return parseChartExportFreeVmCap(raw) ?? 0;
+}
+
 /**
  * Strict reader of an `off|free` default: unset gives `fallback`; the switch's off words (`off`, `0`, `false`, `no`,
  * empty) give `off`; `free` gives `free`; anything else is `off` (fail toward lower cost) and is named by
@@ -162,6 +186,10 @@ export function chartExportDefaultsWarnings(env: Env): string[] {
     if (raw !== undefined && !known(raw.trim().toLowerCase(), CHART_EXPORT_ENV_FREE_VALUES)) {
       out.push(`[chart-export] ${flag} has an unknown value; the default is off (expected off or free)`);
     }
+  }
+  const cap = env[CHART_EXPORT_FREE_VM_CAP_ENV_FLAG];
+  if (cap !== undefined && cap.trim() !== "" && parseChartExportFreeVmCap(cap) === null) {
+    out.push(`[chart-export] ${CHART_EXPORT_FREE_VM_CAP_ENV_FLAG} is not a non-negative integer; free VM runs are stopped (cap 0)`);
   }
   const explicit = env[CHART_EXPORT_FREE_EXPLICIT_ENV_FLAG];
   if (explicit !== undefined && !known(explicit.trim().toLowerCase(), CHART_EXPORT_ENV_ON_VALUES)) {
@@ -228,8 +256,39 @@ export function resolveChartExportTier(args: {
   origin: RunOrigin;
   env: Env;
 }): ChartExportTier {
-  const usable = (tier: ChartExportTier | null | undefined) => tier === "free" && !chartExportFreeExplicitAllowed(args.env) ? undefined : tier ?? undefined;
+  const usable = (tier: ChartExportTier | null | undefined) => explicitProjectChartTier({ tier: tier ?? undefined }, args.env);
   return usable(args.requested) ?? usable(args.project?.tier) ?? defaultChartExportTier(args.origin, args.env);
+}
+
+/** off < free < models. */
+export const CHART_EXPORT_TIER_RANK: Readonly<Record<ChartExportTier, number>> = { off: 0, free: 1, models: 2 };
+
+/** The lower of two tiers. */
+export function minChartExportTier(a: ChartExportTier, b: ChartExportTier): ChartExportTier {
+  return CHART_EXPORT_TIER_RANK[a] <= CHART_EXPORT_TIER_RANK[b] ? a : b;
+}
+
+/**
+ * A project's explicit chart tier as the deployment honours it: its stored tier, except a `free` while explicit free is
+ * not allowed (`DOCSLURP_CHART_EXPORT_FREE_EXPLICIT`), which counts as unset. Undefined when the project has none. The
+ * one rule for "is this project's tier explicit" (run resolution, reindex, full index).
+ */
+export function explicitProjectChartTier(project: Pick<ChartExportConfig, "tier"> | null | undefined, env: Env): ChartExportTier | undefined {
+  const tier = project?.tier;
+  return tier === "free" && !chartExportFreeExplicitAllowed(env) ? undefined : tier ?? undefined;
+}
+
+/**
+ * The most a replayed or inherited tier may run at in a project now (reprocess, bulk reprocess, reindex, full index):
+ * the project's explicit tier, else the higher of the two origin defaults (an unset project never resolves to `models`).
+ * A replay never raises a run above this; only an explicit request override can, through the editor/scope ceiling.
+ */
+export function projectChartExportTierCap(project: Pick<ChartExportConfig, "tier"> | null | undefined, env: Env): ChartExportTier {
+  const explicit = explicitProjectChartTier(project, env);
+  if (explicit) return explicit;
+  const app = defaultChartExportTier("app", env);
+  const machine = defaultChartExportTier("machine", env);
+  return CHART_EXPORT_TIER_RANK[app] >= CHART_EXPORT_TIER_RANK[machine] ? app : machine;
 }
 
 /** The project's chart export config with its tier resolved for one run (see `resolveChartExportTier`). */

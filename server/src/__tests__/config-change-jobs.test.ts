@@ -580,6 +580,23 @@ describe("chart export estimates", () => {
     // An API-key reindex (machine default off) does not drop the documents' free exports.
     for (const run of runs) expect(run).toMatchObject({ origin: "machine", pipeline: { chartExport: { tier: "free" } } });
   });
+
+  it("a reindex after the project moved from models to unset inherits at most the project's current tier (R2-M1)", async () => {
+    await seed({ credits: 10_000, documents: 2 });
+    vi.stubEnv("DOCSLURP_CHART_EXPORT", "on");
+    vi.stubEnv("DOCSLURP_CHART_EXPORT_APP_DEFAULT", "off");
+    try {
+      // The documents were read with AI while the project was on models; the project is now unset (production: off).
+      await sql`update project_runs set pipeline = jsonb_set(pipeline, '{chartExport}', ${sql.json({ tier: "models", formats: ["description", "mermaid"], diagrams: true })}) where id = 'src'`;
+      const plan = await change.planProjectChange({ projectId: "w", userId: "u1", input: { ...embeddingChange(), apply: "reindex" } as never, origin: "app" });
+      await change.applyProjectChange({ plan: plan!, userId: "u1" });
+      const runs = await sql<{ pipeline: { chartExport?: { tier?: string } } }[]>`select pipeline from project_runs where kind = 'reindex'`;
+      expect(runs.length).toBeGreaterThan(0);
+      for (const run of runs) expect(run.pipeline.chartExport?.tier).toBe("off");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
 });
 
 describe("inline estimates", () => {

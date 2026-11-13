@@ -614,4 +614,65 @@ describe("chart export tier: origin defaults, per-request override and its guard
     expect(charts.credits.high).toBeCloseTo(out.chartExport.credits.high, 5);
     expect(charts.credits.low).toBeCloseTo(out.chartExport.credits.low, 5);
   });
+
+  const stampRun = async (run: string, tier: string) => {
+    await sql`update project_runs set pipeline = jsonb_set(pipeline, '{chartExport}', ${sql.json({ tier, formats: ["description", "mermaid"], diagrams: true })}) where id = ${run}`;
+  };
+
+  it("an old models run reprocessed after the project moved to off runs at off: no 403, no model reads (R2-M1)", async () => {
+    vi.stubEnv("DOCSLURP_CHART_EXPORT", "on");
+    await stampRun("run", "models");
+    await setProjectTier("w", "off");
+    // The editor's plain reprocess: capped at off, never a silent billed replay.
+    expect((await post(appFor("u1", undefined, { session: true }), "/v1/runs/run/reprocess", {})).status).toBe(201);
+    expect(await latestRun()).toMatchObject({ pipeline: { chartExport: { tier: "off" } } });
+    // An ingest-only key's plain reprocess: no 403 about a tier it never asked for.
+    expect((await post(appFor("u1", server({ scopes: ["ingest"] })), "/v1/runs/run/reprocess", {})).status).toBe(201);
+    expect(await latestRun()).toMatchObject({ origin: "machine", pipeline: { chartExport: { tier: "off" } } });
+    // The estimate prices the capped tier: no chart reads.
+    const estimate = await (await post(appFor("u1", server()), "/v1/runs/run/reprocess/estimate", {})).json() as { estimate: { basis: string } };
+    expect(estimate.estimate.basis).not.toMatch(/chart export/);
+  });
+
+  it("a contributor's plain reprocess of an old models run on a project now off runs at off (R2-M1)", async () => {
+    vi.stubEnv("DOCSLURP_CHART_EXPORT", "on");
+    await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total, artifacts)
+      values ('runwd2', 'o1', 'u2', 'wd', 'upload', 'completed', 'index', ${sql.json({ ...JSON.parse(JSON.stringify(defaultPipelineFeatures)), chartExport: { tier: "models", formats: ["description", "mermaid"], diagrams: true } })}, 1, 3, '{}')`;
+    await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source, canonical_id)
+      values ('dwd2', 'o1', 'u2', 'wd', 'runwd2', 'e.pdf', 'application/pdf', 'k5', 'completed', 3, 'counted', 'c5')`;
+    await setProjectTier("wd", "off");
+    const res = await post(appFor("u2", undefined, { session: true }), "/v1/runs/runwd2/reprocess", {});
+    expect(res.status).toBe(201);
+    expect(await latestRun()).toMatchObject({ pipeline: { chartExport: { tier: "off" } } });
+  });
+
+  it("an explicit models override raises a replay only with the right permissions (R2-M1)", async () => {
+    vi.stubEnv("DOCSLURP_CHART_EXPORT", "on");
+    await stampRun("run", "models");
+    await setProjectTier("w", "off");
+    // Editor session with an explicit override: models.
+    expect((await post(appFor("u1", undefined, { session: true }), "/v1/runs/run/reprocess", { chartExport: { tier: "models" } })).status).toBe(201);
+    expect(await latestRun()).toMatchObject({ pipeline: { chartExport: { tier: "models" } } });
+    // A key with the billed scope: models.
+    await sql`update api_keys set scopes = array['ingest', 'pipeline:billed-features'] where id = 'k1'`;
+    expect((await post(appFor("u1", server({ scopes: ["ingest", "pipeline:billed-features"] })), "/v1/runs/run/reprocess", { chartExport: { tier: "models" } })).status).toBe(201);
+    expect(await latestRun()).toMatchObject({ pipeline: { chartExport: { tier: "models" } } });
+    await sql`update api_keys set scopes = array['ingest', 'search:deep', 'artifacts'] where id = 'k1'`;
+    // Without it: refused, no run.
+    const before = await runCount();
+    expect((await post(appFor("u1", server({ scopes: ["ingest"] })), "/v1/runs/run/reprocess", { chartExport: { tier: "models" } })).status).toBe(403);
+    expect(await runCount()).toBe(before);
+  });
+
+  it("a full index after the project was unset inherits at most the project's current tier (R2-M1)", async () => {
+    vi.stubEnv("DOCSLURP_CHART_EXPORT", "on");
+    vi.stubEnv("DOCSLURP_CHART_EXPORT_APP_DEFAULT", "off");
+    await stampRun("run", "models");
+    await setProjectTier("w", null);
+    expect((await post(appFor("u1", undefined, { session: true }), "/v1/projects/w/full-index")).status).toBe(202);
+    const runs = await sql<{ pipeline: { chartExport?: { tier?: string } } }[]>`select pipeline from project_runs where kind = 'full-index'`;
+    expect(runs.length).toBeGreaterThan(0);
+    for (const run of runs) expect(run.pipeline.chartExport?.tier).toBe("off");
+    vi.stubEnv("DOCSLURP_CHART_EXPORT_APP_DEFAULT", "");
+  });
 });

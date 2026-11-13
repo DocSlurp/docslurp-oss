@@ -87,6 +87,9 @@ describe("maintenance runs keep each document's source-run tier (M5)", () => {
     const docs = [{ id: "a" }, { id: "b" }, { id: "c" }];
     const groups = groupByChartTier(docs, new Map([["a", "free"], ["b", "models"]] as const), "off");
     expect(Object.fromEntries([...groups].map(([tier, list]) => [tier, list.map((d) => d.id)]))).toEqual({ free: ["a"], models: ["b"], off: ["c"] });
+    // Capped at what the project resolves to now: inheritance only ever lowers (R2-M1).
+    const capped = groupByChartTier(docs, new Map([["a", "free"], ["b", "models"]] as const), "off", "free");
+    expect(Object.fromEntries([...capped].map(([tier, list]) => [tier, list.map((d) => d.id)]))).toEqual({ free: ["a", "b"], off: ["c"] });
   });
 });
 

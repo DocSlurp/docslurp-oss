@@ -395,8 +395,6 @@ export async function reprocessRun(
     ...(JSON.parse(JSON.stringify(withoutStageSelection(original.pipeline))) as PipelineFeatures),
     speedBoost: options?.speedBoost === true,
     ...(adoptedMode ? { indexingMode: adoptedMode } : {}),
-    // A per-request tier wins over the tier the original run resolved.
-    ...(options?.chartExport ? { chartExport: { ...(original.pipeline.chartExport ?? {}), tier: options.chartExport.tier } } : {}),
     ...(options?.stages?.length ? { stageSubset: [...options.stages] } : {}),
     ...(options?.stageFrom && !options?.stages?.length ? { restartFromStage: options.stageFrom } : {}),
   };
@@ -420,8 +418,9 @@ export async function reprocessRun(
     speedBoost: options?.speedBoost === true,
     pipeline: pipelineConfig,
     origin: options?.origin ?? "machine",
-    // The source run's stamped tier (or the override, refused above when unavailable) is kept, not resolved again.
-    chartExportStamped: true,
+    // The source run's stamped tier, capped at what the project resolves to now; only an explicit override (refused above
+    // when unavailable, and subject to the editor/scope ceiling) may raise it.
+    chartExportReplay: { requested: options?.chartExport?.tier ?? null },
     apiKeyId: options?.apiKeyId ?? null,
     sources: { kind: "versionsOf", documentIds: docs.map((doc) => doc.id), reuse: partial },
   });

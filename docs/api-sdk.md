@@ -1145,7 +1145,9 @@ and logged at startup:
 
 The resolved tier is stored on the run (`pipeline.chartExport.tier`), so a retry or resume runs with the same tier.
 
-**Per project:** `PATCH /v1/projects/:project` with `{ "pipeline": { "chartExport": { "tier": "free" } } }` (a server key with `projects:manage`). Remove the field to go back to the caller's default.
+**Per project:** `PATCH /v1/projects/:project` with `{ "pipeline": { "chartExport": { "tier": "models" } } }` (or `"off"`; a server key with `projects:manage`). An explicit `"free"` is accepted only where the deployment allows it (`chartExportDefaults.freeAvailable`, `DOCSLURP_CHART_EXPORT_FREE_EXPLICIT=on`); elsewhere it is refused with `400 chart_export_tier_unavailable`. Remove the field to go back to the caller's default.
+
+**Replays never raise the tier.** Reprocess, bulk reprocess, reindex and full index run each document at its source run's tier capped at what the project resolves to now: after a project moves from `models` to `off` (or unset), a plain reprocess or a later reindex runs without billed chart reads, and a contributor's plain reprocess is not refused. Only an explicit request override (`chartExport: { "tier": "models" }`) raises it, and it then needs project editor rights (and, for an API key, `pipeline:billed-features`).
 
 **Per request:** upload, URL ingest and direct upload sessions take it in the request's `pipeline` overrides; reprocess and the estimate endpoints take a top-level `chartExport`:
 
@@ -1172,7 +1174,7 @@ estimates and project changes. The tier is never silently lowered. `models` is o
 and an explicit `free` only where `DOCSLURP_CHART_EXPORT_FREE_EXPLICIT=on`. The access check comes first, so a caller
 without access gets its 403 or 404 before any tier refusal.
 
-**A project's tier is a ceiling.** Choosing `models` per request (or replaying a `models` run by reprocess) on a project
+**A project's tier is a ceiling.** Choosing `models` per request on a project
 whose stored tier is `off` or `free` needs project editor rights. An API key additionally needs the
 `pipeline:billed-features` scope (or `projects:manage`). Otherwise the request is refused with
 `403 chart_export_models_forbidden`. Projects with no tier keep the usual rules.
@@ -1182,7 +1184,7 @@ and the `ingest` scope on a server key. An unknown tier, a `generatorModel` fiel
 validation error. The model that reads charts is chosen by DocSlurp from managed settings; requests cannot pick one.
 
 **Reindex and full index** of a project with no tier keep each document's own tier, the one its source run stamped, as
-reprocess does. They do not take the tier of whoever started them.
+reprocess does, capped at what the project resolves to now. They do not take the tier of whoever started them.
 
 **Figures and PDF charts:** PDF charts are read from the PDF's extracted figures, so `figures: false` also turns off
 chart export for PDFs.

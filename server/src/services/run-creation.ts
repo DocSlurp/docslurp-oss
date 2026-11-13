@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import { chartExportModelsAllowed, upgradeStoredChartExport, type ResolvedChartExportConfig, type RunOrigin } from "@docslurp/shared";
+import { chartExportModelsAllowed, minChartExportTier, projectChartExportTierCap, upgradeStoredChartExport, type ChartExportTier, type ResolvedChartExportConfig, type RunOrigin } from "@docslurp/shared";
 import { assertChartExportModelsCeiling, stampRunChartExport } from "./chart-export-availability.js";
 import {
   assertPipelineSpeedBoost,
@@ -96,6 +96,12 @@ export interface CreateRunInput {
    * is instead of being resolved again (`stampRunChartExport` with `stamped`).
    */
   chartExportStamped?: boolean;
+  /**
+   * The run replays a source run's pipeline (reprocess, bulk reprocess): its stamped chart tier is capped at what the
+   * project resolves to now (`projectChartExportTierCap`). `requested` is the request's explicit override, which may
+   * raise it and then passes the editor/scope ceiling and spend admission like any override.
+   */
+  chartExportReplay?: { requested?: ChartExportTier | null };
   priority?: number;
   sources: RunSources;
   /**
@@ -651,6 +657,24 @@ async function ensureCanonicalId(
  * is either fully created (published, then started or deferred) or it does not
  * exist. Callers describe sources; they never write Documents themselves.
  */
+/**
+ * A replayed run's chart export config: the explicit override when the request gave one, else the source run's stamped
+ * tier (resolved for `origin` when it has none) capped at the project's current cap. Never raises above the project.
+ */
+export function replayChartExport<T extends PipelineFeatures>(
+  pipeline: T,
+  requested: ChartExportTier | null,
+  project: { tier?: ChartExportTier } | null,
+  origin: RunOrigin,
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): T {
+  const stamped = stampRunChartExport(pipeline, origin, env, { stamped: true });
+  const replayed = (stamped.chartExport as ResolvedChartExportConfig).tier;
+  const tier = requested ?? minChartExportTier(replayed, projectChartExportTierCap(project, env));
+  if (!requested && tier !== replayed) console.log(`[chart-export] replayed tier capped from=${replayed} to=${tier} (project now resolves lower)`);
+  return { ...stamped, chartExport: { ...stamped.chartExport, tier } };
+}
+
 export function createRunCreation(deps: RunCreationDeps) {
   const { sql, start } = deps;
 
@@ -955,22 +979,27 @@ export function createRunCreation(deps: RunCreationDeps) {
     const requestedPipeline = { ...request.pipeline, speedBoost: request.speedBoost === true };
     assertPipelineSpeedBoost(requestedPipeline);
     const sanitized = sanitizeStoredPipeline(requestedPipeline, `run creation in project ${request.projectId}`);
-    // The chart export tier is resolved here, once per run (request override, project tier, origin default), and
-    // stored on the run: a retry or resume reads it back, and the worker never re-resolves it.
+    // With the stored pipeline: the project's chart tier is the ceiling checked below, and the cap on a replayed tier.
+    const access = await getProjectAccessWithPipeline(request.projectId, request.userId);
+    if (!access) throw new Error("Project not found");
+    if (!canContributeToProject(access, request.userId)) throw new Error("Forbidden");
+    const projectChartExport = upgradeStoredChartExport((access.pipeline as { chartExport?: unknown } | null | undefined)?.chartExport) as { tier?: ChartExportTier } | null;
+    // The chart export tier is resolved here, once per run, and stored on the run: a retry or resume reads it back, and
+    // the worker never re-resolves it. A new run: request override, project tier, origin default. A replay (reprocess,
+    // bulk reprocess): the request's explicit override, else the source run's stamp capped at what the project resolves
+    // to now, so a project moved to off (or unset) never replays billed reads and never refuses a plain reprocess.
     const input: CreateRunInput = {
       ...request,
-      pipeline: stampRunChartExport(sanitized, request.origin ?? "machine", process.env, { stamped: request.chartExportStamped === true }),
+      pipeline: request.chartExportReplay
+        ? replayChartExport(sanitized, request.chartExportReplay.requested ?? null, projectChartExport, request.origin ?? "machine")
+        : stampRunChartExport(sanitized, request.origin ?? "machine", process.env, { stamped: request.chartExportStamped === true }),
     };
     assertPipelineSpeedBoost(input.pipeline);
-    // With the stored pipeline: the project's chart tier is the ceiling checked below.
-    const access = await getProjectAccessWithPipeline(input.projectId, input.userId);
-    if (!access) throw new Error("Project not found");
-    if (!canContributeToProject(access, input.userId)) throw new Error("Forbidden");
     // The project's explicit chart tier is a ceiling: `models` above a stored `off`/`free` needs editor rights (and, for
     // an API key, the billed-features scope). Every run (upload, URL, extract, MCP, reprocess) lands here.
     await assertChartExportModelsCeiling({
       runTier: (input.pipeline.chartExport as ResolvedChartExportConfig | undefined)?.tier,
-      projectTier: (upgradeStoredChartExport((access.pipeline as { chartExport?: unknown } | null | undefined)?.chartExport) as { tier?: unknown } | null)?.tier,
+      projectTier: projectChartExport?.tier,
       canEdit: canEditProject(access, input.userId),
       // Some intake paths do not thread the key id through; the request context always has it for a key request.
       apiKeyId: input.apiKeyId ?? currentRequestApiKeyId(),
