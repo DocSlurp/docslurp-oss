@@ -280,9 +280,34 @@ export async function writeDocumentAssetLedger(sql: Sql<Record<string, unknown>>
         select resumes from document_extraction_shards
         where document_id = ${documentId} and org_id = ${orgId} and project_id = ${projectId}
           and first_page = ${shardResume.first} and last_page = ${shardResume.last}`;
-      if (!existing) throw new DocumentAssetLedgerError("invalid-level");
-      if (existing.resumes >= DOCUMENT_ASSET_RESUME_CAP) throw new DocumentAssetLedgerError("resume-cap");
-      shardResumes = existing.resumes + 1;
+      if (existing) {
+        if (existing.resumes >= DOCUMENT_ASSET_RESUME_CAP) throw new DocumentAssetLedgerError("resume-cap");
+        shardResumes = existing.resumes + 1;
+      } else {
+        // A gap's resume (a fresh pass over pages no shard returned): the range must lie inside one of the level's gaps;
+        // its shard is created here.
+        const [level] = await tx<{ gaps: DopplerFigureGap[] | null }[]>`
+          select gaps from document_extraction_levels where document_id = ${documentId} and org_id = ${orgId} and project_id = ${projectId}`;
+        const inGap = (level?.gaps ?? []).some((gap) => gap.first <= shardResume.first && shardResume.last <= gap.last);
+        if (!inGap) throw new DocumentAssetLedgerError("invalid-level");
+        shardResumes = 1;
+      }
+    }
+    // The level's gaps after this write: a full write states them; a shard (or gap) resume keeps the others and replaces
+    // whatever overlapped its range with what it reports inside it.
+    let levelGaps: DopplerFigureGap[] = [...(write.level.gaps ?? [])];
+    if (shardResume) {
+      const [current] = await tx<{ gaps: DopplerFigureGap[] | null }[]>`
+        select gaps from document_extraction_levels where document_id = ${documentId} and org_id = ${orgId} and project_id = ${projectId}`;
+      const inside = (write.level.gaps ?? []).filter((gap) => gap.first >= shardResume.first && gap.last <= shardResume.last);
+      const outside: DopplerFigureGap[] = [];
+      for (const gap of current?.gaps ?? []) {
+        if (gap.last < shardResume.first || gap.first > shardResume.last) { outside.push(gap); continue; }
+        // The parts of an overlapping gap outside the resumed range stay gaps.
+        if (gap.first < shardResume.first) outside.push({ ...gap, last: shardResume.first - 1 });
+        if (gap.last > shardResume.last) outside.push({ ...gap, first: shardResume.last + 1 });
+      }
+      levelGaps = [...outside, ...inside].sort((a, b) => a.first - b.first).slice(0, DOPPLER_FIGURE_GAPS_MAX);
     }
 
     // Defense in depth behind the composite foreign key: no row of this document may carry another scope.
@@ -430,18 +455,22 @@ export async function writeDocumentAssetLedger(sql: Sql<Record<string, unknown>>
       from document_extraction_shards where document_id = ${documentId} and org_id = ${orgId} and project_id = ${projectId}`;
     const sharded = (shardState?.n ?? 0) > 0;
     let imagesStatus = write.level.imagesStatus;
+    // Gaps (pages a shard or the document's pass budget left with no manifest) are resumable work too, within the caps.
+    const anyResumable = totals!.resumable > 0 || levelGaps.length > 0;
     if (sharded) {
-      // Complete only if every shard is; resumable while any image a resume would retry remains.
-      imagesStatus = shardState!.incomplete === 0 ? "complete" : totals!.resumable > 0 ? "resumable" : "partial";
+      // Complete only if every shard is and no gap is left; resumable while any image or gap a resume would retry remains.
+      imagesStatus = shardState!.incomplete === 0 && levelGaps.length === 0 ? "complete" : anyResumable ? "resumable" : "partial";
       resumes = shardState!.resumes;
-    } else if ((imagesStatus === "resumable") !== (totals!.resumable > 0)) {
+    } else if (imagesStatus === "resumable" && !anyResumable) {
       throw new DocumentAssetLedgerError("invalid-level");
+    } else if (anyResumable) {
+      imagesStatus = "resumable";
     }
     const counts2 = {
       total: totals!.total, extracted: totals!.extracted, notExtracted: totals!.not_extracted, unlinked: totals!.unlinked,
       resumable: totals!.resumable, sourceCopy: totals!.copy, sourceDecode: totals!.decode, sourceRender: totals!.render, bytes: totals!.bytes,
     };
-    const level = { ...write.level, imagesStatus };
+    const level = { ...write.level, imagesStatus, gaps: levelGaps };
     const facts = sharded
       ? { ...(level.run ?? { manifestResumes: 0, complete: false, resumable: false, deadlineMs: null }), sourceSha256: shardState!.source, settingsSha256: null, lastCutPage: shardState!.cut }
       : level.run;
@@ -572,6 +601,8 @@ export interface ResumableDocument {
   settingsSha256: string | null;
   /** The stored manifest's SHA-256: what downloadDopplerImagesDir checks before it rebuilds the DIR. */
   manifestSha256: string | null;
+  /** A gap (`shard` is its range): no manifest at all; resumed by a fresh pass over its pages. */
+  gap: boolean;
   resumes: number;
   assetsResumable: number;
   lastCutPage: number | null;
@@ -619,6 +650,21 @@ export async function listResumableDocuments(
         and lv.images_status = 'resumable' and lv.run_id is not distinct from s.run_id
       where s.org_id = ${args.orgId} and s.images_status = 'resumable' and s.resumes < ${DOCUMENT_ASSET_RESUME_CAP} ${project("s")}
         and d.superseded_at is null and d.archived_at is null and d.purged_at is null
+      union all
+      -- Gaps: page ranges with no manifest at all (a failed or over-share shard, the document's pass budget). Each is resumed
+      -- by a fresh pass over its pages, which becomes that range's shard.
+      select g.document_id, g.project_id, g.run_id, g.first_page, g.last_page, g.source_sha256, g.settings_sha256, null as manifest_sha256,
+        g.resumes, 0 as assets_resumable, null::int as last_cut_page, g.at
+      from (
+        select l.document_id, l.project_id, l.run_id, (gap ->> 'first')::int as first_page, (gap ->> 'last')::int as last_page, l.source_sha256,
+          l.settings_sha256, l.resumes, l.updated_at as at, l.org_id
+        from document_extraction_levels l
+        cross join lateral jsonb_array_elements(coalesce(l.gaps, '[]'::jsonb)) gap
+        join documents d on d.id = l.document_id and d.org_id = l.org_id and d.project_id = l.project_id
+        join projects pg on pg.id = l.project_id and pg.org_id = l.org_id and ${figuresOnSql(sql, "pg")}
+        where l.org_id = ${args.orgId} and l.images_status = 'resumable' and l.assets_current and l.resumes < ${DOCUMENT_ASSET_RESUME_CAP} ${project("l")}
+          and d.superseded_at is null and d.archived_at is null and d.purged_at is null
+      ) g
     ) work
     ${args.after ? sql`where (work.at, work.document_id, work.first_page) > (${args.after.updatedAt}::timestamptz, ${args.after.documentId}, ${args.after.firstPage ?? 0})` : sql``}
     order by work.at, work.document_id, work.first_page
@@ -626,7 +672,8 @@ export async function listResumableDocuments(
   return rows.map((row) => ({
     documentId: row.document_id, projectId: row.project_id, runId: row.run_id,
     shard: row.last_page === null ? null : { first: row.first_page, last: row.last_page },
-    sourceSha256: row.source_sha256, settingsSha256: row.settings_sha256, manifestSha256: row.manifest_sha256, resumes: row.resumes,
+    sourceSha256: row.source_sha256, settingsSha256: row.settings_sha256, manifestSha256: row.manifest_sha256,
+    gap: row.last_page !== null && row.manifest_sha256 === null, resumes: row.resumes,
     assetsResumable: row.assets_resumable, lastCutPage: row.last_cut_page, updatedAt: row.updated_at,
   }));
 }
@@ -761,7 +808,9 @@ async function recountLevel(tx: Tx, scope: DocumentAssetLedgerScope, fallback: D
       count(*) filter (where source = 'render')::int as render,
       coalesce(sum(bytes) filter (where storage_state = 'stored'), 0)::text as bytes
     from document_assets where document_id = ${documentId} and org_id = ${orgId} and project_id = ${projectId} and run_id = ${runId}`;
-  const status: DocumentImagesStatus = t!.resumable > 0 ? "resumable"
+  const [gapRow] = await tx<{ n: number }[]>`
+    select coalesce(jsonb_array_length(gaps), 0)::int as n from document_extraction_levels where document_id = ${documentId} and org_id = ${orgId}`;
+  const status: DocumentImagesStatus = t!.resumable > 0 || (gapRow?.n ?? 0) > 0 ? "resumable"
     : t!.total === 0 ? (fallback ?? "none")
     : fallback === "complete" && t!.pending === 0 ? "complete" : "partial";
   await tx`
@@ -805,7 +854,7 @@ export async function writeFigureLevel(
     if (args.imagesStatus === "none" || args.imagesStatus === "disabled") {
       // The figure step did not run: off the resume queue, and no row is current (none deleted).
       await tx`
-        update document_extraction_levels set images_status = ${args.imagesStatus}, assets_current = false, assets_total = 0,
+        update document_extraction_levels set images_status = ${args.imagesStatus}, assets_current = false, gaps = null, assets_total = 0,
           assets_extracted = 0, assets_not_extracted = 0, assets_unlinked = 0, assets_resumable = 0, source_copy = 0, source_decode = 0,
           source_render = 0, asset_bytes = 0, updated_at = now()
         where document_id = ${documentId} and org_id = ${orgId} and project_id = ${projectId}`;
