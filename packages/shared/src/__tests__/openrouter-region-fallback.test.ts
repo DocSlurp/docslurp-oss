@@ -4,7 +4,7 @@ import {
   createOpenRouterRoutingFetch, DEFAULT_RESTRICTED_FALLBACK_MODEL, isTextOnlyRequest, resetRegionBlockedModels,
   restrictedFallbackModel, setOpenRouterProviderPolicyResolver,
 } from "../openrouter-routing.js";
-import { createOpenRouterUsageCapture, regionFallbackUsageMetadata, servedTextModel, withServedUsageModel } from "../openrouter-usage.js";
+import { createOpenRouterUsageCapture, reasoningTokenAllowance, regionFallbackUsageMetadata, servedTextModel, withServedUsageModel } from "../openrouter-usage.js";
 import { CHINA_PROVIDER_SLUGS, providerRegion } from "../provider-regions.js";
 
 const CHAT = "https://openrouter.ai/api/v1/chat/completions";
@@ -62,6 +62,19 @@ describe("restricted-provider fallback", () => {
     resetRegionBlockedModels();
     await fetch(CHAT, textRequest({ reasoning: { effort: "high" } }));
     expect(sent[3]!.reasoning).toEqual({ effort: "high" });
+  });
+
+  it("carries the fallback model's reasoning allowance on a floor-level output limit, not on an explicit effort", async () => {
+    setOpenRouterProviderPolicyResolver(RESTRICTED);
+    const { sent, fetch } = harness();
+    await fetch(CHAT, textRequest({ max_tokens: 96 }));
+    // The blocked request is sent as built; the re-targeted one leaves room for gpt-oss's floor reasoning.
+    expect(sent[0]!.max_tokens).toBe(96);
+    expect(sent[1]!.max_tokens).toBe(96 + reasoningTokenAllowance(DEFAULT_RESTRICTED_FALLBACK_MODEL));
+    expect(reasoningTokenAllowance(DEFAULT_RESTRICTED_FALLBACK_MODEL)).toBeGreaterThan(0);
+    resetRegionBlockedModels();
+    await fetch(CHAT, textRequest({ max_tokens: 96, reasoning: { effort: "high" } }));
+    expect(sent[3]!.max_tokens).toBe(96);
   });
 
   it("is off unless the call site opts in: chat with a chosen model and classifiers never fall back", async () => {

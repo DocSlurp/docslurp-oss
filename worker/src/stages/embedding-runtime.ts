@@ -139,6 +139,8 @@ export interface ContextualChunkUsage {
 }
 
 const CONTEXTUAL_CHUNK_SUMMARY_LIMIT = 240;
+/** Output limit for the one-sentence preamble (~60 tokens); reasoning-mandatory models get their allowance on top. */
+const CONTEXTUAL_CHUNK_SUMMARY_TOKENS = 96;
 const CONTEXTUAL_SOURCE_LIMIT = 12_000;
 
 /**
@@ -1440,34 +1442,36 @@ async function buildDocumentContextSummary(args: {
       untrustedContentLabel: "document excerpt",
       maxContentChars: -1,
     });
-    const result = await generateOpenRouterText({
+    const generate = (maxOutputTokens: number) => generateOpenRouterText({
       operation: "contextual-chunk-preamble",
       apiKey: textModelApiKey(args.config.openRouterApiKey, model),
       privacyMode: args.privacyMode,
       model,
-      maxOutputTokens: 96,
+      maxOutputTokens,
       textGeneration: args.textGeneration,
       deploymentProfile: args.config.textGenerationProfile,
       system: task.system,
       prompt: task.prompt,
       signal: args.signal,
     });
-    const inputTokens = result.usage.inputTokens;
-    const outputTokens = result.usage.outputTokens;
-    // The caller records `usage` through the pipeline ledger, which logs `[ai-usage]`.
+    const attempts = [await generate(CONTEXTUAL_CHUNK_SUMMARY_TOKENS)];
+    // A cut-off answer is never indexed. Retry once with a larger limit, never with more reasoning: a model
+    // that spends its floor-level reasoning past the allowance still finishes the sentence.
+    if (attempts[0]!.finishReason === "length") attempts.push(await generate(CONTEXTUAL_CHUNK_SUMMARY_TOKENS * 2));
+    const result = attempts.at(-1)!;
+    // The caller records `usage` through the pipeline ledger, which logs `[ai-usage]`; it bills every attempt.
+    const usage = combinedTextUsage(attempts.map((attempt) => attempt.usage));
     const summary = normalizeWhitespace(result.text);
-    // Do not index a truncated analysis or an unfinished answer as document
-    // context. Fall back to source text when the one-sentence contract fails.
-    const validSummary = summary.length > 0 && summary.length <= CONTEXTUAL_CHUNK_SUMMARY_LIMIT
+    // Do not index a truncated analysis or an unfinished answer as document context. A complete plain
+    // sentence over the length limit is trimmed to it like the heuristic: it still names the document's
+    // scope, which the heuristic's first source sentence often does not. Anything else falls back.
+    const validSummary = summary.length > 0 && result.finishReason !== "length"
       && !/(?:<think>|thinking process:|^\s*(?:#{1,6}\s|\d+\.\s|[-*]\s))/im.test(result.text);
     return {
-      summary: validSummary ? summary : heuristicSummary,
+      summary: validSummary ? truncateText(summary, CONTEXTUAL_CHUNK_SUMMARY_LIMIT) : heuristicSummary,
       usage: {
         ...textUsageLabels(model),
-        costCents: result.usage.costCents,
-        metadata: result.usage.metadata,
-        inputTokens,
-        outputTokens,
+        ...usage,
         source: textUsageLabels(model).provider === "private" ? "private" : "openrouter",
       },
     };
@@ -1586,6 +1590,25 @@ function formatPageLabel(
 
 function normalizeWhitespace(text: string): string {
   return text.replace(/\s+/g, " ").trim();
+}
+
+/** Usage of a call and its retries as one ledger event: tokens and cost summed, every generation id kept. */
+function combinedTextUsage(usages: Array<{ inputTokens: number; outputTokens: number; costCents?: number; metadata?: Record<string, unknown> }>) {
+  const last = usages.at(-1)!;
+  if (usages.length === 1) return { inputTokens: last.inputTokens, outputTokens: last.outputTokens, costCents: last.costCents, metadata: last.metadata };
+  const costs = usages.map((usage) => usage.costCents).filter((cost): cost is number => typeof cost === "number");
+  const reasoning = usages.map((usage) => usage.metadata?.reasoningTokens).filter((tokens): tokens is number => typeof tokens === "number");
+  return {
+    inputTokens: usages.reduce((sum, usage) => sum + usage.inputTokens, 0),
+    outputTokens: usages.reduce((sum, usage) => sum + usage.outputTokens, 0),
+    costCents: costs.length ? costs.reduce((sum, cost) => sum + cost, 0) : undefined,
+    metadata: {
+      ...last.metadata,
+      attempts: usages.length,
+      generationIds: usages.map((usage) => usage.metadata?.generationId).filter(Boolean),
+      ...(reasoning.length ? { reasoningTokens: reasoning.reduce((sum, tokens) => sum + tokens, 0) } : {}),
+    },
+  };
 }
 
 function truncateText(text: string, limit: number): string {
