@@ -9,7 +9,7 @@
  * scope, project, PII policy). An image whose file the project's PII policy withholds keeps its size and hash but has no
  * slot, and says why with a fixed value (`refusal: "pii-policy"`), never error text or document content.
  */
-import { parseArtifactUri } from "@docslurp/shared";
+import { parseArtifactUri, type DopplerLedgerReason } from "@docslurp/shared";
 
 import { sql } from "../db.js";
 import { withheldArtifactUrisFromMetadata } from "./pii-artifact-guard.js";
@@ -58,8 +58,12 @@ export interface DocumentAssetView {
   kind: string;
   fate: string;
   status: string;
-  /** Doppler's own fixed reason for a `not-extracted` image (`min_side`, `repeat`, `budget`, `copy`, ...). */
-  reason: string | null;
+  /**
+   * Doppler's own reason from a closed vocabulary (DOPPLER_LEDGER_REASONS, enforced by the database): why a
+   * `not-extracted` image has no file (`min_side`, `repeat`, `budget`, `copy`, ...), or why an `unlinked` one was left to
+   * the page image (`scan-not-copyable`). Never free text, so safe to show.
+   */
+  reason: DopplerLedgerReason | null;
   resumable: boolean;
   source: string | null;
   format: string | null;
@@ -195,7 +199,7 @@ export async function getDocumentAssetLedger(scope: DocumentAssetScope, page?: D
 
   // The file an image shows is its owner's (file_of); the owner may sit on another page of the result, so join it.
   const rows = await sql<Array<{
-    asset_id: string; page_number: number; kind: string; fate: string; status: string; reason: string | null; resumable: boolean;
+    asset_id: string; page_number: number; kind: string; fate: string; status: string; reason: DopplerLedgerReason | null; resumable: boolean;
     source: string | null; format: string | null; bytes: number | null; sha256: string | null; width: number | null; height: number | null;
     repeat_of: string | null; fallback: string | null; link_path: string | null; file_of: string | null; owner_key: string | null;
     slot_uri: string | null;
