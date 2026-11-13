@@ -16,7 +16,7 @@ import {
 import { runArtifactRoot } from "../lib/artifact-root.js";
 import { quarantineScanSnapshotEnabled, type CommandRunner } from "../tools/runner.js";
 import { trustedTempDownloadPattern } from "../lib/temp-file-names.js";
-import { sha256Bytes, verifyStagedSource } from "../sandbox/source-integrity.js";
+import { sha256Bytes, verifyQuarantineUpload } from "../sandbox/source-integrity.js";
 import { applyParseSource, clearParseSource, originalSourceForQuarantine } from "../lib/parse-source.js";
 
 export class QuarantineStage implements Stage {
@@ -74,7 +74,9 @@ export class QuarantineStage implements Stage {
               // The scanned bytes must be the bytes the server hashed. Their hash is what the decision binds parsers of the
               // upload to (council R8-L1), so a swap after this scan is refused even for a row without a server hash.
               const scannedSha256 = sha256Bytes(bytes);
-              verifyStagedSource(original, scannedSha256);
+              // The upload has no parse decision yet (this scan records it), so the parsers' decision gate, which refuses
+              // an object without one in production, does not apply; the hash binding and the unreadable-key refusal do.
+              verifyQuarantineUpload(original, scannedSha256);
               // The API only glanced at this file; this is the first full look, before any parser.
               // One inspection of the bytes (in the parser VM in production) serves the intake check and the scan.
               const inspection = await inspectQuarantine({ bytes, filename: document.filename, tempFile, runner: this.runner, policy: this.config, ...(signal ? { signal } : {}) });
