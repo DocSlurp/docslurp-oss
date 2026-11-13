@@ -223,6 +223,18 @@ defaults for actual extraction.
 the decision chain, executors and the Extract flat-tier OCR routes. It does not touch proprietary hosted APIs; those
 stay under the privacy modes below. Classes, sources and the full table are in `docs/page-router.md` ("Licence classes").
 
+## Models never selected automatically
+
+Some models are never picked by the system on its own: `NO_AUTOMATIC_SELECTION_MODEL_FAMILIES` in
+`packages/shared/src/automatic-model-selection.ts` (today DeepSeek V4.1 Flash, every build, variant, provider suffix and
+spelling). Such a model is never a chat failover, Speed boost swap, route-tier pool option, page-router target, chart
+generator candidate, OCR escalation model or restricted-region fallback; each of those lists is checked when it is
+defined or configured, and a configured value naming one is refused. A model a caller or operator names explicitly
+(a project's chat or vision model, the default vision model) is not affected.
+
+Chat failover: a failed answer retries once, on GPT-6 Luna, or on GLM 5.3 Flash for a project that already answers with
+Luna (`PROJECT_CHAT_FAILOVER_MODELS`). Speed boost and evaluation turns do not fail over.
+
 ## Hosted provider routing
 
 OpenRouter serves many open-weight models from several hosts, at different

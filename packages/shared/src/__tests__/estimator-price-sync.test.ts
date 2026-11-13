@@ -74,4 +74,7 @@ describe("figure storage (core #357 on #355, not merged)", () => {
 
 describe("managed model tiers (core feat/managed-model-tiers-only, not merged)", () => {
   it.todo("quotes chat answers by category (chatTier) only; a request naming a backend model is refused, never priced");
+  // Council H1 (2026-11-13): a tier-to-model default is chosen by the system, so the tier map must pass the never-automatic
+  // check (assertNoAutomaticSelectionDenied) unless the owner rules a tier default an explicit choice. Owner decision pending.
+  it.todo("keeps every CHAT_TIER_MODELS default out of NO_AUTOMATIC_SELECTION_MODEL_FAMILIES, or records the owner's exemption");
 });

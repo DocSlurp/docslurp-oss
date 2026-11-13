@@ -46,7 +46,10 @@ describe("models never selected automatically", () => {
       "accounts/fireworks/models/deepseek-v4p1-flash",
       "llm://fireworks/accounts/fireworks/models/deepseek-v4p1-flash-1017",
       "llm://openrouter/deepseek%2Fdeepseek-v4.1-flash%ZZ",
+      // A route label with its setting after the id.
+      "deepseek/deepseek-v4.1-flash (effort none)",
     ]) expect(isAutomaticSelectionDenied(ref), ref).toBe(true);
+    expect(isAutomaticSelectionDenied("z-ai/glm-5.3-flash (effort minimal)")).toBe(false);
   });
 
   it("does not catch neighbouring models", () => {

@@ -118,6 +118,14 @@ type ProjectChatRuntimeSummary = {
  */
 export const PROJECT_CHAT_FAILOVER_MODEL: ProjectChatModelId =
   "openai/gpt-6-luna";
+/**
+ * Failover candidates in order: the failover model, then GLM 5.3 Flash (same answer tier) for a project that already
+ * answers with the failover model, so a Luna outage does not leave Luna projects without a second model.
+ */
+export const PROJECT_CHAT_FAILOVER_MODELS: readonly ProjectChatModelId[] = [
+  PROJECT_CHAT_FAILOVER_MODEL,
+  "z-ai/glm-5.3-flash",
+];
 const DEFAULT_PENDING_SEARCH_RETRY = {
   maxAttempts: 8,
   intervalMs: 2000,
@@ -487,13 +495,17 @@ function buildUsageSummary(args?: {
 }
 
 /** Eval models never fail over: a comparison must not silently measure another model. */
+/**
+ * The models one chat turn tries, in order: the caller's choice, then the first failover candidate that differs from
+ * it and is not denied. At most two attempts.
+ */
 export function buildModelFailoverOrder(
   preferredModel: string,
   failover = true,
 ): string[] {
-  return failover
-    ? [...new Set([preferredModel, ...withoutAutomaticSelectionDenied([PROJECT_CHAT_FAILOVER_MODEL])])]
-    : [preferredModel];
+  if (!failover) return [preferredModel];
+  const next = withoutAutomaticSelectionDenied(PROJECT_CHAT_FAILOVER_MODELS).find((model) => model !== preferredModel);
+  return next ? [preferredModel, next] : [preferredModel];
 }
 
 async function generateProjectChatTextWithFailover(args: {
