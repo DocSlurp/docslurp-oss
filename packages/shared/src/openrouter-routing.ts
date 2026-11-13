@@ -1,3 +1,4 @@
+import { MAX_OUTPUT_USD_PER_MTOK_EXCLUSIVE } from "./routing-targets.js";
 import { isAutomaticSelectionDenied } from "./automatic-model-selection.js";
 import { lowestOpenRouterReasoning, withReasoningTokenAllowance } from "./openrouter-usage.js";
 import { isProhibitedRoutingModelId } from "./routing-targets.js";
@@ -79,6 +80,12 @@ export function isPriceRoutedModel(model: string): boolean {
   return PRICE_ROUTED_MODEL_PREFIXES.some((prefix) => model.startsWith(prefix));
 }
 
+/** OpenRouter endpoints with no output-token price, where the output-price ceiling does not apply. Audio only. */
+const OUTPUT_CEILING_EXEMPT_PATHS: ReadonlySet<string> = new Set(["/api/v1/audio/transcriptions"]);
+
+/** Highest output price any OpenRouter request may be routed to: just under the cap (MAX_OUTPUT_USD_PER_MTOK_EXCLUSIVE). */
+export const OUTPUT_PRICE_CEILING_USD_PER_MTOK = MAX_OUTPUT_USD_PER_MTOK_EXCLUSIVE - 0.01;
+
 /** The price-routing `provider` preferences for `model`, or undefined to leave routing to OpenRouter. */
 export function openRouterProviderPreferences(model: string): Record<string, unknown> | undefined {
   if (model.endsWith(":nitro")) {
@@ -126,7 +133,11 @@ export function applyOpenRouterProviderPolicy(provider: Record<string, unknown> 
  * China restriction (when `policy` turns it on) then applies to the merged preferences, so a caller can narrow
  * it but never widen it.
  */
-export function withOpenRouterProviderPreferences<T extends Record<string, unknown>>(body: T, policy?: OpenRouterProviderPolicy): T & { provider?: Record<string, unknown> } {
+export function withOpenRouterProviderPreferences<T extends Record<string, unknown>>(
+  body: T,
+  policy?: OpenRouterProviderPolicy,
+  options: { outputPriceCeiling?: boolean } = {},
+): T & { provider?: Record<string, unknown> } {
   const model = typeof body.model === "string" ? body.model : "";
   const preferences = openRouterProviderPreferences(model);
   const own = body.provider && typeof body.provider === "object" && !Array.isArray(body.provider) ? body.provider as Record<string, unknown> : undefined;
@@ -147,8 +158,20 @@ export function withOpenRouterProviderPreferences<T extends Record<string, unkno
       merged.quantizations = allowed;
     }
   }
-  const routed = policy ? applyOpenRouterProviderPolicy(merged, policy) : merged;
-  if (!routed || (routed === own && !preferences)) return body;
+  if (options.outputPriceCeiling === false) {
+    // An endpoint without output-token pricing (audio transcription): no ceiling to apply, routing as before.
+    const routed = policy ? applyOpenRouterProviderPolicy(merged, policy) : merged;
+    if (!routed || (routed === own && !preferences)) return body;
+    return { ...body, ...(nitroBase ? { model: nitroBase } : {}), provider: routed };
+  }
+  // Every routed request carries an output-price ceiling under the cap ($50 per 1M), so no endpoint of a model (GPT-6.1
+  // Sol lists an `ultrafast` endpoint at $60 per 1M output) is ever chosen above it. A caller may lower it, never raise it.
+  const capped: Record<string, unknown> = { ...(merged ?? {}) };
+  const price = capped.max_price && typeof capped.max_price === "object" ? capped.max_price as Record<string, unknown> : {};
+  const completion = typeof price.completion === "number" && Number.isFinite(price.completion) && price.completion >= 0
+    ? Math.min(price.completion, OUTPUT_PRICE_CEILING_USD_PER_MTOK) : OUTPUT_PRICE_CEILING_USD_PER_MTOK;
+  capped.max_price = { ...price, completion };
+  const routed = policy ? applyOpenRouterProviderPolicy(capped, policy) : capped;
   // OpenRouter reads a `:nitro` suffix as a throughput sort, which would override the price sort above. Send the
   // base model id; `:nitro` stays the internal id for tiers, billing and usage attribution.
   return { ...body, ...(nitroBase ? { model: nitroBase } : {}), provider: routed };
@@ -354,7 +377,10 @@ export function createOpenRouterRoutingFetch(baseFetch: typeof fetch = fetch, op
       return baseFetch(input, { ...init, body: JSON.stringify(withOpenRouterProviderPreferences(retargeted, { ...policy!, speedBoost: false })) });
     };
     if (canFallBack && regionBlocked(requested)) return sendFallback("remembered");
-    const routed = withOpenRouterProviderPreferences(body, policy);
+    // Every endpoint carries the output-price ceiling unless it is listed here as having no output-token price. Only
+    // audio transcription is (billed per audio input); a new endpoint gets the ceiling by default.
+    const priced = !OUTPUT_CEILING_EXEMPT_PATHS.has(url.pathname);
+    const routed = withOpenRouterProviderPreferences(body, policy, { outputPriceCeiling: priced });
     let response = routed === original ? await baseFetch(input, init) : await baseFetch(input, { ...init, body: JSON.stringify(routed) });
     const base = typeof body.model === "string" ? nitroBaseModel(body.model) : undefined;
     if (response.status === 404 && base) {

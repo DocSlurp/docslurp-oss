@@ -20,6 +20,8 @@ import {
   type MaterializationPolicy,
   type PipelineFeatures,
   type ProjectRecord,
+  parseManagedPipelineOverrides,
+  resolveManagedPipeline,
 } from "@docslurp/shared";
 
 import { sql } from "../db.js";
@@ -271,6 +273,8 @@ export async function commitIndexJobs(prepared: PreparedIndexJobs, userId: strin
     // Lock organization before project, matching other admission paths.
     await tx`select pg_advisory_xact_lock(spend_admission_lock_key(${prepared.orgId}))`;
     await tx`select pg_advisory_xact_lock(hashtextextended(${`full-index:${prepared.projectId}`}, 0))`;
+    const [managedRow] = await tx<{ managed: unknown }[]>`select managed_models -> 'pipeline' as managed from projects where id = ${prepared.projectId}`;
+    const managedOverrides = parseManagedPipelineOverrides(managedRow?.managed, `project ${prepared.projectId}`);
     // Chart tier: an explicit project tier applies to every document; with none, each document keeps the tier its
     // source run stamped (as reprocess does), and only documents without one take the caller's origin default (M5).
     const stamped: RunBatch[] = [];
@@ -299,13 +303,16 @@ export async function commitIndexJobs(prepared: PreparedIndexJobs, userId: strin
       if (block) throw new SpendBlockedError(block.message, block.code);
       const runId = randomUUID();
       const pages = docs.reduce((sum, doc) => sum + Math.max(0, doc.page_count ?? 0), 0);
+      // A direct insert, so the same managed-model resolution as runCreation.create: model values in the pipeline
+      // are dropped and only the project's explicit admin overrides apply.
+      const runPipeline = resolveManagedPipeline(batch.pipeline, managedOverrides, `full index in project ${prepared.projectId}`).pipeline;
       await tx`
         insert into project_runs (id, org_id, user_id, project_id, kind, status, priority, stage,
           total_documents, processed_documents, pages_total, pages_processed, pipeline,
           creation_ready_at, creation_expires_at, origin)
         -- The documents are inserted in this transaction, so the manifest is complete when it commits.
         values (${runId}, ${prepared.orgId}, ${userId}, ${prepared.projectId}, 'full-index', 'queued', 0, 'queued',
-          ${docs.length}, 0, ${pages}, 0, ${tx.json(JSON.parse(JSON.stringify(batch.pipeline)))}, now(), null, ${origin})
+          ${docs.length}, 0, ${pages}, 0, ${tx.json(JSON.parse(JSON.stringify(runPipeline)))}, now(), null, ${origin})
       `;
       for (const doc of docs) {
         const canonicalId = doc.canonical_id ?? doc.id;
@@ -328,7 +335,7 @@ export async function commitIndexJobs(prepared: PreparedIndexJobs, userId: strin
         await requireRunCreditLease(tx, { runId, orgId: prepared.orgId, projectId: prepared.projectId });
       }
       result.runIds.push(runId);
-      result.pipelines.set(runId, batch.pipeline);
+      result.pipelines.set(runId, runPipeline);
     }
   });
   return result;

@@ -1,4 +1,4 @@
-import { publicDiagnostics, publicDocumentError, publicProcessingMessage, type ApiErrorCode } from "@docslurp/shared";
+import { publicDiagnostics, publicDocumentError, publicProcessingMessage, type ApiErrorCode, resolveManagedPipeline } from "@docslurp/shared";
 import { CHART_EXPORT_TIER_UNAVAILABLE_CODE, type ChartExportTier, type RunOrigin } from "@docslurp/shared";
 import { chartExportOverrideError } from "./chart-export-availability.js";
 import {
@@ -35,6 +35,7 @@ import {
   type ProjectRunRow,
 } from "./run-records.js";
 import { sql } from "../db.js";
+import { loadManagedPipelineOverrides } from "./projects.js";
 import { RUN_EVENTS_CHANNEL, RunEventHub, type RunEventHubRow } from "./run-event-hub.js";
 import { env as apiEnv } from "../config.js";
 import { getPipelineTemporalSnapshot } from "../lib/temporal.js";
@@ -390,9 +391,15 @@ export async function reprocessRun(
   const liveModes = new Set(docs.filter((doc) => !doc.superseded_at && doc.indexing_mode).map((doc) => doc.indexing_mode as string));
   const adoptedMode = liveModes.size === 1 ? effectiveIndexingMode([...liveModes][0] as PipelineFeatures["indexingMode"]) : null;
 
-  // A reprocess of a partial run starts from that run's full feature set.
+  // A reprocess of a partial run starts from that run's full feature set. The run snapshot's model values are history,
+  // never configuration: they are dropped, and the project's current explicit admin overrides and defaults apply.
+  const managed = resolveManagedPipeline(
+    withoutStageSelection(original.pipeline),
+    await loadManagedPipelineOverrides(original.projectId),
+    `run ${runId}`,
+  );
   const pipelineConfig: PipelineFeatures = {
-    ...(JSON.parse(JSON.stringify(withoutStageSelection(original.pipeline))) as PipelineFeatures),
+    ...(JSON.parse(JSON.stringify(managed.pipeline)) as PipelineFeatures),
     speedBoost: options?.speedBoost === true,
     ...(adoptedMode ? { indexingMode: adoptedMode } : {}),
     ...(options?.stages?.length ? { stageSubset: [...options.stages] } : {}),
@@ -504,6 +511,11 @@ export async function retryRun(
     throw new Error("Forbidden");
   }
 
+  // A retried run keeps its categories and stage selection, but its model values are re-resolved: a run from before
+  // managed models (0158) must not replay a stored model (the former DeepSeek vision default is refused at call time).
+  const managed = resolveManagedPipeline(run.pipeline, await loadManagedPipelineOverrides(run.projectId), `run ${run.id} retry`);
+  const retried = { ...run, pipeline: { ...managed.pipeline, speedBoost: run.pipeline.speedBoost === true } };
+
   // All retries retain their immutable original mode. Admission, checkpoint reset,
   // queued transition and lease acquisition commit together; Temporal starts only afterward.
   let outcome: RunRetryOutcome;
@@ -515,9 +527,10 @@ export async function retryRun(
         // Abort admission before its post-callback lease acquisition. A stale or
         // clean completed run must not retain credits for work it cannot retry.
         if (status === "not-retryable") throw notRetryable;
+        await tx`update project_runs set pipeline = ${tx.json(JSON.parse(JSON.stringify(retried.pipeline)))} where id = ${run.id}`;
         return status;
       }, { speedBoost: run.pipeline.speedBoost === true, leaseRunId: run.id, readmission: true });
-      outcome = { status: prepared, start: await runLifecycle.start(run, { restartExisting: true }) };
+      outcome = { status: prepared, start: await runLifecycle.start(retried, { restartExisting: true }) };
     } catch (error) {
       if (error !== notRetryable) throw error;
       outcome = { status: "not-retryable" };

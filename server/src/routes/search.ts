@@ -5,7 +5,7 @@ import { reportPublicError } from "../lib/public-errors.js";
 import { chatSessionForRequest, CHAT_SESSION_TOKEN_HEADER } from "../lib/chat-session-tokens.js";
 import { apiErrorResponse, nativeApiErrors, withApiErrorDetails } from "../lib/api-error.js";
 import { Hono, type Context } from "hono";
-import { batchSearchInputSchema, searchFormError, searchInputSchema, searchOptions, searchQueryText, projectChatInputSchema, type SearchInput } from "../lib/search-input.js";
+import { batchSearchInputSchema, searchFormError, searchInputSchema, searchOptions, searchQueryText, projectChatRequestSchema, type SearchInput } from "../lib/search-input.js";
 import { streamSSE } from "hono/streaming";
 import { assertCanSpend } from "../services/billing/spend-guard.js";
 import { enforceActorCategoryRateLimit } from "../middleware/rate-limit.js";
@@ -48,7 +48,7 @@ import { awaitSearchSessionWrites } from "../search/session.js";
 import { randomUUID } from "node:crypto";
 import { env } from "../config.js";
 import { activeTraceparent } from "@docslurp/shared/observability";
-import { chatModelRefused, ChatModelNotAllowedError } from "../lib/chat-model-policy.js";
+import { chatModelRefused, ChatModelNotAllowedError, SpeedBoostUnavailableError } from "../lib/chat-model-policy.js";
 
 function modelNotAllowed(c: Context): Response {
   return apiErrorResponse(c, 400, "model_not_allowed", new ChatModelNotAllowedError().message);
@@ -204,7 +204,7 @@ async function handleProjectChat(c: Context, mode: "public" | "grounded") {
   // Lets clients join a turn to its trace (the trace id is the second field).
   const traceparent = activeTraceparent();
   if (traceparent) c.header("traceparent", traceparent);
-  const parsed = projectChatInputSchema.safeParse(await c.req.json().catch(() => null));
+  const parsed = projectChatRequestSchema.safeParse(await c.req.json().catch(() => null));
   if (!parsed.success) return apiErrorResponse(c, 400, "invalid_request", "Invalid chat input", { issues: parsed.error.issues });
   const body = parsed.data;
   const userId = c.get("sessionUser")?.id;
@@ -227,7 +227,7 @@ async function handleProjectChat(c: Context, mode: "public" | "grounded") {
   let response: Awaited<ReturnType<typeof chatProject>>;
   try {
     response = await turn.run(() => withDeferredContext(deferred.context, () => chatProject({ projectId, userId, scope: authorized.scope,
-      query: body.q, sessionId, sessionToken: body.sessionToken, model: body.model, speedBoost: body.speedBoost,
+      query: body.q, sessionId, sessionToken: body.sessionToken, model: body.model, tier: body.tier, reasoning: body.reasoning, speedBoost: body.speedBoost,
       actor: getRequestActor(c), signal,
       ...(mode === "grounded"
         ? { allowAgentTools: false, allowConfiguration: false }
@@ -237,6 +237,7 @@ async function handleProjectChat(c: Context, mode: "public" | "grounded") {
   } catch (error) {
     const usage = await failChatTurn(turn, chatTurnFailureReason(error, signal));
     if (error instanceof ChatModelNotAllowedError) return modelNotAllowed(c);
+    if (error instanceof SpeedBoostUnavailableError) return apiErrorResponse(c, 400, "speed_boost_unavailable", error.message);
     if (error instanceof ProjectChatDisabledError) return apiErrorResponse(c, 403, "chat_disabled", error.message);
     const failure = expectedSearchFailure(error);
     if (failure) return apiErrorResponse(c, failure.status, failure.apiCode, failure.message, usage ? { usage } : undefined);
@@ -307,9 +308,9 @@ async function projectChatStreamHandler(c: Context) {
       project: c.req.query("project") || undefined, orgId: c.req.query("orgId") || undefined,
       sessionId: c.req.query("sessionId"),
       sessionToken: c.req.header(CHAT_SESSION_TOKEN_HEADER)?.trim() || undefined,
-      model: c.req.query("model"), speedBoost: c.req.query("speedBoost") === undefined ? false : c.req.query("speedBoost") === "true" ? true : c.req.query("speedBoost") === "false" ? false : c.req.query("speedBoost") };
+      model: c.req.query("model"), tier: c.req.query("tier") || undefined, reasoning: c.req.query("reasoning") || undefined, speedBoost: c.req.query("speedBoost") === undefined ? false : c.req.query("speedBoost") === "true" ? true : c.req.query("speedBoost") === "false" ? false : c.req.query("speedBoost") };
   }
-  const parsed = projectChatInputSchema.safeParse(input);
+  const parsed = projectChatRequestSchema.safeParse(input);
   if (!parsed.success) return apiErrorResponse(c, 400, "invalid_request", "Invalid chat input", { issues: parsed.error.issues });
   const { q: query, sessionToken, model } = parsed.data;
 
@@ -362,7 +363,7 @@ async function projectChatStreamHandler(c: Context) {
         query,
         actor: getRequestActor(c), allowAgentTools: env.publicChatAgentEnabled, signal: AbortSignal.any([c.req.raw.signal, abort.signal]),
         sessionId, sessionToken,
-        model, speedBoost: parsed.data.speedBoost, filters: parsed.data.filters,
+        model, tier: parsed.data.tier, reasoning: parsed.data.reasoning, speedBoost: parsed.data.speedBoost, filters: parsed.data.filters,
         // Answer text as the model writes it. The final `message` frame still carries the whole answer: clients that
         // ignore `delta` (or a moderated turn, whose text arrives as one delta after the check) lose nothing.
         onTextDelta: async (text) => {

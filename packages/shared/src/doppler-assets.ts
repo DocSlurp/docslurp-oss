@@ -110,6 +110,74 @@ export const DOPPLER_FIGURE_GAPS_MAX = 128;
 /** Pages `first..last` the provider did not extract images for (a page in a gap with no ledger rows was not extracted). */
 export interface DopplerFigureGap { first: number; last: number; reason: DopplerFigureGapReason }
 
+/**
+ * The ledger's rule for recorded shards: from page 1 with no hole, except where the level's gaps cover a hole entirely.
+ * (A recorded gap may also lie inside a shard: pages that shard did not extract. The reader's stricter rule for a folder
+ * is dopplerShardCoverage.)
+ */
+export function dopplerShardsContiguous(
+  ranges: ReadonlyArray<readonly [number, number]>, gaps: readonly Pick<DopplerFigureGap, "first" | "last">[] | null | undefined,
+): boolean {
+  const covered = (first: number, last: number): boolean => {
+    let next = first;
+    for (const gap of [...(gaps ?? [])].sort((a, b) => a.first - b.first)) {
+      if (gap.last < next) continue;
+      if (gap.first > next) return false;
+      next = gap.last + 1;
+      if (next > last) return true;
+    }
+    return next > last;
+  };
+  let next = 1;
+  for (const [first, last] of ranges) {
+    if (first < next) return false;
+    if (first > next && !covered(next, first - 1)) return false;
+    next = last + 1;
+  }
+  return true;
+}
+
+export type DopplerShardCoverageRule = "shards-not-contiguous" | "gap-overlaps-shard" | "page-outside-document";
+
+/**
+ * The folder's shard ranges against the outcome's declared gaps, over the pages it was asked for (`first..last`: the
+ * document, or a resumed range). Null when they agree, else the rule broken.
+ * - Every shard and gap lies inside `first..last` (`page-outside-document`); no gap overlaps a shard (`gap-overlaps-shard`).
+ * - `partial` with declared gaps (a failed batch or shard publishes no folder: app #464): shards and gaps together cover
+ *   every page of `first..last` exactly once, so a first, middle or trailing gap keeps the extracted shards.
+ * - Otherwise (an `extracted` outcome, or no gap declared): the strict rule, shards from `first` with no hole; an
+ *   extracted outcome's last shard ends at `last`. A hole is never excused by a gap an `extracted` outcome declares.
+ * A gap holds no rows: it is never stored, billed or served; its resume publishes `shards/<first>-<last>/` for it.
+ */
+export function dopplerShardCoverage(
+  ranges: ReadonlyArray<readonly [number, number]>, gaps: readonly Pick<DopplerFigureGap, "first" | "last">[] | null | undefined,
+  args: { first: number; last: number; partial: boolean },
+): DopplerShardCoverageRule | null {
+  const shards = [...ranges].sort((a, b) => a[0] - b[0]);
+  const declared = [...(gaps ?? [])].sort((a, b) => a.first - b.first);
+  if (shards.some(([first, last]) => first < args.first || last > args.last)) return "page-outside-document";
+  if (declared.some((gap) => gap.first < args.first || gap.last > args.last)) return "page-outside-document";
+  if (declared.some((gap) => shards.some(([first, last]) => first <= gap.last && gap.first <= last))) return "gap-overlaps-shard";
+  if (!args.partial || declared.length === 0) {
+    let next = args.first;
+    for (const [first, last] of shards) {
+      if (first !== next) return "shards-not-contiguous";
+      next = last + 1;
+    }
+    // An extracted outcome reaches the last asked page: a missing tail is not "complete" (it needs a declared gap, which
+    // only a partial outcome may carry).
+    if (!args.partial && next !== args.last + 1) return "shards-not-contiguous";
+    return null;
+  }
+  const items = [...shards.map(([first, last]) => ({ first, last })), ...declared].sort((a, b) => a.first - b.first);
+  let next = args.first;
+  for (const item of items) {
+    if (item.first !== next) return "shards-not-contiguous";
+    next = item.last + 1;
+  }
+  return next === args.last + 1 ? null : "shards-not-contiguous";
+}
+
 /** Pages per Doppler image batch (`--images-batch-pages`); the per-batch limits below are derived from it. */
 export const DOPPLER_IMAGES_BATCH_PAGES = 64;
 
@@ -536,7 +604,20 @@ export interface DopplerManifestV3Summary {
   images: number;
   batches: number;
   lastCutPage: number | null;
+  /** Context-page entries (counted in `images`) and their line bytes: outside the folder's entry and byte caps (R3-L2). */
+  contextImages: number;
+  contextBytes: number;
 }
+
+/** Context pages a shard's conversion may add either side of its `--images-pages` range (`-f`/`-l`, the #464 plugin's 16). */
+export const DOPPLER_SHARD_CONTEXT_PAGES = 16;
+/**
+ * The context-page allowance of a sharded folder (R3-L2), apart from its entry and manifest-byte caps: per shard, up to
+ * this many context lines (2 × 16 context pages, generously many images each), and up to CONTEXT_LINE_BYTES bytes per
+ * allowed line, so a dense legitimate document near the caps is never refused for context alone.
+ */
+export const DOPPLER_SHARD_CONTEXT_LINES = 2 * DOPPLER_SHARD_CONTEXT_PAGES * 64;
+export const DOPPLER_SHARD_CONTEXT_LINE_BYTES = 1024;
 
 /** id order: page, then pictures before figures, then index. */
 function idOrderKey(id: string): [number, number, number] {
@@ -573,9 +654,17 @@ export class DopplerManifestV3Validator {
 
   /**
    * `range`: a shard's pages (`shards/<first>-<last>/manifest.jsonl`): its header's `pages` must be exactly that range and
-   * every image and batch must start inside it.
+   * every batch must start inside it; every image too, except context-page entries (`not-extracted`, reason `pages`, no
+   * file, resume, repeat or fallback; their derived link allowed), which are counted but yield no row.
    */
-  constructor(private readonly limits: { maxLines: number; maxPage: number; range?: readonly [number, number] }) {}
+  constructor(private readonly limits: {
+    maxLines: number; maxPage: number; range?: readonly [number, number];
+    /** Context-page lines this manifest may hold beyond `maxLines` (their own allowance, R3-L2); 0 by default. */
+    maxContextLines?: number;
+  }) {}
+  private contextLines = 0;
+  private contextBytes = 0;
+  private lineBytes = 0;
 
   /** The header line, once it has been accepted. */
   get headerLine(): DopplerManifestV3Header | null {
@@ -600,7 +689,9 @@ export class DopplerManifestV3Validator {
   accept(text: string, precedingSha256?: string): { row: DocumentAsset; file: DopplerManifestFileEntry | null; error?: string } | null {
     if (this.state === "done") this.fail("line-after-end");
     this.lines += 1;
-    if (this.lines > this.limits.maxLines + 2) this.fail("too-many-lines");
+    this.lineBytes = text.length + 1;
+    // Context lines have their own allowance (R3-L2): the shared cap counts the others; the total stays bounded.
+    if (this.lines - this.contextLines > this.limits.maxLines + 2 || this.lines > this.limits.maxLines + 2 + (this.limits.maxContextLines ?? 0)) this.fail("too-many-lines");
     const caps = DOPPLER_MANIFEST_V3_TYPE_LINE_BYTES;
     if (text.length + 1 > Math.max(caps.header, caps.image, caps.batch, caps.end)) this.fail("line-too-long");
     const value = this.parse(text);
@@ -645,7 +736,7 @@ export class DopplerManifestV3Validator {
     this.fail("unknown-line-type");
   }
 
-  private image(value: Record<string, unknown>): { row: DocumentAsset; file: DopplerManifestFileEntry | null; error?: string } {
+  private image(value: Record<string, unknown>): { row: DocumentAsset; file: DopplerManifestFileEntry | null; error?: string } | null {
     if (this.state !== "images") this.fail("lines-out-of-order");
     const parsed = dopplerManifestV3ImageSchema.safeParse(value);
     if (!parsed.success) this.fail("image-invalid");
@@ -653,19 +744,42 @@ export class DopplerManifestV3Validator {
     const header = this.header!;
     if (entry.page > this.limits.maxPage) this.fail("page-outside-document");
     const range = this.limits.range;
-    if (range && (entry.page < range[0] || entry.page > range[1])) this.fail("shard-range");
+    // A shard's conversion also lists the images on its context pages (`-f`/`-l` around `--images-pages`, bound into its
+    // settings and hash chain), as `not-extracted` with reason `pages`. Such an entry outside the shard's range is counted
+    // for the end line but yields no row: the shard that owns the page lists it (ledger, index, billing and resume).
+    // Anything else outside the range is refused.
+    const context = !!range && (entry.page < range[0] || entry.page > range[1]);
+    // Only within the shard's conversion range, from host values (never the VM's own context numbers): max(1, first - 16)
+    // to min(pageCount, last + 16), the plugin's -f/-l (#464 checkV3Manifest, round 3 N4).
+    if (context && (entry.page < Math.max(1, range[0] - DOPPLER_SHARD_CONTEXT_PAGES) ||
+        entry.page > Math.min(this.limits.maxPage, range[1] + DOPPLER_SHARD_CONTEXT_PAGES))) this.fail("shard-range");
+    // (Its derived path and link are allowed, as Doppler writes them; it never has a file, a resume, a repeat or a fallback.)
+    if (context && !(entry.status === "not-extracted" && entry.reason === "pages" && entry.resumable !== true &&
+        entry.repeat_of === undefined && entry.fallback === undefined && entry.bytes === 0 && entry.sha256 === null)) {
+      this.fail("shard-range");
+    }
     const key = idOrderKey(entry.id);
     if (this.lastId && !idBefore(this.lastId, key)) this.fail("lines-out-of-order");
     this.lastId = key;
-    if (entry.link !== null && entry.path !== null && entry.link !== `${header.link_prefix}${entry.path}`) this.fail("image-invalid");
+    // (A context entry's path is never checked against or linked to this folder's files: it is not this shard's image.)
+    if (!context && entry.link !== null && entry.path !== null && entry.link !== `${header.link_prefix}${entry.path}`) this.fail("image-invalid");
     if (entry.repeat_of !== undefined) {
       // A repeat names an earlier linked image that is not itself a repeat (no chains, no cycles, no forward names).
       if (!this.repeatTargets.has(entry.repeat_of)) this.fail("repeat-invalid");
-    } else if (entry.path !== null) {
+    } else if (entry.path !== null && !context) {
+      // (A context entry is never a repeat target: the shard that owns its page lists it.)
       this.repeatTargets.add(entry.id);
     }
     const s = this.sum;
     s.images += 1;
+    if (context) {
+      s.notExtracted += 1;
+      if (entry.path !== null) s.linked += 1;
+      this.contextLines += 1;
+      this.contextBytes += this.lineBytes;
+      if (this.contextLines > (this.limits.maxContextLines ?? 0)) this.fail("too-many-lines");
+      return null;
+    }
     if (entry.path !== null) s.linked += 1;
     if (entry.reason === "repeat") s.repeats += 1;
     if (entry.fallback !== undefined) s.fallbacks += 1;
@@ -708,7 +822,10 @@ export class DopplerManifestV3Validator {
     if (end.resumable !== this.anyResumable) this.fail("resumable-mismatch");
     if (end.complete && (end.resumable || s.cut > 0 || this.anyBatchReason)) this.fail("complete-mismatch");
     this.state = "done";
-    this.summary = { header: this.header!, complete: end.complete, resumable: end.resumable, images: s.images, batches: s.batches, lastCutPage: this.lastCutPage };
+    this.summary = {
+      header: this.header!, complete: end.complete, resumable: end.resumable, images: s.images, batches: s.batches, lastCutPage: this.lastCutPage,
+      contextImages: this.contextLines, contextBytes: this.contextBytes,
+    };
   }
 
   /** The whole manifest's summary; throws when the end line never came (a truncated manifest). */

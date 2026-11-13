@@ -1,3 +1,4 @@
+import { SPEED_BOOST_UNAVAILABLE_MESSAGE } from "./project-chat-models.js";
 import { z } from "zod";
 import { PUBLIC_ERROR_MESSAGES } from "./public-errors.js";
 import { PARSE_SOURCE_RESCAN_MESSAGE } from "./parse-source-decision.js";
@@ -66,6 +67,7 @@ export const API_ERROR_CODES = [
   "client_key_origin_not_allowed",
   "api_key_ip_not_allowed",
   "model_not_allowed",
+  "speed_boost_unavailable",
   "chart_export_tier_unavailable",
   "chart_export_models_forbidden",
   "chat_deadline_exceeded",
@@ -172,6 +174,7 @@ export const API_ERROR_PUBLIC_MESSAGES: Record<ApiErrorCode, string> = {
   api_key_ip_not_allowed: "This API key can't be used from this IP address. Add the address or its range to the key's IP allowlist, or call from an allowed server.",
   client_key_origin_not_allowed: "This browser API key isn't allowed on this website. Add the site to the key's allowed websites (for example docs.example.com, or *.example.com for its subdomains), or call DocSlurp from your server with a server key.",
   model_not_allowed: PUBLIC_ERROR_MESSAGES.modelNotAllowed,
+  speed_boost_unavailable: SPEED_BOOST_UNAVAILABLE_MESSAGE,
   chart_export_tier_unavailable: "That chart export tier isn’t available on this deployment. Leave the tier unset to use the deployment’s default, or turn chart export off.",
   chart_export_models_forbidden: "This project’s chart export tier is set below reading charts with AI. Ask a project editor to change it, or use an API key with the pipeline:billed-features scope.",
   chat_deadline_exceeded: PUBLIC_ERROR_MESSAGES.chatDeadline,

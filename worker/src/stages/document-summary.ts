@@ -1,4 +1,4 @@
-import { calculateAiUsageCostCents, resolvePipelineTextModel, type PrivacyMode, type TextGenerationConfig } from "@docslurp/shared";
+import { calculateAiUsageCostCents, resolveAllowedPipelineTextModel, type PrivacyMode, type TextGenerationConfig } from "@docslurp/shared";
 
 import type { Config } from "../config.js";
 import { generateOpenRouterText } from "../lib/ai.js";
@@ -37,10 +37,11 @@ export class DocumentSummaryStage implements Stage {
   ) {}
 
   async run(state: WorkflowState, signal?: AbortSignal): Promise<void> {
-    const model = resolvePipelineTextModel(state.run.pipeline, "document-summary", this.config.textGenerationModel);
     if (!state.run.pipeline.summarize) {
       return;
     }
+    // Resolved (and policed) only when the stage runs: a disabled stage never fails on its model.
+    const model = resolveAllowedPipelineTextModel(state.run.pipeline, "document-summary", this.config.textGenerationModel);
 
     if (!textModelApiKey(this.config.openRouterApiKey, model)) {
       return;

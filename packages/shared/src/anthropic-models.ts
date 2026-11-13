@@ -6,7 +6,9 @@
 // so stored settings, saved projects and API callers keep working. Fable and
 // Mythos map to Opus 5.5 (their $50/MTok output price is also outside the
 // internal cost policy). Prices verified 2026-10-25 against
-// platform.claude.com pricing and the OpenRouter models API.
+// platform.claude.com pricing and the OpenRouter models API; cache read and
+// 5-minute cache write rates verified 2026-11-13 against the OpenRouter models
+// API (the same on every first-party, Vertex and Bedrock global endpoint).
 
 export type AnthropicModelFamily = "opus" | "sonnet" | "haiku";
 
@@ -17,11 +19,17 @@ export type AnthropicModel = {
   family: AnthropicModelFamily;
   inputUsdPerMTok: number;
   outputUsdPerMTok: number;
+  /** Prompt tokens read from the prompt cache. */
+  cacheReadUsdPerMTok: number;
+  /** Prompt tokens written to the prompt cache with the default 5-minute TTL. */
+  cacheWriteUsdPerMTok: number;
   /** Prompts above the threshold are billed at the long-context rates. */
   longContext?: {
     thresholdInputTokens: number;
     inputUsdPerMTok: number;
     outputUsdPerMTok: number;
+    cacheReadUsdPerMTok: number;
+    cacheWriteUsdPerMTok: number;
   };
 };
 
@@ -35,6 +43,8 @@ export const ANTHROPIC_MODELS: readonly AnthropicModel[] = [
     family: "opus",
     inputUsdPerMTok: 4,
     outputUsdPerMTok: 20,
+    cacheReadUsdPerMTok: 0.2,
+    cacheWriteUsdPerMTok: 5,
   },
   {
     id: "claude-sonnet-5-5",
@@ -43,6 +53,8 @@ export const ANTHROPIC_MODELS: readonly AnthropicModel[] = [
     family: "sonnet",
     inputUsdPerMTok: 2,
     outputUsdPerMTok: 10,
+    cacheReadUsdPerMTok: 0.1,
+    cacheWriteUsdPerMTok: 2.5,
   },
   {
     id: "claude-haiku-5-5",
@@ -51,7 +63,9 @@ export const ANTHROPIC_MODELS: readonly AnthropicModel[] = [
     family: "haiku",
     inputUsdPerMTok: 0.1,
     outputUsdPerMTok: 0.5,
-    longContext: { thresholdInputTokens: 100_000, inputUsdPerMTok: 0.5, outputUsdPerMTok: 2.5 },
+    cacheReadUsdPerMTok: 0.01,
+    cacheWriteUsdPerMTok: 0.125,
+    longContext: { thresholdInputTokens: 100_000, inputUsdPerMTok: 0.5, outputUsdPerMTok: 2.5, cacheReadUsdPerMTok: 0.05, cacheWriteUsdPerMTok: 0.625 },
   },
 ];
 

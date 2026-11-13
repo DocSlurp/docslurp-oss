@@ -1,7 +1,7 @@
 import {
   defaultGraphConfig,
   graphConfigFingerprint,
-  resolvePipelineTextModel,
+  resolveAllowedPipelineTextModel,
   type GraphConfig,
 } from "@docslurp/shared";
 
@@ -65,8 +65,8 @@ export class GraphEnrichStage implements Stage {
     if (!state.run.projectId) return;
 
     const graphStore = graphStoreOf(state);
-    const graphModel = resolvePipelineTextModel(pipeline, "graph-extraction", this.config.textGenerationModel);
-    const communityModel = resolvePipelineTextModel(pipeline, "community-summary", this.config.textGenerationModel);
+    const graphModel = resolveAllowedPipelineTextModel(pipeline, "graph-extraction", this.config.textGenerationModel);
+    const communityModel = resolveAllowedPipelineTextModel(pipeline, "community-summary", this.config.textGenerationModel);
     const graphConfig: GraphConfig = { ...defaultGraphConfig, ...(pipeline.graph ?? {}) };
     const configHash = graphConfigFingerprint(graphConfig, graphModel);
     // Graph extraction and community summaries fall back to heuristics without

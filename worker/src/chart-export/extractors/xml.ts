@@ -33,8 +33,16 @@ export interface XmlParseOptions {
 }
 
 const NAMED: Record<string, string> = { lt: "<", gt: ">", amp: "&", quot: "\"", apos: "'", nbsp: " " };
-const NAME_START = /[A-Za-z_:]/;
-const NAME_CHAR = /[A-Za-z0-9_:.\-]/;
+
+// Character classes by code unit (the tokenizer's hot path; a RegExp test per character cost ~1/3 of a parse). Exported
+// for the exhaustive equivalence test against the regexes they replace.
+/** `[A-Za-z_:]` */
+export const isNameStart = (c: number) => (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || c === 95 || c === 58;
+/** `[A-Za-z0-9_:.\-]` */
+export const isNameChar = (c: number) => isNameStart(c) || (c >= 48 && c <= 57) || c === 46 || c === 45;
+/** Exactly JavaScript's `\s`: ASCII whitespace plus the Unicode space separators, line terminators and BOM. */
+export const isSpace = (c: number) => (c >= 9 && c <= 13) || c === 32 || c === 0xa0 || c === 0x1680 || (c >= 0x2000 && c <= 0x200a)
+  || c === 0x2028 || c === 0x2029 || c === 0x202f || c === 0x205f || c === 0x3000 || c === 0xfeff;
 
 export function decodeEntities(value: string): string {
   if (!value.includes("&")) return value;
@@ -129,27 +137,27 @@ export function parseXml(input: string, options: XmlParseOptions = {}): XmlEleme
     }
     // Start tag.
     let j = i + 1;
-    if (!NAME_START.test(src[j] ?? "")) throw new ExtractLimitError("xml-bad-tag");
-    while (j < n && NAME_CHAR.test(src[j]!)) j++;
+    if (!isNameStart(src.charCodeAt(j))) throw new ExtractLimitError("xml-bad-tag");
+    while (j < n && isNameChar(src.charCodeAt(j))) j++;
     const name = src.slice(i + 1, j);
     const attrs: Record<string, string> = Object.create(null);
     let attrCount = 0;
     let selfClosing = false;
     for (;;) {
-      while (j < n && /\s/.test(src[j]!)) j++;
+      while (j < n && isSpace(src.charCodeAt(j))) j++;
       if (j >= n) throw new ExtractLimitError("xml-unterminated-tag");
       const c = src[j]!;
       if (c === ">") { j++; break; }
       if (c === "/" && src[j + 1] === ">") { selfClosing = true; j += 2; break; }
-      if (!NAME_START.test(c)) throw new ExtractLimitError("xml-bad-attribute");
+      if (!isNameStart(src.charCodeAt(j))) throw new ExtractLimitError("xml-bad-attribute");
       const start = j;
-      while (j < n && NAME_CHAR.test(src[j]!)) j++;
+      while (j < n && isNameChar(src.charCodeAt(j))) j++;
       const attrName = src.slice(start, j);
-      while (j < n && /\s/.test(src[j]!)) j++;
+      while (j < n && isSpace(src.charCodeAt(j))) j++;
       let value = "";
       if (src[j] === "=") {
         j++;
-        while (j < n && /\s/.test(src[j]!)) j++;
+        while (j < n && isSpace(src.charCodeAt(j))) j++;
         const q = src[j];
         if (q === "\"" || q === "'") {
           const end = src.indexOf(q, j + 1);
@@ -158,7 +166,7 @@ export function parseXml(input: string, options: XmlParseOptions = {}): XmlEleme
           j = end + 1;
         } else {
           const start2 = j;
-          while (j < n && !/[\s>]/.test(src[j]!) && !(src[j] === "/" && src[j + 1] === ">")) j++;
+          while (j < n && !isSpace(src.charCodeAt(j)) && src.charCodeAt(j) !== 62 && !(src[j] === "/" && src[j + 1] === ">")) j++;
           value = src.slice(start2, j);
         }
       }

@@ -18,19 +18,46 @@ export function apply(m: Matrix, x: number, y: number): [number, number] {
 
 const NUM = /[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?/g;
 
+const isLetter = (c: number) => (c >= 65 && c <= 90) || (c >= 97 && c <= 122);
+
+/**
+ * The matches of `/([a-zA-Z]+)\s*\(([^)]*)\)/g` in order, found in one linear pass (that regex retries from every letter
+ * of a run with no `(` or `)` after it: quadratic; council r7 sweep). A match can only start at a letter run's first
+ * letter and needs the run's own `(`; with no `)` left, nothing later can match either.
+ */
+export function transformParts(raw: string): Array<{ name: string; args: string; length: number }> {
+  const out: Array<{ name: string; args: string; length: number }> = [];
+  const n = raw.length;
+  let i = 0;
+  while (i < n) {
+    let p = i;
+    while (p < n && !isLetter(raw.charCodeAt(p))) p++;
+    if (p >= n) break;
+    let q = p;
+    while (q < n && isLetter(raw.charCodeAt(q))) q++;
+    let k = q;
+    while (k < n && /\s/.test(raw[k]!)) k++;
+    if (raw[k] !== "(") { i = q; continue; }
+    const close = raw.indexOf(")", k + 1);
+    if (close < 0) break;
+    out.push({ name: raw.slice(p, q), args: raw.slice(k + 1, close), length: close + 1 - p });
+    i = close + 1;
+  }
+  return out;
+}
+
 /** Parse an SVG `transform` list. Unknown functions make the whole transform invalid (null). */
 export function parseTransform(raw: string | undefined | null): Matrix | null {
   if (!raw) return IDENTITY;
   if (raw.length > 4096) return null;
   let m: Matrix = IDENTITY;
-  const re = /([a-zA-Z]+)\s*\(([^)]*)\)/g;
   let consumed = 0;
-  for (const part of raw.matchAll(re)) {
-    consumed += part[0].length;
-    const args = (part[2]!.match(NUM) ?? []).map(Number);
+  for (const part of transformParts(raw)) {
+    consumed += part.length;
+    const args = (part.args.match(NUM) ?? []).map(Number);
     if (args.some((a) => !Number.isFinite(a))) return null;
     let t: Matrix;
-    switch (part[1]) {
+    switch (part.name) {
       case "matrix": if (args.length !== 6) return null; t = args as unknown as Matrix; break;
       case "translate": t = [1, 0, 0, 1, args[0] ?? 0, args[1] ?? 0]; break;
       case "scale": t = [args[0] ?? 1, 0, 0, args[1] ?? args[0] ?? 1, 0, 0]; break;
