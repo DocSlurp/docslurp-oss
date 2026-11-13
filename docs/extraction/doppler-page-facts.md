@@ -66,3 +66,39 @@ classify-route and page-image evidence read the facts unchanged:
 
 `probeRowsFromDopplerFacts` (`worker/src/routing/probe/doppler-facts.ts`) builds the v2 router's `ProbeRow` with
 `probeEngine: "doppler-facts"` and no thumbnail; its header comment lists each field.
+
+## Chart and diagram candidates
+
+Chart export (`worker/src/chart-export/facts-candidates.ts`) reads the facts again from the document's
+`doppler-page-facts-canonical` slot: the canonical lines extract-markdown re-serialized from what the reader kept, parsed
+again by the same strict reader and bounded by the host's page count. No slot, or facts the reader refuses, leaves chart
+export exactly as it was.
+
+**Candidates (`use` only, and only without a router plan, which owns chart labels when it exists).** A page or region is
+a candidate from its structure, not its words. Each candidate carries the cluster or image box as its crop, so the model
+reads crops, never whole pages:
+
+| rule | stands alone | needs the keyword route on its page |
+|---|---|---|
+| figure cluster (curved or diagonal drawing) at least 48 pt on its short side, 6 paths, 2–90% of the page | the page's `uncoveredRatio` ≥ 0.6, or `coverage` × `uncoveredRatio` ≥ 0.15 (a large non-text vector area) | `uncoveredRatio` 0.3–0.6 |
+| placed image, 4–85% of the page, at least 96 samples a side, not a stencil mask, on a page whose `scan` is `none` | never: photos are common | always |
+
+Never candidates: a page with `uncoveredRatio` below 0.3 (underlines, boxes around text, ruled tables), thin rule-like
+clusters, a scan page's images, and furniture: an image `obj` or a cluster box that recurs on at least 3 pages and 20% of
+the pages with facts (logos, headers, borders). At most 4 candidates a page, largest first. The keyword route
+(`chart-or-figure`) stays a vote: alone it is still low confidence; a facts candidate on its page replaces its whole-page
+read with crops. The thresholds are general structure limits (`FACTS_CANDIDATE_RULES`), set from the contract's field
+meanings, not from any evaluation document.
+
+Known gap: Doppler clusters only curved or diagonal drawing, so an axis-aligned bar chart drawn only with rectangles has no
+cluster box to crop and is left to the other signals.
+
+**One read per repeated picture (`store` and `use`).** Before a model reads a crop or an image, candidates are grouped by
+the facts' image object number and the media map's content hash (sha256), transitively, within the document only. The first
+placement whose read the provider answers stands for the group; the other placements reuse its visual with no call and no
+charge. A read that failed before an answer, or a whole-page read, stands for nothing. Visual candidate stats count a group
+once (so measured estimates price the reads that will be made), and the stage stats record
+`chartExport.dedupe: { groups, placements, readsAvoided }` and, with `use`, `chartExport.factsCandidates` per rule.
+
+Charges are per read made, as before: a reused placement has no answered call, so it is never charged. Nothing about the
+facts sizes a charge.

@@ -119,6 +119,8 @@ import { recordExtractedPageEquivalents } from "../lib/page-equivalents.js";
 import { collectPageLayoutFacts } from "../lib/page-layout-evidence.js";
 import { routingFactsWithDopplerFacts } from "../lib/doppler-page-facts-layout.js";
 import { sandboxedPdfPageFacts } from "../extractors/sandboxed-pdf-page-facts.js";
+import { CHART_FACTS_FORMAT, CHART_FACTS_SLOT } from "../chart-export/facts-candidates.js";
+import { dopplerPageFactsJsonl } from "../lib/doppler-page-facts.js";
 import { PAGE_RENDITION, pageRenditionKey } from "../lib/page-rendition.js";
 import { extractorFailureReason, extractorFallbackFor, recordExtractorFallback } from "../lib/extractor-fallback.js";
 
@@ -1014,6 +1016,13 @@ export class ExtractMarkdownStage implements Stage {
                     documentId: document.id, runId: state.run.id, pageCount: document.pageCount,
                     layoutFacts: routingFactsWithDopplerFacts(winningCandidate.layoutFacts, winningCandidate.pageFacts),
                   }));
+                  // The validated facts as canonical lines (never the guest's bytes) for chart export: structural candidates
+                  // and one read per repeated image. Re-read by the strict reader, bounded by the host's page count.
+                  if (winningCandidate.pageFacts) {
+                    const factsKey = `${runArtifactRoot(state.run, document.userId)}/doppler-page-facts/${document.id}.json`;
+                    await this.storage.putJson(factsKey, { format: CHART_FACTS_FORMAT, jsonl: dopplerPageFactsJsonl(winningCandidate.pageFacts) });
+                    state.artifactLedger.recordDocument(document.id, CHART_FACTS_SLOT, this.storage.uri(factsKey));
+                  }
                   // Doppler figures of the winning VM candidate: validated whole, stored under the document's artifact root, and
                   // recorded as document artifact slots so the artifact and PII guards (and the file proxy) apply to each file.
                   // A first-pass placeholder (a host-only mark on the job) stores nothing: the first pass stores those figures
