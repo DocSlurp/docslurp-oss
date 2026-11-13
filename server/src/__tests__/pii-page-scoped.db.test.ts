@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import postgres from "postgres";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { startMigratedPostgres } from "@docslurp/worker/testing";
@@ -129,5 +130,41 @@ describe("page-scoped PII serving", () => {
     expect(kept.map((result) => [result.citation.documentId, result.citation.pageNumber])).toEqual([[DOC_A, 1], [DOC_A, 3]]);
     await sql`update documents set status = 'pii_blocked' where id = ${DOC_A}`;
     expect(await guard.filterPiiWithheldResults([hit(DOC_A, 1)])).toEqual([]);
+  });
+});
+
+describe("operator dry run (scripts/pii-page-scope-dry-run.sql)", () => {
+  it("counts blocked documents a rescan would make partly available, changing nothing", async () => {
+    const policy = (action: string) => sql.json({ piiPolicy: { enabled: true, action, patterns: ["ssn"] } });
+    await sql`insert into projects (id, org_id, user_id, name, pipeline) values ('pdry', 'oa', 'ua', 'Dry', ${policy("block_indexing")}),
+      ('pdoc', 'oa', 'ua', 'Dry doc', ${policy("block_document")})`;
+    await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline) values
+      ('rdry', 'oa', 'ua', 'pdry', 'bulk-upload', 'completed', 'completed', '{}'),
+      ('rdoc', 'oa', 'ua', 'pdoc', 'bulk-upload', 'completed', 'completed', '{}')`;
+    const docs: Array<[string, string, string, number, Array<number | null>]> = [
+      ["dry-one-page-hit", "pdry", "rdry", 10, [4]],
+      ["dry-every-page", "pdry", "rdry", 2, [1, 2]],
+      ["dry-unpaged-hit", "pdry", "rdry", 5, [null]],
+      ["dry-block-document", "pdoc", "rdoc", 10, [3]],
+    ];
+    for (const [id, project, run, pages, hits] of docs) {
+      await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, metadata)
+        values (${id}, 'oa', 'ua', ${project}, ${run}, ${`${id}.pdf`}, 'application/pdf', ${`u/${id}.pdf`}, 'pii_blocked', ${pages}, ${sql.json({ pii: { runId: run, blocked: true } })})`;
+      for (const hit of hits) {
+        await sql`insert into pii_detections (document_id, run_id, pattern_type, matched_prefix, page_number) values (${id}, ${run}, 'ssn', 'fp', ${hit})`;
+      }
+    }
+    const query = readFileSync(new URL("../../../scripts/pii-page-scope-dry-run.sql", import.meta.url), "utf8");
+    const rows = await sql.unsafe<{ verdict: string; documents: string; pages_that_would_be_served: string; pages_that_stay_withheld: string }[]>(query);
+    const byVerdict = Object.fromEntries(rows.map((row) => [row.verdict, row]));
+    expect(Number(byVerdict["partly-available:pages"]?.documents)).toBe(1);
+    expect(Number(byVerdict["partly-available:pages"]?.pages_that_would_be_served)).toBe(9);
+    expect(Number(byVerdict["partly-available:pages"]?.pages_that_stay_withheld)).toBe(1);
+    expect(Number(byVerdict["stays-blocked:every-page"]?.documents)).toBe(1);
+    expect(Number(byVerdict["stays-blocked:match-without-page"]?.documents)).toBe(1);
+    expect(Number(byVerdict["stays-blocked:block_document"]?.documents)).toBe(1);
+    // Read-only: nothing was rescanned or unblocked.
+    const [{ blocked }] = await sql<{ blocked: number }[]>`select count(*)::int as blocked from documents where id like 'dry-%' and status = 'pii_blocked'`;
+    expect(blocked).toBe(4);
   });
 });

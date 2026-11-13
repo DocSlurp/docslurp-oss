@@ -61,7 +61,8 @@ describe("PII-blocked documents in the run lifecycle", () => {
     await sink.recordDetections("d-block", "run-1", [match], false);
     await sink.recordDetections("d-block", "run-1", [match], false);
     await sink.setDocumentOutcome("d-block", {
-      runId: "run-1", action: "block_indexing", matchCount: 1, patternTypes: ["ssn"],
+      runId: "run-1", scope: "document", withheldPages: [], withheldSectionCount: 0, pageCount: 2,
+      action: "block_indexing", matchCount: 1, patternTypes: ["ssn"],
       blocked: true, reviewRequired: false, redacted: false, reason: "PII policy blocked indexing: 1 match (ssn)",
       withheldArtifactUris: ["s3://b/k1"],
     });
@@ -131,7 +132,8 @@ describe("PII-blocked documents in the run lifecycle", () => {
     });
     const sink = createPostgresPiiDetectionSink(url);
     await sink.setDocumentOutcome("d-rescan", {
-      runId: "run-1", action: "block_indexing", matchCount: 0, patternTypes: [],
+      runId: "run-1", scope: "none", withheldPages: [], withheldSectionCount: 0, pageCount: 2,
+      action: "block_indexing", matchCount: 0, patternTypes: [],
       blocked: false, reviewRequired: false, redacted: false, reason: null, withheldArtifactUris: [],
     });
     await sink.close();

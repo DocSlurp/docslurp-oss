@@ -17,7 +17,25 @@ Under `block_indexing`, the document is still `pii_blocked` when:
 - every page is withheld, or
 - a match cannot be placed on a page (the fail-closed fallback).
 
-Stored `block_indexing` policies become page-scoped, and no data migration runs. Projects that want the old behaviour set `block_document`.
+## Behaviour change for existing projects
+
+Projects that already use `block_indexing` become page-scoped too, and no policy is migrated to `block_document`.
+Their documents start serving their clean pages from the next scan on. Projects that want the old whole-document
+behaviour set `block_document`.
+
+Documents already `pii_blocked` are **not** rescanned automatically. They keep their state until they are rescanned or
+reprocessed. Operators can count what a rescan would change, read-only, with:
+
+```sh
+psql "$DATABASE_URL" -f scripts/pii-page-scope-dry-run.sql
+```
+
+It groups the blocked documents by verdict, using the detections recorded for each:
+
+- `partly-available:pages`, with the pages that would be served and the pages that stay withheld;
+- `partly-available:sections`;
+- `stays-blocked:every-page`, `stays-blocked:match-without-page` or `stays-blocked:block_document`;
+- `policy-disabled-now`, `policy-action-changed` or `unknown:no-detections-recorded`.
 
 ## Granularity
 
