@@ -258,8 +258,8 @@ BEGIN
     OR TG_NAME<>'realtime_changed' OR TG_WHEN<>'AFTER' OR TG_LEVEL<>'ROW' OR TG_NARGS<>0 THEN
     RAISE EXCEPTION 'untrusted realtime trigger source' USING ERRCODE='42501';
   END IF;
-  IF TG_OP<>'INSERT' THEN old_project_id := OLD.metadata->>'projectId'; END IF;
-  IF TG_OP<>'DELETE' THEN new_project_id := NEW.metadata->>'projectId'; END IF;
+  IF TG_OP<>'INSERT' THEN old_project_id := coalesce(OLD.project_id, OLD.metadata->>'projectId'); END IF;
+  IF TG_OP<>'DELETE' THEN new_project_id := coalesce(NEW.project_id, NEW.metadata->>'projectId'); END IF;
   FOR project_id_value IN SELECT DISTINCT value FROM unnest(ARRAY[old_project_id,new_project_id]) AS value WHERE value IS NOT NULL ORDER BY value LOOP
     organization_id := NULL;
     SELECT org_id INTO organization_id FROM public.projects WHERE id=project_id_value;
