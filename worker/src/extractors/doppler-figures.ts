@@ -30,6 +30,7 @@ import {
   type DopplerManifest, type DopplerManifestRunFacts, type DopplerManifestV3Header,
 } from "@docslurp/shared";
 
+import { objectDigest, type FigureObjectReader } from "../db/document-asset-ledger.js";
 import { documentArtifactRoot } from "../lib/artifact-root.js";
 import {
   StreamCheckError, boundedPool, checkedFileStream, dopplerFigureBufferBytes, dopplerFigureUploadConcurrency, dopplerWorkerBudget, reserve,
@@ -687,9 +688,30 @@ export interface DopplerFigureStorage {
    * at a time per upload slot, within the same budget.
    */
   putStream?(key: string, body: Readable, size: number, contentType: string): Promise<void>;
-  /** Removes partial uploads after a failed store; without it they stay unrecorded (unreachable) orphans. */
+  /**
+   * Conditional creates (`If-None-Match: *`): write the object only if the key is free, else report `exists` without
+   * touching it. With them, a figure already at its key is accepted only when its SHA-256 is the manifest's (read through
+   * `openStream`), never overwritten. Without them (a store that cannot), keys are still write-once in practice: they sit
+   * under the run's own artifact root, and a stale run's writes are refused by the ledger (stale-write).
+   */
+  putBytesIfAbsent?(key: string, data: Uint8Array, contentType: string): Promise<"created" | "exists">;
+  putStreamIfAbsent?(key: string, body: Readable, size: number, contentType: string): Promise<"created" | "exists">;
+  openStream?(key: string, signal?: AbortSignal): Promise<{ stream: AsyncIterable<Uint8Array>; size: number | null }>;
+  /** Never called on a failure path: figures are kept (owner rule); the orphan GC is the only deleter. */
   deleteKeys?(keys: string[]): Promise<void>;
 }
+
+/**
+ * The ledger beside an upload: `pending` records the next files before their upload, `stored` flips them once they
+ * landed and checked out. Called once per FIGURE_LEDGER_BATCH files, in order.
+ */
+export interface DopplerFigureLedgerHooks {
+  pending(rows: Array<DocumentAsset & { storageKey: string }>): Promise<void>;
+  stored(files: Array<{ id: string; key: string }>): Promise<void>;
+}
+
+/** Files recorded pending, uploaded and flipped to stored per step. */
+export const FIGURE_LEDGER_BATCH = 64;
 
 /** Why storing a validated figure set failed: a fixed slug for stage stats and telemetry, never the storage error text. */
 export type DopplerFigureStoreFailure = "store-object-failed" | "store-index-failed";
@@ -701,7 +723,8 @@ export type DopplerFigureStoreFailure = "store-object-failed" | "store-index-fai
 export class DopplerFigureStoreError extends Error {
   constructor(
     readonly reason: DopplerFigureStoreFailure,
-    readonly cleanup: "deleted" | "failed" | "unavailable" | "none",
+    /** `kept`: verified uploads stay for the next attempt to adopt; nothing is deleted on a failure path. */
+    readonly cleanup: "kept" | "none",
     options: { cause: unknown },
   ) {
     super(`Doppler figures were not stored (${reason})`, options);
@@ -771,7 +794,19 @@ const magicCheck = (format: DopplerFigureFormat) => (head: Buffer, tail: Buffer,
 async function uploadChecked(args: {
   storage: DopplerFigureStorage; budgets: DopplerStoreBudgets; key: string; contentType: string; size: number;
   open: () => Promise<FileHandle>; check: StreamCheck; signal?: AbortSignal;
+  /** A figure file: created only if absent; an existing object must have exactly these bytes (`object-conflict`). */
+  createOnly?: boolean;
 }): Promise<void> {
+  const conditional = !!args.createOnly && !!args.storage.openStream &&
+    (args.size > DOPPLER_UPLOAD_SMALL_FILE_BYTES && args.storage.putStream ? !!args.storage.putStreamIfAbsent : !!args.storage.putBytesIfAbsent);
+  const settle = async (result: "created" | "exists" | void) => {
+    if (result !== "exists") return;
+    // Already there (a replayed upload, a retry, a concurrent writer of this run): accept identical bytes only.
+    const found = await objectDigest(args.storage as FigureObjectReader, args.key, args.size, args.signal);
+    if (!found || found.size !== args.size || (args.check.sha256 !== null && found.sha256 !== args.check.sha256)) {
+      throw new DopplerFigureRejection("object-conflict");
+    }
+  };
   const streaming = !!args.storage.putStream && args.size > DOPPLER_UPLOAD_SMALL_FILE_BYTES;
   const release = await reserve(args.budgets, streaming ? Math.min(args.size, 2 * DOPPLER_UPLOAD_CHUNK_BYTES) : args.size, args.signal);
   let handle: FileHandle | null = null;
@@ -780,13 +815,15 @@ async function uploadChecked(args: {
     handle = await args.open();
     if (streaming) {
       try {
-        await args.storage.putStream!(args.key, checkedFileStream(handle, args.check), args.size, args.contentType);
+        const body = checkedFileStream(handle, args.check);
+        await settle(conditional
+          ? await args.storage.putStreamIfAbsent!(args.key, body, args.size, args.contentType)
+          : await args.storage.putStream!(args.key, body, args.size, args.contentType));
       } catch (error) {
+        // A body that failed its check aborts the request, so no object was created; nothing is deleted (an object already
+        // at the key may be a committed figure).
         const check = error instanceof StreamCheckError ? error : (error as { cause?: unknown })?.cause instanceof StreamCheckError ? (error as { cause: StreamCheckError }).cause : null;
-        if (check) {
-          await args.storage.deleteKeys?.([args.key]).catch(() => undefined);
-          throw new DopplerFigureRejection(check.rule);
-        }
+        if (check) throw new DopplerFigureRejection(check.rule);
         throw error;
       }
       return;
@@ -802,7 +839,7 @@ async function uploadChecked(args: {
     if (total !== args.check.expectedSize || probe.bytesRead !== 0) throw new DopplerFigureRejection("file-changed");
     if (args.check.sha256 !== null && createHash("sha256").update(data).digest("hex") !== args.check.sha256) throw new DopplerFigureRejection("sha256-mismatch");
     if (args.check.magic && !args.check.magic(data.subarray(0, 64), data.subarray(-2), total)) throw new DopplerFigureRejection("wrong-magic");
-    await args.storage.putBytes(args.key, data, args.contentType);
+    await settle(conditional ? await args.storage.putBytesIfAbsent!(args.key, data, args.contentType) : await args.storage.putBytes(args.key, data, args.contentType));
   } finally {
     await handle?.close().catch(() => undefined);
     release();
@@ -820,8 +857,9 @@ async function openHostFile(file: string): Promise<{ size: number; open: () => P
  * Store a validated images folder in the document's Doppler folder (`DOPPLER_STORE_LAYOUT`): every image file at its page
  * path, uploaded concurrently (DopplerStoreBudgets.concurrency) within the fixed memory budget and verified while it
  * streams; then, once every file has landed and checked out, the manifest bytes unchanged, the page facts, the Markdown
- * as Doppler wrote it and `source.json`; DocSlurp's index last. Until the caller records the slots nothing is reachable;
- * any failure removes what this call wrote, best effort.
+ * as Doppler wrote it and `source.json`; DocSlurp's index last. Until the caller records the slots nothing is reachable.
+ * Nothing is deleted on any failure: verified files stay (pending or stored ledger rows let the next attempt adopt them;
+ * the orphan GC removes what no row vouches for).
  */
 export async function storeDopplerFigures(args: {
   storage: DopplerFigureStorage;
@@ -835,6 +873,8 @@ export async function storeDopplerFigures(args: {
   /** `source.json`; the folder has none when absent. */
   source?: DopplerSourcePointer | null;
   budgets?: DopplerStoreBudgets;
+  /** The ledger beside the upload: pending before each step of FIGURE_LEDGER_BATCH files, stored after it. */
+  ledger?: DopplerFigureLedgerHooks;
   signal?: AbortSignal;
 }): Promise<StoredDopplerFigures> {
   const started = Date.now();
@@ -850,14 +890,22 @@ export async function storeDopplerFigures(args: {
   let phase: DopplerFigureStoreFailure = "store-object-failed";
   let work: string | null = null;
   try {
-    // 1. Every image file, concurrently, each verified as it streams.
+    // 1. Every image file, concurrently, each created only if absent and verified as it streams; with the ledger, in steps of
+    //    FIGURE_LEDGER_BATCH: recorded pending, uploaded, flipped to stored (kept whatever later fails).
     for (const file of set.files) keys.set(file.id, key({ id: file.id, format: file.format }));
-    written.push(...keys.values());
-    await boundedPool(set.files, budgets.concurrency, (file) => uploadChecked({
-      storage: args.storage, budgets, key: keys.get(file.id)!, contentType: file.mediaType, size: file.size, signal: args.signal,
-      open: async () => (await openFolderFile(root, file.relative, file.size, file.cap)).handle,
-      check: { expectedSize: file.size, sha256: file.sha256, magic: magicCheck(file.format) },
-    }), args.signal);
+    const rows = args.ledger ? await extractedRows(set, keys) : null;
+    for (let at = 0; at < set.files.length; at += FIGURE_LEDGER_BATCH) {
+      const step = set.files.slice(at, at + FIGURE_LEDGER_BATCH);
+      if (args.ledger) await args.ledger.pending(step.map((file) => rows!.get(file.id)!));
+      written.push(...step.map((file) => keys.get(file.id)!));
+      await boundedPool(step, budgets.concurrency, (file) => uploadChecked({
+        storage: args.storage, budgets, key: keys.get(file.id)!, contentType: file.mediaType, size: file.size, signal: args.signal,
+        open: async () => (await openFolderFile(root, file.relative, file.size, file.cap)).handle,
+        check: { expectedSize: file.size, sha256: file.sha256, magic: magicCheck(file.format) }, createOnly: true,
+      }), args.signal);
+      args.signal?.throwIfAborted();
+      if (args.ledger) await args.ledger.stored(step.map((file) => ({ id: file.id, key: keys.get(file.id)! })));
+    }
     for (const file of set.files) slots.push({ slot: dopplerFigureSlot(file.id), uri: args.storage.uri(keys.get(file.id)!) });
     args.signal?.throwIfAborted();
 
@@ -939,11 +987,9 @@ export async function storeDopplerFigures(args: {
     const single = storedManifests.length === 1 && storedManifests[0]!.range === null ? storedManifests[0]! : null;
     return { indexUri: args.storage.uri(indexKey), slots, keys, manifest: single ? { key: single.key, sha256: single.sha256 } : null, manifests: storedManifests, stats };
   } catch (error) {
-    let cleanup: DopplerFigureStoreError["cleanup"] = "none";
-    if (written.length > 0) {
-      if (!args.storage.deleteKeys) cleanup = "unavailable";
-      else cleanup = await args.storage.deleteKeys(written).then(() => "deleted" as const, () => "failed" as const);
-    }
+    // Nothing is deleted (owner rule): verified uploads stay for the next attempt to adopt; the orphan GC removes what no
+    // ledger row vouches for.
+    const cleanup: DopplerFigureStoreError["cleanup"] = written.length > 0 ? "kept" : "none";
     // Cancellation stays cancellation: the caller must stop the document, not record a figure failure.
     if (args.signal?.aborted) throw error;
     // A file that does not match the manifest is a refused folder, like any other mismatch.
@@ -952,6 +998,17 @@ export async function storeDopplerFigures(args: {
   } finally {
     if (work) await rm(work, { recursive: true, force: true }).catch(() => undefined);
   }
+}
+
+/** The extracted rows of the set's files (from the spill), each with its key: what `pending` records. */
+async function extractedRows(set: DopplerFigureSet, keys: ReadonlyMap<string, string>): Promise<Map<string, DocumentAsset & { storageKey: string }>> {
+  const rows = new Map<string, DocumentAsset & { storageKey: string }>();
+  for await (const line of spillLines(set.ledger.spill)) {
+    const storageKey = keys.get(line.r.assetId);
+    if (line.r.status === "extracted" && storageKey) rows.set(line.r.assetId, { ...line.r, storageKey });
+  }
+  if (rows.size !== set.files.length) throw new DopplerFigureRejection("files-do-not-match-manifest");
+  return rows;
 }
 
 /** Write the index JSON from the spilled rows, streaming: `{version, documentId, markers, figures: [...]}`. */
@@ -1016,11 +1073,13 @@ async function downloadChecked(reader: DopplerFolderReader, key: string, file: s
 }
 
 /**
- * Rebuild `pdftomarkdown --images-resume`'s DIR from stored state, for a resume worker: the document's
- * `images/manifest.jsonl` (its SHA-256 must be the one the extraction level recorded) and every file it lists as
- * extracted, each downloaded from the key derived from its id (never a listing) to its page path and checked against the
- * manifest's size and SHA-256. Streamed throughout. `page-facts.jsonl` stays out: Doppler's DIR holds only the manifest
- * and page folders. `dir` must be empty or absent.
+ * Rebuild `pdftomarkdown --images-resume`'s DIR from stored state, for a resume worker: the document's (or one shard's)
+ * `manifest.jsonl`, whose SHA-256 must be the one the ledger recorded, validated line by line. By default that is all
+ * (`manifestOnly`): Doppler resumes from the manifest alone and writes only the images still to do, so finished figures
+ * never travel back into the VM (no transfer, no VM disk or memory for them). `manifestOnly: false` also downloads every
+ * file the manifest lists as extracted, each from the key derived from its id (never a listing) to its page path, checked
+ * against the manifest's size and SHA-256 (tests and debugging). Streamed throughout. `page-facts.jsonl` stays out.
+ * `dir` must be empty or absent.
  */
 export async function downloadDopplerImagesDir(args: {
   storage: DopplerFolderReader;
@@ -1029,16 +1088,24 @@ export async function downloadDopplerImagesDir(args: {
   manifestSha256: string;
   pageCount: number;
   dir: string;
+  /** One shard's manifest (`images/shards/<first>-<last>/manifest.jsonl`), validated against that range. */
+  shard?: { first: number; last: number };
+  /** Default true: the manifest only. */
+  manifestOnly?: boolean;
   signal?: AbortSignal;
 }): Promise<{ files: number; bytes: number }> {
   await mkdir(args.dir, { recursive: true, mode: 0o700 });
   const manifestPath = path.join(args.dir, DOPPLER_MANIFEST_V3_FILE);
-  await downloadChecked(args.storage, dopplerFolderKey(args.document, args.runId, "manifestV3"), manifestPath, { size: null, sha256: args.manifestSha256 }, args.signal);
+  const manifestKey = dopplerFolderKey(args.document, args.runId, args.shard ? { shard: [args.shard.first, args.shard.last] as const } : "manifestV3");
+  await downloadChecked(args.storage, manifestKey, manifestPath, { size: null, sha256: args.manifestSha256 }, args.signal);
   const caps = dopplerAssetCaps(args.pageCount);
-  const validator = new DopplerManifestV3Validator({ maxLines: caps.entries, maxPage: args.pageCount });
+  const validator = new DopplerManifestV3Validator({
+    maxLines: caps.entries, maxPage: args.pageCount, ...(args.shard ? { range: [args.shard.first, args.shard.last] as const } : {}),
+  });
   const root = await openRoot(args.dir);
   const files: Array<{ id: string; path: string; format: DopplerFigureFormat; bytes: number; sha256: string }> = [];
   await readManifestLines(root, validator, async ({ file }) => { if (file) files.push(file); }, args.signal);
+  if (args.manifestOnly !== false) return { files: 0, bytes: 0 };
   let bytes = 0;
   for (const file of files) {
     args.signal?.throwIfAborted();

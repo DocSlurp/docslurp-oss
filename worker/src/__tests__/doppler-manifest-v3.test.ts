@@ -254,7 +254,7 @@ describe("storing: fixed memory, bounded concurrency, verified streams", () => {
     expect(stored.stats.peakBufferBytes).toBeLessThanOrEqual(6 * 1024 * 1024);
   }, 60_000);
 
-  it("a file that fails verification midway aborts its upload and deletes the partial object, and nothing else stays", async () => {
+  it("a file that fails verification midway aborts its upload, creates no object and deletes nothing", async () => {
     await scanBook(6, 2 * 1024 * 1024);
     const set = await readDopplerFigureDir(dir, { pageCount: 6, expect: "complete" });
     // Changed after the read: same size, different bytes near the end.
@@ -267,9 +267,10 @@ describe("storing: fixed memory, bounded concurrency, verified streams", () => {
     expect(error).toBeInstanceOf(DopplerFigureRejection);
     expect(error.rule).toBe("sha256-mismatch");
     const { deleted, objects, order } = storage.stats();
-    expect(deleted).toContain(`user-1/run-1/doppler/${DOC.id}/images/page-0004/image-001.jpg`);
+    // The failed body aborted its own request (no object); nothing is deleted on a failure path (orphan GC only).
+    expect(deleted).toEqual([]);
     expect(order).not.toContain(`user-1/run-1/doppler/${DOC.id}/images/page-0004/image-001.jpg`);
-    expect(objects.size).toBe(0);
+    expect(objects.has(`user-1/run-1/doppler/${DOC.id}/images/page-0004/image-001.jpg`)).toBe(false);
     expect(order.some((key) => key.endsWith("manifest.jsonl"))).toBe(false);
   }, 60_000);
 

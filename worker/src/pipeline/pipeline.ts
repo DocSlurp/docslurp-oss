@@ -70,6 +70,9 @@ export interface CheckpointStore {
   recordPrivacyAudit?(entries: readonly PrivacyAuditEntry[]): Promise<void>;
   /** Document asset ledger and extraction level (db/document-asset-ledger.ts), in one org-scoped transaction. */
   writeDocumentAssetLedger?(write: import("../db/document-asset-ledger.js").DocumentAssetLedgerWrite): Promise<unknown>;
+  /** Figure uploads in progress (db/document-asset-ledger.ts): pending before each upload step, stored after it. */
+  markAssetsPending?(args: Parameters<typeof import("../db/document-asset-ledger.js").markAssetsPending>[1]): Promise<unknown>;
+  markAssetsStored?(args: Parameters<typeof import("../db/document-asset-ledger.js").markAssetsStored>[1]): Promise<unknown>;
   /** Per-page ingest facts (ingest report); best effort, idempotent per (document, page). */
   upsertPageFacts?(rows: readonly PageFactUpsert[]): Promise<void>;
   /** Reserves Fast page-image renders from the run's shared budget (db/fast-page-image-budget.ts). */

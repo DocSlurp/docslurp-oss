@@ -50,9 +50,19 @@ export const estimateProfileSchema = z.strictObject({
   workerSlots: z.number().int().positive().optional(),
   /** Stages an upload runs; only shown in the estimate's basis. */
   stageCount: z.number().int().nonnegative(),
+  /**
+   * Whether this deployment extracts figures (DOCSLURP_DOPPLER_IMAGE_EXTRACT): stored figure files are billed as storage,
+   * measured after the fact. A pricing provider may show them as an informational hosting line; omitted means unknown.
+   */
+  figures: z.boolean().optional(),
   billing: z.enum(["enforced", "disabled"]),
 });
 export type EstimateProfile = z.infer<typeof estimateProfileSchema>;
+
+/** DOCSLURP_DOPPLER_IMAGE_EXTRACT as the worker reads it (`1`/`true`/`on`); anything else is off for an estimate. */
+function figuresOn(env: Record<string, string | undefined>): boolean {
+  return ["1", "true", "on"].includes((env.DOCSLURP_DOPPLER_IMAGE_EXTRACT ?? "").trim().toLowerCase());
+}
 
 /** Reduce a project pipeline to its EstimateProfile, exactly as the upload estimate prices it. */
 export function estimateProfileFor(
@@ -72,6 +82,7 @@ export function estimateProfileFor(
     videoFrames: pipeline.mediaVideo?.enabled !== false,
     ...(options.workerSlots ? { workerSlots: options.workerSlots } : {}),
     stageCount: stages.length,
+    figures: figuresOn(options.env),
     billing: isBillingEnforced(options.env) ? "enforced" : "disabled",
   };
 }
@@ -86,8 +97,11 @@ export type QuoteFile = UploadMediaFile & {
   pageEquivalents?: number;
   /** The high end of the page equivalents (profilePageEquivalentRange): wider when text was estimated or pages unsampled. */
   pageEquivalentsHigh?: number;
-  /** For a document already processed: its pages and how many a model read, as the worker recorded them (trusted). */
-  measured?: { pages: number; readPages: number };
+  /**
+   * For a document already processed: its pages and how many a model read, as the worker recorded them (trusted), and the
+   * bytes of its stored figure files (the asset ledger's level, billed as storage like the source).
+   */
+  measured?: { pages: number; readPages: number; assetBytes?: number };
   profile?: FileProfile;
 };
 

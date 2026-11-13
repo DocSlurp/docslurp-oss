@@ -241,6 +241,26 @@ describe("estimate twins answer the unified quote from measured documents", () =
     expect(file).toMatchObject({ pages: 9, measured: { pages: 9, readPages: 2 }, type: "application/pdf" });
   });
 
+  it("measured figure bytes ride on the quote file (measured.assetBytes) and the open stored-bytes model adds them, scoped to the org", async () => {
+    const { storedQuoteFiles } = await import("../services/stored-quote.js");
+    const { openStoredBytes } = await import("@docslurp/shared");
+    const [plain] = await storedQuoteFiles({ orgId: "o1", projectId: "w" });
+    await sql`insert into document_extraction_levels (document_id, org_id, project_id, images_status, asset_bytes) values ('d1', 'o1', 'w', 'complete', 7000)`;
+    try {
+      const [file] = await storedQuoteFiles({ orgId: "o1", projectId: "w" });
+      expect(file!.measured).toMatchObject({ assetBytes: 7000 });
+      const pages = { low: file!.pages!, central: file!.pages!, high: file!.pages! };
+      const settings = { indexing: "full" } as never;
+      const withFigures = openStoredBytes(file!, pages as never, settings);
+      const without = openStoredBytes(plain!, pages as never, settings);
+      expect(withFigures.low - without.low).toBe(7000);
+      // Another org's scope never sees them.
+      expect(await storedQuoteFiles({ orgId: "o2", projectId: "w" })).toEqual([]);
+    } finally {
+      await sql`delete from document_extraction_levels where document_id = 'd1'`;
+    }
+  });
+
   it("keeps measured, assumed and measured-empty documents apart (council F #3)", async () => {
     const { storedQuoteFiles } = await import("../services/stored-quote.js");
     const docx = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";

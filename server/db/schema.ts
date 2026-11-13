@@ -3595,6 +3595,8 @@ export const documentAssets = pgTable("document_assets", {
   linkPath: text("link_path"),
   fileOf: text("file_of"),
   storageKey: text("storage_key"),
+  // Migration 0143: none (no file), pending (written before its upload), stored (landed and checked; served and billed).
+  storageState: text("storage_state").default("none").notNull(),
   objNum: integer("obj_num"),
   objGen: integer("obj_gen"),
   bbox: doublePrecision().array(),
@@ -3646,6 +3648,8 @@ export const documentExtractionLevels = pgTable("document_extraction_levels", {
   sourceDecode: integer("source_decode").default(0).notNull(),
   sourceRender: integer("source_render").default(0).notNull(),
   assetBytes: bigint("asset_bytes", { mode: "number" }).default(0).notNull(),
+  // Migration 0143: false after a re-run that skipped the figure step (rows kept, not served, counted or billed).
+  assetsCurrent: boolean("assets_current").default(true).notNull(),
   gaps: jsonb(),
   shards: integer().default(0).notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),

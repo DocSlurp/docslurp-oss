@@ -24,7 +24,7 @@ import {
 import { markFirstPassServedFigures, sandboxedPdfLayoutFacts, sandboxedPdfProvider, type SandboxedPdfFigureOutcome, type SandboxedPdfJob, type SandboxedPdfResult } from "../extractors/plugins.js";
 import type { PageLayoutFacts } from "../lib/page-layout-facts.js";
 import { DopplerFigureRejection, disposeDopplerFigureSet, dopplerSourcePointer, readDopplerFigureDir, storeDopplerFigures, type DopplerFigureStorage } from "../extractors/doppler-figures.js";
-import { ledgerWriteForFailedFigures, ledgerWriteForStoredFigures, queueAssetLedger } from "../db/document-asset-ledger.js";
+import { figureLedgerHooks, ledgerWriteForFailedFigures, ledgerWriteForStoredFigures, queueAssetLedger } from "../db/document-asset-ledger.js";
 import { planFirstPassBatches, type FirstPassBatchLimits } from "../temporal/first-pass-batches.js";
 import { sniffedPdf } from "../lib/sniffed-pdf.js";
 import { trustedTempDownloadPattern } from "../lib/temp-file-names.js";
@@ -640,6 +640,8 @@ export async function storeFirstPassFigures(args: {
     return { stats: { dopplerFigures: { status: "extraction-failed", ledger } } };
   }
   let figures: Awaited<ReturnType<typeof readDopplerFigureDir>> | null = null;
+  // Pending, then stored, per upload step: kept whatever later fails (owner rule).
+  const ledgerHooks = figureLedgerHooks(state, documentId);
   try {
     figures = await readDopplerFigureDir(args.dir, {
       pageCount: document.pageCount, signal: args.signal, expect: outcome.status === "partial" ? "partial" : "complete",
@@ -648,6 +650,7 @@ export async function storeFirstPassFigures(args: {
     const stored = await storeDopplerFigures({
       storage: args.storage, document, runId: args.runId, figures, markdown: args.markdown,
       dopplerMarkdownPath: args.markdownPath, source: dopplerSourcePointer(document), signal: args.signal,
+      ...(ledgerHooks ? { ledger: ledgerHooks } : {}),
     });
     for (const { slot, uri } of stored.slots) state.artifactLedger.recordDocument(documentId, slot, uri);
     // The ledger write takes over the reader's spill (it removes it once written).

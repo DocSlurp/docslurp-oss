@@ -46,50 +46,42 @@ async function rejection(pageCount = 10): Promise<string> {
   throw new Error("expected a rejection");
 }
 
-describe("storeDopplerFigures: a failed upload stores nothing", () => {
-  const recordingStorage = (fail: { bytes?: string; json?: boolean }, withDelete = true) => {
+describe("storeDopplerFigures: a failed upload records nothing and deletes nothing", () => {
+  const recordingStorage = (fail: { bytes?: string; json?: boolean }) => {
     const live = new Set<string>();
     const storage = {
       putBytes: vi.fn(async (key: string) => {
         if (fail.bytes && key.endsWith(fail.bytes)) throw new Error("boom");
         live.add(key);
-        // The index write lands, then fails: it must be removed too.
         if (fail.json && key.endsWith("/index.json")) throw new Error("boom");
       }),
       putJson: vi.fn(async (key: string) => { live.add(key); if (fail.json) throw new Error("boom"); }),
       uri: (key: string) => `s3://bucket/${key}`,
-      ...(withDelete ? { deleteKeys: vi.fn(async (keys: string[]) => { for (const key of keys) live.delete(key); }) } : {}),
+      deleteKeys: vi.fn(async (keys: string[]) => { for (const key of keys) live.delete(key); }),
     };
     return { storage, live };
   };
 
-  it("an object failure deletes the files already written and names the phase", async () => {
+  it("an object failure names the phase, writes nothing after the files and deletes nothing (the next attempt adopts)", async () => {
     const set = await readDopplerFigureDir(dir, { pageCount: 5 });
     const { storage, live } = recordingStorage({ bytes: "/page-0005/figure-001.png" });
     const error = await storeDopplerFigures({ storage, document: DOC, runId: "run-1", figures: set, markdown: "" }).catch((e) => e);
     expect(error).toBeInstanceOf(DopplerFigureStoreError);
-    expect(error).toMatchObject({ reason: "store-object-failed", cleanup: "deleted" });
-    // Nothing after the files (the manifest, the index) is written once a file failed.
+    expect(error).toMatchObject({ reason: "store-object-failed", cleanup: "kept" });
     expect(storage.putBytes.mock.calls.some(([key]) => String(key).endsWith("manifest.json") || String(key).endsWith("index.json"))).toBe(false);
-    expect(live.size).toBe(0);
+    expect(storage.deleteKeys).not.toHaveBeenCalled();
+    expect(live.size).toBe(2);
   });
 
-  it("an index failure deletes the files and the index, even when the index write landed", async () => {
+  it("an index failure keeps the files and deletes nothing", async () => {
     const set = await readDopplerFigureDir(dir, { pageCount: 5 });
-    const { storage, live } = recordingStorage({ json: true });
+    const { storage } = recordingStorage({ json: true });
     const error = await storeDopplerFigures({ storage, document: DOC, runId: "run-1", figures: set, markdown: "" }).catch((e) => e);
-    expect(error).toMatchObject({ reason: "store-index-failed", cleanup: "deleted" });
-    expect(live.size).toBe(0);
+    expect(error).toMatchObject({ reason: "store-index-failed", cleanup: "kept" });
+    expect(storage.deleteKeys).not.toHaveBeenCalled();
   });
 
-  it("without deleteKeys the failure still reports, with cleanup unavailable", async () => {
-    const set = await readDopplerFigureDir(dir, { pageCount: 5 });
-    const { storage } = recordingStorage({ json: true }, false);
-    await expect(storeDopplerFigures({ storage, document: DOC, runId: "run-1", figures: set, markdown: "" }))
-      .rejects.toMatchObject({ reason: "store-index-failed", cleanup: "unavailable" });
-  });
-
-  it("cancellation stays an abort, not a figure failure", async () => {
+  it("cancellation stays an abort, not a figure failure, and deletes nothing", async () => {
     const set = await readDopplerFigureDir(dir, { pageCount: 5 });
     const controller = new AbortController();
     const { storage, live } = recordingStorage({});
@@ -97,19 +89,22 @@ describe("storeDopplerFigures: a failed upload stores nothing", () => {
     const error = await storeDopplerFigures({ storage, document: DOC, runId: "run-1", figures: set, markdown: "", signal: controller.signal }).catch((e) => e);
     expect(error).not.toBeInstanceOf(DopplerFigureStoreError);
     expect(error.name).toBe("AbortError");
-    expect(live.size).toBe(0);
+    expect(storage.deleteKeys).not.toHaveBeenCalled();
   });
 
-  it("cancellation during a successful final index write records no slots and removes everything written", async () => {
+  it("with ledger hooks: every file is pending before its upload and stored after it", async () => {
     const set = await readDopplerFigureDir(dir, { pageCount: 5 });
-    const controller = new AbortController();
-    const { storage, live } = recordingStorage({});
-    storage.putBytes.mockImplementation(async (key: string) => { live.add(key); if (key.endsWith("/index.json")) controller.abort(); });
-    const error = await storeDopplerFigures({ storage, document: DOC, runId: "run-1", figures: set, markdown: "", signal: controller.signal }).catch((e) => e);
-    expect(error).not.toBeInstanceOf(DopplerFigureStoreError);
-    expect(error.name).toBe("AbortError");
-    expect(storage.deleteKeys).toHaveBeenCalledTimes(1);
-    expect(live.size).toBe(0);
+    const events: string[] = [];
+    const { storage } = recordingStorage({});
+    storage.putBytes.mockImplementation(async (key: string) => { if (/\/page-\d{4}\//.test(key)) events.push("put"); });
+    await storeDopplerFigures({
+      storage, document: DOC, runId: "run-1", figures: set, markdown: "",
+      ledger: {
+        pending: async (rows) => { events.push(`pending ${rows.map((row) => row.assetId).join(",")}`); },
+        stored: async (files) => { events.push(`stored ${files.map((file) => file.id).join(",")}`); },
+      },
+    });
+    expect(events).toEqual(["pending p3.1,p3.g2,p5.g1", "put", "put", "put", "stored p3.1,p3.g2,p5.g1"]);
   });
 });
 

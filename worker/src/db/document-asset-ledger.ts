@@ -12,6 +12,7 @@
  */
 import { rm } from "node:fs/promises";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import type { JSONValue, Sql } from "postgres";
 import {
   DOCUMENT_IMAGES_STATUSES, DOPPLER_BUILD, DOPPLER_MANIFEST_V2_LIMITS, DOPPLER_MANIFEST_V3_FILE, DOPPLER_STORE_LAYOUT,
@@ -20,7 +21,7 @@ import {
   parseDopplerFigureId, type DocumentAsset, type DocumentImagesStatus, type DopplerFigureGap, type DopplerManifestRunFacts,
 } from "@docslurp/shared";
 
-import { readLedgerSpill, type DopplerFigureSet } from "../extractors/doppler-figures.js";
+import { readLedgerSpill, type DopplerFigureLedgerHooks, type DopplerFigureSet } from "../extractors/doppler-figures.js";
 
 /** Who the rows belong to. Every query is filtered by `orgId` (and `projectId`), never by the document id alone. */
 export interface DocumentAssetLedgerScope {
@@ -78,13 +79,19 @@ export interface DocumentAssetLedgerWrite {
   resume?: boolean | { first: number; last: number };
   /** The shard manifests of a sharded document (all of them; a shard resume names exactly its own). */
   shards?: readonly LedgerShard[];
+  /**
+   * The level only (writeFigureLevel): never touches or deletes a row. The failed-figures and no-figures writes: figures
+   * an attempt already stored are kept (owner rule: orphan GC is the only deleter).
+   */
+  levelOnly?: boolean;
 }
 
 /** Resumes a document may have before the resume queue leaves it alone (counted by the host, not the manifest). */
 export const DOCUMENT_ASSET_RESUME_CAP = 3;
 
 export type DocumentAssetLedgerRule =
-  | "invalid-scope" | "invalid-assets" | "invalid-level" | "scope-mismatch" | "key-mismatch" | "stale-write" | "resume-cap" | "write-mismatch";
+  | "invalid-scope" | "invalid-assets" | "invalid-level" | "scope-mismatch" | "key-mismatch" | "stale-write" | "resume-cap" | "write-mismatch"
+  | "resume-rewrite";
 
 /** A write refused before anything reached the database, or one the database state refused. Fixed messages. */
 export class DocumentAssetLedgerError extends Error {
@@ -195,6 +202,8 @@ function assetPayload(asset: LedgerAsset) {
     reason: asset.reason, resumable: asset.resumable, source: asset.source, format: asset.format, bytes: asset.bytes,
     sha256: asset.sha256, width: asset.width, height: asset.height, repeat_of: asset.repeatOf, fallback: asset.fallback,
     link_path: asset.linkPath, file_of: asset.fileOf, storage_key: asset.storageKey,
+    // A full write follows its uploads (all landed and verified): its files are stored.
+    storage_state: asset.status === "extracted" ? "stored" : "none",
     obj_num: asset.obj?.[0] ?? null, obj_gen: asset.obj?.[1] ?? null, bbox: asset.bbox,
   };
 }
@@ -217,6 +226,13 @@ export interface DocumentAssetLedgerResult { upserted: number; removed: number; 
  */
 export async function writeDocumentAssetLedger(sql: Sql<Record<string, unknown>>, write: DocumentAssetLedgerWrite): Promise<DocumentAssetLedgerResult> {
   assertScope(write.scope);
+  if (write.levelOnly) {
+    await writeFigureLevel(sql, {
+      scope: write.scope, markdownComplete: write.level.markdownComplete, imagesStatus: write.level.imagesStatus,
+      exitCode: write.level.imagesExitCode, build: write.level.dopplerBuild, gaps: write.level.gaps ?? null,
+    });
+    return { upserted: 0, removed: 0, resumes: 0 };
+  }
   // The level is checked before the transaction; its counts against the rows once they have streamed through.
   checkedLevel(write.level, write.level.imagesStatus === "resumable" ? 1 : 0);
   const { orgId, projectId, documentId, runId } = write.scope;
@@ -250,6 +266,7 @@ export async function writeDocumentAssetLedger(sql: Sql<Record<string, unknown>>
     const manifestKeys = [DOPPLER_STORE_LAYOUT.manifest, DOPPLER_MANIFEST_V3_FILE].map((name) => `${prefix}${DOPPLER_STORE_LAYOUT.imagesFolder}${name}`);
     if (write.level.manifest && !manifestKeys.includes(write.level.manifest.key)) throw new DocumentAssetLedgerError("key-mismatch");
     const shardResume = typeof write.resume === "object" && write.resume !== null ? write.resume : null;
+    const resuming = write.resume === true || shardResume !== null;
     const shards = checkedShards(write.shards ?? [], `${prefix}${DOPPLER_STORE_LAYOUT.imagesFolder}`);
     if (shards.length > 0 && write.level.manifest) throw new DocumentAssetLedgerError("invalid-level");
     const priorResumes = previous?.resumes ?? 0;
@@ -286,36 +303,39 @@ export async function writeDocumentAssetLedger(sql: Sql<Record<string, unknown>>
     let last: [number, number, number] | null = null;
     const upsert = async () => {
       if (batch.length === 0) return;
+      if (resuming) await refuseResumeRewrites(tx, write.scope, batch);
       const payload = batch.map(assetPayload);
       batch = [];
       const written = await tx`
         insert into document_assets (document_id, org_id, project_id, run_id, asset_id, page_number, kind, fate, status, reason,
           resumable, source, format, bytes, sha256, width, height, repeat_of, fallback, link_path, file_of, storage_key, obj_num,
-          obj_gen, bbox)
+          obj_gen, bbox, storage_state)
         select ${documentId}, ${orgId}, ${projectId}, ${runId}, r.asset_id, r.page_number, r.kind, r.fate, r.status, r.reason,
           r.resumable, r.source, r.format, r.bytes, r.sha256, r.width, r.height, r.repeat_of, r.fallback, r.link_path, r.file_of,
-          r.storage_key, r.obj_num, r.obj_gen, r.bbox
+          r.storage_key, r.obj_num, r.obj_gen, r.bbox, r.storage_state
         from jsonb_to_recordset(${tx.json(payload as unknown as JSONValue)}::jsonb) as r(
           asset_id text, page_number integer, kind text, fate text, status text, reason text, resumable boolean, source text,
           format text, bytes integer, sha256 text, width integer, height integer, repeat_of text, fallback text, link_path text,
-          file_of text, storage_key text, obj_num integer, obj_gen integer, bbox double precision[])
+          file_of text, storage_key text, obj_num integer, obj_gen integer, bbox double precision[], storage_state text)
         on conflict (document_id, asset_id) do update
         set run_id = excluded.run_id, page_number = excluded.page_number, kind = excluded.kind, fate = excluded.fate,
             status = excluded.status, reason = excluded.reason, resumable = excluded.resumable, source = excluded.source,
             format = excluded.format, bytes = excluded.bytes, sha256 = excluded.sha256, width = excluded.width,
             height = excluded.height, repeat_of = excluded.repeat_of, fallback = excluded.fallback, link_path = excluded.link_path,
             file_of = excluded.file_of, storage_key = excluded.storage_key, obj_num = excluded.obj_num, obj_gen = excluded.obj_gen,
-            bbox = excluded.bbox, updated_at = now()
+            bbox = excluded.bbox, storage_state = excluded.storage_state, updated_at = now()
         where document_assets.org_id = excluded.org_id and document_assets.project_id = excluded.project_id
+          -- A resume only adds: a stored file is never rewritten by one (refuseResumeRewrites refused another file for it).
+          ${resuming ? tx`and document_assets.storage_state <> 'stored'` : tx``}
           and (document_assets.run_id, document_assets.page_number, document_assets.kind, document_assets.fate, document_assets.status,
             document_assets.reason, document_assets.resumable, document_assets.source, document_assets.format, document_assets.bytes,
             document_assets.sha256, document_assets.width, document_assets.height, document_assets.repeat_of, document_assets.fallback,
             document_assets.link_path, document_assets.file_of, document_assets.storage_key, document_assets.obj_num,
-            document_assets.obj_gen, document_assets.bbox)
+            document_assets.obj_gen, document_assets.bbox, document_assets.storage_state)
           is distinct from (excluded.run_id, excluded.page_number, excluded.kind, excluded.fate, excluded.status, excluded.reason,
             excluded.resumable, excluded.source, excluded.format, excluded.bytes, excluded.sha256, excluded.width, excluded.height,
             excluded.repeat_of, excluded.fallback, excluded.link_path, excluded.file_of, excluded.storage_key, excluded.obj_num,
-            excluded.obj_gen, excluded.bbox)
+            excluded.obj_gen, excluded.bbox, excluded.storage_state)
         returning 1`;
       upserted += written.length;
     };
@@ -325,6 +345,9 @@ export async function writeDocumentAssetLedger(sql: Sql<Record<string, unknown>>
       const gone = await tx`
         delete from document_assets a
         where a.org_id = ${orgId} and a.project_id = ${projectId} and a.document_id = ${documentId}
+          -- A resume never prunes a stored file. A fresh pass may, when its manifest no longer lists it; the orphan GC then
+          -- removes the object.
+          ${resuming ? tx`and a.storage_state <> 'stored'` : tx``}
           and a.page_number >= ${pruneFrom} ${to === null ? tx`` : tx`and a.page_number <= ${to}`}
           and not exists (select 1 from unnest(${tx.array(keepIds)}::text[]) as keep(id) where keep.id = a.asset_id)
         returning 1`;
@@ -398,7 +421,8 @@ export async function writeDocumentAssetLedger(sql: Sql<Record<string, unknown>>
         count(*) filter (where status = 'not-extracted')::int as not_extracted, count(*) filter (where status = 'unlinked')::int as unlinked,
         count(*) filter (where resumable)::int as resumable, count(*) filter (where source = 'copy')::int as copy,
         count(*) filter (where source = 'decode')::int as decode, count(*) filter (where source = 'render')::int as render,
-        coalesce(sum(bytes), 0)::text as bytes
+        -- Billed bytes: files whose upload landed and checked out.
+        coalesce(sum(bytes) filter (where storage_state = 'stored'), 0)::text as bytes
       from document_assets where document_id = ${documentId} and org_id = ${orgId} and project_id = ${projectId}`;
     const [shardState] = await tx<Array<{ n: number; incomplete: number; resumes: number; cut: number | null; source: string | null }>>`
       select count(*)::int as n, count(*) filter (where images_status <> 'complete')::int as incomplete,
@@ -442,7 +466,7 @@ export async function writeDocumentAssetLedger(sql: Sql<Record<string, unknown>>
           assets_extracted = excluded.assets_extracted, assets_not_extracted = excluded.assets_not_extracted,
           assets_unlinked = excluded.assets_unlinked, assets_resumable = excluded.assets_resumable,
           source_copy = excluded.source_copy, source_decode = excluded.source_decode, source_render = excluded.source_render,
-          asset_bytes = excluded.asset_bytes, gaps = excluded.gaps, shards = excluded.shards, updated_at = now()
+          asset_bytes = excluded.asset_bytes, gaps = excluded.gaps, shards = excluded.shards, assets_current = true, updated_at = now()
       where document_extraction_levels.org_id = excluded.org_id and document_extraction_levels.project_id = excluded.project_id
       returning 1`;
     if (leveled.length !== 1) throw new DocumentAssetLedgerError("write-mismatch");
@@ -472,6 +496,8 @@ export interface PendingAssetLedgerWrite {
   assets: LedgerAssets;
   shards?: readonly LedgerShard[];
   resume?: boolean | { first: number; last: number };
+  /** The level only, never a row (DocumentAssetLedgerWrite.levelOnly). */
+  levelOnly?: boolean;
 }
 
 /** The ledger write for a stored figure set: every image, streamed back from the reader's spill. */
@@ -509,7 +535,10 @@ export async function disposePendingAssetLedger(write: PendingAssetLedgerWrite |
   }
 }
 
-/** The ledger write for a figure step that stored nothing: no asset rows (older ones go), images failed. */
+/**
+ * The ledger write for a figure step that stored nothing new: images failed. Level only (owner rule): rows an attempt of
+ * this run already stored are kept, and the status follows them (writeFigureLevel); nothing is deleted.
+ */
 export function ledgerWriteForFailedFigures(args: { outcome: Omit<FigureStepOutcome, "status"> }): PendingAssetLedgerWrite {
   return {
     level: {
@@ -517,15 +546,18 @@ export function ledgerWriteForFailedFigures(args: { outcome: Omit<FigureStepOutc
       run: null, manifest: null, gaps: args.outcome.gaps ?? null,
     },
     assets: [],
+    levelOnly: true,
   };
 }
 
 /**
  * The level for committed Markdown whose figure step did not run: `disabled` (figures off for the run) or `none` (another
- * extractor won, the document is not a PDF, or no VM). No assets: older rows (and a stale resumable state) go.
+ * extractor won, the document is not a PDF, or no VM). Level only: the document leaves the resume queue (MEDIUM-3: the
+ * level is this run's, with no rows of this run), while rows an earlier run stored stay as unserved, unbilled evidence
+ * until the orphan GC or the run's purge (only rows of the level's run are served, counted and billed).
  */
 export function ledgerWriteForNoFigures(status: "none" | "disabled"): PendingAssetLedgerWrite {
-  return { level: { imagesStatus: status, imagesExitCode: null, manifestVersion: null, dopplerBuild: null, run: null, manifest: null }, assets: [] };
+  return { level: { imagesStatus: status, imagesExitCode: null, manifestVersion: null, dopplerBuild: null, run: null, manifest: null }, assets: [], levelOnly: true };
 }
 
 // ---- Reading: the resume queue ----
@@ -580,6 +612,9 @@ export async function listResumableDocuments(
         s.resumes, s.assets_resumable, s.last_cut_page, s.updated_at as at
       from document_extraction_shards s
       join documents d on d.id = s.document_id and d.org_id = s.org_id and d.project_id = s.project_id
+      -- Only shards of the current level (MEDIUM-3: a re-run without the figure step takes the document off the queue).
+      join document_extraction_levels lv on lv.document_id = s.document_id and lv.org_id = s.org_id and lv.assets_current
+        and lv.images_status = 'resumable' and lv.run_id is not distinct from s.run_id
       where s.org_id = ${args.orgId} and s.images_status = 'resumable' and s.resumes < ${DOCUMENT_ASSET_RESUME_CAP} ${project("s")}
         and d.superseded_at is null and d.archived_at is null and d.purged_at is null
     ) work
@@ -654,6 +689,7 @@ async function flushOne(
       assets: entry.assets,
       ...(entry.shards ? { shards: entry.shards } : {}),
       ...(entry.resume ? { resume: entry.resume } : {}),
+      ...(entry.levelOnly ? { levelOnly: true } : {}),
     });
     return "written";
   } catch (error) {
@@ -666,4 +702,357 @@ async function flushOne(
     console.warn(`[asset-ledger] document=${documentId} status=failed error=${error instanceof Error ? error.name : typeof error}${typeof code === "string" ? ` code=${code}` : ""}`);
     return "failed";
   }
+}
+
+// ---- Figures kept on every failure path: pending and stored rows, adopt, level-only writes (migration 0143) ----
+
+type Tx = import("postgres").TransactionSql<Record<string, unknown>>;
+
+/**
+ * Inside a transaction: serialize writers of one document, check the scope against the document (else `scope-mismatch`)
+ * and the run against the document's current run, not older than the level's writer (else `stale-write`, the same rule as
+ * writeDocumentAssetLedger). Returns the document's artifact root.
+ */
+async function lockAndCheck(tx: Tx, scope: DocumentAssetLedgerScope): Promise<{ root: string; level: { run_id: string | null } | undefined }> {
+  const { orgId, projectId, documentId, runId } = scope;
+  await tx`select pg_advisory_xact_lock(hashtext(${`document-assets:${documentId}`}))`;
+  const [document] = await tx<{ user_id: string; run_id: string | null }[]>`
+    select user_id, run_id from documents where id = ${documentId} and org_id = ${orgId} and project_id = ${projectId} for key share`;
+  if (!document) throw new DocumentAssetLedgerError("scope-mismatch");
+  const [run] = await tx<{ storage_prefix: string | null }[]>`
+    select storage_prefix from project_runs where id = ${runId} and org_id = ${orgId} and project_id = ${projectId}`;
+  if (!run) throw new DocumentAssetLedgerError("scope-mismatch");
+  if (document.run_id !== runId) throw new DocumentAssetLedgerError("stale-write");
+  const [level] = await tx<{ run_id: string | null; newer: boolean }[]>`
+    select l.run_id, coalesce(l.run_id <> ${runId} and r.created_at > (select created_at from project_runs where id = ${runId}), false) as newer
+    from document_extraction_levels l left join project_runs r on r.id = l.run_id
+    where l.document_id = ${documentId} and l.org_id = ${orgId} and l.project_id = ${projectId}`;
+  if (level?.newer) throw new DocumentAssetLedgerError("stale-write");
+  return { root: run.storage_prefix ?? `${document.user_id}/${runId}`, level };
+}
+
+/** A resume batch: an image that already has a stored file must come back with that same file (else `resume-rewrite`). */
+async function refuseResumeRewrites(tx: Tx, scope: DocumentAssetLedgerScope, rows: readonly LedgerAsset[]): Promise<void> {
+  const stored = await tx<Array<{ asset_id: string; sha256: string | null; format: string | null }>>`
+    select asset_id, sha256, format from document_assets
+    where org_id = ${scope.orgId} and project_id = ${scope.projectId} and document_id = ${scope.documentId} and storage_state = 'stored'
+      and asset_id = any(${tx.array(rows.map((row) => row.assetId))}::text[])`;
+  const byId = new Map(stored.map((row) => [row.asset_id, row]));
+  for (const row of rows) {
+    const old = byId.get(row.assetId);
+    if (old && (row.status !== "extracted" || row.sha256 !== old.sha256 || row.format !== old.format)) throw new DocumentAssetLedgerError("resume-rewrite");
+  }
+}
+
+/**
+ * Recount the level from the rows of its run (rows an earlier run left are never counted, served or billed as current)
+ * and set its status: resumable while any image a resume would retry remains; otherwise `fallback` when the run has no
+ * rows (a skipped or failed figure step), else partial or complete as the rows show.
+ */
+async function recountLevel(tx: Tx, scope: DocumentAssetLedgerScope, fallback: DocumentImagesStatus | null): Promise<void> {
+  const { orgId, projectId, documentId, runId } = scope;
+  const [t] = await tx<Array<{ total: number; extracted: number; not_extracted: number; unlinked: number; resumable: number; pending: number; copy: number; decode: number; render: number; bytes: string }>>`
+    select count(*)::int as total, count(*) filter (where status = 'extracted')::int as extracted,
+      count(*) filter (where status = 'not-extracted')::int as not_extracted, count(*) filter (where status = 'unlinked')::int as unlinked,
+      count(*) filter (where resumable)::int as resumable, count(*) filter (where storage_state = 'pending')::int as pending,
+      count(*) filter (where source = 'copy')::int as copy, count(*) filter (where source = 'decode')::int as decode,
+      count(*) filter (where source = 'render')::int as render,
+      coalesce(sum(bytes) filter (where storage_state = 'stored'), 0)::text as bytes
+    from document_assets where document_id = ${documentId} and org_id = ${orgId} and project_id = ${projectId} and run_id = ${runId}`;
+  const status: DocumentImagesStatus = t!.resumable > 0 ? "resumable"
+    : t!.total === 0 ? (fallback ?? "none")
+    : fallback === "complete" && t!.pending === 0 ? "complete" : "partial";
+  await tx`
+    update document_extraction_levels set run_id = ${runId}, images_status = ${status}, assets_current = true,
+      assets_total = ${t!.total}, assets_extracted = ${t!.extracted}, assets_not_extracted = ${t!.not_extracted},
+      assets_unlinked = ${t!.unlinked}, assets_resumable = ${t!.resumable}, source_copy = ${t!.copy}, source_decode = ${t!.decode},
+      source_render = ${t!.render}, asset_bytes = ${t!.bytes}::bigint, updated_at = now()
+    where document_id = ${documentId} and org_id = ${orgId} and project_id = ${projectId}`;
+}
+
+/**
+ * The level only (the failed-figures and no-figures writes, and the level a delivery keeps before the Markdown commits):
+ * never touches or deletes a row. The level becomes this run's: a re-run that skipped the figure step takes the document
+ * off the resume queue (`none`/`disabled`, MEDIUM-3), and figures this run already stored keep an honest status.
+ */
+export async function writeFigureLevel(
+  sql: Sql<Record<string, unknown>>,
+  args: { scope: DocumentAssetLedgerScope; markdownComplete: boolean; imagesStatus: DocumentImagesStatus; exitCode?: number | null; build?: string | null; gaps?: readonly DopplerFigureGap[] | null },
+): Promise<void> {
+  assertScope(args.scope);
+  const exitCode = args.exitCode ?? null;
+  const build = args.build ?? null;
+  if (!DOCUMENT_IMAGES_STATUSES.includes(args.imagesStatus) || (exitCode !== null && !(Number.isSafeInteger(exitCode) && exitCode >= 0 && exitCode <= 255)) ||
+      (build !== null && !DOPPLER_BUILD.test(build)) || (args.gaps != null && (!Array.isArray(args.gaps) || args.gaps.length > DOPPLER_FIGURE_GAPS_MAX))) {
+    throw new DocumentAssetLedgerError("invalid-level");
+  }
+  const gaps = args.gaps && args.gaps.length > 0 ? args.gaps.map((gap) => ({ first: gap.first, last: gap.last, reason: (DOPPLER_FIGURE_GAP_REASONS as readonly string[]).includes(gap.reason) ? gap.reason : "other" })) : null;
+  const { orgId, projectId, documentId, runId } = args.scope;
+  await sql.begin(async (tx) => {
+    await lockAndCheck(tx, args.scope);
+    const leveled = await tx`
+      insert into document_extraction_levels (document_id, org_id, project_id, run_id, markdown_complete, images_status, images_exit_code, doppler_build, gaps)
+      values (${documentId}, ${orgId}, ${projectId}, ${runId}, ${args.markdownComplete}, 'none', ${exitCode}, ${build},
+        ${gaps ? tx.json(gaps as unknown as JSONValue) : null})
+      on conflict (document_id) do update
+      set run_id = excluded.run_id, markdown_complete = excluded.markdown_complete, images_exit_code = excluded.images_exit_code,
+          doppler_build = excluded.doppler_build, gaps = excluded.gaps, updated_at = now()
+      where document_extraction_levels.org_id = excluded.org_id and document_extraction_levels.project_id = excluded.project_id
+      returning 1`;
+    if (leveled.length !== 1) throw new DocumentAssetLedgerError("write-mismatch");
+    if (args.imagesStatus === "none" || args.imagesStatus === "disabled") {
+      // The figure step did not run: off the resume queue, and no row is current (none deleted).
+      await tx`
+        update document_extraction_levels set images_status = ${args.imagesStatus}, assets_current = false, assets_total = 0,
+          assets_extracted = 0, assets_not_extracted = 0, assets_unlinked = 0, assets_resumable = 0, source_copy = 0, source_decode = 0,
+          source_render = 0, asset_bytes = 0, updated_at = now()
+        where document_id = ${documentId} and org_id = ${orgId} and project_id = ${projectId}`;
+      return;
+    }
+    await recountLevel(tx, args.scope, args.imagesStatus === "resumable" ? "partial" : args.imagesStatus);
+  });
+}
+
+/**
+ * Before their uploads: record the files about to be uploaded as `pending` rows with their exact keys (derived from the
+ * run's artifact root, the document and the id), so a crash between upload and commit leaves rows the next attempt can
+ * adopt and the orphan GC knows were meant. Only extracted rows. A stored row is never downgraded. Pending rows are
+ * neither served nor billed.
+ */
+export async function markAssetsPending(
+  sql: Sql<Record<string, unknown>>,
+  args: { scope: DocumentAssetLedgerScope; rows: ReadonlyArray<DocumentAsset & { storageKey?: string | null }> },
+): Promise<{ pending: number }> {
+  assertScope(args.scope);
+  if (args.rows.length > DOPPLER_MANIFEST_V2_LIMITS.maxEntries) throw new DocumentAssetLedgerError("invalid-assets");
+  const rows = args.rows.map((row) => {
+    const { storageKey, ...rest } = row;
+    const checked = checkedRow(rest as DocumentAsset, true);
+    if (checked.status !== "extracted") throw new DocumentAssetLedgerError("invalid-assets");
+    checked.storageKey = typeof storageKey === "string" ? storageKey : null;
+    return checked;
+  });
+  if (rows.length === 0) return { pending: 0 };
+  const { orgId, projectId, documentId, runId } = args.scope;
+  return await sql.begin(async (tx) => {
+    const { root } = await lockAndCheck(tx, args.scope);
+    for (const row of rows) {
+      let key: string;
+      try { key = dopplerAssetStorageKey(root, documentId, row.assetId, row.format!); } catch { throw new DocumentAssetLedgerError("invalid-assets"); }
+      if (row.storageKey !== null && row.storageKey !== key) throw new DocumentAssetLedgerError("key-mismatch");
+      row.storageKey = key;
+    }
+    const payload = rows.map((row) => ({ ...assetPayload(row), storage_state: "pending" }));
+    const written = await tx`
+      insert into document_assets (document_id, org_id, project_id, run_id, asset_id, page_number, kind, fate, status, reason,
+        resumable, source, format, bytes, sha256, width, height, repeat_of, fallback, link_path, file_of, storage_key, obj_num,
+        obj_gen, bbox, storage_state)
+      select ${documentId}, ${orgId}, ${projectId}, ${runId}, r.asset_id, r.page_number, r.kind, r.fate, r.status, r.reason,
+        r.resumable, r.source, r.format, r.bytes, r.sha256, r.width, r.height, r.repeat_of, r.fallback, r.link_path, r.file_of,
+        r.storage_key, r.obj_num, r.obj_gen, r.bbox, 'pending'
+      from jsonb_to_recordset(${tx.json(payload as unknown as JSONValue)}::jsonb) as r(
+        asset_id text, page_number integer, kind text, fate text, status text, reason text, resumable boolean, source text,
+        format text, bytes integer, sha256 text, width integer, height integer, repeat_of text, fallback text, link_path text,
+        file_of text, storage_key text, obj_num integer, obj_gen integer, bbox double precision[])
+      on conflict (document_id, asset_id) do update
+      set run_id = excluded.run_id, page_number = excluded.page_number, kind = excluded.kind, fate = excluded.fate,
+          status = excluded.status, reason = excluded.reason, resumable = excluded.resumable, source = excluded.source,
+          format = excluded.format, bytes = excluded.bytes, sha256 = excluded.sha256, width = excluded.width,
+          height = excluded.height, repeat_of = excluded.repeat_of, fallback = excluded.fallback, link_path = excluded.link_path,
+          file_of = excluded.file_of, storage_key = excluded.storage_key, obj_num = excluded.obj_num, obj_gen = excluded.obj_gen,
+          bbox = excluded.bbox, storage_state = 'pending', updated_at = now()
+      where document_assets.org_id = excluded.org_id and document_assets.project_id = excluded.project_id
+        and not (document_assets.storage_state = 'stored' and document_assets.sha256 = excluded.sha256 and document_assets.run_id = excluded.run_id)
+      returning 1`;
+    return { pending: written.length };
+  });
+}
+
+/**
+ * After uploads landed and checked out: flip their pending rows to `stored` (only rows still pending with exactly the key
+ * that was uploaded), and keep the level honest before any Markdown commits: this run's, `markdown_complete = false` when
+ * the level was another run's, counts and bytes from this run's rows. Called every upload step.
+ */
+export async function markAssetsStored(
+  sql: Sql<Record<string, unknown>>,
+  args: { scope: DocumentAssetLedgerScope; files: ReadonlyArray<{ id: string; key: string }> },
+): Promise<{ stored: number }> {
+  assertScope(args.scope);
+  if (args.files.length === 0) return { stored: 0 };
+  if (args.files.length > DOPPLER_MANIFEST_V2_LIMITS.maxEntries) throw new DocumentAssetLedgerError("invalid-assets");
+  const { orgId, projectId, documentId, runId } = args.scope;
+  return await sql.begin(async (tx) => {
+    await lockAndCheck(tx, args.scope);
+    const flipped = await tx`
+      update document_assets a set storage_state = 'stored', updated_at = now()
+      from unnest(${tx.array(args.files.map((file) => file.id))}::text[], ${tx.array(args.files.map((file) => file.key))}::text[]) as f(id, key)
+      where a.org_id = ${orgId} and a.project_id = ${projectId} and a.document_id = ${documentId} and a.run_id = ${runId}
+        and a.asset_id = f.id and a.storage_key = f.key and a.storage_state = 'pending'
+      returning 1`;
+    await tx`
+      insert into document_extraction_levels (document_id, org_id, project_id, run_id, markdown_complete, images_status)
+      values (${documentId}, ${orgId}, ${projectId}, ${runId}, false, 'none')
+      on conflict (document_id) do update
+      set markdown_complete = case when document_extraction_levels.run_id is distinct from excluded.run_id then false
+            else document_extraction_levels.markdown_complete end,
+          run_id = excluded.run_id, updated_at = now()
+      where document_extraction_levels.org_id = excluded.org_id and document_extraction_levels.project_id = excluded.project_id`;
+    await recountLevel(tx, args.scope, "partial");
+    return { stored: flipped.length };
+  });
+}
+
+/** Reads a stored object as a stream (the worker's ArtifactStore.openStream); a missing object throws a not-found error. */
+export interface FigureObjectReader {
+  openStream(key: string, signal?: AbortSignal): Promise<{ stream: AsyncIterable<Uint8Array>; size: number | null }>;
+}
+
+export function isMissingObject(error: unknown): boolean {
+  const e = error as { name?: unknown; Code?: unknown; code?: unknown; $metadata?: { httpStatusCode?: unknown }; cause?: unknown } | null;
+  if (!e) return false;
+  if (e.name === "NoSuchKey" || e.name === "NotFound" || e.Code === "NoSuchKey" || e.code === "ENOENT" || e.$metadata?.httpStatusCode === 404) return true;
+  return e.cause !== undefined && e.cause !== error && isMissingObject(e.cause);
+}
+
+/** Size and SHA-256 of an object, streamed (never held whole); null when it does not exist. Stops past `limit` bytes. */
+export async function objectDigest(reader: FigureObjectReader, key: string, limit: number, signal?: AbortSignal): Promise<{ size: number; sha256: string } | null> {
+  let opened;
+  try {
+    opened = await reader.openStream(key, signal);
+  } catch (error) {
+    if (isMissingObject(error)) return null;
+    throw error;
+  }
+  if (opened.size !== null && opened.size > limit) return { size: opened.size, sha256: "" };
+  const hash = createHash("sha256");
+  let size = 0;
+  for await (const chunk of opened.stream) {
+    signal?.throwIfAborted();
+    size += chunk.length;
+    if (size > limit) return { size, sha256: "" };
+    hash.update(chunk);
+  }
+  return { size, sha256: hash.digest("hex") };
+}
+
+export interface AdoptResult { adopted: number; lost: number; kept: number }
+
+/**
+ * The adopt pass (no VM boot): every pending row of the document's current run is checked against storage by its exact
+ * key. An object of exactly the row's size and SHA-256 is adopted (`stored`); a missing one, or one of other bytes, turns
+ * the image back into a resumable `aborted` one (its repeats lose their file link). A storage error other than not-found
+ * leaves the row pending for a later attempt. One transaction at the end; the level is recounted. Nothing is deleted.
+ */
+export async function adoptPendingAssets(
+  sql: Sql<Record<string, unknown>>,
+  reader: FigureObjectReader,
+  args: { scope: DocumentAssetLedgerScope; signal?: AbortSignal },
+): Promise<AdoptResult> {
+  assertScope(args.scope);
+  const { orgId, projectId, documentId, runId } = args.scope;
+  const pending = await sql<Array<{ asset_id: string; storage_key: string; bytes: number; sha256: string }>>`
+    select asset_id, storage_key, bytes, sha256 from document_assets
+    where org_id = ${orgId} and project_id = ${projectId} and document_id = ${documentId} and run_id = ${runId} and storage_state = 'pending'
+    order by page_number, asset_id
+    limit ${DOPPLER_MANIFEST_V2_LIMITS.maxEntries}`;
+  if (pending.length === 0) return { adopted: 0, lost: 0, kept: 0 };
+  const adopt: Array<{ id: string; key: string }> = [];
+  const lost: string[] = [];
+  let kept = 0;
+  for (const row of pending) {
+    args.signal?.throwIfAborted();
+    let digest;
+    try {
+      digest = await objectDigest(reader, row.storage_key, row.bytes, args.signal);
+    } catch (error) {
+      if (args.signal?.aborted) throw error;
+      kept += 1;
+      continue;
+    }
+    if (digest && digest.size === row.bytes && digest.sha256 === row.sha256) adopt.push({ id: row.asset_id, key: row.storage_key });
+    else lost.push(row.asset_id);
+  }
+  return await sql.begin(async (tx) => {
+    const { root } = await lockAndCheck(tx, args.scope);
+    // Defense in depth: a key that is not exactly the one derived for its row is never adopted.
+    const rows = await tx<Array<{ asset_id: string; storage_key: string; format: string }>>`
+      select asset_id, storage_key, format from document_assets
+      where org_id = ${orgId} and project_id = ${projectId} and document_id = ${documentId} and run_id = ${runId} and storage_state = 'pending'
+        and asset_id = any(${tx.array(adopt.map((file) => file.id))}::text[])`;
+    const derived = new Set(rows.filter((row) => {
+      try { return dopplerAssetStorageKey(root, documentId, row.asset_id, row.format as never) === row.storage_key; } catch { return false; }
+    }).map((row) => row.asset_id));
+    const adoptable = adopt.filter((file) => derived.has(file.id));
+    for (const file of adopt) if (!derived.has(file.id)) lost.push(file.id);
+    const flipped = await tx`
+      update document_assets a set storage_state = 'stored', updated_at = now()
+      from unnest(${tx.array(adoptable.map((file) => file.id))}::text[], ${tx.array(adoptable.map((file) => file.key))}::text[]) as f(id, key)
+      where a.org_id = ${orgId} and a.project_id = ${projectId} and a.document_id = ${documentId} and a.run_id = ${runId}
+        and a.asset_id = f.id and a.storage_key = f.key and a.storage_state = 'pending'
+      returning 1`;
+    const reverted = await revertToResumable(tx, args.scope, lost);
+    const [level] = await tx<{ n: number }[]>`select count(*)::int as n from document_extraction_levels where document_id = ${documentId} and org_id = ${orgId}`;
+    if ((level?.n ?? 0) > 0) await recountLevel(tx, args.scope, "partial");
+    return { adopted: flipped.length, lost: reverted, kept };
+  });
+}
+
+/** Turn images whose file is gone back into resumable `aborted` ones (no key, no bytes); repeats lose the link. */
+async function revertToResumable(tx: Tx, scope: DocumentAssetLedgerScope, ids: readonly string[]): Promise<number> {
+  if (ids.length === 0) return 0;
+  const { orgId, projectId, documentId } = scope;
+  const reverted = await tx`
+    update document_assets set status = 'not-extracted', reason = 'aborted', resumable = true, storage_state = 'none',
+      storage_key = null, bytes = null, sha256 = null, source = null, width = null, height = null, updated_at = now()
+    where org_id = ${orgId} and project_id = ${projectId} and document_id = ${documentId}
+      and asset_id = any(${tx.array([...ids])}::text[]) and status = 'extracted'
+    returning 1`;
+  await tx`
+    update document_assets set file_of = null, updated_at = now()
+    where org_id = ${orgId} and project_id = ${projectId} and document_id = ${documentId}
+      and file_of = any(${tx.array([...ids])}::text[]) and status <> 'extracted'`;
+  return reverted.length;
+}
+
+/**
+ * The audit's verdict on stored rows of the current run: images whose object is missing or of the wrong size become
+ * resumable `aborted` images (the audit then queues a resume); the level is recounted.
+ */
+export async function markAssetsLost(
+  sql: Sql<Record<string, unknown>>,
+  args: { scope: DocumentAssetLedgerScope; ids: readonly string[] },
+): Promise<{ lost: number }> {
+  assertScope(args.scope);
+  if (args.ids.length === 0) return { lost: 0 };
+  return await sql.begin(async (tx) => {
+    await lockAndCheck(tx, args.scope);
+    const lost = await revertToResumable(tx, args.scope, args.ids);
+    await recountLevel(tx, args.scope, "partial");
+    return { lost };
+  });
+}
+
+/**
+ * The ledger beside a figure upload: pending rows before each upload step and stored after it, through the run's store
+ * under the run's organization and project, so figures are kept whatever later fails (the Markdown, a later stage, the run,
+ * the worker). The checkpoint's write then completes the level. None without a store that has them, or for a run without
+ * a scope (the checkpoint's write is then the only record).
+ */
+export function figureLedgerHooks(
+  state: {
+    store?: {
+      markAssetsPending?(args: Parameters<typeof markAssetsPending>[1]): Promise<unknown>;
+      markAssetsStored?(args: Parameters<typeof markAssetsStored>[1]): Promise<unknown>;
+    };
+    run: { id: string; orgId: string | null; projectId?: string | null };
+  },
+  documentId: string,
+): DopplerFigureLedgerHooks | undefined {
+  const store = state.store;
+  if (!store?.markAssetsPending || !store.markAssetsStored || !state.run.orgId || !state.run.projectId) return undefined;
+  const scope = { orgId: state.run.orgId, projectId: state.run.projectId, documentId, runId: state.run.id };
+  return {
+    pending: async (rows) => { await store.markAssetsPending!({ scope, rows }); },
+    stored: async (files) => { await store.markAssetsStored!({ scope, files }); },
+  };
 }
