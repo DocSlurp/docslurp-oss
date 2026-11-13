@@ -22,7 +22,7 @@ import type { ChartModelClient, VisualCandidate } from "./types.js";
 const MODEL_URI = "llm://openrouter/openai/gpt-6-luna";
 const cfg = { openRouterApiKey: "or-key", openAiApiKey: "", openAiBaseUrl: "https://api.openai.com/v1" } as Config;
 const candidate: VisualCandidate = { id: "p1-i0", pageNumber: 1, imageIndex: 0, bbox: { x: 0, y: 0, width: 400, height: 300 }, kind: "chart", detectedBy: "router-inset" };
-const chartConfig: ChartExportConfig = { ...defaultChartExportConfig, enabled: true, formats: ["description", "mermaid"] };
+const chartConfig: ChartExportConfig = { ...defaultChartExportConfig, tier: "models", formats: ["description", "mermaid"] };
 const BAR_SPEC = {
   kind: "chart", chartType: "bar", title: "Quarterly revenue",
   yAxis: { label: "Revenue", unit: "USD m", scale: "linear", min: null, max: null },

@@ -70,7 +70,7 @@ export async function freeVisualCandidateStats(args: {
     deterministicSourceKind(document.mimeType) === "office" ? quarantineChartPresence(storage, ledger, document.id) : Promise.resolve({}),
   ]);
   const session = new ChartExportSession({
-    documentId: document.id, config: defaultChartExportConfig, catalog: () => [], client: null, recordUsage: () => undefined,
+    documentId: document.id, config: { ...defaultChartExportConfig, tier: "off" }, catalog: () => [], client: null, recordUsage: () => undefined,
   });
   const pass = await runChartExportPass({
     session, document, run: args.run, storage, ledger, routedPlan, legacyPages: legacy, ...(presence ? { presence } : {}), pageImage: async () => null,

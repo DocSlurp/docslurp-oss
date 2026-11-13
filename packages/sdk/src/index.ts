@@ -190,7 +190,14 @@ export type UploadEstimateInput = {
   }>;
   /** Knobs to quote with instead of the project's own; the answer's `quote` reflects them. */
   settings?: Partial<QuoteSettings>;
+  /** Price the upload with this chart export tier instead of the project's (or the API default, off). */
+  chartExport?: ChartExportOverride;
   project?: string };
+
+/** Chart export tier: off, free (deterministic, no charge) or models (reading charts with AI, billed per chart). */
+export type ChartExportTier = "off" | "free" | "models";
+/** Per-request chart export override, the same shape on upload, URL ingest, reprocess and estimates. */
+export type ChartExportOverride = { tier: ChartExportTier };
 
 /** The knobs of a quote, in customer terms; omitted ones take a new project's defaults. */
 export type QuoteSettings = {
@@ -206,6 +213,11 @@ export type QuoteSettings = {
   hostingMonths: number;
   searchesPerMonth: number; chatAnswersPerMonth: number;
   chatTier: "standard" | "advanced" | "premium";
+  /**
+   * Chart and diagram export tier. Omitted: the project's, else off for API callers. `models` (reading charts with AI)
+   * adds a `charts` line; `free` costs nothing. Refused where the deployment does not offer `models`.
+   */
+  chartExport: ChartExportTier;
 };
 export type EstimateInput = {
   files: Array<{ name: string; size: number; type?: string; pages?: number; durationSeconds?: number; profile?: FileProfile }>;
@@ -445,6 +457,12 @@ export type UploadOptions = RequestOptions & {
   /** Processing quality for these files (`pipeline.quality`); omitted uses the project's (auto by default). */
   quality?: QualityMode;
   /**
+   * Chart and diagram export for this request. Omitted: the project's setting; a project with no setting is `off` for
+   * API, SDK, CLI and MCP calls. `free` exports charts that carry their own data at no charge; `models` also reads
+   * other charts with AI, billed per chart read. The deployment can cap this (`models` is refused where unavailable).
+   */
+  chartExport?: ChartExportOverride;
+  /**
    * "auto" (default) uses presigned storage PUTs: single PUT for small files,
    * multipart for large files and unknown-size streams. The server starts
    * ingestion automatically. false uses the size-limited /v1/uploads/bulk
@@ -474,6 +492,12 @@ export type UploadInput = {
   indexingMode?: IndexingMode;
   /** Processing quality for these files (`pipeline.quality`); omitted uses the project's (auto by default). */
   quality?: QualityMode;
+  /**
+   * Chart and diagram export for this request. Omitted: the project's setting; a project with no setting is `off` for
+   * API, SDK, CLI and MCP calls. `free` exports charts that carry their own data at no charge; `models` also reads
+   * other charts with AI, billed per chart read. The deployment can cap this (`models` is refused where unavailable).
+   */
+  chartExport?: ChartExportOverride;
   newProject?: boolean;
   orgId?: string;
   templateKey?: ProjectTemplateKey;
@@ -546,6 +570,12 @@ export type UploadUrlsInput = {
   indexingMode?: IndexingMode;
   /** Processing quality for these files (`pipeline.quality`); omitted uses the project's (auto by default). */
   quality?: QualityMode;
+  /**
+   * Chart and diagram export for this request. Omitted: the project's setting; a project with no setting is `off` for
+   * API, SDK, CLI and MCP calls. `free` exports charts that carry their own data at no charge; `models` also reads
+   * other charts with AI, billed per chart read. The deployment can cap this (`models` is refused where unavailable).
+   */
+  chartExport?: ChartExportOverride;
   newProject?: boolean;
   orgId?: string;
   templateKey?: ProjectTemplateKey;
@@ -750,7 +780,7 @@ export type DeletedDocument = JsonObject & {
 };
 
 /** Input of {@link DocSlurpClient.reprocessRun}: all stages, from one stage on, or only the listed stages. */
-export type ReprocessRunInput = { stageFrom?: string; stages?: string[]; speedBoost?: boolean };
+export type ReprocessRunInput = { stageFrom?: string; stages?: string[]; speedBoost?: boolean; chartExport?: ChartExportOverride };
 /** The run created by {@link DocSlurpClient.reprocessRun}, its job, and warnings when its start was deferred. */
 export type ReprocessRunResult = { run: ProjectRun; job?: JobStatus; warnings: string[] };
 export type BulkDocumentsInput = {
@@ -1648,8 +1678,9 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
   }
 
   /** Quality is a pipeline override; Speed boost is an explicit request-level opt-in. */
-  function pipelineFields(metadata: { quality?: QualityMode; speedBoost?: boolean }): { pipeline?: { quality: QualityMode }; speedBoost?: boolean } {
-    return { ...(metadata.quality ? { pipeline: { quality: metadata.quality } } : {}),
+  function pipelineFields(metadata: { quality?: QualityMode; speedBoost?: boolean; chartExport?: ChartExportOverride }): { pipeline?: { quality?: QualityMode; chartExport?: ChartExportOverride }; speedBoost?: boolean } {
+    const pipeline = { ...(metadata.quality ? { quality: metadata.quality } : {}), ...(metadata.chartExport ? { chartExport: { tier: metadata.chartExport.tier } } : {}) };
+    return { ...(Object.keys(pipeline).length ? { pipeline } : {}),
       ...(metadata.speedBoost !== undefined ? { speedBoost: metadata.speedBoost } : {}) };
   }
 
@@ -1736,7 +1767,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     if (options.path) fields.path = options.path;
     if (metadata.templateKey) fields.templateKey = metadata.templateKey;
     if (metadata.indexingMode) fields.indexingMode = metadata.indexingMode;
-    if (metadata.quality) fields.pipeline = JSON.stringify(pipelineFields(metadata).pipeline);
+    if (metadata.quality || metadata.chartExport) fields.pipeline = JSON.stringify(pipelineFields(metadata).pipeline);
     if (metadata.speedBoost !== undefined) fields.speedBoost = String(metadata.speedBoost);
     for (const [name, value] of Object.entries(extractFields(options))) fields[name] = String(value);
     const headers = new Headers();
@@ -2135,7 +2166,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
       return { run: run as ProjectRun, job, warnings: [] };
     },
     /** What {@link reprocessRun} would cost, without starting it. Server keys need `ingest`. */
-    reprocessEstimate(runId: string, input: JsonObject = {}, requestOptions?: RequestOptions): Promise<EstimateResponse> {
+    reprocessEstimate(runId: string, input: JsonObject | ReprocessRunInput = {}, requestOptions?: RequestOptions): Promise<EstimateResponse> {
       return estimateAt(`/v1/runs/${encodeURIComponent(runId)}/reprocess/estimate`, input, requestOptions);
     },
     /** Cost of fully indexing one document (`{ documentId }`) or a project (`{ project?, documentIds? }`). */
