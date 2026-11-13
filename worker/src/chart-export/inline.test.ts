@@ -201,6 +201,37 @@ console.log(JSON.stringify({ status: out.status, calls: out.result?.calls, visua
         delete process.env.DOCSLURP_CHART_GUEST_TEST_FAULT;
       }
     }, 60_000);
+    it("the compile cache is used only read-only, and handed to every worker (#364 compileCacheDir, council r10)", async () => {
+      const { readOnlyCompileCache } = await import(pathToFileURL(path.join(workerRoot, "scripts/chart-inline.mjs")).href);
+      const cache = path.join(dir, `cache-${Math.random().toString(36).slice(2)}`);
+      await mkdir(path.join(cache, "v24-x64-hash-1"), { recursive: true });
+      await writeFile(path.join(cache, "v24-x64-hash-1", "entry"), "x");
+      // Writable by this process: never used (a run could write what another document's run loads).
+      expect(readOnlyCompileCache(cache)).toBeNull();
+      const { chmod } = await import("node:fs/promises");
+      await chmod(path.join(cache, "v24-x64-hash-1", "entry"), 0o444);
+      await chmod(path.join(cache, "v24-x64-hash-1"), 0o555);
+      await chmod(cache, 0o555);
+      try {
+        // Root can write anything: the guard refuses it there too (the parser VM runs commands unprivileged).
+        expect(readOnlyCompileCache(cache)).toBe(process.getuid?.() === 0 ? null : cache);
+        expect(readOnlyCompileCache(path.join(dir, "missing"))).toBeNull();
+        const echo = path.join(dir, `cache-echo-${Math.random().toString(36).slice(2)}.mjs`);
+        await writeFile(echo, `import { parentPort, workerData } from "node:worker_threads";
+parentPort.on("message", () => parentPort.postMessage({ t: "result", result: { schemaVersion: "chart-export-deterministic@v1", visuals: [], refusals: [], cache: workerData?.compileCacheDir ?? null } }));`);
+        const svg = path.join(dir, `cache-${Math.random().toString(36).slice(2)}.svg`);
+        await writeFile(svg, "<svg/>");
+        const { inlineCharts } = await import(pathToFileURL(path.join(workerRoot, "scripts/chart-inline.mjs")).href);
+        const inspection = { sniffed: { encoding: "utf-8", container: null }, archive: null };
+        const withCache = await inlineCharts(Buffer.from("<svg/>"), { kind: "svg", diagrams: true }, inspection, svg, pathToFileURL(echo), cache);
+        expect((withCache as { result: { cache: unknown } }).result.cache).toBe(cache);
+        const without = await inlineCharts(Buffer.from("<svg/>"), { kind: "svg", diagrams: true }, inspection, svg, pathToFileURL(echo), null);
+        expect((without as { result: { cache: unknown } }).result.cache).toBeNull();
+      } finally {
+        await chmod(cache, 0o755);
+        await chmod(path.join(cache, "v24-x64-hash-1"), 0o755);
+      }
+    }, 30_000);
     it("each worker gets the batch-wide output budget, an empty environment and the {visuals, bytes} skip map", async () => {
       const echo = path.join(dir, `echo-${Math.random().toString(36).slice(2)}.mjs`);
       await writeFile(echo, `import { parentPort } from "node:worker_threads";

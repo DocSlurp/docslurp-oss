@@ -57,11 +57,18 @@ const sh = async (cmd, timeoutMs = 120_000) => {
 try {
   await vm.filesystem.writeBytes(readFileSync(tar), "/bench.tar");
   await sh("mkdir -p /bench && tar -xf /bench.tar -C /bench");
-  // The compile cache is built where it is used (Node keys entries by the module's path and source).
-  for (const v of [...(baseline ? ["before"] : []), "now"]) await sh(`cd /bench/${v}/worker && node -e "import('./scripts/chart-guest-bundle.mjs').then((m) => m.buildCompileCache())"`);
-  const variants = [...(baseline ? ["before=/bench/before"] : []), "now=/bench/now:--disallow-code-generation-from-strings"].join(",");
+  // As production builds and uses it: the compile cache is built as root at "image build" (filled as the parser user,
+  // uid 10001, then root-owned and read-only), and the bench runs as uid 10001, the parser VM's command user, so the
+  // inline path finds it read-only. Arms: `nocache` (the same tree with no cache) and `now` (the read-only cache);
+  // a `before` baseline pack, when given, runs as it shipped (its cache, if any, was built for another uid).
+  await sh("chmod -R a+rX /bench && cp -a /bench/now /bench/nocache");
+  await sh("cd /bench/now/worker && node -e \"import('./scripts/chart-guest-bundle.mjs').then((m) => m.buildCompileCache())\" && ls -la dist/chart-export/compile-cache dist/chart-export/compile-cache/*/ >&2");
+  await sh("rm -rf /bench/nocache/worker/dist/chart-export/compile-cache");
+  const flag = ":--disallow-code-generation-from-strings";
+  const variants = [...(baseline ? ["before=/bench/before" + flag] : []), "nocache=/bench/nocache" + flag, "now=/bench/now" + flag].join(",");
+  const asParser = "setpriv --reuid=10001 --regid=10001 --clear-groups";
   // PROBE=1: the fixed-cost probe (probe-vm.mjs) on this tree's bundle instead of the slice bench.
-  writeFileSync(outPath, await sh(process.env.PROBE === "1" ? `node /bench/probe-vm.mjs /bench/now ${runs}` : `node /bench/bench-vm.mjs ${variants} /bench/slice ${runs}`, 28 * 60_000));
+  writeFileSync(outPath, await sh(process.env.PROBE === "1" ? `${asParser} node /bench/probe-vm.mjs /bench/now ${runs}` : `${asParser} node /bench/bench-vm.mjs ${variants} /bench/slice ${runs}`, 28 * 60_000));
 } finally {
   await vm.terminate();
   console.log(`vm_seconds=${((Date.now() - started) / 1000).toFixed(1)}`);

@@ -130,20 +130,61 @@ export async function compileCacheKey() {
   return { node: process.version, nodeSha256: await fileSha256(process.execPath), bundleSha256: await fileSha256(BUNDLE_PATH) };
 }
 
-/** Populate the cache by loading the bundle in a worker thread, the way the inline chart worker does, then write the key. */
+/**
+ * Populate the cache the way the guest loads it: a worker thread (as #364's unit workers) enables the cache, loads
+ * #364's worker script and the bundle, flushes, and exits, under the guest's V8 flag (a code cache built under other
+ * flags is rejected). V8 keys the cache directory by Node version, flags and uid, so at image build (as root) it is
+ * filled as the parser user (PARSER_UID, the uid the parser VM runs commands as) and then handed back to root, read-only:
+ * the inline path uses it only read-only (chart-inline.mjs readOnlyCompileCache). Not root: filled as the current user.
+ */
+/** The uid the parser VM runs commands as (sandbox/providers/modal: uid 10001). */
+export const PARSER_UID = 10001;
 export async function buildCompileCache() {
-  const { rm, mkdir, writeFile } = await import("node:fs/promises");
+  const { rm, mkdir, writeFile, mkdtemp, chown, chmod, readdir } = await import("node:fs/promises");
+  const asRoot = process.getuid?.() === 0;
+  const { tmpdir } = await import("node:os");
   const { spawnSync } = await import("node:child_process");
   await rm(COMPILE_CACHE_DIR, { recursive: true, force: true });
   await mkdir(COMPILE_CACHE_DIR, { recursive: true });
-  const script = `import { Worker } from "node:worker_threads";
+  const scratch = await mkdtemp(path.join(process.env.TMPDIR || tmpdir(), "chart-cache-"));
+  try {
+    const filler = path.join(scratch, "fill.mjs");
+    const main = path.join(scratch, "main.mjs");
+    await writeFile(filler, `import module from "node:module";
+module.enableCompileCache(${JSON.stringify(COMPILE_CACHE_DIR)});
+await import(${JSON.stringify(pathToFileURL(path.join(WORKER_ROOT, "scripts/chart-export-worker.mjs")).href)});
+module.flushCompileCache();
+process.exit(0);
+`);
+    await writeFile(main, `import { Worker } from "node:worker_threads";
 await new Promise((resolve, reject) => {
-  const w = new Worker(${JSON.stringify(`import(${JSON.stringify(pathToFileURL(BUNDLE_PATH).href)}).then(() => process.exit(0))`)}, { eval: true });
+  const w = new Worker(new URL(${JSON.stringify(pathToFileURL(filler).href)}), { env: {} });
   w.once("exit", (code) => (code === 0 ? resolve() : reject(new Error("worker exit " + code)))); w.once("error", reject);
-});`;
-  const run = spawnSync(process.execPath, ["--input-type=module", "-e", script], { env: { ...process.env, NODE_COMPILE_CACHE: COMPILE_CACHE_DIR }, encoding: "utf8" });
-  if (run.status !== 0) throw new Error(`chart guest compile cache: ${run.stderr.slice(0, 500)}`);
+});
+`);
+    if (asRoot) {
+      await chown(COMPILE_CACHE_DIR, PARSER_UID, PARSER_UID);
+      await chmod(scratch, 0o755);
+    }
+    const run = spawnSync(process.execPath, ["--disallow-code-generation-from-strings", main], { encoding: "utf8", ...(asRoot ? { uid: PARSER_UID, gid: PARSER_UID } : {}) });
+    if (run.status !== 0) throw new Error(`chart guest compile cache: ${run.stderr.slice(0, 500)}`);
+  } finally {
+    await rm(scratch, { recursive: true, force: true });
+  }
   await writeFile(COMPILE_CACHE_KEY, `${JSON.stringify(await compileCacheKey(), null, 2)}\n`);
+  if (asRoot) {
+    // Back to root, read-only: no run can write what another document's run will load (#364 council r10).
+    const walk = async (dir) => {
+      await chown(dir, 0, 0);
+      await chmod(dir, 0o555);
+      for (const e of await readdir(dir, { withFileTypes: true })) {
+        const p = path.join(dir, e.name);
+        if (e.isDirectory()) await walk(p);
+        else { await chown(p, 0, 0); await chmod(p, 0o444); }
+      }
+    };
+    await walk(COMPILE_CACHE_DIR);
+  }
 }
 
 /** Startup contract: an image that ships a cache must ship one built for this Node binary and this bundle. */

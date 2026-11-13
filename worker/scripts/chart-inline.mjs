@@ -9,12 +9,45 @@
 // - a wall-clock budget: the extractor's own deadline (setGuestDeadline, softDeadlineShare of it), each unit at most
 //   what is left, the whole step at most startupMs + the size-scaled deadline; past it one short count-only worker
 //   records what is left as guest-deadline ranges.
+import { accessSync, constants, readdirSync } from "node:fs";
+import path from "node:path";
 import { performance } from "node:perf_hooks";
+import { fileURLToPath } from "node:url";
 import { Worker } from "node:worker_threads";
 import { INLINE_CHART_LIMITS, inlineChartPlan, inlineDeadlineMs } from "../dist/chart-export/inline-guest.js";
 import { CHART_EXTRACT_LIMITS } from "../dist/chart-export/extractors/limits.js";
 
 const WORKER = new URL("./chart-export-worker.mjs", import.meta.url);
+/** The V8 compile cache pre-filled at image build (chart-guest-bundle.mjs buildCompileCache; verified at VM start). */
+const COMPILE_CACHE = fileURLToPath(new URL("../dist/chart-export/compile-cache/", import.meta.url));
+
+/**
+ * The compile cache directory to hand #364's workers (`compileCacheDir`), or null. Security condition (#364 council r10):
+ * a run must never write a cache that another document's run will load. So it is used only when this process can write
+ * neither the directory nor anything in it (the image's root-owned files; parser commands run unprivileged). Anything
+ * else (missing, writable, unreadable) runs without a cache: the same result, ~20-40 ms slower.
+ */
+export function readOnlyCompileCache(dir = COMPILE_CACHE) {
+  const writable = (p) => { try { accessSync(p, constants.W_OK); return true; } catch { return false; } };
+  try {
+    accessSync(dir, constants.R_OK | constants.X_OK);
+    if (writable(dir)) return null;
+    const stack = [dir];
+    let seen = 0;
+    while (stack.length) {
+      const d = stack.pop();
+      for (const e of readdirSync(d, { withFileTypes: true })) {
+        if (++seen > 64) return null; // a pre-filled cache is a key file and one V8 directory with a few entries
+        const p = path.join(d, e.name);
+        if (e.isSymbolicLink() || writable(p)) return null;
+        if (e.isDirectory()) stack.push(p);
+      }
+    }
+    return dir;
+  } catch {
+    return null;
+  }
+}
 /** The inline answer's output budget (INLINE_CHART_LIMITS.outputBudget); the byte total carries across worker restarts. */
 const INLINE_OUTPUT_BUDGET = INLINE_CHART_LIMITS.outputBudget;
 const visualBytes = (v) => Buffer.byteLength(JSON.stringify(v));
@@ -36,11 +69,13 @@ const MAX_WORKERS = 8;
  * Run one unit worker until it returns a result, crashes, overruns or passes the memory budget; finished units go into
  * `done`. Resolves { result } | { failure: "timeout" | "crashed" | "exited", inflight }.
  */
-function runWorker(workerUrl, task, done, index, endsAt, rssLimit, onStart) {
+function runWorker(workerUrl, task, done, index, endsAt, rssLimit, onStart, compileCacheDir) {
   return new Promise((resolve) => {
     // An empty environment, as #364's guest gives its workers.
     const worker = new Worker(workerUrl, {
       env: {},
+      // #364's worker enables a compile cache only when given one (read-only here: readOnlyCompileCache).
+      ...(compileCacheDir ? { workerData: { compileCacheDir } } : {}),
       resourceLimits: {
         maxOldGenerationSizeMb: INLINE_CHART_LIMITS.maxOldGenerationSizeMb,
         maxYoungGenerationSizeMb: INLINE_CHART_LIMITS.maxYoungGenerationSizeMb,
@@ -121,7 +156,7 @@ function reassemble(kind, done, failed, final, lastWorker, unplaced, nextSvg, ou
  * { status: "skipped", reason } | { status: "refused", reason, ms } (no unit could be placed: start-up, or every worker
  * failing outside any unit).
  */
-export async function inlineCharts(bytes, request, inspection, inputPath, workerUrl = WORKER) {
+export async function inlineCharts(bytes, request, inspection, inputPath, workerUrl = WORKER, compileCacheDir = readOnlyCompileCache()) {
   const kind = typeof request?.kind === "string" ? request.kind : "";
   let text;
   const plan = inlineChartPlan(kind, inspection, bytes.length, () => (text ??= bytes.toString("utf8")));
@@ -152,7 +187,7 @@ export async function inlineCharts(bytes, request, inspection, inputPath, worker
     const skip = [...[...done].map(([id, d]) => [id, { visuals: d.delta.visuals.length, bytes: d.delta.bytes }]), ...[...failed.keys()].map((id) => [id, { visuals: 0, bytes: 0 }])];
     const task = { path: inputPath, kind, packaged: plan.packaged, options, skip, outputBudget: INLINE_OUTPUT_BUDGET, deadline: countOnly ? 0 : softDeadline, fault };
     const outcome = await runWorker(workerUrl, task, done, w, countOnly ? performance.now() + COUNT_ONLY_MS : endsAt, rssLimit,
-      (unit) => { nextSvg = unit.svgIndex + (unit.svg ? 1 : 0); });
+      (unit) => { nextSvg = unit.svgIndex + (unit.svg ? 1 : 0); }, compileCacheDir);
     lastWorker = w;
     if (outcome.result) { final = outcome.result; break; }
     if (outcome.inflight && !failed.has(outcome.inflight.id) && !countOnly) {

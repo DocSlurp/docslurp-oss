@@ -252,3 +252,43 @@ kind 0 ms.
 lines and starts a fresh child after a lost figure. On the normal path it adds nothing: the step's median was 82.6 ms over
 9 real figures in a Modal VM, against about 116–125 ms for the uncontained child. A crash, an out-of-memory and a hang in
 one figure were each lost alone (`results-p15-units.json` in the app).
+
+## Compile cache and output budget (`results-vm-r5.json`, #364 93c080686 / 694e4d195)
+
+- **Same slice** (106 documents, 207 pages), **same VM shape and prices**, five interleaved runs per arm.
+- **The bench now runs as uid 10001,** the parser VM's command user. V8 keys its compile cache by uid, and the inline path
+  refuses a cache it can write, which root always can.
+- **The cache is built as production builds it:** as root at "image build", filled as uid 10001 under the guest's V8 flag,
+  then root-owned 0555/0444.
+- **Arms:** the current tree (contained, with the output budget):
+  - `nocache`: no cache;
+  - `now`: the read-only cache.
+
+| | Σ added time | workers started | visuals | pages per $1, page-only (63,878) | counting each document's quarantine VM (8,591) | pages per minute (200) |
+|---|--:|--:|--:|--:|--:|--:|
+| round 3, one worker, no containment | 3.52 s | 48 | 96 | 55,409 (−13.3%) | 8,418 (−2.0%) | 189.3 (−5.4%) |
+| round 4, contained | 6.73 s | 48 | 96 | 49,449 (−22.6%) | 8,267 (−3.8%) | 180.4 (−9.8%) |
+| contained + output budget, no cache | 5.98 s | 48 | 96 | 50,731 (−20.6%) | 8,302 (−3.4%) | 182.4 (−8.8%) |
+| **contained + output budget + read-only cache** | **5.34 s** | **48** | **96** | **51,863 (−18.8%)** | **8,331 (−3.0%)** | **184.2 (−7.9%)** |
+
+Median added time per signalled document, read-only cache:
+
+| class | added |
+|---|--:|
+| Office | +104 ms |
+| SVG | +104 ms |
+| EPUB | +104 ms |
+
+That is against +133 ms in round 4 and +66 ms in round 3. HTML and JSON stay at about +9 ms.
+
+- **The cache saves about 13 ms per signalled document** (0.64 s over 48), below #364's 19–41 ms. The inline step loads
+  only the worker and the bundle; the parent's own modules are small.
+- **The output budget changes nothing measurable,** and the visuals are unchanged.
+- **Gate:**
+  - Counting the quarantine VM every document pays: −3.0%, still over the ≤2% budget. Containment costs about +38 ms per
+    signalled document net of the cache.
+  - Page-only, as defined: −18.8%.
+- **Modal spend:** 121.7 VM-seconds.
+
+**Doppler child** (app #510): a read-only cache filled at image build, as uid 0, the single-document job's uid. On a Modal
+VM the 9-figure chart step went from 123 to 103 ms and the smoke from 85 to 65 ms.
