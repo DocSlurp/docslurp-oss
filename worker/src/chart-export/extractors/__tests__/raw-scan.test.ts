@@ -56,7 +56,7 @@ describe("linear raw-text scanners: exactly the old regexes", () => {
       const body = randomText(random, [" ", "//", "<![CDATA[", "]]>", "a", "\n", "/"], 1 + Math.floor(random() * 12));
       expect(unwrapCdata(body)).toBe(oldCdata(body));
     }
-  });
+  }, 60_000);
 
   it("transform lists (5,000 seeded random values)", () => {
     const random = rng(11);
@@ -65,7 +65,7 @@ describe("linear raw-text scanners: exactly the old regexes", () => {
       const raw = randomText(random, tokens, 1 + Math.floor(random() * 20));
       expect(transformParts(raw)).toEqual(oldTransform(raw));
     }
-  });
+  }, 60_000);
 });
 
 describe("Turkish capital I before a chart (council r8 M1)", () => {

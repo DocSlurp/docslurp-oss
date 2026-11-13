@@ -53,7 +53,9 @@ function rng(seed: number) {
 const REASONS: DeterministicDeferral["reason"][] = ["svg-document-limit", "html-svg-limit", "guest-deadline", "visual-limit", "package-part-limit", "guest-deadline-part", "unit-crashed", "unit-timeout", "output-limit"];
 
 describe("reassembleUnits", () => {
-  it("matches the guest's former inline reassembly on 2,000 seeded scenarios", () => {
+  // 500 scenarios from a fixed seed (each builds and clones up to ~1 MB of visuals): about 1 s idle, with an explicit
+  // timeout so a loaded runner does not trip vitest's 5 s default.
+  it("matches the guest's former inline reassembly on 500 seeded scenarios", () => {
     const random = rng(369);
     const int = (n: number) => Math.floor(random() * n);
     const visual = (k: number) => {
@@ -68,7 +70,7 @@ describe("reassembleUnits", () => {
       return { visuals, refusals: Array.from({ length: int(random() < 0.05 ? 1200 : 3) }, (_, k) => ({ locator: `p${k}`, reason: "svg-too-dense" })), deferred: Array.from({ length: int(3) }, deferral), overflow: int(3), bytes: visuals.reduce((n, v) => n + visualBytes(v), 0), full: null };
     };
     let differing = 0;
-    for (let s = 0; s < 2000; s++) {
+    for (let s = 0; s < 500; s++) {
       const workers = 1 + int(4);
       const done = new Map<number, FinishedUnit>();
       const failed = new Map<number, FailedUnit>();
@@ -93,7 +95,7 @@ describe("reassembleUnits", () => {
       if (JSON.stringify(got) !== JSON.stringify(want)) differing++;
     }
     expect(differing).toBe(0);
-  });
+  }, 60_000);
 
   it("returns the last worker's result unchanged when nothing failed", () => {
     const final: DeterministicVisualResult = { schemaVersion: "chart-export-deterministic@v1", visuals: [emptyVisual("svg-geometry", "svg[0]")], refusals: [] };

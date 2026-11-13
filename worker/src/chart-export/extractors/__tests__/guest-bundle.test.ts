@@ -27,7 +27,8 @@ const VL = "https://vega.github.io/schema/vega-lite/v5.json";
 const vlSpec = { $schema: VL, title: "Sales", data: { values: [{ r: "N", s: 28 }, { r: "S", s: 55 }] }, mark: "bar", encoding: { x: { field: "r", type: "nominal" }, y: { field: "s", type: "quantitative" } } };
 const Q = ["Q1", "Q2", "Q3"];
 
-describe.skipIf(!built)("chart-export guest bundle (the production guest)", () => {
+// Each test spawns real guest processes: an explicit timeout, so a loaded runner does not trip the 5 s default.
+describe.skipIf(!built)("chart-export guest bundle (the production guest)", { timeout: 60_000 }, () => {
   let dir: string;
   beforeAll(async () => { dir = await mkdtemp(path.join(process.env.TMPDIR || os.tmpdir(), "chart-guest-")); });
   afterAll(async () => { await rm(dir, { recursive: true, force: true }); });

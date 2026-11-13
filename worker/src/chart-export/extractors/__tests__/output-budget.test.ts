@@ -78,7 +78,8 @@ describe("per-chart output bound", () => {
   });
 });
 
-describe("per-input output bound", () => {
+// Each test builds and extracts a 2,000-row amplification workbook: an explicit timeout for loaded runners.
+describe("per-input output bound", { timeout: 30_000 }, () => {
   it("one amplification chart (the council's 85 KB CJK XLSX) becomes one bounded, truncated chart", () => {
     const r = extractDeterministicVisuals({ kind: "office", bytes: ampXlsx(1, "cjk", 2000) });
     expect(r.visuals).toHaveLength(1);
