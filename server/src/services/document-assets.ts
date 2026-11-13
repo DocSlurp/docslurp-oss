@@ -83,8 +83,8 @@ export interface DocumentAssetView {
   refusal: DocumentAssetRefusal | null;
   /**
    * The typed state a client shows when the image has no served file (ingest-version.ts): `withheld` (PII policy),
-   * `not-extracted` (status `not-extracted`, Doppler's reason says why; or an upload still pending after
-   * PENDING_UPLOAD_TIMEOUT_MS, which the next attempt adopts), `processing` (its upload is in flight). Null when served, or
+   * `not-extracted` (status `not-extracted`, Doppler's reason says why; or a file whose row has been pending for
+   * PENDING_UPLOAD_TIMEOUT_MS since its upload started, which the next attempt adopts), `processing` (its upload is in flight). Null when served, or
    * when the image is unlinked and the page image shows it.
    */
   availability: DataUnavailable | null;
@@ -202,12 +202,11 @@ export async function getDocumentAssetLedger(scope: DocumentAssetScope, page?: D
     manifest_sha256: string | null; doppler_build: string | null; resumes: number; last_cut_page: number | null; deadline_ms: number | null;
     assets_total: number; assets_extracted: number; assets_not_extracted: number; assets_unlinked: number; assets_resumable: number;
     source_copy: number; source_decode: number; source_render: number; asset_bytes: string | number; updated_at: string;
-    resume_blocked: string | null; age_ms: number;
+    resume_blocked: string | null;
   }>>`
     select markdown_complete, images_status, images_exit_code, manifest_version, manifest_sha256, doppler_build, resumes, last_cut_page,
       deadline_ms, assets_total, assets_extracted, assets_not_extracted, assets_unlinked, assets_resumable, source_copy, source_decode,
-      source_render, asset_bytes, updated_at::text, resume_blocked,
-      (extract(epoch from (now() - updated_at)) * 1000)::float8 as age_ms
+      source_render, asset_bytes, updated_at::text, resume_blocked
     from document_extraction_levels
     where document_id = ${scope.documentId} and org_id = ${scope.orgId}`;
 
@@ -216,11 +215,12 @@ export async function getDocumentAssetLedger(scope: DocumentAssetScope, page?: D
     asset_id: string; page_number: number; kind: string; fate: string; status: string; reason: DopplerLedgerReason | null; resumable: boolean;
     source: string | null; format: string | null; bytes: number | null; sha256: string | null; width: number | null; height: number | null;
     repeat_of: string | null; fallback: string | null; link_path: string | null; file_of: string | null; owner_key: string | null;
-    owner_stored: boolean | null;
+    owner_stored: boolean | null; owner_pending_ms: number | null;
     slot_uri: string | null;
   }>>`
     select a.asset_id, a.page_number, a.kind, a.fate, a.status, a.reason, a.resumable, a.source, a.format, a.bytes, a.sha256, a.width,
       a.height, a.repeat_of, a.fallback, a.link_path, a.file_of, o.storage_key as owner_key, o.storage_state = 'stored' as owner_stored,
+      case when o.storage_state = 'pending' then (extract(epoch from (now() - o.updated_at)) * 1000)::float8 end as owner_pending_ms,
       (select r.artifacts ->> (a.document_id || ':doppler-figure:' || a.file_of) from project_runs r
         where r.id = ${document.run_id} and r.org_id = ${scope.orgId}) as slot_uri
     from document_assets a
@@ -243,8 +243,10 @@ export async function getDocumentAssetLedger(scope: DocumentAssetScope, page?: D
 
   const pageRows = rows.slice(0, limit);
   const ingestVersion = document.ingest_version ?? UNKNOWN_INGEST_VERSION;
-  // The level is written in the transaction that records the uploads; pending past this is stalled, not in flight.
-  const uploadStalled = !level || Number(level.age_ms) > (options.pendingUploadTimeoutMs ?? PENDING_UPLOAD_TIMEOUT_MS);
+  // A file's row is marked pending (updated_at = now()) when its upload starts, including a resume's; pending past the
+  // timeout since then is stalled, not in flight.
+  const timeoutMs = options.pendingUploadTimeoutMs ?? PENDING_UPLOAD_TIMEOUT_MS;
+  const uploadStalled = (row: (typeof rows)[number]) => row.owner_pending_ms !== null && Number(row.owner_pending_ms) > timeoutMs;
   const resumeBlocked = (blocked: string | null): DataUnavailable | null => {
     const reason = figureResumeUnavailableReason(blocked);
     return reason ? dataUnavailable(reason, { canEdit: options.canEdit, ingestVersion }) : null;
@@ -279,7 +281,7 @@ export async function getDocumentAssetLedger(scope: DocumentAssetScope, page?: D
             : row.status === "not-extracted" ? dataUnavailable("not-extracted", { ingestVersion })
               // An upload still pending after the timeout will not land on its own: the next attempt adopts it, so it is
               // resumable work (a figure resume or reprocess), not "processing" forever.
-              : row.file_of && uploadStalled ? dataUnavailable("not-extracted", { canEdit: options.canEdit, ingestVersion })
+              : row.file_of && uploadStalled(row) ? dataUnavailable("not-extracted", { canEdit: options.canEdit, ingestVersion })
                 : row.file_of ? dataUnavailable("processing", { ingestVersion })
                   : null,
       };

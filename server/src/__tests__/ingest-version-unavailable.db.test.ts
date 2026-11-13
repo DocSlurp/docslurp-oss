@@ -314,14 +314,20 @@ describe("figure ledger", () => {
     const [held, pending] = ledger.assets;
     expect(held).toMatchObject({ id: "p1.1", slot: null, refusal: "pii-policy", availability: { reason: "withheld", canReprocess: false } });
     expect(pending).toMatchObject({ id: "p2.1", slot: null, availability: { reason: "processing", canReprocess: false } });
+    // A resume uploading now: the level is old, but the file's own row went pending moments ago, so it is in flight.
     await sql`update document_extraction_levels set updated_at = now() - interval '1 hour' where document_id = 'doc-figs'`;
     try {
+      expect((await (await app.request("/documents/doc-figs/assets", as("ua"))).json()).assets[1])
+        .toMatchObject({ id: "p2.1", availability: { reason: "processing" } });
+      // Pending on its own row past the timeout: stalled, resumable work.
+      await sql`update document_assets set updated_at = now() - interval '1 hour' where document_id = 'doc-figs' and asset_id = 'p2.1'`;
       const stalled = (await (await app.request("/documents/doc-figs/assets", as("ua"))).json()).assets[1];
       expect(stalled).toMatchObject({ id: "p2.1", availability: { reason: "not-extracted", canReprocess: true } });
       const viewer = (await (await app.request("/documents/doc-figs/assets", as("uv"))).json()).assets[1];
       expect(viewer).toMatchObject({ availability: { reason: "not-extracted", canReprocess: false } });
     } finally {
       await sql`update document_extraction_levels set updated_at = now() where document_id = 'doc-figs'`;
+      await sql`update document_assets set updated_at = now() where document_id = 'doc-figs'`;
     }
   });
 

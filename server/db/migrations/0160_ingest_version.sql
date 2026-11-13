@@ -11,9 +11,11 @@
 -- catalog-only change, so the backfill rewrites no rows.
 --
 -- Locking: every statement waits at most 5 s for its lock (lock_timeout, transaction-local) and fails the release instead
--- of queueing behind a long query and blocking documents/project_runs traffic. The CHECKs are added NOT VALID (no scan
--- under ACCESS EXCLUSIVE) and validated after, which on its own takes only SHARE UPDATE EXCLUSIVE. Each step checks the
--- catalog first and VALIDATE of a valid constraint is a no-op, so a second run changes nothing.
+-- of queueing behind a long query and blocking documents/project_runs traffic. The CHECKs are added NOT VALID, so adding
+-- them scans no rows under ACCESS EXCLUSIVE; they hold for every new and updated row. They are not validated here: drizzle
+-- applies pending migrations in one transaction, so a VALIDATE would scan under the lock ADD COLUMN already holds and
+-- save nothing. Existing rows all hold 0 and '{}' (the defaults), which satisfy them. Each step checks the catalog first,
+-- so a second run changes nothing.
 SET LOCAL lock_timeout = '5s';
 --> statement-breakpoint
 ALTER TABLE documents ADD COLUMN IF NOT EXISTS ingest_version integer NOT NULL DEFAULT 0;
@@ -36,7 +38,3 @@ BEGIN
       CHECK (ingest_version >= 0 AND cardinality(ingest_capabilities) <= 32) NOT VALID;
   END IF;
 END $$;
---> statement-breakpoint
-ALTER TABLE public.documents VALIDATE CONSTRAINT documents_ingest_version_check;
---> statement-breakpoint
-ALTER TABLE public.project_runs VALIDATE CONSTRAINT project_runs_ingest_version_check;

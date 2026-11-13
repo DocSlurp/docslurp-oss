@@ -50,7 +50,8 @@ produced it. The serving API answers data it cannot show with a typed
   (`deduped_from_document_id`) always inherits its source's version and
   capabilities.
 - Migration 0160 waits at most 5 s for each lock. It adds the CHECKs `NOT
-  VALID` and validates them separately.
+  VALID` and does not validate them; existing rows hold the defaults, which
+  satisfy them.
 - When `updateAvailable` is true, a reprocess brings the document to the current
   version. Clients should send it through the reprocess estimate
   (`POST /v1/projects/:project/documents/bulk/estimate`) so credits are shown
@@ -95,7 +96,7 @@ and worker reasons stay in logs and traces.
 | --- | --- | --- |
 | `needs-reprocess` | Produced before the current scan or by an older pipeline: a page of a document without a current parse decision (`source-unscanned`), or a figure resume blocked `unscanned`. | If the caller may reprocess |
 | `withheld` | A PII policy withholds it: a PII-blocked document's pages and structured result (even when a result was recorded), a structured result its policy withheld, a withheld figure file, a page materialization blocked by PII, or a page whose source file is withheld. | No |
-| `not-extracted` | The pipeline produced nothing: a failed or cancelled document, an image Doppler did not extract (its `reason` says why, for example `min_side`, `repeat` or `budget`), no structured result while the project has a schema, a figure resume that ran out of attempts, a page that failed to materialize, or a figure upload still pending 15 minutes after its level was written (the next attempt adopts it). | Document-level states and stalled uploads, if the caller may reprocess. Images Doppler skipped: no |
+| `not-extracted` | The pipeline produced nothing: a failed or cancelled document, an image Doppler did not extract (its `reason` says why, for example `min_side`, `repeat` or `budget`), no structured result while the project has a schema, a figure resume that ran out of attempts, a page that failed to materialize, or a figure upload still pending 15 minutes after its own row went pending (the next attempt adopts it). | Document-level states and stalled uploads, if the caller may reprocess. Images Doppler skipped: no |
 | `processing` | Still being produced: a document mid-run, a figure upload in flight, or a figure resume whose document moved to a newer run. Clients refresh these with backoff. | No |
 | `not-supported` | The data does not exist for this file type (page images of a non-PDF). | No |
 | `disabled` | A project setting turns the feature off: figure resume blocked `figures-off` or `resume-off`, or no structured result in a project without an `outputSchema`. | No |
