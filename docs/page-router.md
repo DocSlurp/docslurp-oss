@@ -398,7 +398,7 @@ matching endpoints or `max_price`) is a counted failure, not a throttle (`isRout
 `worker/src/lib/provider-retry.ts`; an assumption, not verified with a paid call). The in-process
 local runtime weighs 2 cents. So the most an org can cost us per day in uncharged requests is the
 $40 bound, whichever models its projects route to: at an unreadable size, 651 requests on the
-default `deepseek/deepseek-v4.1-flash-1017` (6.14 cents), 1,083 on `gpt-4.1-mini` (3.69 cents),
+former default `deepseek/deepseek-v4.1-flash-1017` (6.14 cents), 1,083 on `gpt-4.1-mini` (3.69 cents),
 1,553 on `google/gemini-3.1-flash-lite` (2.58 cents); a 1700x2200 page weighs 2.15 cents on the
 default model (1,864 a day). Any mix in one org shares the same bound.
 

@@ -1,3 +1,4 @@
+import { isAutomaticSelectionDenied } from "./automatic-model-selection.js";
 import { lowestOpenRouterReasoning, withReasoningTokenAllowance } from "./openrouter-usage.js";
 import { isProhibitedRoutingModelId } from "./routing-targets.js";
 import { nitroBaseModel, speedBoostMaxPrice } from "./project-chat-models.js";
@@ -187,8 +188,8 @@ export function restrictedFallbackModel(env: NodeJS.ProcessEnv = process.env): s
   const configured = env.OPENROUTER_RESTRICTED_FALLBACK_MODEL?.trim();
   if (configured === undefined) return DEFAULT_RESTRICTED_FALLBACK_MODEL;
   if (!configured || configured.toLowerCase() === "none") return undefined;
-  if (configured.includes(":") || isProhibitedRoutingModelId(configured)) {
-    if (!warnedInvalidFallback) console.warn(`[openrouter] region_fallback disabled: OPENROUTER_RESTRICTED_FALLBACK_MODEL=${configured} is a variant or prohibited model`);
+  if (configured.includes(":") || isProhibitedRoutingModelId(configured) || isAutomaticSelectionDenied(configured)) {
+    if (!warnedInvalidFallback) console.warn(`[openrouter] region_fallback disabled: OPENROUTER_RESTRICTED_FALLBACK_MODEL=${configured} is a variant, prohibited, or never selected automatically`);
     warnedInvalidFallback = true;
     return undefined;
   }
