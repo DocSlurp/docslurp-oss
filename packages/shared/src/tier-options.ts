@@ -8,9 +8,13 @@
  *   from distinct providers.
  * - Pools are `llm://` entries, one per host (`?_provider=`); pool options (`_sort`, `_fallbacks`, `_timeout`,
  *   `_minUptime`, `_maxAge`, `_preferredMargin`) are written once, on the first entry. See provider-pools.ts.
- * - evalScore stays null until a recorded eval run measures the option; unmeasured options are never "smart".
+ * - evalScore is the option's composite on its capability's tier benchmark: for page-ocr, the mean tolerant-markdown@v1
+ *   `content` (mean of the applicable tolerant text, tables and math components) over the development page-OCR items,
+ *   with the per-component scores kept in the run (evalRef). "smart" ranks by it (owner, 2026-11-13). It stays null
+ *   until a recorded run measures the option on that scale; unmeasured options are never "smart". Chat has no
+ *   composite on a shared scale yet.
  * - Together is omitted from every pool (owner, 2026-11-12): its DeepSeek V4.1 Flash 1017 endpoint fabricated page
- *   bodies on the tier benchmark (quality 0.565 and 0.301 against Fireworks 0.786 and 0.784).
+ *   bodies on the tier benchmark (composite 0.673 and 0.333 against Fireworks 0.938 and 0.938).
  * - DeepSeek V4.1 Flash is never an option (owner, 2026-11-13): it is never selected automatically
  *   (automatic-model-selection.ts), and assertTierOptions refuses it.
  */
@@ -27,8 +31,10 @@ export const TIER_OPTIONS: readonly TierOption[] = defineTierOptions([
     capability: "page-ocr",
     pool: [`${GLM}?_provider=wafer/nvfp4&_sort=price`, `${GLM}?_provider=friendli`, `${GLM}?_provider=inference-net/fp4`],
     tiers: ["fastest", "balanced", "smart"],
-    evalScore: null,
-    evalRef: null,
+    // Tier benchmark v1, development page OCR (67 items), production pool: composite 0.934 (tolerant text 0.919,
+    // tables 0.930, math 1.000).
+    evalScore: 0.934,
+    evalRef: "tier-benchmark-v1/page-ocr/development/dev-page-ocr-20261112-r2",
   },
   {
     id: "page-ocr/mimo-v2.6-flash",
