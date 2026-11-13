@@ -143,7 +143,7 @@ RUN cmake -S /src/doppler -B /src/build -G Ninja -DCMAKE_BUILD_TYPE=Release \
     && rm -rf /out/usr/lib/doppler/include /out/usr/lib/doppler/lib/pkgconfig /out/usr/lib/doppler/lib/cmake /out/usr/lib/doppler/share/man \
     && install -D -m 0644 /src/doppler/COPYING /out/usr/lib/doppler/share/doc/doppler/COPYING \
     && install -D -m 0644 /src/doppler/COPYING3 /out/usr/lib/doppler/share/doc/doppler/COPYING3 \
-    && printf 'Doppler (GPL-2.0-or-later). Corresponding source: https://github.com/DocSlurp/doppler/tree/f4355280e0e9d58d448e09d5cdf23c97755e43cd (tarball: https://github.com/DocSlurp/doppler/releases/download/docslurp-f435528/doppler-f435528-src.tar.gz)\n' > /out/usr/lib/doppler/share/doc/doppler/SOURCE \
+    && printf 'Doppler (GPL-2.0-or-later). Corresponding source: https://github.com/DocSlurp/doppler/tree/79957e1a3e2addb1b0a964b8744fcd5ec78b5f7c (tarball: https://github.com/DocSlurp/doppler/releases/download/docslurp-79957e1/doppler-79957e1-src.tar.gz)\n' > /out/usr/lib/doppler/share/doc/doppler/SOURCE \
     && for tool in pdftotext pdftohtml pdfinfo pdfimages pdftoppm pdfseparate pdfunite pdfpagecount; do test -x "/out/usr/lib/doppler/bin/$tool"; done
 
 FROM rust:1.99-slim-trixie@sha256:7eab7ce19273ce785e0ca7578bdf7bc1fcbae621775a8197379a04c9f6e03cd5 AS doppler-md
@@ -292,9 +292,9 @@ RUN node scripts/write-component-provenance.mjs \
       --doppler worker/doppler.json --doppler-prefix /usr/lib/doppler \
       --engine-manifest /app/vendor-artifacts/native-pdf/manifest.json
 LABEL io.docslurp.doppler.source="https://github.com/DocSlurp/doppler" \
-      io.docslurp.doppler.commit="f4355280e0e9d58d448e09d5cdf23c97755e43cd" \
+      io.docslurp.doppler.commit="79957e1a3e2addb1b0a964b8744fcd5ec78b5f7c" \
       io.docslurp.doppler.license="GPL-2.0-or-later" \
-      io.docslurp.doppler.corresponding-source="https://github.com/DocSlurp/doppler/tree/f4355280e0e9d58d448e09d5cdf23c97755e43cd" \
+      io.docslurp.doppler.corresponding-source="https://github.com/DocSlurp/doppler/tree/79957e1a3e2addb1b0a964b8744fcd5ec78b5f7c" \
       io.docslurp.sbom.native-components="/usr/share/doc/docslurp/sbom/native-components.spdx.json"
 ENV NATIVE_PDF_OCR_MODEL_DIR=${DOCSLURP_NATIVE_PDF_OCR_MODELS:+/opt/native-pdf/ocr-models}
 ENV NATIVE_PDF_FONTS_DIR=${DOCSLURP_NATIVE_PDF_CJK_FONTS:+/opt/native-pdf/fonts}
