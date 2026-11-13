@@ -3680,6 +3680,11 @@ export const documentExtractionLevels = pgTable("document_extraction_levels", {
   // Lifetime resume VM launches (reset only by a new run) and the audit cursor.
   resumeVmLaunches: integer("resume_vm_launches").default(0).notNull(),
   resumeUnitFailures: jsonb("resume_unit_failures").default({}).notNull(),
+  // Migration 0160: measured resume VM time, resumes in a row without progress, request grants, and when the block was set.
+  resumeVmMs: bigint("resume_vm_ms", { mode: "number" }).default(0).notNull(),
+  resumeStalls: integer("resume_stalls").default(0).notNull(),
+  resumeGrants: integer("resume_grants").default(0).notNull(),
+  resumeBlockedAt: timestamp("resume_blocked_at", { withTimezone: true, mode: "string" }),
   auditedAt: timestamp("audited_at", { withTimezone: true, mode: "string" }),
   gaps: jsonb(),
   shards: integer().default(0).notNull(),

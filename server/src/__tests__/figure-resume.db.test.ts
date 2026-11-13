@@ -93,10 +93,10 @@ describe("POST /documents/:id/assets/resume", () => {
     await resumableDocument("doc-a");
     const res = await post("doc-a", { "x-test-user": "ua" });
     expect(res.status).toBe(202);
-    expect(await res.json()).toEqual({ documentId: "doc-a", status: "queued" });
+    expect(await res.json()).toEqual({ documentId: "doc-a", status: "queued", reason: null, granted: false, grantsLeft: 2 });
     expect(await queued("doc-a")).toBe(true);
     const { rawKey } = await keys.createApiKey("ua", "ingest", { orgId: "org-a", scopes: ["ingest"], keyType: "server", projectIds: ["proj-a"] });
-    expect(await (await post("doc-a", { authorization: `Bearer ${rawKey}` })).json()).toEqual({ documentId: "doc-a", status: "already-queued" });
+    expect(await (await post("doc-a", { authorization: `Bearer ${rawKey}` })).json()).toMatchObject({ documentId: "doc-a", status: "already-queued" });
   });
 
   it("cross-tenant, another project's key, a key without ingest, a client key and a revoked key are refused; nothing is queued", async () => {
@@ -122,23 +122,58 @@ describe("POST /documents/:id/assets/resume", () => {
     expect(await queued("doc-a")).toBe(false);
   });
 
-  it("is off for a project whose resumes are off, and capped after three attempts", async () => {
+  it("is off for a project whose resumes are off", async () => {
     await resumableDocument("doc-off", "proj-off", "org-a", "run-off");
-    expect(await (await post("doc-off", { "x-test-user": "ua" })).json()).toEqual({ documentId: "doc-off", status: "off" });
+    expect(await (await post("doc-off", { "x-test-user": "ua" })).json()).toMatchObject({ documentId: "doc-off", status: "off" });
     expect(await queued("doc-off")).toBe(false);
-    await resumableDocument("doc-a");
-    await sql`update document_extraction_levels set resume_blocked = 'attempts', resumes = 3 where document_id = 'doc-a'`;
-    expect(await (await post("doc-a", { "x-test-user": "ua" })).json()).toEqual({ documentId: "doc-a", status: "capped" });
   });
 
-  it("H4: a request never resets the failure count, and the lifetime VM launch cap reports capped", async () => {
+  it("H4: a request never resets the failure count for a block that is not a budget stop", async () => {
     await resumableDocument("doc-a");
     await sql`update document_extraction_levels set resume_failures = 2, resume_blocked = 'stale' where document_id = 'doc-a'`;
-    expect(await (await post("doc-a", { "x-test-user": "ua" })).json()).toEqual({ documentId: "doc-a", status: "queued" });
-    expect((await sql`select resume_failures, resume_blocked from document_extraction_levels where document_id = 'doc-a'`)[0]).toEqual({ resume_failures: 2, resume_blocked: null });
-    await sql`update document_extraction_levels set resume_after = null, resume_vm_launches = 6 where document_id = 'doc-a'`;
-    expect(await (await post("doc-a", { "x-test-user": "ua" })).json()).toEqual({ documentId: "doc-a", status: "capped" });
-    expect(await queued("doc-a")).toBe(false);
+    expect(await (await post("doc-a", { "x-test-user": "ua" })).json()).toEqual({ documentId: "doc-a", status: "queued", reason: "stale", granted: false, grantsLeft: 2 });
+    expect((await sql`select resume_failures, resume_blocked, resume_grants from document_extraction_levels where document_id = 'doc-a'`)[0])
+      .toEqual({ resume_failures: 2, resume_blocked: null, resume_grants: 0 });
+  });
+
+  it("budget stops: each block is visible by reason, a request clears it with a bounded grant, then it reports capped", async () => {
+    await resumableDocument("doc-a");
+    const state = async () => (await sql`select resume_blocked, resume_blocked_at is not null as at, resume_grants, resume_stalls, resume_failures,
+      resume_unit_failures, resume_after is not null as q from document_extraction_levels where document_id = 'doc-a'`)[0];
+    // Each budget reason (the runner's: launches, VM time, no progress) is cleared once per grant; two grants per run.
+    const reasons = ["vm-budget", "no-progress"] as const;
+    for (const [i, reason] of reasons.entries()) {
+      await sql`update document_extraction_levels set resume_blocked = ${reason}, resume_blocked_at = now(), resume_after = null, resume_stalls = 3,
+        resume_failures = 2, resume_unit_failures = '{"doc": 2}'::jsonb where document_id = 'doc-a'`;
+      const res = await post("doc-a", { "x-test-user": "ua" });
+      expect(res.status).toBe(202);
+      expect(await res.json()).toEqual({ documentId: "doc-a", status: "queued", reason, granted: true, grantsLeft: 1 - i });
+      expect(await state()).toEqual({ resume_blocked: null, at: false, resume_grants: i + 1, resume_stalls: 0, resume_failures: 0, resume_unit_failures: {}, q: true });
+    }
+    // Grants spent: the reason stays visible and nothing is queued; only a reprocess (a new run) starts clean.
+    await sql`update document_extraction_levels set resume_blocked = 'attempts', resume_blocked_at = now(), resume_after = null where document_id = 'doc-a'`;
+    const res = await post("doc-a", { "x-test-user": "ua" });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ documentId: "doc-a", status: "capped", reason: "attempts", granted: false, grantsLeft: 0 });
+    expect(await state()).toMatchObject({ resume_blocked: "attempts", at: true, resume_grants: 2, q: false });
+    // The request is audited with its reason.
+    const [audit] = await sql<{ metadata: Record<string, unknown> }[]>`
+      select metadata from audit_log where action = 'document.figures.resume_requested' and resource_id = 'doc-a' order by created_at desc limit 1`;
+    expect(audit!.metadata).toMatchObject({ status: "capped", reason: "attempts", granted: false });
+  });
+
+  it("bulk requests and the backstop never grant: a budget-blocked document is left blocked", async () => {
+    await resumableDocument("doc-a");
+    await resumableDocument("doc-b2");
+    await sql`update document_extraction_levels set resume_blocked = 'vm-budget', updated_at = now() - interval '1 hour' where document_id = 'doc-a'`;
+    await sql`update document_extraction_levels set updated_at = now() - interval '1 hour' where document_id = 'doc-b2'`;
+    expect(await (await app.request("/projects/proj-a/figures/resume", { method: "POST", headers: { "x-test-user": "ua" } })).json()).toMatchObject({ queued: 1 });
+    service.resetFigureResumeBackstopForTest();
+    await sql`update document_extraction_levels set resume_after = null`;
+    expect(await service.sweepFigureResumeQueue()).toBe(1);
+    expect((await sql`select resume_blocked, resume_grants, resume_after is not null as q from document_extraction_levels where document_id = 'doc-a'`)[0])
+      .toEqual({ resume_blocked: "vm-budget", resume_grants: 0, q: false });
+    expect(await service.countResumableFigureDocuments({ orgId: "org-a", projectId: "proj-a" })).toBe(1);
   });
 
   it("R6-H1 F3: no request clears an unscanned block (only a new run that records a parse decision does)", async () => {
@@ -169,7 +204,7 @@ describe("POST /documents/:id/assets/resume", () => {
     await sql`update document_extraction_levels set updated_at = now() - interval '1 hour'`;
     service.resetFigureResumeBackstopForTest();
     expect(await service.sweepFigureResumeQueue()).toBe(0);
-    expect(await (await post("doc-m", { "x-test-user": "ua" })).json()).toEqual({ documentId: "doc-m", status: "queued" });
+    expect(await (await post("doc-m", { "x-test-user": "ua" })).json()).toMatchObject({ documentId: "doc-m", status: "queued" });
   });
 });
 

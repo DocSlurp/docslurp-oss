@@ -10,7 +10,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { DocumentAsset } from "@docslurp/shared";
 
 import {
-  DOCUMENT_ASSET_RESUME_CAP, DocumentAssetLedgerError, flushAssetLedger, ledgerWriteForFailedFigures, ledgerWriteForNoFigures,
+  DOCUMENT_ASSET_RESUME_CAP, DOCUMENT_ASSET_RESUME_TOTAL_CAP, DocumentAssetLedgerError, flushAssetLedger, ledgerWriteForFailedFigures, ledgerWriteForNoFigures,
   ledgerWriteForStoredFigures, listResumableDocuments, writeDocumentAssetLedger,
   type DocumentAssetLedgerScope, type DocumentAssetLedgerWrite, type LedgerAsset, type PendingAssetLedgerWrite,
 } from "../db/document-asset-ledger.js";
@@ -630,7 +630,7 @@ describe("sharded documents: a record per shard, the level is the aggregate, res
     const rows3 = (await inMemory(full)).assets.filter((asset) => asset.pageNumber === 3);
     const resume = (): DocumentAssetLedgerWrite => ({ ...full, assets: rows3, shards: shard3, resume: { first: 3, last: 3 } });
     for (let i = 1; i <= DOCUMENT_ASSET_RESUME_CAP; i += 1) await store.writeDocumentAssetLedger(resume());
-    expect((await shards()).map((row) => [row.first_page, row.resumes])).toEqual([[1, 0], [3, 3]]);
+    expect((await shards()).map((row) => [row.first_page, row.resumes])).toEqual([[1, 0], [3, DOCUMENT_ASSET_RESUME_CAP]]);
     // Rows of the other shard were neither pruned nor rewritten.
     expect((await assets("doc-a")).map((row) => row.asset_id)).toEqual(["p1.1", "p1.g1", "p2.1", "p2.2", "p3.1", "p3.2"]);
     expect(await listResumableDocuments(sql, { orgId: "org-a" })).toEqual([]);
@@ -678,13 +678,15 @@ describe("LOW-5: shard ranges and the document's total resume cap", () => {
     expect(await sql`select 1 from document_extraction_shards where document_id = 'doc-a'`).toHaveLength(0);
   });
 
-  it("past min(3 x shards, 12) resumes in all, no shard of the document is listed or resumed", async () => {
-    // Five shards: each under its own cap of 3, but 12 resumes in all (the absolute cap).
-    await insertShards([3, 3, 3, 2, 1], 3);
+  it("past the backstop total (min(unit cap x shards, hard document cap)) no shard of the document is listed or resumed", async () => {
+    // Nine shards: each under its own cap, but DOCUMENT_ASSET_RESUME_TOTAL_CAP resumes in all.
+    const unit = DOCUMENT_ASSET_RESUME_CAP - 1;
+    const full = Array.from({ length: 8 }, () => unit);
+    await insertShards([...full, DOCUMENT_ASSET_RESUME_TOTAL_CAP - 8 * unit], 3);
     expect(await listResumableDocuments(sql, { orgId: "org-a" })).toEqual([]);
     await sql`delete from document_extraction_shards`;
     // Under the total, the resumable shards are listed.
-    await insertShards([3, 3, 2, 2, 1], 3);
+    await insertShards([unit, unit, unit, 2, 1], 3);
     expect((await listResumableDocuments(sql, { orgId: "org-a" })).map((row) => row.shard)).toEqual([{ first: 4, last: 4 }, { first: 5, last: 5 }]);
     await sql`delete from document_extraction_shards`;
   });

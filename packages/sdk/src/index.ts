@@ -801,7 +801,19 @@ export type DeletedDocument = JsonObject & {
 };
 
 /** Answer of {@link DocSlurpClient.resumeDocumentFigures}. */
-export type FigureResumeRequest = { documentId: string; status: "queued" | "already-queued" | "not-resumable" | "capped" | "off" };
+export type FigureResumeRequest = {
+  documentId: string;
+  status: "queued" | "already-queued" | "not-resumable" | "capped" | "off";
+  /**
+   * Why the document's resumes stopped, when they did (or had, when this request cleared it): `attempts` (launch cap),
+   * `vm-budget` (VM time), `no-progress`, `unscanned`, `refused`, `stale`, `resume-off` or `figures-off`; else null.
+   */
+  reason: string | null;
+  /** Whether this request granted an extension past a budget stop (bounded per run; a reprocess starts clean). */
+  granted: boolean;
+  /** Extensions left for the document's current run. */
+  grantsLeft: number;
+};
 /** Answer of {@link DocSlurpClient.resumeProjectFigures}: how many were queued, already queued, and whether more remain. */
 export type ProjectFigureResumeRequest = { projectId: string; status: "queued" | "off"; queued: number; alreadyQueued: number; capped: boolean };
 

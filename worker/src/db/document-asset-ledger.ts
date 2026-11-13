@@ -15,7 +15,7 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import type { JSONValue, Sql } from "postgres";
 import {
-  DOCUMENT_IMAGES_STATUSES, DOPPLER_BUILD, DOPPLER_MANIFEST_V2_LIMITS, DOPPLER_MANIFEST_V3_FILE, DOPPLER_STORE_LAYOUT,
+  DOCUMENT_IMAGES_STATUSES, DOPPLER_BUILD, DOPPLER_MANIFEST_V2_LIMITS, FIGURE_RESUME_HARD, DOPPLER_MANIFEST_V3_FILE, DOPPLER_STORE_LAYOUT,
   addDocumentAssetCount, dopplerAssetStorageKey, emptyDocumentAssetCounts, isDocumentAssetRow, dopplerDocumentPrefix,
   DOPPLER_FIGURE_GAP_REASONS, DOPPLER_FIGURE_GAPS_MAX, DOPPLER_SHARDS_MAX, dopplerShardFolder, dopplerShardsContiguous,
   parseDopplerFigureId, type DocumentAsset, type DocumentImagesStatus, type DopplerFigureGap, type DopplerManifestRunFacts,
@@ -93,10 +93,14 @@ export interface DocumentAssetLedgerWrite {
   levelOnly?: boolean;
 }
 
-/** Resumes a document (or one shard) may have before the resume queue leaves it alone (counted by the host, not the manifest). */
-export const DOCUMENT_ASSET_RESUME_CAP = 3;
-/** A sharded document's resumes across all its shards: `min(3 x shards, 12)`. Past it no shard of it is listed or resumed. */
-export const DOCUMENT_ASSET_RESUME_TOTAL_CAP = 12;
+/**
+ * The ledger's backstop on resumes of one unit (a shard, or the unsharded document), counted by the host, not the manifest.
+ * The resume policy (figureResumeUnitCap, figureResumeLaunchCap in packages/shared figure-resume-limits.ts) scales with
+ * pages and stops far below it; this only refuses a write no policy could have allowed.
+ */
+export const DOCUMENT_ASSET_RESUME_CAP = FIGURE_RESUME_HARD.unitResumes;
+/** A sharded document's resumes across all its shards, backstop: `min(unit cap x shards, hard document cap)`. */
+export const DOCUMENT_ASSET_RESUME_TOTAL_CAP = FIGURE_RESUME_HARD.documentLaunches;
 export function documentResumeTotalCap(shards: number): number {
   return Math.min(DOCUMENT_ASSET_RESUME_CAP * Math.max(1, shards), DOCUMENT_ASSET_RESUME_TOTAL_CAP);
 }
@@ -748,7 +752,7 @@ export async function listResumableDocuments(
         and lv.images_status = 'resumable' and lv.run_id is not distinct from s.run_id
       where (rs.id is null or ${figuresOnSql(sql, "rs")}) and s.org_id = ${args.orgId} and s.images_status = 'resumable' and s.resumes < ${DOCUMENT_ASSET_RESUME_CAP} ${project("s")}
         and d.superseded_at is null and d.archived_at is null and d.purged_at is null
-        -- The document's resumes across all its shards stay under min(3 x shards, 12) (documentResumeTotalCap).
+        -- The document's resumes across all its shards stay under the backstop (documentResumeTotalCap).
         and (select coalesce(sum(t.resumes), 0) from document_extraction_shards t
              where t.document_id = s.document_id and t.org_id = s.org_id and t.project_id = s.project_id)
           < least(${DOCUMENT_ASSET_RESUME_CAP}::int * (select count(*) from document_extraction_shards t
@@ -1361,6 +1365,10 @@ export function resumeRunChangeSql(tx: Sql<Record<string, unknown>> | Tx) {
     resume_failures = case when ${changed} then 0 else document_extraction_levels.resume_failures end,
     resume_vm_launches = case when ${changed} then 0 else document_extraction_levels.resume_vm_launches end,
     resume_unit_failures = case when ${changed} then '{}'::jsonb else document_extraction_levels.resume_unit_failures end,
+    resume_vm_ms = case when ${changed} then 0 else document_extraction_levels.resume_vm_ms end,
+    resume_stalls = case when ${changed} then 0 else document_extraction_levels.resume_stalls end,
+    resume_grants = case when ${changed} then 0 else document_extraction_levels.resume_grants end,
+    resume_blocked_at = case when ${changed} then null else document_extraction_levels.resume_blocked_at end,
     resume_blocked = case when ${changed} then null else document_extraction_levels.resume_blocked end`;
 }
 

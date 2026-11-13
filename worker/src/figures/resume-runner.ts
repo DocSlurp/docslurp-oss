@@ -40,14 +40,15 @@ import path from "node:path";
 import type { Sql } from "postgres";
 import {
   DOPPLER_STORE_LAYOUT, dopplerFigureSlot, dopplerImageExtractEnabled, dopplerImageLimits, dopplerShardFolder, figureAuditWrites,
-  figureGcDeletes, figureResumeBackoffMs, figureResumeConcurrency, figureResumeDeployEnabled, figureResumeGlobalMax, figureResumeOrgDailyVmMs,
-  parseDopplerFigureId, projectFigureResumeMode, projectFiguresOff, FIGURE_RESUME_LIMITS,
+  figureGcDeletes, figureResumeBackoffMs, figureResumeBudgetConfig, figureResumeConcurrency, figureResumeDeployEnabled, figureResumeGlobalMax,
+  figureResumeLaunchCap as launchCapFor, figureResumeOrgDailyVmMs, figureResumeUnitCap, figureResumeVmBudgetMs, parseDopplerFigureId,
+  projectFigureResumeMode, projectFiguresOff, FIGURE_RESUME_LIMITS, type FigureResumeBlockReason,
 } from "@docslurp/shared";
 import { recordFigureTelemetry } from "@docslurp/shared/observability";
 
 import {
-  adoptPendingAssets, documentResumeTotalCap, figureLedgerHooks, isMissingObject, ledgerWriteForStoredFigures, markAssetsLost,
-  markAssetsPending, markAssetsStored, writeDocumentAssetLedger, DocumentAssetLedgerError, DOCUMENT_ASSET_RESUME_CAP,
+  adoptPendingAssets, figureLedgerHooks, isMissingObject, ledgerWriteForStoredFigures, markAssetsLost,
+  markAssetsPending, markAssetsStored, writeDocumentAssetLedger, DocumentAssetLedgerError,
   type DocumentAssetLedgerScope, type FigureObjectReader,
 } from "../db/document-asset-ledger.js";
 import { persistScopedUsageEvents } from "../db/usage-event-store.js";
@@ -94,17 +95,50 @@ interface ClaimedLevel {
   document_id: string; org_id: string; project_id: string; run_id: string; user_id: string; page_count: number;
   source_sha256: string | null; shards: number; resumes: number; manifest_sha256: string | null; storage_prefix: string | null;
   pipeline: unknown; run_pipeline: unknown; resume_vm_launches: number; gap_count: number;
+  /** Measured resume VM time, resumes in a row without progress, and request grants of this run (migration 0160). */
+  resume_vm_ms: number; resume_stalls: number; resume_grants: number;
   /** This claim's lease token (`<worker>:<uuid>`): every later runner write is fenced by it (R2 adversarial 5). */
   lease: string;
 }
 
 /**
- * The lifetime resume VM launches of a document (R2-M3): #355's per-document resume total, min(3 × units, 12), with its
- * shards and gaps as units, so a big sharded document can resume each unit; never below the old floor of 6 (an
- * unsharded document, whose per-unit cap is 3, keeps room for failures). Never reset by a request; a new run resets it.
+ * A document's resume budget for its current run (packages/shared figure-resume-limits.ts): lifetime launches and VM time
+ * scaled by its pages (plus what request grants added), and the no-progress stop. A new run resets the counters.
  */
-export function figureResumeLaunchCap(units: number): number {
-  return Math.max(FIGURE_RESUME_LIMITS.maxVmLaunches, documentResumeTotalCap(Math.max(1, units)));
+export function documentResumeBudget(
+  row: { page_count: number; shards: number; gap_count: number; resume_grants: number },
+  env: Record<string, string | undefined> = process.env,
+): { launchCap: number; vmBudgetMs: number; noProgressLimit: number } {
+  const config = figureResumeBudgetConfig(env);
+  return {
+    launchCap: launchCapFor({ pageCount: row.page_count, units: row.shards + row.gap_count, grants: row.resume_grants }, config),
+    vmBudgetMs: figureResumeVmBudgetMs({ pageCount: row.page_count, units: row.shards + row.gap_count, grants: row.resume_grants }, config),
+    noProgressLimit: config.noProgressLimit,
+  };
+}
+
+/** Which budget stop a document is past, if any: launches, measured VM time (with a minute to spare), or no progress. */
+export function resumeBudgetBlock(
+  row: { page_count: number; shards: number; gap_count: number; resume_grants: number; resume_vm_launches: number; resume_vm_ms: number; resume_stalls: number },
+  env: Record<string, string | undefined> = process.env,
+): "attempts" | "vm-budget" | "no-progress" | null {
+  const budget = documentResumeBudget(row, env);
+  if (row.resume_stalls >= budget.noProgressLimit) return "no-progress";
+  if (row.resume_vm_launches >= budget.launchCap) return "attempts";
+  if (budget.vmBudgetMs - row.resume_vm_ms < MIN_LAUNCH_MS) return "vm-budget";
+  return null;
+}
+/** The shortest launch the runner starts (a resume VM's timeout floor). */
+const MIN_LAUNCH_MS = 60_000;
+
+/** The budget's numbers for a block's log line (counts only, never document content). */
+function budgetDetail(
+  row: { page_count: number; shards: number; gap_count: number; resume_grants: number; resume_vm_launches: number; resume_vm_ms: number; resume_stalls: number },
+  env: Record<string, string | undefined>,
+): string {
+  const budget = documentResumeBudget(row, env);
+  return ` pages=${row.page_count} launches=${row.resume_vm_launches}/${budget.launchCap} vmMs=${Math.round(row.resume_vm_ms)}/${budget.vmBudgetMs}`
+    + ` stalls=${row.resume_stalls}/${budget.noProgressLimit} grants=${row.resume_grants}`;
 }
 
 /** The figures of documents the queue may claim: completed, current run, Markdown committed (M1, PII rule). */
@@ -115,9 +149,10 @@ function claimableSql(sql: Client) {
     and (l.resume_lease_until is null or l.resume_lease_until < now())`;
 }
 
-async function block(tx: Client, row: Pick<ClaimedLevel, "document_id" | "org_id">, reason: "attempts" | "figures-off" | "resume-off" | "stale" | "refused" | "unscanned"): Promise<void> {
-  await tx`update document_extraction_levels set resume_after = null, resume_blocked = ${reason} where document_id = ${row.document_id} and org_id = ${row.org_id}`;
-  console.log(`[doppler-figures] resume capped doc=${row.document_id} reason=${reason}`);
+async function block(tx: Client, row: Pick<ClaimedLevel, "document_id" | "org_id">, reason: FigureResumeBlockReason, detail = ""): Promise<void> {
+  await tx`update document_extraction_levels set resume_after = null, resume_blocked = ${reason}, resume_blocked_at = now()
+    where document_id = ${row.document_id} and org_id = ${row.org_id}`;
+  console.log(`[doppler-figures] resume capped doc=${row.document_id} reason=${reason}${detail}`);
   recordFigureTelemetry("resume.capped", 1, { reason });
 }
 
@@ -137,6 +172,7 @@ export async function claimFigureResume(sql: Client, workerId: string, env: Reco
       select c.* from (
         select distinct on (l.org_id) l.document_id, l.org_id, l.project_id, l.run_id, d.user_id, d.page_count, l.source_sha256,
           l.shards, l.resumes, l.manifest_sha256, r.storage_prefix, p.pipeline, r.pipeline as run_pipeline, l.resume_vm_launches, l.resume_after,
+          l.resume_vm_ms::float8 as resume_vm_ms, l.resume_stalls, l.resume_grants,
           coalesce(jsonb_array_length(l.gaps), 0)::int as gap_count
         from document_extraction_levels l
         join documents d on d.id = l.document_id and d.org_id = l.org_id and d.project_id = l.project_id and d.run_id = l.run_id
@@ -172,7 +208,10 @@ export async function claimFigureResume(sql: Client, workerId: string, env: Reco
         continue;
       }
       if (projectFigureResumeMode(row.pipeline) === "off") { await block(tx as unknown as Client, row, "resume-off"); continue; }
-      if (row.resume_vm_launches >= figureResumeLaunchCap(row.shards + row.gap_count)) { await block(tx as unknown as Client, row, "attempts"); continue; }
+      // The document's own budget (page-scaled launches and VM time, the no-progress stop): blocked, counted and logged
+      // with its numbers; a request may grant an extension, a reprocess clears it.
+      const spent = resumeBudgetBlock(row, env);
+      if (spent) { await block(tx as unknown as Client, row, spent, budgetDetail(row, env)); continue; }
       // A resume adds billable stored bytes: never for an organization that may not spend now (re-queued later).
       const [spend] = await tx<Array<{ funded: boolean | null; available: string | number; project_budget_paused: boolean; org_budget_paused: boolean; project_in_org: boolean }>>`
         select funded, available, project_budget_paused, org_budget_paused, project_in_org from org_spend_status(${row.org_id}, ${row.project_id}::text, 0)`;
@@ -231,19 +270,26 @@ type Outcome = "done" | "retry" | "blocked" | "lost" | "deferred";
  * theirs, or nothing runnable is left (H1). A lease that is no longer ours, or a level that moved to another run, is left
  * untouched.
  */
-async function release(sql: Client, row: ClaimedLevel, outcome: Exclude<Outcome, "lost">, blocked?: string, exhausted = false, unitKey?: string): Promise<void> {
-  const [level] = await sql<{ images_status: string; resume_failures: number; resume_vm_launches: number; resume_unit_failures: Record<string, number>; shards: number; gap_count: number }[]>`
-    select images_status, resume_failures, resume_vm_launches, resume_unit_failures, shards, coalesce(jsonb_array_length(gaps), 0)::int as gap_count
+async function release(
+  sql: Client, row: ClaimedLevel, outcome: Exclude<Outcome, "lost">, blocked?: string, exhausted = false, unitKey?: string,
+  progress: { launched: boolean; progressed: boolean } = { launched: false, progressed: false }, env: Record<string, string | undefined> = process.env,
+): Promise<void> {
+  const [level] = await sql<{ images_status: string; resume_failures: number; resume_vm_launches: number; resume_unit_failures: Record<string, number>; shards: number; gap_count: number; resume_vm_ms: number; resume_stalls: number; resume_grants: number }[]>`
+    select images_status, resume_failures, resume_vm_launches, resume_unit_failures, shards, coalesce(jsonb_array_length(gaps), 0)::int as gap_count,
+      resume_vm_ms::float8 as resume_vm_ms, resume_stalls, resume_grants
     from document_extraction_levels where ${fenced(sql, row)}`;
   if (!level) return;
+  // No progress (R3-L3 follow-up): a launched resume that added no file and closed no work, failed ones included. Any
+  // progress resets the count; past noProgressLimit in a row the document stops `no-progress`.
+  const stalls = progress.launched ? (progress.progressed ? 0 : level.resume_stalls + 1) : level.resume_stalls;
   // Failures count per unit (R2-M3): one failing shard never blocks the others; the level's total is kept for telemetry.
   const retry = outcome === "retry";
   const unitFailures = { ...(level.resume_unit_failures ?? {}) };
   if (retry && unitKey) unitFailures[unitKey] = (unitFailures[unitKey] ?? 0) + 1;
   const failures = level.resume_failures + (retry ? 1 : 0);
   const resumable = level.images_status === "resumable";
-  const spent = level.resume_vm_launches >= figureResumeLaunchCap(level.shards + level.gap_count) || exhausted;
-  const nextBlocked = outcome === "blocked" ? blocked ?? "refused" : resumable && spent ? "attempts" : null;
+  const budgetStop = resumeBudgetBlock({ ...level, page_count: row.page_count, resume_stalls: stalls }, env);
+  const nextBlocked = outcome === "blocked" ? blocked ?? "refused" : resumable && exhausted ? "attempts" : resumable ? budgetStop : null;
   const after = !resumable || nextBlocked ? null
     : outcome === "done" ? new Date().toISOString()
     // Past the organization's daily resume VM budget: the next UTC day, no failure counted.
@@ -251,11 +297,13 @@ async function release(sql: Client, row: ClaimedLevel, outcome: Exclude<Outcome,
     : new Date(Date.now() + figureResumeBackoffMs(unitKey ? unitFailures[unitKey] ?? failures : failures)).toISOString();
   await sql`
     update document_extraction_levels set resume_lease_until = null, resume_lease_owner = null, resume_failures = ${failures},
-      resume_unit_failures = ${sql.json(unitFailures)}::jsonb,
-      resume_after = ${after}::timestamptz, resume_blocked = coalesce(${nextBlocked}, resume_blocked)
+      resume_unit_failures = ${sql.json(unitFailures)}::jsonb, resume_stalls = ${stalls},
+      resume_after = ${after}::timestamptz, resume_blocked = coalesce(${nextBlocked}, resume_blocked),
+      resume_blocked_at = case when ${nextBlocked}::text is null then resume_blocked_at else now() end
     where ${fenced(sql, row)}`;
   if (nextBlocked) {
-    console.log(`[doppler-figures] resume capped doc=${row.document_id} reason=${nextBlocked}`);
+    const detail = budgetDetail({ ...level, page_count: row.page_count, resume_stalls: stalls }, env);
+    console.log(`[doppler-figures] resume capped doc=${row.document_id} reason=${nextBlocked}${detail}`);
     recordFigureTelemetry("resume.capped", 1, { reason: nextBlocked });
   }
 }
@@ -269,36 +317,38 @@ type ResumeUnit = {
 };
 
 /**
- * The runnable units of a claimed document, each one range, below #355's caps (3 per unit, the document's total
- * documentResumeTotalCap) and below 3 failures of its own (R2-M3):
+ * The runnable units of a claimed document, each one range, below its resume caps (figureResumeUnitCap per unit, scaled
+ * by its pages; the document's launch cap across its shards) and below 3 failures of its own (R2-M3):
  *   - every resumable shard of the claimed run (its manifest);
  *   - every gap no shard covers (a fresh pass over its pages becomes its shard);
  *   - a gap inside a shard that is not complete (e.g. a gap resume's own inner gaps, R2 adversarial 8): that shard's resume
  *     narrowed to the gap's pages, unless the shard is already a unit;
  *   - or the unsharded document itself.
  */
-async function units(sql: Client, row: ClaimedLevel): Promise<ResumeUnit[]> {
+async function units(sql: Client, row: ClaimedLevel, env: Record<string, string | undefined> = process.env): Promise<ResumeUnit[]> {
   const [level] = await sql<{ gaps: Array<{ first: number; last: number }> | null; resumes: number; assets_resumable: number; manifest_sha256: string | null; shards: number; resume_unit_failures: Record<string, number> | null }[]>`
     select gaps, resumes, assets_resumable, manifest_sha256, shards, resume_unit_failures from document_extraction_levels
     where document_id = ${row.document_id} and org_id = ${row.org_id} and project_id = ${row.project_id} and run_id = ${row.run_id}`;
   if (!level) return [];
   const failed = level.resume_unit_failures ?? {};
   const open = (key: string) => (failed[key] ?? 0) < FIGURE_RESUME_LIMITS.maxAttempts;
+  // Each unit's resumes scale with its pages (figureResumeUnitCap); the document's across its shards with the launch cap.
+  const unitCap = (first: number, last: number) => figureResumeUnitCap(last - first + 1, row.resume_grants);
   const shards = await sql<Array<{ first_page: number; last_page: number; manifest_sha256: string; resumes: number; images_status: string }>>`
     select first_page, last_page, manifest_sha256, resumes, images_status from document_extraction_shards
     where document_id = ${row.document_id} and org_id = ${row.org_id} and project_id = ${row.project_id}
     order by first_page`;
   const out: ResumeUnit[] = [];
-  if (shards.length === 0 && level.manifest_sha256 && level.resumes < DOCUMENT_ASSET_RESUME_CAP && level.assets_resumable > 0 && open("doc")) {
+  if (shards.length === 0 && level.manifest_sha256 && level.resumes < unitCap(1, Math.max(1, row.page_count)) && level.assets_resumable > 0 && open("doc")) {
     out.push({ shard: null, manifestSha256: level.manifest_sha256, gap: false, key: "doc" });
   }
   const total = shards.reduce((sum, shard) => sum + shard.resumes, 0);
-  const totalOpen = total < documentResumeTotalCap(Math.max(1, shards.length));
+  const totalOpen = total < documentResumeBudget({ ...row, shards: Math.max(1, shards.length) }, env).launchCap;
   if (totalOpen) {
     const keyOfRange = (first: number, last: number) => `${first}-${last}`;
     for (const shard of shards) {
       const key = keyOfRange(shard.first_page, shard.last_page);
-      if (shard.images_status === "resumable" && shard.resumes < DOCUMENT_ASSET_RESUME_CAP && open(key)) {
+      if (shard.images_status === "resumable" && shard.resumes < unitCap(shard.first_page, shard.last_page) && open(key)) {
         out.push({ shard: { first: shard.first_page, last: shard.last_page }, manifestSha256: shard.manifest_sha256, gap: false, key });
       }
     }
@@ -310,7 +360,7 @@ async function units(sql: Client, row: ClaimedLevel): Promise<ResumeUnit[]> {
         continue;
       }
       // Covered by a complete shard: no work. Inside a shard that is not complete: that shard's narrowed resume.
-      if (owner.images_status === "complete" || owner.resumes >= DOCUMENT_ASSET_RESUME_CAP) continue;
+      if (owner.images_status === "complete" || owner.resumes >= unitCap(owner.first_page, owner.last_page)) continue;
       const shardKey = keyOfRange(owner.first_page, owner.last_page);
       if (out.some((unit) => unit.key === shardKey) || !open(shardKey)) continue;
       out.push({
@@ -355,6 +405,7 @@ async function resumeClaimed(deps: FigureResumeDeps, row: ClaimedLevel): Promise
   let vmMs = 0;
   let added = 0;
   let unitKey: string | undefined;
+  let before: { work: number; launches: number } | null = null;
   try {
     const adopted = await adoptPendingAssets(deps.sql, deps.storage, { scope, signal: deps.signal });
     if (adopted.adopted > 0) recordFigureTelemetry("adopted_files", adopted.adopted);
@@ -375,7 +426,7 @@ async function resumeClaimed(deps: FigureResumeDeps, row: ClaimedLevel): Promise
       const last = unit.shard?.last ?? Math.max(1, row.page_count);
       return Array.from({ length: Math.min(last - first + 1, 100_000) }, (_, i) => first + i);
     };
-    const all = await units(deps.sql, row);
+    const all = await units(deps.sql, row, deps.env ?? process.env);
     const todo = withholding.scope === "pages" ? all.filter((unit) => !pageRange(unit).every((page) => isPageWithheld(withholding, page))) : all;
     if (todo.length < all.length) recordFigureTelemetry("resume.pii_skipped", all.length - todo.length, { scope: "pages" });
     console.log(`[doppler-figures] resume claim doc=${row.document_id} org=${row.org_id} launches=${row.resume_vm_launches} units=${todo.length} adopt=${adopted.adopted} lost=${adopted.lost}`);
@@ -386,6 +437,7 @@ async function resumeClaimed(deps: FigureResumeDeps, row: ClaimedLevel): Promise
       exhausted = true;
     } else {
       unitKey = unit.key;
+      before = await remainingWork(deps.sql, row);
       const result = await resumeUnit(deps, row, scope, document, unit);
       vmMs = result.vmMs;
       added = result.added;
@@ -408,7 +460,12 @@ async function resumeClaimed(deps: FigureResumeDeps, row: ClaimedLevel): Promise
     console.warn(`[doppler-figures] resume ${outcome === "blocked" ? "stale" : "failed"} doc=${row.document_id} rule=${rule}`);
   } finally {
     if (outcome !== "lost") {
-      await release(deps.sql, row, outcome, blocked, exhausted, unitKey)
+      // Progress: a file added, or less work left (a unit closed, a gap filled, resumable images settled). Only a resume
+      // that launched a VM (its launch counted, whatever happened after) counts toward the no-progress stop.
+      const after = before ? await remainingWork(deps.sql, row).catch(() => before) : null;
+      const launched = !!before && !!after && after.launches > before.launches;
+      const progressed = added > 0 || (!!before && !!after && after.work < before.work);
+      await release(deps.sql, row, outcome, blocked, exhausted, unitKey, { launched, progressed }, deps.env ?? process.env)
         .catch((error) => console.warn(`[doppler-figures] resume release-failed doc=${row.document_id} error=${error instanceof Error ? error.name : typeof error}`));
     }
   }
@@ -418,6 +475,17 @@ async function resumeClaimed(deps: FigureResumeDeps, row: ClaimedLevel): Promise
   console.log(`[doppler-figures] resume done doc=${row.document_id} outcome=${label} added=${added} vmMs=${vmMs} ms=${Date.now() - started}`);
   recordFigureTelemetry("resume.attempts", 1, { outcome: label });
   if (added > 0) recordFigureTelemetry("resume.added_files", added);
+}
+
+/** The document's launches so far and its open figure work as one number: resumable images, gaps, and shards not complete with their resumable images. */
+async function remainingWork(sql: Client, row: ClaimedLevel): Promise<{ work: number; launches: number }> {
+  const [work] = await sql<{ n: number; launches: number }[]>`
+    select l.resume_vm_launches as launches, (l.assets_resumable + coalesce(jsonb_array_length(l.gaps), 0)
+      + coalesce((select sum(s.assets_resumable + case when s.images_status = 'complete' then 0 else 1 end)
+        from document_extraction_shards s where s.document_id = l.document_id and s.org_id = l.org_id and s.project_id = l.project_id), 0))::float8 as n
+    from document_extraction_levels l
+    where l.document_id = ${row.document_id} and l.org_id = ${row.org_id} and l.project_id = ${row.project_id} and l.run_id = ${row.run_id}`;
+  return { work: work?.n ?? 0, launches: work?.launches ?? 0 };
 }
 
 /**
@@ -432,6 +500,9 @@ async function recordResumeVmTime(sql: Client, row: ClaimedLevel, wallTimeMs: nu
     insert into figure_resume_org_days (org_id, day, launches, vm_ms) values (${row.org_id}, (now() at time zone 'utc')::date, 0, ${ms})
     on conflict (org_id, day) do update set vm_ms = figure_resume_org_days.vm_ms + excluded.vm_ms,
       reserved_ms = greatest(0, figure_resume_org_days.reserved_ms - ${Math.max(0, Math.round(reservedMs))})`;
+  // And the document's lifetime VM budget, scoped to its run (not the lease: VM time a lost lease spent still counts).
+  await sql`update document_extraction_levels set resume_vm_ms = resume_vm_ms + ${ms}
+    where document_id = ${row.document_id} and org_id = ${row.org_id} and run_id = ${row.run_id}`;
   const profile = resolveWorkerDeploymentProfile();
   const event = buildLocalComputeUsageEvent({
     metric: FIGURE_RESUME_METRIC, profile, observation: buildAllocatedResourceObservation({ profile, wallTimeMs: ms }),
@@ -586,9 +657,14 @@ async function resumeUnit(
   // The launch's timeout is capped at what is left of the organization's daily resume VM budget (R2 adversarial 4).
   const [today] = await deps.sql<{ used: number }[]>`
     select (vm_ms + reserved_ms)::float8 as used from figure_resume_org_days where org_id = ${row.org_id} and day = (now() at time zone 'utc')::date`;
-  const remaining = figureResumeOrgDailyVmMs(deps.env ?? process.env) - (today?.used ?? 0);
-  if (remaining < 60_000) return { outcome: "deferred", vmMs: 0, added: 0 };
-  const timeoutMs = Math.max(60_000, Math.min(deps.provider!.timeoutMs(pages), remaining));
+  const env = deps.env ?? process.env;
+  const remaining = figureResumeOrgDailyVmMs(env) - (today?.used ?? 0);
+  if (remaining < MIN_LAUNCH_MS) return { outcome: "deferred", vmMs: 0, added: 0 };
+  // And at what is left of the document's own lifetime VM budget (page-scaled): under a minute, the document is spent.
+  const budget = documentResumeBudget(row, env);
+  const docRemaining = budget.vmBudgetMs - row.resume_vm_ms;
+  if (docRemaining < MIN_LAUNCH_MS) return { outcome: "blocked", blocked: "vm-budget", vmMs: 0, added: 0 };
+  const timeoutMs = Math.max(MIN_LAUNCH_MS, Math.min(deps.provider!.timeoutMs(pages), remaining, docRemaining));
   // Heartbeat: renewed every two minutes while this unit runs (R2-L3); a lease no longer ours aborts the unit.
   if (!await heartbeat(deps.sql, row, HEARTBEAT_LEASE_MS)) return { outcome: "lost", vmMs: 0, added: 0 };
   const lost = new AbortController();
@@ -616,7 +692,7 @@ async function resumeUnit(
     await mkdir(outDir, { mode: 0o700 });
     const counted = await deps.sql`
       update document_extraction_levels set resume_vm_launches = resume_vm_launches + 1
-      where ${fenced(deps.sql, row)} and resume_vm_launches < ${figureResumeLaunchCap(row.shards + row.gap_count)} returning 1`;
+      where ${fenced(deps.sql, row)} and resume_vm_launches < ${budget.launchCap} returning 1`;
     if (counted.length !== 1) return { outcome: "lost", vmMs: 0, added: 0 };
     await deps.sql`
       insert into figure_resume_org_days (org_id, day, launches, vm_ms, reserved_ms) values (${row.org_id}, (now() at time zone 'utc')::date, 1, 0, ${timeoutMs})

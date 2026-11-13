@@ -476,15 +476,46 @@ no organization default above it.
   run: the release, the heartbeat, launch counting, the ledger writes (`scope.lease`), the pending and stored hooks, and
   the slot update. The lease is renewed every two minutes while a unit runs, and a lease that is lost aborts the unit.
 
-**Caps.**
+**Caps.** Every limit lives in `packages/shared/src/figure-resume-limits.ts`, with its environment override and bounds.
+One resume VM returns at most 64 MiB and 2,048 files, whatever the document's own allowance (2,048 + 2 per page files,
+64 MiB + 1.25 MiB per page, up to 32,768 files and 4 GiB). So a big figure-heavy document needs many passes, and a small
+one at most one or two. The caps scale with pages:
 
-- Each unit (a shard, a gap or the document) is closed after 3 failures of its own (`resume_unit_failures`). One
-  failing shard never blocks the others.
-- A document gets `max(6, min(3 × units, 12))` VM launches over its lifetime. That is #355's per-document resume total,
-  with its shards and gaps as units. No request resets it; only a new run does.
-- Each launch's timeout is capped at what is left of the organization's daily VM budget, and that time is reserved at
-  launch, then settled to the real time on return. With under a minute left, the unit waits for the next UTC day and no
-  failure is counted.
+- *Launches:* 1.5 × the passes the allowance needs after the first pass, and at least one per open unit, clamped to
+  `DOCSLURP_FIGURE_RESUME_LAUNCH_FLOOR`..`_CEILING` (default 3..128). 10 pages: 3. 1,000 pages: 30. 20,000 pages: 95.
+- *VM time:* `DOCSLURP_FIGURE_RESUME_VM_HEADROOM` (2) × the expected passes × one launch's estimated time. A launch is
+  `DOCSLURP_FIGURE_RESUME_VM_MS_PER_LAUNCH` (3,000) plus `DOCSLURP_FIGURE_RESUME_VM_MS_PER_PAGE` (50) for each page of one
+  unit: a sharded document resumes one shard at a time, an unsharded one all its pages. Clamped to
+  `DOCSLURP_FIGURE_RESUME_DOC_VM_SECONDS_FLOOR`..`_CEILING` (180 s..4 h). Measured VM time is charged to the document
+  (`resume_vm_ms`), each launch's timeout is capped at what is left, and under a minute left the document stops.
+- *Per unit:* its pages' share of the allowance plus two, 3..32 resumes. Each unit is also closed after 3 failures of its
+  own (`resume_unit_failures`), so one failing shard never blocks the others.
+- *No progress:* `DOCSLURP_FIGURE_RESUME_NO_PROGRESS` (3) launched resumes in a row that add no file and close no work
+  (failed ones included) stop the document. Any progress resets the count; a resume that never launched a VM does not
+  count.
+- *Per organization:* one resume at a time, and the daily VM budget as before. Each launch's timeout is capped at what is
+  left of the day, reserved at launch and settled to the real time on return. With under a minute left, the unit waits
+  for the next UTC day and no failure is counted.
+- *Backstop:* the ledger refuses a resume write past 64 per unit or 512 per document (`resume-cap`), whatever the policy.
+
+| Document | Old launches | New launches | New VM budget | Expected resume VM time |
+|---|---|---|---|---|
+| 10 pages | 6 (3 per unit) | 3 | 180 s | 1 pass, about 4 s |
+| 1,000 pages, unsharded | 6 | 30 | 2,120 s | 20 passes × 53 s = 1,060 s |
+| 20,000 pages, 32 shards | 12 | 95 | 4,316 s | 63 passes × 34 s = 2,160 s |
+
+**Blocks.** A stopped document is blocked with a reason code (`attempts` for launches, `vm-budget`, `no-progress`; the
+others are `figures-off`, `resume-off`, `stale`, `refused` and `unscanned`), with `resume_blocked_at`, a log line with its
+numbers (`pages`, `launches`, `vmMs`, `stalls`, `grants`) and the `resume.capped` counter by reason. Nothing is dropped:
+the level stays resumable.
+
+- A reprocess (a new run) clears every block and counter.
+- A single-document request (`POST /v1/documents/{id}/assets/resume`, or the chat's offer for one document) clears a
+  budget block by granting one extension: half the base caps again (at least the floors), the no-progress count and unit
+  failures reset. At most `DOCSLURP_FIGURE_RESUME_MAX_GRANTS` (2) per run, so a request buys a bounded amount of VM time.
+  The answer carries `reason`, `granted` and `grantsLeft`; past the grants it is `capped` with its reason.
+- Bulk requests and the backstop sweep never grant: they leave budget-blocked documents blocked.
+- `unscanned` is cleared only by a reprocess. Other blocks are cleared by any request, without a grant.
 
 **One unit per claim.** A unit is the unsharded document, one resumable shard, one gap with no shard, or a gap inside a
 shard that is not complete. The last kind runs as that shard's resume narrowed to the gap's pages (`resumePages`). For
