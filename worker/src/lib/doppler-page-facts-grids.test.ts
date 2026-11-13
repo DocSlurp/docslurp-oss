@@ -5,7 +5,7 @@
 import { describe, expect, it } from "vitest";
 
 import { parseDopplerPageFacts, type DopplerPageFactsDocument } from "./doppler-page-facts.js";
-import { pageLayoutFactsFromDopplerFacts, rasterUnionCoverage } from "./doppler-page-facts-layout.js";
+import { gridCoversBox, pageLayoutFactsFromDopplerFacts } from "./doppler-page-facts-layout.js";
 import { dopplerFactsCoverEvidence, pageImageEvidenceFromDopplerFacts } from "./doppler-page-facts-evidence.js";
 import { buildPageImageEvidence, findSparsePages, summarizeImageListing, type PageImageEvidence } from "./page-image-evidence.js";
 import type { PageLayoutFacts } from "./page-layout-facts.js";
@@ -35,16 +35,15 @@ const one = (line: Record<string, unknown>) => parse(jsonl([docLine({ pageCount:
 const layoutOf = (line: Record<string, unknown>) => pageLayoutFactsFromDopplerFacts(one(line)).get(1)!;
 
 const TABLE = { bbox: [72, 100, 540, 400], rows: 6, columns: 4, coverage: 0.29 };
+/** An image box whose edges the 64 x 64 ratio cells of a Letter page cover (gridCoversBox). */
+const ALIGNED = [29, 38, 110, 82];
 
 describe("doppler page facts: ruled grids", () => {
-  it("golden: maps grids to PageTables with their coverage, and tableCoverage to the union of their boxes", () => {
+  it("golden: a grid Doppler found is unknown (its search is not the walker's), never a guessed table", () => {
     const second = { bbox: [72, 500, 300, 700], rows: 2, columns: 3, coverage: 0.09 };
-    const layout = layoutOf(page({ vectors: { hRules: 12, vRules: 9, grids: [TABLE, second], gridsTruncated: false } }));
-    // The coverage is measured from the box on the walker's 200 x 200 raster, not taken from the guest.
-    expect(layout.grids).toEqual([{ rows: 6, columns: 4, coverage: 0.2964 }, { rows: 2, columns: 3, coverage: 0.0969 }]);
-    expect(layout.tableCoverage).toBe(0.3933);
-    // Overlapping grids count once.
-    expect(layoutOf(page({ vectors: { hRules: 14, vRules: 10, grids: [TABLE, TABLE], gridsTruncated: false } })).tableCoverage).toBe(0.2964);
+    const layout = layoutOf(page({ vectors: { grids: [TABLE, second], gridsTruncated: false } }));
+    expect(layout.grids).toBeNull();
+    expect(layout.tableCoverage).toBeNull();
   });
 
   it("golden: an empty, complete list proves there is no grid", () => {
@@ -53,21 +52,27 @@ describe("doppler page facts: ruled grids", () => {
     expect(layout.tableCoverage).toBe(0);
   });
 
-  it("drops one-column grids (parallel rules: weak evidence, below the walker's minimum grid)", () => {
+  it("golden: one-column grids only (parallel rules: weak evidence) prove there is no walker grid", () => {
     const lined = { bbox: [72, 72, 540, 720], rows: 30, columns: 1, coverage: 0.8 };
-    const layout = layoutOf(page({ vectors: { grids: [lined, TABLE], gridsTruncated: false } }));
-    expect(layout.grids).toEqual([{ rows: 6, columns: 4, coverage: 0.2964 }]);
-    expect(layout.tableCoverage).toBe(0.2964);
+    expect(layoutOf(page({ vectors: { grids: [lined], gridsTruncated: false } })).grids).toEqual([]);
+    expect(layoutOf(page({ vectors: { grids: [lined, TABLE], gridsTruncated: false } })).grids).toBeNull();
+  });
+
+  it("golden: below the walker's minimum rules there is no grid, whatever the list says", () => {
+    // A two-column page's centre divider and a few section rules: Doppler can report a grid, the walker cannot.
+    const layout = layoutOf(page({ vectors: { hRules: 4, vRules: 1, grids: [TABLE], gridsTruncated: false } }));
+    expect(layout.grids).toEqual([]);
+    expect(layout.tableCoverage).toBe(0);
   });
 
   it("truncation gives unknown, never []", () => {
     for (const grids of [[], [TABLE]]) {
-      const layout = layoutOf(page({ vectors: { hRules: 0, vRules: 0, grids, gridsTruncated: true } }));
+      const layout = layoutOf(page({ vectors: { grids, gridsTruncated: true } }));
       expect(layout.grids).toBeNull();
       expect(layout.tableCoverage).toBeNull();
     }
     // The flag alone (grouping cut short) is unknown too.
-    expect(layoutOf(page({ vectors: { hRules: 0, gridsTruncated: true } })).grids).toBeNull();
+    expect(layoutOf(page({ vectors: { gridsTruncated: true } })).grids).toBeNull();
     // At the drawing cap.
     expect(layoutOf(page({ vectors: { grids: [], gridsTruncated: false, limitHit: true } })).grids).toBeNull();
   });
@@ -80,13 +85,6 @@ describe("doppler page facts: ruled grids", () => {
     expect(layoutOf(page({ vectors: { hRules: 1 } })).tableCoverage).toBeNull();
     const { vectors: _v, ...noVectors } = page();
     expect(layoutOf(noVectors).grids).toBeNull();
-  });
-
-  it("leaves grids unknown on a page whose CropBox differs from its MediaBox (the boxes are in MediaBox space)", () => {
-    const geometry = { widthPt: 500, heightPt: 700, rotation: 0, userUnit: 1, mediaBox: [0, 0, 612, 792], cropBox: [50, 50, 550, 750] };
-    const layout = layoutOf(page({ vectors: { grids: [TABLE], gridsTruncated: false }, extra: { geometry } }));
-    expect(layout.grids).toBeNull();
-    expect(layout.tableCoverage).toBeNull();
   });
 
   it("hostile: a bad list, a grid off the page, or a list without its flag makes vectors unknown", () => {
@@ -112,9 +110,8 @@ describe("doppler page facts: ruled grids", () => {
       expect(facts.pages.get(1)!.vectors, name).toBeUndefined();
       expect(pageLayoutFactsFromDopplerFacts(facts).get(1)!.grids, name).toBeNull();
     }
-    // Within the 1 pt slack the box stands; the coverage is clipped to the page.
-    const edge = layoutOf(page({ vectors: { grids: [{ ...TABLE, bbox: [-1, -1, 613, 793] }], gridsTruncated: false } }));
-    expect(edge.grids).toEqual([{ rows: 6, columns: 4, coverage: 1 }]);
+    // Within the 1 pt slack the box is valid.
+    expect(one(page({ vectors: { grids: [{ ...TABLE, bbox: [-1, -1, 613, 793] }], gridsTruncated: false } })).pages.get(1)!.vectors?.grids).toHaveLength(1);
     // Without a geometry there is no page to bound a box by.
     const { geometry: _g, ...noGeometry } = page({ vectors: { grids: [TABLE], gridsTruncated: false } });
     expect(one(noGeometry).pages.get(1)!.vectors).toBeUndefined();
@@ -130,19 +127,14 @@ describe("doppler page facts: ruled grids", () => {
     expect(parse(dopplerPageFactsJsonl(facts)).pages).toEqual(facts.pages);
   });
 
-  it("measures the union on the walker's raster in bounded work for many overlapping boxes", () => {
-    const boxes = Array.from({ length: 64 }, (_, i) => [i * 5, i * 7, i * 5 + 300, i * 7 + 200] as [number, number, number, number]);
-    const started = performance.now();
-    for (let i = 0; i < 2_000; i += 1) rasterUnionCoverage(boxes, 612, 792);
-    // About 0.1 ms a page of 64 overlapping grids; the bound leaves room for a loaded CI host.
-    expect(performance.now() - started).toBeLessThan(10_000);
-    expect(rasterUnionCoverage([[0, 0, 612, 792]], 612, 792)).toBe(1);
-    expect(rasterUnionCoverage([], 612, 792)).toBe(0);
-    // The walker's own values (pdf_layout_facts.py union_coverage), ties rounded half to even as Python does.
-    expect(rasterUnionCoverage([[0, 0, 25, 50]], 200, 200)).toBe(0.0312);
-    expect(rasterUnionCoverage([[0, 0, 75, 50]], 200, 200)).toBe(0.0938);
-    // Two boxes side by side and one inside them: 0.5 of the page.
-    expect(rasterUnionCoverage([[0, 0, 306, 396], [306, 0, 612, 396], [10, 10, 20, 20]], 612, 792)).toBe(0.5);
+  it("covers an image's box with the 64 x 64 ratio cells only when no strip inside an edge escapes them", () => {
+    // Letter page: cells are 9.5625 x 12.375 pt. An edge must lie at or before the centre of the cell it falls in, inside.
+    expect(gridCoversBox([29, 38, 110, 82], [612, 792])).toBe(true);
+    expect(gridCoversBox([36, 38, 110, 82], [612, 792])).toBe(false);   // left edge past its cell's centre: a 2.25 pt strip
+    expect(gridCoversBox([29, 38, 110, 80], [612, 792])).toBe(false);   // bottom edge before its cell's centre
+    expect(gridCoversBox([0, 0, 612, 792], [612, 792])).toBe(true);
+    expect(gridCoversBox([10, 10, 12, 12], [612, 792])).toBe(false);    // smaller than a cell: marks nothing
+    expect(gridCoversBox([29, 38, 110, 82], [0, 792])).toBe(false);
   });
 });
 
@@ -165,7 +157,7 @@ describe("doppler page facts: words inside and bytes per pixel", () => {
     const at = (ratio: number | undefined, inside: number) => {
       const t = { ...text };
       if (ratio === undefined) delete t.textOverImageRatio; else t.textOverImageRatio = ratio;
-      return layoutOf(textPage(1, { text: t, images: { ...images, items: [{ ...item, visibleWordsInside: inside, invisibleWordsInside: 0 }] } })).images![0]!.wordsInside;
+      return layoutOf(textPage(1, { text: t, images: { ...images, items: [{ ...item, bbox: ALIGNED, visibleWordsInside: inside, invisibleWordsInside: 0 }] } })).images![0]!.wordsInside;
     };
     expect(at(0, 0)).toBe(0);
     expect(at(0, 2)).toBe(2);
@@ -175,6 +167,9 @@ describe("doppler page facts: words inside and bytes per pixel", () => {
     // Above the mixed-scan threshold a count only blocks a read, and the walker's is at least as high: it stands.
     expect(at(0.5, 3)).toBe(3);
     expect(at(undefined, 40)).toBe(40);
+    // An edge strip the ratio's cells miss: a straddling word's centre could sit there uncounted.
+    const unaligned = textPage(1, { images: { ...images, items: [{ ...item, visibleWordsInside: 0, invisibleWordsInside: 0 }] } });
+    expect(layoutOf(unaligned).images![0]!.wordsInside).toBeNull();
   });
 
   it("absent gives unknown (null), never 0", () => {
@@ -215,11 +210,11 @@ describe("doppler page facts: words inside and bytes per pixel", () => {
   });
 
   it("xref-repaired-earlier: the page keeps only its size; images, words, grids are unknown, so nothing on it selects a read", () => {
-    const scanLike = { visibleWordsInside: 0, invisibleWordsInside: 0, bytesPerPixel: 0.02, bbox: [72, 300, 540, 700], coverage: 0.39, px: [1950, 1667], dpi: [300, 300], filter: "dct" };
+    const scanLike = { visibleWordsInside: 0, invisibleWordsInside: 0, bytesPerPixel: 0.02, bbox: [67, 302, 535, 602], coverage: 0.29, px: [1950, 1667], dpi: [300, 300], filter: "dct" };
     const vectorsWithGrid = { grids: [TABLE], gridsTruncated: false };
     const ok = layoutOf(page({ item: scanLike, vectors: vectorsWithGrid }));
     expect([ok.images![0]!.widthPx, ok.images![0]!.heightPx, ok.images![0]!.ppi, ok.images![0]!.bytesPerPixel, ok.images![0]!.wordsInside]).toEqual([1950, 1667, [300, 300], 0.02, 0]);
-    expect(ok.grids).toHaveLength(1);
+    expect(ok.grids).toBeNull();
     const low = layoutOf(page({ item: scanLike, vectors: vectorsWithGrid, extra: { parseWarnings: ["xref-repaired-earlier"] } }));
     expect(low).toEqual({ images: null, tables: null, words: null, grids: null, tableCoverage: null, widthPt: 612, heightPt: 792 });
     // An unknown warning value is still dropped, as the contract asks.
@@ -246,18 +241,6 @@ describe("doppler page facts: words inside and bytes per pixel", () => {
     expect(surface(null).pages[0]?.ocrDecision?.authorized ?? false).toBe(false);
   });
 
-  it("grids must fit the page's thin rules together, and the page needs crossing rules", () => {
-    // 8 horizontal and 5 vertical rules: a 6 x 4 table takes 7 and 5; 8 shaded panel bands with 2 columns cannot be paid for.
-    const panels = { bbox: [72, 420, 540, 760], rows: 8, columns: 2, coverage: 0.3 };
-    expect(layoutOf(page({ vectors: { grids: [TABLE, panels], gridsTruncated: false } })).grids).toEqual([{ rows: 6, columns: 4, coverage: 0.2964 }]);
-    // Two grids that each fit alone but not together: the second is dropped.
-    const small = { bbox: [72, 500, 300, 600], rows: 2, columns: 2, coverage: 0.05 };
-    expect(layoutOf(page({ vectors: { hRules: 9, vRules: 6, grids: [TABLE, small], gridsTruncated: false } })).grids).toHaveLength(1);
-    expect(layoutOf(page({ vectors: { hRules: 10, vRules: 8, grids: [TABLE, small], gridsTruncated: false } })).grids).toHaveLength(2);
-    expect(layoutOf(page({ vectors: { grids: [{ ...TABLE, columns: 5 }], gridsTruncated: false } })).grids).toEqual([]);
-    // Rules that never cross (zebra fills beside unrelated underlines): no grid.
-    expect(layoutOf(page({ vectors: { ruleGridScore: 0, hRules: 40, vRules: 40, grids: [TABLE], gridsTruncated: false } })).grids).toEqual([]);
-  });
 });
 
 // ── Parity: the same synthetic page, measured by the walker (and the pdfimages probe) and by Doppler's facts ──
@@ -303,11 +286,11 @@ const TRUTH: TruthPage[] = [
   { name: "Markdown table", words: 200, images: [logo], grids: [], text: `${prose(150)}\n\n| a | b |\n|---|---|\n${Array.from({ length: 6 }, (_, i) => `| ${i} | x |`).join("\n")}` },
   {
     name: "mixed scan: bilevel figure beside text", words: 240, grids: [], text: prose(240),
-    images: [logo, { bbox: placed(72, 300, [1950, 1250], 300), px: [1950, 1250], ppi: 300, filter: "ccitt", bpc: 1, colorSpace: "gray", streamBytes: 40_000, obj: 50, wordsInside: 0 }],
+    images: [logo, { bbox: placed(67, 302, [1950, 1250], 300), px: [1950, 1250], ppi: 300, filter: "ccitt", bpc: 1, colorSpace: "gray", streamBytes: 40_000, obj: 50, wordsInside: 0 }],
   },
   {
     name: "mixed scan: low-bpp DCT scan beside text", words: 240, grids: [], text: prose(240),
-    images: [logo, { bbox: placed(72, 300, [1950, 1250], 300), px: [1950, 1250], ppi: 300, filter: "dct", bpc: 8, colorSpace: "gray", streamBytes: 243_750, obj: 51, wordsInside: 0 }],
+    images: [logo, { bbox: placed(67, 302, [1950, 1250], 300), px: [1950, 1250], ppi: 300, filter: "dct", bpc: 8, colorSpace: "gray", streamBytes: 243_750, obj: 51, wordsInside: 0 }],
   },
   {
     name: "photo beside text", words: 240, grids: [], text: prose(240),
@@ -337,6 +320,8 @@ const TRUTH: TruthPage[] = [
   { name: "sparse page with a logo only", words: 6, images: [logo], grids: [], text: prose(6) },
 ];
 
+const share = (b: number[]) => Math.round(((b[2]! - b[0]!) * (b[3]! - b[1]!)) / (W * H) * 10_000) / 10_000;
+
 /** What the walker writes for a page (pdf_layout_facts.py layout_facts, with no Markdown table box matched). */
 function walkerLayout(truth: TruthPage, repeated: Set<number>): PageLayoutFacts {
   const encoding = { dct: "jpeg", ccitt: "ccitt", jbig2: "jbig2", flate: "image" } as const;
@@ -350,8 +335,8 @@ function walkerLayout(truth: TruthPage, repeated: Set<number>): PageLayoutFacts 
     })),
     tables: null,
     words: truth.words,
-    grids: grids.map((g) => ({ rows: g.rows, columns: g.columns, coverage: rasterUnionCoverage([g.bbox], W, H) })),
-    tableCoverage: rasterUnionCoverage(grids.map((g) => g.bbox), W, H),
+    grids: grids.map((g) => ({ rows: g.rows, columns: g.columns, coverage: share(g.bbox) })),
+    tableCoverage: Math.min(1, grids.reduce((sum, g) => sum + share(g.bbox), 0)),
     widthPt: W, heightPt: H, invisibleWords: truth.invisibleWords ?? 0,
     textLayer: truth.words === 0 ? "none" : truth.invisibleWords === truth.words ? "invisible" : truth.invisibleWords ? "mixed" : "visible",
   };
@@ -428,7 +413,7 @@ function decisions(layout: Map<number, PageLayoutFacts>, evidence: PageImageEvid
  * wholeWordsInside). It does not measure how often Doppler and the walker agree on real PDFs: that is a corpus benchmark.
  */
 describe("parity: facts-mapped layout routes like the walker's", () => {
-  it("makes the same classify-route and page-image decisions on synthetic pages (table-heavy, mixed scan, raster, blank)", () => {
+  it("is never looser than the walker, and makes the same decisions wherever Doppler found no grid", () => {
     const facts = parse(jsonl([docLine({ pageCount: TRUTH.length }), ...TRUTH.map((t, i) => factsLine(t, i + 1)), runLine({ pagesEmitted: TRUTH.length })]), TRUTH.length);
     const repeated = walkerRepeated(TRUTH);
     const walker = new Map(TRUTH.map((t, i) => [i + 1, walkerLayout(t, repeated)]));
@@ -437,13 +422,23 @@ describe("parity: facts-mapped layout routes like the walker's", () => {
 
     const fromWalker = decisions(walker, probeEvidence(TRUTH), TRUTH);
     const fromFacts = decisions(mapped, factsEvidence, TRUTH);
-    expect(fromFacts).toEqual(fromWalker);
+    // Never looser: a read or a table route from facts is one the walker makes too.
+    fromFacts.forEach((d, i) => {
+      if (d.ocr?.authorized) expect(fromWalker[i]!.ocr?.authorized, d.page).toBe(true);
+      if (d.route === "table-heavy") expect(fromWalker[i]!.route, d.page).toBe("table-heavy");
+    });
+    // Identical wherever Doppler's list holds no grid of two or more columns (grids then read [] or the rule proof).
+    const dopplerGrid = (t: TruthPage) => (t.doppler?.grids ?? t.grids).some((g) => g.columns >= 2) && (t.doppler?.vRules ?? 3) >= 3;
+    const same = (list: typeof fromFacts) => list.filter((_, i) => !dopplerGrid(TRUTH[i]!));
+    expect(same(fromFacts)).toEqual(same(fromWalker));
 
-    // The synthetic pages exercise every decision the new fields feed (so parity is not vacuous).
     const byName = Object.fromEntries(fromFacts.map((d) => [d.page, d]));
-    expect(byName["ruled table flattened to prose (rows)"]!.route).toBe("table-heavy");
-    expect(byName["large two-row grid (coverage)"]!.route).toBe("table-heavy");
-    expect(byName["small grid"]!.route).not.toBe("table-heavy");
+    const walkerByName = Object.fromEntries(fromWalker.map((d) => [d.page, d]));
+    // Where Doppler found a grid the facts cannot place, they are stricter: the walker's drawn tables are missed.
+    expect(walkerByName["ruled table flattened to prose (rows)"]!.route).toBe("table-heavy");
+    expect(byName["ruled table flattened to prose (rows)"]!.route).not.toBe("table-heavy");
+    expect(mapped.get(TRUTH.findIndex((t) => t.name.startsWith("ruled table")) + 1)!.grids).toBeNull();
+    // The other decisions the new fields feed fire (so the comparison is not vacuous).
     expect(byName["lined paper (one column)"]!.route).not.toBe("table-heavy");
     expect(byName["Markdown table"]!.route).toBe("table-heavy");
     expect(byName["mixed scan: bilevel figure beside text"]!.ocr?.authorized).toBe(true);
@@ -453,10 +448,8 @@ describe("parity: facts-mapped layout routes like the walker's", () => {
     expect(byName["sparse full-page scan"]!.ocr?.authorized).toBe(true);
     expect(byName["prose"]!.ocr?.authorized).toBe(false);
     expect(byName["blank"]!.ocr?.authorized).toBe(false);
-    // Where Doppler's own measures differ from the walker's, the mapping falls back so the decision still matches.
     expect(byName["two-column page with a centre divider"]!.route).not.toBe("table-heavy");
     expect(byName["labels overrunning a bilevel figure"]!.ocr?.authorized).toBe(false);
-    expect(mapped.get(TRUTH.findIndex((t) => t.name.startsWith("labels overrunning")) + 1)!.images!.every((i) => i.wordsInside === null)).toBe(true);
   });
 
   it("is stricter than the walker, never looser, where whole-box counts cannot stand: a figure with one word over it", () => {

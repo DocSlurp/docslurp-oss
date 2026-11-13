@@ -371,9 +371,9 @@ describe("the sandboxed PDF route on the worker host", () => {
       await h.stage.run(h.state);
       expect(h.state.documentStage("doc-1", "extract-markdown")?.status).toBe("completed");
       // The facts were used for layout (so the new fields reached the mapper) and still sized nothing.
-      const stored = [...h.json.entries()].find(([key]) => key.includes("page-layout-facts/"))![1] as { source: string; pages: Array<{ grids: unknown[] | null }> };
+      const stored = [...h.json.entries()].find(([key]) => key.includes("page-layout-facts/"))![1] as { source: string; pages: Array<{ images: Array<{ bytesPerPixel: number | null }> | null }> };
       expect(stored.source).toBe("vm-pdf-facts");
-      expect(stored.pages.every((p) => Array.isArray(p.grids) && p.grids.length === 64)).toBe(true);
+      expect(stored.pages.every((p) => p.images?.[0]?.bytesPerPixel === 1e9)).toBe(true);
       expect(recordPageEquivalents).not.toHaveBeenCalled();
     } finally { await h.cleanup(); }
   });

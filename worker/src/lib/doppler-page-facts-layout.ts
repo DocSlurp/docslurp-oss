@@ -14,22 +14,17 @@
  *   `pdfimages -list` vocabulary, `repeated` from `obj` across the pages given (the walker's furniture rule).
  *   `wordsInside` ← `visibleWordsInside` + `invisibleWordsInside` (the walker counts every text-layer word whose centre is
  *   inside; Doppler a word whose whole box is, within 1 pt), null when the pair is absent; a count of at most
- *   `mixedScanMaxWordsInside` stands only on a page whose centre-based `textOverImageRatio` is 0 (`wordsInside`).
+ *   `mixedScanMaxWordsInside` stands only when the page's centre-based `textOverImageRatio` is 0 and the image's grid cells
+ *   cover its whole box (`wordsInside`), so it is never lower than the walker's.
  *   `coverage` is capped by the image's own box over the page. `bytesPerPixel` ← `bytesPerPixel`
  *   one to one, null when absent (never 0). Both are routing hints from what the file says: never a billing input.
  *   Null (unknown) when the list was not computed, is truncated, or holds fewer items than `imageCount`.
- * - `grids` ← `vectors.grids` as `PageTable`s (rows, columns, coverage of the box clipped to the page; the type has no box),
- *   keeping only grids of two or more columns: the walker's minimum grid (2 horizontals, 3 verticals). A one-column grid
- *   (parallel rules: form lines, lined paper) is weak evidence and not a table. Doppler's search also builds grids from
- *   shaded boxes and from inner column lines without outer sides, so on a page with fewer than 2 horizontal or 3 vertical
- *   rules (where the walker finds no grid) the grids are `[]` whatever the list says; elsewhere the page needs crossing
- *   rules (`ruleGridScore` > 0) and the kept grids together must fit its rule counts. Unknown (null) when the list is truncated,
- *   at the drawing cap, or on a page whose CropBox differs from its MediaBox (the boxes are in MediaBox space). Without the
- *   list (older builds): `[]` only when the rule counts prove there is no grid (fewer than 2 horizontal or 3 vertical rules,
- *   no cap hit), otherwise null, never a guessed grid.
- * - `tables` ← null: tables come from the extractor's Markdown. `tableCoverage` ← the union of the kept grid boxes over the
- *   page on the walker's 200 x 200 raster (overlaps once) when the grids are known from the list, else null. The walker's
- *   value also covers the Markdown tables' boxes, so this is never larger than the walker's.
+ * - `grids` ← `[]` when there is no walker grid: fewer than 2 horizontal or 3 vertical rules on the page, or a complete
+ *   `vectors.grids` list without a grid of two or more columns (one column is parallel rules: form lines, lined paper).
+ *   A grid Doppler found is unknown (null): its search is not the walker's (shaded boxes count as rules, column lines need
+ *   no outer sides) and the facts carry no rule positions to tell which grids the walker would find. Null too when the list
+ *   is truncated or absent (older builds), or at the drawing cap; never a guessed grid.
+ * - `tables` ← null: tables come from the extractor's Markdown. `tableCoverage` ← 0 with a `[]` known from the list, else null.
  * - A failed page (`error: failed`) is omitted: unknown. A page marked `xref-repaired-earlier` (any of its facts may come
  *   from an object the file holds twice) keeps only its size: images, words, grids and table coverage are unknown.
  */
@@ -58,8 +53,8 @@ const GRID_MIN_H = 2;
 const GRID_MIN_V = 3;
 /** The walker's minimum grid in columns (3 distinct verticals). */
 const GRID_MIN_COLUMNS = 2;
-/** The walker's union-coverage raster (pdf_layout_facts.py COVERAGE_RASTER). */
-const COVERAGE_RASTER = 200;
+/** Doppler's coverage grid (64 x 64 cells a page) for `textOverImageRatio`. */
+const COVERAGE_GRID = 64;
 
 /** Image objects drawn on enough of the `considered` pages to be page furniture (the walker's and the probe's rule). */
 export function repeatedDopplerImageObjects(pages: Iterable<DopplerPageFacts>, considered: number): Set<number> {
@@ -112,115 +107,53 @@ function boxCappedCoverage(coverage: number, bbox: Box, extent: [number, number]
  * An image's words inside as the walker would count them, or null. Doppler counts a word inside only when its whole box is
  * (within 1 pt); the walker when its centre is, so a word straddling the edge (a label overrunning a figure) counts for
  * the walker only and a facts count can be lower. Only a low count matters: `mixedScanImage` reads an image with at most
- * `mixedScanMaxWordsInside` words inside. So a count above that stands (the walker's is at least as high), and a count at
- * or below it stands only when the page's `text.textOverImageRatio` is 0: no character's centre lies in any image's cells,
- * which reach past every image's edge, so no word's centre is inside any image and the walker's count is 0 as well.
- * Otherwise (or without the ratio, or the pair) the count is unknown. Conservative: a caption beside a figure can make a
- * count unknown and so skip a read the walker would make; never the reverse.
+ * `mixedScanMaxWordsInside` words inside. So a count above that stands (the walker's is at least as high). A count at or
+ * below it stands only when no word's centre can be inside the image uncounted: the page's `text.textOverImageRatio` (characters
+ * whose centre is in a cell of the image's 64 x 64 grid, a cell being the image's when its centre is inside the box) is 0,
+ * and the image's marked cells cover its whole box (`gridCoversBox`), so no strip inside an edge escapes the ratio.
+ * Otherwise (or without the ratio, the pair or a page extent) the count is unknown: stricter than the walker, never looser.
  */
 function wordsInside(page: DopplerPageFacts, item: DopplerImageItem): number | null {
   if (item.visibleWordsInside === undefined || item.invisibleWordsInside === undefined) return null;
   const count = item.visibleWordsInside + item.invisibleWordsInside;
   if (count > PAGE_RASTER_ROUTING.mixedScanMaxWordsInside) return count;
-  return page.text?.textOverImageRatio === 0 ? count : null;
-}
-
-/** The page's width and height when its grid boxes can be placed on it (CropBox = MediaBox, sides in range), else null. */
-function gridPage(page: DopplerPageFacts): [number, number] | null {
-  const g = page.geometry;
-  if (!g || !(g.widthPt >= MIN_SIDE_PT && g.widthPt <= MAX_SIDE_PT && g.heightPt >= MIN_SIDE_PT && g.heightPt <= MAX_SIDE_PT)) return null;
-  if (g.cropBox && g.mediaBox && g.cropBox.some((v, i) => Math.abs(v - g.mediaBox![i]!) > 0.5)) return null;
-  return [g.widthPt, g.heightPt];
+  const extent = dopplerPageExtent(page.geometry);
+  return page.text?.textOverImageRatio === 0 && extent !== null && gridCoversBox(item.bbox, extent) ? count : null;
 }
 
 /**
- * Share of a `w` x `h` page covered by the union of `boxes`, on the walker's COVERAGE_RASTER grid (union_coverage: a box
- * marks every cell it touches; overlaps count once), rounded to 4 places. Bands between the boxes' row edges, then merged
- * column intervals per band: at most 2·n bands of n intervals, whatever the boxes.
+ * Whether the cells of a 64 x 64 grid over a `w` x `h` page whose centres lie strictly inside `box` cover the whole box
+ * (clipped to the page): each edge must lie at or before the centre of the cell it falls in, on the inside. A centre on the
+ * edge is taken as outside, the stricter reading.
  */
-export function rasterUnionCoverage(boxes: readonly Box[], w: number, h: number): number {
-  const n = COVERAGE_RASTER;
-  // Cell spans [c0, c1) x [r0, r1), sorted by c0 (insertion sort: at most 64 boxes a page).
-  const c0s = new Int32Array(boxes.length), c1s = new Int32Array(boxes.length), r0s = new Int32Array(boxes.length), r1s = new Int32Array(boxes.length);
-  const edges = new Int32Array(boxes.length * 2);
-  let count = 0, edgeCount = 0;
-  for (const [x0, y0, x1, y1] of boxes) {
-    const c0 = Math.max(0, Math.trunc(x0 / w * n)), r0 = Math.max(0, Math.trunc(y0 / h * n));
-    const c1 = Math.min(n, Math.ceil(x1 / w * n)), r1 = Math.min(n, Math.ceil(y1 / h * n));
-    if (!(c1 > c0 && r1 > r0)) continue;
-    let i = count++;
-    while (i > 0 && c0s[i - 1]! > c0) { c0s[i] = c0s[i - 1]!; c1s[i] = c1s[i - 1]!; r0s[i] = r0s[i - 1]!; r1s[i] = r1s[i - 1]!; i -= 1; }
-    c0s[i] = c0; c1s[i] = c1; r0s[i] = r0; r1s[i] = r1;
-    edges[edgeCount++] = r0; edges[edgeCount++] = r1;
-  }
-  const rows = edges.subarray(0, edgeCount).sort();
-  let covered = 0;
-  for (let e = 0; e + 1 < rows.length; e += 1) {
-    const top = rows[e]!, bottom = rows[e + 1]!;
-    if (bottom === top) continue;
-    let width = 0, end = -1;
-    for (let i = 0; i < count; i += 1) {
-      if (r0s[i]! > top || r1s[i]! < bottom) continue;
-      const c0 = c0s[i]!, c1 = c1s[i]!;
-      if (c0 > end) { width += c1 - c0; end = c1; } else if (c1 > end) { width += c1 - end; end = c1; }
-    }
-    covered += width * (bottom - top);
-  }
-  return roundLikePython(covered, n * n);
-}
-
-/**
- * Python's `round(cells / total, 4)`, which the walker uses: the double's exact decimal value rounded half to even.
- * `toFixed` rounds the exact value too, but breaks a tie away from zero; a tie needs `cells / total` to be exact in binary
- * and to end in 5 at the fifth place, which is decided on the integers.
- */
-function roundLikePython(cells: number, total: number): number {
-  const gcd = (a: number, b: number): number => (b === 0 ? a : gcd(b, a % b));
-  const den = total / gcd(cells, total);
-  const exact = (den & (den - 1)) === 0;
-  const scaled = cells * 10_000;
-  if (exact && scaled % total !== 0 && (2 * scaled) % total === 0) {
-    const down = Math.floor(scaled / total);
-    return (down % 2 === 0 ? down : down + 1) / 10_000;
-  }
-  return Number((cells / total).toFixed(4));
+export function gridCoversBox(box: Box, [w, h]: [number, number]): boolean {
+  if (!(w > 0 && h > 0)) return false;
+  const axis = (lo: number, hi: number, side: number): boolean => {
+    const cell = side / COVERAGE_GRID;
+    const a = Math.max(0, lo), b = Math.min(side, hi);
+    if (!(b > a)) return false;
+    const first = Math.floor(a / cell - 0.5) + 1;  // the first cell whose centre is > a
+    const last = Math.ceil(b / cell - 0.5) - 1;    // the last cell whose centre is < b
+    return last >= first && first * cell <= a && (last + 1) * cell >= b;
+  };
+  return axis(box[0], box[2], w) && axis(box[1], box[3], h);
 }
 
 function gridFacts(page: DopplerPageFacts): Pick<PageLayoutFacts, "grids" | "tableCoverage"> {
   const v = page.vectors;
   // Low confidence (`xref-repaired-earlier`): the rules may have been read from another object: unknown.
   if (!v || v.limitHit || v.gridsTruncated || dopplerPageFactsLowConfidence(page)) return { grids: null, tableCoverage: null };
-  // The walker's grid needs 2 horizontal and 3 vertical rules on the page. Doppler's search also builds grids from shaded
-  // boxes and from inner column lines without outer sides (a two-column page's centre divider), which the walker never
-  // reads as a table: on a page without the walker's minimum rules there is no walker grid, whatever the list says.
-  const noWalkerGrid = v.hRules < GRID_MIN_H || v.vRules < GRID_MIN_V;
-  if (v.grids === undefined) {
-    // An older build: rule counts can prove there is no grid, never where one is.
-    return { grids: noWalkerGrid ? [] : null, tableCoverage: null };
-  }
-  if (noWalkerGrid) return { grids: [], tableCoverage: 0 };
-  const size = gridPage(page);
-  if (!size) return { grids: null, tableCoverage: null };
-  const [w, h] = size;
-  const clip = (b: Box): Box => [Math.min(w, Math.max(0, b[0])), Math.min(h, Math.max(0, b[1])), Math.min(w, Math.max(0, b[2])), Math.min(h, Math.max(0, b[3]))];
-  // The walker's grid is built from thin rules that cross. Doppler's search also counts shaded boxes (two bands each) and
-  // column lines without outer sides, which the page's rule counts (thin rules only) do not hold. So the page must have
-  // crossing rules (`ruleGridScore` > 0), and the kept grids together must fit its rules: each takes rows + 1 horizontal
-  // and columns + 1 vertical rules (outer sides included) from the page's counts, in the search's order, and a grid the
-  // rules left cannot pay for is dropped. Rule positions are not in the facts, so a crafted page can still place unrelated
-  // rules to pay for a shaded grid; it could equally draw a real grid for the walker.
-  let hLeft = v.ruleGridScore > 0 ? v.hRules : 0, vLeft = v.ruleGridScore > 0 ? v.vRules : 0;
-  const kept: Array<(typeof v.grids)[number]> = [];
-  for (const g of v.grids) {
-    if (g.columns < GRID_MIN_COLUMNS || g.rows + 1 > hLeft || g.columns + 1 > vLeft) continue;
-    hLeft -= g.rows + 1;
-    vLeft -= g.columns + 1;
-    kept.push({ ...g, bbox: clip(g.bbox) });
-  }
-  return {
-    grids: kept.map((g) => ({ rows: g.rows, columns: g.columns, coverage: rasterUnionCoverage([g.bbox], w, h) })),
-    tableCoverage: rasterUnionCoverage(kept.map((g) => g.bbox), w, h),
-  };
+  // No walker grid: fewer than the walker's minimum rules (2 horizontal, 3 vertical) on the page.
+  if (v.hRules < GRID_MIN_H || v.vRules < GRID_MIN_V) return { grids: [], tableCoverage: v.grids === undefined ? null : 0 };
+  // An older build: rule counts can prove there is no grid, never where one is.
+  if (v.grids === undefined) return { grids: null, tableCoverage: null };
+  // A complete list with no grid of two or more columns: Doppler's search found no table the walker could (one column is
+  // parallel rules: form lines, lined paper). Finding none can only mean fewer table routes than the walker, never more.
+  if (v.grids.every((g) => g.columns < GRID_MIN_COLUMNS)) return { grids: [], tableCoverage: 0 };
+  // Doppler found a grid. Its search is not the walker's (shaded boxes count as rules, column lines need no outer sides),
+  // and the facts carry no rule positions to tell which of the page's rules bound which grid, so its rows and box cannot
+  // stand for the walker's grid: unknown, never a guessed table. Needs per-grid rule counts in the contract.
+  return { grids: null, tableCoverage: null };
 }
 
 /** One page's layout facts, or null when the page is unknown (failed). `repeated`: furniture image objects of the document. */
