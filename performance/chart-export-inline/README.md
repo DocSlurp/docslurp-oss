@@ -292,3 +292,25 @@ That is against +133 ms in round 4 and +66 ms in round 3. HTML and JSON stay at 
 
 **Doppler child** (app #510): a read-only cache filled at image build, as uid 0, the single-document job's uid. On a Modal
 VM the 9-figure chart step went from 123 to 103 ms and the smoke from 85 to 65 ms.
+
+## Shared reassembly (`results-vm-r6.json`, #364 967449b61)
+
+- The inline supervisor now uses #364's exported `reassembleUnits` and `resumeSkipList`. It loads them from the bundle
+  only when a unit was lost, so the normal path is unchanged.
+- Same slice, VM, prices and arms as round 5, run as uid 10001.
+
+| | Σ added time | workers | visuals | pages per $1, page-only (63,878) | counting the quarantine VM (8,591) | pages per minute (200) |
+|---|--:|--:|--:|--:|--:|--:|
+| no cache | 5.90 s | 48 | 96 | 50,870 (−20.4%) | 8,305 (−3.3%) | 182.7 (−8.7%) |
+| **read-only compile cache** | **5.31 s** | **48** | **96** | **51,919 (−18.7%)** | **8,333 (−3.0%)** | **184.2 (−7.9%)** |
+
+Median added time per signalled document with the cache:
+
+| class | added |
+|---|--:|
+| Office | +102 ms |
+| SVG | +100 ms |
+| EPUB | +105 ms |
+
+HTML and JSON stay at about +9 ms. Round 5 measured within 0.1 point of these numbers. The gate is unchanged: −3.0%
+counting the quarantine VM (≤2% budget) and −18.7% page-only. Modal spend: 120.1 VM-seconds.
