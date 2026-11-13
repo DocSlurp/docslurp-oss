@@ -15,7 +15,8 @@ const RECOVERY_MESSAGES: Record<string, string> = {
   chat_disabled: "Chat is disabled for this project. Enable chat in project settings.",
   invalid_search_scope: "Choose a valid search scope in this project and try again.",
   project_scope_forbidden: "Choose a project this API key can access.",
-  model_not_allowed: "Choose a model allowed by this project.",
+  model_not_allowed: "DocSlurp manages chat models: pass --tier fastest, balanced or smart.",
+  chat_capacity_unavailable: "Chat is temporarily unavailable. Wait a few seconds, then try again.",
   unavailable: "The service is temporarily unavailable. Try again later.",
 };
 

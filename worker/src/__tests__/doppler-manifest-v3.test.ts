@@ -8,7 +8,7 @@ import v8 from "node:v8";
 import { runInNewContext } from "node:vm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { DopplerFigureRejection, downloadDopplerImagesDir, readDopplerFigureDir, readLedgerSpill, storeDopplerFigures, type DopplerFigureSet } from "../extractors/doppler-figures.js";
+import { DopplerFigureRejection, disposeDopplerFigureSet, downloadDopplerImagesDir, readDopplerFigureDir, readLedgerSpill, storeDopplerFigures, type DopplerFigureSet } from "../extractors/doppler-figures.js";
 import { ByteBudget } from "../extractors/doppler-upload.js";
 import { dopplerAssetCaps } from "@docslurp/shared";
 import { v2Manifest, v3ShardText, v3Text, writeShardedFolder, writeV3Folder } from "../test/doppler-manifest-v2.js";
@@ -260,6 +260,54 @@ async function scanBook(count: number, bytes: number): Promise<void> {
   await writeV3Folder(dir, v3Text(m), files);
 }
 
+describe("--scan-pages copy (Doppler #39): a scan that cannot be copied is unlinked, reason scan-not-copyable", () => {
+  /** The fixture with `scan_pages: copy` and p2.2 a background scan Doppler left to the host's page rendering. */
+  const copyMode = () => {
+    const m = base();
+    m.scan_pages = "copy";
+    Object.assign(m.images.find((e) => e.id === "p2.2")!, { fate: "background", reason: "scan-not-copyable" });
+    return m;
+  };
+  const withEntry = (id: string, patch: Record<string, unknown>) => {
+    const m = copyMode();
+    Object.assign(m.images.find((e) => e.id === id)!, patch);
+    return v3Text(m);
+  };
+
+  it("accepts the header's copy mode and the unlinked background scan, and ledgers its reason", async () => {
+    await writeV3Folder(dir, v3Text(copyMode()), v2Manifest().files);
+    const set = await readDopplerFigureDir(dir, { pageCount: 3, expect: "complete" });
+    expect((await rowsOf(set)).find((r) => r.assetId === "p2.2")).toMatchObject({ status: "unlinked", reason: "scan-not-copyable", fate: "background", fileOf: null, linkPath: null });
+    expect(set.ledger.counts).toMatchObject({ unlinked: 1, resumable: 0 });
+    // The other scan modes still read.
+    for (const mode of ["image", "skip", "render"]) expect(await rule(v3Text({ ...base(), scan_pages: mode }))).toBe("accepted");
+  });
+
+  it("refuses scan-not-copyable anywhere but an unlinked background image, and any other reason on an unlinked one", async () => {
+    // On a not-extracted image (a repeat), on extracted ones (a picture, a copied page scan), and on an unlinked image
+    // whose fate is not background (furniture, page-scan).
+    expect(await rule(withEntry("p2.1", { reason: "scan-not-copyable" }))).toBe("manifest-image-invalid");
+    expect(await rule(withEntry("p1.1", { reason: "scan-not-copyable" }))).toBe("manifest-image-invalid");
+    expect(await rule(withEntry("p3.1", { reason: "scan-not-copyable" }))).toBe("manifest-image-invalid");
+    expect(await rule(withEntry("p2.2", { fate: "furniture" }))).toBe("manifest-image-invalid");
+    expect(await rule(withEntry("p2.2", { fate: "page-scan" }))).toBe("manifest-image-invalid");
+    // An unlinked image takes no not-extracted reason, and no reason outside the vocabulary.
+    expect(await rule(withEntry("p2.2", { reason: "min_side" }))).toBe("manifest-image-invalid");
+    expect(await rule(withEntry("p2.2", { reason: "scan_not_copyable" }))).toBe("manifest-image-invalid");
+    // An unlinked image may not carry a path and link (it would then be linked, not unlinked).
+    expect(await rule(withEntry("p2.2", { path: "page-0002/image-002.webp", link: "images/page-0002/image-002.webp", format: "webp" }))).toBe("manifest-image-invalid");
+    // An unlinked image never repeats another (Doppler never writes it): no repeat_of, so no fileOf or slot.
+    expect(await rule(withEntry("p2.2", { repeat_of: "p1.1" }))).toBe("manifest-image-invalid");
+    expect(await rule(withEntry("p2.2", { reason: undefined, fate: "furniture", repeat_of: "p1.1" }))).toBe("manifest-image-invalid");
+    // A vector is never a scan; a background mask is (a layered scan's stencil, as kinds.pdf below shows).
+    expect(await rule(withEntry("p2.2", { kind: "vector", id: "p2.g2" }))).toBe("manifest-image-invalid");
+    expect(await rule(withEntry("p2.2", { kind: "mask" }))).toBe("accepted");
+    // An unknown scan mode is refused.
+    expect(await rule(v3Text({ ...copyMode(), scan_pages: "copy-all" }))).not.toBe("accepted");
+    expect(await rule(v3Text(copyMode()))).toBe("accepted");
+  });
+});
+
 describe("storing: fixed memory, bounded concurrency, verified streams", () => {
   it("never holds more than the budget, never runs more uploads than the cap, and writes the manifest after every file", async () => {
     await scanBook(40, 1024 * 1024);
@@ -279,7 +327,7 @@ describe("storing: fixed memory, bounded concurrency, verified streams", () => {
     expect(stored.stats.peakBufferBytes).toBeLessThanOrEqual(6 * 1024 * 1024);
   }, 60_000);
 
-  it("a file that fails verification midway aborts its upload and deletes the partial object, and nothing else stays", async () => {
+  it("a file that fails verification midway aborts its upload, creates no object and deletes nothing", async () => {
     await scanBook(6, 2 * 1024 * 1024);
     const set = await readDopplerFigureDir(dir, { pageCount: 6, expect: "complete" });
     // Changed after the read: same size, different bytes near the end.
@@ -292,9 +340,10 @@ describe("storing: fixed memory, bounded concurrency, verified streams", () => {
     expect(error).toBeInstanceOf(DopplerFigureRejection);
     expect(error.rule).toBe("sha256-mismatch");
     const { deleted, objects, order } = storage.stats();
-    expect(deleted).toContain(`user-1/run-1/doppler/${DOC.id}/images/page-0004/image-001.jpg`);
+    // The failed body aborted its own request (no object); nothing is deleted on a failure path (orphan GC only).
+    expect(deleted).toEqual([]);
     expect(order).not.toContain(`user-1/run-1/doppler/${DOC.id}/images/page-0004/image-001.jpg`);
-    expect(objects.size).toBe(0);
+    expect(objects.has(`user-1/run-1/doppler/${DOC.id}/images/page-0004/image-001.jpg`)).toBe(false);
     expect(order.some((key) => key.endsWith("manifest.jsonl"))).toBe(false);
   }, 60_000);
 
@@ -341,14 +390,82 @@ describe("a real Doppler run (fixtures/doppler-golden/v3-repeats, see PROVENANCE
   });
 });
 
+describe("a real Doppler --scan-pages copy run (fixtures/doppler-golden/v3-scan-copy, see PROVENANCE.json)", () => {
+  const GOLDEN = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "doppler-golden", "v3-scan-copy");
+
+  it("reads Doppler #39's manifest: the copied JPEG scan, the uncopyable scan left unlinked, and a born-digital picture", async () => {
+    const folder = path.join(work, "images");
+    await cp(path.join(GOLDEN, "images"), folder, { recursive: true });
+    const source = createHash("sha256").update(await readFile(path.join(GOLDEN, "source.pdf"))).digest("hex");
+    const set = await readDopplerFigureDir(folder, { pageCount: 3, expect: "complete", sourceSha256: source });
+    expect(set.version).toBe(3);
+    expect((await rowsOf(set)).map((r) => [r.assetId, r.fate, r.status, r.reason, r.source, r.format, r.fileOf])).toEqual([
+      ["p1.1", "page-scan", "extracted", null, "copy", "jpg", "p1.1"],
+      ["p2.1", "background", "unlinked", "scan-not-copyable", null, null, null],
+      ["p3.1", "block", "extracted", null, "render", "webp", "p3.1"],
+    ]);
+    const storage = slowStreamingStorage();
+    await storeDopplerFigures({ storage, document: DOC, runId: "run-1", figures: set, markdown: "", documentMarkdown: await readFile(path.join(GOLDEN, "document.md")) });
+    const prefix = `user-1/run-1/doppler/${DOC.id}/`;
+    const { objects } = storage.stats();
+    expect(objects.get(`${prefix}images/manifest.jsonl`)!.equals(await readFile(path.join(GOLDEN, "images", "manifest.jsonl")))).toBe(true);
+    // Only the two extracted images are stored; the uncopyable scan has no object.
+    expect([...objects.keys()].filter((key) => key.startsWith(`${prefix}images/page-`)).sort()).toEqual([
+      `${prefix}images/page-0001/image-001.jpg`, `${prefix}images/page-0003/image-001.webp`,
+    ]);
+    const markdown = objects.get(`${prefix}document.md`)!.toString();
+    const links = [...markdown.matchAll(/\]\(([^)]+)\)/g)].map((m) => m[1]!);
+    expect(links.length).toBe(2);
+    for (const link of links) expect(objects.has(`${prefix}${link}`), link).toBe(true);
+  });
+});
+
+describe("real Doppler --scan-pages copy runs on Doppler's own scan fixtures (see PROVENANCE.json)", () => {
+  const GOLDEN = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "doppler-golden");
+  async function read(name: string, pageCount: number) {
+    const folder = path.join(work, name);
+    await cp(path.join(GOLDEN, name, "images"), folder, { recursive: true });
+    const source = createHash("sha256").update(await readFile(path.join(GOLDEN, name, "source.pdf"))).digest("hex");
+    return await readDopplerFigureDir(folder, { pageCount, expect: "complete", sourceSha256: source });
+  }
+
+  it("a rebuilt cross-reference table: the linked page scan is not extracted (copy, xref) with no file and no batch line", async () => {
+    const set = await read("v3-scan-xref", 3);
+    expect((await rowsOf(set)).map((r) => [r.assetId, r.fate, r.status, r.reason, r.linkPath, r.fileOf, r.bytes])).toEqual([
+      ["p1.1", "page-scan", "not-extracted", "copy", "images/page-0001/image-001.jpg", null, null],
+      ["p2.1", "background", "unlinked", "scan-not-copyable", null, null, null],
+      ["p3.1", "background", "unlinked", "scan-not-copyable", null, null, null],
+    ]);
+    expect(set.ledger.counts).toMatchObject({ extracted: 0, notExtracted: 1, unlinked: 2, resumable: 0 });
+    expect(set.run).toMatchObject({ complete: true, resumable: false });
+  });
+
+  it("every kind of scan: copied, decoded, and left to the host, a layered scan's stencil reported as a background mask", async () => {
+    const set = await read("v3-scan-kinds", 7);
+    expect((await rowsOf(set)).map((r) => [r.assetId, r.kind, r.fate, r.status, r.reason, r.source])).toEqual([
+      ["p1.1", "picture", "page-scan", "extracted", null, "copy"],
+      ["p2.1", "picture", "page-scan", "extracted", null, "copy"],
+      ["p3.1", "picture", "background", "unlinked", "scan-not-copyable", null],
+      ["p4.1", "picture", "background", "unlinked", "scan-not-copyable", null],
+      ["p5.1", "picture", "background", "unlinked", "scan-not-copyable", null],
+      ["p5.2", "picture", "background", "unlinked", "scan-not-copyable", null],
+      ["p5.3", "picture", "background", "unlinked", "scan-not-copyable", null],
+      ["p5.4", "picture", "background", "unlinked", "scan-not-copyable", null],
+      ["p6.1", "picture", "background", "unlinked", "scan-not-copyable", null],
+      ["p6.2", "mask", "background", "unlinked", "scan-not-copyable", null],
+      ["p7.1", "picture", "page-scan", "extracted", null, "decode"],
+    ]);
+  });
+});
+
 describe("sharded documents: one manifest per shard", () => {
-  async function shardRule(build: (m: ReturnType<typeof base>, files: Map<string, Buffer>) => Array<{ range: [number, number]; text: string }>, options: { partial?: boolean } = {}) {
+  async function shardRule(build: (m: ReturnType<typeof base>, files: Map<string, Buffer>) => Array<{ range: [number, number]; text: string }>, options: { partial?: boolean; gaps?: Array<{ first: number; last: number; reason: "plugin:shard-over-share" }>; pageCount?: number } = {}) {
     const { manifest, files } = v2Manifest({ partial: options.partial });
     const shards = build(manifest, files);
     await rm(dir, { recursive: true, force: true });
     await writeShardedFolder(dir, shards, files);
     try {
-      return await readDopplerFigureDir(dir, { pageCount: 3 });
+      return await readDopplerFigureDir(dir, { pageCount: options.pageCount ?? 3, gaps: options.gaps ?? null, ...(options.partial ? { expect: "partial" as const } : {}) });
     } catch (error) {
       if (error instanceof DopplerFigureRejection) return error.rule;
       throw error;
@@ -387,13 +504,15 @@ describe("sharded documents: one manifest per shard", () => {
       return [{ range: [1, 2], text: v3ShardText(m, [1, 2]) }, { range: [3, 3], text: v3ShardText(other, [3, 3]) }];
     })).toBe("shards-source-mismatch");
     expect(await shardRule((m) => [{ range: [1, 2], text: v3ShardText(m, [1, 2]) }, { range: [3, 3], text: v3ShardText({ ...m, dpi: 300 }, [3, 3]) }])).toBe("shards-settings-mismatch");
-    // Shard 3-3's manifest left out: page-0003's file has no owner.
-    expect(await shardRule((m) => [{ range: [1, 2], text: v3ShardText(m, [1, 2]) }])).toBe("files-do-not-match-manifest");
+    // Shard 3-3's manifest left out: the missing tail is refused before page-0003's ownerless file (R2 adversarial 8).
+    expect(await shardRule((m) => [{ range: [1, 2], text: v3ShardText(m, [1, 2]) }])).toBe("shards-not-contiguous");
+    // Declared as a gap of a partial outcome, the page-0003 file still has no owner.
+    expect(await shardRule((m) => [{ range: [1, 2], text: v3ShardText(m, [1, 2]) }], { partial: true, gaps: [{ first: 3, last: 3, reason: "plugin:shard-over-share" }] })).toBe("files-do-not-match-manifest");
     // An image line of page 3 in the 1-2 shard.
     expect(await shardRule((m) => [{ range: [1, 2], text: v3ShardText(m, [1, 2], { mutateLines: (lines) => {
       const p3 = JSON.stringify({ type: "image", ...m.images.find((e) => e.id === "p3.1") });
       lines.splice(lines.findIndex((l) => l.includes('"type":"batch"')), 0, p3);
-    } }) }])).toBe("manifest-shard-range");
+    } }) }, { range: [3, 3], text: v3ShardText(m, [3, 3]) }])).toBe("manifest-shard-range");
     // A header whose pages are not the folder's range.
     expect(await shardRule((m) => [{ range: [1, 2], text: v3ShardText(m, [1, 2]).replace('"pages":[1,2]', '"pages":[1,3]') }, { range: [3, 3], text: v3ShardText(m, [3, 3]) }])).toMatch(/^manifest-/);
     // Both a top-level manifest and shards.
@@ -403,11 +522,161 @@ describe("sharded documents: one manifest per shard", () => {
     })).toBe("unexpected-entry");
   }, 60_000);
 
+  it("context-page entries (real Doppler shards list their -f/-l pages as not-extracted `pages`) are counted, never rows; anything else out of range is refused", async () => {
+    // As the 130-page streamed fixture: shard 1-64 lists p70.1 and shard 65-128 lists p130.1, each not-extracted `pages`.
+    const ctx = (m: ReturnType<typeof base>, id: string, page: number, extra: Record<string, unknown> = {}) => ({
+      ...m.images.find((e) => e.id === "p2.2")!, id, page, kind: "picture", fate: "inline", status: "not-extracted", reason: "pages",
+      format: "webp", source: null, bytes: 0, sha256: null, width: 0, height: 0,
+      // As the fixture: the derived path and link, no file.
+      path: `page-${String(page).padStart(4, "0")}/image-${id.split(".")[1]!.padStart(3, "0")}.webp`,
+      link: `images/page-${String(page).padStart(4, "0")}/image-${id.split(".")[1]!.padStart(3, "0")}.webp`, ...extra,
+    }) as never;
+    const shards = (extra: Record<string, unknown> = {}) => (m: ReturnType<typeof base>) => [
+      { range: [1, 2] as [number, number], text: v3ShardText(m, [1, 2], { context: [ctx(m, "p3.9", 3, extra)] }) },
+      { range: [3, 3] as [number, number], text: v3ShardText(m, [3, 3], { context: [ctx(m, "p2.9", 2)] }) },
+    ];
+    const set = await shardRule(shards()) as DopplerFigureSet;
+    expect(typeof set === "string" ? set : "set").toBe("set");
+    const ids = new Set<string>();
+    for await (const row of readLedgerSpill(set.ledger.spill)) ids.add(row.assetId);
+    expect(ids.has("p3.9") || ids.has("p2.9")).toBe(false);
+    expect(set.files.map((file) => file.id).sort()).toEqual(["p1.1", "p1.g1", "p3.1"]);
+    await disposeDopplerFigureSet(set);
+    // Out of range and resumable, of another reason, or extracted: refused.
+    expect(await shardRule(shards({ resumable: true, reason: "budget" }))).toBe("manifest-shard-range");
+    expect(await shardRule(shards({ reason: "min_side" }))).toBe("manifest-shard-range");
+    expect(await shardRule(shards({ status: "extracted", reason: undefined, source: "render", bytes: 10, sha256: "a".repeat(64), width: 1, height: 1 }))).toBe("manifest-shard-range");
+  }, 60_000);
+
+  it("context entries: only within 16 pages of the shard; never a second row for an id another shard owns; never a repeat target; never billed", async () => {
+    const ctx = (m: ReturnType<typeof base>, id: string, page: number) => ({
+      ...m.images.find((e) => e.id === "p2.2")!, id, page, kind: "picture", fate: "inline", status: "not-extracted", reason: "pages",
+      format: "webp", source: null, bytes: 0, sha256: null, width: 0, height: 0,
+      path: `page-${String(page).padStart(4, "0")}/image-${id.split(".")[1]!.padStart(3, "0")}.webp`,
+      link: `images/page-${String(page).padStart(4, "0")}/image-${id.split(".")[1]!.padStart(3, "0")}.webp`,
+    }) as never;
+    const kind = (r: unknown) => typeof r === "string" ? r : "set";
+    const tail = { partial: true, pageCount: 40, gaps: [{ first: 4, last: 40, reason: "plugin:shard-over-share" as const }] };
+    // 1. The context window: shard 1-2 may list up to page 18; page 19 is outside it.
+    const window = (page: number) => (m: ReturnType<typeof base>) => [
+      { range: [1, 2] as [number, number], text: v3ShardText(m, [1, 2], { context: [ctx(m, `p${page}.1`, page)] }) },
+      { range: [3, 3] as [number, number], text: v3ShardText(m, [3, 3]) },
+    ];
+    expect(kind(await shardRule(window(18), tail))).toBe("set");
+    expect(await shardRule(window(19), tail)).toBe("manifest-shard-range");
+    // 2. A context entry for an id the next shard owns (p3.1, extracted there): one row, the owner's.
+    const dup = (m: ReturnType<typeof base>) => [
+      { range: [1, 2] as [number, number], text: v3ShardText(m, [1, 2], { context: [ctx(m, "p3.1", 3)] }) },
+      { range: [3, 3] as [number, number], text: v3ShardText(m, [3, 3]) },
+    ];
+    const set = await shardRule(dup) as DopplerFigureSet;
+    expect(kind(set)).toBe("set");
+    const rows: Array<{ assetId: string; status: string; bytes: number | null }> = [];
+    for await (const row of readLedgerSpill(set.ledger.spill)) rows.push({ assetId: row.assetId, status: row.status, bytes: row.bytes });
+    expect(rows.filter((row) => row.assetId === "p3.1")).toEqual([expect.objectContaining({ status: "extracted" })]);
+    expect(new Set(rows.map((row) => row.assetId)).size).toBe(rows.length);
+    // 4. Not billable: no context entry adds a row or a file (the files are exactly the owners').
+    expect(set.files.map((file) => file.id).sort()).toEqual(["p1.1", "p1.g1", "p3.1"]);
+    await disposeDopplerFigureSet(set);
+    // 3. Never a repeat target: an in-range repeat naming a context entry is refused.
+    const repeat = (m: ReturnType<typeof base>) => {
+      const target = ctx(m, "p2.9", 2) as unknown as Record<string, unknown>;
+      const repeatOf = { ...target, id: "p3.8", page: 3, reason: "repeat", repeat_of: "p2.9" } as never;
+      return [
+        { range: [1, 2] as [number, number], text: v3ShardText(m, [1, 2]) },
+        { range: [3, 3] as [number, number], text: v3ShardText({ ...m, images: [...m.images, repeatOf] }, [3, 3], { context: [target as never] }) },
+      ];
+    };
+    expect(await shardRule(repeat)).toBe("manifest-repeat-invalid");
+  }, 60_000);
+
+  it("R3-L2: context lines have their own allowance: they never spend the shared line cap, and the allowance is bounded", async () => {
+    const { DopplerManifestV3Validator } = await import("@docslurp/shared");
+    const m = base();
+    const ctx = (id: string, page: number) => ({
+      ...m.images.find((e) => e.id === "p2.2")!, id, page, kind: "picture", fate: "inline", status: "not-extracted", reason: "pages",
+      format: "webp", source: null, bytes: 0, sha256: null, width: 0, height: 0,
+      path: `page-${String(page).padStart(4, "0")}/image-${id.split(".")[1]!.padStart(3, "0")}.webp`,
+      link: `images/page-${String(page).padStart(4, "0")}/image-${id.split(".")[1]!.padStart(3, "0")}.webp`,
+    }) as never;
+    const context = Array.from({ length: 6 }, (_, i) => ctx(`p3.${i + 10}`, 3));
+    const lines = v3ShardText(m, [1, 2], { context }).split("\n").filter((line) => line.length > 0);
+    const inRange = lines.filter((line) => line.includes('"type":"image"') && !line.includes('"reason":"pages"')).length;
+    const batches = lines.filter((line) => line.includes('"type":"batch"')).length;
+    const run = (maxContextLines: number) => {
+      // The shared cap holds exactly the shard's own images and batches: the 6 context lines must fit their own allowance.
+      const validator = new DopplerManifestV3Validator({ maxLines: inRange + batches, maxPage: 40, range: [1, 2], maxContextLines });
+      const hash = createHash("sha256");
+      for (const line of lines) {
+        const isEnd = line.includes('"type":"end"');
+        validator.accept(line, isEnd ? hash.copy().digest("hex") : undefined);
+        hash.update(`${line}\n`);
+      }
+      return validator.finish();
+    };
+    expect(run(6)).toMatchObject({ contextImages: 6 });
+    expect(run(6).contextBytes).toBeGreaterThan(0);
+    expect(() => run(5)).toThrow(/too-many-lines/);
+    expect(() => run(0)).toThrow(/too-many-lines/);
+  });
+
+  it("R3b-L1: the folder-wide context allowance never exceeds the entry cap, however many shards the VM publishes", async () => {
+    const { DOPPLER_SHARD_CONTEXT_LINES, dopplerAssetCaps } = await import("@docslurp/shared");
+    // Single-page shards, each with a full per-shard allowance of context lines on the other pages.
+    let ownRows = 0;
+    const folder = (pages: number) => (full: ReturnType<typeof base>) => Array.from({ length: pages }, (_, i) => {
+      // No cross-shard repeat (the fixture's p2.1 repeats p1.1, which single-page shards cannot hold).
+      const m = { ...full, images: full.images.filter((e) => e.reason !== "repeat") } as ReturnType<typeof base>;
+      ownRows = m.images.length;
+      const own = i + 1;
+      const others = Array.from({ length: pages }, (_, j) => j + 1).filter((page) => page !== own);
+      const context = Array.from({ length: DOPPLER_SHARD_CONTEXT_LINES }, (_, n) => {
+        const page = others[n % others.length]!;
+        const index = 100 + Math.floor(n / others.length);
+        return {
+          ...m.images.find((e) => e.id === "p2.2")!, id: `p${page}.${index}`, page, kind: "picture", fate: "inline", status: "not-extracted", reason: "pages",
+          format: "webp", source: null, bytes: 0, sha256: null, width: 0, height: 0,
+          path: `page-${String(page).padStart(4, "0")}/image-${String(index).padStart(3, "0")}.webp`,
+          link: `images/page-${String(page).padStart(4, "0")}/image-${String(index).padStart(3, "0")}.webp`,
+        } as never;
+      });
+      return { range: [own, own] as [number, number], text: v3ShardText(m, [own, own], { context }) };
+    });
+    // 8 shards x 2048 = 16,384 context lines: within dopplerAssetCaps(8).entries (16,512). Accepted, with no context row.
+    expect(8 * DOPPLER_SHARD_CONTEXT_LINES).toBeLessThanOrEqual(dopplerAssetCaps(8).entries);
+    const set = await shardRule(folder(8), { pageCount: 8 }) as DopplerFigureSet;
+    expect(typeof set === "string" ? set : "set").toBe("set");
+    let rows = 0;
+    for await (const _row of readLedgerSpill(set.ledger.spill)) rows += 1;
+    expect(rows).toBe(ownRows);
+    await disposeDopplerFigureSet(set);
+    // 9 shards x 2048 = 18,432 > dopplerAssetCaps(9).entries (16,528): the folder is refused, not given 9 allowances.
+    expect(9 * DOPPLER_SHARD_CONTEXT_LINES).toBeGreaterThan(dopplerAssetCaps(9).entries);
+    expect(await shardRule(folder(9), { pageCount: 9 })).toBe("manifest-too-many-lines");
+  }, 180_000);
+
   it("LOW-5: shards start at page 1, leave no hole, and end within the document", async () => {
     // Page 2 has no file (a repeat and furniture), so a 1-1 + 3-3 split would otherwise drop its rows silently.
     expect(await shardRule((m) => [{ range: [1, 1], text: v3ShardText(m, [1, 1]) }, { range: [3, 3], text: v3ShardText(m, [3, 3]) }])).toBe("shards-not-contiguous");
     expect(await shardRule((m) => [{ range: [2, 3], text: v3ShardText(m, [2, 3]) }])).toBe("shards-not-contiguous");
     expect(await shardRule((m) => [{ range: [1, 2], text: v3ShardText(m, [1, 2]) }, { range: [3, 4], text: v3ShardText(m, [3, 4]) }])).toBe("page-outside-document");
+  }, 60_000);
+
+  it("a partial outcome's declared gaps keep the extracted shards (council round 2 H2, app #464); an extracted one stays strict", async () => {
+    const holed = (m: ReturnType<typeof base>) => [{ range: [1, 1] as [number, number], text: v3ShardText(m, [1, 1]) }, { range: [3, 3] as [number, number], text: v3ShardText(m, [3, 3]) }];
+    const gap = (first: number, last: number) => ({ first, last, reason: "plugin:shard-over-share" as const });
+    const kind = (r: unknown) => typeof r === "string" ? r : "set";
+    // A middle gap: the shards on either side are read.
+    expect(kind(await shardRule(holed, { partial: true, gaps: [gap(2, 2)] }))).toBe("set");
+    // A first-batch gap and a trailing gap pass coverage (this fixture then refuses page 1's or page 3's files, which only a
+    // shard may hold: not a contiguity refusal).
+    expect(await shardRule((m) => [{ range: [2, 3], text: v3ShardText(m, [2, 3]) }], { partial: true, gaps: [gap(1, 1)] })).not.toBe("shards-not-contiguous");
+    expect(await shardRule((m) => [{ range: [1, 2], text: v3ShardText(m, [1, 2]) }], { partial: true, gaps: [gap(3, 3)] })).not.toBe("shards-not-contiguous");
+    // A gap overlapping a shard, or one that leaves a hole: refused.
+    expect(await shardRule(holed, { partial: true, gaps: [gap(2, 3)] })).toBe("gap-overlaps-shard");
+    expect(await shardRule((m) => [{ range: [3, 3], text: v3ShardText(m, [3, 3]) }], { partial: true, gaps: [gap(2, 2)] })).toBe("shards-not-contiguous");
+    // Not partial: a hole is refused even with a declared gap.
+    expect(await shardRule(holed, { gaps: [gap(2, 2)] })).toBe("shards-not-contiguous");
   }, 60_000);
 });
 

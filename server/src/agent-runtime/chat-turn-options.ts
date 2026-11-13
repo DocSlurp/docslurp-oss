@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { chatRetrievalOverridesSchema, chatSearchFiltersSchema } from "@docslurp/shared";
+import { CHAT_REASONING_LEVELS, CHAT_TIERS } from "@docslurp/shared/project-chat-models";
 import { isFirstPartyAppActor } from "../lib/first-party-app.js";
 import type { RequestActor } from "../lib/request-actor.js";
 
@@ -11,6 +12,9 @@ import type { RequestActor } from "../lib/request-actor.js";
  */
 export const durableChatOptionsShape = {
   speedBoost: z.boolean().optional(),
+  /** The chat tier; backend models are never a customer choice. */
+  tier: z.enum(CHAT_TIERS).optional(),
+  reasoning: z.enum(CHAT_REASONING_LEVELS).optional(),
   webTools: z.boolean().optional(),
   suggestions: z.boolean().optional(),
   retrieval: chatRetrievalOverridesSchema.optional(),
@@ -22,10 +26,12 @@ const durableChatOptionsSchema = z.object(durableChatOptionsShape);
 export function durableChatTurnOptions(input: Record<string, unknown>, actor: RequestActor) {
   const options = durableChatOptionsSchema.parse({
     speedBoost: input.speedBoost, webTools: input.webTools, suggestions: input.suggestions,
-    retrieval: input.retrieval, filters: input.filters,
+    retrieval: input.retrieval, filters: input.filters, tier: input.tier, reasoning: input.reasoning,
   });
   return {
     speedBoost: options.speedBoost === true,
+    ...(options.tier ? { tier: options.tier } : {}),
+    ...(options.reasoning ? { reasoning: options.reasoning } : {}),
     // Web tools stay off unless asked for. Suggestions are a signed-in app
     // capability and default on there, as in the streaming route.
     agent: { web: options.webTools === true, suggestions: isFirstPartyAppActor(actor) && options.suggestions !== false },

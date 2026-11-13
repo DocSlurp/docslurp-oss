@@ -1,9 +1,9 @@
 import { z } from "zod";
 
 import { QUALITY_RANK } from "./quality.js";
-import { FIXED_OVERHEAD_SECONDS, estimateIngest, isBillingEnforced, visualExportCredits, type PipelineProfileId } from "./billing.js";
+import { expectedVisualExportCredits, FIXED_OVERHEAD_SECONDS, estimateIngest, isBillingEnforced, workerSlotsFor, type PipelineProfileId } from "./billing.js";
 import type { VisualCandidateStats } from "./chart-export.js";
-import { chartExportAvailable } from "./chart-export.js";
+import { chartExportDefaults, chartExportModelsAvailable, CONSERVATIVE_CHART_EXPORT_DEFAULTS, effectiveTierFromDefaults, type ChartExportDefaults, type ChartExportTier, type RunOrigin } from "./chart-export.js";
 import { chartExportConfigOf, expectedBillableVisuals, type VisualExportModes } from "./chart-export-estimate.js";
 import { sha256Hex } from "./hash.js";
 import { embeddingModelBaseUri,
@@ -30,7 +30,27 @@ export type ConfigChangeImpact = {
   pages: number;
 };
 
-export type ConfigChangeContext = { documents: number; pages: number };
+export type ConfigChangeContext = {
+  documents: number;
+  pages: number;
+  /**
+   * The caller's surface, for settings whose unset value resolves per run origin (chart export's tier): the app's
+   * settings page and chat are `app`, API keys and MCP tokens are `machine`. Default `app`.
+   */
+  origin?: RunOrigin;
+  /**
+   * The deployment's chart export defaults as the server reports them (`project.chartExportDefaults`). Clients pass
+   * these; the server may pass `env` instead. Neither: the conservative defaults (nothing runs), never a code default.
+   */
+  chartExportDefaults?: ChartExportDefaults | null;
+  /** The server's environment, read with `chartExportDefaults(env)` when no defaults are passed. */
+  env?: Readonly<Record<string, string | undefined>>;
+};
+
+function contextChartExportDefaults(ctx?: ConfigChangeContext): ChartExportDefaults {
+  if (ctx?.chartExportDefaults) return ctx.chartExportDefaults;
+  return ctx?.env ? chartExportDefaults(ctx.env) : CONSERVATIVE_CHART_EXPORT_DEFAULTS;
+}
 
 const KIND_RANK: Record<ConfigChangeKind, number> = {
   none: 0,
@@ -80,9 +100,11 @@ export function indexConfigHash(config: IndexConfig): string {
   ])).slice(0, 32);
 }
 
-type FieldImpact = ConfigChangeKind | ((before: PipelineFeatures, after: PipelineFeatures) => ConfigChangeKind);
+type FieldImpact = ConfigChangeKind | ((before: PipelineFeatures, after: PipelineFeatures, ctx?: ConfigChangeContext) => ConfigChangeKind);
 
 /** A feature switched on adds value to old documents; switched off only affects future ones. */
+const TIER_RANK: Record<ChartExportTier, number> = { off: 0, free: 1, models: 2 };
+
 const toggled = (key: "summarize" | "pageIndex" | "propositionIndex" | "graphRag" | "graphCommunitySummaries" | "entityIndex" |
   "htmlExtraction" | "markdownExtraction" | "preserveTables" | "preserveCode" | "preserveImages" | "pdfRegionExtraction" |
   "visionFallback" | "embed" | "indexVectors"): FieldImpact =>
@@ -138,14 +160,22 @@ export const PIPELINE_FIELD_IMPACT: Record<keyof PipelineFeatures, FieldImpact> 
   pdfRegionExtraction: toggled("pdfRegionExtraction"),
   embed: toggled("embed"),
   indexVectors: toggled("indexVectors"),
-  // Enabling export, adding formats or turning diagrams on adds outputs old documents gain on re-index.
-  chartExport: (before, after) => {
-    if (!after.chartExport.enabled) return "new-uploads";
-    const gained = !before.chartExport.enabled
+  // Compared as the tiers that run for the caller's surface (an unset tier resolves to its origin default). Moving up a
+  // tier (off -> free, free -> models) or gaining formats or diagrams while on recommends a reindex: billed for
+  // `models` (priced by chartExportCredits), free otherwise. Turning it down or off applies to new uploads only.
+  chartExport: (before, after, ctx) => {
+    const defaults = contextChartExportDefaults(ctx);
+    const tierOf = (features: PipelineFeatures) => effectiveTierFromDefaults(features.chartExport?.tier, ctx?.origin ?? "app", defaults);
+    const was = tierOf(before);
+    const now = tierOf(after);
+    if (now === "off") return "new-uploads";
+    const gained = TIER_RANK[now] > TIER_RANK[was]
       || after.chartExport.formats.some((format) => !before.chartExport.formats.includes(format))
       || (after.chartExport.diagrams && !before.chartExport.diagrams);
     return gained ? "reindex-recommended" : "new-uploads";
   },
+  // Figures switched on: existing documents gain them on reindex. Off: new uploads only (existing figures stay).
+  figures: (before, after) => (after.figures && !before.figures ? "reindex-recommended" : "new-uploads"),
   // Future ingestion only.
   maxCostCents: "new-uploads",
   inferenceLane: "new-uploads",
@@ -179,8 +209,12 @@ const FIELD_EFFECTS: Partial<Record<keyof PipelineFeatures, Partial<Record<Confi
     "new-uploads": "New uploads use this processing quality. Existing documents keep the text already extracted.",
   },
   chartExport: {
-    "reindex-recommended": "New uploads export charts and diagrams in the chosen formats. Existing documents gain them when you reprocess them.",
-    "new-uploads": "Applies to new uploads only. Existing documents keep the chart and diagram exports they already have.",
+    "reindex-recommended": "New uploads export charts and diagrams in the chosen formats. Existing documents gain them when you reprocess them (charts that carry their own data at no charge; reading charts with AI is billed per chart).",
+    "new-uploads": "Applies to new uploads only, at no charge for charts that carry their own data. Existing documents keep the chart and diagram exports they already have.",
+  },
+  figures: {
+    "reindex-recommended": "New uploads extract figures from PDFs. Existing documents gain them when you reprocess them from extraction, which re-extracts and re-embeds each document (see the estimate).",
+    "new-uploads": "New uploads skip figure extraction, which also turns off chart export for PDFs (PDF charts are read from their figures). Existing documents keep their figures until you reprocess them.",
   },
   visionFallback: {
     "reindex-recommended": "New uploads can read scanned or image-only pages with vision. Existing documents keep their current text until you reprocess them.",
@@ -200,7 +234,7 @@ export function analyzePipelineChange(
   for (const field of Object.keys(PIPELINE_FIELD_IMPACT) as Array<keyof PipelineFeatures>) {
     if (pipelineValuesEqual(before[field], after[field])) continue;
     const rule = PIPELINE_FIELD_IMPACT[field];
-    let fieldKind = typeof rule === "function" ? rule(before, after) : rule;
+    let fieldKind = typeof rule === "function" ? rule(before, after, ctx) : rule;
     let effect = FIELD_EFFECTS[field]?.[fieldKind] ?? EFFECTS[fieldKind] ?? "No effect on stored data.";
     if (KIND_RANK[fieldKind] >= KIND_RANK["reindex-recommended"]) {
       // Only a field with an effective seed stage in the new config can re-index anything. Otherwise (e.g. the
@@ -268,6 +302,40 @@ const STAGE_WEIGHT: Record<PipelineRunStage, number> = {
 };
 
 
+/**
+ * Measured free-tier time (a before/after run of the free tier on a chart-dense slice): about 0.1 s of artifact reads per document
+ * for the extra `vision-extract` pass, and about 1.4 s of parser-VM boot and staging per document with a chart signal.
+ * The high end assumes the measured chart-dense share of signalled documents (35 of 75).
+ */
+export const FREE_CHART_TIER_PASS_SECONDS_PER_DOCUMENT = 0.1;
+export const FREE_CHART_TIER_VM_SECONDS_PER_SIGNALLED_DOCUMENT = 1.4;
+export const FREE_CHART_TIER_SIGNALLED_SHARE_HIGH = 35 / 75;
+
+/** Weight of `vision-extract` when only the free chart tier runs there (no page read, no model): small, not zero. */
+const FREE_CHART_TIER_STAGE_WEIGHT = 0.02;
+
+/**
+ * A stage's weight for these features. `vision-extract` is enabled for the free chart tier too; there it reads no page
+ * and calls no model, so it weighs `FREE_CHART_TIER_STAGE_WEIGHT` unless vision fallback or the billed `models` tier
+ * makes it full work, and nothing when chart export is off.
+ */
+function stageWeight(stage: PipelineRunStage, features: PipelineFeatures, tier?: ChartExportTier | null): number {
+  if (stage === "vision-extract" && !features.visionFallback) {
+    const resolved = tier ?? features.chartExport?.tier;
+    if (resolved === "off") return 0;
+    if (resolved !== "models") return FREE_CHART_TIER_STAGE_WEIGHT;
+  }
+  return STAGE_WEIGHT[stage];
+}
+
+/** Extra wall seconds the free chart tier adds to a run of `documents` (low: pass only; high: chart-dense VM share). */
+export function freeChartTierSeconds(documents: number, workerSlots: number): { low: number; high: number } {
+  const slots = Math.max(1, workerSlots);
+  const pass = documents * FREE_CHART_TIER_PASS_SECONDS_PER_DOCUMENT;
+  const vm = documents * FREE_CHART_TIER_SIGNALLED_SHARE_HIGH * FREE_CHART_TIER_VM_SECONDS_PER_SIGNALLED_DOCUMENT;
+  return { low: pass / slots, high: (pass + vm) / slots };
+}
+
 const profileFor = (features: PipelineFeatures): PipelineProfileId => features.quality;
 
 /** Stages whose run re-exports charts and diagrams: the generator runs at the end of vision-extract (worker chart-export/stage.ts). */
@@ -286,18 +354,37 @@ function chartExportCredits(args: {
   env: Record<string, string | undefined>;
   visualStats?: Partial<VisualCandidateStats> | null;
   modes?: VisualExportModes;
+  tier?: ChartExportTier | null;
 }): { low: number; high: number; note: string | null } {
-  // The deployment kill switch (DOCSLURP_CHART_EXPORT) off means the worker never exports: nothing to price.
-  const config = chartExportAvailable(args.env) ? chartExportConfigOf(args.features) : null;
+  // Only the billed `models` tier is priced, and only when the deployment kill switch (DOCSLURP_CHART_EXPORT) is `on`:
+  // the free tier (and the switch on `free` or `off`) never calls a model, so it costs 0 credits. A per-request tier
+  // wins over the project's.
+  const project = chartExportConfigOf({ chartExport: { ...(args.features.chartExport ?? {}), ...(args.tier ? { tier: args.tier } : {}) } });
+  const config = chartExportModelsAvailable(args.env) ? project : null;
   if (!config || !args.stages.some((stage) => CHART_EXPORT_CHARGING_STAGES.includes(stage))) return { low: 0, high: 0, note: null };
   const visuals = expectedBillableVisuals({ config, pages: args.pages, documents: args.documents, stats: args.visualStats ?? null });
-  const price = (count: number) => visualExportCredits({ visuals: count, source: "vision", formats: config.formats, ...(args.modes ? { modes: args.modes } : {}) });
+  // First reads plus the expected billed second reads (repairs and cut-off retries).
+  const price = (count: number) => expectedVisualExportCredits({ visuals: count, formats: config.formats, ...(args.modes ? { modes: args.modes } : {}) });
   const range = visuals.low === visuals.high ? `${visuals.low}` : `${visuals.low} to ${visuals.high}`;
   return {
     low: price(visuals.low),
     high: price(visuals.high),
-    note: `; chart export: ${range} model-read visuals (${visuals.basis === "measured" ? "recorded counts" : "per-page planning prior"})`,
+    note: `; chart export: ${range} model-read visuals (${visuals.basis === "measured" ? "recorded counts" : "per-page planning prior"}), each billed as one read, or two when it needs a repair`,
   };
+}
+
+/**
+ * Credits for chart export alone over a new upload of `pages` pages, at `tier` (a resolved tier: per-request override,
+ * project tier or origin default). Only `models` with the deploy switch `on` is priced; everything else is 0.
+ */
+export function estimateChartExportCredits(args: {
+  features: PipelineFeatures;
+  tier: ChartExportTier;
+  pages: number;
+  documents: number;
+  env: Record<string, string | undefined>;
+}): { low: number; high: number; note: string | null } {
+  return chartExportCredits({ ...args, stages: CHART_EXPORT_CHARGING_STAGES });
 }
 
 /**
@@ -319,6 +406,11 @@ export function estimatePipelineWork(args: {
   visualStats?: Partial<VisualCandidateStats> | null;
   /** Per-format generation mode for chart export (default: every format derived from one spec). */
   chartExportModes?: VisualExportModes;
+  /**
+   * The chart export tier this estimate's run would use when it differs from the project's stored one (a per-request
+   * override). Unset and default tiers never resolve to `models`, so they price 0.
+   */
+  chartExportTier?: ChartExportTier | null;
 }): CostEstimate {
   const pages = Math.max(0, Math.round(args.pages));
   const documents = Math.max(0, Math.round(args.documents));
@@ -326,8 +418,8 @@ export function estimatePipelineWork(args: {
   const profile = profileFor(args.features);
   const planned = new Set<PipelineRunStage>(compilePipelinePlan(args.features).stageOrder);
   const selected = pipelineStageOrder.filter((stage) => args.stages.includes(stage));
-  const selectedWeight = selected.reduce((sum, stage) => sum + STAGE_WEIGHT[stage], 0);
-  const plannedWeight = [...planned].reduce((sum, stage) => sum + STAGE_WEIGHT[stage], 0);
+  const selectedWeight = selected.reduce((sum, stage) => sum + stageWeight(stage, args.features, args.chartExportTier), 0);
+  const plannedWeight = [...planned].reduce((sum, stage) => sum + stageWeight(stage, args.features, args.chartExportTier), 0);
   const share = selectedWeight <= 0 ? 0 : Math.min(1, selectedWeight / Math.max(plannedWeight, selectedWeight));
 
   // Optional per-document features are charged in full whenever their stage runs (not by stage share).
@@ -352,8 +444,13 @@ export function estimatePipelineWork(args: {
     env: args.env,
     visualStats: args.visualStats ?? null,
     ...(args.chartExportModes ? { modes: args.chartExportModes } : {}),
+    ...(args.chartExportTier ? { tier: args.chartExportTier } : {}),
   });
   const scaleSeconds = (wall: number) => (share > 0 && pages > 0 ? Math.max(0, wall - FIXED_OVERHEAD_SECONDS) * share + FIXED_OVERHEAD_SECONDS : 0);
+  // The free chart tier bills nothing but takes time: its pass and parser-VM runs (only when vision-extract runs at free).
+  const freeTier = (args.chartExportTier ?? args.features.chartExport?.tier) === "free" && selected.includes("vision-extract") && pages > 0
+    ? freeChartTierSeconds(Math.max(1, documents), args.workerSlots ?? workerSlotsFor(true))
+    : { low: 0, high: 0 };
 
   return costEstimateSchema.parse({
     pages,
@@ -363,7 +460,7 @@ export function estimatePipelineWork(args: {
       low: round(priced(low) + visuals.low),
       high: round(priced(high) + visuals.high),
     },
-    seconds: { low: round(scaleSeconds(low.wallSeconds)), high: round(scaleSeconds(high.wallSeconds)) },
+    seconds: { low: round(scaleSeconds(low.wallSeconds) + freeTier.low), high: round(scaleSeconds(high.wallSeconds) + freeTier.high) },
     basis: `${profile} profile, ${selected.length} of ${Math.max(planned.size, selected.length)} stages; `
       + "range from all-text to scan-heavy pages; modeled averages, not measured for this corpus"
       + (visuals.note ?? ""),

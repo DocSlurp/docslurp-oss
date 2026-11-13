@@ -128,7 +128,9 @@ export const openStoredBytes: StoredBytesModel = (file, pages, settings) => {
   const text = profiledTextChars(file, pages, 2_000);
   const images = profiledPageArea(file) * 1_200;
   const index = (chars: number) => (settings.indexing !== "on-demand" ? Math.ceil(chars / 2_000) * 6 * 1024 : 0);
-  const bytesFor = (pageCount: number, chars: number) => file.size + pageCount * images + chars * 2 + index(chars);
+  // Stored figure files of a processed document are measured (QuoteFile.measured.assetBytes), never estimated.
+  const figures = Math.max(0, Number(file.measured?.assetBytes) || 0);
+  const bytesFor = (pageCount: number, chars: number) => file.size + figures + pageCount * images + chars * 2 + index(chars);
   return { low: bytesFor(pages.low, text.low), high: bytesFor(pages.high, text.high) };
 };
 
@@ -153,6 +155,8 @@ export const OPEN_PRICING: PricingProvider = {
   chatAnswerCredits: () => 0,
   featureCredits: () => 0,
   visualExportCredits: () => 0,
+  visualExportRetryCredits: () => 0,
+  chartExportExpectedRetriesPerRead: () => 0,
   speedBoostMultiplier: (speedBoost) => {
     if (typeof speedBoost !== "boolean") throw new Error("speedBoost must be a boolean");
     return 1;
@@ -184,6 +188,7 @@ export const OPEN_PRICING: PricingProvider = {
     sandboxCostCents: () => 0,
     sandboxRatesObservedAt: () => null,
     workerSlotUsdPerHour: () => null,
+    chartGeneratorMaxPricesUsdPerMTok: () => null,
   },
 };
 

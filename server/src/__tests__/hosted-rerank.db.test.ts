@@ -2,6 +2,9 @@ import postgres from "postgres";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { normalizePipelineFeatures, defaultProjectSearchSettings } from "@docslurp/shared";
 import { startMigratedPostgres } from "@docslurp/worker/testing";
+/** The explicit search access scope every search caller passes (search/access-scope.ts). */
+const TEST_SEARCH_SCOPE = { orgId: "hosted-org", projectIds: "org", modeCeiling: null } as const;
+
 
 let sql: postgres.Sql;
 let stop: () => Promise<void>;
@@ -50,7 +53,7 @@ describe("real hybrid search with hosted reranking and actual SQL usage", () => 
     parentRetrieval: false, queryRewrite: false, selfQuery: false, useContextualCompression: false,
     useHyDE: false, stepback: false, iterativeMultiHop: false, enableGraphExpansion: false, enableCommunityExpansion: false };
   it("reads project opt-in, preserves citations and persists scoped actual tokens", async () => {
-    const result = await hybridSearch("pump maintenance", "hosted-user", options);
+    const result = await hybridSearch("pump maintenance", "hosted-user", options, TEST_SEARCH_SCOPE);
     expect(http).toHaveBeenCalledTimes(1);
     // The reranker is fused with the hybrid order (a two-candidate swap ties and keeps the hybrid order), but the
     // candidate it scored still carries its own citation and body.
@@ -71,8 +74,8 @@ describe("real hybrid search with hosted reranking and actual SQL usage", () => 
   });
   it("rerank off and denied tenant access make no provider request", async () => {
     const before = http.mock.calls.length;
-    await hybridSearch("pump maintenance", "hosted-user", { ...options, useRerank: false });
-    await expect(hybridSearch("pump maintenance", "outsider", options)).rejects.toThrow();
+    await hybridSearch("pump maintenance", "hosted-user", { ...options, useRerank: false }, TEST_SEARCH_SCOPE);
+    await expect(hybridSearch("pump maintenance", "outsider", options, TEST_SEARCH_SCOPE)).rejects.toThrow();
     expect(http).toHaveBeenCalledTimes(before);
   });
   it("persists late sibling usage before returning a parallel fallback", async () => {
@@ -82,7 +85,7 @@ describe("real hybrid search with hosted reranking and actual SQL usage", () => 
     const waiting: Array<(r:Response)=>void> = [];
     http.mockImplementation(()=>new Promise<Response>(resolve=>waiting.push(resolve)));
     let returned=false;
-    const running=hybridSearch("pump maintenance","hosted-user",{...options,rootSessionId:"hosted-parallel"}).then(r=>{returned=true;return r;});
+    const running=hybridSearch("pump maintenance","hosted-user",{...options,rootSessionId:"hosted-parallel"}, TEST_SEARCH_SCOPE).then(r=>{returned=true;return r;});
     await vi.waitFor(()=>expect(waiting).toHaveLength(2));
     waiting[0](Response.json({input_tokens:10},{status:429}));
     await new Promise<void>(resolve=>setImmediate(resolve));
@@ -100,10 +103,10 @@ describe("real hybrid search with hosted reranking and actual SQL usage", () => 
   it("privacy and actual exhausted budget block provider calls", async () => {
     const before = http.mock.calls.length;
     await sql`update projects set pipeline=jsonb_set(pipeline,'{privacyMode}','"local-only"') where id='hosted-ws'`;
-    await hybridSearch("pump maintenance", "hosted-user", options);
+    await hybridSearch("pump maintenance", "hosted-user", options, TEST_SEARCH_SCOPE);
     await sql`update projects set pipeline=jsonb_set(pipeline,'{privacyMode}','"standard"') where id='hosted-ws'`;
     await sql`update organizations set credit_balance_cents=-100000 where id='hosted-org'`;
-    await hybridSearch("pump maintenance", "hosted-user", options);
+    await hybridSearch("pump maintenance", "hosted-user", options, TEST_SEARCH_SCOPE);
     expect(http).toHaveBeenCalledTimes(before);
   });
 });

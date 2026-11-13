@@ -9,7 +9,9 @@ region is decided, and what DocSlurp records.
 
 China-based providers are **allowed** by default (`allowChinaProviders: true` on organizations and projects).
 
-- **Vision (Rich pages):** the default model, `deepseek/deepseek-v4.1-flash-1017`, is served by Fireworks
+- **Vision (Rich pages):** the default model is `openai/gpt-6-luna`, served by OpenAI (never its Flex tier), with Amazon
+  Bedrock us-east-1 and Azure US as fallbacks and as the retry route for content-filter stops; `max_price` is their
+  $0.11 / $0.55 per million tokens. When a project picks `deepseek/deepseek-v4.1-flash-1017`, it is served by Fireworks
   or Parasail. OpenRouter picks the one with the lowest recent latency at request time
   (`provider.only` plus `provider.sort: "latency"`). Together is omitted (see below). Every request carries `provider.max_price`, so no host can
   bill above the route's price ceiling ($0.30 / $1.20 per million tokens).
@@ -79,7 +81,7 @@ some text models unavailable:
     stage's model as `requestedModel`, with `regionFallback: true`.
   - Set `OPENROUTER_RESTRICTED_FALLBACK_MODEL` to another model, or to `none` to turn the fallback off and fail
     instead; a `:variant` or prohibited model is ignored. To choose the model that runs, set
-    `pipeline.textGeneration.model` to a model with non-China hosts; it then never needs the fallback.
+    `pipeline.textGeneration.model` (a managed setting, set by platform admins) to a model with non-China hosts; it then never needs the fallback.
 - Providers whose region is unknown (for example Relace, Typesafe, Liquid, NEAR AI, Makora) are never used
   while the setting is off.
 

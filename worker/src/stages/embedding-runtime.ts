@@ -6,7 +6,7 @@ import { isUtf8 } from "node:buffer";
 import path from "node:path";
 
 import type { CanonicalDocument } from "@docslurp/shared";
-import { localEmbeddingPooling, type EmbeddingPooling, assertProviderAllowed, authorizePrivateModelCall, textModelCallDescriptor, canonicalDocumentSchema, DEEPINFRA_EMBEDDING_BASE_URL, validateDeepInfraEmbedding, fitEmbeddingDimensions, openRouterEmbeddingRoute, validateHostedEmbeddingVector, OPENROUTER_BASE_URL, PRIVATE_MODEL_PROVIDER, isProviderCallAllowed, resolvePipelineTextModel, createOpenRouterRoutingFetch, createOpenRouterChargeTotal, type PrivacyMode, type TextGenerationConfig } from "@docslurp/shared";
+import { localEmbeddingPooling, type EmbeddingPooling, assertProviderAllowed, authorizePrivateModelCall, textModelCallDescriptor, canonicalDocumentSchema, DEEPINFRA_EMBEDDING_BASE_URL, validateDeepInfraEmbedding, fitEmbeddingDimensions, openRouterEmbeddingRoute, validateHostedEmbeddingVector, OPENROUTER_BASE_URL, PRIVATE_MODEL_PROVIDER, isProviderCallAllowed, resolveAllowedPipelineTextModel, createOpenRouterRoutingFetch, createOpenRouterChargeTotal, type PrivacyMode, type TextGenerationConfig } from "@docslurp/shared";
 import { embedMany } from "ai";
 import { blankPages, embedPerplexity, imageAnchorsToAltText, pageImageReferencePages } from "@docslurp/shared";
 import { noteWorkProgress, withRequestTimeout } from "../lib/work-progress.js";
@@ -1402,7 +1402,7 @@ async function buildDocumentContextSummary(args: {
   config: Config;
   signal?: AbortSignal;
 }): Promise<{ summary: string; usage?: ContextualChunkUsage }> {
-  const model = resolvePipelineTextModel(args, "contextual-chunk-preamble", args.config.textGenerationModel);
+  const model = resolveAllowedPipelineTextModel(args, "contextual-chunk-preamble", args.config.textGenerationModel);
   const heuristicSummary = buildHeuristicDocumentSummary(
     args.documentTitle,
     args.documentText,

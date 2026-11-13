@@ -448,6 +448,13 @@ export async function runLanceDbMaintenance(
       // merge-insert joins on "id"; a btree lets it look keys up instead of scanning the table.
       await table.createIndex("id", { config: Index.btree(), replace: false });
     }
+    if (rows >= ID_INDEX_MIN_ROWS && !indices.some((index) => index.columns.includes("documentId"))) {
+      // Search scopes every query by documentId (an IN list, or NOT IN a few excluded documents)
+      // and purges delete by it. BTREE rather than BITMAP: a large project holds thousands of
+      // distinct documents, and LanceDB recommends BITMAP only below a few hundred distinct values.
+      // Rows written later are folded into it by optimize(), like the other indexes.
+      await table.createIndex("documentId", { config: Index.btree(), replace: false });
+    }
     if (lanceDbFtsIndexEnabled() && rows > 0) {
       fts = await ensureChunkTextFtsIndex(table, indices, { key: lanceMaintenanceKey(uri, tableName) });
       if (fts.error) console.warn(`[lancedb] fts rebuild failed table=${tableName} fts_ms=${fts.ms} error=${fts.error.split("\n")[0]}`);

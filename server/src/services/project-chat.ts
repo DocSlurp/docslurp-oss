@@ -1,9 +1,9 @@
-import type { ChatReasoningLevel } from "@docslurp/shared/project-chat-models";
+import { nitroBaseModel, type ChatReasoningLevel, type ChatTier } from "@docslurp/shared/project-chat-models";
 import { resolveSpeedBoostChatModel, ChatModelNotAllowedError } from "../lib/chat-model-policy.js";
 import { reportPublicError } from "../lib/public-errors.js";
 import { getDeferredContext } from "../search/deferred/deferred-context.js";
-import { hostedApiKeyForProject, loadProjectPrivacyMode, openRouterCall, privacyModeOf, privateTextModelForProject } from "../lib/privacy.js";
-import { BILLABLE_UNIT_METRICS, chatAnswerCredits, chatAnswerUnits, chatModelTier, ingestReportFocusPages, parsePrivateModelUri, requestsIngestReport } from "@docslurp/shared";
+import { hostedApiKeyForProject, openRouterCall, privateTextModelForProject } from "../lib/privacy.js";
+import { BILLABLE_UNIT_METRICS, chatAnswerCredits, chatAnswerUnits, chatModelTier, ingestReportFocusPages, parsePrivateModelUri, requestsIngestReport, withoutAutomaticSelectionDenied } from "@docslurp/shared";
 import type { PrivacyMode } from "@docslurp/shared";
 import { env } from "../config.js";
 import type { RequestActor } from "../lib/request-actor.js";
@@ -54,6 +54,7 @@ import { sql } from "../db.js";
 import { loadChatProjectInventory } from "./chat-project-inventory.js";
 import { loadChatVisualCandidates } from "./visual-candidates.js";
 import { chartExportEnabledOnServer } from "./chart-export-availability.js";
+import { chartExportDefaults, effectiveTierFromDefaults, type ChartExportTier } from "@docslurp/shared";
 import { classifyUntrustedEvidenceText, logInjectionIndicators } from "./prompt-injection.js";
 import {
   hybridSearch,
@@ -63,11 +64,15 @@ import {
 } from "./search.js";
 import { getProjectSearchSettings } from "./search-controls.js";
 import { getProject } from "./projects.js";
+import { loadChatTurnContext, type ChatTurnContext } from "./chat-turn-context.js";
+import { ProjectChatDisabledError } from "./project-chat-errors.js";
+import { assertSearchAccessScope, type SearchAccessScope } from "../search/access-scope.js";
 import { loadIngestReport, summarizeIngestReport } from "./ingest-report.js";
 import { canEditProject, getProjectAccess } from "./organizations.js";
 import type { ProjectChatModelId } from "@docslurp/shared/project-chat-models";
 import type { ChatAgentLimits, ChatAgentLimitsInput } from "@docslurp/shared";
 import { chatEvalAccess, chatTurnNeedsEvalAccess, resolveChatAgentLimits, resolveChatModelRequest } from "../lib/chat-model-policy.js";
+import { customerChatResponse, loadProjectChatTierModels } from "./managed-models.js";
 import { currentRequestId, currentRequestSignal } from "../lib/request-context.js";
 import { currentChatAgentSignal } from "../lib/chat-agent-context.js";
 import { searchHitStatementTimeout } from "../search/timings.js";
@@ -111,8 +116,24 @@ type ProjectChatRuntimeSummary = {
   totalMs: number;
 };
 
-const PROJECT_CHAT_FAILOVER_MODEL: ProjectChatModelId =
-  "deepseek/deepseek-v4.1-flash-1017";
+/**
+ * The model a failed chat answer retries on. GPT-6 Luna since 2026-11-13: DeepSeek V4.1 Flash is never selected
+ * automatically (automatic-model-selection.ts), so it is never a failover target; buildModelFailoverOrder also drops
+ * any such model after the caller's own choice.
+ */
+export const PROJECT_CHAT_FAILOVER_MODEL: ProjectChatModelId =
+  "openai/gpt-6-luna";
+/**
+ * Failover candidates in order (all standard answer tier). A turn retries on the first that is not the project's own
+ * model and is not denied, so a Luna project fails over to Claude Haiku 5.5, a different vendor stack. Haiku comes
+ * before GLM 5.3 Flash: in the 2026-11-13 chat-answer comparison (#343 harness, 30 cases, blind pairwise judge) it beat
+ * GLM on quality (held-out mean 5.00 vs 4.56) and latency (p50 0.88 s vs 2.8 s, p90 2.3 s vs 19.8 s), at parity with Luna.
+ */
+export const PROJECT_CHAT_FAILOVER_MODELS: readonly ProjectChatModelId[] = [
+  PROJECT_CHAT_FAILOVER_MODEL,
+  "anthropic/claude-haiku-5.5",
+  "z-ai/glm-5.3-flash",
+];
 const DEFAULT_PENDING_SEARCH_RETRY = {
   maxAttempts: 8,
   intervalMs: 2000,
@@ -192,6 +213,7 @@ async function sleep(ms: number): Promise<void> {
 async function searchProjectForChat(args: {
   query: string;
   userId: string;
+  scope: SearchAccessScope;
   options: SearchOptions;
   pendingSearchRetry?: ProjectChatPendingSearchRetry;
   onSearchActivity?: (activity: ChatSearchActivity) => void;
@@ -204,7 +226,7 @@ async function searchProjectForChat(args: {
     const retrieved = await hybridSearch(args.query, args.userId, {
       ...args.options, rootSessionId, suppressSessionLog: false,
       onSearchActivity: args.onSearchActivity,
-    });
+    }, args.scope);
 
     if (attempt >= retry.maxAttempts || !shouldWaitForPendingSearch(retrieved) || searchHitStatementTimeout(retrieved)) {
       return retrieved;
@@ -482,11 +504,37 @@ function buildUsageSummary(args?: {
 }
 
 /** Eval models never fail over: a comparison must not silently measure another model. */
-function buildModelFailoverOrder(
+/**
+ * The models one chat turn tries, in order: the caller's choice, then the first failover candidate that differs from
+ * it and is not denied. At most two attempts.
+ */
+export function buildModelFailoverOrder(
   preferredModel: string,
   failover = true,
 ): string[] {
-  return failover ? [...new Set([preferredModel, PROJECT_CHAT_FAILOVER_MODEL])] : [preferredModel];
+  if (!failover) return [preferredModel];
+  // A Speed boost variant is the same model: a Luna Nitro project fails over to Haiku, never to plain Luna.
+  const base = nitroBaseModel(preferredModel) ?? preferredModel;
+  const next = withoutAutomaticSelectionDenied(PROJECT_CHAT_FAILOVER_MODELS).find((model) => model !== base);
+  return next ? [preferredModel, next] : [preferredModel];
+}
+
+/**
+ * Wraps a caller's text-delta handler to record whether any answer text has
+ * reached it. Streaming clients are promised that the deltas of a turn
+ * concatenate to its final answer, so once text has been emitted no second
+ * answer may follow it: not from a failover model, not from another generation
+ * path and not from the citation fallback. The turn fails instead.
+ */
+function trackTextDeltas(handler: TextDeltaHandler | undefined): { emitted: boolean; handler: TextDeltaHandler | undefined } {
+  const tracked: { emitted: boolean; handler: TextDeltaHandler | undefined } = { emitted: false, handler: undefined };
+  if (handler) {
+    tracked.handler = (delta) => {
+      if (delta) tracked.emitted = true;
+      return handler(delta);
+    };
+  }
+  return tracked;
 }
 
 async function generateProjectChatTextWithFailover(args: {
@@ -525,6 +573,7 @@ async function generateProjectChatTextWithFailover(args: {
     return { ...generated, model: args.privateModel };
   }
   let lastError: unknown;
+  const deltas = trackTextDeltas(args.onTextDelta);
 
   for (const model of buildModelFailoverOrder(args.preferredModel, args.failover)) {
     try {
@@ -537,7 +586,7 @@ async function generateProjectChatTextWithFailover(args: {
         prompt: args.prompt,
         documents: args.documents,
         maxOutputTokens: args.maxOutputTokens,
-        onTextDelta: args.onTextDelta,
+        onTextDelta: deltas.handler,
         signal,
       });
 
@@ -548,6 +597,9 @@ async function generateProjectChatTextWithFailover(args: {
     } catch (error) {
       rethrowIfAborted(error);
       reportPublicError(error, { operation: "chat-generation", model });
+      // The client already holds part of this model's answer: another model's
+      // answer would be appended to it. Fail the turn instead of failing over.
+      if (deltas.emitted) throw error;
       lastError = error;
     }
   }
@@ -769,6 +821,15 @@ async function ensureChatSession(args: {
   userId: string;
   sessionId?: string;
 }): Promise<string> {
+  return (await openChatSession(args)).id;
+}
+
+/** The caller's chat session (verified as theirs, in this project), or a new one; `created` when it has no history yet. */
+async function openChatSession(args: {
+  projectId: string;
+  userId: string;
+  sessionId?: string;
+}): Promise<{ id: string; created: boolean }> {
   if (args.sessionId) {
     try {
       const [existing] = await sql<ProjectChatSessionRow[]>`
@@ -781,7 +842,7 @@ async function ensureChatSession(args: {
       `;
 
       if (existing) {
-        return existing.id;
+        return { id: existing.id, created: false };
       }
     } catch {
       // Never reuse an unverified caller-provided session on database failure.
@@ -802,7 +863,7 @@ async function ensureChatSession(args: {
     throw new Error("Unable to create chat session");
   }
 
-  return sessionId;
+  return { id: sessionId, created: true };
 }
 
 async function listRecentTurns(
@@ -918,15 +979,7 @@ async function persistEvidenceSpans(args: {
   }
 }
 
-/** Thrown when a project has `searchSettings.chat.enabled = false`. Routes map it to 403. */
-export class ProjectChatDisabledError extends Error {
-  readonly status = 403 as const;
-  readonly code = "chat_disabled" as const;
-  constructor() {
-    super("Chat is turned off for this project. A project editor can turn it on in project settings.");
-    this.name = "ProjectChatDisabledError";
-  }
-}
+export { ProjectChatDisabledError } from "./project-chat-errors.js";
 
 export async function isProjectChatEnabled(projectId: string, userId: string): Promise<boolean> {
   const settings = await getProjectSearchSettings(projectId, userId);
@@ -997,6 +1050,11 @@ async function chatProjectInTurn(args: {
   speedBoost?: boolean;
   projectId: string;
   userId: string;
+  /**
+   * Required: who may read what (search/access-scope.ts). The project must be in its org and allowlist; every
+   * retrieval this turn runs is held to it. A turn without one is refused before anything is read or spent.
+   */
+  scope: SearchAccessScope;
   query: string;
   /**
    * "interactive" (default): a user's chat turn, which may use the chat
@@ -1006,7 +1064,12 @@ async function chatProjectInTurn(args: {
   sessionId?: string;
   /** Browser keys: the sealed grant returned with the previous answer; required to continue `sessionId`. */
   sessionToken?: string | null;
+  /** Operator evaluation only (see chat-model-policy.ts): a backend model id. Everyone else sends `tier`. */
   model?: string | null;
+  /** The chat tier (fastest, balanced, smart); omitted: the project default tier. */
+  tier?: ChatTier | null;
+  /** Reasoning level for the answering model; omitted: none (each model's lowest setting). */
+  reasoning?: ChatReasoningLevel | null;
   history?: Array<Pick<ProjectChatTurn, "role" | "content">>;
   maxOutputTokens?: number;
   allowConfiguration?: boolean;
@@ -1034,39 +1097,67 @@ async function chatProjectInTurn(args: {
   answerIngestReport?: boolean;
 }): Promise<ProjectChatResponse> {
   if (args.actor && args.actor.userId !== args.userId) throw new Error("Chat actor does not match user");
+  // Fail closed: no explicit scope, no turn (nothing is read, written or spent).
+  assertSearchAccessScope(args.scope);
   args = { ...args, speedBoost: currentChatTurn()?.speedBoost === true };
   // The key's chat output cap (browser keys default to 1000) bounds the model's max output, whatever the request asks.
   args = { ...args, maxOutputTokens: capOutputTokens(args.maxOutputTokens, apiKeyOutputCap(args.actor)) };
   // Browser-key visitors share the key owner's identity: a session id alone never continues a conversation.
   args = { ...args, sessionId: chatSessionForRequest(args.actor, { projectId: args.projectId, sessionId: args.sessionId, sessionToken: args.sessionToken }) };
+  // "/status" and "how did my files process?" are answered from the ingest report, without a model.
+  const ingestReport = Boolean(args.answerIngestReport && !args.filters?.geo && args.filters?.documentIds?.length !== 0
+    && requestsIngestReport(args.query, { natural: ingestReportNaturalIntents() }));
+  // One light read (access within the scope, name, prompt, pipeline, settings) runs beside the spend check. The spend
+  // check is bound to the scope's org (org_spend_status refuses a project outside it, so no hold can land on another
+  // tenant), and its outcome is only reported after the access decision: a project outside the scope is a 404 before
+  // it can be a 402. Every chat turn calls a model, so spend is refused (402) before any model call.
+  const [contextResult, spendResult] = await Promise.allSettled([
+    loadChatTurnContext(args.projectId, args.userId, args.scope),
+    ingestReport ? Promise.resolve() : assertCanSpend(args.scope.orgId, args.projectId, { kind: args.spendKind ?? "interactive", speedBoost: args.speedBoost }),
+  ]);
+  if (contextResult.status === "rejected") throw contextResult.reason;
+  const context = contextResult.value;
   // Enforced here too so every caller (routes, MCP, automation) honours the switch.
-  if (!(await isProjectChatEnabled(args.projectId, args.userId))) throw new ProjectChatDisabledError();
+  if (context.settings.chat.enabled === false) throw new ProjectChatDisabledError();
   // An explicit model is honoured exactly or refused (400), never silently swapped for the default.
   // Platform admins, or a project owned by a DOCSLURP_CHAT_EVAL_ORG_IDS org.
   // Looked up only when the request asks for an eval model or raised limits.
   const isAdmin = chatTurnNeedsEvalAccess(args.model, args.agent) && await chatEvalAccess(args.actor, args.projectId);
-  const resolved = resolveChatModelRequest({ requested: args.model, isAdmin });
-  if (args.speedBoost === true && await loadProjectPrivacyMode(args.projectId) !== "standard") throw new ChatModelNotAllowedError();
-  const turnModel = resolveSpeedBoostChatModel(resolved.model, args.speedBoost === true);
+  // A backend model is refused before any project lookup when the caller has no eval access.
+  if (args.model?.trim() && !isAdmin) throw new ChatModelNotAllowedError();
+  const tierModels = await loadProjectChatTierModels(args.projectId);
+  const resolved = resolveChatModelRequest({ requested: args.model, tier: args.tier, reasoning: args.reasoning, isAdmin, tierModels });
+  if (args.speedBoost === true && context.privacyMode !== "standard") throw new ChatModelNotAllowedError();
+  const turnModel = resolveSpeedBoostChatModel(resolved.model, args.speedBoost === true, tierModels);
   const policy: ChatTurnPolicy = {
     model: turnModel, failover: args.speedBoost !== true && resolved.source !== "eval",
     // A Speed boost model swap bills at the chosen model's answer tier; the boost multiplier prices the swap.
     ...(turnModel !== `${resolved.model}:nitro` && turnModel !== resolved.model ? { tierModel: resolved.model } : {}),
-    requestedModel: args.model?.trim() || null,
+    requestedModel: args.model?.trim() || resolved.tier,
     limits: resolveChatAgentLimits(args.agent, isAdmin),
     reasoning: resolved.reasoning,
   };
-  // "/status" and "how did my files process?" are answered from the ingest report, without a model.
-  if (args.answerIngestReport && !args.filters?.geo && args.filters?.documentIds?.length !== 0 && requestsIngestReport(args.query, { natural: ingestReportNaturalIntents() })) {
-    return await answerIngestReportTurn(args);
-  }
-  // Every chat turn calls a model: refuse before spending (402 when blocked).
-  await assertCanSpend(null, args.projectId, { kind: args.spendKind ?? "interactive", speedBoost: args.speedBoost });
-  const sessionId = await ensureChatSession({
+  if (ingestReport) return await answerIngestReportTurn(args);
+  if (spendResult.status === "rejected") throw spendResult.reason;
+  const session = await openChatSession({
     projectId: args.projectId,
     userId: args.userId,
     sessionId: args.sessionId,
   });
+  const sessionId = session.id;
+  // Independent reads, together: the thread's saved retrieval, its recent turns (a new thread has neither) and the
+  // hosted-model key under the project's privacy mode.
+  const [threadOverrides, history, chatApiKey] = await Promise.all([
+    session.created ? {} : loadChatSessionSearchOverrides(sessionId),
+    args.history ?? (session.created ? [] : listRecentTurns(sessionId, 20)),
+    hostedApiKeyForProject({
+      apiKey: resolveOpenRouterApiKey(),
+      privacyMode: context.privacyMode,
+      projectId: args.projectId,
+      call: openRouterCall("api.chat", policy.model),
+    }),
+  ]);
+  const prepared: PreparedChatTurn = { context, threadOverrides, history, chatApiKey };
 
   // Optional output moderation for public (browser-key) answers; off unless
   // CHAT_OUTPUT_MODERATION is set. Moderated turns buffer streamed text so
@@ -1080,18 +1171,21 @@ async function chatProjectInTurn(args: {
       sessionId,
       traceName: "project_chat",
     },
-    () => chatProjectTurn(args, sessionId, policy),
+    () => chatProjectTurn(args, sessionId, policy, prepared),
   );
   if (moderated) {
     response = await moderateChatAnswer(response, {
       actor: args.actor, question: args.query, userId: args.userId, projectId: args.projectId,
-      orgId: args.actor?.type === "apiKey" ? args.actor.apiKey.orgId : null,
-      privacyMode: await loadProjectPrivacyMode(args.projectId), signal: args.signal,
+      orgId: context.orgId,
+      privacyMode: context.privacyMode, signal: args.signal,
     });
     // Streamed text was held back; the client receives only the moderated answer.
     if (streamDelta) await streamDelta(response.answer);
   }
   await chargeChatAnswer(response, args, sessionId, policy);
+  // Backend model and provider ids stay in usage events, traces and logs; customers see the tier. Operator
+  // evaluation turns (a backend model they named) keep the raw diagnostics.
+  if (resolved.source !== "eval" && resolved.source !== "catalog") response = customerChatResponse(response, resolved.tier, tierModels);
   if (requiresChatSessionToken(args.actor)) {
     return { ...response, sessionToken: sealChatSessionToken({ keyId: args.actor.apiKey.keyId, projectId: args.projectId, sessionId: response.sessionId }) };
   }
@@ -1213,6 +1307,14 @@ async function answerIngestReportTurn(args: ChatProjectArgs): Promise<ProjectCha
   };
 }
 
+/** What chatProjectInTurn read before the turn: the project context, the thread's overrides and history, the model key. */
+type PreparedChatTurn = {
+  context: ChatTurnContext;
+  threadOverrides: Awaited<ReturnType<typeof loadChatSessionSearchOverrides>>;
+  history: Array<Pick<ProjectChatTurn, "role" | "content">>;
+  chatApiKey: string | undefined;
+};
+
 type ChatTurnPolicy = { model: string; failover: boolean; requestedModel: string | null; limits: ChatAgentLimits; tierModel?: string;
   /** The model reference's `?reasoning=` option (default none: each model's lowest setting). */
   reasoning: ChatReasoningLevel };
@@ -1221,31 +1323,20 @@ async function chatProjectTurn(
   args: ChatProjectArgs,
   sessionId: string,
   policy: ChatTurnPolicy,
+  prepared: PreparedChatTurn,
 ): Promise<ProjectChatResponse> {
   const startedAtMs = Date.now();
   // The turn's own answer takes the chat turn id its Usage Events carry; a
   // nested grounded answer (MCP chat tool inside the agent) gets a fresh id.
   const responseId = claimChatTurnAnswerId() ?? randomUUID();
   const model = policy.model;
-  const project = await getProject(args.projectId, args.userId);
+  const { context, threadOverrides, history, chatApiKey } = prepared;
+  const project = { id: context.projectId, orgId: context.orgId, name: context.name, systemPrompt: context.systemPrompt, pipeline: context.pipeline };
   // Every hosted call in this turn sees project content or the user's query
   // about it, so one privacy decision covers configuration, MCP and answers.
-  const privacyMode = project
-    ? privacyModeOf(project.pipeline)
-    : await loadProjectPrivacyMode(args.projectId);
-  const chatApiKey = await hostedApiKeyForProject({
-    apiKey: resolveOpenRouterApiKey(),
-    privacyMode,
-    projectId: args.projectId,
-    call: openRouterCall("api.chat", model),
-  });
+  const privacyMode = context.privacyMode;
   // Project defaults, then this thread's saved overrides, then this request's.
-  const threadOverrides = await loadChatSessionSearchOverrides(sessionId);
-  let searchSettings = withThreadRetrieval(
-    await getProjectSearchSettings(args.projectId, args.userId),
-    threadOverrides,
-    args.retrieval,
-  );
+  let searchSettings = withThreadRetrieval(context.settings, threadOverrides, args.retrieval);
   // The default instructions template and the scope decline describe the project by its name only.
   const chatScope: ChatScope = chatScopeFor(project);
   let searchConfiguration: SearchConfigurationOutcome | undefined;
@@ -1265,7 +1356,6 @@ async function chatProjectTurn(
   const narrowingFilters = Boolean(
     args.filters?.documentIds !== undefined || args.filters?.geo || args.filters?.mimeTypes?.length || args.filters?.tags?.length || args.filters?.dateFrom || args.filters?.dateTo,
   );
-  const history = args.history ?? await listRecentTurns(sessionId, 20);
   // Project names never come from a chat message: a member's private first question is not the shared name (services/project-naming.ts).
   // Filtered questions take direct retrieval so the filters are guaranteed to apply.
   // `agent.tools: false` (or tool_choice "none" on /v1/chat/completions) asks for it too.
@@ -1278,8 +1368,9 @@ async function chatProjectTurn(
     // decide relevance, and the model applies the fixed core rule (decline
     // unrelated requests politely and suggest related ones).
     const suggestionsRequested = firstPartyApp && args.agent?.suggestions === true;
-    const chartExportEnabled = (project.pipeline as { chartExport?: { enabled?: unknown } } | null)?.chartExport?.enabled === true;
-    // Deployment kill switch off: chart export is never suggested (and the candidate query is skipped).
+    // Suggestions offer the billed `models` tier (the free tier is on by default): only projects not already on it.
+    const chartExportEnabled = (project.pipeline as { chartExport?: { tier?: unknown } } | null)?.chartExport?.tier === "models";
+    // Deployment kill switch not `on`: reading charts with a model is never suggested (and the candidate query is skipped).
     const chartExportOffered = chartExportEnabledOnServer();
     const [{ runChatMcpAgent }, projectInventory, visualCandidates] = await Promise.all([
       import("./chat-mcp-agent.js"),
@@ -1302,7 +1393,13 @@ async function chatProjectTurn(
       projectWebTools: (project.pipeline as { webTools?: unknown } | null)?.webTools !== false,
       web: args.agent?.web, suggestions: firstPartyApp && args.agent?.suggestions === true,
       retrievalDefaults: searchSettings.retrievalDefaults, projectInventory,
-      ...(chartExportOffered ? { chartExport: { enabled: chartExportEnabled, unexportedVisuals: visualCandidates?.unexported ?? null } } : {}),
+      ...(chartExportOffered ? { chartExport: {
+        enabled: chartExportEnabled,
+        unexportedVisuals: visualCandidates?.unexported ?? null,
+        // The deployment's real app default (production holds it off), never a code default.
+        effectiveTier: effectiveTierFromDefaults((project.pipeline as { chartExport?: { tier?: ChartExportTier } } | null)?.chartExport?.tier, "app", chartExportDefaults(process.env)),
+        freeAvailable: chartExportDefaults(process.env).freeAvailable,
+      } } : {}),
       instructionsFor: ({ webTools }) => composeAgentProjectInstructions({
         ingestInstructions: project.systemPrompt,
         searchInstructions: searchSettings.chat.searchInstructions,
@@ -1362,6 +1459,11 @@ async function chatProjectTurn(
   const openRouterApiKey = chatApiKey ?? (privateChatModel ? "private-endpoint" : undefined);
   const prefersWholeCorpus = searchSettings.chat.mode === "whole-corpus" && !narrowingFilters;
 
+  // One tracker for the whole turn: whole-corpus generation, retrieval
+  // generation and the citation fallback are alternative answers, and none may
+  // follow text the client has already received.
+  const answerDeltas = trackTextDeltas(args.onTextDelta);
+
   if ((prefersWholeCorpus || documentIds?.length) && !narrowingFilters && wholeCorpus.eligible) {
     args.onEvidence?.(wholeCorpus.results);
     if (!openRouterApiKey) {
@@ -1391,7 +1493,7 @@ async function chatProjectTurn(
           }),
           documents: buildNativeDocumentInputs(wholeCorpus.results),
           maxOutputTokens: args.maxOutputTokens ?? 2048,
-          onTextDelta: args.onTextDelta,
+          onTextDelta: answerDeltas.handler,
         });
 
         await logChatUsage({
@@ -1444,6 +1546,9 @@ async function chatProjectTurn(
         };
       } catch (error) {
         rethrowIfAborted(error);
+        // Before any text: answer from retrieval instead. After text was
+        // streamed, a retrieval answer would be concatenated to it.
+        if (answerDeltas.emitted) throw error;
         wholeCorpusDebug.fallbackReason = "generation-failed";
       }
     }
@@ -1494,6 +1599,7 @@ async function chatProjectTurn(
   const retrieved = await searchProjectForChat({
     query: args.query,
     userId: args.userId,
+    scope: args.scope,
     options: searchOptions,
     pendingSearchRetry: args.pendingSearchRetry,
     onSearchActivity: args.onSearchActivity,
@@ -1630,7 +1736,7 @@ async function chatProjectTurn(
       }),
       documents: buildNativeDocumentInputs(citations),
       maxOutputTokens: args.maxOutputTokens ?? 2048,
-      onTextDelta: args.onTextDelta,
+      onTextDelta: answerDeltas.handler,
     });
 
     await logChatUsage({
@@ -1680,6 +1786,9 @@ async function chatProjectTurn(
     };
   } catch (error) {
     rethrowIfAborted(error);
+    // The citation fallback is a different answer: it replaces a failed
+    // generation only while the client has received no text.
+    if (answerDeltas.emitted) throw error;
     const answer = buildFallbackAnswer(
       args.query,
       citations,

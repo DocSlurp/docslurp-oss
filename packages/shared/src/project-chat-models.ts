@@ -1,3 +1,4 @@
+import { assertNoAutomaticSelectionDenied } from "./automatic-model-selection.js";
 import { normalizeHostedModelRef } from "./model-uri.js";
 
 export const PROJECT_CHAT_MODELS = [
@@ -17,13 +18,12 @@ export const DEFAULT_PROJECT_CHAT_MODEL: ProjectChatModelId =
   "z-ai/glm-5.3-flash";
 
 /**
- * Speed boost on the default efficient model answers with DeepSeek V4.1 Flash
- * on Nitro instead of GLM 5.3 Flash on Nitro: measured 2026-11-10 (3 runs,
- * ~3k-token prompt), DeepSeek Nitro steps took 0.9-1.1 s against 2.3-2.7 s.
+ * Speed boost model swaps: a model Speed boost answers with instead of the chosen model's own Nitro variant. Empty:
+ * Speed boost answers with the chosen model on Nitro. The 2026-11-10 swap from GLM 5.3 Flash to DeepSeek V4.1 Flash
+ * on Nitro was removed (owner, 2026-11-13): a swap is an automatic selection, and DeepSeek V4.1 Flash is never
+ * selected automatically (automatic-model-selection.ts). A swap target must never be such a model.
  */
-export const SPEED_BOOST_MODEL_SWAPS: Readonly<Record<string, ProjectChatModelId>> = {
-  "z-ai/glm-5.3-flash": "deepseek/deepseek-v4.1-flash-1017:nitro",
-};
+export const SPEED_BOOST_MODEL_SWAPS: Readonly<Record<string, ProjectChatModelId>> = {};
 
 export function isProjectChatModelId(model: unknown): model is ProjectChatModelId {
   return PROJECT_CHAT_MODELS.some((candidate) => candidate.id === model);
@@ -127,4 +127,75 @@ export function parseChatModelOptions(ref: string): { model: string; reasoning?:
 export function withChatReasoning(model: string, reasoning: ChatReasoningLevel): string {
   const base = parseChatModelOptions(model)?.model ?? model;
   return reasoning === DEFAULT_CHAT_REASONING ? base : `${base}?reasoning=${reasoning}`;
+}
+
+/**
+ * Chat tiers: the only chat choice callers make. Programmatic callers (REST, OpenAI-compatible, MCP, SDK, CLI) pick a
+ * tier, never a backend model or provider; the server resolves the tier to a reviewed model (CHAT_TIER_MODELS, or a
+ * per-project mapping only platform admins can set). Backend ids stay in usage events, traces and logs.
+ */
+export const CHAT_TIERS = ["fastest", "balanced", "smart"] as const;
+export type ChatTier = (typeof CHAT_TIERS)[number];
+export const DEFAULT_CHAT_TIER: ChatTier = "fastest";
+
+/**
+ * Managed default model for each tier: the single constant to change. Every entry is a reviewed catalog model priced
+ * under the output-price cap and outside NO_AUTOMATIC_SELECTION_MODEL_FAMILIES (a tier is resolved for the caller, so
+ * it counts as automatic selection). Owner, 2026-11-13: fastest Claude Haiku 5.5 (p50 0.88 s), balanced GPT-6 Luna
+ * (p50 1.16 s), smart GPT-6.1 Sol; GLM 5.3 Flash stays a failover entry only.
+ */
+export const CHAT_TIER_MODELS: Readonly<Record<ChatTier, ProjectChatModelId>> = {
+  fastest: "anthropic/claude-haiku-5.5",
+  balanced: "openai/gpt-6-luna",
+  smart: "openai/gpt-6.1-sol",
+};
+assertNoAutomaticSelectionDenied("CHAT_TIER_MODELS", Object.values(CHAT_TIER_MODELS));
+
+/** Tiers whose model (the project's mapping, else the managed default) has a reviewed fast-route (`:nitro`) variant. */
+export function speedBoostChatTiers(overrides?: Partial<Record<ChatTier, string>> | null): ChatTier[] {
+  return CHAT_TIERS.filter(tier => isProjectChatModelId(`${overrides?.[tier] ?? CHAT_TIER_MODELS[tier]}:nitro`));
+}
+
+/** The refusal for Speed boost on a tier without a fast route: it names the tiers that have one. */
+export function speedBoostUnavailableMessage(tiers: readonly ChatTier[]): string {
+  return tiers.length
+    ? `Speed boost is available for the ${tiers.join(" and ")} tier${tiers.length === 1 ? "" : "s"}. Choose ${tiers.length === 1 ? "it" : "one of them"}, or turn Speed boost off.`
+    : "Speed boost isn't available for chat right now. Turn Speed boost off.";
+}
+
+/** With the managed defaults (projects with an admin mapping compute their own: speedBoostChatTiers(overrides)). */
+export const SPEED_BOOST_CHAT_TIERS: readonly ChatTier[] = speedBoostChatTiers();
+export const SPEED_BOOST_UNAVAILABLE_MESSAGE = speedBoostUnavailableMessage(SPEED_BOOST_CHAT_TIERS);
+
+export function isChatTier(value: unknown): value is ChatTier {
+  return typeof value === "string" && (CHAT_TIERS as readonly string[]).includes(value);
+}
+
+/** The refusal callers see for a model, provider or `llm://` reference: it names the tiers and nothing else. */
+export const CHAT_TIER_REQUIRED_MESSAGE = `Chat models are managed by DocSlurp. Send tier (${CHAT_TIERS.join(", ")}) instead of a model; omit it for the project default.`;
+
+/** A tier → model mapping: per-project overrides on top of the managed defaults. */
+export type ChatTierModelMap = Partial<Record<ChatTier, string>>;
+
+/** The model a tier resolves to: the project's managed mapping when set, else the managed default. */
+export function chatTierModel(tier: ChatTier, overrides?: ChatTierModelMap | null): string {
+  return overrides?.[tier] ?? CHAT_TIER_MODELS[tier];
+}
+
+/**
+ * The tier a resolved model answers for, for customer-facing responses: the turn's tier when known, else the
+ * managed default tier whose model (or its `:nitro` variant) it is. Null for anything else (eval or unknown models).
+ */
+export function chatTierForModel(model: string | null | undefined, overrides?: ChatTierModelMap | null, preferred?: ChatTier | null): ChatTier | null {
+  if (!model?.trim()) return null;
+  if (isChatTier(model)) return model;
+  const id = normalizeChatModelRef(model);
+  const base = nitroBaseModel(id) ?? id;
+  // Tiers may share a model (fastest and balanced both use GLM 5.3 Flash): the turn's own tier wins.
+  if (preferred && chatTierModel(preferred, overrides) === base) return preferred;
+  for (const tier of CHAT_TIERS) if (chatTierModel(tier, overrides) === base) return tier;
+  for (const [base_, swapped] of Object.entries(SPEED_BOOST_MODEL_SWAPS)) {
+    if (swapped === id) return chatTierForModel(base_, overrides, preferred);
+  }
+  return null;
 }

@@ -40,7 +40,7 @@ import { healthyDocuments } from "../pipeline/document-health.js";
 import type { CommandRunner } from "../tools/runner.js";
 import { type ArtifactStore, cleanupTempFile, keyFromStorageUri } from "../tools/storage.js";
 import { runArtifactRoot } from "../lib/artifact-root.js";
-import { configuredVisionServedRoute, executeVisionRuntime, visionCall } from "../tools/vision-runtime.js";
+import { configuredVisionServedRoute, executeVisionRuntime, visionCall, VisionImageOverBudgetError } from "../tools/vision-runtime.js";
 import { findVisionBilledUsage, findVisionOutputRejected } from "../tools/vision-stream.js";
 import { primaryFailureUsages, priceVisionResult, visionFailureUsages, type VisionFailureUsage } from "../lib/guarded-vision-call.js";
 import { allowHostedCall } from "../lib/privacy-guard.js";
@@ -82,7 +82,7 @@ import { MIXED_SCAN_IMAGE_SIGNAL, tableLeakPageCap } from "@docslurp/shared";
 import { buildVisionPageFacts, recordPageFacts, type VisionPageOutcome } from "../pipeline/page-facts.js";
 import { VISUAL_CANDIDATE_STATS_KEY, type BBox } from "@docslurp/shared";
 import { chargeChartExports, chartExportCanSpend } from "../chart-export/billing.js";
-import { chartExportActive, chartExportConfigOf } from "../chart-export/config.js";
+import { chartCallRuntimeOptions, chartExportActive, chartExportConfigOf, chartExportModelsActive } from "../chart-export/config.js";
 import { chartExportReasoning, chartExportVisionConfig } from "../chart-export/model-selection.js";
 import { ChartExportSession, type ChartExportRunBudget } from "../chart-export/session.js";
 import {
@@ -95,6 +95,7 @@ import {
 } from "../chart-export/stage.js";
 import { quarantineChartPresence, storedRoutePlan } from "../chart-export/free-stats.js";
 import type { ChartModelClient } from "../chart-export/types.js";
+import { chartExportFreeVmCap } from "../db/chart-export-free-vm-cap.js";
 import { deterministicSourceKind } from "../chart-export/vm-extractor.js";
 import chartSharp from "../tools/isolated-image.js";
 import type { DocumentStageResult } from "../pipeline/checkpoints.js";
@@ -291,10 +292,11 @@ export class VisionExtractStage implements Stage {
       && (await this.visionAllowed(state));
     const exportCharts = chartExportActive(state.run.pipeline);
     if (!readsPages) {
-      // Chart export is its own opt-in: it runs without general vision (each model call is gated by privacy mode and
-      // the cost cap on its own), so enabling it and reindexing exports charts whatever the vision settings are. With
-      // export off the stage stays as inert as before (render-images records the free candidate stats); only a
-      // reprocess of a document an earlier run exported charts for removes those blocks.
+      // Chart export runs without general vision: the free tier (the default) exports only charts that carry their own
+      // data and never renders a page or calls a model; the billed `models` tier also reads crops (each call gated by
+      // privacy mode and the cost cap on its own). With export off the stage stays as inert as before (render-images
+      // records the free candidate stats); only a reprocess of a document an earlier run exported charts for removes
+      // those blocks.
       if (exportCharts) await this.runChartExportOnly(state, signal);
       else await this.clearStaleChartExports(state);
       return;
@@ -973,7 +975,7 @@ export class VisionExtractStage implements Stage {
           },
           hostedReader: createHostedOcrReader({ state, cfg: this.cfg, runner: this.runner }),
           // Chart export on: chart/diagram crops go through the generator instead of the role's vision prompt.
-          ...(chartExport?.enabled ? {
+          ...(chartExport?.runs ? {
             exportVisual: async ({ role, scope, assignmentIndex, raster, pageNumber, signal: abort }) => {
               const out = await chartExport.exportRouted({
                 assignment: { role, scope, pageNumber }, assignmentIndex, image: { path: raster.path, mimeType: raster.mimeType }, ...(abort ? { signal: abort } : {}),
@@ -1742,7 +1744,11 @@ export class VisionExtractStage implements Stage {
   /** Generator calls across this run's documents (per-run cap). */
   private readonly chartRunBudgets = new WeakMap<WorkflowState, ChartExportRunBudget>();
 
-  /** Chart export for one document: config, admitted generator catalog, model client, usage ledger and caps. */
+  /**
+   * Chart export for one document: config, admitted generator catalog, model client, usage ledger and caps. The model
+   * client is built only for the billed `models` tier with the kill switch `on`: a free-tier session has no client, so
+   * it cannot call a model whatever happens downstream (the session's `canCallModel` is the second fence).
+   */
   private chartExportSession(state: WorkflowState, document: import("../models.js").Document): ChartExportSession {
     let runBudget = this.chartRunBudgets.get(state);
     if (!runBudget) {
@@ -1750,12 +1756,13 @@ export class VisionExtractStage implements Stage {
       this.chartRunBudgets.set(state, runBudget);
     }
     const config = chartExportConfigOf(state.run.pipeline);
+    const models = chartExportModelsActive(state.run.pipeline);
     const session: ChartExportSession = new ChartExportSession({
       documentId: document.id,
       config,
       catalog: () => buildRuntimeCatalog({ privacyMode: state.run.pipeline.privacyMode }).targets,
       envModel: process.env.CHART_EXPORT_GENERATOR_MODEL?.trim() || null,
-      client: this.chartModelClient(state, document),
+      client: models ? this.chartModelClient(state, document) : null,
       recordUsage: (input) => { state.usageLedger.record(input); },
       // The session combines this with its per-document and per-run call caps.
       canCallModel: () => chartExportCanSpend(state),
@@ -1796,6 +1803,7 @@ export class VisionExtractStage implements Stage {
               gate,
               promptText: request.prompt,
               ...(chartExportReasoning(request.modelUri) ? { reasoning: chartExportReasoning(request.modelUri)! } : {}),
+              ...chartCallRuntimeOptions(request),
               ...(request.signal ? { signal: request.signal } : {}),
             });
             recordVisionFailureUsages(state, primaryFailureUsages(result.primaryFailure, this.cfg, page));
@@ -1810,6 +1818,8 @@ export class VisionExtractStage implements Stage {
               finishReason: result.finishReason ?? null,
             };
           } catch (error) {
+            // Refused before admission (image above the chart limit): nothing was sent, so there is no attempt to record.
+            if (error instanceof VisionImageOverBudgetError) throw error;
             if (!findVisionGuardStop(error)) {
               this.recordFailedVisionAttempt(state, document, vision, { pageNumber: request.pageNumber, artifactUri: "" }, toError(error).message, error);
             } else {
@@ -1865,7 +1875,12 @@ export class VisionExtractStage implements Stage {
           stats: {
             ...result.stats,
             [VISUAL_CANDIDATE_STATS_KEY]: pass.stats,
-            chartExport: { ...totals, lowConfidenceCandidates: pass.lowConfidence, changedPages: pass.changedPages, artifactUri: pass.artifactUri },
+            chartExport: {
+              ...totals, lowConfidenceCandidates: pass.lowConfidence, changedPages: pass.changedPages, artifactUri: pass.artifactUri,
+              // Repeated pictures read once (readsAvoided: placements served by another placement's read, never charged).
+              dedupe: pass.dedupe,
+              ...(pass.facts ? { factsCandidates: pass.facts } : {}),
+            },
           },
         };
       } catch (error) {
@@ -1919,6 +1934,17 @@ export class VisionExtractStage implements Stage {
       cropImage: (image, bbox) => this.cropChartImage(image, bbox),
       // Parser-VM time of the deterministic extractor: a cost-only event in this run's ledger, scoped to the document.
       recordUsage: (event) => { state.usageLedger.enqueue(event); },
+      // The per-org hourly cap on free-tier VM runs, shared by every worker. No store or no org: refused (fail closed).
+      reserveFreeVmRun: async () => {
+        const reserve = state.store?.reserveChartExportFreeVmRun?.bind(state.store);
+        if (!reserve || !state.run.orgId) return false;
+        try {
+          return await reserve({ orgId: state.run.orgId, runId: state.run.id, documentId: document.id, perHour: chartExportFreeVmCap() });
+        } catch (error) {
+          console.warn(`[chart-export] free VM reservation failed document=${document.id} error=${toError(error).message}`);
+          return false;
+        }
+      },
       ...(signal ? { signal } : {}),
     };
   }

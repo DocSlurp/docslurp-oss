@@ -1,3 +1,5 @@
+import { getRequestActor, isPlatformAdminActor } from "../lib/request-actor.js";
+import { runChargedCredits } from "../services/usage-attribution.js";
 import { getRetainedVersionStorage } from "../services/billing/retained-storage.js";
 import { reportPublicError } from "../lib/public-errors.js";
 import { Hono, type Context } from "hono";
@@ -104,6 +106,37 @@ async function audit(
 function parseLimit(value: string | undefined, fallback: number): number {
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+/**
+ * A usage row as customers see it: one neutral category. Run usage is ingestion work (a vision or text stage may use a
+ * model that also backs a chat tier, so a tier word would mislead); the stage already says which step it was.
+ */
+function customerUsageCategory(_model: string | null | undefined): string {
+  return "processing";
+}
+
+/**
+ * The cost breakdown as customers see it: tokens by stage and by category, and the credits the run was charged.
+ * Backend model ids and our provider cost (per model, per stage and in total) are operator data and are dropped.
+ */
+async function customerCostBreakdown(
+  scope: { runId: string; orgId: string },
+  breakdown: { totalTokens: number; byStage: Array<{ stage: string; tokens: number }>; byModel: Array<{ model: string; tokens: number }> },
+) {
+  const groups = new Map<string, number>();
+  for (const row of breakdown.byModel) {
+    const category = customerUsageCategory(row.model);
+    groups.set(category, (groups.get(category) ?? 0) + row.tokens);
+  }
+  const billed = await runChargedCredits(scope);
+  return {
+    totalTokens: breakdown.totalTokens,
+    // One credit is one cent of the published price list.
+    credits: billed,
+    byStage: breakdown.byStage.map(({ stage, tokens }) => ({ stage, tokens })),
+    byCategory: [...groups].map(([category, tokens]) => ({ category, tokens })),
+  };
 }
 
 export const billingRoutes = new Hono()
@@ -255,7 +288,12 @@ export const billingRoutes = new Hono()
       limit: parseLimit(c.req.query("limit"), 50),
       offset: c.req.query("offset") ? Number(c.req.query("offset")) : 0,
     });
-    return c.json(result);
+    if (await isPlatformAdminActor(getRequestActor(c))) return c.json(result);
+    // Customers: tokens per row with a tier or neutral category; no backend model, provider or provider cost.
+    return c.json({
+      total: result.total,
+      costs: result.costs.map(({ model, provider: _provider, costCents: _cost, ...row }) => ({ ...row, category: customerUsageCategory(model) })),
+    });
   })
   .get("/usage/run/:runId/cost-breakdown", async (c) => {
     const userId = c.get("sessionUser").id;
@@ -263,7 +301,9 @@ export const billingRoutes = new Hono()
     if (!org) {
       return apiStatusError(c, 404, "No organization found");
     }
-    return c.json(await getRunCostBreakdown({ runId: c.req.param("runId"), orgId: org.id }));
+    const breakdown = await getRunCostBreakdown({ runId: c.req.param("runId"), orgId: org.id });
+    // Backend model ids and per-model provider cost are operator data: customers get chat tiers and a neutral category.
+    return c.json(await isPlatformAdminActor(getRequestActor(c)) ? breakdown : await customerCostBreakdown({ runId: c.req.param("runId"), orgId: org.id }, breakdown));
   })
 
   // ---------------------------------------------------------------- invoices & payment methods

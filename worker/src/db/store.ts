@@ -12,12 +12,13 @@ import { BILLABLE_UNIT_METRICS, DOCUMENT_FAILURE_MARKERS, INFRASTRUCTURE_RETRIES
 import { DocumentNotFoundError, isMissingDocumentError } from "./missing-document.js";
 import { recordPageBaseFee } from "./page-base-fee.js";
 import { reserveFastPageImageRenders } from "./fast-page-image-budget.js";
+import { reserveChartExportFreeVmRun } from "./chart-export-free-vm-cap.js";
 import { PageTaskStore } from "./page-task-store.js";
 import { WorkerSlotStore, resolveWorkerSlotOptions, tryMaintenanceLease, type WorkerSlotOptions } from "./worker-slot-store.js";
 import { randomUUID, createHmac } from "node:crypto";
 
 import postgres, { type JSONValue, type PendingQuery, type Sql } from "postgres";
-import { flushAssetLedger, writeDocumentAssetLedger, type DocumentAssetLedgerResult, type DocumentAssetLedgerWrite } from "./document-asset-ledger.js";
+import { adoptPendingAssets, flushAssetLedger, listHostPageImagePages, markAssetsLost, markAssetsPending, markAssetsStored, replaceUnvouchedObject, writeDocumentAssetLedger, type FigureObjectReader, type DocumentAssetLedgerResult, type DocumentAssetLedgerWrite } from "./document-asset-ledger.js";
 import { applyDefaultVisionOverride, defaultPipelineFeatures, normalizeStoredPipelineFeatures, PII_BLOCKED_DOCUMENT_STATUS, planRunFailure, type DerivedDocumentTitle, type PrivacyAuditEntry } from "@docslurp/shared";
 
 import { adoptBackfillDocuments } from "../deferred/backfill-adoption.js";
@@ -2694,9 +2695,41 @@ export class Store {
 
   }
 
+  /** Reserves one free-tier chart-export VM run against the org's hourly cap, shared by every worker (chart-export-free-vm-cap.ts). */
+  async reserveChartExportFreeVmRun(args: { orgId: string; runId: string; documentId: string; perHour: number }): Promise<boolean> {
+    return await reserveChartExportFreeVmRun(this.sql, args);
+  }
+
   /** Document asset ledger (db/document-asset-ledger.ts): one org-scoped transaction for a document's images and level. */
+  async listHostPageImagePages(scope: { orgId: string; documentId: string }): Promise<number[]> {
+    return await listHostPageImagePages(this.sql, scope);
+  }
+
   async writeDocumentAssetLedger(write: DocumentAssetLedgerWrite): Promise<DocumentAssetLedgerResult> {
     return await writeDocumentAssetLedger(this.sql, write);
+  }
+
+  /** Figure uploads in progress (document-asset-ledger.ts): pending rows before an upload step, stored once it landed. */
+  async markAssetsPending(args: Parameters<typeof markAssetsPending>[1]): Promise<{ pending: number }> {
+    return await markAssetsPending(this.sql, args);
+  }
+
+  async markAssetsStored(args: Parameters<typeof markAssetsStored>[1]): Promise<{ stored: number }> {
+    return await markAssetsStored(this.sql, args);
+  }
+
+  /** The adopt pass: pending rows checked against storage (streamed SHA-256), no VM. */
+  async adoptPendingAssets(reader: FigureObjectReader, args: Parameters<typeof adoptPendingAssets>[2]) {
+    return await adoptPendingAssets(this.sql, reader, args);
+  }
+
+  async markAssetsLost(args: Parameters<typeof markAssetsLost>[1]): Promise<{ lost: number }> {
+    return await markAssetsLost(this.sql, args);
+  }
+
+  /** Repair a figure object of other bytes under the document's ledger lock (document-asset-ledger.ts). */
+  async replaceUnvouchedObject(args: Parameters<typeof replaceUnvouchedObject>[1]): Promise<void> {
+    await replaceUnvouchedObject(this.sql, args);
   }
 
   /**

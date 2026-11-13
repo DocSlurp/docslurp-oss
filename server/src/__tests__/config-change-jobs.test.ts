@@ -1,4 +1,5 @@
 import postgres from "postgres";
+import { normalizePipelineFeatures } from "@docslurp/shared";
 import { Hono } from "hono";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -44,6 +45,9 @@ afterAll(async () => {
 });
 
 const pipeline = (patch: Partial<PipelineFeatures> = {}): PipelineFeatures => ({ ...defaultPipelineFeatures, ...patch });
+/** An embedding config chosen by profile (a category): the model comes from the profile, never a raw URI. */
+const profileEmbedding = (profile: "fastest-local" | "cheapest-local") =>
+  normalizePipelineFeatures({ ...defaultPipelineFeatures, embedding: { profile } } as never).embedding;
 
 async function seed(args: { credits: number; autoConfirm?: boolean; documents?: number; vectorized?: boolean }) {
   await sql`delete from project_runs`;
@@ -67,7 +71,7 @@ async function seed(args: { credits: number; autoConfirm?: boolean; documents?: 
   }
 }
 
-const embeddingChange = () => ({ pipeline: pipeline({ embedding: { ...defaultPipelineFeatures.embedding, target: "local" as const, modelUri: "llm://transformers.js/Xenova/gte-small" as never } }) });
+const embeddingChange = () => ({ pipeline: pipeline({ embedding: profileEmbedding("fastest-local") }) });
 
 async function patch(input: Record<string, unknown>) {
   const plan = await change.planProjectChange({ projectId: "w", userId: "u1", input: input as never });
@@ -194,7 +198,8 @@ describe("config-change jobs", () => {
     expect(applied!.job).toMatchObject({ status: "blocked", reason: "credits" });
     expect(applied!.queuedRunIds).toEqual([]);
     const [ws] = await sql<{ pipeline: PipelineFeatures }[]>`select pipeline from projects where id = 'w'`;
-    expect(ws!.pipeline.embedding.modelUri).toBe("llm://transformers.js/Xenova/gte-small");
+    // The row stores the category (managed form); the model comes from the profile when read.
+    expect(ws!.pipeline.embedding.profile).toBe("fastest-local");
 
     expect((await blocked.resumeBlockedRuns({ sql: sql as never })).resumed).toBe(0);
     await sql`update organizations set credit_balance_cents = 10000 where id = 'o1'`;
@@ -207,7 +212,7 @@ describe("config-change jobs", () => {
     await seed({ credits: 10_000, documents: 3, vectorized: true });
     const A = pipeline();
     const B = embeddingChange().pipeline;
-    const C = pipeline({ embedding: { ...defaultPipelineFeatures.embedding, target: "local" as const, modelUri: "llm://transformers.js/Xenova/all-MiniLM-L6-v2" as never } });
+    const C = pipeline({ embedding: profileEmbedding("cheapest-local") });
     const hashes = { A: indexConfigHash(indexConfigOf(A)), B: indexConfigHash(indexConfigOf(B)), C: indexConfigHash(indexConfigOf(C)) };
 
     const first = await patch({ pipeline: B });
@@ -259,7 +264,7 @@ describe("config-change jobs", () => {
     await seed({ credits: 0, documents: 2, vectorized: true });
     const first = await patch(embeddingChange());
     expect(first.applied!.job).toMatchObject({ status: "blocked" });
-    const second = await patch({ pipeline: pipeline({ embedding: { ...defaultPipelineFeatures.embedding, target: "local" as const, modelUri: "llm://transformers.js/Xenova/all-MiniLM-L6-v2" as never } }) });
+    const second = await patch({ pipeline: pipeline({ embedding: profileEmbedding("cheapest-local") }) });
     expect(second.applied!.job).toMatchObject({ status: "blocked" });
     const [cancelled] = await sql<{ status: string; control_state: string }[]>`select status, control_state from project_runs where id = ${first.applied!.job!.id}`;
     expect(cancelled).toEqual({ status: "failed", control_state: "cancelled" });
@@ -302,8 +307,8 @@ describe("config-change jobs", () => {
   const stagesOf = async (jobId: string) =>
     (await sql<{ s: string[] | null }[]>`select pipeline -> 'stageSubset' as s from project_runs where job_id = ${jobId} order by created_at`)
       .flatMap((row) => row.s ?? []);
-  const MINILM = "llm://transformers.js/Xenova/all-MiniLM-L6-v2" as never;
-  const embeddingTo = (pl: PipelineFeatures) => ({ pipeline: { ...pl, embedding: { ...pl.embedding, target: "local" as const, modelUri: MINILM } } });
+  // An embedding change is a profile change (a category): raw model URIs are managed, never a caller's choice.
+  const embeddingTo = (pl: PipelineFeatures) => ({ pipeline: { ...pl, embedding: profileEmbedding("cheapest-local") } });
 
   it("keeps a cancelled PII re-index's stages when an embedding change supersedes it", async () => {
     await seed({ credits: 10_000, documents: 2, vectorized: true });
@@ -379,7 +384,8 @@ describe("config-change jobs", () => {
 
 describe("concurrent PATCHes do not lose updates", () => {
   const plan = async (input: Record<string, unknown>) => (await change.planProjectChange({ projectId: "w", userId: "u1", input: input as never }))!;
-  const modelOf = async () => ((await sql`select pipeline from projects where id = 'w'`)[0]!.pipeline as PipelineFeatures).embedding.modelUri;
+  // The row stores the managed form (no default URIs); the model is what the stored categories resolve to.
+  const modelOf = async () => normalizePipelineFeatures((await sql`select pipeline from projects where id = 'w'`)[0]!.pipeline as PipelineFeatures).embedding.modelUri;
 
   it("an embedding change planned before a budget change keeps the budget (and the job matches the final index)", async () => {
     await seed({ credits: 10_000, documents: 2, vectorized: true });
@@ -420,7 +426,7 @@ describe("re-plan exhaustion", () => {
 
 describe("estimator prices the compiled plan the run will execute", () => {
   const fields: Array<[string, Partial<PipelineFeatures>]> = [
-    ["embedding model", { embedding: { ...defaultPipelineFeatures.embedding, target: "local" as const, modelUri: "llm://transformers.js/Xenova/gte-small" as never } }],
+    ["embedding model", { embedding: profileEmbedding("fastest-local") }],
     ["summarize", { summarize: true }],
     ["pii policy", { piiPolicy: { ...defaultPipelineFeatures.piiPolicy, enabled: true, action: "block_indexing" as const } }],
     ["structured extraction", { structuredExtraction: { ...defaultPipelineFeatures.structuredExtraction, supportingPrompt: "Extract totals." } }],
@@ -509,7 +515,7 @@ describe("chart export estimates", () => {
     // Seeded where the worker records them: the vision-extract stage stats of the document's run.
     await sql`insert into document_run_stage_states (run_id, document_id, stage_name, status, stats)
       values ('src', 'd0', 'vision-extract', 'completed', ${sql.json({ visualCandidates: { charts: 3, diagrams: 0, pagesWithUnexportedVisuals: [1], exported: 0, bySource: {} } })})`;
-    const features = pipeline({ chartExport: { enabled: true, formats: ["description", "mermaid"], diagrams: true, generatorModel: null } });
+    const features = pipeline({ chartExport: { tier: "models", formats: ["description", "mermaid"], diagrams: true } });
     const estimate = (documentIds: string[], projectId = "w") => change.estimateWork({
       features, stages: ["vision-extract"], documents: documentIds.length, pages: 10, orgId: "o1", env: { ...process.env, DOCSLURP_CHART_EXPORT: "on" },
       visualScope: { projectId, documentIds },
@@ -521,16 +527,81 @@ describe("chart export estimates", () => {
     expect((await estimate(["d0"], "other")).basis).toMatch(/per-page planning prior/);
   });
 
-  it("refuses to turn chart export on while the deployment kill switch is off", async () => {
+  it("refuses the models tier unless the deployment kill switch is on; free and off need no switch", async () => {
     await seed({ credits: 10_000, documents: 1 });
     const { ChartExportUnavailableError } = await import("../services/chart-export-availability.js");
+    for (const flag of ["off", "free", "bogus"]) {
+      await expect(change.planProjectChange({
+        projectId: "w", userId: "u1", input: { pipeline: { chartExport: { tier: "models" } } } as never, env: { DOCSLURP_CHART_EXPORT: flag },
+      })).rejects.toBeInstanceOf(ChartExportUnavailableError);
+    }
+    // Off is always allowed; an explicit free needs DOCSLURP_CHART_EXPORT_FREE_EXPLICIT=on and a switch that is not off.
+    const off = await change.planProjectChange({ projectId: "w", userId: "u1", input: { pipeline: { chartExport: { tier: "off" } } } as never, env: { DOCSLURP_CHART_EXPORT: "off" } });
+    expect(off?.nextPipeline.chartExport.tier).toBe("off");
     await expect(change.planProjectChange({
-      projectId: "w", userId: "u1", input: { pipeline: { chartExport: { enabled: true } } } as never, env: { DOCSLURP_CHART_EXPORT: "off" },
-    })).rejects.toBeInstanceOf(ChartExportUnavailableError);
-    const allowed = await change.planProjectChange({
-      projectId: "w", userId: "u1", input: { pipeline: { chartExport: { enabled: true } } } as never, env: { ...process.env, DOCSLURP_CHART_EXPORT: "on" },
+      projectId: "w", userId: "u1", input: { pipeline: { chartExport: { tier: "free" } } } as never, env: { DOCSLURP_CHART_EXPORT: "on" },
+    })).rejects.toMatchObject({ status: 400, code: "chart_export_tier_unavailable" });
+    const free = await change.planProjectChange({
+      projectId: "w", userId: "u1", input: { pipeline: { chartExport: { tier: "free" } } } as never, env: { DOCSLURP_CHART_EXPORT: "on", DOCSLURP_CHART_EXPORT_FREE_EXPLICIT: "on" },
     });
-    expect(allowed?.nextPipeline.chartExport.enabled).toBe(true);
+    expect(free?.nextPipeline.chartExport.tier).toBe("free");
+    const allowed = await change.planProjectChange({
+      projectId: "w", userId: "u1", input: { pipeline: { chartExport: { tier: "models" } } } as never, env: { ...process.env, DOCSLURP_CHART_EXPORT: "on" },
+    });
+    expect(allowed?.nextPipeline.chartExport.tier).toBe("models");
+  });
+
+  it("classifies a tier change for the caller's surface and prices only models (the chat suggestion path)", async () => {
+    await seed({ credits: 10_000, documents: 2 });
+    const env = { ...process.env, DOCSLURP_CHART_EXPORT: "on", DOCSLURP_CHART_EXPORT_FREE_EXPLICIT: "on" };
+    const plan = (tier: string, origin: "app" | "machine") => change.planProjectChange({
+      projectId: "w", userId: "u1", input: { apply: "reindex" }, pipelineOverrides: { chartExport: { tier } } as never, env, origin,
+    });
+    // Moving to models (what chat proposes): a billed reindex through vision-extract, with chart reads in the estimate.
+    const models = await plan("models", "app");
+    expect(models?.impact.kind).toBe("reindex-recommended");
+    expect(models?.impact.stages).toContain("vision-extract");
+    expect(models?.estimate?.basis).toMatch(/chart export: .* model-read visuals/);
+    // Moving an API caller (default off) to free: an optional reindex with no chart charge.
+    const free = await plan("free", "machine");
+    expect(free?.impact.kind).toBe("reindex-recommended");
+    expect(free?.estimate?.basis ?? "").not.toMatch(/chart export/);
+    // In the app the default is already free: nothing for stored documents.
+    expect((await plan("free", "app"))?.impact.kind).not.toBe("reindex-recommended");
+    // Off applies to new uploads only.
+    expect((await plan("off", "app"))?.impact.kind).toBe("new-uploads");
+    // The origin is recorded on the plan, so the re-index runs it queues resolve the same way.
+    expect(models?.origin).toBe("app");
+  });
+
+  it("a reindex on a project with no tier keeps each document's source-run tier and records the caller's origin (M5, T3)", async () => {
+    await seed({ credits: 10_000, documents: 2 });
+    // The documents were uploaded from the app with free chart exports (their run's stamp).
+    await sql`update project_runs set pipeline = jsonb_set(pipeline, '{chartExport}', ${sql.json({ tier: "free", formats: ["description", "mermaid"], diagrams: true })}) where id = 'src'`;
+    const plan = await change.planProjectChange({ projectId: "w", userId: "u1", input: { ...embeddingChange(), apply: "reindex" } as never, origin: "machine" });
+    const applied = await change.applyProjectChange({ plan: plan!, userId: "u1" });
+    expect(applied?.queuedRunIds.length ?? 0).toBeGreaterThan(0);
+    const runs = await sql<{ pipeline: { chartExport?: { tier?: string } }; origin: string }[]>`select pipeline, origin from project_runs where kind = 'reindex'`;
+    expect(runs.length).toBeGreaterThan(0);
+    // An API-key reindex (machine default off) does not drop the documents' free exports.
+    for (const run of runs) expect(run).toMatchObject({ origin: "machine", pipeline: { chartExport: { tier: "free" } } });
+  });
+
+  it("a reindex after the project moved from models to unset inherits at most the project's current tier (R2-M1)", async () => {
+    await seed({ credits: 10_000, documents: 2 });
+    vi.stubEnv("DOCSLURP_CHART_EXPORT", "on");
+    vi.stubEnv("DOCSLURP_CHART_EXPORT_APP_DEFAULT", "off");
+    try {
+      // The documents were read with AI while the project was on models; the project is now unset (production: off).
+      await sql`update project_runs set pipeline = jsonb_set(pipeline, '{chartExport}', ${sql.json({ tier: "models", formats: ["description", "mermaid"], diagrams: true })}) where id = 'src'`;
+      const plan = await change.planProjectChange({ projectId: "w", userId: "u1", input: { ...embeddingChange(), apply: "reindex" } as never, origin: "app" });
+      await change.applyProjectChange({ plan: plan!, userId: "u1" });
+      const runs = await sql<{ pipeline: { chartExport?: { tier?: string } } }[]>`select pipeline from project_runs where kind = 'reindex'`;
+      expect(runs.length).toBeGreaterThan(0);
+      for (const run of runs) expect(run.pipeline.chartExport?.tier).toBe("off");
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 });
 

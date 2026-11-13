@@ -22,6 +22,10 @@ The facts come from a VM that read a customer file, so the worker treats every b
 - accepts finite numbers only, ratios in 0..1, non-negative integer counts, closed enums (an unknown enum value is
   dropped, as the contract asks) and bounded lists; a family that fails any check, or whose counts contradict each
   other, is absent (unknown) while the rest of the page stands;
+- reads the fields added within `/1` the same way: `vectors.grids` (at most 64, each box on the page within 1 pt, rows and
+  columns positive counts; a bad list, a box off the page or a list without `gridsTruncated` makes `vectors` unknown),
+  and per image `visibleWordsInside`/`invisibleWordsInside` (both or neither, within the page's own word counts) and
+  `bytesPerPixel` (finite, non-negative; never on an inline image). A value that fails is unknown, never 0;
 - never reads `producer`, `creator` or `lang`, the document's own strings in the stream, nor any field it does not know; the run
   line's `version` and `commit` are kept only as a dotted version and a hex commit.
 
@@ -94,7 +98,7 @@ Commands the facts cannot retire, and why:
 | Command | Feeds | Kept because |
 |---|---|---|
 | `pdfpagecount`, `pdftotext -f 1 -l 1` | page count, Poppler acceptance | billing and limits use the host's own count |
-| layout walker (`pdfimages -list`, `pdftotext -bbox-layout`, `pdf_layout_facts.py`) | layout facts | page-equivalent billing reads the walker's page sizes; facts have no `wordsInside`, `bytesPerPixel`, table or grid boxes |
+| layout walker (`pdfimages -list`, `pdftotext -bbox-layout`, `pdf_layout_facts.py`) | layout facts | page-equivalent billing reads the walker's page sizes, never the facts'. Facts from a build with ruled grids, words inside and bytes per pixel (Doppler #42) stand in for the walker's image inputs and prove pages without grids; a grid Doppler finds is not the walker's and stays unknown, so drawn tables flattened to prose still need the walker (or per-grid rule counts in the facts) |
 | OCR ledger `pdftotext` | Rich reads of an extractor that OCRs without saying so | billing evidence; never on the sandboxed route |
 | `pdfinfo` before `pdftoppm` | render bounds, rendered page areas | bounds an untrusted render and sizes a charge |
 
@@ -109,9 +113,21 @@ classify-route and page-image evidence read the facts unchanged:
 | `invisibleWords`, `textLayer` | `text.invisibleWordCount`, `text.textLayer` |
 | `widthPt`, `heightPt` | `geometry.widthPt`, `heightPt` (the CropBox with rotation; the walker uses CropBox ∩ MediaBox) |
 | `images` | `images.items`: box, coverage, pixel size, bits, colour space and codec in the walker's vocabulary, ppi; `repeated` from `obj` across pages. Null when not computed or truncated |
-| `images[].bytesPerPixel`, `images[].wordsInside` | null: facts never read the stream or the word boxes |
-| `grids` | `[]` when the `vectors` family proves no ruled grid (fewer than 2 horizontal or 3 vertical rules, no cap hit); otherwise null |
-| `tables`, `tableCoverage` | null: tables come from the Markdown |
+| `images[].coverage` | `coverage`, capped by the image's own box over the page |
+| `images[].wordsInside` | `visibleWordsInside` + `invisibleWordsInside`: words whose whole box is inside (within 1 pt), where the walker counts word centres, so a label straddling the edge counts for the walker only. A count above `mixedScanMaxWordsInside` (2) stands; a lower one only when the page's centre-based `textOverImageRatio` is 0 and the image's 64 × 64 ratio cells cover its whole box (no edge strip escapes them): then the walker's count is 0 too. Otherwise, or when absent, null: stricter than the walker, never looser |
+| `images[].bytesPerPixel` | `bytesPerPixel`, one to one; null when absent (never 0). The exact declared `/Length`, where the walker divides `pdfimages -list`'s rounded size, so the two can differ near the scan-like threshold. What the file says, which a crafted file can inflate: a routing hint, never a billing input |
+| `grids` | `[]` when there is no walker grid: fewer than 2 horizontal or 3 vertical rules, or a complete `vectors.grids` list with no grid of two or more columns (one column is parallel rules: weak evidence). A grid Doppler found is unknown (null): its search is not the walker's (shaded boxes count as rules, column lines need no outer sides) and the facts have no rule positions to tell which grids the walker would find. Null too when `gridsTruncated`, at the drawing cap, or without the list (older builds) |
+| `tableCoverage` | 0 with a `[]` known from the list, else null |
+| `tables` | null: tables come from the Markdown |
+
+A page marked `xref-repaired-earlier` (an earlier page rebuilt the cross-reference table, so any of its facts may come
+from an object the file holds twice) is low confidence: its layout facts keep only the page size (images, words, grids
+and table coverage are unknown), the document gets no facts-built page-image evidence
+(`xref-repaired-earlier`; the furniture rule is shared across pages), and chart export nominates nothing on the page.
+
+With words inside known, facts in `use` mode can select a mixed-scan read (`mixedScanImage`), as walker layout does: a
+page with native text and a placed, scan-like, readable image with at most 2 words inside. That read bills Rich like any
+other.
 
 `probeRowsFromDopplerFacts` (`worker/src/routing/probe/doppler-facts.ts`) builds the v2 router's `ProbeRow` with
 `probeEngine: "doppler-facts"` and no thumbnail; its header comment lists each field.
@@ -144,3 +160,56 @@ Shadow telemetry compares the facts-driven plan with v3. Each `page-route-decisi
 `page-route-chunk-estimate` carries the document totals (`pages`, `compared`, `agree`, `routerOnlyPixels`, `v3OnlyPixels`).
 The router needs pixels for any role beyond `accept-text` or `skip`; v3 does for any route other than `straightforward-text`
 or an authorized OCR decision.
+
+## Chart and diagram candidates
+
+Chart export (`worker/src/chart-export/facts-candidates.ts`) reads the facts again from the document's
+`doppler-page-facts` slot (the canonical lines above), through the same strict reader, bounded by the host's page count
+and byte budget. No slot, or facts the reader refuses, leaves chart export exactly as it was. Unlike the page router,
+chart export also reads a slot a partial reprocess seeded from an earlier run of the same document (the same source
+bytes); it never reads another document's facts.
+
+**Candidates (`use` only, and only without a router plan, which owns chart labels when it exists: with the page router
+in `shadow` or `active` on these facts, its plan's labels are used instead).** A page or region is
+a candidate from its structure, not its words. Each candidate carries the cluster or image box as its crop, so the model
+reads that crop; a facts candidate whose crop cannot be made is not read at all (never the whole page). A page whose
+CropBox differs from its MediaBox, or whose size is outside 1–14,400 pt, gets no facts boxes (unknown):
+
+| rule | stands alone | needs the keyword route on its page |
+|---|---|---|
+| figure cluster (curved or diagonal drawing) at least 48 pt on its short side, 6 paths, 2–90% of the page | the page's `uncoveredRatio` ≥ 0.6, or `coverage` × `uncoveredRatio` ≥ 0.15 (a large non-text vector area) | `uncoveredRatio` 0.3–0.6 |
+| placed image, 4–85% of the page, at least 96 samples a side, not a stencil mask, on a page whose `scan` is `none` | never: photos are common | always |
+
+Never candidates: a page with `uncoveredRatio` below 0.3 (underlines, boxes around text, ruled tables), thin rule-like
+clusters, a scan page's images, and furniture: an image `obj` or a cluster box that recurs on at least 3 pages and 20% of
+the pages with facts (logos, headers, borders). At most 4 candidates a page, largest first, and 500 a document. The keyword route
+(`chart-or-figure`) stays a vote: alone it is still low confidence; a facts candidate on its page replaces its whole-page
+read with crops. The thresholds are general structure limits (`FACTS_CANDIDATE_RULES`), set from the contract's field
+meanings, not from any evaluation document.
+
+Known gap: Doppler clusters only curved or diagonal drawing, so an axis-aligned bar chart drawn only with rectangles has no
+cluster box to crop and is left to the other signals.
+
+**One read per repeated picture (`store` and `use`; `off` turns it off).** Before a model reads a crop or an image,
+candidates are grouped by the facts' image object number and the media map's content hash (sha256), transitively, within
+the document only. An image-backed candidate (image routing, a router image inset) takes a facts `obj` only when its box
+and the image's agree to IoU 0.9, and never from a stencil mask, the page's scan image, or two objects in one place; a
+vector cluster or router region never takes one. Only a placement the facts show nothing drawn over shares a read: no
+figure cluster crossing its box and no text over images on its page (one base image under different data points or
+labels is different pictures). Without facts for its page a placement is never grouped, so a document without facts
+reads as before. The first placement whose read the provider answers stands for the
+group; the other placements reuse its visual with no call and no charge. A read that failed before an answer, or a
+whole-page read (a crop that failed), stands for nothing; a placement waiting for it reads for itself, within the read
+cap checked again after the wait. Visual candidate stats count a group
+once (so measured estimates price the reads that will be made), and the stage stats record
+`chartExport.dedupe: { groups, placements, readsAvoided }` and, with `use`, `chartExport.factsCandidates` per rule.
+
+Charges are per read made, as before: a reused placement has no answered call, so it is never charged. Nothing about the
+facts sizes a charge.
+
+Known limits: clusters cover curved and diagonal drawing only, so an axis-aligned overlay (rectangles drawn over a base
+image) is not seen; one image object drawn with different clips (sprites, crops of one large image) is treated as one picture;
+a reused `none` answer leaves a later placement's middling deterministic spec unused; and the same chart image on many
+pages counts as furniture for nomination (other signals still list it, and it is then read once). In `use`, standalone
+vector candidates are a new source of reads that a first estimate built on the per-page prior does not see until stats
+are recorded; the read cap per document still bounds them.

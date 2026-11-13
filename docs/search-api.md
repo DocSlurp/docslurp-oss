@@ -104,8 +104,8 @@ Every error from the native JSON API (`/v1/*`, including authentication, rate li
 
 `code` is a closed set you can branch on:
 
-- Request and access: `invalid_request`, `unauthorized`, `forbidden`, `not_found`, `project_not_found`, `conflict`, `payload_too_large`, `session_required`, `mfa_required`, `REAUTH_REQUIRED` (a sensitive account action needs you to sign in again), `api_key_ip_not_allowed`, `client_key_projects_required`, `client_key_origin_not_allowed`, `invalid_search_scope`, `chat_disabled`, `chat_session_forbidden`, `model_not_allowed`, `chat_tool_failed` (HTTP 424: a required tool failed and the task is blocked), `chat_deadline_exceeded` (HTTP 424: a search-agent model/turn deadline was reached, even if partial text was streamed).
-- Limits: `rate_limited`, `spend_limit_exceeded`, `search_limit_exceeded`, `daily_page_limit`, `ip_temporarily_blocked`.
+- Request and access: `invalid_request`, `unauthorized`, `forbidden`, `not_found`, `project_not_found`, `conflict`, `payload_too_large`, `session_required`, `mfa_required`, `REAUTH_REQUIRED` (a sensitive account action needs you to sign in again), `api_key_ip_not_allowed`, `client_key_projects_required`, `client_key_origin_not_allowed`, `invalid_search_scope`, `chat_disabled`, `chat_session_forbidden`, `model_not_allowed`, `speed_boost_unavailable`, `chat_tool_failed` (HTTP 424: a required tool failed and the task is blocked), `chat_deadline_exceeded` (HTTP 424: a search-agent model/turn deadline was reached, even if partial text was streamed).
+- Limits: `rate_limited`, `spend_limit_exceeded`, `search_limit_exceeded`, `daily_page_limit`, `ip_temporarily_blocked`, `chat_capacity_unavailable` (HTTP 503: chat turns in progress couldn't be counted, so the turn was refused; retry after `Retry-After`).
 - Billing: `payment_required`, `credit_exhausted`, `project_budget_paused`, `org_budget_paused`, `minimum_credit_required`, `plan_not_entitled`.
 - Uploads and extracts: `unsupported_type`, `remote_format_disabled`, `file_too_large`, `unreadable_source`, `extract_not_found`, `extract_expired`, `retention_exceeds_cap`, `download_not_ready`, `download_failed`.
 - Web tools and privacy: `web_disabled`, `web_scope_required`, `url_blocked`, `privacy_mode_blocked`.
@@ -120,28 +120,31 @@ Protocol surfaces keep the shapes their clients already parse: the OpenAI-compat
 
 ## Grounded chat
 
-`POST /v1/chat` is the canonical project chat endpoint. Send `{q, project?, sessionId?, sessionToken?, model?, speedBoost?, retrieval?, filters?, agent?}` (`sessionToken`: browser keys only, see [conversations](#conversations); `speedBoost`: see [speed boost](openrouter-nitro.md)); an omitted `project` means your organization's default project (`project` takes an ID, slug or name). `sessionId` and `model` are nonempty strings of at most 256 characters; unknown fields are rejected, and all fields are checked before model calls. The response is `{id, sessionId, sessionToken?, searchSessionId, answer, finishReason?, citations, evidenceSpans, availability, usage, runtime, debug}`.
+`POST /v1/chat` is the canonical project chat endpoint. Send `{q, project?, sessionId?, sessionToken?, tier?, reasoning?, speedBoost?, retrieval?, filters?, agent?}` (`sessionToken`: browser keys only, see [conversations](#conversations); `speedBoost`: see [speed boost](openrouter-nitro.md)); an omitted `project` means your organization's default project (`project` takes an ID, slug or name). `sessionId` is a nonempty string of at most 256 characters; unknown fields are rejected, and all fields are checked before model calls. The response is `{id, sessionId, sessionToken?, searchSessionId, answer, finishReason?, citations, evidenceSpans, availability, usage, runtime, debug}`.
 
 `filters` narrows retrieval: `documentIds` (up to 50), `mimeTypes` (up to 24), `tags`, `dateFrom`/`dateTo` (`YYYY-MM-DD`, indexed on or after / on or before that UTC day) and `geo`. Any filter sends the turn down the [direct-answer](#direct-answers) path so the filter is guaranteed to apply.
 
-**Streaming.** `GET /v1/chat/stream` takes `q`, `project`, `sessionId`, `model`, `speedBoost` and `filters` (URL-encoded JSON, up to 16,384 characters) as query parameters and answers with server-sent events: `status` (`{stage, message}`), then `message` (the full `/v1/chat` response), then `done` (`{id, sessionId, sessionToken?, searchSessionId}`). It does not stream answer tokens and does not take `retrieval` or `agent`. The SDK's `chatStream` reads it. For token-by-token deltas, use `/v1/chat/completions` with `stream: true`. `POST /v1/chat` is the non-streaming fallback for both.
+**Streaming.** `POST /v1/chat/stream` takes the same JSON body as `POST /v1/chat` (so the question never sits in a URL); `GET /v1/chat/stream` takes `q`, `project`, `sessionId`, `tier`, `reasoning`, `speedBoost` and `filters` (URL-encoded JSON, up to 16,384 characters) as query parameters for clients that can only open an `EventSource`. Both answer with server-sent events: `status` (`{stage, message}`), then `delta` events (`{text}`, the answer as the model writes it; concatenated in order they are the answer), then `message` (the full `/v1/chat` response, whose `answer` is authoritative), then `done` (`{id, sessionId, sessionToken?, searchSessionId}`). A client that ignores `delta` still gets the whole answer in `message`. If generation fails after a `delta` was sent, the stream ends without `message` or `done` (the SDK's `chatStream` throws): the server never switches to another model or a fallback answer mid-stream, so deltas are never a mix of two answers. Discard the partial text and retry. A failure before the first `delta` can still be answered by a fallback model. When output moderation applies (browser keys with `CHAT_OUTPUT_MODERATION` set), the moderated answer arrives as one `delta` after the check. The stream does not take `retrieval` or `agent`. The SDK's `chatStream` reads it. `POST /v1/chat` is the non-streaming fallback.
 
-### Model
+### Tier
 
-Omit `model` to use the default (`z-ai/glm-5.3-flash`). Any project chat catalog model (`z-ai/glm-5.3-flash`, `anthropic/claude-haiku-5.5`, `deepseek/deepseek-v4.1-flash`, `openai/gpt-6.1-sol`, `openai/gpt-6-luna`) is accepted from anyone. The `:nitro` variants of `z-ai/glm-5.3-flash`, `deepseek/deepseek-v4.1-flash` and `openai/gpt-6-luna` need `speedBoost: true` ([speed boost](openrouter-nitro.md)). Any other value returns HTTP 400 with code `model_not_allowed`; the server never substitutes the default for a model you named. The same check applies to the streaming chat route (before the stream opens) and the dashboard chat routes.
+Callers choose a chat **tier**, never a backend model or provider. DocSlurp manages the model behind each tier and may change it as models and prices move; usage events, traces and logs record the model that answered.
 
-Operators can list extra OpenRouter ids in `DOCSLURP_CHAT_EVAL_MODELS` (comma-separated; `:free` suffixes allowed) for model evaluations. Only platform admins can request them: a session whose verified email is in `ADMIN_EMAILS`, or a server API key owned by such a user. Client (publishable) keys and organization owners or admins do not qualify. For an evaluation account that should not be a platform admin, list its organization in `DOCSLURP_CHAT_EVAL_ORG_IDS` (comma-separated org ids): a turn whose project is owned by a listed organization may then use the eval models and the full `agent` limit range, from a session or a server API key (never a client key). The project's owning organization decides, not the caller's memberships, and the setting grants nothing else. When the configuration loads, the server logs and drops ids that match the Pro/Ultra prohibition, ids without a verified price in `packages/shared/src/chat-model-prices.ts` (mirrored from `scripts/lib/model-prices.json`), and ids whose output price is $50 per million tokens or more. An eval model answers on its own: if it fails, chat does not fail over to another model.
+| `tier` | Use it for |
+| --- | --- |
+| `fastest` (default) | Quick, short answers for everyday questions (the quickest tier). |
+| `balanced` | Fast, thorough answers for analysis and comparisons. |
+| `smart` | Complex reasoning and detailed answers (the slowest and most expensive tier). |
+
+Omit `tier` for the project default (`fastest`). Responses report the tier that answered in `debug.model` (`"fastest"`, `"balanced"` or `"smart"`; if the answering model failed over, the tier of the model that answered), never a backend model id. A request that names a backend model (`model`, a vendor id, an `llm://` URI) gets HTTP 400 `model_not_allowed` with a message naming the tiers; the value is not echoed. The same check applies to `/v1/chat/stream` (before the stream opens), the dashboard chat routes, MCP `chat` and `/v1/chat/completions` (`docslurp.tier`). A project's tier mapping can only be changed by DocSlurp operators.
+
+`speedBoost: true` runs the tier on faster, speed-boosted routing at the speed-boost rate ([speed boost](openrouter-nitro.md)). Only `balanced` has a fast route today; Speed boost on another tier answers HTTP 400 `speed_boost_unavailable` naming the tiers that support it.
+
+Operator evaluations (self-hosted deployments): `DOCSLURP_CHAT_EVAL_MODELS` lists extra OpenRouter ids (comma-separated; `:free` suffixes allowed). Only platform admins may name a backend `model` on a chat request, catalog or eval, and only from a browser session whose verified email is in `ADMIN_EMAILS`: an admin's API key chooses tiers like any programmatic caller. For an evaluation account that should not be a platform admin, list its organization in `DOCSLURP_CHAT_EVAL_ORG_IDS`: a turn whose project is owned by a listed organization may then name models and use the full `agent` limit range, from a session or a server API key (never a client key). The project's owning organization decides, not the caller's memberships. When the configuration loads, the server logs and drops ids that match the Pro/Ultra prohibition, ids without a verified price in `packages/shared/src/chat-model-prices.ts`, and ids whose output price is $50 per million tokens or more. An eval model answers on its own and keeps raw `debug` model fields; it never fails over. Platform admins set a project's tier mapping with `PUT /v1/admin/projects/:projectId/managed-models` (`{"chat": {"smart": "<catalog id>"}}`) from a browser session; API keys are refused.
 
 ### Reasoning
 
-Chat answers with reasoning off by default: each model runs at its lowest verified reasoning setting, the fastest answer (2026-11-10, DeepSeek V4.1 Flash on one host: 0.56 s a call with reasoning off against 1.18 s at the provider default). For long, multi-part questions you can ask for more by adding a `reasoning` option to the model reference:
-
-```text
-llm://openrouter/deepseek/deepseek-v4.1-flash-1017?reasoning=high
-z-ai/glm-5.3-flash?reasoning=low
-```
-
-Levels use OpenRouter's native effort names: `none` (the default; `off` is accepted), `minimal`, `low`, `medium` and `high`. The native keys `reasoning_effort` and `effort` work too. More reasoning adds latency and output tokens; a chat answer counts once more per 100,000 total tokens. The option applies to the answering model only: query rewrites, HyDE and other search helpers always run at the floor. Any other option, an unknown level, or conflicting levels returns HTTP 400 `model_not_allowed`. On `POST /v1/chat/completions` put it on `docslurp.model`.
+Chat answers with reasoning off by default: each model runs at its lowest verified reasoning setting, the fastest answer. For long, multi-part questions you can ask for more with `reasoning`: `none` (default), `minimal`, `low`, `medium` or `high`. More reasoning adds latency and output tokens; a chat answer counts once more per 100,000 total tokens. It applies to the answering model only: query rewrites, HyDE and other search helpers always run at the floor. On `POST /v1/chat/completions` send it as `docslurp.reasoning`.
 
 ### Direct answers
 
@@ -241,23 +244,21 @@ Any failed tool (including an HTTP-200 batch with failed items), invalid tool ca
 
 ```bash
 curl -sS -X POST "$DOCSLURP_URL/v1/chat" -H "Authorization: Bearer $DOCSLURP_API_KEY" -H "Content-Type: application/json" \
-  -d '{"q": "How far above our margin target are we?", "model": "anthropic/claude-haiku-5.5", "agent": {"maxSteps": 4, "maxToolCalls": 6, "searchConcurrency": 2}}'
+  -d '{"q": "How far above our margin target are we?", "tier": "balanced", "agent": {"maxSteps": 4, "maxToolCalls": 6, "searchConcurrency": 2}}'
 ```
 
 ```json
 {
   "answer": "Operating margin is projected at 24%, 4 points above the 20% target [1].",
   "debug": {
-    "model": "anthropic/claude-haiku-5.5",
-    "requestedModel": "anthropic/claude-haiku-5.5",
-    "resolvedModel": "anthropic/claude-haiku-5.5",
-    "resolvedProvider": "Anthropic",
+    "model": "balanced",
+    "requestedModel": "balanced",
     "steps": 2, "toolCallCount": 1, "toolCallsRefused": 0,
     "searchCallCount": 1, "searchQueryCount": 2, "zeroHitSearchCount": 0,
     "stopReason": "answered",
     "stepUsage": [
-      {"step": 0, "model": "anthropic/claude-haiku-5.5", "finishReason": "tool-calls", "inputTokens": 1830, "outputTokens": 61, "costCents": 0.021, "toolCalls": ["search"]},
-      {"step": 1, "model": "anthropic/claude-haiku-5.5", "finishReason": "stop", "inputTokens": 4120, "outputTokens": 92, "costCents": 0.046, "toolCalls": []}
+      {"step": 0, "model": "balanced", "finishReason": "tool-calls", "inputTokens": 1830, "outputTokens": 61, "costCents": 0.021, "toolCalls": ["search"]},
+      {"step": 1, "model": "balanced", "finishReason": "stop", "inputTokens": 4120, "outputTokens": 92, "costCents": 0.046, "toolCalls": []}
     ],
     "limits": {"maxSteps": 4, "baseSteps": 4, "maxToolCalls": 6, "searchConcurrency": 2, "clamped": []}
   }
@@ -425,28 +426,30 @@ stem: Russian, German and French inflections match only their exact forms.
 
 ### Optional hosted learned reranking
 
-Project search settings can explicitly select DeepInfra's pointwise
-`Qwen/Qwen3-Reranker-0.6B`. Omitted provider settings continue to use local BM25.
-With the operator's `DEEPINFRA_API_KEY` configured, an authorized project owner
-can opt in through `PATCH /v1/projects/:projectId/search-settings` from a
-signed-in session or a server key with `projects:manage`:
+Project search settings can opt in to the managed hosted reranker (a learned
+pointwise model) with `retrievalDefaults.reranker`: `"keyword"` (the default,
+local BM25) or `"model"`. The provider and model behind `"model"` are managed by
+DocSlurp; requests that name `rerankProvider` or `rerankModel` get HTTP 400
+`model_not_allowed`. Self-hosted deployments need the operator's
+`DEEPINFRA_API_KEY`. An authorized project owner opts in through
+`PATCH /v1/projects/:projectId/search-settings` from a signed-in session or a
+server key with `projects:manage`:
 
 ```json
 {
   "retrievalDefaults": {
     "useRerank": true,
-    "rerankProvider": "deepinfra",
-    "rerankModel": "Qwen/Qwen3-Reranker-0.6B",
+    "reranker": "model",
     "candidateDepth": 100,
     "resultOrder": "relevance"
   }
 }
 ```
 
-Set `rerankProvider` to `"bm25"` to restore local ranking; a request with
-`rerank:false` makes no reranker call. Provider/model selection is a project
-setting, not an arbitrary per-request URL or credential. Search and project
-chat share the post-retrieval implementation. Existing output-score and citation
+Set `reranker` to `"keyword"` to restore local ranking; a request with
+`rerank:false` makes no reranker call. Settings read back with `reranker`, never
+the provider or model. Search and project chat share the post-retrieval
+implementation. Existing output-score and citation
 contracts are retained; provider scores only choose candidate ordering, fused with the
 hybrid order as above.
 

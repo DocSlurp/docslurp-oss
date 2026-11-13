@@ -348,11 +348,13 @@ export class RoutePagesStage implements Stage {
         },
       };
       const chainReport: ChainReport | undefined = chain ? { trace: chain.trace, servedBy: chain.servedBy } : undefined;
-      const pixelNote = pixelSkipped.length > 0 && decisionModels.length > 0 ? `decision-model-skipped:no-host-pixels:${pixelSkipped.join("|")}` : undefined;
+      // The note names no model (customers can read it): models skipped and attempts by position. The model ids stay in
+      // the decisionModel / decisionChain fields, which only platform operators read.
+      const pixelNote = pixelSkipped.length > 0 && decisionModels.length > 0 ? `decision-model-skipped:no-host-pixels:${pixelSkipped.length}` : undefined;
       const routerNote = [
         selectNote,
         pixelNote,
-        chainReport ? `decision-chain:${chainReport.trace.map((t) => `${t.model}=${t.outcome}`).join(",")}` : undefined,
+        chainReport ? `decision-chain:${chainReport.trace.map((t, i) => `${i + 1}=${t.outcome}`).join(",")}` : undefined,
       ].filter(Boolean).join(" ") || undefined;
       const plan: RoutePlan = routePlanSchema.parse({
         ...raw,
@@ -535,7 +537,8 @@ export class RoutePagesStage implements Stage {
     const disallowedPrivacy = new Set<string>(args.privacyMode === "standard" ? [] : ["hosted"]);
     // Chart export replaces chart/diagram readings with generator calls: the planner prices those instead.
     const chartExportConfig = chartExportConfigOf(state.run.pipeline);
-    const chartExport = chartExportConfig.enabled ? { chartExport: { config: chartExportConfig, modes: FORMAT_MODE } } : {};
+    // Only the billed `models` tier sends chart crops to a generator; the free tier adds no model output to price.
+    const chartExport = chartExportConfig.tier === "models" ? { chartExport: { config: chartExportConfig, modes: FORMAT_MODE } } : {};
     const heuristic = () => new HeuristicRouter(ids);
     const baseline = (carry?: ConstructorParameters<typeof BaselineRouter>[0]["carry"]) => new BaselineRouter({
       pack: loadRuntimePolicyPack("baseline"),
@@ -549,8 +552,8 @@ export class RoutePagesStage implements Stage {
     if (settings.router === "baseline") return { router: baseline() };
 
     if (args.decisionModels.length === 0) {
-      if (args.pixelSkipped.length > 0) return { router: baseline(), routerNote: `decision-model-skipped:no-host-pixels:${args.pixelSkipped.join("|")}` };
-      return { router: baseline(), routerNote: `decision-model-unavailable:${args.requestedModels.join("|")}` };
+      if (args.pixelSkipped.length > 0) return { router: baseline(), routerNote: `decision-model-skipped:no-host-pixels:${args.pixelSkipped.length}` };
+      return { router: baseline(), routerNote: `decision-model-unavailable:${args.requestedModels.length}` };
     }
     // Decision calls cost money and send page images or text to a hosted provider: the run's own
     // cost cap and the project privacy mode both gate them (strict-privacy audits the block).

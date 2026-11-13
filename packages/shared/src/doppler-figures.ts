@@ -24,9 +24,15 @@ export function dopplerImageExtractEnabled(env: Record<string, string | undefine
 }
 
 /**
- * Whether figures run for a project's pipeline: the deploy flag on, and the project did not opt out (`figures: false`).
+ * Whether a run's document gets the Doppler figure pass: the project did not opt out (`pipeline.figures !== false`) and
+ * the deploy flag is on. The one rule for every caller: the first pass, `extract-markdown`, the asset ledger's level
+ * (an opted-out document is `disabled`, never `none` or `resumable`) and figure resume discovery (an opted-out document
+ * never stays on the resume queue and never accrues new figure storage). Whether the PDF provider can produce figures
+ * is the worker's own extra check (`sandboxedPdfProvider()?.figures`).
  */
-export function figuresEnabled(pipeline: { figures?: boolean | null } | null | undefined, env: Record<string, string | undefined>): boolean { return pipeline?.figures !== false && dopplerImageExtractEnabled(env); }
+export function figuresEnabled(pipeline: { figures?: boolean | null } | null | undefined, env: Record<string, string | undefined>): boolean {
+  return pipeline?.figures !== false && dopplerImageExtractEnabled(env);
+}
 
 /** The wire version of the manifest the provider hands the worker. */
 export const DOPPLER_FIGURES_VERSION = "doppler-figures@1";

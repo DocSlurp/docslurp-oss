@@ -98,6 +98,16 @@ Doppler's images manifest comes in two newer shapes, accepted beside version 1 u
   counts, and `sha256`, the SHA-256 of every byte before the end line).
 - **Version 2, `manifest.json`**: the same fields as one JSON object (`"version": 2`).
 
+`scan_pages` is one of `copy`, `image`, `skip` or `render`. `copy` is Doppler's default from Doppler PR #39: a full-page
+scan that can be copied as its own bytes (a JPEG or bilevel stream, upright) gets its marker and file; any other scan
+(JPEG 2000, Flate, tiled, layered, turned, ...) gets no marker and no file, and Doppler reports it as an `unlinked`
+image with `fate: background` (a `picture`, or the `mask` of a layered scan) and `reason: scan-not-copyable`. A page
+scan whose copy failed its checks is `not-extracted` with `reason: copy` (for example `error: xref`, a cross-reference
+table the producer rebuilt) and keeps its link, with no file. For both, when the project keeps page images
+(`preserveImages`), render-images renders that page from the asset ledger (the write still waiting for its checkpoint,
+or the stored rows of the document's organization), so the page image is the host's; Fast quality keeps its own
+page-image rule (textless pages, within its caps).
+
 The worker reads version 3 **one line at a time in fixed memory** (`DopplerManifestV3Validator`,
 `packages/shared/src/doppler-assets.ts`): each line is parsed and validated as it arrives and becomes one ledger row,
 spilled to a private temporary file, so memory does not grow with the number of images. It refuses the folder when a line
@@ -118,19 +128,21 @@ Doppler says a resume would retry them. The worker checks the outcome against th
 folder (`outcome-mismatch`) otherwise.
 
 Either way the folder holds only the manifest, optionally `page-facts.jsonl` (allowed, but never read or stored: see
-"Page facts" below), and `page-NNNN` real directories holding
-only `(image|figure)-NNN.<format>` regular files. Every entry is checked strictly: unknown fields, values outside each
-closed enum (`status`, `reason`, `fate`, `source`, batch `status`, `fallback`), non-finite or out-of-range numbers and
-over-long strings refuse it. A linked image's `path` must be exactly the one derived from its own id and format, with no
-extra leading zeros; only an image without a file of its own may share the path of the image it repeats, which must be an
-earlier linked image that is not itself a repeat (no chains, no cycles). `link` must be the manifest's `link_prefix`
-followed by that path, and the prefix must be `images/`, the one the host asks for (so the stored Markdown resolves with
-no rewriting). Only page scans are copied or decoded, and a decoded scan is never a JPEG. `complete` with a stopped batch
-or an image a stopped batch left is refused, as is `resumable` disagreeing with the images. Every total (`images`,
-`linked`, `extracted`, `not_extracted`, `unlinked`, `bytes`, `repeats`, `fallbacks`, `scans`, `scan_bytes`, `batches`,
-`batches_cut`: the batches whose status is not `ok`) must match the entries. The manifest must name this document's PDF
-(`source_sha256`, when the host knows it). The files present must be exactly the paths of the `extracted` images, each of
-its stated size.
+"Page facts" below), and `page-NNNN` real directories holding only `(image|figure)-NNN.<format>` regular files. Every
+entry is checked strictly: unknown fields, values outside each closed enum (`status`, `reason`, `fate`, `source`, batch
+`status`, `fallback`), non-finite or out-of-range numbers and over-long strings refuse it. A linked image's `path` must
+be exactly the one derived from its own id and format, with no extra leading zeros; only an image without a file of its
+own may share the path of the image it repeats, which must be an earlier linked image that is not itself a repeat (no
+chains, no cycles). `link` must be the manifest's `link_prefix` followed by that path, and the prefix must be `images/`,
+the one the host asks for (so the stored Markdown resolves with no rewriting). Only page scans are copied or decoded,
+and a decoded scan is never a JPEG. A `reason` must fit the status: a `not-extracted` image has one of the not-extracted
+reasons below, an `unlinked` image has none or `scan-not-copyable` (only on a `background` `picture` or `mask`, never
+with `repeat_of`; an `unlinked` image never repeats another), and an `extracted` image has none; anything else refuses
+the folder. `complete` with a stopped batch or an image a stopped batch left is refused, as is `resumable` disagreeing
+with the images. Every total (`images`, `linked`, `extracted`, `not_extracted`, `unlinked`, `bytes`, `repeats`,
+`fallbacks`, `scans`, `scan_bytes`, `batches`, `batches_cut`: the batches whose status is not `ok`) must match the
+entries. The manifest must name this document's PDF (`source_sha256`, when the host knows it). The files present must be
+exactly the paths of the `extracted` images, each of its stated size.
 
 **Sharded documents.** A provider that converts a long document in page ranges (one VM per shard, each running Doppler
 with its own `-f/-l` and `--images-pages`) cannot merge the shards into one valid manifest: each shard's settings digest
@@ -278,13 +290,14 @@ version 2 is held to fewer entries and its parse is reserved from the worker bud
 
 ## Asset ledger
 
-Every image Doppler reports for a document, whether or not it has a file, is a row of `document_assets` (migration
-0141), and the document's extraction level is a row of `document_extraction_levels`. The figure step **queues** the write
-on the run's state; the store writes it in one transaction after the stage checkpoint that records the Markdown and the
-image slots commits, never before (`worker/src/db/document-asset-ledger.ts`, `Store.writeProgress`). `markdown_complete`
-is whether that committed checkpoint holds the document's Markdown. An attempt that fails or is escalated drops its queued
-write. The write never fails the document: a refused, stale or failed write is logged
-(`[asset-ledger] document=... status=refused rule=...`, `status=stale-write`) and the stage stats say `ledger: "queued"`.
+Every image Doppler reports for a document, whether or not it has a file, is a row of `document_assets` (migration 0141;
+0150 lets an unlinked image carry `scan-not-copyable`), and the document's extraction level is a row of
+`document_extraction_levels`. The figure step **queues** the write on the run's state; the store writes it in one
+transaction after the stage checkpoint that records the Markdown and the image slots commits, never before
+(`worker/src/db/document-asset-ledger.ts`, `Store.writeProgress`). `markdown_complete` is whether that committed
+checkpoint holds the document's Markdown. An attempt that fails or is escalated drops its queued write. The write never
+fails the document: a refused, stale or failed write is logged (`[asset-ledger] document=... status=refused rule=...`,
+`status=stale-write`) and the stage stats say `ledger: "queued"`.
 
 **Scope.** Both tables carry `org_id` and `project_id` (NOT NULL) and reference the document's own
 `(id, project_id, org_id)` with a composite foreign key, so a row cannot name another organization's or project's
@@ -309,16 +322,17 @@ rows and records `images_status: failed`.
 | --- | --- |
 | `extracted` | The image owns a stored file: `format`, `bytes`, `sha256`, `width`, `height`, `source` and `storage_key` are set. |
 | `not-extracted` | The Markdown links it (or, for version 1, marks it) but it has no file of its own; `reason` says why. |
-| `unlinked` | Doppler placed it without a link (`fate` furniture, watermark, background, small, fragment, grouped, ...). |
+| `unlinked` | Doppler placed it without a link (`fate` furniture, watermark, background, small, fragment, grouped, ...); `reason` is null, or `scan-not-copyable`. |
 
 | `reason` | Meaning |
 | --- | --- |
 | `repeat` | Same image as `repeat_of`; `file_of` names the image whose file shows it. |
 | `min_side`, `bbox`, `id`, `pages` | Too small, an unusable box or id, or outside `--images-pages`. |
 | `file_bytes`, `encode`, `error` | Over the per-file cap, the encoder failed, or the renderer reported an error for this image. |
-| `scan-pages`, `copy` | Page scans skipped (`--scan-pages skip`), or a scan copy failed its checks. |
+| `scan-pages`, `copy` | Page scans skipped (`--scan-pages skip`), or a scan copy failed its checks (`copy`; on a `page-scan`, render-images renders the page). |
 | `budget`, `doc_budget`, `timeout`, `deadline`, `aborted` | The batch or document stopped; `resumable` is true when Doppler says a resume retries it. |
 | `renderer` | The batch's renderer failed; not resumable. |
+| `scan-not-copyable` | Only on an `unlinked` `picture` or `mask` with `fate: background` and no `repeat_of`: a page scan `--scan-pages copy` could not copy; render-images renders the page. Not resumable. |
 | `other` | A version 1 skip reason outside this vocabulary. |
 
 | `source` | Meaning |
@@ -381,6 +395,62 @@ and downloads each `extracted` file from the key derived from its id (never a li
 its size and SHA-256. `DIR` must be absent or an empty directory. It then runs `pdftomarkdown --images-resume DIR` in the PDF VM with the
 same PDF and settings, validates the returned folder like any other, stores it, and writes the ledger with
 `resume: true`. Nothing runs resumes yet.
+
+## Pending and stored files
+
+Migration 0156 makes the asset ledger keep extracted figures on every failure path:
+
+- **Pending, then stored.** Before each upload step (64 files), the figure step records the files as `pending` rows
+  under their exact keys. After the step's uploads land and check out, it flips them to `stored`, in the same order for
+  the first pass and `extract-markdown`. It does this as soon as the VM job returns, before the Markdown is stored, so a
+  later failure keeps them. Such failures include the Markdown or text pass, a later stage, a cancelled or failed run, or
+  a worker killed mid-upload. The level stays honest: `markdown_complete = false` until the checkpoint commits the
+  Markdown, and `partial` or `resumable` from the rows.
+- **Only stored rows count.** Only stored rows are served (slots, the assets route) or billed (`asset_bytes`). A crash
+  can leave unbilled orphans, never billed ghosts.
+- **Adopt, no VM.** The next attempt checks each pending row of the document's current run by streaming its object and
+  hashing it (`adoptPendingAssets`). An object of exactly the row's size and SHA-256 becomes `stored`. A missing object,
+  or one with other bytes, turns the image back into a resumable `aborted` one.
+- **Never overwritten.** Keys stay exactly Doppler's layout, so the stored `images/` folder is a plain `--images-resume`
+  DIR and `document.md`'s relative links resolve. Each figure is created with `If-None-Match: *`; Tigris returns 412
+  for a taken key, for both buffered and streamed bodies (probed 2026-11-13). An object already at the key is accepted
+  only when its SHA-256 is the manifest's, else the folder is refused (`object-conflict`) and the object is left as it
+  is. A store without conditional creates still writes under the run's own artifact root, and a stale run's ledger writes
+  are refused (`stale-write`).
+- **Never deleted on failure.** No failure path deletes a figure object or row:
+  - a failed upload reports `cleanup: "kept"`;
+  - the failed-figures and no-figures ledger writes are level-only.
+  A re-run that skips the figure step still takes the document off the resume queue: the level becomes that run's
+  (`none` or `disabled`, with no rows of that run).
+- **Only the level's run is current.** Rows an earlier run left are never served, counted or billed as current. The
+  assets route reads only rows of the level's run, and slots come from the document's current run.
+- **Who deletes.** Deleting the document or tenant purges its folder, as before. Run artifact retention purges a run's
+  prefix. Otherwise, the orphan GC sweep (`figure-orphan-gc` in the maintenance sweeper, resume runner PR) is the only
+  deleter: it removes objects under a document's `images/` folder that no ledger row vouches for, 24 hours after their
+  last write. Objects of a failed run that still have rows are kept until that run's purge or the document's deletion.
+- **A resume only adds.** It never rewrites or prunes a stored file (`resume-rewrite`). Its input is the shard's
+  `manifest.jsonl` alone: `downloadDopplerImagesDir` defaults to `manifestOnly`, so finished figures never travel back
+  into the VM.
+
+## Storage billing
+
+Stored figures are billed as storage, measured rather than estimated. The daily storage meter
+(`server/src/services/billing/storage-meter.ts`) reads `getOrgStorage`, which adds the sum of
+`document_extraction_levels.asset_bytes` to `objectBytes`. The figure bytes follow the same rules as source bytes:
+
+- Live documents (completed, not superseded) count. The daily meter leaves out extracts, which pay for their own
+  retention window.
+- Archived versions that are not yet purged also count.
+- Superseded, purged and failed documents add nothing.
+- Every sum is filtered by the organization, and the ledger's composite foreign key ties each row to its document's own
+  organization.
+
+The per-page artifact estimate (96 KiB per page) never included figures, so nothing is counted twice. The figure bytes
+are charged through the existing daily storage event and credit debit, once per organization per day. The event's
+metadata records `measuredArtifactBytes`, and so does `storage_meter_days.measured_artifact_bytes`. Pending uploads and
+orphaned objects that no committed ledger row vouches for are never billed. A failed document's figures are not billed
+while it is failed, exactly like its source file (the meter counts completed, non-superseded documents plus archived,
+not purged ones); they are billed once a retry completes it.
 
 ## Not yet
 

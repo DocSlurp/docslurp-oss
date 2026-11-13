@@ -6,7 +6,7 @@ vi.mock("../services/organizations.js", () => ({ getProjectAccess }));
 
 const {
   ChatModelNotAllowedError, chatEvalAccess, chatModelRefused, chatTurnNeedsEvalAccess, configuredChatEvalModels, parseChatEvalModels,
-  resolveChatAgentLimits, resolveChatModelRequest, resolveSpeedBoostChatModel,
+  SpeedBoostUnavailableError, managedChatModelProblem, resolveChatAgentLimits, resolveChatModelRequest, resolveSpeedBoostChatModel,
 } = await import("./chat-model-policy.js");
 const { chatAgentProviderOptions } = await import("../services/chat-mcp-agent.js");
 
@@ -41,10 +41,36 @@ describe("DOCSLURP_CHAT_EVAL_MODELS", () => {
 });
 
 describe("chat model resolution", () => {
-  it("uses the default only when model is omitted and honours catalog models for everyone", () => {
-    expect(resolveChatModelRequest({ requested: undefined, isAdmin: false, evalModels })).toMatchObject({ model: "z-ai/glm-5.3-flash", source: "default" });
+  it("resolves tiers to managed models and the default tier when nothing is named", () => {
+    expect(resolveChatModelRequest({ requested: undefined, isAdmin: false, evalModels })).toMatchObject({ model: "anthropic/claude-haiku-5.5", source: "default", tier: "fastest" });
     expect(resolveChatModelRequest({ requested: "  ", isAdmin: false, evalModels }).source).toBe("default");
-    expect(resolveChatModelRequest({ requested: "anthropic/claude-haiku-5.5", isAdmin: false, evalModels })).toMatchObject({ model: "anthropic/claude-haiku-5.5", source: "catalog" });
+    expect(resolveChatModelRequest({ tier: "balanced", isAdmin: false })).toMatchObject({ model: "openai/gpt-6-luna", source: "tier", tier: "balanced" });
+    expect(resolveChatModelRequest({ tier: "smart", isAdmin: false })).toMatchObject({ model: "openai/gpt-6.1-sol", tier: "smart" });
+    expect(resolveChatModelRequest({ tier: "smart", reasoning: "high", isAdmin: false })).toMatchObject({ reasoning: "high" });
+  });
+
+  it("uses the project's managed mapping for a tier", () => {
+    const tierModels = { fastest: "openai/gpt-6-luna" };
+    expect(resolveChatModelRequest({ tier: "fastest", isAdmin: false, tierModels })).toMatchObject({ model: "openai/gpt-6-luna", tier: "fastest" });
+    expect(resolveChatModelRequest({ isAdmin: false, tierModels })).toMatchObject({ model: "openai/gpt-6-luna", source: "default" });
+    expect(resolveChatModelRequest({ tier: "smart", isAdmin: false, tierModels }).model).toBe("openai/gpt-6.1-sol");
+  });
+
+  it("refuses every backend model reference from callers without eval access, catalog ids included", () => {
+    for (const requested of [
+      "anthropic/claude-haiku-5.5", "z-ai/glm-5.3-flash", "z-ai/glm-5.3-flash:nitro", "llm://openrouter/openai/gpt-6.1-sol",
+      "openai/gpt-6.1-sol?reasoning=high", "liquid/lfm-2.5-24b-a2b", "fastest",
+    ]) {
+      expect(() => resolveChatModelRequest({ requested, isAdmin: false, evalModels }), requested).toThrow(ChatModelNotAllowedError);
+    }
+    const error = (() => { try { resolveChatModelRequest({ requested: "openai/gpt-6.1-sol", isAdmin: false }); } catch (caught) { return caught as Error; } })();
+    // The refusal names the tiers and never echoes the model.
+    expect(error?.message).toContain("fastest, balanced, smart");
+    expect(error?.message).not.toContain("gpt");
+  });
+
+  it("refuses a request naming both a tier and a model, even for eval access", () => {
+    expect(() => resolveChatModelRequest({ requested: "anthropic/claude-haiku-5.5", tier: "smart", isAdmin: true, evalModels })).toThrow(ChatModelNotAllowedError);
   });
 
   it("refuses unknown models instead of silently falling back", () => {
@@ -54,10 +80,10 @@ describe("chat model resolution", () => {
   });
 
   it("accepts llm://openrouter/<id> wherever a bare id works, resolving to the bare id", () => {
-    expect(resolveChatModelRequest({ requested: " llm://openrouter/anthropic/claude-haiku-5.5 ", isAdmin: false, evalModels })).toMatchObject({ model: "anthropic/claude-haiku-5.5", source: "catalog" });
-    expect(resolveChatModelRequest({ requested: "LLM://OpenRouter/z-ai/glm-5.3-flash:nitro", isAdmin: false, evalModels })).toMatchObject({ model: "z-ai/glm-5.3-flash:nitro", source: "catalog" });
+    expect(resolveChatModelRequest({ requested: " llm://openrouter/anthropic/claude-haiku-5.5 ", isAdmin: true, evalModels })).toMatchObject({ model: "anthropic/claude-haiku-5.5", source: "catalog" });
+    expect(resolveChatModelRequest({ requested: "LLM://OpenRouter/z-ai/glm-5.3-flash:nitro", isAdmin: true, evalModels })).toMatchObject({ model: "z-ai/glm-5.3-flash:nitro", source: "catalog" });
     expect(resolveChatModelRequest({ requested: "llm://openrouter/liquid/lfm-2.5-24b-a2b", isAdmin: true, evalModels })).toMatchObject({ model: "liquid/lfm-2.5-24b-a2b", source: "eval" });
-    expect(chatTurnNeedsEvalAccess("llm://openrouter/anthropic/claude-haiku-5.5")).toBe(false);
+    expect(chatTurnNeedsEvalAccess("llm://openrouter/anthropic/claude-haiku-5.5")).toBe(true);
     expect(chatTurnNeedsEvalAccess("llm://openrouter/liquid/lfm-2.5-24b-a2b")).toBe(true);
     expect(parseChatEvalModels("llm://openrouter/liquid/lfm-2.5-24b-a2b").models).toEqual(["liquid/lfm-2.5-24b-a2b"]);
   });
@@ -84,8 +110,8 @@ describe("chat model resolution", () => {
 
   it("reads the allowlist from the environment for route pre-checks", async () => {
     vi.stubEnv("DOCSLURP_CHAT_EVAL_MODELS", "xiaomi/mimo-v2.6-flash");
-    expect(await chatModelRefused({ admin: true } as never, "xiaomi/mimo-v2.6-flash")).toBe(false);
-    expect(await chatModelRefused({ admin: false } as never, "xiaomi/mimo-v2.6-flash")).toBe(true);
+    expect(await chatModelRefused({ type: "session", admin: true } as never, "xiaomi/mimo-v2.6-flash")).toBe(false);
+    expect(await chatModelRefused({ type: "session", admin: false } as never, "xiaomi/mimo-v2.6-flash")).toBe(true);
     expect(await chatModelRefused(undefined, undefined)).toBe(false);
     expect(await chatModelRefused(undefined, "unknown/model")).toBe(true);
   });
@@ -98,13 +124,13 @@ describe("chat model resolution", () => {
     }
   });
 
-  it("reads the reasoning level from the model reference's options", () => {
-    expect(resolveChatModelRequest({ requested: undefined, isAdmin: false })).toMatchObject({ model: "z-ai/glm-5.3-flash", reasoning: "none" });
-    expect(resolveChatModelRequest({ requested: "llm://openrouter/deepseek/deepseek-v4.1-flash-1017?reasoning=high", isAdmin: false }))
-      .toEqual({ model: "deepseek/deepseek-v4.1-flash-1017", source: "catalog", reasoning: "high" });
-    expect(resolveChatModelRequest({ requested: "z-ai/glm-5.3-flash?effort=low", isAdmin: false })).toMatchObject({ model: "z-ai/glm-5.3-flash", reasoning: "low" });
-    expect(resolveChatModelRequest({ requested: "z-ai/glm-5.3-flash?reasoning_effort=minimal", isAdmin: false })).toMatchObject({ reasoning: "minimal" });
-    expect(resolveChatModelRequest({ requested: "z-ai/glm-5.3-flash?reasoning=off", isAdmin: false })).toMatchObject({ reasoning: "none" });
+  it("reads the reasoning level from an eval model reference's options", () => {
+    expect(resolveChatModelRequest({ requested: undefined, isAdmin: false })).toMatchObject({ model: "anthropic/claude-haiku-5.5", reasoning: "none" });
+    expect(resolveChatModelRequest({ requested: "llm://openrouter/deepseek/deepseek-v4.1-flash-1017?reasoning=high", isAdmin: true }))
+      .toEqual({ model: "deepseek/deepseek-v4.1-flash-1017", source: "catalog", reasoning: "high", tier: null });
+    expect(resolveChatModelRequest({ requested: "z-ai/glm-5.3-flash?effort=low", isAdmin: true })).toMatchObject({ model: "z-ai/glm-5.3-flash", reasoning: "low" });
+    expect(resolveChatModelRequest({ requested: "z-ai/glm-5.3-flash?reasoning_effort=minimal", isAdmin: true })).toMatchObject({ reasoning: "minimal" });
+    expect(resolveChatModelRequest({ requested: "z-ai/glm-5.3-flash?reasoning=off", isAdmin: true })).toMatchObject({ reasoning: "none" });
     for (const requested of ["z-ai/glm-5.3-flash?reasoning=max", "z-ai/glm-5.3-flash?temperature=2", "z-ai/glm-5.3-flash?reasoning=low&effort=high", "z-ai/glm-5.3-flash#x"]) {
       expect(() => resolveChatModelRequest({ requested, isAdmin: true, evalModels: new Set() }), requested).toThrow(ChatModelNotAllowedError);
     }
@@ -151,6 +177,11 @@ describe("DOCSLURP_CHAT_EVAL_ORG_IDS", () => {
     expect(await chatEvalAccess({ ...session, admin: true } as never, "ws-plain")).toBe(true);
   });
 
+  it("never gives a platform admin's API key eval access: an admin key chooses tiers like any programmatic caller", async () => {
+    expect(await chatEvalAccess({ ...key("server"), admin: true } as never, "ws-plain")).toBe(false);
+    expect(await chatModelRefused({ ...key("server"), admin: true } as never, "anthropic/claude-haiku-5.5", "ws-plain")).toBe(true);
+  });
+
   it("pre-checks stream models against the turn's project", async () => {
     vi.stubEnv("DOCSLURP_CHAT_EVAL_ORG_IDS", "org-eval");
     vi.stubEnv("DOCSLURP_CHAT_EVAL_MODELS", "liquid/lfm-2.5-24b-a2b");
@@ -163,21 +194,27 @@ describe("DOCSLURP_CHAT_EVAL_ORG_IDS", () => {
 describe("eval access lookups", () => {
   const session = { type: "session" as const, userId: "u", sessionId: "s", user: { id: "u", email: "", name: "" } };
 
-  it("is needed only for a non-catalog model or a raised agent limit", () => {
+  it("is needed for any backend model or a raised agent limit", () => {
     expect(chatTurnNeedsEvalAccess(undefined)).toBe(false);
     expect(chatTurnNeedsEvalAccess("  ")).toBe(false);
-    expect(chatTurnNeedsEvalAccess("z-ai/glm-5.3-flash", { maxSteps: 6, maxToolCalls: 2, searchConcurrency: 4 })).toBe(false);
+    expect(chatTurnNeedsEvalAccess(undefined, { maxSteps: 6, maxToolCalls: 2, searchConcurrency: 4 })).toBe(false);
+    expect(chatTurnNeedsEvalAccess("z-ai/glm-5.3-flash")).toBe(true);
     expect(chatTurnNeedsEvalAccess("liquid/lfm-2.5-24b-a2b")).toBe(true);
     expect(chatTurnNeedsEvalAccess(undefined, { maxSteps: 9 })).toBe(true);
     expect(chatTurnNeedsEvalAccess(undefined, { searchConcurrency: 8 })).toBe(true);
   });
 
-  it("skips the project lookup when the stream pre-check names a catalog model or none", async () => {
+  it("skips the project lookup when the stream pre-check names no model", async () => {
     vi.stubEnv("DOCSLURP_CHAT_EVAL_ORG_IDS", "org-eval");
     getProjectAccess.mockClear();
-    expect(await chatModelRefused(session, "anthropic/claude-haiku-5.5", "ws-eval")).toBe(false);
     expect(await chatModelRefused(session, undefined, "ws-eval")).toBe(false);
     expect(getProjectAccess).not.toHaveBeenCalled();
+  });
+
+  it("refuses a catalog model to a non-eval session but lets an eval org's session name it", async () => {
+    vi.stubEnv("DOCSLURP_CHAT_EVAL_ORG_IDS", "org-eval");
+    expect(await chatModelRefused(session, "anthropic/claude-haiku-5.5", "ws-other")).toBe(true);
+    expect(await chatModelRefused(session, "anthropic/claude-haiku-5.5", "ws-eval")).toBe(false);
   });
 });
 
@@ -191,11 +228,40 @@ describe("explicit Speed boost admission", () => {
     expect(resolveSpeedBoostChatModel(model, true)).toBe(`${model}:nitro`);
     expect(resolveSpeedBoostChatModel(`${model}:nitro`, true)).toBe(`${model}:nitro`);
   });
-  it("answers boosted GLM 5.3 Flash with DeepSeek V4.1 Flash on Nitro, keeping an explicit GLM Nitro id", () => {
-    expect(resolveSpeedBoostChatModel("z-ai/glm-5.3-flash", true)).toBe("deepseek/deepseek-v4.1-flash-1017:nitro");
+  it("answers boosted GLM 5.3 Flash on its own Nitro variant, never swapping to another model", () => {
+    // No swap to another model since 2026-11-13: GLM answers on its own Nitro variant, never DeepSeek V4.1 Flash.
+    expect(resolveSpeedBoostChatModel("z-ai/glm-5.3-flash", true)).toBe("z-ai/glm-5.3-flash:nitro");
     expect(resolveSpeedBoostChatModel("z-ai/glm-5.3-flash:nitro", true)).toBe("z-ai/glm-5.3-flash:nitro");
   });
-  it.each(["openai/gpt-6-luna-pro", "arbitrary/model", "openai/gpt-6.1-sol"])("refuses unsupported boost %s before spending", (model) => {
-    expect(() => resolveSpeedBoostChatModel(model, true)).toThrow(ChatModelNotAllowedError);
+  it.each(["openai/gpt-6-luna-pro", "arbitrary/model", "openai/gpt-6.1-sol", "anthropic/claude-haiku-5.5"])("refuses unsupported boost %s before spending, naming the tiers that have one", (model) => {
+    expect(() => resolveSpeedBoostChatModel(model, true)).toThrow(SpeedBoostUnavailableError);
+    try { resolveSpeedBoostChatModel(model, true); } catch (error) {
+      expect(error).toMatchObject({ status: 400, code: "speed_boost_unavailable" });
+      expect((error as Error).message).toBe("Speed boost is available for the balanced tier. Choose it, or turn Speed boost off.");
+      expect((error as Error).message).not.toMatch(/omit model/i);
+    }
+  });
+});
+
+describe("Speed boost follows the project's tier mapping", () => {
+  it("names the tiers with a fast route under the project's mapping", () => {
+    // An operator mapped fastest to Luna (fast route) and balanced to Haiku (none).
+    const tierModels = { fastest: "openai/gpt-6-luna", balanced: "anthropic/claude-haiku-5.5" };
+    try { resolveSpeedBoostChatModel("anthropic/claude-haiku-5.5", true, tierModels); } catch (error) {
+      expect((error as Error).message).toBe("Speed boost is available for the fastest tier. Choose it, or turn Speed boost off.");
+    }
+    expect(resolveSpeedBoostChatModel("openai/gpt-6-luna", true, tierModels)).toBe("openai/gpt-6-luna:nitro");
+  });
+});
+
+describe("managed tier mappings", () => {
+  it("admits reviewed, priced catalog base models only", () => {
+    expect(managedChatModelProblem("anthropic/claude-haiku-5.5", new Set())).toBeNull();
+    expect(managedChatModelProblem("z-ai/glm-5.3-flash:nitro", new Set())).toMatch(/speedBoost/);
+    expect(managedChatModelProblem("llm://openrouter/anthropic/claude-haiku-5.5", new Set())).toMatch(/bare/);
+    expect(managedChatModelProblem("liquid/lfm-2.5-24b-a2b", new Set())).toMatch(/reviewed/);
+    expect(managedChatModelProblem("openai/gpt-6-sol-pro", new Set(["openai/gpt-6-sol-pro"]))).toBe("prohibited model");
+    // A tier mapping is automatic selection: DeepSeek V4.1 Flash is never mapped (owner, 2026-11-13).
+    expect(managedChatModelProblem("deepseek/deepseek-v4.1-flash-1017", new Set())).toBe("never selected automatically");
   });
 });

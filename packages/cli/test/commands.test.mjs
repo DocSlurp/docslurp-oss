@@ -282,6 +282,19 @@ test("chat supports sessions and machine-readable answers", async () => {
   assert.deepEqual(JSON.parse(result.stdout), body);
 });
 
+test("chat sends a tier and refuses --model before any request", async () => {
+  const body = { answer: "A", sessionId: "s", citations: [] };
+  const tiered = await invoke(["chat", "Why?", "--tier", "smart", "--reasoning", "low", "--json"], () => ({ body }), { project: "project" });
+  assert.equal(tiered.code, 0, tiered.stderr);
+  assert.deepEqual(JSON.parse(tiered.requests[0].body), { q: "Why?", project: "project", tier: "smart", reasoning: "low" });
+  for (const args of [["--model", "anthropic/claude-haiku-5.5"], ["--tier", "openai/gpt-6.1-sol"]]) {
+    const refused = await invoke(["chat", "Why?", ...args], () => ({ body }), { project: "project" });
+    assert.notEqual(refused.code, 0);
+    assert.match(refused.stderr, /fastest, balanced, smart/);
+    assert.equal(refused.requests.length, 0);
+  }
+});
+
 test("search context emits full cited text and JSON emits the API envelope", async () => {
   const text = "Long evidence ".repeat(50);
   const body = { results: [{ score: 1, text, citation: { filename: "policy.pdf", documentId: "doc", pageNumbers: [2] } }], availability: null };
@@ -411,6 +424,43 @@ test("--json emits a safe typed HTTP error without raw body diagnostics", async 
   assert.equal(body.error.requestId, "req-safe-2");
   assert.equal(body.error.retryAfterSeconds, 30);
   assert.doesNotMatch(result.stderr, /secret|private/);
+});
+
+test("--chart-export sends pipeline.chartExport on upload and ingest-url, chartExport on reprocess and estimates, and rejects unknown tiers", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "docslurp-cli-"));
+  try {
+    const file = join(dir, "note.txt");
+    await writeFile(file, "Plain text");
+    const respond = () => ({ body: { run: { id: "run" }, project: { id: "project", name: "Docs" }, documents: [{}], estimate: { pages: 1, documents: 1, credits: null, seconds: null, basis: "x" } } });
+    let result = await invoke(["upload", file, "--chart-export", "free", "--quality", "fast"], respond);
+    assert.equal(result.code, 0, result.stderr);
+    assert.match(result.requests[0].body, /name="pipeline"\r\n\r\n\{"quality":"fast","chartExport":\{"tier":"free"\}\}/);
+
+    result = await invoke(["ingest-url", "https://example.test/a.pdf", "--chart-export", "models"], respond);
+    assert.equal(result.code, 0, result.stderr);
+    assert.deepEqual(JSON.parse(result.requests[0].body).pipeline, { chartExport: { tier: "models" } });
+
+    result = await invoke(["reprocess", "run-1", "--chart-export", "off"], respond);
+    assert.deepEqual(JSON.parse(result.requests[0].body), { chartExport: { tier: "off" } });
+    result = await invoke(["reprocess", "run-1", "--chart-export", "models", "--estimate"], respond);
+    assert.match(result.requests[0].url, /\/reprocess\/estimate$/);
+    assert.deepEqual(JSON.parse(result.requests[0].body), { chartExport: { tier: "models" } });
+
+    result = await invoke(["upload", file, "--chart-export", "models", "--estimate"], respond);
+    assert.match(result.requests[0].url, /\/v1\/uploads\/estimate$/);
+    assert.deepEqual(JSON.parse(result.requests[0].body).chartExport, { tier: "models" });
+
+    // Without the flag the project's setting (or the API default, off) applies: nothing is sent.
+    result = await invoke(["upload", file], respond);
+    assert.doesNotMatch(result.requests[0].body, /chartExport/);
+
+    for (const bad of ["smart", "on", ""]) {
+      result = await invoke(["upload", file, "--chart-export", bad], respond);
+      assert.notEqual(result.code, 0);
+      assert.match(result.stderr, /--chart-export must be off, free or models/);
+      assert.deepEqual(result.requests, []);
+    }
+  } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
 test("--quality sends pipeline.quality on upload and ingest-url, and rejects unknown modes", async () => {

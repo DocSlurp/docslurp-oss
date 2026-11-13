@@ -1,17 +1,56 @@
 import { realtimeCanaryOrgAllowed } from "./rollout-scope.js";
 import { readPageImageReadiness } from "../services/page-image-readiness.js";
-import { realtimeSuggestionsSnapshotSchema } from "@docslurp/shared";
+import { customerPipelineView, realtimeSuggestionsSnapshotSchema } from "@docslurp/shared";
 import { readProjectSuggestions } from "../services/project-suggestions.js";
 import type { RealtimeBackend, DashboardResource } from "./broker.js";
 import { sql } from "../db.js";
 import { isConfiguredAdminUserSql } from "../lib/admin-emails.js";
 import { projectUsageTotals, runUsageCostSummaries } from "../services/usage-attribution.js";
 import { getBillingOverview } from "../services/billing/overview.js";
-import { getProject } from "../services/projects.js";
+import { getAuthorizedProjectRecord } from "../services/projects.js";
 import { listDocumentIndexEntries, getRealtimeViewerPayload } from "../services/documents.js";
 import { mapProjectRun, type ProjectRunRow } from "../services/run-records.js";
 import { buildRunProgressSnapshot } from "../services/runs.js";
+import { redactOperatorRun } from "../services/progress-snapshot.js";
 import { realtimeRunProgress, realtimeRunRecord } from "./run-projection.js";
+import { realtimeScopeKey } from "./broker.js";
+
+type EconomicsRow = { projectId: string; name: string; documentCount: number; pageCount: number; sourceBytes: number; activeRuns: number; pagesProcessed: number; runtimeMs: number };
+
+/**
+ * Per-project economics for one page of an organization's projects, from
+ * trigger-maintained counters instead of aggregating every document and run:
+ * - current documents (not superseded, any status) = the completed corpus in
+ *   project_corpus_stats + in-flight documents (documents_project_in_flight_idx)
+ *   + failed/cancelled ones (documents_project_terminal_current_idx, 0153);
+ * - completed-run pages and runtime: project_corpus_stats (0153 run trigger);
+ * - active runs: project_runs_project_active_idx (0153).
+ * Values equal the former per-project aggregates (realtime/economics.db.test.ts).
+ */
+export async function readProjectEconomics(orgId: string, page: number): Promise<EconomicsRow[]> {
+  return await sql<EconomicsRow[]>`
+    select w.id as "projectId", w.name,
+      (coalesce(cs.document_count,0) + inflight.documents + terminal.documents)::int as "documentCount",
+      (coalesce(cs.page_count,0) + inflight.pages + terminal.pages)::float8 as "pageCount",
+      (coalesce(cs.source_bytes,0) + inflight.bytes + terminal.bytes)::float8 as "sourceBytes",
+      active.runs as "activeRuns",
+      coalesce(cs.completed_run_pages_processed,0)::float8 as "pagesProcessed",
+      coalesce(cs.completed_run_runtime_ms,0)::float8 as "runtimeMs"
+    from projects w
+    left join project_corpus_stats cs on cs.project_id = w.id
+    cross join lateral (
+      select count(*)::bigint as documents, coalesce(sum(d.page_count),0)::bigint as pages, coalesce(sum(d.file_size),0)::numeric as bytes
+      from documents d where d.project_id = w.id and d.status not in ('completed','failed','cancelled') and d.superseded_at is null
+    ) inflight
+    cross join lateral (
+      select count(*)::bigint as documents, coalesce(sum(d.page_count),0)::bigint as pages, coalesce(sum(d.file_size),0)::numeric as bytes
+      from documents d where d.project_id = w.id and d.status in ('failed','cancelled') and d.superseded_at is null
+    ) terminal
+    cross join lateral (
+      select count(*)::int as runs from project_runs r where r.project_id = w.id and r.status in ('queued','processing')
+    ) active
+    where w.org_id = ${orgId} order by w.id limit 51 offset ${page * 50}`;
+}
 
 /** One statement and one MVCC boundary for a socket's bounded resource sweep.
  * This matches getProjectAccess, including explicitly shared personal projects.
@@ -70,6 +109,14 @@ export const realtimeBackend: RealtimeBackend = {
     const rows = await sql<{ org_id: string; revision: string }[]>`select org_id, revision::text from realtime_revisions where org_id = any(${sql.array(orgIds)})`;
     return new Map(rows.map(row => [row.org_id, row.revision]));
   },
+  async scopeRevisions(keys) {
+    if (!keys.length) return new Map();
+    const rows = await sql<{ org_id: string; scope: string; revision: string }[]>`
+      select org_id, scope, revision::text from realtime_scope_revisions
+      where org_id = any(${sql.array([...new Set(keys.map(key => key.orgId))])})
+        and scope = any(${sql.array([...new Set(keys.map(key => key.scope))])})`;
+    return new Map(rows.map(row => [realtimeScopeKey(row.org_id, row.scope), row.revision]));
+  },
   async listen(wake) {
     const subscription = await sql.listen("realtime_changed", wake);
     return () => subscription.unlisten();
@@ -93,7 +140,11 @@ export const realtimeBackend: RealtimeBackend = {
           where r.org_id = ${orgId} and docslurp_project_access(w.id, ${userId})
           order by (r.status in ('queued','processing')) desc, r.updated_at desc, r.id limit 201`;
         const costs = await runUsageCostSummaries(runs.slice(0, 200).map(run => run.id));
-        return { runs: runs.slice(0, 200).map(run => realtimeRunRecord(mapProjectRun(run, costs.get(run.id)))), truncated: runs.length > 200 };
+        // Customers never see backend models: run pipelines lose their managed model fields, and model keys and ids go,
+        // exactly as on the REST and SSE activity paths. Platform operators see the raw records.
+        const operator = await isConfiguredAdminUserSql(sql, userId);
+        const view = (run: ReturnType<typeof mapProjectRun>) => operator ? run : redactOperatorRun(run);
+        return { runs: runs.slice(0, 200).map(run => realtimeRunRecord(view(mapProjectRun(run, costs.get(run.id))))), truncated: runs.length > 200 };
       }
       case "suggestions": return realtimeSuggestionsSnapshotSchema.parse(await readProjectSuggestions(userId, resource.projectId, { limit: 8 }));
       case "page-image": return await readPageImageReadiness(userId, resource);
@@ -102,19 +153,17 @@ export const realtimeBackend: RealtimeBackend = {
         if (!viewer) throw new Error("not_found");
         return viewer;
       }
-      case "project": return await getProject(resource.projectId, userId, { refineNames: false });
+      case "project": {
+        const project = await getAuthorizedProjectRecord(resource.projectId, orgId);
+        if (!project) throw new Error("not_found");
+        // The REST routes return publicProjectView; the socket applies the same customer view (no managed model fields).
+        if (await isConfiguredAdminUserSql(sql, userId)) return project;
+        return { ...project, pipeline: customerPipelineView(project.pipeline) };
+      }
       case "documents": return await listDocumentIndexEntries({ userId, orgId,
         projectId: resource.projectId, limit: 50, offset: resource.page * 50 });
       case "economics": {
-        const rows = await sql<{ projectId: string; name: string; documentCount: number; pageCount: number; sourceBytes: number; activeRuns: number; pagesProcessed: number; runtimeMs: number }[]>`
-          select w.id as "projectId", w.name,
-            (select count(*)::int from documents d where d.project_id=w.id and d.superseded_at is null) as "documentCount",
-            (select coalesce(sum(page_count),0)::float8 from documents d where d.project_id=w.id and d.superseded_at is null) as "pageCount",
-            (select coalesce(sum(file_size),0)::float8 from documents d where d.project_id=w.id and d.superseded_at is null) as "sourceBytes",
-            (select count(*)::int from project_runs r where r.project_id=w.id and r.status in ('queued','processing')) as "activeRuns",
-            (select coalesce(sum(pages_processed),0)::float8 from project_runs r where r.project_id=w.id and r.status='completed') as "pagesProcessed",
-            (select coalesce(sum(greatest(0,extract(epoch from(updated_at-created_at))*1000)),0)::float8 from project_runs r where r.project_id=w.id and r.status='completed') as "runtimeMs"
-          from projects w where w.org_id=${orgId} order by w.id limit 51 offset ${resource.page * 50}`;
+        const rows = await readProjectEconomics(orgId, resource.page);
         const projects = [];
         // Bound concurrent aggregate reads even for a large organization's board.
         for (let i=0; i<Math.min(rows.length,50); i+=5) {

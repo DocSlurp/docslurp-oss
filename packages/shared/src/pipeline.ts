@@ -28,7 +28,7 @@ import {
 } from "./deferred-indexing.js";
 import { isPrivateModelUri, parsePrivateModelUri } from "./private-endpoints.js";
 import { normalizeHostedModelRef } from "./model-uri.js";
-import { chartExportConfigSchema, defaultChartExportConfig } from "./chart-export.js";
+import { chartExportConfigSchema, defaultChartExportConfig, upgradeStoredPipelineChartExport } from "./chart-export.js";
 
 export const organizationRoleSchema = z.enum([
   "owner",
@@ -602,9 +602,16 @@ export const pipelineFeaturesSchema = z
     }).default({ enabled: true }),
     /**
      * Chart and diagram export: re-express detected charts/diagrams as description, Mermaid, Vega-Lite,
-     * matplotlib and CSV. Off by default; enabling it or adding formats recommends a reindex.
+     * matplotlib and CSV. `tier` unset means the run origin's default (app uploads: `free`; API, MCP, SDK, CLI:
+     * `off`, see `resolveChartExportTier`); the server stamps the resolved tier on each run.
      */
     chartExport: chartExportConfigSchema.default(defaultChartExportConfig),
+    /**
+     * Figure extraction from PDFs (the sandboxed figure pass): on by default. Off skips the pass for this project's
+     * new runs; existing figures stay until the documents are reprocessed. The deployment ceiling
+     * (`DOCSLURP_DOPPLER_IMAGE_EXTRACT`) still decides whether the pass exists at all.
+     */
+    figures: z.boolean().default(true),
   })
   .superRefine((value, ctx) => {
     if (value.afterFirstPass === "none" && value.firstPass === "off") {
@@ -757,6 +764,7 @@ export const defaultPipelineFeatures: PipelineFeatures = {
   pageRouter: defaultPageRouterConfig,
   mediaVideo: { enabled: true },
   chartExport: defaultChartExportConfig,
+  figures: true,
 };
 
 const alwaysEnabled = () => true;
@@ -872,8 +880,10 @@ const basePipelineStagePlan: readonly PipelineStagePlanItem[] = [
     label: "Vision",
     phase: "extract",
     phaseLabel: "Extract",
-    // Chart export runs here too, with or without general vision fallback.
-    isEnabled: (features) => features.visionFallback || features.chartExport?.enabled === true,
+    // Chart export runs here too, with or without general vision fallback; the free tier (the default) included. The
+    // free tier only reads charts that carry their own data: no page is re-read and no model is called.
+    // An unset tier resolves per run (the server stamps it at run creation), so only an explicit `off` drops the stage.
+    isEnabled: (features) => features.visionFallback || features.chartExport?.tier !== "off",
   },
   {
     stage: "pii-detect",
@@ -1109,7 +1119,8 @@ export function sanitizeStoredPipeline<T>(stored: T, source: string): T {
   if (!isPlainRecord(stored)) return stored;
   // Canonical ids drop retired extractors silently; a stored read reports what they named.
   const retired = isPlainRecord(stored.documentExtraction) ? dropRetiredExtractorIds(stored.documentExtraction).dropped : [];
-  let next: Record<string, unknown> = withCanonicalExtractorIds(stored);
+  // Legacy chart export keys (rows from before migration 0151 or from an older API during a deploy): mapped, not dropped.
+  let next: Record<string, unknown> = upgradeStoredPipelineChartExport(withCanonicalExtractorIds(stored));
   const dropped: string[] = retired.map((entry) => `documentExtraction.${entry}`);
   if (isPlainRecord(next.documentExtraction)) {
     const extraction = sanitizeStoredDocumentExtraction(next.documentExtraction);
@@ -1164,9 +1175,20 @@ export function mergePipelineFeatures(
   const normalizedBase = normalizePipelineFeatures(base ?? defaultPipelineFeatures);
   overrides = migrateLegacyQualitySettings(overrides);
   if (!overrides || Object.keys(overrides).length === 0) return normalizedBase;
+  // A profile override changes the model: the base's model URI and target (its old profile's, or an admin override of
+  // it) go, so the new profile's default applies, unless the override names its own.
+  const baseRecord = { ...(normalizedBase as unknown as Record<string, unknown>) };
+  for (const section of ["embedding", "vision"] as const) {
+    const override = (overrides as Record<string, unknown>)[section] as Record<string, unknown> | undefined;
+    const current = baseRecord[section] as Record<string, unknown> | undefined;
+    if (override && typeof override.profile === "string" && current && override.profile !== current.profile && override.modelUri === undefined) {
+      const { modelUri: _modelUri, target: _target, ...rest } = current;
+      baseRecord[section] = rest;
+    }
+  }
   return normalizePipelineFeatures(
     mergeOverrideRecord(
-      normalizedBase as unknown as Record<string, unknown>,
+      baseRecord,
       overrides as Record<string, unknown>,
       0,
     ) as PipelineFeatureOverrides,
@@ -1652,6 +1674,7 @@ const FIELD_SEED_STAGES: Record<keyof PipelineFeatures, readonly PipelineRunStag
   mediaVideo: ["extract-markdown"],
   // Routed visual extraction (chart-data / diagram assignments) runs in vision-extract; exports attach there.
   chartExport: ["vision-extract"],
+  figures: ["extract-markdown"],
 };
 
 /**

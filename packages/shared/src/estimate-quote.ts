@@ -3,6 +3,7 @@ import { z } from "zod";
 import { isBillingEnforced, pipelineProfileIdSchema } from "./billing.js";
 import { fileProfileSchema } from "./file-profile.js";
 import { CHAT_ANSWER_TIERS, pricing } from "./pricing-provider.js";
+import { CHART_EXPORT_TIER_UNAVAILABLE_CODE, CHART_EXPORT_FORMATS, chartExportFormatSchema, chartExportOverrideRefusal, chartExportTierSchema, defaultChartExportConfig, effectiveChartExportConfig, resolveChartExportTier, type ChartExportTier, type RunOrigin } from "./chart-export.js";
 import type { PipelineFeatures } from "./pipeline.js";
 import type { CostEstimate } from "./jobs.js";
 import type { UploadMediaEstimate } from "./media-upload-estimate.js";
@@ -48,6 +49,14 @@ export const quoteSettingsSchema = z.strictObject({
   chatAnswersPerMonth: z.number().int().min(0).max(1_000_000),
   /** The chat model class the answers use. */
   chatTier: z.enum(CHAT_ANSWER_TIERS as unknown as [string, ...string[]]),
+  /**
+   * Chart and diagram export tier. Omitted: the project's tier, else the caller's default (the DocSlurp app: free; API,
+   * MCP, SDK and CLI: off). The deploy switch caps it. Only `models` (reading charts with AI) is priced.
+   */
+  chartExport: chartExportTierSchema,
+  /** Chart export formats and diagrams the `models` tier prices with: the project's own, so the quote's charts line equals the upload's `chartExport.credits`. */
+  chartFormats: z.array(chartExportFormatSchema).min(1).max(CHART_EXPORT_FORMATS.length),
+  chartDiagrams: z.boolean(),
 });
 export type QuoteSettings = z.infer<typeof quoteSettingsSchema>;
 
@@ -64,7 +73,27 @@ export const DEFAULT_QUOTE_SETTINGS: QuoteSettings = {
   searchesPerMonth: 0,
   chatAnswersPerMonth: 0,
   chatTier: "standard",
+  chartExport: "off",
+  chartFormats: [...defaultChartExportConfig.formats],
+  chartDiagrams: defaultChartExportConfig.diagrams,
 };
+
+type QuoteOrigin = { origin?: RunOrigin; env?: Record<string, string | undefined> };
+
+/**
+ * The chart tier a quote prices: the request's, else the project's (`base`), else the caller's origin default; then
+ * capped by the deploy switch, as ingest resolves it (`stampRunChartExport` + the worker's ceiling).
+ */
+function quoteChartTier(requested: ChartExportTier | undefined, base: ChartExportTier | undefined, options: QuoteOrigin): ChartExportTier {
+  const env = options.env ?? process.env;
+  for (const value of [requested, base]) {
+    if (value !== undefined && !chartExportTierSchema.safeParse(value).success) throw new QuoteSettingsError("chartExport must be off, free or models");
+  }
+  // A requested `models` quote where the deployment does not offer it is refused, as the upload itself would be.
+  if (requested && chartExportOverrideRefusal(requested, env)) throw new QuoteSettingsError("That chart export tier is not available on this deployment", CHART_EXPORT_TIER_UNAVAILABLE_CODE);
+  const tier = resolveChartExportTier({ requested: requested ?? null, project: base ? { tier: base } : null, origin: options.origin ?? "machine", env });
+  return effectiveChartExportConfig({ ...defaultChartExportConfig, tier }, env).tier;
+}
 
 /** One file to estimate: name, size and type, a counted page count or duration, and its client file profile. */
 export const estimateFileSchema = z.strictObject({
@@ -88,7 +117,7 @@ export type CreditRange = { low: number; high: number };
 
 /** A neutral, customer-facing line: what is charged, never how it is derived. */
 export type EstimateLine = {
-  id: "pages" | "media" | "features" | "storage" | "search" | "chat";
+  id: "pages" | "media" | "features" | "charts" | "storage" | "search" | "chat";
   label: string;
   period: "once" | "month";
   credits: CreditRange;
@@ -96,8 +125,9 @@ export type EstimateLine = {
 
 export type EstimateQuote = {
   kind: "estimate";
-  /** The pricing rules that priced this estimate, and until when it holds. */
+  /** The pricing rules that priced this estimate. */
   pricingVersion: string;
+  /** When to re-quote: a freshness hint, not a price hold. Prices may change without notice. */
   validUntil: string;
   /** `disabled`: this deployment does not bill, and every credit figure is null. */
   billing: "enforced" | "disabled";
@@ -141,6 +171,10 @@ export function quoteSettingsForPipeline(pipeline: PipelineFeatures): Partial<Qu
     ...features,
     videoFrames: pipeline.mediaVideo?.enabled !== false,
     speedBoost: pipeline.speedBoost === true,
+    // Only an explicit project tier; an unset one resolves per caller at quote time.
+    ...(pipeline.chartExport?.tier ? { chartExport: pipeline.chartExport.tier } : {}),
+    ...(pipeline.chartExport?.formats?.length ? { chartFormats: [...pipeline.chartExport.formats] } : {}),
+    ...(pipeline.chartExport ? { chartDiagrams: pipeline.chartExport.diagrams !== false } : {}),
   };
 }
 
@@ -177,8 +211,12 @@ export function quoteStoredWork(args: {
   settings?: Partial<QuoteSettings>;
   workerSlots?: number;
   env?: Record<string, string | undefined>;
+  origin?: RunOrigin;
 }): EstimateQuote {
-  const settings = quoteSettingsSchema.parse({ ...DEFAULT_QUOTE_SETTINGS, ...args.base, ...args.settings });
+  const settings = quoteSettingsSchema.parse({
+    ...DEFAULT_QUOTE_SETTINGS, ...args.base, ...args.settings,
+    chartExport: quoteChartTier(args.settings?.chartExport, args.base?.chartExport, args),
+  });
   if (settings.indexing === "visual" && settings.quality === "fast") throw new QuoteSettingsError("Visual indexing reads every page and cannot be combined with fast quality");
   const billing = isBillingEnforced(args.env ?? process.env) ? "enforced" : "disabled";
   const files = args.files.map(({ profile: _ignored, ...file }) => file);
@@ -191,6 +229,12 @@ export function quoteStoredWork(args: {
 /** Settings a project could not be configured with (a quote refuses them as the project API does). */
 export class QuoteSettingsError extends Error {
   override name = "QuoteSettingsError";
+  /** The public error code; `invalid_request` unless a specific refusal (`chart_export_tier_unavailable`). */
+  readonly code: string;
+  constructor(message: string, code = "invalid_request") {
+    super(message);
+    this.code = code;
+  }
 }
 
 /**
@@ -200,9 +244,12 @@ export class QuoteSettingsError extends Error {
  */
 export function quoteEstimate(
   request: EstimateRequest,
-  options: { base?: Partial<QuoteSettings>; workerSlots?: number; env?: Record<string, string | undefined> } = {},
+  options: { base?: Partial<QuoteSettings>; workerSlots?: number; env?: Record<string, string | undefined>; origin?: RunOrigin } = {},
 ): EstimateQuote {
-  const settings = quoteSettingsSchema.parse({ ...DEFAULT_QUOTE_SETTINGS, ...options.base, ...request.settings });
+  const settings = quoteSettingsSchema.parse({
+    ...DEFAULT_QUOTE_SETTINGS, ...options.base, ...request.settings,
+    chartExport: quoteChartTier(request.settings?.chartExport, options.base?.chartExport, options),
+  });
   if (settings.indexing === "visual" && settings.quality === "fast") throw new QuoteSettingsError("Visual indexing reads every page and cannot be combined with fast quality");
   const billing = isBillingEnforced(options.env ?? process.env) ? "enforced" : "disabled";
   const files = request.files.map((file) => applyFileProfile(file));

@@ -3,7 +3,7 @@ import { htmlTableSources } from "../pipeline/chunking.js";
 import { createHash } from "node:crypto";
 
 import { RunPolicyError } from "../lib/document-failure.js";
-import { calculateAiUsageCostCents, buildPricedAiUsageLedgerEvent, resolvePipelineTextModel, pipelineVersionFeatures } from "@docslurp/shared";
+import { calculateAiUsageCostCents, buildPricedAiUsageLedgerEvent, resolveAllowedPipelineTextModel, pipelineVersionFeatures } from "@docslurp/shared";
 
 import type { Config } from "../config.js";
 import type { Stage, WorkflowState } from "../pipeline/pipeline.js";
@@ -162,7 +162,7 @@ export class EmbedStage implements Stage {
           let contextKey: string | undefined;
           let reusedDocumentContext: string | undefined;
           const lookupReusableContext = async () => {
-            const contextModel = resolvePipelineTextModel(state.run.pipeline, "contextual-chunk-preamble", this.config.textGenerationModel);
+            const contextModel = resolveAllowedPipelineTextModel(state.run.pipeline, "contextual-chunk-preamble", this.config.textGenerationModel);
             if (!textModelApiKey(this.config.openRouterApiKey, contextModel)) return;
             // Logs/audits a privacy block; contextualize then uses the local heuristic.
             const hostedContextAllowed = await allowHostedCall(

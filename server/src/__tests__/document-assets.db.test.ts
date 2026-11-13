@@ -38,13 +38,13 @@ beforeAll(async () => {
     ('doc-blocked', 'org-a', 'ua', 'proj-a', 'run-a', 'blocked.pdf', 'application/pdf', 'kd', 'pii_blocked', 3)`;
   for (const [doc, org, project, user, run] of [["doc-a", "org-a", "proj-a", "ua", "run-a"], ["doc-b", "org-b", "proj-b", "ub", "run-b"], ["doc-busy", "org-a", "proj-a", "ua", "run-a"], ["doc-blocked", "org-a", "proj-a", "ua", "run-a"]] as const) {
     await sql`insert into document_assets (document_id, org_id, project_id, run_id, asset_id, page_number, kind, fate, status, reason,
-        resumable, source, format, bytes, sha256, width, height, link_path, file_of, storage_key, obj_num, obj_gen, bbox) values
+        resumable, source, format, bytes, sha256, width, height, link_path, file_of, storage_key, obj_num, obj_gen, bbox, storage_state) values
       (${doc}, ${org}, ${project}, ${run}, 'p1.1', 1, 'picture', 'block', 'extracted', null, false, 'render', 'webp', 20, ${SHA}, 6, 4,
-        'images/page-0001/image-001.webp', 'p1.1', ${`${user}/${run}/doppler/${doc}/images/page-0001/image-001.webp`}, 12, 0, '{10,20,110,220}'),
+        'images/page-0001/image-001.webp', 'p1.1', ${`${user}/${run}/doppler/${doc}/images/page-0001/image-001.webp`}, 12, 0, '{10,20,110,220}', 'stored'),
       (${doc}, ${org}, ${project}, ${run}, 'p2.1', 2, 'picture', 'block', 'not-extracted', 'repeat', false, null, 'webp', null, null, null, null,
-        'images/page-0001/image-001.webp', 'p1.1', null, 12, 0, '{10,20,110,220}'),
-      (${doc}, ${org}, ${project}, null, 'p3.2', 3, 'picture', 'inline', 'not-extracted', 'budget', true, null, 'webp', null, null, null, null,
-        'images/page-0003/image-002.webp', null, null, null, null, null)`;
+        'images/page-0001/image-001.webp', 'p1.1', null, 12, 0, '{10,20,110,220}', 'none'),
+      (${doc}, ${org}, ${project}, ${run}, 'p3.2', 3, 'picture', 'inline', 'not-extracted', 'budget', true, null, 'webp', null, null, null, null,
+        'images/page-0003/image-002.webp', null, null, null, null, null, 'none')`;
     await sql`insert into document_extraction_levels (document_id, org_id, project_id, run_id, markdown_complete, images_status, images_exit_code,
         manifest_version, manifest_key, manifest_sha256, assets_total, assets_extracted, assets_not_extracted, assets_resumable, source_render,
         asset_bytes, last_cut_page)
@@ -92,6 +92,31 @@ describe("getDocumentAssetLedger", () => {
     // Storage keys (files, the stored manifest) stay internal.
     expect(JSON.stringify(ledger)).not.toContain("ua/run-a/doppler");
     expect(JSON.stringify(ledger)).not.toContain("manifest.json");
+  });
+
+  it("links only a stored file: a pending upload has no slot, for itself or its repeats", async () => {
+    await sql`update document_assets set storage_state = 'pending' where document_id = 'doc-a' and asset_id = 'p1.1'`;
+    try {
+      const ledger = await service.getDocumentAssetLedger({ orgId: "org-a", documentId: "doc-a" });
+      expect(ledger?.assets.map((a) => [a.id, a.slot])).toEqual([["p1.1", null], ["p2.1", null], ["p3.2", null]]);
+    } finally {
+      await sql`update document_assets set storage_state = 'stored' where document_id = 'doc-a' and asset_id = 'p1.1'`;
+    }
+  });
+
+  it("serves only the level's current rows: an earlier run's rows, or rows after a re-run without figures, are not current", async () => {
+    try {
+      await sql`update document_extraction_levels set assets_current = false, images_status = 'disabled', assets_total = 0, assets_extracted = 0,
+        assets_not_extracted = 0, assets_resumable = 0, source_render = 0, asset_bytes = 0 where document_id = 'doc-a'`;
+      expect((await service.getDocumentAssetLedger({ orgId: "org-a", documentId: "doc-a" }))?.assets).toEqual([]);
+      await sql`update document_extraction_levels set assets_current = true where document_id = 'doc-a'`;
+      await sql`update document_assets set run_id = null where document_id = 'doc-a' and asset_id = 'p3.2'`;
+      expect((await service.getDocumentAssetLedger({ orgId: "org-a", documentId: "doc-a" }))?.assets.map((a) => a.id)).toEqual(["p1.1", "p2.1"]);
+    } finally {
+      await sql`update document_assets set run_id = 'run-a' where document_id = 'doc-a' and asset_id = 'p3.2'`;
+      await sql`update document_extraction_levels set images_status = 'resumable', assets_total = 3, assets_extracted = 1, assets_not_extracted = 2,
+        assets_resumable = 1, source_render = 1, asset_bytes = 20 where document_id = 'doc-a'`;
+    }
   });
 
   it("keeps a PII-withheld image's size and hash, gives it no slot and says why with a fixed value", async () => {
