@@ -7,6 +7,7 @@ import { actorHasAnyApiKeyScope, getRequestActor } from "../lib/request-actor.js
 import { parseArtifactUri } from "../lib/artifacts.js";
 import { buildArtifactPreview } from "../services/artifact-security.js";
 import { userCanAccessArtifactUri } from "../services/documents.js";
+import { dopplerFolderServable, isDopplerSourcePointer } from "../services/document-assets.js";
 import { acceptApiKeys } from "../lib/route-auth.js";
 import { apiStatusError } from "../lib/api-error.js";
 import { validationHook } from "../lib/validation.js";
@@ -30,7 +31,9 @@ export const artifactsRoutes = new Hono()
     if (!parseArtifactUri(uri)) {
       return apiStatusError(c, 400, "Unsupported artifact URI");
     }
-    if (!(await userCanAccessArtifactUri(uri, userId, c.get("apiKey")?.orgId))) {
+    // The Doppler source pointer is never served; a Doppler folder file only for a `completed` document (the same
+    // refusals as the file proxy, behind the same artifact check).
+    if (isDopplerSourcePointer(uri) || !(await userCanAccessArtifactUri(uri, userId, c.get("apiKey")?.orgId)) || !(await dopplerFolderServable(uri))) {
       return apiStatusError(c, 404, "Artifact not found");
     }
 

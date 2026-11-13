@@ -129,6 +129,14 @@ export class ArtifactStore {
     await this.putBytes(key, Buffer.from(text, "utf8"), contentType);
   }
 
+  /**
+   * One streaming PUT of exactly `size` bytes (the Doppler images store, extractors/doppler-upload.ts): the body is read
+   * as the request sends it, so only the stream's buffer is held. A body that errors fails the request.
+   */
+  async putStream(key: string, body: Readable, size: number, contentType: string): Promise<void> {
+    await this.client.send(new PutObjectCommand({ Bucket: this.bucket, Key: key, Body: body, ContentLength: size, ContentType: contentType }));
+  }
+
   /** Files go up with their real size; any other stream goes through the multipart uploader. */
   async streamToStorage(key: string, stream: Readable, contentType: string): Promise<void> {
     const filePath = (stream as Readable & { path?: string | Buffer }).path;
