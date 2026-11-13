@@ -1,5 +1,5 @@
 /*
- * The document asset ledger (migration 0140): one `document_assets` row per image Doppler reports for a document and one
+ * The document asset ledger (migration 0141): one `document_assets` row per image Doppler reports for a document and one
  * `document_extraction_levels` row per document, written together in one transaction with an explicit organization and
  * project scope. Re-runs and resumes update rows in place; images a new manifest no longer lists are removed.
  *

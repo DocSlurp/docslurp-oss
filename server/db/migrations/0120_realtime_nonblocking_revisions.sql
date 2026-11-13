@@ -2,15 +2,21 @@
 -- Do not serialize independent ingestion transactions on one organization row.
 -- Each transaction writes its own counter; committed counters are folded without
 -- touching any other live writer. The aggregate view preserves the read contract.
-ALTER TABLE realtime_revisions RENAME TO realtime_revision_counters;
-ALTER TABLE realtime_revision_counters DROP CONSTRAINT realtime_revisions_pkey;
-UPDATE realtime_revision_counters SET transaction_id=0;
-ALTER TABLE realtime_revision_counters ADD PRIMARY KEY (org_id,transaction_id);
+-- Once: afterwards realtime_revisions is the view below, and resetting
+-- transaction_id again would merge pending counters.
+DO $idem$ BEGIN
+  IF EXISTS (SELECT 1 FROM pg_class WHERE oid = to_regclass('realtime_revisions') AND relkind = 'r') THEN
+    ALTER TABLE realtime_revisions RENAME TO realtime_revision_counters;
+    ALTER TABLE realtime_revision_counters DROP CONSTRAINT realtime_revisions_pkey;
+    UPDATE realtime_revision_counters SET transaction_id=0;
+    ALTER TABLE realtime_revision_counters ADD PRIMARY KEY (org_id,transaction_id);
+  END IF;
+END $idem$;
 -- Maintenance must not scan every settled organization to find a pending row.
-CREATE INDEX realtime_revision_pending ON realtime_revision_counters(org_id,transaction_id)
+CREATE INDEX IF NOT EXISTS realtime_revision_pending ON realtime_revision_counters(org_id,transaction_id)
 WHERE transaction_id<>0;
 --> statement-breakpoint
-CREATE VIEW realtime_revisions AS
+CREATE OR REPLACE VIEW realtime_revisions AS
 SELECT org_id,sum(revision)::bigint AS revision,max(transaction_id) AS transaction_id
 FROM realtime_revision_counters GROUP BY org_id;
 --> statement-breakpoint
@@ -34,7 +40,7 @@ GRANT USAGE,CREATE ON SCHEMA public TO docslurp_realtime_publisher;
 GRANT SELECT,INSERT,UPDATE,DELETE ON public.realtime_revision_counters TO docslurp_realtime_publisher;
 GRANT SELECT(id,org_id) ON public.workspaces,public.workspace_runs,public.documents TO docslurp_realtime_publisher;
 --> statement-breakpoint
-CREATE FUNCTION realtime_fold_committed(organization_id text) RETURNS integer
+CREATE OR REPLACE FUNCTION realtime_fold_committed(organization_id text) RETURNS integer
 LANGUAGE plpgsql SET search_path=pg_catalog,pg_temp AS $$
 DECLARE folded bigint; removed_count integer;
 BEGIN
@@ -55,7 +61,7 @@ BEGIN
   RETURN removed_count;
 END $$;
 --> statement-breakpoint
-CREATE FUNCTION realtime_record_change(organization_id text) RETURNS void
+CREATE OR REPLACE FUNCTION realtime_record_change(organization_id text) RETURNS void
 LANGUAGE plpgsql SET search_path=pg_catalog,pg_temp AS $$
 DECLARE inserted integer;
 BEGIN
@@ -69,7 +75,7 @@ END $$;
 --> statement-breakpoint
 -- Bounded independent maintenance: keyset through 16 orgs, <=256 counters/org.
 -- No supplied revision or arbitrary mutation; it only folds already committed sums.
-CREATE FUNCTION realtime_compact_revisions(after_org text DEFAULT '')
+CREATE OR REPLACE FUNCTION realtime_compact_revisions(after_org text DEFAULT '')
 RETURNS TABLE(next_org text,folded_rows integer)
 LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,pg_temp AS $$
 DECLARE candidate text; cursor_value text:=after_org; total integer:=0;

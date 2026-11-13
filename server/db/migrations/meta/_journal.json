@@ -985,8 +985,15 @@
     {
       "idx": 140,
       "version": "7",
-      "when": 1794303600000,
-      "tag": "0140_document_asset_ledger",
+      "when": 1794400000000,
+      "tag": "0140_provider_endpoint_observations",
+      "breakpoints": true
+    },
+    {
+      "idx": 141,
+      "version": "7",
+      "when": 1794500000000,
+      "tag": "0141_document_asset_ledger",
       "breakpoints": true
     }
   ]

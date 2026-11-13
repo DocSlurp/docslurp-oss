@@ -1,6 +1,6 @@
 -- Retain the latest generation even after verification consumes its OTP.
 -- This fences Better Auth 1.7.14's consume/restore wrong-code path.
-CREATE TABLE auth_otp_generations (
+CREATE TABLE IF NOT EXISTS auth_otp_generations (
   identifier text PRIMARY KEY,
   digest text NOT NULL,
   expires_at timestamptz NOT NULL
@@ -12,9 +12,10 @@ SELECT DISTINCT ON (identifier) identifier, regexp_replace(value, ':[0-9]+$', ''
 FROM verification
 WHERE identifier ~ '^(email-verification|sign-in|forget-password|change-email)-otp-'
   AND value ~ ':[0-9]+$' AND "expiresAt" > now()
-ORDER BY identifier, "createdAt" DESC, id DESC;
+ORDER BY identifier, "createdAt" DESC, id DESC
+ON CONFLICT (identifier) DO NOTHING;
 --> statement-breakpoint
-CREATE FUNCTION fence_auth_otp_generation() RETURNS trigger LANGUAGE plpgsql AS $$
+CREATE OR REPLACE FUNCTION fence_auth_otp_generation() RETURNS trigger LANGUAGE plpgsql AS $$
 DECLARE
   code_digest text;
   attempt text;
@@ -50,5 +51,5 @@ BEGIN
 END;
 $$;
 --> statement-breakpoint
-CREATE TRIGGER verification_otp_generation BEFORE INSERT ON verification
+CREATE OR REPLACE TRIGGER verification_otp_generation BEFORE INSERT ON verification
   FOR EACH ROW EXECUTE FUNCTION fence_auth_otp_generation();

@@ -2427,7 +2427,7 @@ export const projectRuns = pgTable(
       foreignColumns: [user.id],
       name: "project_runs_user_id_fkey",
     }).onDelete("cascade"),
-    // Migration 0140: the key ledger rows' composite run foreign keys reference.
+    // Migration 0141: the key ledger rows' composite run foreign keys reference.
     unique("project_runs_tenant_scope").on(table.id, table.projectId, table.orgId),
   ],
 );
@@ -3566,7 +3566,7 @@ export const documentPageStates = pgTable(
 );
 
 /**
- * Document asset ledger (migration 0140, docs/extraction/doppler-figures.md "Asset ledger"): one row per image Doppler
+ * Document asset ledger (migration 0141, docs/extraction/doppler-figures.md "Asset ledger"): one row per image Doppler
  * reports for a document, extracted or not. Tenant scope is tied to the document by the composite foreign key on
  * documents (id, project_id, org_id); CHECK constraints (closed enums, bounds, status consistency) live in the migration.
  */
@@ -3617,7 +3617,7 @@ export const documentAssets = pgTable("document_assets", {
   index("document_assets_run_idx").on(table.runId).where(sql`run_id IS NOT NULL`),
 ]);
 
-/** Whether a document's Markdown is committed and how far its images got (migration 0140); one row per document. */
+/** Whether a document's Markdown is committed and how far its images got (migration 0141); one row per document. */
 export const documentExtractionLevels = pgTable("document_extraction_levels", {
   documentId: text("document_id").primaryKey().notNull(),
   orgId: text("org_id").notNull(),

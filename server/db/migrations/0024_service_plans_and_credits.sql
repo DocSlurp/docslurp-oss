@@ -29,13 +29,24 @@ ALTER TABLE organizations
   ADD COLUMN IF NOT EXISTS auto_recharge_authorized_by_user_id text,
   ADD COLUMN IF NOT EXISTS last_billable_activity_at timestamptz;
 --> statement-breakpoint
-ALTER TABLE organizations
-  ADD CONSTRAINT organizations_plan_id_check CHECK (plan_id IN ('free', 'silver', 'gold', 'platinum')),
-  ADD CONSTRAINT organizations_scheduled_plan_id_check CHECK (scheduled_plan_id IS NULL OR scheduled_plan_id IN ('free', 'silver', 'gold', 'platinum')),
-  ADD CONSTRAINT organizations_worker_slots_check CHECK (worker_slots > 0),
-  ADD CONSTRAINT organizations_included_credits_check CHECK (included_credits_remaining >= 0),
-  ADD CONSTRAINT organizations_auto_recharge_authorized_by_fkey
-    FOREIGN KEY (auto_recharge_authorized_by_user_id) REFERENCES "user"(id) ON DELETE SET NULL;
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'organizations_plan_id_check' AND conrelid = 'organizations'::regclass) THEN
+    ALTER TABLE organizations ADD CONSTRAINT organizations_plan_id_check CHECK (plan_id IN ('free', 'silver', 'gold', 'platinum'));
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'organizations_scheduled_plan_id_check' AND conrelid = 'organizations'::regclass) THEN
+    ALTER TABLE organizations ADD CONSTRAINT organizations_scheduled_plan_id_check CHECK (scheduled_plan_id IS NULL OR scheduled_plan_id IN ('free', 'silver', 'gold', 'platinum'));
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'organizations_worker_slots_check' AND conrelid = 'organizations'::regclass) THEN
+    ALTER TABLE organizations ADD CONSTRAINT organizations_worker_slots_check CHECK (worker_slots > 0);
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'organizations_included_credits_check' AND conrelid = 'organizations'::regclass) THEN
+    ALTER TABLE organizations ADD CONSTRAINT organizations_included_credits_check CHECK (included_credits_remaining >= 0);
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'organizations_auto_recharge_authorized_by_fkey' AND conrelid = 'organizations'::regclass) THEN
+    ALTER TABLE organizations ADD CONSTRAINT organizations_auto_recharge_authorized_by_fkey
+      FOREIGN KEY (auto_recharge_authorized_by_user_id) REFERENCES "user"(id) ON DELETE SET NULL;
+  END IF;
+END $idem$;
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS organizations_auto_recharge_idx ON organizations (id) WHERE auto_recharge_enabled;
 --> statement-breakpoint
@@ -51,9 +62,14 @@ WHERE l.org_id IS NULL AND EXISTS (SELECT 1 FROM organizations o WHERE o.id = l.
 --> statement-breakpoint
 UPDATE credit_ledger SET pool = 'prepaid' WHERE pool IS NULL;
 --> statement-breakpoint
-ALTER TABLE credit_ledger
-  ADD CONSTRAINT credit_ledger_org_id_fkey FOREIGN KEY (org_id) REFERENCES organizations(id) ON DELETE CASCADE,
-  ADD CONSTRAINT credit_ledger_pool_check CHECK (pool IS NULL OR pool IN ('included', 'prepaid'));
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'credit_ledger_org_id_fkey' AND conrelid = 'credit_ledger'::regclass) THEN
+    ALTER TABLE credit_ledger ADD CONSTRAINT credit_ledger_org_id_fkey FOREIGN KEY (org_id) REFERENCES organizations(id) ON DELETE CASCADE;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'credit_ledger_pool_check' AND conrelid = 'credit_ledger'::regclass) THEN
+    ALTER TABLE credit_ledger ADD CONSTRAINT credit_ledger_pool_check CHECK (pool IS NULL OR pool IN ('included', 'prepaid'));
+  END IF;
+END $idem$;
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS credit_ledger_org_created_idx ON credit_ledger (org_id, created_at DESC);
 --> statement-breakpoint
@@ -95,11 +111,15 @@ CREATE TABLE IF NOT EXISTS storage_meter_days (
 );
 --> statement-breakpoint
 -- Existing top-ups become prepaid grants; stripe_topups is retired.
-INSERT INTO credit_grants (org_id, source, external_id, credits, pool, metadata, created_at)
-SELECT org_id, 'topup', payment_intent_id, amount_cents, 'prepaid',
-  jsonb_build_object('paymentIntentId', payment_intent_id, 'migratedFrom', 'stripe_topups'), created_at
-FROM stripe_topups
-ON CONFLICT (source, external_id) DO NOTHING;
+DO $idem$ BEGIN
+  IF to_regclass('stripe_topups') IS NOT NULL THEN
+    INSERT INTO credit_grants (org_id, source, external_id, credits, pool, metadata, created_at)
+    SELECT org_id, 'topup', payment_intent_id, amount_cents, 'prepaid',
+      jsonb_build_object('paymentIntentId', payment_intent_id, 'migratedFrom', 'stripe_topups'), created_at
+    FROM stripe_topups
+    ON CONFLICT (source, external_id) DO NOTHING;
+  END IF;
+END $idem$;
 --> statement-breakpoint
 DROP TABLE IF EXISTS stripe_topups;
 --> statement-breakpoint

@@ -14,7 +14,12 @@
 -- DOPPLER_STORE_LAYOUT): the manifest at `images/manifest.json`, each file at `images/page-NNNN/(image|figure)-NNN.<ext>`.
 
 -- The run a ledger row names must belong to the row's own project and organization.
-ALTER TABLE project_runs ADD CONSTRAINT project_runs_tenant_scope UNIQUE (id, project_id, org_id);
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_constraint WHERE conname = 'project_runs_tenant_scope' AND conrelid = 'public.project_runs'::regclass) THEN
+    ALTER TABLE project_runs ADD CONSTRAINT project_runs_tenant_scope UNIQUE (id, project_id, org_id);
+  END IF;
+END $$;
 --> statement-breakpoint
 CREATE TABLE IF NOT EXISTS document_assets (
   document_id text NOT NULL,

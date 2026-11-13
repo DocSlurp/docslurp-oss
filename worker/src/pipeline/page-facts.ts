@@ -73,7 +73,7 @@ export interface PageFactUpsert {
   factsSource?: string | null;
   visionStatus?: PageVisionStatus | null;
   visionTextBytes?: number | null;
-  /** Routing facts (document_page_facts.text_layer / scan_class, migration 0140): closed enums; absent keeps the stored value. */
+  /** Routing facts (document_page_facts.text_layer / scan_class, migration 0141): closed enums; absent keeps the stored value. */
   textLayer?: PageTextLayer | null;
   scanClass?: PageScanClass | null;
 }

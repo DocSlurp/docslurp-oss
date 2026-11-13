@@ -2750,7 +2750,7 @@ export class Store {
             updated_at = now()
       `;
     }
-    // Routing facts (migration 0140): a value the write does not know keeps the stored one.
+    // Routing facts (migration 0141): a value the write does not know keeps the stored one.
     for (const batch of batchedRows(routing)) {
       const payload = batch.map((row) => ({
         document_id: row.documentId, page_number: row.pageNumber, run_id: row.runId,

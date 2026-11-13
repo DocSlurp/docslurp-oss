@@ -70,12 +70,12 @@ BEGIN
 END;
 $$;
 --> statement-breakpoint
-CREATE TRIGGER documents_retire_pending_on_insert
+CREATE OR REPLACE TRIGGER documents_retire_pending_on_insert
 AFTER INSERT ON documents FOR EACH ROW
 WHEN (NEW.status = 'completed' AND NEW.canonical_id IS NOT NULL)
 EXECUTE FUNCTION retire_pending_canonical_replacements();
 --> statement-breakpoint
-CREATE TRIGGER documents_retire_pending_on_complete
+CREATE OR REPLACE TRIGGER documents_retire_pending_on_complete
 AFTER UPDATE OF status ON documents FOR EACH ROW
 WHEN (NEW.status = 'completed' AND OLD.status IS DISTINCT FROM NEW.status AND NEW.canonical_id IS NOT NULL)
 EXECUTE FUNCTION retire_pending_canonical_replacements();

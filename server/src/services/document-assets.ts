@@ -1,5 +1,5 @@
 /*
- * Read side of the document asset ledger (migration 0140, docs/extraction/doppler-figures.md "Asset ledger"): a
+ * Read side of the document asset ledger (migration 0141, docs/extraction/doppler-figures.md "Asset ledger"): a
  * document's images (extracted, not extracted with the reason, unlinked) and its extraction level, for the API and the
  * inspector. Every query is filtered by the caller's organization and project; a document of another scope, or one the
  * viewer would not be shown (not `completed`, or purged), reads as missing (null), exactly like one that does not exist.
