@@ -581,6 +581,9 @@ export interface DopplerManifestV3Summary {
   lastCutPage: number | null;
 }
 
+/** Context pages a shard's conversion may add either side of its `--images-pages` range (`-f`/`-l`, the #464 plugin's 16). */
+export const DOPPLER_SHARD_CONTEXT_PAGES = 16;
+
 /** id order: page, then pictures before figures, then index. */
 function idOrderKey(id: string): [number, number, number] {
   const parsed = parseDopplerFigureId(id)!;
@@ -702,6 +705,10 @@ export class DopplerManifestV3Validator {
     // for the end line but yields no row: the shard that owns the page lists it (ledger, index, billing and resume).
     // Anything else outside the range is refused.
     const context = !!range && (entry.page < range[0] || entry.page > range[1]);
+    // Only within the shard's conversion range, from host values (never the VM's own context numbers): max(1, first - 16)
+    // to min(pageCount, last + 16), the plugin's -f/-l (#464 checkV3Manifest, round 3 N4).
+    if (context && (entry.page < Math.max(1, range[0] - DOPPLER_SHARD_CONTEXT_PAGES) ||
+        entry.page > Math.min(this.limits.maxPage, range[1] + DOPPLER_SHARD_CONTEXT_PAGES))) this.fail("shard-range");
     // (Its derived path and link are allowed, as Doppler writes them; it never has a file, a resume, a repeat or a fallback.)
     if (context && !(entry.status === "not-extracted" && entry.reason === "pages" && entry.resumable !== true &&
         entry.repeat_of === undefined && entry.fallback === undefined && entry.bytes === 0 && entry.sha256 === null)) {
@@ -710,7 +717,8 @@ export class DopplerManifestV3Validator {
     const key = idOrderKey(entry.id);
     if (this.lastId && !idBefore(this.lastId, key)) this.fail("lines-out-of-order");
     this.lastId = key;
-    if (entry.link !== null && entry.path !== null && entry.link !== `${header.link_prefix}${entry.path}`) this.fail("image-invalid");
+    // (A context entry's path is never checked against or linked to this folder's files: it is not this shard's image.)
+    if (!context && entry.link !== null && entry.path !== null && entry.link !== `${header.link_prefix}${entry.path}`) this.fail("image-invalid");
     if (entry.repeat_of !== undefined) {
       // A repeat names an earlier linked image that is not itself a repeat (no chains, no cycles, no forward names).
       if (!this.repeatTargets.has(entry.repeat_of)) this.fail("repeat-invalid");

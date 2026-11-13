@@ -214,6 +214,16 @@ describe("estimate twins answer the unified quote from measured documents", () =
     expect(out.quote.pages).toEqual({ low: 9, high: 9 });
   });
 
+  it("#481 L1: every stored group is marked stored, an assumed-only quote included, so it never gets a new-upload prior", async () => {
+    const { storedQuoteFile } = await import("../services/stored-quote.js");
+    const assumed = storedQuoteFile({ mime_type: "application/pdf", state: "assumed", documents: 3, bytes: 3_000_000, pages: 0, read_pages: 0 });
+    expect(assumed).toMatchObject({ stored: true });
+    expect(assumed.measured).toBeUndefined();
+    expect(storedQuoteFile({ mime_type: "application/pdf", state: "measured", documents: 1, bytes: 10, pages: 4, read_pages: 0, asset_bytes: 7 }))
+      .toMatchObject({ stored: true, measured: { pages: 4, readPages: 0, assetBytes: 7 } });
+    expect(storedQuoteFile({ mime_type: "application/pdf", state: "empty", documents: 1, bytes: 10, pages: 0, read_pages: 0 })).toMatchObject({ stored: true });
+  });
+
   it("the stored scope never reaches another organization's or project's documents", async () => {
     const { storedQuoteFiles } = await import("../services/stored-quote.js");
     await sql`insert into projects(id, org_id, user_id, name, slug, pipeline, is_default) values ('w2', 'o2', 'u2', 'Theirs', 'theirs', ${sql.json(JSON.parse(JSON.stringify(defaultPipelineFeatures)))}, true)`;
@@ -274,7 +284,7 @@ describe("estimate twins answer the unified quote from measured documents", () =
     expect(byName("(measured)")).toMatchObject({ pages: 7, measured: { pages: 7, readPages: 0 }, size: 40000 });
     // Assumed: intake's 30 is never passed as pages, measured or otherwise; the quote prices the size as a range.
     const assumed = byName("pages not measured");
-    expect(assumed).toEqual({ name: expect.any(String), size: 900000, type: docx });
+    expect(assumed).toEqual({ name: expect.any(String), size: 900000, type: docx, stored: true });
     // Measured empty: 0 kept, not dropped and not priced as one page.
     expect(byName("no pages")).toMatchObject({ measured: { pages: 0, readPages: 0 }, size: 5000 });
     expect(byName("no pages").pages).toBeUndefined();

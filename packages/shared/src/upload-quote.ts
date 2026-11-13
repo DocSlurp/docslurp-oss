@@ -105,6 +105,11 @@ export type QuoteFile = UploadMediaFile & {
    * bytes of its stored figure files (the asset ledger's level, billed as storage like the source).
    */
   measured?: { pages: number; readPages: number; assetBytes?: number };
+  /**
+   * Server-set for every stored-document group (storedQuoteFile), measured or not: the file is already stored, so a pricing
+   * provider never adds a new-upload prior (e.g. figure bytes) to it. A client cannot set it (quoteFileSchema strips it).
+   */
+  stored?: true;
   profile?: FileProfile;
 };
 
