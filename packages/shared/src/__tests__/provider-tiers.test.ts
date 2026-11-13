@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { hostMatchesEndpoint, parsePoolDuration, parseProviderPool, providerPool, providerPoolPreferences } from "../provider-pools.js";
-import { assertTierOptions, defineTierOptions, selectTierRoute, type EndpointObservation, type TierOption, type TierSelectionInput } from "../provider-tiers.js";
+import { assertTierOptions, defineTierOptions, selectTierRoute, servedMargin, type EndpointObservation, type TierOption, type TierSelectionInput } from "../provider-tiers.js";
 
 const NOW = new Date("2026-11-12T18:00:00Z");
 const PAGE = { inputTokens: 1_500, outputTokens: 800 };
@@ -23,11 +23,11 @@ describe("provider pools", () => {
   it("parses llm:// entries: model from the path, model options from the query, pool options from _ params or the fragment", () => {
     const pool = providerPool([
       "llm://openrouter/acme/m?reasoning=low&_provider=fireworks&_sort=latency&_timeout=45s",
-      "llm://openrouter/acme/m?reasoning=low&_provider=parasail/fp8#minUptime=95&_maxAge=30m&minMargin=0.2",
+      "llm://openrouter/acme/m?reasoning=low&_provider=parasail/fp8#minUptime=95&_maxAge=30m&preferredMargin=0.25",
     ]);
     expect(pool).toMatchObject({ model: "acme/m", modelOptions: { reasoning: "low" }, hosts: ["fireworks", "parasail/fp8"], sort: "latency",
-      fallbackBeyondPool: false, timeoutMs: 45_000, minUptime: 95, maxAgeMs: 1_800_000, minMargin: 0.2 });
-    expect(providerPool(["llm://openrouter/acme/m?_provider=a"])).toMatchObject({ sort: "price", timeoutMs: null, minUptime: null, maxAgeMs: null, minMargin: null });
+      fallbackBeyondPool: false, timeoutMs: 45_000, minUptime: 95, maxAgeMs: 1_800_000, preferredMargin: 0.25 });
+    expect(providerPool(["llm://openrouter/acme/m?_provider=a"])).toMatchObject({ sort: "price", timeoutMs: null, minUptime: null, maxAgeMs: null, preferredMargin: null });
   });
 
   it("has no size cap: many distinct providers are one pool", () => {
@@ -52,7 +52,7 @@ describe("provider pools", () => {
     expect(problems(["llm://openrouter/acme/m?_provider=a&_fallbacks=true"])[0]).toContain("order pool");
     expect(problems(["llm://openrouter/acme/m?_provider=a&_timeout=soon"])[0]).toContain("_timeout");
     expect(problems(["llm://openrouter/acme/m?_provider=a&_minUptime=101"])[0]).toContain("_minUptime");
-    expect(problems(["llm://openrouter/acme/m?_provider=a&_minMargin=1"])[0]).toContain("_minMargin");
+    expect(problems(["llm://openrouter/acme/m?_provider=a&_preferredMargin=1"])[0]).toContain("_preferredMargin");
     expect(problems(["llm://openrouter/acme/m?_provider=a&_maxHosts=3"])[0]).toContain("unknown pool option _maxHosts");
     expect(() => providerPool(["llm://openrouter/acme/m"], "pool x")).toThrow(/^pool x: /);
   });
@@ -101,33 +101,60 @@ describe("tier selection", () => {
   });
 
   // PAGE at 0.30/1.20 per MTok costs $0.00141; at 0.25/1.00, $0.001175; at 0.065/0.24, $0.0002895.
-  it("sends one host: the fastest that keeps a 10% margin, not the cheapest; the rest are retry alternatives", () => {
+  it("sends one host: the fastest that keeps the 20% preferred margin, not the cheapest; the rest are retry alternatives", () => {
     const observations = [
       obs("acme/ocr-a", "fireworks", 0.3, 1.2, { latencyP50Ms: 500 }),
       obs("acme/ocr-a", "parasail/fp8", 0.25, 1.0, { latencyP50Ms: 900 }),
       obs("acme/ocr-a", "together", 0.2, 0.9, { latencyP50Ms: 1_200 }),
       obs("acme/ocr-b", "wafer/nvfp4", 0.065, 0.24, { latencyP50Ms: 1_500 }),
     ];
-    // Earns $0.0015 a page: the 10% floor caps cost at $0.00135, which rules out the fastest host (fireworks).
+    // Earns $0.0015 a page: fireworks (fastest) keeps only 6%, parasail 21.7%, together 32%, wafer 80.7%.
     const selection = selectTierRoute(base({ observations, unitRevenueUsd: 0.0015 }));
     if (selection.basis !== "live") throw new Error(selection.basis);
     expect(selection.option.id).toBe("ocr-a");
     expect(selection.host).toMatchObject({ host: "parasail", endpoint: "parasail/fp8" });
+    expect(selection).toMatchObject({ policy: "speed", marginWarning: null });
     expect(selection.provider).toEqual({ order: ["parasail"], allow_fallbacks: false, max_price: { prompt: 0.25, completion: 1.0 } });
-    expect(selection.alternatives.map((host) => host.host)).toEqual(["together"]);
+    // Within the band by speed, then the rest by margin.
+    expect(selection.alternatives.map((host) => host.host)).toEqual(["together", "fireworks"]);
     // Earning more makes the fastest host affordable.
     const richer = selectTierRoute(base({ observations, unitRevenueUsd: 0.002 }));
     if (richer.basis !== "live") throw new Error(richer.basis);
     expect(richer.provider.order).toEqual(["fireworks"]);
   });
 
-  it("allows a host at exactly the margin floor; a pool's _minMargin overrides the default", () => {
-    const observations = [obs("acme/ocr-a", "fireworks", 0.3, 1.2)];
-    const atFloor = 0.00141 / 0.9;
-    expect(selectTierRoute(base({ options: [ocrA], observations, unitRevenueUsd: atFloor }))).toMatchObject({ basis: "live" });
-    expect(selectTierRoute(base({ options: [ocrA], observations, unitRevenueUsd: atFloor, minMargin: 0.2 }))).toMatchObject({ basis: "none" });
-    const [thin] = defineTierOptions([{ id: "thin", capability: "page-ocr", pool: entries("acme/ocr-a", ["fireworks"], "#minMargin=0.05"), tiers: ["cheapest"], evalScore: null, evalRef: null }]);
-    expect(selectTierRoute(base({ options: [thin!], observations, unitRevenueUsd: 0.00141 / 0.95, minMargin: 0.2 }))).toMatchObject({ basis: "live" });
+  it("when no host keeps the preferred margin, takes the best margin without a loss, and warns under the global threshold", () => {
+    const observations = [obs("acme/ocr-a", "fireworks", 0.3, 1.2, { latencyP50Ms: 400 }), obs("acme/ocr-a", "parasail", 0.25, 1.0, { latencyP50Ms: 2_000 })];
+    // Fireworks costs $0.00141 and parasail $0.001175. At $0.00125 revenue: fireworks loses money, parasail keeps 6%.
+    const thin = selectTierRoute(base({ options: [ocrA], observations, unitRevenueUsd: 0.00125 }));
+    if (thin.basis !== "live") throw new Error(thin.basis);
+    expect(thin).toMatchObject({ policy: "margin", provider: { order: ["parasail"] } });
+    expect(thin.alternatives).toEqual([]);
+    expect(thin.marginWarning?.threshold).toBe(0.1);
+    expect(thin.marginWarning?.margin).toBeCloseTo(0.06, 5);
+    // At $0.0016 parasail keeps 26.6% (in the band) and fireworks 11.9% (out): speed among the band picks parasail.
+    const band = selectTierRoute(base({ options: [ocrA], observations, unitRevenueUsd: 0.0016 }));
+    expect(band).toMatchObject({ basis: "live", policy: "speed", provider: { order: ["parasail"] }, marginWarning: null });
+    // At $0.0014: parasail 16%, fireworks loses. Best margin, no warning (16% is over the 10% threshold).
+    expect(selectTierRoute(base({ options: [ocrA], observations, unitRevenueUsd: 0.0014 }))).toMatchObject({ policy: "margin", provider: { order: ["parasail"] }, marginWarning: null });
+  });
+
+  it("the preferred margin and threshold come from the caller; a pool's _preferredMargin overrides the band for its hosts", () => {
+    const observations = [obs("acme/ocr-a", "fireworks", 0.3, 1.2, { latencyP50Ms: 400 }), obs("acme/ocr-a", "parasail", 0.25, 1.0, { latencyP50Ms: 2_000 })];
+    // $0.0016 revenue: fireworks keeps 11.9%, parasail 26.6%.
+    expect(selectTierRoute(base({ options: [ocrA], observations, unitRevenueUsd: 0.0016 }))).toMatchObject({ provider: { order: ["parasail"] } });
+    expect(selectTierRoute(base({ options: [ocrA], observations, unitRevenueUsd: 0.0016, preferredMargin: 0.1 }))).toMatchObject({ policy: "speed", provider: { order: ["fireworks"] }, marginWarning: null });
+    expect(selectTierRoute(base({ options: [ocrA], observations, unitRevenueUsd: 0.0016, preferredMargin: 0.1, warnBelowMargin: 0.15 }))).toMatchObject({ provider: { order: ["fireworks"] }, marginWarning: { threshold: 0.15 } });
+    const [loose] = defineTierOptions([{ id: "loose", capability: "page-ocr", pool: entries("acme/ocr-a", ["fireworks", "parasail"], "#preferredMargin=0.1"), tiers: ["cheapest"], evalScore: null, evalRef: null }]);
+    expect(selectTierRoute(base({ options: [loose!], observations, unitRevenueUsd: 0.0016 }))).toMatchObject({ provider: { order: ["fireworks"] } });
+  });
+
+  it("checks a served request's actual margin against the threshold", () => {
+    const fine = servedMargin({ usage: PAGE, inputUsdPerMTok: 0.25, outputUsdPerMTok: 1.0, unitRevenueUsd: 0.0016 });
+    expect(fine.marginWarning).toBeNull();
+    const long = servedMargin({ usage: { inputTokens: 1_500, outputTokens: 1_400 }, inputUsdPerMTok: 0.25, outputUsdPerMTok: 1.0, unitRevenueUsd: 0.0016 });
+    expect(long.margin).toBeCloseTo(1 - 0.001775 / 0.0016, 6);
+    expect(long.marginWarning).toEqual({ margin: long.margin, threshold: 0.1 });
   });
 
   it("without measured latency, follows the reviewed order (options as listed, hosts as pooled), not the lowest price", () => {
@@ -139,7 +166,7 @@ describe("tier selection", () => {
     expect(selection.alternatives.map((host) => host.host)).toEqual(["parasail"]);
   });
 
-  it("takes each host's cheapest endpoint that keeps the margin", () => {
+  it("takes each host's cheapest endpoint and drops endpoints that would lose money", () => {
     const revenue = (1_500 * 0.3 + 800 * 1.2) / 1e6 / 0.9;
     const selection = selectTierRoute(base({ options: [ocrA], unitRevenueUsd: revenue, observations: [obs("acme/ocr-a", "fireworks/us", 0.45, 1.8), obs("acme/ocr-a", "fireworks", 0.3, 1.2)] }));
     if (selection.basis !== "live") throw new Error(selection.basis);
@@ -147,7 +174,7 @@ describe("tier selection", () => {
     expect(selection.provider.max_price).toEqual({ prompt: 0.3, completion: 1.2 });
   });
 
-  it("fails closed when fresh observations leave nothing within the margin, down or degraded", () => {
+  it("fails closed when every fresh host would lose money, is down or degraded", () => {
     const observations = [obs("acme/ocr-a", "fireworks", 0.3, 1.2), obs("acme/ocr-b", "wafer/nvfp4", 0.065, 0.24, { status: -2 }), obs("acme/ocr-b", "friendli", 0.15, 0.5, { uptime30m: 40 })];
     expect(selectTierRoute(base({ observations, unitRevenueUsd: 0.0001 })).basis).toBe("none");
   });

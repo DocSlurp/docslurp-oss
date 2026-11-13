@@ -3,7 +3,7 @@ import { tierOptionModels, type EndpointObservation } from "@docslurp/shared";
 import { sql as defaultSql } from "../db.js";
 
 /**
- * Live provider observations for route tiers (migration 0136): the API's maintenance sweep polls OpenRouter's public
+ * Live provider observations for route tiers (migration 0138): the API's maintenance sweep polls OpenRouter's public
  * endpoint listings for every model a tier option can route to, and tier selection reads `provider_endpoint_current`.
  * Off unless DOCSLURP_PROVIDER_OBSERVATIONS=1. The listing is public and unauthenticated: no key is sent.
  */

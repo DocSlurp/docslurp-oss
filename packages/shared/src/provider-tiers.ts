@@ -7,12 +7,15 @@
  *   which also give the model, and its measured eval score. Observations (prices, uptime, latency from the database) only rank and filter inside
  *   it; a host that is not in an option's pool is never sent a request, whatever the data says.
  * - The tier's customer price is fixed elsewhere; this module receives what one unit of work (an answer, a page)
- *   earns and never picks a host whose live cost for that unit leaves less than the minimum margin (default 10%).
- * - A request goes to exactly one host: the fastest one that keeps the margin (see `selectTierRoute`). The other
- *   hosts that also keep it are returned in rank order as `alternatives`, for the caller to retry with as a new
- *   single-host request if that call fails; nothing is sent to them otherwise.
+ *   earns. Margin = 1 - unit cost / unit revenue.
+ * - A request goes to exactly one host (see `selectTierRoute`): the fastest that keeps the preferred margin (default
+ *   20%); when none does, the one with the best margin, and never one that loses money. A pick under the global
+ *   margin threshold (`warnBelowMargin`, default 10%) carries a `marginWarning` for the caller to log, and so does a
+ *   served request whose actual usage lands under it (`servedMargin`).
+ * - The other eligible hosts of the option come back in rank order as `alternatives`, for the caller to retry with as
+ *   a new single-host request if that call fails; nothing is sent to them otherwise.
  * - Missing or stale observations fall back to the option's first pool host (reviewed config lists the fastest
- *   first), which is inside eligibility by construction. Fresh observations under which nothing keeps the margin
+ *   first), which is inside eligibility by construction. Fresh observations under which every host would lose money
  *   select nothing (fail closed): the caller refuses or uses its default route and reports it.
  */
 import { hostMatchesEndpoint, providerPool, type ProviderPool } from "./provider-pools.js";
@@ -87,8 +90,10 @@ export interface TierSelectionInput {
   readonly observations: readonly EndpointObservation[];
   /** USD one unit of work earns at this tier's fixed price; null when the caller has no price (no margin check). */
   readonly unitRevenueUsd: number | null;
-  /** Least share of `unitRevenueUsd` a host must leave as margin, unless the pool sets `_minMargin`. Default 0.10. */
-  readonly minMargin?: number;
+  /** Speed is preferred among hosts keeping at least this margin, unless the pool sets `_preferredMargin`. Default 0.20. */
+  readonly preferredMargin?: number;
+  /** The global margin threshold: a pick under it carries `marginWarning`. Default 0.10. */
+  readonly warnBelowMargin?: number;
   readonly unit: WorkUnit;
   readonly now: Date;
   /** Observations older than this are ignored, unless the pool sets `_maxAge`. Default 2 hours. */
@@ -105,6 +110,13 @@ export interface RankedHost {
   readonly inputUsdPerMTok: number;
   readonly outputUsdPerMTok: number;
   readonly latencyP50Ms: number | null;
+  /** 1 - unitCostUsd / unitRevenueUsd; null when the caller gave no revenue. */
+  readonly margin: number | null;
+}
+
+export interface MarginWarning {
+  readonly margin: number;
+  readonly threshold: number;
 }
 
 export type TierSelection =
@@ -113,6 +125,10 @@ export type TierSelection =
     readonly option: TierOption;
     /** The one host this request goes to. */
     readonly host: RankedHost;
+    /** `speed`: fastest host keeping the preferred margin. `margin`: none kept it, so the best-margin host. */
+    readonly policy: "speed" | "margin";
+    /** Set when the chosen host's margin is under the global threshold. */
+    readonly marginWarning: MarginWarning | null;
     /** Other hosts of the option that keep the margin, in rank order: retry targets only, never sent alongside. */
     readonly alternatives: readonly RankedHost[];
     /** OpenRouter `provider` for `host` alone: no fallbacks, priced at most at its endpoint. */
@@ -129,11 +145,33 @@ export interface SingleHostPreferences {
 
 const DEFAULT_MAX_AGE_MS = 2 * 3600 * 1000;
 const DEFAULT_MIN_UPTIME = 90;
-export const DEFAULT_MIN_MARGIN = 0.1;
+export const DEFAULT_PREFERRED_MARGIN = 0.2;
+export const DEFAULT_WARN_BELOW_MARGIN = 0.1;
 
-/** Highest unit cost that keeps `minMargin` of `unitRevenueUsd`; null when there is no revenue to measure against. */
-export function maxUnitCostForMargin(unitRevenueUsd: number | null, minMargin: number): number | null {
-  return unitRevenueUsd === null ? null : unitRevenueUsd * (1 - minMargin);
+/** 1 - cost / revenue; null without revenue. A non-positive revenue has no margin to keep: -Infinity unless free. */
+export function unitMargin(unitCostUsd: number, unitRevenueUsd: number | null): number | null {
+  if (unitRevenueUsd === null) return null;
+  if (!(unitRevenueUsd > 0)) return unitCostUsd > 0 ? Number.NEGATIVE_INFINITY : 0;
+  return 1 - unitCostUsd / unitRevenueUsd;
+}
+
+const marginWarningOf = (margin: number | null, threshold: number): MarginWarning | null =>
+  margin !== null && margin < threshold - 1e-12 ? { margin, threshold } : null;
+
+/**
+ * The margin a served request actually earned, from its billed usage and the endpoint's prices, with a warning when
+ * it is under the global threshold (actual tokens can exceed the estimate the host was picked on).
+ */
+export function servedMargin(input: {
+  readonly usage: WorkUnit;
+  readonly inputUsdPerMTok: number;
+  readonly outputUsdPerMTok: number;
+  readonly unitRevenueUsd: number;
+  readonly warnBelowMargin?: number;
+}): { margin: number; costUsd: number; marginWarning: MarginWarning | null } {
+  const costUsd = unitCostUsd(input.usage, input.inputUsdPerMTok, input.outputUsdPerMTok);
+  const margin = unitMargin(costUsd, input.unitRevenueUsd)!;
+  return { margin, costUsd, marginWarning: marginWarningOf(margin, input.warnBelowMargin ?? DEFAULT_WARN_BELOW_MARGIN) };
 }
 
 export function unitCostUsd(unit: WorkUnit, inputUsdPerMTok: number, outputUsdPerMTok: number): number {
@@ -155,10 +193,9 @@ export function assertTierOptions(options: readonly TierOption[]): void {
 
 const maxAgeOf = (option: TierOption, input: TierSelectionInput) => option.pool.maxAgeMs ?? input.maxAgeMs ?? DEFAULT_MAX_AGE_MS;
 
-/** The hosts of `option` that can serve now and keep the margin, each at its cheapest such endpoint, in pool order. */
+/** The hosts of `option` that can serve now without losing money, each at its cheapest such endpoint, in pool order. */
 export function eligibleHosts(option: TierOption, input: TierSelectionInput): RankedHost[] {
   const maxAge = maxAgeOf(option, input);
-  const ceiling = maxUnitCostForMargin(input.unitRevenueUsd, option.pool.minMargin ?? input.minMargin ?? DEFAULT_MIN_MARGIN);
   const minUptime = option.pool.minUptime ?? input.minUptime ?? DEFAULT_MIN_UPTIME;
   const fresh = input.observations.filter((observation) => observation.model === option.model
     && input.now.getTime() - observation.observedAt.getTime() <= maxAge);
@@ -171,10 +208,11 @@ export function eligibleHosts(option: TierOption, input: TierSelectionInput): Ra
       if (observation.status !== null && observation.status < 0) continue;
       if (observation.uptime30m !== null && observation.uptime30m < minUptime) continue;
       const cost = unitCostUsd(input.unit, observation.inputUsdPerMTok, observation.outputUsdPerMTok);
-      if (ceiling !== null && cost > ceiling + 1e-12) continue;
+      const margin = unitMargin(cost, input.unitRevenueUsd);
+      if (margin !== null && margin < -1e-12) continue;
       if (!best || cost < best.unitCostUsd) {
         best = { host, endpoint: observation.endpoint, unitCostUsd: cost, inputUsdPerMTok: observation.inputUsdPerMTok,
-          outputUsdPerMTok: observation.outputUsdPerMTok, latencyP50Ms: observation.latencyP50Ms };
+          outputUsdPerMTok: observation.outputUsdPerMTok, latencyP50Ms: observation.latencyP50Ms, margin };
       }
     }
     if (best) hosts.push(best);
@@ -199,6 +237,9 @@ const bySpeed = (a: Candidate, b: Candidate) =>
   || a.optionIndex - b.optionIndex || a.hostIndex - b.hostIndex
   || a.host.unitCostUsd - b.host.unitCostUsd;
 
+/** Best margin first (cheapest), then fastest. */
+const byMargin = (a: Candidate, b: Candidate) => a.host.unitCostUsd - b.host.unitCostUsd || bySpeed(a, b);
+
 const singleHost = (host: RankedHost): SingleHostPreferences => ({
   order: [host.host],
   allow_fallbacks: false,
@@ -207,10 +248,11 @@ const singleHost = (host: RankedHost): SingleHostPreferences => ({
 });
 
 /**
- * Pick the one host for one request. Every tier prefers speed: among the tier's options, the fastest serving host
- * whose live unit cost keeps the minimum margin (default 10% of what the unit earns). The tier decides which
- * options compete and the price, hence the cost ceiling; "best" first narrows to the highest eval score that has a
- * host keeping the margin, then picks that option's fastest host. Static: when no candidate option has a fresh
+ * Pick the one host for one request. Every tier prefers speed within the preferred margin: among the tier's options,
+ * the fastest serving host whose live unit cost keeps at least `preferredMargin` (default 20%; a pool's
+ * `_preferredMargin` overrides it for its hosts). When no host keeps it, the host with the best margin that still
+ * does not lose money. The tier decides which options compete and the price; "best" first narrows to the highest
+ * eval score that has a serving host, then picks within that option. Static: when no candidate option has a fresh
  * observation, the first host of the first candidate (by eval score for "best", else as listed).
  */
 export function selectTierRoute(input: TierSelectionInput): TierSelection {
@@ -229,16 +271,22 @@ export function selectTierRoute(input: TierSelectionInput): TierSelection {
     const top = Math.max(...ranked.map((entry) => entry.option.evalScore!));
     ranked = ranked.filter((entry) => entry.option.evalScore === top);
   }
-  ranked.sort(bySpeed);
-  const chosen = ranked[0];
+  const keepsPreferred = (entry: Candidate) => entry.host.margin === null
+    || entry.host.margin >= (entry.option.pool.preferredMargin ?? input.preferredMargin ?? DEFAULT_PREFERRED_MARGIN) - 1e-12;
+  const preferred = ranked.filter(keepsPreferred).sort(bySpeed);
+  const rest = ranked.filter((entry) => !keepsPreferred(entry)).sort(byMargin);
+  const ordered = [...preferred, ...rest];
+  const chosen = ordered[0];
   if (!chosen) {
-    return { basis: "none", reason: `no ${input.capability} host for tier ${input.tier} is serving within the margin` };
+    return { basis: "none", reason: `no ${input.capability} host for tier ${input.tier} is serving without a loss` };
   }
   return {
     basis: "live",
     option: chosen.option,
     host: chosen.host,
-    alternatives: ranked.slice(1).filter((entry) => entry.option === chosen.option).map((entry) => entry.host),
+    policy: preferred.length > 0 ? "speed" : "margin",
+    marginWarning: marginWarningOf(chosen.host.margin, input.warnBelowMargin ?? DEFAULT_WARN_BELOW_MARGIN),
+    alternatives: ordered.slice(1).filter((entry) => entry.option === chosen.option).map((entry) => entry.host),
     provider: singleHost(chosen.host),
   };
 }

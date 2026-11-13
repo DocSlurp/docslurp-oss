@@ -7,7 +7,7 @@
  * - chat pools: hosts serving the model at FP8 or better (or undisclosed, as the default chat routing allows), all
  *   from distinct providers.
  * - Pools are `llm://` entries, one per host (`?_provider=`); pool options (`_sort`, `_fallbacks`, `_timeout`,
- *   `_minUptime`, `_maxAge`, `_minMargin`) are written once, on the first entry. See provider-pools.ts.
+ *   `_minUptime`, `_maxAge`, `_preferredMargin`) are written once, on the first entry. See provider-pools.ts.
  * - evalScore stays null until a recorded eval run measures the option; unmeasured options are never "best".
  * - Together is omitted from every pool (owner, 2026-11-12): its DeepSeek V4.1 Flash 1017 endpoint fabricated page
  *   bodies on the tier benchmark (quality 0.565 and 0.301 against Fireworks 0.786 and 0.784).
