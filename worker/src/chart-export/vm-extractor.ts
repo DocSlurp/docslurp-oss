@@ -250,9 +250,10 @@ export function createVmDeterministicVisualExtractor(deps: VmExtractorDeps): Det
     // come from the Doppler VM's own figure pass (protocol 15, words beside each figure), stored by extract-markdown under
     // FIGURE_CHARTS_SLOT and validated again here; page and box come from the host's figure index.
     if (chartExportInlineEnabled()) {
-      const listed = input.artifacts.dopplerFiguresIndexUri || input.dopplerFiguresIndex !== undefined
-        ? (await svgFigures(deps, input.artifacts.dopplerFiguresIndexUri, Math.max(1, document.pageCount), input.dopplerFiguresIndex)).length
-        : 0;
+      const listedFigures = input.artifacts.dopplerFiguresIndexUri || input.dopplerFiguresIndex !== undefined
+        ? await svgFigures(deps, input.artifacts.dopplerFiguresIndexUri, Math.max(1, document.pageCount), input.dopplerFiguresIndex)
+        : [];
+      const listed = listedFigures.length;
       const chartsUri = input.artifacts.artifactUri?.(FIGURE_CHARTS_SLOT) ?? null;
       const chartsKey = chartsUri ? keyFromStorageUri(chartsUri, deps.storage.bucket) : null;
       const charts = chartsKey ? readStoredFigureCharts(await deps.storage.getJson(chartsKey).catch(() => null)) : null;
@@ -268,7 +269,19 @@ export function createVmDeterministicVisualExtractor(deps: VmExtractorDeps): Det
         // (host-measured), which already includes the chart step.
         log(`[chart-export] doppler figure charts ${context} figures=${charts.figures.length} visuals=${charts.figures.reduce((n, f) => n + f.result.visuals.length, 0)}`);
       } else if (listed > 0) log(`[chart-export] svg figures not sent ${context} figures=${listed} reason=inline-mode${charts ? ` charts=${charts.reason}` : ""}`);
-      if (deferred.length) log(`[chart-export] visuals deferred ${context} count=${deferred.length}`);
+      // Own SVG figures the in-VM chart pass left without a result (a refused shard, or a refused answer): each is a
+      // counted deferral, never a silent loss (council r3 M1). Only when the pass was asked (an answer is stored).
+      if (charts) {
+        const covered = new Set(charts.status === "ok" ? charts.figures.map((f) => f.id) : []);
+        let missing = 0;
+        for (const figure of listedFigures) {
+          if (covered.has(figure.id)) continue;
+          missing++;
+          deferred.push({ input: "doppler-figure", svgIndex: 0, count: 1, reason: "figure-charts-refused", pageNumber: figure.page, figureId: figure.id });
+        }
+        if (missing) log(`[chart-export] figure charts missing ${context} figures=${missing}${charts.status === "ok" ? ` refused_shards=${charts.refusedShards?.length ?? 0}` : ` reason=${charts.reason}`}`);
+      }
+      if (deferred.length) log(`[chart-export] visuals deferred ${context} svgs=${deferred.reduce((n, d) => n + d.count, 0)}`);
       return { partials, presence: presenceOf(results, listed), ...(deferred.length ? { deferred: deferred.slice(0, 1000) } : {}) };
     }
 

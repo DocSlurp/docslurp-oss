@@ -15,7 +15,7 @@ import { barPlot, chartXml, docx, genericBar, pptx, xlsx } from "./extractors/__
 import { extractDeterministicVisuals } from "./extractors/index.js";
 import { CHART_EXTRACT_LIMITS } from "./extractors/limits.js";
 import { chartExportInlineEnabled, freeInlineMode, inlineChartsInProcess, inlineHasWork, readStoredInlineCharts, validateInlineCharts } from "./inline.js";
-import { INLINE_CHART_LIMITS, inlineChartPlan, inlineDeadlineMs } from "./inline-guest.js";
+import { INLINE_CHART_LIMITS, inlineChartPlan, inlineDeadlineMs, scriptTypes } from "./inline-guest.js";
 import { createVmDeterministicVisualExtractor } from "./vm-extractor.js";
 import { inlineChartRequest } from "../stages/quarantine.js";
 
@@ -207,6 +207,44 @@ console.log(JSON.stringify({ status: out.status, calls: out.result?.calls, visua
     expect(out.sniffed).toBeTruthy();
   }, 60_000);
 
+  it("a chart step that kills the process leaves the inspection written (council r3 L1)", async () => {
+    const root = await mkdtemp(path.join(dir, "crash-"));
+    await mkdir(path.join(root, "scripts"));
+    await symlink(path.join(workerRoot, "dist"), path.join(root, "dist"));
+    await copyFile(path.join(workerRoot, "scripts/quarantine-inspect.mjs"), path.join(root, "scripts/quarantine-inspect.mjs"));
+    await writeFile(path.join(root, "scripts/chart-inline.mjs"), "export async function inlineCharts() { process.exit(3); }\n");
+    const tag = Math.random().toString(36).slice(2);
+    const input = path.join(dir, `${tag}.svg`);
+    const options = path.join(dir, `${tag}-options.json`);
+    const output = path.join(dir, `${tag}-out.json`);
+    await writeFile(input, genericBar(["North", "South"], [4, 6], 8));
+    await writeFile(options, JSON.stringify({ filename: "c.svg", policy: POLICY, charts: { kind: "svg", diagrams: true } }));
+    await expect(run(process.execPath, [path.join(root, "scripts/quarantine-inspect.mjs"), input, options, output])).rejects.toMatchObject({ code: 3 });
+    const out = JSON.parse(await readFile(output, "utf8"));
+    expect(out.sniffed).toBeTruthy();
+    expect(out.charts).toBeUndefined();
+    expect(existsSync(`${output}.part`)).toBe(false);
+  }, 60_000);
+
+  it("5 MiB of hostile script tags: the real quarantine command finishes and writes its inspection (council r3 H1)", async () => {
+    for (const unit of ["<script ", "<script type=x "]) {
+      const body = Buffer.from(unit.repeat(Math.ceil((5 * 1024 * 1024) / unit.length))).subarray(0, 5 * 1024 * 1024);
+      const started = Date.now();
+      const out = await inspect("page.html", body, { kind: "html", diagrams: true });
+      expect(Date.now() - started).toBeLessThan(20_000);
+      expect(out.sniffed).toBeTruthy();
+      expect(out.charts).toEqual({ status: "skipped", reason: "no-signal" });
+    }
+  }, 120_000);
+
+  it("the worker gets its own softer deadline inside the hard one (council r3 M2)", async () => {
+    const file = path.join(dir, `worker-budget-${Math.random().toString(36).slice(2)}.mjs`);
+    await writeFile(file, `import { parentPort } from "node:worker_threads";\nparentPort.postMessage("ready");\nparentPort.once("message", (job) => parentPort.postMessage(JSON.stringify({ budgetMs: job.budgetMs })));\n`);
+    const { inlineCharts } = await import(pathToFileURL(path.join(workerRoot, "scripts/chart-inline.mjs")).href);
+    const out = await inlineCharts(Buffer.from("<svg/>"), { kind: "svg", diagrams: true }, { sniffed: { encoding: "utf-8", container: null }, archive: null }, pathToFileURL(file));
+    expect(out).toMatchObject({ status: "ok", result: { budgetMs: Math.floor(inlineDeadlineMs(6) * INLINE_CHART_LIMITS.softDeadlineShare) } });
+  }, 30_000);
+
   it("an SVG declared kind on a ZIP is skipped before any worker starts; the command finishes", async () => {
     const out = await inspect("x.svg", xlsx("S", [["q", "v"], ["A", 1]], chart), { kind: "svg", diagrams: true });
     expect(out.charts).toEqual({ status: "skipped", reason: "not-text" });
@@ -223,9 +261,9 @@ describe("inline chart plan and host validation", () => {
     expect(inlineChartPlan("office", zip(2), 1000, () => "")).toEqual({ run: true, packaged: true });
     expect(inlineChartPlan("office", zip(0), 1000, () => "")).toEqual({ run: false, reason: "no-chart-parts" });
     expect(inlineChartPlan("office", zip(2, true), 1000, () => "")).toEqual({ run: false, reason: "archive-refused" });
-    // An EPUB runs only with an SVG file in it (council r2 M-b / L-b).
-    expect(inlineChartPlan("epub", zip(0), 1000, () => "")).toEqual({ run: false, reason: "no-chart-parts" });
-    expect(inlineChartPlan("epub", { ...zip(0), archive: { ...zip(0).archive, svgParts: 1 } }, 1000, () => "")).toEqual({ run: true, packaged: true });
+    // Every inspectable EPUB runs, SVG file or not: charts drawn inline in XHTML have no cheaper signal (council r3 M3).
+    expect(inlineChartPlan("epub", zip(0), 1000, () => "")).toEqual({ run: true, packaged: true });
+    expect(inlineChartPlan("epub", zip(0, true), 1000, () => "")).toEqual({ run: false, reason: "archive-refused" });
     expect(inlineChartPlan("json", text, 10, () => "  [1,2]")).toEqual({ run: false, reason: "no-signal" });
     expect(inlineChartPlan("json", text, 10, () => " {\"mark\":\"bar\",\"data\":{}}")).toEqual({ run: true, packaged: false });
     expect(inlineChartPlan("json", text, 10, () => " {\"mark\":\"bar\"}")).toEqual({ run: false, reason: "no-signal" });
@@ -253,6 +291,28 @@ describe("inline chart plan and host validation", () => {
       expect(inlineChartPlan(kind, text, Buffer.byteLength(body), () => body)).toMatchObject({ run: false, reason: "no-signal" });
       expect(extractDeterministicVisuals({ kind, text: body }).visuals).toEqual([]);
     }
+  });
+
+  it("plans 5 MiB of hostile script tags in linear time (council r3 H1)", () => {
+    const MiB5 = 5 * 1024 * 1024;
+    const fill = (unit: string, prefix = "") => (prefix + unit.repeat(Math.ceil(MiB5 / unit.length))).slice(0, MiB5);
+    const bodies: Array<readonly ["html" | "json", string]> = [
+      ["html", fill("<script ")], ["html", fill("<script type=x ")], ["html", fill("<SCRIPT\ttype='x' ")],
+      ["json", fill("<script ", "{")], ["json", fill("<script type=x ", "{")],
+    ];
+    for (const [kind, body] of bodies) {
+      const started = performance.now();
+      const plan = inlineChartPlan(kind, text, Buffer.byteLength(body), () => body);
+      const took = performance.now() - started;
+      // The old regexes took 7.9 s on 160 KB and hours on 5 MiB. Linear is ~10-30 ms; the bound leaves room for a loaded host.
+      expect(took, `${kind} ${body.slice(0, 16)}`).toBeLessThan(1_000);
+      expect(plan).toEqual({ run: false, reason: "no-signal" });
+    }
+    // Still a superset of the old typed-script regexes: an unclosed typed tag reaching the end of the file runs.
+    expect(inlineChartPlan("html", text, 64, () => "<p><script type=\"application/vnd.plotly.v1+json\"")).toEqual({ run: true, packaged: false });
+    expect(scriptTypes("<script>x</script><script type=text/plain><script src=a.json>")).toEqual({ any: true, plotly: false, xml: false, json: false });
+    expect(scriptTypes("<script id=a <script type=\"application/json\">")).toMatchObject({ json: true });
+    expect(scriptTypes("<Script TYPE='application/xhtml+xml'>")).toMatchObject({ xml: true });
   });
 
   it("runs on what the extractor reads: an HTML file that is a JSON spec, an escaped key", () => {

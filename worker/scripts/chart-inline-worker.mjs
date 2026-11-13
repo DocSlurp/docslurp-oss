@@ -13,9 +13,12 @@ import { parentPort, workerData } from "node:worker_threads";
 if (workerData?.compileCache) {
   try { module.enableCompileCache?.(workerData.compileCache); } catch { /* no cache: same result, slower start */ }
 }
-const { extractDeterministicVisuals } = await import("../dist/chart-export/guest.bundle.mjs");
+const { extractDeterministicVisuals, setGuestDeadline } = await import("../dist/chart-export/guest.bundle.mjs");
 parentPort.postMessage("ready");
 parentPort.once("message", (job) => {
+  // The extractor's own deadline, below the parent's hard one: past it, the SVGs not reached become counted
+  // `guest-deadline` ranges and a still-walking one `svg-too-slow`, so one slow chart costs only itself (council r3 M2).
+  if (Number.isSafeInteger(job.budgetMs) && job.budgetMs > 0) setGuestDeadline(Date.now() + job.budgetMs);
   const bytes = Buffer.from(job.buffer);
   const input = job.packaged ? { kind: job.kind, bytes } : { kind: job.kind, text: bytes.toString("utf8") };
   parentPort.postMessage(JSON.stringify(extractDeterministicVisuals(input, { diagrams: job.diagrams !== false })));

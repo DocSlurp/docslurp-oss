@@ -37,7 +37,7 @@ export interface DeterministicRefusal { locator: string; reason: string }
 export interface DeterministicDeferral {
   svgIndex: number;
   count: number;
-  reason: "svg-document-limit" | "html-svg-limit" | "guest-deadline" | "visual-limit" | "package-part-limit";
+  reason: "svg-document-limit" | "html-svg-limit" | "guest-deadline" | "visual-limit" | "package-part-limit" | "figure-charts-refused";
 }
 
 export interface DeterministicVisualResult {

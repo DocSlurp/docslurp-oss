@@ -11,7 +11,7 @@ import { fileFactsFromSniff, quarantineFailureText, type FileFacts } from "@docs
 
 import type { Config } from "../config.js";
 import { DocumentStageError } from "../pipeline/checkpoints.js";
-import type { MalwareScanResult } from "../tools/runner.js";
+import { CommandExitError, type MalwareScanResult } from "../tools/runner.js";
 import type { CommandRunner } from "../tools/runner.js";
 import { vmOnlyParsing } from "./vm-only-parsing.js";
 import { isClamEncryptedAlert, isClamLimitAlert } from "../tools/clam-limits.js";
@@ -429,6 +429,7 @@ async function inspectInVm(args: InspectArgs): Promise<QuarantineInspection> {
   try {
     const options = path.join(dir, "options.json");
     const output = path.join(dir, "inspection.json");
+    let inlineCrashed = false;
     await writeFile(options, JSON.stringify({ filename: args.filename, policy: {
       quarantineFailOpenOnToolMissing: args.policy.quarantineFailOpenOnToolMissing,
       quarantineMaxArchiveEntries: args.policy.quarantineMaxArchiveEntries,
@@ -439,7 +440,15 @@ async function inspectInVm(args: InspectArgs): Promise<QuarantineInspection> {
     }, ...(args.charts ? { charts: { kind: args.charts.kind, diagrams: args.charts.diagrams } } : {}) }), { mode: 0o600 });
     // V8 refuses code generation from strings in this command and in the inline chart worker it starts (worker threads take
     // the flag from their process; it cannot be set per worker), as in every chart guest run (host.ts GUEST_NODE_FLAGS).
-    await args.runner.run({ binary: "node", args: [...GUEST_NODE_FLAGS, path.join(resolveScriptsDir(), "quarantine-inspect.mjs"), args.tempFile, options, output], available: true, readOnlyInputs: true, timeoutMs: 60_000 }, args.signal);
+    try {
+      await args.runner.run({ binary: "node", args: [...GUEST_NODE_FLAGS, path.join(resolveScriptsDir(), "quarantine-inspect.mjs"), args.tempFile, options, output], available: true, readOnlyInputs: true, timeoutMs: 60_000 }, args.signal);
+    } catch (error) {
+      // The guest writes the inspection before charts run (council r3 L1). When the command exited non-zero after that,
+      // with charts asked, the inspection stands and the charts are a refusal. Without charts, or with no inspection
+      // written (a timeout, an abort, a failure before the write), the command failed as before.
+      if (!args.charts || !(error instanceof CommandExitError) || error.exitCode === null || args.signal?.aborted || !(await stat(output).catch(() => null))) throw error;
+      inlineCrashed = true;
+    }
     if ((await stat(output)).size > (args.charts ? 6 : 2) * 1024 * 1024) throw new Error("quarantine inspection result exceeds limit");
     const result = JSON.parse(await readFile(output, "utf8")) as QuarantineInspection;
     // The chart answer is checked on its own and can only ever be dropped to a refusal: it never fails the inspection.
@@ -448,7 +457,8 @@ async function inspectInVm(args: InspectArgs): Promise<QuarantineInspection> {
     delete (result as { charts?: unknown }).charts;
     // The inspection proper keeps its own 2 MiB bound; only the chart answer gets the extra allowance.
     if (Buffer.byteLength(JSON.stringify(result)) > 2 * 1024 * 1024) throw new Error("quarantine inspection result exceeds limit");
-    if (args.charts && charts !== undefined) result.charts = validateInlineCharts(charts);
+    if (args.charts && inlineCrashed) result.charts = { status: "refused", reason: "worker-failed", ms: 0 };
+    else if (args.charts && charts !== undefined) result.charts = validateInlineCharts(charts);
     const sniffed = result?.sniffed as unknown as Record<string, unknown> | null;
     if (!sniffed || typeof sniffed !== "object" || Object.keys(sniffed).some((key) => !["mimeType", "container", "encoding"].includes(key))
       || !(sniffed.mimeType === null || typeof sniffed.mimeType === "string" && sniffed.mimeType.length <= 256 && /^[\w.+-]+\/[\w.+-]+$/.test(sniffed.mimeType))

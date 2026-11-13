@@ -70,6 +70,6 @@ describe("figure charts on every store path", () => {
     const { stage: s } = stage();
     const out = await s.storeWinningDopplerFiguresOnly({ document: DOC, runId: "run-1", markdown: "", candidate: { figures: { dir, outcome: { status: "extracted" } } } });
     expect(out.figures.stats.status).toBe("stored");
-    expect(out.figures.stats.charts).toEqual({ status: "refused", reason: "result-invalid" });
+    expect(out.figures.stats.charts).toMatchObject({ status: "refused", reason: "result-invalid", missing: expect.any(Number) });
   });
 });

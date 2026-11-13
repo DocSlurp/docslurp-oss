@@ -3,7 +3,8 @@
 // worker, never the inspection:
 // - a V8 heap limit (resourceLimits);
 // - a process RSS growth limit, polled while the worker runs: the heap limit does not cover Buffers/ArrayBuffers;
-// - a wall-clock deadline that starts when the file is handed over (start-up is our code and has its own allowance).
+// - a wall-clock deadline that starts when the file is handed over (start-up is our code and has its own allowance). The
+//   extractor gets a softer one inside it, so a slow SVG loses only itself, recorded as counted deferrals.
 import { existsSync } from "node:fs";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
@@ -54,7 +55,8 @@ export async function inlineCharts(bytes, request, inspection, workerUrl = WORKE
   const deadline = inlineDeadlineMs(bytes.length);
   // One copy at most: the worker gets the file's memory itself (transferred), the parent keeps none of it.
   const own = bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength ? bytes.buffer : bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
-  const job = { kind, packaged: plan.packaged, diagrams: request.diagrams !== false, buffer: own };
+  // The worker stops itself at 80% of the deadline and returns what it has; terminate() at 100% stays the backstop.
+  const job = { kind, packaged: plan.packaged, diagrams: request.diagrams !== false, budgetMs: Math.floor(deadline * INLINE_CHART_LIMITS.softDeadlineShare), buffer: own };
   const rssLimit = process.memoryUsage.rss() + INLINE_CHART_LIMITS.maxRssGrowthMb * 1024 * 1024;
   return await new Promise((resolve) => {
     let settled = false;

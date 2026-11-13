@@ -10,6 +10,7 @@ import type { CommandRunner } from "../../tools/runner.js";
 import { extractDeterministicVisuals as guestExtract, type DeterministicVisualInput, type DeterministicVisualOptions } from "./index.js";
 import { CHART_EXTRACT_LIMITS } from "./limits.js";
 import type { DeterministicVisualResult } from "./types.js";
+import { GUEST_NODE_FLAGS } from "../../sandbox/guest-node-flags.js";
 
 /*
  * Host side of the deterministic chart rungs. Customer bytes are parsed only by the guest entry
@@ -54,7 +55,8 @@ function validVisual(v: unknown): boolean {
 const validEntry = (r: unknown) => !!r && typeof r === "object" && !Array.isArray(r) && Object.keys(r).sort().join(",") === "locator,reason"
   && isStr((r as Record<string, unknown>).locator, 512) && isStr((r as Record<string, unknown>).reason, 120);
 /** A deferral is an ordinal range and a closed reason only: nothing from the input's names reaches stats. */
-const DEFERRAL_REASONS = new Set<string>(DEFERRED_VISUAL_REASONS);
+// figure-charts-refused is the host's own record of a refused in-VM chart pass: a guest never reports it.
+const DEFERRAL_REASONS = new Set<string>(DEFERRED_VISUAL_REASONS.filter((r) => r !== "figure-charts-refused"));
 const intIn = (v: unknown, min: number, max: number) => Number.isSafeInteger(v) && (v as number) >= min && (v as number) <= max;
 const validDeferral = (r: unknown) => !!r && typeof r === "object" && !Array.isArray(r) && Object.keys(r).sort().join(",") === "count,reason,svgIndex"
   && DEFERRAL_REASONS.has((r as Record<string, unknown>).reason as string)
@@ -66,7 +68,7 @@ const validDeferral = (r: unknown) => !!r && typeof r === "object" && !Array.isA
  * Only the VM guest gets it (and zod `jitless`, via guest-entry): the in-process paths below are for tests and local
  * development, refused wherever parsing must stay in the VM (`vmOnlyParsing`), and are not this boundary.
  */
-export const GUEST_NODE_FLAGS = ["--disallow-code-generation-from-strings"];
+export { GUEST_NODE_FLAGS };
 /** How far below the run's timeout the guest stops and returns what it has (VM exec, staging and result write fit). */
 const GUEST_DEADLINE_MARGIN_MS = 15_000;
 

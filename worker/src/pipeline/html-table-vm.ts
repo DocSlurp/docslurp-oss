@@ -7,6 +7,7 @@ import { resolveScriptsDir } from "../tools/scripts-dir.js";
 import type { CommandRunner } from "../tools/runner.js";
 import type { HtmlTableCell } from "./table-cells-guest.js";
 import { vmOnlyParsing } from "../lib/vm-only-parsing.js";
+import { GUEST_NODE_FLAGS } from "../sandbox/guest-node-flags.js";
 const cellsContext = new AsyncLocalStorage<Map<string, HtmlTableCell[] | null>>();
 export function preparedHtmlTableCells(source: string): HtmlTableCell[] | null | undefined { return cellsContext.getStore()?.get(source); }
 function vmTableSources(sources: string[]): string[] {
@@ -37,7 +38,7 @@ export async function withPreparedHtmlTables<T>(sources: string[], runner: Pick<
         }
         const input = path.join(dir, `tables-${start}.json`), output = path.join(dir, `cells-${start}.json`);
         await writeFile(input, JSON.stringify(batch), { mode: 0o600 });
-        await runner.run({ binary: "node", args: [path.join(resolveScriptsDir(), "table-cells.mjs"), input, output], available: true, readOnlyInputs: true, timeoutMs: 60_000 }, signal);
+        await runner.run({ binary: "node", args: [...GUEST_NODE_FLAGS, path.join(resolveScriptsDir(), "table-cells.mjs"), input, output], available: true, readOnlyInputs: true, timeoutMs: 60_000 }, signal);
         if ((await stat(output)).size > 64 * 1024 * 1024) throw new Error("HTML table result exceeds limit");
         const result = JSON.parse(await readFile(output, "utf8")) as Array<HtmlTableCell[] | null>;
         if (!Array.isArray(result) || result.length !== batch.length) throw new Error("invalid HTML table result");

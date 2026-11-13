@@ -1,5 +1,5 @@
 // Parser VM only: no worker credentials enter this process.
-import { readFile, stat, writeFile } from "node:fs/promises";
+import { readFile, rename, stat, writeFile } from "node:fs/promises";
 import { inspectQuarantineBytes } from "../dist/lib/quarantine-bytes.js";
 const [input, optionsPath, output] = process.argv.slice(2);
 if ((await stat(input)).size > 500 * 1024 * 1024 || (await stat(optionsPath)).size > 64 * 1024) throw new Error("quarantine input exceeds limit");
@@ -24,7 +24,11 @@ const inspection = inspectQuarantineBytes(bytes, options.filename, options.polic
 // The inspection's own bound, unchanged: 2 MiB without the chart answer.
 const own = JSON.stringify(inspection);
 if (Buffer.byteLength(own) > 2 * 1024 * 1024) throw new Error("quarantine result exceeds limit");
-let result = own;
+// Each write is whole or absent (temp file, then rename). The inspection is written before charts run, so a chart step
+// that crashes the process cannot lose the verdict's input (council r3 L1): the host reads it and records the charts as
+// refused. A timeout still discards every output (the runner never downloads a timed-out command's files).
+const put = async (json) => { await writeFile(`${output}.part`, json, { mode: 0o600 }); await rename(`${output}.part`, output); };
+await put(own);
 if (charts) {
   let answer;
   try {
@@ -32,8 +36,8 @@ if (charts) {
   } catch {
     answer = refused("worker-failed");
   }
-  result = JSON.stringify({ ...inspection, charts: answer });
+  let result = JSON.stringify({ ...inspection, charts: answer });
   // The chart answer has its own allowance on top; over it, the answer becomes a refusal (never a failed command).
   if (Buffer.byteLength(result) > 6 * 1024 * 1024) result = JSON.stringify({ ...inspection, charts: refused("result-too-large") });
+  await put(result);
 }
-await writeFile(output, result, { mode: 0o600 });

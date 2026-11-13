@@ -21,6 +21,8 @@ export const INLINE_CHART_LIMITS = {
   deadlineBaseMs: 500,
   deadlinePerKibMs: 2,
   deadlineMaxMs: 10_000,
+  /** The extractor's own deadline, as a share of the hard one: it returns partial, counted results before terminate(). */
+  softDeadlineShare: 0.8,
   /** Start-up of the worker thread and the bundle import (our code, not the file's): ~50 ms on an idle VM. */
   startupMs: 5_000,
   /** V8 heap of the extraction worker thread. Inflated ZIP entries are bounded by the extractor's own zip limits. */
@@ -70,25 +72,52 @@ const DATA_COMPANION = /"(?:mark|layer|encoding|type|y|values)"\s*:/;
 const ESCAPED_ASCII = /\\u00[0-7][0-9a-fA-F]/;
 const LITERAL_SPEC_KEY = /"\$schema"|"mark"|"data"/;
 const PLOTLY_CALL = /\bPlotly\.(?:newPlot|react|plot)\s*\(/;
-const SCRIPT = /<script\b/i;
-const SCRIPT_TYPED = (pattern: string) => new RegExp(`<script\\b[^>]*\\btype\\s*=\\s*["']?[^"'\\s>]*(?:${pattern})`, "i");
-const PLOTLY_TYPED = SCRIPT_TYPED("plotly");
-const JSON_TYPED = SCRIPT_TYPED("json");
-const XML_TYPED = SCRIPT_TYPED("\\+xml|xhtml");
 const ALWAYS = /<(?:svg|metadata)\b/i;
+interface ScriptTypes { any: boolean; plotly: boolean; xml: boolean; json: boolean }
+
+/**
+ * What the file's `<script>` start tags could be typed as, in one linear pass (council r3 H1: the old
+ * `<script\b[^>]*\btype…` regexes backtracked quadratically, 160 KB of `<script ` took 7.9 s on the quarantine main thread,
+ * outside the worker's deadline). A superset of those regexes, so a skip still means the extractor finds nothing:
+ * - Only the first `<script` of each `>`-free span is measured. A later one in the same span is a suffix of it, and the
+ *   old `[^>]*` could reach anything the suffix reaches.
+ * - A tag counts as typed X when it mentions `type` and X anywhere (case-insensitive), whether or not that is the type
+ *   attribute's value. A tag with no `>` runs to the end of the text, as `[^>]*` did.
+ * Linear: the measured spans are disjoint and each is read a fixed number of times (find, slice, lower-case, search).
+ */
+export function scriptTypes(t: string): ScriptTypes {
+  const out: ScriptTypes = { any: false, plotly: false, xml: false, json: false };
+  const start = /<script\b/gi;
+  let match: RegExpExecArray | null;
+  while ((match = start.exec(t)) !== null) {
+    out.any = true;
+    const found = t.indexOf(">", match.index);
+    const end = found < 0 ? t.length : found;
+    const tag = t.slice(match.index + 7, end).toLowerCase();
+    if (tag.includes("type")) {
+      if (tag.includes("plotly")) out.plotly = true;
+      if (tag.includes("+xml") || tag.includes("xhtml")) out.xml = true;
+      if (tag.includes("json")) out.json = true;
+    }
+    if (found < 0) break;
+    start.lastIndex = end + 1;
+  }
+  return out;
+}
 
 /** Whether parsed JSON in `t` could be a spec `classify` reads (see above). */
 function jsonCouldHit(t: string): boolean {
   return SCHEMA_KEY.test(t) || (DATA_KEY.test(t) && DATA_COMPANION.test(t)) || ESCAPED_ASCII.test(t);
 }
 
-/** Whether `findEmbeddedSpecs` could find anything in HTML/XHTML text, or in JSON text. */
+/** Whether `findEmbeddedSpecs` could find anything in HTML/XHTML text, or in JSON text. Linear in the text's length. */
 export function markupCouldHit(t: string): boolean {
   if (t.trimStart().startsWith("{") && jsonCouldHit(t)) return true;
   if (ALWAYS.test(t)) return true;
-  if (!SCRIPT.test(t)) return false;
-  if (PLOTLY_TYPED.test(t) || XML_TYPED.test(t) || PLOTLY_CALL.test(t) || LITERAL_SPEC_KEY.test(t)) return true;
-  return JSON_TYPED.test(t) && jsonCouldHit(t);
+  const types = scriptTypes(t);
+  if (!types.any) return false;
+  if (types.plotly || types.xml || PLOTLY_CALL.test(t) || LITERAL_SPEC_KEY.test(t)) return true;
+  return types.json && jsonCouldHit(t);
 }
 
 /** The UTF-16 length of UTF-8 bytes is at least a third of the byte count: past this, the decoded text is over the limit. */
@@ -103,8 +132,8 @@ const MAX_TEXT_INPUT_BYTES = 3 * CHART_EXTRACT_LIMITS.maxTextBytes;
  *   the extractor would return a size refusal, the plan returns `input-too-large`.
  * - Office without chart parts: SVG pictures under media/ are not read. This is #363's host rule for Office sources
  *   (chart parts are the signal), kept here on purpose: a picture-only deck is not a chart signal.
- * - EPUB without an SVG file: specs or inline SVG inside its XHTML chapters are not read (reading them is the extraction
- *   itself). An EPUB with at least one `*.svg` entry runs.
+ * - EPUB: never skipped for content. Every inspectable EPUB runs (council r3 M3): charts drawn inline in XHTML chapters
+ *   have no cheaper signal than reading them, and the worker costs ~50-80 ms per EPUB, a few ms per page.
  */
 export function inlineChartPlan(kind: string, inspection: InlineInspectionView, sizeBytes: number, text: () => string): InlinePlan {
   if (!(INLINE_CHART_KINDS as readonly string[]).includes(kind)) return { run: false, reason: "kind-unsupported" };
@@ -114,7 +143,6 @@ export function inlineChartPlan(kind: string, inspection: InlineInspectionView, 
     const archive = inspection.archive;
     if (!archive || archive.kind !== "zip" || archive.suspicious || !archive.inspectable) return { run: false, reason: "archive-refused" };
     if (kind === "office" && !((archive.chartParts ?? 0) > 0)) return { run: false, reason: "no-chart-parts" };
-    if (kind === "epub" && !((archive.svgParts ?? 0) > 0)) return { run: false, reason: "no-chart-parts" };
     return { run: true, packaged };
   }
   if (inspection.archive !== null || inspection.sniffed.container !== null || inspection.sniffed.encoding === null) return { run: false, reason: "not-text" };

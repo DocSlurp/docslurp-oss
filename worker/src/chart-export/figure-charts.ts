@@ -75,11 +75,34 @@ export async function takeFigureCharts(dir: string): Promise<TakenFigureCharts> 
 }
 
 export interface StoredFigureChart { id: string; page: number; bbox: [number, number, number, number]; result: GuestResult }
+/** A shard (page range) whose chart answer the guest's join refused: its figures have no result. */
+export interface RefusedChartShard { first: number; last: number; reason: string }
+/**
+ * `missing`: the document's own SVG figures with no result (council r3 M1), counted against the host's index. The free
+ * pass records each as a `figure-charts-refused` deferral, so a refused shard or answer is never a silent loss.
+ */
 export type StoredFigureCharts =
-  | { schemaVersion: typeof FIGURE_CHARTS_SCHEMA; status: "ok"; ms: number | null; figures: StoredFigureChart[] }
-  | { schemaVersion: typeof FIGURE_CHARTS_SCHEMA; status: "refused"; reason: string };
+  | { schemaVersion: typeof FIGURE_CHARTS_SCHEMA; status: "ok"; ms: number | null; figures: StoredFigureChart[]; missing: number; refusedShards?: RefusedChartShard[] }
+  | { schemaVersion: typeof FIGURE_CHARTS_SCHEMA; status: "refused"; reason: string; missing: number };
 
-const refused = (reason: string): StoredFigureCharts => ({ schemaVersion: FIGURE_CHARTS_SCHEMA, status: "refused", reason });
+const MAX_REFUSED_SHARDS = 256;
+const MAX_PAGE = 1_000_000;
+const refused = (reason: string, missing = 0): StoredFigureCharts => ({ schemaVersion: FIGURE_CHARTS_SCHEMA, status: "refused", reason, missing });
+const countOf = (n: unknown) => (Number.isSafeInteger(n) && (n as number) >= 0 && (n as number) <= DOPPLER_FIGURE_LIMITS.maxFiles ? (n as number) : null);
+
+/** The guest join's refused shards: page ranges and fixed slugs only; null when malformed. */
+function refusedShardsOf(raw: unknown): RefusedChartShard[] | null {
+  if (!Array.isArray(raw) || raw.length > MAX_REFUSED_SHARDS) return null;
+  const out: RefusedChartShard[] = [];
+  for (const r of raw) {
+    if (!r || typeof r !== "object" || Array.isArray(r) || Object.keys(r).sort().join(",") !== "first,last,reason") return null;
+    const { first, last, reason } = r as Record<string, unknown>;
+    if (!Number.isSafeInteger(first) || !Number.isSafeInteger(last) || (first as number) < 1 || (last as number) < (first as number) || (last as number) > MAX_PAGE) return null;
+    if (typeof reason !== "string" || !SLUG.test(reason)) return null;
+    out.push({ first: first as number, last: last as number, reason });
+  }
+  return out;
+}
 
 /** The document's own SVG figures (each with its own file), by id, from the validated figure index. */
 function ownSvgFigures(index: readonly unknown[]): Map<string, DopplerFigureRecord> {
@@ -101,26 +124,30 @@ function ownSvgFigures(index: readonly unknown[]): Map<string, DopplerFigureReco
  */
 export function validateFigureCharts(taken: TakenFigureCharts, index: readonly unknown[]): StoredFigureCharts | null {
   if (taken === null) return null;
-  if ("refused" in taken) return refused(taken.refused);
+  const own = ownSvgFigures(index);
+  // Every refusal leaves all of the document's own SVG figures without a result: counted, never silent.
+  const refuse = (reason: string) => refused(reason, own.size);
+  if ("refused" in taken) return refuse(taken.refused);
   const o = taken.raw as Record<string, unknown> | null;
-  if (!o || typeof o !== "object" || Array.isArray(o) || o.schemaVersion !== FIGURE_CHARTS_SCHEMA) return refused("result-invalid");
+  if (!o || typeof o !== "object" || Array.isArray(o) || o.schemaVersion !== FIGURE_CHARTS_SCHEMA) return refuse("result-invalid");
   if (o.status === "refused") {
     const keys = Object.keys(o).sort().join(",");
-    return keys === "reason,schemaVersion,status" && typeof o.reason === "string" && SLUG.test(o.reason) ? refused(o.reason) : refused("result-invalid");
+    return keys === "reason,schemaVersion,status" && typeof o.reason === "string" && SLUG.test(o.reason) ? refuse(o.reason) : refuse("result-invalid");
   }
-  if (o.status !== "ok") return refused("result-invalid");
+  if (o.status !== "ok") return refuse("result-invalid");
   const keys = Object.keys(o).sort();
-  if (keys.some((k) => !["batch", "figures", "ms", "schemaVersion", "status"].includes(k)) || !Array.isArray(o.figures)) return refused("result-invalid");
+  if (keys.some((k) => !["batch", "figures", "ms", "refusedShards", "schemaVersion", "status"].includes(k)) || !Array.isArray(o.figures)) return refuse("result-invalid");
   const ms = o.ms === undefined ? null : Number.isSafeInteger(o.ms) && (o.ms as number) >= 0 && (o.ms as number) <= MAX_MS ? (o.ms as number) : NaN;
-  if (Number.isNaN(ms)) return refused("result-invalid");
-  const own = ownSvgFigures(index);
+  if (Number.isNaN(ms)) return refuse("result-invalid");
+  const shards = o.refusedShards === undefined ? [] : refusedShardsOf(o.refusedShards);
+  if (shards === null) return refuse("result-invalid");
   const ids = o.figures as unknown[];
-  if (ids.length > DOPPLER_FIGURE_LIMITS.maxFiles || new Set(ids).size !== ids.length || ids.some((id) => typeof id !== "string" || !own.has(id))) return refused("unknown-figure");
+  if (ids.length > DOPPLER_FIGURE_LIMITS.maxFiles || new Set(ids).size !== ids.length || ids.some((id) => typeof id !== "string" || !own.has(id))) return refuse("unknown-figure");
   let results: GuestResult[];
   try {
     results = validateDeterministicBatch(o.batch, ids.length);
   } catch {
-    return refused("result-invalid");
+    return refuse("result-invalid");
   }
   return {
     schemaVersion: FIGURE_CHARTS_SCHEMA, status: "ok", ms,
@@ -129,6 +156,9 @@ export function validateFigureCharts(taken: TakenFigureCharts, index: readonly u
       // Page and box come from the host's own index, never from the guest's answer.
       return { id, page: f.page, bbox: f.bbox, result: results[i]! };
     }),
+    // Coverage, counted from the host's index (not the guest's word): ids are distinct own figures, so this is >= 0.
+    missing: own.size - ids.length,
+    ...(shards.length ? { refusedShards: shards } : {}),
   };
 }
 
@@ -136,23 +166,29 @@ export function validateFigureCharts(taken: TakenFigureCharts, index: readonly u
 export function readStoredFigureCharts(raw: unknown): StoredFigureCharts | null {
   const o = raw as Record<string, unknown> | null;
   if (!o || typeof o !== "object" || o.schemaVersion !== FIGURE_CHARTS_SCHEMA) return null;
-  if (o.status === "refused") return typeof o.reason === "string" && SLUG.test(o.reason) ? refused(o.reason) : null;
+  const missing = o.missing === undefined ? 0 : countOf(o.missing);
+  if (missing === null) return null;
+  if (o.status === "refused") return typeof o.reason === "string" && SLUG.test(o.reason) ? refused(o.reason, missing) : null;
   if (o.status !== "ok" || !Array.isArray(o.figures) || o.figures.length > DOPPLER_FIGURE_LIMITS.maxFiles) return null;
+  const shards = o.refusedShards === undefined ? [] : refusedShardsOf(o.refusedShards);
+  if (shards === null) return null;
   try {
     const figures = (o.figures as Array<Record<string, unknown>>).map((f) => {
       const bbox = f.bbox as unknown[];
       if (typeof f.id !== "string" || !Number.isSafeInteger(f.page) || (f.page as number) < 1 || !Array.isArray(bbox) || bbox.length !== 4 || !bbox.every((n) => typeof n === "number" && Number.isFinite(n))) throw new Error("bad figure");
       return { id: f.id, page: f.page as number, bbox: bbox as [number, number, number, number], result: validateDeterministicResult(f.result) };
     });
-    return { schemaVersion: FIGURE_CHARTS_SCHEMA, status: "ok", ms: typeof o.ms === "number" ? o.ms : null, figures };
+    return { schemaVersion: FIGURE_CHARTS_SCHEMA, status: "ok", ms: typeof o.ms === "number" ? o.ms : null, figures, missing, ...(shards.length ? { refusedShards: shards } : {}) };
   } catch {
     return null;
   }
 }
 
-/** Whether the answer gives the free pass anything to export or defer. */
+/** Whether the answer gives the free pass anything to export or defer (figures left without a result are deferred). */
 export function figureChartsHaveWork(charts: StoredFigureCharts | null): boolean {
-  return charts?.status === "ok" && charts.figures.some((f) => f.result.visuals.length > 0 || (f.result.deferred?.length ?? 0) > 0);
+  if (!charts) return false;
+  if (charts.missing > 0) return true;
+  return charts.status === "ok" && charts.figures.some((f) => f.result.visuals.length > 0 || (f.result.deferred?.length ?? 0) > 0);
 }
 
 /** Object name of the stored answer: the work bit is in the name, so the ledger alone says whether to look. */

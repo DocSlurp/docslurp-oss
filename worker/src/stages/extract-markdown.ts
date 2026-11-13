@@ -3236,7 +3236,9 @@ export class ExtractMarkdownStage implements Stage {
       const indexKey = keyFromStorageUri(stored.indexUri, this.storage.bucket);
       if (!indexKey) return { status: "failed", reason: "index-key" };
       const index = await this.storage.getJson<{ figures?: unknown }>(indexKey);
-      const charts = validateFigureCharts(taken, Array.isArray(index?.figures) ? index.figures : []) ?? { schemaVersion: FIGURE_CHARTS_SCHEMA, status: "refused" as const, reason: "missing" };
+      const figureIndex = Array.isArray(index?.figures) ? index.figures : [];
+      // Asked and absent (an older guest): refused as `missing`, with every own SVG figure counted as left without a result.
+      const charts = validateFigureCharts(taken ?? { refused: "missing" }, figureIndex)!;
       const work = figureChartsHaveWork(charts);
       const key = path.posix.join(path.posix.dirname(indexKey), figureChartsObjectName(documentId, work));
       await this.storage.putJson(key, charts);
@@ -3244,8 +3246,11 @@ export class ExtractMarkdownStage implements Stage {
       stored.slots.push({ slot: FIGURE_CHARTS_SLOT, uri });
       stored.objectKeys.push(key);
       const visuals = charts.status === "ok" ? charts.figures.reduce((n, f) => n + f.result.visuals.length, 0) : 0;
-      console.log(`[doppler-figures] document=${documentId} charts=${charts.status}${charts.status === "ok" ? ` figures=${charts.figures.length} visuals=${visuals}` : ` reason=${charts.reason}`}`);
-      return charts.status === "ok" ? { status: "ok", figures: charts.figures.length, visuals, ms: charts.ms } : { status: "refused", reason: charts.reason };
+      const shards = charts.status === "ok" ? charts.refusedShards ?? [] : [];
+      console.log(`[doppler-figures] document=${documentId} charts=${charts.status}${charts.status === "ok" ? ` figures=${charts.figures.length} visuals=${visuals}` : ` reason=${charts.reason}`} missing=${charts.missing}${shards.length ? ` refused_shards=${shards.length} shard_reasons=${[...new Set(shards.map((r) => r.reason))].join(",")}` : ""}`);
+      return charts.status === "ok"
+        ? { status: "ok", figures: charts.figures.length, visuals, ms: charts.ms, missing: charts.missing, ...(shards.length ? { refusedShards: shards.length } : {}) }
+        : { status: "refused", reason: charts.reason, missing: charts.missing };
     } catch (error) {
       console.warn(`[doppler-figures] document=${documentId} charts=failed error=${error instanceof Error ? error.name : "error"}`);
       return { status: "failed", reason: "store" };
