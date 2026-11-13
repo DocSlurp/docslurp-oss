@@ -124,7 +124,7 @@ describe("chat slots when the shared Redis is down", () => {
 });
 
 describe("chat slot backend at startup", () => {
-  const production = (extra: Record<string, string> = {}) => ({ NODE_ENV: "production", ...extra });
+  const production = (extra: Record<string, string | undefined> = {}) => ({ NODE_ENV: "production", ...extra });
   beforeEach(() => {
     resetChatConcurrency();
     vi.spyOn(console, "error").mockImplementation(() => undefined);
