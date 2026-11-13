@@ -21,6 +21,14 @@ vi.mock("../services/billing/spend-guard.js", async (importOriginal) => ({
   canSpend: vi.fn(async () => true),
 }));
 
+// Page-scoped PII filtering is covered against a real database (pii-page-scoped.db.test.ts); here it passes hits
+// through and records that every search went through it.
+const piiFilter = vi.hoisted(() => vi.fn(async <T,>(results: T[]) => results));
+vi.mock("../services/pii-artifact-guard.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../services/pii-artifact-guard.js")>()),
+  filterPiiWithheldResults: piiFilter,
+}));
+
 vi.mock("../db.js", () => ({
   sql: sqlMock,
 }));
@@ -664,6 +672,15 @@ describe("hybridSearch", () => {
       expect(response.results).toEqual([]);
       expect(response.relevanceFloor).toEqual({ minScore: 0.1, dropped: 2, noMatch: true });
       expect(response.availability.status).toBe("complete");
+    });
+
+    it("page-scoped PII: every result goes through the withheld-page filter, which can drop it", async () => {
+      mockIndex();
+      lanceDbVectorSearch.mockResolvedValue([hitFor("strong", 0.95)]);
+      piiFilter.mockImplementationOnce(async () => []);
+      const response = await search("contract");
+      expect(piiFilter).toHaveBeenCalled();
+      expect(response.results).toEqual([]);
     });
 
     it("keeps strong matches and drops the weak tail without changing the strong score", async () => {

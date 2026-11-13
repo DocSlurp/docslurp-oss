@@ -39,6 +39,9 @@ function artifactsFor(doc: string) {
   };
 }
 
+// One database for both suites; closed after the last one.
+afterAll(async () => { await sql?.end(); await stop?.(); });
+
 /**
  * Page-scoped PII withholding at the serving layer, on a migrated database: the file proxy's authorization
  * (`userCanAccessArtifactUri`), page-image readiness and the search/chat hit filter. Negative cases: withheld pages
@@ -65,7 +68,6 @@ describe("page-scoped PII serving", () => {
     guard = await import("../services/pii-artifact-guard.js");
     readiness = await import("../services/page-image-readiness.js");
   }, 120_000);
-  afterAll(async () => { await sql?.end(); await stop?.(); });
   beforeEach(async () => {
     await sql`update documents set status = 'completed', metadata = ${sql.json(PAGE_SCOPED(DOC_A))} where id = ${DOC_A}`;
   });
