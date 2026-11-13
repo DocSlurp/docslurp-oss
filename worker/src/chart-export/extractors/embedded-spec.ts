@@ -426,7 +426,11 @@ const PLOTLY_CALL = /\bPlotly\.(newPlot|react|plot)\s*\(/g;
 /** A `<script>` or `<metadata>` block's text, `type`, and where it was (`script[3]`). */
 export interface EmbeddedBlock { locator: string; type: string; body: string }
 /** Candidates not examined because a per-input list cap or the guest deadline was reached (counted, never silent). */
-export interface EmbeddedScanStats { overflow: number }
+export interface EmbeddedScanStats {
+  overflow: number;
+  /** Characters the Plotly call windows scanned, summed over blocks (a work count for tests; council r10 I2). */
+  windowChars?: number;
+}
 
 const isWordChar = (c: number) => (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 95;
 const isSpaceChar = (c: string | undefined) => c !== undefined && /\s/.test(c);
@@ -566,7 +570,9 @@ function specsFromBlocks(blocks: EmbeddedBlock[], hits: EmbeddedSpecHit[], seen:
       // A window after the call: the data and layout regions are each at most maxJsonBytes, so nothing usable is cut,
       // and 50 calls cannot each rescan a whole 5 MiB body.
       const from = call.index! + call[0].length;
+      const leftBefore = scan.left;
       const after = jsonRegions(block.body.slice(from, from + 2 * CHART_EXTRACT_LIMITS.maxJsonBytes + 4096), 4, undefined, scan);
+      if (stats.windowChars !== undefined) stats.windowChars += leftBefore - scan.left;
       const dataRegion = after.find((r) => r.text.startsWith("["));
       if (!dataRegion) { if (scan.exhausted) stats.overflow++; continue; }
       if (dataSeen.has(from + dataRegion.start)) continue;

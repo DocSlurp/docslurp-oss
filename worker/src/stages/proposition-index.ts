@@ -86,6 +86,8 @@ export class PropositionIndexStage implements Stage {
             }> = [];
             let actualInputTokens = 0;
             let actualOutputTokens = 0;
+            let cachedInputTokens = 0;
+            let cacheWriteInputTokens = 0;
 
             // Batch paragraphs to reduce API calls (up to ~3000 chars per batch)
             const batches = batchParagraphs(paragraphs, 3000);
@@ -98,9 +100,13 @@ export class PropositionIndexStage implements Stage {
                   groups: propositionTexts,
                   inputTokens: batchIn,
                   outputTokens: batchOut,
+                  cachedInputTokens: batchCached,
+                  cacheWriteInputTokens: batchWritten,
                 } = await this.atomizeParagraphs(batch, model, state.run.pipeline.privacyMode, signal, state.run.pipeline.textGeneration);
                 actualInputTokens += batchIn;
                 actualOutputTokens += batchOut;
+                cachedInputTokens += batchCached;
+                cacheWriteInputTokens += batchWritten;
                 for (let i = 0; i < batch.length; i++) {
                   const paragraph = batch[i]!;
                   const props = propositionTexts[i] ?? [];
@@ -197,6 +203,8 @@ export class PropositionIndexStage implements Stage {
                 costCents: generationCost.costCents,
                 inputTokens: actualInputTokens,
                 outputTokens: actualOutputTokens,
+                cachedInputTokens,
+                cacheWriteInputTokens,
                 metadata: { ...generationCost.metadata, documentId: document.id },
               },
             );
@@ -246,6 +254,8 @@ export class PropositionIndexStage implements Stage {
     groups: string[][];
     inputTokens: number;
     outputTokens: number;
+    cachedInputTokens: number;
+    cacheWriteInputTokens: number;
   }> {
     const combined = paragraphs
       .map((p, i) => `[PARAGRAPH ${i + 1}]\n${p}`)
@@ -299,7 +309,11 @@ export class PropositionIndexStage implements Stage {
         groups.push(group.split("\n").filter((l) => l.trim().length > 0));
       }
     }
-    return { groups, inputTokens, outputTokens };
+    const cache = (key: "cachedInputTokens" | "cacheWriteInputTokens") => {
+      const value = result.usage.metadata?.[key];
+      return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0;
+    };
+    return { groups, inputTokens, outputTokens, cachedInputTokens: cache("cachedInputTokens"), cacheWriteInputTokens: cache("cacheWriteInputTokens") };
   }
 }
 

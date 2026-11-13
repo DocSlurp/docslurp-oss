@@ -2,6 +2,7 @@
 // argv: <input file> <request.json> <output.json> [more input files...]. Reads customer bytes; runs only inside the
 // parser VM in production. With `batch: N` in the request (SVG only), the first input plus the N-1 trailing inputs are
 // extracted one by one, each under its own size limit, and the output is one result per input, in order.
+import { accessSync, constants as fsc, lstatSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { readFile, stat, writeFile } from "node:fs/promises";
 import module from "node:module";
 import path from "node:path";
@@ -12,18 +13,69 @@ if ((await stat(requestPath)).size > 4096) throw new Error("chart extract reques
 const request = JSON.parse(await readFile(requestPath, "utf8"));
 // Optional V8 compile cache (`compileCacheDir`, an absolute directory): off unless the caller passes one. It saves
 // compiling the bundle again in this process and in each worker; it caches compilation of the fixed bundle and script
-// files only, and leaves --disallow-code-generation-from-strings and zod jitless as they are. The directory should be
-// prepared ahead of time and read-only to the guest, so one document's run cannot leave compiled code for the next.
-const compileCacheDir = request.compileCacheDir ?? null;
-if (compileCacheDir !== null && (typeof compileCacheDir !== "string" || compileCacheDir.length > 512 || compileCacheDir.includes("\0") || !path.isAbsolute(compileCacheDir) || path.normalize(compileCacheDir) !== compileCacheDir)) {
+// files only, and leaves --disallow-code-generation-from-strings and zod jitless as they are.
+// A cache the guest could write would let one document's run leave compiled code for the next (Node's check is an
+// unkeyed checksum), so it is used only when the guest cannot write it (council r10 L3): prepared ahead of time and
+// mounted read-only. A writable, missing or unusual directory runs without the cache (identical output) and says why.
+// A cache inherited through the environment is never accepted: that is configuration, not input, so it is refused (and
+// the host strips every NODE_* variable from parser commands, so Node never acts on one before this check).
+// Deployment requirement (council r11 I3): this in-guest check covers one run leaving code for the next, nothing more.
+// Use the cache only with one VM per job, or with the cache on a hypervisor-level read-only disk or image layer, and
+// never under a parent directory the guest can write. A root guest in a long-lived VM could remount it, a read-only
+// alias of a path still writable elsewhere passes the probe, and concurrent runs under a writable parent can swap it
+// between the check and the load.
+if (typeof module.getCompileCacheDir === "function" && module.getCompileCacheDir()) throw new Error("chart extract refuses an inherited compile cache (NODE_COMPILE_CACHE)");
+const requestedCache = request.compileCacheDir ?? null;
+if (requestedCache !== null && (typeof requestedCache !== "string" || requestedCache.length > 512 || requestedCache.includes("\0") || !path.isAbsolute(requestedCache) || path.normalize(requestedCache) !== requestedCache)) {
   throw new Error("invalid chart extract compile cache");
 }
+/** Why `dir` cannot serve as a read-only compile cache, or null when it can. */
+function cacheUnsafe(dir) {
+  const probe = (d) => {
+    const file = path.join(d, `.chart-guest-probe-${process.pid}-${Date.now()}`);
+    try { writeFileSync(file, "", { flag: "wx" }); } catch { return false; }
+    try { unlinkSync(file); } catch { /* removed or not, it was writable */ }
+    return true;
+  };
+  // An entry the guest's own (non-root) user owns can be chmod-ed back to writable: not read-only. Root on a read-write
+  // mount fails the write probe instead.
+  const uid = process.getuid?.() ?? -1;
+  const ownedHere = (p) => uid > 0 && lstatSync(p).uid === uid;
+  try {
+    if (!lstatSync(dir).isDirectory()) return "not a directory";
+    if (ownedHere(dir)) return "owned by the guest user";
+    if (probe(dir)) return "writable";
+    // Node keeps entries one level down (a per-version directory); at most a few, all checked.
+    const entries = readdirSync(dir, { withFileTypes: true });
+    if (entries.length > 16) return "unexpected layout";
+    for (const e of entries) {
+      const sub = path.join(dir, e.name);
+      if (e.isSymbolicLink()) return "symbolic link";
+      if (ownedHere(sub)) return "owned by the guest user";
+      if (!e.isDirectory()) { try { accessSync(sub, fsc.W_OK); return "writable"; } catch { continue; } }
+      if (probe(sub)) return "writable";
+      const files = readdirSync(sub, { withFileTypes: true });
+      if (files.length > 64) return "unexpected layout";
+      for (const f of files) {
+        if (!f.isFile()) return "unexpected layout";
+        if (ownedHere(path.join(sub, f.name))) return "owned by the guest user";
+        try { accessSync(path.join(sub, f.name), fsc.W_OK); return "writable"; } catch { /* read-only, as required */ }
+      }
+    }
+    return null;
+  } catch {
+    return "unreadable";
+  }
+}
+const unsafe = requestedCache ? cacheUnsafe(requestedCache) : null;
+if (unsafe) process.stderr.write(`[chart-guest] compile cache disabled: ${unsafe}\n`);
+const compileCacheDir = requestedCache && !unsafe ? requestedCache : null;
 if (compileCacheDir) module.enableCompileCache(compileCacheDir);
 // One bundled module (built from dist/chart-export/extractors/guest-entry.js): loads in a fraction of the CPU the
 // separate ESM files take, which matters because every VM command starts a fresh process. A fixed path, loaded after
 // the cache is enabled. `testHooks` is null in the production bundle (a build-time constant), so the test-only knobs
 // below are inert there.
-const { CHART_EXTRACT_LIMITS, testHooks, reassembleUnits, resultVisualBytes, resumeSkipList } = await import("../dist/chart-export/guest.bundle.mjs");
+const { CHART_EXTRACT_LIMITS, testHooks, reassembleUnits, resultVisualBytes, resumeSkipList, fitResult, MAX_RESULT_BYTES } = await import("../dist/chart-export/guest.bundle.mjs");
 const kind = request?.kind;
 if (!["office", "epub", "svg", "html", "json"].includes(kind)) throw new Error("invalid chart extract kind");
 const packaged = kind === "office" || kind === "epub";
@@ -32,7 +84,6 @@ const options = { diagrams: request.diagrams !== false };
 // returned as a counted `guest-deadline` deferral, so a slow input keeps what it produced instead of being killed.
 const budgetMs = Number.isSafeInteger(request.budgetMs) && request.budgetMs >= 1_000 && request.budgetMs <= 175_000 ? request.budgetMs : 45_000;
 const deadline = started + budgetMs;
-const MAX_RESULT_BYTES = 16 * 1024 * 1024;
 
 /*
  * Crash and timeout containment (council r8). Each input's extraction runs in a worker_thread with its own heap limit.
@@ -143,13 +194,17 @@ if (request.batch !== undefined) {
       results.push(refused("extract-failed"));
     }
   }
+  // The batch file has the same cap as one result. The shared visual budget keeps it far under; if refusals still push it
+  // over, each figure is held to an equal share, truncated and counted (council r10 M1), never thrown.
   json = JSON.stringify({ schemaVersion: "chart-export-deterministic-batch@v1", results });
+  if (Buffer.byteLength(json) > MAX_RESULT_BYTES) {
+    const share = Math.floor((MAX_RESULT_BYTES - 4096) / results.length);
+    json = JSON.stringify({ schemaVersion: "chart-export-deterministic-batch@v1", results: results.map((r) => fitResult(r, share)) });
+  }
 } else {
   if (more.length > 0) throw new Error("unexpected chart extract inputs");
   if ((await stat(input)).size > (packaged ? CHART_EXTRACT_LIMITS.maxPackageBytes : CHART_EXTRACT_LIMITS.maxTextBytes)) throw new Error("chart extract input exceeds limit");
-  json = JSON.stringify(await extractContained(input, kind, packaged, CHART_EXTRACT_LIMITS.maxOutputBytes));
+  // Held to the result cap by fitResult (inside reassembly, and again here for the fast path): truncated and counted.
+  json = JSON.stringify(fitResult(await extractContained(input, kind, packaged, CHART_EXTRACT_LIMITS.maxOutputBytes)));
 }
-// An assertion: the output budgets (visuals ≤ maxOutputBytes, ≤ 1,000 refusals and deferral entries) keep every result
-// well under this, so a result over it means a bug, not an input.
-if (Buffer.byteLength(json) > MAX_RESULT_BYTES) throw new Error("chart extract result exceeds limit");
 await writeFile(output, json, { mode: 0o600 });

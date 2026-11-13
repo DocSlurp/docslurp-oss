@@ -145,6 +145,39 @@ describe("sandbox command construction", () => {
   });
 });
 
+describe("parser command env: no NODE_* variable, whatever the allowlist says (council r11 I2)", () => {
+  const plan: CommandPlan = { binary: "node", args: [path.join(scriptsDir, "chart-export-extract.mjs")], available: true };
+  const sourceEnv = {
+    PATH: "/usr/bin",
+    LANG: "C.UTF-8",
+    NODE_OPTIONS: "--import=/tmp/evil.mjs",
+    NODE_COMPILE_CACHE: "/tmp/poisoned-cache",
+    NODE_PATH: "/tmp/modules",
+    NODE_EXTRA_CA_CERTS: "/etc/ssl/extra.pem",
+    node_options: "--require=/tmp/evil.cjs",
+    DOCSLURP_PARSER_ENV_ALLOWLIST: "NODE_OPTIONS,NODE_COMPILE_CACHE,NODE_PATH,node_options",
+  };
+
+  it("strips every NODE_* variable from a parser command, even when the allowlist names it", () => {
+    const env = buildCommandEnv({ plan, venvBin: "/tmp/fake-venv/bin", isVectorBackend: false, env: sourceEnv });
+    expect(Object.keys(env).filter((k) => k.toUpperCase().startsWith("NODE_"))).toEqual([]);
+    // Everything else the allowlist admits is still there.
+    expect(env.LANG).toBe("C.UTF-8");
+    expect(env.PATH).toContain("/usr/bin");
+  });
+
+  it("strips NODE_* set by a plan's own env too", () => {
+    const env = buildCommandEnv({ plan: { ...plan, bundleEnv: { NODE_COMPILE_CACHE: "/tmp/x", OMP_NUM_THREADS: "1" } }, venvBin: "/tmp/fake-venv/bin", isVectorBackend: false, env: { PATH: "/usr/bin" } });
+    expect(env.NODE_COMPILE_CACHE).toBeUndefined();
+    expect(env.OMP_NUM_THREADS).toBe("1");
+  });
+
+  it("leaves the host-side vector writer's env as it was", () => {
+    const env = buildCommandEnv({ plan, venvBin: "/tmp/fake-venv/bin", isVectorBackend: true, env: sourceEnv });
+    expect(env.NODE_EXTRA_CA_CERTS).toBe("/etc/ssl/extra.pem");
+  });
+});
+
 describe("document tool invocation planning", () => {
   it("separates parser options from leading-dash file names", () => {
     const planned = planDocumentToolInvocation({

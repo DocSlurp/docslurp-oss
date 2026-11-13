@@ -47,7 +47,7 @@ export const INLINE_CHART_LIMITS = {
 
 /** Fixed slugs a guest may report (the host refuses any other). */
 export const INLINE_SKIP_REASONS = ["no-chart-parts", "no-signal", "archive-refused", "not-text", "input-too-large", "kind-unsupported"] as const;
-export const INLINE_REFUSE_REASONS = ["deadline", "worker-failed", "result-too-large", "result-invalid", "memory-limit"] as const;
+export const INLINE_REFUSE_REASONS = ["deadline", "worker-failed", "result-too-large", "result-invalid", "memory-limit", "cache-inherited"] as const;
 
 export function inlineDeadlineMs(sizeBytes: number): number {
   const kib = Math.ceil(Math.max(0, sizeBytes) / 1024);

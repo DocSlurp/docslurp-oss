@@ -548,6 +548,8 @@ async function generateProjectChatTextWithFailover(args: {
   /** Non-standard projects: answer with this private route instead of hosted models (no failover). */
   privateModel?: PrivateChatModel;
   projectId?: string;
+  /** The project's org: keys the evidence tag (tenant-scoped prompt cache). */
+  orgId?: string | null;
   system: string;
   prompt: string;
   documents: Parameters<typeof generateOpenRouterDocumentText>[0]["documents"];
@@ -585,6 +587,7 @@ async function generateProjectChatTextWithFailover(args: {
         system: args.system,
         prompt: args.prompt,
         documents: args.documents,
+        evidenceScope: args.orgId ?? null,
         maxOutputTokens: args.maxOutputTokens,
         onTextDelta: deltas.handler,
         signal,
@@ -1471,6 +1474,7 @@ async function chatProjectTurn(
     } else {
       try {
         const generated = await generateProjectChatTextWithFailover({
+          orgId: project?.orgId ?? null,
           apiKey: openRouterApiKey,
           privacyMode,
           preferredModel: model, failover: policy.failover, reasoning: policy.reasoning,
@@ -1714,6 +1718,7 @@ async function chatProjectTurn(
 
   try {
     const generated = await generateProjectChatTextWithFailover({
+          orgId: project?.orgId ?? null,
       apiKey: openRouterApiKey,
       privacyMode,
       preferredModel: model, failover: policy.failover, reasoning: policy.reasoning,

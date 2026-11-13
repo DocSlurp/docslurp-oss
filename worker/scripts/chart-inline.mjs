@@ -134,6 +134,10 @@ export async function inlineCharts(bytes, request, inspection, inputPath, worker
   let text;
   const plan = inlineChartPlan(kind, inspection, bytes.length, () => (text ??= bytes.toString("utf8")));
   if (!plan.run) return { status: "skipped", reason: plan.reason };
+  // A compile cache inherited through the environment (NODE_COMPILE_CACHE) is configuration, not input, and may be
+  // writable: refused, as #364's guest refuses it (the host strips NODE_* from parser commands). Charts only; the
+  // inspection stands.
+  if (typeof module.getCompileCacheDir === "function" && module.getCompileCacheDir()) return { status: "refused", reason: "cache-inherited", ms: 0 };
   const started = performance.now();
   const ms = () => Math.round(performance.now() - started);
   const deadline = inlineDeadlineMs(bytes.length);
@@ -175,9 +179,12 @@ export async function inlineCharts(bytes, request, inspection, inputPath, worker
   if (!final && done.size === 0 && failed.size === 0) return { status: "refused", reason: failure === "timeout" ? "deadline" : "worker-failed", ms: ms() };
   const result = final && failed.size === 0 ? final : (await guest(compileCacheDir)).reassembleUnits({
     done, failed: [...failed.values()].map(({ id, svgIndex, reason }) => ({ id, svgIndex, reason })), final, lastWorker,
-    unplaced: unplaced ? { svgIndex: nextSvg, locator: kind } : null, outputBudget: INLINE_OUTPUT_BUDGET,
+    unplaced: unplaced ? { svgIndex: nextSvg, locator: kind } : null, outputBudget: INLINE_OUTPUT_BUDGET, maxResultBytes: INLINE_CHART_LIMITS.maxResultBytes,
   });
-  const json = JSON.stringify(result);
+  let json = JSON.stringify(result);
+  // Held to the inline answer's cap by #364's fitResult (truncated and counted: output-limit, overflow), as the guest does
+  // for its fast path, instead of refusing the whole answer. Loaded only when over the cap.
+  if (Buffer.byteLength(json) > INLINE_CHART_LIMITS.maxResultBytes) json = JSON.stringify((await guest(compileCacheDir)).fitResult(JSON.parse(json), INLINE_CHART_LIMITS.maxResultBytes));
   if (Buffer.byteLength(json) > INLINE_CHART_LIMITS.maxResultBytes) return { status: "refused", reason: "result-too-large", ms: ms() };
   return { status: "ok", ms: ms(), result: JSON.parse(json) };
 }

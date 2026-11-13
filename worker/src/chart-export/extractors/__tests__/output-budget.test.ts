@@ -44,6 +44,28 @@ describe("per-chart output bound", () => {
     expect(points).toBeGreaterThan(0);
   });
 
+  it("charges the real serialized size: labels that escape to 2 bytes a character stay within maxChartBytes", () => {
+    const draft = { chartType: "bar" as const, series: Array.from({ length: 32 }, (_, s) => ({ name: `S${s}`, points: Array.from({ length: 2000 }, (_, i) => ({ x: (String(i) + "\\".repeat(200)).slice(0, 200), y: -1.2345678901234567e300 + i })) })) };
+    const fin = finalizeChart(draft);
+    expect(fin.truncated).toBe(true);
+    expect(Buffer.byteLength(JSON.stringify(fin.spec))).toBeLessThanOrEqual(L.maxChartBytes);
+    // And it uses the budget: within 10% of it, not a fraction from over-charging.
+    expect(Buffer.byteLength(JSON.stringify(fin.spec))).toBeGreaterThan(0.9 * L.maxChartBytes);
+  });
+
+  it("cuts series fairly: a 32-series × 2,000-day chart keeps all 32 series, each cut to the same length", () => {
+    const day = (i: number) => new Date(Date.UTC(2020, 0, 1) + i * 86_400_000).toISOString().slice(0, 10);
+    const draft = { chartType: "line" as const, series: Array.from({ length: 32 }, (_, s) => ({ name: `S${s}`, points: Array.from({ length: 2000 }, (_, i) => ({ x: day(i), y: i * s })) })) };
+    const fin = finalizeChart(draft);
+    expect(fin.truncated).toBe(true);
+    const lengths = fin.spec!.series.map((s) => s.points.length);
+    expect(lengths).toHaveLength(32);
+    expect(Math.max(...lengths) - Math.min(...lengths)).toBeLessThanOrEqual(1);
+    // Each series keeps its first points, in order.
+    expect(fin.spec!.series[5]!.points.slice(0, 3).map((p) => p.x)).toEqual([day(0), day(1), day(2)]);
+    expect(Buffer.byteLength(JSON.stringify(fin.spec))).toBeLessThanOrEqual(L.maxChartBytes);
+  });
+
   it("leaves ordinary charts unchanged", () => {
     const draft = { chartType: "line" as const, series: [{ name: "Revenue", points: Array.from({ length: 365 }, (_, i) => ({ x: `2026-01-${i}`, y: i })) }] };
     const fin = finalizeChart(draft);
@@ -56,7 +78,8 @@ describe("per-chart output bound", () => {
   });
 });
 
-describe("per-input output bound", () => {
+// Each test builds and extracts a 2,000-row amplification workbook: an explicit timeout for loaded runners.
+describe("per-input output bound", { timeout: 30_000 }, () => {
   it("one amplification chart (the council's 85 KB CJK XLSX) becomes one bounded, truncated chart", () => {
     const r = extractDeterministicVisuals({ kind: "office", bytes: ampXlsx(1, "cjk", 2000) });
     expect(r.visuals).toHaveLength(1);

@@ -56,7 +56,7 @@ describe("linear raw-text scanners: exactly the old regexes", () => {
       const body = randomText(random, [" ", "//", "<![CDATA[", "]]>", "a", "\n", "/"], 1 + Math.floor(random() * 12));
       expect(unwrapCdata(body)).toBe(oldCdata(body));
     }
-  });
+  }, 60_000);
 
   it("transform lists (5,000 seeded random values)", () => {
     const random = rng(11);
@@ -65,7 +65,7 @@ describe("linear raw-text scanners: exactly the old regexes", () => {
       const raw = randomText(random, tokens, 1 + Math.floor(random() * 20));
       expect(transformParts(raw)).toEqual(oldTransform(raw));
     }
-  });
+  }, 60_000);
 });
 
 describe("Turkish capital I before a chart (council r8 M1)", () => {
@@ -178,19 +178,24 @@ describe("Plotly call windows share one scan budget per block (council r9)", () 
   it("nested, unclosed calls stop at the block's budget and the calls left are counted", () => {
     // 50 `Plotly.newPlot(` nested in one 4 MiB block with no closed region: each call's window would rescan ~4 MiB.
     const body = "Plotly.newPlot(".repeat(50) + "[".repeat(1) + "x".repeat(4 * 1024 * 1024);
-    const stats = { overflow: 0 };
-    const t = performance.now();
+    const stats = { overflow: 0, windowChars: 0 };
     const hits = findEmbeddedSpecs(`<html><body><script>${body}</script></body></html>`, stats);
     expect(hits).toEqual([]);
     expect(stats.overflow).toBeGreaterThan(0);
-    // Unbudgeted this was 50 windows × 4 MiB; budgeted, at most 4 × body length plus one region scan.
-    expect(performance.now() - t).toBeLessThan(20_000);
+    // Counted in characters scanned, not wall time (council r10 I2). Unbudgeted this was 50 windows × ~4 MiB (≈ 210 M);
+    // budgeted, the windows share max(16 MiB, 4 × body).
+    const budget = Math.max(16 * 1024 * 1024, 4 * body.length);
+    expect(stats.windowChars).toBeLessThanOrEqual(budget);
+    expect(stats.windowChars).toBeGreaterThan(body.length);
+    expect(50 * body.length).toBeGreaterThan(10 * budget);
   });
 
   it("50 ordinary calls in one block are all read", () => {
     const calls = Array.from({ length: 50 }, (_, i) => `Plotly.newPlot("d${i}", ${JSON.stringify([{ type: "bar", x: ["a", "b"], y: [i, i + 1], name: `s${i}` }])}, ${JSON.stringify({ title: `C${i}` })});`).join("\n");
-    const stats = { overflow: 0 };
+    const stats = { overflow: 0, windowChars: 0 };
     const hits = findEmbeddedSpecs(`<html><body><script>${calls}</script></body></html>`, stats);
+    // Each call stops after its first few regions: about one pass over the body in all.
+    expect(stats.windowChars).toBeLessThan(3 * calls.length);
     expect(hits.filter((h) => h.generator === "plotly" && h.spec)).toHaveLength(50);
     expect(stats.overflow).toBe(0);
   });

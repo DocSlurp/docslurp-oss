@@ -177,6 +177,9 @@ export interface ChartModelResponse {
   costCents: number;
   latencyMs: number;
   finishReason?: string | null;
+  /** Prompt tokens served from / written to the provider's prompt cache (included in inputTokens), when reported. */
+  cachedInputTokens?: number;
+  cacheWriteInputTokens?: number;
 }
 
 export interface ChartModelClient {

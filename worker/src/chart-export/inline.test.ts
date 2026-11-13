@@ -266,11 +266,27 @@ parentPort.on("message", () => { parentPort.postMessage({ t: "start", id: 0, loc
       expect(out).toMatchObject({ status: "refused", reason: "worker-failed" });
       expect(JSON.stringify(out)).not.toContain("secret");
     }, 60_000);
-    it("an answer over the inline allowance is refused as too large (the standalone guest takes it)", async () => {
+    it("a compile cache inherited through NODE_COMPILE_CACHE refuses the charts; the inspection stands (#364)", async () => {
+      const tag = Math.random().toString(36).slice(2);
+      const input = path.join(dir, `${tag}.svg`);
+      const options = path.join(dir, `${tag}-options.json`);
+      const output = path.join(dir, `${tag}-out.json`);
+      await writeFile(input, genericBar(["North", "South"], [4, 6], 8));
+      await writeFile(options, JSON.stringify({ filename: "c.svg", policy: POLICY, charts: { kind: "svg", diagrams: true } }));
+      await run(process.execPath, [path.join(workerRoot, "scripts/quarantine-inspect.mjs"), input, options, output], { cwd: workerRoot, env: { ...process.env, NODE_COMPILE_CACHE: path.join(dir, `inherited-${tag}`) } });
+      const out = JSON.parse(await readFile(output, "utf8"));
+      expect(out.charts).toEqual({ status: "refused", reason: "cache-inherited", ms: 0 });
+      expect(out.sniffed).toBeTruthy();
+    }, 60_000);
+    it("an answer over the inline cap is fitted to it by #364's fitResult: cut and counted, never refused", async () => {
       const big = path.join(dir, `big-${Math.random().toString(36).slice(2)}.mjs`);
       await writeFile(big, `import { parentPort } from "node:worker_threads";
 parentPort.on("message", () => parentPort.postMessage({ t: "result", result: { schemaVersion: "chart-export-deterministic@v1", visuals: [], refusals: [{ locator: "x".repeat(5 * 1024 * 1024), reason: "x" }] } }));`);
-      expect(await contained(Buffer.from(genericBar(["A", "B"], [1, 2], 3)), "svg", null, pathToFileURL(big))).toMatchObject({ status: "refused", reason: "result-too-large" });
+      const out = await contained(Buffer.from(genericBar(["A", "B"], [1, 2], 3)), "svg", null, pathToFileURL(big)) as { status: string; result: { refusals: unknown[]; overflow?: number } };
+      expect(out.status).toBe("ok");
+      expect(out.result.refusals).toEqual([]);
+      expect(out.result.overflow).toBe(1);
+      expect(Buffer.byteLength(JSON.stringify(out.result))).toBeLessThanOrEqual(INLINE_CHART_LIMITS.maxResultBytes);
     }, 30_000);
   });
 

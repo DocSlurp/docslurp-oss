@@ -355,6 +355,79 @@ Measured on the parser-VM shape, in three separate sandboxes (`worker-startup.mj
 - **Caveat:** the VM sandboxes ran as root, so read-only there is enforced by the mount, not by file modes. Locally,
   as an unprivileged user, the read-only cache was 141 ms against 172 ms without one.
 
+### Caps on every result path, stable resume, fair chart cuts, read-only cache (council round 10)
+
+- **M1: one set of field caps, everywhere.**
+  - `result-caps.ts` holds the caps: locator 512, sheet 200, generator 40, reason 120, digest 3,200.
+  - The extractor's result, each unit delta before it leaves the worker, and `reassembleUnits` all apply them.
+    Before this, a unit failure skipped them, so a long EPUB or Office part name made the host reject the whole result.
+  - `fitResult` holds any result to a byte budget. It cuts refusals first (counted in `overflow`), then visuals
+    (counted as `output-limit`), and never throws.
+  - Reassembly uses it, the guest's final 16 MiB guard degrades through it, and a batch is held to an equal share per
+    figure.
+- **L1: stable unit ids on resume.** Each unit delta and its resume charge carry the input's full state, and a resumed
+  worker replays it rather than re-deriving it. A crash after the budget fills now costs exactly that unit: the same
+  visuals and the same total count as the run without a fault.
+- **L2: real size, fair cuts.**
+  - Each point is charged its real JSON size, escapes included.
+  - Series fill round-robin by row, so an over-budget chart keeps every series, each cut to the same length.
+  - Charts over the budget now use it fully (about 0.5 MB each) with all their series. An input of many such charts
+    therefore keeps fewer of them before `output-limit`: `dash30date` keeps 24 of 30, each with all 32 series, where
+    before it kept 30 with 4 series each.
+- **L3: the cache must be read-only to the guest.**
+  - The guest uses `compileCacheDir` only if it cannot write it: a probe write in the directory and its subdirectories,
+    plus `W_OK` on each file, catches root on a read-write mount. Entries owned by the guest's own non-root uid are
+    refused, because it could chmod them back.
+  - Otherwise it runs without the cache, with identical output, and logs the reason. An inherited `NODE_COMPILE_CACHE`
+    is refused outright.
+  - **Preparing the cache:** `scripts/chart-guest-compile-cache.mjs` prepares it. Node keys the cache by uid, so run it
+    as the guest user with the same flag, then chown the directory to root and mount it read-only.
+  - **Verified:** a test runs the guest on a prepared read-only mount (`unshare`) and checks, from Node's own
+    compile-cache log, that the cached bundle was accepted in both the parent and the worker.
+  - **Deployment requirement (council r11 I3).** The in-guest check stops one run leaving compiled code for the next,
+    and no more. Use the cache only with **one VM per job**, or with the cache on a **hypervisor-level read-only disk or
+    image layer**, and **never under a parent directory the guest can write**. The check cannot cover three cases:
+    - a root guest in a long-lived VM could remount the cache read-write;
+    - a read-only alias of a path that is still writable elsewhere in the VM passes the probe;
+    - concurrent runs under a writable parent can swap the directory between the check and the load.
+  - **Host side (council r11 I2).** The host strips every `NODE_*` variable from parser commands, whatever
+    `DOCSLURP_PARSER_ENV_ALLOWLIST` says. Node acts on `NODE_OPTIONS`, `NODE_COMPILE_CACHE` and `NODE_PATH` before any
+    guest code runs, so the guest's own refusal would come too late.
+- **I2:** the Plotly budget test counts characters scanned, not wall time.
+
+**Parser-VM shape, one run, 50 inputs (rounds 5 to 10 plus faults):**
+- **Every input exits 0.**
+
+| input | wall | peak RSS | result | outcome |
+|---|--:|--:|--:|---|
+| `longLocEpub` + crash (64 KB-class part names) | 0.23 s | 91 MB | 1.9 KB | 1 chart kept, 1 refusal, 1 `unit-crashed`; locators ≤ 512 (was `invalid-guest-result`) |
+| `divergeEpub` + crash after the budget fills | 0.84 s | 236 MB | 12.19 MB | 28 visuals, as without the fault; 3 `output-limit` + 1 `unit-crashed` = the fault-free 4 |
+| `amp200bslash` (escaping labels) | 1.07 s | 269 MB | 12.49 MB | 24 charts each ≤ 512 KiB serialized (was 863 KB each) |
+| `dash10date` (32 series × 2,000 days, 10 charts) | 0.82 s | 260 MB | 5.2 MB | 10 charts, every one keeping all 32 series |
+| `dash30date` | 1.55 s | 374 MB | 12.49 MB | 24 charts with all series, 6 `output-limit` |
+| `plotlyEpub` (r8) | 9.7 s | 350 MB | 0.93 MB | unchanged: 27 visuals |
+| `textEpub400` (gate-passing worst) | 9.3 s | 279 MB | 0.20 MB | unchanged |
+| injected OOM in 1 of 100 charts | 2.1 s | 1,638 MB | 65 KB | unchanged: 99 kept, 1 `unit-crashed` |
+
+- **Largest result:** 12.49 MB.
+- **Worst peak:** 560 MB without injected faults.
+- **Whole guest command per document**, run through the same `unshare` wrapper for each mode:
+
+  | cache | median |
+  |---|--:|
+  | none | 166.8 ms |
+  | writable (refused, so run without) | 172.7 ms |
+  | prepared, read-only | **151.1 ms** |
+
+  The read-only cache saves about 16 ms (9%).
+
+**Round 11 (council-clear) follow-ups:**
+- **Counts-only fallback:** `fitResult`'s fallback is host-valid. It never emits a zero count or `overflow: 0`, and it
+  keeps deferrals collapsed to one entry per reason.
+- **Cuts with a full deferral list:** visuals cut while the deferral list is full are counted in `overflow`.
+- **Coverage:** neither case is reachable in production; the smallest budget the guest uses is about 419 KB. Both now
+  have unit tests, plus a seeded invariant that every visual, refusal and deferral stays counted.
+
 ### Guest hardening: zod `jitless`, the V8 code-generation flag, code-loading guard, image check
 
 - **zod `jitless`, now effective (council r4 M1).**
@@ -449,7 +522,7 @@ with `for…of` destructuring, which the council measured as roughly 5–14× sl
 Three Modal VM runs: 9.8 s (failed: harness file missing), 108 s (3 arms) and 122 s (4 arms), 240 VM-seconds in all,
 within the test budget. No model calls.
 Round 9: two containment-proof VM runs (169 s and 99 s wall, one VM each) and four short compile-cache startup runs
-(about 7 s each). No model calls.
+(about 7 s each). Round 10: one VM run, 94 s wall. No model calls.
 
 ## Open findings (not changed here)
 

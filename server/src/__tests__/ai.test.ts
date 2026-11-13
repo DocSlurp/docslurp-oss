@@ -9,6 +9,8 @@ const embedMock = vi.fn();
 const streamTextMock = vi.fn();
 const createOpenAIMock = vi.fn(() => Object.assign((model: string) => ({ model }), {
   embedding: (model: string) => ({ model }),
+  // Chat Completions: models that cache only at explicit markers (Claude) go through provider.chat.
+  chat: (model: string) => ({ model, api: "chat" }),
 }));
 
 vi.mock("@huggingface/transformers", () => ({
@@ -37,10 +39,13 @@ it("streams extracted evidence as text without interpreting document prefixes as
     apiKey: "test", privacyMode: "standard", prompt: "Summarize", maxOutputTokens: 100,
     documents: [{ title: "Example", text: "Document: example.pdf\nSource evidence." }],
   });
-  expect(streamTextMock).toHaveBeenCalledWith(expect.objectContaining({
-    prompt: expect.stringContaining("Document: example.pdf\nSource evidence."),
-  }));
-  expect(streamTextMock.mock.calls.at(-1)?.[0].messages).toBeUndefined();
+  // Evidence is plain text (never a file or URL part), sent before the question so it stays in the cached prefix.
+  const call = streamTextMock.mock.calls.at(-1)?.[0];
+  expect(call.prompt).toBeUndefined();
+  expect(call.messages).toHaveLength(1);
+  const [evidence, question] = call.messages[0].content;
+  expect(evidence).toEqual({ type: "text", text: expect.stringContaining("Document: example.pdf\nSource evidence.") });
+  expect(question).toEqual({ type: "text", text: "Summarize" });
   expect(result).toMatchObject({ text: "Grounded answer [1]", usage: { inputTokens: 42, outputTokens: 7 } });
 });
 
@@ -244,6 +249,29 @@ describe("OpenRouter credential isolation", () => {
   });
 });
 
+it("starts each org's chat system prompt with its own salt: identical tenant text never shares a cached prefix across orgs", async () => {
+  const stream = () => ({
+    textStream: (async function* () { yield "Answer [1]"; })(),
+    usage: Promise.resolve({ inputTokens: 10, outputTokens: 2, raw: { cost: 0.0001 } }),
+    response: Promise.resolve({ id: "gen-test" }),
+    sources: Promise.resolve([]),
+  });
+  // Same project name, chat instructions and ingest instruction in both orgs.
+  const system = "Project: Falcon deal room. Answer formally and cite every figure.";
+  const args = { apiKey: "test", privacyMode: "standard" as const, system, prompt: "Q", maxOutputTokens: 100, documents: [{ title: "T", text: "x" }], model: "openai/gpt-6-luna" };
+  const systemFor = async (evidenceScope: string) => {
+    streamTextMock.mockReturnValueOnce(stream());
+    await generateOpenRouterDocumentText({ ...args, evidenceScope });
+    return streamTextMock.mock.calls.at(-1)?.[0].system as string;
+  };
+  const a1 = await systemFor("org-a"), a2 = await systemFor("org-a"), b = await systemFor("org-b");
+  expect(a1).toBe(a2);
+  expect(a1).not.toBe(b);
+  expect(a1.split("\n")[0]).toMatch(/^Workspace [0-9a-f]{16}\.$/);
+  expect(a1.indexOf(system)).toBeGreaterThan(a1.indexOf("Workspace"));
+  expect(b.split("\n")[0]).not.toBe(a1.split("\n")[0]);
+});
+
 it("appends the per-model answer guidance to the shared instructions, only for models that have one", async () => {
   const stream = () => ({
     textStream: (async function* () { yield "Answer [1]"; })(),
@@ -254,8 +282,9 @@ it("appends the per-model answer guidance to the shared instructions, only for m
   const args = { apiKey: "test", privacyMode: "standard" as const, system: "Shared rules.", prompt: "Q", maxOutputTokens: 100, documents: [{ title: "T", text: "x" }] };
   streamTextMock.mockReturnValueOnce(stream());
   await generateOpenRouterDocumentText({ ...args, model: "anthropic/claude-haiku-5.5" });
-  expect(streamTextMock.mock.calls.at(-1)?.[0].system).toMatch(/^Shared rules\.\n\nLength: answer only what the question asks/);
+  // The org salt line leads the system prompt (prompt caching), then the shared rules, then the addendum.
+  expect(streamTextMock.mock.calls.at(-1)?.[0].system).toMatch(/^Workspace [0-9a-f]{16}\.\n\nShared rules\.\n\nLength: answer only what the question asks/);
   streamTextMock.mockReturnValueOnce(stream());
   await generateOpenRouterDocumentText({ ...args, model: "openai/gpt-6-luna" });
-  expect(streamTextMock.mock.calls.at(-1)?.[0].system).toBe("Shared rules.");
+  expect(streamTextMock.mock.calls.at(-1)?.[0].system).toMatch(/^Workspace [0-9a-f]{16}\.\n\nShared rules\.$/);
 });
