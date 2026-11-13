@@ -90,6 +90,9 @@ Chunks reach keyword search once the embed stage has written every chunk row of 
 
 - **Up to 100 queries**, each 1–1,000 characters and 16,000 characters in total. At most 8 may use "quoted phrases" or `-negation`: those run as full-text queries on the Postgres keyword path instead of the BM25 index.
 - **Mode:** `mode` must be `keyword` or omitted. Any other mode returns 400.
+- **Ranking:** each chunk is scored for the relevance floor against the queries that found it, not the joined text. Rerank and MMR are off for a fan-out, so the fused order stands. Each query fetches a share of the candidates (about 1,000 in all; at least 10 per query). Documents still being indexed are searched per query too.
+- **Batches:** a batch may hold at most 100 fan-out queries across all its items.
+- **Chat:** the chat agent's search tool sends an array `q` as one query with the items joined, so a chat turn stays one search per query.
 - **Results:** each result carries `matchedQueries`, the indexes into `q` of the queries it matched. The response also adds `keywordQueries`: each query as sent and how many chunks it matched before fusion. Duplicate queries run once and count under every index they appear at.
 - **Cost and limits:** each query counts as one keyword search, for billing and for the key's keyword search limit.
 - **Speed:** the scope, eligibility and project settings resolve once per search. A warm fan-out of 100 queries issues the same single SQL read as one keyword search, and up to `SEARCH_KEYWORD_FANOUT_CONCURRENCY` (default 16) BM25 queries run at once. Queries that run on Postgres instead (phrases, negation, fallbacks) share `SEARCH_KEYWORD_FANOUT_POSTGRES_CONCURRENCY` (default 4) slots across the whole process.

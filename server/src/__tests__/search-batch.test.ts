@@ -155,6 +155,15 @@ describe("batch retrieval and canonical chat", () => {
     expect((await app().request("/v1/search", json({ ...body, project: "project" }))).status).toBe(400);
     expect(mocks.search).not.toHaveBeenCalled();
   });
+  it("caps keyword fan-out queries across a whole batch", async () => {
+    const item = { q: Array.from({ length: 60 }, (_, i) => `t${i}`), project: "project" };
+    expect((await app().request("/v1/search", json({ queries: [item, item] }))).status).toBe(400);
+    expect(mocks.search).not.toHaveBeenCalled();
+  });
+  it("strips NUL bytes from keyword fan-out queries", async () => {
+    expect((await app().request("/v1/search", json({ q: ["a\u0000b", "c"], project: "project" }))).status).toBe(200);
+    expect(mocks.search.mock.calls[0]![2].keywordQueries).toEqual(["ab", "c"]);
+  });
   it("accepts 100 keyword queries and up to 8 that need the Postgres path", async () => {
     const q = [...Array.from({ length: 92 }, (_, i) => `term${i}`), ...Array.from({ length: 8 }, (_, i) => `"phrase ${i}"`)];
     expect((await app().request("/v1/search", json({ q, project: "project", mode: "keyword" }))).status).toBe(200);

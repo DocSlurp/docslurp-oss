@@ -46,5 +46,8 @@ export function clampToSearchMode<T extends SearchOptions>(options: T, mode: Sea
     rerankProvider: "bm25",
     rerankModel: undefined,
   };
-  return mode === "hybrid" ? hybrid : { ...hybrid, queryVector: undefined, summarySeed: false };
+  if (mode === "hybrid") return hybrid;
+  const keyword: T = { ...hybrid, queryVector: undefined, summarySeed: false };
+  // A keyword fan-out's order is its fusion of the queries: a rerank or MMR would judge it against the joined text.
+  return options.keywordQueries?.length ? { ...keyword, useRerank: false, useMmr: false } : keyword;
 }

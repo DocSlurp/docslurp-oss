@@ -72,7 +72,7 @@ import {
   lexicalSearchableDocument,
   servableInProgressVersion,
 } from "../search/eligibility.js";
-import { queryPhraseWindows } from "../search/relevance.js";
+import { lexicalRelevance, phraseRelevance, queryPhraseWindows } from "../search/relevance.js";
 import { enqueueSearchCharge, leanSearchLogging } from "../search/lean-logging.js";
 import { estimateTextTokens } from "../search/token-estimate.js";
 import { backoffWords, buildFoldedBackoffTsQuery, hasNonAscii } from "../search/text-fold.js";
@@ -112,6 +112,11 @@ export interface SearchChunk {
    * OR backoff (may match on one term), "phrase" from the three-word phrase query.
    */
   lexicalMatch?: "partial" | "phrase";
+  /**
+   * Keyword fan-out: relevance (0..1) against the queries that retrieved this chunk, the best of them. Relevance
+   * scoring uses it instead of measuring against the fan-out's joined text (search/relevance.ts).
+   */
+  queryRelevance?: number;
   filename: string;
   pageNumbers: number[];
   blockIds: string[];
@@ -260,37 +265,57 @@ async function mapWithLimit<T, R>(items: readonly T[], limit: number, fn: (item:
 const fanoutChunkKey = (documentId: string, chunkIndex: number) => `${documentId}\u0000${chunkIndex}`;
 
 /**
- * Runs each distinct keyword query (`text` runs one), fuses the lists by reciprocal rank and remembers which input
- * queries matched each chunk. Every query uses the caller's options, so scope and filters are the search's own.
+ * Per-query candidate depth: the search's limit, shrunk so a fan-out fetches at most about 1,000 candidates in all
+ * (never fewer than 10 per query).
  */
-export function createKeywordFanout(terms: readonly string[]) {
-  const matched = new Map<string, number[]>();
-  const hits = terms.map(() => 0);
+function keywordFanoutDepth(limit: number, queries: number): number {
+  return Math.max(1, Math.min(limit, Math.max(10, Math.ceil(1_000 / Math.max(1, queries)))));
+}
+
+function chunkQueryRelevance(term: string, chunk: SearchChunk): number {
+  // A strict full-text hit contains every term of its own query.
+  if (chunk.lexicalMatch === undefined) return 1;
+  const haystack = [chunk.text, chunk.headingPath.join(" "), chunk.filename].join("\n");
+  return chunk.lexicalMatch === "phrase" ? phraseRelevance(term, haystack) : lexicalRelevance(term, haystack);
+}
+
+/**
+ * A keyword fan-out: each retrieval leg (BM25 chunks, page text) runs every distinct query with the caller's options
+ * (so scope and filters are the search's own), fuses the lists by reciprocal rank, scores each chunk against the
+ * queries that found it, and remembers which input queries matched which chunk.
+ */
+export function createKeywordFanout(rawTerms: readonly string[]) {
+  const terms = rawTerms.map((term) => stripNulBytes(term));
+  const matched = new Map<string, Set<number>>();
+  const hitsByLeg = new Map<string, number[]>();
   const distinct = [...new Set(terms)];
   return {
-    async search(run: (term: string) => Promise<SearchChunk[]>, limit: number): Promise<SearchChunk[]> {
-      const lists = await mapWithLimit(distinct, keywordFanoutConcurrency(), (term) => run(term));
-      matched.clear();
-      hits.fill(0);
+    async search(leg: string, run: (term: string, depth: number) => Promise<SearchChunk[]>, limit: number): Promise<SearchChunk[]> {
+      const depth = keywordFanoutDepth(limit, distinct.length);
+      const lists = await mapWithLimit(distinct, keywordFanoutConcurrency(), (term) => run(term, depth));
+      const hits = terms.map(() => 0);
+      const best = new Map<string, number>();
       distinct.forEach((term, distinctIndex) => {
         const list = lists[distinctIndex]!;
+        for (const chunk of list) best.set(chunk.id, Math.max(best.get(chunk.id) ?? 0, chunkQueryRelevance(term, chunk)));
         terms.forEach((input, index) => {
           if (input !== term) return;
           hits[index] = list.length;
           for (const chunk of list) {
             const key = fanoutChunkKey(chunk.documentId, chunk.chunkIndex);
-            const indexes = matched.get(key) ?? [];
-            if (!indexes.includes(index)) indexes.push(index);
+            const indexes = matched.get(key) ?? new Set<number>();
+            indexes.add(index);
             matched.set(key, indexes);
           }
         });
       });
-      countSearchEvent("keywordFanout");
+      hitsByLeg.set(leg, hits);
+      countSearchEvent(`keywordFanout:${leg}`);
       return reciprocalRankFusion(lists).slice(0, limit)
-        .map((chunk, index) => ({ ...chunk, score: 1 / (60 + index + 1), lexicalMatch: "partial" as const }));
+        .map((chunk, index) => ({ ...chunk, score: 1 / (60 + index + 1), lexicalMatch: "partial" as const, queryRelevance: best.get(chunk.id) ?? 0 }));
     },
     annotate(response: SearchResponse): void {
-      response.keywordQueries = terms.map((q, index) => ({ q, hits: hits[index]! }));
+      response.keywordQueries = terms.map((q, index) => ({ q, hits: [...hitsByLeg.values()].reduce((sum, hits) => sum + hits[index]!, 0) }));
       response.results = response.results.map((result) => {
         const indexes = matched.get(fanoutChunkKey(result.citation.documentId, result.citation.chunkIndex));
         return indexes ? { ...result, matchedQueries: [...indexes].sort((a, b) => a - b) } : result;
@@ -1925,7 +1950,7 @@ async function executeHybridSearch(
         })),
       textSearch: ({ query, options }) =>
         timePhase("text", () => fanout
-          ? fanout.search((term) => nativeTextOrLegacy(term, options, fanoutPostgresTextSearch), options.limit ?? 20)
+          ? fanout.search("text", (term, depth) => nativeTextOrLegacy(term, { ...options, limit: depth }, fanoutPostgresTextSearch), options.limit ?? 20)
           : nativeTextOrLegacy(query, options)),
       graphNeighborSearch: ({ query, projectId, options }) => mode !== "deep"
         ? Promise.resolve([])
@@ -1933,10 +1958,18 @@ async function executeHybridSearch(
       communitySummarySearch: ({ query, projectId, options }) => mode !== "deep"
         ? Promise.resolve([])
         : timePhase("community", () => communitySummarySearch(query, projectId, options)),
+      // A keyword fan-out runs the page-text legs per query too (Postgres, on the fan-out's Postgres slots).
       progressivePageSearch: ({ query, userId, options }) => skipProgressive
         ? Promise.resolve([])
-        : timePhase("progressive", () => progressivePageSearch(query, userId, options)),
-      completedPageSearch: async (args) => args.shouldSearch && await pageOnlyCompleted() ? completedPageSearch(args) : [],
+        : timePhase("progressive", () => fanout
+          ? fanout.search("progressive", (term, depth) => withKeywordFanoutPostgresSlot(() => progressivePageSearch(term, userId, { ...options, limit: depth })), options.limit ?? 20)
+          : progressivePageSearch(query, userId, options)),
+      completedPageSearch: async (args) => {
+        if (!args.shouldSearch || !await pageOnlyCompleted()) return [];
+        return fanout
+          ? fanout.search("completed", (term, depth) => withKeywordFanoutPostgresSlot(() => completedPageSearch({ ...args, query: term, options: { ...args.options, limit: depth } })), args.options.limit ?? 20)
+          : completedPageSearch(args);
+      },
       wholeCorpusFallback,
       ...(deferredProfilesEnabled() && mode === "deep"
         ? {

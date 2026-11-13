@@ -219,7 +219,7 @@ describe("SEARCH_LANCEDB_NATIVE", () => {
     const keywordQueries = ["cavitation", "torque bearing", "qqqzzznomatch", "cavitation"];
     const response = await run(true, keywordQueries.join(" "), { searchMode: "keyword", keywordQueries, limit: 20 });
     expect(response.searchMode).toBe("keyword");
-    expect(response.timings?.keywordFanout).toBe(1);
+    expect(response.timings?.["keywordFanout:text"]).toBe(1);
     expect(response.keywordQueries?.map((item) => item.q)).toEqual(keywordQueries);
     expect(response.keywordQueries?.[2]!.hits).toBe(0);
     expect(response.keywordQueries?.[0]!.hits).toBeGreaterThan(0);

@@ -91,7 +91,10 @@ export function searchQueryText(q: SearchInput["q"]): string {
   return Array.isArray(q) ? q.join(" ") : q;
 }
 export const batchSearchInputSchema = z.object({
-  queries: z.array(searchInputSchema).min(1).max(20),
+  queries: z.array(searchInputSchema).min(1).max(20)
+    // One request runs at most KEYWORD_FANOUT_MAX keyword fan-out queries, however they are split across items.
+    .refine((items) => items.reduce((sum, item) => sum + (Array.isArray(item.q) ? item.q.length : 0), 0) <= KEYWORD_FANOUT_MAX,
+      { message: `A batch may hold at most ${KEYWORD_FANOUT_MAX} keyword fan-out queries in all.` }),
   /** Parallel retrievals; the chat search agent clamps it to the turn's `agent.searchConcurrency`. */
   concurrency: z.number().int().min(1).max(8).default(4),
 }).strict();
@@ -144,7 +147,7 @@ export function searchOptions(body: SearchInput & { projectId: string }) {
     }), ...(body.geo ? {geo:body.geo} : {}) },
     // An array q is a keyword fan-out: keyword mode, one BM25 query per item (services/search.ts).
     searchMode: Array.isArray(body.q) ? "keyword" as const : body.mode,
-    ...(Array.isArray(body.q) ? { keywordQueries: body.q } : {}),
+    ...(Array.isArray(body.q) ? { keywordQueries: body.q.map((term) => term.replaceAll("\u0000", "")) } : {}),
     useHyDE: body.hyde, useRerank: body.rerank,
     candidateDepth: body.candidateDepth, resultOrder: body.resultOrder,
     useMmr: body.mmr, mmrLambda: body.mmrLambda,
