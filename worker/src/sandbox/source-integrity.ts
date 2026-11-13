@@ -105,9 +105,28 @@ export function verifyStagedSource(document: HashedDocument, stagedSha256: strin
 
 /** The upload as the quarantine stage stages it (lib/parse-source.ts originalSourceForQuarantine): no decision yet. */
 export interface QuarantineUpload {
-  id: string;
-  sourceKey: string;
-  sourceSha256: string | null;
+  readonly id: string;
+  readonly sourceKey: string;
+  readonly sourceSha256: string | null;
+}
+
+/** Uploads issued by the one holder of the issuer (lib/parse-source.ts originalSourceForQuarantine). Module-private. */
+const issuedUploads = new WeakSet<object>();
+let issuerClaimed = false;
+
+/**
+ * The capability to issue uploads that verifyQuarantineUpload accepts. It is claimed once: lib/parse-source.ts claims it
+ * when it loads, beside the module-private upload bindings only quarantine reads. Any other claim throws, and if another
+ * module claimed it first, parse-source's own claim throws at load, so the worker cannot start (fail closed).
+ */
+export function claimQuarantineUploadIssuer(): (upload: QuarantineUpload) => QuarantineUpload {
+  if (issuerClaimed) throw new Error("the quarantine upload issuer is already claimed");
+  issuerClaimed = true;
+  return (upload) => {
+    const issued = Object.freeze({ id: upload.id, sourceKey: upload.sourceKey, sourceSha256: upload.sourceSha256 });
+    issuedUploads.add(issued);
+    return issued;
+  };
 }
 
 /**
@@ -115,9 +134,15 @@ export interface QuarantineUpload {
  * decision is required, because quarantine is what records one: a fresh upload is "unscanned" until it finishes, and in
  * production (I-1) an object without a decision field is unscanned too, so verifyStagedSource refuses every upload here.
  * Everything else still holds: the unreadable key is refused, and a hash mismatch is a final SourceIntegrityError.
- * Only stages/quarantine.ts calls this (tripwire in __tests__/quarantine-council-r7.test.ts); parsers use verifyStagedSource.
+ *
+ * Only an upload issued by originalSourceForQuarantine (frozen, from the loader's binding) is accepted; anything else,
+ * including a copy of an issued one, is refused before any check. Parsers use verifyStagedSource.
  */
 export function verifyQuarantineUpload(upload: QuarantineUpload, stagedSha256: string): void {
+  if (!issuedUploads.has(upload)) {
+    console.error(`[worker-source] status=quarantine-upload-unissued metric=quarantine_upload_unissued document=${String((upload as { id?: unknown })?.id)}`);
+    throw new Error("quarantine upload verification refused: the upload was not issued by originalSourceForQuarantine");
+  }
   if (typeof upload.sourceKey !== "string" || upload.sourceKey.startsWith("\u0000")) {
     console.error(`[worker-source] status=parse-source-unscanned metric=parse_source_unscanned document=${upload.id}`);
     throw new UnscannedParseSourceError(upload.id, "quarantine was handed an unreadable key instead of the upload");
