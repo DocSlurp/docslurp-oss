@@ -2,9 +2,10 @@
  * Generator model selection.
  *
  * - Default: the first admitted model of `CHART_GENERATOR_CANDIDATES`, in preference order. The order comes from the
- *   chart-export evaluation (2026-11-10): GPT-6 Luna at reasoning `none` scored best on held-out charts and diagrams,
- *   Gemini 3.1 Flash Lite at reasoning `minimal` next; GLM 5.3 Flash is last for its unstable latency. A pure
- *   cheapest-first sort would have picked GLM.
+ *   chart-export evaluation (2026-11-10): GPT-6 Luna at reasoning `none` scored best on held-out charts and diagrams;
+ *   GLM 5.3 Flash is last for its unstable latency. A pure cheapest-first sort would have picked GLM. Gemini 3.1 Flash
+ *   Lite scored second but was removed (2026-11-13) for its cost per read on real documents, where reads are larger
+ *   than in the synthetic screen and often need a repair call.
  * - Override: a configured model (project `chartExport.generatorModel`, else env `CHART_EXPORT_GENERATOR_MODEL`) is
  *   used only when it is one of the candidates, the routing-target catalog admits it (image input, a list price, not
  *   Pro/Ultra, runtime-accepted) and its output list price is at most `CHART_EXPORT_MAX_OUTPUT_USD_PER_MTOK`. The
@@ -26,7 +27,6 @@ export const CHART_EXPORT_MAX_OUTPUT_USD_PER_MTOK = 2;
  */
 export const CHART_GENERATOR_CANDIDATES: readonly string[] = [
   "llm://openrouter/openai/gpt-6-luna",
-  "llm://openrouter/google/gemini-3.1-flash-lite",
   "llm://openrouter/deepseek/deepseek-v4.1-flash-1017",
   "llm://openrouter/z-ai/glm-5.3-flash",
 ];

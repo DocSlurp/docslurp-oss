@@ -333,17 +333,19 @@ describe("generator model selection", () => {
 
   it("picks the first admitted candidate in preference order and refuses overrides outside the allowlist or ceiling", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    // The test catalog prices GPT-6 Luna at $10/M output: over the ceiling, so the next preferred candidate wins.
+    // The test catalog prices GPT-6 Luna at $10/M output: over the ceiling, so the next admitted candidate wins (the test
+    // catalog has no DeepSeek 1017 target, so GLM).
     const chosen = selectGeneratorModel({ kind: "chart", catalog });
-    expect(chosen).toMatchObject({ reason: "preferred-candidate", modelUri: "llm://openrouter/google/gemini-3.1-flash-lite" });
+    expect(chosen).toMatchObject({ reason: "preferred-candidate", modelUri: "llm://openrouter/z-ai/glm-5.3-flash" });
     const live = catalog.map((t) => t.ref.modelUri === "llm://openrouter/openai/gpt-6-luna" ? { ...t, pricing: { ...t.pricing, inputUsdPerMTok: 0.1, outputUsdPerMTok: 0.5 } } : t);
     expect(selectGeneratorModel({ kind: "diagram", catalog: live })?.modelUri).toBe("llm://openrouter/openai/gpt-6-luna");
     // The ceiling is $2/M output: a preferred candidate priced at $3/M is skipped.
     expect(CHART_EXPORT_MAX_OUTPUT_USD_PER_MTOK).toBe(2);
     const pricier = catalog.map((t) => t.ref.modelUri === "llm://openrouter/openai/gpt-6-luna" ? { ...t, pricing: { ...t.pricing, inputUsdPerMTok: 0.1, outputUsdPerMTok: 3 } } : t);
-    expect(selectGeneratorModel({ kind: "chart", catalog: pricier })?.modelUri).toBe("llm://openrouter/google/gemini-3.1-flash-lite");
-    // Not the cheapest-first pick (GLM is cheaper than Gemini 3.1 Flash Lite in the test catalog).
-    expect(chosen?.modelUri).not.toBe("llm://openrouter/z-ai/glm-5.3-flash");
+    expect(selectGeneratorModel({ kind: "chart", catalog: pricier })?.modelUri).toBe("llm://openrouter/z-ai/glm-5.3-flash");
+    // Gemini 3.1 Flash Lite is admitted by the routing catalog but is no longer a chart generator (2026-11-13).
+    expect(CHART_GENERATOR_CANDIDATES).not.toContain("llm://openrouter/google/gemini-3.1-flash-lite");
+    expect(selectGeneratorModel({ kind: "chart", catalog, envModel: "google/gemini-3.1-flash-lite" })?.reason).toBe("preferred-candidate");
     const proOverride = selectGeneratorModel({ kind: "chart", catalog, projectModel: "llm://openrouter/openai/gpt-6-sol-pro" });
     expect(proOverride?.reason).toBe("preferred-candidate");
     // Admitted by the routing catalog, but not a chart generator: refused.
