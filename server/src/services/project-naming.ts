@@ -190,40 +190,53 @@ export async function sweepProjectAutoTitles(options: { batchSize?: number; maxB
     // - a summary committed before the claim is visible to the evidence read.
     // A crash or failed rename rolls the checkpoint back with everything else. The advisory lock keeps one sweep
     // at a time, so overlapping sweeps cannot apply stale evidence over newer evidence.
-    const batch = await sql.begin(async (transaction) => {
-      const tx = transaction as unknown as Db;
-      const [lock] = await tx<{ locked: boolean }[]>`select pg_try_advisory_xact_lock(hashtext(${AUTO_TITLE_SWEEP_LOCK})) as locked`;
-      if (!lock?.locked) return null;
-      // updated_at as text: a JS Date drops the microseconds the comparison needs.
-      const rows = await tx<{ id: string; seen: string }[]>`
-        select cs.project_id as id, cs.updated_at::text as seen
-        from project_corpus_stats cs
-        where cs.auto_title_checked_at is distinct from cs.updated_at
-        order by cs.updated_at, cs.project_id
-        limit ${batchSize}
-        for update skip locked
-      `;
-      if (rows.length === 0) return { claimed: 0 };
-      const ids = rows.map((row) => row.id);
-      const eligible = await tx<{ id: string }[]>`
-        select w.id from projects w join project_search_settings s on s.project_id = w.id
-        where w.id = any(${tx.array(ids)}::text[]) and s.compat_metadata -> 'autoTitle' ->> 'name' = w.name
-          and (
-            s.compat_metadata -> 'autoTitle' ->> 'phase' in ('empty', 'upload')
-            or (s.compat_metadata -> 'autoTitle' ->> 'phase' = 'content'
-              and coalesce(s.compat_metadata -> 'autoTitle' ->> 'source', 'heading') <> 'summary')
-          )
-      `;
-      await refineProjectNames(eligible.map((row) => row.id), tx);
-      // Recorded as the updated_at that was read: a document completing after the claim waits for this commit and
-      // then moves updated_at past it, so the project is pending again.
-      await tx`
-        update project_corpus_stats cs set auto_title_checked_at = v.seen::timestamptz
-        from unnest(${tx.array(ids)}::text[], ${tx.array(rows.map((row) => row.seen))}::text[]) as v(id, seen)
-        where cs.project_id = v.id
-      `;
-      return { claimed: rows.length };
-    });
+    // Bounded: the claimed stats rows block summary writes and document completions for those projects until this
+    // commits, so the batch never waits long on another lock or runs long. A timeout (or a deadlock) rolls the whole
+    // batch back; its projects stay pending and the next tick retries.
+    let batch: { claimed: number } | null;
+    try {
+      batch = await sql.begin(async (transaction) => {
+        const tx = transaction as unknown as Db;
+        await tx`set local lock_timeout = '2s'`;
+        await tx`set local statement_timeout = '10s'`;
+        const [lock] = await tx<{ locked: boolean }[]>`select pg_try_advisory_xact_lock(hashtext(${AUTO_TITLE_SWEEP_LOCK})) as locked`;
+        if (!lock?.locked) return null;
+        // updated_at as text: a JS Date drops the microseconds the comparison needs.
+        const rows = await tx<{ id: string; seen: string }[]>`
+          select cs.project_id as id, cs.updated_at::text as seen
+          from project_corpus_stats cs
+          where cs.auto_title_checked_at is distinct from cs.updated_at
+          order by cs.updated_at, cs.project_id
+          limit ${batchSize}
+          for update skip locked
+        `;
+        if (rows.length === 0) return { claimed: 0 };
+        const ids = rows.map((row) => row.id);
+        const eligible = await tx<{ id: string }[]>`
+          select w.id from projects w join project_search_settings s on s.project_id = w.id
+          where w.id = any(${tx.array(ids)}::text[]) and s.compat_metadata -> 'autoTitle' ->> 'name' = w.name
+            and (
+              s.compat_metadata -> 'autoTitle' ->> 'phase' in ('empty', 'upload')
+              or (s.compat_metadata -> 'autoTitle' ->> 'phase' = 'content'
+                and coalesce(s.compat_metadata -> 'autoTitle' ->> 'source', 'heading') <> 'summary')
+            )
+        `;
+        await refineProjectNames(eligible.map((row) => row.id), tx);
+        // Recorded as the updated_at that was read: a document completing after the claim waits for this commit and
+        // then moves updated_at past it, so the project is pending again.
+        await tx`
+          update project_corpus_stats cs set auto_title_checked_at = v.seen::timestamptz
+          from unnest(${tx.array(ids)}::text[], ${tx.array(rows.map((row) => row.seen))}::text[]) as v(id, seen)
+          where cs.project_id = v.id
+        `;
+        return { claimed: rows.length };
+      });
+    } catch (error) {
+      const code = (error as { code?: string }).code;
+      if (code !== "55P03" && code !== "57014" && code !== "40P01") throw error;
+      console.warn(`[project-naming] status=sweep-batch-rolled-back code=${code}: projects stay pending for the next sweep`);
+      break;
+    }
     // Another instance holds the lock and is doing this work.
     if (!batch) break;
     examined += batch.claimed;

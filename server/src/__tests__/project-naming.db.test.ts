@@ -230,6 +230,34 @@ it.skipIf(!raceDatabaseUrl)("keeps a project pending when its summary transactio
   expect(await pending()).toBe(false);
 }, 30_000);
 
+it.skipIf(!raceDatabaseUrl)("rolls a sweep batch back instead of waiting on a locked project, leaving it pending", async () => {
+  const project = await ws.createProject({ userId: "u", orgId: "o" });
+  const doc = await addDocument(project.id, "scan.pdf");
+  await sql`insert into document_chunks (id, document_id, run_id, user_id, chunk_index, text, token_estimate, heading_path)
+    values (${doc.id + "-c0"}, ${doc.id}, ${doc.runId}, 'u', 0, 'Body.', 2, ${["Harbour Expansion Plan"]})`;
+  const pending = async () => (await sql<{ pending: boolean }[]>`
+    select auto_title_checked_at is distinct from updated_at as pending from project_corpus_stats where project_id = ${project.id}`)[0]!.pending;
+  const connection = await concurrent.reserve();
+  const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  try {
+    // Another transaction holds the project row the rename needs.
+    await connection`begin`;
+    await connection`select id from projects where id = ${project.id} for update`;
+    const started = Date.now();
+    await naming.sweepProjectAutoTitles();
+    expect(Date.now() - started).toBeLessThan(8_000);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("status=sweep-batch-rolled-back code=55P03"));
+    expect(await pending()).toBe(true);
+  } finally {
+    await connection`rollback`;
+    connection.release();
+    warn.mockRestore();
+  }
+  await naming.sweepProjectAutoTitles();
+  expect((await state(project.id)).name).toBe("Harbour Expansion Plan");
+  expect(await pending()).toBe(false);
+}, 30_000);
+
 it.skipIf(!raceDatabaseUrl)("runs one sweep at a time", async () => {
   const project = await ws.createProject({ userId: "u", orgId: "o" });
   await addDocument(project.id, "file.pdf");
