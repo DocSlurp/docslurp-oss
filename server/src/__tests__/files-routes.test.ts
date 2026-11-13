@@ -119,9 +119,11 @@ describe("file proxy", () => {
 
   describe("Doppler figures", () => {
     const DOC = "0b6f7e8c-3c1a-4f7e-9a51-2a1d3e4f5a6b";
-    // Doppler's own layout under the document's folder: `<root>/doppler/<doc>/images/page-NNNN/(image|figure)-NNN.<ext>`.
+    // Doppler's own layout under the document's folder, content-addressed (migration 0143):
+    // `<root>/doppler/<doc>/images/page-NNNN/(image|figure)-NNN.<sha16>.<ext>`.
+    const H = "0123456789abcdef";
     const PATHS: Record<string, string> = {
-      "p3.g2.svg": "page-0003/figure-002.svg", "p3.1.webp": "page-0003/image-001.webp", "p4.g1.png": "page-0004/figure-001.png",
+      "p3.g2.svg": `page-0003/figure-002.${H}.svg`, "p3.1.webp": `page-0003/image-001.${H}.webp`, "p4.g1.png": `page-0004/figure-001.${H}.png`,
     };
     const figureUri = (name: string) => `s3://bucket/user-a/run-1/doppler/${DOC}/images/${PATHS[name] ?? name}`;
     const figureToken = (name: string, overrides: Record<string, unknown> = {}) => token({ uri: figureUri(name), name, ...overrides });
@@ -170,8 +172,11 @@ describe("file proxy", () => {
         "user-a/run-1/doppler/doc/images/../page-0003/figure-002.svg", "user-a/run-1/uploads/page-0003/figure-002.svg",
         "user-a/run-1/doppler/doc/images/evil.svg", "user-a/run-1/doppler/doc/images/page-0003/figure-002.svg.html",
         "user-a/run-1/doppler/doc/page-0003/figure-002.svg",
-        // The retired flat layout is no longer a figure key.
+        // The retired flat layout is no longer a figure key, and neither is a key without its content digest.
         "user-a/run-1/doppler-figures/doc/p3.g2.svg",
+        "user-a/run-1/doppler/doc/images/page-0003/figure-002.svg",
+        "user-a/run-1/doppler/doc/images/page-0003/figure-002.0123456789ABCDEF.svg",
+        "user-a/run-1/doppler/doc/images/page-0003/figure-002.0123/../456789abcdef.svg",
       ]) {
         open.mockResolvedValue(object("<svg/>", { ContentType: "image/svg+xml" }));
         const res = await get(`/v1/files/${token({ uri: `s3://bucket/${key}`, name: "p3.g2.svg" })}/p3.g2.svg`);
@@ -180,9 +185,9 @@ describe("file proxy", () => {
       }
     });
 
-    it("types the folder's manifest, page facts, index and Markdown by name, never as active content", async () => {
+    it("types the folder's page facts, index and Markdown by name, never as active content", async () => {
       for (const [relative, type] of [
-        ["images/manifest.json", "application/json; charset=utf-8"], ["index.json", "application/json; charset=utf-8"],
+        ["index.json", "application/json; charset=utf-8"],
         ["images/page-facts.jsonl", "text/plain; charset=utf-8"], ["document.md", "text/markdown; charset=utf-8"],
       ] as const) {
         open.mockResolvedValue(object("<script>alert(1)</script>", { ContentType: "text/html" }));
@@ -200,6 +205,16 @@ describe("file proxy", () => {
       access.mockResolvedValue(false); // PII-withheld, another tenant's, or never recorded
       const res = await get(`/v1/files/${token({ uri: folderUri("images/manifest.json"), name: "manifest.json" })}/manifest.json`);
       expect(res.status).toBe(404);
+      expect(open).not.toHaveBeenCalled();
+    });
+
+    it("never serves the canonical manifest (a resume input, not a customer file), whatever records it", async () => {
+      access.mockResolvedValue(true);
+      for (const relative of ["images/manifest.json", "images/manifest.jsonl"]) {
+        const name = relative.split("/").pop()!;
+        const res = await get(`/v1/files/${token({ uri: folderUri(relative), name })}/${name}`);
+        expect(res.status, relative).toBe(404);
+      }
       expect(open).not.toHaveBeenCalled();
     });
 
