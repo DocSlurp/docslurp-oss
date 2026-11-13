@@ -810,8 +810,12 @@ export class RoutePagesStage implements Stage {
   }
 
   /**
-   * Reads the document's page facts from the one key this run's extract-markdown writes them to (the Doppler folder's
-   * `images/page-facts.jsonl`, the same dopplerFolderKey call that wrote them).
+   * Reads the document's page facts only through the storage address recorded in the current run's `doppler-page-facts`
+   * slot, never from the fixed folder key alone: a file a failed attempt or an earlier run left at
+   * `doppler/<document>/images/page-facts.jsonl` is not this run's facts. No slot in this run's ledger means unavailable
+   * (v3 routing). The recorded address must also be this run's own key for this document (dopplerFolderKey, the call that
+   * wrote it), so a slot a partial reprocess seeded from its source document, which points into that document's folder,
+   * is not read either.
    */
   private defaultFactsProbe(state: WorkflowState, document: Document): FactsProbeRunner {
     const expected = dopplerFolderKey(document, state.run.id, "pageFacts");
@@ -819,7 +823,7 @@ export class RoutePagesStage implements Stage {
       if (documentId !== document.id) return null;
       const uri = state.artifactLedger.readDocument(document.id, DOPPLER_PAGE_FACTS_SLOT);
       const key = uri ? keyFromStorageUri(uri, this.storage.bucket) : null;
-      // Only this run's own key for this document: a ledger entry pointing anywhere else is not read.
+      // No current-run slot: unavailable. A slot pointing anywhere but this run's own key: unavailable.
       if (!key || key !== expected) return null;
       return await this.storage.getBytes(key, { maxBytes });
     });

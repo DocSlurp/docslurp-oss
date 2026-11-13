@@ -77,8 +77,9 @@ With `DOCSLURP_DOPPLER_PAGE_FACTS=use` and the v2 page router in `shadow` or `ac
 from these facts instead of probing the PDF (`createDopplerFactsProbeRunner`, `worker/src/routing/probe/doppler-facts-runner.ts`):
 
 - route-pages reads the canonical facts extract-markdown already stored (`<artifactRoot>/doppler/<documentId>/images/page-facts.jsonl`,
-  slot `doppler-page-facts`; written in `store` and `use` before the stage commits). It reads only the key `dopplerFolderKey`
-  gives for this run and document, re-validates it with `parseDopplerPageFacts` bounded by the document's page count and
+  slot `doppler-page-facts`; written in `store` and `use` before the stage commits). It reads only the address recorded in the current run's
+  `doppler-page-facts` slot, and only when that address is the key `dopplerFolderKey` gives for this run and document (a
+  file left at the key by a failed attempt or an earlier run, without a current-run slot, is never read), re-validates it with `parseDopplerPageFacts` bounded by the document's page count and
   the reader's byte budget, and never opens the PDF.
 - Facts that are missing, refused, oversized, for an unreadable document, for fewer pages than the host counted, or with
   every page failed are unavailable: no plan is written and the document keeps v3 routing (`page-route-fallback`). Missing

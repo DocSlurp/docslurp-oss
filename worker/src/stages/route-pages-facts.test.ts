@@ -188,6 +188,24 @@ describe("route-pages on a sandboxed deployment", () => {
     expect(state.usageLedger.pendingCount).toBe(0);
   });
 
+  it("a stale file at the fixed key with no current-run slot is not read: v3 fallback", async () => {
+    // The storage holds facts at doppler/doc/images/page-facts.jsonl (a failed attempt or an earlier run left them), but this
+    // run's ledger has no doppler-page-facts slot.
+    const { plan, metrics, storage } = await route({ facts: fullFixture(), factsKey: null });
+    expectNoHostPdfAccess();
+    expect(storage.getBytes).not.toHaveBeenCalled();
+    expect(plan).toBeNull();
+    expect(metrics("page-route-fallback")[0]!.metadata).toMatchObject({ reason: "facts-missing", fallback: "v3" });
+  });
+
+  it("a slot a partial reprocess seeded from the source document is not read", async () => {
+    const seeded = dopplerFolderKey({ id: "source-doc", userId: "user", runId: "source-run" }, "source-run", "pageFacts");
+    const { plan, metrics, storage } = await route({ facts: fullFixture(), factsKey: seeded });
+    expect(storage.getBytes).not.toHaveBeenCalled();
+    expect(plan).toBeNull();
+    expect(metrics("page-route-fallback")[0]!.metadata).toMatchObject({ reason: "facts-missing" });
+  });
+
   it("a ledger entry pointing at another key is not read", async () => {
     const { plan, metrics, storage } = await route({ facts: fullFixture(), factsKey: "other-user/run/doppler/doc/images/page-facts.jsonl" });
     expect(storage.getBytes).not.toHaveBeenCalled();
