@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import type { RunOrigin } from "@docslurp/shared";
 import { groupByChartTier, sourceRunChartTiers, stampRunChartExport } from "./chart-export-availability.js";
-import { upgradeStoredChartExport } from "@docslurp/shared";
+import { explicitProjectChartTier, projectChartExportTierCap, upgradeStoredChartExport, type ChartExportTier } from "@docslurp/shared";
 import { isFirstPartyAppActor } from "../lib/first-party-app.js";
 import {
   pageCredits,
@@ -276,12 +276,15 @@ export async function commitIndexJobs(prepared: PreparedIndexJobs, userId: strin
     const stamped: RunBatch[] = [];
     for (const batch of prepared.batches) {
       const resolved = stampRunChartExport(batch.pipeline, origin);
-      if ((upgradeStoredChartExport(batch.pipeline.chartExport) as { tier?: unknown } | null)?.tier) {
+      // "Explicit" uses the run-resolution rule (a disallowed stored free counts as unset, R2-L4).
+      const projectChart = upgradeStoredChartExport(batch.pipeline.chartExport) as { tier?: ChartExportTier } | null;
+      if (explicitProjectChartTier(projectChart, process.env)) {
         stamped.push({ ...batch, pipeline: resolved });
         continue;
       }
       const tiers = await sourceRunChartTiers(tx as never, { orgId: prepared.orgId, projectId: prepared.projectId }, batch.docs.map((doc) => doc.id));
-      for (const [tier, docs] of groupByChartTier(batch.docs, tiers, resolved.chartExport.tier ?? "off")) {
+      // Inherited tiers never exceed what the project resolves to now (R2-M1).
+      for (const [tier, docs] of groupByChartTier(batch.docs, tiers, resolved.chartExport.tier ?? "off", projectChartExportTierCap(projectChart, process.env))) {
         stamped.push({ ...batch, docs, pipeline: { ...resolved, chartExport: { ...resolved.chartExport, tier } } });
       }
     }

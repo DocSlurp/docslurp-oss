@@ -2,6 +2,7 @@ import type { PGlite } from "@electric-sql/pglite";
 import type { PGLiteSocketServer } from "@electric-sql/pglite-socket";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
+import { chartExportDefaultsWarnings } from "@docslurp/shared";
 import { chartExportFreeVmCap } from "../db/chart-export-free-vm-cap.js";
 import { Store } from "../db/store.js";
 import { createMigratedDatabase } from "../test/migrated-db.js";
@@ -78,7 +79,11 @@ describe("per-org hourly cap on free chart-export VM runs (Postgres, shared by w
     expect(await worker().reserveChartExportFreeVmRun({ orgId: "o2", runId: "r2", documentId: "r2-d9", perHour: 0 })).toBe(false);
     expect(chartExportFreeVmCap({})).toBe(200);
     expect(chartExportFreeVmCap({ DOCSLURP_CHART_EXPORT_FREE_VM_RUNS_PER_ORG_HOUR: "0" })).toBe(0);
-    expect(chartExportFreeVmCap({ DOCSLURP_CHART_EXPORT_FREE_VM_RUNS_PER_ORG_HOUR: "-5" })).toBe(200);
-    expect(chartExportFreeVmCap({ DOCSLURP_CHART_EXPORT_FREE_VM_RUNS_PER_ORG_HOUR: "lots" })).toBe(200);
+    expect(chartExportFreeVmCap({ DOCSLURP_CHART_EXPORT_FREE_VM_RUNS_PER_ORG_HOUR: "" })).toBe(200);
+    expect(chartExportFreeVmCap({ DOCSLURP_CHART_EXPORT_FREE_VM_RUNS_PER_ORG_HOUR: " 50 " })).toBe(50);
+    // Invalid values fail toward lower cost (0: no free VM runs) and are named at startup (R2-L3).
+    for (const bad of ["-5", "lots", "20O", "1.5", "1e3"]) expect(chartExportFreeVmCap({ DOCSLURP_CHART_EXPORT_FREE_VM_RUNS_PER_ORG_HOUR: bad })).toBe(0);
+    expect(chartExportDefaultsWarnings({ DOCSLURP_CHART_EXPORT_FREE_VM_RUNS_PER_ORG_HOUR: "20O" }).join(" ")).toMatch(/cap 0/);
+    expect(chartExportDefaultsWarnings({ DOCSLURP_CHART_EXPORT_FREE_VM_RUNS_PER_ORG_HOUR: "200" })).toEqual([]);
   });
 });

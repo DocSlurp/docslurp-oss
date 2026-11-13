@@ -2,6 +2,10 @@ import { describe, expect, it } from "vitest";
 
 import {
   chartExportDefaults,
+  chartExportFreeVmCap,
+  explicitProjectChartTier,
+  minChartExportTier,
+  projectChartExportTierCap,
   chartExportDefaultsWarnings,
   chartExportModelsAllowed,
   chartExportOverrideRefusal,
@@ -101,6 +105,29 @@ describe("chart export tier resolution", () => {
     const warnings = chartExportDefaultsWarnings({ DOCSLURP_CHART_EXPORT_APP_DEFAULT: "disabled", DOCSLURP_CHART_EXPORT_API_DEFAULT: "bogus", DOCSLURP_CHART_EXPORT_FREE_EXPLICIT: "maybe" });
     expect(warnings).toHaveLength(3);
     expect(warnings.join("\n")).not.toMatch(/disabled|bogus|maybe/);
+  });
+
+  it("caps a replayed or inherited tier at what the project resolves to now (R2-M1)", () => {
+    expect(minChartExportTier("models", "off")).toBe("off");
+    expect(minChartExportTier("free", "models")).toBe("free");
+    // An explicit project tier is the cap.
+    expect(projectChartExportTierCap({ tier: "off" }, {})).toBe("off");
+    expect(projectChartExportTierCap({ tier: "models" }, {})).toBe("models");
+    // Unset: the higher origin default, never models.
+    expect(projectChartExportTierCap({}, {})).toBe("free");
+    expect(projectChartExportTierCap(null, { DOCSLURP_CHART_EXPORT_APP_DEFAULT: "off" })).toBe("off");
+    expect(projectChartExportTierCap(null, { DOCSLURP_CHART_EXPORT_APP_DEFAULT: "off", DOCSLURP_CHART_EXPORT_API_DEFAULT: "free" })).toBe("free");
+    // One "explicit" rule: a disallowed stored free counts as unset (R2-L4).
+    expect(explicitProjectChartTier({ tier: "free" }, {})).toBeUndefined();
+    expect(explicitProjectChartTier({ tier: "free" }, FREE_OK)).toBe("free");
+    expect(explicitProjectChartTier({ tier: "off" }, {})).toBe("off");
+    expect(projectChartExportTierCap({ tier: "free" }, { DOCSLURP_CHART_EXPORT_APP_DEFAULT: "off" })).toBe("off");
+  });
+
+  it("parses the free VM cap strictly: invalid values are 0, never the default (R2-L3)", () => {
+    expect(chartExportFreeVmCap({})).toBe(200);
+    expect(chartExportFreeVmCap({ DOCSLURP_CHART_EXPORT_FREE_VM_RUNS_PER_ORG_HOUR: "12" })).toBe(12);
+    for (const bad of ["-1", "x", "20O", "2.5"]) expect(chartExportFreeVmCap({ DOCSLURP_CHART_EXPORT_FREE_VM_RUNS_PER_ORG_HOUR: bad })).toBe(0);
   });
 
   it("maps legacy stored keys on read (rows written before migration 0145 or by an older API)", () => {

@@ -5,6 +5,7 @@ import {
   CHART_EXPORT_FREE_EXPLICIT_ENV_FLAG,
   CHART_EXPORT_TIER_UNAVAILABLE_CODE,
   defaultChartExportConfig,
+  minChartExportTier,
   upgradeStoredChartExport,
   chartExportModelsAvailable,
   chartExportOverrideRefusal,
@@ -150,11 +151,15 @@ export async function sourceRunChartTiers(
   return out;
 }
 
-/** Groups `docs` by the tier each keeps (`sourceRunChartTiers`), `fallback` for those with none. Order kept. */
-export function groupByChartTier<T extends { id: string }>(docs: readonly T[], tiers: ReadonlyMap<string, ChartExportTier>, fallback: ChartExportTier): Map<ChartExportTier, T[]> {
+/**
+ * Groups `docs` by the tier each keeps (`sourceRunChartTiers`), `fallback` for those with none, each capped at `cap`
+ * (what the project resolves to now, `projectChartExportTierCap`): inheritance only ever lowers a tier, so a document
+ * stamped `models` before the project was turned off or unset never replays billed reads. Order kept.
+ */
+export function groupByChartTier<T extends { id: string }>(docs: readonly T[], tiers: ReadonlyMap<string, ChartExportTier>, fallback: ChartExportTier, cap: ChartExportTier = "models"): Map<ChartExportTier, T[]> {
   const groups = new Map<ChartExportTier, T[]>();
   for (const doc of docs) {
-    const tier = tiers.get(doc.id) ?? fallback;
+    const tier = minChartExportTier(tiers.get(doc.id) ?? fallback, cap);
     groups.set(tier, [...(groups.get(tier) ?? []), doc]);
   }
   return groups;

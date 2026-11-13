@@ -1,18 +1,14 @@
 import type { Sql } from "postgres";
 
-/** Free-tier chart-export parser-VM runs one organization may start per clock hour, across every worker. */
-export const CHART_EXPORT_FREE_VM_CAP_ENV = "DOCSLURP_CHART_EXPORT_FREE_VM_RUNS_PER_ORG_HOUR";
-export const DEFAULT_CHART_EXPORT_FREE_VM_RUNS_PER_ORG_HOUR = 200;
+export {
+  CHART_EXPORT_FREE_VM_CAP_ENV_FLAG as CHART_EXPORT_FREE_VM_CAP_ENV,
+  DEFAULT_CHART_EXPORT_FREE_VM_RUNS_PER_ORG_HOUR,
+} from "@docslurp/shared";
+import { chartExportFreeVmCap as parseCap } from "@docslurp/shared";
 
-/**
- * The cap from `DOCSLURP_CHART_EXPORT_FREE_VM_RUNS_PER_ORG_HOUR`: a non-negative integer (0 stops free VM runs). Unset or
- * invalid: the default (200 per org-hour, about $0.023 of unbilled VM time at the measured $0.000114 per run).
- */
+/** The per-org hourly cap (`DOCSLURP_CHART_EXPORT_FREE_VM_RUNS_PER_ORG_HOUR`); an invalid value is 0, see the shared parser. */
 export function chartExportFreeVmCap(env: Readonly<Record<string, string | undefined>> = process.env): number {
-  const raw = env[CHART_EXPORT_FREE_VM_CAP_ENV]?.trim();
-  if (!raw) return DEFAULT_CHART_EXPORT_FREE_VM_RUNS_PER_ORG_HOUR;
-  const value = Number(raw);
-  return Number.isSafeInteger(value) && value >= 0 ? value : DEFAULT_CHART_EXPORT_FREE_VM_RUNS_PER_ORG_HOUR;
+  return parseCap(env);
 }
 
 /** The document is not one of the run's own documents in that organization; nothing is reserved. */

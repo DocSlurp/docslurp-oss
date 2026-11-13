@@ -19,7 +19,8 @@ import {
   type ReprocessRunInput,
 } from "@docslurp/shared";
 
-import { estimateChartExportCredits, type ChartExportTier, type RunOrigin } from "@docslurp/shared";
+import { estimateChartExportCredits, upgradeStoredChartExport, type ChartExportTier, type RunOrigin } from "@docslurp/shared";
+import { replayChartExport } from "./run-creation.js";
 import { sql } from "../db.js";
 import { estimateWork, orgWorkerSlots, sumEstimates, type EstimateEnv } from "./config-change.js";
 import { getRun } from "./runs.js";
@@ -36,11 +37,21 @@ export async function estimateRunReprocess(args: {
 }): Promise<CostEstimate | null> {
   const run = await getRun(args.runId, args.userId);
   if (!run) return null;
+  // The tier reprocess will run at (run-creation `replayChartExport`): the override, else the run's stamp capped at what
+  // the project resolves to now. Only `models` is priced.
+  const [project] = run.projectId
+    ? await sql<{ pipeline: { chartExport?: unknown } | null }[]>`select pipeline from projects where id = ${run.projectId} and org_id = ${run.orgId}`
+    : [];
+  const replayed = replayChartExport(
+    run.pipeline,
+    args.options?.chartExport?.tier ?? null,
+    upgradeStoredChartExport(project?.pipeline?.chartExport) as { tier?: ChartExportTier } | null,
+    "machine",
+    (args.env ?? process.env) as Record<string, string | undefined>,
+  );
   const features: PipelineFeatures = {
-    ...(JSON.parse(JSON.stringify(withoutStageSelection(run.pipeline))) as PipelineFeatures),
+    ...(JSON.parse(JSON.stringify(withoutStageSelection(replayed))) as PipelineFeatures),
     speedBoost: args.options?.speedBoost === true,
-    // A per-request tier wins over the tier the run resolved; only `models` is priced.
-    ...(args.options?.chartExport ? { chartExport: { ...(run.pipeline.chartExport ?? {}), tier: args.options.chartExport.tier } } : {}),
     ...(args.options?.stages?.length ? { stageSubset: [...args.options.stages] } : {}),
     ...(args.options?.stageFrom && !args.options?.stages?.length ? { restartFromStage: args.options.stageFrom } : {}),
   };
