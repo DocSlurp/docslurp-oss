@@ -336,20 +336,17 @@ class SqlSearchSessionJournal implements SearchSessionJournal {
    */
   private flushUsageInline(userId: string, projectId: string | null | undefined): Promise<void> {
     const scope = { sessionId: this.sessionId, projectId: projectId ?? null, orgId: this.scope.orgId ?? null };
-    const flush = () => this.usage.flush({ userId, scope });
-    const pending = this.usageTail
-      .then(flush)
-      .catch(async () => {
-        await new Promise<void>((resolve) => { setTimeout(resolve, WRITE_BEHIND_RETRY_DELAY_MS); });
-        await flush();
-      })
-      .then(() => undefined)
-      // Still unflushed: the background session write retries it in its transaction.
-      .catch((error) => { reportPublicError(error, { operation: "search-usage-inline", sessionId: this.sessionId }); });
+    const previous = this.usageTail;
+    // Rejects on failure so the billed write-behind controller retries it (same event ids) and keeps its credits held.
+    const write = async () => {
+      await previous;
+      await this.usage.flush({ userId, scope });
+    };
     this.usageInFlight += 1;
-    void pending.finally(() => { this.usageInFlight -= 1; });
-    // `pending` reports its own failure (and the snapshot's transaction retries the events), so it never rejects here.
-    const { done, settled } = writeBehindWithinCap(this.usage.pendingCostCents(), () => pending);
+    const { done, settled } = writeBehindWithinCap(this.usage.pendingCostCents(), write, {
+      onError: (error, attempt) => reportPublicError(error, { operation: "search-usage-inline", sessionId: this.sessionId, attempt: attempt + 1 }),
+    });
+    void settled.finally(() => { this.usageInFlight -= 1; });
     this.usageTail = settled;
     trackCurrentChatTurnWrite(settled);
     return done;

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { billedWriteBehindCredits, billedWriteBehindLost, billedWriteBehindMaxCredits, billedWriteBehindPending, drainBilledWriteBehind, writeBehindWithinCap } from "../lib/billed-write-behind.js";
+import { billedWriteBehindCredits, billedWriteBehindLost, billedWriteBehindMaxCredits, billedWriteBehindPending, drainBilledWriteBehind, resetBilledWriteBehindForTests, writeBehindWithinCap } from "../lib/billed-write-behind.js";
 
 function gate() {
   let release!: () => void;
@@ -15,7 +15,7 @@ async function settles(promise: Promise<unknown>): Promise<boolean> {
   return done;
 }
 
-afterEach(() => { vi.unstubAllEnvs(); });
+afterEach(() => { vi.unstubAllEnvs(); resetBilledWriteBehindForTests(); });
 
 describe("billed write-behind cap", () => {
   it("defaults to 10 credits ($0.10) and accepts 0", () => {
@@ -86,8 +86,14 @@ describe("billed write-behind cap", () => {
     expect(billedWriteBehindCredits()).toBe(10);
     expect(inlineAttempts).toBe(90);
     await drainBilledWriteBehind();
-    expect(billedWriteBehindCredits()).toBe(0);
+    // Abandoned at shutdown: their credits stay held as loss debt, so the allowance never reopens.
     expect(billedWriteBehindPending()).toBe(0);
+    expect(billedWriteBehindCredits()).toBe(10);
+    const later = gate();
+    const next = writeBehindWithinCap(1, () => later.promise).done;
+    expect(await settles(next)).toBe(false);
+    later.release();
+    await next;
   });
 
   it("shutdown drain retries without waiting for the backoff", async () => {
@@ -110,7 +116,7 @@ describe("billed write-behind cap", () => {
     await result;
   });
 
-  it("gives up at once on integrity errors and releases the credits", async () => {
+  it("gives up at once on integrity errors and keeps their credits held as loss debt", async () => {
     const lost = billedWriteBehindLost();
     let attempts = 0;
     const result = writeBehindWithinCap(3, async () => {
@@ -120,7 +126,7 @@ describe("billed write-behind cap", () => {
     await result.settled;
     expect(attempts).toBe(1);
     expect(billedWriteBehindLost()).toBe(lost + 1);
-    expect(billedWriteBehindCredits()).toBe(0);
+    expect(billedWriteBehindCredits()).toBe(3);
   });
 
   it("never defers with a cap of 0, even a zero-credit write", async () => {

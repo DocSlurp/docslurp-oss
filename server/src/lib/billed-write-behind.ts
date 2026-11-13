@@ -13,7 +13,9 @@
  * id, backoff up to 30 s, about ten minutes) until it commits, so transient
  * failures cannot recycle the allowance: once unwritten charges fill the cap,
  * every later request writes before it answers. Integrity errors (SQLSTATE 23)
- * and exhausted retries are reported as lost. At most
+ * and exhausted retries are reported as lost, and their credits stay held
+ * against the cap until the process restarts, so lost charges never total more
+ * than the cap. At most
  * SEARCH_WRITE_BEHIND_MAX_PENDING writes of any cost are deferred at once.
  * Shutdown (drainBilledWriteBehind) retries what is left without waiting.
  */
@@ -39,6 +41,15 @@ function permanentFailure(error: unknown): boolean {
 }
 
 let lostWrites = 0;
+/** Credits of abandoned writes: held against the cap for the life of the process. */
+let lostCredits = 0;
+/** Tests only: forget loss debt (a restart does this in production). */
+export function resetBilledWriteBehindForTests(): void {
+  lostWrites = 0;
+  lostCredits = 0;
+  deferredCredits = 0;
+}
+
 /** Deferred writes given up on (permanent error or retries exhausted) since start. */
 export function billedWriteBehindLost(): number {
   return lostWrites;
@@ -99,19 +110,22 @@ export function writeBehindWithinCap(credits: number, write: () => Promise<void>
     for (let attempt = 0; ; attempt++) {
       try {
         await write();
-        return;
+        return false;
       } catch (error) {
         options.onError?.(error, attempt);
         // Integrity errors never succeed; retries end after MAX_ATTEMPTS; shutdown gives two more tries.
         if (permanentFailure(error) || attempt + 1 >= MAX_ATTEMPTS || (draining && attempt >= 2)) {
           lostWrites += 1;
-          console.error(`[billed-write-behind] gave up on a deferred billed write after ${attempt + 1} attempt(s) (${permanentFailure(error) ? "permanent error" : "retries exhausted"}); lost=${lostWrites}`);
-          return;
+          // Loss debt: an abandoned write's credits stay counted until the process restarts, so lost charges can
+          // never total more than the cap; once they fill it every later request writes before it answers.
+          lostCredits += cost;
+          console.error(`[billed-write-behind] gave up on a deferred billed write after ${attempt + 1} attempt(s) (${permanentFailure(error) ? "permanent error" : "retries exhausted"}); lost=${lostWrites} lostCredits=${lostCredits}`);
+          return true;
         }
         await retryDelay(attempt);
       }
     }
-  })().finally(() => { deferredCredits = Math.max(0, deferredCredits - cost); });
+  })().then((abandoned) => { if (!abandoned) deferredCredits = Math.max(0, deferredCredits - cost); });
   pending.add(settled);
   void settled.finally(() => pending.delete(settled));
   return { done: Promise.resolve(), settled };

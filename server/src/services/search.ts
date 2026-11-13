@@ -212,6 +212,8 @@ export interface SearchResponse {
   deferred?: DeferredSearchStats;
   /** The mode the search ran in (keyword, hybrid or deep): the most the caller asked for and the key allows. */
   searchMode?: SearchMode;
+  /** Internal: the organization the search was scoped to (billing stamps it on the charge). Not public. */
+  scopeOrgId?: string | null;
   /** Internal: the turn's calibrated vector relevance, for the chat scope decline. Not part of the public response. */
   scopeSignal?: ScopeSignal | null;
 }
@@ -1703,7 +1705,7 @@ async function chargeSearch(result: SearchResponse, userId: string, searchId: st
   }
   const llmMode = result.searchMode ?? "deep";
   const credits = searchCredits(1, { llmStrategies, mode: llmMode });
-  const orgId = projectOrgs.get(projectId)?.replace(/^org:/, "") ?? currentRequestOrgId() ?? null;
+  const orgId = result.scopeOrgId ?? currentRequestOrgId() ?? null;
   // Committed after the response within SEARCH_WRITE_BEHIND_MAX_CREDITS, retried until it lands; the id makes a retry idempotent.
   await writeBehindWithinCap(credits, async () => {
     await recordUnitCharge({
@@ -1853,6 +1855,7 @@ async function executeHybridSearch(
   });
   // The mode the search ran in: billing categories and the public response read it.
   response.searchMode = mode;
+  response.scopeOrgId = setup.normalizedScope.orgId;
   return response;
 }
 

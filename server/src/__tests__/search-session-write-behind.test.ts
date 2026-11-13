@@ -180,4 +180,24 @@ describe("write-behind search usage", () => {
     await settled;
     await drainSearchSessionWrites();
   });
+
+  it("retries a failed usage flush and keeps its credits held until it commits", async () => {
+    let failing = true;
+    let calls = 0;
+    (sql as unknown as { mockImplementation(fn: () => unknown): void }).mockImplementation(() => {
+      calls += 1;
+      if (!failing) return Promise.resolve([{ id: "event" }]);
+      const rejected = Promise.reject(new Error("connection reset"));
+      rejected.catch(() => undefined);
+      return rejected;
+    });
+    await journalWithCost(3).flushUsage("user-a");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    // The failed flush was not swallowed: its credits stay held while it waits to retry.
+    expect(calls).toBeGreaterThan(0);
+    expect(billedWriteBehindCredits()).toBe(3);
+    failing = false;
+    await drainSearchSessionWrites();
+    expect(billedWriteBehindCredits()).toBe(0);
+  });
 });
