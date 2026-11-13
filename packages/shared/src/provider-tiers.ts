@@ -1,6 +1,8 @@
 /**
- * Route tiers: "cheapest", "fastest" and "best" choices of model, host pool and config for a capability (chat
- * answers, page OCR), picked per request from live provider observations.
+ * Route tiers: the customer tiers (CHAT_TIERS: "fastest", "balanced", "smart"; one vocabulary, defined in
+ * project-chat-models.ts) applied to host routing: a choice of model, host pool and config for a capability (chat
+ * answers, page OCR), picked per request from live provider observations. "smart" ranks options by measured eval
+ * score; "fastest" and "balanced" take options in their reviewed order.
  *
  * Trust split:
  * - Eligibility is reviewed configuration: `TierOption` names its host pool as `llm://` entries (provider-pools.ts),
@@ -18,10 +20,12 @@
  *   first), which is inside eligibility by construction. Fresh observations under which every host would lose money
  *   select nothing (fail closed): the caller refuses or uses its default route and reports it.
  */
+import { CHAT_TIERS, type ChatTier } from "./project-chat-models.js";
 import { hostMatchesEndpoint, providerPool, type ProviderPool } from "./provider-pools.js";
 
-export const ROUTE_TIERS = ["cheapest", "fastest", "best"] as const;
-export type RouteTier = (typeof ROUTE_TIERS)[number];
+/** The customer tier vocabulary, reused for routing; there is no separate routing vocabulary. */
+export const ROUTE_TIERS = CHAT_TIERS;
+export type RouteTier = ChatTier;
 
 export const ROUTE_CAPABILITIES = ["chat", "page-ocr"] as const;
 export type RouteCapability = (typeof ROUTE_CAPABILITIES)[number];
@@ -37,7 +41,7 @@ export interface TierOptionConfig {
   readonly tiers: readonly RouteTier[];
   /**
    * Measured quality on the capability's eval (0-1, higher is better), from a recorded run (`evalRef`). Null means
-   * unmeasured: the option is never picked by "best".
+   * unmeasured: the option is never picked by "smart".
    */
   readonly evalScore: number | null;
   readonly evalRef: string | null;
@@ -251,23 +255,23 @@ const singleHost = (host: RankedHost): SingleHostPreferences => ({
  * Pick the one host for one request. Every tier prefers speed within the preferred margin: among the tier's options,
  * the fastest serving host whose live unit cost keeps at least `preferredMargin` (default 20%; a pool's
  * `_preferredMargin` overrides it for its hosts). When no host keeps it, the host with the best margin that still
- * does not lose money. The tier decides which options compete and the price; "best" first narrows to the highest
+ * does not lose money. The tier decides which options compete and the price; "smart" first narrows to the highest
  * eval score that has a serving host, then picks within that option. Static: when no candidate option has a fresh
- * observation, the first host of the first candidate (by eval score for "best", else as listed).
+ * observation, the first host of the first candidate (by eval score for "smart", else as listed).
  */
 export function selectTierRoute(input: TierSelectionInput): TierSelection {
   const candidates = input.options.filter((option) => option.capability === input.capability
-    && option.tiers.includes(input.tier) && (input.tier !== "best" || option.evalScore !== null));
+    && option.tiers.includes(input.tier) && (input.tier !== "smart" || option.evalScore !== null));
   if (candidates.length === 0) return { basis: "none", reason: `no ${input.capability} option for tier ${input.tier}` };
   const observed = candidates.some((option) => input.observations.some((observation) => observation.model === option.model
     && input.now.getTime() - observation.observedAt.getTime() <= maxAgeOf(option, input)));
   if (!observed) {
-    const option = input.tier === "best" ? [...candidates].sort((a, b) => b.evalScore! - a.evalScore!)[0]! : candidates[0]!;
+    const option = input.tier === "smart" ? [...candidates].sort((a, b) => b.evalScore! - a.evalScore!)[0]! : candidates[0]!;
     return { basis: "static", option, provider: { order: [option.pool.hosts[0]!], allow_fallbacks: false } };
   }
   let ranked: Candidate[] = candidates.flatMap((option, optionIndex) => eligibleHosts(option, input)
     .map((host) => ({ option, optionIndex, hostIndex: option.pool.hosts.indexOf(host.host), host })));
-  if (input.tier === "best" && ranked.length > 0) {
+  if (input.tier === "smart" && ranked.length > 0) {
     const top = Math.max(...ranked.map((entry) => entry.option.evalScore!));
     ranked = ranked.filter((entry) => entry.option.evalScore === top);
   }
