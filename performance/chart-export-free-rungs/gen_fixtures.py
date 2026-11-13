@@ -272,6 +272,16 @@ def adversarial():
         for i in range(20_000):
             f.write(f'<text x="{(i % 100) * 20}" y="{(i // 100) * 10}" font-size="8">{i}</text>')
         f.write("</svg>")
+    # Point markers vs long polylines (marker de-duplication cost grows with points x vertices if done pairwise).
+    with open(os.path.join(d, "markers-vs-lines.svg"), "w") as f:
+        f.write('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 4000 1000">')
+        for t in range(6):
+            f.write(f'<text x="20" y="{900 - t * 150}" text-anchor="end">{t * 20}</text><text x="{100 + t * 700}" y="980">{t}</text>')
+        for k in range(12):
+            f.write('<path stroke="#33c" fill="none" d="M0 0' + "".join(f"L{(i * 0.2):.1f} {(500 + 400 * math.sin(i / (40 + k))):.1f}" for i in range(19_999)) + '"/>')
+        for i in range(20_000):
+            f.write(f'<circle cx="{(i * 0.2) % 4000:.1f}" cy="{(i * 37) % 1000}" r="2" fill="#c33"/>')
+        f.write("</svg>")
     # Embedded JSON: many large candidate regions.
     blob = json.dumps({"data": {"values": [{"a": i, "b": i * 2} for i in range(20_000)]}, "mark": "bar"})
     with open(os.path.join(d, "big-embedded.html"), "w") as f:

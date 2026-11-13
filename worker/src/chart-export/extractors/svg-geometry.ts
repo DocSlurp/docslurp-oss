@@ -201,6 +201,34 @@ function findLegend(texts: TextPrim[], scene: Scene, exclude: Set<TextPrim>): Le
   return out;
 }
 
+/**
+ * Points that do not sit on a line vertex (|dx| < 1.5 and |dy| < 1.5). Vertices are bucketed in 3-unit cells, so one
+ * point checks only its own and the 8 neighbouring cells (the exact test still decides each pair): linear in points +
+ * vertices instead of their product, which a hostile SVG could push to minutes.
+ */
+function withoutVertexMarkers(points: PointPrim[], lines: LinePrim[]): PointPrim[] {
+  if (!points.length || !lines.length) return points;
+  const CELL = 3;
+  const grid = new Map<string, Array<[number, number]>>();
+  for (const l of lines) {
+    for (const v of l.points) {
+      const key = `${Math.floor(v[0] / CELL)},${Math.floor(v[1] / CELL)}`;
+      const bucket = grid.get(key);
+      if (bucket) bucket.push(v); else grid.set(key, [v]);
+    }
+  }
+  return points.filter((p) => {
+    const cx = Math.floor(p.x / CELL), cy = Math.floor(p.y / CELL);
+    for (let dx = -1; dx <= 1; dx++) {
+      for (let dy = -1; dy <= 1; dy++) {
+        const bucket = grid.get(`${cx + dx},${cy + dy}`);
+        if (bucket && bucket.some(([x, y]) => Math.abs(x - p.x) < 1.5 && Math.abs(y - p.y) < 1.5)) return false;
+      }
+    }
+    return true;
+  });
+}
+
 export function analyzeSvgChart(root: XmlElement): SvgChartAnalysis {
   const scene = buildScene(root);
   const generator = detectGenerator(scene);
@@ -279,7 +307,7 @@ export function analyzeSvgChart(root: XmlElement): SvgChartAnalysis {
     });
   let points = scene.points.filter((p) => !inAxis(p) && !inLegend(p) && !legendSwatches.has(p) && (p.fill || p.stroke));
   // Markers drawn on a polyline's vertices duplicate it.
-  points = points.filter((p) => !lines.some((l) => l.points.some(([x, y]) => Math.abs(x - p.x) < 1.5 && Math.abs(y - p.y) < 1.5)));
+  points = withoutVertexMarkers(points, lines);
 
   const colorName = new Map(legend.map((e) => [e.color, e.name]));
   const series = new Map<string, DraftSeries & { color: string | null }>();
