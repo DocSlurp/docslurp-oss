@@ -170,15 +170,6 @@ export async function setProjectManagedModels(
   });
 }
 
-/** Clone: the copy keeps the source project's managed models (an explicit admin decision about that workload). */
-export async function copyProjectManagedModels(fromProjectId: string, toProjectId: string): Promise<void> {
-  await sql`
-    update projects set managed_models = source.managed_models
-    from (select managed_models from projects where id = ${fromProjectId}) source
-    where projects.id = ${toProjectId} and source.managed_models <> '{}'::jsonb
-  `;
-}
-
 /**
  * A chat response as customers see it: the debug block names the tier that answered (a failover model reads as its
  * own tier), never a backend model, build or upstream provider. The raw values were already logged, traced and

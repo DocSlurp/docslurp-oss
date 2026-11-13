@@ -121,7 +121,7 @@ function customerUsageCategory(_model: string | null | undefined): string {
  * Backend model ids and our provider cost (per model, per stage and in total) are operator data and are dropped.
  */
 async function customerCostBreakdown(
-  runId: string,
+  scope: { runId: string; orgId: string },
   breakdown: { totalTokens: number; byStage: Array<{ stage: string; tokens: number }>; byModel: Array<{ model: string; tokens: number }> },
 ) {
   const groups = new Map<string, number>();
@@ -129,7 +129,7 @@ async function customerCostBreakdown(
     const category = customerUsageCategory(row.model);
     groups.set(category, (groups.get(category) ?? 0) + row.tokens);
   }
-  const billed = await runChargedCredits(runId);
+  const billed = await runChargedCredits(scope);
   return {
     totalTokens: breakdown.totalTokens,
     // One credit is one cent of the published price list.
@@ -303,7 +303,7 @@ export const billingRoutes = new Hono()
     }
     const breakdown = await getRunCostBreakdown({ runId: c.req.param("runId"), orgId: org.id });
     // Backend model ids and per-model provider cost are operator data: customers get chat tiers and a neutral category.
-    return c.json(await isPlatformAdminActor(getRequestActor(c)) ? breakdown : await customerCostBreakdown(c.req.param("runId"), breakdown));
+    return c.json(await isPlatformAdminActor(getRequestActor(c)) ? breakdown : await customerCostBreakdown({ runId: c.req.param("runId"), orgId: org.id }, breakdown));
   })
 
   // ---------------------------------------------------------------- invoices & payment methods

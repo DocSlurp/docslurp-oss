@@ -16,7 +16,7 @@ const getRunCostBreakdown = vi.fn(async () => ({
   byStage: [{ stage: "vision-extract", tokens: 15, costCents: 0.42 }],
   byModel: [{ model: "openai/gpt-6-luna", tokens: 15, costCents: 0.42 }, { model: "qwen/qwen3.5-flash-02-23", tokens: 4, costCents: 0.01 }],
 }));
-const runChargedCredits = vi.fn(async () => 12);
+const runChargedCredits = vi.fn(async (_scope: { runId: string; orgId: string }) => 12);
 
 vi.mock("../services/organizations.js", () => ({ listOrganizations }));
 vi.mock("../services/usage-attribution.js", async (importOriginal) => ({
