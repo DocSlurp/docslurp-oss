@@ -13,6 +13,11 @@ export interface CandidateStatsInput {
   exported: readonly ExportedVisual[];
   /** Visuals the deterministic extractor deferred to a later pass. */
   deferred?: DeterministicVisualResult["deferred"];
+  /**
+   * The repeated-picture group of a candidate (one model read serves every placement in it), or null. Placements of one
+   * picture count once, so an estimate built from these stats prices the reads that will be made, not the placements.
+   */
+  groupOf?: (candidate: VisualCandidate) => string | null;
 }
 
 const key = (page: number | null, image: number | null, id: string) => (page === null ? `u:${id}` : image === null ? `p${page}:${id}` : `p${page}:i${image}`);
@@ -28,7 +33,13 @@ export function buildVisualCandidateStats(input: CandidateStatsInput): VisualCan
   }
   let charts = 0;
   let diagrams = 0;
+  const groups = new Set<string>();
   for (const candidate of unique.values()) {
+    const group = input.groupOf?.(candidate) ?? null;
+    if (group !== null) {
+      if (groups.has(group)) continue;
+      groups.add(group);
+    }
     if (candidate.kind === "diagram") diagrams += 1;
     else charts += 1;
   }
@@ -42,7 +53,21 @@ export function buildVisualCandidateStats(input: CandidateStatsInput): VisualCan
     if (visual.source === "office-chart-xml" || visual.source === "embedded-spec") unmatched[visual.source] = (unmatched[visual.source] ?? 0) + 1;
   }
   const bySource: Partial<Record<VisualSource, number>> = {};
-  for (const visual of input.exported) bySource[visual.source] = (bySource[visual.source] ?? 0) + 1;
+  // One per picture: a repeated picture's placements share one read, and estimates subtract free sources by this count.
+  const groupById = new Map<string, string>();
+  for (const candidate of unique.values()) {
+    const group = input.groupOf?.(candidate) ?? null;
+    if (group !== null) groupById.set(candidate.id, group);
+  }
+  const sourced = new Set<string>();
+  for (const visual of input.exported) {
+    const group = groupById.get(visual.id);
+    if (group !== undefined) {
+      if (sourced.has(group)) continue;
+      sourced.add(group);
+    }
+    bySource[visual.source] = (bySource[visual.source] ?? 0) + 1;
+  }
   // Presence the extractor or quarantine saw but nothing exported (chart export off, or a part the guest could not
   // parse). These are free sources (no model reads them), so they go in their deterministic bucket as well: estimates
   // subtract that bucket and never price them as model-read visuals.

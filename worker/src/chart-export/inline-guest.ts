@@ -50,19 +50,46 @@ export function inlineDeadlineMs(sizeBytes: number): number {
 /** The parts of the guest's own inspection the plan reads. */
 export interface InlineInspectionView {
   sniffed: { encoding: string | null; container: string | null };
-  archive: { kind: string; suspicious: boolean; inspectable: boolean; chartParts?: number } | null;
+  archive: { kind: string; suspicious: boolean; inspectable: boolean; chartParts?: number; svgParts?: number } | null;
 }
 
 export type InlinePlan = { run: true; packaged: boolean } | { run: false; reason: (typeof INLINE_SKIP_REASONS)[number] };
 
-const MARKUP_SIGNAL = /<(?:script|metadata|svg)\b/i;
-const SCRIPT_SIGNAL = /<(?:script|metadata)\b/i;
-/**
- * A document that is one JSON object yields a visual only through a `$schema` (Vega/Vega-Lite) or a `data` member
- * (Vega-Lite without a schema, Plotly): `classify` in embedded-spec.ts needs one of them. A `\u` escape could spell
- * either key, so any escape counts too.
+/*
+ * Prefilters, each exact against embedded-spec.ts `findEmbeddedSpecs` and `classify` (a skipped file returns no visual):
+ * - A JSON value (a whole document starting with `{`, or a JSON-typed script) can only hit through a `$schema` member, or
+ *   a `data` member with `mark`, `layer`, `encoding`, `type`, `y` or `values` beside or inside it. Those keys are ASCII, so
+ *   an escape can only spell them with an escaped ASCII character (`\u00XX`, XX below 0x80).
+ * - A non-JSON script region needs the literal `"$schema"`, `"mark"` or `"data"`, or a Plotly call.
+ * - A script typed plotly (its array is read as traces), an XML/XHTML-typed script or a `<metadata>` block (their bodies
+ *   are entity-decoded first) and an inline `<svg>` always run.
  */
-const SPEC_KEY = /"(?:\$schema|data)"\s*:|\\u/;
+const SCHEMA_KEY = /"\$schema"\s*:/;
+const DATA_KEY = /"data"\s*:/;
+const DATA_COMPANION = /"(?:mark|layer|encoding|type|y|values)"\s*:/;
+const ESCAPED_ASCII = /\\u00[0-7][0-9a-fA-F]/;
+const LITERAL_SPEC_KEY = /"\$schema"|"mark"|"data"/;
+const PLOTLY_CALL = /\bPlotly\.(?:newPlot|react|plot)\s*\(/;
+const SCRIPT = /<script\b/i;
+const SCRIPT_TYPED = (pattern: string) => new RegExp(`<script\\b[^>]*\\btype\\s*=\\s*["']?[^"'\\s>]*(?:${pattern})`, "i");
+const PLOTLY_TYPED = SCRIPT_TYPED("plotly");
+const JSON_TYPED = SCRIPT_TYPED("json");
+const XML_TYPED = SCRIPT_TYPED("\\+xml|xhtml");
+const ALWAYS = /<(?:svg|metadata)\b/i;
+
+/** Whether parsed JSON in `t` could be a spec `classify` reads (see above). */
+function jsonCouldHit(t: string): boolean {
+  return SCHEMA_KEY.test(t) || (DATA_KEY.test(t) && DATA_COMPANION.test(t)) || ESCAPED_ASCII.test(t);
+}
+
+/** Whether `findEmbeddedSpecs` could find anything in HTML/XHTML text, or in JSON text. */
+export function markupCouldHit(t: string): boolean {
+  if (t.trimStart().startsWith("{") && jsonCouldHit(t)) return true;
+  if (ALWAYS.test(t)) return true;
+  if (!SCRIPT.test(t)) return false;
+  if (PLOTLY_TYPED.test(t) || XML_TYPED.test(t) || PLOTLY_CALL.test(t) || LITERAL_SPEC_KEY.test(t)) return true;
+  return JSON_TYPED.test(t) && jsonCouldHit(t);
+}
 
 /** The UTF-16 length of UTF-8 bytes is at least a third of the byte count: past this, the decoded text is over the limit. */
 const MAX_TEXT_INPUT_BYTES = 3 * CHART_EXTRACT_LIMITS.maxTextBytes;
@@ -71,12 +98,13 @@ const MAX_TEXT_INPUT_BYTES = 3 * CHART_EXTRACT_LIMITS.maxTextBytes;
  * Whether the inline rungs run for this file. `text` decodes the bytes as UTF-8 (text kinds only, called at most once).
  *
  * What a skip may leave out, case by case (each covered by an equivalence test):
- * - HTML and JSON: nothing. `findEmbeddedSpecs` reads only `<script>`/`<metadata>` blocks, or a whole document that starts
- *   with `{` and has a `$schema` or `data` member; inline SVG needs `<svg`.
+ * - HTML and JSON: nothing (markupCouldHit).
  * - Text kinds over the size limit: nothing exported. The limit is checked on the decoded length, as the extractor does;
  *   the extractor would return a size refusal, the plan returns `input-too-large`.
  * - Office without chart parts: SVG pictures under media/ are not read. This is #363's host rule for Office sources
  *   (chart parts are the signal), kept here on purpose: a picture-only deck is not a chart signal.
+ * - EPUB without an SVG file: specs or inline SVG inside its XHTML chapters are not read (reading them is the extraction
+ *   itself). An EPUB with at least one `*.svg` entry runs.
  */
 export function inlineChartPlan(kind: string, inspection: InlineInspectionView, sizeBytes: number, text: () => string): InlinePlan {
   if (!(INLINE_CHART_KINDS as readonly string[]).includes(kind)) return { run: false, reason: "kind-unsupported" };
@@ -86,14 +114,13 @@ export function inlineChartPlan(kind: string, inspection: InlineInspectionView, 
     const archive = inspection.archive;
     if (!archive || archive.kind !== "zip" || archive.suspicious || !archive.inspectable) return { run: false, reason: "archive-refused" };
     if (kind === "office" && !((archive.chartParts ?? 0) > 0)) return { run: false, reason: "no-chart-parts" };
+    if (kind === "epub" && !((archive.svgParts ?? 0) > 0)) return { run: false, reason: "no-chart-parts" };
     return { run: true, packaged };
   }
   if (inspection.archive !== null || inspection.sniffed.container !== null || inspection.sniffed.encoding === null) return { run: false, reason: "not-text" };
   if (sizeBytes > MAX_TEXT_INPUT_BYTES) return { run: false, reason: "input-too-large" };
   const t = text();
   if (t.length > CHART_EXTRACT_LIMITS.maxTextBytes) return { run: false, reason: "input-too-large" };
-  const specDocument = t.trimStart().startsWith("{") && SPEC_KEY.test(t);
-  if (kind === "html" && !specDocument && !MARKUP_SIGNAL.test(t)) return { run: false, reason: "no-signal" };
-  if (kind === "json" && !specDocument && !SCRIPT_SIGNAL.test(t)) return { run: false, reason: "no-signal" };
+  if ((kind === "html" || kind === "json") && !markupCouldHit(t)) return { run: false, reason: "no-signal" };
   return { run: true, packaged };
 }

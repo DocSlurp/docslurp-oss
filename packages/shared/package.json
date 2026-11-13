@@ -98,9 +98,9 @@
       "types": "./dist/chart-export.d.ts",
       "import": "./dist/chart-export.js"
     },
-    "./visual-spec": {
-      "types": "./dist/visual-spec.d.ts",
-      "import": "./dist/visual-spec.js"
+    "./zod-jitless": {
+      "types": "./dist/zod-jitless.d.ts",
+      "import": "./dist/zod-jitless.js"
     },
     "./file-sniff": {
       "types": "./dist/file-sniff.d.ts",

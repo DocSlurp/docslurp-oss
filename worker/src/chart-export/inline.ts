@@ -38,13 +38,7 @@ export function freeInlineMode(pipeline: unknown, env: Readonly<Record<string, s
   return chartExportInlineEnabled(env) && chartExportActive(pipeline, env) && !chartExportModelsActive(pipeline, env);
 }
 
-/** `pages`: the document's page count as the host knows it, which scales the guest's SVG budget (capped by the guest). */
-export interface InlineChartRequest { kind: InlineChartKind; diagrams: boolean; pages?: number }
-
-/** The page count a request may carry: a sane integer or nothing (the same rule as the standalone guest). */
-export function inlinePages(pages: unknown): { pages?: number } {
-  return Number.isSafeInteger(pages) && (pages as number) > 0 && (pages as number) <= 100_000 ? { pages: pages as number } : {};
-}
+export interface InlineChartRequest { kind: InlineChartKind; diagrams: boolean }
 
 export type InlineCharts =
   | { status: "ok"; ms: number; result: GuestResult }
@@ -115,6 +109,6 @@ export function inlineChartsInProcess(bytes: Buffer, request: InlineChartRequest
   const input = plan.packaged
     ? { kind: request.kind as "office" | "epub", bytes }
     : { kind: request.kind as "svg" | "html" | "json", text: text ?? bytes.toString("utf8") };
-  const result = validateDeterministicResult(guestExtract(input, { diagrams: request.diagrams, ...inlinePages(request.pages) }));
+  const result = validateDeterministicResult(guestExtract(input, { diagrams: request.diagrams }));
   return { status: "ok", ms: Math.round(performance.now() - started), result };
 }

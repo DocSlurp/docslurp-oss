@@ -18,5 +18,5 @@ parentPort.postMessage("ready");
 parentPort.once("message", (job) => {
   const bytes = Buffer.from(job.buffer);
   const input = job.packaged ? { kind: job.kind, bytes } : { kind: job.kind, text: bytes.toString("utf8") };
-  parentPort.postMessage(JSON.stringify(extractDeterministicVisuals(input, { diagrams: job.diagrams !== false, ...(job.pages ? { pages: job.pages } : {}) })));
+  parentPort.postMessage(JSON.stringify(extractDeterministicVisuals(input, { diagrams: job.diagrams !== false })));
 });

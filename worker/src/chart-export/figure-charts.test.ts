@@ -30,13 +30,13 @@ const answer = (figures: string[], results: unknown[], extra: Record<string, unk
 
 describe("figureChartsRequest: opt-in only", () => {
   it("asks only with inline mode, an active tier under the switch, and a provider that declares figure charts", () => {
-    expect(figureChartsRequest({ chartExport: { tier: "free" } }, provider, 7, ENV)).toEqual({ diagrams: true, pages: 7 });
-    expect(figureChartsRequest({ chartExport: { tier: "models" } }, provider, 7, ENV)).toEqual({ diagrams: true, pages: 7 });
-    expect(figureChartsRequest({ chartExport: { tier: "off" } }, provider, 7, ENV)).toBeNull();
-    expect(figureChartsRequest({ chartExport: { tier: "free" } }, provider, 7, { DOCSLURP_CHART_EXPORT: "off", DOCSLURP_CHART_EXPORT_INLINE: "1" })).toBeNull();
-    expect(figureChartsRequest({ chartExport: { tier: "free" } }, provider, 7, { DOCSLURP_CHART_EXPORT: "on" })).toBeNull();
-    expect(figureChartsRequest({ chartExport: { tier: "free" } }, { figures: {} }, 7, ENV)).toBeNull();
-    expect(figureChartsRequest({ chartExport: { tier: "free" } }, null, 7, ENV)).toBeNull();
+    expect(figureChartsRequest({ chartExport: { tier: "free" } }, provider, ENV)).toEqual({ diagrams: true });
+    expect(figureChartsRequest({ chartExport: { tier: "models" } }, provider, ENV)).toEqual({ diagrams: true });
+    expect(figureChartsRequest({ chartExport: { tier: "off" } }, provider, ENV)).toBeNull();
+    expect(figureChartsRequest({ chartExport: { tier: "free" } }, provider, { DOCSLURP_CHART_EXPORT: "off", DOCSLURP_CHART_EXPORT_INLINE: "1" })).toBeNull();
+    expect(figureChartsRequest({ chartExport: { tier: "free" } }, provider, { DOCSLURP_CHART_EXPORT: "on" })).toBeNull();
+    expect(figureChartsRequest({ chartExport: { tier: "free" } }, { figures: {} }, ENV)).toBeNull();
+    expect(figureChartsRequest({ chartExport: { tier: "free" } }, null, ENV)).toBeNull();
   });
 });
 
@@ -117,7 +117,7 @@ describe("the extractor reads figure charts in inline mode, with no VM run", () 
   afterEach(() => { vi.unstubAllEnvs(); });
   it("partials carry the index's page and box; deferred visuals are recorded per figure", async () => {
     vi.stubEnv("DOCSLURP_CHART_EXPORT_INLINE", "1");
-    const stored = validateFigureCharts(answer(["p2.g1", "p3.g1"], [chart, { ...empty, deferred: [{ locator: "svg", reason: "svg-scene-budget" }] }], { ms: 90 }), INDEX)!;
+    const stored = validateFigureCharts(answer(["p2.g1", "p3.g1"], [chart, { ...empty, deferred: [{ svgIndex: 4, reason: "svg-document-limit" }] }], { ms: 90 }), INDEX)!;
     const runs: unknown[] = [];
     const usage: unknown[] = [];
     const extract = createVmDeterministicVisualExtractor({
@@ -133,7 +133,8 @@ describe("the extractor reads figure charts in inline mode, with no VM run", () 
     expect(runs).toEqual([]);
     expect(out.partials).toHaveLength(1);
     expect(out.partials[0]).toMatchObject({ pageNumber: 2, bbox: { x: 72, y: 100, width: 396, height: 300 } });
-    expect(out.deferred).toEqual([{ input: "doppler-figure", locator: "svg", reason: "svg-scene-budget", pageNumber: 3, figureId: "p3.g1" }]);
-    expect(usage).toHaveLength(1);
+    expect(out.deferred).toEqual([{ input: "doppler-figure", svgIndex: 4, reason: "svg-document-limit", pageNumber: 3, figureId: "p3.g1" }]);
+    // The guest's own ms never becomes a usage event (the plugin meters the VM).
+    expect(usage).toHaveLength(0);
   });
 });

@@ -217,7 +217,7 @@ export function createVmDeterministicVisualExtractor(deps: VmExtractorDeps): Det
         results.push(inline.result);
         for (const visual of inline.result.visuals) partials.push(toPartial(visual, null));
         // SVGs past the scene budget are recorded for the later deferred pass, exactly as from the standalone guest.
-        for (const d of inline.result.deferred ?? []) deferred.push({ input: "source", locator: d.locator, reason: d.reason, pageNumber: null, figureId: null });
+        for (const d of inline.result.deferred ?? []) deferred.push({ input: "source", svgIndex: d.svgIndex, reason: d.reason, pageNumber: null, figureId: null });
       }
       log(`[chart-export] parser VM skipped ${context} kind=${sourceKind} reason=inline-${inline.status}${inline.status === "ok" ? ` visuals=${inline.result.visuals.length}` : ` detail=${inline.reason}`}`);
     }
@@ -234,10 +234,10 @@ export function createVmDeterministicVisualExtractor(deps: VmExtractorDeps): Det
       );
       try {
         await guard(reason, 1, async () => {
-          const result = await extractDeterministicVisualsFile({ inputPath: path, kind: sourceKind, options: { ...options, pages: Math.max(1, document.pageCount) }, runner: deps.runner, log, context: `${context} reason=${reason}`, ...(input.signal ? { signal: input.signal } : {}) });
+          const result = await extractDeterministicVisualsFile({ inputPath: path, kind: sourceKind, options, runner: deps.runner, log, context: `${context} reason=${reason}`, ...(input.signal ? { signal: input.signal } : {}) });
           results.push(result);
           for (const visual of result.visuals) partials.push(toPartial(visual, null));
-          for (const d of result.deferred ?? []) deferred.push({ input: "source", locator: d.locator, reason: d.reason, pageNumber: null, figureId: null });
+          for (const d of result.deferred ?? []) deferred.push({ input: "source", svgIndex: d.svgIndex, reason: d.reason, pageNumber: null, figureId: null });
         });
       } finally {
         await cleanupTempFile(path).catch(() => undefined);
@@ -262,9 +262,10 @@ export function createVmDeterministicVisualExtractor(deps: VmExtractorDeps): Det
           results.push(figure.result);
           const box = figureBox(figure.bbox);
           for (const visual of figure.result.visuals) partials.push(toPartial(visual, figure.page, figure.result.visuals.length === 1 ? box : null));
-          for (const d of figure.result.deferred ?? []) deferred.push({ input: "doppler-figure", locator: d.locator, reason: d.reason, pageNumber: figure.page, figureId: figure.id });
+          for (const d of figure.result.deferred ?? []) deferred.push({ input: "doppler-figure", svgIndex: d.svgIndex, reason: d.reason, pageNumber: figure.page, figureId: figure.id });
         }
-        if (charts.ms !== null) input.recordUsage?.(chartExportVmUsageEvent({ documentId: document.id, wallTimeMs: charts.ms, reason: "doppler-figure-charts", inputs: charts.figures.length, outcome: "ok" }));
+        // No usage event from the guest's own `ms` (council #510 L4): the Doppler VM's time is metered by the plugin
+        // (host-measured), which already includes the chart step.
         log(`[chart-export] doppler figure charts ${context} figures=${charts.figures.length} visuals=${charts.figures.reduce((n, f) => n + f.result.visuals.length, 0)}`);
       } else if (listed > 0) log(`[chart-export] svg figures not sent ${context} figures=${listed} reason=inline-mode${charts ? ` charts=${charts.reason}` : ""}`);
       if (deferred.length) log(`[chart-export] visuals deferred ${context} count=${deferred.length}`);
@@ -287,13 +288,12 @@ export function createVmDeterministicVisualExtractor(deps: VmExtractorDeps): Det
       if (staged.length > 0) {
         // Every figure in one guest run: one VM boot per document, not one per figure.
         await guard("doppler-svg-figures", staged.length, async () => {
-          // The document's page count scales the batch's SVG geometry budget (a few figures' worth per page).
-          const batch = await extractDeterministicVisualsBatch({ inputPaths: staged.map((s) => s.path), options: { ...options, pages: Math.max(1, document.pageCount) }, runner: deps.runner, log, context: `${context} reason=doppler-svg-figures`, ...(input.signal ? { signal: input.signal } : {}) });
+          const batch = await extractDeterministicVisualsBatch({ inputPaths: staged.map((s) => s.path), options, runner: deps.runner, log, context: `${context} reason=doppler-svg-figures`, ...(input.signal ? { signal: input.signal } : {}) });
           batch.forEach((result, i) => {
             results.push(result);
             // One figure file holds one visual; when the guest reports several, none can claim the figure's placement.
             for (const visual of result.visuals) partials.push(toPartial(visual, staged[i]!.page, result.visuals.length === 1 ? staged[i]!.bbox : null));
-            for (const d of result.deferred ?? []) deferred.push({ input: "doppler-figure", locator: d.locator, reason: d.reason, pageNumber: staged[i]!.page, figureId: staged[i]!.id });
+            for (const d of result.deferred ?? []) deferred.push({ input: "doppler-figure", svgIndex: d.svgIndex, reason: d.reason, pageNumber: staged[i]!.page, figureId: staged[i]!.id });
           });
         });
       }

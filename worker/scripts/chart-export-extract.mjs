@@ -5,16 +5,14 @@
 import { readFile, stat, writeFile } from "node:fs/promises";
 // One bundled module (built from dist/chart-export/extractors/guest-entry.js): loads in a fraction of the CPU the
 // separate ESM files take, which matters because every VM command starts a fresh process.
-import { CHART_EXTRACT_LIMITS, extractDeterministicVisuals, markerBudget } from "../dist/chart-export/guest.bundle.mjs";
+import { CHART_EXTRACT_LIMITS, extractDeterministicVisuals } from "../dist/chart-export/guest.bundle.mjs";
 const [input, requestPath, output, ...more] = process.argv.slice(2);
 if ((await stat(requestPath)).size > 4096) throw new Error("chart extract request exceeds limit");
 const request = JSON.parse(await readFile(requestPath, "utf8"));
 const kind = request?.kind;
 if (!["office", "epub", "svg", "html", "json"].includes(kind)) throw new Error("invalid chart extract kind");
 const packaged = kind === "office" || kind === "epub";
-// pages: the document's page count, when the host knows it (scales the SVG geometry budget); anything else is ignored.
-const pages = Number.isSafeInteger(request.pages) && request.pages > 0 && request.pages <= 100_000 ? request.pages : undefined;
-const options = { diagrams: request.diagrams !== false, ...(pages ? { pages } : {}) };
+const options = { diagrams: request.diagrams !== false };
 const MAX_RESULT_BYTES = 16 * 1024 * 1024;
 
 let json;
@@ -23,16 +21,11 @@ if (request.batch !== undefined) {
   if (kind !== "svg" || !Number.isSafeInteger(batch) || batch < 1 || batch > 40 || more.length !== batch - 1) throw new Error("invalid chart extract batch");
   const refused = (reason) => ({ schemaVersion: "chart-export-deterministic@v1", visuals: [], refusals: [{ locator: "svg", reason }] });
   const results = [];
-  // One svg-geometry budget for the whole batch: a batch of near-cap SVGs cannot multiply it, and each input's share
-  // leaves room for the inputs after it.
-  const budget = markerBudget(pages);
-  const batchOptions = { ...options, markerBudget: budget };
-  const files = [input, ...more];
-  for (const [i, file] of files.entries()) {
-    budget.inputsAfter = files.length - 1 - i;
+  // Each SVG is bounded by the density gate and the per-SVG pair cap, so one figure never starves the others.
+  for (const file of [input, ...more]) {
     if ((await stat(file)).size > CHART_EXTRACT_LIMITS.maxTextBytes) { results.push(refused("input-too-large")); continue; }
     try {
-      results.push(extractDeterministicVisuals({ kind, text: (await readFile(file)).toString("utf8") }, batchOptions));
+      results.push(extractDeterministicVisuals({ kind, text: (await readFile(file)).toString("utf8") }, options));
     } catch {
       // One bad figure never sinks the others; the host sees a machine reason only.
       results.push(refused("extract-failed"));

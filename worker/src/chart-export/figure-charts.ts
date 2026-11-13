@@ -32,16 +32,15 @@ export const FIGURE_CHARTS_SLOT = "doppler-figure-charts";
 const SLUG = /^[a-z0-9][a-z0-9:_-]{0,63}$/;
 const MAX_MS = 600_000;
 
-export interface FigureChartsRequest { diagrams: boolean; pages: number }
+export interface FigureChartsRequest { diagrams: boolean }
 
 /** The job's `figures.charts`, or null: inline mode, an active chart tier under the switch, and a provider that can. */
 export function figureChartsRequest(
-  pipeline: unknown, provider: { figures?: { charts?: boolean } } | null | undefined, pageCount: number,
+  pipeline: unknown, provider: { figures?: { charts?: boolean } } | null | undefined,
   env: Readonly<Record<string, string | undefined>> = process.env,
 ): FigureChartsRequest | null {
   if (!chartExportInlineEnabled(env) || !chartExportActive(pipeline, env) || provider?.figures?.charts !== true) return null;
-  const pages = Number.isSafeInteger(pageCount) && pageCount > 0 ? Math.min(pageCount, 100_000) : 1;
-  return { diagrams: chartExportConfigOf(pipeline, env).diagrams !== false, pages };
+  return { diagrams: chartExportConfigOf(pipeline, env).diagrams !== false };
 }
 
 export type TakenFigureCharts = { raw: unknown } | { refused: string } | null;

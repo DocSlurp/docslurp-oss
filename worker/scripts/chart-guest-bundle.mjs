@@ -157,14 +157,31 @@ export async function verifyCompileCache() {
 }
 
 /**
- * Imports the inline chart module the quarantine guest loads (scripts/chart-inline.mjs and dist/chart-export/inline-guest.js)
- * and runs it once on the built-in SVG through a real worker thread, so a missing, stale or broken module fails the image
- * at startup instead of turning every chart answer into a refusal.
+ * Runs the real quarantine guest (scripts/quarantine-inspect.mjs, which loads scripts/chart-inline.mjs,
+ * dist/chart-export/inline-guest.js and a worker thread) on the built-in SVG, exactly as the host runs it: a fresh
+ * `node --disallow-code-generation-from-strings` process. A missing, stale or broken module, or one that needs code
+ * generation from strings, fails the image at startup instead of turning every chart answer into a refusal.
  */
 export async function probeInlineCharts() {
-  const { inlineCharts } = await import(pathToFileURL(path.join(WORKER_ROOT, "scripts/chart-inline.mjs")).href);
-  const inspection = { sniffed: { mimeType: "image/svg+xml", container: null, encoding: "utf-8" }, archive: null };
-  const answer = await inlineCharts(Buffer.from(PROBE_SVG), { kind: "svg", diagrams: true }, inspection);
-  const got = answer.status === "ok" ? answer.result.visuals.map((v) => `${v.source}:${v.spec?.chartType ?? "none"}`).join(",") : `${answer.status}:${answer.reason}`;
-  if (got !== "svg-geometry:bar") throw new Error(`inline chart probe failed: ${got || "no visuals"}`);
+  const { mkdtemp, rm, writeFile } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { spawnSync } = await import("node:child_process");
+  const dir = await mkdtemp(path.join(tmpdir(), "chart-inline-probe-"));
+  try {
+    const input = path.join(dir, "probe.svg");
+    const options = path.join(dir, "options.json");
+    const output = path.join(dir, "out.json");
+    await writeFile(input, PROBE_SVG);
+    await writeFile(options, JSON.stringify({ filename: "probe.svg", charts: { kind: "svg", diagrams: true }, policy: {
+      quarantineFailOpenOnToolMissing: false, quarantineMaxArchiveEntries: 10, quarantineMaxArchiveDepth: 2,
+      quarantineMaxTotalUncompressedBytes: 1 << 20, quarantineMaxSingleEntryBytes: 1 << 20, quarantineMaxExpansionRatio: 10,
+    } }));
+    const run = spawnSync(process.execPath, ["--disallow-code-generation-from-strings", path.join(WORKER_ROOT, "scripts/quarantine-inspect.mjs"), input, options, output], { encoding: "utf8", timeout: 60_000 });
+    if (run.status !== 0) throw new Error("inline chart probe failed: the quarantine guest exited " + run.status);
+    const answer = JSON.parse(await readFile(output, "utf8")).charts;
+    const got = answer?.status === "ok" ? answer.result.visuals.map((v) => `${v.source}:${v.spec?.chartType ?? "none"}`).join(",") : `${answer?.status}:${answer?.reason}`;
+    if (got !== "svg-geometry:bar") throw new Error(`inline chart probe failed: ${got || "no visuals"}`);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 }

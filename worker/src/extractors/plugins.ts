@@ -62,7 +62,7 @@ export interface SandboxedPdfJob {
      * declares `figures.charts` and the run's chart tier asks for it (chart-export/figure-charts.ts figureChartsRequest).
      * A provider must never fail the figures or the Markdown because the charts failed: it writes a refusal instead.
      */
-    charts?: { diagrams: boolean; pages: number };
+    charts?: { diagrams: boolean };
   };
 }
 

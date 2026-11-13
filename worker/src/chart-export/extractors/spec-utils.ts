@@ -1,4 +1,4 @@
-import { VISUAL_SPEC_LIMITS, visualSpecSchema, type ChartSpec, type DiagramSpec, type VisualSpec } from "@docslurp/shared/visual-spec";
+import { VISUAL_SPEC_LIMITS, visualSpecSchema, type ChartSpec, type DiagramSpec, type VisualSpec } from "@docslurp/shared/chart-export";
 
 import { cleanLabel, cleanLabelOrNull } from "./text.js";
 

@@ -13,7 +13,6 @@ import { INLINE_CHART_LIMITS, inlineChartPlan, inlineDeadlineMs } from "../dist/
 const WORKER = new URL("./chart-inline-worker.mjs", import.meta.url);
 /** The image's compile cache for the bundle (built at image build time by bundle-chart-guest.mjs --compile-cache). */
 const COMPILE_CACHE = fileURLToPath(new URL("../dist/chart-export/compile-cache/", import.meta.url));
-const pagesOf = (pages) => (Number.isSafeInteger(pages) && pages > 0 && pages <= 100_000 ? pages : undefined);
 
 /** Start the worker (thread start, cache, bundle import); it gets bytes only once it says "ready". */
 function startChartWorker(workerUrl) {
@@ -55,7 +54,7 @@ export async function inlineCharts(bytes, request, inspection, workerUrl = WORKE
   const deadline = inlineDeadlineMs(bytes.length);
   // One copy at most: the worker gets the file's memory itself (transferred), the parent keeps none of it.
   const own = bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength ? bytes.buffer : bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
-  const job = { kind, packaged: plan.packaged, diagrams: request.diagrams !== false, pages: pagesOf(request.pages), buffer: own };
+  const job = { kind, packaged: plan.packaged, diagrams: request.diagrams !== false, buffer: own };
   const rssLimit = process.memoryUsage.rss() + INLINE_CHART_LIMITS.maxRssGrowthMb * 1024 * 1024;
   return await new Promise((resolve) => {
     let settled = false;

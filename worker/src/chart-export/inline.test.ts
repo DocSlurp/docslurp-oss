@@ -104,6 +104,34 @@ describe.skipIf(!built)("inline charts in the quarantine guest (real scripts, re
     expect(out.charts).toEqual({ status: "skipped", reason: "input-too-large" });
   }, 60_000);
 
+  it("generates no code at run time in the worker, under the host's V8 flag (council r2 H1)", { timeout: 60_000, retry: 2 }, async () => {
+    // The real worker script, wrapped so the Function constructor is counted in the worker thread from before the bundle
+    // loads, run from a parent started as the host starts the quarantine command.
+    const wrapper = path.join(dir, `count-${Math.random().toString(36).slice(2)}.mjs`);
+    await writeFile(wrapper, `import { parentPort } from "node:worker_threads";
+const Real = Function; let calls = 0;
+globalThis.Function = new Proxy(Real, { construct(t, a) { calls++; return Reflect.construct(t, a); }, apply(t, h, a) { calls++; return Reflect.apply(t, h, a); } });
+const post = parentPort.postMessage.bind(parentPort);
+parentPort.postMessage = (m, t) => post(typeof m === "string" && m !== "ready" ? JSON.stringify({ ...JSON.parse(m), calls }) : m, t);
+await import(${JSON.stringify(pathToFileURL(path.join(workerRoot, "scripts/chart-inline-worker.mjs")).href)});
+`);
+    const driver = `const { inlineCharts } = await import(${JSON.stringify(pathToFileURL(path.join(workerRoot, "scripts/chart-inline.mjs")).href)});
+const out = await inlineCharts(Buffer.from(${JSON.stringify(genericBar(["London", "Tokyo", "Austin"], [4, 6, 9], 10))}), { kind: "svg", diagrams: true },
+  { sniffed: { encoding: "utf-8", container: null }, archive: null }, new URL(${JSON.stringify(pathToFileURL(wrapper).href)}));
+console.log(JSON.stringify({ status: out.status, calls: out.result?.calls, visuals: out.result?.visuals?.length }));`;
+    // A file, not `-e`: worker threads inherit the parent's flags, and `--input-type` would break their loading.
+    const driverFile = path.join(dir, `driver-${Math.random().toString(36).slice(2)}.mjs`);
+    await writeFile(driverFile, driver);
+    const { stdout } = await run(process.execPath, ["--disallow-code-generation-from-strings", driverFile], { cwd: workerRoot });
+    expect(JSON.parse(stdout)).toEqual({ status: "ok", calls: 0, visuals: 1 });
+    // And the flag does reach the worker: code generation from strings throws there.
+    const probe = path.join(dir, `eval-${Math.random().toString(36).slice(2)}.mjs`);
+    await writeFile(probe, `import { parentPort } from "node:worker_threads"; let blocked = false; try { new Function("return 1")(); } catch { blocked = true; } parentPort.postMessage(String(blocked));`);
+    const check = path.join(dir, `check-${Math.random().toString(36).slice(2)}.mjs`);
+    await writeFile(check, `import { Worker } from "node:worker_threads"; const w = new Worker(${JSON.stringify(probe)}); w.once("message", (m) => { console.log(m); w.terminate(); });`);
+    expect((await run(process.execPath, ["--disallow-code-generation-from-strings", check])).stdout.trim()).toBe("true");
+  });
+
   describe("hostile extraction stays bounded and never fails the inspection", () => {
     // Like the real worker: say "ready" after start-up, then do the (hostile) work once the file arrives.
     // `size`: the input's size, which sets the deadline (0.5 s + 2 ms/KiB); the memory tests need time to allocate.
@@ -137,10 +165,13 @@ describe.skipIf(!built)("inline charts in the quarantine guest (real scripts, re
       // The bound held: the process grew by no more than the budget plus one poll's worth of allocation.
       expect(process.memoryUsage.rss() - before).toBeLessThan((INLINE_CHART_LIMITS.maxRssGrowthMb + 256) * 1024 * 1024);
     }, 60_000);
-    it("off-heap memory allocated in one synchronous burst is stopped too", async () => {
+    it("off-heap memory allocated in one synchronous burst is stopped too, within the bound", async () => {
+      const before = process.memoryUsage.rss();
       const out = await hostile("const keep = []; for (;;) keep.push(Buffer.alloc(16 * 1024 * 1024, 1));", true, 4 * 1024 * 1024);
       expect(out).toMatchObject({ status: "refused" });
       expect(["memory-limit", "worker-failed"]).toContain(out.reason);
+      // Council r2 L-a: the burst never escaped the watchdog's budget (plus one poll's worth of allocation).
+      expect(process.memoryUsage.rss() - before).toBeLessThan((INLINE_CHART_LIMITS.maxRssGrowthMb + 256) * 1024 * 1024);
     }, 60_000);
     it("the file is transferred to the worker, not copied", async () => {
       const out = await hostile("parentPort.postMessage(JSON.stringify({ schemaVersion: 'x', visuals: [], refusals: [], transferred: job.buffer instanceof ArrayBuffer && job.buffer.byteLength === 6 }));");
@@ -181,18 +212,7 @@ describe.skipIf(!built)("inline charts in the quarantine guest (real scripts, re
     expect(out.charts).toEqual({ status: "skipped", reason: "not-text" });
   }, 60_000);
 
-  it("pages reaches the extractor exactly as in the standalone guest", { timeout: 60_000, retry: 2 }, async () => {
-    const bytes = Buffer.from(genericBar(["North", "South", "East"], [12, 18, 9], 20));
-    const tag = Math.random().toString(36).slice(2);
-    const input = path.join(dir, `${tag}-in`);
-    const request = path.join(dir, `${tag}-req.json`);
-    const output = path.join(dir, `${tag}-res.json`);
-    await writeFile(input, bytes);
-    await writeFile(request, JSON.stringify({ kind: "svg", pages: 3 }));
-    await run(process.execPath, [path.join(workerRoot, "scripts/chart-export-extract.mjs"), input, request, output], { cwd: workerRoot });
-    const inline = await inspect("p.svg", bytes, { kind: "svg", diagrams: true, pages: 3 });
-    expect((inline.charts as { result: unknown }).result).toEqual(JSON.parse(await readFile(output, "utf8")));
-  });
+
 });
 
 describe("inline chart plan and host validation", () => {
@@ -203,6 +223,9 @@ describe("inline chart plan and host validation", () => {
     expect(inlineChartPlan("office", zip(2), 1000, () => "")).toEqual({ run: true, packaged: true });
     expect(inlineChartPlan("office", zip(0), 1000, () => "")).toEqual({ run: false, reason: "no-chart-parts" });
     expect(inlineChartPlan("office", zip(2, true), 1000, () => "")).toEqual({ run: false, reason: "archive-refused" });
+    // An EPUB runs only with an SVG file in it (council r2 M-b / L-b).
+    expect(inlineChartPlan("epub", zip(0), 1000, () => "")).toEqual({ run: false, reason: "no-chart-parts" });
+    expect(inlineChartPlan("epub", { ...zip(0), archive: { ...zip(0).archive, svgParts: 1 } }, 1000, () => "")).toEqual({ run: true, packaged: true });
     expect(inlineChartPlan("json", text, 10, () => "  [1,2]")).toEqual({ run: false, reason: "no-signal" });
     expect(inlineChartPlan("json", text, 10, () => " {\"mark\":\"bar\",\"data\":{}}")).toEqual({ run: true, packaged: false });
     expect(inlineChartPlan("json", text, 10, () => " {\"mark\":\"bar\"}")).toEqual({ run: false, reason: "no-signal" });
@@ -218,6 +241,13 @@ describe("inline chart plan and host validation", () => {
       // An API export: an object with no $schema and no data member (classify needs one of them).
       ["json", JSON.stringify({ orders: [{ id: 1, total: 12.5 }], next: null, title: "Bookings" })],
       ["html", "{\"rows\": [1, 2, 3]}"],
+      // Council r2 M-b, realistic negatives: a {"data": ...} envelope with none of the keys classify reads beside data,
+      ["json", JSON.stringify({ data: { id: "42", attributes: { city: "London", bookings: 120 } }, meta: { page: 1 } })],
+      // an ensure_ascii export (only non-ASCII escapes, which cannot spell an ASCII key),
+      ["json", '{"city": "Z\\u00fcrich", "note": "caf\\u00e9 expansion", "bookings": 120}'],
+      // and a web page whose scripts are analytics and a framework bootstrap.
+      ["html", "<html><head><script async src=\"https://example.com/a.js\"></script><script>window.dataLayer=[];function gtag(){dataLayer.push(arguments)}</script>"
+        + "<script type=\"application/json\" id=\"state\">{\"route\":\"/expansion\",\"user\":null}</script></head><body><p>Flights to London.</p></body></html>"],
     ];
     for (const [kind, body] of skipped) {
       expect(inlineChartPlan(kind, text, Buffer.byteLength(body), () => body)).toMatchObject({ run: false, reason: "no-signal" });

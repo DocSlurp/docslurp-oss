@@ -154,9 +154,12 @@ export function inspectArchive(bytes: Buffer, filename: string, policy: Quaranti
   const issues: string[] = [];
   const names = new Set<string>();
   let chartParts = 0;
+  let svgParts = 0;
   for (const entry of parsed) {
     const normalized = entry.name.replace(/\\/g, "/");
     if (OFFICE_CHART_PART.test(normalized)) chartParts += 1;
+    // SVG files by entry name: the free chart signal for an EPUB (inline chart extraction reads its SVG files).
+    if (/\.svg$/i.test(normalized)) svgParts += 1;
     if (!normalized || /[\x00-\x1f:]/.test(normalized) || normalized.startsWith("/") || normalized.split("/").includes("..")) {
       issues.push("archive-unsafe-path");
     }
@@ -210,6 +213,7 @@ export function inspectArchive(bytes: Buffer, filename: string, policy: Quaranti
     inspectable: true,
     issues: [...new Set(issues)],
     chartParts,
+    svgParts,
     ...(nesting.notices.length ? { notices: nesting.notices } : {}),
     nestedContainers: nesting.nestedContainers,
     maxNestingDepth: nesting.maxNestingDepth

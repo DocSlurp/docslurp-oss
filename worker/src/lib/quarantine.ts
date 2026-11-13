@@ -1,5 +1,6 @@
 import path from "node:path";
-import { inlineChartsInProcess, inlinePages, validateInlineCharts, type InlineChartRequest, type StoredInlineCharts } from "../chart-export/inline.js";
+import { GUEST_NODE_FLAGS } from "../chart-export/extractors/host.js";
+import { inlineChartsInProcess, validateInlineCharts, type InlineChartRequest, type StoredInlineCharts } from "../chart-export/inline.js";
 import { describeArchiveIssue, inspectQuarantineBytes, pdfHasEncryptName, type QuarantineInspection } from "./quarantine-bytes.js";
 export { sniffMimeType, inspectArchive, type QuarantineInspection } from "./quarantine-bytes.js";
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
@@ -38,6 +39,8 @@ export interface ArchiveInspection {
    * stats. Optional: guests built before it was added omit it.
    */
   chartParts?: number;
+  /** `*.svg` entries by name (the inline chart signal for an EPUB); optional, older guests omit it. */
+  svgParts?: number;
   /** Warning-only findings of the nested walk (`archive-nested-uninspectable`); optional, older guests omit it. */
   notices?: string[];
   /** Nested containers (ZIP, gzip, OLE2) the in-VM walk opened (archive-nesting.ts). */
@@ -433,8 +436,10 @@ async function inspectInVm(args: InspectArgs): Promise<QuarantineInspection> {
       quarantineMaxTotalUncompressedBytes: args.policy.quarantineMaxTotalUncompressedBytes,
       quarantineMaxSingleEntryBytes: args.policy.quarantineMaxSingleEntryBytes,
       quarantineMaxExpansionRatio: args.policy.quarantineMaxExpansionRatio,
-    }, ...(args.charts ? { charts: { kind: args.charts.kind, diagrams: args.charts.diagrams, ...inlinePages(args.charts.pages) } } : {}) }), { mode: 0o600 });
-    await args.runner.run({ binary: "node", args: [path.join(resolveScriptsDir(), "quarantine-inspect.mjs"), args.tempFile, options, output], available: true, readOnlyInputs: true, timeoutMs: 60_000 }, args.signal);
+    }, ...(args.charts ? { charts: { kind: args.charts.kind, diagrams: args.charts.diagrams } } : {}) }), { mode: 0o600 });
+    // V8 refuses code generation from strings in this command and in the inline chart worker it starts (worker threads take
+    // the flag from their process; it cannot be set per worker), as in every chart guest run (host.ts GUEST_NODE_FLAGS).
+    await args.runner.run({ binary: "node", args: [...GUEST_NODE_FLAGS, path.join(resolveScriptsDir(), "quarantine-inspect.mjs"), args.tempFile, options, output], available: true, readOnlyInputs: true, timeoutMs: 60_000 }, args.signal);
     if ((await stat(output)).size > (args.charts ? 6 : 2) * 1024 * 1024) throw new Error("quarantine inspection result exceeds limit");
     const result = JSON.parse(await readFile(output, "utf8")) as QuarantineInspection;
     // The chart answer is checked on its own and can only ever be dropped to a refusal: it never fails the inspection.
@@ -458,6 +463,7 @@ async function inspectInVm(args: InspectArgs): Promise<QuarantineInspection> {
       if (!(archive.compressionRatio === null || Number.isFinite(archive.compressionRatio) && archive.compressionRatio >= 0)) throw new Error("invalid quarantine expansion ratio");
       if (archive.notices !== undefined && !(Array.isArray(archive.notices) && archive.notices.length <= 10 && archive.notices.every((notice) => notice === "archive-nested-uninspectable"))) throw new Error("invalid quarantine archive notices");
       if (archive.chartParts !== undefined && !(Number.isSafeInteger(archive.chartParts) && archive.chartParts >= 0 && archive.chartParts <= archive.entryCount)) throw new Error("invalid quarantine chart part count");
+      if (archive.svgParts !== undefined && !(Number.isSafeInteger(archive.svgParts) && archive.svgParts >= 0 && archive.svgParts <= archive.entryCount)) throw new Error("invalid quarantine SVG part count");
       for (const key of ["nestedContainers", "maxNestingDepth"] as const) {
         if (archive[key] !== undefined && !(Number.isSafeInteger(archive[key]) && archive[key]! >= 0 && archive[key]! <= 1_000_000)) throw new Error("invalid quarantine nesting count");
       }

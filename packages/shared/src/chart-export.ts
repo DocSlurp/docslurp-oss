@@ -138,8 +138,8 @@ export function parseChartExportFreeVmCap(raw: string): number | null {
 }
 
 /**
- * The cap from `DOCSLURP_CHART_EXPORT_FREE_VM_RUNS_PER_ORG_HOUR`. Unset or empty: the default (200 per org-hour, about
- * $0.023 of unbilled VM time at the measured $0.000114 per run). Anything that is not a non-negative integer is 0 (no
+ * The cap from `DOCSLURP_CHART_EXPORT_FREE_VM_RUNS_PER_ORG_HOUR`. Unset or empty: the default, which bounds the unbilled
+ * parser-VM time one organization can cause per hour. Anything that is not a non-negative integer is 0 (no
  * free VM runs), failing toward lower cost like every other chart-export setting, and is named at startup by
  * `chartExportDefaultsWarnings`.
  */
@@ -365,10 +365,99 @@ export function upgradeStoredPipelineChartExport<T>(pipeline: T): T {
 
 // ---- Specs ------------------------------------------------------------------------------------------------------
 
-// The spec schemas live in visual-spec.ts (its own subpath, so the parser-VM chart guest builds only these schemas at
-// start-up, not the config, stats and export schemas below). Re-exported here unchanged: the same schema objects.
-export * from "./visual-spec.js";
-import { visualSpecSchema } from "./visual-spec.js";
+/** Limits applied to every spec, whatever produced it (model output and parsed files are both untrusted). */
+export const VISUAL_SPEC_LIMITS = {
+  maxSeries: 32,
+  maxPointsPerSeries: 2000,
+  maxNodes: 300,
+  maxEdges: 600,
+  maxLabelChars: 200,
+  maxSummaryChars: 2000,
+} as const;
+
+const label = z.string().max(VISUAL_SPEC_LIMITS.maxLabelChars);
+
+export const CHART_TYPES = [
+  "bar", "grouped-bar", "stacked-bar", "horizontal-bar", "line", "area", "stacked-area", "scatter", "bubble", "pie",
+  "donut", "histogram", "box", "heatmap", "radar", "waterfall", "combo", "other",
+] as const;
+export const chartTypeSchema = z.enum(CHART_TYPES);
+
+export const chartAxisSchema = z.object({
+  label: label.nullable().default(null),
+  unit: label.nullable().default(null),
+  scale: z.enum(["linear", "log", "band", "time"]).default("linear"),
+  min: z.number().nullable().default(null),
+  max: z.number().nullable().default(null),
+});
+export type ChartAxis = z.infer<typeof chartAxisSchema>;
+
+export const chartPointSchema = z.object({
+  x: z.union([z.string().max(VISUAL_SPEC_LIMITS.maxLabelChars), z.number()]),
+  /** null = gap / not present for this category. */
+  y: z.number().nullable(),
+  /** Optional third value (bubble size, heatmap intensity, box-plot detail is out of scope). */
+  z: z.number().nullable().optional(),
+});
+export type ChartPoint = z.infer<typeof chartPointSchema>;
+
+export const chartSeriesSchema = z.object({
+  name: label,
+  /** Combo charts: how this series is drawn. Defaults to the chart type. */
+  mark: z.enum(["bar", "line", "area", "point"]).nullable().default(null),
+  /** Which y axis (combo charts with a secondary axis). */
+  axis: z.enum(["y", "y2"]).default("y"),
+  points: z.array(chartPointSchema).max(VISUAL_SPEC_LIMITS.maxPointsPerSeries),
+});
+export type ChartSeries = z.infer<typeof chartSeriesSchema>;
+
+export const chartSpecSchema = z.object({
+  kind: z.literal("chart"),
+  chartType: chartTypeSchema,
+  title: label.nullable().default(null),
+  xAxis: chartAxisSchema.default({ label: null, unit: null, scale: "band", min: null, max: null }),
+  yAxis: chartAxisSchema.default({ label: null, unit: null, scale: "linear", min: null, max: null }),
+  y2Axis: chartAxisSchema.nullable().default(null),
+  series: z.array(chartSeriesSchema).min(1).max(VISUAL_SPEC_LIMITS.maxSeries),
+  /** Source/footnote text printed on the chart, if any. */
+  source: label.nullable().default(null),
+  summary: z.string().max(VISUAL_SPEC_LIMITS.maxSummaryChars).default(""),
+});
+export type ChartSpec = z.infer<typeof chartSpecSchema>;
+
+export const DIAGRAM_TYPES = ["flowchart", "sequence", "org-chart", "state", "er", "mindmap", "timeline", "other"] as const;
+export const diagramTypeSchema = z.enum(DIAGRAM_TYPES);
+
+export const diagramNodeSchema = z.object({
+  id: z.string().min(1).max(64),
+  label,
+  shape: z.enum(["box", "rounded", "diamond", "circle", "stadium", "cylinder", "actor", "other"]).default("box"),
+  /** Optional containing group (swimlane / subgraph) id. */
+  group: z.string().max(64).nullable().default(null),
+});
+export const diagramEdgeSchema = z.object({
+  from: z.string().min(1).max(64),
+  to: z.string().min(1).max(64),
+  label: label.nullable().default(null),
+  style: z.enum(["solid", "dashed", "thick"]).default("solid"),
+  directed: z.boolean().default(true),
+});
+export const diagramGroupSchema = z.object({ id: z.string().min(1).max(64), label });
+
+export const diagramSpecSchema = z.object({
+  kind: z.literal("diagram"),
+  diagramType: diagramTypeSchema,
+  title: label.nullable().default(null),
+  direction: z.enum(["TB", "LR", "BT", "RL"]).default("TB"),
+  nodes: z.array(diagramNodeSchema).max(VISUAL_SPEC_LIMITS.maxNodes),
+  edges: z.array(diagramEdgeSchema).max(VISUAL_SPEC_LIMITS.maxEdges),
+  groups: z.array(diagramGroupSchema).max(64).default([]),
+  summary: z.string().max(VISUAL_SPEC_LIMITS.maxSummaryChars).default(""),
+});
+export type DiagramSpec = z.infer<typeof diagramSpecSchema>;
+
+export const visualSpecSchema = z.discriminatedUnion("kind", [chartSpecSchema, diagramSpecSchema]);
+export type VisualSpec = z.infer<typeof visualSpecSchema>;
 
 // ---- Results ----------------------------------------------------------------------------------------------------
 
@@ -412,19 +501,19 @@ export type ExportedVisual = z.infer<typeof exportedVisualSchema>;
  */
 /**
  * A visual the free (deterministic) extractor deferred instead of finishing in the document's run, for a later
- * low-priority pass with a larger budget. `input` says what to re-read: the document's own source file, or one of its
- * Doppler figure files (`figureId`, the figure's own id; its slot is `doppler-figure:<figureId>`). `locator` is where in
- * that input (`svg`, `svg[3]`, `word/media/image2.svg`, ...); `reason` is a short machine slug. Never customer content.
+ * low-priority pass. `input` says what to re-read: the document's own source file, or one of its Doppler figure files
+ * (`figureId`, the figure's own id; its slot is `doppler-figure:<figureId>`). `svgIndex` is the SVG's ordinal within that
+ * input (document / package order), and `reason` a closed slug: nothing from the input's names or content is stored.
  */
+export const DEFERRED_VISUAL_REASONS = ["svg-document-limit"] as const;
 export const deferredVisualSchema = z.strictObject({
   input: z.enum(["source", "doppler-figure"]),
-  locator: z.string().max(512),
-  reason: z.string().max(120),
+  svgIndex: z.number().int().nonnegative().max(1_000_000),
+  reason: z.enum(DEFERRED_VISUAL_REASONS),
   pageNumber: z.number().int().positive().nullable(),
   figureId: z.string().max(200).nullable(),
 });
 export type DeferredVisual = z.infer<typeof deferredVisualSchema>;
-
 
 export const visualCandidateStatsSchema = z.object({
   charts: z.number().int().nonnegative().default(0),

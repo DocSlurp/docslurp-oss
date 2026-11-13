@@ -543,7 +543,7 @@ export class ExtractMarkdownStage implements Stage {
                     const dir = await mkdtemp(path.join(path.dirname(prepared.plan.sandboxedPdf.output), ".doppler-figures-"));
                     candidateDirs.push(dir);
                     // Charts from the figure SVGs in the same VM (protocol 15), only when the run's chart tier asks for them.
-                    const charts = figureChartsRequest(state.run.pipeline, sandboxedPdfProvider(), document.pageCount);
+                    const charts = figureChartsRequest(state.run.pipeline, sandboxedPdfProvider());
                     prepared.plan.sandboxedPdf.figures = { dir, limits: dopplerImageLimits(document.pageCount), ...(charts ? { charts } : {}) };
                   }
                 }
@@ -3179,8 +3179,10 @@ export class ExtractMarkdownStage implements Stage {
       pushPerfMetric({ metric: "doppler-figures-failed", value: 1, unit: "count", tags: ["doppler-figures", "extraction-failed"], metadata: { documentId: args.document.id } });
       return { figures: { slots: [], stats: { status: "extraction-failed", imagesConfined } } };
     }
-    // charts.json leaves the folder first, so the folder's strict validation sees exactly what it did before charts.
-    const takenCharts = figures.charts ? await takeFigureCharts(figures.dir) : null;
+    // charts.json leaves the folder first, so the folder's strict validation sees exactly what it did before charts. Taken
+    // whatever path built this candidate (council r2 M-a: the early store and salvage paths of #357 carry no `charts` flag):
+    // the provider publishes charts.json only for a job that asked for it (the plugin refuses an unrequested answer).
+    const takenCharts = await takeFigureCharts(figures.dir);
     let validated;
     try {
       validated = await readDopplerFigureDir(figures.dir, {
@@ -3217,7 +3219,7 @@ export class ExtractMarkdownStage implements Stage {
       if (!(error instanceof DopplerFigureStoreError)) throw error;
       return { figures: this.dopplerFiguresFailed(args.document.id, error.reason, imagesConfined, error.cause, error.cleanup) };
     }
-    const charts = figures.charts ? await this.storeFigureCharts(args.document.id, stored, takenCharts) : null;
+    const charts = figures.charts || takenCharts !== null ? await this.storeFigureCharts(args.document.id, stored, takenCharts) : null;
     const stats = { ...stored.stats, imagesConfined, manifestVersion: validated.version, validateMs: Date.now() - started - stored.stats.storeMs, ...(charts ? { charts } : {}) };
     console.log(`[doppler-figures] document=${args.document.id} status=stored version=${validated.version} entries=${stats.entries} files=${stats.files} bytes=${stats.bytes} markers=${stats.markers} resolved=${stats.markersResolved} confined=${imagesConfined} ms=${Date.now() - started}`);
     return { figures: { slots: stored.slots, stats }, stored: { set: validated, stored } };
