@@ -1149,7 +1149,7 @@ POST /v1/uploads/estimate
 { "files": [{ "name": "q3-earnings.pdf", "size": 2400000 }], "chartExport": { "tier": "models" } }
 ```
 
-The upload estimate answers `chartExport: { tier, source, credits }`, where `source` is `request`, `project` or `default`. Only `models` adds credits. `POST /v1/runs/:runId/reprocess/estimate` prices the same override.
+The upload estimate answers `chartExport: { tier, source, credits }`, where `source` is `request`, `project` or `default`. Only `models` adds credits. The quote in every estimate (`POST /v1/estimate`, the `quote` of `POST /v1/uploads/estimate`, SDK, CLI and MCP `uploadEstimate`) also takes `settings.chartExport` (`off`, `free` or `models`), resolves an omitted one the same way, and shows `models` as a separate `charts` line. Anonymous `POST /v1/estimate` calls are treated as API calls (default `off`). `POST /v1/runs/:runId/reprocess/estimate` prices the same override.
 
 Other surfaces: SDK `chartExport: { tier }` on `upload`, `uploadUrls`/`ingestUrls`, `reprocessRun`, `reprocessEstimate` and `uploadEstimate`; CLI `--chart-export off|free|models` on `upload`, `ingest-url`, `reprocess` and their `--estimate`; MCP `chartExport` on `upload`, `extract`, `uploadEstimate` and `reprocessEstimate`.
 

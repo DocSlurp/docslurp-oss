@@ -80,7 +80,7 @@ export function resolveIntakePipeline(flags: Record<string, string | boolean>): 
 
 function usage(): void {
   console.log(`Usage:
-  docslurp estimate <files...> [--quality <fast|auto|good>] [--indexing <full|on-demand|visual>] [--months <n>] [--json]
+  docslurp estimate <files...> [--quality <fast|auto|good>] [--indexing <full|on-demand|visual>] [--chart-export <off|free|models>] [--months <n>] [--json]
   docslurp upload <files...> [--project <id|slug|name> | --new-project] [--template <key>] [--quality <fast|auto|good>] [--chart-export <off|free|models>] [--canonical-id <id>] [--path <folder>] [--idempotency-key <key>] [--estimate] [--watch] [--api-url <url>]
   docslurp ingest-url <urls...> [--project <id|slug|name> | --new-project] [--template <key>] [--quality <fast|auto|good>] [--chart-export <off|free|models>] [--watch] [--api-url <url>]
   docslurp extract <files...|urls...> [--retention-days <n>] [--no-email] [--download <markdown|all>] [upload options]
@@ -126,7 +126,7 @@ good reads every page with a vision model (highest price). Prices: https://docsl
 --chart-export sets chart and diagram export for this request (default: the project's setting,
 off for CLI and API calls when the project has none): off; free exports charts that carry
 their own data (Office charts, embedded chart specs, vector graphics) at no charge; models
-also reads other charts with AI, billed per chart read. upload --estimate prices it.
+also reads other charts with AI, billed per chart read. upload --estimate and estimate price it.
 --estimate prints the work estimate (pages, documents, credits, time) for the operation and exits without doing it.
 Mutations that queue background work print their job; follow it with docslurp jobs watch <jobId>.
 --watch waits up to five minutes by default; --timeout sets its limit.
@@ -705,6 +705,8 @@ async function estimateCommand(files: string[], flags: Record<string, string | b
   if (typeof flags.quality === "string") settings.quality = resolveQualityPipeline(flags).pipeline?.quality;
   if (typeof flags.indexing === "string") settings.indexing = flags.indexing;
   if (typeof flags.months === "string") settings.hostingMonths = Number.parseInt(flags.months, 10);
+  const chartExport = resolveChartExportFlag(flags);
+  if (chartExport) settings.chartExport = chartExport.tier;
   const body = { files: await profiledEstimateFiles(files), ...(Object.keys(settings).length ? { settings } : {}) };
   const base = (typeof flags["api-url"] === "string" ? flags["api-url"] : process.env.DOCSLURP_API_URL ?? "https://docslurp.io").replace(/\/$/, "");
   const response = await fetch(`${base}/v1/estimate`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });

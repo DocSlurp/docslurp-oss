@@ -19,7 +19,7 @@ import {
   type ReprocessRunInput,
 } from "@docslurp/shared";
 
-import { estimateChartExportCredits, resolveChartExportTier, type ChartExportTier, type RunOrigin } from "@docslurp/shared";
+import { estimateChartExportCredits, type ChartExportTier, type RunOrigin } from "@docslurp/shared";
 import { sql } from "../db.js";
 import { estimateWork, orgWorkerSlots, sumEstimates, type EstimateEnv } from "./config-change.js";
 import { getRun } from "./runs.js";
@@ -129,12 +129,13 @@ export async function estimateUpload(args: {
   const profile = estimateProfileFor(args.project.pipeline, { workerSlots, env });
   // The same quote function as the public estimate, from the project's settings; the explicit speed boost wins.
   const quote = quoteEstimate(
-    { files: args.files.map((file) => ({ ...file, ...(file.type === null ? { type: undefined } : {}) })) as EstimateRequest["files"], settings: { ...args.settings, speedBoost: args.speedBoost === true } },
-    { base: quoteSettingsForPipeline(args.project.pipeline), workerSlots, env },
+    { files: args.files.map((file) => ({ ...file, ...(file.type === null ? { type: undefined } : {}) })) as EstimateRequest["files"], settings: { ...args.settings, speedBoost: args.speedBoost === true, ...(args.chartExportTier ? { chartExport: args.chartExportTier } : {}) } },
+    { base: quoteSettingsForPipeline(args.project.pipeline), workerSlots, env, origin: args.origin ?? "machine" },
   );
   const upload = quoteUpload({ files: args.files, profile, speedBoost: args.speedBoost === true });
   // Chart export: the tier this upload would resolve to for the caller's surface; only `models` adds credits.
-  const tier = resolveChartExportTier({ requested: args.chartExportTier, project: args.project.pipeline.chartExport, origin: args.origin ?? "machine", env });
+  // The tier as it would run (request, project or caller default, capped by the deploy switch): what the quote priced.
+  const tier = quote.settings.chartExport;
   const source = args.chartExportTier ? "request" : args.project.pipeline.chartExport?.tier ? "project" : "default";
   const charts = estimateChartExportCredits({ features: args.project.pipeline, tier, pages: upload.estimate.pages, documents: Math.max(1, args.files.length), env });
   const estimate = upload.estimate.credits && (charts.low > 0 || charts.high > 0)

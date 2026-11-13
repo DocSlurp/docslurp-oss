@@ -213,6 +213,11 @@ export type QuoteSettings = {
   hostingMonths: number;
   searchesPerMonth: number; chatAnswersPerMonth: number;
   chatTier: "standard" | "advanced" | "premium";
+  /**
+   * Chart and diagram export tier. Omitted: the project's, else off for API callers. `models` (reading charts with AI)
+   * adds a `charts` line; `free` costs nothing. Refused where the deployment does not offer `models`.
+   */
+  chartExport: ChartExportTier;
 };
 export type EstimateInput = {
   files: Array<{ name: string; size: number; type?: string; pages?: number; durationSeconds?: number; profile?: FileProfile }>;
