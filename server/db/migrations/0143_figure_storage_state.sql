@@ -28,15 +28,22 @@ CREATE INDEX IF NOT EXISTS document_assets_pending_idx ON document_assets (org_i
 -- deleting them (the orphan GC or the run's purge does that). Any figure write makes them current again.
 ALTER TABLE document_extraction_levels ADD COLUMN IF NOT EXISTS assets_current boolean NOT NULL DEFAULT true;
 --> statement-breakpoint
--- Gaps (page ranges no shard returned a manifest for: a failed or over-share shard, the document's pass budget) are
--- resumable work, like resumable images: a resume runs a fresh pass over the range, within the attempt and document caps.
+-- Resumable work: images a resume would retry, uploads left pending by a crash (adopted without a VM), and gaps (page
+-- ranges no shard returned a manifest for, resumed by a fresh pass over the range). Any of them makes the level
+-- `resumable`; a gap a shard now covers is recorded but no longer work, so the check is one-directional for gaps.
+ALTER TABLE document_extraction_levels ADD COLUMN IF NOT EXISTS assets_pending integer NOT NULL DEFAULT 0 CHECK (assets_pending >= 0);
+--> statement-breakpoint
+-- Bytes of the folder's own stored files (manifests, page facts, document.md, index.json), billed with the figures.
+ALTER TABLE document_extraction_levels ADD COLUMN IF NOT EXISTS folder_bytes bigint NOT NULL DEFAULT 0 CHECK (folder_bytes >= 0);
+--> statement-breakpoint
 DO $$
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_catalog.pg_constraint WHERE conname = 'document_extraction_levels_status_resumable_check' AND conrelid = 'public.document_extraction_levels'::regclass) THEN
     ALTER TABLE document_extraction_levels DROP CONSTRAINT document_extraction_levels_status_resumable_check;
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_constraint WHERE conname = 'document_extraction_levels_resumable_work_check' AND conrelid = 'public.document_extraction_levels'::regclass) THEN
-    ALTER TABLE document_extraction_levels ADD CONSTRAINT document_extraction_levels_resumable_work_check
-      CHECK ((images_status = 'resumable') = (assets_resumable > 0 OR coalesce(jsonb_array_length(gaps), 0) > 0));
+    ALTER TABLE document_extraction_levels ADD CONSTRAINT document_extraction_levels_resumable_work_check CHECK (
+      (images_status = 'resumable' OR (assets_resumable = 0 AND assets_pending = 0))
+      AND (images_status <> 'resumable' OR assets_resumable > 0 OR assets_pending > 0 OR coalesce(jsonb_array_length(gaps), 0) > 0));
   END IF;
 END $$;

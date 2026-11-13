@@ -3650,6 +3650,10 @@ export const documentExtractionLevels = pgTable("document_extraction_levels", {
   assetBytes: bigint("asset_bytes", { mode: "number" }).default(0).notNull(),
   // Migration 0143: false after a re-run that skipped the figure step (rows kept, not served, counted or billed).
   assetsCurrent: boolean("assets_current").default(true).notNull(),
+  // Migration 0143: uploads a crash left pending (resumable work, adopted without a VM) and the folder files' bytes.
+  assetsPending: integer("assets_pending").default(0).notNull(),
+  folderBytes: bigint("folder_bytes", { mode: "number" }).default(0).notNull(),
+
   // Migration 0144: the resume runner's queue and lease (one per document).
   resumeAfter: timestamp("resume_after", { withTimezone: true, mode: "string" }),
   resumeLeaseUntil: timestamp("resume_lease_until", { withTimezone: true, mode: "string" }),

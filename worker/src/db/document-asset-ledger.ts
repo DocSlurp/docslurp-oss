@@ -44,6 +44,8 @@ export interface DocumentExtractionLevelInput {
   manifest: { key: string; sha256: string } | null;
   /** Page ranges the provider reported without images (SandboxedPdfFigureOutcome.gaps), at most 128. */
   gaps?: readonly DopplerFigureGap[] | null;
+  /** Bytes of the folder's own stored files (manifests, page facts, Markdown, index); a resume keeps the level's. */
+  folderBytes?: number;
 }
 
 /** One shard manifest of a sharded document (document_extraction_shards). */
@@ -267,6 +269,8 @@ export async function writeDocumentAssetLedger(sql: Sql<Record<string, unknown>>
     if (write.level.manifest && !manifestKeys.includes(write.level.manifest.key)) throw new DocumentAssetLedgerError("key-mismatch");
     const shardResume = typeof write.resume === "object" && write.resume !== null ? write.resume : null;
     const resuming = write.resume === true || shardResume !== null;
+    // Earlier runs' figure folders, read before this write moves any row: queued for purge once it commits (fresh writes only).
+    const oldFolders = resuming ? [] : await oldFigureFolders(tx, write.scope, root);
     const shards = checkedShards(write.shards ?? [], `${prefix}${DOPPLER_STORE_LAYOUT.imagesFolder}`);
     if (shards.length > 0 && write.level.manifest) throw new DocumentAssetLedgerError("invalid-level");
     const priorResumes = previous?.resumes ?? 0;
@@ -441,25 +445,31 @@ export async function writeDocumentAssetLedger(sql: Sql<Record<string, unknown>>
     }
 
     // The level's counts are the document's rows as they now stand (a shard resume changed only its own).
-    const [totals] = await tx<Array<{ total: number; extracted: number; not_extracted: number; unlinked: number; resumable: number; copy: number; decode: number; render: number; bytes: string }>>`
+    const [totals] = await tx<Array<{ total: number; extracted: number; not_extracted: number; unlinked: number; resumable: number; pending: number; copy: number; decode: number; render: number; bytes: string }>>`
       select count(*)::int as total, count(*) filter (where status = 'extracted')::int as extracted,
         count(*) filter (where status = 'not-extracted')::int as not_extracted, count(*) filter (where status = 'unlinked')::int as unlinked,
-        count(*) filter (where resumable)::int as resumable, count(*) filter (where source = 'copy')::int as copy,
+        count(*) filter (where resumable)::int as resumable, count(*) filter (where storage_state = 'pending')::int as pending,
+        count(*) filter (where source = 'copy')::int as copy,
         count(*) filter (where source = 'decode')::int as decode, count(*) filter (where source = 'render')::int as render,
         -- Billed bytes: files whose upload landed and checked out.
         coalesce(sum(bytes) filter (where storage_state = 'stored'), 0)::text as bytes
-      from document_assets where document_id = ${documentId} and org_id = ${orgId} and project_id = ${projectId}`;
+      -- This run's rows only (the one recount rule, shared with recountLevel): another run's rows are never current.
+      from document_assets where document_id = ${documentId} and org_id = ${orgId} and project_id = ${projectId} and run_id = ${runId}`;
     const [shardState] = await tx<Array<{ n: number; incomplete: number; resumes: number; cut: number | null; source: string | null }>>`
       select count(*)::int as n, count(*) filter (where images_status <> 'complete')::int as incomplete,
         coalesce(max(resumes), 0)::int as resumes, max(last_cut_page) as cut, min(source_sha256) as source
       from document_extraction_shards where document_id = ${documentId} and org_id = ${orgId} and project_id = ${projectId}`;
     const sharded = (shardState?.n ?? 0) > 0;
     let imagesStatus = write.level.imagesStatus;
-    // Gaps (pages a shard or the document's pass budget left with no manifest) are resumable work too, within the caps.
-    const anyResumable = totals!.resumable > 0 || levelGaps.length > 0;
+    // Gaps (pages a shard or the document's pass budget left with no manifest) are resumable work too, within the caps; a
+    // gap a shard now covers is recorded but no longer work. Uploads a crash left pending are work as well (adopted, no VM).
+    const covered = await tx<{ first_page: number; last_page: number }[]>`
+      select first_page, last_page from document_extraction_shards where document_id = ${documentId} and org_id = ${orgId} and project_id = ${projectId}`;
+    const effectiveGaps = levelGaps.filter((gap) => !covered.some((shard) => shard.first_page <= gap.last && gap.first <= shard.last_page));
+    const anyResumable = totals!.resumable > 0 || totals!.pending > 0 || effectiveGaps.length > 0;
     if (sharded) {
       // Complete only if every shard is and no gap is left; resumable while any image or gap a resume would retry remains.
-      imagesStatus = shardState!.incomplete === 0 && levelGaps.length === 0 ? "complete" : anyResumable ? "resumable" : "partial";
+      imagesStatus = shardState!.incomplete === 0 && effectiveGaps.length === 0 && totals!.pending === 0 ? "complete" : anyResumable ? "resumable" : "partial";
       resumes = shardState!.resumes;
     } else if (imagesStatus === "resumable" && !anyResumable) {
       throw new DocumentAssetLedgerError("invalid-level");
@@ -471,6 +481,8 @@ export async function writeDocumentAssetLedger(sql: Sql<Record<string, unknown>>
       resumable: totals!.resumable, sourceCopy: totals!.copy, sourceDecode: totals!.decode, sourceRender: totals!.render, bytes: totals!.bytes,
     };
     const level = { ...write.level, imagesStatus, gaps: levelGaps };
+    // Folder files: a fresh write states them; a resume keeps the level's until it publishes new ones.
+    const folderBytes = write.level.folderBytes !== undefined ? byteCount(write.level.folderBytes) : null;
     const facts = sharded
       ? { ...(level.run ?? { manifestResumes: 0, complete: false, resumable: false, deadlineMs: null }), sourceSha256: shardState!.source, settingsSha256: null, lastCutPage: shardState!.cut }
       : level.run;
@@ -478,14 +490,14 @@ export async function writeDocumentAssetLedger(sql: Sql<Record<string, unknown>>
       insert into document_extraction_levels (document_id, org_id, project_id, run_id, markdown_complete, images_status,
         images_exit_code, manifest_version, doppler_build, manifest_key, manifest_sha256, source_sha256, settings_sha256, resumes,
         last_cut_page, deadline_ms, assets_total, assets_extracted, assets_not_extracted, assets_unlinked, assets_resumable,
-        source_copy, source_decode, source_render, asset_bytes, gaps, shards)
+        source_copy, source_decode, source_render, asset_bytes, gaps, shards, assets_pending, folder_bytes)
       values (${documentId}, ${orgId}, ${projectId}, ${runId}, ${level.markdownComplete}, ${level.imagesStatus},
         ${level.imagesExitCode}, ${level.manifestVersion}, ${level.dopplerBuild}, ${level.manifest?.key ?? null},
         ${level.manifest?.sha256 ?? null}, ${facts?.sourceSha256 ?? null}, ${facts?.settingsSha256 ?? null}, ${resumes},
         ${facts?.lastCutPage ?? null}, ${facts?.deadlineMs ?? null}, ${counts2.total}, ${counts2.extracted}, ${counts2.notExtracted},
         ${counts2.unlinked}, ${counts2.resumable}, ${counts2.sourceCopy}, ${counts2.sourceDecode}, ${counts2.sourceRender}, ${counts2.bytes}::bigint,
         ${level.gaps && level.gaps.length > 0 ? tx.json(level.gaps.map((gap) => ({ first: gap.first, last: gap.last, reason: gap.reason })) as unknown as JSONValue) : null},
-        ${shardState?.n ?? 0})
+        ${shardState?.n ?? 0}, ${totals!.pending}, ${folderBytes ?? 0})
       on conflict (document_id) do update
       set run_id = excluded.run_id, markdown_complete = excluded.markdown_complete, images_status = excluded.images_status,
           images_exit_code = excluded.images_exit_code, manifest_version = excluded.manifest_version,
@@ -495,10 +507,16 @@ export async function writeDocumentAssetLedger(sql: Sql<Record<string, unknown>>
           assets_extracted = excluded.assets_extracted, assets_not_extracted = excluded.assets_not_extracted,
           assets_unlinked = excluded.assets_unlinked, assets_resumable = excluded.assets_resumable,
           source_copy = excluded.source_copy, source_decode = excluded.source_decode, source_render = excluded.source_render,
+          assets_pending = excluded.assets_pending,
+          folder_bytes = ${folderBytes === null ? tx`document_extraction_levels.folder_bytes` : tx`excluded.folder_bytes`},
           asset_bytes = excluded.asset_bytes, gaps = excluded.gaps, shards = excluded.shards, assets_current = true, updated_at = now()
       where document_extraction_levels.org_id = excluded.org_id and document_extraction_levels.project_id = excluded.project_id
       returning 1`;
     if (leveled.length !== 1) throw new DocumentAssetLedgerError("write-mismatch");
+    // Billed bytes: stored figure files of this run plus the folder's own files.
+    await tx`update document_extraction_levels set asset_bytes = ${totals!.bytes}::bigint + folder_bytes
+      where document_id = ${documentId} and org_id = ${orgId} and project_id = ${projectId}`;
+    if (!resuming && write.level.markdownComplete) await queueOldFigureFolders(tx, write.scope, oldFolders);
     await queueFigureResume(tx, write.scope, resuming);
     return { upserted, removed, resumes };
   });
@@ -534,7 +552,7 @@ export interface PendingAssetLedgerWrite {
 export function ledgerWriteForStoredFigures(args: {
   set: Pick<DopplerFigureSet, "version" | "complete" | "ledger" | "run" | "manifests">;
   /** What the store wrote: the single manifest's key and SHA-256 (null for shards), and every manifest's key. */
-  stored: { manifest: { key: string; sha256: string } | null; manifests: ReadonlyArray<{ key: string; sha256: string; range: [number, number] | null }> };
+  stored: { manifest: { key: string; sha256: string } | null; manifests: ReadonlyArray<{ key: string; sha256: string; range: [number, number] | null }>; folderBytes?: number };
   outcome: FigureStepOutcome;
 }): PendingAssetLedgerWrite {
   const shards: LedgerShard[] = [];
@@ -552,6 +570,7 @@ export function ledgerWriteForStoredFigures(args: {
     level: {
       imagesStatus: imagesStatusOf(args.set), imagesExitCode: args.outcome.exitCode ?? null, manifestVersion: args.set.version,
       dopplerBuild: args.outcome.build ?? null, run: args.set.run, manifest: args.stored.manifest, gaps: args.outcome.gaps ?? null,
+      ...(args.stored.folderBytes !== undefined ? { folderBytes: args.stored.folderBytes } : {}),
     },
     assets: { spill: args.set.ledger.spill, rows: args.set.ledger.rows },
     ...(shards.length > 0 ? { shards } : {}),
@@ -637,7 +656,7 @@ export async function listResumableDocuments(
       from document_extraction_levels l
       join documents d on d.id = l.document_id and d.org_id = l.org_id and d.project_id = l.project_id
       join projects p on p.id = l.project_id and p.org_id = l.org_id and ${figuresOnSql(sql, "p")}
-      where l.org_id = ${args.orgId} and l.images_status = 'resumable' and l.shards = 0 and l.resumes < ${DOCUMENT_ASSET_RESUME_CAP}
+      where l.org_id = ${args.orgId} and l.images_status = 'resumable' and l.shards = 0 and (l.assets_resumable > 0 or l.assets_pending > 0) and l.resumes < ${DOCUMENT_ASSET_RESUME_CAP}
         and l.manifest_key is not null ${project("l")}
         and d.superseded_at is null and d.archived_at is null and d.purged_at is null
       union all
@@ -665,6 +684,9 @@ export async function listResumableDocuments(
         join projects pg on pg.id = l.project_id and pg.org_id = l.org_id and ${figuresOnSql(sql, "pg")}
         where l.org_id = ${args.orgId} and l.images_status = 'resumable' and l.assets_current and l.resumes < ${DOCUMENT_ASSET_RESUME_CAP} ${project("l")}
           and d.superseded_at is null and d.archived_at is null and d.purged_at is null
+          -- Only effective gaps: a gap a shard now covers is that shard's work (no duplicate unit).
+          and not exists (select 1 from document_extraction_shards sc where sc.document_id = l.document_id and sc.org_id = l.org_id
+            and sc.first_page <= (gap ->> 'last')::int and (gap ->> 'first')::int <= sc.last_page)
       ) g
     ) work
     ${args.after ? sql`where (work.at, work.document_id, work.first_page) > (${args.after.updatedAt}::timestamptz, ${args.after.documentId}, ${args.after.firstPage ?? 0})` : sql``}
@@ -809,16 +831,22 @@ async function recountLevel(tx: Tx, scope: DocumentAssetLedgerScope, fallback: D
       count(*) filter (where source = 'render')::int as render,
       coalesce(sum(bytes) filter (where storage_state = 'stored'), 0)::text as bytes
     from document_assets where document_id = ${documentId} and org_id = ${orgId} and project_id = ${projectId} and run_id = ${runId}`;
+  // Effective gaps: gaps no shard covers (the one rule, shared with the full write).
   const [gapRow] = await tx<{ n: number }[]>`
-    select coalesce(jsonb_array_length(gaps), 0)::int as n from document_extraction_levels where document_id = ${documentId} and org_id = ${orgId}`;
-  const status: DocumentImagesStatus = t!.resumable > 0 || (gapRow?.n ?? 0) > 0 ? "resumable"
+    select count(*)::int as n from document_extraction_levels l
+    cross join lateral jsonb_array_elements(coalesce(l.gaps, '[]'::jsonb)) gap
+    where l.document_id = ${documentId} and l.org_id = ${orgId}
+      and not exists (select 1 from document_extraction_shards s where s.document_id = l.document_id and s.org_id = l.org_id
+        and s.first_page <= (gap ->> 'last')::int and (gap ->> 'first')::int <= s.last_page)`;
+  const work = t!.resumable > 0 || t!.pending > 0 || (gapRow?.n ?? 0) > 0;
+  const status: DocumentImagesStatus = work ? "resumable"
     : t!.total === 0 ? (fallback ?? "none")
-    : fallback === "complete" && t!.pending === 0 ? "complete" : "partial";
+    : fallback === "complete" ? "complete" : "partial";
   await tx`
     update document_extraction_levels set run_id = ${runId}, images_status = ${status}, assets_current = true,
       assets_total = ${t!.total}, assets_extracted = ${t!.extracted}, assets_not_extracted = ${t!.not_extracted},
-      assets_unlinked = ${t!.unlinked}, assets_resumable = ${t!.resumable}, source_copy = ${t!.copy}, source_decode = ${t!.decode},
-      source_render = ${t!.render}, asset_bytes = ${t!.bytes}::bigint, updated_at = now()
+      assets_unlinked = ${t!.unlinked}, assets_resumable = ${t!.resumable}, assets_pending = ${t!.pending}, source_copy = ${t!.copy},
+      source_decode = ${t!.decode}, source_render = ${t!.render}, asset_bytes = ${t!.bytes}::bigint + folder_bytes, updated_at = now()
     where document_id = ${documentId} and org_id = ${orgId} and project_id = ${projectId}`;
 }
 
@@ -842,25 +870,35 @@ export async function writeFigureLevel(
   const { orgId, projectId, documentId, runId } = args.scope;
   await sql.begin(async (tx) => {
     await lockAndCheck(tx, args.scope);
+    if (args.imagesStatus === "none" || args.imagesStatus === "disabled") {
+      // The figure step did not run: off the resume queue (no gaps, no counts), and no row is current (none deleted).
+      const leveled = await tx`
+        insert into document_extraction_levels (document_id, org_id, project_id, run_id, markdown_complete, images_status, images_exit_code,
+          doppler_build, assets_current)
+        values (${documentId}, ${orgId}, ${projectId}, ${runId}, ${args.markdownComplete}, ${args.imagesStatus}, ${exitCode}, ${build}, false)
+        on conflict (document_id) do update
+        set run_id = excluded.run_id, markdown_complete = excluded.markdown_complete, images_status = excluded.images_status,
+            images_exit_code = excluded.images_exit_code, doppler_build = excluded.doppler_build, assets_current = false, gaps = null,
+            assets_total = 0, assets_extracted = 0, assets_not_extracted = 0, assets_unlinked = 0, assets_resumable = 0, assets_pending = 0,
+            source_copy = 0, source_decode = 0, source_render = 0, asset_bytes = 0, folder_bytes = 0, updated_at = now()
+        where document_extraction_levels.org_id = excluded.org_id and document_extraction_levels.project_id = excluded.project_id
+        returning 1`;
+      if (leveled.length !== 1) throw new DocumentAssetLedgerError("write-mismatch");
+      return;
+    }
     const leveled = await tx`
       insert into document_extraction_levels (document_id, org_id, project_id, run_id, markdown_complete, images_status, images_exit_code, doppler_build, gaps)
       values (${documentId}, ${orgId}, ${projectId}, ${runId}, ${args.markdownComplete}, 'none', ${exitCode}, ${build},
         ${gaps ? tx.json(gaps as unknown as JSONValue) : null})
       on conflict (document_id) do update
       set run_id = excluded.run_id, markdown_complete = excluded.markdown_complete, images_exit_code = excluded.images_exit_code,
-          doppler_build = excluded.doppler_build, gaps = excluded.gaps, updated_at = now()
+          doppler_build = excluded.doppler_build, gaps = excluded.gaps,
+          -- Another run's folder files are not this run's.
+          folder_bytes = case when document_extraction_levels.run_id is distinct from excluded.run_id then 0 else document_extraction_levels.folder_bytes end,
+          updated_at = now()
       where document_extraction_levels.org_id = excluded.org_id and document_extraction_levels.project_id = excluded.project_id
       returning 1`;
     if (leveled.length !== 1) throw new DocumentAssetLedgerError("write-mismatch");
-    if (args.imagesStatus === "none" || args.imagesStatus === "disabled") {
-      // The figure step did not run: off the resume queue, and no row is current (none deleted).
-      await tx`
-        update document_extraction_levels set images_status = ${args.imagesStatus}, assets_current = false, gaps = null, assets_total = 0,
-          assets_extracted = 0, assets_not_extracted = 0, assets_unlinked = 0, assets_resumable = 0, source_copy = 0, source_decode = 0,
-          source_render = 0, asset_bytes = 0, updated_at = now()
-        where document_id = ${documentId} and org_id = ${orgId} and project_id = ${projectId}`;
-      return;
-    }
     await recountLevel(tx, args.scope, args.imagesStatus === "resumable" ? "partial" : args.imagesStatus);
   });
 }
@@ -915,6 +953,9 @@ export async function markAssetsPending(
           bbox = excluded.bbox, storage_state = 'pending', updated_at = now()
       where document_assets.org_id = excluded.org_id and document_assets.project_id = excluded.project_id
         and not (document_assets.storage_state = 'stored' and document_assets.sha256 = excluded.sha256 and document_assets.run_id = excluded.run_id)
+        -- A row still current and stored under an earlier run stays until this run's full write commits (a failed run
+        -- must not orphan the figures the document serves); the upload is then recorded by that write.
+        and not (document_assets.storage_state = 'stored' and document_assets.run_id is distinct from excluded.run_id)
       returning 1`;
     return { pending: written.length };
   });
@@ -947,6 +988,9 @@ export async function markAssetsStored(
       on conflict (document_id) do update
       set markdown_complete = case when document_extraction_levels.run_id is distinct from excluded.run_id then false
             else document_extraction_levels.markdown_complete end,
+          -- A new run's level starts clean: the earlier run's gaps and folder files are not this run's.
+          gaps = case when document_extraction_levels.run_id is distinct from excluded.run_id then null else document_extraction_levels.gaps end,
+          folder_bytes = case when document_extraction_levels.run_id is distinct from excluded.run_id then 0 else document_extraction_levels.folder_bytes end,
           run_id = excluded.run_id, updated_at = now()
       where document_extraction_levels.org_id = excluded.org_id and document_extraction_levels.project_id = excluded.project_id`;
     await recountLevel(tx, args.scope, "partial");
@@ -1095,6 +1139,7 @@ export function figureLedgerHooks(
     store?: {
       markAssetsPending?(args: Parameters<typeof markAssetsPending>[1]): Promise<unknown>;
       markAssetsStored?(args: Parameters<typeof markAssetsStored>[1]): Promise<unknown>;
+      replaceUnvouchedObject?(args: Parameters<typeof replaceUnvouchedObject>[1]): Promise<void>;
     };
     run: { id: string; orgId: string | null; projectId?: string | null };
   },
@@ -1106,6 +1151,7 @@ export function figureLedgerHooks(
   return {
     pending: async (rows) => { await store.markAssetsPending!({ scope, rows }); },
     stored: async (files) => { await store.markAssetsStored!({ scope, files }); },
+    ...(store.replaceUnvouchedObject ? { replace: figureRepairHook(store.replaceUnvouchedObject.bind(store), scope) } : {}),
   };
 }
 
@@ -1115,6 +1161,78 @@ export function figuresOnSql(sql: Sql<Record<string, unknown>>, projectAlias: st
   return sql`(coalesce(${p}.pipeline -> 'figures', 'true'::jsonb) not in ('false'::jsonb, '"off"'::jsonb)
     and coalesce(${p}.pipeline -> 'figures' ->> 'enabled', 'true') <> 'false')`;
 }
+
+/**
+ * Repair under the document's ledger lock: `replace` (delete, then create) runs only when no stored row vouches for `key`;
+ * otherwise `object-conflict`. Held across the delete and the create, so no writer can vouch for the key in between.
+ */
+export async function replaceUnvouchedObject(
+  sql: Sql<Record<string, unknown>>,
+  args: { scope: DocumentAssetLedgerScope; key: string; replace: () => Promise<void> },
+): Promise<void> {
+  assertScope(args.scope);
+  const { orgId, projectId, documentId } = args.scope;
+  await sql.begin(async (tx) => {
+    const { root } = await lockAndCheck(tx, args.scope);
+    if (!args.key.startsWith(`${dopplerDocumentPrefix(root, documentId)}${DOPPLER_STORE_LAYOUT.imagesFolder}`) || args.key.includes("..")) {
+      throw new DocumentAssetLedgerError("key-mismatch");
+    }
+    const [vouched] = await tx<{ n: number }[]>`
+      select count(*)::int as n from document_assets
+      where document_id = ${documentId} and org_id = ${orgId} and project_id = ${projectId} and storage_key = ${args.key} and storage_state = 'stored'`;
+    if ((vouched?.n ?? 0) > 0) throw new DopplerFigureConflict();
+    await args.replace();
+  });
+}
+
+/** An object with other bytes at a key a stored row still vouches for: never replaced. */
+export class DopplerFigureConflict extends Error {
+  readonly rule = "object-conflict";
+  constructor() { super("Doppler figures rejected: object-conflict"); this.name = "DopplerFigureRejection"; }
+}
+
+/**
+ * Once a fresh full write of `scope.runId` commits the document's figures (its Markdown is committed), the figure folders
+ * of the document's earlier runs are queued for purge (kind `doppler_folder`). Never on a resume, a pending write or a
+ * failed run: those leave the earlier folders as they are. The drainer re-checks that no row vouches for the folder and
+ * that it is not the current run's.
+ */
+async function oldFigureFolders(tx: Tx, scope: DocumentAssetLedgerScope, root: string): Promise<string[]> {
+  const current = dopplerDocumentPrefix(root, scope.documentId);
+  const rows = await tx<{ folder: string | null }[]>`
+    select distinct substring(storage_key from ${`^(.*/doppler/${scope.documentId}/)`}) as folder from document_assets
+    where document_id = ${scope.documentId} and org_id = ${scope.orgId} and storage_key is not null and run_id is distinct from ${scope.runId}
+    union
+    select coalesce(r.storage_prefix, d.user_id || '/' || r.id) || '/doppler/' || ${scope.documentId} || '/' as folder
+    from document_extraction_levels l
+    join project_runs r on r.id = l.run_id and r.org_id = l.org_id
+    join documents d on d.id = l.document_id
+    where l.document_id = ${scope.documentId} and l.org_id = ${scope.orgId} and l.run_id is distinct from ${scope.runId}`;
+  return rows.map((row) => row.folder).filter((folder): folder is string => !!folder && folder !== current && !folder.includes(".."));
+}
+
+async function queueOldFigureFolders(tx: Tx, scope: DocumentAssetLedgerScope, folders: readonly string[]): Promise<void> {
+  for (const folder of folders) {
+    await tx`
+      insert into storage_cleanup_queue (kind, org_id, target, payload, reason, not_before)
+      select 'doppler_folder', ${scope.orgId}, ${folder}, ${tx.json({ documentId: scope.documentId, projectId: scope.projectId, runId: scope.runId })},
+        'figures moved to a newer run', now() + interval '1 hour'
+      where not exists (select 1 from storage_cleanup_queue where kind = 'doppler_folder' and target = ${folder})`;
+  }
+}
+
+/** The ledger's repair hook for figureLedgerHooks (DopplerFigureLedgerHooks.replace). */
+export function figureRepairHook(
+  replace: (args: { scope: DocumentAssetLedgerScope; key: string; replace: () => Promise<void> }) => Promise<void>,
+  scope: DocumentAssetLedgerScope,
+): DopplerFigureLedgerHooks["replace"] {
+  return async (key, run) => { await replace({ scope, key, replace: run }); };
+}
+
+/** A non-negative byte count, or `invalid-level`. */
+function byteCount(value: number): number {
+  if (!Number.isSafeInteger(value) || value < 0) throw new DocumentAssetLedgerError("invalid-level");
+  return value;
 
 // ---- The resume queue (migration 0144) ----
 

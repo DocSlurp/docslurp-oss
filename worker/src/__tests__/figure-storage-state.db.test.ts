@@ -12,7 +12,7 @@ import {
   writeDocumentAssetLedger, type DocumentAssetLedgerScope,
 } from "../db/document-asset-ledger.js";
 import { Store } from "../db/store.js";
-import { listResumableDocuments } from "../db/document-asset-ledger.js";
+import { listResumableDocuments, replaceUnvouchedObject } from "../db/document-asset-ledger.js";
 import { firstPassBatchOptions } from "../pipeline/first-pass.js";
 import { projectFiguresEnabled } from "@docslurp/shared";
 import { DopplerFigureStoreError, downloadDopplerImagesDir, readDopplerFigureDir, readLedgerSpill, storeDopplerFigures } from "../extractors/doppler-figures.js";
@@ -326,6 +326,81 @@ describe("gaps: page ranges with no manifest are resumable work", () => {
     expect(await listResumableDocuments(sql, { orgId: "org-a" })).toEqual([]);
   });
 });
+
+describe("council fix round (#357)", () => {
+  it("pending rows a crash left are resumable work (M3): the level is resumable and discovery lists the document for a VM-less adopt", async () => {
+    const set = await readDopplerFigureDir(await folder(), { pageCount: 3, expect: "complete" });
+    const extracted = [];
+    for await (const row of readLedgerSpill(set.ledger.spill)) if (row.status === "extracted") extracted.push(row);
+    await markAssetsPending(sql, { scope: A, rows: extracted });
+    // The worker died before any flip; the stage's failure write is level-only.
+    await writeDocumentAssetLedger(sql, { scope: A, ...ledgerWriteForFailedFigures({ outcome: {} }), level: { ...ledgerWriteForFailedFigures({ outcome: {} }).level, markdownComplete: false } });
+    const [row] = await sql<{ images_status: string; assets_pending: number }[]>`select images_status, assets_pending from document_extraction_levels where document_id = 'doc-a'`;
+    expect(row).toEqual({ images_status: "resumable", assets_pending: 3 });
+    // An unsharded level needs a stored manifest to be a resume unit; pending-only work is adopted by the audit.
+    expect(await listResumableDocuments(sql, { orgId: "org-a" })).toEqual([]);
+  });
+
+  it("a fresh full write that commits on a newer run queues the earlier run's figure folder; a resume or a failure never does (Q2)", async () => {
+    const storage = memoryStorage();
+    const first = await storeStep(storage);
+    const w1 = ledgerWriteForStoredFigures({ set: first.set, stored: first.stored, outcome: { status: "extracted", exitCode: 0 } });
+    await writeDocumentAssetLedger(sql, { scope: A, level: { ...w1.level, markdownComplete: true }, assets: w1.assets });
+    await sql`delete from storage_cleanup_queue`;
+    // The document moves to run-a2; a failed figure step there queues nothing.
+    await sql`update documents set run_id = 'run-a2' where id = 'doc-a'`;
+    const A2 = { ...A, runId: "run-a2" };
+    await writeDocumentAssetLedger(sql, { scope: A2, ...ledgerWriteForFailedFigures({ outcome: {} }), level: { ...ledgerWriteForFailedFigures({ outcome: {} }).level, markdownComplete: true } });
+    expect(await sql`select target from storage_cleanup_queue`).toEqual([]);
+    // A pending write of run-a2 never rewrites run-a's stored, still-served rows (M5).
+    const before = await rows();
+    await markAssetsPending(sql, { scope: A2, rows: (await inMemoryRows(first.set)).filter((r) => r.status === "extracted") });
+    expect(await rows()).toEqual(before);
+    // run-a2's full write commits: run-a's folder is queued.
+    const second = await storeStep(memoryStorage(), { scope: A2 });
+    const w2 = ledgerWriteForStoredFigures({ set: second.set, stored: second.stored, outcome: { status: "extracted", exitCode: 0 } });
+    await writeDocumentAssetLedger(sql, { scope: A2, level: { ...w2.level, markdownComplete: true }, assets: w2.assets });
+    expect(await sql`select kind, target from storage_cleanup_queue`).toEqual([{ kind: "doppler_folder", target: "ua/run-a/doppler/doc-a/" }]);
+    await sql`delete from storage_cleanup_queue`;
+  });
+
+  it("repair: an object of other bytes is replaced under the document lock only when no stored row vouches for it (M4)", async () => {
+    const storage = memoryStorage();
+    await storeStep(storage);
+    const key = `${ROOT_A}/page-0001/image-001.webp`;
+    // A stored row vouches: never replaced.
+    await expect(replaceUnvouchedObject(sql, { scope: A, key, replace: async () => { throw new Error("must not run"); } })).rejects.toMatchObject({ rule: "object-conflict" });
+    // Not vouched (the row went back to resumable): replaced.
+    await sql`update document_assets set status = 'not-extracted', reason = 'aborted', resumable = true, storage_state = 'none', storage_key = null, bytes = null, sha256 = null, source = null where document_id = 'doc-a' and asset_id = 'p1.1'`;
+    let ran = false;
+    await replaceUnvouchedObject(sql, { scope: A, key, replace: async () => { ran = true; } });
+    expect(ran).toBe(true);
+    // A key outside the document's own images folder is refused.
+    await expect(replaceUnvouchedObject(sql, { scope: A, key: "ub/run-b/doppler/doc-b/images/page-0001/image-001.webp", replace: async () => {} })).rejects.toMatchObject({ rule: "key-mismatch" });
+    // The upload path uses it: other bytes at an unvouched key are replaced, not refused.
+    storage.objects.set(key, Buffer.from("RIFF....WEBP stale bytes"));
+    await storeStep(storage);
+    expect(storage.objects.get(key)!.equals(v2Manifest().files.get("page-0001/image-001.webp")!)).toBe(true);
+  });
+
+  it("billed bytes include the folder's own stored files (L11)", async () => {
+    const storage = memoryStorage();
+    const { set, stored } = await storeStep(storage);
+    const w = ledgerWriteForStoredFigures({ set, stored, outcome: { status: "extracted", exitCode: 0 } });
+    await writeDocumentAssetLedger(sql, { scope: A, level: { ...w.level, markdownComplete: true }, assets: w.assets });
+    const figureBytes = figureKeys(storage).reduce((sum, k) => sum + storage.objects.get(k)!.length, 0);
+    const [row] = await sql<{ asset_bytes: number; folder_bytes: number }[]>`select asset_bytes::float8 as asset_bytes, folder_bytes::float8 as folder_bytes from document_extraction_levels where document_id = 'doc-a'`;
+    expect(row!.folder_bytes).toBe(stored.folderBytes);
+    expect(stored.folderBytes).toBeGreaterThan(0);
+    expect(row!.asset_bytes).toBe(figureBytes + stored.folderBytes);
+  });
+});
+
+async function inMemoryRows(set: Awaited<ReturnType<typeof readDopplerFigureDir>>) {
+  const out = [];
+  for await (const row of readLedgerSpill(set.ledger.spill)) out.push(row);
+  return out;
+}
 
 describe("projects that opted out of figures", () => {
   it("never appear in resume discovery, and the first pass asks for no figures", async () => {

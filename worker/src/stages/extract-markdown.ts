@@ -531,7 +531,10 @@ export class ExtractMarkdownStage implements Stage {
                 // Doppler figures (DOCSLURP_DOPPLER_IMAGE_EXTRACT): from the same VM job, into an empty host folder per candidate.
                 // A first-pass document's figures come from its batch and are stored by the first pass itself.
                 if (isPdf && projectFiguresEnabled(state.run.pipeline) && sandboxedPdfProvider()?.figures && !firstPassServesDocument(state.run.id, document.id)) {
-                  let early = true;
+                  // One winning candidate per run: figures are stored early only when a single VM candidate can produce
+                  // them; with two, the winner's are stored once it is known, so a loser never writes rows or objects.
+                  const vmCandidates = [isolated.primary.extractor, isolated.secondary?.extractor].filter((prepared) => !!prepared?.plan.sandboxedPdf).length;
+                  let early = vmCandidates === 1;
                   for (const prepared of [isolated.primary.extractor, isolated.secondary?.extractor]) {
                     if (!prepared?.plan.sandboxedPdf) continue;
                     const dir = await mkdtemp(path.join(path.dirname(prepared.plan.sandboxedPdf.output), ".doppler-figures-"));

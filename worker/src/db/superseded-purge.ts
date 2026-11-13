@@ -1020,7 +1020,7 @@ async function referencedDocumentsUnderPrefix(
 
 type StorageCleanupRow = {
   id: string;
-  kind: "storage_prefix" | "vector_table" | "vector_prefix" | "vector_rows" | "upload_original";
+  kind: "storage_prefix" | "vector_table" | "vector_prefix" | "vector_rows" | "upload_original" | "doppler_folder";
   org_id: string | null;
   target: string;
   payload: Record<string, unknown>;
@@ -1147,6 +1147,28 @@ export async function drainStorageCleanupQueue(
             result.purged += 1;
             return;
           }
+        } else if (row.kind === "doppler_folder") {
+          // An earlier run's figure folder of a document whose figures moved to a newer run (document-asset-ledger.ts).
+          // Re-checked here: the folder must be exactly `<root>/doppler/<document>/`, not the document's current run's
+          // folder, and no ledger row may still vouch for a key under it. A folder that is still in use waits a day.
+          const documentId = typeof row.payload.documentId === "string" ? row.payload.documentId : "";
+          if (!/^[A-Za-z0-9-]{1,64}$/.test(documentId) || !row.target.endsWith(`/doppler/${documentId}/`) || row.target.includes("..") ||
+              row.target.startsWith("/") || row.target.includes("//")) {
+            throw new Error(`Refusing unsafe figure folder: ${row.target}`);
+          }
+          const [inUse] = await client`
+            select 1 from document_assets where document_id = ${documentId} and storage_key like ${`${row.target.replace(/[\\%_]/g, (c) => `\\${c}`)}%`}
+            union all
+            select 1 from document_extraction_levels l join project_runs r on r.id = l.run_id
+              join documents d on d.id = l.document_id
+            where l.document_id = ${documentId} and coalesce(r.storage_prefix, d.user_id || '/' || r.id) || '/doppler/' || ${documentId} || '/' = ${row.target}
+            limit 1`;
+          if (inUse) {
+            await client`update storage_cleanup_queue set not_before = now() + interval '1 day' where id = ${row.id}`;
+            result.purged += 1;
+            return;
+          }
+          await purgePrefix(txStorage, row.target, () => false);
         } else if (row.kind === "vector_prefix") {
           await purgeProjectVectorPrefix(client, storage, options.lancedbRoot, row.org_id ?? "", payloadProjectId(row.payload));
         } else if (row.kind === "vector_rows") {
