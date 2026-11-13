@@ -117,7 +117,7 @@ describe("the extractor reads figure charts in inline mode, with no VM run", () 
   afterEach(() => { vi.unstubAllEnvs(); });
   it("partials carry the index's page and box; deferred visuals are recorded per figure", async () => {
     vi.stubEnv("DOCSLURP_CHART_EXPORT_INLINE", "1");
-    const stored = validateFigureCharts(answer(["p2.g1", "p3.g1"], [chart, { ...empty, deferred: [{ svgIndex: 4, reason: "svg-document-limit" }] }], { ms: 90 }), INDEX)!;
+    const stored = validateFigureCharts(answer(["p2.g1", "p3.g1"], [chart, { ...empty, deferred: [{ svgIndex: 4, count: 1, reason: "svg-document-limit" }] }], { ms: 90 }), INDEX)!;
     const runs: unknown[] = [];
     const usage: unknown[] = [];
     const extract = createVmDeterministicVisualExtractor({
@@ -133,7 +133,7 @@ describe("the extractor reads figure charts in inline mode, with no VM run", () 
     expect(runs).toEqual([]);
     expect(out.partials).toHaveLength(1);
     expect(out.partials[0]).toMatchObject({ pageNumber: 2, bbox: { x: 72, y: 100, width: 396, height: 300 } });
-    expect(out.deferred).toEqual([{ input: "doppler-figure", svgIndex: 4, reason: "svg-document-limit", pageNumber: 3, figureId: "p3.g1" }]);
+    expect(out.deferred).toEqual([{ input: "doppler-figure", svgIndex: 4, count: 1, reason: "svg-document-limit", pageNumber: 3, figureId: "p3.g1" }]);
     // The guest's own ms never becomes a usage event (the plugin meters the VM).
     expect(usage).toHaveLength(0);
   });

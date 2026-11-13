@@ -217,7 +217,7 @@ export function createVmDeterministicVisualExtractor(deps: VmExtractorDeps): Det
         results.push(inline.result);
         for (const visual of inline.result.visuals) partials.push(toPartial(visual, null));
         // SVGs past the scene budget are recorded for the later deferred pass, exactly as from the standalone guest.
-        for (const d of inline.result.deferred ?? []) deferred.push({ input: "source", svgIndex: d.svgIndex, reason: d.reason, pageNumber: null, figureId: null });
+        for (const d of inline.result.deferred ?? []) deferred.push({ input: "source", svgIndex: d.svgIndex, count: d.count, reason: d.reason, pageNumber: null, figureId: null });
       }
       log(`[chart-export] parser VM skipped ${context} kind=${sourceKind} reason=inline-${inline.status}${inline.status === "ok" ? ` visuals=${inline.result.visuals.length}` : ` detail=${inline.reason}`}`);
     }
@@ -262,7 +262,7 @@ export function createVmDeterministicVisualExtractor(deps: VmExtractorDeps): Det
           results.push(figure.result);
           const box = figureBox(figure.bbox);
           for (const visual of figure.result.visuals) partials.push(toPartial(visual, figure.page, figure.result.visuals.length === 1 ? box : null));
-          for (const d of figure.result.deferred ?? []) deferred.push({ input: "doppler-figure", svgIndex: d.svgIndex, reason: d.reason, pageNumber: figure.page, figureId: figure.id });
+          for (const d of figure.result.deferred ?? []) deferred.push({ input: "doppler-figure", svgIndex: d.svgIndex, count: d.count, reason: d.reason, pageNumber: figure.page, figureId: figure.id });
         }
         // No usage event from the guest's own `ms` (council #510 L4): the Doppler VM's time is metered by the plugin
         // (host-measured), which already includes the chart step.
