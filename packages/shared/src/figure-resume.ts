@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { projectFiguresEnabled } from "./doppler-figures.js";
 
 /*
  * Figure resume (docs/extraction/doppler-figures.md, "Resuming partial figures"): when the worker finishes the images a
@@ -40,10 +41,8 @@ export function figureResumeDeployEnabled(env: Record<string, string | undefined
  * export branch) in any of its plausible shapes, fail closed: `false`, `"off"`, or `{ enabled: false }` all mean off.
  */
 export function projectFiguresOff(pipeline: unknown): boolean {
-  const figures = (pipeline as { figures?: unknown } | null | undefined)?.figures;
-  if (figures === false || figures === "off") return true;
-  if (figures && typeof figures === "object" && (figures as { enabled?: unknown }).enabled === false) return true;
-  return false;
+  // The same rule as projectFiguresEnabled (doppler-figures.ts) for the project part; the deploy flag is checked apart.
+  return !projectFiguresEnabled(pipeline, { DOCSLURP_DOPPLER_IMAGE_EXTRACT: "1" });
 }
 
 /** The project's resume mode (`pipeline.figureResume`, default `auto`); `off` when its figures are off. */
