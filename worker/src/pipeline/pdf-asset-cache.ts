@@ -15,7 +15,7 @@ import { loadNativePdfEngine } from "../native-pdf/loader.js";
 import { logNativePdfFallback, NativePdfError } from "../native-pdf/types.js";
 import { renderClipNative, renderPagesNative } from "../native-pdf/render.js";
 import type { Bbox, NativePdfEngine } from "../native-pdf/types.js";
-import { boundedRasterDpi, boundedRasterEdge } from "../lib/raster-bounds.js";
+import { longEdgeCappedDpi, longEdgeCappedEdge } from "../lib/raster-bounds.js";
 import { pageAreaEquivalents, pageAreaEquivalentsPt } from "@docslurp/shared";
 import type { PageEquivalentRow } from "../db/page-equivalents.js";
 import { recordRenderedPageAreas } from "./page-area-sink.js";
@@ -400,9 +400,19 @@ export class PdfRasterCache {
     runId: string;
     pageNumbers: number[];
     dpi?: number;
+    /**
+     * Longest rendered edge in pixels, for a vision model trained on that size (vision-request-profile.ts). Lowers each
+     * PDF page's DPI from its measured point size; raster uploads are stored as uploaded. Renders get their own keys.
+     */
+    maxLongEdgePx?: number;
     signal?: AbortSignal;
   }): Promise<RasterPageArtifact[]> {
     const dpi = clampDpi(args.dpi);
+    const maxLongEdgePx = args.maxLongEdgePx;
+    if (maxLongEdgePx !== undefined && !(Number.isInteger(maxLongEdgePx) && maxLongEdgePx >= 256 && maxLongEdgePx <= 4_000)) {
+      throw new Error("maxLongEdgePx must be an integer from 256 to 4000");
+    }
+    const edgeSuffix = maxLongEdgePx !== undefined ? `-edge${maxLongEdgePx}` : "";
     const pageNumbers = normalizePageNumbers(args.pageNumbers, args.document.pageCount);
     if (pageNumbers.length === 0) return [];
 
@@ -415,7 +425,7 @@ export class PdfRasterCache {
 
     // Engines get separate key spaces so an A/B run never mixes their pixels.
     const resolved = isPdf ? await this.resolveEngine() : { name: "pdftoppm" as RasterEngineName, engine: null };
-    const dpiDir = resolved.name === "native-pdf" ? `v2-${dpi}dpi-native-pdf` : `v2-${dpi}dpi`;
+    const dpiDir = resolved.name === "native-pdf" ? `v2-${dpi}dpi${edgeSuffix}-native-pdf` : `v2-${dpi}dpi${edgeSuffix}`;
     const keys = new Map(pageNumbers.map((pageNumber) => [
       pageNumber,
       `${documentArtifactRoot(args.document, args.runId)}/images/${args.document.id}/${dpiDir}/page-${pageNumber}.${extension}`,
@@ -443,6 +453,7 @@ export class PdfRasterCache {
         try {
           rendered = await renderPagesNative(resolved.engine, source.path, missing, {
             dpi,
+            ...(maxLongEdgePx !== undefined ? { maxLongEdgePx } : {}),
             concurrency: this.options.concurrency,
             signal: args.signal,
           });
@@ -453,7 +464,7 @@ export class PdfRasterCache {
         if (rendered && missing.every((pageNumber) => rendered.has(pageNumber))) {
           const areas: PageEquivalentRow[] = [];
           for (const [pageNumber, page] of rendered) {
-            if (page.widthPx && page.heightPx) areas.push({ pageNumber, area: pageAreaEquivalents(page.widthPx, page.heightPx, dpi) });
+            if (page.widthPx && page.heightPx) areas.push({ pageNumber, area: pageAreaEquivalents(page.widthPx, page.heightPx, page.dpi) });
           }
           // Measured and authorized before any page is cached, outside the engine fallback: a refusal (an unfunded run is
           // paused) or a failed record stops here and leaves nothing a retry would skip.
@@ -469,7 +480,7 @@ export class PdfRasterCache {
         // Keys are engine-scoped, so a fallback render must land under the pdftoppm key space.
         engineName = "pdftoppm";
         for (const pageNumber of pageNumbers) {
-          keys.set(pageNumber, `${documentArtifactRoot(args.document, args.runId)}/images/${args.document.id}/v2-${dpi}dpi/page-${pageNumber}.${extension}`);
+          keys.set(pageNumber, `${documentArtifactRoot(args.document, args.runId)}/images/${args.document.id}/v2-${dpi}dpi${edgeSuffix}/page-${pageNumber}.${extension}`);
         }
         await Promise.all(pageNumbers.map(async (pageNumber) => {
           existing.set(pageNumber, await this.storage.objectSize(keys.get(pageNumber)!));
@@ -496,7 +507,7 @@ export class PdfRasterCache {
         }));
         await runLanes(pdftoppmPages, lanes, args.signal, async (selectedPage, signal) => {
           const size = sizes.get(selectedPage)!;
-          const renderDpi = boundedRasterDpi(size.widthPt, size.heightPt, dpi);
+          const renderDpi = longEdgeCappedDpi(size.widthPt, size.heightPt, dpi, maxLongEdgePx);
           // Each command writes only to its own directory and reads the source read-only: concurrent
           // lanes share no writable path (so no socket or file to meet on), and one lane cannot touch
           // another's output.
@@ -508,7 +519,7 @@ export class PdfRasterCache {
             selectedPage,
             selectedPage,
             renderDpi,
-            boundedRasterEdge(size.widthPt, size.heightPt, renderDpi),
+            longEdgeCappedEdge(size.widthPt, size.heightPt, renderDpi, maxLongEdgePx),
           );
           if (!rendered.available) throw new Error("pdftoppm unavailable for selected-page rasterization");
           const plan = { ...rendered, readOnlyInputs: true };

@@ -110,10 +110,12 @@ describe("PdfRasterCache with PDF_RASTER_ENGINE=native-pdf", () => {
       uri: (k: string) => `s3://t/${k}`,
     };
     let pdftoppmCalls = 0;
+    const pdftoppmArgs: Array<{ dpi: number; edge: number }> = [];
     const runner = {
       async pdfPageSizes(_source: string, first: number, last: number) { return { binary: "pdfinfo", args: [String(first), String(last)], available: true }; },
-      async renderPdfPageRange(_s: string, prefix: string, first: number, last: number) {
+      async renderPdfPageRange(_s: string, prefix: string, first: number, last: number, dpi: number, edge: number) {
         pdftoppmCalls += 1;
+        pdftoppmArgs.push({ dpi, edge });
         return { binary: "pdftoppm", args: [prefix, String(first), String(last)], available: true };
       },
       async run(plan: { binary?: string; args: string[] }) {
@@ -128,7 +130,7 @@ describe("PdfRasterCache with PDF_RASTER_ENGINE=native-pdf", () => {
       loadEngine: async () => engine,
       concurrency: 2,
     });
-    return { cache, store, calls: () => pdftoppmCalls, sources };
+    return { cache, store, calls: () => pdftoppmCalls, sources, pdftoppmArgs };
   }
 
   it("renders with the engine, tags engine+dpi, uses a separate key space and reuses it", async () => {
@@ -143,6 +145,27 @@ describe("PdfRasterCache with PDF_RASTER_ENGINE=native-pdf", () => {
     const second = await cache.renderSelectedPages({ document, runId: "r", pageNumbers: [2, 3] });
     expect(second.every((p) => p.cacheHit && p.engine === "native-pdf")).toBe(true);
     await sources.clear();
+  });
+
+  it("caps the long edge for a profiled vision model under its own keys, on both engines", async () => {
+    const capped = 1_024 * 72 / 792; // a Letter page's 792 pt long edge at 1024 px
+    const { engine, stats } = fakeEngine();
+    const native = await setup(engine);
+    const a = await native.cache.renderSelectedPages({ document, runId: "r", pageNumbers: [1], maxLongEdgePx: 1_024 });
+    expect(a[0]!.artifactKey).toContain("/v2-150dpi-edge1024-native-pdf/");
+    expect(stats.renders[0]).toMatchObject({ maxEdgePx: 1_024 });
+    expect(stats.renders[0]!.dpi).toBeCloseTo(capped, 9);
+    const uncapped = await native.cache.renderSelectedPages({ document, runId: "r", pageNumbers: [1] });
+    expect(uncapped[0]!.cacheHit).toBe(false);
+    await native.sources.clear();
+
+    const fallback = await setup(null);
+    const b = await fallback.cache.renderSelectedPages({ document, runId: "r", pageNumbers: [1], maxLongEdgePx: 1_024 });
+    expect(b[0]!.artifactKey).toContain("/v2-150dpi-edge1024/");
+    expect(fallback.pdftoppmArgs[0]!.edge).toBe(1_024);
+    expect(fallback.pdftoppmArgs[0]!.dpi).toBeCloseTo(capped, 9);
+    await expect(fallback.cache.renderSelectedPages({ document, runId: "r", pageNumbers: [1], maxLongEdgePx: 100 })).rejects.toThrow("maxLongEdgePx");
+    await fallback.sources.clear();
   });
 
   it("falls back to pdftoppm when the engine is absent or a render fails", async () => {

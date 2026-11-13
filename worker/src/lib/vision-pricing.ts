@@ -348,8 +348,10 @@ export function visionRequestPricing(route: {
   inputTokens: number;
   /** `visionImageTokenBound(image, model)` of the request's image; unset: the largest raster's. */
   imageTokens?: number;
+  /** Most output tokens the request can produce (`visionOutputTokenBound`); unset: the model's shared cap. */
+  outputTokens?: number;
 }): VisionRequestPricing {
-  const outputTokens = visionMaxOutputTokens(route.model);
+  const outputTokens = route.outputTokens ?? visionMaxOutputTokens(route.model);
   const priced = visionModelTokenPricing(route.model);
   if (isBilledVisionRoute(route.billing)) {
     if (route.billing === "unknown-hosted") throw new UnpricedVisionRouteError(route.model, "goes to a destination that is not OpenAI, OpenRouter or DeepInfra");

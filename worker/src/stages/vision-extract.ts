@@ -40,7 +40,7 @@ import { healthyDocuments } from "../pipeline/document-health.js";
 import type { CommandRunner } from "../tools/runner.js";
 import { type ArtifactStore, cleanupTempFile, keyFromStorageUri } from "../tools/storage.js";
 import { runArtifactRoot } from "../lib/artifact-root.js";
-import { configuredVisionServedRoute, executeVisionRuntime, visionCall } from "../tools/vision-runtime.js";
+import { configuredVisionServedRoute, executeVisionRuntime, visionCall, visionRenderLongEdge } from "../tools/vision-runtime.js";
 import { findVisionBilledUsage, findVisionOutputRejected } from "../tools/vision-stream.js";
 import { primaryFailureUsages, priceVisionResult, visionFailureUsages, type VisionFailureUsage } from "../lib/guarded-vision-call.js";
 import { allowHostedCall } from "../lib/privacy-guard.js";
@@ -1286,10 +1286,18 @@ export class VisionExtractStage implements Stage {
       if (rest.length === 0) return completed.sort((a, b) => a.pageNumber - b.pageNumber);
       missing.splice(0, missing.length, ...rest);
     }
+    // A vision model trained on a set page size gets PDF pages rendered no larger (the renderer lowers each page's DPI
+    // from its point size). Raster uploads go as uploaded: resizing one would decode it, which only an isolated
+    // provider may do.
+    const maxLongEdgePx = visionRenderLongEdge(vision);
+    if (maxLongEdgePx !== undefined && document.mimeType !== "application/pdf") {
+      console.log(`[vision-profile] document=${document.id} long-edge cap ${maxLongEdgePx}px not applied: raster uploads are sent as uploaded`);
+    }
     const rasterPages = await this.rasters.renderSelectedPages({
       document,
       runId: state.run.id,
       pageNumbers: missing,
+      ...(maxLongEdgePx !== undefined ? { maxLongEdgePx } : {}),
       signal,
     });
     for (const page of rasterPages) {
