@@ -237,6 +237,26 @@ console.log(JSON.stringify({ status: out.status, calls: out.result?.calls, visua
       expect((clamped as { ms: number }).ms).toBeGreaterThanOrEqual(remaining - 100);
       expect((clamped as { ms: number }).ms).toBeLessThanOrEqual(remaining + INLINE_STEP_TAIL_MS + 500);
     }, 30_000);
+    it("the real quarantine guest charges charts against its own command clock: a slow inspection refuses them (council #387 L1)", async () => {
+      // The guest process's clock is moved 36 s ahead (as if the inspection had taken that long); quarantine-inspect.mjs
+      // must pass its process start as the command start, or the step would think it has its full budget.
+      const late = path.join(dir, `late-clock-${Math.random().toString(36).slice(2)}.mjs`);
+      await writeFile(late, `import { performance } from "node:perf_hooks";\nconst now = performance.now.bind(performance);\nperformance.now = () => now() + 36_000;\n`);
+      const tag = Math.random().toString(36).slice(2);
+      const input = path.join(dir, `${tag}-late.svg`);
+      const options = path.join(dir, `${tag}-options.json`);
+      const output = path.join(dir, `${tag}-out.json`);
+      await writeFile(input, genericBar(["North", "South"], [4, 6], 8));
+      await writeFile(options, JSON.stringify({ filename: "late.svg", policy: POLICY, charts: { kind: "svg", diagrams: true } }));
+      await run(process.execPath, ["--import", pathToFileURL(late).href, path.join(workerRoot, "scripts/quarantine-inspect.mjs"), input, options, output], { cwd: workerRoot });
+      const out = JSON.parse(await readFile(output, "utf8")) as { charts: unknown; sniffed: unknown };
+      expect(out.charts).toEqual({ status: "refused", reason: "command-budget", ms: 0 });
+      // The inspection itself stands.
+      expect(out.sniffed).toBeTruthy();
+      // The same file with the real clock exports normally (the shift alone made the difference).
+      await run(process.execPath, [path.join(workerRoot, "scripts/quarantine-inspect.mjs"), input, options, output], { cwd: workerRoot });
+      expect((JSON.parse(await readFile(output, "utf8")) as { charts: { status: string } }).charts.status).toBe("ok");
+    }, 60_000);
     it("the step ends at the worker's measured start plus the file's deadline, not a flat start-up allowance (council #387 M2)", async () => {
       // A hostile unit that holds the worker as soon as it is ready: the step must end near deadlineBaseMs after ready,
       // never banking the 5 s start-up allowance as extra time for the file.
@@ -470,6 +490,11 @@ describe("inline chart plan and host validation", () => {
     const late = inlineStepBudget({ now: 33_000, commandStartedAt: 0, sizeBytes: 4 * MiB })!;
     expect(late.endsAt).toBe(INLINE_CHART_LIMITS.commandCutoffMs);
     expect(late.softMs).toBeLessThan(late.endsAt - 33_000);
+    // Cut to the minimum: start-up keeps its whole allowance, the soft deadline the share of what is left after it (L2).
+    const tight = inlineStepBudget({ now: INLINE_CHART_LIMITS.commandCutoffMs - INLINE_MIN_REMAINING_MS, commandStartedAt: 0, sizeBytes: 4 * MiB })!;
+    expect(tight.softMs).toBe(INLINE_CHART_LIMITS.startupMs + Math.floor((INLINE_MIN_REMAINING_MS - INLINE_CHART_LIMITS.startupMs) * INLINE_CHART_LIMITS.softDeadlineShare));
+    expect(tight.softMs).toBeGreaterThan(INLINE_CHART_LIMITS.startupMs);
+    expect(tight.softMs).toBeLessThan(INLINE_MIN_REMAINING_MS);
     // Too little left to start a worker: no budget (the guest refuses with command-budget).
     expect(inlineStepBudget({ now: INLINE_CHART_LIMITS.commandCutoffMs - INLINE_MIN_REMAINING_MS + 1, commandStartedAt: 0, sizeBytes: 10 })).toBeNull();
     expect(inlineStepBudget({ now: INLINE_CHART_LIMITS.commandCutoffMs - INLINE_MIN_REMAINING_MS, commandStartedAt: 0, sizeBytes: 10 })).not.toBeNull();

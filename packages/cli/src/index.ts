@@ -82,7 +82,7 @@ function usage(): void {
   console.log(`Usage:
   docslurp estimate <files...> [--quality <fast|auto|good>] [--indexing <full|on-demand|visual>] [--chart-export <off|free|models>] [--months <n>] [--json]
   docslurp upload <files...> [--project <id|slug|name> | --new-project] [--template <key>] [--quality <fast|auto|good>] [--chart-export <off|free|models>] [--canonical-id <id>] [--path <folder>] [--idempotency-key <key>] [--estimate] [--watch] [--api-url <url>]
-  docslurp ingest-url <urls...> [--project <id|slug|name> | --new-project] [--template <key>] [--quality <fast|auto|good>] [--chart-export <off|free|models>] [--watch] [--api-url <url>]
+  docslurp ingest-url <urls...> [--project <id|slug|name> | --new-project] [--template <key>] [--quality <fast|auto|good>] [--chart-export <off|free|models>] [--estimate] [--watch] [--api-url <url>]
   docslurp extract <files...|urls...> [--retention-days <n>] [--no-email] [--download <markdown|all>] [upload options]
   docslurp extract-status <extractId> [--json]
   docslurp extract-download <extractId>
@@ -901,6 +901,15 @@ async function ingestUrlCommand(urls: string[], flags: Record<string, string | b
     process.exitCode = 1;
     return;
   }
+  if (flags.estimate === true) {
+    // An estimate never starts an ingest (council #387 M1): sizes come from each URL's own headers, read from here.
+    const files = await urlEstimateFiles(urls);
+    const target = resolveIntakeTarget(flags);
+    const chartExport = resolveChartExportFlag(flags);
+    const quality = resolveQualityPipeline(flags).pipeline?.quality;
+    await runEstimate("/v1/uploads/estimate", { files, ...(target.project ? { project: target.project } : {}), ...(chartExport ? { chartExport } : {}), ...(quality ? { settings: { quality } } : {}) }, flags);
+    return;
+  }
   const response = await apiFetch(`${intake.base}/url`, flags, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -913,6 +922,37 @@ async function ingestUrlCommand(urls: string[], flags: Record<string, string | b
   }
   await printIntakeResult(response, flags);
 }
+
+/**
+ * Estimate inputs for URLs: name from the path, size and type from a HEAD request (redirects followed, 15 s each). A URL
+ * that reports no usable size cannot be estimated: the command fails before any request to DocSlurp, rather than
+ * guessing. The sizes are the server's own claim and only shape the estimate; the ingest is billed by what is measured.
+ */
+async function urlEstimateFiles(urls: string[]): Promise<Array<{ name: string; size: number; type?: string }>> {
+  const files: Array<{ name: string; size: number; type?: string }> = [];
+  for (const raw of urls) {
+    let url: URL;
+    try { url = new URL(raw); } catch { throw new Error(`--estimate: ${raw} is not a URL.`); }
+    if (url.protocol !== "https:" && url.protocol !== "http:") throw new Error(`--estimate: ${raw} is not an http(s) URL.`);
+    let response: Response;
+    try {
+      response = await fetch(url, { method: "HEAD", redirect: "follow", signal: AbortSignal.timeout(15_000) });
+    } catch {
+      throw new Error(`--estimate: could not reach ${url.href} to read its size. Download it and run docslurp estimate <file>.`);
+    }
+    const size = Number(response.headers.get("content-length"));
+    if (!response.ok || !Number.isSafeInteger(size) || size <= 0) {
+      throw new Error(`--estimate: ${url.href} reports no size (HTTP ${response.status}). Download it and run docslurp estimate <file>.`);
+    }
+    const name = decodeURIComponent(url.pathname.split("/").filter(Boolean).at(-1) ?? "") || url.hostname;
+    const type = response.headers.get("content-type")?.split(";")[0]?.trim();
+    files.push({ name: name.slice(0, 255), size, ...(type ? { type } : {}) });
+  }
+  return files;
+}
+
+/** Commands that read `--estimate`; anywhere else the flag is refused, so it can never silently run billed work. */
+const ESTIMATE_COMMANDS: ReadonlySet<string> = new Set(["upload", "ingest-url", "full-index", "reprocess"]);
 
 /** `docslurp extract`: files or URLs (not both), with the retention options. */
 async function extractCommand(inputs: string[], flags: Record<string, string | boolean>): Promise<void> {
@@ -1410,6 +1450,9 @@ async function main(): Promise<void> {
   }
 
   const { command, positional, flags } = parseCliArgs(own);
+  if (flags.estimate === true && !ESTIMATE_COMMANDS.has(command ?? "")) {
+    throw new Error(`--estimate is not supported by ${command ?? "this command"}: it would run the command instead of estimating it. Commands with --estimate: ${[...ESTIMATE_COMMANDS].join(", ")}.`);
+  }
 
   switch (command) {
     case "upload":

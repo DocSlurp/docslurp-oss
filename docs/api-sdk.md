@@ -1201,6 +1201,10 @@ docslurp ingest-url https://example.com/q3-earnings.pdf --chart-export models --
 docslurp reprocess <runId> --chart-export free
 ```
 
+`--estimate` prints the estimate and starts nothing. For `ingest-url` it reads each URL's size from the URL's own
+headers, and fails if a URL reports none; download the file and run `docslurp estimate <file>` instead. Commands without
+an estimate (such as `extract`) refuse the flag.
+
 The same bodies over JSON:
 
 ```json

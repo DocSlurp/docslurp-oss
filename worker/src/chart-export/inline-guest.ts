@@ -94,8 +94,11 @@ export function inlineStepBudget(args: { now: number; commandStartedAt: number; 
   const own = INLINE_CHART_LIMITS.startupMs + deadline;
   const span = Math.min(own, remaining);
   const ownSoft = INLINE_CHART_LIMITS.startupMs + Math.floor(deadline * INLINE_CHART_LIMITS.softDeadlineShare);
-  // Cut by the command: the soft deadline keeps the same share of what is left, so units still end counted, not killed.
-  const softMs = span < own ? Math.min(ownSoft, Math.floor(span * INLINE_CHART_LIMITS.softDeadlineShare)) : ownSoft;
+  // Cut by the command: start-up keeps its allowance and the soft deadline the same share of the work time left after it
+  // (council #387 correctness L2), so units still end counted, not killed, and a late start still does useful work.
+  const softMs = span < own
+    ? Math.min(ownSoft, INLINE_CHART_LIMITS.startupMs + Math.floor(Math.max(0, span - INLINE_CHART_LIMITS.startupMs) * INLINE_CHART_LIMITS.softDeadlineShare))
+    : ownSoft;
   return { endsAt: args.now + span, deadlineMs: deadline, softMs, unitCapMs: Math.max(3_000, Math.floor(deadline / 4)) };
 }
 
