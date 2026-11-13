@@ -111,3 +111,13 @@ ALTER TABLE document_page_facts ADD COLUMN IF NOT EXISTS text_layer text
 --> statement-breakpoint
 ALTER TABLE document_page_facts ADD COLUMN IF NOT EXISTS scan_class text
   CHECK (scan_class IN ('none', 'single', 'tiled', 'layered'));
+--> statement-breakpoint
+-- Least privilege for the worker at commit (server/db/roles.mjs WORKER_TABLES, reconciled again on deploy): it writes and
+-- prunes ledger rows and reads the resume queue. The app role gets DML through default privileges.
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'docslurp_worker') THEN
+    REVOKE ALL ON public.document_assets, public.document_extraction_levels FROM docslurp_worker;
+    GRANT SELECT, INSERT, UPDATE, DELETE ON public.document_assets, public.document_extraction_levels TO docslurp_worker;
+  END IF;
+END $$;
