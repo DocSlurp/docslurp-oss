@@ -23,6 +23,7 @@ const f = (name) => [`${tmp}/${name}.mjs`];
 ms(f("m-import"), { NODE_COMPILE_CACHE: cc });
 ms(f("m-worker-import"), { NODE_COMPILE_CACHE: cc });
 chmodSync(cc, 0o555);
+const FLAG = ["--disallow-code-generation-from-strings"];
 const out = {
   nodeBoot: med(() => ms(f("m-empty"))),
   importBundle: med(() => ms(f("m-import"))),
@@ -30,5 +31,9 @@ const out = {
   emptyWorker: med(() => ms(f("m-worker-empty"))),
   workerImportBundle: med(() => ms(f("m-worker-import"))),
   workerImportBundleCompileCacheRO: med(() => ms(f("m-worker-import"), { NODE_COMPILE_CACHE: cc })),
+  importBundleFlag: med(() => ms([...FLAG, ...f("m-import")])),
+  importBundleFlagCompileCacheRO: med(() => ms([...FLAG, ...f("m-import")], { NODE_COMPILE_CACHE: cc })),
+  workerImportBundleFlag: med(() => ms([...FLAG, ...f("m-worker-import")])),
+  workerImportBundleFlagCompileCacheRO: med(() => ms([...FLAG, ...f("m-worker-import")], { NODE_COMPILE_CACHE: cc })),
 };
 console.log(JSON.stringify(out));

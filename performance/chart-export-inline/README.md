@@ -101,6 +101,55 @@ in the parser VM's pooled lanes (reused across documents of the same activity, w
 - **Same trust level** as the existing parser commands, which run customer bytes in the same pooled VMs.
 - **Not done here:** marking a VM that ran inline charts as not reusable for another document's quarantine.
 
+## Council round 2 re-measure (`results-vm-r2.json`, `results-probe-r2.json`)
+
+- **Slice:** the 95 documents above plus 11 realistic no-chart documents, 106 documents and 196 pages in all:
+  - 2 `{"data": ...}` envelopes;
+  - 2 JSON:API documents, whose `data` items have `type`, which the extractor does read;
+  - 3 `ensure_ascii` exports;
+  - 4 saved web pages with analytics, framework and JSON-state scripts.
+- **Same VM shape and prices** as round 1.
+- **Arms:**
+  - `before`: the round-1 guest as it shipped, without the V8 flag;
+  - `now`: this round's guest, run as the host runs it, with `--disallow-code-generation-from-strings` on the quarantine command. Compile cache on in both.
+
+| | Σ added time | workers started | visuals | pages per $1, the gate as defined (63,878) | counting each document's quarantine VM (8,591) | pages per minute (200) |
+|---|--:|--:|--:|--:|--:|--:|
+| before | 2.73 s | 57 | 96 | 57,110 (−10.6%) | 8,457 (−1.6%) | 191.6 (−4.2%) |
+| **now** | **3.52 s** | **43** | **90** | **55,409 (−13.3%)** | **8,418 (−2.0%)** | **189.3 (−5.4%)** |
+
+Per class, as the median added time per document, and for `now` the loss on a single-page document of that class against
+its full cost (page cost + its quarantine VM):
+
+| class (n) | before | now | now: workers | now: 1-page document |
+|---|--:|--:|--:|--:|
+| Office with charts (25) | +49 ms | +74 ms | 25/25 | −4.7% |
+| SVG with charts (5) | +46 ms | +74 ms | 5/5 | −4.7% |
+| HTML with charts (5) | +44 ms | +71 ms | 5/5 | −4.5% |
+| JSON specs (6) | +44 ms | +71 ms | 6/6 | −4.5% |
+| JSON:API with `type` (2, no chart) | +43 ms | +71 ms | 2/2 | −4.5% |
+| web pages with scripts (4, no chart) | +44 ms | +7 ms | 0/4 | −0.5% |
+| `{"data": ...}` envelopes (2) | +43 ms | +4 ms | 0/2 | −0.3% |
+| `ensure_ascii` exports (3) | +44 ms | +5 ms | 0/3 | −0.4% |
+| EPUB without an SVG file (5; 3 of them hold inline charts) | +47 ms | +7 ms | 0/5 | −0.5% |
+| Office, HTML, JSON without a signal (21) | ~0 | ~+5 ms | 0/21 | −0.3% |
+
+**What changed:**
+- **Prefilters (exact) and the EPUB rule:** 14 fewer workers. The realistic negatives now start none, except JSON:API,
+  which the extractor really reads.
+- **The EPUB rule (an EPUB runs only with a `*.svg` file) costs visuals:** the 3 generated chart EPUBs carry their charts
+  inline in XHTML, so 6 visuals are no longer exported. This is the documented difference (`inline-guest.ts`). Lifting
+  it brings back about 50 ms per EPUB.
+- **The V8 flag costs about 25–35 ms per worker** (probe: worker plus bundle import 72 → 106 ms with the compile cache,
+  85 → 124 ms without; the main thread only +6 ms). It is the mandated H1 fix, kept as is. The compile cache still
+  applies under the flag (−18 ms).
+
+**Gate:**
+- As defined (page-only): **fails, −13.3%**.
+- Counting the quarantine VM: **−2.0%**, at the edge of the ≤2% budget.
+- A signalled single-page document loses 4.5–4.7% of its full cost; an unsignalled one 0.3–0.5%.
+- The owner decides the baseline.
+
 ## PDF vector charts (`pdf-figure-words.mjs`, `gen_pdf_truth.py`)
 
 Doppler figure SVGs carry no text, so the free steps yield **0** charts for PDFs today. This branch sends none of them

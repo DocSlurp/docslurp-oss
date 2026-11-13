@@ -3,9 +3,9 @@
 // `runtime: "vm"` sandbox shaped like the parser VM (2 vCPU, 4 GiB: the provider defaults; network blocked, no secrets)
 // and runs bench-vm.mjs there.
 //   node performance/chart-export-inline/run-in-modal-vm.mjs <slice dir> <out.json> [runs=5] [baseline pack dir]
-// Variants: v0 = <baseline pack dir> (an earlier pack of this script, when given); v1 = this tree, no compile cache, no
-// cache; v2 = this tree as shipped (+ the compile cache, built inside the VM at its own paths). The 2026-11-13 run also had
-// a v3 with an SVG worker pre-started during the inspection: ~1 ms, so it was removed. Needs MODAL_TOKEN_ID / MODAL_TOKEN_SECRET and a built worker.
+// Variants: `before` = <baseline pack dir> (a variant dir of an earlier pack, run as it shipped then), and `now` = this
+// tree as the host runs it (--disallow-code-generation-from-strings). Both get a compile cache built inside the VM at its
+// own paths. Earlier runs: results-vm-steps.json (v0-v3 of round 1). Needs MODAL_TOKEN_ID / MODAL_TOKEN_SECRET and a built worker.
 import { execFileSync } from "node:child_process";
 import { cpSync, mkdtempSync, readdirSync, readFileSync, writeFileSync, mkdirSync, copyFileSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -30,10 +30,10 @@ async function variant(name, { prestart }) {
   // The SVG pre-start variant (v3) was measured at ~1 ms per SVG and removed from the guest; v1/v2 remain.
   void prestart;
 }
-if (baseline) cpSync(baseline, path.join(pack, "v0"), { recursive: true });
-await variant("v1", { prestart: false });
-await variant("v2", { prestart: false });
-copyFileSync(`${repo}performance/chart-export-inline/bench-vm.mjs`, path.join(pack, "bench-vm.mjs"));
+// The earlier shipped guest (a variant dir of an earlier pack), and this tree as the host runs it now (V8 flag).
+if (baseline) cpSync(baseline, path.join(pack, "before"), { recursive: true });
+await variant("now", { prestart: false });
+for (const f of ["bench-vm.mjs", "probe-vm.mjs"]) copyFileSync(`${repo}performance/chart-export-inline/${f}`, path.join(pack, f));
 mkdirSync(path.join(pack, "slice"));
 for (const f of readdirSync(slice)) copyFileSync(path.join(slice, f), path.join(pack, "slice", f));
 const tar = `${pack}.tar`;
@@ -58,9 +58,10 @@ try {
   await vm.filesystem.writeBytes(readFileSync(tar), "/bench.tar");
   await sh("mkdir -p /bench && tar -xf /bench.tar -C /bench");
   // The compile cache is built where it is used (Node keys entries by the module's path and source).
-  for (const v of ["v2"]) await sh(`cd /bench/${v}/worker && node -e "import('./scripts/chart-guest-bundle.mjs').then((m) => m.buildCompileCache())"`);
-  const variants = [...(baseline ? ["v0"] : []), "v1", "v2"].map((v) => `${v}=/bench/${v}`).join(",");
-  writeFileSync(outPath, await sh(`node /bench/bench-vm.mjs ${variants} /bench/slice ${runs}`, 28 * 60_000));
+  for (const v of [...(baseline ? ["before"] : []), "now"]) await sh(`cd /bench/${v}/worker && node -e "import('./scripts/chart-guest-bundle.mjs').then((m) => m.buildCompileCache())"`);
+  const variants = [...(baseline ? ["before=/bench/before"] : []), "now=/bench/now:--disallow-code-generation-from-strings"].join(",");
+  // PROBE=1: the fixed-cost probe (probe-vm.mjs) on this tree's bundle instead of the slice bench.
+  writeFileSync(outPath, await sh(process.env.PROBE === "1" ? `node /bench/probe-vm.mjs /bench/now ${runs}` : `node /bench/bench-vm.mjs ${variants} /bench/slice ${runs}`, 28 * 60_000));
 } finally {
   await vm.terminate();
   console.log(`vm_seconds=${((Date.now() - started) / 1000).toFixed(1)}`);

@@ -56,4 +56,16 @@ for (let i = 0; i < 3; i += 1) {
   writeFileSync(path.join(out, `gen-book-chart-${i}.epub`), epub([`<h1>Expansion</h1>${proseLines(20, i).map((l) => `<p>${l}</p>`).join("")}`, genericBar(["London", "Tokyo", "Austin"], [4 + i, 6, 9], 12), `<script type="application/json">${JSON.stringify(vega(i))}</script>`]));
 }
 for (let i = 0; i < 2; i += 1) writeFileSync(path.join(out, `gen-book-plain-${i}.epub`), epub([`<h1>Annual report</h1>${proseLines(40, i).map((l) => `<p>${l}</p>`).join("")}`]));
+// Council r2 M-b: realistic no-chart documents. JSON API envelopes ({"data": ...}, two with JSON:API "type" members, which
+// the extractor does read), ensure_ascii exports, and saved web pages whose scripts are analytics, a framework bootstrap
+// and JSON state.
+for (let i = 0; i < 2; i += 1) writeFileSync(path.join(out, `real-envelope-${i}.json`), JSON.stringify({ data: { id: String(i), attributes: { city: ["London", "Tokyo"][i], bookings: 120 + i } }, meta: { page: 1 } }));
+for (let i = 0; i < 2; i += 1) writeFileSync(path.join(out, `real-jsonapi-${i}.json`), JSON.stringify({ data: [{ type: "trips", id: String(i), attributes: { from: "Austin", to: "London" } }], links: { self: "/trips" } }));
+for (let i = 0; i < 3; i += 1) writeFileSync(path.join(out, `real-ascii-${i}.json`), `{"city": "Z\\u00fcrich", "note": "caf\\u00e9 expansion ${i}", "rows": [${Array.from({ length: 50 }, (_, k) => k).join(",")}]}`);
+for (let i = 0; i < 4; i += 1) {
+  writeFileSync(path.join(out, `real-page-${i}.html`), `<!doctype html><html><head><title>Expansion news</title><script async src="https://example.com/gtag.js"></script>`
+    + `<script>window.dataLayer=window.dataLayer||[];function gtag(){dataLayer.push(arguments)}gtag("js",new Date());</script>`
+    + `<script type="application/json" id="__STATE__">{"route":"/news/${i}","user":null,"flags":{"beta":true}}</script></head>`
+    + `<body><nav>Home · News</nav>${proseLines(30, i).map((l) => `<p>${l}</p>`).join("")}<script src="/app.js"></script></body></html>`);
+}
 console.log(`documents=${readdirSync(out).length}`);
