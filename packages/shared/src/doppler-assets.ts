@@ -581,6 +581,9 @@ export interface DopplerManifestV3Summary {
   lastCutPage: number | null;
 }
 
+/** Context pages a shard's conversion may add either side of its `--images-pages` range (`-f`/`-l`, the #464 plugin's 16). */
+export const DOPPLER_SHARD_CONTEXT_PAGES = 16;
+
 /** id order: page, then pictures before figures, then index. */
 function idOrderKey(id: string): [number, number, number] {
   const parsed = parseDopplerFigureId(id)!;
@@ -702,6 +705,8 @@ export class DopplerManifestV3Validator {
     // for the end line but yields no row: the shard that owns the page lists it (ledger, index, billing and resume).
     // Anything else outside the range is refused.
     const context = !!range && (entry.page < range[0] || entry.page > range[1]);
+    // Only within the shard's context range: at most DOPPLER_SHARD_CONTEXT_PAGES either side (the plugin's -f/-l).
+    if (context && (entry.page < range[0] - DOPPLER_SHARD_CONTEXT_PAGES || entry.page > range[1] + DOPPLER_SHARD_CONTEXT_PAGES)) this.fail("shard-range");
     // (Its derived path and link are allowed, as Doppler writes them; it never has a file, a resume, a repeat or a fallback.)
     if (context && !(entry.status === "not-extracted" && entry.reason === "pages" && entry.resumable !== true &&
         entry.repeat_of === undefined && entry.fallback === undefined && entry.bytes === 0 && entry.sha256 === null)) {

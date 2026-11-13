@@ -343,13 +343,13 @@ describe("a real Doppler run (fixtures/doppler-golden/v3-repeats, see PROVENANCE
 });
 
 describe("sharded documents: one manifest per shard", () => {
-  async function shardRule(build: (m: ReturnType<typeof base>, files: Map<string, Buffer>) => Array<{ range: [number, number]; text: string }>, options: { partial?: boolean; gaps?: Array<{ first: number; last: number; reason: "plugin:shard-over-share" }> } = {}) {
+  async function shardRule(build: (m: ReturnType<typeof base>, files: Map<string, Buffer>) => Array<{ range: [number, number]; text: string }>, options: { partial?: boolean; gaps?: Array<{ first: number; last: number; reason: "plugin:shard-over-share" }>; pageCount?: number } = {}) {
     const { manifest, files } = v2Manifest({ partial: options.partial });
     const shards = build(manifest, files);
     await rm(dir, { recursive: true, force: true });
     await writeShardedFolder(dir, shards, files);
     try {
-      return await readDopplerFigureDir(dir, { pageCount: 3, gaps: options.gaps ?? null, ...(options.partial ? { expect: "partial" as const } : {}) });
+      return await readDopplerFigureDir(dir, { pageCount: options.pageCount ?? 3, gaps: options.gaps ?? null, ...(options.partial ? { expect: "partial" as const } : {}) });
     } catch (error) {
       if (error instanceof DopplerFigureRejection) return error.rule;
       throw error;
@@ -430,6 +430,48 @@ describe("sharded documents: one manifest per shard", () => {
     expect(await shardRule(shards({ resumable: true, reason: "budget" }))).toBe("manifest-shard-range");
     expect(await shardRule(shards({ reason: "min_side" }))).toBe("manifest-shard-range");
     expect(await shardRule(shards({ status: "extracted", reason: undefined, source: "render", bytes: 10, sha256: "a".repeat(64), width: 1, height: 1 }))).toBe("manifest-shard-range");
+  }, 60_000);
+
+  it("context entries: only within 16 pages of the shard; never a second row for an id another shard owns; never a repeat target; never billed", async () => {
+    const ctx = (m: ReturnType<typeof base>, id: string, page: number) => ({
+      ...m.images.find((e) => e.id === "p2.2")!, id, page, kind: "picture", fate: "inline", status: "not-extracted", reason: "pages",
+      format: "webp", source: null, bytes: 0, sha256: null, width: 0, height: 0,
+      path: `page-${String(page).padStart(4, "0")}/image-${id.split(".")[1]!.padStart(3, "0")}.webp`,
+      link: `images/page-${String(page).padStart(4, "0")}/image-${id.split(".")[1]!.padStart(3, "0")}.webp`,
+    }) as never;
+    const kind = (r: unknown) => typeof r === "string" ? r : "set";
+    const tail = { partial: true, pageCount: 40, gaps: [{ first: 4, last: 40, reason: "plugin:shard-over-share" as const }] };
+    // 1. The context window: shard 1-2 may list up to page 18; page 19 is outside it.
+    const window = (page: number) => (m: ReturnType<typeof base>) => [
+      { range: [1, 2] as [number, number], text: v3ShardText(m, [1, 2], { context: [ctx(m, `p${page}.1`, page)] }) },
+      { range: [3, 3] as [number, number], text: v3ShardText(m, [3, 3]) },
+    ];
+    expect(kind(await shardRule(window(18), tail))).toBe("set");
+    expect(await shardRule(window(19), tail)).toBe("manifest-shard-range");
+    // 2. A context entry for an id the next shard owns (p3.1, extracted there): one row, the owner's.
+    const dup = (m: ReturnType<typeof base>) => [
+      { range: [1, 2] as [number, number], text: v3ShardText(m, [1, 2], { context: [ctx(m, "p3.1", 3)] }) },
+      { range: [3, 3] as [number, number], text: v3ShardText(m, [3, 3]) },
+    ];
+    const set = await shardRule(dup) as DopplerFigureSet;
+    expect(kind(set)).toBe("set");
+    const rows: Array<{ assetId: string; status: string; bytes: number | null }> = [];
+    for await (const row of readLedgerSpill(set.ledger.spill)) rows.push({ assetId: row.assetId, status: row.status, bytes: row.bytes });
+    expect(rows.filter((row) => row.assetId === "p3.1")).toEqual([expect.objectContaining({ status: "extracted" })]);
+    expect(new Set(rows.map((row) => row.assetId)).size).toBe(rows.length);
+    // 4. Not billable: no context entry adds a row or a file (the files are exactly the owners').
+    expect(set.files.map((file) => file.id).sort()).toEqual(["p1.1", "p1.g1", "p3.1"]);
+    await disposeDopplerFigureSet(set);
+    // 3. Never a repeat target: an in-range repeat naming a context entry is refused.
+    const repeat = (m: ReturnType<typeof base>) => {
+      const target = ctx(m, "p2.9", 2) as unknown as Record<string, unknown>;
+      const repeatOf = { ...target, id: "p3.8", page: 3, reason: "repeat", repeat_of: "p2.9" } as never;
+      return [
+        { range: [1, 2] as [number, number], text: v3ShardText(m, [1, 2]) },
+        { range: [3, 3] as [number, number], text: v3ShardText({ ...m, images: [...m.images, repeatOf] }, [3, 3], { context: [target as never] }) },
+      ];
+    };
+    expect(await shardRule(repeat)).toBe("manifest-repeat-invalid");
   }, 60_000);
 
   it("LOW-5: shards start at page 1, leave no hole, and end within the document", async () => {
