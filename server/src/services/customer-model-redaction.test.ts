@@ -7,7 +7,7 @@ import {
   resolveManagedPipeline,
   type ProjectRunProgressSnapshot,
 } from "@docslurp/shared";
-import { customerHiddenModelIds, redactOperatorEvent, redactOperatorRun, redactOperatorRunFields } from "./progress-snapshot.js";
+import { customerHiddenModelIds, customerHiddenModelNames, redactModelIdsInText, redactOperatorEvent, redactOperatorRun, redactOperatorRunFields } from "./progress-snapshot.js";
 
 /**
  * Council round 3, N2: no catalog model id reaches a customer through a run, its stage stats, its events or its
@@ -107,3 +107,21 @@ describe("no catalog model id reaches a customer", () => {
     for (const event of fullDefaultSnapshot().recentEvents) expect(leaks(redactOperatorEvent(event))).toEqual([]);
   });
 });
+
+describe("free-text scrub (council round 4, R4-2)", () => {
+  it("replaces display names, any model route (private ones too) and catalog ids", () => {
+    expect(redactModelIdsInText("DeepSeek V4.1 Flash and GPT-6.1 Sol refused")).toBe("managed-model and managed-model refused");
+    expect(redactModelIdsInText("deepseek  v4.1 flash timed out")).toBe("managed-model timed out");
+    expect(redactModelIdsInText("route llm://private/acme-gpu/qwen/qwen3-vl failed")).toBe("route managed-model failed");
+    expect(redactModelIdsInText("fell back to llm://openrouter/x-ai/grok-9, then stopped")).toBe("fell back to managed-model, then stopped");
+    expect(redactModelIdsInText("Qwen3-VL 30B A3B (DeepInfra) was slow")).toBe("managed-model was slow");
+    for (const name of customerHiddenModelNames()) expect(redactModelIdsInText(`x ${name} y`)).toBe("x managed-model y");
+  });
+
+  it("keeps ordinary text, mime types and customer tier words", () => {
+    for (const text of ["application/pdf on page 3", "Balanced answer in 1.2 s", "Smart tier", "3 pages failed OCR"]) {
+      expect(redactModelIdsInText(text)).toBe(text);
+    }
+  });
+});
+

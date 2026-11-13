@@ -397,11 +397,37 @@ const CUSTOMER_HIDDEN_MODEL_IDS: readonly string[] = (() => {
   return [...ids].sort((a, b) => b.length - a.length);
 })();
 
-const MODEL_ID_PATTERN = new RegExp(CUSTOMER_HIDDEN_MODEL_IDS.map((id) => id.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")).join("|"), "gi");
+/**
+ * Display names of the chat and vision model catalogs ("DeepSeek V4.1 Flash", "GPT-6.1 Sol", "Qwen3-VL 30B A3B"), with
+ * and without a parenthesized host or variant. Embedding-profile labels are customer category words and stay.
+ */
+const CUSTOMER_HIDDEN_MODEL_NAMES: readonly string[] = (() => {
+  const names = new Set<string>();
+  for (const label of [...PROJECT_CHAT_MODELS.map((model) => model.label), ...visionModelCatalog.map((model) => model.label)]) {
+    for (const name of [label, label.replace(/\s*\([^)]*\)\s*$/, "")]) if (name.trim().length >= 5) names.add(name.trim());
+  }
+  return [...names].sort((a, b) => b.length - a.length);
+})();
 
-/** A string with any catalog model id replaced by a neutral word. */
+const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
+const MODEL_ID_PATTERN = new RegExp([
+  // Any model route, operator private routes (llm://private/<alias>/...) included.
+  String.raw`\b(?:llm|vlm):\/{0,2}[^\s"'<>,;)]+`,
+  ...CUSTOMER_HIDDEN_MODEL_IDS.map(escapeRegExp),
+  ...CUSTOMER_HIDDEN_MODEL_NAMES.map((name) => escapeRegExp(name).replace(/\s+/g, "\\s+")),
+].join("|"), "gi");
+
+/**
+ * A string with model routes (`llm://...`, private routes too), catalog model ids and catalog display names replaced by
+ * a neutral word. Best effort: customer-visible errors are mapped to public messages first; this is the second layer.
+ */
 export function redactModelIdsInText(text: string): string {
   return text.replace(MODEL_ID_PATTERN, "managed-model");
+}
+
+/** The catalog display names customers must never see (tests walk customer payloads against them). */
+export function customerHiddenModelNames(): readonly string[] {
+  return CUSTOMER_HIDDEN_MODEL_NAMES;
 }
 
 /** The catalog model ids customers must never see (tests walk customer payloads against it). */
