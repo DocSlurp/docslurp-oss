@@ -51,7 +51,8 @@ function fingerprint(plan: ProjectChangePlan): string {
 const PIPELINE_LABELS: Record<string, string> = {
   "mediaVideo.enabled": "Video frame analysis",
   quality: "Processing quality",
-  "chartExport.enabled": "Chart and diagram export",
+  "chartExport.tier": "Chart and diagram export",
+  figures: "Figure extraction",
   "chartExport.formats": "Chart export formats",
   "chartExport.diagrams": "Export diagrams",
 };
@@ -82,7 +83,7 @@ async function plan(actor: RequestActor, projectId: string, changes: z.infer<typ
   // The planner versions and loads one base snapshot before merging the proposal.
   let config: Awaited<ReturnType<typeof planProjectChange>>;
   try {
-    config = await planProjectChange({ projectId, userId: actor.userId, input: { apply: "reindex" }, pipelineOverrides: changes.pipeline });
+    config = await planProjectChange({ projectId, userId: actor.userId, input: { apply: "reindex" }, pipelineOverrides: changes.pipeline, origin: "app" });
   } catch (error) {
     if (error instanceof ChartExportUnavailableError) return fail(400, error.code, error.message);
     throw error;

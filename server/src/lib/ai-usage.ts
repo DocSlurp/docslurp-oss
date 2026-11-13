@@ -490,14 +490,7 @@ function resolvedProjectId(client: UsageClient, scope: UsageScope, columns: Scop
   return client`coalesce(
     ${columns.projectId}::text,
     (select wr.project_id from project_runs wr where wr.id = ${scope.runId ?? null}::text),
-    (
-      select case when jsonb_typeof(ss.metadata) = 'string'
-        then (ss.metadata #>> '{}')::jsonb ->> 'projectId'
-        else ss.metadata ->> 'projectId'
-      end
-      from search_sessions ss
-      where ss.id = ${sessionId}::text
-    )
+    (select ss.project_id from search_sessions ss where ss.id = ${sessionId}::text)
   )`;
 }
 

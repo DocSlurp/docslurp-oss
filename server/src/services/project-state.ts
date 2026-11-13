@@ -104,6 +104,7 @@ export async function getProjectState(args: { projectId: string; orgId: string; 
     search_metadata as (
       select s.*, case when jsonb_typeof(metadata) = 'string' and pg_input_is_valid(metadata #>> '{}', 'jsonb') then (metadata #>> '{}')::jsonb else metadata end as normalized_metadata
       from search_sessions s
+      where s.project_id = ${args.projectId}
     ),
     searches as (
       select s.*, s.created_at >= clock.observed_at - (${args.recentWindowHours} * interval '1 hour') as recent,
@@ -111,8 +112,6 @@ export async function getProjectState(args: { projectId: string; orgId: string; 
           case when (s.normalized_metadata ->> 'durationMs')::numeric >= 0
             then (s.normalized_metadata ->> 'durationMs')::numeric end end as duration_ms
       from search_metadata s cross join clock
-      where s.normalized_metadata ->> 'projectId' = ${args.projectId}
-        or (s.normalized_metadata -> 'projectIds') @> ${client.json([args.projectId])}::jsonb
     ),
     search_summary as (
       select count(*) as total_searches, count(*) filter (where recent) as recent_searches,

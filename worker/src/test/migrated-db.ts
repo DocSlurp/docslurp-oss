@@ -43,9 +43,13 @@ function findTag(tags: string[], name: string): number {
 }
 
 /**
- * One transaction per migration, as drizzle-kit migrate runs them, so
- * transaction-scoped statements (LOCK TABLE, SET LOCAL, ON COMMIT DROP temp
- * tables) behave here as they do in production.
+ * One transaction per migration, so a test can stop between two of them. This
+ * is NOT how production applies them: server/db/migrate.mjs (drizzle's
+ * migrator) runs every pending migration in a single transaction. There, a
+ * lock a migration takes is held until the last pending migration commits, a
+ * SET LOCAL lasts through the migrations after it, and an ON COMMIT DROP temp
+ * table survives into them. Judge a migration's lock time by everything that
+ * can be pending with it, not by its own statements.
  */
 export async function applyMigration(db: PGlite, tag: string): Promise<void> {
   const sql = readFileSync(`${migrationsDir}${tag}.sql`, "utf8");

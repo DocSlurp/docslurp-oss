@@ -199,6 +199,8 @@ export const projectCorpusStats = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" })
       .defaultNow()
       .notNull(),
+    /** The updated_at the automatic-title sweep last examined (0154); the project is pending while they differ. */
+    autoTitleCheckedAt: timestamp("auto_title_checked_at", { withTimezone: true, mode: "string" }),
   },
   (table) => [
     foreignKey({
@@ -1388,9 +1390,12 @@ export const searchSessions = pgTable(
       .notNull(),
     /** API-key keyword and hybrid searches only (0139); the maintenance sweep deletes the session after it. */
     expiresAt: timestamp("expires_at", { withTimezone: true, mode: "string" }),
+    /** The searched project (0141). Project reads filter and date sessions by it, never by metadata. */
+    projectId: text("project_id"),
   },
   (table) => [
     index("search_sessions_expires_at_idx").on(table.expiresAt).where(sql`expires_at is not null`),
+    index("search_sessions_project_id_created_at_idx").using("btree", table.projectId, table.createdAt, table.id),
     index("search_sessions_user_id_created_at_idx").using(
       "btree",
       table.userId.asc().nullsLast().op("text_ops"),
@@ -1405,6 +1410,11 @@ export const searchSessions = pgTable(
       columns: [table.userId],
       foreignColumns: [user.id],
       name: "search_sessions_user_id_fkey",
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.projectId],
+      foreignColumns: [projects.id],
+      name: "search_sessions_project_id_fkey",
     }).onDelete("cascade"),
   ],
 );
@@ -2218,6 +2228,8 @@ export const uploadSessions = pgTable(
     projectName: text("project_name"),
     templateKey: text("template_key"),
     pipeline: jsonb().default({}).notNull(),
+    /** Run origin from the authenticated principal: app (first-party session) or machine (migration 0141). */
+    origin: text().default("machine").notNull(),
     status: text().default("pending").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "string" })
       .defaultNow()
@@ -2327,6 +2339,8 @@ export const projectRuns = pgTable(
      */
     spentCents: numeric("spent_cents", { precision: 24, scale: 12, mode: "number" }).default(0).notNull(),
     pipeline: jsonb().default({}).notNull(),
+    /** Run origin from the authenticated principal: app (first-party session) or machine (migration 0141). */
+    origin: text().default("machine").notNull(),
     stats: jsonb().default({}).notNull(),
     artifacts: jsonb().default({}).notNull(),
     runId: text("run_id"),

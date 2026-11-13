@@ -6,7 +6,9 @@
  * Imports only modules that do not need the pricing provider at load time (pricing-provider.ts imports the open default,
  * which imports this).
  */
-import { chatAnswerCredits, creditsToDollars, searchCredits, storageCreditsPerMonth } from "./billing.js";
+import { chatAnswerCredits, creditsToDollars, expectedVisualExportCredits, searchCredits, storageCreditsPerMonth } from "./billing.js";
+import { defaultChartExportConfig, type ChartExportFormat } from "./chart-export.js";
+import { expectedBillableVisuals } from "./chart-export-estimate.js";
 import type { EstimateLine, EstimateQuote, ProviderEstimateArgs } from "./estimate-quote.js";
 import type { CostEstimate } from "./jobs.js";
 import type { UploadMediaEstimate } from "./media-upload-estimate.js";
@@ -78,11 +80,19 @@ export function assembleEstimateQuote(args: ProviderEstimateArgs & {
   const searches = searchCredits(settings.searchesPerMonth, {});
   const chat = settings.chatAnswersPerMonth * chatAnswerCredits({ tier: settings.chatTier as ChatAnswerTier });
   const media = ingest.media?.credits ?? { low: 0, high: 0 };
-  const ingestCredits = ingest.estimate.credits;
-  const pageCredits = ingestCredits ? ordered({ low: Math.max(0, ingestCredits.low - media.low), high: Math.max(0, ingestCredits.high - media.high) }) : null;
+  // Reading charts with AI (the `models` tier, already resolved for the caller and capped by the deploy switch): billed per
+  // chart or diagram a model reads, from the per-page planning prior over the quoted pages. Stage-priced work (`work`)
+  // already includes it (estimatePipelineWork), so only an upload quote adds the line. `free` and `off` cost nothing.
+  const charts = billed && !args.work && settings.chartExport === "models" ? chartCredits(pages, paged.length, settings) : null;
+  const ingestCredits = ingest.estimate.credits && charts
+    ? { low: ingest.estimate.credits.low + charts.low, high: ingest.estimate.credits.high + charts.high }
+    : ingest.estimate.credits;
+  const providerCredits = ingest.estimate.credits;
+  const pageCredits = providerCredits ? ordered({ low: Math.max(0, providerCredits.low - media.low), high: Math.max(0, providerCredits.high - media.high) }) : null;
   const lines: EstimateLine[] = [];
   if (billed && pageCredits && pages.high > 0) lines.push({ id: "pages", label: "Document pages", period: "once", credits: rounded(pageCredits) });
   if (billed && ingest.media) lines.push({ id: "media", label: "Audio and video minutes", period: "once", credits: rounded(media) });
+  if (charts) lines.push({ id: "charts", label: "Charts read with AI", period: "once", credits: rounded(charts) });
   if (billed) lines.push({ id: "storage", label: "Storage and search index", period: "month", credits: rounded(storagePerMonth) });
   if (billed && settings.searchesPerMonth > 0) lines.push({ id: "search", label: "Searches", period: "month", credits: rounded({ low: searches, high: searches }) });
   if (billed && settings.chatAnswersPerMonth > 0) lines.push({ id: "chat", label: "Chat answers", period: "month", credits: rounded({ low: chat, high: chat }) });
@@ -118,4 +128,20 @@ export function assembleEstimateQuote(args: ProviderEstimateArgs & {
     },
     basis: ingest.estimate.basis,
   };
+}
+
+/**
+ * Credits for reading the expected charts and diagrams with AI over `pages` pages, with the formats and diagrams the
+ * quote's settings carry (the project's own), from the per-page prior: the same rule as the upload's `chartExport`.
+ */
+function chartCredits(pages: { low: number; high: number }, documents: number, settings: { chartFormats?: readonly ChartExportFormat[]; chartDiagrams?: boolean }): { low: number; high: number } {
+  const formats = settings.chartFormats?.length ? [...settings.chartFormats] : defaultChartExportConfig.formats;
+  const config = { ...defaultChartExportConfig, formats, diagrams: settings.chartDiagrams ?? defaultChartExportConfig.diagrams };
+  const at = (count: number) => expectedBillableVisuals({ config, pages: count, documents: Math.max(1, documents) });
+  // First reads plus the expected billed second reads (one repair or cut-off retry per chart at most), priced by the
+  // active provider: the same function the stage estimate (`chartExportCredits`) uses, so the line equals its credits.
+  return ordered({
+    low: expectedVisualExportCredits({ visuals: at(pages.low).low, formats }),
+    high: expectedVisualExportCredits({ visuals: at(pages.high).high, formats }),
+  });
 }

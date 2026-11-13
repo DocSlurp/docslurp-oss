@@ -63,7 +63,18 @@ The executor reconstructs the existing project-chat policy and usage ledger
 from trusted scope. Its lifetime is unrelated to HTTP responses and sockets.
 Session, MFA, membership and cancellation are checked during execution; accepted
 output is fenced under the root cancellation lock and native lease before native
-cache publication. An interrupted provider execution is not silently restarted.
+cache publication. Streamed text is coalesced: one fenced, quota-reserved append
+per 250 ms (`DOCSLURP_CHAT_OUTPUT_FLUSH_MS`, 10 to 2000) or 16 KiB of text, and
+always before a tool, evidence or result event, so event order is unchanged.
+Buffered text is dropped, never published, once the turn is cancelled or aborted.
+Session, MFA and project access are re-read immediately before every append is
+published, and every two seconds while the turn is idle, so revoked work that
+publishes nothing still stops. The session is also re-read inside the publish
+transaction under a share lock on its row, so nothing is published after a
+sign-out or session revocation commits, except one payload whose publish timed out (after 3 s
+the transaction ends and its Redis command may still complete). A membership or project share removed
+in the few milliseconds between the pre-publish check and that commit can still
+let one append through; readers of the operation are authorized separately. An interrupted provider execution is not silently restarted.
 
 Each user may have eight active roots, including roots with active descendants
 or shared Temporal dependencies after the answer completes. Trees have at most
@@ -238,27 +249,38 @@ that the user pressed Stop. If graceful settlement fails, the surviving worker's
 recurring lease reconciliation marks the expired execution failed/interrupted.
 SIGKILL has no settlement opportunity and always relies on that lease path.
 
-Host configuration should send SIGTERM and allow at least 30 seconds before
-SIGKILL for shutdown/storage/transport cleanup; that timeout is cleanup allowance,
-not a promise to finish generation. Restarted observers retain partial output and
-show the authoritative terminal state. Rolling replacement may interrupt active
-answers; keep the feature off until this product policy and production Redis
-persistence are approved. Browser disconnect/unsubscribe still only detach.
+Stopping an executor drains it. The first SIGTERM/SIGINT stops claiming new
+tasks (the worker leaves the native dispatch group, so new launches go to other
+workers at once) and lets running turns finish, up to `CHAT_EXECUTOR_DRAIN_MS`
+(default 25 seconds; `0` restores the immediate interrupt, the maximum is 900
+seconds). A second signal ends the drain early. Native shutdown then interrupts
+whatever is left, as before: a turn still running at the drain limit keeps its
+accepted output and is not retried. A draining executor claims nothing, so with
+a single executor machine no new turn starts until its replacement is running;
+the default keeps that gap to about 25 seconds per deploy. With several
+executors and rolling restarts, a longer drain (up to the chat turn deadline
+plus five seconds) lets more turns finish without a claim gap. Configure the
+platform kill timeout above the drain plus the five-second teardown (for the
+default at least 30 seconds; 45 leaves a margin), or SIGKILL interrupts the drain.
+During a drain, cancellation of a running turn reaches it through the executor's
+two-second authorization and cancellation recheck, and every append stays fenced.
+Restarted observers retain partial output and show the authoritative terminal
+state. Browser disconnect/unsubscribe still only detach.
 
 The local process integration suite tests SIGTERM and SIGKILL separately with a
 surviving worker already running before acceptance, retained partial output,
 terminal state, zero retry count and zero survivor executor invocations.
 
-The executor entrypoint starts a process-wide five-second exit deadline on the
-first SIGTERM/SIGINT, covering startup, recovery cancellation, native shutdown and
-global pool cleanup. Host shutdown starts native interruption concurrently with
+The executor entrypoint starts a process-wide exit deadline of the drain plus five
+seconds on the first SIGTERM/SIGINT, covering startup, the drain, recovery
+cancellation, native shutdown and global pool cleanup. Host shutdown starts native
+interruption concurrently with
 recovery abort. Its five-second budget destroys tracked Redis writers/readers;
 recovery owns separately abortable SQL/Redis resources with a three-second attempt
 limit. The main native pool bounds acquisition to one second and statements to
 four seconds. If the process deadline wins, retained output stays recoverable and
 unsettled execution becomes interrupted after lease expiry; no paid retry occurs.
-The 30-second platform kill allowance remains a safety margin, not extra time for
-generation. See the bounded-I/O evidence in `realtime-council-review.md`.
+See the bounded-I/O evidence in `realtime-council-review.md`.
 
 ### Pause new admission during rollback
 

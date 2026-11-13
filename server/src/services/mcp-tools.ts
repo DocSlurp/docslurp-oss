@@ -1,10 +1,12 @@
+import { chartExportDefaults } from "@docslurp/shared";
+import { env } from "../config.js";
 import type { z } from "zod";
 import { getProjectSearchSettings } from "./search-controls.js";
 import { projectSettingsPipelinePatchSchema } from "./project-settings-proposal-input.js";
 import { projectSettingsProposalInputSchema } from "./project-settings-proposal-input.js";
 import { currentChatSessionId, inChatAgentContext } from "../lib/chat-agent-context.js";
 import { enforceActorCategoryRateLimit } from "../middleware/rate-limit.js";
-import { acquireChatSlot } from "../middleware/chat-concurrency.js";
+import { acquireChatSlot, CHAT_CAPACITY_UNAVAILABLE_MESSAGE, CHAT_SLOT_RETRY_AFTER_SECONDS, CHAT_SLOTS_FULL_MESSAGE } from "../middleware/chat-concurrency.js";
 import { proposeProjectSettings, SettingsProposalError } from "./project-settings-proposals.js";
 import { publicErrorMiddleware } from "../lib/public-errors.js";
 import { apiErrorResponse, apiStatusError, usesNativeErrorEnvelope } from "../lib/api-error.js";
@@ -62,6 +64,11 @@ export const markSessionToolsSurface: MiddlewareHandler = async (c, next) => {
   c.set("mcpSurface", "session-tools");
   await next();
 };
+
+/** The pipeline override an MCP upload or extract sends: quality and the chart export tier, nothing else. */
+function mcpPipelineOverride(input: { quality?: string; chartExport?: { tier: string } }): Record<string, unknown> {
+  return { ...(input.quality ? { quality: input.quality } : {}), ...(input.chartExport ? { chartExport: { tier: input.chartExport.tier } } : {}) };
+}
 
 const uploaderHidden = (c: Context) => c.get("mcpSurface") === "session-tools";
 
@@ -122,7 +129,9 @@ const mcpAdapterRoutes = new Hono()
       return c.json({ projectId: project.id,
         pipeline: Object.fromEntries(Object.keys(projectSettingsPipelinePatchSchema.shape).map(key => [key, key === "mediaVideo" ? { enabled: project.pipeline.mediaVideo?.enabled !== false }
           : project.pipeline[key as keyof typeof project.pipeline]])),
-        chat: settings.chat, retrieval: settings.retrievalDefaults });
+        chat: settings.chat, retrieval: settings.retrievalDefaults,
+        // What an unset chart tier runs as on this deployment, and which tiers a change may choose.
+        chartExportDefaults: chartExportDefaults(process.env) });
     }
 
     if (toolId === "proposeProjectSettings") {
@@ -144,7 +153,7 @@ const mcpAdapterRoutes = new Hono()
     if (toolId === "listProjects") {
       const parsed = listProjectsInput.safeParse(body);
       if (!parsed.success) return invalidInput(c, parsed.error);
-      const accessible = (await listProjects(actor.userId, { refineNames: false }))
+      const accessible = (await listProjects(actor.userId))
         .filter(project => !apiKey || apiKeyCanUseProject(apiKey, project));
       const { offset, limit } = parsed.data;
       return c.json({ projects: accessible.slice(offset, offset + limit).map(project => ({
@@ -165,13 +174,14 @@ const mcpAdapterRoutes = new Hono()
       // project, plus any org member for the default project. Read-only shares are not offered.
       const editable = new Set(await listEditableProjectIds(actor.userId));
       if (!editable.has(project.id)) return adapterError(c, 403, "You do not have permission to upload to this project", "forbidden");
-      const accessible = (await listProjects(actor.userId, { refineNames: false }))
+      const accessible = (await listProjects(actor.userId))
         .filter(item => editable.has(item.id) && (!apiKey || apiKeyCanUseProject(apiKey, item)));
       const summary = (item: { id: string; slug: string; name: string; isDefault: boolean }) => ({ id: item.id, slug: item.slug, name: item.name, isDefault: item.isDefault });
       return c.json({
         project: summary(accessible.find(item => item.id === project.id) ?? { ...project, isDefault: false }),
         projects: accessible.slice(0, 50).map(summary),
-        limits: { maxFiles: 10, maxFileBytes: 5 * 1024 ** 3 },
+        // What the server actually accepts (MAX_UPLOAD_BYTES, lib/upload-policy.ts), never a larger fixed number.
+        limits: { maxFiles: 10, maxFileBytes: env.maxUploadBytes },
         uploader: { resourceUri: UPLOAD_UI_URI },
         hint: "Ask the user to drop files into the uploader. Hosts without MCP Apps: use upload with urls.",
       });
@@ -189,6 +199,8 @@ const mcpAdapterRoutes = new Hono()
         : (await import("../routes/uploads.js")).uploadsRoutes;
       const native = new Hono().use("*", publicErrorMiddleware).use("*", async (inner, next) => {
         setRequestActor(inner, actor);
+        // MCP is a machine surface whatever authenticated it (WebMCP session tools included).
+        inner.set("runOrigin", "machine");
         await next();
       }).route("/", routes);
       native.onError(spendAwareErrorHandler);
@@ -208,7 +220,7 @@ const mcpAdapterRoutes = new Hono()
         }
         const form = new FormData();
         if (input.project) form.set("project", input.project);
-        if (input.quality) form.set("pipeline", JSON.stringify({ quality: input.quality }));
+        if (input.quality || input.chartExport) form.set("pipeline", JSON.stringify(mcpPipelineOverride(input)));
         for (const [name, value] of Object.entries(extractFields)) form.set(name, String(value));
         for (const file of decoded) form.append("files", new File([new Uint8Array(file.bytes!)], file.filename, { type: file.mimeType ?? "" }));
         return native.request("http://mcp.internal/bulk", { method: "POST", headers, body: form, signal: c.req.raw.signal });
@@ -217,7 +229,7 @@ const mcpAdapterRoutes = new Hono()
       return native.request(`http://mcp.internal/${input.urls ? "url" : "direct/sessions"}`, {
         method: "POST", headers, body: JSON.stringify({ project: input.project,
           ...(input.urls ? { urls: input.urls } : { files: input.files }),
-          ...(input.quality ? { pipeline: { quality: input.quality } } : {}),
+          ...(input.quality || input.chartExport ? { pipeline: mcpPipelineOverride(input) } : {}),
           ...extractFields,
         }), signal: c.req.raw.signal,
       });
@@ -256,15 +268,18 @@ const mcpAdapterRoutes = new Hono()
       const actor = c.get("requestActor");
       // A direct MCP chat call runs a model turn: it counts as chat-ai and takes
       // a chat slot. A nested call from the chat agent is already inside its turn.
-      let slot: { release: () => void } | null | "uncapped" = "uncapped";
+      let slot: { release: () => void } | "uncapped" = "uncapped";
       if (toolId === "chat" && !inChatAgentContext()) {
         const limited = await enforceActorCategoryRateLimit(c, "chat-ai");
         if (limited) return limited;
-        slot = acquireChatSlot(c);
-        if (!slot) {
-          c.header("Retry-After", "5");
-          return adapterError(c, 429, "Too many chat requests in progress for this key; wait for one to finish", "rate_limited");
+        const acquired = await acquireChatSlot(c);
+        if (acquired === "full" || acquired === "unavailable") {
+          c.header("Retry-After", String(CHAT_SLOT_RETRY_AFTER_SECONDS));
+          return acquired === "full"
+            ? adapterError(c, 429, CHAT_SLOTS_FULL_MESSAGE, "rate_limited")
+            : adapterError(c, 503, CHAT_CAPACITY_UNAVAILABLE_MESSAGE, "chat_capacity_unavailable");
         }
+        slot = acquired;
       }
       // The MCP chat tool is grounded retrieval only: it never starts another
       // agent (which would refresh the outer tool budget) or changes settings.
@@ -387,7 +402,7 @@ const mcpAdapterRoutes = new Hono()
             and user_id = ${actor.userId} and phrase ilike ${like}
           union all
           select s.query as phrase, 10 as weight, s.created_at from search_sessions s
-            where s.user_id = ${actor.userId} and (s.metadata ->> 'projectId') = ${project.id}
+            where s.user_id = ${actor.userId} and s.project_id = ${project.id}
               and s.query not like 'enc:%' and s.query not like 'redacted:%' and s.query ilike ${like}
         ) x
         group by phrase

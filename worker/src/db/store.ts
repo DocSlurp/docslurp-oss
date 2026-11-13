@@ -12,6 +12,7 @@ import { BILLABLE_UNIT_METRICS, DOCUMENT_FAILURE_MARKERS, INFRASTRUCTURE_RETRIES
 import { DocumentNotFoundError, isMissingDocumentError } from "./missing-document.js";
 import { recordPageBaseFee } from "./page-base-fee.js";
 import { reserveFastPageImageRenders } from "./fast-page-image-budget.js";
+import { reserveChartExportFreeVmRun } from "./chart-export-free-vm-cap.js";
 import { PageTaskStore } from "./page-task-store.js";
 import { WorkerSlotStore, resolveWorkerSlotOptions, tryMaintenanceLease, type WorkerSlotOptions } from "./worker-slot-store.js";
 import { randomUUID, createHmac } from "node:crypto";
@@ -2692,6 +2693,11 @@ export class Store {
   async reserveFastPageImageRenders(args: { runId: string; documentId: string; wanted: number; perRun: number }): Promise<number> {
     return await reserveFastPageImageRenders(this.sql, args);
 
+  }
+
+  /** Reserves one free-tier chart-export VM run against the org's hourly cap, shared by every worker (chart-export-free-vm-cap.ts). */
+  async reserveChartExportFreeVmRun(args: { orgId: string; runId: string; documentId: string; perHour: number }): Promise<boolean> {
+    return await reserveChartExportFreeVmRun(this.sql, args);
   }
 
   /** Document asset ledger (db/document-asset-ledger.ts): one org-scoped transaction for a document's images and level. */

@@ -71,7 +71,7 @@ beforeEach(() => {
 describe("aggregateProjectRagSearch spend", () => {
   it("passes the requested mode to each search and lets a key's per-mode limit refuse the whole request", async () => {
     await aggregateProjectRagSearch({ userId: "u1", orgId: "org-1", request: request({ mode: "keyword" }) });
-    expect(mocks.hybridSearch).toHaveBeenCalledWith(expect.any(String), "u1", expect.objectContaining({ searchMode: "keyword" }));
+    expect(mocks.hybridSearch).toHaveBeenCalledWith(expect.any(String), "u1", expect.objectContaining({ searchMode: "keyword" }), expect.objectContaining({ orgId: expect.any(String) }));
     const { SearchModeLimitError } = await import("../search/search-mode-limits.js");
     mocks.hybridSearch.mockRejectedValueOnce(new SearchModeLimitError("deep", { metric: "searches", mode: "deep", limit: 1, windowSeconds: 60 }, 30));
     await expect(aggregateProjectRagSearch({ userId: "u1", orgId: "org-1", request: request({}) })).rejects.toBeInstanceOf(SearchModeLimitError);
@@ -83,7 +83,7 @@ describe("aggregateProjectRagSearch spend", () => {
     expect(response.citations).toHaveLength(1);
     expect(mocks.hybridSearch).toHaveBeenCalledWith("who is this for?", "u1", expect.objectContaining({
       queryRewrite: false, selfQuery: false, useHyDE: false, useContextualCompression: false, queryDecompose: false, stepback: false,
-    }));
+    }), expect.objectContaining({ orgId: expect.any(String) }));
     expect(mocks.generateOpenRouterDocumentText).not.toHaveBeenCalled();
     expect(mocks.assertCanSpend).not.toHaveBeenCalled();
     expect(mocks.recordUsageEvent).not.toHaveBeenCalled();
