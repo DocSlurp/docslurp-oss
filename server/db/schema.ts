@@ -3644,6 +3644,8 @@ export const documentExtractionLevels = pgTable("document_extraction_levels", {
   sourceDecode: integer("source_decode").default(0).notNull(),
   sourceRender: integer("source_render").default(0).notNull(),
   assetBytes: bigint("asset_bytes", { mode: "number" }).default(0).notNull(),
+  gaps: jsonb(),
+  shards: integer().default(0).notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
 }, (table) => [
   foreignKey({
@@ -3660,6 +3662,40 @@ export const documentExtractionLevels = pgTable("document_extraction_levels", {
   index("document_extraction_levels_resumable_idx").on(table.orgId, table.updatedAt, table.documentId).where(sql`images_status = 'resumable'`),
   index("document_extraction_levels_org_idx").on(table.orgId, table.projectId),
   index("document_extraction_levels_run_idx").on(table.runId).where(sql`run_id IS NOT NULL`),
+]);
+
+/** Migration 0141: one row per shard manifest of a sharded document (resume runs per shard). */
+export const documentExtractionShards = pgTable("document_extraction_shards", {
+  documentId: text("document_id").notNull(),
+  orgId: text("org_id").notNull(),
+  projectId: text("project_id").notNull(),
+  runId: text("run_id"),
+  firstPage: integer("first_page").notNull(),
+  lastPage: integer("last_page").notNull(),
+  manifestKey: text("manifest_key").notNull(),
+  manifestSha256: text("manifest_sha256").notNull(),
+  sourceSha256: text("source_sha256").notNull(),
+  settingsSha256: text("settings_sha256").notNull(),
+  imagesStatus: text("images_status").notNull(),
+  assetsResumable: integer("assets_resumable").default(0).notNull(),
+  resumes: integer().default(0).notNull(),
+  lastCutPage: integer("last_cut_page"),
+  deadlineMs: integer("deadline_ms"),
+  updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
+}, (table) => [
+  primaryKey({ columns: [table.documentId, table.firstPage], name: "document_extraction_shards_pkey" }),
+  foreignKey({
+    columns: [table.documentId, table.projectId, table.orgId],
+    foreignColumns: [documents.id, documents.projectId, documents.orgId],
+    name: "document_extraction_shards_document_scope_fkey",
+  }).onDelete("cascade").onUpdate("cascade"),
+  foreignKey({ columns: [table.orgId], foreignColumns: [organizations.id], name: "document_extraction_shards_org_id_fkey" }).onDelete("cascade"),
+  foreignKey({
+    columns: [table.runId, table.projectId, table.orgId],
+    foreignColumns: [projectRuns.id, projectRuns.projectId, projectRuns.orgId],
+    name: "document_extraction_shards_run_scope_fkey",
+  }),
+  index("document_extraction_shards_resumable_idx").on(table.orgId, table.updatedAt, table.documentId, table.firstPage).where(sql`images_status = 'resumable'`),
 ]);
 
 export const documentMaps = pgTable(

@@ -651,7 +651,7 @@ export async function storeFirstPassFigures(args: {
     });
     for (const { slot, uri } of stored.slots) state.artifactLedger.recordDocument(documentId, slot, uri);
     // The ledger write takes over the reader's spill (it removes it once written).
-    const ledger = queueAssetLedger(state, documentId, ledgerWriteForStoredFigures({ set: figures, storedManifest: stored.manifest, outcome }));
+    const ledger = queueAssetLedger(state, documentId, ledgerWriteForStoredFigures({ set: figures, stored, outcome }));
     return { artifactUri: stored.indexUri, stats: { dopplerFigures: { ...stored.stats, manifestVersion: figures.version, ledger } } };
   } catch (error) {
     await disposeDopplerFigureSet(figures);

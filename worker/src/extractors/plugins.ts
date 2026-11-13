@@ -22,7 +22,7 @@ import { dopplerBinDir, dopplerConverterPath } from "../tools/doppler.js";
 import path from "node:path";
 import { dopplerImageExtractEnabled } from "./doppler-figures.js";
 import {
-  DOPPLER_BUILD, DOPPLER_IMAGE_EXTRACT_ENV, type DopplerImageLimits, localPdfModeRequested, PDF_EXTRACTION_UNCONFIGURED, resolvePdfMode, sandboxedPdfConfigured, type EmbeddedImageFacts, type EmbeddedImageMediaType, type MediaMap, type OrientationResultRecord,
+  DOPPLER_BUILD, DOPPLER_FIGURE_GAP_REASONS, DOPPLER_FIGURE_GAPS_MAX, DOPPLER_IMAGE_EXTRACT_ENV, type DopplerFigureGap, type DopplerImageLimits, localPdfModeRequested, PDF_EXTRACTION_UNCONFIGURED, resolvePdfMode, sandboxedPdfConfigured, type EmbeddedImageFacts, type EmbeddedImageMediaType, type MediaMap, type OrientationResultRecord,
 } from "@docslurp/shared";
 
 import { SandboxRunError, type SandboxResult } from "../sandbox/types.js";
@@ -107,9 +107,17 @@ export interface SandboxedPdfResult extends SandboxResult {
    * all of it), `failed` when Doppler kept the Markdown but could not extract images (its exit status 5). `reason` is raw
    * diagnostic text for telemetry only; it never reaches a user or an API response.
    */
-  figures?: ({ status: "extracted" } | { status: "failed"; reason: string }) & {
+  figures?: ({ status: "extracted" } | { status: "partial" } | { status: "failed"; reason: string }) & {
     /** Doppler's report `images_confined`: whether its renderer confined itself in the VM. Omit when unknown. */
     confined?: boolean;
+    /** Doppler's exit status and build (a version or commit), recorded on the document's extraction level. */
+    exitCode?: number;
+    build?: string;
+    /**
+     * Page ranges without images and why: at most 128, whole pages within the document, sorted, not overlapping; a reason
+     * outside DOPPLER_FIGURE_GAP_REASONS is recorded as `other`. Malformed gaps make the whole answer a failure.
+     */
+    gaps?: Array<{ first: number; last: number; reason: string }>;
   };
 }
 
@@ -241,6 +249,8 @@ export interface ExtractorPluginHost {
    * database bound (setExtractorDocumentOwners): a provider must then refuse the batch, never skip the check.
    */
   documentOwners(documentIds: readonly string[]): Promise<ReadonlyMap<string, { orgId: string | null; runId: string }>>;
+  /** The figure outcomes this core accepts: a provider reports `partial` (exit 5, folder kept) only when it is listed. */
+  figureOutcomes: readonly ("extracted" | "partial" | "failed")[];
 }
 
 type DocumentOwnersLookup = ExtractorPluginHost["documentOwners"];
@@ -267,6 +277,7 @@ export function createExtractorPluginHost(): ExtractorPluginHost {
       if (!documentOwnersLookup) throw new SandboxRunError("Document ownership lookup is not bound in this worker");
       return await documentOwnersLookup(documentIds);
     },
+    figureOutcomes: SANDBOXED_PDF_FIGURE_OUTCOMES,
   };
 }
 
@@ -339,13 +350,48 @@ export type SandboxedPdfFigureOutcome = ({ status: "extracted" } | { status: "pa
   confined?: boolean;
   exitCode?: number;
   build?: string;
+  /** Page ranges the provider did not extract images for, and why (DopplerFigureGap). */
+  gaps?: DopplerFigureGap[];
 };
 const MAX_FIGURE_REASON_CHARS = 500;
 
+/** The figure outcomes this core accepts (ExtractorPluginHost.figureOutcomes): a plugin may report `partial` only when listed. */
+export const SANDBOXED_PDF_FIGURE_OUTCOMES = ["extracted", "partial", "failed"] as const;
+
+/**
+ * Parse a provider's `gaps`: at most DOPPLER_FIGURE_GAPS_MAX ranges of whole pages within the document, first <= last,
+ * sorted and not overlapping; a reason outside the closed set becomes `other`. Anything else is null (the outcome is refused).
+ */
+export function parseDopplerFigureGaps(raw: unknown, pageCount: number): DopplerFigureGap[] | null {
+  if (!Array.isArray(raw) || raw.length > DOPPLER_FIGURE_GAPS_MAX) return null;
+  const maxPage = Number.isSafeInteger(pageCount) && pageCount > 0 ? pageCount : 1_000_000_000;
+  const gaps: DopplerFigureGap[] = [];
+  let previous = 0;
+  for (const item of raw) {
+    const gap = item as { first?: unknown; last?: unknown; reason?: unknown } | null;
+    if (!gap || typeof gap !== "object") return null;
+    const { first, last } = gap;
+    if (!Number.isSafeInteger(first) || !Number.isSafeInteger(last)) return null;
+    if ((first as number) < 1 || (first as number) > (last as number) || (last as number) > maxPage || (first as number) <= previous) return null;
+    previous = last as number;
+    const reason = typeof gap.reason === "string" && (DOPPLER_FIGURE_GAP_REASONS as readonly string[]).includes(gap.reason)
+      ? gap.reason as DopplerFigureGap["reason"] : "other";
+    gaps.push({ first: first as number, last: last as number, reason });
+  }
+  return gaps;
+}
+
 /** Parse a provider's figure outcome (untrusted). Anything that is not a recognised answer is a failure. */
-export function parseSandboxedPdfFigureOutcome(raw: unknown, maxReasonChars = MAX_FIGURE_REASON_CHARS): SandboxedPdfFigureOutcome {
-  const value = raw as { status?: unknown; reason?: unknown; confined?: unknown; exitCode?: unknown; build?: unknown } | undefined;
+export function parseSandboxedPdfFigureOutcome(raw: unknown, maxReasonChars = MAX_FIGURE_REASON_CHARS, pageCount = 0): SandboxedPdfFigureOutcome {
+  const value = raw as { status?: unknown; reason?: unknown; confined?: unknown; exitCode?: unknown; build?: unknown; gaps?: unknown } | undefined;
+  let gaps: DopplerFigureGap[] | null = null;
+  if (value?.gaps !== undefined) {
+    gaps = parseDopplerFigureGaps(value.gaps, pageCount);
+    // Malformed gaps (too many, outside the document, out of order, overlapping): nothing of the answer is trusted.
+    if (!gaps) return { status: "failed", reason: "provider-reported-invalid-gaps" };
+  }
   const extra = {
+    ...(gaps && gaps.length > 0 ? { gaps } : {}),
     ...(typeof value?.confined === "boolean" ? { confined: value.confined } : {}),
     ...(Number.isSafeInteger(value?.exitCode) && (value!.exitCode as number) >= 0 && (value!.exitCode as number) <= 255 ? { exitCode: value!.exitCode as number } : {}),
     ...(typeof value?.build === "string" && DOPPLER_BUILD.test(value.build) ? { build: value.build } : {}),
@@ -373,12 +419,12 @@ export function firstPassServedFigures(job: SandboxedPdfJob | undefined): boolea
   return !!job && firstPassServedJobs.has(job);
 }
 
-function figureOutcome(job: SandboxedPdfJob, raw: unknown): SandboxedPdfFigureOutcome | undefined {
+function figureOutcome(job: SandboxedPdfJob, raw: unknown, pages: number): SandboxedPdfFigureOutcome | undefined {
   if (!job.figures) {
     if (raw !== undefined) throw new SandboxRunError("Sandboxed PDF provider returned unrequested figures");
     return undefined;
   }
-  return parseSandboxedPdfFigureOutcome(raw);
+  return parseSandboxedPdfFigureOutcome(raw, MAX_FIGURE_REASON_CHARS, pages);
 }
 
 /**
@@ -389,7 +435,7 @@ export function acceptSandboxedPdfResult(job: SandboxedPdfJob, result: Sandboxed
   reportedOcrPages.delete(job);
   reportedLayoutFacts.delete(job);
   reportedFigures.delete(job);
-  const figures = figureOutcome(job, result.figures);
+  const figures = figureOutcome(job, result.figures, pages);
   if (figures) reportedFigures.set(job, figures);
   if (result.figures !== undefined) result = { ...result, figures: undefined };
   if (result.layoutFacts !== undefined) {

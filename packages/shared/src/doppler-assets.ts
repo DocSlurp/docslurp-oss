@@ -94,6 +94,15 @@ const ABSOLUTE_FILE_CAPS = {
   scanFileBytes: DOPPLER_MANIFEST_V2_LIMITS.maxScanFileBytes,
 } as const;
 
+/** Why a provider left a page range without images (SandboxedPdfFigureOutcome.gaps). Anything else is `other`. */
+export const DOPPLER_FIGURE_GAP_REASONS = [
+  "plugin:doc-pass-budget", "plugin:shard-over-share", "converter:timeout", "converter:budget", "converter:renderer", "other",
+] as const;
+export type DopplerFigureGapReason = (typeof DOPPLER_FIGURE_GAP_REASONS)[number];
+export const DOPPLER_FIGURE_GAPS_MAX = 128;
+/** Pages `first..last` the provider did not extract images for (a page in a gap with no ledger rows was not extracted). */
+export interface DopplerFigureGap { first: number; last: number; reason: DopplerFigureGapReason }
+
 /** Pages per Doppler image batch (`--images-batch-pages`); the per-batch limits below are derived from it. */
 export const DOPPLER_IMAGES_BATCH_PAGES = 64;
 
@@ -413,6 +422,25 @@ export function parseDopplerManifest(json: unknown): DopplerManifest | null {
 
 export const DOPPLER_IMAGES_V3_SCHEMA = "doppler-images/3";
 export const DOPPLER_MANIFEST_V3_FILE = "manifest.jsonl";
+/** A shard's folder (`shards/<first>-<last>`), page numbers zero-padded to at least 4 digits. */
+export const DOPPLER_SHARD_FOLDER = /^([0-9]{4,10})-([0-9]{4,10})$/;
+export const DOPPLER_SHARDS_MAX = 4096;
+
+/** The folder name of a shard's pages: `<first>-<last>` zero-padded to 4 digits (no extra leading zeros). */
+export function dopplerShardFolder(first: number, last: number): string {
+  if (!Number.isSafeInteger(first) || !Number.isSafeInteger(last) || first < 1 || first > last || last > 1_000_000_000) throw new Error("Invalid shard range");
+  return `${String(first).padStart(4, "0")}-${String(last).padStart(4, "0")}`;
+}
+
+/** The range a shard folder names, or null when the name is not canonical. */
+export function parseDopplerShardFolder(name: string): [number, number] | null {
+  const m = DOPPLER_SHARD_FOLDER.exec(name);
+  if (!m) return null;
+  const first = Number(m[1]);
+  const last = Number(m[2]);
+  if (first < 1 || first > last || last > 1_000_000_000) return null;
+  return dopplerShardFolder(first, last) === name ? [first, last] : null;
+}
 /** Each line is one ASCII JSON object of at most this many bytes, `\n` included. */
 export const DOPPLER_MANIFEST_V3_LINE_BYTES = 64 * 1024;
 
@@ -504,7 +532,11 @@ export class DopplerManifestV3Validator {
   private anyBatchReason = false;
   private summary: DopplerManifestV3Summary | null = null;
 
-  constructor(private readonly limits: { maxLines: number; maxPage: number }) {}
+  /**
+   * `range`: a shard's pages (`shards/<first>-<last>/manifest.jsonl`): its header's `pages` must be exactly that range and
+   * every image and batch must start inside it.
+   */
+  constructor(private readonly limits: { maxLines: number; maxPage: number; range?: readonly [number, number] }) {}
 
   /** The header line, once it has been accepted. */
   get headerLine(): DopplerManifestV3Header | null {
@@ -537,6 +569,8 @@ export class DopplerManifestV3Validator {
       if (value.schema !== DOPPLER_IMAGES_V3_SCHEMA) this.fail("schema");
       const parsed = dopplerManifestV3HeaderSchema.safeParse(value);
       if (!parsed.success) this.fail("header-invalid");
+      const range = this.limits.range;
+      if (range && (parsed.data.pages === null || parsed.data.pages[0] !== range[0] || parsed.data.pages[1] !== range[1])) this.fail("shard-range");
       this.header = parsed.data;
       this.state = "images";
       return null;
@@ -551,6 +585,8 @@ export class DopplerManifestV3Validator {
       const batch = parsed.data;
       // A batch is a page range of `batch_pages` (its end may pass the last page); batches come in page order.
       if (batch.pages[0] <= this.lastBatchEnd || batch.pages[0] > this.limits.maxPage) this.fail("lines-out-of-order");
+      const range = this.limits.range;
+      if (range && (batch.pages[0] < range[0] || batch.pages[0] > range[1])) this.fail("shard-range");
       this.lastBatchEnd = batch.pages[1];
       this.sum.batches += 1;
       if (this.sum.batches > DOPPLER_MANIFEST_V2_LIMITS.maxBatches) this.fail("too-many-lines");
@@ -574,6 +610,8 @@ export class DopplerManifestV3Validator {
     const entry = parsed.data;
     const header = this.header!;
     if (entry.page > this.limits.maxPage) this.fail("page-outside-document");
+    const range = this.limits.range;
+    if (range && (entry.page < range[0] || entry.page > range[1])) this.fail("shard-range");
     const key = idOrderKey(entry.id);
     if (this.lastId && !idBefore(this.lastId, key)) this.fail("lines-out-of-order");
     this.lastId = key;

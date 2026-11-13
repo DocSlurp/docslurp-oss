@@ -108,3 +108,41 @@ export async function writeV3Folder(dir: string, text: string, files: ReadonlyMa
   }
   await writeFile(path.join(dir, "manifest.jsonl"), text);
 }
+
+/**
+ * One shard's `manifest.jsonl`: the images and batches of `range` only, with that shard's totals, header `pages` set to
+ * the range and its own settings digest (each shard VM runs with its own `-f/-l` and `--images-pages`).
+ */
+export function v3ShardText(manifest: V2Manifest, range: [number, number], options: { settings?: string; mutateLines?: (lines: string[]) => void } = {}): string {
+  const images = manifest.images.filter((entry) => (entry.page as number) >= range[0] && (entry.page as number) <= range[1]);
+  const batches = [{ pages: [range[0], range[0] + 63], status: images.some((e) => e.resumable) ? "budget" : "ok", ...(images.some((e) => e.resumable) ? { cut_page: range[1] } : {}) }];
+  const count = (status: string) => images.filter((entry) => entry.status === status).length;
+  const extracted = images.filter((entry) => entry.status === "extracted");
+  const scans = extracted.filter((entry) => entry.fate === "page-scan");
+  const resumable = images.some((entry) => entry.resumable === true);
+  const shard: V2Manifest = {
+    ...manifest, settings_sha256: options.settings ?? createHash("sha256").update(`settings ${range[0]}-${range[1]}`).digest("hex"),
+    images, batches, resumable, complete: !resumable,
+    totals: {
+      images: images.length, linked: images.filter((entry) => entry.path !== null).length, extracted: count("extracted"),
+      not_extracted: count("not-extracted"), unlinked: count("unlinked"), bytes: extracted.reduce((sum, e) => sum + (e.bytes as number), 0),
+      repeats: images.filter((entry) => entry.reason === "repeat").length, fallbacks: images.filter((entry) => entry.fallback !== undefined).length,
+      scans: scans.length, scan_bytes: scans.reduce((sum, e) => sum + (e.bytes as number), 0), batches: 1, batches_cut: resumable ? 1 : 0,
+    },
+  };
+  return v3Text(shard, { pages: range, ...(options.mutateLines ? { mutateLines: options.mutateLines } : {}) });
+}
+
+/** A sharded version 3 folder: the page folders at the top, and `shards/<first>-<last>/manifest.jsonl` per shard. */
+export async function writeShardedFolder(dir: string, shards: ReadonlyArray<{ range: [number, number]; text: string }>, files: ReadonlyMap<string, Buffer>): Promise<void> {
+  await mkdir(dir, { recursive: true });
+  for (const [relative, bytes] of files) {
+    await mkdir(path.join(dir, path.dirname(relative)), { recursive: true });
+    await writeFile(path.join(dir, relative), bytes);
+  }
+  for (const { range, text } of shards) {
+    const folder = path.join(dir, "shards", `${String(range[0]).padStart(4, "0")}-${String(range[1]).padStart(4, "0")}`);
+    await mkdir(folder, { recursive: true });
+    await writeFile(path.join(folder, "manifest.jsonl"), text);
+  }
+}

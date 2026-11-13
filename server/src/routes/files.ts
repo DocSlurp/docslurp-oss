@@ -76,7 +76,7 @@ const FIGURE_SVG_CSP = "default-src 'none'; style-src 'unsafe-inline'; sandbox; 
  * index as JSON, the page facts and the Markdown as text. All of them still pass the artifact check (recorded slot,
  * project, organization, PII withholding) like any other artifact.
  */
-const DOPPLER_FOLDER_FILE_KEY = /\/doppler\/[A-Za-z0-9-]{1,64}\/(images\/manifest\.jsonl?|images\/page-facts\.jsonl|document\.md|index\.json)$/;
+const DOPPLER_FOLDER_FILE_KEY = /\/doppler\/[A-Za-z0-9-]{1,64}\/(images\/manifest\.jsonl?|images\/shards\/[0-9]{4,10}-[0-9]{4,10}\/manifest\.jsonl|images\/page-facts\.jsonl|document\.md|index\.json)$/;
 const DOPPLER_FOLDER_FILE_TYPES: Readonly<Record<string, string>> = {
   "images/manifest.json": "application/json; charset=utf-8",
   "images/manifest.jsonl": "text/plain; charset=utf-8",
@@ -95,7 +95,9 @@ export function dopplerFigureFormat(uri: string): DopplerFigureFormat | null {
 /** The fixed content type of a Doppler folder file (manifest, page facts, Markdown, index), or null. */
 export function dopplerFolderFileType(uri: string): string | null {
   const match = DOPPLER_FOLDER_FILE_KEY.exec(parseArtifactUri(uri)?.key ?? "");
-  return match ? DOPPLER_FOLDER_FILE_TYPES[match[1]!] ?? null : null;
+  if (!match) return null;
+  // A shard's manifest (`images/shards/<first>-<last>/manifest.jsonl`) is JSON Lines like the single one.
+  return DOPPLER_FOLDER_FILE_TYPES[match[1]!.startsWith("images/shards/") ? "images/manifest.jsonl" : match[1]!] ?? null;
 }
 
 /** Whether a URI names a document's Doppler source pointer, which is never served. */

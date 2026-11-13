@@ -135,6 +135,11 @@ CREATE TABLE IF NOT EXISTS document_extraction_levels (
   source_decode integer NOT NULL DEFAULT 0 CHECK (source_decode >= 0),
   source_render integer NOT NULL DEFAULT 0 CHECK (source_render >= 0),
   asset_bytes bigint NOT NULL DEFAULT 0 CHECK (asset_bytes >= 0),
+  -- Page ranges the provider did not extract images for, and why: [{first, last, reason}], at most 128, reasons from a
+  -- closed set (packages/shared DOPPLER_FIGURE_GAP_REASONS). A page in a gap with no asset rows was not extracted.
+  gaps jsonb CHECK (gaps IS NULL OR (jsonb_typeof(gaps) = 'array' AND jsonb_array_length(gaps) <= 128)),
+  -- How many shard manifests the document has (document_extraction_shards); 0 for a single manifest.
+  shards integer NOT NULL DEFAULT 0 CHECK (shards BETWEEN 0 AND 4096),
   updated_at timestamptz NOT NULL DEFAULT now(),
   CONSTRAINT document_extraction_levels_document_scope_fkey FOREIGN KEY (document_id, project_id, org_id)
     REFERENCES documents (id, project_id, org_id) ON DELETE CASCADE ON UPDATE CASCADE,
@@ -151,6 +156,47 @@ CREATE TABLE IF NOT EXISTS document_extraction_levels (
         = '/doppler/' || document_id || '/images/manifest.json')
       AND position('..' in manifest_key) = 0 AND position('//' in manifest_key) = 0 AND left(manifest_key, 1) <> '/')))
 );
+--> statement-breakpoint
+-- One row per shard of a sharded document (each shard VM ran Doppler on its own page range with its own manifest,
+-- stored at `<artifact root>/doppler/<document>/images/shards/<first>-<last>/manifest.jsonl`). A resume runs per shard, with
+-- that shard's manifest and range; the document's images status is the aggregate (complete only if every shard is).
+CREATE TABLE IF NOT EXISTS document_extraction_shards (
+  document_id text NOT NULL,
+  org_id text NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+  project_id text NOT NULL,
+  run_id text,
+  first_page integer NOT NULL CHECK (first_page >= 1),
+  last_page integer NOT NULL,
+  manifest_key text NOT NULL CHECK (char_length(manifest_key) <= 512),
+  manifest_sha256 text NOT NULL CHECK (manifest_sha256 ~ '^[0-9a-f]{64}$'),
+  source_sha256 text NOT NULL CHECK (source_sha256 ~ '^[0-9a-f]{64}$'),
+  settings_sha256 text NOT NULL CHECK (settings_sha256 ~ '^[0-9a-f]{64}$'),
+  images_status text NOT NULL CHECK (images_status IN ('complete', 'partial', 'resumable')),
+  assets_resumable integer NOT NULL DEFAULT 0 CHECK (assets_resumable >= 0),
+  -- Resumes the host wrote for this shard (previous + 1); the queue skips a shard at 3.
+  resumes integer NOT NULL DEFAULT 0 CHECK (resumes BETWEEN 0 AND 1000),
+  last_cut_page integer CHECK (last_cut_page >= 1),
+  deadline_ms integer CHECK (deadline_ms >= 0),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (document_id, first_page),
+  CONSTRAINT document_extraction_shards_document_scope_fkey FOREIGN KEY (document_id, project_id, org_id)
+    REFERENCES documents (id, project_id, org_id) ON DELETE CASCADE ON UPDATE CASCADE,
+  CONSTRAINT document_extraction_shards_run_scope_fkey FOREIGN KEY (run_id, project_id, org_id)
+    REFERENCES project_runs (id, project_id, org_id) ON DELETE SET NULL (run_id),
+  CONSTRAINT document_extraction_shards_range_check CHECK (first_page <= last_page),
+  CONSTRAINT document_extraction_shards_status_resumable_check CHECK ((images_status = 'resumable') = (assets_resumable > 0)),
+  CONSTRAINT document_extraction_shards_key_scope_check CHECK (
+    right(manifest_key, char_length('/doppler/' || document_id || '/images/shards/'
+        || lpad(first_page::text, greatest(4, char_length(first_page::text)), '0') || '-'
+        || lpad(last_page::text, greatest(4, char_length(last_page::text)), '0') || '/manifest.jsonl'))
+      = '/doppler/' || document_id || '/images/shards/'
+        || lpad(first_page::text, greatest(4, char_length(first_page::text)), '0') || '-'
+        || lpad(last_page::text, greatest(4, char_length(last_page::text)), '0') || '/manifest.jsonl'
+    AND position('..' in manifest_key) = 0 AND position('//' in manifest_key) = 0 AND left(manifest_key, 1) <> '/')
+);
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS document_extraction_shards_resumable_idx
+  ON document_extraction_shards (org_id, updated_at, document_id, first_page) WHERE images_status = 'resumable';
 --> statement-breakpoint
 -- The resume worker's queue: documents with images a resume would retry, per organization.
 CREATE INDEX IF NOT EXISTS document_extraction_levels_resumable_idx
@@ -174,7 +220,7 @@ ALTER TABLE document_page_facts ADD COLUMN IF NOT EXISTS scan_class text
 DO $$
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'docslurp_worker') THEN
-    REVOKE ALL ON public.document_assets, public.document_extraction_levels FROM docslurp_worker;
-    GRANT SELECT, INSERT, UPDATE, DELETE ON public.document_assets, public.document_extraction_levels TO docslurp_worker;
+    REVOKE ALL ON public.document_assets, public.document_extraction_levels, public.document_extraction_shards FROM docslurp_worker;
+    GRANT SELECT, INSERT, UPDATE, DELETE ON public.document_assets, public.document_extraction_levels, public.document_extraction_shards TO docslurp_worker;
   END IF;
 END $$;

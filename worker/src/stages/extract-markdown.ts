@@ -3026,7 +3026,7 @@ export class ExtractMarkdownStage implements Stage {
     document: import("../models.js").Document; runId: string; candidate: ExtractedCandidate; markdown: string; signal?: AbortSignal;
   }): Promise<{
     figures: { slots: Array<{ slot: string; uri: string }>; stats: Record<string, unknown> };
-    stored?: { set: import("../extractors/doppler-figures.js").DopplerFigureSet; storedManifest: { key: string; sha256: string } };
+    stored?: { set: import("../extractors/doppler-figures.js").DopplerFigureSet; stored: Pick<import("../extractors/doppler-figures.js").StoredDopplerFigures, "manifest" | "manifests"> };
   }> {
     const figures = args.candidate.figures!;
     const started = Date.now();
@@ -3070,7 +3070,7 @@ export class ExtractMarkdownStage implements Stage {
     }
     const stats = { ...stored.stats, imagesConfined, manifestVersion: validated.version, validateMs: Date.now() - started - stored.stats.storeMs };
     console.log(`[doppler-figures] document=${args.document.id} status=stored version=${validated.version} entries=${stats.entries} files=${stats.files} bytes=${stats.bytes} markers=${stats.markers} resolved=${stats.markersResolved} confined=${imagesConfined} ms=${Date.now() - started}`);
-    return { figures: { slots: stored.slots, stats }, stored: { set: validated, storedManifest: stored.manifest } };
+    return { figures: { slots: stored.slots, stats }, stored: { set: validated, stored } };
   }
 
   /**

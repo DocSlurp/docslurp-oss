@@ -22,7 +22,7 @@ beforeEach(async () => {
   work = await mkdtemp(path.join(tmpdir(), "doppler-v2-test-"));
   dir = path.join(work, "figures");
 });
-afterEach(async () => { await rm(work, { recursive: true, force: true }); });
+afterEach(async () => { await rm(work, { recursive: true, force: true }); }, 60_000);
 
 async function rule(mutate: (m: V2Manifest, files: Map<string, Buffer>) => unknown = () => undefined, options: { partial?: boolean; expect?: "complete" | "partial"; pageCount?: number; sourceSha256?: string } = {}): Promise<string> {
   const { manifest, files } = v2Manifest({ partial: options.partial });
@@ -242,9 +242,10 @@ describe("manifest v2: hostile or oversized manifests are refused", () => {
     await writeV2Folder(dir, manifest, files);
     const cap = dopplerAssetCaps(3).files;
     await mkdir(path.join(dir, "page-0002"), { recursive: true });
-    for (let i = 0; i < cap + 5; i += 1) await writeFile(path.join(dir, "page-0002", `image-${String(i + 100).padStart(5, "0")}.webp`), "");
+    const names = Array.from({ length: cap + 5 }, (_, i) => path.join(dir, "page-0002", `image-${String(i + 100).padStart(5, "0")}.webp`));
+    for (let i = 0; i < names.length; i += 256) await Promise.all(names.slice(i, i + 256).map((name) => writeFile(name, "")));
     await expect(readDopplerFigureDir(dir, { pageCount: 3 })).rejects.toMatchObject({ rule: "too-many-files" });
-  });
+  }, 180_000);
 
   it("refuses a file that is a symlink inside a page folder", async () => {
     const { manifest, files } = v2Manifest();

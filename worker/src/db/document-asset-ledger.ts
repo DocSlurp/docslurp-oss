@@ -16,7 +16,8 @@ import type { JSONValue, Sql } from "postgres";
 import {
   DOCUMENT_IMAGES_STATUSES, DOPPLER_BUILD, DOPPLER_MANIFEST_V2_LIMITS, DOPPLER_MANIFEST_V3_FILE, DOPPLER_STORE_LAYOUT,
   addDocumentAssetCount, dopplerAssetStorageKey, emptyDocumentAssetCounts, isDocumentAssetRow, dopplerDocumentPrefix,
-  parseDopplerFigureId, type DocumentAsset, type DocumentImagesStatus, type DopplerManifestRunFacts,
+  DOPPLER_FIGURE_GAP_REASONS, DOPPLER_FIGURE_GAPS_MAX, DOPPLER_SHARDS_MAX, dopplerShardFolder,
+  parseDopplerFigureId, type DocumentAsset, type DocumentImagesStatus, type DopplerFigureGap, type DopplerManifestRunFacts,
 } from "@docslurp/shared";
 
 import { readLedgerSpill, type DopplerFigureSet } from "../extractors/doppler-figures.js";
@@ -38,8 +39,24 @@ export interface DocumentExtractionLevelInput {
   manifestVersion: 1 | 2 | 3 | null;
   dopplerBuild: string | null;
   run: DopplerManifestRunFacts | null;
-  /** The stored manifest (`<root>/doppler/<document>/images/manifest.json`) and its SHA-256. */
+  /** The stored manifest (`<root>/doppler/<document>/images/manifest.jsonl`) and its SHA-256; null for shards. */
   manifest: { key: string; sha256: string } | null;
+  /** Page ranges the provider reported without images (SandboxedPdfFigureOutcome.gaps), at most 128. */
+  gaps?: readonly DopplerFigureGap[] | null;
+}
+
+/** One shard manifest of a sharded document (document_extraction_shards). */
+export interface LedgerShard {
+  first: number;
+  last: number;
+  manifestKey: string;
+  manifestSha256: string;
+  sourceSha256: string;
+  settingsSha256: string;
+  imagesStatus: "complete" | "partial" | "resumable";
+  assetsResumable: number;
+  lastCutPage: number | null;
+  deadlineMs: number | null;
 }
 
 export type LedgerAsset = DocumentAsset & { storageKey: string | null };
@@ -54,8 +71,13 @@ export interface DocumentAssetLedgerWrite {
   scope: DocumentAssetLedgerScope;
   level: DocumentExtractionLevelInput;
   assets: LedgerAssets;
-  /** A resume's write (`--images-resume`): the host counts it, previous + 1, and refuses one past the cap. */
-  resume?: boolean;
+  /**
+   * A resume's write (`--images-resume`): the host counts it, previous + 1, and refuses one past the cap. For a sharded
+   * document a resume is one shard's (`{ first, last }`): only that shard's rows and record change.
+   */
+  resume?: boolean | { first: number; last: number };
+  /** The shard manifests of a sharded document (all of them; a shard resume names exactly its own). */
+  shards?: readonly LedgerShard[];
 }
 
 /** Resumes a document may have before the resume queue leaves it alone (counted by the host, not the manifest). */
@@ -99,6 +121,28 @@ function checkedRow(asset: LedgerAsset | DocumentAsset, spilled: boolean): Ledge
   return { ...row, storageKey };
 }
 
+/** Shard records re-validated: at most DOPPLER_SHARDS_MAX, sorted, not overlapping, each key exactly its folder's. */
+function checkedShards(shards: readonly LedgerShard[], imagesPrefix: string): LedgerShard[] {
+  if (!Array.isArray(shards) || shards.length > DOPPLER_SHARDS_MAX) throw new DocumentAssetLedgerError("invalid-level");
+  let previous = 0;
+  for (const shard of shards) {
+    const range = (n: unknown) => Number.isSafeInteger(n) && (n as number) >= 1 && (n as number) <= 1_000_000_000;
+    if (!shard || !range(shard.first) || !range(shard.last) || shard.first > shard.last || shard.first <= previous ||
+        !SHA256.test(shard.manifestSha256) || !SHA256.test(shard.sourceSha256) || !SHA256.test(shard.settingsSha256) ||
+        !["complete", "partial", "resumable"].includes(shard.imagesStatus) || !Number.isSafeInteger(shard.assetsResumable) ||
+        shard.assetsResumable < 0 || (shard.imagesStatus === "resumable") !== (shard.assetsResumable > 0) ||
+        (shard.lastCutPage !== null && !range(shard.lastCutPage)) ||
+        (shard.deadlineMs !== null && !(Number.isSafeInteger(shard.deadlineMs) && shard.deadlineMs >= 0 && shard.deadlineMs <= 2_000_000_000))) {
+      throw new DocumentAssetLedgerError("invalid-level");
+    }
+    if (shard.manifestKey !== `${imagesPrefix}shards/${dopplerShardFolder(shard.first, shard.last)}/${DOPPLER_MANIFEST_V3_FILE}`) {
+      throw new DocumentAssetLedgerError("key-mismatch");
+    }
+    previous = shard.last;
+  }
+  return [...shards];
+}
+
 /** id order: page, pictures before figures, index (the order a manifest lists images in). */
 function idKey(id: string): [number, number, number] {
   const parsed = parseDopplerFigureId(id)!;
@@ -132,6 +176,12 @@ function checkedLevel(level: DocumentExtractionLevelInput, resumable: number): v
   const run = level?.run;
   const hex = (v: unknown) => v === null || (typeof v === "string" && SHA256.test(v));
   const int = (v: unknown, min: number, max: number) => v === null || (Number.isSafeInteger(v) && (v as number) >= min && (v as number) <= max);
+  const gaps = level?.gaps;
+  if (gaps != null && !(Array.isArray(gaps) && gaps.length <= DOPPLER_FIGURE_GAPS_MAX && gaps.every((gap, i) =>
+    gap && Number.isSafeInteger(gap.first) && Number.isSafeInteger(gap.last) && gap.first >= 1 && gap.first <= gap.last &&
+    gap.last <= 1_000_000_000 && (i === 0 || gap.first > gaps[i - 1]!.last) && (DOPPLER_FIGURE_GAP_REASONS as readonly string[]).includes(gap.reason)))) {
+    throw new DocumentAssetLedgerError("invalid-level");
+  }
   if (!ok || (run !== null && !(hex(run.sourceSha256) && hex(run.settingsSha256) && int(run.manifestResumes, 0, 1_000_000) &&
       int(run.lastCutPage, 1, 1_000_000_000) && int(run.deadlineMs, 0, 2_000_000_000)))) {
     throw new DocumentAssetLedgerError("invalid-level");
@@ -199,9 +249,24 @@ export async function writeDocumentAssetLedger(sql: Sql<Record<string, unknown>>
     }
     const manifestKeys = [DOPPLER_STORE_LAYOUT.manifest, DOPPLER_MANIFEST_V3_FILE].map((name) => `${prefix}${DOPPLER_STORE_LAYOUT.imagesFolder}${name}`);
     if (write.level.manifest && !manifestKeys.includes(write.level.manifest.key)) throw new DocumentAssetLedgerError("key-mismatch");
+    const shardResume = typeof write.resume === "object" && write.resume !== null ? write.resume : null;
+    const shards = checkedShards(write.shards ?? [], `${prefix}${DOPPLER_STORE_LAYOUT.imagesFolder}`);
+    if (shards.length > 0 && write.level.manifest) throw new DocumentAssetLedgerError("invalid-level");
     const priorResumes = previous?.resumes ?? 0;
-    if (write.resume && priorResumes >= DOCUMENT_ASSET_RESUME_CAP) throw new DocumentAssetLedgerError("resume-cap");
-    const resumes = write.resume ? priorResumes + 1 : 0;
+    if (write.resume === true && priorResumes >= DOCUMENT_ASSET_RESUME_CAP) throw new DocumentAssetLedgerError("resume-cap");
+    let resumes = write.resume === true ? priorResumes + 1 : 0;
+    let shardResumes = 0;
+    if (shardResume) {
+      // A shard's resume: exactly that shard, which this document already has; counted per shard and capped.
+      if (shards.length !== 1 || shards[0]!.first !== shardResume.first || shards[0]!.last !== shardResume.last) throw new DocumentAssetLedgerError("invalid-level");
+      const [existing] = await tx<{ resumes: number }[]>`
+        select resumes from document_extraction_shards
+        where document_id = ${documentId} and org_id = ${orgId} and project_id = ${projectId}
+          and first_page = ${shardResume.first} and last_page = ${shardResume.last}`;
+      if (!existing) throw new DocumentAssetLedgerError("invalid-level");
+      if (existing.resumes >= DOCUMENT_ASSET_RESUME_CAP) throw new DocumentAssetLedgerError("resume-cap");
+      shardResumes = existing.resumes + 1;
+    }
 
     // Defense in depth behind the composite foreign key: no row of this document may carry another scope.
     const [foreign] = await tx<{ n: number }[]>`
@@ -215,7 +280,7 @@ export async function writeDocumentAssetLedger(sql: Sql<Record<string, unknown>>
     let removed = 0;
     let batch: LedgerAsset[] = [];
     let keepIds: string[] = [];
-    let pruneFrom = 1;
+    let pruneFrom = shardResume?.first ?? 1;
     let pruneTo = 0;
     let currentPage = 0;
     let last: [number, number, number] | null = null;
@@ -274,6 +339,8 @@ export async function writeDocumentAssetLedger(sql: Sql<Record<string, unknown>>
       if (last && !idBefore(last, key)) throw new DocumentAssetLedgerError("invalid-assets");
       last = key;
       if (counts.total >= DOPPLER_MANIFEST_V2_LIMITS.maxEntries) throw new DocumentAssetLedgerError("invalid-assets");
+      // A shard's resume writes only its own pages.
+      if (shardResume && (asset.pageNumber < shardResume.first || asset.pageNumber > shardResume.last)) throw new DocumentAssetLedgerError("invalid-assets");
       let storageKey: string;
       try {
         storageKey = asset.status === "extracted" ? dopplerAssetStorageKey(root, documentId, asset.assetId, asset.format!) : "";
@@ -301,21 +368,71 @@ export async function writeDocumentAssetLedger(sql: Sql<Record<string, unknown>>
     }
     await upsert();
     keepIds.push(...pageIds);
-    await prune(null);
+    await prune(shardResume ? shardResume.last : null);
 
-    if ((write.level.imagesStatus === "resumable") !== (counts.resumable > 0)) throw new DocumentAssetLedgerError("invalid-level");
-    const level = write.level;
-    const facts = level.run;
+    // Shard records: a full write replaces them (none for an unsharded document); a shard resume updates its own.
+    if (!shardResume) {
+      await tx`
+        delete from document_extraction_shards
+        where document_id = ${documentId} and org_id = ${orgId} and project_id = ${projectId}
+          and not (first_page = any(${tx.array(shards.map((shard) => shard.first))}::int[]))`;
+    }
+    for (const shard of shards) {
+      await tx`
+        insert into document_extraction_shards (document_id, org_id, project_id, run_id, first_page, last_page, manifest_key, manifest_sha256,
+          source_sha256, settings_sha256, images_status, assets_resumable, resumes, last_cut_page, deadline_ms)
+        values (${documentId}, ${orgId}, ${projectId}, ${runId}, ${shard.first}, ${shard.last}, ${shard.manifestKey}, ${shard.manifestSha256},
+          ${shard.sourceSha256}, ${shard.settingsSha256}, ${shard.imagesStatus}, ${shard.assetsResumable}, ${shardResume ? shardResumes : 0},
+          ${shard.lastCutPage}, ${shard.deadlineMs})
+        on conflict (document_id, first_page) do update
+        set run_id = excluded.run_id, last_page = excluded.last_page, manifest_key = excluded.manifest_key,
+            manifest_sha256 = excluded.manifest_sha256, source_sha256 = excluded.source_sha256, settings_sha256 = excluded.settings_sha256,
+            images_status = excluded.images_status, assets_resumable = excluded.assets_resumable, resumes = excluded.resumes,
+            last_cut_page = excluded.last_cut_page, deadline_ms = excluded.deadline_ms, updated_at = now()
+        where document_extraction_shards.org_id = excluded.org_id and document_extraction_shards.project_id = excluded.project_id`;
+    }
+
+    // The level's counts are the document's rows as they now stand (a shard resume changed only its own).
+    const [totals] = await tx<Array<{ total: number; extracted: number; not_extracted: number; unlinked: number; resumable: number; copy: number; decode: number; render: number; bytes: string }>>`
+      select count(*)::int as total, count(*) filter (where status = 'extracted')::int as extracted,
+        count(*) filter (where status = 'not-extracted')::int as not_extracted, count(*) filter (where status = 'unlinked')::int as unlinked,
+        count(*) filter (where resumable)::int as resumable, count(*) filter (where source = 'copy')::int as copy,
+        count(*) filter (where source = 'decode')::int as decode, count(*) filter (where source = 'render')::int as render,
+        coalesce(sum(bytes), 0)::text as bytes
+      from document_assets where document_id = ${documentId} and org_id = ${orgId} and project_id = ${projectId}`;
+    const [shardState] = await tx<Array<{ n: number; incomplete: number; resumes: number; cut: number | null; source: string | null }>>`
+      select count(*)::int as n, count(*) filter (where images_status <> 'complete')::int as incomplete,
+        coalesce(max(resumes), 0)::int as resumes, max(last_cut_page) as cut, min(source_sha256) as source
+      from document_extraction_shards where document_id = ${documentId} and org_id = ${orgId} and project_id = ${projectId}`;
+    const sharded = (shardState?.n ?? 0) > 0;
+    let imagesStatus = write.level.imagesStatus;
+    if (sharded) {
+      // Complete only if every shard is; resumable while any image a resume would retry remains.
+      imagesStatus = shardState!.incomplete === 0 ? "complete" : totals!.resumable > 0 ? "resumable" : "partial";
+      resumes = shardState!.resumes;
+    } else if ((imagesStatus === "resumable") !== (totals!.resumable > 0)) {
+      throw new DocumentAssetLedgerError("invalid-level");
+    }
+    const counts2 = {
+      total: totals!.total, extracted: totals!.extracted, notExtracted: totals!.not_extracted, unlinked: totals!.unlinked,
+      resumable: totals!.resumable, sourceCopy: totals!.copy, sourceDecode: totals!.decode, sourceRender: totals!.render, bytes: totals!.bytes,
+    };
+    const level = { ...write.level, imagesStatus };
+    const facts = sharded
+      ? { ...(level.run ?? { manifestResumes: 0, complete: false, resumable: false, deadlineMs: null }), sourceSha256: shardState!.source, settingsSha256: null, lastCutPage: shardState!.cut }
+      : level.run;
     const leveled = await tx`
       insert into document_extraction_levels (document_id, org_id, project_id, run_id, markdown_complete, images_status,
         images_exit_code, manifest_version, doppler_build, manifest_key, manifest_sha256, source_sha256, settings_sha256, resumes,
         last_cut_page, deadline_ms, assets_total, assets_extracted, assets_not_extracted, assets_unlinked, assets_resumable,
-        source_copy, source_decode, source_render, asset_bytes)
+        source_copy, source_decode, source_render, asset_bytes, gaps, shards)
       values (${documentId}, ${orgId}, ${projectId}, ${runId}, ${level.markdownComplete}, ${level.imagesStatus},
         ${level.imagesExitCode}, ${level.manifestVersion}, ${level.dopplerBuild}, ${level.manifest?.key ?? null},
         ${level.manifest?.sha256 ?? null}, ${facts?.sourceSha256 ?? null}, ${facts?.settingsSha256 ?? null}, ${resumes},
-        ${facts?.lastCutPage ?? null}, ${facts?.deadlineMs ?? null}, ${counts.total}, ${counts.extracted}, ${counts.notExtracted},
-        ${counts.unlinked}, ${counts.resumable}, ${counts.sourceCopy}, ${counts.sourceDecode}, ${counts.sourceRender}, ${counts.bytes})
+        ${facts?.lastCutPage ?? null}, ${facts?.deadlineMs ?? null}, ${counts2.total}, ${counts2.extracted}, ${counts2.notExtracted},
+        ${counts2.unlinked}, ${counts2.resumable}, ${counts2.sourceCopy}, ${counts2.sourceDecode}, ${counts2.sourceRender}, ${counts2.bytes}::bigint,
+        ${level.gaps && level.gaps.length > 0 ? tx.json(level.gaps.map((gap) => ({ first: gap.first, last: gap.last, reason: gap.reason })) as unknown as JSONValue) : null},
+        ${shardState?.n ?? 0})
       on conflict (document_id) do update
       set run_id = excluded.run_id, markdown_complete = excluded.markdown_complete, images_status = excluded.images_status,
           images_exit_code = excluded.images_exit_code, manifest_version = excluded.manifest_version,
@@ -325,7 +442,7 @@ export async function writeDocumentAssetLedger(sql: Sql<Record<string, unknown>>
           assets_extracted = excluded.assets_extracted, assets_not_extracted = excluded.assets_not_extracted,
           assets_unlinked = excluded.assets_unlinked, assets_resumable = excluded.assets_resumable,
           source_copy = excluded.source_copy, source_decode = excluded.source_decode, source_render = excluded.source_render,
-          asset_bytes = excluded.asset_bytes, updated_at = now()
+          asset_bytes = excluded.asset_bytes, gaps = excluded.gaps, shards = excluded.shards, updated_at = now()
       where document_extraction_levels.org_id = excluded.org_id and document_extraction_levels.project_id = excluded.project_id
       returning 1`;
     if (leveled.length !== 1) throw new DocumentAssetLedgerError("write-mismatch");
@@ -340,6 +457,7 @@ export interface FigureStepOutcome {
   status: "extracted" | "partial" | "failed";
   exitCode?: number;
   build?: string;
+  gaps?: readonly DopplerFigureGap[];
 }
 
 /** The images status a read folder means: complete, resumable (a resume would retry some) or partial. */
@@ -352,22 +470,35 @@ export function imagesStatusOf(set: Pick<DopplerFigureSet, "complete" | "ledger"
 export interface PendingAssetLedgerWrite {
   level: Omit<DocumentExtractionLevelInput, "markdownComplete">;
   assets: LedgerAssets;
-  resume?: boolean;
+  shards?: readonly LedgerShard[];
+  resume?: boolean | { first: number; last: number };
 }
 
 /** The ledger write for a stored figure set: every image, streamed back from the reader's spill. */
 export function ledgerWriteForStoredFigures(args: {
-  set: Pick<DopplerFigureSet, "version" | "complete" | "ledger" | "run">;
-  /** The stored manifest's key and SHA-256. */
-  storedManifest: { key: string; sha256: string };
+  set: Pick<DopplerFigureSet, "version" | "complete" | "ledger" | "run" | "manifests">;
+  /** What the store wrote: the single manifest's key and SHA-256 (null for shards), and every manifest's key. */
+  stored: { manifest: { key: string; sha256: string } | null; manifests: ReadonlyArray<{ key: string; sha256: string; range: [number, number] | null }> };
   outcome: FigureStepOutcome;
 }): PendingAssetLedgerWrite {
+  const shards: LedgerShard[] = [];
+  for (const manifest of args.set.manifests) {
+    if (!manifest.range || !manifest.run) continue;
+    const stored = args.stored.manifests.find((m) => m.range && m.range[0] === manifest.range![0] && m.range[1] === manifest.range![1])!;
+    shards.push({
+      first: manifest.range[0], last: manifest.range[1], manifestKey: stored.key, manifestSha256: manifest.sha256,
+      sourceSha256: manifest.run.sourceSha256!, settingsSha256: manifest.run.settingsSha256!,
+      imagesStatus: manifest.complete ? "complete" : manifest.resumable > 0 ? "resumable" : "partial",
+      assetsResumable: manifest.resumable, lastCutPage: manifest.run.lastCutPage, deadlineMs: manifest.run.deadlineMs,
+    });
+  }
   return {
     level: {
       imagesStatus: imagesStatusOf(args.set), imagesExitCode: args.outcome.exitCode ?? null, manifestVersion: args.set.version,
-      dopplerBuild: args.outcome.build ?? null, run: args.set.run, manifest: args.storedManifest,
+      dopplerBuild: args.outcome.build ?? null, run: args.set.run, manifest: args.stored.manifest, gaps: args.outcome.gaps ?? null,
     },
     assets: { spill: args.set.ledger.spill, rows: args.set.ledger.rows },
+    ...(shards.length > 0 ? { shards } : {}),
   };
 }
 
@@ -383,7 +514,7 @@ export function ledgerWriteForFailedFigures(args: { outcome: Omit<FigureStepOutc
   return {
     level: {
       imagesStatus: "failed", imagesExitCode: args.outcome.exitCode ?? null, manifestVersion: null, dopplerBuild: args.outcome.build ?? null,
-      run: null, manifest: null,
+      run: null, manifest: null, gaps: args.outcome.gaps ?? null,
     },
     assets: [],
   };
@@ -403,6 +534,8 @@ export interface ResumableDocument {
   documentId: string;
   projectId: string;
   runId: string | null;
+  /** For a sharded document, the shard to resume (its own manifest and page range); null for a single manifest. */
+  shard: { first: number; last: number } | null;
   sourceSha256: string | null;
   settingsSha256: string | null;
   /** The stored manifest's SHA-256: what downloadDopplerImagesDir checks before it rebuilds the DIR. */
@@ -414,38 +547,50 @@ export interface ResumableDocument {
 }
 
 /**
- * Documents of one organization (optionally one project) whose images a Doppler resume would retry, oldest first, with a
- * keyset cursor. Only live documents (not superseded, archived or purged), with a stored manifest, and below the host's
- * resume cap (a manifest that never finishes is dropped after DOCUMENT_ASSET_RESUME_CAP resumes, whatever it reports).
- * For a later resume worker; nothing here resumes anything.
+ * Resumable work of one organization (optionally one project), oldest first, with a keyset cursor: a document with a
+ * single manifest whose `images_status` is `resumable`, or one shard of a sharded document whose shard is resumable (a
+ * resume runs per shard, with that shard's manifest and range). Only live documents, with a stored manifest, and below
+ * the host's resume cap (a manifest that never finishes is dropped after DOCUMENT_ASSET_RESUME_CAP resumes, whatever it
+ * reports). For a later resume worker; nothing here resumes anything.
  */
 export async function listResumableDocuments(
   sql: Sql<Record<string, unknown>>,
-  args: { orgId: string; projectId?: string; limit?: number; after?: { updatedAt: string; documentId: string } },
+  args: { orgId: string; projectId?: string; limit?: number; after?: { updatedAt: string; documentId: string; firstPage?: number } },
 ): Promise<ResumableDocument[]> {
   if (typeof args.orgId !== "string" || !ID.test(args.orgId) || (args.projectId !== undefined && (typeof args.projectId !== "string" || !ID.test(args.projectId)))) {
     throw new DocumentAssetLedgerError("invalid-scope");
   }
   const limit = Math.min(Math.max(Math.floor(args.limit ?? 100) || 100, 1), 1000);
+  const project = (alias: string) => args.projectId === undefined ? sql`` : sql`and ${sql(alias)}.project_id = ${args.projectId}`;
   const rows = await sql<Array<{
-    document_id: string; project_id: string; run_id: string | null; source_sha256: string | null; settings_sha256: string | null;
-    manifest_sha256: string | null; resumes: number; assets_resumable: number; last_cut_page: number | null; updated_at: string;
+    document_id: string; project_id: string; run_id: string | null; first_page: number; last_page: number | null; source_sha256: string | null;
+    settings_sha256: string | null; manifest_sha256: string | null; resumes: number; assets_resumable: number; last_cut_page: number | null;
+    updated_at: string; at: string;
   }>>`
-    select l.document_id, l.project_id, l.run_id, l.source_sha256, l.settings_sha256, l.manifest_sha256, l.resumes, l.assets_resumable,
-      l.last_cut_page, to_char(l.updated_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as updated_at
-    from document_extraction_levels l
-    join documents d on d.id = l.document_id and d.org_id = l.org_id and d.project_id = l.project_id
-    where l.org_id = ${args.orgId} and l.images_status = 'resumable' and l.resumes < ${DOCUMENT_ASSET_RESUME_CAP}
-      and l.manifest_key is not null
-      ${args.projectId === undefined ? sql`` : sql`and l.project_id = ${args.projectId}`}
-      ${args.after ? sql`and (l.updated_at, l.document_id) > (${args.after.updatedAt}::timestamptz, ${args.after.documentId})` : sql``}
-      and d.superseded_at is null and d.archived_at is null and d.purged_at is null
-    order by l.updated_at, l.document_id
+    select work.*, to_char(work.at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as updated_at from (
+      select l.document_id, l.project_id, l.run_id, 0 as first_page, null::int as last_page, l.source_sha256, l.settings_sha256,
+        l.manifest_sha256, l.resumes, l.assets_resumable, l.last_cut_page, l.updated_at as at
+      from document_extraction_levels l
+      join documents d on d.id = l.document_id and d.org_id = l.org_id and d.project_id = l.project_id
+      where l.org_id = ${args.orgId} and l.images_status = 'resumable' and l.shards = 0 and l.resumes < ${DOCUMENT_ASSET_RESUME_CAP}
+        and l.manifest_key is not null ${project("l")}
+        and d.superseded_at is null and d.archived_at is null and d.purged_at is null
+      union all
+      select s.document_id, s.project_id, s.run_id, s.first_page, s.last_page, s.source_sha256, s.settings_sha256, s.manifest_sha256,
+        s.resumes, s.assets_resumable, s.last_cut_page, s.updated_at as at
+      from document_extraction_shards s
+      join documents d on d.id = s.document_id and d.org_id = s.org_id and d.project_id = s.project_id
+      where s.org_id = ${args.orgId} and s.images_status = 'resumable' and s.resumes < ${DOCUMENT_ASSET_RESUME_CAP} ${project("s")}
+        and d.superseded_at is null and d.archived_at is null and d.purged_at is null
+    ) work
+    ${args.after ? sql`where (work.at, work.document_id, work.first_page) > (${args.after.updatedAt}::timestamptz, ${args.after.documentId}, ${args.after.firstPage ?? 0})` : sql``}
+    order by work.at, work.document_id, work.first_page
     limit ${limit}`;
   return rows.map((row) => ({
-    documentId: row.document_id, projectId: row.project_id, runId: row.run_id, sourceSha256: row.source_sha256,
-    settingsSha256: row.settings_sha256, manifestSha256: row.manifest_sha256, resumes: row.resumes, assetsResumable: row.assets_resumable,
-    lastCutPage: row.last_cut_page, updatedAt: row.updated_at,
+    documentId: row.document_id, projectId: row.project_id, runId: row.run_id,
+    shard: row.last_page === null ? null : { first: row.first_page, last: row.last_page },
+    sourceSha256: row.source_sha256, settingsSha256: row.settings_sha256, manifestSha256: row.manifest_sha256, resumes: row.resumes,
+    assetsResumable: row.assets_resumable, lastCutPage: row.last_cut_page, updatedAt: row.updated_at,
   }));
 }
 
@@ -507,7 +652,8 @@ async function flushOne(
       scope: { orgId: state.run.orgId, projectId: state.run.projectId, documentId, runId: state.run.id },
       level: { ...entry.level, markdownComplete: !!state.artifactLedger.readDocument(documentId, "markdown") },
       assets: entry.assets,
-      ...(entry.resume ? { resume: true } : {}),
+      ...(entry.shards ? { shards: entry.shards } : {}),
+      ...(entry.resume ? { resume: entry.resume } : {}),
     });
     return "written";
   } catch (error) {

@@ -127,6 +127,25 @@ or an image a stopped batch left is refused, as is `resumable` disagreeing with 
 (`source_sha256`, when the host knows it). The files present must be exactly the paths of the `extracted` images, each of
 its stated size.
 
+**Sharded documents.** A provider that converts a long document in page ranges (one VM per shard, each running Doppler
+with its own `-f/-l` and `--images-pages`) cannot merge the shards into one valid manifest: each shard's settings digest
+differs, and a resume must use the shard's own manifest and range. Such a folder has the page folders at the top, as
+always (page paths are global, so shards never collide), and `shards/<first>-<last>/manifest.jsonl` per shard (page
+numbers zero-padded to 4 digits) instead of one `manifest.jsonl`; never both. Each shard manifest gets every version 3
+check; its header's `pages` must be exactly its folder's range, and its image and batch lines must fall inside it. Across
+shards: the ranges must not overlap, every shard must name the same PDF (`source_sha256`), every other header setting
+must be equal (all fields but `pages`, `resumes`, `deadline_ms` and `settings_sha256`), and every file in the page folders
+must be owned by exactly one shard's image line. Any violation refuses the whole folder. The shard manifests are stored at
+`images/shards/<first>-<last>/manifest.jsonl` beside the page folders, each with its own artifact slot
+(`<document>:doppler-manifest:<first>-<last>`).
+
+**Gaps.** A provider may report page ranges it did not extract images for: `figures.gaps`, at most 128
+`{first, last, reason}` entries of whole pages within the document, sorted and not overlapping, with `reason` from
+`plugin:doc-pass-budget`, `plugin:shard-over-share`, `converter:timeout`, `converter:budget`, `converter:renderer`
+(anything else is recorded as `other`, never as text). Malformed gaps make the whole figure answer a failure. They are
+recorded on the document's extraction level; a page inside a gap with no ledger rows was not extracted. The plugin host
+exposes `figureOutcomes: ["extracted", "partial", "failed"]` so a provider can tell that this core accepts `partial`.
+
 The folder must be quiescent when it is read (the VM has exited). The reader still opens it defensively: directories are
 read entry by entry with a cap (a huge directory is refused without being listed whole), page folders are opened with
 `O_DIRECTORY | O_NOFOLLOW` and must be the device and inode the listing saw, every file is opened with `O_NOFOLLOW`, must be
@@ -307,6 +326,14 @@ stored bytes.
 `tiled`, `layered`). They are written through the ordinary page-facts write whatever the figure setting: `text_layer` from
 the VM's layout facts today, `scan_class` once the provider returns `doppler-page-facts/1`.
 
+A sharded document also has one `document_extraction_shards` row per shard (scoped like the other tables, with the same
+composite foreign keys): its range, its stored manifest's key and SHA-256, its `source_sha256` and `settings_sha256`, its
+own status (`complete`, `partial`, `resumable`), resumable count and host-side `resumes`. Its asset rows are the union of
+the shards'. The document's level is the aggregate: `complete` only if every shard is, `resumable` while any image a
+resume would retry remains, else `partial`; its `shards` column counts the shards and its manifest key is null. A write
+for a single manifest (or a failed, `none` or `disabled` level) removes the shard rows. The level's `gaps` keeps the
+provider's gaps, capped at 128.
+
 **Reading it.** `GET /v1/documents/:id/assets` returns the level and the images, a page at a time: `limit` (1 to 1,000,
 default 500), `after` (the previous page's `nextCursor`) and an optional `pageFrom`/`pageTo` range. It answers only for a
 document the viewer is shown (status `completed`, in the caller's organization and a project it may use, and for an API key
@@ -316,8 +343,11 @@ refusal is a fixed value, never error text or content. Storage keys, the manifes
 returned; a slot resolves to a file URL through the document detail, under the file proxy's own checks.
 
 **Resuming.** `listResumableDocuments(sql, { orgId, projectId?, limit, after })` lists one organization's live documents
-whose `images_status` is `resumable` and that have a stored manifest, oldest first with a keyset cursor, with the hashes a
-resume must present and the manifest's SHA-256. The host counts resumes itself (previous + 1 on each resume write; the
+whose `images_status` is `resumable` and that have a stored manifest, and, for a sharded document, each resumable shard
+as its own entry (`shard: { first, last }`), oldest first with a keyset cursor, with the hashes a resume must present and
+the manifest's SHA-256. A shard's resume writes with `resume: { first, last }` and that shard alone: only its pages' rows
+are upserted and pruned, its record's `resumes` goes up by one (capped at 3 like a whole document's), and the level is
+recomputed from all rows and shard records. The host counts resumes itself (previous + 1 on each resume write; the
 manifest's own `resumes` is telemetry only) and leaves a document out of the queue at 3, so a manifest that never finishes
 cannot keep it there. A resume worker rebuilds Doppler's DIR from stored state with `downloadDopplerImagesDir`: it
 downloads `images/manifest.jsonl`, checks its SHA-256 against the level's `manifest_sha256`, validates it line by line,

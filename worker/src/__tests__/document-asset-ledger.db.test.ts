@@ -23,7 +23,7 @@ async function inMemory(write: DocumentAssetLedgerWrite, root = "ua/run-a/dopple
   for await (const row of readLedgerSpill((write.assets as { spill: string }).spill)) rows.push({ ...row, storageKey: row.status === "extracted" ? `${root}${row.linkPath!.slice("images/".length)}` : null });
   return { ...write, assets: rows };
 }
-import { v2Manifest, v3Text, writeV2Folder, writeV3Folder, V2_SETTINGS_SHA, V2_SOURCE_SHA } from "../test/doppler-manifest-v2.js";
+import { v2Manifest, v3ShardText, v3Text, writeShardedFolder, writeV2Folder, writeV3Folder, V2_SETTINGS_SHA, V2_SOURCE_SHA } from "../test/doppler-manifest-v2.js";
 import { createMigratedDatabase } from "../test/migrated-db.js";
 import { serveOnRandomPort } from "../test/migrated-postgres.js";
 
@@ -74,6 +74,7 @@ afterAll(async () => {
 beforeEach(async () => {
   await sql`delete from document_assets`;
   await sql`delete from document_extraction_levels`;
+  await sql`delete from document_extraction_shards`;
   await sql`update documents set run_id = 'run-a' where id in ('doc-a', 'doc_w')`;
 });
 
@@ -104,7 +105,7 @@ async function figureWrite(scope: DocumentAssetLedgerScope, options: { partial?:
     runId: scope.runId, figures: set, markdown: "",
   });
   const pending = ledgerWriteForStoredFigures({
-    set, storedManifest: stored.manifest,
+    set, stored,
     outcome: { status: partial ? "partial" : "extracted", exitCode: partial ? 5 : 0, build: "doppler-1.4.0+g1a2b3c4" },
   });
   return complete(scope, pending, options.resume);
@@ -208,7 +209,7 @@ describe("writing the ledger", () => {
     await cp(path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "doppler-figures"), dir, { recursive: true });
     const set = await readDopplerFigureDir(dir, { pageCount: 5, expect: "complete" });
     const stored = await storeDopplerFigures({ storage: memoryStorage(), document: { id: "doc-a", userId: "ua", runId: "run-a" }, runId: "run-a", figures: set, markdown: "" });
-    await store.writeDocumentAssetLedger(complete(A, ledgerWriteForStoredFigures({ set, storedManifest: stored.manifest, outcome: { status: "extracted" } })));
+    await store.writeDocumentAssetLedger(complete(A, ledgerWriteForStoredFigures({ set, stored, outcome: { status: "extracted" } })));
     expect((await assets("doc-a")).map((row) => [row.asset_id, row.status, row.reason, row.file_of, row.link_path, row.stored])).toEqual([
       ["p3.1", "extracted", null, "p3.1", null, true],
       ["p3.g2", "extracted", null, "p3.g2", null, true],
@@ -478,5 +479,63 @@ describe("routing page facts go through the page-facts write (MEDIUM-6)", () => 
       { page_number: 1, text_layer: "visible", scan_class: null }, { page_number: 3, text_layer: "invisible", scan_class: "single" },
     ]);
     await sql`delete from document_page_facts where document_id = 'doc-a'`;
+  });
+});
+
+describe("sharded documents: a record per shard, the level is the aggregate, resume per shard", () => {
+  /** Read and store a two-shard folder (pages 1-2 and 3-3), as the figure step does, and queue-shape its write. */
+  async function shardedWrite(options: { partial?: boolean } = {}): Promise<DocumentAssetLedgerWrite> {
+    const built = v2Manifest({ partial: options.partial });
+    const dir = await mkdtemp(path.join(work, "sharded-"));
+    await writeShardedFolder(dir, [{ range: [1, 2], text: v3ShardText(built.manifest, [1, 2]) }, { range: [3, 3], text: v3ShardText(built.manifest, [3, 3]) }], built.files);
+    const set = await readDopplerFigureDir(dir, { pageCount: 3 });
+    const stored = await storeDopplerFigures({ storage: memoryStorage(), document: { id: "doc-a", userId: "ua", runId: "run-a" }, runId: "run-a", figures: set, markdown: "" });
+    const pending = ledgerWriteForStoredFigures({ set, stored, outcome: { status: set.complete ? "extracted" : "partial", exitCode: set.complete ? 0 : 5, gaps: [{ first: 2, last: 2, reason: "plugin:shard-over-share" }] } });
+    return { ...complete(A, pending), ...(pending.shards ? { shards: pending.shards } : {}) };
+  }
+  const shards = async () => sql`select first_page, last_page, images_status, assets_resumable, resumes, manifest_key from document_extraction_shards where document_id = 'doc-a' order by first_page`;
+
+  it("writes the union of rows, one record per shard, and an aggregate level with the gaps", async () => {
+    await store.writeDocumentAssetLedger(await shardedWrite({ partial: true }));
+    expect((await assets("doc-a")).map((row) => row.asset_id)).toEqual(["p1.1", "p1.g1", "p2.1", "p2.2", "p3.1", "p3.2"]);
+    expect(await shards()).toEqual([
+      { first_page: 1, last_page: 2, images_status: "complete", assets_resumable: 0, resumes: 0, manifest_key: "ua/run-a/doppler/doc-a/images/shards/0001-0002/manifest.jsonl" },
+      { first_page: 3, last_page: 3, images_status: "resumable", assets_resumable: 1, resumes: 0, manifest_key: "ua/run-a/doppler/doc-a/images/shards/0003-0003/manifest.jsonl" },
+    ]);
+    expect(await level("doc-a")).toMatchObject({ images_status: "resumable", manifest_key: null, assets_total: 6, assets_resumable: 1 });
+    expect((await sql`select shards, gaps from document_extraction_levels where document_id = 'doc-a'`)[0]).toEqual({ shards: 2, gaps: [{ first: 2, last: 2, reason: "plugin:shard-over-share" }] });
+    // Resume discovery names the shard, with its own manifest.
+    expect(await listResumableDocuments(sql, { orgId: "org-a" })).toMatchObject([{ documentId: "doc-a", shard: { first: 3, last: 3 }, assetsResumable: 1 }]);
+  });
+
+  it("complete only if every shard is; a single-manifest write afterwards removes the shard records", async () => {
+    await store.writeDocumentAssetLedger(await shardedWrite());
+    expect(await level("doc-a")).toMatchObject({ images_status: "complete" });
+    await store.writeDocumentAssetLedger(await figureWrite(A));
+    expect(await shards()).toEqual([]);
+    expect((await sql`select shards from document_extraction_levels where document_id = 'doc-a'`)[0]).toEqual({ shards: 0 });
+  });
+
+  it("a shard resume touches only its own rows and record, is counted per shard, and leaves the queue at the cap", async () => {
+    await store.writeDocumentAssetLedger(await shardedWrite({ partial: true }));
+    const full = await shardedWrite({ partial: true });
+    const shard3 = full.shards!.filter((shard) => shard.first === 3);
+    const rows3 = (await inMemory(full)).assets.filter((asset) => asset.pageNumber === 3);
+    const resume = (): DocumentAssetLedgerWrite => ({ ...full, assets: rows3, shards: shard3, resume: { first: 3, last: 3 } });
+    for (let i = 1; i <= DOCUMENT_ASSET_RESUME_CAP; i += 1) await store.writeDocumentAssetLedger(resume());
+    expect((await shards()).map((row) => [row.first_page, row.resumes])).toEqual([[1, 0], [3, 3]]);
+    // Rows of the other shard were neither pruned nor rewritten.
+    expect((await assets("doc-a")).map((row) => row.asset_id)).toEqual(["p1.1", "p1.g1", "p2.1", "p2.2", "p3.1", "p3.2"]);
+    expect(await listResumableDocuments(sql, { orgId: "org-a" })).toEqual([]);
+    await expect(store.writeDocumentAssetLedger(resume())).rejects.toMatchObject({ rule: "resume-cap" });
+    // A shard resume may not write another shard's pages.
+    await expect(store.writeDocumentAssetLedger({ ...resume(), assets: (await inMemory(full)).assets })).rejects.toMatchObject({ rule: expect.stringMatching(/invalid-assets|resume-cap/) });
+  });
+
+  it("refuses a shard record whose key is not its folder's, or ranges that overlap", async () => {
+    const write = await shardedWrite();
+    await expect(store.writeDocumentAssetLedger({ ...write, shards: write.shards!.map((s) => ({ ...s, manifestKey: s.manifestKey.replace("ua/run-a/", "ub/run-b/") })) })).rejects.toMatchObject({ rule: "key-mismatch" });
+    await expect(store.writeDocumentAssetLedger({ ...write, shards: [write.shards![0]!, { ...write.shards![1]!, first: 2 }] })).rejects.toMatchObject({ rule: expect.stringMatching(/invalid-level|key-mismatch/) });
+    expect(await shards()).toEqual([]);
   });
 });

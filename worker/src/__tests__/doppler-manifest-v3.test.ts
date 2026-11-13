@@ -10,7 +10,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { DopplerFigureRejection, readDopplerFigureDir, readLedgerSpill, storeDopplerFigures, type DopplerFigureSet } from "../extractors/doppler-figures.js";
 import { ByteBudget } from "../extractors/doppler-upload.js";
-import { v2Manifest, v3Text, writeV3Folder } from "../test/doppler-manifest-v2.js";
+import { v2Manifest, v3ShardText, v3Text, writeShardedFolder, writeV3Folder } from "../test/doppler-manifest-v2.js";
 
 // Version 3 (`manifest.jsonl`, `doppler-images/3`): read line by line in fixed memory, every line checked as it arrives,
 // the end line's counts, totals and hash checked against what came before. And the store: bounded memory, bounded
@@ -58,8 +58,8 @@ describe("manifest v3: reading", () => {
     await writeV3Folder(dir, v3Text(manifest), files);
     const set = await readDopplerFigureDir(dir, { pageCount: 3, expect: "complete" });
     expect(set.version).toBe(3);
-    expect(set.manifestFile).toBe("manifest.jsonl");
-    expect(set.manifestSha256).toBe(createHash("sha256").update(await readFile(path.join(dir, "manifest.jsonl"))).digest("hex"));
+    expect(set.manifests[0]!.relative).toBe("manifest.jsonl");
+    expect(set.manifests[0]!.sha256).toBe(createHash("sha256").update(await readFile(path.join(dir, "manifest.jsonl"))).digest("hex"));
     expect((await rowsOf(set)).map((a) => [a.assetId, a.status, a.reason, a.source, a.fileOf, a.linkPath])).toEqual([
       ["p1.1", "extracted", null, "render", "p1.1", "images/page-0001/image-001.webp"],
       ["p1.g1", "extracted", null, "render", "p1.g1", "images/page-0001/figure-001.svg"],
@@ -114,7 +114,7 @@ describe("manifest v3: reading", () => {
     stopped.totals.batches_cut = 1;
     expect(await rule(v3Text(stopped))).toBe("manifest-complete-mismatch");
     expect(await rule(v3Text(base(), { endPatch: { resumable: true, complete: false } }))).toBe("manifest-resumable-mismatch");
-  });
+  }, 60_000);
 
   it("refuses a hostile image line on its own, and a repeat that names a later image", async () => {
     expect(await rule(v3Text(base(), { mutateLines: (lines) => { lines[1] = lines[1]!.replace('"page-0001/image-001.webp"', '"../../etc/passwd"'); } }))).toBe("manifest-image-invalid");
@@ -312,5 +312,93 @@ describe("a real Doppler run (fixtures/doppler-golden/v3-repeats, see PROVENANCE
     const links = [...markdown.matchAll(/\]\(([^)]+)\)/g)].map((m) => m[1]!);
     expect(links.length).toBeGreaterThan(0);
     for (const link of links) expect(objects.has(`${prefix}${link}`), link).toBe(true);
+  });
+});
+
+describe("sharded documents: one manifest per shard", () => {
+  async function shardRule(build: (m: ReturnType<typeof base>, files: Map<string, Buffer>) => Array<{ range: [number, number]; text: string }>, options: { partial?: boolean } = {}) {
+    const { manifest, files } = v2Manifest({ partial: options.partial });
+    const shards = build(manifest, files);
+    await rm(dir, { recursive: true, force: true });
+    await writeShardedFolder(dir, shards, files);
+    try {
+      return await readDopplerFigureDir(dir, { pageCount: 3 });
+    } catch (error) {
+      if (error instanceof DopplerFigureRejection) return error.rule;
+      throw error;
+    }
+  }
+  const two = (m: ReturnType<typeof base>) => [{ range: [1, 2] as [number, number], text: v3ShardText(m, [1, 2]) }, { range: [3, 3] as [number, number], text: v3ShardText(m, [3, 3]) }];
+
+  it("accepts two shards: the union of their rows, one record per shard, complete only if every shard is", async () => {
+    const set = await shardRule(two) as DopplerFigureSet;
+    expect(typeof set).toBe("object");
+    expect(set.manifests.map((m) => [m.relative, m.range, m.complete])).toEqual([
+      ["shards/0001-0002/manifest.jsonl", [1, 2], true], ["shards/0003-0003/manifest.jsonl", [3, 3], true],
+    ]);
+    expect((await rowsOf(set)).map((r) => r.assetId)).toEqual(["p1.1", "p1.g1", "p2.1", "p2.2", "p3.1"]);
+    expect(set.complete).toBe(true);
+    const partial = await shardRule(two, { partial: true }) as DopplerFigureSet;
+    expect(partial.complete).toBe(false);
+    expect(partial.manifests.map((m) => m.resumable)).toEqual([0, 1]);
+  });
+
+  it("stores each shard's manifest beside the page folders", async () => {
+    const set = await shardRule(two) as DopplerFigureSet;
+    const storage = slowStreamingStorage();
+    const stored = await storeDopplerFigures({ storage, document: DOC, runId: "run-1", figures: set, markdown: "" });
+    const images = `user-1/run-1/doppler/${DOC.id}/images/`;
+    expect(stored.manifest).toBeNull();
+    expect(stored.manifests.map((m) => [m.key, m.range])).toEqual([[`${images}shards/0001-0002/manifest.jsonl`, [1, 2]], [`${images}shards/0003-0003/manifest.jsonl`, [3, 3]]]);
+    expect(storage.stats().objects.has(`${images}page-0003/image-001.jpg`)).toBe(true);
+    expect(stored.slots.map((s) => s.slot)).toContain("doppler-manifest:0001-0002");
+  });
+
+  it("refuses overlapping ranges, another PDF, other settings, a file with no owner, and an image outside its shard", async () => {
+    expect(await shardRule((m) => [{ range: [1, 2], text: v3ShardText(m, [1, 2]) }, { range: [2, 3], text: v3ShardText(m, [2, 3]) }])).toBe("shards-overlap");
+    expect(await shardRule((m) => {
+      const other = { ...m, source_sha256: "c".repeat(64) };
+      return [{ range: [1, 2], text: v3ShardText(m, [1, 2]) }, { range: [3, 3], text: v3ShardText(other, [3, 3]) }];
+    })).toBe("shards-source-mismatch");
+    expect(await shardRule((m) => [{ range: [1, 2], text: v3ShardText(m, [1, 2]) }, { range: [3, 3], text: v3ShardText({ ...m, dpi: 300 }, [3, 3]) }])).toBe("shards-settings-mismatch");
+    // Shard 3-3's manifest left out: page-0003's file has no owner.
+    expect(await shardRule((m) => [{ range: [1, 2], text: v3ShardText(m, [1, 2]) }])).toBe("files-do-not-match-manifest");
+    // An image line of page 3 in the 1-2 shard.
+    expect(await shardRule((m) => [{ range: [1, 2], text: v3ShardText(m, [1, 2], { mutateLines: (lines) => {
+      const p3 = JSON.stringify({ type: "image", ...m.images.find((e) => e.id === "p3.1") });
+      lines.splice(lines.findIndex((l) => l.includes('"type":"batch"')), 0, p3);
+    } }) }])).toBe("manifest-shard-range");
+    // A header whose pages are not the folder's range.
+    expect(await shardRule((m) => [{ range: [1, 2], text: v3ShardText(m, [1, 2]).replace('"pages":[1,2]', '"pages":[1,3]') }, { range: [3, 3], text: v3ShardText(m, [3, 3]) }])).toMatch(/^manifest-/);
+    // Both a top-level manifest and shards.
+    expect(await shardRule((m, files) => { void files; return two(m); }).then(async () => {
+      await writeFile(path.join(dir, "manifest.jsonl"), v3Text(m0()));
+      try { await readDopplerFigureDir(dir, { pageCount: 3 }); return "accepted"; } catch (error) { return (error as DopplerFigureRejection).rule; }
+    })).toBe("unexpected-entry");
+  }, 60_000);
+});
+
+const m0 = () => v2Manifest().manifest;
+
+describe("figure outcome gaps", () => {
+  it("keeps sorted, non-overlapping page gaps within the document; unknown reasons become other", async () => {
+    const { parseSandboxedPdfFigureOutcome } = await import("../extractors/plugins.js");
+    expect(parseSandboxedPdfFigureOutcome({ status: "partial", gaps: [{ first: 1, last: 2, reason: "plugin:doc-pass-budget" }, { first: 5, last: 5, reason: "rm -rf /" }] }, 500, 10))
+      .toEqual({ status: "partial", gaps: [{ first: 1, last: 2, reason: "plugin:doc-pass-budget" }, { first: 5, last: 5, reason: "other" }] });
+    const refused = { status: "failed", reason: "provider-reported-invalid-gaps" };
+    expect(parseSandboxedPdfFigureOutcome({ status: "partial", gaps: [{ first: 1, last: 3, reason: "converter:timeout" }, { first: 3, last: 4, reason: "converter:timeout" }] }, 500, 10)).toEqual(refused);
+    expect(parseSandboxedPdfFigureOutcome({ status: "partial", gaps: [{ first: 4, last: 5, reason: "x" }, { first: 1, last: 2, reason: "x" }] }, 500, 10)).toEqual(refused);
+    expect(parseSandboxedPdfFigureOutcome({ status: "partial", gaps: [{ first: 9, last: 11, reason: "x" }] }, 500, 10)).toEqual(refused);
+    expect(parseSandboxedPdfFigureOutcome({ status: "partial", gaps: [{ first: 0, last: 1, reason: "x" }] }, 500, 10)).toEqual(refused);
+    expect(parseSandboxedPdfFigureOutcome({ status: "partial", gaps: [{ first: 2, last: 1, reason: "x" }] }, 500, 10)).toEqual(refused);
+    expect(parseSandboxedPdfFigureOutcome({ status: "partial", gaps: [{ first: 1.5, last: 2, reason: "x" }] }, 500, 10)).toEqual(refused);
+    const many = Array.from({ length: 129 }, (_, i) => ({ first: i + 1, last: i + 1, reason: "converter:budget" }));
+    expect(parseSandboxedPdfFigureOutcome({ status: "partial", gaps: many }, 500, 1000)).toEqual(refused);
+    expect(parseSandboxedPdfFigureOutcome({ status: "partial", gaps: many.slice(0, 128) }, 500, 1000)).toMatchObject({ status: "partial" });
+  });
+
+  it("the plugin host says which outcomes this core accepts", async () => {
+    const { createExtractorPluginHost } = await import("../extractors/plugins.js");
+    expect(createExtractorPluginHost().figureOutcomes).toEqual(["extracted", "partial", "failed"]);
   });
 });

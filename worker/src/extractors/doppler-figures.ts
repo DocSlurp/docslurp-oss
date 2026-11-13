@@ -23,11 +23,11 @@ import type { Readable } from "node:stream";
 import {
   DOPPLER_FIGURE_FILE_NAME, DOPPLER_FIGURE_LIMITS, DOPPLER_FIGURE_MEDIA_TYPES, DOPPLER_FIGURES_INDEX_SLOT, DOPPLER_FIGURES_INDEX_VERSION,
   DOPPLER_FIGURES_MANIFEST, DOPPLER_MANIFEST_V3_FILE, DOPPLER_MANIFEST_V3_LINE_BYTES, DOPPLER_MANIFEST_V2_LIMITS, DOPPLER_STORE_LAYOUT,
-  DopplerManifestV3Error, DopplerManifestV3Validator, addDocumentAssetCount, dopplerAssetCaps, dopplerAssetPath, dopplerAssetStorageKey,
+  DOPPLER_SHARDS_MAX, DopplerManifestV3Error, DopplerManifestV3Validator, dopplerShardFolder, parseDopplerShardFolder, addDocumentAssetCount, dopplerAssetCaps, dopplerAssetPath, dopplerAssetStorageKey,
   dopplerDocumentPrefix, dopplerEntryFileCap, dopplerFigureSlot, dopplerImageExtractEnabled, dopplerImageMarkerIds, dopplerLedgerAssets,
   dopplerManifestRunFacts, dopplerManifestV3RunFacts, emptyDocumentAssetCounts, parseDopplerFigureId, parseDopplerManifest,
   type DocumentAsset, type DocumentAssetCounts, type DopplerAssetCaps, type DopplerFigureFormat, type DopplerFigureRecord,
-  type DopplerManifest, type DopplerManifestRunFacts,
+  type DopplerManifest, type DopplerManifestRunFacts, type DopplerManifestV3Header,
 } from "@docslurp/shared";
 
 import { documentArtifactRoot } from "../lib/artifact-root.js";
@@ -61,6 +61,18 @@ export interface DopplerFigureFile {
   cap: number;
 }
 
+/** One manifest of the folder: where it is, its size and SHA-256, and (for a shard) its page range and own facts. */
+export interface DopplerManifestFile {
+  relative: string;
+  size: number;
+  sha256: string;
+  range: [number, number] | null;
+  run: DopplerManifestRunFacts | null;
+  complete: boolean;
+  /** Images of this manifest a resume would retry. */
+  resumable: number;
+}
+
 /** One spilled ledger row (JSON line) with the index record fields only the index needs. */
 interface SpillLine { r: DocumentAsset; x?: DopplerFigureRecord }
 
@@ -68,13 +80,16 @@ export interface DopplerFigureSet {
   /** The folder the set was read from (quiescent: the provider's VM has exited). */
   dir: string;
   version: 1 | 2 | 3;
-  /** The manifest's name in the folder (`manifest.jsonl` for version 3), its size and SHA-256 (stored unchanged). */
-  manifestFile: string;
-  manifestSize: number;
-  manifestSha256: string;
-  /** Version 2 and 3 run facts (null for version 1). */
+  /**
+   * The manifests, stored unchanged: one (`manifest.json`, or `manifest.jsonl` for version 3), or one per shard
+   * (`shards/<first>-<last>/manifest.jsonl`, version 3 only) when the provider converted the document in page ranges.
+   */
+  manifests: DopplerManifestFile[];
+  /** Run facts of the whole folder (version 2 and 3; null for version 1); for shards, the shared fields only. */
   run: DopplerManifestRunFacts | null;
+  /** Every manifest says complete. */
   complete: boolean;
+
   /** The files to store; no bytes are held: each is streamed, checked and uploaded by storeDopplerFigures. */
   files: DopplerFigureFile[];
   /** The ledger rows, one JSON line each in id order, spilled to a private temporary file (see disposeDopplerFigureSet). */
@@ -305,9 +320,9 @@ function idOrder(a: string, b: string): number {
  */
 async function readManifestLines(
   root: FolderRoot, validator: DopplerManifestV3Validator, onImage: (accepted: NonNullable<ReturnType<DopplerManifestV3Validator["accept"]>>) => Promise<void>,
-  signal?: AbortSignal,
+  signal?: AbortSignal, relative: string = DOPPLER_MANIFEST_V3_FILE,
 ): Promise<{ size: number; sha256: string }> {
-  const { handle, size } = await openFolderFile(root, DOPPLER_MANIFEST_V3_FILE, null, Number.MAX_SAFE_INTEGER);
+  const { handle, size } = await openFolderFile(root, relative, null, Number.MAX_SAFE_INTEGER);
   const whole = createHash("sha256");
   const preceding = createHash("sha256");
   const buffer = Buffer.allocUnsafe(DOPPLER_MANIFEST_V3_LINE_BYTES);
@@ -394,8 +409,10 @@ export async function readDopplerFigureDir(
   const pageDirs: string[] = [];
   let manifestFile: string | null = null;
   let hasPageFacts = false;
+  let hasShards = false;
   for (const dirent of listed) {
     if (dirent.isDirectory && PAGE_DIR.test(dirent.name)) { pageDirs.push(dirent.name); continue; }
+    if (dirent.isDirectory && dirent.name === "shards") { hasShards = true; continue; }
     if (!dirent.isFile) throw new DopplerFigureRejection("unexpected-entry");
     if (dirent.name === DOPPLER_FIGURES_MANIFEST || dirent.name === DOPPLER_MANIFEST_V3_FILE) {
       if (manifestFile) throw new DopplerFigureRejection("unexpected-file");
@@ -406,7 +423,30 @@ export async function readDopplerFigureDir(
     if (!DOPPLER_FIGURE_FILE_NAME.test(dirent.name)) throw new DopplerFigureRejection("unexpected-file");
     flat.add(dirent.name);
   }
-  if (!manifestFile) throw new DopplerFigureRejection("missing-manifest");
+  // One manifest, or one per shard (version 3), never both.
+  if (manifestFile && hasShards) throw new DopplerFigureRejection("unexpected-entry");
+  if (!manifestFile && !hasShards) throw new DopplerFigureRejection("missing-manifest");
+  const shardRanges: Array<[number, number]> = [];
+  if (hasShards) {
+    const shardsInfo = await lstat(path.join(dir, "shards")).catch(() => null);
+    if (!shardsInfo || !shardsInfo.isDirectory() || shardsInfo.isSymbolicLink()) throw new DopplerFigureRejection("unexpected-entry");
+    await checkedSubdir(root, "shards", shardsInfo);
+    for (const dirent of await boundedEntries(path.join(dir, "shards"), DOPPLER_SHARDS_MAX)) {
+      const range = dirent.isDirectory ? parseDopplerShardFolder(dirent.name) : null;
+      if (!range) throw new DopplerFigureRejection("unexpected-entry");
+      const relative = `shards/${dirent.name}`;
+      const info = await lstat(path.join(dir, relative)).catch(() => null);
+      if (!info || !info.isDirectory() || info.isSymbolicLink()) throw new DopplerFigureRejection("unexpected-entry");
+      await checkedSubdir(root, relative, info);
+      const inner = await boundedEntries(path.join(dir, relative), 2);
+      if (inner.length !== 1 || !inner[0]!.isFile || inner[0]!.name !== DOPPLER_MANIFEST_V3_FILE) throw new DopplerFigureRejection("unexpected-entry");
+      shardRanges.push(range);
+    }
+    if (shardRanges.length === 0) throw new DopplerFigureRejection("missing-manifest");
+    shardRanges.sort((a, b) => a[0] - b[0]);
+    // Shard ranges never overlap: page paths are global, and each page belongs to one shard's manifest.
+    for (let i = 1; i < shardRanges.length; i += 1) if (shardRanges[i]![0] <= shardRanges[i - 1]![1]) throw new DopplerFigureRejection("shards-overlap");
+  }
   // Page folders as listed (device and inode), to refuse one swapped before it is opened.
   const listedDirs = new Map<string, Stats>();
   for (const name of pageDirs) {
@@ -428,36 +468,52 @@ export async function readDopplerFigureDir(
   };
   const spill = await SpillWriter.create();
   let version: 1 | 2 | 3;
-  let manifestSize: number;
-  let manifestSha256: string;
+  const manifests: DopplerManifestFile[] = [];
   let run: DopplerManifestRunFacts | null;
   let complete: boolean;
   try {
-    if (manifestFile === DOPPLER_MANIFEST_V3_FILE) {
+    if (manifestFile === DOPPLER_MANIFEST_V3_FILE || hasShards) {
       version = 3;
       if (flat.size > 0) throw new DopplerFigureRejection("unexpected-file");
-      const validator = new DopplerManifestV3Validator({ maxLines: caps.entries, maxPage: pageCount });
-      let header: { link_prefix: string; source_sha256: string } | null = null;
-      const read = await readManifestLines(root, validator, async ({ row, file, error }) => {
-        if (!header) {
-          header = validator.headerLine!;
+      // The manifests in page order: one, or one per shard. Lines are counted against the cap across all of them.
+      const jobs: Array<{ relative: string; range: [number, number] | null }> = hasShards
+        ? shardRanges.map((range) => ({ relative: `shards/${dopplerShardFolder(range[0], range[1])}/${DOPPLER_MANIFEST_V3_FILE}`, range }))
+        : [{ relative: DOPPLER_MANIFEST_V3_FILE, range: null }];
+      let linesLeft = caps.entries;
+      let first: DopplerManifestV3Header | null = null;
+      for (const job of jobs) {
+        const validator = new DopplerManifestV3Validator({ maxLines: linesLeft, maxPage: pageCount, ...(job.range ? { range: job.range } : {}) });
+        let resumable = 0;
+        let checked = false;
+        const checkHeader = (header: DopplerManifestV3Header) => {
           if (header.link_prefix !== DOPPLER_STORE_LAYOUT.imagesFolder) throw new DopplerFigureRejection("link-prefix");
           if (args.sourceSha256 && header.source_sha256 !== args.sourceSha256) throw new DopplerFigureRejection("source-mismatch");
-        }
-        if (file) addFile(file.path, file.id, file.format, file.bytes, file.sha256, dopplerEntryFileCap(file, caps));
-        await spill.add({ r: row, x: recordOf(row, error) });
-      }, args.signal);
-      const summary = validator.finish();
-      // A manifest with no image never reached the header checks above.
-      if (summary.header.link_prefix !== DOPPLER_STORE_LAYOUT.imagesFolder) throw new DopplerFigureRejection("link-prefix");
-      if (args.sourceSha256 && summary.header.source_sha256 !== args.sourceSha256) throw new DopplerFigureRejection("source-mismatch");
-      manifestSize = read.size;
-      manifestSha256 = read.sha256;
-      run = dopplerManifestV3RunFacts(summary);
-      complete = summary.complete;
+          // Shards of one conversion: the same PDF and the same settings, apart from each shard's own range, resumes,
+          // deadline and the settings digest those change.
+          if (first && !sameShardSettings(first, header)) throw new DopplerFigureRejection(first.source_sha256 !== header.source_sha256 ? "shards-source-mismatch" : "shards-settings-mismatch");
+        };
+        const read = await readManifestLines(root, validator, async ({ row, file, error }) => {
+          if (!checked) { checkHeader(validator.headerLine!); checked = true; }
+          if (file) addFile(file.path, file.id, file.format, file.bytes, file.sha256, dopplerEntryFileCap(file, caps));
+          if (row.resumable) resumable += 1;
+          await spill.add({ r: row, x: recordOf(row, error) });
+        }, args.signal, job.relative);
+        const summary = validator.finish();
+        if (!checked) checkHeader(summary.header);
+        first ??= summary.header;
+        linesLeft -= summary.images + summary.batches;
+        manifests.push({ relative: job.relative, size: read.size, sha256: read.sha256, range: job.range, run: dopplerManifestV3RunFacts(summary), complete: summary.complete, resumable });
+      }
+      complete = manifests.every((m) => m.complete);
+      const firstRun = manifests[0]!.run!;
+      run = manifests.length === 1 ? firstRun : {
+        ...firstRun, settingsSha256: null, manifestResumes: 0, complete,
+        resumable: manifests.some((m) => m.resumable > 0),
+        lastCutPage: manifests.map((m) => m.run!.lastCutPage).filter((page): page is number => page !== null).at(-1) ?? null,
+      };
     } else {
       const cap = Math.min(caps.manifestBytes, DOPPLER_MANIFEST_V2_LIMITS.maxManifestBytes);
-      const raw = await readFolderFile(root, manifestFile, null, cap);
+      const raw = await readFolderFile(root, manifestFile!, null, cap);
       let json: unknown;
       try { json = JSON.parse(raw.toString("utf8")); } catch { throw new DopplerFigureRejection("manifest-not-json"); }
       const manifest = parseDopplerManifest(json);
@@ -466,8 +522,7 @@ export async function readDopplerFigureDir(
       if (manifest.version === 1 && raw.length > DOPPLER_FIGURE_LIMITS.maxManifestBytes) throw new DopplerFigureRejection("oversized-file");
       if (manifest.manifest.images.some((entry) => entry.page > pageCount)) throw new DopplerFigureRejection("page-outside-document");
       version = manifest.version;
-      manifestSize = raw.length;
-      manifestSha256 = createHash("sha256").update(raw).digest("hex");
+      const counts = { resumable: 0 };
       if (manifest.version === 1) {
         if (pageDirs.length > 0 || hasPageFacts) throw new DopplerFigureRejection("unexpected-entry");
         for (const entry of manifest.manifest.images) {
@@ -494,7 +549,14 @@ export async function readDopplerFigureDir(
       const rows = dopplerLedgerAssets(manifest);
       const records = dopplerFigureRecords(manifest);
       const order = rows.map((_, i) => i).sort((a, b) => idOrder(rows[a]!.assetId, rows[b]!.assetId));
-      for (const i of order) await spill.add({ r: rows[i]!, x: records[i]! });
+      for (const i of order) {
+        if (rows[i]!.resumable) counts.resumable += 1;
+        await spill.add({ r: rows[i]!, x: records[i]! });
+      }
+      manifests.push({
+        relative: manifestFile!, size: raw.length, sha256: createHash("sha256").update(raw).digest("hex"), range: null, run, complete,
+        resumable: counts.resumable,
+      });
     }
     if ((args.expect === "partial" && complete) || (args.expect === "complete" && !complete)) throw new DopplerFigureRejection("outcome-mismatch");
 
@@ -534,13 +596,19 @@ export async function readDopplerFigureDir(
     }
     await spill.close();
     return {
-      dir, version, manifestFile, manifestSize, manifestSha256, run, complete, files: [...expected.values()],
+      dir, version, manifests, run, complete, files: [...expected.values()],
       ledger: { spill: spill.path, rows: spill.rows, counts: spill.counts }, pageFacts, caps,
     };
   } catch (error) {
     await spill.discard();
     throw error;
   }
+}
+
+/** Whether two shard headers describe one conversion: equal apart from the shard's range, resumes, deadline and settings digest. */
+function sameShardSettings(a: DopplerManifestV3Header, b: DopplerManifestV3Header): boolean {
+  const strip = ({ pages: _p, resumes: _r, deadline_ms: _d, settings_sha256: _s, ...rest }: DopplerManifestV3Header) => JSON.stringify(rest);
+  return strip(a) === strip(b);
 }
 
 /** The index record of a version 2 or 3 row (version 1 keeps the record its manifest gives). */
@@ -563,12 +631,13 @@ function recordOf(row: DocumentAsset, error?: string): DopplerFigureRecord {
 export function dopplerFolderKey(
   document: { id: string; userId: string; runId: string; artifactRoot?: string | null },
   runId: string,
-  object: "markdown" | "source" | "index" | "manifest" | "manifestV3" | "pageFacts" | { id: string; format: DopplerFigureFormat },
+  object: "markdown" | "source" | "index" | "manifest" | "manifestV3" | "pageFacts" | { id: string; format: DopplerFigureFormat } | { shard: readonly [number, number] },
 ): string {
   const root = documentArtifactRoot(document, runId);
-  if (typeof object === "object") return dopplerAssetStorageKey(root, document.id, object.id, object.format);
   const prefix = dopplerDocumentPrefix(root, document.id);
   const images = `${prefix}${DOPPLER_STORE_LAYOUT.imagesFolder}`;
+  if (typeof object === "object" && "shard" in object) return `${images}shards/${dopplerShardFolder(object.shard[0], object.shard[1])}/${DOPPLER_MANIFEST_V3_FILE}`;
+  if (typeof object === "object") return dopplerAssetStorageKey(root, document.id, object.id, object.format);
   switch (object) {
     case "markdown": return `${prefix}${DOPPLER_STORE_LAYOUT.markdown}`;
     case "source": return `${prefix}${DOPPLER_STORE_LAYOUT.source}`;
@@ -670,8 +739,10 @@ export interface StoredDopplerFigures {
   slots: Array<{ slot: string; uri: string }>;
   /** Storage key of each stored file, by the id that owns it. */
   keys: Map<string, string>;
-  /** The stored manifest's key and SHA-256 (for the extraction level: what a resume downloads). */
-  manifest: { key: string; sha256: string };
+  /** The stored manifest's key and SHA-256 (for the extraction level: what a resume downloads); null for shards. */
+  manifest: { key: string; sha256: string } | null;
+  /** Every stored manifest: one, or one per shard with its page range. */
+  manifests: Array<{ key: string; sha256: string; range: [number, number] | null }>;
   stats: DopplerFigureStats;
 }
 
@@ -771,7 +842,7 @@ export async function storeDopplerFigures(args: {
   const set = args.figures;
   const key = (object: Parameters<typeof dopplerFolderKey>[2]) => dopplerFolderKey(args.document, args.runId, object);
   const indexKey = key("index");
-  const manifestKey = key(set.version === 3 ? "manifestV3" : "manifest");
+  const singleManifestKey = key(set.version === 3 ? "manifestV3" : "manifest");
   const root = await openRoot(set.dir);
   const slots: StoredDopplerFigures["slots"] = [];
   const keys = new Map<string, string>();
@@ -792,14 +863,22 @@ export async function storeDopplerFigures(args: {
 
     // 2. Only now the manifest, the page facts, the Markdown and the source pointer.
     const tail: Array<() => Promise<void>> = [];
-    written.push(manifestKey);
-    tail.push(() => uploadChecked({
-      storage: args.storage, budgets, key: manifestKey, contentType: set.version === 3 ? "application/x-ndjson" : "application/json",
-      size: set.manifestSize, signal: args.signal,
-      open: async () => (await openFolderFile(root, set.manifestFile, set.manifestSize, Number.MAX_SAFE_INTEGER)).handle,
-      check: { expectedSize: set.manifestSize, sha256: set.manifestSha256, magic: null },
-    }));
-    slots.push({ slot: DOPPLER_MANIFEST_SLOT, uri: args.storage.uri(manifestKey) });
+    const storedManifests: StoredDopplerFigures["manifests"] = [];
+    for (const manifest of set.manifests) {
+      const manifestKey = manifest.range ? key({ shard: manifest.range }) : singleManifestKey;
+      written.push(manifestKey);
+      tail.push(() => uploadChecked({
+        storage: args.storage, budgets, key: manifestKey, contentType: set.version === 3 ? "text/plain; charset=utf-8" : "application/json",
+        size: manifest.size, signal: args.signal,
+        open: async () => (await openFolderFile(root, manifest.relative, manifest.size, Number.MAX_SAFE_INTEGER)).handle,
+        check: { expectedSize: manifest.size, sha256: manifest.sha256, magic: null },
+      }));
+      storedManifests.push({ key: manifestKey, sha256: manifest.sha256, range: manifest.range });
+      slots.push({
+        slot: manifest.range ? `${DOPPLER_MANIFEST_SLOT}:${dopplerShardFolder(manifest.range[0], manifest.range[1])}` : DOPPLER_MANIFEST_SLOT,
+        uri: args.storage.uri(manifestKey),
+      });
+    }
     if (set.pageFacts) {
       const factsKey = key("pageFacts");
       const facts = set.pageFacts;
@@ -857,7 +936,8 @@ export async function storeDopplerFigures(args: {
       peakBufferBytes: budgets.job.peak,
       bufferBudgetBytes: budgets.job.limit,
     };
-    return { indexUri: args.storage.uri(indexKey), slots, keys, manifest: { key: manifestKey, sha256: set.manifestSha256 }, stats };
+    const single = storedManifests.length === 1 && storedManifests[0]!.range === null ? storedManifests[0]! : null;
+    return { indexUri: args.storage.uri(indexKey), slots, keys, manifest: single ? { key: single.key, sha256: single.sha256 } : null, manifests: storedManifests, stats };
   } catch (error) {
     let cleanup: DopplerFigureStoreError["cleanup"] = "none";
     if (written.length > 0) {

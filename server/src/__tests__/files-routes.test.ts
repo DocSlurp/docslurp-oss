@@ -184,6 +184,7 @@ describe("file proxy", () => {
       for (const [relative, type] of [
         ["images/manifest.json", "application/json; charset=utf-8"], ["index.json", "application/json; charset=utf-8"],
         ["images/page-facts.jsonl", "text/plain; charset=utf-8"], ["document.md", "text/markdown; charset=utf-8"],
+        ["images/manifest.jsonl", "text/plain; charset=utf-8"], ["images/shards/0001-0064/manifest.jsonl", "text/plain; charset=utf-8"],
       ] as const) {
         open.mockResolvedValue(object("<script>alert(1)</script>", { ContentType: "text/html" }));
         const name = relative.split("/").pop()!;
