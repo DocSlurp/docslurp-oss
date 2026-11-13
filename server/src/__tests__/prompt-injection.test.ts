@@ -43,7 +43,7 @@ describe("evidence blocks", () => {
   });
 
   it("keys the evidence tag per org with a server secret, stable within the org", () => {
-    const docs = [{ title: "a.pdf", text: "Revenue was $482.6 million.", context: "Page: 3" }];
+    const docs = [{ title: "a.pdf", text: "Shipments rose to 7,215 units.", context: "Page: 3" }];
     vi.stubEnv("EVIDENCE_TAG_KEY", "k".repeat(40));
     resetEvidenceTagKeyForTests();
     const tag = evidenceNonce(docs, "org-a");
@@ -54,7 +54,7 @@ describe("evidence blocks", () => {
     // Another org gets another tag for the same evidence: no cross-tenant shared prefix.
     expect(evidenceNonce(docs, "org-b")).not.toBe(tag);
     // Any change to a document, title or context changes the tag.
-    expect(evidenceNonce([{ ...docs[0]!, text: "Revenue was $482.7 million." }], "org-a")).not.toBe(tag);
+    expect(evidenceNonce([{ ...docs[0]!, text: "Shipments rose to 7,216 units." }], "org-a")).not.toBe(tag);
     expect(evidenceNonce([{ ...docs[0]!, context: "Page: 4" }], "org-a")).not.toBe(tag);
     // Without the key the tag cannot be computed: a different key gives a different tag for the same input.
     vi.stubEnv("EVIDENCE_TAG_KEY", "z".repeat(40));
