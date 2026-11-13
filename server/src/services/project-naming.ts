@@ -183,32 +183,24 @@ export async function sweepProjectAutoTitles(options: { batchSize?: number; maxB
   const batchSize = options.batchSize ?? AUTO_TITLE_SWEEP_BATCH;
   let examined = 0;
   for (let i = 0; i < (options.maxBatches ?? AUTO_TITLE_SWEEP_MAX_BATCHES); i += 1) {
+    // Checkpoint first, evidence second. The batch's checkpoints commit before any title evidence is read, so a
+    // summary written after that commit finds a non-null checkpoint and clears it (the 0153 trigger), and one written
+    // before it is visible to the read below: no interleaving loses a late summary.
     const batch = await sql.begin(async (transaction) => {
       const tx = transaction as unknown as Db;
       const [lock] = await tx<{ locked: boolean }[]>`select pg_try_advisory_xact_lock(hashtext(${AUTO_TITLE_SWEEP_LOCK})) as locked`;
       if (!lock?.locked) return null;
       // updated_at as text: a JS Date drops the microseconds the comparison needs.
-      const rows = await tx<{ id: string; seen: string; eligible: boolean }[]>`
-        select cs.project_id as id, cs.updated_at::text as seen,
-          exists (
-            select 1 from projects w join project_search_settings s on s.project_id = w.id
-            where w.id = cs.project_id and s.compat_metadata -> 'autoTitle' ->> 'name' = w.name
-              and (
-                s.compat_metadata -> 'autoTitle' ->> 'phase' in ('empty', 'upload')
-                or (s.compat_metadata -> 'autoTitle' ->> 'phase' = 'content'
-                  and coalesce(s.compat_metadata -> 'autoTitle' ->> 'source', 'heading') <> 'summary')
-              )
-          ) as eligible
+      const rows = await tx<{ id: string; seen: string }[]>`
+        select cs.project_id as id, cs.updated_at::text as seen
         from project_corpus_stats cs
         where cs.auto_title_checked_at is distinct from cs.updated_at
         order by cs.updated_at, cs.project_id
         limit ${batchSize}
       `;
-      if (rows.length === 0) return { selected: 0, marked: 0 };
-      await refineProjectNames(rows.filter((row) => row.eligible).map((row) => row.id), tx);
+      if (rows.length === 0) return { selected: 0, marked: [] as string[] };
       // Recorded as the updated_at that was read: a document completing meanwhile leaves the project pending.
-      // SKIP LOCKED: a stats row an ingest transaction holds stays pending for the next sweep, so this transaction
-      // (which holds the renamed projects' rows) never waits on one.
+      // SKIP LOCKED: a stats row an ingest transaction holds stays pending for the next sweep.
       const marked = await tx<{ project_id: string }[]>`
         update project_corpus_stats cs set auto_title_checked_at = v.seen::timestamptz
         from unnest(${tx.array(rows.map((row) => row.id))}::text[], ${tx.array(rows.map((row) => row.seen))}::text[]) as v(id, seen)
@@ -218,13 +210,26 @@ export async function sweepProjectAutoTitles(options: { batchSize?: number; maxB
         )
         returning cs.project_id
       `;
-      return { selected: rows.length, marked: marked.length };
+      return { selected: rows.length, marked: marked.map((row) => row.project_id) };
     });
     // Another instance holds the lock and is doing this work.
     if (!batch) break;
-    examined += batch.marked;
+    if (batch.marked.length) {
+      // Read after the checkpoint commit; only projects whose title is still automatic are renamed.
+      const eligible = await sql<{ id: string }[]>`
+        select w.id from projects w join project_search_settings s on s.project_id = w.id
+        where w.id = any(${sql.array(batch.marked)}::text[]) and s.compat_metadata -> 'autoTitle' ->> 'name' = w.name
+          and (
+            s.compat_metadata -> 'autoTitle' ->> 'phase' in ('empty', 'upload')
+            or (s.compat_metadata -> 'autoTitle' ->> 'phase' = 'content'
+              and coalesce(s.compat_metadata -> 'autoTitle' ->> 'source', 'heading') <> 'summary')
+          )
+      `;
+      await refineProjectNames(eligible.map((row) => row.id));
+    }
+    examined += batch.marked.length;
     // A short page is the end of the queue; an unmarked row would be selected again, so leave it to the next sweep.
-    if (batch.selected < batchSize || batch.marked < batch.selected) break;
+    if (batch.selected < batchSize || batch.marked.length < batch.selected) break;
   }
   return examined;
 }

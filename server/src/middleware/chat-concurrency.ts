@@ -215,7 +215,7 @@ export function createRedisChatSlotBackend(url: string, keyPrefix?: string): Cha
 }
 
 /** An Upstash REST backend (the limiter's other shared store). */
-function createUpstashChatSlotBackend(url: string, token: string): ChatSlotBackend {
+export function createUpstashChatSlotBackend(url: string, token: string): ChatSlotBackend {
   const send = async (command: string[]) => {
     const response = await fetch(url, {
       method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
@@ -226,7 +226,24 @@ function createUpstashChatSlotBackend(url: string, token: string): ChatSlotBacke
     if (!response.ok) throw new Error(`Upstash Redis returned ${response.status}`);
     return payload.result;
   };
+  // The same eviction check as the TCP backend, once per process (retried after a failure): REST stores get no
+  // exemption, so an evicting or unverifiable one is refused in production.
+  let verified: Promise<void> | null = null;
+  const verify = () => {
+    verified ??= verifySlotEvictionPolicy({
+      configGet: async () => {
+        const reply = await send(["CONFIG", "GET", "maxmemory-policy"]);
+        return Array.isArray(reply) && typeof reply[1] === "string" ? reply[1] : null;
+      },
+      infoMemory: async () => {
+        const reply = await send(["INFO", "memory"]);
+        return typeof reply === "string" ? reply : null;
+      },
+    }).catch((error) => { verified = null; throw error; });
+    return verified;
+  };
   const run = async (call: { sha: string; source: string; tail: string[] }) => {
+    await verify();
     try {
       return await send(["EVALSHA", call.sha, ...call.tail]);
     } catch (error) {

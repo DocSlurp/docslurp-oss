@@ -13,6 +13,15 @@ import { operationOutputTopic, publishOperationOutput } from "./operation-delive
 import { executionAttempt } from "./native-attempts.js";
 import { durableChatTurnOptions } from "./chat-turn-options.js";
 
+/** Bound on one output publish while the publish transaction holds the session share lock (see publish()). */
+const PUBLISH_TIMEOUT_MS=3_000;
+async function publishWithin<T>(ms:number,promise:Promise<T>):Promise<T> {
+  let timer:ReturnType<typeof setTimeout>|undefined;
+  try {
+    return await Promise.race([promise,new Promise<never>((_,reject)=>{timer=setTimeout(()=>reject(new Error("operation_publish_timeout")),ms);})]);
+  } finally { if(timer)clearTimeout(timer); }
+}
+
 /** Per-operation and per-root (whole tree) output quotas, in bytes. */
 const OPERATION_OUTPUT_LIMIT=262144;
 const ROOT_OUTPUT_LIMIT=524288;
@@ -128,6 +137,11 @@ export function createProjectChatExecutor(manager:BackgroundTaskManager,pubsub:P
       // Recheck under the cancellation lock after the reservation commits.
       // Reservations are conservative and never refunded on uncertain output.
       await sql.begin(async tx=>{
+        // The share lock below must never outlive a stalled Redis: Postgres itself ends this transaction (releasing
+        // the lock, so sign-out and session refresh proceed) if it sits idle waiting on the publish for 3 s, and the
+        // client gives up on the publish at the same bound. A publish that times out is an uncertain write, handled
+        // like any other failed publication (quota stays reserved; the turn fails).
+        await tx`set local idle_in_transaction_session_timeout = '3s'`;
         await lockAndFence(tx);
         // Revocation fence: share-lock the session row, then re-validate it in this
         // transaction. A sign-out or session revocation (a delete or update of that
@@ -136,7 +150,7 @@ export function createProjectChatExecutor(manager:BackgroundTaskManager,pubsub:P
         const [held]=await tx`select id from session where id=${actor.sessionId} and "userId"=${actor.userId} for share`;
         if(!held||!await revalidateRealtimeSession(actor,signal,tx))throw new Error("session_revoked");
         publicationAttempted=true;
-        await publishOperationOutput(pubsub,task.id,{kind,payload});
+        await publishWithin(PUBLISH_TIMEOUT_MS,publishOperationOutput(pubsub,task.id,{kind,payload}));
         if(kind==="tool")tools.push(payload);
         if(kind==="evidence")evidence=payload;
         if(kind==="text"&&payload&&typeof payload==="object"&&"text" in payload)text+=String(payload.text);

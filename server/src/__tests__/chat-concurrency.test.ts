@@ -14,6 +14,7 @@ import {
   resetChatConcurrency,
   resolveChatSlotBackendConfig,
   verifySlotEvictionPolicy,
+  createUpstashChatSlotBackend,
   type ChatSlotBackend,
 } from "../middleware/chat-concurrency.js";
 
@@ -218,5 +219,39 @@ describe("chat-slot Redis eviction policy", () => {
     await expect(verifySlotEvictionPolicy(reader(new Error("denied"), new Error("denied")), true)).rejects.toThrow(/unverifiable/);
     await expect(verifySlotEvictionPolicy(reader("allkeys-lru"), false)).resolves.toBeUndefined();
     expect(console.error).toHaveBeenCalledWith(expect.stringContaining("reason=redis-eviction-policy"));
+  });
+});
+
+describe("REST chat-slot backend eviction check", () => {
+  const counters = [{ key: "k", tag: "k", cap: 1 }];
+  const stub = (policy: string | null) => vi.fn(async (_url: unknown, init?: { body?: string }) => {
+    const command = JSON.parse(String(init?.body)) as string[];
+    const result = command[0] === "CONFIG" ? (policy ? ["maxmemory-policy", policy] : null)
+      : command[0] === "INFO" ? null
+      : 1;
+    return new Response(JSON.stringify(policy === null && command[0] === "CONFIG" ? { error: "ERR unknown command" } : { result }), { status: 200 });
+  });
+  beforeEach(() => { vi.spyOn(console, "error").mockImplementation(() => {}); vi.stubEnv("NODE_ENV", "production"); });
+  afterEach(() => { vi.unstubAllEnvs(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
+
+  it("acquires on a noeviction store, checking the policy once", async () => {
+    const fetch = stub("noeviction");
+    vi.stubGlobal("fetch", fetch);
+    const backend = createUpstashChatSlotBackend("https://rest.example.com", "t");
+    await expect(backend.acquire(counters, 60_000, "lease-1")).resolves.toBe(true);
+    await expect(backend.acquire(counters, 60_000, "lease-2")).resolves.toBe(true);
+    const commands = fetch.mock.calls.map(([, init]) => (JSON.parse(String(init?.body)) as string[])[0]);
+    expect(commands.filter((command) => command === "CONFIG")).toHaveLength(1);
+  });
+
+  it("refuses an evicting or unverifiable store in production before running the script", async () => {
+    for (const policy of ["allkeys-lru", null]) {
+      const fetch = stub(policy);
+      vi.stubGlobal("fetch", fetch);
+      const backend = createUpstashChatSlotBackend("https://rest.example.com", "t");
+      await expect(backend.acquire(counters, 60_000, "lease")).rejects.toThrow(/noeviction is required/);
+      const commands = fetch.mock.calls.map(([, init]) => (JSON.parse(String(init?.body)) as string[])[0]);
+      expect(commands).not.toContain("EVALSHA");
+    }
   });
 });
