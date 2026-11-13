@@ -231,6 +231,24 @@ live documents whose `images_status` is `resumable`, oldest first with a keyset 
 present (`--images-resume` refuses a different PDF or settings) and the count of resumable images. Nothing resumes yet;
 a resume worker would run `--images-resume` in the PDF VM and write the ledger again through the same transaction.
 
+## Storage billing
+
+Stored figures are billed as storage, measured rather than estimated. The daily storage meter
+(`server/src/services/billing/storage-meter.ts`) reads `getOrgStorage`, which adds the sum of
+`document_extraction_levels.asset_bytes` to `objectBytes`. The figure bytes follow the same rules as source bytes:
+
+- Live documents (completed, not superseded) count. The daily meter leaves out extracts, which pay for their own
+  retention window.
+- Archived versions that are not yet purged also count.
+- Superseded, purged and failed documents add nothing.
+- Every sum is filtered by the organization, and the ledger's composite foreign key ties each row to its document's own
+  organization.
+
+The per-page artifact estimate (96 KiB per page) never included figures, so nothing is counted twice. The figure bytes
+are charged through the existing daily storage event and credit debit, once per organization per day. The event's
+metadata records `measuredArtifactBytes`, and so does `storage_meter_days.measured_artifact_bytes`. Pending uploads and
+orphaned objects that no committed ledger row vouches for are never billed.
+
 ## Not yet
 
 - Figures are not merged into search results, chat citations or exports; they are artifacts and markers only.

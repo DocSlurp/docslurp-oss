@@ -80,12 +80,15 @@ async function meterOrgDay(org: { id: string; created_by_user_id: string }, day:
   const daysInMonth = daysInUtcMonth(day);
   const credits = dailyStorageCredits(bytes, daysInMonth);
   const charge = { totalCredits: credits };
+  console.info(`[storage-meter] orgId=${org.id} day=${day} measuredArtifactBytes=${Math.round(storage.measuredArtifactBytes)} ` +
+    `estimatedBytes=${Math.round(bytes - storage.sourceBytes - storage.measuredArtifactBytes)} credits=${credits}`);
 
   return sql.begin(async (tx) => {
     const client = tx as unknown as SqlClient;
     const inserted = await client`
-      insert into storage_meter_days (org_id, day, object_bytes, index_bytes, credits)
-      values (${org.id}, ${day}::date, ${Math.round(storage.objectBytes)}, ${Math.round(storage.indexBytes)}, ${charge.totalCredits})
+      insert into storage_meter_days (org_id, day, object_bytes, index_bytes, measured_artifact_bytes, credits)
+      values (${org.id}, ${day}::date, ${Math.round(storage.objectBytes)}, ${Math.round(storage.indexBytes)},
+        ${Math.round(storage.measuredArtifactBytes)}, ${charge.totalCredits})
       on conflict (org_id, day) do nothing
       returning org_id
     `;
@@ -112,7 +115,9 @@ async function meterOrgDay(org: { id: string; created_by_user_id: string }, day:
           indexBytes: storage.indexBytes,
           sourceBytes: storage.sourceBytes,
           pages: storage.pages,
-          // Artifact and index bytes are estimated from page counts.
+          // Stored figure files, their index and manifest: measured from the asset ledger, included in objectBytes.
+          measuredArtifactBytes: storage.measuredArtifactBytes,
+          // The rest of the artifact and index bytes are estimated from page counts.
           estimate: true,
         }),
       },

@@ -24,7 +24,17 @@ import { isStripeConfigured } from "./stripe-client.js";
 export const ESTIMATED_ARTIFACT_BYTES_PER_PAGE = 96 * 1024;
 export const ESTIMATED_INDEX_BYTES_PER_PAGE = 28 * 1024;
 
-export type OrgStorage = { objectBytes: number; indexBytes: number; sourceBytes: number; pages: number };
+export type OrgStorage = {
+  objectBytes: number;
+  indexBytes: number;
+  sourceBytes: number;
+  pages: number;
+  /**
+   * Measured bytes of stored figure files plus their index and manifest (document_extraction_levels.asset_bytes,
+   * recomputed from committed ledger rows), included in objectBytes. The per-page estimate never covered figures.
+   */
+  measuredArtifactBytes: number;
+};
 
 /**
  * Object + index bytes the org is storing: live documents from
@@ -32,6 +42,10 @@ export type OrgStorage = { objectBytes: number; indexBytes: number; sourceBytes:
  * source stay stored for browsing). Live and archived rows are disjoint
  * (archived rows are superseded), so nothing is double-counted. Purged rows
  * are excluded.
+ *
+ * Measured figure bytes (the asset ledger, migration 0140) follow the same liveness rules as source bytes: live
+ * documents (completed, not superseded; extracts left out when asked) plus archived, not purged versions. One row per
+ * document, so a document is counted at most once whichever branch matches. Every query is scoped by the org.
  */
 export async function getOrgStorage(
   orgId: string,
@@ -50,7 +64,10 @@ export async function getOrgStorage(
         where w.org_id = ${orgId} and r.extract_id is not null
           and d.status = 'completed' and d.superseded_at is null)`
     : db`(select 0 as bytes, 0 as pages)`;
-  const [row] = await db<{ source_bytes: string | number; pages: string | number; extra_pages: string | number }[]>`
+  const excludeExtracts = options.excludeExtracts === true;
+  const [row] = await db<{
+    source_bytes: string | number; pages: string | number; extra_pages: string | number; artifact_bytes: string | number;
+  }[]>`
     with extract_docs as ${extracts}
     select
       greatest(0, coalesce((select sum(s.source_bytes) from project_corpus_stats s
@@ -67,14 +84,23 @@ export async function getOrgStorage(
       -- its chunks, vectors and artifacts scale with what it holds, so the storage estimate does too.
       coalesce((select sum(greatest(d.billing_pages - d.page_count, 0)) from documents d
         join projects w on w.id = d.project_id
-        where w.org_id = ${orgId} and d.status = 'completed' and d.superseded_at is null and d.billing_pages > d.page_count), 0)::text as extra_pages
+        where w.org_id = ${orgId} and d.status = 'completed' and d.superseded_at is null and d.billing_pages > d.page_count), 0)::text as extra_pages,
+      coalesce((select sum(l.asset_bytes) from document_extraction_levels l
+        join documents d on d.id = l.document_id and d.org_id = l.org_id and d.project_id = l.project_id
+        where l.org_id = ${orgId} and l.asset_bytes > 0
+          and ((d.status = 'completed' and d.superseded_at is null
+                and not (${excludeExtracts}::boolean and exists (
+                  select 1 from project_runs r where r.id = d.run_id and r.extract_id is not null)))
+            or (d.archived_at is not null and d.purged_at is null))), 0)::text as artifact_bytes
   `;
   const sourceBytes = Number(row?.source_bytes ?? 0);
   const pages = Number(row?.pages ?? 0) + Number(row?.extra_pages ?? 0);
+  const measuredArtifactBytes = Number(row?.artifact_bytes ?? 0);
   return {
     sourceBytes,
     pages,
-    objectBytes: sourceBytes + pages * ESTIMATED_ARTIFACT_BYTES_PER_PAGE,
+    measuredArtifactBytes,
+    objectBytes: sourceBytes + pages * ESTIMATED_ARTIFACT_BYTES_PER_PAGE + measuredArtifactBytes,
     indexBytes: pages * ESTIMATED_INDEX_BYTES_PER_PAGE,
   };
 }

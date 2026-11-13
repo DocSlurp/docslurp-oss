@@ -3326,6 +3326,8 @@ export const storageMeterDays = pgTable(
     objectBytes: bigint("object_bytes", { mode: "number" }).default(0).notNull(),
     // You can use { mode: "bigint" } if numbers are exceeding js number limitations
     indexBytes: bigint("index_bytes", { mode: "number" }).default(0).notNull(),
+    // Of objectBytes, the figure bytes measured from the asset ledger (migration 0141).
+    measuredArtifactBytes: bigint("measured_artifact_bytes", { mode: "number" }).default(0).notNull(),
     credits: numeric({ precision: 24, scale: 12, mode: "number" }).default(0).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "string" })
       .defaultNow()

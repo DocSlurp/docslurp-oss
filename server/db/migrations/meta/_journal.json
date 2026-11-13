@@ -988,6 +988,13 @@
       "when": 1794303600000,
       "tag": "0140_document_asset_ledger",
       "breakpoints": true
+    },
+    {
+      "idx": 141,
+      "version": "7",
+      "when": 1794307200000,
+      "tag": "0141_figure_storage_billing",
+      "breakpoints": true
     }
   ]
 }
