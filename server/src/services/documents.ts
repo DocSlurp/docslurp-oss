@@ -1,4 +1,4 @@
-import { isPageWithheld, piiWithheldSummary, piiWithholding, withheldPageOfSlot, MIME_BY_EXTENSION, fileExtension, realtimeViewerSnapshotSchema, cleanDocumentTitle, mediaSummarySchema, publicDiagnostics, publicDocumentError, sanitizeStoredPipeline, type MediaSummary } from "@docslurp/shared";
+import { isPageWithheld, type PiiWithheldSummary, piiWithheldSummary, piiWithholding, withheldPageOfSlot, MIME_BY_EXTENSION, fileExtension, realtimeViewerSnapshotSchema, cleanDocumentTitle, mediaSummarySchema, publicDiagnostics, publicDocumentError, sanitizeStoredPipeline, type MediaSummary } from "@docslurp/shared";
 
 import {
   defaultPipelineFeatures,
@@ -530,6 +530,8 @@ export interface DocumentViewerPayload {
   };
   /** Present for audio/video: stats for the media focus view ("This recording"). */
   media?: MediaSummary | null;
+  /** What the PII policy withholds: page numbers and counts, never content (packages/shared/src/pii-withholding.ts). */
+  piiWithheld: PiiWithheldSummary;
   run: Pick<ProjectRun, "id" | "projectId" | "stage" | "status" | "updatedAt"> | null;
   usage: {
     document: {
