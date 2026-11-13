@@ -1,0 +1,3 @@
+![page 1 scan](images/page-0001/image-001.jpg)![page 2 scan](images/page-0002/image-001.jpg)
+
+Scanned line 0 of the page Scanned line 1 of the page Scanned line 2 of the page Scanned line 3 of the page Scanned line 4 of the pageScanned line 0 of the page Scanned line 1 of the page Scanned line 2 of the page Scanned line 3 of the page Scanned line 4 of the page![page 7 scan](images/page-0007/image-001.png)
