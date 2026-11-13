@@ -112,6 +112,8 @@ export interface SupersededPurgeResult {
   failed: number;
   /** Superseded versions kept browsable (search data removed) within the retention window. */
   archived?: number;
+  /** Queue rows deferred because their target is still in use (an earlier run's figure folder a row still vouches for). */
+  deferred?: number;
 }
 
 type RetentionAction = "archive" | "purge";
@@ -1165,7 +1167,8 @@ export async function drainStorageCleanupQueue(
             limit 1`;
           if (inUse) {
             await client`update storage_cleanup_queue set not_before = now() + interval '1 day' where id = ${row.id}`;
-            result.purged += 1;
+            // Deferred, not purged (R2-L10).
+            result.deferred = (result.deferred ?? 0) + 1;
             return;
           }
           await purgePrefix(txStorage, row.target, () => false);
