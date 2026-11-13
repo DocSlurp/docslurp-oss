@@ -2,6 +2,9 @@ import postgres from "postgres";
 import { Hono } from "hono";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { startMigratedPostgres } from "@docslurp/worker/testing";
+/** The explicit search access scope every search caller passes (search/access-scope.ts). */
+const TEST_SEARCH_SCOPE = { orgId: "o", projectIds: "org", modeCeiling: null } as const;
+
 
 /**
  * search_zero_results.session_id references search_sessions. A zero-hit search
@@ -99,7 +102,7 @@ describe("zero-result diagnostics reference a persisted search session", () => {
   // Synchronous session writes (write-behind follows native search, which is on by default).
   beforeEach(() => { vi.stubEnv("SEARCH_SESSION_WRITE_BEHIND", "0"); });
   it("single search", async () => {
-    const response = await search.hybridSearch("maintenance", "u", { ...options, filters: zeroHitFilters });
+    const response = await search.hybridSearch("maintenance", "u", { ...options, filters: zeroHitFilters }, TEST_SEARCH_SCOPE);
     expect(response.results).toEqual([]);
       expect(await zeroResultRows()).toEqual([
       { session_id: response.sessionId, project_id: "w", persisted: true, chat_session_id: null },
@@ -110,7 +113,7 @@ describe("zero-result diagnostics reference a persisted search session", () => {
   it("child searches that suppress their session row record nothing themselves", async () => {
     const response = await search.hybridSearch("maintenance", "u", {
       ...options, filters: zeroHitFilters, suppressSessionLog: true, rootSessionId: crypto.randomUUID(),
-    });
+    }, TEST_SEARCH_SCOPE);
     expect(response.results).toEqual([]);
       expect(await zeroResultRows()).toEqual([]);
     expect(reported).toEqual([]);
@@ -156,7 +159,7 @@ describe("zero-result diagnostics reference a persisted search session", () => {
   it("is readable as soon as the search returns", async () => {
     // GET /v1/search/diagnostics?sessionId= is called with the id a zero-hit
     // search just returned, so the row must exist before the response does.
-    const response = await search.hybridSearch("maintenance", "u", { ...options, filters: zeroHitFilters });
+    const response = await search.hybridSearch("maintenance", "u", { ...options, filters: zeroHitFilters }, TEST_SEARCH_SCOPE);
     expect(await zeroResultRows()).toEqual([
       { session_id: response.sessionId, project_id: "w", persisted: true, chat_session_id: null },
     ]);
@@ -167,7 +170,7 @@ describe("zero-result diagnostics reference a persisted search session", () => {
     // search under one root session id; analytics count sessions, not attempts.
     const rootSessionId = crypto.randomUUID();
     for (let attempt = 0; attempt < 3; attempt += 1) {
-      await search.hybridSearch("maintenance", "u", { ...options, filters: zeroHitFilters, rootSessionId });
+      await search.hybridSearch("maintenance", "u", { ...options, filters: zeroHitFilters, rootSessionId }, TEST_SEARCH_SCOPE);
     }
     expect(await zeroResultRows()).toEqual([
       { session_id: rootSessionId, project_id: "w", persisted: true, chat_session_id: null },
@@ -176,9 +179,9 @@ describe("zero-result diagnostics reference a persisted search session", () => {
 
   it("a reused session whose later attempt finds results drops its zero-result row", async () => {
     const rootSessionId = crypto.randomUUID();
-    await search.hybridSearch("maintenance", "u", { ...options, filters: zeroHitFilters, rootSessionId });
+    await search.hybridSearch("maintenance", "u", { ...options, filters: zeroHitFilters, rootSessionId }, TEST_SEARCH_SCOPE);
     expect(await zeroResultRows()).toHaveLength(1);
-    const found = await search.hybridSearch("maintenance", "u", { ...options, filters: { projectId: "w" }, rootSessionId });
+    const found = await search.hybridSearch("maintenance", "u", { ...options, filters: { projectId: "w" }, rootSessionId }, TEST_SEARCH_SCOPE);
     expect(found.results.length).toBeGreaterThan(0);
     expect(found.sessionId).toBe(rootSessionId);
     expect(await zeroResultRows()).toEqual([]);
@@ -187,7 +190,7 @@ describe("zero-result diagnostics reference a persisted search session", () => {
   it("a failed diagnostics insert never fails the search", async () => {
     await sql`alter table search_zero_results add constraint reject_all check (false) not valid`;
     try {
-      const response = await search.hybridSearch("maintenance", "u", { ...options, filters: zeroHitFilters });
+      const response = await search.hybridSearch("maintenance", "u", { ...options, filters: zeroHitFilters }, TEST_SEARCH_SCOPE);
       expect(response.results).toEqual([]);
           expect(reported).toHaveLength(1);
       expect(await sql`select id from search_sessions where id = ${response.sessionId}`).toHaveLength(1);
@@ -202,7 +205,7 @@ describe("write-behind session writes (SEARCH_SESSION_WRITE_BEHIND)", () => {
 
   it("answers before its rows commit, and a reader that awaits the session sees them", async () => {
     const session = await import("../search/session.js");
-    const response = await search.hybridSearch("maintenance", "u", { ...options, filters: zeroHitFilters });
+    const response = await search.hybridSearch("maintenance", "u", { ...options, filters: zeroHitFilters }, TEST_SEARCH_SCOPE);
     expect(response.results).toEqual([]);
     await session.awaitSearchSessionWrites(response.sessionId);
     expect(await zeroResultRows()).toEqual([
@@ -237,7 +240,7 @@ describe("write-behind session writes (SEARCH_SESSION_WRITE_BEHIND)", () => {
 
   it("waits for its own writes once the backlog is full (SEARCH_WRITE_BEHIND_MAX_PENDING)", async () => {
     vi.stubEnv("SEARCH_WRITE_BEHIND_MAX_PENDING", "0");
-    const response = await search.hybridSearch("maintenance", "u", { ...options, filters: zeroHitFilters });
+    const response = await search.hybridSearch("maintenance", "u", { ...options, filters: zeroHitFilters }, TEST_SEARCH_SCOPE);
     // No await on the session: backpressure made the search commit before answering.
     expect(await zeroResultRows()).toEqual([
       { session_id: response.sessionId, project_id: "w", persisted: true, chat_session_id: null },
@@ -247,7 +250,7 @@ describe("write-behind session writes (SEARCH_SESSION_WRITE_BEHIND)", () => {
 
   it("records a click sent right after the answer", async () => {
     const session = await import("../search/session.js");
-    const response = await search.hybridSearch("maintenance", "u", { ...options, filters: { projectId: "w" } });
+    const response = await search.hybridSearch("maintenance", "u", { ...options, filters: { projectId: "w" } }, TEST_SEARCH_SCOPE);
     expect(response.results.length).toBeGreaterThan(0);
     const clicked = await app().request(`/v1/search/${response.sessionId}/feedback`, {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ clickedChunkId: "d-chunk" }),
@@ -263,9 +266,9 @@ describe("write-behind session writes (SEARCH_SESSION_WRITE_BEHIND)", () => {
     const rootSessionId = crypto.randomUUID();
     // Three zero-hit attempts, one that finds results, all queued before any write commits.
     for (let attempt = 0; attempt < 3; attempt += 1) {
-      await search.hybridSearch("maintenance", "u", { ...options, filters: zeroHitFilters, rootSessionId });
+      await search.hybridSearch("maintenance", "u", { ...options, filters: zeroHitFilters, rootSessionId }, TEST_SEARCH_SCOPE);
     }
-    const found = await search.hybridSearch("maintenance", "u", { ...options, filters: { projectId: "w" }, rootSessionId });
+    const found = await search.hybridSearch("maintenance", "u", { ...options, filters: { projectId: "w" }, rootSessionId }, TEST_SEARCH_SCOPE);
     expect(found.results.length).toBeGreaterThan(0);
     await session.drainSearchSessionWrites();
     // The latest attempt decides: results found, so no zero-result row remains.

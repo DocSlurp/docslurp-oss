@@ -8,6 +8,9 @@ import { encodeLanceChunkHydration, LANCE_HYDRATION_COLUMN_SPECS } from "@docslu
 import postgres from "postgres";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { startMigratedPostgres } from "@docslurp/worker/testing";
+/** The explicit search access scope every search caller passes (search/access-scope.ts). */
+const TEST_SEARCH_SCOPE = { orgId: "org1", projectIds: "org", modeCeiling: null } as const;
+
 
 /**
  * SEARCH_LANCEDB_NATIVE against migrated Postgres and a real local LanceDB
@@ -152,7 +155,7 @@ function near(id: string): number[] {
 
 async function run(native: boolean, query: string, options: Record<string, unknown>) {
   vi.stubEnv("SEARCH_LANCEDB_NATIVE", native ? "1" : "0");
-  const response = await search.hybridSearch(query, "u", { ...baseOptions, ...options, filters: { projectId: "w", ...(options.filters as object ?? {}) } });
+  const response = await search.hybridSearch(query, "u", { ...baseOptions, ...options, filters: { projectId: "w", ...(options.filters as object ?? {}) } }, TEST_SEARCH_SCOPE);
   await session.drainSearchSessionWrites();
   return response;
 }
@@ -222,7 +225,7 @@ describe("SEARCH_LANCEDB_NATIVE", () => {
     await run(true, "torque bearing", { queryVector, filters });
     vi.stubEnv("SEARCH_LANCEDB_NATIVE", "1");
     statements.length = 0;
-    const response = await search.hybridSearch("torque bearing", "u", { ...baseOptions, queryVector, filters: { projectId: "w", ...filters } });
+    const response = await search.hybridSearch("torque bearing", "u", { ...baseOptions, queryVector, filters: { projectId: "w", ...filters } }, TEST_SEARCH_SCOPE);
     // Write-behind session and usage writes may already have started; they are not on the answer's path.
     const reads = statements.filter((statement) => !/^\s*(begin|commit|insert|delete|update|with recorded|savepoint|release)/i.test(statement));
     await session.drainSearchSessionWrites();
@@ -268,7 +271,7 @@ describe("SEARCH_LANCEDB_NATIVE", () => {
       const queryVector = near("doc4-9");
       const legacy = await run(false, "cavitation erosion", { queryVector });
       vi.stubEnv("SEARCH_LANCEDB_NATIVE", undefined);
-      const native = await search.hybridSearch("cavitation erosion", "u", { ...baseOptions, queryVector, filters: { projectId: "w" } });
+      const native = await search.hybridSearch("cavitation erosion", "u", { ...baseOptions, queryVector, filters: { projectId: "w" } }, TEST_SEARCH_SCOPE);
       await session.drainSearchSessionWrites();
       expect(native.timings?.nativeLexicalUnindexed).toBe(1);
       expect(native.timings?.nativeHydrationPostgres).toBe(1);

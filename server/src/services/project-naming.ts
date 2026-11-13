@@ -14,8 +14,8 @@ import { sql } from "../db.js";
  * The state lives in `project_search_settings.compat_metadata.autoTitle`
  * (`{ phase, name, source? }`). Automatic naming applies only while
  * `autoTitle.name` equals the project's name, so a manual rename stops it for
- * good. Renames run lazily (project reads, uploads and the first chat turn);
- * no timer or background job is involved.
+ * good. Upload titles are written by the upload itself; content titles by the
+ * maintenance sweep after ingest (sweepProjectAutoTitles). Project reads never rename.
  */
 export const AUTO_TITLE_PHASES = ["empty", "upload", "content", "chat"] as const;
 export type AutoTitlePhase = (typeof AUTO_TITLE_PHASES)[number];
@@ -155,8 +155,40 @@ export async function nameProjectFromUpload(args: { projectId: string; filenames
   return (await applyAutoTitle({ projectId: args.projectId, currentName: row.name, name, phase: "upload" })) ? name : null;
 }
 
+/** How far back the auto-title sweep looks for projects whose corpus changed (covers missed sweep ticks). */
+const AUTO_TITLE_SWEEP_WINDOW_MINUTES = 15;
+
 /**
- * Advances automatic titles from content (lazily, on project reads). Content prefers the first stored
+ * After ingest: refines the automatic titles of projects whose current corpus
+ * changed recently (project_corpus_stats is trigger-maintained as documents
+ * complete), and that still name themselves automatically. Runs from the
+ * maintenance sweep, so project reads (dashboard, chat, search) never write.
+ * Idempotent across instances: applyAutoTitle only moves a title forward
+ * while it still equals the project's name.
+ */
+export async function sweepProjectAutoTitles(): Promise<number> {
+  const rows = await sql<{ id: string }[]>`
+    select cs.project_id as id
+    from project_corpus_stats cs
+    join projects w on w.id = cs.project_id
+    join project_search_settings s on s.project_id = w.id
+    where cs.updated_at > now() - make_interval(mins => ${AUTO_TITLE_SWEEP_WINDOW_MINUTES})
+      and s.compat_metadata -> 'autoTitle' ->> 'name' = w.name
+      and (
+        s.compat_metadata -> 'autoTitle' ->> 'phase' in ('empty', 'upload')
+        or (s.compat_metadata -> 'autoTitle' ->> 'phase' = 'content'
+          and coalesce(s.compat_metadata -> 'autoTitle' ->> 'source', 'heading') <> 'summary')
+      )
+    order by cs.updated_at desc
+    limit 200
+  `;
+  if (rows.length === 0) return 0;
+  await refineProjectNames(rows.map((row) => row.id));
+  return rows.length;
+}
+
+/**
+ * Advances automatic titles from content (after ingest, from the maintenance sweep). Content prefers the first stored
  * document summary over the first chunk heading or Index Map title; a
  * heading-titled project is upgraded once when a summary arrives. A manual
  * edit stops automatic naming.

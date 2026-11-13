@@ -1,4 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+/** The explicit search access scope every search caller passes (search/access-scope.ts). */
+const TEST_SEARCH_SCOPE = { orgId: "org-1", projectIds: "org", modeCeiling: null } as const;
+
 
 // Search statements run directly on the mocked pool (no per-statement timeout transaction).
 process.env.SEARCH_STATEMENT_TIMEOUT_MS = "0";
@@ -140,7 +143,7 @@ describe("hybridSearch", () => {
     sqlMock.mockReset();
     sqlMock.unsafe.mockReset();
 
-    await expect(hybridSearch("test", "user-1")).rejects.toBeInstanceOf(
+    await expect(hybridSearch("test", "user-1", {}, TEST_SEARCH_SCOPE)).rejects.toBeInstanceOf(
       MissingProjectScopeError,
     );
     expect(sqlMock).not.toHaveBeenCalled();
@@ -180,7 +183,7 @@ describe("hybridSearch", () => {
 
     const onSearchActivity = vi.fn();
     await expect(
-      hybridSearch("test", "user-1", { runId: "run-1", onSearchActivity }),
+      hybridSearch("test", "user-1", { runId: "run-1", onSearchActivity }, TEST_SEARCH_SCOPE),
     ).resolves.toEqual({
       timings: expect.objectContaining({ totalMs: expect.any(Number), setupMs: expect.any(Number) }),
       searchMode: "deep",
@@ -240,7 +243,7 @@ describe("hybridSearch", () => {
     await expect(
       hybridSearch("test", "user-1", {
         filters: { documentIds: ["doc-1", "doc-2"] },
-      }),
+      }, TEST_SEARCH_SCOPE),
     ).rejects.toThrow("Search scope must stay within a single project");
     expect(sqlMock.unsafe).not.toHaveBeenCalled();
   });
@@ -478,7 +481,7 @@ describe("hybridSearch", () => {
       parentRetrieval: true,
       useRerank: false,
       useMmr: false,
-    });
+    }, TEST_SEARCH_SCOPE);
 
     expect(response.results[0]?.parentText).toBe(hasPages ? "Parent page text" : "Neighboring page text");
     if (!hasPages) expect(response.results[0]?.citation.pageNumbers).toEqual([3, 4]);
@@ -583,7 +586,7 @@ describe("hybridSearch", () => {
       useMmr: false,
       parentRetrieval: false,
       suppressSessionLog: true,
-    });
+    }, TEST_SEARCH_SCOPE);
 
     expect(response.results).toHaveLength(1);
     expect(response.results[0]?.text).toContain("MATH 1010");
@@ -603,7 +606,7 @@ describe("hybridSearch", () => {
       filters: { projectId: "ws-1", documentIds: ["doc-1"] },
       queryVector: [0.1, 0.2], useRerank: false, useMmr: false,
       parentRetrieval: false, suppressSessionLog: true,
-    });
+    }, TEST_SEARCH_SCOPE);
     expect(lanceDbVectorSearch).toHaveBeenCalledWith(expect.objectContaining({
       orgId: "org-1", projectId: "ws-1", documentIds: ["doc-1"],
     }));
@@ -625,7 +628,7 @@ describe("hybridSearch", () => {
     const response = await hybridSearch("contract", "user-1", {
       filters: { projectId: "ws-1" }, queryVector: [0.1, 0.2], useRerank: false, useMmr: false,
       parentRetrieval: false, suppressSessionLog: true,
-    });
+    }, TEST_SEARCH_SCOPE);
     expect(lanceDbVectorSearch).toHaveBeenCalledWith(expect.objectContaining({ documentIds: ["copy", "owner"] }));
     expect(response.results.map((result) => result.text)).toContain("Copy chunk body");
   });
@@ -655,7 +658,7 @@ describe("hybridSearch", () => {
     const search = (query: string, options: Record<string, unknown> = {}) => hybridSearch(query, "user-1", {
       filters: { projectId: "ws-1" }, queryVector: [0.1, 0.2], useRerank: false, useMmr: false,
       parentRetrieval: false, suppressSessionLog: true, ...options,
-    });
+    }, TEST_SEARCH_SCOPE);
 
     it("reports no match instead of weak hits for a query nothing in the project answers", async () => {
       mockIndex();
@@ -748,7 +751,7 @@ describe("hybridSearch", () => {
       useMmr: false,
       parentRetrieval: false,
       suppressSessionLog: true,
-    });
+    }, TEST_SEARCH_SCOPE);
 
     expect(accessChecks).toBe(2);
     expect(lanceDbVectorSearch).not.toHaveBeenCalled();
@@ -817,7 +820,7 @@ describe("hybridSearch", () => {
       useRerank: false,
       useMmr: false,
       parentRetrieval: false,
-    });
+    }, TEST_SEARCH_SCOPE);
 
     const insertCall = sqlMock.mock.calls.find(([strings]) => {
       const text = Array.isArray(strings) ? strings.join(" ") : String(strings);
@@ -962,7 +965,7 @@ describe("hybridSearch", () => {
         useRerank: false,
         useMmr: false,
         parentRetrieval: false,
-      },
+      }, TEST_SEARCH_SCOPE
     );
 
     expect(response.results).toHaveLength(2);
@@ -1079,7 +1082,7 @@ describe("hybridSearch", () => {
       useContextualCompression: true,
       parentRetrieval: false,
       suppressSessionLog: true,
-    });
+    }, TEST_SEARCH_SCOPE);
 
     expect(response.results[0]?.text).toBe("Compressed acquisition terms.");
     expect(response.usageEvents).toEqual([

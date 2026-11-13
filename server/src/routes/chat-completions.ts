@@ -9,9 +9,9 @@ import {
   actorHasAnyApiKeyScope,
   apiKeyAllowsProject,
   getRequestActor,
-  loadActorScopedProject,
   resolveActorProjectId,
 } from "../lib/request-actor.js";
+import { authorizeActorProjectSearch } from "../lib/search-access.js";
 import { apiKeyAuth } from "../middleware/api-key-auth.js";
 import { createChatConcurrencyLimit } from "../middleware/chat-concurrency.js";
 import { assertCanSpend, isSpendBlockedError, type SpendBlockedError } from "../services/billing/spend-guard.js";
@@ -187,7 +187,9 @@ export const chatCompletionsRoutes = new Hono()
       if (error instanceof ProjectAccessError) return null;
       throw error;
     });
-    if (!projectId || !await loadActorScopedProject(projectId, actor)) {
+    // One access read, which also yields the explicit search access scope chatProject requires.
+    const authorized = projectId ? await authorizeActorProjectSearch(actor, projectId, "chat") : null;
+    if (!projectId || !authorized?.ok) {
       return c.json(errorBody("Project model not found", "invalid_request_error", "model_not_found", "model"), 404);
     }
     const chatDisabled = await projectChatDisabledBody(projectId, actor.userId);
@@ -222,6 +224,7 @@ export const chatCompletionsRoutes = new Hono()
       }));
     const args = {
       projectId,
+      scope: authorized.scope,
       speedBoost: input.docslurp?.speedBoost === true,
       userId: actor.userId,
       actor, allowAgentTools: env.publicChatAgentEnabled && input.tool_choice !== "none", signal: c.req.raw.signal,
@@ -257,7 +260,7 @@ export const chatCompletionsRoutes = new Hono()
     // Refuse before the stream opens, so a blocked spend is a 402, not an SSE error.
     try {
       // Pre-check only: chatProject takes the interactive hold.
-      await assertCanSpend(null, projectId, { kind: "interactive", hold: false });
+      await assertCanSpend(authorized.scope.orgId, projectId, { kind: "interactive", hold: false });
     } catch (error) {
       if (isSpendBlockedError(error)) return c.json(spendBlockedBody(c, error), 402);
       throw error;

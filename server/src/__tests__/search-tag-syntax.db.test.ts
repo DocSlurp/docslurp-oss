@@ -1,6 +1,9 @@
 import postgres from "postgres";
 import { afterAll, beforeAll, expect, it, vi } from "vitest";
 import { startMigratedPostgres } from "@docslurp/worker/testing";
+/** The explicit search access scope every search caller passes (search/access-scope.ts). */
+const TEST_SEARCH_SCOPE = { orgId: "syntax-org", projectIds: "org", modeCeiling: null } as const;
+
 
 let stop: () => Promise<void>;
 let sql: postgres.Sql;
@@ -38,7 +41,7 @@ it("retrieves ordinary budget text using a tag label as scope rather than releva
   const result = await hybridSearch("budget tag:finance", "syntax-user", {
     filters: { projectId: "syntax-project" }, selfQuery: true,
     queryVector: [], useRerank: true, useMmr: false, parentRetrieval: false,
-  });
+  }, TEST_SEARCH_SCOPE);
   expect(result.results.map((hit) => hit.citation.documentId)).toEqual(["finance"]);
   expect(result.results[0]?.relevance).toBe(1);
 });
@@ -47,7 +50,7 @@ it("preserves case and spaces in quoted tag labels", async () => {
   const result = await hybridSearch('budget tag:"Finance Team"', "syntax-user", {
     filters: { projectId: "syntax-project" }, selfQuery: true,
     queryVector: [], useRerank: true, parentRetrieval: false,
-  });
+  }, TEST_SEARCH_SCOPE);
   expect(result.results.map((hit) => hit.citation.documentId)).toEqual(["quoted"]);
   expect(result.results[0]?.relevance).toBe(1);
 });
@@ -56,7 +59,7 @@ it("keeps explicit caller tag filters authoritative over query labels", async ()
   const result = await hybridSearch("budget tag:finance", "syntax-user", {
     filters: { projectId: "syntax-project", tags: ["other"] }, selfQuery: true,
     queryVector: [], useRerank: true, parentRetrieval: false,
-  });
+  }, TEST_SEARCH_SCOPE);
   expect(result.results.map((hit) => hit.citation.documentId)).toEqual(["other"]);
   expect(result.results[0]?.relevance).toBe(1);
 });
@@ -65,6 +68,6 @@ it("rejects malformed and tag-only searches instead of widening their scope", as
   for (const query of ["budget tag:", 'budget tag:"Finance Team', 'budget tag:"finance"suffix', "budget tag:finance,other", "tag:finance"]) {
     await expect(hybridSearch(query, "syntax-user", {
       filters: { projectId: "syntax-project" }, selfQuery: true, queryVector: [],
-    })).rejects.toMatchObject({ name: "InvalidRetrievalQueryError" });
+    }, TEST_SEARCH_SCOPE)).rejects.toMatchObject({ name: "InvalidRetrievalQueryError" });
   }
 });
