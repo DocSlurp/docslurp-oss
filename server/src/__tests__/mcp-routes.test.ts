@@ -164,7 +164,8 @@ describe("mcpRoutes", () => {
       expect(defaulted).toEqual({
         project: { id: "default-ws", slug: "main", name: "Main", isDefault: true },
         projects: [{ id: "default-ws", slug: "main", name: "Main", isDefault: true }, { id: "ws-2", slug: "legal", name: "Legal", isDefault: false }],
-        limits: { maxFiles: 10, maxFileBytes: 5368709120 },
+        // The server's own upload limit (MAX_UPLOAD_BYTES), not a fixed 5 GiB.
+        limits: { maxFiles: 10, maxFileBytes: env.maxUploadBytes },
         uploader: { resourceUri: UPLOAD_UI_URI },
         hint: expect.any(String),
       });
