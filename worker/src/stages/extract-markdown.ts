@@ -1,9 +1,9 @@
 import { createHash } from "node:crypto";
-import { committedDocumentUris, countDeferredPdfPages, firstPassServesDocument, primeFirstPassResults } from "../pipeline/first-pass.js";
+import { committedDocumentUris, countDeferredPdfPages, firstPassServesDocument, primeFirstPassResults, readMarkdownSlotBytes } from "../pipeline/first-pass.js";
 import { reserveOrientationAttempt } from "../lib/image-orientation.js";
 import { EMBEDDED_IMAGE_TARGETS, embeddedImageGraph, resolveEmbeddedImageRequest } from "../extractors/embedded-images.js";
 import { anchorImageMarkdownFile } from "../extractors/image-markdown.js";
-import { DopplerFigureRejection, DopplerFigureStoreError, disposeDopplerFigureSet, dopplerSourcePointer, readDopplerFigureDir, storeDopplerFigures } from "../extractors/doppler-figures.js";
+import { DopplerFigureRejection, DopplerFigureStoreError, disposeDopplerFigureSet, dopplerFolderKey, dopplerSourcePointer, DOPPLER_MARKDOWN_SLOT, readDopplerFigureDir, storeDopplerFigures } from "../extractors/doppler-figures.js";
 import { figureLedgerHooks, ledgerWriteForFailedFigures, ledgerWriteForNoFigures, ledgerWriteForStoredFigures, queueAssetLedger } from "../db/document-asset-ledger.js";
 import {
   SANDBOXED_PDF_MAX_MARKDOWN_BYTES, VM_PDF_EXTRACTOR_ID, firstPassServedFigures, requireSandboxedPdfProvider, sandboxedPdfFigures, sandboxedPdfSalvagedFigures, sandboxedPdfProvider, sandboxedPdfLayoutFacts, sandboxedPdfOcrPages,
@@ -1022,7 +1022,7 @@ export class ExtractMarkdownStage implements Stage {
                   const firstPassOwned = !!winningCandidate.figures && firstPassServedFigures(winningCandidate.plan.sandboxedPdf);
                   if (firstPassOwned) this.firstPassLedger.add(`${state.run.id}\u0000${document.id}`);
                   const dopplerFigures = winningCandidate.figures && !firstPassOwned
-                    ? await this.storeWinningDopplerFigures({ document, runId: state.run.id, candidate: winningCandidate, markdown: winningText, signal, state })
+                    ? await this.storeWinningDopplerFigures({ document, runId: state.run.id, candidate: winningCandidate, markdown: winningText, markdownSlotUri: artifactUri, signal, state })
                     : null;
                   for (const { slot, uri } of dopplerFigures?.slots ?? []) state.artifactLedger.recordDocument(document.id, slot, uri);
                   if (graph) {
@@ -3052,6 +3052,8 @@ export class ExtractMarkdownStage implements Stage {
    */
   private async storeWinningDopplerFigures(args: {
     document: import("../models.js").Document; runId: string; candidate: ExtractedCandidate; markdown: string; signal?: AbortSignal;
+    /** The document's Markdown slot (what the PII stage scans): `document.md` is exactly its bytes. */
+    markdownSlotUri?: string;
     state?: import("../pipeline/pipeline.js").WorkflowState;
   }): Promise<{ slots: Array<{ slot: string; uri: string }>; stats: Record<string, unknown> }> {
     // Stored as soon as the VM job returned (extractFileCandidate), else now.
@@ -3061,6 +3063,15 @@ export class ExtractMarkdownStage implements Stage {
     const result = early ?? await this.storeWinningDopplerFiguresOnly({
       ...args, ...(args.state ? { ledger: figureLedgerHooks(args.state, args.document.id), committedUris: committedDocumentUris(args.state, args.document.id) } : {}),
     });
+    // The early store ran before the Markdown slot existed: `document.md` (exactly the slot's bytes) is added now.
+    if (early?.stored && args.markdownSlotUri && !early.figures.slots.some(({ slot }) => slot === DOPPLER_MARKDOWN_SLOT)) {
+      const bytes = await readMarkdownSlotBytes(this.storage, args.markdownSlotUri).catch(() => null);
+      if (bytes) {
+        const key = dopplerFolderKey(args.document, args.runId, "markdown");
+        await this.storage.putBytes(key, bytes, "text/markdown; charset=utf-8");
+        result.figures.slots.push({ slot: DOPPLER_MARKDOWN_SLOT, uri: this.storage.uri(key) });
+      }
+    }
     const outcome = args.candidate.figures!.outcome;
     if (!args.state) return result.figures;
     // The asset ledger: every image Doppler reported and the document's extraction level, queued for this stage's
@@ -3102,7 +3113,7 @@ export class ExtractMarkdownStage implements Stage {
   private async storeWinningDopplerFiguresOnly(args: {
     document: import("../models.js").Document; runId: string; candidate: ExtractedCandidate; markdown: string; signal?: AbortSignal;
     ledger?: import("../extractors/doppler-figures.js").DopplerFigureLedgerHooks;
-    committedUris?: ReadonlySet<string>;
+    committedUris?: ReadonlySet<string>; markdownSlotUri?: string;
   }): Promise<{
     figures: { slots: Array<{ slot: string; uri: string }>; stats: Record<string, unknown> };
     stored?: { set: import("../extractors/doppler-figures.js").DopplerFigureSet; stored: Pick<import("../extractors/doppler-figures.js").StoredDopplerFigures, "manifest" | "manifests"> };
@@ -3131,12 +3142,14 @@ export class ExtractMarkdownStage implements Stage {
     }
     let stored;
     try {
-      // `document.md` is the winning candidate's file as this stage holds it: Doppler's output after the host's sanitizing
-      // (data URIs and front matter stripped, tables repaired) and before PII redaction. Its image links are Doppler's, so
-      // they resolve. It is recorded before the PII stage runs, so that stage withholds it when it redacts or blocks.
+      // `document.md` is exactly the bytes of the document's Markdown slot, the text the PII stage scans (sanitized, after
+      // any OCR fill or critique), never the candidate's earlier file. Its image links (`images/page-NNNN/...`) survive
+      // sanitizing, so it resolves inside the folder. It is recorded before the PII stage runs, which withholds it when it
+      // redacts or blocks.
+      const documentMarkdown = await readMarkdownSlotBytes(this.storage, args.markdownSlotUri).catch(() => null);
       stored = await storeDopplerFigures({
         storage: this.storage, document: args.document, runId: args.runId, figures: validated, markdown: args.markdown,
-        dopplerMarkdownPath: args.candidate.tempTextPath, source: dopplerSourcePointer(args.document), signal: args.signal,
+        documentMarkdown, source: dopplerSourcePointer(args.document), signal: args.signal,
         ...(args.ledger ? { ledger: args.ledger } : {}),
         ...(args.committedUris ? { committedUris: args.committedUris } : {}),
       });

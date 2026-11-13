@@ -802,6 +802,8 @@ export interface StoredDopplerFigures {
   manifests: Array<{ key: string; sha256: string; range: [number, number] | null }>;
   /** Bytes of the folder's own files stored (manifests, page facts, Markdown, index): billed with the figures. */
   folderBytes: number;
+  /** Every object this call wrote (files, manifests, Markdown, source pointer, index): what a caller removes if it cannot record them. */
+  objectKeys: string[];
   stats: DopplerFigureStats;
 }
 
@@ -918,8 +920,11 @@ export async function storeDopplerFigures(args: {
   figures: DopplerFigureSet;
   /** The stored Markdown: which markers it holds, and whether each names a stored figure. */
   markdown: string;
-  /** The Markdown file exactly as Doppler wrote it (stored as `document.md`); the folder has none when absent. */
-  dopplerMarkdownPath?: string | null;
+  /**
+   * `document.md`: always exactly the bytes of the document's Markdown slot, the text the PII stage scans (sanitized, after
+   * any OCR fill or critique), never the provider's raw output. The folder has none when absent.
+   */
+  documentMarkdown?: Buffer | null;
   /** `source.json`; the folder has none when absent. */
   source?: DopplerSourcePointer | null;
   /**
@@ -986,7 +991,7 @@ export async function storeDopplerFigures(args: {
         byKind: {}, byFormat: {}, markers: 0, markersResolved: 0, storeMs: Date.now() - started, peakBufferBytes: budgets.job.peak,
         bufferBudgetBytes: budgets.job.limit,
       };
-      return { indexUri: args.storage.uri(indexKey), slots, keys, manifest: single ? { key: single.key, sha256: single.sha256 } : null, manifests: storedManifests, folderBytes: 0, stats };
+      return { indexUri: args.storage.uri(indexKey), slots, keys, manifest: single ? { key: single.key, sha256: single.sha256 } : null, manifests: storedManifests, objectKeys: [...new Set(written)], folderBytes: 0, stats };
     }
     for (const manifest of set.manifests) {
       const manifestKey = manifest.range ? key({ shard: manifest.range }) : singleManifestKey;
@@ -1004,15 +1009,14 @@ export async function storeDopplerFigures(args: {
         uri: args.storage.uri(manifestKey),
       });
     }
-    if (args.dopplerMarkdownPath) {
+    if (args.documentMarkdown) {
       const markdownKey = key("markdown");
-      const host = await openHostFile(args.dopplerMarkdownPath);
-      folderBytes += host.size;
-      tail.push(() => uploadChecked({
-        storage: args.storage, budgets, key: markdownKey, contentType: "text/markdown; charset=utf-8", size: host.size, signal: args.signal,
-        open: host.open, check: { expectedSize: host.size, sha256: null, magic: null },
-        onStart: () => { written.push(markdownKey); },
-      }));
+      const bytes = args.documentMarkdown;
+      folderBytes += bytes.length;
+      tail.push(async () => {
+        written.push(markdownKey);
+        await args.storage.putBytes(markdownKey, bytes, "text/markdown; charset=utf-8");
+      });
       slots.push({ slot: DOPPLER_MARKDOWN_SLOT, uri: args.storage.uri(markdownKey) });
     }
     if (args.source) {
@@ -1055,7 +1059,10 @@ export async function storeDopplerFigures(args: {
     };
     const single = storedManifests.length === 1 && storedManifests[0]!.range === null ? storedManifests[0]! : null;
     folderBytes += host.size;
-    return { indexUri: args.storage.uri(indexKey), slots, keys, manifest: single ? { key: single.key, sha256: single.sha256 } : null, manifests: storedManifests, folderBytes, stats };
+    return {
+      indexUri: args.storage.uri(indexKey), slots, keys, manifest: single ? { key: single.key, sha256: single.sha256 } : null, manifests: storedManifests,
+      objectKeys: [...new Set(written)], folderBytes, stats,
+    };
   } catch (error) {
     // Nothing is deleted (owner rule): verified uploads stay for the next attempt to adopt; the orphan GC removes what no
     // ledger row vouches for.
@@ -1245,4 +1252,20 @@ export async function storeDopplerFolderManifests(args: {
     bytes += manifest.size;
   }
   return { bytes };
+}
+
+/**
+ * Every URI a store of `set` can make reachable (figure files, manifests, the index, `document.md`), derived from the
+ * layout before anything is uploaded: what a PII withholding adds to the document's withheld list first.
+ */
+export function dopplerFigureUris(
+  storage: Pick<DopplerFigureStorage, "uri">, document: { id: string; userId: string; runId: string; artifactRoot?: string | null }, runId: string,
+  set: Pick<DopplerFigureSet, "files" | "manifests" | "version">,
+): string[] {
+  const key = (object: Parameters<typeof dopplerFolderKey>[2]) => storage.uri(dopplerFolderKey(document, runId, object));
+  return [
+    ...set.files.map((file) => key({ id: file.id, format: file.format })),
+    ...set.manifests.map((manifest) => key(manifest.range ? { shard: manifest.range } : set.version === 3 ? "manifestV3" : "manifest")),
+    key("index"), key("markdown"),
+  ];
 }

@@ -163,11 +163,11 @@ Doppler's `error` detail is telemetry only and never stored.
 ## Storage and serving
 
 A document's Doppler output is stored in **Doppler's own folder layout** under one tenant-scoped prefix, so a plain
-download of the folder is the conversion exactly as Doppler wrote it:
+download of the folder is the conversion as Doppler laid it out (the image files and manifests byte for byte):
 
 ```text
 <artifact root>/doppler/<document id>/
-  document.md                         the Markdown as Doppler wrote it (its links are images/page-NNNN/...)
+  document.md                         the document's Markdown slot, exactly the text the PII stage scans (links images/page-NNNN/...)
   source.json                         {sourceKey, sha256, pageCount, mimeType}: a pointer to the source, never served
   index.json                          DocSlurp's figure index (docslurp-doppler-figures@1)
   images/manifest.jsonl               the manifest bytes, unchanged (manifest.json for versions 1 and 2)
@@ -189,10 +189,13 @@ serves an artifact only when its exact URI is one of the caller's documents' rec
 organization, with the API key's `artifacts` scope, and not withheld by the project's PII policy (every slot of the document
 written before the PII stage is withheld under `redact_artifacts` and `block_indexing`, these included). The first pass
 stores its figures after the PII stage has run, so when that stage's outcome withheld anything (it redacted or blocked),
-every file the first pass stores joins `metadata.pii.withheldArtifactUris` before any slot is recorded, and Doppler's raw
-`document.md` (unredacted text) is not stored at all; a store that cannot say stores nothing. In the extraction stage,
-`document.md` is the winning candidate's file after the host's sanitizing and before PII redaction, recorded before the
-PII stage, which withholds it. As defense in depth, the file proxy and `/v1/artifacts/preview` serve a Doppler folder
+every file the first pass stores joins `metadata.pii.withheldArtifactUris` before any slot is recorded (if that write
+fails, the objects are deleted, never a committed one), and no `document.md` is stored; a store that cannot say stores
+nothing. On both paths `document.md` is one thing: exactly the bytes of the document's Markdown slot, the text the PII
+stage scans (sanitized, after any OCR fill or critique), never the provider's raw output, which can hold text the host
+strips before the scan (a front-matter block, data URIs). Doppler's `images/...` links survive sanitizing, so it still
+resolves inside the folder. In the extraction stage it is recorded before the PII stage, which withholds it when it
+redacts or blocks. As defense in depth, the file proxy and `/v1/artifacts/preview` serve a Doppler folder
 file only while its document is `completed`. Revoking access, a key from another organization or a key without the scope
 all get the same 404.
 

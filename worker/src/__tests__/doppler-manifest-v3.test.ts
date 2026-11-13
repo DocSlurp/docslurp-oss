@@ -327,8 +327,9 @@ describe("a real Doppler run (fixtures/doppler-golden/v3-repeats, see PROVENANCE
       ["p3.2", "not-extracted", "repeat", "p3.1"], ["p4.1", "not-extracted", "repeat", "p1.1"],
     ]);
     const storage = slowStreamingStorage();
-    const markdownPath = path.join(GOLDEN, "v3-repeats", "document.md");
-    await storeDopplerFigures({ storage, document: DOC, runId: "run-1", figures: set, markdown: "", dopplerMarkdownPath: markdownPath });
+    // document.md is the Markdown slot's bytes; Doppler's links survive the host's sanitizing, so they still resolve.
+    const markdownBytes = await readFile(path.join(GOLDEN, "v3-repeats", "document.md"));
+    await storeDopplerFigures({ storage, document: DOC, runId: "run-1", figures: set, markdown: "", documentMarkdown: markdownBytes });
     const prefix = `user-1/run-1/doppler/${DOC.id}/`;
     const { objects } = storage.stats();
     // The manifest bytes are Doppler's, unchanged.
