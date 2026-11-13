@@ -229,8 +229,10 @@ describe("the extractor uses the inline answer instead of a parser VM run", () =
 
   it("an answer for another kind is ignored (the type changed after quarantine)", async () => {
     const { deps, extract } = extractor();
-    await extract(input({ kind: "html", status: "ok", ms: 1, result: visuals })).catch(() => undefined);
-    // The SVG source falls back to the pre-inline rule (standalone document), so it is staged for the VM.
+    const xlsx = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+    const out = await extract({ ...(input({ kind: "html", status: "ok", ms: 1, result: visuals }, xlsx) as object), signals: { officeChartParts: 1 } } as never).catch(() => null);
+    // Not used as the source's answer; the source falls back to the pre-inline rule (Office chart parts -> standalone).
+    expect(out?.partials ?? []).toEqual([]);
     expect(deps.storage.downloadToTempFile).toHaveBeenCalled();
   });
 

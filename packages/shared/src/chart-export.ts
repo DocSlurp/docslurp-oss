@@ -109,36 +109,127 @@ export type RunOrigin = (typeof RUN_ORIGINS)[number];
  */
 export const CHART_EXPORT_API_DEFAULT_ENV_FLAG = "DOCSLURP_CHART_EXPORT_API_DEFAULT";
 
-export function chartExportMachineDefault(env: Readonly<Record<string, string | undefined>>): "off" | "free" {
-  return env[CHART_EXPORT_API_DEFAULT_ENV_FLAG]?.trim().toLowerCase() === "free" ? "free" : "off";
-}
-
 /**
- * Deploy-wide default tier for app-origin runs on projects with no explicit tier: `free` (default) or `off`. Lets a
+ * Deploy-wide default tier for app-origin runs on projects with no explicit tier: `free` (code default) or `off`. Lets a
  * deployment hold the app default off until the free steps pass their cost gate, without a code change.
  */
 export const CHART_EXPORT_APP_DEFAULT_ENV_FLAG = "DOCSLURP_CHART_EXPORT_APP_DEFAULT";
 
-export function chartExportAppDefault(env: Readonly<Record<string, string | undefined>>): "off" | "free" {
-  return env[CHART_EXPORT_APP_DEFAULT_ENV_FLAG]?.trim().toLowerCase() === "off" ? "off" : "free";
+/**
+ * Whether a caller may choose `free` explicitly (a request override or a project's stored tier):
+ * `DOCSLURP_CHART_EXPORT_FREE_EXPLICIT`, `on` or `off` (default). Off, an explicit `free` is refused on requests and
+ * project changes, and a stored `free` counts as unset (the origin default). Each free run boots an unbilled parser VM,
+ * so only the deployment's own defaults may turn it on until extraction folds into a VM the document already boots.
+ */
+export const CHART_EXPORT_FREE_EXPLICIT_ENV_FLAG = "DOCSLURP_CHART_EXPORT_FREE_EXPLICIT";
+
+type Env = Readonly<Record<string, string | undefined>>;
+
+/**
+ * Strict reader of an `off|free` default: unset gives `fallback`; the switch's off words (`off`, `0`, `false`, `no`,
+ * empty) give `off`; `free` gives `free`; anything else is `off` (fail toward lower cost) and is named by
+ * `chartExportDefaultsWarning`.
+ */
+function offOrFree(env: Env, flag: string, fallback: "off" | "free"): "off" | "free" {
+  const raw = env[flag];
+  if (raw === undefined) return fallback;
+  const value = raw.trim().toLowerCase();
+  return CHART_EXPORT_ENV_FREE_VALUES.includes(value) ? "free" : "off";
+}
+
+export function chartExportMachineDefault(env: Env): "off" | "free" {
+  return offOrFree(env, CHART_EXPORT_API_DEFAULT_ENV_FLAG, "off");
+}
+
+export function chartExportAppDefault(env: Env): "off" | "free" {
+  return offOrFree(env, CHART_EXPORT_APP_DEFAULT_ENV_FLAG, "free");
+}
+
+/** Whether an explicit `free` (request or project) is allowed: `DOCSLURP_CHART_EXPORT_FREE_EXPLICIT=on` only. */
+export function chartExportFreeExplicitAllowed(env: Env): boolean {
+  return CHART_EXPORT_ENV_ON_VALUES.includes(env[CHART_EXPORT_FREE_EXPLICIT_ENV_FLAG]?.trim().toLowerCase() ?? "");
+}
+
+/**
+ * Startup warnings for chart export defaults holding a value the parser does not know (each is treated as `off`).
+ * Processes log them next to `chartExportSwitchWarning`.
+ */
+export function chartExportDefaultsWarnings(env: Env): string[] {
+  const known = (value: string, extra: readonly string[]) => CHART_EXPORT_ENV_OFF_VALUES.includes(value) || extra.includes(value);
+  const out: string[] = [];
+  for (const flag of [CHART_EXPORT_API_DEFAULT_ENV_FLAG, CHART_EXPORT_APP_DEFAULT_ENV_FLAG]) {
+    const raw = env[flag];
+    if (raw !== undefined && !known(raw.trim().toLowerCase(), CHART_EXPORT_ENV_FREE_VALUES)) {
+      out.push(`[chart-export] ${flag} has an unknown value; the default is off (expected off or free)`);
+    }
+  }
+  const explicit = env[CHART_EXPORT_FREE_EXPLICIT_ENV_FLAG];
+  if (explicit !== undefined && !known(explicit.trim().toLowerCase(), CHART_EXPORT_ENV_ON_VALUES)) {
+    out.push(`[chart-export] ${CHART_EXPORT_FREE_EXPLICIT_ENV_FLAG} has an unknown value; an explicit free tier is refused (expected off or on)`);
+  }
+  return out;
 }
 
 /** The default tier for a run of `origin` on a project with no explicit tier: the app default (free) or the machine default (off). */
-export function defaultChartExportTier(origin: RunOrigin, env: Readonly<Record<string, string | undefined>>): ChartExportTier {
+export function defaultChartExportTier(origin: RunOrigin, env: Env): ChartExportTier {
   return origin === "app" ? chartExportAppDefault(env) : chartExportMachineDefault(env);
 }
 
 /**
+ * The defaults a deployment reports to clients (`project.chartExportDefaults`): the tier each origin runs on a project
+ * with no tier (after the kill switch), whether `models` may be chosen, and whether `free` may be chosen explicitly.
+ * Clients classify settings changes and label the "default" option from this, never from a code default.
+ */
+export type ChartExportDefaults = {
+  app: ChartExportTier;
+  machine: ChartExportTier;
+  modelsAvailable: boolean;
+  freeAvailable: boolean;
+  /** The kill switch (`DOCSLURP_CHART_EXPORT`): the most any tier runs as. */
+  ceiling: ChartExportSwitch;
+};
+
+export function chartExportDefaults(env: Env): ChartExportDefaults {
+  const capped = (tier: ChartExportTier) => effectiveChartExportConfig({ ...defaultChartExportConfig, tier }, env).tier;
+  return {
+    app: capped(defaultChartExportTier("app", env)),
+    machine: capped(defaultChartExportTier("machine", env)),
+    modelsAvailable: chartExportModelsAvailable(env),
+    freeAvailable: chartExportFreeExplicitAllowed(env) && chartExportSwitch(env) !== "off",
+    ceiling: chartExportSwitch(env),
+  };
+}
+
+/**
+ * The tier that runs for a project's stored tier on a deployment described by `defaults` (what a server reports), for
+ * clients that classify settings changes without the server's environment: an explicit `free` the deployment does not
+ * allow counts as unset, unset is the origin default, and the ceiling caps the result.
+ */
+export function effectiveTierFromDefaults(stored: ChartExportTier | null | undefined, origin: RunOrigin, defaults: ChartExportDefaults): ChartExportTier {
+  const explicit = stored === "free" && !defaults.freeAvailable ? undefined : stored ?? undefined;
+  const tier = explicit ?? (origin === "app" ? defaults.app : defaults.machine);
+  if (defaults.ceiling === "off" || tier === "off") return "off";
+  if (tier === "models" && (defaults.ceiling !== "on" || !defaults.modelsAvailable)) return "free";
+  return tier;
+}
+
+/** The most conservative defaults, for a client whose server reports none (an older server): nothing runs. */
+export const CONSERVATIVE_CHART_EXPORT_DEFAULTS: ChartExportDefaults = { app: "off", machine: "off", modelsAvailable: false, freeAvailable: false, ceiling: "off" };
+
+/**
  * The tier one run uses, before the deploy ceiling: a per-request override, else the project's explicit tier, else the
- * origin default. The deploy kill switch (`effectiveChartExportConfig`) then caps it; it is never raised by this.
+ * origin default. An explicit `free` counts only while `DOCSLURP_CHART_EXPORT_FREE_EXPLICIT=on`; otherwise it is the
+ * origin default (requests that ask for it are refused earlier, `chartExportOverrideRefusal`). The deploy kill switch
+ * (`effectiveChartExportConfig`) then caps it; it is never raised by this.
  */
 export function resolveChartExportTier(args: {
   requested?: ChartExportTier | null | undefined;
   project?: Pick<ChartExportConfig, "tier"> | null | undefined;
   origin: RunOrigin;
-  env: Readonly<Record<string, string | undefined>>;
+  env: Env;
 }): ChartExportTier {
-  return args.requested ?? args.project?.tier ?? defaultChartExportTier(args.origin, args.env);
+  const usable = (tier: ChartExportTier | null | undefined) => tier === "free" && !chartExportFreeExplicitAllowed(args.env) ? undefined : tier ?? undefined;
+  return usable(args.requested) ?? usable(args.project?.tier) ?? defaultChartExportTier(args.origin, args.env);
 }
 
 /** The project's chart export config with its tier resolved for one run (see `resolveChartExportTier`). */
@@ -146,7 +237,7 @@ export function resolveChartExportConfig(args: {
   requested?: ChartExportTier | null | undefined;
   project?: ChartExportConfig | null | undefined;
   origin: RunOrigin;
-  env: Readonly<Record<string, string | undefined>>;
+  env: Env;
 }): ResolvedChartExportConfig {
   return { ...(args.project ?? defaultChartExportConfig), tier: resolveChartExportTier(args) };
 }
@@ -155,29 +246,62 @@ export function resolveChartExportConfig(args: {
  * Whether chart export runs at all for a resolved config on this deployment: its tier is not `off` and the kill switch
  * is not `off`. With the switch on `free`, only the deterministic steps run.
  */
-export function chartExportRuns(config: Pick<ResolvedChartExportConfig, "tier">, env: Readonly<Record<string, string | undefined>>): boolean {
+export function chartExportRuns(config: Pick<ResolvedChartExportConfig, "tier">, env: Env): boolean {
   return config.tier !== "off" && chartExportSwitch(env) !== "off";
 }
 
 /** Whether the billed model steps may run: the resolved tier is `models` and the kill switch is `on`. */
-export function chartExportModelsAllowed(config: Pick<ResolvedChartExportConfig, "tier">, env: Readonly<Record<string, string | undefined>>): boolean {
+export function chartExportModelsAllowed(config: Pick<ResolvedChartExportConfig, "tier">, env: Env): boolean {
   return config.tier === "models" && chartExportSwitch(env) === "on";
 }
 
 /**
  * The tier that actually runs: the resolved tier capped by the kill switch (`off` -> off, `free` -> at most free).
  */
-export function effectiveChartExportConfig(config: ResolvedChartExportConfig, env: Readonly<Record<string, string | undefined>>): ResolvedChartExportConfig {
+export function effectiveChartExportConfig(config: ResolvedChartExportConfig, env: Env): ResolvedChartExportConfig {
   const tier: ChartExportTier = !chartExportRuns(config, env) ? "off" : chartExportModelsAllowed(config, env) ? "models" : "free";
   return tier === config.tier ? config : { ...config, tier };
 }
 
-/** Why a per-request tier override is refused on this deployment, or null when it is allowed. */
-export function chartExportOverrideRefusal(
-  tier: ChartExportTier,
-  env: Readonly<Record<string, string | undefined>>,
-): "chart_export_models_unavailable" | null {
-  return tier === "models" && chartExportSwitch(env) !== "on" ? "chart_export_models_unavailable" : null;
+/**
+ * The one public code for a tier a caller may not choose on this deployment, with status 400, on every surface
+ * (uploads, URL ingest, direct sessions, extracts, web crawl, reprocess, estimates, project changes, chat proposals).
+ */
+export const CHART_EXPORT_TIER_UNAVAILABLE_CODE = "chart_export_tier_unavailable" as const;
+
+/**
+ * Why an explicitly chosen tier (request override or project change) is refused on this deployment, or null when it is
+ * allowed: `models` while the switch is not `on`; `free` while `DOCSLURP_CHART_EXPORT_FREE_EXPLICIT` is not `on` or the
+ * switch is `off`. `off` is always allowed.
+ */
+export function chartExportOverrideRefusal(tier: ChartExportTier, env: Env): typeof CHART_EXPORT_TIER_UNAVAILABLE_CODE | null {
+  if (tier === "models") return chartExportSwitch(env) === "on" ? null : CHART_EXPORT_TIER_UNAVAILABLE_CODE;
+  if (tier === "free") return chartExportFreeExplicitAllowed(env) && chartExportSwitch(env) !== "off" ? null : CHART_EXPORT_TIER_UNAVAILABLE_CODE;
+  return null;
+}
+
+/**
+ * Stored chart export config (projects, runs, upload sessions, settings snapshots in the audit log, saved chat proposals
+ * and ingest-report patches) as the current schema reads it. Rows written before migration 0145, or by an older API
+ * during a deploy, carry `enabled` and `generatorModel`: `enabled: true` with no `tier` becomes `tier: "models"`, and
+ * both legacy keys are dropped. Applied on read, so a row the migration missed still parses. Request schemas stay
+ * strict and never call this. Anything that is not an object is returned unchanged (strict parsing then rejects it).
+ */
+export function upgradeStoredChartExport(raw: unknown): unknown {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return raw;
+  const record = raw as Record<string, unknown>;
+  if (!("enabled" in record) && !("generatorModel" in record)) return raw;
+  const { enabled, generatorModel: _generatorModel, ...rest } = record;
+  return enabled === true && rest.tier === undefined ? { ...rest, tier: "models" } : rest;
+}
+
+/** A stored pipeline (or pipeline patch) with its `chartExport` upgraded (`upgradeStoredChartExport`); other keys untouched. */
+export function upgradeStoredPipelineChartExport<T>(pipeline: T): T {
+  if (!pipeline || typeof pipeline !== "object" || Array.isArray(pipeline)) return pipeline;
+  const record = pipeline as Record<string, unknown>;
+  if (!("chartExport" in record)) return pipeline;
+  const upgraded = upgradeStoredChartExport(record.chartExport);
+  return upgraded === record.chartExport ? pipeline : ({ ...record, chartExport: upgraded } as T);
 }
 
 // ---- Specs ------------------------------------------------------------------------------------------------------

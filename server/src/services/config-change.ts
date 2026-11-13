@@ -29,8 +29,8 @@ import {
 
 import { sql } from "../db.js";
 import { loadVisualStatsForEstimate, VISUAL_CANDIDATES_DOCUMENT_LIMIT, type VisualEstimateStats } from "./visual-candidates.js";
-import { assertChartExportChangeAllowed, stampRunChartExport } from "./chart-export-availability.js";
-import type { RunOrigin } from "@docslurp/shared";
+import { assertChartExportChangeAllowed, groupByChartTier, sourceRunChartTiers, stampRunChartExport } from "./chart-export-availability.js";
+import { upgradeStoredChartExport, type ChartExportTier, type RunOrigin } from "@docslurp/shared";
 import { notifySearchEligibilityChanged } from "../search/eligibility-hint.js";
 import { nextVersionNumber } from "./version-number.js";
 import { validateModeSwitch } from "./project-indexing-mode.js";
@@ -365,9 +365,18 @@ export async function createReindexRuns(args: {
   blockedReason: "credits" | "budget" | "policy" | null;
   /** Partial groups re-run `stages` over documents seeded from their source run; `full` re-runs everything. */
   reusable: ReusableSplit;
+  /** The caller's origin, written to `project_runs.origin` (the pipeline's tier does not depend on it when inherited). */
+  origin?: RunOrigin;
 }): Promise<ReindexRunResult> {
   assertPipelineSpeedBoost(args.pipeline);
   const { tx, project } = args;
+  // A project with no chart tier: each document keeps the tier its source run stamped (as reprocess does), not the
+  // tier of the surface that triggered this reindex (council M5). An explicit project tier applies to every document.
+  const inheritTier = !(upgradeStoredChartExport((project.pipeline as { chartExport?: unknown } | null)?.chartExport) as { tier?: unknown } | null)?.tier;
+  const allDocs = [...args.reusable.partial.flatMap((group) => group.docs), ...args.reusable.full];
+  const sourceTiers = inheritTier ? await sourceRunChartTiers(tx as never, { orgId: project.orgId, projectId: project.id }, allDocs.map((doc) => doc.id)) : new Map<string, ChartExportTier>();
+  const fallbackTier = (args.pipeline.chartExport as { tier?: ChartExportTier } | undefined)?.tier ?? "off";
+  const withTier = (pipeline: PipelineFeatures, tier: ChartExportTier): PipelineFeatures => ({ ...pipeline, chartExport: { ...pipeline.chartExport, tier } });
   const runIds: string[] = [];
   const queuedRunIds: string[] = [];
   let blockedReason = args.blockedReason;
@@ -375,19 +384,25 @@ export async function createReindexRuns(args: {
   const fullPipeline = { ...withoutStageSelection(args.pipeline) } as PipelineFeatures;
   for (const group of args.reusable.partial) {
     const pipeline = { ...withoutStageSelection(args.pipeline), stageSubset: [...group.stages] } as PipelineFeatures;
-    for (let i = 0; i < group.docs.length; i += MAX_DOCUMENTS_PER_REINDEX_RUN) {
-      batches.push({ docs: group.docs.slice(i, i + MAX_DOCUMENTS_PER_REINDEX_RUN), pipeline, partial: true });
+    for (const [tier, docs] of groupByChartTier(group.docs, sourceTiers, fallbackTier)) {
+      for (let i = 0; i < docs.length; i += MAX_DOCUMENTS_PER_REINDEX_RUN) {
+        batches.push({ docs: docs.slice(i, i + MAX_DOCUMENTS_PER_REINDEX_RUN), pipeline: withTier(pipeline, tier), partial: true });
+      }
     }
   }
-  for (let i = 0; i < args.reusable.full.length; i += MAX_DOCUMENTS_PER_REINDEX_RUN) {
-    batches.push({ docs: args.reusable.full.slice(i, i + MAX_DOCUMENTS_PER_REINDEX_RUN), pipeline: fullPipeline, partial: false });
+  for (const [tier, docs] of groupByChartTier(args.reusable.full, sourceTiers, fallbackTier)) {
+    for (let i = 0; i < docs.length; i += MAX_DOCUMENTS_PER_REINDEX_RUN) {
+      batches.push({ docs: docs.slice(i, i + MAX_DOCUMENTS_PER_REINDEX_RUN), pipeline: withTier(fullPipeline, tier), partial: false });
+    }
   }
   const jobId = randomUUID();
   let documents = 0;
   for (const [index, batch] of batches.entries()) {
     // Recheck under the org admission lock for every batch. Earlier batches in
     // this transaction already hold their own reservation/lease; a single
-    // check for the whole job would over-admit large projects.
+    // check for the whole job would over-admit large projects. This is the same spend decision `assertCanSpend` makes
+    // (loadSpendStatus), so a `models` batch passes the same admission as run creation; it blocks the run instead of
+    // throwing, because the settings change itself is saved in this transaction.
     let batchBlockedReason = args.blockedReason;
     if (!batchBlockedReason) {
       const block = await admissionBlock(tx, project.orgId, project.id, { speedBoost: batch.pipeline.speedBoost });
@@ -400,12 +415,12 @@ export async function createReindexRuns(args: {
     await tx`
       insert into project_runs (id, org_id, user_id, project_id, kind, status, blocked_reason, job_id, priority, stage,
         total_documents, processed_documents, pages_total, pages_processed, input_cost_cents, output_cost_cents, pipeline, stats,
-        creation_ready_at, creation_expires_at)
+        creation_ready_at, creation_expires_at, origin)
       -- The documents are inserted in this transaction, so the manifest is complete when it commits; without
       -- creation_ready_at neither runLifecycle.start nor run-start recovery would ever start the run.
       values (${runId}, ${project.orgId}, ${args.userId}, ${project.id}, 'reindex', ${status}, ${batchBlockedReason}, ${jobId}, 0, 'queued',
         ${batch.docs.length}, 0, ${pages}, 0, 0, 0, ${tx.json(JSON.parse(JSON.stringify(batch.pipeline)))}, ${tx.json(JSON.parse(JSON.stringify(stats)))},
-        now(), null)
+        now(), null, ${args.origin ?? "machine"})
     `;
     for (const doc of batch.docs) {
       const canonicalId = doc.canonical_id ?? `docslurp:document:${doc.id}`;
@@ -734,8 +749,8 @@ async function applyPlannedChange(args: {
     }
     split.partial = [...planned.values()];
     const runs = await createReindexRuns({
-      tx, project, pipeline: stampRunChartExport({ ...plan.nextPipeline, speedBoost: plan.input.speedBoost === true }, plan.origin), userId,
-      meta: jobMeta, blockedReason, reusable: split,
+      tx, project: { ...project, pipeline: plan.nextPipeline }, pipeline: stampRunChartExport({ ...plan.nextPipeline, speedBoost: plan.input.speedBoost === true }, plan.origin), userId,
+      meta: jobMeta, blockedReason, reusable: split, origin: plan.origin,
     });
     return { runs, cancelled };
   });

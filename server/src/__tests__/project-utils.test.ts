@@ -69,6 +69,25 @@ describe("project-utils", () => {
     expect(readProjectVersionSnapshot({ snapshot: { name: "Broken" } })).toBeNull();
   });
 
+  it("restores a settings snapshot saved before migration 0145 (chartExport.enabled / generatorModel mapped on read)", () => {
+    const legacy = (chartExport: Record<string, unknown>) => readProjectVersionSnapshot({
+      snapshot: {
+        name: "Q3 earnings",
+        templateKey: null,
+        systemPrompt: null,
+        pipeline: { ...defaultPipelineFeatures, chartExport },
+      },
+    });
+    // A project that had opted into model reads keeps them.
+    expect(legacy({ enabled: true, generatorModel: null, formats: ["description", "csv"], diagrams: true })?.pipeline.chartExport)
+      .toEqual({ tier: "models", formats: ["description", "csv"], diagrams: true });
+    // Off (or the old default) becomes unset: the deployment's default for the caller.
+    const off = legacy({ enabled: false, generatorModel: "llm://openrouter/x/y", formats: ["description", "mermaid"], diagrams: true });
+    expect(off).not.toBeNull();
+    expect(off?.pipeline.chartExport.tier).toBeUndefined();
+    expect(Object.keys(off!.pipeline.chartExport).sort()).toEqual(["diagrams", "formats"]);
+  });
+
   it("builds a stable clone name", () => {
     expect(buildClonedProjectName("Contracts")).toBe("Contracts copy");
     expect(buildClonedProjectName("Contracts copy")).toBe("Contracts copy 2");

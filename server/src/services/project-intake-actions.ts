@@ -1,3 +1,4 @@
+import { CHART_EXPORT_TIER_UNAVAILABLE_CODE } from "@docslurp/shared";
 /**
  * HTTP-facing Project Intake actions: request parsing, idempotency, and the
  * response payload. Each action is a thin source adapter over
@@ -176,12 +177,19 @@ export function parseProjectIntakePipeline(raw: unknown): PipelineFeatureOverrid
       code: issue.code,
     })));
   }
-  const tier = (parsed.data as { chartExport?: { tier?: ChartExportTier } }).chartExport?.tier;
-  const refused = chartExportOverrideError(tier, "intake");
-  if (refused) {
-    throw new ProjectIntakeError("Invalid pipeline payload", 422, [{ path: "pipeline.chartExport.tier", message: refused, code: "chart_export_models_unavailable" }]);
-  }
+  assertIntakeChartExportTier((parsed.data as { chartExport?: { tier?: ChartExportTier } }).chartExport?.tier, "intake");
   return parsed.data;
+}
+
+/**
+ * Refuses an upload, URL ingest, extract or crawl override for a tier the deployment does not offer: 400
+ * `chart_export_tier_unavailable`, the same code and status as reprocess, estimates and project changes.
+ */
+export function assertIntakeChartExportTier(tier: ChartExportTier | null | undefined, context: string): void {
+  const refused = chartExportOverrideError(tier, context);
+  if (refused) {
+    throw new ProjectIntakeError(refused, 400, [{ path: "pipeline.chartExport.tier", message: refused, code: CHART_EXPORT_TIER_UNAVAILABLE_CODE }], CHART_EXPORT_TIER_UNAVAILABLE_CODE);
+  }
 }
 
 export function parseProjectIntakeTemplateKey(raw: unknown): ProjectTemplateKey | undefined {
@@ -244,6 +252,10 @@ export async function confirmDirectUploadProjectIntake(
         return project;
       },
     } };
+    const sessionPipeline = session.pipeline ? sanitizeStoredPipeline(session.pipeline, `upload session ${args.sessionId}`) : undefined;
+    // Re-checked at confirm: a session opened before the deployment stopped offering a tier (or before migration 0145
+    // mapped enabled:true to models) is refused with the same code, not run at a tier no estimate showed.
+    assertIntakeChartExportTier((sessionPipeline as { chartExport?: { tier?: ChartExportTier } } | undefined)?.chartExport?.tier, `upload session ${args.sessionId}`);
     const intake = await requiredIntake({
       userId: args.userId,
       orgId: session.org_id,
@@ -252,7 +264,7 @@ export async function confirmDirectUploadProjectIntake(
       templateKey: session.template_key ? projectTemplateKeySchema.parse(session.template_key) : undefined,
       // Stored with the session; a session created before an extractor schema tightened is read leniently.
       speedBoost: session.pipeline?.speedBoost === true,
-      pipeline: session.pipeline ? sanitizeStoredPipeline(session.pipeline, `upload session ${args.sessionId}`) : undefined,
+      pipeline: sessionPipeline,
       tags: session.tags ?? [],
       apiKeyId: session.api_key_id,
       // Recorded from the principal that opened the session (never a request field); older rows are machine.

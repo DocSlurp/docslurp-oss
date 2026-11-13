@@ -1,5 +1,5 @@
 import { reportPublicError } from "../lib/public-errors.js";
-import { chartExportOverrideSchema } from "@docslurp/shared";
+import { CHART_EXPORT_TIER_UNAVAILABLE_CODE, chartExportOverrideSchema } from "@docslurp/shared";
 import { chartExportOverrideError } from "../services/chart-export-availability.js";
 import { runOriginOf } from "../lib/run-origin.js";
 import { Hono, type Context } from "hono";
@@ -50,6 +50,7 @@ import {
   parseFormProjectIntakePipeline,
   parseFormDocumentTags,
   parseProjectIntakePipeline,
+  assertIntakeChartExportTier,
   parseProjectIntakeTemplateKey,
 } from "../services/project-intake-actions.js";
 import {
@@ -454,6 +455,7 @@ export const createUploadsRoutes = (ports: ProjectIntakePorts = projectIntakePor
         templateKey: requestedTemplateKey,
         allowedProjectIds: actorAllowedProjectIds(getRequestActor(c)),
         origin: runOriginOf(c),
+        apiKeyId: c.get("apiKey")?.keyId ?? null,
         indexingMode: indexingModeSchema.safeParse(body.indexingMode).data,
         pipeline,
         speedBoost,
@@ -496,6 +498,8 @@ export const createUploadsRoutes = (ports: ProjectIntakePorts = projectIntakePor
       }
       let result;
       try {
+        // The same refusal as file uploads (400 chart_export_tier_unavailable), never a silent downgrade.
+        assertIntakeChartExportTier(body.pipeline?.chartExport?.tier, "url ingest");
         result = await createRemoteUrlProjectIntake({
           userId,
           orgId: c.get("apiKey")?.orgId ?? body.orgId,
@@ -504,6 +508,7 @@ export const createUploadsRoutes = (ports: ProjectIntakePorts = projectIntakePor
           templateKey: body.templateKey,
           allowedProjectIds: actorAllowedProjectIds(getRequestActor(c)),
           origin: runOriginOf(c),
+          apiKeyId: c.get("apiKey")?.keyId ?? null,
           indexingMode: body.indexingMode,
           pipeline: body.pipeline,
           speedBoost: body.speedBoost === true,
@@ -593,8 +598,6 @@ export const uploadEstimateRoutes = new Hono().post(
     const userId = c.get("sessionUser").id;
     const body = c.req.valid("json");
     const actor = getRequestActor(c);
-    const refusedTier = chartExportOverrideError(body.chartExport?.tier, "upload estimate");
-    if (refusedTier) return apiStatusError(c, 400, refusedTier, { code: "chart_export_models_unavailable" });
     // Same gate as the upload itself: ingest scope, bound to the key's organization and projects.
     if (actor.type === "apiKey" && (actor.apiKey.keyType !== "server" || !actorHasAnyApiKeyScope(actor, ["ingest"]))) {
       return apiErrorResponse(c, 403, "forbidden", "Forbidden");
@@ -610,6 +613,9 @@ export const uploadEstimateRoutes = new Hono().post(
     if (!project || (actor.type === "apiKey" && !apiKeyCanUseProject(actor.apiKey, project))) {
       return apiErrorResponse(c, 404, "project_not_found", "Project not found");
     }
+    // After the scope and project checks: a caller that may not upload here never learns what the deployment offers.
+    const refusedTier = chartExportOverrideError(body.chartExport?.tier, "upload estimate");
+    if (refusedTier) return apiStatusError(c, 400, refusedTier, { code: CHART_EXPORT_TIER_UNAVAILABLE_CODE, details: { field: "chartExport.tier" } });
     const { estimate, media, profile, quote, chartExport } = await estimateUpload({
       files: body.files, project, speedBoost: body.speedBoost === true, settings: body.settings,
       chartExportTier: body.chartExport?.tier ?? null, origin: runOriginOf(c),

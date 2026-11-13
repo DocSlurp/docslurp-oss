@@ -1523,7 +1523,7 @@ export const projectsRoutes = new Hono()
       } catch (error) {
         if (error instanceof ProjectSlugError) return apiStatusError(c, error.status, error.message);
         if (error instanceof ConfigConflictError) return apiStatusError(c, error.status, error.message, { details: { category: error.code } });
-        if (error instanceof ChartExportUnavailableError) return apiStatusError(c, error.status, error.message, { details: { category: error.code } });
+        if (error instanceof ChartExportUnavailableError) return apiStatusError(c, error.status, error.message, { code: error.code, details: { field: "chartExport.tier" } });
         return fail(error);
       }
 

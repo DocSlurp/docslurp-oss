@@ -6,8 +6,8 @@
  *
  * Inputs, each only when a free signal says it can hold a chart (a parser-VM boot is not free):
  * - the document source when its type can carry exact chart data: DOCX/PPTX/XLSX (`office`) with chart parts counted by
- *   quarantine; EPUB (`epub`) or HTML (`html`) with an embed hint or a detected candidate; a standalone SVG (`svg`) or
- *   JSON (`json`) document, which is itself the candidate;
+ *   quarantine; EPUB (`epub`), HTML (`html`), a standalone SVG (`svg`) or JSON (`json`) document with an embed hint or a
+ *   detected candidate (a file type alone never boots the VM);
  * - the stored Doppler SVG figures (`svg`), all in ONE guest run, each placed on the page the figure index records.
  */
 import { DOPPLER_FIGURE_LIMITS, dopplerFigureRecordSchema, dopplerFigureSlot, type BBox, type DopplerFigureRecord } from "@docslurp/shared";
@@ -130,7 +130,14 @@ export interface VmExtractorDeps {
  * Why the source goes to the guest, or null when no free signal says it can hold a chart (no VM run).
  */
 export function sourceRunReason(kind: DeterministicInputKind, signals: DeterministicVisualInput["signals"]): string | null {
-  if (kind === "svg" || kind === "json") return "standalone-document";
+  // A standalone SVG or JSON document is no longer a chart signal by its type alone (council M1: any caller could boot
+  // an unbilled VM per tiny file). It needs a signal the host already holds without parsing the bytes: a candidate from
+  // the router plan or media map, or an embed hint the parser VM recorded. Detecting a chart spec inside the guest that
+  // converts the document belongs with the inline-VM work (folding extraction into a VM the document already boots).
+  if (kind === "svg" || kind === "json") {
+    if (signals?.htmlEmbedHints) return "embed-hints";
+    return (signals?.candidates ?? 0) > 0 ? "candidates" : null;
+  }
   if (kind === "office") return (signals?.officeChartParts ?? 0) > 0 ? "office-chart-parts" : null;
   if (signals?.htmlEmbedHints) return "embed-hints";
   return (signals?.candidates ?? 0) > 0 ? "candidates" : null;
@@ -167,6 +174,18 @@ export function createVmDeterministicVisualExtractor(deps: VmExtractorDeps): Det
     const options = { diagrams: input.diagrams !== false };
     const context = `document=${document.id}`;
     let guestDown = false;
+    // One admission per document (the per-org free VM cap), asked before the first VM run and reused after.
+    let admitted: Promise<boolean> | null = null;
+    const admit = (): Promise<boolean> => (admitted ??= (input.admitVmRun ? input.admitVmRun() : Promise.resolve(true)));
+    let capLogged = false;
+
+    /** Asked before any bytes are staged for the guest: a refused document downloads nothing and boots no VM. */
+    const admittedToVm = async (): Promise<boolean> => {
+      if (await admit()) return true;
+      if (!capLogged) log(`[chart-export] parser VM skipped ${context} reason=org-free-vm-cap`);
+      capLogged = true;
+      return false;
+    };
 
     const guard = async (reason: string, inputs: number, run: () => Promise<void>): Promise<void> => {
       if (guestDown) return;
@@ -200,7 +219,7 @@ export function createVmDeterministicVisualExtractor(deps: VmExtractorDeps): Det
       log(`[chart-export] parser VM skipped ${context} kind=${sourceKind} reason=inline-${inline.status}${inline.status === "ok" ? ` visuals=${inline.result.visuals.length}` : ` detail=${inline.reason}`}`);
     }
     const reason = sourceKind && !useInline ? (inline ? "inline-result-too-large" : sourceRunReason(sourceKind, input.signals)) : null;
-    if (sourceKind && document.sourceKey && reason) {
+    if (sourceKind && document.sourceKey && reason && await admittedToVm()) {
       const path = await stageSourceFile(
         deps.storage,
         {
@@ -236,7 +255,7 @@ export function createVmDeterministicVisualExtractor(deps: VmExtractorDeps): Det
     }
 
     const figures = await svgFigures(deps, input.artifacts.dopplerFiguresIndexUri, Math.max(1, document.pageCount), input.dopplerFiguresIndex);
-    const sent = figures.slice(0, MAX_SVG_FIGURES_PER_DOCUMENT);
+    const sent = figures.length > 0 && await admittedToVm() ? figures.slice(0, MAX_SVG_FIGURES_PER_DOCUMENT) : [];
     const staged: Array<{ path: string; page: number; bbox: BBox | null; id: string }> = [];
     try {
       for (const figure of sent) {
@@ -264,7 +283,7 @@ export function createVmDeterministicVisualExtractor(deps: VmExtractorDeps): Det
     } finally {
       await Promise.all(staged.map((s) => cleanupTempFile(s.path).catch(() => undefined)));
     }
-    if (figures.length > sent.length && !guestDown) log(`[chart-export] svg figures capped ${context} figures=${figures.length} sent=${sent.length}`);
+    if (figures.length > sent.length && !guestDown && !capLogged) log(`[chart-export] svg figures capped ${context} figures=${figures.length} sent=${sent.length}`);
 
     if (deferred.length) log(`[chart-export] visuals deferred ${context} count=${deferred.length}`);
     return { partials, presence: presenceOf(results, figures.length), ...(deferred.length ? { deferred: deferred.slice(0, 1000) } : {}) };

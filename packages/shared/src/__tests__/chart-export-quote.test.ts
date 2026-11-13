@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   defaultPipelineFeatures,
   DISTINCT_TEST_PRICING,
+  estimateChartExportCredits,
   estimatePipelineWork,
   compilePipelinePlan,
   installTestPricing,
@@ -26,8 +27,16 @@ describe("chart export in the public quote", () => {
   it("prices the free tier at 0 credits: no charts line, the same ingest credits as off", () => {
     installTestPricing(DISTINCT_TEST_PRICING);
     const off = quoteEstimate({ files, settings: { chartExport: "off" } }, { env: ON });
-    const free = quoteEstimate({ files, settings: { chartExport: "free" } }, { env: ON });
+    const free = quoteEstimate({ files, settings: { chartExport: "free" } }, { env: { ...ON, DOCSLURP_CHART_EXPORT_FREE_EXPLICIT: "on" } });
     expect(free.settings.chartExport).toBe("free");
+    // Without the explicit-free gate a requested free is refused with the one tier code.
+    try {
+      quoteEstimate({ files, settings: { chartExport: "free" } }, { env: ON });
+      expect.unreachable();
+    } catch (error) {
+      expect(error).toBeInstanceOf(QuoteSettingsError);
+      expect((error as QuoteSettingsError).code).toBe("chart_export_tier_unavailable");
+    }
     expect(charts(free)).toBeUndefined();
     expect(free.ingest.credits).toEqual(off.ingest.credits);
   });
@@ -69,6 +78,19 @@ describe("chart export in the public quote", () => {
       expect(() => quoteEstimate({ files, settings: { chartExport: "models" } }, { env })).toThrow(QuoteSettingsError);
     }
     expect(() => quoteEstimate({ files, settings: { chartExport: "smart" as never } }, { env: ON })).toThrow();
+  });
+
+  it("the charts line prices the project's formats and diagrams, so it equals the upload's chartExport credits", () => {
+    installTestPricing(DISTINCT_TEST_PRICING);
+    const pipeline = { ...defaultPipelineFeatures, chartExport: { tier: "models" as const, formats: ["description", "vega-lite", "matplotlib", "csv"] as const, diagrams: true } };
+    const base = quoteSettingsForPipeline(pipeline as never);
+    expect(base.chartFormats).toEqual(["description", "vega-lite", "matplotlib", "csv"]);
+    const quote = quoteEstimate({ files }, { env: ON, base });
+    const line = charts(quote)!;
+    const credits = estimateChartExportCredits({ features: pipeline as never, tier: "models", pages: quote.pages.high, documents: files.length, env: ON });
+    expect(line.credits.high).toBeCloseTo(credits.high, 5);
+    expect(quote.pages.low).toBe(quote.pages.high);
+    expect(line.credits.low).toBeCloseTo(credits.low, 5);
   });
 
   it("estimatePipelineWork prices chart reads only with the switch on, never at free", () => {

@@ -3,7 +3,7 @@ import { z } from "zod";
 import { isBillingEnforced, pipelineProfileIdSchema } from "./billing.js";
 import { fileProfileSchema } from "./file-profile.js";
 import { CHAT_ANSWER_TIERS, pricing } from "./pricing-provider.js";
-import { chartExportOverrideRefusal, chartExportTierSchema, defaultChartExportConfig, effectiveChartExportConfig, resolveChartExportTier, type ChartExportTier, type RunOrigin } from "./chart-export.js";
+import { CHART_EXPORT_TIER_UNAVAILABLE_CODE, CHART_EXPORT_FORMATS, chartExportFormatSchema, chartExportOverrideRefusal, chartExportTierSchema, defaultChartExportConfig, effectiveChartExportConfig, resolveChartExportTier, type ChartExportTier, type RunOrigin } from "./chart-export.js";
 import type { PipelineFeatures } from "./pipeline.js";
 import type { CostEstimate } from "./jobs.js";
 import type { UploadMediaEstimate } from "./media-upload-estimate.js";
@@ -54,6 +54,9 @@ export const quoteSettingsSchema = z.strictObject({
    * MCP, SDK and CLI: off). The deploy switch caps it. Only `models` (reading charts with AI) is priced.
    */
   chartExport: chartExportTierSchema,
+  /** Chart export formats and diagrams the `models` tier prices with: the project's own, so the quote's charts line equals the upload's `chartExport.credits`. */
+  chartFormats: z.array(chartExportFormatSchema).min(1).max(CHART_EXPORT_FORMATS.length),
+  chartDiagrams: z.boolean(),
 });
 export type QuoteSettings = z.infer<typeof quoteSettingsSchema>;
 
@@ -71,6 +74,8 @@ export const DEFAULT_QUOTE_SETTINGS: QuoteSettings = {
   chatAnswersPerMonth: 0,
   chatTier: "standard",
   chartExport: "off",
+  chartFormats: [...defaultChartExportConfig.formats],
+  chartDiagrams: defaultChartExportConfig.diagrams,
 };
 
 type QuoteOrigin = { origin?: RunOrigin; env?: Record<string, string | undefined> };
@@ -85,7 +90,7 @@ function quoteChartTier(requested: ChartExportTier | undefined, base: ChartExpor
     if (value !== undefined && !chartExportTierSchema.safeParse(value).success) throw new QuoteSettingsError("chartExport must be off, free or models");
   }
   // A requested `models` quote where the deployment does not offer it is refused, as the upload itself would be.
-  if (requested && chartExportOverrideRefusal(requested, env)) throw new QuoteSettingsError("Reading charts with AI is not available on this deployment");
+  if (requested && chartExportOverrideRefusal(requested, env)) throw new QuoteSettingsError("That chart export tier is not available on this deployment", CHART_EXPORT_TIER_UNAVAILABLE_CODE);
   const tier = resolveChartExportTier({ requested: requested ?? null, project: base ? { tier: base } : null, origin: options.origin ?? "machine", env });
   return effectiveChartExportConfig({ ...defaultChartExportConfig, tier }, env).tier;
 }
@@ -167,6 +172,8 @@ export function quoteSettingsForPipeline(pipeline: PipelineFeatures): Partial<Qu
     speedBoost: pipeline.speedBoost === true,
     // Only an explicit project tier; an unset one resolves per caller at quote time.
     ...(pipeline.chartExport?.tier ? { chartExport: pipeline.chartExport.tier } : {}),
+    ...(pipeline.chartExport?.formats?.length ? { chartFormats: [...pipeline.chartExport.formats] } : {}),
+    ...(pipeline.chartExport ? { chartDiagrams: pipeline.chartExport.diagrams !== false } : {}),
   };
 }
 
@@ -221,6 +228,12 @@ export function quoteStoredWork(args: {
 /** Settings a project could not be configured with (a quote refuses them as the project API does). */
 export class QuoteSettingsError extends Error {
   override name = "QuoteSettingsError";
+  /** The public error code; `invalid_request` unless a specific refusal (`chart_export_tier_unavailable`). */
+  readonly code: string;
+  constructor(message: string, code = "invalid_request") {
+    super(message);
+    this.code = code;
+  }
 }
 
 /**

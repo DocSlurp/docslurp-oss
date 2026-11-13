@@ -8,6 +8,8 @@ import {
   chartExportRuns,
   chartExportSwitch,
   chartExportSwitchWarning,
+  chartExportDefaultsWarnings,
+  upgradeStoredChartExport,
   defaultChartExportConfig,
   effectiveChartExportConfig,
   resolveChartExportConfig,
@@ -28,10 +30,11 @@ export function chartExportSwitchOf(env: Readonly<Record<string, string | undefi
 let switchWarned = false;
 /** Logs once per process when the switch holds an unknown value (it is treated as `off`). Called at worker startup. */
 export function warnChartExportSwitch(env: Readonly<Record<string, string | undefined>> = process.env): void {
-  const warning = chartExportSwitchWarning(env);
-  if (warning && !switchWarned) {
+  if (switchWarned) return;
+  const warnings = [chartExportSwitchWarning(env), ...chartExportDefaultsWarnings(env)].filter((w): w is string => Boolean(w));
+  if (warnings.length > 0) {
     switchWarned = true;
-    console.warn(warning);
+    for (const warning of warnings) console.warn(warning);
   }
 }
 
@@ -43,9 +46,16 @@ export function warnChartExportSwitch(env: Readonly<Record<string, string | unde
  */
 export function chartExportConfigOf(pipeline: unknown, env: Readonly<Record<string, string | undefined>> = process.env): ResolvedChartExportConfig {
   const raw = pipeline && typeof pipeline === "object" ? (pipeline as { chartExport?: unknown }).chartExport : undefined;
-  const parsed = raw === undefined || raw === null ? null : chartExportConfigSchema.safeParse(raw);
+  // Runs written before migration 0145 or by an older API during a deploy carry `enabled`/`generatorModel`: mapped on
+  // read (`enabled: true` -> `models`), so a skew-window run keeps the tier it was created with.
+  const parsed = raw === undefined || raw === null ? null : chartExportConfigSchema.safeParse(upgradeStoredChartExport(raw));
   const project = parsed?.success ? parsed.data : defaultChartExportConfig;
-  return effectiveChartExportConfig(resolveChartExportConfig({ project, origin: "machine", env }), env);
+  // A stamped tier is already resolved (the server applied overrides, project tier, origin default and the explicit-free
+  // gate at run creation): it is used as is, only capped by the switch. Unstamped resolves as a machine run.
+  const resolved: ResolvedChartExportConfig = project.tier
+    ? { ...project, tier: project.tier }
+    : resolveChartExportConfig({ project, origin: "machine", env });
+  return effectiveChartExportConfig(resolved, env);
 }
 
 /** Whether chart export runs for this run's pipeline (any tier but off, kill switch not off). */

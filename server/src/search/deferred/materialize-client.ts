@@ -86,8 +86,8 @@ export const defaultMaterializeDeps: MaterializeDeps = {
     // so the stale-lease alerts and health counts flag a materialize run only when its worker really died.
     // The stored source pipeline may predate the strict extractor schemas: drop what they reject (a Dolphin
     // repoPath, an unknown extractor id) before it is copied into the new run, as every other run path does.
-    const [source] = await sql<{ pipeline: Record<string, unknown> | null }[]>`
-      select coalesce(nullif(r.pipeline, '{}'::jsonb), nullif(w.pipeline, '{}'::jsonb), '{}'::jsonb) as pipeline
+    const [source] = await sql<{ pipeline: Record<string, unknown> | null; origin: string | null }[]>`
+      select coalesce(nullif(r.pipeline, '{}'::jsonb), nullif(w.pipeline, '{}'::jsonb), '{}'::jsonb) as pipeline, r.origin
       from (select 1) one
       left join documents d on d.id = ${args.documentId} and d.project_id = ${args.projectId}
       left join project_runs r on r.id = d.run_id and r.project_id = ${args.projectId}
@@ -95,13 +95,15 @@ export const defaultMaterializeDeps: MaterializeDeps = {
     `;
     // A materialize run reads pages a query needs: never chart export beyond what the source run already resolved (a
     // project pipeline with no stamped tier resolves as machine, i.e. off by default).
-    const pipeline = stampRunChartExport(sanitizeStoredPipeline(source?.pipeline ?? {}, `materialize run ${id} source pipeline`) as PipelineFeatures, "machine");
+    // A source run's stamped tier is kept as is (`stamped`); a project pipeline with no tier resolves as machine.
+    const pipeline = stampRunChartExport(sanitizeStoredPipeline(source?.pipeline ?? {}, `materialize run ${id} source pipeline`) as PipelineFeatures, "machine", process.env, { stamped: true });
+    const origin = source?.origin === "app" ? "app" : "machine";
     return acceptChatRunDependency({ ...args, pages: args.pageNumbers ?? [] }, async tx => {
     await tx`
-      insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, total_documents, pages_total, pipeline, workflow_started_at, lease_expires_at, creation_ready_at, creation_expires_at)
+      insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, total_documents, pages_total, pipeline, workflow_started_at, lease_expires_at, creation_ready_at, creation_expires_at, origin)
       values (${id}, ${args.orgId}, ${args.userId}, ${args.projectId}, 'materialize', 'processing', 'materialize',
              ${args.documents}, ${args.pages}, ${tx.json(pipeline as never)}, now(),
-             now() + interval '15 minutes', now(), null)
+             now() + interval '15 minutes', now(), null, ${origin})
     `;
     return { runId: id, value: id };
     });

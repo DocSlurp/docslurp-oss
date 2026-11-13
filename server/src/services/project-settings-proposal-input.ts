@@ -1,3 +1,4 @@
+import { upgradeStoredPipelineChartExport } from "@docslurp/shared";
 import { z } from "zod";
 import { chartExportFormatSchema, chartExportTierSchema, CHART_EXPORT_FORMATS, migrateLegacyQualitySettings, qualityModeSchema, type QualityMode, updateProjectSearchChatSettingsSchema, updateProjectSearchRetrievalDefaultsSchema } from "@docslurp/shared";
 
@@ -8,6 +9,8 @@ import { chartExportFormatSchema, chartExportTierSchema, CHART_EXPORT_FORMATS, m
  */
 function migrateLegacyPatch(value: unknown): unknown {
   if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  // Patches saved in chat history or an ingest report before migration 0145 carry chartExport.enabled/generatorModel.
+  value = upgradeStoredPipelineChartExport(value);
   const vision = (value as { vision?: unknown }).vision;
   const hadLegacyVision = !!vision && typeof vision === "object" && "forceAllPages" in vision;
   const migrated = migrateLegacyQualitySettings(value) as Record<string, unknown>;

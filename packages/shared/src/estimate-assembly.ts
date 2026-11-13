@@ -7,7 +7,7 @@
  * which imports this).
  */
 import { chatAnswerCredits, creditsToDollars, searchCredits, storageCreditsPerMonth, visualExportCredits } from "./billing.js";
-import { defaultChartExportConfig } from "./chart-export.js";
+import { defaultChartExportConfig, type ChartExportFormat } from "./chart-export.js";
 import { expectedBillableVisuals } from "./chart-export-estimate.js";
 import type { EstimateLine, EstimateQuote, ProviderEstimateArgs } from "./estimate-quote.js";
 import type { CostEstimate } from "./jobs.js";
@@ -82,7 +82,7 @@ export function assembleEstimateQuote(args: ProviderEstimateArgs & {
   // Reading charts with AI (the `models` tier, already resolved for the caller and capped by the deploy switch): billed per
   // chart or diagram a model reads, from the per-page planning prior over the quoted pages. Stage-priced work (`work`)
   // already includes it (estimatePipelineWork), so only an upload quote adds the line. `free` and `off` cost nothing.
-  const charts = billed && !args.work && settings.chartExport === "models" ? chartCredits(pages, paged.length) : null;
+  const charts = billed && !args.work && settings.chartExport === "models" ? chartCredits(pages, paged.length, settings) : null;
   const ingestCredits = ingest.estimate.credits && charts
     ? { low: ingest.estimate.credits.low + charts.low, high: ingest.estimate.credits.high + charts.high }
     : ingest.estimate.credits;
@@ -129,10 +129,14 @@ export function assembleEstimateQuote(args: ProviderEstimateArgs & {
   };
 }
 
-/** Credits for reading the expected charts and diagrams with AI over `pages` pages (default formats, prior per page). */
-function chartCredits(pages: { low: number; high: number }, documents: number): { low: number; high: number } {
-  const formats = defaultChartExportConfig.formats;
-  const at = (count: number) => expectedBillableVisuals({ config: defaultChartExportConfig, pages: count, documents: Math.max(1, documents) });
+/**
+ * Credits for reading the expected charts and diagrams with AI over `pages` pages, with the formats and diagrams the
+ * quote's settings carry (the project's own), from the per-page prior: the same rule as the upload's `chartExport`.
+ */
+function chartCredits(pages: { low: number; high: number }, documents: number, settings: { chartFormats?: readonly ChartExportFormat[]; chartDiagrams?: boolean }): { low: number; high: number } {
+  const formats = settings.chartFormats?.length ? [...settings.chartFormats] : defaultChartExportConfig.formats;
+  const config = { ...defaultChartExportConfig, formats, diagrams: settings.chartDiagrams ?? defaultChartExportConfig.diagrams };
+  const at = (count: number) => expectedBillableVisuals({ config, pages: count, documents: Math.max(1, documents) });
   return ordered({
     low: visualExportCredits({ visuals: at(pages.low).low, source: "vision", formats }),
     high: visualExportCredits({ visuals: at(pages.high).high, source: "vision", formats }),

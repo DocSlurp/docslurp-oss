@@ -9,7 +9,7 @@ import {
 } from "../config-change.js";
 import { affectedStages, defaultPipelineFeatures, normalizePipelineFeatures, pipelineFeaturesSchema, pipelineStagePlan, compilePipelinePlan } from "../index.js";
 
-const ctx = { documents: 3, pages: 120 };
+const ctx = { documents: 3, pages: 120, env: { DOCSLURP_CHART_EXPORT: "on" } };
 const base = normalizePipelineFeatures(defaultPipelineFeatures);
 const withF = (patch: Record<string, unknown>) => normalizePipelineFeatures({ ...base, ...patch } as never);
 
@@ -131,12 +131,33 @@ describe("analyzePipelineChange", () => {
   });
   it("chart export: an unset tier resolves for the caller's surface", () => {
     const free = withF({ chartExport: { tier: "free" } });
+    const ctx = { documents: 3, pages: 120, env: { DOCSLURP_CHART_EXPORT: "on", DOCSLURP_CHART_EXPORT_FREE_EXPLICIT: "on" } };
     // In the app the default is already free: setting it explicitly changes nothing stored.
     expect(analyzePipelineChange(base, free, { ...ctx, origin: "app" }).kind).toBe("new-uploads");
     // For API callers the default is off: free is an optional (free) reindex.
     expect(analyzePipelineChange(base, free, { ...ctx, origin: "machine" }).kind).toBe("reindex-recommended");
     // DOCSLURP_CHART_EXPORT_API_DEFAULT=free makes API callers' default free too.
-    expect(analyzePipelineChange(base, free, { ...ctx, origin: "machine", env: { DOCSLURP_CHART_EXPORT_API_DEFAULT: "free" } }).kind).toBe("new-uploads");
+    expect(analyzePipelineChange(base, free, { ...ctx, origin: "machine", env: { ...ctx.env, DOCSLURP_CHART_EXPORT_API_DEFAULT: "free" } }).kind).toBe("new-uploads");
+  });
+  it("chart export: classification follows the production defaults (switch on, app default off, explicit free refused)", () => {
+    const production = { DOCSLURP_CHART_EXPORT: "on", DOCSLURP_CHART_EXPORT_APP_DEFAULT: "off" };
+    const app = { ...ctx, origin: "app" as const, env: production };
+    // Unset -> models: billed reads old documents gain on reprocess.
+    expect(analyzePipelineChange(base, withF({ chartExport: { tier: "models" } }), app).kind).toBe("reindex-recommended");
+    // A stored free counts as unset while explicit free is refused, so it changes nothing.
+    expect(analyzePipelineChange(base, withF({ chartExport: { tier: "free" } }), app).kind).toBe("new-uploads");
+    // With explicit free allowed, unset (off here) -> free is a reindex, not "new uploads only".
+    const freeOk = { ...app, env: { ...production, DOCSLURP_CHART_EXPORT_FREE_EXPLICIT: "on" } };
+    expect(analyzePipelineChange(base, withF({ chartExport: { tier: "free" } }), freeOk).kind).toBe("reindex-recommended");
+    // A typo in the app default fails closed (off), never free.
+    expect(analyzePipelineChange(base, withF({ chartExport: { tier: "free" } }), { ...freeOk, env: { ...freeOk.env, DOCSLURP_CHART_EXPORT_APP_DEFAULT: "of" } }).kind).toBe("reindex-recommended");
+    // Clients pass the server-reported defaults instead of an environment.
+    const reported = { app: "off" as const, machine: "off" as const, modelsAvailable: true, freeAvailable: true, ceiling: "on" as const };
+    expect(analyzePipelineChange(base, withF({ chartExport: { tier: "free" } }), { documents: 3, pages: 120, origin: "app", chartExportDefaults: reported }).kind).toBe("reindex-recommended");
+    // Under the switch off nothing runs, so no tier change recommends a reindex.
+    expect(analyzePipelineChange(base, withF({ chartExport: { tier: "models" } }), { documents: 3, pages: 120, origin: "app", chartExportDefaults: { ...reported, ceiling: "off" } }).kind).toBe("new-uploads");
+    // No defaults at all: conservative (nothing runs), never an assumed free.
+    expect(analyzePipelineChange(base, withF({ chartExport: { tier: "models" } }), { documents: 3, pages: 120, origin: "app" }).kind).toBe("new-uploads");
   });
   it("chart export: vision-extract runs unless the tier is explicitly off", () => {
     const noVision = withF({ visionFallback: false });
