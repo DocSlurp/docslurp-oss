@@ -7,21 +7,27 @@ import { NativeOperations } from "./native-operations.js";
 import { createNativeOperationPolicy } from "./operation-policy.js";
 import { createProjectChatExecutor } from "./project-chat-executor.js";
 import { durableRedisUrl } from "./durability-policy.js";
-import { chatTurnTimeBudget } from "../services/chat-turn-deadline.js";
 
 /** Teardown after the drain: native settlement, Redis and pool shutdown. */
 export const NATIVE_CHAT_TEARDOWN_MS=5000;
 /**
- * How long a stopping executor lets accepted turns run: one full turn deadline
- * plus room to publish the final result (CHAT_EXECUTOR_DRAIN_MS overrides,
- * 0 to 900000; 0 restores the immediate interrupt). The process supervisor's
- * kill timeout must exceed this plus NATIVE_CHAT_TEARDOWN_MS.
+ * Default drain. While an executor drains it claims nothing, so with a single
+ * executor machine no new turn starts until its replacement is up: the drain
+ * is the deploy's claim gap and is kept short rather than a full turn deadline.
+ */
+export const NATIVE_CHAT_DEFAULT_DRAIN_MS=25_000;
+/**
+ * How long a stopping executor lets accepted turns run (CHAT_EXECUTOR_DRAIN_MS
+ * overrides, 0 to 900000; 0 restores the immediate interrupt). A turn still
+ * running at the limit is interrupted exactly as before the drain existed: its
+ * accepted output is retained and it is never retried. The process
+ * supervisor's kill timeout must exceed this plus NATIVE_CHAT_TEARDOWN_MS.
  */
 export function nativeChatDrainMs(env:NodeJS.ProcessEnv=process.env):number {
   const raw=env.CHAT_EXECUTOR_DRAIN_MS?.trim();
   const parsed=raw ? Number(raw) : Number.NaN;
   if(Number.isInteger(parsed)&&parsed>=0&&parsed<=900_000)return parsed;
-  return chatTurnTimeBudget(env).turnDeadlineMs+5_000;
+  return NATIVE_CHAT_DEFAULT_DRAIN_MS;
 }
 
 let producer: Promise<Awaited<ReturnType<typeof createRuntime>>> | undefined;
