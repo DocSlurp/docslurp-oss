@@ -61,7 +61,8 @@ describe("hosted vision catalog", () => {
       // Priced at the most expensive host the route allows ($0.30/$1.20: US hosts, DeepSeek at peak), not the $0.15/$0.60 list price.
       "deepseek/deepseek-v4.1-flash-1017": { input: 0.3, output: 1.2, perPage: 0.103, checked: "2026-11-12", route: ["fireworks", "parasail"] },
       "xiaomi/mimo-v2.6-flash": { input: 0.14, output: 0.28, perPage: 0.056 },
-      "openai/gpt-6-luna": { input: 0.1, output: 0.5, perPage: 0.061 },
+      "openai/gpt-6-luna": { input: 0.11, output: 0.55, perPage: 0.061, checked: "2026-11-13", route: ["openai", "amazon-bedrock/us-east-1", "azure/us"], cacheWrite: 0.1375 },
+      "anthropic/claude-haiku-5.5": { input: 0.1, output: 0.5, perPage: 0.11, checked: "2026-11-13" },
       "z-ai/glm-5.3-flash": { input: 0.15, output: 0.5, perPage: 0.073, checked: "2026-11-12", route: ["wafer/nvfp4", "friendli", "inference-net/fp4"] },
     };
     for (const [id, expected] of Object.entries(tuned)) {
@@ -77,6 +78,7 @@ describe("hosted vision catalog", () => {
         outputUsdPerMillion: expected.output,
         checked: "checked" in expected ? expected.checked : "2026-10-25",
         ...(route ? { basis: "pinned-route", providers: route } : {}),
+        ...("cacheWrite" in expected ? { promptCacheWriteUsdPerMillion: expected.cacheWrite } : {}),
       });
       // MiMo stays cataloged (price, profile) but is refused until its image-token bound has serving evidence.
       if (visionModelRefusal(id)) expect(visionConfigSchema.safeParse({ modelUri: uri }).success, id).toBe(false);
@@ -202,7 +204,7 @@ describe("hosted vision catalog limits", () => {
     expect(visionModelUriProblem("llm://acme/plain-vl")).toMatch(/not supported/);
     expect(visionModelUriProblem("llm://anthropic/claude-haiku-5.5")).toMatch(/not supported/);
     expect(visionModelUriProblem("llm://huggingface/Qwen/Qwen2.5-VL-7B-Instruct")).toMatch(/not supported/);
-    expect(visionModelUriProblem("llm://openrouter/anthropic/claude-haiku-5.5")).toMatch(/priced vision catalog/);
+    expect(visionModelUriProblem("llm://openrouter/anthropic/claude-sonnet-5.5")).toMatch(/priced vision catalog/);
     expect(visionModelUriProblem("llm://openai/gpt-x")).toMatch(/priced vision catalog/);
     for (const uri of ["llm://openrouter/openai/o3-pro", "llm://openai/gpt-5-pro", "llm://vllm/x/model-ultra", "llm://private/gpu1/acme/vl-pro-2025"]) {
       expect(visionModelUriProblem(uri), uri).toMatch(/Pro\/Ultra/);

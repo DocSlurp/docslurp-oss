@@ -133,7 +133,7 @@ Per-model prompt, output cap, routing and reasoning settings live in
 | --- | --- | --- | --- |
 | `llm://openrouter/deepseek/deepseek-v4.1-flash-1017` (explicit choice only) | 0.30 / 1.20 (route ceiling) | 0.103 cents (US route) | Markdown + LaTeX prompt, 8,192 output cap, reasoning effort `none`. Only Fireworks and Parasail (US), lowest latency first (Together omitted: it fabricated page bodies on 2026-11-12); new hosts stay gated pending disclosure and rollout ([provider regions](provider-regions.md)) |
 | `llm://openrouter/xiaomi/mimo-v2.6-flash` (refused, see above) | 0.14 / 0.28 | 0.056 cents | Markdown transcription prompt, output cap ceiling 8,192, reasoning `none`, routed to Relace then DeepInfra with fallbacks, math delimiters normalized |
-| `llm://openrouter/openai/gpt-6-luna` (default) | 0.10 / 0.50 | 0.061 cents | Page Markdown + LaTeX prompt, image detail `high`, reasoning `none`, output cap ceiling 8,192, whole-page code fence removed, content-filter retry on Bedrock then Azure US |
+| `llm://openrouter/openai/gpt-6-luna` (default) | 0.11 / 0.55 (route ceiling) | 0.061 cents | Page Markdown + LaTeX prompt, image detail `high`, reasoning `none`, output cap ceiling 8,192, whole-page code fence removed. Routed to OpenAI (never its Flex tier), with Amazon Bedrock us-east-1 and Azure US as fallbacks and as the content-filter retry route; priced at those hosts' $0.11/$0.55 so `max_price` admits them |
 | `llm://openrouter/z-ai/glm-5.3-flash` | 0.0113 / 0.1589 | 0.013 cents (computed from about 3,000 input and 560 output tokens) | Markdown transcription prompt, output cap ceiling 8,192, reasoning `minimal`, routed to Wafer, Friendli then InferenceNet with no other fallbacks, missing table delimiter rows repaired |
 
 The first three per-page costs are measured; GLM's is computed from list price.
@@ -251,11 +251,14 @@ Some models are never picked by the system on its own: `NO_AUTOMATIC_SELECTION_M
 `packages/shared/src/automatic-model-selection.ts` (today DeepSeek V4.1 Flash, every build, variant, provider suffix and
 spelling). Such a model is never a chat failover, Speed boost swap, route-tier pool option, page-router target, chart
 generator candidate, OCR escalation model or restricted-region fallback; each of those lists is checked when it is
-defined or configured, and a configured value naming one is refused. A model a caller or operator names explicitly
-(a project's chat or vision model, the default vision model) is not affected.
+defined or configured, and a configured value naming one is refused. Built-in defaults are checked too (the default
+vision model, the open-weights profile). A model a caller or operator names explicitly is not affected: a project's
+chat or vision model, and the operator's `DOCSLURP_VISION_MODEL_URI`. Provider aliases that do not name the family
+(for example `deepseek/deepseek-chat`) are not caught by the check.
 
-Chat failover: a failed answer retries once, on GPT-6 Luna, or on GLM 5.3 Flash for a project that already answers with
-Luna (`PROJECT_CHAT_FAILOVER_MODELS`). Speed boost and evaluation turns do not fail over.
+Chat failover: a failed answer retries once, on the first of GPT-6 Luna, Claude Haiku 5.5 and GLM 5.3 Flash that is not
+the project's own model (`PROJECT_CHAT_FAILOVER_MODELS`): Luna, or Haiku for a project that already answers with Luna.
+Speed boost and evaluation turns do not fail over.
 
 ## Hosted provider routing
 

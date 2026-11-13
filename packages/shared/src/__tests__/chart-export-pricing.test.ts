@@ -112,8 +112,9 @@ describe("estimatePipelineWork with chart export", () => {
     installTestPricing(DISTINCT_TEST_PRICING);
     const off = estimatePipelineWork({ features: base, stages, pages: 400, documents: 4, env });
     const on = estimatePipelineWork({ features: withChartExport({ enabled: true }), stages, pages: 400, documents: 4, env });
-    expect(on.credits!.low - off.credits!.low).toBeCloseTo(Math.ceil(400 * CHART_EXPORT_VISUALS_PER_PAGE_PRIOR.low) * 0.07, 4);
-    expect(on.credits!.high - off.credits!.high).toBeCloseTo(Math.ceil(400 * CHART_EXPORT_VISUALS_PER_PAGE_PRIOR.high) * 0.07, 4);
+    // Each visual: a first read (0.07) plus the expected half of a billed second read (test pricing 0.5 x 0.07).
+    expect(on.credits!.low - off.credits!.low).toBeCloseTo(Math.ceil(400 * CHART_EXPORT_VISUALS_PER_PAGE_PRIOR.low) * (0.07 + 0.5 * 0.07), 4);
+    expect(on.credits!.high - off.credits!.high).toBeCloseTo(Math.ceil(400 * CHART_EXPORT_VISUALS_PER_PAGE_PRIOR.high) * (0.07 + 0.5 * 0.07), 4);
     expect(on.basis).toMatch(/chart export: 8 to 100 model-read visuals \(per-page planning prior\)/);
     const indexOnly = estimatePipelineWork({ features: withChartExport({ enabled: true }), stages: ["index"], pages: 400, documents: 4, env });
     const indexOnlyOff = estimatePipelineWork({ features: base, stages: ["index"], pages: 400, documents: 4, env });
@@ -133,7 +134,8 @@ describe("estimatePipelineWork with chart export", () => {
       visualStats: { charts: 10, diagrams: 0, bySource: { "office-chart-xml": 4 } },
       chartExportModes: { matplotlib: "direct" },
     });
-    expect(measured.credits!.high - off.credits!.high).toBeCloseTo(6 * 2 * 0.07, 4);
+    // Two direct-mode calls on the first read; a second read is one call's worth.
+    expect(measured.credits!.high - off.credits!.high).toBeCloseTo(6 * (2 * 0.07 + 0.5 * 0.07), 4);
     expect(measured.basis).toMatch(/6 model-read visuals \(recorded counts\)/);
   });
   it("prices nothing while the deployment kill switch is off", () => {

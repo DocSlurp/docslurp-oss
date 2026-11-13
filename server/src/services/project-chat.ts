@@ -1,4 +1,4 @@
-import type { ChatReasoningLevel, ChatTier } from "@docslurp/shared/project-chat-models";
+import { nitroBaseModel, type ChatReasoningLevel, type ChatTier } from "@docslurp/shared/project-chat-models";
 import { resolveSpeedBoostChatModel, ChatModelNotAllowedError } from "../lib/chat-model-policy.js";
 import { reportPublicError } from "../lib/public-errors.js";
 import { getDeferredContext } from "../search/deferred/deferred-context.js";
@@ -120,11 +120,14 @@ type ProjectChatRuntimeSummary = {
 export const PROJECT_CHAT_FAILOVER_MODEL: ProjectChatModelId =
   "openai/gpt-6-luna";
 /**
- * Failover candidates in order: the failover model, then GLM 5.3 Flash (same answer tier) for a project that already
- * answers with the failover model, so a Luna outage does not leave Luna projects without a second model.
+ * Failover candidates in order (all standard answer tier). A turn retries on the first that is not the project's own
+ * model and is not denied, so a Luna project fails over to Claude Haiku 5.5, a different vendor stack. Haiku comes
+ * before GLM 5.3 Flash: in the 2026-11-13 chat-answer comparison (#343 harness, 30 cases, blind pairwise judge) it beat
+ * GLM on quality (held-out mean 5.00 vs 4.56) and latency (p50 0.88 s vs 2.8 s, p90 2.3 s vs 19.8 s), at parity with Luna.
  */
 export const PROJECT_CHAT_FAILOVER_MODELS: readonly ProjectChatModelId[] = [
   PROJECT_CHAT_FAILOVER_MODEL,
+  "anthropic/claude-haiku-5.5",
   "z-ai/glm-5.3-flash",
 ];
 const DEFAULT_PENDING_SEARCH_RETRY = {
@@ -505,7 +508,9 @@ export function buildModelFailoverOrder(
   failover = true,
 ): string[] {
   if (!failover) return [preferredModel];
-  const next = withoutAutomaticSelectionDenied(PROJECT_CHAT_FAILOVER_MODELS).find((model) => model !== preferredModel);
+  // A Speed boost variant is the same model: a Luna Nitro project fails over to Haiku, never to plain Luna.
+  const base = nitroBaseModel(preferredModel) ?? preferredModel;
+  const next = withoutAutomaticSelectionDenied(PROJECT_CHAT_FAILOVER_MODELS).find((model) => model !== base);
   return next ? [preferredModel, next] : [preferredModel];
 }
 
