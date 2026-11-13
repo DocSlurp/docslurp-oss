@@ -5,6 +5,8 @@ import { parentPort, workerData } from "node:worker_threads";
 import { extractDeterministicVisuals } from "../dist/chart-export/guest.bundle.mjs";
 
 const { kind, packaged, diagrams } = workerData;
+// Trusted start-up is done: the host-side deadline covers only the work on customer bytes from here.
+parentPort.postMessage("ready");
 const bytes = Buffer.from(workerData.bytes.buffer, workerData.bytes.byteOffset, workerData.bytes.byteLength);
 const input = packaged ? { kind, bytes } : { kind, text: bytes.toString("utf8") };
 parentPort.postMessage(JSON.stringify(extractDeterministicVisuals(input, { diagrams: diagrams !== false })));

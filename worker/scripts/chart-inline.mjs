@@ -10,8 +10,9 @@ const WORKER = new URL("./chart-inline-worker.mjs", import.meta.url);
 /**
  * `request`: { kind, diagrams } from the host. `inspection`: this process's own inspection of the same bytes.
  * Returns { status: "ok", ms, result } | { status: "skipped", reason } | { status: "refused", reason, ms }.
+ * `workerUrl` exists for the tests' hostile workers; the inspection script never passes it.
  */
-export async function inlineCharts(bytes, request, inspection) {
+export async function inlineCharts(bytes, request, inspection, workerUrl = WORKER) {
   const kind = typeof request?.kind === "string" ? request.kind : "";
   let text;
   const plan = inlineChartPlan(kind, inspection, bytes.length, () => (text ??= bytes.toString("utf8")));
@@ -28,7 +29,7 @@ export async function inlineCharts(bytes, request, inspection) {
       void worker.terminate().catch(() => undefined);
       resolve(value);
     };
-    const worker = new Worker(WORKER, {
+    const worker = new Worker(workerUrl, {
       workerData: { kind, packaged: plan.packaged, diagrams: request.diagrams !== false, bytes: new Uint8Array(bytes) },
       resourceLimits: {
         maxOldGenerationSizeMb: INLINE_CHART_LIMITS.maxOldGenerationSizeMb,
@@ -37,8 +38,18 @@ export async function inlineCharts(bytes, request, inspection) {
       },
       stdout: true, stderr: true,
     });
-    const timer = setTimeout(() => finish({ status: "refused", reason: "deadline", ms: ms() }), deadline);
-    worker.once("message", (json) => {
+    // Start-up (thread, bundle import) is our own code, so it gets a fixed allowance; the size-scaled deadline starts
+    // when the worker says it is about to read the file.
+    let timer = setTimeout(() => finish({ status: "refused", reason: "deadline", ms: ms() }), INLINE_CHART_LIMITS.startupMs);
+    let ready = false;
+    worker.on("message", (json) => {
+      if (!ready && json === "ready") {
+        ready = true;
+        clearTimeout(timer);
+        timer = setTimeout(() => finish({ status: "refused", reason: "deadline", ms: ms() }), deadline);
+        return;
+      }
+      if (!ready) return finish({ status: "refused", reason: "result-invalid", ms: ms() });
       if (typeof json !== "string" || Buffer.byteLength(json) > INLINE_CHART_LIMITS.maxResultBytes) return finish({ status: "refused", reason: "result-too-large", ms: ms() });
       try { finish({ status: "ok", ms: ms(), result: JSON.parse(json) }); } catch { finish({ status: "refused", reason: "result-invalid", ms: ms() }); }
     });

@@ -21,6 +21,8 @@ export const INLINE_CHART_LIMITS = {
   deadlineBaseMs: 500,
   deadlinePerKibMs: 2,
   deadlineMaxMs: 10_000,
+  /** Start-up of the worker thread and the bundle import (our code, not the file's): ~50 ms on an idle VM. */
+  startupMs: 5_000,
   /** V8 heap of the extraction worker thread. Inflated ZIP entries are bounded by the extractor's own zip limits. */
   maxOldGenerationSizeMb: 256,
   maxYoungGenerationSizeMb: 32,
