@@ -45,13 +45,58 @@ Page counts for billing and limits stay the host's own (pdfpagecount). The facts
   the reader does not know. The file proxy serves it as text, behind the same artifact and PII checks as the folder's
   other files. Malformed or refused facts write no object.
 - `use`: as `store`, and when the provider returned no layout facts the facts stand in for them: the mapped
-  `PageLayoutFacts` are stored as `page-layout-facts` with `source: "vm-pdf-facts"`.
+  `PageLayoutFacts` are stored as `page-layout-facts` with `source: "vm-pdf-facts"`. The facts also stand in for the host
+  probes the sandboxed route never runs (see [Routing evidence](#routing-evidence)).
 
 An unrecognised value is `off`, logged as an error.
 
 In every mode the facts never size a charge: page-equivalent billing reads page sizes only from layout facts the VM's
 walker measured. `use` does let valid facts steer routing where no walker facts exist, as layout facts do: a page the
 facts show without words can be read by OCR or vision for the project that asked for it, billed by the host's page count.
+
+## Routing evidence
+
+The sandboxed PDF route runs none of the host's Poppler probes: page facts' `pdfimages -list` and `pdftotext`, page triage's
+`pdfimages -list` and `pdfinfo` page sizes, the layout walker's `pdftotext -bbox-layout` run, and the OCR ledger's
+`pdftotext`. Without them it had no page-image evidence (classify-route saw a sparse scan page as `unknown`) and no per-page
+source rows in the ingest report. In `use` mode, `lib/doppler-page-facts-evidence.ts` builds both from the winning VM job's
+facts, with no command:
+
+- page-image evidence (`page-image-evidence`, `source: "doppler-facts"`, vision fallback on): the probe's sparse pages
+  (fewer than `sparsePageWords` words in the text layer, invisible OCR words included, as `pdftotext` reads them), each
+  with its significant, non-repeated image count and coverage under the probe's own rules (`minSignificantImagePixels`,
+  `minSignificantImageCoverage`, and the repeated-furniture rule over significant placements in the probe's listing scope).
+  No text-layer verdict: the probe judges the PDF's own layer, which facts do not carry, and judging the extracted Markdown or
+  OCR text instead would call math, tables or OCR output garbled. `embeddedImageBytes` and `drawnBytesPerPage` are null:
+  facts never read a stream, so the drawn-content hint stays off;
+- per-page rows in `document_page_facts` (`facts_source = 'doppler-facts'`): `word_count`, `image_count` (image rows, as
+  `pdfimages -list` counts them) and `text_bytes`, which is 0 for a page with no text layer and otherwise the extracted page's
+  whitespace-collapsed bytes, or null for a page a model read (its text is OCR output, not the layer).
+
+Only facts that cover the document count: a complete stream (a run line last), no dropped line, no failed page, no document
+error or lock, every page of the host's own count present with the `text` and `geometry` families and a complete
+`images.items` list. Any
+less, in any mode but `use`, or when another extractor won, nothing is built and the route goes without, as before; the
+stage records `dopplerFactsEvidence: { status: "skipped", reason }`.
+
+No page count, size or charge comes from the facts: the page count stays the host's, page-equivalent sizes stay the
+walker's, extract-markdown's Rich reads stay the provider's `ocrPages`, and the per-page rows are not written for a run
+without a page billing pin, which still bills pages with no text bytes and an image as scans at completion
+(`runBillsScansAtCompletion`). The evidence is routing evidence, though: like the probe's, it can make classify-route send a
+sparse scan page to a vision read, and that read bills Rich when it happens, for a project with vision fallback on. To keep a
+counting gap or hostile facts from turning text pages into reads, the facts must agree with the extraction: a page the facts
+call sparse while the winning extraction read `sparsePageWords` or more words from it without a model (the provider's OCR,
+host scan-fill and accepted critique pages are exempt) refuses the whole
+document's evidence (`words-disagree`), and an image never counts for more of the page than its own box covers.
+
+Commands the facts cannot retire, and why:
+
+| Command | Feeds | Kept because |
+|---|---|---|
+| `pdfpagecount`, `pdftotext -f 1 -l 1` | page count, Poppler acceptance | billing and limits use the host's own count |
+| layout walker (`pdfimages -list`, `pdftotext -bbox-layout`, `pdf_layout_facts.py`) | layout facts | page-equivalent billing reads the walker's page sizes; facts have no `wordsInside`, `bytesPerPixel`, table or grid boxes |
+| OCR ledger `pdftotext` | Rich reads of an extractor that OCRs without saying so | billing evidence; never on the sandboxed route |
+| `pdfinfo` before `pdftoppm` | render bounds, rendered page areas | bounds an untrusted render and sizes a charge |
 
 ## Mappings
 
@@ -99,3 +144,56 @@ Shadow telemetry compares the facts-driven plan with v3. Each `page-route-decisi
 `page-route-chunk-estimate` carries the document totals (`pages`, `compared`, `agree`, `routerOnlyPixels`, `v3OnlyPixels`).
 The router needs pixels for any role beyond `accept-text` or `skip`; v3 does for any route other than `straightforward-text`
 or an authorized OCR decision.
+
+## Chart and diagram candidates
+
+Chart export (`worker/src/chart-export/facts-candidates.ts`) reads the facts again from the document's
+`doppler-page-facts` slot (the canonical lines above), through the same strict reader, bounded by the host's page count
+and byte budget. No slot, or facts the reader refuses, leaves chart export exactly as it was. Unlike the page router,
+chart export also reads a slot a partial reprocess seeded from an earlier run of the same document (the same source
+bytes); it never reads another document's facts.
+
+**Candidates (`use` only, and only without a router plan, which owns chart labels when it exists: with the page router
+in `shadow` or `active` on these facts, its plan's labels are used instead).** A page or region is
+a candidate from its structure, not its words. Each candidate carries the cluster or image box as its crop, so the model
+reads that crop; a facts candidate whose crop cannot be made is not read at all (never the whole page). A page whose
+CropBox differs from its MediaBox, or whose size is outside 1–14,400 pt, gets no facts boxes (unknown):
+
+| rule | stands alone | needs the keyword route on its page |
+|---|---|---|
+| figure cluster (curved or diagonal drawing) at least 48 pt on its short side, 6 paths, 2–90% of the page | the page's `uncoveredRatio` ≥ 0.6, or `coverage` × `uncoveredRatio` ≥ 0.15 (a large non-text vector area) | `uncoveredRatio` 0.3–0.6 |
+| placed image, 4–85% of the page, at least 96 samples a side, not a stencil mask, on a page whose `scan` is `none` | never: photos are common | always |
+
+Never candidates: a page with `uncoveredRatio` below 0.3 (underlines, boxes around text, ruled tables), thin rule-like
+clusters, a scan page's images, and furniture: an image `obj` or a cluster box that recurs on at least 3 pages and 20% of
+the pages with facts (logos, headers, borders). At most 4 candidates a page, largest first, and 500 a document. The keyword route
+(`chart-or-figure`) stays a vote: alone it is still low confidence; a facts candidate on its page replaces its whole-page
+read with crops. The thresholds are general structure limits (`FACTS_CANDIDATE_RULES`), set from the contract's field
+meanings, not from any evaluation document.
+
+Known gap: Doppler clusters only curved or diagonal drawing, so an axis-aligned bar chart drawn only with rectangles has no
+cluster box to crop and is left to the other signals.
+
+**One read per repeated picture (`store` and `use`; `off` turns it off).** Before a model reads a crop or an image,
+candidates are grouped by the facts' image object number and the media map's content hash (sha256), transitively, within
+the document only. An image-backed candidate (image routing, a router image inset) takes a facts `obj` only when its box
+and the image's agree to IoU 0.9, and never from a stencil mask, the page's scan image, or two objects in one place; a
+vector cluster or router region never takes one. Only a placement the facts show nothing drawn over shares a read: no
+figure cluster crossing its box and no text over images on its page (one base image under different data points or
+labels is different pictures). Without facts for its page a placement is never grouped, so a document without facts
+reads as before. The first placement whose read the provider answers stands for the
+group; the other placements reuse its visual with no call and no charge. A read that failed before an answer, or a
+whole-page read (a crop that failed), stands for nothing; a placement waiting for it reads for itself, within the read
+cap checked again after the wait. Visual candidate stats count a group
+once (so measured estimates price the reads that will be made), and the stage stats record
+`chartExport.dedupe: { groups, placements, readsAvoided }` and, with `use`, `chartExport.factsCandidates` per rule.
+
+Charges are per read made, as before: a reused placement has no answered call, so it is never charged. Nothing about the
+facts sizes a charge.
+
+Known limits: clusters cover curved and diagonal drawing only, so an axis-aligned overlay (rectangles drawn over a base
+image) is not seen; one image object drawn with different clips (sprites, crops of one large image) is treated as one picture;
+a reused `none` answer leaves a later placement's middling deterministic spec unused; and the same chart image on many
+pages counts as furniture for nomination (other signals still list it, and it is then read once). In `use`, standalone
+vector candidates are a new source of reads that a first estimate built on the per-page prior does not see until stats
+are recorded; the read cap per document still bounds them.

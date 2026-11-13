@@ -45,7 +45,8 @@ const MAX_SIDE_PT = 14_400;
 const GRID_MIN_H = 2;
 const GRID_MIN_V = 3;
 
-function repeatedObjects(pages: Iterable<DopplerPageFacts>, considered: number): Set<number> {
+/** Image objects drawn on enough of the `considered` pages to be page furniture (the walker's and the probe's rule). */
+export function repeatedDopplerImageObjects(pages: Iterable<DopplerPageFacts>, considered: number): Set<number> {
   const seen = new Map<number, Set<number>>();
   for (const page of pages) {
     for (const item of page.images?.items ?? []) {
@@ -102,7 +103,7 @@ export function pageLayoutFactsFromDopplerPage(page: DopplerPageFacts, repeated:
 
 /** Every known page's layout facts, keyed by page number. Pages that are unknown in the facts are absent here too. */
 export function pageLayoutFactsFromDopplerFacts(facts: Pick<DopplerPageFactsDocument, "pages">): Map<number, PageLayoutFacts> {
-  const repeated = repeatedObjects(facts.pages.values(), facts.pages.size);
+  const repeated = repeatedDopplerImageObjects(facts.pages.values(), facts.pages.size);
   const out = new Map<number, PageLayoutFacts>();
   for (const [number, page] of [...facts.pages].sort(([a], [b]) => a - b)) {
     const layout = pageLayoutFactsFromDopplerPage(page, repeated);
