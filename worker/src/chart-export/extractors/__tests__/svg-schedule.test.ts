@@ -44,6 +44,23 @@ describe("svg-geometry schedule: many SVGs in one input", () => {
     expect(budget.pairTests).toBeLessThanOrEqual(20_000_000);
   });
 
+  it("exports every SVG of a 40-copy batch sharing one budget (council r3 I2: was 1 visual and 39 refusals)", () => {
+    // The guest batch loop (scripts/chart-export-extract.mjs): one budget across the files, inputsAfter counting the rest.
+    // Scaled like the 100-SVG test: 5×10⁶ pair tests per SVG unbounded, a 2×10⁷ budget for the batch.
+    const svg = packedSvg(2500, 2000);
+    const budget = budgetOf(20_000_000);
+    const results = Array.from({ length: 40 }, (_, i) => {
+      budget.inputsAfter = 40 - 1 - i;
+      return extractDeterministicVisuals({ kind: "svg", text: svg }, { markerBudget: budget });
+    });
+    expect(results.flatMap((r) => r.refusals)).toEqual([]);
+    expect(results.map((r) => r.visuals.length)).toEqual(Array(40).fill(1));
+    expect(results.every((r) => r.deferred === undefined)).toBe(true);
+    expect(budget.pairTests).toBeLessThanOrEqual(20_000_000);
+    // Shares leave room for the inputs still to come: the last file got a share too (it is approximated, not refused).
+    expect(results.at(-1)!.visuals[0]!.reason).toBe(APPROXIMATE_MARKER_REASON);
+  });
+
   it("gives every SVG a fair share: one giant SVG first cannot starve 99 small ones after it", () => {
     const giant = packedSvg(2500, 2000); // 5×10⁶ pair tests unbounded
     const small = packedSvg(22, 100); // 2×10³ each

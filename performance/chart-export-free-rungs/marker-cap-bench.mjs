@@ -7,6 +7,8 @@
 // calibrate: per-pair-test cost on single SVGs (with an unlimited budget), and inputs of many near-cap SVGs.
 // doc100: only the council's 100-SVG HTML input with the production budget, in a fresh process, reporting wall time,
 // peak RSS and what happened to each SVG (exact, approximate, deferred, refused).
+// batch40: the council's 40-copy SVG batch, run exactly like scripts/chart-export-extract.mjs runs a batch (one budget,
+// `inputsAfter` counting the files still to come), with the production budget for a 1-page document.
 //
 // Scenes (generated here, no files): V polyline vertices packed into one 3-unit cell and P markers in the next cell,
 // more than 1.5 from every vertex, so no marker short-circuits and the filter runs exactly V × P pair tests.
@@ -48,6 +50,17 @@ function time(input, makeBudget = unlimited) {
   return out[Math.floor(out.length / 2)];
 }
 
+if (mode === "batch40") {
+  const svg = packedSvg(2500, Math.floor(budget / 2500 / 100) * 100 - 100);
+  const b = markerBudget(1);
+  const t0 = process.hrtime.bigint();
+  const results = Array.from({ length: 40 }, (_, i) => { b.inputsAfter = 39 - i; return extractDeterministicVisuals({ kind: "svg", text: svg }, { markerBudget: b }); });
+  const ms = Number(process.hrtime.bigint() - t0) / 1e6;
+  const visuals = results.flatMap((r) => r.visuals);
+  const approximate = visuals.filter((v) => v.reason === "approximate-marker-dedup").length;
+  console.log(JSON.stringify({ node: process.version, mode, scene: `batch of 40 near-cap SVGs (${(svg.length / 1e3).toFixed(0)} KB each), production budget`, ms, pairTests: b.pairTests, visuals: visuals.length, exact: visuals.length - approximate, approximate, deferred: results.reduce((n, r) => n + (r.deferred?.length ?? 0), 0), refusals: [...new Set(results.flatMap((r) => r.refusals.map((x) => x.reason)))], peakRssMb: Math.round(process.resourceUsage().maxRSS / 1024) }, null, 1));
+  process.exit(0);
+}
 if (mode === "doc100") {
   const near = packedSvg(2500, Math.floor(budget / 2500 / 100) * 100 - 100);
   const html = `<html><body>${near.repeat(100)}</body></html>`;

@@ -2,7 +2,7 @@
 // Runs marker-cap-bench.mjs inside a Modal `runtime: "vm"` sandbox shaped like the parser VM (2 vCPU, 4 GiB, network
 // blocked, no secrets) and prints its JSON. Needs MODAL_TOKEN_ID / MODAL_TOKEN_SECRET and a built worker.
 //
-//   node performance/chart-export-free-rungs/run-in-modal-vm.mjs [runs=3] [mode=calibrate|doc100]
+//   node performance/chart-export-free-rungs/run-in-modal-vm.mjs [runs=3] [mode=calibrate|doc100|batch40]
 import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";

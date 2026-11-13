@@ -455,6 +455,16 @@ export const deferredVisualSchema = z.strictObject({
 });
 export type DeferredVisual = z.infer<typeof deferredVisualSchema>;
 
+/**
+ * Turn off zod's eval-compiled parsers (built with the Function constructor) for this process. The parser-VM chart
+ * guest calls it at start, so no code is generated at run time. The CPU cost is nil: a fresh guest parses a few
+ * schemas once (measured 134 vs 141 ms per run, performance/chart-export-free-rungs). Process-wide, so only for
+ * single-purpose processes.
+ */
+export function disableSchemaJit(): void {
+  z.config({ jitless: true });
+}
+
 export const visualCandidateStatsSchema = z.object({
   charts: z.number().int().nonnegative().default(0),
   diagrams: z.number().int().nonnegative().default(0),
