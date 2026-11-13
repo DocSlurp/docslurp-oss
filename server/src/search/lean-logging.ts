@@ -1,10 +1,11 @@
+import { AsyncResource } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 
 import { BILLABLE_UNIT_METRICS, searchCredits, searchUnits, type SearchMode } from "@docslurp/shared";
 
 import { persistUsageEvent, recordUnitCharge, type UsageEvent } from "../lib/ai-usage.js";
 import { currentChatTurn } from "../lib/chat-turn-context.js";
-import { currentRequestApiKeyId } from "../lib/request-context.js";
+import { currentRequestApiKeyId, currentRequestOrgId } from "../lib/request-context.js";
 
 /**
  * Lean logging for API-key keyword and hybrid searches, the cheap high-volume tiers. Two things a search otherwise
@@ -47,9 +48,17 @@ const BATCH_MS = (() => {
   const ms = Number((process.env.SEARCH_CHARGE_BATCH_MS ?? "").trim() || 5_000);
   return Number.isFinite(ms) && ms >= 100 ? Math.min(ms, 60_000) : 5_000;
 })();
+/** A charge batch this large is written at once, so a key's spend limit lags by at most this many searches. */
+const BATCH_MAX_SEARCHES = 200;
+
+/**
+ * Flushes run outside any request: in the async context captured when this module loaded, so one request's trace,
+ * org or key context never stamps another tenant's batched rows. Every scope value a batch writes is explicit.
+ */
+const detached = new AsyncResource("search-charge-flush");
 
 type ChargeGroup = { userId: string; orgId: string | null; projectId: string; apiKeyId: string; mode: SearchMode };
-type ChargeBatch = ChargeGroup & { kind: "charge"; id: string; searches: number };
+type ChargeBatch = ChargeGroup & { kind: "charge"; id: string; searches: number; firstSearchAt: string };
 type UsageBatch = { kind: "usage"; id: string; userId: string; orgId: string | null; projectId: string; apiKeyId: string; event: UsageEvent & { calls: number } };
 type Batch = ChargeBatch | UsageBatch;
 
@@ -58,17 +67,23 @@ const open = new Map<string, Batch>();
 const retry: Batch[] = [];
 let timer: ReturnType<typeof setTimeout> | null = null;
 let flushing: Promise<void> | null = null;
+/** Set by the shutdown drain: from then on every enqueue writes at once instead of waiting for the timer. */
+let draining = false;
 
 /** Counts one lean search charge for the current request's API key. */
 export function enqueueSearchCharge(group: Omit<ChargeGroup, "apiKeyId"> & { apiKeyId?: string | null }): void {
   const apiKeyId = group.apiKeyId ?? currentRequestApiKeyId();
   if (!apiKeyId) throw new Error("a batched search charge needs an API key");
-  const key = ["charge", group.userId, group.orgId ?? "", group.projectId, apiKeyId, group.mode].join("\u0000");
+  // The organization is fixed now, while the request knows it: a project deleted before the flush must not leave a
+  // charge without an organization to debit.
+  const orgId = group.orgId ?? currentRequestOrgId();
+  const key = ["charge", group.userId, orgId ?? "", group.projectId, apiKeyId, group.mode].join("\u0000");
   const existing = open.get(key);
-  const batch: ChargeBatch = existing?.kind === "charge" ? existing : { kind: "charge", ...group, apiKeyId, id: `search-batch:${randomUUID()}`, searches: 0 };
+  const batch: ChargeBatch = existing?.kind === "charge" ? existing
+    : { kind: "charge", ...group, orgId, apiKeyId, id: `search-batch:${randomUUID()}`, searches: 0, firstSearchAt: new Date().toISOString() };
   batch.searches += 1;
   open.set(key, batch);
-  scheduleFlush();
+  scheduleFlush(batch.searches >= BATCH_MAX_SEARCHES);
 }
 
 /**
@@ -78,10 +93,12 @@ export function enqueueSearchCharge(group: Omit<ChargeGroup, "apiKeyId"> & { api
 export function enqueueSearchUsage(scope: { userId: string; orgId: string | null; projectId: string; apiKeyId?: string | null }, events: readonly UsageEvent[]): void {
   const apiKeyId = scope.apiKeyId ?? currentRequestApiKeyId();
   if (!apiKeyId) throw new Error("batched search usage needs an API key");
+  const orgId = scope.orgId ?? currentRequestOrgId();
   for (const event of events) {
     if (event.metadata?.billable !== false) throw new Error(`only non-billable usage is batched (${event.metric})`);
-    const key = ["usage", scope.userId, scope.orgId ?? "", scope.projectId, apiKeyId, event.provider, event.model, event.metric, event.unit ?? ""].join("\u0000");
+    const key = ["usage", scope.userId, orgId ?? "", scope.projectId, apiKeyId, event.provider, event.model, event.metric, event.unit ?? ""].join("\u0000");
     const existing = open.get(key);
+    const providerCost = Number(event.metadata?.providerCostCents ?? 0) || 0;
     if (existing?.kind === "usage") {
       const sum = existing.event;
       sum.calls += 1;
@@ -89,18 +106,25 @@ export function enqueueSearchUsage(scope: { userId: string; orgId: string | null
       sum.inputTokens = (sum.inputTokens ?? 0) + (event.inputTokens ?? 0);
       sum.outputTokens = (sum.outputTokens ?? 0) + (event.outputTokens ?? 0);
       sum.costCents = (sum.costCents ?? 0) + (event.costCents ?? 0);
+      sum.metadata = { ...sum.metadata, providerCostCents: Number(sum.metadata.providerCostCents ?? 0) + providerCost };
     } else {
       const id = `search-usage-batch:${randomUUID()}`;
-      open.set(key, { kind: "usage", id, userId: scope.userId, orgId: scope.orgId, projectId: scope.projectId, apiKeyId,
-        event: { ...event, id, calls: 1, metadata: { ...event.metadata, billable: false, batched: true } } });
+      // Only what holds for the whole batch: no per-call trace, span or provider request ids.
+      const metadata: Record<string, unknown> = { billable: false, batched: true, providerCostCents: providerCost, firstCallAt: new Date().toISOString() };
+      for (const field of ["costSource", "pricingSource", "privacyMode"]) if (event.metadata?.[field] !== undefined) metadata[field] = event.metadata[field];
+      open.set(key, { kind: "usage", id, userId: scope.userId, orgId, projectId: scope.projectId, apiKeyId, event: { ...event, id, calls: 1, metadata } });
     }
   }
   scheduleFlush();
 }
 
-function scheduleFlush(): void {
+function scheduleFlush(now = false): void {
+  if (draining || now) {
+    void detached.runInAsyncScope(() => flushSearchCharges());
+    return;
+  }
   if (timer) return;
-  timer = setTimeout(() => { timer = null; void flushSearchCharges(); }, BATCH_MS);
+  timer = detached.runInAsyncScope(() => setTimeout(() => { timer = null; void flushSearchCharges(); }, BATCH_MS));
   timer.unref?.();
 }
 
@@ -120,7 +144,7 @@ async function writeBatch(batch: Batch): Promise<void> {
       amount: batch.searches,
       unit: "search",
       credits: searchCredits(batch.searches, { mode: batch.mode }),
-      metadata: { llmStrategies: false, searchMode: batch.mode, batched: true, searchUnits: batch.searches * searchUnits({ mode: batch.mode }) },
+      metadata: { llmStrategies: false, searchMode: batch.mode, batched: true, firstSearchAt: batch.firstSearchAt, searchUnits: batch.searches * searchUnits({ mode: batch.mode }) },
     },
   });
 }
@@ -128,10 +152,11 @@ async function writeBatch(batch: Batch): Promise<void> {
 /** Writes every pending batch; failed batches stay queued (same id) for the next flush. */
 export function flushSearchCharges(): Promise<void> {
   if (flushing) return flushing.then(() => flushSearchCharges());
+  if (timer) { clearTimeout(timer); timer = null; }
   const batches = [...retry.splice(0), ...open.values()];
   open.clear();
   if (batches.length === 0) return Promise.resolve();
-  flushing = (async () => {
+  flushing = detached.runInAsyncScope(async () => {
     const results = await Promise.allSettled(batches.map(writeBatch));
     results.forEach((result, index) => {
       if (result.status === "fulfilled") return;
@@ -139,9 +164,39 @@ export function flushSearchCharges(): Promise<void> {
       retry.push(batch);
       console.error(`[search-charge] batch ${batch.id} (${batch.kind === "charge" ? `${batch.searches} searches` : `${batch.event.calls} ${batch.event.metric} calls`}) not written, will retry: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`);
     });
-    if (retry.length > 0) scheduleFlush();
-  })().finally(() => { flushing = null; });
+    if (retry.length > 0 && !draining) scheduleFlush();
+  }).finally(() => { flushing = null; });
   return flushing;
+}
+
+const sleep = (ms: number) => new Promise<void>((resolve) => { setTimeout(resolve, ms).unref?.(); });
+
+/**
+ * Shutdown: from now on every lean charge writes at once, and this waits until nothing has been pending for a moment
+ * (searches still finishing enqueue after the drain starts) or the deadline passes. Run it after the session writes
+ * drain, since a session's persist enqueues its usage. Returns how many searches and usage calls are still unwritten,
+ * and logs them; the caller exits after it.
+ */
+export async function drainSearchCharges(timeoutMs = 5_000): Promise<number> {
+  draining = true;
+  const deadline = Date.now() + timeoutMs;
+  let quietSince = 0;
+  while (Date.now() < deadline) {
+    await Promise.race([flushSearchCharges(), sleep(Math.max(0, deadline - Date.now()))]);
+    const busy = flushing !== null || pendingSearchCharges() + pendingSearchUsageCalls() > 0;
+    if (busy) quietSince = 0;
+    else if (!quietSince) quietSince = Date.now();
+    else if (Date.now() - quietSince >= 250) break;
+    await sleep(25);
+  }
+  const left = pendingSearchCharges() + pendingSearchUsageCalls();
+  if (left > 0) console.error(`[search-charge] shutdown: ${pendingSearchCharges()} searches and ${pendingSearchUsageCalls()} usage calls not written`);
+  return left;
+}
+
+/** Tests: leave drain mode. */
+export function resetSearchChargeDrainForTests(): void {
+  draining = false;
 }
 
 /** Pending searches not yet written (tests and shutdown logs). */

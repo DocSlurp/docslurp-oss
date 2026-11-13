@@ -67,7 +67,7 @@ import { adminBillingRoutes } from "./routes/admin-billing.js";
 import { adminUsersRoutes } from "./routes/admin-users.js";
 import { clientSurfaceMiddleware, clientSurfaceRecorder } from "./services/client-surface.js";
 import { drainSearchSessionWrites as drainSessionWrites } from "./search/session.js";
-import { flushSearchCharges } from "./search/lean-logging.js";
+import { drainSearchCharges } from "./search/lean-logging.js";
 import { billingRoutes } from "./routes/billing.js";
 import { stripeWebhookRoutes } from "./routes/stripe-webhook.js";
 import { secretsRoutes } from "./routes/secrets.js";
@@ -121,8 +121,11 @@ export { IN_PROCESS_ENV_KEY } from "./lib/client-ip.js";
 export { forwardRequest } from "./lib/forward-request.js";
 /** Commit pending write-behind search writes (sessions, usage) before the host exits; resolves after `timeoutMs` at most. */
 export async function drainSearchSessionWrites(timeoutMs?: number): Promise<void> {
-  // Batched search charges (lean-logging.ts) are written here too, so a deploy does not drop them.
-  await Promise.all([drainSessionWrites(timeoutMs), clientSurfaceRecorder.flush(), flushSearchCharges()]);
+  const started = Date.now();
+  await Promise.all([drainSessionWrites(timeoutMs), clientSurfaceRecorder.flush()]);
+  // Then batched search charges and usage (lean-logging.ts): session persists enqueue usage, so they drain first, and
+  // searches still finishing write at once from here on.
+  await drainSearchCharges(timeoutMs === undefined ? 5_000 : Math.max(500, timeoutMs - (Date.now() - started)));
 }
 
 export function createApiApp(): Hono {

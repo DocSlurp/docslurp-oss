@@ -45,6 +45,11 @@ vi.mock("../services/projects.js", () => ({ resolveProjectRef: vi.fn(async () =>
 vi.mock("../services/organizations.js", async (importOriginal) => ({
   ...await importOriginal<typeof import("../services/organizations.js")>(),
   resolveDefaultOrganization: vi.fn(async () => ({ id: "org-1" })),
+  // The API-key access check reads access, not the project record: answer from the getProject mock.
+  getProjectAccess: vi.fn(async (id: string, userId: string) => {
+    const project = await (await import("../services/projects.js")).getProject(id, userId) as { id: string; orgId: string } | null;
+    return project ? { projectId: project.id, orgId: project.orgId, projectOwnerUserId: userId, isDefaultProject: false, orgRole: "owner", projectRole: null } : null;
+  }),
   getProjectAccessWithPipeline: vi.fn(async (projectId: string) => ({
     projectId, orgId: "org-1", pipeline: projectId.includes("strict") ? { privacyMode: "strict-privacy" } : {},
   })),

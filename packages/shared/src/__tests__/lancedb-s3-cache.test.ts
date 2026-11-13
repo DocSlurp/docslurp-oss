@@ -104,6 +104,28 @@ describe("serveCachedRequest", () => {
     expect(up.calls.slice(before)).toEqual(["GET bytes=48-79"]);
   });
 
+  it("serves every range of a cached object from block slices, including the short final block", async () => {
+    const cache = cacheOf(); const up = fakeUpstream({ [KEY]: object });
+    bytes(await get(cache, up, "bytes=0-99"));
+    const fetched = up.calls.length;
+    for (let start = 0; start < 100; start += 3) {
+      for (const end of [start, start + 1, Math.min(99, start + 15), Math.min(99, start + 16), Math.min(99, start + 40), 99]) {
+        const r = bytes(await get(cache, up, `bytes=${start}-${end}`));
+        expect(r.outcome, `${start}-${end}`).toBe("hit");
+        expect([...r.body], `${start}-${end}`).toEqual([...object.subarray(start, end + 1)]);
+      }
+    }
+    expect(up.calls.length).toBe(fetched);
+    // Disk slices and a fresh fill in one answer: drop one middle block's file, then ask across it.
+    const fresh = cacheOf(); const up2 = fakeUpstream({ [KEY]: object });
+    bytes(await get(fresh, up2, "bytes=0-99"));
+    await fresh.dropObject(DiskBlockCache.objectId("ns", "bkt", KEY));
+    bytes(await get(fresh, up2, "bytes=0-15"));
+    bytes(await get(fresh, up2, "bytes=32-47"));
+    const mixed = bytes(await get(fresh, up2, "bytes=5-40"));
+    expect([...mixed.body]).toEqual([...object.subarray(5, 41)]);
+  });
+
   it("clamps the end block, resolves suffix and open ranges, serves whole objects as 200", async () => {
     const cache = cacheOf(); const up = fakeUpstream({ [KEY]: object });
     const tail = bytes(await get(cache, up, "bytes=-10"));

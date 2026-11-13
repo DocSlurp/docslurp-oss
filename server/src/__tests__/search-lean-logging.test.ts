@@ -1,12 +1,13 @@
 import { searchCredits } from "@docslurp/shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const context = vi.hoisted(() => ({ apiKeyId: null as string | null, chatTurn: null as unknown }));
+const context = vi.hoisted(() => ({ apiKeyId: null as string | null, orgId: null as string | null, chatTurn: null as unknown }));
 const charges = vi.hoisted(() => ({ calls: [] as Array<Record<string, any>>, usage: [] as Array<Record<string, any>>, failNext: 0 }));
 
 vi.mock("../lib/request-context.js", async (original) => ({
   ...await original<typeof import("../lib/request-context.js")>(),
   currentRequestApiKeyId: () => context.apiKeyId,
+  currentRequestOrgId: () => context.orgId,
 }));
 vi.mock("../lib/chat-turn-context.js", async (original) => ({
   ...await original<typeof import("../lib/chat-turn-context.js")>(),
@@ -30,6 +31,7 @@ const { createUsageLedger } = await vi.importActual<typeof import("../lib/ai-usa
 
 beforeEach(() => {
   context.apiKeyId = "key1";
+  context.orgId = null;
   context.chatTurn = null;
   charges.calls = [];
   charges.usage = [];
@@ -39,6 +41,7 @@ afterEach(async () => {
   vi.unstubAllEnvs();
   charges.failNext = 0;
   await lean.flushSearchCharges();
+  lean.resetSearchChargeDrainForTests();
 });
 
 describe("lean search logging", () => {
@@ -142,5 +145,51 @@ describe("lean search logging", () => {
     const batch = await ledger.flushWithin(client, { scope: { orgId: "o", projectId: "p" } });
     expect(inserts).toEqual(["rewrite"]);
     expect(batch.events.map((event) => event.metric)).toEqual(["rewrite"]);
+  });
+
+  it("fixes the organization when the search is queued, from the request", async () => {
+    context.orgId = "org-of-project";
+    lean.enqueueSearchCharge({ userId: "u", orgId: null, projectId: "p", mode: "keyword" });
+    lean.enqueueSearchUsage({ userId: "u", orgId: null, projectId: "p" }, [{ provider: "o", model: "e", metric: "embed-query", amount: 1, unit: "tokens", inputTokens: 1, outputTokens: 0, costCents: 0, metadata: { billable: false } }]);
+    context.orgId = null; // the flush runs outside the request
+    await lean.flushSearchCharges();
+    expect(charges.calls[0]!.scope.orgId).toBe("org-of-project");
+    expect(charges.usage[0]!.scope.orgId).toBe("org-of-project");
+    expect(charges.calls[0]!.charge.metadata.firstSearchAt).toMatch(/^\d{4}-/);
+  });
+
+  it("sums provider cost and keeps no per-call ids on a usage batch", async () => {
+    const call = (cost: number, traceId: string) => ({ provider: "o", model: "e", metric: "embed-query", amount: 4, unit: "tokens", inputTokens: 4, outputTokens: 0, costCents: 0,
+      metadata: { billable: false, providerCostCents: cost, traceId, spanId: traceId, providerRequestId: traceId, costSource: "catalog" } });
+    lean.enqueueSearchUsage({ userId: "u", orgId: "o", projectId: "p" }, [call(0.002, "t1"), call(0.003, "t2")]);
+    await lean.flushSearchCharges();
+    const metadata = charges.usage[0]!.event.metadata;
+    expect(metadata.providerCostCents).toBeCloseTo(0.005);
+    expect(metadata).toMatchObject({ billable: false, batched: true, calls: 2, costSource: "catalog" });
+    expect(metadata).not.toHaveProperty("traceId");
+    expect(metadata).not.toHaveProperty("spanId");
+    expect(metadata).not.toHaveProperty("providerRequestId");
+  });
+
+  it("writes a batch at once when it reaches 200 searches", async () => {
+    for (let i = 0; i < 200; i += 1) lean.enqueueSearchCharge({ userId: "u", orgId: "o", projectId: "p", mode: "keyword" });
+    await vi.waitFor(() => expect(charges.calls.map((call) => call.charge.amount)).toEqual([200]));
+  });
+
+  it("on shutdown writes searches that finish during the drain and reports what it could not write", async () => {
+    lean.enqueueSearchCharge({ userId: "u", orgId: "o", projectId: "p", mode: "keyword" });
+    const drained = lean.drainSearchCharges(2_000);
+    // A search that finishes after the drain started is written at once, not left for a timer that never fires.
+    lean.enqueueSearchCharge({ userId: "u", orgId: "o", projectId: "p", mode: "hybrid" });
+    expect(await drained).toBe(0);
+    expect(charges.calls.map((call) => [call.charge.metadata.searchMode, call.charge.amount]).sort()).toEqual([["hybrid", 1], ["keyword", 1]]);
+    lean.resetSearchChargeDrainForTests();
+    charges.failNext = 100;
+    lean.enqueueSearchCharge({ userId: "u", orgId: "o", projectId: "p", mode: "keyword" });
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    expect(await lean.drainSearchCharges(300)).toBe(1);
+    expect(errors.mock.calls.some(([line]) => String(line).includes("shutdown: 1 searches"))).toBe(true);
+    errors.mockRestore();
+    charges.failNext = 0;
   });
 });

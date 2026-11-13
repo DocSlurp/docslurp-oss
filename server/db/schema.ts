@@ -2031,6 +2031,7 @@ export const chatAnswerEvidenceSpans = pgTable(
       .notNull(),
   },
   (table) => [
+    index("chat_answer_evidence_spans_search_session_idx").on(table.searchSessionId).where(sql`search_session_id is not null`),
     index("chat_answer_evidence_spans_answer_id_idx").using(
       "btree",
       table.answerId.asc().nullsLast().op("int4_ops"),
@@ -2442,6 +2443,7 @@ export const searchZeroResults = pgTable(
       .notNull(),
   },
   (table) => [
+    index("search_zero_results_session_idx").on(table.sessionId),
     index("search_zero_results_user_idx").using(
       "btree",
       table.userId.asc().nullsLast().op("text_ops"),

@@ -16,6 +16,14 @@ vi.mock("../services/projects.js", async original => ({
   findProjectForInput: vi.fn(async (ref: { id: string }) => ({ id: ref.id, orgId: "org-1" })),
   resolveProjectRef: vi.fn(async (id: string) => ({ id })),
 }));
+vi.mock("../services/organizations.js", async original => ({
+  ...await original<typeof import("../services/organizations.js")>(),
+  // The API-key access check reads access, not the project record: answer from the getProject mock.
+  getProjectAccess: vi.fn(async (id: string, userId: string) => {
+    const project = await (await import("../services/projects.js")).getProject(id, userId) as { id: string; orgId: string } | null;
+    return project ? { projectId: project.id, orgId: project.orgId, projectOwnerUserId: userId, isDefaultProject: false, orgRole: "owner", projectRole: null } : null;
+  }),
+}));
 vi.mock("../services/search-controls.js", () => ({ getProjectSearchSettings: vi.fn(async () => ({ ...defaultProjectSearchSettings, chat: { ...defaultProjectSearchSettings.chat, mode: "retrieval" } })) }));
 vi.mock("../services/search.js", async original => ({ ...await original<typeof import("../services/search.js")>(), hybridSearch: m.search, loadProjectWholeCorpusContext: vi.fn(async () => ({ eligible: false, results: [], stats: {} })) }));
 vi.mock("../lib/chat-agent-model.js", async original => ({ ...await original<typeof import("../lib/chat-agent-model.js")>(), createChatAgentModel: m.provider }));

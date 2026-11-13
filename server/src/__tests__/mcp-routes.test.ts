@@ -23,7 +23,13 @@ vi.mock("../services/media-evidence.js", () => ({ loadMediaEvidence }));
 
 const forwardInProcess = vi.fn();
 const listEditableProjectIds = vi.fn(async (_userId: string): Promise<string[]> => []);
-vi.mock("../services/organizations.js", async (importOriginal) => ({ ...(await importOriginal<typeof import("../services/organizations.js")>()), listEditableProjectIds }));
+vi.mock("../services/organizations.js", async (importOriginal) => ({ ...(await importOriginal<typeof import("../services/organizations.js")>()), listEditableProjectIds,
+  // The API-key access check reads access, not the project record: answer from the getProject mock.
+  getProjectAccess: vi.fn(async (id: string, userId: string) => {
+    const project = await (await import("../services/projects.js")).getProject(id, userId) as { id: string; orgId: string } | null;
+    return project ? { projectId: project.id, orgId: project.orgId, projectOwnerUserId: userId, isDefaultProject: false, orgRole: "owner", projectRole: null } : null;
+  }),
+}));
 
 // forwardInProcess is mocked, so the route modules it statically mounts only need to exist.
 vi.mock("../routes/projects.js", async () => ({ projectsRoutes: new (await import("hono")).Hono() }));

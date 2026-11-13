@@ -241,7 +241,8 @@ export interface OrgUnitUsage {
 /**
  * Units and credits the price card charged an org since `since` (the billing
  * forecast's last-30-day pace). Unit events record the count in `amount`:
- * searches and chat answers as 1 per call, pages as billed pages.
+ * chat answers as 1 per call, searches as 1 per search or the batch size for
+ * batched API searches (search/lean-logging.ts), pages as billed pages.
  */
 export async function orgUnitUsage(orgId: string, since: UsageWindow, client: SqlClient = sql): Promise<OrgUnitUsage> {
   const rows = await client<{ metric: string; amount: number; cost_cents: number; events: number }[]>`
@@ -258,7 +259,7 @@ export async function orgUnitUsage(orgId: string, since: UsageWindow, client: Sq
   const get = (metric: string) => by.get(metric) ?? { amount: 0, cost: 0, events: 0 };
   const ingestCredits = INGEST_UNIT_METRICS.reduce((sum, metric) => sum + get(metric).cost, 0);
   return {
-    searches: get(BILLABLE_UNIT_METRICS.search).events,
+    searches: get(BILLABLE_UNIT_METRICS.search).amount,
     searchCredits: get(BILLABLE_UNIT_METRICS.search).cost,
     chatAnswers: get(BILLABLE_UNIT_METRICS.chatAnswer).events,
     chatCredits: get(BILLABLE_UNIT_METRICS.chatAnswer).cost,

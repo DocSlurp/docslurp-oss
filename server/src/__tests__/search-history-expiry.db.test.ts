@@ -42,8 +42,10 @@ describe("search history expiry", () => {
     expect(await sweep.sweepExpiredSearchSessions()).toBe(0);
   });
 
-  it("indexes expires_at for the sweep", async () => {
+  it("indexes expires_at and the foreign keys the sweep's deletes go through", async () => {
     const [index] = await sql<{ indexdef: string }[]>`select indexdef from pg_indexes where indexname = 'search_sessions_expires_at_idx'`;
     expect(index?.indexdef).toMatch(/expires_at IS NOT NULL/i);
+    const names = (await sql<{ indexname: string }[]>`select indexname from pg_indexes where indexname in ('search_zero_results_session_idx', 'chat_answer_evidence_spans_search_session_idx')`).map((row) => row.indexname).sort();
+    expect(names).toEqual(["chat_answer_evidence_spans_search_session_idx", "search_zero_results_session_idx"]);
   });
 });
