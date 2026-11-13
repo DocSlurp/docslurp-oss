@@ -453,12 +453,14 @@ describe("chart export tier: origin defaults, per-request override and its guard
 
   it("the per-request override wins over the run's and the origin's tier", async () => {
     vi.stubEnv("DOCSLURP_CHART_EXPORT", "on");
+    vi.stubEnv("DOCSLURP_CHART_EXPORT_FREE_EXPLICIT", "on");
     expect((await post(appFor("u1", server()), "/v1/runs/run/reprocess", { chartExport: { tier: "free" } })).status).toBe(201);
     expect(await latestRun()).toMatchObject({ origin: "machine", pipeline: { chartExport: { tier: "free" } } });
     expect((await post(appFor("u1", undefined, { session: true }), "/v1/runs/run/reprocess", { chartExport: { tier: "off" } })).status).toBe(201);
     expect(await latestRun()).toMatchObject({ origin: "app", pipeline: { chartExport: { tier: "off" } } });
     expect((await post(appFor("u1", server()), "/v1/runs/run/reprocess", { chartExport: { tier: "models" } })).status).toBe(201);
     expect(await latestRun()).toMatchObject({ pipeline: { chartExport: { tier: "models" } } });
+    vi.stubEnv("DOCSLURP_CHART_EXPORT_FREE_EXPLICIT", "");
   });
 
   it("refuses invalid values, model names, and models where the deploy switch is not on (no run created)", async () => {
@@ -477,8 +479,12 @@ describe("chart export tier: origin defaults, per-request override and its guard
       expect(await (await post(key, "/v1/runs/run/reprocess/estimate", { chartExport: { tier: "models" } })).json()).toMatchObject({ error: { code: "chart_export_tier_unavailable" } });
       const estimate = await post(key, "/v1/runs/run/reprocess/estimate", { chartExport: { tier: "models" } });
       expect(estimate.status).toBe(400);
-      // Free is always allowed (it never calls a model).
-      expect((await post(key, "/v1/runs/run/reprocess/estimate", { chartExport: { tier: "free" } })).status).toBe(200);
+      // An explicit free needs its own gate, refused with the same code (each free run boots an unbilled VM).
+      const free = await post(key, "/v1/runs/run/reprocess/estimate", { chartExport: { tier: "free" } });
+      expect(free.status).toBe(400);
+      expect(await free.json()).toMatchObject({ error: { code: "chart_export_tier_unavailable" } });
+      // Off is always allowed.
+      expect((await post(key, "/v1/runs/run/reprocess/estimate", { chartExport: { tier: "off" } })).status).toBe(200);
     }
     expect(await runCount()).toBe(before);
   });
@@ -529,5 +535,83 @@ describe("chart export tier: origin defaults, per-request override and its guard
     expect((await post(appFor("u1", server()), "/v1/uploads/estimate", { files, project: "w", chartExport: { tier: "models" } })).status).toBe(400);
     expect((await post(appFor("u1", server()), "/v1/uploads/estimate", { files, project: "w", chartExport: { tier: "nope" } })).status).toBe(400);
   });
-});
 
+  const setProjectTier = async (project: string, tier: string | null) => {
+    const chartExport = tier ? { tier, formats: ["description", "mermaid"], diagrams: true } : { formats: ["description", "mermaid"], diagrams: true };
+    await sql`update projects set pipeline = jsonb_set(pipeline, '{chartExport}', ${sql.json(chartExport)}) where id = ${project}`;
+  };
+
+  it("a project's off/free tier is a ceiling: models needs editor rights and, for a key, the billed-features scope (M2)", async () => {
+    vi.stubEnv("DOCSLURP_CHART_EXPORT", "on");
+    await setProjectTier("w", "off");
+    const before = await runCount();
+    // The project owner's ingest-only key (k1's stored scopes are the defaults: ingest, search:deep, artifacts).
+    const ingestKey = await post(appFor("u1", server({ scopes: ["ingest"] })), "/v1/runs/run/reprocess", { chartExport: { tier: "models" } });
+    expect(ingestKey.status).toBe(403);
+    expect(await ingestKey.json()).toMatchObject({ error: { code: "chart_export_models_forbidden" } });
+    expect(await runCount()).toBe(before);
+    // The same key once granted pipeline:billed-features (scopes are read from the stored, unrevoked key).
+    await sql`update api_keys set scopes = array['ingest', 'pipeline:billed-features'] where id = 'k1'`;
+    expect((await post(appFor("u1", server({ scopes: ["ingest", "pipeline:billed-features"] })), "/v1/runs/run/reprocess", { chartExport: { tier: "models" } })).status).toBe(201);
+    // Revoked: refused again, fail closed.
+    await sql`update api_keys set revoked_at = now() where id = 'k1'`;
+    expect((await post(appFor("u1", server({ scopes: ["ingest", "pipeline:billed-features"] })), "/v1/runs/run/reprocess", { chartExport: { tier: "models" } })).status).toBe(403);
+    await sql`update api_keys set revoked_at = null, scopes = array['ingest', 'search:deep', 'artifacts'] where id = 'k1'`;
+    // The editor's own session may choose it.
+    expect((await post(appFor("u1", undefined, { session: true }), "/v1/runs/run/reprocess", { chartExport: { tier: "models" } })).status).toBe(201);
+  });
+
+  it("a contributor (an org member uploading to the default project) cannot read charts with AI above the project's tier", async () => {
+    vi.stubEnv("DOCSLURP_CHART_EXPORT", "on");
+    await setProjectTier("wd", "free");
+    await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total, artifacts)
+      values ('runwd', 'o1', 'u2', 'wd', 'upload', 'completed', 'index', ${sql.json(JSON.parse(JSON.stringify(defaultPipelineFeatures)))}, 1, 3, '{}')`;
+    await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source, canonical_id)
+      values ('dwd', 'o1', 'u2', 'wd', 'runwd', 'c.pdf', 'application/pdf', 'k3', 'completed', 3, 'counted', 'c3')`;
+    const before = await runCount();
+    const member = await post(appFor("u2", undefined, { session: true }), "/v1/runs/runwd/reprocess", { chartExport: { tier: "models" } });
+    expect(member.status).toBe(403);
+    expect(await member.json()).toMatchObject({ error: { code: "chart_export_models_forbidden" } });
+    expect(await runCount()).toBe(before);
+    // The member may still reprocess at the project's own tier.
+    expect((await post(appFor("u2", undefined, { session: true }), "/v1/runs/runwd/reprocess", {})).status).toBe(201);
+  });
+
+  it("checks access before the tier: a wrong-scope key gets 403 and another org 404, never the tier refusal (L4/L6)", async () => {
+    vi.stubEnv("DOCSLURP_CHART_EXPORT", "off");
+    const files = [{ name: "a.pdf", size: 1000, pages: 1, type: "application/pdf" }];
+    expect((await post(appFor("u1", server({ scopes: ["search:keyword"] })), "/v1/uploads/estimate", { files, project: "w", chartExport: { tier: "models" } })).status).toBe(403);
+    expect((await post(appFor("u2", server({ orgId: "o2", userId: "u2" })), "/v1/runs/run/reprocess/estimate", { chartExport: { tier: "models" } })).status).toBe(404);
+    expect((await post(appFor("u2", server({ orgId: "o2", userId: "u2" })), "/v1/runs/run/reprocess", { chartExport: { tier: "models" } })).status).toBe(404);
+  });
+
+  it("reprocess keeps the source run's stamped tier, even an explicit free the gate now refuses on requests", async () => {
+    vi.stubEnv("DOCSLURP_CHART_EXPORT", "on");
+    await sql`update project_runs set pipeline = jsonb_set(pipeline, '{chartExport}', ${sql.json({ tier: "free", formats: ["description", "mermaid"], diagrams: true })}) where id = 'run'`;
+    expect((await post(appFor("u1", server()), "/v1/runs/run/reprocess", {})).status).toBe(201);
+    expect(await latestRun()).toMatchObject({ origin: "machine", pipeline: { chartExport: { tier: "free" } } });
+  });
+
+  it("full index on a project with no tier keeps each document's source-run tier and records the origin (M5, L4)", async () => {
+    vi.stubEnv("DOCSLURP_CHART_EXPORT", "on");
+    await setProjectTier("w", null);
+    await sql`update project_runs set pipeline = jsonb_set(pipeline, '{chartExport}', ${sql.json({ tier: "free", formats: ["description", "mermaid"], diagrams: true })}) where id = 'run'`;
+    // A machine caller (default off) does not flip the documents' free exports off.
+    const res = await post(appFor("u1", server()), "/v1/projects/w/full-index");
+    expect(res.status).toBe(202);
+    const runs = await sql<{ pipeline: { chartExport?: { tier?: string } }; origin: string; kind: string }[]>`select pipeline, origin, kind from project_runs where kind = 'full-index'`;
+    expect(runs.length).toBeGreaterThan(0);
+    for (const run of runs) expect(run).toMatchObject({ origin: "machine", pipeline: { chartExport: { tier: "free" } } });
+  });
+
+  it("the upload quote's charts line equals chartExport.credits for the project's own formats (M7)", async () => {
+    vi.stubEnv("DOCSLURP_CHART_EXPORT", "on");
+    await sql`update projects set pipeline = jsonb_set(pipeline, '{chartExport}', ${sql.json({ tier: "models", formats: ["description", "vega-lite", "matplotlib", "csv"], diagrams: true })}) where id = 'w'`;
+    const files = [{ name: "a.pdf", size: 400_000, pages: 40, type: "application/pdf" }];
+    type Out = { chartExport: { credits: { low: number; high: number } }; quote: { lines: Array<{ id: string; credits: { low: number; high: number } }> } };
+    const out = await (await post(appFor("u1", server()), "/v1/uploads/estimate", { files, project: "w" })).json() as Out;
+    const charts = out.quote.lines.find((line) => line.id === "charts")!;
+    expect(charts.credits.high).toBeCloseTo(out.chartExport.credits.high, 5);
+    expect(charts.credits.low).toBeCloseTo(out.chartExport.credits.low, 5);
+  });
+});

@@ -77,7 +77,7 @@ describe("stampRunChartExport", () => {
     const base = defaultPipelineFeatures;
     expect(stampRunChartExport({ ...base, chartExport: { ...base.chartExport, tier: "free" } }, "machine", {}, { stamped: true }).chartExport.tier).toBe("free");
     const legacy = { ...base, chartExport: { enabled: true, generatorModel: null, formats: ["csv"], diagrams: true } } as never;
-    expect(stampRunChartExport(legacy, "machine", {}).chartExport).toEqual({ tier: "models", formats: ["csv"], diagrams: true });
+    expect((stampRunChartExport(legacy, "machine", {}) as typeof base).chartExport).toEqual({ tier: "models", formats: ["csv"], diagrams: true });
     expect(stampRunChartExport(base, "app", { DOCSLURP_CHART_EXPORT_APP_DEFAULT: "off" }, { stamped: true }).chartExport.tier).toBe("off");
   });
 });

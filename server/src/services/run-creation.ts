@@ -30,7 +30,7 @@ import {
   SpendBlockedError,
   type SpendBlockedCode,
 } from "./billing/spend-guard.js";
-import { canContributeToProject, canEditProject, getProjectAccess } from "./organizations.js";
+import { canContributeToProject, canEditProject, getProjectAccessWithPipeline } from "./organizations.js";
 import { attributedUsage } from "./usage-attribution.js";
 import { buildRunProcessingPreview } from "./run-processing-preview.js";
 import { RunPipelineInvalidError, runLifecycle, type RunLifecycleRun, type RunStartOutcome } from "./run-lifecycle.js";
@@ -962,14 +962,15 @@ export function createRunCreation(deps: RunCreationDeps) {
       pipeline: stampRunChartExport(sanitized, request.origin ?? "machine", process.env, { stamped: request.chartExportStamped === true }),
     };
     assertPipelineSpeedBoost(input.pipeline);
-    const access = await getProjectAccess(input.projectId, input.userId);
+    // With the stored pipeline: the project's chart tier is the ceiling checked below.
+    const access = await getProjectAccessWithPipeline(input.projectId, input.userId);
     if (!access) throw new Error("Project not found");
     if (!canContributeToProject(access, input.userId)) throw new Error("Forbidden");
     // The project's explicit chart tier is a ceiling: `models` above a stored `off`/`free` needs editor rights (and, for
     // an API key, the billed-features scope). Every run (upload, URL, extract, MCP, reprocess) lands here.
     await assertChartExportModelsCeiling({
       runTier: (input.pipeline.chartExport as ResolvedChartExportConfig | undefined)?.tier,
-      projectTier: (upgradeStoredChartExport((access.pipeline as { chartExport?: unknown } | null)?.chartExport) as { tier?: unknown } | null)?.tier,
+      projectTier: (upgradeStoredChartExport((access.pipeline as { chartExport?: unknown } | null | undefined)?.chartExport) as { tier?: unknown } | null)?.tier,
       canEdit: canEditProject(access, input.userId),
       // Some intake paths do not thread the key id through; the request context always has it for a key request.
       apiKeyId: input.apiKeyId ?? currentRequestApiKeyId(),
