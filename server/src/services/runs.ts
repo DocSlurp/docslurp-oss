@@ -502,7 +502,7 @@ export async function retryRun(
   }
 
   // A retried run keeps its categories and stage selection, but its model values are re-resolved: a run from before
-  // managed models (0146) must not replay a stored model (the former DeepSeek vision default is refused at call time).
+  // managed models (0155) must not replay a stored model (the former DeepSeek vision default is refused at call time).
   const managed = resolveManagedPipeline(run.pipeline, await loadManagedPipelineOverrides(run.projectId), `run ${run.id} retry`);
   const retried = { ...run, pipeline: { ...managed.pipeline, speedBoost: run.pipeline.speedBoost === true } };
 

@@ -86,7 +86,7 @@ describe("managed pipeline models", () => {
     expect(audit.map((row) => row.action)).toContain("project.managed_models.updated");
   });
 
-  it("rolls back to a pre-0146 snapshot without restoring its model choices, and keeps a removed override removed", async () => {
+  it("rolls back to a pre-0155 snapshot without restoring its model choices, and keeps a removed override removed", async () => {
     await managedModels.setProjectManagedModels("w", { pipeline: { vision: { modelUri: "llm://openrouter/google/gemini-2.5-flash-lite" } } }, { userId: "u1" });
     await managedModels.setProjectManagedModels("w", { pipeline: null }, { userId: "u1" });
     await sql`insert into audit_log(id, org_id, user_id, project_id, action, resource_type, metadata) values (

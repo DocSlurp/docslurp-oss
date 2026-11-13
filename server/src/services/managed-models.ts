@@ -1,7 +1,7 @@
 /**
  * Managed model settings. Callers choose DocSlurp categories (chat tiers, quality, profiles); the concrete backend
  * model behind a category is a managed setting that only platform admins change, per project, in
- * `projects.managed_models` (migration 0146): `chat` (tier -> model) and `pipeline` (explicit pipeline model overrides,
+ * `projects.managed_models` (migration 0155): `chat` (tier -> model) and `pipeline` (explicit pipeline model overrides,
  * managed-pipeline-models.ts). Backend ids are recorded in usage events, traces and logs, and never returned to
  * customers.
  */
