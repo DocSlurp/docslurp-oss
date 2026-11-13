@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 vi.mock("../db.js", () => ({ sql: vi.fn() }));
 
-const { createKeywordFanout } = await import("../services/search.js");
+const { createKeywordFanout, withKeywordFanoutPostgresSlot } = await import("../services/search.js");
 type Chunk = Parameters<Parameters<ReturnType<typeof createKeywordFanout>["search"]>[0]> extends never ? never : any;
 
 function chunk(documentId: string, chunkIndex: number): Chunk {
@@ -21,7 +21,7 @@ describe("keyword fan-out", () => {
       beta: [chunk("d1", 1), chunk("d2", 0)],
       gamma: [],
     };
-    const fanout = createKeywordFanout(["alpha", "beta", "alpha", "gamma"], true);
+    const fanout = createKeywordFanout(["alpha", "beta", "alpha", "gamma"]);
     const run = vi.fn(async (term: string) => lists[term]!);
     const fused = await fanout.search(run, 20);
     expect(run).toHaveBeenCalledTimes(3);
@@ -35,23 +35,61 @@ describe("keyword fan-out", () => {
   });
 
   it("keeps the fused list within the limit", async () => {
-    const fanout = createKeywordFanout(["a", "b"], true);
+    const fanout = createKeywordFanout(["a", "b"]);
     const fused = await fanout.search(async (term) => Array.from({ length: 10 }, (_, i) => chunk(term, i)), 5);
     expect(fused).toHaveLength(5);
   });
 
-  it("bounds parallel queries: 16 natively, 4 on the Postgres path", async () => {
-    for (const [native, expected] of [[true, 16], [false, 4]] as const) {
-      let active = 0;
-      let peak = 0;
-      const fanout = createKeywordFanout(Array.from({ length: 40 }, (_, i) => `t${i}`), native);
-      await fanout.search(async () => {
-        active += 1; peak = Math.max(peak, active);
-        await new Promise((resolve) => setTimeout(resolve, 2));
-        active -= 1;
+  it("runs at most 16 queries at once", async () => {
+    let active = 0;
+    let peak = 0;
+    const fanout = createKeywordFanout(Array.from({ length: 40 }, (_, i) => `t${i}`));
+    await fanout.search(async () => {
+      active += 1; peak = Math.max(peak, active);
+      await new Promise((resolve) => setTimeout(resolve, 2));
+      active -= 1;
+      return [];
+    }, 20);
+    expect(peak).toBe(16);
+  });
+
+  it("stops starting queries after a failure and settles the running ones before it rejects", async () => {
+    let started = 0;
+    let running = 0;
+    const fanout = createKeywordFanout(Array.from({ length: 100 }, (_, i) => `t${i}`));
+    const failed = fanout.search(async (term) => {
+      started += 1; running += 1;
+      try {
+        await new Promise((resolve) => setTimeout(resolve, term === "t3" ? 1 : 5));
+        if (term === "t3") throw new Error("statement timeout");
         return [];
-      }, 20);
-      expect(peak).toBe(expected);
-    }
+      } finally {
+        running -= 1;
+      }
+    }, 20);
+    await expect(failed).rejects.toThrow("statement timeout");
+    // Only the first wave (16) started; none is still running once the search has failed.
+    expect(started).toBe(16);
+    expect(running).toBe(0);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(started).toBe(16);
+  });
+
+  it("caps Postgres legs across every fan-out in the process, wherever they come from", async () => {
+    let active = 0;
+    let peak = 0;
+    const leg = () => withKeywordFanoutPostgresSlot(async () => {
+      active += 1; peak = Math.max(peak, active);
+      await new Promise((resolve) => setTimeout(resolve, 2));
+      active -= 1;
+      return [];
+    });
+    // Two concurrent fan-outs whose every query falls back to Postgres.
+    await Promise.all([0, 1].map((n) => createKeywordFanout(Array.from({ length: 30 }, (_, i) => `f${n}-${i}`)).search(leg, 20)));
+    expect(peak).toBe(4);
+    const failing = withKeywordFanoutPostgresSlot(async () => { throw new Error("boom"); });
+    await expect(failing).rejects.toThrow("boom");
+    // A failed leg releases its slot.
+    await Promise.all(Array.from({ length: 8 }, leg));
   });
 });

@@ -200,24 +200,60 @@ export interface KeywordQueryOutcome {
   hits: number;
 }
 
-/** Parallel BM25 queries per keyword fan-out (SEARCH_KEYWORD_FANOUT_CONCURRENCY, default 16; 4 on the Postgres path). */
-function keywordFanoutConcurrency(native: boolean): number {
+/** Parallel BM25 queries per keyword fan-out (SEARCH_KEYWORD_FANOUT_CONCURRENCY, default 16). */
+function keywordFanoutConcurrency(): number {
   const parsed = Number(process.env.SEARCH_KEYWORD_FANOUT_CONCURRENCY);
-  const configured = Number.isSafeInteger(parsed) && parsed > 0 ? Math.min(parsed, 100) : 16;
-  // Without native BM25 every query is a Postgres full-text query on the shared pool.
-  return native ? configured : Math.min(configured, 4);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? Math.min(parsed, 100) : 16;
 }
 
+/**
+ * Postgres full-text queries all keyword fan-outs in this process may run at once
+ * (SEARCH_KEYWORD_FANOUT_POSTGRES_CONCURRENCY, default 4). It is taken where Postgres actually runs: phrase and
+ * negation terms, the Postgres fallback when native BM25 is unavailable or misses, and documents not yet in LanceDB.
+ */
+function keywordFanoutPostgresConcurrency(): number {
+  const parsed = Number(process.env.SEARCH_KEYWORD_FANOUT_POSTGRES_CONCURRENCY);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? Math.min(parsed, 64) : 4;
+}
+
+let fanoutPostgresActive = 0;
+const fanoutPostgresQueue: Array<() => void> = [];
+
+export async function withKeywordFanoutPostgresSlot<T>(fn: () => Promise<T>): Promise<T> {
+  if (fanoutPostgresActive >= keywordFanoutPostgresConcurrency()) {
+    await new Promise<void>((resolve) => { fanoutPostgresQueue.push(resolve); });
+  } else {
+    fanoutPostgresActive += 1;
+  }
+  try {
+    return await fn();
+  } finally {
+    const next = fanoutPostgresQueue.shift();
+    // The slot passes straight to the next waiter; otherwise it is released.
+    if (next) next(); else fanoutPostgresActive -= 1;
+  }
+}
+
+/**
+ * Runs `fn` over `items`, at most `limit` at once. After the first failure no further item starts; the call waits
+ * for the ones already running and then rethrows, so no work outlives the search (and its admission slot).
+ */
 async function mapWithLimit<T, R>(items: readonly T[], limit: number, fn: (item: T, index: number) => Promise<R>): Promise<R[]> {
   const results = new Array<R>(items.length);
   let next = 0;
+  let failure: { error: unknown } | null = null;
   const worker = async () => {
-    while (next < items.length) {
+    while (!failure && next < items.length) {
       const index = next++;
-      results[index] = await fn(items[index]!, index);
+      try {
+        results[index] = await fn(items[index]!, index);
+      } catch (error) {
+        failure ??= { error };
+      }
     }
   };
   await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  if (failure) throw (failure as { error: unknown }).error;
   return results;
 }
 
@@ -227,13 +263,13 @@ const fanoutChunkKey = (documentId: string, chunkIndex: number) => `${documentId
  * Runs each distinct keyword query (`text` runs one), fuses the lists by reciprocal rank and remembers which input
  * queries matched each chunk. Every query uses the caller's options, so scope and filters are the search's own.
  */
-export function createKeywordFanout(terms: readonly string[], native: boolean) {
+export function createKeywordFanout(terms: readonly string[]) {
   const matched = new Map<string, number[]>();
   const hits = terms.map(() => 0);
   const distinct = [...new Set(terms)];
   return {
     async search(run: (term: string) => Promise<SearchChunk[]>, limit: number): Promise<SearchChunk[]> {
-      const lists = await mapWithLimit(distinct, keywordFanoutConcurrency(native), (term) => run(term));
+      const lists = await mapWithLimit(distinct, keywordFanoutConcurrency(), (term) => run(term));
       matched.clear();
       hits.fill(0);
       distinct.forEach((term, distinctIndex) => {
@@ -1117,6 +1153,8 @@ async function nativeTextSearch(
   userId: string,
   context: NativeSearchContext,
   options: SearchOptions,
+  /** Postgres full-text search for the tail; a keyword fan-out passes one bounded by its Postgres slots. */
+  legacyTextSearch: typeof textSearch = textSearch,
 ): Promise<SearchChunk[] | null> {
   if (!nativeScopeSupported(options.filters)) return null;
   // The BM25 index has no positions and its query is plain terms: a quoted
@@ -1170,7 +1208,7 @@ async function nativeTextSearch(
   const requested = new Set(options.filters?.documentIds ?? []);
   const tailIds = tail.map((document) => document.id).filter((id) => requested.size === 0 || requested.has(id));
   if (tailIds.length === 0) return nativeChunks;
-  const tailChunks = await textSearch(query, userId, { ...options, filters: { ...options.filters, documentIds: tailIds } });
+  const tailChunks = await legacyTextSearch(query, userId, { ...options, filters: { ...options.filters, documentIds: tailIds } });
   if (nativeChunks.length === 0) return tailChunks;
   if (tailChunks.length === 0) return nativeChunks;
   return reciprocalRankFusion([nativeChunks, tailChunks]).slice(0, limit)
@@ -1828,9 +1866,11 @@ async function executeHybridSearch(
   const nativeVectorOrLegacy = (vector: number[], options: SearchOptions, serving: IndexServing | null) => native
     ? nativeVectorSearch(vector, native, options, serving).then((chunks) => chunks ?? vectorSearch(vector, userId, native.projectId, options, serving, setup.privacyMode))
     : vectorSearch(vector, userId, setup.normalizedScope.projectId, options, serving, setup.privacyMode);
-  const nativeTextOrLegacy = (text: string, options: SearchOptions) => native
-    ? nativeTextSearch(text, userId, native, options).then((chunks) => chunks ?? textSearch(text, userId, options))
-    : textSearch(text, userId, options);
+  const nativeTextOrLegacy = (text: string, options: SearchOptions, legacy: typeof textSearch = textSearch) => native
+    ? nativeTextSearch(text, userId, native, options, legacy).then((chunks) => chunks ?? legacy(text, userId, options))
+    : legacy(text, userId, options);
+  // A keyword fan-out's Postgres legs share the process-wide fan-out Postgres slots.
+  const fanoutPostgresTextSearch: typeof textSearch = (text, user, options) => withKeywordFanoutPostgresSlot(() => textSearch(text, user, options));
   // Native search skips page branches the cached coverage says have nothing to serve.
   const pageOnlyDocuments = setup.availabilityRow?.page_only_documents;
   const skipProgressive = Boolean(native) && pageOnlyDocuments === 0;
@@ -1838,7 +1878,7 @@ async function executeHybridSearch(
   const mode = setup.resolvedOptions.searchMode ?? "deep";
   const keywordOnly = mode === "keyword";
   const keywordTerms = setup.resolvedOptions.keywordQueries;
-  const fanout = keywordOnly && keywordTerms && keywordTerms.length > 0 ? createKeywordFanout(keywordTerms, Boolean(native)) : null;
+  const fanout = keywordOnly && keywordTerms && keywordTerms.length > 0 ? createKeywordFanout(keywordTerms) : null;
   const pageOnlyCompleted = async (): Promise<boolean> => {
     if (!native) return true;
     const embedding = resolveEmbeddingRoute(native.pipeline.embedding);
@@ -1885,7 +1925,7 @@ async function executeHybridSearch(
         })),
       textSearch: ({ query, options }) =>
         timePhase("text", () => fanout
-          ? fanout.search((term) => nativeTextOrLegacy(term, options), options.limit ?? 20)
+          ? fanout.search((term) => nativeTextOrLegacy(term, options, fanoutPostgresTextSearch), options.limit ?? 20)
           : nativeTextOrLegacy(query, options)),
       graphNeighborSearch: ({ query, projectId, options }) => mode !== "deep"
         ? Promise.resolve([])

@@ -92,7 +92,7 @@ Chunks reach keyword search once the embed stage has written every chunk row of 
 - **Mode:** `mode` must be `keyword` or omitted. Any other mode returns 400.
 - **Results:** each result carries `matchedQueries`, the indexes into `q` of the queries it matched. The response also adds `keywordQueries`: each query as sent and how many chunks it matched before fusion. Duplicate queries run once and count under every index they appear at.
 - **Cost and limits:** each query counts as one keyword search, for billing and for the key's keyword search limit.
-- **Speed:** the scope, eligibility and project settings resolve once per search. A warm fan-out of 100 queries issues the same single SQL read as one keyword search, and up to `SEARCH_KEYWORD_FANOUT_CONCURRENCY` (default 16; at most 4 when search runs on Postgres) BM25 queries run at once.
+- **Speed:** the scope, eligibility and project settings resolve once per search. A warm fan-out of 100 queries issues the same single SQL read as one keyword search, and up to `SEARCH_KEYWORD_FANOUT_CONCURRENCY` (default 16) BM25 queries run at once. Queries that run on Postgres instead (phrases, negation, fallbacks) share `SEARCH_KEYWORD_FANOUT_POSTGRES_CONCURRENCY` (default 4) slots across the whole process.
 
 The array form also works inside a batch item (`queries: [{ q: [...] }]`).
 
