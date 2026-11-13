@@ -503,9 +503,8 @@ async function resumeUnit(
         and run_id = ${row.run_id} and storage_state = 'stored'`).map((r) => [r.asset_id, r.sha256]));
     const set = await readDopplerFigureDir(outDir, {
       pageCount: row.page_count, signal: deps.signal, expect: outcome.status === "partial" ? "partial" : "complete", sourceSha256: row.source_sha256,
-      // A range resume (a shard or a gap) returns only its own range: the pages before it are not this folder's, so they
-      // count as covered for the contiguity rule (reader only; never written to the ledger).
-      gaps: [...(unit.shard && unit.shard.first > 1 ? [{ first: 1, last: unit.shard.first - 1, reason: "other" as const }] : []), ...(outcome.gaps ?? [])],
+      // A range resume (a shard or a gap) is checked over its own pages (dopplerShardCoverage), with its declared gaps.
+      gaps: outcome.gaps ?? null, ...(unit.shard ? { range: [unit.shard.first, unit.shard.last] as const } : {}),
       resume: { stored },
     });
     try {

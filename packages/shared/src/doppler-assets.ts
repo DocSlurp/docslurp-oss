@@ -111,9 +111,9 @@ export const DOPPLER_FIGURE_GAPS_MAX = 128;
 export interface DopplerFigureGap { first: number; last: number; reason: DopplerFigureGapReason }
 
 /**
- * Whether sorted, non-overlapping shard ranges follow each other from page 1 with no hole, except where the reported
- * gaps cover a hole entirely (a range with no manifest at all: a failed or over-share shard, the document's pass budget).
- * A gap never excuses a hole it only partly covers.
+ * The ledger's rule for recorded shards: from page 1 with no hole, except where the level's gaps cover a hole entirely.
+ * (A recorded gap may also lie inside a shard: pages that shard did not extract. The reader's stricter rule for a folder
+ * is dopplerShardCoverage.)
  */
 export function dopplerShardsContiguous(
   ranges: ReadonlyArray<readonly [number, number]>, gaps: readonly Pick<DopplerFigureGap, "first" | "last">[] | null | undefined,
@@ -135,6 +135,44 @@ export function dopplerShardsContiguous(
     next = last + 1;
   }
   return true;
+}
+
+export type DopplerShardCoverageRule = "shards-not-contiguous" | "gap-overlaps-shard" | "page-outside-document";
+
+/**
+ * The folder's shard ranges against the outcome's declared gaps, over the pages it was asked for (`first..last`: the
+ * document, or a resumed range). Null when they agree, else the rule broken.
+ * - Every shard and gap lies inside `first..last` (`page-outside-document`); no gap overlaps a shard (`gap-overlaps-shard`).
+ * - `partial` with declared gaps (a failed batch or shard publishes no folder: app #464): shards and gaps together cover
+ *   every page of `first..last` exactly once, so a first, middle or trailing gap keeps the extracted shards.
+ * - Otherwise (an `extracted` outcome, or no gap declared): the strict rule, shards from `first` with no hole, ending
+ *   within `last`. A hole is never excused by a gap an `extracted` outcome declares.
+ * A gap holds no rows: it is never stored, billed or served; its resume publishes `shards/<first>-<last>/` for it.
+ */
+export function dopplerShardCoverage(
+  ranges: ReadonlyArray<readonly [number, number]>, gaps: readonly Pick<DopplerFigureGap, "first" | "last">[] | null | undefined,
+  args: { first: number; last: number; partial: boolean },
+): DopplerShardCoverageRule | null {
+  const shards = [...ranges].sort((a, b) => a[0] - b[0]);
+  const declared = [...(gaps ?? [])].sort((a, b) => a.first - b.first);
+  if (shards.some(([first, last]) => first < args.first || last > args.last)) return "page-outside-document";
+  if (declared.some((gap) => gap.first < args.first || gap.last > args.last)) return "page-outside-document";
+  if (declared.some((gap) => shards.some(([first, last]) => first <= gap.last && gap.first <= last))) return "gap-overlaps-shard";
+  if (!args.partial || declared.length === 0) {
+    let next = args.first;
+    for (const [first, last] of shards) {
+      if (first !== next) return "shards-not-contiguous";
+      next = last + 1;
+    }
+    return null;
+  }
+  const items = [...shards.map(([first, last]) => ({ first, last })), ...declared].sort((a, b) => a.first - b.first);
+  let next = args.first;
+  for (const item of items) {
+    if (item.first !== next) return "shards-not-contiguous";
+    next = item.last + 1;
+  }
+  return next === args.last + 1 ? null : "shards-not-contiguous";
 }
 
 /** Pages per Doppler image batch (`--images-batch-pages`); the per-batch limits below are derived from it. */
