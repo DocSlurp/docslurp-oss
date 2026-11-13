@@ -14,7 +14,7 @@ const image = { type: "image_url", image_url: { url: "data:image/png;base64,AA==
 const cfg = { openRouterApiKey: "or-key", openAiApiKey: "", openAiBaseUrl: "https://api.openai.com/v1" } as Config;
 afterEach(() => vi.unstubAllGlobals());
 
-async function body(model: string, prompt?: string): Promise<Record<string, any>> {
+async function body(model: string, prompt?: string, promptText?: string): Promise<Record<string, any>> {
   const bodies: Array<Record<string, any>> = [];
   vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => {
     bodies.push(JSON.parse(String(init.body)));
@@ -26,19 +26,35 @@ async function body(model: string, prompt?: string): Promise<Record<string, any>
   await writeFile(imagePath, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
   await inAllowingRun(() => executeVisionRuntime({
     imagePath, outputPath: `${imagePath}.json`, gate: null, cfg, runner: new CommandRunner(), privacyMode: "standard",
-    vision: visionConfigSchema.parse({ modelUri: `llm://openrouter/${model}`, ...(prompt ? { prompt } : {}) }),
+    // The schema admits only priced page-read models; chart export swaps the model into a parsed config the same way.
+    vision: { ...visionConfigSchema.parse({ modelUri: "llm://openrouter/openai/gpt-6-luna", ...(prompt ? { prompt } : {}) }), modelUri: `llm://openrouter/${model}` },
+    ...(promptText ? { promptText } : {}),
   }));
   return bodies[0]!;
 }
 
 describe("Claude page reads are cache-ordered; other models keep the original shape", () => {
-  // Claude is not in the priced page-read catalog, so production reaches this shape through chart reads only; the
-  // runtime composes it exactly like this.
+  // Claude is not in the priced page-read catalog yet, so this shape has no production traffic; chart reads never use
+  // it. The runtime composes a Claude page read exactly like this.
   it("composes Claude's body as a marked fixed system message and the image alone after it", () => {
     const sent = withPromptCacheBreakpoints({ model: "anthropic/claude-haiku-5.5",
       messages: visionPromptMessages(visionPromptTemplates.layout, undefined, image, { cacheOrdered: true }) }) as Record<string, any>;
     expect(sent.messages[0]).toEqual({ role: "system", content: [{ type: "text", text: `${VISION_SYSTEM_INSTRUCTION}\n\n${visionPromptTemplates.layout}`, cache_control: { type: "ephemeral" } }] });
     expect(sent.messages[1].content).toEqual([image]);
+  });
+
+  it("sends a Claude page read cache-ordered with the marker, and a Claude chart read in the original order without one", async () => {
+    const page = await body("anthropic/claude-haiku-5.5", "layout");
+    expect(page.messages[0]).toEqual({ role: "system", content: [{ type: "text", text: `${VISION_SYSTEM_INSTRUCTION}\n\n${visionPromptTemplates.layout}`, cache_control: { type: "ephemeral" } }] });
+    expect(page.messages[1].content).toHaveLength(1);
+    expect(page.messages[1].content[0].type).toBe("image_url");
+
+    const chartPrompt = "Return one JSON object of this shape: {...}";
+    const chart = await body("anthropic/claude-haiku-5.5", "layout", chartPrompt);
+    expect(chart.messages[0]).toEqual({ role: "system", content: VISION_SYSTEM_INSTRUCTION });
+    expect(chart.messages[1].content[0]).toEqual({ type: "text", text: chartPrompt });
+    expect(chart.messages[1].content[1].type).toBe("image_url");
+    expect(JSON.stringify(chart)).not.toContain("cache_control");
   });
 
   it("keeps GPT-6 Luna on the original shape", async () => {

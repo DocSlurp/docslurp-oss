@@ -779,6 +779,7 @@ export async function runVisionRequest(args: {
       // ProviderRetryableError so the activity retries instead of skipping the page.
       // Streaming, degeneration abort and the single alternate-route retry live in vision-stream.ts.
       const isOpenRouter = isOpenRouterBaseUrl(args.baseUrl);
+      const cacheOrdered = visionCacheOrdered({ pageRead: args.cacheOrderedPrompt === true, openRouter: isOpenRouter, model: args.model });
       const body = {
         model: args.model,
         // Cache-ordered only for Claude page reads on OpenRouter (Haiku 5.5 reads its fixed prefix: +13% pages per
@@ -791,7 +792,7 @@ export async function runVisionRequest(args: {
             url: `data:${args.mimeType};base64,${image.toString("base64")}`,
             ...visionImageUrlOptions(args.model),
           },
-        }, { cacheOrdered: visionCacheOrdered({ pageRead: args.cacheOrderedPrompt === true, openRouter: isOpenRouter, model: args.model }) }),
+        }, { cacheOrdered }),
         temperature: 0,
         max_tokens: visionCallMaxOutputTokens(args.model, args.maxOutputTokens),
         // Page transcription never needs thinking: pin each verified model to its lowest accepted effort.
@@ -807,6 +808,7 @@ export async function runVisionRequest(args: {
         const own = (body as { provider?: Record<string, unknown> }).provider ?? {};
         Object.assign(body, { provider: { ...own, max_price: openRouterMaxPrice(args.maxPrice) } });
       }
+      const routedBody = isOpenRouter && nitroBaseModel(args.model) ? withOpenRouterProviderPreferences(body, currentProviderPolicy()) : body;
       const result = await runGuardedChatCompletion({
         url: resolveChatCompletionsUrl(args.baseUrl),
         headers: {
@@ -814,8 +816,9 @@ export async function runVisionRequest(args: {
           ...(args.apiKey ? { authorization: `Bearer ${args.apiKey}` } : {}),
         },
         // Claude caches only at explicit markers: one at the end of the fixed system instructions (Haiku 5.5 caches
-        // prefixes of 512+ tokens). Other models cache a long enough prefix on their own.
-        body: withPromptCacheBreakpoints(isOpenRouter && nitroBaseModel(args.model) ? withOpenRouterProviderPreferences(body, currentProviderPolicy()) : body),
+        // prefixes of 512+ tokens). The marker goes only on a cache-ordered body; every other request, chart reads
+        // included, is sent as before.
+        body: cacheOrdered ? withPromptCacheBreakpoints(routedBody) : routedBody,
         model: args.model,
         providerLabel: args.providerLabel ?? providerFromBaseUrl(args.baseUrl),
         openRouter: isOpenRouter,
