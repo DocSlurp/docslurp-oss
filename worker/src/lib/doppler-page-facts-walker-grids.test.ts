@@ -16,7 +16,7 @@ import { buildAdaptiveRoutingDecisionSurface } from "../stages/classify-route.js
 import { SCHEMA, docLine, jsonl, runLine, textPage } from "../test/doppler-page-facts-fixture.js";
 import { dopplerPageFactsJsonl, parseDopplerPageFacts, withoutWalkerParityFacts, type DopplerPageFactsDocument } from "./doppler-page-facts.js";
 import { pageImageEvidenceFromDopplerFacts } from "./doppler-page-facts-evidence.js";
-import { pageLayoutFactsFromDopplerFacts, unclippedPlacement } from "./doppler-page-facts-layout.js";
+import { pageLayoutFactsFromDopplerFacts } from "./doppler-page-facts-layout.js";
 import { buildPageImageEvidence, findSparsePages, summarizeImageListing, type PageImageEvidence } from "./page-image-evidence.js";
 import type { PageLayoutFacts } from "./page-layout-facts.js";
 
@@ -196,35 +196,32 @@ describe("doppler #44 facts: the walker-grid contract", () => {
     expect(layoutOf(page({ vectors: { hRules: 31, vRules: 2, grids: [{ ...lined, vRules: 0 }], unlistedRuledGrids: 0 } }))).toMatchObject({ grids: [], tableCoverage: 0 });
   });
 
-  it("words inside: centred counts are the walker's wordsInside whenever present; truncation leaves images unknown", () => {
-    // A 264 x 300 pt box that its 264 x 300 samples at 72 dpi fill: the whole placement.
+  it("words inside: centred counts stand above the mixed-scan threshold; a low count is unknown; truncation leaves images unknown", () => {
     const at = (item: Record<string, unknown>, ratio = 0.2) => layoutOf(page({
       item: { bbox: [36, 300, 300, 600], px: [264, 300], dpi: [72, 72], ...item }, extra: { text: { ...(base.text as object), textOverImageRatio: ratio } },
     })).images![0]!.wordsInside;
     // A caption line straddling the bottom edge: the walker counts it by its centre, as the centred count does.
     expect(at({ visibleWordsInside: 0, invisibleWordsInside: 0, visibleWordsCentredInside: 4, invisibleWordsCentredInside: 0 })).toBe(4);
-    // A low count stands without #378's ratio-and-cells proof: it is the walker's own test.
-    expect(at({ visibleWordsInside: 0, invisibleWordsInside: 0, visibleWordsCentredInside: 1, invisibleWordsCentredInside: 0 })).toBe(1);
     expect(at({ visibleWordsCentredInside: 7, invisibleWordsCentredInside: 0 })).toBe(7);
-    // Council #382 M2: a clipped image's box is smaller than its placement, where the walker counts: a low count is unknown.
-    // Here a full-page scan clipped to the top 60% (px / dpi give 612 x 792, the box is 612 x 475).
-    const clipped = { bbox: [0, 0, 612, 475], px: [2550, 3300], dpi: [300, 300] };
-    expect(at({ ...clipped, visibleWordsCentredInside: 0, invisibleWordsCentredInside: 0 })).toBeNull();
-    expect(at({ ...clipped, visibleWordsCentredInside: 2, invisibleWordsCentredInside: 0 })).toBeNull();
-    // A high count only blocks a read: it stands.
-    expect(at({ ...clipped, visibleWordsCentredInside: 40, invisibleWordsCentredInside: 0 })).toBe(40);
-    // The whole-box fallback is held to the same test.
-    expect(at({ ...clipped, visibleWordsInside: 0, invisibleWordsInside: 0 }, 0)).toBeNull();
-    expect(unclippedPlacement({ bbox: [0, 0, 300, 264], px: [264, 300], dpi: [72, 72] })).toBe(true); // turned 90°
-    expect(unclippedPlacement({ bbox: [0, 0, 264, 300], px: [264, 300], dpi: [0, 72] })).toBe(false);
+    // Council #382 M2: Doppler's box is clipped (and a rotated or skewed image clipped to its own size looks unclipped), so a
+    // low count can be below the walker's: unknown, whatever the box, ratio or resolution say.
+    for (const low of [0, 1, 2]) {
+      expect(at({ visibleWordsCentredInside: low, invisibleWordsCentredInside: 0 }, 0), `centred ${low}`).toBeNull();
+      expect(at({ visibleWordsInside: low, invisibleWordsInside: 0 }, 0), `whole-box ${low}`).toBeNull();
+    }
+    // 45° rotation clipped to its own size: a 400 x 400 pt box that 400 x 400 samples at 72 dpi fill (the walker's box is
+    // about 566 pt a side, with prose in its corners).
+    expect(at({ bbox: [100, 200, 500, 600], px: [400, 400], dpi: [72, 72], visibleWordsCentredInside: 0, invisibleWordsCentredInside: 0 }, 0)).toBeNull();
+    // A high count only blocks a read: it stands, clipped or not.
+    expect(at({ bbox: [0, 0, 612, 475], px: [2550, 3300], dpi: [300, 300], visibleWordsCentredInside: 40, invisibleWordsCentredInside: 0 })).toBe(40);
     // Visible and invisible add up (an OCR layer over a scan counts its invisible words, as the walker's boxes do).
     const ocr = layoutOf(page({
       item: { bbox: [36, 300, 300, 600], px: [264, 300], dpi: [72, 72], visibleWordsCentredInside: 2, invisibleWordsCentredInside: 5 },
       extra: { text: { ...(base.text as object), wordCount: 415, invisibleWordCount: 5, invisibleCharCount: 30, charCount: 2430, textLayer: "mixed" } },
     })).images![0]!.wordsInside;
     expect(ocr).toBe(7);
-    // Without the centred pair, #378's whole-box rule (here: unknown, text centres over the image).
-    expect(at({ visibleWordsInside: 0, invisibleWordsInside: 0 })).toBeNull();
+    // Without the centred pair, the whole-box pair: above the threshold it stands.
+    expect(at({ visibleWordsInside: 5, invisibleWordsInside: 0 })).toBe(5);
     const truncated = textPage(1, { images: { ...baseImages, itemsTruncated: true, items: [{ ...baseItem, visibleWordsCentredInside: 0, invisibleWordsCentredInside: 0 }] } });
     expect(layoutOf(truncated).images).toBeNull();
     // Fewer items than images: the list is unknown too.
@@ -233,10 +230,10 @@ describe("doppler #44 facts: the walker-grid contract", () => {
   });
 
   it("facts of a -glyphs run (pdftomarkdown --math) lose the walker-parity fields and map as an older build", () => {
-    const line = page({ vectors: { grids: [WALKER] }, item: { bbox: [36, 300, 300, 600], px: [264, 300], dpi: [72, 72], visibleWordsInside: 0, invisibleWordsInside: 0, visibleWordsCentredInside: 1, invisibleWordsCentredInside: 0 }, extra: { text: { ...(base.text as object), textOverImageRatio: 0.2 } } });
+    const line = page({ vectors: { grids: [WALKER] }, item: { bbox: [36, 300, 300, 600], px: [264, 300], dpi: [72, 72], visibleWordsInside: 0, invisibleWordsInside: 0, visibleWordsCentredInside: 4, invisibleWordsCentredInside: 0 }, extra: { text: { ...(base.text as object), textOverImageRatio: 0.2 } } });
     const facts = one(line);
     expect(pageLayoutFactsFromDopplerFacts(facts).get(1)!.grids).toHaveLength(1);
-    expect(pageLayoutFactsFromDopplerFacts(facts).get(1)!.images![0]!.wordsInside).toBe(1);
+    expect(pageLayoutFactsFromDopplerFacts(facts).get(1)!.images![0]!.wordsInside).toBe(4);
     const stripped = withoutWalkerParityFacts(facts);
     expect(facts.pages.get(1)!.vectors!.unlistedRuledGrids).toBe(0); // the input is not changed
     const mapped = pageLayoutFactsFromDopplerFacts(stripped).get(1)!;
@@ -460,18 +457,22 @@ describe("decision parity: #44 facts route like the walker, ruled tables include
       expect(mapped.get(i + 1)!.grids?.map((g) => [g.rows, g.columns]), t.name).toEqual(walker.get(i + 1)!.grids!.map((g) => [g.rows, g.columns]));
       // Table coverage is known only without walker grids (0); with them it is unknown (Doppler's boxes are not the walker's).
       expect(mapped.get(i + 1)!.tableCoverage, t.name).toBe(t.walker.length === 0 ? 0 : null);
-      expect(mapped.get(i + 1)!.images?.map((im) => im.wordsInside), t.name).toEqual(walker.get(i + 1)!.images!.map((im) => im.wordsInside));
+      // Words inside: the walker's count where it is above the mixed-scan threshold, else unknown.
+      expect(mapped.get(i + 1)!.images?.map((im) => im.wordsInside), t.name).toEqual(walker.get(i + 1)!.images!.map((im) => im.wordsInside! > 2 ? im.wordsInside : null));
     });
     const fromFacts = decisions(mapped, factsEvidence, TRUTH);
     // Coverage-only table pages: the walker's grids cover 40% of the page with fewer than 5 rows each. Facts miss them.
     const coverageOnly = new Set(["large two-row grid (coverage)", "two ruled tables, neither heavy alone"]);
-    const same = (list: typeof fromFacts) => list.filter((d) => !coverageOnly.has(d.page));
+    // Mixed-scan reads: facts leave low words-inside counts unknown (council #382 M2), so they miss them.
+    const mixedScan = new Set(["mixed scan: bilevel figure beside text", "mixed scan: low-bpp DCT scan beside text", "scan with one word over it"]);
+    const same = (list: typeof fromFacts) => list.filter((d) => !coverageOnly.has(d.page) && !mixedScan.has(d.page));
     expect(same(fromFacts)).toEqual(same(fromWalker));
     fromFacts.forEach((d, i) => {
       if (d.route === "table-heavy") expect(fromWalker[i]!.route, d.page).toBe("table-heavy");
       if (d.ocr?.authorized) expect(fromWalker[i]!.ocr?.authorized, d.page).toBe(true);
     });
     for (const name of coverageOnly) expect(fromFacts.find((d) => d.page === name)!.route, name).not.toBe("table-heavy");
+    for (const name of mixedScan) expect(fromFacts.find((d) => d.page === name)!.ocr?.authorized ?? false, name).toBe(false);
 
     // The comparison is not vacuous: the decisions the new fields feed fire both ways.
     const byName = Object.fromEntries(fromWalker.map((d) => [d.page, d]));

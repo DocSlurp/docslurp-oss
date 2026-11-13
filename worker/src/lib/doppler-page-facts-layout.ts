@@ -13,11 +13,9 @@
  *   `bitsPerComponent`, `dpi` → `ppi` (non-positive → null), `filter` → `encoding` and `colorSpace` in the walker's
  *   `pdfimages -list` vocabulary, `repeated` from `obj` across the pages given (the walker's furniture rule).
  *   `wordsInside` ← `visibleWordsCentredInside` + `invisibleWordsCentredInside` (Doppler #44: words whose box centre is
- *   inside, the walker's own test) when that pair is present; a count at most `mixedScanMaxWordsInside` stands only for an
- *   image whose box is its whole placement (`unclippedPlacement`), since Doppler's box is clipped. Without it (an older build), from the whole-box pair
- *   `visibleWordsInside` + `invisibleWordsInside`, null when that pair is absent; a whole-box count of at most
- *   `mixedScanMaxWordsInside` stands only when the page's centre-based `textOverImageRatio` is 0 and the image's grid cells
- *   cover its whole box (`wholeBoxWordsInside`), so it is never lower than the walker's.
+ *   inside, the walker's own test), else an older build's whole-box `visibleWordsInside` + `invisibleWordsInside`, only
+ *   when above `mixedScanMaxWordsInside`; a lower count, or none, is null. Doppler's box is clipped (and a rotated image
+ *   clipped to its own size looks unclipped), so a low count can be below the walker's: facts never select a mixed-scan read.
  *   `coverage` is capped by the image's own box over the page. `bytesPerPixel` ← `bytesPerPixel`
  *   one to one, null when absent (never 0). Both are routing hints from what the file says: never a billing input.
  *   Null (unknown) when the list was not computed, is truncated, or holds fewer items than `imageCount`.
@@ -62,8 +60,6 @@ const GRID_MIN_H = 2;
 const GRID_MIN_V = 3;
 /** The walker's minimum grid in columns (3 distinct verticals). */
 const GRID_MIN_COLUMNS = 2;
-/** Doppler's coverage grid (64 x 64 cells a page) for `textOverImageRatio`. */
-const COVERAGE_GRID = 64;
 
 /** Image objects drawn on enough of the `considered` pages to be page furniture (the walker's and the probe's rule). */
 export function repeatedDopplerImageObjects(pages: Iterable<DopplerPageFacts>, considered: number): Set<number> {
@@ -96,7 +92,7 @@ function layoutImages(page: DopplerPageFacts, repeated: Set<number>): PageLayout
     ppi: [item.dpi[0] > 0 ? item.dpi[0] : null, item.dpi[1] > 0 ? item.dpi[1] : null],
     bytesPerPixel: item.bytesPerPixel ?? null,
     repeated: item.obj !== undefined && repeated.has(item.obj),
-    wordsInside: wordsInside(page, item),
+    wordsInside: wordsInside(item),
   }));
 }
 
@@ -113,70 +109,22 @@ function boxCappedCoverage(coverage: number, bbox: Box, extent: [number, number]
 }
 
 /**
- * An image's words inside as the walker would count them, or null. Doppler counts a word inside only when its whole box is
- * (within 1 pt); the walker when its centre is, so a word straddling the edge (a label overrunning a figure) counts for
- * the walker only and a facts count can be lower. Only a low count matters: `mixedScanImage` reads an image with at most
- * `mixedScanMaxWordsInside` words inside. So a count above that stands (the walker's is at least as high). A count at or
- * below it stands only when no word's centre can be inside the image uncounted: the page's `text.textOverImageRatio` (characters
- * whose centre is in a cell of the image's 64 x 64 grid, a cell being the image's when its centre is inside the box) is 0,
- * and the image's marked cells cover its whole box (`gridCoversBox`), so no strip inside an edge escapes the ratio.
- * Otherwise (or without the ratio, the pair or a page extent) the count is unknown: stricter than the walker, never looser.
+ * An image's words inside as the walker would count them, or null. Only a low count authorizes anything:
+ * `mixedScanImage` reads an image with at most `mixedScanMaxWordsInside` words inside. Facts can count fewer words than the
+ * walker: Doppler's box is the part of the image inside its clip and the page, axis-aligned, where the walker counts word
+ * centres inside the whole placement's box; a rotated or skewed image clipped to its own size looks unclipped in the facts,
+ * and an older build counts only words wholly inside. So a count above the threshold stands (the walker's is at least as
+ * high: it only blocks a read), and a count at or below it is unknown: facts never select a mixed-scan read. Doppler #44's
+ * centred counts (`visibleWordsCentredInside` + `invisibleWordsCentredInside`, the walker's own test) are read first,
+ * then an older build's whole-box pair.
  */
-function wordsInside(page: DopplerPageFacts, item: DopplerImageItem): number | null {
-  // Doppler #44: words whose centre is inside, the walker's own test (within the 1 pt slack the contract states).
-  if (item.visibleWordsCentredInside !== undefined && item.invisibleWordsCentredInside !== undefined) {
-    const count = item.visibleWordsCentredInside + item.invisibleWordsCentredInside;
-    // Doppler's box is the part inside the clip and the page; the walker's is the whole placement, so a clipped image can
-    // count fewer words here. A count above the mixed-scan threshold only blocks a read and stands; a lower one only for
-    // an image whose box is its whole placement.
-    return count > PAGE_RASTER_ROUTING.mixedScanMaxWordsInside || unclippedPlacement(item) ? count : null;
-  }
-  return wholeBoxWordsInside(page, item);
-}
-
-/** Slack between an image's box and the size its pixels and resolution give (the box is written to 0.01 pt). */
-const PLACEMENT_SLACK_PT = 1;
-
-/**
- * Whether an image's box is its whole placement: an axis-aligned placement (either way round) whose box is as large as its
- * samples over its resolution (`dpi`, along the image's own axes) make it. A clip or the page edge cutting the image, a
- * skew, or an unknown resolution all fail: the box may then be smaller than the placement the walker measures.
- */
-export function unclippedPlacement(item: Pick<DopplerImageItem, "bbox" | "px" | "dpi">): boolean {
-  const [dx, dy] = item.dpi;
-  if (!(dx > 0 && dy > 0)) return false;
-  const w = item.px[0] / dx * 72, h = item.px[1] / dy * 72;
-  const bw = item.bbox[2] - item.bbox[0], bh = item.bbox[3] - item.bbox[1];
-  const near = (a: number, b: number) => Math.abs(a - b) <= PLACEMENT_SLACK_PT;
-  return (near(bw, w) && near(bh, h)) || (near(bw, h) && near(bh, w));
-}
-
-/** An older build's whole-box count as the walker's centre count, or null (see `wordsInside` in the header). */
-function wholeBoxWordsInside(page: DopplerPageFacts, item: DopplerImageItem): number | null {
-  if (item.visibleWordsInside === undefined || item.invisibleWordsInside === undefined) return null;
-  const count = item.visibleWordsInside + item.invisibleWordsInside;
-  if (count > PAGE_RASTER_ROUTING.mixedScanMaxWordsInside) return count;
-  const extent = dopplerPageExtent(page.geometry);
-  // The ratio and its cells are measured over the clipped box too: a clipped image can hide words the walker counts.
-  return page.text?.textOverImageRatio === 0 && extent !== null && gridCoversBox(item.bbox, extent) && unclippedPlacement(item) ? count : null;
-}
-
-/**
- * Whether the cells of a 64 x 64 grid over a `w` x `h` page whose centres lie strictly inside `box` cover the whole box
- * (clipped to the page): each edge must lie at or before the centre of the cell it falls in, on the inside. A centre on the
- * edge is taken as outside, the stricter reading.
- */
-export function gridCoversBox(box: Box, [w, h]: [number, number]): boolean {
-  if (!(w > 0 && h > 0)) return false;
-  const axis = (lo: number, hi: number, side: number): boolean => {
-    const cell = side / COVERAGE_GRID;
-    const a = Math.max(0, lo), b = Math.min(side, hi);
-    if (!(b > a)) return false;
-    const first = Math.floor(a / cell - 0.5) + 1;  // the first cell whose centre is > a
-    const last = Math.ceil(b / cell - 0.5) - 1;    // the last cell whose centre is < b
-    return last >= first && first * cell <= a && (last + 1) * cell >= b;
-  };
-  return axis(box[0], box[2], w) && axis(box[1], box[3], h);
+function wordsInside(item: DopplerImageItem): number | null {
+  const centred = item.visibleWordsCentredInside !== undefined && item.invisibleWordsCentredInside !== undefined
+    ? item.visibleWordsCentredInside + item.invisibleWordsCentredInside : undefined;
+  const whole = item.visibleWordsInside !== undefined && item.invisibleWordsInside !== undefined
+    ? item.visibleWordsInside + item.invisibleWordsInside : undefined;
+  const count = centred ?? whole;
+  return count !== undefined && count > PAGE_RASTER_ROUTING.mixedScanMaxWordsInside ? count : null;
 }
 
 /**
