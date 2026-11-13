@@ -13,6 +13,7 @@ import {
   DURABLE_REDIS_CHAT_SLOT_PREFIX,
   resetChatConcurrency,
   resolveChatSlotBackendConfig,
+  verifySlotEvictionPolicy,
   type ChatSlotBackend,
 } from "../middleware/chat-concurrency.js";
 
@@ -195,5 +196,27 @@ describe("chat slot backend at startup", () => {
   it("keeps the per-process fallback outside production", () => {
     expect(assertChatConcurrencyBackend({ NODE_ENV: "development" }, { warn: vi.fn() })).toBe("local");
     expect(assertChatConcurrencyBackend({ NODE_ENV: "test", UPSTASH_REDIS_REST_URL: "https://rest.example.com" }, { warn: vi.fn() })).toBe("local");
+  });
+});
+
+describe("chat-slot Redis eviction policy", () => {
+  const reader = (config: string | null | Error, info: string | null | Error = null) => ({
+    configGet: async () => { if (config instanceof Error) throw config; return config; },
+    infoMemory: async () => { if (info instanceof Error) throw info; return info; },
+  });
+  beforeEach(() => { vi.spyOn(console, "error").mockImplementation(() => {}); });
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  it("accepts noeviction from CONFIG GET or, when CONFIG is refused, from INFO memory", async () => {
+    await expect(verifySlotEvictionPolicy(reader("noeviction"), true)).resolves.toBeUndefined();
+    await expect(verifySlotEvictionPolicy(reader(new Error("unknown command 'CONFIG'"), "# Memory\r\nmaxmemory_policy:noeviction\r\n"), true)).resolves.toBeUndefined();
+  });
+
+  it("refuses an evicting or unverifiable store in production, and only logs elsewhere", async () => {
+    await expect(verifySlotEvictionPolicy(reader("allkeys-lru"), true)).rejects.toThrow(/maxmemory-policy=allkeys-lru/);
+    await expect(verifySlotEvictionPolicy(reader("volatile-ttl"), true)).rejects.toThrow(/noeviction is required/);
+    await expect(verifySlotEvictionPolicy(reader(new Error("denied"), new Error("denied")), true)).rejects.toThrow(/unverifiable/);
+    await expect(verifySlotEvictionPolicy(reader("allkeys-lru"), false)).resolves.toBeUndefined();
+    expect(console.error).toHaveBeenCalledWith(expect.stringContaining("reason=redis-eviction-policy"));
   });
 });

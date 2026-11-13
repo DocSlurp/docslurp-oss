@@ -120,12 +120,21 @@ export function createProjectChatExecutor(manager:BackgroundTaskManager,pubsub:P
       // Authorization is re-read for every append, immediately before it is
       // published: a session or project access revoked since the last check
       // (the timer's or an earlier append's) publishes nothing more. A refusal
-      // rejects the append, which aborts the turn.
+      // rejects the append, which aborts the turn. Session revocation is also
+      // fenced inside the publish transaction below; a membership or share
+      // removed in the milliseconds between this check and that commit can still
+      // let this one append through (operation reads re-authorize the reader).
       await check();
       // Recheck under the cancellation lock after the reservation commits.
       // Reservations are conservative and never refunded on uncertain output.
       await sql.begin(async tx=>{
         await lockAndFence(tx);
+        // Revocation fence: share-lock the session row, then re-validate it in this
+        // transaction. A sign-out or session revocation (a delete or update of that
+        // row) either committed first, and is seen here, or waits for this publish to
+        // commit; none can slip between the check and the publish.
+        const [held]=await tx`select id from session where id=${actor.sessionId} and "userId"=${actor.userId} for share`;
+        if(!held||!await revalidateRealtimeSession(actor,signal,tx))throw new Error("session_revoked");
         publicationAttempted=true;
         await publishOperationOutput(pubsub,task.id,{kind,payload});
         if(kind==="tool")tools.push(payload);

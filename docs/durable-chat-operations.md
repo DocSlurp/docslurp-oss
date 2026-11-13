@@ -68,8 +68,12 @@ per 250 ms (`DOCSLURP_CHAT_OUTPUT_FLUSH_MS`, 10 to 2000) or 16 KiB of text, and
 always before a tool, evidence or result event, so event order is unchanged.
 Buffered text is dropped, never published, once the turn is cancelled or aborted.
 Session, MFA and project access are re-read immediately before every append is
-published, so nothing is published after a revocation, and every two seconds
-while the turn is idle, so revoked work that publishes nothing still stops. An interrupted provider execution is not silently restarted.
+published, and every two seconds while the turn is idle, so revoked work that
+publishes nothing still stops. The session is also re-read inside the publish
+transaction under a share lock on its row, so nothing is published after a
+sign-out or session revocation commits. A membership or project share removed
+in the few milliseconds between the pre-publish check and that commit can still
+let one append through; readers of the operation are authorized separately. An interrupted provider execution is not silently restarted.
 
 Each user may have eight active roots, including roots with active descendants
 or shared Temporal dependencies after the answer completes. Trees have at most

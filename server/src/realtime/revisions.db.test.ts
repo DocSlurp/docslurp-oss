@@ -154,7 +154,7 @@ describe("commit-visible realtime coverage", () => {
     expect(await moved(`update document_chunks set run_id='bulk-run-a' where run_id='bulk-run-reindex'`))
       .toEqual({ org: 1, "project:bulk-project-a": 1, "run:bulk-run-a": 1, "run:bulk-run-reindex": 1 });
     // Several statements in one transaction still move each scope once, and a rollback moves nothing.
-    const before = { org: await revision(), ...(await scopes()) };
+    const before: Record<string, number> = { org: await revision(), ...(await scopes()) };
     await db.transaction(async (tx) => {
       for (let i = 0; i < 5; i++) await tx.exec(`update document_chunks set token_estimate=${10 + i} where document_id='bulk-doc-b'`);
     });

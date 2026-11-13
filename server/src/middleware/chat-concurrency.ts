@@ -139,6 +139,28 @@ const createSlotRedisClient = (url: string) => createClient({ url, disableOfflin
   socket: { connectTimeout: REDIS_TIMEOUT_MS, reconnectStrategy: (retries: number) => Math.min(1_000 * 2 ** retries, 30_000) } });
 type SlotRedisClient = ReturnType<typeof createSlotRedisClient>;
 
+/**
+ * Leases are only as durable as the store: a Redis that evicts keys under memory
+ * pressure can drop a live counter and admit turns beyond the cap. Read
+ * maxmemory-policy (CONFIG GET, else INFO memory, which managed Redis usually
+ * allows) and accept only noeviction. In production an unverifiable or evicting
+ * store is refused (fail closed: capped turns get 503); elsewhere it is logged.
+ */
+export async function verifySlotEvictionPolicy(
+  read: { configGet(): Promise<string | null>; infoMemory(): Promise<string | null> },
+  production = process.env.NODE_ENV === "production",
+): Promise<void> {
+  let policy = await read.configGet().catch(() => null);
+  if (!policy) {
+    const info = await read.infoMemory().catch(() => null);
+    policy = info?.match(/^maxmemory_policy:(\S+)/m)?.[1] ?? null;
+  }
+  if (policy === "noeviction") return;
+  const reason = policy ? `maxmemory-policy=${policy}` : "maxmemory-policy unverifiable";
+  console.error(`[chat-concurrency] status=refused reason=redis-eviction-policy ${reason}: chat-slot leases need noeviction`);
+  if (production) throw new Error(`chat-slot Redis ${reason}; noeviction is required`);
+}
+
 /** A node-redis backend. `keyPrefix` defaults to the limiter's (`<API_RATE_LIMIT_KEY_PREFIX>:chat-inflight`). */
 export function createRedisChatSlotBackend(url: string, keyPrefix?: string): ChatSlotBackend {
   let client: SlotRedisClient | null = null;
@@ -154,6 +176,10 @@ export function createRedisChatSlotBackend(url: string, keyPrefix?: string): Cha
       });
       try {
         await next.connect();
+        await verifySlotEvictionPolicy({
+          configGet: async () => (await next.configGet("maxmemory-policy"))["maxmemory-policy"] ?? null,
+          infoMemory: async () => await next.info("memory"),
+        });
       } catch (error) {
         next.destroy();
         throw error;
