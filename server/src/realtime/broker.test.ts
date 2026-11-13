@@ -91,3 +91,90 @@ it("revokes a subscription whose access changed even when its own data did not",
   expect(project).toHaveBeenCalledTimes(1);
   close(); await broker.close();
 });
+it("projects a new subscription's first snapshot without waiting for the interval", async () => {
+  const project = vi.fn(async () => ({ runs: [] }));
+  const backend: RealtimeBackend = { authorize: async () => "org", project,
+    revisions: async () => new Map([["org", "1"]]), listen: async () => async () => {} };
+  // An interval this long never fires in the test: only the subscribe-time sweep can deliver.
+  const broker = new RealtimeBroker(backend, 60_000);
+  const received: unknown[] = [];
+  const close = await broker.subscribe("user", resource, async data => { received.push(data); });
+  await vi.waitFor(() => expect(received).toEqual([{ runs: [] }]), { timeout: 1_000 });
+  expect(project).toHaveBeenCalledTimes(1);
+  close(); await broker.close();
+});
+it("sweeps again for a subscription that arrives during a running sweep", async () => {
+  let release!: (value: unknown) => void;
+  const project = vi.fn()
+    .mockImplementationOnce(() => new Promise(done => { release = done; }))
+    .mockResolvedValue({ runs: [] });
+  const backend: RealtimeBackend = { authorize: async () => "org", project,
+    revisions: async () => new Map([["org", "1"]]), listen: async () => async () => {} };
+  const broker = new RealtimeBroker(backend, 60_000);
+  const first: unknown[] = [], second: unknown[] = [];
+  const closeFirst = await broker.subscribe("a", resource, async data => { first.push(data); });
+  await vi.waitFor(() => expect(project).toHaveBeenCalledTimes(1));
+  // The first sweep is still projecting for "a" when "b" subscribes.
+  const closeSecond = await broker.subscribe("b", resource, async data => { second.push(data); });
+  release({ runs: [] });
+  await vi.waitFor(() => expect(second).toEqual([{ runs: [] }]), { timeout: 1_000 });
+  expect(first).toEqual([{ runs: [] }]);
+  closeFirst(); closeSecond(); await broker.close();
+});
+it("authorizes in the subscribe-time sweep before projecting", async () => {
+  // Admitted at subscribe, access gone by the time the sweep runs: nothing may be projected.
+  const authorize = vi.fn().mockResolvedValueOnce("org").mockResolvedValue(null);
+  const project = vi.fn(async () => ({ runs: [] }));
+  const backend: RealtimeBackend = { authorize, project,
+    revisions: async () => new Map([["org", "1"]]), listen: async () => async () => {} };
+  const broker = new RealtimeBroker(backend, 60_000);
+  const revoked = vi.fn();
+  const received: unknown[] = [];
+  const close = await broker.subscribe("user", resource, Object.assign(async (data: unknown) => { received.push(data); }, { revoked }));
+  await vi.waitFor(() => expect(revoked).toHaveBeenCalledTimes(1), { timeout: 1_000 });
+  expect(project).not.toHaveBeenCalled();
+  expect(received).toEqual([]);
+  close(); await broker.close();
+});
+it("does not sweep after close", async () => {
+  const revisions = vi.fn(async () => new Map([["org", "1"]]));
+  const backend: RealtimeBackend = { authorize: async () => "org", project: async () => ({}), revisions, listen: async () => async () => {} };
+  const broker = new RealtimeBroker(backend, 60_000);
+  await broker.subscribe("user", resource, async () => {});
+  await broker.close();
+  await new Promise(done => setTimeout(done, 50));
+  expect(revisions).not.toHaveBeenCalled();
+});
+it("a subscribe never re-projects or re-authorizes entries that already have a snapshot", async () => {
+  // Another tenant's entry whose revision keeps moving: only the interval sweep may serve it.
+  let revision = 1;
+  const authorize = vi.fn(async (userId: string) => userId === "victim" ? "org-b" : "org-a");
+  const project = vi.fn(async (userId: string) => ({ userId }));
+  const revisions = vi.fn(async (orgIds: string[]) => new Map(orgIds.map(id => [id, String(revision)])));
+  const backend: RealtimeBackend = { authorize, project, revisions, listen: async () => async () => {} };
+  const broker = new RealtimeBroker(backend, 60_000);
+  const victim: unknown[] = [];
+  const closeVictim = await broker.subscribe("victim", { kind: "activity", orgId: "org-b" }, async data => { victim.push(data); });
+  await vi.waitFor(() => expect(victim).toHaveLength(1), { timeout: 1_000 });
+  const calls = () => ({ project: project.mock.calls.filter(([userId]) => userId === "victim").length,
+    authorize: authorize.mock.calls.filter(([userId]) => userId === "victim").length,
+    revisions: revisions.mock.calls.filter(([orgIds]) => orgIds.includes("org-b")).length });
+  const before = calls();
+  const closes: Array<() => void> = [];
+  for (let i = 0; i < 20; i++) {
+    revision++;
+    const received: unknown[] = [];
+    closes.push(await broker.subscribe(`attacker-${i}`, { kind: "activity", orgId: "org-a" }, async data => { received.push(data); }));
+    await vi.waitFor(() => expect(received).toHaveLength(1), { timeout: 1_000 });
+    // A second observer on an entry that already has a snapshot waits for the interval as well.
+    closes.push(await broker.subscribe(`attacker-${i}`, { kind: "activity", orgId: "org-a" }, async () => {}));
+  }
+  await new Promise(done => setTimeout(done, 50));
+  expect(calls()).toEqual(before);
+  expect(victim).toHaveLength(1);
+  expect(project).toHaveBeenCalledTimes(21);
+  // The interval sweep still converges the victim on the moved revision.
+  await broker.tick();
+  expect(victim).toHaveLength(2);
+  closeVictim(); closes.forEach(close => close()); await broker.close();
+});
