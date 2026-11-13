@@ -1,12 +1,12 @@
 import { createHash } from "node:crypto";
-import { countDeferredPdfPages, firstPassServesDocument, primeFirstPassResults } from "../pipeline/first-pass.js";
+import { committedDocumentUris, countDeferredPdfPages, firstPassServesDocument, primeFirstPassResults } from "../pipeline/first-pass.js";
 import { reserveOrientationAttempt } from "../lib/image-orientation.js";
 import { EMBEDDED_IMAGE_TARGETS, embeddedImageGraph, resolveEmbeddedImageRequest } from "../extractors/embedded-images.js";
 import { anchorImageMarkdownFile } from "../extractors/image-markdown.js";
 import { DopplerFigureRejection, DopplerFigureStoreError, disposeDopplerFigureSet, dopplerSourcePointer, readDopplerFigureDir, storeDopplerFigures } from "../extractors/doppler-figures.js";
 import { figureLedgerHooks, ledgerWriteForFailedFigures, ledgerWriteForNoFigures, ledgerWriteForStoredFigures, queueAssetLedger } from "../db/document-asset-ledger.js";
 import {
-  SANDBOXED_PDF_MAX_MARKDOWN_BYTES, VM_PDF_EXTRACTOR_ID, firstPassServedFigures, requireSandboxedPdfProvider, sandboxedPdfFigures, sandboxedPdfProvider, sandboxedPdfLayoutFacts, sandboxedPdfOcrPages,
+  SANDBOXED_PDF_MAX_MARKDOWN_BYTES, VM_PDF_EXTRACTOR_ID, firstPassServedFigures, requireSandboxedPdfProvider, sandboxedPdfFigures, sandboxedPdfSalvagedFigures, sandboxedPdfProvider, sandboxedPdfLayoutFacts, sandboxedPdfOcrPages,
 } from "../extractors/plugins.js";
 import { buildSummaryEvidence } from "./summary-evidence.js";
 import type { CapacityLeaseStore } from "../media/capacity/types.js";
@@ -60,7 +60,7 @@ import {
 } from "../pipeline/checkpoints.js";
 import { healthyDocuments } from "../pipeline/document-health.js";
 import { buildCanonicalDocumentFromMarkdown } from "../lib/canonical-document.js";
-import { dopplerImageLimits, projectFiguresEnabled, type CanonicalDocument } from "@docslurp/shared";
+import { dopplerImageLimits, figuresEnabled, type CanonicalDocument } from "@docslurp/shared";
 import { enrichCanonicalDocumentWithPptx, enrichCanonicalDocumentWithXlsx } from "../lib/office-structure.js";
 import {
   enrichCanonicalDocumentWithBestParser,
@@ -388,7 +388,7 @@ export class ExtractMarkdownStage implements Stage {
             this.name,
             artifactSlot,
             "markdown extraction ready",
-            async (retryStrategy) => this.withImagesLevel(state, document, await (async () => {
+            async (retryStrategy) => this.withImagesLevel(state, document, async () => {
               // Fails this document, never the run, and before anything reads the source.
               if (hostPdf.length > 0) {
                 throw new Error(`extractor ${hostPdf.map((entry) => `${entry.id} (${entry.path.join(".")})`).join(", ")} refused for pdf: this deployment runs PDFs only in ${VM_PDF_EXTRACTOR_ID}`);
@@ -530,7 +530,7 @@ export class ExtractMarkdownStage implements Stage {
                 }
                 // Doppler figures (DOCSLURP_DOPPLER_IMAGE_EXTRACT): from the same VM job, into an empty host folder per candidate.
                 // A first-pass document's figures come from its batch and are stored by the first pass itself.
-                if (isPdf && projectFiguresEnabled(state.run.pipeline) && sandboxedPdfProvider()?.figures && !firstPassServesDocument(state.run.id, document.id)) {
+                if (isPdf && figuresEnabled(state.run.pipeline as { figures?: boolean | null }, process.env) && sandboxedPdfProvider()?.figures && !firstPassServesDocument(state.run.id, document.id)) {
                   // One winning candidate per run: figures are stored early only when a single VM candidate can produce
                   // them; with two, the winner's are stored once it is known, so a loser never writes rows or objects.
                   const vmCandidates = [isolated.primary.extractor, isolated.secondary?.extractor].filter((prepared) => !!prepared?.plan.sandboxedPdf).length;
@@ -1303,7 +1303,7 @@ export class ExtractMarkdownStage implements Stage {
               } finally {
                 await Promise.all(candidateDirs.map((dir) => rm(dir, { recursive: true, force: true })));
               }
-            })()),
+            }),
             signal,
             {
               retryStrategies: this.tryResolveExtractorOrder(format, extractionConfig.order).slice(1),
@@ -2001,7 +2001,14 @@ export class ExtractMarkdownStage implements Stage {
     signal?: AbortSignal,
     documentId?: string,
   ): Promise<ExtractedCandidate> {
-    await this.runner.run(plan, signal);
+    try {
+      await this.runner.run(plan, signal);
+    } catch (error) {
+      // The job failed, but the provider may have salvaged the shards that finished (`error.figures`, #464): stored now,
+      // idempotently (conditional creates, pending → stored), so a retry or a resume restarts from them. Then rethrown.
+      await this.storeSalvagedFigures(plan, label, textKey, outputPath, signal);
+      throw error;
+    }
     // Provider output is untrusted: a regular file of bounded size, checked before anything reads it.
     if (plan.sandboxedPdf) await assertSandboxedPdfMarkdownBounded(outputPath);
     // Figures first: stored (pending, then stored, per step) and recorded in the ledger before anything else can fail.
@@ -2015,6 +2022,7 @@ export class ExtractMarkdownStage implements Stage {
           candidate: { label, plan, textKey, textUri: this.storage.uri(textKey), tempTextPath: outputPath, figures: { dir: plan.sandboxedPdf.figures.dir, outcome } } as ExtractedCandidate,
           markdown: await readFile(outputPath, "utf8"), signal: earlyContext.signal,
           ledger: figureLedgerHooks(earlyContext.state, earlyContext.document.id),
+          committedUris: committedDocumentUris(earlyContext.state, earlyContext.document.id),
         });
         this.earlyFigures.set(plan.sandboxedPdf, early);
       }
@@ -3014,11 +3022,23 @@ export class ExtractMarkdownStage implements Stage {
   /** Documents whose figures (and ledger) the first pass owns in this attempt: a served placeholder. */
   private readonly firstPassLedger = new Set<string>();
 
-  private withImagesLevel<T>(state: import("../pipeline/pipeline.js").WorkflowState, document: import("../models.js").Document, result: T): T {
-    if (this.firstPassLedger.delete(`${state.run.id}\u0000${document.id}`)) return result;
+  private async withImagesLevel<T>(state: import("../pipeline/pipeline.js").WorkflowState, document: import("../models.js").Document, attempt: () => Promise<T>): Promise<T> {
+    // The mark is per attempt: one left by an attempt that threw must not make a later attempt skip its own level.
+    const key = `${state.run.id}\u0000${document.id}`;
+    this.firstPassLedger.delete(key);
+    let result: T;
+    try {
+      result = await attempt();
+    } catch (error) {
+      this.firstPassLedger.delete(key);
+      throw error;
+    }
+    if (this.firstPassLedger.delete(key)) return result;
     if (state.pendingAssetLedger.has(document.id)) return result;
-    // Off for the deployment or opted out by the project: `disabled` (off the resume queue, no figure storage).
-    const figuresOn = projectFiguresEnabled(state.run.pipeline) && !!sandboxedPdfProvider()?.figures;
+    // Figures for this run: the deploy flag, the provider, and the project not opted out (`figures: false`). A project
+    // that opted out gets `disabled` for every document, first-pass ones included (the batch asked for no figures), so
+    // an earlier resumable level leaves the resume queue and no new figure storage accrues.
+    const figuresOn = figuresEnabled(state.run.pipeline as { figures?: boolean | null }, process.env) && !!sandboxedPdfProvider()?.figures;
     if (figuresOn && firstPassServesDocument(state.run.id, document.id)) return result;
     queueAssetLedger(state, document.id, ledgerWriteForNoFigures(figuresOn ? "none" : "disabled"));
     return result;
@@ -3039,7 +3059,7 @@ export class ExtractMarkdownStage implements Stage {
     const early = job ? this.earlyFigures.get(job) : undefined;
     if (job) this.earlyFigures.delete(job);
     const result = early ?? await this.storeWinningDopplerFiguresOnly({
-      ...args, ...(args.state ? { ledger: figureLedgerHooks(args.state, args.document.id) } : {}),
+      ...args, ...(args.state ? { ledger: figureLedgerHooks(args.state, args.document.id), committedUris: committedDocumentUris(args.state, args.document.id) } : {}),
     });
     const outcome = args.candidate.figures!.outcome;
     if (!args.state) return result.figures;
@@ -3053,12 +3073,36 @@ export class ExtractMarkdownStage implements Stage {
   }
 
   /** The first VM candidate's job, until it returns: its figures are stored right then. */
+  /** A failed VM job's salvaged figures (sandboxedPdfSalvagedFigures), stored like an early store; never throws. */
+  private async storeSalvagedFigures(plan: CommandPlan, label: string, textKey: string, outputPath: string, signal?: AbortSignal): Promise<void> {
+    const job = plan.sandboxedPdf;
+    if (!job?.figures) return;
+    const outcome = sandboxedPdfSalvagedFigures(job);
+    const context = this.earlyFigureContext.get(job);
+    // Only where the figures would have been stored early (one VM candidate): a losing candidate never writes rows.
+    if (!outcome || !context || signal?.aborted) return;
+    this.earlyFigureContext.delete(job);
+    try {
+      const salvaged = await this.storeWinningDopplerFiguresOnly({
+        document: context.document, runId: context.state.run.id,
+        candidate: { label, plan, textKey, textUri: this.storage.uri(textKey), tempTextPath: outputPath, figures: { dir: job.figures.dir, outcome } } as ExtractedCandidate,
+        markdown: "", signal: context.signal,
+        ledger: figureLedgerHooks(context.state, context.document.id),
+        committedUris: committedDocumentUris(context.state, context.document.id),
+      });
+      console.log(`[doppler-figures] salvaged doc=${context.document.id} files=${String(salvaged.figures.stats.files ?? 0)}`);
+    } catch (error) {
+      console.warn(`[doppler-figures] salvage-not-stored doc=${context.document.id} error=${error instanceof Error ? error.name : typeof error}`);
+    }
+  }
+
   private readonly earlyFigureContext = new WeakMap<object, { document: import("../models.js").Document; state: import("../pipeline/pipeline.js").WorkflowState; signal?: AbortSignal }>();
   private readonly earlyFigures = new WeakMap<object, Awaited<ReturnType<ExtractMarkdownStage["storeWinningDopplerFiguresOnly"]>>>();
 
   private async storeWinningDopplerFiguresOnly(args: {
     document: import("../models.js").Document; runId: string; candidate: ExtractedCandidate; markdown: string; signal?: AbortSignal;
     ledger?: import("../extractors/doppler-figures.js").DopplerFigureLedgerHooks;
+    committedUris?: ReadonlySet<string>;
   }): Promise<{
     figures: { slots: Array<{ slot: string; uri: string }>; stats: Record<string, unknown> };
     stored?: { set: import("../extractors/doppler-figures.js").DopplerFigureSet; stored: Pick<import("../extractors/doppler-figures.js").StoredDopplerFigures, "manifest" | "manifests"> };
@@ -3076,7 +3120,7 @@ export class ExtractMarkdownStage implements Stage {
     try {
       validated = await readDopplerFigureDir(figures.dir, {
         pageCount: args.document.pageCount, signal: args.signal, expect: figures.outcome.status === "partial" ? "partial" : "complete",
-        sourceSha256: args.document.sourceSha256 ?? null,
+        sourceSha256: args.document.sourceSha256 ?? null, gaps: figures.outcome.gaps ?? null,
       });
     } catch (error) {
       if (args.signal?.aborted) throw error;
@@ -3087,11 +3131,14 @@ export class ExtractMarkdownStage implements Stage {
     }
     let stored;
     try {
-      // `document.md` is the candidate's output exactly as Doppler wrote it (before any sanitizing), so its links resolve.
+      // `document.md` is the winning candidate's file as this stage holds it: Doppler's output after the host's sanitizing
+      // (data URIs and front matter stripped, tables repaired) and before PII redaction. Its image links are Doppler's, so
+      // they resolve. It is recorded before the PII stage runs, so that stage withholds it when it redacts or blocks.
       stored = await storeDopplerFigures({
         storage: this.storage, document: args.document, runId: args.runId, figures: validated, markdown: args.markdown,
         dopplerMarkdownPath: args.candidate.tempTextPath, source: dopplerSourcePointer(args.document), signal: args.signal,
         ...(args.ledger ? { ledger: args.ledger } : {}),
+        ...(args.committedUris ? { committedUris: args.committedUris } : {}),
       });
     } catch (error) {
       await disposeDopplerFigureSet(validated);

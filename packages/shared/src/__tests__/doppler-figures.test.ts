@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { imageAnchorsToAltText } from "../image-anchors.js";
+import { dopplerShardsContiguous } from "../doppler-assets.js";
 import {
   DOPPLER_FIGURE_FILE_NAME, DOPPLER_FIGURE_LIMITS, DOPPLER_FIGURES_VERSION, dopplerFigureFileName, dopplerFigureManifestSchema,
   dopplerFigureUrls, dopplerImageMarkerIds, parseDopplerFigureId, parseDopplerImageMarkerLine, resolveDopplerImageMarkers,
@@ -146,5 +147,21 @@ describe("Doppler continuation comments", () => {
     expect(isDopplerContinuationLine("<!-- page 3 -->")).toBe(false);
     expect(isDopplerContinuationLine("text <!-- doppler:paragraph-continued -->")).toBe(false);
     expect(stripDopplerImageMarkers("<!-- note: doppler:x -->")).toBe("<!-- note: doppler:x -->");
+  });
+});
+
+describe("dopplerShardsContiguous: shards from page 1, holes only where a gap covers them whole", () => {
+  const g = (first: number, last: number) => ({ first, last });
+  it("accepts contiguous shards and gap-covered holes", () => {
+    expect(dopplerShardsContiguous([[1, 4], [5, 9]], null)).toBe(true);
+    expect(dopplerShardsContiguous([[1, 4], [9, 9]], [g(5, 8)])).toBe(true);
+    expect(dopplerShardsContiguous([[1, 4], [9, 9]], [g(5, 6), g(7, 8)])).toBe(true);
+    expect(dopplerShardsContiguous([[3, 4]], [g(1, 2)])).toBe(true);
+  });
+  it("refuses an uncovered or partly covered hole, and overlaps", () => {
+    expect(dopplerShardsContiguous([[2, 4]], null)).toBe(false);
+    expect(dopplerShardsContiguous([[1, 4], [9, 9]], [g(5, 7)])).toBe(false);
+    expect(dopplerShardsContiguous([[1, 4], [9, 9]], [g(5, 6), g(8, 8)])).toBe(false);
+    expect(dopplerShardsContiguous([[1, 4], [4, 9]], null)).toBe(false);
   });
 });

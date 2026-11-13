@@ -3328,7 +3328,7 @@ export const storageMeterDays = pgTable(
     objectBytes: bigint("object_bytes", { mode: "number" }).default(0).notNull(),
     // You can use { mode: "bigint" } if numbers are exceeding js number limitations
     indexBytes: bigint("index_bytes", { mode: "number" }).default(0).notNull(),
-    // Of objectBytes, the figure bytes measured from the asset ledger (migration 0142).
+    // Of objectBytes, the figure bytes measured from the asset ledger (migration 0146).
     measuredArtifactBytes: bigint("measured_artifact_bytes", { mode: "number" }).default(0).notNull(),
     credits: numeric({ precision: 24, scale: 12, mode: "number" }).default(0).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "string" })
@@ -3595,7 +3595,7 @@ export const documentAssets = pgTable("document_assets", {
   linkPath: text("link_path"),
   fileOf: text("file_of"),
   storageKey: text("storage_key"),
-  // Migration 0143: none (no file), pending (written before its upload), stored (landed and checked; served and billed).
+  // Migration 0147: none (no file), pending (written before its upload), stored (landed and checked; served and billed).
   storageState: text("storage_state").default("none").notNull(),
   objNum: integer("obj_num"),
   objGen: integer("obj_gen"),
@@ -3648,13 +3648,13 @@ export const documentExtractionLevels = pgTable("document_extraction_levels", {
   sourceDecode: integer("source_decode").default(0).notNull(),
   sourceRender: integer("source_render").default(0).notNull(),
   assetBytes: bigint("asset_bytes", { mode: "number" }).default(0).notNull(),
-  // Migration 0143: false after a re-run that skipped the figure step (rows kept, not served, counted or billed).
+  // Migration 0147: false after a re-run that skipped the figure step (rows kept, not served, counted or billed).
   assetsCurrent: boolean("assets_current").default(true).notNull(),
-  // Migration 0143: uploads a crash left pending (resumable work, adopted without a VM) and the folder files' bytes.
+  // Migration 0147: uploads a crash left pending (resumable work, adopted without a VM) and the folder files' bytes.
   assetsPending: integer("assets_pending").default(0).notNull(),
   folderBytes: bigint("folder_bytes", { mode: "number" }).default(0).notNull(),
 
-  // Migration 0144: the resume runner's queue and lease (one per document).
+  // Migration 0148: the resume runner's queue and lease (one per document).
   resumeAfter: timestamp("resume_after", { withTimezone: true, mode: "string" }),
   resumeLeaseUntil: timestamp("resume_lease_until", { withTimezone: true, mode: "string" }),
   resumeLeaseOwner: text("resume_lease_owner"),
@@ -3683,7 +3683,7 @@ export const documentExtractionLevels = pgTable("document_extraction_levels", {
   index("document_extraction_levels_run_idx").on(table.runId).where(sql`run_id IS NOT NULL`),
 ]);
 
-/** Migration 0144: resume VM time per organization per UTC day (the runner's daily budget). */
+/** Migration 0148: resume VM time per organization per UTC day (the runner's daily budget). */
 export const figureResumeOrgDays = pgTable("figure_resume_org_days", {
   orgId: text("org_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
   day: date().notNull(),
@@ -3691,7 +3691,7 @@ export const figureResumeOrgDays = pgTable("figure_resume_org_days", {
   vmMs: bigint("vm_ms", { mode: "number" }).default(0).notNull(),
 }, (table) => [primaryKey({ columns: [table.orgId, table.day], name: "figure_resume_org_days_pkey" })]);
 
-/** Migration 0144: applied figure resume proposals (single-use chat tokens). */
+/** Migration 0148: applied figure resume proposals (single-use chat tokens). */
 export const figureResumeProposalUses = pgTable("figure_resume_proposal_uses", {
   jti: text().primaryKey().notNull(),
   orgId: text("org_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),

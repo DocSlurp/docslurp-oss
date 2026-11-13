@@ -30,8 +30,9 @@ export type OrgStorage = {
   sourceBytes: number;
   pages: number;
   /**
-   * Measured bytes of stored figure files plus their index and manifest (document_extraction_levels.asset_bytes,
-   * recomputed from committed ledger rows), included in objectBytes. The per-page estimate never covered figures.
+   * document_extraction_levels.asset_bytes, included in objectBytes: the level run's stored figure files (storage_state
+   * 'stored') plus the folder files measured when stored (manifests, document.md, index.json: folder_bytes). The per-page
+   * estimate never covered figures.
    */
   measuredArtifactBytes: number;
 };

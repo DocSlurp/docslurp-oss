@@ -5,8 +5,9 @@ import { Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { acceptSandboxedPdfResult, markFirstPassServedFigures, registerExtractorPlugin, resetExtractorPluginsForTest, type SandboxedPdfResult } from "../extractors/plugins.js";
+import { acceptSandboxedPdfResult, markFirstPassServedFigures, noteSalvagedFigures, registerExtractorPlugin, resetExtractorPluginsForTest, type SandboxedPdfResult } from "../extractors/plugins.js";
 import { ExtractMarkdownStage } from "../stages/extract-markdown.js";
+import { markFirstPassDocumentForTest, resetFirstPassResultsForTest } from "../pipeline/first-pass.js";
 
 const FIXTURE = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "doppler-figures");
 const DOC_ID = "0b6f7e8c-3c1a-4f7e-9a51-2a1d3e4f5a6b";
@@ -26,7 +27,7 @@ function registerProvider(figures: boolean) {
  */
 type StorageFaults = { putBytes?: (key: string) => boolean; putJson?: (key: string) => boolean };
 
-async function runStage(vm: (job: any) => Promise<Partial<SandboxedPdfResult>>, faults: StorageFaults = {}, options: { markServed?: boolean; pipeline?: Record<string, unknown> } = {}) {
+async function runStage(vm: (job: any) => Promise<Partial<SandboxedPdfResult>>, faults: StorageFaults = {}, options: { markServed?: boolean; stage?: ExtractMarkdownStage; prepare?: (internals: any) => void; pipeline?: Record<string, unknown>; firstPass?: boolean } = {}) {
   const { defaultPipelineFeatures, defaultDocumentExtractionConfig } = await import("@docslurp/shared");
   const { WorkflowState } = await import("../pipeline/pipeline.js");
   const dir = await mkdtemp(path.join(tmpdir(), "vm-figures-stage-"));
@@ -60,22 +61,32 @@ async function runStage(vm: (job: any) => Promise<Partial<SandboxedPdfResult>>, 
     jobs.push(structuredClone(plan.sandboxedPdf));
     if (options.markServed) markFirstPassServedFigures(plan.sandboxedPdf);
     await writeFile(plan.sandboxedPdf.output, MARKDOWN);
-    const result = await vm(plan.sandboxedPdf);
+    let result: Partial<SandboxedPdfResult>;
+    try {
+      result = await vm(plan.sandboxedPdf);
+    } catch (error) {
+      // As the runner's launch does: a failed job's salvaged figures are noted, then the failure stands.
+      noteSalvagedFigures(plan.sandboxedPdf, error, 5);
+      throw error;
+    }
     acceptSandboxedPdfResult(plan.sandboxedPdf, { stdout: "", stderr: "", exitCode: 0, ...result }, 5);
     return { stdout: "", stderr: "" };
   });
   const runner = { sandboxedPdfMarkdown: async (input: string, output: string) => ({ binary: "test-vm", args: [], available: true, sandboxedPdf: { input, output } }), run };
-  const stage = new ExtractMarkdownStage(runner as any, storage as any, {} as any);
+  const stage = options.stage ?? new ExtractMarkdownStage(runner as any, storage as any, {} as any);
   const internals = stage as any;
+  if (options.stage) { internals.runner = runner; internals.storage = storage; }
   internals.sources = { get: async () => ({ path: sourcePath, sha256: "a".repeat(64) }) };
   internals.recordSourcePageFacts = async () => undefined;
   internals.recordPageImageEvidence = async () => null;
+  options.prepare?.(internals);
   const doc = { id: DOC_ID, userId: "u", runId: "r", filename: "source.pdf", mimeType: "application/pdf", sourceKey: "u/source.pdf", status: "processing", extractionMode: "hybrid", pageCount: 5, createdAt: new Date(), updatedAt: new Date() };
   const state = WorkflowState.create({ id: "r", orgId: "o", userId: "u", kind: "bulk-upload", status: "processing", stage: "extract-markdown", totalDocuments: 1, processedDocuments: 0, pagesTotal: 5, pagesProcessed: 0, spentCents: 0,
-    pipeline: { ...defaultPipelineFeatures, ...(options.pipeline ?? {}), quality: "fast", markdownExtraction: true, visionFallback: false,
-      documentExtraction: { ...defaultDocumentExtractionConfig, order: { pdf: ["vm-pdf"] } } },
+    pipeline: { ...defaultPipelineFeatures, quality: "fast", markdownExtraction: true, visionFallback: false,
+      documentExtraction: { ...defaultDocumentExtractionConfig, order: { pdf: ["vm-pdf"] } }, ...options.pipeline },
     error: null, stats: {}, artifacts: {}, claimId: null, createdAt: new Date(), updatedAt: new Date() } as any, [doc as any]);
   state.artifactLedger.recordDocument(DOC_ID, "normalizedFormat", "pdf");
+  if (options.firstPass) markFirstPassDocumentForTest("r", DOC_ID);
   try {
     await stage.run(state);
   } finally {
@@ -84,14 +95,14 @@ async function runStage(vm: (job: any) => Promise<Partial<SandboxedPdfResult>>, 
   const stageState = state.documentStage(DOC_ID, "extract-markdown");
   const ledger = state.artifactLedger.all() as Record<string, string>;
   const markdown = [...objects.entries()].find(([key]) => key === `u/r/markdown/${DOC_ID}.vm-pdf.md`)?.[1].bytes.toString();
-  return { jobs, objects, json, stageState, ledger, markdown, state, pending: state.pendingAssetLedger.get(DOC_ID) };
+  return { jobs, objects, json, stageState, ledger, markdown, state, pending: state.pendingAssetLedger.get(DOC_ID), stage };
 }
 
 const folderRoot = `u/r/doppler/${DOC_ID}`;
 const figureRoot = `${folderRoot}/images`;
 
 beforeEach(() => resetExtractorPluginsForTest());
-afterEach(() => { resetExtractorPluginsForTest(); vi.unstubAllEnvs(); vi.restoreAllMocks(); });
+afterEach(() => { resetExtractorPluginsForTest(); resetFirstPassResultsForTest(); vi.unstubAllEnvs(); vi.restoreAllMocks(); });
 
 describe("Doppler figures in the extraction stage", () => {
   it("a project that opted out of figures (pipeline.figures false): no figure request, level disabled, no figure storage", async () => {
@@ -149,6 +160,24 @@ describe("Doppler figures in the extraction stage", () => {
     expect(out.stageState?.stats?.dopplerFigures).toMatchObject({ status: "stored", files: 3, markers: 3, markersResolved: 3 });
     // The stored Markdown is Doppler's, byte for byte: markers resolve at read time.
     expect(out.markdown).toBe(MARKDOWN);
+  });
+
+  it("M10: a failed VM job's salvaged figures (#464 `error.figures`) are stored before the failure stands; none without them", async () => {
+    registerProvider(true);
+    vi.stubEnv("DOCSLURP_DOPPLER_IMAGE_EXTRACT", "1");
+    const salvaged = await runStage(async (job) => {
+      await cp(FIXTURE, job.figures.dir, { recursive: true });
+      throw Object.assign(new Error("vm died after its first shards"), { figures: { status: "extracted" } });
+    });
+    expect(salvaged.stageState?.status).not.toBe("completed");
+    expect(salvaged.objects.get(`${figureRoot}/page-0003/image-001.webp`)?.type).toBe("image/webp");
+    expect(salvaged.objects.get(`${figureRoot}/page-0005/figure-001.png`)?.type).toBe("image/png");
+    // No salvage offered: nothing stored.
+    const plain = await runStage(async (job) => {
+      await cp(FIXTURE, job.figures.dir, { recursive: true });
+      throw new Error("vm died");
+    });
+    expect([...plain.objects.keys()].some((key) => key.startsWith(figureRoot))).toBe(false);
   });
 
   it("Doppler exit 5: keeps the Markdown, stores no figure, and the raw reason goes to the log only", async () => {
@@ -233,5 +262,47 @@ describe("Doppler figures in the extraction stage", () => {
     const out = await runStage(async () => ({ figures: { status: "failed", reason: "first-pass:figures-stored-separately" } }));
     expect(out.stageState?.stats?.dopplerFigures).toMatchObject({ status: "extraction-failed", ledger: "queued" });
     expect(out.pending).toMatchObject({ level: { imagesStatus: "failed" }, assets: [] });
+  });
+
+  it("Info: a first-pass mark left by an attempt that threw does not make a later attempt skip its level", async () => {
+    registerProvider(true);
+    vi.stubEnv("DOCSLURP_DOPPLER_IMAGE_EXTRACT", "1");
+    // The first attempt is a first-pass placeholder that fails after the mark (its title step throws).
+    const failed = await runStage(async () => ({ figures: { status: "failed", reason: "figures-stored-by-first-pass" } }), {}, {
+      markServed: true, prepare: (internals) => { internals.recordDocumentTitle = async () => { throw new Error("title step failed"); }; },
+    });
+    expect(failed.stageState?.status).toBe("failed");
+    // A later attempt of the same document (same run) that the first pass does not own writes its own level.
+    vi.stubEnv("DOCSLURP_DOPPLER_IMAGE_EXTRACT", "");
+    const later = await runStage(async () => ({}), {}, { stage: failed.stage, prepare: (internals) => { delete internals.recordDocumentTitle; } });
+    expect(later.stageState?.status).toBe("completed");
+    expect(later.pending).toMatchObject({ level: { imagesStatus: "disabled" }, assets: [] });
+  });
+
+  describe("a project that opted out of figures (pipeline.figures: false, chart-export council H2)", () => {
+    it("extract-markdown: no figure request, and the level is `disabled` (never `none`), so a resumable level leaves the queue", async () => {
+      registerProvider(true);
+      vi.stubEnv("DOCSLURP_DOPPLER_IMAGE_EXTRACT", "1");
+      const out = await runStage(async () => ({}), {}, { pipeline: { figures: false } });
+      expect(out.jobs[0].figures).toBeUndefined();
+      expect(out.stageState?.status).toBe("completed");
+      expect(out.pending).toMatchObject({ level: { imagesStatus: "disabled", manifest: null }, assets: [] });
+    });
+
+    it("a first-pass document: the level is still written, `disabled` (the first pass stores no figures for it)", async () => {
+      registerProvider(true);
+      vi.stubEnv("DOCSLURP_DOPPLER_IMAGE_EXTRACT", "1");
+      const out = await runStage(async () => ({}), {}, { pipeline: { figures: false }, firstPass: true });
+      expect(out.jobs[0].figures).toBeUndefined();
+      expect(out.pending).toMatchObject({ level: { imagesStatus: "disabled" }, assets: [] });
+    });
+
+    it("the first pass's batch asks for no figures when the project opted out", async () => {
+      const { firstPassBatchOptions } = await import("../pipeline/first-pass.js");
+      registerProvider(true);
+      vi.stubEnv("DOCSLURP_DOPPLER_IMAGE_EXTRACT", "1");
+      expect(firstPassBatchOptions({ figures: false } as any, process.env).figures).toBe(false);
+      expect(firstPassBatchOptions({} as any, process.env).figures).toBe(true);
+    });
   });
 });

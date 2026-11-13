@@ -16,7 +16,7 @@ import { copyFile, cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/p
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { dopplerImageLimits, projectFiguresEnabled, type PipelineFeatures } from "@docslurp/shared";
+import { dopplerImageLimits, figuresEnabled, type PipelineFeatures } from "@docslurp/shared";
 import {
   acceptSandboxedPdfBatchEvent, assertSingleScopeBatch, batchFileJob, batchUsageOf, sandboxedPdfBatchProvider, unfinishedBatchFiles,
   type SandboxedPdfBatchEvent, type SandboxedPdfBatchFile, type SandboxedPdfBatchJob, type SandboxedPdfBatchProvider,
@@ -57,15 +57,17 @@ export function firstPassDrainConcurrency(env: NodeJS.ProcessEnv = process.env):
   return Number.isSafeInteger(value) ? Math.max(1, Math.min(16, value)) : 4;
 }
 
-/** The batch options a project's pipeline asks for: math only when the project requests it, figures when the deploy has them. */
+/**
+ * The batch options a project's pipeline asks for: math only when the project requests it, figures when the deploy has
+ * them and the project did not opt out (`figures: false`).
+ */
 export function firstPassBatchOptions(pipeline: PipelineFeatures, env: NodeJS.ProcessEnv = process.env): SandboxedPdfBatchJob["options"] {
   const vmOptions = (pipeline.documentExtraction?.options as Record<string, { math?: unknown } | undefined> | undefined)?.["vm-pdf"];
   return {
     // Math reading stays behind its own deploy flag (default off) until the open council follow-up on the math reader is
     // closed (TODO.md: bound its scan on hostile pages); the project's request alone never turns it on.
     math: vmOptions?.math === true && env.DOCSLURP_FIRST_PASS_MATH?.trim().toLowerCase() === "on",
-    // The deploy flag and the project's figures opt-out (projectFiguresEnabled): an opted-out project stores none.
-    figures: projectFiguresEnabled(pipeline, env) && !!sandboxedPdfProvider()?.figures,
+    figures: figuresEnabled(pipeline as { figures?: boolean | null }, env) && !!sandboxedPdfProvider()?.figures,
   };
 }
 
@@ -125,6 +127,11 @@ export function firstPassServesDocument(runId: string, documentId: string): bool
 
 export function resetFirstPassResultsForTest(): void {
   results.clear();
+}
+
+/** Test hook: the batch converted this document (firstPassServesDocument is true); nothing is served from it. */
+export function markFirstPassDocumentForTest(runId: string, documentId: string): void {
+  results.set(key(runId, documentId), { markdownPath: "", result: {} as SandboxedPdfResult });
 }
 
 // ── Planning ──
@@ -640,23 +647,37 @@ export async function storeFirstPassFigures(args: {
     const ledger = queueAssetLedger(state, documentId, ledgerWriteForFailedFigures({ outcome }));
     return { stats: { dopplerFigures: { status: "extraction-failed", ledger } } };
   }
+  // This step runs after the document's PII stage, so that stage's withheld list never saw these files. When the
+  // outcome withholds artifacts (redact_artifacts or block_indexing matched), every file stored here joins the list
+  // before any slot is recorded, and Doppler's raw `document.md` (unredacted text) is not stored at all. A store that
+  // cannot say or cannot add stores nothing (fail closed).
+  const piiEnabled = !!state.run.pipeline?.piiPolicy?.enabled;
+  const pii = state.store;
+  if (piiEnabled && (!pii?.documentPiiWithholds || !pii.appendWithheldArtifactUris)) {
+    console.warn(`[first-pass] figures document=${documentId} status=failed rule=pii-unverifiable`);
+    const ledger = queueAssetLedger(state, documentId, ledgerWriteForFailedFigures({ outcome }));
+    return { stats: { dopplerFigures: { status: "failed", rule: "pii-unverifiable", ledger } } };
+  }
   let figures: Awaited<ReturnType<typeof readDopplerFigureDir>> | null = null;
   // Pending, then stored, per upload step: kept whatever later fails (owner rule).
   const ledgerHooks = figureLedgerHooks(state, documentId);
   try {
+    const withhold = piiEnabled ? await pii!.documentPiiWithholds!(documentId) : false;
     figures = await readDopplerFigureDir(args.dir, {
       pageCount: document.pageCount, signal: args.signal, expect: outcome.status === "partial" ? "partial" : "complete",
-      sourceSha256: document.sourceSha256 ?? null,
+      sourceSha256: document.sourceSha256 ?? null, gaps: outcome.gaps ?? null,
     });
     const stored = await storeDopplerFigures({
       storage: args.storage, document, runId: args.runId, figures, markdown: args.markdown,
-      dopplerMarkdownPath: args.markdownPath, source: dopplerSourcePointer(document), signal: args.signal,
+      dopplerMarkdownPath: withhold ? null : args.markdownPath, source: dopplerSourcePointer(document), signal: args.signal,
+      committedUris: committedDocumentUris(state, documentId),
       ...(ledgerHooks ? { ledger: ledgerHooks } : {}),
     });
+    if (withhold) await pii!.appendWithheldArtifactUris!(documentId, stored.slots.map(({ uri }) => uri));
     for (const { slot, uri } of stored.slots) state.artifactLedger.recordDocument(documentId, slot, uri);
     // The ledger write takes over the reader's spill (it removes it once written).
     const ledger = queueAssetLedger(state, documentId, ledgerWriteForStoredFigures({ set: figures, stored, outcome }));
-    return { artifactUri: stored.indexUri, stats: { dopplerFigures: { ...stored.stats, manifestVersion: figures.version, ledger } } };
+    return { artifactUri: stored.indexUri, stats: { dopplerFigures: { ...stored.stats, manifestVersion: figures.version, ledger, ...(withhold ? { piiWithheld: true } : {}) } } };
   } catch (error) {
     await disposeDopplerFigureSet(figures);
     if (args.signal.aborted) throw error;
@@ -665,4 +686,12 @@ export async function storeFirstPassFigures(args: {
     const ledger = queueAssetLedger(state, documentId, ledgerWriteForFailedFigures({ outcome }));
     return { stats: { dopplerFigures: { status: "failed", rule, ledger } } };
   }
+}
+
+/** URIs the document's artifact slots already record (committed objects a failed store must never delete). */
+export function committedDocumentUris(state: Pick<WorkflowState, "artifactLedger">, documentId: string): Set<string> {
+  const prefix = `${documentId}:`;
+  const uris = new Set<string>();
+  for (const [slot, uri] of Object.entries(state.artifactLedger.all() as Record<string, string>)) if (slot.startsWith(prefix)) uris.add(uri);
+  return uris;
 }

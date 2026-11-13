@@ -130,7 +130,7 @@ function fakeProvider(options: { fail?: boolean; rewrite?: boolean; onResume?: (
   const provider: FigureResumeProvider = {
     timeoutMs: () => 60_000,
     resume: async (job) => {
-      jobs.push({ ...job, inputFiles: await readdir(path.dirname(job.manifest)) });
+      jobs.push({ ...job, inputFiles: job.manifest ? await readdir(path.dirname(job.manifest)) : [] });
       await options.onResume?.();
       if (options.fail) return { status: "failed", reason: "vm died" };
       const built = v2Manifest({ partial: true });
@@ -322,8 +322,23 @@ describe("the runner", () => {
     const { provider, jobs } = fakeProvider();
     await runFigureResumes({ sql, storage, provider, workerId: "w1", env: ON });
     expect(jobs).toEqual([]);
-    // L2: the reason says figures are off (not resumes).
-    expect(await level("doc-off")).toMatchObject({ resume_blocked: "figures-off", queued: false });
+    // L2: the reason says figures are off (not resumes); #363 H2: the level is closed `disabled`.
+    expect(await level("doc-off")).toMatchObject({ resume_blocked: "figures-off", queued: false, images_status: "disabled" });
+  });
+
+  it("#363 H2: a run whose own pipeline opted out of figures closes the level disabled and is never resumed", async () => {
+    const storage = memoryStorage();
+    await partialPass(storage);
+    await due();
+    await sql`update project_runs set pipeline = '{"figures": false}'::jsonb where id = 'run-a'`;
+    try {
+      const { provider, jobs } = fakeProvider();
+      await runFigureResumes({ sql, storage, provider, workerId: "w1", env: ON });
+      expect(jobs).toEqual([]);
+      expect(await level()).toMatchObject({ images_status: "disabled", resume_blocked: "figures-off", queued: false });
+    } finally {
+      await sql`update project_runs set pipeline = '{}'::jsonb where id = 'run-a'`;
+    }
   });
 });
 

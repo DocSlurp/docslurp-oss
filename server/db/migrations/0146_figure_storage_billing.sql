@@ -1,6 +1,7 @@
 -- Figure storage billing (docs/extraction/doppler-figures.md, "Storage billing"). The daily storage meter
--- (server/src/services/billing/storage-meter.ts) adds the measured bytes of stored figure files, their index and manifest
--- (document_extraction_levels.asset_bytes, recomputed from committed ledger rows) to objectBytes. Before this the
+-- (server/src/services/billing/storage-meter.ts) adds document_extraction_levels.asset_bytes to objectBytes: the stored
+-- figure files of the level's run (storage_state = 'stored') plus the folder files measured as they were stored (manifests,
+-- document.md, index.json: folder_bytes, migration 0147). Before this the
 -- per-page artifact estimate never covered figures, so nothing is counted twice.
 --
 -- One index-only aggregate per org per day: the meter sums asset_bytes for the org's documents that store any.

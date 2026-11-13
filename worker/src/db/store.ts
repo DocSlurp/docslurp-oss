@@ -2723,6 +2723,42 @@ export class Store {
   }
 
   /**
+   * Whether the document's PII outcome withholds artifacts (`documents.metadata.pii`: it redacted or blocked, so it keeps
+   * a withheld list). A missing document withholds (fail closed).
+   */
+  async documentPiiWithholds(documentId: string): Promise<boolean> {
+    const [row] = await this.sql<{ withholds: boolean }[]>`
+      select coalesce((metadata->'pii'->>'blocked')::boolean, false)
+        or coalesce((metadata->'pii'->>'redacted')::boolean, false)
+        or coalesce(jsonb_array_length(case when jsonb_typeof(metadata->'pii'->'withheldArtifactUris') = 'array'
+          then metadata->'pii'->'withheldArtifactUris' else '[]'::jsonb end), 0) > 0 as withholds
+      from documents where id = ${documentId}`;
+    return row?.withholds ?? true;
+  }
+
+  /**
+   * Add URIs to the document's PII withheld list (`documents.metadata.pii.withheldArtifactUris`), for artifacts written
+   * after its PII stage. Throws when the document has no PII outcome to add to, so a caller never records the artifacts
+   * as servable on a write that did not land.
+   */
+  async appendWithheldArtifactUris(documentId: string, uris: readonly string[]): Promise<void> {
+    if (uris.length === 0) return;
+    const updated = await this.sql`
+      update documents d
+      set metadata = jsonb_set(d.metadata, '{pii,withheldArtifactUris}', (
+            select coalesce(jsonb_agg(u order by u), '[]'::jsonb) from (
+              select jsonb_array_elements_text(case when jsonb_typeof(d.metadata->'pii'->'withheldArtifactUris') = 'array'
+                then d.metadata->'pii'->'withheldArtifactUris' else '[]'::jsonb end) as u
+              union
+              select unnest(${this.sql.array([...uris])}::text[])
+            ) withheld), true),
+          updated_at = now()
+      where d.id = ${documentId} and jsonb_typeof(d.metadata->'pii') = 'object'
+      returning 1`;
+    if (updated.length !== 1) throw new Error("PII withheld list not updated: the document has no PII outcome");
+  }
+
+  /**
    * Ingest report page facts. Source facts (text layer, images) and vision
    * outcomes come from different stages, so each write only touches its own
    * columns and never clears the other stage's values.

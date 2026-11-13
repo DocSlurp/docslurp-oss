@@ -86,7 +86,7 @@ const CLAIM_LEASE_MS = 10 * 60_000;
 interface ClaimedLevel {
   document_id: string; org_id: string; project_id: string; run_id: string; user_id: string; page_count: number; source_key: string;
   source_sha256: string | null; shards: number; resumes: number; manifest_sha256: string | null; storage_prefix: string | null;
-  pipeline: unknown; resume_vm_launches: number;
+  pipeline: unknown; run_pipeline: unknown; resume_vm_launches: number;
 }
 
 /** The figures of documents the queue may claim: completed, current run, Markdown committed (M1, PII rule). */
@@ -116,7 +116,7 @@ export async function claimFigureResume(sql: Client, workerId: string, env: Reco
     const candidates = await tx<ClaimedLevel[]>`
       select c.* from (
         select distinct on (l.org_id) l.document_id, l.org_id, l.project_id, l.run_id, d.user_id, d.page_count, d.source_key, l.source_sha256,
-          l.shards, l.resumes, l.manifest_sha256, r.storage_prefix, p.pipeline, l.resume_vm_launches, l.resume_after
+          l.shards, l.resumes, l.manifest_sha256, r.storage_prefix, p.pipeline, r.pipeline as run_pipeline, l.resume_vm_launches, l.resume_after
         from document_extraction_levels l
         join documents d on d.id = l.document_id and d.org_id = l.org_id and d.project_id = l.project_id and d.run_id = l.run_id
         join projects p on p.id = l.project_id and p.org_id = l.org_id
@@ -140,7 +140,16 @@ export async function claimFigureResume(sql: Client, workerId: string, env: Reco
       const [busy] = await tx<{ n: number }[]>`
         select count(*)::int as n from document_extraction_levels where org_id = ${row.org_id} and resume_lease_until > now()`;
       if ((busy?.n ?? 0) > 0) continue;
-      if (projectFiguresOff(row.pipeline)) { await block(tx as unknown as Client, row, "figures-off"); continue; }
+      // #363 H2: the project or the run opted out of figures: the level closes `disabled` (never resumable again, nothing
+      // served, counted or billed from it; the retention GC collects what was stored) and leaves the queue.
+      if (projectFiguresOff(row.pipeline) || projectFiguresOff(row.run_pipeline)) {
+        await tx`update document_extraction_levels set images_status = 'disabled', assets_current = false, gaps = null,
+            assets_total = 0, assets_extracted = 0, assets_not_extracted = 0, assets_unlinked = 0, assets_resumable = 0, assets_pending = 0,
+            source_copy = 0, source_decode = 0, source_render = 0, asset_bytes = 0, folder_bytes = 0, updated_at = now()
+          where document_id = ${row.document_id} and org_id = ${row.org_id} and run_id = ${row.run_id}`;
+        await block(tx as unknown as Client, row, "figures-off");
+        continue;
+      }
       if (projectFigureResumeMode(row.pipeline) === "off") { await block(tx as unknown as Client, row, "resume-off"); continue; }
       if (row.resume_vm_launches >= FIGURE_RESUME_LIMITS.maxVmLaunches) { await block(tx as unknown as Client, row, "attempts"); continue; }
       // A resume adds billable stored bytes: never for an organization that may not spend now (re-queued later).
