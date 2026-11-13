@@ -65,6 +65,13 @@ describe("stampDocumentIngestVersion", () => {
     await stampDocumentIngestVersion(sql, "run", ["d-full"]);
     expect((await versions())["d-full"]).toEqual([CURRENT_INGEST_VERSION, ["pageFacts"]]);
   });
+
+  it("does not count page facts another run left", async () => {
+    await sql`update document_page_facts set run_id = 'run-old' where document_id = 'd-full'`;
+    await stampDocumentIngestVersion(sql, "run", ["d-full"]);
+    expect((await versions())["d-full"]).toEqual([CURRENT_INGEST_VERSION, []]);
+    await sql`update document_page_facts set run_id = 'run' where document_id = 'd-full'`;
+  });
 });
 
 describe("stampRunIngestVersion", () => {

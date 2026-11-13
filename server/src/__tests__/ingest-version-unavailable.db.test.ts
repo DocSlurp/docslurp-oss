@@ -29,10 +29,13 @@ beforeAll(async () => {
   }) as unknown as postgres.Sql<Record<string, unknown>>;
   vi.doMock("../db.js", () => ({ sql }));
   vi.doMock("../lib/temporal.js", async (load) => ({ ...(await load<typeof import("../lib/temporal.js")>()), startPageRenderWorkflow: vi.fn() }));
-  await sql`insert into "user"(id, name, email) values ('ua', 'A', 'a@example.com'), ('ub', 'B', 'b@example.com'), ('uv', 'V', 'v@example.com')`;
+  await sql`insert into "user"(id, name, email) values ('ua', 'A', 'a@example.com'), ('ub', 'B', 'b@example.com'), ('uv', 'V', 'v@example.com'), ('ue', 'E', 'e@example.com')`;
   await sql`insert into organizations(id, name, slug, created_by_user_id) values ('org-a', 'A', 'a', 'ua'), ('org-b', 'B', 'b', 'ub')`;
-  await sql`insert into org_memberships(org_id, user_id, role) values ('org-a', 'ua', 'owner'), ('org-b', 'ub', 'owner'), ('org-a', 'uv', 'viewer')`;
-  await sql`insert into projects(id, org_id, user_id, name, is_default) values ('proj-a', 'org-a', 'ua', 'A', true), ('proj-b', 'org-b', 'ub', 'B', true)`;
+  await sql`insert into org_memberships(org_id, user_id, role) values ('org-a', 'ua', 'owner'), ('org-b', 'ub', 'owner'), ('org-a', 'uv', 'viewer'), ('org-a', 'ue', 'member')`;
+  await sql`insert into projects(id, org_id, user_id, name, is_default) values ('proj-a', 'org-a', 'ua', 'A', true), ('proj-b', 'org-b', 'ub', 'B', true),
+    ('proj-c', 'org-a', 'ua', 'C', false)`;
+  // ue edits project C and only views project A (the default project).
+  await sql`insert into project_members (project_id, user_id, role) values ('proj-c', 'ue', 'editor'), ('proj-a', 'ue', 'viewer')`;
   await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline) values
     ('run-a', 'org-a', 'ua', 'proj-a', 'upload', 'completed', 'completed', '{}'), ('run-b', 'org-b', 'ub', 'proj-b', 'upload', 'completed', 'completed', '{}')`;
   // Rows inserted without the new columns are what the migration backfilled: version 0, no capabilities.
@@ -42,7 +45,13 @@ beforeAll(async () => {
     ('doc-busy', 'org-a', 'ua', 'proj-a', 'run-a', 'busy.pdf', 'application/pdf', 'kc', 'embed', 3),
     ('doc-pii', 'org-a', 'ua', 'proj-a', 'run-a', 'pii.pdf', 'application/pdf', 'kp', 'pii_blocked', 3),
     ('doc-failed', 'org-a', 'ua', 'proj-a', 'run-a', 'failed.pdf', 'application/pdf', 'kf', 'failed', 3),
-    ('doc-b', 'org-b', 'ub', 'proj-b', 'run-b', 'b.pdf', 'application/pdf', 'kb', 'completed', 3)`;
+    ('doc-b', 'org-b', 'ub', 'proj-b', 'run-b', 'b.pdf', 'application/pdf', 'kb', 'completed', 3),
+    ('doc-c', 'org-a', 'ua', 'proj-c', 'run-a', 'c.pdf', 'application/pdf', 'kcc', 'completed', 1)`;
+  // Structured results recorded for a PII-blocked document and for one whose policy withheld the result.
+  await sql`insert into document_run_stage_states (run_id, document_id, stage_name, status, artifact_uri) values
+    ('run-a', 'doc-pii', 'structured-extract', 'completed', 's3://bucket/structured/doc-pii.json'),
+    ('run-a', 'doc-text', 'structured-extract', 'completed', 's3://bucket/structured/doc-text.json')`;
+  await sql`update documents set metadata = ${sql.json({ pii: { withheldArtifactUris: ["s3://bucket/structured/doc-text.json"] } })} where id = 'doc-text'`;
   await sql`insert into document_extraction_levels (document_id, org_id, project_id, run_id, markdown_complete, images_status, assets_total,
       assets_not_extracted, assets_resumable, resume_blocked)
     values ('doc-old', 'org-a', 'proj-a', 'run-a', true, 'resumable', 1, 1, 1, 'unscanned')`;
@@ -50,11 +59,13 @@ beforeAll(async () => {
       resumable, format, link_path, storage_state) values
     ('doc-old', 'org-a', 'proj-a', 'run-a', 'p1.1', 1, 'picture', 'block', 'not-extracted', 'min_side', false, 'webp', 'images/page-0001/image-001.webp', 'none')`;
   await sql`insert into document_page_states (document_id, page_number, state, failure_reason) values
-    ('doc-old', 1, 'failed', 'source-unscanned'), ('doc-old', 2, 'blocked-pii', null), ('doc-old', 3, 'indexed', null)`;
+    ('doc-old', 1, 'failed', 'source-unscanned'), ('doc-old', 2, 'blocked-pii', null), ('doc-old', 3, 'indexed', null),
+    ('doc-c', 1, 'failed', 'source-unscanned')`;
   const candidates = [1, 2, 3].map((page) => ({ documentId: "doc-old", page }));
   await sql`insert into search_sessions (id, user_id, project_id, query, metadata) values
     ('sess-a', 'ua', 'proj-a', 'q', ${sql.json({ diagnostics: { deferredCandidates: candidates } })}),
-    ('sess-b', 'ub', 'proj-b', 'q', ${sql.json({ diagnostics: { deferredCandidates: candidates } })})`;
+    ('sess-b', 'ub', 'proj-b', 'q', ${sql.json({ diagnostics: { deferredCandidates: candidates } })}),
+    ('sess-e', 'ue', 'proj-c', 'q', ${sql.json({ diagnostics: { deferredCandidates: [{ documentId: "doc-old", page: 1 }, { documentId: "doc-c", page: 1 }] } })})`;
   keys = await import("../services/api-keys.js");
   const { documentsRoutes } = await import("../routes/documents.js");
   const { ingestVersionRoutes } = await import("../routes/ingest-version.js");
@@ -207,6 +218,16 @@ describe("structured results", () => {
     expect(await (await app.request("/documents/doc-busy/structured", as("ua"))).json()).toMatchObject({ availability: { reason: "processing" } });
   });
 
+  it("never serves a PII-blocked document's fields, or a result its policy withheld, even when the stage recorded one", async () => {
+    for (const doc of ["doc-pii", "doc-text"]) {
+      const response = await app.request(`/documents/${doc}/structured`, as("ua"));
+      expect(response.status, doc).toBe(200);
+      const body = await response.json();
+      expect(body, doc).toEqual({ structured: null, uri: null, availability: expect.objectContaining({ reason: "withheld", canReprocess: false }) });
+      expect(JSON.stringify(body)).not.toContain("s3://");
+    }
+  });
+
   it("cross-tenant: stays a 404 with no state", async () => {
     const response = await app.request("/documents/doc-old/structured", as("ub"));
     expect(response.status).toBe(404);
@@ -242,6 +263,19 @@ describe("search materialization", () => {
         { documentId: "doc-old", page: 2, state: "blocked-pii", availability: expect.objectContaining({ reason: "withheld", canReprocess: false }) },
         { documentId: "doc-old", page: 3, state: "indexed" },
       ]);
+    } finally {
+      vi.unstubAllEnvs();
+      vi.stubEnv("FILE_TOKEN_SECRET", "ingest-version-test-secret-0123456789abcdef");
+    }
+  });
+
+  it("decides canReprocess per document's own project: an editor of C who only views A gets false on an A page", async () => {
+    vi.stubEnv("DOCSLURP_DEFERRED_PROFILES", "1");
+    try {
+      const body = await (await app.request("/searches/sess-e/materialization", as("ue"))).json();
+      const byDoc = Object.fromEntries(body.pages.map((page: { documentId: string; availability?: { canReprocess: boolean } }) => [page.documentId, page.availability]));
+      expect(byDoc["doc-old"]).toMatchObject({ reason: "needs-reprocess", canReprocess: false });
+      expect(byDoc["doc-c"]).toMatchObject({ reason: "needs-reprocess", canReprocess: true });
     } finally {
       vi.unstubAllEnvs();
       vi.stubEnv("FILE_TOKEN_SECRET", "ingest-version-test-secret-0123456789abcdef");

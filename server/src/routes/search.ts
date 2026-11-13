@@ -707,7 +707,7 @@ export const searchesRoutes = new Hono().get("/:sessionId/materialization", asyn
   // Only documents the caller can reach, in the session project's organization, report a state: a candidate naming any
   // other document reads as "unseen", with no state, reason or version (the ledger read below is not tenant-scoped).
   const [owner] = await sql<{ org_id: string }[]>`select org_id from projects where id = ${row.project_id}`;
-  const reachable = new Map<string, number>();
+  const reachable = new Map<string, { projectId: string; ingestVersion: number }>();
   const ids = [...new Set(candidates.map((p) => p.documentId))];
   if (owner && ids.length > 0) {
     const projectIds = await listAccessibleProjectIds(userId);
@@ -716,17 +716,20 @@ export const searchesRoutes = new Hono().get("/:sessionId/materialization", asyn
       select id, project_id, ingest_version from documents
       where id = any(${sql.array(ids)}::text[]) and org_id = ${owner.org_id} and project_id = any(${sql.array(projectIds)}::text[])`) {
       if (apiKey && !apiKeyCanUseProject(apiKey, { orgId: owner.org_id, projectId: doc.project_id })) continue;
-      reachable.set(doc.id, doc.ingest_version);
+      reachable.set(doc.id, { projectId: doc.project_id, ingestVersion: doc.ingest_version });
     }
   }
   const scoped = candidates.filter((p) => reachable.has(p.documentId));
   const states = await defaultMaterializeDeps.loadPageStates(scoped);
-  const stuck = scoped.some((p) => {
+  // Typed states for pages that will not materialize (ingest-version.ts). Whether the caller may reprocess is decided per
+  // document's own project, never the session's: a session can list candidates from several projects.
+  const canEditByProject = new Map<string, boolean>();
+  for (const p of scoped) {
     const state = states.get(pageKey(p.documentId, p.page))?.state;
-    return state === "failed" || state === "blocked-pii";
-  });
-  // Typed states for pages that will not materialize (ingest-version.ts).
-  const canEdit = owner && stuck ? await callerCanReprocess(c, { orgId: owner.org_id, projectId: row.project_id }) : false;
+    const projectId = reachable.get(p.documentId)!.projectId;
+    if (!owner || (state !== "failed" && state !== "blocked-pii") || canEditByProject.has(projectId)) continue;
+    canEditByProject.set(projectId, await callerCanReprocess(c, { orgId: owner.org_id, projectId }));
+  }
   const pages = candidates.map((p) => {
     const page = reachable.has(p.documentId) ? states.get(pageKey(p.documentId, p.page)) : undefined;
     // A page the worker refused because its document predates the current scan (PR #339): stable reason, never raw text.
@@ -739,7 +742,10 @@ export const searchesRoutes = new Hono().get("/:sessionId/materialization", asyn
       ...p,
       state: page?.state ?? "unseen",
       ...(rescan ? { reason: PARSE_SOURCE_RESCAN_REASON } : {}),
-      ...(reason ? { availability: dataUnavailable(reason, { canEdit, ingestVersion: reachable.get(p.documentId) ?? null }) } : {}),
+      ...(reason ? { availability: dataUnavailable(reason, {
+        canEdit: canEditByProject.get(reachable.get(p.documentId)!.projectId) === true,
+        ingestVersion: reachable.get(p.documentId)?.ingestVersion ?? null,
+      }) } : {}),
     };
   });
   const failed = pages.filter((p) => p.state === "failed" || p.state === "blocked-pii").length;

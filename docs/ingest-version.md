@@ -20,7 +20,7 @@ produced it. The serving API answers data it cannot show with a typed
   what its pipeline build supports. A document's capabilities are measured from
   what its run actually stored:
   - `parseSourceDecision`: a parse decision from the current quarantine scan;
-  - `pageFacts`: per-page facts;
+  - `pageFacts`: per-page facts written by that run;
   - `figureLedger`: a figure ledger written by that run.
 - Version `0` means unknown. Every row that existed before tagging was backfilled
   to `0` with no capabilities, and nothing about those rows is inferred.
@@ -72,7 +72,7 @@ and worker reasons stay in logs and traces.
 | Reason | When | `canReprocess` |
 | --- | --- | --- |
 | `needs-reprocess` | Produced before the current scan or by an older pipeline: a page of a document without a current parse decision (`source-unscanned`), or a figure resume blocked `unscanned`. | If the caller may reprocess |
-| `withheld` | A PII policy withholds it: a PII-blocked document's pages and structured result, a withheld figure file, a page materialization blocked by PII, or a page whose source file is withheld. | No |
+| `withheld` | A PII policy withholds it: a PII-blocked document's pages and structured result (even when a result was recorded), a structured result its policy withheld, a withheld figure file, a page materialization blocked by PII, or a page whose source file is withheld. | No |
 | `not-extracted` | The pipeline produced nothing: a failed or cancelled document, an image Doppler did not extract (its `reason` says why, for example `min_side`, `repeat` or `budget`), no structured result, a figure resume that ran out of attempts, or a page that failed to materialize. | Document-level states only, if the caller may reprocess. Per-image states: no |
 | `processing` | Still being produced: a document mid-run, a figure upload that has not landed, or a figure resume whose document moved to a newer run. | No |
 | `not-supported` | The data does not exist for this file type (page images of a non-PDF). | No |
@@ -90,7 +90,8 @@ Where the states appear:
 - `GET /v1/documents/:id/assets`: `assets[].availability` (null when the file is
   served or the image is left to the page image) and `level.resumeBlocked`.
 - `GET /v1/searches/:sessionId/materialization`: `pages[].availability` on
-  failed and PII-blocked pages. The older `reason:
+  failed and PII-blocked pages, with `canReprocess` decided by each document's
+  own project, not the session's. The older `reason:
   "quarantine-rescan-required"` field stays.
 
 A document outside the caller's scope is still the same 404 as a missing

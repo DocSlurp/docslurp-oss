@@ -55,6 +55,8 @@ import { billingState } from "../services/config-change.js";
 import { estimateDocumentReprocess, singleProjectOf } from "../services/work-estimates.js";
 import { apiKeyCanUpdateContent, CONTENT_UPDATE_SCOPE_MESSAGE } from "../lib/content-update-access.js";
 import { callerCanReprocess } from "../lib/reprocess-access.js";
+import { sql } from "../db.js";
+import { withheldArtifactUrisFromMetadata } from "../services/pii-artifact-guard.js";
 import { apiKeyCanUseProject } from "../lib/api-key-project-scope.js";
 import { DocumentAssetQueryError, getDocumentAssetLedger } from "../services/document-assets.js";
 import { redactOperatorRun } from "../services/progress-snapshot.js";
@@ -91,6 +93,12 @@ async function requireApiKeyDocumentScope(c: Context, docId: string, userId: str
     return { response: apiStatusError(c, 404, "Document not found") };
   }
   return { viewer };
+}
+
+/** Whether the document's PII policy withheld this exact structured result (metadata.pii.withheldArtifactUris). */
+async function structuredResultWithheld(documentId: string, uri: string): Promise<boolean> {
+  const [row] = await sql<{ metadata: unknown }[]>`select metadata from documents where id = ${documentId}`;
+  return !row || withheldArtifactUrisFromMetadata(row.metadata).has(uri);
 }
 
 /** Document changes a server key with `ingest` may make: delete, retag and bulk reprocess/retag/delete. */
@@ -396,6 +404,10 @@ export const documentsRoutes = new Hono()
     const viewer = scoped.viewer;
     const structuredUri = viewer.stages.find((stage) => stage.stage_name === "structured-extract")?.artifact_uri;
     const ingestVersion = viewer.document.ingestVersion ?? UNKNOWN_INGEST_VERSION;
+    // PII: a blocked document's fields, or a result its policy withheld, are never served, whatever the stage recorded.
+    if (viewer.document.status === "pii_blocked" || (structuredUri && await structuredResultWithheld(viewer.document.id, structuredUri))) {
+      return c.json({ structured: null, uri: null, availability: dataUnavailable("withheld", { ingestVersion }) });
+    }
     if (!structuredUri) {
       const reason = viewer.document.status === "pii_blocked" ? "withheld"
         : viewer.document.status === "completed" || viewer.document.status === "failed" || viewer.document.status === "cancelled" ? "not-extracted"

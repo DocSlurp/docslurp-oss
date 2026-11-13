@@ -16,7 +16,7 @@ function documentStampAssignments(client: Sql<Record<string, unknown>>, runId: s
     ingest_capabilities = array_remove(array[
       case when d.parse_source_scan_version = ${PARSE_SOURCE_SCAN_VERSION} and d.parse_source_sha256 is not null
         then 'parseSourceDecision' end,
-      case when exists (select 1 from document_page_facts f where f.document_id = d.id) then 'pageFacts' end,
+      case when exists (select 1 from document_page_facts f where f.document_id = d.id and f.run_id = ${runId}) then 'pageFacts' end,
       case when exists (select 1 from document_extraction_levels l where l.document_id = d.id and l.org_id = d.org_id
         and l.run_id = ${runId}) then 'figureLedger' end
     ]::text[], null)`;
@@ -33,7 +33,7 @@ export function completingDocumentStamp(client: Sql<Record<string, unknown>>, ru
     ingest_capabilities = case when ${owned} then array_remove(array[
       case when d.parse_source_scan_version = ${PARSE_SOURCE_SCAN_VERSION} and d.parse_source_sha256 is not null
         then 'parseSourceDecision' end,
-      case when exists (select 1 from document_page_facts f where f.document_id = d.id) then 'pageFacts' end,
+      case when exists (select 1 from document_page_facts f where f.document_id = d.id and f.run_id = ${runId}) then 'pageFacts' end,
       case when exists (select 1 from document_extraction_levels l where l.document_id = d.id and l.org_id = d.org_id
         and l.run_id = ${runId}) then 'figureLedger' end
     ]::text[], null) else d.ingest_capabilities end`;
