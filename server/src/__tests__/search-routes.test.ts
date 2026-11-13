@@ -50,9 +50,14 @@ vi.mock("../services/organizations.js", async (importOriginal) => ({
     const project = await (await import("../services/projects.js")).getProject(id, userId) as { id: string; orgId: string } | null;
     return project ? { projectId: project.id, orgId: project.orgId, projectOwnerUserId: userId, isDefaultProject: false, orgRole: "owner", projectRole: null } : null;
   }),
-  getProjectAccessWithPipeline: vi.fn(async (projectId: string) => ({
-    projectId, orgId: "org-1", pipeline: projectId.includes("strict") ? { privacyMode: "strict-privacy" } : {},
-  })),
+  // The route's one access read (lib/search-access.ts) and the cache's: from the getProject mock when a test arranges
+  // one (null: no access), otherwise an org-1 project.
+  getProjectAccessWithPipeline: vi.fn(async (projectId: string, userId: string) => {
+    const project = await (await import("../services/projects.js")).getProject(projectId, userId) as { id: string; orgId: string } | null | undefined;
+    if (project === null) return null;
+    return { projectId, orgId: project?.orgId ?? "org-1", projectOwnerUserId: userId, isDefaultProject: false, orgRole: "owner", projectRole: null,
+      pipeline: projectId.includes("strict") ? { privacyMode: "strict-privacy" } : {} };
+  }),
 }));
 
 const traceparent = vi.hoisted(() => ({ value: null as string | null }));

@@ -4,7 +4,8 @@ import type { PubSub } from "@mastra/core/events";
 import { sql } from "../db.js";
 import { env } from "../config.js";
 import { revalidateRealtimeSession } from "../realtime/session.js";
-import { loadActorScopedProject, type SessionRequestActor } from "../lib/request-actor.js";
+import { loadActorScopedProjectAccess, type SessionRequestActor } from "../lib/request-actor.js";
+import { searchAccessScopeFor } from "../search/access-scope.js";
 import { chatProject, projectChatDisabledBody } from "../services/project-chat.js";
 import { withDeferredContext } from "../search/deferred/deferred-context.js";
 import { withNativeChatRunOwner } from "../services/chat-run-dependencies.js";
@@ -34,7 +35,8 @@ export function createProjectChatExecutor(manager:BackgroundTaskManager,pubsub:P
     const check=async()=>{
       signal.throwIfAborted();
       if(!await revalidateRealtimeSession(actor,signal))throw new Error("session_revoked");
-      const project=await loadActorScopedProject(binding.project_id,actor,{refineNames:false});
+      // Access only (one indexed query, every 2 s): the project record's corpus and activity summary is not needed.
+      const project=await loadActorScopedProjectAccess(binding.project_id,actor);
       if(project?.orgId!==binding.org_id)throw new Error("project_revoked");
       const [active]=await sql`
         select c.id from chat_operations c join chat_operations root on root.id=c.root_id
@@ -125,6 +127,8 @@ export function createProjectChatExecutor(manager:BackgroundTaskManager,pubsub:P
       const result=await withNativeChatRunOwner({...binding,sessionId:actor.sessionId,signal,nativeTaskId:task.id,nativeOwnerId:manager.ownerId},
         ()=>withDeferredContext({signal},()=>chatProject({
           projectId:binding.project_id,userId:binding.user_id,query:String(binding.input.q),
+          // The operation's bound org; check() above re-verified the project is still in it.
+          scope:searchAccessScopeFor(actor,{orgId:binding.org_id})!,
           sessionId:binding.input.sessionId as string|undefined,model:binding.input.model as string|undefined,
           ...durableChatTurnOptions(binding.input,actor),
           // Signed-in app turn: "/status" gets the free ingest report, as in the streaming route.

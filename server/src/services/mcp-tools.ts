@@ -1,3 +1,4 @@
+import { env } from "../config.js";
 import type { z } from "zod";
 import { getProjectSearchSettings } from "./search-controls.js";
 import { projectSettingsPipelinePatchSchema } from "./project-settings-proposal-input.js";
@@ -144,7 +145,7 @@ const mcpAdapterRoutes = new Hono()
     if (toolId === "listProjects") {
       const parsed = listProjectsInput.safeParse(body);
       if (!parsed.success) return invalidInput(c, parsed.error);
-      const accessible = (await listProjects(actor.userId, { refineNames: false }))
+      const accessible = (await listProjects(actor.userId))
         .filter(project => !apiKey || apiKeyCanUseProject(apiKey, project));
       const { offset, limit } = parsed.data;
       return c.json({ projects: accessible.slice(offset, offset + limit).map(project => ({
@@ -165,13 +166,14 @@ const mcpAdapterRoutes = new Hono()
       // project, plus any org member for the default project. Read-only shares are not offered.
       const editable = new Set(await listEditableProjectIds(actor.userId));
       if (!editable.has(project.id)) return adapterError(c, 403, "You do not have permission to upload to this project", "forbidden");
-      const accessible = (await listProjects(actor.userId, { refineNames: false }))
+      const accessible = (await listProjects(actor.userId))
         .filter(item => editable.has(item.id) && (!apiKey || apiKeyCanUseProject(apiKey, item)));
       const summary = (item: { id: string; slug: string; name: string; isDefault: boolean }) => ({ id: item.id, slug: item.slug, name: item.name, isDefault: item.isDefault });
       return c.json({
         project: summary(accessible.find(item => item.id === project.id) ?? { ...project, isDefault: false }),
         projects: accessible.slice(0, 50).map(summary),
-        limits: { maxFiles: 10, maxFileBytes: 5 * 1024 ** 3 },
+        // What the server actually accepts (MAX_UPLOAD_BYTES, lib/upload-policy.ts), never a larger fixed number.
+        limits: { maxFiles: 10, maxFileBytes: env.maxUploadBytes },
         uploader: { resourceUri: UPLOAD_UI_URI },
         hint: "Ask the user to drop files into the uploader. Hosts without MCP Apps: use upload with urls.",
       });
@@ -387,7 +389,7 @@ const mcpAdapterRoutes = new Hono()
             and user_id = ${actor.userId} and phrase ilike ${like}
           union all
           select s.query as phrase, 10 as weight, s.created_at from search_sessions s
-            where s.user_id = ${actor.userId} and (s.metadata ->> 'projectId') = ${project.id}
+            where s.user_id = ${actor.userId} and s.project_id = ${project.id}
               and s.query not like 'enc:%' and s.query not like 'redacted:%' and s.query ilike ${like}
         ) x
         group by phrase

@@ -18,6 +18,9 @@ let realtime: typeof import("../realtime/backend.js");
 
 const USERS = ["owner", "admin", "member", "shared", "removed", "outsider", "pOwner", "pShared", "bob"] as const;
 const PROJECTS = ["wsDefault", "wsPrivate", "wsMemberOwned", "wsShared", "wsPersonal", "wsB"] as const;
+const PROJECT_ORG: Record<(typeof PROJECTS)[number], string> = {
+  wsDefault: "team", wsPrivate: "team", wsMemberOwned: "team", wsShared: "team", wsPersonal: "personal", wsB: "orgB",
+};
 
 /** Explicit expectation: who may see what. Anything missing from a row is denied. */
 const EXPECTED: Record<(typeof USERS)[number], readonly (typeof PROJECTS)[number][]> = {
@@ -99,7 +102,8 @@ describe("every reader of the rule agrees with the SQL function", () => {
   it.each(USERS)("the search session context and realtime authorization for %s", async (user) => {
     for (const project of PROJECTS) {
       const ok = allowed(user, project);
-      const context = await search.loadSearchProjectContext(project, user).then(() => true, () => false);
+      // Held to the project's own org: the scope's org check is not what this matrix tests (chat-turn-scope.db.test.ts is).
+      const context = await search.loadSearchProjectContext(project, user, { orgId: PROJECT_ORG[project], projectIds: "org", modeCeiling: null }).then(() => true, () => false);
       expect(context, `loadSearchProjectContext ${user} -> ${project}`).toBe(ok);
       const authorized = await realtime.realtimeBackend.authorize(user, { kind: "project", projectId: project });
       expect(Boolean(authorized), `realtime authorize ${user} -> ${project}`).toBe(ok);

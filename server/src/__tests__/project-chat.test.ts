@@ -72,6 +72,18 @@ vi.mock("../services/search-controls.js", () => ({
   getProjectSearchSettings,
 }));
 
+// The turn's one context read, composed from the getProject and settings mocks these tests already arrange
+// (its own query and scope checks are covered in chat-turn-scope.db.test.ts).
+const loadChatTurnContext = vi.fn(async (projectId: string, userId: string) => {
+  const project = await getProject(projectId, userId) as { id?: string; orgId?: string; name?: string; systemPrompt?: string | null; pipeline?: { privacyMode?: string } } | null | undefined;
+  const settings = await getProjectSearchSettings(projectId, userId);
+  return {
+    projectId, orgId: project?.orgId ?? "org-1", name: project?.name ?? null, systemPrompt: project?.systemPrompt ?? null,
+    pipeline: project?.pipeline, privacyMode: project?.pipeline?.privacyMode ?? "standard", settings,
+  };
+});
+vi.mock("../services/chat-turn-context.js", () => ({ loadChatTurnContext }));
+
 vi.mock("../lib/ai.js", () => ({
   SEARCH_OPENROUTER_MODEL: "openrouter-test",
   resolveOpenRouterApiKey: vi.fn(
@@ -85,9 +97,13 @@ vi.mock("../lib/ai.js", () => ({
 }));
 
 const { buildFallbackAnswer, buildNativeDocumentInputs,
-  loadRetrievedDocumentSummaries, buildSystemInstructions, chatProject } = await import(
+  loadRetrievedDocumentSummaries, buildSystemInstructions, chatProject: chatProjectWithScope } = await import(
   "../services/project-chat.js"
 );
+/** The explicit access scope every caller passes; these tests exercise the turn, not the scope. */
+const testScope = { orgId: "org-1", projectIds: "org", modeCeiling: null } as const;
+const chatProject = (args: Omit<Parameters<typeof chatProjectWithScope>[0], "scope"> & { scope?: Parameters<typeof chatProjectWithScope>[0]["scope"] }) =>
+  chatProjectWithScope({ scope: testScope, ...args });
 const { createSearchSessionJournal } = await import("../search/session.js");
 const MODEL_KEY_ENV = ["ANTHROPIC_API_KEY", "OPENROUTER_API_KEY", "OPENROUTER_KEY"] as const;
 const originalModelKeys = Object.fromEntries(MODEL_KEY_ENV.map(name => [name, process.env[name]]));

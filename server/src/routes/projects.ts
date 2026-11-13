@@ -75,6 +75,7 @@ import {
   reprocessIngestRecommendation,
 } from "../services/ingest-report.js";
 import { chatProject, projectChatDisabledBody, type ChatSearchActivity } from "../services/project-chat.js";
+import { ProjectChatDisabledError } from "../services/project-chat-errors.js";
 import { InvalidRetrievalQueryError, parseRetrievalQueryFlags } from "../lib/retrieval-query-flags.js";
 import { deleteChatFeedback, upsertChatFeedback } from "../services/chat-feedback.js";
 import {
@@ -105,6 +106,7 @@ import {
   type ProjectChatUIMessage,
 } from "@docslurp/shared/project-chat-ui";
 import { acceptApiKeys } from "../lib/route-auth.js";
+import { authorizeActorProjectSearch } from "../lib/search-access.js";
 import { apiKeyCanUpdateContent, CONTENT_UPDATE_SCOPE_MESSAGE } from "../lib/content-update-access.js";
 import { apiErrorResponse, apiStatusError } from "../lib/api-error.js";
 import { indexingModeErrorResponse } from "../lib/indexing-mode-error.js";
@@ -284,10 +286,12 @@ async function createProjectAgentChatResponse(c: Context) {
     return apiStatusError(c, 400, "Missing query");
   }
 
-  const project = await getProject(projectId, userId);
-  if (!project) {
+  // One access read (no dashboard-sized project record): it also yields the explicit search access scope.
+  const authorized = await authorizeActorProjectSearch(getRequestActor(c), projectId, "chat");
+  if (!authorized.ok) {
     return apiErrorResponse(c, 404, "project_not_found", "Project not found");
   }
+  const project = { id: authorized.access.projectId, orgId: authorized.access.orgId };
   const chatDisabled = await projectChatDisabledBody(project.id, userId);
   if (chatDisabled) return apiErrorResponse(c, 403, "chat_disabled", chatDisabled.error);
   if (await chatModelRefused(getRequestActor(c), body.model, project.id)) {
@@ -394,6 +398,7 @@ async function createProjectAgentChatResponse(c: Context) {
           response = await chatProject({
             projectId,
             userId,
+            scope: authorized.scope,
             query,
             actor: getRequestActor(c), signal: c.req.raw.signal,
             answerIngestReport: getRequestActor(c).type === "session",
@@ -879,8 +884,8 @@ export const projectsRoutes = new Hono()
       return apiStatusError(c, 400, "Missing q");
     }
 
-    const project = await getProject(c.req.param("projectId"), userId);
-    if (!project) {
+    const authorized = await authorizeActorProjectSearch(getRequestActor(c), c.req.param("projectId"), "search");
+    if (!authorized.ok) {
       return apiErrorResponse(c, 404, "project_not_found", "Project not found");
     }
 
@@ -937,7 +942,7 @@ export const projectsRoutes = new Hono()
           filters,
           variant: variant || undefined,
           rootSessionId,
-        });
+        }, authorized.scope);
 
         await stream.writeSSE({
           event: "results",
@@ -1332,18 +1337,18 @@ export const projectsRoutes = new Hono()
     if (!scope) return apiStatusError(c, 400, "Invalid retrieval or filters");
 
     const userId = c.get("sessionUser").id;
-    const project = await getProject(c.req.param("projectId"), userId);
-    if (!project) {
+    const authorized = await authorizeActorProjectSearch(getRequestActor(c), c.req.param("projectId"), "chat");
+    if (!authorized.ok) {
       return apiErrorResponse(c, 404, "project_not_found", "Project not found");
     }
-    const chatDisabled = await projectChatDisabledBody(project.id, userId);
-    if (chatDisabled) return apiErrorResponse(c, 403, "chat_disabled", chatDisabled.error);
+    const project = { id: authorized.access.projectId, orgId: authorized.access.orgId };
 
     let response: Awaited<ReturnType<typeof chatProject>>;
     try {
       response = await chatProject({
         projectId: c.req.param("projectId"),
         userId,
+        scope: authorized.scope,
         query: body.q,
         actor: body.retrievalOnly === true ? undefined : getRequestActor(c), signal: c.req.raw.signal,
         allowConfiguration: body.retrievalOnly === true ? false : undefined,
@@ -1356,6 +1361,7 @@ export const projectsRoutes = new Hono()
       });
     } catch (error) {
       if (error instanceof ChatModelNotAllowedError) return apiErrorResponse(c, 400, "model_not_allowed", error.message);
+      if (error instanceof ProjectChatDisabledError) return apiErrorResponse(c, 403, "chat_disabled", error.message);
       throw error;
     }
 

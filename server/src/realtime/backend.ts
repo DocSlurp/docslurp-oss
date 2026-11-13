@@ -102,7 +102,7 @@ export const realtimeBackend: RealtimeBackend = {
         if (!viewer) throw new Error("not_found");
         return viewer;
       }
-      case "project": return await getProject(resource.projectId, userId, { refineNames: false });
+      case "project": return await getProject(resource.projectId, userId);
       case "documents": return await listDocumentIndexEntries({ userId, orgId,
         projectId: resource.projectId, limit: 50, offset: resource.page * 50 });
       case "economics": {
