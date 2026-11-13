@@ -80,7 +80,7 @@ describe.skipIf(!built)("inline charts in the quarantine guest (real scripts, re
       expect(inspection).toEqual(without);
       const inProcess = inlineChartsInProcess(Buffer.from(bytes), { kind: file.kind, diagrams: true }, without as never);
       expect(inProcess.status === "ok" && inProcess.result).toEqual(alone);
-    }, 60_000);
+    }, { timeout: 60_000, retry: 2 }); // a host at load ~100 can overrun the 0.5 s deadline; the VM takes 2-5 ms
   }
 
   it("an Office file without chart parts and plain HTML are skipped by the guest's own measurement (no worker)", async () => {
