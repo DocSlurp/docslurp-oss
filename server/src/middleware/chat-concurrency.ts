@@ -24,8 +24,8 @@ import { chatTurnTimeBudget } from "../services/chat-turn-deadline.js";
  * so a client that stops reading cannot hold a slot past the turn.
  *
  * Counts are cluster-wide through a shared Redis, resolved in this order:
- * API_RATE_LIMIT_REDIS_URL, REDIS_URL, the REST pair
- * (API_RATE_LIMIT_REDIS_REST_URL + _TOKEN, or UPSTASH_REDIS_REST_URL + _TOKEN),
+ * the REST pair (API_RATE_LIMIT_REDIS_REST_URL + _TOKEN, or UPSTASH_REDIS_REST_URL
+ * + _TOKEN), API_RATE_LIMIT_REDIS_URL, REDIS_URL (the rate limiter's order),
  * then MASTRA_REDIS_URL (the durable-chat Redis, under its own key prefix).
  * Each slot is a lease in a Redis sorted set, taken and checked in one atomic
  * script and expiring on Redis time at the hard deadline, so a crashed process
@@ -241,13 +241,15 @@ function halfRestPair(env: SlotEnv): boolean {
  * nothing (production refuses to start on it, see assertChatConcurrencyBackend).
  */
 export function resolveChatSlotBackendConfig(env: SlotEnv = process.env): ChatSlotBackendConfig {
+  // Same precedence as the rate limiter (rate-limit.ts): the REST pair, then a Redis URL, so caps and
+  // limits share one store when both are configured. MASTRA_REDIS_URL is the last resort.
+  const restUrl = env.API_RATE_LIMIT_REDIS_REST_URL?.trim() || env.UPSTASH_REDIS_REST_URL?.trim();
+  const restToken = env.API_RATE_LIMIT_REDIS_REST_TOKEN?.trim() || env.UPSTASH_REDIS_REST_TOKEN?.trim();
+  if (restUrl && restToken) return { kind: "rest", url: restUrl, token: restToken };
   const limiterUrl = env.API_RATE_LIMIT_REDIS_URL?.trim();
   if (limiterUrl) return { kind: "redis", url: limiterUrl, source: "API_RATE_LIMIT_REDIS_URL" };
   const redisUrl = env.REDIS_URL?.trim();
   if (redisUrl) return { kind: "redis", url: redisUrl, source: "REDIS_URL" };
-  const restUrl = env.API_RATE_LIMIT_REDIS_REST_URL?.trim() || env.UPSTASH_REDIS_REST_URL?.trim();
-  const restToken = env.API_RATE_LIMIT_REDIS_REST_TOKEN?.trim() || env.UPSTASH_REDIS_REST_TOKEN?.trim();
-  if (restUrl && restToken) return { kind: "rest", url: restUrl, token: restToken };
   const durableUrl = env.MASTRA_REDIS_URL?.trim();
   if (durableUrl) return { kind: "redis", url: durableUrl, source: "MASTRA_REDIS_URL", keyPrefix: DURABLE_REDIS_CHAT_SLOT_PREFIX };
   return { kind: "none" };

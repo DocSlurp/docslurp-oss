@@ -181,12 +181,13 @@ describe("chat slot backend at startup", () => {
     expect(resolveChatSlotBackendConfig(env)).toEqual({ kind: "redis", url: "redis://durable:6379", source: "MASTRA_REDIS_URL", keyPrefix: DURABLE_REDIS_CHAT_SLOT_PREFIX });
   });
 
-  it("resolves API_RATE_LIMIT_REDIS_URL, REDIS_URL, the REST pair, then MASTRA_REDIS_URL", () => {
+  it("resolves the REST pair, API_RATE_LIMIT_REDIS_URL, REDIS_URL, then MASTRA_REDIS_URL (the rate limiter's order)", () => {
     const all = { API_RATE_LIMIT_REDIS_URL: "redis://limiter:6379", REDIS_URL: "redis://plain:6379",
       API_RATE_LIMIT_REDIS_REST_URL: "https://rest.example.com", API_RATE_LIMIT_REDIS_REST_TOKEN: "t", MASTRA_REDIS_URL: "redis://durable:6379" };
-    expect(resolveChatSlotBackendConfig(all)).toMatchObject({ kind: "redis", source: "API_RATE_LIMIT_REDIS_URL" });
-    expect(resolveChatSlotBackendConfig({ ...all, API_RATE_LIMIT_REDIS_URL: "" })).toMatchObject({ kind: "redis", source: "REDIS_URL" });
-    expect(resolveChatSlotBackendConfig({ ...all, API_RATE_LIMIT_REDIS_URL: "", REDIS_URL: " " })).toEqual({ kind: "rest", url: "https://rest.example.com", token: "t" });
+    expect(resolveChatSlotBackendConfig(all)).toEqual({ kind: "rest", url: "https://rest.example.com", token: "t" });
+    const noRest = { ...all, API_RATE_LIMIT_REDIS_REST_URL: "", API_RATE_LIMIT_REDIS_REST_TOKEN: "" };
+    expect(resolveChatSlotBackendConfig(noRest)).toMatchObject({ kind: "redis", source: "API_RATE_LIMIT_REDIS_URL" });
+    expect(resolveChatSlotBackendConfig({ ...noRest, API_RATE_LIMIT_REDIS_URL: "" })).toMatchObject({ kind: "redis", source: "REDIS_URL" });
     expect(resolveChatSlotBackendConfig({ MASTRA_REDIS_URL: "redis://durable:6379", UPSTASH_REDIS_REST_URL: "https://rest.example.com" })).toMatchObject({ source: "MASTRA_REDIS_URL" });
     expect(resolveChatSlotBackendConfig({})).toEqual({ kind: "none" });
   });
