@@ -87,14 +87,27 @@ export function fitResult(r: DeterministicVisualResult, maxBytes: number = MAX_R
   let cut = 0;
   while (size > target && refusals.length) { size -= utf8Bytes(JSON.stringify(refusals.pop())) + 1; dropped++; }
   while (size > target && visuals.length) { size -= visualBytes(visuals.pop()!) + 1; cut++; }
-  const overflow = (r.overflow ?? 0) + dropped;
-  const deferred = mergeDeferred([...(r.deferred ?? []), ...(cut ? [{ svgIndex: 0, count: cut, reason: "output-limit" as const }] : [])]);
+  const before = r.deferred ?? [];
+  const deferred = mergeDeferred([...before, ...(cut ? [{ svgIndex: 0, count: cut, reason: "output-limit" as const }] : [])]);
+  // A full deferral list (1,000 entries) can leave no room for the cut's entry: whatever count the list could not keep
+  // is added to `overflow`, so every cut stays counted (council r11 L2).
+  const unlisted = sumCounts(before) + cut - sumCounts(deferred);
+  const overflow = (r.overflow ?? 0) + dropped + unlisted;
   const out: DeterministicVisualResult = { schemaVersion: r.schemaVersion, visuals, refusals, ...(overflow > 0 ? { overflow } : {}), ...(deferred.length ? { deferred } : {}) };
-  // Only deferral entries are left (at most 1,000 small ones): if even they do not fit, keep the counts alone.
   if (utf8Bytes(JSON.stringify(out)) <= maxBytes) return out;
-  const lostDeferred = (r.deferred ?? []).reduce((n, d) => n + d.count, 0);
-  return { schemaVersion: r.schemaVersion, visuals: [], refusals: [], overflow: overflow + refusals.length + lostDeferred, deferred: [{ svgIndex: 0, count: r.visuals.length, reason: "output-limit" }] };
+  // Only deferral entries are left (at most 1,000 small ones) and even they do not fit (a budget far below any the
+  // guest uses): keep the counts alone, one entry per reason, and never a zero count (council r11 L1).
+  const byReason = new Map<DeterministicDeferral["reason"], DeterministicDeferral>();
+  for (const d of [...before, ...(r.visuals.length ? [{ svgIndex: 0, count: r.visuals.length, reason: "output-limit" as const }] : [])]) {
+    const e = byReason.get(d.reason);
+    if (e) { e.svgIndex = Math.min(e.svgIndex, d.svgIndex); e.count += d.count; } else byReason.set(d.reason, { ...d });
+  }
+  const counts = [...byReason.values()].filter((d) => d.count > 0);
+  const lastOverflow = (r.overflow ?? 0) + r.refusals.length;
+  return { schemaVersion: r.schemaVersion, visuals: [], refusals: [], ...(lastOverflow > 0 ? { overflow: lastOverflow } : {}), ...(counts.length ? { deferred: counts } : {}) };
 }
+
+const sumCounts = (list: readonly DeterministicDeferral[]) => list.reduce((n, d) => n + d.count, 0);
 
 /**
  * One input's result from its units: the last worker's own result unchanged when nothing failed (identical to an

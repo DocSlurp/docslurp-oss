@@ -384,6 +384,15 @@ Measured on the parser-VM shape, in three separate sandboxes (`worker-startup.mj
     as the guest user with the same flag, then chown the directory to root and mount it read-only.
   - **Verified:** a test runs the guest on a prepared read-only mount (`unshare`) and checks, from Node's own
     compile-cache log, that the cached bundle was accepted in both the parent and the worker.
+  - **Deployment requirement (council r11 I3).** The in-guest check stops one run leaving compiled code for the next,
+    and no more. Use the cache only with **one VM per job**, or with the cache on a **hypervisor-level read-only disk or
+    image layer**, and **never under a parent directory the guest can write**. The check cannot cover three cases:
+    - a root guest in a long-lived VM could remount the cache read-write;
+    - a read-only alias of a path that is still writable elsewhere in the VM passes the probe;
+    - concurrent runs under a writable parent can swap the directory between the check and the load.
+  - **Host side (council r11 I2).** The host strips every `NODE_*` variable from parser commands, whatever
+    `DOCSLURP_PARSER_ENV_ALLOWLIST` says. Node acts on `NODE_OPTIONS`, `NODE_COMPILE_CACHE` and `NODE_PATH` before any
+    guest code runs, so the guest's own refusal would come too late.
 - **I2:** the Plotly budget test counts characters scanned, not wall time.
 
 **Parser-VM shape, one run, 50 inputs (rounds 5 to 10 plus faults):**
@@ -411,6 +420,13 @@ Measured on the parser-VM shape, in three separate sandboxes (`worker-startup.mj
   | prepared, read-only | **151.1 ms** |
 
   The read-only cache saves about 16 ms (9%).
+
+**Round 11 (council-clear) follow-ups:**
+- **Counts-only fallback:** `fitResult`'s fallback is host-valid. It never emits a zero count or `overflow: 0`, and it
+  keeps deferrals collapsed to one entry per reason.
+- **Cuts with a full deferral list:** visuals cut while the deferral list is full are counted in `overflow`.
+- **Coverage:** neither case is reachable in production; the smallest budget the guest uses is about 419 KB. Both now
+  have unit tests, plus a seeded invariant that every visual, refusal and deferral stays counted.
 
 ### Guest hardening: zod `jitless`, the V8 code-generation flag, code-loading guard, image check
 

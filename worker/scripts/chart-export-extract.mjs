@@ -17,7 +17,13 @@ const request = JSON.parse(await readFile(requestPath, "utf8"));
 // A cache the guest could write would let one document's run leave compiled code for the next (Node's check is an
 // unkeyed checksum), so it is used only when the guest cannot write it (council r10 L3): prepared ahead of time and
 // mounted read-only. A writable, missing or unusual directory runs without the cache (identical output) and says why.
-// A cache inherited through the environment is never accepted: that is configuration, not input, so it is refused.
+// A cache inherited through the environment is never accepted: that is configuration, not input, so it is refused (and
+// the host strips every NODE_* variable from parser commands, so Node never acts on one before this check).
+// Deployment requirement (council r11 I3): this in-guest check covers one run leaving code for the next, nothing more.
+// Use the cache only with one VM per job, or with the cache on a hypervisor-level read-only disk or image layer, and
+// never under a parent directory the guest can write. A root guest in a long-lived VM could remount it, a read-only
+// alias of a path still writable elsewhere passes the probe, and concurrent runs under a writable parent can swap it
+// between the check and the load.
 if (typeof module.getCompileCacheDir === "function" && module.getCompileCacheDir()) throw new Error("chart extract refuses an inherited compile cache (NODE_COMPILE_CACHE)");
 const requestedCache = request.compileCacheDir ?? null;
 if (requestedCache !== null && (typeof requestedCache !== "string" || requestedCache.length > 512 || requestedCache.includes("\0") || !path.isAbsolute(requestedCache) || path.normalize(requestedCache) !== requestedCache)) {

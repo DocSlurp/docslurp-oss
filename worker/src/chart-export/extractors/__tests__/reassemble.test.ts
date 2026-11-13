@@ -150,6 +150,63 @@ describe("reassembleUnits", () => {
     // Even a budget too small for anything returns counts, not an exception.
     const c = fitResult(r, 10);
     expect(c.visuals).toEqual([]);
-    expect(c.deferred).toEqual([{ svgIndex: 0, count: 50, reason: "output-limit" }]);
+    expect(c.deferred).toEqual([{ svgIndex: 0, count: 52, reason: "output-limit" }]);
+    expect(c.overflow).toBe(200);
+  });
+
+  // Council r11 L1/L2. Each result is checked against the host's validator: a count-only result must still be valid.
+  const valid = (x: DeterministicVisualResult) => expect(() => validateDeterministicResult(JSON.parse(JSON.stringify(x)))).not.toThrow();
+  const big = (n: number) => Array.from({ length: n }, (_, k) => ({ ...emptyVisual("svg-geometry", `svg[${k}]`), digest: "d".repeat(3000) }));
+
+  it("the counts-only fallback is host-valid with no visuals: no zero-count entry", () => {
+    const r: DeterministicVisualResult = { schemaVersion: "chart-export-deterministic@v1", visuals: [], refusals: Array.from({ length: 50 }, (_, k) => ({ locator: `p${k}`, reason: "svg-too-dense" })) };
+    const f = fitResult(r, 10);
+    expect(f).toEqual({ schemaVersion: "chart-export-deterministic@v1", visuals: [], refusals: [], overflow: 50 });
+    valid(f);
+  });
+
+  it("the counts-only fallback is host-valid with nothing but visuals: no overflow: 0", () => {
+    const r: DeterministicVisualResult = { schemaVersion: "chart-export-deterministic@v1", visuals: big(5), refusals: [] };
+    const f = fitResult(r, 10);
+    expect(f).toEqual({ schemaVersion: "chart-export-deterministic@v1", visuals: [], refusals: [], deferred: [{ svgIndex: 0, count: 5, reason: "output-limit" }] });
+    valid(f);
+  });
+
+  it("the counts-only fallback keeps each deferral reason (collapsed), not folded into overflow", () => {
+    const deferred: DeterministicDeferral[] = Array.from({ length: 1000 }, (_, k) => ({ svgIndex: 2 * k, count: 1, reason: k % 2 ? "unit-crashed" : "html-svg-limit" }));
+    const r: DeterministicVisualResult = { schemaVersion: "chart-export-deterministic@v1", visuals: big(3), refusals: [], deferred };
+    const f = fitResult(r, 10);
+    expect(f.deferred).toEqual([{ svgIndex: 0, count: 500, reason: "html-svg-limit" }, { svgIndex: 2, count: 500, reason: "unit-crashed" }, { svgIndex: 0, count: 3, reason: "output-limit" }]);
+    expect(f.overflow).toBeUndefined();
+    valid(f);
+  });
+
+  it("visuals cut while the deferral list is full are still counted, in overflow", () => {
+    // 1,000 non-contiguous unit-crashed entries and no output-limit entry: the cut's own entry has no room.
+    const deferred: DeterministicDeferral[] = Array.from({ length: 1000 }, (_, k) => ({ svgIndex: 2 * k, count: 1, reason: "unit-crashed" }));
+    const r: DeterministicVisualResult = { schemaVersion: "chart-export-deterministic@v1", visuals: big(30), refusals: [], deferred };
+    const max = Buffer.byteLength(JSON.stringify(r)) - 20 * 3200;
+    const f = fitResult(r, max);
+    const cut = 30 - f.visuals.length;
+    expect(cut).toBeGreaterThan(0);
+    expect(f.deferred).toHaveLength(1000);
+    expect(f.deferred!.some((d) => d.reason === "output-limit")).toBe(false);
+    expect(f.overflow).toBe(cut);
+    expect(Buffer.byteLength(JSON.stringify(f))).toBeLessThanOrEqual(max);
+    valid(f);
+  });
+
+  it("every fitResult outcome counts every visual and refusal it was given (seeded)", () => {
+    const random = rng(1111);
+    for (let k = 0; k < 200; k++) {
+      const visuals = big(Math.floor(random() * 20));
+      const refusals = Array.from({ length: Math.floor(random() * 50) }, (_, i) => ({ locator: `p${i}`.padEnd(300, "x"), reason: "svg-too-dense" }));
+      const deferred: DeterministicDeferral[] = Array.from({ length: Math.floor(random() * 3) * 500 }, (_, i) => ({ svgIndex: 2 * i, count: 1, reason: "unit-timeout" }));
+      const r: DeterministicVisualResult = { schemaVersion: "chart-export-deterministic@v1", visuals, refusals, ...(deferred.length ? { deferred } : {}) };
+      const f = fitResult(r, Math.floor(random() * Buffer.byteLength(JSON.stringify(r))));
+      const listed = (x: DeterministicVisualResult) => x.visuals.length + x.refusals.length + (x.overflow ?? 0) + (x.deferred ?? []).reduce((n, d) => n + d.count, 0);
+      expect(listed(f)).toBe(listed(r));
+      valid(f);
+    }
   });
 });
