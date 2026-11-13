@@ -8,7 +8,7 @@
  * `[ai-usage]` line) and summed into the returned totals, so a discarded attempt
  * is still billed honestly; the caller logs the single `[ai-usage]` total.
  */
-import { applyOpenRouterProviderPolicy, CHINA_PROVIDER_SLUGS, currentOpenRouterProviderPolicy, readProviderCharge, resolveOpenRouterUsage } from "@docslurp/shared";
+import { applyOpenRouterProviderPolicy, CHINA_PROVIDER_SLUGS, currentOpenRouterProviderPolicy, readPromptCacheTokens, readProviderCharge, resolveOpenRouterUsage } from "@docslurp/shared";
 
 import { fetchWithProviderRetry } from "../lib/provider-retry.js";
 import type { ProviderRateLease } from "../lib/provider-rate-limit.js";
@@ -291,6 +291,9 @@ export function findVisionBilledUsage(error: unknown): VisionBilledUsage | null 
 
 export interface AttemptSummary {
   generationId?: string | null;
+  /** Prompt tokens of this attempt served from / written to the provider's prompt cache (included in inputTokens). */
+  cachedInputTokens?: number;
+  cacheWriteInputTokens?: number;
   costMetadata?: Record<string, unknown>;
   attempt: number;
   provider: string | null;
@@ -646,6 +649,7 @@ function summarize(args: GuardedCompletionArgs, attempt: VisionAttempt, index: n
     generationId: attempt.id, costMetadata: { ...attempt.receiptMetadata, ...charge.metadata },
     attempt: index, provider: attempt.provider, model: attempt.model, streamed: attempt.streamed, outcome: outcome ?? "ok",
     finishReason: attempt.finishReason, inputTokens, outputTokens, costCents, usageSource: hasUsage ? "provider" : "estimated", charge,
+    ...readPromptCacheTokens(attempt.usage),
   };
 }
 
@@ -790,11 +794,16 @@ function totalsOf(log: Array<ReturnType<typeof summarize>>, args: GuardedComplet
     ? { inputTokens: charged.reduce((n, s) => n + s.inputTokens, 0), outputTokens: charged.reduce((n, s) => n + s.outputTokens, 0) }
     : undefined;
   const usageSource: "provider" | "estimated" = log.every((s) => s.usageSource === "provider") ? "provider" : "estimated";
+  // Summed over every attempt, like the tokens; the usage ledger reads them from the top level of the metadata.
+  const cachedInputTokens = log.reduce((n, s) => n + (s.cachedInputTokens ?? 0), 0);
+  const cacheWriteInputTokens = log.reduce((n, s) => n + (s.cacheWriteInputTokens ?? 0), 0);
+  const cache = { ...(cachedInputTokens > 0 ? { cachedInputTokens } : {}), ...(cacheWriteInputTokens > 0 ? { cacheWriteInputTokens } : {}) };
   const costMetadata = anyCharge ? {
+    ...cache,
     costSource: charged.length === log.length ? "provider" : "mixed",
     reconciliationRequired: charged.length !== log.length,
     providerCostUsd: log.reduce((n, s) => n + (s.charge.costCents ?? 0), 0) / 100,
     visionAttempts: log.map(stripCharge),
-  } : { costSource: "estimate", reconciliationRequired: true, visionAttempts: log.map(stripCharge) };
+  } : { costSource: "estimate", reconciliationRequired: true, ...cache, visionAttempts: log.map(stripCharge) };
   return { inputTokens, outputTokens, usageSource, costCents, ...(chargedTokens ? { chargedTokens } : {}), costMetadata };
 }

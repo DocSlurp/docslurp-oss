@@ -1,6 +1,6 @@
 import { DEFAULT_CHAT_REASONING, type ChatReasoningLevel } from "@docslurp/shared/project-chat-models";
-import { assertProviderAllowed, authorizePrivateModelCall, createOpenRouterReasoningFetch, createOpenRouterRoutingFetch, createOpenRouterUsageCapture, createOpenRouterChargeTotal, isPrivateModelUri, readProviderCharge, PRIVATE_MODEL_PROVIDER, resolveOpenRouterUsage, servedTextModel, regionFallbackUsageMetadata, resolveSupportedModelIdWithWarning, type PrivacyMode, type PrivateCallAuditScope, type ProviderTextUsage } from "@docslurp/shared";
-import { randomBytes } from "node:crypto";
+import { assertProviderAllowed, authorizePrivateModelCall, createOpenRouterReasoningFetch, createOpenRouterRoutingFetch, createOpenRouterUsageCapture, createOpenRouterChargeTotal, createOpenRouterPromptCacheFetch, needsExplicitPromptCache, chatModelPromptAddendum, isPrivateModelUri, readProviderCharge, PRIVATE_MODEL_PROVIDER, resolveOpenRouterUsage, servedTextModel, regionFallbackUsageMetadata, resolveSupportedModelIdWithWarning, type PrivacyMode, type PrivateCallAuditScope, type ProviderTextUsage } from "@docslurp/shared";
+import { createHash, randomBytes } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { withObservation, aiResultDetails, instrumentFetch } from "@docslurp/shared/observability";
@@ -240,6 +240,18 @@ export async function generateOpenRouterText(args: {
 }
 
 /**
+ * A tag nonce derived from the evidence itself: 64 bits of SHA-256 over every block. Document text cannot predict
+ * it (a document would have to contain the hash of a body that includes the hash), and the same evidence always gets
+ * the same tag, so a follow-up turn over the same documents repeats the evidence bytes exactly and the provider's
+ * prompt cache can serve them.
+ */
+export function evidenceNonce(documents: Array<{ title: string; text: string; context?: string }>): string {
+  const hash = createHash("sha256");
+  for (const document of documents) hash.update(JSON.stringify([document.title, document.context ?? "", document.text])).update("\n");
+  return hash.digest("hex").slice(0, 16);
+}
+
+/**
  * Retrieved documents as isolated evidence blocks. Each block is delimited by a per-call random tag name that
  * document text cannot predict, so a document can neither close its own block nor forge a neighbouring one
  * (the old `---` separator and `[n]` header could be imitated from inside a file). Text is passed verbatim;
@@ -303,7 +315,7 @@ export async function generateOpenRouterDocumentText(args: {
   const reasoning = args.reasoning ?? DEFAULT_CHAT_REASONING;
   const accounting = createOpenRouterUsageCapture();
   const provider = createOpenAI({
-    fetch: createOpenRouterReasoningFetch(createOpenRouterRoutingFetch(instrumentFetch("openrouter", "chat", accounting.fetch)), reasoning === "none" ? "none" : undefined),
+    fetch: createOpenRouterPromptCacheFetch(createOpenRouterReasoningFetch(createOpenRouterRoutingFetch(instrumentFetch("openrouter", "chat", accounting.fetch)), reasoning === "none" ? "none" : undefined)),
     apiKey: args.apiKey,
     baseURL: OPENROUTER_BASE_URL,
   });
@@ -341,7 +353,7 @@ export async function generateOpenRouterDocumentText(args: {
     sources: Array<Record<string, unknown>>;
   finishReason?: string;
   }> {
-    const inlineDocuments = formatEvidenceBlocks(args.documents);
+    const inlineDocuments = formatEvidenceBlocks(args.documents, evidenceNonce(args.documents));
 
     return withObservation(
       {
@@ -363,9 +375,16 @@ export async function generateOpenRouterDocumentText(args: {
             provider: "openrouter",
             context: args.observability,
           }),
-          model: provider(model),
-          system: args.system,
-          prompt: `${args.prompt}\n\nProject evidence:\n\n${inlineDocuments}`,
+          // Chat Completions for models that cache only at explicit markers (OpenRouter ignores part markers on the
+          // Responses API); the Responses API for the rest, as before.
+          model: needsExplicitPromptCache(model) ? provider.chat(model) : provider(model),
+          system: [args.system, chatModelPromptAddendum(model)].filter(Boolean).join("\n\n") || undefined,
+          // Stable first, per-request last: the evidence (identical across turns over the same documents) before
+          // the history and question, so it stays in the cached prefix.
+          messages: [{ role: "user", content: [
+            { type: "text", text: `Project evidence:\n\n${inlineDocuments}` },
+            { type: "text", text: args.prompt },
+          ] }],
           maxOutputTokens: args.maxOutputTokens,
           abortSignal: args.signal,
           providerOptions,

@@ -118,7 +118,7 @@ describe("chat MCP agent with the real SDK loop", () => {
     const instructions = JSON.stringify(model.doStreamCalls[0]!.prompt.filter(message => message.role === "system"));
     expect(instructions).toContain("Answer in Spanish.");
     expect(instructions).toContain("Available tools for this actor and turn: search");
-    expect(instructions).toContain("If a tool mentioned below is absent, it is unavailable");
+    expect(instructions).toContain("If a tool mentioned in these instructions is absent, it is unavailable");
     expect(model.doStreamCalls[0]!.tools?.map(tool => tool.name)).toEqual(["search"]);
     expect(instructions).not.toContain("getMediaEvidence");
     expect(instructions).not.toContain("not a single extracted frame");

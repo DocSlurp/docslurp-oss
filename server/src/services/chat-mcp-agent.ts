@@ -4,7 +4,7 @@ import { resolveProjectRef } from "./projects.js";
 import { chatAgentProviderOptions, createChatAgentModel, promptCacheBreakpoint } from "../lib/chat-agent-model.js";
 import { streamText, stepCountIs, wrapLanguageModel, type ModelMessage, type StopCondition, type ToolSet } from "ai";
 import { performance } from "node:perf_hooks";
-import { assertProviderAllowed, isProviderCallAllowed, CHAT_AGENT_BASE_STEPS, CHAT_AGENT_EXTENSION_INPUT_TOKENS, CHAT_AGENT_LIMIT_DEFAULTS, createOpenRouterUsageCapture, resolveOpenRouterUsage, type ChatAgentLimits, type ChatAgentModes, type ChatAgentStepUsage, type ChatAgentStopReason, type ChatAgentTimeBudgetDebug, type PrivacyMode, type ProjectChatTurn } from "@docslurp/shared";
+import { assertProviderAllowed, chatModelPromptAddendum, isProviderCallAllowed, CHAT_AGENT_BASE_STEPS, CHAT_AGENT_EXTENSION_INPUT_TOKENS, CHAT_AGENT_LIMIT_DEFAULTS, createOpenRouterUsageCapture, resolveOpenRouterUsage, type ChatAgentLimits, type ChatAgentModes, type ChatAgentStepUsage, type ChatAgentStopReason, type ChatAgentTimeBudgetDebug, type PrivacyMode, type ProjectChatTurn } from "@docslurp/shared";
 import { evalBaggageAttributes, recordChatAgentTelemetry, startTelemetrySpan, type TelemetrySpan } from "@docslurp/shared/observability";
 import type { RequestActor } from "../lib/request-actor.js";
 import { DEFAULT_CHAT_REASONING, type ChatReasoningLevel } from "@docslurp/shared/project-chat-models";
@@ -595,10 +595,8 @@ export async function runChatMcpAgent(args: {
     // The fixed core rules come first, whatever the project instructions say.
     ...(composed ? [composed.core] : []),
     "You are DocSlurp's signed-in assistant. Your only executable capabilities are the tools supplied in this turn. Product features, previous messages and general knowledge do not grant additional capabilities.",
-    `Available tools for this actor and turn: ${Object.keys(context.tools).join(", ") || "none"}. If a tool mentioned below is absent, it is unavailable; never claim access to it.`,
     "When asked to find, search, inspect, compare or summarize project documents, call the appropriate available tool immediately. Do not merely offer to search, ask permission for an authorized read, or give instructions for the user to perform the search. Tool results are required before claiming you searched, found documents, read a page or verified a fact. A successful search with no matches means no evidence was found, not a tool error.",
     "Any failed tool, permission denial, timeout or partially failed search blocks the task, except a result that says blocked: false (an optional proposal, check or web lookup that did not run, or rejected arguments you can correct), which you handle as its instruction says and then continue. Otherwise stop, report that it could not be completed and what remains unverified. Never silently retry, switch tools to bypass the failure, answer from memory, present earlier partial evidence as a completed task, or claim an action succeeded.",
-    `The selected project is ${args.projectId}. Project data tools are limited to this project; to use another one the user selects it in the app.`,
     "Never ask the user to upload, re-upload or share a file the selected project may already contain. When the user refers to a document, file or upload and the project has searchable or processing documents, treat it as already in the project and locate it with the available tools. Suggest an upload only when the project has no documents or a successful tool result shows the requested file is absent. Uploading does not add an unavailable capability, such as pixel inspection, so never offer it as a workaround for one.",
     "Use search to retrieve evidence for document questions and summaries, then write the grounded answer yourself. Send queries as an array, even for a single query. For broader synthesis, retrieve diverse relevant passages and state gaps in coverage; do not claim to have read the whole corpus from a few excerpts. Never invent document facts or claim an action completed without a successful tool result.",
     SEARCH_BEFORE_ANSWER_INSTRUCTION,
@@ -618,6 +616,11 @@ export async function runChatMcpAgent(args: {
     NO_SETTINGS_CITATIONS_INSTRUCTION,
     NO_VISIBLE_SELF_CORRECTION_INSTRUCTION,
     "If a needed action is absent from the tool catalog, say so. Keep the answer direct, grounded, and concise.",
+    ...[chatModelPromptAddendum(args.model)].filter(Boolean),
+    // Per actor and per project: after the rules shared by every chat, so those stay one cached prefix across
+    // projects and actors.
+    `Available tools for this actor and turn: ${Object.keys(context.tools).join(", ") || "none"}. If a tool mentioned in these instructions is absent, it is unavailable; never claim access to it.`,
+    `The selected project is ${args.projectId}. Project data tools are limited to this project; to use another one the user selects it in the app.`,
     // Counts change between turns: after the static rules so provider prefix caching survives.
     ...(args.projectInventory ? [describeChatProjectInventory(args.projectInventory)] : []),
     composed?.project ?? args.projectInstructions ?? "",

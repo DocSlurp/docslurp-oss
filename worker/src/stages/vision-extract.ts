@@ -1808,6 +1808,7 @@ export class VisionExtractStage implements Stage {
               costCents: priceVisionResult(result, this.cfg),
               latencyMs: result.latencyMs,
               finishReason: result.finishReason ?? null,
+              ...promptCacheCounts(result.costMetadata),
             };
           } catch (error) {
             if (!findVisionGuardStop(error)) {
@@ -2195,4 +2196,11 @@ async function settleAll(promises: Array<Promise<unknown>>): Promise<void> {
   const results = await Promise.allSettled(promises);
   const failed = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
   if (failed) throw failed.reason;
+}
+
+/** The prompt-cache counts a vision result's cost metadata carries (summed over its attempts), for chart usage rows. */
+function promptCacheCounts(metadata: Record<string, unknown> | undefined): { cachedInputTokens?: number; cacheWriteInputTokens?: number } {
+  const count = (value: unknown) => typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : undefined;
+  const cached = count(metadata?.cachedInputTokens), written = count(metadata?.cacheWriteInputTokens);
+  return { ...(cached ? { cachedInputTokens: cached } : {}), ...(written ? { cacheWriteInputTokens: written } : {}) };
 }

@@ -37,10 +37,13 @@ it("streams extracted evidence as text without interpreting document prefixes as
     apiKey: "test", privacyMode: "standard", prompt: "Summarize", maxOutputTokens: 100,
     documents: [{ title: "Example", text: "Document: example.pdf\nSource evidence." }],
   });
-  expect(streamTextMock).toHaveBeenCalledWith(expect.objectContaining({
-    prompt: expect.stringContaining("Document: example.pdf\nSource evidence."),
-  }));
-  expect(streamTextMock.mock.calls.at(-1)?.[0].messages).toBeUndefined();
+  // Evidence is plain text (never a file or URL part), sent before the question so it stays in the cached prefix.
+  const call = streamTextMock.mock.calls.at(-1)?.[0];
+  expect(call.prompt).toBeUndefined();
+  expect(call.messages).toHaveLength(1);
+  const [evidence, question] = call.messages[0].content;
+  expect(evidence).toEqual({ type: "text", text: expect.stringContaining("Document: example.pdf\nSource evidence.") });
+  expect(question).toEqual({ type: "text", text: "Summarize" });
   expect(result).toMatchObject({ text: "Grounded answer [1]", usage: { inputTokens: 42, outputTokens: 7 } });
 });
 

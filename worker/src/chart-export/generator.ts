@@ -97,6 +97,8 @@ export function buildChartExportUsage(
       outcome: context.ok ? "completed" : "invalid-output",
       latencyMs: response.latencyMs,
       ...(response.finishReason ? { finishReason: response.finishReason } : {}),
+      ...(response.cachedInputTokens ? { cachedInputTokens: response.cachedInputTokens } : {}),
+      ...(response.cacheWriteInputTokens ? { cacheWriteInputTokens: response.cacheWriteInputTokens } : {}),
     },
   };
 }
