@@ -61,6 +61,7 @@ describe("real hybrid search with hosted reranking and actual SQL usage", () => 
     expect(valve?.citation).toMatchObject({ documentId: "hosted-doc", pageNumber: 2 });
     expect(result.results).toHaveLength(2);
     expect(result.usageEvents).toMatchObject([{ model: "Qwen/Qwen3-Reranker-0.6B", inputTokens: 174 }]);
+    await (await import("../search/session.js")).drainSearchSessionWrites();
     const { attributedUsage } = await import("../services/usage-attribution.js");
     const events = await sql`select org_id,project_id,input_tokens,run_id,metric,cost_cents from ${attributedUsage(null)} au where au.metadata->>'sessionId'=${result.sessionId} order by au.metric`;
     // The rerank call's provider tokens (billing 0) and the billable search unit.
@@ -93,6 +94,9 @@ describe("real hybrid search with hosted reranking and actual SQL usage", () => 
     waiting[1](Response.json({input_tokens:20,scores:Array(25).fill(.5)}));
     const result=await running;
     expect(result.usageEvents?.reduce((n,e)=>n+(e.inputTokens??0),0)).toBe(30);
+    // Both siblings' usage is in the journal the search answered with; write-behind commits it just after.
+    const { drainSearchSessionWrites }=await import("../search/session.js");
+    await drainSearchSessionWrites();
     const { attributedUsage }=await import("../services/usage-attribution.js");
     const events=await sql`select input_tokens from ${attributedUsage(null)} au where au.metadata->>'sessionId'=${result.sessionId}`;
     expect(events).toHaveLength(2);
