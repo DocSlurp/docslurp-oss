@@ -555,7 +555,7 @@ export const pipelineFeaturesSchema = z
             "private-key",
           ]),
         action: z
-          .enum(["flag_for_review", "redact_artifacts", "block_indexing"])
+          .enum(["flag_for_review", "redact_artifacts", "block_indexing", "block_document"])
           .default("flag_for_review"),
         allowlistPatterns: z.array(z.string()).default([]),
       })

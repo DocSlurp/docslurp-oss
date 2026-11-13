@@ -78,7 +78,7 @@ export function assertVisualModeAllowed(pipeline: Pick<PipelineFeatures, "privac
     );
   }
   const hostedForbidden = pipeline.privacyMode !== "standard" && !hasPrivatePageEmbedder();
-  const piiBlocks = Boolean(pipeline.piiPolicy?.enabled && pipeline.piiPolicy.action === "block_indexing");
+  const piiBlocks = Boolean(pipeline.piiPolicy?.enabled && (pipeline.piiPolicy.action === "block_indexing" || pipeline.piiPolicy.action === "block_document"));
   if (hostedForbidden || piiBlocks) {
     throw new IndexingModeError(
       piiBlocks

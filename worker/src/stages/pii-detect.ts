@@ -20,7 +20,16 @@ import {
   type PiiPatternType,
   piiPatternTypeSchema,
 } from "@docslurp/shared";
-import { createPiiTextScanner, redactCanonicalDocument, redactJsonText, type PiiTextScanner } from "../lib/pii-redaction.js";
+import { createPiiTextScanner, isStructuralKey, redactCanonicalDocument, redactJsonText, type PiiTextScanner } from "../lib/pii-redaction.js";
+import {
+  applyPlanToCanonical,
+  applyPlanToJson,
+  applyPlanToText,
+  locateMatches,
+  perPageArtifactServable,
+  planPiiWithholding,
+  type CanonicalBlockLike,
+} from "../lib/pii-page-withholding.js";
 import { measureOp, pushPerfMetric } from "../lib/perf-context.js";
 import { extractTextForEmbedding } from "./embedding-runtime.js";
 import { refreshSummaryEvidence } from "./summary-evidence-refresh.js";
@@ -43,6 +52,9 @@ export interface PiiDetectionArtifact {
   sourcesScanned: PiiTextSource[];
   action: string;
   blocked: boolean;
+  /** `pages`/`sections`: the document completes with these withheld; `document`: it is blocked. */
+  withholding?: "none" | "pages" | "sections" | "document";
+  withheldPages?: number[];
   reviewRequired: boolean;
   redacted: boolean;
   redactedArtifacts: string[];
@@ -60,6 +72,14 @@ export interface PiiDetectionSink {
 
 export type PiiDocumentOutcome = {
   runId: string;
+  /**
+   * What is withheld (packages/shared/src/pii-withholding.ts): `pages` (the document completes; `withheldPages` are
+   * replaced and refused), `sections` (unpaged), `document` (status pii_blocked) or `none`.
+   */
+  scope: "none" | "pages" | "sections" | "document";
+  withheldPages: number[];
+  withheldSectionCount: number;
+  pageCount: number;
   action: PiiPolicy["action"];
   matchCount: number;
   patternTypes: string[];
@@ -139,8 +159,12 @@ export function createPostgresPiiDetectionSink(databaseUrl: string): PiiDetectio
       });
     },
     async setDocumentOutcome(documentId, outcome) {
-      const pii = outcome.matchCount > 0
+      const pii = outcome.matchCount > 0 || outcome.scope !== "none"
         ? {
+            scope: outcome.scope,
+            ...(outcome.scope === "pages" ? { withheldPages: outcome.withheldPages, withheldPageCount: outcome.withheldPages.length } : {}),
+            ...(outcome.scope === "sections" ? { withheldSectionCount: outcome.withheldSectionCount } : {}),
+            pageCount: outcome.pageCount,
             action: outcome.action,
             runId: outcome.runId,
             matchCount: outcome.matchCount,
@@ -321,9 +345,36 @@ export class PiiDetectStage implements Stage {
       metadata: { documentId: document.id, action: policy.action },
     });
 
-    const blocked = policy.action === "block_indexing" && anyMatch;
-    const redacted = policy.action === "redact_artifacts" && anyMatch;
+    const plan = planPiiWithholding(policy.action, {
+      pageCount: document.pageCount,
+      canonical: canonicalResult
+        ? { matches: canonicalResult.matches, changedPages: canonicalResult.changedPages, blocks: canonicalBlocks(canonical?.value) }
+        : null,
+      markdown: markdown && markdownResult ? { text: markdown.text, matches: markdownResult.matches } : null,
+      fallback: fallbackResult ? { text: fallbackText, matches: fallbackResult.matches } : null,
+      html: htmlResult ? { matches: htmlResult.matches } : null,
+      contract: contractResult ? { matches: contractResult.matches } : null,
+    }, anyMatch);
+    // Pages hit, for redaction and review: per-page artifacts of the other pages stay servable.
+    const located = anyMatch && document.pageCount > 1
+      ? locateMatches({
+          pageCount: document.pageCount,
+          canonical: canonicalResult ? { matches: canonicalResult.matches, changedPages: canonicalResult.changedPages, blocks: [] } : null,
+          markdown: markdown && markdownResult ? { text: markdown.text, matches: markdownResult.matches } : null,
+          fallback: fallbackResult ? { text: fallbackText, matches: fallbackResult.matches } : null,
+          html: htmlResult ? { matches: htmlResult.matches } : null,
+          contract: contractResult ? { matches: contractResult.matches } : null,
+        })
+      : null;
+
+    const blocked = plan.scope === "document";
+    const withholding = plan.scope === "pages" || plan.scope === "sections";
+    const redacted = policy.action === "redact_artifacts" && anyMatch && !blocked;
     const reviewRequired = policy.action === "flag_for_review" && anyMatch;
+    if (blocked && plan.reason.startsWith("unattributed")) {
+      // Fail closed: a hit that cannot be placed on a page withholds the document.
+      console.warn(`[pii] document-withheld document=${document.id} reason=${plan.reason}`);
+    }
     const patternTypes = [...new Set([
       ...primary.map((match) => match.patternType),
       ...(markdownResult?.matches ?? []).map((match) => match.patternType),
@@ -332,10 +383,11 @@ export class PiiDetectStage implements Stage {
     ])].sort();
 
     // Rewrite every artifact a later stage or the API reads, in place, so their
-    // URIs (already recorded on the run) now resolve to redacted text.
+    // URIs (already recorded on the run) now resolve to redacted (or withheld) text.
     const redactedArtifacts: string[] = [];
     const servableUris = new Set<string>();
-    for (const artifact of [markdown, html, canonical, contract]) {
+    const rewrite = redacted || withholding;
+    for (const artifact of rewrite ? [markdown, canonical, contract] : [markdown, html, canonical, contract]) {
       if (!artifact) continue;
       servableUris.add(this.storage.uri(artifact.key));
       const slotUri = artifact.slot === "html"
@@ -343,40 +395,51 @@ export class PiiDetectStage implements Stage {
         : ledger.readDocument(document.id, artifact.slot);
       if (slotUri) servableUris.add(slotUri);
     }
-    if (redacted) {
-      if (canonical && canonicalResult?.changed) {
-        await this.storage.putJson(canonical.key, canonicalResult.document);
+    if (redacted && html) {
+      // Redaction rewrites the HTML rendering too; page and section withholding withhold it (it has no page breaks).
+      servableUris.add(this.storage.uri(html.key));
+      const slotUri = ledger.read(`${document.id}:html`);
+      if (slotUri) servableUris.add(slotUri);
+    }
+    let currentMarkdown: string | null = markdown?.text ?? null;
+    if (rewrite) {
+      if (canonical && canonicalResult && (canonicalResult.changed || withholding)) {
+        const next = withholding
+          ? applyPlanToCanonical(plan, canonicalResult.document, canonicalResult.changedBlockIndexes)
+          : canonicalResult.document;
+        await this.storage.putJson(canonical.key, next);
         redactedArtifacts.push(canonical.slot);
       }
-      if (markdown && markdownResult && markdownResult.matches.length > 0) {
-        await this.storage.streamText(markdown.key, markdownResult.redacted, markdown.contentType);
+      if (markdown && markdownResult && (markdownResult.matches.length > 0 || withholding)) {
+        const base = withholding && plan.scope === "sections" ? markdown.text : markdownResult.redacted;
+        currentMarkdown = withholding ? applyPlanToText(plan, base, markdownResult.matches) : base;
+        await this.storage.streamText(markdown.key, currentMarkdown, markdown.contentType);
         redactedArtifacts.push(markdown.slot);
       }
-      if (html && htmlResult && htmlResult.matches.length > 0) {
+      if (redacted && html && htmlResult && htmlResult.matches.length > 0) {
         await this.storage.streamText(html.key, htmlResult.redacted, html.contentType);
         redactedArtifacts.push(html.slot);
       }
-      if (contract && contractResult && contractResult.matches.length > 0) {
-        await this.storage.putJson(contract.key, contractResult.value);
+      if (contract && contractResult && (contractResult.matches.length > 0 || withholding)) {
+        const next = plan.scope === "pages" ? applyPlanToJson(plan, contractResult.value, isStructuralKey) : contractResult.value;
+        await this.storage.putJson(contract.key, next);
         redactedArtifacts.push(contract.slot);
       }
-      if (fallbackResult && fallbackResult.matches.length > 0) {
+      if (fallbackResult && (fallbackResult.matches.length > 0 || withholding)) {
         // Embed, summary and page index read the markdown slot before the source file.
         const key = `${runArtifactRoot(state.run, document.userId)}/pii/${document.id}.redacted.md`;
-        await this.storage.streamText(key, fallbackResult.redacted, "text/markdown");
+        currentMarkdown = withholding
+          ? applyPlanToText(plan, plan.scope === "sections" ? fallbackText : fallbackResult.redacted, fallbackResult.matches)
+          : fallbackResult.redacted;
+        await this.storage.streamText(key, currentMarkdown, "text/markdown");
         ledger.recordDocument(document.id, "markdown", this.storage.uri(key));
         redactedArtifacts.push("markdown");
         servableUris.add(this.storage.uri(key));
       }
-      // Summary evidence holds excerpts of the pre-redaction extraction. Rebuild
-      // it from the redacted markdown now in the slot (or delete it when that
-      // text is unreadable) so unredacted text never reaches the summary model
-      // or survives in storage.
-      const currentMarkdown = fallbackResult && fallbackResult.matches.length > 0
-        ? fallbackResult.redacted
-        : markdown
-          ? (markdownResult && markdownResult.matches.length > 0 ? markdownResult.redacted : markdown.text)
-          : null;
+      // Summary evidence holds excerpts of the pre-scan extraction. Rebuild it
+      // from the markdown now in the slot (or delete it when that text is
+      // unreadable) so withheld text never reaches the summary model or
+      // survives in storage.
       const evidence = await refreshSummaryEvidence({
         storage: this.storage, ledger, document,
         text: currentMarkdown, sourceUri: ledger.readDocument(document.id, "markdown"),
@@ -384,20 +447,39 @@ export class PiiDetectStage implements Stage {
       if (evidence !== "absent") redactedArtifacts.push("summary-evidence");
     }
 
-    // Under redact_artifacts the scanned sources are now clean (redacted or
-    // matchless) and stay servable; under block_indexing nothing written
-    // before this stage is served.
-    const withheldArtifactUris = blocked || redacted
-      ? this.withheldArtifactUris(state, document, redacted ? servableUris : new Set())
+    // Per-page artifacts written before this stage (page images, renders, figures) stay servable for pages known to be
+    // clean; everything else written before it (parser candidates, raw vision output, the source file, the HTML) is
+    // withheld whenever anything is. Under block_document (or a page that cannot be placed) nothing is served.
+    const withheldPageSet = new Set(plan.scope === "pages" ? plan.pages : []);
+    const hitPages = located && located.unattributed.length === 0 ? located.pages : null;
+    const cleanPage = (page: number): boolean => {
+      if (page < 1 || page > document.pageCount) return false;
+      if (plan.scope === "pages") return !withheldPageSet.has(page);
+      if (redacted) return hitPages !== null && !hitPages.has(page);
+      return false;
+    };
+    const withheldArtifactUris = blocked || redacted || withholding
+      ? this.withheldArtifactUris(state, document, blocked ? new Set() : servableUris, blocked ? () => false : cleanPage)
       : [];
 
+    const withheldPageList = plan.scope === "pages" ? plan.pages : [];
     const reason = blocked
-      ? `PII policy blocked indexing: ${matchCount} match${matchCount === 1 ? "" : "es"} (${patternTypes.join(", ")})`
-      : null;
+      ? policy.action === "block_document" || plan.reason === "every-page-withheld"
+        ? `PII policy blocked indexing: ${matchCount} match${matchCount === 1 ? "" : "es"} (${patternTypes.join(", ")})`
+        : `PII policy blocked indexing: a match could not be placed on a page (${plan.reason})`
+      : plan.scope === "pages"
+        ? `PII policy withheld ${withheldPageList.length} page${withheldPageList.length === 1 ? "" : "s"}`
+        : plan.scope === "sections"
+          ? `PII policy withheld ${plan.sectionCount} section${plan.sectionCount === 1 ? "" : "s"}`
+          : null;
 
     await this.sink.recordDetections(document.id, state.run.id, primary, redacted);
     await this.sink.setDocumentOutcome(document.id, {
       runId: state.run.id,
+      scope: plan.scope,
+      withheldPages: withheldPageList,
+      withheldSectionCount: plan.scope === "sections" ? plan.sectionCount : 0,
+      pageCount: document.pageCount,
       action: policy.action,
       matchCount: anyMatch ? matchCount : 0,
       patternTypes,
@@ -425,6 +507,8 @@ export class PiiDetectStage implements Stage {
       sourcesScanned,
       action: policy.action,
       blocked,
+      withholding: plan.scope,
+      withheldPages: withheldPageList,
       reviewRequired,
       redacted,
       redactedArtifacts,
@@ -443,23 +527,38 @@ export class PiiDetectStage implements Stage {
         redacted,
         redactedArtifacts,
         withheldArtifactCount: withheldArtifactUris.length,
+        withholding: plan.scope === "document" ? "document" : plan.scope,
+        withheldPages: withheldPageList,
+        ...(plan.scope === "sections" ? { withheldSectionCount: plan.sectionCount } : {}),
         ...(reason ? { reason } : {}),
       },
     };
   }
 
-  /** Every artifact URI recorded for this document so far, minus the ones known to be clean. */
-  private withheldArtifactUris(state: WorkflowState, document: Document, servable: Set<string>): string[] {
-    const uris = new Set<string>();
+  /**
+   * Every artifact URI recorded for this document so far, minus the ones known to be clean: the rewritten text
+   * artifacts and the per-page artifacts (page images, renders, figures) of clean pages. A URI recorded under several
+   * slots is served only when every one of them is clean.
+   */
+  private withheldArtifactUris(
+    state: WorkflowState,
+    document: Document,
+    servable: Set<string>,
+    cleanPage: (page: number) => boolean,
+  ): string[] {
+    const verdicts = new Map<string, boolean>();
+    const add = (uri: string, clean: boolean) => verdicts.set(uri, (verdicts.get(uri) ?? true) && clean);
     const prefix = `${document.id}:`;
     for (const [slot, uri] of Object.entries(state.artifactLedger.all())) {
-      if (slot.startsWith(prefix) && slot !== `${prefix}pii-detect` && uri.includes("://")) uris.add(uri);
+      if (slot.startsWith(prefix) && slot !== `${prefix}pii-detect` && uri.includes("://")) {
+        add(uri, perPageArtifactServable(slot.slice(prefix.length), cleanPage));
+      }
     }
     for (const stage of state.documentStages.get(document.id)?.values() ?? []) {
-      if (stage.stageName !== this.name && stage.artifactUri) uris.add(stage.artifactUri);
+      if (stage.stageName !== this.name && stage.artifactUri) add(stage.artifactUri, false);
     }
-    uris.add(this.storage.uri(document.sourceKey));
-    return [...uris].filter((uri) => !servable.has(uri)).sort();
+    add(this.storage.uri(document.sourceKey), false);
+    return [...verdicts].filter(([uri, clean]) => !clean && !servable.has(uri)).map(([uri]) => uri).sort();
   }
 
   /**
@@ -507,4 +606,9 @@ export class PiiDetectStage implements Stage {
   async close(): Promise<void> {
     await this.sink.close();
   }
+}
+
+function canonicalBlocks(value: unknown): CanonicalBlockLike[] {
+  const blocks = value && typeof value === "object" ? (value as { blocks?: unknown }).blocks : null;
+  return Array.isArray(blocks) ? (blocks as CanonicalBlockLike[]) : [];
 }

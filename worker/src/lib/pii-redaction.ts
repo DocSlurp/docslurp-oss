@@ -13,7 +13,7 @@ export function createPiiTextScanner(
 /** Keys whose string values are identifiers or locations, never document text. */
 const STRUCTURAL_KEY = /^(?:id|ids|uri|url|key|hash|sha256)$|[a-z0-9](?:Id|Ids|ID|Uri|URI|Url|URL|Key|Hash|Sha256)$/;
 
-function isStructuralKey(key: string): boolean {
+export function isStructuralKey(key: string): boolean {
   return STRUCTURAL_KEY.test(key);
 }
 
@@ -69,14 +69,19 @@ type CanonicalLikeBlock = {
 export function redactCanonicalDocument<T extends { blocks?: unknown }>(
   document: T,
   scan: PiiTextScanner,
-): { document: T; matches: PiiMatch[]; changed: boolean } {
+): { document: T; matches: PiiMatch[]; changed: boolean; changedPages: Array<number | null>; changedBlockIndexes: Set<number> } {
   const blocks = Array.isArray(document.blocks) ? (document.blocks as CanonicalLikeBlock[]) : [];
   const matches: PiiMatch[] = [];
   let changed = false;
+  // Pages of every block with a hit anywhere (text, heading path, metadata); null for a block without a page.
+  const changedPages: Array<number | null> = [];
+  const changedBlockIndexes = new Set<number>();
 
-  const redactedBlocks = blocks.map((block) => {
+  const redactedBlocks = blocks.map((block, blockIndex) => {
     const page = typeof block.pageNumber === "number" ? block.pageNumber : null;
     const next: CanonicalLikeBlock = { ...block };
+    const changedBefore = changed;
+    changed = false;
     if (typeof block.text === "string") {
       const result = scan(block.text, page);
       matches.push(...result.matches);
@@ -97,8 +102,13 @@ export function redactCanonicalDocument<T extends { blocks?: unknown }>(
       if (result.matches.length > 0) changed = true;
       next.metadata = result.value;
     }
+    if (changed) {
+      changedPages.push(page);
+      changedBlockIndexes.add(blockIndex);
+    }
+    changed = changed || changedBefore;
     return next;
   });
 
-  return { document: { ...document, blocks: redactedBlocks }, matches, changed };
+  return { document: { ...document, blocks: redactedBlocks }, matches, changed, changedPages, changedBlockIndexes };
 }

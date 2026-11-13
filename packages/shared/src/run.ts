@@ -298,9 +298,11 @@ export type ProjectRunProgressSnapshot = z.infer<
 >;
 
 /**
- * Terminal document status set by the PII policy (`piiPolicy.action =
- * "block_indexing"`): the document matched a configured pattern, so it is not
- * summarised, embedded or indexed and never appears in search or chat.
+ * Terminal document status set by the PII policy: `block_document` matched, or
+ * `block_indexing` withheld every page (or could not place a match on a page).
+ * The document is not summarised, embedded or indexed and never appears in
+ * search or chat. A document with only some pages withheld completes instead
+ * (see `pii-withholding.ts`).
  */
 export const PII_BLOCKED_DOCUMENT_STATUS = "pii_blocked";
 

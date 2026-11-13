@@ -35,6 +35,7 @@ export * from "./structured.js";
 export * from "./connectors.js";
 export * from "./artifacts.js";
 export * from "./pii.js";
+export * from "./pii-withholding.js";
 export * from "./temporal-connection.js";
 export * from "./vector-namespace.js";
 

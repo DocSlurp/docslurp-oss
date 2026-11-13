@@ -1,4 +1,4 @@
-import { pageRenderSlot, pageRenderDpi, pageRenderCapabilities, parseSourceRescanRequired, type ParseSourceDecisionColumns } from "@docslurp/shared";
+import { isPageWithheld, piiWithholding, pageRenderSlot, pageRenderDpi, pageRenderCapabilities, parseSourceRescanRequired, type ParseSourceDecisionColumns } from "@docslurp/shared";
 import { canEditProject, getProjectAccess } from "./organizations.js";
 import { sql } from "../db.js";
 import { startPageRenderWorkflow } from "../lib/temporal.js";
@@ -17,6 +17,11 @@ export async function requestDocumentPageRender(documentId: string, pageNumber: 
     const access = await getProjectAccess(doc.projectId, userId);
     if (!access || !canEditProject(access, userId)) return { status: "missing" as const };
   }
+  // Page-scoped PII: a withheld page is never served or rendered, whatever is cached.
+  const [pii] = await sql<{ status: string | null; metadata: unknown }[]>`select status, metadata from documents where id = ${doc.id}`;
+  if (!pii) return { status: "missing" as const };
+  const withholding = piiWithholding(pii);
+  if (isPageWithheld(withholding, pageNumber)) return { status: "unavailable" as const };
   const observation=doc.runId?{kind:"page-image" as const,documentId:doc.id,runId:doc.runId,pageNumber,quality}:undefined;
   const dpi = pageRenderDpi(quality);
   const capabilities = pageRenderCapabilities();
@@ -28,8 +33,10 @@ export async function requestDocumentPageRender(documentId: string, pageNumber: 
     if (legacy) return { status: "ready" as const, capabilities, observation, artifact: { ...legacy, slot: `${documentId}:page-${pageNumber}` } };
   }
   if (artifact) return { status: "ready" as const, dpi, capabilities, observation, artifact: { ...artifact, slot: `${documentId}:page-${pageNumber}` } };
-  // Withheld sources may never be recreated as unredacted page images.
-  if (doc.mimeType !== "application/pdf" || doc.status !== "completed" || !doc.runId || !viewer.source?.url) return { status: "unavailable" as const };
+  // Withheld sources may never be recreated as unredacted page images. Under page-scoped withholding the source is
+  // withheld, yet its clean pages may be rendered: the page was checked above and the worker rechecks it.
+  const sourceRenderable = Boolean(viewer.source?.url) || (withholding.scope === "pages" && viewer.source?.withheld === true);
+  if (doc.mimeType !== "application/pdf" || doc.status !== "completed" || !doc.runId || !sourceRenderable) return { status: "unavailable" as const };
   // Scan what we parse (PR #339): the worker refuses to render a document without a parse decision from the current scan
   // (one quarantined before it). Say so, stably, instead of queueing a render that can only fail and polling "pending".
   const [decision] = await sql<ParseSourceDecisionColumns[]>`

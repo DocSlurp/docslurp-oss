@@ -32,6 +32,9 @@ import {
   type PipelineFeatures,
   type ProjectRecord,
   partialExtractionMessage,
+  piiWithheldSummary,
+  piiWithholding,
+  type PiiWithholding,
 } from "@docslurp/shared";
 import { z } from "zod";
 import type { BulkReprocessResult } from "./documents.js";
@@ -67,6 +70,8 @@ export interface IngestReportDocumentRow {
   language: string | null;
   /** A newer version replaced this document (only in run or document scopes); never reprocessed again. */
   superseded?: boolean;
+  /** What the PII policy withheld (from the worker-written `metadata.pii`; packages/shared/src/pii-withholding.ts). */
+  piiWithholding?: PiiWithholding;
 }
 
 export interface IngestReportPageRow {
@@ -514,6 +519,7 @@ export function buildIngestReport(input: IngestReportInput): IngestReport {
     extractionWarnings: listExtractionWarnings(docs, stagesByDoc),
     denseText: listDenseText(docs, stagesByDoc),
     partialExtraction: listPartialExtraction(docs, stagesByDoc),
+    piiWithheld: listPiiWithheld(docs),
     focus,
     languages: [...languageCounts].sort((a, b) => b[1] - a[1]).map(([code, documents]) => ({ code, documents })),
     stages: {
@@ -589,6 +595,28 @@ function listDenseText(docs: IngestReportDocumentRow[], stagesByDoc: Map<string,
     }
   }
   return { total, examples };
+}
+
+/** Completed files with pages or sections withheld by the PII policy: page numbers and counts, never content. */
+function listPiiWithheld(docs: IngestReportDocumentRow[]): IngestReport["piiWithheld"] {
+  const examples: IngestReport["piiWithheld"]["examples"] = [];
+  let total = 0;
+  let pages = 0;
+  for (const doc of docs) {
+    const withholding = doc.piiWithholding;
+    if (!withholding || (withholding.scope !== "pages" && withholding.scope !== "sections") || statusBucket(doc.status) !== "completed") continue;
+    const summary = piiWithheldSummary(withholding, doc.pageCount);
+    total += 1;
+    pages += summary.withheldPageCount;
+    if (examples.length < FAILURE_EXAMPLE_LIMIT) {
+      examples.push({
+        documentId: doc.id, filename: doc.filename, scope: withholding.scope,
+        withheldPages: summary.withheldPages.slice(0, 1000), withheldPageCount: summary.withheldPageCount,
+        withheldSectionCount: summary.withheldSectionCount, message: summary.message ?? "",
+      });
+    }
+  }
+  return { total, pages, examples };
 }
 
 /** PDFs extracted short of their page tree (stats.pdfPagesMismatch = processed-below-measured): `pdf-partially-extracted`. */
@@ -1093,6 +1121,10 @@ export function summarizeIngestReport(report: IngestReport): string {
     const shown = report.partialExtraction.examples.slice(0, 3).map((file) => `${escapeMarkdown(file.filename)} (${file.pagesExtracted} of ${file.pagesInFile} pages)`);
     lines.push(`**${plural(report.partialExtraction.total, "PDF")} ${agree(report.partialExtraction.total, "was", "were")} only partly extracted** because ${agree(report.partialExtraction.total, "its", "their")} page structure is inconsistent: ${shown.join(", ")}. Only the extracted pages are searchable and billed; re-save or re-export ${agree(report.partialExtraction.total, "it", "them")} to recover the rest.`);
   }
+  if (report.piiWithheld.total > 0) {
+    const shown = report.piiWithheld.examples.slice(0, 3).map((file) => `${escapeMarkdown(file.filename)} (${file.scope === "pages" ? `${plural(file.withheldPageCount, "page")}: ${file.withheldPages.slice(0, 10).join(", ")}` : plural(file.withheldSectionCount, "section")})`);
+    lines.push(`**${report.piiWithheld.pages > 0 ? plural(report.piiWithheld.pages, "page") : plural(report.piiWithheld.total, "file")} withheld for privacy** by the project's PII policy: ${shown.join(", ")}. The rest of ${agree(report.piiWithheld.total, "that file", "those files")} is searchable.`);
+  }
   if (report.denseText.total > 0) {
     const shown = report.denseText.examples.slice(0, 3).map((file) => `${escapeMarkdown(file.filename)} (${plural(file.densePageCount, "page")})`);
     lines.push(`${plural(report.denseText.total, "file")} ${agree(report.denseText.total, "has", "have")} pages holding several pages of text each (very dense, tiny, hidden or off-page text): ${shown.join(", ")}. That text is searchable and counted by its volume; check it if you did not expect it.`);
@@ -1142,7 +1174,7 @@ export function describeReason(reason: IngestReportPageReason | null): string {
 
 type DocumentSqlRow = {
   id: string; filename: string; mime_type: string; status: string; page_count: number; file_size: string | number;
-  run_id: string | null; created_at: Date | string; superseded: boolean;
+  run_id: string | null; created_at: Date | string; superseded: boolean; pii: unknown;
 };
 
 function num(value: unknown): number {
@@ -1181,7 +1213,7 @@ export async function loadIngestReport(args: {
   `;
   const docRows = await client<DocumentSqlRow[]>`
     select d.id, d.filename, d.mime_type, d.status, d.page_count, d.file_size, d.run_id, d.created_at,
-      (d.superseded_at is not null) as superseded
+      (d.superseded_at is not null) as superseded, d.metadata->'pii' as pii
     from documents d
     where d.project_id = ${projectId} and d.purged_at is null
       and (${scoped} or d.superseded_at is null)
@@ -1314,6 +1346,7 @@ export async function loadIngestReport(args: {
       chunkUnattributed: chunksByDoc.get(row.id)?.unattributed ?? 0,
       language: languageByDoc.get(row.id) ?? null,
       superseded: row.superseded === true,
+      piiWithholding: piiWithholding({ status: row.status, metadata: row.pii === null || row.pii === undefined ? {} : { pii: row.pii } }),
     })),
     pageDetailDocumentIds: detailIds,
     pages: pageRows.map((row) => ({
