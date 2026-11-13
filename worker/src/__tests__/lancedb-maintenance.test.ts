@@ -342,6 +342,31 @@ describe("LanceDB maintenance", () => {
     });
   });
 
+  it("adds a BTREE on documentId to large tables, including existing ones, once", async () => {
+    const rows = (doc: number) => Array.from({ length: 10 }, (_, i) => record(`doc${doc}`, i));
+    await writeLanceDbRecords(dir, "chunks", Array.from({ length: 120 }, (_, doc) => rows(doc)).flat());
+    // An existing table from before this change: it already has the id btree but no documentId index.
+    await withTable(async (table) => { await table.createIndex("id", { config: (await import("@lancedb/lancedb")).Index.btree() }); });
+    expect(await runLanceDbMaintenance(dir, "chunks", { vectorIndexMinRows: 1_000_000 })).toMatchObject({ ok: true, rows: 1_200 });
+    const documentIndexes = () => withTable(async (table) => (await table.listIndices()).filter((index) => index.columns.includes("documentId")));
+    const [created] = await documentIndexes();
+    expect(created?.indexType).toMatch(/btree/i);
+    // Idempotent: a second pass neither rebuilds nor duplicates it, and new rows are folded in.
+    await writeLanceDbRecords(dir, "chunks", rows(500));
+    expect(await runLanceDbMaintenance(dir, "chunks", { vectorIndexMinRows: 1_000_000 })).toMatchObject({ ok: true, rows: 1_210 });
+    expect((await documentIndexes()).map((index) => index.name)).toEqual([created?.name]);
+    await withTable(async (table) => {
+      expect(await table.countRows(`"documentId" = 'doc500'`)).toBe(10);
+      expect(await table.query().where(`"documentId" NOT IN ('doc0')`).limit(2_000).toArray()).toHaveLength(1_200);
+    });
+  });
+
+  it("leaves small tables without a documentId index", async () => {
+    await writeLanceDbRecords(dir, "chunks", Array.from({ length: 20 }, (_, i) => record("small", i)));
+    await runLanceDbMaintenance(dir, "chunks", { vectorIndexMinRows: 1_000_000 });
+    expect(await withTable(async (table) => (await table.listIndices()).some((index) => index.columns.includes("documentId")))).toBe(false);
+  });
+
   it("swallows failures", async () => {
     const result = await runLanceDbMaintenance(dir, "missing_table", { vectorIndexMinRows: 1 });
     expect(result.ok).toBe(false);

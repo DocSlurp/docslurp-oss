@@ -633,6 +633,19 @@ export async function getProject(projectId: string, userId: string): Promise<Pro
     return null;
   }
 
+  return await readProject(projectId, access.orgId);
+}
+
+/**
+ * The project record for a caller that has already authorized the project in `orgId`
+ * (the realtime broker re-authorizes every subscription before projecting it): one
+ * statement, pinned to the organization, no access lookup and no name refinement.
+ */
+export async function getAuthorizedProjectRecord(projectId: string, orgId: string): Promise<ProjectRecord | null> {
+  return await readProject(projectId, orgId);
+}
+
+async function readProject(projectId: string, orgId: string): Promise<ProjectRecord | null> {
   const [row] = await sql<ProjectRow[]>`
     select
       w.id,
@@ -728,7 +741,7 @@ export async function getProject(projectId: string, userId: string): Promise<Pro
       order by created_at desc
       limit 1
     ) recent on true
-    where w.id = ${projectId}
+    where w.id = ${projectId} and w.org_id = ${orgId}
   `;
 
   return row ? mapProject(row) : null;

@@ -376,17 +376,29 @@ describe("SEARCH_LANCEDB_NATIVE", () => {
     expect(fresh.documents.map((document) => document.id)).not.toContain("gone");
   });
 
-  it("drops cached eligibility when a run_events hint names the project's run", async () => {
-    const set = await eligible.loadEligibleDocuments({ projectId: "w", embeddingModel: route.model, dimension: DIM });
-    expect(set.documents.filter((document) => document.vectorReady)).toHaveLength(DOCS + 1);
-    await sql`update documents set superseded_at = now() where id = 'doc6'`;
+  it("drops cached eligibility when a run_events hint names the project's run (debounced)", async () => {
+    vi.stubEnv("SEARCH_ELIGIBLE_DEBOUNCE_MS", "100");
     try {
+      // Let any drop from an earlier test leave the window.
+      await new Promise((resolve) => setTimeout(resolve, 120));
+      const set = await eligible.loadEligibleDocuments({ projectId: "w", embeddingModel: route.model, dimension: DIM });
+      expect(set.documents.filter((document) => document.vectorReady)).toHaveLength(DOCS + 1);
+      await sql`update documents set superseded_at = now() where id = 'doc6'`;
       expect(await eligible.loadEligibleDocuments({ projectId: "w", embeddingModel: route.model, dimension: DIM })).toBe(set);
       await eligible.invalidateSearchRuns(["run1"]);
       const fresh = await eligible.loadEligibleDocuments({ projectId: "w", embeddingModel: route.model, dimension: DIM });
       expect(fresh.documents.map((document) => document.id)).not.toContain("doc6");
+      // A second hint inside the window waits for its end.
+      await sql`update documents set superseded_at = null where id = 'doc6'`;
+      await eligible.invalidateSearchRuns(["run1"]);
+      expect(await eligible.loadEligibleDocuments({ projectId: "w", embeddingModel: route.model, dimension: DIM })).toBe(fresh);
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      const later = await eligible.loadEligibleDocuments({ projectId: "w", embeddingModel: route.model, dimension: DIM });
+      expect(later.documents.map((document) => document.id)).toContain("doc6");
     } finally {
       await sql`update documents set superseded_at = null where id = 'doc6'`;
+      vi.unstubAllEnvs();
     }
   });
+
 });
