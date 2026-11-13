@@ -26,6 +26,10 @@ export interface ExtractedCandidate {
   ocrPages?: number[];
   /** Layout facts the sandboxed PDF provider returned from the same VM job (validated; see SandboxedPdfResult). */
   layoutFacts?: Map<number, import("../lib/page-layout-facts.js").PageLayoutFacts>;
+  /** Where `layoutFacts` came from: the provider's layout walker, or its page facts (DOCSLURP_DOPPLER_PAGE_FACTS=use). */
+  layoutFactsSource?: "vm-pdf" | "vm-pdf-facts";
+  /** Doppler page facts the sandboxed PDF provider returned from the same VM job (validated; see SandboxedPdfResult). */
+  pageFacts?: import("../lib/doppler-page-facts.js").DopplerPageFactsDocument;
   /** The extractor already charged its OCR reads through the ledger (the OCR engine does); the stage must not again. */
   ocrCharged?: boolean;
   /** Doppler figures the sandboxed PDF provider returned from the same VM job: the folder (unvalidated) and the outcome. */

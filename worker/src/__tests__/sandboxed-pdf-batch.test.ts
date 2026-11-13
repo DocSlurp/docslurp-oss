@@ -1,11 +1,13 @@
 import { afterEach, describe, expect, it } from "vitest";
 import {
-  registerExtractorPlugin, resetExtractorPluginsForTest, EXTRACTOR_PLUGIN_API_VERSION, type SandboxedPdfExtractorProvider,
+  acceptSandboxedPdfResult, registerExtractorPlugin, resetExtractorPluginsForTest, EXTRACTOR_PLUGIN_API_VERSION, type SandboxedPdfExtractorProvider,
 } from "../extractors/plugins.js";
 import {
   acceptSandboxedPdfBatchEvent, assertSingleScopeBatch, batchFileJob, batchUsageOf, sandboxedPdfBatchProvider, unfinishedBatchFiles,
   type SandboxedPdfBatchJob,
 } from "../extractors/sandboxed-pdf-batch.js";
+import { pageFactsForResend, sandboxedPdfPageFacts } from "../extractors/sandboxed-pdf-page-facts.js";
+import { docLine, jsonl, runLine, textPage } from "../test/doppler-page-facts-fixture.js";
 
 function job(files = 3, figures = false): SandboxedPdfBatchJob {
   return {
@@ -117,6 +119,51 @@ describe("acceptSandboxedPdfBatchEvent", () => {
   it("runs the single-file acceptance on the text result (ocrPages validated)", () => {
     expect(() => acceptSandboxedPdfBatchEvent(job(), text(0, 2, { ocrPages: [3] }))).toThrow("invalid ocrPages");
     expect(acceptSandboxedPdfBatchEvent(job(), text(0, 2, { ocrPages: [2, 1] }))).toMatchObject({ result: { ocrPages: [1, 2] } });
+  });
+
+  it("accepts a file's page facts bounded by its processed slots, and strips them from the result", () => {
+    const j = job();
+    const pageFacts = jsonl([docLine(), textPage(1), textPage(2), textPage(3), runLine()]);
+    const event = acceptSandboxedPdfBatchEvent(j, { ...text(0, 3, { pageFacts }), processedPages: 2 });
+    expect(event).toMatchObject({ phase: "text", pages: 3, processedPages: 2 });
+    expect((event as { result: { pageFacts?: unknown } }).result.pageFacts).toBeUndefined();
+    expect([...sandboxedPdfPageFacts(batchFileJob(j, 0)!)!.pages.keys()]).toEqual([1, 2]);
+    // Malformed facts on another file: no facts, the text result still stands.
+    expect(acceptSandboxedPdfBatchEvent(j, text(1, 2, { pageFacts: "garbage" })).phase).toBe("text");
+    expect(sandboxedPdfPageFacts(batchFileJob(j, 1)!)).toBeUndefined();
+  });
+
+  it("hands facts on only as validated canonical lines, never the guest's raw bytes (council #358 A2, B-L3)", () => {
+    const j = job();
+    acceptSandboxedPdfBatchEvent(j, text(0, 1, { pageFacts: jsonl([docLine({ title: "secret" }), textPage(1, { note: "secret" }), runLine()]) }));
+    const resent = pageFactsForResend(batchFileJob(j, 0)!)!;
+    expect(resent).not.toMatch(/secret|PRODUCER-MARKER|producer/);
+    expect(resent.split("\n").filter(Boolean)).toHaveLength(3);
+    // Refused facts are not handed on at all.
+    acceptSandboxedPdfBatchEvent(j, text(1, 1, { pageFacts: "garbage\n" }));
+    expect(pageFactsForResend(batchFileJob(j, 1)!)).toBeUndefined();
+  });
+
+  it("records no page facts for a result refused over its ocrPages (council #358 recheck N1)", () => {
+    const single = { input: "/a", output: "/b" };
+    expect(() => acceptSandboxedPdfResult(single, { exitCode: 0, stdout: "", stderr: "", ocrPages: [9], pageFacts: jsonl([docLine(), textPage(1)]) }, 3)).toThrow("invalid ocrPages");
+    expect(sandboxedPdfPageFacts(single)).toBeUndefined();
+  });
+
+  it("drops facts when the host has no page count of its own (council #358 A4)", () => {
+    const single = { input: "/a", output: "/b" };
+    for (const pages of [0, Number.NaN, -1]) {
+      acceptSandboxedPdfResult(single, { exitCode: 0, stdout: "", stderr: "", pageFacts: jsonl([docLine(), textPage(1)]) }, pages);
+      expect(sandboxedPdfPageFacts(single)).toBeUndefined();
+    }
+  });
+
+  it("forgets a job's earlier page facts when a later result for it is refused (council #358 L4)", () => {
+    const single = { input: "/a", output: "/b" };
+    acceptSandboxedPdfResult(single, { exitCode: 0, stdout: "", stderr: "", pageFacts: jsonl([docLine(), textPage(1)]) }, 3);
+    expect(sandboxedPdfPageFacts(single)).toBeDefined();
+    expect(() => acceptSandboxedPdfResult(single, { exitCode: 0, stdout: "", stderr: "", figures: { status: "extracted" } }, 3)).toThrow("unrequested figures");
+    expect(sandboxedPdfPageFacts(single)).toBeUndefined();
   });
 
   it("accepts a fixed failure slug only, and nothing after a failure", () => {
