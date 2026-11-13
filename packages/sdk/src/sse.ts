@@ -1,7 +1,14 @@
 export type SseFrame = { event: string; id?: string; data: string };
 
-/** Incremental SSE framing; the reader is owned and cancelled by the caller. */
-export async function* readSse(reader: ReadableStreamDefaultReader<Uint8Array>): AsyncGenerator<SseFrame> {
+export const DEFAULT_SSE_FRAME_BYTES = 1_048_576;
+
+/**
+ * Incremental SSE framing; the reader is owned and cancelled by the caller.
+ * `maxFrameBytes` bounds one frame (default 1 MiB); the search stream raises it because
+ * `search.results` carries the whole search response in one frame.
+ */
+export async function* readSse(reader: ReadableStreamDefaultReader<Uint8Array>, maxFrameBytes = DEFAULT_SSE_FRAME_BYTES): AsyncGenerator<SseFrame> {
+  const tooLarge = () => new Error(`DocSlurp SSE frame exceeds ${Math.round(maxFrameBytes / 1_048_576)} MiB`);
   const decoder = new TextDecoder();
   let buffer = "";
   let event = "message";
@@ -12,7 +19,7 @@ export async function* readSse(reader: ReadableStreamDefaultReader<Uint8Array>):
     const chunk = await reader.read();
     buffer += decoder.decode(chunk.value, { stream: !chunk.done });
     // Bound both a single unbroken line and a frame containing many short lines.
-    if (buffer.length + size > 1_048_576) throw new Error("DocSlurp SSE frame exceeds 1 MiB");
+    if (buffer.length + size > maxFrameBytes) throw tooLarge();
     while (true) {
       const newline = /\r\n|\r|\n/.exec(buffer);
       if (!newline || (!chunk.done && newline[0] === "\r" && newline.index === buffer.length - 1)) break;
@@ -26,7 +33,7 @@ export async function* readSse(reader: ReadableStreamDefaultReader<Uint8Array>):
         continue;
       }
       size += line.length;
-      if (size > 1_048_576) throw new Error("DocSlurp SSE frame exceeds 1 MiB");
+      if (size > maxFrameBytes) throw tooLarge();
       if (line.startsWith(":")) continue;
       const colon = line.indexOf(":");
       const field = colon < 0 ? line : line.slice(0, colon);

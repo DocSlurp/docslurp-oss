@@ -81,9 +81,10 @@ test("explicit URL and key override environment, including cookie-session opt-ou
 
 test("browser use needs no process global and ignores browser process shims", async () => {
   const compiled = (await readFile(new URL("../dist/sse.js", import.meta.url), "utf8")
+    + await readFile(new URL("../dist/search-stream.js", import.meta.url), "utf8")
     + await readFile(new URL("../dist/keys.js", import.meta.url), "utf8")
     + await readFile(new URL("../dist/index.js", import.meta.url), "utf8"))
-    .replace(/^import .*$/gm, "").replace(/^export \{[^}]*\} from .*$/gm, "").replace(/^export /gm, "");
+    .replace(/^import .*$/gm, "").replace(/^export \{[^}]*\} from .*$/gm, "").replace(/^export \* from .*$/gm, "").replace(/^export /gm, "");
   for (const globals of [
     {},
     { window: {}, process: { env: { DOCSLURP_URL: "https://private.test", DOCSLURP_API_KEY: "private-key", DOCSLURP_PROJECT: "private-project" } } },
