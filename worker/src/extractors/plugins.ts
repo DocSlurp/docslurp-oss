@@ -56,6 +56,28 @@ export interface SandboxedPdfJob {
   figures?: { dir: string; limits?: DopplerImageLimits };
 }
 
+/**
+ * One figure resume (provider `figures.resume`). Paths are host paths the provider stages into its VM; the host reads
+ * nothing of the source. The provider writes the resumed images folder into `dir` (created empty): the manifest
+ * (`manifest.jsonl`, or `shards/<first>-<last>/manifest.jsonl` for a shard) and only the new files under `page-NNNN/`.
+ * It answers like SandboxedPdfResult.figures (`extracted`, `partial` or `failed` with a telemetry-only reason); the host
+ * validates the folder exactly as a first pass's.
+ */
+export interface FigureResumeJob {
+  /** The document's PDF (checked against `sourceSha256` by the converter, which refuses another). */
+  input: string;
+  sourceSha256: string;
+  /** The stored manifest to resume from (the resume folder holds only it). */
+  manifest: string;
+  /** A shard's pages, or null for the whole document. */
+  pages: [number, number] | null;
+  /** Empty folder for the resumed images. */
+  dir: string;
+  limits: DopplerImageLimits;
+  /** Wall-time budget for the VM run. */
+  timeoutMs: number;
+}
+
 export interface SandboxedPdfRunContext {
   /** The host's page count for the document, or 0 when unknown. */
   pages: number;
@@ -146,7 +168,14 @@ export interface SandboxedPdfExtractorProvider {
     read(output: string, signal?: AbortSignal): Promise<EmbeddedImageSet>;
   };
   /** Present when the provider can return Doppler figure crops beside the Markdown (SandboxedPdfJob.figures). */
-  figures?: { producerId: string };
+  figures?: {
+    producerId: string;
+    /**
+     * Finish the images a figure pass left resumable, in a fresh VM (`pdftomarkdown --images-resume` with the stored
+     * manifest only: no figure file goes back into the VM). Optional: without it, resumable documents stay resumable.
+     */
+    resume?(job: FigureResumeJob, signal?: AbortSignal): Promise<unknown>;
+  };
   /** Page-shard cost profile: calibration refines the prior from observed shard timings under `key`. */
   shardProfile?: { key: string; prior: ShardCostProfile };
   /**

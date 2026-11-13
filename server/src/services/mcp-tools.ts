@@ -6,6 +6,9 @@ import { currentChatSessionId, inChatAgentContext } from "../lib/chat-agent-cont
 import { enforceActorCategoryRateLimit } from "../middleware/rate-limit.js";
 import { acquireChatSlot } from "../middleware/chat-concurrency.js";
 import { proposeProjectSettings, SettingsProposalError } from "./project-settings-proposals.js";
+import { FigureResumeProposalError, proposeFigureResume } from "./figure-resume-proposals.js";
+import { countResumableFigureDocuments } from "./figure-resume.js";
+import { figureResumeProposalInputSchema, projectFigureResumeMode } from "@docslurp/shared";
 import { publicErrorMiddleware } from "../lib/public-errors.js";
 import { apiErrorResponse, apiStatusError, usesNativeErrorEnvelope } from "../lib/api-error.js";
 import { mapValidationIssues, type ValidationErrorSource } from "../lib/validation.js";
@@ -122,7 +125,10 @@ const mcpAdapterRoutes = new Hono()
       return c.json({ projectId: project.id,
         pipeline: Object.fromEntries(Object.keys(projectSettingsPipelinePatchSchema.shape).map(key => [key, key === "mediaVideo" ? { enabled: project.pipeline.mediaVideo?.enabled !== false }
           : project.pipeline[key as keyof typeof project.pipeline]])),
-        chat: settings.chat, retrieval: settings.retrievalDefaults });
+        chat: settings.chat, retrieval: settings.retrievalDefaults,
+        // Figures a processing pass left out that a resume could finish (proposeFigureResume), and the project's mode.
+        figures: { resumeMode: projectFigureResumeMode(project.pipeline),
+          resumableDocuments: project.orgId ? await countResumableFigureDocuments({ orgId: project.orgId, projectId: project.id }) : 0 } });
     }
 
     if (toolId === "proposeProjectSettings") {
@@ -137,6 +143,22 @@ const mcpAdapterRoutes = new Hono()
         return c.json({ settingsProposal });
       } catch (error) {
         if (error instanceof SettingsProposalError) return adapterError(c, error.status, error.message);
+        throw error;
+      }
+    }
+
+    if (toolId === "proposeFigureResume") {
+      const parsed = figureResumeProposalInputSchema.safeParse(body);
+      if (!parsed.success) return invalidInput(c, parsed.error);
+      const sessionId = currentChatSessionId();
+      if (!sessionId) return adapterError(c, 403, "Figure proposals require a project chat session");
+      const project = await loadActorScopedProject(await resolveActorProjectId(actor, parsed.data.project), actor);
+      if (!project) return adapterError(c, 404, "Project not found", "project_not_found");
+      try {
+        const figureResumeProposal = await proposeFigureResume({ actor, projectId: project.id, sessionId, ...(parsed.data.documentId ? { documentId: parsed.data.documentId } : {}) });
+        return c.json({ figureResumeProposal });
+      } catch (error) {
+        if (error instanceof FigureResumeProposalError) return adapterError(c, error.status, error.message);
         throw error;
       }
     }

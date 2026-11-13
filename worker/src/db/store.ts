@@ -3350,6 +3350,20 @@ export class Store {
     });
   }
 
+  /** Claims and runs queued figure resumes (figures/resume-runner.ts); a no-op while DOCSLURP_FIGURE_RESUME is off. */
+  async runFigureResumes(deps: Omit<import("../figures/resume-runner.js").FigureResumeDeps, "sql">): Promise<number> {
+    const { runFigureResumes } = await import("../figures/resume-runner.js");
+    return await runFigureResumes({ ...deps, sql: this.sql });
+  }
+
+  /** Orphan GC and the stored-figure audit (figures/resume-runner.ts). */
+  async auditFigureStorage(deps: { storage: import("../figures/resume-runner.js").FigureResumeStorage; limit?: number }) {
+    const { auditFigureStorage, figureResumeBacklog } = await import("../figures/resume-runner.js");
+    const result = await auditFigureStorage({ ...deps, sql: this.sql });
+    const backlog = await figureResumeBacklog(this.sql);
+    return { ...result, backlog };
+  }
+
   /** Claims and runs queued project graph rebuilds (see graph/rebuild-job.ts). */
   async runGraphJobs(options: GraphJobRunnerOptions): Promise<number> {
     return await runGraphJobs(this.sql, options);

@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { dynamicTool, jsonSchema, type ToolSet } from "ai";
-import { projectSettingsProposalSchema, type ProjectSettingsProposal, CHAT_AGENT_LIMIT_DEFAULTS, CHAT_MAX_RETRIEVED_PASSAGES, searchResultSchema, type SearchResult, type ProjectSearchRetrievalDefaults } from "@docslurp/shared";
+import { figureResumeProposalSchema, projectSettingsProposalSchema, type FigureResumeProposal, type ProjectSettingsProposal, CHAT_AGENT_LIMIT_DEFAULTS, CHAT_MAX_RETRIEVED_PASSAGES, searchResultSchema, type SearchResult, type ProjectSearchRetrievalDefaults } from "@docslurp/shared";
 import type { WebToolActivity } from "@docslurp/shared/project-chat-ui";
 import { startTelemetrySpan, type TelemetrySpan } from "@docslurp/shared/observability";
 import type { McpDispatch, McpManifest } from "../lib/mcp-http.js";
@@ -214,7 +214,7 @@ const CHAT_EXCLUDED_TOOLS = new Set(["chat", "openUploader", "upload", "extract"
  * back too, so a customer's end users cannot read project configuration
  * through its chat.
  */
-const CHAT_SETTINGS_TOOLS = new Set(["getProjectSettings", "proposeProjectSettings"]);
+const CHAT_SETTINGS_TOOLS = new Set(["getProjectSettings", "proposeProjectSettings", "proposeFigureResume"]);
 /**
  * Withheld from browser (client) key chats, whose users are a customer's
  * anonymous visitors: upload status reports runs, costs and failed files.
@@ -229,7 +229,7 @@ const CHAT_WEB_TOOLS = new Set(["webSearch", "webFetch"]);
  * nothing by itself. Their failures, refusals and timeouts go back to the model
  * as an error result instead of blocking the turn.
  */
-const NON_BLOCKING_TOOLS = new Set(["proposeProjectSettings"]);
+const NON_BLOCKING_TOOLS = new Set(["proposeProjectSettings", "proposeFigureResume"]);
 
 /**
  * Read-only checks suggestions mode adds to a turn. Their refusals (tool-call
@@ -637,6 +637,12 @@ export function createChatMcpTools(args: {
           }
           // A partial fetch failure still reports what was read and how many pages failed.
           if (response.ok && web) web = webActivityResult(web, result);
+          let figureResumeProposal: FigureResumeProposal | undefined;
+          if (ok && definition.id === "proposeFigureResume") {
+            const parsed = figureResumeProposalSchema.safeParse((result as { figureResumeProposal?: unknown })?.figureResumeProposal);
+            if (parsed.success) figureResumeProposal = parsed.data;
+            else { ok = false; failureCode = "invalid_proposal"; }
+          }
           if (ok && definition.id === "proposeProjectSettings") {
             const parsed = projectSettingsProposalSchema.safeParse((result as { settingsProposal?: unknown })?.settingsProposal);
             if (parsed.success) settingsProposal = parsed.data;
@@ -651,6 +657,7 @@ export function createChatMcpTools(args: {
           detail({ status: ok ? "success" : "error", ...(queries ? { queries } : {}),
             ...(stats ? { resultCount: stats.resultCount, zeroHit: stats.zeroHit } : {}),
             evidencePages: pages, ...(ok ? { costCents } : {}), ...(settingsProposal ? { settingsProposal } : {}),
+            ...(figureResumeProposal ? { figureResumeProposal } : {}),
             ...(ok ? {} : { errorCode: failureCode ?? responseErrorCode(result, response.status) }) });
           if (stats) {
             searchCalls.push(stats);

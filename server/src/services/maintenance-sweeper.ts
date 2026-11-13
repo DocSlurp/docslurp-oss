@@ -13,6 +13,7 @@ import { sweepStaleQueuedRuns } from "./stale-queued-runs.js";
 import { sweepProviderObservations } from "./provider-observations.js";
 import { resumeOrganizationDeletions } from "./tenant-offboarding.js";
 import { requestWebhookOutboxDrain } from "./webhooks.js";
+import { sweepFigureResumeQueue } from "./figure-resume.js";
 
 /**
  * Periodic in-process recovery for work that can otherwise get stuck: queued
@@ -57,6 +58,8 @@ const sweeps: Array<[name: string, run: () => Promise<unknown>]> = [
   ["provider-observations", () => sweepProviderObservations()],
   // Expired API-key search history (lean-logging.ts); result rows and diagnostics cascade.
   ["search-history-expiry", () => sweepExpiredSearchSessions()],
+  // Figure resumes the commit-time enqueue missed (auto projects; every 10 min at most). The worker's runner claims them.
+  ["figure-resume-enqueue", () => sweepFigureResumeQueue()],
 ];
 
 let timer: ReturnType<typeof setInterval> | null = null;

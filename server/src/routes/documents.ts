@@ -360,6 +360,25 @@ export const documentsRoutes = new Hono()
     if (!ledger) return apiStatusError(c, 404, "Document not found");
     return c.json(ledger);
   })
+  // Finish the figures a pass left resumable (figure-resume.ts): only queues, under the runner's own caps. Server keys
+  // with `ingest` or a session that may edit the project; anything outside the caller's scope is the same 404.
+  .post("/:docId/assets/resume", async (c) => {
+    const userId = c.get("sessionUser").id;
+    const docId = c.req.param("docId");
+    const apiKey = c.get("apiKey");
+    if (apiKey && !apiKeyCanUpdateContent(apiKey)) return apiStatusError(c, 403, CONTENT_UPDATE_SCOPE_MESSAGE);
+    const [owner] = await listDocumentOwners([docId], userId);
+    if (!owner || (apiKey && !apiKeyCanUseProject(apiKey, owner))) return apiStatusError(c, 404, "Document not found");
+    const access = await getProjectAccess(owner.projectId, userId);
+    if (!access || access.orgId !== owner.orgId || !canEditProject(access, userId)) return apiStatusError(c, 404, "Document not found");
+    const status = await requestDocumentFigureResume({ orgId: owner.orgId, projectId: owner.projectId, documentId: docId });
+    await appendAuditLog({
+      orgId: owner.orgId, userId, projectId: owner.projectId, documentId: docId, apiKeyId: apiKey?.keyId ?? null,
+      action: "document.figures.resume_requested", resourceType: "document", resourceId: docId, ipAddress: requestIp(c),
+      metadata: { status, userAgent: requestUserAgent(c) },
+    });
+    return c.json({ documentId: docId, status }, status === "queued" || status === "already-queued" ? 202 : 200);
+  })
   .get("/:docId/structured", async (c) => {
     const userId = c.get("sessionUser").id;
     const scoped = await requireApiKeyDocumentScope(c, c.req.param("docId"), userId);

@@ -44,6 +44,8 @@ const projectSettingsPipelinePatchObjectSchema = z.object({
   summarize: z.boolean().optional(), embed: z.boolean().optional(), indexVectors: z.boolean().optional(),
   preserveTables: z.boolean().optional(), preserveCode: z.boolean().optional(), preserveImages: z.boolean().optional(),
   pdfRegionExtraction: z.boolean().optional(), visionFallback: z.boolean().optional(),
+  /** Finishing figures a pass left out: auto (queued on their own), manual (only on request) or off (figure-resume.ts). */
+  figureResume: z.enum(["auto", "manual", "off"]).optional(),
   /** Processing quality (fast / auto / good): the setting the ingest report's vision recommendations change. */
   quality: qualityModeSchema.optional(),
   /**

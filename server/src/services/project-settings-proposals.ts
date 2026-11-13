@@ -54,6 +54,7 @@ const PIPELINE_LABELS: Record<string, string> = {
   "chartExport.enabled": "Chart and diagram export",
   "chartExport.formats": "Chart export formats",
   "chartExport.diagrams": "Export diagrams",
+  figureResume: "Finish missing figures automatically",
 };
 function changedValues(before: PipelineFeatures, after: PipelineFeatures, patch: z.infer<typeof projectSettingsPipelinePatchSchema>) {
   return Object.entries(patch).flatMap(([key, value]) => {

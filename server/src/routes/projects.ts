@@ -106,6 +106,8 @@ import {
 } from "@docslurp/shared/project-chat-ui";
 import { acceptApiKeys } from "../lib/route-auth.js";
 import { apiKeyCanUpdateContent, CONTENT_UPDATE_SCOPE_MESSAGE } from "../lib/content-update-access.js";
+import { requestProjectFigureResumes } from "../services/figure-resume.js";
+import { applyFigureResumeProposal, FigureResumeProposalError } from "../services/figure-resume-proposals.js";
 import { apiErrorResponse, apiStatusError } from "../lib/api-error.js";
 import { indexingModeErrorResponse } from "../lib/indexing-mode-error.js";
 import { getRun } from "../services/runs.js";
@@ -811,6 +813,38 @@ export const projectsRoutes = new Hono()
       if (error instanceof IngestReportActionError) return apiStatusError(c, error.status, error.message);
       throw error;
     }
+  })
+  // The trusted Apply of a chat figure-resume proposal (first-party app only; figure-resume-proposals.ts).
+  .post("/:projectId/figure-resume-proposals/apply", async c => {
+    let body: { token?: unknown };
+    try { body = await c.req.json(); } catch { return apiStatusError(c, 400, "Expected a JSON object"); }
+    if (typeof body?.token !== "string") return apiStatusError(c, 400, "token is required");
+    try {
+      return c.json(await applyFigureResumeProposal({ actor: getRequestActor(c), projectId: c.req.param("projectId"), token: body.token }));
+    } catch (error) {
+      if (error instanceof FigureResumeProposalError) return apiErrorResponse(c, error.status, error.category, error.message);
+      throw error;
+    }
+  })
+  // Queue the project's documents whose figures a resume could finish (at most 100 per request; figure-resume.ts).
+  .post("/:projectId/figures/resume", async (c) => {
+    const userId = c.get("sessionUser").id;
+    const actor = getRequestActor(c);
+    if (actor.type === "apiKey" && !apiKeyCanUpdateContent(actor.apiKey)) return apiStatusError(c, 403, CONTENT_UPDATE_SCOPE_MESSAGE);
+    const project = await getProject(c.req.param("projectId"), userId);
+    if (!project || !project.orgId || (actor.type === "apiKey" && !apiKeyCanUseProject(actor.apiKey, project))) return apiErrorResponse(c, 404, "project_not_found", "Project not found");
+    const access = await getProjectAccess(project.id, userId);
+    if (!access || !canEditProject(access, userId)) return apiErrorResponse(c, 404, "project_not_found", "Project not found");
+    const raw = c.req.query("limit");
+    const limit = raw === undefined ? undefined : /^[1-9][0-9]{0,3}$/.test(raw) ? Number(raw) : null;
+    if (limit === null) return apiStatusError(c, 400, "Invalid limit");
+    const result = await requestProjectFigureResumes({ orgId: project.orgId, projectId: project.id, ...(limit ? { limit } : {}) });
+    await appendAuditLog({
+      orgId: project.orgId, userId, projectId: project.id, apiKeyId: actor.type === "apiKey" ? actor.apiKey.keyId : null,
+      action: "project.figures.resume_requested", resourceType: "project", resourceId: project.id, ipAddress: requestIp(c),
+      metadata: { ...result, userAgent: requestUserAgent(c) },
+    });
+    return c.json({ projectId: project.id, ...result }, result.queued > 0 ? 202 : 200);
   })
   .post("/:projectId/ingest-report/reprocess", zValidator("json", reprocessIngestRecommendationSchema, validationHook), async (c) => {
     const userId = c.get("sessionUser").id;

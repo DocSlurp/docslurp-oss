@@ -400,7 +400,15 @@ async function readManifestLines(
  */
 export async function readDopplerFigureDir(
   dir: string,
-  args: { pageCount: number; signal?: AbortSignal; expect?: DopplerFigureExpectation; sourceSha256?: string | null; hooks?: DopplerFigureReadHooks },
+  args: {
+    pageCount: number; signal?: AbortSignal; expect?: DopplerFigureExpectation; sourceSha256?: string | null; hooks?: DopplerFigureReadHooks;
+    /**
+     * A resume's folder (`--images-resume` from the stored manifest only): images the ledger already holds a stored file
+     * for (id → SHA-256) must keep that digest and may come back without their file; a file handed back for one of them
+     * must be byte-identical (checked as it would be uploaded) and is never stored again. Another digest is `resume-rewrite`.
+     */
+    resume?: { stored: ReadonlyMap<string, string> };
+  },
 ): Promise<DopplerFigureSet> {
   const pageCount = Number.isSafeInteger(args.pageCount) && args.pageCount > 0 ? args.pageCount : 0;
   const caps = dopplerAssetCaps(pageCount);
@@ -460,7 +468,14 @@ export async function readDopplerFigureDir(
   // Where each extracted image's file must be, relative to the folder, by the id that owns it.
   const expected = new Map<string, DopplerFigureFile>();
   let fileBytes = 0;
+  const kept = new Set<string>();
   const addFile = (relative: string, id: string, format: DopplerFigureFormat, size: number, sha256: string, cap: number) => {
+    const storedSha = args.resume?.stored.get(id);
+    if (storedSha !== undefined) {
+      if (storedSha !== sha256) throw new DopplerFigureRejection("resume-rewrite");
+      kept.add(relative);
+      return;
+    }
     if (size > cap) throw new DopplerFigureRejection("oversized-file");
     expected.set(relative, { id, format, mediaType: DOPPLER_FIGURE_MEDIA_TYPES[format], relative, size, sha256, cap });
     fileBytes += size;
@@ -582,6 +597,8 @@ export async function readDopplerFigureDir(
         if (!after || after.isSymbolicLink() || after.dev !== before.dev || after.ino !== before.ino) throw new DopplerFigureRejection("folder-changed");
       }
     }
+    // A resume may hand back a file it kept: not stored again (its stored object stays the one served).
+    for (const name of [...present]) if (kept.has(name)) present.delete(name);
     if (expected.size !== present.size || [...present].some((name) => !expected.has(name))) throw new DopplerFigureRejection("files-do-not-match-manifest");
     for (const entry of expected.values()) {
       args.signal?.throwIfAborted();

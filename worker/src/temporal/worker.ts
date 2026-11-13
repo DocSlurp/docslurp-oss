@@ -1,4 +1,6 @@
 import { flushErrorReporting, initializeWorkerErrorReporting, reportException } from "@docslurp/shared/error-reporting";
+import { sandboxedPdfProvider } from "../extractors/plugins.js";
+import { pushPerfMetric } from "../lib/perf-context.js";
 import { envFlags, formatEnvFlags } from "@docslurp/shared/env-flags";
 import { startLiveModelPriceRefresh } from "@docslurp/shared";
 import { initializeObservability, shutdownObservability, withBackgroundSpan } from "@docslurp/shared/observability";
@@ -546,6 +548,36 @@ async function main(): Promise<void> {
     : null;
   graphJobTimer?.unref();
 
+  // Figure resumes (figures/resume-runner.ts): one document at a time per worker, leased; a no-op unless
+  // DOCSLURP_FIGURE_RESUME is on and the PDF provider can resume. The orphan GC and audit run every 30 minutes.
+  let figureResumeRunning = false;
+  const figureProvider = () => {
+    const pdf = sandboxedPdfProvider();
+    return pdf?.figures?.resume ? { resume: pdf.figures.resume.bind(pdf.figures), timeoutMs: (pages: number) => pdf.timeoutMs(pages) } : null;
+  };
+  const runFigureResumes = () => {
+    if (figureResumeRunning) return;
+    figureResumeRunning = true;
+    withBackgroundSpan("figure-resume", () => store.runFigureResumes({ storage, provider: figureProvider(), workerId: workerIdentity }))
+      .catch((err) => console.error(`[doppler-figures] resume sweep failed: ${err instanceof Error ? err.name : typeof err}`))
+      .finally(() => { figureResumeRunning = false; });
+  };
+  const figureResumeTimer = setInterval(onLeader(runFigureResumes), 30_000);
+  figureResumeTimer.unref();
+  let figureAuditRunning = false;
+  const figureAuditTimer = setInterval(onLeader(() => {
+    if (figureAuditRunning) return;
+    figureAuditRunning = true;
+    withBackgroundSpan("figure-audit", () => store.auditFigureStorage({ storage, limit: 50 }))
+      .then((result) => {
+        pushPerfMetric({ metric: "figures.resumable_backlog", value: result.backlog.queued, unit: "count", tags: ["figure-resume"], metadata: {} });
+        pushPerfMetric({ metric: "figures.resume_oldest_age_s", value: result.backlog.oldestAgeS, unit: "seconds", tags: ["figure-resume"], metadata: {} });
+      })
+      .catch((err) => console.error(`[figure-audit] sweep failed: ${err instanceof Error ? err.name : typeof err}`))
+      .finally(() => { figureAuditRunning = false; });
+  }), 30 * 60_000);
+  figureAuditTimer.unref();
+
   // LanceDB maintenance runs off the index stage's critical path (lancedb-maintenance-pool.ts).
   // Drainers schedule it as they commit; this sweep catches tables that became due with no
   // drainer coming (traffic stopped) and checks lost to a crash or a shutdown drain timeout.
@@ -661,6 +693,8 @@ async function main(): Promise<void> {
     clearInterval(retentionTimer);
     if (purgeTimer) clearInterval(purgeTimer);
     if (graphJobTimer) clearInterval(graphJobTimer);
+    clearInterval(figureResumeTimer);
+    clearInterval(figureAuditTimer);
     if (creditFlushTimer) clearInterval(creditFlushTimer);
     if (lanceSweepTimer) clearInterval(lanceSweepTimer);
     // Activities have drained; let background LanceDB maintenance finish (bounded) before

@@ -470,6 +470,7 @@ export async function writeDocumentAssetLedger(sql: Sql<Record<string, unknown>>
       where document_extraction_levels.org_id = excluded.org_id and document_extraction_levels.project_id = excluded.project_id
       returning 1`;
     if (leveled.length !== 1) throw new DocumentAssetLedgerError("write-mismatch");
+    await queueFigureResume(tx, write.scope, resuming);
     return { upserted, removed, resumes };
   });
 }
@@ -1055,4 +1056,39 @@ export function figureLedgerHooks(
     pending: async (rows) => { await store.markAssetsPending!({ scope, rows }); },
     stored: async (files) => { await store.markAssetsStored!({ scope, files }); },
   };
+}
+
+// ---- The resume queue (migration 0144) ----
+
+/**
+ * SQL: whether a project resumes figures on its own (`pipeline.figureResume` is `auto`, the default, and its figures are
+ * not off). Mirrors projectFigureResumeMode (packages/shared figure-resume.ts).
+ */
+export function projectAutoResumeSql(tx: Sql<Record<string, unknown>> | Tx, projectAlias: string) {
+  const p = tx(projectAlias);
+  return tx`(coalesce(${p}.pipeline ->> 'figureResume', 'auto') = 'auto'
+    and coalesce(${p}.pipeline -> 'figures', 'true'::jsonb) not in ('false'::jsonb, '"off"'::jsonb)
+    and coalesce(${p}.pipeline -> 'figures' ->> 'enabled', 'true') <> 'false')`;
+}
+
+/**
+ * In the transaction that commits a level: queue a resume when it is resumable and the project resumes on its own, after
+ * a short delay (or, for a resume's own write, after the backoff for the attempts spent); clear the queue entry when
+ * nothing is left to resume. Never touches a blocked document (a request or a fresh pass clears the block).
+ */
+async function queueFigureResume(tx: Tx, scope: DocumentAssetLedgerScope, resumed: boolean): Promise<void> {
+  await tx`
+    update document_extraction_levels l set
+      resume_after = case
+        when l.images_status <> 'resumable' or not l.assets_current then null
+        when ${resumed} then now() + (case least(l.resumes, 2) when 0 then interval '2 minutes' when 1 then interval '15 minutes' else interval '2 hours' end)
+        when l.resume_after is not null then l.resume_after
+        when ${projectAutoResumeSql(tx, "p")} then now() + interval '2 minutes'
+        else null end,
+      resume_blocked = case when ${resumed} then l.resume_blocked else null end,
+      -- A fresh pass starts the failure count again; a resume's own write keeps it.
+      resume_failures = case when ${resumed} then l.resume_failures else 0 end
+    from projects p
+    where l.document_id = ${scope.documentId} and l.org_id = ${scope.orgId} and l.project_id = ${scope.projectId}
+      and p.id = l.project_id and p.org_id = l.org_id`;
 }

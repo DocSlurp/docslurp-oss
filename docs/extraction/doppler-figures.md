@@ -392,6 +392,56 @@ Migration 0143 makes the asset ledger keep extracted figures on every failure pa
   `manifest.jsonl` alone: `downloadDopplerImagesDir` defaults to `manifestOnly`, so finished figures never travel back
   into the VM.
 
+## Resuming partial figures
+
+A figure pass can leave images resumable: a batch or document budget, a deadline, or a shard that timed out. The resume
+runner (`worker/src/figures/resume-runner.ts`) finishes them in the background.
+
+**Queueing.** A document is queued in the same transaction that commits its resumable level
+(`document_extraction_levels.resume_after`, migration 0144), when its project's `pipeline.figureResume` is `auto` (the
+default). A backstop sweep in the API's maintenance sweeper (`figure-resume-enqueue`) re-queues any the commit missed.
+`manual` projects queue only on request, and `off` projects (or projects whose figures are off) never do. Requests:
+
+- `POST /v1/documents/{id}/assets/resume`, or the SDK's `resumeDocumentFigures(id)`;
+- `POST /v1/projects/{id}/figures/resume?limit=N` (at most 100 per request), or `resumeProjectFigures(id, { limit })`;
+- in the app's chat, the `proposeFigureResume` tool, which offers to "finish extracting the missing figures" for one
+  document or the project. The user applies the card (`POST /v1/projects/{id}/figure-resume-proposals/apply`).
+
+All three only queue. They need a server API key with `ingest`, or a session that may edit the project; anything outside
+the caller's organization or project is a 404. `getProjectSettings` reports `figures.resumableDocuments`.
+
+**Running.** The runner only runs while `DOCSLURP_FIGURE_RESUME` is on (default off; queued documents wait and nothing is
+lost) and while the PDF provider implements `figures.resume`. It claims one document at a time per worker with
+`for update skip locked`, and at most one per organization. It skips organizations that may not spend, since a resume
+adds stored bytes; those are re-queued an hour later. Per resumable unit (the document, or each resumable shard):
+
+1. Pending uploads a crashed attempt left are adopted (streamed SHA-256, no VM).
+2. Only the unit's stored `manifest.jsonl` is downloaded, and the provider runs `--images-resume` in a fresh VM. No
+   figure file goes back into the VM.
+3. The folder is validated whole. Images already stored must keep their digest and are never uploaded again.
+4. New files are stored as pending, then stored, with conditional creates.
+5. The ledger is written as a resume: it only adds, `resume-rewrite` is refused, and it counts against #355's cap of 3.
+6. The new files' slots join the document's run.
+
+The VM time is a cost-only usage event (`doppler-figures-resume-vm`, `billable: false`); it is never a customer charge.
+Failed attempts back off 2 minutes, 15 minutes, then 2 hours, and the document is blocked after three
+(`resume_blocked = attempts`). A reprocess or newer run that overtakes a resume makes its writes `stale-write`: the
+resume is a no-op and the document is blocked as `stale`. The source and settings digests bind a resume to the same PDF
+and settings.
+
+**Orphan GC and audit.** Every 30 minutes the worker lists the images folders of up to 50 documents with figure rows.
+It deletes page files that no ledger row of any run vouches for, once they are older than 24 hours; this is the only
+figure deleter besides document, run and tenant purges. A stored row of the current run whose object is missing, or has
+another size, becomes a resumable `aborted` image, and the document is queued.
+
+**Telemetry.**
+- Log lines: `[doppler-figures] resume claim|unit|done|failed|stale|capped|requested|backstop` and `[figure-audit]`.
+- Spans: `figure-resume` and `figure-audit`.
+- Metrics:
+  - `figures.resume.{claimed,completed,partial,stale,failed,capped}`;
+  - `figures.resumable_backlog` and `figures.resume_oldest_age_s`;
+  - `figures.adopted_files`, `figures.orphan_bytes` and `figures.ledger_storage_drift`.
+
 ## Storage billing
 
 Stored figures are billed as storage, measured rather than estimated. The daily storage meter

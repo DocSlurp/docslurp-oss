@@ -103,6 +103,8 @@ export const PIPELINE_FIELD_IMPACT: Record<keyof PipelineFeatures, FieldImpact> 
   speedBoost: "new-uploads",
   firstPass: "new-uploads",
   afterFirstPass: "new-uploads",
+  // Resume scheduling only: no stored document is re-run.
+  figureResume: "none",
   // Existing vectors would be incompatible with new queries/chunks.
   embedding: "reindex-required",
   chunkOverlap: "reindex-required",
