@@ -348,10 +348,11 @@ class SqlSearchSessionJournal implements SearchSessionJournal {
         ? client`'enc:pgp:v1:' || encode(pgp_sym_encrypt(${input.query}, ${encryptionKey}), 'base64')`
         : redactedSearchQuery(input.query);
       const sessions = await client<{ id: string; inserted: boolean }[]>`
-        insert into search_sessions (id, user_id, query, variant, result_count, metadata, expires_at)
+        insert into search_sessions (id, user_id, project_id, query, variant, result_count, metadata, expires_at)
         values (
           ${this.sessionId},
           ${input.userId},
+          ${input.metadata.projectId},
           ${storedQuery},
           ${input.variant ?? null},
           ${input.results.length},
@@ -363,7 +364,7 @@ class SqlSearchSessionJournal implements SearchSessionJournal {
           metadata = excluded.metadata,
           variant = excluded.variant
         where search_sessions.user_id = excluded.user_id
-          and search_sessions.metadata ->> 'projectId' = excluded.metadata ->> 'projectId'
+          and search_sessions.project_id = excluded.project_id
           and search_sessions.metadata ->> 'queryHash' = excluded.metadata ->> 'queryHash'
         returning id, (xmax = 0) as inserted
       `;
