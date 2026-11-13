@@ -80,6 +80,29 @@ describe("write-behind search session writes", () => {
   });
 });
 
+describe("write-behind backpressure", () => {
+  it("counts writes still waiting on an earlier write of their session", async () => {
+    vi.stubEnv("SEARCH_WRITE_BEHIND_CONCURRENCY", "1");
+    vi.stubEnv("SEARCH_WRITE_BEHIND_MAX_PENDING", "1");
+    try {
+      let release!: () => void;
+      const journal = createSearchSessionJournal({ writeBehind: true });
+      await journal.afterWrites(() => new Promise<void>((resolve) => { release = resolve; }));
+      // Waits behind the first write of its session, not in the slot queue: it still fills the backlog.
+      await journal.afterWrites(async () => {});
+      let returned = false;
+      const third = createSearchSessionJournal({ writeBehind: true }).afterWrites(async () => {}).then(() => { returned = true; });
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(returned).toBe(false);
+      release();
+      await third;
+      await drainSearchSessionWrites();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+});
+
 describe("write-behind search usage", () => {
   /** Every usage insert waits for `release`, so a test can see whether the search waited for it. */
   function gateInserts() {

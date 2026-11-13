@@ -124,6 +124,8 @@ function countSaturatedWrite(): void {
   }
 }
 let activeBackgroundWrites = 0;
+/** Write-behind writes parked behind an earlier write or usage flush of their session (not yet in the slot queue). */
+let parkedWrites = 0;
 const backgroundQueue: Array<() => void> = [];
 
 function writeBehindConcurrency(): number {
@@ -213,6 +215,8 @@ class SqlSearchSessionJournal implements SearchSessionJournal {
   private readonly usage: UsageLedger = createUsageLedger({});
   private persistenceTail: Promise<void> = Promise.resolve();
   private usageTail: Promise<void> = Promise.resolve();
+  /** Usage flushes of this journal not yet settled (a snapshot enqueued meanwhile is parked behind them). */
+  private usageInFlight = 0;
   private readonly diagnosticEvents: Record<string, unknown> = {};
   /** The chat turn whose search agent ran this retrieval, if any. */
   private readonly chatSessionId = currentChatSessionId();
@@ -242,11 +246,15 @@ class SqlSearchSessionJournal implements SearchSessionJournal {
       return pending;
     }
     const bound = AsyncResource.bind(write);
-    // Backpressure: a full backlog makes this search wait for its own write.
-    const saturated = backgroundQueue.length >= writeBehindMaxPending();
+    // Backpressure: a full backlog makes this search wait for its own write. Writes still waiting on an earlier
+    // write (or usage flush) of their session count too, not only those queued for a slot.
+    const saturated = backgroundQueue.length + parkedWrites >= writeBehindMaxPending();
+    const parked = pendingSessionWrites.has(this.sessionId) || this.usageInFlight > 0;
+    if (parked) parkedWrites += 1;
     const previous = pendingSessionWrites.get(this.sessionId) ?? Promise.resolve();
     // After this journal's usage flush too, so the snapshot never inserts the same events concurrently.
     const pending = Promise.all([previous, this.persistenceTail, this.usageTail])
+      .finally(() => { if (parked) parkedWrites -= 1; })
       .then(() => inBackgroundSlot(bound))
       // One retry, as the inline path retries a failed usage flush: these writes carry billed usage.
       // A failed attempt rolled back (each write is one transaction), so retrying cannot double it.
@@ -338,6 +346,9 @@ class SqlSearchSessionJournal implements SearchSessionJournal {
       .then(() => undefined)
       // Still unflushed: the background session write retries it in its transaction.
       .catch((error) => { reportPublicError(error, { operation: "search-usage-inline", sessionId: this.sessionId }); });
+    this.usageInFlight += 1;
+    void pending.finally(() => { this.usageInFlight -= 1; });
+    // `pending` reports its own failure (and the snapshot's transaction retries the events), so it never rejects here.
     const { done, settled } = writeBehindWithinCap(this.usage.pendingCostCents(), () => pending);
     this.usageTail = settled;
     trackCurrentChatTurnWrite(settled);

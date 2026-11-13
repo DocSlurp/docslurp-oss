@@ -39,7 +39,7 @@ import { writeBehindWithinCap } from "../lib/billed-write-behind.js";
 import { currentChatTurn } from "../lib/chat-turn-context.js";
 import { effectiveSearchMode } from "../search/search-mode.js";
 import { consumeSearchModeLimit } from "../search/search-mode-limits.js";
-import { currentRequestSignal } from "../lib/request-context.js";
+import { currentRequestOrgId, currentRequestSignal } from "../lib/request-context.js";
 import { jsonRecord } from "../lib/json-record.js";
 import { lanceDbFullTextSearch, lanceDbVectorSearch, warmLanceDbSearch, type LanceDbSearchHit } from "../search/lancedb.js";
 import { decodeLanceChunkHydration } from "@docslurp/shared/lancedb-hydration";
@@ -1703,11 +1703,13 @@ async function chargeSearch(result: SearchResponse, userId: string, searchId: st
   }
   const llmMode = result.searchMode ?? "deep";
   const credits = searchCredits(1, { llmStrategies, mode: llmMode });
+  const orgId = projectOrgs.get(projectId)?.replace(/^org:/, "") ?? currentRequestOrgId() ?? null;
   // Committed after the response within SEARCH_WRITE_BEHIND_MAX_CREDITS, retried until it lands; the id makes a retry idempotent.
   await writeBehindWithinCap(credits, async () => {
     await recordUnitCharge({
       userId,
-      scope: { projectId, sessionId: result.sessionId },
+      // The organization is fixed now: a project deleted before a deferred write commits must still be debited.
+      scope: { projectId, orgId, sessionId: result.sessionId },
       charge: {
         id: `search:${searchId}`,
         metric: BILLABLE_UNIT_METRICS.search,

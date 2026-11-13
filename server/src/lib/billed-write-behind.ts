@@ -10,14 +10,39 @@
  * own write, as before.
  *
  * A deferred write that fails keeps holding its credits and is retried (same
- * id, backoff up to 30 s) until it commits, so failures can never recycle the
- * allowance: once unwritten charges fill the cap, every later request writes
- * before it answers. Shutdown (drainBilledWriteBehind) retries what is left
- * without waiting.
+ * id, backoff up to 30 s, about ten minutes) until it commits, so transient
+ * failures cannot recycle the allowance: once unwritten charges fill the cap,
+ * every later request writes before it answers. Integrity errors (SQLSTATE 23)
+ * and exhausted retries are reported as lost. At most
+ * SEARCH_WRITE_BEHIND_MAX_PENDING writes of any cost are deferred at once.
+ * Shutdown (drainBilledWriteBehind) retries what is left without waiting.
  */
 
 const DEFAULT_MAX_CREDITS = 10;
 const RETRY_DELAYS_MS = [250, 1_000, 5_000, 30_000];
+/** About ten minutes of retries; then the write is reported as lost and its credits are released. */
+const MAX_ATTEMPTS = 25;
+
+/**
+ * Writes (any cost) allowed to run after their response: SEARCH_WRITE_BEHIND_MAX_PENDING, default 200, the
+ * session write-behind backlog limit. Zero-credit inserts are bounded by it too.
+ */
+function maxPendingWrites(env: NodeJS.ProcessEnv = process.env): number {
+  const parsed = Number(env.SEARCH_WRITE_BEHIND_MAX_PENDING);
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : 200;
+}
+
+/** Integrity violations (SQLSTATE class 23: foreign key, check, not null) fail the same way on every retry. */
+function permanentFailure(error: unknown): boolean {
+  const code = (error as { code?: unknown } | null)?.code;
+  return typeof code === "string" && code.startsWith("23");
+}
+
+let lostWrites = 0;
+/** Deferred writes given up on (permanent error or retries exhausted) since start. */
+export function billedWriteBehindLost(): number {
+  return lostWrites;
+}
 
 export function billedWriteBehindMaxCredits(env: NodeJS.ProcessEnv = process.env): number {
   const raw = (env.SEARCH_WRITE_BEHIND_MAX_CREDITS ?? "").trim();
@@ -63,7 +88,9 @@ export interface BilledWriteOptions {
  */
 export function writeBehindWithinCap(credits: number, write: () => Promise<void>, options: BilledWriteOptions = {}): { done: Promise<void>; settled: Promise<void> } {
   const cost = Number.isFinite(credits) && credits > 0 ? credits : 0;
-  if (deferredCredits + cost > billedWriteBehindMaxCredits()) {
+  const maxCredits = billedWriteBehindMaxCredits();
+  // A cap of 0 never defers, even a zero-credit write; the pending count bounds zero-credit writes otherwise.
+  if (maxCredits === 0 || deferredCredits + cost > maxCredits || pending.size >= maxPendingWrites()) {
     const settled = write().catch((error) => { options.onError?.(error, 0); });
     return { done: settled, settled };
   }
@@ -75,8 +102,12 @@ export function writeBehindWithinCap(credits: number, write: () => Promise<void>
         return;
       } catch (error) {
         options.onError?.(error, attempt);
-        // Shutdown gives each write two more tries, then leaves it to the logs.
-        if (draining && attempt >= 2) return;
+        // Integrity errors never succeed; retries end after MAX_ATTEMPTS; shutdown gives two more tries.
+        if (permanentFailure(error) || attempt + 1 >= MAX_ATTEMPTS || (draining && attempt >= 2)) {
+          lostWrites += 1;
+          console.error(`[billed-write-behind] gave up on a deferred billed write after ${attempt + 1} attempt(s) (${permanentFailure(error) ? "permanent error" : "retries exhausted"}); lost=${lostWrites}`);
+          return;
+        }
         await retryDelay(attempt);
       }
     }

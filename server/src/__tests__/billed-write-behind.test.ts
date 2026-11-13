@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { billedWriteBehindCredits, billedWriteBehindMaxCredits, billedWriteBehindPending, drainBilledWriteBehind, writeBehindWithinCap } from "../lib/billed-write-behind.js";
+import { billedWriteBehindCredits, billedWriteBehindLost, billedWriteBehindMaxCredits, billedWriteBehindPending, drainBilledWriteBehind, writeBehindWithinCap } from "../lib/billed-write-behind.js";
 
 function gate() {
   let release!: () => void;
@@ -108,5 +108,40 @@ describe("billed write-behind cap", () => {
     expect(await settles(result)).toBe(false);
     write.release();
     await result;
+  });
+
+  it("gives up at once on integrity errors and releases the credits", async () => {
+    const lost = billedWriteBehindLost();
+    let attempts = 0;
+    const result = writeBehindWithinCap(3, async () => {
+      attempts += 1;
+      throw Object.assign(new Error("insert violates foreign key constraint"), { code: "23503" });
+    });
+    await result.settled;
+    expect(attempts).toBe(1);
+    expect(billedWriteBehindLost()).toBe(lost + 1);
+    expect(billedWriteBehindCredits()).toBe(0);
+  });
+
+  it("never defers with a cap of 0, even a zero-credit write", async () => {
+    vi.stubEnv("SEARCH_WRITE_BEHIND_MAX_CREDITS", "0");
+    const write = gate();
+    const result = writeBehindWithinCap(0, () => write.promise).done;
+    expect(await settles(result)).toBe(false);
+    write.release();
+    await result;
+  });
+
+  it("bounds zero-credit writes by SEARCH_WRITE_BEHIND_MAX_PENDING", async () => {
+    vi.stubEnv("SEARCH_WRITE_BEHIND_MAX_PENDING", "3");
+    const write = gate();
+    const deferred = Array.from({ length: 3 }, () => writeBehindWithinCap(0, () => write.promise).done);
+    for (const done of deferred) expect(await settles(done)).toBe(true);
+    expect(billedWriteBehindPending()).toBe(3);
+    const fourth = writeBehindWithinCap(0, () => write.promise).done;
+    expect(await settles(fourth)).toBe(false);
+    write.release();
+    await fourth;
+    await drainBilledWriteBehind();
   });
 });
