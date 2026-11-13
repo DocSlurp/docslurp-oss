@@ -26,8 +26,11 @@ export function cleanLabelOrNull(value: unknown): string | null {
 export function finiteOrNull(value: unknown): number | null {
   if (typeof value === "number") return Number.isFinite(value) ? value : null;
   if (typeof value !== "string") return null;
+  // No finite number needs this many characters; the cap and the unambiguous pattern (same language as
+  // /^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/, which split a digit run every possible way) keep this O(n) (council r8 H1).
+  if (value.length > 512) return null;
   const t = value.trim();
-  if (t === "" || !/^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/.test(t)) return null;
+  if (t === "" || !/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(t)) return null;
   const v = Number(t);
   return Number.isFinite(v) ? v : null;
 }

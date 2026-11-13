@@ -144,6 +144,17 @@ const inputs = {
   emptyCmtEpub90: () => [epub(Object.fromEntries([["OEBPS/a000.svg", r7.barSvg()], ...Array.from({ length: 90 }, (_, i) => [`OEBPS/b${String(i).padStart(3, "0")}.svg`, r7.emptyCmt()]), ["OEBPS/z999.svg", r7.barSvg()]]))],
   legit: () => [{ kind: "html", text: `<html><body>${Array.from({ length: 100 }, (_, k) => bar(k)).join("")}</body></html>` }],
 }[mode]();
+// --write <dir>: write the mode's inputs as guest inputs (<dir>/<mode>[-k]/{input,meta.json}) for guest-repro-run.mjs.
+if (process.argv[4] === "--write") {
+  const { mkdirSync, writeFileSync } = await import("node:fs");
+  inputs.forEach((input, k) => {
+    const dir = `${process.argv[5]}/${mode}${inputs.length > 1 ? `-${k}` : ""}`;
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(`${dir}/input`, input.text ?? input.bytes);
+    writeFileSync(`${dir}/meta.json`, JSON.stringify({ kind: input.kind }));
+  });
+  process.exit(0);
+}
 const bytes = inputs.reduce((n, i) => n + (i.text?.length ?? i.bytes.length), 0);
 const t0 = process.hrtime.bigint();
 const results = inputs.map((input) => extractDeterministicVisuals(input));

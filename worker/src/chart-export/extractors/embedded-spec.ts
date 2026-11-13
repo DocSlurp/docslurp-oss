@@ -1,7 +1,7 @@
 import { CHART_EXTRACT_LIMITS, pastGuestDeadline } from "./limits.js";
 import { clamp01, finalizeChart, type DraftChart, type DraftSeries } from "./spec-utils.js";
 import { cleanLabel, finiteOrNull } from "./text.js";
-import { indexFrom, type ScanWork } from "./scan.js";
+import { asciiLower, indexFrom, type ScanWork } from "./scan.js";
 import { decodeEntities, textContent, type XmlElement } from "./xml.js";
 
 /*
@@ -48,7 +48,7 @@ export function safeJsonParse(text: string): Json | undefined {
 }
 
 /** Top-level `{...}` and `[...]` regions in a script body (string- and comment-aware), in order. */
-export function jsonRegions(body: string, max: number = CHART_EXTRACT_LIMITS.maxJsonCandidates): Array<{ start: number; text: string }> {
+export function jsonRegions(body: string, max: number = CHART_EXTRACT_LIMITS.maxJsonCandidates, stats?: EmbeddedScanStats): Array<{ start: number; text: string }> {
   const out: Array<{ start: number; text: string }> = [];
   let depth = 0;
   let start = -1;
@@ -66,14 +66,18 @@ export function jsonRegions(body: string, max: number = CHART_EXTRACT_LIMITS.max
     if (c === "{" || c === "[") {
       if (depth === 0) start = i;
       depth++;
-      if (depth > CHART_EXTRACT_LIMITS.maxJsonDepth * 4) return out;
+      // Too deep to be a spec: the rest of the body is not scanned, and that is counted (council r8 L1).
+      if (depth > CHART_EXTRACT_LIMITS.maxJsonDepth * 4) { if (stats) stats.overflow++; return out; }
     } else if (c === "}" || c === "]") {
       if (depth === 0) continue;
       depth--;
       if (depth === 0 && start >= 0) {
-        if (i + 1 - start <= CHART_EXTRACT_LIMITS.maxJsonBytes) out.push({ start, text: body.slice(start, i + 1) });
+        // Regions over maxJsonBytes, and regions past `max`, are counted (the scan continues, cheaply, to count them).
+        if (i + 1 - start > CHART_EXTRACT_LIMITS.maxJsonBytes) { if (stats) stats.overflow++; }
+        else if (out.length < max) out.push({ start, text: body.slice(start, i + 1) });
+        else if (stats) stats.overflow++;
+        else return out;
         start = -1;
-        if (out.length >= max) return out;
       }
     }
   }
@@ -439,7 +443,7 @@ export function unwrapCdata(body: string): string | null {
  * for again, and a start with no `>` after it ends the scan. Blocks past `max` are counted in `stats.overflow`.
  */
 export function scanBlocks(text: string, max: number, stats: EmbeddedScanStats, work?: ScanWork): Array<{ name: string; attrs: string; body: string }> {
-  const lower = text.toLowerCase();
+  const lower = asciiLower(text);
   const out: Array<{ name: string; attrs: string; body: string }> = [];
   const open = { script: true, metadata: true } as Record<string, boolean>;
   let i = 0;
@@ -535,10 +539,13 @@ function specsFromBlocks(blocks: EmbeddedBlock[], hits: EmbeddedSpecHit[], seen:
       }
     }
     // Plotly.newPlot(el, data, layout): the first array region after the call is the trace list, the next object the layout.
-    const regions = jsonRegions(block.body);
+    const regions = jsonRegions(block.body, CHART_EXTRACT_LIMITS.maxJsonCandidates, stats);
     let calls = 0;
+    // A data region several calls point at is parsed once (offsets in this block; council r8 L2).
+    const dataSeen = new Set<number>();
     for (const call of block.body.matchAll(PLOTLY_CALL)) {
-      if (++calls > 50) break;
+      // Calls past 50 are counted, not run (council r8 L1).
+      if (++calls > 50) { stats.overflow++; continue; }
       // Scan from inside the call's parentheses so a call nested in a block is still found.
       // A window after the call: the data and layout regions are each at most maxJsonBytes, so nothing usable is cut,
       // and 50 calls cannot each rescan a whole 5 MiB body.
@@ -546,6 +553,8 @@ function specsFromBlocks(blocks: EmbeddedBlock[], hits: EmbeddedSpecHit[], seen:
       const after = jsonRegions(block.body.slice(from, from + 2 * CHART_EXTRACT_LIMITS.maxJsonBytes + 4096), 4);
       const dataRegion = after.find((r) => r.text.startsWith("["));
       if (!dataRegion) continue;
+      if (dataSeen.has(from + dataRegion.start)) continue;
+      dataSeen.add(from + dataRegion.start);
       const data = safeJsonParse(dataRegion.text);
       if (!Array.isArray(data)) { hits.push({ locator: block.locator, generator: "plotly", spec: null, confidence: 0, reason: "plotly-data-not-json" }); continue; }
       const layoutRegion = after.find((r) => r.start > dataRegion.start && r.text.startsWith("{"));

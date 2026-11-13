@@ -109,6 +109,13 @@ describe("VM deterministic extractor adapter", () => {
     // Refusal logs name the document and why the VM ran, never content.
     expect(logs.some((m) => m.includes("reason=guest-unavailable") && m.includes("document=doc"))).toBe(true);
     expect(logs.some((m) => m.includes("document=doc reason=office-chart-parts"))).toBe(true);
+    // Everything the refused run lost is counted for the deferred pass (council r8 L1): the source, and each figure
+    // that was not run because the guest was down.
+    expect(result.deferred).toEqual([
+      { input: "source", svgIndex: 0, count: 1, reason: "guest-unavailable", pageNumber: null, figureId: null },
+      { input: "doppler-figure", svgIndex: 0, count: 1, reason: "guest-unavailable", pageNumber: 2, figureId: "p2.g0" },
+      { input: "doppler-figure", svgIndex: 0, count: 1, reason: "guest-unavailable", pageNumber: 2, figureId: "p2.g1" },
+    ]);
   });
 
   it("sends every Doppler SVG figure of a document to the guest in one batched VM run, with each figure's page", async () => {
