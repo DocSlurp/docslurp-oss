@@ -246,7 +246,6 @@ export interface DopplerDocFacts {
   incrementalUpdates?: number;
   tagged?: boolean;
   markedContent?: boolean;
-  lang?: string;
   outlineCount?: number;
   pageLabels?: boolean;
   embeddedFiles?: number;
@@ -506,12 +505,11 @@ export function validateDopplerPage(value: unknown, pageCount: number): DopplerP
   return out;
 }
 
-const LANG = /^[A-Za-z]{2,8}(-[A-Za-z0-9]{1,8}){0,4}$/;
 /** The run line's build stamps, narrowed so they cannot carry free text: a dotted version and a hex commit. */
 const VERSION = /^[0-9]{1,4}(\.[0-9]{1,4}){0,3}$/;
 const COMMIT = /^[0-9a-f]{0,40}$/;
 
-/** Validate the doc line (or a stored doc summary). `producer` and `creator` are never read. */
+/** Validate the doc line. Its document strings (`producer`, `creator`, `lang`) are never read. */
 export function validateDopplerDoc(value: unknown): DopplerDocFacts | null {
   if (!isObj(value)) return null;
   const unusualFeatures = has(value, "unusualFeatures") ? vocabulary(FEATURES, value.unusualFeatures, 64) : [];
@@ -544,7 +542,6 @@ export function validateDopplerDoc(value: unknown): DopplerDocFacts | null {
   pick("incrementalUpdates", "incrementalUpdates", (v) => count(v));
   pick("tagged", "tagged", bool);
   pick("markedContent", "markedContent", bool);
-  pick("lang", "lang", (v) => typeof v === "string" && v.length <= 64 && LANG.test(v) ? v : undefined);
   pick("outlineCount", "outlineCount", (v) => count(v));
   pick("pageLabels", "pageLabels", bool);
   pick("embeddedFiles", "embeddedFiles", (v) => count(v));

@@ -40,13 +40,14 @@ describe("parseDopplerPageFacts: well-formed input", () => {
     expect(p1.annots?.bySubtype).toEqual({ link: 2, widget: 1 });
     expect(facts.pages.get(2)!.geometry).toEqual({ widthPt: 612, heightPt: 792, rotation: 90, userUnit: 1, mediaBox: [0, 0, 792, 612], cropBox: [0, 0, 792, 612] });
     expect(facts.pages.get(3)!.vectors?.clusters).toEqual([{ bbox: [72, 100, 540, 500], paths: 880, curves: 300, segments: 2000 }]);
-    expect(facts.doc).toMatchObject({ level: "full", reportedPageCount: 3, pdfVersion: "1.7", lang: "en-US", acroForm: "present", ocgCount: 1 });
+    expect(facts.doc).toMatchObject({ level: "full", reportedPageCount: 3, pdfVersion: "1.7", acroForm: "present", ocgCount: 1 });
   });
 
   it("never keeps producer or creator, nor any unknown field", () => {
     const facts = parse(jsonl([docLine({ title: PRODUCER_MARKER }), textPage(1, { note: PRODUCER_MARKER, text: { ...textPage().text as object, extra: PRODUCER_MARKER } }), runLine()]), 1);
     expect("producer" in facts.doc).toBe(false);
     expect("creator" in facts.doc).toBe(false);
+    expect("lang" in facts.doc).toBe(false);
     const stored = JSON.stringify({ doc: facts.doc, pages: [...facts.pages.values()], run: facts.run }) + dopplerPageFactsJsonl(facts);
     expect(stored).not.toContain("PRODUCER-MARKER");
     expect(stored).not.toContain("producer");

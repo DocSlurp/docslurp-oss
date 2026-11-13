@@ -22,7 +22,7 @@ The facts come from a VM that read a customer file, so the worker treats every b
 - accepts finite numbers only, ratios in 0..1, non-negative integer counts, closed enums (an unknown enum value is
   dropped, as the contract asks) and bounded lists; a family that fails any check, or whose counts contradict each
   other, is absent (unknown) while the rest of the page stands;
-- never reads `producer` or `creator`, the only document strings in the stream, nor any field it does not know; the run
+- never reads `producer`, `creator` or `lang`, the document's own strings in the stream, nor any field it does not know; the run
   line's `version` and `commit` are kept only as a dotted version and a hex commit.
 
 Facts that must be handed on (the first pass's stored batch result) go as canonical lines re-serialized from what the
