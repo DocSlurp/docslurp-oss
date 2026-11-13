@@ -1,5 +1,6 @@
 # TODO
 
+- Figure resume budget constants (council #388 M3, 2026-11-13): before `DOCSLURP_FIGURE_RESUME` is on in production, measure the per-pass VM time the budget assumes (`DOCSLURP_FIGURE_RESUME_VM_MS_PER_PAGE` 50 and `_VM_MS_PER_LAUNCH` 3,000 are estimates). Run the runner on a held-back slice of partial documents (small, 1,000-page unsharded, 10K+ sharded), read the `resume pass … msPerPage estimateMs` log lines and `resume.pass_ms_per_page`, and set the defaults from the measured p95. Alert on `resume.capped{reason="vm-budget"}` so a low estimate never silently drops completeness.
 - First pass (sandboxed PDF batches, 2026-11-11; `DOCSLURP_FIRST_PASS`, default off). Remaining before it is on by default:
   council review of the seam, the activity and the workflow wiring (one organization per batch, the publish gate, page-count
   billing); measurement on the run (`first_keyword_searchable_at`, `fully_indexed_at`, pages per minute and per $1 through

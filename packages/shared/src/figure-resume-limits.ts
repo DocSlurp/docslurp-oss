@@ -11,12 +11,12 @@
  *
  *   - launches: 1.5x the passes the document's allowance needs after its first pass (at least one per open unit), clamped
  *     to [launchFloor, launchCeiling];
- *   - VM time: vmHeadroom x the expected passes x the estimated cost of one pass over one unit (vmMsPerLaunch, plus
- *     vmMsPerPage for each of the unit's pages: a sharded document resumes one shard at a time, an unsharded one all its
- *     pages), clamped to [docVmSecondsFloor, docVmSecondsCeiling]. Measured resume VM time is charged against it, and
+ *   - VM time: vmHeadroom x the expected passes x the estimated cost of one launch (vmMsPerLaunch, plus vmMsPerPage for
+ *     each page it converts: a sharded document resumes one shard at a time, an unsharded one re-reads all its pages,
+ *     gaps or not), clamped to [docVmSecondsFloor, docVmSecondsCeiling] and to FIGURE_RESUME_HARD.documentVmMs. Measured resume VM time is charged against it, and
  *     each launch's timeout is capped by what is left;
- *   - per unit (a shard, a gap or the unsharded document): its own pages' share of the allowance, clamped to
- *     [3, UNIT_RESUME_CEILING];
+ *   - per unit (a shard, a gap or the unsharded document): the passes its own share of the allowance needs (the whole
+ *     document's for the unsharded one) plus two, at least 3, at most FIGURE_RESUME_HARD.unitResumes;
  *   - no progress: noProgressLimit launched resumes in a row whose gain is under the minimum stop the document. A gain is
  *     work closed (resumable images settled, gaps filled, shards completed) or files added; it counts only when it is at
  *     least minProgressPercent of one unit's share of the work left (and one item: a resume runs one unit, so a document with
@@ -60,8 +60,11 @@ export const FIGURE_RESUME_PASS = { files: DOPPLER_FIGURE_LIMITS.maxFiles, bytes
 
 /** Hard ceilings no override can pass. The ledger enforces them as a backstop (resume-cap), whatever the policy says. */
 export const FIGURE_RESUME_HARD = {
-  /** Resumes of one unit (document_extraction_shards.resumes, or the unsharded level's). */
-  unitResumes: 64,
+  /**
+   * Resumes of one unit (document_extraction_shards.resumes, or the unsharded level's), grants included: room for a unit
+   * that holds a whole 4 GiB allowance (63 passes plus failures) with grants on top.
+   */
+  unitResumes: 128,
   /** Resume launches of one document, grants included (document_extraction_levels.resume_vm_launches is CHECKed at 1000). */
   documentLaunches: 512,
   /** Resume VM time of one document per run, grants included: no env value or grant count passes it (12 hours). */
@@ -70,8 +73,6 @@ export const FIGURE_RESUME_HARD = {
   grants: 10,
 } as const;
 
-/** Per-unit resumes: the floor is FIGURE_RESUME_LIMITS.maxAttempts, the ceiling this. */
-export const UNIT_RESUME_CEILING = 32;
 
 export const FIGURE_RESUME_ORG_DAILY_ENV = "DOCSLURP_FIGURE_RESUME_ORG_DAILY_VM_MINUTES";
 export const FIGURE_RESUME_CONCURRENCY_ENV = "DOCSLURP_FIGURE_RESUME_CONCURRENCY";
@@ -173,10 +174,18 @@ export function figureResumeLaunchCap(args: { pageCount: number; units?: number;
   return Math.min(FIGURE_RESUME_HARD.documentLaunches, base + grantsOf(args.grants ?? 0) * grantStep(base, config.launchFloor));
 }
 
-/** Estimated VM time of one resume launch: one unit's pass (the document's pages over its units). */
-export function figureResumeLaunchVmMs(args: { pageCount: number; units?: number }, config: FigureResumeBudgetConfig = figureResumeBudgetConfig()): number {
-  const unitPages = Math.ceil(pagesOf(args.pageCount) / Math.max(1, Math.trunc(args.units ?? 0)));
-  return config.vmMsPerLaunch + unitPages * config.vmMsPerPage;
+/**
+ * Pages one resume launch converts (M2): a shard's pages for a sharded document (its pages over its shards), every page
+ * for an unsharded one. Gaps never divide it: an unsharded document's own resume re-reads all its pages.
+ */
+export function figureResumeLaunchPages(args: { pageCount: number; shards?: number }): number {
+  const shards = Math.max(0, Math.trunc(args.shards ?? 0));
+  return shards === 0 ? pagesOf(args.pageCount) : Math.ceil(pagesOf(args.pageCount) / shards);
+}
+
+/** Estimated VM time of one resume launch: vmMsPerLaunch plus vmMsPerPage for each page it converts. */
+export function figureResumeLaunchVmMs(args: { pageCount: number; shards?: number }, config: FigureResumeBudgetConfig = figureResumeBudgetConfig()): number {
+  return config.vmMsPerLaunch + figureResumeLaunchPages(args) * config.vmMsPerPage;
 }
 
 /**
@@ -184,7 +193,7 @@ export function figureResumeLaunchVmMs(args: { pageCount: number; units?: number
  * [docVmSecondsFloor, docVmSecondsCeiling], plus what its grants added. 10 pages: 180 s. 1,000 pages unsharded: 2,120 s.
  * 20,000 pages in 32 shards: 4,316 s.
  */
-export function figureResumeVmBudgetMs(args: { pageCount: number; units?: number; grants?: number }, config: FigureResumeBudgetConfig = figureResumeBudgetConfig()): number {
+export function figureResumeVmBudgetMs(args: { pageCount: number; shards?: number; grants?: number }, config: FigureResumeBudgetConfig = figureResumeBudgetConfig()): number {
   const estimate = config.vmHeadroom * figureResumeExpectedPasses(args.pageCount) * figureResumeLaunchVmMs(args, config);
   const base = clamp(estimate, config.docVmSecondsFloor * 1000, config.docVmSecondsCeiling * 1000);
   const granted = base + Math.min(FIGURE_RESUME_HARD.grants, grantsOf(args.grants ?? 0)) * grantStep(base, config.docVmSecondsFloor * 1000);
@@ -211,13 +220,27 @@ export function figureResumeProgressed(
 }
 
 /**
- * Resumes of one unit (`pages` long): its pages' share of the allowance (1.25 MiB a page) over one VM's bytes, plus two
- * for failures, clamped to [maxAttempts, UNIT_RESUME_CEILING], plus a third of that per grant. 32 pages: 3. 625: 15.
+ * Resumes of one unit (M1): the passes its share of the allowance needs plus two for failures, at least
+ * FIGURE_RESUME_LIMITS.maxAttempts, plus half that per grant, at most FIGURE_RESUME_HARD.unitResumes. A shard's share is
+ * 1.25 MiB a page (never above the document's allowance); the unsharded document's unit is the document, so it gets the
+ * document's expected passes. 32-page shard: 3. 625-page shard: 15. 3,000 pages unsharded: 61.
  */
-export function figureResumeUnitCap(pages: number, grants = 0): number {
-  const share = Math.ceil((pagesOf(pages) * Math.floor(1.25 * 1024 * 1024)) / FIGURE_RESUME_PASS.bytes) + 2;
-  const base = clamp(share, FIGURE_RESUME_LIMITS.maxAttempts, UNIT_RESUME_CEILING);
-  return Math.min(FIGURE_RESUME_HARD.unitResumes, base + grantsOf(grants) * Math.max(FIGURE_RESUME_LIMITS.maxAttempts, Math.ceil(base / 3)));
+export function figureResumeUnitCap(args: { unitPages: number; documentPages?: number; whole?: boolean; grants?: number }): number {
+  const documentPages = pagesOf(args.documentPages ?? args.unitPages);
+  const passes = args.whole
+    ? figureResumeExpectedPasses(documentPages)
+    : Math.ceil(Math.min(pagesOf(args.unitPages) * Math.floor(1.25 * 1024 * 1024), dopplerAssetCaps(documentPages).totalBytes) / FIGURE_RESUME_PASS.bytes);
+  const base = Math.max(FIGURE_RESUME_LIMITS.maxAttempts, passes + 2);
+  const granted = base + Math.min(FIGURE_RESUME_HARD.grants, grantsOf(args.grants ?? 0)) * Math.max(FIGURE_RESUME_LIMITS.maxAttempts, Math.ceil(base / 2));
+  return Math.min(FIGURE_RESUME_HARD.unitResumes, granted);
+}
+
+/**
+ * The open threshold for a unit's own failures or no-progress resumes (H1): the base limit, plus the base again per
+ * grant (a grant never clears a unit's count, so a poisoned unit stays sorted last).
+ */
+export function figureResumeUnitStrikeLimit(base: number, grants = 0): number {
+  return base * (1 + Math.min(FIGURE_RESUME_HARD.grants, grantsOf(grants)));
 }
 
 /** Resume VM milliseconds one organization may use per UTC day. */

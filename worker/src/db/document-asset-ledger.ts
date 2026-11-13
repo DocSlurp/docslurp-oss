@@ -1367,6 +1367,7 @@ export function resumeRunChangeSql(tx: Sql<Record<string, unknown>> | Tx) {
     resume_unit_failures = case when ${changed} then '{}'::jsonb else document_extraction_levels.resume_unit_failures end,
     resume_vm_ms = case when ${changed} then 0 else document_extraction_levels.resume_vm_ms end,
     resume_stalls = case when ${changed} then 0 else document_extraction_levels.resume_stalls end,
+    resume_unit_stalls = case when ${changed} then '{}'::jsonb else document_extraction_levels.resume_unit_stalls end,
     resume_grants = case when ${changed} then 0 else document_extraction_levels.resume_grants end,
     resume_blocked_at = case when ${changed} then null else document_extraction_levels.resume_blocked_at end,
     resume_blocked = case when ${changed} then null else document_extraction_levels.resume_blocked end`;

@@ -680,10 +680,12 @@ describe("LOW-5: shard ranges and the document's total resume cap", () => {
   });
 
   it("past the backstop total (min(unit cap x shards, hard document cap)) no shard of the document is listed or resumed", async () => {
-    // Nine shards: each under its own cap, but DOCUMENT_ASSET_RESUME_TOTAL_CAP resumes in all.
+    // Each shard under its own cap, but DOCUMENT_ASSET_RESUME_TOTAL_CAP resumes in all.
     const unit = DOCUMENT_ASSET_RESUME_CAP - 1;
-    const full = Array.from({ length: 8 }, () => unit);
-    await insertShards([...full, DOCUMENT_ASSET_RESUME_TOTAL_CAP - 8 * unit], 3);
+    const fullShards = Math.floor(DOCUMENT_ASSET_RESUME_TOTAL_CAP / unit);
+    const rest = DOCUMENT_ASSET_RESUME_TOTAL_CAP - fullShards * unit;
+    expect(Math.min(DOCUMENT_ASSET_RESUME_CAP * (fullShards + 1), DOCUMENT_ASSET_RESUME_TOTAL_CAP)).toBe(DOCUMENT_ASSET_RESUME_TOTAL_CAP);
+    await insertShards([...Array.from({ length: fullShards }, () => unit), rest], 3);
     expect(await listResumableDocuments(sql, { orgId: "org-a" })).toEqual([]);
     await sql`delete from document_extraction_shards`;
     // Under the total, the resumable shards are listed.

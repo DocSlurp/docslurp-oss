@@ -41,7 +41,8 @@ import type { Sql } from "postgres";
 import {
   DOPPLER_STORE_LAYOUT, dopplerFigureSlot, dopplerImageExtractEnabled, dopplerImageLimits, dopplerShardFolder, figureAuditWrites,
   figureGcDeletes, figureResumeBackoffMs, figureResumeBudgetConfig, figureResumeConcurrency, figureResumeDeployEnabled, figureResumeGlobalMax,
-  figureResumeLaunchCap as launchCapFor, figureResumeOrgDailyVmMs, figureResumeProgressed, figureResumeUnitCap, figureResumeVmBudgetMs, parseDopplerFigureId,
+  figureResumeLaunchCap as launchCapFor, figureResumeOrgDailyVmMs, figureResumeLaunchPages, figureResumeLaunchVmMs, figureResumeProgressed, figureResumeUnitCap, figureResumeUnitStrikeLimit,
+  figureResumeVmBudgetMs, parseDopplerFigureId,
   projectFigureResumeMode, projectFiguresOff, FIGURE_RESUME_LIMITS, type FigureResumeBlockReason,
 } from "@docslurp/shared";
 import { recordFigureTelemetry } from "@docslurp/shared/observability";
@@ -112,7 +113,8 @@ export function documentResumeBudget(
   const config = figureResumeBudgetConfig(env);
   return {
     launchCap: launchCapFor({ pageCount: row.page_count, units: row.shards + row.gap_count, grants: row.resume_grants }, config),
-    vmBudgetMs: figureResumeVmBudgetMs({ pageCount: row.page_count, units: row.shards + row.gap_count, grants: row.resume_grants }, config),
+    // Per launch, the pages a resume actually converts (M2): one shard, or every page of an unsharded document.
+    vmBudgetMs: figureResumeVmBudgetMs({ pageCount: row.page_count, shards: row.shards, grants: row.resume_grants }, config),
     noProgressLimit: config.noProgressLimit,
   };
 }
@@ -272,20 +274,34 @@ type Outcome = "done" | "retry" | "blocked" | "lost" | "deferred";
  */
 async function release(
   sql: Client, row: ClaimedLevel, outcome: Exclude<Outcome, "lost">, blocked?: string, exhausted = false, unitKey?: string,
-  progress: { launched: boolean; progressed: boolean } = { launched: false, progressed: false }, env: Record<string, string | undefined> = process.env,
+  progress: { launched: boolean; progressed: boolean; otherUnits: number } = { launched: false, progressed: false, otherUnits: 0 },
+  env: Record<string, string | undefined> = process.env,
 ): Promise<void> {
-  const [level] = await sql<{ images_status: string; resume_failures: number; resume_vm_launches: number; resume_unit_failures: Record<string, number>; shards: number; gap_count: number; resume_vm_ms: number; resume_stalls: number; resume_grants: number }[]>`
-    select images_status, resume_failures, resume_vm_launches, resume_unit_failures, shards, coalesce(jsonb_array_length(gaps), 0)::int as gap_count,
+  const [level] = await sql<{ images_status: string; resume_failures: number; resume_vm_launches: number; resume_unit_failures: Record<string, number>; resume_unit_stalls: Record<string, number>; shards: number; gap_count: number; resume_vm_ms: number; resume_stalls: number; resume_grants: number }[]>`
+    select images_status, resume_failures, resume_vm_launches, resume_unit_failures, resume_unit_stalls, shards, coalesce(jsonb_array_length(gaps), 0)::int as gap_count,
       resume_vm_ms::float8 as resume_vm_ms, resume_stalls, resume_grants
     from document_extraction_levels where ${fenced(sql, row)}`;
   if (!level) return;
-  // No progress (R3-L3 follow-up, L1): a launched resume whose gain is under the minimum (figureResumeProgressed), failed
-  // ones included. Enough progress resets the count; past noProgressLimit in a row the document stops `no-progress`.
-  const stalls = progress.launched ? (progress.progressed ? 0 : level.resume_stalls + 1) : level.resume_stalls;
-  // Failures count per unit (R2-M3): one failing shard never blocks the others; the level's total is kept for telemetry.
+  const config = figureResumeBudgetConfig(env);
+  // Failures and no-progress resumes count per unit (R2-M3, H1): one failing shard never blocks the others.
   const retry = outcome === "retry";
   const unitFailures = { ...(level.resume_unit_failures ?? {}) };
   if (retry && unitKey) unitFailures[unitKey] = (unitFailures[unitKey] ?? 0) + 1;
+  const unitStalls = { ...(level.resume_unit_stalls ?? {}) };
+  if (progress.launched && unitKey) unitStalls[unitKey] = progress.progressed ? 0 : (unitStalls[unitKey] ?? 0) + 1;
+  // This resume closed its unit (its own failure or no-progress limit): with other units open, that is the document
+  // moving on, not stalling (H1), so it resets the document's count.
+  const closedUnit = !!unitKey && progress.launched && !progress.progressed && progress.otherUnits > 0 && (
+    (unitFailures[unitKey] ?? 0) >= figureResumeUnitStrikeLimit(FIGURE_RESUME_LIMITS.maxAttempts, level.resume_grants)
+    || (unitStalls[unitKey] ?? 0) >= figureResumeUnitStrikeLimit(config.noProgressLimit, level.resume_grants));
+  // The document's no-progress count (R3-L3 follow-up, L1): launched resumes in a row, across units, whose gain is under
+  // the minimum (figureResumeProgressed), failed ones included. Units are taken fewest strikes first, so consecutive
+  // stalls land on different units: N in a row means every open unit stalls (a systemic fault), not one poisoned unit.
+  const stalls = !progress.launched ? level.resume_stalls : progress.progressed || closedUnit ? 0 : level.resume_stalls + 1;
+  if (closedUnit) {
+    console.log(`[doppler-figures] resume unit-closed doc=${row.document_id} unit=${unitKey} failures=${unitFailures[unitKey!] ?? 0} stalls=${unitStalls[unitKey!] ?? 0} others=${progress.otherUnits}`);
+    recordFigureTelemetry("resume.unit_closed", 1, { reason: (unitFailures[unitKey!] ?? 0) >= FIGURE_RESUME_LIMITS.maxAttempts ? "failures" : "no-progress" });
+  }
   const failures = level.resume_failures + (retry ? 1 : 0);
   const resumable = level.images_status === "resumable";
   const budgetStop = resumeBudgetBlock({ ...level, page_count: row.page_count, resume_stalls: stalls }, env);
@@ -297,7 +313,7 @@ async function release(
     : new Date(Date.now() + figureResumeBackoffMs(unitKey ? unitFailures[unitKey] ?? failures : failures)).toISOString();
   await sql`
     update document_extraction_levels set resume_lease_until = null, resume_lease_owner = null, resume_failures = ${failures},
-      resume_unit_failures = ${sql.json(unitFailures)}::jsonb, resume_stalls = ${stalls},
+      resume_unit_failures = ${sql.json(unitFailures)}::jsonb, resume_unit_stalls = ${sql.json(unitStalls)}::jsonb, resume_stalls = ${stalls},
       resume_after = ${after}::timestamptz, resume_blocked = coalesce(${nextBlocked}, resume_blocked),
       resume_blocked_at = case when ${nextBlocked}::text is null then resume_blocked_at else now() end
     where ${fenced(sql, row)}`;
@@ -326,20 +342,27 @@ type ResumeUnit = {
  *   - or the unsharded document itself.
  */
 async function units(sql: Client, row: ClaimedLevel, env: Record<string, string | undefined> = process.env): Promise<ResumeUnit[]> {
-  const [level] = await sql<{ gaps: Array<{ first: number; last: number }> | null; resumes: number; assets_resumable: number; manifest_sha256: string | null; shards: number; resume_unit_failures: Record<string, number> | null }[]>`
-    select gaps, resumes, assets_resumable, manifest_sha256, shards, resume_unit_failures from document_extraction_levels
+  const [level] = await sql<{ gaps: Array<{ first: number; last: number }> | null; resumes: number; assets_resumable: number; manifest_sha256: string | null; shards: number; resume_unit_failures: Record<string, number> | null; resume_unit_stalls: Record<string, number> | null; resume_grants: number }[]>`
+    select gaps, resumes, assets_resumable, manifest_sha256, shards, resume_unit_failures, resume_unit_stalls, resume_grants from document_extraction_levels
     where document_id = ${row.document_id} and org_id = ${row.org_id} and project_id = ${row.project_id} and run_id = ${row.run_id}`;
   if (!level) return [];
   const failed = level.resume_unit_failures ?? {};
-  const open = (key: string) => (failed[key] ?? 0) < FIGURE_RESUME_LIMITS.maxAttempts;
-  // Each unit's resumes scale with its pages (figureResumeUnitCap); the document's across its shards with the launch cap.
-  const unitCap = (first: number, last: number) => figureResumeUnitCap(last - first + 1, row.resume_grants);
+  const stalled = level.resume_unit_stalls ?? {};
+  const grants = level.resume_grants ?? row.resume_grants;
+  const noProgressLimit = figureResumeBudgetConfig(env).noProgressLimit;
+  // A unit is open below its own failure and no-progress limits (H1); a grant raises both, never clears them.
+  const open = (key: string) => (failed[key] ?? 0) < figureResumeUnitStrikeLimit(FIGURE_RESUME_LIMITS.maxAttempts, grants)
+    && (stalled[key] ?? 0) < figureResumeUnitStrikeLimit(noProgressLimit, grants);
+  // Each unit's resumes scale with the passes its share needs (figureResumeUnitCap, M1); the document's across its shards
+  // with the launch cap.
+  const unitCap = (first: number, last: number) => figureResumeUnitCap({ unitPages: last - first + 1, documentPages: row.page_count, grants });
   const shards = await sql<Array<{ first_page: number; last_page: number; manifest_sha256: string; resumes: number; images_status: string }>>`
     select first_page, last_page, manifest_sha256, resumes, images_status from document_extraction_shards
     where document_id = ${row.document_id} and org_id = ${row.org_id} and project_id = ${row.project_id}
     order by first_page`;
   const out: ResumeUnit[] = [];
-  if (shards.length === 0 && level.manifest_sha256 && level.resumes < unitCap(1, Math.max(1, row.page_count)) && level.assets_resumable > 0 && open("doc")) {
+  const docCap = figureResumeUnitCap({ unitPages: row.page_count, documentPages: row.page_count, whole: true, grants });
+  if (shards.length === 0 && level.manifest_sha256 && level.resumes < docCap && level.assets_resumable > 0 && open("doc")) {
     out.push({ shard: null, manifestSha256: level.manifest_sha256, gap: false, key: "doc" });
   }
   const total = shards.reduce((sum, shard) => sum + shard.resumes, 0);
@@ -369,7 +392,10 @@ async function units(sql: Client, row: ClaimedLevel, env: Record<string, string 
       });
     }
   }
-  return out.sort((a, b) => (a.shard?.first ?? 0) - (b.shard?.first ?? 0));
+  // Fewest strikes (failures plus no-progress resumes) first, then page order (H1): a unit that keeps failing yields to
+  // the others instead of being retried first every time.
+  const strikes = (unit: ResumeUnit) => (failed[unit.key] ?? 0) + (stalled[unit.key] ?? 0);
+  return out.sort((a, b) => strikes(a) - strikes(b) || (a.shard?.first ?? 0) - (b.shard?.first ?? 0));
 }
 
 /**
@@ -407,6 +433,7 @@ async function resumeClaimed(deps: FigureResumeDeps, row: ClaimedLevel): Promise
   let addedBytes = 0;
   let unitKey: string | undefined;
   let before: { work: number; launches: number } | null = null;
+  let otherUnits = 0;
   try {
     const adopted = await adoptPendingAssets(deps.sql, deps.storage, { scope, signal: deps.signal });
     if (adopted.adopted > 0) recordFigureTelemetry("adopted_files", adopted.adopted);
@@ -438,6 +465,7 @@ async function resumeClaimed(deps: FigureResumeDeps, row: ClaimedLevel): Promise
       exhausted = true;
     } else {
       unitKey = unit.key;
+      otherUnits = todo.length - 1;
       before = await remainingWork(deps.sql, row);
       const result = await resumeUnit(deps, row, scope, document, unit);
       vmMs = result.vmMs;
@@ -469,7 +497,7 @@ async function resumeClaimed(deps: FigureResumeDeps, row: ClaimedLevel): Promise
       const launched = !!before && !!after && after.launches > before.launches;
       const progressed = !!before && !!after
         && figureResumeProgressed({ before: before.work, after: after.work, added, addedBytes, units: Math.max(1, row.shards + row.gap_count) }, figureResumeBudgetConfig(deps.env ?? process.env));
-      await release(deps.sql, row, outcome, blocked, exhausted, unitKey, { launched, progressed }, deps.env ?? process.env)
+      await release(deps.sql, row, outcome, blocked, exhausted, unitKey, { launched, progressed, otherUnits }, deps.env ?? process.env)
         .catch((error) => console.warn(`[doppler-figures] resume release-failed doc=${row.document_id} error=${error instanceof Error ? error.name : typeof error}`));
     }
   }
@@ -702,6 +730,7 @@ async function resumeUnit(
       insert into figure_resume_org_days (org_id, day, launches, vm_ms, reserved_ms) values (${row.org_id}, (now() at time zone 'utc')::date, 1, 0, ${timeoutMs})
       on conflict (org_id, day) do update set launches = figure_resume_org_days.launches + 1, reserved_ms = figure_resume_org_days.reserved_ms + ${timeoutMs}`;
     const vmStarted = Date.now();
+    let wall = 0;
     let raw: unknown;
     let vmOutcome = "failed";
     try {
@@ -712,10 +741,18 @@ async function resumeUnit(
       }, signal);
       vmOutcome = "returned";
     } finally {
-      await recordResumeVmTime(deps.sql, row, Date.now() - vmStarted, vmOutcome, timeoutMs)
+      wall = Date.now() - vmStarted;
+      await recordResumeVmTime(deps.sql, row, wall, vmOutcome, timeoutMs)
         .catch((error) => console.warn(`[doppler-figures] resume vm-cost-unrecorded doc=${row.document_id} error=${error instanceof Error ? error.name : typeof error}`));
+      // The measured pass against the budget's estimate (M3): what DOCSLURP_FIGURE_RESUME_VM_MS_PER_PAGE and _PER_LAUNCH are
+      // tuned from before the runner is switched on.
+      const config = figureResumeBudgetConfig(env);
+      const estimateMs = figureResumeLaunchVmMs({ pageCount: row.page_count, shards: row.shards }, config);
+      console.log(`[doppler-figures] resume pass doc=${row.document_id} pages=${pages} launchPages=${figureResumeLaunchPages({ pageCount: row.page_count, shards: row.shards })}`
+        + ` vmMs=${wall} msPerPage=${(wall / Math.max(1, pages)).toFixed(1)} estimateMs=${estimateMs} outcome=${vmOutcome}`);
+      recordFigureTelemetry("resume.pass_ms_per_page", Math.round(wall / Math.max(1, pages)), { outcome: vmOutcome });
     }
-    const vmMs = Date.now() - vmStarted;
+    const vmMs = wall;
     const outcome = parseSandboxedPdfFigureOutcome(raw, 500, row.page_count);
     if (outcome.status === "failed") {
       console.warn(`[doppler-figures] resume failed doc=${row.document_id} pages=${asked[0]}-${asked[1]} reason=${reasonSlug(outcome.reason)}`);

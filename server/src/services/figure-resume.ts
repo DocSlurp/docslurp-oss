@@ -86,7 +86,9 @@ async function projectMode(scope: FigureResumeScope) {
  * decision clears that, R6-H1 F3).
  *
  * A budget block (`attempts`, `vm-budget`, `no-progress`) is cleared by granting one extension: resume_grants + 1 (each
- * adds half the page-scaled caps again, figure-resume-limits.ts), the no-progress count and the unit failures reset. At
+ * adds half the page-scaled caps again, at least the floors; each unit's failure and no-progress limits once more,
+ * figure-resume-limits.ts) and the document's no-progress count resets. A unit's own counts are kept (H1), so a unit
+ * that keeps failing stays sorted after the others. At
  * most DOCSLURP_FIGURE_RESUME_MAX_GRANTS per run, so a request buys a bounded amount of VM time (H4); a reprocess (a new,
  * customer-paid run) starts every counter clean. Other blocks and the backoff are cleared without a grant.
  */
@@ -118,8 +120,7 @@ export async function requestDocumentFigureResume(scope: FigureResumeScope & { d
     update document_extraction_levels l set resume_after = now(), resume_blocked = null, resume_blocked_at = null,
       resume_grants = l.resume_grants + case when l.resume_blocked = any(${sql.array([...FIGURE_RESUME_BUDGET_BLOCKS])}::text[]) then 1 else 0 end,
       resume_stalls = case when l.resume_blocked = any(${sql.array([...FIGURE_RESUME_BUDGET_BLOCKS])}::text[]) then 0 else l.resume_stalls end,
-      resume_failures = case when l.resume_blocked = any(${sql.array([...FIGURE_RESUME_BUDGET_BLOCKS])}::text[]) then 0 else l.resume_failures end,
-      resume_unit_failures = case when l.resume_blocked = any(${sql.array([...FIGURE_RESUME_BUDGET_BLOCKS])}::text[]) then '{}'::jsonb else l.resume_unit_failures end
+      resume_failures = case when l.resume_blocked = any(${sql.array([...FIGURE_RESUME_BUDGET_BLOCKS])}::text[]) then 0 else l.resume_failures end
     from documents d
     where l.document_id = ${scope.documentId} and ${resumableWhere(scope, "grantable")}
       and l.resume_blocked is not distinct from ${level.blocked}::text

@@ -511,16 +511,75 @@ describe("page-scaled resume budget (figure-resume-limits.ts)", () => {
     log.mockRestore();
   });
 
-  it("each launch's timeout is capped at the document's remaining VM time, and the measured time is charged to the document", async () => {
+  it("each launch's timeout is capped at the document's remaining VM time, and exactly the measured time is charged to the document", async () => {
     const storage = memoryStorage();
     await gapPass(storage, [{ first: 3, last: 3 }]);
     await sql`update document_extraction_levels set resume_vm_ms = 60000 where document_id = 'doc-a'`;
     await due();
-    const { provider, jobs } = gapProvider();
+    const { provider: inner, jobs } = gapProvider();
+    // A VM that takes measurable time, so a charge of 0 cannot pass.
+    const provider: FigureResumeProvider = { timeoutMs: inner.timeoutMs, resume: async (job, signal) => { await new Promise((r) => setTimeout(r, 40)); return inner.resume(job, signal); } };
+    const log = vi.spyOn(console, "log");
     await runFigureResumes({ sql, storage, provider, workerId: "w1", env: ON });
     expect(jobs).toHaveLength(1);
     expect(jobs[0]!.timeoutMs).toBeLessThanOrEqual(120_000);
-    expect(Number((await level())!.resume_vm_ms)).toBeGreaterThanOrEqual(60_000);
+    const charged = Number((await level())!.resume_vm_ms) - 60_000;
+    const [day] = await sql<{ vm_ms: number }[]>`select vm_ms::float8 as vm_ms from figure_resume_org_days where org_id = 'org-a'`;
+    expect(charged).toBeGreaterThanOrEqual(35);
+    // The same measured time joins the document's budget and the organization's day.
+    expect(charged).toBe(day!.vm_ms);
+    // M3: the pass is logged against the estimate, for tuning.
+    expect(log.mock.calls.map((call) => String(call[0])).find((line) => line.includes("resume pass doc=doc-a")))
+      .toMatch(new RegExp(`pages=1 launchPages=\\d+ vmMs=${charged} msPerPage=\\S+ estimateMs=\\d+ outcome=returned`));
+    log.mockRestore();
+  });
+
+  it("H1: one unit that always fails never blocks the others: the next unit still runs and completes", async () => {
+    const storage = memoryStorage();
+    await gapPass(storage, [{ first: 2, last: 2 }, { first: 3, last: 3 }]);
+    const { provider: inner, jobs } = gapProvider();
+    const provider: FigureResumeProvider = {
+      timeoutMs: inner.timeoutMs,
+      resume: async (job, signal) => {
+        if (job.pages?.[0] === 2) { jobs.push(job); throw new Error("poisoned range"); }
+        return inner.resume(job, signal);
+      },
+    };
+    const env = { ...ON, DOCSLURP_FIGURE_RESUME_LAUNCH_FLOOR: "20" };
+    for (let pass = 0; pass < 8; pass += 1) {
+      await due();
+      await runFigureResumes({ sql, storage, provider, workerId: "w1", env });
+    }
+    const ranges = jobs.map((job) => job.pages![0]);
+    // The poisoned unit ran first, then yielded to the other unit, which completed.
+    expect(ranges.slice(0, 2)).toEqual([2, 3]);
+    expect(ranges.filter((page) => page === 3)).toHaveLength(1);
+    expect(ranges.filter((page) => page === 2).length).toBeLessThanOrEqual(3);
+    const [shard] = await sql<{ images_status: string }[]>`select images_status from document_extraction_shards where document_id = 'doc-a' and first_page = 3`;
+    expect(shard).toEqual({ images_status: "complete" });
+    const row = (await sql<Array<Record<string, unknown>>>`select resume_unit_failures, resume_blocked from document_extraction_levels where document_id = 'doc-a'`)[0]!;
+    expect(row.resume_unit_failures).toEqual({ "2-2": 3 });
+    // Nothing runnable is left: the poisoned unit is closed, and the document stops without re-queueing.
+    expect(row.resume_blocked).not.toBeNull();
+    expect(capped("no-progress") + capped("attempts")).toBe(1);
+  });
+
+  it("H1: when every unit fails, the document still stops `no-progress` after N launches in a row, across units", async () => {
+    const storage = memoryStorage();
+    await gapPass(storage, [{ first: 2, last: 2 }, { first: 3, last: 3 }]);
+    const jobs: FigureResumeJob[] = [];
+    const provider: FigureResumeProvider = { timeoutMs: () => 60_000, resume: async (job) => { jobs.push(job); throw new Error("every range fails"); } };
+    const env = { ...ON, DOCSLURP_FIGURE_RESUME_LAUNCH_FLOOR: "20" };
+    for (let pass = 0; pass < 6; pass += 1) {
+      await due();
+      await runFigureResumes({ sql, storage, provider, workerId: "w1", env });
+    }
+    // Fewest strikes first: the failures alternate between units, and three in a row stop the document.
+    expect(jobs.map((job) => job.pages![0])).toEqual([2, 3, 2]);
+    expect(await level()).toMatchObject({ resume_blocked: "no-progress", resume_stalls: 3, resume_vm_launches: 3, queued: false });
+    const [row] = await sql<{ f: Record<string, number>; s: Record<string, number> }[]>`
+      select resume_unit_failures as f, resume_unit_stalls as s from document_extraction_levels where document_id = 'doc-a'`;
+    expect(row).toEqual({ f: { "2-2": 2, "3-3": 1 }, s: { "2-2": 2, "3-3": 1 } });
   });
 
   it("a huge document keeps resuming past the old cap of 12 launches, up to its own page-scaled cap", async () => {

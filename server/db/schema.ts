@@ -3685,6 +3685,7 @@ export const documentExtractionLevels = pgTable("document_extraction_levels", {
   resumeStalls: integer("resume_stalls").default(0).notNull(),
   resumeGrants: integer("resume_grants").default(0).notNull(),
   resumeBlockedAt: timestamp("resume_blocked_at", { withTimezone: true, mode: "string" }),
+  resumeUnitStalls: jsonb("resume_unit_stalls").default({}).notNull(),
   auditedAt: timestamp("audited_at", { withTimezone: true, mode: "string" }),
   gaps: jsonb(),
   shards: integer().default(0).notNull(),

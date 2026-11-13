@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
-  FIGURE_RESUME_BUDGET_ENV, FIGURE_RESUME_HARD, figureResumeBudgetConfig, figureResumeConcurrency, figureResumeGlobalMax, figureResumeProgressed, figureResumeExpectedPasses, figureResumeLaunchCap, figureResumeOrgDailyVmMs,
+  FIGURE_RESUME_BUDGET_ENV, FIGURE_RESUME_HARD, figureResumeLaunchPages, figureResumeBudgetConfig, figureResumeConcurrency, figureResumeGlobalMax, figureResumeProgressed, figureResumeExpectedPasses, figureResumeLaunchCap, figureResumeOrgDailyVmMs,
   figureResumeUnitCap, figureResumeVmBudgetMs, isFigureResumeBudgetBlock,
 } from "../figure-resume-limits.js";
 
@@ -22,30 +22,46 @@ describe("figure resume limits", () => {
   it("small documents: 3 launches, 180 s, 3 resumes per unit; huge documents: 95 launches, 4,316 s, 15 per 625-page shard", () => {
     expect(figureResumeLaunchCap({ pageCount: 10 }, defaults)).toBe(3);
     expect(figureResumeVmBudgetMs({ pageCount: 10 }, defaults)).toBe(180_000);
-    expect(figureResumeUnitCap(10)).toBe(3);
+    expect(figureResumeUnitCap({ unitPages: 10, whole: true })).toBe(3);
     expect(figureResumeLaunchCap({ pageCount: 1_000 }, defaults)).toBe(30);
     // Unsharded: every resume converts all 1,000 pages (3 s + 50 s), 20 passes, 2x headroom.
     expect(figureResumeVmBudgetMs({ pageCount: 1_000 }, defaults)).toBe(2_120_000);
     expect(figureResumeLaunchCap({ pageCount: 20_000, units: 32 }, defaults)).toBe(95);
     // 32 shards of 625 pages: each resume is one shard (3 s + 31.25 s), 63 passes, 2x headroom.
-    expect(figureResumeVmBudgetMs({ pageCount: 20_000, units: 32 }, defaults)).toBe(4_315_500);
+    expect(figureResumeVmBudgetMs({ pageCount: 20_000, shards: 32 }, defaults)).toBe(4_315_500);
     // The same document unsharded would need 63 full passes: the ceiling (4 h) bounds it.
     expect(figureResumeVmBudgetMs({ pageCount: 20_000 }, defaults)).toBe(4 * 3_600_000);
-    expect(figureResumeUnitCap(625)).toBe(15);
-    expect(figureResumeUnitCap(100_000)).toBe(32);
+    expect(figureResumeUnitCap({ unitPages: 625, documentPages: 20_000 })).toBe(15);
+    expect(figureResumeUnitCap({ unitPages: 32, documentPages: 20_000 })).toBe(3);
     // At least one launch per open unit, up to the ceiling.
     expect(figureResumeLaunchCap({ pageCount: 10, units: 40 }, defaults)).toBe(40);
     expect(figureResumeLaunchCap({ pageCount: 10, units: 4_000 }, defaults)).toBe(128);
+  });
+
+  it("M1: a unit's cap follows the passes its share needs: a 3,000-page unsharded document gets its 59 passes, a 2,000-page shard its 40", () => {
+    expect(figureResumeExpectedPasses(3_000)).toBe(59);
+    expect(figureResumeUnitCap({ unitPages: 3_000, documentPages: 3_000, whole: true })).toBe(61);
+    expect(figureResumeUnitCap({ unitPages: 2_000, documentPages: 20_000 })).toBe(42);
+    // A shard never gets more than the document's whole allowance: 4 GiB over 64 MiB.
+    expect(figureResumeUnitCap({ unitPages: 20_000, documentPages: 20_000 })).toBe(66);
+    expect(figureResumeLaunchCap({ pageCount: 3_000 }, defaults)).toBe(89);
+  });
+
+  it("M2: an unsharded document's launch converts every page, gaps or not; a sharded one, one shard", () => {
+    expect(figureResumeLaunchPages({ pageCount: 1_000 })).toBe(1_000);
+    expect(figureResumeLaunchPages({ pageCount: 20_000, shards: 32 })).toBe(625);
+    // 1,000 pages unsharded with gaps: still 20 passes of 53 s, 2x headroom (the gaps never divide it).
+    expect(figureResumeVmBudgetMs({ pageCount: 1_000, shards: 0 }, defaults)).toBe(2_120_000);
   });
 
   it("grants add half the base again (at least the floors), bounded by the hard ceilings", () => {
     expect(figureResumeLaunchCap({ pageCount: 10, grants: 1 }, defaults)).toBe(6);
     expect(figureResumeLaunchCap({ pageCount: 20_000, grants: 2 }, defaults)).toBe(95 + 2 * 48);
     expect(figureResumeVmBudgetMs({ pageCount: 10, grants: 1 }, defaults)).toBe(360_000);
-    expect(figureResumeVmBudgetMs({ pageCount: 20_000, units: 32, grants: 1 }, defaults)).toBe(4_315_500 + 2_157_750);
-    expect(figureResumeUnitCap(10, 1)).toBe(6);
+    expect(figureResumeVmBudgetMs({ pageCount: 20_000, shards: 32, grants: 1 }, defaults)).toBe(4_315_500 + 2_157_750);
+    expect(figureResumeUnitCap({ unitPages: 10, whole: true, grants: 1 })).toBe(6);
     expect(figureResumeLaunchCap({ pageCount: 20_000, grants: 100 }, { ...defaults, launchCeiling: 512 })).toBe(FIGURE_RESUME_HARD.documentLaunches);
-    expect(figureResumeUnitCap(100_000, 100)).toBe(FIGURE_RESUME_HARD.unitResumes);
+    expect(figureResumeUnitCap({ unitPages: 100_000, whole: true, grants: 100 })).toBe(FIGURE_RESUME_HARD.unitResumes);
   });
 
   it("L3: an override outside its bounds or unparsable keeps the default and warns once; floors never exceed ceilings", () => {
@@ -72,7 +88,7 @@ describe("figure resume limits", () => {
       DOCSLURP_FIGURE_RESUME_DOC_VM_SECONDS_FLOOR: "600", DOCSLURP_FIGURE_RESUME_DOC_VM_SECONDS_CEILING: "120" });
     expect([inverted.launchFloor, inverted.launchCeiling, inverted.docVmSecondsFloor, inverted.docVmSecondsCeiling]).toEqual([20, 20, 600, 600]);
     const tuned = figureResumeBudgetConfig({ DOCSLURP_FIGURE_RESUME_VM_MS_PER_PAGE: "150", DOCSLURP_FIGURE_RESUME_VM_HEADROOM: "1", DOCSLURP_FIGURE_RESUME_VM_MS_PER_LAUNCH: "0" });
-    expect(figureResumeVmBudgetMs({ pageCount: 20_000, units: 32 }, tuned)).toBe(63 * 625 * 150);
+    expect(figureResumeVmBudgetMs({ pageCount: 20_000, shards: 32 }, tuned)).toBe(63 * 625 * 150);
     expect(figureResumeOrgDailyVmMs({})).toBe(120 * 60_000);
     expect(figureResumeOrgDailyVmMs({ DOCSLURP_FIGURE_RESUME_ORG_DAILY_VM_MINUTES: "1440" })).toBe(24 * 60 * 60_000);
   });
@@ -84,9 +100,10 @@ describe("figure resume limits", () => {
     for (const pageCount of [1, 10, 1_000, 20_000, 100_000]) {
       for (const units of [0, 1, 32, 256]) {
         for (const grants of [0, 1, 10, 100, 1_000_000]) {
-          expect(figureResumeVmBudgetMs({ pageCount, units, grants }, config)).toBeLessThanOrEqual(FIGURE_RESUME_HARD.documentVmMs);
+          expect(figureResumeVmBudgetMs({ pageCount, shards: units, grants }, config)).toBeLessThanOrEqual(FIGURE_RESUME_HARD.documentVmMs);
           expect(figureResumeLaunchCap({ pageCount, units, grants }, config)).toBeLessThanOrEqual(FIGURE_RESUME_HARD.documentLaunches);
-          expect(figureResumeUnitCap(pageCount, grants)).toBeLessThanOrEqual(FIGURE_RESUME_HARD.unitResumes);
+          expect(figureResumeUnitCap({ unitPages: pageCount, whole: true, grants })).toBeLessThanOrEqual(FIGURE_RESUME_HARD.unitResumes);
+          expect(figureResumeUnitCap({ unitPages: Math.ceil(pageCount / Math.max(1, units)), documentPages: pageCount, grants })).toBeLessThanOrEqual(FIGURE_RESUME_HARD.unitResumes);
         }
       }
     }

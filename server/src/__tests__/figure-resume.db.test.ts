@@ -148,7 +148,8 @@ describe("POST /documents/:id/assets/resume", () => {
       const res = await post("doc-a", { "x-test-user": "ua" });
       expect(res.status).toBe(202);
       expect(await res.json()).toEqual({ documentId: "doc-a", status: "queued", reason, granted: true, grantsLeft: 1 - i });
-      expect(await state()).toEqual({ resume_blocked: null, at: false, resume_grants: i + 1, resume_stalls: 0, resume_failures: 0, resume_unit_failures: {}, q: true });
+      // The document's counts reset; a unit's own counts are kept (H1: a poisoned unit stays sorted last).
+      expect(await state()).toEqual({ resume_blocked: null, at: false, resume_grants: i + 1, resume_stalls: 0, resume_failures: 0, resume_unit_failures: { doc: 2 }, q: true });
     }
     // Grants spent: the reason stays visible and nothing is queued; only a reprocess (a new run) starts clean.
     await sql`update document_extraction_levels set resume_blocked = 'attempts', resume_blocked_at = now(), resume_after = null where document_id = 'doc-a'`;
@@ -160,6 +161,18 @@ describe("POST /documents/:id/assets/resume", () => {
     const [audit] = await sql<{ metadata: Record<string, unknown> }[]>`
       select metadata from audit_log where action = 'document.figures.resume_requested' and resource_id = 'doc-a' order by created_at desc limit 1`;
     expect(audit!.metadata).toMatchObject({ status: "capped", reason: "attempts", granted: false });
+  });
+
+  it("L5: the route and the chat offer read only the runner's stored block, never a launch count (the old 6-vs-12 disagreement)", async () => {
+    await resumableDocument("doc-a");
+    // An unblocked document past the old API cap (6) but under the runner's page-scaled one: still resumable everywhere.
+    await sql`update document_extraction_levels set resume_vm_launches = 8 where document_id = 'doc-a'`;
+    expect(await service.countResumableFigureDocuments({ orgId: "org-a", projectId: "proj-a" })).toBe(1);
+    expect(await (await post("doc-a", { "x-test-user": "ua" })).json()).toMatchObject({ status: "queued", reason: null, granted: false });
+    // Once the runner blocks it at its own cap, both see the block.
+    await sql`update document_extraction_levels set resume_after = null, resume_blocked = 'attempts', resume_blocked_at = now(), resume_grants = 2 where document_id = 'doc-a'`;
+    expect(await service.countResumableFigureDocuments({ orgId: "org-a", projectId: "proj-a" })).toBe(0);
+    expect(await (await post("doc-a", { "x-test-user": "ua" })).json()).toMatchObject({ status: "capped", reason: "attempts" });
   });
 
   it("L4: the document detail and its asset ledger show the block reason, when it was set and the grants left; other tenants see nothing", async () => {

@@ -6,8 +6,9 @@
 --   `no-progress`. Any progress resets it.
 -- * resume_grants: extensions a single-document request granted past a budget block (bounded per run).
 -- * resume_blocked_at: when the current block was set (visible with its reason).
+-- * resume_unit_stalls: the same no-progress count per resume unit.
 --
--- All four start clean when the level moves to a new run (a fresh, customer-paid pass), like the 0159 counters.
+-- All five start clean when the level moves to a new run (a fresh, customer-paid pass), like the 0159 counters.
 ALTER TABLE document_extraction_levels ADD COLUMN IF NOT EXISTS resume_vm_ms bigint NOT NULL DEFAULT 0 CHECK (resume_vm_ms >= 0);
 --> statement-breakpoint
 ALTER TABLE document_extraction_levels ADD COLUMN IF NOT EXISTS resume_stalls integer NOT NULL DEFAULT 0 CHECK (resume_stalls BETWEEN 0 AND 1000);
@@ -23,6 +24,10 @@ BEGIN
 END $$;
 --> statement-breakpoint
 ALTER TABLE document_extraction_levels ADD COLUMN IF NOT EXISTS resume_blocked_at timestamptz;
+--> statement-breakpoint
+-- No-progress resumes per resume unit (`{"<first>-<last>" | "doc": n}`), beside 0159's resume_unit_failures: a unit at
+-- its limit is closed and the others keep resuming (one poisoned shard never blocks the document).
+ALTER TABLE document_extraction_levels ADD COLUMN IF NOT EXISTS resume_unit_stalls jsonb NOT NULL DEFAULT '{}'::jsonb;
 --> statement-breakpoint
 -- The block reasons, with the two new budget stops (`vm-budget`, `no-progress`), dropped and re-added by name so the
 -- statement converges on every database.
