@@ -458,6 +458,52 @@ describe("contextualizeChunksForEmbedding", () => {
     expect(result.chunks[0].contextPreamble).toContain("Employee benefits");
     expect(result.usage).toMatchObject({ inputTokens: 90, outputTokens: 96, costCents: 0.0048, metadata: { costSource: "provider", generationId: "test-generation" } });
   });
+  it("retries a cut-off preamble once with a larger limit and bills both attempts", async () => {
+    textMock.mockReset();
+    textMock
+      .mockResolvedValueOnce({ text: "", finishReason: "length", usage: { inputTokens: 90, outputTokens: 96, costCents: 0.01, metadata: { generationId: "gen-a", reasoningTokens: 96 } } })
+      .mockResolvedValueOnce({ text: "Employee handbook covering benefits and leave.", finishReason: "stop", usage: { inputTokens: 90, outputTokens: 120, costCents: 0.012, metadata: { generationId: "gen-b", reasoningTokens: 110 } } });
+    const config = fromEnv();
+    config.openRouterApiKey = "test-key";
+    const result = await contextualizeChunksForEmbedding({ privacyMode: "standard",
+      documentTitle: "handbook.pdf", documentText: "Leave accrues monthly. Benefits start on day one.",
+      chunks: [{ text: "Leave accrues monthly." }], config,
+    });
+    expect(textMock.mock.calls.map((call) => call[0].maxOutputTokens)).toEqual([96, 192]);
+    expect(result.chunks[0].contextPreamble).toContain("Employee handbook covering benefits and leave.");
+    expect(result.usage).toMatchObject({ inputTokens: 180, outputTokens: 216, metadata: { attempts: 2, generationIds: ["gen-a", "gen-b"], reasoningTokens: 206 } });
+    expect(result.usage?.costCents).toBeCloseTo(0.022, 10);
+  });
+
+  it("never indexes a preamble that is still cut off after the retry", async () => {
+    textMock.mockReset();
+    textMock.mockResolvedValue({ text: "Employee handbook covering", finishReason: "length", usage: { inputTokens: 90, outputTokens: 96 } });
+    const config = fromEnv();
+    config.openRouterApiKey = "test-key";
+    const result = await contextualizeChunksForEmbedding({ privacyMode: "standard",
+      documentTitle: "handbook.pdf", documentText: "Leave accrues monthly for full-time staff.",
+      chunks: [{ text: "Leave accrues monthly." }], config,
+    });
+    expect(textMock).toHaveBeenCalledTimes(2);
+    expect(result.chunks[0].contextPreamble).not.toContain("Employee handbook covering");
+    expect(result.chunks[0].contextPreamble).toContain("Leave accrues monthly for full-time staff.");
+  });
+
+  it("trims a complete over-length sentence to the limit instead of discarding it", async () => {
+    textMock.mockReset();
+    const sentence = "Documents the account recovery and password safety design, covering email OTP reset, breached-password rejection, rate limits, verification bindings, session credential fingerprints and SSO domain enforcement built on the authentication library plugins.";
+    expect(sentence.length).toBeGreaterThan(240);
+    textMock.mockResolvedValue({ text: sentence, finishReason: "stop", usage: { inputTokens: 90, outputTokens: 60 } });
+    const config = fromEnv();
+    config.openRouterApiKey = "test-key";
+    const result = await contextualizeChunksForEmbedding({ privacyMode: "standard",
+      documentTitle: "recovery.md", documentText: "Status: draft.",
+      chunks: [{ text: "Reset codes expire." }], config,
+    });
+    expect(textMock).toHaveBeenCalledTimes(1);
+    expect(result.chunks[0].contextPreamble).toContain("Documents the account recovery and password safety design");
+    expect(result.chunks[0].contextPreamble).not.toContain(sentence);
+  });
   it("builds a local contextual preamble without an LLM key and preserves raw chunk text", async () => {
     const config = fromEnv();
     config.openRouterApiKey = "";
