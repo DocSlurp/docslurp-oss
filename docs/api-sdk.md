@@ -274,6 +274,7 @@ curl -X PATCH "$api_url/v1/projects/amber-falcon-ridge" \
 | Update or rename project | `PATCH /v1/projects/:project` (session or `projects:manage` key) | `updateProject(id, { slug })` | Use HTTP |
 | Retrieve passages | `POST /v1/search` or `GET /v1/search` | `search` | `search` |
 | Batch retrieval | `POST /v1/search` with `{ queries }` | `search({ queries })` | `search --queries-file` |
+| Streaming retrieval (SSE, each leg as it lands) | `POST /v1/search/stream` ([events](search-api.md#streaming-search)) | `searchStream` | `search --stream` |
 | Grounded chat | `POST /v1/chat` | `chat` | `chat` |
 | Grounded chat over SSE | `GET /v1/chat/stream` | `chatStream` | Use SDK/HTTP |
 | OpenAI-compatible chat | `POST /v1/chat/completions`, `GET /v1/models` ([chat](https://docslurp.io/docs/chat)) | Use an OpenAI SDK | Use HTTP |

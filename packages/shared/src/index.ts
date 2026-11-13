@@ -70,6 +70,7 @@ export * from "./project-slug.js";
 export * from "./connection-uri.js";
 export * from "./chunks.js";
 export * from "./search.js";
+export * from "./search-stream.js";
 export * from "./usage.js";
 export * from "./text-normalization.js";
 export * from "./document-title.js";
