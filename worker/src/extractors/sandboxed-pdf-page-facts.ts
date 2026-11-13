@@ -11,7 +11,7 @@
  *   (document_page_facts, through upsertPageFacts); `use`
  *   also lets them stand in for layout facts when the provider returned none.
  */
-import { parseDopplerPageFacts, dopplerPageFactsJsonl, dopplerPageFactsMode, type DopplerPageFactsDocument } from "../lib/doppler-page-facts.js";
+import { parseDopplerPageFacts, dopplerPageFactsJsonl, dopplerPageFactsMode, withoutWalkerParityFacts, type DopplerPageFactsDocument } from "../lib/doppler-page-facts.js";
 import { pageLayoutFactsFromDopplerFacts } from "../lib/doppler-page-facts-layout.js";
 import type { PageLayoutFacts } from "../lib/page-layout-facts.js";
 
@@ -23,8 +23,12 @@ const accepted = new WeakMap<Job, { facts: DopplerPageFactsDocument; layout: Map
 /**
  * Parse a run's raw `pageFacts` for `job` (replacing anything an earlier result left), bounded by `pages`, the host's own
  * page count. Never throws on provider input: unusable facts are dropped with a warning.
+ *
+ * `glyphs`: the run read math (`pdftomarkdown --math`, so its pdftotext ran with `-glyphs`). Doppler's walker-parity fields
+ * (thin-rule grid counts, centred words inside) hold only for a run without `-glyphs`, so they are stripped and the facts
+ * map as an older build's would. The single-file guest never passes `--math`; the batch guest does when the job asks.
  */
-export function acceptSandboxedPdfPageFacts(job: Job, raw: unknown, pages: number, env: NodeJS.ProcessEnv = process.env): void {
+export function acceptSandboxedPdfPageFacts(job: Job, raw: unknown, pages: number, env: NodeJS.ProcessEnv = process.env, options: { glyphs?: boolean } = {}): void {
   accepted.delete(job);
   if (raw === undefined) return;
   const mode = dopplerPageFactsMode(env);
@@ -46,7 +50,7 @@ export function acceptSandboxedPdfPageFacts(job: Job, raw: unknown, pages: numbe
     console.warn(`[vm-pdf] page facts refused reason=${parsed.reason}; continuing without them`);
     return;
   }
-  const { facts } = parsed;
+  const facts = options.glyphs ? withoutWalkerParityFacts(parsed.facts) : parsed.facts;
   if (facts.summary.linesDropped > 0 || !facts.summary.complete) {
     console.warn(`[vm-pdf] page facts partial pagesKnown=${facts.summary.pagesKnown} linesDropped=${facts.summary.linesDropped} complete=${facts.summary.complete}`);
   }
