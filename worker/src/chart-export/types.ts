@@ -25,7 +25,21 @@ export interface VisualCandidate {
   /** Null when the detector could not tell (legacy `chart-or-figure` pages). */
   kind: VisualKind | null;
   /** Which free signal found it (for stats and telemetry). */
-  detectedBy: "router-inset" | "router-region" | "legacy-page-route" | "image-routing" | "deterministic";
+  detectedBy: "router-inset" | "router-region" | "legacy-page-route" | "image-routing" | "deterministic" | "page-facts-vector" | "page-facts-image";
+  /**
+   * Identity of the embedded image under the candidate, when known: the facts' image object number and the media map's
+   * content hash. Candidates sharing either are one picture placed several times: one model read serves them all.
+   * Scoped to the document; never used across documents.
+   */
+  asset?: {
+    obj?: number;
+    sha256?: string;
+    /**
+     * The page facts show no figure drawing and no text over this placement, so its crop shows the image alone. Only such
+     * placements share a read: one image under different overlays (data points, labels) is different pictures.
+     */
+    clean?: boolean;
+  };
   /**
    * On no known page (a partial without a page: DOCX/XLSX chart parts). `pageNumber` is then nominal (never paired, never
    * read by a model) and the exported visual's page is null.
