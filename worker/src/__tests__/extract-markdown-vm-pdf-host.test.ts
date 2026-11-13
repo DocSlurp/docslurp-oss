@@ -79,7 +79,7 @@ async function harness(providerResult: { ocrPages?: unknown; layoutFacts?: unkno
   const state = WorkflowState.create(run(documentExtraction), [document]);
   state.usageLedger.runId = "run-1";
   state.artifactLedger.recordDocument("doc-1", "normalizedFormat", "pdf");
-  const upsertPageFacts = vi.fn(async () => undefined);
+  const upsertPageFacts = vi.fn(async (_rows: unknown) => undefined);
   // A store that accepts every write, so page facts would be recorded if the stage probed for them.
   (state as { store?: unknown }).store = new Proxy({ upsertPageFacts, getCompletedPages: async () => new Set<number>() } as Record<string, unknown>, {
     get: (object, key) => (typeof key !== "string" || key === "then" ? undefined : object[key] ?? (async () => undefined)),
@@ -202,23 +202,24 @@ describe("the sandboxed PDF route on the worker host", () => {
     vi.restoreAllMocks();
   });
 
-  it("stores the VM's Doppler page facts as a document artifact, without the document's strings, and bills nothing from them", async () => {
+  it("records the VM's Doppler page facts as per-page routing facts, without the document's strings, and bills nothing from them", async () => {
     vi.stubEnv("DOCSLURP_PDF_EXTRACTOR", "vm-pdf");
     // The facts claim more pages than the host counted (3): the extra page and the facts' own count are never used.
     const pageFacts = jsonl([docLine({ pageCount: 50 }), textPage(1), textPage(2), textPage(3), textPage(4), runLine()]);
-    const h = await harness({ markdown: "OneTwoThree", pageFacts: Buffer.from(pageFacts) });
+    const h = await harness({ markdown: "One\fTwo\fThree", pageFacts: Buffer.from(pageFacts) });
     h.state.artifactLedger.record(VISION_ROUTING_VERSION_SLOT, "v3");
     try {
       await h.stage.run(h.state);
       expect(h.state.documentStage("doc-1", "extract-markdown")?.status).toBe("completed");
       expect(h.hostPdf()).toEqual([]);
       expect(h.richIds()).toEqual([]);
-      expect(h.state.artifactLedger.readDocument("doc-1", "doppler-page-facts")).toMatch(/\/page-facts\/doc-1\.json$/);
-      const [key, stored] = [...h.json.entries()].find(([key]) => key.includes("/page-facts/"))!;
-      expect(key).toMatch(/\/page-facts\/doc-1\.json$/);
-      expect((stored as { pages: Array<{ page: number }> }).pages.map((page) => page.page)).toEqual([1, 2, 3]);
-      expect(JSON.stringify([...h.json.values()])).not.toContain("PRODUCER-MARKER");
-      expect(JSON.stringify([...h.json.values()])).not.toContain(PRODUCER_MARKER.slice(0, 10));
+      // One routing row per page the host counted (page 4 is past it): closed enums only.
+      const rows = h.upsertPageFacts.mock.calls.flatMap((call) => call[0] as Array<Record<string, unknown>>).filter((row) => row.scanClass !== undefined);
+      expect(rows).toEqual([1, 2, 3].map((pageNumber) => ({ documentId: "doc-1", runId: "run-1", pageNumber, textLayer: "visible", scanClass: "none" })));
+      const everything = JSON.stringify([...h.json.values(), ...h.upsertPageFacts.mock.calls]);
+      expect(everything).not.toContain("PRODUCER-MARKER");
+      expect(everything).not.toContain(PRODUCER_MARKER.slice(0, 10));
+      expect([...h.json.keys()].some((key) => key.includes("/page-facts/"))).toBe(false);
       // store (the default): the facts never stand in for layout facts.
       expect(h.state.artifactLedger.readDocument("doc-1", "page-layout-facts")).toBeUndefined();
     } finally { await h.cleanup(); }
@@ -276,7 +277,8 @@ describe("the sandboxed PDF route on the worker host", () => {
       try {
         await h.stage.run(h.state);
         expect(h.state.documentStage("doc-1", "extract-markdown")?.status).toBe("completed");
-        expect(h.state.artifactLedger.readDocument("doc-1", "doppler-page-facts")).toBeUndefined();
+        // No routing row came from the facts (they carry the only scan class).
+        expect(h.upsertPageFacts.mock.calls.flat(2).some((row) => (row as { scanClass?: unknown }).scanClass !== undefined)).toBe(false);
         expect(h.state.artifactLedger.readDocument("doc-1", "page-layout-facts")).toBeUndefined();
         // Billing evidence is the provider's ocrPages alone, whatever happened to the facts.
         expect(h.richIds()).toEqual(["rich:run-1:doc-1:2"]);

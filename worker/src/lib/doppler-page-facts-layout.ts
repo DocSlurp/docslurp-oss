@@ -23,7 +23,7 @@
  */
 import type { PageLayoutImage } from "@docslurp/shared";
 
-import type { DopplerColorSpace, DopplerImageFilter, DopplerPageFacts, DopplerPageFactsDocument } from "./doppler-page-facts.js";
+import type { DopplerColorSpace, DopplerImageFilter, DopplerPageFacts, DopplerPageFactsDocument, DopplerScan, DopplerTextLayer } from "./doppler-page-facts.js";
 import type { PageLayoutFacts } from "./page-layout-facts.js";
 
 /** The walker's `pdfimages -list` encodings (worker/scripts/pdf_layout_facts.py LISTING_ENCODINGS). */
@@ -109,4 +109,31 @@ export function pageLayoutFactsFromDopplerFacts(facts: Pick<DopplerPageFactsDocu
     if (layout) out.set(number, layout);
   }
   return out;
+}
+
+/** A page's routing facts as document_page_facts stores them (buildRoutingPageFacts): closed enums only. */
+export interface PageRoutingFacts {
+  textLayer?: DopplerTextLayer | null;
+  scanClass?: DopplerScan | null;
+}
+
+/**
+ * The routing facts (`text_layer`, `scan_class`) for document_page_facts: the layout facts' text layer where they have one,
+ * else the page facts' `text.textLayer`; the scan class from the page facts' `images.scan` (layout facts have none). A
+ * failed or unknown page contributes nothing. Undefined when neither source knows anything.
+ */
+export function routingFactsWithDopplerFacts(
+  layout: ReadonlyMap<number, Pick<PageLayoutFacts, "textLayer">> | undefined,
+  facts: Pick<DopplerPageFactsDocument, "pages"> | undefined,
+): Map<number, PageRoutingFacts> | undefined {
+  const out = new Map<number, PageRoutingFacts>();
+  for (const [page, entry] of layout ?? []) if (entry.textLayer) out.set(page, { textLayer: entry.textLayer });
+  for (const [page, entry] of facts?.pages ?? []) {
+    if (entry.failed) continue;
+    const known = out.get(page) ?? {};
+    const textLayer = known.textLayer ?? entry.text?.textLayer;
+    const scanClass = entry.images?.scan;
+    if (textLayer || scanClass) out.set(page, { ...(textLayer ? { textLayer } : {}), ...(scanClass ? { scanClass } : {}) });
+  }
+  return out.size > 0 ? out : undefined;
 }

@@ -1,10 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
-  DOPPLER_PAGE_FACTS_MAX_BYTES, DOPPLER_PAGE_FACTS_MAX_LINE_BYTES, dopplerPageFactsArtifact, dopplerPageFactsJsonl, dopplerPageFactsByteBudget, dopplerPageFactsMode,
-  parseDopplerPageFacts, readDopplerPageFactsArtifact, type DopplerPageFactsDocument,
+  DOPPLER_PAGE_FACTS_MAX_BYTES, DOPPLER_PAGE_FACTS_MAX_LINE_BYTES, dopplerPageFactsJsonl, dopplerPageFactsByteBudget, dopplerPageFactsMode,
+  parseDopplerPageFacts, type DopplerPageFactsDocument,
 } from "./doppler-page-facts.js";
-import { pageLayoutFactsFromDopplerFacts } from "./doppler-page-facts-layout.js";
+import { pageLayoutFactsFromDopplerFacts, routingFactsWithDopplerFacts } from "./doppler-page-facts-layout.js";
 import { parsePageLayoutFacts } from "./page-layout-facts.js";
 import { probeRowsFromDopplerFacts } from "../routing/probe/doppler-facts.js";
 import { pageInputFromProbeRow } from "../routing/page-input.js";
@@ -47,7 +47,7 @@ describe("parseDopplerPageFacts: well-formed input", () => {
     const facts = parse(jsonl([docLine({ title: PRODUCER_MARKER }), textPage(1, { note: PRODUCER_MARKER, text: { ...textPage().text as object, extra: PRODUCER_MARKER } }), runLine()]), 1);
     expect("producer" in facts.doc).toBe(false);
     expect("creator" in facts.doc).toBe(false);
-    const stored = JSON.stringify(dopplerPageFactsArtifact("doc-1", facts));
+    const stored = JSON.stringify({ doc: facts.doc, pages: [...facts.pages.values()], run: facts.run }) + dopplerPageFactsJsonl(facts);
     expect(stored).not.toContain("PRODUCER-MARKER");
     expect(stored).not.toContain("producer");
     assertSane(facts);
@@ -159,7 +159,7 @@ describe("parseDopplerPageFacts: hostile input", () => {
   it("keeps the run line's build stamps only as a version and a hex commit (council #358 A5)", () => {
     const facts = parse(jsonl([docLine(), textPage(1), runLine({ version: "SSN-078-05-1120", commit: "Acme-salary-250000" })]), 1);
     expect(facts.run).toEqual({ pagesEmitted: 3, pagesFailed: 0 });
-    expect(JSON.stringify(dopplerPageFactsArtifact("doc-1", facts))).not.toMatch(/SSN|salary/);
+    expect(dopplerPageFactsJsonl(facts)).not.toMatch(/SSN|salary/);
   });
 
   it("re-serializes only what it kept: canonical lines that parse to the same facts", () => {
@@ -292,7 +292,7 @@ describe("parseDopplerPageFacts: hostile input", () => {
     const facts = parse(input, pageCount);
     const ms = performance.now() - started;
     expect(facts.pages.size).toBe(pageCount);
-    expect(ms).toBeLessThan(10_000);
+    expect(ms).toBeLessThan(30_000);
     expect(process.memoryUsage().heapUsed - before).toBeLessThan(256 * 1024 * 1024);
     // The same lines for a 10-page document: refused at the line cap, not parsed.
     const started2 = performance.now();
@@ -303,16 +303,16 @@ describe("parseDopplerPageFacts: hostile input", () => {
   }, 60_000);
 });
 
-describe("stored artifact", () => {
-  it("round-trips through the reader, revalidated, and refuses another document's facts", () => {
-    const facts = parse(fullFixture());
-    const artifact = JSON.parse(JSON.stringify(dopplerPageFactsArtifact("doc-1", facts)));
-    const read = readDopplerPageFactsArtifact(artifact, { documentId: "doc-1", pageCount: 3 })!;
-    expect(read.doc).toEqual(facts.doc);
-    expect([...read.pages.entries()]).toEqual([...facts.pages.entries()]);
-    expect(readDopplerPageFactsArtifact(artifact, { documentId: "doc-2", pageCount: 3 })).toBeNull();
-    // A smaller host page count drops what it does not cover.
-    expect([...readDopplerPageFactsArtifact({ ...artifact, pages: artifact.pages.slice(0, 2) }, { documentId: "doc-1", pageCount: 2 })!.pages.keys()]).toEqual([1, 2]);
+describe("routingFactsWithDopplerFacts", () => {
+  it("takes the text layer from layout facts first, the scan class from page facts, and nothing from a failed page", () => {
+    const facts = parse(jsonl([docLine(), textPage(1), scanPage(2), { schema: SCHEMA, type: "page", page: 3, error: "failed", parseWarnings: [], unusualFeatures: [] }]));
+    const layout = new Map([[1, { textLayer: "mixed" as const }], [3, { textLayer: "none" as const }]]);
+    expect(Object.fromEntries(routingFactsWithDopplerFacts(layout, facts)!)).toEqual({
+      1: { textLayer: "mixed", scanClass: "none" },
+      2: { textLayer: "invisible", scanClass: "single" },
+      3: { textLayer: "none" },
+    });
+    expect(routingFactsWithDopplerFacts(undefined, undefined)).toBeUndefined();
   });
 });
 

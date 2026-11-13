@@ -118,8 +118,14 @@ describe("file proxy", () => {
   });
 
   describe("Doppler figures", () => {
-    const figureUri = (name: string) => `s3://bucket/user-a/run-1/doppler-figures/0b6f7e8c-3c1a-4f7e-9a51-2a1d3e4f5a6b/${name}`;
+    const DOC = "0b6f7e8c-3c1a-4f7e-9a51-2a1d3e4f5a6b";
+    // Doppler's own layout under the document's folder: `<root>/doppler/<doc>/images/page-NNNN/(image|figure)-NNN.<ext>`.
+    const PATHS: Record<string, string> = {
+      "p3.g2.svg": "page-0003/figure-002.svg", "p3.1.webp": "page-0003/image-001.webp", "p4.g1.png": "page-0004/figure-001.png",
+    };
+    const figureUri = (name: string) => `s3://bucket/user-a/run-1/doppler/${DOC}/images/${PATHS[name] ?? name}`;
     const figureToken = (name: string, overrides: Record<string, unknown> = {}) => token({ uri: figureUri(name), name, ...overrides });
+    const folderUri = (relative: string) => `s3://bucket/user-a/run-1/doppler/${DOC}/${relative}`;
 
     it("serves an SVG figure inline with a fixed type and a CSP that loads and runs nothing", async () => {
       open.mockResolvedValue(object('<svg xmlns="http://www.w3.org/2000/svg"/>', { ContentType: "text/html" }));
@@ -160,12 +166,52 @@ describe("file proxy", () => {
     });
 
     it("renders no other SVG: a look-alike key outside the figure layout stays an attachment", async () => {
-      for (const key of ["user-a/run-1/doppler-figures/doc/../p3.g2.svg", "user-a/run-1/uploads/p3.g2.svg", "user-a/run-1/doppler-figures/doc/evil.svg", "user-a/run-1/doppler-figures/doc/p3.g2.svg.html"]) {
+      for (const key of [
+        "user-a/run-1/doppler/doc/images/../page-0003/figure-002.svg", "user-a/run-1/uploads/page-0003/figure-002.svg",
+        "user-a/run-1/doppler/doc/images/evil.svg", "user-a/run-1/doppler/doc/images/page-0003/figure-002.svg.html",
+        "user-a/run-1/doppler/doc/page-0003/figure-002.svg",
+        // The retired flat layout is no longer a figure key.
+        "user-a/run-1/doppler-figures/doc/p3.g2.svg",
+      ]) {
         open.mockResolvedValue(object("<svg/>", { ContentType: "image/svg+xml" }));
         const res = await get(`/v1/files/${token({ uri: `s3://bucket/${key}`, name: "p3.g2.svg" })}/p3.g2.svg`);
         expect(res.headers.get("content-type"), key).toBe("application/octet-stream");
         expect(res.headers.get("content-disposition"), key).toMatch(/^attachment;/);
       }
+    });
+
+    it("types the folder's manifest, page facts, index and Markdown by name, never as active content", async () => {
+      for (const [relative, type] of [
+        ["images/manifest.json", "application/json; charset=utf-8"], ["index.json", "application/json; charset=utf-8"],
+        ["images/page-facts.jsonl", "text/plain; charset=utf-8"], ["document.md", "text/markdown; charset=utf-8"],
+        ["images/manifest.jsonl", "text/plain; charset=utf-8"], ["images/shards/0001-0064/manifest.jsonl", "text/plain; charset=utf-8"],
+      ] as const) {
+        open.mockResolvedValue(object("<script>alert(1)</script>", { ContentType: "text/html" }));
+        const name = relative.split("/").pop()!;
+        const res = await get(`/v1/files/${token({ uri: folderUri(relative), name })}/${name}`);
+        expect(res.status, relative).toBe(200);
+        expect(access).toHaveBeenCalledWith(folderUri(relative), "user-a", undefined);
+        expect(res.headers.get("content-type"), relative).toBe(type);
+        expect(res.headers.get("content-security-policy"), relative).toContain("sandbox");
+        expect(res.headers.get("x-content-type-options"), relative).toBe("nosniff");
+      }
+    });
+
+    it("serves the manifest only through the artifact check: a withheld or foreign manifest is the same 404", async () => {
+      access.mockResolvedValue(false); // PII-withheld, another tenant's, or never recorded
+      const res = await get(`/v1/files/${token({ uri: folderUri("images/manifest.json"), name: "manifest.json" })}/manifest.json`);
+      expect(res.status).toBe(404);
+      expect(open).not.toHaveBeenCalled();
+    });
+
+    it("never serves the source pointer, even when the access check would allow it", async () => {
+      access.mockResolvedValue(true);
+      open.mockResolvedValue(object('{"sourceKey":"uploads/secret.pdf"}', { ContentType: "application/json" }));
+      const res = await get(`/v1/files/${token({ uri: folderUri("source.json"), name: "source.json" })}/source.json`);
+      expect(res.status).toBe(404);
+      expect(await res.text()).not.toContain("uploads/secret.pdf");
+      expect(access).not.toHaveBeenCalled();
+      expect(open).not.toHaveBeenCalled();
     });
 
     it("applies the same tenant checks: another tenant, a revoked document, a wrong-scope or other key all get 404", async () => {

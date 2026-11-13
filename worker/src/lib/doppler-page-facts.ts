@@ -479,7 +479,7 @@ function layers(value: unknown): DopplerLayerFacts | undefined {
 const PAGE_FAMILIES = { geometry, text, fonts, images, vectors, forms, annots, layers } as const;
 
 /**
- * Validate one page object (a wire `page` line, or a page of a stored artifact). Null when the page number is missing,
+ * Validate one page object (a wire `page` line). Null when the page number is missing,
  * out of 1..pageCount, or the required lists are malformed: the page is then unknown.
  */
 export function validateDopplerPage(value: unknown, pageCount: number): DopplerPageFacts | null {
@@ -530,8 +530,7 @@ export function validateDopplerDoc(value: unknown): DopplerDocFacts | null {
   }));
   pick("error", "error", (v) => oneOf(["open-failed", "damaged"] as const, v));
   pick("locked", "locked", bool);
-  // Stored summaries carry the renamed field; the wire carries `pageCount`.
-  pick("reportedPageCount", has(value, "reportedPageCount") ? "reportedPageCount" : "pageCount", (v) => count(v));
+  pick("reportedPageCount", "pageCount", (v) => count(v));
   pick("pdfVersion", "pdfVersion", (v) => typeof v === "string" && /^[12]\.[0-9]$/.test(v) ? v : undefined);
   pick("linearized", "linearized", bool);
   pick("xref", "xref", (v) => oneOf(["ok", "repaired"] as const, v));
@@ -706,64 +705,14 @@ export function dopplerPageFactsJsonl(facts: Pick<DopplerPageFactsDocument, "doc
   return lines.map((line) => JSON.stringify(line) + "\n").join("");
 }
 
-// ── Stored artifact ──
-
-export const DOPPLER_PAGE_FACTS_ARTIFACT_VERSION = "doppler-page-facts-artifact@1";
-/** The document artifact slot (DocumentArtifactLedger) holding the stored facts. */
-export const DOPPLER_PAGE_FACTS_ARTIFACT = "doppler-page-facts";
-
-export interface DopplerPageFactsArtifact {
-  version: typeof DOPPLER_PAGE_FACTS_ARTIFACT_VERSION;
-  schema: typeof DOPPLER_PAGE_FACTS_SCHEMA;
-  documentId: string;
-  source: "vm-pdf";
-  summary: DopplerPageFactsSummary;
-  doc: DopplerDocFacts;
-  run: DopplerRunFacts | null;
-  pages: DopplerPageFacts[];
-}
-
-/** The artifact extract-markdown stores: the validated facts only (no document strings), pages ascending. */
-export function dopplerPageFactsArtifact(documentId: string, facts: DopplerPageFactsDocument): DopplerPageFactsArtifact {
-  return {
-    version: DOPPLER_PAGE_FACTS_ARTIFACT_VERSION, schema: DOPPLER_PAGE_FACTS_SCHEMA, documentId, source: "vm-pdf",
-    summary: facts.summary, doc: facts.doc, run: facts.run,
-    pages: [...facts.pages.values()].sort((a, b) => a.page - b.page),
-  };
-}
-
-/**
- * Read a stored artifact back, validating it again with the same checks as the wire (storage is not a trust boundary we
- * rely on). Null when it is not one, or names another document.
- */
-export function readDopplerPageFactsArtifact(payload: unknown, expected: { documentId: string; pageCount: number }): DopplerPageFactsDocument | null {
-  if (!isObj(payload) || payload.version !== DOPPLER_PAGE_FACTS_ARTIFACT_VERSION || payload.documentId !== expected.documentId) return null;
-  const { pageCount } = expected;
-  if (!Number.isSafeInteger(pageCount) || pageCount < 1 || pageCount > DOPPLER_PAGE_FACTS_MAX_PAGES) return null;
-  const doc = validateDopplerDoc(payload.doc);
-  if (!doc || !Array.isArray(payload.pages) || payload.pages.length > pageCount) return null;
-  const pages = new Map<number, DopplerPageFacts>();
-  for (const entry of payload.pages) {
-    const page = validateDopplerPage(entry, pageCount);
-    if (page && !pages.has(page.page)) pages.set(page.page, page);
-  }
-  const run = payload.run === null ? null : validateDopplerRun(payload.run);
-  const summary = isObj(payload.summary) ? payload.summary : {};
-  let failed = 0;
-  for (const page of pages.values()) if (page.failed) failed++;
-  return {
-    doc, pages, run,
-    summary: { pageCount, pagesKnown: pages.size, pagesFailed: failed, linesDropped: count(summary.linesDropped) ?? 0, complete: run !== null },
-  };
-}
-
 // ── Mode ──
 
 export const DOPPLER_PAGE_FACTS_ENV = "DOCSLURP_DOPPLER_PAGE_FACTS";
 export type DopplerPageFactsMode = "off" | "store" | "use";
 
 /**
- * `off`: facts a provider returns are dropped unread. `store` (default): parsed and stored as a document artifact only.
+ * `off`: facts a provider returns are dropped unread. `store` (default): parsed, and each page's text layer and scan
+ * class recorded in document_page_facts (upsertPageFacts).
  * `use`: also stand in for layout facts when the provider returned none. An unknown value is `off`, said loudly: a typo
  * must not widen what untrusted facts can decide.
  */
