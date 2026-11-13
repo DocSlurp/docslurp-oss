@@ -178,7 +178,7 @@ describe("estimate twins equal the mutation's job.estimate", () => {
     const app = appFor("u1");
     await sql`insert into vector_indexes (id, document_id, backend, bucket, path, embedding_model, dimension) values ('v1', 'd1', 'lancedb', 'b', 'p', 'm', 384)`;
     await sql`update documents set indexing_mode = 'full'`;
-    const body = { pipeline: { ...graphPipeline, embedding: { ...graphPipeline.embedding, target: "local" as const, modelUri: "llm://transformers.js/Xenova/gte-small" } } };
+    const body = { pipeline: { ...graphPipeline, embedding: { ...graphPipeline.embedding, profile: "fastest-local" as const, target: "local" as const, modelUri: "llm://transformers.js/Xenova/gte-small" } } };
     const twin = await (await post(app, "/v1/projects/w/estimate", body)).json() as { impact: { kind: string }; estimate: unknown };
     expect(twin.impact.kind).toBe("reindex-required");
     const res = await app.request("/v1/projects/w", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
@@ -423,7 +423,7 @@ describe("PATCH /v1/projects/:id through the real route stays non-breaking", () 
     ["budget cleared", { monthlyBudgetCents: 0 }],
     ["retention", { artifactRetentionDays: 30, runRetentionDays: null }],
     ["partial nested pipeline", { pipeline: { summarize: true } }],
-    ["nested embedding", { pipeline: { embedding: { modelUri: "llm://transformers.js/Xenova/gte-small" } } }],
+    ["nested embedding profile", { pipeline: { embedding: { profile: "fastest-local" } } }],
     ["indexing mode", { pipeline: { indexingMode: "map" } }],
     ["indexing mode with indexAll", { pipeline: { indexingMode: "full" }, indexAll: true }],
     ["apply new-uploads", { apply: "new-uploads", pipeline: { summarize: true } }],

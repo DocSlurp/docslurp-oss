@@ -1,4 +1,4 @@
-import { nitroBaseModel, type ChatReasoningLevel } from "@docslurp/shared/project-chat-models";
+import { nitroBaseModel, type ChatReasoningLevel, type ChatTier } from "@docslurp/shared/project-chat-models";
 import { resolveSpeedBoostChatModel, ChatModelNotAllowedError } from "../lib/chat-model-policy.js";
 import { reportPublicError } from "../lib/public-errors.js";
 import { getDeferredContext } from "../search/deferred/deferred-context.js";
@@ -72,6 +72,7 @@ import { canEditProject, getProjectAccess } from "./organizations.js";
 import type { ProjectChatModelId } from "@docslurp/shared/project-chat-models";
 import type { ChatAgentLimits, ChatAgentLimitsInput } from "@docslurp/shared";
 import { chatEvalAccess, chatTurnNeedsEvalAccess, resolveChatAgentLimits, resolveChatModelRequest } from "../lib/chat-model-policy.js";
+import { customerChatResponse, loadProjectChatTierModels } from "./managed-models.js";
 import { currentRequestId, currentRequestSignal } from "../lib/request-context.js";
 import { currentChatAgentSignal } from "../lib/chat-agent-context.js";
 import { searchHitStatementTimeout } from "../search/timings.js";
@@ -547,6 +548,8 @@ async function generateProjectChatTextWithFailover(args: {
   /** Non-standard projects: answer with this private route instead of hosted models (no failover). */
   privateModel?: PrivateChatModel;
   projectId?: string;
+  /** The project's org: keys the evidence tag (tenant-scoped prompt cache). */
+  orgId?: string | null;
   system: string;
   prompt: string;
   documents: Parameters<typeof generateOpenRouterDocumentText>[0]["documents"];
@@ -584,6 +587,7 @@ async function generateProjectChatTextWithFailover(args: {
         system: args.system,
         prompt: args.prompt,
         documents: args.documents,
+        evidenceScope: args.orgId ?? null,
         maxOutputTokens: args.maxOutputTokens,
         onTextDelta: deltas.handler,
         signal,
@@ -1063,7 +1067,12 @@ async function chatProjectInTurn(args: {
   sessionId?: string;
   /** Browser keys: the sealed grant returned with the previous answer; required to continue `sessionId`. */
   sessionToken?: string | null;
+  /** Operator evaluation only (see chat-model-policy.ts): a backend model id. Everyone else sends `tier`. */
   model?: string | null;
+  /** The chat tier (fastest, balanced, smart); omitted: the project default tier. */
+  tier?: ChatTier | null;
+  /** Reasoning level for the answering model; omitted: none (each model's lowest setting). */
+  reasoning?: ChatReasoningLevel | null;
   history?: Array<Pick<ProjectChatTurn, "role" | "content">>;
   maxOutputTokens?: number;
   allowConfiguration?: boolean;
@@ -1117,14 +1126,17 @@ async function chatProjectInTurn(args: {
   // Platform admins, or a project owned by a DOCSLURP_CHAT_EVAL_ORG_IDS org.
   // Looked up only when the request asks for an eval model or raised limits.
   const isAdmin = chatTurnNeedsEvalAccess(args.model, args.agent) && await chatEvalAccess(args.actor, args.projectId);
-  const resolved = resolveChatModelRequest({ requested: args.model, isAdmin });
+  // A backend model is refused before any project lookup when the caller has no eval access.
+  if (args.model?.trim() && !isAdmin) throw new ChatModelNotAllowedError();
+  const tierModels = await loadProjectChatTierModels(args.projectId);
+  const resolved = resolveChatModelRequest({ requested: args.model, tier: args.tier, reasoning: args.reasoning, isAdmin, tierModels });
   if (args.speedBoost === true && context.privacyMode !== "standard") throw new ChatModelNotAllowedError();
-  const turnModel = resolveSpeedBoostChatModel(resolved.model, args.speedBoost === true);
+  const turnModel = resolveSpeedBoostChatModel(resolved.model, args.speedBoost === true, tierModels);
   const policy: ChatTurnPolicy = {
     model: turnModel, failover: args.speedBoost !== true && resolved.source !== "eval",
     // A Speed boost model swap bills at the chosen model's answer tier; the boost multiplier prices the swap.
     ...(turnModel !== `${resolved.model}:nitro` && turnModel !== resolved.model ? { tierModel: resolved.model } : {}),
-    requestedModel: args.model?.trim() || null,
+    requestedModel: args.model?.trim() || resolved.tier,
     limits: resolveChatAgentLimits(args.agent, isAdmin),
     reasoning: resolved.reasoning,
   };
@@ -1174,6 +1186,9 @@ async function chatProjectInTurn(args: {
     if (streamDelta) await streamDelta(response.answer);
   }
   await chargeChatAnswer(response, args, sessionId, policy);
+  // Backend model and provider ids stay in usage events, traces and logs; customers see the tier. Operator
+  // evaluation turns (a backend model they named) keep the raw diagnostics.
+  if (resolved.source !== "eval" && resolved.source !== "catalog") response = customerChatResponse(response, resolved.tier, tierModels);
   if (requiresChatSessionToken(args.actor)) {
     return { ...response, sessionToken: sealChatSessionToken({ keyId: args.actor.apiKey.keyId, projectId: args.projectId, sessionId: response.sessionId }) };
   }
@@ -1459,6 +1474,7 @@ async function chatProjectTurn(
     } else {
       try {
         const generated = await generateProjectChatTextWithFailover({
+          orgId: project?.orgId ?? null,
           apiKey: openRouterApiKey,
           privacyMode,
           preferredModel: model, failover: policy.failover, reasoning: policy.reasoning,
@@ -1702,6 +1718,7 @@ async function chatProjectTurn(
 
   try {
     const generated = await generateProjectChatTextWithFailover({
+          orgId: project?.orgId ?? null,
       apiKey: openRouterApiKey,
       privacyMode,
       preferredModel: model, failover: policy.failover, reasoning: policy.reasoning,

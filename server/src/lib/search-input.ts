@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { CHAT_REASONING_LEVELS, CHAT_TIERS } from "@docslurp/shared/project-chat-models";
 import { geoPredicateSchema, searchModeSchema, chatAgentLimitsInputSchema, chatRetrievalOverridesSchema, chatSearchFiltersSchema, searchCandidateDepthSchema, searchResultOrderSchema } from "@docslurp/shared";
 import { parseFilters } from "../search/filters.js";
 
@@ -81,13 +82,23 @@ export const projectChatInputSchema = z.object({
   sessionId: id.optional(),
   /** Browser (client) keys: the `sessionToken` returned with the previous answer, required to continue `sessionId`. */
   sessionToken: z.string().min(1).max(4096).optional(),
-  model: id.optional().describe("Chat model for this request: an llm://openrouter/<vendor>/<model> URI such as llm://openrouter/anthropic/claude-haiku-5.5, or the bare OpenRouter id. Omitted: the default. Optional `?reasoning=` option: none (default, fastest), minimal, low, medium or high. A model you may not use is refused with 400 model_not_allowed, never swapped for the default."),
+  tier: z.enum(CHAT_TIERS).optional().describe("Chat tier for this request: fastest, balanced or smart. Omitted: the project default (fastest). DocSlurp manages the model behind each tier; backend model ids are not accepted."),
+  reasoning: z.enum(CHAT_REASONING_LEVELS).optional().describe("How much the answering model reasons: none (default, fastest), minimal, low, medium or high. Use more for long multi-part questions."),
   /** Retrieval overrides for this request only. */
   retrieval: chatRetrievalOverridesSchema.optional(),
   /** Documents, types, tags and indexed-date filters. */
   filters: chatSearchFiltersSchema.optional(),
   /** Search-agent budgets for this turn; non-admins may only lower the defaults. */
   agent: chatAgentLimitsInputSchema.optional(),
+}).strict();
+
+/**
+ * What the chat routes parse: the public input plus `model`, a backend model id that only operator evaluation access
+ * may use (chat-model-policy.ts). Everyone else naming a model gets 400 model_not_allowed naming the tiers. Kept out
+ * of the public schema, so OpenAPI, MCP and the SDK never offer it.
+ */
+export const projectChatRequestSchema = projectChatInputSchema.extend({
+  model: z.string().trim().min(1).max(256).optional(),
 }).strict();
 
 /**

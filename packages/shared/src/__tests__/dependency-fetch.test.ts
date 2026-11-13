@@ -78,6 +78,12 @@ it("records the routed model, upstream host, timing and usage of OpenRouter gene
   expect(exporter.getFinishedSpans().find((item) => item.name === "openrouter.json")!.attributes).toMatchObject({
     "docslurp.llm.upstream_provider": "Crusoe", "gen_ai.usage.output_tokens": 2 });
 
+  const cached = await instrumentFetch("openrouter", "cached", async () => Response.json({ id: "gen-c", provider: "Anthropic", model: "anthropic/claude-haiku-5.5",
+    choices: [], usage: { prompt_tokens: 3000, completion_tokens: 2, prompt_tokens_details: { cached_tokens: 2048, cache_write_tokens: 900 } } }))("https://openrouter.ai/api/v1/chat/completions", { method: "POST", body: "{}" });
+  await cached.json();
+  expect(exporter.getFinishedSpans().find((item) => item.name === "openrouter.cached")!.attributes).toMatchObject({
+    "gen_ai.usage.input_tokens": 3000, "gen_ai.usage.cache_read.input_tokens": 2048, "gen_ai.usage.cache_creation.input_tokens": 900 });
+
   await (await instrumentFetch("openrouter", "embed", async () => Response.json({ provider: "X" }))("https://openrouter.ai/api/v1/embeddings", { method: "POST", body })).json();
   expect(exporter.getFinishedSpans().find((item) => item.name === "openrouter.embed")!.attributes["docslurp.llm.upstream_provider"]).toBeUndefined();
 });

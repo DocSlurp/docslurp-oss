@@ -1,6 +1,9 @@
 import { DEFAULT_CHAT_REASONING, type ChatReasoningLevel } from "@docslurp/shared/project-chat-models";
-import { assertProviderAllowed, authorizePrivateModelCall, createOpenRouterReasoningFetch, createOpenRouterRoutingFetch, createOpenRouterUsageCapture, createOpenRouterChargeTotal, isPrivateModelUri, readProviderCharge, PRIVATE_MODEL_PROVIDER, resolveOpenRouterUsage, servedTextModel, regionFallbackUsageMetadata, resolveSupportedModelIdWithWarning, type PrivacyMode, type PrivateCallAuditScope, type ProviderTextUsage } from "@docslurp/shared";
-import { randomBytes } from "node:crypto";
+import { assertProviderAllowed, authorizePrivateModelCall, createOpenRouterReasoningFetch, createOpenRouterRoutingFetch, createOpenRouterUsageCapture, createOpenRouterChargeTotal, createOpenRouterPromptCacheFetch, needsExplicitPromptCache, chatModelPromptAddendum, isPrivateModelUri, readProviderCharge, PRIVATE_MODEL_PROVIDER, resolveOpenRouterUsage, servedTextModel, regionFallbackUsageMetadata, resolveSupportedModelIdWithWarning, type PrivacyMode, type PrivateCallAuditScope, type ProviderTextUsage } from "@docslurp/shared";
+import { createHmac, randomBytes } from "node:crypto";
+import { chatSystemSaltLine, EVIDENCE_TAG_KEY_MIN_LENGTH, evidenceTagKeyBytes, resetEvidenceTagKeyForTests } from "./chat-prompt-salt.js";
+
+export { chatSystemSaltLine, EVIDENCE_TAG_KEY_MIN_LENGTH, resetEvidenceTagKeyForTests };
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { withObservation, aiResultDetails, instrumentFetch } from "@docslurp/shared/observability";
@@ -237,10 +240,62 @@ export async function generateOpenRouterText(args: {
 }
 
 /**
- * Retrieved documents as isolated evidence blocks. Each block is delimited by a per-call random tag name that
- * document text cannot predict, so a document can neither close its own block nor forge a neighbouring one
- * (the old `---` separator and `[n]` header could be imitated from inside a file). Text is passed verbatim;
- * no line is removed for looking like an instruction (see services/prompt-injection.ts).
+ * The keyed evidence nonce: 128 bits of HMAC-SHA256 under a server secret over the tenant scope (org id) and every
+ * block. Nobody without the key can compute it, so a document cannot be ground offline to contain its own closing
+ * tag, and the same evidence in another org gets a different tag (no cross-tenant shared cache prefix). Within one org
+ * the same evidence keeps the same tag, so a follow-up turn over the same documents can be served from the cache.
+ */
+export function evidenceNonce(documents: Array<{ title: string; text: string; context?: string }>, scope: string): string {
+  const mac = createHmac("sha256", evidenceTagKeyBytes()).update(scope).update("\0");
+  for (const document of documents) mac.update(JSON.stringify([document.title, document.context ?? "", document.text])).update("\n");
+  return mac.digest("hex").slice(0, 32);
+}
+
+/**
+ * The tag nonce for one call: the keyed nonce when the call has a tenant scope and no document already contains it,
+ * else a fresh random one (that call is not cacheable, which only costs the cache).
+ */
+export function evidenceTagNonce(
+  documents: Array<{ title: string; text: string; context?: string }>,
+  scope: string | null | undefined,
+  nonceOf: typeof evidenceNonce = evidenceNonce,
+): string {
+  if (!scope) return randomBytes(16).toString("hex");
+  const nonce = nonceOf(documents, scope);
+  const named = documents.some((document) => namesNonce(document.title, nonce) || namesNonce(document.text, nonce) || namesNonce(document.context ?? "", nonce));
+  return named ? randomBytes(16).toString("hex") : nonce;
+}
+
+/**
+ * Removes evidence tag names from text placed outside the evidence (conversation history, the question): an answer
+ * coaxed into echoing a tag, or a user string carrying one, must never form a valid block next to the real evidence.
+ */
+export function withoutEvidenceTags(text: string): string {
+  return text.replace(EVIDENCE_TAG_NAME, "evidence");
+}
+
+/**
+ * An evidence tag name in any spelling a model can be coaxed to echo: hyphens of any kind, a soft hyphen, zero-width
+ * or other format characters, underscores or spaces between "evidence" and the hex. The hex run must hold a digit, so
+ * ordinary words ("evidence decade") are left alone.
+ */
+const EVIDENCE_TAG_NAME = /evidence[\s_\p{Pd}\p{Cf}\u2212\uFE63\uFF0D]*(?=[0-9a-f]*[0-9])[0-9a-f]{6,}/giu;
+
+/**
+ * Whether `text` carries `nonce` in any form: after NFKC, with everything but hex digits removed (format characters,
+ * separators, markup), so `</evidence‐n>`, `evidence_n`, `e v i d e n c e - n` and a bare `</n>` all count. A false
+ * positive only costs the call its cache (a random tag is used).
+ */
+export function namesNonce(text: string, nonce: string): boolean {
+  return text.normalize("NFKC").toLowerCase().replace(/[^0-9a-f]/g, "").includes(nonce.toLowerCase());
+}
+
+/**
+ * Retrieved documents as isolated evidence blocks. Each block is delimited by a tag name document text cannot predict:
+ * a keyed per-org nonce (`evidenceTagNonce`) on hosted routes, a random one per call otherwise (the default). A
+ * document can therefore neither close its own block nor forge a neighbouring one (the old `---` separator and `[n]`
+ * header could be imitated from inside a file). Text is passed verbatim; no line is removed for looking like an
+ * instruction (see services/prompt-injection.ts).
  */
 export function formatEvidenceBlocks(documents: Array<{ title: string; text: string; context?: string }>, nonce = randomBytes(6).toString("hex")): string {
   const tag = `evidence-${nonce}`;
@@ -263,6 +318,11 @@ export async function generateOpenRouterDocumentText(args: {
     text: string;
     context?: string;
   }>;
+  /**
+   * Tenant scope of the evidence (the org id). Keys the evidence tag so the same evidence repeats byte for byte within
+   * the org (prompt cache) and differs across orgs. Absent: a random tag per call.
+   */
+  evidenceScope?: string | null;
   model?: string;
   /** Hosted answers: the chat model reference's `?reasoning=` option. Default none (each model's lowest setting). */
   reasoning?: ChatReasoningLevel;
@@ -286,7 +346,8 @@ export async function generateOpenRouterDocumentText(args: {
       operation: "api.chat.documents",
       modelUri: args.model,
       system: args.system,
-      prompt: `${args.prompt}\n\nProject evidence:\n\n${inlineDocuments}`,
+      // Private routes keep the question-first order and a random per-call tag: they have no shared prompt cache.
+      prompt: `${withoutEvidenceTags(args.prompt)}\n\nProject evidence:\n\n${inlineDocuments}`,
       maxOutputTokens: args.maxOutputTokens,
       privacyMode: args.privacyMode,
       auditScope: args.auditScope,
@@ -300,7 +361,7 @@ export async function generateOpenRouterDocumentText(args: {
   const reasoning = args.reasoning ?? DEFAULT_CHAT_REASONING;
   const accounting = createOpenRouterUsageCapture();
   const provider = createOpenAI({
-    fetch: createOpenRouterReasoningFetch(createOpenRouterRoutingFetch(instrumentFetch("openrouter", "chat", accounting.fetch)), reasoning === "none" ? "none" : undefined),
+    fetch: createOpenRouterPromptCacheFetch(createOpenRouterReasoningFetch(createOpenRouterRoutingFetch(instrumentFetch("openrouter", "chat", accounting.fetch)), reasoning === "none" ? "none" : undefined)),
     apiKey: args.apiKey,
     baseURL: OPENROUTER_BASE_URL,
   });
@@ -338,7 +399,10 @@ export async function generateOpenRouterDocumentText(args: {
     sources: Array<Record<string, unknown>>;
   finishReason?: string;
   }> {
-    const inlineDocuments = formatEvidenceBlocks(args.documents);
+    // The question and history follow the evidence: if they carry this call's tag in any form (an echoed or obfuscated
+    // tag from an earlier turn), the call uses a random tag instead, so nothing outside the evidence can name it.
+    const keyed = evidenceTagNonce(args.documents, args.evidenceScope);
+    const inlineDocuments = formatEvidenceBlocks(args.documents, namesNonce(args.prompt, keyed) ? randomBytes(16).toString("hex") : keyed);
 
     return withObservation(
       {
@@ -360,9 +424,18 @@ export async function generateOpenRouterDocumentText(args: {
             provider: "openrouter",
             context: args.observability,
           }),
-          model: provider(model),
-          system: args.system,
-          prompt: `${args.prompt}\n\nProject evidence:\n\n${inlineDocuments}`,
+          // Chat Completions for models that cache only at explicit markers (OpenRouter ignores part markers on the
+          // Responses API); the Responses API for the rest, as before.
+          model: needsExplicitPromptCache(model) ? provider.chat(model) : provider(model),
+          // The org salt comes first: nothing tenant-specific precedes it in the cached prefix.
+          system: [chatSystemSaltLine(args.evidenceScope), args.system, chatModelPromptAddendum(model)].filter(Boolean).join("\n\n"),
+          // Stable first, per-request last: the evidence (byte-identical when a follow-up retrieves the same
+          // documents, within one org) before the history and question, so providers with automatic prefix caching
+          // can reuse it. Claude marks only the system prompt (openrouter-prompt-cache.ts).
+          messages: [{ role: "user", content: [
+            { type: "text", text: `Project evidence:\n\n${inlineDocuments}` },
+            { type: "text", text: withoutEvidenceTags(args.prompt) },
+          ] }],
           maxOutputTokens: args.maxOutputTokens,
           abortSignal: args.signal,
           providerOptions,
