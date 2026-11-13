@@ -10,14 +10,12 @@ const refused = (reason) => ({ status: "refused", reason, ms: 0 });
 
 // Inline chart extraction (DOCSLURP_CHART_EXPORT_INLINE): only when the host asks. Everything about it, the module load
 // included, is inside a try: a chart failure (a missing or broken module, a worker crash) is a chart refusal and never
-// fails this command. An SVG's worker starts before the inspection (its plan almost always passes); it gets no bytes
-// until the plan has passed, and is ended if the plan skips.
+// fails this command. The worker starts only after the plan passed (pre-starting an SVG's worker during the inspection
+// saved ~1 ms on the parser VM, performance/chart-export-inline, so it is not done).
 let chartModule = null;
-let prestarted = null;
 if (charts) {
   try {
     chartModule = await import("./chart-inline.mjs");
-    if (charts.kind === "svg") prestarted = chartModule.startChartWorker();
   } catch {
     chartModule = null;
   }
@@ -30,7 +28,7 @@ let result = own;
 if (charts) {
   let answer;
   try {
-    answer = chartModule ? await chartModule.inlineCharts(bytes, charts, inspection, prestarted) : refused("worker-failed");
+    answer = chartModule ? await chartModule.inlineCharts(bytes, charts, inspection) : refused("worker-failed");
   } catch {
     answer = refused("worker-failed");
   }

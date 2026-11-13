@@ -15,12 +15,8 @@ const WORKER = new URL("./chart-inline-worker.mjs", import.meta.url);
 const COMPILE_CACHE = fileURLToPath(new URL("../dist/chart-export/compile-cache/", import.meta.url));
 const pagesOf = (pages) => (Number.isSafeInteger(pages) && pages > 0 && pages <= 100_000 ? pages : undefined);
 
-/**
- * Start the worker (thread start, cache, bundle import) without giving it any bytes. The quarantine script starts it
- * before its inspection only for kinds whose plan almost always passes (svg); `cancel()` ends it if the plan skips.
- * `workerUrl` exists for the tests' hostile workers; the inspection script never passes it.
- */
-export function startChartWorker(workerUrl = WORKER) {
+/** Start the worker (thread start, cache, bundle import); it gets bytes only once it says "ready". */
+function startChartWorker(workerUrl) {
   const started = performance.now();
   const worker = new Worker(workerUrl, {
     workerData: existsSync(COMPILE_CACHE) ? { compileCache: COMPILE_CACHE } : {},
@@ -44,19 +40,16 @@ export function startChartWorker(workerUrl = WORKER) {
 
 /**
  * `request`: { kind, diagrams, pages? } from the host. `inspection`: this process's own inspection of the same bytes.
- * `prestarted`: a worker from startChartWorker(), or null to start one here (only after the plan passed).
+ * The worker starts only after the plan passed. `workerUrl` exists for the tests' hostile workers.
  * Returns { status: "ok", ms, result } | { status: "skipped", reason } | { status: "refused", reason, ms }.
  * Transfers `bytes`' memory to the worker: the caller must not use `bytes` afterwards.
  */
-export async function inlineCharts(bytes, request, inspection, prestarted = null, workerUrl = WORKER) {
+export async function inlineCharts(bytes, request, inspection, workerUrl = WORKER) {
   const kind = typeof request?.kind === "string" ? request.kind : "";
   let text;
   const plan = inlineChartPlan(kind, inspection, bytes.length, () => (text ??= bytes.toString("utf8")));
-  if (!plan.run) {
-    prestarted?.cancel();
-    return { status: "skipped", reason: plan.reason };
-  }
-  const handle = prestarted ?? startChartWorker(workerUrl);
+  if (!plan.run) return { status: "skipped", reason: plan.reason };
+  const handle = startChartWorker(workerUrl);
   const { worker } = handle;
   const ms = () => Math.round(performance.now() - handle.started);
   const deadline = inlineDeadlineMs(bytes.length);
@@ -100,7 +93,7 @@ export async function inlineCharts(bytes, request, inspection, prestarted = null
     worker.on("message", onMessage);
     worker.once("error", onError);
     worker.once("exit", onExit);
-    // Replay what a prestarted worker already said (its "ready", or an early failure).
+    // Replay anything the worker said before these listeners were attached (none in practice: same tick).
     if (handle.early) {
       handle.detach();
       for (const [event, value] of handle.early.splice(0)) (event === "message" ? onMessage : event === "error" ? onError : onExit)(value);

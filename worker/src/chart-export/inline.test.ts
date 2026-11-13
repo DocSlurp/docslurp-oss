@@ -113,7 +113,7 @@ describe.skipIf(!built)("inline charts in the quarantine guest (real scripts, re
       const { inlineCharts } = await import(pathToFileURL(path.join(workerRoot, "scripts/chart-inline.mjs")).href);
       const inspection = { sniffed: { encoding: "utf-8", container: null }, archive: null };
       const input = size === 6 ? Buffer.from("<svg/>") : Buffer.from(`<svg>${" ".repeat(size - 11)}</svg>`);
-      return await inlineCharts(input, { kind: "svg", diagrams: true }, inspection, null, pathToFileURL(file));
+      return await inlineCharts(input, { kind: "svg", diagrams: true }, inspection, pathToFileURL(file));
     }
     it("a spinning extractor hits the deadline", async () => {
       const started = Date.now();
@@ -176,7 +176,7 @@ describe.skipIf(!built)("inline charts in the quarantine guest (real scripts, re
     expect(out.sniffed).toBeTruthy();
   }, 60_000);
 
-  it("a prestarted SVG worker is ended when the plan skips; the command finishes", async () => {
+  it("an SVG declared kind on a ZIP is skipped before any worker starts; the command finishes", async () => {
     const out = await inspect("x.svg", xlsx("S", [["q", "v"], ["A", 1]], chart), { kind: "svg", diagrams: true });
     expect(out.charts).toEqual({ status: "skipped", reason: "not-text" });
   }, 60_000);

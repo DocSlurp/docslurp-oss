@@ -6,7 +6,7 @@
 import { copyFileSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
-import { barPlot, chartXml, docx, genericBar, linePlot, pptx, xlsx } from "../../worker/src/chart-export/extractors/__tests__/fixtures.js";
+import { barPlot, chartXml, docx, genericBar, linePlot, pptx, xlsx, zip } from "../../worker/src/chart-export/extractors/__tests__/fixtures.js";
 import { buildTestPdf, proseLines } from "../../worker/src/test/make-pdf.js";
 
 const [corpus, out] = process.argv.slice(2);
@@ -35,4 +35,25 @@ for (let i = 0; i < 5; i += 1) writeFileSync(path.join(out, `gen-chart-${i}.svg`
 for (let i = 0; i < 10; i += 1) {
   writeFileSync(path.join(out, `gen-text-${i}.pdf`), buildTestPdf(Array.from({ length: 3 + i }, (_, p) => ({ kind: "text", heading: `Section ${p + 1}`, lines: proseLines(40, i * 10 + p) }) as never)));
 }
+// Council M3: JSON and EPUB, with and without a chart (an API export is the common JSON upload and must cost nothing).
+const vega = (k: number) => ({ $schema: "https://vega.github.io/schema/vega-lite/v5.json", title: `Bookings growth ${2024 + k}`, mark: "bar", data: { values: quarters.map((q, i) => ({ quarter: q, bookings: 40 + i * 10 + k })) }, encoding: { x: { field: "quarter", type: "nominal" }, y: { field: "bookings", type: "quantitative" } } });
+for (let i = 0; i < 4; i += 1) writeFileSync(path.join(out, `gen-spec-${i}.json`), JSON.stringify(vega(i), null, 2));
+for (let i = 0; i < 2; i += 1) writeFileSync(path.join(out, `gen-plotly-${i}.json`), JSON.stringify({ data: [{ type: "bar", x: quarters, y: [12 + i, 15, 19, 24] }], layout: { title: { text: "Earnings beat" } } }));
+for (let i = 0; i < 6; i += 1) {
+  writeFileSync(path.join(out, `gen-export-${i}.json`), JSON.stringify({ orders: Array.from({ length: 50 + i * 40 }, (_, k) => ({ id: k, city: ["London", "Tokyo", "Austin"][k % 3], total: 10 + k })), next: null }, null, 2));
+}
+for (let i = 0; i < 3; i += 1) writeFileSync(path.join(out, `gen-rows-${i}.json`), JSON.stringify(Array.from({ length: 200 }, (_, k) => ({ quarter: quarters[k % 4], value: k }))));
+function epub(chapters: string[]): Uint8Array {
+  const files: Record<string, string> = {
+    mimetype: "application/epub+zip",
+    "META-INF/container.xml": `<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>`,
+    "OEBPS/content.opf": `<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata/><manifest>${chapters.map((_, k) => `<item id="c${k}" href="c${k}.xhtml" media-type="application/xhtml+xml"/>`).join("")}</manifest><spine>${chapters.map((_, k) => `<itemref idref="c${k}"/>`).join("")}</spine></package>`,
+  };
+  chapters.forEach((body, k) => { files[`OEBPS/c${k}.xhtml`] = `<?xml version="1.0"?><html xmlns="http://www.w3.org/1999/xhtml"><body>${body}</body></html>`; });
+  return zip(files, 0);
+}
+for (let i = 0; i < 3; i += 1) {
+  writeFileSync(path.join(out, `gen-book-chart-${i}.epub`), epub([`<h1>Expansion</h1>${proseLines(20, i).map((l) => `<p>${l}</p>`).join("")}`, genericBar(["London", "Tokyo", "Austin"], [4 + i, 6, 9], 12), `<script type="application/json">${JSON.stringify(vega(i))}</script>`]));
+}
+for (let i = 0; i < 2; i += 1) writeFileSync(path.join(out, `gen-book-plain-${i}.epub`), epub([`<h1>Annual report</h1>${proseLines(40, i).map((l) => `<p>${l}</p>`).join("")}`]));
 console.log(`documents=${readdirSync(out).length}`);

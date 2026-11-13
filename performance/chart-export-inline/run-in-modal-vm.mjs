@@ -1,33 +1,43 @@
 #!/usr/bin/env node
-// Packs the built guest scripts (bundled, so no node_modules are needed) and the slice into a Modal `runtime: "vm"`
-// sandbox shaped like the parser VM (2 vCPU, 4 GiB, network blocked, no secrets) and runs bench-vm.mjs there.
-//   node performance/chart-export-inline/run-in-modal-vm.mjs <slice dir> <out.json> [runs=5]
-// Needs MODAL_TOKEN_ID / MODAL_TOKEN_SECRET and a built worker (pnpm --filter @docslurp/worker build).
+// Packs start-up variants of the inline chart guest (bundled, so no node_modules are needed) and the slice into a Modal
+// `runtime: "vm"` sandbox shaped like the parser VM (2 vCPU, 4 GiB: the provider defaults; network blocked, no secrets)
+// and runs bench-vm.mjs there.
+//   node performance/chart-export-inline/run-in-modal-vm.mjs <slice dir> <out.json> [runs=5] [baseline pack dir]
+// Variants: v0 = <baseline pack dir> (an earlier pack of this script, when given); v1 = this tree, no compile cache, no
+// cache; v2 = this tree as shipped (+ the compile cache, built inside the VM at its own paths). The 2026-11-13 run also had
+// a v3 with an SVG worker pre-started during the inspection: ~1 ms, so it was removed. Needs MODAL_TOKEN_ID / MODAL_TOKEN_SECRET and a built worker.
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readdirSync, readFileSync, writeFileSync, mkdirSync, copyFileSync } from "node:fs";
+import { cpSync, mkdtempSync, readdirSync, readFileSync, writeFileSync, mkdirSync, copyFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const repo = fileURLToPath(new URL("../../", import.meta.url));
-const [slice, outPath, runs = "5"] = process.argv.slice(2);
+const [slice, outPath, runs = "5", baseline] = process.argv.slice(2);
 const req = createRequire(`${repo}worker/package.json`);
 const { build } = req("esbuild");
 const pack = mkdtempSync(path.join(process.env.TMPDIR || tmpdir(), "inline-pack-"));
-const w = (p) => path.join(pack, "worker", p);
-mkdirSync(w("scripts"), { recursive: true });
-mkdirSync(w("dist/chart-export"), { recursive: true });
 const common = { bundle: true, platform: "node", format: "esm", target: "node22", logLevel: "warning", absWorkingDir: `${repo}worker` };
-await build({ ...common, entryPoints: [`${repo}worker/scripts/quarantine-inspect.mjs`], outfile: w("scripts/quarantine-inspect.mjs"), external: ["./chart-inline.mjs"] });
-await build({ ...common, entryPoints: [`${repo}worker/scripts/chart-inline.mjs`], outfile: w("scripts/chart-inline.mjs") });
-for (const f of ["chart-inline-worker.mjs", "chart-export-extract.mjs"]) copyFileSync(`${repo}worker/scripts/${f}`, w(`scripts/${f}`));
-copyFileSync(`${repo}worker/dist/chart-export/guest.bundle.mjs`, w("dist/chart-export/guest.bundle.mjs"));
-for (const f of ["bench-vm.mjs", "probe-vm.mjs"]) copyFileSync(`${repo}performance/chart-export-inline/${f}`, path.join(pack, f));
+async function variant(name, { prestart }) {
+  const w = (p) => path.join(pack, name, "worker", p);
+  mkdirSync(w("scripts"), { recursive: true });
+  mkdirSync(w("dist/chart-export"), { recursive: true });
+  await build({ ...common, entryPoints: [`${repo}worker/scripts/quarantine-inspect.mjs`], outfile: w("scripts/quarantine-inspect.mjs"), external: ["./chart-inline.mjs"] });
+  await build({ ...common, entryPoints: [`${repo}worker/scripts/chart-inline.mjs`], outfile: w("scripts/chart-inline.mjs") });
+  for (const f of ["chart-inline-worker.mjs", "chart-guest-bundle.mjs"]) copyFileSync(`${repo}worker/scripts/${f}`, w(`scripts/${f}`));
+  copyFileSync(`${repo}worker/dist/chart-export/guest.bundle.mjs`, w("dist/chart-export/guest.bundle.mjs"));
+  // The SVG pre-start variant (v3) was measured at ~1 ms per SVG and removed from the guest; v1/v2 remain.
+  void prestart;
+}
+if (baseline) cpSync(baseline, path.join(pack, "v0"), { recursive: true });
+await variant("v1", { prestart: false });
+await variant("v2", { prestart: false });
+copyFileSync(`${repo}performance/chart-export-inline/bench-vm.mjs`, path.join(pack, "bench-vm.mjs"));
 mkdirSync(path.join(pack, "slice"));
 for (const f of readdirSync(slice)) copyFileSync(path.join(slice, f), path.join(pack, "slice", f));
-const tar = path.join(pack, "..", `${path.basename(pack)}.tar`);
-execFileSync("tar", ["-cf", tar, "-C", pack, "."]);
+const tar = `${pack}.tar`;
+execFileSync("tar", ["-cf", tar, "--owner=0", "--group=0", "-C", pack, "."]);
 
 const { ModalClient } = req("modal");
 const client = new ModalClient({ tokenId: process.env.MODAL_TOKEN_ID, tokenSecret: process.env.MODAL_TOKEN_SECRET });
@@ -36,18 +46,21 @@ const image = client.images.fromRegistry("node:24-trixie-slim");
 const started = Date.now();
 const vm = await client.sandboxes.create(app, image, {
   runtime: "vm", command: ["sleep", "infinity"], cpu: 2, cpuLimit: 2, memoryMiB: 4096, memoryLimitMiB: 4096,
-  timeoutMs: 20 * 60_000, blockNetwork: true, env: {}, secrets: [],
+  timeoutMs: 30 * 60_000, blockNetwork: true, env: {}, secrets: [],
 });
+const sh = async (cmd, timeoutMs = 120_000) => {
+  const p = await vm.exec(["sh", "-c", cmd], { mode: "text", timeoutMs });
+  const [out, err, code] = await Promise.all([p.stdout.readText(), p.stderr.readText(), p.wait()]);
+  if (code !== 0) throw new Error(`${cmd}: ${err}`);
+  return out;
+};
 try {
   await vm.filesystem.writeBytes(readFileSync(tar), "/bench.tar");
-  const untar = await vm.exec(["sh", "-c", "mkdir -p /bench && tar -xf /bench.tar -C /bench"], { timeoutMs: 120_000 });
-  if ((await untar.wait()) !== 0) throw new Error(await untar.stderr.readText());
-  // PROBE=1: the fixed-cost probe (probe-vm.mjs) instead of the slice bench.
-  const argv = process.env.PROBE === "1" ? ["node", "/bench/probe-vm.mjs", "/bench", runs] : ["node", "/bench/bench-vm.mjs", "/bench", "/bench/slice", runs];
-  const proc = await vm.exec(argv, { mode: "text", timeoutMs: 18 * 60_000 });
-  const [out, err, code] = await Promise.all([proc.stdout.readText(), proc.stderr.readText(), proc.wait()]);
-  if (code !== 0) { process.stderr.write(err); process.exitCode = 1; }
-  writeFileSync(outPath, out);
+  await sh("mkdir -p /bench && tar -xf /bench.tar -C /bench");
+  // The compile cache is built where it is used (Node keys entries by the module's path and source).
+  for (const v of ["v2"]) await sh(`cd /bench/${v}/worker && node -e "import('./scripts/chart-guest-bundle.mjs').then((m) => m.buildCompileCache())"`);
+  const variants = [...(baseline ? ["v0"] : []), "v1", "v2"].map((v) => `${v}=/bench/${v}`).join(",");
+  writeFileSync(outPath, await sh(`node /bench/bench-vm.mjs ${variants} /bench/slice ${runs}`, 28 * 60_000));
 } finally {
   await vm.terminate();
   console.log(`vm_seconds=${((Date.now() - started) / 1000).toFixed(1)}`);

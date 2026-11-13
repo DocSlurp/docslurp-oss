@@ -54,6 +54,53 @@ still exceeds the page-only budget (about 19 ms per signalled document on this s
 2. Trim the bundle's import-time work: zod schema construction.
 3. Start the worker while the quarantine inspection is still running.
 
+## Council fix round re-measure (`results-vm-steps.json`)
+
+- **Slice:** the 75 documents above plus 20 more (council M3): 6 JSON specs (Vega-Lite and Plotly), 6 JSON API exports,
+  3 JSON row arrays, 3 EPUBs with charts and 2 without. That makes 95 documents and 196 pages.
+- **VM:** the same Modal VM shape, 2 vCPU and 4 GiB. These are the parser VM's provider defaults
+  (`DOCSLURP_MODAL_CPU`, `DOCSLURP_MODAL_MEMORY_MB`), so production runs at the size measured.
+- **Price, at that size:** VM $0.00010552/s plus worker slot $0.000035/s.
+- **Per-document quarantine VM (boot and staging, 1.4 s):** $0.000197.
+- **Runs:** five per arm, interleaved with the order rotated, a fresh process per command.
+
+| step | inline time per signalled document (median) | documents that started a worker | pages per $1, the gate as defined (page-only baseline 63,878) | pages per $1 counting each document's quarantine VM (baseline 9,008) | pages per minute (baseline 200) |
+|---|--:|--:|--:|--:|--:|
+| v0: before this round | 62 ms | 52 | 55,240 (−13.5%) | 8,814 (−2.2%) | 189.0 (−5.5%) |
+| v1: + JSON spec-key prefilter, spec schemas in their own module, transfer, RSS watchdog | 61 ms | 46 | 56,028 (−12.3%) | 8,834 (−1.9%) | 190.1 (−4.9%) |
+| **v2: + compile cache (shipped)** | **51 ms** | **46** | **57,052 (−10.7%)** | **8,859 (−1.7%)** | **191.5 (−4.3%)** |
+| (v3: + SVG worker started during the inspection) | 50 ms | 46 | 57,114 (−10.6%) | 8,860 (−1.6%) | 191.6 (−4.2%) |
+
+Every step exported the same 94 visuals.
+
+**What each step bought:**
+- **JSON prefilter (v1):** the 6 API exports no longer start a worker; their cost went from ~58 ms to ~4 ms each.
+- **Spec schemas in their own module (v1):** within noise. A CPU profile of the import puts zod schema construction at
+  ~20% of it, and the guest still builds the spec schemas it validates with.
+- **Compile cache (v2):** −10 ms on every signalled document.
+- **Pre-start (v3):** ~1 ms, so it was removed from the guest.
+
+**Gate.** As defined (≤2% loss on the page-only baseline), the shipped guest **fails: −10.7%**. It is −6.3% on the
+original 75-document slice at the 1-core price used before; the 2 vCPU / 4 GiB price and the JSON and EPUB documents make
+it worse here. Counting the quarantine VM that every document already pays, it is −1.7% (the earlier figure was −1.6%).
+Which baseline applies is the owner's decision.
+
+**EPUB:** each EPUB starts a worker (~50 ms), with or without a chart. Nothing in the ZIP listing shows a chart signal.
+
+## Threat model note (council L6)
+
+The XML, SVG and JSON extractors now run in a worker thread of the quarantine-inspect process, before the ClamAV verdict,
+in the parser VM's pooled lanes (reused across documents of the same activity, wiped between them).
+- **Risk:** a V8-level compromise through the extractor could forge this document's inspection result, or try to
+  persist into a later command in the same VM.
+- **What bounds it:**
+  - the VM is the boundary;
+  - the host cross-checks the inspection (magic bytes, intake facts) and validates the chart answer field by field;
+  - ClamAV runs in its own scanner session;
+  - the lane is wiped between documents.
+- **Same trust level** as the existing parser commands, which run customer bytes in the same pooled VMs.
+- **Not done here:** marking a VM that ran inline charts as not reusable for another document's quarantine.
+
 ## PDF vector charts (`pdf-figure-words.mjs`, `gen_pdf_truth.py`)
 
 Doppler figure SVGs carry no text, so the free steps yield **0** charts for PDFs today. This branch sends none of them
