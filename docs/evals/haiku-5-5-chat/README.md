@@ -78,7 +78,6 @@ Latency and cost, from measured usage. Cost is at list price; Luna's OpenRouter 
 - Its chat route-tier option (`tier-options.ts`) joins Luna's tiers.
 - It is recommended for the second chat failover slot: `[gpt-6-luna, claude-haiku-5.5, glm-5.3-flash]`, owned by
   core #361. Haiku runs on Anthropic, Vertex and Bedrock infrastructure, separate from Luna's OpenAI and Azure.
-- The credit tier is `standard`, the same as Luna; this is set in the private price card and was already the case.
 
 ## Prompt caching
 
