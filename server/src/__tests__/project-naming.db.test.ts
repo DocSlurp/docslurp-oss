@@ -78,7 +78,10 @@ describe("automatic project naming", () => {
 
     await sql`insert into document_chunks (id, document_id, run_id, user_id, chunk_index, text, token_estimate, heading_path)
       values (${first.id + "-c0"}, ${first.id}, ${first.runId}, 'u', 0, 'Rent is due monthly.', 5, ${["Residential Lease"]})`;
+    // Reads never rename; the maintenance sweep does, after ingest.
     await ws.getProject(project.id, "u");
+    expect((await state(project.id)).name).toBe("Lease 2026 + 1 more");
+    await naming.sweepProjectAutoTitles();
     expect(await state(project.id)).toEqual({ name: "Residential Lease", autoTitle: { phase: "content", name: "Residential Lease", source: "heading" } });
 
     // Uploads no longer rename once content has named the project.
@@ -109,7 +112,52 @@ describe("automatic project naming", () => {
     await sql`insert into document_chunks (id, document_id, run_id, user_id, chunk_index, text, token_estimate, heading_path)
       values (${doc.id + "-c0"}, ${doc.id}, ${doc.runId}, 'u', 0, 'Body.', 2, ${["Field Survey Notes"]})`;
     await ws.listProjects("u");
+    expect((await state(project.id)).name).toBe("Untitled project");
+    await naming.sweepProjectAutoTitles();
     expect((await state(project.id)).name).toBe("Field Survey Notes");
+  });
+
+  it("sweeps the oldest pending corpus change first, with no lookback window and no starvation", async () => {
+    await naming.sweepProjectAutoTitles();
+    const pending = async () => (await sql<{ project_id: string }[]>`
+      select project_id from project_corpus_stats where auto_title_checked_at is distinct from updated_at`).map((row) => row.project_id).sort();
+    expect(await pending()).toEqual([]);
+
+    // Three projects the sweep can do nothing for (manually named), changed more recently than the one it can.
+    const stale = await ws.createProject({ userId: "u", orgId: "o" });
+    const doc = await addDocument(stale.id, "scan.pdf");
+    await sql`insert into document_chunks (id, document_id, run_id, user_id, chunk_index, text, token_estimate, heading_path)
+      values (${doc.id + "-c0"}, ${doc.id}, ${doc.runId}, 'u', 0, 'Body.', 2, ${["Harbour Expansion Plan"]})`;
+    // An outage far longer than the old 15-minute window.
+    await sql`update project_corpus_stats set updated_at = now() - interval '3 days' where project_id = ${stale.id}`;
+    const manual: string[] = [];
+    for (const name of ["Manual one", "Manual two", "Manual three"]) {
+      const project = await ws.createProject({ userId: "u", orgId: "o", name });
+      await addDocument(project.id, "file.pdf");
+      manual.push(project.id);
+    }
+    expect(await pending()).toEqual([stale.id, ...manual].sort());
+
+    // One page of one: the oldest change, not the newest.
+    expect(await naming.sweepProjectAutoTitles({ batchSize: 1, maxBatches: 1 })).toBe(1);
+    expect((await state(stale.id)).name).toBe("Harbour Expansion Plan");
+    expect(await pending()).toEqual([...manual].sort());
+    // Projects with nothing to rename are examined once and leave the queue.
+    expect(await naming.sweepProjectAutoTitles({ batchSize: 2 })).toBe(3);
+    expect(await pending()).toEqual([]);
+    expect(await naming.sweepProjectAutoTitles()).toBe(0);
+
+    // A summary written after the document completed (enrichment after indexing), with no further upload, makes the
+    // project pending again on its own; the summary then outranks the heading.
+    await sql`insert into document_summaries (id, document_id, run_id, user_id, summary)
+      values (${doc.id + "-summary"}, ${doc.id}, ${doc.runId}, 'u', 'This document is a harbour expansion budget for 2027, covering new berths.')`;
+    expect(await pending()).toEqual([stale.id]);
+    expect(await naming.sweepProjectAutoTitles()).toBe(1);
+    expect((await state(stale.id)).name).toBe("Harbour expansion budget for 2027");
+    expect(await pending()).toEqual([]);
+    // A later corpus change also makes it pending again.
+    await addDocument(stale.id, "appendix.pdf");
+    expect(await pending()).toEqual([stale.id]);
   });
 
   it("stops automatic naming after a manual rename", async () => {
@@ -154,6 +202,76 @@ it.skipIf(!raceDatabaseUrl).each(["changed", "same"])("does not overwrite a conc
     await automatic;
   }
 }, 15_000);
+
+it.skipIf(!raceDatabaseUrl)("keeps a project pending when its summary transaction is still open during a sweep", async () => {
+  const project = await ws.createProject({ userId: "u", orgId: "o" });
+  const doc = await addDocument(project.id, "scan.pdf");
+  await sql`insert into document_chunks (id, document_id, run_id, user_id, chunk_index, text, token_estimate, heading_path)
+    values (${doc.id + "-c0"}, ${doc.id}, ${doc.runId}, 'u', 0, 'Body.', 2, ${["Harbour Expansion Plan"]})`;
+  const pending = async () => (await sql<{ pending: boolean }[]>`
+    select auto_title_checked_at is distinct from updated_at as pending from project_corpus_stats where project_id = ${project.id}`)[0]!.pending;
+  expect(await pending()).toBe(true);
+  const connection = await concurrent.reserve();
+  try {
+    // The summary is written but not committed while the sweep runs (the checkpoint is still null).
+    await connection`begin`;
+    await connection`insert into document_summaries (id, document_id, run_id, user_id, summary)
+      values (${doc.id + "-summary"}, ${doc.id}, ${doc.runId}, 'u', 'This document is a harbour expansion budget for 2027, covering new berths.')`;
+    await naming.sweepProjectAutoTitles();
+    // The summary transaction holds the stats row, so the sweep skipped the project instead of marking it.
+    expect(await pending()).toBe(true);
+    await connection`commit`;
+  } finally {
+    await connection`rollback`;
+    connection.release();
+  }
+  await naming.sweepProjectAutoTitles();
+  expect((await state(project.id)).name).toBe("Harbour expansion budget for 2027");
+  expect(await pending()).toBe(false);
+}, 30_000);
+
+it.skipIf(!raceDatabaseUrl)("rolls a sweep batch back instead of waiting on a locked project, leaving it pending", async () => {
+  const project = await ws.createProject({ userId: "u", orgId: "o" });
+  const doc = await addDocument(project.id, "scan.pdf");
+  await sql`insert into document_chunks (id, document_id, run_id, user_id, chunk_index, text, token_estimate, heading_path)
+    values (${doc.id + "-c0"}, ${doc.id}, ${doc.runId}, 'u', 0, 'Body.', 2, ${["Harbour Expansion Plan"]})`;
+  const pending = async () => (await sql<{ pending: boolean }[]>`
+    select auto_title_checked_at is distinct from updated_at as pending from project_corpus_stats where project_id = ${project.id}`)[0]!.pending;
+  const connection = await concurrent.reserve();
+  const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  try {
+    // Another transaction holds the project row the rename needs.
+    await connection`begin`;
+    await connection`select id from projects where id = ${project.id} for update`;
+    const started = Date.now();
+    await naming.sweepProjectAutoTitles();
+    expect(Date.now() - started).toBeLessThan(8_000);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("status=sweep-batch-rolled-back code=55P03"));
+    expect(await pending()).toBe(true);
+  } finally {
+    await connection`rollback`;
+    connection.release();
+    warn.mockRestore();
+  }
+  await naming.sweepProjectAutoTitles();
+  expect((await state(project.id)).name).toBe("Harbour Expansion Plan");
+  expect(await pending()).toBe(false);
+}, 30_000);
+
+it.skipIf(!raceDatabaseUrl)("runs one sweep at a time", async () => {
+  const project = await ws.createProject({ userId: "u", orgId: "o" });
+  await addDocument(project.id, "file.pdf");
+  const connection = await concurrent.reserve();
+  try {
+    await connection`begin`;
+    await connection`select pg_advisory_xact_lock(hashtext('project-auto-title-sweep'))`;
+    expect(await naming.sweepProjectAutoTitles()).toBe(0);
+  } finally {
+    await connection`rollback`;
+    connection.release();
+  }
+  expect(await naming.sweepProjectAutoTitles()).toBeGreaterThan(0);
+}, 30_000);
 
 it.each(["superseded", "archived", "purged", "failed", "cancelled", "pii_blocked", "queued", "processing"])("excludes %s documents from all naming sources", async (excluded) => {
   const project = await ws.createProject({ userId: "u", orgId: "o" });

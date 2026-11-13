@@ -27,6 +27,7 @@ import { assertCanSpend } from "./billing/spend-guard.js";
 import type { ValidatedKey } from "./api-keys.js";
 import { apiKeyCanUseProject } from "../lib/api-key-project-scope.js";
 import { hybridSearch, ProjectNotFoundError, type SearchOptions } from "./search.js";
+import { searchAccessScopeFor } from "../search/access-scope.js";
 import { SearchModeLimitError } from "../search/search-mode-limits.js";
 import {
   buildFallbackAnswer,
@@ -325,6 +326,11 @@ export async function aggregateProjectRagSearch(args: {
 }): Promise<AggregateRagSearchResponse> {
   const request = aggregateProjectRagSearchRequestSchema.parse(args.request);
   const query = (request.q ?? request.goal ?? "").trim();
+  // The explicit scope every per-project search is held to: this one org, and the key's allowlist and mode ceiling.
+  const scope = args.apiKey
+    ? searchAccessScopeFor({ type: "apiKey", apiKey: args.apiKey }, { orgId: args.orgId })
+    : searchAccessScopeFor({ type: "session" }, { orgId: args.orgId });
+  if (!scope) throw new ProjectNotFoundError();
   const projects = await resolveAggregateProjects({
     userId: args.userId,
     orgId: args.orgId,
@@ -356,7 +362,7 @@ export async function aggregateProjectRagSearch(args: {
         const response = await hybridSearch(query, args.userId, {
           ...buildSearchOptions(request, project.id),
           rootSessionId: undefined,
-        });
+        }, scope);
         return {
           projectId: project.id,
           projectName: project.name,

@@ -1,3 +1,13 @@
+## Serving path: indexed sessions, explicit scope, coalesced durable chat, shared chat caps (2026-11-13)
+
+- Search sessions carry a real `project_id` (migration 0151, schema only; a BEFORE trigger fills it, a batched maintenance backfill fills old rows). The 0132 rename had left the per-project index keyed on `workspaceId`, so project reads scanned every session: 25 projects at 600k sessions went from 16.3 s to 0.10–0.29 s.
+- `hybridSearch` and `chatProject` require an explicit access scope (org, project allowlist, mode ceiling) and refuse without one; one route access read replaces three. Chat turns load access, settings and history in parallel with the spend check, and project names refine in a maintenance sweep instead of on reads (0153 checkpoint, oldest first).
+- `/v1/chat/stream` streams token `delta` events; a model that fails after text has streamed is not retried on another model.
+- Durable chat coalesces text into fenced appends every 250 ms (a 200-delta answer: about 2,900 statements before, 144–226 after), re-checks authorization before each publish under a share lock on the session row, and drains for up to 25 s on SIGTERM.
+- Chat in-flight caps are Redis leases shared across instances (the rate limiter's store, else `MASTRA_REDIS_URL`); production refuses to start without one unless `CHAT_CONCURRENCY_LOCAL_ONLY=1`, requires `noeviction`, and answers 503 `chat_capacity_unavailable` when the store is unreachable. Server keys default to 64 concurrent turns.
+- LanceDB search on a 10K-document project: a `documentId` scalar index and an exclusion (or no) prefilter with a post-filter guard took vector p50 from 199 to 25 ms idle and 442 to 37 ms during ingest. Arrivals are debounced; withdrawals (migration 0152 `search_eligibility`) drop the eligible set at once.
+- Realtime re-projects per project and run instead of per org, reads economics from `project_corpus_stats`, and publishes chunk, page and page-stage changes from statement-level triggers (a 20,000-row chunk insert: 1.4 s in triggers before, 10 ms after).
+
 ## Search modes and per-mode key limits (2026-11-12)
 
 - Search runs in one of three nested modes: `keyword` (keyword matching, no model calls), `hybrid` (adds the query embedding and vector search) and `deep` (adds graph/community expansion, the hosted reranker, deferred pages and LLM query strategies). API key and OAuth scopes `search:keyword`, `search:hybrid` and `search:deep` replace `search` (migration 0138 maps existing keys and grants to `search:deep`; the OAuth endpoints still accept `search` from saved clients). A request may ask for a cheaper `mode`; the search service caps every search at the key's mode after project defaults resolve, on every route.

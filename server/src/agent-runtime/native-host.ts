@@ -1,6 +1,6 @@
 import { startNativeRecovery } from "./recovery.js";
 import { StrictCachingPubSub, boundedNativeCacheScript } from "./strict-pubsub.js";
-import type { BackgroundTaskManager } from "@mastra/core/background-tasks";
+import type { BackgroundTaskManager, ToolExecutor } from "@mastra/core/background-tasks";
 import { Agent } from "@mastra/core/agent";
 import { EventedAgent } from "@mastra/core/agent/durable";
 import { Mastra } from "@mastra/core/mastra";
@@ -99,12 +99,54 @@ export async function createNativeChatHost(options: {
         defaultRetries: { maxRetries: 0 }, cleanup: { completedTtlMs: OPERATION_RETENTION_MS, failedTtlMs: OPERATION_RETENTION_MS } },
     });
     startupMastra = mastra;
-    if (options.configureBackgroundTasks) options.configureBackgroundTasks(mastra.backgroundTaskManager!, pubsub);
+    // Every executor this host runs is counted, so a drain knows when this
+    // worker's accepted turns have settled (native shutdown aborts them at once).
+    const inFlight = new Set<Promise<unknown>>();
+    const manager = mastra.backgroundTaskManager!;
+    const register = manager.registerStaticExecutor.bind(manager);
+    manager.registerStaticExecutor = (toolName: string, executor: ToolExecutor) => register(toolName, {
+      ...executor,
+      execute(args, executeOptions) {
+        const run = executor.execute(args, executeOptions);
+        inFlight.add(run);
+        const settled = () => { inFlight.delete(run); };
+        run.then(settled, settled);
+        return run;
+      },
+    });
+    if (options.configureBackgroundTasks) options.configureBackgroundTasks(manager, pubsub);
     await mastra.backgroundTaskManager!.init(pubsub);
     io.signal.throwIfAborted();
     const stopRecovery = options.worker ? startNativeRecovery(options.pool, options.redisUrl, namespace) : undefined;
     let closing: Promise<void> | undefined;
+    let draining: Promise<boolean> | undefined;
     return { mastra, agent, storage, memory, pubsub, cache,
+      /** Graceful stop for a worker: claim no new tasks (new dispatches go to
+       * other workers), then wait for this worker's running tasks to settle, up
+       * to `timeoutMs` or until `force` aborts. True when nothing is left
+       * running. Call close() afterwards; it aborts whatever remains. */
+      drain(timeoutMs: number, force?: AbortSignal) {
+        return draining ??= (async () => {
+          // The stop takes effect at once; leaving the worker group (reader
+          // teardown) finishes in the background and never extends the drain.
+          void pubsub.stopDispatch().catch(() => {});
+          const deadline = Date.now() + Math.max(0, timeoutMs);
+          const forced = new Promise<void>(resolve => {
+            if (force?.aborted) resolve(); else force?.addEventListener("abort", () => resolve(), { once: true });
+          });
+          // A claim already in progress starts its executor shortly after the
+          // stop; settle once more before treating an empty set as idle.
+          for (let quiet = 0; quiet < 2 && Date.now() < deadline && !force?.aborted;) {
+            const running = [...inFlight];
+            quiet = running.length ? 0 : quiet + 1;
+            if (quiet >= 2) break;
+            let timer: ReturnType<typeof setTimeout> | undefined;
+            const wait = new Promise<void>(resolve => { timer = setTimeout(resolve, Math.min(running.length ? Infinity : 250, Math.max(0, deadline - Date.now()))); });
+            try { await Promise.race([...running.length ? [Promise.allSettled(running)] : [], wait, forced]); } finally { clearTimeout(timer); }
+          }
+          return inFlight.size === 0;
+        })();
+      },
       close() {
         return closing ??= (async () => {
           // One deadline starts before recovery cancellation and native shutdown.
