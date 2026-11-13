@@ -284,7 +284,7 @@ describe("estimate twins answer the unified quote from measured documents", () =
     expect(byName("(measured)")).toMatchObject({ pages: 7, measured: { pages: 7, readPages: 0 }, size: 40000 });
     // Assumed: intake's 30 is never passed as pages, measured or otherwise; the quote prices the size as a range.
     const assumed = byName("pages not measured");
-    expect(assumed).toEqual({ name: expect.any(String), size: 900000, type: docx });
+    expect(assumed).toEqual({ name: expect.any(String), size: 900000, type: docx, stored: true });
     // Measured empty: 0 kept, not dropped and not priced as one page.
     expect(byName("no pages")).toMatchObject({ measured: { pages: 0, readPages: 0 }, size: 5000 });
     expect(byName("no pages").pages).toBeUndefined();
