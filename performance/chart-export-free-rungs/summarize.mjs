@@ -7,14 +7,13 @@
 // (exec, staging, reset), which this harness does not see. `--time cpu` (default, for a loaded dev host) uses guest
 // CPU time as its duration: the guest is single-threaded and CPU-bound, so on an idle VM wall ≈ CPU. `--time wall`
 // uses measured wall time (use it for runs inside a real VM).
-// Pages per $1 prices that duration at Modal's public list rates for the parser VM's default allocation (2 cores,
-// 4 GiB): CPU $0.0000394 per core-second, memory $0.00000672 per GiB-second (billed on the allocation).
+// Doppler figure workloads count the source PDF's pages while the guest processes only its figure SVGs, so their
+// pages / min is not comparable with the other sets.
 import { readFileSync } from "node:fs";
 
 const [file, ...flags] = process.argv.slice(2);
 const timeKey = flags.includes("--time") ? flags[flags.indexOf("--time") + 1] : "cpu";
 const { results } = JSON.parse(readFileSync(file, "utf8"));
-const VM_DOLLARS_PER_SECOND = 2 * 0.0000394 + 4 * 0.00000672;
 const arms = [...new Set(results.map((r) => r.arm))];
 const label = (a) => a.split("/").pop();
 const median = (xs) => { const s = [...xs].sort((a, b) => a - b); return s.length % 2 ? s[(s.length - 1) / 2] : (s[s.length / 2 - 1] + s[s.length / 2]) / 2; };
@@ -28,8 +27,8 @@ console.log(`Outputs identical across arms: ${mismatches.length === 0 ? "yes" : 
 console.log(`Runs per arm per workload: ${median(results.map((r) => r.cpuMs.length))}; time basis: ${timeKey}\n`);
 
 const sets = ["office", "embedded", "svg-upload", "doppler-figures", "free-path (all but adversarial)", "adversarial"];
-console.log("| set | arm | guest runs | pages | visuals | CPU ms / run (median) | CPU ms / page | CPU ms / visual | peak RSS MB (max) | pages / min (guest) | pages per $1 (guest) |");
-console.log("|---|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|");
+console.log("| set | arm | guest runs | pages | visuals | CPU ms / run (median) | CPU ms / page | CPU ms / visual | peak RSS MB (max) | pages / min (guest) |");
+console.log("|---|---|--:|--:|--:|--:|--:|--:|--:|--:|");
 for (const set of sets) {
   for (const arm of arms) {
     const rows = results.filter((r) => r.arm === arm && (set.startsWith("free-path") ? r.set !== "adversarial" : r.set === set));
@@ -40,8 +39,7 @@ for (const set of sets) {
     const t = rows.reduce((s, r) => s + (timeKey === "wall" ? r.medWallMs : r.medCpuMs), 0);
     const rss = Math.max(...rows.map((r) => r.maxRssMb));
     const ppm = pages / (t / 60000);
-    const ppd = pages / ((t / 1000) * VM_DOLLARS_PER_SECOND);
-    console.log(`| ${set} | ${label(arm)} | ${rows.length} | ${pages} | ${visuals} | ${(cpu / rows.length).toFixed(0)} | ${(cpu / pages).toFixed(1)} | ${visuals ? (cpu / visuals).toFixed(1) : "-"} | ${rss.toFixed(0)} | ${fmtInt(ppm)} | ${fmtInt(ppd)} |`);
+    console.log(`| ${set} | ${label(arm)} | ${rows.length} | ${pages} | ${visuals} | ${(cpu / rows.length).toFixed(0)} | ${(cpu / pages).toFixed(1)} | ${visuals ? (cpu / visuals).toFixed(1) : "-"} | ${rss.toFixed(0)} | ${fmtInt(ppm)} |`);
   }
 }
 
