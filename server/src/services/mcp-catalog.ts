@@ -100,7 +100,7 @@ function searchToolInputSchema() {
     type: "object", additionalProperties: false,
     properties: {
       ...single.properties,
-      q: { ...single.properties.q, description: "One search query. Send either q (with the other top-level options) or queries, never both." },
+      q: { ...single.properties.q, description: "One search query, or an array of up to 100 keyword queries run in parallel in keyword mode and fused into one ranked list (each result lists the matched queries in matchedQueries). Send either q (with the other top-level options) or queries, never both." },
       queries: { ...batch.queries, description: "Batch form: up to 20 independent queries, each an object with its own q and options. Use instead of q; only concurrency may accompany it." },
       concurrency: { ...batch.concurrency, description: "Batch form only: parallel retrievals for queries (1-8, default 4)." },
     },
@@ -189,7 +189,7 @@ export function mcpTools(baseUrl: string): McpTool[] {
       description: "Legacy fallback for single-PUT sessions: verify uploaded files and start ingestion after every PUT succeeds. Normal uploads complete automatically; use getUploadStatus with sessionId instead. Pass sessionId and fileIds from upload. Do not use for multipart uploads.",
       inputSchema: toolInputJsonSchema(completeUploadInput) },
     { id: "search", title: "Search documents", scopes: [...SEARCH_SCOPES], annotations: READ_ONLY,
-      description: "Retrieve cited passages for one query (q) or up to 20 independent queries (queries). Supply exactly one form: q with top-level options, or queries (each item has its own q and options) with optional concurrency; a call with both is rejected. Batch results stay in input order with per-query errors; each query can select a project; concurrency (1-8, default 4) bounds parallel retrieval. Omitted project uses the default. Does not generate answers.",
+      description: "Retrieve cited passages for one query (q), several keyword queries at once (q as an array of up to 100 strings: keyword mode, fused results with matchedQueries), or up to 20 independent queries (queries). Supply exactly one form: q with top-level options, or queries (each item has its own q and options) with optional concurrency; a call with both is rejected. Batch results stay in input order with per-query errors; each query can select a project; concurrency (1-8, default 4) bounds parallel retrieval. Omitted project uses the default. Does not generate answers.",
       inputSchema: searchToolInputSchema() },
     { id: "chat", title: "Chat with project", scopes: ["chat"],
       annotations: { readOnly: false, destructive: false, idempotent: false, openWorld: false, consequential: false },

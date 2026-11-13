@@ -72,6 +72,8 @@ export interface ChatToolCallDetail extends ChatToolActivity {
 function modelQueries(supplied: Record<string, unknown>): string[] {
   const items = Array.isArray(supplied.queries) ? supplied.queries : [supplied];
   return items.slice(0, 20).map(item => item && typeof item === "object" ? (item as { q?: unknown }).q : undefined)
+    // A keyword fan-out (array q) is labelled by its queries joined.
+    .map(q => Array.isArray(q) && q.every(term => typeof term === "string") ? q.join(" · ") : q)
     .filter((q): q is string => typeof q === "string").map(q => q.slice(0, 1000));
 }
 

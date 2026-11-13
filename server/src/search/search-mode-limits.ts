@@ -29,18 +29,21 @@ export class SearchModeLimitError extends HTTPException {
  * {@link SearchModeLimitError} when one is reached. Fixed windows, shared across processes when Redis is configured
  * (per process otherwise, like the other per-key limits). Chat turns are governed by the chat limits instead.
  */
-export async function consumeSearchModeLimit(mode: SearchMode): Promise<void> {
+export async function consumeSearchModeLimit(mode: SearchMode, searches = 1): Promise<void> {
   if (currentChatTurn()) return;
   const limits = currentRequestSearchLimits();
   if (!limits) return;
   for (const rule of limits.rules) {
     if (rule.metric !== "searches" || rule.mode !== mode) continue;
-    const retry = await consumeFeatureRateLimit({
-      feature: `key-searches-${mode}-${rule.windowSeconds}`,
-      subject: limits.keyId,
-      limit: rule.limit,
-      windowMs: rule.windowSeconds * 1000,
-    });
-    if (retry !== null) throw new SearchModeLimitError(mode, rule, retry);
+    // A keyword fan-out counts each of its queries; the first refusal stops it.
+    for (let count = 0; count < Math.max(1, Math.floor(searches)); count++) {
+      const retry = await consumeFeatureRateLimit({
+        feature: `key-searches-${mode}-${rule.windowSeconds}`,
+        subject: limits.keyId,
+        limit: rule.limit,
+        windowMs: rule.windowSeconds * 1000,
+      });
+      if (retry !== null) throw new SearchModeLimitError(mode, rule, retry);
+    }
   }
 }

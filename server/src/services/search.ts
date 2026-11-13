@@ -183,10 +183,84 @@ export interface SearchOptions {
    */
   searchMode?: SearchMode;
   /**
+   * Keyword fan-out (an array `q`): in keyword mode, one BM25 query per item, run in parallel under this one
+   * search's slot and scope and fused by reciprocal rank. The search's `query` is the items joined.
+   */
+  keywordQueries?: string[];
+  /**
    * Relevance floor, 0..1: results whose raw relevance is lower are dropped.
    * 0 disables it. Omitted: the project default, else SEARCH_MIN_SCORE.
    */
   minScore?: number;
+}
+
+export interface KeywordQueryOutcome {
+  q: string;
+  /** Chunks this query matched before fusion (at most the search's candidate limit). */
+  hits: number;
+}
+
+/** Parallel BM25 queries per keyword fan-out (SEARCH_KEYWORD_FANOUT_CONCURRENCY, default 16; 4 on the Postgres path). */
+function keywordFanoutConcurrency(native: boolean): number {
+  const parsed = Number(process.env.SEARCH_KEYWORD_FANOUT_CONCURRENCY);
+  const configured = Number.isSafeInteger(parsed) && parsed > 0 ? Math.min(parsed, 100) : 16;
+  // Without native BM25 every query is a Postgres full-text query on the shared pool.
+  return native ? configured : Math.min(configured, 4);
+}
+
+async function mapWithLimit<T, R>(items: readonly T[], limit: number, fn: (item: T, index: number) => Promise<R>): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const index = next++;
+      results[index] = await fn(items[index]!, index);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
+}
+
+const fanoutChunkKey = (documentId: string, chunkIndex: number) => `${documentId}\u0000${chunkIndex}`;
+
+/**
+ * Runs each distinct keyword query (`text` runs one), fuses the lists by reciprocal rank and remembers which input
+ * queries matched each chunk. Every query uses the caller's options, so scope and filters are the search's own.
+ */
+export function createKeywordFanout(terms: readonly string[], native: boolean) {
+  const matched = new Map<string, number[]>();
+  const hits = terms.map(() => 0);
+  const distinct = [...new Set(terms)];
+  return {
+    async search(run: (term: string) => Promise<SearchChunk[]>, limit: number): Promise<SearchChunk[]> {
+      const lists = await mapWithLimit(distinct, keywordFanoutConcurrency(native), (term) => run(term));
+      matched.clear();
+      hits.fill(0);
+      distinct.forEach((term, distinctIndex) => {
+        const list = lists[distinctIndex]!;
+        terms.forEach((input, index) => {
+          if (input !== term) return;
+          hits[index] = list.length;
+          for (const chunk of list) {
+            const key = fanoutChunkKey(chunk.documentId, chunk.chunkIndex);
+            const indexes = matched.get(key) ?? [];
+            if (!indexes.includes(index)) indexes.push(index);
+            matched.set(key, indexes);
+          }
+        });
+      });
+      countSearchEvent("keywordFanout");
+      return reciprocalRankFusion(lists).slice(0, limit)
+        .map((chunk, index) => ({ ...chunk, score: 1 / (60 + index + 1), lexicalMatch: "partial" as const }));
+    },
+    annotate(response: SearchResponse): void {
+      response.keywordQueries = terms.map((q, index) => ({ q, hits: hits[index]! }));
+      response.results = response.results.map((result) => {
+        const indexes = matched.get(fanoutChunkKey(result.citation.documentId, result.citation.chunkIndex));
+        return indexes ? { ...result, matchedQueries: [...indexes].sort((a, b) => a - b) } : result;
+      });
+    },
+  };
 }
 
 /** What the relevance floor did to this search. */
@@ -211,6 +285,8 @@ export interface SearchResponse {
   deferred?: DeferredSearchStats;
   /** The mode the search ran in (keyword, hybrid or deep): the most the caller asked for and the key allows. */
   searchMode?: SearchMode;
+  /** Keyword fan-out: each query as sent and the chunks it matched before fusion. */
+  keywordQueries?: KeywordQueryOutcome[];
   /** Internal: the turn's calibrated vector relevance, for the chat scope decline. Not part of the public response. */
   scopeSignal?: ScopeSignal | null;
 }
@@ -1664,7 +1740,10 @@ export async function hybridSearch(rawQuery: string, userId: string, options: Se
     // Search SQL is cancelled when the request (or chat turn) aborts (search/query-bounds.ts).
     const signal = currentSearchSignal() ?? getDeferredContext()?.signal ?? currentRequestSignal();
     // Per-mode key limits count root searches only (sub-searches of decomposition and multi-hop are part of one).
-    if (!options.rootSessionId) await consumeSearchModeLimit(effectiveSearchMode(options));
+    if (!options.rootSessionId) {
+      const searchMode = effectiveSearchMode(options);
+      await consumeSearchModeLimit(searchMode, searchMode === "keyword" ? options.keywordQueries?.length ?? 1 : 1);
+    }
     const { value: result, timings } = await collectSearchTimings(() => withSearchSignal(signal, () =>
       withSearchSlotTimed(signal, () => executeHybridSearch(query, userId, { ...options, rootSessionId: activity.groupId }), searchAdmission(options))));
     result.timings = timings;
@@ -1696,8 +1775,10 @@ async function chargeSearch(result: SearchResponse, userId: string, searchId: st
   if (!projectId) return;
   const llmStrategies = (result.usageEvents ?? []).some((event) => (event.outputTokens ?? 0) > 0);
   // API-key keyword and hybrid searches are charged in batches (lean-logging.ts).
+  // A keyword fan-out is one search per query it ran.
+  const searches = result.keywordQueries?.length || 1;
   if (!llmStrategies && leanSearchLogging(result.searchMode)) {
-    enqueueSearchCharge({ userId, orgId: null, projectId, mode: result.searchMode! });
+    enqueueSearchCharge({ userId, orgId: null, projectId, mode: result.searchMode! }, searches);
     return;
   }
   try {
@@ -1707,9 +1788,9 @@ async function chargeSearch(result: SearchResponse, userId: string, searchId: st
       charge: {
         id: `search:${searchId}`,
         metric: BILLABLE_UNIT_METRICS.search,
-        amount: 1,
+        amount: searches,
         unit: "search",
-        credits: searchCredits(1, { llmStrategies, mode: result.searchMode ?? "deep" }),
+        credits: searchCredits(searches, { llmStrategies, mode: result.searchMode ?? "deep" }),
         metadata: { llmStrategies, searchMode: result.searchMode ?? "deep", searchUnits: searchUnits({ llmStrategies, mode: result.searchMode ?? "deep" }) },
       },
     });
@@ -1756,6 +1837,8 @@ async function executeHybridSearch(
   // Below deep: no graph, community or deferred (model-materialized) legs. Keyword: no vector leg or index warm-up either.
   const mode = setup.resolvedOptions.searchMode ?? "deep";
   const keywordOnly = mode === "keyword";
+  const keywordTerms = setup.resolvedOptions.keywordQueries;
+  const fanout = keywordOnly && keywordTerms && keywordTerms.length > 0 ? createKeywordFanout(keywordTerms, Boolean(native)) : null;
   const pageOnlyCompleted = async (): Promise<boolean> => {
     if (!native) return true;
     const embedding = resolveEmbeddingRoute(native.pipeline.embedding);
@@ -1801,7 +1884,9 @@ async function executeHybridSearch(
           },
         })),
       textSearch: ({ query, options }) =>
-        timePhase("text", () => nativeTextOrLegacy(query, options)),
+        timePhase("text", () => fanout
+          ? fanout.search((term) => nativeTextOrLegacy(term, options), options.limit ?? 20)
+          : nativeTextOrLegacy(query, options)),
       graphNeighborSearch: ({ query, projectId, options }) => mode !== "deep"
         ? Promise.resolve([])
         : timePhase("graph", () => graphNeighborSearch(query, projectId, options)),
@@ -1847,6 +1932,7 @@ async function executeHybridSearch(
   });
   // The mode the search ran in: billing categories and the public response read it.
   response.searchMode = mode;
+  fanout?.annotate(response);
   return response;
 }
 

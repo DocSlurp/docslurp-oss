@@ -76,6 +76,26 @@ Chunks reach keyword search once the embed stage has written every chunk row of 
 - Spend limits are checked before the model call, and the call is recorded as an `aggregate-rag-answer` usage event.
 - If chat is turned off in any answered project, or no project is accessible, the request still succeeds (200) with `answer: null`, the citations and a warning. No model is called.
 
+## Keyword fan-out
+
+`q` may be an array of keyword queries instead of one string. The search runs in keyword mode: one BM25 query per item, in parallel, under one search's scope, filters and admission slot. The lists are fused by reciprocal rank into one ranked `results` list, capped at `limit`:
+
+```json
+{
+  "q": ["quarterly revenue", "earnings beat", "guidance raised", "\"record bookings\""],
+  "project": "board-materials",
+  "limit": 20
+}
+```
+
+- **Up to 100 queries**, each 1–1,000 characters and 16,000 characters in total. At most 8 may use "quoted phrases" or `-negation`: those run as full-text queries on the Postgres keyword path instead of the BM25 index.
+- **Mode:** `mode` must be `keyword` or omitted. Any other mode returns 400.
+- **Results:** each result carries `matchedQueries`, the indexes into `q` of the queries it matched. The response also adds `keywordQueries`: each query as sent and how many chunks it matched before fusion. Duplicate queries run once and count under every index they appear at.
+- **Cost and limits:** each query counts as one keyword search, for billing and for the key's keyword search limit.
+- **Speed:** the scope, eligibility and project settings resolve once per search. A warm fan-out of 100 queries issues the same single SQL read as one keyword search, and up to `SEARCH_KEYWORD_FANOUT_CONCURRENCY` (default 16; at most 4 when search runs on Postgres) BM25 queries run at once.
+
+The array form also works inside a batch item (`queries: [{ q: [...] }]`).
+
 ## Batch retrieval
 
 `POST /v1/search` accepts either a single `{ q, ...filters }` input or a batch of search input objects. Supply exactly one form; batch project and filter options belong inside each query:
