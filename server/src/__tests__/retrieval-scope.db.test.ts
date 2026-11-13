@@ -3,6 +3,9 @@ import { defaultEmbeddingConfig, resolveEmbeddingRoute } from "@docslurp/shared"
 import type { SearchFilters } from "../search/filters.js";
 import { afterAll, beforeAll, expect, it, vi } from "vitest";
 import { startMigratedPostgres } from "@docslurp/worker/testing";
+/** The explicit search access scope every search caller passes (search/access-scope.ts). */
+const TEST_SEARCH_SCOPE = { orgId: "o", projectIds: "org", modeCeiling: null } as const;
+
 
 const { lanceDbVectorSearch } = vi.hoisted(() => ({
   lanceDbVectorSearch: vi.fn<typeof import("../search/lancedb.js").lanceDbVectorSearch>().mockResolvedValue([]),
@@ -84,7 +87,7 @@ it.each([false, true])("intersects tags and document selection for evidence and 
     parentRetrieval: false, useContextualCompression: false, useHyDE: false,
     stepback: false, iterativeMultiHop: false, enableGraphExpansion: graph,
     enableCommunityExpansion: graph,
-  });
+  }, TEST_SEARCH_SCOPE);
   const docs = result.results.filter((hit) => hit.citation.source === "document");
   expect(docs.length).toBeGreaterThan(0);
   expect([...new Set(docs.map((hit) => hit.citation.documentId))]).toEqual(["selected"]);
@@ -109,7 +112,7 @@ it.each([
     parentRetrieval: false, useContextualCompression: false, useHyDE: false,
     stepback: false, iterativeMultiHop: false, enableGraphExpansion: true,
     enableCommunityExpansion: false,
-  });
+  }, TEST_SEARCH_SCOPE);
   expect(result.results.map((hit) => hit.citation.documentId)).toEqual(["selected"]);
 });
 
@@ -121,7 +124,7 @@ it("intersects singular and plural document selections even when both match the 
     parentRetrieval: false, useContextualCompression: false, useHyDE: false,
     stepback: false, iterativeMultiHop: false, enableGraphExpansion: false,
     enableCommunityExpansion: false,
-  });
+  }, TEST_SEARCH_SCOPE);
   expect(result.results).toEqual([]);
 });
 
@@ -137,7 +140,7 @@ it.each([
     parentRetrieval: false, useContextualCompression: false, useHyDE: false,
     stepback: false, iterativeMultiHop: false, enableGraphExpansion: false,
     enableCommunityExpansion: false,
-  });
+  }, TEST_SEARCH_SCOPE);
   expect(result.results).toEqual([]);
 });
 
@@ -152,7 +155,7 @@ it.each([
     parentRetrieval: false, useContextualCompression: false, useHyDE: false,
     stepback: false, iterativeMultiHop: false, enableGraphExpansion: false,
     enableCommunityExpansion: false,
-  });
+  }, TEST_SEARCH_SCOPE);
   expect(result.results.map((hit) => hit.citation.documentId)).toEqual(["page-selected"]);
 });
 
@@ -168,7 +171,7 @@ it.each([
     parentRetrieval: true, useContextualCompression: false, useHyDE: false,
     stepback: false, iterativeMultiHop: false, enableGraphExpansion: false,
     enableCommunityExpansion: false,
-  });
+  }, TEST_SEARCH_SCOPE);
   const selected = result.results.find((hit) => hit.text.includes("Selected evidence"));
   expect(selected).toBeDefined();
   expect(selected?.parentText).toContain("Selected evidence");
@@ -183,7 +186,7 @@ it("does not fabricate an absent pinned document outside the requested document 
     parentRetrieval: false, useContextualCompression: false, useHyDE: false,
     stepback: false, iterativeMultiHop: false, enableGraphExpansion: false,
     enableCommunityExpansion: false,
-  });
+  }, TEST_SEARCH_SCOPE);
   expect(result.results.length).toBeGreaterThan(0);
   expect(result.results.map((hit) => hit.citation.documentId)).toEqual(["selected"]);
   expect(result.results[0].text).toContain("Selected evidence");
@@ -209,7 +212,7 @@ it.each([
     parentRetrieval: false, useContextualCompression: false, useHyDE: false,
     stepback: false, iterativeMultiHop: false, enableGraphExpansion: false,
     enableCommunityExpansion: false,
-  });
+  }, TEST_SEARCH_SCOPE);
   expect(result.results.some((hit) => hit.text.includes("Selected evidence"))).toBe(true);
   expect(lanceDbVectorSearch).toHaveBeenCalledOnce();
   expect(lanceDbVectorSearch).toHaveBeenCalledWith(expect.objectContaining({
@@ -238,6 +241,6 @@ it.each([
     parentRetrieval: false, useContextualCompression: false, useHyDE: false,
     stepback: false, iterativeMultiHop: false, enableGraphExpansion: false,
     enableCommunityExpansion: false,
-  });
+  }, TEST_SEARCH_SCOPE);
   expect([...new Set(result.results.filter((hit) => hit.citation.source === "document").map((hit) => hit.citation.documentId))]).toEqual(expected);
 });

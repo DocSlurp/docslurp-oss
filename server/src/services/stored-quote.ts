@@ -1,3 +1,4 @@
+import type { RunOrigin } from "@docslurp/shared";
 import {
   quoteSettingsForPipeline,
   quoteStoredWork,
@@ -37,7 +38,7 @@ type StoredPageState = "measured" | "empty" | "assumed";
  */
 export async function storedQuoteFiles(scope: StoredQuoteScope): Promise<QuoteFile[]> {
   if (scope.documentIds && scope.documentIds.length === 0) return [];
-  const rows = await sql<{ mime_type: string; state: StoredPageState; documents: number; bytes: string | number; pages: string | number; read_pages: string | number }[]>`
+  const rows = await sql<{ mime_type: string; state: StoredPageState; documents: number; bytes: string | number; pages: string | number; read_pages: string | number; asset_bytes: string | number }[]>`
     with scoped as (
       select d.id, d.mime_type, d.file_size,
         case
@@ -57,7 +58,9 @@ export async function storedQuoteFiles(scope: StoredQuoteScope): Promise<QuoteFi
       count(*)::int as documents,
       coalesce(sum(s.file_size), 0)::bigint as bytes,
       coalesce(sum(case when s.state = 'measured' then s.pages else 0 end), 0)::bigint as pages,
-      coalesce(sum(case when s.state = 'measured' then (select count(*) from document_page_facts f where f.document_id = s.id and f.vision_status = 'extracted') else 0 end), 0)::bigint as read_pages
+      coalesce(sum(case when s.state = 'measured' then (select count(*) from document_page_facts f where f.document_id = s.id and f.vision_status = 'extracted') else 0 end), 0)::bigint as read_pages,
+      -- Stored figure files (the asset ledger's level), measured: billed as storage like the source.
+      coalesce(sum((select l.asset_bytes from document_extraction_levels l where l.document_id = s.id and l.org_id = ${scope.orgId})), 0)::bigint as asset_bytes
     from scoped s
     group by s.mime_type, s.state
     order by s.mime_type, s.state
@@ -66,16 +69,21 @@ export async function storedQuoteFiles(scope: StoredQuoteScope): Promise<QuoteFi
 }
 
 /** One group of stored documents as a quote file, keeping its page state explicit (storedQuoteFiles). */
-export function storedQuoteFile(row: { mime_type: string; state: StoredPageState; documents: number; bytes: string | number; pages: string | number; read_pages: string | number }): QuoteFile {
+export function storedQuoteFile(row: { mime_type: string; state: StoredPageState; documents: number; bytes: string | number; pages: string | number; read_pages: string | number; asset_bytes?: string | number }): QuoteFile {
   const file = {
     name: `${row.documents} stored ${row.documents === 1 ? "document" : "documents"} (${row.state === "assumed" ? "pages not measured" : row.state === "empty" ? "no pages" : "measured"})`,
     size: Number(row.bytes) || 0,
     type: row.mime_type,
+    // Every stored group, assumed ones included, is marked: never priced like a new upload (#481 L1).
+    stored: true as const,
   };
+  const assetBytes = Math.max(0, Number(row.asset_bytes) || 0);
+  const assets = assetBytes > 0 ? { assetBytes } : {};
+  // Never measured: its pages are a range over its size, so figure bytes are not folded into it.
   if (row.state === "assumed") return file;
-  if (row.state === "empty") return { ...file, measured: { pages: 0, readPages: 0 } };
+  if (row.state === "empty") return { ...file, measured: { pages: 0, readPages: 0, ...assets } };
   const pages = Math.max(1, Number(row.pages) || 0);
-  return { ...file, pages, measured: { pages, readPages: Math.min(pages, Number(row.read_pages) || 0) } };
+  return { ...file, pages, measured: { pages, readPages: Math.min(pages, Number(row.read_pages) || 0), ...assets } };
 }
 
 /**
@@ -88,6 +96,8 @@ export async function quoteStoredDocuments(args: {
   estimate: CostEstimate | null;
   settings?: Partial<QuoteSettings>;
   env?: EstimateEnv;
+  /** The caller's origin, for a project with no chart tier (`runOriginOf`). */
+  origin?: RunOrigin;
 }): Promise<EstimateQuote | null> {
   const files = await storedQuoteFiles(args.scope);
   if (files.length === 0) return null;
@@ -98,5 +108,6 @@ export async function quoteStoredDocuments(args: {
     ...(args.settings ? { settings: args.settings } : {}),
     workerSlots: await orgWorkerSlots(args.scope.orgId),
     env: args.env ?? process.env,
+    ...(args.origin ? { origin: args.origin } : {}),
   });
 }

@@ -283,9 +283,12 @@ describe("chat concurrency", () => {
     expect((await app.request("/v1/chat", from("203.0.113.81"))).status).toBe(200);
   });
 
-  it("leaves server keys uncapped by default (backend batch callers), and honours a key's own concurrent rule", async () => {
+  it("caps server keys at 64 by default (room for backend batch callers), and honours a key's own concurrent rule", async () => {
     const batch = concurrencyApp(keyActor("server", "srv-batch"));
-    for (let i = 0; i < 40; i++) expect((await batch.app.request("/v1/chat", from("198.51.100.1"))).status).toBe(200);
+    for (let i = 0; i < 64; i++) expect((await batch.app.request("/v1/chat", from("198.51.100.1"))).status).toBe(200);
+    expect((await batch.app.request("/v1/chat", from("198.51.100.1"))).status).toBe(429);
+    vi.stubEnv("API_CHAT_MAX_CONCURRENT_PER_SERVER_KEY", "0");
+    expect((await batch.app.request("/v1/chat", from("198.51.100.1"))).status).toBe(200);
     const own = keyActor("server", "srv-own");
     if (own.type === "apiKey") own.apiKey.rateLimits = [{ metric: "concurrent", limit: 2, windowSeconds: 1 }];
     const capped = concurrencyApp(own);

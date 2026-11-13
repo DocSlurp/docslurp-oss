@@ -44,4 +44,21 @@ describe("materialize run source pipeline", () => {
     const [run] = await sql<{ pipeline: Record<string, unknown> }[]>`select pipeline from project_runs where id = ${id}`;
     expect(run!.pipeline).toMatchObject({ quality: "good" });
   });
+
+  it("never copies the source run's model values: the project's explicit overrides and current defaults apply", async () => {
+    await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline)
+      values ('run-legacy', 'o', 'u', 'mine', 'upload', 'completed', 'completed', ${sql.json({
+        quality: "good",
+        vision: { profile: "good-fast-hosted", modelUri: "llm://openrouter/deepseek/deepseek-v4.1-flash-1017", target: "hosted" },
+        textGeneration: { model: "z-ai/glm-5.3-flash", models: {} },
+      })})`;
+    await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count)
+      values ('legacy-doc', 'o', 'u', 'mine', 'run-legacy', 'b.pdf', 'application/pdf', 'k2', 'completed', 3)`;
+    await sql`update projects set managed_models = ${sql.json({ pipeline: { textGeneration: { model: "llm://private/gpu1/acme/text" } } })} where id = 'mine'`;
+    const id = await defaultMaterializeDeps.createRun({ orgId: "o", userId: "u", projectId: "mine", documentId: "legacy-doc", documents: 1, pages: 3 });
+    const [run] = await sql<{ pipeline: Record<string, Record<string, unknown>> }[]>`select pipeline from project_runs where id = ${id}`;
+    expect(run!.pipeline).toMatchObject({ quality: "good" });
+    expect(run!.pipeline.vision!.modelUri).not.toMatch(/deepseek/);
+    expect(run!.pipeline.textGeneration).toMatchObject({ model: "llm://private/gpu1/acme/text" });
+  });
 });

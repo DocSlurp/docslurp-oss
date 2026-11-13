@@ -9,11 +9,11 @@ import {
   actorHasAnyApiKeyScope,
   apiKeyAllowsProject,
   getRequestActor,
-  loadActorScopedProject,
   resolveActorProjectId,
 } from "../lib/request-actor.js";
+import { authorizeActorProjectSearch } from "../lib/search-access.js";
 import { apiKeyAuth } from "../middleware/api-key-auth.js";
-import { createChatConcurrencyLimit } from "../middleware/chat-concurrency.js";
+import { CHAT_CAPACITY_UNAVAILABLE_MESSAGE, createChatConcurrencyLimit } from "../middleware/chat-concurrency.js";
 import { assertCanSpend, isSpendBlockedError, type SpendBlockedError } from "../services/billing/spend-guard.js";
 import { upgradeLinkHeader, upgradeLinksFor } from "../lib/upgrade-links.js";
 import { chatProject, projectChatDisabledBody } from "../services/project-chat.js";
@@ -24,7 +24,8 @@ import { authenticatedByRoute } from "../lib/route-auth.js";
 import { env } from "../config.js";
 import { ChatToolBlockedError } from "../services/chat-tool-error.js";
 import { isChatTurnDeadlineError } from "../services/chat-turn-deadline.js";
-import { chatModelRefused, ChatModelNotAllowedError } from "../lib/chat-model-policy.js";
+import { chatModelRefused, ChatModelNotAllowedError, SpeedBoostUnavailableError } from "../lib/chat-model-policy.js";
+import { CHAT_REASONING_LEVELS, CHAT_TIERS } from "@docslurp/shared/project-chat-models";
 
 const textContent = z.union([
   z.string().max(64_000),
@@ -32,10 +33,10 @@ const textContent = z.union([
 ]);
 const requestSchema = z.object({
   // project:<uuid>, project:<slug> (current or former) or project:default.
-  // The inference model is docslurp.model (an llm:// URI), never this field.
+  // The model behind the answer is chosen by tier (docslurp.tier), never this field.
   model: z.string().regex(/^project:(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[a-z0-9]+(?:-[a-z0-9]+)*)$/i, {
     error: (issue) => typeof issue.input === "string" && /^llm:\/\//i.test(issue.input.trim())
-      ? "model selects a project (project:default, project:<slug> or an id from GET /v1/models). Send the llm:// inference model as docslurp.model instead."
+      ? `model selects a project (project:default, project:<slug> or an id from GET /v1/models). DocSlurp manages the backend model: choose docslurp.tier (${CHAT_TIERS.join(", ")}) instead.`
       : "model must be project:default, project:<slug> or a project model id from GET /v1/models",
   }),
   messages: z.array(z.object({
@@ -57,7 +58,11 @@ const requestSchema = z.object({
   /** DocSlurp extension (send it with extra_body in OpenAI SDKs), mirroring the response's `docslurp` field. */
   docslurp: z.object({
     speedBoost: z.boolean().default(false),
-    /** Inference model for this request, as `model` on POST /v1/chat: `llm://openrouter/<vendor>/<model>` or the bare id, with an optional `?reasoning=` level. */
+    /** Chat tier for this request, as `tier` on POST /v1/chat: fastest, balanced or smart. */
+    tier: z.enum(CHAT_TIERS).optional(),
+    /** Reasoning level, as `reasoning` on POST /v1/chat. */
+    reasoning: z.enum(CHAT_REASONING_LEVELS).optional(),
+    /** Operator evaluation only (not in OpenAPI): a backend model id. Everyone else gets 400 model_not_allowed. */
     model: z.string().trim().min(1).max(256).optional(),
     /** Per-request retrieval overrides, as `retrieval` on POST /v1/chat. */
     retrieval: chatRetrievalOverridesSchema.optional(),
@@ -145,7 +150,9 @@ const compatibleChatAuth: MiddlewareHandler = async (c, next) => {
 export const chatCompletionsRoutes = new Hono()
   .use("/models", compatibleChatAuth)
   .use("/chat/completions", compatibleChatAuth)
-  .use("/chat/completions", createChatConcurrencyLimit((c) => c.json(errorBody("Too many chat requests in progress for this key. Retry later.", "rate_limit_error", "rate_limit_exceeded"), 429)))
+  .use("/chat/completions", createChatConcurrencyLimit((c, reason) => reason === "full"
+    ? c.json(errorBody("Too many chat requests in progress for this key. Retry later.", "rate_limit_error", "rate_limit_exceeded"), 429)
+    : c.json(errorBody(CHAT_CAPACITY_UNAVAILABLE_MESSAGE, "server_error", "chat_capacity_unavailable"), 503)))
   .get("/models", async (c) => {
     const actor = getRequestActor(c);
     const projects = await listProjects(actor.userId);
@@ -187,7 +194,9 @@ export const chatCompletionsRoutes = new Hono()
       if (error instanceof ProjectAccessError) return null;
       throw error;
     });
-    if (!projectId || !await loadActorScopedProject(projectId, actor)) {
+    // One access read, which also yields the explicit search access scope chatProject requires.
+    const authorized = projectId ? await authorizeActorProjectSearch(actor, projectId, "chat") : null;
+    if (!projectId || !authorized?.ok) {
       return c.json(errorBody("Project model not found", "invalid_request_error", "model_not_found", "model"), 404);
     }
     const chatDisabled = await projectChatDisabledBody(projectId, actor.userId);
@@ -222,11 +231,14 @@ export const chatCompletionsRoutes = new Hono()
       }));
     const args = {
       projectId,
+      scope: authorized.scope,
       speedBoost: input.docslurp?.speedBoost === true,
       userId: actor.userId,
       actor, allowAgentTools: env.publicChatAgentEnabled && input.tool_choice !== "none", signal: c.req.raw.signal,
       ...(input.docslurp?.retrieval ? { retrieval: input.docslurp.retrieval } : {}),
       ...(input.docslurp?.model ? { model: input.docslurp.model } : {}),
+      ...(input.docslurp?.tier ? { tier: input.docslurp.tier } : {}),
+      ...(input.docslurp?.reasoning ? { reasoning: input.docslurp.reasoning } : {}),
       query: contentText(input.messages.at(-1)!.content),
       history,
       maxOutputTokens: input.max_completion_tokens ?? input.max_tokens,
@@ -248,6 +260,7 @@ export const chatCompletionsRoutes = new Hono()
       } catch (error) {
         if (isSpendBlockedError(error)) return c.json(spendBlockedBody(c, error), 402);
         if (error instanceof ChatModelNotAllowedError) return c.json(errorBody(error.message, "invalid_request_error", error.code, "docslurp.model"), 400);
+        if (error instanceof SpeedBoostUnavailableError) return c.json(errorBody(error.message, "invalid_request_error", error.code, "docslurp.speedBoost"), 400);
         if (error instanceof ChatToolBlockedError) return c.json(errorBody(error.message, "server_error", error.code), error.statusCode);
         if (isChatTurnDeadlineError(error)) return c.json(errorBody(error.message, "timeout_error", error.code), error.statusCode);
         reportPublicError(error, { operation: "chat-completions" }, c.req.raw.signal);
@@ -257,7 +270,7 @@ export const chatCompletionsRoutes = new Hono()
     // Refuse before the stream opens, so a blocked spend is a 402, not an SSE error.
     try {
       // Pre-check only: chatProject takes the interactive hold.
-      await assertCanSpend(null, projectId, { kind: "interactive", hold: false });
+      await assertCanSpend(authorized.scope.orgId, projectId, { kind: "interactive", hold: false });
     } catch (error) {
       if (isSpendBlockedError(error)) return c.json(spendBlockedBody(c, error), 402);
       throw error;

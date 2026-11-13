@@ -42,6 +42,10 @@ vi.mock("../services/project-naming.js", () => ({
   refineProjectNames,
 }));
 
+vi.mock("../services/managed-models.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../services/managed-models.js")>()),
+  loadProjectChatTierModels: vi.fn(async () => null),
+}));
 vi.mock("../db.js", () => ({
   sql: sqlMock,
 }));
@@ -72,6 +76,18 @@ vi.mock("../services/search-controls.js", () => ({
   getProjectSearchSettings,
 }));
 
+// The turn's one context read, composed from the getProject and settings mocks these tests already arrange
+// (its own query and scope checks are covered in chat-turn-scope.db.test.ts).
+const loadChatTurnContext = vi.fn(async (projectId: string, userId: string) => {
+  const project = await getProject(projectId, userId) as { id?: string; orgId?: string; name?: string; systemPrompt?: string | null; pipeline?: { privacyMode?: string } } | null | undefined;
+  const settings = await getProjectSearchSettings(projectId, userId);
+  return {
+    projectId, orgId: project?.orgId ?? "org-1", name: project?.name ?? null, systemPrompt: project?.systemPrompt ?? null,
+    pipeline: project?.pipeline, privacyMode: project?.pipeline?.privacyMode ?? "standard", settings,
+  };
+});
+vi.mock("../services/chat-turn-context.js", () => ({ loadChatTurnContext }));
+
 vi.mock("../lib/ai.js", () => ({
   SEARCH_OPENROUTER_MODEL: "openrouter-test",
   resolveOpenRouterApiKey: vi.fn(
@@ -84,9 +100,13 @@ vi.mock("../lib/ai.js", () => ({
 }));
 
 const { buildFallbackAnswer, buildModelFailoverOrder, PROJECT_CHAT_FAILOVER_MODELS, buildNativeDocumentInputs,
-  loadRetrievedDocumentSummaries, buildSystemInstructions, chatProject } = await import(
+  loadRetrievedDocumentSummaries, buildSystemInstructions, chatProject: chatProjectWithScope } = await import(
   "../services/project-chat.js"
 );
+/** The explicit access scope every caller passes; these tests exercise the turn, not the scope. */
+const testScope = { orgId: "org-1", projectIds: "org", modeCeiling: null } as const;
+const chatProject = (args: Omit<Parameters<typeof chatProjectWithScope>[0], "scope"> & { scope?: Parameters<typeof chatProjectWithScope>[0]["scope"] }) =>
+  chatProjectWithScope({ scope: testScope, ...args });
 const { createSearchSessionJournal } = await import("../search/session.js");
 const MODEL_KEY_ENV = ["ANTHROPIC_API_KEY", "OPENROUTER_API_KEY"] as const;
 const originalModelKeys = Object.fromEntries(MODEL_KEY_ENV.map(name => [name, process.env[name]]));
@@ -158,10 +178,12 @@ describe("chatProject", () => {
     sqlMock.mockImplementation(async (strings) => {
       const text = Array.isArray(strings) ? strings.join(" ") : String(strings);
       if (text.includes("from chat_turns")) throw new Error("statement timeout");
+      // An existing thread (a new one has no history to read).
+      if (text.includes("from chat_sessions")) return [{ id: "thread-1", project_id: "ws-1", user_id: "user-1", created_at: "2026-11-01" }];
       return [];
     });
     getProject.mockResolvedValue({ id: "ws-1", systemPrompt: null });
-    await expect(chatProject({ projectId: "ws-1", userId: "user-1", query: "and the second one?" })).rejects.toThrow("Unable to load chat history");
+    await expect(chatProject({ projectId: "ws-1", userId: "user-1", sessionId: "thread-1", query: "and the second one?" })).rejects.toThrow("Unable to load chat history");
     expect(hybridSearch).not.toHaveBeenCalled();
   });
 
@@ -234,7 +256,7 @@ describe("chatProject", () => {
       process.env.ANTHROPIC_API_KEY = "test-key";
       const response = await chatProject({ projectId: "ws-1", userId: "user-1",
         query: "Which maintenance revisions apply?", allowConfiguration: false });
-      expect(hybridSearch).toHaveBeenCalledWith(expect.any(String), "user-1", expect.objectContaining({ limit: expected }));
+      expect(hybridSearch).toHaveBeenCalledWith(expect.any(String), "user-1", expect.objectContaining({ limit: expected }), expect.objectContaining({ orgId: expect.any(String) }));
       expect(response.citations).toHaveLength(expected);
       expect(generateAnthropicDocumentText.mock.calls[0]?.[0].documents).toHaveLength(expected);
       expect(generateAnthropicDocumentText.mock.calls[0]?.[0].documents.at(-1).text).toBe(`Equipment maintenance revision ${expected}.`);
@@ -450,7 +472,7 @@ describe("chatProject", () => {
         actor: { type: "session", userId: "user-1", sessionId: "s", user: { id: "user-1", email: "", name: "User" } } });
       expect(runChatMcpAgent).not.toHaveBeenCalled();
       expect(hybridSearch).toHaveBeenCalledOnce();
-      expect(hybridSearch).toHaveBeenCalledWith(expect.any(String), "user-1", expect.objectContaining({ parentRetrieval: false }));
+      expect(hybridSearch).toHaveBeenCalledWith(expect.any(String), "user-1", expect.objectContaining({ parentRetrieval: false }), expect.objectContaining({ orgId: expect.any(String) }));
     } finally {
       if (previous === undefined) delete process.env.OPENROUTER_API_KEY; else process.env.OPENROUTER_API_KEY = previous;
     }
@@ -588,7 +610,7 @@ describe("chatProject", () => {
         tags: ["legal"],
         dateRange: { from: "2026-09-01T00:00:00.000Z", to: undefined },
       },
-    }));
+    }), expect.objectContaining({ orgId: expect.any(String) }));
     expect(generateAnthropicDocumentText).not.toHaveBeenCalled();
   });
 
@@ -606,7 +628,7 @@ describe("chatProject", () => {
         actor:{type:"session",userId:"user-1",sessionId:"s",user:{id:"user-1",email:"",name:"User"}},
         filters:{documentIds:[],...(withGeo?{geo}:{})}});
       expect(runChatMcpAgent).not.toHaveBeenCalled();
-      expect(hybridSearch).toHaveBeenCalledWith(expect.any(String),"user-1",expect.objectContaining({filters:expect.objectContaining({documentIds:[],...(withGeo?{geo}:{})})}));
+      expect(hybridSearch).toHaveBeenCalledWith(expect.any(String),"user-1",expect.objectContaining({filters:expect.objectContaining({documentIds:[],...(withGeo?{geo}:{})})}), expect.objectContaining({ orgId: expect.any(String) }));
       expect(loadProjectWholeCorpusContext).not.toHaveBeenCalled();
       expect(response.citations).toEqual([]);
       expect(generateAnthropicDocumentText).not.toHaveBeenCalled();
@@ -864,7 +886,7 @@ describe("chatProject", () => {
     });
 
     // A filename mentioned in the question is query text, never a restriction.
-    expect(hybridSearch).toHaveBeenCalledWith(expect.any(String), "user-1", expect.objectContaining({ filters: { projectId: "ws-1" } }));
+    expect(hybridSearch).toHaveBeenCalledWith(expect.any(String), "user-1", expect.objectContaining({ filters: { projectId: "ws-1" } }), expect.objectContaining({ orgId: expect.any(String) }));
     expect(response.searchSessionId).toEqual(expect.any(String));
     expect(response.debug.mode).toBe("retrieval");
     expect(response.debug.wholeCorpus.fallbackReason).toBe(
@@ -915,7 +937,7 @@ describe("chatProject", () => {
         filters: expect.objectContaining({
           projectId: "ws-1",
         }),
-      }),
+      }), expect.objectContaining({ orgId: expect.any(String) })
     );
   });
 
@@ -1336,7 +1358,7 @@ describe("chatProject", () => {
       "user-1",
       expect.objectContaining({
         suppressSessionLog: false,
-      }),
+      }), expect.objectContaining({ orgId: expect.any(String) })
     );
     expect(hybridSearch).toHaveBeenNthCalledWith(
       2,
@@ -1344,7 +1366,7 @@ describe("chatProject", () => {
       "user-1",
       expect.objectContaining({
         suppressSessionLog: false,
-      }),
+      }), expect.objectContaining({ orgId: expect.any(String) })
     );
   });
 
@@ -1385,7 +1407,7 @@ describe("chatProject", () => {
 
     // Retrieval always runs; no wording of the question skips it.
     expect(hybridSearch).toHaveBeenCalledTimes(1);
-    expect(hybridSearch).toHaveBeenCalledWith(query, "user-1", expect.anything());
+    expect(hybridSearch).toHaveBeenCalledWith(query, "user-1", expect.anything(), expect.objectContaining({ orgId: expect.any(String) }));
     const documents = generateAnthropicDocumentText.mock.calls[0]?.[0].documents;
     expect(documents[0].text).toContain("Late fees accrue at 1.5% per month");
     expect(documents[1].text).toBe("A residential lease with rent, deposit and late-fee terms.");
@@ -1831,12 +1853,13 @@ describe("chatProject", () => {
       projectId: "ws-1",
       userId: "user-1",
       query: "Summarize the manual",
-      model: "openai/gpt-6.1-sol",
+      tier: "smart",
     });
 
     expect(response.answer).toBe("Fallback answer [1]");
-    // The failover model is GPT-6 Luna; DeepSeek V4.1 Flash is never a failover target (automatic-model-selection.ts).
-    expect(response.debug.model).toBe("openai/gpt-6-luna");
+    // The failover model (GPT-6 Luna, #361; never DeepSeek V4.1 Flash) is the balanced tier's model, so customers see
+    // "balanced": the tier word of the model that answered, never the backend id.
+    expect(response.debug.model).toBe("balanced");
     expect(generateAnthropicDocumentText).toHaveBeenNthCalledWith(
       1,
       expect.objectContaining({
@@ -1902,14 +1925,14 @@ describe("chatProject", () => {
       projectId: "ws-1",
       userId: "user-1",
       query: "Summarize the manual",
-      model: "openai/gpt-6-luna",
+      tier: "smart",
     });
 
     expect(response.answer).toBe("Native answer [1]");
-    expect(response.debug.model).toBe("openai/gpt-6-luna");
+    expect(response.debug.model).toBe("smart");
     expect(generateAnthropicDocumentText).toHaveBeenCalledWith(
       expect.objectContaining({
-        model: "openai/gpt-6-luna",
+        model: "openai/gpt-6.1-sol",
         system: expect.stringContaining(
           "When you create, set, or initialize a plan",
         ),
@@ -1984,5 +2007,91 @@ describe("chatProject", () => {
       sourceText: "Renewal Date: 2025-01-05",
     });
     expect(response.evidenceSpans[0]?.answerText).toContain("[1]");
+  });
+
+  describe("streamed text is one answer", () => {
+    const stats = { documentCount: 1, chunkCount: 1, tokenEstimate: 80, charEstimate: 400, maxDocuments: 12, maxChunks: 24, maxTokens: 12000, maxChars: 60000 };
+    const citation = (documentId: string) => ({ documentId, filename: `${documentId}.pdf`, pageNumber: 1, pageNumbers: [1], headingPath: [], chunkIndex: 0, blockIds: [], blockTypes: [] });
+    const usage = { inputTokens: 10, outputTokens: 4 };
+    type Generate = { model?: string; onTextDelta?: (delta: string) => void | Promise<void> };
+
+    function retrievalProject() {
+      sqlMock.mockResolvedValue([]);
+      loadProjectWholeCorpusContext.mockResolvedValue({ eligible: false, reason: "chunk-limit-exceeded", results: [], stats });
+      getProject.mockResolvedValue({ id: "ws-1", systemPrompt: null });
+      hybridSearch.mockResolvedValue({ sessionId: "search-stream", results: [{ text: "retrieved chunk", score: 1, citation: citation("doc-r"), parentText: "retrieved chunk" }] });
+      process.env.ANTHROPIC_API_KEY = "test-key";
+    }
+    function wholeCorpusProject() {
+      retrievalProject();
+      getProjectSearchSettings.mockResolvedValue(buildSearchSettings({ chat: { mode: "whole-corpus" } }));
+      loadProjectWholeCorpusContext.mockResolvedValue({ eligible: true, reason: null, results: [{ text: "full corpus chunk", score: 1, citation: citation("doc-w") }], stats });
+    }
+    // Callers choose a tier, never a backend model (#362): "smart" is GPT-6.1 Sol, with a failover model behind it.
+    function streamedTurn(tier?: "fastest" | "balanced" | "smart") {
+      const deltas: string[] = [];
+      const turn = chatProject({ projectId: "ws-1", userId: "user-1", query: "what changed?", ...(tier ? { tier } : {}), onTextDelta: (delta) => { deltas.push(delta); } });
+      return { deltas, turn };
+    }
+
+    it("does not fail over to another model once the first has streamed text", async () => {
+      retrievalProject();
+      generateAnthropicDocumentText
+        .mockImplementationOnce(async ({ onTextDelta }: Generate) => { await onTextDelta?.("The contract renews "); throw new Error("provider stream reset"); })
+        .mockImplementationOnce(async ({ onTextDelta }: Generate) => { await onTextDelta?.("Different answer [1]"); return { text: "Different answer [1]", usage, sources: [] }; });
+      const { deltas, turn } = streamedTurn("smart");
+      // The turn fails: no failover answer and no citation fallback is appended to the streamed prefix.
+      await expect(turn).rejects.toThrow("provider stream reset");
+      expect(generateAnthropicDocumentText).toHaveBeenCalledTimes(1);
+      expect(deltas).toEqual(["The contract renews "]);
+    });
+
+    it("still fails over when the first model fails before any text", async () => {
+      retrievalProject();
+      generateAnthropicDocumentText
+        // An empty delta is not answer text.
+        .mockImplementationOnce(async ({ onTextDelta }: Generate) => { await onTextDelta?.(""); throw new Error("selected model rate limited"); })
+        .mockImplementationOnce(async ({ onTextDelta }: Generate) => { await onTextDelta?.("Fallback "); await onTextDelta?.("answer [1]"); return { text: "Fallback answer [1]", usage, sources: [] }; });
+      const { deltas, turn } = streamedTurn("smart");
+      const response = await turn;
+      expect(generateAnthropicDocumentText).toHaveBeenCalledTimes(2);
+      expect(response.answer).toBe("Fallback answer [1]");
+      expect(deltas.join("")).toBe(response.answer);
+    });
+
+    it("still answers with the citation fallback when every model fails before any text", async () => {
+      retrievalProject();
+      generateAnthropicDocumentText.mockRejectedValue(new Error("provider down"));
+      const { deltas, turn } = streamedTurn("smart");
+      const response = await turn;
+      expect(response.debug.fallback).toBe(true);
+      expect(response.answer).toContain("Here are the relevant source passages:");
+      expect(deltas).toEqual([]);
+    });
+
+    it("does not fall through from whole-corpus to retrieval generation after streaming text", async () => {
+      wholeCorpusProject();
+      generateAnthropicDocumentText
+        .mockImplementationOnce(async ({ onTextDelta }: Generate) => { await onTextDelta?.("From the full corpus: "); throw new Error("whole corpus stream reset"); })
+        .mockImplementation(async ({ onTextDelta }: Generate) => { await onTextDelta?.("retrieval answer [1]"); return { text: "retrieval answer [1]", usage, sources: [] }; });
+      const { deltas, turn } = streamedTurn();
+      await expect(turn).rejects.toThrow("whole corpus stream reset");
+      expect(generateAnthropicDocumentText).toHaveBeenCalledTimes(1);
+      expect(hybridSearch).not.toHaveBeenCalled();
+      expect(deltas).toEqual(["From the full corpus: "]);
+    });
+
+    it("still falls through from whole-corpus to retrieval when nothing was streamed", async () => {
+      wholeCorpusProject();
+      generateAnthropicDocumentText
+        .mockRejectedValueOnce(new Error("whole corpus failure"))
+        .mockRejectedValueOnce(new Error("whole corpus failover failure"))
+        .mockImplementationOnce(async ({ onTextDelta }: Generate) => { await onTextDelta?.("retrieval answer [1]"); return { text: "retrieval answer [1]", usage, sources: [] }; });
+      const { deltas, turn } = streamedTurn();
+      const response = await turn;
+      expect(response.debug.mode).toBe("retrieval");
+      expect(response.debug.wholeCorpus.fallbackReason).toBe("generation-failed");
+      expect(deltas.join("")).toBe(response.answer);
+    });
   });
 });

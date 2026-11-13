@@ -20,11 +20,12 @@ import { runDocumentStage, runDocuments } from "../pipeline/checkpoints.js";
 import { PdfSourceCache } from "../pipeline/pdf-asset-cache.js";
 import type { Stage } from "../pipeline/pipeline.js";
 import { createStageExecution, loadRunState } from "../pipeline/stage-execution.js";
-import { readSourceBytes, resetStagedSourcesForTests, sha256Bytes, stageSourceFile } from "../sandbox/source-integrity.js";
+import { claimQuarantineUploadIssuer, readSourceBytes, resetStagedSourcesForTests, sha256Bytes, stageSourceFile, verifyQuarantineUpload, verifyStagedSource } from "../sandbox/source-integrity.js";
 import { QuarantineStage } from "../stages/quarantine.js";
 import { resolvePipelineWorkflowStageOrder } from "../temporal/pipeline-workflow-plan.js";
 import { createMigratedDatabase } from "../test/migrated-db.js";
 import { serveOnRandomPort } from "../test/migrated-postgres.js";
+import { fakeVmCommands, withFakeParserVm } from "../test/parser-vm-fake.js";
 import type { CommandRunner } from "../tools/runner.js";
 import { sourceStorageKey, type ArtifactStore } from "../tools/storage.js";
 
@@ -98,11 +99,11 @@ function quarantineRunner(): CommandRunner {
 }
 
 /** The real quarantine stage, and for every later stage a parser that stages its source (hash-checked) and logs what it read. */
-function pipelineStages(storage: ArtifactStore) {
+function pipelineStages(storage: ArtifactStore, runner: CommandRunner = quarantineRunner()) {
   const executed: string[] = [];
   const parsed: Array<{ stage: string; key: string; bytes: Buffer }> = [];
   const stages: Stage[] = pipelineStageOrder.map((name) => name === "quarantine"
-    ? new QuarantineStage(quarantineRunner(), storage, config)
+    ? new QuarantineStage(runner, storage, config)
     : {
       name,
       async run(state, signal) {
@@ -509,5 +510,312 @@ describe("I-1: a document object not built by the loader is unscanned in product
       error.mockRestore();
     }
     expect(reads).toEqual([]);
+  });
+});
+
+/**
+ * Production regression (app deploy rolled back): every upload was refused at quarantine with parse-source-unscanned.
+ * The stage verified the upload with verifyStagedSource, whose decision gate treats an object without a decision field as
+ * unscanned under NODE_ENV=production (I-1), and originalSourceForQuarantine returns exactly such an object. Every other
+ * test here stubs NODE_ENV=test, so none ran the production branch. These run the real stage under NODE_ENV=production.
+ */
+describe("production: quarantine decides a fresh upload under NODE_ENV=production", () => {
+  const benign = Buffer.from("%PDF-1.4\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF\n");
+  const plainRunner = withFakeParserVm({ scanForMalware: async () => clean, decryptPdfForScan: async () => ({ status: "not-encrypted", encrypted: false }) } as unknown as CommandRunner);
+
+  beforeEach(() => {
+    vi.stubEnv("NODE_ENV", "production");
+  });
+
+  async function seedFreshUpload(id: string, key: string, sha: string | null, features: PipelineFeatures = pipeline) {
+    await sql`
+      insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total, execution_generation)
+      values (${`run-${id}`}, 'o1', 'u1', 'w', 'upload', 'queued', 'queued', ${sql.json(features as unknown as postgres.JSONValue)}, 1, 1, 'test-generation')`;
+    await sql`
+      insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, source_sha256, status, page_count)
+      values (${id}, 'o1', 'u1', 'w', ${`run-${id}`}, 'upload.pdf', 'application/pdf', ${key}, ${sha}, 'queued', 1)`;
+  }
+
+  async function decisionRow(id: string) {
+    const [row] = await sql<{ parse_source_key: string | null; parse_source_sha256: string | null; parse_source_scan_version: number | null }[]>`
+      select parse_source_key, parse_source_sha256, parse_source_scan_version from documents where id = ${id}`;
+    return row;
+  }
+
+  function quiet() {
+    const spies = [vi.spyOn(console, "warn").mockImplementation(() => {}), vi.spyOn(console, "error").mockImplementation(() => {})];
+    return () => spies.forEach((spy) => spy.mockRestore());
+  }
+
+  it("a plain upload: quarantine completes, records an 'original' decision, and the loaded document is unscanned before it", async () => {
+    await seedFreshUpload("fresh", "raw/fresh.pdf", sha256Bytes(benign));
+    const { storage, reads } = memoryStorage(new Map([["raw/fresh.pdf", benign]]));
+    const restore = quiet();
+    try {
+      const state = await loadRunState(store, "run-fresh", { totalStages: 2 });
+      // The production loader: a fresh upload has no decision until quarantine records one.
+      expect(state.documents[0]?.parseSourceDecision).toBe("unscanned");
+      await new QuarantineStage(plainRunner, storage, config).run(state);
+      const checkpoint = state.documentStage("fresh", "quarantine");
+      expect(checkpoint?.error || null).toBeNull();
+      expect(checkpoint?.status).toBe("completed");
+      expect(state.documents[0]).toMatchObject({ parseSourceDecision: "original", sourceKey: "raw/fresh.pdf", sourceSha256: sha256Bytes(benign) });
+      expect(reads).toEqual(["raw/fresh.pdf"]);
+    } finally {
+      restore();
+    }
+    expect(await decisionRow("fresh")).toEqual({ parse_source_key: null, parse_source_sha256: sha256Bytes(benign), parse_source_scan_version: 1 });
+    expect((await store.loadDocument("fresh")).parseSourceDecision).toBe("original");
+  }, 60_000);
+
+  it("an encrypted upload, end to end: quarantine stores its copy and every later stage parses the copy", async () => {
+    const features = { ...pipeline };
+    await seedFreshUpload("enc", "raw/enc.pdf", ORIGINAL_SHA, features);
+    const { storage, reads, objects } = memoryStorage(new Map([["raw/enc.pdf", attackPdf]]));
+    const { stages, executed, parsed } = pipelineStages(storage, withFakeParserVm(quarantineRunner()));
+    const restore = quiet();
+    try {
+      await runWorkflow(stages, features, "run-enc");
+    } finally {
+      restore();
+    }
+    const copyKey = "u1/run-enc/quarantine/enc.scanned.pdf";
+    expect(objects.get(copyKey)).toEqual(scannedCopy);
+    expect(executed.length).toBeGreaterThan(3);
+    expect(new Set(parsed.map((read) => read.key))).toEqual(new Set([copyKey]));
+    expect(reads.filter((key) => key === "raw/enc.pdf")).toHaveLength(1);
+    expect(await decisionRow("enc")).toEqual({ parse_source_key: copyKey, parse_source_sha256: sha256Bytes(scannedCopy), parse_source_scan_version: 1 });
+    const [run] = await sql<{ status: string }[]>`select status from project_runs where id = 'run-enc'`;
+    expect(run?.status).toBe("completed");
+  }, 60_000);
+
+  it("negative: an upload swapped after the server hashed it is refused (source-hash-mismatch) and gets no decision", async () => {
+    await seedFreshUpload("swapped", "raw/swapped.pdf", sha256Bytes(benign));
+    const { storage } = memoryStorage(new Map([["raw/swapped.pdf", Buffer.from("%PDF-1.4\n% SWAPPED\n%%EOF\n")]]));
+    const restore = quiet();
+    try {
+      const state = await loadRunState(store, "run-swapped", { totalStages: 2 });
+      await new QuarantineStage(plainRunner, storage, config).run(state);
+      const checkpoint = state.documentStage("swapped", "quarantine");
+      expect(checkpoint?.status).toBe("failed");
+      expect(checkpoint?.error).toMatch(/source changed after upload/);
+      expect(state.documents[0]?.parseSourceDecision).toBe("unscanned");
+      await expect(stageSourceFile(storage, state.documents[0]!, "x")).rejects.toBeInstanceOf(UnscannedParseSourceError);
+    } finally {
+      restore();
+    }
+    expect(await decisionRow("swapped")).toEqual({ parse_source_key: null, parse_source_sha256: null, parse_source_scan_version: null });
+  }, 60_000);
+
+  it("negative: an upload the scan refuses stays undecided, and a later parse stage refuses it before reading", async () => {
+    await seedFreshUpload("bad", "raw/bad.pdf", sha256Bytes(benign));
+    const { storage, reads } = memoryStorage(new Map([["raw/bad.pdf", benign]]));
+    const infected = withFakeParserVm({ scanForMalware: async () => ({ ...clean, status: "infected", signature: "Eicar-Test-Signature" }), decryptPdfForScan: async () => ({ status: "not-encrypted", encrypted: false }) } as unknown as CommandRunner);
+    const restore = quiet();
+    try {
+      const state = await loadRunState(store, "run-bad", { totalStages: 2 });
+      await new QuarantineStage(infected, storage, config).run(state);
+      const refused = state.documentStage("bad", "quarantine");
+      expect(refused?.status).toBe("failed");
+      // Refused by the scan verdict, after inspection in the VM: never by the decision gate before the scan.
+      expect(quarantineReasonOf(refused?.error)).toBe("quarantine-malware");
+      expect(refused?.error).toMatch(/quarantined \[malware-detected\]/);
+      expect(refused?.error).not.toMatch(/parse-source-unscanned/);
+      expect(fakeVmCommands(infected)).toHaveLength(1);
+      expect(state.documents[0]?.parseSourceDecision).toBe("unscanned");
+      reads.length = 0;
+      const later = await loadRunState(store, "run-bad", { totalStages: 2 });
+      expect(later.documents[0]?.parseSourceDecision).toBe("unscanned");
+      let ran = false;
+      await runDocumentStage(later, later.documents[0]!, "format-detect", "bad:normalizedFormat", "x", async () => { ran = true; return { artifactUri: "" }; });
+      expect(ran).toBe(false);
+      await expect(stageSourceFile(storage, later.documents[0]!, "x")).rejects.toBeInstanceOf(UnscannedParseSourceError);
+      expect(reads).toEqual([]);
+    } finally {
+      restore();
+    }
+    expect(await decisionRow("bad")).toEqual({ parse_source_key: null, parse_source_sha256: null, parse_source_scan_version: null });
+  }, 60_000);
+
+  it("negative: a document object the loader did not build (no upload binding, no decision) is refused before any read", async () => {
+    await seedFreshUpload("adhoc-q", "raw/adhoc.pdf", sha256Bytes(benign));
+    const { storage, reads } = memoryStorage(new Map([["raw/adhoc.pdf", benign]]));
+    const restore = quiet();
+    try {
+      const state = await loadRunState(store, "run-adhoc-q", { totalStages: 2 });
+      const loaded = state.documents[0]!;
+      // A spread copy loses the binding; dropping its decision field makes it look hand-built.
+      const { parseSourceDecision: _dropped, ...rest } = { ...loaded, sourceKey: "raw/adhoc.pdf", sourceSha256: sha256Bytes(benign) };
+      state.documents[0] = rest as typeof loaded;
+      await new QuarantineStage(plainRunner, storage, config).run(state);
+      const checkpoint = state.documentStage("adhoc-q", "quarantine");
+      expect(checkpoint?.status).toBe("failed");
+      expect(checkpoint?.error).toMatch(/no upload binding/);
+    } finally {
+      restore();
+    }
+    expect(reads).toEqual([]);
+    expect(await decisionRow("adhoc-q")).toEqual({ parse_source_key: null, parse_source_sha256: null, parse_source_scan_version: null });
+  }, 60_000);
+
+  it("a partial reprocess (restartFromStage) of a document quarantined by an earlier build re-quarantines and parses only its own copy", async () => {
+    await seedLegacySourceRun();
+    const features = { ...pipeline, restartFromStage: "format-detect" };
+    await seedReprocess(features);
+    const { storage, reads, objects } = memoryStorage(new Map([["raw/a.pdf", attackPdf]]));
+    const runner = withFakeParserVm(quarantineRunner());
+    const { stages, executed, parsed } = pipelineStages(storage, runner);
+    const restore = quiet();
+    try {
+      const before = await loadRunState(store, "run-re", { totalStages: 2 });
+      expect(before.documents[0]?.parseSourceDecision).toBe("unscanned");
+      await runWorkflow(stages, features, "run-re");
+    } finally {
+      restore();
+    }
+    const copyKey = "u1/run-re/quarantine/re.scanned.pdf";
+    expect(fakeVmCommands(runner)).toHaveLength(1);
+    expect(objects.get(copyKey)).toEqual(scannedCopy);
+    expect(executed.length).toBeGreaterThan(3);
+    expect(new Set(parsed.map((read) => read.key))).toEqual(new Set([copyKey]));
+    expect(reads.filter((key) => key === "raw/a.pdf")).toHaveLength(1);
+    expect(await decisionRow("re")).toEqual({ parse_source_key: copyKey, parse_source_sha256: sha256Bytes(scannedCopy), parse_source_scan_version: 1 });
+    // The source run's document keeps no decision: a reprocess decides only its own row.
+    expect(await decisionRow("src")).toEqual({ parse_source_key: null, parse_source_sha256: null, parse_source_scan_version: null });
+  }, 60_000);
+
+  /** Several uploads in one run; bytes starting "INFECTED" are what the fake scanner flags. */
+  async function seedRun(runId: string, uploads: Array<[id: string, bytes: Buffer]>) {
+    await sql`
+      insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total, execution_generation)
+      values (${runId}, 'o1', 'u1', 'w', 'bulk-upload', 'processing', 'quarantine', ${sql.json(pipeline as unknown as postgres.JSONValue)}, ${uploads.length}, ${uploads.length}, 'test-generation')`;
+    for (const [id, bytes] of uploads) {
+      await sql`
+        insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, source_sha256, status, page_count)
+        values (${id}, 'o1', 'u1', 'w', ${runId}, ${`${id}.pdf`}, 'application/pdf', ${`raw/${id}.pdf`}, ${sha256Bytes(bytes)}, 'queued', 1)`;
+    }
+    return new Map(uploads.map(([id, bytes]) => [`raw/${id}.pdf`, bytes]));
+  }
+  const infectedPdf = Buffer.from("INFECTED%PDF-1.4\n%%EOF\n");
+  function verdictRunner(onScan?: (bytes: Buffer) => void) {
+    return withFakeParserVm({
+      scanForMalware: async (file: string) => {
+        const bytes = await readFile(file);
+        onScan?.(bytes);
+        return bytes.subarray(0, 8).toString() === "INFECTED" ? { ...clean, status: "infected", signature: "Eicar-Test-Signature" } : clean;
+      },
+      decryptPdfForScan: async () => ({ status: "not-encrypted", encrypted: false }),
+    } as unknown as CommandRunner);
+  }
+
+  it("shards: each shard decides only its own documents; a foreign id is ignored; a later shard's activity decides the rest", async () => {
+    const sources = await seedRun("run-shard", [["sa", benign], ["sb", Buffer.from("%PDF-1.4\n% b\n%%EOF\n")], ["sc", infectedPdf]]);
+    const { storage, reads } = memoryStorage(sources);
+    const runner = verdictRunner();
+    const restore = quiet();
+    try {
+      const first = await loadRunState(store, "run-shard", { totalStages: 2 });
+      first.beginShard(["sa", "sc", "foreign-run-document"]);
+      await new QuarantineStage(runner, storage, config).run(first);
+      expect(first.documentStage("sa", "quarantine")?.status).toBe("completed");
+      expect(quarantineReasonOf(first.documentStage("sc", "quarantine")?.error)).toBe("quarantine-malware");
+      expect(reads).toEqual(["raw/sa.pdf", "raw/sc.pdf"]);
+      expect(await decisionRow("sb")).toEqual({ parse_source_key: null, parse_source_sha256: null, parse_source_scan_version: null });
+
+      // The next shard is another activity: it reloads the run, and sees sa's decision from the row.
+      const second = await loadRunState(store, "run-shard", { totalStages: 2 });
+      expect(second.documents.find((document) => document.id === "sa")?.parseSourceDecision).toBe("original");
+      second.beginShard(["sb"]);
+      await new QuarantineStage(runner, storage, config).run(second);
+      expect(second.documentStage("sb", "quarantine")?.status).toBe("completed");
+      expect(reads).toEqual(["raw/sa.pdf", "raw/sc.pdf", "raw/sb.pdf"]);
+    } finally {
+      restore();
+    }
+    expect(fakeVmCommands(runner)).toHaveLength(3);
+    expect((await decisionRow("sa"))?.parse_source_sha256).toBe(sha256Bytes(benign));
+    expect((await decisionRow("sb"))?.parse_source_scan_version).toBe(1);
+    expect(await decisionRow("sc")).toEqual({ parse_source_key: null, parse_source_sha256: null, parse_source_scan_version: null });
+    const parsedLater = await loadRunState(store, "run-shard", { totalStages: 2 });
+    expect(Object.fromEntries(parsedLater.documents.map((document) => [document.id, document.parseSourceDecision]))).toEqual({ sa: "original", sb: "original", sc: "unscanned" });
+  }, 60_000);
+
+  it("retry: a scan interrupted by shutdown is retried by a new activity; the decided sibling is not rescanned", async () => {
+    const sources = await seedRun("run-retry", [["r1", benign], ["r2", Buffer.from("%PDF-1.4\n% r2\n%%EOF\n")]]);
+    const { storage, reads } = memoryStorage(sources);
+    const controller = new AbortController();
+    const interrupting = verdictRunner((bytes) => {
+      if (bytes.includes("% r2")) { controller.abort(new Error("worker shutdown")); throw controller.signal.reason; }
+    });
+    const restore = quiet();
+    try {
+      const first = await loadRunState(store, "run-retry", { totalStages: 2 });
+      await expect(new QuarantineStage(interrupting, storage, config).run(first, controller.signal)).rejects.toThrow("worker shutdown");
+      expect(first.documentStage("r1", "quarantine")?.status).toBe("completed");
+      expect(first.documentStage("r2", "quarantine")?.status).not.toBe("failed");
+      expect(await decisionRow("r2")).toEqual({ parse_source_key: null, parse_source_sha256: null, parse_source_scan_version: null });
+
+      const retry = await loadRunState(store, "run-retry", { totalStages: 2 });
+      expect(Object.fromEntries(retry.documents.map((document) => [document.id, document.parseSourceDecision]))).toEqual({ r1: "original", r2: "unscanned" });
+      await new QuarantineStage(verdictRunner(), storage, config).run(retry);
+      expect(retry.documentStage("r2", "quarantine")?.status).toBe("completed");
+      expect(retry.documents.find((document) => document.id === "r2")?.parseSourceDecision).toBe("original");
+    } finally {
+      restore();
+    }
+    expect(reads).toEqual(["raw/r1.pdf", "raw/r2.pdf", "raw/r2.pdf"]);
+    expect((await decisionRow("r2"))?.parse_source_sha256).toBe(sha256Bytes(sources.get("raw/r2.pdf")!));
+  }, 60_000);
+
+  it("the parsers' gate is unchanged; the quarantine check accepts only uploads originalSourceForQuarantine issued", () => {
+    const restore = quiet();
+    try {
+      expect(() => verifyStagedSource({ id: "x", sourceKey: "raw/x.pdf", sourceSha256: sha256Bytes(benign) }, sha256Bytes(benign))).toThrow(UnscannedParseSourceError);
+      expect(() => verifyStagedSource({ id: "x", sourceKey: "raw/x.pdf", sourceSha256: sha256Bytes(benign), parseSourceDecision: "unscanned" }, sha256Bytes(benign))).toThrow(UnscannedParseSourceError);
+      // An object quarantine did not get from originalSourceForQuarantine is refused before any check, even a perfect copy.
+      const forged = { id: "x", sourceKey: "raw/x.pdf", sourceSha256: sha256Bytes(benign) };
+      expect(() => verifyQuarantineUpload(forged, sha256Bytes(benign))).toThrow(/not issued by originalSourceForQuarantine/);
+      // In-memory documents (no loader binding): only "unscanned-allowed" ones are their own upload, even in production.
+      const issue = (sourceKey: string, sourceSha256: string | null) =>
+        originalSourceForQuarantine({ id: "x", sourceKey, sourceSha256, parseSourceDecision: "unscanned-allowed" });
+      const issued = issue("raw/x.pdf", sha256Bytes(benign));
+      expect(Object.isFrozen(issued)).toBe(true);
+      expect(() => verifyQuarantineUpload({ ...issued }, sha256Bytes(benign))).toThrow(/not issued/);
+      expect(() => verifyQuarantineUpload(issue(unscannedParseSourceKey("x"), null), sha256Bytes(benign))).toThrow(UnscannedParseSourceError);
+      expect(() => verifyQuarantineUpload(issued, "f".repeat(64))).toThrow(/source changed after upload/);
+      expect(() => verifyQuarantineUpload(issue("raw/x.pdf", null), "not-a-hash")).toThrow(/not a sha256/);
+      expect(() => verifyQuarantineUpload(issued, sha256Bytes(benign))).not.toThrow();
+      // The issuer is claimed once, by parse-source at load: nobody else can mint accepted uploads.
+      expect(() => claimQuarantineUploadIssuer()).toThrow(/already claimed/);
+    } finally {
+      restore();
+    }
+  });
+
+  it("tripwire: only the quarantine stage verifies an upload without a decision; only parse-source claims the issuer", async () => {
+    // The boundary is structural (verifyQuarantineUpload accepts only frozen uploads issued by originalSourceForQuarantine,
+    // whose issuer parse-source claims once at load). This is the second line: every worker source file of any loadable
+    // extension (.ts/.mts/.cts/.js/.mjs/.cjs, tests excluded) that names the API, or its "QuarantineUpload" stem as a
+    // namespace member or a string piece of a computed access, is listed, and only the two owners may.
+    const root = fileURLToPath(new URL("../../", import.meta.url));
+    const skipDirs = new Set(["node_modules", "dist", "__tests__", "test", "testdata", "coverage"]);
+    const named: Record<string, string[]> = {};
+    const walk = async (directory: string): Promise<void> => {
+      for (const entry of await readdir(directory, { withFileTypes: true })) {
+        const full = path.join(directory, entry.name);
+        if (entry.isDirectory()) { if (!skipDirs.has(entry.name)) await walk(full); continue; }
+        if (!/\.[cm]?[jt]s$/.test(entry.name) || /\.(?:test|spec)\.[cm]?[jt]s$/.test(entry.name) || entry.name.endsWith(".d.ts")) continue;
+        const relative = path.relative(root, full).split(path.sep).join("/");
+        if (relative === "src/sandbox/source-integrity.ts") continue;
+        const text = await readFile(full, "utf8");
+        const hits = ["verifyQuarantineUpload", "claimQuarantineUploadIssuer", "QuarantineUpload"].filter((name) => text.includes(name));
+        if (hits.length) named[relative] = hits;
+      }
+    };
+    await walk(root);
+    expect(named).toEqual({
+      "src/stages/quarantine.ts": ["verifyQuarantineUpload", "QuarantineUpload"],
+      "src/lib/parse-source.ts": ["claimQuarantineUploadIssuer", "QuarantineUpload"],
+    });
   });
 });

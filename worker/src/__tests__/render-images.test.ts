@@ -141,14 +141,74 @@ describe("free chart candidate stats", () => {
     const stateWith = (pipeline: Record<string, unknown>) => ({ artifactLedger: DocumentArtifactLedger.create({}), run: { id: "run", pipeline } }) as unknown as WorkflowState;
     const free = (stage as unknown as { freeVisualCandidates: (s: WorkflowState, d: unknown, c: unknown) => Promise<unknown> }).freeVisualCandidates.bind(stage);
     // Keyword-only chart page: counted as low confidence, not as a priced candidate. No storage read (no slots).
-    expect(await free(stateWith({ visionFallback: true, chartExport: { enabled: true, formats: ["description"], diagrams: true, generatorModel: null } }), document, classification))
+    expect(await free(stateWith({ visionFallback: true, chartExport: { tier: "models", formats: ["description"], diagrams: true } }), document, classification))
       .toEqual({ stats: { charts: 0, diagrams: 0, pagesWithUnexportedVisuals: [], exported: 0, bySource: {} }, lowConfidence: 1 });
     expect(getJson).not.toHaveBeenCalled();
     vi.stubEnv("DOCSLURP_CHART_EXPORT", "on");
     try {
-      expect(await free(stateWith({ visionFallback: true, chartExport: { enabled: true, formats: ["description"], diagrams: true, generatorModel: null } }), document, classification)).toBeNull();
+      expect(await free(stateWith({ visionFallback: true, chartExport: { tier: "models", formats: ["description"], diagrams: true } }), document, classification)).toBeNull();
+      // The free tier is active too: vision-extract records the stats. An unstamped run resolves as machine (off): render-images does.
+      expect(await free(stateWith({ visionFallback: false, chartExport: { tier: "free", formats: ["description"], diagrams: true } }), document, classification)).toBeNull();
+      expect(await free(stateWith({ visionFallback: false, chartExport: { formats: ["description"], diagrams: true } }), document, classification)).not.toBeNull();
     } finally {
       vi.unstubAllEnvs();
     }
+  });
+});
+
+describe("pages Doppler left to the host's page image (--scan-pages copy)", () => {
+  const classification = {
+    status: "ready", documentId: "doc", label: "mixed", confidence: 0.8, signals: [], suggestedPlaybook: "balanced",
+    documentComplexity: "mixed", dominantRoutes: ["image-heavy"], visionPolicy: "selective", specializedContentSummary: [],
+    evidence: { source: "canonical-document", artifactUri: "s3://bucket/c.json", characterCount: 1000, pageCount: 6 },
+    pages: [{ pageNumber: 4, route: "image-heavy", confidence: 0.8, textDensityScore: 0.1, signals: [], extractorHint: "vision-rescue", specializedContent: [] }],
+  };
+  const row = (pageNumber: number, fate: string, status: string, reason: string | null) => ({ assetId: `p${pageNumber}.1`, pageNumber, fate, status, reason });
+  async function render(options: { preserveImages?: boolean; mimeType?: string; orgId?: string | null; pending?: unknown[]; stored?: number[]; storeFails?: boolean }) {
+    const listHostPageImagePages = vi.fn(async (scope: { orgId: string; documentId: string }) => {
+      if (options.storeFails) throw new Error("db down");
+      return scope.orgId === "org-a" && scope.documentId === "doc" ? options.stored ?? [] : [];
+    });
+    const pendingAssetLedger = new Map(options.pending ? [["doc", { level: {}, assets: options.pending }]] : []);
+    const state = {
+      artifactLedger: DocumentArtifactLedger.create({}), pendingAssetLedger, store: { getCompletedPages: async () => new Set(), listHostPageImagePages },
+      documents: [{ id: "doc", userId: "user", pageCount: 6, mimeType: options.mimeType ?? "application/pdf" }],
+      docConcurrency: 1, run: { id: "run", orgId: options.orgId === undefined ? "org-a" : options.orgId, pipeline: { preserveImages: options.preserveImages ?? true, visionFallback: true } },
+    } as unknown as WorkflowState;
+    const renderSelectedPages = vi.fn(async () => []);
+    const stage = new RenderImagesStage({ renderSelectedPages } as unknown as PdfRasterCache,
+      { putJson: vi.fn(), uri: (key: string) => `s3://bucket/${key}` } as unknown as ArtifactStore);
+    vi.spyOn(stage as any, "loadRasterRequest").mockResolvedValue(classification);
+    await stage.run(state);
+    return { pages: (renderSelectedPages.mock.calls[0] as unknown as [{ pageNumbers: number[] }])[0].pageNumbers, listHostPageImagePages };
+  }
+
+  it("renders the stored ledger's scan-not-copyable and failed-copy pages beside the classification's, scoped to the document's organization", async () => {
+    const { pages, listHostPageImagePages } = await render({ stored: [2, 5] });
+    expect(pages).toEqual([2, 4, 5]);
+    expect(listHostPageImagePages).toHaveBeenCalledWith({ orgId: "org-a", documentId: "doc" });
+  });
+
+  it("prefers the write still waiting for its checkpoint, and selects only the two host-image cases from it", async () => {
+    const { pages, listHostPageImagePages } = await render({
+      stored: [1],
+      pending: [
+        row(1, "page-scan", "extracted", null), row(2, "background", "unlinked", "scan-not-copyable"),
+        row(3, "page-scan", "not-extracted", "copy"), row(5, "block", "not-extracted", "copy"), row(6, "furniture", "unlinked", null),
+        row(6, "page-scan", "not-extracted", "budget"),
+      ],
+    });
+    expect(pages).toEqual([2, 3, 4]);
+    expect(listHostPageImagePages).not.toHaveBeenCalled();
+  });
+
+  it("leaves other pages and other projects alone: page images off, not a PDF, no organization, a page past the end, a failed read", async () => {
+    expect((await render({ preserveImages: false, stored: [2] })).pages).toEqual([4]);
+    expect((await render({ mimeType: "image/png", stored: [2] })).pages).toEqual([]);
+    const orphan = await render({ orgId: null, stored: [2] });
+    expect(orphan.pages).toEqual([4]);
+    expect(orphan.listHostPageImagePages).not.toHaveBeenCalled();
+    expect((await render({ stored: [7, 0, 2] })).pages).toEqual([2, 4]);
+    expect((await render({ storeFails: true })).pages).toEqual([4]);
   });
 });

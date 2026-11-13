@@ -1,3 +1,4 @@
+import { customerPipelineView } from "@docslurp/shared";
 import postgres from "postgres";
 import { afterAll, beforeAll, expect, it, vi } from "vitest";
 import { defaultPipelineFeatures, mergePipelineFeatures } from "@docslurp/shared";
@@ -232,7 +233,8 @@ it("proposes the quality change the ingest report recommends, with new-upload im
   expect(proposal.estimate?.pages).toBeGreaterThan(0);
   // Optional reprocessing: saving without consent changes settings only, and keeps every other vision setting.
   await expect(service.applySettingsProposal({ ...f, token: proposal.token, reprocessExisting: false })).resolves.toMatchObject({ applied: true, reprocess: { requested: false, status: 'not-requested' } });
-  expect(await saved(f.id)).toMatchObject({ vision: before.vision, preserveCode: false, quality: 'good' });
+  // Compared through the customer view: the row stores the managed form (no schema-filled model URIs).
+  expect(customerPipelineView(await saved(f.id))).toMatchObject({ vision: customerPipelineView(before).vision, preserveCode: false, quality: 'good' });
   // The per-file vision page limit was removed; proposing it is rejected rather than silently ignored.
   await expect(service.proposeProjectSettings({ ...f, changes: { pipeline: { vision: { forceAllPages: true, maxPagesPerDocument: 8 } } } })).rejects.toBeDefined();
 });

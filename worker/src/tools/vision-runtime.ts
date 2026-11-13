@@ -1,5 +1,5 @@
 import { currentProviderPolicy } from "../lib/provider-rate-limit.js";
-import { nitroBaseModel, speedBoostModel, type OpenRouterReasoning, withOpenRouterProviderPreferences, resolveSupportedModelIdWithWarning, withServedProviderRegion, withPromptCacheBreakpoints, needsExplicitPromptCache } from "@docslurp/shared";
+import { nitroBaseModel, speedBoostModel, type OpenRouterReasoning, withOpenRouterProviderPreferences, resolveSupportedModelIdWithWarning, withServedProviderRegion, withPromptCacheBreakpoints, needsExplicitPromptCache, assertAutomaticModelCallAllowed } from "@docslurp/shared";
 import { withObservation } from "@docslurp/shared/observability";
 import { ProviderRetryableError, providerFromBaseUrl } from "../lib/provider-retry.js";
 import {
@@ -268,6 +268,9 @@ export async function executeVisionRuntime(args: {
   const normalized = normalizeVisionConfig(args.vision, args.cfg, args.outputSchema);
   const selected = args.promptText !== undefined ? { ...normalized, prompt: args.promptText } : normalized;
   assertProviderAllowed(args.privacyMode, visionCall(selected));
+  // Inside a run every vision model is automatic selection: a denied, Pro/Ultra or over-cap model is refused here,
+  // whatever wrote the config. Benchmarks (gate null) name their candidates explicitly.
+  if (args.gate) assertAutomaticModelCallAllowed(selected.modelUri, "vision model");
 
   // Tenant or document text in the prompt (schema labels, a chart digest) is the request tail: it is sent after the
   // image so the fixed instructions form a prefix that is byte-identical across tenants, pages and documents.
@@ -284,6 +287,7 @@ export async function executeVisionRuntime(args: {
     if (!selected.remoteFallbackModelUri || selected.runtime === "remote-openai") {
       throw error;
     }
+    if (args.gate) assertAutomaticModelCallAllowed(selected.remoteFallbackModelUri, "vision fallback model");
     const fallbackProvider = (() => {
       try {
         return new URL(selected.remoteFallbackModelUri).hostname.toLowerCase();

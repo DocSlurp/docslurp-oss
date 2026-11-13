@@ -112,7 +112,7 @@ async function figureWrite(scope: DocumentAssetLedgerScope, options: { partial?:
 }
 
 const complete = (scope: DocumentAssetLedgerScope, pending: PendingAssetLedgerWrite, resume?: boolean): DocumentAssetLedgerWrite =>
-  ({ scope, level: { ...pending.level, markdownComplete: true }, assets: pending.assets, ...(resume ? { resume: true } : {}) });
+  ({ scope, level: { ...pending.level, markdownComplete: true }, assets: pending.assets, ...(resume ? { resume: true } : {}), ...(pending.levelOnly ? { levelOnly: true } : {}) });
 
 const assets = async (documentId: string) => sql<Array<Record<string, unknown>>>`
   select asset_id, org_id, project_id, status, reason, resumable, source, file_of, link_path, storage_key is not null as stored
@@ -145,6 +145,20 @@ describe("writing the ledger", () => {
     });
     expect((await level("doc-a"))!.manifest_sha256).toMatch(/^[0-9a-f]{64}$/);
     expect((await level("doc-a"))!.asset_bytes).toBeGreaterThan(0);
+  });
+
+  it("--scan-pages copy (Doppler #39): an uncopyable background scan is ledgered unlinked with reason scan-not-copyable", async () => {
+    const copyMode = ({ manifest }: ReturnType<typeof v2Manifest>) => {
+      manifest.scan_pages = "copy";
+      Object.assign(manifest.images.find((e) => e.id === "p2.2")!, { fate: "background", reason: "scan-not-copyable" });
+    };
+    await store.writeDocumentAssetLedger(await figureWrite(A, { mutate: copyMode }));
+    expect(await sql`select asset_id, fate, status, reason, file_of, link_path, storage_key from document_assets where document_id = 'doc-a' and asset_id = 'p2.2'`).toEqual([
+      { asset_id: "p2.2", fate: "background", status: "unlinked", reason: "scan-not-copyable", file_of: null, link_path: null, storage_key: null },
+    ]);
+    expect(await level("doc-a")).toMatchObject({ images_status: "complete", assets_total: 5, assets_unlinked: 1, assets_not_extracted: 1, assets_resumable: 0 });
+    // The same write again changes nothing.
+    expect(await store.writeDocumentAssetLedger(await figureWrite(A, { mutate: copyMode }))).toMatchObject({ upserted: 0, removed: 0 });
   });
 
   it("is idempotent: the same write twice changes no row (unchanged rows are skipped)", async () => {
@@ -220,22 +234,29 @@ describe("writing the ledger", () => {
     expect(await level("doc-a")).toMatchObject({ images_status: "complete", manifest_version: 1, images_exit_code: null, source_sha256: null, assets_total: 5, assets_extracted: 3, source_render: 3 });
   });
 
-  it("a failed step clears older rows and records the images as failed", async () => {
+  it("a failed step never deletes stored figures: rows kept, status honest; with nothing stored it is `failed`", async () => {
     await store.writeDocumentAssetLedger(await figureWrite(A));
+    const before = await assets("doc-a");
     await store.writeDocumentAssetLedger(complete(A, ledgerWriteForFailedFigures({ outcome: { exitCode: 6 } })));
-    expect(await assets("doc-a")).toEqual([]);
-    expect(await level("doc-a")).toMatchObject({ images_status: "failed", images_exit_code: 6, manifest_version: null, manifest_key: null, assets_total: 0 });
+    expect(await assets("doc-a")).toEqual(before);
+    expect(await level("doc-a")).toMatchObject({ images_status: "partial", images_exit_code: 6, assets_total: 5 });
+    await store.writeDocumentAssetLedger(complete(B, ledgerWriteForFailedFigures({ outcome: { exitCode: 6 } })));
+    expect(await level("doc-b")).toMatchObject({ images_status: "failed", images_exit_code: 6, assets_total: 0 });
   });
 
-  it("committed Markdown without a figure step leaves the resume queue (MEDIUM-3): resumable, then a re-run with figures off", async () => {
+  it("committed Markdown without a figure step leaves the resume queue (MEDIUM-3), keeping the rows but not as current", async () => {
     await store.writeDocumentAssetLedger(await figureWrite(A, { partial: true }));
     expect(await listResumableDocuments(sql, { orgId: "org-a" })).toHaveLength(1);
+    const before = await assets("doc-a");
     await store.writeDocumentAssetLedger(complete(A, ledgerWriteForNoFigures("disabled")));
     expect(await listResumableDocuments(sql, { orgId: "org-a" })).toEqual([]);
-    expect(await assets("doc-a")).toEqual([]);
-    expect(await level("doc-a")).toMatchObject({ images_status: "disabled", assets_total: 0, manifest_key: null });
+    expect(await assets("doc-a")).toEqual(before);
+    expect(await level("doc-a")).toMatchObject({ images_status: "disabled", assets_total: 0, asset_bytes: 0 });
     await store.writeDocumentAssetLedger(complete(A, ledgerWriteForNoFigures("none")));
     expect(await level("doc-a")).toMatchObject({ images_status: "none" });
+    // A later figure pass makes rows current again.
+    await store.writeDocumentAssetLedger(await figureWrite(A, { partial: true }));
+    expect(await listResumableDocuments(sql, { orgId: "org-a" })).toHaveLength(1);
   });
 });
 
@@ -355,17 +376,94 @@ describe("tenant isolation", () => {
       values ('doc-a', 'org-b', 'proj-b', 'p1.1', 1, 'picture', 'block', 'unlinked')`).rejects.toMatchObject({ code: "23503" });
     await expect(sql`insert into document_extraction_levels (document_id, org_id, project_id) values ('doc-a', 'org-b', 'proj-a')`)
       .rejects.toMatchObject({ code: "23503" });
-    const insert = (documentId: string, key: string) => sql`insert into document_assets (document_id, org_id, project_id, asset_id, page_number, kind, fate, status, source, format, bytes, sha256, width, height, file_of, storage_key)
-      values (${documentId}, 'org-a', 'proj-a', 'p1.1', 1, 'picture', 'block', 'extracted', 'render', 'webp', 10, ${"e".repeat(64)}, 1, 1, 'p1.1', ${key})`;
+    const insert = (documentId: string, key: string) => sql`insert into document_assets (document_id, org_id, project_id, asset_id, page_number, kind, fate, status, source, format, bytes, sha256, width, height, file_of, storage_key, storage_state)
+      values (${documentId}, 'org-a', 'proj-a', 'p1.1', 1, 'picture', 'block', 'extracted', 'render', 'webp', 10, ${"e".repeat(64)}, 1, 1, 'p1.1', ${key}, 'stored')`;
     await expect(insert("doc-a", "ub/run-b/doppler/doc-b/images/page-0001/image-001.webp")).rejects.toMatchObject({ code: "23514" });
     await expect(insert("doc-a", "ua/run-a/doppler/doc-a/images/page-0001/image-002.webp")).rejects.toMatchObject({ code: "23514" });
+    // An extracted row always has a storage state (pending or stored); `none` is refused (migration 0156).
+    await expect(sql`insert into document_assets (document_id, org_id, project_id, asset_id, page_number, kind, fate, status, source, format, bytes, sha256, width, height, file_of, storage_key, storage_state)
+      values ('doc-a', 'org-a', 'proj-a', 'p1.1', 1, 'picture', 'block', 'extracted', 'render', 'webp', 10, ${"e".repeat(64)}, 1, 1, 'p1.1', 'ua/run-a/doppler/doc-a/images/page-0001/image-001.webp', 'none')`)
+      .rejects.toMatchObject({ code: "23514" });
     // A document id with a LIKE wildcard (`_`) matches only itself: `docXw` is another document's folder.
     await expect(insert("doc_w", "ua/run-a/doppler/docXw/images/page-0001/image-001.webp")).rejects.toMatchObject({ code: "23514" });
     await insert("doc_w", "ua/run-a/doppler/doc_w/images/page-0001/image-001.webp");
     // A page scan may pass 8 MiB only as a copy or decode; a picture never.
-    await expect(sql`insert into document_assets (document_id, org_id, project_id, asset_id, page_number, kind, fate, status, source, format, bytes, sha256, width, height, file_of, storage_key)
-      values ('doc-a', 'org-a', 'proj-a', 'p1.1', 1, 'picture', 'block', 'extracted', 'render', 'webp', 9000000, ${"e".repeat(64)}, 1, 1, 'p1.1', 'ua/run-a/doppler/doc-a/images/page-0001/image-001.webp')`)
+    await expect(sql`insert into document_assets (document_id, org_id, project_id, asset_id, page_number, kind, fate, status, source, format, bytes, sha256, width, height, file_of, storage_key, storage_state)
+      values ('doc-a', 'org-a', 'proj-a', 'p1.1', 1, 'picture', 'block', 'extracted', 'render', 'webp', 9000000, ${"e".repeat(64)}, 1, 1, 'p1.1', 'ua/run-a/doppler/doc-a/images/page-0001/image-001.webp', 'stored')`)
       .rejects.toMatchObject({ code: "23514" });
+  });
+
+  it("the database takes scan-not-copyable only on an unlinked background picture or mask (migration 0150)", async () => {
+    const unlinked = (id: string, fate: string, reason: string | null) => sql`insert into document_assets (document_id, org_id, project_id, asset_id, page_number, kind, fate, status, reason)
+      values ('doc-a', 'org-a', 'proj-a', ${id}, 1, 'picture', ${fate}, 'unlinked', ${reason})`;
+    await unlinked("p1.1", "background", "scan-not-copyable");
+    await unlinked("p1.2", "furniture", null);
+    await expect(unlinked("p1.3", "furniture", "scan-not-copyable")).rejects.toMatchObject({ code: "23514" });
+    await expect(unlinked("p1.3", "page-scan", "scan-not-copyable")).rejects.toMatchObject({ code: "23514" });
+    await expect(unlinked("p1.3", "background", "min_side")).rejects.toMatchObject({ code: "23514" });
+    await expect(unlinked("p1.3", "background", "scan_not_copyable")).rejects.toMatchObject({ code: "23514" });
+    await expect(sql`insert into document_assets (document_id, org_id, project_id, asset_id, page_number, kind, fate, status, reason)
+      values ('doc-a', 'org-a', 'proj-a', 'p1.3', 1, 'picture', 'background', 'not-extracted', 'scan-not-copyable')`).rejects.toMatchObject({ code: "23514" });
+    await sql`insert into document_assets (document_id, org_id, project_id, asset_id, page_number, kind, fate, status, reason)
+      values ('doc-a', 'org-a', 'proj-a', 'p1.3', 1, 'picture', 'block', 'not-extracted', 'min_side')`;
+    await expect(sql`insert into document_assets (document_id, org_id, project_id, asset_id, page_number, kind, fate, status, reason)
+      values ('doc-a', 'org-a', 'proj-a', 'p1.4', 1, 'picture', 'block', 'not-extracted', null)`).rejects.toMatchObject({ code: "23514" });
+    await expect(sql`insert into document_assets (document_id, org_id, project_id, asset_id, page_number, kind, fate, status, reason, source, format, bytes, sha256, width, height, file_of, storage_key)
+      values ('doc-a', 'org-a', 'proj-a', 'p1.4', 1, 'picture', 'background', 'extracted', 'scan-not-copyable', 'render', 'webp', 10, ${"e".repeat(64)}, 1, 1, 'p1.4', 'ua/run-a/doppler/doc-a/images/page-0001/image-004.webp')`)
+      .rejects.toMatchObject({ code: "23514" });
+    // A background mask (a layered scan's stencil) is allowed; a vector never; nor a repeat or another image's file.
+    await sql`insert into document_assets (document_id, org_id, project_id, asset_id, page_number, kind, fate, status, reason)
+      values ('doc-a', 'org-a', 'proj-a', 'p1.5', 1, 'mask', 'background', 'unlinked', 'scan-not-copyable')`;
+    await expect(sql`insert into document_assets (document_id, org_id, project_id, asset_id, page_number, kind, fate, status, reason)
+      values ('doc-a', 'org-a', 'proj-a', 'p1.g1', 1, 'vector', 'background', 'unlinked', 'scan-not-copyable')`).rejects.toMatchObject({ code: "23514" });
+    await expect(sql`insert into document_assets (document_id, org_id, project_id, asset_id, page_number, kind, fate, status, reason, repeat_of)
+      values ('doc-a', 'org-a', 'proj-a', 'p1.6', 1, 'picture', 'background', 'unlinked', 'scan-not-copyable', 'p1.1')`).rejects.toMatchObject({ code: "23514" });
+    await expect(sql`insert into document_assets (document_id, org_id, project_id, asset_id, page_number, kind, fate, status, reason, file_of)
+      values ('doc-a', 'org-a', 'proj-a', 'p1.6', 1, 'picture', 'background', 'unlinked', 'scan-not-copyable', 'p1.1')`).rejects.toMatchObject({ code: "23514" });
+    // Every constraint 0150 added or replaced is validated, not only enforced on later writes.
+    expect(await sql`select conname, convalidated from pg_constraint where conrelid = 'document_assets'::regclass
+      and conname in ('document_assets_reason_check', 'document_assets_status_reason_check', 'document_assets_scan_not_copyable_fate_check',
+        'document_assets_scan_not_copyable_file_check') order by conname`).toEqual([
+      { conname: "document_assets_reason_check", convalidated: true },
+      { conname: "document_assets_scan_not_copyable_fate_check", convalidated: true },
+      { conname: "document_assets_scan_not_copyable_file_check", convalidated: true },
+      { conname: "document_assets_status_reason_check", convalidated: true },
+    ]);
+    // An existing row cannot be moved into a forbidden combination either.
+    await expect(sql`update document_assets set fate = 'furniture' where document_id = 'doc-a' and asset_id = 'p1.1'`).rejects.toMatchObject({ code: "23514" });
+    await expect(sql`update document_assets set status = 'not-extracted' where document_id = 'doc-a' and asset_id = 'p1.1'`).rejects.toMatchObject({ code: "23514" });
+  });
+
+  it("pages left to the host's page image are read for the asking organization's document only", async () => {
+    const insert = (documentId: string, orgId: string, projectId: string, id: string, page: number, fate: string, status: string, reason: string | null, link: string | null = null, runId = orgId === "org-a" ? "run-a" : "run-b") =>
+      sql`insert into document_assets (document_id, org_id, project_id, run_id, asset_id, page_number, kind, fate, status, reason, format, link_path)
+        values (${documentId}, ${orgId}, ${projectId}, ${runId}, ${id}, ${page}, 'picture', ${fate}, ${status}, ${reason}, ${link ? "jpg" : null}, ${link})`;
+    // The current levels of each document's run (rows of another run, or of a non-current level, never count).
+    await sql`insert into document_extraction_levels (document_id, org_id, project_id, run_id, markdown_complete, images_status)
+      values ('doc-a', 'org-a', 'proj-a', 'run-a', true, 'partial'), ('doc-b', 'org-b', 'proj-b', 'run-b', true, 'partial')
+      on conflict (document_id) do update set run_id = excluded.run_id, assets_current = true`;
+    await insert("doc-a", "org-a", "proj-a", "p1.1", 1, "page-scan", "not-extracted", "copy", "images/page-0001/image-001.jpg");
+    await insert("doc-a", "org-a", "proj-a", "p2.1", 2, "background", "unlinked", "scan-not-copyable");
+    await insert("doc-a", "org-a", "proj-a", "p2.2", 2, "background", "unlinked", "scan-not-copyable");
+    await insert("doc-a", "org-a", "proj-a", "p3.1", 3, "block", "not-extracted", "copy", "images/page-0003/image-001.jpg");
+    await insert("doc-a", "org-a", "proj-a", "p3.2", 3, "furniture", "unlinked", null);
+    await insert("doc-b", "org-b", "proj-b", "p3.3", 3, "background", "unlinked", "scan-not-copyable");
+    expect(await store.listHostPageImagePages({ orgId: "org-a", documentId: "doc-a" })).toEqual([1, 2]);
+    expect(await store.listHostPageImagePages({ orgId: "org-b", documentId: "doc-b" })).toEqual([3]);
+    // Another organization's id with this document's id selects nothing; a missing scope is refused.
+    expect(await store.listHostPageImagePages({ orgId: "org-b", documentId: "doc-a" })).toEqual([]);
+    expect(await store.listHostPageImagePages({ orgId: "org-a", documentId: "doc-b" })).toEqual([]);
+    await expect(store.listHostPageImagePages({ orgId: "", documentId: "doc-a" })).rejects.toBeInstanceOf(DocumentAssetLedgerError);
+    await expect(store.listHostPageImagePages({ orgId: "org-a", documentId: "doc-a' or 1=1 --" })).rejects.toBeInstanceOf(DocumentAssetLedgerError);
+    // An earlier run's rows (kept until a newer full write) never decide this run's page images (core #357 with #376).
+    await sql`delete from document_assets where document_id = 'doc-a'`;
+    await insert("doc-a", "org-a", "proj-a", "p2.1", 2, "background", "unlinked", "scan-not-copyable", null, "run-a-old");
+    expect(await store.listHostPageImagePages({ orgId: "org-a", documentId: "doc-a" })).toEqual([]);
+    // Nor do a non-current level's.
+    await insert("doc-a", "org-a", "proj-a", "p2.2", 2, "background", "unlinked", "scan-not-copyable");
+    expect(await store.listHostPageImagePages({ orgId: "org-a", documentId: "doc-a" })).toEqual([2]);
+    await sql`update document_extraction_levels set assets_current = false where document_id = 'doc-a'`;
+    expect(await store.listHostPageImagePages({ orgId: "org-a", documentId: "doc-a" })).toEqual([]);
   });
 
   it("the resume queue lists only the asking organization's documents", async () => {
@@ -388,6 +486,15 @@ describe("refused writes write nothing", () => {
       { bytes: 9 * 1024 * 1024 }, { source: "decode", format: "jpg" },
     ]) {
       await expect(store.writeDocumentAssetLedger(bad(patch))).rejects.toMatchObject({ rule: "invalid-assets" });
+    }
+    // scan-not-copyable only on an unlinked background image (rows: p1.1 extracted, p2.1 not-extracted, p2.2 unlinked).
+    const badAt = (id: string, patch: Record<string, unknown>) => ({ ...write, assets: write.assets.map((asset) => (asset.assetId === id ? { ...asset, ...patch } : asset)) }) as DocumentAssetLedgerWrite;
+    for (const [id, patch] of [
+      ["p1.1", { reason: "scan-not-copyable" }], ["p2.1", { reason: "scan-not-copyable" }], ["p2.2", { reason: "scan-not-copyable" }],
+      ["p2.2", { fate: "background", reason: "min_side" }], ["p2.2", { fate: "background", reason: "other" }],
+      ["p2.2", { fate: "background", reason: "scan-not-copyable", repeatOf: "p1.1" }], ["p2.2", { repeatOf: "p1.1" }],
+    ] as const) {
+      await expect(store.writeDocumentAssetLedger(badAt(id, patch))).rejects.toMatchObject({ rule: "invalid-assets" });
     }
     await expect(store.writeDocumentAssetLedger({ ...write, assets: [...write.assets, write.assets[0]!] })).rejects.toMatchObject({ rule: "invalid-assets" });
     await expect(store.writeDocumentAssetLedger({ ...write, assets: Array.from({ length: 131_073 }, (_, i) => ({ ...write.assets[3]!, assetId: `p2.${i + 10}` })) })).rejects.toMatchObject({ rule: "invalid-assets" });
@@ -440,7 +547,7 @@ describe("resume from stored state (HIGH-2)", () => {
     // What a resume worker does: download images/ (the manifest, then each extracted file by its derived key).
     const dir = path.join(await mkdtemp(path.join(work, "resume-")), "DIR");
     const rebuilt = await downloadDopplerImagesDir({
-      storage, document: { id: "doc-a", userId: "ua", runId: "run-a" }, runId: "run-a", manifestSha256: queued!.manifestSha256!, pageCount: 3, dir,
+      storage, document: { id: "doc-a", userId: "ua", runId: "run-a" }, runId: "run-a", manifestSha256: queued!.manifestSha256!, pageCount: 3, dir, manifestOnly: false,
     });
     expect(rebuilt).toMatchObject({ files: 3 });
     // Exactly Doppler's DIR: manifest.jsonl and page folders, nothing else; the manifest bytes are the stored ones.
@@ -543,6 +650,12 @@ describe("sharded documents: a record per shard, the level is the aggregate, res
 describe("LOW-5: shard ranges and the document's total resume cap", () => {
   const H = "a".repeat(64);
   async function insertShards(resumes: number[], resumableFrom = 0) {
+    // Shards are listed only under the current, resumable level of their run (MEDIUM-3).
+    await sql`insert into document_extraction_levels (document_id, org_id, project_id, run_id, markdown_complete, images_status, assets_total,
+        assets_not_extracted, assets_resumable, shards)
+      values ('doc-a', 'org-a', 'proj-a', 'run-a', true, 'resumable', 1, 1, 1, ${resumes.length})
+      on conflict (document_id) do update set run_id = 'run-a', images_status = 'resumable', assets_total = 1, assets_extracted = 0,
+        assets_not_extracted = 1, assets_unlinked = 0, assets_resumable = 1, assets_current = true, shards = excluded.shards`;
     for (const [i, n] of resumes.entries()) {
       const page = i + 1;
       const folder = `${String(page).padStart(4, "0")}-${String(page).padStart(4, "0")}`;

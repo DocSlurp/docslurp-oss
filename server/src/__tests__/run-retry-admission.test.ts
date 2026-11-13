@@ -13,7 +13,9 @@ const { retryRun } = await import("../services/runs.js");
 beforeEach(()=>{
   vi.clearAllMocks();
   mocks.run.pipeline.speedBoost = true;
-  mocks.admit.mockImplementation(async (_org,_project,callback)=>{const result=await callback({});await mocks.lease();return result;});
+  // The admission transaction: retryRun writes the resolved (managed) pipeline back through it.
+  const tx=Object.assign(vi.fn(async()=>[]),{json:(v:unknown)=>v});
+  mocks.admit.mockImplementation(async (_org,_project,callback)=>{const result=await callback(tx);await mocks.lease();return result;});
 });
 it("rolls back the no-op retry before lease acquisition or workflow start",async()=>{
   mocks.prepare.mockResolvedValue('not-retryable');

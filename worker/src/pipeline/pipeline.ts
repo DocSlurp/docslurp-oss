@@ -70,6 +70,12 @@ export interface CheckpointStore {
   recordPrivacyAudit?(entries: readonly PrivacyAuditEntry[]): Promise<void>;
   /** Document asset ledger and extraction level (db/document-asset-ledger.ts), in one org-scoped transaction. */
   writeDocumentAssetLedger?(write: import("../db/document-asset-ledger.js").DocumentAssetLedgerWrite): Promise<unknown>;
+  /** Figure uploads in progress (db/document-asset-ledger.ts): pending before each upload step, stored after it. */
+  markAssetsPending?(args: Parameters<typeof import("../db/document-asset-ledger.js").markAssetsPending>[1]): Promise<unknown>;
+  markAssetsStored?(args: Parameters<typeof import("../db/document-asset-ledger.js").markAssetsStored>[1]): Promise<unknown>;
+  replaceUnvouchedObject?(args: Parameters<typeof import("../db/document-asset-ledger.js").replaceUnvouchedObject>[1]): Promise<void>;
+  /** Pages whose image Doppler left to the host (db/document-asset-ledger.ts listHostPageImagePages); read-only, org-scoped. */
+  listHostPageImagePages?(scope: { orgId: string; documentId: string }): Promise<number[]>;
   /**
    * PII withholding for artifacts written after the document's PII stage (the first pass's figure step): whether the
    * document's recorded PII outcome withholds artifacts (it redacted or blocked), and adding URIs to its withheld list.
@@ -80,6 +86,8 @@ export interface CheckpointStore {
   upsertPageFacts?(rows: readonly PageFactUpsert[]): Promise<void>;
   /** Reserves Fast page-image renders from the run's shared budget (db/fast-page-image-budget.ts). */
   reserveFastPageImageRenders?(args: { runId: string; documentId: string; wanted: number; perRun: number }): Promise<number>;
+  /** Reserves one free-tier chart-export VM run against the org's hourly cap (db/chart-export-free-vm-cap.ts). */
+  reserveChartExportFreeVmRun?(args: { orgId: string; runId: string; documentId: string; perHour: number }): Promise<boolean>;
   /**
    * Stores the derived display title in documents.metadata unless one is already set
    * (re-runs do not churn it and a user rename wins). Returns whether it was written.

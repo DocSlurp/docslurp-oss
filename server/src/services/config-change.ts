@@ -25,11 +25,13 @@ import {
   type PipelineRunStage,
   type UpdateProjectInput,
   type ProjectRecord,
+  resolveManagedPipeline,
 } from "@docslurp/shared";
 
 import { sql } from "../db.js";
 import { loadVisualStatsForEstimate, VISUAL_CANDIDATES_DOCUMENT_LIMIT, type VisualEstimateStats } from "./visual-candidates.js";
-import { assertChartExportChangeAllowed } from "./chart-export-availability.js";
+import { assertChartExportChangeAllowed, groupByChartTier, sourceRunChartTiers, stampRunChartExport } from "./chart-export-availability.js";
+import { explicitProjectChartTier, projectChartExportTierCap, upgradeStoredChartExport, type ChartExportTier, type RunOrigin } from "@docslurp/shared";
 import { notifySearchEligibilityChanged } from "../search/eligibility-hint.js";
 import { nextVersionNumber } from "./version-number.js";
 import { validateModeSwitch } from "./project-indexing-mode.js";
@@ -44,7 +46,7 @@ import {
 } from "./jobs.js";
 import { enforceLiveBudgetCaps } from "./run-creation.js";
 import { assertBackfillReusableMany, isReprocessRejectedError } from "./runs.js";
-import { getProject, resolveUpdatedPipeline, updateProject, type ProjectUpdateOptions } from "./projects.js";
+import { getProject, loadManagedPipelineOverrides, resolveUpdatedPipeline, updateProject, type ProjectUpdateOptions } from "./projects.js";
 
 /**
  * Config-change jobs (spec 6.2). A project PATCH is classified by `analyzePipelineChange`; changes that
@@ -94,6 +96,8 @@ export type ProjectChangePlan = {
   input: UpdateProjectInput;
   nextPipeline: PipelineFeatures;
   impact: ConfigChangeImpact;
+  /** The caller's surface; re-index runs this plan queues resolve an unset chart export tier for it. */
+  origin: RunOrigin;
   /** What re-indexing means for this change; null when existing documents are unaffected. */
   reindex: ReindexMode | null;
   /** Whether this request queues the re-index job. */
@@ -258,7 +262,14 @@ export async function planProjectChange(args: {
   env?: EstimateEnv;
   /** Merge a narrow trusted proposal against the same project snapshot this plan versions. */
   pipelineOverrides?: PipelineFeatureOverrides;
+  /**
+   * The caller's surface (`runOriginOf`): an unset chart export tier resolves to its default for the impact, the estimate
+   * and the re-index runs this plan queues. Unset: machine.
+   */
+  origin?: RunOrigin;
 }): Promise<ProjectChangePlan | null> {
+  const origin: RunOrigin = args.origin ?? "machine";
+  const env = args.env ?? process.env;
   const input = updateProjectSchema.parse(args.input);
   // Read before the project: a change landing in between only makes apply re-plan, never apply stale data.
   const rowVersion = await projectRowVersion(sql, args.projectId);
@@ -268,7 +279,7 @@ export async function planProjectChange(args: {
   const nextPipeline = await resolveUpdatedPipeline(project.id, project, input, { indexingMode: args.indexingMode });
   // The deployment kill switch: chart export cannot be turned on while it is off (a stored "on" stays inert).
   assertChartExportChangeAllowed(project.pipeline, nextPipeline, args.env ?? process.env);
-  const base = analyzePipelineChange(project.pipeline, nextPipeline, { documents: 0, pages: 0 });
+  const base = analyzePipelineChange(project.pipeline, nextPipeline, { documents: 0, pages: 0, origin, env });
   const reindex: ReindexMode | null =
     base.kind === "reindex-required" ? "required" : base.kind === "reindex-recommended" ? "recommended" : null;
 
@@ -310,7 +321,7 @@ export async function planProjectChange(args: {
     const parts: CostEstimate[] = [];
     for (const group of groups.values()) {
       parts.push(await estimateWork({
-        features: { ...nextPipeline, speedBoost: input.speedBoost === true }, stages: group.stages, documents: group.documents, pages: group.pages, orgId: project.orgId, env: args.env,
+        features: stampRunChartExport({ ...nextPipeline, speedBoost: input.speedBoost === true }, origin, env), stages: group.stages, documents: group.documents, pages: group.pages, orgId: project.orgId, env: args.env,
         visualScope: { projectId: project.id, documentIds: group.documentIds },
       }));
     }
@@ -319,7 +330,7 @@ export async function planProjectChange(args: {
   return {
     project, input, nextPipeline, impact, reindex,
     willReindex: willReindex && targets.length > 0 && impact.stages.length > 0,
-    hashChanged, recordsIndexChange, beforeConfig, afterConfig, targets, estimate, rowVersion,
+    hashChanged, recordsIndexChange, beforeConfig, afterConfig, targets, estimate, rowVersion, origin,
   };
 }
 
@@ -355,29 +366,51 @@ export async function createReindexRuns(args: {
   blockedReason: "credits" | "budget" | "policy" | null;
   /** Partial groups re-run `stages` over documents seeded from their source run; `full` re-runs everything. */
   reusable: ReusableSplit;
+  /** The caller's origin, written to `project_runs.origin` (the pipeline's tier does not depend on it when inherited). */
+  origin?: RunOrigin;
 }): Promise<ReindexRunResult> {
   assertPipelineSpeedBoost(args.pipeline);
   const { tx, project } = args;
+  // This path inserts its runs directly, so it applies the same managed-model resolution as runCreation.create:
+  // model values in the pipeline are dropped and only the project's explicit admin overrides apply.
+  const pipeline = resolveManagedPipeline(args.pipeline, await loadManagedPipelineOverrides(project.id, tx as never), `re-index in project ${project.id}`).pipeline;
+  // A project with no chart tier: each document keeps the tier its source run stamped (as reprocess does), not the
+  // tier of the surface that triggered this reindex (council M5). An explicit project tier applies to every document.
+  // "Explicit" uses the same rule as run resolution: a stored free the deployment does not allow counts as unset (R2-L4).
+  const projectChart = upgradeStoredChartExport((project.pipeline as { chartExport?: unknown } | null)?.chartExport) as { tier?: ChartExportTier } | null;
+  const inheritTier = !explicitProjectChartTier(projectChart, process.env);
+  const allDocs = [...args.reusable.partial.flatMap((group) => group.docs), ...args.reusable.full];
+  const sourceTiers = inheritTier ? await sourceRunChartTiers(tx as never, { orgId: project.orgId, projectId: project.id }, allDocs.map((doc) => doc.id)) : new Map<string, ChartExportTier>();
+  const fallbackTier = (pipeline.chartExport as { tier?: ChartExportTier } | undefined)?.tier ?? "off";
+  // Inherited tiers never exceed what the project resolves to now (R2-M1).
+  const tierCap = projectChartExportTierCap(projectChart, process.env);
+  const withTier = (pipeline: PipelineFeatures, tier: ChartExportTier): PipelineFeatures => ({ ...pipeline, chartExport: { ...pipeline.chartExport, tier } });
   const runIds: string[] = [];
   const queuedRunIds: string[] = [];
   let blockedReason = args.blockedReason;
   const batches: Array<{ docs: ReindexTarget[]; pipeline: PipelineFeatures; partial: boolean }> = [];
-  const fullPipeline = { ...withoutStageSelection(args.pipeline) } as PipelineFeatures;
+  const fullPipeline = { ...withoutStageSelection(pipeline) } as PipelineFeatures;
   for (const group of args.reusable.partial) {
-    const pipeline = { ...withoutStageSelection(args.pipeline), stageSubset: [...group.stages] } as PipelineFeatures;
-    for (let i = 0; i < group.docs.length; i += MAX_DOCUMENTS_PER_REINDEX_RUN) {
-      batches.push({ docs: group.docs.slice(i, i + MAX_DOCUMENTS_PER_REINDEX_RUN), pipeline, partial: true });
+    const partialPipeline = { ...withoutStageSelection(pipeline), stageSubset: [...group.stages] } as PipelineFeatures;
+    for (const [tier, docs] of groupByChartTier(group.docs, sourceTiers, fallbackTier, tierCap)) {
+      for (let i = 0; i < docs.length; i += MAX_DOCUMENTS_PER_REINDEX_RUN) {
+        batches.push({ docs: docs.slice(i, i + MAX_DOCUMENTS_PER_REINDEX_RUN), pipeline: withTier(partialPipeline, tier), partial: true });
+      }
     }
   }
-  for (let i = 0; i < args.reusable.full.length; i += MAX_DOCUMENTS_PER_REINDEX_RUN) {
-    batches.push({ docs: args.reusable.full.slice(i, i + MAX_DOCUMENTS_PER_REINDEX_RUN), pipeline: fullPipeline, partial: false });
+  for (const [tier, docs] of groupByChartTier(args.reusable.full, sourceTiers, fallbackTier, tierCap)) {
+    for (let i = 0; i < docs.length; i += MAX_DOCUMENTS_PER_REINDEX_RUN) {
+      batches.push({ docs: docs.slice(i, i + MAX_DOCUMENTS_PER_REINDEX_RUN), pipeline: withTier(fullPipeline, tier), partial: false });
+    }
   }
   const jobId = randomUUID();
   let documents = 0;
   for (const [index, batch] of batches.entries()) {
     // Recheck under the org admission lock for every batch. Earlier batches in
     // this transaction already hold their own reservation/lease; a single
-    // check for the whole job would over-admit large projects.
+    // check for the whole job would over-admit large projects. This is the same spend decision `assertCanSpend` makes
+    // (loadSpendStatus), so a `models` batch passes the same admission as run creation; it blocks the run instead of
+    // throwing, because the settings change itself is saved in this transaction.
     let batchBlockedReason = args.blockedReason;
     if (!batchBlockedReason) {
       const block = await admissionBlock(tx, project.orgId, project.id, { speedBoost: batch.pipeline.speedBoost });
@@ -390,12 +423,12 @@ export async function createReindexRuns(args: {
     await tx`
       insert into project_runs (id, org_id, user_id, project_id, kind, status, blocked_reason, job_id, priority, stage,
         total_documents, processed_documents, pages_total, pages_processed, input_cost_cents, output_cost_cents, pipeline, stats,
-        creation_ready_at, creation_expires_at)
+        creation_ready_at, creation_expires_at, origin)
       -- The documents are inserted in this transaction, so the manifest is complete when it commits; without
       -- creation_ready_at neither runLifecycle.start nor run-start recovery would ever start the run.
       values (${runId}, ${project.orgId}, ${args.userId}, ${project.id}, 'reindex', ${status}, ${batchBlockedReason}, ${jobId}, 0, 'queued',
         ${batch.docs.length}, 0, ${pages}, 0, 0, 0, ${tx.json(JSON.parse(JSON.stringify(batch.pipeline)))}, ${tx.json(JSON.parse(JSON.stringify(stats)))},
-        now(), null)
+        now(), null, ${args.origin ?? "machine"})
     `;
     for (const doc of batch.docs) {
       const canonicalId = doc.canonical_id ?? `docslurp:document:${doc.id}`;
@@ -590,7 +623,7 @@ export async function applyProjectChange(args: {
     if (attempt + 1 >= (args.maxAttempts ?? MAX_REPLANS)) break;
     // A concurrent change was saved after planning: plan again from what is stored now, so neither change is lost.
     const replanned = await planProjectChange({
-      projectId: plan.project.id, userId: args.userId, input: plan.input, indexingMode: args.updateOptions?.indexingMode, env: args.env,
+      projectId: plan.project.id, userId: args.userId, input: plan.input, indexingMode: args.updateOptions?.indexingMode, env: args.env, origin: plan.origin,
     });
     if (!replanned) return null;
     plan = replanned;
@@ -724,8 +757,8 @@ async function applyPlannedChange(args: {
     }
     split.partial = [...planned.values()];
     const runs = await createReindexRuns({
-      tx, project, pipeline: { ...plan.nextPipeline, speedBoost: plan.input.speedBoost === true }, userId,
-      meta: jobMeta, blockedReason, reusable: split,
+      tx, project: { ...project, pipeline: plan.nextPipeline }, pipeline: stampRunChartExport({ ...plan.nextPipeline, speedBoost: plan.input.speedBoost === true }, plan.origin), userId,
+      meta: jobMeta, blockedReason, reusable: split, origin: plan.origin,
     });
     return { runs, cancelled };
   });
@@ -770,6 +803,7 @@ export async function estimateProjectChange(args: {
   userId: string;
   input: UpdateProjectInput;
   env?: EstimateEnv;
+  origin?: RunOrigin;
 }): Promise<ProjectEstimateResponse | null> {
   const plan = await planProjectChange(args);
   if (!plan) return null;
