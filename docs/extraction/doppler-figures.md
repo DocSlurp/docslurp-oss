@@ -500,10 +500,11 @@ one at most one or two. The caps scale with pages:
   still open, resets the document's no-progress count. One failing shard never blocks the others.
 - *No progress:* `DOCSLURP_FIGURE_RESUME_NO_PROGRESS` (3) launched resumes in a row, across units, whose gain is under
   the minimum (failed ones included) stop the document. With units taken fewest strikes first, that means every open
-  unit is stalling, not one. The gain is work closed (resumable images settled, gaps filled, shards
-  completed) or files added. It must be at least `DOCSLURP_FIGURE_RESUME_MIN_PROGRESS_PERCENT` (5) of one unit's share of
-  the work left, and at least one item. Added files count only with `DOCSLURP_FIGURE_RESUME_MIN_PROGRESS_BYTES` (4,096)
-  in all, so a source that yields one tiny figure a pass still stops. Enough progress resets the count; a resume that
+  unit is stalling, not one. The gain is measured against what one pass can deliver (64 MiB / 2,048 files), never against
+  the backlog, so a big document storing full passes always progresses. A pass progresses with
+  `DOCSLURP_FIGURE_RESUME_MIN_PROGRESS_PERCENT` (5) of a pass's bytes (3.2 MiB), or that share of its files (103, carrying
+  `DOCSLURP_FIGURE_RESUME_MIN_PROGRESS_BYTES`, 4,096, in all), or that share of the work items one pass could close (at
+  least one). A source that yields one tiny figure a pass on a big backlog still stops. Enough progress resets the count; a resume that
   never launched a VM does not count.
 - *Per organization:* one resume at a time, and the daily VM budget as before. Each launch's timeout is capped at what is
   left of the day, reserved at launch and settled to the real time on return. With under a minute left, the unit waits

@@ -17,10 +17,10 @@
  *     each launch's timeout is capped by what is left;
  *   - per unit (a shard, a gap or the unsharded document): the passes its own share of the allowance needs (the whole
  *     document's for the unsharded one) plus two, at least 3, at most FIGURE_RESUME_HARD.unitResumes;
- *   - no progress: noProgressLimit launched resumes in a row whose gain is under the minimum stop the document. A gain is
- *     work closed (resumable images settled, gaps filled, shards completed) or files added; it counts only when it is at
- *     least minProgressPercent of one unit's share of the work left (and one item: a resume runs one unit, so a document with
- *     many shards is never measured against its whole backlog), and added files count only with minProgressBytes in all.
+ *   - no progress: noProgressLimit launched resumes in a row whose gain is under the minimum stop the document. The
+ *     minimum is measured against what one pass can deliver (FIGURE_RESUME_PASS), never against the backlog, since one
+ *     VM returns at most 64 MiB / 2,048 files however much is left: minProgressPercent of a pass's bytes (3.2 MiB at 5%)
+ *     or of its files (103, with minProgressBytes in all), or that share of the work items it could close (at least one).
  *
  * A stopped document is blocked with a reason code (`attempts`, `vm-budget`, `no-progress`), logged and counted
  * (`resume.capped`). A reprocess (a new, customer-paid run) clears every block. A single-document request clears a cap
@@ -201,22 +201,30 @@ export function figureResumeVmBudgetMs(args: { pageCount: number; shards?: numbe
 }
 
 /**
- * Whether one launched resume made progress worth another (L1). `before`/`after` are the document's open work (resumable
- * images, gaps, shards not complete); `units` its resume units (a resume runs one); `added` and `addedBytes` what the
- * resume stored. The minimum gain is minProgressPercent of one unit's share of the work left, and at least one item.
- * Closed work counts as is; added files count only when they carry at least minProgressBytes in all (a source that yields
- * one tiny figure a pass does not reset the stop).
+ * Whether one launched resume made progress worth another (L1, r2 H1). `before`/`after` are the document's open work
+ * (resumable images, gaps, shards not complete); `units` its resume units (a resume runs one); `added` and `addedBytes`
+ * what the resume stored. The gain is measured against one pass's capacity, never the backlog (a 3,000-page document
+ * storing a full 64 MiB pass is progress however much is left). Any of:
+ *   - bytes: addedBytes >= minProgressPercent of a pass's bytes (3.2 MiB at 5%);
+ *   - files: added >= minProgressPercent of a pass's files (103), carrying minProgressBytes in all;
+ *   - closed work: at least minProgressPercent of what one pass could close (one unit's share of the work, at most a
+ *     pass's files), and at least one item.
+ * A source that yields one tiny figure a pass makes none of them on a big backlog (4 KiB is under 3.2 MiB and 103 files,
+ * and 1 closed item under the share), so the stop still fires; a small document closing its last item still progresses.
  */
 export function figureResumeProgressed(
   args: { before: number; after: number; added: number; addedBytes: number; units?: number },
   config: FigureResumeBudgetConfig = figureResumeBudgetConfig(),
 ): boolean {
+  const pct = config.minProgressPercent / 100;
   const before = Math.max(0, args.before);
-  const share = before / Math.max(1, Math.trunc(args.units ?? 1));
-  const minGain = Math.max(1, Math.ceil((share * config.minProgressPercent) / 100));
+  const addedBytes = Math.max(0, args.addedBytes);
+  const added = Math.max(0, args.added);
+  if (addedBytes > 0 && addedBytes >= Math.ceil(FIGURE_RESUME_PASS.bytes * pct)) return true;
+  if (added > 0 && addedBytes >= config.minProgressBytes && added >= Math.max(1, Math.ceil(FIGURE_RESUME_PASS.files * pct))) return true;
+  const passItems = Math.min(before / Math.max(1, Math.trunc(args.units ?? 1)), FIGURE_RESUME_PASS.files);
   const closed = Math.max(0, before - Math.max(0, args.after));
-  const added = args.addedBytes >= config.minProgressBytes ? Math.max(0, args.added) : 0;
-  return Math.max(closed, added) >= minGain;
+  return closed > 0 && closed >= Math.max(1, Math.ceil(passItems * pct));
 }
 
 /**

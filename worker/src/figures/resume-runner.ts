@@ -300,7 +300,9 @@ async function release(
   const stalls = !progress.launched ? level.resume_stalls : progress.progressed || closedUnit ? 0 : level.resume_stalls + 1;
   if (closedUnit) {
     console.log(`[doppler-figures] resume unit-closed doc=${row.document_id} unit=${unitKey} failures=${unitFailures[unitKey!] ?? 0} stalls=${unitStalls[unitKey!] ?? 0} others=${progress.otherUnits}`);
-    recordFigureTelemetry("resume.unit_closed", 1, { reason: (unitFailures[unitKey!] ?? 0) >= FIGURE_RESUME_LIMITS.maxAttempts ? "failures" : "no-progress" });
+    // The limit that actually closed it, with grants (r2 L2).
+    const byFailures = (unitFailures[unitKey!] ?? 0) >= figureResumeUnitStrikeLimit(FIGURE_RESUME_LIMITS.maxAttempts, level.resume_grants);
+    recordFigureTelemetry("resume.unit_closed", 1, { reason: byFailures ? "failures" : "no-progress" });
   }
   const failures = level.resume_failures + (retry ? 1 : 0);
   const resumable = level.images_status === "resumable";

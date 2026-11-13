@@ -112,19 +112,52 @@ describe("figure resume limits", () => {
     expect(FIGURE_RESUME_BUDGET_ENV.docVmSecondsCeiling.max * 1000).toBeLessThanOrEqual(FIGURE_RESUME_HARD.documentVmMs);
   });
 
-  it("L1: progress needs a minimum gain: 5% of one unit's share of the work left (at least one item), and real bytes for files", () => {
-    // Closing work counts as is.
-    expect(figureResumeProgressed({ before: 1, after: 0, added: 0, addedBytes: 0 }, defaults)).toBe(true);
-    expect(figureResumeProgressed({ before: 1_000, after: 950, added: 0, addedBytes: 0 }, defaults)).toBe(true);
-    expect(figureResumeProgressed({ before: 1_000, after: 951, added: 0, addedBytes: 0 }, defaults)).toBe(false);
-    // One tiny figure a pass is no progress; one real one on a small document is.
+  it("L1 / r2 H1: progress is measured against one pass's capacity, never the backlog", () => {
+    const MiB = 1024 * 1024;
+    // r2 H1: a 3,000-page unsharded document storing a full pass of 300 KB figures is progress, whatever is left.
+    expect(figureResumeProgressed({ before: 12_800, after: 12_582, added: 218, addedBytes: 64 * MiB }, defaults)).toBe(true);
+    expect(figureResumeProgressed({ before: 38_400, after: 37_745, added: 655, addedBytes: 64 * MiB }, defaults)).toBe(true);
+    // Bytes alone (3.2 MiB at 5%), files alone (103 with real bytes), or closed work alone (5% of what one pass can close).
+    expect(figureResumeProgressed({ before: 12_800, after: 12_800, added: 10, addedBytes: Math.ceil(3.2 * MiB) }, defaults)).toBe(true);
+    expect(figureResumeProgressed({ before: 12_800, after: 12_800, added: 103, addedBytes: 103 * 5_000 }, defaults)).toBe(true);
+    expect(figureResumeProgressed({ before: 12_800, after: 12_800, added: 102, addedBytes: 102 * 5_000 }, defaults)).toBe(false);
+    expect(figureResumeProgressed({ before: 12_800, after: 12_698, added: 0, addedBytes: 0 }, defaults)).toBe(false);
+    expect(figureResumeProgressed({ before: 12_800, after: 12_697, added: 0, addedBytes: 0 }, defaults)).toBe(true);
+    // The one-tiny-figure attack: 1 file of 4 KiB on a big backlog is none of them.
+    expect(figureResumeProgressed({ before: 12_800, after: 12_799, added: 1, addedBytes: 4_096 }, defaults)).toBe(false);
+    expect(figureResumeProgressed({ before: 30_000, after: 29_999, added: 1, addedBytes: 500_000, units: 128 }, defaults)).toBe(false);
+    // 103 tiny files under minProgressBytes in all are not progress either.
+    expect(figureResumeProgressed({ before: 12_800, after: 12_800, added: 103, addedBytes: 103 * 30 }, defaults)).toBe(false);
+    // A 128-shard document: one shard's honest resume is progress.
+    expect(figureResumeProgressed({ before: 30_000, after: 29_766, added: 234, addedBytes: 20 * MiB, units: 128 }, defaults)).toBe(true);
+    // A small document closing its last item progresses; nothing happening never does.
+    expect(figureResumeProgressed({ before: 1, after: 0, added: 1, addedBytes: 40 }, defaults)).toBe(true);
     expect(figureResumeProgressed({ before: 5, after: 5, added: 1, addedBytes: 40 }, defaults)).toBe(false);
-    expect(figureResumeProgressed({ before: 5, after: 5, added: 1, addedBytes: 50_000 }, defaults)).toBe(true);
-    // A 128-shard document: one shard's honest resume (under 1% of the whole backlog) is progress; one file a pass is not.
-    expect(figureResumeProgressed({ before: 30_000, after: 29_766, added: 234, addedBytes: 20_000_000, units: 128 }, defaults)).toBe(true);
-    expect(figureResumeProgressed({ before: 30_000, after: 30_000, added: 1, addedBytes: 500_000, units: 128 }, defaults)).toBe(false);
-    expect(figureResumeProgressed({ before: 30_000, after: 30_000, added: 1, addedBytes: 500_000, units: 1 }, defaults)).toBe(false);
     expect(figureResumeProgressed({ before: 0, after: 0, added: 0, addedBytes: 0 }, defaults)).toBe(false);
+  });
+
+  it("r2 H1: a 3,000-page unsharded document making steady 218-figure passes resumes to completion inside every cap", () => {
+    const MiB = 1024 * 1024;
+    const pageCount = 3_000;
+    const launchCap = figureResumeLaunchCap({ pageCount }, defaults);
+    const unitCap = figureResumeUnitCap({ unitPages: pageCount, documentPages: pageCount, whole: true });
+    const vmBudget = figureResumeVmBudgetMs({ pageCount, shards: 0 }, defaults);
+    const passMs = 3_000 + pageCount * 50;
+    // The allowance after the first pass, in 300 KB figures: (3,814 - 64) MiB.
+    let work = Math.floor((3_750 * MiB) / 307_200);
+    let launches = 0, stalls = 0, vmMs = 0;
+    while (work > 0) {
+      expect(launches).toBeLessThan(Math.min(launchCap, unitCap));
+      expect(vmBudget - vmMs).toBeGreaterThanOrEqual(60_000);
+      const added = Math.min(work, 218);
+      const next = work - added;
+      launches += 1; vmMs += passMs;
+      stalls = figureResumeProgressed({ before: work, after: next, added, addedBytes: added * 307_200 }, defaults) ? 0 : stalls + 1;
+      expect(stalls).toBeLessThan(defaults.noProgressLimit);
+      work = next;
+    }
+    expect(launches).toBe(59);
+    expect(unitCap).toBe(61);
   });
 
   it("only the three budget stops are grantable", () => {

@@ -564,6 +564,41 @@ describe("page-scaled resume budget (figure-resume-limits.ts)", () => {
     expect(capped("no-progress") + capped("attempts")).toBe(1);
   });
 
+  it("r2 M2: a unit closing at its own failure limit while another is open resets the document's no-progress count", async () => {
+    const storage = memoryStorage();
+    await gapPass(storage, [{ first: 2, last: 2 }, { first: 3, last: 3 }]);
+    const jobs: FigureResumeJob[] = [];
+    const provider: FigureResumeProvider = { timeoutMs: () => 60_000, resume: async (job) => { jobs.push(job); throw new Error("every range fails"); } };
+    // A no-progress limit above the unit failure limit (3): the units close one at a time before the document stops.
+    const env = { ...ON, DOCSLURP_FIGURE_RESUME_LAUNCH_FLOOR: "20", DOCSLURP_FIGURE_RESUME_NO_PROGRESS: "5" };
+    for (let pass = 0; pass < 10; pass += 1) {
+      await due();
+      await runFigureResumes({ sql, storage, provider, workerId: "w1", env });
+    }
+    // 2-2's third failure closes it with 3-3 still open: the document's count resets (5 in a row would have stopped it
+    // `no-progress` before 3-3's third attempt). 3-3 then closes too, and nothing runnable is left.
+    expect(jobs.map((job) => job.pages![0])).toEqual([2, 3, 2, 3, 2, 3]);
+    expect(await level()).toMatchObject({ resume_blocked: "attempts", resume_vm_launches: 6, resume_stalls: 1, queued: false });
+    expect(telemetry.calls.filter((call) => call.name === "resume.unit_closed").map((call) => call.labels)).toEqual([{ reason: "failures" }]);
+    expect(capped("no-progress")).toBe(0);
+  });
+
+  it("r2 M2: a unit at its own no-progress limit is closed, even with no failures, and the other units still run", async () => {
+    const storage = memoryStorage();
+    await gapPass(storage, [{ first: 2, last: 2 }, { first: 3, last: 3 }]);
+    await sql`update document_extraction_levels set resume_unit_stalls = '{"2-2": 3}'::jsonb where document_id = 'doc-a'`;
+    const { provider, jobs } = gapProvider();
+    for (let pass = 0; pass < 4; pass += 1) {
+      await due();
+      await runFigureResumes({ sql, storage, provider, workerId: "w1", env: ON });
+    }
+    expect(jobs.map((job) => job.pages![0])).toEqual([3]);
+    // A grant raises the unit's limit (its count is kept), so it runs again.
+    await sql`update document_extraction_levels set resume_blocked = null, resume_grants = 1, resume_after = now() - interval '1 second' where document_id = 'doc-a'`;
+    await runFigureResumes({ sql, storage, provider, workerId: "w1", env: ON });
+    expect(jobs.map((job) => job.pages![0])).toEqual([3, 2]);
+  });
+
   it("H1: when every unit fails, the document still stops `no-progress` after N launches in a row, across units", async () => {
     const storage = memoryStorage();
     await gapPass(storage, [{ first: 2, last: 2 }, { first: 3, last: 3 }]);
