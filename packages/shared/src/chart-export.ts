@@ -509,11 +509,14 @@ export type ExportedVisual = z.infer<typeof exportedVisualSchema>;
 /**
  * Why visuals were deferred, each a per-input cap of the free extractor. `count` is of SVGs at consecutive ordinals
  * from `svgIndex` for svg-document-limit, html-svg-limit and guest-deadline; for visual-limit it counts the visuals and
- * SVGs lost to the output cap from `svgIndex` on; for package-part-limit, package parts never opened;
- * for figure-charts-refused, one Doppler figure whose in-VM chart pass returned no result (its shard's or its document's
- * chart answer was refused), `svgIndex` 0 and `count` 1.
+ * SVGs lost to the output cap from `svgIndex` on; for package-part-limit and guest-deadline-part, package parts (chart
+ * XML, media SVGs, EPUB parts) never opened; for figure-batch-limit and figure-unavailable, one Doppler figure
+ * (`figureId`) past the per-document batch cap or without a readable file; for figure-charts-refused, one Doppler figure
+ * whose in-VM chart pass (Doppler protocol 15) returned no result: its shard's or its document's chart answer was refused.
  */
-export const DEFERRED_VISUAL_REASONS = ["svg-document-limit", "html-svg-limit", "guest-deadline", "visual-limit", "package-part-limit", "figure-charts-refused"] as const;
+export const DEFERRED_VISUAL_REASONS = ["svg-document-limit", "html-svg-limit", "guest-deadline", "visual-limit", "package-part-limit", "guest-deadline-part", "figure-batch-limit", "figure-unavailable", "figure-charts-refused"] as const;
+/** The reasons the parser-VM guest itself may report (the figure reasons are the host's own). */
+export const GUEST_DEFERRAL_REASONS = ["svg-document-limit", "html-svg-limit", "guest-deadline", "visual-limit", "package-part-limit", "guest-deadline-part"] as const;
 export const deferredVisualSchema = z.strictObject({
   input: z.enum(["source", "doppler-figure"]),
   svgIndex: z.number().int().nonnegative().max(1_000_000),
@@ -534,6 +537,8 @@ export const visualCandidateStatsSchema = z.object({
   bySource: z.partialRecord(visualSourceSchema, z.number().int().nonnegative()).default({}),
   /** Visuals deferred to a later pass (present only when some were): never dropped, picked up by the deferred pass. */
   deferred: z.array(deferredVisualSchema).max(1000).optional(),
+  /** Candidates and entries past a per-input list cap (or the guest deadline), counted but not listed. */
+  overflow: z.number().int().positive().optional(),
 });
 export type VisualCandidateStats = z.infer<typeof visualCandidateStatsSchema>;
 

@@ -128,6 +128,8 @@ export interface DeterministicVisualResult {
   presence?: { officeChartParts?: number; svgFigures?: number; embeddedSpecs?: number };
   /** Visuals deferred to a later pass (recorded in the candidate stats, never dropped). */
   deferred?: DeferredVisual[];
+  /** Candidates and refusals past a per-input list cap or the guest deadline, not listed individually: their count. */
+  overflow?: number;
 }
 
 /** S2's entry (`extractDeterministicVisuals`) satisfies this; the default does nothing. */

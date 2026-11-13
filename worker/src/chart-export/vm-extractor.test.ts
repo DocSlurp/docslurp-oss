@@ -5,7 +5,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { barPlot, chartXml, genericBar, pptx } from "./extractors/__tests__/fixtures.js";
-import { CHART_EXPORT_VM_USAGE_METRIC, createVmDeterministicVisualExtractor, deterministicSourceKind, presenceOf, sourceRunReason } from "./vm-extractor.js";
+import { CHART_EXPORT_VM_USAGE_METRIC, createVmDeterministicVisualExtractor, deterministicSourceKind, MAX_SVG_FIGURES_PER_DOCUMENT, presenceOf, sourceRunReason } from "./vm-extractor.js";
 import type { UsageEvent } from "../models.js";
 import { billableCents } from "../pipeline/usage-ledger.js";
 
@@ -173,7 +173,27 @@ describe("VM deterministic extractor adapter", () => {
     // The finished figure is kept; the deferred one is recorded for the later pass.
     expect(result.partials).toHaveLength(1);
     expect(result.deferred).toEqual([{ input: "doppler-figure", svgIndex: 400, count: 2, reason: "svg-document-limit", pageNumber: 3, figureId: "p3.g0" }]);
-    expect(logs.join("\n")).toContain("visuals deferred document=doc-d svgs=2");
+    expect(logs.join("\n")).toContain("visuals deferred document=doc-d svg-document-limit=2");
+  });
+
+  it("records Doppler figures past the batch cap and figures without a readable file as deferred (council r7 L1)", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    const n = MAX_SVG_FIGURES_PER_DOCUMENT + 2;
+    const ids = Array.from({ length: n }, (_, k) => `p1.g${k}`);
+    const store = storage(Object.fromEntries(ids.map((id) => [`fig/${id}.svg`, genericBar(["a"], [1], 2)])), { "run/index.json": figureIndex(ids.map((id) => ({ id, page: 1, format: "svg" as const }))) });
+    const empty = { schemaVersion: "chart-export-deterministic@v1", visuals: [], refusals: [] };
+    const run = vi.fn(async (plan: { args: string[] }) => { const count = plan.args.length - 4; await writeFile(plan.args[4]!, JSON.stringify({ schemaVersion: "chart-export-deterministic-batch@v1", results: Array(count).fill(empty) })); return { stdout: "", stderr: "" }; });
+    const extract = createVmDeterministicVisualExtractor({ runner: { run } as never, storage: store, log: () => {} });
+    // The first figure has no readable file; the last two are past the per-document batch cap.
+    const result = await extract({
+      document: { id: "doc-f", mimeType: "application/pdf", pageCount: 1, sourceKey: "src/doc.pdf" },
+      candidates: [],
+      artifacts: { dopplerFiguresIndexUri: "s3://b/run/index.json", mediaMapUri: null, artifactUri: (slot) => (slot === "doppler-figure:p1.g0" ? null : `s3://b/fig/${slot.slice("doppler-figure:".length)}.svg`) },
+    });
+    expect(result.deferred).toEqual([
+      { input: "doppler-figure", svgIndex: 0, count: 1, reason: "figure-unavailable", pageNumber: 1, figureId: "p1.g0" },
+      ...ids.slice(MAX_SVG_FIGURES_PER_DOCUMENT).map((figureId) => ({ input: "doppler-figure", svgIndex: 0, count: 1, reason: "figure-batch-limit", pageNumber: 1, figureId })),
+    ]);
   });
 
   it("reads a figure only from its own doppler-figure slot, never another artifact slot (adversarial L4)", async () => {

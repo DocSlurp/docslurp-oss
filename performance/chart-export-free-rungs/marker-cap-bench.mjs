@@ -22,12 +22,18 @@
 //          rgbStyleEpub8 (a 4,000-space rgb( style re-walked by 999 <use>), xsplit / xsplitEpub9 (a 640 KiB x attribute
 //          re-walked by 999 <use>), text999, points999, width999, deep1 / deepEpub300 (250 nested long-class groups
 //          over 2,700 rects; the EPUB's have no axis, so all 300 are analysed).
+// Council round 7 (raw-text scans): cmtScript64k / cmtScript640k (an SVG whose comment holds unclosed `<script `
+//          starts), epubCmt3 (bar chart, 3 such 640 KiB SVGs, bar chart), htmlSvgOpen1m (`<svg ` × 200k), htmlScript1m
+//          (`<script>` × 125k), html2m (a JSON script then `<svg ` × 400k), epubScript200 (200 parts of ~300 KB unclosed
+//          `<script>`), emptyCmt / emptyCmtEpub90 (a group of ~93k empty comments re-walked by 999 <use>).
 import { readFileSync } from "node:fs";
 import { crc32 } from "node:zlib";
 import { pathToFileURL } from "node:url";
 
 const [bundle, mode = "doc100"] = process.argv.slice(2);
-const { extractDeterministicVisuals } = await import(pathToFileURL(bundle).href);
+const { extractDeterministicVisuals, setGuestDeadline } = await import(pathToFileURL(bundle).href);
+// As the guest does for a single-input run: stop and return what it has 45 s in (the host kills at 60 s).
+setGuestDeadline(Date.now() + 45_000);
 const ticks = [[0, 90], [10, 50], [20, 10]].map(([v, y]) => `<text x="2" y="${y}">${v}</text>`).join("") + '<text x="10" y="98">A</text><text x="50" y="98">B</text><text x="90" y="98">C</text>';
 function packedSvg() {
   const pts = ["10,90"];
@@ -94,6 +100,11 @@ const r6 = {
   width: () => SVG(fit('<defs><rect id="r" width="', " ", `x"/></defs>${'<use href="#r"/>'.repeat(999)}`)),
   deep: (axis) => { let d = ""; for (let k = 0; k < 250; k++) d += `<g class="${"c".repeat(190)}${k}">`; return SVG((axis ? [0, 25, 50, 75, 100].map((v, k) => `<text x="2" y="${400 - k * 80}">${v}</text>`).join("") : "") + d + Array.from({ length: 2700 }, (_, k) => `<rect x="${40 + (k % 100) * 4}" y="${100 + Math.floor(k / 100)}" width="3" height="${1 + k % 5}" fill="#0a0"/>`).join("") + "</g>".repeat(250)); },
 };
+const r7 = {
+  cmtScript: (n) => SVG(`<!--${"<script ".repeat(n)}--><rect width="1" height="1"/>`),
+  emptyCmt: () => SVG(fit('<defs><g id="t">', "<!---->", `</g></defs>${'<use href="#t"/>'.repeat(999)}`)),
+  barSvg: () => SVG('<rect x="65" y="170" width="70" height="50" fill="#e45756"/><rect x="165" y="120" width="70" height="100" fill="#e45756"/><line x1="50" y1="220" x2="350" y2="220" stroke="black"/>' + [0, 1, 2, 3, 4].map((v) => `<text x="44" y="${220 - v * 50}" text-anchor="end" font-size="10">${v}</text>`).join("") + '<text x="100" y="234" font-size="10">A</text><text x="200" y="234" font-size="10">B</text>', 'width="400" height="260"'),
+};
 const bar = (k) => `<svg xmlns="http://www.w3.org/2000/svg" width="400" height="260"><rect x="65" y="${170 - k % 50}" width="70" height="${50 + k % 50}" fill="#e45756"/><rect x="165" y="120" width="70" height="100" fill="#e45756"/><line x1="50" y1="220" x2="350" y2="220" stroke="black"/>${[0, 1, 2, 3, 4].map((v) => `<text x="44" y="${220 - v * 50}" text-anchor="end" font-size="10">${v}</text>`).join("")}<text x="100" y="234" text-anchor="middle" font-size="10">A</text><text x="200" y="234" text-anchor="middle" font-size="10">B</text></svg>`;
 
 const inputs = {
@@ -122,6 +133,15 @@ const inputs = {
   width999: () => [{ kind: "svg", text: r6.width() }],
   deep1: () => [{ kind: "svg", text: r6.deep(true) }],
   deepEpub300: () => [epub(Object.fromEntries(Array.from({ length: 150 }, (_, i) => [`OEBPS/d${String(i).padStart(3, "0")}.xhtml`, `<html><body>${r6.deep(false)}${r6.deep(false)}</body></html>`])))],
+  cmtScript64k: () => [{ kind: "svg", text: r7.cmtScript(8_000) }],
+  cmtScript640k: () => [{ kind: "svg", text: r7.cmtScript(80_000) }],
+  epubCmt3: () => [epub({ "OEBPS/a.svg": r7.barSvg(), "OEBPS/b.svg": r7.cmtScript(80_000), "OEBPS/c.svg": r7.cmtScript(80_000), "OEBPS/d.svg": r7.cmtScript(80_000), "OEBPS/e.svg": r7.barSvg() })],
+  htmlSvgOpen1m: () => [{ kind: "html", text: "<svg ".repeat(200_000) }],
+  htmlScript1m: () => [{ kind: "html", text: "<script>".repeat(125_000) }],
+  html2m: () => [{ kind: "html", text: `<script type="application/json">{}</script>${"<svg ".repeat(400_000)}` }],
+  epubScript200: () => [epub(Object.fromEntries(Array.from({ length: 200 }, (_, i) => [`OEBPS/c${String(i).padStart(3, "0")}.xhtml`, `<html><body>${"<script>".repeat(37_000)}</body></html>`])))],
+  emptyCmt: () => [{ kind: "svg", text: r7.emptyCmt() }],
+  emptyCmtEpub90: () => [epub(Object.fromEntries([["OEBPS/a000.svg", r7.barSvg()], ...Array.from({ length: 90 }, (_, i) => [`OEBPS/b${String(i).padStart(3, "0")}.svg`, r7.emptyCmt()]), ["OEBPS/z999.svg", r7.barSvg()]]))],
   legit: () => [{ kind: "html", text: `<html><body>${Array.from({ length: 100 }, (_, k) => bar(k)).join("")}</body></html>` }],
 }[mode]();
 const bytes = inputs.reduce((n, i) => n + (i.text?.length ?? i.bytes.length), 0);

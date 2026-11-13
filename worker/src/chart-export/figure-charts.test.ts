@@ -151,6 +151,27 @@ describe("the extractor reads figure charts in inline mode, with no VM run", () 
     // The guest's own ms never becomes a usage event (the plugin meters the VM).
     expect(usage).toHaveLength(0);
   });
+  it("carries #364's overflow count and every guest reason through the figure answer (#364 a5f42e47a)", async () => {
+    vi.stubEnv("DOCSLURP_CHART_EXPORT_INLINE", "1");
+    const partial = { ...empty, deferred: [{ svgIndex: 0, count: 2, reason: "guest-deadline-part" }, { svgIndex: 2, count: 1, reason: "visual-limit" }], overflow: 7 };
+    const stored = validateFigureCharts(answer(["p2.g1", "p3.g1"], [chart, partial], { refusedShards: [{ first: 4, last: 4, reason: "node-timeout" }] }), INDEX)!;
+    expect(stored).toMatchObject({ status: "ok" });
+    const extract = createVmDeterministicVisualExtractor({
+      runner: { run: vi.fn(async () => { throw new Error("no VM"); }) },
+      storage: { bucket: "b", getJson: vi.fn(async (key: string) => (key.endsWith(".charts.work.json") ? JSON.parse(JSON.stringify(stored)) : { figures: INDEX })), downloadToTempFile: vi.fn() },
+      log: () => undefined,
+    } as never);
+    const out = await extract({
+      document: { id: "d", mimeType: "application/pdf", pageCount: 3, sourceKey: "s" }, candidates: [], signals: {},
+      artifacts: { dopplerFiguresIndexUri: "s3://b/f/index.json", mediaMapUri: null, artifactUri: (slot: string) => (slot === FIGURE_CHARTS_SLOT ? "s3://b/f/d.charts.work.json" : null) },
+      recordUsage: () => undefined,
+    } as never);
+    expect(out.overflow).toBe(7);
+    expect(out.deferred?.map((d: { reason: string }) => d.reason)).toEqual(["guest-deadline-part", "visual-limit"]);
+    // A guest cannot claim a host-only figure reason.
+    const forged = { ...empty, deferred: [{ svgIndex: 0, count: 1, reason: "figure-charts-refused" }] };
+    expect(validateFigureCharts(answer(["p2.g1"], [forged]), INDEX)).toMatchObject({ status: "refused", reason: "result-invalid" });
+  });
   it("own SVG figures with no result become counted figure-charts-refused deferrals (council r3 M1)", async () => {
     vi.stubEnv("DOCSLURP_CHART_EXPORT_INLINE", "1");
     const stored = validateFigureCharts(answer(["p2.g1"], [chart], { refusedShards: [{ first: 3, last: 3, reason: "node-timeout" }] }), INDEX)!;

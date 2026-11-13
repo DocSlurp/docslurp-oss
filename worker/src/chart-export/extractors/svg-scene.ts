@@ -124,7 +124,8 @@ export function buildScene(root: XmlElement, counts?: SceneGateCounts): Scene {
     if (n === undefined) {
       n = 0;
       for (const k in el.attrs) n += k.length + el.attrs[k]!.length;
-      for (const c of el.children) n += c.type === "element" ? 1 : c.value.length;
+      // Every child costs at least 1, so empty comments iterated on each re-walk are paid for (council r7 L2).
+      for (const c of el.children) n += 1 + (c.type === "element" ? 0 : c.value.length);
       frameBytes.set(el, n);
     }
     return n;
