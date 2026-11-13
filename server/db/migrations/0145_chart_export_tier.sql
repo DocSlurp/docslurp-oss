@@ -9,8 +9,9 @@
 --    CLI token, connector, internal). Set server-side from the authenticated principal; existing rows are `machine`.
 --
 -- Idempotent: rows are rewritten only while they still carry `enabled` or `generatorModel`; columns and constraints are
--- guarded. NOTE: numbered 0145 (journal idx stays positional) to sit after the open PRs (#355: 0141, #357: 0142-0143, #365: 0144, #362: 0141). Whichever
--- PR lands later renumbers and raises its journal `when` above every earlier entry.
+-- guarded. NOTE: numbered 0145 (journal idx stays positional, after #355's 0141 on main) to stay clear of the open
+-- PRs (#357: 0142-0143, #365: 0144, #362: 0141). Whichever PR lands later renumbers and raises its journal `when`
+-- above every earlier entry.
 
 ALTER TABLE upload_sessions ADD COLUMN IF NOT EXISTS origin text NOT NULL DEFAULT 'machine';
 ALTER TABLE project_runs ADD COLUMN IF NOT EXISTS origin text NOT NULL DEFAULT 'machine';
