@@ -17,6 +17,7 @@ function app(user: { id: string; isAdmin?: boolean }) {
     .use("*", customerPipelineGuard)
     .get("/project", (c) => c.json({ id: "p", pipeline: withModels }))
     .get("/nested", (c) => c.json({ projects: [{ id: "p", pipeline: withModels }], runs: [{ id: "r", pipeline: withModels, stats: { pages: 3 } }] }))
+    .get("/route-only", (c) => c.json({ id: "p", pipeline: { quality: "good", visualPages: { route: "vlm:acme/reader" } } }))
     .get("/text", (c) => c.text(`pipeline ${privateRoute}`))
     .get("/stream", (c) => new Response(`data: {"pipeline":{"vision":{"modelUri":"${privateRoute}"}}}\n\n`, { headers: { "content-type": "text/event-stream" } }));
 }
@@ -33,6 +34,12 @@ describe("customerPipelineGuard", () => {
     const nested = await (await app({ id: "member" }).request("/nested")).json() as { runs: Array<{ stats: unknown; pipeline: Record<string, unknown> }> };
     expect(nested.runs[0]!.stats).toEqual({ pages: 3 });
     expect(nested.runs[0]!.pipeline.quality).toBe((pipeline as { quality: unknown }).quality);
+  });
+
+  it("strips a pipeline that names its model only through a visual-pages route (R5-1)", async () => {
+    const text = await (await app({ id: "member" }).request("/route-only")).text();
+    expect(text).not.toContain("vlm:");
+    expect(JSON.parse(text).pipeline.quality).toBe("good");
   });
 
   it("leaves a platform operator's response whole", async () => {

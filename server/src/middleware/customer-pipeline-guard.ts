@@ -6,13 +6,14 @@ import { getRequestActor, isPlatformAdminActor, type RequestActor } from "../lib
 const MAX_GUARDED_BYTES = 8 * 1024 * 1024;
 const MAX_DEPTH = 16;
 /**
- * Text that any managed model value brings with it: its key (managed-pipeline-models.ts paths ending in a model key)
- * or a model route. `target` and `route` keys are left out of the pre-check (they also name non-model settings); they
- * only ever travel with a model key in the same section, and the parse then removes them too.
+ * Text that any managed model value brings with it: its key (every managed-pipeline-models.ts path's last key, `target`
+ * and `route` included) or a model route (`llm://`, `vlm:`). A pipeline that names its model only through
+ * `visualPages.route` or a `target` still triggers the parse (council round 5, R5-1).
  */
 const MANAGED_FIELD_KEYS = [
-  ...new Set(MANAGED_PIPELINE_MODEL_PATHS.map((path) => path.split(".").at(-1)!).filter((key) => /model/i.test(key)).map((key) => `"${key}"`)),
+  ...new Set(MANAGED_PIPELINE_MODEL_PATHS.map((path) => `"${path.split(".").at(-1)!}"`)),
   "llm://",
+  "vlm:",
 ];
 
 /** Every object under a `pipeline` key, at any depth, with its managed model fields removed. */
@@ -42,7 +43,7 @@ export const customerPipelineGuard: MiddlewareHandler = async (c, next) => {
   if (length > MAX_GUARDED_BYTES) return;
   const text = await response.clone().text();
   if (text.length > MAX_GUARDED_BYTES || !text.includes("\"pipeline\"")) return;
-  // A response routes already redacted names no managed model: skip the parse (~10 ms on a 450 KB run list).
+  // A response that names no managed key or model route: skip the parse (~10 ms on a 450 KB run list).
   if (!MANAGED_FIELD_KEYS.some((key) => text.includes(key))) return;
   // Only now the operator check (a server key's costs a query): most responses carry no pipeline.
   let actor: RequestActor | undefined;
