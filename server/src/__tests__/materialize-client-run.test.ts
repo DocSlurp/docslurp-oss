@@ -48,7 +48,9 @@ describe("materialize run rows", () => {
     }
     const insert = mocks.calls.find((call) => call.text.includes("insert into project_runs"))!;
     const stored = insert.values.find((value) => typeof value === "object" && value !== null && "quality" in (value as object));
-    expect(stored).toEqual({ quality: "good", documentExtraction: { options: { dolphin: { mode: "page" } } } });
+    // The run row carries the resolved pipeline (managed models applied, defaults filled), never the rejected path.
+    expect(stored).toMatchObject({ quality: "good", documentExtraction: { options: { dolphin: { mode: "page" } } } });
+    expect((stored as { documentExtraction: { options: { dolphin: Record<string, unknown> } } }).documentExtraction.options.dolphin).not.toHaveProperty("repoPath");
     expect(JSON.stringify(insert.values)).not.toContain("/tmp/attacker");
   });
 

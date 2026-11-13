@@ -130,7 +130,11 @@ export function applyOpenRouterProviderPolicy(provider: Record<string, unknown> 
  * China restriction (when `policy` turns it on) then applies to the merged preferences, so a caller can narrow
  * it but never widen it.
  */
-export function withOpenRouterProviderPreferences<T extends Record<string, unknown>>(body: T, policy?: OpenRouterProviderPolicy): T & { provider?: Record<string, unknown> } {
+export function withOpenRouterProviderPreferences<T extends Record<string, unknown>>(
+  body: T,
+  policy?: OpenRouterProviderPolicy,
+  options: { outputPriceCeiling?: boolean } = {},
+): T & { provider?: Record<string, unknown> } {
   const model = typeof body.model === "string" ? body.model : "";
   const preferences = openRouterProviderPreferences(model);
   const own = body.provider && typeof body.provider === "object" && !Array.isArray(body.provider) ? body.provider as Record<string, unknown> : undefined;
@@ -150,6 +154,12 @@ export function withOpenRouterProviderPreferences<T extends Record<string, unkno
       if (!allowed.length) throw new Error("No supported Nitro quantization remains");
       merged.quantizations = allowed;
     }
+  }
+  if (options.outputPriceCeiling === false) {
+    // An endpoint without output-token pricing (audio transcription): no ceiling to apply, routing as before.
+    const routed = policy ? applyOpenRouterProviderPolicy(merged, policy) : merged;
+    if (!routed || (routed === own && !preferences)) return body;
+    return { ...body, ...(nitroBase ? { model: nitroBase } : {}), provider: routed };
   }
   // Every routed request carries an output-price ceiling under the cap ($50 per 1M), so no endpoint of a model (GPT-6.1
   // Sol lists an `ultrafast` endpoint at $60 per 1M output) is ever chosen above it. A caller may lower it, never raise it.
@@ -364,7 +374,9 @@ export function createOpenRouterRoutingFetch(baseFetch: typeof fetch = fetch, op
       return baseFetch(input, { ...init, body: JSON.stringify(withOpenRouterProviderPreferences(retargeted, { ...policy!, speedBoost: false })) });
     };
     if (canFallBack && regionBlocked(requested)) return sendFallback("remembered");
-    const routed = withOpenRouterProviderPreferences(body, policy);
+    // Text generation and embeddings carry the output-price ceiling; other endpoints (audio) have no output tokens.
+    const priced = generation || url.pathname === "/api/v1/embeddings";
+    const routed = withOpenRouterProviderPreferences(body, policy, { outputPriceCeiling: priced });
     let response = routed === original ? await baseFetch(input, init) : await baseFetch(input, { ...init, body: JSON.stringify(routed) });
     const base = typeof body.model === "string" ? nitroBaseModel(body.model) : undefined;
     if (response.status === 404 && base) {
