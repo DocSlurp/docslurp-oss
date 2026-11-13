@@ -62,11 +62,9 @@ describe("manifest v2: the happy path", () => {
     const keys: string[] = [];
     const json = new Map<string, unknown>();
     const markdown = "A\n\n![image](images/page-0001/image-001.webp)\n";
-    const markdownPath = path.join(work, "document.md");
-    await writeFile(markdownPath, markdown);
     const stored = await storeDopplerFigures({
       storage: { putBytes: async (key) => { keys.push(key); }, putJson: async (key, value) => { keys.push(key); json.set(key, value); }, uri: (key) => `s3://b/${key}` },
-      document: DOC, runId: "run-1", figures: set, markdown, dopplerMarkdownPath: markdownPath,
+      document: DOC, runId: "run-1", figures: set, markdown, documentMarkdown: Buffer.from(markdown),
       source: { sourceKey: "uploads/s1/a.pdf", sha256: "a".repeat(64), pageCount: 3, mimeType: "application/pdf" },
     });
     const root = `user-1/run-1/doppler/${DOC.id}`;
