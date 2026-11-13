@@ -422,8 +422,28 @@ describe("projects that opted out of figures", () => {
       expect(figuresEnabled({ figures: false }, { DOCSLURP_DOPPLER_IMAGE_EXTRACT: "1" })).toBe(false);
       expect(figuresEnabled({}, { DOCSLURP_DOPPLER_IMAGE_EXTRACT: "1" })).toBe(true);
       expect(figuresEnabled({}, {})).toBe(false);
+      // #363 H2: the re-run of an opted-out project closes the level `disabled` (never none or resumable), keeps the rows
+      // but stops serving, counting and billing them, and nothing comes back on the queue even if figures return.
+      await writeDocumentAssetLedger(sql, { scope: A, ...ledgerWriteForNoFigures("disabled"), level: { ...ledgerWriteForNoFigures("disabled").level, markdownComplete: true } });
+      expect(await level()).toMatchObject({ images_status: "disabled", asset_bytes: 0 });
+      await sql`update projects set pipeline = '{}'::jsonb where id = 'proj-a'`;
+      expect(await listResumableDocuments(sql, { orgId: "org-a" })).toEqual([]);
     } finally {
       await sql`update projects set pipeline = '{}'::jsonb where id = 'proj-a'`;
+    }
+  });
+
+  it("a run whose own pipeline opted out of figures is never listed for resume (#363 H2)", async () => {
+    const storage = memoryStorage();
+    const { set, stored } = await storeStep(storage, { partial: true });
+    const full = ledgerWriteForStoredFigures({ set, stored, outcome: { status: "partial", exitCode: 5 } });
+    await writeDocumentAssetLedger(sql, { scope: A, level: { ...full.level, markdownComplete: true }, assets: full.assets });
+    expect(await listResumableDocuments(sql, { orgId: "org-a" })).toHaveLength(1);
+    await sql`update project_runs set pipeline = '{"figures": false}'::jsonb where id = 'run-a'`;
+    try {
+      expect(await listResumableDocuments(sql, { orgId: "org-a" })).toEqual([]);
+    } finally {
+      await sql`update project_runs set pipeline = '{}'::jsonb where id = 'run-a'`;
     }
   });
 });

@@ -675,7 +675,9 @@ export async function listResumableDocuments(
       from document_extraction_levels l
       join documents d on d.id = l.document_id and d.org_id = l.org_id and d.project_id = l.project_id
       join projects p on p.id = l.project_id and p.org_id = l.org_id and ${figuresOnSql(sql, "p")}
-      where l.org_id = ${args.orgId} and l.images_status = 'resumable' and l.shards = 0 and (l.assets_resumable > 0 or l.assets_pending > 0) and l.resumes < ${DOCUMENT_ASSET_RESUME_CAP}
+      -- The run's own pipeline too (#363 H2): a run that opted out of figures is never resumed.
+      left join project_runs rp on rp.id = l.run_id and rp.org_id = l.org_id
+      where (rp.id is null or ${figuresOnSql(sql, "rp")}) and l.org_id = ${args.orgId} and l.images_status = 'resumable' and l.shards = 0 and (l.assets_resumable > 0 or l.assets_pending > 0) and l.resumes < ${DOCUMENT_ASSET_RESUME_CAP}
         and l.manifest_key is not null ${project("l")}
         and d.superseded_at is null and d.archived_at is null and d.purged_at is null
       union all
@@ -685,9 +687,10 @@ export async function listResumableDocuments(
       join documents d on d.id = s.document_id and d.org_id = s.org_id and d.project_id = s.project_id
       -- Only shards of the current level (MEDIUM-3: a re-run without the figure step takes the document off the queue).
       join projects ps on ps.id = s.project_id and ps.org_id = s.org_id and ${figuresOnSql(sql, "ps")}
+      left join project_runs rs on rs.id = s.run_id and rs.org_id = s.org_id
       join document_extraction_levels lv on lv.document_id = s.document_id and lv.org_id = s.org_id and lv.assets_current
         and lv.images_status = 'resumable' and lv.run_id is not distinct from s.run_id
-      where s.org_id = ${args.orgId} and s.images_status = 'resumable' and s.resumes < ${DOCUMENT_ASSET_RESUME_CAP} ${project("s")}
+      where (rs.id is null or ${figuresOnSql(sql, "rs")}) and s.org_id = ${args.orgId} and s.images_status = 'resumable' and s.resumes < ${DOCUMENT_ASSET_RESUME_CAP} ${project("s")}
         and d.superseded_at is null and d.archived_at is null and d.purged_at is null
         -- The document's resumes across all its shards stay under min(3 x shards, 12) (documentResumeTotalCap).
         and (select coalesce(sum(t.resumes), 0) from document_extraction_shards t
@@ -706,7 +709,8 @@ export async function listResumableDocuments(
         cross join lateral jsonb_array_elements(coalesce(l.gaps, '[]'::jsonb)) gap
         join documents d on d.id = l.document_id and d.org_id = l.org_id and d.project_id = l.project_id
         join projects pg on pg.id = l.project_id and pg.org_id = l.org_id and ${figuresOnSql(sql, "pg")}
-        where l.org_id = ${args.orgId} and l.images_status = 'resumable' and l.assets_current and l.resumes < ${DOCUMENT_ASSET_RESUME_CAP} ${project("l")}
+        left join project_runs rg on rg.id = l.run_id and rg.org_id = l.org_id
+        where (rg.id is null or ${figuresOnSql(sql, "rg")}) and l.org_id = ${args.orgId} and l.images_status = 'resumable' and l.assets_current and l.resumes < ${DOCUMENT_ASSET_RESUME_CAP} ${project("l")}
           and d.superseded_at is null and d.archived_at is null and d.purged_at is null
           -- Only effective gaps: a gap a shard now covers is that shard's work (no duplicate unit).
           and not exists (select 1 from document_extraction_shards sc where sc.document_id = l.document_id and sc.org_id = l.org_id
@@ -1188,7 +1192,7 @@ export function figureLedgerHooks(
  * SQL: the project's figures are on (`pipeline.figures`, default on): figuresEnabled (#363) without the deploy flag. Fails
  * closed on malformed shapes too (`"off"`, `{ enabled: false }`), so discovery never lists more than figuresEnabled runs.
  */
-export function figuresOnSql(sql: Sql<Record<string, unknown>>, projectAlias: string) {
+export function figuresOnSql(sql: Sql<Record<string, unknown>>, projectAlias: string /* a projects or project_runs row: both carry `pipeline` */) {
   const p = sql(projectAlias);
   return sql`(coalesce(${p}.pipeline -> 'figures', 'true'::jsonb) not in ('false'::jsonb, '"off"'::jsonb)
     and coalesce(${p}.pipeline -> 'figures' ->> 'enabled', 'true') <> 'false')`;
