@@ -410,37 +410,103 @@ default). A backstop sweep in the API's maintenance sweeper (`figure-resume-enqu
 All three only queue. They need a server API key with `ingest`, or a session that may edit the project; anything outside
 the caller's organization or project is a 404. `getProjectSettings` reports `figures.resumableDocuments`.
 
-**Running.** The runner only runs while `DOCSLURP_FIGURE_RESUME` is on (default off; queued documents wait and nothing is
-lost) and while the PDF provider implements `figures.resume`. It claims one document at a time per worker with
-`for update skip locked`, and at most one per organization. It skips organizations that may not spend, since a resume
-adds stored bytes; those are re-queued an hour later. Per resumable unit (the document, or each resumable shard):
+**Setting scope.** `figureResume` is a project setting. DocSlurp has no organization-level pipeline settings, so there is
+no organization default above it.
+
+**Running.**
+
+- *When it runs.* The runner runs only while all of these hold:
+  - `DOCSLURP_FIGURE_RESUME` is on (default off; queued documents wait and nothing is lost);
+  - `DOCSLURP_DOPPLER_IMAGE_EXTRACT` is on;
+  - the PDF provider implements `figures.resume`.
+
+  Every worker runs it, with at most `DOCSLURP_FIGURE_RESUME_CONCURRENCY` resumes at once (default 2).
+- *Claiming.* Each claim takes the oldest due document of each organization that holds no live lease (`distinct on`),
+  re-locks it `for update skip locked`, and checks it again. The rules:
+  - at most one resume per organization;
+  - at most `DOCSLURP_FIGURE_RESUME_GLOBAL_MAX` resumes across the fleet (default 8);
+  - only `completed` documents whose Markdown committed, on their current run.
+
+  Failed, cancelled, `pii_blocked` and processing documents are never claimed.
+- *Blocking and deferring.*
+  - A project whose figures are off is blocked `figures-off`.
+  - A project whose resumes are off is blocked `resume-off`.
+  - An organization that may not spend is re-queued an hour later.
+  - An organization past its daily resume VM budget (`DOCSLURP_FIGURE_RESUME_ORG_DAILY_VM_MINUTES`, default 120 minutes
+    per UTC day, `figure_resume_org_days`) is re-queued for the next day.
+- *The lease.* The lease is fenced. Every runner write after the claim matches the lease owner and the claimed run, so a
+  runner that lost its lease, or a document that moved to a new run, is never overwritten.
+
+**One unit per claim.** A unit is the unsharded document, one resumable shard, or one gap. A gap is a range with no
+manifest, resumed by a fresh pass over its pages that becomes its shard. A unit is runnable only below #355's caps: 3 per
+unit, and `min(3 × shards, 12)` per document. For the claimed unit:
 
 1. Pending uploads a crashed attempt left are adopted (streamed SHA-256, no VM).
-2. Only the unit's stored `manifest.jsonl` is downloaded, and the provider runs `--images-resume` in a fresh VM. No
-   figure file goes back into the VM.
-3. The folder is validated whole. Images already stored must keep their digest and are never uploaded again.
-4. New files are stored as pending, then stored, with conditional creates.
-5. The ledger is written as a resume: it only adds, `resume-rewrite` is refused, and it counts against #355's cap of 3.
-6. The new files' slots join the document's run.
+2. The lease is extended to cover the unit's VM budget (heartbeat).
+3. The launch is counted against two caps:
+   - the document's lifetime cap of 6 (`resume_vm_launches`), which no request resets and only a new run does;
+   - the organization's daily count.
+4. Only the unit's stored `manifest.jsonl` is downloaded; there is none for a gap. The provider runs `--images-resume` in
+   a fresh VM, and no figure file goes back into the VM.
+5. The folder is validated whole. Images already stored must keep their digest and are never uploaded again.
+6. Figures on a page the document's PII stage withheld are added to the document's withheld list before upload. The rule
+   is page-scoped: it uses `pii_detections.page_number` once the document withholds anything, and a withholding with no
+   page number withholds every resumed figure. One PII page never blocks or fails the document; clean pages resume
+   normally.
+7. New figure files only (`folderFiles: false`) are stored pending, then stored, with conditional creates.
+8. The new manifests are staged by content.
+9. The ledger is written as a resume. It only adds, refuses `resume-rewrite`, keeps the pass's `markdown_complete`, and
+   counts against the caps.
+10. After the commit, the manifests are published at their places. An unsharded document's `index.json` is rebuilt with
+    markers from the stored `document.md`. A resume never rewrites page facts or the Markdown.
+11. The new files' slots join the document's run.
 
-The VM time is a cost-only usage event (`doppler-figures-resume-vm`, `billable: false`); it is never a customer charge.
-Failed attempts back off 2 minutes, 15 minutes, then 2 hours, and the document is blocked after three
-(`resume_blocked = attempts`). A reprocess or newer run that overtakes a resume makes its writes `stale-write`: the
-resume is a no-op and the document is blocked as `stale`. The source and settings digests bind a resume to the same PDF
-and settings.
+The document then goes back to the queue at once for its next unit. When no runnable unit is left, it is blocked
+`attempts`, never re-queued.
 
-**Orphan GC and audit.** Every 30 minutes the worker lists the images folders of up to 50 documents with figure rows.
-It deletes page files that no ledger row of any run vouches for, once they are older than 24 hours; this is the only
-figure deleter besides document, run and tenant purges. A stored row of the current run whose object is missing, or has
-another size, becomes a resumable `aborted` image, and the document is queued.
+**Cost, backoff and overtaking.**
+
+- *Cost.* VM time, including failed and timed-out runs, is a cost-only usage event (`doppler-figures-resume-vm`) at its
+  real allocated cost, `billable: false`. It is never a customer charge.
+- *Backoff.* Failed attempts back off 2 minutes, 15 minutes, then 2 hours. The document is blocked `attempts` after
+  three failures, or after its lifetime launch cap.
+- *Requests.* A request clears only the backoff and any block other than `attempts`, never a counter.
+- *Overtaking.* A reprocess or newer run that overtakes a resume makes its writes `stale-write`, so the resume is a no-op.
+  A new run's level starts with a clean resume state (`resumeRunChangeSql`).
+- *Binding.* The source and settings digests bind a resume to the same PDF and settings.
+
+**Salvaged figures.** A failed VM job can hand back the shards that finished (`error.figures`, only when the host
+declares `partial` in `figureOutcomes`). The stage stores them idempotently, with conditional creates and pending then
+stored, before the failure stands, so a retry or resume starts from them.
+
+**Orphan GC, retention and audit.** Every 30 minutes the leader walks up to 50 documents with figure rows or objects,
+oldest audited first (`audited_at`).
+
+- Pending rows older than 24 hours are adopted (no VM).
+- Each folder is listed whole. A truncated listing skips the document: no deletes, and no "missing" verdict.
+- Page files that no ledger row vouches for are collected 24 hours after their last write.
+- Retention collects every object, and the rows, of:
+  - a failed or cancelled document, 7 days after it ended;
+  - a level that is no longer current (`assets_current = false`), after 24 hours.
+- Each delete is re-checked under the document's ledger lock (`document-assets:<id>`) right before it happens.
+- Each current stored row is HEAD-checked. Only a confirmed 404 or another size makes it a resumable `aborted` image. The
+  document is then queued, without clearing an `attempts` block.
+- Kill switches: the ledger writes need `DOCSLURP_FIGURE_AUDIT=1` and the deletes need `DOCSLURP_FIGURE_GC_DELETE=1`.
+  Both default to a dry run that logs and measures only.
+
+These are the only figure deleters besides document, run and tenant purges.
 
 **Telemetry.**
-- Log lines: `[doppler-figures] resume claim|unit|done|failed|stale|capped|requested|backstop` and `[figure-audit]`.
-- Spans: `figure-resume` and `figure-audit`.
-- Metrics:
-  - `figures.resume.{claimed,completed,partial,stale,failed,capped}`;
-  - `figures.resumable_backlog` and `figures.resume_oldest_age_s`;
-  - `figures.adopted_files`, `figures.orphan_bytes` and `figures.ledger_storage_drift`.
+- Log lines: `[doppler-figures] resume claim|unit|done|failed|stale|capped|deferred|requested|backstop|salvaged` and
+  `[figure-audit]`.
+- Spans: `figure-resume`, `figure-resume-backlog` and `figure-audit`.
+- Metrics are on the OTel meter `docslurp.figures` (`recordFigureTelemetry`), so they reach SigNoz from background
+  timers:
+  - `resume.claimed`, `resume.attempts{outcome}`, `resume.capped{reason}`, `resume.deferred{reason}`, `resume.vm_ms`,
+    `resume.added_files`, `resume.pii_withheld_files` and `adopted_files`;
+  - the gauges `resumable_backlog` and `resume_oldest_age_s` (live documents only);
+  - `gc.orphan_files`, `gc.orphan_bytes`, `gc.expired_files`, `audit.ledger_storage_drift`, `audit.adopted_files` and
+    `audit.skipped_truncated`.
 
 ## Storage billing
 

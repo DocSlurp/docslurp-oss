@@ -25,17 +25,23 @@ function assertScope(scope: FigureResumeScope): void {
   }
 }
 
-/** Live documents of the scope whose current level a resume could finish (some unit below the attempt cap). */
+/**
+ * Live, completed documents of the scope whose current level a resume could finish: the Markdown committed, under the
+ * lifetime VM launch cap, not blocked `attempts`, and some unit below its cap (the unsharded document, a resumable shard,
+ * or a gap). The runner re-checks all of it at claim.
+ */
 function resumableWhere(scope: FigureResumeScope) {
   return sql`
     l.org_id = ${scope.orgId} and l.project_id = ${scope.projectId}
-      and l.images_status = 'resumable' and l.assets_current
+      and l.images_status = 'resumable' and l.assets_current and l.markdown_complete
+      and l.resume_vm_launches < ${FIGURE_RESUME_LIMITS.maxVmLaunches} and l.resume_blocked is distinct from 'attempts'
       and d.id = l.document_id and d.org_id = l.org_id and d.project_id = l.project_id and d.run_id is not distinct from l.run_id
-      and d.superseded_at is null and d.archived_at is null and d.purged_at is null
+      and d.status = 'completed' and d.superseded_at is null and d.archived_at is null and d.purged_at is null
       and (
-        (l.shards = 0 and l.resumes < ${FIGURE_RESUME_LIMITS.maxAttempts})
+        (l.shards = 0 and l.resumes < ${FIGURE_RESUME_LIMITS.maxAttempts} and (l.assets_resumable > 0 or l.assets_pending > 0))
         or exists (select 1 from document_extraction_shards s where s.document_id = l.document_id and s.org_id = l.org_id
           and s.run_id is not distinct from l.run_id and s.images_status = 'resumable' and s.resumes < ${FIGURE_RESUME_LIMITS.maxAttempts})
+        or coalesce(jsonb_array_length(l.gaps), 0) > 0
       )`;
 }
 
@@ -46,8 +52,9 @@ async function projectMode(scope: FigureResumeScope) {
 
 /**
  * Queue one document's resume now. `off` when the project's figures or resumes are off; `capped` when every unit spent
- * its three attempts; `not-resumable` when nothing is left (or the document is not this scope's: the route answers 404
- * for that before calling). A block from an earlier attempt is cleared, unless it is the attempt cap.
+ * its attempts or the document its lifetime VM launches; `not-resumable` when nothing is left (or the document is not this
+ * scope's: the route answers 404 for that before calling). A request clears only an earlier block reason other than the
+ * cap and the backoff: it never resets a counter (H4: a request cannot buy more VM time).
  */
 export async function requestDocumentFigureResume(scope: FigureResumeScope & { documentId: string }): Promise<FigureResumeRequestStatus> {
   assertScope(scope);
@@ -57,7 +64,7 @@ export async function requestDocumentFigureResume(scope: FigureResumeScope & { d
   const [level] = await sql<{ queued: boolean; resumable: boolean; capped: boolean }[]>`
     select l.resume_after is not null and l.resume_blocked is null as queued,
       exists (select 1 from documents d where ${resumableWhere(scope)}) as resumable,
-      l.resume_blocked = 'attempts' as capped
+      (l.resume_blocked = 'attempts' or l.resume_vm_launches >= ${FIGURE_RESUME_LIMITS.maxVmLaunches}) as capped
     from document_extraction_levels l
     where l.document_id = ${scope.documentId} and l.org_id = ${scope.orgId} and l.project_id = ${scope.projectId}`;
   if (!level) return "not-resumable";
@@ -70,7 +77,7 @@ export async function requestDocumentFigureResume(scope: FigureResumeScope & { d
   }
   if (level.queued) return "already-queued";
   const updated = await sql`
-    update document_extraction_levels l set resume_after = now(), resume_blocked = null, resume_failures = 0
+    update document_extraction_levels l set resume_after = now(), resume_blocked = null
     from documents d
     where l.document_id = ${scope.documentId} and ${resumableWhere(scope)} and (l.resume_blocked is distinct from 'attempts')
     returning 1`;
@@ -87,22 +94,19 @@ export async function requestProjectFigureResumes(scope: FigureResumeScope & { l
   const [already] = await sql<{ n: number }[]>`
     select count(*)::int as n from document_extraction_levels l join documents d on d.id = l.document_id
     where ${resumableWhere(scope)} and l.resume_after is not null and l.resume_blocked is null`;
-  const queued = await sql<{ document_id: string }[]>`
+  // One more than the cap is selected (never updated) only to say whether more remain (L10).
+  const picked = await sql<{ document_id: string }[]>`
+    select l.document_id from document_extraction_levels l join documents d on d.id = l.document_id
+    where ${resumableWhere(scope)} and l.resume_after is null
+    order by l.updated_at, l.document_id
+    limit ${limit + 1}`;
+  const capped = picked.length > limit;
+  const ids = picked.slice(0, limit).map((row) => row.document_id);
+  const queued = ids.length === 0 ? [] : await sql<{ document_id: string }[]>`
     update document_extraction_levels l set resume_after = now(), resume_blocked = null
-    where l.document_id in (
-      select l.document_id from document_extraction_levels l join documents d on d.id = l.document_id
-      where ${resumableWhere(scope)} and l.resume_after is null and (l.resume_blocked is null or l.resume_blocked <> 'attempts')
-      order by l.updated_at, l.document_id
-      limit ${limit + 1})
-      and l.org_id = ${scope.orgId} and l.project_id = ${scope.projectId}
+    from documents d
+    where l.document_id = any(${sql.array(ids)}::text[]) and ${resumableWhere(scope)} and l.resume_after is null
     returning l.document_id`;
-  // One more than the cap was selected only to say whether more remain: put it back.
-  let capped = false;
-  if (queued.length > limit) {
-    capped = true;
-    const extra = queued[queued.length - 1]!.document_id;
-    await sql`update document_extraction_levels set resume_after = null where document_id = ${extra} and org_id = ${scope.orgId}`;
-  }
   const count = Math.min(queued.length, limit);
   console.log(`[doppler-figures] resume requested project=${scope.projectId} org=${scope.orgId} queued=${count} already=${already?.n ?? 0} capped=${capped}`);
   return { status: "queued", queued: count, alreadyQueued: already?.n ?? 0, capped };
@@ -129,7 +133,10 @@ export async function sweepFigureResumeQueue(now = Date.now()): Promise<number> 
     where l.document_id in (
       select l2.document_id from document_extraction_levels l2
       join projects p on p.id = l2.project_id and p.org_id = l2.org_id
-      where l2.images_status = 'resumable' and l2.assets_current and l2.resume_after is null and l2.resume_blocked is null
+      join documents d on d.id = l2.document_id and d.org_id = l2.org_id and d.run_id = l2.run_id
+      where l2.images_status = 'resumable' and l2.assets_current and l2.markdown_complete and l2.resume_after is null and l2.resume_blocked is null
+        and l2.resume_vm_launches < ${FIGURE_RESUME_LIMITS.maxVmLaunches} and l2.resume_failures < ${FIGURE_RESUME_LIMITS.maxAttempts}
+        and d.status = 'completed' and d.superseded_at is null and d.archived_at is null and d.purged_at is null
         and l2.updated_at < now() - interval '5 minutes'
         and coalesce(p.pipeline ->> 'figureResume', 'auto') = 'auto'
         and coalesce(p.pipeline -> 'figures', 'true'::jsonb) not in ('false'::jsonb, '"off"'::jsonb)

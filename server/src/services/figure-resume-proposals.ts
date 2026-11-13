@@ -6,6 +6,7 @@
  * for the resume itself.
  */
 import { FIGURE_RESUME_LIMITS, type FigureResumeProposal } from "@docslurp/shared";
+import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { sql } from "../db.js";
 import type { RequestActor } from "../lib/request-actor.js";
@@ -18,6 +19,8 @@ import { countResumableFigureDocuments, requestDocumentFigureResume, requestProj
 const claimsSchema = z.object({
   purpose: z.literal("figure-resume-proposal-v1"), actor: z.string(), userId: z.string(), sessionId: z.string().min(1),
   projectId: z.string(), orgId: z.string(), documentId: z.string().nullable(), expiresAt: z.number(),
+  /** Single use: recorded on Apply (figure_resume_proposal_uses); a replay is refused. */
+  jti: z.string().regex(/^[A-Za-z0-9-]{16,64}$/),
 }).strict();
 
 export class FigureResumeProposalError extends Error {
@@ -42,8 +45,9 @@ async function resumable(scope: { orgId: string; projectId: string }, documentId
   const [row] = await sql<{ n: number }[]>`
     select count(*)::int as n from document_extraction_levels l join documents d on d.id = l.document_id and d.org_id = l.org_id
     where l.document_id = ${documentId} and l.org_id = ${scope.orgId} and l.project_id = ${scope.projectId}
-      and l.images_status = 'resumable' and l.assets_current and d.superseded_at is null and d.purged_at is null
-      and (l.resume_blocked is null or l.resume_blocked <> 'attempts')`;
+      and l.images_status = 'resumable' and l.assets_current and l.markdown_complete and d.status = 'completed'
+      and d.run_id is not distinct from l.run_id and d.superseded_at is null and d.archived_at is null and d.purged_at is null
+      and l.resume_vm_launches < ${FIGURE_RESUME_LIMITS.maxVmLaunches} and (l.resume_blocked is null or l.resume_blocked <> 'attempts')`;
   return row?.n ?? 0;
 }
 
@@ -54,7 +58,7 @@ export async function proposeFigureResume(args: { actor: RequestActor; projectId
   if (count === 0) return fail(400, "figure_resume_unavailable", documentId ? "This document has no figures left to finish" : "No document in this project has figures left to finish");
   const expiresAt = (args.now ?? Date.now()) + 10 * 60_000;
   const token = sealSettingsProposal({ purpose: "figure-resume-proposal-v1", actor: identity(args.actor), userId: args.actor.userId, sessionId: args.sessionId,
-    projectId: args.projectId, orgId: access.orgId, documentId, expiresAt });
+    projectId: args.projectId, orgId: access.orgId, documentId, expiresAt, jti: randomUUID() });
   return { token, projectId: args.projectId, documentId, documents: Math.min(count, FIGURE_RESUME_LIMITS.bulkMax), more: count > FIGURE_RESUME_LIMITS.bulkMax,
     expiresAt: new Date(expiresAt).toISOString(), credits: 0 };
 }
@@ -73,6 +77,10 @@ export async function applyFigureResumeProposal(args: { actor: RequestActor; pro
   }
   const access = await authorize(args.actor, args.projectId, claims.sessionId);
   if (access.orgId !== claims.orgId) return fail(403, "figure_resume_invalid", "Project organization changed");
+  // Single use: the first Apply records the token's id; any replay is refused (and old records age out).
+  await sql`delete from figure_resume_proposal_uses where used_at < now() - interval '1 day'`;
+  const [fresh] = await sql`insert into figure_resume_proposal_uses (jti, org_id) values (${claims.jti}, ${claims.orgId}) on conflict (jti) do nothing returning 1`;
+  if (!fresh) return fail(410, "figure_resume_used", "This proposal was already applied");
   const scope = { orgId: claims.orgId, projectId: claims.projectId };
   let status: FigureResumeRequestStatus | "queued" | "off";
   let queued: number;

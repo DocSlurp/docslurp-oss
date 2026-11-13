@@ -499,7 +499,10 @@ export async function writeDocumentAssetLedger(sql: Sql<Record<string, unknown>>
         ${level.gaps && level.gaps.length > 0 ? tx.json(level.gaps.map((gap) => ({ first: gap.first, last: gap.last, reason: gap.reason })) as unknown as JSONValue) : null},
         ${shardState?.n ?? 0}, ${totals!.pending}, ${folderBytes ?? 0})
       on conflict (document_id) do update
-      set run_id = excluded.run_id, markdown_complete = excluded.markdown_complete, images_status = excluded.images_status,
+      set ${resumeRunChangeSql(tx)}, run_id = excluded.run_id,
+          -- A resume never claims the Markdown committed (M1): it keeps whatever the pass recorded.
+          markdown_complete = ${resuming ? tx`document_extraction_levels.markdown_complete` : tx`excluded.markdown_complete`},
+          images_status = excluded.images_status,
           images_exit_code = excluded.images_exit_code, manifest_version = excluded.manifest_version,
           doppler_build = excluded.doppler_build, manifest_key = excluded.manifest_key, manifest_sha256 = excluded.manifest_sha256,
           source_sha256 = excluded.source_sha256, settings_sha256 = excluded.settings_sha256, resumes = excluded.resumes,
@@ -877,13 +880,15 @@ export async function writeFigureLevel(
           doppler_build, assets_current)
         values (${documentId}, ${orgId}, ${projectId}, ${runId}, ${args.markdownComplete}, ${args.imagesStatus}, ${exitCode}, ${build}, false)
         on conflict (document_id) do update
-        set run_id = excluded.run_id, markdown_complete = excluded.markdown_complete, images_status = excluded.images_status,
+        set ${resumeRunChangeSql(tx)}, run_id = excluded.run_id, markdown_complete = excluded.markdown_complete, images_status = excluded.images_status,
             images_exit_code = excluded.images_exit_code, doppler_build = excluded.doppler_build, assets_current = false, gaps = null,
             assets_total = 0, assets_extracted = 0, assets_not_extracted = 0, assets_unlinked = 0, assets_resumable = 0, assets_pending = 0,
             source_copy = 0, source_decode = 0, source_render = 0, asset_bytes = 0, folder_bytes = 0, updated_at = now()
         where document_extraction_levels.org_id = excluded.org_id and document_extraction_levels.project_id = excluded.project_id
         returning 1`;
       if (leveled.length !== 1) throw new DocumentAssetLedgerError("write-mismatch");
+      // Off the resume queue: the figure step did not run.
+      await tx`update document_extraction_levels set resume_after = null where document_id = ${documentId} and org_id = ${orgId} and project_id = ${projectId}`;
       return;
     }
     const leveled = await tx`
@@ -891,7 +896,7 @@ export async function writeFigureLevel(
       values (${documentId}, ${orgId}, ${projectId}, ${runId}, ${args.markdownComplete}, 'none', ${exitCode}, ${build},
         ${gaps ? tx.json(gaps as unknown as JSONValue) : null})
       on conflict (document_id) do update
-      set run_id = excluded.run_id, markdown_complete = excluded.markdown_complete, images_exit_code = excluded.images_exit_code,
+      set ${resumeRunChangeSql(tx)}, run_id = excluded.run_id, markdown_complete = excluded.markdown_complete, images_exit_code = excluded.images_exit_code,
           doppler_build = excluded.doppler_build, gaps = excluded.gaps,
           -- Another run's folder files are not this run's.
           folder_bytes = case when document_extraction_levels.run_id is distinct from excluded.run_id then 0 else document_extraction_levels.folder_bytes end,
@@ -991,7 +996,7 @@ export async function markAssetsStored(
           -- A new run's level starts clean: the earlier run's gaps and folder files are not this run's.
           gaps = case when document_extraction_levels.run_id is distinct from excluded.run_id then null else document_extraction_levels.gaps end,
           folder_bytes = case when document_extraction_levels.run_id is distinct from excluded.run_id then 0 else document_extraction_levels.folder_bytes end,
-          run_id = excluded.run_id, updated_at = now()
+          ${resumeRunChangeSql(tx)}, run_id = excluded.run_id, updated_at = now()
       where document_extraction_levels.org_id = excluded.org_id and document_extraction_levels.project_id = excluded.project_id`;
     await recountLevel(tx, args.scope, "partial");
     return { stored: flipped.length };
@@ -1237,6 +1242,21 @@ function byteCount(value: number): number {
 // ---- The resume queue (migration 0144) ----
 
 /**
+ * SQL assignments for a level upsert (`excluded` is the new row): when the level moves to another run, its resume state
+ * starts clean (M1): no queue entry, no lease (the old run's runner then loses every fenced write), no failures, no
+ * block and a fresh lifetime VM count (a new run is a fresh, customer-paid pass). The same run keeps all of it.
+ */
+export function resumeRunChangeSql(tx: Sql<Record<string, unknown>> | Tx) {
+  const changed = tx`document_extraction_levels.run_id is distinct from excluded.run_id`;
+  return tx`resume_after = case when ${changed} then null else document_extraction_levels.resume_after end,
+    resume_lease_until = case when ${changed} then null else document_extraction_levels.resume_lease_until end,
+    resume_lease_owner = case when ${changed} then null else document_extraction_levels.resume_lease_owner end,
+    resume_failures = case when ${changed} then 0 else document_extraction_levels.resume_failures end,
+    resume_vm_launches = case when ${changed} then 0 else document_extraction_levels.resume_vm_launches end,
+    resume_blocked = case when ${changed} then null else document_extraction_levels.resume_blocked end`;
+}
+
+/**
  * SQL: whether a project resumes figures on its own (`pipeline.figureResume` is `auto`, the default, and its figures are
  * not off). Mirrors projectFigureResumeMode (packages/shared figure-resume.ts).
  */
@@ -1259,9 +1279,8 @@ async function queueFigureResume(tx: Tx, scope: DocumentAssetLedgerScope, resume
         when l.resume_after is not null then l.resume_after
         when ${projectAutoResumeSql(tx, "p")} then now() + interval '2 minutes'
         else null end,
-      resume_blocked = case when ${resumed} then l.resume_blocked else null end,
-      -- A fresh pass starts the failure count again; a resume's own write keeps it.
-      resume_failures = case when ${resumed} then l.resume_failures else 0 end
+      -- A fresh pass clears a block other than the lifetime cap; the counters move only with the run (resumeRunChangeSql).
+      resume_blocked = case when ${resumed} or l.resume_blocked = 'attempts' then l.resume_blocked else null end
     from projects p
     where l.document_id = ${scope.documentId} and l.org_id = ${scope.orgId} and l.project_id = ${scope.projectId}
       and p.id = l.project_id and p.org_id = l.org_id`;

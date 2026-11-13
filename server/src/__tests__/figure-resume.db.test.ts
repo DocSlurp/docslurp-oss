@@ -131,6 +131,30 @@ describe("POST /documents/:id/assets/resume", () => {
     expect(await (await post("doc-a", { "x-test-user": "ua" })).json()).toEqual({ documentId: "doc-a", status: "capped" });
   });
 
+  it("H4: a request never resets the failure count, and the lifetime VM launch cap reports capped", async () => {
+    await resumableDocument("doc-a");
+    await sql`update document_extraction_levels set resume_failures = 2, resume_blocked = 'stale' where document_id = 'doc-a'`;
+    expect(await (await post("doc-a", { "x-test-user": "ua" })).json()).toEqual({ documentId: "doc-a", status: "queued" });
+    expect((await sql`select resume_failures, resume_blocked from document_extraction_levels where document_id = 'doc-a'`)[0]).toEqual({ resume_failures: 2, resume_blocked: null });
+    await sql`update document_extraction_levels set resume_after = null, resume_vm_launches = 6 where document_id = 'doc-a'`;
+    expect(await (await post("doc-a", { "x-test-user": "ua" })).json()).toEqual({ documentId: "doc-a", status: "capped" });
+    expect(await queued("doc-a")).toBe(false);
+  });
+
+  it("M1: a failed, cancelled or PII-blocked document, or one whose Markdown never committed, is not resumable", async () => {
+    await resumableDocument("doc-a");
+    for (const status of ["failed", "cancelled", "pii_blocked"]) {
+      await sql`update documents set status = ${status} where id = 'doc-a'`;
+      expect(await (await post("doc-a", { "x-test-user": "ua" })).json(), status).toMatchObject({ status: expect.stringMatching(/^(not-resumable|capped)$/) });
+      expect(await queued("doc-a")).toBe(false);
+    }
+    await sql`update documents set status = 'completed' where id = 'doc-a'`;
+    await sql`update document_extraction_levels set markdown_complete = false where document_id = 'doc-a'`;
+    expect(await queued("doc-a")).toBe(false);
+    await post("doc-a", { "x-test-user": "ua" });
+    expect(await queued("doc-a")).toBe(false);
+  });
+
   it("a manual project queues on request only (the backstop leaves it alone)", async () => {
     await resumableDocument("doc-m", "proj-m", "org-a", "run-m");
     await sql`update document_extraction_levels set updated_at = now() - interval '1 hour'`;
@@ -151,6 +175,16 @@ describe("POST /projects/:id/figures/resume", () => {
     const next = await app.request("/projects/proj-a/figures/resume?limit=2", { method: "POST", headers: { "x-test-user": "ua" } });
     expect(await next.json()).toMatchObject({ queued: 2, capped: true });
     expect((await app.request("/projects/proj-a/figures/resume?limit=0", { method: "POST", headers: { "x-test-user": "ua" } })).status).toBe(400);
+  });
+
+  it("L10: the document past the cap keeps its block reason (selected, never updated and put back)", async () => {
+    for (let i = 0; i < 3; i += 1) await resumableDocument(`e-${i}`);
+    await sql`update document_extraction_levels set resume_blocked = 'stale', updated_at = now() - (interval '1 minute' * (3 - substr(document_id, 3)::int))`;
+    const res = await app.request("/projects/proj-a/figures/resume?limit=2", { method: "POST", headers: { "x-test-user": "ua" } });
+    expect(await res.json()).toMatchObject({ queued: 2, capped: true });
+    expect(await sql`select document_id, resume_blocked, resume_after is not null as q from document_extraction_levels order by document_id`).toEqual([
+      { document_id: "e-0", resume_blocked: null, q: true }, { document_id: "e-1", resume_blocked: null, q: true }, { document_id: "e-2", resume_blocked: "stale", q: false },
+    ]);
   });
 
   it("never queues another organization's project, and the backstop only touches auto projects", async () => {
@@ -187,6 +221,8 @@ describe("the chat's proposal", () => {
     await expect(fresh.applyFigureResumeProposal({ actor: actor("ua"), projectId: "proj-a", token: `${proposal.token}x` })).rejects.toMatchObject({ status: 403 });
     await expect(fresh.applyFigureResumeProposal({ actor: actor("ua"), projectId: "proj-a", token: proposal.token, now: Date.now() + 11 * 60_000 })).rejects.toMatchObject({ status: 410 });
     expect(await fresh.applyFigureResumeProposal({ actor: actor("ua"), projectId: "proj-a", token: proposal.token })).toMatchObject({ applied: true, queued: 1 });
+    // Single use: a replay of the same token is refused.
+    await expect(fresh.applyFigureResumeProposal({ actor: actor("ua"), projectId: "proj-a", token: proposal.token })).rejects.toMatchObject({ status: 410 });
     expect(await queued("doc-a")).toBe(true);
     expect(await queued("doc-b")).toBe(false);
     vi.doUnmock("../lib/first-party-app.js");

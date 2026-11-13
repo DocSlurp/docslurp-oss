@@ -3363,10 +3363,14 @@ export class Store {
 
   /** Orphan GC and the stored-figure audit (figures/resume-runner.ts). */
   async auditFigureStorage(deps: { storage: import("../figures/resume-runner.js").FigureResumeStorage; limit?: number }) {
-    const { auditFigureStorage, figureResumeBacklog } = await import("../figures/resume-runner.js");
-    const result = await auditFigureStorage({ ...deps, sql: this.sql });
-    const backlog = await figureResumeBacklog(this.sql);
-    return { ...result, backlog };
+    const { auditFigureStorage } = await import("../figures/resume-runner.js");
+    return await auditFigureStorage({ ...deps, sql: this.sql });
+  }
+
+  /** The resume backlog gauges (emitted on the OTel meter by figureResumeBacklog). */
+  async figureResumeBacklog() {
+    const { figureResumeBacklog } = await import("../figures/resume-runner.js");
+    return await figureResumeBacklog(this.sql);
   }
 
   /** Claims and runs queued project graph rebuilds (see graph/rebuild-job.ts). */

@@ -6,14 +6,22 @@ import path from "node:path";
 import type { PGlite } from "@electric-sql/pglite";
 import type { PGLiteSocketServer } from "@electric-sql/pglite-socket";
 import type postgres from "postgres";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { figureLedgerHooks, ledgerWriteForStoredFigures, writeDocumentAssetLedger, type DocumentAssetLedgerScope } from "../db/document-asset-ledger.js";
+const telemetry = vi.hoisted(() => ({ calls: [] as Array<{ name: string; value: number; labels: Record<string, string> }> }));
+vi.mock("@docslurp/shared/observability", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@docslurp/shared/observability")>(),
+  recordFigureTelemetry: (name: string, value: number, labels: Record<string, string> = {}) => { telemetry.calls.push({ name, value, labels }); },
+}));
+
+import { figureLedgerHooks, ledgerWriteForStoredFigures, markAssetsLost, writeDocumentAssetLedger, type DocumentAssetLedgerScope } from "../db/document-asset-ledger.js";
 import { Store } from "../db/store.js";
 import { readDopplerFigureDir, storeDopplerFigures } from "../extractors/doppler-figures.js";
 import type { FigureResumeJob } from "../extractors/plugins.js";
 import { setSpendCheckConfig } from "../db/spend-check.js";
-import { auditFigureStorage, claimFigureResume, runFigureResumes, FIGURE_ORPHAN_GRACE_MS, type FigureResumeProvider } from "../figures/resume-runner.js";
+import {
+  auditFigureStorage, claimFigureResume, figureResumeBacklog, runFigureResumes, FIGURE_FAILED_RETENTION_MS, FIGURE_ORPHAN_GRACE_MS, type FigureResumeProvider,
+} from "../figures/resume-runner.js";
 import { v2Manifest, v3Text, writeV3Folder, V2_SOURCE_SHA } from "../test/doppler-manifest-v2.js";
 import { createMigratedDatabase } from "../test/migrated-db.js";
 import { serveOnRandomPort } from "../test/migrated-postgres.js";
@@ -26,7 +34,9 @@ let server: PGLiteSocketServer;
 let store: Store;
 let sql: postgres.Sql<Record<string, unknown>>;
 let work: string;
-const ON = { DOCSLURP_FIGURE_RESUME: "1" };
+const ON = { DOCSLURP_FIGURE_RESUME: "1", DOCSLURP_DOPPLER_IMAGE_EXTRACT: "1" };
+/** The audit and GC with their writes and deletes on (they are dry runs by default). */
+const GC = { DOCSLURP_FIGURE_AUDIT: "1", DOCSLURP_FIGURE_GC_DELETE: "1" };
 
 const scopeOf = (doc: string, org = "org-a", project = "proj-a", run = "run-a"): DocumentAssetLedgerScope => ({ orgId: org, projectId: project, documentId: doc, runId: run });
 
@@ -68,6 +78,11 @@ beforeEach(async () => {
   await sql`delete from document_assets`;
   await sql`delete from document_extraction_levels`;
   await sql`delete from usage_events`;
+  await sql`delete from document_extraction_shards`;
+  await sql`delete from figure_resume_org_days`;
+  await sql`delete from pii_detections`;
+  await sql`update documents set status = 'completed', metadata = '{}'::jsonb`;
+  telemetry.calls.length = 0;
   await sql`update documents set run_id = case id when 'doc-m' then 'run-m' when 'doc-off' then 'run-off' when 'doc-b' then 'run-b' else 'run-a' end`;
   await sql`update project_runs set artifacts = '{}'::jsonb`;
 });
@@ -146,7 +161,8 @@ function fakeProvider(options: { fail?: boolean; rewrite?: boolean; onResume?: (
 }
 
 const level = async (doc = "doc-a") => (await sql<Array<Record<string, unknown>>>`
-  select images_status, resumes, resume_failures, resume_after is not null as queued, resume_blocked, resume_lease_until is not null as leased, assets_resumable
+  select images_status, resumes, resume_failures, resume_vm_launches, resume_after is not null as queued, resume_blocked, resume_lease_until is not null as leased,
+    resume_lease_owner, assets_resumable
   from document_extraction_levels where document_id = ${doc}`)[0];
 const due = async (doc = "doc-a") => { await sql`update document_extraction_levels set resume_after = now() - interval '1 second' where document_id = ${doc} and resume_after is not null`; };
 
@@ -191,7 +207,9 @@ describe("the runner", () => {
     expect(run!.artifacts["doc-a:doppler-figure:p3.2"]).toBe("s3://b/ua/run-a/doppler/doc-a/images/page-0003/image-002.webp");
     const events = await sql<{ metric: string; cost: number; org_id: string; metadata: Record<string, unknown> }[]>`
       select metric, cost_cents::float8 as cost, org_id, metadata from usage_events`;
-    expect(events).toEqual([expect.objectContaining({ metric: "doppler-figures-resume-vm", cost: 0, org_id: "org-a", metadata: expect.objectContaining({ billable: false }) })]);
+    // Our own cost at its real allocated price (L5), never a customer charge.
+    expect(events).toEqual([expect.objectContaining({ metric: "doppler-figures-resume-vm", org_id: "org-a", metadata: expect.objectContaining({ billable: false, costRollup: "authoritative" }) })]);
+    expect(events[0]!.cost).toBeGreaterThanOrEqual(0);
     expect(storage.deletes).toEqual([]);
   });
 
@@ -248,9 +266,13 @@ describe("the runner", () => {
     await partialPass(storage);
     await due();
     const rows = await sql`select asset_id, sha256, storage_state from document_assets where document_id = 'doc-a' order by asset_id`;
+    const manifestKey = "ua/run-a/doppler/doc-a/images/manifest.jsonl";
+    const manifestBefore = Buffer.from(storage.objects.get(manifestKey)!.bytes);
     const { provider } = fakeProvider({ rewrite: true });
     await runFigureResumes({ sql, storage, provider, workerId: "w1", env: ON });
     expect(await sql`select asset_id, sha256, storage_state from document_assets where document_id = 'doc-a' order by asset_id`).toEqual(rows);
+    // Adversarial M7: a refused resume never rewrote the folder's manifest (figure files only before the commit).
+    expect(storage.objects.get(manifestKey)!.bytes.equals(manifestBefore)).toBe(true);
     expect(await level()).toMatchObject({ images_status: "resumable", resume_failures: 1 });
   });
 
@@ -270,11 +292,11 @@ describe("the runner", () => {
     await partialPass(storage, "doc-a2");
     await partialPass(storage, "doc-b", "org-b", "proj-b", "run-b");
     await due("doc-a"); await due("doc-a2"); await due("doc-b");
-    const first = await claimFigureResume(sql, "w1", 60_000);
+    const first = await claimFigureResume(sql, "w1", ON);
     expect(first?.org_id).toBe("org-a");
-    const second = await claimFigureResume(sql, "w2", 60_000);
+    const second = await claimFigureResume(sql, "w2", ON);
     expect(second?.org_id).toBe("org-b");
-    expect(await claimFigureResume(sql, "w3", 60_000)).toBeNull();
+    expect(await claimFigureResume(sql, "w3", ON)).toBeNull();
   });
 
   it("never claims for an organization that may not spend (budget paused): re-queued later", async () => {
@@ -284,7 +306,7 @@ describe("the runner", () => {
     await due("doc-b");
     await sql`update organizations set budget_paused = true where id = 'org-b'`;
     try {
-      expect(await claimFigureResume(sql, "w1", 60_000)).toBeNull();
+      expect(await claimFigureResume(sql, "w1", ON)).toBeNull();
       const [row] = await sql<{ later: boolean }[]>`select resume_after > now() + interval '30 minutes' as later from document_extraction_levels where document_id = 'doc-b'`;
       expect(row).toEqual({ later: true });
     } finally {
@@ -300,7 +322,8 @@ describe("the runner", () => {
     const { provider, jobs } = fakeProvider();
     await runFigureResumes({ sql, storage, provider, workerId: "w1", env: ON });
     expect(jobs).toEqual([]);
-    expect(await level("doc-off")).toMatchObject({ resume_blocked: "resume-off", queued: false });
+    // L2: the reason says figures are off (not resumes).
+    expect(await level("doc-off")).toMatchObject({ resume_blocked: "figures-off", queued: false });
   });
 });
 
@@ -319,7 +342,7 @@ describe("orphan GC and audit", () => {
     // A stored figure lost from storage.
     storage.objects.delete("ua/run-a/doppler/doc-a/images/page-0001/image-001.webp");
     const bBefore = [...storage.objects.keys()].filter((key) => key.startsWith("ub/"));
-    const result = await auditFigureStorage({ sql, storage, limit: 10 });
+    const result = await auditFigureStorage({ sql, storage, limit: 10, env: GC });
     expect(storage.deletes).toEqual([orphanOld]);
     expect(storage.objects.has(orphanNew)).toBe(true);
     expect(result).toMatchObject({ orphans: 1, missing: 1 });
@@ -328,5 +351,211 @@ describe("orphan GC and audit", () => {
     // Org B's folder and rows are untouched.
     expect([...storage.objects.keys()].filter((key) => key.startsWith("ub/"))).toEqual(bBefore);
     expect((await sql`select count(*)::int as n from document_assets where document_id = 'doc-b' and storage_state = 'stored'`)[0]).toEqual({ n: 3 });
+  });
+});
+
+const OLD = () => new Date(Date.now() - FIGURE_ORPHAN_GRACE_MS - 60_000);
+const P11 = "ua/run-a/doppler/doc-a/images/page-0001/image-001.webp";
+const P32 = "ua/run-a/doppler/doc-a/images/page-0003/image-002.webp";
+
+describe("council fix round (#365): highs", () => {
+  it("H1: a level with no runnable unit left (every cap spent) is blocked `attempts`, never re-queued", async () => {
+    const storage = memoryStorage();
+    await partialPass(storage);
+    await sql`update document_extraction_levels set resumes = 3 where document_id = 'doc-a'`;
+    await due();
+    const { provider, jobs } = fakeProvider();
+    await runFigureResumes({ sql, storage, provider, workerId: "w1", env: ON });
+    expect(jobs).toEqual([]);
+    expect(await level()).toMatchObject({ resume_blocked: "attempts", queued: false, leased: false, resume_vm_launches: 0 });
+  });
+
+  it("H2: a truncated listing is skipped whole: nothing is marked lost and nothing is deleted", async () => {
+    const storage = memoryStorage();
+    await partialPass(storage);
+    storage.objects.delete(P11);
+    storage.objects.set("ua/run-a/doppler/doc-a/images/page-0002/image-009.webp", { bytes: Buffer.from("x"), at: OLD() });
+    storage.listKeys = async ({ prefix }) => ({ keys: [...storage.objects.keys()].filter((key) => key.startsWith(prefix)).slice(0, 1), truncated: true });
+    const result = await auditFigureStorage({ sql, storage, limit: 10, env: GC });
+    expect(result).toMatchObject({ skippedTruncated: 1, missing: 0, orphans: 0 });
+    expect(storage.deletes).toEqual([]);
+    expect((await sql`select storage_state from document_assets where document_id = 'doc-a' and asset_id = 'p1.1'`)[0]).toEqual({ storage_state: "stored" });
+  });
+
+  it("H2: an object vouched for again between the GC's snapshot and its delete survives (re-checked under the ledger lock)", async () => {
+    const storage = memoryStorage();
+    await partialPass(storage);
+    const [saved] = await sql<{ row: unknown }[]>`select to_jsonb(a) as row from document_assets a where document_id = 'doc-a' and asset_id = 'p1.1'`;
+    await markAssetsLost(sql, { scope: scopeOf("doc-a"), ids: ["p1.1"] });
+    storage.objects.get(P11)!.at = OLD();
+    const head = storage.headObject;
+    storage.headObject = async (key: string) => {
+      // A same-run retry adopts the object right after the GC listed it as unvouched.
+      if (key === P11) {
+        await sql`delete from document_assets where document_id = 'doc-a' and asset_id = 'p1.1'`;
+        await sql`insert into document_assets select * from jsonb_populate_record(null::document_assets, ${sql.json(saved!.row as never)}::jsonb)`;
+      }
+      return head(key);
+    };
+    const result = await auditFigureStorage({ sql, storage, limit: 10, env: GC });
+    expect(result.orphans).toBe(0);
+    expect(storage.objects.has(P11)).toBe(true);
+    expect(storage.deletes).toEqual([]);
+  });
+
+  it("H3: runner, audit and backlog signals reach the OTel meter from a background pass", async () => {
+    const storage = memoryStorage();
+    await partialPass(storage);
+    await due();
+    const { provider } = fakeProvider();
+    await runFigureResumes({ sql, storage, provider, workerId: "w1", env: ON });
+    await auditFigureStorage({ sql, storage, limit: 10 });
+    await figureResumeBacklog(sql);
+    const names = telemetry.calls.map((call) => call.name);
+    expect(names).toEqual(expect.arrayContaining(["resume.claimed", "resume.attempts", "resume.vm_ms", "resumable_backlog", "resume_oldest_age_s", "gc.orphan_files"]));
+    expect(telemetry.calls.find((call) => call.name === "resume.attempts")!.labels).toEqual({ outcome: "completed" });
+  });
+
+  it("H4: a request never resets failures, the lifetime VM cap holds across requests, and failed VM time is recorded at cost", async () => {
+    const storage = memoryStorage();
+    await partialPass(storage);
+    const provider: FigureResumeProvider = { timeoutMs: () => 60_000, resume: async () => { throw new Error("vm timed out"); } };
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      await due();
+      await runFigureResumes({ sql, storage, provider, workerId: "w1", env: ON });
+    }
+    expect(await level()).toMatchObject({ resume_failures: 2, resume_vm_launches: 2, resume_blocked: null });
+    // The on-demand request (server figure-resume.ts): clears the backoff, never a counter.
+    await sql`update document_extraction_levels set resume_after = now() - interval '1 second', resume_blocked = null where document_id = 'doc-a'`;
+    await runFigureResumes({ sql, storage, provider, workerId: "w1", env: ON });
+    expect(await level()).toMatchObject({ resume_failures: 3, resume_vm_launches: 3, resume_blocked: "attempts", queued: false });
+    const events = await sql<{ metadata: Record<string, unknown> }[]>`select metadata from usage_events where metric = 'doppler-figures-resume-vm'`;
+    expect(events).toHaveLength(3);
+    expect(events.every((event) => event.metadata.outcome === "failed" && event.metadata.billable === false)).toBe(true);
+    // Lifetime: even with the failures cleared by hand, a document past its launches is blocked at claim.
+    await sql`update document_extraction_levels set resume_failures = 0, resume_blocked = null, resume_after = now() - interval '1 second', resume_vm_launches = 6 where document_id = 'doc-a'`;
+    const { provider: fresh, jobs } = fakeProvider();
+    await runFigureResumes({ sql, storage, provider: fresh, workerId: "w1", env: ON });
+    expect(jobs).toEqual([]);
+    expect(await level()).toMatchObject({ resume_blocked: "attempts", resume_vm_launches: 6 });
+  });
+
+  it("H4: an organization past its daily resume VM budget is deferred to the next UTC day", async () => {
+    const storage = memoryStorage();
+    await partialPass(storage);
+    await due();
+    await sql`insert into figure_resume_org_days (org_id, day, launches, vm_ms) values ('org-a', (now() at time zone 'utc')::date, 50, 999999999)`;
+    expect(await claimFigureResume(sql, "w1", ON)).toBeNull();
+    const [row] = await sql<{ later: boolean }[]>`
+      select resume_after > now() and resume_after <= now() + interval '25 hours' as later from document_extraction_levels where document_id = 'doc-a'`;
+    expect(row).toEqual({ later: true });
+  });
+});
+
+describe("council fix round (#365): mediums", () => {
+  it("M1: only completed documents whose Markdown committed are claimed; a new run's level starts with a clean queue", async () => {
+    const storage = memoryStorage();
+    await partialPass(storage);
+    await due();
+    for (const status of ["failed", "cancelled", "pii_blocked", "processing"]) {
+      await sql`update documents set status = ${status} where id = 'doc-a'`;
+      expect(await claimFigureResume(sql, "w1", ON), status).toBeNull();
+    }
+    await sql`update documents set status = 'completed' where id = 'doc-a'`;
+    await sql`update document_extraction_levels set markdown_complete = false where document_id = 'doc-a'`;
+    expect(await claimFigureResume(sql, "w1", ON)).toBeNull();
+    // A fresh pass in a new run: failures, launches, the block and the lease all start again.
+    await sql`update document_extraction_levels set markdown_complete = true, resume_failures = 2, resume_vm_launches = 4, resume_blocked = 'stale',
+      resume_lease_owner = 'w9', resume_lease_until = now() + interval '1 hour' where document_id = 'doc-a'`;
+    await sql`update documents set run_id = 'run-a2' where id = 'doc-a'`;
+    await partialPass(storage, "doc-a", "org-a", "proj-a", "run-a2");
+    expect(await level()).toMatchObject({ resume_failures: 0, resume_vm_launches: 0, resume_blocked: null, leased: false, resume_lease_owner: null, queued: true });
+  });
+
+  it("M2: a runner that lost its lease never overwrites the new owner's queue state", async () => {
+    const storage = memoryStorage();
+    await partialPass(storage);
+    await due();
+    const { provider } = fakeProvider({
+      fail: true,
+      onResume: async () => { await sql`update document_extraction_levels set resume_lease_owner = 'w2', resume_lease_until = now() + interval '1 hour' where document_id = 'doc-a'`; },
+    });
+    await runFigureResumes({ sql, storage, provider, workerId: "w1", env: ON });
+    expect(await level()).toMatchObject({ resume_lease_owner: "w2", leased: true, resume_failures: 0 });
+  });
+
+  it("M3: the audit adopts pending rows a crash left on a level nobody queued", async () => {
+    const storage = memoryStorage();
+    await partialPass(storage);
+    await sql`update document_assets set storage_state = 'pending', updated_at = now() - interval '2 days' where document_id = 'doc-a' and asset_id = 'p1.1'`;
+    const result = await auditFigureStorage({ sql, storage, limit: 10, env: GC });
+    expect(result.adopted).toBe(1);
+    expect((await sql`select storage_state from document_assets where document_id = 'doc-a' and asset_id = 'p1.1'`)[0]).toEqual({ storage_state: "stored" });
+  });
+
+  it("M7: with the deploy figure flag off the runner does nothing, and the audit and GC are dry runs by default", async () => {
+    const storage = memoryStorage();
+    await partialPass(storage);
+    await due();
+    const { provider, jobs } = fakeProvider();
+    expect(await runFigureResumes({ sql, storage, provider, workerId: "w1", env: { DOCSLURP_FIGURE_RESUME: "1" } })).toBe(0);
+    expect(jobs).toEqual([]);
+    storage.objects.set("ua/run-a/doppler/doc-a/images/page-0002/image-009.webp", { bytes: Buffer.from("x"), at: OLD() });
+    storage.objects.delete(P11);
+    const result = await auditFigureStorage({ sql, storage, limit: 10 });
+    expect(result).toMatchObject({ orphans: 1, missing: 1, dryRun: { audit: true, gc: true } });
+    expect(storage.deletes).toEqual([]);
+    expect((await sql`select storage_state from document_assets where document_id = 'doc-a' and asset_id = 'p1.1'`)[0]).toEqual({ storage_state: "stored" });
+  });
+
+  it("M11: figures of a failed document are collected after its retention, and of a level no longer current after the grace period; other tenants untouched", async () => {
+    const storage = memoryStorage();
+    await partialPass(storage);
+    await partialPass(storage, "doc-a2");
+    await partialPass(storage, "doc-b", "org-b", "proj-b", "run-b");
+    for (const value of storage.objects.values()) value.at = new Date(Date.now() - FIGURE_FAILED_RETENTION_MS - 60_000);
+    await sql`update documents set status = 'failed', updated_at = now() - interval '8 days' where id = 'doc-a'`;
+    await sql`update document_extraction_levels set assets_current = false, updated_at = now() - interval '2 days' where document_id = 'doc-a2'`;
+    // A failed document inside its retention keeps everything.
+    await sql`update documents set status = 'failed', updated_at = now() where id = 'doc-b'`;
+    const bBefore = [...storage.objects.keys()].filter((key) => key.startsWith("ub/"));
+    await auditFigureStorage({ sql, storage, limit: 10, env: GC });
+    expect([...storage.objects.keys()].filter((key) => key.includes("/doc-a/"))).toEqual([]);
+    expect([...storage.objects.keys()].filter((key) => key.includes("/doc-a2/"))).toEqual([]);
+    expect((await sql`select count(*)::int as n from document_assets where document_id in ('doc-a', 'doc-a2')`)[0]).toEqual({ n: 0 });
+    expect([...storage.objects.keys()].filter((key) => key.startsWith("ub/"))).toEqual(bBefore);
+    expect((await sql`select count(*)::int as n from document_assets where document_id = 'doc-b'`)[0]!.n).toBeGreaterThan(0);
+  });
+});
+
+describe("PII (owner rule: page-scoped)", () => {
+  it("one withheld page never blocks the document: other pages resume normally, the PII page's resumed figures are withheld", async () => {
+    const storage = memoryStorage();
+    await partialPass(storage);
+    await due();
+    await sql`update documents set metadata = '{"pii":{"redacted":true,"withheldArtifactUris":["s3://b/ua/run-a/doppler/doc-a/document.md"]}}'::jsonb where id = 'doc-a'`;
+    await sql`insert into pii_detections (document_id, run_id, pattern_type, matched_prefix, page_number) values ('doc-a', 'run-a', 'email', 'a@', 3)`;
+    const { provider, jobs } = fakeProvider();
+    await runFigureResumes({ sql, storage, provider, workerId: "w1", env: ON });
+    expect(jobs).toHaveLength(1);
+    expect(await level()).toMatchObject({ images_status: "complete", resume_blocked: null });
+    const [doc] = await sql<{ withheld: string[] }[]>`select metadata->'pii'->'withheldArtifactUris' as withheld from documents where id = 'doc-a'`;
+    // p3.2 is on the PII page: withheld (never served); the earlier withheld URI stays.
+    expect(doc!.withheld).toEqual(expect.arrayContaining([`s3://b/${P32}`, "s3://b/ua/run-a/doppler/doc-a/document.md"]));
+  });
+
+  it("a PII page elsewhere withholds nothing resumed on clean pages", async () => {
+    const storage = memoryStorage();
+    await partialPass(storage);
+    await due();
+    await sql`update documents set metadata = '{"pii":{"redacted":true,"withheldArtifactUris":["s3://b/x"]}}'::jsonb where id = 'doc-a'`;
+    await sql`insert into pii_detections (document_id, run_id, pattern_type, matched_prefix, page_number) values ('doc-a', 'run-a', 'email', 'a@', 1)`;
+    const { provider } = fakeProvider();
+    await runFigureResumes({ sql, storage, provider, workerId: "w1", env: ON });
+    expect(await level()).toMatchObject({ images_status: "complete" });
+    const [doc] = await sql<{ withheld: string[] }[]>`select metadata->'pii'->'withheldArtifactUris' as withheld from documents where id = 'doc-a'`;
+    expect(doc!.withheld).toEqual(["s3://b/x"]);
+    const [run] = await sql<{ artifacts: Record<string, string> }[]>`select artifacts from project_runs where id = 'run-a'`;
+    expect(run!.artifacts["doc-a:doppler-figure:p3.2"]).toBe(`s3://b/${P32}`);
   });
 });

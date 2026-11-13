@@ -1,45 +1,58 @@
 /*
  * The figure resume runner (docs/extraction/doppler-figures.md, "Resuming partial figures"): finishes the images a figure
- * pass left resumable, and keeps storage and the ledger in agreement (orphan GC and audit).
+ * pass left resumable, and keeps storage and the ledger in agreement (adopt, audit, orphan GC, retention).
  *
- * Claim: one document at a time per worker (`for update skip locked` on document_extraction_levels, migration 0144), at
- * most one per organization, only while DOCSLURP_FIGURE_RESUME is on, the project's `figureResume` is not `off` and its
- * figures are on, and the organization may spend (a resume adds billable stored bytes). Then, per resumable unit (the
- * document, or each resumable shard):
+ * Claim (one transaction): the oldest due document of each organization that holds no live lease (fair across
+ * organizations, M6), re-locked `for update skip locked`, only for a `completed` document whose Markdown committed and
+ * whose level belongs to the document's current run (M1), only while DOCSLURP_FIGURE_RESUME and the deploy figure flag
+ * are on (M7), the project's figures are on and its `figureResume` is not `off`, the document is under its lifetime VM
+ * launch cap, the organization may spend and has resume VM time left today (H4). The lease is fenced: every later runner
+ * write matches the lease owner and the claimed run, so a reprocess or a second runner is never overwritten (M2).
+ *
+ * One unit per claim (a shard, a gap or the unsharded document), then the document goes back to the queue (M6):
  *   1. adopt pending uploads a crashed attempt left (streamed SHA-256, no VM);
- *   2. if still resumable: the unit's stored manifest only (manifest-only resume: no figure goes back into the VM), the
- *      provider's `figures.resume` in a fresh VM, the folder validated whole (resume mode: stored images keep their
- *      digest), new files stored pending → stored with conditional creates, the ledger written as a resume (only adds,
- *      counted against the host's cap of 3), the new files' slots added to the document's run;
- *   3. the VM time recorded as a cost-only event (never a customer charge: the failure was ours).
- * Backoff 2 min, 15 min, 2 h; blocked after 3 resumes. The ledger's stale-write rule turns a resume that a reprocess
- * overtook into a no-op; the source and settings digests bind it to the same PDF and settings.
+ *   2. if a runnable unit remains (below #355's per-unit and per-document caps): the lease is extended for the unit's
+ *      pages (heartbeat), the launch is counted (lifetime and per organization per day), the unit's stored manifest only
+ *      (none for a gap: a fresh pass over its pages becomes its shard), the provider's `figures.resume` in a fresh VM, the
+ *      folder validated whole (resume mode: stored images keep their digest), new files stored pending → stored with
+ *      conditional creates, figure files only (`folderFiles: false`); the new manifests are staged by content before the
+ *      ledger write and published after it, the index rebuilt after it with the stored Markdown's markers (unsharded);
+ *   3. the VM time recorded as a cost-only event at its real cost, `billable: false`, for failed and timed-out runs too.
+ * With no runnable unit left the document is blocked `attempts` (H1), never re-queued forever.
  *
- * Nothing here deletes a figure except the orphan GC: objects under a document's images folder that no ledger row of any
- * run vouches for, 24 hours after their last write. The audit turns a stored row whose object is missing or the wrong size
- * into a resumable `aborted` image and queues a resume.
+ * PII (owner rule: one PII page never blocks or fails a document): figures resumed on a page the PII stage withheld are
+ * added to the document's withheld list before they are uploaded, so they are never served; clean pages resume normally.
+ *
+ * Nothing here deletes a figure except the orphan GC (DOCSLURP_FIGURE_GC_DELETE, dry run by default): objects under a
+ * document's folder that no ledger row vouches for, re-checked under the document's ledger lock right before the delete,
+ * 24 hours after their last write; and, past their retention, the figures of failed or cancelled documents (7 days) and of
+ * levels that are no longer current (24 hours). The audit (DOCSLURP_FIGURE_AUDIT, dry run by default) adopts aged pending
+ * rows and turns a current stored row whose object is confirmed missing (HEAD 404) or of another size into a resumable
+ * `aborted` image; a truncated listing is never read as "missing".
  */
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { Sql } from "postgres";
 import {
-  DOPPLER_STORE_LAYOUT, dopplerFigureSlot, dopplerImageLimits, dopplerShardFolder, figureResumeBackoffMs, figureResumeDeployEnabled,
-  projectFigureResumeMode, FIGURE_RESUME_LIMITS,
+  DOPPLER_STORE_LAYOUT, dopplerFigureSlot, dopplerImageExtractEnabled, dopplerImageLimits, dopplerShardFolder, figureAuditWrites,
+  figureGcDeletes, figureResumeBackoffMs, figureResumeConcurrency, figureResumeDeployEnabled, figureResumeGlobalMax, figureResumeOrgDailyVmMs,
+  parseDopplerFigureId, projectFigureResumeMode, projectFiguresOff, FIGURE_RESUME_LIMITS,
 } from "@docslurp/shared";
+import { recordFigureTelemetry } from "@docslurp/shared/observability";
 
 import {
-  adoptPendingAssets, figureLedgerHooks, isMissingObject, ledgerWriteForStoredFigures, markAssetsLost, markAssetsPending, markAssetsStored,
-  writeDocumentAssetLedger, DocumentAssetLedgerError, type DocumentAssetLedgerScope, type FigureObjectReader,
+  adoptPendingAssets, documentResumeTotalCap, figureLedgerHooks, isMissingObject, ledgerWriteForStoredFigures, markAssetsLost,
+  markAssetsPending, markAssetsStored, writeDocumentAssetLedger, DocumentAssetLedgerError, DOCUMENT_ASSET_RESUME_CAP,
+  type DocumentAssetLedgerScope, type FigureObjectReader,
 } from "../db/document-asset-ledger.js";
 import { persistScopedUsageEvents } from "../db/usage-event-store.js";
 import { spendBlockCode, spendCheckConfig } from "../db/spend-check.js";
 import {
-  DopplerFigureRejection, disposeDopplerFigureSet, downloadDopplerImagesDir, readDopplerFigureDir, storeDopplerFigures,
-  type DopplerFigureStorage, type DopplerFolderReader,
+  DopplerFigureRejection, disposeDopplerFigureSet, dopplerFolderKey, downloadDopplerImagesDir, readDopplerFigureDir, storeDopplerFigureIndex,
+  storeDopplerFigures, storeDopplerFolderManifests, type DopplerFigureSet, type DopplerFigureStorage, type DopplerFolderReader,
 } from "../extractors/doppler-figures.js";
 import { parseSandboxedPdfFigureOutcome, type FigureResumeJob } from "../extractors/plugins.js";
-import { pushPerfMetric } from "../lib/perf-context.js";
 import { buildAllocatedResourceObservation, buildLocalComputeUsageEvent, resolveWorkerDeploymentProfile } from "../pipeline/local-compute-cost.js";
 
 type Client = Sql<Record<string, unknown>>;
@@ -63,129 +76,201 @@ export interface FigureResumeDeps {
   provider: FigureResumeProvider | null;
   workerId: string;
   env?: Record<string, string | undefined>;
-  /** Lease length (default 2 × the provider's budget for the document, at least 10 min). */
-  leaseMs?: number;
   signal?: AbortSignal;
 }
 
 export const FIGURE_RESUME_METRIC = "doppler-figures-resume-vm";
+/** The claim's first lease; each unit extends it to its own VM budget (heartbeat). */
+const CLAIM_LEASE_MS = 10 * 60_000;
 
 interface ClaimedLevel {
   document_id: string; org_id: string; project_id: string; run_id: string; user_id: string; page_count: number; source_key: string;
   source_sha256: string | null; shards: number; resumes: number; manifest_sha256: string | null; storage_prefix: string | null;
-  pipeline: unknown; artifact_root: string | null;
+  pipeline: unknown; resume_vm_launches: number;
+}
+
+/** The figures of documents the queue may claim: completed, current run, Markdown committed (M1, PII rule). */
+function claimableSql(sql: Client) {
+  return sql`l.resume_after is not null and l.resume_after <= now() and l.resume_blocked is null
+    and l.images_status = 'resumable' and l.assets_current and l.markdown_complete
+    and d.status = 'completed' and d.superseded_at is null and d.archived_at is null and d.purged_at is null
+    and (l.resume_lease_until is null or l.resume_lease_until < now())`;
+}
+
+async function block(tx: Client, row: Pick<ClaimedLevel, "document_id" | "org_id">, reason: "attempts" | "figures-off" | "resume-off" | "stale" | "refused"): Promise<void> {
+  await tx`update document_extraction_levels set resume_after = null, resume_blocked = ${reason} where document_id = ${row.document_id} and org_id = ${row.org_id}`;
+  console.log(`[doppler-figures] resume capped doc=${row.document_id} reason=${reason}`);
+  recordFigureTelemetry("resume.capped", 1, { reason });
 }
 
 /**
- * Claim the next queued document, or null. One transaction: the candidate row locked (`skip locked`), then a per-org
- * advisory lock and a check that the org holds no live lease (at most one resume per organization), then the lease.
- * Documents whose project turned resume or figures off are blocked instead of claimed.
+ * Claim the next due document, or null. One transaction: the oldest due document of each organization with no live
+ * lease (`distinct on`), oldest first; each candidate re-locked (`skip locked`) and re-checked, a per-org advisory lock and
+ * live-lease check (at most one resume per organization), then the gates and the lease.
  */
-export async function claimFigureResume(sql: Client, workerId: string, leaseMs: number): Promise<ClaimedLevel | null> {
+export async function claimFigureResume(sql: Client, workerId: string, env: Record<string, string | undefined> = process.env): Promise<ClaimedLevel | null> {
   return await sql.begin(async (tx) => {
+    // A fleet-wide ceiling on resumes running at once (every worker runs the runner).
+    const [live] = await tx<{ n: number }[]>`select count(*)::int as n from document_extraction_levels where resume_lease_until > now()`;
+    if ((live?.n ?? 0) >= figureResumeGlobalMax(env)) return null;
     const candidates = await tx<ClaimedLevel[]>`
-      select l.document_id, l.org_id, l.project_id, l.run_id, d.user_id, d.page_count, d.source_key, l.source_sha256, l.shards, l.resumes,
-        l.manifest_sha256, r.storage_prefix, p.pipeline, null::text as artifact_root
-      from document_extraction_levels l
-      join documents d on d.id = l.document_id and d.org_id = l.org_id and d.project_id = l.project_id and d.run_id = l.run_id
-      join projects p on p.id = l.project_id and p.org_id = l.org_id
-      join organizations o on o.id = l.org_id and o.deleted_at is null
-      left join project_runs r on r.id = l.run_id
-      where l.resume_after is not null and l.resume_after <= now() and l.resume_blocked is null
-        and l.images_status = 'resumable' and l.assets_current
-        and (l.resume_lease_until is null or l.resume_lease_until < now())
-        and d.superseded_at is null and d.archived_at is null and d.purged_at is null
-      order by l.resume_after, l.document_id
-      limit 8
-      for update of l skip locked`;
+      select c.* from (
+        select distinct on (l.org_id) l.document_id, l.org_id, l.project_id, l.run_id, d.user_id, d.page_count, d.source_key, l.source_sha256,
+          l.shards, l.resumes, l.manifest_sha256, r.storage_prefix, p.pipeline, l.resume_vm_launches, l.resume_after
+        from document_extraction_levels l
+        join documents d on d.id = l.document_id and d.org_id = l.org_id and d.project_id = l.project_id and d.run_id = l.run_id
+        join projects p on p.id = l.project_id and p.org_id = l.org_id
+        join organizations o on o.id = l.org_id and o.deleted_at is null
+        left join project_runs r on r.id = l.run_id
+        where ${claimableSql(tx as unknown as Client)}
+          and not exists (select 1 from document_extraction_levels b where b.org_id = l.org_id and b.resume_lease_until > now())
+        order by l.org_id, l.resume_after, l.document_id
+      ) c
+      order by c.resume_after, c.document_id
+      limit 16`;
     for (const row of candidates) {
-      if (projectFigureResumeMode(row.pipeline) === "off") {
-        await tx`update document_extraction_levels set resume_after = null, resume_blocked = 'resume-off' where document_id = ${row.document_id} and org_id = ${row.org_id}`;
-        continue;
-      }
-      const [locked] = await tx<{ ok: boolean }[]>`select pg_try_advisory_xact_lock(hashtext(${`figure-resume-org:${row.org_id}`})) as ok`;
-      if (!locked?.ok) continue;
+      const [locked] = await tx<{ ok: number }[]>`
+        select 1 as ok from document_extraction_levels l
+        join documents d on d.id = l.document_id and d.org_id = l.org_id and d.run_id = l.run_id
+        where l.document_id = ${row.document_id} and l.org_id = ${row.org_id} and l.run_id = ${row.run_id} and ${claimableSql(tx as unknown as Client)}
+        for update of l skip locked`;
+      if (!locked) continue;
+      const [org] = await tx<{ ok: boolean }[]>`select pg_try_advisory_xact_lock(hashtext(${`figure-resume-org:${row.org_id}`})) as ok`;
+      if (!org?.ok) continue;
       const [busy] = await tx<{ n: number }[]>`
-        select count(*)::int as n from document_extraction_levels
-        where org_id = ${row.org_id} and resume_lease_until > now() and document_id <> ${row.document_id}`;
+        select count(*)::int as n from document_extraction_levels where org_id = ${row.org_id} and resume_lease_until > now()`;
       if ((busy?.n ?? 0) > 0) continue;
+      if (projectFiguresOff(row.pipeline)) { await block(tx as unknown as Client, row, "figures-off"); continue; }
+      if (projectFigureResumeMode(row.pipeline) === "off") { await block(tx as unknown as Client, row, "resume-off"); continue; }
+      if (row.resume_vm_launches >= FIGURE_RESUME_LIMITS.maxVmLaunches) { await block(tx as unknown as Client, row, "attempts"); continue; }
       // A resume adds billable stored bytes: never for an organization that may not spend now (re-queued later).
       const [spend] = await tx<Array<{ funded: boolean | null; available: string | number; project_budget_paused: boolean; org_budget_paused: boolean; project_in_org: boolean }>>`
         select funded, available, project_budget_paused, org_budget_paused, project_in_org from org_spend_status(${row.org_id}, ${row.project_id}::text, 0)`;
       if (spendCheckConfig().enabled && spendBlockCode(spend ? { ...spend, org_id: row.org_id } : spend)) {
         await tx`update document_extraction_levels set resume_after = now() + interval '1 hour' where document_id = ${row.document_id} and org_id = ${row.org_id}`;
-        console.log(`[doppler-figures] resume capped doc=${row.document_id} reason=spend-paused`);
-        pushPerfMetric({ metric: "figures.resume.capped", value: 1, unit: "count", tags: ["doppler-figures", "spend-paused"], metadata: { documentId: row.document_id } });
+        console.log(`[doppler-figures] resume deferred doc=${row.document_id} reason=spend-paused`);
+        recordFigureTelemetry("resume.deferred", 1, { reason: "spend-paused" });
+        continue;
+      }
+      // Resume VM time is ours: each organization gets a daily budget (UTC); past it, the next day.
+      const [today] = await tx<{ vm_ms: number }[]>`
+        select vm_ms::float8 as vm_ms from figure_resume_org_days where org_id = ${row.org_id} and day = (now() at time zone 'utc')::date`;
+      if ((today?.vm_ms ?? 0) >= figureResumeOrgDailyVmMs(env)) {
+        await tx`update document_extraction_levels
+          set resume_after = ((now() at time zone 'utc')::date + 1)::timestamp at time zone 'utc' + interval '5 minutes'
+          where document_id = ${row.document_id} and org_id = ${row.org_id}`;
+        console.log(`[doppler-figures] resume deferred doc=${row.document_id} org=${row.org_id} reason=org-daily-vm-budget`);
+        recordFigureTelemetry("resume.deferred", 1, { reason: "org-daily-vm-budget" });
         continue;
       }
       await tx`
-        update document_extraction_levels set resume_lease_until = now() + ${`${Math.max(60_000, Math.round(leaseMs))} milliseconds`}::interval,
+        update document_extraction_levels set resume_lease_until = now() + ${`${CLAIM_LEASE_MS} milliseconds`}::interval,
           resume_lease_owner = ${workerId.slice(0, 128)}
-        where document_id = ${row.document_id} and org_id = ${row.org_id}`;
+        where document_id = ${row.document_id} and org_id = ${row.org_id} and run_id = ${row.run_id}`;
       return row;
     }
     return null;
   });
 }
 
-/** Release a lease: requeue with backoff, finish (nothing left), or block. */
-async function release(sql: Client, row: ClaimedLevel, outcome: "done" | "retry" | "blocked", blocked?: string): Promise<void> {
-  const [level] = await sql<{ resumes: number; images_status: string; resume_failures: number }[]>`
-    select resumes, images_status, resume_failures from document_extraction_levels where document_id = ${row.document_id} and org_id = ${row.org_id}`;
-  const failures = (level?.resume_failures ?? 0) + (outcome === "retry" ? 1 : 0);
-  const resumes = Math.max(level?.resumes ?? row.resumes, failures);
-  const spent = resumes >= FIGURE_RESUME_LIMITS.maxAttempts;
-  const nextBlocked = outcome === "blocked" ? blocked ?? "refused" : outcome === "retry" && spent ? "attempts" : null;
-  const after = outcome === "done" && level?.images_status !== "resumable" ? null
-    : nextBlocked ? null
-    : new Date(Date.now() + figureResumeBackoffMs(resumes)).toISOString();
+/** Every runner write after the claim matches its lease and run (M2): a lost lease or a new run makes it a no-op. */
+function fenced(sql: Client, row: ClaimedLevel, workerId: string) {
+  return sql`document_id = ${row.document_id} and org_id = ${row.org_id} and run_id = ${row.run_id} and resume_lease_owner = ${workerId.slice(0, 128)}`;
+}
+
+/** Extend the lease for the next unit; false when the lease is no longer ours (stop, touch nothing). */
+async function heartbeat(sql: Client, row: ClaimedLevel, workerId: string, ms: number): Promise<boolean> {
+  const extended = await sql`
+    update document_extraction_levels set resume_lease_until = now() + ${`${Math.max(60_000, Math.round(ms))} milliseconds`}::interval
+    where ${fenced(sql, row, workerId)} returning 1`;
+  return extended.length === 1;
+}
+
+type Outcome = "done" | "retry" | "blocked" | "lost";
+
+/**
+ * Release a lease (fenced): `done` re-queues at once while the document is still resumable (the next unit); `retry` counts
+ * a failure and backs off; the document is blocked `attempts` once failures reach the cap, the lifetime VM launches reach
+ * theirs, or nothing runnable is left (H1). A lease that is no longer ours, or a level that moved to another run, is left
+ * untouched.
+ */
+async function release(sql: Client, row: ClaimedLevel, workerId: string, outcome: Exclude<Outcome, "lost">, blocked?: string, exhausted = false): Promise<void> {
+  const [level] = await sql<{ images_status: string; resume_failures: number; resume_vm_launches: number }[]>`
+    select images_status, resume_failures, resume_vm_launches from document_extraction_levels where ${fenced(sql, row, workerId)}`;
+  if (!level) return;
+  const failures = level.resume_failures + (outcome === "retry" ? 1 : 0);
+  const resumable = level.images_status === "resumable";
+  const spent = failures >= FIGURE_RESUME_LIMITS.maxAttempts || level.resume_vm_launches >= FIGURE_RESUME_LIMITS.maxVmLaunches || exhausted;
+  const nextBlocked = outcome === "blocked" ? blocked ?? "refused" : resumable && spent ? "attempts" : null;
+  const after = !resumable || nextBlocked ? null
+    : outcome === "done" ? new Date().toISOString()
+    : new Date(Date.now() + figureResumeBackoffMs(failures)).toISOString();
   await sql`
     update document_extraction_levels set resume_lease_until = null, resume_lease_owner = null, resume_failures = ${failures},
       resume_after = ${after}::timestamptz, resume_blocked = coalesce(${nextBlocked}, resume_blocked)
-    where document_id = ${row.document_id} and org_id = ${row.org_id} and resume_lease_owner is not null`;
-  if (nextBlocked) console.log(`[doppler-figures] resume capped doc=${row.document_id} reason=${nextBlocked}`);
+    where ${fenced(sql, row, workerId)}`;
+  if (nextBlocked) {
+    console.log(`[doppler-figures] resume capped doc=${row.document_id} reason=${nextBlocked}`);
+    recordFigureTelemetry("resume.capped", 1, { reason: nextBlocked });
+  }
 }
 
-type ResumeUnit = { shard: { first: number; last: number } | null; manifestSha256: string | null; resumes: number };
+type ResumeUnit = { shard: { first: number; last: number } | null; manifestSha256: string | null; gap: boolean };
 
 /**
- * The resumable units of a claimed document, each one range: every resumable shard (its manifest), every gap (no
- * manifest: a fresh pass over its pages becomes its shard), or the unsharded document itself.
+ * The runnable units of a claimed document, each one range, below #355's caps: every resumable shard of the claimed run
+ * under its own cap and the document's total (documentResumeTotalCap); every effective gap (no shard covers it; a fresh
+ * pass over its pages becomes its shard) while the document's total is not spent; or the unsharded document itself.
  */
 async function units(sql: Client, row: ClaimedLevel): Promise<ResumeUnit[]> {
-  const out: ResumeUnit[] = [];
-  if (row.shards === 0 && row.manifest_sha256 && row.resumes < FIGURE_RESUME_LIMITS.maxAttempts) {
-    const [own] = await sql<{ n: number }[]>`select assets_resumable as n from document_extraction_levels where document_id = ${row.document_id} and org_id = ${row.org_id}`;
-    if ((own?.n ?? 0) > 0) out.push({ shard: null, manifestSha256: row.manifest_sha256, resumes: row.resumes });
-  }
-  const shards = await sql<Array<{ first_page: number; last_page: number; manifest_sha256: string; resumes: number }>>`
-    select first_page, last_page, manifest_sha256, resumes from document_extraction_shards
-    where document_id = ${row.document_id} and org_id = ${row.org_id} and project_id = ${row.project_id} and run_id = ${row.run_id}
-      and images_status = 'resumable' and resumes < ${FIGURE_RESUME_LIMITS.maxAttempts}
+  const [level] = await sql<{ gaps: Array<{ first: number; last: number }> | null; resumes: number; assets_resumable: number; manifest_sha256: string | null; shards: number }[]>`
+    select gaps, resumes, assets_resumable, manifest_sha256, shards from document_extraction_levels
+    where document_id = ${row.document_id} and org_id = ${row.org_id} and project_id = ${row.project_id} and run_id = ${row.run_id}`;
+  if (!level) return [];
+  const shards = await sql<Array<{ first_page: number; last_page: number; manifest_sha256: string; resumes: number; images_status: string }>>`
+    select first_page, last_page, manifest_sha256, resumes, images_status from document_extraction_shards
+    where document_id = ${row.document_id} and org_id = ${row.org_id} and project_id = ${row.project_id}
     order by first_page`;
-  for (const shard of shards) out.push({ shard: { first: shard.first_page, last: shard.last_page }, manifestSha256: shard.manifest_sha256, resumes: shard.resumes });
-  const [level] = await sql<{ gaps: Array<{ first: number; last: number }> | null; resumes: number }[]>`
-    select gaps, resumes from document_extraction_levels where document_id = ${row.document_id} and org_id = ${row.org_id} and project_id = ${row.project_id}`;
-  if ((level?.resumes ?? 0) < FIGURE_RESUME_LIMITS.maxAttempts) {
-    for (const gap of level?.gaps ?? []) out.push({ shard: { first: gap.first, last: gap.last }, manifestSha256: null, resumes: level!.resumes });
+  const out: ResumeUnit[] = [];
+  if (shards.length === 0 && level.manifest_sha256 && level.resumes < DOCUMENT_ASSET_RESUME_CAP && level.assets_resumable > 0) {
+    out.push({ shard: null, manifestSha256: level.manifest_sha256, gap: false });
+  }
+  const total = shards.reduce((sum, shard) => sum + shard.resumes, 0);
+  const totalOpen = total < documentResumeTotalCap(Math.max(1, shards.length));
+  if (totalOpen) {
+    for (const shard of shards) {
+      if (shard.images_status === "resumable" && shard.resumes < DOCUMENT_ASSET_RESUME_CAP) {
+        out.push({ shard: { first: shard.first_page, last: shard.last_page }, manifestSha256: shard.manifest_sha256, gap: false });
+      }
+    }
+    for (const gap of level.gaps ?? []) {
+      if (shards.some((shard) => shard.first_page <= gap.last && gap.first <= shard.last_page)) continue;
+      out.push({ shard: { first: gap.first, last: gap.last }, manifestSha256: null, gap: true });
+    }
   }
   return out.sort((a, b) => (a.shard?.first ?? 0) - (b.shard?.first ?? 0));
 }
 
 /**
- * Claim and resume queued documents until none is due (or `max`). Returns how many were processed. A no-op while
- * DOCSLURP_FIGURE_RESUME is off or the provider cannot resume (requests stay queued; nothing is lost).
+ * Claim and resume due documents until none is due (or `max`), with at most DOCSLURP_FIGURE_RESUME_CONCURRENCY at once.
+ * Returns how many were processed. A no-op while DOCSLURP_FIGURE_RESUME or DOCSLURP_DOPPLER_IMAGE_EXTRACT is off, or the
+ * provider cannot resume (requests stay queued; nothing is lost).
  */
-export async function runFigureResumes(deps: FigureResumeDeps, max = 4): Promise<number> {
-  if (!figureResumeDeployEnabled(deps.env ?? process.env) || !deps.provider) return 0;
+export async function runFigureResumes(deps: FigureResumeDeps, max = 8): Promise<number> {
+  const env = deps.env ?? process.env;
+  if (!figureResumeDeployEnabled(env) || !dopplerImageExtractEnabled(env) || !deps.provider) return 0;
   let processed = 0;
-  for (; processed < max; processed += 1) {
-    deps.signal?.throwIfAborted();
-    const leaseMs = deps.leaseMs ?? Math.max(10 * 60_000, 2 * deps.provider.timeoutMs(1000));
-    const row = await claimFigureResume(deps.sql, deps.workerId, leaseMs);
-    if (!row) break;
-    await resumeClaimed(deps, row);
-  }
+  let drained = false;
+  const lane = async () => {
+    while (!drained && processed < max) {
+      deps.signal?.throwIfAborted();
+      const row = await claimFigureResume(deps.sql, deps.workerId, env);
+      if (!row) { drained = true; return; }
+      processed += 1;
+      await resumeClaimed(deps, row);
+    }
+  };
+  await Promise.all(Array.from({ length: figureResumeConcurrency(env) }, lane));
   return processed;
 }
 
@@ -193,22 +278,27 @@ async function resumeClaimed(deps: FigureResumeDeps, row: ClaimedLevel): Promise
   const scope: DocumentAssetLedgerScope = { orgId: row.org_id, projectId: row.project_id, documentId: row.document_id, runId: row.run_id };
   const document = { id: row.document_id, userId: row.user_id, runId: row.run_id, artifactRoot: row.storage_prefix };
   const started = Date.now();
-  let vmMs = 0;
-  let outcome: "done" | "retry" | "blocked" = "done";
+  let outcome: Outcome = "done";
   let blocked: string | undefined;
+  let exhausted = false;
+  let vmMs = 0;
+  let added = 0;
   try {
     const adopted = await adoptPendingAssets(deps.sql, deps.storage, { scope, signal: deps.signal });
+    if (adopted.adopted > 0) recordFigureTelemetry("adopted_files", adopted.adopted);
     const todo = await units(deps.sql, row);
-    console.log(`[doppler-figures] resume claim doc=${row.document_id} org=${row.org_id} attempt=${row.resumes + 1} units=${todo.length} adopt=${adopted.adopted} lost=${adopted.lost}`);
-    pushPerfMetric({ metric: "figures.resume.claimed", value: 1, unit: "count", tags: ["doppler-figures"], metadata: { documentId: row.document_id } });
-    if (adopted.adopted > 0) pushPerfMetric({ metric: "figures.adopted_files", value: adopted.adopted, unit: "count", tags: ["doppler-figures"], metadata: { documentId: row.document_id } });
-    for (const unit of todo) {
-      deps.signal?.throwIfAborted();
+    console.log(`[doppler-figures] resume claim doc=${row.document_id} org=${row.org_id} launches=${row.resume_vm_launches} units=${todo.length} adopt=${adopted.adopted} lost=${adopted.lost}`);
+    recordFigureTelemetry("resume.claimed", 1);
+    const unit = todo[0];
+    if (!unit) {
+      // Nothing runnable (caps spent, or adopt finished it): never re-queued forever (H1).
+      exhausted = true;
+    } else {
       const result = await resumeUnit(deps, row, scope, document, unit);
-      vmMs += result.vmMs;
-      if (result.outcome !== "done") outcome = result.outcome;
-      if (result.blocked) blocked = result.blocked;
-      if (outcome === "blocked") break;
+      vmMs = result.vmMs;
+      added = result.added;
+      outcome = result.outcome;
+      blocked = result.blocked;
     }
   } catch (error) {
     if (deps.signal?.aborted) throw error;
@@ -217,35 +307,87 @@ async function resumeClaimed(deps: FigureResumeDeps, row: ClaimedLevel): Promise
     const ruled = error instanceof DocumentAssetLedgerError || error instanceof DopplerFigureRejection ? error
       : cause instanceof DocumentAssetLedgerError || cause instanceof DopplerFigureRejection ? cause : null;
     const rule = ruled ? ruled.rule : error instanceof Error ? error.name : "error";
-    // A reprocess or a newer run overtook this resume: a no-op, never a mix.
+    // A reprocess or a newer run overtook this resume: a no-op, never a mix (the fenced release then touches nothing).
     if (rule === "stale-write" || rule === "scope-mismatch") { outcome = "blocked"; blocked = "stale"; }
     else outcome = "retry";
     console.warn(`[doppler-figures] resume ${outcome === "blocked" ? "stale" : "failed"} doc=${row.document_id} rule=${rule}`);
-    pushPerfMetric({ metric: outcome === "blocked" ? "figures.resume.stale" : "figures.resume.failed", value: 1, unit: "count", tags: ["doppler-figures"], metadata: { documentId: row.document_id, rule } });
   } finally {
-    await release(deps.sql, row, outcome, blocked).catch((error) => console.warn(`[doppler-figures] resume release-failed doc=${row.document_id} error=${error instanceof Error ? error.name : typeof error}`));
-    if (vmMs > 0) await recordResumeVmTime(deps.sql, row, vmMs).catch(() => undefined);
+    if (outcome !== "lost") {
+      await release(deps.sql, row, deps.workerId, outcome, blocked, exhausted)
+        .catch((error) => console.warn(`[doppler-figures] resume release-failed doc=${row.document_id} error=${error instanceof Error ? error.name : typeof error}`));
+    }
   }
-  const [level] = await deps.sql<{ images_status: string }[]>`select images_status from document_extraction_levels where document_id = ${row.document_id} and org_id = ${row.org_id}`;
-  console.log(`[doppler-figures] resume done doc=${row.document_id} outcome=${level?.images_status ?? "none"} vmMs=${vmMs} ms=${Date.now() - started}`);
-  pushPerfMetric({ metric: level?.images_status === "resumable" ? "figures.resume.partial" : "figures.resume.completed", value: 1, unit: "count", tags: ["doppler-figures"], metadata: { documentId: row.document_id } });
+  // The attempt's own outcome (L1), never the level another writer left.
+  const label = outcome === "done" ? (exhausted ? "exhausted" : "completed") : outcome === "blocked" ? (blocked === "stale" ? "stale" : "blocked") : outcome === "lost" ? "lease-lost" : "failed";
+  console.log(`[doppler-figures] resume done doc=${row.document_id} outcome=${label} added=${added} vmMs=${vmMs} ms=${Date.now() - started}`);
+  recordFigureTelemetry("resume.attempts", 1, { outcome: label });
+  if (added > 0) recordFigureTelemetry("resume.added_files", added);
 }
 
-/** Resume VM time is ours (the failure was ours): a cost-only event through the usage ledger, never a customer charge. */
-async function recordResumeVmTime(sql: Client, row: ClaimedLevel, wallTimeMs: number): Promise<void> {
+/**
+ * Resume VM time is ours (the failure was ours): a cost-only event at its real allocated cost through the usage ledger,
+ * `billable: false` (never a customer charge), plus the organization's daily total. Recorded for failed and timed-out
+ * runs too.
+ */
+async function recordResumeVmTime(sql: Client, row: ClaimedLevel, wallTimeMs: number, outcome: string): Promise<void> {
+  const ms = Math.max(0, Math.round(wallTimeMs));
+  await sql`
+    insert into figure_resume_org_days (org_id, day, launches, vm_ms) values (${row.org_id}, (now() at time zone 'utc')::date, 0, ${ms})
+    on conflict (org_id, day) do update set vm_ms = figure_resume_org_days.vm_ms + excluded.vm_ms`;
   const profile = resolveWorkerDeploymentProfile();
   const event = buildLocalComputeUsageEvent({
-    metric: FIGURE_RESUME_METRIC, profile, observation: buildAllocatedResourceObservation({ profile, wallTimeMs: Math.max(0, wallTimeMs) }),
-    costRollup: "included",
-    metadata: { stage: "figure-resume", scope: "document", documentId: row.document_id, measurement: "allocated-capacity", billable: false },
+    metric: FIGURE_RESUME_METRIC, profile, observation: buildAllocatedResourceObservation({ profile, wallTimeMs: ms }),
+    costRollup: "authoritative",
+    metadata: { stage: "figure-resume", scope: "document", documentId: row.document_id, measurement: "allocated-capacity", billable: false, outcome },
   });
-  await persistScopedUsageEvents({ client: sql, userId: row.user_id, scope: { orgId: row.org_id, projectId: row.project_id }, usageEvents: [{ ...event, costCents: 0 } as typeof event] });
+  await persistScopedUsageEvents({ client: sql, userId: row.user_id, scope: { orgId: row.org_id, projectId: row.project_id }, usageEvents: [event] });
+  recordFigureTelemetry("resume.vm_ms", ms, { outcome });
+}
+
+/** Pages the document's PII stage withheld (owner rule: page-scoped), or null when it withheld nothing. */
+async function piiWithheldPages(sql: Client, row: ClaimedLevel): Promise<{ all: boolean; pages: Set<number> } | null> {
+  const [doc] = await sql<{ withholds: boolean }[]>`
+    select coalesce((metadata->'pii'->>'blocked')::boolean, false)
+      or coalesce((metadata->'pii'->>'redacted')::boolean, false)
+      or coalesce(jsonb_array_length(case when jsonb_typeof(metadata->'pii'->'withheldArtifactUris') = 'array'
+        then metadata->'pii'->'withheldArtifactUris' else '[]'::jsonb end), 0) > 0 as withholds
+    from documents where id = ${row.document_id} and org_id = ${row.org_id}`;
+  if (!doc) return { all: true, pages: new Set() };
+  if (!doc.withholds) return null;
+  // TODO(feat/pii-page-scoped): swap to its withheldPages(document) helper when it lands; the same rule.
+  const detections = await sql<{ page_number: number | null }[]>`
+    select distinct page_number from pii_detections where document_id = ${row.document_id} and run_id = ${row.run_id}`;
+  // Fail closed: a withholding outcome without page numbers withholds every resumed figure (the document still resumes).
+  return { all: detections.length === 0 || detections.some((d) => d.page_number === null), pages: new Set(detections.map((d) => d.page_number!).filter((n) => n !== null)) };
+}
+
+/** Add URIs to the document's withheld list (scoped by its organization); throws when the write did not land. */
+async function withholdUris(sql: Client, row: ClaimedLevel, uris: readonly string[]): Promise<void> {
+  if (uris.length === 0) return;
+  const updated = await sql`
+    update documents d
+    set metadata = jsonb_set(d.metadata, '{pii,withheldArtifactUris}', (
+          select coalesce(jsonb_agg(u order by u), '[]'::jsonb) from (
+            select jsonb_array_elements_text(case when jsonb_typeof(d.metadata->'pii'->'withheldArtifactUris') = 'array'
+              then d.metadata->'pii'->'withheldArtifactUris' else '[]'::jsonb end) as u
+            union
+            select unnest(${sql.array([...uris])}::text[])
+          ) withheld), true),
+        updated_at = now()
+    where d.id = ${row.document_id} and d.org_id = ${row.org_id} and jsonb_typeof(d.metadata->'pii') = 'object'
+    returning 1`;
+  if (updated.length !== 1) throw new Error("PII withheld list not updated");
 }
 
 async function resumeUnit(
   deps: FigureResumeDeps, row: ClaimedLevel, scope: DocumentAssetLedgerScope, document: { id: string; userId: string; runId: string; artifactRoot: string | null },
   unit: ResumeUnit,
-): Promise<{ outcome: "done" | "retry" | "blocked"; blocked?: string; vmMs: number }> {
+): Promise<{ outcome: Outcome; blocked?: string; vmMs: number; added: number }> {
+  if (!row.source_sha256) return { outcome: "blocked", blocked: "refused", vmMs: 0, added: 0 };
+  const pages = unit.shard ? unit.shard.last - unit.shard.first + 1 : row.page_count;
+  const timeoutMs = deps.provider!.timeoutMs(pages);
+  // Heartbeat: the lease covers this unit's VM budget, the download and the store (M2).
+  if (!await heartbeat(deps.sql, row, deps.workerId, 2 * timeoutMs + 10 * 60_000)) return { outcome: "lost", vmMs: 0, added: 0 };
   const work = await mkdtemp(path.join(tmpdir(), "figure-resume-"));
   let source: string | null = null;
   try {
@@ -257,57 +399,94 @@ async function resumeUnit(
         ...(unit.shard ? { shard: unit.shard } : {}), signal: deps.signal,
       });
     }
-    // 2. The source (the provider stages it into its VM; the host never parses it) and a fresh VM.
-    if (!row.source_sha256) return { outcome: "blocked", blocked: "refused", vmMs: 0 };
+    // 2. The source (the provider stages it into its VM; the host never parses it) and a fresh VM, counted before it
+    //    starts (lifetime, per organization per day) and timed whatever happens.
     const sourceKey = deps.storage.bucket ? keyOf(row.source_key, deps.storage.bucket) : row.source_key;
     source = await deps.storage.downloadToTempFile(sourceKey, "figure-resume-source-*.pdf");
     const outDir = path.join(work, "out");
-    const { mkdir } = await import("node:fs/promises");
     await mkdir(outDir, { mode: 0o700 });
-    const pages = unit.shard ? unit.shard.last - unit.shard.first + 1 : row.page_count;
-    const timeoutMs = deps.provider!.timeoutMs(pages);
+    const counted = await deps.sql`
+      update document_extraction_levels set resume_vm_launches = resume_vm_launches + 1
+      where ${fenced(deps.sql, row, deps.workerId)} and resume_vm_launches < ${FIGURE_RESUME_LIMITS.maxVmLaunches} returning 1`;
+    if (counted.length !== 1) return { outcome: "lost", vmMs: 0, added: 0 };
+    await deps.sql`
+      insert into figure_resume_org_days (org_id, day, launches, vm_ms) values (${row.org_id}, (now() at time zone 'utc')::date, 1, 0)
+      on conflict (org_id, day) do update set launches = figure_resume_org_days.launches + 1`;
     const vmStarted = Date.now();
-    const raw = await deps.provider!.resume({
-      input: source, sourceSha256: row.source_sha256, manifest: unit.manifestSha256 ? path.join(manifestDir, "manifest.jsonl") : null,
-      pages: unit.shard ? [unit.shard.first, unit.shard.last] : null, resumePages: null, dir: outDir, limits: dopplerImageLimits(row.page_count), timeoutMs,
-    }, deps.signal);
+    let raw: unknown;
+    let vmOutcome = "failed";
+    try {
+      raw = await deps.provider!.resume({
+        input: source, sourceSha256: row.source_sha256, manifest: unit.manifestSha256 ? path.join(manifestDir, "manifest.jsonl") : null,
+        pages: unit.shard ? [unit.shard.first, unit.shard.last] : null, resumePages: null, dir: outDir, limits: dopplerImageLimits(row.page_count), timeoutMs,
+      }, deps.signal);
+      vmOutcome = "returned";
+    } finally {
+      await recordResumeVmTime(deps.sql, row, Date.now() - vmStarted, vmOutcome)
+        .catch((error) => console.warn(`[doppler-figures] resume vm-cost-unrecorded doc=${row.document_id} error=${error instanceof Error ? error.name : typeof error}`));
+    }
     const vmMs = Date.now() - vmStarted;
     const outcome = parseSandboxedPdfFigureOutcome(raw, 500, row.page_count);
     if (outcome.status === "failed") {
       console.warn(`[doppler-figures] resume failed doc=${row.document_id} pages=${unit.shard ? `${unit.shard.first}-${unit.shard.last}` : "all"} reason=${JSON.stringify(outcome.reason)}`);
-      return { outcome: "retry", vmMs };
+      return { outcome: "retry", vmMs, added: 0 };
     }
     // 3. Validated whole; stored images keep their digest and are never uploaded again.
     const stored = new Map((await deps.sql<{ asset_id: string; sha256: string }[]>`
       select asset_id, sha256 from document_assets where org_id = ${row.org_id} and project_id = ${row.project_id} and document_id = ${row.document_id}
         and run_id = ${row.run_id} and storage_state = 'stored'`).map((r) => [r.asset_id, r.sha256]));
-    const set = await readDopplerFigureDir(unit.shard ? outDir : outDir, {
+    const set = await readDopplerFigureDir(outDir, {
       pageCount: row.page_count, signal: deps.signal, expect: outcome.status === "partial" ? "partial" : "complete", sourceSha256: row.source_sha256,
-      resume: { stored },
+      gaps: outcome.gaps ?? null, resume: { stored },
     });
     try {
+      // PII (page-scoped): figures on a withheld page are withheld before they can be stored or served.
+      const withheld = await piiWithheldPages(deps.sql, row);
+      if (withheld) {
+        const uris = set.files.filter((file) => withheld.all || withheld.pages.has(parseDopplerFigureId(file.id)?.pageNumber ?? -1))
+          .map((file) => deps.storage.uri(dopplerFolderKey(document, row.run_id, { id: file.id, format: file.format })));
+        await withholdUris(deps.sql, row, uris);
+        if (uris.length > 0) recordFigureTelemetry("resume.pii_withheld_files", uris.length);
+      }
       const ledger = figureLedgerHooks({ store: { markAssetsPending: (args) => markAssetsPending(deps.sql, args), markAssetsStored: (args) => markAssetsStored(deps.sql, args) }, run: { id: row.run_id, orgId: row.org_id, projectId: row.project_id } }, row.document_id);
-      const result = await storeDopplerFigures({ storage: deps.storage, document, runId: row.run_id, figures: set, markdown: "", ...(ledger ? { ledger } : {}), signal: deps.signal });
+      // Figure files only: the folder's manifests, Markdown and index are never rewritten before the ledger commits.
+      const result = await storeDopplerFigures({ storage: deps.storage, document, runId: row.run_id, figures: set, markdown: "", folderFiles: false, ...(ledger ? { ledger } : {}), signal: deps.signal });
+      // The new manifest staged by content first: a crash after the commit still finds it (downloadDopplerImagesDir).
+      await storeDopplerFolderManifests({ storage: deps.storage, set, document, runId: row.run_id, phase: "stage", signal: deps.signal });
       const pending = ledgerWriteForStoredFigures({ set, stored: result, outcome });
       await writeDocumentAssetLedger(deps.sql, {
         scope, level: { ...pending.level, markdownComplete: true }, assets: pending.assets,
         resume: unit.shard ? unit.shard : true, ...(pending.shards ? { shards: unit.shard ? pending.shards.filter((s) => s.first === unit.shard!.first) : pending.shards } : {}),
       });
-      // The new files are served: their slots join the document's run (scoped by its organization and project).
+      // After the commit: the manifests at their places, and (unsharded) the index with the stored Markdown's markers.
+      await storeDopplerFolderManifests({ storage: deps.storage, set, document, runId: row.run_id, phase: "publish", signal: deps.signal });
+      if (!unit.shard) await rebuildIndex(deps, set, document, row.run_id).catch((error) => console.warn(`[doppler-figures] resume index-not-rebuilt doc=${row.document_id} error=${error instanceof Error ? error.name : typeof error}`));
+      // The new files are served: their slots join the document's run (fenced by the lease, scoped by org and project).
       const slots: Record<string, string> = {};
-      for (const { slot, uri } of result.slots) if (slot.startsWith("doppler-figure:") || slot === "doppler-figures") slots[`${row.document_id}:${slot}`] = uri;
+      for (const { slot, uri } of result.slots) if (slot.startsWith("doppler-figure:")) slots[`${row.document_id}:${slot}`] = uri;
       if (Object.keys(slots).length > 0) {
         await deps.sql`update project_runs set artifacts = coalesce(artifacts, '{}'::jsonb) || ${deps.sql.json(slots)}::jsonb
           where id = ${row.run_id} and org_id = ${row.org_id} and project_id = ${row.project_id}`;
       }
-      console.log(`[doppler-figures] resume unit doc=${row.document_id} pages=${unit.shard ? `${unit.shard.first}-${unit.shard.last}` : "all"} added=${result.stats.files} bytes=${result.stats.bytes} vmMs=${vmMs}`);
+      console.log(`[doppler-figures] resume unit doc=${row.document_id} pages=${unit.shard ? `${unit.shard.first}-${unit.shard.last}` : "all"}${unit.gap ? " gap" : ""} added=${result.stats.files} bytes=${result.stats.bytes} vmMs=${vmMs}`);
+      return { outcome: "done", vmMs, added: result.stats.files };
     } finally {
       await disposeDopplerFigureSet(set);
     }
-    return { outcome: "done", vmMs };
   } finally {
     if (source) await rm(source, { force: true }).catch(() => undefined);
     await rm(work, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+
+async function rebuildIndex(deps: FigureResumeDeps, set: DopplerFigureSet, document: { id: string; userId: string; runId: string; artifactRoot: string | null }, runId: string): Promise<void> {
+  let file: string | null = null;
+  try {
+    file = await deps.storage.downloadToTempFile(dopplerFolderKey(document, runId, "markdown"), "figure-resume-md-*.md");
+    const markdown = await readFile(file, "utf8");
+    await storeDopplerFigureIndex({ storage: deps.storage, set, document, runId, markdown, signal: deps.signal });
+  } finally {
+    if (file) await rm(file, { force: true }).catch(() => undefined);
   }
 }
 
@@ -316,92 +495,199 @@ function keyOf(sourceKey: string, bucket: string): string {
   return sourceKey.startsWith(prefix) ? sourceKey.slice(prefix.length) : sourceKey;
 }
 
-// ---- Orphan GC and audit ----
+// ---- Orphan GC, retention and audit ----
 
 /** Objects younger than this are never collected (an upload in flight writes its pending row first, but be generous). */
 export const FIGURE_ORPHAN_GRACE_MS = 24 * 3600_000;
+/** Figures of failed or cancelled documents are kept this long for a retry, then collected (M11). */
+export const FIGURE_FAILED_RETENTION_MS = 7 * 24 * 3600_000;
+/** Keys one listing may return: the largest folder (file caps plus manifests) with room; a longer one is skipped whole. */
+const AUDIT_LIST_MAX = 40_000;
+/** Stored rows HEAD-checked per document per pass. */
+const AUDIT_HEAD_MAX = 2_000;
+const FIGURE_FILE = /^page-[0-9]{4,10}\/(?:image|figure)-[0-9]{3,7}\.(?:webp|svg|png|jpg)$/;
 
-export interface FigureAuditResult { documents: number; orphans: number; orphanBytes: number; missing: number; sizeMismatch: number }
+export interface FigureAuditResult {
+  documents: number; orphans: number; orphanBytes: number; expiredFiles: number; missing: number; sizeMismatch: number; adopted: number;
+  skippedTruncated: number; dryRun: { audit: boolean; gc: boolean };
+}
+
+interface AuditDoc {
+  document_id: string; org_id: string; project_id: string; run_id: string | null; assets_current: boolean; doc_status: string;
+  expired: boolean; manifest_key: string | null;
+}
 
 /**
- * One pass over up to `limit` documents with figure rows (oldest audited first): list each images folder under the
- * roots its rows use, delete objects no row of any run vouches for once they are past the grace period (the only figure
- * deleter besides document, run and tenant purges), and turn a current stored row whose object is missing or of another
- * size into a resumable `aborted` image, queueing a resume. Fixed folder files (manifests, page facts) are never collected.
+ * One pass over up to `limit` documents with figure rows or objects, oldest audited first (`audited_at`). Per document:
+ *   - adopt pending rows older than the grace period (no VM; M3);
+ *   - list its folders whole (a truncated listing skips the document: never "absent" read as "missing", H2);
+ *   - collect objects no row vouches for (page files only), or every object of an expired document (failed or cancelled
+ *     past FIGURE_FAILED_RETENTION_MS, or a level no longer current past the grace period; M11), each re-checked under the
+ *     document's ledger lock right before its delete (H2);
+ *   - confirm each current stored row with HEAD: a 404 or another size turns it into a resumable `aborted` image (queued,
+ *     never clearing an `attempts` block).
+ * The ledger writes need DOCSLURP_FIGURE_AUDIT and the deletes DOCSLURP_FIGURE_GC_DELETE; otherwise logged and measured
+ * only (M7).
  */
-export async function auditFigureStorage(deps: { sql: Client; storage: FigureResumeStorage; limit?: number; now?: Date }): Promise<FigureAuditResult> {
-  const result: FigureAuditResult = { documents: 0, orphans: 0, orphanBytes: 0, missing: 0, sizeMismatch: 0 };
+export async function auditFigureStorage(deps: { sql: Client; storage: FigureResumeStorage; limit?: number; now?: Date; env?: Record<string, string | undefined> }): Promise<FigureAuditResult> {
+  const env = deps.env ?? process.env;
+  const writes = figureAuditWrites(env);
+  const deletes = figureGcDeletes(env);
+  const result: FigureAuditResult = {
+    documents: 0, orphans: 0, orphanBytes: 0, expiredFiles: 0, missing: 0, sizeMismatch: 0, adopted: 0, skippedTruncated: 0,
+    dryRun: { audit: !writes, gc: !deletes },
+  };
   if (!deps.storage.listKeys) return result;
   const now = deps.now ?? new Date();
-  const documents = await deps.sql<Array<{ document_id: string; org_id: string; project_id: string; run_id: string | null }>>`
-    select l.document_id, l.org_id, l.project_id, l.run_id from document_extraction_levels l
-    where exists (select 1 from document_assets a where a.document_id = l.document_id and a.org_id = l.org_id and a.storage_key is not null)
-    order by random()
+  const documents = await deps.sql<AuditDoc[]>`
+    select l.document_id, l.org_id, l.project_id, l.run_id, l.assets_current, d.status as doc_status, l.manifest_key,
+      ((d.status in ('failed', 'cancelled') and d.updated_at < ${now}::timestamptz - ${`${FIGURE_FAILED_RETENTION_MS} milliseconds`}::interval)
+        or (not l.assets_current and l.updated_at < ${now}::timestamptz - ${`${FIGURE_ORPHAN_GRACE_MS} milliseconds`}::interval)) as expired
+    from document_extraction_levels l
+    join documents d on d.id = l.document_id and d.org_id = l.org_id
+    where l.asset_bytes > 0 or l.assets_pending > 0 or not l.assets_current
+      or exists (select 1 from document_assets a where a.document_id = l.document_id and a.org_id = l.org_id and a.storage_key is not null)
+    order by l.audited_at nulls first, l.document_id
     limit ${Math.min(Math.max(deps.limit ?? 50, 1), 500)}`;
   for (const doc of documents) {
     result.documents += 1;
-    const rows = await deps.sql<Array<{ asset_id: string; storage_key: string; bytes: number; storage_state: string; run_id: string | null }>>`
-      select asset_id, storage_key, bytes, storage_state, run_id from document_assets
-      where document_id = ${doc.document_id} and org_id = ${doc.org_id} and storage_key is not null`;
-    const vouched = new Set(rows.map((row) => row.storage_key));
-    // The images folders the rows use (per run root), each strictly this document's own.
-    const folders = new Set<string>();
-    for (const row of rows) {
-      const at = row.storage_key.indexOf(`/${DOPPLER_STORE_LAYOUT.folder}/${doc.document_id}/${DOPPLER_STORE_LAYOUT.imagesFolder}`);
-      if (at > 0) folders.add(row.storage_key.slice(0, at + `/${DOPPLER_STORE_LAYOUT.folder}/${doc.document_id}/${DOPPLER_STORE_LAYOUT.imagesFolder}`.length));
-    }
-    const present = new Set<string>();
-    for (const folder of folders) {
-      const listed = await deps.storage.listKeys({ prefix: folder, maxKeys: 20_000 });
-      for (const key of listed.keys) {
-        present.add(key);
-        const relative = key.slice(folder.length);
-        // Only page files are figures; manifests, page facts and shard manifests are the folder's own.
-        if (!/^page-[0-9]{4,10}\/(?:image|figure)-[0-9]{3,7}\.(?:webp|svg|png|jpg)$/.test(relative) || vouched.has(key)) continue;
-        const head = deps.storage.headObject ? await deps.storage.headObject(key).catch(() => null) : null;
-        if (!head || !head.lastModified || now.getTime() - head.lastModified.getTime() < FIGURE_ORPHAN_GRACE_MS) continue;
-        await deps.storage.deleteKeys?.([key]);
-        result.orphans += 1;
-        result.orphanBytes += head.size;
-      }
-    }
-    // Audit: current stored rows whose object is gone or of another size.
-    if (!doc.run_id) continue;
-    const lost: string[] = [];
-    for (const row of rows) {
-      if (row.storage_state !== "stored" || row.run_id !== doc.run_id) continue;
-      if (!present.has(row.storage_key)) { lost.push(row.asset_id); result.missing += 1; continue; }
-      if (deps.storage.headObject) {
-        const head = await deps.storage.headObject(row.storage_key).catch((error) => (isMissingObject(error) ? null : undefined));
-        if (head === null) { lost.push(row.asset_id); result.missing += 1; }
-        else if (head && head.size !== row.bytes) { lost.push(row.asset_id); result.sizeMismatch += 1; }
-      }
-    }
-    if (lost.length > 0) {
-      const scope = { orgId: doc.org_id, projectId: doc.project_id, documentId: doc.document_id, runId: doc.run_id };
-      try {
-        await markAssetsLost(deps.sql, { scope, ids: lost });
-        await deps.sql`update document_extraction_levels set resume_after = coalesce(resume_after, now()), resume_blocked = null
-          where document_id = ${doc.document_id} and org_id = ${doc.org_id} and images_status = 'resumable'`;
-      } catch (error) {
-        if (!(error instanceof DocumentAssetLedgerError)) throw error;
-      }
-    }
-    if (result.orphans > 0 || lost.length > 0) {
-      console.log(`[figure-audit] doc=${doc.document_id} orphans=${result.orphans} orphanBytes=${result.orphanBytes} missing=${result.missing} sizeMismatch=${result.sizeMismatch}`);
-    }
+    await deps.sql`update document_extraction_levels set audited_at = now() where document_id = ${doc.document_id} and org_id = ${doc.org_id}`;
+    await auditDocument(deps, doc, now, writes, deletes, result).catch((error) => {
+      console.warn(`[figure-audit] doc=${doc.document_id} failed error=${error instanceof Error ? error.name : typeof error}`);
+    });
   }
-  if (result.orphanBytes > 0) pushPerfMetric({ metric: "figures.orphan_bytes", value: result.orphanBytes, unit: "bytes", tags: ["figure-audit"], metadata: {} });
-  if (result.missing + result.sizeMismatch > 0) pushPerfMetric({ metric: "figures.ledger_storage_drift", value: result.missing + result.sizeMismatch, unit: "count", tags: ["figure-audit"], metadata: {} });
+  recordFigureTelemetry("gc.orphan_files", result.orphans, { mode: deletes ? "delete" : "dry-run" });
+  recordFigureTelemetry("gc.orphan_bytes", result.orphanBytes, { mode: deletes ? "delete" : "dry-run" }, "counter", "By");
+  recordFigureTelemetry("gc.expired_files", result.expiredFiles, { mode: deletes ? "delete" : "dry-run" });
+  recordFigureTelemetry("audit.ledger_storage_drift", result.missing + result.sizeMismatch, { mode: writes ? "write" : "dry-run" });
+  recordFigureTelemetry("audit.adopted_files", result.adopted);
+  recordFigureTelemetry("audit.skipped_truncated", result.skippedTruncated);
   return result;
 }
 
-/** Backlog gauges for SigNoz: queued documents and the oldest one's age. */
+async function auditDocument(
+  deps: { sql: Client; storage: FigureResumeStorage }, doc: AuditDoc, now: Date, writes: boolean, deletes: boolean, result: FigureAuditResult,
+): Promise<void> {
+  const scope = doc.run_id ? { orgId: doc.org_id, projectId: doc.project_id, documentId: doc.document_id, runId: doc.run_id } : null;
+  // 1. Pending rows a crash left on a level that is not queued (M3): adopted without a VM.
+  if (scope && writes && !doc.expired) {
+    const [aged] = await deps.sql<{ n: number }[]>`
+      select count(*)::int as n from document_assets
+      where document_id = ${doc.document_id} and org_id = ${doc.org_id} and run_id = ${doc.run_id} and storage_state = 'pending'
+        and updated_at < ${now}::timestamptz - ${`${FIGURE_ORPHAN_GRACE_MS} milliseconds`}::interval`;
+    if ((aged?.n ?? 0) > 0) {
+      const adopted = await adoptPendingAssets(deps.sql, deps.storage, { scope }).catch((error) => {
+        if (error instanceof DocumentAssetLedgerError) return null;
+        throw error;
+      });
+      if (adopted) result.adopted += adopted.adopted;
+    }
+  }
+  const rows = await deps.sql<Array<{ asset_id: string; storage_key: string; bytes: number; storage_state: string; run_id: string | null }>>`
+    select asset_id, storage_key, bytes, storage_state, run_id from document_assets
+    where document_id = ${doc.document_id} and org_id = ${doc.org_id} and storage_key is not null`;
+  // 2. The document's folders (every root its rows or its level use), each strictly this document's own.
+  const marker = `/${DOPPLER_STORE_LAYOUT.folder}/${doc.document_id}/`;
+  const folders = new Set<string>();
+  for (const key of [...rows.map((row) => row.storage_key), ...(doc.manifest_key ? [doc.manifest_key] : [])]) {
+    const at = key.indexOf(marker);
+    if (at > 0) folders.add(key.slice(0, at + marker.length));
+  }
+  const vouched = new Set(rows.map((row) => row.storage_key));
+  let truncated = false;
+  for (const folder of folders) {
+    const listed = await deps.storage.listKeys!({ prefix: folder, maxKeys: AUDIT_LIST_MAX });
+    if (listed.truncated) { truncated = true; break; }
+    for (const key of listed.keys) {
+      const relative = key.slice(folder.length + DOPPLER_STORE_LAYOUT.imagesFolder.length);
+      const figureFile = key.startsWith(`${folder}${DOPPLER_STORE_LAYOUT.imagesFolder}`) && FIGURE_FILE.test(relative);
+      // Unexpired: only page files no row vouches for. Expired: every object of the document's folder.
+      if (!doc.expired && (!figureFile || vouched.has(key))) continue;
+      const head = deps.storage.headObject ? await deps.storage.headObject(key).catch(() => null) : null;
+      if (!head || !head.lastModified || now.getTime() - head.lastModified.getTime() < FIGURE_ORPHAN_GRACE_MS) continue;
+      if (await collectUnderLock(deps, doc, key, deletes)) {
+        if (doc.expired) result.expiredFiles += 1;
+        else { result.orphans += 1; result.orphanBytes += head.size; }
+      }
+    }
+  }
+  if (truncated) {
+    result.skippedTruncated += 1;
+    console.warn(`[figure-audit] doc=${doc.document_id} listing truncated: skipped (no GC, no loss verdict)`);
+    return;
+  }
+  if (doc.expired) {
+    // The rows of an expired document no longer vouch: removed once its objects are gone (deletes on only).
+    if (deletes && rows.length > 0) {
+      await deps.sql.begin(async (tx) => {
+        await tx`select pg_advisory_xact_lock(hashtext(${`document-assets:${doc.document_id}`}))`;
+        await tx`delete from document_assets where document_id = ${doc.document_id} and org_id = ${doc.org_id}`;
+        await tx`update document_extraction_levels set assets_current = false, asset_bytes = 0, folder_bytes = 0, resume_after = null
+          where document_id = ${doc.document_id} and org_id = ${doc.org_id}`;
+      });
+    }
+    console.log(`[figure-audit] doc=${doc.document_id} expired status=${doc.doc_status} current=${doc.assets_current} files=${result.expiredFiles} mode=${deletes ? "delete" : "dry-run"}`);
+    return;
+  }
+  // 3. Current stored rows: HEAD each (bounded); only a confirmed 404 or another size is a loss.
+  if (!scope || !deps.storage.headObject) return;
+  const lost: string[] = [];
+  let checked = 0;
+  for (const row of rows) {
+    if (row.storage_state !== "stored" || row.run_id !== doc.run_id) continue;
+    if (++checked > AUDIT_HEAD_MAX) break;
+    const head = await deps.storage.headObject(row.storage_key).catch((error) => (isMissingObject(error) ? null : undefined));
+    if (head === null) { lost.push(row.asset_id); result.missing += 1; }
+    else if (head && head.size !== row.bytes) { lost.push(row.asset_id); result.sizeMismatch += 1; }
+  }
+  if (lost.length === 0) return;
+  console.log(`[figure-audit] doc=${doc.document_id} lost=${lost.length} mode=${writes ? "write" : "dry-run"}`);
+  if (!writes) return;
+  try {
+    await markAssetsLost(deps.sql, { scope, ids: lost });
+    // Queued again, but never clearing a block (an `attempts` block stays; H2, adversarial 13).
+    await deps.sql`update document_extraction_levels set resume_after = coalesce(resume_after, now())
+      where document_id = ${doc.document_id} and org_id = ${doc.org_id} and images_status = 'resumable' and resume_blocked is null`;
+  } catch (error) {
+    if (!(error instanceof DocumentAssetLedgerError)) throw error;
+  }
+}
+
+/**
+ * Delete one object under the document's ledger lock (the lock every ledger writer takes), re-checking right before the
+ * delete that no row vouches for it now (an adopt or a same-run retry may have just accepted it) or, for an expired
+ * document, that it is still expired. True when collected (or would be, in a dry run).
+ */
+async function collectUnderLock(deps: { sql: Client; storage: FigureResumeStorage }, doc: AuditDoc, key: string, deletes: boolean): Promise<boolean> {
+  return await deps.sql.begin(async (tx) => {
+    await tx`select pg_advisory_xact_lock(hashtext(${`document-assets:${doc.document_id}`}))`;
+    if (doc.expired) {
+      const [still] = await tx<{ ok: boolean }[]>`
+        select (d.status in ('failed', 'cancelled') or not l.assets_current) as ok
+        from document_extraction_levels l join documents d on d.id = l.document_id and d.org_id = l.org_id
+        where l.document_id = ${doc.document_id} and l.org_id = ${doc.org_id}`;
+      if (!still?.ok) return false;
+    } else {
+      const [vouch] = await tx`select 1 from document_assets where document_id = ${doc.document_id} and org_id = ${doc.org_id} and storage_key = ${key} limit 1`;
+      if (vouch) return false;
+    }
+    if (deletes) await deps.storage.deleteKeys?.([key]);
+    return true;
+  });
+}
+
+/** Backlog gauges for SigNoz: queued live documents and the oldest one's age (L3: dead documents are not counted). */
 export async function figureResumeBacklog(sql: Client): Promise<{ queued: number; oldestAgeS: number }> {
   const [row] = await sql<{ queued: number; oldest: number | null }[]>`
-    select count(*)::int as queued, extract(epoch from now() - min(resume_after))::float8 as oldest
-    from document_extraction_levels where resume_after is not null and resume_blocked is null and images_status = 'resumable'`;
-  return { queued: row?.queued ?? 0, oldestAgeS: Math.max(0, Math.round(row?.oldest ?? 0)) };
+    select count(*)::int as queued, extract(epoch from now() - min(l.resume_after))::float8 as oldest
+    from document_extraction_levels l
+    join documents d on d.id = l.document_id and d.org_id = l.org_id and d.run_id = l.run_id
+    where l.resume_after is not null and l.resume_blocked is null and l.images_status = 'resumable'
+      and d.status = 'completed' and d.superseded_at is null and d.archived_at is null and d.purged_at is null`;
+  const backlog = { queued: row?.queued ?? 0, oldestAgeS: Math.max(0, Math.round(row?.oldest ?? 0)) };
+  recordFigureTelemetry("resumable_backlog", backlog.queued, {}, "gauge");
+  recordFigureTelemetry("resume_oldest_age_s", backlog.oldestAgeS, {}, "gauge", "s");
+  return backlog;
 }
 
 export { dopplerFigureSlot, dopplerShardFolder };

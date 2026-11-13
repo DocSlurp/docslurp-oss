@@ -470,6 +470,22 @@ export function recordUnrecordedUsageTelemetry(args: { provider: string; model: 
   });
 }
 
+/**
+ * Figure resume, audit and GC signals (docs/extraction/doppler-figures.md): emitted on the OTel meter directly, so they
+ * reach SigNoz from background timers that have no per-document perf context. `kind: "gauge"` records the current value
+ * (backlog, oldest age); counters add. Labels are bounded categories (outcome, reason), never ids.
+ */
+export function recordFigureTelemetry(name: string, value: number, labels: Record<string, string> = {}, kind: "counter" | "gauge" = "counter", unit?: string): void {
+  if (!/^[a-z0-9_.]{1,64}$/.test(name) || !Number.isFinite(value)) return;
+  const meter = getRuntime()?.metrics?.getMeter("docslurp.figures");
+  if (!meter) return;
+  bestEffort(() => {
+    const options = unit ? { unit } : undefined;
+    if (kind === "gauge") meter.createGauge(`docslurp.figures.${name}`, options).record(value, labels);
+    else meter.createCounter(`docslurp.figures.${name}`, options).add(value, labels);
+  });
+}
+
 const dependencyScopeKey = createContextKey("docslurp.dependency.scope");
 export function withDependencyScope<T>(scope: Record<string, unknown>, run: () => T): T {
   return context.with(context.active().setValue(dependencyScopeKey, scope), run);

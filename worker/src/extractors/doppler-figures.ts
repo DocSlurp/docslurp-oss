@@ -1217,3 +1217,28 @@ export async function storeDopplerFolderManifests(args: {
   }
   return { bytes };
 }
+
+/**
+ * A resume's index, after its ledger write committed: `index.json` rebuilt from the whole document's validated set, with
+ * markers from the stored Markdown (`document.md`), never from an empty string. Only for an unsharded document (a shard's
+ * set covers its own range only: the index is left as the pass wrote it). Returns the index's size, or null when skipped.
+ */
+export async function storeDopplerFigureIndex(args: {
+  storage: DopplerFigureStorage; set: DopplerFigureSet; document: { id: string; userId: string; runId: string; artifactRoot?: string | null };
+  runId: string; markdown: string; budgets?: DopplerStoreBudgets; signal?: AbortSignal;
+}): Promise<{ bytes: number } | null> {
+  if (args.set.manifests.some((manifest) => manifest.range !== null)) return null;
+  const budgets = args.budgets ?? dopplerStoreBudgets();
+  const work = await mkdtemp(path.join(tmpdir(), "doppler-index-"));
+  try {
+    const built = await writeIndexFile(path.join(work, "index.json"), args.set, args.document.id, args.markdown);
+    const host = await openHostFile(built.path);
+    await uploadChecked({
+      storage: args.storage, budgets, key: dopplerFolderKey(args.document, args.runId, "index"), contentType: "application/json",
+      size: host.size, signal: args.signal, open: host.open, check: { expectedSize: host.size, sha256: null, magic: null },
+    });
+    return { bytes: host.size };
+  } finally {
+    await rm(work, { recursive: true, force: true }).catch(() => undefined);
+  }
+}

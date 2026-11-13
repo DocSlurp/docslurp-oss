@@ -1,11 +1,12 @@
 import { z } from "zod";
-import { projectFiguresEnabled } from "./doppler-figures.js";
 
 /*
  * Figure resume (docs/extraction/doppler-figures.md, "Resuming partial figures"): when the worker finishes the images a
  * figure pass left resumable, and who may ask for it. The deploy flag DOCSLURP_FIGURE_RESUME is the ceiling; a project
  * chooses `auto` (resumes are queued when a partial level commits), `manual` (only on request: the API, the SDK or the
- * chat's offer) or `off`. A project whose figures are off (`pipeline.figures`) never resumes.
+ * chat's offer) or `off`. A project whose figures are off (`pipeline.figures`) never resumes. The setting is per project:
+ * DocSlurp has no organization-level pipeline settings (a project inherits nothing from its organization), so there is
+ * no organization default to cap it (M9).
  */
 
 export const FIGURE_RESUME_ENV = "DOCSLURP_FIGURE_RESUME";
@@ -22,7 +23,52 @@ export const FIGURE_RESUME_LIMITS = {
   firstDelayMs: 2 * 60_000,
   /** Documents one bulk request (a project) may queue. */
   bulkMax: 100,
+  /**
+   * Resume VM launches per document over its lifetime (H4): counted when a VM starts, never reset by a request, reset only
+   * by a fresh, customer-paid pass (a new run). Past it the document is blocked `attempts`.
+   */
+  maxVmLaunches: 6,
+  /** Resume VM minutes per organization per UTC day (DOCSLURP_FIGURE_RESUME_ORG_DAILY_VM_MINUTES overrides). */
+  orgDailyVmMinutes: 120,
+  /** Resumes running at once on one worker (DOCSLURP_FIGURE_RESUME_CONCURRENCY overrides, 1..16). */
+  concurrency: 2,
+  /** Resumes running at once across the fleet (DOCSLURP_FIGURE_RESUME_GLOBAL_MAX overrides, 1..256). */
+  globalMax: 8,
 } as const;
+
+export const FIGURE_RESUME_ORG_DAILY_ENV = "DOCSLURP_FIGURE_RESUME_ORG_DAILY_VM_MINUTES";
+export const FIGURE_RESUME_CONCURRENCY_ENV = "DOCSLURP_FIGURE_RESUME_CONCURRENCY";
+/** The audit's ledger writes (`markAssetsLost`, adopting aged pending rows): `1`/`on` writes, anything else logs only. */
+export const FIGURE_AUDIT_ENV = "DOCSLURP_FIGURE_AUDIT";
+/** The orphan GC's deletes: `1`/`on` deletes, anything else is a dry run (log and metric only). */
+export const FIGURE_GC_DELETE_ENV = "DOCSLURP_FIGURE_GC_DELETE";
+
+function flagOn(env: Record<string, string | undefined>, name: string): boolean {
+  const raw = (env[name] ?? "").trim().toLowerCase();
+  return raw === "1" || raw === "true" || raw === "on";
+}
+/** Whether the audit may write the ledger (default off: dry run). */
+export function figureAuditWrites(env: Record<string, string | undefined> = process.env): boolean { return flagOn(env, FIGURE_AUDIT_ENV); }
+/** Whether the orphan GC may delete objects (default off: dry run). */
+export function figureGcDeletes(env: Record<string, string | undefined> = process.env): boolean { return flagOn(env, FIGURE_GC_DELETE_ENV); }
+
+function boundedInt(raw: string | undefined, fallback: number, min: number, max: number): number {
+  const value = Number.parseInt((raw ?? "").trim(), 10);
+  return Number.isSafeInteger(value) && value >= min && value <= max ? value : fallback;
+}
+/** Resume VM milliseconds one organization may use per UTC day. */
+export function figureResumeOrgDailyVmMs(env: Record<string, string | undefined> = process.env): number {
+  return boundedInt(env[FIGURE_RESUME_ORG_DAILY_ENV], FIGURE_RESUME_LIMITS.orgDailyVmMinutes, 0, 24 * 60) * 60_000;
+}
+export const FIGURE_RESUME_GLOBAL_ENV = "DOCSLURP_FIGURE_RESUME_GLOBAL_MAX";
+/** Resumes running at once across the fleet (live leases). */
+export function figureResumeGlobalMax(env: Record<string, string | undefined> = process.env): number {
+  return boundedInt(env[FIGURE_RESUME_GLOBAL_ENV], FIGURE_RESUME_LIMITS.globalMax, 1, 256);
+}
+/** Resumes one worker runs at once. */
+export function figureResumeConcurrency(env: Record<string, string | undefined> = process.env): number {
+  return boundedInt(env[FIGURE_RESUME_CONCURRENCY_ENV], FIGURE_RESUME_LIMITS.concurrency, 1, 16);
+}
 
 /**
  * DOCSLURP_FIGURE_RESUME: `1`/`true`/`on` lets the runner claim resumes; unset/`0`/`false`/`off` stops it (requests still
@@ -37,12 +83,14 @@ export function figureResumeDeployEnabled(env: Record<string, string | undefined
 }
 
 /**
- * Whether a project's figures are off. Reads the project-level opt-out (`pipeline.figures`, being added on the chart
- * export branch) in any of its plausible shapes, fail closed: `false`, `"off"`, or `{ enabled: false }` all mean off.
+ * Whether a project's figures are off (`pipeline.figures`, #363), fail closed: `false`, `"off"`, or `{ enabled: false }`
+ * all mean off.
  */
 export function projectFiguresOff(pipeline: unknown): boolean {
-  // The same rule as projectFiguresEnabled (doppler-figures.ts) for the project part; the deploy flag is checked apart.
-  return !projectFiguresEnabled(pipeline, { DOCSLURP_DOPPLER_IMAGE_EXTRACT: "1" });
+  // figuresEnabled (doppler-figures.ts) for the project part, failing closed on other shapes; the deploy flag is apart.
+  const figures = (pipeline as { figures?: unknown } | null | undefined)?.figures;
+  if (figures === false || figures === "off") return true;
+  return !!figures && typeof figures === "object" && (figures as { enabled?: unknown }).enabled === false;
 }
 
 /** The project's resume mode (`pipeline.figureResume`, default `auto`); `off` when its figures are off. */
