@@ -35,10 +35,11 @@ import {
 
 import { sql, type SqlClient } from "../db.js";
 import { recordUnitCharge } from "../lib/ai-usage.js";
+import { writeBehindWithinCap } from "../lib/billed-write-behind.js";
 import { currentChatTurn } from "../lib/chat-turn-context.js";
 import { effectiveSearchMode } from "../search/search-mode.js";
 import { consumeSearchModeLimit } from "../search/search-mode-limits.js";
-import { currentRequestSignal } from "../lib/request-context.js";
+import { currentRequestOrgId, currentRequestSignal } from "../lib/request-context.js";
 import { jsonRecord } from "../lib/json-record.js";
 import { lanceDbFullTextSearch, lanceDbVectorSearch, warmLanceDbSearch, type LanceDbSearchHit } from "../search/lancedb.js";
 import { decodeLanceChunkHydration } from "@docslurp/shared/lancedb-hydration";
@@ -375,6 +376,8 @@ export interface SearchResponse {
   searchMode?: SearchMode;
   /** Keyword fan-out: each query as sent and the chunks it matched before fusion. */
   keywordQueries?: KeywordQueryOutcome[];
+  /** Internal: the organization the search was scoped to (billing stamps it on the charge). Not public. */
+  scopeOrgId?: string | null;
   /** Internal: the turn's calibrated vector relevance, for the chat scope decline. Not part of the public response. */
   scopeSignal?: ScopeSignal | null;
 }
@@ -1879,23 +1882,30 @@ async function chargeSearch(result: SearchResponse, userId: string, searchId: st
     enqueueSearchCharge({ userId, orgId: null, projectId, mode: result.searchMode! }, searches);
     return;
   }
-  try {
+  const llmMode = result.searchMode ?? "deep";
+  const credits = searchCredits(searches, { llmStrategies, mode: llmMode });
+  const orgId = result.scopeOrgId ?? currentRequestOrgId() ?? null;
+  // Committed after the response within SEARCH_WRITE_BEHIND_MAX_CREDITS, retried until it lands; the id makes a retry idempotent.
+  await writeBehindWithinCap(credits, async () => {
     await recordUnitCharge({
       userId,
-      scope: { projectId, sessionId: result.sessionId },
+      // The organization is fixed now: a project deleted before a deferred write commits must still be debited.
+      scope: { projectId, orgId, sessionId: result.sessionId },
       charge: {
         id: `search:${searchId}`,
         metric: BILLABLE_UNIT_METRICS.search,
         amount: searches,
         unit: "search",
-        credits: searchCredits(searches, { llmStrategies, mode: result.searchMode ?? "deep" }),
-        metadata: { llmStrategies, searchMode: result.searchMode ?? "deep", searchUnits: searchUnits({ llmStrategies, mode: result.searchMode ?? "deep" }) },
+        credits,
+        metadata: { llmStrategies, searchMode: llmMode, searchUnits: searchUnits({ llmStrategies, mode: llmMode }) },
       },
     });
-  } catch (error) {
+  }, {
+    // Deferred against this org's own allowance; without an org the charge is written before the response.
+    orgId,
     // A failed charge never fails the search the user already has.
-    console.error(`[search] charge failed session=${result.sessionId}: ${error instanceof Error ? error.message : String(error)}`);
-  }
+    onError: (error, attempt) => console.error(`[search] charge failed session=${result.sessionId} attempt=${attempt + 1}: ${error instanceof Error ? error.message : String(error)}`),
+  }).done;
 }
 
 async function executeHybridSearch(
@@ -2043,6 +2053,7 @@ async function executeHybridSearch(
   // The mode the search ran in: billing categories and the public response read it.
   response.searchMode = mode;
   fanout?.annotate(response);
+  response.scopeOrgId = setup.normalizedScope.orgId;
   return response;
 }
 
