@@ -437,14 +437,15 @@ export async function runFirstPassBatch(deps: FirstPassBatchDeps, input: { runId
     }
 
     // Figures: stored only for documents whose text was extracted and whose publish gate passed, never failing a document.
+    // `document.md` is the document's Markdown slot as the drains committed it (the text the PII stage scanned), never the
+    // batch's raw output: the slots are read from a fresh state once.
+    const committed = figureReady.size > 0 ? await loadRunState(deps.store, input.runId, { hydrate: true }) : null;
     for (const [documentId, { dir, outcome }] of figureReady) {
       const document = documents.get(documentId)!;
       if (!results.has(key(input.runId, documentId)) || !cleared.has(documentId)) continue;
-      // The Markdown exactly as Doppler wrote it: stored as `document.md` beside the images, and read for its markers.
-      const markdownPath = files.find((f) => f.documentId === documentId)!.output;
-      const markdown = await readFile(markdownPath, "utf8").catch(() => "");
+      const markdownSlot = await readMarkdownSlotBytes(deps.storage, committed?.artifactLedger.readDocument(documentId, "markdown")).catch(() => null);
       await runDocumentStage(state, document, FIRST_PASS_FIGURES_STAGE, `${documentId}:${FIRST_PASS_FIGURES_STAGE}`, "figures stored", () =>
-        storeFirstPassFigures({ state, document, dir, outcome, markdownPath, markdown, storage: deps.storage as unknown as DopplerFigureStorage, runId: input.runId, signal: batch.signal })
+        storeFirstPassFigures({ state, document, dir, outcome, markdownSlot, storage: deps.storage as unknown as DopplerFigureStorage, runId: input.runId, signal: batch.signal })
       , batch.signal);
     }
 
@@ -637,7 +638,9 @@ export const __test = { textlessPages, cp };
  * images level). Never fails the document; cancellation still throws.
  */
 export async function storeFirstPassFigures(args: {
-  state: WorkflowState; document: Document; dir: string; outcome: SandboxedPdfFigureOutcome; markdownPath: string; markdown: string;
+  state: WorkflowState; document: Document; dir: string; outcome: SandboxedPdfFigureOutcome;
+  /** The bytes of the document's Markdown slot (readMarkdownSlotBytes), or null: `document.md` and the markers' source. */
+  markdownSlot: Buffer | null;
   storage: DopplerFigureStorage; runId: string; signal: AbortSignal;
 }): Promise<{ artifactUri?: string; stats: Record<string, unknown> }> {
   const { state, document, outcome } = args;
@@ -649,8 +652,8 @@ export async function storeFirstPassFigures(args: {
   }
   // This step runs after the document's PII stage, so that stage's withheld list never saw these files. When the
   // outcome withholds artifacts (redact_artifacts or block_indexing matched), every file stored here joins the list
-  // before any slot is recorded, and Doppler's raw `document.md` (unredacted text) is not stored at all. A store that
-  // cannot say or cannot add stores nothing (fail closed).
+  // before any slot is recorded, and no `document.md` is stored. A store that cannot say or cannot add stores nothing
+  // (fail closed). Otherwise `document.md` is exactly the Markdown slot's bytes, the text the PII stage scanned.
   const piiEnabled = !!state.run.pipeline?.piiPolicy?.enabled;
   const pii = state.store;
   if (piiEnabled && (!pii?.documentPiiWithholds || !pii.appendWithheldArtifactUris)) {
@@ -665,12 +668,22 @@ export async function storeFirstPassFigures(args: {
       pageCount: document.pageCount, signal: args.signal, expect: outcome.status === "partial" ? "partial" : "complete",
       sourceSha256: document.sourceSha256 ?? null,
     });
+    const committedUris = committedDocumentUris(state, documentId);
     const stored = await storeDopplerFigures({
-      storage: args.storage, document, runId: args.runId, figures, markdown: args.markdown,
-      dopplerMarkdownPath: withhold ? null : args.markdownPath, source: dopplerSourcePointer(document), signal: args.signal,
-      committedUris: committedDocumentUris(state, documentId),
+      storage: args.storage, document, runId: args.runId, figures, markdown: args.markdownSlot?.toString("utf8") ?? "",
+      documentMarkdown: withhold ? null : args.markdownSlot, source: dopplerSourcePointer(document), signal: args.signal,
+      committedUris,
     });
-    if (withhold) await pii!.appendWithheldArtifactUris!(documentId, stored.slots.map(({ uri }) => uri));
+    if (withhold) {
+      try {
+        await pii!.appendWithheldArtifactUris!(documentId, stored.slots.map(({ uri }) => uri));
+      } catch (error) {
+        // Nothing records these objects: remove them (never a committed one) rather than leave them unreachable.
+        const removable = stored.objectKeys.filter((objectKey) => !committedUris.has(args.storage.uri(objectKey)));
+        if (removable.length > 0) await args.storage.deleteKeys?.(removable).catch(() => undefined);
+        throw error;
+      }
+    }
     for (const { slot, uri } of stored.slots) state.artifactLedger.recordDocument(documentId, slot, uri);
     // The ledger write takes over the reader's spill (it removes it once written).
     const ledger = queueAssetLedger(state, documentId, ledgerWriteForStoredFigures({ set: figures, stored, outcome }));
@@ -683,6 +696,17 @@ export async function storeFirstPassFigures(args: {
     const ledger = queueAssetLedger(state, documentId, ledgerWriteForFailedFigures({ outcome }));
     return { stats: { dopplerFigures: { status: "failed", rule, ledger } } };
   }
+}
+
+/**
+ * The bytes of a document's Markdown slot (the text the PII stage scans), for `document.md`; null when there is none or
+ * it is not a text object (a manifest).
+ */
+export async function readMarkdownSlotBytes(storage: Pick<ArtifactStore, "getBytes" | "bucket">, uri: string | undefined): Promise<Buffer | null> {
+  if (!uri) return null;
+  const objectKey = keyFromStorageUri(uri, storage.bucket);
+  if (!objectKey || objectKey.endsWith(".json")) return null;
+  return await storage.getBytes(objectKey);
 }
 
 /** URIs the document's artifact slots already record (committed objects a failed store must never delete). */

@@ -37,6 +37,8 @@ async function runStage(vm: (job: any) => Promise<Partial<SandboxedPdfResult>>, 
   const json = new Map<string, any>();
   const storage = {
     uri: (key: string) => `s3://test/${key}`,
+    bucket: "test",
+    getBytes: async (key: string) => { const o = objects.get(key); if (!o) throw new Error("NoSuchKey"); return o.bytes; },
     putBytes: async (key: string, data: Uint8Array, type: string) => {
       if (faults.putBytes?.(key)) throw Object.assign(new Error(`upload of ${key} failed: Prose before the figure.`), { code: "SlowDown" });
       objects.set(key, { bytes: Buffer.from(data), type });
@@ -269,6 +271,39 @@ describe("Doppler figures in the extraction stage", () => {
       vi.stubEnv("DOCSLURP_DOPPLER_IMAGE_EXTRACT", "1");
       expect(firstPassBatchOptions({ figures: false } as any, process.env).figures).toBe(false);
       expect(firstPassBatchOptions({} as any, process.env).figures).toBe(true);
+    });
+  });
+
+  describe("document.md is exactly the Markdown slot the PII stage scans (M1, L1)", () => {
+    it("front matter shaped like PII is stripped before the scan, and document.md is the stripped slot, not the raw output", async () => {
+      registerProvider(true);
+      vi.stubEnv("DOCSLURP_DOPPLER_IMAGE_EXTRACT", "1");
+      const out = await runStage(async (job) => {
+        await writeFile(job.output, `---\nName: Ada Example\nSSN: 123-45-6789\n---\n${MARKDOWN}`);
+        await cp(FIXTURE, job.figures.dir, { recursive: true });
+        return { figures: { status: "extracted" as const, confined: true } };
+      });
+      expect(out.stageState?.status).toBe("completed");
+      const slotUri = out.ledger[`${DOC_ID}:markdown`] ?? out.stageState?.artifactUri;
+      const slot = out.objects.get(String(slotUri).replace("s3://test/", ""))!.bytes;
+      const stored = out.objects.get(`${folderRoot}/document.md`)!.bytes;
+      expect(stored.equals(slot)).toBe(true);
+      expect(stored.toString()).not.toContain("123-45-6789");
+    });
+
+    it("L1: after a critique replaced the text, document.md is the corrected slot, not the pre-critique candidate", async () => {
+      registerProvider(true);
+      vi.stubEnv("DOCSLURP_DOPPLER_IMAGE_EXTRACT", "1");
+      const corrected = MARKDOWN.replace("Prose before the figure.", "Corrected prose before the figure.");
+      const out = await runStage(figureFolder, {}, { prepare: (internals) => {
+        internals.runSelfCritique = async () => {
+          await internals.storage.streamText("u/r/critique/doc.md", corrected);
+          return { correctedText: corrected, correctedTextUri: "s3://test/u/r/critique/doc.md", critiqueArtifactUri: "s3://test/u/r/critique/doc.json",
+            reviewedPages: [1], acceptedPages: [1], corrections: [], inputTokens: 0, outputTokens: 0, latencyMs: 0, costCents: 0 };
+        };
+      } });
+      expect(out.stageState?.status).toBe("completed");
+      expect(out.objects.get(`${folderRoot}/document.md`)?.bytes.toString()).toBe(corrected);
     });
   });
 });

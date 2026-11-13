@@ -769,6 +769,8 @@ export interface StoredDopplerFigures {
   manifest: { key: string; sha256: string } | null;
   /** Every stored manifest: one, or one per shard with its page range. */
   manifests: Array<{ key: string; sha256: string; range: [number, number] | null }>;
+  /** Every object this call wrote (files, manifests, Markdown, source pointer, index): what a caller removes if it cannot record them. */
+  objectKeys: string[];
   stats: DopplerFigureStats;
 }
 
@@ -862,8 +864,11 @@ export async function storeDopplerFigures(args: {
   figures: DopplerFigureSet;
   /** The stored Markdown: which markers it holds, and whether each names a stored figure. */
   markdown: string;
-  /** The Markdown file exactly as Doppler wrote it (stored as `document.md`); the folder has none when absent. */
-  dopplerMarkdownPath?: string | null;
+  /**
+   * `document.md`: always exactly the bytes of the document's Markdown slot, the text the PII stage scans (sanitized, after
+   * any OCR fill or critique), never the provider's raw output. The folder has none when absent.
+   */
+  documentMarkdown?: Buffer | null;
   /** `source.json`; the folder has none when absent. */
   source?: DopplerSourcePointer | null;
   /**
@@ -917,14 +922,13 @@ export async function storeDopplerFigures(args: {
         uri: args.storage.uri(manifestKey),
       });
     }
-    if (args.dopplerMarkdownPath) {
+    if (args.documentMarkdown) {
       const markdownKey = key("markdown");
-      const host = await openHostFile(args.dopplerMarkdownPath);
-      tail.push(() => uploadChecked({
-        storage: args.storage, budgets, key: markdownKey, contentType: "text/markdown; charset=utf-8", size: host.size, signal: args.signal,
-        open: host.open, check: { expectedSize: host.size, sha256: null, magic: null },
-        onStart: () => { written.push(markdownKey); },
-      }));
+      const bytes = args.documentMarkdown;
+      tail.push(async () => {
+        written.push(markdownKey);
+        await args.storage.putBytes(markdownKey, bytes, "text/markdown; charset=utf-8");
+      });
       slots.push({ slot: DOPPLER_MARKDOWN_SLOT, uri: args.storage.uri(markdownKey) });
     }
     if (args.source) {
@@ -966,7 +970,10 @@ export async function storeDopplerFigures(args: {
       bufferBudgetBytes: budgets.job.limit,
     };
     const single = storedManifests.length === 1 && storedManifests[0]!.range === null ? storedManifests[0]! : null;
-    return { indexUri: args.storage.uri(indexKey), slots, keys, manifest: single ? { key: single.key, sha256: single.sha256 } : null, manifests: storedManifests, stats };
+    return {
+      indexUri: args.storage.uri(indexKey), slots, keys, manifest: single ? { key: single.key, sha256: single.sha256 } : null, manifests: storedManifests,
+      objectKeys: [...new Set(written)], stats,
+    };
   } catch (error) {
     let cleanup: DopplerFigureStoreError["cleanup"] = "none";
     // Only keys this call started writing, and never one a slot or ledger row already references (a committed object
