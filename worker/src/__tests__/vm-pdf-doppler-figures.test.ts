@@ -26,7 +26,7 @@ function registerProvider(figures: boolean) {
  */
 type StorageFaults = { putBytes?: (key: string) => boolean; putJson?: (key: string) => boolean };
 
-async function runStage(vm: (job: any) => Promise<Partial<SandboxedPdfResult>>, faults: StorageFaults = {}) {
+async function runStage(vm: (job: any) => Promise<Partial<SandboxedPdfResult>>, faults: StorageFaults = {}, pipelineOverrides: Record<string, unknown> = {}) {
   const { defaultPipelineFeatures, defaultDocumentExtractionConfig } = await import("@docslurp/shared");
   const { WorkflowState } = await import("../pipeline/pipeline.js");
   const dir = await mkdtemp(path.join(tmpdir(), "vm-figures-stage-"));
@@ -72,7 +72,7 @@ async function runStage(vm: (job: any) => Promise<Partial<SandboxedPdfResult>>, 
   const doc = { id: DOC_ID, userId: "u", runId: "r", filename: "source.pdf", mimeType: "application/pdf", sourceKey: "u/source.pdf", status: "processing", extractionMode: "hybrid", pageCount: 5, createdAt: new Date(), updatedAt: new Date() };
   const state = WorkflowState.create({ id: "r", orgId: "o", userId: "u", kind: "bulk-upload", status: "processing", stage: "extract-markdown", totalDocuments: 1, processedDocuments: 0, pagesTotal: 5, pagesProcessed: 0, spentCents: 0,
     pipeline: { ...defaultPipelineFeatures, quality: "fast", markdownExtraction: true, visionFallback: false,
-      documentExtraction: { ...defaultDocumentExtractionConfig, order: { pdf: ["vm-pdf"] } } },
+      documentExtraction: { ...defaultDocumentExtractionConfig, order: { pdf: ["vm-pdf"] } }, ...pipelineOverrides },
     error: null, stats: {}, artifacts: {}, claimId: null, createdAt: new Date(), updatedAt: new Date() } as any, [doc as any]);
   state.artifactLedger.recordDocument(DOC_ID, "normalizedFormat", "pdf");
   try {
@@ -96,6 +96,20 @@ describe("Doppler figures in the extraction stage", () => {
     registerProvider(true);
     vi.stubEnv("DOCSLURP_DOPPLER_IMAGE_EXTRACT", "");
     const out = await runStage(async () => ({}));
+    expect(out.jobs).toHaveLength(1);
+    expect(out.jobs[0].figures).toBeUndefined();
+    expect(out.stageState?.status).toBe("completed");
+    expect(out.stageState?.stats?.dopplerFigures).toBeUndefined();
+    expect([...out.objects.keys()].some((key) => key.includes("doppler-figures"))).toBe(false);
+    expect(Object.keys(out.ledger).some((slot) => slot.includes("doppler-figure"))).toBe(false);
+    expect(out.markdown).toBe(MARKDOWN);
+  });
+
+  it("flag on, project opted out (figures: false): no figure request, no figure objects or slots", async () => {
+    registerProvider(true);
+    vi.stubEnv("DOCSLURP_DOPPLER_IMAGE_EXTRACT", "1");
+    const vm = vi.fn(async () => ({}));
+    const out = await runStage(vm, {}, { figures: false });
     expect(out.jobs).toHaveLength(1);
     expect(out.jobs[0].figures).toBeUndefined();
     expect(out.stageState?.status).toBe("completed");

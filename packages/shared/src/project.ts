@@ -1,5 +1,5 @@
 import { geoPredicateSchema } from "./geo.js";
-import { chartExportTierSchema } from "./chart-export.js";
+import { CHART_EXPORT_SWITCH_VALUES, chartExportTierSchema } from "./chart-export.js";
 import { projectSettingsProposalSchema } from "./project-settings-proposal.js";
 import { z } from "zod";
 import { documentTagsSchema } from "./document-tags.js";
@@ -102,9 +102,18 @@ export const projectSchema = z.object({
   billingEnforced: z.boolean().optional(),
   /**
    * This deployment's chart export defaults for a project with no tier: `app` (DocSlurp app uploads) and `machine`
-   * (API, MCP, SDK, CLI), plus whether the billed `models` tier is offered (`DOCSLURP_CHART_EXPORT=on`).
+   * (API, MCP, SDK, CLI), after the kill switch; whether the billed `models` tier is offered (`DOCSLURP_CHART_EXPORT=on`);
+   * whether `free` may be chosen explicitly (`DOCSLURP_CHART_EXPORT_FREE_EXPLICIT=on`); and the switch itself. Clients
+   * label the default and classify changes from these, never from a code default. Absent (an older server): treat as
+   * `CONSERVATIVE_CHART_EXPORT_DEFAULTS` and hide tier controls.
    */
-  chartExportDefaults: z.object({ app: chartExportTierSchema, machine: chartExportTierSchema, modelsAvailable: z.boolean() }).optional(),
+  chartExportDefaults: z.object({
+    app: chartExportTierSchema,
+    machine: chartExportTierSchema,
+    modelsAvailable: z.boolean(),
+    freeAvailable: z.boolean(),
+    ceiling: z.enum(CHART_EXPORT_SWITCH_VALUES),
+  }).optional(),
   /** Retained versions per document for this project; null inherits the organization's setting. */
   retainDocumentVersions: z.number().int().min(1).max(100).nullable().default(null),
   /**
@@ -839,7 +848,13 @@ export type ChartExportOverride = z.infer<typeof chartExportOverrideSchema>;
 
 /** One description for the override on every machine surface (MCP tools, SDK and CLI docs). */
 export const CHART_EXPORT_OVERRIDE_DESCRIPTION =
-  "Chart and diagram export for this request: { tier: \"off\" | \"free\" | \"models\" }. Omit for the project's setting; a project with no setting is off for API, MCP, SDK and CLI calls (on with the free steps in the DocSlurp app). free exports charts that carry their own data (Office charts, embedded chart specs, vector graphics) at no charge. models also reads other charts with AI, billed per chart read. The deployment can cap this; models is refused where it is unavailable.";
+  "Chart and diagram export for this request: { tier: \"off\" | \"free\" | \"models\" }. Omit for the project's setting; a project with no setting uses the deployment's default for the caller (see the project record's chartExportDefaults; API, MCP, SDK and CLI calls default to off). free exports charts that carry their own data (Office charts, embedded chart specs, vector graphics) at no charge; models also reads other charts with AI, billed per chart read. Each tier is available only where the deployment turns it on: a tier it does not offer is refused with 400 chart_export_tier_unavailable, never silently lowered. models on a project whose tier is set to off or free needs project editor rights (or an API key with the pipeline:billed-features scope).";
+
+/** The chart export override description with the deployment's actual defaults, for tool and prompt text built at runtime. */
+export function chartExportOverrideDescriptionFor(defaults: { app: string; machine: string; modelsAvailable: boolean; freeAvailable: boolean }): string {
+  const offered = ["off", ...(defaults.freeAvailable ? ["free"] : []), ...(defaults.modelsAvailable ? ["models"] : [])].join(", ");
+  return `${CHART_EXPORT_OVERRIDE_DESCRIPTION} On this deployment: API, MCP, SDK and CLI calls default to ${defaults.machine}; DocSlurp app uploads default to ${defaults.app}; tiers a request may choose: ${offered}.`;
+}
 
 export const reprocessRunSchema = z
   .object({

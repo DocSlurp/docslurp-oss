@@ -3,7 +3,7 @@ import { countDeferredPdfPages, firstPassServesDocument, primeFirstPassResults }
 import { reserveOrientationAttempt } from "../lib/image-orientation.js";
 import { EMBEDDED_IMAGE_TARGETS, embeddedImageGraph, resolveEmbeddedImageRequest } from "../extractors/embedded-images.js";
 import { anchorImageMarkdownFile } from "../extractors/image-markdown.js";
-import { DopplerFigureRejection, DopplerFigureStoreError, dopplerImageExtractEnabled, readDopplerFigureDir, storeDopplerFigures } from "../extractors/doppler-figures.js";
+import { DopplerFigureRejection, DopplerFigureStoreError, readDopplerFigureDir, storeDopplerFigures } from "../extractors/doppler-figures.js";
 import {
   SANDBOXED_PDF_MAX_MARKDOWN_BYTES, VM_PDF_EXTRACTOR_ID, requireSandboxedPdfProvider, sandboxedPdfFigures, sandboxedPdfProvider, sandboxedPdfLayoutFacts, sandboxedPdfOcrPages,
 } from "../extractors/plugins.js";
@@ -34,6 +34,7 @@ import {
   resolvePdfExtractorSetting,
   hostPdfExtractorsUnderSandbox,
   sandboxedPdfConfigured,
+  figuresEnabled,
   type ExtractionContract,
   type ExtractionArtifactRef,
 } from "@docslurp/shared";
@@ -530,7 +531,7 @@ export class ExtractMarkdownStage implements Stage {
                 // Doppler figures (DOCSLURP_DOPPLER_IMAGE_EXTRACT): from the same VM job, into an empty host folder per candidate.
                 // A first-pass document's figures come from its batch and are stored by the first pass itself.
                 // The project may opt out (`pipeline.figures: false`); the deploy flag stays the ceiling.
-                if (isPdf && state.run.pipeline.figures !== false && dopplerImageExtractEnabled() && sandboxedPdfProvider()?.figures && !firstPassServesDocument(state.run.id, document.id)) {
+                if (isPdf && figuresEnabled(state.run.pipeline, process.env) && sandboxedPdfProvider()?.figures && !firstPassServesDocument(state.run.id, document.id)) {
                   for (const prepared of [isolated.primary.extractor, isolated.secondary?.extractor]) {
                     if (!prepared?.plan.sandboxedPdf) continue;
                     const dir = await mkdtemp(path.join(path.dirname(prepared.plan.sandboxedPdf.output), ".doppler-figures-"));

@@ -94,7 +94,7 @@ export const estimateRoutes = new Hono().post(
       // Anonymous quotes resolve an unset chart tier as a machine caller (off); a signed-in app session as the app.
       return c.json(quoteEstimate(body, { origin: runOriginOf(c) }));
     } catch (error) {
-      if (error instanceof QuoteSettingsError) return apiErrorResponse(c, 400, "invalid_request", error.message);
+      if (error instanceof QuoteSettingsError) return apiErrorResponse(c, 400, error.code as never, error.message);
       throw error;
     }
   },

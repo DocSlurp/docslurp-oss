@@ -16,7 +16,7 @@ import { copyFile, cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/p
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { dopplerImageExtractEnabled, type PipelineFeatures } from "@docslurp/shared";
+import { figuresEnabled, type PipelineFeatures } from "@docslurp/shared";
 import {
   acceptSandboxedPdfBatchEvent, assertSingleScopeBatch, batchFileJob, batchUsageOf, sandboxedPdfBatchProvider, unfinishedBatchFiles,
   type SandboxedPdfBatchEvent, type SandboxedPdfBatchFile, type SandboxedPdfBatchJob, type SandboxedPdfBatchProvider,
@@ -64,7 +64,7 @@ export function firstPassBatchOptions(pipeline: PipelineFeatures, env: NodeJS.Pr
     // closed (TODO.md: bound its scan on hostile pages); the project's request alone never turns it on.
     math: vmOptions?.math === true && env.DOCSLURP_FIRST_PASS_MATH?.trim().toLowerCase() === "on",
     // The project may opt out (`figures: false`); the deploy flag stays the ceiling.
-    figures: pipeline.figures !== false && dopplerImageExtractEnabled(env) && !!sandboxedPdfProvider()?.figures,
+    figures: figuresEnabled(pipeline, env) && !!sandboxedPdfProvider()?.figures,
   };
 }
 
