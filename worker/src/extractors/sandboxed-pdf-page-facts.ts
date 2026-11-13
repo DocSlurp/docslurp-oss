@@ -5,7 +5,8 @@
  * Rules:
  * - The facts are untrusted guest output. They are parsed once, by the strict bounded reader (lib/doppler-page-facts.ts),
  *   bounded by the page count the host measured; a refused or unusable stream is dropped (unknown), never repaired.
- * - Routing evidence only: they never bill, never authorize a read, and never replace the host's page count.
+ * - Routing evidence only: they never size a charge and never replace the host's page count. In `use` they steer routing as
+ *   layout facts do, so they can select a read (a sparse scan page, a mixed-scan image) that bills as Rich when it happens.
  * - DOCSLURP_DOPPLER_PAGE_FACTS: `off` drops them unread; `store` (default) records their text layer and scan class per page
  *   (document_page_facts, through upsertPageFacts); `use`
  *   also lets them stand in for layout facts when the provider returned none.
