@@ -208,6 +208,8 @@ export function annotateEvidenceRelevance(
     // Strict full-text queries need every query term (Postgres stems and drops
     // stop words), so a hit is a full match. The OR backoff can match on one
     // incidental word and is judged by term coverage instead.
+    // A keyword fan-out already scored the chunk against the queries that found it.
+    if (chunk.queryRelevance !== undefined) return chunk.queryRelevance;
     if (chunk.lexicalMatch === undefined) return 1;
     const haystack = [chunk.text, chunk.headingPath.join(" "), chunk.filename].join("\n");
     return chunk.lexicalMatch === "phrase"

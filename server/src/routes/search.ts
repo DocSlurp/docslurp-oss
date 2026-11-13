@@ -5,7 +5,7 @@ import { reportPublicError } from "../lib/public-errors.js";
 import { chatSessionForRequest, CHAT_SESSION_TOKEN_HEADER } from "../lib/chat-session-tokens.js";
 import { apiErrorResponse, nativeApiErrors, withApiErrorDetails } from "../lib/api-error.js";
 import { Hono, type Context } from "hono";
-import { batchSearchInputSchema, searchFormError, searchInputSchema, searchOptions, projectChatRequestSchema, type SearchInput } from "../lib/search-input.js";
+import { batchSearchInputSchema, searchFormError, searchInputSchema, searchOptions, searchQueryText, projectChatRequestSchema, type SearchInput } from "../lib/search-input.js";
 import { streamSSE } from "hono/streaming";
 import { assertCanSpend } from "../services/billing/spend-guard.js";
 import { enforceActorCategoryRateLimit } from "../middleware/rate-limit.js";
@@ -94,7 +94,8 @@ async function runSearchBatch(c: Context, parsed: { queries: SearchInput[]; conc
     }
   }));
   if (!signal.aborted) {
-    await prefetchBatchQueryEmbeddings(inputs.flatMap((input) => input ? [{ query: input.q.replaceAll("\u0000", ""), projectId: input.projectId, options: searchOptions(input), scope: input.scope }] : []), userId, signal);
+    // Keyword fan-outs (array q) never embed.
+    await prefetchBatchQueryEmbeddings(inputs.flatMap((input) => input && !Array.isArray(input.q) ? [{ query: input.q.replaceAll("\u0000", ""), projectId: input.projectId, options: searchOptions(input), scope: input.scope }] : []), userId, signal);
   }
   let next = 0;
   async function worker() {
@@ -455,7 +456,7 @@ async function retrieve(body: SearchInput & { projectId: string }, scope: Search
       timings: { cachedMs: 0, totalMs: 0 },
     };
   }
-  const search = () => hybridSearch(body.q, userId, searchOptions(body), scope);
+  const search = () => hybridSearch(searchQueryText(body.q), userId, searchOptions(body), scope);
   const data = publicSearchResponse(await (deferred ? withDeferredContext(deferred, search) : search()));
   // A response with pages still materializing must not be replayed as final.
   if (ticket && data.availability?.status === "complete" && !(data.deferred && data.deferred.pendingPages > 0)) {

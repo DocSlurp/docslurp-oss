@@ -218,6 +218,45 @@ describe("SEARCH_LANCEDB_NATIVE", () => {
     expect(native.timings?.nativeLexicalUnindexed).toBeUndefined();
   });
 
+  it("runs an array of keyword queries as one BM25 fan-out with per-query matches", async () => {
+    const keywordQueries = ["cavitation", "torque bearing", "qqqzzznomatch", "cavitation"];
+    const response = await run(true, keywordQueries.join(" "), { searchMode: "keyword", keywordQueries, limit: 20 });
+    expect(response.searchMode).toBe("keyword");
+    expect(response.timings?.["keywordFanout:text"]).toBe(1);
+    expect(response.keywordQueries?.map((item) => item.q)).toEqual(keywordQueries);
+    expect(response.keywordQueries?.[2]!.hits).toBe(0);
+    expect(response.keywordQueries?.[0]!.hits).toBeGreaterThan(0);
+    const planted = response.results.find((result) => result.citation.documentId === "doc4" && result.citation.chunkIndex === 9);
+    expect(planted?.matchedQueries).toEqual(expect.arrayContaining([0, 3]));
+    expect(response.results.every((result) => !result.matchedQueries || result.matchedQueries.every((index) => index !== 2))).toBe(true);
+  });
+
+  it("keeps a warm keyword fan-out of up to 100 queries to about the SQL of one keyword search", async () => {
+    const filters = { documentIds: ["doc1", "doc2", "doc3", "doc4", "doc5", "doc6"] };
+    const reads = async (keywordQueries: string[]) => {
+      await run(true, keywordQueries.join(" "), { searchMode: "keyword", keywordQueries, filters });
+      vi.stubEnv("SEARCH_LANCEDB_NATIVE", "1");
+      statements.length = 0;
+      const started = performance.now();
+      const response = await search.hybridSearch(keywordQueries.join(" "), "u", { ...baseOptions, searchMode: "keyword", keywordQueries, filters: { projectId: "w", ...filters } }, TEST_SEARCH_SCOPE);
+      const ms = performance.now() - started;
+      const count = statements.filter((statement) => !/^\s*(begin|commit|insert|delete|update|with recorded|savepoint|release)/i.test(statement)).length;
+      await session.drainSearchSessionWrites();
+      return { count, ms, results: response.results.length };
+    };
+    const terms = (size: number) => Array.from({ length: size }, (_, i) => `${WORDS[i % WORDS.length]} ${WORDS[(i * 7 + 3) % WORDS.length]} q${i}`);
+    const one = await reads(["torque"]);
+    const sizes = [20, 25, 50, 100];
+    const fanouts: Array<Awaited<ReturnType<typeof reads>>> = [];
+    for (const size of sizes) fanouts.push(await reads(terms(size)));
+    console.info(`[keyword-fanout] warm reads/ms one=${one.count}/${one.ms.toFixed(1)} ${sizes.map((size, i) => `${size}=${fanouts[i]!.count}/${fanouts[i]!.ms.toFixed(1)}`).join(" ")}`);
+    for (const fanout of fanouts) {
+      expect(fanout.results).toBeGreaterThan(0);
+      // Scope, eligibility and settings resolve once per search; BM25 and hydration come from LanceDB.
+      expect(fanout.count).toBeLessThanOrEqual(one.count + 5);
+    }
+  });
+
   it("answers a warm search with one SQL read plus chunk-id checks", async () => {
     const queryVector = near("doc5-2");
     // Original documents only: hits serving a dedup copy are hydrated from Postgres by design.

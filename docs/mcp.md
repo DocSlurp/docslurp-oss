@@ -308,4 +308,4 @@ References: [MCP tools](https://modelcontextprotocol.io/specification/2026-07-28
 
 ### One search surface
 
-Use `search({ q: "notice period" })` for one query or `search({ queries: [{ q: "notice period" }, { q: "eligibility" }], concurrency: 2 })` for a batch. Batches accept 1–20 queries, preserve input order, and return `{ results: [{ ok, data?, error? }] }`. Put project and filters inside each query. The SDK and `POST /v1/search` accept the same two forms.
+Use `search({ q: "notice period" })` for one query or `search({ queries: [{ q: "notice period" }, { q: "eligibility" }], concurrency: 2 })` for a batch. Batches accept 1–20 queries, preserve input order, and return `{ results: [{ ok, data?, error? }] }`. For many keyword queries at once, send `q` as an array of up to 100 strings: one keyword-mode search whose fused results list the matched queries in `matchedQueries` (see [keyword fan-out](search-api.md#keyword-fan-out)). Put project and filters inside each query. The SDK and `POST /v1/search` accept the same two forms.

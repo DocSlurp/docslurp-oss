@@ -138,4 +138,44 @@ describe("batch retrieval and canonical chat", () => {
     mocks.access.mockResolvedValue(new Response(null, { status: 404 }));
     expect((await app().request("/v1/chat", json(queries[0]))).status).toBe(404); expect(mocks.chat).not.toHaveBeenCalled();
   });
+  it("runs an array q as one keyword fan-out search", async () => {
+    const res = await app().request("/v1/search", json({ q: ["notice period", "termination", "notice period"], project: "project" }));
+    expect(res.status).toBe(200);
+    expect(mocks.search).toHaveBeenCalledTimes(1);
+    const [text, , options] = mocks.search.mock.calls[0]!;
+    expect(text).toBe("notice period termination notice period");
+    expect(options).toMatchObject({ searchMode: "keyword", keywordQueries: ["notice period", "termination", "notice period"] });
+  });
+  it("accepts a keyword fan-out inside a batch item", async () => {
+    const res = await app().request("/v1/search", json({ queries: [{ q: ["a1", "b2"], project: "project" }, { q: "plain", project: "project" }] }));
+    expect(res.status).toBe(200);
+    expect(mocks.search.mock.calls.map(call => call[2].keywordQueries)).toEqual(expect.arrayContaining([["a1", "b2"], undefined]));
+  });
+  it.each([
+    { q: ["a", "b"], mode: "hybrid" },
+    { q: ["a", "b"], mode: "deep" },
+    { q: [] },
+    { q: Array.from({ length: 101 }, (_, i) => `term${i}`) },
+    { q: ["ok", " "] },
+    { q: ["x".repeat(1001)] },
+    { q: Array.from({ length: 17 }, () => "y".repeat(1000)) },
+    { q: Array.from({ length: 9 }, (_, i) => `"exact phrase ${i}"`) },
+    { q: Array.from({ length: 9 }, (_, i) => `term -excluded${i}`) },
+  ])("refuses an invalid keyword fan-out before retrieval: %#", async body => {
+    expect((await app().request("/v1/search", json({ ...body, project: "project" }))).status).toBe(400);
+    expect(mocks.search).not.toHaveBeenCalled();
+  });
+  it("caps keyword fan-out queries across a whole batch", async () => {
+    const item = { q: Array.from({ length: 60 }, (_, i) => `t${i}`), project: "project" };
+    expect((await app().request("/v1/search", json({ queries: [item, item] }))).status).toBe(400);
+    expect(mocks.search).not.toHaveBeenCalled();
+  });
+  it("strips NUL bytes from keyword fan-out queries", async () => {
+    expect((await app().request("/v1/search", json({ q: ["a\u0000b", "c"], project: "project" }))).status).toBe(200);
+    expect(mocks.search.mock.calls[0]![2].keywordQueries).toEqual(["ab", "c"]);
+  });
+  it("accepts 100 keyword queries and up to 8 that need the Postgres path", async () => {
+    const q = [...Array.from({ length: 92 }, (_, i) => `term${i}`), ...Array.from({ length: 8 }, (_, i) => `"phrase ${i}"`)];
+    expect((await app().request("/v1/search", json({ q, project: "project", mode: "keyword" }))).status).toBe(200);
+  });
 });
