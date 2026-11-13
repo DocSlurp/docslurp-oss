@@ -17,7 +17,7 @@ import { WorkerSlotStore, resolveWorkerSlotOptions, tryMaintenanceLease, type Wo
 import { randomUUID, createHmac } from "node:crypto";
 
 import postgres, { type JSONValue, type PendingQuery, type Sql } from "postgres";
-import { flushAssetLedger, writeDocumentAssetLedger, type DocumentAssetLedgerResult, type DocumentAssetLedgerWrite } from "./document-asset-ledger.js";
+import { flushAssetLedger, listHostPageImagePages, writeDocumentAssetLedger, type DocumentAssetLedgerResult, type DocumentAssetLedgerWrite } from "./document-asset-ledger.js";
 import { applyDefaultVisionOverride, defaultPipelineFeatures, normalizeStoredPipelineFeatures, PII_BLOCKED_DOCUMENT_STATUS, planRunFailure, type DerivedDocumentTitle, type PrivacyAuditEntry } from "@docslurp/shared";
 
 import { adoptBackfillDocuments } from "../deferred/backfill-adoption.js";
@@ -2695,6 +2695,10 @@ export class Store {
   }
 
   /** Document asset ledger (db/document-asset-ledger.ts): one org-scoped transaction for a document's images and level. */
+  async listHostPageImagePages(scope: { orgId: string; documentId: string }): Promise<number[]> {
+    return await listHostPageImagePages(this.sql, scope);
+  }
+
   async writeDocumentAssetLedger(write: DocumentAssetLedgerWrite): Promise<DocumentAssetLedgerResult> {
     return await writeDocumentAssetLedger(this.sql, write);
   }
