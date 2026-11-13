@@ -1,3 +1,4 @@
+import { isAutomaticSelectionDenied } from "@docslurp/shared";
 import { isSpeedBoostEligible, speedBoostModel } from "@docslurp/shared";
 import { SPEED_BOOST_MODEL_SWAPS } from "@docslurp/shared/project-chat-models";
 import {
@@ -162,10 +163,12 @@ export async function chatModelRefused(actor: RequestActor | undefined, model: s
 
 /**
  * A Nitro model cannot bypass explicit credit opt-in. Unsupported routes fail before spending.
- * Speed boost on GLM 5.3 Flash (default or picked) answers with DeepSeek V4.1 Flash on Nitro
- * (SPEED_BOOST_MODEL_SWAPS); an explicit `:nitro` id is honoured as named.
+ * Speed boost answers with the chosen model on Nitro, or its SPEED_BOOST_MODEL_SWAPS target (none today). A swap is an
+ * automatic selection, so a swap target that is never selected automatically is ignored. An explicit `:nitro` id is
+ * honoured as named.
  */
 export function resolveSpeedBoostChatModel(model: string, enabled: boolean = false): string {
   if ((model.endsWith(":nitro") && !enabled) || (enabled && !isSpeedBoostEligible(model))) throw new ChatModelNotAllowedError();
-  return (enabled ? SPEED_BOOST_MODEL_SWAPS[model] : undefined) ?? speedBoostModel(model, enabled);
+  const swap = enabled ? SPEED_BOOST_MODEL_SWAPS[model] : undefined;
+  return (swap && !isAutomaticSelectionDenied(swap) ? swap : undefined) ?? speedBoostModel(model, enabled);
 }

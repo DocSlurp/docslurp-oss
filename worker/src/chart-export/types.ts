@@ -140,7 +140,8 @@ export function deterministicVisualExtractor(): DeterministicVisualExtractor {
 
 // ---- Model client -------------------------------------------------------------------------------------------
 
-export type ChartModelPurpose = "spec" | "repair" | "direct";
+/** `expand`: the one retry of a spec cut off at its output cap, at the larger cap (never followed by a repair). */
+export type ChartModelPurpose = "spec" | "expand" | "repair" | "direct";
 
 export interface ChartModelRequest {
   modelUri: string;
@@ -149,6 +150,8 @@ export interface ChartModelRequest {
   pageNumber: number;
   purpose: ChartModelPurpose;
   format?: ChartExportFormat;
+  /** Output token cap for this call (`CHART_EXPORT_LIMITS`); the runtime sends the lower of it and the model's cap. */
+  maxOutputTokens?: number;
   signal?: AbortSignal;
 }
 
