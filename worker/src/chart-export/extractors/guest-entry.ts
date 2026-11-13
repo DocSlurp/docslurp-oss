@@ -6,6 +6,9 @@ import "@docslurp/shared/zod-jitless";
 
 export { extractDeterministicVisuals } from "./index.js";
 export { CHART_EXTRACT_LIMITS, setGuestDeadline } from "./limits.js";
+// Unit reassembly for contained extraction: one copy for every supervisor (this guest's parent, the inline path).
+export { mergeDeferred, reassembleUnits, resultVisualBytes, resumeSkipList, visualBytes } from "./reassemble.js";
+export type { FailedUnit, FinishedUnit, ReassembleInput } from "./reassemble.js";
 
 /**
  * Fault injection for the containment tests only (council r9 L3). `__CHART_GUEST_TEST_HOOKS__` is a build-time
