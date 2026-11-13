@@ -64,11 +64,12 @@ from trusted scope. Its lifetime is unrelated to HTTP responses and sockets.
 Session, MFA, membership and cancellation are checked during execution; accepted
 output is fenced under the root cancellation lock and native lease before native
 cache publication. Streamed text is coalesced: one fenced, quota-reserved append
-per 150 ms (`DOCSLURP_CHAT_OUTPUT_FLUSH_MS`, 10 to 2000) or 16 KiB of text, and
+per 250 ms (`DOCSLURP_CHAT_OUTPUT_FLUSH_MS`, 10 to 2000) or 16 KiB of text, and
 always before a tool, evidence or result event, so event order is unchanged.
 Buffered text is dropped, never published, once the turn is cancelled or aborted.
-Session, MFA and project access are rechecked every two seconds rather than per
-append; no append is published on a check older than five seconds. An interrupted provider execution is not silently restarted.
+Session, MFA and project access are re-read immediately before every append is
+published, so nothing is published after a revocation, and every two seconds
+while the turn is idle, so revoked work that publishes nothing still stops. An interrupted provider execution is not silently restarted.
 
 Each user may have eight active roots, including roots with active descendants
 or shared Temporal dependencies after the answer completes. Trees have at most
