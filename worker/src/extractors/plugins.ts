@@ -29,6 +29,7 @@ import { SandboxRunError, type SandboxResult } from "../sandbox/types.js";
 import type { UsageEvent } from "../models.js";
 import { currentPerfContext } from "../lib/perf-context.js";
 import { parsePageLayoutFacts, type PageLayoutFacts } from "../lib/page-layout-facts.js";
+import { acceptSandboxedPdfPageFacts, clearSandboxedPdfPageFacts, sandboxedPdfPageFactsLayout } from "./sandboxed-pdf-page-facts.js";
 import { planPageShards, type ShardCostProfile } from "../temporal/page-shards.js";
 import { registerShardProfile } from "../temporal/page-shard-profiles.js";
 import { resolveModalImage, type ModalSdk } from "../sandbox/providers/modal/index.js";
@@ -102,6 +103,12 @@ export interface SandboxedPdfResult extends SandboxResult {
    * document. Omit when unknown; missing or malformed facts never authorize a read.
    */
   layoutFacts?: unknown;
+  /**
+   * Doppler's page facts from the same VM job (doppler-page-facts/1 JSON lines, as a string or the raw bytes; page numbers of
+   * the whole document). Untrusted: parsed by the host's strict bounded reader (extractors/sandboxed-pdf-page-facts.ts),
+   * bounded by the host's own page count. Omit when unknown; missing or malformed facts never authorize a read or bill.
+   */
+  pageFacts?: unknown;
   /**
    * Required when the job asked for `figures`: `extracted` when the provider wrote the folder (the host still validates
    * all of it), `failed` when Doppler kept the Markdown but could not extract images (its exit status 5). `reason` is raw
@@ -435,9 +442,12 @@ export function acceptSandboxedPdfResult(job: SandboxedPdfJob, result: Sandboxed
   reportedOcrPages.delete(job);
   reportedLayoutFacts.delete(job);
   reportedFigures.delete(job);
+  clearSandboxedPdfPageFacts(job);
   const figures = figureOutcome(job, result.figures, pages);
   if (figures) reportedFigures.set(job, figures);
   if (result.figures !== undefined) result = { ...result, figures: undefined };
+  const pageFacts = result.pageFacts;
+  if (pageFacts !== undefined) result = { ...result, pageFacts: undefined };
   if (result.layoutFacts !== undefined) {
     // Routing evidence, not billing evidence: a malformed payload is dropped (routing then has no layout facts), never repaired.
     const layout = parsePageLayoutFacts(result.layoutFacts, Number.isSafeInteger(pages) && pages > 0 ? pages : MAX_REPORTED_PAGES);
@@ -446,20 +456,32 @@ export function acceptSandboxedPdfResult(job: SandboxedPdfJob, result: Sandboxed
     result = { ...result, layoutFacts: undefined };
   }
   const raw: unknown = result.ocrPages;
-  if (raw === undefined) return result;
-  const bound = Number.isSafeInteger(pages) && pages > 0 ? pages : MAX_REPORTED_PAGES;
-  if (!Array.isArray(raw) || raw.length > bound ||
-      raw.some((page) => !Number.isSafeInteger(page) || page < 1 || page > bound) || new Set(raw).size !== raw.length) {
-    throw new SandboxRunError(`Sandboxed PDF provider returned invalid ocrPages (expected unique pages 1..${bound})`, result.usage);
+  let ocrPages: number[] | undefined;
+  if (raw !== undefined) {
+    const bound = Number.isSafeInteger(pages) && pages > 0 ? pages : MAX_REPORTED_PAGES;
+    if (!Array.isArray(raw) || raw.length > bound ||
+        raw.some((page) => !Number.isSafeInteger(page) || page < 1 || page > bound) || new Set(raw).size !== raw.length) {
+      throw new SandboxRunError(`Sandboxed PDF provider returned invalid ocrPages (expected unique pages 1..${bound})`, result.usage);
+    }
+    ocrPages = [...(raw as number[])].sort((a, b) => a - b);
+    reportedOcrPages.set(job, ocrPages);
   }
-  const ocrPages = [...(raw as number[])].sort((a, b) => a - b);
-  reportedOcrPages.set(job, ocrPages);
-  return { ...result, ocrPages };
+  // Last, once nothing else can refuse the result: page facts bounded by the host's own count only (without one, dropped).
+  acceptSandboxedPdfPageFacts(job, pageFacts, pages);
+  return ocrPages ? { ...result, ocrPages } : result;
 }
 
-/** The validated layout facts a finished job returned, or undefined when it returned none usable. */
+/**
+ * The validated layout facts a finished job returned, or undefined when it returned none usable. With
+ * DOCSLURP_DOPPLER_PAGE_FACTS=use, layout facts mapped from its page facts stand in when it returned none.
+ */
 export function sandboxedPdfLayoutFacts(job: SandboxedPdfJob): Map<number, PageLayoutFacts> | undefined {
-  return reportedLayoutFacts.get(job);
+  return reportedLayoutFacts.get(job) ?? sandboxedPdfPageFactsLayout(job);
+}
+
+/** Where `sandboxedPdfLayoutFacts` came from: the provider's layout walker, or its page facts (`use` mode). */
+export function sandboxedPdfLayoutFactsSource(job: SandboxedPdfJob): "vm-pdf" | "vm-pdf-facts" | undefined {
+  return reportedLayoutFacts.has(job) ? "vm-pdf" : sandboxedPdfPageFactsLayout(job) ? "vm-pdf-facts" : undefined;
 }
 
 /**
