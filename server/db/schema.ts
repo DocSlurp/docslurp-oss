@@ -1395,7 +1395,7 @@ export const searchSessions = pgTable(
   },
   (table) => [
     index("search_sessions_expires_at_idx").on(table.expiresAt).where(sql`expires_at is not null`),
-    index("search_sessions_project_id_created_at_idx").using("btree", table.projectId, table.createdAt),
+    index("search_sessions_project_id_created_at_idx").using("btree", table.projectId, table.createdAt, table.id),
     index("search_sessions_user_id_created_at_idx").using(
       "btree",
       table.userId.asc().nullsLast().op("text_ops"),

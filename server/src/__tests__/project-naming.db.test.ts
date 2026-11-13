@@ -147,13 +147,17 @@ describe("automatic project naming", () => {
     expect(await pending()).toEqual([]);
     expect(await naming.sweepProjectAutoTitles()).toBe(0);
 
-    // A later corpus change makes the project pending again; the summary then outranks the heading.
+    // A summary written after the document completed (enrichment after indexing), with no further upload, makes the
+    // project pending again on its own; the summary then outranks the heading.
     await sql`insert into document_summaries (id, document_id, run_id, user_id, summary)
       values (${doc.id + "-summary"}, ${doc.id}, ${doc.runId}, 'u', 'This document is a harbour expansion budget for 2027, covering new berths.')`;
-    await addDocument(stale.id, "appendix.pdf");
     expect(await pending()).toEqual([stale.id]);
     expect(await naming.sweepProjectAutoTitles()).toBe(1);
     expect((await state(stale.id)).name).toBe("Harbour expansion budget for 2027");
+    expect(await pending()).toEqual([]);
+    // A later corpus change also makes it pending again.
+    await addDocument(stale.id, "appendix.pdf");
+    expect(await pending()).toEqual([stale.id]);
   });
 
   it("stops automatic naming after a manual rename", async () => {

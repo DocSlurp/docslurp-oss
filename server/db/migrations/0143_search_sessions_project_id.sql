@@ -53,7 +53,7 @@ DROP INDEX IF EXISTS "search_sessions_project_created_idx";
 DROP INDEX IF EXISTS "search_sessions_workspace_created_idx";
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "search_sessions_project_id_created_at_idx"
-  ON "search_sessions" USING btree ("project_id", "created_at");
+  ON "search_sessions" USING btree ("project_id", "created_at", "id");
 --> statement-breakpoint
 -- Column statistics now, so the backfill's pages (project_id IS NULL, in created_at order) are planned as short
 -- index range scans from the first batch instead of waiting for autoanalyze. A sample, not a table scan.

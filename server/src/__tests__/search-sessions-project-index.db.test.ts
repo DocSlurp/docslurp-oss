@@ -45,8 +45,11 @@ describe("search_sessions.project_id (0143)", () => {
       backfill.resetSearchSessionProjectBackfillForTests();
       expect(await backfill.sweepSearchSessionProjectBackfill({ batchSize: 2, maxBatches: 1 })).toBe(2);
       expect(await projectIds()).toMatchObject({ "ss-1": "ss-a", "ss-2": "ss-b", "ss-3": null });
-      // Sessions sharing a created_at (one transaction's now()) stay in one page.
-      expect(await backfill.sweepSearchSessionProjectBackfill({ batchSize: 1, maxBatches: 1 })).toBe(2);
+      // Sessions sharing a created_at (one transaction's now()) are still paged strictly by (created_at, id): a page
+      // never exceeds its batch size, and the next page resumes between the tied rows.
+      expect(await backfill.sweepSearchSessionProjectBackfill({ batchSize: 1, maxBatches: 1 })).toBe(1);
+      expect(await projectIds()).toMatchObject({ "ss-3": "ss-a", "ss-3-tie": null });
+      expect(await backfill.sweepSearchSessionProjectBackfill({ batchSize: 1, maxBatches: 1 })).toBe(1);
       expect(await projectIds()).toMatchObject({ "ss-3": "ss-a", "ss-3-tie": "ss-b" });
       expect(await backfill.sweepSearchSessionProjectBackfill({ batchSize: 2 })).toBe(0);
       // A deleted project and a session that names none stay null.

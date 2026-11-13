@@ -12,7 +12,7 @@ type Sql = typeof defaultSql;
  * project is gone, or that never named one, stay null for good; the cursor steps over them once instead of
  * rereading them every sweep. Kept as text: a JS Date drops the microseconds.
  */
-let cursor: string | null = null;
+let cursor: { createdAt: string; id: string } | null = null;
 let finished = false;
 let running = false;
 
@@ -39,30 +39,34 @@ export async function sweepSearchSessionProjectBackfill(
       const batch = await sql.begin(async (tx) => {
         const [lock] = await tx<{ locked: boolean }[]>`select pg_try_advisory_xact_lock(hashtext(${LOCK_KEY})) as locked`;
         if (!lock?.locked) return null;
-        // Ordered exactly as search_sessions_project_id_created_at_idx, so a page is one short index range scan.
-        // WITH TIES keeps sessions sharing the last created_at in the same page: the cursor never splits them.
-        const [row] = await tx<{ scanned: number; filled: number; last_created_at: string | null }[]>`
+        // Ordered exactly as search_sessions_project_id_created_at_idx (project_id, created_at, id), and paged by a
+        // strict (created_at, id) cursor: a page is one short index range scan of at most batchSize rows, even when
+        // many sessions share one created_at (a bulk insert at one now()).
+        const [row] = await tx<{ scanned: number; filled: number; last_created_at: string | null; last_id: string | null }[]>`
           with page as (
             select s.id, s.created_at, s.metadata ->> 'projectId' as wanted
             from search_sessions s
-            where s.project_id is null and s.created_at > ${cursor ?? "-infinity"}::text::timestamptz
-            order by s.project_id, s.created_at
-            fetch first ${batchSize} rows with ties
+            where s.project_id is null
+              and (s.created_at, s.id) > (${cursor?.createdAt ?? "-infinity"}::text::timestamptz, ${cursor?.id ?? ""}::text)
+            order by s.project_id, s.created_at, s.id
+            limit ${batchSize}
           ), filled as (
             update search_sessions s set project_id = p.id
             from page join projects p on p.id = page.wanted
             where s.id = page.id and s.project_id is null
             returning 1
+          ), last as (
+            select created_at::text as last_created_at, id as last_id from page order by created_at desc, id desc limit 1
           )
           select (select count(*) from page)::int as scanned, (select count(*) from filled)::int as filled,
-            (select max(created_at)::text from page) as last_created_at
+            (select last_created_at from last) as last_created_at, (select last_id from last) as last_id
         `;
         return row!;
       });
       // Another instance holds the lock: it is doing this work.
       if (!batch) break;
       filled += batch.filled;
-      if (batch.last_created_at) cursor = batch.last_created_at;
+      if (batch.last_created_at && batch.last_id) cursor = { createdAt: batch.last_created_at, id: batch.last_id };
       if (batch.scanned < batchSize) {
         finished = true;
         break;
