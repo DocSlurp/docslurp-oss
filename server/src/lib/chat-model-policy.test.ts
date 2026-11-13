@@ -243,6 +243,17 @@ describe("explicit Speed boost admission", () => {
   });
 });
 
+describe("Speed boost follows the project's tier mapping", () => {
+  it("names the tiers with a fast route under the project's mapping", () => {
+    // An operator mapped fastest to Luna (fast route) and balanced to Haiku (none).
+    const tierModels = { fastest: "openai/gpt-6-luna", balanced: "anthropic/claude-haiku-5.5" };
+    try { resolveSpeedBoostChatModel("anthropic/claude-haiku-5.5", true, tierModels); } catch (error) {
+      expect((error as Error).message).toBe("Speed boost is available for the fastest tier. Choose it, or turn Speed boost off.");
+    }
+    expect(resolveSpeedBoostChatModel("openai/gpt-6-luna", true, tierModels)).toBe("openai/gpt-6-luna:nitro");
+  });
+});
+
 describe("managed tier mappings", () => {
   it("admits reviewed, priced catalog base models only", () => {
     expect(managedChatModelProblem("anthropic/claude-haiku-5.5", new Set())).toBeNull();

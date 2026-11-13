@@ -7,7 +7,9 @@
  */
 import {
   automaticModelCallProblem,
+  buildDecisionModelCatalog,
   embeddingModelCatalogByUri,
+  findDecisionModel,
   isProhibitedRoutingModelId,
   managedPipelineOverridesSchema,
   parseManagedPipelineOverrides,
@@ -76,6 +78,15 @@ export function managedPipelineModelProblem(path: string, model: string): string
   if (PRIVATE_ROUTE.test(model.trim())) return null;
   if (path.startsWith("vision.")) return visionModelCatalogByUri[model.trim()] ? null : "not a reviewed vision model";
   if (path.startsWith("embedding.")) return embeddingModelCatalogByUri[model.trim()] ? null : "not a reviewed embedding model";
+  if (path.startsWith("pageRouter.")) {
+    // Router decision models have their own reviewed catalog and per-call prices (not OpenRouter chat prices):
+    // admitted there means priced, input-billed, not Pro/Ultra. Availability (API keys) is the deployment's concern.
+    const found = findDecisionModel(model.trim());
+    if (!found) return "not a reviewed decision model";
+    const env = Object.fromEntries(found.availability.requiresEnv.map((key) => [key, "set"]));
+    const rejected = buildDecisionModelCatalog({ env }).rejected.find((entry) => entry.modelId === found.id);
+    return rejected ? `decision model refused (${rejected.reason})` : null;
+  }
   const { pricingSource } = resolveAiUsagePricingWithSource({ provider: "openrouter", model: policyModelId(model) });
   return pricingSource === "configured-fallback" ? "no verified price" : null;
 }

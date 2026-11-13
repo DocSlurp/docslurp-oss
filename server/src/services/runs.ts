@@ -501,6 +501,11 @@ export async function retryRun(
     throw new Error("Forbidden");
   }
 
+  // A retried run keeps its categories and stage selection, but its model values are re-resolved: a run from before
+  // managed models (0146) must not replay a stored model (the former DeepSeek vision default is refused at call time).
+  const managed = resolveManagedPipeline(run.pipeline, await loadManagedPipelineOverrides(run.projectId), `run ${run.id} retry`);
+  const retried = { ...run, pipeline: { ...managed.pipeline, speedBoost: run.pipeline.speedBoost === true } };
+
   // All retries retain their immutable original mode. Admission, checkpoint reset,
   // queued transition and lease acquisition commit together; Temporal starts only afterward.
   let outcome: RunRetryOutcome;
@@ -512,9 +517,10 @@ export async function retryRun(
         // Abort admission before its post-callback lease acquisition. A stale or
         // clean completed run must not retain credits for work it cannot retry.
         if (status === "not-retryable") throw notRetryable;
+        await tx`update project_runs set pipeline = ${tx.json(JSON.parse(JSON.stringify(retried.pipeline)))} where id = ${run.id}`;
         return status;
       }, { speedBoost: run.pipeline.speedBoost === true, leaseRunId: run.id, readmission: true });
-      outcome = { status: prepared, start: await runLifecycle.start(run, { restartExisting: true }) };
+      outcome = { status: prepared, start: await runLifecycle.start(retried, { restartExisting: true }) };
     } catch (error) {
       if (error !== notRetryable) throw error;
       outcome = { status: "not-retryable" };

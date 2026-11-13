@@ -32,10 +32,11 @@ export class PropositionIndexStage implements Stage {
   ) {}
 
   async run(state: WorkflowState, signal?: AbortSignal): Promise<void> {
-    const model = resolveAllowedPipelineTextModel(state.run.pipeline, "proposition-extraction", this.config.textGenerationModel);
     if (!state.run.pipeline.propositionIndex) {
       return;
     }
+    // Resolved (and policed) only when the stage runs: a disabled stage never fails on its model.
+    const model = resolveAllowedPipelineTextModel(state.run.pipeline, "proposition-extraction", this.config.textGenerationModel);
 
     if (!textModelApiKey(this.config.openRouterApiKey, model)) {
       return;

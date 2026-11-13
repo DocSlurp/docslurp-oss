@@ -1075,7 +1075,7 @@ async function chatProjectInTurn(args: {
   const tierModels = await loadProjectChatTierModels(args.projectId);
   const resolved = resolveChatModelRequest({ requested: args.model, tier: args.tier, reasoning: args.reasoning, isAdmin, tierModels });
   if (args.speedBoost === true && await loadProjectPrivacyMode(args.projectId) !== "standard") throw new ChatModelNotAllowedError();
-  const turnModel = resolveSpeedBoostChatModel(resolved.model, args.speedBoost === true);
+  const turnModel = resolveSpeedBoostChatModel(resolved.model, args.speedBoost === true, tierModels);
   const policy: ChatTurnPolicy = {
     model: turnModel, failover: args.speedBoost !== true && resolved.source !== "eval",
     // A Speed boost model swap bills at the chosen model's answer tier; the boost multiplier prices the swap.

@@ -41,6 +41,8 @@ import {
   validateModeSwitch,
 } from "./project-indexing-mode.js";
 import { buildRunProgressSnapshot, withRunCosts } from "./runs.js";
+import { parseStoredChatTierModels } from "./managed-models.js";
+import { speedBoostChatTiers } from "@docslurp/shared/project-chat-models";
 import {
   canEditProject,
   canManageProject,
@@ -72,7 +74,7 @@ type ProjectRow = {
   system_prompt: string | null;
   pipeline: ProjectRecord["pipeline"] | null;
   /** Platform-admin model overrides (managed-models.ts); never part of the customer record. */
-  managed_models?: { pipeline?: unknown } | null;
+  managed_models?: { pipeline?: unknown; chat?: unknown } | null;
   monthly_budget_cents: number | null;
   artifact_retention_days?: number | null;
   run_retention_days?: number | null;
@@ -334,6 +336,7 @@ function mapProject(row: ProjectRow): ProjectRecord {
     latestRunStatus: row.latest_run_status,
     archivedAt: row.archived_at ?? null,
     isDefault: row.is_default ?? false,
+    chatSpeedBoostTiers: speedBoostChatTiers(parseStoredChatTierModels(row.managed_models && typeof row.managed_models === "object" ? (row.managed_models as { chat?: unknown }).chat : null, row.id)),
     slug: row.slug,
     lastActivityAt: row.last_activity_at,
     createdAt: row.created_at,

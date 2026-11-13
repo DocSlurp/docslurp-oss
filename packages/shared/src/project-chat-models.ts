@@ -151,13 +151,21 @@ export const CHAT_TIER_MODELS: Readonly<Record<ChatTier, ProjectChatModelId>> = 
 };
 assertNoAutomaticSelectionDenied("CHAT_TIER_MODELS", Object.values(CHAT_TIER_MODELS));
 
-/** Tiers whose managed model has a reviewed fast-route (`:nitro`) variant: the tiers Speed boost can run. */
-export const SPEED_BOOST_CHAT_TIERS: readonly ChatTier[] = CHAT_TIERS.filter(tier => isProjectChatModelId(`${CHAT_TIER_MODELS[tier]}:nitro`));
+/** Tiers whose model (the project's mapping, else the managed default) has a reviewed fast-route (`:nitro`) variant. */
+export function speedBoostChatTiers(overrides?: Partial<Record<ChatTier, string>> | null): ChatTier[] {
+  return CHAT_TIERS.filter(tier => isProjectChatModelId(`${overrides?.[tier] ?? CHAT_TIER_MODELS[tier]}:nitro`));
+}
 
 /** The refusal for Speed boost on a tier without a fast route: it names the tiers that have one. */
-export const SPEED_BOOST_UNAVAILABLE_MESSAGE = SPEED_BOOST_CHAT_TIERS.length
-  ? `Speed boost is available for the ${SPEED_BOOST_CHAT_TIERS.join(" and ")} tier${SPEED_BOOST_CHAT_TIERS.length === 1 ? "" : "s"}. Choose ${SPEED_BOOST_CHAT_TIERS.length === 1 ? "it" : "one of them"}, or turn Speed boost off.`
-  : "Speed boost isn't available for chat right now. Turn Speed boost off.";
+export function speedBoostUnavailableMessage(tiers: readonly ChatTier[]): string {
+  return tiers.length
+    ? `Speed boost is available for the ${tiers.join(" and ")} tier${tiers.length === 1 ? "" : "s"}. Choose ${tiers.length === 1 ? "it" : "one of them"}, or turn Speed boost off.`
+    : "Speed boost isn't available for chat right now. Turn Speed boost off.";
+}
+
+/** With the managed defaults (projects with an admin mapping compute their own: speedBoostChatTiers(overrides)). */
+export const SPEED_BOOST_CHAT_TIERS: readonly ChatTier[] = speedBoostChatTiers();
+export const SPEED_BOOST_UNAVAILABLE_MESSAGE = speedBoostUnavailableMessage(SPEED_BOOST_CHAT_TIERS);
 
 export function isChatTier(value: unknown): value is ChatTier {
   return typeof value === "string" && (CHAT_TIERS as readonly string[]).includes(value);

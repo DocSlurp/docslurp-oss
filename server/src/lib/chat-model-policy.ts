@@ -17,6 +17,8 @@ import {
   DEFAULT_CHAT_REASONING,
   DEFAULT_CHAT_TIER,
   SPEED_BOOST_UNAVAILABLE_MESSAGE,
+  speedBoostChatTiers,
+  speedBoostUnavailableMessage,
   chatTierForModel,
   chatTierModel,
   isProjectChatModelId,
@@ -49,8 +51,8 @@ export class SpeedBoostUnavailableError extends Error {
   readonly status = 400 as const;
   readonly statusCode = 400 as const;
   readonly code = "speed_boost_unavailable" as const;
-  constructor() {
-    super(SPEED_BOOST_UNAVAILABLE_MESSAGE);
+  constructor(message: string = SPEED_BOOST_UNAVAILABLE_MESSAGE) {
+    super(message);
     this.name = "SpeedBoostUnavailableError";
   }
 }
@@ -225,9 +227,10 @@ export async function chatModelRefused(actor: RequestActor | undefined, model: s
  * automatic selection, so a swap target that is never selected automatically is ignored. An explicit `:nitro` id is
  * honoured as named.
  */
-export function resolveSpeedBoostChatModel(model: string, enabled: boolean = false): string {
+export function resolveSpeedBoostChatModel(model: string, enabled: boolean = false, tierModels?: ChatTierModelMap | null): string {
   if (model.endsWith(":nitro") && !enabled) throw new ChatModelNotAllowedError();
-  if (enabled && !isSpeedBoostEligible(model)) throw new SpeedBoostUnavailableError();
+  // The message names the tiers that have a fast route under this project's mapping, not just the managed defaults.
+  if (enabled && !isSpeedBoostEligible(model)) throw new SpeedBoostUnavailableError(speedBoostUnavailableMessage(speedBoostChatTiers(tierModels)));
   const swap = enabled ? SPEED_BOOST_MODEL_SWAPS[model] : undefined;
   return (swap && !isAutomaticSelectionDenied(swap) ? swap : undefined) ?? speedBoostModel(model, enabled);
 }

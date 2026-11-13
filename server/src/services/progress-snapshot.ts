@@ -343,13 +343,15 @@ export function redactOperatorKeys<T>(value: T, depth = 0): T {
 /** A run event for a caller that is not a platform operator: heartbeat metrics, stats and progress without worker diagnostics. */
 export function redactOperatorEvent<E extends { progress?: unknown; stats?: unknown; payload?: unknown }>(event: E): E {
   const redacted: E = { ...event };
-  for (const field of ["progress", "stats", "payload"] as const) if (field in event) redacted[field] = redactOperatorKeys(event[field]) as E[typeof field];
+  // Customers never see backend models in events either (the routing stage's decisionModel and its decision trace).
+  for (const field of ["progress", "stats", "payload"] as const) if (field in event) redacted[field] = redactOperatorKeys(redactModelKeys(event[field])) as E[typeof field];
   return redacted;
 }
 
 /** A run (GET /runs, the activity stream) for a caller that is not a platform operator: its stats without worker diagnostics. */
 /** Keys that name a backend model or provider: kept for platform operators, removed for customers. */
-const MODEL_KEY = /^(?:model|models|modelUri|modelId|provider|resolvedModel|resolvedProvider|decisionModels?|generatorModel|remoteFallbackModelUri)$/i;
+// `decisionChain` is the router's trace ({model, outcome, reason}); its reasons can name models, so it goes whole.
+const MODEL_KEY = /^(?:model|models|modelUri|modelId|provider|resolvedModel|resolvedProvider|decisionModels?|decisionChain|generatorModel|remoteFallbackModelUri)$/i;
 
 /** Removes backend model and provider keys from a stats structure, at any depth (bounded like redactOperatorKeys). */
 export function redactModelKeys<T>(value: T, depth = 0): T {

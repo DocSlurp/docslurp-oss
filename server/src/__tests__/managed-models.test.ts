@@ -106,6 +106,15 @@ describe("platform-admin managed model route", () => {
     expect((await embedding.json()).error.message).toContain("re-index");
   });
 
+  it("lets an admin pin router decision models checked against their own catalog prices, never DeepSeek", async () => {
+    sqlMock.mockResolvedValueOnce(projectRow()).mockResolvedValue([]);
+    const ok = await put(adminSession, { pipeline: { pageRouter: { decisionModel: ["cloudflare/clef-flash", "typesafe/jev-1.13"] } } });
+    expect(ok.status, await ok.clone().text()).toBe(200);
+    sqlMock.mockReset();
+    expect((await put(adminSession, { pipeline: { pageRouter: { decisionModel: ["acme/unknown-decider"] } } })).status).toBe(400);
+    expect(sqlMock).not.toHaveBeenCalled();
+  });
+
   it("refuses an override that conflicts with the project's privacy mode", async () => {
     sqlMock.mockResolvedValueOnce(projectRow({ pipeline: { privacyMode: "local-only", vision: { profile: "cheapest-local" }, embedding: { profile: "cheapest-local" } } }));
     const response = await put(adminSession, { pipeline: { vision: { remoteFallbackModelUri: "llm://openrouter/google/gemini-2.5-flash-lite" } } });
