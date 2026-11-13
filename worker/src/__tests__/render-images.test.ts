@@ -141,12 +141,15 @@ describe("free chart candidate stats", () => {
     const stateWith = (pipeline: Record<string, unknown>) => ({ artifactLedger: DocumentArtifactLedger.create({}), run: { id: "run", pipeline } }) as unknown as WorkflowState;
     const free = (stage as unknown as { freeVisualCandidates: (s: WorkflowState, d: unknown, c: unknown) => Promise<unknown> }).freeVisualCandidates.bind(stage);
     // Keyword-only chart page: counted as low confidence, not as a priced candidate. No storage read (no slots).
-    expect(await free(stateWith({ visionFallback: true, chartExport: { enabled: true, formats: ["description"], diagrams: true, generatorModel: null } }), document, classification))
+    expect(await free(stateWith({ visionFallback: true, chartExport: { tier: "models", formats: ["description"], diagrams: true } }), document, classification))
       .toEqual({ stats: { charts: 0, diagrams: 0, pagesWithUnexportedVisuals: [], exported: 0, bySource: {} }, lowConfidence: 1 });
     expect(getJson).not.toHaveBeenCalled();
     vi.stubEnv("DOCSLURP_CHART_EXPORT", "on");
     try {
-      expect(await free(stateWith({ visionFallback: true, chartExport: { enabled: true, formats: ["description"], diagrams: true, generatorModel: null } }), document, classification)).toBeNull();
+      expect(await free(stateWith({ visionFallback: true, chartExport: { tier: "models", formats: ["description"], diagrams: true } }), document, classification)).toBeNull();
+      // The free tier is active too: vision-extract records the stats. An unstamped run resolves as machine (off): render-images does.
+      expect(await free(stateWith({ visionFallback: false, chartExport: { tier: "free", formats: ["description"], diagrams: true } }), document, classification)).toBeNull();
+      expect(await free(stateWith({ visionFallback: false, chartExport: { formats: ["description"], diagrams: true } }), document, classification)).not.toBeNull();
     } finally {
       vi.unstubAllEnvs();
     }
