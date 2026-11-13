@@ -349,6 +349,35 @@ describe("the sandboxed PDF route on the worker host", () => {
     }
   });
 
+  it("never sizes a charge from page facts' grids, words inside or bytes per pixel either (doppler #42 fields)", async () => {
+    vi.stubEnv("DOCSLURP_PDF_EXTRACTOR", "vm-pdf");
+    vi.stubEnv("DOCSLURP_DOPPLER_PAGE_FACTS", "use");
+    const huge = { widthPt: 14_000, heightPt: 14_000, rotation: 0, userUnit: 1 };
+    const page = (n: number) => {
+      const base = textPage(n, { geometry: huge });
+      const images = base.images as { items: Array<Record<string, unknown>> } & Record<string, unknown>;
+      return {
+        ...base,
+        images: { ...images, items: images.items.map((item) => ({ ...item, bbox: [0, 0, 14_000, 14_000], coverage: 1, px: [60_000, 60_000], visibleWordsInside: 0, invisibleWordsInside: 0, bytesPerPixel: 1e9 })) },
+        vectors: { ...(base.vectors as object), grids: Array.from({ length: 64 }, () => ({ bbox: [0, 0, 14_000, 14_000], rows: 8_192, columns: 8_192, coverage: 1 })), gridsTruncated: false },
+      };
+    };
+    const pageFacts = jsonl([docLine(), page(1), page(2), page(3), runLine()]);
+    const h = await harness({ markdown: "OneTwoThree", pageFacts });
+    h.state.artifactLedger.record(VISION_ROUTING_VERSION_SLOT, "v3");
+    const recordPageEquivalents = vi.fn(async () => 3);
+    (h.state.store as unknown as Record<string, unknown>).recordPageEquivalents = recordPageEquivalents;
+    try {
+      await h.stage.run(h.state);
+      expect(h.state.documentStage("doc-1", "extract-markdown")?.status).toBe("completed");
+      // The facts were used for layout (so the new fields reached the mapper) and still sized nothing.
+      const stored = [...h.json.entries()].find(([key]) => key.includes("page-layout-facts/"))![1] as { source: string; pages: Array<{ grids: unknown[] | null }> };
+      expect(stored.source).toBe("vm-pdf-facts");
+      expect(stored.pages.every((p) => Array.isArray(p.grids) && p.grids.length === 64)).toBe(true);
+      expect(recordPageEquivalents).not.toHaveBeenCalled();
+    } finally { await h.cleanup(); }
+  });
+
   it("keeps the provider's own layout facts over page facts in use mode, and stores nothing with page facts off or malformed", async () => {
     vi.stubEnv("DOCSLURP_PDF_EXTRACTOR", "vm-pdf");
     vi.stubEnv("DOCSLURP_DOPPLER_PAGE_FACTS", "use");

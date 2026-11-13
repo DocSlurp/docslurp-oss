@@ -99,6 +99,11 @@ describe("candidatesFromPageFacts", () => {
     ]);
   });
 
+  it("nominates no image on a page marked xref-repaired-earlier: its pixel size is unknown, so it authorizes no read", () => {
+    const facts = parse([{ ...imagePage(1, 7), parseWarnings: ["xref-repaired-earlier"] }], 1);
+    expect(candidatesFromPageFacts(facts, new Set([1])).candidates).toEqual([]);
+  });
+
   it("treats an image object on many pages as furniture (a logo), never a candidate", () => {
     const facts = parse(Array.from({ length: 20 }, (_, i) => imagePage(i + 1, 99)), 20);
     const keyword = new Set(Array.from({ length: 20 }, (_, i) => i + 1));

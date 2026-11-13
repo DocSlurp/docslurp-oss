@@ -122,7 +122,24 @@ export function rasterUnionCoverage(boxes: readonly Box[], w: number, h: number)
     }
     covered += width * (bottom - top);
   }
-  return Math.round(covered / (n * n) * 10_000) / 10_000;
+  return roundLikePython(covered, n * n);
+}
+
+/**
+ * Python's `round(cells / total, 4)`, which the walker uses: the double's exact decimal value rounded half to even.
+ * `toFixed` rounds the exact value too, but breaks a tie away from zero; a tie needs `cells / total` to be exact in binary
+ * and to end in 5 at the fifth place, which is decided on the integers.
+ */
+function roundLikePython(cells: number, total: number): number {
+  const gcd = (a: number, b: number): number => (b === 0 ? a : gcd(b, a % b));
+  const den = total / gcd(cells, total);
+  const exact = (den & (den - 1)) === 0;
+  const scaled = cells * 10_000;
+  if (exact && scaled % total !== 0 && (2 * scaled) % total === 0) {
+    const down = Math.floor(scaled / total);
+    return (down % 2 === 0 ? down : down + 1) / 10_000;
+  }
+  return Number((cells / total).toFixed(4));
 }
 
 function gridFacts(page: DopplerPageFacts): Pick<PageLayoutFacts, "grids" | "tableCoverage"> {

@@ -22,6 +22,10 @@ The facts come from a VM that read a customer file, so the worker treats every b
 - accepts finite numbers only, ratios in 0..1, non-negative integer counts, closed enums (an unknown enum value is
   dropped, as the contract asks) and bounded lists; a family that fails any check, or whose counts contradict each
   other, is absent (unknown) while the rest of the page stands;
+- reads the fields added within `/1` the same way: `vectors.grids` (at most 64, each box on the page within 1 pt, rows and
+  columns positive counts; a bad list, a box off the page or a list without `gridsTruncated` makes `vectors` unknown),
+  and per image `visibleWordsInside`/`invisibleWordsInside` (both or neither, within the page's own word counts) and
+  `bytesPerPixel` (finite, non-negative; never on an inline image). A value that fails is unknown, never 0;
 - never reads `producer`, `creator` or `lang`, the document's own strings in the stream, nor any field it does not know; the run
   line's `version` and `commit` are kept only as a dotted version and a hex commit.
 
@@ -94,7 +98,7 @@ Commands the facts cannot retire, and why:
 | Command | Feeds | Kept because |
 |---|---|---|
 | `pdfpagecount`, `pdftotext -f 1 -l 1` | page count, Poppler acceptance | billing and limits use the host's own count |
-| layout walker (`pdfimages -list`, `pdftotext -bbox-layout`, `pdf_layout_facts.py`) | layout facts | page-equivalent billing reads the walker's page sizes; facts have no `wordsInside`, `bytesPerPixel`, table or grid boxes |
+| layout walker (`pdfimages -list`, `pdftotext -bbox-layout`, `pdf_layout_facts.py`) | layout facts | page-equivalent billing reads the walker's page sizes, never the facts'. Facts from a build with ruled grids, words inside and bytes per pixel (Doppler #42) cover every routing input the walker gives |
 | OCR ledger `pdftotext` | Rich reads of an extractor that OCRs without saying so | billing evidence; never on the sandboxed route |
 | `pdfinfo` before `pdftoppm` | render bounds, rendered page areas | bounds an untrusted render and sizes a charge |
 
@@ -109,9 +113,16 @@ classify-route and page-image evidence read the facts unchanged:
 | `invisibleWords`, `textLayer` | `text.invisibleWordCount`, `text.textLayer` |
 | `widthPt`, `heightPt` | `geometry.widthPt`, `heightPt` (the CropBox with rotation; the walker uses CropBox ∩ MediaBox) |
 | `images` | `images.items`: box, coverage, pixel size, bits, colour space and codec in the walker's vocabulary, ppi; `repeated` from `obj` across pages. Null when not computed or truncated |
-| `images[].bytesPerPixel`, `images[].wordsInside` | null: facts never read the stream or the word boxes |
-| `grids` | `[]` when the `vectors` family proves no ruled grid (fewer than 2 horizontal or 3 vertical rules, no cap hit); otherwise null |
-| `tables`, `tableCoverage` | null: tables come from the Markdown |
+| `images[].wordsInside` | `visibleWordsInside` + `invisibleWordsInside`; null when absent |
+| `images[].bytesPerPixel` | `bytesPerPixel`, one to one; null when absent (never 0). What the file says, which a crafted file can inflate: a routing hint, never a billing input |
+| `grids` | `vectors.grids` with two or more columns (the walker's minimum grid; one column is parallel rules, weak evidence), as rows, columns and the box's coverage of the page. Null when `gridsTruncated`, at the drawing cap, or when the CropBox differs from the MediaBox. Without the list (older builds): `[]` when the rule counts prove there is no grid, otherwise null |
+| `tableCoverage` | the union of the kept grid boxes on the walker's 200 × 200 raster, when the grids are known from the list; else null. The walker's value also covers Markdown table boxes, so this is never larger |
+| `tables` | null: tables come from the Markdown |
+
+A page marked `xref-repaired-earlier` (an earlier page rebuilt the cross-reference table, so its facts may come from an
+object the file holds twice) is low confidence: its images' pixel size, ppi and `bytesPerPixel` are unknown in the layout
+facts, its page-image evidence is unknown (`imagesKnown: false`), and chart export nominates none of its images. None of
+them can authorize a paid read.
 
 `probeRowsFromDopplerFacts` (`worker/src/routing/probe/doppler-facts.ts`) builds the v2 router's `ProbeRow` with
 `probeEngine: "doppler-facts"` and no thumbnail; its header comment lists each field.
