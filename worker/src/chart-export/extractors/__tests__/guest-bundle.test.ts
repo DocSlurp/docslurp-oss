@@ -7,7 +7,7 @@ import { existsSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -41,7 +41,8 @@ describe.skipIf(!built)("chart-export guest bundle (the production guest)", () =
     const request = path.join(dir, `request-${Math.random().toString(36).slice(2)}.json`);
     const output = path.join(dir, `output-${Math.random().toString(36).slice(2)}.json`);
     await writeFile(request, JSON.stringify({ kind, ...extra }));
-    await run(process.execPath, [guestScript, inputs[0]!, request, output, ...inputs.slice(1)], { cwd: workerRoot });
+    // As the host runs it: V8 code generation from strings disabled (eval, the Function constructor).
+    await run(process.execPath, ["--disallow-code-generation-from-strings", guestScript, inputs[0]!, request, output, ...inputs.slice(1)], { cwd: workerRoot });
     return readFile(output, "utf8");
   }
 
@@ -101,5 +102,19 @@ describe.skipIf(!built)("chart-export guest bundle (the production guest)", () =
       }
     });
     expect(got).toBe(JSON.stringify({ schemaVersion: "chart-export-deterministic-batch@v1", results: want }));
+  });
+
+  it("generates no code at run time: zod is jitless before any schema is built (council r4 M1)", async () => {
+    // Count every use of the Function constructor (zod's JIT and its allowsEval probe) from before the bundle loads
+    // until after it extracts a bar chart. With jitless set first there are none.
+    const bundle = path.join(workerRoot, "dist/chart-export/guest.bundle.mjs");
+    const probe = `
+      const Real = Function; let calls = 0;
+      globalThis.Function = new Proxy(Real, { construct(t, a) { calls++; return Reflect.construct(t, a); }, apply(t, h, a) { calls++; return Reflect.apply(t, h, a); } });
+      const g = await import(${JSON.stringify(pathToFileURL(bundle).href)});
+      const r = g.extractDeterministicVisuals({ kind: "svg", text: ${JSON.stringify(genericBar(["a", "b", "c"], [1, 2, 3], 4))} });
+      console.log(JSON.stringify({ calls, visuals: r.visuals.length, spec: !!r.visuals[0]?.spec }));`;
+    const { stdout } = await run(process.execPath, ["--input-type=module", "-e", probe], { cwd: workerRoot });
+    expect(JSON.parse(stdout)).toEqual({ calls: 0, visuals: 1, spec: true });
   });
 });

@@ -190,28 +190,19 @@ export type ExportedVisual = z.infer<typeof exportedVisualSchema>;
  */
 /**
  * A visual the free (deterministic) extractor deferred instead of finishing in the document's run, for a later
- * low-priority pass with a larger budget. `input` says what to re-read: the document's own source file, or one of its
- * Doppler figure files (`figureId`, the figure's own id; its slot is `doppler-figure:<figureId>`). `locator` is where in
- * that input (`svg`, `svg[3]`, `word/media/image2.svg`, ...); `reason` is a short machine slug. Never customer content.
+ * low-priority pass. `input` says what to re-read: the document's own source file, or one of its Doppler figure files
+ * (`figureId`, the figure's own id; its slot is `doppler-figure:<figureId>`). `svgIndex` is the SVG's ordinal within that
+ * input (document / package order), and `reason` a closed slug: nothing from the input's names or content is stored.
  */
+export const DEFERRED_VISUAL_REASONS = ["svg-document-limit"] as const;
 export const deferredVisualSchema = z.strictObject({
   input: z.enum(["source", "doppler-figure"]),
-  locator: z.string().max(512),
-  reason: z.string().max(120),
+  svgIndex: z.number().int().nonnegative().max(1_000_000),
+  reason: z.enum(DEFERRED_VISUAL_REASONS),
   pageNumber: z.number().int().positive().nullable(),
   figureId: z.string().max(200).nullable(),
 });
 export type DeferredVisual = z.infer<typeof deferredVisualSchema>;
-
-/**
- * Turn off zod's eval-compiled parsers (built with the Function constructor) for this process. The parser-VM chart
- * guest calls it at start, so no code is generated at run time. The CPU cost is nil: a fresh guest parses a few
- * schemas once (measured 134 vs 141 ms per run, performance/chart-export-free-rungs). Process-wide, so only for
- * single-purpose processes.
- */
-export function disableSchemaJit(): void {
-  z.config({ jitless: true });
-}
 
 export const visualCandidateStatsSchema = z.object({
   charts: z.number().int().nonnegative().default(0),

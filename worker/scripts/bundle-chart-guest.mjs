@@ -10,7 +10,8 @@
 //   `require(x)` is a build error (esbuild cannot bundle it), and `createRequire`, `getBuiltinModule` or esbuild's
 //   `__require` shim in the output fail the build, so nothing can load unbundled code at run time. Our own bundled
 //   sources (everything but zod) may not use the Function constructor, eval or process bindings either. zod keeps its
-//   JIT (`new Function`) in the text, but the guest turns it off at start (`disableSchemaJit`).
+//   JIT in the text, but the guest turns it off first (`@docslurp/shared/zod-jitless`) and the host runs it with V8's
+//   --disallow-code-generation-from-strings. This scan only guards against accidents; the V8 flag is the enforcement.
 // - Byte budget for the bundle.
 // It also writes guest.bundle.inputs.json (hashes of every input and of the bundle itself), so the VM contract
 // (scripts/parser-vm-contract.mjs) refuses a bundle older than the code it ships with.
@@ -39,7 +40,7 @@ const ALLOWED = [
   /^dist\/chart-export\/extractors\/[\w-]+\.js$/,
   /^dist\/lib\/(quarantine-bytes|archive-nesting|pdf-encryption-structure)\.js$/,
   /^dist\/tools\/clam-limits\.js$/,
-  /^\.\.\/packages\/shared\/dist\/(chart-export|file-sniff|file-formats)\.js$/,
+  /^\.\.\/packages\/shared\/dist\/(chart-export|file-sniff|file-formats|zod-jitless)\.js$/,
   /(^|\/)node_modules\/(\.pnpm\/zod@[^/]+\/node_modules\/)?zod\//,
 ];
 const inputs = Object.keys(result.metafile.inputs);

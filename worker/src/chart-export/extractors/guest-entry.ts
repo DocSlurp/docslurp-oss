@@ -1,8 +1,8 @@
 /** The parser-VM guest's imports, bundled into one module by `scripts/bundle-chart-guest.mjs` at build time. */
-import { disableSchemaJit } from "@docslurp/shared/chart-export";
+// FIRST: zod reads `jitless` when each schema is built, so this must evaluate before anything that builds one. ESM
+// evaluates imports in order and esbuild keeps that order; `guest-bundle.test.ts` checks it under V8's
+// --disallow-code-generation-from-strings, which the host also passes to every guest run.
+import "@docslurp/shared/zod-jitless";
 
-// The guest evaluates no generated code: zod's JIT (the Function constructor) is off before any schema parses.
-disableSchemaJit();
-
-export { extractDeterministicVisuals, markerBudget } from "./index.js";
+export { extractDeterministicVisuals } from "./index.js";
 export { CHART_EXTRACT_LIMITS } from "./limits.js";

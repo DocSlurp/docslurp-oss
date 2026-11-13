@@ -126,10 +126,9 @@ describe("VM deterministic extractor adapter", () => {
     const usage: UsageEvent[] = [];
     const run = vi.fn(async (plan: { args: string[]; timeoutMs?: number }) => {
       plans.push(plan);
-      const request = JSON.parse(await readFile(plan.args[2]!, "utf8"));
-      // pages: the document's page count, which scales the batch's SVG geometry budget.
-      expect(request).toEqual({ kind: "svg", diagrams: true, batch: 2, pages: 3 });
-      await writeFile(plan.args[3]!, JSON.stringify({ schemaVersion: "chart-export-deterministic-batch@v1", results: [one("a"), one("b")] }));
+      const request = JSON.parse(await readFile(plan.args[3]!, "utf8"));
+      expect(request).toEqual({ kind: "svg", diagrams: true, batch: 2 });
+      await writeFile(plan.args[4]!, JSON.stringify({ schemaVersion: "chart-export-deterministic-batch@v1", results: [one("a"), one("b")] }));
       return { stdout: "", stderr: "" };
     });
     const extract = createVmDeterministicVisualExtractor({ runner: { run } as never, storage: store, log: () => {} });
@@ -146,7 +145,8 @@ describe("VM deterministic extractor adapter", () => {
     // The PDF source is not a deterministic input; both SVG figures go in ONE guest run.
     expect(store.downloads).toEqual(["fig/a.svg", "fig/b.svg"]);
     expect(run).toHaveBeenCalledOnce();
-    expect(plans[0]!.args).toHaveLength(5);
+    expect(plans[0]!.args).toHaveLength(6);
+    expect(plans[0]!.args[0]).toBe("--disallow-code-generation-from-strings");
     expect(result.partials.map((p) => [p.pageNumber, (p.spec as { series: Array<{ points: Array<{ x: string }> }> }).series[0]!.points[0]!.x])).toEqual([[2, "a"], [3, "b"]]);
     expect(result.presence).toMatchObject({ svgFigures: 2 });
     // Each partial carries its figure's placement from the host's own index ([0, 0, 10, 10] in page points).
@@ -160,8 +160,8 @@ describe("VM deterministic extractor adapter", () => {
       { "run/index.json": figureIndex([{ id: "p2.g0", page: 2, format: "svg" }, { id: "p3.g0", page: 3, format: "svg" }]) },
     );
     const done = { schemaVersion: "chart-export-deterministic@v1", visuals: [{ source: "svg-geometry", kind: "chart", confidence: 0.9, spec: { kind: "chart", chartType: "bar", series: [{ name: "s", points: [{ x: "a", y: 1 }] }] }, digest: null, locator: "svg", slide: null, sheet: null, generator: null, reason: null }], refusals: [] };
-    const later = { schemaVersion: "chart-export-deterministic@v1", visuals: [], refusals: [], deferred: [{ locator: "svg", reason: "svg-scene-budget" }] };
-    const run = vi.fn(async (plan: { args: string[] }) => { await writeFile(plan.args[3]!, JSON.stringify({ schemaVersion: "chart-export-deterministic-batch@v1", results: [done, later] })); return { stdout: "", stderr: "" }; });
+    const later = { schemaVersion: "chart-export-deterministic@v1", visuals: [], refusals: [], deferred: [{ svgIndex: 0, reason: "svg-document-limit" }] };
+    const run = vi.fn(async (plan: { args: string[] }) => { await writeFile(plan.args[4]!, JSON.stringify({ schemaVersion: "chart-export-deterministic-batch@v1", results: [done, later] })); return { stdout: "", stderr: "" }; });
     const logs: string[] = [];
     const extract = createVmDeterministicVisualExtractor({ runner: { run } as never, storage: store, log: (m) => logs.push(m) });
     const result = await extract({
@@ -171,7 +171,7 @@ describe("VM deterministic extractor adapter", () => {
     });
     // The finished figure is kept; the deferred one is recorded for the later pass.
     expect(result.partials).toHaveLength(1);
-    expect(result.deferred).toEqual([{ input: "doppler-figure", locator: "svg", reason: "svg-scene-budget", pageNumber: 3, figureId: "p3.g0" }]);
+    expect(result.deferred).toEqual([{ input: "doppler-figure", svgIndex: 0, reason: "svg-document-limit", pageNumber: 3, figureId: "p3.g0" }]);
     expect(logs.join("\n")).toContain("visuals deferred document=doc-d count=1");
   });
 
@@ -208,7 +208,7 @@ describe("VM deterministic extractor adapter", () => {
       { schemaVersion: "chart-export-deterministic@v1", results: [empty, empty] },
     ]) {
       const logs: string[] = [];
-      const run = vi.fn(async (plan: { args: string[] }) => { await writeFile(plan.args[3]!, JSON.stringify(payload)); return { stdout: "", stderr: "" }; });
+      const run = vi.fn(async (plan: { args: string[] }) => { await writeFile(plan.args[4]!, JSON.stringify(payload)); return { stdout: "", stderr: "" }; });
       const extract = createVmDeterministicVisualExtractor({ runner: { run } as never, storage: store, log: (m) => logs.push(m) });
       const result = await extract({
         document: { id: "doc-b", mimeType: "application/pdf", pageCount: 1, sourceKey: "src/doc.pdf" },

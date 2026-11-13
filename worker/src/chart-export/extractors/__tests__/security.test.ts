@@ -38,7 +38,9 @@ describe("hardened XML", () => {
     const deep = `<svg xmlns="http://www.w3.org/2000/svg">${"<g>".repeat(5000)}${"</g>".repeat(5000)}</svg>`;
     expect(refusalOf(extractDeterministicVisuals({ kind: "svg", text: deep }))).toEqual(["xml-depth-limit"]);
     const wide = `<svg xmlns="http://www.w3.org/2000/svg">${"<g/>".repeat(CHART_EXTRACT_LIMITS.maxXmlElements + 1)}</svg>`;
-    expect(refusalOf(extractDeterministicVisuals({ kind: "svg", text: wide }))).toEqual(["xml-element-limit"]);
+    // The SVG density gate's byte cap (640 KiB) refuses it first; the XML parser's own element limit still holds.
+    expect(refusalOf(extractDeterministicVisuals({ kind: "svg", text: wide }))).toEqual(["svg-too-large"]);
+    expect(() => parseXml(wide)).toThrow(/xml-element-limit/);
     const big = `<svg>${" ".repeat(CHART_EXTRACT_LIMITS.maxTextBytes)}</svg>`;
     expect(refusalOf(extractDeterministicVisuals({ kind: "svg", text: big }))).toEqual(["svg-too-large"]);
     expect(() => parseXml(`<a ${Array.from({ length: 300 }, (_, k) => `a${k}="1"`).join(" ")}/>`)).toThrow(/attribute-limit/);
@@ -57,8 +59,10 @@ describe("SVG work limits", () => {
     const huge = `<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0${" L1 1".repeat(CHART_EXTRACT_LIMITS.maxPathVertices + 10)}"/></svg>`;
     expect(refusalOf(extractDeterministicVisuals({ kind: "svg", text: huge }))).toEqual(["svg-path-vertex-limit"]);
     const one = `<path d="M0 0${" L1 1".repeat(9000)}"/>`;
-    const many = `<svg xmlns="http://www.w3.org/2000/svg">${one.repeat(60)}</svg>`;
-    expect(refusalOf(extractDeterministicVisuals({ kind: "svg", text: many }))).toEqual(["svg-path-command-limit"]);
+    // 6 × 9,000 segments (270 KB): under the byte cap, over the 50,000-segment density gate.
+    const many = `<svg xmlns="http://www.w3.org/2000/svg">${one.repeat(6)}</svg>`;
+    // The density gate (12,000 path segments per SVG) stops this before the document-wide path budget.
+    expect(refusalOf(extractDeterministicVisuals({ kind: "svg", text: many }))).toEqual(["svg-too-dense"]);
   });
 
   it("bounds <use> expansion (self references and fan-out bombs)", () => {
@@ -66,7 +70,8 @@ describe("SVG work limits", () => {
     const r = extractDeterministicVisuals({ kind: "svg", text: self });
     expect(r.visuals).toEqual([]);
     const fan = `<svg xmlns="http://www.w3.org/2000/svg"><defs><g id="l0"><rect width="1" height="1"/></g>${Array.from({ length: 7 }, (_, k) => `<g id="l${k + 1}">${`<use href="#l${k}"/>`.repeat(10)}</g>`).join("")}</defs><use href="#l7"/></svg>`;
-    expect(refusalOf(extractDeterministicVisuals({ kind: "svg", text: fan }))).toEqual(["svg-use-limit"]);
+    // The density gate's <use> budget (1,000 per SVG) stops the fan-out bomb at its first expansion past the cap.
+    expect(refusalOf(extractDeterministicVisuals({ kind: "svg", text: fan }))).toEqual(["svg-use-bomb"]);
   });
 
   it("rejects malformed path data and transforms without throwing out of the extractor", () => {

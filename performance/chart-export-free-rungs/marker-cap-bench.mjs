@@ -1,86 +1,63 @@
 #!/usr/bin/env node
-// Calibrates CHART_EXTRACT_LIMITS.maxMarkerPairTests: times svg-geometry's marker/vertex de-duplication on hostile
-// packed-cell SVGs through the guest bundle, and reports the cost per pair test and per guest input.
+// Worst-case inputs for the SVG density gate, run through the guest bundle in a fresh process: wall time, peak RSS and
+// what happened to each SVG (exported exactly, approximated, skipped by reason, deferred).
 //
-//   node marker-cap-bench.mjs <worker/dist/chart-export/guest.bundle.mjs> [runs=3] [mode=calibrate|doc100]
+//   node marker-cap-bench.mjs <worker/dist/chart-export/guest.bundle.mjs> <mode>
 //
-// calibrate: per-pair-test cost on single SVGs (with an unlimited budget), and inputs of many near-cap SVGs.
-// doc100: only the council's 100-SVG HTML input with the production budget, in a fresh process, reporting wall time,
-// peak RSS and what happened to each SVG (exact, approximate, deferred, refused).
-// batch40: the council's 40-copy SVG batch, run exactly like scripts/chart-export-extract.mjs runs a batch (one budget,
-// `inputsAfter` counting the files still to come), with the production budget for a 1-page document.
-//
-// Scenes (generated here, no files): V polyline vertices packed into one 3-unit cell and P markers in the next cell,
-// more than 1.5 from every vertex, so no marker short-circuits and the filter runs exactly V × P pair tests.
-// "html×N" puts N copies of a near-cap SVG in one HTML input, which shares one budget across its SVGs.
+// doc100:  the council's 100-SVG HTML page (each SVG: 2,500 packed vertices, 19,900 markers from 199 <use>).
+// batch40: the council's 40-copy SVG batch, run like scripts/chart-export-extract.mjs runs a batch.
+// held17:  the council's round-4 H1 page: 17 SVGs, each ~1,010 markers near 1,000 packed vertices plus 3,900 <use> of
+//          a 100-rect group (~390k rects unexpanded), 3.6 MB.
+// column:  the council's round-4 M2 SVG: one bar column of 3,900 rects (39 <use> of a 100-rect group).
+// atcap200: 200 SVGs in one HTML input, each just under the primitive gate (39 <use> of a 100-rect group spread
+//          over 60 columns, ~3,980 primitives), to bound a document of SVGs that all pass the gate.
+// legit:   the same page shape with 100 ordinary bar charts, for comparison.
+import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
-const [bundle, runsArg, mode = "calibrate"] = process.argv.slice(2);
-const runs = Number(runsArg ?? 3);
-const { extractDeterministicVisuals, markerBudget, CHART_EXTRACT_LIMITS } = await import(pathToFileURL(bundle).href);
-const budget = CHART_EXTRACT_LIMITS.maxMarkerPairTests;
+const [bundle, mode = "doc100"] = process.argv.slice(2);
+const { extractDeterministicVisuals } = await import(pathToFileURL(bundle).href);
+const ticks = [[0, 90], [10, 50], [20, 10]].map(([v, y]) => `<text x="2" y="${y}">${v}</text>`).join("") + '<text x="10" y="98">A</text><text x="50" y="98">B</text><text x="90" y="98">C</text>';
+function packedSvg() {
+  const pts = ["10,90"];
+  for (let i = 0; i < 2498; i++) pts.push(`${(30 + (i % 290) / 100).toFixed(2)},${(30 + (i % 97) / 34).toFixed(2)}`);
+  pts.push("90,10");
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"><polyline points="${pts.join(" ")}" stroke="#f00" fill="none"/><defs><g id="m">${'<circle cx="34.6" cy="34.6" r="1" fill="#00f"/>'.repeat(100)}</g></defs>${'<use href="#m"/>'.repeat(199)}${ticks}</svg>`;
+}
+function heldSvg(i) {
+  const t = [0, 25, 50, 75, 100].map((v, k) => `<text x="20" y="${400 - k * 80}">${v}</text>`).join("");
+  const markers = Array.from({ length: 1010 }, (_, k) => `<circle cx="${200 + (k % 3) * 0.3 + 2}" cy="202" r="1" fill="#f00"/>`).join("");
+  const pts = Array.from({ length: 1000 }, (_, k) => `${200 + (k % 2) * 0.1},${200 + (k % 2) * 0.1}`).join(" ");
+  const g = `<defs><g id="g${i}">${Array.from({ length: 100 }, (_, k) => `<rect x="${100 + k * 2}" y="${150 + (k % 50)}" width="1" height="1" fill="#0a0"/>`).join("")}</g></defs>`;
+  const uses = Array.from({ length: 3900 }, (_, u) => `<use href="#g${i}" x="${(u % 60) * 210}" y="${Math.floor(u / 60) * 0.001}"/>`).join("");
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="500" height="500">${g}${t}${markers}<polyline stroke="#00f" fill="none" points="${pts} 400,50"/>${uses}</svg>`;
+}
+function columnSvg() {
+  const t = [0, 25, 50, 75, 100].map((v, k) => `<text x="20" y="${400 - k * 80}">${v}</text>`).join("");
+  const g = `<defs><g id="g">${Array.from({ length: 100 }, (_, k) => `<rect x="100" y="${100 + k * 2}" width="30" height="1" fill="#0a0"/>`).join("")}</g></defs>`;
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="500" height="500">${g}${t}${Array.from({ length: 39 }, (_, u) => `<use href="#g" y="${u * 0.001}"/>`).join("")}<text x="115" y="420">A</text></svg>`;
+}
+function atCapSvg(i) {
+  const t = [0, 25, 50, 75, 100].map((v, k) => `<text x="20" y="${400 - k * 80}">${v}</text>`).join("");
+  const g = `<defs><g id="c${i}">${Array.from({ length: 100 }, (_, k) => `<rect x="${40 + (k % 60) * 7}" y="${100 + Math.floor(k / 60) * 3 + (k % 7)}" width="5" height="${2 + (k % 5)}" fill="#0a0"/>`).join("")}</g></defs>`;
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="500" height="500">${g}${t}${Array.from({ length: 39 }, (_, u) => `<use href="#c${i}" y="${u * 7}"/>`).join("")}<text x="115" y="420">A</text></svg>`;
+}
+const bar = (k) => `<svg xmlns="http://www.w3.org/2000/svg" width="400" height="260"><rect x="65" y="${170 - k % 50}" width="70" height="${50 + k % 50}" fill="#e45756"/><rect x="165" y="120" width="70" height="100" fill="#e45756"/><line x1="50" y1="220" x2="350" y2="220" stroke="black"/>${[0, 1, 2, 3, 4].map((v) => `<text x="44" y="${220 - v * 50}" text-anchor="end" font-size="10">${v}</text>`).join("")}<text x="100" y="234" text-anchor="middle" font-size="10">A</text><text x="200" y="234" text-anchor="middle" font-size="10">B</text></svg>`;
 
-function packedSvg(vertices, markers) {
-  let s = '<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">';
-  for (let off = 0; off < vertices; off += 2500) {
-    const n = Math.min(2500, vertices - off);
-    const pts = ["10,90"];
-    for (let i = 0; i < n - 2; i++) pts.push(`${(30 + (i % 290) / 100).toFixed(2)},${(30 + (i % 97) / 34).toFixed(2)}`);
-    pts.push("90,10");
-    s += `<polyline points="${pts.join(" ")}" stroke="#f00" fill="none"/>`;
-  }
-  s += `<defs><g id="m">${'<circle cx="34.6" cy="34.6" r="1" fill="#00f"/>'.repeat(100)}</g></defs>`;
-  s += '<use href="#m"/>'.repeat(Math.ceil(markers / 100));
-  for (const [v, y] of [[0, 90], [10, 50], [20, 10]]) s += `<text x="2" y="${y}">${v}</text>`;
-  return s + '<text x="10" y="98">A</text><text x="50" y="98">B</text><text x="90" y="98">C</text></svg>';
-}
-
-const unlimited = () => ({ remaining: Number.MAX_SAFE_INTEGER, pairTests: 0, primitives: 0, inputsAfter: 0 });
-function time(input, makeBudget = unlimited) {
-  const out = [];
-  for (let r = 0; r < runs; r++) {
-    const b = makeBudget();
-    const t0 = process.hrtime.bigint();
-    const result = extractDeterministicVisuals(input, { markerBudget: b });
-    const ms = Number(process.hrtime.bigint() - t0) / 1e6;
-    const approximate = result.visuals.filter((v) => v.reason === "approximate-marker-dedup").length;
-    out.push({ ms, pairTests: b.pairTests, visuals: result.visuals.length, exact: result.visuals.length - approximate, approximate, deferred: result.deferred?.length ?? 0, refusals: [...new Set(result.refusals.map((x) => x.reason))] });
-  }
-  out.sort((a, b) => a.ms - b.ms);
-  return out[Math.floor(out.length / 2)];
-}
-
-if (mode === "batch40") {
-  const svg = packedSvg(2500, Math.floor(budget / 2500 / 100) * 100 - 100);
-  const b = markerBudget(1);
-  const t0 = process.hrtime.bigint();
-  const results = Array.from({ length: 40 }, (_, i) => { b.inputsAfter = 39 - i; return extractDeterministicVisuals({ kind: "svg", text: svg }, { markerBudget: b }); });
-  const ms = Number(process.hrtime.bigint() - t0) / 1e6;
-  const visuals = results.flatMap((r) => r.visuals);
-  const approximate = visuals.filter((v) => v.reason === "approximate-marker-dedup").length;
-  console.log(JSON.stringify({ node: process.version, mode, scene: `batch of 40 near-cap SVGs (${(svg.length / 1e3).toFixed(0)} KB each), production budget`, ms, pairTests: b.pairTests, visuals: visuals.length, exact: visuals.length - approximate, approximate, deferred: results.reduce((n, r) => n + (r.deferred?.length ?? 0), 0), refusals: [...new Set(results.flatMap((r) => r.refusals.map((x) => x.reason)))], peakRssMb: Math.round(process.resourceUsage().maxRSS / 1024) }, null, 1));
-  process.exit(0);
-}
-if (mode === "doc100") {
-  const near = packedSvg(2500, Math.floor(budget / 2500 / 100) * 100 - 100);
-  const html = `<html><body>${near.repeat(100)}</body></html>`;
-  const row = time({ kind: "html", text: html }, () => markerBudget());
-  console.log(JSON.stringify({ node: process.version, mode, scene: `html × 100 near-cap SVGs (${(html.length / 1e6).toFixed(1)} MB), production budget`, ...row, peakRssMb: Math.round(process.resourceUsage().maxRSS / 1024) }, null, 1));
-  process.exit(0);
-}
-const rows = [];
-// Baseline: the same SVG with no markers (parse + scene cost only), to subtract from the pair-test runs.
-const base = time({ kind: "svg", text: packedSvg(2500, 0) });
-rows.push({ scene: "svg 2.5k vertices, 0 markers", ...base });
-for (const markers of [4000, 8000, 16000]) {
-  const r = time({ kind: "svg", text: packedSvg(2500, markers) });
-  rows.push({ scene: `svg 2.5k vertices × ${markers} markers`, ...r, nsPerPairTest: r.pairTests ? ((r.ms - base.ms) * 1e6) / r.pairTests : null });
-}
-// Near-cap per SVG, repeated in one input: the shared budget must stop the whole input near `budget`.
-const perSvg = Math.floor(budget / 2500 / 100) * 100 - 100;
-const near = packedSvg(2500, perSvg);
-for (const copies of [10, 100]) {
-  const html = `<html><body>${near.repeat(copies)}</body></html>`;
-  rows.push({ scene: `html × ${copies} SVGs of 2.5k × ${perSvg} (${(html.length / 1e6).toFixed(1)} MB), production budget`, ...time({ kind: "html", text: html }, () => markerBudget()) });
-}
-console.log(JSON.stringify({ node: process.version, budget, runs, rows }, null, 1));
+const inputs = {
+  doc100: () => [{ kind: "html", text: `<html><body>${packedSvg().repeat(100)}</body></html>` }],
+  batch40: () => Array.from({ length: 40 }, () => ({ kind: "svg", text: packedSvg() })),
+  held17: () => [{ kind: "html", text: `<html><body>${Array.from({ length: 17 }, (_, i) => heldSvg(i)).join("\n")}</body></html>` }],
+  column: () => [{ kind: "svg", text: columnSvg() }],
+  atcap200: () => [{ kind: "html", text: `<html><body>${Array.from({ length: 200 }, (_, i) => atCapSvg(i)).join("")}</body></html>` }],
+  legit: () => [{ kind: "html", text: `<html><body>${Array.from({ length: 100 }, (_, k) => bar(k)).join("")}</body></html>` }],
+}[mode]();
+const bytes = inputs.reduce((n, i) => n + i.text.length, 0);
+const t0 = process.hrtime.bigint();
+const results = inputs.map((input) => extractDeterministicVisuals(input));
+const ms = Number(process.hrtime.bigint() - t0) / 1e6;
+const visuals = results.flatMap((r) => r.visuals);
+const skipped = {};
+for (const r of results.flatMap((x) => x.refusals)) skipped[r.reason] = (skipped[r.reason] ?? 0) + 1;
+const peakRssMb = Math.round(Number(/VmHWM:\s+(\d+)/.exec(readFileSync("/proc/self/status", "utf8"))?.[1] ?? 0) / 1024);
+console.log(JSON.stringify({ node: process.version, mode, inputMb: +(bytes / 1e6).toFixed(2), ms: Math.round(ms), peakRssMb, exported: visuals.length, approximate: visuals.filter((v) => v.reason === "approximate-marker-dedup").length, skipped, deferred: results.reduce((n, r) => n + (r.deferred?.length ?? 0), 0) }));

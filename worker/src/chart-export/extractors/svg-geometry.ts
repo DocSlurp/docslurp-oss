@@ -265,63 +265,48 @@ const cellKey = (cx: number, cy: number) => `${cx},${cy}`;
 /**
  * Polyline vertices bucketed in 3-unit cells, in typed buffers: `coords` holds each cell's vertices contiguously
  * (x, y pairs, in input order within a cell), `cells` maps a cell key to its index, and the vertices of cell `i` are
- * `coords[2 * starts[i] .. 2 * starts[i + 1])`. Non-finite vertices never pass the exact test and are left out.
- * Throws `svg-marker-vertex-limit` above `maxMarkerVertices`: callers check `vertices` first and approximate instead.
+ * `coords[2 * starts[i] .. 2 * starts[i + 1])`. Non-finite vertices never pass the exact test and are left out. Exact
+ * duplicate vertices are indexed once (they cannot change whether a marker has a vertex within 1.5). The density gate
+ * bounds the input to `maxSvgPathSegments` vertices, so the buffers stay small.
  */
 interface VertexGrid { cells: Map<string, number>; starts: Int32Array; coords: Float64Array }
 
 function vertexGrid(lines: LinePrim[]): VertexGrid {
-  let n = 0;
-  for (const l of lines) for (const v of l.points) if (Number.isFinite(v[0]) && Number.isFinite(v[1])) n++;
-  if (n > CHART_EXTRACT_LIMITS.maxMarkerVertices) throw new ExtractLimitError("svg-marker-vertex-limit");
+  // Exact duplicates collapse: same coordinates, same answer for every marker.
+  const unique: Array<[number, number]> = [];
+  const seen = new Set<string>();
+  for (const l of lines) {
+    for (const v of l.points) {
+      if (!Number.isFinite(v[0]) || !Number.isFinite(v[1])) continue;
+      const key = `${v[0]},${v[1]}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      unique.push(v);
+    }
+  }
+  const n = unique.length;
   const cells = new Map<string, number>();
   const cellOf = new Int32Array(n);
   const counts: number[] = [];
   let k = 0;
-  for (const l of lines) {
-    for (const v of l.points) {
-      if (!Number.isFinite(v[0]) || !Number.isFinite(v[1])) continue;
-      const key = cellKey(Math.floor(v[0] / CELL), Math.floor(v[1] / CELL));
-      let id = cells.get(key);
-      if (id === undefined) { id = counts.length; cells.set(key, id); counts.push(0); }
-      counts[id]!++;
-      cellOf[k++] = id;
-    }
+  for (const v of unique) {
+    const key = cellKey(Math.floor(v[0] / CELL), Math.floor(v[1] / CELL));
+    let id = cells.get(key);
+    if (id === undefined) { id = counts.length; cells.set(key, id); counts.push(0); }
+    counts[id]!++;
+    cellOf[k++] = id;
   }
   const starts = new Int32Array(counts.length + 1);
   for (let i = 0; i < counts.length; i++) starts[i + 1] = starts[i]! + counts[i]!;
   const fill = starts.slice(0, counts.length);
   const coords = new Float64Array(2 * n);
   k = 0;
-  for (const l of lines) {
-    for (const v of l.points) {
-      if (!Number.isFinite(v[0]) || !Number.isFinite(v[1])) continue;
-      const at = fill[cellOf[k++]!]!++;
-      coords[2 * at] = v[0];
-      coords[2 * at + 1] = v[1];
-    }
+  for (const v of unique) {
+    const at = fill[cellOf[k++]!]!++;
+    coords[2 * at] = v[0];
+    coords[2 * at + 1] = v[1];
   }
   return { cells, starts, coords };
-}
-
-/**
- * Upper bound on the pair tests `withoutVertexMarkers` runs: per finite marker, the vertices in its 9 cells (the exact
- * pass stops early at a match, so it usually runs far fewer). O(markers + vertices); the schedule in `index.ts` orders
- * and shares the budget by it.
- */
-export function markerPairEstimate(points: PointPrim[], lines: LinePrim[]): number {
-  if (!points.length || !lines.length) return 0;
-  const { cells, starts } = vertexGrid(lines);
-  let total = 0;
-  for (const p of points) {
-    if (!Number.isFinite(p.x) || !Number.isFinite(p.y)) continue;
-    const cx = Math.floor(p.x / CELL), cy = Math.floor(p.y / CELL);
-    for (let k = 0; k < CELL_OFFSETS.length; k += 2) {
-      const id = cells.get(cellKey(cx + CELL_OFFSETS[k]!, cy + CELL_OFFSETS[k + 1]!));
-      if (id !== undefined) total += starts[id + 1]! - starts[id]!;
-    }
-  }
-  return total;
 }
 
 /**
@@ -329,8 +314,8 @@ export function markerPairEstimate(points: PointPrim[], lines: LinePrim[]): numb
  * the vertices in its own and the 8 neighbouring 3-unit cells; a non-finite coordinate never passes the exact test, so
  * such points are kept and such vertices skipped. Close to linear in points + vertices when vertices are spread out;
  * packed into a few cells (a hostile SVG) it costs points × packed vertices, so every pair test is counted in `work`
- * and the call stops with `svg-marker-limit` once `work.pairTests` passes `budget`. The schedule in `index.ts` catches
- * that and approximates instead.
+ * and the call stops with `svg-marker-limit` once `work.pairTests` passes `budget` (`maxMarkerPairTests` per SVG);
+ * `index.ts` catches that and approximates instead.
  */
 export function withoutVertexMarkers(points: PointPrim[], lines: LinePrim[], work: MarkerWork = { pairTests: 0 }, budget: number = CHART_EXTRACT_LIMITS.maxMarkerPairTests): PointPrim[] {
   if (!points.length || !lines.length) return points;
@@ -356,20 +341,19 @@ export function withoutVertexMarkers(points: PointPrim[], lines: LinePrim[], wor
 }
 
 /**
- * Bounded, deterministic stand-in for `withoutVertexMarkers` when an SVG is over its share or its vertex cap: a point is
+ * Bounded, deterministic stand-in for `withoutVertexMarkers` when an SVG is over `maxMarkerPairTests`: a point is
  * dropped when a vertex lies in its own 1.5-unit cell. Such a vertex is within 1.5 on both axes (up to rounding at cell
- * edges), so this keeps some points the exact test would drop and practically never drops one it keeps. Indexes at most `maxMarkerVertices`
- * cells, in input order. O(points + vertices), no pair tests.
+ * edges), so this keeps some points the exact test would drop and practically never drops one it keeps.
+ * O(points + vertices), no pair tests.
  */
 export function approximateVertexMarkers(points: PointPrim[], lines: LinePrim[]): PointPrim[] {
   if (!points.length || !lines.length) return points;
   const FINE = 1.5;
   const occupied = new Set<string>();
-  outer: for (const l of lines) {
+  for (const l of lines) {
     for (const v of l.points) {
       if (!Number.isFinite(v[0]) || !Number.isFinite(v[1])) continue;
       occupied.add(cellKey(Math.floor(v[0] / FINE), Math.floor(v[1] / FINE)));
-      if (occupied.size >= CHART_EXTRACT_LIMITS.maxMarkerVertices) break outer;
     }
   }
   return points.filter((p) => !(Number.isFinite(p.x) && Number.isFinite(p.y) && occupied.has(cellKey(Math.floor(p.x / FINE), Math.floor(p.y / FINE)))));
