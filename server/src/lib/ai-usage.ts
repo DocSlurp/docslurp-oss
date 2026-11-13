@@ -195,6 +195,8 @@ export interface UsageLedger extends UsageRecorder {
    * search/lean-logging.ts); they stay in events() but flush never writes them.
    */
   divert(filter: (event: UsageEvent) => boolean): UsageEvent[];
+  /** Cost (credits) of the events a flush would write now. */
+  pendingCostCents(): number;
   /** Persist events not yet flushed, stamped with the ledger scope. */
   flush(options?: UsageFlushOptions): Promise<UsageEvent[]>;
   /**
@@ -266,6 +268,9 @@ export function createUsageLedger(args: {
       const taken = events.slice(flushedCount).filter((event) => !diverted.has(event) && filter(event));
       for (const event of taken) diverted.add(event);
       return taken;
+    },
+    pendingCostCents() {
+      return events.slice(flushedCount).reduce((sum, event) => sum + (diverted.has(event) ? 0 : Math.max(0, event.costCents || 0)), 0);
     },
     async flush(options) {
       const batch = await flushWithin(sql, options);

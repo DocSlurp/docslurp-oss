@@ -35,6 +35,7 @@ import {
 
 import { sql, type SqlClient } from "../db.js";
 import { recordUnitCharge } from "../lib/ai-usage.js";
+import { writeBehindWithinCap } from "../lib/billed-write-behind.js";
 import { currentChatTurn } from "../lib/chat-turn-context.js";
 import { effectiveSearchMode } from "../search/search-mode.js";
 import { consumeSearchModeLimit } from "../search/search-mode-limits.js";
@@ -1700,7 +1701,10 @@ async function chargeSearch(result: SearchResponse, userId: string, searchId: st
     enqueueSearchCharge({ userId, orgId: null, projectId, mode: result.searchMode! });
     return;
   }
-  try {
+  const llmMode = result.searchMode ?? "deep";
+  const credits = searchCredits(1, { llmStrategies, mode: llmMode });
+  // Committed after the response within SEARCH_WRITE_BEHIND_MAX_CREDITS; the id makes a retry idempotent.
+  await writeBehindWithinCap(credits, async () => { try {
     await recordUnitCharge({
       userId,
       scope: { projectId, sessionId: result.sessionId },
@@ -1709,14 +1713,14 @@ async function chargeSearch(result: SearchResponse, userId: string, searchId: st
         metric: BILLABLE_UNIT_METRICS.search,
         amount: 1,
         unit: "search",
-        credits: searchCredits(1, { llmStrategies, mode: result.searchMode ?? "deep" }),
-        metadata: { llmStrategies, searchMode: result.searchMode ?? "deep", searchUnits: searchUnits({ llmStrategies, mode: result.searchMode ?? "deep" }) },
+        credits,
+        metadata: { llmStrategies, searchMode: llmMode, searchUnits: searchUnits({ llmStrategies, mode: llmMode }) },
       },
     });
   } catch (error) {
     // A failed charge never fails the search the user already has.
     console.error(`[search] charge failed session=${result.sessionId}: ${error instanceof Error ? error.message : String(error)}`);
-  }
+  } }).done;
 }
 
 async function executeHybridSearch(

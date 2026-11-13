@@ -7,6 +7,9 @@ vi.mock("../lib/public-errors.js", () => ({
 }));
 
 const { createSearchSessionJournal, drainSearchSessionWrites, searchSessionWriteBacklog } = await import("../search/session.js");
+const { sql } = await import("../db.js");
+const { billedWriteBehindCredits } = await import("../lib/billed-write-behind.js");
+const { BILLABLE_UNIT_METRICS, unitChargeMetadata } = await import("@docslurp/shared");
 const turns = await import("../lib/chat-turn-context.js");
 
 beforeEach(() => { reported.length = 0; });
@@ -74,5 +77,84 @@ describe("write-behind search session writes", () => {
     } finally {
       vi.unstubAllEnvs();
     }
+  });
+});
+
+describe("write-behind search usage", () => {
+  /** Every usage insert waits for `release`, so a test can see whether the search waited for it. */
+  function gateInserts() {
+    let release!: () => void;
+    const gate = new Promise<unknown[]>((resolve) => { release = () => resolve([{ id: "event" }]); });
+    let inserts = 0;
+    (sql as unknown as { mockImplementation(fn: () => unknown): void }).mockImplementation(() => { inserts += 1; return gate; });
+    return { release, inserts: () => inserts };
+  }
+
+  function journalWithCost(costCents: number) {
+    const journal = createSearchSessionJournal({ writeBehind: true, scope: { orgId: "org-a", projectId: "project-a" } });
+    // A billed unit event keeps its credits; AI token events are priced at 0 credits.
+    journal.record({ provider: "docslurp", model: "search", metric: BILLABLE_UNIT_METRICS.search, amount: 1, unit: "search",
+      costCents, metadata: unitChargeMetadata() });
+    return journal;
+  }
+
+  async function settles(promise: Promise<unknown>): Promise<boolean> {
+    let done = false;
+    void promise.then(() => { done = true; });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    return done;
+  }
+
+  it("answers before a usage insert under the cap commits, and shutdown drains it", async () => {
+    const gate = gateInserts();
+    expect(await settles(journalWithCost(2).flushUsage("user-a"))).toBe(true);
+    expect(gate.inserts()).toBeGreaterThan(0);
+    expect(billedWriteBehindCredits()).toBe(2);
+    const drained = drainSearchSessionWrites();
+    expect(await settles(drained)).toBe(false);
+    gate.release();
+    await drained;
+    expect(billedWriteBehindCredits()).toBe(0);
+  });
+
+  it("waits for the usage insert once unwritten usage would pass the cap", async () => {
+    vi.stubEnv("SEARCH_WRITE_BEHIND_MAX_CREDITS", "5");
+    try {
+      const gate = gateInserts();
+      expect(await settles(journalWithCost(4).flushUsage("user-a"))).toBe(true);
+      // 4 + 4 > 5: this search waits for its own insert.
+      const second = journalWithCost(4).flushUsage("user-a");
+      expect(await settles(second)).toBe(false);
+      gate.release();
+      await second;
+      await drainSearchSessionWrites();
+      expect(billedWriteBehindCredits()).toBe(0);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("commits all usage before the response when the cap is 0", async () => {
+    vi.stubEnv("SEARCH_WRITE_BEHIND_MAX_CREDITS", "0");
+    try {
+      const gate = gateInserts();
+      const flushed = journalWithCost(1).flushUsage("user-a");
+      expect(await settles(flushed)).toBe(false);
+      gate.release();
+      await flushed;
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("is waited for by a failing chat turn before it refunds (#90)", async () => {
+    const gate = gateInserts();
+    const turn = turns.createChatTurnContext({ refundOnFailure: true });
+    await turns.runInChatTurnContext(turn, () => journalWithCost(1).flushUsage("user-a"));
+    const settled = turns.settleChatTurnWrites(turn);
+    expect(await settles(settled)).toBe(false);
+    gate.release();
+    await settled;
+    await drainSearchSessionWrites();
   });
 });
