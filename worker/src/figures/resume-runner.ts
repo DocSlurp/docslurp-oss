@@ -295,7 +295,23 @@ async function resumeClaimed(deps: FigureResumeDeps, row: ClaimedLevel): Promise
   try {
     const adopted = await adoptPendingAssets(deps.sql, deps.storage, { scope, signal: deps.signal });
     if (adopted.adopted > 0) recordFigureTelemetry("adopted_files", adopted.adopted);
-    const todo = await units(deps.sql, row);
+    // PII: a document withheld whole (or whose outcome cannot be read) resumes nothing and leaves the queue; a unit whose
+    // pages are all withheld is skipped; clean pages resume normally.
+    const withholding = await documentPiiWithholding(deps.sql, row);
+    if (withholding.scope === "document") {
+      outcome = "blocked"; blocked = "refused";
+      console.log(`[doppler-figures] resume skipped doc=${row.document_id} reason=pii-${withholding.reason}`);
+      recordFigureTelemetry("resume.pii_skipped", 1, { scope: "document" });
+      return;
+    }
+    const pageRange = (unit: ResumeUnit) => {
+      const first = unit.shard?.first ?? 1;
+      const last = unit.shard?.last ?? Math.max(1, row.page_count);
+      return Array.from({ length: Math.min(last - first + 1, 100_000) }, (_, i) => first + i);
+    };
+    const all = await units(deps.sql, row);
+    const todo = withholding.scope === "pages" ? all.filter((unit) => !pageRange(unit).every((page) => isPageWithheld(withholding, page))) : all;
+    if (todo.length < all.length) recordFigureTelemetry("resume.pii_skipped", all.length - todo.length, { scope: "pages" });
     console.log(`[doppler-figures] resume claim doc=${row.document_id} org=${row.org_id} launches=${row.resume_vm_launches} units=${todo.length} adopt=${adopted.adopted} lost=${adopted.lost}`);
     recordFigureTelemetry("resume.claimed", 1);
     const unit = todo[0];
@@ -353,21 +369,62 @@ async function recordResumeVmTime(sql: Client, row: ClaimedLevel, wallTimeMs: nu
   recordFigureTelemetry("resume.vm_ms", ms, { outcome });
 }
 
-/** Pages the document's PII stage withheld (owner rule: page-scoped), or null when it withheld nothing. */
-async function piiWithheldPages(sql: Client, row: ClaimedLevel): Promise<{ all: boolean; pages: Set<number> } | null> {
-  const [doc] = await sql<{ withholds: boolean }[]>`
-    select coalesce((metadata->'pii'->>'blocked')::boolean, false)
-      or coalesce((metadata->'pii'->>'redacted')::boolean, false)
-      or coalesce(jsonb_array_length(case when jsonb_typeof(metadata->'pii'->'withheldArtifactUris') = 'array'
-        then metadata->'pii'->'withheldArtifactUris' else '[]'::jsonb end), 0) > 0 as withholds
-    from documents where id = ${row.document_id} and org_id = ${row.org_id}`;
-  if (!doc) return { all: true, pages: new Set() };
-  if (!doc.withholds) return null;
-  // TODO(feat/pii-page-scoped): swap to its withheldPages(document) helper when it lands; the same rule.
+// ---- PII (page-scoped). Local until feat/pii-page-scoped lands: the same names and semantics as its
+// packages/shared/src/pii-withholding.ts (piiWithholding, isPageWithheld); whichever lands later dedupes. ----
+
+export type PiiWithholding = { scope: "none" } | { scope: "document"; reason: string } | { scope: "pages"; pages: Set<number> };
+
+/**
+ * A document's PII withholding from its status and metadata, failing closed: status `pii_blocked`, `pii.blocked`, or a
+ * malformed `metadata.pii` is `document`. `pii.scope = "pages"` with its page list is `pages`; a page-scoped outcome whose
+ * pages cannot be read is `document`. A legacy outcome (no scope) that withholds anything takes its pages from the run's
+ * `pii_detections` (`detectedPages`), or is `document` when they are missing or unpaged.
+ */
+export function piiWithholding(args: { status: string | null | undefined; metadata: unknown; detectedPages?: ReadonlyArray<number | null> }): PiiWithholding {
+  if (args.status === "pii_blocked") return { scope: "document", reason: "pii_blocked" };
+  const metadata = args.metadata as { pii?: unknown } | null | undefined;
+  if (metadata !== null && metadata !== undefined && typeof metadata !== "object") return { scope: "document", reason: "malformed" };
+  const pii = metadata?.pii;
+  if (pii === undefined || pii === null) return { scope: "none" };
+  if (typeof pii !== "object" || Array.isArray(pii)) return { scope: "document", reason: "malformed" };
+  const value = pii as { blocked?: unknown; redacted?: unknown; scope?: unknown; pages?: unknown; withheldPages?: unknown; withheldArtifactUris?: unknown };
+  if (value.blocked === true) return { scope: "document", reason: "blocked" };
+  const pageList = (list: unknown): Set<number> | null =>
+    Array.isArray(list) && list.every((n) => Number.isSafeInteger(n) && (n as number) >= 1) ? new Set(list as number[]) : null;
+  if (value.scope === "document") return { scope: "document", reason: "document" };
+  if (value.scope === "pages") {
+    const pages = pageList(value.pages ?? value.withheldPages);
+    return pages ? { scope: "pages", pages } : { scope: "document", reason: "unreadable-pages" };
+  }
+  if (value.scope !== undefined && value.scope !== "none") return { scope: "document", reason: "malformed" };
+  const uris = value.withheldArtifactUris;
+  if (uris !== undefined && !Array.isArray(uris)) return { scope: "document", reason: "malformed" };
+  const withholds = value.redacted === true || (Array.isArray(uris) && uris.length > 0);
+  if (!withholds || value.scope === "none") return { scope: "none" };
+  const detected = args.detectedPages ?? [];
+  if (detected.length === 0 || detected.some((page) => page === null)) return { scope: "document", reason: "unpaged" };
+  return { scope: "pages", pages: new Set(detected as number[]) };
+}
+
+/** Whether a page (or any of several) is withheld; `document` always; a null or unknown page whenever any page is. */
+export function isPageWithheld(withholding: PiiWithholding, page: number | readonly number[] | null): boolean {
+  if (withholding.scope === "none") return false;
+  if (withholding.scope === "document") return true;
+  if (page === null) return withholding.pages.size > 0;
+  const pages = typeof page === "number" ? [page] : page;
+  if (pages.length === 0) return withholding.pages.size > 0;
+  return pages.some((n) => !Number.isSafeInteger(n) || withholding.pages.has(n));
+}
+
+/** The claimed document's withholding (its status, metadata and, for a legacy outcome, its run's detections). */
+async function documentPiiWithholding(sql: Client, row: ClaimedLevel): Promise<PiiWithholding> {
+  const [doc] = await sql<{ status: string; metadata: unknown }[]>`select status, metadata from documents where id = ${row.document_id} and org_id = ${row.org_id}`;
+  if (!doc) return { scope: "document", reason: "missing" };
+  const first = piiWithholding({ status: doc.status, metadata: doc.metadata });
+  if (first.scope !== "document" || first.reason !== "unpaged") return first;
   const detections = await sql<{ page_number: number | null }[]>`
     select distinct page_number from pii_detections where document_id = ${row.document_id} and run_id = ${row.run_id}`;
-  // Fail closed: a withholding outcome without page numbers withholds every resumed figure (the document still resumes).
-  return { all: detections.length === 0 || detections.some((d) => d.page_number === null), pages: new Set(detections.map((d) => d.page_number!).filter((n) => n !== null)) };
+  return piiWithholding({ status: doc.status, metadata: doc.metadata, detectedPages: detections.map((d) => d.page_number) });
 }
 
 /** Add URIs to the document's withheld list (scoped by its organization); throws when the write did not land. */
@@ -446,13 +503,18 @@ async function resumeUnit(
         and run_id = ${row.run_id} and storage_state = 'stored'`).map((r) => [r.asset_id, r.sha256]));
     const set = await readDopplerFigureDir(outDir, {
       pageCount: row.page_count, signal: deps.signal, expect: outcome.status === "partial" ? "partial" : "complete", sourceSha256: row.source_sha256,
-      gaps: outcome.gaps ?? null, resume: { stored },
+      // A range resume (a shard or a gap) returns only its own range: the pages before it are not this folder's, so they
+      // count as covered for the contiguity rule (reader only; never written to the ledger).
+      gaps: [...(unit.shard && unit.shard.first > 1 ? [{ first: 1, last: unit.shard.first - 1, reason: "other" as const }] : []), ...(outcome.gaps ?? [])],
+      resume: { stored },
     });
     try {
-      // PII (page-scoped): figures on a withheld page are withheld before they can be stored or served.
-      const withheld = await piiWithheldPages(deps.sql, row);
-      if (withheld) {
-        const uris = set.files.filter((file) => withheld.all || withheld.pages.has(parseDopplerFigureId(file.id)?.pageNumber ?? -1))
+      // PII (page-scoped): figures on a withheld page join the withheld list before any upload, so they are never served.
+      // (They are still uploaded: the ledger records the folder whole. The unit filter above skips ranges withheld whole.)
+      const withheld = await documentPiiWithholding(deps.sql, row);
+      if (withheld.scope === "document") return { outcome: "blocked", blocked: "refused", vmMs, added: 0 };
+      if (withheld.scope === "pages") {
+        const uris = set.files.filter((file) => isPageWithheld(withheld, parseDopplerFigureId(file.id)?.pageNumber ?? null))
           .map((file) => deps.storage.uri(dopplerFolderKey(document, row.run_id, { id: file.id, format: file.format })));
         await withholdUris(deps.sql, row, uris);
         if (uris.length > 0) recordFigureTelemetry("resume.pii_withheld_files", uris.length);

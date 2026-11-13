@@ -20,7 +20,7 @@ import { readDopplerFigureDir, storeDopplerFigures } from "../extractors/doppler
 import type { FigureResumeJob } from "../extractors/plugins.js";
 import { setSpendCheckConfig } from "../db/spend-check.js";
 import {
-  auditFigureStorage, claimFigureResume, figureResumeBacklog, runFigureResumes, FIGURE_FAILED_RETENTION_MS, FIGURE_ORPHAN_GRACE_MS, type FigureResumeProvider,
+  auditFigureStorage, claimFigureResume, figureResumeBacklog, isPageWithheld, piiWithholding, runFigureResumes, FIGURE_FAILED_RETENTION_MS, FIGURE_ORPHAN_GRACE_MS, type FigureResumeProvider,
 } from "../figures/resume-runner.js";
 import { v2Manifest, v3Text, writeV3Folder, V2_SOURCE_SHA } from "../test/doppler-manifest-v2.js";
 import { createMigratedDatabase } from "../test/migrated-db.js";
@@ -572,5 +572,69 @@ describe("PII (owner rule: page-scoped)", () => {
     expect(doc!.withheld).toEqual(["s3://b/x"]);
     const [run] = await sql<{ artifacts: Record<string, string> }[]>`select artifacts from project_runs where id = 'run-a'`;
     expect(run!.artifacts["doc-a:doppler-figure:p3.2"]).toBe(`s3://b/${P32}`);
+  });
+});
+
+describe("PII withholding API (local until feat/pii-page-scoped lands)", () => {
+  it("piiWithholding fails closed; isPageWithheld follows the scope", () => {
+    expect(piiWithholding({ status: "completed", metadata: {} })).toEqual({ scope: "none" });
+    expect(piiWithholding({ status: "pii_blocked", metadata: {} }).scope).toBe("document");
+    expect(piiWithholding({ status: "completed", metadata: { pii: "garbage" } }).scope).toBe("document");
+    expect(piiWithholding({ status: "completed", metadata: { pii: { blocked: true } } }).scope).toBe("document");
+    expect(piiWithholding({ status: "completed", metadata: { pii: { scope: "pages", pages: "x" } } }).scope).toBe("document");
+    const pages = piiWithholding({ status: "completed", metadata: { pii: { scope: "pages", pages: [3] } } });
+    expect(pages).toEqual({ scope: "pages", pages: new Set([3]) });
+    expect(isPageWithheld(pages, 3)).toBe(true);
+    expect(isPageWithheld(pages, 2)).toBe(false);
+    expect(isPageWithheld(pages, [1, 3])).toBe(true);
+    expect(isPageWithheld(pages, null)).toBe(true);
+    expect(isPageWithheld({ scope: "document", reason: "x" }, 1)).toBe(true);
+    expect(isPageWithheld({ scope: "none" }, null)).toBe(false);
+    // Legacy outcome (no scope): pages from the run's detections, or document when unpaged.
+    expect(piiWithholding({ status: "completed", metadata: { pii: { redacted: true } }, detectedPages: [2] })).toEqual({ scope: "pages", pages: new Set([2]) });
+    expect(piiWithholding({ status: "completed", metadata: { pii: { redacted: true } }, detectedPages: [null] }).scope).toBe("document");
+  });
+
+  it("a page-scoped document (metadata.pii.scope = pages) resumes figures on clean pages; the PII page's figures are withheld", async () => {
+    const storage = memoryStorage();
+    await partialPass(storage);
+    await due();
+    await sql`update documents set metadata = '{"pii":{"scope":"pages","pages":[3],"withheldArtifactUris":[]}}'::jsonb where id = 'doc-a'`;
+    const { provider, jobs } = fakeProvider();
+    await runFigureResumes({ sql, storage, provider, workerId: "w1", env: ON });
+    expect(jobs).toHaveLength(1);
+    expect(await level()).toMatchObject({ images_status: "complete", resume_blocked: null });
+    const [doc] = await sql<{ withheld: string[] }[]>`select metadata->'pii'->'withheldArtifactUris' as withheld from documents where id = 'doc-a'`;
+    expect(doc!.withheld).toEqual([`s3://b/${P32}`]);
+  });
+
+  it("a unit whose pages are all withheld is skipped (no VM), and nothing runnable is left", async () => {
+    const storage = memoryStorage();
+    await partialPass(storage);
+    await due();
+    await sql`update documents set metadata = '{"pii":{"scope":"pages","pages":[1,2,3]}}'::jsonb where id = 'doc-a'`;
+    const { provider, jobs } = fakeProvider();
+    await runFigureResumes({ sql, storage, provider, workerId: "w1", env: ON });
+    expect(jobs).toEqual([]);
+    expect(await level()).toMatchObject({ queued: false, resume_blocked: "attempts", resume_vm_launches: 0 });
+  });
+
+  it("an outcome that cannot be read skips all figures (no VM) and leaves the queue", async () => {
+    const storage = memoryStorage();
+    await partialPass(storage);
+    await due();
+    await sql`update documents set metadata = '{"pii":{"scope":"pages","pages":"unreadable"}}'::jsonb where id = 'doc-a'`;
+    const { provider, jobs } = fakeProvider();
+    await runFigureResumes({ sql, storage, provider, workerId: "w1", env: ON });
+    expect(jobs).toEqual([]);
+    expect(await level()).toMatchObject({ queued: false, resume_blocked: "refused", resume_vm_launches: 0 });
+  });
+
+  it("a pii_blocked document is never claimed", async () => {
+    const storage = memoryStorage();
+    await partialPass(storage);
+    await due();
+    await sql`update documents set status = 'pii_blocked' where id = 'doc-a'`;
+    expect(await claimFigureResume(sql, "w1", ON)).toBeNull();
   });
 });
