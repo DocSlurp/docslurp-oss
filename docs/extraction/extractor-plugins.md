@@ -118,6 +118,9 @@ export function register(host: ExtractorPluginHost): ExtractorPlugin {
   `{ status: "failed", reason }` when Doppler kept the Markdown but could not extract figures. `reason` is raw text
   for telemetry only. Core validates the whole folder again and stores nothing from a folder that fails any rule; a
   provider that returns `figures` for a job that did not ask is refused.
+- `run` may return `pageFacts`: Doppler's [page facts](doppler-page-facts.md) (`doppler-page-facts/1` JSON lines, a
+  string or the raw bytes) from the same job. The host parses them with a strict, bounded reader and stores them as a
+  document artifact; malformed or oversized facts are dropped, never repaired, and never bill or authorize a read.
 - `shardProfile` registers the provider's prior cost profile; calibration refines it from the shard timings it
   records through `context.recordTiming`.
 

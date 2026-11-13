@@ -5,7 +5,7 @@ import { EMBEDDED_IMAGE_TARGETS, embeddedImageGraph, resolveEmbeddedImageRequest
 import { anchorImageMarkdownFile } from "../extractors/image-markdown.js";
 import { DopplerFigureRejection, DopplerFigureStoreError, dopplerImageExtractEnabled, readDopplerFigureDir, storeDopplerFigures } from "../extractors/doppler-figures.js";
 import {
-  SANDBOXED_PDF_MAX_MARKDOWN_BYTES, VM_PDF_EXTRACTOR_ID, requireSandboxedPdfProvider, sandboxedPdfFigures, sandboxedPdfProvider, sandboxedPdfLayoutFacts, sandboxedPdfOcrPages,
+  SANDBOXED_PDF_MAX_MARKDOWN_BYTES, VM_PDF_EXTRACTOR_ID, requireSandboxedPdfProvider, sandboxedPdfFigures, sandboxedPdfProvider, sandboxedPdfLayoutFacts, sandboxedPdfLayoutFactsSource, sandboxedPdfOcrPages,
 } from "../extractors/plugins.js";
 import { buildSummaryEvidence } from "./summary-evidence.js";
 import type { CapacityLeaseStore } from "../media/capacity/types.js";
@@ -116,6 +116,8 @@ import { recordMeasuredPageCount, type PageCountResult } from "../lib/office-pag
 import { processedPdfPages, reconcileProcessedPdfPages } from "../lib/pdf-page-count.js";
 import { recordExtractedPageEquivalents } from "../lib/page-equivalents.js";
 import { collectPageLayoutFacts } from "../lib/page-layout-evidence.js";
+import { DOPPLER_PAGE_FACTS_ARTIFACT, dopplerPageFactsArtifact } from "../lib/doppler-page-facts.js";
+import { sandboxedPdfPageFacts } from "../extractors/sandboxed-pdf-page-facts.js";
 import { PAGE_RENDITION, pageRenditionKey } from "../lib/page-rendition.js";
 import { extractorFailureReason, extractorFallbackFor, recordExtractorFallback } from "../lib/extractor-fallback.js";
 
@@ -997,10 +999,15 @@ export class ExtractMarkdownStage implements Stage {
                   // PDFs, or returned by the PDF VM from the same job that wrote the winning Markdown. Never host-probed otherwise.
                   const pageLayoutFactsUri = !isPdf || !resolveRunRoutingV2(state) ? null
                     : hostPdfProbes === "ran" ? await this.recordPageLayoutFacts(document, tempFile, winningText, state, signal)
-                    : winningCandidate.layoutFacts ? await this.storePageLayoutFacts(document, state, winningCandidate.layoutFacts, "vm-pdf")
+                    : winningCandidate.layoutFacts ? await this.storePageLayoutFacts(document, state, winningCandidate.layoutFacts, winningCandidate.layoutFactsSource ?? "vm-pdf")
                     : null;
                   if (pageLayoutFactsUri) {
                     state.artifactLedger.recordDocument(document.id, "page-layout-facts", pageLayoutFactsUri);
+                  }
+                  // Doppler page facts from the same VM job (validated, no document strings): kept as a document artifact for
+                  // routing consumers. DOCSLURP_DOPPLER_PAGE_FACTS=off never parses them, so none arrive here.
+                  if (isPdf && winningCandidate.pageFacts) {
+                    state.artifactLedger.recordDocument(document.id, DOPPLER_PAGE_FACTS_ARTIFACT, await this.storeDopplerPageFacts(document, state, winningCandidate.pageFacts));
                   }
                   // Doppler figures of the winning VM candidate: validated whole, stored under the document's artifact root, and
                   // recorded as document artifact slots so the artifact and PII guards (and the file proxy) apply to each file.
@@ -1680,7 +1687,7 @@ export class ExtractMarkdownStage implements Stage {
     document: import("../models.js").Document,
     state: import("../pipeline/pipeline.js").WorkflowState,
     pages: Map<number, import("../lib/page-layout-facts.js").PageLayoutFacts>,
-    source: "parser-sandbox" | "vm-pdf",
+    source: "parser-sandbox" | "vm-pdf" | "vm-pdf-facts",
     ms: number | null = null,
   ): Promise<string> {
     const key = `${runArtifactRoot(state.run, document.userId)}/page-layout-facts/${document.id}.json`;
@@ -1689,6 +1696,19 @@ export class ExtractMarkdownStage implements Stage {
       pages: [...pages.entries()].map(([pageNumber, page]) => ({ pageNumber, known: true, ...page })),
     });
     console.log(`[extract-debug] document=${document.id} pageLayoutFacts source=${source} pages=${pages.size}${ms === null ? "" : ` ms=${ms}`}`);
+    return this.storage.uri(key);
+  }
+
+  /** Doppler page facts as `<runArtifactRoot>/page-facts/<documentId>.json` (lib/doppler-page-facts.ts artifact). */
+  private async storeDopplerPageFacts(
+    document: import("../models.js").Document,
+    state: import("../pipeline/pipeline.js").WorkflowState,
+    facts: import("../lib/doppler-page-facts.js").DopplerPageFactsDocument,
+  ): Promise<string> {
+    const key = `${runArtifactRoot(state.run, document.userId)}/page-facts/${document.id}.json`;
+    await this.storage.putJson(key, dopplerPageFactsArtifact(document.id, facts));
+    const { summary } = facts;
+    console.log(`[extract-debug] document=${document.id} dopplerPageFacts pages=${summary.pagesKnown} failed=${summary.pagesFailed} dropped=${summary.linesDropped} complete=${summary.complete}`);
     return this.storage.uri(key);
   }
 
@@ -2002,6 +2022,8 @@ export class ExtractMarkdownStage implements Stage {
     await upload.done;
     const ocrPages = plan.sandboxedPdf ? sandboxedPdfOcrPages(plan.sandboxedPdf) : undefined;
     const layoutFacts = plan.sandboxedPdf ? sandboxedPdfLayoutFacts(plan.sandboxedPdf) : undefined;
+    const layoutFactsSource = plan.sandboxedPdf ? sandboxedPdfLayoutFactsSource(plan.sandboxedPdf) : undefined;
+    const pageFacts = plan.sandboxedPdf ? sandboxedPdfPageFacts(plan.sandboxedPdf) : undefined;
     const figureOutcome = plan.sandboxedPdf?.figures ? sandboxedPdfFigures(plan.sandboxedPdf) : undefined;
 
     return {
@@ -2011,7 +2033,8 @@ export class ExtractMarkdownStage implements Stage {
       textUri: this.storage.uri(textKey),
       tempTextPath: outputPath,
       ...(ocrPages ? { ocrPages: [...ocrPages] } : {}),
-      ...(layoutFacts ? { layoutFacts } : {}),
+      ...(layoutFacts ? { layoutFacts, ...(layoutFactsSource ? { layoutFactsSource } : {}) } : {}),
+      ...(pageFacts ? { pageFacts } : {}),
       ...(plan.sandboxedPdf?.figures && figureOutcome ? { figures: { dir: plan.sandboxedPdf.figures.dir, outcome: figureOutcome } } : {}),
     };
   }

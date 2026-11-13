@@ -2,6 +2,7 @@ export type PipelineArtifactMap = Record<string, string>;
 export type DocumentArtifactName =
   | "canonical-document"
   | "classification"
+  | "doppler-page-facts"
   | "embeddings"
   | "extraction-contract"
   | "format-detect"

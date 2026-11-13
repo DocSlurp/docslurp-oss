@@ -6,6 +6,8 @@ import {
   acceptSandboxedPdfBatchEvent, assertSingleScopeBatch, batchFileJob, batchUsageOf, sandboxedPdfBatchProvider, unfinishedBatchFiles,
   type SandboxedPdfBatchJob,
 } from "../extractors/sandboxed-pdf-batch.js";
+import { sandboxedPdfPageFacts } from "../extractors/sandboxed-pdf-page-facts.js";
+import { docLine, jsonl, runLine, textPage } from "../test/doppler-page-facts-fixture.js";
 
 function job(files = 3, figures = false): SandboxedPdfBatchJob {
   return {
@@ -117,6 +119,18 @@ describe("acceptSandboxedPdfBatchEvent", () => {
   it("runs the single-file acceptance on the text result (ocrPages validated)", () => {
     expect(() => acceptSandboxedPdfBatchEvent(job(), text(0, 2, { ocrPages: [3] }))).toThrow("invalid ocrPages");
     expect(acceptSandboxedPdfBatchEvent(job(), text(0, 2, { ocrPages: [2, 1] }))).toMatchObject({ result: { ocrPages: [1, 2] } });
+  });
+
+  it("accepts a file's page facts bounded by its processed slots, and strips them from the result", () => {
+    const j = job();
+    const pageFacts = jsonl([docLine(), textPage(1), textPage(2), textPage(3), runLine()]);
+    const event = acceptSandboxedPdfBatchEvent(j, { ...text(0, 3, { pageFacts }), processedPages: 2 });
+    expect(event).toMatchObject({ phase: "text", pages: 3, processedPages: 2 });
+    expect((event as { result: { pageFacts?: unknown } }).result.pageFacts).toBeUndefined();
+    expect([...sandboxedPdfPageFacts(batchFileJob(j, 0)!)!.pages.keys()]).toEqual([1, 2]);
+    // Malformed facts on another file: no facts, the text result still stands.
+    expect(acceptSandboxedPdfBatchEvent(j, text(1, 2, { pageFacts: "garbage" })).phase).toBe("text");
+    expect(sandboxedPdfPageFacts(batchFileJob(j, 1)!)).toBeUndefined();
   });
 
   it("accepts a fixed failure slug only, and nothing after a failure", () => {
