@@ -3,11 +3,10 @@ import { countDeferredPdfPages, firstPassServesDocument, primeFirstPassResults }
 import { reserveOrientationAttempt } from "../lib/image-orientation.js";
 import { EMBEDDED_IMAGE_TARGETS, embeddedImageGraph, resolveEmbeddedImageRequest } from "../extractors/embedded-images.js";
 import { anchorImageMarkdownFile } from "../extractors/image-markdown.js";
-import { DopplerFigureRejection, DopplerFigureStoreError, disposeDopplerFigureSet, downloadRangeManifest, dopplerImageExtractEnabled, dopplerSourcePointer, finishDopplerFolder, readDopplerFigureDir, storeDopplerFigures, storeFigureDelivery } from "../extractors/doppler-figures.js";
-import { figureLedgerHooks, ledgerWriteForDeliveredFigures, ledgerWriteForFailedFigures, ledgerWriteForNoFigures, ledgerWriteForStoredFigures, queueAssetLedger } from "../db/document-asset-ledger.js";
+import { DopplerFigureRejection, DopplerFigureStoreError, disposeDopplerFigureSet, dopplerImageExtractEnabled, dopplerSourcePointer, readDopplerFigureDir, storeDopplerFigures } from "../extractors/doppler-figures.js";
+import { ledgerWriteForFailedFigures, ledgerWriteForNoFigures, ledgerWriteForStoredFigures, queueAssetLedger } from "../db/document-asset-ledger.js";
 import {
   SANDBOXED_PDF_MAX_MARKDOWN_BYTES, VM_PDF_EXTRACTOR_ID, firstPassServedFigures, requireSandboxedPdfProvider, sandboxedPdfFigures, sandboxedPdfProvider, sandboxedPdfLayoutFacts, sandboxedPdfOcrPages,
-  deliverSandboxedPdfFigures, setSandboxedPdfFigureDelivery,
 } from "../extractors/plugins.js";
 import { buildSummaryEvidence } from "./summary-evidence.js";
 import type { CapacityLeaseStore } from "../media/capacity/types.js";
@@ -61,7 +60,7 @@ import {
 } from "../pipeline/checkpoints.js";
 import { healthyDocuments } from "../pipeline/document-health.js";
 import { buildCanonicalDocumentFromMarkdown } from "../lib/canonical-document.js";
-import { checkedDopplerFigureGaps, dopplerImageLimits, type CanonicalDocument } from "@docslurp/shared";
+import { dopplerImageLimits, type CanonicalDocument } from "@docslurp/shared";
 import { enrichCanonicalDocumentWithPptx, enrichCanonicalDocumentWithXlsx } from "../lib/office-structure.js";
 import {
   enrichCanonicalDocumentWithBestParser,
@@ -532,20 +531,11 @@ export class ExtractMarkdownStage implements Stage {
                 // Doppler figures (DOCSLURP_DOPPLER_IMAGE_EXTRACT): from the same VM job, into an empty host folder per candidate.
                 // A first-pass document's figures come from its batch and are stored by the first pass itself.
                 if (isPdf && dopplerImageExtractEnabled() && sandboxedPdfProvider()?.figures && !firstPassServesDocument(state.run.id, document.id)) {
-                  // Figures are stored the moment each range validates (per-range deliveries), independent of the Markdown,
-                  // of this stage and of the run: only the first VM candidate delivers, so two candidates never race.
-                  const delivery = await this.prepareFigureDeliveries(state, document, candidateDirs, signal);
-                  let delivering = !!delivery;
                   for (const prepared of [isolated.primary.extractor, isolated.secondary?.extractor]) {
                     if (!prepared?.plan.sandboxedPdf) continue;
                     const dir = await mkdtemp(path.join(path.dirname(prepared.plan.sandboxedPdf.output), ".doppler-figures-"));
                     candidateDirs.push(dir);
-                    prepared.plan.sandboxedPdf.figures = {
-                      dir, limits: dopplerImageLimits(document.pageCount),
-                      ...(delivering && delivery?.resume ? { resume: delivery.resume } : {}),
-                    };
-                    if (delivering && delivery) setSandboxedPdfFigureDelivery(prepared.plan.sandboxedPdf, delivery.deliver);
-                    delivering = false;
+                    prepared.plan.sandboxedPdf.figures = { dir, limits: dopplerImageLimits(document.pageCount) };
                   }
                 }
                 const [resultA, resultB] = await this.collectCandidateResults({
@@ -1023,13 +1013,7 @@ export class ExtractMarkdownStage implements Stage {
                   // and writes their ledger.
                   const firstPassOwned = !!winningCandidate.figures && firstPassServedFigures(winningCandidate.plan.sandboxedPdf);
                   if (firstPassOwned) this.firstPassLedger.add(`${state.run.id}\u0000${document.id}`);
-                  const deliveryKey = `${state.run.id}\u0000${document.id}`;
-                  const delivered = this.figureDeliveries.get(deliveryKey);
-                  // No committed delivery (a legacy version 1 or 2 folder, or every delivery refused): the single-folder path.
-                  if (delivered && delivered.deliveries.length === 0) this.figureDeliveries.delete(deliveryKey);
-                  const dopplerFigures = delivered && delivered.deliveries.length > 0 && !firstPassOwned
-                    ? await this.finishDeliveredFigures({ document, state, candidate: winningCandidate, markdown: winningText, delivered, signal })
-                    : winningCandidate.figures && !firstPassOwned
+                  const dopplerFigures = winningCandidate.figures && !firstPassOwned
                     ? await this.storeWinningDopplerFigures({ document, runId: state.run.id, candidate: winningCandidate, markdown: winningText, signal, state })
                     : null;
                   for (const { slot, uri } of dopplerFigures?.slots ?? []) state.artifactLedger.recordDocument(document.id, slot, uri);
@@ -2010,18 +1994,6 @@ export class ExtractMarkdownStage implements Stage {
     documentId?: string,
   ): Promise<ExtractedCandidate> {
     await this.runner.run(plan, signal);
-    // The final images folder is one more delivery, stored now: before anything else can fail (the Markdown checks,
-    // sanitizing, later stages), so a validated range is kept whatever happens next.
-    if (plan.sandboxedPdf?.figures) {
-      const outcome = sandboxedPdfFigures(plan.sandboxedPdf);
-      if (outcome && outcome.status !== "failed") {
-        await deliverSandboxedPdfFigures(plan.sandboxedPdf, {
-          dir: plan.sandboxedPdf.figures.dir, status: outcome.status === "partial" ? "partial" : "extracted",
-          ...(outcome.exitCode !== undefined ? { exitCode: outcome.exitCode } : {}), ...(outcome.build ? { build: outcome.build } : {}),
-          ...(outcome.gaps !== undefined ? { gaps: outcome.gaps } : {}),
-        });
-      }
-    }
     // Provider output is untrusted: a regular file of bounded size, checked before anything reads it.
     if (plan.sandboxedPdf) await assertSandboxedPdfMarkdownBounded(outputPath);
     // VM image output: put each routed-in image's reference at its reading-order position before the Markdown is stored.
@@ -3028,111 +3000,6 @@ export class ExtractMarkdownStage implements Stage {
     return result;
   }
 
-  /** Per-range figure deliveries committed for a document in this attempt (run id + document id). */
-  private readonly figureDeliveries = new Map<string, { deliveries: import("../extractors/doppler-figures.js").StoredFigureDelivery[]; failed: number }>();
-
-  /**
-   * The host side of per-range deliveries for one document, when the run's store has the ledger operations and the run
-   * an organization and project: `deliver` stores and commits a validated range (never fails the document: a refused or
-   * failed delivery is logged with a fixed rule; cancellation still throws). A retry or reprocess of the same PDF first
-   * adopts pending uploads (HEAD + SHA-256, no VM) and passes the stored range manifests for `--images-resume` when the
-   * provider supports it, so finished figures are never redone. Null otherwise (the single-folder path stays).
-   */
-  private async prepareFigureDeliveries(
-    state: import("../pipeline/pipeline.js").WorkflowState, document: import("../models.js").Document, scratch: string[], signal?: AbortSignal,
-  ): Promise<{ deliver: (delivery: import("../extractors/doppler-figures.js").DopplerFigureDelivery) => Promise<void>; resume?: { ranges: Array<{ first: number; last: number; manifest: string }> } } | null> {
-    const store = state.store;
-    if (!store?.beginFigureDelivery || !store.commitFigureDelivery || !store.markAssetsPending || !store.markAssetsStored ||
-        !state.run.orgId || !state.run.projectId) {
-      return null;
-    }
-    const scope = { orgId: state.run.orgId, projectId: state.run.projectId, documentId: document.id, runId: state.run.id };
-    const target = { id: document.id, userId: document.userId, runId: state.run.id, artifactRoot: document.artifactRoot ?? null,
-      pageCount: document.pageCount, sourceSha256: document.sourceSha256 ?? null };
-    const key = `${state.run.id}\u0000${document.id}`;
-    const ledger = store as Required<Pick<NonNullable<typeof store>, "beginFigureDelivery" | "commitFigureDelivery" | "markAssetsPending" | "markAssetsStored">>;
-    const deliver = async (delivery: import("../extractors/doppler-figures.js").DopplerFigureDelivery) => {
-      try {
-        const stored = await storeFigureDelivery({ storage: this.storage, ledger, scope, document: target, delivery, signal });
-        const entry = this.figureDeliveries.get(key) ?? { deliveries: [], failed: 0 };
-        entry.deliveries.push(stored);
-        this.figureDeliveries.set(key, entry);
-      } catch (error) {
-        if (signal?.aborted) throw error;
-        const rule = error instanceof DopplerFigureRejection ? error.rule : (error as { rule?: unknown })?.rule ?? (error instanceof Error ? error.name : "error");
-        console.warn(`[doppler-figures] delivery doc=${document.id} status=refused rule=${String(rule)}`);
-        pushPerfMetric({ metric: "doppler-figures-failed", value: 1, unit: "count", tags: ["doppler-figures", "delivery"], metadata: { documentId: document.id, rule: String(rule) } });
-        const entry = this.figureDeliveries.get(key) ?? { deliveries: [], failed: 0 };
-        entry.failed += 1;
-        this.figureDeliveries.set(key, entry);
-      }
-    };
-    // A retry or reprocess of the same PDF: adopt what a crashed attempt uploaded, then resume from the stored manifests.
-    let resume: { ranges: Array<{ first: number; last: number; manifest: string }> } | undefined;
-    try {
-      const level = await store.readFigureLevel?.(scope);
-      if (level && document.sourceSha256 && level.sourceSha256 === document.sourceSha256) {
-        if (level.pending > 0 && store.adoptPendingAssets) {
-          const adopted = await store.adoptPendingAssets(this.storage, { scope, fence: { generation: level.generation }, signal });
-          console.log(`[doppler-figures] adopt doc=${document.id} gen=${level.generation} adopted=${adopted.adopted} lost=${adopted.lost} kept=${adopted.kept}`);
-        }
-        if (sandboxedPdfProvider()?.figures?.resume && level.ranges.length > 0) {
-          const dir = await mkdtemp(path.join(tmpdir(), "doppler-resume-"));
-          scratch.push(dir);
-          const ranges: Array<{ first: number; last: number; manifest: string }> = [];
-          for (const range of level.ranges) {
-            const file = path.join(dir, `${range.first}-${range.last}.jsonl`);
-            await downloadRangeManifest(this.storage, range, file, signal);
-            ranges.push({ first: range.first, last: range.last, manifest: file });
-          }
-          resume = { ranges };
-        }
-      }
-    } catch (error) {
-      if (signal?.aborted) throw error;
-      // Planning a resume is an optimization: on any failure the pass runs fresh (deliveries still merge by digest).
-      console.warn(`[doppler-figures] resume-plan doc=${document.id} status=skipped error=${error instanceof Error ? error.name : typeof error}`);
-      resume = undefined;
-    }
-    return { deliver, ...(resume ? { resume } : {}) };
-  }
-
-  /**
-   * The winning candidate's figures after per-range deliveries: the folder's Markdown and source pointer, DocSlurp's index
-   * built from the committed ledger rows (every range), and a slot per stored file; the level is queued level-only for the
-   * checkpoint (it sets markdown_complete). Never fails the document.
-   */
-  private async finishDeliveredFigures(args: {
-    document: import("../models.js").Document; state: import("../pipeline/pipeline.js").WorkflowState; candidate: ExtractedCandidate;
-    markdown: string; delivered: { deliveries: import("../extractors/doppler-figures.js").StoredFigureDelivery[]; failed: number }; signal?: AbortSignal;
-  }): Promise<{ slots: Array<{ slot: string; uri: string }>; stats: Record<string, unknown> }> {
-    const { document, state } = args;
-    const outcome = args.candidate.figures?.outcome ?? { status: "partial" as const };
-    try {
-      const scope = { orgId: state.run.orgId!, projectId: state.run.projectId!, documentId: document.id };
-      const rows = await state.store!.figureIndexRows!(scope);
-      const files = await state.store!.storedFigureFiles!(scope);
-      const finished = await finishDopplerFolder({
-        storage: this.storage, document: { ...document, runId: state.run.id }, runId: state.run.id, rows, files, markdown: args.markdown,
-        dopplerMarkdownPath: args.candidate.tempTextPath, source: dopplerSourcePointer(document), signal: args.signal,
-      });
-      const ledger = queueAssetLedger(state, document.id, ledgerWriteForDeliveredFigures({
-        outcome: { ...(("exitCode" in outcome && outcome.exitCode !== undefined) ? { exitCode: outcome.exitCode } : {}), ...(("build" in outcome && outcome.build) ? { build: outcome.build } : {}) },
-        indexBytes: finished.indexBytes,
-      }));
-      const stats = { status: "stored", deliveries: args.delivered.deliveries.length, failedDeliveries: args.delivered.failed, files: files.length, ledger, ...finished.stats };
-      console.log(`[doppler-figures] document=${document.id} status=stored deliveries=${args.delivered.deliveries.length} files=${files.length} markers=${finished.stats.markers} resolved=${finished.stats.markersResolved}`);
-      return { slots: finished.slots, stats };
-    } catch (error) {
-      if (args.signal?.aborted) throw error;
-      // The figures stay stored and committed; only their slots (serving) wait for a later attempt.
-      queueAssetLedger(state, document.id, ledgerWriteForFailedFigures({ outcome: {} }));
-      return this.dopplerFiguresFailed(document.id, "store-index-failed", null, error, "kept");
-    } finally {
-      this.figureDeliveries.delete(`${state.run.id}\u0000${document.id}`);
-    }
-  }
-
   /**
    * Validate and store the winning candidate's Doppler figures. Never fails the document: a provider that could not
    * extract images (Doppler exit 5), a folder that fails validation or cannot be read, and a failed object or index
@@ -3143,13 +3010,13 @@ export class ExtractMarkdownStage implements Stage {
     document: import("../models.js").Document; runId: string; candidate: ExtractedCandidate; markdown: string; signal?: AbortSignal;
     state?: import("../pipeline/pipeline.js").WorkflowState;
   }): Promise<{ slots: Array<{ slot: string; uri: string }>; stats: Record<string, unknown> }> {
-    const result = await this.storeWinningDopplerFiguresOnly({ ...args, ledger: args.state ? figureLedgerHooks(args.state, args.document.id) : undefined });
+    const result = await this.storeWinningDopplerFiguresOnly(args);
     const outcome = args.candidate.figures!.outcome;
     if (!args.state) return result.figures;
     // The asset ledger: every image Doppler reported and the document's extraction level, queued for this stage's
     // checkpoint (written after it commits the Markdown and the figure slots).
     const ledger = queueAssetLedger(args.state, args.document.id, result.stored
-      ? ledgerWriteForStoredFigures({ set: result.stored.set, storedManifest: result.stored.storedManifest, storedBytes: result.stored.storedBytes, outcome, gaps: checkedGaps(args.document, outcome.gaps) })
+      ? ledgerWriteForStoredFigures({ ...result.stored, outcome })
       // (the ledger write takes over the reader's spill and removes it once written)
       : ledgerWriteForFailedFigures({ outcome }));
     return { slots: result.figures.slots, stats: { ...result.figures.stats, ledger } };
@@ -3157,13 +3024,9 @@ export class ExtractMarkdownStage implements Stage {
 
   private async storeWinningDopplerFiguresOnly(args: {
     document: import("../models.js").Document; runId: string; candidate: ExtractedCandidate; markdown: string; signal?: AbortSignal;
-    ledger?: import("../extractors/doppler-figures.js").DopplerFigureLedgerHooks;
   }): Promise<{
     figures: { slots: Array<{ slot: string; uri: string }>; stats: Record<string, unknown> };
-    stored?: {
-      set: import("../extractors/doppler-figures.js").DopplerFigureSet; storedManifest: { key: string; sha256: string };
-      storedBytes: { manifest: number; index: number };
-    };
+    stored?: { set: import("../extractors/doppler-figures.js").DopplerFigureSet; stored: Pick<import("../extractors/doppler-figures.js").StoredDopplerFigures, "manifest" | "manifests"> };
   }> {
     const figures = args.candidate.figures!;
     const started = Date.now();
@@ -3193,7 +3056,6 @@ export class ExtractMarkdownStage implements Stage {
       stored = await storeDopplerFigures({
         storage: this.storage, document: args.document, runId: args.runId, figures: validated, markdown: args.markdown,
         dopplerMarkdownPath: args.candidate.tempTextPath, source: dopplerSourcePointer(args.document), signal: args.signal,
-        ...(args.ledger ? { ledger: args.ledger } : {}),
       });
     } catch (error) {
       await disposeDopplerFigureSet(validated);
@@ -3208,7 +3070,7 @@ export class ExtractMarkdownStage implements Stage {
     }
     const stats = { ...stored.stats, imagesConfined, manifestVersion: validated.version, validateMs: Date.now() - started - stored.stats.storeMs };
     console.log(`[doppler-figures] document=${args.document.id} status=stored version=${validated.version} entries=${stats.entries} files=${stats.files} bytes=${stats.bytes} markers=${stats.markers} resolved=${stats.markersResolved} confined=${imagesConfined} ms=${Date.now() - started}`);
-    return { figures: { slots: stored.slots, stats }, stored: { set: validated, storedManifest: stored.manifest, storedBytes: stored.storedBytes } };
+    return { figures: { slots: stored.slots, stats }, stored: { set: validated, stored } };
   }
 
   /**
@@ -3733,15 +3595,4 @@ async function settle<T>(
       reason,
     };
   }
-}
-
-/** A provider's shard gaps, checked against the document's page count; invalid ones are dropped whole (and logged). */
-function checkedGaps(document: import("../models.js").Document, raw: unknown): import("@docslurp/shared").DopplerFigureGap[] {
-  if (raw === undefined) return [];
-  const gaps = checkedDopplerFigureGaps(raw, document.pageCount);
-  if (!gaps) {
-    console.warn(`[doppler-figures] document=${document.id} status=gaps-refused`);
-    return [];
-  }
-  return gaps;
 }

@@ -94,6 +94,15 @@ const ABSOLUTE_FILE_CAPS = {
   scanFileBytes: DOPPLER_MANIFEST_V2_LIMITS.maxScanFileBytes,
 } as const;
 
+/** Why a provider left a page range without images (SandboxedPdfFigureOutcome.gaps). Anything else is `other`. */
+export const DOPPLER_FIGURE_GAP_REASONS = [
+  "plugin:doc-pass-budget", "plugin:shard-over-share", "converter:timeout", "converter:budget", "converter:renderer", "other",
+] as const;
+export type DopplerFigureGapReason = (typeof DOPPLER_FIGURE_GAP_REASONS)[number];
+export const DOPPLER_FIGURE_GAPS_MAX = 128;
+/** Pages `first..last` the provider did not extract images for (a page in a gap with no ledger rows was not extracted). */
+export interface DopplerFigureGap { first: number; last: number; reason: DopplerFigureGapReason }
+
 /** Pages per Doppler image batch (`--images-batch-pages`); the per-batch limits below are derived from it. */
 export const DOPPLER_IMAGES_BATCH_PAGES = 64;
 
@@ -176,68 +185,11 @@ export function dopplerDocumentPrefix(artifactRoot: string, documentId: string):
   return `${artifactRoot}/${DOPPLER_STORE_LAYOUT.folder}/${documentId}/`;
 }
 
-/**
- * The storage key of the file an image owns, content-addressed: the document's images folder plus the path derived from
- * the id, with the first 16 hex digits of the file's SHA-256 before the format (`page-0003/image-001.<sha16>.webp`).
- * A replayed upload writes identical bytes to the same key; a writer with other bytes can never overwrite a committed
- * file. Doppler's own folder (and the Markdown's links) keep the plain path; the key is only ever derived, never listed.
- */
-export function dopplerAssetStorageKey(artifactRoot: string, documentId: string, ownerId: string, format: DopplerFigureFormat, sha256: string): string {
+/** The storage key of the file an image owns: the document's images folder plus its derived path. */
+export function dopplerAssetStorageKey(artifactRoot: string, documentId: string, ownerId: string, format: DopplerFigureFormat): string {
   const relative = dopplerAssetPath(ownerId, format);
-  if (!relative || typeof sha256 !== "string" || !SHA256_HEX.test(sha256)) throw new Error("Invalid Doppler image id, format or digest");
-  return `${dopplerDocumentPrefix(artifactRoot, documentId)}${DOPPLER_STORE_LAYOUT.imagesFolder}${dopplerContentPath(relative, sha256)}`;
-}
-
-const SHA256_HEX = /^[0-9a-f]{64}$/;
-
-/** `page-NNNN/image-NNN.<format>` with the content digest inserted: `page-NNNN/image-NNN.<sha16>.<format>`. */
-export function dopplerContentPath(relative: string, sha256: string): string {
-  const dot = relative.lastIndexOf(".");
-  return `${relative.slice(0, dot)}.${sha256.slice(0, 16)}${relative.slice(dot)}`;
-}
-
-/**
- * The key of a range's canonical manifest, content-addressed: `<folder>/images/manifests/<first>-<last>.<sha16>.jsonl`
- * (`.json` for a legacy version 1 or 2 manifest). A delivery of the same range and bytes lands on the same key.
- */
-export function dopplerRangeManifestKey(artifactRoot: string, documentId: string, range: { first: number; last: number }, sha256: string, jsonl = true): string {
-  if (!Number.isSafeInteger(range.first) || !Number.isSafeInteger(range.last) || range.first < 1 || range.last < range.first ||
-      range.last > 999_999_999 || typeof sha256 !== "string" || !SHA256_HEX.test(sha256)) {
-    throw new Error("Invalid Doppler range manifest");
-  }
-  return `${dopplerDocumentPrefix(artifactRoot, documentId)}${DOPPLER_STORE_LAYOUT.imagesFolder}manifests/${range.first}-${range.last}.${sha256.slice(0, 16)}.${jsonl ? "jsonl" : "json"}`;
-}
-
-/** One range manifest the ledger holds (document_extraction_levels.ranges). */
-export interface DopplerFigureRange { first: number; last: number; key: string; sha256: string; bytes: number; complete: boolean }
-
-// ---- Shard gaps: page ranges a figure pass returned nothing for ----
-
-/** Why a page range has no manifest: its shard failed, timed out, went over its share, returned an invalid frame, or the document's pass budget ran out. */
-export const DOPPLER_FIGURE_GAP_REASONS = ["shard-failed", "shard-timeout", "shard-over-share", "frame-invalid", "doc-pass-budget"] as const;
-export type DopplerFigureGapReason = (typeof DOPPLER_FIGURE_GAP_REASONS)[number];
-export const DOPPLER_FIGURE_MAX_GAPS = 128;
-export interface DopplerFigureGap { first: number; last: number; reason: DopplerFigureGapReason }
-
-/**
- * Validate gaps for a document of `pageCount` pages: at most 128, each `1 <= first <= last <= pageCount`, sorted and not
- * overlapping, a reason from the closed list. Returns a fresh copy (only the three fields), or null when invalid.
- */
-export function checkedDopplerFigureGaps(gaps: unknown, pageCount: number): DopplerFigureGap[] | null {
-  if (!Array.isArray(gaps) || gaps.length > DOPPLER_FIGURE_MAX_GAPS || !Number.isSafeInteger(pageCount) || pageCount < 1) return null;
-  const out: DopplerFigureGap[] = [];
-  let previous = 0;
-  for (const gap of gaps as unknown[]) {
-    if (!gap || typeof gap !== "object" || Array.isArray(gap)) return null;
-    const { first, last, reason } = gap as Record<string, unknown>;
-    if (!Number.isSafeInteger(first) || !Number.isSafeInteger(last) || typeof reason !== "string" ||
-        !(DOPPLER_FIGURE_GAP_REASONS as readonly string[]).includes(reason)) return null;
-    const a = first as number, b = last as number;
-    if (a < 1 || b < a || b > pageCount || a <= previous) return null;
-    previous = b;
-    out.push({ first: a, last: b, reason: reason as DopplerFigureGapReason });
-  }
-  return out;
+  if (!relative) throw new Error("Invalid Doppler image id or format");
+  return `${dopplerDocumentPrefix(artifactRoot, documentId)}${DOPPLER_STORE_LAYOUT.imagesFolder}${relative}`;
 }
 
 export const DOPPLER_ASSET_KINDS = ["picture", "mask", "vector"] as const;
@@ -470,6 +422,25 @@ export function parseDopplerManifest(json: unknown): DopplerManifest | null {
 
 export const DOPPLER_IMAGES_V3_SCHEMA = "doppler-images/3";
 export const DOPPLER_MANIFEST_V3_FILE = "manifest.jsonl";
+/** A shard's folder (`shards/<first>-<last>`), page numbers zero-padded to at least 4 digits. */
+export const DOPPLER_SHARD_FOLDER = /^([0-9]{4,10})-([0-9]{4,10})$/;
+export const DOPPLER_SHARDS_MAX = 4096;
+
+/** The folder name of a shard's pages: `<first>-<last>` zero-padded to 4 digits (no extra leading zeros). */
+export function dopplerShardFolder(first: number, last: number): string {
+  if (!Number.isSafeInteger(first) || !Number.isSafeInteger(last) || first < 1 || first > last || last > 1_000_000_000) throw new Error("Invalid shard range");
+  return `${String(first).padStart(4, "0")}-${String(last).padStart(4, "0")}`;
+}
+
+/** The range a shard folder names, or null when the name is not canonical. */
+export function parseDopplerShardFolder(name: string): [number, number] | null {
+  const m = DOPPLER_SHARD_FOLDER.exec(name);
+  if (!m) return null;
+  const first = Number(m[1]);
+  const last = Number(m[2]);
+  if (first < 1 || first > last || last > 1_000_000_000) return null;
+  return dopplerShardFolder(first, last) === name ? [first, last] : null;
+}
 /** Each line is one ASCII JSON object of at most this many bytes, `\n` included. */
 export const DOPPLER_MANIFEST_V3_LINE_BYTES = 64 * 1024;
 
@@ -561,7 +532,11 @@ export class DopplerManifestV3Validator {
   private anyBatchReason = false;
   private summary: DopplerManifestV3Summary | null = null;
 
-  constructor(private readonly limits: { maxLines: number; maxPage: number }) {}
+  /**
+   * `range`: a shard's pages (`shards/<first>-<last>/manifest.jsonl`): its header's `pages` must be exactly that range and
+   * every image and batch must start inside it.
+   */
+  constructor(private readonly limits: { maxLines: number; maxPage: number; range?: readonly [number, number] }) {}
 
   /** The header line, once it has been accepted. */
   get headerLine(): DopplerManifestV3Header | null {
@@ -594,6 +569,8 @@ export class DopplerManifestV3Validator {
       if (value.schema !== DOPPLER_IMAGES_V3_SCHEMA) this.fail("schema");
       const parsed = dopplerManifestV3HeaderSchema.safeParse(value);
       if (!parsed.success) this.fail("header-invalid");
+      const range = this.limits.range;
+      if (range && (parsed.data.pages === null || parsed.data.pages[0] !== range[0] || parsed.data.pages[1] !== range[1])) this.fail("shard-range");
       this.header = parsed.data;
       this.state = "images";
       return null;
@@ -608,6 +585,8 @@ export class DopplerManifestV3Validator {
       const batch = parsed.data;
       // A batch is a page range of `batch_pages` (its end may pass the last page); batches come in page order.
       if (batch.pages[0] <= this.lastBatchEnd || batch.pages[0] > this.limits.maxPage) this.fail("lines-out-of-order");
+      const range = this.limits.range;
+      if (range && (batch.pages[0] < range[0] || batch.pages[0] > range[1])) this.fail("shard-range");
       this.lastBatchEnd = batch.pages[1];
       this.sum.batches += 1;
       if (this.sum.batches > DOPPLER_MANIFEST_V2_LIMITS.maxBatches) this.fail("too-many-lines");
@@ -631,6 +610,8 @@ export class DopplerManifestV3Validator {
     const entry = parsed.data;
     const header = this.header!;
     if (entry.page > this.limits.maxPage) this.fail("page-outside-document");
+    const range = this.limits.range;
+    if (range && (entry.page < range[0] || entry.page > range[1])) this.fail("shard-range");
     const key = idOrderKey(entry.id);
     if (this.lastId && !idBefore(this.lastId, key)) this.fail("lines-out-of-order");
     this.lastId = key;

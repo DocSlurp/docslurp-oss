@@ -20,12 +20,10 @@ import { downloadDopplerImagesDir, readDopplerFigureDir, readLedgerSpill, storeD
 /** A spilled write as rows in memory, each owned file with the key the store gave it (for tests that bend one row). */
 async function inMemory(write: DocumentAssetLedgerWrite, root = "ua/run-a/doppler/doc-a/images/"): Promise<DocumentAssetLedgerWrite & { assets: LedgerAsset[] }> {
   const rows: LedgerAsset[] = [];
-  for await (const row of readLedgerSpill((write.assets as { spill: string }).spill)) {
-    rows.push({ ...row, storageKey: row.status === "extracted" ? `${root}${row.linkPath!.slice("images/".length).replace(/\.(\w+)$/, `.${row.sha256!.slice(0, 16)}.$1`)}` : null });
-  }
+  for await (const row of readLedgerSpill((write.assets as { spill: string }).spill)) rows.push({ ...row, storageKey: row.status === "extracted" ? `${root}${row.linkPath!.slice("images/".length)}` : null });
   return { ...write, assets: rows };
 }
-import { v2Manifest, v3Text, writeV2Folder, writeV3Folder, V2_SETTINGS_SHA, V2_SOURCE_SHA } from "../test/doppler-manifest-v2.js";
+import { v2Manifest, v3ShardText, v3Text, writeShardedFolder, writeV2Folder, writeV3Folder, V2_SETTINGS_SHA, V2_SOURCE_SHA } from "../test/doppler-manifest-v2.js";
 import { createMigratedDatabase } from "../test/migrated-db.js";
 import { serveOnRandomPort } from "../test/migrated-postgres.js";
 
@@ -76,6 +74,7 @@ afterAll(async () => {
 beforeEach(async () => {
   await sql`delete from document_assets`;
   await sql`delete from document_extraction_levels`;
+  await sql`delete from document_extraction_shards`;
   await sql`update documents set run_id = 'run-a' where id in ('doc-a', 'doc_w')`;
 });
 
@@ -106,18 +105,14 @@ async function figureWrite(scope: DocumentAssetLedgerScope, options: { partial?:
     runId: scope.runId, figures: set, markdown: "",
   });
   const pending = ledgerWriteForStoredFigures({
-    set, storedManifest: stored.manifest,
+    set, stored,
     outcome: { status: partial ? "partial" : "extracted", exitCode: partial ? 5 : 0, build: "doppler-1.4.0+g1a2b3c4" },
   });
-  const write = complete(scope, pending, options.resume);
-  if (!options.resume) return write;
-  // A resume names the generation it claimed.
-  const [claimed] = await sql<{ g: number }[]>`select figures_generation::int as g from document_extraction_levels where document_id = ${scope.documentId}`;
-  return { ...write, generation: claimed?.g ?? 0 };
+  return complete(scope, pending, options.resume);
 }
 
 const complete = (scope: DocumentAssetLedgerScope, pending: PendingAssetLedgerWrite, resume?: boolean): DocumentAssetLedgerWrite =>
-  ({ scope, level: { ...pending.level, markdownComplete: true }, assets: pending.assets, ...(resume ? { resume: true } : {}), ...(pending.levelOnly ? { levelOnly: true } : {}) });
+  ({ scope, level: { ...pending.level, markdownComplete: true }, assets: pending.assets, ...(resume ? { resume: true } : {}) });
 
 const assets = async (documentId: string) => sql<Array<Record<string, unknown>>>`
   select asset_id, org_id, project_id, status, reason, resumable, source, file_of, link_path, storage_key is not null as stored
@@ -139,11 +134,9 @@ describe("writing the ledger", () => {
       { asset_id: "p3.1", org_id: "org-a", project_id: "proj-a", status: "extracted", reason: null, resumable: false, source: "copy", file_of: "p3.1", link_path: "images/page-0003/image-001.jpg", stored: true },
     ]);
     expect(await sql`select asset_id, storage_key, obj_num, obj_gen, bbox from document_assets where document_id = 'doc-a' and asset_id in ('p1.1', 'p1.g1') order by asset_id`).toEqual([
-      { asset_id: "p1.1", storage_key: expect.stringMatching(/^ua\/run-a\/doppler\/doc-a\/images\/page-0001\/image-001\.[0-9a-f]{16}\.webp$/), obj_num: 12, obj_gen: 0, bbox: [10, 20, 110, 220] },
-      { asset_id: "p1.g1", storage_key: expect.stringMatching(/^ua\/run-a\/doppler\/doc-a\/images\/page-0001\/figure-001\.[0-9a-f]{16}\.svg$/), obj_num: null, obj_gen: null, bbox: [10, 20, 110, 220] },
+      { asset_id: "p1.1", storage_key: "ua/run-a/doppler/doc-a/images/page-0001/image-001.webp", obj_num: 12, obj_gen: 0, bbox: [10, 20, 110, 220] },
+      { asset_id: "p1.g1", storage_key: "ua/run-a/doppler/doc-a/images/page-0001/figure-001.svg", obj_num: null, obj_gen: null, bbox: [10, 20, 110, 220] },
     ]);
-    // Every extracted row is stored (its upload landed); only stored rows are served and billed.
-    expect(await sql`select count(*)::int as n from document_assets where document_id = 'doc-a' and status = 'extracted' and storage_state <> 'stored'`).toEqual([{ n: 0 }]);
     expect(await level("doc-a")).toMatchObject({
       org_id: "org-a", run_id: "run-a", images_status: "complete", images_exit_code: 0, doppler_build: "doppler-1.4.0+g1a2b3c4",
       markdown_complete: true, manifest_key: "ua/run-a/doppler/doc-a/images/manifest.jsonl", manifest_version: 3, source_sha256: V2_SOURCE_SHA,
@@ -216,7 +209,7 @@ describe("writing the ledger", () => {
     await cp(path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "doppler-figures"), dir, { recursive: true });
     const set = await readDopplerFigureDir(dir, { pageCount: 5, expect: "complete" });
     const stored = await storeDopplerFigures({ storage: memoryStorage(), document: { id: "doc-a", userId: "ua", runId: "run-a" }, runId: "run-a", figures: set, markdown: "" });
-    await store.writeDocumentAssetLedger(complete(A, ledgerWriteForStoredFigures({ set, storedManifest: stored.manifest, outcome: { status: "extracted" } })));
+    await store.writeDocumentAssetLedger(complete(A, ledgerWriteForStoredFigures({ set, stored, outcome: { status: "extracted" } })));
     expect((await assets("doc-a")).map((row) => [row.asset_id, row.status, row.reason, row.file_of, row.link_path, row.stored])).toEqual([
       ["p3.1", "extracted", null, "p3.1", null, true],
       ["p3.g2", "extracted", null, "p3.g2", null, true],
@@ -227,26 +220,22 @@ describe("writing the ledger", () => {
     expect(await level("doc-a")).toMatchObject({ images_status: "complete", manifest_version: 1, images_exit_code: null, source_sha256: null, assets_total: 5, assets_extracted: 3, source_render: 3 });
   });
 
-  it("a failed step never deletes stored figures: rows and status stay honest (a failed step with nothing stored is `failed`)", async () => {
+  it("a failed step clears older rows and records the images as failed", async () => {
     await store.writeDocumentAssetLedger(await figureWrite(A));
-    const before = await assets("doc-a");
     await store.writeDocumentAssetLedger(complete(A, ledgerWriteForFailedFigures({ outcome: { exitCode: 6 } })));
-    expect(await assets("doc-a")).toEqual(before);
-    expect(await level("doc-a")).toMatchObject({ images_status: "complete", images_exit_code: 6, assets_total: 5 });
-    await store.writeDocumentAssetLedger(complete(B, ledgerWriteForFailedFigures({ outcome: { exitCode: 6 } })));
-    expect(await level("doc-b")).toMatchObject({ images_status: "failed", images_exit_code: 6, assets_total: 0 });
+    expect(await assets("doc-a")).toEqual([]);
+    expect(await level("doc-a")).toMatchObject({ images_status: "failed", images_exit_code: 6, manifest_version: null, manifest_key: null, assets_total: 0 });
   });
 
-  it("committed Markdown without a figure step keeps stored figures and their resumable state; a document with none records it", async () => {
+  it("committed Markdown without a figure step leaves the resume queue (MEDIUM-3): resumable, then a re-run with figures off", async () => {
     await store.writeDocumentAssetLedger(await figureWrite(A, { partial: true }));
-    const before = await assets("doc-a");
+    expect(await listResumableDocuments(sql, { orgId: "org-a" })).toHaveLength(1);
     await store.writeDocumentAssetLedger(complete(A, ledgerWriteForNoFigures("disabled")));
-    expect(await assets("doc-a")).toEqual(before);
-    expect(await level("doc-a")).toMatchObject({ images_status: "resumable", markdown_complete: true });
-    await store.writeDocumentAssetLedger(complete(B, ledgerWriteForNoFigures("disabled")));
-    expect(await level("doc-b")).toMatchObject({ images_status: "disabled", assets_total: 0 });
-    await store.writeDocumentAssetLedger(complete(B, ledgerWriteForNoFigures("none")));
-    expect(await level("doc-b")).toMatchObject({ images_status: "none" });
+    expect(await listResumableDocuments(sql, { orgId: "org-a" })).toEqual([]);
+    expect(await assets("doc-a")).toEqual([]);
+    expect(await level("doc-a")).toMatchObject({ images_status: "disabled", assets_total: 0, manifest_key: null });
+    await store.writeDocumentAssetLedger(complete(A, ledgerWriteForNoFigures("none")));
+    expect(await level("doc-a")).toMatchObject({ images_status: "none" });
   });
 });
 
@@ -260,7 +249,7 @@ describe("a 5,000-page document (MEDIUM-7)", () => {
         assetId: `p${page}.1`, pageNumber: page, kind: "picture", fate: "page-scan", status: "extracted", reason: null, resumable: false,
         source: "copy", format: "jpg", bytes: 1_000_000 + page, sha256: createHash("sha256").update(String(page)).digest("hex"), width: 1700, height: 2200,
         repeatOf: null, fallback: null, linkPath: `images/page-${p}/image-001.jpg`, fileOf: `p${page}.1`, obj: [page + 4, 0], bbox: [0, 0, 612, 792],
-        storageKey: `ua/${runId}/doppler/doc-a/images/page-${p}/image-001.${createHash("sha256").update(String(page)).digest("hex").slice(0, 16)}.jpg`,
+        storageKey: `ua/${runId}/doppler/doc-a/images/page-${p}/image-001.jpg`,
       });
       rows.push({
         assetId: `p${page}.2`, pageNumber: page, kind: "picture", fate: "watermark", status: "unlinked", reason: null, resumable: false,
@@ -366,22 +355,16 @@ describe("tenant isolation", () => {
       values ('doc-a', 'org-b', 'proj-b', 'p1.1', 1, 'picture', 'block', 'unlinked')`).rejects.toMatchObject({ code: "23503" });
     await expect(sql`insert into document_extraction_levels (document_id, org_id, project_id) values ('doc-a', 'org-b', 'proj-a')`)
       .rejects.toMatchObject({ code: "23503" });
-    const insert = (documentId: string, key: string, state = "stored") => sql`insert into document_assets (document_id, org_id, project_id, asset_id, page_number, kind, fate, status, source, format, bytes, sha256, width, height, file_of, storage_key, storage_state)
-      values (${documentId}, 'org-a', 'proj-a', 'p1.1', 1, 'picture', 'block', 'extracted', 'render', 'webp', 10, ${"e".repeat(64)}, 1, 1, 'p1.1', ${key}, ${state})`;
-    const E = "eeeeeeeeeeeeeeee";
-    await expect(insert("doc-a", `ub/run-b/doppler/doc-b/images/page-0001/image-001.${E}.webp`)).rejects.toMatchObject({ code: "23514" });
-    await expect(insert("doc-a", `ua/run-a/doppler/doc-a/images/page-0001/image-002.${E}.webp`)).rejects.toMatchObject({ code: "23514" });
-    // Content-addressed: the key must carry the row's own digest, and an extracted row must have a storage state.
-    await expect(insert("doc-a", "ua/run-a/doppler/doc-a/images/page-0001/image-001.webp")).rejects.toMatchObject({ code: "23514" });
-    await expect(insert("doc-a", "ua/run-a/doppler/doc-a/images/page-0001/image-001.ffffffffffffffff.webp")).rejects.toMatchObject({ code: "23514" });
-    await expect(insert("doc-a", `ua/run-a/doppler/doc-a/images/../page-0001/image-001.${E}.webp`)).rejects.toMatchObject({ code: "23514" });
-    await expect(insert("doc-a", `ua/run-a/doppler/doc-a/images/page-0001/image-001.${E}.webp`, "none")).rejects.toMatchObject({ code: "23514" });
+    const insert = (documentId: string, key: string) => sql`insert into document_assets (document_id, org_id, project_id, asset_id, page_number, kind, fate, status, source, format, bytes, sha256, width, height, file_of, storage_key)
+      values (${documentId}, 'org-a', 'proj-a', 'p1.1', 1, 'picture', 'block', 'extracted', 'render', 'webp', 10, ${"e".repeat(64)}, 1, 1, 'p1.1', ${key})`;
+    await expect(insert("doc-a", "ub/run-b/doppler/doc-b/images/page-0001/image-001.webp")).rejects.toMatchObject({ code: "23514" });
+    await expect(insert("doc-a", "ua/run-a/doppler/doc-a/images/page-0001/image-002.webp")).rejects.toMatchObject({ code: "23514" });
     // A document id with a LIKE wildcard (`_`) matches only itself: `docXw` is another document's folder.
-    await expect(insert("doc_w", `ua/run-a/doppler/docXw/images/page-0001/image-001.${E}.webp`)).rejects.toMatchObject({ code: "23514" });
-    await insert("doc_w", `ua/run-a/doppler/doc_w/images/page-0001/image-001.${E}.webp`);
+    await expect(insert("doc_w", "ua/run-a/doppler/docXw/images/page-0001/image-001.webp")).rejects.toMatchObject({ code: "23514" });
+    await insert("doc_w", "ua/run-a/doppler/doc_w/images/page-0001/image-001.webp");
     // A page scan may pass 8 MiB only as a copy or decode; a picture never.
     await expect(sql`insert into document_assets (document_id, org_id, project_id, asset_id, page_number, kind, fate, status, source, format, bytes, sha256, width, height, file_of, storage_key)
-      values ('doc-a', 'org-a', 'proj-a', 'p1.1', 1, 'picture', 'block', 'extracted', 'render', 'webp', 9000000, ${"e".repeat(64)}, 1, 1, 'p1.1', 'ua/run-a/doppler/doc-a/images/page-0001/image-001.eeeeeeeeeeeeeeee.webp')`)
+      values ('doc-a', 'org-a', 'proj-a', 'p1.1', 1, 'picture', 'block', 'extracted', 'render', 'webp', 9000000, ${"e".repeat(64)}, 1, 1, 'p1.1', 'ua/run-a/doppler/doc-a/images/page-0001/image-001.webp')`)
       .rejects.toMatchObject({ code: "23514" });
   });
 
@@ -480,3 +463,79 @@ describe("resume from stored state (HIGH-2)", () => {
 
 // Keep the shared row type in use (the writer re-validates it).
 export type { DocumentAsset };
+
+describe("routing page facts go through the page-facts write (MEDIUM-6)", () => {
+  it("text_layer and scan_class land whatever the figure setting, and a later write without them keeps them", async () => {
+    const { buildRoutingPageFacts } = await import("../pipeline/page-facts.js");
+    const layout = new Map<number, { textLayer?: string | null; scanClass?: string | null }>([
+      [1, { textLayer: "visible" }], [3, { textLayer: "invisible", scanClass: "single" }], [2, { textLayer: "lots" }], [9, { textLayer: "none" }],
+    ]);
+    const rows = buildRoutingPageFacts({ documentId: "doc-a", runId: "run-a", pageCount: 3, layoutFacts: layout });
+    // Out-of-vocabulary values and pages outside the document are dropped.
+    expect(rows.map((row) => [row.pageNumber, row.textLayer, row.scanClass])).toEqual([[1, "visible", undefined], [3, "invisible", "single"]]);
+    await store.upsertPageFacts(rows);
+    await store.upsertPageFacts([{ documentId: "doc-a", runId: "run-a", pageNumber: 3, textBytes: 10, wordCount: 2, imageCount: 1, factsSource: "pdftotext" }]);
+    expect(await sql`select page_number, text_layer, scan_class from document_page_facts where document_id = 'doc-a' order by page_number`).toEqual([
+      { page_number: 1, text_layer: "visible", scan_class: null }, { page_number: 3, text_layer: "invisible", scan_class: "single" },
+    ]);
+    await sql`delete from document_page_facts where document_id = 'doc-a'`;
+  });
+});
+
+describe("sharded documents: a record per shard, the level is the aggregate, resume per shard", () => {
+  /** Read and store a two-shard folder (pages 1-2 and 3-3), as the figure step does, and queue-shape its write. */
+  async function shardedWrite(options: { partial?: boolean } = {}): Promise<DocumentAssetLedgerWrite> {
+    const built = v2Manifest({ partial: options.partial });
+    const dir = await mkdtemp(path.join(work, "sharded-"));
+    await writeShardedFolder(dir, [{ range: [1, 2], text: v3ShardText(built.manifest, [1, 2]) }, { range: [3, 3], text: v3ShardText(built.manifest, [3, 3]) }], built.files);
+    const set = await readDopplerFigureDir(dir, { pageCount: 3 });
+    const stored = await storeDopplerFigures({ storage: memoryStorage(), document: { id: "doc-a", userId: "ua", runId: "run-a" }, runId: "run-a", figures: set, markdown: "" });
+    const pending = ledgerWriteForStoredFigures({ set, stored, outcome: { status: set.complete ? "extracted" : "partial", exitCode: set.complete ? 0 : 5, gaps: [{ first: 2, last: 2, reason: "plugin:shard-over-share" }] } });
+    return { ...complete(A, pending), ...(pending.shards ? { shards: pending.shards } : {}) };
+  }
+  const shards = async () => sql`select first_page, last_page, images_status, assets_resumable, resumes, manifest_key from document_extraction_shards where document_id = 'doc-a' order by first_page`;
+
+  it("writes the union of rows, one record per shard, and an aggregate level with the gaps", async () => {
+    await store.writeDocumentAssetLedger(await shardedWrite({ partial: true }));
+    expect((await assets("doc-a")).map((row) => row.asset_id)).toEqual(["p1.1", "p1.g1", "p2.1", "p2.2", "p3.1", "p3.2"]);
+    expect(await shards()).toEqual([
+      { first_page: 1, last_page: 2, images_status: "complete", assets_resumable: 0, resumes: 0, manifest_key: "ua/run-a/doppler/doc-a/images/shards/0001-0002/manifest.jsonl" },
+      { first_page: 3, last_page: 3, images_status: "resumable", assets_resumable: 1, resumes: 0, manifest_key: "ua/run-a/doppler/doc-a/images/shards/0003-0003/manifest.jsonl" },
+    ]);
+    expect(await level("doc-a")).toMatchObject({ images_status: "resumable", manifest_key: null, assets_total: 6, assets_resumable: 1 });
+    expect((await sql`select shards, gaps from document_extraction_levels where document_id = 'doc-a'`)[0]).toEqual({ shards: 2, gaps: [{ first: 2, last: 2, reason: "plugin:shard-over-share" }] });
+    // Resume discovery names the shard, with its own manifest.
+    expect(await listResumableDocuments(sql, { orgId: "org-a" })).toMatchObject([{ documentId: "doc-a", shard: { first: 3, last: 3 }, assetsResumable: 1 }]);
+  });
+
+  it("complete only if every shard is; a single-manifest write afterwards removes the shard records", async () => {
+    await store.writeDocumentAssetLedger(await shardedWrite());
+    expect(await level("doc-a")).toMatchObject({ images_status: "complete" });
+    await store.writeDocumentAssetLedger(await figureWrite(A));
+    expect(await shards()).toEqual([]);
+    expect((await sql`select shards from document_extraction_levels where document_id = 'doc-a'`)[0]).toEqual({ shards: 0 });
+  });
+
+  it("a shard resume touches only its own rows and record, is counted per shard, and leaves the queue at the cap", async () => {
+    await store.writeDocumentAssetLedger(await shardedWrite({ partial: true }));
+    const full = await shardedWrite({ partial: true });
+    const shard3 = full.shards!.filter((shard) => shard.first === 3);
+    const rows3 = (await inMemory(full)).assets.filter((asset) => asset.pageNumber === 3);
+    const resume = (): DocumentAssetLedgerWrite => ({ ...full, assets: rows3, shards: shard3, resume: { first: 3, last: 3 } });
+    for (let i = 1; i <= DOCUMENT_ASSET_RESUME_CAP; i += 1) await store.writeDocumentAssetLedger(resume());
+    expect((await shards()).map((row) => [row.first_page, row.resumes])).toEqual([[1, 0], [3, 3]]);
+    // Rows of the other shard were neither pruned nor rewritten.
+    expect((await assets("doc-a")).map((row) => row.asset_id)).toEqual(["p1.1", "p1.g1", "p2.1", "p2.2", "p3.1", "p3.2"]);
+    expect(await listResumableDocuments(sql, { orgId: "org-a" })).toEqual([]);
+    await expect(store.writeDocumentAssetLedger(resume())).rejects.toMatchObject({ rule: "resume-cap" });
+    // A shard resume may not write another shard's pages.
+    await expect(store.writeDocumentAssetLedger({ ...resume(), assets: (await inMemory(full)).assets })).rejects.toMatchObject({ rule: expect.stringMatching(/invalid-assets|resume-cap/) });
+  });
+
+  it("refuses a shard record whose key is not its folder's, or ranges that overlap", async () => {
+    const write = await shardedWrite();
+    await expect(store.writeDocumentAssetLedger({ ...write, shards: write.shards!.map((s) => ({ ...s, manifestKey: s.manifestKey.replace("ua/run-a/", "ub/run-b/") })) })).rejects.toMatchObject({ rule: "key-mismatch" });
+    await expect(store.writeDocumentAssetLedger({ ...write, shards: [write.shards![0]!, { ...write.shards![1]!, first: 2 }] })).rejects.toMatchObject({ rule: expect.stringMatching(/invalid-level|key-mismatch/) });
+    expect(await shards()).toEqual([]);
+  });
+});

@@ -156,6 +156,8 @@ export function assertSingleScopeBatch(
 }
 
 /** Per-job record of what each file has reported, for event ordering. */
+/** Each file's page count from its text result, which bounds its figure gaps. */
+const textPages = new WeakMap<SandboxedPdfBatchJob, Map<number, number>>();
 const progress = new WeakMap<SandboxedPdfBatchJob, Map<number, "text" | "figures" | "failed">>();
 const textJobs = new WeakMap<SandboxedPdfBatchJob, Map<number, SandboxedPdfJob>>();
 
@@ -198,6 +200,9 @@ export function acceptSandboxedPdfBatchEvent(job: SandboxedPdfBatchJob, raw: unk
       const jobs = textJobs.get(job) ?? new Map<number, SandboxedPdfJob>();
       textJobs.set(job, jobs);
       jobs.set(index as number, single);
+      const pageCounts = textPages.get(job) ?? new Map<number, number>();
+      textPages.set(job, pageCounts);
+      pageCounts.set(index as number, slots);
       seen.set(index as number, job.options.figures ? "text" : "figures");
       return { index: index as number, phase: "text", pages: pages as number, ...(processed === undefined ? {} : { processedPages: processed as number }), result: accepted };
     }
@@ -207,7 +212,7 @@ export function acceptSandboxedPdfBatchEvent(job: SandboxedPdfBatchJob, raw: unk
       seen.set(index as number, "figures");
       const figures = (event as { figures?: { status?: unknown } }).figures;
       // No answer, or an unknown one, is a failure (the reason stays telemetry only).
-      return { index: index as number, phase: "figures", figures: parseSandboxedPdfFigureOutcome(figures?.status === undefined ? { ...figures, status: "failed", reason: "unspecified" } : figures, 200) };
+      return { index: index as number, phase: "figures", figures: parseSandboxedPdfFigureOutcome(figures?.status === undefined ? { ...figures, status: "failed", reason: "unspecified" } : figures, 200, textPages.get(job)?.get(index as number) ?? 0) };
     }
     case "failed": {
       // A file may fail after its text (its figures never came): the text stands, the figures count as failed.

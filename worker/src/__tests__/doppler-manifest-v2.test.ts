@@ -22,7 +22,7 @@ beforeEach(async () => {
   work = await mkdtemp(path.join(tmpdir(), "doppler-v2-test-"));
   dir = path.join(work, "figures");
 });
-afterEach(async () => { await rm(work, { recursive: true, force: true }); });
+afterEach(async () => { await rm(work, { recursive: true, force: true }); }, 60_000);
 
 async function rule(mutate: (m: V2Manifest, files: Map<string, Buffer>) => unknown = () => undefined, options: { partial?: boolean; expect?: "complete" | "partial"; pageCount?: number; sourceSha256?: string } = {}): Promise<string> {
   const { manifest, files } = v2Manifest({ partial: options.partial });
@@ -70,20 +70,15 @@ describe("manifest v2: the happy path", () => {
     });
     const root = `user-1/run-1/doppler/${DOC.id}`;
     // Every image file first; then the manifest, the Markdown and the source pointer; the index last.
-    const sha = (id: string) => set.files.find((file) => file.id === id)!.sha256.slice(0, 16);
-    expect(keys.slice(0, 3).sort()).toEqual([`${root}/images/page-0001/figure-001.${sha("p1.g1")}.svg`, `${root}/images/page-0001/image-001.${sha("p1.1")}.webp`, `${root}/images/page-0003/image-001.${sha("p3.1")}.jpg`]);
+    expect(keys.slice(0, 3).sort()).toEqual([`${root}/images/page-0001/figure-001.svg`, `${root}/images/page-0001/image-001.webp`, `${root}/images/page-0003/image-001.jpg`]);
     expect(keys.slice(3, 6).sort()).toEqual([`${root}/document.md`, `${root}/images/manifest.json`, `${root}/source.json`]);
     expect(keys[6]).toBe(`${root}/index.json`);
-    // The storage key is the link path with the file's content digest before the format.
-    for (const asset of (await rowsOf(set)).filter((a) => a.status === "extracted")) {
-      expect(stored.keys.get(asset.assetId)).toBe(`${root}/${asset.linkPath!.replace(/\.(\w+)$/, `.${asset.sha256!.slice(0, 16)}.$1`)}`);
-    }
-    // The canonical manifest (re-serialised JSON of the same value), not the provider's bytes.
-    expect(stored.manifest.key).toBe(`${root}/images/manifest.json`);
-    expect(stored.manifest.sha256).toMatch(/^[0-9a-f]{64}$/);
+    // The ledger's link path and the storage key share one relative path under the folder.
+    for (const asset of (await rowsOf(set)).filter((a) => a.status === "extracted")) expect(stored.keys.get(asset.assetId)).toBe(`${root}/${asset.linkPath}`);
+    expect(stored.manifest).toEqual({ key: `${root}/images/manifest.json`, sha256: createHash("sha256").update(await readFile(path.join(dir, "manifest.json"))).digest("hex") });
     expect(json.get(`${root}/source.json`)).toEqual({ sourceKey: "uploads/s1/a.pdf", sha256: "a".repeat(64), pageCount: 3, mimeType: "application/pdf" });
-    // Slots for every served object, none for the source pointer or the manifest (never served).
-    expect(stored.slots.map((s) => s.slot)).toEqual(["doppler-figures", "doppler-figure:p1.1", "doppler-figure:p1.g1", "doppler-figure:p3.1", "doppler-markdown"]);
+    // Slots for every served object, none for the source pointer.
+    expect(stored.slots.map((s) => s.slot)).toEqual(["doppler-figures", "doppler-figure:p1.1", "doppler-figure:p1.g1", "doppler-figure:p3.1", "doppler-manifest", "doppler-markdown"]);
     expect(stored.slots.some((s) => s.uri.endsWith("/source.json"))).toBe(false);
   });
 
@@ -95,7 +90,7 @@ describe("manifest v2: the happy path", () => {
       storage: { putBytes: async () => {}, putJson: async () => {}, uri: (key) => `s3://b/${key}` },
       document: { ...DOC, artifactRoot: "extracts/org-1/ex-1" }, runId: "run-1", figures: set, markdown: "",
     });
-    expect(stored.keys.get("p1.1")).toBe(`extracts/org-1/ex-1/doppler/${DOC.id}/images/page-0001/image-001.${set.files.find((f) => f.id === "p1.1")!.sha256.slice(0, 16)}.webp`);
+    expect(stored.keys.get("p1.1")).toBe(`extracts/org-1/ex-1/doppler/${DOC.id}/images/page-0001/image-001.webp`);
   });
 
   it("stores page-facts.jsonl beside the manifest, with its own slot", async () => {
@@ -247,9 +242,10 @@ describe("manifest v2: hostile or oversized manifests are refused", () => {
     await writeV2Folder(dir, manifest, files);
     const cap = dopplerAssetCaps(3).files;
     await mkdir(path.join(dir, "page-0002"), { recursive: true });
-    for (let i = 0; i < cap + 5; i += 1) await writeFile(path.join(dir, "page-0002", `image-${String(i + 100).padStart(5, "0")}.webp`), "");
+    const names = Array.from({ length: cap + 5 }, (_, i) => path.join(dir, "page-0002", `image-${String(i + 100).padStart(5, "0")}.webp`));
+    for (let i = 0; i < names.length; i += 256) await Promise.all(names.slice(i, i + 256).map((name) => writeFile(name, "")));
     await expect(readDopplerFigureDir(dir, { pageCount: 3 })).rejects.toMatchObject({ rule: "too-many-files" });
-  });
+  }, 180_000);
 
   it("refuses a file that is a symlink inside a page folder", async () => {
     const { manifest, files } = v2Manifest();

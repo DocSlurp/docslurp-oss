@@ -38,9 +38,7 @@ describe("first pass: the figure step queues the ledger", () => {
     const markdownPath = path.join(FIXTURE, "document.md");
     const result = await storeFirstPassFigures({ state, document, dir, outcome: { status: "extracted", exitCode: 0 }, markdownPath, markdown: "", storage, runId: "r", signal: new AbortController().signal });
     expect(result.stats.dopplerFigures).toMatchObject({ status: "stored", ledger: "queued", manifestVersion: 3 });
-    // The canonical manifest is stored but never served: no slot.
-    expect(state.artifactLedger.readDocument(DOC_ID, "doppler-manifest")).toBeUndefined();
-    expect(objects.has(`u/r/doppler/${DOC_ID}/images/manifest.jsonl`)).toBe(true);
+    expect(state.artifactLedger.readDocument(DOC_ID, "doppler-manifest")).toBe(`s3://b/u/r/doppler/${DOC_ID}/images/manifest.jsonl`);
     expect(objects.has(`u/r/doppler/${DOC_ID}/document.md`)).toBe(true);
     expect(state.pendingAssetLedger.get(DOC_ID)).toMatchObject({
       level: { imagesStatus: "complete", imagesExitCode: 0, manifestVersion: 3, manifest: { key: `u/r/doppler/${DOC_ID}/images/manifest.jsonl` } },
