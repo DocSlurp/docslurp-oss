@@ -83,9 +83,10 @@ describe("parser image capabilities (council #387 M1)", () => {
     expect(parserImageHasCapability("inline-command-budget", older)).toBe(false);
     expect(parserVmCapabilities("inline-command-budget")).toEqual([]);
   });
-  it("a local sandbox runs this checkout's guest scripts: every capability it knows", () => {
+  it("a local sandbox runs this checkout's guest scripts: every capability it knows; none known is no capability", () => {
     expect(parserImageHasCapability("inline-command-budget", { isolation: { location: "local" } } as never)).toBe(true);
-    expect(parserImageHasCapability("inline-command-budget", undefined)).toBe(true);
+    // No sandbox known: fail closed (council #387 r2 L1).
+    expect(parserImageHasCapability("inline-command-budget", undefined)).toBe(false);
   });
 });
 

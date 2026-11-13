@@ -40,6 +40,8 @@ export async function initializeParserSandbox(
 
 let registeredSandbox: InitializedParserSandbox | undefined;
 let lazySandbox: Promise<InitializedParserSandbox> | undefined;
+/** The lazily initialized sandbox once it has resolved (CLIs and scripts that never register one). */
+let lazyResolved: InitializedParserSandbox | undefined;
 
 /**
  * Register the process's initialized sandbox (the Temporal worker does this at start) so
@@ -49,16 +51,20 @@ let lazySandbox: Promise<InitializedParserSandbox> | undefined;
 export function setDefaultParserSandbox(sandbox: InitializedParserSandbox | undefined): void {
   registeredSandbox = sandbox;
   lazySandbox = undefined;
+  lazyResolved = undefined;
 }
 
 /**
  * Whether the parser image runs guest code with `capability`. A remote image (guest scripts shipped in the image, not
  * this worker) must report it in its contract; one that does not, an older image or one that reports none, lacks it.
- * A local sandbox runs this checkout's own guest scripts, so it has every capability this code knows. No registered
- * sandbox (tests, CLIs): this checkout's scripts as well.
+ * A local sandbox runs this checkout's own guest scripts, so it has every capability this code knows. With no sandbox
+ * known (none registered and no lazily initialized one resolved yet), nothing is assumed: false, fail closed (council
+ * #387 r2 L1: a script running the pipeline on a remote provider must not skip the check).
  */
-export function parserImageHasCapability(capability: string, sandbox: InitializedParserSandbox | undefined = registeredSandbox): boolean {
-  if (!sandbox || sandbox.isolation.location !== "remote") return true;
+export function parserImageHasCapability(capability: string, ...given: [InitializedParserSandbox | undefined] | []): boolean {
+  const sandbox = given.length ? given[0] : (registeredSandbox ?? lazyResolved);
+  if (!sandbox) return false;
+  if (sandbox.isolation.location !== "remote") return true;
   return sandbox.capabilities?.includes(capability) === true;
 }
 
@@ -76,7 +82,7 @@ export function defaultParserSandbox(): Promise<InitializedParserSandbox> {
   if (!lazySandbox) {
     const initializing = initializeParserSandbox(process.env, process.platform);
     lazySandbox = initializing;
-    initializing.catch(() => {
+    initializing.then((sandbox) => { if (lazySandbox === initializing) lazyResolved = sandbox; }, () => {
       if (lazySandbox === initializing) lazySandbox = undefined;
     });
   }

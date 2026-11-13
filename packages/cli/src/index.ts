@@ -92,7 +92,7 @@ function usage(): void {
   docslurp jobs watch <jobId> [--timeout <seconds>]
   docslurp status <runId> [--api-url <url>] [--watch] [--timeout <seconds>]
   docslurp runs [--limit <1-100>] [--cursor <nextCursor>] [--api-url <url>]
-  docslurp search <query> [--project <id|slug|name>] [--min-score <0..1>] [--mode <keyword|hybrid|deep>] [--json | --context]
+  docslurp search <query> [--project <id|slug|name>] [--min-score <0..1>] [--mode <keyword|hybrid|deep>] [--stream [--stats]] [--json | --context]
   docslurp search --queries-file <queries.json> [--project <id|slug|name>] [--concurrency <1..4>] [--json | --context]
   docslurp chat <question> [--project <id|slug|name>] [--session <id>] [--tier fastest|balanced|smart] [--reasoning none|minimal|low|medium|high] [--json]
   docslurp mcp-server [--api-url <url>] [--api-key <key>]   (alias: docslurp mcp)
@@ -289,6 +289,27 @@ function normalizeCompatImportPayload(args: {
   };
 }
 
+/** Flags that take no value, by their command-line name, and the key commands read them as. */
+const BOOLEAN_FLAGS: Readonly<Record<string, string>> = {
+  watch: "watch", json: "json", context: "context", estimate: "estimate", device: "device", force: "force", stream: "stream", stats: "stats",
+  "no-browser": "noBrowser", "no-email": "noEmail", "new-project": "newProject",
+};
+
+/** Flags that take a value (`--flag value` or `--flag=value`); the key is the camelCase name. */
+const VALUE_FLAGS: ReadonlySet<string> = new Set([
+  "project", "api-url", "api-key", "run", "source", "out", "queries-file", "concurrency", "min-score", "session", "canonical-id", "path",
+  "template", "document", "stage-from", "retention-days", "download", "quality", "chart-export", "idempotency-key",
+  "timeout", "limit", "cursor", "mode", "tier", "reasoning", "months", "indexing", "model", "scopes", "profile",
+]);
+
+const camel = (name: string) => name.replace(/-([a-z])/g, (_, c: string) => c.toUpperCase());
+
+/**
+ * The command, its positional arguments and its flags. Strict (council #387 r2 M1): an unknown flag is an error, never a
+ * flag that swallows the next argument (`--yes --estimate` once started a billed ingest); a value flag never takes a
+ * value that starts with `--`; a flag without a value takes none (`--estimate=true` is an error, not a different flag);
+ * `--flag=value` works for value flags. A bare `-x` stays positional as before.
+ */
 function parseCliArgs(argv: string[]) {
   const command = argv[0];
   const positional: string[] = [];
@@ -296,32 +317,30 @@ function parseCliArgs(argv: string[]) {
 
   let i = 1;
   while (i < argv.length) {
-    const arg = argv[i];
-    if (/^--(?:workspace(?:-id|-name)?|new-workspace)(?:=|$)/.test(arg ?? "")) throw new Error("Legacy workspace flags are no longer supported; use --project or --new-project.");
-    if (arg === "--watch" || arg === "--json" || arg === "--context" || arg === "--estimate" || arg === "--device" || arg === "--force") {
-      flags[arg.slice(2)] = true;
+    const arg = argv[i] ?? "";
+    if (/^--(?:workspace(?:-id|-name)?|new-workspace)(?:=|$)/.test(arg)) throw new Error("Legacy workspace flags are no longer supported; use --project or --new-project.");
+    if (!arg.startsWith("--")) {
+      positional.push(arg);
       i++;
-    } else if (arg === "--no-browser") {
-      flags.noBrowser = true;
+      continue;
+    }
+    const eq = arg.indexOf("=");
+    const name = eq >= 0 ? arg.slice(2, eq) : arg.slice(2);
+    if (name === "project-name" || name === "project-id") {
+      throw new Error(`--${name} was removed: pass a project ID, slug or name with --project (a name that matches no project is created on upload).`);
+    }
+    const boolean = BOOLEAN_FLAGS[name];
+    if (boolean) {
+      if (eq >= 0) throw new Error(`--${name} takes no value (got ${arg}).`);
+      flags[boolean] = true;
       i++;
-    } else if (arg === "--no-email") {
-      flags.noEmail = true;
-      i++;
-    } else if (arg === "--new-project") {
-      flags.newProject = true;
-      i++;
-    } else if (arg === "--project-name" || arg === "--project-id") {
-      throw new Error(`${arg} was removed: pass a project ID, slug or name with --project (a name that matches no project is created on upload).`);
-    } else if (arg === "--project" || arg === "--api-url" || arg === "--run" || arg === "--api-key" || arg === "--source" || arg === "--out" || arg === "--queries-file" || arg === "--concurrency" || arg === "--min-score" || arg === "--session" || arg === "--canonical-id" || arg === "--path" || arg === "--template" || arg === "--document" || arg === "--stage-from" || arg === "--retention-days" || arg === "--download" || arg === "--quality" || arg === "--chart-export" || arg === "--idempotency-key") {
-      const key = arg.replace(/^--/, "").replace(/-([a-z])/g, (_, c: string) => c.toUpperCase());
-      flags[key] = argv[i + 1] ?? "";
-      i += 2;
-    } else if (arg?.startsWith("--")) {
-      flags[arg.replace(/^--/, "")] = argv[i + 1] ?? "";
-      i += 2;
+    } else if (VALUE_FLAGS.has(name)) {
+      const value = eq >= 0 ? arg.slice(eq + 1) : argv[i + 1];
+      if (value === undefined || (eq < 0 && value.startsWith("--"))) throw new Error(`--${name} needs a value.`);
+      flags[camel(name)] = value;
+      i += eq >= 0 ? 1 : 2;
     } else {
-      positional.push(arg ?? "");
-      i++;
+      throw new Error(`Unknown flag --${name}${command ? ` for ${command}` : ""}. Run docslurp --help for the flags each command takes.`);
     }
   }
 
@@ -708,7 +727,7 @@ async function estimateCommand(files: string[], flags: Record<string, string | b
   const chartExport = resolveChartExportFlag(flags);
   if (chartExport) settings.chartExport = chartExport.tier;
   const body = { files: await profiledEstimateFiles(files), ...(Object.keys(settings).length ? { settings } : {}) };
-  const base = (typeof flags["api-url"] === "string" ? flags["api-url"] : process.env.DOCSLURP_API_URL ?? "https://docslurp.io").replace(/\/$/, "");
+  const base = (typeof flags.apiUrl === "string" ? flags.apiUrl : process.env.DOCSLURP_API_URL ?? "https://docslurp.io").replace(/\/$/, "");
   const response = await fetch(`${base}/v1/estimate`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
   if (!response.ok) {
     console.error(`Error: estimate failed (${response.status}): ${await response.text()}`);
@@ -1239,11 +1258,160 @@ async function searchCommand(query: string, flags: Record<string, string | boole
   if (minScore !== undefined && !(minScore >= 0 && minScore <= 1)) throw new Error("--min-score must be a number from 0 to 1.");
   const mode = typeof flags.mode === "string" ? flags.mode.trim() : undefined;
   if (flags.mode !== undefined && !["keyword", "hybrid", "deep"].includes(mode ?? "")) throw new Error("--mode must be keyword, hybrid or deep.");
+  if (flags.stats && !flags.stream) throw new Error("--stats requires --stream.");
+  if (flags.stream) {
+    await searchStreamCommand({ q: query, ...(project ? { project } : {}), ...(minScore === undefined ? {} : { minScore }), ...(mode ? { mode } : {}), ...(flags.stats ? { stats: true } : {}) }, flags);
+    return;
+  }
   const params = new URLSearchParams({ q: query, ...(project ? { project } : {}), ...(minScore === undefined ? {} : { minScore: String(minScore) }), ...(mode ? { mode } : {}) });
   const response = await apiFetch(`/v1/search?${params.toString()}`, flags);
   if (!response.ok) throw await responseFailure(response);
   const data = await response.json() as CliSearchResponse;
   if (flags.json) console.log(JSON.stringify(data)); else printSearch(data, flags);
+}
+
+
+type CliSearchStreamEvent = { type: string; searchId?: string; seq?: number; elapsedMs?: number; [key: string]: unknown };
+
+/** Complete SSE frames from a byte stream: handles CRLF, comments, split chunks and multi-line data. */
+async function* sseFrames(body: AsyncIterable<Uint8Array>, maxFrameBytes = 1_048_576): AsyncGenerator<{ event: string; data: string }> {
+  const decoder = new TextDecoder();
+  let buffer = "";
+  const frame = (block: string) => {
+    let event = "message";
+    const data: string[] = [];
+    for (const line of block.split("\n")) {
+      if (!line || line.startsWith(":")) continue;
+      const colon = line.indexOf(":");
+      const field = colon < 0 ? line : line.slice(0, colon);
+      const value = colon < 0 ? "" : line.slice(colon + 1).replace(/^ /, "");
+      if (field === "event") event = value;
+      else if (field === "data") data.push(value);
+    }
+    return data.length ? { event, data: data.join("\n") } : null;
+  };
+  for await (const chunk of body) {
+    buffer = (buffer + decoder.decode(chunk, { stream: true })).replace(/\r\n?/g, (m, offset, whole) => (m === "\r" && offset === whole.length - 1 ? m : "\n"));
+    if (buffer.length > maxFrameBytes) throw new Error(`DocSlurp SSE frame exceeds ${Math.round(maxFrameBytes / 1_048_576)} MiB`);
+    let split: number;
+    while ((split = buffer.indexOf("\n\n")) >= 0) {
+      const parsed = frame(buffer.slice(0, split));
+      buffer = buffer.slice(split + 2);
+      if (parsed) yield parsed;
+    }
+  }
+  const rest = frame(buffer.replace(/\r/g, "\n"));
+  if (rest) yield rest;
+}
+
+/**
+ * `search --stream`: prints each retrieval leg's hits to stderr as they land (completion order, provisional), then the final ranked list
+ * to stdout exactly as without `--stream`. With `--json` stdout is one event per line (NDJSON), each event verbatim. A search is billed once
+ * it has produced hits, so it falls back to `GET /v1/search` only when the stream never started: HTTP 404/405/406/501, a 2xx that is not an
+ * event stream, or a connection failure before any response. After the first event a drop, a malformed or oversized frame, or a stream that
+ * ends without `search.results` is an error and never a second search; a drop after `search.results` still prints the answer.
+ */
+async function searchStreamCommand(input: { q: string; project?: string; minScore?: number; mode?: string; stats?: boolean }, flags: Record<string, string | boolean>): Promise<void> {
+  const json = flags.json === true;
+  const started = Date.now();
+  let final: CliSearchResponse | undefined;
+  let seq = 0;
+  const emit = (event: CliSearchStreamEvent) => { if (json) console.log(JSON.stringify(event)); };
+  const note = (line: string) => { if (!json) console.error(line); };
+  const unavailable = (response: Response) => [404, 405, 406, 501].includes(response.status) || (response.ok && !response.headers.get("content-type")?.includes("text/event-stream"));
+  const interrupted = (why: string) => new Error(`The search stream ${why} after it started. Not retried: a search is billed once it has produced hits. Run the search again.`);
+  let fallbackReason: string | undefined;
+  {
+    let response: Response | undefined;
+    try {
+      response = await apiFetch("/v1/search/stream", flags, {
+        method: "POST", headers: { "Content-Type": "application/json", Accept: "text/event-stream" }, body: JSON.stringify(input),
+      }, Number(flags.timeout ?? 120) * 1000);
+    } catch (error) {
+      // A connection failure before any response: the search never started.
+      if (!(error instanceof TypeError)) throw error;
+      fallbackReason = "could not connect to the stream endpoint";
+    }
+    if (response) {
+      if (unavailable(response)) {
+        await response.body?.cancel().catch(() => undefined);
+        fallbackReason = "stream endpoint unavailable";
+      } else if (!response.ok) throw await responseFailure(response);
+      else if (!response.body) fallbackReason = "stream endpoint unavailable";
+      else {
+        let received = false;
+        // The first leg and rank of each hit body already printed, for hits a later leg reports by id only.
+        const printed = new Map<string, string>();
+        try {
+          for await (const frame of sseFrames(response.body as unknown as AsyncIterable<Uint8Array>, 32 * 1_048_576)) {
+            received = true;
+            let event: CliSearchStreamEvent;
+            try { event = JSON.parse(frame.data); } catch { throw interrupted("sent a malformed event"); }
+            if (!event || typeof event.type !== "string") continue;
+            if (typeof event.seq === "number") seq = Math.max(seq, event.seq + 1);
+            if (event.type === "search.error") {
+              const error = event.error as { code?: string; status?: number } | undefined;
+              const status = typeof error?.status === "number" ? error.status : 500;
+              emit(event);
+              throw new CliApiError(status, safeHttpFailure(status, { error: { code: error?.code } }));
+            }
+            if (event.type === "search.hits") {
+              emit(event);
+              const hits = (event.hits as Array<{ id: string; legRank: number; result?: CliSearchResponse["results"][number] }>) ?? [];
+              const stats = event.stats as { ms?: number; candidates?: number; timedOut?: boolean } | undefined;
+              const detail = flags.stats && stats ? ` ${stats.ms}ms${stats.candidates === undefined ? "" : `, ${stats.candidates} candidates`}${stats.timedOut ? ", timed out" : ""}` : "";
+              const scope = typeof event.subSearch === "number" ? ` (sub-search ${event.subSearch + 1})` : "";
+              note(`[${String(event.leg)}]${scope} ${hits.length} hit${hits.length === 1 ? "" : "s"}${event.truncated ? "+" : ""}${detail}`);
+              for (const hit of hits) {
+                if (!hit.result) {
+                  note(`  ${String(event.leg)} #${hit.legRank + 1} also found by ${printed.get(hit.id) ?? "an earlier leg"}`);
+                  continue;
+                }
+                const page = hit.result.citation.pageNumbers?.length ? hit.result.citation.pageNumbers.join(", ") : hit.result.citation.pageNumber ?? "-";
+                if (!printed.has(hit.id)) printed.set(hit.id, `${String(event.leg)} #${hit.legRank + 1} (${hit.result.citation.filename}, p.${page})`);
+                note(`  ${String(event.leg)} #${hit.legRank + 1} ${hit.result.citation.filename} (p.${page}) ${hit.result.text.slice(0, 100).replace(/\n/g, " ")}`);
+              }
+            } else if (event.type === "search.phase") {
+              emit(event);
+              const stats = event.stats as { ms?: number } | undefined;
+              if (flags.stats) note(`[${String(event.phase)}] ${stats?.ms}ms`);
+            } else if (event.type === "search.results") {
+              emit(event);
+              final = (event.response as CliSearchResponse);
+            } else if (event.type === "search.started" || event.type === "search.done") {
+              emit(event);
+              if (event.type === "search.done" && flags.stats && event.timings) note(`timings: ${Object.entries(event.timings as Record<string, number>).map(([name, ms]) => `${name} ${ms}ms`).join(", ")}`);
+            }
+          }
+          if (!final) {
+            if (received) throw interrupted("ended without the final results");
+            fallbackReason = "stream ended before any event";
+          }
+        } catch (error) {
+          // The answer arrived: a later drop does not matter. Otherwise nothing is retried once the stream started.
+          if (final) { /* print it below */ }
+          else if (error instanceof CliApiError || (error instanceof Error && error.message.startsWith("The search stream "))) throw error;
+          else if (received || (error instanceof Error && /exceeds \d+ MiB/.test(error.message))) throw interrupted(error instanceof Error && /exceeds \d+ MiB/.test(error.message) ? "sent an oversized event" : "dropped");
+          else fallbackReason = "stream dropped before any event";
+        }
+      }
+    }
+  }
+  if (!final) {
+    note(`Falling back to the JSON search (${fallbackReason ?? "stream unavailable"}).`);
+    const params = new URLSearchParams({ q: input.q, ...(input.project ? { project: input.project } : {}), ...(input.minScore === undefined ? {} : { minScore: String(input.minScore) }), ...(input.mode ? { mode: input.mode } : {}) });
+    const response = await apiFetch(`/v1/search?${params.toString()}`, flags);
+    if (!response.ok) throw await responseFailure(response);
+    final = await response.json() as CliSearchResponse;
+    const sessionId = String((final as { sessionId?: unknown }).sessionId ?? "");
+    const envelope = () => ({ searchId: `json-${sessionId}`, seq: seq++, elapsedMs: Date.now() - started });
+    emit({ ...envelope(), type: "search.results", response: final });
+    emit({ ...envelope(), type: "search.done", sessionId, resultCount: final.results.length });
+  }
+  if (!json) {
+    if (flags.context !== true) console.log(flags.stats ? `\nFinal ranking (${Date.now() - started}ms):` : "\nFinal ranking:");
+    printSearch(final, flags);
+  }
 }
 
 const CHAT_TIERS = ["fastest", "balanced", "smart"] as const;
