@@ -704,9 +704,13 @@ export type ChatResponse = {
   };
 };
 
-/** SSE events from {@link DocSlurpClient.chatStream}: retrieval status, the answer, then the done envelope. */
+/**
+ * SSE events from {@link DocSlurpClient.chatStream}: retrieval status, answer text deltas as the model writes them,
+ * the full answer, then the done envelope. `message.data.answer` is authoritative; the deltas concatenated are it.
+ */
 export type ChatStreamEvent =
   | { event: "status"; data: { stage: string; message: string } }
+  | { event: "delta"; data: { text: string } }
   | { event: "message"; data: ChatResponse }
   | { event: "done"; data: { id: string; sessionId: string; sessionToken?: string; searchSessionId: string | null } };
 
@@ -2254,12 +2258,12 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
 
     /**
      * Streamed grounded answer, as a streaming companion to chat(). Yields a
-     * retrieval `status`, the `message` (a full ChatResponse) and a final `done`
-     * envelope. Throws if the stream ends before `done`, so a truncated answer
-     * is never mistaken for success. Posts the question in the body of
-     * POST /v1/chat/stream, so it never sits in a URL, proxy log or browser
-     * history; for OpenAI-style token streaming use POST /v1/chat/completions
-     * with stream: true.
+     * retrieval `status`, `delta` events with answer text as it is written,
+     * the `message` (a full ChatResponse, whose answer is authoritative) and a
+     * final `done` envelope. Throws if the stream ends before `done`, so a
+     * truncated answer is never mistaken for success. Posts the question in the
+     * body of POST /v1/chat/stream, so it never sits in a URL, proxy log or
+     * browser history.
      */
     async *chatStream(input: ChatInput, requestOptions: RequestOptions = {}): AsyncGenerator<ChatStreamEvent> {
       const target = inProject(input);
@@ -2269,7 +2273,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
       let completed = false;
       const grant: Record<string, string> = sessionToken ? { "X-DocSlurp-Chat-Session-Token": sessionToken } : {};
       for await (const frame of streamEventsAt("/v1/chat/stream", requestOptions, grant, payload)) {
-        if (frame.event === "status" || frame.event === "message" || frame.event === "done") {
+        if (frame.event === "status" || frame.event === "delta" || frame.event === "message" || frame.event === "done") {
           if (frame.event === "done") completed = true;
           yield { event: frame.event, data: frame.data } as ChatStreamEvent;
         }
