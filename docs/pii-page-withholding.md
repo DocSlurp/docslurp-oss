@@ -84,6 +84,11 @@ Every reader asks `piiWithholding()` and `isPageWithheld()` from `@docslurp/shar
   - Page-image readiness reports a withheld page as `unavailable`.
 - **Exports** leave out withheld pages' images and replace page text with the placeholder.
 - **Deferred materialization** refuses pages the ingest scan withheld.
+- **First-pass figures** are stored after the scan, so pii-detect never saw them:
+  - Under page scope, figure slots (`<doc>:doppler-figure:pN.M`) join `withheldArtifactUris` only for withheld pages.
+  - Non-page slots (`doppler-markdown`, `doppler-figures`, `doppler-manifest*`) stay all-or-nothing.
+  - `document.md` is the scanned Markdown slot (withheld pages already replaced). It is stored only when every withheld page is verified to be the placeholder; otherwise it is not stored.
+- **Doppler's folder** (`<root>/doppler/<doc>/images/page-NNNN/(image|figure)-MMM.<ext>`): the file proxy reads the page from the key. Under `images/`, a key it cannot parse is refused while the document withholds pages. The assets route refuses an image on a withheld page, or one that shows a file from a withheld page.
 - **Later stages and resumes** (figure resume, chart export, reindex, the first-pass reprocess) consult the worker's `documentPiiWithholding()` and `isPageWithheldInRun()` in a run, or `loadDocumentPiiWithholding()` outside one.
 
 ## Rescans
