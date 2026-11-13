@@ -8,7 +8,13 @@ export interface RealtimeBackend {
   /** Collection payloads must reauthorize their constituents before delivery. */
   authorizeDelivery?(userId: string, resource: DashboardResource, data: unknown): Promise<boolean>;
   project(userId: string, resource: DashboardResource): Promise<unknown>;
+  /** Organization revisions: move on every change in the organization, access changes included. */
   revisions(orgIds: string[]): Promise<Map<string, string>>;
+  /**
+   * Per-resource revisions (realtimeResourceScope), keyed by realtimeScopeKey. A backend
+   * without them re-projects every subscription on each organization revision.
+   */
+  scopeRevisions?(keys: Array<{ orgId: string; scope: string }>): Promise<Map<string, string>>;
   listen(wake: () => void): Promise<() => Promise<void>>;
 }
 export const realtimeMetrics = {
@@ -25,8 +31,26 @@ export const realtimeProjectionBuckets = [10, 50, 100, 250, 500, 1_000, 2_000, I
 type Observer = ((data: unknown, revision: number) => Promise<void>) & { failed?: () => void; revoked?: () => void | Promise<void> };
 type Entry = {
   userId: string; resource: DashboardResource; orgId: string;
-  observers: Set<Observer>; version?: string; revision: number; dirty: boolean;
+  observers: Set<Observer>;
+  /** Data revision of the last projection; organization revision of the last authorization. */
+  version?: string; accessVersion?: string;
+  revision: number; dirty: boolean;
 };
+
+/**
+ * The revision scope whose changes can alter a resource's projection, or null for the
+ * organization. Matches the scopes migration 0145's triggers record: a project's own
+ * rows, documents, runs, suggestions and search sessions move `project:<id>`; a run's
+ * row, events, stage states, documents and usage move `run:<id>`.
+ */
+export function realtimeResourceScope(resource: DashboardResource): string | null {
+  switch (resource.kind) {
+    case "run": return `run:${resource.runId}`;
+    case "project": case "documents": case "suggestions": return `project:${resource.projectId}`;
+    default: return null;
+  }
+}
+export const realtimeScopeKey = (orgId: string, scope: string) => `${orgId}\u0000${scope}`;
 /** One notification listener and revision sweep for every socket using this broker.
  * Notifications do not carry customer data or constitute durable history.
  */
@@ -84,20 +108,37 @@ export class RealtimeBroker {
       const entries = [...this.entries.values()];
       realtimeMetrics.revisionQueries++;
       const versions = await this.backend.revisions([...new Set(entries.map(e => e.orgId))]);
+      const scoped = new Map<string, { orgId: string; scope: string }>();
+      if (this.backend.scopeRevisions) {
+        for (const entry of entries) {
+          const scope = realtimeResourceScope(entry.resource);
+          if (scope) scoped.set(realtimeScopeKey(entry.orgId, scope), { orgId: entry.orgId, scope });
+        }
+      }
+      const scopeVersions = scoped.size && this.backend.scopeRevisions ? await this.backend.scopeRevisions([...scoped.values()]) : new Map<string, string>();
       for (let offset = 0; offset < entries.length; offset += 8) {
         await Promise.all(entries.slice(offset, offset + 8).map(async entry => {
-          const version = versions.get(entry.orgId) ?? "0";
-          if (!entry.dirty && version === entry.version) return;
+          const orgVersion = versions.get(entry.orgId) ?? "0";
+          const scope = this.backend.scopeRevisions ? realtimeResourceScope(entry.resource) : null;
+          const version = scope ? scopeVersions.get(realtimeScopeKey(entry.orgId, scope)) ?? "0" : orgVersion;
+          if (!entry.dirty && version === entry.version && orgVersion === entry.accessVersion) return;
+          const project = entry.dirty || version !== entry.version;
           entry.dirty = false;
           const began = Date.now();
           try {
             // Register first, then read a durable revision before the projection.
             // A concurrent commit advances the next sweep's revision, forcing a
             // second snapshot even if its notification was lost.
+            // Authorization is rechecked on every organization revision (membership,
+            // sharing and project changes all move it), whether or not this
+            // resource's own data changed: exactly as often as before scopes.
             if (!await this.backend.authorize(entry.userId, entry.resource)) {
               for (const observer of [...entry.observers]) await observer.revoked?.();
               return;
             }
+            entry.accessVersion = orgVersion;
+            // Another resource of the organization changed: nothing to send.
+            if (!project) return;
             realtimeMetrics.projectionQueries++;
             realtimeMetrics.coalesced += Math.max(0, entry.observers.size - 1);
             const data = await this.backend.project(entry.userId, entry.resource);

@@ -293,6 +293,19 @@ and the distinction between existing project chat logic and native ownership.
 
 ### Revision publication and ingestion lock independence
 
+Migration 0145 adds a `scope` to every counter: `''` is the organization (written
+on every change, exactly as before, and the only scope `realtime_revisions` reads),
+`project:<id>` and `run:<id>` are written alongside it by the same triggers for a
+change's project and run. `realtime_scope_revisions` aggregates them. The broker
+(`realtime/broker.ts`) re-projects `project`, `documents` and `suggestions`
+subscriptions only when their project scope moves and `run` subscriptions only when
+their run scope moves; `activity`, `billing`, `economics`, `viewer` and `page-image`
+still follow the organization revision. Every subscription is still re-authorized
+whenever the organization revision moves (membership, sharing and project changes
+all move it), so authorization is checked as often as before. Folded per-scope
+checkpoints are kept (one row per project and run); the compactor folds them with
+the organization's counters under the same 256-row bound.
+
 Migration 0120 preserves `realtime_revisions` as an aggregate read view while
 writers insert one counter per organization/transaction. Independent transactions
 no longer update a shared organization row. A nonblocking advisory try-lock allows

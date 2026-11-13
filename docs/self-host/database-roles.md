@@ -47,12 +47,15 @@ The server's database watchdog counts its own pool's backends in `pg_stat_activi
 Realtime publication keeps the ingestion worker separate from the native chat
 executor (the latter is a server process using the application database role).
 The ingestion worker has no access to `chat_operations`, `chat_operation_events`,
-`chat_run_dependencies` or the API's aggregate `realtime_revisions` view. Its run,
+`chat_run_dependencies` or the API's aggregate `realtime_revisions` and
+`realtime_scope_revisions` views. Its run,
 document, usage and page-state writes invoke validated `SECURITY DEFINER` triggers
 owned by `docslurp_realtime_publisher`. That role has no login, inheritance,
 superuser, role creation, database creation, replication or RLS bypass. Its only
-data grants are counter DML and SELECT of `(id, org_id)` on projects, runs and
-documents. It has no schema CREATE privilege after migration. Trigger functions
+data grants are counter DML, SELECT of `(id, org_id)` on projects, runs and
+documents, and (migration 0145) SELECT of `project_id` on runs and of
+`(project_id, run_id)` on documents, so a change also records its project and run
+revision scopes. It has no schema CREATE privilege after migration. Trigger functions
 validate the exact public relation, trigger name, timing, level and arguments;
 all lookups are schema-qualified with a fixed `pg_catalog,pg_temp` search path.
 PUBLIC and runtime EXECUTE on the publication functions is revoked. Runtime

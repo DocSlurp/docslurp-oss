@@ -42,3 +42,52 @@ it("fails observers closed when reconciliation cannot establish state", async ()
   const close = await broker.subscribe("user",resource,Object.assign(async () => {}, {failed}));
   await broker.tick(); expect(failed).toHaveBeenCalledTimes(1); close(); await broker.close();
 });
+it("re-projects only the subscriptions whose project or run scope moved", async () => {
+  const scopes = new Map([["org\u0000project:a", "1"], ["org\u0000project:b", "1"], ["org\u0000run:r", "1"]]);
+  let orgRevision = "1";
+  const project = vi.fn(async (_userId: string, resource: { kind: string }) => ({ kind: resource.kind }));
+  const authorize = vi.fn(async () => "org");
+  const backend: RealtimeBackend = { authorize, project, listen: async () => async () => {},
+    revisions: async () => new Map([["org", orgRevision]]),
+    scopeRevisions: vi.fn(async keys => new Map(keys.map(key => [`${key.orgId}\u0000${key.scope}`, scopes.get(`${key.orgId}\u0000${key.scope}`) ?? "0"]))) };
+  const broker = new RealtimeBroker(backend, 60_000);
+  const seen: string[] = [];
+  const subscribe = (label: string, resource: Parameters<RealtimeBroker["subscribe"]>[1]) => broker.subscribe("user", resource, async () => { seen.push(label); });
+  const closes = await Promise.all([
+    subscribe("a", { kind: "project", projectId: "a" }), subscribe("a-docs", { kind: "documents", projectId: "a", page: 0 }),
+    subscribe("b", { kind: "project", projectId: "b" }), subscribe("run", { kind: "run", runId: "r" }), subscribe("org", resource),
+  ]);
+  await broker.tick();
+  expect(seen.sort()).toEqual(["a", "a-docs", "b", "org", "run"]);
+  seen.length = 0; project.mockClear(); authorize.mockClear();
+  // A change in project A: the organization revision and A's scope move, B's and the run's do not.
+  orgRevision = "2"; scopes.set("org\u0000project:a", "2");
+  await broker.tick();
+  expect(seen.sort()).toEqual(["a", "a-docs", "org"]);
+  expect(project.mock.calls.map(([, resource]) => resource.kind).sort()).toEqual(["activity", "documents", "project"]);
+  // ...but every subscription was re-authorized on the organization revision.
+  expect(authorize).toHaveBeenCalledTimes(5);
+  seen.length = 0; authorize.mockClear();
+  await broker.tick();
+  expect(seen).toEqual([]); expect(authorize).not.toHaveBeenCalled();
+  closes.forEach(close => close()); await broker.close();
+});
+it("revokes a subscription whose access changed even when its own data did not", async () => {
+  let orgRevision = "1";
+  let allowed = true;
+  const revoked = vi.fn();
+  const project = vi.fn(async () => ({ id: "b" }));
+  const backend: RealtimeBackend = { authorize: async () => allowed ? "org" : null, project, listen: async () => async () => {},
+    revisions: async () => new Map([["org", orgRevision]]),
+    scopeRevisions: async () => new Map([["org\u0000project:b", "7"]]) };
+  const broker = new RealtimeBroker(backend, 60_000);
+  const close = await broker.subscribe("user", { kind: "project", projectId: "b" }, Object.assign(async () => {}, { revoked }));
+  await broker.tick();
+  expect(project).toHaveBeenCalledTimes(1);
+  // Membership removed: only the organization revision moves.
+  allowed = false; orgRevision = "2";
+  await broker.tick();
+  expect(revoked).toHaveBeenCalledTimes(1);
+  expect(project).toHaveBeenCalledTimes(1);
+  close(); await broker.close();
+});
