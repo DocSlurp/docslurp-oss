@@ -3,7 +3,7 @@ import { link, mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from "
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { dopplerAssetCaps, dopplerImageLimits, dopplerLedgerAssets, dopplerManifestV2Schema, parseDopplerManifest } from "@docslurp/shared";
+import { dopplerAssetCaps, dopplerImageLimits, dopplerLedgerAssets, dopplerManifestV2Schema, isDocumentAssetRow, parseDopplerManifest } from "@docslurp/shared";
 
 import { DopplerFigureRejection, dopplerFigureRecords, readDopplerFigureDir, readLedgerSpill, storeDopplerFigures, type DopplerFigureSet } from "../extractors/doppler-figures.js";
 import { ByteBudget } from "../extractors/doppler-upload.js";
@@ -270,6 +270,32 @@ describe("manifest v2: hostile or oversized manifests are refused", () => {
 });
 
 describe("version 1 maps into the ledger with what it has", () => {
+  it("a scan Doppler would not copy (skipped: scan-not-copyable) is the unlinked row render-images renders on the host", async () => {
+    const none = { file: null, format: null, bytes: null, sha256: null, width: null, height: null } as const;
+    const parsed = parseDopplerManifest({
+      version: "doppler-figures@1",
+      images: [
+        { id: "p1.1", page: 1, bbox: [0, 0, 612, 792], kind: "picture", fate: "background", ...none, skipped: "scan-not-copyable" },
+        { id: "p2.1", page: 2, bbox: [0, 0, 612, 792], kind: "mask", fate: "background", ...none, skipped: "scan-not-copyable" },
+        // Not a background picture or mask, or with an error: an `other` skip, never a host page.
+        { id: "p3.1", page: 3, bbox: [0, 0, 612, 792], kind: "picture", fate: "block", ...none, skipped: "scan-not-copyable" },
+        { id: "p4.g1", page: 4, bbox: [0, 0, 612, 792], kind: "vector", fate: "background", ...none, skipped: "scan-not-copyable" },
+        { id: "p5.1", page: 5, bbox: [0, 0, 612, 792], kind: "picture", fate: "background", ...none, skipped: "scan-not-copyable", error: "xref" },
+      ],
+    });
+    const rows = dopplerLedgerAssets(parsed!);
+    expect(rows.map((a) => [a.assetId, a.status, a.reason, a.fileOf])).toEqual([
+      ["p1.1", "unlinked", "scan-not-copyable", null],
+      ["p2.1", "unlinked", "scan-not-copyable", null],
+      ["p3.1", "not-extracted", "other", null],
+      ["p4.g1", "not-extracted", "other", null],
+      ["p5.1", "not-extracted", "error", null],
+    ]);
+    expect(rows.every((row) => isDocumentAssetRow(row))).toBe(true);
+    const { hostPageImagePagesOf } = await import("../db/document-asset-ledger.js");
+    expect(await hostPageImagePagesOf(rows)).toEqual([1, 2]);
+  });
+
   it("files are extracted, repeats and errors not extracted, fate skips unlinked, unknown values other", () => {
     const parsed = parseDopplerManifest({
       version: "doppler-figures@1",

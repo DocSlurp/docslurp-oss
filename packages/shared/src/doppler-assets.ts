@@ -956,8 +956,9 @@ const V1_SKIPPED: Readonly<Record<string, DopplerLedgerReason>> = Object.assign(
 /**
  * Ledger rows for a parsed manifest: one per image, in manifest order. Version 1 maps with what it has: a file is
  * `extracted` (`copy` for a copied JPEG scan, else `render`), `skipped: fate` (an image Doppler placed without a marker)
- * is `unlinked`, a repeat or a known skip reason is `not-extracted` with that reason, an `error` is `error`, and any
- * other skip is `other`. Version 1 has no links, so `linkPath` is null.
+ * is `unlinked`, `skipped: scan-not-copyable` on a background picture or mask is `unlinked` with that reason (a scan
+ * Doppler left to the host), a repeat or a known skip reason is `not-extracted` with that reason, an `error` is `error`,
+ * and any other skip is `other`. Version 1 has no links, so `linkPath` is null.
  */
 export function dopplerLedgerAssets(parsed: DopplerManifest): DocumentAsset[] {
   if (parsed.version === 2) {
@@ -992,6 +993,13 @@ export function dopplerLedgerAssets(parsed: DopplerManifest): DocumentAsset[] {
     }
     const none = { source: null, bytes: null, sha256: null, width: null, height: null, format: null } as const;
     if (entry.skipped === "fate" && entry.repeat_of === undefined) return { ...base, ...none, status: "unlinked", reason: null, fileOf: null };
+    // A full-page scan Doppler would not copy (`--scan-pages copy`), carried in version 1 by the batch guest: the same row
+    // as version 2/3's unlinked `scan-not-copyable`, so render-images renders that page on the host. Only on a background
+    // picture or mask without a repeat (dopplerStatusReasonOk); anything else stays an `other` skip.
+    if (entry.skipped === "scan-not-copyable" && entry.repeat_of === undefined && entry.error === undefined && base.fate === "background" &&
+        (entry.kind === "picture" || entry.kind === "mask")) {
+      return { ...base, ...none, status: "unlinked", reason: "scan-not-copyable", fileOf: null };
+    }
     const reason: DopplerLedgerReason = entry.repeat_of !== undefined ? "repeat"
       : entry.error !== undefined ? "error"
         : typeof entry.skipped === "string" && Object.hasOwn(V1_SKIPPED, entry.skipped) ? V1_SKIPPED[entry.skipped]! : "other";
