@@ -23,7 +23,7 @@ if (compileCacheDir) module.enableCompileCache(compileCacheDir);
 // separate ESM files take, which matters because every VM command starts a fresh process. A fixed path, loaded after
 // the cache is enabled. `testHooks` is null in the production bundle (a build-time constant), so the test-only knobs
 // below are inert there.
-const { CHART_EXTRACT_LIMITS, testHooks } = await import("../dist/chart-export/guest.bundle.mjs");
+const { CHART_EXTRACT_LIMITS, testHooks, reassembleUnits, resultVisualBytes, resumeSkipList } = await import("../dist/chart-export/guest.bundle.mjs");
 const kind = request?.kind;
 if (!["office", "epub", "svg", "html", "json"].includes(kind)) throw new Error("invalid chart extract kind");
 const packaged = kind === "office" || kind === "epub";
@@ -53,8 +53,6 @@ const UNIT_TIMEOUT_MS = testHooks?.unitMs ?? 15_000;
 const COUNT_ONLY_MS = 5_000;
 // Failures do not stop the input: workers continue until the deadline (council r9 L1). This only guards a runaway loop.
 const MAX_WORKERS_PER_INPUT = 1_000;
-const MERGED_REASONS = new Set(["visual-limit", "output-limit", "package-part-limit", "guest-deadline-part"]);
-const visualBytes = (v) => Buffer.byteLength(JSON.stringify(v));
 
 /** Run one worker until it returns a result, crashes or overruns; record finished units into `done`. */
 function runWorker(task, done, workerIndex, onStart) {
@@ -94,16 +92,6 @@ function runWorker(task, done, workerIndex, onStart) {
   });
 }
 
-/** Same-reason entries the extractor keeps one per input, merged again after a resume (council r9 I2). */
-function mergeDeferred(list) {
-  const out = [];
-  for (const d of list) {
-    const same = MERGED_REASONS.has(d.reason) ? out.find((e) => e.reason === d.reason) : null;
-    if (same) { same.svgIndex = Math.min(same.svgIndex, d.svgIndex); same.count += d.count; } else out.push({ ...d });
-  }
-  return out.slice(0, 1000);
-}
-
 /**
  * One input, contained, its visuals inside `outputBudget` bytes: the worker's own result when nothing failed (identical
  * to an uncontained run), otherwise the units each worker finished, the failed units counted, and the last worker's own
@@ -118,7 +106,7 @@ async function extractContained(path, kind, packaged, outputBudget) {
   let nextSvg = 0;
   for (let w = 0; ; w++) {
     const countOnly = Date.now() >= deadline || w >= MAX_WORKERS_PER_INPUT - 1;
-    const skip = [...[...done].map(([id, d]) => [id, { visuals: d.delta.visuals.length, bytes: d.delta.bytes }]), ...[...failed.keys()].map((id) => [id, { visuals: 0, bytes: 0 }])];
+    const skip = resumeSkipList(done, failed.keys());
     const task = { path, kind, packaged, options, skip, outputBudget, deadline: countOnly ? 0 : deadline };
     const outcome = await runWorker(task, done, w, (unit) => { nextSvg = unit.svgIndex + (unit.svg ? 1 : 0); });
     lastWorker = w;
@@ -132,31 +120,8 @@ async function extractContained(path, kind, packaged, outputBudget) {
     unplaced = true;
     break;
   }
-  if (final && failed.size === 0) return final;
-  // Reassemble: units finished by earlier workers, the failed units, and the last worker's own accounting.
-  const earlier = [...done].filter(([, d]) => !final || d.worker !== lastWorker).sort((a, b) => a[0] - b[0]).map(([, d]) => d.delta);
-  const lost = [...failed.values()].sort((a, b) => a.id - b.id).map((f) => ({ svgIndex: f.svgIndex, count: 1, reason: f.reason }));
-  const base = final ?? { schemaVersion: "chart-export-deterministic@v1", visuals: [], refusals: [], overflow: 0 };
-  // The same output budget, enforced while merging: past it a visual is counted as output-limit, never thrown.
-  const visuals = [];
-  const deferredExtra = [];
-  let bytes = 0;
-  for (const v of [...earlier.flatMap((d) => d.visuals), ...base.visuals]) {
-    const size = visualBytes(v);
-    if (visuals.length >= CHART_EXTRACT_LIMITS.maxVisuals || bytes + size > outputBudget) { deferredExtra.push({ svgIndex: 0, count: 1, reason: visuals.length >= CHART_EXTRACT_LIMITS.maxVisuals ? "visual-limit" : "output-limit" }); continue; }
-    bytes += size;
-    visuals.push(v);
-  }
-  const refusals = [...earlier.flatMap((d) => d.refusals), ...base.refusals, ...(unplaced ? [{ locator: kind, reason: "unit-crashed" }] : [])];
-  const deferred = mergeDeferred([...earlier.flatMap((d) => d.deferred), ...lost, ...(unplaced ? [{ svgIndex: nextSvg, count: 1, reason: "unit-crashed" }] : []), ...(base.deferred ?? []), ...deferredExtra]);
-  const overflow = earlier.reduce((n, d) => n + d.overflow, 0) + (base.overflow ?? 0) + Math.max(0, refusals.length - 1000);
-  return {
-    schemaVersion: "chart-export-deterministic@v1",
-    visuals,
-    refusals: refusals.slice(0, 1000),
-    ...(overflow > 0 ? { overflow } : {}),
-    ...(deferred.length ? { deferred } : {}),
-  };
+  // Shared with the inline supervisor (reassemble.ts in the bundle): identical merge, resume charge and budget re-check.
+  return reassembleUnits({ done, failed: failed.values(), final, lastWorker, unplaced: unplaced ? { svgIndex: nextSvg, locator: kind } : null, outputBudget });
 }
 
 let json;
@@ -172,7 +137,7 @@ if (request.batch !== undefined) {
     if ((await stat(file)).size > CHART_EXTRACT_LIMITS.maxTextBytes) { results.push(refused("input-too-large")); continue; }
     try {
       const result = await extractContained(file, kind, false, left);
-      left = Math.max(0, left - result.visuals.reduce((n, v) => n + visualBytes(v), 0));
+      left = Math.max(0, left - resultVisualBytes(result));
       results.push(result);
     } catch {
       results.push(refused("extract-failed"));
