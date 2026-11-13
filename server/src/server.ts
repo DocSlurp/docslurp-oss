@@ -53,6 +53,7 @@ import { webRoutes } from "./routes/web.js";
 import { projectGraphRoutes } from "./routes/project-graph.js";
 import { artifactsRoutes } from "./routes/artifacts.js";
 import { inviteRoutes, metaRoutes, dashboardRoutes, waitlistRoutes } from "./routes/frontend.js";
+import { customerPipelineGuard } from "./middleware/customer-pipeline-guard.js";
 import { filesRoutes } from "./routes/files.js";
 import { capabilitiesRoutes } from "./routes/capabilities.js";
 import { notificationsRoutes } from "./routes/notifications.js";
@@ -66,6 +67,7 @@ import { samlCallbackRoutes, ssoRoutes } from "./routes/sso.js";
 import { connectorsRoutes } from "./routes/connectors.js";
 import { adminBillingRoutes } from "./routes/admin-billing.js";
 import { adminUsersRoutes } from "./routes/admin-users.js";
+import { adminProjectsRoutes } from "./routes/admin-projects.js";
 import { clientSurfaceMiddleware, clientSurfaceRecorder } from "./services/client-surface.js";
 import { drainSearchSessionWrites as drainSessionWrites } from "./search/session.js";
 import { drainSearchCharges } from "./search/lean-logging.js";
@@ -185,6 +187,9 @@ export function createApiApp(): Hono {
   // The Algolia adapter reads JSON itself; bound it like the other compat adapters.
   app.use("/compat/algolia/*", nativeBodyLimit(256 * 1024));
   app.use("*", rejectNulBytes);
+  // Backstop: no JSON response to a non-operator carries a pipeline's managed model fields (routes return customer views).
+  app.use("/v1/*", customerPipelineGuard);
+  app.use("/dashboard/*", customerPipelineGuard);
   app.use("/v1/*", rejectLegacyProjectSelection);
   // `/v1/projects/:slug|default/...` → resolved project UUID routes.
   const projectRefs = projectRefPath([projectsRoutes, chatInstructionsRoutes, connectorsRoutes, secretsRoutes, projectGraphRoutes]);
@@ -237,6 +242,7 @@ export function createApiApp(): Hono {
   app.route("/v1/billing", billingRoutes);
   app.route("/v1/admin/billing", adminBillingRoutes);
   app.route("/v1/admin/users", adminUsersRoutes);
+  app.route("/v1/admin/projects", adminProjectsRoutes);
   app.route("/v1/projects", secretsRoutes);
   app.route("/v1/projects", projectGraphRoutes);
   app.route("/v1/user-settings", userSettingsRoutes);

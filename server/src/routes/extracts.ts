@@ -8,6 +8,7 @@ import {
   extractOptionsSchema,
   indexingModeSchema,
   pipelineFeatureOverridesSchema,
+  publicPipelineFeatureOverridesSchema,
   PROJECT_INPUT_MAX_LENGTH,
   projectTemplateKeySchema,
   type ExtractOptions,
@@ -83,7 +84,7 @@ const ingestUrlSchema = z.object({
     z.string().url(),
     z.object({ url: z.string().url(), canonicalId: canonicalIdSchema.optional() }),
   ])).min(1),
-  pipeline: pipelineFeatureOverridesSchema.optional(),
+  pipeline: publicPipelineFeatureOverridesSchema.optional(),
 }).extend(extractOptionsSchema.shape);
 
 const createDirectSessionSchema = z.object({
@@ -93,7 +94,7 @@ const createDirectSessionSchema = z.object({
   project: projectInputSchema.optional(),
   newProject: z.boolean().optional(),
   templateKey: projectTemplateKeySchema.optional(),
-  pipeline: pipelineFeatureOverridesSchema.optional(),
+  pipeline: publicPipelineFeatureOverridesSchema.optional(),
   files: z.array(directUploadFileSchema).min(1),
 }).extend(extractOptionsSchema.shape);
 

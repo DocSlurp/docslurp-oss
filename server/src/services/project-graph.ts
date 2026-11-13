@@ -9,7 +9,7 @@ import {
   graphFallbackScope,
   isGraphJobActive,
   normalizePipelineFeatures,
-  resolvePipelineTextModel,
+  resolveAllowedPipelineTextModel,
   type GraphBuildCalibration,
   type GraphBuildEstimate,
   type GraphConfig,
@@ -78,7 +78,7 @@ function graphEnabled(pipeline: PipelineFeatures): boolean {
 }
 
 function graphModel(pipeline: PipelineFeatures): string {
-  return resolvePipelineTextModel(pipeline, "graph-extraction", (process.env.DOCSLURP_TEXT_MODEL?.trim() ? normalizeHostedModelRef(process.env.DOCSLURP_TEXT_MODEL) : undefined));
+  return resolveAllowedPipelineTextModel(pipeline, "graph-extraction", (process.env.DOCSLURP_TEXT_MODEL?.trim() ? normalizeHostedModelRef(process.env.DOCSLURP_TEXT_MODEL) : undefined));
 }
 
 function workerConcurrency(): number {
