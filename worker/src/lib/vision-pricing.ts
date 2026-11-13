@@ -1,4 +1,5 @@
 import {
+  assertNoAutomaticSelectionDenied,
   DEEPINFRA_VISION_BASE_URL,
   DEFAULT_OPENROUTER_VISION_MODEL,
   isLoopbackModelBaseUrl,
@@ -6,6 +7,7 @@ import {
   PRIVATE_MODEL_PROVIDER,
   VISION_MAX_OUTPUT_USD_PER_MILLION,
   visionImageTokens,
+  visionInputUsdPerMillion,
   readVisionModelUriOverride,
   resolveVisionRoute,
   visionListPriceCents,
@@ -253,10 +255,14 @@ export function visionInputTokenBound(image: ImageSize, prompt = "", model?: str
   return visionImageTokenBound(image, model) + visionPromptTokenBound(prompt) + PROMPT_OVERHEAD_TOKENS;
 }
 
-/** The worker's configured default hosted vision model: `DOCSLURP_VISION_MODEL_URI`, else the built-in default. */
+/**
+ * The worker's configured default hosted vision model: `DOCSLURP_VISION_MODEL_URI` (an operator's explicit choice),
+ * else the built-in default, which is never a model that is never selected automatically.
+ */
 export function configuredVisionModel(env: Record<string, string | undefined> = process.env): string {
   const override = readVisionModelUriOverride(env, () => undefined);
   if (override) return resolveVisionRoute({ target: "hosted", modelUri: override } as never).model;
+  assertNoAutomaticSelectionDenied("built-in vision default", [DEFAULT_OPENROUTER_VISION_MODEL]);
   return DEFAULT_OPENROUTER_VISION_MODEL;
 }
 
@@ -267,8 +273,13 @@ export function configuredVisionModel(env: Record<string, string | undefined> = 
  */
 export function worstCaseVisionRequestCents(model: string): number | null {
   // The image counted twice: as prompt tokens, and as OpenRouter's per-image fee cap (`VisionMaxPrice.imageUsd`).
+  // The fee cap is priced at the base input rate (as `visionRequestPricing` sends it); prompt tokens at the rate the
+  // route bills (`visionInputUsdPerMillion`, the cache-write rate where one applies).
+  const pricing = visionModelTokenPricing(model);
+  const tokenCents = visionListPriceCents(model, { inputTokens: visionInputTokenBound(null, "", model), outputTokens: visionMaxOutputTokens(model) });
+  if (!pricing || tokenCents === null) return null;
   const imageFeeTokens = visionImageTokens(model, null) ?? 0;
-  return visionListPriceCents(model, { inputTokens: visionInputTokenBound(null, "", model) + imageFeeTokens, outputTokens: visionMaxOutputTokens(model) });
+  return tokenCents + (imageFeeTokens * pricing.inputUsdPerMillion) / 1e4;
 }
 
 /** The most expensive worst-case request across every priced catalog vision model. */
@@ -285,7 +296,7 @@ export function maxCatalogWorstCaseVisionRequestCents(): number {
 export const LOCAL_VISION_REQUEST_WEIGHT_CENTS = 2;
 
 /** USD per million input (prompt and image) and output tokens. */
-export type VisionTokenPrice = Pick<VisionTokenPricing, "inputUsdPerMillion" | "outputUsdPerMillion">;
+export type VisionTokenPrice = Pick<VisionTokenPricing, "inputUsdPerMillion" | "outputUsdPerMillion" | "promptCacheWriteUsdPerMillion">;
 
 /**
  * OpenRouter `provider.max_price` for one request: the token prices the weight uses plus caps on the separate
@@ -304,7 +315,7 @@ export function maxCatalogVisionTokenPricing(): VisionTokenPrice {
   for (const spec of visionModelCatalog) {
     const pricing = visionModelTokenPricing(spec.id);
     if (!pricing) continue;
-    inputUsdPerMillion = Math.max(inputUsdPerMillion, pricing.inputUsdPerMillion);
+    inputUsdPerMillion = Math.max(inputUsdPerMillion, visionInputUsdPerMillion(pricing));
     outputUsdPerMillion = Math.max(outputUsdPerMillion, pricing.outputUsdPerMillion);
   }
   return { inputUsdPerMillion, outputUsdPerMillion };
@@ -348,7 +359,7 @@ export function visionRequestPricing(route: {
   inputTokens: number;
   /** `visionImageTokenBound(image, model)` of the request's image; unset: the largest raster's. */
   imageTokens?: number;
-  /** Most output tokens the request can produce (`visionOutputTokenBound`); unset: the model's shared cap. */
+  /** Most output tokens the request can produce: `visionOutputCap(...).bound`, the cap it sends. Unset: the model's cap. */
   outputTokens?: number;
 }): VisionRequestPricing {
   const outputTokens = route.outputTokens ?? visionMaxOutputTokens(route.model);
@@ -383,7 +394,8 @@ export function visionRequestPricing(route: {
 }
 
 function centsAt(pricing: VisionTokenPrice, inputTokens: number, outputTokens: number): number {
-  return (inputTokens * pricing.inputUsdPerMillion + outputTokens * pricing.outputUsdPerMillion) / 1e4;
+  // Input at the cache-write rate where the route bills one on every request (visionInputUsdPerMillion).
+  return (inputTokens * visionInputUsdPerMillion(pricing) + outputTokens * pricing.outputUsdPerMillion) / 1e4;
 }
 
 /**

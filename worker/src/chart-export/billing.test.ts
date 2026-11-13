@@ -57,7 +57,7 @@ function runState(runId = "run-1") {
 const chartUnits = (ledger: PipelineUsageEventLedger) => ledger.snapshot().filter((e) => e.metric === BILLABLE_UNIT_METRICS.chartExport);
 
 describe("chart export billing (billing enforced)", () => {
-  it("charges each model-read visual once, deterministic visuals nothing, and settles what the estimate quoted", async () => {
+  it("charges each model-read visual once, deterministic visuals nothing; the estimate adds the expected second reads", async () => {
     installTestPricing(DISTINCT_TEST_PRICING);
     const session = new ChartExportSession({
       documentId: "doc-1", config, catalog: () => testCatalog(), recordUsage: () => undefined,
@@ -87,7 +87,8 @@ describe("chart export billing (billing enforced)", () => {
     expect(chargeChartExports(state, { documentId: "doc-1", attempts: attempts(), calls: session.calls, config })).toBe(0);
     expect(chartUnits(state.usageLedger)).toHaveLength(3);
 
-    // The estimate from the recorded stats equals the settled charge.
+    // The estimate from the recorded stats prices those three first reads plus the provider's expected share of a
+    // second read each (test pricing: 0.5 x 0.07); these three reads needed none, so they settled below the estimate.
     const features = { ...normalizePipelineFeatures(defaultPipelineFeatures), chartExport: config } as PipelineFeatures;
     const base = normalizePipelineFeatures(defaultPipelineFeatures);
     const env = { STRIPE_SECRET_KEY: "sk_test", DOCSLURP_CHART_EXPORT: "on" };
@@ -95,8 +96,8 @@ describe("chart export billing (billing enforced)", () => {
     const stats = session.stats();
     const on = estimatePipelineWork({ features, stages, pages: 10, documents: 1, env, visualStats: stats });
     const off = estimatePipelineWork({ features: base, stages, pages: 10, documents: 1, env });
-    expect(on.credits!.high - off.credits!.high).toBeCloseTo(charged, 6);
-    expect(on.credits!.low - off.credits!.low).toBeCloseTo(charged, 6);
+    expect(on.credits!.high - off.credits!.high).toBeCloseTo(charged + 3 * 0.5 * 0.07, 6);
+    expect(on.credits!.low - off.credits!.low).toBeCloseTo(charged + 3 * 0.5 * 0.07, 6);
   });
 
   it("charges nothing for a deterministic-only document", async () => {
@@ -122,13 +123,17 @@ describe("chart export billing (billing enforced)", () => {
     expect(visual?.source).toBe("svg-geometry");
     expect(session.calls.filter((c) => c.responded)).toHaveLength(2);
     const charges = chartExportCharges({ attempts: [...session.modelReads.values()], calls: session.calls, config });
-    expect(charges).toEqual([{ visualId: "p5-page", pageNumber: 5, credits: expect.closeTo(0.07, 6), paidCalls: 2, exported: true }]);
+    // The answered repair is a second billed read.
+    expect(charges).toEqual([{ visualId: "p5-page", pageNumber: 5, credits: expect.closeTo(0.07, 6), retryCredits: expect.closeTo(0.07, 6), paidCalls: 2, exported: true }]);
   });
 
   it("does not charge for calls that failed before the provider answered", () => {
     installTestPricing(DISTINCT_TEST_PRICING);
     const attempts = [{ id: "p1-page", pageNumber: 1, kind: "chart" as const, exported: false }];
-    expect(chartExportCharges({ attempts, calls: [{ visualId: "p1-page", responded: false }], config })).toEqual([]);
+    expect(chartExportCharges({ attempts, calls: [{ visualId: "p1-page", responded: false, purpose: "spec" }], config })).toEqual([]);
+    // A repair that never got an answer is not a second read.
+    expect(chartExportCharges({ attempts, calls: [{ visualId: "p1-page", responded: true, purpose: "spec" }, { visualId: "p1-page", responded: false, purpose: "repair" }], config }))
+      .toEqual([expect.objectContaining({ retryCredits: 0, paidCalls: 1 })]);
   });
 
   describe("charges every model read whatever its outcome (council round 2, N1)", () => {
@@ -151,11 +156,34 @@ describe("chart export billing (billing enforced)", () => {
       expect(events[0]!.metadata).toMatchObject({ visualId: "p1-page", paidCalls: 1, outcome: "not-exported" });
     });
 
-    it("invalid after the repair, no summary: no visual, one unit for both calls", async () => {
+    it("invalid after the repair, no summary: no visual, two billed reads (the first and the repair)", async () => {
       const { visual, events } = await charge(["not json", "still not json"], cand(2));
       expect(visual).toBeNull();
-      expect(events).toHaveLength(1);
-      expect(events[0]!.metadata).toMatchObject({ paidCalls: 2, outcome: "not-exported" });
+      expect(events.map((event) => event.id)).toEqual(["chart-export:run-1:doc-n:p2-page", "chart-export:run-1:doc-n:p2-page:retry"]);
+      expect(events[0]!.metadata).toMatchObject({ paidCalls: 2, outcome: "not-exported", read: "first" });
+      expect(events[1]!.metadata).toMatchObject({ paidCalls: 2, outcome: "not-exported", read: "retry" });
+      for (const event of events) expect(event.costCents).toBeCloseTo(0.07, 6);
+    });
+
+    it("a repaired visual is billed two reads, once, whatever happens to the pass", async () => {
+      const { visual, events, state, session } = await charge(["not json", JSON.stringify(BAR_SPEC)], cand(6));
+      expect(visual?.source).toBe("vision");
+      expect(events.map((event) => event.metadata?.read)).toEqual(["first", "retry"]);
+      // Replayed: nothing more.
+      expect(chargeChartExports(state, { documentId: "doc-n", attempts: [...session.modelReads.values()], calls: session.calls, config })).toBe(0);
+      expect(chartUnits(state.usageLedger)).toHaveLength(2);
+    });
+
+    it("a cut-off answer's one retry at the larger cap is a second billed read; at most two per visual", () => {
+      installTestPricing(DISTINCT_TEST_PRICING);
+      const attempts = [{ id: "p7-page", pageNumber: 7, kind: "chart" as const, exported: true }];
+      const calls = [
+        { visualId: "p7-page", responded: true, purpose: "spec" as const },
+        { visualId: "p7-page", responded: true, purpose: "expand" as const },
+        // Direct formats are priced by the first read's formats, never as a second read.
+        { visualId: "p7-page", responded: true, purpose: "direct" as const },
+      ];
+      expect(chartExportCharges({ attempts, calls, config })).toEqual([expect.objectContaining({ retryCredits: expect.closeTo(0.07, 6), paidCalls: 3 })]);
     });
 
     it("an unknown-kind candidate read as a diagram while diagrams are off: discarded, one unit", async () => {
@@ -188,7 +216,7 @@ describe("chart export billing (billing enforced)", () => {
             { id: "w", pageNumber: 1, kind: null, exported: false },
             { id: "x", pageNumber: 1, kind: "chart", exported: true },
           ],
-          calls: [{ visualId: "v", responded: true }, { visualId: "w", responded: true }, { visualId: "x", responded: true }],
+          calls: [{ visualId: "v", responded: true, purpose: "spec" }, { visualId: "w", responded: true, purpose: "spec" }, { visualId: "x", responded: true, purpose: "spec" }],
           config: { formats: [...formats] },
         });
         expect(charges.map((c) => [c.visualId, c.credits])).toEqual([["v", expect.closeTo(0.07, 6)], ["w", expect.closeTo(0.07, 6)], ["x", expect.closeTo(0.07, 6)]]);
@@ -212,7 +240,7 @@ describe("chart export billing (billing enforced)", () => {
       installTestPricing(DISTINCT_TEST_PRICING);
       const state = runState();
       const attempts = [1, 2, 3].map((page) => ({ id: `p${page}-page`, pageNumber: page, kind: "chart" as const, exported: page !== 2 }));
-      const calls = attempts.map((a) => ({ visualId: a.id, responded: true }));
+      const calls = attempts.map((a) => ({ visualId: a.id, responded: true, purpose: "spec" as const }));
       chargeChartExports(state, { documentId: "doc-s", attempts: attempts.slice(0, 1), calls, config });
       chargeChartExports(state, { documentId: "doc-s", attempts, calls, config });
       expect(chartUnits(state.usageLedger)).toHaveLength(3);

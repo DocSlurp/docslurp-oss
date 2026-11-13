@@ -222,7 +222,7 @@ describe("worker private endpoint vision", () => {
 });
 
 describe("worker private endpoint vision request profiles", () => {
-  async function sendPage(modelUri: string, extra: { prompt?: string; outputSchema?: Record<string, unknown> } = {}) {
+  async function sendPage(modelUri: string, extra: { prompt?: string; outputSchema?: Record<string, unknown>; maxOutputTokens?: number } = {}) {
     const calls = mockPrivateServer();
     const dir = await mkdtemp(join(tmpdir(), "private-vision-profile-"));
     const imagePath = join(dir, "page.png");
@@ -231,6 +231,7 @@ describe("worker private endpoint vision request profiles", () => {
       imagePath,
       outputPath: `${imagePath}.json`, gate: null,
       ...(extra.outputSchema ? { outputSchema: extra.outputSchema } : {}),
+      ...(extra.maxOutputTokens !== undefined ? { maxOutputTokens: extra.maxOutputTokens } : {}),
       vision: visionConfigSchema.parse({ modelUri, prompt: extra.prompt ?? "markdown" }),
       cfg: fromEnv(),
       runner: new CommandRunner(),
@@ -289,5 +290,12 @@ describe("worker private endpoint vision request profiles", () => {
     expect(isPageTranscription({ vision: { prompt: "markdown" }, promptText: "Extract the chart" })).toBe(false);
     expect(isPageTranscription({ vision: { prompt: "markdown" }, outputSchema: { type: "object" } })).toBe(false);
     expect(visionRequestProfileForRoute({ provider: "openrouter", model: "lightonai/LightOnOCR-3-0.8B" })).toBeUndefined();
+  });
+
+  it("sends a caller's output cap to a profiled model, and ignores an invalid one rather than sending the context size", async () => {
+    const capped = await sendPage("llm://private/gpu1/lightonai/LightOnOCR-3-0.8B", { maxOutputTokens: 512 });
+    expect(capped.max_tokens).toBe(512);
+    const invalid = await sendPage("llm://private/gpu1/lightonai/LightOnOCR-3-0.8B", { maxOutputTokens: 1.5 });
+    expect("max_tokens" in invalid).toBe(false);
   });
 });

@@ -57,9 +57,36 @@ const VISION_MAX_OUTPUT_TOKENS_CONFIGURED = (() => {
   return Number.isInteger(configured) && configured >= 1_024;
 })();
 
+/** A call's image is larger, in the model's own image tokens, than the call allows; refused before admission. */
+export class VisionImageOverBudgetError extends Error {
+  constructor(readonly model: string, readonly imageTokens: number, readonly maxImageTokens: number) {
+    super(`image needs up to ${imageTokens} image tokens on ${model}, above this call's ${maxImageTokens}; refusing to send`);
+    this.name = "VisionImageOverBudgetError";
+  }
+}
+
 /** Output cap for `model`: the shared cap (VISION_MAX_OUTPUT_TOKENS or 16k) adjusted by the model profile. */
 export function visionMaxOutputTokens(model: string | undefined): number {
   return visionOutputCapForModel(model, { value: VISION_MAX_OUTPUT_TOKENS, configured: VISION_MAX_OUTPUT_TOKENS_CONFIGURED });
+}
+
+/**
+ * Output cap of one vision request, resolved once and used by both admission and the request: `maxTokens` is sent as
+ * `max_tokens` (null: none, so the served context limit applies) and `bound` is the most output admission weighs.
+ */
+export type VisionOutputCap = { maxTokens: number | null; bound: number };
+
+/**
+ * The output cap of a request: the profile's cap (its context window when the server decides), else the model's
+ * cap, lowered (never raised) by a caller's own cap such as chart export's. A caller's cap is always sent.
+ */
+export function visionOutputCap(model: string | undefined, profile?: VisionRequestProfile, callCap?: number): VisionOutputCap {
+  const call = callCap !== undefined && Number.isInteger(callCap) && callCap >= 1 ? callCap : undefined;
+  const profileCap = profile?.maxOutputTokens;
+  if (profileCap === "server" && call === undefined) return { maxTokens: null, bound: profile!.contextTokens! };
+  const cap = profileCap === "server" ? profile!.contextTokens! : profileCap ?? visionMaxOutputTokens(model);
+  const maxTokens = call === undefined ? cap : Math.min(cap, call);
+  return { maxTokens, bound: maxTokens };
 }
 
 /**
@@ -106,11 +133,6 @@ export function visionRenderLongEdge(vision: VisionConfig): number | undefined {
   return route.runtime === "local-cli" ? undefined : visionRequestProfileForRoute(route)?.maxLongEdgePx;
 }
 
-/** Output tokens a request can produce at most under `profile`: its cap, its context window when the server decides, else the shared cap. */
-export function visionOutputTokenBound(model: string, profile: VisionRequestProfile | undefined): number {
-  if (profile?.maxOutputTokens === "server") return profile.contextTokens!;
-  return profile?.maxOutputTokens ?? visionMaxOutputTokens(model);
-}
 import { open, readFile } from "node:fs/promises";
 
 import {
@@ -285,13 +307,30 @@ export async function executeVisionRuntime(args: {
    * evaluation measured). OpenRouter routes only; the fallback route gets the same value.
    */
   reasoning?: OpenRouterReasoning;
+  /**
+   * Output cap for this call, below the model's page-transcription cap (chart export sends its own, smaller cap). The
+   * lower of the two is sent as `max_tokens` and weighed by the attempt guard; the fallback route gets the same cap.
+   */
+  maxOutputTokens?: number;
+  /**
+   * One billed request per call: no stream retry or streaming fallback, and a cut-off answer is returned with its
+   * `finishReason` (chart export). The fallback route, if any, is still tried after a failure; chart calls have none.
+   */
+  singleAttempt?: boolean;
+  /**
+   * Largest image, in the model's own image tokens at this image's size, the call may send. A larger image, or one
+   * whose size cannot be read, is refused before admission (nothing is sent or billed): `VisionImageOverBudgetError`.
+   */
+  maxImageTokens?: number;
 }): Promise<VisionExecutionResult> {
   const normalized = normalizeVisionConfig(args.vision, args.cfg, args.outputSchema);
   const selected = args.promptText !== undefined ? { ...normalized, prompt: args.promptText } : normalized;
   assertProviderAllowed(args.privacyMode, visionCall(selected));
 
+  // Request profiles describe plain page transcription only; the fallback route is judged the same way.
+  const routeArgs: RouteRequestArgs = { ...args, transcription: isPageTranscription(args) };
   try {
-    return await runRouteVisionRequest(selected, selected.prompt, { ...args, transcription: isPageTranscription(args) });
+    return await runRouteVisionRequest(selected, selected.prompt, routeArgs);
   } catch (error) {
     // A refused request is not a route failure: the fallback route would be refused the same way. A route refused
     // for billing above its bound is the exception: the fallback is a different route with its own count.
@@ -329,7 +368,7 @@ export async function executeVisionRuntime(args: {
         remoteFallbackModelUri: null,
       }, args.cfg, args.outputSchema);
       assertProviderAllowed(args.privacyMode, visionCall(fallbackConfig));
-      fallback = await runRouteVisionRequest(fallbackConfig, selected.prompt, { ...args, transcription: isPageTranscription(args) });
+      fallback = await runRouteVisionRequest(fallbackConfig, selected.prompt, routeArgs);
     } catch (fallbackError) {
       if (primaryFailure && fallbackError && typeof fallbackError === "object") primaryFailures.set(fallbackError, primaryFailure);
       throw fallbackError;
@@ -402,6 +441,12 @@ function weightedGate(gate: VisionRequestGate, weightCents: number, route: Visio
   };
 }
 
+/** What one route's request needs from `executeVisionRuntime`'s call, plus whether it is plain page transcription. */
+type RouteRequestArgs = Pick<
+  Parameters<typeof executeVisionRuntime>[0],
+  "imagePath" | "mimeType" | "outputPath" | "runner" | "signal" | "cfg" | "privacyMode" | "gate" | "reasoning" | "maxOutputTokens" | "singleAttempt" | "maxImageTokens"
+> & { transcription: boolean };
+
 /**
  * Sends one page to a resolved route. Private routes are authorized (and,
  * under strict-privacy, audited) per request, use the registry URL and auth,
@@ -410,7 +455,7 @@ function weightedGate(gate: VisionRequestGate, weightCents: number, route: Visio
 async function runRouteVisionRequest(
   route: VisionExecutionConfig,
   prompt: string,
-  args: { imagePath: string; mimeType?: string; outputPath: string; runner: CommandRunner; signal?: AbortSignal; cfg: Config; privacyMode: PrivacyMode; gate: VisionRequestGate | null; reasoning?: OpenRouterReasoning; transcription?: boolean },
+  args: RouteRequestArgs,
 ): Promise<VisionExecutionResult> {
   // The prompt can carry tenant schema labels: bounded before anything is admitted or sent.
   assertVisionPromptSize(prompt);
@@ -435,7 +480,7 @@ async function runRouteVisionRequest(
 async function sendRouteVisionRequest(
   route: VisionExecutionConfig,
   prompt: string,
-  args: { imagePath: string; mimeType?: string; outputPath: string; runner: CommandRunner; signal?: AbortSignal; cfg: Config; privacyMode: PrivacyMode; gate: VisionRequestGate | null; reasoning?: OpenRouterReasoning; transcription?: boolean },
+  args: RouteRequestArgs,
   billing: VisionRouteBilling,
   model: string,
   onUsageModel: (model: string) => void,
@@ -445,21 +490,28 @@ async function sendRouteVisionRequest(
   // this model, the route's enforced output cap and its model's price. A billed route outside the priced
   // catalog, or an unknown hosted destination, is refused here: nothing is admitted or sent.
   const imageSize = route.runtime === "local-cli" ? null : await readImageSize(args.imagePath);
+  if (args.maxImageTokens !== undefined) {
+    // Unknown size counts as the largest raster (visionImageTokenBound), so it is refused: fail closed.
+    const imageTokens = visionImageTokenBound(imageSize?.widthPx && imageSize.heightPx ? imageSize : null, model);
+    if (imageTokens > args.maxImageTokens) throw new VisionImageOverBudgetError(model, imageTokens, args.maxImageTokens);
+  }
   // Profiles describe page transcription: a schema-field or task prompt keeps the generic request, so it is never dropped.
-  const requestProfile = route.runtime === "local-cli" || args.transcription !== true ? undefined : visionRequestProfileForRoute(route);
+  const requestProfile = route.runtime === "local-cli" || !args.transcription ? undefined : visionRequestProfileForRoute(route);
+  // Resolved once: admission weighs `bound` and the request sends `maxTokens`, so the two cannot disagree.
+  const outputCap = visionOutputCap(model, requestProfile, args.maxOutputTokens);
   const pricing = visionRequestPricing({
     model,
     runtime: route.runtime,
     billing,
     inputTokens: visionInputTokenBound(imageSize, prompt, model),
     imageTokens: visionImageTokenBound(imageSize, model),
-    outputTokens: visionOutputTokenBound(model, requestProfile),
+    outputTokens: outputCap.bound,
   });
   const knownSize = Boolean(imageSize?.widthPx && imageSize.heightPx);
   console.log(
     `[vision-weight] model=${model} billing=${billing} weightCents=${pricing.weightCents.toFixed(4)} ` +
       `basis=${knownSize ? `known-size:${imageSize!.widthPx}x${imageSize!.heightPx}` : "worst-case"} ` +
-      `imageTokens=${visionImageTokenBound(imageSize, model)}`,
+      `imageTokens=${visionImageTokenBound(imageSize, model)} outputTokens=${outputCap.bound} maxTokens=${outputCap.maxTokens ?? "server"}`,
   );
   const base = {
     imagePath: args.imagePath,
@@ -472,6 +524,8 @@ async function sendRouteVisionRequest(
     prompt,
     ...(args.reasoning ? { reasoning: args.reasoning } : {}),
     ...(requestProfile ? { requestProfile } : {}),
+    outputCap,
+    ...(args.singleAttempt ? { singleAttempt: true } : {}),
   };
   if (!isPrivate) {
     return await runVisionRequest({ ...base, model: route.model, baseUrl: route.baseUrl, apiKey: resolveVisionApiKey(billing, route.baseUrl, args.cfg), swapPolicy: args.cfg.visionModelSwapPolicy, maxPrice: pricing.maxPrice, streaming: args.cfg.visionStreaming });
@@ -633,8 +687,12 @@ export async function runVisionRequest(args: {
   maxPrice?: VisionMaxPrice | null;
   /** Overrides the model's page-transcription reasoning default (OpenRouter only). */
   reasoning?: OpenRouterReasoning;
-  /** Per-model request shape (prompt mode, system message, sampling, output cap); see `visionRequestProfileForRoute`. */
+  /** Per-model request shape (prompt mode, system message, sampling); see `visionRequestProfileForRoute`. */
   requestProfile?: VisionRequestProfile;
+  /** The cap admission weighed (`visionOutputCap`); unset: resolved here from the model and `requestProfile`. */
+  outputCap?: VisionOutputCap;
+  /** One billed request: no stream retry, no streaming fallback, a cut-off returned (`executeVisionRuntime`). */
+  singleAttempt?: boolean;
 }): Promise<VisionRequestResult> {
   args = { ...args, model: isOpenRouterBaseUrl(args.baseUrl) ? speedBoostModel(resolveSupportedModelIdWithWarning(args.model), currentProviderPolicy().speedBoost === true) : resolveSupportedModelIdWithWarning(args.model) };
   return withObservation(
@@ -725,9 +783,10 @@ export async function runVisionRequest(args: {
       // Streaming, degeneration abort and the single alternate-route retry live in vision-stream.ts.
       const isOpenRouter = isOpenRouterBaseUrl(args.baseUrl);
       const profile = args.requestProfile;
+      const outputCap = args.outputCap ?? visionOutputCap(args.model, profile);
       if (profile) {
         console.log(`[vision-profile] model=${args.model} promptMode=${profile.promptMode ?? "template"} systemMessage=${profile.systemMessage ?? true} ` +
-          `temperature=${profile.temperature ?? 0} topP=${profile.topP ?? "default"} maxOutputTokens=${profile.maxOutputTokens ?? "shared"}`);
+          `temperature=${profile.temperature ?? 0} topP=${profile.topP ?? "default"} maxTokens=${outputCap.maxTokens ?? "server"}`);
       }
       const imagePart = {
         type: "image_url",
@@ -753,8 +812,8 @@ export async function runVisionRequest(args: {
         ],
         temperature: profile?.temperature ?? 0,
         ...(profile?.topP !== undefined ? { top_p: profile.topP } : {}),
-        // `server`: no max_tokens, so the served context limit applies; admission bounded it by contextTokens.
-        ...(profile?.maxOutputTokens === "server" ? {} : { max_tokens: profile?.maxOutputTokens ?? visionMaxOutputTokens(args.model) }),
+        // null (`server`, no call cap): no max_tokens, so the served context limit applies; admission weighed contextTokens.
+        ...(outputCap.maxTokens === null ? {} : { max_tokens: outputCap.maxTokens }),
         // Page transcription never needs thinking: pin each verified model to its lowest accepted effort.
         ...(isOpenRouter ? (args.reasoning ? { reasoning: { ...args.reasoning } } : visionReasoningParams(args.model)) : {}),
         // Per-model routing restricted to providers measured to transcribe faithfully.
@@ -778,7 +837,8 @@ export async function runVisionRequest(args: {
         model: args.model,
         providerLabel: args.providerLabel ?? providerFromBaseUrl(args.baseUrl),
         openRouter: isOpenRouter,
-        streaming: args.streaming ?? readBoolean(process.env.VISION_STREAMING, true),
+        streaming: args.singleAttempt ? false : args.streaming ?? readBoolean(process.env.VISION_STREAMING, true),
+        ...(args.singleAttempt ? { singleAttempt: true } : {}),
         fetchImpl: args.fetchImpl,
         signal: args.signal,
         // Prompt plus a typical page image and transcription; each attempt settles with its actual usage.
