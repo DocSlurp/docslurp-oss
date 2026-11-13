@@ -201,6 +201,59 @@ function findLegend(texts: TextPrim[], scene: Scene, exclude: Set<TextPrim>): Le
   return out;
 }
 
+/**
+ * The first tick in `sorted` (ascending `pos`, as a stable sort leaves it) with the smallest |pos − target|: exactly
+ * what a linear scan keeping the first strict minimum returns, in O(log n). Falls back to that scan when the target or
+ * any position is not finite (a binary search needs a total order); pass `finite` when it is already known.
+ */
+export function nearestTick<T extends { pos: number }>(sorted: T[], target: number, finite = sorted.every((t) => Number.isFinite(t.pos))): T | null {
+  if (!sorted.length) return null;
+  const dist = (t: T) => Math.abs(t.pos - target);
+  if (!finite || !Number.isFinite(target)) {
+    let best: T | null = null;
+    for (const c of sorted) if (!best || dist(c) < dist(best)) best = c;
+    return best;
+  }
+  // First index whose pos >= target.
+  let lo = 0, hi = sorted.length;
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (sorted[mid]!.pos < target) lo = mid + 1; else hi = mid; }
+  let left = lo - 1;
+  // The scan keeps the earliest tick at the minimal (rounded) distance: walk back over equal distances.
+  if (left >= 0) while (left > 0 && dist(sorted[left - 1]!) === dist(sorted[left]!)) left--;
+  if (left < 0) return sorted[lo]!;
+  if (lo >= sorted.length) return sorted[left]!;
+  return dist(sorted[left]!) <= dist(sorted[lo]!) ? sorted[left]! : sorted[lo]!;
+}
+
+/** Comparisons and search steps `columnStacked` ran (tests assert it stays O(n log n)). */
+export interface ColumnWork { steps: number }
+
+/**
+ * Whether two bars of one column touch: some a ≠ b with |a.y0 − b.y1| < 0.6 or |a.x1 − b.x0| < 0.6. Exactly the pairwise
+ * test, in O(n log n): for each bar, binary-search the sorted far edges for the run within 0.6 (the computed
+ * difference is monotone in the sorted value, so the run is contiguous). Non-finite edges never pass the test.
+ */
+export function columnStacked(col: RectPrim[], work: ColumnWork = { steps: 0 }): boolean {
+  if (col.length < 2) return false;
+  const touches = (near: (r: RectPrim) => number, far: (r: RectPrim) => number): boolean => {
+    const keyed = col.filter((r) => Number.isFinite(far(r))).sort((a, b) => far(a) - far(b));
+    work.steps += keyed.length * Math.ceil(Math.log2(keyed.length + 1));
+    const values = keyed.map(far);
+    for (const a of col) {
+      const v = near(a);
+      if (!Number.isFinite(v)) continue;
+      // [lo, hi): the sorted far edges w with |v − w| < 0.6, i.e. v − w < 0.6 (from lo) and v − w > −0.6 (before hi).
+      let lo = 0, hi = values.length;
+      while (lo < hi) { const mid = (lo + hi) >> 1; work.steps++; if (v - values[mid]! < 0.6) hi = mid; else lo = mid + 1; }
+      let end = lo, top = values.length;
+      while (end < top) { const mid = (end + top) >> 1; work.steps++; if (v - values[mid]! > -0.6) end = mid + 1; else top = mid; }
+      if (end - lo >= 2 || (end - lo === 1 && keyed[lo] !== a)) return true;
+    }
+    return false;
+  };
+  return touches((r) => r.y0, (r) => r.y1) || touches((r) => r.x1, (r) => r.x0);
+}
+
 /** Pair tests run so far by `withoutVertexMarkers`. */
 export interface MarkerWork { pairTests: number }
 
@@ -432,13 +485,18 @@ export function prepareSvgChart(root: XmlElement, extraTexts: readonly TextPrim[
       if (!s) { s = { name: (color && colorName.get(color)) ?? "", mark, color, points: [] }; series.set(key, s); }
       return s;
     };
+    // Categories sorted (and their pitch) once per category list, not once per mark.
+    const sortedCats = new WeakMap<Tick[], { sorted: Tick[]; pitch: number; finite: boolean }>();
     const nearestCat = (cats: Tick[], pos: number): Tick | null => {
       if (!cats.length) return null;
-      const sorted = [...cats].sort((a, b) => a.pos - b.pos);
-      const pitch = sorted.length > 1 ? median(sorted.slice(1).map((c, k) => c.pos - sorted[k]!.pos)) : Infinity;
-      let best: Tick | null = null;
-      for (const c of sorted) if (!best || Math.abs(c.pos - pos) < Math.abs(best.pos - pos)) best = c;
-      return best && Math.abs(best.pos - pos) <= Math.max(pitch / 2, 2) ? best : null;
+      let entry = sortedCats.get(cats);
+      if (!entry) {
+        const sorted = [...cats].sort((a, b) => a.pos - b.pos);
+        entry = { sorted, pitch: sorted.length > 1 ? median(sorted.slice(1).map((c, k) => c.pos - sorted[k]!.pos)) : Infinity, finite: sorted.every((t) => Number.isFinite(t.pos)) };
+        sortedCats.set(cats, entry);
+      }
+      const best = nearestTick(entry.sorted, pos, entry.finite);
+      return best && Math.abs(best.pos - pos) <= Math.max(entry.pitch / 2, 2) ? best : null;
     };
 
     let candidates = 0, mapped = 0, curved = 0, outOfRange = 0;
@@ -467,7 +525,7 @@ export function prepareSvgChart(root: XmlElement, extraTexts: readonly TextPrim[
         const center = (r: RectPrim) => (horizontal ? (r.y0 + r.y1) / 2 : (r.x0 + r.x1) / 2);
         const columns = cluster(rects, center, 1);
         for (const col of columns) {
-          const colStacked = col.length > 1 && col.some((a) => col.some((b) => a !== b && (Math.abs(a.y0 - b.y1) < 0.6 || Math.abs(a.x1 - b.x0) < 0.6)));
+          const colStacked = columnStacked(col);
           if (colStacked) stacked = true;
           for (const r of col) {
             candidates++;

@@ -13,7 +13,7 @@
 import { SandboxRunError } from "../sandbox/types.js";
 import type { UsageEvent } from "../models.js";
 import {
-  acceptSandboxedPdfResult, sandboxedPdfProvider, type SandboxedPdfFigureOutcome, type SandboxedPdfJob, type SandboxedPdfResult,
+  acceptSandboxedPdfResult, parseSandboxedPdfFigureOutcome, sandboxedPdfProvider, type SandboxedPdfFigureOutcome, type SandboxedPdfJob, type SandboxedPdfResult,
 } from "./plugins.js";
 
 /** One PDF of a batch. Paths are absolute and distinct; `documentId` stays on the host and never reaches the VM. */
@@ -29,8 +29,11 @@ export interface SandboxedPdfBatchFile {
   bytes: number;
   /** Intake's page estimate: sizes the batch only, never bills. The measured count arrives on the text event. */
   estimatedPages: number;
-  /** An empty folder the host created for this file's figures, when the job asks for figures. */
-  figures?: { dir: string };
+  /**
+   * An empty folder the host created for this file's figures, when the job asks for figures, and the host's caps for
+   * this file as Doppler limits (SandboxedPdfJob.figures.limits): the provider passes them to `pdftomarkdown`.
+   */
+  figures?: { dir: string; limits?: import("@docslurp/shared").DopplerImageLimits };
 }
 
 export interface SandboxedPdfBatchOptions {
@@ -54,7 +57,8 @@ export type SandboxedPdfBatchEvent =
   /**
    * The file's Markdown is written to its `output`; `pages` is the structural count the VM measured (what bills and is
    * authorized). `processedPages`, when the converter read fewer pages than that (1..pages-1), is the number of page slots in
-   * the Markdown; the host flags the document partially extracted, as for a single-file run.
+   * the Markdown; the host flags the document partially extracted, as for a single-file run. `result.pageFacts` (Doppler's
+   * page facts, SandboxedPdfResult) is accepted like a single-file run's, bounded by those slots: routing evidence only.
    */
   | { index: number; phase: "text"; pages: number; processedPages?: number; result: SandboxedPdfResult }
   /** The file's figures (only when the job asked for them), after its text. `extracted`: `figures.dir` holds them. */
@@ -153,6 +157,8 @@ export function assertSingleScopeBatch(
 }
 
 /** Per-job record of what each file has reported, for event ordering. */
+/** Each file's page count from its text result, which bounds its figure gaps. */
+const textPages = new WeakMap<SandboxedPdfBatchJob, Map<number, number>>();
 const progress = new WeakMap<SandboxedPdfBatchJob, Map<number, "text" | "figures" | "failed">>();
 const textJobs = new WeakMap<SandboxedPdfBatchJob, Map<number, SandboxedPdfJob>>();
 
@@ -195,19 +201,19 @@ export function acceptSandboxedPdfBatchEvent(job: SandboxedPdfBatchJob, raw: unk
       const jobs = textJobs.get(job) ?? new Map<number, SandboxedPdfJob>();
       textJobs.set(job, jobs);
       jobs.set(index as number, single);
+      const pageCounts = textPages.get(job) ?? new Map<number, number>();
+      textPages.set(job, pageCounts);
+      pageCounts.set(index as number, slots);
       seen.set(index as number, job.options.figures ? "text" : "figures");
       return { index: index as number, phase: "text", pages: pages as number, ...(processed === undefined ? {} : { processedPages: processed as number }), result: accepted };
     }
     case "figures": {
       if (!job.options.figures) fail("figures were not requested");
       if (before !== "text") fail("figures before text");
-      const figures = (event as { figures?: { status?: unknown; reason?: unknown; confined?: unknown } }).figures;
-      const confined = typeof figures?.confined === "boolean" ? { confined: figures.confined } : {};
       seen.set(index as number, "figures");
-      if (figures?.status === "extracted") return { index: index as number, phase: "figures", figures: { status: "extracted", ...confined } };
-      // eslint-disable-next-line no-control-regex
-      const reason = typeof figures?.reason === "string" ? figures.reason.replace(/[\u0000-\u001f\u007f-\u009f]+/g, " ").slice(0, 200) : "";
-      return { index: index as number, phase: "figures", figures: { status: "failed", reason: reason || "unspecified", ...confined } };
+      const figures = (event as { figures?: { status?: unknown } }).figures;
+      // No answer, or an unknown one, is a failure (the reason stays telemetry only).
+      return { index: index as number, phase: "figures", figures: parseSandboxedPdfFigureOutcome(figures?.status === undefined ? { ...figures, status: "failed", reason: "unspecified" } : figures, 200, textPages.get(job)?.get(index as number) ?? 0) };
     }
     case "failed": {
       // A file may fail after its text (its figures never came): the text stands, the figures count as failed.

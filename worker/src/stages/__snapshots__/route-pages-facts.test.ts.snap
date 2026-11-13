@@ -1,0 +1,35 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`golden decisions on fixture facts > golden baseline plan on the fixture facts 1`] = `
+{
+  "golden": [
+    [
+      "table:vlm:private/lightonocr-3",
+    ],
+    [
+      "ocr:vlm:openrouter/google/gemini-3.5-flash",
+    ],
+    [
+      "extract-text:vlm:openrouter/google/gemini-3.5-flash",
+    ],
+  ],
+  "router": "baseline",
+}
+`;
+
+exports[`golden decisions on fixture facts > golden heuristic plan on the fixture facts 1`] = `
+{
+  "golden": [
+    [
+      "accept-text:native:accept-text-layer",
+    ],
+    [
+      "accept-text:native:accept-text-layer",
+    ],
+    [
+      "accept-text:native:accept-text-layer",
+    ],
+  ],
+  "router": "heuristic",
+}
+`;

@@ -16,7 +16,7 @@ document or stored by DocSlurp.
 
 ## Model and configuration
 
-Set the server's `OPENROUTER_API_KEY` (existing `OPENROUTER_KEY` alias also works).
+Set the server's `OPENROUTER_API_KEY`.
 No new dependency or database migration is required. The model is pinned to
 `microsoft/mai-transcribe-2` through a request-scoped Mastra `MastraVoice` adapter.
 The adapter implements `listen()` and retains the provider's JSON usage before
