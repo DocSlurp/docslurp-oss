@@ -6,9 +6,12 @@ import { describe, expect, it } from "vitest";
 import { findEmbeddedSpecs, scanBlocks, unwrapCdata } from "../embedded-spec.js";
 import { buildSignatures, extractDeterministicVisuals, inlineSvgs, stripInlineSvgs } from "../index.js";
 import { CHART_EXTRACT_LIMITS, setGuestDeadline } from "../limits.js";
+import { workbookResolver } from "../office-chart-xml.js";
+import { openZipPackage } from "../safe-zip.js";
+import { finiteOrNull } from "../text.js";
 import type { ScanWork } from "../scan.js";
 import { transformParts } from "../svg-path.js";
-import { barPlot, chartXml, docx, genericBar, zip } from "./fixtures.js";
+import { barPlot, chartXml, docx, genericBar, xlsx, zip } from "./fixtures.js";
 
 /** mulberry32. */
 function rng(seed: number) {
@@ -40,7 +43,10 @@ describe("linear raw-text scanners: exactly the old regexes", () => {
   it("script / metadata blocks, CDATA, the HTML <svg> strip and inline SVGs (5,000 seeded random documents)", () => {
     const random = rng(7);
     const tokens = ["<script", "<SCRIPT", "<scripts", "<metadata", " type=\"application/json\"", " src=x", ">", "</script>", "</script >", "</SCRIPT\t>", "</scriptx>", "</metadata>",
-      "<svg", "<svgx", "<SVG", "</svg>", "</svg  >", "</svgx>", "/>", "<![CDATA[", "]]>", "//", " ", "\n", "{\"mark\":\"bar\"}", "a", "<!--", "-->", "<g/>", "x"];
+      "<svg", "<svgx", "<SVG", "</svg>", "</svg  >", "</svgx>", "/>", "<![CDATA[", "]]>", "//", " ", "\n", "{\"mark\":\"bar\"}", "a", "<!--", "-->", "<g/>", "x",
+      // Length-changing and non-ASCII case folds (council r8 M1): "İ".toLowerCase() is two code units; ſ and the Kelvin
+      // sign fold to ASCII under Unicode rules but not under the non-u /i the old regexes used.
+      "İ", "İ<svg", "ſ", "\u212a", "é", "\u{1F600}", "<ſcript", "<\u212aript"];
     for (let n = 0; n < 5000; n++) {
       const text = randomText(random, tokens, 1 + Math.floor(random() * 40));
       expect(scanBlocks(text, Number.MAX_SAFE_INTEGER, { overflow: 0 })).toEqual(oldBlocks(text));
@@ -59,6 +65,19 @@ describe("linear raw-text scanners: exactly the old regexes", () => {
       const raw = randomText(random, tokens, 1 + Math.floor(random() * 20));
       expect(transformParts(raw)).toEqual(oldTransform(raw));
     }
+  });
+});
+
+describe("Turkish capital I before a chart (council r8 M1)", () => {
+  it("keeps every index right: the inline SVG and the embedded spec both export", () => {
+    const vl = JSON.stringify({ $schema: "https://vega.github.io/schema/vega-lite/v5.json", data: { values: [{ a: "x", b: 1 }, { a: "y", b: 2 }] }, mark: "bar", encoding: { x: { field: "a", type: "nominal" }, y: { field: "b", type: "quantitative" } } });
+    const page = (city: string) => `<html><body><p>${city}</p>${genericBar(["a", "b"], [1, 2], 4)}<script type="application/json">${vl}</script></body></html>`;
+    const turkish = extractDeterministicVisuals({ kind: "html", text: page("İstanbul İzmir İSTATİSTİK") });
+    const ascii = extractDeterministicVisuals({ kind: "html", text: page("Istanbul Izmir ISTATISTIK") });
+    expect(turkish.refusals).toEqual([]);
+    expect(turkish.visuals.map((v) => [v.source, v.spec?.kind])).toEqual(ascii.visuals.map((v) => [v.source, v.spec?.kind]));
+    expect(turkish.visuals).toHaveLength(2);
+    expect(stripInlineSvgs("İİİ<svg>x</svg>KEEP")).toBe("İİİKEEP");
   });
 });
 
@@ -121,5 +140,36 @@ describe("deadline per unit and counted losses (council r7 H1, L1)", () => {
     findEmbeddedSpecs(blocks, stats);
     expect(stats.overflow).toBe(10);
     expect(extractDeterministicVisuals({ kind: "html", text: blocks }).overflow).toBe(10);
+  });
+});
+
+describe("Office and number hot paths (council r8 H1)", () => {
+  it("finiteOrNull: the unambiguous pattern accepts exactly what the old one did, and long inputs are refused before any regex", () => {
+    const old = (t: string) => /^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/.test(t);
+    const random = rng(29);
+    for (let n = 0; n < 20_000; n++) {
+      const t = randomText(random, ["1", "0", ".", "-", "+", "e", "E", "x", " "], 1 + Math.floor(random() * 14)).trim();
+      if (t === "") continue;
+      const v = Number(t);
+      expect(finiteOrNull(t)).toBe(old(t) && Number.isFinite(v) ? v : null);
+    }
+    // The council's 300k-digit value: refused by length, never handed to a regex.
+    expect(finiteOrNull(`${"1".repeat(300_000)}x`)).toBeNull();
+    expect(finiteOrNull("1".repeat(513))).toBeNull();
+  });
+
+  it("clamps a declared multi-level category count (ptCount 2^32 − 1) to maxPathVertices", () => {
+    const chart = chartXml({ plots: [barPlot([{ name: "A", cats: ["x", "y"], vals: [1, 2] }])] })
+      .replace(/<c:cat>[\s\S]*?<\/c:cat>/, '<c:cat><c:multiLvlStrRef><c:f>S!$A$1:$A$2</c:f><c:multiLvlStrCache><c:ptCount val="4294967295"/><c:lvl><c:pt idx="0"><c:v>x</c:v></c:pt><c:pt idx="1"><c:v>y</c:v></c:pt></c:lvl></c:multiLvlStrCache></c:multiLvlStrRef></c:cat>');
+    const r = extractDeterministicVisuals({ kind: "office", bytes: docx([chart]) });
+    expect(r.visuals).toHaveLength(1);
+    const points = (r.visuals[0]!.spec as { series?: Array<{ points: unknown[] }> } | null)?.series?.[0]?.points.length ?? 0;
+    expect(points).toBeLessThanOrEqual(CHART_EXTRACT_LIMITS.maxPathVertices);
+  });
+
+  it("charges workbook cells to one per-input budget (workbook-too-large past it)", () => {
+    const rows: Array<Array<string | number>> = [["q", "v"], ...Array.from({ length: 50 }, (_, i) => [`r${i}`, i])];
+    const resolve = workbookResolver(openZipPackage(xlsx("S", rows, chartXml({ plots: [barPlot([{ name: "A", cats: ["x"], vals: [1] }])] }))), { cells: CHART_EXTRACT_LIMITS.maxWorkbookCells - 10 })!;
+    expect(() => resolve("S!$B$1:$B$50")).toThrow(/workbook-too-large/);
   });
 });

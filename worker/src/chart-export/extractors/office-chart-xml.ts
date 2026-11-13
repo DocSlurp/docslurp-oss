@@ -31,7 +31,9 @@ function richText(el: XmlElement | null): string | null {
   const tx = firstChild(el, "tx");
   const rich = firstChild(tx, "rich");
   if (rich) {
-    const paras = descendants(rich, "p").map((p) => descendants(p, "t").map((t) => textContent(t)).join("")).filter((s) => s.trim() !== "");
+    // Innermost paragraphs only (nested <a:p> each joined every <a:t> below it again), each cut before joining.
+    const paras = descendants(rich, "p").filter((p) => descendants(p, "p").length === 0)
+      .map((p) => descendants(p, "t").map((t) => textContent(t).slice(0, 4096)).join("").slice(0, 4096)).filter((s) => s.trim() !== "");
     const s = cleanLabel(paras.join(" "));
     return s || null;
   }
@@ -73,7 +75,8 @@ function readData(el: XmlElement | null, resolve: RefResolver | null): DataRead 
         const source = ref.local === "multiLvlStrRef" ? firstChild(cache, "lvl") : cache;
         if (source) {
           const values = readCache(source, numeric);
-          if (ref.local === "multiLvlStrRef") values.length = Math.max(values.length, Number(val(firstChild(cache, "ptCount")) ?? 0) || 0);
+          // The declared count pads the categories, clamped like readCache's (a declared 2^32 was the loop bound; council r8 H1).
+          if (ref.local === "multiLvlStrRef") values.length = Math.min(Math.max(values.length, Number(val(firstChild(cache, "ptCount")) ?? 0) || 0), CHART_EXTRACT_LIMITS.maxPathVertices);
           return { values, formatCode: textContent(firstChild(cache, "formatCode")) || null, resolved: false, missing: false };
         }
       }
@@ -171,6 +174,8 @@ export function parseChartXml(xml: string, resolve: RefResolver | null = null): 
       holeOrStyle: val(firstChild(plotEl, "holeSize")),
     };
     for (const ser of elementChildren(plotEl, "ser")) {
+      // Inside one chart part: past the deadline the part is refused (`guest-deadline`) and counted, not run on.
+      if (pastGuestDeadline()) throw new ExtractLimitError("guest-deadline");
       if (++totalSeries > 64) { penalty += 0.1; break; }
       const name = (() => {
         const tx = readData(firstChild(ser, "tx"), resolve);
@@ -187,7 +192,7 @@ export function parseChartXml(xml: string, resolve: RefResolver | null = null): 
       const catValues = cats && !cats.missing ? cats.values : [];
       if (catValues.length && catValues.length !== vals.values.length) mismatched = true;
       const dateCats = catAxis?.kind === "dateAx" || isDateFormat(cats?.formatCode ?? null);
-      const n = Math.max(vals.values.length, catValues.length);
+      const n = Math.min(Math.max(vals.values.length, catValues.length), CHART_EXTRACT_LIMITS.maxPathVertices);
       const points: DraftSeries["points"] = [];
       for (let k = 0; k < n; k++) {
         const rawY = vals.values[k];
@@ -295,7 +300,13 @@ function relsPathFor(part: string): string {
 }
 
 /** A resolver over a workbook package's sheets. Caches parsed sheets; single row/column ranges only. */
-export function workbookResolver(pkg: ZipPackage): RefResolver | null {
+/** Workbook cells parsed for one input, every embedded workbook included (council r8 H1: 8 × 8M cells ran out of heap). */
+export interface CellBudget { cells: number }
+const cellBudgets = new WeakMap<ZipPackage, CellBudget>();
+/** The input's one cell budget, keyed by its outer package. */
+export const cellBudgetFor = (pkg: ZipPackage): CellBudget => { let b = cellBudgets.get(pkg); if (!b) { b = { cells: 0 }; cellBudgets.set(pkg, b); } return b; };
+
+export function workbookResolver(pkg: ZipPackage, budget: CellBudget = cellBudgetFor(pkg)): RefResolver | null {
   if (!pkg.names.includes("xl/workbook.xml")) return null;
   const wb = rootElement(parseXml(pkg.readText("xl/workbook.xml")));
   if (!wb) return null;
@@ -322,8 +333,13 @@ export function workbookResolver(pkg: ZipPackage): RefResolver | null {
     let cells = cache.get(part);
     if (cells) return cells;
     cells = new Map();
+    // A spent budget refuses before parsing another sheet: parsing is the costly part, not the cells.
+    if (budget.cells >= CHART_EXTRACT_LIMITS.maxWorkbookCells) throw new ExtractLimitError("workbook-too-large");
+    if (pastGuestDeadline()) throw new ExtractLimitError("guest-deadline");
     const root = rootElement(parseXml(pkg.readText(part)));
     for (const c of root ? descendants(root, "c") : []) {
+      if (++budget.cells > CHART_EXTRACT_LIMITS.maxWorkbookCells) throw new ExtractLimitError("workbook-too-large");
+      if ((budget.cells & 4095) === 0 && pastGuestDeadline()) throw new ExtractLimitError("guest-deadline");
       const ref = c.attrs.r;
       if (!ref) continue;
       const t = c.attrs.t;
@@ -351,7 +367,8 @@ export function workbookResolver(pkg: ZipPackage): RefResolver | null {
     const count = Math.abs(c2 - c1) + Math.abs(r2 - r1) + 1;
     if (count > 2000) return null;
     let cells: Map<string, CellValue>;
-    try { cells = sheetCells(part); } catch { return null; }
+    // A broken sheet resolves to nothing; a budget or deadline stop refuses the chart part (counted), not silently.
+    try { cells = sheetCells(part); } catch (error) { if (error instanceof ExtractLimitError) throw error; return null; }
     const out: CellValue[] = [];
     for (let k = 0; k < count; k++) {
       const col = c1 === c2 ? c1 : Math.min(c1, c2) + k;
@@ -405,12 +422,21 @@ function sheetOfChart(pkg: ZipPackage): Map<string, string> {
 }
 
 /** Chart parts of an OOXML package (DOCX/PPTX/XLSX bytes). Nested embedded workbooks are opened one level deep. */
-export function extractOfficeCharts(bytes: Uint8Array): { visuals: DeterministicVisual[]; refusals: DeterministicRefusal[]; pkg: ZipPackage; partsDropped: number; deadlineParts: number } {
+/** Where `extractOfficeCharts` sends each chart part's result, and how each part runs (one unit per part). */
+export interface OfficeChartSink {
+  unit(part: string, run: () => void): void;
+  /** Past the guest deadline (resume-aware); defaults to `pastGuestDeadline`. */
+  deadline?(): boolean;
+  visual(v: DeterministicVisual): void;
+  refusal(r: DeterministicRefusal): void;
+}
+
+const collectingSink = (visuals: DeterministicVisual[], refusals: DeterministicRefusal[]): OfficeChartSink => ({ unit: (_, run) => run(), visual: (v) => visuals.push(v), refusal: (r) => refusals.push(r) });
+
+export function extractOfficeCharts(bytes: Uint8Array, sink: OfficeChartSink = collectingSink([], [])): { pkg: ZipPackage; partsDropped: number; deadlineParts: number } {
   const pkg = openZipPackage(bytes);
   const parts = pkg.names.filter((n) => CHART_PART.test(n)).sort((a, b) => a.localeCompare(b, "en", { numeric: true }));
-  const visuals: DeterministicVisual[] = [];
-  const refusals: DeterministicRefusal[] = [];
-  if (!parts.length) return { visuals, refusals, pkg, partsDropped: 0, deadlineParts: 0 };
+  if (!parts.length) return { pkg, partsDropped: 0, deadlineParts: 0 };
   // Chart parts past the package cap are counted by the caller (package-part-limit), never silently skipped.
   const partsDropped = Math.max(0, parts.length - CHART_EXTRACT_LIMITS.maxPartsPerPackage);
   let deadlineParts = 0;
@@ -419,8 +445,8 @@ export function extractOfficeCharts(bytes: Uint8Array): { visuals: Deterministic
   let ownResolver: RefResolver | null | undefined;
   const kept = parts.slice(0, CHART_EXTRACT_LIMITS.maxPartsPerPackage);
   for (const [p, part] of kept.entries()) {
-    if (pastGuestDeadline()) { deadlineParts = kept.length - p; break; }
-    try {
+    if (sink.deadline ? sink.deadline() : pastGuestDeadline()) { deadlineParts = kept.length - p; break; }
+    sink.unit(part, () => { try {
       const resolver: RefResolver = (formula) => {
         if (ownResolver === undefined) { try { ownResolver = workbookResolver(pkg); } catch { ownResolver = null; } }
         const own = ownResolver?.(formula);
@@ -439,20 +465,20 @@ export function extractOfficeCharts(bytes: Uint8Array): { visuals: Deterministic
         v.confidence = fin.spec ? clamp01(result.confidence - (fin.truncated ? 0.1 : 0)) : 0;
         v.reason = fin.reason ?? (fin.truncated ? "truncated" : result.reason);
       }
-      visuals.push(v);
+      sink.visual(v);
     } catch (error) {
-      refusals.push({ locator: part, reason: refusalReason(error) });
-    }
+      sink.refusal({ locator: part, reason: refusalReason(error) });
+    } });
   }
-  if (parts.length > CHART_EXTRACT_LIMITS.maxPartsPerPackage) refusals.push({ locator: "package", reason: "chart-part-limit" });
-  return { visuals, refusals, pkg, partsDropped, deadlineParts };
+  if (parts.length > CHART_EXTRACT_LIMITS.maxPartsPerPackage) sink.refusal({ locator: "package", reason: "chart-part-limit" });
+  return { pkg, partsDropped, deadlineParts };
 }
 
-const embeddedCache = new WeakMap<ZipPackage, Map<string, RefResolver | null>>();
+const embeddedCache = new WeakMap<ZipPackage, { byPart: Map<string, RefResolver | null>; byWorkbook: Map<string, RefResolver | null> }>();
 function embeddedWorkbookResolver(pkg: ZipPackage, chartPart: string): RefResolver | null {
-  let byPart = embeddedCache.get(pkg);
-  if (!byPart) { byPart = new Map(); embeddedCache.set(pkg, byPart); }
-  if (byPart.has(chartPart)) return byPart.get(chartPart)!;
+  let cache = embeddedCache.get(pkg);
+  if (!cache) { cache = { byPart: new Map(), byWorkbook: new Map() }; embeddedCache.set(pkg, cache); }
+  if (cache.byPart.has(chartPart)) return cache.byPart.get(chartPart)!;
   let resolver: RefResolver | null = null;
   try {
     const root = rootElement(parseXml(pkg.readText(chartPart)));
@@ -461,11 +487,14 @@ function embeddedWorkbookResolver(pkg: ZipPackage, chartPart: string): RefResolv
     const target = rid ? relsMap(pkg, relsPathFor(chartPart)).get(rid)?.target : undefined;
     const embedded = target ? resolvePartPath(chartPart, target) : null;
     if (embedded && /\.xlsx$/i.test(embedded) && pkg.names.includes(embedded)) {
-      resolver = workbookResolver(openZipPackage(pkg.read(embedded)));
+      // One resolver per embedded workbook, shared by every chart part that points at it, and charged to the input's
+      // one cell budget: a workbook is opened and its sheets parsed once per package, not once per chart part.
+      if (!cache.byWorkbook.has(embedded)) cache.byWorkbook.set(embedded, workbookResolver(openZipPackage(pkg.read(embedded)), cellBudgetFor(pkg)));
+      resolver = cache.byWorkbook.get(embedded)!;
     }
   } catch (error) {
     if (!(error instanceof ExtractLimitError)) resolver = null;
   }
-  byPart.set(chartPart, resolver);
+  cache.byPart.set(chartPart, resolver);
   return resolver;
 }

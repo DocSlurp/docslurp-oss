@@ -222,7 +222,11 @@ export function createVmDeterministicVisualExtractor(deps: VmExtractorDeps): Det
       log(`[chart-export] parser VM skipped ${context} kind=${sourceKind} reason=inline-${inline.status}${inline.status === "ok" ? ` visuals=${inline.result.visuals.length}` : ` detail=${inline.reason}`}`);
     }
     const reason = sourceKind && !useInline ? (inline ? "inline-result-too-large" : sourceRunReason(sourceKind, input.signals)) : null;
-    if (sourceKind && document.sourceKey && reason && await admittedToVm()) {
+    const sourceAdmitted = !!(sourceKind && document.sourceKey && reason) && await admittedToVm();
+    // A source the free-VM cap turned away is recorded, not just logged (council r8 L1).
+    if (sourceKind && document.sourceKey && reason && !sourceAdmitted) deferred.push({ input: "source", svgIndex: 0, count: 1, reason: "vm-cap", pageNumber: null, figureId: null });
+    if (sourceAdmitted && sourceKind && document.sourceKey && reason) {
+      let sourceRan = false;
       const path = await stageSourceFile(
         deps.storage,
         {
@@ -238,11 +242,14 @@ export function createVmDeterministicVisualExtractor(deps: VmExtractorDeps): Det
           results.push(result);
           for (const visual of result.visuals) partials.push(toPartial(visual, null));
           for (const d of result.deferred ?? []) deferred.push({ input: "source", svgIndex: d.svgIndex, count: d.count, reason: d.reason, pageNumber: null, figureId: null });
+          sourceRan = true;
         });
       } finally {
         await cleanupTempFile(path).catch(() => undefined);
       }
-    } else if (sourceKind && !useInline) {
+      // A refused or failed run loses the whole source: recorded so the deferred pass can retry it (council r8 L1).
+      if (!sourceRan) deferred.push({ input: "source", svgIndex: 0, count: 1, reason: "guest-unavailable", pageNumber: null, figureId: null });
+    } else if (sourceKind && !useInline && !(document.sourceKey && reason)) {
       log(`[chart-export] parser VM skipped ${context} kind=${sourceKind} reason=no-chart-signal`);
     }
 
@@ -297,6 +304,7 @@ export function createVmDeterministicVisualExtractor(deps: VmExtractorDeps): Det
     const figures = await svgFigures(deps, input.artifacts.dopplerFiguresIndexUri, Math.max(1, document.pageCount), input.dopplerFiguresIndex);
     const sent = figures.length > 0 && await admittedToVm() ? figures.slice(0, MAX_SVG_FIGURES_PER_DOCUMENT) : [];
     const staged: Array<{ path: string; page: number; bbox: BBox | null; id: string }> = [];
+    const unavailable = new Set<string>();
     try {
       for (const figure of sent) {
         if (guestDown) break;
@@ -305,7 +313,7 @@ export function createVmDeterministicVisualExtractor(deps: VmExtractorDeps): Det
         const uri = slot ? input.artifacts.artifactUri?.(slot) ?? null : null;
         const key = uri ? keyFromStorageUri(uri, deps.storage.bucket) : null;
         // A figure with no readable file is recorded (council r7 L1), not silently skipped.
-        if (!key) { deferred.push({ input: "doppler-figure", svgIndex: 0, count: 1, reason: "figure-unavailable", pageNumber: figure.page, figureId: figure.id }); continue; }
+        if (!key) { unavailable.add(figure.id); deferred.push({ input: "doppler-figure", svgIndex: 0, count: 1, reason: "figure-unavailable", pageNumber: figure.page, figureId: figure.id }); continue; }
         staged.push({ path: await deps.storage.downloadToTempFile(key, "docslurp-chart-figure-*.svg"), page: figure.page, bbox: figureBox(figure.bbox), id: figure.id });
       }
       if (staged.length > 0) {
@@ -324,9 +332,14 @@ export function createVmDeterministicVisualExtractor(deps: VmExtractorDeps): Det
       await Promise.all(staged.map((s) => cleanupTempFile(s.path).catch(() => undefined)));
     }
     if (figures.length > sent.length && !guestDown && !capLogged) log(`[chart-export] svg figures capped ${context} figures=${figures.length} sent=${sent.length}`);
-    // Figures past the per-document batch cap: recorded one by one, so the deferred pass can read each by its id. (Not when
-    // the org's free-VM cap refused the run: then nothing was sent for another reason, logged above.)
-    if (!capLogged) for (const figure of figures.slice(sent.length)) deferred.push({ input: "doppler-figure", svgIndex: 0, count: 1, reason: "figure-batch-limit", pageNumber: figure.page, figureId: figure.id });
+    // Figures not run, recorded one by one so the deferred pass can read each by its id (council r7 L1, r8 L1): past
+    // the per-document batch cap, refused by the org's free-VM cap, or not run because the guest was down.
+    const ran = new Set(staged.map((s) => s.id));
+    for (const [k, figure] of figures.entries()) {
+      if (ran.has(figure.id) || unavailable.has(figure.id)) continue;
+      const reason = capLogged && sent.length === 0 ? "vm-cap" : guestDown ? "guest-unavailable" : k >= sent.length ? "figure-batch-limit" : null;
+      if (reason) deferred.push({ input: "doppler-figure", svgIndex: 0, count: 1, reason, pageNumber: figure.page, figureId: figure.id });
+    }
 
     // Per reason, so the log never adds SVGs, parts and visuals together (council r7 I1).
     if (deferred.length) {

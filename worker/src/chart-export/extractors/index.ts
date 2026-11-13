@@ -1,6 +1,6 @@
 import { CHART_EXTRACT_LIMITS, ExtractLimitError, pastGuestDeadline, refusalReason } from "./limits.js";
 import { findEmbeddedSpecs, findEmbeddedSpecsInElements, type EmbeddedSpecHit } from "./embedded-spec.js";
-import { indexFrom, type ScanWork } from "./scan.js";
+import { asciiLower, indexFrom, type ScanWork } from "./scan.js";
 import { extractOfficeCharts } from "./office-chart-xml.js";
 import { openZipPackage } from "./safe-zip.js";
 import { clamp01, finalizeChart } from "./spec-utils.js";
@@ -56,6 +56,29 @@ export function wordsAsTexts(words: readonly SvgWord[] | undefined): TextPrim[] 
 export interface DeterministicVisualOptions {
   /** Also extract diagrams (Mermaid / Graphviz SVG). Default true. */
   diagrams?: boolean;
+  /**
+   * Unit checkpoints, for the guest's crash and timeout containment (scripts/chart-export-extract.mjs). A unit is one
+   * SVG's analysis, one HTML / JSON embedded-spec scan, or one Office chart part, numbered in document order. Each unit
+   * reports what it produced when it finishes; a later worker skips units already finished or failed, keeping SVG
+   * ordinals and the visual cap where they were. Omitted (tests, in-process runs), extraction runs straight through.
+   */
+  units?: UnitControl;
+}
+
+/** What one unit produced: its visuals and refusals, deferral counts it added, and overflow it added. */
+export interface UnitDelta {
+  visuals: DeterministicVisual[];
+  refusals: DeterministicRefusal[];
+  deferred: DeterministicDeferral[];
+  overflow: number;
+}
+
+export interface UnitControl {
+  /** Units not to run again (finished by an earlier worker, or failed in it), with the visuals each produced. */
+  skip: ReadonlyMap<number, number>;
+  /** A unit is about to run: `svgIndex` is its SVG ordinal (or the next one, for a non-SVG unit). */
+  onStart(id: number, locator: string, svgIndex: number, svg: boolean): void;
+  onDone(id: number, delta: UnitDelta): void;
 }
 
 export type { DeterministicVisual, DeterministicVisualResult, DeterministicRefusal, DeterministicDeferral } from "./types.js";
@@ -86,6 +109,42 @@ interface Acc {
   current: number | null;
   /** Embedded-spec candidates and refusals past a per-input list cap or the deadline (counted, never silent). */
   overflow: number;
+  /** Unit checkpoints (see `DeterministicVisualOptions.units`), the next unit's number, and visuals of skipped units. */
+  units: UnitControl | null;
+  unitSeq: number;
+  baseVisuals: number;
+  /** First unit after every skipped one: deadline checks before it would miscount finished units as lost. */
+  resumeFrom: number;
+}
+
+/** Past the guest deadline, once past the units an earlier worker already finished or failed. */
+const deadlineHere = (acc: Acc) => acc.unitSeq >= acc.resumeFrom && pastGuestDeadline();
+
+/**
+ * Run one unit under the unit checkpoints, if any: skip it when an earlier worker finished or failed it (an SVG unit
+ * still takes its ordinal), otherwise run it and report what it added.
+ */
+function runUnit(acc: Acc, locator: string, svg: boolean, fn: () => void) {
+  const ctl = acc.units;
+  if (!ctl) return fn();
+  const id = acc.unitSeq++;
+  const skipped = ctl.skip.get(id);
+  if (skipped !== undefined) {
+    if (svg) acc.svgs++;
+    acc.baseVisuals += skipped;
+    if (acc.visuals.length + acc.baseVisuals >= CHART_EXTRACT_LIMITS.maxVisuals) acc.full = true;
+    return;
+  }
+  const v0 = acc.visuals.length, r0 = acc.refusals.length, o0 = acc.overflow;
+  const d0 = acc.deferred.map((d) => ({ ...d }));
+  ctl.onStart(id, locator, acc.svgs, svg);
+  fn();
+  const deferred: DeterministicDeferral[] = [];
+  acc.deferred.forEach((d, i) => {
+    const before = i < d0.length && d0[i]!.reason === d.reason ? d0[i]!.count : 0;
+    if (d.count > before) deferred.push({ svgIndex: d.svgIndex, count: d.count - before, reason: d.reason });
+  });
+  ctl.onDone(id, { visuals: acc.visuals.slice(v0), refusals: acc.refusals.slice(r0), deferred, overflow: acc.overflow - o0 });
 }
 
 /**
@@ -107,7 +166,7 @@ function addDeferral(acc: Acc, reason: DeferralReason, count: number, advanceSvg
 function pushVisual(acc: Acc, v: DeterministicVisual) {
   // At the output cap a visual is counted as lost to it (and the rest of the input is counted, not analysed), instead
   // of aborting the input with one uncounted refusal (council r6 L1).
-  if (acc.visuals.length >= CHART_EXTRACT_LIMITS.maxVisuals) {
+  if (acc.visuals.length + acc.baseVisuals >= CHART_EXTRACT_LIMITS.maxVisuals) {
     acc.full = true;
     addDeferral(acc, "visual-limit", 1, false, acc.current ?? acc.svgs);
     return;
@@ -166,45 +225,47 @@ function handleSvg(text: string, locator: string, options: DeterministicVisualOp
   // cap, or past the guest's deadline (a backstop below the host timeout, so the input returns what it has).
   if (acc.svgs >= CHART_EXTRACT_LIMITS.maxSvgsPerInput) return addDeferral(acc, DEFERRED_SVG_REASON, 1, true);
   if (acc.full) return addDeferral(acc, "visual-limit", 1, true);
-  if (pastGuestDeadline()) return addDeferral(acc, "guest-deadline", 1, true);
-  acc.current = acc.svgs++;
-  try {
-    // Density gate, first check: raw bytes (the rest run while the scene is built).
-    if (text.length > CHART_EXTRACT_LIMITS.maxSvgBytes) throw new ExtractLimitError("svg-too-large");
-    const doc = parseXml(text, { keepComments: true });
-    // Density gate: elements, attribute and text sizes, before the diagram (Mermaid / Graphviz) and geometry paths.
-    gateDocument(doc);
-    const before = acc.visuals.length;
-    // Only the SVG's parsed <script> / <metadata> elements, never raw text (a comment could hide thousands of unclosed
-    // `<script` starts; council r7 H1).
-    const stats = { overflow: 0 };
-    embeddedHits(findEmbeddedSpecsInElements(doc as unknown as XmlElement, stats), `${locator}/`, acc);
-    acc.overflow += stats.overflow;
-    if (acc.visuals.length > before && acc.visuals.slice(before).some((v) => v.spec)) return;
-    const sigs = buildSignatures(text);
-    const diagram = detectDiagramGenerator(doc, sigs);
-    if (diagram) {
-      if (options.diagrams === false) return;
-      const r = diagram === "graphviz" ? graphvizDiagram(doc) : mermaidFlowchart(doc);
-      const v = emptyVisual("svg-geometry", locator);
-      v.kind = "diagram";
-      v.generator = r.generator;
-      v.spec = r.spec;
-      v.confidence = r.spec ? clamp01(r.confidence) : 0;
-      v.reason = r.spec ? r.reason : r.reason ?? "diagram-invalid";
-      pushVisual(acc, v);
-      return;
+  if (deadlineHere(acc)) return addDeferral(acc, "guest-deadline", 1, true);
+  runUnit(acc, locator, true, () => {
+    acc.current = acc.svgs++;
+    try {
+      // Density gate, first check: raw bytes (the rest run while the scene is built).
+      if (text.length > CHART_EXTRACT_LIMITS.maxSvgBytes) throw new ExtractLimitError("svg-too-large");
+      const doc = parseXml(text, { keepComments: true });
+      // Density gate: elements, attribute and text sizes, before the diagram (Mermaid / Graphviz) and geometry paths.
+      gateDocument(doc);
+      const before = acc.visuals.length;
+      // Only the SVG's parsed <script> / <metadata> elements, never raw text (a comment could hide thousands of unclosed
+      // `<script` starts; council r7 H1).
+      const stats = { overflow: 0 };
+      embeddedHits(findEmbeddedSpecsInElements(doc as unknown as XmlElement, stats), `${locator}/`, acc);
+      acc.overflow += stats.overflow;
+      if (acc.visuals.length > before && acc.visuals.slice(before).some((v) => v.spec)) return;
+      const sigs = buildSignatures(text);
+      const diagram = detectDiagramGenerator(doc, sigs);
+      if (diagram) {
+        if (options.diagrams === false) return;
+        const r = diagram === "graphviz" ? graphvizDiagram(doc) : mermaidFlowchart(doc);
+        const v = emptyVisual("svg-geometry", locator);
+        v.kind = "diagram";
+        v.generator = r.generator;
+        v.spec = r.spec;
+        v.confidence = r.spec ? clamp01(r.confidence) : 0;
+        v.reason = r.spec ? r.reason : r.reason ?? "diagram-invalid";
+        pushVisual(acc, v);
+        return;
+      }
+      const svgRoot = doc.children.find((c) => c.type === "element" && c.local === "svg");
+      if (!svgRoot || svgRoot.type !== "element") throw new ExtractLimitError("svg-no-root");
+      const v = analyzeGeometry(prepareSvgChart(svgRoot, wordsAsTexts(words)), locator);
+      if (v) pushVisual(acc, v);
+    } catch (error) {
+      if (error instanceof ExtractLimitError && error.reason === "visual-limit") throw error;
+      acc.refusals.push({ locator, reason: refusalReason(error) });
+    } finally {
+      acc.current = null;
     }
-    const svgRoot = doc.children.find((c) => c.type === "element" && c.local === "svg");
-    if (!svgRoot || svgRoot.type !== "element") throw new ExtractLimitError("svg-no-root");
-    const v = analyzeGeometry(prepareSvgChart(svgRoot, wordsAsTexts(words)), locator);
-    if (v) pushVisual(acc, v);
-  } catch (error) {
-    if (error instanceof ExtractLimitError && error.reason === "visual-limit") throw error;
-    acc.refusals.push({ locator, reason: refusalReason(error) });
-  } finally {
-    acc.current = null;
-  }
+  });
 }
 
 /** Elements whose text the walk never reads per frame (signatures slice it; embedded specs have their own limits). */
@@ -281,7 +342,7 @@ function nextSvgTag(lower: string, from: number, cursor: SvgTagCursor, work?: Sc
  * pass. Once an `<svg` has no `</svg>` after it, none later can either, so the rest is kept as is.
  */
 export function stripInlineSvgs(html: string, work?: ScanWork): string {
-  const lower = html.toLowerCase();
+  const lower = asciiLower(html);
   let out = "";
   let i = 0;
   for (;;) {
@@ -307,7 +368,7 @@ export function inlineSvgs(html: string, max = CHART_EXTRACT_LIMITS.maxPartsPerP
   // The tags `/<(\/?)svg\b[^>]*?(\/?)>/gi` matches, found with indexOf (linear; that regex rescans to the end for every
   // start with no `>` after it, council r7 H1). A start with no `>` after it ends the scan: no later tag can match.
   const out: string[] = [];
-  const lower = html.toLowerCase();
+  const lower = asciiLower(html);
   let depth = 0;
   let start = -1;
   const cursor: SvgTagCursor = { open: -2, close: -2 };
@@ -334,18 +395,19 @@ export function inlineSvgs(html: string, max = CHART_EXTRACT_LIMITS.maxPartsPerP
 
 function handleHtml(text: string, prefix: string, options: DeterministicVisualOptions, acc: Acc) {
   if (text.length > CHART_EXTRACT_LIMITS.maxTextBytes) { acc.refusals.push({ locator: prefix || "html", reason: "html-too-large" }); return; }
-  try {
-    // Deadline per part: past it the part's embedded specs are counted, not scanned (its SVGs defer on their own).
-    if (pastGuestDeadline()) acc.overflow++;
-    else {
-      const stats = { overflow: 0 };
-      embeddedHits(findEmbeddedSpecs(stripInlineSvgs(text), stats), prefix, acc);
-      acc.overflow += stats.overflow;
+  runUnit(acc, prefix || "html", false, () => {
+    try {
+      // Deadline per part: past it the part's embedded specs are counted, not scanned (its SVGs defer on their own).
+      if (deadlineHere(acc)) acc.overflow++;
+      else {
+        const stats = { overflow: 0 };
+        embeddedHits(findEmbeddedSpecs(stripInlineSvgs(text), stats), prefix, acc);
+        acc.overflow += stats.overflow;
+      }
+    } catch (error) {
+      acc.refusals.push({ locator: prefix || "html", reason: refusalReason(error) });
     }
-  } catch (error) {
-    if (error instanceof ExtractLimitError && error.reason === "visual-limit") throw error;
-    acc.refusals.push({ locator: prefix || "html", reason: refusalReason(error) });
-  }
+  });
   const dropped = { count: 0 };
   inlineSvgs(text, CHART_EXTRACT_LIMITS.maxPartsPerPackage, dropped).forEach((svg, k) => handleSvg(svg, `${prefix}svg[${k}]`, options, acc));
   // Inline SVGs past the per-part cap: counted as an ordinal range after this part's analysed ones (council r6 L1).
@@ -353,7 +415,8 @@ function handleHtml(text: string, prefix: string, options: DeterministicVisualOp
 }
 
 export function extractDeterministicVisuals(input: DeterministicVisualInput, options: DeterministicVisualOptions = {}): DeterministicVisualResult {
-  const acc: Acc = { visuals: [], refusals: [], deferred: [], svgs: 0, full: false, current: null, overflow: 0 };
+  const skipIds = options.units ? [...options.units.skip.keys()] : [];
+  const acc: Acc = { visuals: [], refusals: [], deferred: [], svgs: 0, full: false, current: null, overflow: 0, units: options.units ?? null, unitSeq: 0, baseVisuals: 0, resumeFrom: skipIds.length ? Math.max(...skipIds) + 1 : 0 };
   // Package parts past maxPartsPerPackage, recorded after the analysed parts (so svgIndex is the next ordinal).
   let partsDropped = 0;
   try {
@@ -362,21 +425,25 @@ export function extractDeterministicVisuals(input: DeterministicVisualInput, opt
       case "html": handleHtml(input.text, "", options, acc); break;
       case "json":
         if (input.text.length > CHART_EXTRACT_LIMITS.maxTextBytes) acc.refusals.push({ locator: "json", reason: "json-too-large" });
-        else { const stats = { overflow: 0 }; embeddedHits(findEmbeddedSpecs(input.text, stats), "", acc); acc.overflow += stats.overflow; }
+        else runUnit(acc, "json", false, () => { const stats = { overflow: 0 }; embeddedHits(findEmbeddedSpecs(input.text, stats), "", acc); acc.overflow += stats.overflow; });
         break;
       case "office": {
-        const { visuals, refusals, pkg, partsDropped: chartParts, deadlineParts } = extractOfficeCharts(input.bytes);
+        // Each chart part is its own unit; its visual goes straight to the output in document order.
+        const { pkg, partsDropped: chartParts, deadlineParts } = extractOfficeCharts(input.bytes, {
+          unit: (part, fn) => runUnit(acc, part, false, fn),
+          deadline: () => deadlineHere(acc),
+          visual: (v) => pushVisual(acc, v),
+          refusal: (r) => acc.refusals.push(r),
+        });
         // Chart XML parts past the package cap, and any the deadline stopped: counted (council r7 L1).
         addDeferral(acc, "package-part-limit", chartParts, false);
         addDeferral(acc, "guest-deadline-part", deadlineParts, false);
-        visuals.forEach((v) => pushVisual(acc, v));
-        acc.refusals.push(...refusals);
         const allMedia = pkg.names.filter((n) => /^(word|ppt|xl)\/media\/[^/]+\.svg$/i.test(n));
         const media = allMedia.slice(0, CHART_EXTRACT_LIMITS.maxPartsPerPackage);
         partsDropped = allMedia.length - media.length;
 
         for (const [p, name] of media.entries()) {
-          if (pastGuestDeadline()) { addDeferral(acc, "guest-deadline-part", media.length - p, false); break; }
+          if (deadlineHere(acc)) { addDeferral(acc, "guest-deadline-part", media.length - p, false); break; }
           try { handleSvg(pkg.readText(name), name, options, acc); } catch (error) {
             if (error instanceof ExtractLimitError && error.reason === "visual-limit") throw error;
             acc.refusals.push({ locator: name, reason: refusalReason(error) });
@@ -391,7 +458,7 @@ export function extractDeterministicVisuals(input: DeterministicVisualInput, opt
         partsDropped = allParts.length - parts.length;
 
         for (const [p, name] of parts.entries()) {
-          if (pastGuestDeadline()) { addDeferral(acc, "guest-deadline-part", parts.length - p, false); break; }
+          if (deadlineHere(acc)) { addDeferral(acc, "guest-deadline-part", parts.length - p, false); break; }
           try {
             const text = pkg.readText(name);
             if (/\.svg$/i.test(name)) handleSvg(text, name, options, acc);

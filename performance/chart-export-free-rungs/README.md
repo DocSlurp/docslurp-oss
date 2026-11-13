@@ -193,36 +193,74 @@ What remains:
   `guestDown` and cost the document every free-rung visual. The deadline is a backstop: it fires only far outside
   every gate's measured range, so ordinary output stays deterministic.
 
-**Measured on the parser-VM shape** (council round 7 head). Modal `runtime: "vm"`, 2 vCPU, 4 GiB, network blocked,
-Node 24.22.3. Each input runs in a fresh process exactly as the production guest is run: with
-`--disallow-code-generation-from-strings`, V8's default heap, and the guest's 45 s deadline, via
-`marker-cap-bench.mjs` modes. Several rows ran three times; ranges show VM placement noise.
+### Crash and timeout containment per unit (council round 8, structural)
 
-| input | size | wall time | peak RSS | exported | skipped / counted | before |
-|---|--:|--:|--:|--:|--:|---|
-| r7: SVG whose comment holds `<script ` × 8k / × 80k | 0.06 / 0.64 MB | 5 ms | 60 MB | 0 | 0 (comments are never scanned) | 0.41 s / 20.5 s |
-| r7: EPUB: bar chart, 3 such 640 KiB SVGs, bar chart | 1.9 MB | 18 ms | 69 MB | 2 | 0 | 54 s |
-| r7: HTML, `<svg ` × 200k / `<script>` × 125k | 1 MB | 8 / 7 ms | 63 MB | 0 | 0 | 23.5 / 13.3 s |
-| r7: HTML, a JSON script then `<svg ` × 400k | 2 MB | 16 ms | 66 MB | 0 | 0 | **killed at 60 s** |
-| r7: EPUB of 200 parts of ~300 KB unclosed `<script>` | 59 MB | 0.40 s | 319 MB | 0 | 0 | ~ timeout (extrapolated) |
-| r7 L2: ~93k empty comments × 999 `<use>` / EPUB of 90 + 2 bar charts | 0.66 / 59 MB | 55 ms / 1.5 s | 89 / 497 MB | 0 / 2 | 1 / 90 `svg-use-bomb` | 234 ms each |
-| r6: EPUB of 8 `rgb(`-style SVGs / 9 `x`-split SVGs | 0.16 / 5.9 MB | 39 / 22 ms | 87 MB | 0 | 8 / 9 skipped | > 75 s |
-| r6: EPUB of 300 deep-nesting SVGs (no axis, all analysed) | 61 MB | 3.2–6.9 s | 500–503 MB | 0 | 0 | > 75 s |
-| r5: EPUB of 20 hidden-children SVGs | 13 MB | 0.47 s | 262 MB | 0 | 20 `svg-too-dense` | 129 s |
-| r5: EPUB of 200 hostile Mermaid SVGs | 56 MB | 1.5 s | 448 MB | 200 | 0 | ~230 s |
-| EPUB, 400 text-heavy at-cap SVGs | 41 MB | **5.8–12.1 s** | 367–376 MB | 256 | 144 counted `visual-limit` | |
-| EPUB, 400 rect at-cap SVGs | 57 MB | 3.9 s | **539 MB** | 256 | 144 counted `visual-limit` | |
-| 100 ordinary bar charts | 0.07 MB | 43 ms | 81 MB | 100 | 0 | same |
+Rounds 5–8 each found one more hot path. Rather than keep chasing them one at a time, the guest now contains every
+unit, so no gate-passing input can take the guest down and cost the document its other visuals.
 
-- **Worst case measured:** 12.1 s and 539 MB peak. Both are inside the 45 s guest deadline and the 60 s host timeout.
-- **Memory:** 539 MB is about 13% of the 4 GiB parser VM. The production guest runs with V8's default heap, not the
-  1 GiB cap earlier rounds' benches used, so this table matches production (council r7 I2).
-- **Fully accounted for:** every input completes. Every SVG, part and candidate is exported, skipped with a closed
-  reason, or counted in a deferral range or `overflow`.
-- **Known, not a bug (council r7 I3):** draw.io exports carry the whole diagram in the root `content` attribute, often
-  over 32 KiB, and a data URI under a non-standard prefix (`ns1:href`) is not exempt. Both are skipped as
-  `svg-too-dense`, counted and logged. Neither yields a visual today, because there is no draw.io diagram path.
-- **Superseded:** round 6's "5.9 s" was a single run, and round 7 found raw-scan shapes that were killed at 60 s.
+- **Worker per input.** `scripts/chart-export-extract.mjs` runs each input (the source document, or each Doppler
+  figure of a batch) in a `worker_thread` (`scripts/chart-export-worker.mjs`).
+  - Each worker gets `resourceLimits` with a 1,536 MB old generation, leaving the 4 GiB VM ample room.
+  - Workers keep the V8 flag (`--disallow-code-generation-from-strings` is process-wide) and zod `jitless` (the
+    bundle's first import).
+- **Units stream as they finish.** The extractor numbers its units in document order: an SVG's analysis, an HTML or
+  JSON embedded-spec scan, an Office chart part. It reports each finished unit's output to the parent straight away.
+- **One failure, one counted loss.** A worker that crashes, runs out of heap, or overruns a unit (15 s, or the deadline)
+  is terminated.
+  - That unit is recorded as `unit-crashed` or `unit-timeout`, a counted closed reason with the unit's ordinal.
+  - A fresh worker continues after it, skipping every finished or failed unit, with SVG ordinals and the visual cap
+    kept where they were.
+  - Past the deadline, a last worker only counts what is left.
+- **Unchanged output.** With no failure, the worker's own result is returned unchanged, identical to an uncontained run.
+- **Host side.** A refused or failed guest run is recorded as `guest-unavailable`: the source, and each figure not run
+  because the guest was down. A run the org's free-VM cap turns away is recorded as `vm-cap`. The document's other
+  visuals survive either way.
+- **Cost:** measured on the parser-VM shape, a worker that imports the bundle and runs one extraction takes **74 ms**,
+  against 0.4 ms inline. That is about **74 ms per guest run** (once per input), small next to the VM command itself.
+  Batching units into fewer workers would save nothing more: there is already one worker per input, plus one per
+  failure.
+
+**Point fixes that keep units cheap (council r8):**
+- **Office:** `ptCount` and the point loop are clamped to `maxPathVertices`; a declared 2³²−1 was the loop bound.
+- **Numbers:** `finiteOrNull` refuses over 512 characters before any regex, and uses an unambiguous pattern with the
+  same language (20,000 seeded equivalence cases).
+- **Workbooks:**
+  - One resolver per embedded workbook per package, not one per chart part.
+  - A per-input cell budget (2,000,000, `workbook-too-large`), checked before each sheet is parsed.
+  - Deadline checks in the series loop and while reading sheets.
+- **Text:** `richText` joins only innermost paragraphs, each cut to 4 KiB.
+- **Scanners:** lowercase ASCII only, so a Turkish `İ` no longer shifts indices (M1). The equivalence test's alphabet
+  now has `İ`, `ſ`, the Kelvin sign and astral characters.
+- **Embedded specs:** JSON regions past 200 per block, over 2 MiB or too deep, and Plotly calls past 50 are all counted
+  in `overflow`. A Plotly data region several calls share is parsed once.
+
+**Measured on the parser-VM shape: every round-5 to round-8 repro through the real contained guest.** Each input was
+run by `run-guest-in-modal-vm.mjs` and `guest-repro-run.mjs` exactly as production runs it: Modal `runtime: "vm"`, 2 vCPU,
+4 GiB, network blocked, V8 flag, `budgetMs` 45 s, killed at 60 s.
+
+| repro family | worst input | wall | peak RSS | outcome |
+|---|---|--:|--:|---|
+| r8 Office: `ptCount` 2³²−1 / 300k-digit value / 300 KB Vega 300k-digit value | `multiLvl`, `fin300k`, `finVega300k` | 0.19–0.22 s | 108 MB | both charts exported each time (was OOM / killed at 60 s) |
+| r8 embedded workbook: 8 chart parts × a 16 MB workbook | `embwb8` | 2.6 s | 545 MB | good chart exported, 8 parts `workbook-too-large` (was OOM at 39.8 s) |
+| r8 Turkish `İ` before an SVG and a Vega-Lite spec | `turkish` | 0.20 s | 91 MB | both exported (one was refused, one lost uncounted) |
+| r8 Plotly: 50 calls over one 1.5 MB array / EPUB of 25 × 3 such blocks | `plotlyEpub` (20 MB) | **32.2 s** | 307 MB | 27 visuals, completes before the deadline (was 45.9 s, cut by the deadline) |
+| r7 raw-text scans (comment `<script`, 2 MB HTML, 200-part EPUB) | `epubScript200` | 0.63 s | 169 MB | complete |
+| r7 L2 empty comments × `<use>` | `emptyCmtEpub90` | 1.7 s | 287 MB | 2 exported, 90 `svg-use-bomb` |
+| r6 per-frame cost (`rgb(`, `x` split, deep nesting) | `deepEpub300` | 7.1 s | 280 MB | complete |
+| r5 walk / diagram (hidden children, nested `<use>`, Mermaid) | `mermaidEpub200` | 2.1 s | 293 MB | 200 exported |
+| gate-passing worst: 400 text-heavy at-cap SVGs | `textEpub400` | 12.2 s | 282 MB | 256 exported, 144 counted `visual-limit` |
+| injected crash / hang / out-of-memory in one unit of a 100-chart page | `legit+crash`, `+hang`, `+oom` | 0.33 / 2.3 / 2.7 s | 103 / 111 / **1,632** MB | 99 exported, 1 `unit-crashed` / `unit-timeout` / `unit-crashed` |
+| 100 ordinary bar charts | `legit` | 0.24 s | 109 MB | 100 exported |
+
+- **Every input exits 0 with a result.** None ends in `guest-unavailable`.
+- **Worst wall time:** 32.2 s (the Plotly EPUB), inside the 45 s deadline. Any longer input is cut at the deadline and
+  counted, so the bound is the deadline plus one unit, with the unit itself capped at 15 s by the containment.
+- **Worst memory:** 1,632 MB, when a unit is driven out of heap on purpose. That is the 1,536 MB worker cap plus the
+  parent, about 40% of the VM, and it is the most any input can use. Without injected faults the peak is 559 MB.
+- **Every SVG, part and candidate is accounted for:** exported, skipped with a closed reason, counted in a deferral
+  range, or counted in `overflow`.
+- **Superseded:** round 7's "12.1 s" walk-bound worst case still holds (12.2 s here), but round 8's Office and number
+  repros were not bounded by it. They are now, and containment covers whatever is found next.
 
 ### Guest hardening: zod `jitless`, the V8 code-generation flag, code-loading guard, image check
 

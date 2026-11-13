@@ -10,3 +10,12 @@ export function indexFrom(work: ScanWork | undefined, hay: string, needle: strin
   if (work) work.steps += (at < 0 ? hay.length : at) - from + 1;
   return at;
 }
+
+/**
+ * Lowercase ASCII letters only. Length-preserving, so indices found in the result slice the original correctly
+ * (`"İ".toLowerCase()` is two code units; council r8 M1). It is also exactly how a non-`u` `/i` regex compares ASCII
+ * needles: no non-ASCII character folds onto an ASCII one there.
+ */
+export function asciiLower(s: string): string {
+  return s.replace(/[A-Z]+/g, (run) => run.toLowerCase());
+}
