@@ -2027,9 +2027,10 @@ describe("chatProject", () => {
       getProjectSearchSettings.mockResolvedValue(buildSearchSettings({ chat: { mode: "whole-corpus" } }));
       loadProjectWholeCorpusContext.mockResolvedValue({ eligible: true, reason: null, results: [{ text: "full corpus chunk", score: 1, citation: citation("doc-w") }], stats });
     }
-    function streamedTurn(model?: string) {
+    // Callers choose a tier, never a backend model (#362): "smart" is GPT-6.1 Sol, with a failover model behind it.
+    function streamedTurn(tier?: "fastest" | "balanced" | "smart") {
       const deltas: string[] = [];
-      const turn = chatProject({ projectId: "ws-1", userId: "user-1", query: "what changed?", ...(model ? { model } : {}), onTextDelta: (delta) => { deltas.push(delta); } });
+      const turn = chatProject({ projectId: "ws-1", userId: "user-1", query: "what changed?", ...(tier ? { tier } : {}), onTextDelta: (delta) => { deltas.push(delta); } });
       return { deltas, turn };
     }
 
@@ -2038,7 +2039,7 @@ describe("chatProject", () => {
       generateAnthropicDocumentText
         .mockImplementationOnce(async ({ onTextDelta }: Generate) => { await onTextDelta?.("The contract renews "); throw new Error("provider stream reset"); })
         .mockImplementationOnce(async ({ onTextDelta }: Generate) => { await onTextDelta?.("Different answer [1]"); return { text: "Different answer [1]", usage, sources: [] }; });
-      const { deltas, turn } = streamedTurn("openai/gpt-6.1-sol");
+      const { deltas, turn } = streamedTurn("smart");
       // The turn fails: no failover answer and no citation fallback is appended to the streamed prefix.
       await expect(turn).rejects.toThrow("provider stream reset");
       expect(generateAnthropicDocumentText).toHaveBeenCalledTimes(1);
@@ -2051,7 +2052,7 @@ describe("chatProject", () => {
         // An empty delta is not answer text.
         .mockImplementationOnce(async ({ onTextDelta }: Generate) => { await onTextDelta?.(""); throw new Error("selected model rate limited"); })
         .mockImplementationOnce(async ({ onTextDelta }: Generate) => { await onTextDelta?.("Fallback "); await onTextDelta?.("answer [1]"); return { text: "Fallback answer [1]", usage, sources: [] }; });
-      const { deltas, turn } = streamedTurn("openai/gpt-6.1-sol");
+      const { deltas, turn } = streamedTurn("smart");
       const response = await turn;
       expect(generateAnthropicDocumentText).toHaveBeenCalledTimes(2);
       expect(response.answer).toBe("Fallback answer [1]");
@@ -2061,7 +2062,7 @@ describe("chatProject", () => {
     it("still answers with the citation fallback when every model fails before any text", async () => {
       retrievalProject();
       generateAnthropicDocumentText.mockRejectedValue(new Error("provider down"));
-      const { deltas, turn } = streamedTurn("openai/gpt-6.1-sol");
+      const { deltas, turn } = streamedTurn("smart");
       const response = await turn;
       expect(response.debug.fallback).toBe(true);
       expect(response.answer).toContain("Here are the relevant source passages:");
