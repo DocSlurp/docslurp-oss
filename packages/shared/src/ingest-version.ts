@@ -15,6 +15,7 @@
  *   run actually stored; a run's are what its pipeline build supports. Neither is ever inferred for version 0 rows.
  */
 import { z } from "zod";
+import { parseSourceRescanRequired, type ParseSourceDecisionColumns } from "./parse-source-decision.js";
 
 /** The ingest version this build produces. Monotonic; see the bump policy above. */
 export const CURRENT_INGEST_VERSION = 1;
@@ -49,21 +50,48 @@ export const ingestStatusSchema = z.object({
   capabilities: z.array(ingestCapabilitySchema),
   /** The workspace's current version. */
   currentVersion: z.number().int().positive(),
-  /** True when a reprocess would bring the document to the current version. */
+  /** True when a reprocess would bring the document to the current version. Informational: shown in details. */
   updateAvailable: z.boolean(),
+  /**
+   * Capabilities a serving path needs for this document that it lacks, measured from the row (never from the version
+   * alone): `parseSourceDecision` for a PDF or a deferred-indexed document without a decision from the current scan,
+   * whose page images and on-demand pages are refused until a reprocess.
+   */
+  missingCapabilities: z.array(ingestCapabilitySchema),
+  /** True when `missingCapabilities` is non-empty: the only case clients should badge "Update available". */
+  updateRecommended: z.boolean(),
   /** On GET /v1/documents/:id: true only when an update is available and this caller may start the reprocess. */
   canReprocess: z.boolean().optional(),
 });
 export type IngestStatus = z.infer<typeof ingestStatusSchema>;
 
-export function ingestStatus(row: { ingestVersion?: number | null; ingestCapabilities?: readonly unknown[] | null }): IngestStatus {
+export function ingestStatus(
+  row: { ingestVersion?: number | null; ingestCapabilities?: readonly unknown[] | null },
+  missing: readonly IngestCapability[] = [],
+): IngestStatus {
   const version = Number.isInteger(row.ingestVersion) && (row.ingestVersion as number) >= 0 ? row.ingestVersion as number : UNKNOWN_INGEST_VERSION;
+  const missingCapabilities = knownIngestCapabilities(missing);
   return {
     version,
     capabilities: version === UNKNOWN_INGEST_VERSION ? [] : knownIngestCapabilities(row.ingestCapabilities),
     currentVersion: CURRENT_INGEST_VERSION,
     updateAvailable: version < CURRENT_INGEST_VERSION,
+    missingCapabilities,
+    updateRecommended: missingCapabilities.length > 0,
   };
+}
+
+/**
+ * The capabilities serving needs that a document lacks, measured from its row. Today one: page images (PDFs) and on-demand
+ * materialization (deferred indexing) refuse a document without a current parse decision (parse-source-decision.ts).
+ */
+export function missingServingCapabilities(
+  row: ParseSourceDecisionColumns & { mime_type: string; indexing_mode?: string | null; status: string },
+  env: NodeJS.ProcessEnv = process.env,
+): IngestCapability[] {
+  if (row.status !== "completed") return [];
+  const needsDecision = row.mime_type === "application/pdf" || (row.indexing_mode != null && row.indexing_mode !== "full");
+  return needsDecision && parseSourceRescanRequired(row, env) ? ["parseSourceDecision"] : [];
 }
 
 /** GET /v1/ingest-version: the workspace's current version and what it produces. */

@@ -1,5 +1,5 @@
 import { MIME_BY_EXTENSION, fileExtension, realtimeViewerSnapshotSchema, cleanDocumentTitle, mediaSummarySchema, publicDiagnostics, publicDocumentError, sanitizeStoredPipeline, type MediaSummary } from "@docslurp/shared";
-import { ingestRecordFields, ingestStatus, type IngestStatus } from "@docslurp/shared";
+import { ingestRecordFields, ingestStatus, missingServingCapabilities, type IngestStatus } from "@docslurp/shared";
 
 import {
   defaultPipelineFeatures,
@@ -61,6 +61,9 @@ type DocumentRow = {
   metadata?: Record<string, unknown> | null;
   ingest_version?: number | null;
   ingest_capabilities?: string[] | null;
+  parse_source_key?: string | null;
+  parse_source_sha256?: string | null;
+  parse_source_scan_version?: number | null;
 };
 
 type DocumentIndexRow = DocumentRow & {
@@ -1335,7 +1338,7 @@ export async function getDocumentViewerPayload(docId: string, userId: string): P
       pageTextCount: pageStats?.page_text_count ?? 0
     },
     ...(media ? { media } : {}),
-    ingest: ingestStatus(document),
+    ingest: ingestStatus(document, missingServingCapabilities(row)),
     run: run
       ? {
           id: run.id,

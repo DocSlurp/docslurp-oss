@@ -4,7 +4,7 @@ import { isSpendBlockedError, spendBlockedResponse } from "../services/billing/s
 import { Hono } from "hono";
 import type { Context } from "hono";
 import { z } from "zod";
-import { dataUnavailable, documentTagsSchema, UNKNOWN_INGEST_VERSION } from "@docslurp/shared";
+import { compilePipelinePlan, dataUnavailable, documentTagsSchema, parseStoredPipelineFeatures, UNKNOWN_INGEST_VERSION } from "@docslurp/shared";
 import { zValidator } from "@hono/zod-validator";
 
 import { getArtifactJson } from "../lib/artifacts.js";
@@ -93,6 +93,13 @@ async function requireApiKeyDocumentScope(c: Context, docId: string, userId: str
     return { response: apiStatusError(c, 404, "Document not found") };
   }
   return { viewer };
+}
+
+/** Whether the project's current pipeline runs structured extraction (a non-empty `outputSchema`; compilePipelinePlan). */
+async function projectExtractsStructured(projectId: string): Promise<boolean> {
+  const [row] = await sql<{ pipeline: unknown }[]>`select pipeline from projects where id = ${projectId}`;
+  if (!row) return false;
+  return compilePipelinePlan(parseStoredPipelineFeatures(row.pipeline, `project ${projectId}`)).stageOrder.includes("structured-extract");
 }
 
 /** Whether the document's PII policy withheld this exact structured result (metadata.pii.withheldArtifactUris). */
@@ -344,7 +351,7 @@ export const documentsRoutes = new Hono()
     if (scoped.response) return scoped.response;
     const viewer = scoped.viewer;
     // Whether this caller may act on "update available" (an editor session, or a server key with ingest for the project).
-    const canReprocess = viewer.ingest.updateAvailable && await callerCanReprocess(c, viewer.document);
+    const canReprocess = (viewer.ingest.updateAvailable || viewer.ingest.updateRecommended) && await callerCanReprocess(c, viewer.document);
     return c.json({ ...viewer, ingest: { ...viewer.ingest, canReprocess } });
   })
   // The asset ledger: every image Doppler reported (extracted, not extracted with why, unlinked) and the extraction level,
@@ -411,10 +418,12 @@ export const documentsRoutes = new Hono()
       return c.json({ structured: null, uri: null, availability: dataUnavailable("withheld", { ingestVersion }) });
     }
     if (!structuredUri) {
-      const reason = viewer.document.status === "pii_blocked" ? "withheld"
-        : viewer.document.status === "completed" || viewer.document.status === "failed" || viewer.document.status === "cancelled" ? "not-extracted"
-          : "processing";
-      return c.json({ structured: null, uri: null, availability: dataUnavailable(reason, { canEdit: await callerCanReprocess(c, viewer.document), ingestVersion }) });
+      const finished = viewer.document.status === "completed" || viewer.document.status === "failed" || viewer.document.status === "cancelled";
+      // Nothing recorded and the project has no schema: the feature is off, and a reprocess would not produce fields.
+      const reason = !(await projectExtractsStructured(viewer.document.projectId)) ? "disabled"
+        : finished ? "not-extracted" : "processing";
+      const canEdit = reason === "not-extracted" && await callerCanReprocess(c, viewer.document);
+      return c.json({ structured: null, uri: null, availability: dataUnavailable(reason, { canEdit, ingestVersion }) });
     }
     try {
       const json = await getArtifactJson<Record<string, unknown>>(structuredUri);

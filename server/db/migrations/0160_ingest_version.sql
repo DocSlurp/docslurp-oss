@@ -9,6 +9,13 @@
 --
 -- The worker stamps both when a run completes (worker/src/db/ingest-version.ts). ADD COLUMN with a constant default is a
 -- catalog-only change, so the backfill rewrites no rows.
+--
+-- Locking: every statement waits at most 5 s for its lock (lock_timeout, transaction-local) and fails the release instead
+-- of queueing behind a long query and blocking documents/project_runs traffic. The CHECKs are added NOT VALID (no scan
+-- under ACCESS EXCLUSIVE) and validated after, which on its own takes only SHARE UPDATE EXCLUSIVE. Each step checks the
+-- catalog first and VALIDATE of a valid constraint is a no-op, so a second run changes nothing.
+SET LOCAL lock_timeout = '5s';
+--> statement-breakpoint
 ALTER TABLE documents ADD COLUMN IF NOT EXISTS ingest_version integer NOT NULL DEFAULT 0;
 --> statement-breakpoint
 ALTER TABLE documents ADD COLUMN IF NOT EXISTS ingest_capabilities text[] NOT NULL DEFAULT '{}';
@@ -19,12 +26,17 @@ ALTER TABLE project_runs ADD COLUMN IF NOT EXISTS ingest_capabilities text[] NOT
 --> statement-breakpoint
 DO $$
 BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'documents_ingest_version_check') THEN
-    ALTER TABLE documents ADD CONSTRAINT documents_ingest_version_check
-      CHECK (ingest_version >= 0 AND cardinality(ingest_capabilities) <= 32);
+  PERFORM set_config('lock_timeout', '5s', true);
+  IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_constraint WHERE conname = 'documents_ingest_version_check' AND conrelid = 'public.documents'::regclass) THEN
+    ALTER TABLE public.documents ADD CONSTRAINT documents_ingest_version_check
+      CHECK (ingest_version >= 0 AND cardinality(ingest_capabilities) <= 32) NOT VALID;
   END IF;
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'project_runs_ingest_version_check') THEN
-    ALTER TABLE project_runs ADD CONSTRAINT project_runs_ingest_version_check
-      CHECK (ingest_version >= 0 AND cardinality(ingest_capabilities) <= 32);
+  IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_constraint WHERE conname = 'project_runs_ingest_version_check' AND conrelid = 'public.project_runs'::regclass) THEN
+    ALTER TABLE public.project_runs ADD CONSTRAINT project_runs_ingest_version_check
+      CHECK (ingest_version >= 0 AND cardinality(ingest_capabilities) <= 32) NOT VALID;
   END IF;
 END $$;
+--> statement-breakpoint
+ALTER TABLE public.documents VALIDATE CONSTRAINT documents_ingest_version_check;
+--> statement-breakpoint
+ALTER TABLE public.project_runs VALIDATE CONSTRAINT project_runs_ingest_version_check;

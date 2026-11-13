@@ -15,8 +15,18 @@ produced it. The serving API answers data it cannot show with a typed
   gets the same value. Sessions and API keys can read it.
 - Document records carry `ingestVersion` and `ingestCapabilities`.
   `GET /v1/documents/:id` also returns `ingest`: `{ version, capabilities,
-  currentVersion, updateAvailable, canReprocess }`. `canReprocess` is true only
-  when an update is available and the caller may start the reprocess.
+  currentVersion, updateAvailable, missingCapabilities, updateRecommended,
+  canReprocess }`.
+  - `updateAvailable` (version below current) is informational; show it in
+    document details.
+  - `missingCapabilities` lists what a serving path needs and the document
+    lacks, measured from its row rather than its version. Today that is
+    `parseSourceDecision` for a PDF or a deferred-indexed document without a
+    decision from the current scan.
+  - `updateRecommended` is true when that list is non-empty, and it is the only
+    case to badge "Update available". Version-0 documents that serve fine are
+    not badged.
+  - `canReprocess` says whether this caller may start the reprocess.
 - Runs carry `ingestVersion` and `ingestCapabilities`. A run's capabilities are
   what its pipeline build supports. A document's capabilities are measured from
   what its run actually stored:
@@ -27,9 +37,20 @@ produced it. The serving API answers data it cannot show with a typed
   to `0` with no capabilities, and nothing about those rows is inferred.
 - The worker stamps a document when its last stage completes, and stamps the run
   with all of its finished documents when the run completes. Both stamps ride on
-  statements the run already makes. A failed or cancelled document keeps the
-  version that last produced it. A deferred page materialization (`materialize`
-  run) does not reproduce its document and stamps nothing.
+  statements the run already makes. A failed, cancelled or superseded document
+  keeps the version that last produced it. A deferred page materialization
+  (`materialize` run) does not reproduce its document and stamps nothing.
+- Only a run that ran extraction stamps the current version. A run that reused
+  extraction is a partial reprocess or reindex whose `reusedStages` reach into
+  intake, prep or extraction (quarantine always re-runs, so it does not count).
+  Its documents inherit their source's version and capabilities
+  (`reused_from_document_id`, same organization only), plus
+  `parseSourceDecision` when the re-run quarantine recorded one for the new row.
+  Such a run stays at version 0. A deduplicated copy
+  (`deduped_from_document_id`) always inherits its source's version and
+  capabilities.
+- Migration 0160 waits at most 5 s for each lock. It adds the CHECKs `NOT
+  VALID` and validates them separately.
 - When `updateAvailable` is true, a reprocess brings the document to the current
   version. Clients should send it through the reprocess estimate
   (`POST /v1/projects/:project/documents/bulk/estimate`) so credits are shown
@@ -74,10 +95,10 @@ and worker reasons stay in logs and traces.
 | --- | --- | --- |
 | `needs-reprocess` | Produced before the current scan or by an older pipeline: a page of a document without a current parse decision (`source-unscanned`), or a figure resume blocked `unscanned`. | If the caller may reprocess |
 | `withheld` | A PII policy withholds it: a PII-blocked document's pages and structured result (even when a result was recorded), a structured result its policy withheld, a withheld figure file, a page materialization blocked by PII, or a page whose source file is withheld. | No |
-| `not-extracted` | The pipeline produced nothing: a failed or cancelled document, an image Doppler did not extract (its `reason` says why, for example `min_side`, `repeat` or `budget`), no structured result, a figure resume that ran out of attempts, or a page that failed to materialize. | Document-level states only, if the caller may reprocess. Per-image states: no |
-| `processing` | Still being produced: a document mid-run, a figure upload that has not landed, or a figure resume whose document moved to a newer run. | No |
+| `not-extracted` | The pipeline produced nothing: a failed or cancelled document, an image Doppler did not extract (its `reason` says why, for example `min_side`, `repeat` or `budget`), no structured result while the project has a schema, a figure resume that ran out of attempts, a page that failed to materialize, or a figure upload still pending 15 minutes after its level was written (the next attempt adopts it). | Document-level states and stalled uploads, if the caller may reprocess. Images Doppler skipped: no |
+| `processing` | Still being produced: a document mid-run, a figure upload in flight, or a figure resume whose document moved to a newer run. Clients refresh these with backoff. | No |
 | `not-supported` | The data does not exist for this file type (page images of a non-PDF). | No |
-| `disabled` | A project setting turns the feature off (figure resume blocked `figures-off` or `resume-off`). | No |
+| `disabled` | A project setting turns the feature off: figure resume blocked `figures-off` or `resume-off`, or no structured result in a project without an `outputSchema`. | No |
 | `temporarily-unavailable` | Storage did not answer (an unreadable structured result). Retry later. | No |
 
 Where the states appear:

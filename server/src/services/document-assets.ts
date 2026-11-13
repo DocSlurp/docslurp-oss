@@ -83,8 +83,9 @@ export interface DocumentAssetView {
   refusal: DocumentAssetRefusal | null;
   /**
    * The typed state a client shows when the image has no served file (ingest-version.ts): `withheld` (PII policy),
-   * `not-extracted` (status `not-extracted`; Doppler's reason says why), `processing` (its upload has not landed). Null when served, or when the
-   * image is unlinked and the page image shows it.
+   * `not-extracted` (status `not-extracted`, Doppler's reason says why; or an upload still pending after
+   * PENDING_UPLOAD_TIMEOUT_MS, which the next attempt adopts), `processing` (its upload is in flight). Null when served, or
+   * when the image is unlinked and the page image shows it.
    */
   availability: DataUnavailable | null;
 }
@@ -179,7 +180,10 @@ function checkedPage(page: DocumentAssetPage | undefined): { limit: number; afte
  * The document's asset map (one page of it) and extraction level, or null when the document is not in this organization
  * (and project) or is not one the viewer is shown. The scope is required: there is no unscoped read.
  */
-export async function getDocumentAssetLedger(scope: DocumentAssetScope, page?: DocumentAssetPage, options: { canEdit?: boolean } = {}): Promise<DocumentAssetLedgerView | null> {
+/** How long a figure upload may stay `pending` before the ledger reports it as resumable work instead of processing. */
+export const PENDING_UPLOAD_TIMEOUT_MS = 15 * 60_000;
+
+export async function getDocumentAssetLedger(scope: DocumentAssetScope, page?: DocumentAssetPage, options: { canEdit?: boolean; pendingUploadTimeoutMs?: number } = {}): Promise<DocumentAssetLedgerView | null> {
   if (!scope || typeof scope.orgId !== "string" || !ID.test(scope.orgId) || typeof scope.documentId !== "string" || !ID.test(scope.documentId) ||
       (scope.projectId !== undefined && (typeof scope.projectId !== "string" || !ID.test(scope.projectId)))) {
     throw new Error("A document asset read needs an organization and a document id");
@@ -198,11 +202,12 @@ export async function getDocumentAssetLedger(scope: DocumentAssetScope, page?: D
     manifest_sha256: string | null; doppler_build: string | null; resumes: number; last_cut_page: number | null; deadline_ms: number | null;
     assets_total: number; assets_extracted: number; assets_not_extracted: number; assets_unlinked: number; assets_resumable: number;
     source_copy: number; source_decode: number; source_render: number; asset_bytes: string | number; updated_at: string;
-    resume_blocked: string | null;
+    resume_blocked: string | null; age_ms: number;
   }>>`
     select markdown_complete, images_status, images_exit_code, manifest_version, manifest_sha256, doppler_build, resumes, last_cut_page,
       deadline_ms, assets_total, assets_extracted, assets_not_extracted, assets_unlinked, assets_resumable, source_copy, source_decode,
-      source_render, asset_bytes, updated_at::text, resume_blocked
+      source_render, asset_bytes, updated_at::text, resume_blocked,
+      (extract(epoch from (now() - updated_at)) * 1000)::float8 as age_ms
     from document_extraction_levels
     where document_id = ${scope.documentId} and org_id = ${scope.orgId}`;
 
@@ -238,6 +243,8 @@ export async function getDocumentAssetLedger(scope: DocumentAssetScope, page?: D
 
   const pageRows = rows.slice(0, limit);
   const ingestVersion = document.ingest_version ?? UNKNOWN_INGEST_VERSION;
+  // The level is written in the transaction that records the uploads; pending past this is stalled, not in flight.
+  const uploadStalled = !level || Number(level.age_ms) > (options.pendingUploadTimeoutMs ?? PENDING_UPLOAD_TIMEOUT_MS);
   const resumeBlocked = (blocked: string | null): DataUnavailable | null => {
     const reason = figureResumeUnavailableReason(blocked);
     return reason ? dataUnavailable(reason, { canEdit: options.canEdit, ingestVersion }) : null;
@@ -270,8 +277,11 @@ export async function getDocumentAssetLedger(scope: DocumentAssetScope, page?: D
         availability: slot ? null
           : refused ? dataUnavailable("withheld", { ingestVersion })
             : row.status === "not-extracted" ? dataUnavailable("not-extracted", { ingestVersion })
-              : row.file_of ? dataUnavailable("processing", { ingestVersion })
-                : null,
+              // An upload still pending after the timeout will not land on its own: the next attempt adopts it, so it is
+              // resumable work (a figure resume or reprocess), not "processing" forever.
+              : row.file_of && uploadStalled ? dataUnavailable("not-extracted", { canEdit: options.canEdit, ingestVersion })
+                : row.file_of ? dataUnavailable("processing", { ingestVersion })
+                  : null,
       };
     }),
     nextCursor: rows.length > limit && last ? encodeAssetCursor(last.page_number, last.asset_id) : null,

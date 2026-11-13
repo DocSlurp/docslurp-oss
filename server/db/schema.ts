@@ -371,6 +371,10 @@ export const documents = pgTable(
     dedupedFromDocumentId: text("deduped_from_document_id"),
     reusedFromDocumentId: text("reused_from_document_id"),
     dedupScope: text("dedup_scope"),
+    /** Ingest version of the pipeline that produced the document; 0 = unknown (migration 0160, ingest-version.ts). */
+    ingestVersion: integer("ingest_version").default(0).notNull(),
+    /** Capabilities measured from what the producing run stored, or the reused/deduplicated source's (migration 0160). */
+    ingestCapabilities: text("ingest_capabilities").array().default(sql`'{}'::text[]`).notNull(),
     // You can use { mode: "bigint" } if numbers are exceeding js number limitations
     fileSize: bigint("file_size", { mode: "number" }).default(0).notNull(),
     metadata: jsonb().default({}).notNull(),
@@ -2345,6 +2349,10 @@ export const projectRuns = pgTable(
     origin: text().default("machine").notNull(),
     stats: jsonb().default({}).notNull(),
     artifacts: jsonb().default({}).notNull(),
+    /** Ingest version of the build that completed the run with extraction; 0 = unknown or reused extraction (migration 0160). */
+    ingestVersion: integer("ingest_version").default(0).notNull(),
+    /** What that build's pipeline supports (migration 0160). */
+    ingestCapabilities: text("ingest_capabilities").array().default(sql`'{}'::text[]`).notNull(),
     runId: text("run_id"),
     leaseExpiresAt: timestamp("lease_expires_at", {
       withTimezone: true,

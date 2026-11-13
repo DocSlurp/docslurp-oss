@@ -70,8 +70,14 @@ export type DocumentViewerPayload = {
 
 /** A document's ingest version against the workspace's current one (GET /v1/documents/:id `ingest`). */
 export type IngestStatus = {
-  version: number; capabilities: string[]; currentVersion: number; updateAvailable: boolean;
-  /** True only when an update is available and this caller may start the reprocess. */
+  version: number; capabilities: string[]; currentVersion: number;
+  /** The version is below the workspace's (informational). */
+  updateAvailable: boolean;
+  /** Capabilities a serving path needs and this document lacks, measured from its row (e.g. `parseSourceDecision`). */
+  missingCapabilities: string[];
+  /** `missingCapabilities` is non-empty: the case to badge "Update available". */
+  updateRecommended: boolean;
+  /** True only when an update is available or recommended and this caller may start the reprocess. */
   canReprocess?: boolean;
 };
 /** GET /v1/ingest-version. */

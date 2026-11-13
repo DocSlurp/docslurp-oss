@@ -28,6 +28,10 @@ beforeAll(async () => {
     types: { numeric: { to: 1700, from: [1700], serialize: (value: unknown) => String(value), parse: (value: string): unknown => Number(value) } },
   }) as unknown as postgres.Sql<Record<string, unknown>>;
   vi.doMock("../db.js", () => ({ sql }));
+  vi.doMock("../lib/artifacts.js", async (load) => ({
+    ...(await load<typeof import("../lib/artifacts.js")>()),
+    getArtifactJson: vi.fn(async () => { throw new Error("NoSuchKey: internal-bucket/ua/run-a/structured/doc-unread.json"); }),
+  }));
   vi.doMock("../lib/temporal.js", async (load) => ({ ...(await load<typeof import("../lib/temporal.js")>()), startPageRenderWorkflow: vi.fn() }));
   await sql`insert into "user"(id, name, email) values ('ua', 'A', 'a@example.com'), ('ub', 'B', 'b@example.com'), ('uv', 'V', 'v@example.com'), ('ue', 'E', 'e@example.com')`;
   await sql`insert into organizations(id, name, slug, created_by_user_id) values ('org-a', 'A', 'a', 'ua'), ('org-b', 'B', 'b', 'ub')`;
@@ -46,11 +50,31 @@ beforeAll(async () => {
     ('doc-pii', 'org-a', 'ua', 'proj-a', 'run-a', 'pii.pdf', 'application/pdf', 'kp', 'pii_blocked', 3),
     ('doc-failed', 'org-a', 'ua', 'proj-a', 'run-a', 'failed.pdf', 'application/pdf', 'kf', 'failed', 3),
     ('doc-b', 'org-b', 'ub', 'proj-b', 'run-b', 'b.pdf', 'application/pdf', 'kb', 'completed', 3),
-    ('doc-c', 'org-a', 'ua', 'proj-c', 'run-a', 'c.pdf', 'application/pdf', 'kcc', 'completed', 1)`;
+    ('doc-c', 'org-a', 'ua', 'proj-c', 'run-a', 'c.pdf', 'application/pdf', 'kcc', 'completed', 1),
+    ('doc-wsrc', 'org-a', 'ua', 'proj-a', 'run-a', 'held.pdf', 'application/pdf', 'kw', 'completed', 2),
+    ('doc-unread', 'org-a', 'ua', 'proj-a', 'run-a', 'unread.pdf', 'application/pdf', 'ku', 'completed', 1),
+    ('doc-figs', 'org-a', 'ua', 'proj-a', 'run-a', 'figs.pdf', 'application/pdf', 'kg', 'completed', 2)`;
+  // A PDF whose source file the PII policy withheld: its pages may never be re-rendered from it.
+  const { env } = await import("../config.js");
+  await sql`update documents set metadata = ${sql.json({ pii: { withheldArtifactUris: [`s3://${env.s3Bucket}/kw`] } })} where id = 'doc-wsrc'`;
+  // Figures: one stored file the PII policy withheld, one upload still pending.
+  const figureKey = (asset: string, page: string, n: string) => `ua/run-a/doppler/doc-figs/images/page-${page}/image-${n}.webp`;
+  await sql`insert into document_extraction_levels (document_id, org_id, project_id, run_id, markdown_complete, images_status, assets_total, assets_extracted)
+    values ('doc-figs', 'org-a', 'proj-a', 'run-a', true, 'complete', 2, 2)`;
+  await sql`insert into document_assets (document_id, org_id, project_id, run_id, asset_id, page_number, kind, fate, status, reason,
+      resumable, source, format, bytes, sha256, width, height, link_path, file_of, storage_key, obj_num, obj_gen, bbox, storage_state) values
+    ('doc-figs', 'org-a', 'proj-a', 'run-a', 'p1.1', 1, 'picture', 'block', 'extracted', null, false, 'render', 'webp', 20, ${SHA}, 6, 4,
+      'images/page-0001/image-001.webp', 'p1.1', ${figureKey("p1.1", "0001", "001")}, 12, 0, '{10,20,110,220}', 'stored'),
+    ('doc-figs', 'org-a', 'proj-a', 'run-a', 'p2.1', 2, 'picture', 'block', 'extracted', null, false, 'render', 'webp', 20, ${SHA}, 6, 4,
+      'images/page-0002/image-001.webp', 'p2.1', ${figureKey("p2.1", "0002", "001")}, 13, 0, '{10,20,110,220}', 'pending')`;
+  const heldFigure = `s3://bucket/${figureKey("p1.1", "0001", "001")}`;
+  await sql`update project_runs set artifacts = artifacts || ${sql.json({ "doc-figs:doppler-figure:p1.1": heldFigure })}::jsonb where id = 'run-a'`;
+  await sql`update documents set metadata = ${sql.json({ pii: { withheldArtifactUris: [heldFigure] } })} where id = 'doc-figs'`;
   // Structured results recorded for a PII-blocked document and for one whose policy withheld the result.
   await sql`insert into document_run_stage_states (run_id, document_id, stage_name, status, artifact_uri) values
     ('run-a', 'doc-pii', 'structured-extract', 'completed', 's3://bucket/structured/doc-pii.json'),
-    ('run-a', 'doc-text', 'structured-extract', 'completed', 's3://bucket/structured/doc-text.json')`;
+    ('run-a', 'doc-text', 'structured-extract', 'completed', 's3://bucket/structured/doc-text.json'),
+    ('run-a', 'doc-unread', 'structured-extract', 'completed', 's3://bucket/structured/doc-unread.json')`;
   await sql`update documents set metadata = ${sql.json({ pii: { withheldArtifactUris: ["s3://bucket/structured/doc-text.json"] } })} where id = 'doc-text'`;
   await sql`insert into document_extraction_levels (document_id, org_id, project_id, run_id, markdown_complete, images_status, assets_total,
       assets_not_extracted, assets_resumable, resume_blocked)
@@ -60,11 +84,12 @@ beforeAll(async () => {
     ('doc-old', 'org-a', 'proj-a', 'run-a', 'p1.1', 1, 'picture', 'block', 'not-extracted', 'min_side', false, 'webp', 'images/page-0001/image-001.webp', 'none')`;
   await sql`insert into document_page_states (document_id, page_number, state, failure_reason) values
     ('doc-old', 1, 'failed', 'source-unscanned'), ('doc-old', 2, 'blocked-pii', null), ('doc-old', 3, 'indexed', null),
-    ('doc-c', 1, 'failed', 'source-unscanned')`;
+    ('doc-c', 1, 'failed', 'source-unscanned'), ('doc-c', 2, 'failed', 'vision-timeout')`;
   const candidates = [1, 2, 3].map((page) => ({ documentId: "doc-old", page }));
   await sql`insert into search_sessions (id, user_id, project_id, query, metadata) values
     ('sess-a', 'ua', 'proj-a', 'q', ${sql.json({ diagnostics: { deferredCandidates: candidates } })}),
     ('sess-b', 'ub', 'proj-b', 'q', ${sql.json({ diagnostics: { deferredCandidates: candidates } })}),
+    ('sess-g', 'ua', 'proj-c', 'q', ${sql.json({ diagnostics: { deferredCandidates: [{ documentId: "doc-c", page: 2 }] } })}),
     ('sess-e', 'ue', 'proj-c', 'q', ${sql.json({ diagnostics: { deferredCandidates: [{ documentId: "doc-old", page: 1 }, { documentId: "doc-c", page: 1 }] } })})`;
   keys = await import("../services/api-keys.js");
   const { documentsRoutes } = await import("../routes/documents.js");
@@ -130,7 +155,9 @@ describe("document detail", () => {
   it("carries the document's ingest status against the workspace's", async () => {
     const body = await (await app.request("/documents/doc-old", as("ua"))).json();
     expect(body.document).toMatchObject({ ingestVersion: 0, ingestCapabilities: [] });
-    expect(body.ingest).toEqual({ version: 0, capabilities: [], currentVersion: CURRENT_INGEST_VERSION, updateAvailable: true, canReprocess: true });
+    // An unscanned PDF lacks what page images need: the update is recommended (the badge), not just available.
+    expect(body.ingest).toEqual({ version: 0, capabilities: [], currentVersion: CURRENT_INGEST_VERSION, updateAvailable: true,
+      missingCapabilities: ["parseSourceDecision"], updateRecommended: true, canReprocess: true });
   });
 
   it("offers the update only to a caller who may reprocess", async () => {
@@ -145,7 +172,8 @@ describe("document detail", () => {
     await sql`update documents set ingest_version = ${CURRENT_INGEST_VERSION}, ingest_capabilities = '{pageFacts}' where id = 'doc-text'`;
     try {
       const body = await (await app.request("/documents/doc-text", as("ua"))).json();
-      expect(body.ingest).toEqual({ version: CURRENT_INGEST_VERSION, capabilities: ["pageFacts"], currentVersion: CURRENT_INGEST_VERSION, updateAvailable: false, canReprocess: false });
+      expect(body.ingest).toEqual({ version: CURRENT_INGEST_VERSION, capabilities: ["pageFacts"], currentVersion: CURRENT_INGEST_VERSION, updateAvailable: false,
+        missingCapabilities: [], updateRecommended: false, canReprocess: false });
     } finally {
       await sql`update documents set ingest_version = 0, ingest_capabilities = '{}' where id = 'doc-text'`;
     }
@@ -179,6 +207,13 @@ describe("page images: typed unavailable states", () => {
       expect(response.status, doc).toBe(200);
       expect(await response.json(), doc).toMatchObject({ status: "unavailable", reason, canReprocess });
     }
+  });
+
+  it("a PDF whose source the PII policy withheld answers withheld, never re-rendered", async () => {
+    const response = await pageImage("doc-wsrc", as("ua"), "POST");
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ status: "unavailable", reason: "withheld", canReprocess: false });
+    expect((await sql`select 1 from document_page_renders where document_id = 'doc-wsrc'`).length).toBe(0);
   });
 
   it("offers a reprocess only to a caller who may start one", async () => {
@@ -218,12 +253,34 @@ describe("page images: typed unavailable states", () => {
 });
 
 describe("structured results", () => {
-  it("a document with no structured result answers a typed state, not a 404", async () => {
+  it("a project with structured extraction off answers disabled, with no reprocess (a reprocess would not add fields)", async () => {
     const response = await app.request("/documents/doc-old/structured", as("ua"));
     expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({ structured: null, availability: { status: "unavailable", reason: "not-extracted", canReprocess: true } });
+    expect(await response.json()).toMatchObject({ structured: null, availability: { status: "unavailable", reason: "disabled", canReprocess: false } });
     expect(await (await app.request("/documents/doc-pii/structured", as("ua"))).json()).toMatchObject({ availability: { reason: "withheld", canReprocess: false } });
-    expect(await (await app.request("/documents/doc-busy/structured", as("ua"))).json()).toMatchObject({ availability: { reason: "processing" } });
+  });
+
+  it("with a schema on, a missing result is not-extracted (reprocessable) or processing", async () => {
+    const schema = { type: "object", properties: { total: { type: "number" } } };
+    await sql`update projects set pipeline = ${sql.json({ outputSchema: schema })} where id = 'proj-a'`;
+    try {
+      expect(await (await app.request("/documents/doc-old/structured", as("ua"))).json())
+        .toMatchObject({ structured: null, availability: { reason: "not-extracted", canReprocess: true } });
+      expect(await (await app.request("/documents/doc-old/structured", as("uv"))).json())
+        .toMatchObject({ availability: { reason: "not-extracted", canReprocess: false } });
+      expect(await (await app.request("/documents/doc-busy/structured", as("ua"))).json()).toMatchObject({ availability: { reason: "processing", canReprocess: false } });
+    } finally {
+      await sql`update projects set pipeline = '{}' where id = 'proj-a'`;
+    }
+  });
+
+  it("an unreadable result answers temporarily-unavailable, with no storage detail", async () => {
+    const response = await app.request("/documents/doc-unread/structured", as("ua"));
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body).toEqual({ structured: null, uri: null, availability: expect.objectContaining({ reason: "temporarily-unavailable", canReprocess: false }) });
+    const text = JSON.stringify(body);
+    for (const leak of ["NoSuchKey", "internal-bucket", "s3://"]) expect(text).not.toContain(leak);
   });
 
   it("never serves a PII-blocked document's fields, or a result its policy withheld, even when the stage recorded one", async () => {
@@ -252,6 +309,22 @@ describe("figure ledger", () => {
     expect(viewer.level.resumeBlocked).toMatchObject({ reason: "needs-reprocess", canReprocess: false });
   });
 
+  it("types a PII-withheld figure as withheld and a pending upload as processing, then resumable work once stalled", async () => {
+    const ledger = await (await app.request("/documents/doc-figs/assets", as("ua"))).json();
+    const [held, pending] = ledger.assets;
+    expect(held).toMatchObject({ id: "p1.1", slot: null, refusal: "pii-policy", availability: { reason: "withheld", canReprocess: false } });
+    expect(pending).toMatchObject({ id: "p2.1", slot: null, availability: { reason: "processing", canReprocess: false } });
+    await sql`update document_extraction_levels set updated_at = now() - interval '1 hour' where document_id = 'doc-figs'`;
+    try {
+      const stalled = (await (await app.request("/documents/doc-figs/assets", as("ua"))).json()).assets[1];
+      expect(stalled).toMatchObject({ id: "p2.1", availability: { reason: "not-extracted", canReprocess: true } });
+      const viewer = (await (await app.request("/documents/doc-figs/assets", as("uv"))).json()).assets[1];
+      expect(viewer).toMatchObject({ availability: { reason: "not-extracted", canReprocess: false } });
+    } finally {
+      await sql`update document_extraction_levels set updated_at = now() where document_id = 'doc-figs'`;
+    }
+  });
+
   it("cross-tenant: another organization reads nothing", async () => {
     const response = await app.request("/documents/doc-old/assets", as("ub"));
     expect(response.status).toBe(404);
@@ -271,6 +344,19 @@ describe("search materialization", () => {
         { documentId: "doc-old", page: 2, state: "blocked-pii", availability: expect.objectContaining({ reason: "withheld", canReprocess: false }) },
         { documentId: "doc-old", page: 3, state: "indexed" },
       ]);
+    } finally {
+      vi.unstubAllEnvs();
+      vi.stubEnv("FILE_TOKEN_SECRET", "ingest-version-test-secret-0123456789abcdef");
+    }
+  });
+
+  it("a page that failed for another reason is not-extracted", async () => {
+    vi.stubEnv("DOCSLURP_DEFERRED_PROFILES", "1");
+    try {
+      const body = await (await app.request("/searches/sess-g/materialization", as("ua"))).json();
+      expect(body.pages).toEqual([{ documentId: "doc-c", page: 2, state: "failed",
+        availability: expect.objectContaining({ reason: "not-extracted", canReprocess: true }) }]);
+      expect(JSON.stringify(body)).not.toContain("vision-timeout");
     } finally {
       vi.unstubAllEnvs();
       vi.stubEnv("FILE_TOKEN_SECRET", "ingest-version-test-secret-0123456789abcdef");

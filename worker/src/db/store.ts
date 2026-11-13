@@ -22,8 +22,7 @@ import { adoptPendingAssets, flushAssetLedger, listHostPageImagePages, markAsset
 import { applyDefaultVisionOverride, defaultPipelineFeatures, normalizeStoredPipelineFeatures, PII_BLOCKED_DOCUMENT_STATUS, planRunFailure, type DerivedDocumentTitle, type PrivacyAuditEntry } from "@docslurp/shared";
 
 import { adoptBackfillDocuments } from "../deferred/backfill-adoption.js";
-import { completingDocumentStamp, runStampsIngestVersion, stampDocumentIngestVersion } from "./ingest-version.js";
-import { CURRENT_INGEST_CAPABILITIES, CURRENT_INGEST_VERSION } from "@docslurp/shared";
+import { completingDocumentStamp, runReusesExtraction, runStamp, runStampsIngestVersion, stampDocumentIngestVersion } from "./ingest-version.js";
 import { insertPrivacyAuditRows } from "../lib/privacy-guard.js";
 import type {
   Document,
@@ -1176,9 +1175,10 @@ export class Store {
         const replacements = await supersededInThisTransaction(client, completed.filter(id => !adopted.has(id)));
         await this.announceReplacements(state, replacements, client, logicalId);
         // The run's ingest stamp and its documents' (db/ingest-version.ts) ride on this statement: no extra round trip.
-        const stampDocuments = runStampsIngestVersion(state.run.kind) ? client`with stamped as (${stampDocumentIngestVersion(client, state.run.id)} returning 1)` : client``;
-        const stampRun = runStampsIngestVersion(state.run.kind)
-          ? client`, ingest_version = ${CURRENT_INGEST_VERSION}, ingest_capabilities = ${client.array([...CURRENT_INGEST_CAPABILITIES])}::text[]` : client``;
+        const stamps = runStampsIngestVersion(state.run.kind);
+        const stampMode = runReusesExtraction(state.run.pipeline) ? "inherited" as const : "extracted" as const;
+        const stampDocuments = stamps ? client`with stamped as (${stampDocumentIngestVersion(client, state.run.id, stampMode)} returning 1)` : client``;
+        const stampRun = stamps ? runStamp(client, stampMode) : client``;
         await client`${stampDocuments} update project_runs set status = 'completed', stage = 'completed',
           processed_documents = total_documents, pages_processed = pages_total,
           stats = coalesce(stats, '{}'::jsonb) || ${this.toJson({ pageCharges })}::jsonb,
@@ -1755,7 +1755,9 @@ export class Store {
                   else 'completed'
                 end,
                 updated_at = now()
-                ${runStampsIngestVersion(state.run.kind) ? completingDocumentStamp(client, state.run.id) : client``}
+                ${runStampsIngestVersion(state.run.kind)
+                  ? completingDocumentStamp(client, state.run.id, runReusesExtraction(state.run.pipeline) ? "inherited" : "extracted")
+                  : client``}
             where d.id = ${documentId}`,
           supersededInThisTransactionQuery(client, [documentId]),
         ]);
