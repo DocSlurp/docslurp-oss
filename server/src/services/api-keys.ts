@@ -67,7 +67,7 @@ export const API_KEY_MAX_IP_ALLOWLIST = 50;
  * Opt-in scopes; never granted by default. projects:manage renames projects and changes their settings.
  * `web` is client-key only: server keys use web tools through `search:deep`.
  */
-export const supportedApiKeyScopes = ["ingest", ...SEARCH_SCOPES, "chat", "artifacts", "web", "organizations:read", "organizations:manage", "projects:manage", "admin:models"] as const;
+export const supportedApiKeyScopes = ["ingest", ...SEARCH_SCOPES, "chat", "artifacts", "web", "organizations:read", "organizations:manage", "projects:manage", "pipeline:billed-features", "admin:models"] as const;
 export const apiKeyTypes = ["server", "client"] as const;
 export type ApiKeyType = (typeof apiKeyTypes)[number];
 

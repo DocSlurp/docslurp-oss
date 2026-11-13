@@ -1,4 +1,5 @@
 import { quoteStoredDocuments } from "../services/stored-quote.js";
+import { runOriginOf } from "../lib/run-origin.js";
 import { SEARCH_SCOPES } from "../lib/search-tiers.js";
 import { projectRecommendationVisitsRoutes } from "./project-recommendation-visits.js";
 import { ChatToolBlockedError } from "../services/chat-tool-error.js";
@@ -79,6 +80,7 @@ import {
   reprocessIngestRecommendation,
 } from "../services/ingest-report.js";
 import { chatProject, projectChatDisabledBody, type ChatSearchActivity } from "../services/project-chat.js";
+import { ProjectChatDisabledError } from "../services/project-chat-errors.js";
 import { InvalidRetrievalQueryError, parseRetrievalQueryFlags } from "../lib/retrieval-query-flags.js";
 import { deleteChatFeedback, upsertChatFeedback } from "../services/chat-feedback.js";
 import {
@@ -109,6 +111,7 @@ import {
   type ProjectChatUIMessage,
 } from "@docslurp/shared/project-chat-ui";
 import { acceptApiKeys } from "../lib/route-auth.js";
+import { authorizeActorProjectSearch } from "../lib/search-access.js";
 import { apiKeyCanUpdateContent, CONTENT_UPDATE_SCOPE_MESSAGE } from "../lib/content-update-access.js";
 import { apiErrorResponse, apiStatusError } from "../lib/api-error.js";
 import { indexingModeErrorResponse } from "../lib/indexing-mode-error.js";
@@ -297,10 +300,12 @@ async function createProjectAgentChatResponse(c: Context) {
     return apiStatusError(c, 400, "Missing query");
   }
 
-  const project = await getProject(projectId, userId);
-  if (!project) {
+  // One access read (no dashboard-sized project record): it also yields the explicit search access scope.
+  const authorized = await authorizeActorProjectSearch(getRequestActor(c), projectId, "chat");
+  if (!authorized.ok) {
     return apiErrorResponse(c, 404, "project_not_found", "Project not found");
   }
+  const project = { id: authorized.access.projectId, orgId: authorized.access.orgId };
   const chatDisabled = await projectChatDisabledBody(project.id, userId);
   if (chatDisabled) return apiErrorResponse(c, 403, "chat_disabled", chatDisabled.error);
   if (await chatModelRefused(getRequestActor(c), body.model, project.id)) {
@@ -409,6 +414,7 @@ async function createProjectAgentChatResponse(c: Context) {
           response = await chatProject({
             projectId,
             userId,
+            scope: authorized.scope,
             query,
             actor: getRequestActor(c), signal: c.req.raw.signal,
             answerIngestReport: getRequestActor(c).type === "session",
@@ -920,8 +926,8 @@ export const projectsRoutes = new Hono()
       return apiStatusError(c, 400, "Missing q");
     }
 
-    const project = await getProject(c.req.param("projectId"), userId);
-    if (!project) {
+    const authorized = await authorizeActorProjectSearch(getRequestActor(c), c.req.param("projectId"), "search");
+    if (!authorized.ok) {
       return apiErrorResponse(c, 404, "project_not_found", "Project not found");
     }
 
@@ -978,7 +984,7 @@ export const projectsRoutes = new Hono()
           filters,
           variant: variant || undefined,
           rootSessionId,
-        });
+        }, authorized.scope);
 
         await stream.writeSSE({
           event: "results",
@@ -1379,10 +1385,11 @@ export const projectsRoutes = new Hono()
     if (!choice.success) return apiErrorResponse(c, 400, "invalid_request", "Invalid tier or reasoning", { issues: choice.error.issues });
 
     const userId = c.get("sessionUser").id;
-    const project = await getProject(c.req.param("projectId"), userId);
-    if (!project) {
+    const authorized = await authorizeActorProjectSearch(getRequestActor(c), c.req.param("projectId"), "chat");
+    if (!authorized.ok) {
       return apiErrorResponse(c, 404, "project_not_found", "Project not found");
     }
+    const project = { id: authorized.access.projectId, orgId: authorized.access.orgId };
     const chatDisabled = await projectChatDisabledBody(project.id, userId);
     if (chatDisabled) return apiErrorResponse(c, 403, "chat_disabled", chatDisabled.error);
 
@@ -1391,6 +1398,7 @@ export const projectsRoutes = new Hono()
       response = await chatProject({
         projectId: c.req.param("projectId"),
         userId,
+        scope: authorized.scope,
         query: body.q,
         actor: body.retrievalOnly === true ? undefined : getRequestActor(c), signal: c.req.raw.signal,
         allowConfiguration: body.retrievalOnly === true ? false : undefined,
@@ -1404,6 +1412,7 @@ export const projectsRoutes = new Hono()
     } catch (error) {
       if (error instanceof ChatModelNotAllowedError) return apiErrorResponse(c, 400, "model_not_allowed", error.message);
       if (error instanceof SpeedBoostUnavailableError) return apiErrorResponse(c, 400, "speed_boost_unavailable", error.message);
+      if (error instanceof ProjectChatDisabledError) return apiErrorResponse(c, 403, "chat_disabled", error.message);
       throw error;
     }
 
@@ -1565,7 +1574,7 @@ export const projectsRoutes = new Hono()
       let applied: Awaited<ReturnType<typeof applyProjectChange>>;
       try {
         const plan = await planProjectChange({
-          projectId, userId, input, indexingMode: requestedMode.success ? requestedMode.data : undefined,
+          projectId, userId, input, indexingMode: requestedMode.success ? requestedMode.data : undefined, origin: runOriginOf(c),
         });
         applied = plan
           ? await applyProjectChange({ plan, userId, updateOptions: requestedMode.success ? { indexingMode: requestedMode.data } : undefined })
@@ -1573,7 +1582,7 @@ export const projectsRoutes = new Hono()
       } catch (error) {
         if (error instanceof ProjectSlugError) return apiStatusError(c, error.status, error.message);
         if (error instanceof ConfigConflictError) return apiStatusError(c, error.status, error.message, { details: { category: error.code } });
-        if (error instanceof ChartExportUnavailableError) return apiStatusError(c, error.status, error.message, { details: { category: error.code } });
+        if (error instanceof ChartExportUnavailableError) return apiStatusError(c, error.status, error.message, { code: error.code, details: { field: "chartExport.tier" } });
         return fail(error);
       }
 
@@ -1594,7 +1603,7 @@ export const projectsRoutes = new Hono()
       let indexingJob: { runIds: string[] } | undefined;
       if (modeChange && prepared && prepared.batches.length > 0) {
         try {
-          const started = await commitIndexJobs(prepared, userId);
+          const started = await commitIndexJobs(prepared, userId, runOriginOf(c));
           for (const runId of started.runIds) {
             const run = await getRun(runId, userId);
             if (run) await runLifecycle.start(run);
@@ -1645,7 +1654,7 @@ export const projectsRoutes = new Hono()
       }
       const access = await getProjectAccess(project.id, userId);
       if (!access || !canEditProject(access, userId)) return apiErrorResponse(c, 404, "project_not_found", "Project not found");
-      const result = await estimateProjectChange({ projectId: project.id, userId, input: c.req.valid("json") });
+      const result = await estimateProjectChange({ projectId: project.id, userId, input: c.req.valid("json"), origin: runOriginOf(c) });
       if (!result) return apiErrorResponse(c, 404, "project_not_found", "Project not found");
       return c.json(result);
     },

@@ -9,7 +9,7 @@ import { batchSearchInputSchema, searchFormError, searchInputSchema, searchOptio
 import { streamSSE } from "hono/streaming";
 import { assertCanSpend } from "../services/billing/spend-guard.js";
 import { enforceActorCategoryRateLimit } from "../middleware/rate-limit.js";
-import { acquireChatSlot } from "../middleware/chat-concurrency.js";
+import { acquireChatSlot, chatSlotRefusedResponse } from "../middleware/chat-concurrency.js";
 
 import { aggregateProjectRagSearchRequestSchema, deferredProfilesEnabled, PARSE_SOURCE_RESCAN_REASON, PUBLIC_ERROR_MESSAGES, type ApiErrorCode } from "@docslurp/shared";
 
@@ -30,6 +30,7 @@ import { ProjectAccessError } from "../services/default-project.js";
 import { CrossProjectScopeError, hybridSearch, MissingProjectScopeError, ProjectNotFoundError } from "../services/search.js";
 import { prefetchBatchQueryEmbeddings } from "../search/batch-embeddings.js";
 import { chatProject, projectChatDisabledBody } from "../services/project-chat.js";
+import { ProjectChatDisabledError } from "../services/project-chat-errors.js";
 import { beginChatTurn, chatTurnFailureReason, type ChatTurn, type ChatTurnUsage } from "../services/billing/chat-turn-billing.js";
 import { parseFilters } from "../search/filters.js";
 import { InvalidRetrievalQueryError, parseRetrievalQueryFlags } from "../lib/retrieval-query-flags.js";
@@ -37,7 +38,9 @@ import { publicSearchResponse } from "../lib/search-usage.js";
 import { sql } from "../db.js";
 import { acceptApiKeys } from "../lib/route-auth.js";
 import { currentRequestApiKeyId, currentRequestSearchCeiling } from "../lib/request-context.js";
-import { cacheableApiKeyId, createCacheScopeMemo, readCachedResponse, responseCacheTicket, searchResponseCacheTtlMs, storeResponse, type CacheScopeMemo } from "../search/response-cache.js";
+import { cacheableApiKeyId, createCacheScopeMemo, primeCacheScope, readCachedResponse, responseCacheTicket, searchResponseCacheTtlMs, storeResponse, type CacheScopeMemo } from "../search/response-cache.js";
+import { authorizeActorProjectSearch, type AuthorizedProjectSearch } from "../lib/search-access.js";
+import type { SearchAccessScope } from "../search/access-scope.js";
 export { clearSearchResponseCacheForTests } from "../search/response-cache.js";
 import { SearchCapacityError, withSearchAdmissionGroup } from "../search/search-limiter.js";
 import { SearchModeLimitError } from "../search/search-mode-limits.js";
@@ -64,28 +67,35 @@ async function runSearchBatch(c: Context, parsed: { queries: SearchInput[]; conc
   const results: BatchResult[] = queries.map(() => ({ ok: false,
     error: { code: "REQUEST_ABORTED", message: "Request aborted before search started", status: 499 } }));
   if (signal.aborted) return results;
+  // One access and privacy lookup per project for the whole batch, never reused by another request.
+  const memo = createCacheScopeMemo();
+  const authorizations = new Map<string, Promise<AuthorizedProjectSearch | { ok: false; status: 403 | 404 }>>();
   // Scope and API-key checks first, so embeddings are only prefetched for queries that will run.
   const inputs = await Promise.all(queries.map(async (query, index) => {
     try {
-      const input = { ...query, projectId: await resolveActorProjectId(getRequestActor(c), query.project, query.orgId) };
-      const forbidden = await assertApiKeyProjectAccess(c, input.projectId, "search");
-      if (forbidden) {
+      const projectId = await resolveActorProjectId(getRequestActor(c), query.project, query.orgId);
+      let authorization = authorizations.get(projectId);
+      if (!authorization) {
+        authorization = authorizeActorProjectSearch(getRequestActor(c), projectId, "search");
+        authorizations.set(projectId, authorization);
+      }
+      const granted = await authorization;
+      if (!granted.ok) {
         results[index] = { ok: false, error: {
-          code: forbidden.status === 403 ? "FORBIDDEN" : "PROJECT_NOT_FOUND",
-          message: forbidden.status === 403 ? "Forbidden" : "Project not found", status: forbidden.status } };
+          code: granted.status === 403 ? "FORBIDDEN" : "PROJECT_NOT_FOUND",
+          message: granted.status === 403 ? "Forbidden" : "Project not found", status: granted.status } };
         return null;
       }
-      return input;
+      primeCacheScope(memo, userId, granted.access);
+      return { ...query, projectId, scope: granted.scope };
     } catch (error) {
       results[index] = { ok: false, error: searchError(error) };
       return null;
     }
   }));
   if (!signal.aborted) {
-    await prefetchBatchQueryEmbeddings(inputs.flatMap((input) => input ? [{ query: input.q.replaceAll("\u0000", ""), projectId: input.projectId, options: searchOptions(input) }] : []), userId, signal);
+    await prefetchBatchQueryEmbeddings(inputs.flatMap((input) => input ? [{ query: input.q.replaceAll("\u0000", ""), projectId: input.projectId, options: searchOptions(input), scope: input.scope }] : []), userId, signal);
   }
-  // One access and privacy lookup per project for the whole batch, never reused by another request.
-  const memo = createCacheScopeMemo();
   let next = 0;
   async function worker() {
     while (!signal.aborted && next < queries.length) {
@@ -98,7 +108,7 @@ async function runSearchBatch(c: Context, parsed: { queries: SearchInput[]; conc
           const status = deferred.response.status;
           results[index] = { ok: false, error: { code: status === 401 ? "UNAUTHORIZED" : "FORBIDDEN", message: "Search capability rejected", status } };
         } else {
-          results[index] = { ok: true, data: await retrieve(input, userId, requestApiKeyId(c), deferred.context, memo) };
+          results[index] = { ok: true, data: await retrieve(input, input.scope, userId, requestApiKeyId(c), deferred.context, memo) };
         }
       } catch (error) {
         results[index] = { ok: false, error: searchError(error) };
@@ -117,11 +127,15 @@ function clampSearchLimit(value: number | undefined): number | undefined {
   return Math.max(1, Math.min(100, Math.floor(value)));
 }
 
-/** API-key scope and project checks, answered in the native error envelope. Answers need `chat`; passages need `search`. */
-async function denyProjectAccess(c: Context, projectId: string, scope: "search" | "chat" = "search"): Promise<Response | null> {
-  const denied = await assertApiKeyProjectAccess(c, projectId, scope);
-  if (!denied) return null;
-  return denied.status === 403
+/**
+ * The request's one project access read (lib/search-access.ts): API-key scope, project access, org and allowlist,
+ * answered in the native error envelope on refusal. Answers need `chat`; passages need `search`. The granted result
+ * carries the explicit search access scope and the access row the response cache reuses.
+ */
+async function authorizeProject(c: Context, projectId: string, required: "search" | "chat" = "search"): Promise<AuthorizedProjectSearch | Response> {
+  const granted = await authorizeActorProjectSearch(getRequestActor(c), projectId, required);
+  if (granted.ok) return granted;
+  return granted.status === 403
     ? apiErrorResponse(c, 403, "forbidden", "Forbidden")
     : apiErrorResponse(c, 404, "project_not_found", "Project not found");
 }
@@ -195,8 +209,9 @@ async function handleProjectChat(c: Context, mode: "public" | "grounded") {
   const userId = c.get("sessionUser")?.id;
   if (!userId) return apiErrorResponse(c, 401, "unauthorized", "Missing session");
   const projectId = await resolveActorProjectId(getRequestActor(c), body.project, body.orgId);
-  const forbidden = await denyProjectAccess(c, projectId, "chat");
-  if (forbidden) return forbidden;
+  const authorized = await authorizeProject(c, projectId, "chat");
+  if (authorized instanceof Response) return authorized;
+  // Before the turn starts, so a disabled chat is a plain 403 (chatProject enforces it too, for every caller).
   const chatDisabled = await projectChatDisabledBody(projectId, userId);
   if (chatDisabled) return apiErrorResponse(c, 403, "chat_disabled", chatDisabled.error);
   // Before the turn starts: a browser key continues a session only with its grant
@@ -210,7 +225,7 @@ async function handleProjectChat(c: Context, mode: "public" | "grounded") {
   const signal = c.req.raw.signal;
   let response: Awaited<ReturnType<typeof chatProject>>;
   try {
-    response = await turn.run(() => withDeferredContext(deferred.context, () => chatProject({ projectId, userId,
+    response = await turn.run(() => withDeferredContext(deferred.context, () => chatProject({ projectId, userId, scope: authorized.scope,
       query: body.q, sessionId, sessionToken: body.sessionToken, model: body.model, tier: body.tier, reasoning: body.reasoning, speedBoost: body.speedBoost,
       actor: getRequestActor(c), signal,
       ...(mode === "grounded"
@@ -222,6 +237,7 @@ async function handleProjectChat(c: Context, mode: "public" | "grounded") {
     const usage = await failChatTurn(turn, chatTurnFailureReason(error, signal));
     if (error instanceof ChatModelNotAllowedError) return modelNotAllowed(c);
     if (error instanceof SpeedBoostUnavailableError) return apiErrorResponse(c, 400, "speed_boost_unavailable", error.message);
+    if (error instanceof ProjectChatDisabledError) return apiErrorResponse(c, 403, "chat_disabled", error.message);
     const failure = expectedSearchFailure(error);
     if (failure) return apiErrorResponse(c, failure.status, failure.apiCode, failure.message, usage ? { usage } : undefined);
     throw usage ? withApiErrorDetails(error, { usage }) : error;
@@ -299,15 +315,16 @@ async function projectChatStreamHandler(c: Context) {
 
   const userId = c.get("sessionUser").id;
   const projectId = await resolveActorProjectId(getRequestActor(c), parsed.data.project, parsed.data.orgId);
-  const forbidden = await denyProjectAccess(c, projectId, "chat");
-  if (forbidden) return forbidden;
+  const authorized = await authorizeProject(c, projectId, "chat");
+  if (authorized instanceof Response) return authorized;
+  // Checked before the stream opens so a disabled chat is a real 403, not an error event.
   const chatDisabled = await projectChatDisabledBody(projectId, userId);
   if (chatDisabled) return apiErrorResponse(c, 403, "chat_disabled", chatDisabled.error);
   if (await chatModelRefused(getRequestActor(c), model, projectId)) return modelNotAllowed(c);
   const sessionId = chatSessionForRequest(getRequestActor(c), { projectId, sessionId: parsed.data.sessionId, sessionToken });
   // Refuse before the stream opens, so a blocked spend is a 402.
   // Pre-check only: chatProject takes the interactive hold.
-  await assertCanSpend(null, projectId, { kind: "interactive", hold: false });
+  await assertCanSpend(authorized.scope.orgId, projectId, { kind: "interactive", hold: false });
   c.header("Cache-Control", "no-cache");
   c.header("X-Accel-Buffering", "no");
 
@@ -341,10 +358,20 @@ async function projectChatStreamHandler(c: Context) {
       response = await withDeferredContext(deferred.context, () => chatProject({
         projectId,
         userId,
+        scope: authorized.scope,
         query,
         actor: getRequestActor(c), allowAgentTools: env.publicChatAgentEnabled, signal: AbortSignal.any([c.req.raw.signal, abort.signal]),
         sessionId, sessionToken,
-        model, tier: parsed.data.tier, reasoning: parsed.data.reasoning, speedBoost: parsed.data.speedBoost, filters: parsed.data.filters
+        model, tier: parsed.data.tier, reasoning: parsed.data.reasoning, speedBoost: parsed.data.speedBoost, filters: parsed.data.filters,
+        // Answer text as the model writes it. The final `message` frame still carries the whole answer: clients that
+        // ignore `delta` (or a moderated turn, whose text arrives as one delta after the check) lose nothing.
+        onTextDelta: async (text) => {
+          if (!text || abort.signal.aborted) return;
+          pendingEvents = pendingEvents
+            .then(() => stream.writeSSE({ event: "delta", data: JSON.stringify({ text }) }))
+            .catch(() => undefined);
+          await pendingEvents;
+        },
       }));
       await pendingEvents;
       await stream.writeSSE({
@@ -412,7 +439,7 @@ function requestApiKeyId(c: Context): string | null | undefined {
  * API key's scopes first; the cache never serves a request that has not passed them.
  * `memo` shares access and privacy lookups across the searches of one request or batch.
  */
-async function retrieve(body: SearchInput & { projectId: string }, userId: string, actorApiKeyId: string | null | undefined, deferred: DeferredRequestContext | undefined, memo: CacheScopeMemo): Promise<SearchData> {
+async function retrieve(body: SearchInput & { projectId: string }, scope: SearchAccessScope, userId: string, actorApiKeyId: string | null | undefined, deferred: DeferredRequestContext | undefined, memo: CacheScopeMemo): Promise<SearchData> {
   // A capability changes the policy a cached answer was produced under: never share across it.
   const ttl = deferred?.policy || body.geo ? 0 : searchResponseCacheTtlMs();
   const apiKeyId = cacheableApiKeyId(actorApiKeyId, currentRequestApiKeyId());
@@ -428,7 +455,7 @@ async function retrieve(body: SearchInput & { projectId: string }, userId: strin
       timings: { cachedMs: 0, totalMs: 0 },
     };
   }
-  const search = () => hybridSearch(body.q, userId, searchOptions(body));
+  const search = () => hybridSearch(body.q, userId, searchOptions(body), scope);
   const data = publicSearchResponse(await (deferred ? withDeferredContext(deferred, search) : search()));
   // A response with pages still materializing must not be replayed as final.
   if (ticket && data.availability?.status === "complete" && !(data.deferred && data.deferred.pendingPages > 0)) {
@@ -454,8 +481,8 @@ export const searchRoutes = new Hono()
       c.req.query("project"),
       c.req.query("orgId"),
     );
-    const forbidden = await denyProjectAccess(c, projectId);
-    if (forbidden) return forbidden;
+    const authorized = await authorizeProject(c, projectId);
+    if (authorized instanceof Response) return authorized;
     const runId = c.req.query("runId");
     const limit = c.req.query("limit");
     const variant = c.req.query("variant");
@@ -502,7 +529,7 @@ export const searchRoutes = new Hono()
         ...flags,
         filters,
         variant: variant || undefined,
-      }));
+      }, authorized.scope));
       return c.json(publicSearchResponse(response));
     } catch (error) {
       const failure = expectedSearchFailure(error);
@@ -529,12 +556,15 @@ export const searchRoutes = new Hono()
     const userId = c.get("sessionUser")?.id;
     if (!userId) return apiErrorResponse(c, 401, "unauthorized", "Missing session");
     const projectId = await resolveActorProjectId(getRequestActor(c), parsed.data.project, parsed.data.orgId);
-    const forbidden = await denyProjectAccess(c, projectId);
-    if (forbidden) return forbidden;
+    const authorized = await authorizeProject(c, projectId);
+    if (authorized instanceof Response) return authorized;
     const deferred = await deferredRequestContext(c, projectId);
     if ("response" in deferred) return deferred.response;
+    // The route's access read stands in for the response cache's ticket lookup (same query, same request).
+    const memo = createCacheScopeMemo();
+    primeCacheScope(memo, userId, authorized.access);
     try {
-      return c.json(await retrieve({ ...parsed.data, projectId }, userId, requestApiKeyId(c), deferred.context, createCacheScopeMemo()));
+      return c.json(await retrieve({ ...parsed.data, projectId }, authorized.scope, userId, requestApiKeyId(c), deferred.context, memo));
     } catch (error) {
       const failure = expectedSearchFailure(error);
       if (failure) return apiErrorResponse(c, failure.status, failure.apiCode, failure.message);
@@ -564,15 +594,13 @@ export const searchRoutes = new Hono()
 
     // An answer is a chat turn: it spends the chat-ai allowance and holds a
     // chat slot like /v1/chat (the path alone classifies it as search).
-    let slot: { release: () => void } | null | "uncapped" = "uncapped";
+    let slot: { release: () => void } | "uncapped" = "uncapped";
     if (parsed.data.generateAnswer) {
       const limited = await enforceActorCategoryRateLimit(c, "chat-ai");
       if (limited) return limited;
-      slot = acquireChatSlot(c);
-      if (!slot) {
-        c.header("Retry-After", "5");
-        return apiErrorResponse(c, 429, "rate_limited", "Too many chat requests in progress for this key; wait for one to finish");
-      }
+      const acquired = await acquireChatSlot(c);
+      if (acquired === "full" || acquired === "unavailable") return chatSlotRefusedResponse(c, acquired);
+      slot = acquired;
     }
 
     try {
@@ -637,7 +665,7 @@ export const searchRoutes = new Hono()
               or exists (
                 select 1
                 from projects w
-                where w.id = s.metadata ->> 'projectId'
+                where w.id = s.project_id
                   and w.org_id = ${apiKey?.orgId ?? null}
               )
             )
@@ -660,7 +688,7 @@ export const searchesRoutes = new Hono().get("/:sessionId/materialization", asyn
   const { sessionId } = c.req.param();
   await awaitSearchSessionWrites(sessionId);
   const [row] = await sql<{ project_id: string | null; candidates: unknown; deferred: unknown }[]>`
-    select metadata ->> 'projectId' as project_id,
+    select project_id,
            metadata -> 'diagnostics' -> 'deferredCandidates' as candidates,
            metadata -> 'deferred' as deferred
     from search_sessions

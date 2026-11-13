@@ -3,7 +3,9 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   BILLABLE_UNIT_METRICS,
   CHART_EXPORT_DOCUMENT_CAPS,
-  chartExportAvailable,
+  chartExportSwitch,
+  chartExportSwitchWarning,
+  chartExportModelsAvailable,
   CHART_EXPORT_CHARGING_STAGES,
   CHART_EXPORT_VISUALS_PER_PAGE_PRIOR,
   DISTINCT_TEST_PRICING,
@@ -98,11 +100,14 @@ describe("expectedBillableVisuals", () => {
 });
 
 describe("chartExportConfigOf", () => {
-  it("is null when absent, off or invalid", () => {
+  it("is null unless the tier is models (free, off, default, invalid and legacy configs price nothing)", () => {
     expect(chartExportConfigOf(base)).toBeNull();
-    expect(chartExportConfigOf({ chartExport: { enabled: false } })).toBeNull();
-    expect(chartExportConfigOf({ chartExport: { enabled: true, formats: ["bogus"] } })).toBeNull();
-    expect(chartExportConfigOf({ chartExport: { enabled: true } })).toMatchObject({ formats: ["description", "mermaid"], diagrams: true });
+    expect(chartExportConfigOf({ chartExport: { tier: "off" } })).toBeNull();
+    expect(chartExportConfigOf({ chartExport: { tier: "free" } })).toBeNull();
+    expect(chartExportConfigOf({ chartExport: { enabled: true } })).toBeNull();
+    expect(chartExportConfigOf({ chartExport: { tier: "models", formats: ["bogus"] } })).toBeNull();
+    expect(chartExportConfigOf({ chartExport: { tier: "models", generatorModel: "llm://x/y" } })).toBeNull();
+    expect(chartExportConfigOf({ chartExport: { tier: "models" } })).toMatchObject({ tier: "models", formats: ["description", "mermaid"], diagrams: true });
   });
 });
 
@@ -111,23 +116,23 @@ describe("estimatePipelineWork with chart export", () => {
   it("adds per-visual credits only when the option is on and a charging stage runs", () => {
     installTestPricing(DISTINCT_TEST_PRICING);
     const off = estimatePipelineWork({ features: base, stages, pages: 400, documents: 4, env });
-    const on = estimatePipelineWork({ features: withChartExport({ enabled: true }), stages, pages: 400, documents: 4, env });
+    const on = estimatePipelineWork({ features: withChartExport({ tier: "models" }), stages, pages: 400, documents: 4, env });
     // Each visual: a first read (0.07) plus the expected half of a billed second read (test pricing 0.5 x 0.07).
     expect(on.credits!.low - off.credits!.low).toBeCloseTo(Math.ceil(400 * CHART_EXPORT_VISUALS_PER_PAGE_PRIOR.low) * (0.07 + 0.5 * 0.07), 4);
     expect(on.credits!.high - off.credits!.high).toBeCloseTo(Math.ceil(400 * CHART_EXPORT_VISUALS_PER_PAGE_PRIOR.high) * (0.07 + 0.5 * 0.07), 4);
     expect(on.basis).toMatch(/chart export: 8 to 100 model-read visuals \(per-page planning prior\)/);
-    const indexOnly = estimatePipelineWork({ features: withChartExport({ enabled: true }), stages: ["index"], pages: 400, documents: 4, env });
+    const indexOnly = estimatePipelineWork({ features: withChartExport({ tier: "models" }), stages: ["index"], pages: 400, documents: 4, env });
     const indexOnlyOff = estimatePipelineWork({ features: base, stages: ["index"], pages: 400, documents: 4, env });
     expect(indexOnly.credits).toEqual(indexOnlyOff.credits);
     // The generator runs in vision-extract only: re-running extraction alone exports nothing.
-    const markdownOnly = estimatePipelineWork({ features: withChartExport({ enabled: true }), stages: ["extract-markdown"], pages: 400, documents: 4, env });
+    const markdownOnly = estimatePipelineWork({ features: withChartExport({ tier: "models" }), stages: ["extract-markdown"], pages: 400, documents: 4, env });
     const markdownOnlyOff = estimatePipelineWork({ features: base, stages: ["extract-markdown"], pages: 400, documents: 4, env });
     expect(markdownOnly.credits).toEqual(markdownOnlyOff.credits);
     expect(CHART_EXPORT_CHARGING_STAGES).toEqual(["vision-extract"]);
   });
   it("prices recorded visual counts and direct-mode formats", () => {
     installTestPricing(DISTINCT_TEST_PRICING);
-    const features = withChartExport({ enabled: true, formats: ["description", "matplotlib"] });
+    const features = withChartExport({ tier: "models", formats: ["description", "matplotlib"] });
     const off = estimatePipelineWork({ features: base, stages, pages: 400, documents: 4, env });
     const measured = estimatePipelineWork({
       features, stages, pages: 400, documents: 4, env,
@@ -138,21 +143,45 @@ describe("estimatePipelineWork with chart export", () => {
     expect(measured.credits!.high - off.credits!.high).toBeCloseTo(6 * (2 * 0.07 + 0.5 * 0.07), 4);
     expect(measured.basis).toMatch(/6 model-read visuals \(recorded counts\)/);
   });
-  it("prices nothing while the deployment kill switch is off", () => {
+  it("prices the free tier at 0 credits, whatever the switch", () => {
     installTestPricing(DISTINCT_TEST_PRICING);
-    for (const flag of [undefined, "off", "no", "0", "enabled", ""]) {
+    const off = estimatePipelineWork({ features: base, stages, pages: 400, documents: 4, env });
+    for (const tier of ["free", "off"] as const) {
+      const free = estimatePipelineWork({ features: withChartExport({ tier }), stages, pages: 400, documents: 4, env });
+      expect(free.credits).toEqual(off.credits);
+      expect(free.basis).not.toMatch(/chart export/);
+    }
+    // A per-request tier wins over the project's: models prices, free does not.
+    const requested = estimatePipelineWork({ features: base, stages, pages: 400, documents: 4, env, chartExportTier: "models" });
+    expect(requested.credits!.high).toBeGreaterThan(off.credits!.high);
+    const downgraded = estimatePipelineWork({ features: withChartExport({ tier: "models" }), stages, pages: 400, documents: 4, env, chartExportTier: "free" });
+    expect(downgraded.credits).toEqual(off.credits);
+  });
+  it("prices nothing unless the deployment kill switch is on", () => {
+    installTestPricing(DISTINCT_TEST_PRICING);
+    for (const flag of [undefined, "off", "no", "0", "enabled", "", "free"]) {
       const killed = { STRIPE_SECRET_KEY: "sk_test", DOCSLURP_CHART_EXPORT: flag };
       const off = estimatePipelineWork({ features: base, stages, pages: 400, documents: 4, env: killed });
-      const on = estimatePipelineWork({ features: withChartExport({ enabled: true }), stages, pages: 400, documents: 4, env: killed });
+      const on = estimatePipelineWork({ features: withChartExport({ tier: "models" }), stages, pages: 400, documents: 4, env: killed });
       expect(on.credits).toEqual(off.credits);
       expect(on.basis).not.toMatch(/chart export/);
     }
-    for (const flag of ["on", " ON ", "1", "true", "True", "yes", "YES"]) expect(chartExportAvailable({ DOCSLURP_CHART_EXPORT: flag })).toBe(true);
-    for (const flag of [undefined, "", "off", "0", "false", "no", "onn", "enabled"]) expect(chartExportAvailable({ DOCSLURP_CHART_EXPORT: flag })).toBe(false);
-    expect(chartExportAvailable({})).toBe(false);
+    for (const flag of ["on", " ON ", "1", "true", "True", "yes", "YES"]) {
+      expect(chartExportSwitch({ DOCSLURP_CHART_EXPORT: flag })).toBe("on");
+      expect(chartExportModelsAvailable({ DOCSLURP_CHART_EXPORT: flag })).toBe(true);
+    }
+    for (const flag of ["free", " FREE "]) expect(chartExportSwitch({ DOCSLURP_CHART_EXPORT: flag })).toBe("free");
+    for (const flag of [undefined, "", "off", "0", "false", "no", "onn", "enabled"]) {
+      expect(chartExportSwitch({ DOCSLURP_CHART_EXPORT: flag })).toBe("off");
+      expect(chartExportModelsAvailable({ DOCSLURP_CHART_EXPORT: flag })).toBe(false);
+    }
+    expect(chartExportSwitch({})).toBe("off");
+    // Unknown values are off and warned about; known ones are not.
+    expect(chartExportSwitchWarning({ DOCSLURP_CHART_EXPORT: "onn" })).toMatch(/unknown value/);
+    for (const flag of [undefined, "off", "free", "on", "1"]) expect(chartExportSwitchWarning({ DOCSLURP_CHART_EXPORT: flag })).toBeNull();
   });
   it("shows no credits when billing is disabled", () => {
-    const e = estimatePipelineWork({ features: withChartExport({ enabled: true }), stages, pages: 400, documents: 4, env: {} });
+    const e = estimatePipelineWork({ features: withChartExport({ tier: "models" }), stages, pages: 400, documents: 4, env: {} });
     expect(e.credits).toBeNull();
   });
 });

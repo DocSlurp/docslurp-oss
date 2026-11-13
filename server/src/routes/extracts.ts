@@ -1,4 +1,6 @@
 import { Hono, type Context } from "hono";
+import type { PipelineFeatureOverrides } from "@docslurp/shared";
+import { runOriginOf } from "../lib/run-origin.js";
 import { z } from "zod";
 import { zValidator } from "@hono/zod-validator";
 import {
@@ -39,6 +41,7 @@ import {
   parseFormDocumentTags,
   parseFormProjectIntakePipeline,
   parseProjectIntakePipeline,
+  assertIntakeChartExportTier,
   parseProjectIntakeTemplateKey,
 } from "../services/project-intake-actions.js";
 import {
@@ -192,6 +195,12 @@ function intakeFailure(c: Context, error: unknown): Response {
 }
 
 /** `ports` lets tests drive the real routes against fake storage, records, and workflow start. */
+/** Only the request's chart export override (for a run into a project the request just created), or undefined. */
+function chartExportOnly(pipeline: PipelineFeatureOverrides | undefined): PipelineFeatureOverrides | undefined {
+  const chartExport = (pipeline as { chartExport?: unknown } | undefined)?.chartExport;
+  return chartExport ? ({ chartExport } as PipelineFeatureOverrides) : undefined;
+}
+
 export const createExtractsRoutes = (ports: ProjectIntakePorts = projectIntakePorts) => acceptApiKeys(new Hono()
   .use("*", async (c, next) => {
     const actor = getRequestActor(c);
@@ -256,8 +265,10 @@ export const createExtractsRoutes = (ports: ProjectIntakePorts = projectIntakePo
         orgId: target.project.orgId,
         project: target.project.id,
         allowedProjectIds: actorAllowedProjectIds(actor),
+        origin: runOriginOf(c),
         indexingMode: indexingModeSchema.safeParse(body.indexingMode).data,
-        pipeline: target.created ? undefined : pipeline,
+        // A new project keeps only the request's chart tier (the rest of the override sets the project up elsewhere).
+        pipeline: target.created ? chartExportOnly(pipeline) : pipeline,
         files,
         canonicalIds,
         tags: parseFormDocumentTags(body.tags),
@@ -288,6 +299,7 @@ export const createExtractsRoutes = (ports: ProjectIntakePorts = projectIntakePo
     let target: { project: ProjectRecord; created: boolean } | null = null;
     let extractId: string | null = null;
     try {
+      assertIntakeChartExportTier(body.pipeline?.chartExport?.tier, "extract url");
       target = await extractProject(actor, body, c.get("apiKey")?.orgId ?? body.orgId ?? null, inferProjectTitleFromUrls(urls), ports);
       const extract = await createExtract({
         userId: actor.userId,
@@ -302,8 +314,9 @@ export const createExtractsRoutes = (ports: ProjectIntakePorts = projectIntakePo
         orgId: target.project.orgId,
         project: target.project.id,
         allowedProjectIds: actorAllowedProjectIds(actor),
+        origin: runOriginOf(c),
         indexingMode: body.indexingMode,
-        pipeline: target.created ? undefined : body.pipeline,
+        pipeline: target.created ? chartExportOnly(body.pipeline) : body.pipeline,
         tags: body.tags,
         urls,
         canonicalIds: body.urls.map((entry) => typeof entry === "string" ? null : entry.canonicalId ?? null),
@@ -345,10 +358,11 @@ export const createExtractsRoutes = (ports: ProjectIntakePorts = projectIntakePo
         orgId: target.project.orgId,
         apiKeyId: c.get("apiKey")?.keyId ?? null,
         allowedProjectIds: actorAllowedProjectIds(actor),
+        origin: runOriginOf(c),
         projectId: target.project.id,
         projectName: null,
         templateKey: null,
-        pipeline: target.created ? {} : pipeline,
+        pipeline: target.created ? chartExportOnly(pipeline) ?? {} : pipeline,
         files: input.files,
         tags: input.tags,
         extract,

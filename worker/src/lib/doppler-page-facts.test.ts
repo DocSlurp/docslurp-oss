@@ -331,7 +331,8 @@ describe("dopplerPageFactsMode", () => {
 describe("pageLayoutFactsFromDopplerFacts (golden)", () => {
   it("maps every field facts can supply, and leaves the rest unknown", () => {
     const layout = pageLayoutFactsFromDopplerFacts(parse(fullFixture()));
-    const logo = { bbox: [36, 36, 108, 72], coverage: 0.0103, widthPx: 300, heightPx: 150, bitsPerComponent: 8, colorSpace: "rgb", encoding: "image",
+    // Coverage is capped by the image's own box (72 x 36 pt of 612 x 792): the fixture's reported 0.0103 is more than it allows.
+    const logo = { bbox: [36, 36, 108, 72], coverage: 0.0053, widthPx: 300, heightPx: 150, bitsPerComponent: 8, colorSpace: "rgb", encoding: "image",
       ppi: [300, 300], bytesPerPixel: null, repeated: true, wordsInside: null };
     expect(Object.fromEntries(layout)).toEqual({
       1: { images: [logo], tables: null, words: 410, grids: null, tableCoverage: null, widthPt: 612, heightPt: 792, invisibleWords: 0, textLayer: "visible" },

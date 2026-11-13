@@ -27,6 +27,11 @@ vi.mock("../services/billing/spend-guard.js", async (importOriginal) => ({
   assertCanSpend: vi.fn(async () => undefined),
   canSpend: vi.fn(async () => true),
 }));
+// Route access reads (lib/search-access.ts) answered from this file's getProject mock with the real scope rules.
+vi.mock("../lib/search-access.js", async () => {
+  const { authorizeFromProjectMock } = await import("./helpers/search-access.js");
+  return { authorizeActorProjectSearch: authorizeFromProjectMock(async (id, userId) => (await import("../services/projects.js")).getProject(id, userId)) };
+});
 vi.mock("../services/project-chat.js", () => ({ chatProject, projectChatDisabledBody }));
 vi.mock("../services/projects.js", () => ({ listProjects, getProject, resolveProjectRef, findProjectForInput, ensureDefaultProject }));
 vi.mock("../services/api-keys.js", () => ({ validateApiKey }));
@@ -54,7 +59,8 @@ beforeAll(async () => {
   server = serve({ fetch: app.fetch, hostname: "127.0.0.1", port: 0 });
   if (!server.listening) await new Promise<void>((resolve) => server.once("listening", resolve));
   baseURL = `http://127.0.0.1:${(server.address() as AddressInfo).port}/v1`;
-});
+// Importing the route graph can take longer than the default hook timeout on a busy machine.
+}, 60_000);
 
 afterAll(async () => {
   if ("closeAllConnections" in server) server.closeAllConnections();

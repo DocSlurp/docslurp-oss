@@ -1,4 +1,7 @@
 import { reportPublicError } from "../lib/public-errors.js";
+import { CHART_EXPORT_TIER_UNAVAILABLE_CODE, chartExportOverrideSchema } from "@docslurp/shared";
+import { chartExportOverrideError } from "../services/chart-export-availability.js";
+import { runOriginOf } from "../lib/run-origin.js";
 import { Hono, type Context } from "hono";
 import { z } from "zod";
 import { zValidator } from "@hono/zod-validator";
@@ -48,6 +51,7 @@ import {
   parseFormProjectIntakePipeline,
   parseFormDocumentTags,
   parseProjectIntakePipeline,
+  assertIntakeChartExportTier,
   parseProjectIntakeTemplateKey,
 } from "../services/project-intake-actions.js";
 import {
@@ -309,6 +313,7 @@ export const createUploadsRoutes = (ports: ProjectIntakePorts = projectIntakePor
             orgId,
             apiKeyId: c.get("apiKey")?.keyId ?? null,
             allowedProjectIds: actorAllowedProjectIds(actor),
+            origin: runOriginOf(c),
             projectId: target.projectId,
             projectName: target.projectName,
             templateKey: input.templateKey ?? null,
@@ -450,6 +455,8 @@ export const createUploadsRoutes = (ports: ProjectIntakePorts = projectIntakePor
         newProject: requestedNewProject,
         templateKey: requestedTemplateKey,
         allowedProjectIds: actorAllowedProjectIds(getRequestActor(c)),
+        origin: runOriginOf(c),
+        apiKeyId: c.get("apiKey")?.keyId ?? null,
         indexingMode: indexingModeSchema.safeParse(body.indexingMode).data,
         pipeline,
         speedBoost,
@@ -492,6 +499,8 @@ export const createUploadsRoutes = (ports: ProjectIntakePorts = projectIntakePor
       }
       let result;
       try {
+        // The same refusal as file uploads (400 chart_export_tier_unavailable), never a silent downgrade.
+        assertIntakeChartExportTier(body.pipeline?.chartExport?.tier, "url ingest");
         result = await createRemoteUrlProjectIntake({
           userId,
           orgId: c.get("apiKey")?.orgId ?? body.orgId,
@@ -499,6 +508,8 @@ export const createUploadsRoutes = (ports: ProjectIntakePorts = projectIntakePor
           newProject: body.newProject,
           templateKey: body.templateKey,
           allowedProjectIds: actorAllowedProjectIds(getRequestActor(c)),
+          origin: runOriginOf(c),
+          apiKeyId: c.get("apiKey")?.keyId ?? null,
           indexingMode: body.indexingMode,
           pipeline: body.pipeline,
           speedBoost: body.speedBoost === true,
@@ -569,6 +580,8 @@ const uploadEstimateSchema = z.object({
   files: z.array(quoteFileSchema).min(1).max(1000),
   /** Knobs to quote with instead of the project's own (the same as `POST /v1/estimate`). */
   settings: quoteSettingsSchema.partial().optional(),
+  /** The same per-request chart export override the upload takes; priced only for `models`. */
+  chartExport: chartExportOverrideSchema.optional(),
   project: projectInputSchema.optional(),
   orgId: z.string().optional(),
 });
@@ -601,7 +614,13 @@ export const uploadEstimateRoutes = new Hono().post(
     if (!project || (actor.type === "apiKey" && !apiKeyCanUseProject(actor.apiKey, project))) {
       return apiErrorResponse(c, 404, "project_not_found", "Project not found");
     }
-    const { estimate, media, profile, quote } = await estimateUpload({ files: body.files, project, speedBoost: body.speedBoost === true, settings: body.settings });
+    // After the scope and project checks: a caller that may not upload here never learns what the deployment offers.
+    const refusedTier = chartExportOverrideError(body.chartExport?.tier, "upload estimate");
+    if (refusedTier) return apiStatusError(c, 400, refusedTier, { code: CHART_EXPORT_TIER_UNAVAILABLE_CODE, details: { field: "chartExport.tier" } });
+    const { estimate, media, profile, quote, chartExport } = await estimateUpload({
+      files: body.files, project, speedBoost: body.speedBoost === true, settings: body.settings,
+      chartExportTier: body.chartExport?.tier ?? null, origin: runOriginOf(c),
+    });
     // `orgId` is the organization whose credits the upload would spend, for reading its balance. `profile` is the
     // project's settings the estimate priced with; `kind` labels the answer an estimate, never a charge.
     return c.json({
@@ -612,6 +631,8 @@ export const uploadEstimateRoutes = new Hono().post(
       pricingVersion: pricingVersion(),
       // The full estimate (ingest, monthly hosting and usage, lines) for the project's settings and any overrides.
       quote,
+      // The chart export tier the upload would run with (request, project or the caller's default) and its credits.
+      chartExport,
       billing: billingState(),
       orgId: project.orgId,
       billingExempt: isBillingExemptOrg(project.orgId),

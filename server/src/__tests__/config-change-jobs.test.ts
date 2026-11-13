@@ -515,7 +515,7 @@ describe("chart export estimates", () => {
     // Seeded where the worker records them: the vision-extract stage stats of the document's run.
     await sql`insert into document_run_stage_states (run_id, document_id, stage_name, status, stats)
       values ('src', 'd0', 'vision-extract', 'completed', ${sql.json({ visualCandidates: { charts: 3, diagrams: 0, pagesWithUnexportedVisuals: [1], exported: 0, bySource: {} } })})`;
-    const features = pipeline({ chartExport: { enabled: true, formats: ["description", "mermaid"], diagrams: true, generatorModel: null } });
+    const features = pipeline({ chartExport: { tier: "models", formats: ["description", "mermaid"], diagrams: true } });
     const estimate = (documentIds: string[], projectId = "w") => change.estimateWork({
       features, stages: ["vision-extract"], documents: documentIds.length, pages: 10, orgId: "o1", env: { ...process.env, DOCSLURP_CHART_EXPORT: "on" },
       visualScope: { projectId, documentIds },
@@ -527,16 +527,81 @@ describe("chart export estimates", () => {
     expect((await estimate(["d0"], "other")).basis).toMatch(/per-page planning prior/);
   });
 
-  it("refuses to turn chart export on while the deployment kill switch is off", async () => {
+  it("refuses the models tier unless the deployment kill switch is on; free and off need no switch", async () => {
     await seed({ credits: 10_000, documents: 1 });
     const { ChartExportUnavailableError } = await import("../services/chart-export-availability.js");
+    for (const flag of ["off", "free", "bogus"]) {
+      await expect(change.planProjectChange({
+        projectId: "w", userId: "u1", input: { pipeline: { chartExport: { tier: "models" } } } as never, env: { DOCSLURP_CHART_EXPORT: flag },
+      })).rejects.toBeInstanceOf(ChartExportUnavailableError);
+    }
+    // Off is always allowed; an explicit free needs DOCSLURP_CHART_EXPORT_FREE_EXPLICIT=on and a switch that is not off.
+    const off = await change.planProjectChange({ projectId: "w", userId: "u1", input: { pipeline: { chartExport: { tier: "off" } } } as never, env: { DOCSLURP_CHART_EXPORT: "off" } });
+    expect(off?.nextPipeline.chartExport.tier).toBe("off");
     await expect(change.planProjectChange({
-      projectId: "w", userId: "u1", input: { pipeline: { chartExport: { enabled: true } } } as never, env: { DOCSLURP_CHART_EXPORT: "off" },
-    })).rejects.toBeInstanceOf(ChartExportUnavailableError);
-    const allowed = await change.planProjectChange({
-      projectId: "w", userId: "u1", input: { pipeline: { chartExport: { enabled: true } } } as never, env: { ...process.env, DOCSLURP_CHART_EXPORT: "on" },
+      projectId: "w", userId: "u1", input: { pipeline: { chartExport: { tier: "free" } } } as never, env: { DOCSLURP_CHART_EXPORT: "on" },
+    })).rejects.toMatchObject({ status: 400, code: "chart_export_tier_unavailable" });
+    const free = await change.planProjectChange({
+      projectId: "w", userId: "u1", input: { pipeline: { chartExport: { tier: "free" } } } as never, env: { DOCSLURP_CHART_EXPORT: "on", DOCSLURP_CHART_EXPORT_FREE_EXPLICIT: "on" },
     });
-    expect(allowed?.nextPipeline.chartExport.enabled).toBe(true);
+    expect(free?.nextPipeline.chartExport.tier).toBe("free");
+    const allowed = await change.planProjectChange({
+      projectId: "w", userId: "u1", input: { pipeline: { chartExport: { tier: "models" } } } as never, env: { ...process.env, DOCSLURP_CHART_EXPORT: "on" },
+    });
+    expect(allowed?.nextPipeline.chartExport.tier).toBe("models");
+  });
+
+  it("classifies a tier change for the caller's surface and prices only models (the chat suggestion path)", async () => {
+    await seed({ credits: 10_000, documents: 2 });
+    const env = { ...process.env, DOCSLURP_CHART_EXPORT: "on", DOCSLURP_CHART_EXPORT_FREE_EXPLICIT: "on" };
+    const plan = (tier: string, origin: "app" | "machine") => change.planProjectChange({
+      projectId: "w", userId: "u1", input: { apply: "reindex" }, pipelineOverrides: { chartExport: { tier } } as never, env, origin,
+    });
+    // Moving to models (what chat proposes): a billed reindex through vision-extract, with chart reads in the estimate.
+    const models = await plan("models", "app");
+    expect(models?.impact.kind).toBe("reindex-recommended");
+    expect(models?.impact.stages).toContain("vision-extract");
+    expect(models?.estimate?.basis).toMatch(/chart export: .* model-read visuals/);
+    // Moving an API caller (default off) to free: an optional reindex with no chart charge.
+    const free = await plan("free", "machine");
+    expect(free?.impact.kind).toBe("reindex-recommended");
+    expect(free?.estimate?.basis ?? "").not.toMatch(/chart export/);
+    // In the app the default is already free: nothing for stored documents.
+    expect((await plan("free", "app"))?.impact.kind).not.toBe("reindex-recommended");
+    // Off applies to new uploads only.
+    expect((await plan("off", "app"))?.impact.kind).toBe("new-uploads");
+    // The origin is recorded on the plan, so the re-index runs it queues resolve the same way.
+    expect(models?.origin).toBe("app");
+  });
+
+  it("a reindex on a project with no tier keeps each document's source-run tier and records the caller's origin (M5, T3)", async () => {
+    await seed({ credits: 10_000, documents: 2 });
+    // The documents were uploaded from the app with free chart exports (their run's stamp).
+    await sql`update project_runs set pipeline = jsonb_set(pipeline, '{chartExport}', ${sql.json({ tier: "free", formats: ["description", "mermaid"], diagrams: true })}) where id = 'src'`;
+    const plan = await change.planProjectChange({ projectId: "w", userId: "u1", input: { ...embeddingChange(), apply: "reindex" } as never, origin: "machine" });
+    const applied = await change.applyProjectChange({ plan: plan!, userId: "u1" });
+    expect(applied?.queuedRunIds.length ?? 0).toBeGreaterThan(0);
+    const runs = await sql<{ pipeline: { chartExport?: { tier?: string } }; origin: string }[]>`select pipeline, origin from project_runs where kind = 'reindex'`;
+    expect(runs.length).toBeGreaterThan(0);
+    // An API-key reindex (machine default off) does not drop the documents' free exports.
+    for (const run of runs) expect(run).toMatchObject({ origin: "machine", pipeline: { chartExport: { tier: "free" } } });
+  });
+
+  it("a reindex after the project moved from models to unset inherits at most the project's current tier (R2-M1)", async () => {
+    await seed({ credits: 10_000, documents: 2 });
+    vi.stubEnv("DOCSLURP_CHART_EXPORT", "on");
+    vi.stubEnv("DOCSLURP_CHART_EXPORT_APP_DEFAULT", "off");
+    try {
+      // The documents were read with AI while the project was on models; the project is now unset (production: off).
+      await sql`update project_runs set pipeline = jsonb_set(pipeline, '{chartExport}', ${sql.json({ tier: "models", formats: ["description", "mermaid"], diagrams: true })}) where id = 'src'`;
+      const plan = await change.planProjectChange({ projectId: "w", userId: "u1", input: { ...embeddingChange(), apply: "reindex" } as never, origin: "app" });
+      await change.applyProjectChange({ plan: plan!, userId: "u1" });
+      const runs = await sql<{ pipeline: { chartExport?: { tier?: string } } }[]>`select pipeline from project_runs where kind = 'reindex'`;
+      expect(runs.length).toBeGreaterThan(0);
+      for (const run of runs) expect(run.pipeline.chartExport?.tier).toBe("off");
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 });
 

@@ -778,7 +778,7 @@ export const INGEST_RECOMMENDATION_CATALOG = {
   "preserve-tables": { proposal: "pipeline-patch", note: "preserveTables is proposable." },
   "turn-on-embeddings": { proposal: "pipeline-patch", note: "embed and indexVectors are proposable." },
   "turn-on-video": { proposal: "pipeline-patch", note: "mediaVideo.enabled is proposable." },
-  "export-charts": { proposal: "pipeline-patch", note: "chartExport.enabled is proposable (generatorModel is not)." },
+  "export-charts": { proposal: "pipeline-patch", note: "chartExport.tier is proposable." },
   "media-without-transcript": { proposal: "outside-allowlist", note: "Transcription is a platform setting for operators." },
   "reindex-pages-with-text": { proposal: "reprocess-only", note: "Nothing to change; reprocessing re-chunks the files." },
   "retry-failed-files": { proposal: "reprocess-only", note: "Nothing to change; reprocessing runs the files again (see failures for causes that will not clear)." },
@@ -974,7 +974,7 @@ export function recommendIngestChanges(pipeline: PipelineFeatures, observed: Obs
   }
 
   const visuals = observed.visuals;
-  if (observed.chartExportAvailable === true && visuals.unexported > 0 && pipeline.chartExport?.enabled !== true) {
+  if (observed.chartExportAvailable === true && visuals.unexported > 0 && pipeline.chartExport?.tier !== "models") {
     // Exports are not split by kind, so name the kind only when the project has just one.
     const what = visuals.diagrams === 0 ? plural(visuals.unexported, "chart")
       : visuals.charts === 0 ? plural(visuals.unexported, "diagram")
@@ -982,12 +982,12 @@ export function recommendIngestChanges(pipeline: PipelineFeatures, observed: Obs
     const files = visuals.documentIds.length;
     recs.push({
       id: "export-charts", severity: "info",
-      title: "Export charts and diagrams as data",
+      title: "Read charts and diagrams with AI",
       reason: `${what} in ${plural(files, "file")} ${agree(visuals.unexported, "was", "were")} kept as ${agree(visuals.unexported, "an image or a text guess", "images or text guesses")}, so answers cannot quote ${agree(visuals.unexported, "its", "their")} values or steps.`,
-      effect: "Turn on chart export: each chart or diagram is re-expressed as a description and Mermaid (plus Vega-Lite, matplotlib or CSV if chosen), so its data becomes searchable and citable. Applies to new uploads; reprocess the affected files to export existing charts.",
+      effect: "Turn on reading charts with AI (billed): each chart or diagram is re-expressed as a description and Mermaid (plus Vega-Lite, matplotlib or CSV if chosen), so its data becomes searchable and citable. Applies to new uploads; reprocess the affected files to export existing charts.",
       affectedPages: visuals.pagesWithUnexportedVisuals, affectedDocuments: files,
       cost: { centsPer100Pages: null, reprocessCents: null, basis: "Charts that carry their own data (Office charts, embedded chart specs, vector graphics) export without a model call; others are billed per chart or diagram a model reads." },
-      patch: { chartExport: { enabled: true } },
+      patch: { chartExport: { tier: "models" } },
       reprocessDocumentIds: visuals.documentIds,
     });
   }

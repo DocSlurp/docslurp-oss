@@ -1,5 +1,9 @@
 import { randomUUID } from "node:crypto";
 
+import type { RunOrigin } from "@docslurp/shared";
+import { groupByChartTier, sourceRunChartTiers, stampRunChartExport } from "./chart-export-availability.js";
+import { explicitProjectChartTier, projectChartExportTierCap, upgradeStoredChartExport, type ChartExportTier } from "@docslurp/shared";
+import { isFirstPartyAppActor } from "../lib/first-party-app.js";
 import {
   pageCredits,
   speedBoostMultiplier,
@@ -260,7 +264,7 @@ async function validateBatches(batches: RunBatch[]): Promise<void> {
  * per-project lock, re-checking in-flight work inside it so concurrent or
  * repeated requests cannot double-spend. All-or-nothing.
  */
-export async function commitIndexJobs(prepared: PreparedIndexJobs, userId: string): Promise<{ runIds: string[]; pipelines: Map<string, PipelineFeatures> }> {
+export async function commitIndexJobs(prepared: PreparedIndexJobs, userId: string, origin: RunOrigin = "machine"): Promise<{ runIds: string[]; pipelines: Map<string, PipelineFeatures> }> {
   const result = { runIds: [] as string[], pipelines: new Map<string, PipelineFeatures>() };
   if (prepared.batches.length === 0) return result;
   for (const batch of prepared.batches) assertPipelineSpeedBoost(batch.pipeline);
@@ -271,11 +275,30 @@ export async function commitIndexJobs(prepared: PreparedIndexJobs, userId: strin
     await tx`select pg_advisory_xact_lock(hashtextextended(${`full-index:${prepared.projectId}`}, 0))`;
     const [managedRow] = await tx<{ managed: unknown }[]>`select managed_models -> 'pipeline' as managed from projects where id = ${prepared.projectId}`;
     const managedOverrides = parseManagedPipelineOverrides(managedRow?.managed, `project ${prepared.projectId}`);
+    // Chart tier: an explicit project tier applies to every document; with none, each document keeps the tier its
+    // source run stamped (as reprocess does), and only documents without one take the caller's origin default (M5).
+    const stamped: RunBatch[] = [];
     for (const batch of prepared.batches) {
+      const resolved = stampRunChartExport(batch.pipeline, origin);
+      // "Explicit" uses the run-resolution rule (a disallowed stored free counts as unset, R2-L4).
+      const projectChart = upgradeStoredChartExport(batch.pipeline.chartExport) as { tier?: ChartExportTier } | null;
+      if (explicitProjectChartTier(projectChart, process.env)) {
+        stamped.push({ ...batch, pipeline: resolved });
+        continue;
+      }
+      const tiers = await sourceRunChartTiers(tx as never, { orgId: prepared.orgId, projectId: prepared.projectId }, batch.docs.map((doc) => doc.id));
+      // Inherited tiers never exceed what the project resolves to now (R2-M1).
+      for (const [tier, docs] of groupByChartTier(batch.docs, tiers, resolved.chartExport.tier ?? "off", projectChartExportTierCap(projectChart, process.env))) {
+        stamped.push({ ...batch, docs, pipeline: { ...resolved, chartExport: { ...resolved.chartExport, tier } } });
+      }
+    }
+    for (const batch of stamped) {
       const stageSubset = batch.pipeline.stageSubset ?? null;
       const busy = await inFlightSourceIds(tx as unknown as Client, prepared.projectId, batch.docs.map((doc) => doc.id), stageSubset);
       const docs = batch.docs.filter((doc) => !busy.has(doc.id));
       if (docs.length === 0) continue;
+      // The same spend decision as assertCanSpend (loadSpendStatus), under the admission lock: a `models` batch is refused
+      // here exactly as run creation would refuse it.
       const block = await admissionBlock(tx, prepared.orgId, prepared.projectId, { speedBoost: batch.pipeline.speedBoost === true });
       if (block) throw new SpendBlockedError(block.message, block.code);
       const runId = randomUUID();
@@ -286,10 +309,10 @@ export async function commitIndexJobs(prepared: PreparedIndexJobs, userId: strin
       await tx`
         insert into project_runs (id, org_id, user_id, project_id, kind, status, priority, stage,
           total_documents, processed_documents, pages_total, pages_processed, pipeline,
-          creation_ready_at, creation_expires_at)
+          creation_ready_at, creation_expires_at, origin)
         -- The documents are inserted in this transaction, so the manifest is complete when it commits.
         values (${runId}, ${prepared.orgId}, ${userId}, ${prepared.projectId}, 'full-index', 'queued', 0, 'queued',
-          ${docs.length}, 0, ${pages}, 0, ${tx.json(JSON.parse(JSON.stringify(runPipeline)))}, now(), null)
+          ${docs.length}, 0, ${pages}, 0, ${tx.json(JSON.parse(JSON.stringify(runPipeline)))}, now(), null, ${origin})
       `;
       for (const doc of docs) {
         const canonicalId = doc.canonical_id ?? doc.id;
@@ -372,7 +395,7 @@ export async function prepareFullIndex(args: FullIndexArgs): Promise<PreparedInd
  */
 export async function requestFullIndex(args: FullIndexArgs): Promise<{ runId: string; pages: number; estimatedCredits: number | null; billing: ModeEstimate["billing"]; pipeline: PipelineFeatures }> {
   const prepared = await prepareFullIndex(args);
-  const { runIds, pipelines } = await commitIndexJobs(prepared, args.actor.userId);
+  const { runIds, pipelines } = await commitIndexJobs(prepared, args.actor.userId, isFirstPartyAppActor(args.actor) ? "app" : "machine");
   const runId = runIds[0];
   if (!runId) throw new IndexingModeError("A full index is already running for these documents.", 409, "index_in_progress");
   return { runId, pages: prepared.pages, estimatedCredits: prepared.estimatedCredits, billing: prepared.billing, pipeline: pipelines.get(runId)! };
@@ -460,7 +483,7 @@ export async function startModeSwitchJobs(args: {
   const prepared = await prepareModeSwitchJobs({
     project: args.before, speedBoost: args.speedBoost === true, to: args.after.pipeline.indexingMode, indexAll: args.indexAll, actor: args.actor, policy: args.policy,
   });
-  return await commitIndexJobs(prepared, args.actor.userId);
+  return await commitIndexJobs(prepared, args.actor.userId, isFirstPartyAppActor(args.actor) ? "app" : "machine");
 }
 
 /** Restores the stored mode when jobs fail after the mode was saved. */

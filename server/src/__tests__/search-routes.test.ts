@@ -50,9 +50,14 @@ vi.mock("../services/organizations.js", async (importOriginal) => ({
     const project = await (await import("../services/projects.js")).getProject(id, userId) as { id: string; orgId: string } | null;
     return project ? { projectId: project.id, orgId: project.orgId, projectOwnerUserId: userId, isDefaultProject: false, orgRole: "owner", projectRole: null } : null;
   }),
-  getProjectAccessWithPipeline: vi.fn(async (projectId: string) => ({
-    projectId, orgId: "org-1", pipeline: projectId.includes("strict") ? { privacyMode: "strict-privacy" } : {},
-  })),
+  // The route's one access read (lib/search-access.ts) and the cache's: from the getProject mock when a test arranges
+  // one (null: no access), otherwise an org-1 project.
+  getProjectAccessWithPipeline: vi.fn(async (projectId: string, userId: string) => {
+    const project = await (await import("../services/projects.js")).getProject(projectId, userId) as { id: string; orgId: string } | null | undefined;
+    if (project === null) return null;
+    return { projectId, orgId: project?.orgId ?? "org-1", projectOwnerUserId: userId, isDefaultProject: false, orgRole: "owner", projectRole: null,
+      pipeline: projectId.includes("strict") ? { privacyMode: "strict-privacy" } : {} };
+  }),
 }));
 
 const traceparent = vi.hoisted(() => ({ value: null as string | null }));
@@ -142,7 +147,7 @@ describe("searchRoutes", () => {
         filters: expect.objectContaining({
           projectId: "ws-1",
         }),
-      })
+      }), expect.objectContaining({ orgId: expect.any(String) })
     );
   });
 
@@ -164,7 +169,7 @@ describe("searchRoutes", () => {
     expect(ensureDefaultProject).toHaveBeenCalledWith({ userId: "user-1", orgId: undefined });
     expect(hybridSearch).toHaveBeenCalledWith("test", "user-1", expect.objectContaining({
       filters: expect.objectContaining({ projectId: "ws-default" }),
-    }));
+    }), expect.objectContaining({ orgId: expect.any(String) }));
   });
 
   it("passes project through as a search filter on POST /search", async () => {
@@ -224,7 +229,7 @@ describe("searchRoutes", () => {
         filters: expect.objectContaining({
           projectId: "ws-2",
         }),
-      })
+      }), expect.objectContaining({ orgId: expect.any(String) })
     );
   });
 
@@ -251,7 +256,7 @@ describe("searchRoutes", () => {
       // The key is the query as sent: different whitespace is a different search.
       await search("  rate   limits ");
       expect(hybridSearch).toHaveBeenCalledTimes(3);
-      expect(hybridSearch).toHaveBeenLastCalledWith("rate   limits", "user-1", expect.anything());
+      expect(hybridSearch).toHaveBeenLastCalledWith("rate   limits", "user-1", expect.anything(), expect.objectContaining({ orgId: expect.any(String) }));
       // Strict-privacy: never cached, so both identical requests run retrieval.
       await search("rate limits", "ws-strict");
       const strictReplay = await search("rate limits", "ws-strict");
@@ -275,7 +280,7 @@ describe("searchRoutes", () => {
         expect(response.status).toBe(200);
       }
       expect(hybridSearch).toHaveBeenCalledTimes(2);
-      expect(hybridSearch).toHaveBeenLastCalledWith("road", "user-1", expect.objectContaining({filters: expect.objectContaining({geo})}));
+      expect(hybridSearch).toHaveBeenLastCalledWith("road", "user-1", expect.objectContaining({filters: expect.objectContaining({geo})}), expect.objectContaining({ orgId: expect.any(String) }));
     } finally { delete process.env.SEARCH_RESPONSE_CACHE_TTL_MS; clearSearchResponseCacheForTests(); }
   });
 
@@ -303,7 +308,7 @@ describe("searchRoutes", () => {
     expect(response.status).toBe(200);
     expect(hybridSearch).toHaveBeenCalledWith("test", "user-1", expect.objectContaining({
       filters: expect.objectContaining({ projectId: "ws-default" }),
-    }));
+    }), expect.objectContaining({ orgId: expect.any(String) }));
   });
 
   it("runs aggregate RAG search without requiring a single project scope", async () => {
@@ -687,6 +692,8 @@ describe("searchRoutes", () => {
     expect(chatProject).toHaveBeenCalledWith({
       projectId: "ws-chat",
       userId: "user-1",
+      // The explicit search scope from the route's one access read.
+      scope: { orgId: expect.any(String), projectIds: "org", modeCeiling: null },
       query: "test",
       sessionId: undefined,
       model: undefined,
@@ -886,6 +893,6 @@ describe("explicit ranking control transport", () => {
       ? await app.request("/search?" + new URLSearchParams(Object.entries(fields).map(([k, v]) => [k, String(v)])))
       : await app.request("/search", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(fields) });
     expect(response.status).toBe(200);
-    expect(hybridSearch).toHaveBeenLastCalledWith("pump maintenance", "user-1", expect.objectContaining({ candidateDepth: 50, resultOrder: "relevance", useRerank: false }));
+    expect(hybridSearch).toHaveBeenLastCalledWith("pump maintenance", "user-1", expect.objectContaining({ candidateDepth: 50, resultOrder: "relevance", useRerank: false }), expect.objectContaining({ orgId: expect.any(String) }));
   });
 });

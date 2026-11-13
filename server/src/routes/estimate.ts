@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import { runOriginOf } from "../lib/run-origin.js";
 import { Hono } from "hono";
 import { getCookie, setCookie } from "hono/cookie";
 import { zValidator } from "@hono/zod-validator";
@@ -90,9 +91,10 @@ export const estimateRoutes = new Hono().post(
       return apiErrorResponse(c, 413, "payload_too_large", `Send at most ${ESTIMATE_MAX_FILES_ANONYMOUS} files per estimate`);
     }
     try {
-      return c.json(quoteEstimate(body));
+      // Anonymous quotes resolve an unset chart tier as a machine caller (off); a signed-in app session as the app.
+      return c.json(quoteEstimate(body, { origin: runOriginOf(c) }));
     } catch (error) {
-      if (error instanceof QuoteSettingsError) return apiErrorResponse(c, 400, "invalid_request", error.message);
+      if (error instanceof QuoteSettingsError) return apiErrorResponse(c, 400, error.code as never, error.message);
       throw error;
     }
   },

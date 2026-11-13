@@ -1051,9 +1051,9 @@ X-DocSlurp-Spend: "key-spend-1d";q=500;r=212;w=86400;u=usd-cents
 | Searches per mode | — (`Retry-After` only) | Searches in one mode (`keyword`, `hybrid` or `deep`), counted when each starts (a search that then fails still counts), in fixed windows aligned to the clock. Once reached, searches in that mode return 429 `search_limit_exceeded` (`details.mode`, `details.limit`, `details.windowSeconds`, `details.retryAfterSeconds`); a cheaper mode keeps working under its own limit. Each batch item and each project of `/v1/search/aggregate` counts as one search. Cached answers and the searches a chat turn runs don't count. Without a shared Redis limiter each server process counts separately. |
 | Daily pages | — | Uploads stop with `daily_page_limit` once the key's pages-per-day cap is used. |
 | Per visitor of a browser key | `client-visitor-<category>` | Browser (publishable) keys only: each visitor address gets a share of the key's budget per minute, by default 20 `chat-ai` and 120 `search`, so one visitor cannot use up a widget's whole allowance. A visitor is an IP address (an IPv6 /64), so people behind one office or NAT address share it; requests with no known address share one bucket. |
-| Chat in progress | `chat-concurrency` | AI chat turns still running or streaming at once. Browser keys: 16 per key and 3 per visitor address. Server keys: no default cap, so backend batch jobs aren't throttled; set one with a `concurrent` rule. A turn frees its slot when its response ends, the client disconnects, or the turn deadline plus 15 seconds passes, whichever is first. An MCP `chat` tool call counts as `chat-ai` and takes a slot too. |
+| Chat in progress | `chat-concurrency` | AI chat turns still running or streaming at once. Browser keys: 16 per key and 3 per visitor address. Server keys: 64 per key, a bound on runaway loops that leaves room for backend batch jobs; set a different one with a `concurrent` rule. Counts are shared across every API instance. If the shared counter can't be reached, chat turns from capped keys get a 503 `chat_capacity_unavailable` with `Retry-After` instead of running uncounted; retry after the delay. A turn frees its slot when its response ends, the client disconnects, or the turn deadline plus 15 seconds passes, whichever is first. An MCP `chat` tool call counts as `chat-ai` and takes a slot too. |
 
-Custom request and spend windows are set per key on the API keys page (under "Permissions and limits", then "Advanced rate limits") or with `rateLimits` on `POST`/`PATCH /v1/api-keys`, e.g. `[{ "metric": "requests", "limit": 1000, "windowSeconds": 3600 }, { "metric": "spend", "limit": 500, "windowSeconds": 86400 }, { "metric": "concurrent", "limit": 32, "windowSeconds": 1 }]` (spend in US cents; `concurrent` caps chat turns in progress, per server process, and ignores `windowSeconds`; at most five rules, one per metric and window, windows up to 31 days). Spend is recorded when the work it pays for finishes and is refreshed every few seconds, so a request already running can carry a key slightly past its spend limit.
+Custom request and spend windows are set per key on the API keys page (under "Permissions and limits", then "Advanced rate limits") or with `rateLimits` on `POST`/`PATCH /v1/api-keys`, e.g. `[{ "metric": "requests", "limit": 1000, "windowSeconds": 3600 }, { "metric": "spend", "limit": 500, "windowSeconds": 86400 }, { "metric": "concurrent", "limit": 32, "windowSeconds": 1 }]` (spend in US cents; `concurrent` caps chat turns in progress across all API instances and ignores `windowSeconds`; at most five rules, one per metric and window, windows up to 31 days). Spend is recorded when the work it pays for finishes and is refreshed every few seconds, so a request already running can carry a key slightly past its spend limit.
 
 Per-mode search limits use the `searches` metric with a `mode`, e.g. `[{ "metric": "searches", "mode": "deep", "limit": 1000, "windowSeconds": 86400 }, { "metric": "searches", "mode": "keyword", "limit": 100000, "windowSeconds": 86400 }]` for 1,000 deep and 100,000 keyword searches a day. A key takes up to 8 limits, one per metric, mode and window.
 
@@ -1091,6 +1091,8 @@ Every 429 has `Retry-After` and the [error envelope](https://docslurp.io/docs/se
 }
 ```
 
+A 503 with `error.code` `chat_capacity_unavailable` is not a limit you reached: the service couldn't count chat turns in progress and refused the turn. It carries `Retry-After` and `details.policy` `chat-concurrency`. On `/v1/chat/completions` it is an OpenAI-shaped 503 with `error.type` `server_error` and `error.code` `chat_capacity_unavailable`.
+
 `spend_limit_exceeded`, `search_limit_exceeded` and `daily_page_limit` are the key's own limits, so their `links.apiKeys` points at the API keys page. IP-level limits only link these docs. An IP is blocked for a while after an extreme burst or after repeatedly presenting invalid API keys, so stop and fix credentials rather than retrying 401s in a loop.
 
 ### Processing quality
@@ -1109,18 +1111,99 @@ Current Fast and Rich page prices are on [docslurp.io/pricing](https://docslurp.
 
 ### Chart and diagram export
 
-`pipeline.chartExport` (off by default) re-expresses each detected chart or diagram as text an assistant or a notebook can use. A deployment enables the feature with `DOCSLURP_CHART_EXPORT=on` on the API and worker; while it is off, turning `enabled` on is refused with `400 chart_export_unavailable`, a stored `enabled: true` has no effect, and estimates, chat suggestions and the ingest report never offer it. Set it on the project (`PATCH /v1/projects/:project` with `{ "pipeline": { "chartExport": { "enabled": true } } }`) or per upload in the request's `pipeline` overrides.
+`pipeline.chartExport` re-expresses each detected chart or diagram as text an assistant or a notebook can use. You choose a **tier**, never a model:
+
+| Tier | What runs | Cost |
+| --- | --- | --- |
+| `off` | Nothing. Charts stay images (and their counts are still recorded). | none |
+| `free` | Charts that carry their own data: Office chart parts (DOCX, PPTX, XLSX), embedded Vega, Vega-Lite or Plotly specs, and vector figures with readable axes. No model is called. | no credits |
+| `models` | The free steps, plus reading every other chart or diagram with AI. | billed per chart or diagram read (`feature-chart-export`) |
+
+**Defaults depend on where the request comes from.** A project with no `tier` set uses the caller's default, decided by the server from how you authenticated (never from a request field):
+
+- **API, MCP, SDK and CLI calls** (API keys and OAuth tokens): `off`.
+- **The DocSlurp app** (signed-in browser sessions, including chat uploads): the deployment's app default. The code
+  default is `free`; a deployment may hold it `off`, and docslurp.io currently does, until the free steps' cost and speed
+  pass their gate.
+
+The project record reports what a deployment actually runs as `chartExportDefaults`:
+`{ app, machine, modelsAvailable, freeAvailable, ceiling }`. Read it instead of assuming either default.
+
+A deployment sets these without a code change. Each value is parsed strictly, and an unknown value is treated as `off`
+and logged at startup:
+
+- `DOCSLURP_CHART_EXPORT_API_DEFAULT=off|free` (default `off`) for API callers.
+- `DOCSLURP_CHART_EXPORT_APP_DEFAULT=free|off` (default `free`) for the app.
+- `DOCSLURP_CHART_EXPORT_FREE_EXPLICIT=on|off` (default `off`). While it is off, a request or project change that asks
+  for `free` explicitly is refused, and a stored `free` counts as unset. Each free run boots a parser VM that is not
+  billed, so only the deployment's own defaults turn it on for now.
+
+**Precedence**, highest first:
+
+1. The request's own override (below).
+2. The project's `pipeline.chartExport.tier`.
+3. The default for the caller (above).
+4. The deployment ceiling, `DOCSLURP_CHART_EXPORT` (`off`, `free` or `on`), caps all of these: `off` disables chart export everywhere, `free` allows only the free steps, `on` allows `models` too.
+
+The resolved tier is stored on the run (`pipeline.chartExport.tier`), so a retry or resume runs with the same tier.
+
+**Per project:** `PATCH /v1/projects/:project` with `{ "pipeline": { "chartExport": { "tier": "models" } } }` (or `"off"`; a server key with `projects:manage`). An explicit `"free"` is accepted only where the deployment allows it (`chartExportDefaults.freeAvailable`, `DOCSLURP_CHART_EXPORT_FREE_EXPLICIT=on`); elsewhere it is refused with `400 chart_export_tier_unavailable`. Remove the field to go back to the caller's default.
+
+**Replays never raise the tier.** Reprocess, bulk reprocess, reindex and full index run each document at its source run's tier capped at what the project resolves to now: after a project moves from `models` to `off` (or unset), a plain reprocess or a later reindex runs without billed chart reads, and a contributor's plain reprocess is not refused. Only an explicit request override (`chartExport: { "tier": "models" }`) raises it, and it then needs project editor rights (and, for an API key, `pipeline:billed-features`).
+
+**Per request:** upload, URL ingest and direct upload sessions take it in the request's `pipeline` overrides; reprocess and the estimate endpoints take a top-level `chartExport`:
+
+```json
+POST /v1/uploads/url
+{ "urls": ["https://example.com/q3-earnings.pdf"], "pipeline": { "chartExport": { "tier": "off" } } }
+
+POST /v1/runs/:runId/reprocess
+{ "chartExport": { "tier": "models" } }
+
+POST /v1/uploads/estimate
+{ "files": [{ "name": "q3-earnings.pdf", "size": 2400000 }], "chartExport": { "tier": "models" } }
+```
+
+The upload estimate answers `chartExport: { tier, source, credits }`, where `source` is `request`, `project` or `default`. Only `models` adds credits. The quote in every estimate (`POST /v1/estimate`, the `quote` of `POST /v1/uploads/estimate`, SDK, CLI and MCP `uploadEstimate`) also takes `settings.chartExport` (`off`, `free` or `models`), resolves an omitted one the same way, and shows `models` as a separate `charts` line. Anonymous `POST /v1/estimate` calls are treated as API calls (default `off`). `POST /v1/runs/:runId/reprocess/estimate` prices the same override.
+
+Website ingest (`POST /v1/web/ingest`) takes a top-level `chartExport` too.
+
+Other surfaces: SDK `chartExport: { tier }` on `upload`, `uploadUrls`/`ingestUrls`, `reprocessRun`, `reprocessEstimate` and `uploadEstimate`; CLI `--chart-export off|free|models` on `upload`, `ingest-url`, `reprocess` and their `--estimate`; MCP `chartExport` on `upload`, `extract`, `uploadEstimate` and `reprocessEstimate`.
+
+**Refusals:** a tier the deployment does not offer is refused with `400 chart_export_tier_unavailable` on every surface:
+uploads, URL ingest, direct sessions (at creation and again at confirm), extracts, website ingest, reprocess, the
+estimates and project changes. The tier is never silently lowered. `models` is offered only where the ceiling is `on`,
+and an explicit `free` only where `DOCSLURP_CHART_EXPORT_FREE_EXPLICIT=on`. The access check comes first, so a caller
+without access gets its 403 or 404 before any tier refusal.
+
+**A project's tier is a ceiling.** Choosing `models` per request on a project
+whose stored tier is `off` or `free` needs project editor rights. An API key additionally needs the
+`pipeline:billed-features` scope (or `projects:manage`). Otherwise the request is refused with
+`403 chart_export_models_forbidden`. Projects with no tier keep the usual rules.
+
+**Billing for `models`:** a `models` run passes the same spend admission as other model-calling work: credits, budgets,
+and the `ingest` scope on a server key. An unknown tier, a `generatorModel` field, or any other unknown key is a
+validation error. The model that reads charts is chosen by DocSlurp from managed settings; requests cannot pick one.
+
+**Reindex and full index** of a project with no tier keep each document's own tier, the one its source run stamped, as
+reprocess does, capped at what the project resolves to now. They do not take the tier of whoever started them.
+
+**Figures and PDF charts:** PDF charts are read from the PDF's extracted figures, so `figures: false` also turns off
+chart export for PDFs.
 
 | Field | Default | Meaning |
 | --- | --- | --- |
-| `enabled` | `false` | Turn export on. Enabling it (or adding formats, or turning `diagrams` on) recommends a reindex: existing documents gain exports only when you reprocess them. |
+| `tier` | unset (caller's default) | `off`, `free` or `models`, as above. Moving up a tier recommends a reindex: a billed one for `models`, an optional free one for `free`. Turning it down or off applies to new uploads only. |
 | `formats` | `["description", "mermaid"]` | Any of `description` (short prose: type, axes, series, ranges and trend), `mermaid` (rendered in chat; GitHub renders it too), `vega-lite` (v5 JSON with inline data), `matplotlib` (a self-contained Python snippet) and `csv` (RFC 4180; diagrams export an edge list). |
 | `diagrams` | `true` | Also export flowcharts, org charts, sequence, state, ER and mind-map diagrams (Mermaid, description and CSV edge list). |
-| `generatorModel` | `null` | Optional `llm://provider/model` override for charts that need a model. Only the worker's chart generator candidates priced at or under the deployment's generator output-price ceiling are accepted; any other value is ignored (logged) and the default generator is used. Chat proposals never set it. |
 
-Charts that carry their own data (Office chart parts, embedded Vega/Vega-Lite/Plotly specs, vector graphics with readable axes) are exported without a model call; others are read by a model and charged once per chart or diagram the model read (`feature-chart-export`), whatever the outcome: also when the exported data came from the file in the end, when the model found no chart, or when it found a diagram while diagram export is off. The first read bills one generator call per call its formats need (formats derived from one spec share a call; each direct-mode format is its own call). When the spec's first answer needs a repair (it did not validate), or a second try because it was cut off at its length limit, that second call is billed as one more read, its own line in usage; a chart or diagram gets at most one such second read. Estimates and quotes include the expected share of second reads when a spec call runs. A request that failed before the model answered is not charged. Every format is derived from one validated `VisualSpec` (`@docslurp/shared`, `renderVisual`), and a format with no faithful form for a visual (for example a heatmap in Mermaid) is skipped and reported rather than approximated. Labels from documents are escaped for each format, so they cannot add Mermaid directives or click handlers, Python code or spreadsheet formulas. Generated Python is never executed by DocSlurp. Pricing for model-read visuals is on [docslurp.io/pricing](https://docslurp.io/pricing).
+Charts that carry their own data (Office chart parts, embedded Vega/Vega-Lite/Plotly specs, vector graphics with readable axes) are exported without a model call (the `free` tier). With `models`, other charts are read by a model and charged once per chart or diagram the model read (`feature-chart-export`), whatever the outcome: also when the exported data came from the file in the end, when the model found no chart, or when it found a diagram while diagram export is off. The first read bills one generator call per call its formats need (formats derived from one spec share a call; each direct-mode format is its own call). When the spec's first answer needs a repair (it did not validate), or a second try because it was cut off at its length limit, that second call is billed as one more read, its own line in usage; a chart or diagram gets at most one such second read. Estimates and quotes include the expected share of second reads when a spec call runs. A request that failed before the model answered is not charged. Every format is derived from one validated `VisualSpec` (`@docslurp/shared`, `renderVisual`), and a format with no faithful form for a visual (for example a heatmap in Mermaid) is skipped and reported rather than approximated. Labels from documents are escaped for each format, so they cannot add Mermaid directives or click handlers, Python code or spreadsheet formulas. Generated Python is never executed by DocSlurp. Pricing for model-read visuals is on [docslurp.io/pricing](https://docslurp.io/pricing).
 
-Ingest records chart and diagram counts per document even when export is off, so chat suggestions (DocSlurp app) and the ingest report's `export-charts` recommendation can point out charts that were kept only as images.
+Ingest records chart and diagram counts per document whatever the tier. That lets chat suggestions (DocSlurp app) and the ingest report's `export-charts` recommendation point out charts that were not exported as data, and propose `chartExport: { tier: "models" }`.
+
+### Figure extraction
+
+`pipeline.figures` (default `true`) extracts figures from PDFs into the document's image map. Set it to `false` to skip the figure pass for a project's new runs; existing documents keep their figures until they are reprocessed. Turning it back on recommends a reindex, and the figure pass adds sandbox time. The deployment's `DOCSLURP_DOPPLER_IMAGE_EXTRACT` decides whether the pass exists at all. Change it per project (`PATCH /v1/projects/:project` with `{ "pipeline": { "figures": false } }`), per upload in the `pipeline` overrides, or from chat in the DocSlurp app.
 
 ### Credits and budgets
 

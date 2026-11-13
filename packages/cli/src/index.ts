@@ -59,16 +59,35 @@ export function resolveQualityPipeline(flags: Record<string, string | boolean>):
   return { pipeline: { quality: quality as (typeof QUALITY_MODES)[number] } };
 }
 
+const CHART_EXPORT_TIERS = ["off", "free", "models"] as const;
+type ChartExportTier = (typeof CHART_EXPORT_TIERS)[number];
+
+/** `--chart-export off|free|models` as a per-request override, or null when the project setting (or the API default, off) applies. */
+export function resolveChartExportFlag(flags: Record<string, string | boolean>): { tier: ChartExportTier } | null {
+  if (flags.chartExport === undefined) return null;
+  const tier = typeof flags.chartExport === "string" ? flags.chartExport.trim().toLowerCase() : "";
+  if (!(CHART_EXPORT_TIERS as readonly string[]).includes(tier)) throw new Error("--chart-export must be off, free or models.");
+  return { tier: tier as ChartExportTier };
+}
+
+/** `--quality` and `--chart-export` as one pipeline override, or {} when neither is given. */
+export function resolveIntakePipeline(flags: Record<string, string | boolean>): { pipeline?: { quality?: (typeof QUALITY_MODES)[number]; chartExport?: { tier: ChartExportTier } } } {
+  const quality = resolveQualityPipeline(flags).pipeline?.quality;
+  const chartExport = resolveChartExportFlag(flags);
+  const pipeline = { ...(quality ? { quality } : {}), ...(chartExport ? { chartExport } : {}) };
+  return Object.keys(pipeline).length ? { pipeline } : {};
+}
+
 function usage(): void {
   console.log(`Usage:
-  docslurp estimate <files...> [--quality <fast|auto|good>] [--indexing <full|on-demand|visual>] [--months <n>] [--json]
-  docslurp upload <files...> [--project <id|slug|name> | --new-project] [--template <key>] [--quality <fast|auto|good>] [--canonical-id <id>] [--path <folder>] [--idempotency-key <key>] [--estimate] [--watch] [--api-url <url>]
-  docslurp ingest-url <urls...> [--project <id|slug|name> | --new-project] [--template <key>] [--quality <fast|auto|good>] [--watch] [--api-url <url>]
+  docslurp estimate <files...> [--quality <fast|auto|good>] [--indexing <full|on-demand|visual>] [--chart-export <off|free|models>] [--months <n>] [--json]
+  docslurp upload <files...> [--project <id|slug|name> | --new-project] [--template <key>] [--quality <fast|auto|good>] [--chart-export <off|free|models>] [--canonical-id <id>] [--path <folder>] [--idempotency-key <key>] [--estimate] [--watch] [--api-url <url>]
+  docslurp ingest-url <urls...> [--project <id|slug|name> | --new-project] [--template <key>] [--quality <fast|auto|good>] [--chart-export <off|free|models>] [--watch] [--api-url <url>]
   docslurp extract <files...|urls...> [--retention-days <n>] [--no-email] [--download <markdown|all>] [upload options]
   docslurp extract-status <extractId> [--json]
   docslurp extract-download <extractId>
   docslurp full-index [--project <id|slug|name>] [--document <id>] [--estimate] [--watch]
-  docslurp reprocess <runId> [--stage-from <stage>] [--estimate] [--watch]
+  docslurp reprocess <runId> [--stage-from <stage>] [--chart-export <off|free|models>] [--estimate] [--watch]
   docslurp jobs get <jobId> [--json]
   docslurp jobs watch <jobId> [--timeout <seconds>]
   docslurp status <runId> [--api-url <url>] [--watch] [--timeout <seconds>]
@@ -104,6 +123,10 @@ it with that name (and --template, if given); other commands answer project not 
 fast reads the text layer only and keeps scanned pages as images, not read (lowest price);
 auto reads each page the cheapest faithful way (its price depends on the mix of pages);
 good reads every page with a vision model (highest price). Prices: https://docslurp.io/pricing
+--chart-export sets chart and diagram export for this request (default: the project's setting,
+off for CLI and API calls when the project has none): off; free exports charts that carry
+their own data (Office charts, embedded chart specs, vector graphics) at no charge; models
+also reads other charts with AI, billed per chart read. upload --estimate and estimate price it.
 --estimate prints the work estimate (pages, documents, credits, time) for the operation and exits without doing it.
 Mutations that queue background work print their job; follow it with docslurp jobs watch <jobId>.
 --watch waits up to five minutes by default; --timeout sets its limit.
@@ -289,7 +312,7 @@ function parseCliArgs(argv: string[]) {
       i++;
     } else if (arg === "--project-name" || arg === "--project-id") {
       throw new Error(`${arg} was removed: pass a project ID, slug or name with --project (a name that matches no project is created on upload).`);
-    } else if (arg === "--project" || arg === "--api-url" || arg === "--run" || arg === "--api-key" || arg === "--source" || arg === "--out" || arg === "--queries-file" || arg === "--concurrency" || arg === "--min-score" || arg === "--session" || arg === "--canonical-id" || arg === "--path" || arg === "--template" || arg === "--document" || arg === "--stage-from" || arg === "--retention-days" || arg === "--download" || arg === "--quality" || arg === "--idempotency-key") {
+    } else if (arg === "--project" || arg === "--api-url" || arg === "--run" || arg === "--api-key" || arg === "--source" || arg === "--out" || arg === "--queries-file" || arg === "--concurrency" || arg === "--min-score" || arg === "--session" || arg === "--canonical-id" || arg === "--path" || arg === "--template" || arg === "--document" || arg === "--stage-from" || arg === "--retention-days" || arg === "--download" || arg === "--quality" || arg === "--chart-export" || arg === "--idempotency-key") {
       const key = arg.replace(/^--/, "").replace(/-([a-z])/g, (_, c: string) => c.toUpperCase());
       flags[key] = argv[i + 1] ?? "";
       i += 2;
@@ -572,7 +595,8 @@ async function uploadCommand(files: string[], flags: Record<string, string | boo
   if (flags.estimate === true && intake === UPLOAD_MODE) {
     const target = resolveIntakeTarget(flags);
     const estimateFiles = await profiledEstimateFiles(files);
-    await runEstimate("/v1/uploads/estimate", { files: estimateFiles, ...(target.project ? { project: target.project } : {}) }, flags);
+    const chartExport = resolveChartExportFlag(flags);
+    await runEstimate("/v1/uploads/estimate", { files: estimateFiles, ...(target.project ? { project: target.project } : {}), ...(chartExport ? { chartExport } : {}) }, flags);
     return;
   }
 
@@ -583,8 +607,8 @@ async function uploadCommand(files: string[], flags: Record<string, string | boo
   if (target.project) formData.append("project", target.project);
   if (target.newProject) formData.append("newProject", "true");
   if (target.templateKey) formData.append("templateKey", target.templateKey);
-  const qualityPipeline = resolveQualityPipeline(flags).pipeline;
-  if (qualityPipeline) formData.append("pipeline", JSON.stringify(qualityPipeline));
+  const intakePipeline = resolveIntakePipeline(flags).pipeline;
+  if (intakePipeline) formData.append("pipeline", JSON.stringify(intakePipeline));
   if (typeof flags.canonicalId === "string") {
     // Re-uploading with the same canonical ID replaces the previous version in search.
     if (files.length !== 1) throw new Error("--canonical-id applies to a single file.");
@@ -681,6 +705,8 @@ async function estimateCommand(files: string[], flags: Record<string, string | b
   if (typeof flags.quality === "string") settings.quality = resolveQualityPipeline(flags).pipeline?.quality;
   if (typeof flags.indexing === "string") settings.indexing = flags.indexing;
   if (typeof flags.months === "string") settings.hostingMonths = Number.parseInt(flags.months, 10);
+  const chartExport = resolveChartExportFlag(flags);
+  if (chartExport) settings.chartExport = chartExport.tier;
   const body = { files: await profiledEstimateFiles(files), ...(Object.keys(settings).length ? { settings } : {}) };
   const base = (typeof flags["api-url"] === "string" ? flags["api-url"] : process.env.DOCSLURP_API_URL ?? "https://docslurp.io").replace(/\/$/, "");
   const response = await fetch(`${base}/v1/estimate`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
@@ -744,7 +770,8 @@ async function reprocessCommand(runId: string | undefined, flags: Record<string,
     return;
   }
   const base = `/v1/runs/${encodeURIComponent(runId)}/reprocess`;
-  const body = typeof flags.stageFrom === "string" && flags.stageFrom ? { stageFrom: flags.stageFrom } : {};
+  const chartExport = resolveChartExportFlag(flags);
+  const body = { ...(typeof flags.stageFrom === "string" && flags.stageFrom ? { stageFrom: flags.stageFrom } : {}), ...(chartExport ? { chartExport } : {}) };
   if (flags.estimate === true) return runEstimate(`${base}/estimate`, body, flags);
   await startWork(base, body, flags);
 }
@@ -877,7 +904,7 @@ async function ingestUrlCommand(urls: string[], flags: Record<string, string | b
   const response = await apiFetch(`${intake.base}/url`, flags, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ urls, ...resolveIntakeTarget(flags), ...resolveQualityPipeline(flags), ...intake.fields }),
+    body: JSON.stringify({ urls, ...resolveIntakeTarget(flags), ...resolveIntakePipeline(flags), ...intake.fields }),
   });
   if (!response.ok) {
     printFailure(await responseFailure(response));

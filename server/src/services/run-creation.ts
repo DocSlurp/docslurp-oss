@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 
+import { chartExportModelsAllowed, minChartExportTier, projectChartExportTierCap, upgradeStoredChartExport, type ChartExportTier, type ResolvedChartExportConfig, type RunOrigin } from "@docslurp/shared";
+import { assertChartExportModelsCeiling, stampRunChartExport } from "./chart-export-availability.js";
 import {
   assertPipelineSpeedBoost,
   countedPagesForForecast,
@@ -22,14 +24,15 @@ import {
 import { sql as defaultSql, type SqlClient } from "../db.js";
 import { normalizeUploadPath } from "../lib/canonical-id.js";
 import { sanitizeUploadFilename } from "../lib/filenames.js";
-import { currentRequestId } from "../lib/request-context.js";
+import { currentRequestApiKeyId, currentRequestId } from "../lib/request-context.js";
 import { getAvailableCredits } from "./billing/credits.js";
 import {
   admitRunSpend,
+  assertCanSpend,
   SpendBlockedError,
   type SpendBlockedCode,
 } from "./billing/spend-guard.js";
-import { canContributeToProject, getProjectAccess } from "./organizations.js";
+import { canContributeToProject, canEditProject, getProjectAccessWithPipeline } from "./organizations.js";
 import { attributedUsage } from "./usage-attribution.js";
 import { buildRunProcessingPreview } from "./run-processing-preview.js";
 import { RunPipelineInvalidError, runLifecycle, type RunLifecycleRun, type RunStartOutcome } from "./run-lifecycle.js";
@@ -85,6 +88,22 @@ export interface CreateRunInput {
   kind: string;
   pipeline: PipelineFeatures;
   apiKeyId?: string | null;
+  /**
+   * Where the run comes from, derived server-side from the authenticated principal (`runOriginOf`), never from a
+   * request field. It decides the chart export tier when neither the request nor the project sets one. Unset: machine.
+   */
+  origin?: RunOrigin;
+  /**
+   * The pipeline comes from a run that already resolved its chart export tier (reprocess): a present tier is kept as
+   * is instead of being resolved again (`stampRunChartExport` with `stamped`).
+   */
+  chartExportStamped?: boolean;
+  /**
+   * The run replays a source run's pipeline (reprocess, bulk reprocess): its stamped chart tier is capped at what the
+   * project resolves to now (`projectChartExportTierCap`). `requested` is the request's explicit override, which may
+   * raise it and then passes the editor/scope ceiling and spend admission like any override.
+   */
+  chartExportReplay?: { requested?: ChartExportTier | null };
   priority?: number;
   sources: RunSources;
   /**
@@ -640,8 +659,32 @@ async function ensureCanonicalId(
  * is either fully created (published, then started or deferred) or it does not
  * exist. Callers describe sources; they never write Documents themselves.
  */
+/**
+ * A replayed run's chart export config: the explicit override when the request gave one, else the source run's stamped
+ * tier (resolved for `origin` when it has none) capped at the project's current cap. Never raises above the project.
+ */
+export function replayChartExport<T extends PipelineFeatures>(
+  pipeline: T,
+  requested: ChartExportTier | null,
+  project: { tier?: ChartExportTier } | null,
+  origin: RunOrigin,
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): T {
+  const stamped = stampRunChartExport(pipeline, origin, env, { stamped: true });
+  const replayed = (stamped.chartExport as ResolvedChartExportConfig).tier;
+  const tier = requested ?? minChartExportTier(replayed, projectChartExportTierCap(project, env));
+  if (!requested && tier !== replayed) console.log(`[chart-export] replayed tier capped from=${replayed} to=${tier} (project now resolves lower)`);
+  return { ...stamped, chartExport: { ...stamped.chartExport, tier } };
+}
+
 export function createRunCreation(deps: RunCreationDeps) {
   const { sql, start } = deps;
+
+  /** An unrevoked API key's scopes, or null (unknown, revoked, or an OAuth token id): the chart ceiling then refuses. */
+  async function activeApiKeyScopes(apiKeyId: string): Promise<readonly string[] | null> {
+    const [row] = await sql<{ scopes: string[] }[]>`select scopes from api_keys where id = ${apiKeyId} and revoked_at is null limit 1`;
+    return row?.scopes ?? null;
+  }
 
   async function insertRun(args: {
     id: string;
@@ -665,7 +708,7 @@ export function createRunCreation(deps: RunCreationDeps) {
           id, org_id, user_id, project_id, kind, status, priority, control_state,
           control_requested_at, stage, total_documents, processed_documents,
           pages_total, pages_processed, stats, creation_source_keys, pipeline,
-          extract_id, storage_prefix
+          extract_id, storage_prefix, origin
         )
         values (
           ${args.id},
@@ -690,7 +733,8 @@ export function createRunCreation(deps: RunCreationDeps) {
           ${sql.array(args.sourceKeys)}::text[],
           ${sql.json(JSON.parse(JSON.stringify(args.pipeline)))},
           ${input.extract?.id ?? null},
-          ${input.extract?.storagePrefix ?? null}
+          ${input.extract?.storagePrefix ?? null},
+          ${input.origin ?? "machine"}
         )
         returning *
       )
@@ -949,11 +993,34 @@ export function createRunCreation(deps: RunCreationDeps) {
       parseManagedPipelineOverrides(managedRow?.managed, `project ${request.projectId}`),
       source,
     );
-    const input: CreateRunInput = { ...request, pipeline: { ...managed.pipeline, speedBoost: request.speedBoost === true } };
-    assertPipelineSpeedBoost(input.pipeline);
-    const access = await getProjectAccess(input.projectId, input.userId);
+    const sanitized = { ...managed.pipeline, speedBoost: request.speedBoost === true };
+    // With the stored pipeline: the project's chart tier is the ceiling checked below, and the cap on a replayed tier.
+    const access = await getProjectAccessWithPipeline(request.projectId, request.userId);
     if (!access) throw new Error("Project not found");
-    if (!canContributeToProject(access, input.userId)) throw new Error("Forbidden");
+    if (!canContributeToProject(access, request.userId)) throw new Error("Forbidden");
+    const projectChartExport = upgradeStoredChartExport((access.pipeline as { chartExport?: unknown } | null | undefined)?.chartExport) as { tier?: ChartExportTier } | null;
+    // The chart export tier is resolved here, once per run, and stored on the run: a retry or resume reads it back, and
+    // the worker never re-resolves it. A new run: request override, project tier, origin default. A replay (reprocess,
+    // bulk reprocess): the request's explicit override, else the source run's stamp capped at what the project resolves
+    // to now, so a project moved to off (or unset) never replays billed reads and never refuses a plain reprocess.
+    const input: CreateRunInput = {
+      ...request,
+      pipeline: request.chartExportReplay
+        ? replayChartExport(sanitized, request.chartExportReplay.requested ?? null, projectChartExport, request.origin ?? "machine")
+        : stampRunChartExport(sanitized, request.origin ?? "machine", process.env, { stamped: request.chartExportStamped === true }),
+    };
+    assertPipelineSpeedBoost(input.pipeline);
+    // The project's explicit chart tier is a ceiling: `models` above a stored `off`/`free` needs editor rights (and, for
+    // an API key, the billed-features scope). Every run (upload, URL, extract, MCP, reprocess) lands here.
+    await assertChartExportModelsCeiling({
+      runTier: (input.pipeline.chartExport as ResolvedChartExportConfig | undefined)?.tier,
+      projectTier: projectChartExport?.tier,
+      canEdit: canEditProject(access, input.userId),
+      // Some intake paths do not thread the key id through; the request context always has it for a key request.
+      apiKeyId: input.apiKeyId ?? currentRequestApiKeyId(),
+      apiKeyScopes: activeApiKeyScopes,
+      context: `run creation project=${input.projectId}`,
+    });
     // Every caller (upload, extract, MCP, reprocess) lands here: a run pipeline that combines visual indexing
     // with Fast (or a refused privacy/PII policy) is refused whatever the project or request says
     // (IndexingModeError visual_mode_quality / visual_mode_privacy, 400).
@@ -982,6 +1049,10 @@ export function createRunCreation(deps: RunCreationDeps) {
     // the reserved insert.
     await assertCreditFloor(access.orgId);
     await enforceLiveBudgetCaps(input.projectId, access.orgId);
+    // Reading charts with AI bills model reads: the same spend admission as other model-calling work.
+    if (chartExportModelsAllowed(input.pipeline.chartExport as ResolvedChartExportConfig, process.env)) {
+      await assertCanSpend(access.orgId, input.projectId, { kind: "job" });
+    }
 
     // Validated before the insert: a pipeline the preview schema rejects must fail the request with nothing
     // committed, not after the Run and its document versions exist (an orphan run recovery would retry forever).

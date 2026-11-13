@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { defaultChartExportConfig, expectedBillableVisuals, type BBox, type ChartExportConfig } from "@docslurp/shared";
+import { defaultChartExportConfig, expectedBillableVisuals, type BBox, type ResolvedChartExportConfig } from "@docslurp/shared";
 
 import { buildCanonicalDocumentFromMarkdown } from "../lib/canonical-document.js";
 import { parseDopplerPageFacts, type DopplerPageFactsDocument } from "../lib/doppler-page-facts.js";
@@ -23,7 +23,7 @@ const BAR_SPEC = {
   summary: "Revenue grows every quarter, from 10 to 15.",
 };
 
-const config = (extra: Partial<ChartExportConfig> = {}): ChartExportConfig => ({ ...defaultChartExportConfig, enabled: true, formats: ["description", "csv"], ...extra });
+const config = (extra: Partial<ResolvedChartExportConfig> = {}): ResolvedChartExportConfig => ({ ...defaultChartExportConfig, tier: "models", formats: ["description", "csv"], ...extra });
 
 function fakeClient(answers: Array<string | Error>): ChartModelClient & { requests: ChartModelRequest[] } {
   const requests: ChartModelRequest[] = [];
@@ -97,6 +97,13 @@ describe("candidatesFromPageFacts", () => {
     expect(candidatesFromPageFacts(facts, new Set([1])).candidates).toEqual([
       { id: "p1-f1", pageNumber: 1, imageIndex: null, bbox: { x: 36, y: 36, width: 200, height: 100 }, kind: null, detectedBy: "page-facts-image", asset: { obj: 7, clean: true } },
     ]);
+  });
+
+  it("nominates nothing on a page marked xref-repaired-earlier: its facts are low confidence, so they authorize no read", () => {
+    const facts = parse([{ ...imagePage(1, 7), parseWarnings: ["xref-repaired-earlier"] }], 1);
+    expect(candidatesFromPageFacts(facts, new Set([1])).candidates).toEqual([]);
+    // Nor a vector cluster: any fact of such a page may have been read from another object.
+    expect(candidatesFromPageFacts(parse([figurePage(1, { parseWarnings: ["xref-repaired-earlier"] })], 1), new Set([1])).candidates).toEqual([]);
   });
 
   it("treats an image object on many pages as furniture (a logo), never a candidate", () => {

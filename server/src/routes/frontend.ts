@@ -29,7 +29,7 @@ export const dashboardRoutes = new Hono().get("/", async (c) => {
   if (actor.type !== "session") return apiStatusError(c, 403, "Forbidden");
   c.header("Cache-Control", "private, no-store");
   const isOperator = actor.user.isAdmin === true;
-  const [organizations, projects] = await Promise.all([listOrganizations(actor.userId), listProjects(actor.userId, { refineNames: false })]);
+  const [organizations, projects] = await Promise.all([listOrganizations(actor.userId), listProjects(actor.userId)]);
   // Projects as customers read them (no managed model fields), as on GET /v1/projects; operators see them whole.
   return c.json({ isOperator, isAdmin: isOperator, organizations, projects: projects.map((project) => publicProjectView(project, actor)) });
 });
