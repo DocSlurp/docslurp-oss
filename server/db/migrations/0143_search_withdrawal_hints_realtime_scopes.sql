@@ -7,14 +7,33 @@
 -- `search_eligibility` hint from the database itself, whichever code path made
 -- it: delete, supersede, purge, move, a status leaving `completed` or entering a
 -- blocked/terminal state, early-lexical withdrawal, a run that stops being live
--- (its early-lexical documents), and a completed correction reindex.
+-- while it still has early-lexical documents, and a completed correction reindex.
 -- Payload: {"projectIds":[<project>]}; identical notifications in one
 -- transaction are delivered once.
+--
+-- A run that stops being live withdraws only its early-lexical documents: the
+-- ones search served before they completed (search/eligibility.ts). A run that
+-- finishes normally has none left, since each became `completed` first, so it
+-- sends nothing and the debounced run_events hint covers it. Otherwise a bulk
+-- ingest of many small runs dropped the project's cached set, and reloaded it
+-- (257 ms at 10,000 documents), after every single run. The probe is one
+-- documents_run_id_idx range per run that stops, not per document.
 CREATE OR REPLACE FUNCTION search_eligibility_withdrawn() RETURNS trigger
 LANGUAGE plpgsql SET search_path=pg_catalog,pg_temp AS $$
 DECLARE project text;
 BEGIN
-  IF TG_TABLE_NAME = 'documents' OR TG_TABLE_NAME = 'project_runs' THEN
+  IF TG_TABLE_NAME = 'project_runs' THEN
+    -- The documents' own projects: a moved document is served from where it is now.
+    FOR project IN
+      SELECT DISTINCT d.project_id FROM public.documents d
+      WHERE d.run_id = OLD.id AND d.lexical_searchable_at IS NOT NULL AND d.superseded_at IS NULL
+        AND d.status NOT IN ('completed', 'failed', 'cancelled', 'pii_blocked')
+    LOOP
+      PERFORM pg_notify('search_eligibility', json_build_object('projectIds', json_build_array(project))::text);
+    END LOOP;
+    RETURN NULL;
+  END IF;
+  IF TG_TABLE_NAME = 'documents' THEN
     project := OLD.project_id;
   ELSIF TG_TABLE_NAME = 'document_corrections' THEN
     SELECT d.project_id INTO project FROM public.documents d WHERE d.id = NEW.document_id;
@@ -39,7 +58,8 @@ FOR EACH ROW WHEN (
   OR (OLD.lexical_searchable_at IS NOT NULL AND NEW.lexical_searchable_at IS NULL)
 ) EXECUTE FUNCTION search_eligibility_withdrawn();
 --> statement-breakpoint
--- Early-lexical documents are served only while their run is live (search/eligibility.ts liveRun).
+-- Early-lexical documents are served only while their run is live (search/eligibility.ts liveRun); the function
+-- sends a hint only when the run still has some.
 CREATE OR REPLACE TRIGGER project_runs_search_withdrawn
 AFTER UPDATE OF status, control_state ON project_runs
 FOR EACH ROW WHEN (

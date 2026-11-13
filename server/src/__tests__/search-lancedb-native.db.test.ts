@@ -377,27 +377,49 @@ describe("SEARCH_LANCEDB_NATIVE", () => {
   });
 
   it("drops cached eligibility when a run_events hint names the project's run (debounced)", async () => {
-    vi.stubEnv("SEARCH_ELIGIBLE_DEBOUNCE_MS", "100");
+    // A window far longer than the test, so "inside the window" never depends on how fast the queries ran;
+    // its end is reached by advancing the debounce timer, not by sleeping.
+    const WINDOW_MS = 600_000;
+    vi.stubEnv("SEARCH_ELIGIBLE_DEBOUNCE_MS", String(WINDOW_MS));
+    // Nor may the cache's own TTL expire an entry on a slow machine (read when the caches are rebuilt below).
+    vi.stubEnv("SEARCH_ELIGIBLE_CACHE_TTL_MS", String(WINDOW_MS));
+    const load = () => eligible.loadEligibleDocuments({ projectId: "w", embeddingModel: route.model, dimension: DIM });
+    const filename = (set: Awaited<ReturnType<typeof load>>) => set.documents.find((document) => document.id === "doc6")?.filename;
     try {
-      // Let any drop from an earlier test leave the window.
-      await new Promise((resolve) => setTimeout(resolve, 120));
-      const set = await eligible.loadEligibleDocuments({ projectId: "w", embeddingModel: route.model, dimension: DIM });
+      // Forget drops made by earlier tests: this project starts outside any window.
+      eligible.resetEligibleDocumentCachesForTests();
+      const set = await load();
       expect(set.documents.filter((document) => document.vectorReady)).toHaveLength(DOCS + 1);
-      await sql`update documents set superseded_at = now() where id = 'doc6'`;
-      expect(await eligible.loadEligibleDocuments({ projectId: "w", embeddingModel: route.model, dimension: DIM })).toBe(set);
+      // A change that sends no withdrawal hint of its own, visible in the cached set.
+      await sql`update documents set filename = 'first.pdf' where id = 'doc6'`;
+      expect(await load()).toBe(set);
+      // The first hint drops the set at once.
       await eligible.invalidateSearchRuns(["run1"]);
-      const fresh = await eligible.loadEligibleDocuments({ projectId: "w", embeddingModel: route.model, dimension: DIM });
-      expect(fresh.documents.map((document) => document.id)).not.toContain("doc6");
-      // A second hint inside the window waits for its end.
-      await sql`update documents set superseded_at = null where id = 'doc6'`;
-      await eligible.invalidateSearchRuns(["run1"]);
-      expect(await eligible.loadEligibleDocuments({ projectId: "w", embeddingModel: route.model, dimension: DIM })).toBe(fresh);
-      await new Promise((resolve) => setTimeout(resolve, 150));
-      const later = await eligible.loadEligibleDocuments({ projectId: "w", embeddingModel: route.model, dimension: DIM });
-      expect(later.documents.map((document) => document.id)).toContain("doc6");
+      const fresh = await load();
+      expect(fresh).not.toBe(set);
+      expect(filename(fresh)).toBe("first.pdf");
+      // Later hints inside the window drop nothing; one drop is scheduled for its end. Only the debounce timer is
+      // faked, and nothing below touches the database until real timers are back.
+      await sql`update documents set filename = 'second.pdf' where id = 'doc6'`;
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      try {
+        await eligible.invalidateSearchRuns(["run1"]);
+        await eligible.invalidateSearchRuns(["run1"]);
+        expect(vi.getTimerCount()).toBe(1);
+        vi.advanceTimersByTime(WINDOW_MS - 1_000);
+        expect(await load()).toBe(fresh);
+        vi.advanceTimersByTime(WINDOW_MS);
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+      const later = await load();
+      expect(later).not.toBe(fresh);
+      expect(filename(later)).toBe("second.pdf");
     } finally {
-      await sql`update documents set superseded_at = null where id = 'doc6'`;
+      await sql`update documents set filename = 'doc6.pdf' where id = 'doc6'`;
       vi.unstubAllEnvs();
+      eligible.resetEligibleDocumentCachesForTests();
     }
   });
 

@@ -134,4 +134,38 @@ describe("commit-visible realtime coverage", () => {
       }
     } finally { await unlisten(); }
   });
+  it("sends no withdrawal hint when a run finishes with nothing served early, and one when early-lexical documents remain", async () => {
+    const hints: string[] = [];
+    const unlisten = await db.listen("search_eligibility", (payload) => { hints.push(payload); });
+    const settle = () => new Promise((resolve) => setTimeout(resolve, 50));
+    const run = (id: string) => db.exec(`insert into project_runs(id,user_id,org_id,project_id,kind,status,stage)
+      values ('${id}','realtime-user','realtime-org','realtime-project','upload','processing','extract')`);
+    const document = (id: string, runId: string, status: string, early: boolean, projectId = "realtime-project") =>
+      db.exec(`insert into documents(id,user_id,org_id,project_id,run_id,filename,mime_type,source_key,status,lexical_searchable_at)
+        values('${id}','realtime-user','realtime-org','${projectId}','${runId}','${id}.txt','text/plain','${id}','${status}',${early ? "now()" : "null"})`);
+    try {
+      await db.exec(`insert into projects(id,org_id,user_id,name) values ('realtime-project-moved','realtime-org','realtime-user','Moved') on conflict do nothing`);
+      // A normal bulk-ingest run: every document completed (or failed, or never searchable) before the run ends.
+      await run("hint-run-done");
+      await document("hint-done-1", "hint-run-done", "completed", true);
+      await document("hint-done-2", "hint-run-done", "failed", true);
+      await document("hint-done-3", "hint-run-done", "processing", false);
+      await settle();
+      hints.length = 0;
+      await db.exec(`update project_runs set status='completed' where id='hint-run-done'`);
+      await settle();
+      expect(hints).toEqual([]);
+
+      // A run that dies while documents are still served early withdraws them, once per project they are in.
+      await run("hint-run-dead");
+      await document("hint-dead-1", "hint-run-dead", "processing", true);
+      await document("hint-dead-2", "hint-run-dead", "processing", true);
+      await document("hint-dead-3", "hint-run-dead", "processing", true, "realtime-project-moved");
+      await settle();
+      hints.length = 0;
+      await db.exec(`update project_runs set status='failed' where id='hint-run-dead'`);
+      await settle();
+      expect(hints.map((hint) => JSON.parse(hint).projectIds[0]).sort()).toEqual(["realtime-project", "realtime-project-moved"]);
+    } finally { await unlisten(); }
+  });
 });

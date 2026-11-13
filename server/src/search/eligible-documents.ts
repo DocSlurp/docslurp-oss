@@ -16,8 +16,10 @@ import { envInt, TtlLruCache } from "./ttl-lru.js";
  * Freshness: entries live SEARCH_ELIGIBLE_CACHE_TTL_MS (default 15000) and are
  * dropped early by two NOTIFY hints with different urgency:
  * - `search_eligibility` (eligibility-hint.ts, and the documents/runs/corrections
- *   triggers of migration 0145): something left the set (deleted, superseded,
- *   blocked, failed, cancelled, corrected, purged). Dropped immediately, always.
+ *   triggers of migration 0143): something left the set (deleted, superseded,
+ *   blocked, failed, cancelled, corrected, purged, or served early by a run that
+ *   stopped before completing it). Dropped immediately, always. A run that
+ *   finishes with every document completed withdraws nothing and sends none.
  * - `run_events` (worker run progress): mostly documents arriving. During a bulk
  *   ingest these fire many times a second, and reloading a 10,000-document set on
  *   each one made nearly every search pay the full eligibility query. They are
