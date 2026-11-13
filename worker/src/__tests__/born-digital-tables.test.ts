@@ -102,7 +102,7 @@ describe("born-digital tables are served from Doppler (owner policy 2026-11-05)"
   });
 
   describe("the VM guest's HTML tables get the same repairs (real-Modal finding F3)", () => {
-    /** The streaming converter's `--html` output (Doppler 5626992, the guest's mode) for the same fixtures, repaired. */
+    /** The streaming converter's `--html` output (Doppler f435528, the guest's mode) for the same fixtures, repaired. */
     const html = (name: string) => repairMarkdownTables(readFileSync(path.resolve("testdata/pdf-fixtures/doppler-md-html", `${name}.pdf.md`), "utf8"));
     const htmlRows = (markdown: string) => [...markdown.matchAll(/<tr>([\s\S]*?)<\/tr>/g)]
       .map((row) => [...row[1]!.matchAll(/<t[dh]>([\s\S]*?)<\/t[dh]>/g)].map((cell) => cell[1]!));
