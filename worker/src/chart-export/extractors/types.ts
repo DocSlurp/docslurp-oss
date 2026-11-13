@@ -34,7 +34,11 @@ export interface DeterministicRefusal { locator: string; reason: string }
  * ordinals (`svgIndex` = the first one's position among the input's SVGs in document / package order, `count` of them)
  * and a closed reason, never by a name from the input.
  */
-export interface DeterministicDeferral { svgIndex: number; count: number; reason: "svg-document-limit" }
+export interface DeterministicDeferral {
+  svgIndex: number;
+  count: number;
+  reason: "svg-document-limit" | "html-svg-limit" | "guest-deadline" | "visual-limit" | "package-part-limit";
+}
 
 export interface DeterministicVisualResult {
   schemaVersion: "chart-export-deterministic@v1";

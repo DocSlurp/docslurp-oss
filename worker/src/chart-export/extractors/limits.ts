@@ -35,6 +35,18 @@ export const CHART_EXTRACT_LIMITS = {
   /** Elements in one parsed SVG, checked before the diagram (Mermaid / Graphviz) and geometry paths. */
   maxSvgElements: 3_000,
   /**
+   * Per-frame work is O(attribute and text bytes), so these bound it (council r6 H1). Checked once after parsing, before
+   * the diagram and geometry paths: `d` / `points` attributes (p99 10.6 KB, max 42 KB), every other attribute except
+   * `href` (p99 166 B, max 16.2 KB), and the text directly under one element outside `<script>`, `<style>`,
+   * `<metadata>`, `<desc>` and `<title>` (p99 47 B, max 753 B). Then, while walking, every frame's attribute and text
+   * bytes are charged to `maxSvgTouchedBytes`, re-walks included.
+   */
+  maxSvgGeometryAttrBytes: 64 * 1024,
+  maxSvgAttrBytes: 32 * 1024,
+  maxSvgTextBytes: 4 * 1024,
+  /** Attribute + text bytes one SVG's walk may read, every re-walk included (legitimate p99 332 KB, max 1.03 MB). */
+  maxSvgTouchedBytes: 2 * 1024 * 1024,
+  /**
    * Marker/vertex pair tests one SVG may run (`withoutVertexMarkers`); over it the de-duplication is approximated
    * (`approximate-marker-dedup`, confidence capped below 0.85). Legitimate SVGs needed at most 466 (p99 18). This keeps a
    * packed hostile SVG (up to 4,000 markers × 50,000 vertices under the gate) to ~0.3 ms of pair tests.
@@ -73,6 +85,19 @@ export class ExtractLimitError extends Error {
     super(`chart extract refused: ${reason}`);
     this.name = "ExtractLimitError";
   }
+}
+
+/**
+ * Guest deadline: a wall-clock backstop below the host's timeout, so a slow input returns what it has (and records the
+ * rest as deferred) instead of being killed and losing everything. Unset (tests, in-process runs) it never fires. It
+ * only fires on inputs far past every gate's measured legitimate range, so ordinary output stays deterministic.
+ */
+let guestDeadline = Infinity;
+export function setGuestDeadline(epochMs: number): void {
+  guestDeadline = Number.isFinite(epochMs) ? epochMs : Infinity;
+}
+export function pastGuestDeadline(): boolean {
+  return guestDeadline !== Infinity && Date.now() > guestDeadline;
 }
 
 export function refusalReason(error: unknown): string {

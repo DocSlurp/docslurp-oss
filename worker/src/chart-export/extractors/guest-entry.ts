@@ -5,4 +5,4 @@
 import "@docslurp/shared/zod-jitless";
 
 export { extractDeterministicVisuals } from "./index.js";
-export { CHART_EXTRACT_LIMITS } from "./limits.js";
+export { CHART_EXTRACT_LIMITS, setGuestDeadline } from "./limits.js";

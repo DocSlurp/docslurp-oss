@@ -44,6 +44,19 @@ if (args.includes("--generated")) {
 }
 
 const countElements = (el) => { let n = 0; const stack = [el]; while (stack.length) { const e = stack.pop(); n++; for (const c of e.children) if (c.type === "element") stack.push(c); } return n; };
+/** Longest geometry attribute (d, points), longest other attribute, and longest text under one element. */
+function attrSizes(el) {
+  let geo = 0, other = 0, text = 0;
+  const stack = [el];
+  while (stack.length) {
+    const e = stack.pop();
+    for (const [k, v] of Object.entries(e.attrs)) { if (k === "d" || k === "points") geo = Math.max(geo, v.length); else other = Math.max(other, v.length); }
+    let t = 0;
+    for (const c of e.children) { if (c.type === "element") stack.push(c); else if (c.type === "text") t += c.value.length; }
+    text = Math.max(text, t);
+  }
+  return { geoAttr: geo, otherAttr: other, elementText: text };
+}
 const gateLimits = Object.fromEntries(Object.entries(LIMITS).filter(([k]) => /^maxSvg|^maxMarkerPairTests$/.test(k)));
 // Count with the gates lifted, so every file is measured in full; restore them to check what the gate would do.
 const lifted = Object.fromEntries(Object.keys(gateLimits).map((k) => [k, Number.MAX_SAFE_INTEGER]));
@@ -55,7 +68,8 @@ for (const f of files) {
     const doc = parseXml(f.text, { keepComments: true });
     const svg = doc.children.find((c) => c.type === "element" && c.local === "svg");
     row.elements = countElements(svg);
-    const counts = { useExpansions: 0, primitives: 0, segments: 0, walked: 0 };
+    Object.assign(row, attrSizes(svg));
+    const counts = { useExpansions: 0, primitives: 0, segments: 0, walked: 0, touched: 0 };
     buildScene(svg, counts);
     Object.assign(row, counts);
     const prepared = prepareSvgChart(svg);
@@ -67,15 +81,16 @@ for (const f of files) {
   }
   Object.assign(LIMITS, gateLimits);
   const result = extractDeterministicVisuals({ kind: "svg", text: f.text });
-  row.gated = result.refusals.map((r) => r.reason).filter((r) => /^svg-(too-large|too-dense|use-bomb)$/.test(r))[0] ?? null;
+  // Any refusal or deferral of a legitimate SVG counts as skipped, whatever the reason (council r6 L2).
+  row.gated = result.refusals[0]?.reason ?? result.deferred?.[0]?.reason ?? null;
   row.approximate = result.visuals.some((v) => v.reason === "approximate-marker-dedup");
   rows.push(row);
 }
 const ok = rows.filter((r) => !r.error);
 const q = (k, p) => { const v = ok.map((r) => r[k]).sort((a, b) => a - b); return v[Math.min(v.length - 1, Math.floor(p * (v.length - 1)))]; };
-console.log(`SVGs: ${rows.length} measured, ${rows.length - ok.length} failed to parse`);
+console.log(`SVGs: ${rows.length} measured, ${rows.length - ok.length} failed to parse${rows.length > ok.length ? `: ${rows.filter((r) => r.error).map((r) => `${path.basename(r.name)} (${r.error})`).join(", ")}` : ""}`);
 console.log("| metric | p50 | p90 | p99 | max | gate |\n|---|--:|--:|--:|--:|--:|");
-for (const [k, gate] of [["bytes", "maxSvgBytes"], ["useExpansions", "maxSvgUseExpansions"], ["primitives", "maxSvgPrimitives"], ["segments", "maxSvgPathSegments"], ["walked", "maxSvgWalkedElements"], ["elements", "maxSvgElements"], ["pairTests", "maxMarkerPairTests"]]) {
+for (const [k, gate] of [["geoAttr", "maxSvgGeometryAttrBytes"], ["otherAttr", "maxSvgAttrBytes"], ["elementText", "maxSvgTextBytes"], ["bytes", "maxSvgBytes"], ["useExpansions", "maxSvgUseExpansions"], ["primitives", "maxSvgPrimitives"], ["segments", "maxSvgPathSegments"], ["walked", "maxSvgWalkedElements"], ["touched", "maxSvgTouchedBytes"], ["elements", "maxSvgElements"], ["pairTests", "maxMarkerPairTests"]]) {
   console.log(`| ${k} | ${q(k, 0.5)} | ${q(k, 0.9)} | ${q(k, 0.99)} | ${q(k, 1)} | ${gateLimits[gate]} |`);
 }
 const gated = rows.filter((r) => r.gated);
