@@ -39,7 +39,7 @@ beforeAll(async () => {
   pg = await startMigratedPostgres();
   vi.stubEnv("DATABASE_URL", pg.url);
   vi.stubEnv("LANCEDB_REFINE_FACTOR", "4");
-  for (const key of ["OPENAI_API_KEY", "OPENROUTER_API_KEY", "OPENROUTER_KEY", "ANTHROPIC_API_KEY"]) vi.stubEnv(key, "");
+  for (const key of ["OPENAI_API_KEY", "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY"]) vi.stubEnv(key, "");
   directory = await mkdtemp(path.join(tmpdir(), "docslurp-refine-service-"));
   vi.stubEnv("LANCEDB_URI", directory);
   ({ sql } = await import("../db.js"));

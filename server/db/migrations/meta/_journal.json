@@ -1000,21 +1000,28 @@
       "idx": 142,
       "version": "7",
       "when": 1794600000000,
-      "tag": "0142_search_sessions_project_id",
+      "tag": "0142_vision_default_off_deepseek",
       "breakpoints": true
     },
     {
       "idx": 143,
       "version": "7",
       "when": 1794700000000,
-      "tag": "0143_search_withdrawal_hints_realtime_scopes",
+      "tag": "0143_search_sessions_project_id",
       "breakpoints": true
     },
     {
       "idx": 144,
       "version": "7",
       "when": 1794800000000,
-      "tag": "0144_project_auto_title_checked_at",
+      "tag": "0144_search_withdrawal_hints_realtime_scopes",
+      "breakpoints": true
+    },
+    {
+      "idx": 145,
+      "version": "7",
+      "when": 1794900000000,
+      "tag": "0145_project_auto_title_checked_at",
       "breakpoints": true
     }
   ]

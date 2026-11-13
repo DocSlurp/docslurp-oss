@@ -31,6 +31,7 @@ import {
 import { exportVisual } from "./generator.js";
 import { newVisualMarkerNonce, visualBody, wrapVisualGroup } from "./markdown.js";
 import { selectGeneratorModel, type GeneratorSelection } from "./model-selection.js";
+import { chartFactsUse } from "./facts-candidates.js";
 import { buildVisualCandidateStats } from "./stats.js";
 import type {
   ChartExportCallRecord,
@@ -62,6 +63,8 @@ export interface ChartExportSessionInput {
   onModelRead?: (attempt: ChartExportAttempt) => void;
   /** This export's visual marker nonce (default: fresh random); tests pin it. */
   markerNonce?: string;
+  /** One read per repeated picture (default: on unless DOCSLURP_DOPPLER_PAGE_FACTS is `off`). */
+  dedupeRepeated?: boolean;
 }
 
 export interface RoutedExportResult {
@@ -142,6 +145,7 @@ export function candidatesFromMediaMap(map: unknown): VisualCandidate[] {
         : null,
       kind: null,
       detectedBy: "image-routing" as const,
+      asset: { sha256: image.sha256 },
     }));
 }
 
@@ -233,6 +237,13 @@ function couldPair(candidate: VisualCandidate, partial: DeterministicVisualParti
   return true;
 }
 
+/** The outcome of one placement's model read, reused by the other placements of the same picture. */
+interface GroupRead {
+  visual: ExportedVisual | null;
+  /** The provider answered (the read was paid for): only then does it stand for the group. */
+  answered: boolean;
+}
+
 export interface ChartExportLimits {
   /** Exported visuals, free ones included (output size). */
   maxVisuals: number;
@@ -291,12 +302,27 @@ export class ChartExportSession {
   private readsInFlight = 0;
   private pageExports = 0;
   private capLogged = false;
+  /**
+   * One model read per repeated picture (`asset`: the facts' image object or the media map's hash): the read made for a
+   * group, under every asset key of the group (so a group that grows later still finds it). A placement of the same
+   * picture reuses it instead of reading (and paying) again.
+   */
+  private readonly groupReads = new Map<string, Promise<GroupRead | null>>();
+  /** Asset keys whose group read the provider answered (settled). */
+  private readonly groupsRead = new Set<string>();
+  /** Asset key -> every key of its group (union-find over the candidates), rebuilt when candidates change. */
+  private groupIndex: Map<string, readonly string[]> | null = null;
+  /** Repeated-picture reuse is on (`dedupeRepeated`, default: page facts not `off`). */
+  private readonly dedupe: boolean;
+  /** Placements served by another placement's read (no call, no charge). */
+  private readsReused = 0;
   private readonly client: ChartModelClient | null;
   /** The nonce in this export's visual group markers (recorded in the chart-export artifact for the next reprocess). */
   readonly markerNonce: string;
 
   constructor(private readonly input: ChartExportSessionInput) {
     this.markerNonce = input.markerNonce ?? newVisualMarkerNonce();
+    this.dedupe = input.dedupeRepeated ?? chartFactsUse().dedupe;
     this.limits = { ...DEFAULT_CHART_EXPORT_LIMITS, ...input.limits };
     this.runBudget = input.runBudget ?? { calls: 0 };
     const inner = input.client;
@@ -336,6 +362,7 @@ export class ChartExportSession {
    */
   addGuardedScopes(scopes: readonly VisualCandidate[]): void {
     this.guarded.push(...scopes);
+    this.invalidateGroups();
     for (let i = this.candidates.length - 1; i >= 0; i -= 1) {
       if (this.isGuarded(this.candidates[i]!)) this.candidates.splice(i, 1);
     }
@@ -348,12 +375,14 @@ export class ChartExportSession {
 
   /** Adds candidates, one per picture: a later signal for a picture already listed only fills in its kind. */
   addCandidates(candidates: readonly VisualCandidate[]): void {
+    this.invalidateGroups();
     for (const candidate of candidates) {
       if (this.isGuarded(candidate)) continue;
       const prior = this.candidates.find((c) => !isPageLevel(c) && !isPageLevel(candidate) ? sameVisual(c, candidate) : c.id === candidate.id);
       if (prior) {
         if (prior.kind === null && candidate.kind !== null) prior.kind = candidate.kind;
         if (!prior.bbox && candidate.bbox) prior.bbox = candidate.bbox;
+        if (candidate.asset) prior.asset = { ...candidate.asset, ...prior.asset };
         continue;
       }
       this.candidates.push({ ...candidate });
@@ -366,6 +395,7 @@ export class ChartExportSession {
    * label, image routing) is represented by that candidate. The rest are low-confidence: counted, never exported.
    */
   resolveLegacyPages(signalPages: ReadonlySet<number>): void {
+    this.invalidateGroups();
     for (let i = this.candidates.length - 1; i >= 0; i -= 1) {
       const candidate = this.candidates[i]!;
       if (!isPageLevel(candidate)) continue;
@@ -509,8 +539,57 @@ export class ChartExportSession {
     if (this.attempted.has(candidate.id) || this.visuals.some((v) => v.id === candidate.id)) return null;
     this.attempted.add(candidate.id);
     // A confident free spec needs no image, so no model is reached and no page export is spent.
-    const modelImage = image && this.readsLeft() && this.canCallModel() ? image : null;
+    let modelImage = image && this.readsLeft() && this.canCallModel() ? image : null;
     const partial = this.claimPartial(candidate, wholePage && modelImage !== null);
+    // A picture another placement already had read: reuse that read (unless a confident free spec makes this one free).
+    const keys = partial && confidentPartial(partial) ? [] : this.groupKeys(candidate);
+    let mine: Promise<GroupRead | null> | null = null;
+    let settle: ((read: GroupRead | null) => void) | null = null;
+    if (keys.length > 0) {
+      // Wait for the group's read in flight; one that stood for nothing (no answer) leaves the next placement to read.
+      for (let prior = this.priorRead(keys); prior; prior = this.priorRead(keys)) {
+        const read = await prior;
+        if (read) return this.reuseRead(candidate, read);
+        if (this.priorRead(keys) === prior) break;
+      }
+      // Caps may have changed while waiting: decide again whether this placement can be read.
+      modelImage = image && this.readsLeft() && this.canCallModel() ? image : null;
+      // Only a placement that will be read stands for its group (concurrent placements wait for it).
+      if (modelImage) {
+        mine = new Promise((resolve) => { settle = resolve; });
+        for (const key of keys) this.groupReads.set(key, mine);
+      }
+    }
+    let outcome: GroupRead | null = null;
+    try {
+      outcome = await this.read(candidate, modelImage, partial, signal, wholePage);
+      return outcome?.visual ?? null;
+    } finally {
+      if (settle && mine) {
+        // A read the provider never answered serves no other placement, and a whole-page read (a crop that failed) may
+        // have answered for another visual on the page: neither stands for the picture.
+        const stands = outcome?.answered === true && !wholePage;
+        (settle as (read: GroupRead | null) => void)(stands ? outcome : null);
+        for (const key of keys) {
+          if (stands) this.groupsRead.add(key);
+          else if (this.groupReads.get(key) === mine) this.groupReads.delete(key);
+        }
+      }
+    }
+  }
+
+  /** The read in flight or done for any key of a group. */
+  private priorRead(keys: readonly string[]): Promise<GroupRead | null> | null {
+    for (const key of keys) {
+      const prior = this.groupReads.get(key);
+      if (prior) return prior;
+    }
+    return null;
+  }
+
+  private async read(
+    candidate: VisualCandidate, modelImage: VisualImage | null, partial: DeterministicVisualPartial | null, signal: AbortSignal | undefined, wholePage: boolean,
+  ): Promise<GroupRead> {
     const callsBefore = this.callsMade;
     if (modelImage) this.readsInFlight += 1;
     const result = await exportVisual({
@@ -531,14 +610,105 @@ export class ChartExportSession {
     if (wholePage && this.callsMade > callsBefore) this.pageExports += 1;
     const exported = !!result.visual && this.exportsKind(result.visual.kind);
     if (exported) this.visuals.push(result.visual!);
-    if (result.calls.some((call) => call.responded)) {
+    const answered = result.calls.some((call) => call.responded);
+    if (answered) {
       // Charged whatever the outcome (`none`, invalid, a diagram the project does not export): the read was paid for.
       // Priced by the candidate's kind at call time (the formats requested), never by the kind the model answered.
       const attempt: ChartExportAttempt = { id: candidate.id, pageNumber: candidate.pageNumber, kind: candidate.kind, exported };
       this.modelReads.set(candidate.id, attempt);
       this.input.onModelRead?.(attempt);
     }
-    return exported ? result.visual : null;
+    return { visual: exported ? result.visual : null, answered };
+  }
+
+  /** Drops the cached groups (candidates or their assets changed). */
+  invalidateGroups(): void {
+    this.groupIndex = null;
+  }
+
+  private static assetKeys(c: VisualCandidate): string[] {
+    // Only a placement the page facts show nothing drawn over: the crop then shows the image alone.
+    if (c.asset?.clean !== true) return [];
+    return [
+      ...(c.asset?.obj !== undefined ? [`o:${c.asset.obj}`] : []),
+      ...(c.asset?.sha256 ? [`s:${c.asset.sha256}`] : []),
+    ];
+  }
+
+  /**
+   * Every asset key of the candidate's group: candidates linked by a shared image object (`asset.obj`) or content hash
+   * (`asset.sha256`), transitively (union-find, cached until candidates change). Empty without an asset identity or
+   * with reuse off. Within this document only.
+   */
+  private groupKeys(candidate: VisualCandidate): readonly string[] {
+    if (!this.dedupe) return [];
+    const own = ChartExportSession.assetKeys(candidate);
+    if (own.length === 0) return [];
+    if (!this.groupIndex) {
+      const parent = new Map<string, string>();
+      const find = (k: string): string => {
+        let root = k;
+        while (parent.get(root) !== root) root = parent.get(root)!;
+        for (let x = k; x !== root;) { const next = parent.get(x)!; parent.set(x, root); x = next; }
+        return root;
+      };
+      const add = (k: string) => { if (!parent.has(k)) parent.set(k, k); };
+      for (const c of this.candidates) {
+        const ks = ChartExportSession.assetKeys(c);
+        ks.forEach(add);
+        for (let i = 1; i < ks.length; i += 1) {
+          const a = find(ks[0]!);
+          const b = find(ks[i]!);
+          if (a !== b) parent.set(a, b);
+        }
+      }
+      const members = new Map<string, string[]>();
+      for (const k of parent.keys()) members.set(find(k), [...(members.get(find(k)) ?? []), k]);
+      const index = new Map<string, readonly string[]>();
+      for (const list of members.values()) { list.sort(); for (const k of list) index.set(k, list); }
+      this.groupIndex = index;
+    }
+    const keys = new Set<string>();
+    for (const k of own) for (const member of this.groupIndex.get(k) ?? [k]) keys.add(member);
+    return [...keys].sort();
+  }
+
+  /** A stable name for the candidate's group (its smallest asset key), or null. */
+  private groupKey(candidate: VisualCandidate): string | null {
+    return this.groupKeys(candidate)[0] ?? null;
+  }
+
+  /** A placement served by its group's read: the same visual at this placement, with no call and no charge. */
+  private reuseRead(candidate: VisualCandidate, read: GroupRead): ExportedVisual | null {
+    if (!read.visual) { this.readsReused += 1; return null; }
+    if (!this.exportsKind(read.visual.kind) || this.atLimit()) return null;
+    this.readsReused += 1;
+    const b = candidate.bbox;
+    const visual: ExportedVisual = {
+      ...read.visual,
+      id: candidate.id,
+      pageNumber: candidate.unpaged ? null : candidate.pageNumber,
+      imageIndex: candidate.imageIndex,
+      bbox: b ? [b.x, b.y, b.width, b.height] : null,
+    };
+    this.visuals.push(visual);
+    return visual;
+  }
+
+  /** Whether another placement of this candidate's picture was already read: it is served without an image. */
+  servedByGroup(candidate: VisualCandidate): boolean {
+    return this.groupKeys(candidate).some((key) => this.groupsRead.has(key));
+  }
+
+  /** Repeated pictures: placements in groups of two or more, the groups, and the reads their reuse avoided. */
+  dedupeStats(): { groups: number; placements: number; readsAvoided: number } {
+    const sizes = new Map<string, number>();
+    for (const c of this.candidates) {
+      const key = this.groupKey(c);
+      if (key) sizes.set(key, (sizes.get(key) ?? 0) + 1);
+    }
+    const repeated = [...sizes.values()].filter((n) => n > 1);
+    return { groups: repeated.length, placements: repeated.reduce((s, n) => s + n, 0), readsAvoided: this.readsReused };
   }
 
   /**
@@ -554,7 +724,8 @@ export class ChartExportSession {
     const listed = this.candidates.find((c) => sameVisual(c, candidate)) ?? candidate;
     const before = this.calls.length;
     const visual = await this.run(listed, args.image, args.signal);
-    const made = this.calls.slice(before);
+    // This visual's own calls only: a concurrent crop, or the group read this one waited for, made the others.
+    const made = this.calls.slice(before).filter((c) => c.visualId === listed.id);
     const calls = made.filter((c) => c.ok || c.costCents > 0);
     const usage = {
       inputTokens: calls.reduce((s, c) => s + c.inputTokens, 0),
@@ -615,6 +786,6 @@ export class ChartExportSession {
   }
 
   stats(): VisualCandidateStats {
-    return buildVisualCandidateStats({ candidates: this.candidates, presence: this.presence, exported: this.visuals });
+    return buildVisualCandidateStats({ candidates: this.candidates, presence: this.presence, exported: this.visuals, groupOf: (c) => this.groupKey(c) });
   }
 }

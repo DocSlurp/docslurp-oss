@@ -53,7 +53,7 @@ document, usage and page-state writes invoke validated `SECURITY DEFINER` trigge
 owned by `docslurp_realtime_publisher`. That role has no login, inheritance,
 superuser, role creation, database creation, replication or RLS bypass. Its only
 data grants are counter DML, SELECT of `(id, org_id)` on projects, runs and
-documents, and (migration 0143) SELECT of `project_id` on runs and of
+documents, and (migration 0144) SELECT of `project_id` on runs and of
 `(project_id, run_id)` on documents, so a change also records its project and run
 revision scopes. It has no schema CREATE privilege after migration. Trigger functions
 validate the exact public relation, trigger name, timing, level and arguments;

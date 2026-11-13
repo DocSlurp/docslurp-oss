@@ -156,6 +156,9 @@ describe("forecastRunCost", () => {
     const base = forecast(docs, defaultPipelineFeatures);
     const overridden = applyDefaultVisionOverride(defaultPipelineFeatures, { DOCSLURP_VISION_MODEL_URI: "llm://openrouter/z-ai/glm-5.3-flash" });
     expect(overridden.vision.modelUri).toBe("llm://openrouter/z-ai/glm-5.3-flash");
-    expect(forecast(docs, overridden).maxCents).toBeLessThan(base.maxCents);
+    // The override is forecast exactly as if the project had picked that model, and differs from the default's forecast.
+    const picked = { ...defaultPipelineFeatures, vision: { ...defaultPipelineFeatures.vision, modelUri: "llm://openrouter/z-ai/glm-5.3-flash" } };
+    expect(forecast(docs, overridden).maxCents).toBe(forecast(docs, picked).maxCents);
+    expect(forecast(docs, overridden).maxCents).not.toBe(base.maxCents);
   });
 });

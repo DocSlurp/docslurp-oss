@@ -293,7 +293,7 @@ and the distinction between existing project chat logic and native ownership.
 
 ### Revision publication and ingestion lock independence
 
-Migration 0143 adds a `scope` to every counter: `''` is the organization (written
+Migration 0144 adds a `scope` to every counter: `''` is the organization (written
 on every change, exactly as before, and the only scope `realtime_revisions` reads),
 `project:<id>` and `run:<id>` are written alongside it by the same triggers for a
 change's project and run. `realtime_scope_revisions` aggregates them. The broker
@@ -307,7 +307,7 @@ checkpoints are kept (one row per project and run); the compactor folds them wit
 the organization's counters under the same 256-row bound.
 
 Page, chunk and page-stage rows (`document_pages`, `document_chunks`,
-`page_stage_states`) arrive thousands per statement, so from 0143 they publish
+`page_stage_states`) arrive thousands per statement, so from 0144 they publish
 through statement-level triggers with transition tables
 (`realtime_statement_changed()`, triggers `realtime_changed_insert`, `_update`
 and `_delete`): one pass over the statement's distinct documents and runs, then one

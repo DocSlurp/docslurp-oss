@@ -89,14 +89,13 @@ vi.mock("../lib/ai.js", () => ({
   resolveOpenRouterApiKey: vi.fn(
     () =>
       process.env.OPENROUTER_API_KEY ??
-      process.env.OPENROUTER_KEY ??
       process.env.ANTHROPIC_API_KEY,
   ),
   generateOpenRouterText: generateAnthropicText,
   generateOpenRouterDocumentText: generateAnthropicDocumentText,
 }));
 
-const { buildFallbackAnswer, buildNativeDocumentInputs,
+const { buildFallbackAnswer, buildModelFailoverOrder, PROJECT_CHAT_FAILOVER_MODELS, buildNativeDocumentInputs,
   loadRetrievedDocumentSummaries, buildSystemInstructions, chatProject: chatProjectWithScope } = await import(
   "../services/project-chat.js"
 );
@@ -105,7 +104,7 @@ const testScope = { orgId: "org-1", projectIds: "org", modeCeiling: null } as co
 const chatProject = (args: Omit<Parameters<typeof chatProjectWithScope>[0], "scope"> & { scope?: Parameters<typeof chatProjectWithScope>[0]["scope"] }) =>
   chatProjectWithScope({ scope: testScope, ...args });
 const { createSearchSessionJournal } = await import("../search/session.js");
-const MODEL_KEY_ENV = ["ANTHROPIC_API_KEY", "OPENROUTER_API_KEY", "OPENROUTER_KEY"] as const;
+const MODEL_KEY_ENV = ["ANTHROPIC_API_KEY", "OPENROUTER_API_KEY"] as const;
 const originalModelKeys = Object.fromEntries(MODEL_KEY_ENV.map(name => [name, process.env[name]]));
 
 function buildSearchSettings(
@@ -139,6 +138,25 @@ process.env.BETTER_AUTH_SECRET ||= "project-chat-test-secret-with-enough-entropy
 
 /** The first-party app's signed-in session, the only actor that may change settings from chat. */
 const appSessionActor = { type: "session", userId: "user-1", sessionId: "app-session-1", user: { id: "user-1", email: "u@example.test", name: "User" } } as never;
+
+describe("chat failover order", () => {
+  it("retries once on Luna, or on Haiku when the project already answers with Luna, never on a denied model", () => {
+    expect(PROJECT_CHAT_FAILOVER_MODELS).toEqual(["openai/gpt-6-luna", "anthropic/claude-haiku-5.5", "z-ai/glm-5.3-flash"]);
+    expect(buildModelFailoverOrder("z-ai/glm-5.3-flash")).toEqual(["z-ai/glm-5.3-flash", "openai/gpt-6-luna"]);
+    expect(buildModelFailoverOrder("openai/gpt-6-luna")).toEqual(["openai/gpt-6-luna", "anthropic/claude-haiku-5.5"]);
+    expect(buildModelFailoverOrder("anthropic/claude-haiku-5.5")).toEqual(["anthropic/claude-haiku-5.5", "openai/gpt-6-luna"]);
+    expect(buildModelFailoverOrder("deepseek/deepseek-v4.1-flash-1017")).toEqual(["deepseek/deepseek-v4.1-flash-1017", "openai/gpt-6-luna"]);
+    expect(buildModelFailoverOrder("openai/gpt-6-luna", false)).toEqual(["openai/gpt-6-luna"]);
+    // A Speed boost variant is the same model: its failover is a different model.
+    expect(buildModelFailoverOrder("openai/gpt-6-luna:nitro")).toEqual(["openai/gpt-6-luna:nitro", "anthropic/claude-haiku-5.5"]);
+    expect(buildModelFailoverOrder("z-ai/glm-5.3-flash:nitro")).toEqual(["z-ai/glm-5.3-flash:nitro", "openai/gpt-6-luna"]);
+    for (const model of ["z-ai/glm-5.3-flash", "openai/gpt-6-luna", "anthropic/claude-haiku-5.5", "deepseek/deepseek-v4.1-flash-1017"]) {
+      const order = buildModelFailoverOrder(model);
+      expect(order.length).toBeLessThanOrEqual(2);
+      expect(order.slice(1).some((entry) => /deepseek-v4\.1-flash/.test(entry))).toBe(false);
+    }
+  });
+});
 
 describe("chatProject", () => {
   it("refuses a request whose new chat session cannot be stored instead of answering into a missing session", async () => {
@@ -1835,7 +1853,8 @@ describe("chatProject", () => {
     });
 
     expect(response.answer).toBe("Fallback answer [1]");
-    expect(response.debug.model).toBe("deepseek/deepseek-v4.1-flash-1017");
+    // The failover model is GPT-6 Luna; DeepSeek V4.1 Flash is never a failover target (automatic-model-selection.ts).
+    expect(response.debug.model).toBe("openai/gpt-6-luna");
     expect(generateAnthropicDocumentText).toHaveBeenNthCalledWith(
       1,
       expect.objectContaining({
@@ -1845,7 +1864,7 @@ describe("chatProject", () => {
     expect(generateAnthropicDocumentText).toHaveBeenNthCalledWith(
       2,
       expect.objectContaining({
-        model: "deepseek/deepseek-v4.1-flash-1017",
+        model: "openai/gpt-6-luna",
       }),
     );
   });
