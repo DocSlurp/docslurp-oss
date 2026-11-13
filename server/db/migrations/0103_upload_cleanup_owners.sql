@@ -1,5 +1,5 @@
 -- Cleanup ownership survives deletion of operational upload/document records.
-CREATE TABLE upload_cleanup_owners (
+CREATE TABLE IF NOT EXISTS upload_cleanup_owners (
  original_key text PRIMARY KEY,
  sealed_key text NOT NULL,
  org_id text,
@@ -12,4 +12,5 @@ INSERT INTO upload_cleanup_owners (original_key, sealed_key, org_id)
     WHERE f.source_key = q.payload->>'sealedKey' AND s.org_id = q.org_id
    UNION ALL SELECT 1 FROM documents d
     WHERE d.source_key = q.payload->>'sealedKey' AND d.org_id = q.org_id
- );
+ )
+ ON CONFLICT (original_key) DO NOTHING;

@@ -75,6 +75,6 @@ ALTER TABLE storage_cleanup_queue ADD CONSTRAINT storage_cleanup_queue_kind_chec
 
 --> statement-breakpoint
 -- Fence every in-flight source read when retention or human correction replaces content.
-ALTER TABLE documents ADD COLUMN materialization_generation integer NOT NULL DEFAULT 0;
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS materialization_generation integer NOT NULL DEFAULT 0;
 --> statement-breakpoint
-ALTER TABLE documents ADD COLUMN source_materialization_blocked boolean NOT NULL DEFAULT false;
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS source_materialization_blocked boolean NOT NULL DEFAULT false;

@@ -1,12 +1,12 @@
 -- Commit-visible dashboard revisions. NOTIFY is delivered by Postgres only on
 -- commit; a shared bounded sweep reads these rows to recover lost notifications.
-CREATE TABLE realtime_revisions (
+CREATE TABLE IF NOT EXISTS realtime_revisions (
   org_id text PRIMARY KEY,
   revision bigint NOT NULL DEFAULT 1,
   transaction_id bigint NOT NULL
 );
 --> statement-breakpoint
-CREATE FUNCTION realtime_changed() RETURNS trigger LANGUAGE plpgsql AS $$
+CREATE OR REPLACE FUNCTION realtime_changed() RETURNS trigger LANGUAGE plpgsql AS $$
 DECLARE
   row_data jsonb;
   organization_id text;
@@ -54,6 +54,6 @@ BEGIN
     'document_tags', 'document_summaries', 'performance_log', 'usage_events', 'organizations', 'credit_ledger', 'credit_debits_pending',
     'credit_leases', 'interactive_spend_holds'
   ] LOOP
-    EXECUTE format('CREATE TRIGGER realtime_changed AFTER INSERT OR UPDATE OR DELETE ON %I FOR EACH ROW EXECUTE FUNCTION realtime_changed()', source);
+    EXECUTE format('CREATE OR REPLACE TRIGGER realtime_changed AFTER INSERT OR UPDATE OR DELETE ON %I FOR EACH ROW EXECUTE FUNCTION realtime_changed()', source);
   END LOOP;
 END $$;

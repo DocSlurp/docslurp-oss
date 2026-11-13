@@ -41,7 +41,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS worker_slot_tokens_lease_idx ON worker_slot_to
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS worker_slot_tokens_live_idx ON worker_slot_tokens (expires_at) WHERE lease_id IS NOT NULL;
 --> statement-breakpoint
-DROP TABLE IF EXISTS worker_slot_leases;
+-- Only the 0025 table: once this migration has run, the name is the view below.
+DO $idem$ BEGIN
+  IF EXISTS (SELECT 1 FROM pg_class WHERE oid = to_regclass('worker_slot_leases') AND relkind = 'r') THEN
+    DROP TABLE IF EXISTS worker_slot_leases;
+  END IF;
+END $idem$;
 --> statement-breakpoint
 -- Held tokens under the old name, for dashboards and ops queries
 -- (`... from worker_slot_leases where expires_at > now()`).

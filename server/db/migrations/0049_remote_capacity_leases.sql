@@ -1,5 +1,5 @@
 -- Ownership outlives a worker process and tenant/run deletion. Never cascade leases.
-CREATE TABLE remote_capacity_leases (
+CREATE TABLE IF NOT EXISTS remote_capacity_leases (
   id text PRIMARY KEY, provider text NOT NULL, name text NOT NULL UNIQUE,
   scope jsonb NOT NULL, before_ids jsonb NOT NULL,
   resource_id text, status text NOT NULL CHECK(status IN ('creating','active','deleting','deleted')),
@@ -10,8 +10,8 @@ CREATE TABLE remote_capacity_leases (
   CHECK(deadline > created_at)
 );
 --> statement-breakpoint
-CREATE INDEX remote_capacity_outstanding_idx ON remote_capacity_leases(status, deadline);
+CREATE INDEX IF NOT EXISTS remote_capacity_outstanding_idx ON remote_capacity_leases(status, deadline);
 --> statement-breakpoint
-CREATE TABLE remote_capacity_watchdog (
+CREATE TABLE IF NOT EXISTS remote_capacity_watchdog (
   id text PRIMARY KEY CHECK(id = 'media'), providers jsonb NOT NULL, heartbeat_at timestamptz NOT NULL
 );

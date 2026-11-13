@@ -14,7 +14,7 @@ BEGIN
 END;
 $$;
 --> statement-breakpoint
-CREATE TRIGGER workspace_runs_speed_boost_snapshot
+CREATE OR REPLACE TRIGGER workspace_runs_speed_boost_snapshot
 BEFORE INSERT OR UPDATE OF pipeline ON workspace_runs
 FOR EACH ROW EXECUTE FUNCTION enforce_run_speed_boost_snapshot();
 --> statement-breakpoint

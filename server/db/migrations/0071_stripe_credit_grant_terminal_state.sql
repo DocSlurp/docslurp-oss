@@ -1,11 +1,11 @@
 -- A void can arrive before the created event or synchronous administrative mirror.
 -- Retain terminal state even when no local allocation/customer exists yet.
-CREATE TABLE stripe_credit_grant_voids (
+CREATE TABLE IF NOT EXISTS stripe_credit_grant_voids (
   stripe_grant_id text PRIMARY KEY,
   created_at timestamptz NOT NULL DEFAULT now()
 );
 --> statement-breakpoint
-CREATE FUNCTION reconcile_stripe_credit_grant(
+CREATE OR REPLACE FUNCTION reconcile_stripe_credit_grant(
   p_stripe_grant_id text,
   p_org_id text,
   p_credits numeric,

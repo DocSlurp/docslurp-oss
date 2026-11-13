@@ -7,5 +7,9 @@ ALTER TABLE documents ADD COLUMN IF NOT EXISTS parse_source_key text;
 --> statement-breakpoint
 ALTER TABLE documents ADD COLUMN IF NOT EXISTS parse_source_sha256 text;
 --> statement-breakpoint
-ALTER TABLE documents ADD CONSTRAINT documents_parse_source_pair_check
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'documents_parse_source_pair_check' AND conrelid = 'documents'::regclass) THEN
+    ALTER TABLE documents ADD CONSTRAINT documents_parse_source_pair_check
   CHECK ((parse_source_key IS NULL) = (parse_source_sha256 IS NULL)) NOT VALID;
+  END IF;
+END $idem$;
