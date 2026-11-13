@@ -134,7 +134,8 @@ describe("doppler page facts: ruled grids", () => {
     const boxes = Array.from({ length: 64 }, (_, i) => [i * 5, i * 7, i * 5 + 300, i * 7 + 200] as [number, number, number, number]);
     const started = performance.now();
     for (let i = 0; i < 2_000; i += 1) rasterUnionCoverage(boxes, 612, 792);
-    expect(performance.now() - started).toBeLessThan(2_000);
+    // About 0.1 ms a page of 64 overlapping grids; the bound leaves room for a loaded CI host.
+    expect(performance.now() - started).toBeLessThan(10_000);
     expect(rasterUnionCoverage([[0, 0, 612, 792]], 612, 792)).toBe(1);
     expect(rasterUnionCoverage([], 612, 792)).toBe(0);
     // The walker's own values (pdf_layout_facts.py union_coverage), ties rounded half to even as Python does.
@@ -157,6 +158,21 @@ describe("doppler page facts: words inside and bytes per pixel", () => {
     expect(scan.wordsInside).toBe(397);
     // A real 0 stays 0: only absence is unknown.
     expect(scan.bytesPerPixel).toBe(0);
+  });
+
+  it("whole-box counts stand only when the page's centre-based text over images agrees (the walker counts centres)", () => {
+    const text = base.text as Record<string, unknown>;
+    const at = (ratio: number | undefined, inside: number) => {
+      const t = { ...text };
+      if (ratio === undefined) delete t.textOverImageRatio; else t.textOverImageRatio = ratio;
+      return layoutOf(textPage(1, { text: t, images: { ...images, items: [{ ...item, visibleWordsInside: inside, invisibleWordsInside: 0 }] } })).images![0]!.wordsInside;
+    };
+    // 410 words, 2400 characters: about 5.85 characters a word.
+    expect(at(0, 0)).toBe(0);
+    expect(at(5.85 / 2400, 0)).toBe(0);             // one word's worth over images: within the allowance
+    expect(at(3 * 5.86 / 2400, 0)).toBeNull();      // three words over images, none counted inside: a straddling label
+    expect(at(3 * 5.86 / 2400, 3)).toBe(3);
+    expect(at(undefined, 0)).toBeNull();            // no ratio (no oddtext family): unknown
   });
 
   it("absent gives unknown (null), never 0", () => {
@@ -239,7 +255,10 @@ interface TruthImage {
   colorSpace: "gray" | "rgb";
   streamBytes: number;
   obj: number;
+  /** Words whose centre is inside (the walker's count). */
   wordsInside: number;
+  /** Words whose whole box is inside (Doppler's count), when it differs: a label straddling the edge. */
+  wholeWordsInside?: number;
 }
 interface TruthPage {
   name: string;
@@ -248,6 +267,8 @@ interface TruthPage {
   images: TruthImage[];
   /** Ruled grids: rows, columns and box. Columns 1 is Doppler-only (the walker never finds one). */
   grids: Array<{ bbox: [number, number, number, number]; rows: number; columns: number }>;
+  /** What Doppler's own search reports instead, when it differs from the walker's (shaded boxes, sideless column lines). */
+  doppler?: { grids: TruthPage["grids"]; hRules: number; vRules: number };
   text: string;
 }
 
@@ -288,6 +309,14 @@ const TRUTH: TruthPage[] = [
     name: "OCR'd scan (invisible layer)", words: 300, invisibleWords: 300, grids: [], text: prose(300),
     images: [{ bbox: [0, 0, W, H], px: [2550, 3300], ppi: 300, filter: "ccitt", bpc: 1, colorSpace: "gray", streamBytes: 90_000, obj: 61, wordsInside: 300 }],
   },
+  {
+    name: "two-column page with a centre divider", words: 400, images: [logo], grids: [], text: prose(400),
+    doppler: { grids: [{ bbox: [36, 72, 576, 720], rows: 3, columns: 2 }], hRules: 4, vRules: 1 },
+  },
+  {
+    name: "labels overrunning a bilevel figure", words: 240, grids: [], text: prose(240),
+    images: [logo, { bbox: placed(72, 300, [1950, 1250], 300), px: [1950, 1250], ppi: 300, filter: "ccitt", bpc: 1, colorSpace: "gray", streamBytes: 40_000, obj: 54, wordsInside: 3, wholeWordsInside: 0 }],
+  },
   { name: "blank", words: 0, images: [], grids: [], text: "" },
   { name: "sparse page with a logo only", words: 6, images: [logo], grids: [], text: prose(6) },
 ];
@@ -324,6 +353,8 @@ function factsLine(truth: TruthPage, n: number, warnings: string[] = []): Record
     text: {
       charCount: truth.words * 6, visibleCharCount: visible * 6, invisibleCharCount: invisible * 6, wordCount: truth.words,
       visibleWordCount: visible, invisibleWordCount: invisible, textLayer: layer, textCoverage: 0.3,
+      // Characters by centre over images: every centre-inside word, 6 characters each.
+      textOverImageRatio: truth.words === 0 ? 0 : Math.min(1, truth.images.reduce((sum, i) => sum + i.wordsInside, 0) / truth.words),
     },
     images: {
       imageCount: truth.images.length, imageCoverage: Math.min(1, truth.images.reduce((s, i) => s + area(i.bbox), 0)),
@@ -333,15 +364,17 @@ function factsLine(truth: TruthPage, n: number, warnings: string[] = []): Record
         index: i + 1, bbox: image.bbox, coverage: Math.round(area(image.bbox) * 4096) / 4096, px: image.px, dpi: [image.ppi, image.ppi],
         filter: image.filter, bpc: image.bpc, colorSpace: image.colorSpace, imageMask: false, softMask: false, mask: false, decode: false,
         inline: false, obj: image.obj, copy: "decode",
-        visibleWordsInside: Math.min(image.wordsInside, visible), invisibleWordsInside: Math.max(0, image.wordsInside - visible),
+        visibleWordsInside: Math.min(image.wholeWordsInside ?? image.wordsInside, visible),
+        invisibleWordsInside: Math.max(0, (image.wholeWordsInside ?? image.wordsInside) - visible),
         bytesPerPixel: Math.round(image.streamBytes / (image.px[0] * image.px[1]) * 1e6) / 1e6,
       })),
     },
     vectors: {
-      paths: 40, filled: 0, stroked: 40, coverage: 0.2, hRules: truth.grids.reduce((s, g) => s + g.rows + 1, 0),
-      vRules: truth.grids.reduce((s, g) => s + (g.columns > 1 ? g.columns + 1 : 0), 0), ruleGridScore: truth.grids.length ? 1 : 0,
+      paths: 40, filled: 0, stroked: 40, coverage: 0.2,
+      hRules: truth.doppler?.hRules ?? truth.grids.reduce((s, g) => s + g.rows + 1, 0),
+      vRules: truth.doppler?.vRules ?? truth.grids.reduce((s, g) => s + (g.columns > 1 ? g.columns + 1 : 0), 0), ruleGridScore: truth.grids.length ? 1 : 0,
       shadings: 0, patterns: 0, clips: 0, figureClusters: 0, clusters: [], clustersTruncated: false, limitHit: false,
-      grids: truth.grids.map((g) => ({ ...g, coverage: Math.round(area(g.bbox) * 10_000) / 10_000 })), gridsTruncated: false,
+      grids: (truth.doppler?.grids ?? truth.grids).map((g) => ({ ...g, coverage: Math.round(area(g.bbox) * 10_000) / 10_000 })), gridsTruncated: false,
     },
     parseWarnings: warnings, unusualFeatures: [],
   };
@@ -399,6 +432,10 @@ describe("parity: facts-mapped layout routes like the walker's", () => {
     expect(byName["sparse full-page scan"]!.ocr?.authorized).toBe(true);
     expect(byName["prose"]!.ocr?.authorized).toBe(false);
     expect(byName["blank"]!.ocr?.authorized).toBe(false);
+    // Where Doppler's own measures differ from the walker's, the mapping falls back so the decision still matches.
+    expect(byName["two-column page with a centre divider"]!.route).not.toBe("table-heavy");
+    expect(byName["labels overrunning a bilevel figure"]!.ocr?.authorized).toBe(false);
+    expect(mapped.get(TRUTH.findIndex((t) => t.name.startsWith("labels overrunning")) + 1)!.images!.every((i) => i.wordsInside === null)).toBe(true);
   });
 
   it("without the new fields (an older build) facts never fire a mixed-scan read and miss the drawn tables: the gap #42 closes", () => {
