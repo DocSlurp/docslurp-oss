@@ -117,6 +117,9 @@ export const WORKER_TABLES = Object.freeze({
   projects: { privileges: ["select", "update"], evidence: "worker/src/db/store.ts budget alerts; deferred/materialize-activity.ts" },
   // Read only: raised by the table owner through pricing_state_raise() (0131), never by a runtime role.
   pricing_provider_state: { privileges: ["select"], evidence: "packages/shared/src/pricing-loader.ts durableState (pricing provider, migration 0131)" },
+  // Route tiers (0136): the worker reads current observations to rank vision hosts and records served latency.
+  provider_endpoint_observations: { privileges: ["select", "insert"], evidence: "server/src/services/provider-observations.ts recordServedLatency (traffic rows); tier selection" },
+  provider_endpoint_current: { privileges: ["select"], evidence: "server/src/services/provider-observations.ts readProviderObservations (view)" },
 });
 
 /** Relations the worker must not touch, and why. */
