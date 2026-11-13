@@ -7,6 +7,7 @@ import { sweepDocumentExports } from "./document-exports.js";
 import { sweepFeedbackReports } from "./feedback-reports.js";
 import { sweepExtracts } from "./extracts.js";
 import { sweepExpiredSearchSessions } from "./search-history-expiry.js";
+import { sweepSearchSessionProjectBackfill } from "./search-session-project-backfill.js";
 import { sweepSpendPausedRuns } from "./spend-paused-runs.js";
 import { sweepExpiredCreditLeases } from "./billing/credit-leases.js";
 import { sweepStaleQueuedRuns } from "./stale-queued-runs.js";
@@ -58,6 +59,8 @@ const sweeps: Array<[name: string, run: () => Promise<unknown>]> = [
   ["provider-observations", () => sweepProviderObservations()],
   // Expired API-key search history (lean-logging.ts); result rows and diagnostics cascade.
   ["search-history-expiry", () => sweepExpiredSearchSessions()],
+  // search_sessions.project_id for sessions older than migration 0142, in short batches; stops when none are left.
+  ["search-session-project-backfill", () => sweepSearchSessionProjectBackfill()],
   // Automatic project titles from ingested content; project reads never rename (project-naming.ts).
   ["project-auto-titles", () => sweepProjectAutoTitles()],
 ];
