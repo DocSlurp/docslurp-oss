@@ -451,7 +451,7 @@ function figureOutcome(job: SandboxedPdfJob, raw: unknown, pages: number): Sandb
  * Validate a provider run's `ocrPages` against the page count and keep them for the job. A malformed list refuses the
  * run: provider output is untrusted, and billing evidence must not be guessed from it.
  */
-export function acceptSandboxedPdfResult(job: SandboxedPdfJob, result: SandboxedPdfResult, pages: number): SandboxedPdfResult {
+export function acceptSandboxedPdfResult(job: SandboxedPdfJob, result: SandboxedPdfResult, pages: number, options: { glyphs?: boolean } = {}): SandboxedPdfResult {
   reportedOcrPages.delete(job);
   reportedLayoutFacts.delete(job);
   reportedFigures.delete(job);
@@ -480,7 +480,8 @@ export function acceptSandboxedPdfResult(job: SandboxedPdfJob, result: Sandboxed
     reportedOcrPages.set(job, ocrPages);
   }
   // Last, once nothing else can refuse the result: page facts bounded by the host's own count only (without one, dropped).
-  acceptSandboxedPdfPageFacts(job, pageFacts, pages);
+  // `glyphs`: the run read math, so its facts are not walker-parity facts (acceptSandboxedPdfPageFacts).
+  acceptSandboxedPdfPageFacts(job, pageFacts, pages, process.env, { glyphs: options.glyphs === true });
   return ocrPages ? { ...result, ocrPages } : result;
 }
 

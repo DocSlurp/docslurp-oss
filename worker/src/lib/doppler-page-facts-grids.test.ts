@@ -5,7 +5,7 @@
 import { describe, expect, it } from "vitest";
 
 import { parseDopplerPageFacts, type DopplerPageFactsDocument } from "./doppler-page-facts.js";
-import { gridCoversBox, pageLayoutFactsFromDopplerFacts } from "./doppler-page-facts-layout.js";
+import { pageLayoutFactsFromDopplerFacts } from "./doppler-page-facts-layout.js";
 import { dopplerFactsCoverEvidence, pageImageEvidenceFromDopplerFacts } from "./doppler-page-facts-evidence.js";
 import { buildPageImageEvidence, findSparsePages, summarizeImageListing, type PageImageEvidence } from "./page-image-evidence.js";
 import type { PageLayoutFacts } from "./page-layout-facts.js";
@@ -126,16 +126,6 @@ describe("doppler page facts: ruled grids", () => {
     const facts = one(page({ vectors: { grids: [TABLE], gridsTruncated: false }, item: { visibleWordsInside: 1, invisibleWordsInside: 0, bytesPerPixel: 0.05 } }));
     expect(parse(dopplerPageFactsJsonl(facts)).pages).toEqual(facts.pages);
   });
-
-  it("covers an image's box with the 64 x 64 ratio cells only when no strip inside an edge escapes them", () => {
-    // Letter page: cells are 9.5625 x 12.375 pt. An edge must lie at or before the centre of the cell it falls in, inside.
-    expect(gridCoversBox([29, 38, 110, 82], [612, 792])).toBe(true);
-    expect(gridCoversBox([36, 38, 110, 82], [612, 792])).toBe(false);   // left edge past its cell's centre: a 2.25 pt strip
-    expect(gridCoversBox([29, 38, 110, 80], [612, 792])).toBe(false);   // bottom edge before its cell's centre
-    expect(gridCoversBox([0, 0, 612, 792], [612, 792])).toBe(true);
-    expect(gridCoversBox([10, 10, 12, 12], [612, 792])).toBe(false);    // smaller than a cell: marks nothing
-    expect(gridCoversBox([29, 38, 110, 82], [0, 792])).toBe(false);
-  });
 });
 
 describe("doppler page facts: words inside and bytes per pixel", () => {
@@ -152,24 +142,21 @@ describe("doppler page facts: words inside and bytes per pixel", () => {
     expect(scan.bytesPerPixel).toBe(0);
   });
 
-  it("a low whole-box count stands only when no text centre lies over any image (the walker counts centres)", () => {
+  it("a low whole-box count is unknown: the box is clipped and counts whole words, where the walker counts centres", () => {
     const text = base.text as Record<string, unknown>;
     const at = (ratio: number | undefined, inside: number) => {
       const t = { ...text };
       if (ratio === undefined) delete t.textOverImageRatio; else t.textOverImageRatio = ratio;
-      return layoutOf(textPage(1, { text: t, images: { ...images, items: [{ ...item, bbox: ALIGNED, visibleWordsInside: inside, invisibleWordsInside: 0 }] } })).images![0]!.wordsInside;
+      return layoutOf(textPage(1, { text: t, images: { ...images, items: [{ ...item, bbox: ALIGNED, px: [81, 44], dpi: [72, 72], visibleWordsInside: inside, invisibleWordsInside: 0 }] } })).images![0]!.wordsInside;
     };
-    expect(at(0, 0)).toBe(0);
-    expect(at(0, 2)).toBe(2);
-    expect(at(0.001, 0)).toBeNull();     // some text centred over an image: a straddling word the walker counts may be missing
-    expect(at(0.001, 2)).toBeNull();
-    expect(at(undefined, 1)).toBeNull(); // no ratio (no oddtext family): unknown
+    // Council #382 M2: even with no text centred over any image, a clipped (or rotated and clipped) image can hide words
+    // the walker counts inside its whole placement. Facts never select a mixed-scan read.
+    expect(at(0, 0)).toBeNull();
+    expect(at(0, 2)).toBeNull();
+    expect(at(0.001, 0)).toBeNull();
     // Above the mixed-scan threshold a count only blocks a read, and the walker's is at least as high: it stands.
     expect(at(0.5, 3)).toBe(3);
     expect(at(undefined, 40)).toBe(40);
-    // An edge strip the ratio's cells miss: a straddling word's centre could sit there uncounted.
-    const unaligned = textPage(1, { images: { ...images, items: [{ ...item, visibleWordsInside: 0, invisibleWordsInside: 0 }] } });
-    expect(layoutOf(unaligned).images![0]!.wordsInside).toBeNull();
   });
 
   it("absent gives unknown (null), never 0", () => {
@@ -210,10 +197,10 @@ describe("doppler page facts: words inside and bytes per pixel", () => {
   });
 
   it("xref-repaired-earlier: the page keeps only its size; images, words, grids are unknown, so nothing on it selects a read", () => {
-    const scanLike = { visibleWordsInside: 0, invisibleWordsInside: 0, bytesPerPixel: 0.02, bbox: [67, 302, 535, 602], coverage: 0.29, px: [1950, 1667], dpi: [300, 300], filter: "dct" };
+    const scanLike = { visibleWordsInside: 0, invisibleWordsInside: 0, bytesPerPixel: 0.02, bbox: [67, 302, 535, 602], coverage: 0.29, px: [1950, 1250], dpi: [300, 300], filter: "dct" };
     const vectorsWithGrid = { grids: [TABLE], gridsTruncated: false };
     const ok = layoutOf(page({ item: scanLike, vectors: vectorsWithGrid }));
-    expect([ok.images![0]!.widthPx, ok.images![0]!.heightPx, ok.images![0]!.ppi, ok.images![0]!.bytesPerPixel, ok.images![0]!.wordsInside]).toEqual([1950, 1667, [300, 300], 0.02, 0]);
+    expect([ok.images![0]!.widthPx, ok.images![0]!.heightPx, ok.images![0]!.ppi, ok.images![0]!.bytesPerPixel, ok.images![0]!.wordsInside]).toEqual([1950, 1250, [300, 300], 0.02, null]);
     expect(ok.grids).toBeNull();
     const low = layoutOf(page({ item: scanLike, vectors: vectorsWithGrid, extra: { parseWarnings: ["xref-repaired-earlier"] } }));
     expect(low).toEqual({ images: null, tables: null, words: null, grids: null, tableCoverage: null, widthPt: 612, heightPt: 792 });
@@ -429,7 +416,9 @@ describe("parity: facts-mapped layout routes like the walker's", () => {
     });
     // Identical wherever Doppler's list holds no grid of two or more columns (grids then read [] or the rule proof).
     const dopplerGrid = (t: TruthPage) => (t.doppler?.grids ?? t.grids).some((g) => g.columns >= 2) && (t.doppler?.vRules ?? 3) >= 3;
-    const same = (list: typeof fromFacts) => list.filter((_, i) => !dopplerGrid(TRUTH[i]!));
+    // ... and no mixed-scan read decides (facts leave low words-inside counts unknown: council #382 M2).
+    const mixedScan = (t: TruthPage) => t.words > 0 && t.images.some((i) => i.wordsInside <= 2 && i.obj !== logo.obj);
+    const same = (list: typeof fromFacts) => list.filter((_, i) => !dopplerGrid(TRUTH[i]!) && !mixedScan(TRUTH[i]!));
     expect(same(fromFacts)).toEqual(same(fromWalker));
 
     const byName = Object.fromEntries(fromFacts.map((d) => [d.page, d]));
@@ -441,8 +430,10 @@ describe("parity: facts-mapped layout routes like the walker's", () => {
     // The other decisions the new fields feed fire (so the comparison is not vacuous).
     expect(byName["lined paper (one column)"]!.route).not.toBe("table-heavy");
     expect(byName["Markdown table"]!.route).toBe("table-heavy");
-    expect(byName["mixed scan: bilevel figure beside text"]!.ocr?.authorized).toBe(true);
-    expect(byName["mixed scan: low-bpp DCT scan beside text"]!.ocr?.authorized).toBe(true);
+    // Mixed-scan reads the walker makes are missed, never invented.
+    expect(walkerByName["mixed scan: bilevel figure beside text"]!.ocr?.authorized).toBe(true);
+    expect(byName["mixed scan: bilevel figure beside text"]!.ocr?.authorized).toBe(false);
+    expect(byName["mixed scan: low-bpp DCT scan beside text"]!.ocr?.authorized).toBe(false);
     expect(byName["photo beside text"]!.ocr?.authorized).toBe(false);
     expect(byName["scan with a caption over it"]!.ocr?.authorized).toBe(false);
     expect(byName["sparse full-page scan"]!.ocr?.authorized).toBe(true);
