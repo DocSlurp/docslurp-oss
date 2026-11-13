@@ -3,6 +3,9 @@ import path from "node:path";
 import { cleanDocumentTitle } from "@docslurp/shared";
 import { sql } from "../db.js";
 
+/** The pool, or the sweep's transaction. */
+type Db = typeof sql;
+
 /**
  * Automatic project titles move forward through phases, each a stronger signal
  * than the last: an untitled project (`empty`), its uploaded filenames
@@ -99,8 +102,11 @@ export async function markProjectAutoNamed(projectId: string, userId: string, na
  * Same-name transitions still admit a metadata update without changing updated_at.
  * Returns whether the name changed.
  */
-async function applyAutoTitle(args: { projectId: string; currentName: string; name: string; phase: AutoTitlePhase; source?: AutoTitleSource }): Promise<boolean> {
-  const rows = await sql<{ renamed: boolean }[]>`
+async function applyAutoTitle(
+  args: { projectId: string; currentName: string; name: string; phase: AutoTitlePhase; source?: AutoTitleSource },
+  db: Db = sql,
+): Promise<boolean> {
+  const rows = await db<{ renamed: boolean }[]>`
     with admitted as (
       update projects set name = ${args.name},
         updated_at = case when name <> ${args.name} then now() else updated_at end
@@ -155,36 +161,72 @@ export async function nameProjectFromUpload(args: { projectId: string; filenames
   return (await applyAutoTitle({ projectId: args.projectId, currentName: row.name, name, phase: "upload" })) ? name : null;
 }
 
-/** How far back the auto-title sweep looks for projects whose corpus changed (covers missed sweep ticks). */
-const AUTO_TITLE_SWEEP_WINDOW_MINUTES = 15;
+const AUTO_TITLE_SWEEP_BATCH = 200;
+/** Batches per sweep, so a backlog (first run, or after an outage) drains over a few ticks without one long pass. */
+const AUTO_TITLE_SWEEP_MAX_BATCHES = 10;
+const AUTO_TITLE_SWEEP_LOCK = "project-auto-title-sweep";
 
 /**
  * After ingest: refines the automatic titles of projects whose current corpus
- * changed recently (project_corpus_stats is trigger-maintained as documents
- * complete), and that still name themselves automatically. Runs from the
- * maintenance sweep, so project reads (dashboard, chat, search) never write.
- * Idempotent across instances: applyAutoTitle only moves a title forward
- * while it still equals the project's name.
+ * changed since the sweep last examined them. project_corpus_stats.updated_at
+ * moves as documents complete (trigger-maintained); auto_title_checked_at is
+ * the updated_at the sweep last saw (0144). A project is pending while the two
+ * differ, with no lookback window, and the oldest change goes first: a project
+ * the sweep cannot rename is marked examined like any other, so it cannot hold
+ * a place in the queue, and an outage of any length is caught up afterwards.
+ *
+ * Runs from the maintenance sweep, so project reads (dashboard, chat, search)
+ * never write. One instance at a time (transaction-scoped advisory lock per
+ * batch); the others skip the tick. Returns the number of projects examined.
  */
-export async function sweepProjectAutoTitles(): Promise<number> {
-  const rows = await sql<{ id: string }[]>`
-    select cs.project_id as id
-    from project_corpus_stats cs
-    join projects w on w.id = cs.project_id
-    join project_search_settings s on s.project_id = w.id
-    where cs.updated_at > now() - make_interval(mins => ${AUTO_TITLE_SWEEP_WINDOW_MINUTES})
-      and s.compat_metadata -> 'autoTitle' ->> 'name' = w.name
-      and (
-        s.compat_metadata -> 'autoTitle' ->> 'phase' in ('empty', 'upload')
-        or (s.compat_metadata -> 'autoTitle' ->> 'phase' = 'content'
-          and coalesce(s.compat_metadata -> 'autoTitle' ->> 'source', 'heading') <> 'summary')
-      )
-    order by cs.updated_at desc
-    limit 200
-  `;
-  if (rows.length === 0) return 0;
-  await refineProjectNames(rows.map((row) => row.id));
-  return rows.length;
+export async function sweepProjectAutoTitles(options: { batchSize?: number; maxBatches?: number } = {}): Promise<number> {
+  const batchSize = options.batchSize ?? AUTO_TITLE_SWEEP_BATCH;
+  let examined = 0;
+  for (let i = 0; i < (options.maxBatches ?? AUTO_TITLE_SWEEP_MAX_BATCHES); i += 1) {
+    const batch = await sql.begin(async (transaction) => {
+      const tx = transaction as unknown as Db;
+      const [lock] = await tx<{ locked: boolean }[]>`select pg_try_advisory_xact_lock(hashtext(${AUTO_TITLE_SWEEP_LOCK})) as locked`;
+      if (!lock?.locked) return null;
+      // updated_at as text: a JS Date drops the microseconds the comparison needs.
+      const rows = await tx<{ id: string; seen: string; eligible: boolean }[]>`
+        select cs.project_id as id, cs.updated_at::text as seen,
+          exists (
+            select 1 from projects w join project_search_settings s on s.project_id = w.id
+            where w.id = cs.project_id and s.compat_metadata -> 'autoTitle' ->> 'name' = w.name
+              and (
+                s.compat_metadata -> 'autoTitle' ->> 'phase' in ('empty', 'upload')
+                or (s.compat_metadata -> 'autoTitle' ->> 'phase' = 'content'
+                  and coalesce(s.compat_metadata -> 'autoTitle' ->> 'source', 'heading') <> 'summary')
+              )
+          ) as eligible
+        from project_corpus_stats cs
+        where cs.auto_title_checked_at is distinct from cs.updated_at
+        order by cs.updated_at, cs.project_id
+        limit ${batchSize}
+      `;
+      if (rows.length === 0) return { selected: 0, marked: 0 };
+      await refineProjectNames(rows.filter((row) => row.eligible).map((row) => row.id), tx);
+      // Recorded as the updated_at that was read: a document completing meanwhile leaves the project pending.
+      // SKIP LOCKED: a stats row an ingest transaction holds stays pending for the next sweep, so this transaction
+      // (which holds the renamed projects' rows) never waits on one.
+      const marked = await tx<{ project_id: string }[]>`
+        update project_corpus_stats cs set auto_title_checked_at = v.seen::timestamptz
+        from unnest(${tx.array(rows.map((row) => row.id))}::text[], ${tx.array(rows.map((row) => row.seen))}::text[]) as v(id, seen)
+        where cs.project_id = v.id and cs.project_id in (
+          select project_id from project_corpus_stats where project_id = any(${tx.array(rows.map((row) => row.id))}::text[])
+          for update skip locked
+        )
+        returning cs.project_id
+      `;
+      return { selected: rows.length, marked: marked.length };
+    });
+    // Another instance holds the lock and is doing this work.
+    if (!batch) break;
+    examined += batch.marked;
+    // A short page is the end of the queue; an unmarked row would be selected again, so leave it to the next sweep.
+    if (batch.selected < batchSize || batch.marked < batch.selected) break;
+  }
+  return examined;
 }
 
 /**
@@ -193,9 +235,9 @@ export async function sweepProjectAutoTitles(): Promise<number> {
  * heading-titled project is upgraded once when a summary arrives. A manual
  * edit stops automatic naming.
  */
-export async function refineProjectNames(projectIds: string[]) {
+export async function refineProjectNames(projectIds: string[], db: Db = sql) {
   if (!projectIds.length) return;
-  const rows = await sql<{ id: string; name: string; phase: AutoTitlePhase; summary: string | null; title: string | null }[]>`
+  const rows = await db<{ id: string; name: string; phase: AutoTitlePhase; summary: string | null; title: string | null }[]>`
     select w.id, w.name,
       s.compat_metadata -> 'autoTitle' ->> 'phase' as phase,
       (select ds.summary from documents d
@@ -236,12 +278,12 @@ export async function refineProjectNames(projectIds: string[]) {
     const fromSummary = row.summary ? projectSummarySubject(row.summary) : null;
     // Within the content phase only a summary may replace a heading-derived title.
     if (row.phase === "content") {
-      if (fromSummary) await applyAutoTitle({ projectId: row.id, currentName: row.name, name: fromSummary, phase: "content", source: "summary" });
+      if (fromSummary) await applyAutoTitle({ projectId: row.id, currentName: row.name, name: fromSummary, phase: "content", source: "summary" }, db);
       continue;
     }
     const fromHeading = row.title ? projectSubject(row.title) : null;
     const name = fromSummary ?? fromHeading;
     if (!name) continue;
-    await applyAutoTitle({ projectId: row.id, currentName: row.name, name, phase: "content", source: fromSummary ? "summary" : "heading" });
+    await applyAutoTitle({ projectId: row.id, currentName: row.name, name, phase: "content", source: fromSummary ? "summary" : "heading" }, db);
   }
 }

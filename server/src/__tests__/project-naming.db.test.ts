@@ -78,7 +78,10 @@ describe("automatic project naming", () => {
 
     await sql`insert into document_chunks (id, document_id, run_id, user_id, chunk_index, text, token_estimate, heading_path)
       values (${first.id + "-c0"}, ${first.id}, ${first.runId}, 'u', 0, 'Rent is due monthly.', 5, ${["Residential Lease"]})`;
+    // Reads never rename; the maintenance sweep does, after ingest.
     await ws.getProject(project.id, "u");
+    expect((await state(project.id)).name).toBe("Lease 2026 + 1 more");
+    await naming.sweepProjectAutoTitles();
     expect(await state(project.id)).toEqual({ name: "Residential Lease", autoTitle: { phase: "content", name: "Residential Lease", source: "heading" } });
 
     // Uploads no longer rename once content has named the project.
@@ -109,7 +112,48 @@ describe("automatic project naming", () => {
     await sql`insert into document_chunks (id, document_id, run_id, user_id, chunk_index, text, token_estimate, heading_path)
       values (${doc.id + "-c0"}, ${doc.id}, ${doc.runId}, 'u', 0, 'Body.', 2, ${["Field Survey Notes"]})`;
     await ws.listProjects("u");
+    expect((await state(project.id)).name).toBe("Untitled project");
+    await naming.sweepProjectAutoTitles();
     expect((await state(project.id)).name).toBe("Field Survey Notes");
+  });
+
+  it("sweeps the oldest pending corpus change first, with no lookback window and no starvation", async () => {
+    await naming.sweepProjectAutoTitles();
+    const pending = async () => (await sql<{ project_id: string }[]>`
+      select project_id from project_corpus_stats where auto_title_checked_at is distinct from updated_at`).map((row) => row.project_id).sort();
+    expect(await pending()).toEqual([]);
+
+    // Three projects the sweep can do nothing for (manually named), changed more recently than the one it can.
+    const stale = await ws.createProject({ userId: "u", orgId: "o" });
+    const doc = await addDocument(stale.id, "scan.pdf");
+    await sql`insert into document_chunks (id, document_id, run_id, user_id, chunk_index, text, token_estimate, heading_path)
+      values (${doc.id + "-c0"}, ${doc.id}, ${doc.runId}, 'u', 0, 'Body.', 2, ${["Harbour Expansion Plan"]})`;
+    // An outage far longer than the old 15-minute window.
+    await sql`update project_corpus_stats set updated_at = now() - interval '3 days' where project_id = ${stale.id}`;
+    const manual: string[] = [];
+    for (const name of ["Manual one", "Manual two", "Manual three"]) {
+      const project = await ws.createProject({ userId: "u", orgId: "o", name });
+      await addDocument(project.id, "file.pdf");
+      manual.push(project.id);
+    }
+    expect(await pending()).toEqual([stale.id, ...manual].sort());
+
+    // One page of one: the oldest change, not the newest.
+    expect(await naming.sweepProjectAutoTitles({ batchSize: 1, maxBatches: 1 })).toBe(1);
+    expect((await state(stale.id)).name).toBe("Harbour Expansion Plan");
+    expect(await pending()).toEqual([...manual].sort());
+    // Projects with nothing to rename are examined once and leave the queue.
+    expect(await naming.sweepProjectAutoTitles({ batchSize: 2 })).toBe(3);
+    expect(await pending()).toEqual([]);
+    expect(await naming.sweepProjectAutoTitles()).toBe(0);
+
+    // A later corpus change makes the project pending again; the summary then outranks the heading.
+    await sql`insert into document_summaries (id, document_id, run_id, user_id, summary)
+      values (${doc.id + "-summary"}, ${doc.id}, ${doc.runId}, 'u', 'This document is a harbour expansion budget for 2027, covering new berths.')`;
+    await addDocument(stale.id, "appendix.pdf");
+    expect(await pending()).toEqual([stale.id]);
+    expect(await naming.sweepProjectAutoTitles()).toBe(1);
+    expect((await state(stale.id)).name).toBe("Harbour expansion budget for 2027");
   });
 
   it("stops automatic naming after a manual rename", async () => {
