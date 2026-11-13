@@ -2,6 +2,8 @@
 
 - Search runs in one of three nested modes: `keyword` (keyword matching, no model calls), `hybrid` (adds the query embedding and vector search) and `deep` (adds graph/community expansion, the hosted reranker, deferred pages and LLM query strategies). API key and OAuth scopes `search:keyword`, `search:hybrid` and `search:deep` replace `search` (migration 0138 maps existing keys and grants to `search:deep`; the OAuth endpoints still accept `search` from saved clients). A request may ask for a cheaper `mode`; the search service caps every search at the key's mode after project defaults resolve, on every route.
 - New `searches` key limit per mode (`{ metric: "searches", mode, limit, windowSeconds }`), answering 429 `search_limit_exceeded`; up to 8 limits per key.
+- Search cost tuning (server/scripts/perf-search-modes bench): API-key project checks read project access instead of the project summary, whose search-session count made every keyed search slower as history grew; the LanceDB disk cache reads only the requested range of a cached block (API CPU per search roughly halved, result lists unchanged).
+- Lean logging for API-key keyword and hybrid searches: charges and embedding usage written in batches (one record per key and mode every few seconds), history expiring after 7 days (keyword, no per-result rows) or 30 days (hybrid; migration 0139 `search_sessions.expires_at`, maintenance sweep). The pricing seam passes the search mode to the provider.
 
 ## Server, worker and CLI move to BUSL-1.1 with a free tier (2026-11-12)
 
