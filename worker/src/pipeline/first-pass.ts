@@ -24,7 +24,6 @@ import {
 import { sandboxedPdfLayoutFacts, sandboxedPdfProvider, type SandboxedPdfJob, type SandboxedPdfResult } from "../extractors/plugins.js";
 import type { PageLayoutFacts } from "../lib/page-layout-facts.js";
 import { pageFactsForResend } from "../extractors/sandboxed-pdf-page-facts.js";
-import { DOPPLER_PAGE_FACTS_MAX_BYTES } from "../lib/doppler-page-facts.js";
 import { DopplerFigureRejection, readDopplerFigureDir, storeDopplerFigures, type DopplerFigureStorage } from "../extractors/doppler-figures.js";
 import { planFirstPassBatches, type FirstPassBatchLimits } from "../temporal/first-pass-batches.js";
 import { sniffedPdf } from "../lib/sniffed-pdf.js";
@@ -377,7 +376,7 @@ export async function runFirstPassBatch(deps: FirstPassBatchDeps, input: { runId
       timings.pages += event.pages;
       // The measured count first: recorded and authorized before anything that bills.
       await recordBatchPageCount(deps.store, state, document, event.pages, event.processedPages);
-      const resentFacts = pageFactsForResend(sent?.pageFacts, DOPPLER_PAGE_FACTS_MAX_BYTES);
+      const resentFacts = pageFactsForResend(sent?.pageFacts, event.processedPages ?? event.pages);
       const cached: CachedResult = { markdownPath: file.output, result: { ...event.result, ...(sent?.layoutFacts !== undefined ? { layoutFacts: sent.layoutFacts } : {}), ...(resentFacts !== undefined ? { pageFacts: resentFacts } : {}) } };
       if (persistResults) await persistBatchResult(deps.storage, state, document, cached);
       results.set(key(input.runId, file.documentId), cached);

@@ -9,7 +9,7 @@
  * - DOCSLURP_DOPPLER_PAGE_FACTS: `off` drops them unread; `store` (default) keeps them for the page-facts artifact; `use`
  *   also lets them stand in for layout facts when the provider returned none.
  */
-import { parseDopplerPageFacts, dopplerPageFactsMode, type DopplerPageFactsDocument } from "../lib/doppler-page-facts.js";
+import { parseDopplerPageFacts, dopplerPageFactsByteBudget, dopplerPageFactsMode, type DopplerPageFactsDocument } from "../lib/doppler-page-facts.js";
 import { pageLayoutFactsFromDopplerFacts } from "../lib/doppler-page-facts-layout.js";
 import type { PageLayoutFacts } from "../lib/page-layout-facts.js";
 
@@ -40,6 +40,11 @@ export function acceptSandboxedPdfPageFacts(job: Job, raw: unknown, pages: numbe
   accepted.set(job, { facts, layout: layout && layout.size > 0 ? layout : null });
 }
 
+/** Forget what an earlier result of `job` left (before anything about a new result can throw). */
+export function clearSandboxedPdfPageFacts(job: Job): void {
+  accepted.delete(job);
+}
+
 /** The validated page facts of a finished job, or undefined when it returned none usable (or they are off). */
 export function sandboxedPdfPageFacts(job: Job): DopplerPageFactsDocument | undefined {
   return accepted.get(job)?.facts;
@@ -54,7 +59,10 @@ export function sandboxedPdfPageFactsLayout(job: Job): Map<number, PageLayoutFac
  * The raw facts in a form that survives JSON storage (the first pass keeps a batch result to serve it again, where it is
  * accepted again): a string within the reader's absolute ceiling, or undefined.
  */
-export function pageFactsForResend(raw: unknown, maxBytes: number): string | undefined {
+export function pageFactsForResend(raw: unknown, pages: number, env: NodeJS.ProcessEnv = process.env): string | undefined {
+  // Nothing is kept that the reader would not accept anyway: off mode, or over this document's budget.
+  if (dopplerPageFactsMode(env) === "off") return undefined;
+  const maxBytes = dopplerPageFactsByteBudget(pages);
   if (typeof raw === "string") return raw.length <= maxBytes ? raw : undefined;
   if (raw instanceof Uint8Array && raw.byteLength <= maxBytes) return Buffer.from(raw.buffer, raw.byteOffset, raw.byteLength).toString("latin1");
   return undefined;

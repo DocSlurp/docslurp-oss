@@ -238,6 +238,25 @@ describe("the sandboxed PDF route on the worker host", () => {
     } finally { await h.cleanup(); }
   });
 
+  it("never sizes a charge from page facts in use mode; the walker's own page sizes still do (council #358 M1)", async () => {
+    vi.stubEnv("DOCSLURP_PDF_EXTRACTOR", "vm-pdf");
+    vi.stubEnv("DOCSLURP_DOPPLER_PAGE_FACTS", "use");
+    const huge = { widthPt: 14_000, heightPt: 14_000, rotation: 0, userUnit: 1 };
+    const pageFacts = jsonl([docLine(), textPage(1, { geometry: huge }), textPage(2, { geometry: huge }), textPage(3, { geometry: huge }), runLine()]);
+    const walker = { version: "pdf-layout-facts@1", pages: [1, 2, 3].map((pageNumber) => ({ pageNumber, known: true, words: 1, widthPt: 14_000, heightPt: 14_000 })) };
+    for (const [provider, billed] of [[{ pageFacts }, false], [{ pageFacts, layoutFacts: walker }, true]] as const) {
+      const h = await harness({ markdown: "OneTwoThree", ...provider });
+      h.state.artifactLedger.record(VISION_ROUTING_VERSION_SLOT, "v3");
+      const recordPageEquivalents = vi.fn(async () => 3);
+      (h.state.store as Record<string, unknown>).recordPageEquivalents = recordPageEquivalents;
+      try {
+        await h.stage.run(h.state);
+        expect(h.state.documentStage("doc-1", "extract-markdown")?.status).toBe("completed");
+        expect(recordPageEquivalents.mock.calls.length > 0, JSON.stringify(Object.keys(provider))).toBe(billed);
+      } finally { await h.cleanup(); }
+    }
+  });
+
   it("keeps the provider's own layout facts over page facts in use mode, and stores nothing with page facts off or malformed", async () => {
     vi.stubEnv("DOCSLURP_PDF_EXTRACTOR", "vm-pdf");
     vi.stubEnv("DOCSLURP_DOPPLER_PAGE_FACTS", "use");

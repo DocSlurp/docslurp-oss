@@ -1,12 +1,13 @@
 import { afterEach, describe, expect, it } from "vitest";
 import {
-  registerExtractorPlugin, resetExtractorPluginsForTest, EXTRACTOR_PLUGIN_API_VERSION, type SandboxedPdfExtractorProvider,
+  acceptSandboxedPdfResult, registerExtractorPlugin, resetExtractorPluginsForTest, EXTRACTOR_PLUGIN_API_VERSION, type SandboxedPdfExtractorProvider,
 } from "../extractors/plugins.js";
 import {
   acceptSandboxedPdfBatchEvent, assertSingleScopeBatch, batchFileJob, batchUsageOf, sandboxedPdfBatchProvider, unfinishedBatchFiles,
   type SandboxedPdfBatchJob,
 } from "../extractors/sandboxed-pdf-batch.js";
-import { sandboxedPdfPageFacts } from "../extractors/sandboxed-pdf-page-facts.js";
+import { pageFactsForResend, sandboxedPdfPageFacts } from "../extractors/sandboxed-pdf-page-facts.js";
+import { dopplerPageFactsByteBudget } from "../lib/doppler-page-facts.js";
 import { docLine, jsonl, runLine, textPage } from "../test/doppler-page-facts-fixture.js";
 
 function job(files = 3, figures = false): SandboxedPdfBatchJob {
@@ -131,6 +132,23 @@ describe("acceptSandboxedPdfBatchEvent", () => {
     // Malformed facts on another file: no facts, the text result still stands.
     expect(acceptSandboxedPdfBatchEvent(j, text(1, 2, { pageFacts: "garbage" })).phase).toBe("text");
     expect(sandboxedPdfPageFacts(batchFileJob(j, 1)!)).toBeUndefined();
+  });
+
+  it("keeps raw facts for a resend only within the document's budget and never in off mode (council #358 L3)", () => {
+    const facts = jsonl([docLine(), textPage(1), runLine()]);
+    expect(pageFactsForResend(facts, 1, {})).toBe(facts);
+    expect(pageFactsForResend(Buffer.from(facts), 1, {})).toBe(facts);
+    expect(pageFactsForResend(facts, 1, { DOCSLURP_DOPPLER_PAGE_FACTS: "off" })).toBeUndefined();
+    expect(pageFactsForResend("x".repeat(dopplerPageFactsByteBudget(1) + 1), 1, {})).toBeUndefined();
+    expect(pageFactsForResend({ length: 1 }, 1, {})).toBeUndefined();
+  });
+
+  it("forgets a job's earlier page facts when a later result for it is refused (council #358 L4)", () => {
+    const single = { input: "/a", output: "/b" };
+    acceptSandboxedPdfResult(single, { exitCode: 0, stdout: "", stderr: "", pageFacts: jsonl([docLine(), textPage(1)]) }, 3);
+    expect(sandboxedPdfPageFacts(single)).toBeDefined();
+    expect(() => acceptSandboxedPdfResult(single, { exitCode: 0, stdout: "", stderr: "", figures: { status: "extracted" } }, 3)).toThrow("unrequested figures");
+    expect(sandboxedPdfPageFacts(single)).toBeUndefined();
   });
 
   it("accepts a fixed failure slug only, and nothing after a failure", () => {

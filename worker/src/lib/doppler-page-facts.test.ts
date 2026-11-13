@@ -119,7 +119,7 @@ describe("parseDopplerPageFacts: hostile input", () => {
   });
 
   it("refuses oversized input before parsing it, at the per-page budget and the absolute ceiling", () => {
-    expect(dopplerPageFactsByteBudget(1)).toBe(8 * 1024 * 1024 + 4096);
+    expect(dopplerPageFactsByteBudget(1)).toBe(8 * 1024 * 1024 + 12 * 1024);
     expect(dopplerPageFactsByteBudget(100_000)).toBe(DOPPLER_PAGE_FACTS_MAX_BYTES);
     const big = fullFixture() + " ".repeat(dopplerPageFactsByteBudget(3));
     const parseSpy = vi.spyOn(JSON, "parse");
@@ -136,6 +136,12 @@ describe("parseDopplerPageFacts: hostile input", () => {
     const facts = parse(jsonl([docLine(), textPage(1), long, nonAscii]) + JSON.stringify(runLine()));
     expect([...facts.pages.keys()]).toEqual([1]);
     expect(facts.summary).toMatchObject({ linesDropped: 3, complete: false });
+  });
+
+  it("refuses non-ASCII in string input rather than folding it to ASCII (council #358 L1)", () => {
+    // U+0131 would become 0x31 ("1") if only its low byte were kept.
+    const line = JSON.stringify(textPage(1)).replace("\"page\":1,", "\"page\":\u0131,");
+    expect(parse(jsonl([docLine(), line]), 1).pages.size).toBe(0);
   });
 
   it("refuses a stream with more lines than the page count allows", () => {

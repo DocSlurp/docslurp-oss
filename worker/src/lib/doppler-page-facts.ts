@@ -18,9 +18,9 @@
 
 export const DOPPLER_PAGE_FACTS_SCHEMA = "doppler-page-facts/1";
 
-/** Byte budget: a base for the doc and run lines plus a per-page allowance, under an absolute ceiling. */
+/** Byte budget: a base for the doc and run lines plus a per-page allowance (a full-level page with 32 image items is ~10 KB), under an absolute ceiling. */
 export const DOPPLER_PAGE_FACTS_BASE_BYTES = 8 * 1024 * 1024;
-export const DOPPLER_PAGE_FACTS_BYTES_PER_PAGE = 4 * 1024;
+export const DOPPLER_PAGE_FACTS_BYTES_PER_PAGE = 12 * 1024;
 export const DOPPLER_PAGE_FACTS_MAX_BYTES = 64 * 1024 * 1024;
 /** One line (a full-level page with 32 image items and 32 clusters is a few KiB). */
 export const DOPPLER_PAGE_FACTS_MAX_LINE_BYTES = 64 * 1024;
@@ -604,7 +604,9 @@ export function parseDopplerPageFacts(input: unknown, options: { pageCount: numb
   if (typeof input === "string") {
     // A string longer than the budget in UTF-16 units is over it in bytes too; non-ASCII lines are refused below.
     if (input.length > budget) return { ok: false, reason: "oversized" };
-    bytes = Buffer.from(input, "latin1");
+    // UTF-8, so a character above U+007E stays non-ASCII bytes the line check refuses (latin1 would keep its low byte only).
+    bytes = Buffer.from(input, "utf8");
+    if (bytes.byteLength > budget) return { ok: false, reason: "oversized" };
   } else if (input instanceof Uint8Array) {
     if (input.byteLength > budget) return { ok: false, reason: "oversized" };
     bytes = input;

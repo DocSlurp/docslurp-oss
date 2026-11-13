@@ -29,7 +29,7 @@ import { SandboxRunError, type SandboxResult } from "../sandbox/types.js";
 import type { UsageEvent } from "../models.js";
 import { currentPerfContext } from "../lib/perf-context.js";
 import { parsePageLayoutFacts, type PageLayoutFacts } from "../lib/page-layout-facts.js";
-import { acceptSandboxedPdfPageFacts, sandboxedPdfPageFactsLayout } from "./sandboxed-pdf-page-facts.js";
+import { acceptSandboxedPdfPageFacts, clearSandboxedPdfPageFacts, sandboxedPdfPageFactsLayout } from "./sandboxed-pdf-page-facts.js";
 import { planPageShards, type ShardCostProfile } from "../temporal/page-shards.js";
 import { registerShardProfile } from "../temporal/page-shard-profiles.js";
 import { resolveModalImage, type ModalSdk } from "../sandbox/providers/modal/index.js";
@@ -362,6 +362,7 @@ export function acceptSandboxedPdfResult(job: SandboxedPdfJob, result: Sandboxed
   reportedOcrPages.delete(job);
   reportedLayoutFacts.delete(job);
   reportedFigures.delete(job);
+  clearSandboxedPdfPageFacts(job);
   const figures = figureOutcome(job, result.figures);
   if (figures) reportedFigures.set(job, figures);
   if (result.figures !== undefined) result = { ...result, figures: undefined };

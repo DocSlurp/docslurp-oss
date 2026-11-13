@@ -14,7 +14,7 @@ of a batch carries them on its text event). This page describes how the worker t
 The facts come from a VM that read a customer file, so the worker treats every byte as hostile. The reader
 (`worker/src/lib/doppler-page-facts.ts`, `parseDopplerPageFacts`):
 
-- refuses input over a byte budget before parsing it: 8 MiB plus 4 KiB per page, at most 64 MiB; a stream with more lines
+- refuses input over a byte budget before parsing it: 8 MiB plus 12 KiB per page, at most 64 MiB; a stream with more lines
   than the page count needs; and a missing or malformed doc line;
 - drops a line that is over 64 KiB, not printable ASCII (the contract escapes everything else), not JSON, of another
   schema or type, out of order, outside the host's page count, or unterminated at the end of the stream; a page that
