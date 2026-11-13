@@ -1,7 +1,8 @@
-import { CHART_EXTRACT_LIMITS } from "./limits.js";
+import { CHART_EXTRACT_LIMITS, pastGuestDeadline } from "./limits.js";
 import { clamp01, finalizeChart, type DraftChart, type DraftSeries } from "./spec-utils.js";
 import { cleanLabel, finiteOrNull } from "./text.js";
-import { decodeEntities } from "./xml.js";
+import { indexFrom, type ScanWork } from "./scan.js";
+import { decodeEntities, textContent, type XmlElement } from "./xml.js";
 
 /*
  * Rung 2 (`embedded-spec`): Vega-Lite / Vega / Plotly JSON embedded in HTML, XHTML (EPUB) or SVG. Only JSON is read:
@@ -406,8 +407,74 @@ function classify(value: Json, locator: string, hits: EmbeddedSpecHit[], seen: S
 
 const PLOTLY_CALL = /\bPlotly\.(newPlot|react|plot)\s*\(/g;
 
+/** A `<script>` or `<metadata>` block's text, `type`, and where it was (`script[3]`). */
+export interface EmbeddedBlock { locator: string; type: string; body: string }
+/** Candidates not examined because a per-input list cap or the guest deadline was reached (counted, never silent). */
+export interface EmbeddedScanStats { overflow: number }
+
+const isWordChar = (c: number) => (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 95;
+const isSpaceChar = (c: string | undefined) => c !== undefined && /\s/.test(c);
+
+/**
+ * `<![CDATA[ … ]]>` around a script body (optionally behind `//`), unwrapped with index arithmetic: the same result as
+ * `/^\s*(?:\/\/\s*)?<!\[CDATA\[([\s\S]*?)(?:\/\/\s*)?\]\]>\s*$/` without its backtracking. Null when not wrapped.
+ */
+export function unwrapCdata(body: string): string | null {
+  const t = body.trim();
+  let i = 0;
+  if (t.startsWith("//")) { i = 2; while (isSpaceChar(t[i])) i++; }
+  if (!t.startsWith("<![CDATA[", i) || !t.endsWith("]]>") || t.length - 3 < i + 9) return null;
+  let inner = t.slice(i + 9, t.length - 3);
+  // The lazy capture leaves a trailing "//" (and whitespace after it) outside.
+  let j = inner.length;
+  while (j > 0 && isSpaceChar(inner[j - 1])) j--;
+  if (j >= 2 && inner[j - 2] === "/" && inner[j - 1] === "/") inner = inner.slice(0, j - 2);
+  return inner;
+}
+
+/**
+ * `<script …>…</script>` and `<metadata …>…</metadata>` blocks in raw HTML / XHTML text, in order: the matches of
+ * `/<(script|metadata)\b([^>]*)>([\s\S]*?)<\/\1\s*>/gi` in one linear pass. That regex rescans to the end of the text for
+ * every unclosed start (quadratic; council r7 H1); here, once a tag name has no closing tag left, it is never searched
+ * for again, and a start with no `>` after it ends the scan. Blocks past `max` are counted in `stats.overflow`.
+ */
+export function scanBlocks(text: string, max: number, stats: EmbeddedScanStats, work?: ScanWork): Array<{ name: string; attrs: string; body: string }> {
+  const lower = text.toLowerCase();
+  const out: Array<{ name: string; attrs: string; body: string }> = [];
+  const open = { script: true, metadata: true } as Record<string, boolean>;
+  let i = 0;
+  // Next position of each start tag, re-searched only when the scan has passed it (-2: not searched yet), so a far
+  // `<metadata` is not searched for again on every `<script`.
+  let nextS = -2, nextM = -2;
+  while (i < lower.length) {
+    if (open.script && nextS !== -1 && nextS < i) nextS = indexFrom(work, lower, "<script", i);
+    if (open.metadata && nextM !== -1 && nextM < i) nextM = indexFrom(work, lower, "<metadata", i);
+    const s = open.script ? nextS : -1;
+    const m = open.metadata ? nextM : -1;
+    if (s < 0 && m < 0) break;
+    const name = s >= 0 && (m < 0 || s < m) ? "script" : "metadata";
+    const pos = name === "script" ? s : m;
+    const after = pos + 1 + name.length;
+    if (after < lower.length && isWordChar(lower.charCodeAt(after))) { i = pos + 1; continue; } // `\b`
+    const gt = indexFrom(work, lower, ">", after);
+    if (gt < 0) break; // no `>` anywhere later: no later start can match either
+    // `<\/name\s*>` after the `>`.
+    let close = -1, end = -1;
+    for (let c = indexFrom(work, lower, `</${name}`, gt + 1); c >= 0; c = indexFrom(work, lower, `</${name}`, c + 1)) {
+      let k = c + 2 + name.length;
+      while (k < lower.length && isSpaceChar(lower[k])) k++;
+      if (lower[k] === ">") { close = c; end = k + 1; break; }
+    }
+    if (close < 0) { open[name] = false; i = pos + 1; continue; } // this name never closes again
+    if (out.length < max) out.push({ name, attrs: text.slice(after, gt), body: text.slice(gt + 1, close) });
+    else stats.overflow++;
+    i = end;
+  }
+  return out;
+}
+
 /** Find embedded chart specs in an HTML / XHTML / SVG / JSON text. */
-export function findEmbeddedSpecs(text: string): EmbeddedSpecHit[] {
+export function findEmbeddedSpecs(text: string, stats: EmbeddedScanStats = { overflow: 0 }): EmbeddedSpecHit[] {
   const hits: EmbeddedSpecHit[] = [];
   const seen = new Set<string>();
   if (text.length > CHART_EXTRACT_LIMITS.maxTextBytes) return hits;
@@ -416,20 +483,48 @@ export function findEmbeddedSpecs(text: string): EmbeddedSpecHit[] {
     const v = safeJsonParse(trimmed);
     if (v !== undefined) { classify(v, "json", hits, seen); return hits; }
   }
-  const blocks: Array<{ locator: string; type: string; body: string }> = [];
+  const blocks: EmbeddedBlock[] = [];
   let k = 0;
-  for (const m of text.matchAll(/<(script|metadata)\b([^>]*)>([\s\S]*?)<\/\1\s*>/gi)) {
-    if (blocks.length >= CHART_EXTRACT_LIMITS.maxJsonCandidates) break;
-    const type = /\btype\s*=\s*["']?([^"'\s>]+)/i.exec(m[2] ?? "")?.[1]?.toLowerCase() ?? "";
-    if (/\bsrc\s*=/i.test(m[2] ?? "")) continue;
-    let body = m[3] ?? "";
-    const cdata = /^\s*(?:\/\/\s*)?<!\[CDATA\[([\s\S]*?)(?:\/\/\s*)?\]\]>\s*$/.exec(body);
-    if (cdata) body = cdata[1]!;
-    else if (m[1]!.toLowerCase() === "metadata" || /\+xml|xhtml/.test(type)) body = decodeEntities(body);
-    blocks.push({ locator: `${m[1]!.toLowerCase()}[${k++}]`, type, body });
+  for (const m of scanBlocks(text, Number.MAX_SAFE_INTEGER, stats)) {
+    const type = /\btype\s*=\s*["']?([^"'\s>]+)/i.exec(m.attrs)?.[1]?.toLowerCase() ?? "";
+    if (/\bsrc\s*=/i.test(m.attrs)) continue;
+    if (blocks.length >= CHART_EXTRACT_LIMITS.maxJsonCandidates) { stats.overflow++; continue; }
+    let body = m.body;
+    const cdata = unwrapCdata(body);
+    if (cdata !== null) body = cdata;
+    else if (m.name === "metadata" || /\+xml|xhtml/.test(type)) body = decodeEntities(body);
+    blocks.push({ locator: `${m.name}[${k++}]`, type, body });
   }
+  return specsFromBlocks(blocks, hits, seen, stats);
+}
+
+/**
+ * Embedded specs in a parsed SVG: only its real `<script>` and `<metadata>` elements, in document order, with their text
+ * already decoded by the XML parser. Text in comments or elsewhere is never scanned (council r7 H1).
+ */
+export function findEmbeddedSpecsInElements(root: XmlElement, stats: EmbeddedScanStats = { overflow: 0 }): EmbeddedSpecHit[] {
+  const blocks: EmbeddedBlock[] = [];
+  const stack: XmlElement[] = [root];
+  let k = 0;
+  while (stack.length) {
+    const el = stack.pop()!;
+    if (el.local === "script" || el.local === "metadata") {
+      if (el.attrs.src === undefined) {
+        if (blocks.length < CHART_EXTRACT_LIMITS.maxJsonCandidates) blocks.push({ locator: `${el.local}[${k++}]`, type: (el.attrs.type ?? "").toLowerCase(), body: textContent(el) });
+        else stats.overflow++;
+      }
+      continue;
+    }
+    for (let c = el.children.length - 1; c >= 0; c--) { const n = el.children[c]!; if (n.type === "element") stack.push(n); }
+  }
+  return specsFromBlocks(blocks, [], new Set<string>(), stats);
+}
+
+function specsFromBlocks(blocks: EmbeddedBlock[], hits: EmbeddedSpecHit[], seen: Set<string>, stats: EmbeddedScanStats): EmbeddedSpecHit[] {
   let candidates = 0;
-  for (const block of blocks) {
+  for (const [b, block] of blocks.entries()) {
+    // Guest deadline: blocks not examined are counted, not silently dropped.
+    if (pastGuestDeadline()) { stats.overflow += blocks.length - b; break; }
     const isJsonType = /json/.test(block.type);
     if (isJsonType) {
       const v = safeJsonParse(block.body.trim());
@@ -445,7 +540,10 @@ export function findEmbeddedSpecs(text: string): EmbeddedSpecHit[] {
     for (const call of block.body.matchAll(PLOTLY_CALL)) {
       if (++calls > 50) break;
       // Scan from inside the call's parentheses so a call nested in a block is still found.
-      const after = jsonRegions(block.body.slice(call.index! + call[0].length), 4);
+      // A window after the call: the data and layout regions are each at most maxJsonBytes, so nothing usable is cut,
+      // and 50 calls cannot each rescan a whole 5 MiB body.
+      const from = call.index! + call[0].length;
+      const after = jsonRegions(block.body.slice(from, from + 2 * CHART_EXTRACT_LIMITS.maxJsonBytes + 4096), 4);
       const dataRegion = after.find((r) => r.text.startsWith("["));
       if (!dataRegion) continue;
       const data = safeJsonParse(dataRegion.text);
@@ -457,8 +555,8 @@ export function findEmbeddedSpecs(text: string): EmbeddedSpecHit[] {
       seen.add(key);
       hits.push({ locator: block.locator, generator: "plotly", ...plotlyToChart(data, layout) });
     }
-    for (const region of regions) {
-      if (++candidates > CHART_EXTRACT_LIMITS.maxJsonCandidates) break;
+    for (const [r, region] of regions.entries()) {
+      if (++candidates > CHART_EXTRACT_LIMITS.maxJsonCandidates) { stats.overflow += regions.length - r; break; }
       if (!region.text.startsWith("{") || !/"\$schema"|"mark"|"data"/.test(region.text)) continue;
       const v = safeJsonParse(region.text);
       if (v !== undefined && isObj(v) && (looksVegaLite(v) || isVegaSchema(v, "vega"))) classify(v, block.locator, hits, seen);

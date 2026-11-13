@@ -1,4 +1,4 @@
-import { CHART_EXTRACT_LIMITS, ExtractLimitError, refusalReason } from "./limits.js";
+import { CHART_EXTRACT_LIMITS, ExtractLimitError, pastGuestDeadline, refusalReason } from "./limits.js";
 import { openZipPackage, resolvePartPath, type ZipPackage } from "./safe-zip.js";
 import { clamp01, finalizeChart, type DraftChart, type DraftSeries } from "./spec-utils.js";
 import { cleanLabel, finiteOrNull } from "./text.js";
@@ -405,16 +405,21 @@ function sheetOfChart(pkg: ZipPackage): Map<string, string> {
 }
 
 /** Chart parts of an OOXML package (DOCX/PPTX/XLSX bytes). Nested embedded workbooks are opened one level deep. */
-export function extractOfficeCharts(bytes: Uint8Array): { visuals: DeterministicVisual[]; refusals: DeterministicRefusal[]; pkg: ZipPackage } {
+export function extractOfficeCharts(bytes: Uint8Array): { visuals: DeterministicVisual[]; refusals: DeterministicRefusal[]; pkg: ZipPackage; partsDropped: number; deadlineParts: number } {
   const pkg = openZipPackage(bytes);
   const parts = pkg.names.filter((n) => CHART_PART.test(n)).sort((a, b) => a.localeCompare(b, "en", { numeric: true }));
   const visuals: DeterministicVisual[] = [];
   const refusals: DeterministicRefusal[] = [];
-  if (!parts.length) return { visuals, refusals, pkg };
+  if (!parts.length) return { visuals, refusals, pkg, partsDropped: 0, deadlineParts: 0 };
+  // Chart parts past the package cap are counted by the caller (package-part-limit), never silently skipped.
+  const partsDropped = Math.max(0, parts.length - CHART_EXTRACT_LIMITS.maxPartsPerPackage);
+  let deadlineParts = 0;
   const slides = slideOfChart(pkg);
   const sheets = sheetOfChart(pkg);
   let ownResolver: RefResolver | null | undefined;
-  for (const part of parts.slice(0, CHART_EXTRACT_LIMITS.maxPartsPerPackage)) {
+  const kept = parts.slice(0, CHART_EXTRACT_LIMITS.maxPartsPerPackage);
+  for (const [p, part] of kept.entries()) {
+    if (pastGuestDeadline()) { deadlineParts = kept.length - p; break; }
     try {
       const resolver: RefResolver = (formula) => {
         if (ownResolver === undefined) { try { ownResolver = workbookResolver(pkg); } catch { ownResolver = null; } }
@@ -440,7 +445,7 @@ export function extractOfficeCharts(bytes: Uint8Array): { visuals: Deterministic
     }
   }
   if (parts.length > CHART_EXTRACT_LIMITS.maxPartsPerPackage) refusals.push({ locator: "package", reason: "chart-part-limit" });
-  return { visuals, refusals, pkg };
+  return { visuals, refusals, pkg, partsDropped, deadlineParts };
 }
 
 const embeddedCache = new WeakMap<ZipPackage, Map<string, RefResolver | null>>();

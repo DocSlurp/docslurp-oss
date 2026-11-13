@@ -37,7 +37,7 @@ export interface DeterministicRefusal { locator: string; reason: string }
 export interface DeterministicDeferral {
   svgIndex: number;
   count: number;
-  reason: "svg-document-limit" | "html-svg-limit" | "guest-deadline" | "visual-limit" | "package-part-limit";
+  reason: "svg-document-limit" | "html-svg-limit" | "guest-deadline" | "visual-limit" | "package-part-limit" | "guest-deadline-part";
 }
 
 export interface DeterministicVisualResult {
@@ -47,6 +47,8 @@ export interface DeterministicVisualResult {
   refusals: DeterministicRefusal[];
   /** Parts deferred to a later pass; present only when non-empty. */
   deferred?: DeterministicDeferral[];
+  /** Embedded-spec candidates past their caps or the deadline, plus refusals past the 1,000 listed; present when > 0. */
+  overflow?: number;
 }
 
 export function emptyVisual(source: DeterministicSource, locator: string): DeterministicVisual {

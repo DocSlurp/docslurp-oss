@@ -20,9 +20,9 @@ try {
   await vm.filesystem.makeDirectory("/bench");
   await vm.filesystem.writeBytes(await readFile(`${repo}worker/dist/chart-export/guest.bundle.mjs`), "/bench/guest.bundle.mjs");
   await vm.filesystem.writeBytes(await readFile(`${repo}performance/chart-export-free-rungs/marker-cap-bench.mjs`), "/bench/marker-cap-bench.mjs");
-  // One fresh guest-like process per mode, with the host's V8 flag and a 1 GiB heap (the parser VM's default old space).
-  for (const mode of process.argv.slice(2).length ? process.argv.slice(2) : ["rgbFill80k", "rgbFill640k", "rgbStyle20k", "rgbStyleEpub8", "xsplit", "xsplitEpub9", "text999", "points999", "width999", "deep1", "deepEpub300", "doc100", "held17", "hiddenEpub20", "nested200", "mermaidEpub200", "textEpub400", "textNoAxisEpub400", "rectEpub400", "legit"]) {
-    const proc = await vm.exec(["node", "--disallow-code-generation-from-strings", "--max-old-space-size=1024", "/bench/marker-cap-bench.mjs", "/bench/guest.bundle.mjs", mode], { mode: "text", timeoutMs: 5 * 60_000 });
+  // One fresh guest-like process per mode, with the host's V8 flag and V8's default heap, as the production guest runs.
+  for (const mode of process.argv.slice(2).length ? process.argv.slice(2) : ["cmtScript64k", "cmtScript640k", "epubCmt3", "htmlSvgOpen1m", "htmlScript1m", "html2m", "epubScript200", "emptyCmt", "emptyCmtEpub90", "rgbStyleEpub8", "xsplitEpub9", "deepEpub300", "hiddenEpub20", "mermaidEpub200", "textEpub400", "rectEpub400", "legit"]) {
+    const proc = await vm.exec(["node", "--disallow-code-generation-from-strings", "/bench/marker-cap-bench.mjs", "/bench/guest.bundle.mjs", mode], { mode: "text", timeoutMs: 5 * 60_000 });
     const [out, err, code] = await Promise.all([proc.stdout.readText(), proc.stderr.readText(), proc.wait()]);
     process.stdout.write(out);
     if (code !== 0) { process.stderr.write(`${mode}: exit ${code}\n${err.slice(-2000)}`); process.exitCode = 1; }

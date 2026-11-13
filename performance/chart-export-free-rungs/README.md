@@ -141,6 +141,17 @@ measured value is used.
 An SVG over any check is skipped with a closed reason, and nothing of it is kept. The walk is bounded both in frames and
 in the bytes each frame reads (council r6 H1). Beyond the caps, the per-frame helpers do O(small) work by
 construction:
+- **Raw-text scans are linear** (council r7 H1 and its sweep of every regex or scan over raw input under
+  `chart-export/extractors`). These lazy regexes rescanned to the end of the input for every unclosed start: the
+  embedded-spec `<script>`/`<metadata>` block finder, the HTML `<svg>` strip, `inlineSvgs`' tag finder, the comment
+  signatures, and `parseTransform`. Each is now an `indexOf` scan with cached needles, exactly equal to its regex on
+  10,000 seeded random inputs, and O(n) by step count on the hostile shapes.
+  - In an SVG, embedded specs come only from its parsed `<script>`/`<metadata>` elements, never from raw text, so a
+    comment can't feed the scanner.
+  - The Mermaid id regexes skip ids over 256 or 4,096 characters, and the Graphviz `:port` strip uses `lastIndexOf`.
+  - The Plotly scan reads a bounded window after each call.
+- **The deadline is checked per unit:** each EPUB part, Office media SVG and Office chart part (`guest-deadline-part`),
+  each HTML part's embedded scan and each embedded block (counted in `overflow`), and each SVG (`guest-deadline`).
 - `normalizeColor` rejects values over 64 characters before its regex.
 - `cleanLabel` cuts to 4× its output length before any regex or copy.
 - `firstNum` takes the first token with one anchored match instead of splitting the attribute.
@@ -170,43 +181,48 @@ What remains:
   - `visual-limit`: the 256-visual output cap. The visuals already found are kept; later visuals and SVGs are counted,
     not produced, and nothing is aborted.
   - `html-svg-limit`: inline SVGs past 200 in one HTML part.
-  - `package-part-limit`: Office media SVGs or EPUB parts past 200.
+  - `package-part-limit`: Office chart XML parts, media SVGs or EPUB parts past 200 (council r7 L1 added chart parts).
+  - `figure-batch-limit` and `figure-unavailable`: Doppler figures past the 40 per document batch, or with no readable
+    file. These are recorded by the host one by one with the figure id, where before they were only logged.
+  - `overflow`: one count on the result and in the stats for script blocks and JSON regions past 200, embedded blocks
+    the deadline skipped, refusals past the 1,000 listed, and deferral entries past 1,000.
+  - Every child, empty comments included, costs at least 1 byte in the walk's bytes-touched budget (council r7 L2).
 - **The guest deadline** (`guest-deadline`, `svg-too-slow`). The host sends its run's timeout less 15 s, and the guest
   stops there. SVGs not yet analysed become a counted range, and a single SVG still walking stops on its own, checked
   every 256 frames. So a slow input returns everything it produced instead of being killed. Losing the run would set
   `guestDown` and cost the document every free-rung visual. The deadline is a backstop: it fires only far outside
   every gate's measured range, so ordinary output stays deterministic.
 
-**Measured on the parser-VM shape** (council round 6 head). Modal `runtime: "vm"`, 2 vCPU, 4 GiB, network blocked,
-Node 24.22.3. Each input runs in a fresh process with `--disallow-code-generation-from-strings` and a 1 GiB heap,
-using `marker-cap-bench.mjs` modes. There is no guest deadline in the bench, so these are raw times.
+**Measured on the parser-VM shape** (council round 7 head). Modal `runtime: "vm"`, 2 vCPU, 4 GiB, network blocked,
+Node 24.22.3. Each input runs in a fresh process exactly as the production guest is run: with
+`--disallow-code-generation-from-strings`, V8's default heap, and the guest's 45 s deadline, via
+`marker-cap-bench.mjs` modes. Several rows ran three times; ranges show VM placement noise.
 
 | input | size | wall time | peak RSS | exported | skipped / counted | before |
 |---|--:|--:|--:|--:|--:|---|
-| r6: one `<rect fill="rgb(1␠×80,000x">` | 80 KB | 1 ms | 59 MB | 0 | 1 `svg-too-dense` | 3.2 s |
-| r6: the same at 640 KiB | 0.66 MB | 1 ms | 60 MB | 0 | 1 `svg-too-dense` | > 75 s |
-| r6: `rgb(` style (4,000 spaces) × 999 `<use>` | 20 KB | 8 ms | 66 MB | 0 | 1 `svg-use-bomb` (bytes touched) | 7.6 s |
-| r6: EPUB of 8 such SVGs | 0.16 MB | 31 ms | 78 MB | 0 | 8 `svg-use-bomb` | > 75 s |
-| r6: 640 KiB `x` attribute × 999 `<use>` | 0.66 MB | 4 ms | 62 MB | 0 | 1 `svg-too-dense` | 7.1 s |
-| r6: EPUB of 9 such SVGs | 5.9 MB | 17 ms | 87 MB | 0 | 9 `svg-too-dense` | > 75 s |
-| r6: 640 KiB text, `points`, whitespace `width` × 999 `<use>` | 0.66 MB each | 4 ms each | 61 MB | 0 | 1 `svg-too-dense` each | 0.8–3.3 s |
-| r6: 250 nested long-class groups + 2,700 rects (exports) | 0.2 MB | 45 ms | 87 MB | 1 | 0 | 0.81 s |
-| r6: EPUB of 300 such SVGs, no axis (all analysed) | 61 MB | 3.2 s | **500 MB** | 0 | 0 | > 75 s |
-| council's 100-SVG page | 3.8 MB | 0.34 s | 146 MB | 0 | 100 `svg-use-bomb` | |
-| round-4 H1 page | 3.6 MB | 71 ms | 119 MB | 0 | 17 `svg-too-dense` | 2,147 MB, OOM |
-| r5 H1: EPUB of 20 hidden-children SVGs | 13 MB | 0.30 s | 265 MB | 0 | 20 `svg-too-dense` | 129 s |
-| r5 H1: 200 nested-`<use>` SVGs | 0.64 MB | 0.16 s | 110 MB | 0 | 200 `svg-use-bomb` | 19.6 s |
-| r5 M1: EPUB of 200 hostile Mermaid SVGs | 56 MB | 0.81 s | 443 MB | 200 | 0 | ~230 s |
-| EPUB, 400 text-heavy at-cap SVGs | 41 MB | **5.9 s** | 346 MB | 256 | 144 counted `visual-limit` | r5: 10.9 s |
-| same, labels not numbers (all 400 analysed) | 42 MB | 3.0 s | 380 MB | 0 | 0 | 5.1 s |
-| EPUB, 400 rect at-cap SVGs | 57 MB | 2.0 s | 491 MB | 256 | 144 counted `visual-limit` | |
-| 100 ordinary bar charts | 0.07 MB | 28 ms | 78 MB | 100 | 0 | same |
+| r7: SVG whose comment holds `<script ` × 8k / × 80k | 0.06 / 0.64 MB | 5 ms | 60 MB | 0 | 0 (comments are never scanned) | 0.41 s / 20.5 s |
+| r7: EPUB: bar chart, 3 such 640 KiB SVGs, bar chart | 1.9 MB | 18 ms | 69 MB | 2 | 0 | 54 s |
+| r7: HTML, `<svg ` × 200k / `<script>` × 125k | 1 MB | 8 / 7 ms | 63 MB | 0 | 0 | 23.5 / 13.3 s |
+| r7: HTML, a JSON script then `<svg ` × 400k | 2 MB | 16 ms | 66 MB | 0 | 0 | **killed at 60 s** |
+| r7: EPUB of 200 parts of ~300 KB unclosed `<script>` | 59 MB | 0.40 s | 319 MB | 0 | 0 | ~ timeout (extrapolated) |
+| r7 L2: ~93k empty comments × 999 `<use>` / EPUB of 90 + 2 bar charts | 0.66 / 59 MB | 55 ms / 1.5 s | 89 / 497 MB | 0 / 2 | 1 / 90 `svg-use-bomb` | 234 ms each |
+| r6: EPUB of 8 `rgb(`-style SVGs / 9 `x`-split SVGs | 0.16 / 5.9 MB | 39 / 22 ms | 87 MB | 0 | 8 / 9 skipped | > 75 s |
+| r6: EPUB of 300 deep-nesting SVGs (no axis, all analysed) | 61 MB | 3.2–6.9 s | 500–503 MB | 0 | 0 | > 75 s |
+| r5: EPUB of 20 hidden-children SVGs | 13 MB | 0.47 s | 262 MB | 0 | 20 `svg-too-dense` | 129 s |
+| r5: EPUB of 200 hostile Mermaid SVGs | 56 MB | 1.5 s | 448 MB | 200 | 0 | ~230 s |
+| EPUB, 400 text-heavy at-cap SVGs | 41 MB | **5.8–12.1 s** | 367–376 MB | 256 | 144 counted `visual-limit` | |
+| EPUB, 400 rect at-cap SVGs | 57 MB | 3.9 s | **539 MB** | 256 | 144 counted `visual-limit` | |
+| 100 ordinary bar charts | 0.07 MB | 43 ms | 81 MB | 100 | 0 | same |
 
-- **Worst case measured:** 5.9 s and 500 MB peak, about a tenth of the 60 s guest timeout and half the 1 GiB heap.
-- **Fully accounted for:** every input completes, and every SVG is exported, skipped with a closed reason, or counted in
-  a deferral range.
-- **Superseded:** round 5's "10.9 s" was not the worst case (council r6 found shapes over 75 s). It is replaced by
-  this table.
+- **Worst case measured:** 12.1 s and 539 MB peak. Both are inside the 45 s guest deadline and the 60 s host timeout.
+- **Memory:** 539 MB is about 13% of the 4 GiB parser VM. The production guest runs with V8's default heap, not the
+  1 GiB cap earlier rounds' benches used, so this table matches production (council r7 I2).
+- **Fully accounted for:** every input completes. Every SVG, part and candidate is exported, skipped with a closed
+  reason, or counted in a deferral range or `overflow`.
+- **Known, not a bug (council r7 I3):** draw.io exports carry the whole diagram in the root `content` attribute, often
+  over 32 KiB, and a data URI under a non-standard prefix (`ns1:href`) is not exempt. Both are skipped as
+  `svg-too-dense`, counted and logged. Neither yields a visual today, because there is no draw.io diagram path.
+- **Superseded:** round 6's "5.9 s" was a single run, and round 7 found raw-scan shapes that were killed at 60 s.
 
 ### Guest hardening: zod `jitless`, the V8 code-generation flag, code-loading guard, image check
 

@@ -13,6 +13,8 @@ export interface CandidateStatsInput {
   exported: readonly ExportedVisual[];
   /** Visuals the deterministic extractor deferred to a later pass. */
   deferred?: DeterministicVisualResult["deferred"];
+  /** Candidates and entries past a per-input list cap, counted but not listed. */
+  overflow?: number;
   /**
    * The repeated-picture group of a candidate (one model read serves every placement in it), or null. Placements of one
    * picture count once, so an estimate built from these stats prices the reads that will be made, not the placements.
@@ -95,5 +97,6 @@ export function buildVisualCandidateStats(input: CandidateStatsInput): VisualCan
     bySource,
     // Only when something was deferred, so other stats keep their exact shape.
     ...(input.deferred?.length ? { deferred: input.deferred.slice(0, 1000) } : {}),
+    ...((input.overflow ?? 0) + Math.max(0, (input.deferred?.length ?? 0) - 1000) > 0 ? { overflow: (input.overflow ?? 0) + Math.max(0, (input.deferred?.length ?? 0) - 1000) } : {}),
   });
 }

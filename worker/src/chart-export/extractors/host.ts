@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { DEFERRED_VISUAL_REASONS, visualSpecSchema } from "@docslurp/shared";
+import { GUEST_DEFERRAL_REASONS, visualSpecSchema } from "@docslurp/shared";
 
 import { vmOnlyParsing } from "../../lib/vm-only-parsing.js";
 import { resolveScriptsDir } from "../../tools/scripts-dir.js";
@@ -54,7 +54,7 @@ function validVisual(v: unknown): boolean {
 const validEntry = (r: unknown) => !!r && typeof r === "object" && !Array.isArray(r) && Object.keys(r).sort().join(",") === "locator,reason"
   && isStr((r as Record<string, unknown>).locator, 512) && isStr((r as Record<string, unknown>).reason, 120);
 /** A deferral is an ordinal range and a closed reason only: nothing from the input's names reaches stats. */
-const DEFERRAL_REASONS = new Set<string>(DEFERRED_VISUAL_REASONS);
+const DEFERRAL_REASONS = new Set<string>(GUEST_DEFERRAL_REASONS);
 const intIn = (v: unknown, min: number, max: number) => Number.isSafeInteger(v) && (v as number) >= min && (v as number) <= max;
 const validDeferral = (r: unknown) => !!r && typeof r === "object" && !Array.isArray(r) && Object.keys(r).sort().join(",") === "count,reason,svgIndex"
   && DEFERRAL_REASONS.has((r as Record<string, unknown>).reason as string)
@@ -79,7 +79,11 @@ export function validateDeterministicResult(raw: unknown): DeterministicVisualRe
   const o = raw as Record<string, unknown> | null;
   const keys = o && typeof o === "object" ? Object.keys(o).sort().join(",") : "";
   const ok = !!o && typeof o === "object" && !Array.isArray(o)
-    && (keys === "refusals,schemaVersion,visuals" || (keys === "deferred,refusals,schemaVersion,visuals" && Array.isArray(o.deferred) && o.deferred.length > 0 && o.deferred.length <= 1000 && o.deferred.every(validDeferral)))
+    // Required keys, plus the optional `deferred` (non-empty) and `overflow` (a positive count), nothing else.
+    && keys.split(",").every((k) => ["deferred", "overflow", "refusals", "schemaVersion", "visuals"].includes(k))
+    && ["refusals", "schemaVersion", "visuals"].every((k) => k in o)
+    && (o.deferred === undefined || (Array.isArray(o.deferred) && o.deferred.length > 0 && o.deferred.length <= 1000 && o.deferred.every(validDeferral)))
+    && (o.overflow === undefined || intIn(o.overflow, 1, 1_000_000_000))
     && o.schemaVersion === "chart-export-deterministic@v1"
     && Array.isArray(o.visuals) && o.visuals.length <= CHART_EXTRACT_LIMITS.maxVisuals && o.visuals.every(validVisual)
     && Array.isArray(o.refusals) && o.refusals.length <= 1000

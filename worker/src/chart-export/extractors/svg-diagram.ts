@@ -113,7 +113,9 @@ export function mermaidFlowchart(root: XmlElement): SvgDiagramResult {
   const centers = new Map<string, [number, number]>();
   for (const g of els) {
     if (g.local !== "g" || !classes(g).includes("node")) continue;
-    const m = /^(?:[A-Za-z0-9_-]*?-)?flowchart-(.+)-\d+$/.exec(g.attrs.id ?? "");
+    // Real Mermaid node ids are short; the lazy prefix makes this regex quadratic on a long hostile id.
+    const gid = g.attrs.id ?? "";
+    const m = gid.length <= 256 ? /^(?:[A-Za-z0-9_-]*?-)?flowchart-(.+)-\d+$/.exec(gid) : null;
     if (!m) continue;
     const raw = m[1]!;
     if (rawIds.has(raw)) continue;
@@ -147,7 +149,7 @@ export function mermaidFlowchart(root: XmlElement): SvgDiagramResult {
     let styleSource = el;
     if (el.local === "path" && (cls.includes("flowchart-link") || el.attrs["data-edge"] === "true")) {
       key = el.attrs["data-id"] ?? el.attrs.id ?? "";
-      const m = /^L[_-](.+)[_-]\d+$/.exec(key);
+      const m = key.length <= 4096 ? /^L[_-](.+)[_-]\d+$/.exec(key) : null;
       pair = m ? split(m[1]!, "_") ?? split(m[1]!, "-") : null;
     } else if (el.local === "g" && cls.includes("edgePath")) {
       const ls = cls.find((c) => c.startsWith("LS-"))?.slice(3);
@@ -222,7 +224,8 @@ export function graphvizDiagram(root: XmlElement): SvgDiagramResult {
     const title = textContent(firstChild(g, "title")).trim();
     const directed = title.includes("->");
     const parts = title.split(directed ? "->" : "--");
-    const strip = (s: string) => { const t = s.trim(); return known.has(t) ? t : t.replace(/:[^:]*$/, ""); };
+    // Drop a trailing ":port" (from the last colon on), with lastIndexOf: `/:[^:]*$/` retries from every colon.
+    const strip = (s: string) => { const t = s.trim(); if (known.has(t)) return t; const c = t.lastIndexOf(":"); return c >= 0 ? t.slice(0, c) : t; };
     if (parts.length !== 2 || !known.has(strip(parts[0]!)) || !known.has(strip(parts[1]!))) { unresolved++; continue; }
     const path = firstChild(g, "path");
     const dash = path?.attrs["stroke-dasharray"] ?? /stroke-dasharray/.test(path?.attrs.style ?? "") ? "x" : "";

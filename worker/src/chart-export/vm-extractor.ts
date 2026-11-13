@@ -221,7 +221,8 @@ export function createVmDeterministicVisualExtractor(deps: VmExtractorDeps): Det
         const slot = ownFigureSlot(figure);
         const uri = slot ? input.artifacts.artifactUri?.(slot) ?? null : null;
         const key = uri ? keyFromStorageUri(uri, deps.storage.bucket) : null;
-        if (!key) continue;
+        // A figure with no readable file is recorded (council r7 L1), not silently skipped.
+        if (!key) { deferred.push({ input: "doppler-figure", svgIndex: 0, count: 1, reason: "figure-unavailable", pageNumber: figure.page, figureId: figure.id }); continue; }
         staged.push({ path: await deps.storage.downloadToTempFile(key, "docslurp-chart-figure-*.svg"), page: figure.page, bbox: figureBox(figure.bbox), id: figure.id });
       }
       if (staged.length > 0) {
@@ -240,12 +241,21 @@ export function createVmDeterministicVisualExtractor(deps: VmExtractorDeps): Det
       await Promise.all(staged.map((s) => cleanupTempFile(s.path).catch(() => undefined)));
     }
     if (figures.length > sent.length && !guestDown) log(`[chart-export] svg figures capped ${context} figures=${figures.length} sent=${sent.length}`);
+    // Figures past the per-document batch cap: recorded one by one, so the deferred pass can read each by its id.
+    for (const figure of figures.slice(sent.length)) deferred.push({ input: "doppler-figure", svgIndex: 0, count: 1, reason: "figure-batch-limit", pageNumber: figure.page, figureId: figure.id });
 
-    if (deferred.length) log(`[chart-export] visuals deferred ${context} svgs=${deferred.reduce((n, d) => n + d.count, 0)}`);
+    // Per reason, so the log never adds SVGs, parts and visuals together (council r7 I1).
+    if (deferred.length) {
+      const byReason: Record<string, number> = {};
+      for (const d of deferred) byReason[d.reason] = (byReason[d.reason] ?? 0) + d.count;
+      log(`[chart-export] visuals deferred ${context} ${Object.entries(byReason).map(([k, v]) => `${k}=${v}`).join(" ")}`);
+    }
+    // Entries past the 1,000 kept, plus the guest's own overflow counts: one number, never silent.
+    const overflow = results.reduce((n, r) => n + (r.overflow ?? 0), 0) + Math.max(0, deferred.length - 1000);
     // Density-gate skips per reason, so production can confirm legitimate charts pass (council r5 I2).
     const gated: Record<string, number> = {};
     for (const r of results.flatMap((x) => x.refusals)) if (/^svg-(too-large|too-dense|use-bomb)$/.test(r.reason)) gated[r.reason] = (gated[r.reason] ?? 0) + 1;
     if (Object.keys(gated).length) log(`[chart-export] svg density gate skipped ${context} ${Object.entries(gated).map(([k, v]) => `${k}=${v}`).join(" ")}`);
-    return { partials, presence: presenceOf(results, figures.length), ...(deferred.length ? { deferred: deferred.slice(0, 1000) } : {}) };
+    return { partials, presence: presenceOf(results, figures.length), ...(deferred.length ? { deferred: deferred.slice(0, 1000) } : {}), ...(overflow > 0 ? { overflow } : {}) };
   };
 }
