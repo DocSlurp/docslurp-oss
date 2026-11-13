@@ -499,6 +499,37 @@ export type ExportedVisual = z.infer<typeof exportedVisualSchema>;
  * Per-document visual stats, recorded at ingest even when chart export is off (free signals only), so chat suggestions
  * and the ingest report can say "this project has N charts that were not exported".
  */
+/**
+ * A visual the free (deterministic) extractor deferred instead of finishing in the document's run, for a later
+ * low-priority pass. `input` says what to re-read: the document's own source file, or one of its Doppler figure files
+ * (`figureId`, the figure's own id; its slot is `doppler-figure:<figureId>`). `svgIndex` is the first deferred SVG's
+ * ordinal within that input (document / package order), `count` how many from there, and `reason` a closed slug:
+ * nothing from the input's names or content is stored.
+ */
+/**
+ * Why visuals were deferred, each a per-input cap of the free extractor. `count` is of SVGs at consecutive ordinals
+ * from `svgIndex` for svg-document-limit, html-svg-limit and guest-deadline; for visual-limit it counts the visuals and
+ * SVGs lost to the output cap from `svgIndex` on (output-limit: the same, past the input's output-byte budget); for package-part-limit and guest-deadline-part, package parts (chart
+ * XML, media SVGs, EPUB parts) never opened; for figure-batch-limit and figure-unavailable, one Doppler figure
+ * (`figureId`) past the per-document batch cap or without a readable file; for unit-crashed and unit-timeout, extraction
+ * units (a chart part, an SVG, an embedded scan) whose isolated worker crashed, ran out of memory or overran its time;
+ * for guest-unavailable and vm-cap (host-only), a source or figure whose guest run failed or the org's free-VM cap
+ * turned away, recorded whole.
+ */
+export const DEFERRED_VISUAL_REASONS = ["svg-document-limit", "html-svg-limit", "guest-deadline", "visual-limit", "package-part-limit", "guest-deadline-part", "unit-crashed", "unit-timeout", "output-limit", "figure-batch-limit", "figure-unavailable", "guest-unavailable", "vm-cap"] as const;
+/** The reasons the parser-VM guest itself may report (the figure reasons are the host's own). */
+export const GUEST_DEFERRAL_REASONS = ["svg-document-limit", "html-svg-limit", "guest-deadline", "visual-limit", "package-part-limit", "guest-deadline-part", "unit-crashed", "unit-timeout", "output-limit"] as const;
+export const deferredVisualSchema = z.strictObject({
+  input: z.enum(["source", "doppler-figure"]),
+  svgIndex: z.number().int().nonnegative().max(1_000_000),
+  /** How many consecutive SVGs from `svgIndex` on were deferred. */
+  count: z.number().int().positive().max(1_000_000),
+  reason: z.enum(DEFERRED_VISUAL_REASONS),
+  pageNumber: z.number().int().positive().nullable(),
+  figureId: z.string().max(200).nullable(),
+});
+export type DeferredVisual = z.infer<typeof deferredVisualSchema>;
+
 export const visualCandidateStatsSchema = z.object({
   charts: z.number().int().nonnegative().default(0),
   diagrams: z.number().int().nonnegative().default(0),
@@ -506,8 +537,23 @@ export const visualCandidateStatsSchema = z.object({
   pagesWithUnexportedVisuals: z.array(z.number().int().positive()).max(5000).default([]),
   exported: z.number().int().nonnegative().default(0),
   bySource: z.partialRecord(visualSourceSchema, z.number().int().nonnegative()).default({}),
+  /** Visuals deferred to a later pass (present only when some were): never dropped, picked up by the deferred pass. */
+  deferred: z.array(deferredVisualSchema).max(1000).optional(),
+  /** Candidates and entries past a per-input list cap (or the guest deadline), counted but not listed. */
+  overflow: z.number().int().positive().optional(),
 });
 export type VisualCandidateStats = z.infer<typeof visualCandidateStatsSchema>;
+
+/**
+ * The deferred visuals recorded in a stage's stats (`stats[VISUAL_CANDIDATE_STATS_KEY].deferred`): what a later pass
+ * reads to find work. Tolerant of missing or malformed stats (returns []); every entry is validated.
+ */
+export function deferredVisualsOf(stageStats: unknown): DeferredVisual[] {
+  const stats = stageStats && typeof stageStats === "object" ? (stageStats as Record<string, unknown>)[VISUAL_CANDIDATE_STATS_KEY] : null;
+  const list = stats && typeof stats === "object" ? (stats as Record<string, unknown>).deferred : null;
+  if (!Array.isArray(list)) return [];
+  return list.slice(0, 1000).flatMap((entry) => { const parsed = deferredVisualSchema.safeParse(entry); return parsed.success ? [parsed.data] : []; });
+}
 
 /** Key under document metadata / stage stats where `VisualCandidateStats` is stored. */
 export const VISUAL_CANDIDATE_STATS_KEY = "visualCandidates" as const;

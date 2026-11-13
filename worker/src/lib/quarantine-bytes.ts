@@ -1,6 +1,6 @@
 import path from "node:path";
 
-import { sniffFileBytes, type SniffedBytes } from "@docslurp/shared";
+import { sniffFileBytes, type SniffedBytes } from "@docslurp/shared/file-sniff";
 
 import { CLAM_SCAN_LIMITS } from "../tools/clam-limits.js";
 import { findEmbeddedContainer, inspectNestedArchives, parseZip } from "./archive-nesting.js";

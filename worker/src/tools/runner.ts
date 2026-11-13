@@ -2603,7 +2603,7 @@ export function buildCommandEnv(args: {
   isVectorBackend: boolean;
   env?: NodeJS.ProcessEnv;
 }): NodeJS.ProcessEnv {
-  return buildAllowlistedEnv({
+  const env = buildAllowlistedEnv({
     defaultAllowlist: args.isVectorBackend
       ? [...defaultParserEnvAllowlist, ...vectorBackendEnvAllowlist]
       : defaultParserEnvAllowlist,
@@ -2615,6 +2615,20 @@ export function buildCommandEnv(args: {
     },
     sourceEnv: args.env,
   });
+  if (!args.isVectorBackend) stripNodeRuntimeEnv(env);
+  return env;
+}
+
+/**
+ * Parser commands (every guest that reads customer bytes) never get a `NODE_*` variable, whatever
+ * `DOCSLURP_PARSER_ENV_ALLOWLIST` or a plan says (council r11 I2). Node acts on several of them before any guest code
+ * runs: `NODE_OPTIONS` (`--require`, `--import`), `NODE_COMPILE_CACHE` (loads compiled code from a directory),
+ * `NODE_PATH`. A guest can only refuse them after they have taken effect, so the host removes them. Parser commands run
+ * without network, so `NODE_EXTRA_CA_CERTS` goes too.
+ */
+export function stripNodeRuntimeEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  for (const key of Object.keys(env)) if (key.toUpperCase().startsWith("NODE_")) delete env[key];
+  return env;
 }
 
 /** Provider-neutral description of a parser command: allowlisted env plus the paths it may read and write. */

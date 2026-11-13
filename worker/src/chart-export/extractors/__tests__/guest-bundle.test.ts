@@ -1,0 +1,321 @@
+// Production runs the chart-export guest as one bundled module (dist/chart-export/guest.bundle.mjs, built by
+// scripts/bundle-chart-guest.mjs); every other test imports src/. This runs the real guest script on Office, SVG,
+// embedded-spec and batch inputs and requires output byte-identical to in-process extraction from src/. CI builds the
+// worker before the worker suites, so the bundle must exist there; a local run without a build skips.
+import { execFile, execFileSync } from "node:child_process";
+import { existsSync } from "node:fs";
+import { chmod, copyFile, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { promisify } from "node:util";
+
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+
+import { extractDeterministicVisuals } from "../index.js";
+import { validateDeterministicResult } from "../host.js";
+import { barPlot, chartXml, docx, genericBar, linePlot, matplotlibBar, MERMAID_FLOWCHART, pptx, vegaBar, xlsx, zip } from "./fixtures.js";
+
+const run = promisify(execFile);
+const workerRoot = fileURLToPath(new URL("../../../../", import.meta.url));
+const guestScript = path.join(workerRoot, "scripts/chart-export-extract.mjs");
+const built = existsSync(path.join(workerRoot, "dist/chart-export/guest.bundle.mjs"));
+
+if (process.env.CI && !built) throw new Error("CI must build the worker (pnpm --filter @docslurp/worker build) before the worker tests: the chart guest bundle is missing");
+
+const VL = "https://vega.github.io/schema/vega-lite/v5.json";
+const vlSpec = { $schema: VL, title: "Sales", data: { values: [{ r: "N", s: 28 }, { r: "S", s: 55 }] }, mark: "bar", encoding: { x: { field: "r", type: "nominal" }, y: { field: "s", type: "quantitative" } } };
+const Q = ["Q1", "Q2", "Q3"];
+
+// Each test spawns real guest processes: an explicit timeout, so a loaded runner does not trip the 5 s default.
+describe.skipIf(!built)("chart-export guest bundle (the production guest)", { timeout: 60_000 }, () => {
+  let dir: string;
+  beforeAll(async () => { dir = await mkdtemp(path.join(process.env.TMPDIR || os.tmpdir(), "chart-guest-")); });
+  afterAll(async () => { await rm(dir, { recursive: true, force: true }); });
+
+  /** The test's environment without an inherited compile cache (the guest refuses one; production passes no env). */
+  const guestEnv = (extra: Record<string, string>) => {
+    const env: Record<string, string | undefined> = { ...process.env, ...extra };
+    if (!("NODE_COMPILE_CACHE" in extra)) delete env.NODE_COMPILE_CACHE;
+    return env;
+  };
+
+  async function guest(kind: string, files: Array<string | Uint8Array>, extra: Record<string, unknown> = {}, env: Record<string, string> = {}, script = guestScript): Promise<string> {
+    const inputs: string[] = [];
+    for (const [k, body] of files.entries()) {
+      const file = path.join(dir, `${kind}-${inputs.length}-${k}-${Math.random().toString(36).slice(2)}`);
+      await writeFile(file, body);
+      inputs.push(file);
+    }
+    const request = path.join(dir, `request-${Math.random().toString(36).slice(2)}.json`);
+    const output = path.join(dir, `output-${Math.random().toString(36).slice(2)}.json`);
+    await writeFile(request, JSON.stringify({ kind, ...extra }));
+    // As the host runs it: V8 code generation from strings disabled (eval, the Function constructor).
+    await run(process.execPath, ["--disallow-code-generation-from-strings", script, inputs[0]!, request, output, ...inputs.slice(1)], { cwd: workerRoot, env: guestEnv(env) });
+    return readFile(output, "utf8");
+  }
+
+  // One guest process per test, so each stays well inside the default timeout on a busy runner.
+  const chart = chartXml({ title: "Revenue", plots: [barPlot([{ name: "A", cats: Q, vals: [1, 2, 3] }, { name: "B", cats: Q, vals: [3, 2, 1] }])] });
+  const line = chartXml({ plots: [linePlot([{ name: "L", cats: Q, vals: [5, 6, 7] }])] });
+  const office: Array<[string, () => Uint8Array]> = [
+    ["XLSX", () => xlsx("S", [["q", "v"], ["Q1", 1], ["Q2", 2], ["Q3", 3]], chart)],
+    ["DOCX", () => docx([chart, line])],
+    ["PPTX", () => pptx([[1, chart], [2, line]])],
+  ];
+  for (const [name, make] of office) {
+    it(`extracts Office charts (${name}) exactly as in process`, async () => {
+      const bytes = make();
+      const got = await guest("office", [bytes]);
+      expect(got).toBe(JSON.stringify(extractDeterministicVisuals({ kind: "office", bytes })));
+      expect(JSON.parse(got).visuals.length).toBeGreaterThan(0);
+    });
+  }
+
+  const svgs = [
+    matplotlibBar({ categories: Q, series: [{ name: "R", values: [12, 15, 9], color: "#1f77b4" }] }, { vmax: 20, title: "Revenue" }),
+    vegaBar(["a", "b", "c"], [1, 2, 3], 4),
+    genericBar(["x", "y"], [3, 1], 4),
+    MERMAID_FLOWCHART,
+    "<svg xmlns=\"http://www.w3.org/2000/svg\"><text>no chart</text></svg>",
+    "<svg><unclosed>",
+  ];
+  // One guest process per diagrams setting (a batch), then the first SVG on its own (the single-input path).
+  for (const diagrams of [true, false]) {
+    it(`extracts SVG charts${diagrams ? " and diagrams" : " (diagrams off)"} exactly as in process`, async () => {
+      const got = await guest("svg", svgs, { diagrams, batch: svgs.length });
+      expect(got).toBe(JSON.stringify({ schemaVersion: "chart-export-deterministic-batch@v1", results: svgs.map((text) => extractDeterministicVisuals({ kind: "svg", text }, { diagrams })) }));
+    });
+  }
+  it("extracts a single SVG exactly as in process", async () => {
+    expect(await guest("svg", [svgs[0]!])).toBe(JSON.stringify(extractDeterministicVisuals({ kind: "svg", text: svgs[0]! })));
+  });
+
+  it("extracts embedded specs from HTML and JSON exactly as in process", async () => {
+    const html = `<!doctype html><html><body><div id="vis"></div><script>var spec = ${JSON.stringify(vlSpec)};\nvegaEmbed('#vis', spec);</script>${genericBar(["p", "q"], [1, 2], 4)}</body></html>`;
+    expect(await guest("html", [html])).toBe(JSON.stringify(extractDeterministicVisuals({ kind: "html", text: html })));
+    const json = JSON.stringify(vlSpec);
+    const got = await guest("json", [json]);
+    expect(got).toBe(JSON.stringify(extractDeterministicVisuals({ kind: "json", text: json })));
+    expect(JSON.parse(got).visuals[0].source).toBe("embedded-spec");
+  });
+
+  it("runs an SVG batch one input at a time, exactly as in process", async () => {
+    const texts = [genericBar(["a", "b"], [1, 2], 4), "<svg><bad", vegaBar(["c", "d"], [3, 4], 5)];
+    const got = await guest("svg", texts, { batch: texts.length });
+    const want = texts.map((text) => {
+      try {
+        return extractDeterministicVisuals({ kind: "svg", text });
+      } catch {
+        return { schemaVersion: "chart-export-deterministic@v1", visuals: [], refusals: [{ locator: "svg", reason: "extract-failed" }] };
+      }
+    });
+    expect(got).toBe(JSON.stringify({ schemaVersion: "chart-export-deterministic-batch@v1", results: want }));
+  });
+
+  it("generates no code at run time: zod is jitless before any schema is built (council r4 M1)", async () => {
+    // Count every use of the Function constructor (zod's JIT and its allowsEval probe) from before the bundle loads
+    // until after it extracts a bar chart. With jitless set first there are none.
+    const bundle = path.join(workerRoot, "dist/chart-export/guest.bundle.mjs");
+    const probe = `
+      const Real = Function; let calls = 0;
+      globalThis.Function = new Proxy(Real, { construct(t, a) { calls++; return Reflect.construct(t, a); }, apply(t, h, a) { calls++; return Reflect.apply(t, h, a); } });
+      const g = await import(${JSON.stringify(pathToFileURL(bundle).href)});
+      const r = g.extractDeterministicVisuals({ kind: "svg", text: ${JSON.stringify(genericBar(["a", "b", "c"], [1, 2, 3], 4))} });
+      console.log(JSON.stringify({ calls, visuals: r.visuals.length, spec: !!r.visuals[0]?.spec }));`;
+    const { stdout } = await run(process.execPath, ["--input-type=module", "-e", probe], { cwd: workerRoot });
+    expect(JSON.parse(stdout)).toEqual({ calls: 0, visuals: 1, spec: true });
+  });
+
+  describe("optional V8 compile cache (off unless the request names a directory the guest cannot write)", () => {
+    const bytes = () => xlsx("S", [["q", "v"], ["Q1", 1], ["Q2", 2], ["Q3", 3]], chart);
+    /** Run the guest directly (argv as the host passes it), returning stdout-free output and stderr. */
+    async function guestRaw(b: Uint8Array, request: Record<string, unknown>, env: Record<string, string> = {}, wrap: string[] = []): Promise<{ out: string; stderr: string }> {
+      const input = path.join(dir, `cc-in-${Math.random().toString(36).slice(2)}`);
+      const req = path.join(dir, `cc-req-${Math.random().toString(36).slice(2)}.json`);
+      const output = path.join(dir, `cc-out-${Math.random().toString(36).slice(2)}.json`);
+      await writeFile(input, b);
+      await writeFile(req, JSON.stringify({ kind: "office", ...request }));
+      const argv = [process.execPath, "--disallow-code-generation-from-strings", guestScript, input, req, output];
+      const [cmd, ...args] = wrap.length ? [...wrap, ...argv] : argv;
+      const { stderr } = await run(cmd!, args, { cwd: workerRoot, env: guestEnv(env) });
+      return { out: await readFile(output, "utf8"), stderr };
+    }
+
+    it("a writable directory is not used: same output, nothing written, the reason logged", async () => {
+      const cache = path.join(dir, "cc-writable");
+      await mkdir(cache);
+      const b = bytes();
+      const { out, stderr } = await guestRaw(b, { compileCacheDir: cache });
+      expect(out).toBe(JSON.stringify(extractDeterministicVisuals({ kind: "office", bytes: b })));
+      expect(stderr).toMatch(/compile cache disabled: (writable|owned by the guest user)/);
+      expect(await readdir(cache)).toEqual([]);
+    });
+
+    it("a read-only directory the guest user owns is not used (it could chmod it back)", async () => {
+      if (!process.getuid || process.getuid() === 0) return;
+      const cache = path.join(dir, "cc-owned");
+      await mkdir(cache);
+      await chmod(cache, 0o555);
+      try {
+        const { stderr } = await guestRaw(bytes(), { compileCacheDir: cache });
+        expect(stderr).toMatch(/compile cache disabled: owned by the guest user/);
+      } finally { await chmod(cache, 0o755); }
+    });
+
+    it("a missing directory is not used", async () => {
+      const { stderr } = await guestRaw(bytes(), { compileCacheDir: path.join(dir, "cc-missing") });
+      expect(stderr).toMatch(/compile cache disabled: unreadable/);
+    });
+
+    it("refuses a compile cache inherited through the environment", async () => {
+      await expect(guestRaw(bytes(), {}, { NODE_COMPILE_CACHE: path.join(dir, "cc-env") })).rejects.toThrow(/inherited compile cache/);
+    });
+
+    // A prepared cache on a read-only mount, as production would mount it: a user and mount namespace (`unshare -rm`)
+    // gives a read-only bind mount without privileges. Skipped where unavailable.
+    const canUnshare = (() => { try { execFileSync("unshare", ["-rm", "true"], { stdio: "ignore" }); return true; } catch { return false; } })();
+    it.skipIf(!canUnshare)("a prepared cache on a read-only mount is used by the parent and the worker, unchanged, with identical output", async () => {
+      const cache = path.join(dir, "cc-prepared");
+      // Node keys the cache by uid, so it is prepared as the user the guest runs as (here uid 0 in the namespace).
+      await run("unshare", ["-r", process.execPath, "--disallow-code-generation-from-strings", path.join(workerRoot, "scripts/chart-guest-compile-cache.mjs"), cache], { cwd: workerRoot, env: guestEnv({}) });
+      const before = (await readdir(cache, { recursive: true })).sort();
+      expect(before.length).toBeGreaterThan(0);
+      const b = bytes();
+      const q = (x: string) => `'${x.replace(/'/g, "'\\''")}'`;
+      const input = path.join(dir, "cc-ro-in"), req = path.join(dir, "cc-ro-req.json"), output = path.join(dir, "cc-ro-out.json");
+      await writeFile(input, b);
+      await writeFile(req, JSON.stringify({ kind: "office", compileCacheDir: cache }));
+      const script = `mount --bind ${q(cache)} ${q(cache)} && mount -o remount,bind,ro ${q(cache)} && exec ${q(process.execPath)} --disallow-code-generation-from-strings ${q(guestScript)} ${q(input)} ${q(req)} ${q(output)}`;
+      const { stderr } = await run("unshare", ["-rm", "sh", "-c", script], { cwd: workerRoot, env: guestEnv({ NODE_DEBUG_NATIVE: "COMPILE_CACHE" }) });
+      expect(stderr).not.toMatch(/compile cache disabled/);
+      // Node's own compile-cache log: the bundle's cached code was accepted in the parent and in the worker.
+      expect(stderr.match(/guest\.bundle\.mjs was accepted/g)).toHaveLength(2);
+      expect(await readFile(output, "utf8")).toBe(JSON.stringify(extractDeterministicVisuals({ kind: "office", bytes: b })));
+      expect((await readdir(cache, { recursive: true })).sort()).toEqual(before);
+    });
+
+    it("leaves code generation from strings blocked with a warm cache", async () => {
+      const cache = path.join(dir, "compile-cache-probe");
+      const bundle = pathToFileURL(path.join(workerRoot, "dist/chart-export/guest.bundle.mjs")).href;
+      const probe = `
+        import module from "node:module";
+        module.enableCompileCache(${JSON.stringify(cache)});
+        await import(${JSON.stringify(bundle)});
+        const blocked = (f) => { try { f(); return false; } catch { return true; } };
+        console.log(JSON.stringify({ fn: blocked(() => new Function("return 1")), ev: blocked(() => eval("1")) }));`;
+      for (let k = 0; k < 2; k++) {
+        const { stdout } = await run(process.execPath, ["--disallow-code-generation-from-strings", "--input-type=module", "-e", probe], { cwd: workerRoot });
+        expect(JSON.parse(stdout)).toEqual({ fn: true, ev: true });
+      }
+    });
+
+    for (const bad of ["relative/cache", "/tmp/../etc", "/a//b", 42]) {
+      it(`refuses compileCacheDir ${JSON.stringify(bad)}`, async () => {
+        await expect(guest("office", [bytes()], { compileCacheDir: bad })).rejects.toThrow();
+      });
+    }
+  });
+
+  describe("unit containment (council r8): one unit's crash or overrun loses only that unit, counted", () => {
+    const html = `<html><body>${[["a", "b"], ["c", "d"], ["e", "f"]].map(([x, y]) => genericBar([x!, y!], [1, 2], 4)).join("")}</body></html>`;
+    const plain = () => extractDeterministicVisuals({ kind: "html", text: html });
+    // The production bundle compiles the fault hooks out (council r9 L3); these tests run the same guest scripts beside a
+    // bundle built with them in.
+    let hooked: string;
+    beforeAll(async () => {
+      const root = path.join(dir, "hooked");
+      await mkdir(path.join(root, "scripts"), { recursive: true });
+      for (const f of ["chart-export-extract.mjs", "chart-export-worker.mjs"]) await copyFile(path.join(workerRoot, "scripts", f), path.join(root, "scripts", f));
+      const { build } = await import("esbuild");
+      await build({
+        entryPoints: [path.join(workerRoot, "dist/chart-export/extractors/guest-entry.js")],
+        outfile: path.join(root, "dist/chart-export/guest.bundle.mjs"),
+        bundle: true, platform: "node", format: "esm", logLevel: "silent", absWorkingDir: workerRoot,
+        define: { __CHART_GUEST_TEST_HOOKS__: "true" },
+      });
+      hooked = path.join(root, "scripts/chart-export-extract.mjs");
+    }, 60_000);
+    const faulty = (kind: string, files: Array<string | Uint8Array>, env: Record<string, string>) => guest(kind, files, {}, env, hooked);
+
+    it("the production guest ignores every fault-injection variable", async () => {
+      const out = JSON.parse(await guest("html", [html], {}, { DOCSLURP_CHART_GUEST_TEST_FAULT: "crash:svg[1]", DOCSLURP_CHART_GUEST_TEST_HEAP_MB: "1", DOCSLURP_CHART_GUEST_TEST_UNIT_MS: "1", DOCSLURP_PARSER_ENV_ALLOWLIST: "DOCSLURP_CHART_GUEST_TEST_FAULT" }));
+      expect(out).toEqual(JSON.parse(JSON.stringify(plain())));
+      expect(out.visuals).toHaveLength(3);
+    });
+
+    it("a worker that dies mid-unit: the other units' visuals survive, the unit is recorded unit-crashed", async () => {
+      const out = JSON.parse(await faulty("html", [html], { DOCSLURP_CHART_GUEST_TEST_FAULT: "crash:svg[1]" }));
+      expect(out.visuals.map((v: { locator: string }) => v.locator)).toEqual(["svg[0]", "svg[2]"]);
+      expect(out.deferred).toEqual([{ svgIndex: 1, count: 1, reason: "unit-crashed" }]);
+      // The surviving visuals are exactly what an uncontained run produces for them.
+      expect(out.visuals).toEqual(plain().visuals.filter((v) => v.locator !== "svg[1]"));
+    });
+
+    it("a unit that never returns is stopped at its time limit, recorded unit-timeout; the rest continue", async () => {
+      const out = JSON.parse(await faulty("html", [html], { DOCSLURP_CHART_GUEST_TEST_FAULT: "hang:svg[0]", DOCSLURP_CHART_GUEST_TEST_UNIT_MS: "1500" }));
+      expect(out.visuals.map((v: { locator: string }) => v.locator)).toEqual(["svg[1]", "svg[2]"]);
+      expect(out.deferred).toEqual([{ svgIndex: 0, count: 1, reason: "unit-timeout" }]);
+    });
+
+    it("a unit that runs its worker out of heap is recorded unit-crashed; the rest continue", async () => {
+      const out = JSON.parse(await faulty("html", [html], { DOCSLURP_CHART_GUEST_TEST_FAULT: "oom:svg[2]", DOCSLURP_CHART_GUEST_TEST_HEAP_MB: "64" }));
+      expect(out.visuals.map((v: { locator: string }) => v.locator)).toEqual(["svg[0]", "svg[1]"]);
+      expect(out.deferred).toEqual([{ svgIndex: 2, count: 1, reason: "unit-crashed" }]);
+    });
+
+    // Council r10 M1: after a unit failure the reassembled result is held to the same field caps and size cap as the
+    // normal path, so the host accepts it and the surviving visuals are kept.
+    it("a 64 KB part name with a crashed unit: locators capped, the host accepts the result, the chart survives", async () => {
+      const long = "d".repeat(64_000);
+      const bar = genericBar(["a", "b"], [1, 2], 4);
+      const bytes = zip({ [`${long}/a.xhtml`]: `<html><body>${bar}<p>x</p></body></html>`, [`${long}/b.svg`]: "<svg><g></svg>", "z.xhtml": `<html><body>${bar}</body></html>` });
+      const out = JSON.parse(await faulty("epub", [bytes], { DOCSLURP_CHART_GUEST_TEST_FAULT: "crash:z.xhtml#svg" }));
+      expect(() => validateDeterministicResult(out)).not.toThrow();
+      expect(out.visuals).toHaveLength(1);
+      expect(out.refusals).toHaveLength(1);
+      expect(Math.max(...out.visuals.map((v: { locator: string }) => v.locator.length), ...out.refusals.map((r: { locator: string }) => r.locator.length))).toBe(512);
+      expect(out.deferred).toEqual([{ svgIndex: 2, count: 1, reason: "unit-crashed" }]);
+    });
+
+    it("refusal flooding with 64 KB locators after a crash stays a valid, bounded result (no throw, no guest-unavailable)", async () => {
+      // 398 broken inline SVGs (two pages, under the per-page cap) under a 64 KB directory name (≈ 25 MB of locators
+      // uncapped), then a crashing unit.
+      const long = "e".repeat(64_000);
+      const bar = genericBar(["a", "b"], [1, 2], 4);
+      const broken = `<html><body>${"<svg><g></svg>".repeat(199)}</body></html>`;
+      const bytes = zip({ [`${long}/a.xhtml`]: broken, [`${long}/b.xhtml`]: broken, "z.xhtml": `<html><body>${bar}</body></html>` });
+      const raw = await faulty("epub", [bytes], { DOCSLURP_CHART_GUEST_TEST_FAULT: "crash:z.xhtml#svg" });
+      expect(Buffer.byteLength(raw)).toBeLessThan(1024 * 1024);
+      const out = JSON.parse(raw);
+      expect(() => validateDeterministicResult(out)).not.toThrow();
+      expect(out.refusals).toHaveLength(398);
+      expect(out.refusals.every((r: { locator: string }) => r.locator.length <= 512)).toBe(true);
+      expect(out.deferred).toEqual([{ svgIndex: 398, count: 1, reason: "unit-crashed" }]);
+    });
+
+    // Council r10 L1: a crash after the output budget fills resumes on the same unit ids: one unit counted once, every
+    // SVG counted.
+    it("fill the output budget, then crash a later unit: exactly one unit-crashed, nothing double-counted or lost", async () => {
+      const vl = (seed: number) => JSON.stringify({ $schema: "https://vega.github.io/schema/vega-lite/v5.json", mark: "bar", data: { values: Array.from({ length: 2000 }, (_, i) => ({ a: (`R${seed}-${i}-` + "x".repeat(200)).slice(0, 200), b: i })) }, encoding: { x: { field: "a", type: "nominal" }, y: { field: "b", type: "quantitative" } } });
+      const page = (n: number, seed: number) => `<html><body>${Array.from({ length: n }, (_, k) => `<script type="application/json">${vl(seed * 100 + k)}</script>`).join("")}</body></html>`;
+      const bytes = zip({ "a1.xhtml": page(10, 1), "a2.xhtml": page(10, 2), "a3.xhtml": page(10, 3), "b.svg": genericBar(["a", "b"], [1, 2], 4), "c.xhtml": `<html><body><script type="application/json">${vl(9)}</script></body></html>` });
+      const plainOut = extractDeterministicVisuals({ kind: "epub", bytes });
+      const total = (r: { deferred?: Array<{ count: number }> }) => (r.deferred ?? []).reduce((n, d) => n + d.count, 0);
+      const out = JSON.parse(await faulty("epub", [bytes], { DOCSLURP_CHART_GUEST_TEST_FAULT: "crash:c.xhtml#" }));
+      expect(out.visuals).toEqual(JSON.parse(JSON.stringify(plainOut.visuals)));
+      expect(out.deferred.filter((d: { reason: string }) => d.reason === "unit-crashed")).toEqual([expect.objectContaining({ count: 1 })]);
+      // c's chart is lost to the crash instead of to the budget; every other count is the same.
+      expect(total(out)).toBe(total(plainOut));
+      expect(() => validateDeterministicResult(out)).not.toThrow();
+    });
+
+    it("an Office chart part that crashes loses only that part", async () => {
+      const chart = chartXml({ title: "Revenue", plots: [barPlot([{ name: "A", cats: Q, vals: [1, 2, 3] }])] });
+      const bytes = docx([chart, chart, chart]);
+      const out = JSON.parse(await faulty("office", [bytes], { DOCSLURP_CHART_GUEST_TEST_FAULT: "crash:chart2.xml" }));
+      expect(out.visuals.map((v: { locator: string }) => v.locator)).toEqual(["word/charts/chart1.xml", "word/charts/chart3.xml"]);
+      expect(out.deferred).toEqual([{ svgIndex: 0, count: 1, reason: "unit-crashed" }]);
+    });
+  });
+});
