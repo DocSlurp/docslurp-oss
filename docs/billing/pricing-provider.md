@@ -133,6 +133,8 @@ Response (`EstimateQuote`): `kind: "estimate"`, `pricingVersion`, `validUntil`, 
 credits per month, months, total), `usage.creditsPerMonth` (searches and chat), neutral `lines`
 (`pages`, `media`, `storage`, `search`, `chat`; label, period, credit range) and `rates` (pages per $1, pages per
 minute). Every credit figure is a range where the profile is uncertain, and null where the deployment does not bill.
+`validUntil` says when to re-quote; it is not a price hold. Prices may change without notice, and billing follows what
+processing measures.
 
 Limits: anonymous; a 1 MiB body; at most 200 files; per client IP `ESTIMATE_RATE_LIMIT_PER_MINUTE` quotes a minute
 (default 120) and per quote session `ESTIMATE_SESSION_RATE_LIMIT_PER_MINUTE` (default 60; an opaque random
