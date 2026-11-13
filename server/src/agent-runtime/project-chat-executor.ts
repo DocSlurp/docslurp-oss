@@ -16,14 +16,18 @@ import { durableChatTurnOptions } from "./chat-turn-options.js";
 /** Per-operation and per-root (whole tree) output quotas, in bytes. */
 const OPERATION_OUTPUT_LIMIT=262144;
 const ROOT_OUTPUT_LIMIT=524288;
-/** No output is published on an authorization older than this; the turn aborts. */
+/** An idle turn whose authorization recheck has stalled this long aborts. */
 const AUTHORIZATION_TIMEOUT_MS=5000;
 /** Buffered text flushes early at this size, and the model then waits for the append. */
 const OUTPUT_FLUSH_BYTES=16384;
-/** Text deltas coalesce this long before one fenced append (DOCSLURP_CHAT_OUTPUT_FLUSH_MS, 10 to 2000 ms; default 150). */
+/**
+ * Text deltas coalesce this long before one fenced append
+ * (DOCSLURP_CHAT_OUTPUT_FLUSH_MS, 10 to 2000 ms; default 250). Every append
+ * re-reads authorization, so the interval also bounds statements per answer.
+ */
 function outputFlushMs() {
   const parsed=Number(process.env.DOCSLURP_CHAT_OUTPUT_FLUSH_MS);
-  return Number.isInteger(parsed)&&parsed>=10&&parsed<=2000 ? parsed : 150;
+  return Number.isInteger(parsed)&&parsed>=10&&parsed<=2000 ? parsed : 250;
 }
 
 /** Native static executor: reconstructs application policy after cross-process
@@ -87,9 +91,6 @@ export function createProjectChatExecutor(manager:BackgroundTaskManager,pubsub:P
     };
     const publish=async(kind:"text"|"tool"|"evidence"|"result",payload:unknown)=>{
       signal.throwIfAborted();
-      // Authorization is rechecked on the timer, not per append; never publish
-      // on an authorization older than the abort threshold, even if the timer stalls.
-      if(Date.now()-verifiedAt>AUTHORIZATION_TIMEOUT_MS)throw new Error("authorization_timeout");
       if(!outputMarked) {
         // Conservative persisted marker precedes output. A storage failure
         // cannot later masquerade as an attempt that never accepted output.
@@ -116,6 +117,11 @@ export function createProjectChatExecutor(manager:BackgroundTaskManager,pubsub:P
           returning id`;
         if(!accepted)throw new Error("operation_output_limit");
       });
+      // Authorization is re-read for every append, immediately before it is
+      // published: a session or project access revoked since the last check
+      // (the timer's or an earlier append's) publishes nothing more. A refusal
+      // rejects the append, which aborts the turn.
+      await check();
       // Recheck under the cancellation lock after the reservation commits.
       // Reservations are conservative and never refunded on uncertain output.
       await sql.begin(async tx=>{
@@ -170,6 +176,8 @@ export function createProjectChatExecutor(manager:BackgroundTaskManager,pubsub:P
       if(flushTimer){clearTimeout(flushTimer);flushTimer=undefined;}
       buffered="";bufferedBytes=0;
     },{once:true});
+    // The timer stops idle work (a model or tool call that publishes nothing)
+    // after revocation or cancellation; publishing never relies on it.
     let checking=false;
     const timer=setInterval(()=>{
       if(Date.now()-verifiedAt>AUTHORIZATION_TIMEOUT_MS)local.abort(new Error("authorization_timeout"));

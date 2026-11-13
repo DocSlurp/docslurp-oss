@@ -1984,4 +1984,89 @@ describe("chatProject", () => {
     });
     expect(response.evidenceSpans[0]?.answerText).toContain("[1]");
   });
+
+  describe("streamed text is one answer", () => {
+    const stats = { documentCount: 1, chunkCount: 1, tokenEstimate: 80, charEstimate: 400, maxDocuments: 12, maxChunks: 24, maxTokens: 12000, maxChars: 60000 };
+    const citation = (documentId: string) => ({ documentId, filename: `${documentId}.pdf`, pageNumber: 1, pageNumbers: [1], headingPath: [], chunkIndex: 0, blockIds: [], blockTypes: [] });
+    const usage = { inputTokens: 10, outputTokens: 4 };
+    type Generate = { model?: string; onTextDelta?: (delta: string) => void | Promise<void> };
+
+    function retrievalProject() {
+      sqlMock.mockResolvedValue([]);
+      loadProjectWholeCorpusContext.mockResolvedValue({ eligible: false, reason: "chunk-limit-exceeded", results: [], stats });
+      getProject.mockResolvedValue({ id: "ws-1", systemPrompt: null });
+      hybridSearch.mockResolvedValue({ sessionId: "search-stream", results: [{ text: "retrieved chunk", score: 1, citation: citation("doc-r"), parentText: "retrieved chunk" }] });
+      process.env.ANTHROPIC_API_KEY = "test-key";
+    }
+    function wholeCorpusProject() {
+      retrievalProject();
+      getProjectSearchSettings.mockResolvedValue(buildSearchSettings({ chat: { mode: "whole-corpus" } }));
+      loadProjectWholeCorpusContext.mockResolvedValue({ eligible: true, reason: null, results: [{ text: "full corpus chunk", score: 1, citation: citation("doc-w") }], stats });
+    }
+    function streamedTurn(model?: string) {
+      const deltas: string[] = [];
+      const turn = chatProject({ projectId: "ws-1", userId: "user-1", query: "what changed?", ...(model ? { model } : {}), onTextDelta: (delta) => { deltas.push(delta); } });
+      return { deltas, turn };
+    }
+
+    it("does not fail over to another model once the first has streamed text", async () => {
+      retrievalProject();
+      generateAnthropicDocumentText
+        .mockImplementationOnce(async ({ onTextDelta }: Generate) => { await onTextDelta?.("The contract renews "); throw new Error("provider stream reset"); })
+        .mockImplementationOnce(async ({ onTextDelta }: Generate) => { await onTextDelta?.("Different answer [1]"); return { text: "Different answer [1]", usage, sources: [] }; });
+      const { deltas, turn } = streamedTurn("openai/gpt-6.1-sol");
+      // The turn fails: no failover answer and no citation fallback is appended to the streamed prefix.
+      await expect(turn).rejects.toThrow("provider stream reset");
+      expect(generateAnthropicDocumentText).toHaveBeenCalledTimes(1);
+      expect(deltas).toEqual(["The contract renews "]);
+    });
+
+    it("still fails over when the first model fails before any text", async () => {
+      retrievalProject();
+      generateAnthropicDocumentText
+        // An empty delta is not answer text.
+        .mockImplementationOnce(async ({ onTextDelta }: Generate) => { await onTextDelta?.(""); throw new Error("selected model rate limited"); })
+        .mockImplementationOnce(async ({ onTextDelta }: Generate) => { await onTextDelta?.("Fallback "); await onTextDelta?.("answer [1]"); return { text: "Fallback answer [1]", usage, sources: [] }; });
+      const { deltas, turn } = streamedTurn("openai/gpt-6.1-sol");
+      const response = await turn;
+      expect(generateAnthropicDocumentText).toHaveBeenCalledTimes(2);
+      expect(response.answer).toBe("Fallback answer [1]");
+      expect(deltas.join("")).toBe(response.answer);
+    });
+
+    it("still answers with the citation fallback when every model fails before any text", async () => {
+      retrievalProject();
+      generateAnthropicDocumentText.mockRejectedValue(new Error("provider down"));
+      const { deltas, turn } = streamedTurn("openai/gpt-6.1-sol");
+      const response = await turn;
+      expect(response.debug.fallback).toBe(true);
+      expect(response.answer).toContain("Here are the relevant source passages:");
+      expect(deltas).toEqual([]);
+    });
+
+    it("does not fall through from whole-corpus to retrieval generation after streaming text", async () => {
+      wholeCorpusProject();
+      generateAnthropicDocumentText
+        .mockImplementationOnce(async ({ onTextDelta }: Generate) => { await onTextDelta?.("From the full corpus: "); throw new Error("whole corpus stream reset"); })
+        .mockImplementation(async ({ onTextDelta }: Generate) => { await onTextDelta?.("retrieval answer [1]"); return { text: "retrieval answer [1]", usage, sources: [] }; });
+      const { deltas, turn } = streamedTurn();
+      await expect(turn).rejects.toThrow("whole corpus stream reset");
+      expect(generateAnthropicDocumentText).toHaveBeenCalledTimes(1);
+      expect(hybridSearch).not.toHaveBeenCalled();
+      expect(deltas).toEqual(["From the full corpus: "]);
+    });
+
+    it("still falls through from whole-corpus to retrieval when nothing was streamed", async () => {
+      wholeCorpusProject();
+      generateAnthropicDocumentText
+        .mockRejectedValueOnce(new Error("whole corpus failure"))
+        .mockRejectedValueOnce(new Error("whole corpus failover failure"))
+        .mockImplementationOnce(async ({ onTextDelta }: Generate) => { await onTextDelta?.("retrieval answer [1]"); return { text: "retrieval answer [1]", usage, sources: [] }; });
+      const { deltas, turn } = streamedTurn();
+      const response = await turn;
+      expect(response.debug.mode).toBe("retrieval");
+      expect(response.debug.wholeCorpus.fallbackReason).toBe("generation-failed");
+      expect(deltas.join("")).toBe(response.answer);
+    });
+  });
 });

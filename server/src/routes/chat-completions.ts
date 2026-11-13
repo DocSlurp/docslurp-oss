@@ -13,7 +13,7 @@ import {
 } from "../lib/request-actor.js";
 import { authorizeActorProjectSearch } from "../lib/search-access.js";
 import { apiKeyAuth } from "../middleware/api-key-auth.js";
-import { createChatConcurrencyLimit } from "../middleware/chat-concurrency.js";
+import { CHAT_CAPACITY_UNAVAILABLE_MESSAGE, createChatConcurrencyLimit } from "../middleware/chat-concurrency.js";
 import { assertCanSpend, isSpendBlockedError, type SpendBlockedError } from "../services/billing/spend-guard.js";
 import { upgradeLinkHeader, upgradeLinksFor } from "../lib/upgrade-links.js";
 import { chatProject, projectChatDisabledBody } from "../services/project-chat.js";
@@ -145,7 +145,9 @@ const compatibleChatAuth: MiddlewareHandler = async (c, next) => {
 export const chatCompletionsRoutes = new Hono()
   .use("/models", compatibleChatAuth)
   .use("/chat/completions", compatibleChatAuth)
-  .use("/chat/completions", createChatConcurrencyLimit((c) => c.json(errorBody("Too many chat requests in progress for this key. Retry later.", "rate_limit_error", "rate_limit_exceeded"), 429)))
+  .use("/chat/completions", createChatConcurrencyLimit((c, reason) => reason === "full"
+    ? c.json(errorBody("Too many chat requests in progress for this key. Retry later.", "rate_limit_error", "rate_limit_exceeded"), 429)
+    : c.json(errorBody(CHAT_CAPACITY_UNAVAILABLE_MESSAGE, "server_error", "chat_capacity_unavailable"), 503)))
   .get("/models", async (c) => {
     const actor = getRequestActor(c);
     const projects = await listProjects(actor.userId);

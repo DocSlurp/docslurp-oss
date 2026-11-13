@@ -64,11 +64,12 @@ from trusted scope. Its lifetime is unrelated to HTTP responses and sockets.
 Session, MFA, membership and cancellation are checked during execution; accepted
 output is fenced under the root cancellation lock and native lease before native
 cache publication. Streamed text is coalesced: one fenced, quota-reserved append
-per 150 ms (`DOCSLURP_CHAT_OUTPUT_FLUSH_MS`, 10 to 2000) or 16 KiB of text, and
+per 250 ms (`DOCSLURP_CHAT_OUTPUT_FLUSH_MS`, 10 to 2000) or 16 KiB of text, and
 always before a tool, evidence or result event, so event order is unchanged.
 Buffered text is dropped, never published, once the turn is cancelled or aborted.
-Session, MFA and project access are rechecked every two seconds rather than per
-append; no append is published on a check older than five seconds. An interrupted provider execution is not silently restarted.
+Session, MFA and project access are re-read immediately before every append is
+published, so nothing is published after a revocation, and every two seconds
+while the turn is idle, so revoked work that publishes nothing still stops. An interrupted provider execution is not silently restarted.
 
 Each user may have eight active roots, including roots with active descendants
 or shared Temporal dependencies after the answer completes. Trees have at most
@@ -246,11 +247,16 @@ SIGKILL has no settlement opportunity and always relies on that lease path.
 Stopping an executor drains it. The first SIGTERM/SIGINT stops claiming new
 tasks (the worker leaves the native dispatch group, so new launches go to other
 workers at once) and lets running turns finish, up to `CHAT_EXECUTOR_DRAIN_MS`
-(default: the chat turn deadline plus five seconds, 105 seconds with default
-settings; `0` restores the immediate interrupt). A second signal ends the drain
-early. Native shutdown then interrupts whatever is left, as before. Configure the
-platform kill timeout above the drain plus the five-second teardown (for default
-settings at least 110 seconds, and keep a margin), or SIGKILL interrupts the drain.
+(default 25 seconds; `0` restores the immediate interrupt, the maximum is 900
+seconds). A second signal ends the drain early. Native shutdown then interrupts
+whatever is left, as before: a turn still running at the drain limit keeps its
+accepted output and is not retried. A draining executor claims nothing, so with
+a single executor machine no new turn starts until its replacement is running;
+the default keeps that gap to about 25 seconds per deploy. With several
+executors and rolling restarts, a longer drain (up to the chat turn deadline
+plus five seconds) lets more turns finish without a claim gap. Configure the
+platform kill timeout above the drain plus the five-second teardown (for the
+default at least 30 seconds; 45 leaves a margin), or SIGKILL interrupts the drain.
 During a drain, cancellation of a running turn reaches it through the executor's
 two-second authorization and cancellation recheck, and every append stays fenced.
 Restarted observers retain partial output and show the authoritative terminal

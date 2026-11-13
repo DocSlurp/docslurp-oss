@@ -5,7 +5,7 @@ import { projectSettingsPipelinePatchSchema } from "./project-settings-proposal-
 import { projectSettingsProposalInputSchema } from "./project-settings-proposal-input.js";
 import { currentChatSessionId, inChatAgentContext } from "../lib/chat-agent-context.js";
 import { enforceActorCategoryRateLimit } from "../middleware/rate-limit.js";
-import { acquireChatSlot } from "../middleware/chat-concurrency.js";
+import { acquireChatSlot, CHAT_CAPACITY_UNAVAILABLE_MESSAGE, CHAT_SLOT_RETRY_AFTER_SECONDS, CHAT_SLOTS_FULL_MESSAGE } from "../middleware/chat-concurrency.js";
 import { proposeProjectSettings, SettingsProposalError } from "./project-settings-proposals.js";
 import { publicErrorMiddleware } from "../lib/public-errors.js";
 import { apiErrorResponse, apiStatusError, usesNativeErrorEnvelope } from "../lib/api-error.js";
@@ -258,15 +258,18 @@ const mcpAdapterRoutes = new Hono()
       const actor = c.get("requestActor");
       // A direct MCP chat call runs a model turn: it counts as chat-ai and takes
       // a chat slot. A nested call from the chat agent is already inside its turn.
-      let slot: { release: () => void } | null | "uncapped" = "uncapped";
+      let slot: { release: () => void } | "uncapped" = "uncapped";
       if (toolId === "chat" && !inChatAgentContext()) {
         const limited = await enforceActorCategoryRateLimit(c, "chat-ai");
         if (limited) return limited;
-        slot = await acquireChatSlot(c);
-        if (!slot) {
-          c.header("Retry-After", "5");
-          return adapterError(c, 429, "Too many chat requests in progress for this key; wait for one to finish", "rate_limited");
+        const acquired = await acquireChatSlot(c);
+        if (acquired === "full" || acquired === "unavailable") {
+          c.header("Retry-After", String(CHAT_SLOT_RETRY_AFTER_SECONDS));
+          return acquired === "full"
+            ? adapterError(c, 429, CHAT_SLOTS_FULL_MESSAGE, "rate_limited")
+            : adapterError(c, 503, CHAT_CAPACITY_UNAVAILABLE_MESSAGE, "chat_capacity_unavailable");
         }
+        slot = acquired;
       }
       // The MCP chat tool is grounded retrieval only: it never starts another
       // agent (which would refresh the outer tool budget) or changes settings.

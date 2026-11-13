@@ -146,6 +146,29 @@ describe("OpenAI-compatible project chat", () => {
     expect(body.error.message).toMatch(code === "client_key_projects_required" ? /projects/ : code === "api_key_ip_not_allowed" ? /IP allowlist/ : /allowed websites/);
     expect(chatProject).not.toHaveBeenCalled();
   });
+  it("answers an unreachable chat-slot store with an OpenAI-shaped 503, not a rate limit", async () => {
+    const { resetChatConcurrency } = await import("../middleware/chat-concurrency.js");
+    resetChatConcurrency();
+    const logged = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    vi.stubEnv("NODE_ENV", "production");
+    for (const name of ["API_RATE_LIMIT_REDIS_URL", "API_RATE_LIMIT_REDIS_REST_URL", "API_RATE_LIMIT_REDIS_REST_TOKEN", "UPSTASH_REDIS_REST_URL", "UPSTASH_REDIS_REST_TOKEN", "MASTRA_REDIS_URL", "CHAT_CONCURRENCY_LOCAL_ONLY"]) vi.stubEnv(name, "");
+    // Nothing listens on port 1.
+    vi.stubEnv("REDIS_URL", "redis://127.0.0.1:1");
+    try {
+      const refused = await request(input());
+      expect(refused.status).toBe(503);
+      expect(refused.headers.get("Retry-After")).toBe("5");
+      const text = await refused.text();
+      expect(JSON.parse(text)).toMatchObject({ error: { type: "server_error", code: "chat_capacity_unavailable", message: "Chat is temporarily unavailable. Please try again in a few seconds." } });
+      expect(text).not.toMatch(/ECONNREFUSED|redis|127\.0\.0\.1/i);
+      expect(logged).toHaveBeenCalledWith("[chat-concurrency] status=refused reason=backend-unavailable");
+      expect(chatProject).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllEnvs();
+      resetChatConcurrency();
+      logged.mockRestore();
+    }
+  });
   it("answers a full chat-concurrency cap with an OpenAI-shaped 429 and frees the slot after the stream", async () => {
     const { resetChatConcurrency } = await import("../middleware/chat-concurrency.js");
     resetChatConcurrency();

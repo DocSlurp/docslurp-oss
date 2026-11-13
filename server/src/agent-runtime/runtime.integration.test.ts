@@ -443,7 +443,10 @@ it.runIf(enabled)("coalesces a streamed answer into few fenced appends, in emiss
   const textEvents=kinds.filter(kind=>kind==="text").length;
   process.stderr.write(`${JSON.stringify({coalescedAnswer:{deltas:deltas.length,textEvents,statements:used}})}\n`);
   expect(textEvents).toBeLessThan(40);
-  expect(used).toBeLessThan(300);
+  // Each append re-reads authorization (session, project access, lease) on top of its two fenced
+  // transactions: about 13 statements. One append per delta cost about 2,900 for these 200 deltas.
+  expect(used).toBeLessThan((textEvents+3)*16);
+  expect(used).toBeLessThan(600);
 },40000);
 
 it.runIf(enabled).each(["cancel route","database fence"] as const)("publishes no buffered text after a cancel between flushes (%s)",async(mode)=>{
@@ -478,6 +481,46 @@ it.runIf(enabled).each(["cancel route","database fence"] as const)("publishes no
     expect(body.operation.snapshot.text).toBe("flushed before cancel");
     expect(["cancelled","failed"]).toContain(body.operation.status);
   } finally {vi.stubEnv("DOCSLURP_CHAT_OUTPUT_FLUSH_MS","");}
+},30000);
+
+it.runIf(enabled)("publishes nothing after the session is revoked between a successful check and the next flush",async()=>{
+  await restoreSession();
+  vi.stubEnv("DOCSLURP_CHAT_OUTPUT_FLUSH_MS","1500");
+  let published!:()=>void;const ready=new Promise<void>(resolve=>{published=resolve;});
+  let revoke!:()=>void;const revoked=new Promise<void>(resolve=>{revoke=resolve;});
+  let aborted=false;
+  state.chat.mockReset().mockImplementation(async(args)=>{
+    await args.onTextDelta("published before revoke");
+    args.onToolActivity({tool:"search",status:"done"}); // Publishes the text and this event on a fresh, successful check.
+    published();
+    await revoked;
+    await args.onTextDelta(" buffered after revoke");
+    // Flushes at once, well inside the two-second timer's window: only the per-append check can refuse it.
+    args.onToolActivity({tool:"search",status:"after-revoke"});
+    await new Promise<void>((resolve,reject)=>{
+      const stop=()=>{aborted=true;reject(new Error("revoked"));};
+      if(args.signal.aborted)stop();else args.signal.addEventListener("abort",stop,{once:true});
+    });
+    return {answer:"unreachable"};
+  });
+  const app=requestApp();
+  try {
+    const response=await app.request("/v1/chat/operations",{method:"POST",headers:{"content-type":"application/json","Idempotency-Key":"revoked_between_flushes"},body:JSON.stringify({q:"revoked between flushes",project})});
+    expect(response.status).toBe(202);const id=(await response.json()).operationId;
+    await ready;
+    await vi.waitFor(async()=>expect((await (await app.request(`/v1/chat/operations/${id}?after=0`)).json()).events.map((e:{kind:string})=>e.kind)).toEqual(["text","tool"]),{timeout:5000,interval:10});
+    await sql`update session set "expiresAt"=now()-interval '1 second' where id='native-api-session'`;
+    revoke();
+    await vi.waitFor(()=>expect(aborted).toBe(true),{timeout:6000});
+    await settled(id);await tick(1700);
+    await restoreSession();
+    const body=await (await app.request(`/v1/chat/operations/${id}?after=0`)).json();
+    expect(JSON.stringify(body)).not.toContain("buffered after revoke");
+    expect(JSON.stringify(body)).not.toContain("after-revoke");
+    expect(body.events.map((e:{kind:string})=>e.kind)).toEqual(["text","tool"]);
+    expect(body.operation.snapshot.text).toBe("published before revoke");
+    expect(["cancelled","failed"]).toContain(body.operation.status);
+  } finally {vi.stubEnv("DOCSLURP_CHAT_OUTPUT_FLUSH_MS","");await restoreSession();}
 },30000);
 
 it.runIf(enabled)("enforces the per-operation output quota on coalesced small deltas",async()=>{

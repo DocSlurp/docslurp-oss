@@ -8,8 +8,8 @@ const force = new AbortController();
 const drainMs = nativeChatDrainMs();
 let deadline: ReturnType<typeof setTimeout> | undefined;
 const stop = () => {
-  // First signal: drain. Claim nothing new; running turns finish up to the turn
-  // deadline. A second signal stops the drain and interrupts them at once.
+  // First signal: drain. Claim nothing new; running turns get the drain window
+  // (25 s by default) to finish. A second signal interrupts them at once.
   if (shutdown.signal.aborted) { force.abort(); return; }
   shutdown.abort();
   // One process-wide bound, including startup, global pools and native teardown.

@@ -493,6 +493,24 @@ function buildModelFailoverOrder(
   return failover ? [...new Set([preferredModel, PROJECT_CHAT_FAILOVER_MODEL])] : [preferredModel];
 }
 
+/**
+ * Wraps a caller's text-delta handler to record whether any answer text has
+ * reached it. Streaming clients are promised that the deltas of a turn
+ * concatenate to its final answer, so once text has been emitted no second
+ * answer may follow it: not from a failover model, not from another generation
+ * path and not from the citation fallback. The turn fails instead.
+ */
+function trackTextDeltas(handler: TextDeltaHandler | undefined): { emitted: boolean; handler: TextDeltaHandler | undefined } {
+  const tracked: { emitted: boolean; handler: TextDeltaHandler | undefined } = { emitted: false, handler: undefined };
+  if (handler) {
+    tracked.handler = (delta) => {
+      if (delta) tracked.emitted = true;
+      return handler(delta);
+    };
+  }
+  return tracked;
+}
+
 async function generateProjectChatTextWithFailover(args: {
   apiKey: string;
   privacyMode: PrivacyMode;
@@ -529,6 +547,7 @@ async function generateProjectChatTextWithFailover(args: {
     return { ...generated, model: args.privateModel };
   }
   let lastError: unknown;
+  const deltas = trackTextDeltas(args.onTextDelta);
 
   for (const model of buildModelFailoverOrder(args.preferredModel, args.failover)) {
     try {
@@ -541,7 +560,7 @@ async function generateProjectChatTextWithFailover(args: {
         prompt: args.prompt,
         documents: args.documents,
         maxOutputTokens: args.maxOutputTokens,
-        onTextDelta: args.onTextDelta,
+        onTextDelta: deltas.handler,
         signal,
       });
 
@@ -552,6 +571,9 @@ async function generateProjectChatTextWithFailover(args: {
     } catch (error) {
       rethrowIfAborted(error);
       reportPublicError(error, { operation: "chat-generation", model });
+      // The client already holds part of this model's answer: another model's
+      // answer would be appended to it. Fail the turn instead of failing over.
+      if (deltas.emitted) throw error;
       lastError = error;
     }
   }
@@ -1393,6 +1415,11 @@ async function chatProjectTurn(
   const openRouterApiKey = chatApiKey ?? (privateChatModel ? "private-endpoint" : undefined);
   const prefersWholeCorpus = searchSettings.chat.mode === "whole-corpus" && !narrowingFilters;
 
+  // One tracker for the whole turn: whole-corpus generation, retrieval
+  // generation and the citation fallback are alternative answers, and none may
+  // follow text the client has already received.
+  const answerDeltas = trackTextDeltas(args.onTextDelta);
+
   if ((prefersWholeCorpus || documentIds?.length) && !narrowingFilters && wholeCorpus.eligible) {
     args.onEvidence?.(wholeCorpus.results);
     if (!openRouterApiKey) {
@@ -1422,7 +1449,7 @@ async function chatProjectTurn(
           }),
           documents: buildNativeDocumentInputs(wholeCorpus.results),
           maxOutputTokens: args.maxOutputTokens ?? 2048,
-          onTextDelta: args.onTextDelta,
+          onTextDelta: answerDeltas.handler,
         });
 
         await logChatUsage({
@@ -1475,6 +1502,9 @@ async function chatProjectTurn(
         };
       } catch (error) {
         rethrowIfAborted(error);
+        // Before any text: answer from retrieval instead. After text was
+        // streamed, a retrieval answer would be concatenated to it.
+        if (answerDeltas.emitted) throw error;
         wholeCorpusDebug.fallbackReason = "generation-failed";
       }
     }
@@ -1662,7 +1692,7 @@ async function chatProjectTurn(
       }),
       documents: buildNativeDocumentInputs(citations),
       maxOutputTokens: args.maxOutputTokens ?? 2048,
-      onTextDelta: args.onTextDelta,
+      onTextDelta: answerDeltas.handler,
     });
 
     await logChatUsage({
@@ -1712,6 +1742,9 @@ async function chatProjectTurn(
     };
   } catch (error) {
     rethrowIfAborted(error);
+    // The citation fallback is a different answer: it replaces a failed
+    // generation only while the client has received no text.
+    if (answerDeltas.emitted) throw error;
     const answer = buildFallbackAnswer(
       args.query,
       citations,
