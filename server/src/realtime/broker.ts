@@ -39,7 +39,7 @@ type Entry = {
 
 /**
  * The revision scope whose changes can alter a resource's projection, or null for the
- * organization. Matches the scopes migration 0145's triggers record: a project's own
+ * organization. Matches the scopes migration 0143's triggers record: a project's own
  * rows, documents, runs, suggestions and search sessions move `project:<id>`; a run's
  * row, events, stage states, documents and usage move `run:<id>`.
  */

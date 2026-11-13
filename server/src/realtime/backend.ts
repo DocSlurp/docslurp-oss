@@ -21,9 +21,9 @@ type EconomicsRow = { projectId: string; name: string; documentCount: number; pa
  * trigger-maintained counters instead of aggregating every document and run:
  * - current documents (not superseded, any status) = the completed corpus in
  *   project_corpus_stats + in-flight documents (documents_project_in_flight_idx)
- *   + failed/cancelled ones (documents_project_terminal_current_idx, 0145);
- * - completed-run pages and runtime: project_corpus_stats (0145 run trigger);
- * - active runs: project_runs_project_active_idx (0145).
+ *   + failed/cancelled ones (documents_project_terminal_current_idx, 0143);
+ * - completed-run pages and runtime: project_corpus_stats (0143 run trigger);
+ * - active runs: project_runs_project_active_idx (0143).
  * Values equal the former per-project aggregates (realtime/economics.db.test.ts).
  */
 export async function readProjectEconomics(orgId: string, page: number): Promise<EconomicsRow[]> {
