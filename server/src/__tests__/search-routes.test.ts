@@ -737,6 +737,24 @@ describe("searchRoutes", () => {
     expect(chatProject).not.toHaveBeenCalled();
   });
 
+  it("forwards the chat tier and refuses catalog model ids from non-eval callers before the stream opens", async () => {
+    chatProject.mockResolvedValueOnce({ answer: "Supported" });
+    const post = await app.request("/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q: "Question", project: "ws-chat", tier: "balanced", reasoning: "low" }) });
+    expect(post.status).toBe(200);
+    expect(chatProject).toHaveBeenCalledWith(expect.objectContaining({ tier: "balanced", reasoning: "low" }));
+    chatProject.mockClear();
+    for (const model of ["z-ai/glm-5.3-flash", "llm://openrouter/openai/gpt-6.1-sol"]) {
+      const stream = await app.request(`/chat/stream?q=test&project=ws-chat&model=${encodeURIComponent(model)}`, { headers: { "Sec-Fetch-Site": "same-origin" } });
+      expect(stream.status, model).toBe(400);
+      const body = await stream.json();
+      expect(body).toMatchObject({ error: { code: "model_not_allowed" } });
+      expect(body.error.message).toContain("fastest, balanced, smart");
+    }
+    const badTier = await app.request("/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q: "Question", project: "ws-chat", tier: "anthropic/claude-haiku-5.5" }) });
+    expect(badTier.status).toBe(400);
+    expect(chatProject).not.toHaveBeenCalled();
+  });
+
   it("rejects chat POST and chat stream with 403 when the project turned chat off", async () => {
     projectChatDisabledBody.mockResolvedValue({ error: "Chat is turned off for this project.", code: "chat_disabled" });
     try {

@@ -42,6 +42,10 @@ vi.mock("../services/project-naming.js", () => ({
   refineProjectNames,
 }));
 
+vi.mock("../services/managed-models.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../services/managed-models.js")>()),
+  loadProjectChatTierModels: vi.fn(async () => null),
+}));
 vi.mock("../db.js", () => ({
   sql: sqlMock,
 }));
@@ -1813,11 +1817,12 @@ describe("chatProject", () => {
       projectId: "ws-1",
       userId: "user-1",
       query: "Summarize the manual",
-      model: "openai/gpt-6.1-sol",
+      tier: "smart",
     });
 
     expect(response.answer).toBe("Fallback answer [1]");
-    expect(response.debug.model).toBe("deepseek/deepseek-v4.1-flash-1017");
+    // Customers see the tier that answered (the failover model is the balanced tier's), never the backend id.
+    expect(response.debug.model).toBe("balanced");
     expect(generateAnthropicDocumentText).toHaveBeenNthCalledWith(
       1,
       expect.objectContaining({
@@ -1883,14 +1888,14 @@ describe("chatProject", () => {
       projectId: "ws-1",
       userId: "user-1",
       query: "Summarize the manual",
-      model: "openai/gpt-6-luna",
+      tier: "smart",
     });
 
     expect(response.answer).toBe("Native answer [1]");
-    expect(response.debug.model).toBe("openai/gpt-6-luna");
+    expect(response.debug.model).toBe("smart");
     expect(generateAnthropicDocumentText).toHaveBeenCalledWith(
       expect.objectContaining({
-        model: "openai/gpt-6-luna",
+        model: "openai/gpt-6.1-sol",
         system: expect.stringContaining(
           "When you create, set, or initialize a plan",
         ),

@@ -4,7 +4,7 @@
  * `projects.managed_models` (migration 0141). Backend ids are recorded in usage events, traces and logs, and never
  * returned to customers.
  */
-import { CHAT_TIERS, isChatTier, type ChatTier, type ChatTierModelMap } from "@docslurp/shared/project-chat-models";
+import { CHAT_TIERS, chatTierForModel, isChatTier, type ChatTier, type ChatTierModelMap } from "@docslurp/shared/project-chat-models";
 import type { ProjectChatResponse } from "@docslurp/shared";
 import { z } from "zod";
 
@@ -71,20 +71,26 @@ export async function setProjectManagedModels(projectId: string, update: Managed
 }
 
 /**
- * A chat response as customers see it: the debug block names the tier that answered, never a backend model, build
- * or upstream provider. The raw values were already logged, traced and recorded in usage events.
+ * A chat response as customers see it: the debug block names the tier that answered (a failover model reads as its
+ * own tier), never a backend model, build or upstream provider. The raw values were already logged, traced and
+ * recorded in usage events.
  */
-export function customerChatResponse<T extends Pick<ProjectChatResponse, "debug">>(response: T, tier: ChatTier | null): T {
+export function customerChatResponse<T extends Pick<ProjectChatResponse, "debug">>(
+  response: T,
+  tier: ChatTier | null,
+  overrides?: ChatTierModelMap | null,
+): T {
   const debug = response.debug;
   if (!debug) return response;
+  const tierOf = (model: string | null | undefined): ChatTier | null => model ? chatTierForModel(model, overrides) ?? tier : null;
   const { resolvedModel: _model, resolvedProvider: _provider, ...rest } = debug;
   return {
     ...response,
     debug: {
       ...rest,
-      model: debug.model ? tier : null,
+      model: tierOf(debug.model),
       ...(debug.requestedModel !== undefined ? { requestedModel: tier } : {}),
-      ...(debug.stepUsage ? { stepUsage: debug.stepUsage.map(step => ({ ...step, model: step.model ? tier : null })) } : {}),
+      ...(debug.stepUsage ? { stepUsage: debug.stepUsage.map(step => ({ ...step, model: tierOf(step.model) })) } : {}),
     },
   };
 }

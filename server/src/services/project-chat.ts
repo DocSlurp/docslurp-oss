@@ -1103,7 +1103,7 @@ async function chatProjectInTurn(args: {
   await chargeChatAnswer(response, args, sessionId, policy);
   // Backend model and provider ids stay in usage events, traces and logs; customers see the tier. Operator
   // evaluation turns (a backend model they named) keep the raw diagnostics.
-  if (resolved.source !== "eval" && resolved.source !== "catalog") response = customerChatResponse(response, resolved.tier);
+  if (resolved.source !== "eval" && resolved.source !== "catalog") response = customerChatResponse(response, resolved.tier, tierModels);
   if (requiresChatSessionToken(args.actor)) {
     return { ...response, sessionToken: sealChatSessionToken({ keyId: args.actor.apiKey.keyId, projectId: args.projectId, sessionId: response.sessionId }) };
   }

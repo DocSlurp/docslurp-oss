@@ -247,14 +247,19 @@ describe("OpenAI-compatible project chat", () => {
     }
     expect(chatProject).toHaveBeenCalledOnce();
   });
-  it("takes the llm:// inference model as docslurp.model and refuses one outside the catalog before answering", async () => {
-    expect((await request(input({ docslurp: { model: "llm://openrouter/anthropic/claude-haiku-5.5" } }))).status).toBe(200);
-    expect(chatProject).toHaveBeenCalledWith(expect.objectContaining({ model: "llm://openrouter/anthropic/claude-haiku-5.5" }));
-    for (const model of ["llm://openrouter/acme/unlisted-1", "llm://private/gpu1/acme/model", "llm://openrouter/openai/gpt-6-sol-pro"]) {
+  it("takes the chat tier as docslurp.tier and refuses every backend model in docslurp.model before answering", async () => {
+    expect((await request(input({ docslurp: { tier: "smart", reasoning: "low" } }))).status).toBe(200);
+    expect(chatProject).toHaveBeenCalledWith(expect.objectContaining({ tier: "smart", reasoning: "low" }));
+    for (const model of ["llm://openrouter/anthropic/claude-haiku-5.5", "anthropic/claude-haiku-5.5", "llm://openrouter/acme/unlisted-1", "llm://private/gpu1/acme/model", "llm://openrouter/openai/gpt-6-sol-pro"]) {
       const response = await request(input({ docslurp: { model } }));
       expect(response.status, model).toBe(400);
-      expect((await response.json()).error).toMatchObject({ code: "model_not_allowed", param: "docslurp.model" });
+      const body = await response.json();
+      expect(body.error).toMatchObject({ code: "model_not_allowed", param: "docslurp.model" });
+      expect(body.error.message).toContain("fastest, balanced, smart");
+      expect(JSON.stringify(body)).not.toContain(model);
     }
+    const unknownTier = await request(input({ docslurp: { tier: "gpt-6.1-sol" } }));
+    expect(unknownTier.status).toBe(400);
     expect(chatProject).toHaveBeenCalledOnce();
   });
   it("explains that model names a project when it is sent an llm:// URI", async () => {
@@ -262,7 +267,7 @@ describe("OpenAI-compatible project chat", () => {
     expect(response.status).toBe(400);
     const body = await response.json();
     expect(body.error).toMatchObject({ type: "invalid_request_error", param: "model" });
-    expect(body.error.message).toContain("docslurp.model");
+    expect(body.error.message).toContain("docslurp.tier");
     expect(chatProject).not.toHaveBeenCalled();
   });
   it("streams data-only deltas, usage and DONE with one stable completion id", async () => {
