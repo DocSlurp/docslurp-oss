@@ -4,6 +4,8 @@
  * `intakeIntoProject`, which owns validation, storage, project resolution,
  * run creation, processing start, and audit.
  */
+import { chartExportOverrideError } from "./chart-export-availability.js";
+import type { ChartExportTier } from "@docslurp/shared";
 import { createHash } from "node:crypto";
 
 import {
@@ -73,7 +75,7 @@ export type BulkProjectIntakeFile = Pick<File, "arrayBuffer" | "name" | "size" |
 
 type IntakeTargetArgs = Pick<
   ProjectIntakeRequest,
-  "speedBoost" | "userId" | "orgId" | "project" | "newProject" | "templateKey" | "allowedProjectIds" | "pipeline" | "tags" | "indexingMode" | "extract" | "apiKeyId"
+  "speedBoost" | "userId" | "orgId" | "project" | "newProject" | "templateKey" | "allowedProjectIds" | "pipeline" | "tags" | "indexingMode" | "extract" | "apiKeyId" | "origin"
 >;
 
 /**
@@ -174,6 +176,11 @@ export function parseProjectIntakePipeline(raw: unknown): PipelineFeatureOverrid
       code: issue.code,
     })));
   }
+  const tier = (parsed.data as { chartExport?: { tier?: ChartExportTier } }).chartExport?.tier;
+  const refused = chartExportOverrideError(tier, "intake");
+  if (refused) {
+    throw new ProjectIntakeError("Invalid pipeline payload", 422, [{ path: "pipeline.chartExport.tier", message: refused, code: "chart_export_models_unavailable" }]);
+  }
   return parsed.data;
 }
 
@@ -248,6 +255,8 @@ export async function confirmDirectUploadProjectIntake(
       pipeline: session.pipeline ? sanitizeStoredPipeline(session.pipeline, `upload session ${args.sessionId}`) : undefined,
       tags: session.tags ?? [],
       apiKeyId: session.api_key_id,
+      // Recorded from the principal that opened the session (never a request field); older rows are machine.
+      origin: session.origin === "app" ? "app" : "machine",
       allowedProjectIds: session.allowed_project_ids,
       runId: args.sessionId,
       kind: "direct-upload",

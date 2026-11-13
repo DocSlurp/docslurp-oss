@@ -1,5 +1,8 @@
 import { randomUUID } from "node:crypto";
 
+import type { RunOrigin } from "@docslurp/shared";
+import { stampRunChartExport } from "./chart-export-availability.js";
+import { isFirstPartyAppActor } from "../lib/first-party-app.js";
 import {
   pageCredits,
   speedBoostMultiplier,
@@ -258,7 +261,7 @@ async function validateBatches(batches: RunBatch[]): Promise<void> {
  * per-project lock, re-checking in-flight work inside it so concurrent or
  * repeated requests cannot double-spend. All-or-nothing.
  */
-export async function commitIndexJobs(prepared: PreparedIndexJobs, userId: string): Promise<{ runIds: string[]; pipelines: Map<string, PipelineFeatures> }> {
+export async function commitIndexJobs(prepared: PreparedIndexJobs, userId: string, origin: RunOrigin = "machine"): Promise<{ runIds: string[]; pipelines: Map<string, PipelineFeatures> }> {
   const result = { runIds: [] as string[], pipelines: new Map<string, PipelineFeatures>() };
   if (prepared.batches.length === 0) return result;
   for (const batch of prepared.batches) assertPipelineSpeedBoost(batch.pipeline);
@@ -282,7 +285,7 @@ export async function commitIndexJobs(prepared: PreparedIndexJobs, userId: strin
           creation_ready_at, creation_expires_at)
         -- The documents are inserted in this transaction, so the manifest is complete when it commits.
         values (${runId}, ${prepared.orgId}, ${userId}, ${prepared.projectId}, 'full-index', 'queued', 0, 'queued',
-          ${docs.length}, 0, ${pages}, 0, ${tx.json(JSON.parse(JSON.stringify(batch.pipeline)))}, now(), null)
+          ${docs.length}, 0, ${pages}, 0, ${tx.json(JSON.parse(JSON.stringify(stampRunChartExport(batch.pipeline, origin))))}, now(), null)
       `;
       for (const doc of docs) {
         const canonicalId = doc.canonical_id ?? doc.id;
@@ -365,7 +368,7 @@ export async function prepareFullIndex(args: FullIndexArgs): Promise<PreparedInd
  */
 export async function requestFullIndex(args: FullIndexArgs): Promise<{ runId: string; pages: number; estimatedCredits: number | null; billing: ModeEstimate["billing"]; pipeline: PipelineFeatures }> {
   const prepared = await prepareFullIndex(args);
-  const { runIds, pipelines } = await commitIndexJobs(prepared, args.actor.userId);
+  const { runIds, pipelines } = await commitIndexJobs(prepared, args.actor.userId, isFirstPartyAppActor(args.actor) ? "app" : "machine");
   const runId = runIds[0];
   if (!runId) throw new IndexingModeError("A full index is already running for these documents.", 409, "index_in_progress");
   return { runId, pages: prepared.pages, estimatedCredits: prepared.estimatedCredits, billing: prepared.billing, pipeline: pipelines.get(runId)! };
@@ -453,7 +456,7 @@ export async function startModeSwitchJobs(args: {
   const prepared = await prepareModeSwitchJobs({
     project: args.before, speedBoost: args.speedBoost === true, to: args.after.pipeline.indexingMode, indexAll: args.indexAll, actor: args.actor, policy: args.policy,
   });
-  return await commitIndexJobs(prepared, args.actor.userId);
+  return await commitIndexJobs(prepared, args.actor.userId, isFirstPartyAppActor(args.actor) ? "app" : "machine");
 }
 
 /** Restores the stored mode when jobs fail after the mode was saved. */

@@ -1278,8 +1278,9 @@ async function chatProjectTurn(
     // decide relevance, and the model applies the fixed core rule (decline
     // unrelated requests politely and suggest related ones).
     const suggestionsRequested = firstPartyApp && args.agent?.suggestions === true;
-    const chartExportEnabled = (project.pipeline as { chartExport?: { enabled?: unknown } } | null)?.chartExport?.enabled === true;
-    // Deployment kill switch off: chart export is never suggested (and the candidate query is skipped).
+    // Suggestions offer the billed `models` tier (the free tier is on by default): only projects not already on it.
+    const chartExportEnabled = (project.pipeline as { chartExport?: { tier?: unknown } } | null)?.chartExport?.tier === "models";
+    // Deployment kill switch not `on`: reading charts with a model is never suggested (and the candidate query is skipped).
     const chartExportOffered = chartExportEnabledOnServer();
     const [{ runChatMcpAgent }, projectInventory, visualCandidates] = await Promise.all([
       import("./chat-mcp-agent.js"),

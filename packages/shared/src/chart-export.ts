@@ -14,43 +14,161 @@ export const chartExportFormatSchema = z.enum(CHART_EXPORT_FORMATS);
 export type ChartExportFormat = z.infer<typeof chartExportFormatSchema>;
 
 /**
- * Deployment kill switch for chart & diagram export: `DOCSLURP_CHART_EXPORT=on` (or `1`, `true`, `yes`; any case)
- * makes the project option effective; anything else (unset, `off`, a typo) keeps it off everywhere. The worker never exports, estimates price nothing,
- * chat and the ingest report never suggest it, and the settings API refuses to turn it on. A project that already
- * has it on keeps the stored value; it simply has no effect while the switch is off.
+ * Deployment kill switch for chart & diagram export: `DOCSLURP_CHART_EXPORT`, three values (trimmed, any case).
+ *
+ * - `off` (or unset): nothing runs, whatever projects say. Estimates price nothing; chat and the ingest report never
+ *   suggest it; the settings API refuses to turn on the `models` tier.
+ * - `free`: only the free deterministic steps run (Office chart parts, embedded chart specs, SVG geometry), whatever
+ *   projects say. No model is ever called and nothing is billed, so a project on `models` behaves as `free`.
+ * - `on` (also `1`, `true`, `yes`): the free steps, plus each project's opted-in model steps (tier `models`, billed).
+ *
+ * An unknown value is `off` (fail closed); `chartExportSwitchWarning` names it so processes can warn at startup. A project
+ * keeps its stored tier whatever the switch says; the switch only caps what runs.
  */
 export const CHART_EXPORT_ENV_FLAG = "DOCSLURP_CHART_EXPORT";
 
-/** Values of `DOCSLURP_CHART_EXPORT` that turn the switch on (compared trimmed and lower-cased). */
+export const CHART_EXPORT_SWITCH_VALUES = ["off", "free", "on"] as const;
+export type ChartExportSwitch = (typeof CHART_EXPORT_SWITCH_VALUES)[number];
+
+/** Values of `DOCSLURP_CHART_EXPORT` that mean `on` (compared trimmed and lower-cased). */
 export const CHART_EXPORT_ENV_ON_VALUES: readonly string[] = ["on", "1", "true", "yes"];
+/** Values that mean `free`. */
+export const CHART_EXPORT_ENV_FREE_VALUES: readonly string[] = ["free"];
+/** Values that mean `off` without a warning. */
+export const CHART_EXPORT_ENV_OFF_VALUES: readonly string[] = ["", "off", "0", "false", "no"];
 
 /**
- * Whether this deployment allows chart export: the one parser of the kill switch, used by the worker, estimates and
- * the server alike. `env` is explicit so browsers and tests never read `process`.
+ * The one parser of the kill switch, used by the worker, estimates and the server alike. `env` is explicit so browsers
+ * and tests never read `process`. Unset and unknown values are `off`.
  */
-export function chartExportAvailable(env: Readonly<Record<string, string | undefined>>): boolean {
+export function chartExportSwitch(env: Readonly<Record<string, string | undefined>>): ChartExportSwitch {
   const value = env[CHART_EXPORT_ENV_FLAG]?.trim().toLowerCase();
-  return value !== undefined && CHART_EXPORT_ENV_ON_VALUES.includes(value);
+  if (value === undefined) return "off";
+  if (CHART_EXPORT_ENV_ON_VALUES.includes(value)) return "on";
+  if (CHART_EXPORT_ENV_FREE_VALUES.includes(value)) return "free";
+  return "off";
 }
 
-/** Per-project option (`pipeline.features.chartExport`). Off by default; turning it on recommends a reindex. */
+/** A startup warning when `DOCSLURP_CHART_EXPORT` holds a value the parser does not know (it is treated as `off`). */
+export function chartExportSwitchWarning(env: Readonly<Record<string, string | undefined>>): string | null {
+  const raw = env[CHART_EXPORT_ENV_FLAG];
+  if (raw === undefined) return null;
+  const value = raw.trim().toLowerCase();
+  if (CHART_EXPORT_ENV_ON_VALUES.includes(value) || CHART_EXPORT_ENV_FREE_VALUES.includes(value) || CHART_EXPORT_ENV_OFF_VALUES.includes(value)) return null;
+  return `[chart-export] ${CHART_EXPORT_ENV_FLAG} has an unknown value; chart export is off (expected off, free or on)`;
+}
+
+/** Whether this deployment allows the billed model steps (`DOCSLURP_CHART_EXPORT=on`). */
+export function chartExportModelsAvailable(env: Readonly<Record<string, string | undefined>>): boolean {
+  return chartExportSwitch(env) === "on";
+}
+
+/**
+ * Chart export tier. `off`: nothing. `free`: the deterministic steps only (`office-chart-xml`, `embedded-spec`,
+ * `svg-geometry`); no model client is built and nothing is billed. `models`: the free steps plus the model steps
+ * (`svg-assisted`, `vision`), billed per visual a model reads.
+ */
+export const CHART_EXPORT_TIERS = ["off", "free", "models"] as const;
+export const chartExportTierSchema = z.enum(CHART_EXPORT_TIERS);
+export type ChartExportTier = z.infer<typeof chartExportTierSchema>;
+
+/**
+ * Per-project option (`pipeline.features.chartExport`). `tier` unset means "the default for the run's origin"
+ * (`resolveChartExportTier`): stored config never pins a concrete default, so one project serves the app (free steps on)
+ * and machine callers (off unless asked) alike.
+ */
 export const chartExportConfigSchema = z
   .object({
-    enabled: z.boolean().default(false),
+    tier: chartExportTierSchema.optional(),
     formats: z.array(chartExportFormatSchema).min(1).max(CHART_EXPORT_FORMATS.length).default(["description", "mermaid"]),
     /** Also export diagrams (flowcharts, org charts, sequence/state diagrams) as Mermaid + description. */
     diagrams: z.boolean().default(true),
-    /** Optional generator override (`llm://provider/model`). Admitted through the routing-target catalog like any target. */
-    generatorModel: z.string().min(1).max(200).nullable().default(null),
+    // No model field: callers choose a tier, never a backend model. The generator is chosen internally from managed
+    // settings (the routing catalog); `strict()` refuses a `generatorModel` key with a validation error.
   })
   .strict();
 export type ChartExportConfig = z.infer<typeof chartExportConfigSchema>;
+/** A config whose tier was resolved for one run (`resolveChartExportTier`); what the worker reads. */
+export type ResolvedChartExportConfig = ChartExportConfig & { tier: ChartExportTier };
 export const defaultChartExportConfig: ChartExportConfig = {
-  enabled: false,
   formats: ["description", "mermaid"],
   diagrams: true,
-  generatorModel: null,
 };
+
+/**
+ * Where a run comes from, decided server-side from the authenticated principal (never from a request field):
+ * `app` is a first-party browser session (upload UI, chat); `machine` is an API key, MCP token, SDK, CLI, connector or
+ * any other programmatic caller.
+ */
+export const RUN_ORIGINS = ["app", "machine"] as const;
+export type RunOrigin = (typeof RUN_ORIGINS)[number];
+
+/**
+ * Deploy-wide default tier for machine-origin runs on projects with no explicit tier: `off` (default) or `free`.
+ * Flipped without a code change once the free steps cost and run close enough to having them off.
+ */
+export const CHART_EXPORT_API_DEFAULT_ENV_FLAG = "DOCSLURP_CHART_EXPORT_API_DEFAULT";
+
+export function chartExportMachineDefault(env: Readonly<Record<string, string | undefined>>): "off" | "free" {
+  return env[CHART_EXPORT_API_DEFAULT_ENV_FLAG]?.trim().toLowerCase() === "free" ? "free" : "off";
+}
+
+/** The default tier for a run of `origin` on a project with no explicit tier: `free` for the app, else the machine default. */
+export function defaultChartExportTier(origin: RunOrigin, env: Readonly<Record<string, string | undefined>>): ChartExportTier {
+  return origin === "app" ? "free" : chartExportMachineDefault(env);
+}
+
+/**
+ * The tier one run uses, before the deploy ceiling: a per-request override, else the project's explicit tier, else the
+ * origin default. The deploy kill switch (`effectiveChartExportConfig`) then caps it; it is never raised by this.
+ */
+export function resolveChartExportTier(args: {
+  requested?: ChartExportTier | null | undefined;
+  project?: Pick<ChartExportConfig, "tier"> | null | undefined;
+  origin: RunOrigin;
+  env: Readonly<Record<string, string | undefined>>;
+}): ChartExportTier {
+  return args.requested ?? args.project?.tier ?? defaultChartExportTier(args.origin, args.env);
+}
+
+/** The project's chart export config with its tier resolved for one run (see `resolveChartExportTier`). */
+export function resolveChartExportConfig(args: {
+  requested?: ChartExportTier | null | undefined;
+  project?: ChartExportConfig | null | undefined;
+  origin: RunOrigin;
+  env: Readonly<Record<string, string | undefined>>;
+}): ResolvedChartExportConfig {
+  return { ...(args.project ?? defaultChartExportConfig), tier: resolveChartExportTier(args) };
+}
+
+/**
+ * Whether chart export runs at all for a resolved config on this deployment: its tier is not `off` and the kill switch
+ * is not `off`. With the switch on `free`, only the deterministic steps run.
+ */
+export function chartExportRuns(config: Pick<ResolvedChartExportConfig, "tier">, env: Readonly<Record<string, string | undefined>>): boolean {
+  return config.tier !== "off" && chartExportSwitch(env) !== "off";
+}
+
+/** Whether the billed model steps may run: the resolved tier is `models` and the kill switch is `on`. */
+export function chartExportModelsAllowed(config: Pick<ResolvedChartExportConfig, "tier">, env: Readonly<Record<string, string | undefined>>): boolean {
+  return config.tier === "models" && chartExportSwitch(env) === "on";
+}
+
+/**
+ * The tier that actually runs: the resolved tier capped by the kill switch (`off` -> off, `free` -> at most free).
+ */
+export function effectiveChartExportConfig(config: ResolvedChartExportConfig, env: Readonly<Record<string, string | undefined>>): ResolvedChartExportConfig {
+  const tier: ChartExportTier = !chartExportRuns(config, env) ? "off" : chartExportModelsAllowed(config, env) ? "models" : "free";
+  return tier === config.tier ? config : { ...config, tier };
+}
+
+/** Why a per-request tier override is refused on this deployment, or null when it is allowed. */
+export function chartExportOverrideRefusal(
+  tier: ChartExportTier,
+  env: Readonly<Record<string, string | undefined>>,
+): "chart_export_models_unavailable" | null {
+  return tier === "models" && chartExportSwitch(env) !== "on" ? "chart_export_models_unavailable" : null;
+}
 
 // ---- Specs ------------------------------------------------------------------------------------------------------
 

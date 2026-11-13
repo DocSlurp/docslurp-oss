@@ -1,4 +1,5 @@
 import { geoPredicateSchema } from "./geo.js";
+import { chartExportTierSchema } from "./chart-export.js";
 import { projectSettingsProposalSchema } from "./project-settings-proposal.js";
 import { z } from "zod";
 import { documentTagsSchema } from "./document-tags.js";
@@ -824,9 +825,21 @@ export type UploadRequest = z.infer<typeof uploadRequestSchema>;
  * again; `stageFrom` runs the stages from that one onward and `stages` runs
  * exactly those, reusing the other stages' outputs from the source documents.
  */
+/**
+ * Per-request chart export override (upload, URL ingest, reprocess, estimates): wins over the project's tier and the
+ * origin default; the deploy switch stays the ceiling. `models` (reading charts with AI) is billed per chart read.
+ */
+export const chartExportOverrideSchema = z.object({ tier: chartExportTierSchema }).strict();
+export type ChartExportOverride = z.infer<typeof chartExportOverrideSchema>;
+
+/** One description for the override on every machine surface (MCP tools, SDK and CLI docs). */
+export const CHART_EXPORT_OVERRIDE_DESCRIPTION =
+  "Chart and diagram export for this request: { tier: \"off\" | \"free\" | \"models\" }. Omit for the project's setting; a project with no setting is off for API, MCP, SDK and CLI calls (on with the free steps in the DocSlurp app). free exports charts that carry their own data (Office charts, embedded chart specs, vector graphics) at no charge. models also reads other charts with AI, billed per chart read. The deployment can cap this; models is refused where it is unavailable.";
+
 export const reprocessRunSchema = z
   .object({
     speedBoost: z.boolean().optional(),
+    chartExport: chartExportOverrideSchema.optional(),
     stages: z.array(pipelineRunStageSchema).min(1).optional(),
     stageFrom: pipelineRunStageSchema.optional(),
   })

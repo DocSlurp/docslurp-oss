@@ -3,7 +3,7 @@ import { SEARCH_SCOPES, type SearchScope } from "../lib/search-tiers.js";
 import { z } from "zod";
 
 import { uploadBundleAvailable } from "../lib/mcp-ui-resources.js";
-import { deferredProfilesEnabled, qualityModeSchema } from "@docslurp/shared";
+import { CHART_EXPORT_OVERRIDE_DESCRIPTION, chartExportOverrideSchema, deferredProfilesEnabled, qualityModeSchema } from "@docslurp/shared";
 
 import { env } from "../config.js";
 import { batchSearchInputSchema, searchInputSchema, projectChatInputSchema } from "../lib/search-input.js";
@@ -43,6 +43,7 @@ const uploadInputShape = {
     .describe(`Small files sent in this call (at most ${INLINE_UPLOAD_MAX_BYTES / 1024} KiB in total) when you cannot make HTTP requests to storage upload URLs.`),
   idempotencyKey: z.string().min(1).max(200).optional().describe("For URL and inline uploads: reuse the same key when retrying this exact request to avoid duplicate ingestion."),
   quality: qualityModeSchema.optional().describe("Processing quality for these files; omit for the project setting (auto by default). fast: text layer only, scanned pages kept as images and not searchable ($0.05 per 1,000 pages). auto: each page read the cheapest faithful way ($0.05 to $2.50). good: a vision model reads every page ($2.50)."),
+  chartExport: chartExportOverrideSchema.optional().describe(CHART_EXPORT_OVERRIDE_DESCRIPTION),
 };
 const exactlyOneSource = (value: { urls?: unknown; files?: unknown; inlineFiles?: unknown }) => [value.urls, value.files, value.inlineFiles].filter(Boolean).length === 1;
 export const uploadInput = z.object(uploadInputShape).strict().refine(exactlyOneSource, "Supply exactly one of urls, files or inlineFiles");

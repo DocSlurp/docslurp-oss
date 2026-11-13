@@ -1,4 +1,5 @@
 import { zValidator } from "@hono/zod-validator";
+import { runOriginOf } from "../lib/run-origin.js";
 import { Hono, type Context } from "hono";
 
 import { apiStatusError, nativeApiErrors } from "../lib/api-error.js";
@@ -108,6 +109,7 @@ function createWebRoutes(surface: WebSurface) {
         project: body.project?.trim() || (restricted ? scope.id : null),
         newProject: body.newProject,
         allowedProjectIds: restricted && actor.type === "apiKey" ? actor.apiKey.projectIds! : null,
+        origin: runOriginOf(c),
         tags: body.tags,
         startUrl: body.url,
         crawlOptions: { limit: body.limit, maxDepth: body.maxDepth, includePaths: body.includePaths ?? null, excludePaths: body.excludePaths ?? null },

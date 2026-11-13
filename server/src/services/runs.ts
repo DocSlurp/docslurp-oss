@@ -1,4 +1,6 @@
 import { publicDiagnostics, publicDocumentError, publicProcessingMessage, type ApiErrorCode } from "@docslurp/shared";
+import type { ChartExportTier, RunOrigin } from "@docslurp/shared";
+import { chartExportOverrideError } from "./chart-export-availability.js";
 import {
   planRunControlUpdate,
   runLifecycle,
@@ -365,10 +367,12 @@ function checkReusableSource(
 export async function reprocessRun(
   runId: string,
   userId: string,
-  options?: { stages?: string[]; stageFrom?: string; speedBoost?: boolean },
+  options?: { stages?: string[]; stageFrom?: string; speedBoost?: boolean; chartExport?: { tier: ChartExportTier }; origin?: RunOrigin },
 ): Promise<{ run: ProjectRun; deferredReason: string | null } | null> {
   const original = await getRun(runId, userId);
   if (!original) return null;
+  const refused = chartExportOverrideError(options?.chartExport?.tier, `reprocess run=${runId}`);
+  if (refused) throw new ReprocessRejectedError(refused, 400, "chart_export_models_unavailable", { field: "chartExport.tier" });
   const access = await getProjectAccess(original.projectId, userId);
   if (!access || !canContributeToProject(access, userId)) {
     throw new Error("Forbidden");
@@ -390,6 +394,8 @@ export async function reprocessRun(
     ...(JSON.parse(JSON.stringify(withoutStageSelection(original.pipeline))) as PipelineFeatures),
     speedBoost: options?.speedBoost === true,
     ...(adoptedMode ? { indexingMode: adoptedMode } : {}),
+    // A per-request tier wins over the tier the original run resolved.
+    ...(options?.chartExport ? { chartExport: { ...(original.pipeline.chartExport ?? {}), tier: options.chartExport.tier } } : {}),
     ...(options?.stages?.length ? { stageSubset: [...options.stages] } : {}),
     ...(options?.stageFrom && !options?.stages?.length ? { restartFromStage: options.stageFrom } : {}),
   };
@@ -412,6 +418,7 @@ export async function reprocessRun(
     priority: original.priority ?? 0,
     speedBoost: options?.speedBoost === true,
     pipeline: pipelineConfig,
+    origin: options?.origin ?? "machine",
     sources: { kind: "versionsOf", documentIds: docs.map((doc) => doc.id), reuse: partial },
   });
   return { run: created.run, deferredReason: created.deferredReason };

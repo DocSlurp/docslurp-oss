@@ -2217,6 +2217,8 @@ export const uploadSessions = pgTable(
     projectName: text("project_name"),
     templateKey: text("template_key"),
     pipeline: jsonb().default({}).notNull(),
+    /** Run origin from the authenticated principal: app (first-party session) or machine (migration 0141). */
+    origin: text().default("machine").notNull(),
     status: text().default("pending").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "string" })
       .defaultNow()
@@ -2326,6 +2328,8 @@ export const projectRuns = pgTable(
      */
     spentCents: numeric("spent_cents", { precision: 24, scale: 12, mode: "number" }).default(0).notNull(),
     pipeline: jsonb().default({}).notNull(),
+    /** Run origin from the authenticated principal: app (first-party session) or machine (migration 0141). */
+    origin: text().default("machine").notNull(),
     stats: jsonb().default({}).notNull(),
     artifacts: jsonb().default({}).notNull(),
     runId: text("run_id"),
