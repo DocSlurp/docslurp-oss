@@ -54,3 +54,6 @@ ALTER TABLE storage_cleanup_queue DROP CONSTRAINT IF EXISTS storage_cleanup_queu
 --> statement-breakpoint
 ALTER TABLE storage_cleanup_queue ADD CONSTRAINT storage_cleanup_queue_kind_check
   CHECK (kind IN ('storage_prefix', 'vector_table', 'vector_prefix', 'vector_rows', 'upload_original', 'doppler_folder'));
+--> statement-breakpoint
+-- One index probe per withheld key when the meter subtracts PII-withheld figures (R3-M1), whatever join the planner picks.
+CREATE INDEX IF NOT EXISTS document_assets_storage_key_idx ON document_assets (document_id, storage_key) WHERE storage_key IS NOT NULL;

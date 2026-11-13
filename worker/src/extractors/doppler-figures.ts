@@ -23,7 +23,7 @@ import type { Readable } from "node:stream";
 import {
   DOPPLER_FIGURE_FILE_NAME, DOPPLER_FIGURE_LIMITS, DOPPLER_FIGURE_MEDIA_TYPES, DOPPLER_FIGURES_INDEX_SLOT, DOPPLER_FIGURES_INDEX_VERSION,
   DOPPLER_FIGURES_MANIFEST, DOPPLER_MANIFEST_V3_FILE, DOPPLER_MANIFEST_V3_LINE_BYTES, DOPPLER_MANIFEST_V2_LIMITS, DOPPLER_STORE_LAYOUT,
-  DOPPLER_SHARDS_MAX, dopplerShardCoverage, type DopplerFigureGap, DopplerManifestV3Error, DopplerManifestV3Validator, dopplerShardFolder, parseDopplerShardFolder, addDocumentAssetCount, dopplerAssetCaps, dopplerAssetPath, dopplerAssetStorageKey,
+  DOPPLER_SHARDS_MAX, DOPPLER_SHARD_CONTEXT_LINES, DOPPLER_SHARD_CONTEXT_LINE_BYTES, dopplerShardCoverage, type DopplerFigureGap, DopplerManifestV3Error, DopplerManifestV3Validator, dopplerShardFolder, parseDopplerShardFolder, addDocumentAssetCount, dopplerAssetCaps, dopplerAssetPath, dopplerAssetStorageKey,
   dopplerDocumentPrefix, dopplerEntryFileCap, dopplerFigureSlot, dopplerImageExtractEnabled, dopplerImageMarkerIds, dopplerLedgerAssets,
   dopplerManifestRunFacts, dopplerManifestV3RunFacts, emptyDocumentAssetCounts, parseDopplerFigureId, parseDopplerManifest,
   type DocumentAsset, type DocumentAssetCounts, type DopplerAssetCaps, type DopplerFigureFormat, type DopplerFigureRecord,
@@ -503,9 +503,14 @@ export async function readDopplerFigureDir(
       let linesLeft = caps.entries;
       // Every manifest of the folder counts against one byte cap, and toward the folder's total bytes.
       let bytesLeft = caps.manifestV3Bytes;
+      // Context-page lines (a shard's -f/-l pages) have their own bounded allowance, outside both caps (R3-L2).
+      let contextLinesLeft = (hasShards ? jobs.length : 0) * DOPPLER_SHARD_CONTEXT_LINES;
+      let contextBytesLeft = contextLinesLeft * DOPPLER_SHARD_CONTEXT_LINE_BYTES;
       let first: DopplerManifestV3Header | null = null;
       for (const job of jobs) {
-        const validator = new DopplerManifestV3Validator({ maxLines: linesLeft, maxPage: pageCount, ...(job.range ? { range: job.range } : {}) });
+        const validator = new DopplerManifestV3Validator({
+          maxLines: linesLeft, maxPage: pageCount, ...(job.range ? { range: job.range, maxContextLines: Math.min(DOPPLER_SHARD_CONTEXT_LINES, contextLinesLeft) } : {}),
+        });
         let resumable = 0;
         let checked = false;
         const checkHeader = (header: DopplerManifestV3Header) => {
@@ -520,14 +525,18 @@ export async function readDopplerFigureDir(
           if (file) addFile(file.path, file.id, file.format, file.bytes, file.sha256, dopplerEntryFileCap(file, caps));
           if (row.resumable) resumable += 1;
           await spill.add({ r: row, x: recordOf(row, error) });
-        }, args.signal, job.relative, bytesLeft);
-        bytesLeft -= read.size;
+        }, args.signal, job.relative, bytesLeft + (job.range ? contextBytesLeft : 0));
         fileBytes += read.size;
         if (fileBytes > caps.totalBytes) throw new DopplerFigureRejection("total-bytes");
         const summary = validator.finish();
+        // The context lines' bytes and count come off their own allowance, the rest off the folder's caps.
+        contextLinesLeft -= summary.contextImages;
+        contextBytesLeft -= summary.contextBytes;
+        bytesLeft -= read.size - summary.contextBytes;
+        if (bytesLeft < 0 || contextBytesLeft < 0) throw new DopplerFigureRejection("oversized-file");
         if (!checked) checkHeader(summary.header);
         first ??= summary.header;
-        linesLeft -= summary.images + summary.batches;
+        linesLeft -= summary.images - summary.contextImages + summary.batches;
         manifests.push({ relative: job.relative, size: read.size, sha256: read.sha256, range: job.range, run: dopplerManifestV3RunFacts(summary), complete: summary.complete, resumable });
       }
       complete = manifests.every((m) => m.complete);

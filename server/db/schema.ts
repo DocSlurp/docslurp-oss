@@ -3617,6 +3617,7 @@ export const documentAssets = pgTable("document_assets", {
     name: "document_assets_run_scope_fkey",
   }),
   index("document_assets_org_document_idx").on(table.orgId, table.documentId, table.pageNumber, table.assetId),
+  index("document_assets_storage_key_idx").on(table.documentId, table.storageKey).where(sql`storage_key IS NOT NULL`),
   index("document_assets_resumable_idx").on(table.orgId, table.documentId).where(sql`resumable`),
   index("document_assets_run_idx").on(table.runId).where(sql`run_id IS NOT NULL`),
 ]);

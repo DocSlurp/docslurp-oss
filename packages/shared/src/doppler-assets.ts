@@ -604,10 +604,20 @@ export interface DopplerManifestV3Summary {
   images: number;
   batches: number;
   lastCutPage: number | null;
+  /** Context-page entries (counted in `images`) and their line bytes: outside the folder's entry and byte caps (R3-L2). */
+  contextImages: number;
+  contextBytes: number;
 }
 
 /** Context pages a shard's conversion may add either side of its `--images-pages` range (`-f`/`-l`, the #464 plugin's 16). */
 export const DOPPLER_SHARD_CONTEXT_PAGES = 16;
+/**
+ * The context-page allowance of a sharded folder (R3-L2), apart from its entry and manifest-byte caps: per shard, up to
+ * this many context lines (2 × 16 context pages, generously many images each), and up to CONTEXT_LINE_BYTES bytes per
+ * allowed line, so a dense legitimate document near the caps is never refused for context alone.
+ */
+export const DOPPLER_SHARD_CONTEXT_LINES = 2 * DOPPLER_SHARD_CONTEXT_PAGES * 64;
+export const DOPPLER_SHARD_CONTEXT_LINE_BYTES = 1024;
 
 /** id order: page, then pictures before figures, then index. */
 function idOrderKey(id: string): [number, number, number] {
@@ -647,7 +657,14 @@ export class DopplerManifestV3Validator {
    * every batch must start inside it; every image too, except context-page entries (`not-extracted`, reason `pages`, no
    * file, resume, repeat or fallback; their derived link allowed), which are counted but yield no row.
    */
-  constructor(private readonly limits: { maxLines: number; maxPage: number; range?: readonly [number, number] }) {}
+  constructor(private readonly limits: {
+    maxLines: number; maxPage: number; range?: readonly [number, number];
+    /** Context-page lines this manifest may hold beyond `maxLines` (their own allowance, R3-L2); 0 by default. */
+    maxContextLines?: number;
+  }) {}
+  private contextLines = 0;
+  private contextBytes = 0;
+  private lineBytes = 0;
 
   /** The header line, once it has been accepted. */
   get headerLine(): DopplerManifestV3Header | null {
@@ -672,7 +689,9 @@ export class DopplerManifestV3Validator {
   accept(text: string, precedingSha256?: string): { row: DocumentAsset; file: DopplerManifestFileEntry | null; error?: string } | null {
     if (this.state === "done") this.fail("line-after-end");
     this.lines += 1;
-    if (this.lines > this.limits.maxLines + 2) this.fail("too-many-lines");
+    this.lineBytes = text.length + 1;
+    // Context lines have their own allowance (R3-L2): the shared cap counts the others; the total stays bounded.
+    if (this.lines - this.contextLines > this.limits.maxLines + 2 || this.lines > this.limits.maxLines + 2 + (this.limits.maxContextLines ?? 0)) this.fail("too-many-lines");
     const caps = DOPPLER_MANIFEST_V3_TYPE_LINE_BYTES;
     if (text.length + 1 > Math.max(caps.header, caps.image, caps.batch, caps.end)) this.fail("line-too-long");
     const value = this.parse(text);
@@ -753,7 +772,14 @@ export class DopplerManifestV3Validator {
     }
     const s = this.sum;
     s.images += 1;
-    if (context) { s.notExtracted += 1; if (entry.path !== null) s.linked += 1; return null; }
+    if (context) {
+      s.notExtracted += 1;
+      if (entry.path !== null) s.linked += 1;
+      this.contextLines += 1;
+      this.contextBytes += this.lineBytes;
+      if (this.contextLines > (this.limits.maxContextLines ?? 0)) this.fail("too-many-lines");
+      return null;
+    }
     if (entry.path !== null) s.linked += 1;
     if (entry.reason === "repeat") s.repeats += 1;
     if (entry.fallback !== undefined) s.fallbacks += 1;
@@ -796,7 +822,10 @@ export class DopplerManifestV3Validator {
     if (end.resumable !== this.anyResumable) this.fail("resumable-mismatch");
     if (end.complete && (end.resumable || s.cut > 0 || this.anyBatchReason)) this.fail("complete-mismatch");
     this.state = "done";
-    this.summary = { header: this.header!, complete: end.complete, resumable: end.resumable, images: s.images, batches: s.batches, lastCutPage: this.lastCutPage };
+    this.summary = {
+      header: this.header!, complete: end.complete, resumable: end.resumable, images: s.images, batches: s.batches, lastCutPage: this.lastCutPage,
+      contextImages: this.contextLines, contextBytes: this.contextBytes,
+    };
   }
 
   /** The whole manifest's summary; throws when the end line never came (a truncated manifest). */
