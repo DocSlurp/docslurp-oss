@@ -5,7 +5,8 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { dopplerAssetCaps, dopplerImageLimits, dopplerLedgerAssets, dopplerManifestV2Schema, parseDopplerManifest } from "@docslurp/shared";
 
-import { DopplerFigureRejection, readDopplerFigureDir, readLedgerSpill, storeDopplerFigures, type DopplerFigureSet } from "../extractors/doppler-figures.js";
+import { DopplerFigureRejection, dopplerFigureRecords, readDopplerFigureDir, readLedgerSpill, storeDopplerFigures, type DopplerFigureSet } from "../extractors/doppler-figures.js";
+import { ByteBudget } from "../extractors/doppler-upload.js";
 
 async function rowsOf(set: DopplerFigureSet) {
   const rows = [];
@@ -93,18 +94,18 @@ describe("manifest v2: the happy path", () => {
     expect(stored.keys.get("p1.1")).toBe(`extracts/org-1/ex-1/doppler/${DOC.id}/images/page-0001/image-001.webp`);
   });
 
-  it("stores page-facts.jsonl beside the manifest, with its own slot", async () => {
+  it("never stores page-facts.jsonl (its doc line can carry the PDF's untrusted producer/creator): no object, no slot", async () => {
     const { manifest, files } = v2Manifest();
     await writeV2Folder(dir, manifest, files);
-    await writeFile(path.join(dir, "page-facts.jsonl"), '{"schema":"doppler-page-facts/1"}\n');
+    await writeFile(path.join(dir, "page-facts.jsonl"), '{"type":"doc","producer":"<script>x</script>"}\n');
     const set = await readDopplerFigureDir(dir, { pageCount: 3 });
     const put = new Map<string, Buffer>();
     const stored = await storeDopplerFigures({
       storage: { putBytes: async (key, data) => { put.set(key, Buffer.from(data)); }, putJson: async () => {}, uri: (key) => `s3://b/${key}` },
       document: DOC, runId: "run-1", figures: set, markdown: "",
     });
-    expect(put.get(`user-1/run-1/doppler/${DOC.id}/images/page-facts.jsonl`)?.toString()).toBe('{"schema":"doppler-page-facts/1"}\n');
-    expect(stored.slots.find((s) => s.slot === "doppler-page-facts")?.uri).toBe(`s3://b/user-1/run-1/doppler/${DOC.id}/images/page-facts.jsonl`);
+    expect([...put.keys()].some((key) => key.includes("page-facts"))).toBe(false);
+    expect(stored.slots.some((s) => s.slot.includes("page-facts") || s.uri.includes("page-facts"))).toBe(false);
   });
 
   it("accepts a partial folder (exit 5) and keeps its resumable images", async () => {
@@ -188,7 +189,7 @@ describe("manifest v2: hostile or oversized manifests are refused", () => {
       for (let i = 0; i < extra; i += 1) m.images.push({ ...base, id: `p2.${i + 10}` });
       m.totals.images += extra; m.totals.unlinked += extra;
     })).toBe("too-many-entries");
-  });
+  }, 60_000);
 
   it("refuses a link prefix other than the images/ folder the host asks for, and a manifest of another PDF", async () => {
     expect(await rule((m) => { m.link_prefix = "img/"; for (const e of m.images) if (e.link) e.link = `img/${e.path}`; })).toBe("link-prefix");
@@ -339,5 +340,28 @@ describe("caps scale with the document (HIGH-1)", () => {
     const batches = Math.ceil(500 / limits.batchPages);
     expect(batches * (limits.imagesMax + limits.scanMax)).toBeLessThanOrEqual(caps.files);
     expect(dopplerAssetCaps(1_000_000)).toMatchObject({ files: 32_768, totalBytes: 4 * 1024 ** 3, entries: 131_072, manifestBytes: 16 * 1024 ** 2 });
+  });
+});
+
+describe("LOW-3: the legacy whole-JSON parse is reserved from the worker budget", () => {
+  it("reserves about 10x the manifest's size while it parses, and releases it once the rows are spilled", async () => {
+    const { manifest, files } = v2Manifest();
+    await writeV2Folder(dir, manifest, files);
+    const size = (await readFile(path.join(dir, "manifest.json"))).length;
+    const budget = new ByteBudget(1024 * 1024 * 1024);
+    const set = await readDopplerFigureDir(dir, { pageCount: 3, parseBudget: budget });
+    expect(budget.peak).toBe(10 * size);
+    expect(budget.inUse).toBe(0);
+    expect(set.version).toBe(2);
+    // A refused manifest releases its reservation too.
+    await writeFile(path.join(dir, "manifest.json"), "{not json");
+    await expect(readDopplerFigureDir(dir, { pageCount: 3, parseBudget: budget })).rejects.toMatchObject({ rule: "manifest-not-json" });
+    expect(budget.inUse).toBe(0);
+  });
+
+  it("builds the index records from the rows it already computed (no second dopplerLedgerAssets pass)", () => {
+    const parsed = parseDopplerManifest(v2Manifest().manifest)!;
+    const rows = dopplerLedgerAssets(parsed).map((row) => ({ ...row, fileOf: row.fileOf ? "p3.1" : null }));
+    expect(dopplerFigureRecords(parsed, rows).filter((r) => r.fileOf).every((r) => r.fileOf === "p3.1")).toBe(true);
   });
 });

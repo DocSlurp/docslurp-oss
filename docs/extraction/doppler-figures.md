@@ -101,9 +101,13 @@ Doppler's images manifest comes in two newer shapes, accepted beside version 1 u
 The worker reads version 3 **one line at a time in fixed memory** (`DopplerManifestV3Validator`,
 `packages/shared/src/doppler-assets.ts`): each line is parsed and validated as it arrives and becomes one ledger row,
 spilled to a private temporary file, so memory does not grow with the number of images. It refuses the folder when a line
-is not ASCII, is longer than 64 KiB or has no `\n`, is not a JSON object, has an unknown `type`, or comes out of order
-(header, images, batches, end, nothing after); when the end line is missing (a truncated manifest), its counts or totals
-disagree with the lines, or its hash does not match; and when there are more lines than the document's entry cap. These
+is not ASCII, is longer than its type's cap (2 KiB for a header, image or end line, 1 KiB for a batch line; real image
+lines are about 216 bytes) or has no `\n`, is not a JSON object, has an unknown `type`, or comes out of order (header,
+images, batches, end, nothing after); when the end line is missing (a truncated manifest), its counts or totals disagree
+with the lines, or its hash does not match; when there are more lines than the document's entry cap; and when the
+folder's manifests together pass `min(64 MiB, 1 KiB x entries cap)` (checked when each is opened and as a running total
+across shards, so whitespace padding cannot inflate a manifest to the line cap times the line count). Manifest bytes also
+count toward the document's total bytes. These
 are Doppler's own reader's rules (`docslurp/doppler-md/src/extract/manifest.rs`) plus the checks below. A real Doppler
 run is a test fixture (`worker/src/__tests__/fixtures/doppler-golden/v3-repeats`).
 
@@ -113,7 +117,8 @@ failure: its files are validated and stored like a complete run's, and its missi
 Doppler says a resume would retry them. The worker checks the outcome against the manifest (`complete`) and refuses the
 folder (`outcome-mismatch`) otherwise.
 
-Either way the folder holds only the manifest, optionally `page-facts.jsonl`, and `page-NNNN` real directories holding
+Either way the folder holds only the manifest, optionally `page-facts.jsonl` (allowed, but never read or stored: see
+"Page facts" below), and `page-NNNN` real directories holding
 only `(image|figure)-NNN.<format>` regular files. Every entry is checked strictly: unknown fields, values outside each
 closed enum (`status`, `reason`, `fate`, `source`, batch `status`, `fallback`), non-finite or out-of-range numbers and
 over-long strings refuse it. A linked image's `path` must be exactly the one derived from its own id and format, with no
@@ -133,7 +138,8 @@ differs, and a resume must use the shard's own manifest and range. Such a folder
 always (page paths are global, so shards never collide), and `shards/<first>-<last>/manifest.jsonl` per shard (page
 numbers zero-padded to 4 digits) instead of one `manifest.jsonl`; never both. Each shard manifest gets every version 3
 check; its header's `pages` must be exactly its folder's range, and its image and batch lines must fall inside it. Across
-shards: the ranges must not overlap, every shard must name the same PDF (`source_sha256`), every other header setting
+shards: the ranges must start at page 1, follow each other with no hole and not overlap, the last must end within the
+document's page count, every shard must name the same PDF (`source_sha256`), every other header setting
 must be equal (all fields but `pages`, `resumes`, `deadline_ms` and `settings_sha256`), and every file in the page folders
 must be owned by exactly one shard's image line. Any violation refuses the whole folder. The shard manifests are stored at
 `images/shards/<first>-<last>/manifest.jsonl` beside the page folders, each with its own artifact slot
@@ -165,31 +171,36 @@ download of the folder is the conversion exactly as Doppler wrote it:
   source.json                         {sourceKey, sha256, pageCount, mimeType}: a pointer to the source, never served
   index.json                          DocSlurp's figure index (docslurp-doppler-figures@1)
   images/manifest.jsonl               the manifest bytes, unchanged (manifest.json for versions 1 and 2)
-  images/page-facts.jsonl             doppler-page-facts/1 lines, when the provider returns them
   images/page-0003/image-001.webp     pictures and page scans
   images/page-0003/figure-002.svg     vector figures
 ```
 
 `images/` is the `--images-link-prefix` the host passes, so every link of `document.md` resolves inside the folder with no
-rewriting, and `images/` minus `page-facts.jsonl` is exactly the DIR `pdftomarkdown --images-resume` takes. The ledger's
+rewriting, and `images/` is exactly the DIR `pdftomarkdown --images-resume` takes. The ledger's
 `link_path` and a file's storage key share one relative path. Version 1 files are stored at the page path a version 2 run
 would use. Sources are stored under upload-session keys and deduplicated across documents, so `source.json` points at the
 source rather than copying it.
 
 The artifact root is the run's tenant-scoped prefix (`<user>/<run>`, or an extract's own prefix). Each served object is a
 document artifact slot: `<document>:doppler-figure:<id>` per file, `<document>:doppler-figures` (the index),
-`<document>:doppler-manifest`, `<document>:doppler-page-facts` and `<document>:doppler-markdown`. `source.json` has no slot
-and the file proxy refuses it by name. The slots are what authorize the objects: the file proxy (`/v1/files/<token>/<name>`)
+`<document>:doppler-manifest` and `<document>:doppler-markdown`. `source.json` has no slot and the file proxy and
+`/v1/artifacts/preview` refuse it by name. The slots are what authorize the objects: the file proxy (`/v1/files/<token>/<name>`)
 serves an artifact only when its exact URI is one of the caller's documents' recorded slots, within the caller's projects and
 organization, with the API key's `artifacts` scope, and not withheld by the project's PII policy (every slot of the document
-written before the PII stage is withheld under `redact_artifacts` and `block_indexing`, these included). Revoking access, a
-key from another organization or a key without the scope all get the same 404.
+written before the PII stage is withheld under `redact_artifacts` and `block_indexing`, these included). The first pass
+stores its figures after the PII stage has run, so when that stage's outcome withheld anything (it redacted or blocked),
+every file the first pass stores joins `metadata.pii.withheldArtifactUris` before any slot is recorded, and Doppler's raw
+`document.md` (unredacted text) is not stored at all; a store that cannot say stores nothing. In the extraction stage,
+`document.md` is the winning candidate's file after the host's sanitizing and before PII redaction, recorded before the
+PII stage, which withholds it. As defense in depth, the file proxy and `/v1/artifacts/preview` serve a Doppler folder
+file only while its document is `completed`. Revoking access, a key from another organization or a key without the scope
+all get the same 404.
 
 Image files are served with a content type fixed by their name, never by storage metadata or the bytes: `image/webp`,
 `image/svg+xml`, `image/png` or `image/jpeg`, with `X-Content-Type-Options: nosniff`, `Cache-Control: private, no-store`
 and `Content-Disposition: inline`. SVG figures get `Content-Security-Policy: default-src 'none'; style-src
 'unsafe-inline'; sandbox`, so opening one directly loads and runs nothing. The manifest and index are served as JSON or
-plain text, the page facts as plain text and the Markdown as `text/markdown`, all under the sandbox CSP. Any other SVG is
+plain text and the Markdown as `text/markdown`, all under the sandbox CSP. Any other SVG is
 still served as an `application/octet-stream` attachment.
 
 **Memory and speed.** Storing streams every file: it is read in 1 MiB chunks, hashed and signature-checked as it goes, and
@@ -198,8 +209,12 @@ file is verified before its upload may complete (the last chunk is held back unt
 a mismatch fails that upload, deletes what landed and refuses the folder. Uploads run concurrently
 (`DOCSLURP_DOPPLER_FIGURE_UPLOAD_CONCURRENCY`, default 8), and the bytes they hold are reserved from a fixed per-job budget
 (`DOCSLURP_DOPPLER_FIGURE_BUFFER_BYTES`, default 64 MiB) and a per-process ceiling shared by every document a worker runs
-(`DOCSLURP_DOPPLER_FIGURE_WORKER_BUFFER_BYTES`, default 256 MiB), whatever the page count. The manifest, page facts,
-Markdown and `source.json` are written only after every file has landed and checked out, and the index last.
+(`DOCSLURP_DOPPLER_FIGURE_WORKER_BUFFER_BYTES`, default 256 MiB), whatever the page count. The budget is a hard ceiling:
+a store without streaming uploads refuses a file larger than either budget (`file-over-memory-budget`) rather than read it
+whole. A legacy (version 1 or 2) manifest, parsed whole, reserves 10x its size from the worker budget until its rows are
+spilled. The manifest, Markdown and `source.json` are written only after every file has landed and checked out, and the
+index last. When a store fails, only the keys that call started writing are deleted, and never one a recorded slot
+already references (a committed object a re-run or resume wrote again stays).
 
 Measured with an fs-backed store double (no local object store was used), Node 24:
 
@@ -245,16 +260,17 @@ folder only when Doppler went past what it was told.
 | Manifest entries (version 3: lines) | `min(16384 + 16p, 131072)` |
 | One picture or figure | 8 MiB |
 | One page scan copied or decoded from the PDF | 64 MiB |
-| Version 3 manifest line | 64 KiB |
+| Version 3 manifest line | 64 KiB read buffer; 2 KiB header, image and end lines, 1 KiB batch lines |
+| Version 3 manifests of a folder, together | `min(64 MiB, 1 KiB x entries cap)` |
 | Version 2 manifest (parsed whole) | `min(8 MiB + 128 B x entries, 16 MiB)`, at most 65,536 entries |
 | Version 1 manifest | 4 MiB, 4,096 entries, 2,048 files, 64 MiB of files |
-| `page-facts.jsonl` | `min(1 MiB + 16 KiB x p, 64 MiB)` |
 | Batches | 16,384 |
 | Image side | 16,384 px (or pt) |
 
 A 500-page scanned book of about 1 MiB per page fits (the old fixed 64 MiB total refused anything past about 74 pages and
 lost the whole ledger). Parsing a version 2 manifest at its 16 MiB cap peaks near 160 MB and 2 s (measured), which is why
-version 2 is held to fewer entries; version 3 needs no such cap. Doppler applies its own limits inside the VM (crop pixels,
+version 2 is held to fewer entries and its parse is reserved from the worker budget; version 3 needs no such cap. Version
+2 (and 1) reading is dropped once the Doppler pin writes version 3. Doppler applies its own limits inside the VM (crop pixels,
 `pdfregions` memory and time; see its protocol). A document over any of these bounds keeps its Markdown and stores no image.
 
 ## Asset ledger
@@ -315,8 +331,9 @@ Each row also keeps the image object (`obj_num`, `obj_gen`) and its `bbox`. Vers
 `document_extraction_levels` holds, per document: `markdown_complete`; `images_status`: `complete` (exit 0), `partial`
 (exit 5, nothing a resume retries), `resumable` (exit 5, images a resume retries), `failed` (exit 6, a refused folder or a
 failed store), and, written by extract-markdown whenever it commits a document's Markdown and no figure step ran, `none`
-(another extractor won, not a PDF, no VM, a deduplicated copy) or `disabled` (figures off for the run), which takes a stale
-resumable state out of the queue; `images_exit_code` and `doppler_build` when the provider reports them;
+(another extractor won, not a PDF, no VM, a deduplicated copy) or `disabled` (figures off for the run: the deploy flag
+off, no figure-capable provider, or the project opted out with `pipeline.figures: false`, first-pass documents included),
+which takes a stale resumable state out of the queue; `images_exit_code` and `doppler_build` when the provider reports them;
 `manifest_version`; the stored manifest's key and SHA-256; for versions 2 and 3 the manifest's `source_sha256` and
 `settings_sha256` (which a resume must repeat), `last_cut_page` (the `cut_page` of the last batch that has one: the first
 page with an image that batch did not get to) and `deadline_ms`; `resumes`; and counts per status and source with the
@@ -324,7 +341,12 @@ stored bytes.
 
 `document_page_facts` gains `text_layer` (`none`, `invisible`, `visible`, `mixed`) and `scan_class` (`none`, `single`,
 `tiled`, `layered`). They are written through the ordinary page-facts write whatever the figure setting: `text_layer` from
-the VM's layout facts today, `scan_class` once the provider returns `doppler-page-facts/1`.
+the VM's layout facts today, `scan_class` later.
+
+**Page facts.** The provider's `page-facts.jsonl` is never uploaded: its document line can carry the PDF's own producer
+and creator strings, untrusted text. Facts are stored only once a validating reader exists that re-serialises them from
+validated fields (a later change adds that upload); until then the folder may hold the file, and the host neither reads
+nor stores it, and records no slot for it.
 
 A sharded document also has one `document_extraction_shards` row per shard (scoped like the other tables, with the same
 composite foreign keys): its range, its stored manifest's key and SHA-256, its `source_sha256` and `settings_sha256`, its
@@ -347,12 +369,13 @@ whose `images_status` is `resumable` and that have a stored manifest, and, for a
 as its own entry (`shard: { first, last }`), oldest first with a keyset cursor, with the hashes a resume must present and
 the manifest's SHA-256. A shard's resume writes with `resume: { first, last }` and that shard alone: only its pages' rows
 are upserted and pruned, its record's `resumes` goes up by one (capped at 3 like a whole document's), and the level is
-recomputed from all rows and shard records. The host counts resumes itself (previous + 1 on each resume write; the
+recomputed from all rows and shard records. A sharded document's resumes across all its shards are capped too, at
+`min(3 x shards, 12)`: past it neither the queue lists nor the ledger accepts a resume of any of its shards. The host counts resumes itself (previous + 1 on each resume write; the
 manifest's own `resumes` is telemetry only) and leaves a document out of the queue at 3, so a manifest that never finishes
 cannot keep it there. A resume worker rebuilds Doppler's DIR from stored state with `downloadDopplerImagesDir`: it
 downloads `images/manifest.jsonl`, checks its SHA-256 against the level's `manifest_sha256`, validates it line by line,
 and downloads each `extracted` file from the key derived from its id (never a listing) into `DIR/page-NNNN/...`, checking
-its size and SHA-256; `page-facts.jsonl` stays out. It then runs `pdftomarkdown --images-resume DIR` in the PDF VM with the
+its size and SHA-256. `DIR` must be absent or an empty directory. It then runs `pdftomarkdown --images-resume DIR` in the PDF VM with the
 same PDF and settings, validates the returned folder like any other, stores it, and writes the ledger with
 `resume: true`. Nothing runs resumes yet.
 

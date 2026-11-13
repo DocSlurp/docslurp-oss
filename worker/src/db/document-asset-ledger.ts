@@ -80,8 +80,13 @@ export interface DocumentAssetLedgerWrite {
   shards?: readonly LedgerShard[];
 }
 
-/** Resumes a document may have before the resume queue leaves it alone (counted by the host, not the manifest). */
+/** Resumes a document (or one shard) may have before the resume queue leaves it alone (counted by the host, not the manifest). */
 export const DOCUMENT_ASSET_RESUME_CAP = 3;
+/** A sharded document's resumes across all its shards: `min(3 x shards, 12)`. Past it no shard of it is listed or resumed. */
+export const DOCUMENT_ASSET_RESUME_TOTAL_CAP = 12;
+export function documentResumeTotalCap(shards: number): number {
+  return Math.min(DOCUMENT_ASSET_RESUME_CAP * Math.max(1, shards), DOCUMENT_ASSET_RESUME_TOTAL_CAP);
+}
 
 export type DocumentAssetLedgerRule =
   | "invalid-scope" | "invalid-assets" | "invalid-level" | "scope-mismatch" | "key-mismatch" | "stale-write" | "resume-cap" | "write-mismatch";
@@ -121,8 +126,11 @@ function checkedRow(asset: LedgerAsset | DocumentAsset, spilled: boolean): Ledge
   return { ...row, storageKey };
 }
 
-/** Shard records re-validated: at most DOPPLER_SHARDS_MAX, sorted, not overlapping, each key exactly its folder's. */
-function checkedShards(shards: readonly LedgerShard[], imagesPrefix: string): LedgerShard[] {
+/**
+ * Shard records re-validated: at most DOPPLER_SHARDS_MAX, sorted, not overlapping, each key exactly its folder's. A full
+ * write's shards start at page 1 with no hole between them (`contiguous`); a shard resume names one existing shard.
+ */
+function checkedShards(shards: readonly LedgerShard[], imagesPrefix: string, contiguous: boolean): LedgerShard[] {
   if (!Array.isArray(shards) || shards.length > DOPPLER_SHARDS_MAX) throw new DocumentAssetLedgerError("invalid-level");
   let previous = 0;
   for (const shard of shards) {
@@ -135,6 +143,7 @@ function checkedShards(shards: readonly LedgerShard[], imagesPrefix: string): Le
         (shard.deadlineMs !== null && !(Number.isSafeInteger(shard.deadlineMs) && shard.deadlineMs >= 0 && shard.deadlineMs <= 2_000_000_000))) {
       throw new DocumentAssetLedgerError("invalid-level");
     }
+    if (contiguous && shard.first !== previous + 1) throw new DocumentAssetLedgerError("invalid-level");
     if (shard.manifestKey !== `${imagesPrefix}shards/${dopplerShardFolder(shard.first, shard.last)}/${DOPPLER_MANIFEST_V3_FILE}`) {
       throw new DocumentAssetLedgerError("key-mismatch");
     }
@@ -250,7 +259,7 @@ export async function writeDocumentAssetLedger(sql: Sql<Record<string, unknown>>
     const manifestKeys = [DOPPLER_STORE_LAYOUT.manifest, DOPPLER_MANIFEST_V3_FILE].map((name) => `${prefix}${DOPPLER_STORE_LAYOUT.imagesFolder}${name}`);
     if (write.level.manifest && !manifestKeys.includes(write.level.manifest.key)) throw new DocumentAssetLedgerError("key-mismatch");
     const shardResume = typeof write.resume === "object" && write.resume !== null ? write.resume : null;
-    const shards = checkedShards(write.shards ?? [], `${prefix}${DOPPLER_STORE_LAYOUT.imagesFolder}`);
+    const shards = checkedShards(write.shards ?? [], `${prefix}${DOPPLER_STORE_LAYOUT.imagesFolder}`, !shardResume);
     if (shards.length > 0 && write.level.manifest) throw new DocumentAssetLedgerError("invalid-level");
     const priorResumes = previous?.resumes ?? 0;
     if (write.resume === true && priorResumes >= DOCUMENT_ASSET_RESUME_CAP) throw new DocumentAssetLedgerError("resume-cap");
@@ -265,6 +274,11 @@ export async function writeDocumentAssetLedger(sql: Sql<Record<string, unknown>>
           and first_page = ${shardResume.first} and last_page = ${shardResume.last}`;
       if (!existing) throw new DocumentAssetLedgerError("invalid-level");
       if (existing.resumes >= DOCUMENT_ASSET_RESUME_CAP) throw new DocumentAssetLedgerError("resume-cap");
+      // And the document's total across its shards (documentResumeTotalCap).
+      const [total] = await tx<{ n: number; resumes: number }[]>`
+        select count(*)::int as n, coalesce(sum(resumes), 0)::int as resumes from document_extraction_shards
+        where document_id = ${documentId} and org_id = ${orgId} and project_id = ${projectId}`;
+      if ((total?.resumes ?? 0) >= documentResumeTotalCap(total?.n ?? 1)) throw new DocumentAssetLedgerError("resume-cap");
       shardResumes = existing.resumes + 1;
     }
 
@@ -582,6 +596,11 @@ export async function listResumableDocuments(
       join documents d on d.id = s.document_id and d.org_id = s.org_id and d.project_id = s.project_id
       where s.org_id = ${args.orgId} and s.images_status = 'resumable' and s.resumes < ${DOCUMENT_ASSET_RESUME_CAP} ${project("s")}
         and d.superseded_at is null and d.archived_at is null and d.purged_at is null
+        -- The document's resumes across all its shards stay under min(3 x shards, 12) (documentResumeTotalCap).
+        and (select coalesce(sum(t.resumes), 0) from document_extraction_shards t
+             where t.document_id = s.document_id and t.org_id = s.org_id and t.project_id = s.project_id)
+          < least(${DOCUMENT_ASSET_RESUME_CAP}::int * (select count(*) from document_extraction_shards t
+             where t.document_id = s.document_id and t.org_id = s.org_id and t.project_id = s.project_id), ${DOCUMENT_ASSET_RESUME_TOTAL_CAP}::int)
     ) work
     ${args.after ? sql`where (work.at, work.document_id, work.first_page) > (${args.after.updatedAt}::timestamptz, ${args.after.documentId}, ${args.after.firstPage ?? 0})` : sql``}
     order by work.at, work.document_id, work.first_page

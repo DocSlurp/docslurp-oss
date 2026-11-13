@@ -23,6 +23,11 @@ export function dopplerImageExtractEnabled(env: Record<string, string | undefine
   throw new Error(`${DOPPLER_IMAGE_EXTRACT_ENV} must be 1/true/on or 0/false/off`);
 }
 
+/**
+ * Whether figures run for a project's pipeline: the deploy flag on, and the project did not opt out (`figures: false`).
+ */
+export function figuresEnabled(pipeline: { figures?: boolean | null } | null | undefined, env: Record<string, string | undefined>): boolean { return pipeline?.figures !== false && dopplerImageExtractEnabled(env); }
+
 /** The wire version of the manifest the provider hands the worker. */
 export const DOPPLER_FIGURES_VERSION = "doppler-figures@1";
 export const DOPPLER_FIGURES_MANIFEST = "manifest.json";

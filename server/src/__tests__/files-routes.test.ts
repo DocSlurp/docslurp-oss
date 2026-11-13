@@ -5,6 +5,11 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const access = vi.hoisted(() => vi.fn());
 const open = vi.hoisted(() => vi.fn());
 const actor = vi.hoisted(() => ({ current: null as any }));
+/** Document statuses dopplerFolderServable reads (by id); a missing id is no row. */
+const statuses = vi.hoisted(() => new Map<string, string>());
+vi.mock("../db.js", () => ({
+  sql: async (_strings: TemplateStringsArray, ...values: unknown[]) => statuses.get(String(values[0])) === "completed" ? [{ ok: true }] : [],
+}));
 vi.mock("../services/documents.js", () => ({ userCanAccessArtifactUri: access }));
 vi.mock("../lib/artifacts.js", () => ({ openArtifactObject: open }));
 vi.mock("../lib/request-actor.js", () => ({
@@ -35,6 +40,9 @@ describe("file proxy", () => {
     actor.current = session;
     access.mockResolvedValue(true);
     open.mockResolvedValue(object());
+    statuses.clear();
+    statuses.set("0b6f7e8c-3c1a-4f7e-9a51-2a1d3e4f5a6b", "completed");
+    statuses.set("doc", "completed");
   });
 
   it("streams an authorized file with hardened headers", async () => {
@@ -180,10 +188,10 @@ describe("file proxy", () => {
       }
     });
 
-    it("types the folder's manifest, page facts, index and Markdown by name, never as active content", async () => {
+    it("types the folder's manifest, index and Markdown by name, never as active content", async () => {
       for (const [relative, type] of [
         ["images/manifest.json", "application/json; charset=utf-8"], ["index.json", "application/json; charset=utf-8"],
-        ["images/page-facts.jsonl", "text/plain; charset=utf-8"], ["document.md", "text/markdown; charset=utf-8"],
+        ["document.md", "text/markdown; charset=utf-8"],
         ["images/manifest.jsonl", "text/plain; charset=utf-8"], ["images/shards/0001-0064/manifest.jsonl", "text/plain; charset=utf-8"],
       ] as const) {
         open.mockResolvedValue(object("<script>alert(1)</script>", { ContentType: "text/html" }));
@@ -227,6 +235,29 @@ describe("file proxy", () => {
       actor.current = { type: "apiKey", userId: "user-a", apiKey: { keyId: "key-2", orgId: "org-a", scopes: ["artifacts"] } };
       expect((await get(path({ bind: "k:key-1" }))).status).toBe(404);
       expect(open).not.toHaveBeenCalled();
+    });
+
+    it("page facts are no folder file: never typed as text, whatever stored them (owner decision: not stored at all)", async () => {
+      open.mockResolvedValue(object("{}", { ContentType: "text/html" }));
+      const res = await get(`/v1/files/${token({ uri: folderUri("images/page-facts.jsonl"), name: "page-facts.jsonl" })}/page-facts.jsonl`);
+      expect(res.headers.get("content-type")).toBe("application/octet-stream");
+      expect(res.headers.get("content-disposition")).toMatch(/^attachment;/);
+    });
+
+    it("HIGH-1 defense in depth: no folder file of a document that is not completed, even when the artifact check passes", async () => {
+      for (const status of ["processing", "pii_blocked", "failed", null]) {
+        statuses.clear();
+        if (status) statuses.set(DOC, status);
+        for (const [uri, name] of [[figureUri("p3.g2.svg"), "p3.g2.svg"], [folderUri("document.md"), "document.md"], [folderUri("index.json"), "index.json"],
+          [folderUri("images/manifest.jsonl"), "manifest.jsonl"]] as const) {
+          open.mockClear();
+          const res = await get(`/v1/files/${token({ uri, name })}/${name}`);
+          expect(res.status, `${status} ${name}`).toBe(404);
+          expect(open, `${status} ${name}`).not.toHaveBeenCalled();
+        }
+      }
+      // Outside a Doppler folder the check does not apply.
+      expect((await get(`/v1/files/${token()}/page-0001.png`)).status).toBe(200);
     });
   });
 
