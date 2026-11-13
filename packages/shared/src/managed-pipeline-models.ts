@@ -81,48 +81,47 @@ export function managedPipelineFieldMessage(paths: readonly string[]): string {
 type PipelineLike = Record<string, unknown>;
 
 /**
- * Copy the stored managed fields onto a pipeline a customer just saved (whose schema defaults refilled them from the
- * profiles), except the paths in `explicit` (set by a platform admin in this request). An embedding or vision model
- * URI is carried only when it was an explicit override of the stored profile's default and the profile is unchanged:
- * otherwise the new profile's default applies.
+ * Copy the stored managed fields onto a pipeline a customer just saved, whose schema defaults refilled them. A stored
+ * value is kept only where the incoming field is at its default (null, `{}`, the `auto` route, or the profile's own
+ * URI): public routes refuse anything else, so a non-default incoming value comes from a trusted internal caller and
+ * wins. An embedding or vision model URI is carried only when it was an explicit override of the stored profile's
+ * default and the profile is unchanged; otherwise the new profile's default applies.
  */
-export function carryManagedPipelineFields<T extends PipelineLike>(next: T, stored: PipelineLike | null | undefined, explicit: ReadonlySet<string> = new Set()): T {
+export function carryManagedPipelineFields<T extends PipelineLike>(next: T, stored: PipelineLike | null | undefined): T {
   if (!stored) return next;
   const out: PipelineLike = { ...next };
   const section = (name: string) => { const value = { ...(record(out[name]) ?? {}) }; out[name] = value; return value; };
-  const keep = (path: ManagedPipelineModelPath) => !explicit.has(`pipeline.${path}`);
+  const nextText = record(out.textGeneration);
   const storedText = record(stored.textGeneration);
-  if (storedText && (keep("textGeneration.model") || keep("textGeneration.models"))) {
-    const text = section("textGeneration");
-    if (keep("textGeneration.model")) text.model = storedText.model ?? null;
-    if (keep("textGeneration.models")) text.models = storedText.models ?? {};
+  if (storedText) {
+    if ((nextText?.model ?? null) === null && storedText.model) section("textGeneration").model = storedText.model;
+    if (Object.keys(record(nextText?.models) ?? {}).length === 0 && Object.keys(record(storedText.models) ?? {}).length) {
+      section("textGeneration").models = storedText.models;
+    }
   }
   const storedStructured = record(stored.structuredExtraction);
-  if (storedStructured && keep("structuredExtraction.model")) section("structuredExtraction").model = storedStructured.model ?? null;
+  if (storedStructured?.model && (record(out.structuredExtraction)?.model ?? null) === null) section("structuredExtraction").model = storedStructured.model;
   const storedVisual = record(stored.visualPages);
-  if (storedVisual && keep("visualPages.route") && typeof storedVisual.route === "string") section("visualPages").route = storedVisual.route;
-  const storedEmbedding = record(stored.embedding);
-  const nextEmbedding = record(out.embedding);
-  if (storedEmbedding && nextEmbedding && keep("embedding.modelUri") && nextEmbedding.profile === storedEmbedding.profile) {
-    const defaults = embeddingProfileCatalog[storedEmbedding.profile as keyof typeof embeddingProfileCatalog]?.config;
-    if (typeof storedEmbedding.modelUri === "string" && storedEmbedding.modelUri !== defaults?.modelUri) {
-      const embedding = section("embedding");
-      embedding.modelUri = storedEmbedding.modelUri;
-      if (storedEmbedding.target !== undefined) embedding.target = storedEmbedding.target;
+  const nextRoute = record(out.visualPages)?.route;
+  if (typeof storedVisual?.route === "string" && storedVisual.route !== "auto" && (nextRoute === undefined || nextRoute === "auto")) {
+    section("visualPages").route = storedVisual.route;
+  }
+  for (const [name, catalog] of [["embedding", embeddingProfileCatalog], ["vision", visionProfileCatalog]] as const) {
+    const storedSection = record(stored[name]);
+    const nextSection = record(out[name]);
+    if (!storedSection || !nextSection || nextSection.profile !== storedSection.profile) continue;
+    const defaults = (catalog as Record<string, { config: { modelUri: string } } | undefined>)[String(storedSection.profile)]?.config;
+    const storedOverride = typeof storedSection.modelUri === "string" && storedSection.modelUri !== defaults?.modelUri;
+    const nextAtDefault = nextSection.modelUri === undefined || nextSection.modelUri === defaults?.modelUri;
+    if (storedOverride && nextAtDefault) {
+      const target = section(name);
+      target.modelUri = storedSection.modelUri;
+      if (storedSection.target !== undefined) target.target = storedSection.target;
     }
   }
   const storedVision = record(stored.vision);
-  const nextVision = record(out.vision);
-  if (storedVision && nextVision) {
-    const vision = section("vision");
-    if (keep("vision.modelUri") && nextVision.profile === storedVision.profile) {
-      const defaults = visionProfileCatalog[storedVision.profile as keyof typeof visionProfileCatalog]?.config;
-      if (typeof storedVision.modelUri === "string" && storedVision.modelUri !== defaults?.modelUri) {
-        vision.modelUri = storedVision.modelUri;
-        if (storedVision.target !== undefined) vision.target = storedVision.target;
-      }
-    }
-    if (keep("vision.remoteFallbackModelUri")) vision.remoteFallbackModelUri = storedVision.remoteFallbackModelUri ?? null;
+  if (storedVision?.remoteFallbackModelUri && (record(out.vision)?.remoteFallbackModelUri ?? null) === null) {
+    section("vision").remoteFallbackModelUri = storedVision.remoteFallbackModelUri;
   }
   return out as T;
 }

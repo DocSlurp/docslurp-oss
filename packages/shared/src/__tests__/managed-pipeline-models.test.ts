@@ -69,6 +69,14 @@ describe("managed pipeline model fields", () => {
     expect(carryManagedPipelineFields(reprofiled, stored as never).vision.modelUri).not.toBe("llm://openrouter/google/gemini-2.5-flash-lite");
   });
 
+  it("lets a trusted internal update change a managed field (public routes refuse non-default values)", () => {
+    const stored = normalizePipelineFeatures({ ...defaultPipelineFeatures, embedding: { profile: "cheapest-hosted", target: "local", modelUri: "llm://transformers.js/Xenova/gte-small" } });
+    const next = normalizePipelineFeatures({ ...defaultPipelineFeatures, embedding: { profile: "cheapest-hosted", target: "local", modelUri: "llm://transformers.js/Xenova/all-MiniLM-L6-v2" }, textGeneration: { model: "z-ai/glm-5.3-flash", models: {} } });
+    const carried = carryManagedPipelineFields(next, { ...stored, textGeneration: { model: "qwen/qwen3.5-flash-02-23", models: {} } } as never);
+    expect(carried.embedding.modelUri).toBe("llm://transformers.js/Xenova/all-MiniLM-L6-v2");
+    expect(carried.textGeneration.model).toBe("z-ai/glm-5.3-flash");
+  });
+
   it("customer views carry no backend model ids", () => {
     const view = customerPipelineView(normalizePipelineFeatures(defaultPipelineFeatures));
     expect(JSON.stringify({ embedding: view.embedding, vision: view.vision, textGeneration: view.textGeneration, visualPages: view.visualPages, structuredExtraction: view.structuredExtraction })).not.toMatch(BACKEND_ID);
