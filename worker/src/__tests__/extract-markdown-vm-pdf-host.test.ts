@@ -338,9 +338,9 @@ describe("Doppler page facts as routing evidence on the sandboxed route", () => 
       ] });
       // The ingest report's per-page rows: every page, no invented size.
       expect(sourceRows(h)).toEqual([
-        { documentId: "doc-1", runId: "run-1", pageNumber: 1, textBytes: null, wordCount: 410, imageCount: 1, factsSource: "doppler-facts" },
-        { documentId: "doc-1", runId: "run-1", pageNumber: 2, textBytes: null, wordCount: 300, imageCount: 2, factsSource: "doppler-facts" },
-        { documentId: "doc-1", runId: "run-1", pageNumber: 3, textBytes: null, wordCount: 8, imageCount: 1, factsSource: "doppler-facts" },
+        { documentId: "doc-1", runId: "run-1", pageNumber: 1, textBytes: 17, wordCount: 410, imageCount: 1, factsSource: "doppler-facts" },
+        { documentId: "doc-1", runId: "run-1", pageNumber: 2, textBytes: 24, wordCount: 300, imageCount: 2, factsSource: "doppler-facts" },
+        { documentId: "doc-1", runId: "run-1", pageNumber: 3, textBytes: 8, wordCount: 8, imageCount: 1, factsSource: "doppler-facts" },
       ]);
       expect(checkpoint?.stats).toMatchObject({ hostPdfProbes: "skipped-sandboxed-route", dopplerFactsEvidence: { status: "built", pages: 3, evidencePages: 1, rows: 3 } });
     } finally { await h.cleanup(); }
@@ -355,11 +355,13 @@ describe("Doppler page facts as routing evidence on the sandboxed route", () => 
     ["a page's image list is truncated", () => jsonl([docLine(), textPage(1), scanPage(2), figurePage(3, { images: { ...(textPage().images as object), itemsTruncated: true } }), runLine()]), "images-family-incomplete"],
     ["a page has no image list (basic level)", () => { const images = { ...(textPage().images as Record<string, unknown>) }; delete images.items; return jsonl([docLine(), textPage(1), scanPage(2), figurePage(3, { images }), runLine()]); }, "images-family-incomplete"],
     ["the document is locked", () => jsonl([docLine({ locked: true }), textPage(1), scanPage(2), figurePage(3), runLine()]), "locked"],
-  ])("fails closed when %s: no evidence, no rows, and still no host command", async (_label, facts, reason) => {
+    // Facts call page 3 sparse (8 words) while the extraction read it as 40 words of text, not by OCR.
+    ["the facts disagree with the extracted text", () => covering(), "words-disagree", `One\fTwo\f${Array.from({ length: 40 }, (_, i) => `w${i}`).join(" ")}`],
+  ])("fails closed when %s: no evidence, no rows, and still no host command", async (_label, facts, reason, markdown = "One\fTwo\fThree") => {
     vi.stubEnv("DOCSLURP_PDF_EXTRACTOR", "vm-pdf");
     vi.stubEnv("DOCSLURP_DOPPLER_PAGE_FACTS", "use");
     vi.spyOn(console, "warn").mockImplementation(() => {});
-    const h = await pinned({ markdown: "One\fTwo\fThree", pageFacts: facts() });
+    const h = await pinned({ markdown, pageFacts: facts() });
     try {
       await h.stage.run(h.state);
       const checkpoint = h.state.documentStage("doc-1", "extract-markdown");
@@ -391,7 +393,7 @@ describe("Doppler page facts as routing evidence on the sandboxed route", () => 
     const huge = { widthPt: 14_000, heightPt: 14_000, rotation: 0, userUnit: 1 };
     const scanNoText = scanPage(2, { geometry: huge, text: { ...(scanPage().text as object), charCount: 0, invisibleCharCount: 0, wordCount: 0, invisibleWordCount: 0, textLayer: "none" } });
     const facts = jsonl([docLine(), textPage(1, { geometry: huge }), scanNoText, figurePage(3, { geometry: huge }), runLine()]);
-    const outcomes: Array<{ rich: string[]; equivalents: unknown[] }> = [];
+    const outcomes: Array<{ rich: unknown[]; equivalents: unknown[] }> = [];
     for (const provider of [{}, { pageFacts: facts }]) {
       const h = await pinned({ markdown: "Born digital text\f\fA figure", ocrPages: [2], ...provider });
       const recordPageEquivalents = vi.fn(async () => 3);

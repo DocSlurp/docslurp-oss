@@ -1,7 +1,7 @@
 import { decidePageRaster } from "@docslurp/shared";
 import { describe, expect, it } from "vitest";
 
-import { dopplerFactsCoverEvidence, pageFactRowsFromDopplerFacts, pageImageEvidenceFromDopplerFacts } from "./doppler-page-facts-evidence.js";
+import { dopplerFactsCoverEvidence, dopplerFactsTextDisagreement, pageFactRowsFromDopplerFacts, pageImageEvidenceFromDopplerFacts } from "./doppler-page-facts-evidence.js";
 import { parseDopplerPageFacts, type DopplerPageFactsDocument } from "./doppler-page-facts.js";
 import { buildPageImageEvidence, findSparsePages, summarizeImageListing } from "./page-image-evidence.js";
 import { buildPdfPageFacts } from "../pipeline/page-facts.js";
@@ -81,9 +81,10 @@ describe("Doppler page facts as page-image evidence", () => {
   it("matches the probe's per-page ingest-report image counts (image rows only) and never invents a text size", () => {
     const listing = DOC.flatMap(([, images], i) => images.map((image, n) => listingRow(i + 1, n, image))).join("\n");
     const probe = buildPdfPageFacts({ documentId: "d", runId: "r", pageCount: 5, pageText: null, imagesList: listing });
-    const rows = pageFactRowsFromDopplerFacts({ facts, pageCount: 5, documentId: "d", runId: "r" });
+    const rows = pageFactRowsFromDopplerFacts({ facts, pageCount: 5, pageTexts, documentId: "d", runId: "r" });
     expect(rows.map((row) => row.imageCount)).toEqual(probe.map((row) => row.imageCount));
-    expect(rows.map((row) => [row.wordCount, row.textBytes])).toEqual([[410, null], [0, 0], [420, null], [0, 0], [3, null]]);
+    // Text bytes: 0 without a text layer, else the extracted page's (whitespace-collapsed) bytes, never a size from facts.
+    expect(rows.map((row) => [row.wordCount, row.textBytes])).toEqual([[410, pageTexts[0]!.length], [0, 0], [420, pageTexts[2]!.length], [0, 0], [3, pageTexts[4]!.length]]);
   });
 
   it("routes the scans to a read and the text pages to native text, as the probe's evidence would", () => {
@@ -109,7 +110,9 @@ describe("Doppler page facts as page-image evidence", () => {
     const short = parse([docLine({ pageCount: 1 }), { ...page(1, 0, [SCAN]), images: { ...(page(1, 0, [SCAN]).images as object), imageCount: 2 } }, runLine({ pagesEmitted: 1 })], 1);
     expect(dopplerFactsCoverEvidence(short, 1)).toEqual({ covered: false, reason: "images-family-incomplete" });
     expect(pageImageEvidenceFromDopplerFacts({ facts: truncated, pageCount: 2, pageTexts: ["", ""] })).toBeNull();
-    expect(pageFactRowsFromDopplerFacts({ facts: truncated, pageCount: 2, documentId: "d", runId: "r" })).toEqual([]);
+    expect(pageFactRowsFromDopplerFacts({ facts: truncated, pageCount: 2, pageTexts: ["", ""], documentId: "d", runId: "r" })).toEqual([]);
+    const noGeometry = parse([docLine({ pageCount: 1 }), (() => { const p = page(1, 0, [SCAN]); delete p.geometry; return p; })(), runLine({ pagesEmitted: 1 })], 1);
+    expect(dopplerFactsCoverEvidence(noGeometry, 1)).toEqual({ covered: false, reason: "geometry-missing" });
     // Text that does not line up with the page count builds no evidence.
     expect(pageImageEvidenceFromDopplerFacts({ facts, pageCount: 5, pageTexts: ["one"] })).toBeNull();
   });
@@ -120,5 +123,25 @@ describe("Doppler page facts as page-image evidence", () => {
     const garbled = "�".repeat(400);
     const pages = pageImageEvidenceFromDopplerFacts({ facts: clean, pageCount: 2, pageTexts: ["Plain readable words here", garbled] });
     expect(pages).toEqual([expect.objectContaining({ pageNumber: 2, wordCount: 300, textLayer: expect.objectContaining({ verdict: "garbled", source: "extracted" }) })]);
+  });
+
+  it("refuses facts that call a page sparse while the extraction read it as text (not OCR), and builds nothing from them", () => {
+    // Facts claim page 1 has no words and a full-page image; the extraction read 40 words of text from it.
+    const forged = parse([docLine({ pageCount: 2 }), page(1, 0, [SCAN]), page(2, 0, [SCAN]), runLine({ pagesEmitted: 2 })], 2);
+    const texts = [Array.from({ length: 40 }, (_, i) => `word${i}`).join(" "), ""];
+    expect(dopplerFactsTextDisagreement(forged, texts)).toBe(1);
+    expect(pageImageEvidenceFromDopplerFacts({ facts: forged, pageCount: 2, pageTexts: texts })).toBeNull();
+    expect(pageFactRowsFromDopplerFacts({ facts: forged, pageCount: 2, pageTexts: texts, documentId: "d", runId: "r" })).toEqual([]);
+    // A page the provider OCR'd has words from its pixels, not its layer: that is agreement, as the probe reads it.
+    expect(dopplerFactsTextDisagreement(forged, texts, new Set([1]))).toBeNull();
+    expect(pageImageEvidenceFromDopplerFacts({ facts: forged, pageCount: 2, pageTexts: texts, ocrPages: new Set([1]) })?.map((p) => p.pageNumber)).toEqual([1, 2]);
+  });
+
+  it("never counts more of the page than an image's own box covers (a forged coverage on a small box)", () => {
+    const small = { ...item(1, { px: [2000, 2000], dpi: 300, bbox: [0, 0, 20, 20], obj: 5 }), coverage: 1 };
+    const forged = parse([docLine({ pageCount: 1 }), { ...page(1, 0, []), images: { imageCount: 1, imageCoverage: 1, largestImageCoverage: 1, fullPageImage: true, scan: "single", items: [small], itemsTruncated: false, truncated: false } }, runLine({ pagesEmitted: 1 })], 1);
+    const [evidence] = pageImageEvidenceFromDopplerFacts({ facts: forged, pageCount: 1, pageTexts: [""] }) ?? [];
+    expect(evidence).toMatchObject({ pageNumber: 1, imageCount: 0, imageCoverage: 0, largestImageCoverage: 0 });
+    expect(decidePageRaster({ nativeWords: 0, images: { count: 0, coverage: 0, largestCoverage: 0 } }).read).toBe(false);
   });
 });
