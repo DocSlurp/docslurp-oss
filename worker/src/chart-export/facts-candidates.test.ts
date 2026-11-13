@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { defaultChartExportConfig, expectedBillableVisuals, type BBox, type ChartExportConfig } from "@docslurp/shared";
+import { defaultChartExportConfig, expectedBillableVisuals, type BBox, type ResolvedChartExportConfig } from "@docslurp/shared";
 
 import { buildCanonicalDocumentFromMarkdown } from "../lib/canonical-document.js";
 import { parseDopplerPageFacts, type DopplerPageFactsDocument } from "../lib/doppler-page-facts.js";
@@ -23,7 +23,7 @@ const BAR_SPEC = {
   summary: "Revenue grows every quarter, from 10 to 15.",
 };
 
-const config = (extra: Partial<ChartExportConfig> = {}): ChartExportConfig => ({ ...defaultChartExportConfig, enabled: true, formats: ["description", "csv"], ...extra });
+const config = (extra: Partial<ResolvedChartExportConfig> = {}): ResolvedChartExportConfig => ({ ...defaultChartExportConfig, tier: "models", formats: ["description", "csv"], ...extra });
 
 function fakeClient(answers: Array<string | Error>): ChartModelClient & { requests: ChartModelRequest[] } {
   const requests: ChartModelRequest[] = [];
