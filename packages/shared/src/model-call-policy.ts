@@ -22,8 +22,13 @@ export class ModelCallRefusedError extends Error {
 
 /** The bare hosted id for price and policy lookups: no `llm://openrouter/`, no query, no `:variant`. */
 export function policyModelId(ref: string): string {
-  const hosted = normalizeHostedModelRef(ref.trim());
-  return (hosted.split(/[?#]/, 1)[0] ?? "").split(":", 1)[0]!.trim().toLowerCase();
+  const lowered = ref.trim().toLowerCase();
+  const hosted = normalizeHostedModelRef(lowered.startsWith("llm://openrouter/") ? lowered : lowered).replace(/^llm:\/\/openrouter\//, "");
+  const bare = hosted.split(/[?#]/, 1)[0] ?? "";
+  // A `:variant` (`:nitro`, `:free`) belongs to the last path segment only.
+  const slash = bare.lastIndexOf("/");
+  const tail = bare.slice(slash + 1).split(":", 1)[0] ?? "";
+  return `${bare.slice(0, slash + 1)}${tail}`.trim();
 }
 
 /** Why a stage may not call `ref`, or null. */
