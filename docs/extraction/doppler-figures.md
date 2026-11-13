@@ -98,6 +98,11 @@ Doppler's images manifest comes in two newer shapes, accepted beside version 1 u
   counts, and `sha256`, the SHA-256 of every byte before the end line).
 - **Version 2, `manifest.json`**: the same fields as one JSON object (`"version": 2`).
 
+`scan_pages` is one of `copy`, `image`, `skip` or `render`. `copy` is Doppler's default from Doppler PR #39: a full-page
+scan that can be copied as its own bytes (a JPEG or bilevel stream, upright) gets its marker and file; any other scan
+(JPEG 2000, Flate, tiled, layered, turned, ...) gets no marker and no file, and its page image comes from the host's page
+rendering. Doppler reports that scan as an `unlinked` image with `fate: background` and `reason: scan-not-copyable`.
+
 The worker reads version 3 **one line at a time in fixed memory** (`DopplerManifestV3Validator`,
 `packages/shared/src/doppler-assets.ts`): each line is parsed and validated as it arrives and becomes one ledger row,
 spilled to a private temporary file, so memory does not grow with the number of images. It refuses the folder when a line
@@ -125,7 +130,9 @@ over-long strings refuse it. A linked image's `path` must be exactly the one der
 extra leading zeros; only an image without a file of its own may share the path of the image it repeats, which must be an
 earlier linked image that is not itself a repeat (no chains, no cycles). `link` must be the manifest's `link_prefix`
 followed by that path, and the prefix must be `images/`, the one the host asks for (so the stored Markdown resolves with
-no rewriting). Only page scans are copied or decoded, and a decoded scan is never a JPEG. `complete` with a stopped batch
+no rewriting). Only page scans are copied or decoded, and a decoded scan is never a JPEG. A `reason` must fit the
+status: a `not-extracted` image has one of the not-extracted reasons below, an `unlinked` image has none or
+`scan-not-copyable` (only with `fate: background`), and an `extracted` image has none; anything else refuses the folder. `complete` with a stopped batch
 or an image a stopped batch left is refused, as is `resumable` disagreeing with the images. Every total (`images`,
 `linked`, `extracted`, `not_extracted`, `unlinked`, `bytes`, `repeats`, `fallbacks`, `scans`, `scan_bytes`, `batches`,
 `batches_cut`: the batches whose status is not `ok`) must match the entries. The manifest must name this document's PDF
@@ -279,7 +286,7 @@ version 2 is held to fewer entries and its parse is reserved from the worker bud
 ## Asset ledger
 
 Every image Doppler reports for a document, whether or not it has a file, is a row of `document_assets` (migration
-0141), and the document's extraction level is a row of `document_extraction_levels`. The figure step **queues** the write
+0141; 0148 lets an unlinked image carry `scan-not-copyable`), and the document's extraction level is a row of `document_extraction_levels`. The figure step **queues** the write
 on the run's state; the store writes it in one transaction after the stage checkpoint that records the Markdown and the
 image slots commits, never before (`worker/src/db/document-asset-ledger.ts`, `Store.writeProgress`). `markdown_complete`
 is whether that committed checkpoint holds the document's Markdown. An attempt that fails or is escalated drops its queued
@@ -309,7 +316,7 @@ rows and records `images_status: failed`.
 | --- | --- |
 | `extracted` | The image owns a stored file: `format`, `bytes`, `sha256`, `width`, `height`, `source` and `storage_key` are set. |
 | `not-extracted` | The Markdown links it (or, for version 1, marks it) but it has no file of its own; `reason` says why. |
-| `unlinked` | Doppler placed it without a link (`fate` furniture, watermark, background, small, fragment, grouped, ...). |
+| `unlinked` | Doppler placed it without a link (`fate` furniture, watermark, background, small, fragment, grouped, ...); `reason` is null, or `scan-not-copyable`. |
 
 | `reason` | Meaning |
 | --- | --- |
@@ -319,6 +326,7 @@ rows and records `images_status: failed`.
 | `scan-pages`, `copy` | Page scans skipped (`--scan-pages skip`), or a scan copy failed its checks. |
 | `budget`, `doc_budget`, `timeout`, `deadline`, `aborted` | The batch or document stopped; `resumable` is true when Doppler says a resume retries it. |
 | `renderer` | The batch's renderer failed; not resumable. |
+| `scan-not-copyable` | Only on an `unlinked` image with `fate: background`: a page scan `--scan-pages copy` could not copy, left to the host's page image. Not resumable. |
 | `other` | A version 1 skip reason outside this vocabulary. |
 
 | `source` | Meaning |

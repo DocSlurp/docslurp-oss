@@ -165,6 +165,11 @@ describe("manifest v2: hostile or oversized manifests are refused", () => {
     ["totals.scan_bytes that disagree", (m) => { m.totals.scan_bytes += 1; }],
     ["totals.batches_cut that disagree", (m) => { m.totals.batches_cut = 1; }],
     ["a page outside the document", (m) => { entry(m, "p2.2").page = 4; entry(m, "p2.2").id = "p4.2"; }],
+    ["an unknown scan_pages mode", (m) => { m.scan_pages = "copy-all"; }],
+    ["scan-not-copyable on a not-extracted image", (m) => { entry(m, "p2.1").reason = "scan-not-copyable"; }],
+    ["scan-not-copyable on an extracted image", (m) => { Object.assign(entry(m, "p3.1"), { reason: "scan-not-copyable" }); }],
+    ["scan-not-copyable on an unlinked image that is not a background", (m) => { entry(m, "p2.2").reason = "scan-not-copyable"; }],
+    ["a not-extracted reason on an unlinked image", (m) => { Object.assign(entry(m, "p2.2"), { fate: "background", reason: "copy" }); }],
   ];
   for (const [name, mutate] of cases) {
     it(`refuses ${name}`, async () => {
@@ -174,6 +179,10 @@ describe("manifest v2: hostile or oversized manifests are refused", () => {
 
   it("the cases above are each the only change: the unchanged fixture passes", async () => {
     expect(await rule()).toBe("accepted");
+  });
+
+  it("accepts --scan-pages copy (Doppler #39) with an unlinked background scan, reason scan-not-copyable", async () => {
+    expect(await rule((m) => { m.scan_pages = "copy"; Object.assign(entry(m, "p2.2"), { fate: "background", reason: "scan-not-copyable" }); })).toBe("accepted");
   });
 
   it("refuses an oversized manifest before parsing it (the cap scales with the page count)", async () => {

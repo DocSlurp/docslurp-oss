@@ -16,5 +16,17 @@
   "commit": "b4e8faceb",
   "command": "PDFTOTEXT=build/utils/pdftotext PDFREGIONS=build/utils/pdfregions pdftomarkdown --images-dir images -- ../repeats/source.pdf > document.md",
   "output": "v3-repeats/: document.md and images/ (manifest.jsonl, doppler-images/3, and the page folders) exactly as written"
+ },
+ "v3-scan-copy": {
+  "repository": "https://github.com/DocSlurp/doppler",
+  "branch": "feat/scan-copy-only",
+  "commit": "8312f8ed4",
+  "pull_request": "DocSlurp/doppler#39",
+  "command": "python3 make_pdf.py source.pdf; PDFTOTEXT=build/utils/pdftotext PDFREGIONS=build/utils/pdfregions pdftomarkdown --images-dir images -- source.pdf > document.md",
+  "note": "--scan-pages copy (the default). Inputs are authored (make_pdf.py: page 1 a full-page JPEG scan, copied; page 2 a full-page Flate scan, not copyable, so unlinked with reason scan-not-copyable and no file; page 3 born-digital text with one picture).",
+  "inputs": {
+   "v3-scan-copy/source.pdf": "db30416be6a7dcd7eb1328d2aaf1bfd9460eef891ca26ae1fb4da3f770f6c64c"
+  },
+  "output": "v3-scan-copy/: document.md and images/ (manifest.jsonl, doppler-images/3, and the page folders) exactly as written"
  }
 }
