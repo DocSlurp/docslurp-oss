@@ -432,6 +432,138 @@ Migration 0156 makes the asset ledger keep extracted figures on every failure pa
   `manifest.jsonl` alone: `downloadDopplerImagesDir` defaults to `manifestOnly`, so finished figures never travel back
   into the VM.
 
+## Resuming partial figures
+
+A figure pass can leave images resumable: a batch or document budget, a deadline, or a shard that timed out. The resume
+runner (`worker/src/figures/resume-runner.ts`) finishes them in the background.
+
+**Queueing.** A document is queued in the same transaction that commits its resumable level
+(`document_extraction_levels.resume_after`, migration 0159), when its project's `pipeline.figureResume` is `auto` (the
+default). A backstop sweep in the API's maintenance sweeper (`figure-resume-enqueue`) re-queues any the commit missed.
+`manual` projects queue only on request, and `off` projects (or projects whose figures are off) never do. Requests:
+
+- `POST /v1/documents/{id}/assets/resume`, or the SDK's `resumeDocumentFigures(id)`;
+- `POST /v1/projects/{id}/figures/resume?limit=N` (at most 100 per request), or `resumeProjectFigures(id, { limit })`;
+- in the app's chat, the `proposeFigureResume` tool, which offers to "finish extracting the missing figures" for one
+  document or the project. The user applies the card (`POST /v1/projects/{id}/figure-resume-proposals/apply`).
+
+All three only queue. They need a server API key with `ingest`, or a session that may edit the project; anything outside
+the caller's organization or project is a 404. `getProjectSettings` reports `figures.resumableDocuments`.
+
+**Setting scope.** `figureResume` is a project setting. DocSlurp has no organization-level pipeline settings, so there is
+no organization default above it.
+
+**Running.**
+
+- *When it runs.* The runner runs only while all of these hold:
+  - `DOCSLURP_FIGURE_RESUME` is on (default off; queued documents wait and nothing is lost);
+  - `DOCSLURP_DOPPLER_IMAGE_EXTRACT` is on;
+  - the PDF provider implements `figures.resume`.
+
+  Every worker runs it, with at most `DOCSLURP_FIGURE_RESUME_CONCURRENCY` resumes at once (default 2).
+- *Claiming.* Each claim takes the oldest due document of each organization that holds no live lease, re-locks it
+  `for update skip locked`, and checks it again. The rules:
+  - at most one resume per organization;
+  - at most `DOCSLURP_FIGURE_RESUME_GLOBAL_MAX` resumes across the fleet (default 8), counted under one advisory lock;
+  - only `completed` documents whose Markdown committed, on their current run.
+- *Blocking and deferring.*
+  - A project or run whose figures are off is blocked `figures-off`, and its level is closed `disabled`.
+  - A project whose resumes are off is blocked `resume-off`.
+  - An organization that may not spend is re-queued an hour later.
+  - An organization past its daily resume VM budget (`DOCSLURP_FIGURE_RESUME_ORG_DAILY_VM_MINUTES`, default 120) is
+    re-queued for the next UTC day.
+- *The lease.* Each claim holds a lease token (`<worker>:<uuid>`). Every later write matches that token and the claimed
+  run: the release, the heartbeat, launch counting, the ledger writes (`scope.lease`), the pending and stored hooks, and
+  the slot update. The lease is renewed every two minutes while a unit runs, and a lease that is lost aborts the unit.
+
+**Caps.**
+
+- Each unit (a shard, a gap or the document) is closed after 3 failures of its own (`resume_unit_failures`). One
+  failing shard never blocks the others.
+- A document gets `max(6, min(3 × units, 12))` VM launches over its lifetime. That is #355's per-document resume total,
+  with its shards and gaps as units. No request resets it; only a new run does.
+- Each launch's timeout is capped at what is left of the organization's daily VM budget, and that time is reserved at
+  launch, then settled to the real time on return. With under a minute left, the unit waits for the next UTC day and no
+  failure is counted.
+
+**One unit per claim.** A unit is the unsharded document, one resumable shard, one gap with no shard, or a gap inside a
+shard that is not complete. The last kind runs as that shard's resume narrowed to the gap's pages (`resumePages`). For
+the claimed unit:
+
+1. Pending uploads are adopted, and slots a crash left out are re-added.
+2. Only the unit's stored manifest is downloaded (none for a gap), and the provider runs it in a fresh VM on the
+   document's **parse source**: quarantine's decision, resolved by the loader's rule (`lib/parse-source.ts`). For an
+   encrypted PDF that is its scanned copy; otherwise the upload exactly as the scan read it. It is staged with hash
+   verification, and its hash must be the level's source digest (the bytes the figures were made from). The upload's
+   key is never read. A document with no decision from this build's quarantine (never scanned, refused or rejected) is
+   blocked `unscanned` with no VM. No request clears that block; only a reprocess (a new run that records a decision)
+   does. A hash mismatch or a swapped object is `refused`.
+3. The folder is validated whole and must be exactly one shard folder for a range, or one manifest for the document.
+   Anything else is refused before any upload.
+4. PII (see below).
+5. The new manifest is staged by content first, then the figure files are stored (pending, then stored).
+6. The ledger is written as a resume. `resume-rewrite` is refused at once; it could only repeat.
+7. After the commit, the manifests are published and an unsharded document's `index.json` is rebuilt. The new slots join
+   the run.
+
+**PII.** A resume narrows withholding to pages only for a page-scoped outcome that the PII stage wrote itself
+(`scope: "pages"` with `withheldPages`). There, figures on withheld pages are added to the withheld list before upload:
+they are stored, never served, and not billed. Clean pages resume normally.
+
+Every other outcome that withholds anything refuses the resume, with no VM:
+- a legacy outcome with no scope (`main`'s PII stage withholds every artifact under `redact_artifacts`);
+- `scope: "none"` or `"sections"` with `redacted`, `blocked` or a withheld list;
+- `pii_blocked`.
+
+`pii_detections` is never used to infer pages: it records only the primary source's matches.
+
+**Retention, orphan GC and audit.** Every 30 minutes the leader audits up to 50 documents from the partial index
+(`asset_bytes > 0 or assets_pending > 0 or not assets_current`), oldest audited first. A document whose figure step never
+ran stays current with no bytes, so it is never in that set.
+
+- Pending rows older than 24 hours are adopted, and missing slots re-added.
+- Each folder is listed whole. A truncated listing skips the document.
+- Unvouched page files are collected after 24 hours.
+- Retention collects everything of two kinds of document, so they are not kept unbilled:
+  - a failed, cancelled or `pii_blocked` document, 7 days after it ended;
+  - a non-current level, after 24 hours.
+- Collection runs in batches of 500, each under the document's ledger lock. The full retention rule is re-checked against
+  the selected level and run, so a document retried, reprocessed or revived meanwhile is left alone. Only rows whose
+  objects were collected are dropped.
+- A fully collected document's level is closed (`none`, current, no bytes), and its run's `extract-markdown` checkpoint
+  and figure slots are reset, so "Retry failed documents" re-extracts.
+- Kill switches: the ledger writes need `DOCSLURP_FIGURE_AUDIT=1` and the deletes `DOCSLURP_FIGURE_GC_DELETE=1`. Both
+  default to a dry run.
+
+**Rollout.** Retention bounds unpaid storage (failed, cancelled, `pii_blocked` and non-current figures) only once
+`DOCSLURP_FIGURE_GC_DELETE=1`. Enable it in production after this is council-clear, once the dry-run `gc.expired_files`
+and `gc.orphan_bytes` have been observed.
+
+**Resume and reprocess.** A resume holds within a run. A reprocess is a new run: it re-extracts figures from scratch and
+queues the old run's folder for purge.
+
+**Chat.** The chat's offer (`proposeFigureResume`, its instruction, and `getProjectSettings`' figures block) needs both
+`DOCSLURP_FIGURE_RESUME` and `DOCSLURP_FIGURE_RESUME_CHAT`. It stays off until the app's proposal card ships.
+
+**Cost.** VM time, including failed and timed-out runs, is a cost-only usage event (`doppler-figures-resume-vm`) at its
+real allocated cost, `billable: false`. It is never a customer charge.
+
+**Salvaged figures.** A failed VM job can hand back the shards that finished (`error.figures`, only when the host
+declares `partial` in `figureOutcomes`). The stage stores them idempotently, with conditional creates and pending then
+stored, before the failure stands, so a retry or resume starts from them.
+
+**Telemetry.**
+- Log lines: `[doppler-figures] resume claim|unit|done|failed|stale|capped|deferred|requested|backstop|salvaged` and
+  `[figure-audit]`.
+- Spans: `figure-resume`, `figure-resume-backlog` and `figure-audit`.
+- Metrics are on the OTel meter `docslurp.figures` (`recordFigureTelemetry`), so they reach SigNoz from background
+  timers:
+  - `resume.claimed`, `resume.attempts{outcome}`, `resume.capped{reason}`, `resume.deferred{reason}`, `resume.vm_ms`,
+    `resume.added_files`, `resume.pii_withheld_files` and `adopted_files`;
+  - the gauges `resumable_backlog` and `resume_oldest_age_s` (live documents only);
+  - `gc.orphan_files`, `gc.orphan_bytes`, `gc.expired_files`, `audit.ledger_storage_drift`, `audit.adopted_files` and
+    `audit.skipped_truncated`.
+
 ## Storage billing
 
 Stored figures are billed as storage, measured rather than estimated. The daily storage meter

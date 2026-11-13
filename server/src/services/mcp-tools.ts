@@ -8,6 +8,9 @@ import { currentChatSessionId, inChatAgentContext } from "../lib/chat-agent-cont
 import { enforceActorCategoryRateLimit } from "../middleware/rate-limit.js";
 import { acquireChatSlot, CHAT_CAPACITY_UNAVAILABLE_MESSAGE, CHAT_SLOT_RETRY_AFTER_SECONDS, CHAT_SLOTS_FULL_MESSAGE } from "../middleware/chat-concurrency.js";
 import { proposeProjectSettings, SettingsProposalError } from "./project-settings-proposals.js";
+import { FigureResumeProposalError, proposeFigureResume } from "./figure-resume-proposals.js";
+import { countResumableFigureDocuments } from "./figure-resume.js";
+import { figureResumeChatEnabled, figureResumeProposalInputSchema, projectFigureResumeMode } from "@docslurp/shared";
 import { publicErrorMiddleware } from "../lib/public-errors.js";
 import { apiErrorResponse, apiStatusError, usesNativeErrorEnvelope } from "../lib/api-error.js";
 import { mapValidationIssues, type ValidationErrorSource } from "../lib/validation.js";
@@ -135,7 +138,11 @@ const mcpAdapterRoutes = new Hono()
           : visible[key as keyof typeof visible]])),
         chat: settings.chat, retrieval: settings.retrievalDefaults,
         // What an unset chart tier runs as on this deployment, and which tiers a change may choose.
-        chartExportDefaults: chartExportDefaults(process.env) });
+        chartExportDefaults: chartExportDefaults(process.env),
+        // Figures a processing pass left out that a resume could finish (proposeFigureResume), and the project's mode;
+        // only while the chat's resume offer is on (R2-M5).
+        ...(figureResumeChatEnabled() ? { figures: { resumeMode: projectFigureResumeMode(project.pipeline),
+          resumableDocuments: project.orgId ? await countResumableFigureDocuments({ orgId: project.orgId, projectId: project.id }) : 0 } } : {}) });
     }
 
     if (toolId === "proposeProjectSettings") {
@@ -150,6 +157,23 @@ const mcpAdapterRoutes = new Hono()
         return c.json({ settingsProposal });
       } catch (error) {
         if (error instanceof SettingsProposalError) return adapterError(c, error.status, error.message);
+        throw error;
+      }
+    }
+
+    if (toolId === "proposeFigureResume") {
+      if (!figureResumeChatEnabled()) return adapterError(c, 404, "Unknown MCP tool");
+      const parsed = figureResumeProposalInputSchema.safeParse(body);
+      if (!parsed.success) return invalidInput(c, parsed.error);
+      const sessionId = currentChatSessionId();
+      if (!sessionId) return adapterError(c, 403, "Figure proposals require a project chat session");
+      const project = await loadActorScopedProject(await resolveActorProjectId(actor, parsed.data.project), actor);
+      if (!project) return adapterError(c, 404, "Project not found", "project_not_found");
+      try {
+        const figureResumeProposal = await proposeFigureResume({ actor, projectId: project.id, sessionId, ...(parsed.data.documentId ? { documentId: parsed.data.documentId } : {}) });
+        return c.json({ figureResumeProposal });
+      } catch (error) {
+        if (error instanceof FigureResumeProposalError) return adapterError(c, error.status, error.message);
         throw error;
       }
     }

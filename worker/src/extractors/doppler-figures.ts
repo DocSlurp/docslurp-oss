@@ -406,6 +406,12 @@ export async function readDopplerFigureDir(
   dir: string,
   args: {
     pageCount: number; signal?: AbortSignal; expect?: DopplerFigureExpectation; sourceSha256?: string | null; hooks?: DopplerFigureReadHooks;
+    /**
+     * A resume's folder (`--images-resume` from the stored manifest only): images the ledger already holds a stored file
+     * for (id → SHA-256) must keep that digest and may come back without their file; a file handed back for one of them
+     * must be byte-identical (checked as it would be uploaded) and is never stored again. Another digest is `resume-rewrite`.
+     */
+    resume?: { stored: ReadonlyMap<string, string> };
     /** The outcome's declared gaps (SandboxedPdfFigureOutcome.gaps): with a partial outcome, the pages no shard covers. */
     gaps?: readonly DopplerFigureGap[] | null;
     /** The pages this folder was asked for (a resumed shard or gap); the whole document by default. */
@@ -478,7 +484,14 @@ export async function readDopplerFigureDir(
   // Where each extracted image's file must be, relative to the folder, by the id that owns it.
   const expected = new Map<string, DopplerFigureFile>();
   let fileBytes = 0;
+  const kept = new Set<string>();
   const addFile = (relative: string, id: string, format: DopplerFigureFormat, size: number, sha256: string, cap: number) => {
+    const storedSha = args.resume?.stored.get(id);
+    if (storedSha !== undefined) {
+      if (storedSha !== sha256) throw new DopplerFigureRejection("resume-rewrite");
+      kept.add(relative);
+      return;
+    }
     if (size > cap) throw new DopplerFigureRejection("oversized-file");
     expected.set(relative, { id, format, mediaType: DOPPLER_FIGURE_MEDIA_TYPES[format], relative, size, sha256, cap });
     fileBytes += size;
@@ -634,6 +647,8 @@ export async function readDopplerFigureDir(
         if (!after || after.isSymbolicLink() || after.dev !== before.dev || after.ino !== before.ino) throw new DopplerFigureRejection("folder-changed");
       }
     }
+    // A resume may hand back a file it kept: not stored again (its stored object stays the one served).
+    for (const name of [...present]) if (kept.has(name)) present.delete(name);
     if (expected.size !== present.size || [...present].some((name) => !expected.has(name))) throw new DopplerFigureRejection("files-do-not-match-manifest");
     for (const entry of expected.values()) {
       args.signal?.throwIfAborted();
@@ -1274,6 +1289,31 @@ export async function storeDopplerFolderManifests(args: {
     bytes += manifest.size;
   }
   return { bytes };
+}
+
+/**
+ * A resume's index, after its ledger write committed: `index.json` rebuilt from the whole document's validated set, with
+ * markers from the stored Markdown (`document.md`), never from an empty string. Only for an unsharded document (a shard's
+ * set covers its own range only: the index is left as the pass wrote it). Returns the index's size, or null when skipped.
+ */
+export async function storeDopplerFigureIndex(args: {
+  storage: DopplerFigureStorage; set: DopplerFigureSet; document: { id: string; userId: string; runId: string; artifactRoot?: string | null };
+  runId: string; markdown: string; budgets?: DopplerStoreBudgets; signal?: AbortSignal;
+}): Promise<{ bytes: number } | null> {
+  if (args.set.manifests.some((manifest) => manifest.range !== null)) return null;
+  const budgets = args.budgets ?? dopplerStoreBudgets();
+  const work = await mkdtemp(path.join(tmpdir(), "doppler-index-"));
+  try {
+    const built = await writeIndexFile(path.join(work, "index.json"), args.set, args.document.id, args.markdown);
+    const host = await openHostFile(built.path);
+    await uploadChecked({
+      storage: args.storage, budgets, key: dopplerFolderKey(args.document, args.runId, "index"), contentType: "application/json",
+      size: host.size, signal: args.signal, open: host.open, check: { expectedSize: host.size, sha256: null, magic: null },
+    });
+    return { bytes: host.size };
+  } finally {
+    await rm(work, { recursive: true, force: true }).catch(() => undefined);
+  }
 }
 
 /**

@@ -800,6 +800,11 @@ export type DeletedDocument = JsonObject & {
   sourceKey?: string;
 };
 
+/** Answer of {@link DocSlurpClient.resumeDocumentFigures}. */
+export type FigureResumeRequest = { documentId: string; status: "queued" | "already-queued" | "not-resumable" | "capped" | "off" };
+/** Answer of {@link DocSlurpClient.resumeProjectFigures}: how many were queued, already queued, and whether more remain. */
+export type ProjectFigureResumeRequest = { projectId: string; status: "queued" | "off"; queued: number; alreadyQueued: number; capped: boolean };
+
 /** Input of {@link DocSlurpClient.reprocessRun}: all stages, from one stage on, or only the listed stages. */
 export type ReprocessRunInput = { stageFrom?: string; stages?: string[]; speedBoost?: boolean; chartExport?: ChartExportOverride };
 /** The run created by {@link DocSlurpClient.reprocessRun}, its job, and warnings when its start was deferred. */
@@ -2341,6 +2346,22 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
 
     getDocument(documentId: string, requestOptions?: RequestOptions): Promise<DocumentViewerPayload> {
       return request<DocumentViewerPayload>(`/v1/documents/${encodeURIComponent(documentId)}`, {}, requestOptions, true);
+    },
+
+    /**
+     * Finish extracting the figures a document's pass left out (a timed-out shard, a budget stop). Only queues the work: the
+     * service runs it in a fresh VM under its own caps (three attempts, one document per organization at a time). Server
+     * keys need `ingest`. `status` is `queued`, `already-queued`, `not-resumable`, `capped` (attempts spent) or `off`
+     * (the project's figures or resumes are off).
+     */
+    resumeDocumentFigures(documentId: string, requestOptions?: RequestOptions): Promise<FigureResumeRequest> {
+      return request<FigureResumeRequest>(`/v1/documents/${encodeURIComponent(documentId)}/assets/resume`, jsonRequest("POST", {}), requestOptions);
+    },
+
+    /** Queue every document of a project whose figures a resume could finish, at most `limit` (1 to 100, default 100). */
+    resumeProjectFigures(id: string | undefined, input: { limit?: number } = {}, requestOptions?: RequestOptions): Promise<ProjectFigureResumeRequest> {
+      const limit = input.limit === undefined ? "" : `?limit=${encodeURIComponent(String(input.limit))}`;
+      return request<ProjectFigureResumeRequest>(`/v1/projects/${encodeURIComponent(id?.trim() || clientProject)}/figures/resume${limit}`, jsonRequest("POST", {}), requestOptions);
     },
 
     /** One page of documents in a project (the client default unless one is passed), newest first. Follow `nextCursor` for the rest. */

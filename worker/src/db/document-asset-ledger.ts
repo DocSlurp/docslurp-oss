@@ -30,6 +30,11 @@ export interface DocumentAssetLedgerScope {
   documentId: string;
   /** The run that wrote them: it must be the document's current run, of the same organization and project. */
   runId: string;
+  /**
+   * The figure resume runner's lease token (migration 0159): when set, the write lands only while the document's resume
+   * lease is still this one (a runner that lost its lease writes nothing: `stale-write`).
+   */
+  lease?: string;
 }
 
 export interface DocumentExtractionLevelInput {
@@ -115,7 +120,8 @@ const BATCH = 1000;
 
 function assertScope(scope: DocumentAssetLedgerScope): void {
   if (!scope || typeof scope.orgId !== "string" || !ID.test(scope.orgId) || typeof scope.projectId !== "string" || !ID.test(scope.projectId) ||
-      typeof scope.documentId !== "string" || !DOCUMENT_ID.test(scope.documentId) || typeof scope.runId !== "string" || !ID.test(scope.runId)) {
+      typeof scope.documentId !== "string" || !DOCUMENT_ID.test(scope.documentId) || typeof scope.runId !== "string" || !ID.test(scope.runId) ||
+      (scope.lease !== undefined && (typeof scope.lease !== "string" || scope.lease.length < 8 || scope.lease.length > 128))) {
     throw new DocumentAssetLedgerError("invalid-scope");
   }
 }
@@ -257,6 +263,7 @@ export async function writeDocumentAssetLedger(sql: Sql<Record<string, unknown>>
   return await sql.begin(async (tx) => {
     // Serialize writers of one document (a re-run racing a resume), then check the scope against the document itself.
     await tx`select pg_advisory_xact_lock(hashtext(${`document-assets:${documentId}`}))`;
+    await checkLease(tx, write.scope);
     const [document] = await tx<{ user_id: string; run_id: string | null }[]>`
       select user_id, run_id from documents where id = ${documentId} and org_id = ${orgId} and project_id = ${projectId} for key share`;
     if (!document) throw new DocumentAssetLedgerError("scope-mismatch");
@@ -525,7 +532,10 @@ export async function writeDocumentAssetLedger(sql: Sql<Record<string, unknown>>
         ${level.gaps && level.gaps.length > 0 ? tx.json(level.gaps.map((gap) => ({ first: gap.first, last: gap.last, reason: gap.reason })) as unknown as JSONValue) : null},
         ${shardState?.n ?? 0}, ${totals!.pending}, ${folderBytes ?? 0})
       on conflict (document_id) do update
-      set run_id = excluded.run_id, markdown_complete = excluded.markdown_complete, images_status = excluded.images_status,
+      set ${resumeRunChangeSql(tx)}, run_id = excluded.run_id,
+          -- A resume never claims the Markdown committed (M1): it keeps whatever the pass recorded.
+          markdown_complete = ${resuming ? tx`document_extraction_levels.markdown_complete` : tx`excluded.markdown_complete`},
+          images_status = excluded.images_status,
           images_exit_code = excluded.images_exit_code, manifest_version = excluded.manifest_version,
           doppler_build = excluded.doppler_build, manifest_key = excluded.manifest_key, manifest_sha256 = excluded.manifest_sha256,
           source_sha256 = excluded.source_sha256, settings_sha256 = excluded.settings_sha256, resumes = excluded.resumes,
@@ -543,6 +553,7 @@ export async function writeDocumentAssetLedger(sql: Sql<Record<string, unknown>>
     await tx`update document_extraction_levels set asset_bytes = ${totals!.bytes}::bigint + folder_bytes
       where document_id = ${documentId} and org_id = ${orgId} and project_id = ${projectId}`;
     if (!resuming && write.level.markdownComplete) await queueOldFigureFolders(tx, write.scope, oldFolders);
+    await queueFigureResume(tx, write.scope, resuming);
     return { upserted, removed, resumes };
   });
 }
@@ -863,9 +874,19 @@ type Tx = import("postgres").TransactionSql<Record<string, unknown>>;
  * and the run against the document's current run, not older than the level's writer (else `stale-write`, the same rule as
  * writeDocumentAssetLedger). Returns the document's artifact root.
  */
+/** A runner write (scope.lease) lands only while the document's resume lease is that token (R2 adversarial 5). */
+async function checkLease(tx: Tx, scope: DocumentAssetLedgerScope): Promise<void> {
+  if (scope.lease === undefined) return;
+  const [held] = await tx<{ ok: boolean }[]>`
+    select (resume_lease_owner = ${scope.lease} and resume_lease_until > now()) as ok from document_extraction_levels
+    where document_id = ${scope.documentId} and org_id = ${scope.orgId}`;
+  if (!held?.ok) throw new DocumentAssetLedgerError("stale-write");
+}
+
 async function lockAndCheck(tx: Tx, scope: DocumentAssetLedgerScope): Promise<{ root: string; level: { run_id: string | null } | undefined }> {
   const { orgId, projectId, documentId, runId } = scope;
   await tx`select pg_advisory_xact_lock(hashtext(${`document-assets:${documentId}`}))`;
+  await checkLease(tx, scope);
   const [document] = await tx<{ user_id: string; run_id: string | null }[]>`
     select user_id, run_id from documents where id = ${documentId} and org_id = ${orgId} and project_id = ${projectId} for key share`;
   if (!document) throw new DocumentAssetLedgerError("scope-mismatch");
@@ -960,13 +981,15 @@ export async function writeFigureLevel(
           doppler_build, assets_current)
         values (${documentId}, ${orgId}, ${projectId}, ${runId}, ${args.markdownComplete}, ${args.imagesStatus}, ${exitCode}, ${build}, ${current})
         on conflict (document_id) do update
-        set run_id = excluded.run_id, markdown_complete = excluded.markdown_complete, images_status = excluded.images_status,
+        set ${resumeRunChangeSql(tx)}, run_id = excluded.run_id, markdown_complete = excluded.markdown_complete, images_status = excluded.images_status,
             images_exit_code = excluded.images_exit_code, doppler_build = excluded.doppler_build, assets_current = excluded.assets_current, gaps = null,
             assets_total = 0, assets_extracted = 0, assets_not_extracted = 0, assets_unlinked = 0, assets_resumable = 0, assets_pending = 0,
             source_copy = 0, source_decode = 0, source_render = 0, asset_bytes = 0, folder_bytes = 0, updated_at = now()
         where document_extraction_levels.org_id = excluded.org_id and document_extraction_levels.project_id = excluded.project_id
         returning 1`;
       if (leveled.length !== 1) throw new DocumentAssetLedgerError("write-mismatch");
+      // Off the resume queue: the figure step did not run.
+      await tx`update document_extraction_levels set resume_after = null where document_id = ${documentId} and org_id = ${orgId} and project_id = ${projectId}`;
       return;
     }
     const leveled = await tx`
@@ -974,7 +997,7 @@ export async function writeFigureLevel(
       values (${documentId}, ${orgId}, ${projectId}, ${runId}, ${args.markdownComplete}, 'none', ${exitCode}, ${build},
         ${gaps ? tx.json(gaps as unknown as JSONValue) : null})
       on conflict (document_id) do update
-      set run_id = excluded.run_id, markdown_complete = excluded.markdown_complete, images_exit_code = excluded.images_exit_code,
+      set ${resumeRunChangeSql(tx)}, run_id = excluded.run_id, markdown_complete = excluded.markdown_complete, images_exit_code = excluded.images_exit_code,
           doppler_build = excluded.doppler_build, gaps = excluded.gaps,
           -- Another run's folder files are not this run's.
           folder_bytes = case when document_extraction_levels.run_id is distinct from excluded.run_id then 0 else document_extraction_levels.folder_bytes end,
@@ -1074,7 +1097,7 @@ export async function markAssetsStored(
           -- A new run's level starts clean: the earlier run's gaps and folder files are not this run's.
           gaps = case when document_extraction_levels.run_id is distinct from excluded.run_id then null else document_extraction_levels.gaps end,
           folder_bytes = case when document_extraction_levels.run_id is distinct from excluded.run_id then 0 else document_extraction_levels.folder_bytes end,
-          run_id = excluded.run_id, updated_at = now()
+          ${resumeRunChangeSql(tx)}, run_id = excluded.run_id, updated_at = now()
       where document_extraction_levels.org_id = excluded.org_id and document_extraction_levels.project_id = excluded.project_id`;
     await recountLevel(tx, args.scope, "partial");
     return { stored: flipped.length };
@@ -1227,10 +1250,12 @@ export function figureLedgerHooks(
     run: { id: string; orgId: string | null; projectId?: string | null };
   },
   documentId: string,
+  /** The resume runner's lease token: every hook write is fenced by it. */
+  lease?: string,
 ): DopplerFigureLedgerHooks | undefined {
   const store = state.store;
   if (!store?.markAssetsPending || !store.markAssetsStored || !state.run.orgId || !state.run.projectId) return undefined;
-  const scope = { orgId: state.run.orgId, projectId: state.run.projectId, documentId, runId: state.run.id };
+  const scope = { orgId: state.run.orgId, projectId: state.run.projectId, documentId, runId: state.run.id, ...(lease ? { lease } : {}) };
   return {
     pending: async (rows) => { await store.markAssetsPending!({ scope, rows }); },
     stored: async (files) => { await store.markAssetsStored!({ scope, files }); },
@@ -1319,4 +1344,52 @@ export function figureRepairHook(
 function byteCount(value: number): number {
   if (!Number.isSafeInteger(value) || value < 0) throw new DocumentAssetLedgerError("invalid-level");
   return value;
+}
+
+// ---- The resume queue (migration 0159) ----
+
+/**
+ * SQL assignments for a level upsert (`excluded` is the new row): when the level moves to another run, its resume state
+ * starts clean (M1): no queue entry, no lease (the old run's runner then loses every fenced write), no failures, no
+ * block and a fresh lifetime VM count (a new run is a fresh, customer-paid pass). The same run keeps all of it.
+ */
+export function resumeRunChangeSql(tx: Sql<Record<string, unknown>> | Tx) {
+  const changed = tx`document_extraction_levels.run_id is distinct from excluded.run_id`;
+  return tx`resume_after = case when ${changed} then null else document_extraction_levels.resume_after end,
+    resume_lease_until = case when ${changed} then null else document_extraction_levels.resume_lease_until end,
+    resume_lease_owner = case when ${changed} then null else document_extraction_levels.resume_lease_owner end,
+    resume_failures = case when ${changed} then 0 else document_extraction_levels.resume_failures end,
+    resume_vm_launches = case when ${changed} then 0 else document_extraction_levels.resume_vm_launches end,
+    resume_unit_failures = case when ${changed} then '{}'::jsonb else document_extraction_levels.resume_unit_failures end,
+    resume_blocked = case when ${changed} then null else document_extraction_levels.resume_blocked end`;
+}
+
+/**
+ * SQL: whether a project resumes figures on its own (`pipeline.figureResume` is `auto`, the default, and its figures are
+ * not off). Mirrors projectFigureResumeMode (packages/shared figure-resume.ts).
+ */
+export function projectAutoResumeSql(tx: Sql<Record<string, unknown>> | Tx, projectAlias: string) {
+  const p = tx(projectAlias);
+  return tx`(coalesce(${p}.pipeline ->> 'figureResume', 'auto') = 'auto' and ${figuresOnSql(tx as Sql<Record<string, unknown>>, projectAlias)})`;
+}
+
+/**
+ * In the transaction that commits a level: queue a resume when it is resumable and the project resumes on its own, after
+ * a short delay (or, for a resume's own write, after the backoff for the attempts spent); clear the queue entry when
+ * nothing is left to resume. Never touches a blocked document (a request or a fresh pass clears the block).
+ */
+async function queueFigureResume(tx: Tx, scope: DocumentAssetLedgerScope, resumed: boolean): Promise<void> {
+  await tx`
+    update document_extraction_levels l set
+      resume_after = case
+        when l.images_status <> 'resumable' or not l.assets_current then null
+        when ${resumed} then now() + (case least(l.resumes, 2) when 0 then interval '2 minutes' when 1 then interval '15 minutes' else interval '2 hours' end)
+        when l.resume_after is not null then l.resume_after
+        when ${projectAutoResumeSql(tx, "p")} then now() + interval '2 minutes'
+        else null end,
+      -- A fresh pass clears a block other than the lifetime cap; the counters move only with the run (resumeRunChangeSql).
+      resume_blocked = case when ${resumed} or l.resume_blocked = 'attempts' then l.resume_blocked else null end
+    from projects p
+    where l.document_id = ${scope.documentId} and l.org_id = ${scope.orgId} and l.project_id = ${scope.projectId}
+      and p.id = l.project_id and p.org_id = l.org_id`;
 }
