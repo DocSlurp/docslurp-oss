@@ -122,10 +122,12 @@ describe("a project's explicit tier is a ceiling for models (adversarial M2)", (
     await expect(assertChartExportModelsCeiling({ ...base, projectTier: "off", canEdit: true, apiKeyId: "manage", apiKeyScopes: lookup })).resolves.toBeUndefined();
   });
 
-  it("leaves projects with no tier or on models, and non-models runs, to the usual rules", async () => {
-    for (const projectTier of [undefined, "models"]) {
-      await expect(assertChartExportModelsCeiling({ ...base, projectTier, canEdit: false })).resolves.toBeUndefined();
+  it("a project with no tier is a ceiling of off too (council #387); only one saved on models, and non-models runs, keep the usual rules", async () => {
+    for (const projectTier of [undefined, null, ""]) {
+      await expect(assertChartExportModelsCeiling({ ...base, projectTier, canEdit: false })).rejects.toBeInstanceOf(ChartExportModelsForbiddenError);
+      await expect(assertChartExportModelsCeiling({ ...base, projectTier, canEdit: true })).resolves.toBeUndefined();
     }
+    await expect(assertChartExportModelsCeiling({ ...base, projectTier: "models", canEdit: false })).resolves.toBeUndefined();
     for (const runTier of ["off", "free"] as const) {
       await expect(assertChartExportModelsCeiling({ runTier, projectTier: "off", canEdit: false, context: "t" })).resolves.toBeUndefined();
     }

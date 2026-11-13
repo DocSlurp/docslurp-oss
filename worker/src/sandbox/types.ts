@@ -26,6 +26,11 @@ export interface SandboxProbeResult {
   detail: string;
   /** A remote provider's tools, as the VM image reports them: command availability is decided from these, not the host PATH. */
   tools?: readonly string[];
+  /**
+   * Guest capabilities the VM image reports (parser-vm-contract.mjs `capabilities`), for features whose guest code ships in
+   * the image rather than the worker host. Absent: an image that reports none.
+   */
+  capabilities?: readonly string[];
 }
 
 export interface SandboxLimits {

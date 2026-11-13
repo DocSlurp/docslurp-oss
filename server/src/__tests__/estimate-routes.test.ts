@@ -460,7 +460,12 @@ describe("chart export tier: origin defaults, per-request override and its guard
     await seed();
     // The audit log references the key that made the change.
     await sql`insert into api_keys (id, user_id, org_id, key_hash, name, key_type) values ('k1', 'u1', 'o1', 'hash-chart-k1', 'chart', 'server') on conflict (id) do nothing`;
+    // Each test starts from the key's default stored scopes (the models ceiling reads them from the stored key).
+    await sql`update api_keys set scopes = array['ingest', 'search:deep', 'artifacts'], revoked_at = null where id = 'k1'`;
   });
+  // `server()` keys act with projects:manage; the models ceiling reads scopes from the stored, unrevoked key, so tests
+  // that choose models on a project with no tier store the same scopes.
+  const storeManageScopes = async () => { await sql`update api_keys set scopes = array['projects:manage', 'ingest'] where id = 'k1'`; };
   afterAll(() => { vi.unstubAllEnvs(); });
   const server = (patch: Partial<Key> = {}): Key => ({ orgId: "o1", scopes: ["projects:manage", "ingest"], keyType: "server", ...patch });
   const latestRun = async () => (await sql<{ pipeline: { chartExport?: { tier?: string } }; origin: string }[]>`
@@ -493,6 +498,7 @@ describe("chart export tier: origin defaults, per-request override and its guard
   });
 
   it("the per-request override wins over the run's and the origin's tier", async () => {
+    await storeManageScopes();
     vi.stubEnv("DOCSLURP_CHART_EXPORT", "on");
     vi.stubEnv("DOCSLURP_CHART_EXPORT_FREE_EXPLICIT", "on");
     expect((await post(appFor("u1", server()), "/v1/runs/run/reprocess", { chartExport: { tier: "free" } })).status).toBe(201);
@@ -505,6 +511,7 @@ describe("chart export tier: origin defaults, per-request override and its guard
   });
 
   it("refuses invalid values, model names, and models where the deploy switch is not on (no run created)", async () => {
+    await storeManageScopes();
     const before = await runCount();
     const key = appFor("u1", server());
     vi.stubEnv("DOCSLURP_CHART_EXPORT", "on");
@@ -531,6 +538,7 @@ describe("chart export tier: origin defaults, per-request override and its guard
   });
 
   it("models needs spend allowance like any model-calling work", async () => {
+    await storeManageScopes();
     vi.stubEnv("DOCSLURP_CHART_EXPORT", "on");
     await sql`update organizations set credit_balance_cents = 0 where id = 'o1'`;
     const before = await runCount();
@@ -603,6 +611,7 @@ describe("chart export tier: origin defaults, per-request override and its guard
   });
 
   it("project settings turn chart export on per project; a request override still wins; unknown and unavailable tiers are refused", async () => {
+    await storeManageScopes();
     // The recommended production shape: switch on, inline free extraction, every origin default off.
     vi.stubEnv("DOCSLURP_CHART_EXPORT", "on");
     vi.stubEnv("DOCSLURP_CHART_EXPORT_INLINE", "1");
@@ -661,6 +670,25 @@ describe("chart export tier: origin defaults, per-request override and its guard
     expect(await runCount()).toBe(before);
     // The member may still reprocess at the project's own tier.
     expect((await post(appFor("u2", undefined, { session: true }), "/v1/runs/runwd/reprocess", {})).status).toBe(201);
+  });
+
+  it("no tier is a ceiling of off for models too: an ingest key needs the billed scope; a project saved on models does not (council #387)", async () => {
+    vi.stubEnv("DOCSLURP_CHART_EXPORT", "on");
+    await setProjectTier("w", null);
+    const before = await runCount();
+    await sql`update api_keys set scopes = array['ingest'] where id = 'k1'`;
+    const ingest = await post(appFor("u1", server({ scopes: ["ingest"] })), "/v1/runs/run/reprocess", { chartExport: { tier: "models" } });
+    expect(ingest.status).toBe(403);
+    expect(await ingest.json()).toMatchObject({ error: { code: "chart_export_models_forbidden" } });
+    expect(await runCount()).toBe(before);
+    // The billed-features scope (the key's user is the project's editor) may choose it.
+    await sql`update api_keys set scopes = array['ingest', 'pipeline:billed-features'] where id = 'k1'`;
+    expect((await post(appFor("u1", server({ scopes: ["ingest", "pipeline:billed-features"] })), "/v1/runs/run/reprocess", { chartExport: { tier: "models" } })).status).toBe(201);
+    // A project saved on models: spend admission alone, as before.
+    await setProjectTier("w", "models");
+    await sql`update api_keys set scopes = array['ingest'] where id = 'k1'`;
+    expect((await post(appFor("u1", server({ scopes: ["ingest"] })), "/v1/runs/run/reprocess", { chartExport: { tier: "models" } })).status).toBe(201);
+    await sql`update api_keys set scopes = array['ingest', 'search:deep', 'artifacts'] where id = 'k1'`;
   });
 
   it("checks access before the tier: a wrong-scope key gets 403 and another org 404, never the tier refusal (L4/L6)", async () => {
@@ -762,6 +790,7 @@ describe("chart export tier: origin defaults, per-request override and its guard
   });
 
   it("a full index after the project was unset inherits at most the project's current tier (R2-M1)", async () => {
+    await storeManageScopes();
     vi.stubEnv("DOCSLURP_CHART_EXPORT", "on");
     vi.stubEnv("DOCSLURP_CHART_EXPORT_APP_DEFAULT", "off");
     await stampRun("run", "models");

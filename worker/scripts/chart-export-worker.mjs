@@ -26,7 +26,11 @@ const injectFault = (fault, locator) => {
 };
 
 parentPort.on("message", async (task) => {
-  setGuestDeadline(task.deadline);
+  // Loaded and listening: the inline host measures start-up from here (council #387 M2); the standalone guest ignores it.
+  parentPort.postMessage({ t: "ready" });
+  // `deadlineMs` (inline, first worker): the soft deadline counted from now, capped by the absolute `deadline`. A
+  // `deadline` of 0 is count-only.
+  setGuestDeadline(task.deadline !== 0 && typeof task.deadlineMs === "number" ? Math.min(task.deadline, Date.now() + task.deadlineMs) : task.deadline);
   const bytes = await readFile(task.path);
   const input = task.packaged ? { kind: task.kind, bytes } : { kind: task.kind, text: bytes.toString("utf8") };
   const units = {

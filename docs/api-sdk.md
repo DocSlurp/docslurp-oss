@@ -1137,12 +1137,14 @@ and logged at startup:
 - `DOCSLURP_CHART_EXPORT_API_DEFAULT=off|free` (default `off`) for API callers on projects with no tier.
 - `DOCSLURP_CHART_EXPORT_APP_DEFAULT=off|free` (default `off`) for the app on projects with no tier.
 - `DOCSLURP_CHART_EXPORT_INLINE=1` (default unset): the free steps run inside the sandboxed inspection every document
-  already gets, instead of a separate sandbox run per document.
+  already gets, instead of a separate sandbox run per document. A sandbox image whose inspection does not support it
+  skips those charts and counts them as deferred.
 - `DOCSLURP_CHART_EXPORT_FREE_EXPLICIT=on|off` (default: follows `DOCSLURP_CHART_EXPORT_INLINE`). Whether callers may
   choose `free` explicitly. Unset, it is allowed exactly when inline extraction is on. While it is refused, a request
   or project change that asks for `free` is refused, and a stored `free` counts as unset.
-- `DOCSLURP_CHART_EXPORT_FREE_VM_RUNS_PER_ORG_HOUR` (default `200`): per-organization hourly cap on free-tier sandbox
-  runs, across every worker.
+- `DOCSLURP_CHART_EXPORT_FREE_VM_RUNS_PER_ORG_HOUR` (default `200`): per-organization hourly cap on free-tier
+  documents whose charts run in a sandbox, inline or in a separate run, across every worker. One document counts once.
+  Past the cap, that document's charts are skipped and counted as deferred; the document itself is processed as usual.
 
 **Precedence**, highest first:
 
@@ -1225,9 +1227,9 @@ and an explicit `free` only where `chartExportDefaults.freeAvailable` is true. T
 without access gets its 403 or 404 before any tier refusal.
 
 **A project's tier is a ceiling.** Choosing `models` per request on a project
-whose stored tier is `off` or `free` needs project editor rights. An API key additionally needs the
+whose tier is `off`, `free` or unset (no tier means off) needs project editor rights. An API key additionally needs the
 `pipeline:billed-features` scope (or `projects:manage`). Otherwise the request is refused with
-`403 chart_export_models_forbidden`. Projects with no tier keep the usual rules.
+`403 chart_export_models_forbidden`. Only a project saved on `models` lets any caller with spend allowance choose it.
 
 **Billing for `models`:** a `models` run passes the same spend admission as other model-calling work: credits, budgets,
 and the `ingest` scope on a server key. An unknown tier, a `generatorModel` field, or any other unknown key is a

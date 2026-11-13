@@ -9,6 +9,8 @@ export interface InitializedParserSandbox {
   isolation: SandboxIsolation;
   /** The VM image's tools (SandboxProbeResult.tools), when the provider reports them. */
   tools?: readonly string[];
+  /** The VM image's guest capabilities (SandboxProbeResult.capabilities). */
+  capabilities?: readonly string[];
 }
 
 /**
@@ -33,7 +35,7 @@ export async function initializeParserSandbox(
     `[parser-sandbox] provider=${provider.id} filesystem=${isolation.filesystem} ` +
       `network=${isolation.network} processes=${isolation.processes} location=${isolation.location}`,
   );
-  return { provider, config, isolation, ...(probe.tools ? { tools: probe.tools } : {}) };
+  return { provider, config, isolation, ...(probe.tools ? { tools: probe.tools } : {}), ...(probe.capabilities ? { capabilities: probe.capabilities } : {}) };
 }
 
 let registeredSandbox: InitializedParserSandbox | undefined;
@@ -47,6 +49,17 @@ let lazySandbox: Promise<InitializedParserSandbox> | undefined;
 export function setDefaultParserSandbox(sandbox: InitializedParserSandbox | undefined): void {
   registeredSandbox = sandbox;
   lazySandbox = undefined;
+}
+
+/**
+ * Whether the parser image runs guest code with `capability`. A remote image (guest scripts shipped in the image, not
+ * this worker) must report it in its contract; one that does not, an older image or one that reports none, lacks it.
+ * A local sandbox runs this checkout's own guest scripts, so it has every capability this code knows. No registered
+ * sandbox (tests, CLIs): this checkout's scripts as well.
+ */
+export function parserImageHasCapability(capability: string, sandbox: InitializedParserSandbox | undefined = registeredSandbox): boolean {
+  if (!sandbox || sandbox.isolation.location !== "remote") return true;
+  return sandbox.capabilities?.includes(capability) === true;
 }
 
 /** The registered sandbox, if any; never initializes one. */

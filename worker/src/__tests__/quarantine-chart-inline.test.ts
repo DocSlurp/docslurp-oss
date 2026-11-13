@@ -45,6 +45,8 @@ async function fixture(pipeline: Record<string, unknown>, extra: Array<[string, 
     updateProgress: vi.fn(async () => {}), startRunStage: vi.fn(async () => {}), completeRunStage: vi.fn(async () => {}), failRunStage: vi.fn(async () => {}),
     appendEvent: vi.fn(async () => {}), setPageStageComplete: vi.fn(async () => {}), getCompletedPages: vi.fn(async () => new Set<number>()),
     setDocumentFileFacts: vi.fn(async () => {}), setDocumentParseSource: vi.fn(async () => true),
+    // The org's free-VM cap grants every free-tier inline step here (council #387 M2; its refusal is tested in inline.test.ts).
+    reserveChartExportFreeVmRun: vi.fn(async () => true),
   } as unknown as CheckpointStore;
   const artifacts = new Map<string, Record<string, unknown>>();
   let sequence = 0;

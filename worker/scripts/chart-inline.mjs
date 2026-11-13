@@ -85,7 +85,7 @@ const MAX_WORKERS = 8;
  *   end the input;
  * - messages after the worker is settled are ignored (#364 council r9 I1).
  */
-function runWorker(workerUrl, task, done, index, endsAt, memory, onStart, compileCacheDir, unitCapMs) {
+function runWorker(workerUrl, task, done, index, ends, memory, onStart, compileCacheDir, unitCapMs, onReady = () => {}) {
   return new Promise((resolve) => {
     // An empty environment, as #364's guest gives its workers.
     const worker = new Worker(workerUrl, {
@@ -104,6 +104,8 @@ function runWorker(workerUrl, task, done, index, endsAt, memory, onStart, compil
     const finish = (outcome) => {
       if (settled) return;
       settled = true;
+      // When the worker stopped working on the file (before the exit wait), for the step's work-time account.
+      outcome.endedAt = performance.now();
       clearTimeout(unitTimer);
       clearTimeout(hardTimer);
       clearInterval(watch);
@@ -111,8 +113,9 @@ function runWorker(workerUrl, task, done, index, endsAt, memory, onStart, compil
       void Promise.race([exited, new Promise((r) => setTimeout(r, TERMINATE_WAIT_MS))]).then(() => resolve(outcome));
     };
     const workerLimit = Math.min(memory.ceiling, process.memoryUsage.rss() + memory.growth);
-    const left = () => Math.max(1, endsAt - performance.now());
-    const hardTimer = setTimeout(() => finish({ failure: "timeout", inflight }), left());
+    // `ends()` is the step's hard end; it moves earlier once the first worker reports ready (measured start-up).
+    const left = () => Math.max(1, ends() - performance.now());
+    let hardTimer = setTimeout(() => finish({ failure: "timeout", inflight }), left());
     // The real memory bound (heap limits do not cover external memory): over it, the unit in flight is lost (crashed).
     const watch = setInterval(() => {
       const rss = process.memoryUsage.rss();
@@ -120,7 +123,11 @@ function runWorker(workerUrl, task, done, index, endsAt, memory, onStart, compil
     }, INLINE_CHART_LIMITS.rssPollMs);
     worker.on("message", (m) => {
       if (settled) return;
-      if (m?.t === "start") {
+      if (m?.t === "ready") {
+        onReady();
+        clearTimeout(hardTimer);
+        hardTimer = setTimeout(() => finish({ failure: "timeout", inflight }), left());
+      } else if (m?.t === "start") {
         inflight = { id: m.id, locator: m.locator, svgIndex: m.svgIndex, svg: m.svg };
         onStart(inflight);
         clearTimeout(unitTimer);
@@ -165,9 +172,15 @@ export async function inlineCharts(bytes, request, inspection, inputPath, worker
   // charts are refused (counted by the host as a deferral) so the command always finishes with its verdict.
   const budget = inlineStepBudget({ now: started, commandStartedAt: typeof clock.commandStartedAt === "number" ? clock.commandStartedAt : started, sizeBytes: bytes.length });
   if (!budget) return { status: "refused", reason: "command-budget", ms: 0 };
-  const endsAt = budget.endsAt;
-  // The extractor's own deadline (epoch ms), inside the hard one: past it, unanalysed units become counted deferrals.
-  const softDeadline = Date.now() + budget.softMs;
+  // Time on the file is charged by measurement (council #387 M2): only the time workers spend after reporting ready
+  // (bundle loaded, our code only before that) counts against the file's size-scaled deadline, so a fast start-up is not
+  // banked as extra time for the file, and a worker restart's own start-up and exit wait do not eat it. `budget.endsAt`
+  // (the start-up allowance plus the deadline, cut at the command cutoff) caps the whole step.
+  let workUsed = 0;
+  // The extractor's own (soft) deadline, inside the hard one: past it, unanalysed units become counted deferrals. Each
+  // worker counts it from its own ready (deadlineMs: the same share of the work time left), capped by the command budget
+  // (deadline, epoch ms).
+  const softCap = Date.now() + budget.softMs;
   const options = { diagrams: request.diagrams !== false };
   // One memory budget for the whole step, from the RSS before the first worker: a later worker never inherits the
   // headroom of memory an ended worker has not yet returned.
@@ -188,12 +201,22 @@ export async function inlineCharts(bytes, request, inspection, inputPath, worker
   // the test hooks (the production bundle compiles them out).
   const fault = process.env.DOCSLURP_CHART_GUEST_TEST_FAULT ?? null;
   for (let w = 0; ; w++) {
-    const countOnly = performance.now() >= endsAt || w >= MAX_WORKERS - 1;
+    const workLeft = Math.max(0, budget.deadlineMs - workUsed);
+    const countOnly = performance.now() >= budget.endsAt || workLeft === 0 || w >= MAX_WORKERS - 1;
+    let readyAt = null;
+    // A count-only worker: its start-up (measured, capped) and then COUNT_ONLY_MS to record what is left.
+    let workerEnd = countOnly ? performance.now() + INLINE_CHART_LIMITS.countOnlyStartupMs : budget.endsAt;
+    const onReady = () => {
+      if (readyAt !== null) return;
+      readyAt = performance.now();
+      workerEnd = countOnly ? readyAt + COUNT_ONLY_MS : Math.min(budget.endsAt, readyAt + workLeft);
+    };
     // UnitControl.skip (#364 resumeSkipList): unit id to { visuals, bytes }, so a resumed worker carries the byte total.
     const skip = w === 0 ? [] : (await guest(compileCacheDir)).resumeSkipList(done, failed.keys());
-    const task = { path: inputPath, kind, packaged: plan.packaged, options, skip, outputBudget: INLINE_OUTPUT_BUDGET, deadline: countOnly ? 0 : softDeadline, fault };
-    const outcome = await runWorker(workerUrl, task, done, w, countOnly ? performance.now() + COUNT_ONLY_MS : endsAt, memory,
-      (unit) => { nextSvg = unit.svgIndex + (unit.svg ? 1 : 0); }, compileCacheDir, unitCapMs);
+    const task = { path: inputPath, kind, packaged: plan.packaged, options, skip, outputBudget: INLINE_OUTPUT_BUDGET, deadline: countOnly ? 0 : softCap, ...(countOnly ? {} : { deadlineMs: Math.floor(workLeft * INLINE_CHART_LIMITS.softDeadlineShare) }), fault };
+    const outcome = await runWorker(workerUrl, task, done, w, () => workerEnd, memory,
+      (unit) => { nextSvg = unit.svgIndex + (unit.svg ? 1 : 0); }, compileCacheDir, unitCapMs, onReady);
+    if (readyAt !== null && !countOnly) workUsed += Math.max(0, outcome.endedAt - readyAt);
     lastWorker = w;
     if (outcome.result) { final = outcome.result; break; }
     if (outcome.inflight && !failed.has(outcome.inflight.id) && !countOnly) {

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import modal from "../providers/modal/index.js";
-import { initializeParserSandbox } from "../startup.js";
+import modal, { parserVmCapabilities } from "../providers/modal/index.js";
+import { initializeParserSandbox, parserImageHasCapability } from "../startup.js";
 import type { SandboxSession } from "../types.js";
 
 // Council G M4: the startup probe runs worker/scripts/parser-vm-contract.mjs in the VM and accepts only the parser-vm@5
@@ -66,6 +66,26 @@ describe("modal startup probe requires the parser-vm@5 contract", () => {
     fakeSession(JSON.stringify({ protocol: "parser-vm@5", uid: 10001, links: { hardlinks: 1, symlinks: 1 }, hardening: { suidDumpable: 0, ptraceScope: 1 }, qpdfVersion: "12.2.0" }));
     expect((await modal.probe(modal.readConfig(env))).ok).toBe(true);
     await expect(initializeParserSandbox(env, "linux")).resolves.toMatchObject({ provider: modal });
+  });
+});
+
+describe("parser image capabilities (council #387 M1)", () => {
+  const good = { protocol: "parser-vm@5", uid: 10001, links: { hardlinks: 1, symlinks: 1 }, hardening: { suidDumpable: 0, ptraceScope: 1 }, qpdfVersion: "12.2.0" };
+  it("reports the image's capabilities, and an older @5 image without the field reports none", async () => {
+    fakeSession(JSON.stringify({ ...good, capabilities: ["inline-command-budget", "BAD cap", 7, "inline-command-budget"] }));
+    expect((await modal.probe(modal.readConfig(env))).capabilities).toEqual(["inline-command-budget"]);
+    const withCap = await initializeParserSandbox(env, "linux");
+    expect(parserImageHasCapability("inline-command-budget", withCap)).toBe(true);
+    fakeSession(JSON.stringify(good));
+    const older = await initializeParserSandbox(env, "linux");
+    expect(older.capabilities).toEqual([]);
+    // The image still starts (other parsing is unaffected); inline charts are refused per document instead.
+    expect(parserImageHasCapability("inline-command-budget", older)).toBe(false);
+    expect(parserVmCapabilities("inline-command-budget")).toEqual([]);
+  });
+  it("a local sandbox runs this checkout's guest scripts: every capability it knows", () => {
+    expect(parserImageHasCapability("inline-command-budget", { isolation: { location: "local" } } as never)).toBe(true);
+    expect(parserImageHasCapability("inline-command-budget", undefined)).toBe(true);
   });
 });
 
