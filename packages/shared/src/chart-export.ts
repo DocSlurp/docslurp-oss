@@ -138,8 +138,8 @@ export function parseChartExportFreeVmCap(raw: string): number | null {
 }
 
 /**
- * The cap from `DOCSLURP_CHART_EXPORT_FREE_VM_RUNS_PER_ORG_HOUR`. Unset or empty: the default (200 per org-hour, about
- * $0.023 of unbilled VM time at the measured $0.000114 per run). Anything that is not a non-negative integer is 0 (no
+ * The cap from `DOCSLURP_CHART_EXPORT_FREE_VM_RUNS_PER_ORG_HOUR`. Unset or empty: the default, which bounds the unbilled
+ * parser-VM time one organization can cause per hour. Anything that is not a non-negative integer is 0 (no
  * free VM runs), failing toward lower cost like every other chart-export setting, and is named at startup by
  * `chartExportDefaultsWarnings`.
  */

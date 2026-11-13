@@ -303,7 +303,7 @@ const STAGE_WEIGHT: Record<PipelineRunStage, number> = {
 
 
 /**
- * Measured free-tier time (app docs/evals/chart-export-free-tier-2026-11-13): about 0.1 s of artifact reads per document
+ * Measured free-tier time (a before/after run of the free tier on a chart-dense slice): about 0.1 s of artifact reads per document
  * for the extra `vision-extract` pass, and about 1.4 s of parser-VM boot and staging per document with a chart signal.
  * The high end assumes the measured chart-dense share of signalled documents (35 of 75).
  */
