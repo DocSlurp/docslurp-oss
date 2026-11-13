@@ -79,7 +79,7 @@ some text models unavailable:
     stage's model as `requestedModel`, with `regionFallback: true`.
   - Set `OPENROUTER_RESTRICTED_FALLBACK_MODEL` to another model, or to `none` to turn the fallback off and fail
     instead; a `:variant` or prohibited model is ignored. To choose the model that runs, set
-    `pipeline.textGeneration.model` to a model with non-China hosts; it then never needs the fallback.
+    `pipeline.textGeneration.model` (a managed setting, set by platform admins) to a model with non-China hosts; it then never needs the fallback.
 - Providers whose region is unknown (for example Relace, Typesafe, Liquid, NEAR AI, Makora) are never used
   while the setting is off.
 

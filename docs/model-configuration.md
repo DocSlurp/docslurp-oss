@@ -8,7 +8,7 @@ evidence store. See the judge calibration and adoption tickets.
 
 ## Model URIs (llm://)
 
-Every API field that names a model takes an `llm://` model URI:
+Every managed setting that names a model takes an `llm://` model URI:
 
 ```text
 llm://<provider>/<model-id>
@@ -22,26 +22,43 @@ llm://<provider>/<model-id>
 | `llm://transformers.js/<model>`, `llm://local-cli/<model>`, `llm://vllm/<model>` | A model running in-process, as a local command or on a loopback server (self-hosted deployments). | `llm://transformers.js/Xenova/bge-m3` |
 | `<vendor>/<model>` | Shorthand for `llm://openrouter/<vendor>/<model>`, accepted wherever a hosted model is. | `anthropic/claude-haiku-5.5` |
 
-Where each field accepts them:
+## Managed models: callers choose categories
 
-| Field | Accepts | Notes |
+Programmatic callers (REST, OpenAI-compatible chat, MCP, SDK, CLI) never choose a backend model or provider. They choose DocSlurp categories:
+
+| Surface | Category |
+| --- | --- |
+| Chat (`/v1/chat`, `/v1/chat/stream`, chat operations, MCP `chat`, `docslurp.tier` on `/v1/chat/completions`) | `tier`: `fastest`, `balanced`, `smart`; `reasoning`: `none` to `high` |
+| Ingestion (`pipeline` on project create/update, uploads, extracts) | `quality` (`fast`, `auto`, `good`), `embedding.profile`, `vision.profile`, `inferenceLane` |
+| Search settings | `retrievalDefaults.reranker`: `keyword` or `model` |
+
+A request that names a backend model, provider or route (`model`, `docslurp.model`, `pipeline.textGeneration.model(s)`, `pipeline.structuredExtraction.model`, `pipeline.embedding.modelUri`/`target`, `pipeline.vision.modelUri`/`target`/`remoteFallbackModelUri`, a non-`auto` `pipeline.visualPages.route`, `retrievalDefaults.rerankProvider`/`rerankModel`) gets HTTP 400 `model_not_allowed` naming the fields and the categories to use. The refused value is logged, never echoed. A model URI equal to what the section's profile already implies (a pipeline read back and saved) is not a choice and passes. Project, pipeline and search-settings responses omit these fields; chat responses report the tier. Usage events (`usage_events`), traces and the `[ai-usage] ... model=<id>` logs keep the concrete model and provider.
+
+The concrete models are managed settings:
+
+- **Deployment defaults:** `CHAT_TIER_MODELS` in `packages/shared/src/project-chat-models.ts` (tier → reviewed catalog model, priced under the $50 per 1M output-token cap, never Pro/Ultra), the embedding and vision profile catalogs, and the environment variables below.
+- **Per project (platform admins only):** `PUT /v1/admin/projects/:projectId/managed-models` from a platform-admin browser session (`ADMIN_EMAILS`; API keys and OAuth tokens are refused). Body: `{"chat": {"<tier>": "<catalog id>" | null}, "pipeline": {"textGeneration": {"model", "models"}, "structuredExtraction": {"model"}, "vision": {"modelUri", "remoteFallbackModelUri"}, "embedding": {"modelUri"}}}`. Chat models must be reviewed catalog or eval models with a verified price under the cap. Pipeline values are validated by the pipeline schema (catalog URIs or operator `llm://private/...` routes). An embedding model change is refused once the project has documents; change the profile and re-index instead. Stored managed values survive customer edits; an embedding or vision override is kept only while its profile is unchanged.
+- **Operator evaluations:** see [chat tiers](search-api.md#tier) for `DOCSLURP_CHAT_EVAL_MODELS` and `DOCSLURP_CHAT_EVAL_ORG_IDS`.
+
+Where the managed and deployment settings accept URIs:
+
+| Setting | Accepts | Notes |
 | --- | --- | --- |
-| `model` on `POST /v1/chat`, `/v1/chat/stream`, chat operations | `llm://openrouter/...` or the bare id, from the chat model catalog, with an optional `?reasoning=` option ([reasoning](search-api.md#reasoning)) | An unavailable model, an unknown option or an unknown reasoning level is a 400 `model_not_allowed`, never the default. |
-| `docslurp.model` on `POST /v1/chat/completions` | Same as `/v1/chat` | `model` on this endpoint selects a project (`project:default`); an `llm://` value there is a 400 naming `docslurp.model`. |
-| `pipeline.textGeneration.model`, `.models.<task>`, `pipeline.structuredExtraction.model` | `llm://openrouter/...`, the bare id, or `llm://private/...` | Hosted URIs are stored as the bare OpenRouter id. |
-| `pipeline.vision.modelUri`, `.remoteFallbackModelUri` | An `llm://` URI from the vision catalog | Bare ids are not accepted. |
-| `pipeline.embedding.modelUri` | An `llm://` URI from the embedding catalog | Bare ids are not accepted. |
+| Admin `chat.<tier>`; operator-eval `model` on chat requests | The bare OpenRouter id from the chat catalog (eval requests also take `llm://openrouter/...` with `?reasoning=`) | Customers get 400 `model_not_allowed`. |
+| Admin `pipeline.textGeneration.model`, `.models.<task>`, `pipeline.structuredExtraction.model` | `llm://openrouter/...`, the bare id, or `llm://private/...` | Hosted URIs are stored as the bare OpenRouter id. |
+| Admin `pipeline.vision.modelUri`, `.remoteFallbackModelUri` | An `llm://` URI from the vision catalog, or `llm://private/...` | Bare ids are not accepted. |
+| Admin `pipeline.embedding.modelUri` | An `llm://` URI from the embedding catalog, or `llm://private/...` | Projects without documents only. |
 | `DOCSLURP_SEARCH_MODEL`, `DOCSLURP_CHAT_EVAL_MODELS`, `CHAT_INSTRUCTIONS_IMPROVE_MODEL` | `llm://openrouter/...` or the bare id | |
 | `DOCSLURP_TEXT_MODEL` | `llm://openrouter/...`, the bare id, or `llm://private/...` | The deployment default for text stages. |
 | `DOCSLURP_VISION_MODEL_URI` | An `llm://` URI from the vision catalog | |
 | `MEDIA_TRANSCRIPTION_MODEL` | `llm://<provider>/<model>` (e.g. `llm://deepinfra/openai/whisper-large-v3-turbo`) or the provider's model id | The URI's provider stands in for `MEDIA_PROVIDER`; a conflicting `MEDIA_PROVIDER` fails startup. |
 
 Model URIs never carry credentials: a URI with a user name or password is
-rejected. Responses report the hosted model by its bare OpenRouter id (for
-example `debug.model` on a chat answer).
+rejected.
 
-Project pipeline settings own ingestion model choices. Configure them when
-creating or updating a project through the API/SDK; runs snapshot those settings.
+Project pipeline settings own ingestion choices. Customers configure the
+categories through the API/SDK; platform admins set the managed model fields
+through the admin route above. Runs snapshot those settings.
 Project changes affect new runs, while existing runs retain their captured
 project configuration. Inherited deployment defaults resolve when the worker
 executes each task.
@@ -74,11 +91,11 @@ default is now `null`, so it inherits this same chain.
 
 API search and helper calls use `DOCSLURP_SEARCH_MODEL`, falling back to the
 project chat catalog's default. The environment override must be one of the
-allowed project chat models (bare id or `llm://openrouter/<id>`). Explicit
-request model selections still win.
+allowed project chat models (bare id or `llm://openrouter/<id>`). A chat
+request's tier picks the answering model.
 
 Vision uses `pipeline.vision.modelUri` and its configured fallback; embeddings
-use `pipeline.embedding.modelUri`. Chat uses its existing model selector.
+use `pipeline.embedding.modelUri` (both managed settings). Chat uses the tier.
 Catalog IDs and built-in defaults remain centralized configuration values;
 individual text stages no longer choose a fixed model.
 

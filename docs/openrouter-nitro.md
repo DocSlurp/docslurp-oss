@@ -15,7 +15,7 @@ Pass `speedBoost: true` with either the base model ID or its listed Nitro varian
 For uploads and reprocessing, pass the same top-level flag. The created run snapshots the choice: eligible OpenRouter AI stages use Nitro; unsupported models, local processing, embeddings and other non-generation calls keep their existing routes. The run-level credit multiplier applies to the opted-in run, not only the individual calls that can use Nitro. Omitting the flag on a new API request does not inherit a previous UI choice.
 
 ```ts
-await client.chat({ q: "Summarize the document", model: "openai/gpt-6-luna", speedBoost: true });
+await client.chat({ q: "Summarize the document", tier: "fastest", speedBoost: true });
 await client.upload(file, { speedBoost: true });
 await client.reprocessRun(runId, { speedBoost: true });
 ```
