@@ -220,7 +220,7 @@ export async function pageInputFromProbeRow(
         textDensityScore: entry?.textDensityScore ?? row.textCoverage,
       },
       decisions: null,
-      provenance: { probe: "native-pdf-probe", probeMs: row.probeMs },
+      provenance: { probe: row.probeEngine === "doppler-facts" ? "doppler-facts" : "native-pdf-probe", probeMs: row.probeMs },
     },
     textFacts: {
       wordCount: row.textFacts.wordCount,

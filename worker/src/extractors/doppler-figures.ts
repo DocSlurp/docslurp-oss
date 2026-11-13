@@ -679,7 +679,7 @@ function recordOf(row: DocumentAsset, error?: string): DopplerFigureRecord {
 export function dopplerFolderKey(
   document: { id: string; userId: string; runId: string; artifactRoot?: string | null },
   runId: string,
-  object: "markdown" | "source" | "index" | "manifest" | "manifestV3" | { id: string; format: DopplerFigureFormat } | { shard: readonly [number, number] },
+  object: "markdown" | "source" | "index" | "manifest" | "manifestV3" | "pageFacts" | { id: string; format: DopplerFigureFormat } | { shard: readonly [number, number] },
 ): string {
   const root = documentArtifactRoot(document, runId);
   const prefix = dopplerDocumentPrefix(root, document.id);
@@ -692,6 +692,8 @@ export function dopplerFolderKey(
     case "index": return `${prefix}${DOPPLER_STORE_LAYOUT.index}`;
     case "manifest": return `${images}${DOPPLER_STORE_LAYOUT.manifest}`;
     case "manifestV3": return `${images}${DOPPLER_MANIFEST_V3_FILE}`;
+    // Written by extract-markdown from the host's validated facts (dopplerPageFactsJsonl), never copied from the provider's folder.
+    case "pageFacts": return `${images}${DOPPLER_STORE_LAYOUT.pageFacts}`;
   }
 }
 
@@ -802,6 +804,8 @@ export interface DopplerFigureStats {
 /** Document artifact slots of the Doppler folder (beside `doppler-figure:<id>` per file and the `doppler-figures` index). */
 export const DOPPLER_MANIFEST_SLOT = "doppler-manifest";
 export const DOPPLER_MARKDOWN_SLOT = "doppler-markdown";
+/** The host's canonical page facts (`images/page-facts.jsonl`, extract-markdown), never the provider's file. */
+export const DOPPLER_PAGE_FACTS_SLOT = "doppler-page-facts";
 
 export interface StoredDopplerFigures {
   indexUri: string;
