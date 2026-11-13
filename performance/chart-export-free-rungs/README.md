@@ -124,13 +124,33 @@ gracefully: finished work is never dropped, and a budget hit never aborts the re
 **Measured** with `run-in-modal-vm.mjs 1 doc100` (Modal `runtime: "vm"`, 2 vCPU, network blocked, Node 24.22.3, fresh
 process). The input is the council's 100 near-cap packed SVGs in one 3.8 MB HTML file, under the production budget.
 
-| run | wall time | peak RSS | pair tests | exported | of which approximate | deferred | refused |
-|---|--:|--:|--:|--:|--:|--:|--:|
-| 1 | 6.5 s | 492 MB | 2.0×10⁸ | 100 | 100 | 0 | 0 |
-| 2 | 5.3 s | 490 MB | 2.0×10⁸ | 100 | 100 | 0 | 0 |
+| input | run | wall time | peak RSS | pair tests | exported | of which approximate | deferred | refused |
+|---|---|--:|--:|--:|--:|--:|--:|--:|
+| HTML, 100 near-cap SVGs (3.8 MB) | 1 | 6.5 s | 492 MB | 2.0×10⁸ | 100 | 100 | 0 | 0 |
+| | 2 | 5.3 s | 490 MB | 2.0×10⁸ | 100 | 100 | 0 | 0 |
+| | 3 (with zod `jitless`) | 4.9 s | 495 MB | 2.0×10⁸ | 100 | 100 | 0 | 0 |
+| SVG batch, 40 near-cap copies, 1-page document (`batch40`) | 1 (with zod `jitless`) | 3.0 s | 314 MB | 2.0×10⁸ | 40 | 40 | 0 | 0 |
 
-Every SVG in this input is hostile (no marker sits on a vertex), so all of them are approximated. On round 2's
-first-come cap, 99 of them were refused (2.9 s). The extra time is `complete()` running on 19,900 kept markers per SVG.
+Every SVG in these inputs is hostile (no marker sits on a vertex), so all of them are approximated. Under round 3's
+first-come cap (council r3 I2), the same inputs gave 1 visual and 99 refusals, and 1 visual and 39 refusals. The extra
+time over round 3 is `complete()` running on 19,900 kept markers per SVG.
+
+### Guest hardening: zod `jitless`, code-loading guard, image check
+
+- **zod `jitless` (council r3 I1).** The guest turns off zod's eval-compiled parsers at start (`disableSchemaJit`),
+  so it generates no code at run time.
+  - Measured as fresh guest-like processes, 15 interleaved each, on a loaded host: 134 vs 141 ms CPU for a 1-chart
+    run, and 302 vs 311 ms for 40 charts. That is no cost, and slightly faster.
+  - zod's JIT code stays in the bundle text but never runs. So the build guard scans our own bundled sources
+    (everything but zod) and fails on the Function constructor, `eval`, `process.binding`/`dlopen`/
+    `getBuiltinModule`, `createRequire` or `import(`.
+- **The parser image passes its contract (council r3 I3).**
+  - `worker/Dockerfile.lean`, the `worker-images.yml` recipe, was built locally from this branch.
+  - `node /app/worker/scripts/parser-vm-contract.mjs` ran inside the image as uid 1000 with no network and exited 0.
+    The bundle manifest's paths resolve through the `pnpm deploy` layout, with `@docslurp/shared` under
+    `worker/node_modules/.pnpm/...`.
+  - With one byte appended to the deployed shared `dist/chart-export.js`, the same run exits 1 ("chart guest bundle is
+    stale").
 
 ### Deferred pass (design; follow-up PR)
 

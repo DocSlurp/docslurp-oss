@@ -8,7 +8,9 @@
 //   needs, or zod. Pulling the shared package index back in (OpenTelemetry, pricing: ~0.3 s CPU per run) is refused.
 // - Run-time loads: the bundle may import only `node:zlib` and `node:path` statically. A non-literal `import(x)` or
 //   `require(x)` is a build error (esbuild cannot bundle it), and `createRequire`, `getBuiltinModule` or esbuild's
-//   `__require` shim in the output fail the build, so nothing can load unbundled code at run time.
+//   `__require` shim in the output fail the build, so nothing can load unbundled code at run time. Our own bundled
+//   sources (everything but zod) may not use the Function constructor, eval or process bindings either. zod keeps its
+//   JIT (`new Function`) in the text, but the guest turns it off at start (`disableSchemaJit`).
 // - Byte budget for the bundle.
 // It also writes guest.bundle.inputs.json (hashes of every input and of the bundle itself), so the VM contract
 // (scripts/parser-vm-contract.mjs) refuses a bundle older than the code it ships with.
@@ -49,6 +51,12 @@ const [output] = Object.values(result.metafile.outputs);
 const RUNTIME_IMPORTS = new Set(["node:zlib", "node:path"]);
 const loads = output.imports.filter((i) => !(i.external && i.kind === "import-statement" && RUNTIME_IMPORTS.has(i.path)));
 if (loads.length) throw new Error(`chart guest bundle: run-time imports outside node:zlib/node:path: ${loads.map((i) => `${i.kind} ${i.path}`).join(", ")}`);
+const ZOD = /(^|\/)node_modules\/(\.pnpm\/zod@[^/]+\/node_modules\/)?zod\//;
+const CODE_LOADERS = /\bFunction\s*\(|new\s+Function\b|\beval\s*\(|\bprocess\s*(\.|\[)\s*["']?(binding|_linkedBinding|dlopen|getBuiltinModule)\b|\bcreateRequire\b|\bimport\s*\(/;
+for (const file of inputs.filter((f) => !ZOD.test(f))) {
+  const found = CODE_LOADERS.exec(await readFile(path.join(WORKER_ROOT, file), "utf8"));
+  if (found) throw new Error(`chart guest bundle: ${file} uses \`${found[0]}\`; the guest must not generate or load code at run time`);
+}
 const text = await readFile(BUNDLE_PATH, "utf8");
 const loader = /\b(createRequire|getBuiltinModule|__require)\b/.exec(text);
 if (loader) throw new Error(`chart guest bundle: contains \`${loader[1]}\`; the guest must not load modules at run time`);
