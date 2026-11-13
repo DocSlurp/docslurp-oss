@@ -243,3 +243,19 @@ describe("OpenRouter credential isolation", () => {
     expect(resolveOpenRouterApiKey()).toBe("router-primary-test-key");
   });
 });
+
+it("appends the per-model answer guidance to the shared instructions, only for models that have one", async () => {
+  const stream = () => ({
+    textStream: (async function* () { yield "Answer [1]"; })(),
+    usage: Promise.resolve({ inputTokens: 10, outputTokens: 2, raw: { cost: 0.0001 } }),
+    response: Promise.resolve({ id: "gen-test" }),
+    sources: Promise.resolve([]),
+  });
+  const args = { apiKey: "test", privacyMode: "standard" as const, system: "Shared rules.", prompt: "Q", maxOutputTokens: 100, documents: [{ title: "T", text: "x" }] };
+  streamTextMock.mockReturnValueOnce(stream());
+  await generateOpenRouterDocumentText({ ...args, model: "anthropic/claude-haiku-5.5" });
+  expect(streamTextMock.mock.calls.at(-1)?.[0].system).toMatch(/^Shared rules\.\n\nLength: answer only what the question asks/);
+  streamTextMock.mockReturnValueOnce(stream());
+  await generateOpenRouterDocumentText({ ...args, model: "openai/gpt-6-luna" });
+  expect(streamTextMock.mock.calls.at(-1)?.[0].system).toBe("Shared rules.");
+});
