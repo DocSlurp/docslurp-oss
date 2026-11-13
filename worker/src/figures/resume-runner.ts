@@ -146,15 +146,30 @@ async function release(sql: Client, row: ClaimedLevel, outcome: "done" | "retry"
   if (nextBlocked) console.log(`[doppler-figures] resume capped doc=${row.document_id} reason=${nextBlocked}`);
 }
 
-/** The resumable units of a claimed document: each resumable shard, or the document itself. */
-async function units(sql: Client, row: ClaimedLevel): Promise<Array<{ shard: { first: number; last: number } | null; manifestSha256: string; resumes: number }>> {
-  if (row.shards === 0) return row.manifest_sha256 && row.resumes < FIGURE_RESUME_LIMITS.maxAttempts ? [{ shard: null, manifestSha256: row.manifest_sha256, resumes: row.resumes }] : [];
+type ResumeUnit = { shard: { first: number; last: number } | null; manifestSha256: string | null; resumes: number };
+
+/**
+ * The resumable units of a claimed document, each one range: every resumable shard (its manifest), every gap (no
+ * manifest: a fresh pass over its pages becomes its shard), or the unsharded document itself.
+ */
+async function units(sql: Client, row: ClaimedLevel): Promise<ResumeUnit[]> {
+  const out: ResumeUnit[] = [];
+  if (row.shards === 0 && row.manifest_sha256 && row.resumes < FIGURE_RESUME_LIMITS.maxAttempts) {
+    const [own] = await sql<{ n: number }[]>`select assets_resumable as n from document_extraction_levels where document_id = ${row.document_id} and org_id = ${row.org_id}`;
+    if ((own?.n ?? 0) > 0) out.push({ shard: null, manifestSha256: row.manifest_sha256, resumes: row.resumes });
+  }
   const shards = await sql<Array<{ first_page: number; last_page: number; manifest_sha256: string; resumes: number }>>`
     select first_page, last_page, manifest_sha256, resumes from document_extraction_shards
     where document_id = ${row.document_id} and org_id = ${row.org_id} and project_id = ${row.project_id} and run_id = ${row.run_id}
       and images_status = 'resumable' and resumes < ${FIGURE_RESUME_LIMITS.maxAttempts}
     order by first_page`;
-  return shards.map((shard) => ({ shard: { first: shard.first_page, last: shard.last_page }, manifestSha256: shard.manifest_sha256, resumes: shard.resumes }));
+  for (const shard of shards) out.push({ shard: { first: shard.first_page, last: shard.last_page }, manifestSha256: shard.manifest_sha256, resumes: shard.resumes });
+  const [level] = await sql<{ gaps: Array<{ first: number; last: number }> | null; resumes: number }[]>`
+    select gaps, resumes from document_extraction_levels where document_id = ${row.document_id} and org_id = ${row.org_id} and project_id = ${row.project_id}`;
+  if ((level?.resumes ?? 0) < FIGURE_RESUME_LIMITS.maxAttempts) {
+    for (const gap of level?.gaps ?? []) out.push({ shard: { first: gap.first, last: gap.last }, manifestSha256: null, resumes: level!.resumes });
+  }
+  return out.sort((a, b) => (a.shard?.first ?? 0) - (b.shard?.first ?? 0));
 }
 
 /**
@@ -229,17 +244,19 @@ async function recordResumeVmTime(sql: Client, row: ClaimedLevel, wallTimeMs: nu
 
 async function resumeUnit(
   deps: FigureResumeDeps, row: ClaimedLevel, scope: DocumentAssetLedgerScope, document: { id: string; userId: string; runId: string; artifactRoot: string | null },
-  unit: { shard: { first: number; last: number } | null; manifestSha256: string; resumes: number },
+  unit: ResumeUnit,
 ): Promise<{ outcome: "done" | "retry" | "blocked"; blocked?: string; vmMs: number }> {
   const work = await mkdtemp(path.join(tmpdir(), "figure-resume-"));
   let source: string | null = null;
   try {
-    // 1. The stored manifest only.
+    // 1. The stored manifest only (none for a gap: a fresh pass over its pages).
     const manifestDir = path.join(work, "in");
-    await downloadDopplerImagesDir({
-      storage: deps.storage, document, runId: row.run_id, manifestSha256: unit.manifestSha256, pageCount: row.page_count, dir: manifestDir,
-      ...(unit.shard ? { shard: unit.shard } : {}), signal: deps.signal,
-    });
+    if (unit.manifestSha256) {
+      await downloadDopplerImagesDir({
+        storage: deps.storage, document, runId: row.run_id, manifestSha256: unit.manifestSha256, pageCount: row.page_count, dir: manifestDir,
+        ...(unit.shard ? { shard: unit.shard } : {}), signal: deps.signal,
+      });
+    }
     // 2. The source (the provider stages it into its VM; the host never parses it) and a fresh VM.
     if (!row.source_sha256) return { outcome: "blocked", blocked: "refused", vmMs: 0 };
     const sourceKey = deps.storage.bucket ? keyOf(row.source_key, deps.storage.bucket) : row.source_key;
@@ -251,8 +268,8 @@ async function resumeUnit(
     const timeoutMs = deps.provider!.timeoutMs(pages);
     const vmStarted = Date.now();
     const raw = await deps.provider!.resume({
-      input: source, sourceSha256: row.source_sha256, manifest: path.join(manifestDir, "manifest.jsonl"),
-      pages: unit.shard ? [unit.shard.first, unit.shard.last] : null, dir: outDir, limits: dopplerImageLimits(row.page_count), timeoutMs,
+      input: source, sourceSha256: row.source_sha256, manifest: unit.manifestSha256 ? path.join(manifestDir, "manifest.jsonl") : null,
+      pages: unit.shard ? [unit.shard.first, unit.shard.last] : null, resumePages: null, dir: outDir, limits: dopplerImageLimits(row.page_count), timeoutMs,
     }, deps.signal);
     const vmMs = Date.now() - vmStarted;
     const outcome = parseSandboxedPdfFigureOutcome(raw, 500, row.page_count);

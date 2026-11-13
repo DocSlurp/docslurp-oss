@@ -57,24 +57,38 @@ export interface SandboxedPdfJob {
 }
 
 /**
- * One figure resume (provider `figures.resume`). Paths are host paths the provider stages into its VM; the host reads
- * nothing of the source. The provider writes the resumed images folder into `dir` (created empty): the manifest
- * (`manifest.jsonl`, or `shards/<first>-<last>/manifest.jsonl` for a shard) and only the new files under `page-NNNN/`.
- * It answers like SandboxedPdfResult.figures (`extracted`, `partial` or `failed` with a telemetry-only reason); the host
- * validates the folder exactly as a first pass's.
+ * One figure resume (provider `figures.resume`), always for one range: a shard's pages, a gap's pages, or (for an unsharded
+ * document) the whole document. Paths are host paths the provider stages into a fresh VM; the host reads nothing of the
+ * source. The answer is a figure outcome like SandboxedPdfResult.figures (`extracted`, `partial` with optional `gaps`
+ * inside the range, or `failed` with a telemetry-only reason), and the host validates `dir` exactly like a first pass's
+ * folder (no figure file it already stores may come back different: `resume-rewrite`).
+ *
+ * Folder the provider writes into `dir` (created empty):
+ * - a range (`pages` set): `shards/<first>-<last>/manifest.jsonl` (4-digit zero padding, the converter's own manifest for
+ *   `--images-pages first-last`) and only the new files under `page-NNNN/`;
+ * - a whole document (`pages` null): `manifest.jsonl` and only the new files under `page-NNNN/`.
  */
 export interface FigureResumeJob {
-  /** The document's PDF (checked against `sourceSha256` by the converter, which refuses another). */
+  /** The document's PDF (the converter checks it against `sourceSha256` and refuses another). */
   input: string;
   sourceSha256: string;
-  /** The stored manifest to resume from (the resume folder holds only it). */
-  manifest: string;
-  /** A shard's pages, or null for the whole document. */
+  /**
+   * The range's stored manifest (the resume folder holds only it: `--images-resume` with a manifest-only folder), or null
+   * for a gap (no manifest ever came back): a fresh figure pass over `pages` (`--images-pages first-last`).
+   */
+  manifest: string | null;
+  /** The range (bound into the manifest's settings digest by `--images-pages`), or null for an unsharded document. */
   pages: [number, number] | null;
-  /** Empty folder for the resumed images. */
+  /**
+   * Narrow a resume inside the range (Doppler `--images-resume-pages A-B`, not part of the settings digest); null resumes
+   * all of it. Always within `pages`; never set for a gap.
+   */
+  resumePages: [number, number] | null;
+  /** Empty folder for the resumed images (layout above). */
   dir: string;
+  /** The document's caps as Doppler flags (as for a first pass): a resume never exceeds them. */
   limits: DopplerImageLimits;
-  /** Wall-time budget for the VM run. */
+  /** Wall-time budget for the VM run; the guest should set `--images-deadline` a margin below it. */
   timeoutMs: number;
 }
 

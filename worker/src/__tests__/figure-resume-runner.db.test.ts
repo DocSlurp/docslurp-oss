@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { dopplerShardFolder } from "@docslurp/shared";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { PGlite } from "@electric-sql/pglite";
@@ -192,6 +193,41 @@ describe("the runner", () => {
       select metric, cost_cents::float8 as cost, org_id, metadata from usage_events`;
     expect(events).toEqual([expect.objectContaining({ metric: "doppler-figures-resume-vm", cost: 0, org_id: "org-a", metadata: expect.objectContaining({ billable: false }) })]);
     expect(storage.deletes).toEqual([]);
+  });
+
+  it("a gap (no manifest) is resumed by a fresh pass over its pages, which becomes that range's shard", async () => {
+    const storage = memoryStorage();
+    // A complete pass whose pages 3-3 a shard never returned (plugin:shard-over-share).
+    const built = v2Manifest();
+    const dir = await mkdtemp(path.join(work, "pass-"));
+    await writeV3Folder(dir, v3Text(built.manifest), built.files);
+    const set = await readDopplerFigureDir(dir, { pageCount: 3, expect: "complete", sourceSha256: V2_SOURCE_SHA });
+    const stored = await storeDopplerFigures({ storage, document: { id: "doc-a", userId: "ua", runId: "run-a" }, runId: "run-a", figures: set, markdown: "" });
+    const write = ledgerWriteForStoredFigures({ set, stored, outcome: { status: "partial", exitCode: 5, gaps: [{ first: 3, last: 3, reason: "plugin:shard-over-share" }] } });
+    await writeDocumentAssetLedger(sql, { scope: scopeOf("doc-a"), level: { ...write.level, markdownComplete: true }, assets: write.assets });
+    expect(await level()).toMatchObject({ images_status: "resumable", queued: true });
+    await due();
+    const jobs: FigureResumeJob[] = [];
+    const provider: FigureResumeProvider = {
+      timeoutMs: () => 60_000,
+      resume: async (job) => {
+        jobs.push(job);
+        // The converter's own manifest for --images-pages 3-3: nothing to extract on that page.
+        const empty = { ...v2Manifest().manifest, images: [], batches: [{ pages: [3, 3], status: "ok" }], complete: true, resumable: false };
+        empty.totals = Object.fromEntries(Object.keys(empty.totals).map((key) => [key, key === "batches" ? 1 : 0]));
+        const shardDir = path.join(job.dir, "shards", dopplerShardFolder(3, 3));
+        await mkdir(shardDir, { recursive: true });
+        await writeFile(path.join(shardDir, "manifest.jsonl"), v3Text(empty as never, { pages: [3, 3] }));
+        return { status: "extracted", exitCode: 0 };
+      },
+    };
+    await runFigureResumes({ sql, storage, provider, workerId: "w1", env: ON });
+    expect(jobs).toEqual([expect.objectContaining({ manifest: null, pages: [3, 3], resumePages: null })]);
+    const [after] = await sql<{ images_status: string; gaps: unknown }[]>`select images_status, gaps from document_extraction_levels where document_id = 'doc-a'`;
+    expect(after!.images_status).toBe("complete");
+    expect(after!.gaps ?? []).toEqual([]);
+    expect(await sql`select first_page, last_page from document_extraction_shards where document_id = 'doc-a'`).toEqual([{ first_page: 3, last_page: 3 }]);
+    await sql`delete from document_extraction_shards`;
   });
 
   it("a provider failure backs off and blocks after three attempts; nothing is deleted", async () => {
