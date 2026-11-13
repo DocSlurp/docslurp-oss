@@ -80,6 +80,9 @@ export function isPriceRoutedModel(model: string): boolean {
   return PRICE_ROUTED_MODEL_PREFIXES.some((prefix) => model.startsWith(prefix));
 }
 
+/** OpenRouter endpoints with no output-token price, where the output-price ceiling does not apply. Audio only. */
+const OUTPUT_CEILING_EXEMPT_PATHS: ReadonlySet<string> = new Set(["/api/v1/audio/transcriptions"]);
+
 /** Highest output price any OpenRouter request may be routed to: just under the cap (MAX_OUTPUT_USD_PER_MTOK_EXCLUSIVE). */
 export const OUTPUT_PRICE_CEILING_USD_PER_MTOK = MAX_OUTPUT_USD_PER_MTOK_EXCLUSIVE - 0.01;
 
@@ -374,8 +377,9 @@ export function createOpenRouterRoutingFetch(baseFetch: typeof fetch = fetch, op
       return baseFetch(input, { ...init, body: JSON.stringify(withOpenRouterProviderPreferences(retargeted, { ...policy!, speedBoost: false })) });
     };
     if (canFallBack && regionBlocked(requested)) return sendFallback("remembered");
-    // Text generation and embeddings carry the output-price ceiling; other endpoints (audio) have no output tokens.
-    const priced = generation || url.pathname === "/api/v1/embeddings";
+    // Every endpoint carries the output-price ceiling unless it is listed here as having no output-token price. Only
+    // audio transcription is (billed per audio input); a new endpoint gets the ceiling by default.
+    const priced = !OUTPUT_CEILING_EXEMPT_PATHS.has(url.pathname);
     const routed = withOpenRouterProviderPreferences(body, policy, { outputPriceCeiling: priced });
     let response = routed === original ? await baseFetch(input, init) : await baseFetch(input, { ...init, body: JSON.stringify(routed) });
     const base = typeof body.model === "string" ? nitroBaseModel(body.model) : undefined;
