@@ -105,6 +105,49 @@ describe("figure bytes in getOrgStorage", () => {
     await sql`delete from document_assets`;
   });
 
+  it("R3-M1: withheld figures are subtracted in linear time (5,000 withheld figures under a bound)", async () => {
+    await doc("big");
+    const n = 5000;
+    await sql`insert into document_extraction_levels (document_id, org_id, project_id, run_id, images_status, asset_bytes, assets_total, assets_extracted)
+      values ('big', 'oa', 'pa', 'ra', 'complete', ${n * 100 + 1000}, ${n + 1}, ${n + 1})`;
+    await sql`insert into document_assets (document_id, org_id, project_id, run_id, asset_id, page_number, kind, fate, status, format, source, bytes, sha256,
+        width, height, link_path, file_of, storage_key, storage_state)
+      select 'big', 'oa', 'pa', 'ra', 'p' || g || '.1', g, 'picture', 'block', 'extracted', 'webp', 'render', 100, ${"a".repeat(64)}, 10, 10,
+        'images/page-' || lpad(g::text, 4, '0') || '/image-001.webp', 'p' || g || '.1',
+        'ua/ra/doppler/big/images/page-' || lpad(g::text, 4, '0') || '/image-001.webp', 'stored'
+      from generate_series(1, ${n + 1}) g`;
+    // Every figure but the last is on the withheld list (as main's PII stage writes it under redact_artifacts).
+    await sql`update documents set metadata = jsonb_build_object('pii', jsonb_build_object('redacted', true, 'withheldArtifactUris',
+        (select jsonb_agg('s3://bucket/ua/ra/doppler/big/images/page-' || lpad(g::text, 4, '0') || '/image-001.webp') from generate_series(1, ${n}) g)))
+      where id = 'big'`;
+    const started = Date.now();
+    const storage = await overview.getOrgStorage("oa", sql as never);
+    const elapsed = Date.now() - started;
+    console.log(`[test] withheld subtraction over ${n} figures: ${elapsed} ms`);
+    // Billed: the level's bytes less the n withheld figures.
+    expect(storage.measuredArtifactBytes).toBe(1000);
+    // The old per-row scan of the list took ~33 s for 4,000 figures on PGlite; with the key index, ~0.1 s for 5,000.
+    expect(elapsed).toBeLessThan(5000);
+    await sql`delete from document_assets`;
+  }, 120_000);
+
+  it("R3-L1: an extract document's withheld figures are never subtracted when its figures are not counted (excludeExtracts)", async () => {
+    await doc("live");
+    await doc("extract", { run: "rx" });
+    await sql`insert into document_extraction_levels (document_id, org_id, project_id, run_id, images_status, asset_bytes, assets_total, assets_extracted)
+      values ('live', 'oa', 'pa', 'ra', 'complete', 1000, 1, 1), ('extract', 'oa', 'pa', 'rx', 'complete', 500, 1, 1)`;
+    await sql`insert into document_assets (document_id, org_id, project_id, run_id, asset_id, page_number, kind, fate, status, format, source, bytes, sha256,
+        width, height, link_path, file_of, storage_key, storage_state)
+      values ('extract', 'oa', 'pa', 'rx', 'p1.1', 1, 'picture', 'block', 'extracted', 'webp', 'render', 500, ${"a".repeat(64)}, 10, 10,
+        'images/page-0001/image-001.webp', 'p1.1', 'ua/rx/doppler/extract/images/page-0001/image-001.webp', 'stored')`;
+    await sql`update documents set metadata = ${sql.json({ pii: { redacted: true, withheldArtifactUris: ["s3://bucket/ua/rx/doppler/extract/images/page-0001/image-001.webp"] } })} where id = 'extract'`;
+    // The meter (extracts excluded) bills the live document's 1000 bytes in full: nothing of the extract is subtracted.
+    expect((await overview.getOrgStorage("oa", sql as never, { excludeExtracts: true })).measuredArtifactBytes).toBe(1000);
+    // The billing page counts the extract's figures and subtracts its withheld ones.
+    expect((await overview.getOrgStorage("oa", sql as never)).measuredArtifactBytes).toBe(1000);
+    await sql`delete from document_assets`;
+  });
+
   it("never counts another organization's figures", async () => {
     await doc("a1");
     await doc("b1", { org: "ob" });

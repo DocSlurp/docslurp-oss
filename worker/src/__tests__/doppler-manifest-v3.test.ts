@@ -590,6 +590,36 @@ describe("sharded documents: one manifest per shard", () => {
     expect(await shardRule(repeat)).toBe("manifest-repeat-invalid");
   }, 60_000);
 
+  it("R3-L2: context lines have their own allowance: they never spend the shared line cap, and the allowance is bounded", async () => {
+    const { DopplerManifestV3Validator } = await import("@docslurp/shared");
+    const m = base();
+    const ctx = (id: string, page: number) => ({
+      ...m.images.find((e) => e.id === "p2.2")!, id, page, kind: "picture", fate: "inline", status: "not-extracted", reason: "pages",
+      format: "webp", source: null, bytes: 0, sha256: null, width: 0, height: 0,
+      path: `page-${String(page).padStart(4, "0")}/image-${id.split(".")[1]!.padStart(3, "0")}.webp`,
+      link: `images/page-${String(page).padStart(4, "0")}/image-${id.split(".")[1]!.padStart(3, "0")}.webp`,
+    }) as never;
+    const context = Array.from({ length: 6 }, (_, i) => ctx(`p3.${i + 10}`, 3));
+    const lines = v3ShardText(m, [1, 2], { context }).split("\n").filter((line) => line.length > 0);
+    const inRange = lines.filter((line) => line.includes('"type":"image"') && !line.includes('"reason":"pages"')).length;
+    const batches = lines.filter((line) => line.includes('"type":"batch"')).length;
+    const run = (maxContextLines: number) => {
+      // The shared cap holds exactly the shard's own images and batches: the 6 context lines must fit their own allowance.
+      const validator = new DopplerManifestV3Validator({ maxLines: inRange + batches, maxPage: 40, range: [1, 2], maxContextLines });
+      const hash = createHash("sha256");
+      for (const line of lines) {
+        const isEnd = line.includes('"type":"end"');
+        validator.accept(line, isEnd ? hash.copy().digest("hex") : undefined);
+        hash.update(`${line}\n`);
+      }
+      return validator.finish();
+    };
+    expect(run(6)).toMatchObject({ contextImages: 6 });
+    expect(run(6).contextBytes).toBeGreaterThan(0);
+    expect(() => run(5)).toThrow(/too-many-lines/);
+    expect(() => run(0)).toThrow(/too-many-lines/);
+  });
+
   it("LOW-5: shards start at page 1, leave no hole, and end within the document", async () => {
     // Page 2 has no file (a repeat and furniture), so a 1-1 + 3-3 split would otherwise drop its rows silently.
     expect(await shardRule((m) => [{ range: [1, 1], text: v3ShardText(m, [1, 1]) }, { range: [3, 3], text: v3ShardText(m, [3, 3]) }])).toBe("shards-not-contiguous");

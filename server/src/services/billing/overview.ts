@@ -93,14 +93,24 @@ export async function getOrgStorage(
                 and not (${excludeExtracts}::boolean and exists (
                   select 1 from project_runs r where r.id = d.run_id and r.extract_id is not null)))
             or (d.archived_at is not null and d.purged_at is null))), 0)::text as artifact_bytes,
-      -- Figures withheld for PII (on the document's withheld list) are stored but never served: not billed (Low 9).
-      coalesce((select sum(a.bytes) from documents d
-        join document_extraction_levels l on l.document_id = d.id and l.org_id = d.org_id and l.asset_bytes > 0
-        join document_assets a on a.document_id = d.id and a.org_id = d.org_id and a.run_id = l.run_id and a.storage_state = 'stored'
-        where d.org_id = ${orgId} and jsonb_typeof(d.metadata -> 'pii' -> 'withheldArtifactUris') = 'array'
-          and ((d.status = 'completed' and d.superseded_at is null) or (d.archived_at is not null and d.purged_at is null))
-          and exists (select 1 from jsonb_array_elements_text(d.metadata -> 'pii' -> 'withheldArtifactUris') u
-            where right(u, char_length(a.storage_key) + 1) = '/' || a.storage_key)), 0)::text as withheld_bytes
+      -- Figures withheld for PII (on the document's withheld list) are stored but never served: not billed (Low 9). Each
+      -- document's list is expanded once into storage keys (s3://<bucket>/<key>) and hash-joined on storage_key (R3-M1:
+      -- linear, never a per-row scan of the list), under exactly artifact_bytes' liveness and extract rules (R3-L1).
+      coalesce((
+        with withheld as materialized (
+          select distinct d.id as document_id, l.run_id, substr(u, strpos(substr(u, 6), '/') + 6) as storage_key
+          from documents d
+          join document_extraction_levels l on l.document_id = d.id and l.org_id = d.org_id and l.asset_bytes > 0
+          cross join lateral jsonb_array_elements_text(d.metadata -> 'pii' -> 'withheldArtifactUris') u
+          where d.org_id = ${orgId} and jsonb_typeof(d.metadata -> 'pii' -> 'withheldArtifactUris') = 'array' and u like 's3://%/%'
+            and ((d.status = 'completed' and d.superseded_at is null
+                  and not (${excludeExtracts}::boolean and exists (
+                    select 1 from project_runs r where r.id = d.run_id and r.extract_id is not null)))
+              or (d.archived_at is not null and d.purged_at is null))
+        )
+        select sum(a.bytes) from withheld w
+        join document_assets a on a.document_id = w.document_id and a.org_id = ${orgId} and a.run_id = w.run_id
+          and a.storage_key = w.storage_key and a.storage_state = 'stored'), 0)::text as withheld_bytes
   `;
   const sourceBytes = Number(row?.source_bytes ?? 0);
   const pages = Number(row?.pages ?? 0) + Number(row?.extra_pages ?? 0);
