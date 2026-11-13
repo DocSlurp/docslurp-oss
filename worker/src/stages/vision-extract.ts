@@ -94,7 +94,7 @@ import {
   type PreparedChartExport,
 } from "../chart-export/stage.js";
 import { quarantineChartFacts, storedRoutePlan } from "../chart-export/free-stats.js";
-import { freeInlineMode, inlineHasWork } from "../chart-export/inline.js";
+import { CHART_INLINE_SLOT, freeInlineMode } from "../chart-export/inline.js";
 import type { ChartModelClient } from "../chart-export/types.js";
 import { deterministicSourceKind } from "../chart-export/vm-extractor.js";
 import chartSharp from "../tools/isolated-image.js";
@@ -1708,7 +1708,7 @@ export class VisionExtractStage implements Stage {
   private async runChartExportOnly(state: WorkflowState, signal?: AbortSignal): Promise<void> {
     const freeInline = freeInlineMode(state.run.pipeline);
     await runDocuments(healthyDocuments(state), (state.run.pipeline.maxCostCents ?? 0) > 0 ? 1 : state.docConcurrency, async (document) => {
-      if (freeInline && !(await this.freeInlineHasWork(state, document))) {
+      if (freeInline && !this.freeInlineHasWork(state, document)) {
         console.log(`[extract-debug] stage=${this.name} document=${document.id} chart-export-skipped=free-no-signal`);
         return;
       }
@@ -1725,15 +1725,13 @@ export class VisionExtractStage implements Stage {
   }
 
   /**
-   * Free tier, inline mode: whether the pass has anything to do for this document. A previous export to replace, an
-   * inline answer with visuals (or one too big to carry inline), or a chart-capable source from a run whose quarantine
-   * predates inline mode. PDFs and images have nothing: their figures move to the Doppler VM (not sent in inline mode).
+   * Free tier, inline mode: whether the pass has anything to do for this document: a previous export to replace, or an
+   * inline answer with visuals (or one too big to carry inline). PDFs and images have nothing: their figures move to the
+   * Doppler VM (not sent in inline mode). A source quarantined before inline mode was on gets no free charts.
    */
-  private async freeInlineHasWork(state: WorkflowState, document: import("../models.js").Document): Promise<boolean> {
-    if (state.artifactLedger.readDocument(document.id, "chart-export")) return true;
-    if (deterministicSourceKind(document.mimeType) === null) return false;
-    const { inline } = await quarantineChartFacts(this.storage, state.artifactLedger, document.id);
-    return inline === null || inlineHasWork(inline);
+  private freeInlineHasWork(state: WorkflowState, document: import("../models.js").Document): boolean {
+    // Ledger only, no reads: quarantine records the chart-inline slot exactly when its inline answer has work.
+    return Boolean(state.artifactLedger.readDocument(document.id, "chart-export") || state.artifactLedger.readDocument(document.id, CHART_INLINE_SLOT));
   }
 
   /**

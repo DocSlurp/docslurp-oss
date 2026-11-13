@@ -12,6 +12,9 @@ import { INLINE_CHART_KINDS, INLINE_REFUSE_REASONS, INLINE_SKIP_REASONS, inlineC
  * vision-extract reads it from there: no parser VM run of its own for the document's source.
  */
 
+/** Document artifact slot recorded by quarantine when the inline answer has work (points at the quarantine artifact). */
+export const CHART_INLINE_SLOT = "chart-inline";
+
 export function chartExportInlineEnabled(env: Readonly<Record<string, string | undefined>> = process.env): boolean {
   return env.DOCSLURP_CHART_EXPORT_INLINE?.trim() === "1";
 }

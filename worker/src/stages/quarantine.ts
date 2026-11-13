@@ -18,7 +18,7 @@ import { quarantineScanSnapshotEnabled, type CommandRunner } from "../tools/runn
 import { trustedTempDownloadPattern } from "../lib/temp-file-names.js";
 import { sha256Bytes, verifyStagedSource } from "../sandbox/source-integrity.js";
 import { chartExportActive, chartExportConfigOf } from "../chart-export/config.js";
-import { chartExportInlineEnabled, type InlineChartRequest } from "../chart-export/inline.js";
+import { CHART_INLINE_SLOT, chartExportInlineEnabled, inlineHasWork, type InlineChartRequest } from "../chart-export/inline.js";
 import { deterministicSourceKind } from "../chart-export/vm-extractor.js";
 import { applyParseSource, clearParseSource, originalSourceForQuarantine } from "../lib/parse-source.js";
 
@@ -134,6 +134,9 @@ export class QuarantineStage implements Stage {
 
               await this.storage.putArtifactJson(key, artifact);
               const artifactUri = this.storage.uri(key);
+              // A free signal later stages see without a read: the slot exists only when the inline answer has something
+              // to export (or must go to the standalone guest). It points at this artifact; no other file is written.
+              if (artifact.chartInline && inlineHasWork(artifact.chartInline)) state.artifactLedger.recordDocument(document.id, CHART_INLINE_SLOT, artifactUri);
               if (verified && !verified.refused) {
                 // Persist what the bytes are over the API's provisional record; format-detect and routing read it.
                 if (!state.store?.setDocumentFileFacts) throw new Error("file facts verified but the store cannot persist them");

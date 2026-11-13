@@ -73,6 +73,10 @@ describe("quarantine stage: inline chart extraction", () => {
     expect(chart.result).toEqual(extractDeterministicVisuals({ kind: "svg", text: CHART }));
     expect(f.artifacts.get("infected.svg")?.chartInline).toBeUndefined();
     expect(f.artifacts.get("notes.pdf")?.chartInline).toBeUndefined();
+    // The ledger signal later stages read without a fetch: only where there is something to export.
+    expect(f.state.artifactLedger.readDocument("chart.svg", "chart-inline")).toMatch(/quarantine\/chart\.svg\.json$/);
+    expect(f.state.artifactLedger.readDocument("infected.svg", "chart-inline")).toBeUndefined();
+    expect(f.state.artifactLedger.readDocument("notes.pdf", "chart-inline")).toBeUndefined();
   });
 
   it.each([

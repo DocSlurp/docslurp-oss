@@ -633,6 +633,26 @@ describe("chart export in vision-extract (real pass, fake model client)", () => 
     }
   });
 
+  it("free tier, inline mode: the chart-inline signal from quarantine runs the pass", async () => {
+    vi.stubEnv("DOCSLURP_CHART_EXPORT", "on");
+    vi.stubEnv("DOCSLURP_CHART_EXPORT_INLINE", "1");
+    const calls: unknown[] = [];
+    const previous = setDeterministicVisualExtractor(async (input) => {
+      calls.push(input);
+      return { partials: [{ source: "office-chart-xml" as const, confidence: 0.99, spec: BAR as never, digest: null, pageNumber: 2, imageIndex: 0 }] };
+    });
+    try {
+      const { stage, state, storage } = await setup({ visionFallback: false, quality: "fast", chartExport: { ...CHART_EXPORT, tier: "free" } });
+      state.artifactLedger.recordDocument("doc-c", "chart-inline", "s3://b/u/run-c/quarantine/doc-c.json");
+      await stage.run(state);
+      expect(calls).toHaveLength(1);
+      expect(markdownOf(storage, state).charts).toHaveLength(1);
+      expect(chartCharges(state)).toEqual([]);
+    } finally {
+      setDeterministicVisualExtractor(previous);
+    }
+  });
+
   it("models tier is unchanged: the client is built and each model read is charged", async () => {
     installTestPricing(DISTINCT_TEST_PRICING);
     vi.stubEnv("DOCSLURP_CHART_EXPORT", "on");
