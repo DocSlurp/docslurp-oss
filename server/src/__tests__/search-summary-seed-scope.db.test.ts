@@ -15,7 +15,7 @@ let sql: postgres.Sql;
 let hybridSearch: typeof import("../services/search.js").hybridSearch;
 
 beforeAll(async () => {
-  for (const key of ["OPENROUTER_API_KEY", "OPENROUTER_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"]) vi.stubEnv(key, "");
+  for (const key of ["OPENROUTER_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"]) vi.stubEnv(key, "");
   const pg = await startMigratedPostgres();
   stop = pg.stop;
   sql = postgres(pg.url, { max: 1, prepare: false, onnotice: () => {} });
