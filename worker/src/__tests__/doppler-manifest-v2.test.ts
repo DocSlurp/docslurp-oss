@@ -281,6 +281,9 @@ describe("version 1 maps into the ledger with what it has", () => {
         { id: "p3.1", page: 3, bbox: [0, 0, 612, 792], kind: "picture", fate: "block", ...none, skipped: "scan-not-copyable" },
         { id: "p4.g1", page: 4, bbox: [0, 0, 612, 792], kind: "vector", fate: "background", ...none, skipped: "scan-not-copyable" },
         { id: "p5.1", page: 5, bbox: [0, 0, 612, 792], kind: "picture", fate: "background", ...none, skipped: "scan-not-copyable", error: "xref" },
+        // A page scan whose copy Doppler refused (error: xref): rendered on the host too; `copy` on any other fate stays `other`.
+        { id: "p6.1", page: 6, bbox: [0, 0, 612, 792], kind: "picture", fate: "page-scan", ...none, skipped: "copy", error: "xref" },
+        { id: "p7.1", page: 7, bbox: [0, 0, 612, 792], kind: "picture", fate: "block", ...none, skipped: "copy" },
       ],
     });
     const rows = dopplerLedgerAssets(parsed!);
@@ -290,10 +293,12 @@ describe("version 1 maps into the ledger with what it has", () => {
       ["p3.1", "not-extracted", "other", null],
       ["p4.g1", "not-extracted", "other", null],
       ["p5.1", "not-extracted", "error", null],
+      ["p6.1", "not-extracted", "copy", null],
+      ["p7.1", "not-extracted", "other", null],
     ]);
     expect(rows.every((row) => isDocumentAssetRow(row))).toBe(true);
     const { hostPageImagePagesOf } = await import("../db/document-asset-ledger.js");
-    expect(await hostPageImagePagesOf(rows)).toEqual([1, 2]);
+    expect(await hostPageImagePagesOf(rows)).toEqual([1, 2, 6]);
   });
 
   it("files are extracted, repeats and errors not extracted, fate skips unlinked, unknown values other", () => {

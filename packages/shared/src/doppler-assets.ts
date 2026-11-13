@@ -1000,6 +1000,11 @@ export function dopplerLedgerAssets(parsed: DopplerManifest): DocumentAsset[] {
         (entry.kind === "picture" || entry.kind === "mask")) {
       return { ...base, ...none, status: "unlinked", reason: "scan-not-copyable", fileOf: null };
     }
+    // A page scan whose copy Doppler refused (`skipped: copy`, usually with `error: xref`): the same row as version 2/3's
+    // `not-extracted`/`copy` page scan, so render-images renders that page on the host. Checked before `error`.
+    if (entry.skipped === "copy" && entry.repeat_of === undefined && base.fate === "page-scan") {
+      return { ...base, ...none, status: "not-extracted", reason: "copy", fileOf: null };
+    }
     const reason: DopplerLedgerReason = entry.repeat_of !== undefined ? "repeat"
       : entry.error !== undefined ? "error"
         : typeof entry.skipped === "string" && Object.hasOwn(V1_SKIPPED, entry.skipped) ? V1_SKIPPED[entry.skipped]! : "other";
