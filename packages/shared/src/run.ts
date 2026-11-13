@@ -56,6 +56,10 @@ export const projectRunSchema = z.object({
       maxCents: z.number(),
     })
     .optional(),
+  /** Ingest version of the pipeline build that completed the run (ingest-version.ts); 0 = unknown or not completed. */
+  ingestVersion: z.number().int().nonnegative().optional(),
+  /** What that build's pipeline supports. */
+  ingestCapabilities: z.array(z.string()).optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
@@ -349,6 +353,10 @@ export const documentSchema = z.object({
   /** Set once a newer completed document with the same canonicalId replaces this one in search. */
   supersededAt: z.string().nullable().optional(),
   supersededByDocumentId: z.string().nullable().optional(),
+  /** Ingest version of the pipeline that produced the document (ingest-version.ts); 0 = unknown, produced before tagging. */
+  ingestVersion: z.number().int().nonnegative().optional(),
+  /** Capabilities measured from what the document's run stored; empty for version 0. */
+  ingestCapabilities: z.array(z.string()).optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
 });

@@ -8,7 +8,7 @@ vi.mock("../services/billing/spend-guard.js", () => ({ assertCanSpend: vi.fn() }
 import { getDocumentViewerPayload } from "../services/documents.js";
 import { getProjectAccess, canEditProject } from "../services/organizations.js";
 import { startPageRenderWorkflow } from "../lib/temporal.js";
-import { requestDocumentPageRender } from "../services/document-page-render.js";
+import { pageRenderUnavailableReason, requestDocumentPageRender } from "../services/document-page-render.js";
 const viewer = { document: { id: "doc", runId: "run", orgId: "org", projectId: "project", mimeType: "application/pdf", status: "completed", pageCount: 3 }, artifacts: [], source: { url: "/source" } };
 const decided = { source_sha256: "a".repeat(64), parse_source_key: null, parse_source_sha256: "a".repeat(64), parse_source_scan_version: 1 };
 beforeEach(() => { vi.clearAllMocks(); dbMock.capacity = null; dbMock.decision = { ...decided }; dbMock.calls.length = 0; vi.mocked(getDocumentViewerPayload).mockResolvedValue(structuredClone(viewer) as never); vi.mocked(getProjectAccess).mockResolvedValue({} as never); vi.mocked(canEditProject).mockReturnValue(true); });
@@ -21,7 +21,7 @@ describe("exact page image requests", () => {
     expect(await requestDocumentPageRender("doc", 3, "user", true, () => {})).toEqual({ status: "missing" });
     vi.mocked(canEditProject).mockReturnValue(true);
     vi.mocked(getDocumentViewerPayload).mockResolvedValue({ ...viewer, source: { url: "" } } as never);
-    expect(await requestDocumentPageRender("doc", 3, "user", true, () => {})).toEqual({ status: "unavailable" });
+    expect(await requestDocumentPageRender("doc", 3, "user", true, () => {})).toMatchObject({ status: "unavailable", reason: "withheld", document: { id: "doc" } });
     expect(startPageRenderWorkflow).not.toHaveBeenCalled();
   });
   it("authorizes cached images before returning signed URLs", async () => {
@@ -101,8 +101,8 @@ describe("PR #339 rescan", () => {
     try {
       for (const decision of [{ ...decided, parse_source_scan_version: null, parse_source_sha256: null }, { ...decided, parse_source_sha256: null }, { ...decided, parse_source_sha256: "c".repeat(64) }]) {
         dbMock.decision = decision;
-        expect(await requestDocumentPageRender("doc", 3, "user", true, () => {})).toEqual({ status: "rescan-required", documentId: "doc" });
-        expect(await requestDocumentPageRender("doc", 3, "user", false, () => {})).toEqual({ status: "rescan-required", documentId: "doc" });
+        expect(await requestDocumentPageRender("doc", 3, "user", true, () => {})).toMatchObject({ status: "rescan-required", document: { id: "doc" } });
+        expect(await requestDocumentPageRender("doc", 3, "user", false, () => {})).toMatchObject({ status: "rescan-required", document: { id: "doc" } });
       }
       // Cached pixels still serve.
       vi.mocked(getDocumentViewerPayload).mockResolvedValue({ ...viewer, artifacts: [{ slot: "doc:raster-v3-reader-120dpi-page-3", url: "/signed", uri: "s3://page" }] } as never);
@@ -110,6 +110,24 @@ describe("PR #339 rescan", () => {
     } finally {
       warn.mockRestore();
     }
+    expect(startPageRenderWorkflow).not.toHaveBeenCalled();
+  });
+});
+
+describe("typed unavailable reasons (ingest-version.ts)", () => {
+  const pdf = { mimeType: "application/pdf", status: "completed", runId: "run" };
+  it("maps each document state to one stable reason and never queues a render", async () => {
+    expect(pageRenderUnavailableReason(pdf, true)).toBeNull();
+    expect(pageRenderUnavailableReason(pdf, false)).toBe("withheld");
+    expect(pageRenderUnavailableReason({ ...pdf, status: "pii_blocked" }, true)).toBe("withheld");
+    expect(pageRenderUnavailableReason({ ...pdf, mimeType: "text/plain" }, true)).toBe("not-supported");
+    // A PII block wins over the file type: the reason never hints at what a withheld file is.
+    expect(pageRenderUnavailableReason({ ...pdf, mimeType: "text/plain", status: "pii_blocked" }, true)).toBe("withheld");
+    for (const status of ["queued", "processing", "extract", "embed"]) expect(pageRenderUnavailableReason({ ...pdf, status }, true)).toBe("processing");
+    expect(pageRenderUnavailableReason({ ...pdf, runId: null }, true)).toBe("processing");
+    for (const status of ["failed", "cancelled"]) expect(pageRenderUnavailableReason({ ...pdf, status }, true)).toBe("not-extracted");
+    vi.mocked(getDocumentViewerPayload).mockResolvedValue({ ...viewer, document: { ...viewer.document, status: "embed" } } as never);
+    expect(await requestDocumentPageRender("doc", 3, "user", true, () => {})).toMatchObject({ status: "unavailable", reason: "processing" });
     expect(startPageRenderWorkflow).not.toHaveBeenCalled();
   });
 });

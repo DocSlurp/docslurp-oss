@@ -5,13 +5,15 @@ import { reportPublicError } from "../lib/public-errors.js";
 import { chatSessionForRequest, CHAT_SESSION_TOKEN_HEADER } from "../lib/chat-session-tokens.js";
 import { apiErrorResponse, nativeApiErrors, withApiErrorDetails } from "../lib/api-error.js";
 import { Hono, type Context } from "hono";
+import { callerCanReprocess } from "../lib/reprocess-access.js";
+import { apiKeyCanUseProject } from "../lib/api-key-project-scope.js";
 import { batchSearchInputSchema, searchFormError, searchInputSchema, searchOptions, searchQueryText, projectChatRequestSchema, type SearchInput } from "../lib/search-input.js";
 import { streamSSE } from "hono/streaming";
 import { assertCanSpend } from "../services/billing/spend-guard.js";
 import { enforceActorCategoryRateLimit } from "../middleware/rate-limit.js";
 import { acquireChatSlot, chatSlotRefusedResponse } from "../middleware/chat-concurrency.js";
 
-import { aggregateProjectRagSearchRequestSchema, deferredProfilesEnabled, PARSE_SOURCE_RESCAN_REASON, PUBLIC_ERROR_MESSAGES, type ApiErrorCode } from "@docslurp/shared";
+import { aggregateProjectRagSearchRequestSchema, dataUnavailable, deferredProfilesEnabled, PARSE_SOURCE_RESCAN_REASON, PUBLIC_ERROR_MESSAGES, type ApiErrorCode } from "@docslurp/shared";
 
 import {
   actorHasAnyApiKeyScope,
@@ -25,7 +27,7 @@ import { defaultMaterializeDeps, pageKey } from "../search/deferred/materialize-
 import { loadProjectPipeline } from "../search/session-setup.js";
 import { resolveMaterializationPolicy } from "../services/materialization-policy.js";
 import { aggregateProjectRagSearch } from "../services/aggregate-rag.js";
-import { resolveDefaultOrganization } from "../services/organizations.js";
+import { listAccessibleProjectIds, resolveDefaultOrganization } from "../services/organizations.js";
 import { ProjectAccessError } from "../services/default-project.js";
 import { CrossProjectScopeError, hybridSearch, MissingProjectScopeError, ProjectNotFoundError } from "../services/search.js";
 import { prefetchBatchQueryEmbeddings } from "../search/batch-embeddings.js";
@@ -702,12 +704,43 @@ export const searchesRoutes = new Hono().get("/:sessionId/materialization", asyn
     .filter((p): p is { documentId: string; page: number } =>
       typeof p?.documentId === "string" && Number.isInteger(p?.page))
     .map((p) => ({ documentId: p.documentId, page: p.page }));
-  const states = await defaultMaterializeDeps.loadPageStates(candidates);
+  // Only documents the caller can reach, in the session project's organization, report a state: a candidate naming any
+  // other document reads as "unseen", with no state, reason or version (the ledger read below is not tenant-scoped).
+  const [owner] = await sql<{ org_id: string }[]>`select org_id from projects where id = ${row.project_id}`;
+  const reachable = new Map<string, number>();
+  const ids = [...new Set(candidates.map((p) => p.documentId))];
+  if (owner && ids.length > 0) {
+    const projectIds = await listAccessibleProjectIds(userId);
+    const apiKey = c.get("apiKey");
+    for (const doc of await sql<{ id: string; project_id: string; ingest_version: number }[]>`
+      select id, project_id, ingest_version from documents
+      where id = any(${sql.array(ids)}::text[]) and org_id = ${owner.org_id} and project_id = any(${sql.array(projectIds)}::text[])`) {
+      if (apiKey && !apiKeyCanUseProject(apiKey, { orgId: owner.org_id, projectId: doc.project_id })) continue;
+      reachable.set(doc.id, doc.ingest_version);
+    }
+  }
+  const scoped = candidates.filter((p) => reachable.has(p.documentId));
+  const states = await defaultMaterializeDeps.loadPageStates(scoped);
+  const stuck = scoped.some((p) => {
+    const state = states.get(pageKey(p.documentId, p.page))?.state;
+    return state === "failed" || state === "blocked-pii";
+  });
+  // Typed states for pages that will not materialize (ingest-version.ts).
+  const canEdit = owner && stuck ? await callerCanReprocess(c, { orgId: owner.org_id, projectId: row.project_id }) : false;
   const pages = candidates.map((p) => {
-    const page = states.get(pageKey(p.documentId, p.page));
+    const page = reachable.has(p.documentId) ? states.get(pageKey(p.documentId, p.page)) : undefined;
     // A page the worker refused because its document predates the current scan (PR #339): stable reason, never raw text.
     const rescan = page?.state === "failed" && page.failureReason === "source-unscanned";
-    return { ...p, state: page?.state ?? "unseen", ...(rescan ? { reason: PARSE_SOURCE_RESCAN_REASON } : {}) };
+    const reason = rescan ? "needs-reprocess" as const
+      : page?.state === "blocked-pii" ? "withheld" as const
+        : page?.state === "failed" ? "not-extracted" as const
+          : null;
+    return {
+      ...p,
+      state: page?.state ?? "unseen",
+      ...(rescan ? { reason: PARSE_SOURCE_RESCAN_REASON } : {}),
+      ...(reason ? { availability: dataUnavailable(reason, { canEdit, ingestVersion: reachable.get(p.documentId) ?? null }) } : {}),
+    };
   });
   const failed = pages.filter((p) => p.state === "failed" || p.state === "blocked-pii").length;
   const ready = pages.filter((p) => p.state === "indexed").length;

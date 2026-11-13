@@ -1,3 +1,8 @@
+## Ingest version tagging and typed unavailable states (2026-11-13, draft, needs council)
+
+- Documents and runs record `ingest_version` and `ingest_capabilities` (migration 0160; existing rows backfill to 0 with no capabilities). The worker stamps them on statements a run already makes: documents with capabilities measured from stored rows (`parseSourceDecision`, `pageFacts`, `figureLedger`), runs with the build's. `GET /v1/ingest-version` (SDK `getIngestVersion`) reports the current version; `GET /v1/documents/:id` adds `ingest.updateAvailable`.
+- Page images, structured results, the figure ledger and search materialization answer data the caller may see but cannot be shown with a typed `{ status: "unavailable", reason, message, canReprocess, ingestVersion, currentIngestVersion }` (HTTP 200) instead of 409/404/500. The source-unscanned refusal is unchanged. Materialization now reports pages of documents the caller cannot reach as `unseen`. See docs/ingest-version.md.
+
 ## Managed models: callers choose categories, never a backend model (2026-11-13, draft, needs council)
 
 - Chat takes `tier` (`fastest`, `balanced`, `smart`) and `reasoning` on `/v1/chat`, `/v1/chat/stream`, chat operations, MCP `chat` and `docslurp.tier`/`docslurp.reasoning` on `/v1/chat/completions`. A backend `model` is operator-evaluation only (platform admins, `DOCSLURP_CHAT_EVAL_ORG_IDS`); everyone else gets 400 `model_not_allowed` naming the tiers. Chat responses report the tier; backend ids stay in usage events, traces and logs.

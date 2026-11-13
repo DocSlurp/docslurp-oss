@@ -9,7 +9,7 @@
  * scope, project, PII policy). An image whose file the project's PII policy withholds keeps its size and hash but has no
  * slot, and says why with a fixed value (`refusal: "pii-policy"`), never error text or document content.
  */
-import { parseArtifactUri, type DopplerLedgerReason } from "@docslurp/shared";
+import { dataUnavailable, figureResumeUnavailableReason, parseArtifactUri, UNKNOWN_INGEST_VERSION, type DataUnavailable, type DopplerLedgerReason } from "@docslurp/shared";
 
 import { sql } from "../db.js";
 import { withheldArtifactUrisFromMetadata } from "./pii-artifact-guard.js";
@@ -81,6 +81,12 @@ export interface DocumentAssetView {
   slot: string | null;
   /** Why the file exists but is not served (`pii-policy`), or null. */
   refusal: DocumentAssetRefusal | null;
+  /**
+   * The typed state a client shows when the image has no served file (ingest-version.ts): `withheld` (PII policy),
+   * `not-extracted` (status `not-extracted`; Doppler's reason says why), `processing` (its upload has not landed). Null when served, or when the
+   * image is unlinked and the page image shows it.
+   */
+  availability: DataUnavailable | null;
 }
 
 export interface DocumentExtractionLevelView {
@@ -94,6 +100,8 @@ export interface DocumentExtractionLevelView {
   resumes: number;
   lastCutPage: number | null;
   deadlineMs: number | null;
+  /** Why the figure runner stopped finishing this document's figures, as a typed state; null when it is not blocked. */
+  resumeBlocked: DataUnavailable | null;
   counts: {
     total: number; extracted: number; notExtracted: number; unlinked: number; resumable: number;
     bySource: { copy: number; decode: number; render: number };
@@ -171,7 +179,7 @@ function checkedPage(page: DocumentAssetPage | undefined): { limit: number; afte
  * The document's asset map (one page of it) and extraction level, or null when the document is not in this organization
  * (and project) or is not one the viewer is shown. The scope is required: there is no unscoped read.
  */
-export async function getDocumentAssetLedger(scope: DocumentAssetScope, page?: DocumentAssetPage): Promise<DocumentAssetLedgerView | null> {
+export async function getDocumentAssetLedger(scope: DocumentAssetScope, page?: DocumentAssetPage, options: { canEdit?: boolean } = {}): Promise<DocumentAssetLedgerView | null> {
   if (!scope || typeof scope.orgId !== "string" || !ID.test(scope.orgId) || typeof scope.documentId !== "string" || !ID.test(scope.documentId) ||
       (scope.projectId !== undefined && (typeof scope.projectId !== "string" || !ID.test(scope.projectId)))) {
     throw new Error("A document asset read needs an organization and a document id");
@@ -179,8 +187,8 @@ export async function getDocumentAssetLedger(scope: DocumentAssetScope, page?: D
   const { limit, after, from, to } = checkedPage(page);
   const projectFilter = scope.projectId === undefined ? sql`` : sql`and d.project_id = ${scope.projectId}`;
   // Only a document the viewer would be shown: completed (not processing, failed or PII-blocked) and not purged.
-  const [document] = await sql<{ id: string; metadata: unknown; run_id: string | null }[]>`
-    select d.id, d.metadata, d.run_id from documents d
+  const [document] = await sql<{ id: string; metadata: unknown; run_id: string | null; ingest_version: number | null }[]>`
+    select d.id, d.metadata, d.run_id, d.ingest_version from documents d
     where d.id = ${scope.documentId} and d.org_id = ${scope.orgId} ${projectFilter}
       and d.status = 'completed' and d.purged_at is null`;
   if (!document) return null;
@@ -190,10 +198,11 @@ export async function getDocumentAssetLedger(scope: DocumentAssetScope, page?: D
     manifest_sha256: string | null; doppler_build: string | null; resumes: number; last_cut_page: number | null; deadline_ms: number | null;
     assets_total: number; assets_extracted: number; assets_not_extracted: number; assets_unlinked: number; assets_resumable: number;
     source_copy: number; source_decode: number; source_render: number; asset_bytes: string | number; updated_at: string;
+    resume_blocked: string | null;
   }>>`
     select markdown_complete, images_status, images_exit_code, manifest_version, manifest_sha256, doppler_build, resumes, last_cut_page,
       deadline_ms, assets_total, assets_extracted, assets_not_extracted, assets_unlinked, assets_resumable, source_copy, source_decode,
-      source_render, asset_bytes, updated_at::text
+      source_render, asset_bytes, updated_at::text, resume_blocked
     from document_extraction_levels
     where document_id = ${scope.documentId} and org_id = ${scope.orgId}`;
 
@@ -228,6 +237,11 @@ export async function getDocumentAssetLedger(scope: DocumentAssetScope, page?: D
     !!row.file_of && ((row.slot_uri !== null && withheld.has(row.slot_uri)) || (row.owner_key !== null && withheldKeys.has(row.owner_key)));
 
   const pageRows = rows.slice(0, limit);
+  const ingestVersion = document.ingest_version ?? UNKNOWN_INGEST_VERSION;
+  const resumeBlocked = (blocked: string | null): DataUnavailable | null => {
+    const reason = figureResumeUnavailableReason(blocked);
+    return reason ? dataUnavailable(reason, { canEdit: options.canEdit, ingestVersion }) : null;
+  };
   const last = pageRows.at(-1);
   return {
     documentId: scope.documentId,
@@ -235,6 +249,7 @@ export async function getDocumentAssetLedger(scope: DocumentAssetScope, page?: D
       markdownComplete: level.markdown_complete, imagesStatus: level.images_status, imagesExitCode: level.images_exit_code,
       manifestVersion: level.manifest_version, manifestSha256: level.manifest_sha256, dopplerBuild: level.doppler_build,
       resumes: level.resumes, lastCutPage: level.last_cut_page, deadlineMs: level.deadline_ms,
+      resumeBlocked: resumeBlocked(level.resume_blocked),
       counts: {
         total: level.assets_total, extracted: level.assets_extracted, notExtracted: level.assets_not_extracted, unlinked: level.assets_unlinked,
         resumable: level.assets_resumable, bySource: { copy: level.source_copy, decode: level.source_decode, render: level.source_render },
@@ -244,13 +259,19 @@ export async function getDocumentAssetLedger(scope: DocumentAssetScope, page?: D
     } : null,
     assets: pageRows.map((row) => {
       const refused = isWithheld(row);
+      const slot = row.file_of && row.owner_stored === true && !refused && ASSET_ID.test(row.file_of) ? `${scope.documentId}:doppler-figure:${row.file_of}` : null;
       return {
         id: row.asset_id, page: row.page_number, kind: row.kind, fate: row.fate, status: row.status, reason: row.reason,
         resumable: row.resumable, source: row.source, format: row.format, bytes: row.bytes, sha256: row.sha256, width: row.width,
         height: row.height, repeatOf: row.repeat_of, fallback: row.fallback, link: row.link_path, fileOf: row.file_of,
         // Only a file whose upload landed and checked out (storage_state `stored`) is linked; a pending one is not.
-        slot: row.file_of && row.owner_stored === true && !refused && ASSET_ID.test(row.file_of) ? `${scope.documentId}:doppler-figure:${row.file_of}` : null,
+        slot,
         refusal: refused ? "pii-policy" as const : null,
+        availability: slot ? null
+          : refused ? dataUnavailable("withheld", { ingestVersion })
+            : row.status === "not-extracted" ? dataUnavailable("not-extracted", { ingestVersion })
+              : row.file_of ? dataUnavailable("processing", { ingestVersion })
+                : null,
       };
     }),
     nextCursor: rows.length > limit && last ? encodeAssetCursor(last.page_number, last.asset_id) : null,

@@ -4,7 +4,7 @@ import { isSpendBlockedError, spendBlockedResponse } from "../services/billing/s
 import { Hono } from "hono";
 import type { Context } from "hono";
 import { z } from "zod";
-import { documentTagsSchema, PARSE_SOURCE_RESCAN_MESSAGE, PARSE_SOURCE_RESCAN_REASON } from "@docslurp/shared";
+import { dataUnavailable, documentTagsSchema, UNKNOWN_INGEST_VERSION } from "@docslurp/shared";
 import { zValidator } from "@hono/zod-validator";
 
 import { getArtifactJson } from "../lib/artifacts.js";
@@ -54,6 +54,7 @@ import { inlineEstimate, jobMetaFor, jobStatusForMutation, recordJobMeta } from 
 import { billingState } from "../services/config-change.js";
 import { estimateDocumentReprocess, singleProjectOf } from "../services/work-estimates.js";
 import { apiKeyCanUpdateContent, CONTENT_UPDATE_SCOPE_MESSAGE } from "../lib/content-update-access.js";
+import { callerCanReprocess } from "../lib/reprocess-access.js";
 import { apiKeyCanUseProject } from "../lib/api-key-project-scope.js";
 import { DocumentAssetQueryError, getDocumentAssetLedger } from "../services/document-assets.js";
 import { redactOperatorRun } from "../services/progress-snapshot.js";
@@ -150,9 +151,15 @@ export const documentsRoutes = new Hono()
         document => assertApiKeyProjectScope(c.get("apiKey"), document), quality);
       if (result.status === "busy") { c.header("Retry-After", "5"); return apiStatusError(c, 429, "Page image queue is busy"); }
       if (result.status === "missing") return apiStatusError(c, 404, "Document page not found");
-      if (result.status === "unavailable") return apiStatusError(c, 409, "Page image unavailable");
-      if (result.status === "rescan-required") {
-        return apiErrorResponse(c, 409, "quarantine_rescan_required", PARSE_SOURCE_RESCAN_MESSAGE, { category: PARSE_SOURCE_RESCAN_REASON, action: "reprocess" });
+      // An expected partial-data state, not an error: a typed 200 the client shows calmly (ingest-version.ts). The
+      // refusal itself is unchanged; a document without a current parse decision is never rendered.
+      if (result.status === "unavailable" || result.status === "rescan-required") {
+        const reason = result.status === "rescan-required" ? "needs-reprocess" : result.reason;
+        console.info(`[page-render] status=unavailable reason=${reason} metric=page_render_unavailable document=${result.document.id} page=${raw}`);
+        return c.json(dataUnavailable(reason, {
+          canEdit: await callerCanReprocess(c, result.document),
+          ingestVersion: result.document.ingestVersion ?? UNKNOWN_INGEST_VERSION,
+        }));
       }
       if (result.status === "pending") { c.header("Retry-After", "2"); return c.json(result, 202); }
       return c.json(result);
@@ -355,7 +362,7 @@ export const documentsRoutes = new Hono()
       ledger = await getDocumentAssetLedger({ orgId: owner.orgId, projectId: owner.projectId, documentId: docId }, {
         ...(limit === undefined ? {} : { limit }), ...(after === undefined ? {} : { after }),
         ...(pageFrom === undefined ? {} : { pageFrom }), ...(pageTo === undefined ? {} : { pageTo }),
-      });
+      }, { canEdit: await callerCanReprocess(c, owner) });
     } catch (error) {
       if (error instanceof DocumentAssetQueryError) return apiStatusError(c, 400, "Invalid asset page parameters");
       throw error;
@@ -388,14 +395,20 @@ export const documentsRoutes = new Hono()
     if (scoped.response) return scoped.response;
     const viewer = scoped.viewer;
     const structuredUri = viewer.stages.find((stage) => stage.stage_name === "structured-extract")?.artifact_uri;
+    const ingestVersion = viewer.document.ingestVersion ?? UNKNOWN_INGEST_VERSION;
     if (!structuredUri) {
-      return apiStatusError(c, 404, "No structured artifact for this document");
+      const reason = viewer.document.status === "pii_blocked" ? "withheld"
+        : viewer.document.status === "completed" || viewer.document.status === "failed" || viewer.document.status === "cancelled" ? "not-extracted"
+          : "processing";
+      return c.json({ structured: null, uri: null, availability: dataUnavailable(reason, { canEdit: await callerCanReprocess(c, viewer.document), ingestVersion }) });
     }
     try {
       const json = await getArtifactJson<Record<string, unknown>>(structuredUri);
       return c.json({ structured: json, uri: structuredUri });
-    } catch {
-      return apiStatusError(c, 500, "Unable to read structured artifact");
+    } catch (error) {
+      // Raw storage errors go to telemetry only; the caller gets a stable, retryable state.
+      console.warn(`[documents] status=structured-unreadable metric=structured_artifact_unreadable document=${viewer.document.id} error=${JSON.stringify(error instanceof Error ? error.message : String(error)).slice(0, 300)}`);
+      return c.json({ structured: null, uri: null, availability: dataUnavailable("temporarily-unavailable", { ingestVersion }) });
     }
   })
   .get("/:docId/versions", async (c) => {

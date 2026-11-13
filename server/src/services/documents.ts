@@ -1,4 +1,5 @@
 import { MIME_BY_EXTENSION, fileExtension, realtimeViewerSnapshotSchema, cleanDocumentTitle, mediaSummarySchema, publicDiagnostics, publicDocumentError, sanitizeStoredPipeline, type MediaSummary } from "@docslurp/shared";
+import { ingestRecordFields, ingestStatus, type IngestStatus } from "@docslurp/shared";
 
 import {
   defaultPipelineFeatures,
@@ -58,6 +59,8 @@ type DocumentRow = {
   updated_at: string | Date;
   tags?: string[] | null;
   metadata?: Record<string, unknown> | null;
+  ingest_version?: number | null;
+  ingest_capabilities?: string[] | null;
 };
 
 type DocumentIndexRow = DocumentRow & {
@@ -530,6 +533,8 @@ export interface DocumentViewerPayload {
   };
   /** Present for audio/video: stats for the media focus view ("This recording"). */
   media?: MediaSummary | null;
+  /** The ingest version that produced the document against the workspace's current one (ingest-version.ts). */
+  ingest: IngestStatus;
   run: Pick<ProjectRun, "id" | "projectId" | "stage" | "status" | "updatedAt"> | null;
   usage: {
     document: {
@@ -672,6 +677,7 @@ function mapDocument(row: DocumentRow): DocumentRecord {
     canonicalId: row.canonical_id ?? null,
     supersededAt: row.superseded_at ? serializeTimestamp(row.superseded_at) : null,
     supersededByDocumentId: row.superseded_by_document_id ?? null,
+    ...ingestRecordFields(row),
     createdAt: serializeTimestamp(row.created_at),
     updatedAt: serializeTimestamp(row.updated_at)
   });
@@ -1329,6 +1335,7 @@ export async function getDocumentViewerPayload(docId: string, userId: string): P
       pageTextCount: pageStats?.page_text_count ?? 0
     },
     ...(media ? { media } : {}),
+    ingest: ingestStatus(document),
     run: run
       ? {
           id: run.id,

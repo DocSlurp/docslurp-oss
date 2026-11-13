@@ -58,10 +58,31 @@ export type DocumentViewerPayload = {
   artifacts: DocumentArtifactEntry[];
   source: DocumentSourceEntry;
   pageStats: { pageCount: number; chunkCount: number; pageTextCount: number };
+  /** The ingest version that produced the document against the workspace's current one. */
+  ingest?: IngestStatus;
   run: { id: string; projectId: string; stage: string; status: ProjectRun["status"]; updatedAt: string } | null;
   usage: {
     document: { inputTokens: number; outputTokens: number; costCents: number; events: number };
     run: { inputTokens: number; outputTokens: number; costCents: number; computeEstimated: boolean; totalDocuments: number; events: number } | null;
     estimatedDocument: { inputTokens: number; outputTokens: number; costCents: number; basis: "document-events" | "run-average" | "none" };
   };
+};
+
+/** A document's ingest version against the workspace's current one (GET /v1/documents/:id `ingest`). */
+export type IngestStatus = { version: number; capabilities: string[]; currentVersion: number; updateAvailable: boolean };
+/** GET /v1/ingest-version. */
+export type WorkspaceIngestVersion = { ingestVersion: number; capabilities: string[] };
+/** Why the API cannot show data the caller may see. A closed vocabulary; never error text. */
+export type DataUnavailableReason = "needs-reprocess" | "withheld" | "not-extracted" | "processing" | "not-supported" | "disabled" | "temporarily-unavailable";
+/**
+ * The typed state the API answers (HTTP 200) for a page image, figure or structured result that exists for the caller but
+ * cannot be shown. `canReprocess` is true only when a reprocess fixes it and the caller may start one.
+ */
+export type DataUnavailable = {
+  status: "unavailable";
+  reason: DataUnavailableReason;
+  message: string;
+  canReprocess: boolean;
+  ingestVersion: number | null;
+  currentIngestVersion: number;
 };
