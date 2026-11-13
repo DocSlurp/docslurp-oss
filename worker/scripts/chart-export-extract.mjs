@@ -3,15 +3,27 @@
 // parser VM in production. With `batch: N` in the request (SVG only), the first input plus the N-1 trailing inputs are
 // extracted one by one, each under its own size limit, and the output is one result per input, in order.
 import { readFile, stat, writeFile } from "node:fs/promises";
+import module from "node:module";
+import path from "node:path";
 import { Worker } from "node:worker_threads";
-// One bundled module (built from dist/chart-export/extractors/guest-entry.js): loads in a fraction of the CPU the
-// separate ESM files take, which matters because every VM command starts a fresh process. `testHooks` is null in the
-// production bundle (a build-time constant), so the test-only knobs below are inert there.
-import { CHART_EXTRACT_LIMITS, testHooks } from "../dist/chart-export/guest.bundle.mjs";
 const started = Date.now();
 const [input, requestPath, output, ...more] = process.argv.slice(2);
 if ((await stat(requestPath)).size > 4096) throw new Error("chart extract request exceeds limit");
 const request = JSON.parse(await readFile(requestPath, "utf8"));
+// Optional V8 compile cache (`compileCacheDir`, an absolute directory): off unless the caller passes one. It saves
+// compiling the bundle again in this process and in each worker; it caches compilation of the fixed bundle and script
+// files only, and leaves --disallow-code-generation-from-strings and zod jitless as they are. The directory should be
+// prepared ahead of time and read-only to the guest, so one document's run cannot leave compiled code for the next.
+const compileCacheDir = request.compileCacheDir ?? null;
+if (compileCacheDir !== null && (typeof compileCacheDir !== "string" || compileCacheDir.length > 512 || compileCacheDir.includes("\0") || !path.isAbsolute(compileCacheDir) || path.normalize(compileCacheDir) !== compileCacheDir)) {
+  throw new Error("invalid chart extract compile cache");
+}
+if (compileCacheDir) module.enableCompileCache(compileCacheDir);
+// One bundled module (built from dist/chart-export/extractors/guest-entry.js): loads in a fraction of the CPU the
+// separate ESM files take, which matters because every VM command starts a fresh process. A fixed path, loaded after
+// the cache is enabled. `testHooks` is null in the production bundle (a build-time constant), so the test-only knobs
+// below are inert there.
+const { CHART_EXTRACT_LIMITS, testHooks } = await import("../dist/chart-export/guest.bundle.mjs");
 const kind = request?.kind;
 if (!["office", "epub", "svg", "html", "json"].includes(kind)) throw new Error("invalid chart extract kind");
 const packaged = kind === "office" || kind === "epub";
@@ -48,7 +60,7 @@ const visualBytes = (v) => Buffer.byteLength(JSON.stringify(v));
 function runWorker(task, done, workerIndex, onStart) {
   return new Promise((resolve) => {
     // No environment at all: nothing on the worker host can reach the extractor through it.
-    const worker = new Worker(WORKER, { resourceLimits: RESOURCE_LIMITS, env: {} });
+    const worker = new Worker(WORKER, { resourceLimits: RESOURCE_LIMITS, env: {}, workerData: { compileCacheDir } });
     let inflight = null;
     let settled = false;
     const finish = (outcome) => {

@@ -4,7 +4,7 @@
 // worker before the worker suites, so the bundle must exist there; a local run without a build skips.
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
-import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -116,6 +116,42 @@ describe.skipIf(!built)("chart-export guest bundle (the production guest)", () =
       console.log(JSON.stringify({ calls, visuals: r.visuals.length, spec: !!r.visuals[0]?.spec }));`;
     const { stdout } = await run(process.execPath, ["--input-type=module", "-e", probe], { cwd: workerRoot });
     expect(JSON.parse(stdout)).toEqual({ calls: 0, visuals: 1, spec: true });
+  });
+
+  describe("optional V8 compile cache (off unless the request names a directory)", () => {
+    const bytes = () => xlsx("S", [["q", "v"], ["Q1", 1], ["Q2", 2], ["Q3", 3]], chart);
+
+    it("gives identical output, writes the cache, and reuses it", async () => {
+      const cache = path.join(dir, "compile-cache");
+      const b = bytes();
+      const want = JSON.stringify(extractDeterministicVisuals({ kind: "office", bytes: b }));
+      expect(await guest("office", [b], { compileCacheDir: cache })).toBe(want);
+      const entries = await readdir(cache, { recursive: true });
+      expect(entries.length).toBeGreaterThan(0);
+      // Warm: the same output again.
+      expect(await guest("office", [b], { compileCacheDir: cache })).toBe(want);
+    });
+
+    it("leaves code generation from strings blocked with a warm cache", async () => {
+      const cache = path.join(dir, "compile-cache-probe");
+      const bundle = pathToFileURL(path.join(workerRoot, "dist/chart-export/guest.bundle.mjs")).href;
+      const probe = `
+        import module from "node:module";
+        module.enableCompileCache(${JSON.stringify(cache)});
+        await import(${JSON.stringify(bundle)});
+        const blocked = (f) => { try { f(); return false; } catch { return true; } };
+        console.log(JSON.stringify({ fn: blocked(() => new Function("return 1")), ev: blocked(() => eval("1")) }));`;
+      for (let k = 0; k < 2; k++) {
+        const { stdout } = await run(process.execPath, ["--disallow-code-generation-from-strings", "--input-type=module", "-e", probe], { cwd: workerRoot });
+        expect(JSON.parse(stdout)).toEqual({ fn: true, ev: true });
+      }
+    });
+
+    for (const bad of ["relative/cache", "/tmp/../etc", "/a//b", 42]) {
+      it(`refuses compileCacheDir ${JSON.stringify(bad)}`, async () => {
+        await expect(guest("office", [bytes()], { compileCacheDir: bad })).rejects.toThrow();
+      });
+    }
   });
 
   describe("unit containment (council r8): one unit's crash or overrun loses only that unit, counted", () => {

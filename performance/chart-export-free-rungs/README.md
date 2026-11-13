@@ -327,6 +327,34 @@ copy was killed out of memory at 3.7 GB. Output is now bounded at three levels, 
 - **Every other round-5 to round-8 repro:** unchanged outcomes, within ±1 s of round 8.
 - **Startup:** 92 ms per input on this run (74 ms in round 8; the same order).
 
+### Optional V8 compile cache (for the inline path, #369)
+
+The guest accepts an optional `compileCacheDir` in its request: an absolute, normalized path of at most 512
+characters; anything else is refused.
+- **Off by default.** Without the field nothing changes.
+- **When set,** the parent and each unit worker call `module.enableCompileCache(dir)` before importing the bundle.
+  Both import a fixed path, so no new loading surface. Each worker then reuses the bundle's compiled code instead of
+  compiling 960 KB again.
+- **Flags unchanged.** It caches compilation of the fixed bundle and script files only. `--disallow-code-generation-
+  from-strings` and zod `jitless` stay as they are; a test checks that `new Function` and `eval` are still blocked with
+  a warm cache.
+- **Mount it prepared and read-only.** A cache the guest can write could carry compiled code from one document's run to
+  the next. So the directory should be filled ahead of time (for example at image build) and mounted read-only. A
+  read-only warm cache measured the same as a writable one.
+
+Measured on the parser-VM shape, in three separate sandboxes (`worker-startup.mjs`, `guest-startup.mjs`; medians of
+15):
+
+| | without cache | warm cache | saved |
+|---|--:|--:|--:|
+| worker startup (spawn, import, one extraction) | 44.6 / 64.3 / 97.3 ms | 40.0 / 53.2 / 89.7 ms | 5–11 ms |
+| whole guest command per document (parent + worker, one small SVG) | 131 / 170 / 285 ms | 113 / 146 / 244 ms | 19–41 ms (14–17%) |
+
+- **Cold cache:** the first run, which fills it, costs about the same as no cache (+1–4 ms).
+- **Size:** the cache is one file of 326 KB.
+- **Caveat:** the VM sandboxes ran as root, so read-only there is enforced by the mount, not by file modes. Locally,
+  as an unprivileged user, the read-only cache was 141 ms against 172 ms without one.
+
 ### Guest hardening: zod `jitless`, the V8 code-generation flag, code-loading guard, image check
 
 - **zod `jitless`, now effective (council r4 M1).**
@@ -420,7 +448,8 @@ with `for…of` destructuring, which the council measured as roughly 5–14× sl
 
 Three Modal VM runs: 9.8 s (failed: harness file missing), 108 s (3 arms) and 122 s (4 arms), 240 VM-seconds in all,
 within the test budget. No model calls.
-Round 9: two containment-proof VM runs (169 s and 99 s wall, one VM each). No model calls.
+Round 9: two containment-proof VM runs (169 s and 99 s wall, one VM each) and four short compile-cache startup runs
+(about 7 s each). No model calls.
 
 ## Open findings (not changed here)
 

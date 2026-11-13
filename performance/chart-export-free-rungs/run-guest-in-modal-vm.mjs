@@ -8,12 +8,15 @@
 // with them in (as guest-bundle.test.ts does).
 // Needs MODAL_TOKEN_ID / MODAL_TOKEN_SECRET and a built worker.
 //
-//   node performance/chart-export-free-rungs/run-guest-in-modal-vm.mjs [extra inputs dir]...
+//   node performance/chart-export-free-rungs/run-guest-in-modal-vm.mjs [--startup-only] [extra inputs dir]...
+// --startup-only measures worker and whole-guest startup with and without the optional compile cache, and stops.
 import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+const startupOnly = process.argv.includes("--startup-only");
+const inputDirs = process.argv.slice(2).filter((a) => a !== "--startup-only");
 const repo = fileURLToPath(new URL("../../", import.meta.url));
 const here = fileURLToPath(new URL(".", import.meta.url));
 const { ModalClient } = createRequire(`${repo}worker/package.json`)("modal");
@@ -41,22 +44,27 @@ try {
   for (const f of ["chart-export-extract.mjs", "chart-export-worker.mjs"]) await put(`${repo}worker/scripts/${f}`, `/bench/hooked/scripts/${f}`);
   await put(`${repo}worker/dist/chart-export/guest.bundle.mjs`, "/bench/worker/dist/chart-export/guest.bundle.mjs");
   for (const f of ["chart-export-extract.mjs", "chart-export-worker.mjs"]) await put(`${repo}worker/scripts/${f}`, `/bench/worker/scripts/${f}`);
-  for (const f of ["marker-cap-bench.mjs", "guest-repro-run.mjs", "worker-startup.mjs"]) await put(`${here}${f}`, `/bench/${f}`);
-  for (const dir of process.argv.slice(2)) {
+  for (const f of ["marker-cap-bench.mjs", "guest-repro-run.mjs", "worker-startup.mjs", "guest-startup.mjs"]) await put(`${here}${f}`, `/bench/${f}`);
+  for (const dir of inputDirs) {
     for (const name of readdirSync(dir)) for (const f of ["input", "meta.json"]) await put(path.join(dir, name, f), `/in/${path.basename(dir)}/${name}/${f}`);
   }
+  // Worker startup without and with the optional compile cache (cold, then warm), then the whole guest command.
   process.stdout.write(await exec(["node", "--disallow-code-generation-from-strings", "/bench/worker-startup.mjs", "/bench/worker", "15"]));
-  const modes = ["doc100", "held17", "hiddenEpub20", "nested200", "mermaidEpub200", "rgbStyleEpub8", "xsplitEpub9", "deepEpub300",
-    "cmtScript640k", "epubCmt3", "htmlSvgOpen1m", "html2m", "epubScript200", "emptyCmtEpub90", "textEpub400", "rectEpub400", "legit"];
-  for (const mode of modes) await exec(["node", "/bench/marker-cap-bench.mjs", "/bench/worker/dist/chart-export/guest.bundle.mjs", mode, "--write", "/in/gen"]);
-  const extra = process.argv.slice(2).map((d) => `/in/${path.basename(d)}`);
-  process.stdout.write(await exec(["node", "/bench/guest-repro-run.mjs", "/bench/worker", "/in/gen", ...extra]));
-  // Injected faults in one unit of the ordinary 100-chart page: the other 99 must survive, the unit counted.
-  await exec(["mkdir", "-p", "/in/fault"]);
-  await exec(["cp", "-r", "/in/gen/legit", "/in/fault/legit"]);
-  for (const [fault, extraEnv] of [["crash:svg[50]", {}], ["hang:svg[50]", { DOCSLURP_CHART_GUEST_TEST_UNIT_MS: "2000" }], ["oom:svg[50]", {}]]) {
-    const out = await exec(["node", "/bench/guest-repro-run.mjs", "/bench/hooked", "/in/fault"], { DOCSLURP_CHART_GUEST_TEST_FAULT: fault, ...extraEnv });
-    process.stdout.write(out.replace(/"name":"legit"/, `"name":"legit+${fault}"`));
+  for (let k = 0; k < 2; k++) process.stdout.write(await exec(["node", "--disallow-code-generation-from-strings", "/bench/worker-startup.mjs", "/bench/worker", "15", "/tmp/chart-compile-cache"]));
+  process.stdout.write(await exec(["node", "/bench/guest-startup.mjs", "/bench/worker", "15"]));
+  if (!startupOnly) {
+    const modes = ["doc100", "held17", "hiddenEpub20", "nested200", "mermaidEpub200", "rgbStyleEpub8", "xsplitEpub9", "deepEpub300",
+      "cmtScript640k", "epubCmt3", "htmlSvgOpen1m", "html2m", "epubScript200", "emptyCmtEpub90", "textEpub400", "rectEpub400", "legit"];
+    for (const mode of modes) await exec(["node", "/bench/marker-cap-bench.mjs", "/bench/worker/dist/chart-export/guest.bundle.mjs", mode, "--write", "/in/gen"]);
+    const extra = inputDirs.map((d) => `/in/${path.basename(d)}`);
+    process.stdout.write(await exec(["node", "/bench/guest-repro-run.mjs", "/bench/worker", "/in/gen", ...extra]));
+    // Injected faults in one unit of the ordinary 100-chart page: the other 99 must survive, the unit counted.
+    await exec(["mkdir", "-p", "/in/fault"]);
+    await exec(["cp", "-r", "/in/gen/legit", "/in/fault/legit"]);
+    for (const [fault, extraEnv] of [["crash:svg[50]", {}], ["hang:svg[50]", { DOCSLURP_CHART_GUEST_TEST_UNIT_MS: "2000" }], ["oom:svg[50]", {}]]) {
+      const out = await exec(["node", "/bench/guest-repro-run.mjs", "/bench/hooked", "/in/fault"], { DOCSLURP_CHART_GUEST_TEST_FAULT: fault, ...extraEnv });
+      process.stdout.write(out.replace(/"name":"legit"/, `"name":"legit+${fault}"`));
+    }
   }
 } finally {
   await vm.terminate();
