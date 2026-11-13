@@ -84,7 +84,7 @@ vi.mock("../lib/ai.js", () => ({
   generateOpenRouterDocumentText: generateAnthropicDocumentText,
 }));
 
-const { buildFallbackAnswer, buildModelFailoverOrder, buildNativeDocumentInputs,
+const { buildFallbackAnswer, buildModelFailoverOrder, PROJECT_CHAT_FAILOVER_MODELS, buildNativeDocumentInputs,
   loadRetrievedDocumentSummaries, buildSystemInstructions, chatProject } = await import(
   "../services/project-chat.js"
 );
@@ -125,12 +125,14 @@ process.env.BETTER_AUTH_SECRET ||= "project-chat-test-secret-with-enough-entropy
 const appSessionActor = { type: "session", userId: "user-1", sessionId: "app-session-1", user: { id: "user-1", email: "u@example.test", name: "User" } } as never;
 
 describe("chat failover order", () => {
-  it("retries once on Luna, or on GLM when the project already answers with Luna, never on a denied model", () => {
+  it("retries once on Luna, or on Haiku when the project already answers with Luna, never on a denied model", () => {
+    expect(PROJECT_CHAT_FAILOVER_MODELS).toEqual(["openai/gpt-6-luna", "anthropic/claude-haiku-5.5", "z-ai/glm-5.3-flash"]);
     expect(buildModelFailoverOrder("z-ai/glm-5.3-flash")).toEqual(["z-ai/glm-5.3-flash", "openai/gpt-6-luna"]);
-    expect(buildModelFailoverOrder("openai/gpt-6-luna")).toEqual(["openai/gpt-6-luna", "z-ai/glm-5.3-flash"]);
+    expect(buildModelFailoverOrder("openai/gpt-6-luna")).toEqual(["openai/gpt-6-luna", "anthropic/claude-haiku-5.5"]);
     expect(buildModelFailoverOrder("anthropic/claude-haiku-5.5")).toEqual(["anthropic/claude-haiku-5.5", "openai/gpt-6-luna"]);
+    expect(buildModelFailoverOrder("deepseek/deepseek-v4.1-flash-1017")).toEqual(["deepseek/deepseek-v4.1-flash-1017", "openai/gpt-6-luna"]);
     expect(buildModelFailoverOrder("openai/gpt-6-luna", false)).toEqual(["openai/gpt-6-luna"]);
-    for (const model of ["z-ai/glm-5.3-flash", "openai/gpt-6-luna", "deepseek/deepseek-v4.1-flash-1017"]) {
+    for (const model of ["z-ai/glm-5.3-flash", "openai/gpt-6-luna", "anthropic/claude-haiku-5.5", "deepseek/deepseek-v4.1-flash-1017"]) {
       const order = buildModelFailoverOrder(model);
       expect(order.length).toBeLessThanOrEqual(2);
       expect(order.slice(1).some((entry) => /deepseek-v4\.1-flash/.test(entry))).toBe(false);

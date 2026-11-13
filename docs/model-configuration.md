@@ -235,8 +235,9 @@ generator candidate, OCR escalation model or restricted-region fallback; each of
 defined or configured, and a configured value naming one is refused. A model a caller or operator names explicitly
 (a project's chat or vision model, the default vision model) is not affected.
 
-Chat failover: a failed answer retries once, on GPT-6 Luna, or on GLM 5.3 Flash for a project that already answers with
-Luna (`PROJECT_CHAT_FAILOVER_MODELS`). Speed boost and evaluation turns do not fail over.
+Chat failover: a failed answer retries once, on the first of GPT-6 Luna, Claude Haiku 5.5 and GLM 5.3 Flash that is not
+the project's own model (`PROJECT_CHAT_FAILOVER_MODELS`): Luna, or Haiku for a project that already answers with Luna.
+Speed boost and evaluation turns do not fail over.
 
 ## Hosted provider routing
 
