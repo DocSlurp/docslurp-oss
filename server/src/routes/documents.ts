@@ -95,7 +95,8 @@ async function requireApiKeyDocumentScope(c: Context, docId: string, userId: str
 function isContentUpdateRequest(method: string, path: string): boolean {
   if (method === "DELETE") return /\/documents\/[^/]+\/?$/.test(path);
   if (method === "PUT") return /\/documents\/[^/]+\/tags\/?$/.test(path);
-  return method === "POST" && /\/documents\/bulk\/?$/.test(path);
+  // Queueing a figure resume changes stored content (new figure files), like the other content updates.
+  return method === "POST" && (/\/documents\/bulk\/?$/.test(path) || /\/documents\/[^/]+\/assets\/resume\/?$/.test(path));
 }
 
 /**

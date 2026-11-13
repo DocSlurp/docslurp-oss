@@ -22,7 +22,12 @@ const SHA = "a".repeat(64);
 beforeAll(async () => {
   const pg = await startMigratedPostgres();
   stop = pg.stop;
-  sql = postgres(pg.url, { max: 1, prepare: false, onnotice: () => {} }) as unknown as postgres.Sql<Record<string, unknown>>;
+  sql = postgres(pg.url, {
+    max: 1, prepare: false, onnotice: () => {},
+    types: { numeric: { to: 1700, from: [1700], serialize: (value: unknown) => String(value), parse: (value: string): unknown => Number(value) } },
+  }) as unknown as postgres.Sql<Record<string, unknown>>;
+  // Proposal tokens are sealed with the deployment's secret.
+  process.env.BETTER_AUTH_SECRET ??= "figure-resume-test-secret-0123456789abcdef";
   vi.doMock("../db.js", () => ({ sql }));
   await sql`insert into "user"(id, name, email) values ('ua', 'A', 'a@example.com'), ('ub', 'B', 'b@example.com'), ('uv', 'V', 'v@example.com')`;
   await sql`insert into organizations(id, name, slug, created_by_user_id) values ('org-a', 'A', 'a', 'ua'), ('org-b', 'B', 'b', 'ub')`;
@@ -106,7 +111,7 @@ describe("POST /documents/:id/assets/resume", () => {
     // Wrong scope and a client key.
     const readOnly = await keys.createApiKey("ua", "read", { orgId: "org-a", scopes: ["artifacts"], keyType: "server" });
     expect((await post("doc-a", { authorization: `Bearer ${readOnly.rawKey}` })).status).toBe(403);
-    const client = await keys.createApiKey("ua", "client", { orgId: "org-a", scopes: ["ingest"], keyType: "client" });
+    const client = await keys.createApiKey("ua", "client", { orgId: "org-a", scopes: ["ingest"], keyType: "client", allowedDomains: ["docs.example.com"] });
     expect((await post("doc-a", { authorization: `Bearer ${client.rawKey}` })).status).toBe(403);
     // A revoked key never authenticates.
     const revoked = await keys.createApiKey("ua", "revoked", { orgId: "org-a", scopes: ["ingest"], keyType: "server" });
