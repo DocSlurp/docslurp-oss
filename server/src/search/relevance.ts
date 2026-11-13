@@ -146,22 +146,32 @@ export function contentTerms(query: string): string[] {
   return [...new Set(matchTerms(query).filter((term) => !coverageStopWords.has(term)))];
 }
 
-/** Share of the query's distinct content terms present in the text (accent-insensitive, root plus inflection). */
-export function termCoverage(query: string, text: string): number {
-  const terms = contentTerms(query);
-  if (terms.length === 0) return 0;
+/** A text folded and split into words once, so several coverage checks against it do not redo that work. */
+interface PreparedText { folded: string; words: Set<string> }
+
+function prepareText(text: string): PreparedText {
   const folded = foldText(text);
-  const words = new Set(folded.split(/[^\p{L}\p{N}\p{M}-]+/u).filter(Boolean));
+  return { folded, words: new Set(folded.split(/[^\p{L}\p{N}\p{M}-]+/u).filter(Boolean)) };
+}
+
+function coverageOf(terms: string[], text: PreparedText): number {
+  if (terms.length === 0) return 0;
   const matched = terms.filter((term) => {
     // Unsegmented scripts have no word boundaries: a character pair is looked up in the running text.
-    if (hasCjk(term)) return folded.includes(term);
+    if (hasCjk(term)) return text.folded.includes(term);
     // Inflection is only modelled for ASCII-letter words; other scripts need the whole word.
-    if (!/^[a-z]+$/.test(term)) return words.has(term);
+    if (!/^[a-z]+$/.test(term)) return text.words.has(term);
     const root = stem(term);
-    for (const word of words) if (sharesRoot(word, root)) return true;
+    for (const word of text.words) if (sharesRoot(word, root)) return true;
     return false;
   });
   return matched.length / terms.length;
+}
+
+/** Share of the query's distinct content terms present in the text (accent-insensitive, root plus inflection). */
+export function termCoverage(query: string, text: string): number {
+  const terms = contentTerms(query);
+  return terms.length === 0 ? 0 : coverageOf(terms, prepareText(text));
 }
 
 /**
@@ -174,22 +184,37 @@ export function queryPhraseWindows(query: string): string[] {
   return words.slice(2).map((_, index) => words.slice(index, index + 3).join(" "));
 }
 
+/** A query's content terms and its phrase windows' terms, computed once per search instead of once per chunk. */
+interface PreparedQuery { terms: string[]; windows: string[][] }
+
+function prepareQuery(query: string): PreparedQuery {
+  return { terms: contentTerms(query), windows: queryPhraseWindows(query).map(contentTerms) };
+}
+
+function lexicalOf(query: PreparedQuery, text: PreparedText): number {
+  const coverage = coverageOf(query.terms, text);
+  return coverage > LEXICAL_MIN_COVERAGE ? coverage : 0;
+}
+
+function phraseOf(query: PreparedQuery, text: PreparedText): number {
+  for (const terms of query.windows) {
+    if (terms.length >= 2 && coverageOf(terms, text) === 1) return 1;
+  }
+  return lexicalOf(query, text);
+}
+
 /**
  * Relevance of a row that matched a phrase window. A window with two or more
  * content terms found in the chunk is an exact multi-word match (1). Otherwise
  * the row only shared a single word and gets the strict-majority score.
  */
 export function phraseRelevance(query: string, text: string): number {
-  for (const window of queryPhraseWindows(query)) {
-    if (contentTerms(window).length >= 2 && termCoverage(window, text) === 1) return 1;
-  }
-  return lexicalRelevance(query, text);
+  return phraseOf(prepareQuery(query), prepareText(text));
 }
 
 /** Coverage counts as lexical evidence only for a majority of the query's terms. */
 export function lexicalRelevance(query: string, text: string): number {
-  const coverage = termCoverage(query, text);
-  return coverage > LEXICAL_MIN_COVERAGE ? coverage : 0;
+  return lexicalOf(prepareQuery(query), prepareText(text));
 }
 
 /**
@@ -202,6 +227,7 @@ export function annotateEvidenceRelevance(
   args: { query: string; embeddingPipeline?: string | null },
 ): SearchChunk[][] {
   const baseline = embeddingNoiseBaseline(args.embeddingPipeline);
+  const query = prepareQuery(args.query);
   const relevanceFor = (adapter: EvidenceRetrievalResult["adapter"], chunk: SearchChunk): number => {
     if (adapter === "vector") return baseline === null ? 1 : vectorRelevance(chunk.score, baseline);
     if (adapter === "graph" || adapter === "community") return 1;
@@ -209,10 +235,8 @@ export function annotateEvidenceRelevance(
     // stop words), so a hit is a full match. The OR backoff can match on one
     // incidental word and is judged by term coverage instead.
     if (chunk.lexicalMatch === undefined) return 1;
-    const haystack = [chunk.text, chunk.headingPath.join(" "), chunk.filename].join("\n");
-    return chunk.lexicalMatch === "phrase"
-      ? phraseRelevance(args.query, haystack)
-      : lexicalRelevance(args.query, haystack);
+    const haystack = prepareText([chunk.text, chunk.headingPath.join(" "), chunk.filename].join("\n"));
+    return chunk.lexicalMatch === "phrase" ? phraseOf(query, haystack) : lexicalOf(query, haystack);
   };
   const annotated: EvidenceRetrievalResult[] = results.map((result) => ({
     adapter: result.adapter,
