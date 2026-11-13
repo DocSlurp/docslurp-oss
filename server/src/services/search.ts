@@ -39,7 +39,7 @@ import { writeBehindWithinCap } from "../lib/billed-write-behind.js";
 import { currentChatTurn } from "../lib/chat-turn-context.js";
 import { effectiveSearchMode } from "../search/search-mode.js";
 import { consumeSearchModeLimit } from "../search/search-mode-limits.js";
-import { currentRequestOrgId, currentRequestSignal } from "../lib/request-context.js";
+import { currentRequestId, currentRequestOrgId, currentRequestSignal } from "../lib/request-context.js";
 import { jsonRecord } from "../lib/json-record.js";
 import { lanceDbFullTextSearch, lanceDbVectorSearch, warmLanceDbSearch, type LanceDbSearchHit } from "../search/lancedb.js";
 import { decodeLanceChunkHydration } from "@docslurp/shared/lancedb-hydration";
@@ -64,6 +64,7 @@ import { runSearchSession, type SearchSessionRunnerAdapters } from "../search/se
 import {
   resolveSearchSetup,
   loadProjectPipeline,
+  type SearchSetup,
   type SearchAvailabilityRow,
 } from "../search/session-setup.js";
 import { getDeferredContext } from "../search/deferred/deferred-context.js";
@@ -80,7 +81,8 @@ import { lexicalRelevance, phraseRelevance, queryPhraseWindows } from "../search
 import { enqueueSearchCharge, leanSearchLogging } from "../search/lean-logging.js";
 import { estimateTextTokens } from "../search/token-estimate.js";
 import { backoffWords, buildFoldedBackoffTsQuery, hasNonAscii } from "../search/text-fold.js";
-import { currentSearchAdmissionGroup, withSearchSlot, type SearchAdmission } from "../search/search-limiter.js";
+import { currentSearchAdmissionGroup, withSearchLanes, type SearchAdmission, type SearchLaneReport } from "../search/search-limiter.js";
+import { activeTraceparent } from "@docslurp/shared/observability";
 import { currentChatSessionId } from "../lib/chat-agent-context.js";
 import {
   boundedSearchQuery,
@@ -92,7 +94,7 @@ import {
   withSearchSignal,
 } from "../search/query-bounds.js";
 import { FOLDED_INDEX_NAME, foldedIndexReady, foldedUnindexedTimeoutMs } from "../search/folded-index.js";
-import { collectSearchTimings, countSearchEvent, recordSearchPhase, timePhase, type SearchTimings } from "../search/timings.js";
+import { collectSearchTimings, countSearchEvent, formatSearchTimingContext, recordSearchPhase, timePhase, type SearchTimings } from "../search/timings.js";
 import { assertSearchAccessScope, type SearchAccessScope } from "../search/access-scope.js";
 
 export { CrossProjectScopeError, MissingProjectScopeError, ProjectNotFoundError } from "../search/session-setup.js";
@@ -1815,12 +1817,55 @@ function searchAdmission(options: SearchOptions): SearchAdmission {
   };
 }
 
-function withSearchSlotTimed<T>(signal: AbortSignal | undefined, fn: () => Promise<T>, admission: SearchAdmission): Promise<T> {
-  const started = performance.now();
-  return withSearchSlot(signal, () => {
-    recordSearchPhase("queue", performance.now() - started);
-    return fn();
-  }, admission);
+/**
+ * A search with nothing to retrieve (no document is searchable, keyword-served or page-served yet)
+ * returns an empty response from cached state. It stays in the fast lane and never takes a main
+ * slot, so it cannot queue behind searches that run retrieval. Deep search with deferred profiles
+ * may still materialize pages, so it always takes a main slot.
+ */
+function hasNothingToRetrieve(setup: SearchSetup): boolean {
+  const row = setup.availabilityRow;
+  if (!row) return false;
+  const mode = setup.resolvedOptions.searchMode ?? "deep";
+  if (deferredProfilesEnabled() && mode === "deep") return false;
+  return row.searchable_documents === 0 && row.indexed_documents === 0 && (row.keyword_only_documents ?? 0) === 0 && (row.page_only_documents ?? 0) === 0;
+}
+
+/** Trailing fields of the `[search-timing]` line, so production logs join traces and split by mode and admission. */
+function searchTimingContext(options: SearchOptions, scope: SearchAccessScope, admitted: SearchLaneReport | undefined): string {
+  let traceId: string | null = null;
+  try { traceId = activeTraceparent()?.split("-")[1] ?? null; } catch { /* observability mocked out */ }
+  return formatSearchTimingContext({
+    mode: effectiveSearchMode(options, scope.modeCeiling),
+    sub: Boolean(options.rootSessionId),
+    group: currentChatSessionId() ? "chat" : currentSearchAdmissionGroup() ? "batch" : "none",
+    streamed: Boolean(currentSearchStreamSink()),
+    lane: admitted?.lane, running: admitted?.running, queued: admitted?.queued, fastWaitMs: admitted?.fastWaitMs,
+    requestId: currentRequestId(),
+    traceId,
+  });
+}
+
+/** Admit one root search: setup in the fast lane, then retrieval in a main slot unless there is nothing to retrieve. */
+function admitHybridSearch<T>(
+  signal: AbortSignal | undefined,
+  admission: SearchAdmission,
+  steps: {
+    query: string; userId: string; options: SearchOptions; scope: SearchAccessScope;
+    run: (setup: SearchSetup) => Promise<T>;
+    onAdmitted: (report: SearchLaneReport) => void;
+  },
+): Promise<T> {
+  return withSearchLanes(signal, admission, {
+    setup: () => timePhase("setup", () => resolveSearchSetup(steps.userId, steps.options, steps.scope)),
+    isLight: hasNothingToRetrieve,
+    tenantOf: (setup) => `org:${setup.normalizedScope.orgId}`,
+    run: steps.run,
+    onAdmitted: (report) => {
+      recordSearchPhase("queue", report.fastWaitMs + report.mainWaitMs);
+      steps.onAdmitted(report);
+    },
+  });
 }
 
 /**
@@ -1849,10 +1894,15 @@ export async function hybridSearch(rawQuery: string, userId: string, options: Se
       const searchMode = effectiveSearchMode(options, scope.modeCeiling);
       await consumeSearchModeLimit(searchMode, searchMode === "keyword" ? options.keywordQueries?.length ?? 1 : 1);
     }
+    let admitted: SearchLaneReport | undefined;
     const { value: result, timings } = await collectSearchTimings(() => withSearchSignal(signal, () =>
-      withSearchSlotTimed(signal, () => executeHybridSearch(query, userId, { ...options, rootSessionId: activity.groupId }, scope), searchAdmission(options))));
+      admitHybridSearch(signal, searchAdmission(options), {
+        query, userId, options, scope,
+        run: (setup) => executeHybridSearch(query, userId, { ...options, rootSessionId: activity.groupId }, scope, setup),
+        onAdmitted: (report) => { admitted = report; },
+      })));
     result.timings = timings;
-    console.info(`[search-timing] ${Object.entries(timings).map(([key, ms]) => `${key.replace(/Ms$/, "")}=${ms}`).join(" ")} results=${result.results.length}`);
+    console.info(`[search-timing] ${Object.entries(timings).map(([key, ms]) => `${key.replace(/Ms$/, "")}=${ms}`).join(" ")} results=${result.results.length}${searchTimingContext(options, scope, admitted)}`);
     // Price card: one search per root query (sub-searches of decomposition and
     // multi-hop are part of it); LLM query strategies count as the provider's searchUnits.
     // Searches a chat turn runs are part of the chat answer's price.
@@ -1987,8 +2037,8 @@ async function executeHybridSearch(
   userId: string,
   options: SearchOptions,
   scope: SearchAccessScope,
+  setup: SearchSetup,
 ): Promise<SearchResponse> {
-  const setup = await timePhase("setup", () => resolveSearchSetup(userId, options, scope));
   noteSearchStreamProject(setup.normalizedScope.projectId);
   if (projectOrgs.size < 50_000) projectOrgs.set(setup.normalizedScope.projectId, `org:${setup.normalizedScope.orgId}`);
   const wholeCorpusFallback = async (filters = setup.resolvedOptions.filters): Promise<SearchResult[]> => {

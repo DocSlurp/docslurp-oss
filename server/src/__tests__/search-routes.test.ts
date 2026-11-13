@@ -36,8 +36,10 @@ vi.mock("../services/aggregate-rag.js", () => ({
 
 const getProject = vi.fn();
 const ensureDefaultProject = vi.fn(async () => ({ id: "ws-default" }));
+const resolveDefaultProjectId = vi.fn(async () => "ws-default");
 vi.mock("../services/projects.js", () => ({ resolveProjectRef: vi.fn(async () => null), findProjectForInput: vi.fn(async (ref: { id?: string; slug?: string }) => ({ id: (ref.id ?? ref.slug)!, orgId: "org-1" })),
   ensureDefaultProject,
+  resolveDefaultProjectId,
   getProject,
 }));
 
@@ -166,7 +168,7 @@ describe("searchRoutes", () => {
     const response = await app.request("/search?q=test");
 
     expect(response.status).toBe(200);
-    expect(ensureDefaultProject).toHaveBeenCalledWith({ userId: "user-1", orgId: undefined });
+    expect(resolveDefaultProjectId).toHaveBeenCalledWith({ userId: "user-1", orgId: undefined });
     expect(hybridSearch).toHaveBeenCalledWith("test", "user-1", expect.objectContaining({
       filters: expect.objectContaining({ projectId: "ws-default" }),
     }), expect.objectContaining({ orgId: expect.any(String) }));

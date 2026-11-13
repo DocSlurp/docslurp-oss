@@ -18,7 +18,7 @@ import { withLanceS3Proxy, withLanceSearchSpan } from "@docslurp/shared/lancedb-
 import { formatLanceSessionLog, resolveLanceSessionConfig, type LanceSessionConfig } from "@docslurp/shared/lancedb-session";
 
 import { lanceDbQueryTuning } from "./lancedb-query-tuning.js";
-import { prewarmTable } from "./lancedb-prewarm.js";
+import { prewarmSearchIndexes, prewarmTable } from "./lancedb-prewarm.js";
 import { isLanceTableNotFound, lanceOpenFailure, openLanceTable } from "./lancedb-open.js";
 export { isLanceTableNotFound } from "./lancedb-open.js";
 import { resultCache, resultCacheKey } from "./result-cache.js";
@@ -108,6 +108,10 @@ export interface LanceTableCapabilities {
   /** A native FTS (BM25) index covers `text`; rows added since are flat-scanned. */
   fullTextIndex: boolean;
   columns: string[];
+  /** Vector and full-text index names: what a search loads on first use. */
+  searchIndexes: string[];
+  /** Changes when the worker rebuilds one of them (new index UUID), which needs loading again. */
+  searchIndexSignature: string;
 }
 
 /** listIndices reads the manifest; refreshed at most this often per open table. */
@@ -120,7 +124,10 @@ export function lanceTableCapabilities(table: lancedb.Table, now = Date.now()): 
   const value = Promise.all([table.schema(), table.listIndices()]).then(([schema, indices]) => {
     const names = schema.fields.map((field) => field.name);
     const present = new Set(names);
+    const searchIndexes = indices.filter((index) => index.columns.includes("vector") || /fts|inverted/i.test(index.indexType ?? ""));
     return {
+      searchIndexes: searchIndexes.map((index) => index.name),
+      searchIndexSignature: searchIndexes.map((index) => `${index.name}:${(index as { indexUuid?: string }).indexUuid ?? ""}`).sort().join(","),
       columns: names,
       hydrationColumns: HYDRATION_RESULT_COLUMNS.every((name) => present.has(name)),
       fullTextIndex: indices.some((index) => index.columns.includes("text") && /fts|inverted/i.test(index.indexType ?? "")),
@@ -368,6 +375,8 @@ export function resetLanceDbConnectionForTests(): void {
   missingTables.clear();
   missingWithDocumentsLoggedAt.clear();
   lastPrewarm.clear();
+  indexWarmActive = 0;
+  indexWarmQueue.length = 0;
   if (sessionState) clearInterval(sessionState.timer);
   sessionState = undefined;
 }
@@ -433,9 +442,77 @@ export function filterLanceDbRowsByDocumentIds(
 }
 
 /**
+ * First-search index load. A cold vector query reads the whole HNSW-SQ index partition from
+ * storage before it can rank (measured: 106 MB of a 122 MB index at 100,000 chunks), and the
+ * BM25 leg reads its index beside it. The warm-up starts both loads when the search starts, so
+ * they overlap planning and query embedding instead of beginning inside each leg.
+ * - Once per open table handle and index generation: later searches only look the entry up.
+ * - Concurrent first searches share the one in-flight load; Lance also de-duplicates a query
+ *   that needs an index already being loaded (measured: no second read of the index).
+ * - At most INDEX_WARM_CONCURRENCY tables load at once, bounding the burst of storage requests
+ *   and memory. It loads only what the first query on that table would load anyway.
+ * - A failed load is retried no sooner than INDEX_WARM_RETRY_MS later; search works without it.
+ * SEARCH_LANCE_WARM_INDEX=0 turns it off (the warm-up then reads version and schema only).
+ */
+const INDEX_WARM_CONCURRENCY = 2;
+const INDEX_WARM_RETRY_MS = 60_000;
+interface IndexWarmup { signature: string; done: Promise<boolean>; settled: boolean; failedAt?: number }
+const indexWarmups = new WeakMap<lancedb.Table, IndexWarmup>();
+let indexWarmActive = 0;
+const indexWarmQueue: Array<() => void> = [];
+
+async function withIndexWarmSlot<T>(run: () => Promise<T>): Promise<T> {
+  // A released slot is handed straight to the next waiter, so the count never exceeds the limit.
+  if (indexWarmActive >= INDEX_WARM_CONCURRENCY) await new Promise<void>((resolve) => indexWarmQueue.push(resolve));
+  else indexWarmActive += 1;
+  try {
+    return await run();
+  } finally {
+    const next = indexWarmQueue.shift();
+    if (next) next(); else indexWarmActive -= 1;
+  }
+}
+
+/**
+ * Timings vocabulary ([search-timing]): `lanceIndexCold` this search started or joined an index
+ * load and `lanceIndexLoad` (ms) how long it lasted; `lanceIndexWarm` the indexes were already
+ * loaded in this process; `lanceIndexWarmFailed` the load failed (the legs read on demand).
+ */
+async function warmSearchIndexes(table: lancedb.Table, uri: string, capabilities: LanceTableCapabilities): Promise<void> {
+  if (process.env.SEARCH_LANCE_WARM_INDEX === "0" || capabilities.searchIndexes.length === 0) return;
+  let warmup = indexWarmups.get(table);
+  const retry = warmup?.failedAt !== undefined && Date.now() - warmup.failedAt >= INDEX_WARM_RETRY_MS;
+  if (warmup && warmup.signature === capabilities.searchIndexSignature && !retry) {
+    if (warmup.settled) {
+      countSearchEvent(warmup.failedAt === undefined ? "lanceIndexWarm" : "lanceIndexWarmFailed");
+      return;
+    }
+  } else {
+    const entry: IndexWarmup = {
+      signature: capabilities.searchIndexSignature,
+      settled: false,
+      done: withIndexWarmSlot(() => prewarmSearchIndexes(table, capabilities.searchIndexes, lanceNamespace(uri)))
+        .then((result) => result.errors.length === 0, () => false),
+    };
+    void entry.done.then((ok) => {
+      entry.settled = true;
+      if (!ok) entry.failedAt = Date.now();
+    });
+    indexWarmups.set(table, entry);
+    warmup = entry;
+  }
+  countSearchEvent("lanceIndexCold");
+  const started = performance.now();
+  const ok = await warmup.done;
+  recordSearchPhase("lanceIndexLoad", performance.now() - started);
+  if (!ok) countSearchEvent("lanceIndexWarmFailed");
+}
+
+/**
  * Warm the tables a vector search will read while the query is still being embedded (or rewritten):
- * open the handle, refresh a stale version and load the schema/capabilities, so the nearest-neighbour
- * query that follows does not start with those storage round trips. Best effort; never throws.
+ * open the handle, refresh a stale version, load the schema/capabilities and start loading the
+ * vector and full-text indexes (warmSearchIndexes), so the legs that follow do not start with those
+ * storage round trips. `lanceWarm` (ms) covers all of it. Best effort; never throws.
  */
 export async function warmLanceDbSearch(args: { orgId: string; projectId: string; embeddingModel: string; dimension: number; hydrate?: boolean }): Promise<void> {
   if (!args.orgId.trim() || !args.projectId.trim()) return;
@@ -443,8 +520,10 @@ export async function warmLanceDbSearch(args: { orgId: string; projectId: string
   try {
     const target = searchTarget(args);
     const table = await getTable(target.uri, target.name);
-    if (table) await Promise.all([table.version(), args.hydrate ? lanceTableCapabilities(table) : resultColumns(table)]);
-    countSearchEvent("lanceWarm");
+    if (table) {
+      const [capabilities] = await Promise.all([lanceTableCapabilities(table), table.version(), args.hydrate ? undefined : resultColumns(table)]);
+      await warmSearchIndexes(table, target.uri, capabilities);
+    }
   } catch {
     // The search itself reopens or drops the handle on failure.
   } finally {
