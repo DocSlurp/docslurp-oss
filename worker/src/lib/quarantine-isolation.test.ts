@@ -70,6 +70,12 @@ describe("inline charts never cost the inspection (council r3 L1)", () => {
     expect(inspection.charts).toEqual({ status: "refused", reason: "worker-failed", ms: 0 });
     expect(run).toHaveBeenCalledOnce();
   });
+  it("an image that gives no chart answer when asked: a counted answer-missing refusal (council r4 M3)", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    const run = vi.fn(async (plan) => { await writeFile(out(plan), JSON.stringify(ok)); });
+    const inspection = await inspectQuarantine({ ...base, runner: { run } as unknown as CommandRunner });
+    expect(inspection.charts).toEqual({ status: "refused", reason: "answer-missing", ms: 0 });
+  });
   it("still fails without charts asked, on a timeout (no exit code), or with no inspection written", async () => {
     vi.stubEnv("NODE_ENV", "production");
     const wrote = vi.fn(async (plan) => { await writeFile(out(plan), JSON.stringify(ok)); throw new CommandExitError("node (3)", 3); });

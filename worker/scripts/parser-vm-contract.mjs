@@ -16,6 +16,9 @@ await verifyCompileCache();
 await access(fileURLToPath(import.meta.resolve("@docslurp/shared/page-table-routing")));
 // The chart-export and quarantine guests load only these @docslurp/shared modules (not the package index: ~0.3 s of CPU per run).
 for (const sub of ["chart-export", "file-sniff"]) await access(fileURLToPath(import.meta.resolve(`@docslurp/shared/${sub}`)));
+// parser-vm@5 (#369, council r4 M3): the image ships the inline chart guest (quarantine-inspect.mjs answers `charts`,
+// chart-inline.mjs, #364's unit worker and bundle, the read-only compile cache), so a host with inline charts on refuses an
+// older image at the canary instead of skipping every free-tier document.
 // parser-vm@4: quarantine inspection returns { sniffed, archive, pdf } (pdf: the /Encrypt check that sends an encrypted PDF to
 // the in-VM qpdf decryption, and encryptConflict, the council N-H1 structure check; archive: the nested-archive walk, which
 // walks tar and refuses nested 7z, bzip2 and xz); an older image is refused. qpdfVersion: the image's qpdf,
@@ -44,4 +47,4 @@ try { await access("/sys/fs/cgroup/cgroup.controllers"); cgroupV2 = true; } catc
 import { execFileSync } from "node:child_process";
 let qpdfVersion = null;
 try { qpdfVersion = /^qpdf version (\d+\.\d+\.\d+)/m.exec(execFileSync("qpdf", ["--version"], { encoding: "utf8", timeout: 10_000 }))?.[1] ?? null; } catch { /* absent */ }
-console.log(JSON.stringify({ protocol: "parser-vm@4", uid: process.getuid?.() ?? null, tools, links, hardening, cgroupV2, qpdfVersion }));
+console.log(JSON.stringify({ protocol: "parser-vm@5", uid: process.getuid?.() ?? null, tools, links, hardening, cgroupV2, qpdfVersion }));

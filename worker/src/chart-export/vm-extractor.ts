@@ -225,7 +225,12 @@ export function createVmDeterministicVisualExtractor(deps: VmExtractorDeps): Det
       }
       log(`[chart-export] parser VM skipped ${context} kind=${sourceKind} reason=inline-${inline.status}${inline.status === "ok" ? ` visuals=${inline.result.visuals.length}` : ` detail=${inline.reason}`}`);
     }
-    const reason = sourceKind && !useInline ? (inline ? "inline-result-too-large" : sourceRunReason(sourceKind, input.signals)) : null;
+    // The standalone run: an inline answer too big to carry, or missing (an older image: #363's own signal decides), or no
+    // inline answer at all (inline mode off).
+    const reason = sourceKind && !useInline
+      ? (inline?.status === "refused" && inline.reason === "result-too-large" ? "inline-result-too-large" : sourceRunReason(sourceKind, input.signals))
+      : null;
+    if (inline?.status === "refused" && inline.reason === "answer-missing") log(`[chart-export] inline answer missing ${context} kind=${sourceKind} fallback=standalone`);
     const sourceAdmitted = !!(sourceKind && document.sourceKey && reason) && await admittedToVm();
     // A source the free-VM cap turned away is recorded, not just logged (council r8 L1).
     if (sourceKind && document.sourceKey && reason && !sourceAdmitted) deferred.push({ input: "source", svgIndex: 0, count: 1, reason: "vm-cap", pageNumber: null, figureId: null });

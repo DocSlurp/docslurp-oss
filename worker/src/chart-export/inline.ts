@@ -87,8 +87,13 @@ export function readStoredInlineCharts(raw: unknown): StoredInlineCharts | null 
 }
 
 /** Whether the standalone VM run should still try the source: only when the inline answer was too big to carry. */
+/**
+ * Refusals the standalone guest (#363's path) takes over: an answer too big to carry inline, and an answer the image did
+ * not give at all (answer-missing: a parser image older than the inline guest, council r4 M3). Every other refusal is
+ * recorded as a loss (vm-extractor).
+ */
 export function inlineNeedsStandalone(charts: InlineCharts): boolean {
-  return charts.status === "refused" && charts.reason === "result-too-large";
+  return charts.status === "refused" && (charts.reason === "result-too-large" || charts.reason === "answer-missing");
 }
 
 /**

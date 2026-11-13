@@ -23,15 +23,18 @@ afterEach(async () => { vi.unstubAllEnvs(); await Promise.all(dirs.splice(0).map
 const CHART = genericBar(["London", "Tokyo", "Austin"], [4, 6, 9], 10);
 const INFECTED = CHART.replace("</svg>", "<!-- INFECTED --></svg>");
 
-async function fixture(pipeline: Record<string, unknown>) {
+async function fixture(pipeline: Record<string, unknown>, extra: Array<[string, Buffer, string]> = []) {
   vi.stubEnv("NODE_ENV", "test");
   vi.stubEnv("DOCSLURP_SERVICE_PROFILE", "development");
   const dir = await mkdtemp(join(process.env.TMPDIR || tmpdir(), "quarantine-chart-inline-")); dirs.push(dir);
-  const sources = new Map([["chart.svg", Buffer.from(CHART)], ["infected.svg", Buffer.from(INFECTED)], ["notes.pdf", Buffer.from("%PDF-1.7\nexpansion plan\n%%EOF\n")]]);
+  const sources = new Map([["chart.svg", Buffer.from(CHART)], ["infected.svg", Buffer.from(INFECTED)], ["notes.pdf", Buffer.from("%PDF-1.7\nexpansion plan\n%%EOF\n")],
+    ...extra.map(([name, bytes]) => [name, bytes] as [string, Buffer])]);
   const now = new Date();
   const documents: Document[] = [...sources].map(([filename, bytes]) => ({
-    id: filename, userId: "u", runId: "run", filename, mimeType: filename.endsWith(".pdf") ? "application/pdf" : "image/svg+xml", sourceKey: filename, sourceSha256: sha256Bytes(bytes),
+    id: filename, userId: "u", runId: "run", filename, mimeType: extra.find(([n]) => n === filename)?.[2] ?? (filename.endsWith(".pdf") ? "application/pdf" : "image/svg+xml"), sourceKey: filename, sourceSha256: sha256Bytes(bytes),
     parseSourceDecision: "unscanned-allowed", status: "queued", extractionMode: "hybrid", pageCount: 1, createdAt: now, updatedAt: now,
+    // A provisional intake record (the API's header glance): quarantine's own sniff decides the verified type.
+    ...(extra.some(([n]) => n === filename) ? { fileFacts: { inspection: "header", declaredMimeType: extra.find(([n]) => n === filename)![2] } as never } : {}),
   }));
   const run: ProjectRun = { id: "run", orgId: "org-a", projectId: "project", userId: "u", kind: "bulk-upload", status: "processing", stage: "quarantine",
     totalDocuments: documents.length, processedDocuments: 0, pagesTotal: documents.length, pagesProcessed: 0, spentCents: 0,
@@ -81,6 +84,20 @@ describe("quarantine stage: inline chart extraction", () => {
     expect(events[0]!.metadata).toMatchObject({ stage: "quarantine", documentId: "chart.svg", reason: "inline", outcome: "ok", billable: false });
     expect(f.state.artifactLedger.readDocument("infected.svg", "chart-inline")).toBeUndefined();
     expect(f.state.artifactLedger.readDocument("notes.pdf", "chart-inline")).toBeUndefined();
+  });
+
+  it("drops the answer when the verified type is not the kind it was read as (council r4 L2)", async () => {
+    vi.stubEnv("DOCSLURP_CHART_EXPORT", "on");
+    vi.stubEnv("DOCSLURP_CHART_EXPORT_INLINE", "1");
+    // Declared SVG, verified HTML (a page that embeds the chart): the guest read it as `svg`; the stage keeps an answer
+    // only for the verified kind.
+    const f = await fixture({ chartExport: { tier: "free" } }, [["declared.html", Buffer.from(`<!doctype html><html><body><h1>Expansion</h1>${CHART}</body></html>`), "image/svg+xml"]]);
+    await f.stage.run(f.state);
+    expect(f.state.documentStage("declared.html", "quarantine")?.status).toBe("completed");
+    expect(f.artifacts.get("declared.html")?.chartInline).toBeUndefined();
+    expect(f.state.artifactLedger.readDocument("declared.html", "chart-inline")).toBeUndefined();
+    const events = f.state.usageLedger.snapshot().filter((e) => e.metric === "chart-export-vm" && (e.metadata as { documentId?: string }).documentId === "declared.html");
+    expect(events).toHaveLength(0);
   });
 
   it("rewrites a stale work slot from an earlier run to none when nothing is asked (council L4)", async () => {

@@ -39,8 +39,6 @@ export interface ArchiveInspection {
    * stats. Optional: guests built before it was added omit it.
    */
   chartParts?: number;
-  /** `*.svg` entries by name (the inline chart signal for an EPUB); optional, older guests omit it. */
-  svgParts?: number;
   /** Warning-only findings of the nested walk (`archive-nested-uninspectable`); optional, older guests omit it. */
   notices?: string[];
   /** Nested containers (ZIP, gzip, OLE2) the in-VM walk opened (archive-nesting.ts). */
@@ -452,13 +450,16 @@ async function inspectInVm(args: InspectArgs): Promise<QuarantineInspection> {
     if ((await stat(output)).size > (args.charts ? 6 : 2) * 1024 * 1024) throw new Error("quarantine inspection result exceeds limit");
     const result = JSON.parse(await readFile(output, "utf8")) as QuarantineInspection;
     // The chart answer is checked on its own and can only ever be dropped to a refusal: it never fails the inspection.
-    // Asked for and missing (an image whose guest predates inline charts) stays missing: vision-extract then runs as before.
+    // Asked for and missing (an image whose guest predates inline charts): a counted refusal (answer-missing), never a
+    // silent skip; vm-extractor then runs #363's standalone path for the source (council r4 M3). parser-vm@5 also refuses
+    // such an image at the canary.
     const charts = (result as { charts?: unknown }).charts;
     delete (result as { charts?: unknown }).charts;
     // The inspection proper keeps its own 2 MiB bound; only the chart answer gets the extra allowance.
     if (Buffer.byteLength(JSON.stringify(result)) > 2 * 1024 * 1024) throw new Error("quarantine inspection result exceeds limit");
     if (args.charts && inlineCrashed) result.charts = { status: "refused", reason: "worker-failed", ms: 0 };
     else if (args.charts && charts !== undefined) result.charts = validateInlineCharts(charts);
+    else if (args.charts) result.charts = { status: "refused", reason: "answer-missing", ms: 0 };
     const sniffed = result?.sniffed as unknown as Record<string, unknown> | null;
     if (!sniffed || typeof sniffed !== "object" || Object.keys(sniffed).some((key) => !["mimeType", "container", "encoding"].includes(key))
       || !(sniffed.mimeType === null || typeof sniffed.mimeType === "string" && sniffed.mimeType.length <= 256 && /^[\w.+-]+\/[\w.+-]+$/.test(sniffed.mimeType))
@@ -473,7 +474,6 @@ async function inspectInVm(args: InspectArgs): Promise<QuarantineInspection> {
       if (!(archive.compressionRatio === null || Number.isFinite(archive.compressionRatio) && archive.compressionRatio >= 0)) throw new Error("invalid quarantine expansion ratio");
       if (archive.notices !== undefined && !(Array.isArray(archive.notices) && archive.notices.length <= 10 && archive.notices.every((notice) => notice === "archive-nested-uninspectable"))) throw new Error("invalid quarantine archive notices");
       if (archive.chartParts !== undefined && !(Number.isSafeInteger(archive.chartParts) && archive.chartParts >= 0 && archive.chartParts <= archive.entryCount)) throw new Error("invalid quarantine chart part count");
-      if (archive.svgParts !== undefined && !(Number.isSafeInteger(archive.svgParts) && archive.svgParts >= 0 && archive.svgParts <= archive.entryCount)) throw new Error("invalid quarantine SVG part count");
       for (const key of ["nestedContainers", "maxNestingDepth"] as const) {
         if (archive[key] !== undefined && !(Number.isSafeInteger(archive[key]) && archive[key]! >= 0 && archive[key]! <= 1_000_000)) throw new Error("invalid quarantine nesting count");
       }

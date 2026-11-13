@@ -540,11 +540,18 @@ describe("the extractor uses the inline answer instead of a parser VM run", () =
     expect(inlineHasWork({ status: "skipped", reason: "no-signal" })).toBe(false);
   });
 
-  it("result-too-large is the one refusal that goes to the standalone guest", async () => {
-    const { deps, extract } = extractor();
-    await extract(input({ kind: "svg", status: "refused", reason: "result-too-large", ms: 9 })).catch(() => undefined);
-    expect(deps.storage.downloadToTempFile).toHaveBeenCalled();
-    expect(inlineHasWork({ status: "refused", reason: "result-too-large", ms: 9 })).toBe(true);
+  it("result-too-large and answer-missing are the refusals that go to the standalone guest", async () => {
+    // answer-missing (council r4 M3): a parser image older than the inline guest gave no answer; #363's standalone
+    // path takes the source, so an old image never silently skips documents.
+    for (const reason of ["result-too-large", "answer-missing"]) {
+      const { deps, extract } = extractor();
+      // answer-missing: #363's own signal decides the standalone run (here a router candidate, as #363 needs for an SVG).
+      const asked = input({ kind: "svg", status: "refused", reason, ms: 0 }) as unknown as { signals: Record<string, unknown> };
+      if (reason === "answer-missing") asked.signals = { candidates: 1 };
+      await extract(asked as never).catch(() => undefined);
+      expect(deps.storage.downloadToTempFile, reason).toHaveBeenCalled();
+      expect(inlineHasWork({ status: "refused", reason, ms: 0 } as never)).toBe(true);
+    }
   });
 
   it("an answer for another kind is ignored (the type changed after quarantine)", async () => {
