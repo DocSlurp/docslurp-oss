@@ -38,6 +38,7 @@ import {
 } from "@docslurp/shared";
 
 import { chatModelRefused, ChatModelNotAllowedError } from "../lib/chat-model-policy.js";
+import { CHAT_REASONING_LEVELS, CHAT_TIERS } from "@docslurp/shared/project-chat-models";
 import { actorHasAnyApiKeyScope, getRequestActor, apiKeyCanUseProject, isFirstPartyAppActor, type RequestActor } from "../lib/request-actor.js";
 import { requestIp, requestUserAgent } from "../lib/request-context.js";
 import { isProjectChatAgent } from "../lib/mastra.js";
@@ -141,6 +142,12 @@ const chatFeedbackSchema = z.object({
   model: optionalText(200),
 });
 
+/** A chat turn's category choice: the tier and reasoning level. Backend models are never a customer choice. */
+const chatTierChoiceSchema = z.object({
+  tier: z.enum(CHAT_TIERS).optional(),
+  reasoning: z.enum(CHAT_REASONING_LEVELS).optional(),
+});
+
 const cloneProjectSchema = z.object({
   name: z.string().trim().min(1).max(120).optional(),
 });
@@ -163,7 +170,10 @@ type ProjectChatPostBody = {
   speedBoost?: boolean;
   messages?: ProjectChatUIMessage[];
   sessionId?: string;
+  /** Operator evaluation only; customers send `tier`. */
   model?: string;
+  tier?: unknown;
+  reasoning?: unknown;
   /** Thread retrieval overrides from the composer. */
   retrieval?: unknown;
   /** Composer filters (documents, types, tags, dates). */
@@ -293,6 +303,8 @@ async function createProjectAgentChatResponse(c: Context) {
   if (await chatModelRefused(getRequestActor(c), body.model, project.id)) {
     return apiErrorResponse(c, 400, "model_not_allowed", new ChatModelNotAllowedError().message);
   }
+  const choice = chatTierChoiceSchema.safeParse({ tier: body.tier, reasoning: body.reasoning });
+  if (!choice.success) return apiErrorResponse(c, 400, "invalid_request", "Invalid tier or reasoning", { issues: choice.error.issues });
 
   return createUIMessageStreamResponse({
     headers: {
@@ -406,7 +418,7 @@ async function createProjectAgentChatResponse(c: Context) {
               } });
             },
             sessionId: body.sessionId,
-            model: body.model, speedBoost: body.speedBoost === true,
+            model: body.model, tier: choice.data.tier, reasoning: choice.data.reasoning, speedBoost: body.speedBoost === true,
             ...(scope.retrieval ? { retrieval: scope.retrieval } : {}),
             ...(scope.filters ? { filters: scope.filters } : {}),
             onSearchActivity: (activity) => {
@@ -1318,6 +1330,8 @@ export const projectsRoutes = new Hono()
       speedBoost?: boolean;
       sessionId?: string;
       model?: string;
+      tier?: unknown;
+      reasoning?: unknown;
       retrievalOnly?: boolean;
       retrieval?: unknown;
       filters?: unknown;
@@ -1330,6 +1344,8 @@ export const projectsRoutes = new Hono()
     if (body.speedBoost !== undefined && typeof body.speedBoost !== "boolean") return apiStatusError(c, 400, "speedBoost must be a boolean");
     const scope = parseChatScope(body);
     if (!scope) return apiStatusError(c, 400, "Invalid retrieval or filters");
+    const choice = chatTierChoiceSchema.safeParse({ tier: body.tier, reasoning: body.reasoning });
+    if (!choice.success) return apiErrorResponse(c, 400, "invalid_request", "Invalid tier or reasoning", { issues: choice.error.issues });
 
     const userId = c.get("sessionUser").id;
     const project = await getProject(c.req.param("projectId"), userId);
@@ -1350,7 +1366,7 @@ export const projectsRoutes = new Hono()
         answerIngestReport: getRequestActor(c).type === "session",
         agent: composerAgentModes(body, getRequestActor(c)),
         sessionId: body.sessionId,
-        model: body.model, speedBoost: body.speedBoost === true,
+        model: body.model, tier: choice.data.tier, reasoning: choice.data.reasoning, speedBoost: body.speedBoost === true,
         ...(scope.retrieval ? { retrieval: scope.retrieval } : {}),
         ...(scope.filters ? { filters: scope.filters } : {}),
       });

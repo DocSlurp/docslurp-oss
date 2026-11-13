@@ -25,6 +25,7 @@ import { env } from "../config.js";
 import { ChatToolBlockedError } from "../services/chat-tool-error.js";
 import { isChatTurnDeadlineError } from "../services/chat-turn-deadline.js";
 import { chatModelRefused, ChatModelNotAllowedError } from "../lib/chat-model-policy.js";
+import { CHAT_REASONING_LEVELS, CHAT_TIERS } from "@docslurp/shared/project-chat-models";
 
 const textContent = z.union([
   z.string().max(64_000),
@@ -32,10 +33,10 @@ const textContent = z.union([
 ]);
 const requestSchema = z.object({
   // project:<uuid>, project:<slug> (current or former) or project:default.
-  // The inference model is docslurp.model (an llm:// URI), never this field.
+  // The model behind the answer is chosen by tier (docslurp.tier), never this field.
   model: z.string().regex(/^project:(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[a-z0-9]+(?:-[a-z0-9]+)*)$/i, {
     error: (issue) => typeof issue.input === "string" && /^llm:\/\//i.test(issue.input.trim())
-      ? "model selects a project (project:default, project:<slug> or an id from GET /v1/models). Send the llm:// inference model as docslurp.model instead."
+      ? `model selects a project (project:default, project:<slug> or an id from GET /v1/models). DocSlurp manages the backend model: choose docslurp.tier (${CHAT_TIERS.join(", ")}) instead.`
       : "model must be project:default, project:<slug> or a project model id from GET /v1/models",
   }),
   messages: z.array(z.object({
@@ -57,7 +58,11 @@ const requestSchema = z.object({
   /** DocSlurp extension (send it with extra_body in OpenAI SDKs), mirroring the response's `docslurp` field. */
   docslurp: z.object({
     speedBoost: z.boolean().default(false),
-    /** Inference model for this request, as `model` on POST /v1/chat: `llm://openrouter/<vendor>/<model>` or the bare id, with an optional `?reasoning=` level. */
+    /** Chat tier for this request, as `tier` on POST /v1/chat: fastest, balanced or smart. */
+    tier: z.enum(CHAT_TIERS).optional(),
+    /** Reasoning level, as `reasoning` on POST /v1/chat. */
+    reasoning: z.enum(CHAT_REASONING_LEVELS).optional(),
+    /** Operator evaluation only (not in OpenAPI): a backend model id. Everyone else gets 400 model_not_allowed. */
     model: z.string().trim().min(1).max(256).optional(),
     /** Per-request retrieval overrides, as `retrieval` on POST /v1/chat. */
     retrieval: chatRetrievalOverridesSchema.optional(),
@@ -227,6 +232,8 @@ export const chatCompletionsRoutes = new Hono()
       actor, allowAgentTools: env.publicChatAgentEnabled && input.tool_choice !== "none", signal: c.req.raw.signal,
       ...(input.docslurp?.retrieval ? { retrieval: input.docslurp.retrieval } : {}),
       ...(input.docslurp?.model ? { model: input.docslurp.model } : {}),
+      ...(input.docslurp?.tier ? { tier: input.docslurp.tier } : {}),
+      ...(input.docslurp?.reasoning ? { reasoning: input.docslurp.reasoning } : {}),
       query: contentText(input.messages.at(-1)!.content),
       history,
       maxOutputTokens: input.max_completion_tokens ?? input.max_tokens,

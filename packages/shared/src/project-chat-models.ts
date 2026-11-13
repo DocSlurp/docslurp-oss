@@ -128,3 +128,50 @@ export function withChatReasoning(model: string, reasoning: ChatReasoningLevel):
   const base = parseChatModelOptions(model)?.model ?? model;
   return reasoning === DEFAULT_CHAT_REASONING ? base : `${base}?reasoning=${reasoning}`;
 }
+
+/**
+ * Chat tiers: the only chat choice callers make. Programmatic callers (REST, OpenAI-compatible, MCP, SDK, CLI) pick a
+ * tier, never a backend model or provider; the server resolves the tier to a reviewed model (CHAT_TIER_MODELS, or a
+ * per-project mapping only platform admins can set). Backend ids stay in usage events, traces and logs.
+ */
+export const CHAT_TIERS = ["fastest", "balanced", "smart"] as const;
+export type ChatTier = (typeof CHAT_TIERS)[number];
+export const DEFAULT_CHAT_TIER: ChatTier = "fastest";
+
+/** Managed default model for each tier. Every entry is a reviewed catalog model priced under the output-price cap. */
+export const CHAT_TIER_MODELS: Readonly<Record<ChatTier, ProjectChatModelId>> = {
+  fastest: "z-ai/glm-5.3-flash",
+  balanced: "deepseek/deepseek-v4.1-flash-1017",
+  smart: "openai/gpt-6.1-sol",
+};
+
+export function isChatTier(value: unknown): value is ChatTier {
+  return typeof value === "string" && (CHAT_TIERS as readonly string[]).includes(value);
+}
+
+/** The refusal callers see for a model, provider or `llm://` reference: it names the tiers and nothing else. */
+export const CHAT_TIER_REQUIRED_MESSAGE = `Chat models are managed by DocSlurp. Send tier (${CHAT_TIERS.join(", ")}) instead of a model; omit it for the project default.`;
+
+/** A tier → model mapping: per-project overrides on top of the managed defaults. */
+export type ChatTierModelMap = Partial<Record<ChatTier, string>>;
+
+/** The model a tier resolves to: the project's managed mapping when set, else the managed default. */
+export function chatTierModel(tier: ChatTier, overrides?: ChatTierModelMap | null): string {
+  return overrides?.[tier] ?? CHAT_TIER_MODELS[tier];
+}
+
+/**
+ * The tier a resolved model answers for, for customer-facing responses: the turn's tier when known, else the
+ * managed default tier whose model (or its `:nitro` variant) it is. Null for anything else (eval or unknown models).
+ */
+export function chatTierForModel(model: string | null | undefined, overrides?: ChatTierModelMap | null): ChatTier | null {
+  if (!model?.trim()) return null;
+  if (isChatTier(model)) return model;
+  const id = normalizeChatModelRef(model);
+  const base = nitroBaseModel(id) ?? id;
+  for (const tier of CHAT_TIERS) if (chatTierModel(tier, overrides) === base) return tier;
+  for (const [base_, swapped] of Object.entries(SPEED_BOOST_MODEL_SWAPS)) {
+    if (swapped === id) return chatTierForModel(base_, overrides);
+  }
+  return null;
+}

@@ -12,23 +12,32 @@ import {
   type ChatAgentLimitsInput,
 } from "@docslurp/shared";
 import {
+  CHAT_TIER_REQUIRED_MESSAGE,
   DEFAULT_CHAT_REASONING,
-  DEFAULT_PROJECT_CHAT_MODEL,
+  DEFAULT_CHAT_TIER,
+  chatTierForModel,
+  chatTierModel,
   isProjectChatModelId,
+  nitroBaseModel,
   normalizeChatModelRef,
   parseChatModelOptions,
   type ChatReasoningLevel,
+  type ChatTier,
+  type ChatTierModelMap,
 } from "@docslurp/shared/project-chat-models";
 import { isPlatformAdminActor, type RequestActor } from "./request-actor.js";
 import { getProjectAccess } from "../services/organizations.js";
 
-/** An explicit chat `model` the caller may not use. Answered as HTTP 400 `model_not_allowed`. */
+/**
+ * A chat `model` (a backend model id, provider or `llm://` reference) the caller may not use. Answered as HTTP 400
+ * `model_not_allowed` naming the tiers; the refused value goes to logs only, never back to the caller.
+ */
 export class ChatModelNotAllowedError extends Error {
   readonly status = 400 as const;
   readonly statusCode = 400 as const;
   readonly code = "model_not_allowed" as const;
   constructor() {
-    super("That chat model isn’t available for this request. Omit model to use the default.");
+    super(CHAT_TIER_REQUIRED_MESSAGE);
     this.name = "ChatModelNotAllowedError";
   }
 }
@@ -99,32 +108,64 @@ export async function chatEvalAccess(actor: RequestActor | undefined, projectId:
  * catalog requests skip the admin and project lookups entirely.
  */
 export function chatTurnNeedsEvalAccess(model: string | null | undefined, agent?: ChatAgentLimitsInput): boolean {
-  const requested = model ? normalizeChatModelRef(model) : undefined;
-  if (requested && !isProjectChatModelId(requested)) return true;
+  // Any explicit backend model, catalog or not, is an operator evaluation request: customers choose a tier.
+  if (model?.trim()) return true;
   return (Object.keys(CHAT_AGENT_LIMIT_DEFAULTS) as ChatAgentLimitName[])
     .some(name => typeof agent?.[name] === "number" && Math.trunc(agent[name]!) > CHAT_AGENT_LIMIT_DEFAULTS[name]);
 }
 
-export type ChatModelSource = "default" | "catalog" | "eval";
+export type ChatModelSource = "default" | "tier" | "catalog" | "eval";
 
 /**
- * `model` may be a bare OpenRouter id or its `llm://openrouter/<id>` URI; both resolve to the bare id.
- * Omitted model: the default. A catalog model: anyone. An eval allowlist model:
- * callers with eval access only (`isAdmin`: see chatEvalAccess). Anything else, including a non-admin naming an eval model, is a
- * 400 rather than a silent fallback, so a comparison never measures the wrong model.
+ * Resolve a turn's model. Callers choose a `tier` (fastest, balanced, smart) and an optional `reasoning` level; the
+ * tier resolves to the project's managed mapping (set by platform admins only) or the managed default. Omitted: the
+ * project default tier. A backend `model` (bare OpenRouter id or `llm://openrouter/<id>`, optional `?reasoning=`) is
+ * operator evaluation only (`isAdmin`: see chatEvalAccess): catalog and DOCSLURP_CHAT_EVAL_MODELS ids then answer as
+ * named. Anyone else naming a model, or a request naming both, is a 400 rather than a silent fallback.
  */
-export function resolveChatModelRequest(args: { requested: string | null | undefined; isAdmin: boolean; evalModels?: ReadonlySet<string> }): { model: string; source: ChatModelSource; reasoning: ChatReasoningLevel } {
+export function resolveChatModelRequest(args: {
+  requested?: string | null;
+  tier?: ChatTier | null;
+  reasoning?: ChatReasoningLevel | null;
+  isAdmin: boolean;
+  evalModels?: ReadonlySet<string>;
+  tierModels?: ChatTierModelMap | null;
+  defaultTier?: ChatTier | null;
+}): { model: string; source: ChatModelSource; reasoning: ChatReasoningLevel; tier: ChatTier | null } {
+  const raw = args.requested?.trim();
+  if (!raw) {
+    const tier = args.tier ?? args.defaultTier ?? DEFAULT_CHAT_TIER;
+    return { model: chatTierModel(tier, args.tierModels), source: args.tier ? "tier" : "default", reasoning: args.reasoning ?? DEFAULT_CHAT_REASONING, tier };
+  }
+  if (args.tier || !args.isAdmin) throw new ChatModelNotAllowedError();
   // `?reasoning=` (or the native `reasoning_effort` / `effort`) sets the turn's reasoning; any other option, or a
   // level DocSlurp does not know, refuses the model rather than ignoring the option.
-  const options = args.requested?.trim() ? parseChatModelOptions(args.requested) : { model: "" };
+  const options = parseChatModelOptions(raw);
   if (!options) throw new ChatModelNotAllowedError();
-  const reasoning = options.reasoning ?? DEFAULT_CHAT_REASONING;
+  const reasoning = options.reasoning ?? args.reasoning ?? DEFAULT_CHAT_REASONING;
   const requested = options.model ? normalizeChatModelRef(options.model) : undefined;
-  if (!requested) return { model: DEFAULT_PROJECT_CHAT_MODEL, source: "default", reasoning };
-  if (isProjectChatModelId(requested)) return { model: requested, source: "catalog", reasoning };
+  if (!requested) throw new ChatModelNotAllowedError();
+  if (isProjectChatModelId(requested)) return { model: requested, source: "catalog", reasoning, tier: chatTierForModel(requested, args.tierModels) };
   const evalModels = args.evalModels ?? configuredChatEvalModels();
-  if (args.isAdmin && evalModels.has(requested) && !isProhibitedRoutingModelId(requested)) return { model: requested, source: "eval", reasoning };
+  if (evalModels.has(requested) && !isProhibitedRoutingModelId(requested)) return { model: requested, source: "eval", reasoning, tier: null };
   throw new ChatModelNotAllowedError();
+}
+
+/**
+ * Why a model cannot back a project's tier mapping, or null when it can: a reviewed catalog base model (not a
+ * `:nitro` variant, which Speed boost chooses) or an operator eval model, never Pro/Ultra, with a verified price
+ * under the output-price cap.
+ */
+export function managedChatModelProblem(model: string, evalModels: ReadonlySet<string> = configuredChatEvalModels()): string | null {
+  const id = normalizeChatModelRef(model);
+  if (id !== model.trim()) return "use the bare catalog id";
+  if (nitroBaseModel(id)) return "fast-route variants are chosen by speedBoost, not mapped";
+  if (!isProjectChatModelId(id) && !evalModels.has(id)) return "not a reviewed chat model";
+  if (isProhibitedRoutingModelId(id)) return "prohibited model";
+  const price = CHAT_MODEL_PRICES_USD_PER_MTOK[id];
+  if (!price) return "no verified price";
+  if (price.output >= MAX_OUTPUT_USD_PER_MTOK_EXCLUSIVE) return "output price at or above the cap";
+  return null;
 }
 
 /**

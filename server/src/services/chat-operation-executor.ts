@@ -1,3 +1,4 @@
+import { isChatReasoningLevel, isChatTier, type ChatReasoningLevel, type ChatTier } from "@docslurp/shared/project-chat-models";
 import { withChatRunOwner } from "./chat-run-dependencies.js";
 import { env } from "../config.js";
 import { sql } from "../db.js";
@@ -45,6 +46,7 @@ export async function executeChatOperation(task: Operation) {
     if (disabled) throw new Error("chat_disabled");
     const result = await withChatRunOwner({...task,signal:abort.signal}, () => withDeferredContext({ signal: abort.signal }, () => chatProject({ projectId: task.project_id, userId: task.user_id, query: String(task.input.q),
       sessionId: task.input.sessionId as string | undefined, model: task.input.model as string | undefined,
+      ...chatTierInput(task.input),
       actor, allowAgentTools: env.publicChatAgentEnabled, allowConfiguration: false, signal: abort.signal,
       onTextDelta: text => append("text", { text }),
       onToolActivity: event => { void append("tool", event); }, onEvidence: event => { void append("evidence", event); },
@@ -70,4 +72,12 @@ export async function runChatOperationExecutor(signal: AbortSignal) {
       await new Promise<void>(resolve => { const done = () => { clearTimeout(timer); signal.removeEventListener("abort", done); resolve(); }; const timer = setTimeout(done, 1000); signal.addEventListener("abort", done, { once: true }); });
     }
   }
+}
+
+/** The stored launch's tier and reasoning; anything else (a stale or tampered row) is dropped, so the turn uses the default tier. */
+function chatTierInput(input: Record<string, unknown>): { tier?: ChatTier; reasoning?: ChatReasoningLevel } {
+  return {
+    ...(isChatTier(input.tier) ? { tier: input.tier } : {}),
+    ...(isChatReasoningLevel(input.reasoning) ? { reasoning: input.reasoning } : {}),
+  };
 }

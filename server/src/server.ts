@@ -65,6 +65,7 @@ import { samlCallbackRoutes, ssoRoutes } from "./routes/sso.js";
 import { connectorsRoutes } from "./routes/connectors.js";
 import { adminBillingRoutes } from "./routes/admin-billing.js";
 import { adminUsersRoutes } from "./routes/admin-users.js";
+import { adminProjectsRoutes } from "./routes/admin-projects.js";
 import { clientSurfaceMiddleware, clientSurfaceRecorder } from "./services/client-surface.js";
 import { drainSearchSessionWrites as drainSessionWrites } from "./search/session.js";
 import { drainSearchCharges } from "./search/lean-logging.js";
@@ -236,6 +237,7 @@ export function createApiApp(): Hono {
   app.route("/v1/billing", billingRoutes);
   app.route("/v1/admin/billing", adminBillingRoutes);
   app.route("/v1/admin/users", adminUsersRoutes);
+  app.route("/v1/admin/projects", adminProjectsRoutes);
   app.route("/v1/projects", secretsRoutes);
   app.route("/v1/projects", projectGraphRoutes);
   app.route("/v1/user-settings", userSettingsRoutes);
