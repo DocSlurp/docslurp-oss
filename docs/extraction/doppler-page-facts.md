@@ -22,6 +22,10 @@ The facts come from a VM that read a customer file, so the worker treats every b
 - accepts finite numbers only, ratios in 0..1, non-negative integer counts, closed enums (an unknown enum value is
   dropped, as the contract asks) and bounded lists; a family that fails any check, or whose counts contradict each
   other, is absent (unknown) while the rest of the page stands;
+- reads the fields added within `/1` the same way: `vectors.grids` (at most 64, each box on the page within 1 pt, rows and
+  columns positive counts; a bad list, a box off the page or a list without `gridsTruncated` makes `vectors` unknown),
+  and per image `visibleWordsInside`/`invisibleWordsInside` (both or neither, within the page's own word counts) and
+  `bytesPerPixel` (finite, non-negative; never on an inline image). A value that fails is unknown, never 0;
 - never reads `producer`, `creator` or `lang`, the document's own strings in the stream, nor any field it does not know; the run
   line's `version` and `commit` are kept only as a dotted version and a hex commit.
 
@@ -94,7 +98,7 @@ Commands the facts cannot retire, and why:
 | Command | Feeds | Kept because |
 |---|---|---|
 | `pdfpagecount`, `pdftotext -f 1 -l 1` | page count, Poppler acceptance | billing and limits use the host's own count |
-| layout walker (`pdfimages -list`, `pdftotext -bbox-layout`, `pdf_layout_facts.py`) | layout facts | page-equivalent billing reads the walker's page sizes; facts have no `wordsInside`, `bytesPerPixel`, table or grid boxes |
+| layout walker (`pdfimages -list`, `pdftotext -bbox-layout`, `pdf_layout_facts.py`) | layout facts | page-equivalent billing reads the walker's page sizes, never the facts'. Facts from a build with ruled grids, words inside and bytes per pixel (Doppler #42) stand in for the walker's image inputs and prove pages without grids; a grid Doppler finds is not the walker's and stays unknown, so drawn tables flattened to prose still need the walker (or per-grid rule counts in the facts) |
 | OCR ledger `pdftotext` | Rich reads of an extractor that OCRs without saying so | billing evidence; never on the sandboxed route |
 | `pdfinfo` before `pdftoppm` | render bounds, rendered page areas | bounds an untrusted render and sizes a charge |
 
@@ -109,9 +113,21 @@ classify-route and page-image evidence read the facts unchanged:
 | `invisibleWords`, `textLayer` | `text.invisibleWordCount`, `text.textLayer` |
 | `widthPt`, `heightPt` | `geometry.widthPt`, `heightPt` (the CropBox with rotation; the walker uses CropBox ∩ MediaBox) |
 | `images` | `images.items`: box, coverage, pixel size, bits, colour space and codec in the walker's vocabulary, ppi; `repeated` from `obj` across pages. Null when not computed or truncated |
-| `images[].bytesPerPixel`, `images[].wordsInside` | null: facts never read the stream or the word boxes |
-| `grids` | `[]` when the `vectors` family proves no ruled grid (fewer than 2 horizontal or 3 vertical rules, no cap hit); otherwise null |
-| `tables`, `tableCoverage` | null: tables come from the Markdown |
+| `images[].coverage` | `coverage`, capped by the image's own box over the page |
+| `images[].wordsInside` | `visibleWordsInside` + `invisibleWordsInside`: words whose whole box is inside (within 1 pt), where the walker counts word centres, so a label straddling the edge counts for the walker only. A count above `mixedScanMaxWordsInside` (2) stands; a lower one only when the page's centre-based `textOverImageRatio` is 0 and the image's 64 × 64 ratio cells cover its whole box (no edge strip escapes them): then the walker's count is 0 too. Otherwise, or when absent, null: stricter than the walker, never looser |
+| `images[].bytesPerPixel` | `bytesPerPixel`, one to one; null when absent (never 0). The exact declared `/Length`, where the walker divides `pdfimages -list`'s rounded size, so the two can differ near the scan-like threshold. What the file says, which a crafted file can inflate: a routing hint, never a billing input |
+| `grids` | `[]` when there is no walker grid: fewer than 2 horizontal or 3 vertical rules, or a complete `vectors.grids` list with no grid of two or more columns (one column is parallel rules: weak evidence). A grid Doppler found is unknown (null): its search is not the walker's (shaded boxes count as rules, column lines need no outer sides) and the facts have no rule positions to tell which grids the walker would find. Null too when `gridsTruncated`, at the drawing cap, or without the list (older builds) |
+| `tableCoverage` | 0 with a `[]` known from the list, else null |
+| `tables` | null: tables come from the Markdown |
+
+A page marked `xref-repaired-earlier` (an earlier page rebuilt the cross-reference table, so any of its facts may come
+from an object the file holds twice) is low confidence: its layout facts keep only the page size (images, words, grids
+and table coverage are unknown), the document gets no facts-built page-image evidence
+(`xref-repaired-earlier`; the furniture rule is shared across pages), and chart export nominates nothing on the page.
+
+With words inside known, facts in `use` mode can select a mixed-scan read (`mixedScanImage`), as walker layout does: a
+page with native text and a placed, scan-like, readable image with at most 2 words inside. That read bills Rich like any
+other.
 
 `probeRowsFromDopplerFacts` (`worker/src/routing/probe/doppler-facts.ts`) builds the v2 router's `ProbeRow` with
 `probeEngine: "doppler-facts"` and no thumbnail; its header comment lists each field.
