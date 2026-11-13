@@ -9,6 +9,7 @@ import { pricing } from "./pricing-provider.js";
 export * from "./upload-pages.js";
 import { profilePageEquivalentRange } from "./upload-pages.js";
 import { compilePipelinePlan, type PipelineFeatures } from "./pipeline.js";
+import { figuresEnabled } from "./doppler-figures.js";
 
 /*
  * Upload quotes without a database: what `POST /v1/uploads/estimate` returns. This module holds the generic parts (page
@@ -50,9 +51,21 @@ export const estimateProfileSchema = z.strictObject({
   workerSlots: z.number().int().positive().optional(),
   /** Stages an upload runs; only shown in the estimate's basis. */
   stageCount: z.number().int().nonnegative(),
+  /**
+   * Whether this run extracts figures: the deploy flag (DOCSLURP_DOPPLER_IMAGE_EXTRACT) and the project's opt-out
+   * (`pipeline.figures`, figuresEnabled). Stored figure files are billed as storage, measured after the fact
+   * (QuoteFile.measured.assetBytes once stored); for a new upload a pricing provider may add its own prior when this is
+   * true. Omitted means unknown.
+   */
+  figures: z.boolean().optional(),
   billing: z.enum(["enforced", "disabled"]),
 });
 export type EstimateProfile = z.infer<typeof estimateProfileSchema>;
+
+/** figuresEnabled for an estimate: the deploy flag and the project's opt-out; a malformed flag is off here, never a throw. */
+function figuresOn(pipeline: { figures?: boolean | null }, env: Record<string, string | undefined>): boolean {
+  try { return figuresEnabled(pipeline, env); } catch { return false; }
+}
 
 /** Reduce a project pipeline to its EstimateProfile, exactly as the upload estimate prices it. */
 export function estimateProfileFor(
@@ -72,6 +85,7 @@ export function estimateProfileFor(
     videoFrames: pipeline.mediaVideo?.enabled !== false,
     ...(options.workerSlots ? { workerSlots: options.workerSlots } : {}),
     stageCount: stages.length,
+    figures: figuresOn(pipeline as { figures?: boolean | null }, options.env),
     billing: isBillingEnforced(options.env) ? "enforced" : "disabled",
   };
 }
@@ -86,8 +100,16 @@ export type QuoteFile = UploadMediaFile & {
   pageEquivalents?: number;
   /** The high end of the page equivalents (profilePageEquivalentRange): wider when text was estimated or pages unsampled. */
   pageEquivalentsHigh?: number;
-  /** For a document already processed: its pages and how many a model read, as the worker recorded them (trusted). */
-  measured?: { pages: number; readPages: number };
+  /**
+   * For a document already processed: its pages and how many a model read, as the worker recorded them (trusted), and the
+   * bytes of its stored figure files (the asset ledger's level, billed as storage like the source).
+   */
+  measured?: { pages: number; readPages: number; assetBytes?: number };
+  /**
+   * Server-set for every stored-document group (storedQuoteFile), measured or not: the file is already stored, so a pricing
+   * provider never adds a new-upload prior (e.g. figure bytes) to it. A client cannot set it (quoteFileSchema strips it).
+   */
+  stored?: true;
   profile?: FileProfile;
 };
 

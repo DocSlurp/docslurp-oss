@@ -202,15 +202,19 @@ export async function getDocumentAssetLedger(scope: DocumentAssetScope, page?: D
     asset_id: string; page_number: number; kind: string; fate: string; status: string; reason: DopplerLedgerReason | null; resumable: boolean;
     source: string | null; format: string | null; bytes: number | null; sha256: string | null; width: number | null; height: number | null;
     repeat_of: string | null; fallback: string | null; link_path: string | null; file_of: string | null; owner_key: string | null;
+    owner_stored: boolean | null;
     slot_uri: string | null;
   }>>`
     select a.asset_id, a.page_number, a.kind, a.fate, a.status, a.reason, a.resumable, a.source, a.format, a.bytes, a.sha256, a.width,
-      a.height, a.repeat_of, a.fallback, a.link_path, a.file_of, o.storage_key as owner_key,
+      a.height, a.repeat_of, a.fallback, a.link_path, a.file_of, o.storage_key as owner_key, o.storage_state = 'stored' as owner_stored,
       (select r.artifacts ->> (a.document_id || ':doppler-figure:' || a.file_of) from project_runs r
         where r.id = ${document.run_id} and r.org_id = ${scope.orgId}) as slot_uri
     from document_assets a
     left join document_assets o on o.document_id = a.document_id and o.org_id = a.org_id and o.asset_id = a.file_of
     where a.document_id = ${scope.documentId} and a.org_id = ${scope.orgId}
+      -- Only the level's run: rows an earlier run left (kept, never deleted on a failure path) are never served as current.
+      and exists (select 1 from document_extraction_levels l where l.document_id = a.document_id and l.org_id = a.org_id
+        and l.assets_current and l.run_id is not distinct from a.run_id)
       ${from === null ? sql`` : sql`and a.page_number >= ${from}`}
       ${to === null ? sql`` : sql`and a.page_number <= ${to}`}
       ${after === null ? sql`` : sql`and (a.page_number, a.asset_id) > (${after.page}, ${after.assetId})`}
@@ -244,7 +248,8 @@ export async function getDocumentAssetLedger(scope: DocumentAssetScope, page?: D
         id: row.asset_id, page: row.page_number, kind: row.kind, fate: row.fate, status: row.status, reason: row.reason,
         resumable: row.resumable, source: row.source, format: row.format, bytes: row.bytes, sha256: row.sha256, width: row.width,
         height: row.height, repeatOf: row.repeat_of, fallback: row.fallback, link: row.link_path, fileOf: row.file_of,
-        slot: row.file_of && !refused && ASSET_ID.test(row.file_of) ? `${scope.documentId}:doppler-figure:${row.file_of}` : null,
+        // Only a file whose upload landed and checked out (storage_state `stored`) is linked; a pending one is not.
+        slot: row.file_of && row.owner_stored === true && !refused && ASSET_ID.test(row.file_of) ? `${scope.documentId}:doppler-figure:${row.file_of}` : null,
         refusal: refused ? "pii-policy" as const : null,
       };
     }),
