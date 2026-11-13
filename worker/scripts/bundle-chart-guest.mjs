@@ -30,6 +30,8 @@ const result = await build({
   target: "node22",
   legalComments: "inline",
   logLevel: "warning",
+  // The production guest has no fault hooks: dead code under this constant (council r9 L3; see guest-entry.ts).
+  define: { __CHART_GUEST_TEST_HOOKS__: "false" },
   logOverride: { "unsupported-dynamic-import": "error", "unsupported-require-call": "error" },
   metafile: true,
   absWorkingDir: WORKER_ROOT,
@@ -61,6 +63,8 @@ for (const file of inputs.filter((f) => !ZOD.test(f))) {
 const text = await readFile(BUNDLE_PATH, "utf8");
 const loader = /\b(createRequire|getBuiltinModule|__require)\b/.exec(text);
 if (loader) throw new Error(`chart guest bundle: contains \`${loader[1]}\`; the guest must not load modules at run time`);
+// The fault hooks compile to `false ? {...} : null` (council r9 L3): the constant must be substituted, never read at run time.
+if (text.includes("__CHART_GUEST_TEST_HOOKS__") || !/var testHooks = false \?/.test(text)) throw new Error("chart guest bundle: the test-hook constant was not compiled out");
 if (output.bytes > BUNDLE_MAX_BYTES) throw new Error(`chart guest bundle: ${output.bytes} bytes exceeds the ${BUNDLE_MAX_BYTES}-byte budget`);
 
 await writeFile(INPUTS_PATH, `${JSON.stringify(await bundleManifest(inputs), null, 2)}\n`);

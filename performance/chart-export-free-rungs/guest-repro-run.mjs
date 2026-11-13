@@ -2,7 +2,7 @@
 // Runs repro inputs through the real parser-VM guest (worker/scripts/chart-export-extract.mjs, with its per-unit
 // worker containment) exactly as production does: `node --disallow-code-generation-from-strings`, `budgetMs` 45 s, and
 // killed at 60 s like the host. For each input it reports the exit code, wall time, peak RSS of the guest process (all
-// its worker threads included) and every counted outcome in the result.
+// its worker threads included), the result's size and every counted outcome in the result.
 //
 //   node guest-repro-run.mjs <worker root> <inputs dir>...     (each <inputs dir>/<name>/{input,meta.json})
 import { spawn } from "node:child_process";
@@ -30,7 +30,7 @@ function run(dir) {
       if (code === 0 && existsSync(output)) {
         const r = JSON.parse(readFileSync(output, "utf8"));
         const reasons = (list) => { const o = {}; for (const x of list ?? []) o[x.reason] = (o[x.reason] ?? 0) + (x.count ?? 1); return o; };
-        Object.assign(row, { visuals: r.visuals.length, refusals: reasons(r.refusals), deferred: reasons(r.deferred), overflow: r.overflow ?? 0 });
+        Object.assign(row, { resultBytes: statSync(output).size, visuals: r.visuals.length, truncated: r.visuals.filter((v) => v.reason === "truncated").length, refusals: reasons(r.refusals), deferred: reasons(r.deferred), overflow: r.overflow ?? 0 });
       } else row.stderr = err.trim().split("\n").slice(-2).join(" | ");
       resolve(row);
     });

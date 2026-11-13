@@ -107,4 +107,6 @@ export async function probeChartGuestBundle() {
     throw new Error(`chart guest bundle probe failed: ${got || "no visuals"}`);
   }
   if (!(guest.CHART_EXTRACT_LIMITS?.maxTextBytes > 0)) throw new Error("chart guest bundle probe failed: no limits export");
+  // The production bundle carries no fault hooks (a build-time constant; council r9 L3).
+  if (guest.testHooks !== null) throw new Error("chart guest bundle probe failed: test hooks are enabled");
 }

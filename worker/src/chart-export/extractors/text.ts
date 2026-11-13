@@ -14,7 +14,8 @@ export function cleanLabel(value: unknown, max: number = VISUAL_SPEC_LIMITS.maxL
     .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f​-‏‪-‮⁦-⁩﻿]/g, "")
     .replace(/\s+/g, " ")
     .trim();
-  return [...s].slice(0, max).join("");
+  // At most `max` code units is at most `max` code points: nothing to cut, so skip the code-point copy.
+  return s.length <= max ? s : [...s].slice(0, max).join("");
 }
 
 export function cleanLabelOrNull(value: unknown): string | null {

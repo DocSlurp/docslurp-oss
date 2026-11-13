@@ -3,7 +3,7 @@ import { findEmbeddedSpecs, findEmbeddedSpecsInElements, type EmbeddedSpecHit } 
 import { asciiLower, indexFrom, type ScanWork } from "./scan.js";
 import { extractOfficeCharts } from "./office-chart-xml.js";
 import { openZipPackage } from "./safe-zip.js";
-import { clamp01, finalizeChart } from "./spec-utils.js";
+import { clamp01, finalizeChart, utf8Bytes } from "./spec-utils.js";
 import { buildScene } from "./svg-scene.js";
 import { approximateVertexMarkers, prepareSvgChart, withoutVertexMarkers, type PreparedSvgChart, type SvgChartAnalysis } from "./svg-geometry.js";
 import { detectDiagramGenerator, graphvizDiagram, mermaidFlowchart } from "./svg-diagram.js";
@@ -38,6 +38,11 @@ export interface DeterministicVisualOptions {
    * ordinals and the visual cap where they were. Omitted (tests, in-process runs), extraction runs straight through.
    */
   units?: UnitControl;
+  /**
+   * Serialized bytes this input's visuals may use (default `maxOutputBytes`). A guest batch passes what is left of its
+   * shared budget, so 40 figures together stay inside one result. Past it, visuals are counted as `output-limit`.
+   */
+  outputBudget?: number;
 }
 
 /** What one unit produced: its visuals and refusals, deferral counts it added, and overflow it added. */
@@ -46,11 +51,16 @@ export interface UnitDelta {
   refusals: DeterministicRefusal[];
   deferred: DeterministicDeferral[];
   overflow: number;
+  /** Serialized bytes of `visuals` (charged to the output budget). */
+  bytes: number;
 }
 
+/** What a skipped unit had produced: its visuals count and their bytes, charged again so budgets stay where they were. */
+export interface UnitCharge { visuals: number; bytes: number }
+
 export interface UnitControl {
-  /** Units not to run again (finished by an earlier worker, or failed in it), with the visuals each produced. */
-  skip: ReadonlyMap<number, number>;
+  /** Units not to run again (finished by an earlier worker, or failed in it), with what each produced. */
+  skip: ReadonlyMap<number, UnitCharge>;
   /** A unit is about to run: `svgIndex` is its SVG ordinal (or the next one, for a non-SVG unit). */
   onStart(id: number, locator: string, svgIndex: number, svg: boolean): void;
   onDone(id: number, delta: UnitDelta): void;
@@ -78,8 +88,12 @@ interface Acc {
   deferred: DeterministicDeferral[];
   /** SVGs seen in this input, in document / package order (the ordinal a deferral records). */
   svgs: number;
-  /** The input reached `maxVisuals`: later visuals and SVGs are counted, not produced. */
+  /** The input reached `maxVisuals` or its output budget: later visuals and SVGs are counted, not produced. */
   full: boolean;
+  fullReason: "visual-limit" | "output-limit";
+  /** Serialized bytes of the visuals produced (plus skipped units'), and the input's output budget. */
+  bytes: number;
+  budget: number;
   /** Ordinal of the SVG being analysed, if any (where a visual lost to the output cap came from). */
   current: number | null;
   /** Embedded-spec candidates and refusals past a per-input list cap or the deadline (counted, never silent). */
@@ -106,11 +120,13 @@ function runUnit(acc: Acc, locator: string, svg: boolean, fn: () => void) {
   const skipped = ctl.skip.get(id);
   if (skipped !== undefined) {
     if (svg) acc.svgs++;
-    acc.baseVisuals += skipped;
-    if (acc.visuals.length + acc.baseVisuals >= CHART_EXTRACT_LIMITS.maxVisuals) acc.full = true;
+    acc.baseVisuals += skipped.visuals;
+    acc.bytes += skipped.bytes;
+    if (acc.visuals.length + acc.baseVisuals >= CHART_EXTRACT_LIMITS.maxVisuals) { acc.full = true; acc.fullReason = "visual-limit"; }
+    else if (acc.bytes >= acc.budget) { acc.full = true; acc.fullReason = "output-limit"; }
     return;
   }
-  const v0 = acc.visuals.length, r0 = acc.refusals.length, o0 = acc.overflow;
+  const v0 = acc.visuals.length, r0 = acc.refusals.length, o0 = acc.overflow, b0 = acc.bytes;
   const d0 = acc.deferred.map((d) => ({ ...d }));
   ctl.onStart(id, locator, acc.svgs, svg);
   fn();
@@ -119,7 +135,7 @@ function runUnit(acc: Acc, locator: string, svg: boolean, fn: () => void) {
     const before = i < d0.length && d0[i]!.reason === d.reason ? d0[i]!.count : 0;
     if (d.count > before) deferred.push({ svgIndex: d.svgIndex, count: d.count - before, reason: d.reason });
   });
-  ctl.onDone(id, { visuals: acc.visuals.slice(v0), refusals: acc.refusals.slice(r0), deferred, overflow: acc.overflow - o0 });
+  ctl.onDone(id, { visuals: acc.visuals.slice(v0), refusals: acc.refusals.slice(r0), deferred, overflow: acc.overflow - o0, bytes: acc.bytes - b0 });
 }
 
 /**
@@ -133,7 +149,7 @@ function addDeferral(acc: Acc, reason: DeferralReason, count: number, advanceSvg
   let same: DeterministicDeferral | undefined;
   for (let i = acc.deferred.length - 1; i >= 0 && !same; i--) if (acc.deferred[i]!.reason === reason) same = acc.deferred[i];
   // One entry per input for the output cap and for package parts; SVG ranges merge when contiguous.
-  const single = reason === "visual-limit" || reason === "package-part-limit" || reason === "guest-deadline-part";
+  const single = reason === "visual-limit" || reason === "output-limit" || reason === "package-part-limit" || reason === "guest-deadline-part";
   if (same && (single || same.svgIndex + same.count === at || acc.deferred.length >= 1000)) same.count += count;
   else acc.deferred.push({ svgIndex: at, count, reason });
 }
@@ -143,9 +159,19 @@ function pushVisual(acc: Acc, v: DeterministicVisual) {
   // of aborting the input with one uncounted refusal (council r6 L1).
   if (acc.visuals.length + acc.baseVisuals >= CHART_EXTRACT_LIMITS.maxVisuals) {
     acc.full = true;
+    acc.fullReason = "visual-limit";
     addDeferral(acc, "visual-limit", 1, false, acc.current ?? acc.svgs);
     return;
   }
+  // Output budget (council r9 H1): a visual that does not fit is counted, and the input stops producing, never throws.
+  const size = utf8Bytes(JSON.stringify(v));
+  if (acc.bytes + size > acc.budget) {
+    acc.full = true;
+    acc.fullReason = "output-limit";
+    addDeferral(acc, "output-limit", 1, false, acc.current ?? acc.svgs);
+    return;
+  }
+  acc.bytes += size;
   acc.visuals.push(v);
 }
 
@@ -199,7 +225,7 @@ function handleSvg(text: string, locator: string, options: DeterministicVisualOp
   // SVGs not analysed are recorded as counted ordinal ranges, never dropped: past the input's SVG count, past the output
   // cap, or past the guest's deadline (a backstop below the host timeout, so the input returns what it has).
   if (acc.svgs >= CHART_EXTRACT_LIMITS.maxSvgsPerInput) return addDeferral(acc, DEFERRED_SVG_REASON, 1, true);
-  if (acc.full) return addDeferral(acc, "visual-limit", 1, true);
+  if (acc.full) return addDeferral(acc, acc.fullReason, 1, true);
   if (deadlineHere(acc)) return addDeferral(acc, "guest-deadline", 1, true);
   runUnit(acc, locator, true, () => {
     acc.current = acc.svgs++;
@@ -391,7 +417,7 @@ function handleHtml(text: string, prefix: string, options: DeterministicVisualOp
 
 export function extractDeterministicVisuals(input: DeterministicVisualInput, options: DeterministicVisualOptions = {}): DeterministicVisualResult {
   const skipIds = options.units ? [...options.units.skip.keys()] : [];
-  const acc: Acc = { visuals: [], refusals: [], deferred: [], svgs: 0, full: false, current: null, overflow: 0, units: options.units ?? null, unitSeq: 0, baseVisuals: 0, resumeFrom: skipIds.length ? Math.max(...skipIds) + 1 : 0 };
+  const acc: Acc = { visuals: [], refusals: [], deferred: [], svgs: 0, full: false, current: null, overflow: 0, units: options.units ?? null, unitSeq: 0, baseVisuals: 0, fullReason: "visual-limit", bytes: 0, budget: Math.max(0, options.outputBudget ?? CHART_EXTRACT_LIMITS.maxOutputBytes), resumeFrom: skipIds.length ? Math.max(...skipIds) + 1 : 0 };
   // Package parts past maxPartsPerPackage, recorded after the analysed parts (so svgIndex is the next ordinal).
   let partsDropped = 0;
   try {
@@ -405,7 +431,8 @@ export function extractDeterministicVisuals(input: DeterministicVisualInput, opt
       case "office": {
         // Each chart part is its own unit; its visual goes straight to the output in document order.
         const { pkg, partsDropped: chartParts, deadlineParts } = extractOfficeCharts(input.bytes, {
-          unit: (part, fn) => runUnit(acc, part, false, fn),
+          // Once the input is full (visual count or output budget), later parts are counted, not parsed.
+          unit: (part, fn) => runUnit(acc, part, false, acc.full ? () => addDeferral(acc, acc.fullReason, 1, false) : fn),
           deadline: () => deadlineHere(acc),
           visual: (v) => pushVisual(acc, v),
           refusal: (r) => acc.refusals.push(r),

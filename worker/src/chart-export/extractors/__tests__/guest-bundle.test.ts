@@ -4,7 +4,7 @@
 // worker before the worker suites, so the bundle must exist there; a local run without a build skips.
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -31,7 +31,7 @@ describe.skipIf(!built)("chart-export guest bundle (the production guest)", () =
   beforeAll(async () => { dir = await mkdtemp(path.join(process.env.TMPDIR || os.tmpdir(), "chart-guest-")); });
   afterAll(async () => { await rm(dir, { recursive: true, force: true }); });
 
-  async function guest(kind: string, files: Array<string | Uint8Array>, extra: Record<string, unknown> = {}, env: Record<string, string> = {}): Promise<string> {
+  async function guest(kind: string, files: Array<string | Uint8Array>, extra: Record<string, unknown> = {}, env: Record<string, string> = {}, script = guestScript): Promise<string> {
     const inputs: string[] = [];
     for (const [k, body] of files.entries()) {
       const file = path.join(dir, `${kind}-${inputs.length}-${k}-${Math.random().toString(36).slice(2)}`);
@@ -42,7 +42,7 @@ describe.skipIf(!built)("chart-export guest bundle (the production guest)", () =
     const output = path.join(dir, `output-${Math.random().toString(36).slice(2)}.json`);
     await writeFile(request, JSON.stringify({ kind, ...extra }));
     // As the host runs it: V8 code generation from strings disabled (eval, the Function constructor).
-    await run(process.execPath, ["--disallow-code-generation-from-strings", guestScript, inputs[0]!, request, output, ...inputs.slice(1)], { cwd: workerRoot, env: { ...process.env, ...env } });
+    await run(process.execPath, ["--disallow-code-generation-from-strings", script, inputs[0]!, request, output, ...inputs.slice(1)], { cwd: workerRoot, env: { ...process.env, ...env } });
     return readFile(output, "utf8");
   }
 
@@ -121,9 +121,32 @@ describe.skipIf(!built)("chart-export guest bundle (the production guest)", () =
   describe("unit containment (council r8): one unit's crash or overrun loses only that unit, counted", () => {
     const html = `<html><body>${[["a", "b"], ["c", "d"], ["e", "f"]].map(([x, y]) => genericBar([x!, y!], [1, 2], 4)).join("")}</body></html>`;
     const plain = () => extractDeterministicVisuals({ kind: "html", text: html });
+    // The production bundle compiles the fault hooks out (council r9 L3); these tests run the same guest scripts beside a
+    // bundle built with them in.
+    let hooked: string;
+    beforeAll(async () => {
+      const root = path.join(dir, "hooked");
+      await mkdir(path.join(root, "scripts"), { recursive: true });
+      for (const f of ["chart-export-extract.mjs", "chart-export-worker.mjs"]) await copyFile(path.join(workerRoot, "scripts", f), path.join(root, "scripts", f));
+      const { build } = await import("esbuild");
+      await build({
+        entryPoints: [path.join(workerRoot, "dist/chart-export/extractors/guest-entry.js")],
+        outfile: path.join(root, "dist/chart-export/guest.bundle.mjs"),
+        bundle: true, platform: "node", format: "esm", logLevel: "silent", absWorkingDir: workerRoot,
+        define: { __CHART_GUEST_TEST_HOOKS__: "true" },
+      });
+      hooked = path.join(root, "scripts/chart-export-extract.mjs");
+    }, 60_000);
+    const faulty = (kind: string, files: Array<string | Uint8Array>, env: Record<string, string>) => guest(kind, files, {}, env, hooked);
+
+    it("the production guest ignores every fault-injection variable", async () => {
+      const out = JSON.parse(await guest("html", [html], {}, { DOCSLURP_CHART_GUEST_TEST_FAULT: "crash:svg[1]", DOCSLURP_CHART_GUEST_TEST_HEAP_MB: "1", DOCSLURP_CHART_GUEST_TEST_UNIT_MS: "1", DOCSLURP_PARSER_ENV_ALLOWLIST: "DOCSLURP_CHART_GUEST_TEST_FAULT" }));
+      expect(out).toEqual(JSON.parse(JSON.stringify(plain())));
+      expect(out.visuals).toHaveLength(3);
+    });
 
     it("a worker that dies mid-unit: the other units' visuals survive, the unit is recorded unit-crashed", async () => {
-      const out = JSON.parse(await guest("html", [html], {}, { DOCSLURP_CHART_GUEST_TEST_FAULT: "crash:svg[1]" }));
+      const out = JSON.parse(await faulty("html", [html], { DOCSLURP_CHART_GUEST_TEST_FAULT: "crash:svg[1]" }));
       expect(out.visuals.map((v: { locator: string }) => v.locator)).toEqual(["svg[0]", "svg[2]"]);
       expect(out.deferred).toEqual([{ svgIndex: 1, count: 1, reason: "unit-crashed" }]);
       // The surviving visuals are exactly what an uncontained run produces for them.
@@ -131,13 +154,13 @@ describe.skipIf(!built)("chart-export guest bundle (the production guest)", () =
     });
 
     it("a unit that never returns is stopped at its time limit, recorded unit-timeout; the rest continue", async () => {
-      const out = JSON.parse(await guest("html", [html], {}, { DOCSLURP_CHART_GUEST_TEST_FAULT: "hang:svg[0]", DOCSLURP_CHART_GUEST_TEST_UNIT_MS: "1500" }));
+      const out = JSON.parse(await faulty("html", [html], { DOCSLURP_CHART_GUEST_TEST_FAULT: "hang:svg[0]", DOCSLURP_CHART_GUEST_TEST_UNIT_MS: "1500" }));
       expect(out.visuals.map((v: { locator: string }) => v.locator)).toEqual(["svg[1]", "svg[2]"]);
       expect(out.deferred).toEqual([{ svgIndex: 0, count: 1, reason: "unit-timeout" }]);
     });
 
     it("a unit that runs its worker out of heap is recorded unit-crashed; the rest continue", async () => {
-      const out = JSON.parse(await guest("html", [html], {}, { DOCSLURP_CHART_GUEST_TEST_FAULT: "oom:svg[2]", DOCSLURP_CHART_GUEST_TEST_HEAP_MB: "64" }));
+      const out = JSON.parse(await faulty("html", [html], { DOCSLURP_CHART_GUEST_TEST_FAULT: "oom:svg[2]", DOCSLURP_CHART_GUEST_TEST_HEAP_MB: "64" }));
       expect(out.visuals.map((v: { locator: string }) => v.locator)).toEqual(["svg[0]", "svg[1]"]);
       expect(out.deferred).toEqual([{ svgIndex: 2, count: 1, reason: "unit-crashed" }]);
     });
@@ -145,7 +168,7 @@ describe.skipIf(!built)("chart-export guest bundle (the production guest)", () =
     it("an Office chart part that crashes loses only that part", async () => {
       const chart = chartXml({ title: "Revenue", plots: [barPlot([{ name: "A", cats: Q, vals: [1, 2, 3] }])] });
       const bytes = docx([chart, chart, chart]);
-      const out = JSON.parse(await guest("office", [bytes], {}, { DOCSLURP_CHART_GUEST_TEST_FAULT: "crash:chart2.xml" }));
+      const out = JSON.parse(await faulty("office", [bytes], { DOCSLURP_CHART_GUEST_TEST_FAULT: "crash:chart2.xml" }));
       expect(out.visuals.map((v: { locator: string }) => v.locator)).toEqual(["word/charts/chart1.xml", "word/charts/chart3.xml"]);
       expect(out.deferred).toEqual([{ svgIndex: 0, count: 1, reason: "unit-crashed" }]);
     });

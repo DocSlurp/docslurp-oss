@@ -509,16 +509,16 @@ export type ExportedVisual = z.infer<typeof exportedVisualSchema>;
 /**
  * Why visuals were deferred, each a per-input cap of the free extractor. `count` is of SVGs at consecutive ordinals
  * from `svgIndex` for svg-document-limit, html-svg-limit and guest-deadline; for visual-limit it counts the visuals and
- * SVGs lost to the output cap from `svgIndex` on; for package-part-limit and guest-deadline-part, package parts (chart
+ * SVGs lost to the output cap from `svgIndex` on (output-limit: the same, past the input's output-byte budget); for package-part-limit and guest-deadline-part, package parts (chart
  * XML, media SVGs, EPUB parts) never opened; for figure-batch-limit and figure-unavailable, one Doppler figure
  * (`figureId`) past the per-document batch cap or without a readable file; for unit-crashed and unit-timeout, extraction
  * units (a chart part, an SVG, an embedded scan) whose isolated worker crashed, ran out of memory or overran its time;
  * for guest-unavailable and vm-cap (host-only), a source or figure whose guest run failed or the org's free-VM cap
  * turned away, recorded whole.
  */
-export const DEFERRED_VISUAL_REASONS = ["svg-document-limit", "html-svg-limit", "guest-deadline", "visual-limit", "package-part-limit", "guest-deadline-part", "unit-crashed", "unit-timeout", "figure-batch-limit", "figure-unavailable", "guest-unavailable", "vm-cap"] as const;
+export const DEFERRED_VISUAL_REASONS = ["svg-document-limit", "html-svg-limit", "guest-deadline", "visual-limit", "package-part-limit", "guest-deadline-part", "unit-crashed", "unit-timeout", "output-limit", "figure-batch-limit", "figure-unavailable", "guest-unavailable", "vm-cap"] as const;
 /** The reasons the parser-VM guest itself may report (the figure reasons are the host's own). */
-export const GUEST_DEFERRAL_REASONS = ["svg-document-limit", "html-svg-limit", "guest-deadline", "visual-limit", "package-part-limit", "guest-deadline-part", "unit-crashed", "unit-timeout"] as const;
+export const GUEST_DEFERRAL_REASONS = ["svg-document-limit", "html-svg-limit", "guest-deadline", "visual-limit", "package-part-limit", "guest-deadline-part", "unit-crashed", "unit-timeout", "output-limit"] as const;
 export const deferredVisualSchema = z.strictObject({
   input: z.enum(["source", "doppler-figure"]),
   svgIndex: z.number().int().nonnegative().max(1_000_000),

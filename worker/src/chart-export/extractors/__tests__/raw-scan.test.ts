@@ -173,3 +173,25 @@ describe("Office and number hot paths (council r8 H1)", () => {
     expect(() => resolve("S!$B$1:$B$50")).toThrow(/workbook-too-large/);
   });
 });
+
+describe("Plotly call windows share one scan budget per block (council r9)", () => {
+  it("nested, unclosed calls stop at the block's budget and the calls left are counted", () => {
+    // 50 `Plotly.newPlot(` nested in one 4 MiB block with no closed region: each call's window would rescan ~4 MiB.
+    const body = "Plotly.newPlot(".repeat(50) + "[".repeat(1) + "x".repeat(4 * 1024 * 1024);
+    const stats = { overflow: 0 };
+    const t = performance.now();
+    const hits = findEmbeddedSpecs(`<html><body><script>${body}</script></body></html>`, stats);
+    expect(hits).toEqual([]);
+    expect(stats.overflow).toBeGreaterThan(0);
+    // Unbudgeted this was 50 windows × 4 MiB; budgeted, at most 4 × body length plus one region scan.
+    expect(performance.now() - t).toBeLessThan(20_000);
+  });
+
+  it("50 ordinary calls in one block are all read", () => {
+    const calls = Array.from({ length: 50 }, (_, i) => `Plotly.newPlot("d${i}", ${JSON.stringify([{ type: "bar", x: ["a", "b"], y: [i, i + 1], name: `s${i}` }])}, ${JSON.stringify({ title: `C${i}` })});`).join("\n");
+    const stats = { overflow: 0 };
+    const hits = findEmbeddedSpecs(`<html><body><script>${calls}</script></body></html>`, stats);
+    expect(hits.filter((h) => h.generator === "plotly" && h.spec)).toHaveLength(50);
+    expect(stats.overflow).toBe(0);
+  });
+});
