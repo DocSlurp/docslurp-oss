@@ -679,7 +679,8 @@ describe("agent modes", () => {
 
   it("offers chart export only while it is off and a data question or unexported charts justify it", () => {
     const off = { enabled: false };
-    expect(chartExportSuggestionInstruction("Show the revenue trend by quarter as a chart", off)).toContain("chartExport: { enabled: true }");
+    expect(chartExportSuggestionInstruction("Show the revenue trend by quarter as a chart", off)).toContain('chartExport: { tier: "models" }');
+    expect(chartExportSuggestionInstruction("Show the revenue trend by quarter as a chart", off)).toContain("billed");
     expect(chartExportSuggestionInstruction("Who signed the lease?", off)).toBeNull();
     expect(chartExportSuggestionInstruction("Who signed the lease?", { enabled: false, unexportedVisuals: 7 })).toContain("ingest recorded 7 charts or diagrams in this project that were not exported");
     expect(chartExportSuggestionInstruction("Who signed the lease?", { enabled: false, unexportedVisuals: 1 })).toContain("1 chart or diagram in this project that was not exported");
@@ -696,13 +697,13 @@ describe("agent modes", () => {
     const on = new MockLanguageModelV4({ doStream: [answerStep("Ready")] });
     mocks.provider.mockReturnValue(on);
     await runChatMcpAgent({ ...args, query, suggestions: true, projectInstructions: "Answer in British English.", chartExport: { enabled: false, unexportedVisuals: 3 } });
-    expect(systemText(on)).toContain("Chart export is off for this project");
+    expect(systemText(on)).toContain("Reading charts with AI is off for this project");
     // The per-question hint comes after the project instructions, keeping them in the cached prompt prefix.
-    expect(systemText(on).indexOf("Chart export is off")).toBeGreaterThan(systemText(on).indexOf("Answer in British English."));
+    expect(systemText(on).indexOf("Reading charts with AI is off")).toBeGreaterThan(systemText(on).indexOf("Answer in British English."));
     const offMode = new MockLanguageModelV4({ doStream: [answerStep("Ready")] });
     mocks.provider.mockReturnValue(offMode);
     await runChatMcpAgent({ ...args, query, chartExport: { enabled: false, unexportedVisuals: 3 } });
-    expect(systemText(offMode)).not.toContain("Chart export is off");
+    expect(systemText(offMode)).not.toContain("Reading charts with AI is off");
   });
 
   it("keeps settings facts uncited and answers free of visible self-corrections", async () => {
