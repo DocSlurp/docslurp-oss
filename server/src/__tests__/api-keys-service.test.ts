@@ -20,6 +20,12 @@ vi.mock("../services/organizations.js", () => ({
   OrganizationError: class extends Error { constructor(readonly status: number, readonly code: string, message: string) { super(message); } }
 }));
 
+// Platform admins (ADMIN_EMAILS): only "admin-1".
+vi.mock("../lib/admin-emails.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../lib/admin-emails.js")>()),
+  isConfiguredAdminUserSql: vi.fn(async (_sql: unknown, userId: string) => userId === "admin-1"),
+}));
+
 const { apiKeyTypeFromPrefix, ApiKeyTypeChangeError, ClientKeyOriginNotAllowedError, ClientKeyProjectsRequiredError, createApiKey, getLiveApiKeyById, rotateApiKey, updateApiKey, validateApiKey } = await import("../services/api-keys.js");
 const organizations = await import("../services/organizations.js");
 
@@ -372,4 +378,13 @@ it.each(["client", "server"])("missing stored scopes on a %s key never use creat
   sqlMock.mockResolvedValue([buildKeyRow(rawKey, { key_type: keyType, scopes: null, allowed_domains: ["docs.example.com"], project_ids: ["w"] })]);
   expect((await validateApiKey(rawKey, { origin: "https://docs.example.com" }))?.scopes).toEqual([]);
   expect((await getLiveApiKeyById("key-1"))?.scopes).toEqual([]);
+});
+
+describe("admin:models scope", () => {
+  it("can be minted only by a platform admin, never on a browser key", async () => {
+    await expect(createApiKey("user-1", "Models", { orgId: "org-1", keyType: "server", scopes: ["admin:models"] }))
+      .rejects.toMatchObject({ status: 403, code: "organization_forbidden" });
+    await expect(createApiKey("admin-1", "Models", { orgId: "org-1", keyType: "client", allowedDomains: ["docs.example.com"], projectIds: ["ws-1"], scopes: ["admin:models"] }))
+      .rejects.toMatchObject({ status: 400 });
+  });
 });

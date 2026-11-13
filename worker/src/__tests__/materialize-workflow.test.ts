@@ -418,6 +418,25 @@ describe("runMaterializeRange activity", () => {
     expect(seen[0]?.profile).toContain("MiniLM");
   });
 
+  it("drops model values from the source pipeline it falls back to: the profile's current model embeds (round 3)", async () => {
+    await db.exec(`
+      insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents)
+        values ('m-stale', 'o1', 'u1', 'w', 'materialize', 'processing', 'materialize', '{}', 1);
+      update project_runs set pipeline = '{"indexingMode":"map","privacyMode":"local-only",
+        "embedding":{"profile":"cheapest-local","modelUri":"llm://transformers.js/Xenova/bge-m3","target":"local"}}'::jsonb where id = 'up';`);
+    const seen: string[] = [];
+    const d = deps();
+    d.materializer.ops = {
+      ...ops,
+      async embed(args) { seen.push(args.profile.model); return { vectors: args.chunks.map(() => Array.from({ length: args.profile.dimensions }, () => 0.1)), totalTokens: 1 } as never; },
+    };
+    const result = await runMaterializeRange(d as never, input("m-stale", [1]));
+    await db.exec(`update project_runs set pipeline = '{"indexingMode":"map"}'::jsonb where id = 'up'`);
+    expect(result.indexed).toEqual([1]);
+    expect(seen[0]).toContain("MiniLM");
+    expect(seen.join(" ")).not.toContain("bge-m3");
+  });
+
   it("refuses to run on defaults when neither the run nor its source carries a pipeline", async () => {
     await db.exec(`
       insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents)

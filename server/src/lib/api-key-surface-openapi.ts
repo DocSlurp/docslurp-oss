@@ -38,6 +38,8 @@ function operation(path: string, tag: string, summary: string, scope: string, su
 const jsonBody = { requestBody: { required: true, content: { "application/json": { schema: { type: "object" } } } } };
 
 const entries: Array<[path: string, method: Method, tag: string, summary: string, scope: string, success: string, extra?: Record<string, unknown>]> = [
+  ["/v1/admin/projects/{projectId}/managed-models", "get", "admin", "Read a project's managed models (platform admins)", "admin:models", "The tier mapping and pipeline model overrides"],
+  ["/v1/admin/projects/{projectId}/managed-models", "put", "admin", "Set a project's managed models (platform admins)", "admin:models", "The stored managed models", jsonBody],
   ["/v1/capabilities", "post", "search", "Mint a sealed search capability (X-DocSlurp-Capability) that bounds query-time page parsing for browser callers. Server keys only", "search:deep", "Capability token, expiry and effective policy", jsonBody],
   ["/v1/runs/activity/stream", "get", "runs", "Stream account run activity over SSE", "ingest, artifacts or any search scope", "Server-sent event stream"],
   ["/v1/runs/{runId}/events", "get", "runs", "List a run's events", "ingest, artifacts or any search scope", "Run events"],

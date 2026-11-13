@@ -1,3 +1,4 @@
+import { managedPipelineFieldMessage, managedPipelineModelPaths } from "@docslurp/shared";
 import { quoteStoredDocuments } from "../services/stored-quote.js";
 import { chartExportOverrideError } from "../services/chart-export-availability.js";
 import { CHART_EXPORT_TIER_UNAVAILABLE_CODE } from "@docslurp/shared";
@@ -37,6 +38,11 @@ import {
   retryRun
 } from "../services/runs.js";
 import { redactOperatorEvent, redactOperatorRun } from "../services/progress-snapshot.js";
+
+/** A run as the caller may read it: platform operators see everything; customers never see backend models or machines. */
+async function customerRun<R extends { stats?: unknown; pipeline?: unknown }>(c: Context, run: R): Promise<R> {
+  return await isPlatformAdminActor(getRequestActor(c)) ? run : redactOperatorRun(run);
+}
 import { acceptApiKeys } from "../lib/route-auth.js";
 import { apiErrorResponse, apiStatusError } from "../lib/api-error.js";
 import { parseListLimit } from "../lib/list-cursor.js";
@@ -300,7 +306,13 @@ export const runsRoutes = new Hono()
       }
     });
   })
-  .post("/preview", zValidator("json", runProcessingPreviewRequestSchema, runValidationHook), async (c) => {
+  .post("/preview", async (c, next) => {
+    // A preview calls no model, but it takes the same pipeline as a write: managed model fields are refused, not ignored.
+    const raw = await c.req.json().catch(() => null) as { pipeline?: unknown } | null;
+    const paths = managedPipelineModelPaths(raw?.pipeline);
+    if (paths.length) return apiErrorResponse(c, 400, "model_not_allowed", managedPipelineFieldMessage(paths), { paths });
+    await next();
+  }, zValidator("json", runProcessingPreviewRequestSchema, runValidationHook), async (c) => {
     const userId = c.get("sessionUser").id;
     const body = c.req.valid("json");
     try {
@@ -388,10 +400,10 @@ export const runsRoutes = new Hono()
 
     if (deferred) {
       c.header("X-Temporal-Deferred", "true");
-      return c.json({ run, warnings: [deferred], job }, 201);
+      return c.json({ run: await customerRun(c, run), warnings: [deferred], job }, 201);
     }
 
-    return c.json({ ...run, job }, 201);
+    return c.json({ ...(await customerRun(c, run)), job }, 201);
   })
   .post("/:runId/retry", async (c) => {
     const userId = c.get("sessionUser").id;
@@ -421,10 +433,10 @@ export const runsRoutes = new Hono()
 
     if (deferred) {
       c.header("X-Temporal-Deferred", "true");
-      return c.json({ run, warnings: [deferred] });
+      return c.json({ run: await customerRun(c, run), warnings: [deferred] });
     }
 
-    return c.json(run);
+    return c.json(await customerRun(c, run));
   })
   .post("/:runId/control", zValidator("json", controlRunSchema, validationHook), async (c) => {
     const userId = c.get("sessionUser").id;
@@ -455,7 +467,7 @@ export const runsRoutes = new Hono()
       }
     });
 
-    return c.json(run);
+    return c.json(await customerRun(c, run));
   });
 
 acceptApiKeys(runsRoutes, [

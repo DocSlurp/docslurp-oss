@@ -1920,6 +1920,8 @@ export const projects = pgTable(
     artifactRetentionDays: integer("artifact_retention_days"),
     runRetentionDays: integer("run_retention_days").default(30),
     pipeline: jsonb().default({}).notNull(),
+    /** Platform-admin-only model mapping per category (migration 0141); never returned to customers. */
+    managedModels: jsonb("managed_models").default({}).notNull(),
     systemPrompt: text("system_prompt"),
     budgetPaused: boolean("budget_paused").default(false).notNull(),
     archivedAt: timestamp("archived_at", {
