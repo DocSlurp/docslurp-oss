@@ -14,6 +14,7 @@ import { currentChatSessionId } from "../lib/chat-agent-context.js";
 import { reportPublicError } from "../lib/public-errors.js";
 import { trackCurrentChatTurnWrite } from "../lib/chat-turn-context.js";
 import { enqueueSearchUsage } from "./lean-logging.js";
+import { drainBilledWriteBehind, writeBehindWithinCap } from "../lib/billed-write-behind.js";
 
 export type SearchUsageEvent = UsageEvent;
 
@@ -98,7 +99,8 @@ export interface SearchSessionJournal extends UsageRecorder {
  * Write-behind (SEARCH_SESSION_WRITE_BEHIND, on by default with
  * SEARCH_LANCEDB_NATIVE): the session row, result ranks and zero-result
  * diagnostics are written after the response instead of before it. Usage
- * events (billing) still commit before the response. Writes of one session id stay in order (a reused id's latest attempt
+ * events follow them within SEARCH_WRITE_BEHIND_MAX_CREDITS
+ * (lib/billed-write-behind.ts) and otherwise commit before the response. Writes of one session id stay in order (a reused id's latest attempt
  * still decides the rows), at most SEARCH_WRITE_BEHIND_CONCURRENCY run at
  * once so they never crowd searches out of the pool, and readers of a
  * session's rows (GET /search/diagnostics) wait for its pending writes with
@@ -122,7 +124,21 @@ function countSaturatedWrite(): void {
   }
 }
 let activeBackgroundWrites = 0;
-const backgroundQueue: Array<() => void> = [];
+/**
+ * Write-behind backlog per org: writes queued for a slot plus writes parked behind an earlier write or usage flush of
+ * their session. Backpressure reads its own org's count, so one org's backlog never makes another org's searches wait.
+ */
+const waitingByOrg = new Map<string, number>();
+let waitingTotal = 0;
+/** Slot queues per org, served round robin so one org's burst cannot delay every other org's writes. */
+const backgroundQueues = new Map<string, Array<() => void>>();
+let queuedTotal = 0;
+
+function addWaiting(orgKey: string, delta: number): void {
+  const next = (waitingByOrg.get(orgKey) ?? 0) + delta;
+  if (next > 0) waitingByOrg.set(orgKey, next); else waitingByOrg.delete(orgKey);
+  waitingTotal += delta;
+}
 
 function writeBehindConcurrency(): number {
   const parsed = Number(process.env.SEARCH_WRITE_BEHIND_CONCURRENCY);
@@ -130,33 +146,58 @@ function writeBehindConcurrency(): number {
 }
 
 /**
- * Most writes allowed to wait for a background slot (SEARCH_WRITE_BEHIND_MAX_PENDING,
- * default 200). Past it a search waits for its own writes, as without write-behind:
- * the backlog (and the usage a crash could lose, and the spend budgets cannot see
- * yet) stays bounded instead of growing with load.
+ * Most writes one org may have waiting to start (SEARCH_WRITE_BEHIND_MAX_PENDING,
+ * default 200). Past it that org's searches wait for their own writes, as without
+ * write-behind: the backlog (and the rows a crash could lose) stays bounded
+ * instead of growing with load. SEARCH_WRITE_BEHIND_MAX_PENDING_TOTAL (default
+ * 5000) bounds all orgs together, for memory.
  */
 function writeBehindMaxPending(): number {
   const parsed = Number(process.env.SEARCH_WRITE_BEHIND_MAX_PENDING);
   return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : 200;
 }
 
-/** Background session writes queued or running in this process. */
-export function searchSessionWriteBacklog(): { active: number; queued: number } {
-  return { active: activeBackgroundWrites, queued: backgroundQueue.length };
+function writeBehindMaxPendingTotal(): number {
+  const parsed = Number(process.env.SEARCH_WRITE_BEHIND_MAX_PENDING_TOTAL);
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : 5_000;
 }
 
-/** Run `task` when a background write slot is free. */
-function inBackgroundSlot(task: () => Promise<void>): Promise<void> {
+/** Background session writes queued or running in this process. */
+export function searchSessionWriteBacklog(): { active: number; queued: number } {
+  return { active: activeBackgroundWrites, queued: queuedTotal };
+}
+
+/** Start the next queued write, taking orgs in turn. */
+function startNextBackgroundWrite(): void {
+  const next = backgroundQueues.entries().next();
+  if (next.done) return;
+  const [orgKey, queue] = next.value;
+  const start = queue.shift()!;
+  queuedTotal -= 1;
+  // Round robin: this org goes to the back of the line, or leaves it when it has nothing else queued.
+  backgroundQueues.delete(orgKey);
+  if (queue.length > 0) backgroundQueues.set(orgKey, queue);
+  start();
+}
+
+/** Run `task` when a background write slot is free; orgs share slots in turn. */
+function inBackgroundSlot(orgKey: string, task: () => Promise<void>): Promise<void> {
   return new Promise<void>((resolve, reject) => {
     const start = () => {
       activeBackgroundWrites++;
       task().then(resolve, reject).finally(() => {
         activeBackgroundWrites--;
-        backgroundQueue.shift()?.();
+        startNextBackgroundWrite();
       });
     };
     if (activeBackgroundWrites < writeBehindConcurrency()) start();
-    else backgroundQueue.push(start);
+    else {
+      const queued = () => { addWaiting(orgKey, -1); start(); };
+      addWaiting(orgKey, 1);
+      const queue = backgroundQueues.get(orgKey);
+      if (queue) queue.push(queued); else backgroundQueues.set(orgKey, [queued]);
+      queuedTotal += 1;
+    }
   });
 }
 
@@ -173,6 +214,7 @@ export async function awaitSearchSessionWrites(sessionId: string, timeoutMs = 5_
 export async function drainSearchSessionWrites(timeoutMs?: number): Promise<void> {
   const drain = (async () => {
     while (pendingSessionWrites.size > 0) await Promise.all([...pendingSessionWrites.values()]);
+    await drainBilledWriteBehind();
   })();
   if (timeoutMs === undefined) return await drain;
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -210,6 +252,8 @@ class SqlSearchSessionJournal implements SearchSessionJournal {
   private readonly usage: UsageLedger = createUsageLedger({});
   private persistenceTail: Promise<void> = Promise.resolve();
   private usageTail: Promise<void> = Promise.resolve();
+  /** Usage flushes of this journal not yet settled (a snapshot enqueued meanwhile is parked behind them). */
+  private usageInFlight = 0;
   private readonly diagnosticEvents: Record<string, unknown> = {};
   /** The chat turn whose search agent ran this retrieval, if any. */
   private readonly chatSessionId = currentChatSessionId();
@@ -239,16 +283,23 @@ class SqlSearchSessionJournal implements SearchSessionJournal {
       return pending;
     }
     const bound = AsyncResource.bind(write);
-    // Backpressure: a full backlog makes this search wait for its own write.
-    const saturated = backgroundQueue.length >= writeBehindMaxPending();
+    // Backpressure: a full backlog of this org makes this search wait for its own write. Every write not yet
+    // started counts, whether parked behind an earlier write of its session or queued for a slot.
+    const orgKey = this.scope.orgId ?? "";
+    const saturated = (waitingByOrg.get(orgKey) ?? 0) >= writeBehindMaxPending() || waitingTotal >= writeBehindMaxPendingTotal();
+    const parked = pendingSessionWrites.has(this.sessionId) || this.usageInFlight > 0;
+    if (parked) addWaiting(orgKey, 1);
+    const run = () => bound();
     const previous = pendingSessionWrites.get(this.sessionId) ?? Promise.resolve();
-    const pending = Promise.all([previous, this.persistenceTail])
-      .then(() => inBackgroundSlot(bound))
+    // After this journal's usage flush too, so the snapshot never inserts the same events concurrently.
+    const pending = Promise.all([previous, this.persistenceTail, this.usageTail])
+      .finally(() => { if (parked) addWaiting(orgKey, -1); })
+      .then(() => inBackgroundSlot(orgKey, run))
       // One retry, as the inline path retries a failed usage flush: these writes carry billed usage.
       // A failed attempt rolled back (each write is one transaction), so retrying cannot double it.
       .catch(async () => {
         await new Promise<void>((resolve) => { setTimeout(resolve, WRITE_BEHIND_RETRY_DELAY_MS); });
-        await inBackgroundSlot(bound);
+        await inBackgroundSlot(orgKey, run);
       })
       .catch((error) => { reportPublicError(error, { operation: `search-write-behind:${operation}`, sessionId: this.sessionId }); });
     trackCurrentChatTurnWrite(pending);
@@ -314,27 +365,31 @@ class SqlSearchSessionJournal implements SearchSessionJournal {
   }
 
   /**
-   * Write-behind keeps billed usage out of the background queue: the usage
-   * events (usually one small insert) commit before the response, so a deploy
-   * or crash cannot lose them. Only the session row, result ranks and
-   * zero-result diagnostics wait. Event ids are stable, so a retry, or the
-   * snapshot's own flush picking up an event whose inline write failed,
-   * cannot bill twice.
+   * Write-behind usage: the events (usually one small insert, AI calls priced
+   * at 0 credits) commit after the response while the process's unwritten
+   * billed credits stay within SEARCH_WRITE_BEHIND_MAX_CREDITS
+   * (lib/billed-write-behind.ts); past it the search waits for the insert.
+   * Shutdown drains them, and a failing chat turn waits for them before it
+   * refunds (#90). Event ids are stable, so a retry, or the snapshot's own
+   * flush picking up an event whose write failed, cannot bill twice.
    */
   private flushUsageInline(userId: string, projectId: string | null | undefined): Promise<void> {
     const scope = { sessionId: this.sessionId, projectId: projectId ?? null, orgId: this.scope.orgId ?? null };
-    const flush = () => this.usage.flush({ userId, scope });
-    const pending = this.usageTail
-      .then(flush)
-      .catch(async () => {
-        await new Promise<void>((resolve) => { setTimeout(resolve, WRITE_BEHIND_RETRY_DELAY_MS); });
-        await flush();
-      })
-      .then(() => undefined)
-      // Still unflushed: the background session write retries it in its transaction.
-      .catch((error) => { reportPublicError(error, { operation: "search-usage-inline", sessionId: this.sessionId }); });
-    this.usageTail = pending;
-    return trackCurrentChatTurnWrite(pending);
+    const previous = this.usageTail;
+    // Rejects on failure so the billed write-behind controller retries it (same event ids) and keeps its credits held.
+    const write = async () => {
+      await previous;
+      await this.usage.flush({ userId, scope });
+    };
+    this.usageInFlight += 1;
+    const { done, settled } = writeBehindWithinCap(this.usage.pendingCostCents(), write, {
+      orgId: this.scope.orgId,
+      onError: (error, attempt) => reportPublicError(error, { operation: "search-usage-inline", sessionId: this.sessionId, attempt: attempt + 1 }),
+    });
+    void settled.finally(() => { this.usageInFlight -= 1; });
+    this.usageTail = settled;
+    trackCurrentChatTurnWrite(settled);
+    return done;
   }
 
   private async persistSnapshot(input: PersistSearchSessionInput, durationMs: number): Promise<void> {
