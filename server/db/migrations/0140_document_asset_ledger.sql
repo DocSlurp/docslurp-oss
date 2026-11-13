@@ -1,17 +1,26 @@
 -- Document asset ledger (docs/extraction/doppler-figures.md, "Asset ledger"). One row per image Doppler reports for a
--- document (extracted, not extracted with the reason, or unlinked), and one extraction-level row per document: how far
--- its text, page facts and images got. Written by the worker in one transaction per figure step
--- (worker/src/db/document-asset-ledger.ts); read by server/src/services/document-assets.ts.
+-- document (extracted, not extracted with the reason, or unlinked), and one extraction-level row per document: whether
+-- its Markdown is committed and how far its images got. Written by the worker after the stage checkpoint that recorded
+-- the Markdown and the image files commits (worker/src/db/document-asset-ledger.ts); read by
+-- server/src/services/document-assets.ts.
 --
 -- Tenant scope: org_id and project_id are NOT NULL and tied to the document's own (id, project_id, org_id) by a composite
 -- foreign key on documents_projection_scope (migration 0109), so a row can never name a document of another
--- organization or project, and a document without an organization can have no rows. Every value is a validated
--- manifest field from a closed vocabulary or a bounded number; no document-supplied text is stored.
+-- organization or project, and a document without an organization can have no rows. run_id is tied the same way to the
+-- run's own (id, project_id, org_id): a row cannot name another tenant's run. Every value is a validated manifest field
+-- from a closed vocabulary or a bounded number; no document-supplied text is stored.
+--
+-- Object keys follow Doppler's own folder layout under `<artifact root>/doppler/<document>/` (packages/shared
+-- DOPPLER_STORE_LAYOUT): the manifest at `images/manifest.json`, each file at `images/page-NNNN/(image|figure)-NNN.<ext>`.
+
+-- The run a ledger row names must belong to the row's own project and organization.
+ALTER TABLE project_runs ADD CONSTRAINT project_runs_tenant_scope UNIQUE (id, project_id, org_id);
+--> statement-breakpoint
 CREATE TABLE IF NOT EXISTS document_assets (
   document_id text NOT NULL,
   org_id text NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
   project_id text NOT NULL,
-  run_id text REFERENCES project_runs(id) ON DELETE SET NULL,
+  run_id text,
   asset_id text NOT NULL CHECK (asset_id ~ '^p[1-9][0-9]{0,8}\.g?(0|[1-9][0-9]{0,5})$'),
   page_number integer NOT NULL CHECK (page_number >= 1),
   kind text NOT NULL CHECK (kind IN ('picture', 'mask', 'vector')),
@@ -23,7 +32,8 @@ CREATE TABLE IF NOT EXISTS document_assets (
   resumable boolean NOT NULL DEFAULT false,
   source text CHECK (source IN ('copy', 'decode', 'render')),
   format text CHECK (format IN ('webp', 'svg', 'png', 'jpg')),
-  bytes integer CHECK (bytes BETWEEN 1 AND 8388608),
+  -- 8 MiB for a picture or figure (--images-max-file-bytes); 64 MiB for a page scan copied or decoded from the PDF.
+  bytes integer CHECK (bytes BETWEEN 1 AND 67108864),
   sha256 text CHECK (sha256 ~ '^[0-9a-f]{64}$'),
   width integer CHECK (width BETWEEN 1 AND 16384),
   height integer CHECK (height BETWEEN 1 AND 16384),
@@ -33,26 +43,51 @@ CREATE TABLE IF NOT EXISTS document_assets (
   link_path text CHECK (char_length(link_path) <= 192 AND link_path ~ '^([A-Za-z0-9._~-]+/)*page-[0-9]{4,10}/(image|figure)-[0-9]{3,7}\.(webp|png|svg|jpg)$'),
   -- The image whose stored file shows this one (itself when it owns one).
   file_of text CHECK (file_of ~ '^p[1-9][0-9]{0,8}\.g?(0|[1-9][0-9]{0,5})$'),
-  -- Object key of the file this image owns: under the run's tenant-scoped artifact root and this document's folder.
+  -- Object key of the file this image owns: `<artifact root>/doppler/<document>/images/<path derived from the id>`.
   storage_key text CHECK (char_length(storage_key) <= 512),
+  -- The image object (manifest v2 `obj`, [num, gen]) and its box (page points, y down): kept for a resume and for
+  -- matching repeats across runs.
+  obj_num integer CHECK (obj_num >= 0),
+  obj_gen integer CHECK (obj_gen BETWEEN 0 AND 65535),
+  bbox double precision[] CHECK (bbox IS NULL OR (cardinality(bbox) = 4 AND array_position(bbox, NULL) IS NULL)),
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (document_id, asset_id),
   CONSTRAINT document_assets_document_scope_fkey FOREIGN KEY (document_id, project_id, org_id)
     REFERENCES documents (id, project_id, org_id) ON DELETE CASCADE ON UPDATE CASCADE,
+  -- A deleted run leaves the row (its run unknown), never the row's tenant columns.
+  CONSTRAINT document_assets_run_scope_fkey FOREIGN KEY (run_id, project_id, org_id)
+    REFERENCES project_runs (id, project_id, org_id) ON DELETE SET NULL (run_id),
   CONSTRAINT document_assets_id_page_check CHECK (page_number = substring(asset_id from '^p([0-9]+)\.')::integer),
-  CONSTRAINT document_assets_id_kind_check CHECK ((kind = 'vector') = (asset_id LIKE '%.g%')),
+  CONSTRAINT document_assets_id_kind_check CHECK ((kind = 'vector') = (position('.g' in asset_id) > 0)),
+  CONSTRAINT document_assets_obj_check CHECK ((obj_num IS NULL) = (obj_gen IS NULL)),
   CONSTRAINT document_assets_status_reason_check CHECK ((status = 'not-extracted') = (reason IS NOT NULL)),
   CONSTRAINT document_assets_resumable_reason_check CHECK (NOT resumable OR reason IN ('budget', 'doc_budget', 'timeout', 'deadline', 'aborted')),
   CONSTRAINT document_assets_status_file_check CHECK (CASE WHEN status = 'extracted'
     THEN bytes IS NOT NULL AND sha256 IS NOT NULL AND format IS NOT NULL AND storage_key IS NOT NULL AND file_of = asset_id
     ELSE bytes IS NULL AND sha256 IS NULL AND source IS NULL AND storage_key IS NULL END),
   CONSTRAINT document_assets_status_link_check CHECK (status <> 'unlinked' OR link_path IS NULL),
-  CONSTRAINT document_assets_storage_key_scope_check CHECK (storage_key IS NULL
-    OR (storage_key LIKE '%/doppler-figures/' || document_id || '/' || asset_id || '.' || format AND storage_key NOT LIKE '%..%'))
+  -- Only a page scan is copied or decoded; a decoded scan is re-encoded (never a JPEG); only those may pass 8 MiB.
+  CONSTRAINT document_assets_source_fate_check CHECK ((source IS DISTINCT FROM 'copy' AND source IS DISTINCT FROM 'decode') OR fate = 'page-scan'),
+  CONSTRAINT document_assets_decode_format_check CHECK (source IS DISTINCT FROM 'decode' OR format <> 'jpg'),
+  CONSTRAINT document_assets_file_bytes_check CHECK (bytes IS NULL OR bytes <= 8388608 OR source IN ('copy', 'decode')),
+  -- The key ends in this document's folder and the path derived from the id and format, compared as plain text (no
+  -- pattern built from column values); the worker also compares the whole key to the document's artifact root.
+  CONSTRAINT document_assets_storage_key_scope_check CHECK (storage_key IS NULL OR (
+    right(storage_key, char_length('/doppler/' || document_id || '/images/page-'
+        || lpad(substring(asset_id from '^p([0-9]+)\.'), greatest(4, char_length(substring(asset_id from '^p([0-9]+)\.'))), '0')
+        || (CASE WHEN kind = 'vector' THEN '/figure-' ELSE '/image-' END)
+        || lpad(substring(asset_id from '([0-9]+)$'), greatest(3, char_length(substring(asset_id from '([0-9]+)$'))), '0')
+        || '.' || format))
+      = '/doppler/' || document_id || '/images/page-'
+        || lpad(substring(asset_id from '^p([0-9]+)\.'), greatest(4, char_length(substring(asset_id from '^p([0-9]+)\.'))), '0')
+        || (CASE WHEN kind = 'vector' THEN '/figure-' ELSE '/image-' END)
+        || lpad(substring(asset_id from '([0-9]+)$'), greatest(3, char_length(substring(asset_id from '([0-9]+)$'))), '0')
+        || '.' || format
+    AND position('..' in storage_key) = 0 AND position('//' in storage_key) = 0 AND left(storage_key, 1) <> '/'))
 );
 --> statement-breakpoint
-CREATE INDEX IF NOT EXISTS document_assets_org_document_idx ON document_assets (org_id, document_id);
+CREATE INDEX IF NOT EXISTS document_assets_org_document_idx ON document_assets (org_id, document_id, page_number, asset_id);
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS document_assets_resumable_idx ON document_assets (org_id, document_id) WHERE resumable;
 --> statement-breakpoint
@@ -64,21 +99,26 @@ CREATE TABLE IF NOT EXISTS document_extraction_levels (
   document_id text PRIMARY KEY,
   org_id text NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
   project_id text NOT NULL,
-  run_id text REFERENCES project_runs(id) ON DELETE SET NULL,
-  -- Text: the Markdown (with its final links) is stored.
+  run_id text,
+  -- The Markdown is committed: the checkpoint that recorded the document's markdown slot committed before this row.
   markdown_complete boolean NOT NULL DEFAULT false,
-  -- Page facts (doppler-page-facts/1): the level computed, or none.
-  facts_level text NOT NULL DEFAULT 'none' CHECK (facts_level IN ('none', 'basic', 'full')),
-  -- Images: none (not run), complete (exit 0), partial (exit 5, nothing a resume retries), resumable (exit 5, a resume
-  -- would retry some), failed (exit 6, a refused folder, or nothing usable), disabled (figures off for the run).
+  -- Images: none (no figure step ran for the committed Markdown: another extractor won, or no VM), complete (exit 0),
+  -- partial (exit 5, nothing a resume retries), resumable (exit 5, a resume would retry some), failed (exit 6, a refused
+  -- folder, or nothing usable), disabled (figures off for the run).
   images_status text NOT NULL DEFAULT 'none' CHECK (images_status IN ('none', 'complete', 'partial', 'resumable', 'failed', 'disabled')),
   images_exit_code smallint CHECK (images_exit_code BETWEEN 0 AND 255),
   manifest_version smallint CHECK (manifest_version IN (1, 2)),
   doppler_build text CHECK (doppler_build ~ '^[0-9A-Za-z][0-9A-Za-z._+-]{0,63}$'),
+  -- The stored manifest (`<artifact root>/doppler/<document>/images/manifest.json`, the validated bytes unchanged) and
+  -- its SHA-256: with the files, what a resume worker downloads as its DIR.
+  manifest_key text CHECK (char_length(manifest_key) <= 512),
+  manifest_sha256 text CHECK (manifest_sha256 ~ '^[0-9a-f]{64}$'),
   -- Manifest v2 binding a resume must repeat (the PDF and the conversion settings).
   source_sha256 text CHECK (source_sha256 ~ '^[0-9a-f]{64}$'),
   settings_sha256 text CHECK (settings_sha256 ~ '^[0-9a-f]{64}$'),
-  resumes integer NOT NULL DEFAULT 0 CHECK (resumes >= 0),
+  -- Resumes the host itself wrote (previous + 1 per resume write); the manifest's own count is telemetry only. The resume
+  -- queue skips a document at its cap (worker DOCUMENT_ASSET_RESUME_CAP).
+  resumes integer NOT NULL DEFAULT 0 CHECK (resumes BETWEEN 0 AND 1000),
   last_cut_page integer CHECK (last_cut_page >= 1),
   deadline_ms integer CHECK (deadline_ms >= 0),
   assets_total integer NOT NULL DEFAULT 0 CHECK (assets_total >= 0),
@@ -93,9 +133,15 @@ CREATE TABLE IF NOT EXISTS document_extraction_levels (
   updated_at timestamptz NOT NULL DEFAULT now(),
   CONSTRAINT document_extraction_levels_document_scope_fkey FOREIGN KEY (document_id, project_id, org_id)
     REFERENCES documents (id, project_id, org_id) ON DELETE CASCADE ON UPDATE CASCADE,
+  CONSTRAINT document_extraction_levels_run_scope_fkey FOREIGN KEY (run_id, project_id, org_id)
+    REFERENCES project_runs (id, project_id, org_id) ON DELETE SET NULL (run_id),
   CONSTRAINT document_extraction_levels_counts_check
     CHECK (assets_total = assets_extracted + assets_not_extracted + assets_unlinked AND assets_resumable <= assets_not_extracted),
-  CONSTRAINT document_extraction_levels_status_resumable_check CHECK ((images_status = 'resumable') = (assets_resumable > 0))
+  CONSTRAINT document_extraction_levels_status_resumable_check CHECK ((images_status = 'resumable') = (assets_resumable > 0)),
+  CONSTRAINT document_extraction_levels_manifest_check CHECK ((manifest_key IS NULL) = (manifest_sha256 IS NULL)
+    AND (manifest_key IS NULL OR (right(manifest_key, char_length('/doppler/' || document_id || '/images/manifest.json'))
+      = '/doppler/' || document_id || '/images/manifest.json'
+      AND position('..' in manifest_key) = 0 AND position('//' in manifest_key) = 0 AND left(manifest_key, 1) <> '/')))
 );
 --> statement-breakpoint
 -- The resume worker's queue: documents with images a resume would retry, per organization.
@@ -104,8 +150,11 @@ CREATE INDEX IF NOT EXISTS document_extraction_levels_resumable_idx
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS document_extraction_levels_org_idx ON document_extraction_levels (org_id, project_id);
 --> statement-breakpoint
--- Per-page routing facts beside the ingest report's other per-page facts: the text layer (doppler-page-facts
--- `text.textLayer`, or the layout facts' equivalent) and the scan class (`scan`). Two closed enums, no free text.
+CREATE INDEX IF NOT EXISTS document_extraction_levels_run_idx ON document_extraction_levels (run_id) WHERE run_id IS NOT NULL;
+--> statement-breakpoint
+-- Per-page routing facts beside the ingest report's other per-page facts, written through the worker's page-facts path
+-- whatever the figure setting: the text layer (the VM's layout facts `textLayer`, or doppler-page-facts `text.textLayer`)
+-- and the scan class (doppler-page-facts `scan`). Two closed enums, no free text.
 ALTER TABLE document_page_facts ADD COLUMN IF NOT EXISTS text_layer text
   CHECK (text_layer IN ('none', 'invisible', 'visible', 'mixed'));
 --> statement-breakpoint

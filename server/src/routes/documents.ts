@@ -54,7 +54,7 @@ import { billingState } from "../services/config-change.js";
 import { estimateDocumentReprocess, singleProjectOf } from "../services/work-estimates.js";
 import { apiKeyCanUpdateContent, CONTENT_UPDATE_SCOPE_MESSAGE } from "../lib/content-update-access.js";
 import { apiKeyCanUseProject } from "../lib/api-key-project-scope.js";
-import { getDocumentAssetLedger } from "../services/document-assets.js";
+import { DocumentAssetQueryError, getDocumentAssetLedger } from "../services/document-assets.js";
 
 const bulkSchema = z.object({
   speedBoost: z.boolean().optional(),
@@ -327,16 +327,36 @@ export const documentsRoutes = new Hono()
 
     return c.json(scoped.viewer);
   })
-  // The asset ledger: every image Doppler reported (extracted, not extracted with why, unlinked) and the extraction level.
-  // Same gate as the document detail: the caller must reach the document's project; an API key also needs `artifacts`
-  // (middleware above) and a project it may use. Anything else is the same 404 as a missing document.
+  // The asset ledger: every image Doppler reported (extracted, not extracted with why, unlinked) and the extraction level,
+  // one keyset page at a time (`limit`, `after`, `pageFrom`, `pageTo`). Same gate as the document detail: the caller must
+  // reach the document's project; an API key also needs `artifacts` (middleware above) and a project it may use. A
+  // document the viewer is not shown (not completed, purged) or any other miss is the same 404 as a missing document.
   .get("/:docId/assets", async (c) => {
     const userId = c.get("sessionUser").id;
     const docId = c.req.param("docId");
     const apiKey = c.get("apiKey");
+    const integer = (name: string): number | undefined | null => {
+      const raw = c.req.query(name);
+      if (raw === undefined) return undefined;
+      return /^[1-9][0-9]{0,9}$/.test(raw) ? Number(raw) : null;
+    };
+    const limit = integer("limit");
+    const pageFrom = integer("pageFrom");
+    const pageTo = integer("pageTo");
+    const after = c.req.query("after");
+    if (limit === null || pageFrom === null || pageTo === null) return apiStatusError(c, 400, "Invalid asset page parameters");
     const [owner] = await listDocumentOwners([docId], userId);
     if (!owner || (apiKey && !apiKeyCanUseProject(apiKey, owner))) return apiStatusError(c, 404, "Document not found");
-    const ledger = await getDocumentAssetLedger({ orgId: owner.orgId, projectId: owner.projectId, documentId: docId });
+    let ledger;
+    try {
+      ledger = await getDocumentAssetLedger({ orgId: owner.orgId, projectId: owner.projectId, documentId: docId }, {
+        ...(limit === undefined ? {} : { limit }), ...(after === undefined ? {} : { after }),
+        ...(pageFrom === undefined ? {} : { pageFrom }), ...(pageTo === undefined ? {} : { pageTo }),
+      });
+    } catch (error) {
+      if (error instanceof DocumentAssetQueryError) return apiStatusError(c, 400, "Invalid asset page parameters");
+      throw error;
+    }
     if (!ledger) return apiStatusError(c, 404, "Document not found");
     return c.json(ledger);
   })
