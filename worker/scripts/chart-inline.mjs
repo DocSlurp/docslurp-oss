@@ -7,15 +7,16 @@
 // - a V8 heap limit per worker (resourceLimits);
 // - a process RSS growth limit, polled while a worker runs (the heap limit does not cover Buffers/ArrayBuffers);
 // - a wall-clock budget: the extractor's own deadline (setGuestDeadline, softDeadlineShare of it), each unit at most
-//   what is left, the whole step at most startupMs + the size-scaled deadline; past it one short count-only worker
-//   records what is left as guest-deadline ranges.
+//   what is left, the whole step at most startupMs + the size-scaled deadline, and never past commandCutoffMs of the
+//   quarantine command (inlineStepBudget: the inspection's time counts, council #369 L4); past it one short count-only
+//   worker records what is left as guest-deadline ranges. Too little left to start: refused command-budget.
 import { accessSync, constants, readdirSync } from "node:fs";
 import module from "node:module";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 import { Worker } from "node:worker_threads";
-import { INLINE_CHART_LIMITS, inlineChartPlan, inlineDeadlineMs } from "../dist/chart-export/inline-guest.js";
+import { INLINE_CHART_LIMITS, inlineChartPlan, inlineStepBudget } from "../dist/chart-export/inline-guest.js";
 
 const WORKER = new URL("./chart-export-worker.mjs", import.meta.url);
 /** The V8 compile cache pre-filled at image build (chart-guest-bundle.mjs buildCompileCache; verified at VM start). */
@@ -65,9 +66,9 @@ async function guest(compileCacheDir) {
   return guestModule;
 }
 /** A count-only worker (past the deadline) gets this long: it parses nothing, it records what is left. */
-const COUNT_ONLY_MS = 1_000;
+const COUNT_ONLY_MS = INLINE_CHART_LIMITS.countOnlyMs;
 /** How long a finished worker gets to exit before the next one starts anyway. */
-const TERMINATE_WAIT_MS = 1_000;
+const TERMINATE_WAIT_MS = INLINE_CHART_LIMITS.terminateWaitMs;
 const MAX_WORKERS = 8;
 
 /**
@@ -144,7 +145,12 @@ function runWorker(workerUrl, task, done, index, endsAt, memory, onStart, compil
  * { status: "skipped", reason } | { status: "refused", reason, ms } (no unit could be placed: start-up, or every worker
  * failing outside any unit).
  */
-export async function inlineCharts(bytes, request, inspection, inputPath, workerUrl = WORKER, compileCacheDir = readOnlyCompileCache()) {
+/**
+ * `clock.commandStartedAt`: when the quarantine command started, on the performance.now() clock (quarantine-inspect.mjs
+ * passes 0, the process start). The step is charged against the command's budget from there (inlineStepBudget, council
+ * #369 L4). Omitted (tests, in-process callers): the step starts the clock itself.
+ */
+export async function inlineCharts(bytes, request, inspection, inputPath, workerUrl = WORKER, compileCacheDir = readOnlyCompileCache(), clock = {}) {
   const kind = typeof request?.kind === "string" ? request.kind : "";
   let text;
   const plan = inlineChartPlan(kind, inspection, bytes.length, () => (text ??= bytes.toString("utf8")));
@@ -155,10 +161,13 @@ export async function inlineCharts(bytes, request, inspection, inputPath, worker
   if (typeof module.getCompileCacheDir === "function" && module.getCompileCacheDir()) return { status: "refused", reason: "cache-inherited", ms: 0 };
   const started = performance.now();
   const ms = () => Math.round(performance.now() - started);
-  const deadline = inlineDeadlineMs(bytes.length);
-  const endsAt = started + INLINE_CHART_LIMITS.startupMs + deadline;
+  // The step's budget, cut at the quarantine command's cutoff: a slow inspection shortens it, and with too little left the
+  // charts are refused (counted by the host as a deferral) so the command always finishes with its verdict.
+  const budget = inlineStepBudget({ now: started, commandStartedAt: typeof clock.commandStartedAt === "number" ? clock.commandStartedAt : started, sizeBytes: bytes.length });
+  if (!budget) return { status: "refused", reason: "command-budget", ms: 0 };
+  const endsAt = budget.endsAt;
   // The extractor's own deadline (epoch ms), inside the hard one: past it, unanalysed units become counted deferrals.
-  const softDeadline = Date.now() + INLINE_CHART_LIMITS.startupMs + Math.floor(deadline * INLINE_CHART_LIMITS.softDeadlineShare);
+  const softDeadline = Date.now() + budget.softMs;
   const options = { diagrams: request.diagrams !== false };
   // One memory budget for the whole step, from the RSS before the first worker: a later worker never inherits the
   // headroom of memory an ended worker has not yet returned.
@@ -167,7 +176,7 @@ export async function inlineCharts(bytes, request, inspection, inputPath, worker
   const memory = { growth, ceiling: process.memoryUsage.rss() + 2 * growth };
   // One unit at most a quarter of the step's deadline (at least 3 s, so a heap overrun ends as the crash it is): a hang loses itself, not the rest (as #364's 15 s
   // per unit inside its 45 s budget).
-  const unitCapMs = Math.max(3_000, Math.floor(deadline / 4));
+  const unitCapMs = budget.unitCapMs;
   const done = new Map();
   const failed = new Map();
   let final = null;

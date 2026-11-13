@@ -15,7 +15,7 @@ import { barPlot, chartXml, docx, genericBar, pptx, xlsx } from "./extractors/__
 import { extractDeterministicVisuals } from "./extractors/index.js";
 import { CHART_EXTRACT_LIMITS } from "./extractors/limits.js";
 import { chartExportInlineEnabled, freeInlineMode, inlineChartsInProcess, inlineHasWork, readStoredInlineCharts, validateInlineCharts } from "./inline.js";
-import { INLINE_CHART_LIMITS, inlineChartPlan, inlineDeadlineMs, scriptTypes } from "./inline-guest.js";
+import { INLINE_CHART_LIMITS, INLINE_MIN_REMAINING_MS, INLINE_STEP_TAIL_MS, inlineChartPlan, inlineDeadlineMs, inlineStepBudget, scriptTypes } from "./inline-guest.js";
 import { createVmDeterministicVisualExtractor } from "./vm-extractor.js";
 import { inlineChartRequest } from "../stages/quarantine.js";
 
@@ -201,6 +201,31 @@ console.log(JSON.stringify({ status: out.status, calls: out.result?.calls, visua
         delete process.env.DOCSLURP_CHART_GUEST_TEST_FAULT;
       }
     }, 60_000);
+    it("a slow inspection refuses the charts (command-budget) instead of timing out quarantine (council #369 L4)", async () => {
+      const hang = path.join(dir, `hang-${Math.random().toString(36).slice(2)}.mjs`);
+      await writeFile(hang, `import { parentPort } from "node:worker_threads";\nparentPort.on("message", () => { for (;;); });`);
+      const { inlineCharts } = await import(pathToFileURL(path.join(workerRoot, "scripts/chart-inline.mjs")).href);
+      const inspection = { sniffed: { encoding: "utf-8", container: null }, archive: null };
+      const svgBytes = Buffer.from(genericBar(["A", "B"], [1, 2], 3));
+      const svg = path.join(dir, `late-${Math.random().toString(36).slice(2)}.svg`);
+      await writeFile(svg, svgBytes);
+      // The inspection took 36 s of the command: too little left to start a worker.
+      const started = Date.now();
+      const out = await inlineCharts(svgBytes, { kind: "svg", diagrams: true }, inspection, svg, pathToFileURL(hang), null, { commandStartedAt: performance.now() - 36_000 });
+      expect(out).toEqual({ status: "refused", reason: "command-budget", ms: 0 });
+      expect(Date.now() - started).toBeLessThan(1_000);
+      expect(inlineHasWork(validateInlineCharts(out))).toBe(true);
+      // 33.5 s in: the step starts, but a hanging worker is cut at the command cutoff, not at the step's own (longer) end.
+      const big = Buffer.concat([svgBytes, Buffer.alloc(2 * 1024 * 1024, 0x20)]);
+      const bigFile = path.join(dir, `late-big-${Math.random().toString(36).slice(2)}.svg`);
+      await writeFile(bigFile, big);
+      const remaining = INLINE_CHART_LIMITS.commandCutoffMs - 33_500;
+      expect(INLINE_CHART_LIMITS.startupMs + inlineDeadlineMs(big.length)).toBeGreaterThan(remaining + 2_500);
+      const clamped = await inlineCharts(big, { kind: "svg", diagrams: true }, inspection, bigFile, pathToFileURL(hang), null, { commandStartedAt: performance.now() - 33_500 });
+      expect(clamped).toMatchObject({ status: "refused", reason: "deadline" });
+      expect((clamped as { ms: number }).ms).toBeGreaterThanOrEqual(remaining - 100);
+      expect((clamped as { ms: number }).ms).toBeLessThanOrEqual(remaining + INLINE_STEP_TAIL_MS + 500);
+    }, 30_000);
     it("the compile cache is used only read-only, and handed to every worker (#364 compileCacheDir, council r10)", async () => {
       const { readOnlyCompileCache } = await import(pathToFileURL(path.join(workerRoot, "scripts/chart-inline.mjs")).href);
       const cache = path.join(dir, `cache-${Math.random().toString(36).slice(2)}`);
@@ -404,6 +429,34 @@ describe("inline chart plan and host validation", () => {
     expect(inlineChartPlan("pdf", text, 10, () => "")).toEqual({ run: false, reason: "kind-unsupported" });
     expect(inlineDeadlineMs(0)).toBe(500);
     expect(inlineDeadlineMs(100 * 1024 * 1024)).toBe(10_000);
+  });
+
+  it("charges the inline step against the quarantine command's budget (council #369 L4, #383)", () => {
+    const MiB = 1024 * 1024;
+    // A fast inspection: the step keeps its own size-scaled budget.
+    const fresh = inlineStepBudget({ now: 200, commandStartedAt: 0, sizeBytes: 4 * MiB })!;
+    expect(fresh.endsAt - 200).toBe(INLINE_CHART_LIMITS.startupMs + inlineDeadlineMs(4 * MiB));
+    expect(fresh.softMs).toBe(INLINE_CHART_LIMITS.startupMs + Math.floor(inlineDeadlineMs(4 * MiB) * INLINE_CHART_LIMITS.softDeadlineShare));
+    // A slow inspection: the step ends at the command cutoff, its soft deadline inside it.
+    const late = inlineStepBudget({ now: 33_000, commandStartedAt: 0, sizeBytes: 4 * MiB })!;
+    expect(late.endsAt).toBe(INLINE_CHART_LIMITS.commandCutoffMs);
+    expect(late.softMs).toBeLessThan(late.endsAt - 33_000);
+    // Too little left to start a worker: no budget (the guest refuses with command-budget).
+    expect(inlineStepBudget({ now: INLINE_CHART_LIMITS.commandCutoffMs - INLINE_MIN_REMAINING_MS + 1, commandStartedAt: 0, sizeBytes: 10 })).toBeNull();
+    expect(inlineStepBudget({ now: INLINE_CHART_LIMITS.commandCutoffMs - INLINE_MIN_REMAINING_MS, commandStartedAt: 0, sizeBytes: 10 })).not.toBeNull();
+    expect(inlineStepBudget({ now: 59_000, commandStartedAt: 0, sizeBytes: 10 })).toBeNull();
+    expect(inlineStepBudget({ now: Number.NaN, commandStartedAt: 0, sizeBytes: 10 })).toBeNull();
+    // Whenever the inspection finishes, the step (plus its count-only tail) ends well before the command times out.
+    for (let now = 0; now <= 60_000; now += 250) {
+      for (const size of [0, 1024, 4 * MiB, 100 * MiB]) {
+        const budget = inlineStepBudget({ now, commandStartedAt: 0, sizeBytes: size });
+        if (budget) expect(budget.endsAt + INLINE_STEP_TAIL_MS).toBeLessThanOrEqual(INLINE_CHART_LIMITS.commandTimeoutMs - 15_000);
+      }
+    }
+    // The refusal is a valid, counted answer: the host records it as a deferral, never a silent skip.
+    const refused = validateInlineCharts({ status: "refused", reason: "command-budget", ms: 0 });
+    expect(refused).toEqual({ status: "refused", reason: "command-budget", ms: 0 });
+    expect(inlineHasWork(refused)).toBe(true);
   });
 
   it("the HTML and JSON prefilters skip only files that extract nothing (council L1, M3)", () => {
