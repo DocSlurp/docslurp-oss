@@ -157,7 +157,8 @@ describe("doppler page facts: words inside and bytes per pixel", () => {
     const at = (ratio: number | undefined, inside: number) => {
       const t = { ...text };
       if (ratio === undefined) delete t.textOverImageRatio; else t.textOverImageRatio = ratio;
-      return layoutOf(textPage(1, { text: t, images: { ...images, items: [{ ...item, bbox: ALIGNED, visibleWordsInside: inside, invisibleWordsInside: 0 }] } })).images![0]!.wordsInside;
+      // px / dpi = the box: the image is its whole placement (unclippedPlacement).
+      return layoutOf(textPage(1, { text: t, images: { ...images, items: [{ ...item, bbox: ALIGNED, px: [81, 44], dpi: [72, 72], visibleWordsInside: inside, invisibleWordsInside: 0 }] } })).images![0]!.wordsInside;
     };
     expect(at(0, 0)).toBe(0);
     expect(at(0, 2)).toBe(2);
@@ -210,10 +211,10 @@ describe("doppler page facts: words inside and bytes per pixel", () => {
   });
 
   it("xref-repaired-earlier: the page keeps only its size; images, words, grids are unknown, so nothing on it selects a read", () => {
-    const scanLike = { visibleWordsInside: 0, invisibleWordsInside: 0, bytesPerPixel: 0.02, bbox: [67, 302, 535, 602], coverage: 0.29, px: [1950, 1667], dpi: [300, 300], filter: "dct" };
+    const scanLike = { visibleWordsInside: 0, invisibleWordsInside: 0, bytesPerPixel: 0.02, bbox: [67, 302, 535, 602], coverage: 0.29, px: [1950, 1250], dpi: [300, 300], filter: "dct" };
     const vectorsWithGrid = { grids: [TABLE], gridsTruncated: false };
     const ok = layoutOf(page({ item: scanLike, vectors: vectorsWithGrid }));
-    expect([ok.images![0]!.widthPx, ok.images![0]!.heightPx, ok.images![0]!.ppi, ok.images![0]!.bytesPerPixel, ok.images![0]!.wordsInside]).toEqual([1950, 1667, [300, 300], 0.02, 0]);
+    expect([ok.images![0]!.widthPx, ok.images![0]!.heightPx, ok.images![0]!.ppi, ok.images![0]!.bytesPerPixel, ok.images![0]!.wordsInside]).toEqual([1950, 1250, [300, 300], 0.02, 0]);
     expect(ok.grids).toBeNull();
     const low = layoutOf(page({ item: scanLike, vectors: vectorsWithGrid, extra: { parseWarnings: ["xref-repaired-earlier"] } }));
     expect(low).toEqual({ images: null, tables: null, words: null, grids: null, tableCoverage: null, widthPt: 612, heightPt: 792 });

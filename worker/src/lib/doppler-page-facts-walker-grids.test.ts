@@ -16,7 +16,7 @@ import { buildAdaptiveRoutingDecisionSurface } from "../stages/classify-route.js
 import { SCHEMA, docLine, jsonl, runLine, textPage } from "../test/doppler-page-facts-fixture.js";
 import { dopplerPageFactsJsonl, parseDopplerPageFacts, withoutWalkerParityFacts, type DopplerPageFactsDocument } from "./doppler-page-facts.js";
 import { pageImageEvidenceFromDopplerFacts } from "./doppler-page-facts-evidence.js";
-import { pageLayoutFactsFromDopplerFacts, unionCoverage } from "./doppler-page-facts-layout.js";
+import { pageLayoutFactsFromDopplerFacts, unclippedPlacement } from "./doppler-page-facts-layout.js";
 import { buildPageImageEvidence, findSparsePages, summarizeImageListing, type PageImageEvidence } from "./page-image-evidence.js";
 import type { PageLayoutFacts } from "./page-layout-facts.js";
 
@@ -85,8 +85,6 @@ describe("doppler #44 facts: strict reader", () => {
       ["unlisted negative", { unlistedRuledGrids: -1 }], ["unlisted fractional", { unlistedRuledGrids: 0.5 }],
       ["unlisted string", { unlistedRuledGrids: "0" }], ["unlisted huge", { unlistedRuledGrids: 2_049 }], ["unlisted null", { unlistedRuledGrids: null }],
       ["counts without unlistedRuledGrids", { unlistedRuledGrids: undefined }],
-      ["more lines than the page's rules", { hRules: 6, vRules: 40 }],
-      ["more columns than the page's rules", { hRules: 40, vRules: 4 }],
     ];
     for (const [name, over] of hostile) {
       const line = page({ vectors: over });
@@ -94,6 +92,16 @@ describe("doppler #44 facts: strict reader", () => {
       const facts = one(line);
       expect(facts.pages.get(1)!.vectors, name).toBeUndefined();
       expect(pageLayoutFactsFromDopplerFacts(facts).get(1)!.grids, name).toBeNull();
+    }
+    // More distinct lines than the page has rules (what a -glyphs run can write: stencil-mask rules count for the grid
+    // only): the thin-rule counts go, the family stands, and the grid reads as an older build's (unknown).
+    for (const rules of [{ hRules: 6, vRules: 40 }, { hRules: 40, vRules: 4 }]) {
+      const facts = one(page({ vectors: rules }));
+      const v = facts.pages.get(1)!.vectors!;
+      expect(v.unlistedRuledGrids).toBeUndefined();
+      expect(v.grids![0]!.hRules).toBeUndefined();
+      expect(v.grids![0]!.rows).toBe(6);
+      expect(pageLayoutFactsFromDopplerFacts(facts).get(1)!.grids).toBeNull();
     }
     // unlistedRuledGrids with no list to qualify.
     const { grids: _g, ...noList } = page().vectors as Record<string, unknown>;
@@ -134,27 +142,27 @@ describe("doppler #44 facts: the walker-grid contract", () => {
     const lines = { ...WALKER, bbox: [72, 420, 540, 440], rows: 1, columns: 1, coverage: 0.02, hRules: 1, vRules: 3, connected: true };
     const stray = { ...WALKER, bbox: [72, 40, 540, 90], hRules: 3, vRules: 4, connected: false, coverage: 0.07 };
     const layout = layoutOf(page({ vectors: { grids: [WALKER, ZEBRA, tick, lines, stray] } }));
-    expect(layout.grids).toEqual([{ rows: 6, columns: 4, coverage: 0.2897 }]);
-    expect(layout.tableCoverage).toBe(walkerUnion([WALKER.bbox]));
-    expect(layout.tableCoverage).toBe(0.2965);
+    // Coverage stays unknown: Doppler's box spans its grid search's group, not the walker's connected rules.
+    expect(layout.grids).toEqual([{ rows: 6, columns: 4, coverage: null }]);
+    expect(layout.tableCoverage).toBeNull();
     // Only non-walker grids on a known page: no walker grid.
     expect(layoutOf(page({ vectors: { grids: [ZEBRA, stray] } }))).toMatchObject({ grids: [], tableCoverage: 0 });
     // A complete, empty list.
     expect(layoutOf(page({ vectors: { grids: [] } }))).toMatchObject({ grids: [], tableCoverage: 0 });
   });
 
-  it("known: the rows, columns and coverage are the walker's even where Doppler's own search says otherwise", () => {
+  it("known: the rows and columns are the walker's even where Doppler's own search says otherwise; coverage never is", () => {
     // A table ruled cell by cell: the grid search sees one column; the thin rules give the walker's 5 rows x 3 columns.
     const cellByCell = { bbox: [72, 100, 400, 300], rows: 5, columns: 1, coverage: 0.13, hRules: 6, vRules: 4, outerSides: 4, connected: true };
     const second = { ...WALKER, bbox: [300, 450, 576, 760], rows: 9, columns: 2, hRules: 10, vRules: 3, coverage: 0.18 };
     const layout = layoutOf(page({ vectors: { grids: [cellByCell, second] } }));
     expect(layout.grids!.map((g) => [g.rows, g.columns])).toEqual([[5, 3], [9, 2]]);
-    expect(layout.tableCoverage).toBe(walkerUnion([cellByCell.bbox, second.bbox]));
-    // Overlapping boxes count once, as the walker's raster does.
-    const overlap = { ...WALKER, bbox: [100, 150, 500, 350] };
-    expect(layoutOf(page({ vectors: { grids: [WALKER, overlap] } })).tableCoverage).toBe(walkerUnion([WALKER.bbox, overlap.bbox]));
-    // A forged coverage never exceeds the grid's own box over the page.
-    expect(layoutOf(page({ vectors: { grids: [{ ...WALKER, coverage: 1 }] } })).grids![0]!.coverage).toBe(0.2897);
+    expect(layout.tableCoverage).toBeNull();
+    // Council #382 M1: decorative shaded bands the grid search groups over 60% of the page, with a small ruled 1 x 2 table
+    // inside. The walker's grid is the tiny table; Doppler's box is the whole group. Never a coverage that makes it heavy.
+    const banded = { bbox: [36, 100, 576, 650], rows: 12, columns: 2, coverage: 0.61, hRules: 2, vRules: 3, outerSides: 0, connected: true };
+    const bandedLayout = layoutOf(page({ vectors: { grids: [banded] } }));
+    expect(bandedLayout).toMatchObject({ grids: [{ rows: 1, columns: 2, coverage: null }], tableCoverage: null });
   });
 
   it("unknown: each condition the contract names leaves every grid on the page unknown (null)", () => {
@@ -174,10 +182,8 @@ describe("doppler #44 facts: the walker-grid contract", () => {
     // The thin-rule search was incomplete: Doppler leaves out unlistedRuledGrids and the counts, and sets gridsTruncated.
     const { unlistedRuledGrids: _u, ...incomplete } = page({ vectors: { grids: [{ bbox: WALKER.bbox, rows: 6, columns: 4, coverage: 0.29 }], gridsTruncated: true } }).vectors as Record<string, unknown>;
     expect(layoutOf(textPage(1, { vectors: incomplete })).grids).toBeNull();
-    // A walker grid on a page whose CropBox differs from its MediaBox: the boxes and the walker's page box differ.
-    const cropped = { widthPt: W, heightPt: H, rotation: 0, userUnit: 1, mediaBox: [0, 0, 700, 900], cropBox: [0, 0, W, H] };
-    expect(layoutOf(page({ extra: { geometry: cropped } })).grids).toBeNull();
-    expect(layoutOf(page({ vectors: { grids: [ZEBRA] }, extra: { geometry: cropped } }))).toMatchObject({ grids: [], tableCoverage: 0 });
+    // xref-repaired on a #44 page leaves even the page-level rule proof unknown, as the contract says.
+    expect(layoutOf(page({ vectors: { hRules: 1, grids: [] }, extra: { parseWarnings: ["xref-repaired"] } })).grids).toBeNull();
   });
 
   it("unknown: an older build's absence rule never applies to a #44 page the contract leaves unknown", () => {
@@ -191,17 +197,29 @@ describe("doppler #44 facts: the walker-grid contract", () => {
   });
 
   it("words inside: centred counts are the walker's wordsInside whenever present; truncation leaves images unknown", () => {
+    // A 264 x 300 pt box that its 264 x 300 samples at 72 dpi fill: the whole placement.
     const at = (item: Record<string, unknown>, ratio = 0.2) => layoutOf(page({
-      item: { bbox: [36, 300, 300, 600], ...item }, extra: { text: { ...(base.text as object), textOverImageRatio: ratio } },
+      item: { bbox: [36, 300, 300, 600], px: [264, 300], dpi: [72, 72], ...item }, extra: { text: { ...(base.text as object), textOverImageRatio: ratio } },
     })).images![0]!.wordsInside;
     // A caption line straddling the bottom edge: the walker counts it by its centre, as the centred count does.
     expect(at({ visibleWordsInside: 0, invisibleWordsInside: 0, visibleWordsCentredInside: 4, invisibleWordsCentredInside: 0 })).toBe(4);
     // A low count stands without #378's ratio-and-cells proof: it is the walker's own test.
     expect(at({ visibleWordsInside: 0, invisibleWordsInside: 0, visibleWordsCentredInside: 1, invisibleWordsCentredInside: 0 })).toBe(1);
     expect(at({ visibleWordsCentredInside: 7, invisibleWordsCentredInside: 0 })).toBe(7);
+    // Council #382 M2: a clipped image's box is smaller than its placement, where the walker counts: a low count is unknown.
+    // Here a full-page scan clipped to the top 60% (px / dpi give 612 x 792, the box is 612 x 475).
+    const clipped = { bbox: [0, 0, 612, 475], px: [2550, 3300], dpi: [300, 300] };
+    expect(at({ ...clipped, visibleWordsCentredInside: 0, invisibleWordsCentredInside: 0 })).toBeNull();
+    expect(at({ ...clipped, visibleWordsCentredInside: 2, invisibleWordsCentredInside: 0 })).toBeNull();
+    // A high count only blocks a read: it stands.
+    expect(at({ ...clipped, visibleWordsCentredInside: 40, invisibleWordsCentredInside: 0 })).toBe(40);
+    // The whole-box fallback is held to the same test.
+    expect(at({ ...clipped, visibleWordsInside: 0, invisibleWordsInside: 0 }, 0)).toBeNull();
+    expect(unclippedPlacement({ bbox: [0, 0, 300, 264], px: [264, 300], dpi: [72, 72] })).toBe(true); // turned 90°
+    expect(unclippedPlacement({ bbox: [0, 0, 264, 300], px: [264, 300], dpi: [0, 72] })).toBe(false);
     // Visible and invisible add up (an OCR layer over a scan counts its invisible words, as the walker's boxes do).
     const ocr = layoutOf(page({
-      item: { bbox: [36, 300, 300, 600], visibleWordsCentredInside: 2, invisibleWordsCentredInside: 5 },
+      item: { bbox: [36, 300, 300, 600], px: [264, 300], dpi: [72, 72], visibleWordsCentredInside: 2, invisibleWordsCentredInside: 5 },
       extra: { text: { ...(base.text as object), wordCount: 415, invisibleWordCount: 5, invisibleCharCount: 30, charCount: 2430, textLayer: "mixed" } },
     })).images![0]!.wordsInside;
     expect(ocr).toBe(7);
@@ -215,9 +233,10 @@ describe("doppler #44 facts: the walker-grid contract", () => {
   });
 
   it("facts of a -glyphs run (pdftomarkdown --math) lose the walker-parity fields and map as an older build", () => {
-    const line = page({ vectors: { grids: [WALKER] }, item: { bbox: [36, 300, 300, 600], visibleWordsInside: 0, invisibleWordsInside: 0, visibleWordsCentredInside: 1, invisibleWordsCentredInside: 0 }, extra: { text: { ...(base.text as object), textOverImageRatio: 0.2 } } });
+    const line = page({ vectors: { grids: [WALKER] }, item: { bbox: [36, 300, 300, 600], px: [264, 300], dpi: [72, 72], visibleWordsInside: 0, invisibleWordsInside: 0, visibleWordsCentredInside: 1, invisibleWordsCentredInside: 0 }, extra: { text: { ...(base.text as object), textOverImageRatio: 0.2 } } });
     const facts = one(line);
     expect(pageLayoutFactsFromDopplerFacts(facts).get(1)!.grids).toHaveLength(1);
+    expect(pageLayoutFactsFromDopplerFacts(facts).get(1)!.images![0]!.wordsInside).toBe(1);
     const stripped = withoutWalkerParityFacts(facts);
     expect(facts.pages.get(1)!.vectors!.unlistedRuledGrids).toBe(0); // the input is not changed
     const mapped = pageLayoutFactsFromDopplerFacts(stripped).get(1)!;
@@ -240,7 +259,7 @@ describe("doppler #44 facts: the walker-grid contract", () => {
         };
         acceptSandboxedPdfBatchEvent(job, { index: 0, phase: "text", pages: 1, result: { exitCode: 0, stdout: "", stderr: "", pageFacts: raw } });
         const file = batchFileJob(job, 0)!;
-        expect(sandboxedPdfLayoutFacts(file)!.get(1)!.grids, `math ${math}`).toEqual(math ? null : [{ rows: 6, columns: 4, coverage: 0.2897 }]);
+        expect(sandboxedPdfLayoutFacts(file)!.get(1)!.grids, `math ${math}`).toEqual(math ? null : [{ rows: 6, columns: 4, coverage: null }]);
         // The first pass hands on canonical lines: a served math result cannot bring the fields back.
         const served = { input: "/c", output: "/d" };
         acceptSandboxedPdfResult(served, { exitCode: 0, stdout: "", stderr: "", pageFacts: pageFactsForResend(file)! }, 1);
@@ -249,14 +268,6 @@ describe("doppler #44 facts: the walker-grid contract", () => {
     } finally {
       if (env === undefined) delete process.env.DOCSLURP_DOPPLER_PAGE_FACTS; else process.env.DOCSLURP_DOPPLER_PAGE_FACTS = env;
     }
-  });
-
-  it("bounds the union's cost by the boxes, not the raster", () => {
-    const boxes = Array.from({ length: 64 }, (_, i) => [i * 9, i * 12, i * 9 + 40, i * 12 + 30] as [number, number, number, number]);
-    expect(unionCoverage(boxes, [W, H])).toBe(walkerUnion(boxes));
-    expect(unionCoverage([[0, 0, W, H]], [W, H])).toBe(1);
-    expect(unionCoverage([], [W, H])).toBe(0);
-    expect(unionCoverage([[0, 0, W, H]], [0, H])).toBe(0);
   });
 });
 
@@ -440,17 +451,27 @@ describe("decision parity: #44 facts route like the walker, ruled tables include
   const walker = new Map(TRUTH.map((t, i) => [i + 1, walkerLayout(t, repeated)]));
   const fromWalker = decisions(walker, probeEvidence(TRUTH), TRUTH);
 
-  it("makes the same classify-route and page-image decisions on every page", () => {
+  it("makes the same decisions as the walker except where only coverage decides, and is never looser there", () => {
     const facts = factsDocument(TRUTH);
     const mapped = pageLayoutFactsFromDopplerFacts(facts);
     const factsEvidence = pageImageEvidenceFromDopplerFacts({ facts, pageCount: TRUTH.length, pageTexts: TRUTH.map((t) => t.text) });
     // The layout itself: grids and table coverage are the walker's on every page.
     TRUTH.forEach((t, i) => {
       expect(mapped.get(i + 1)!.grids?.map((g) => [g.rows, g.columns]), t.name).toEqual(walker.get(i + 1)!.grids!.map((g) => [g.rows, g.columns]));
-      expect(mapped.get(i + 1)!.tableCoverage, t.name).toBe(walker.get(i + 1)!.tableCoverage);
+      // Table coverage is known only without walker grids (0); with them it is unknown (Doppler's boxes are not the walker's).
+      expect(mapped.get(i + 1)!.tableCoverage, t.name).toBe(t.walker.length === 0 ? 0 : null);
       expect(mapped.get(i + 1)!.images?.map((im) => im.wordsInside), t.name).toEqual(walker.get(i + 1)!.images!.map((im) => im.wordsInside));
     });
-    expect(decisions(mapped, factsEvidence, TRUTH)).toEqual(fromWalker);
+    const fromFacts = decisions(mapped, factsEvidence, TRUTH);
+    // Coverage-only table pages: the walker's grids cover 40% of the page with fewer than 5 rows each. Facts miss them.
+    const coverageOnly = new Set(["large two-row grid (coverage)", "two ruled tables, neither heavy alone"]);
+    const same = (list: typeof fromFacts) => list.filter((d) => !coverageOnly.has(d.page));
+    expect(same(fromFacts)).toEqual(same(fromWalker));
+    fromFacts.forEach((d, i) => {
+      if (d.route === "table-heavy") expect(fromWalker[i]!.route, d.page).toBe("table-heavy");
+      if (d.ocr?.authorized) expect(fromWalker[i]!.ocr?.authorized, d.page).toBe(true);
+    });
+    for (const name of coverageOnly) expect(fromFacts.find((d) => d.page === name)!.route, name).not.toBe("table-heavy");
 
     // The comparison is not vacuous: the decisions the new fields feed fire both ways.
     const byName = Object.fromEntries(fromWalker.map((d) => [d.page, d]));
@@ -486,10 +507,8 @@ describe("decision parity: #44 facts route like the walker, ruled tables include
     const lines = TRUTH.map((t, i) => ({ ...factsLine(t, i + 1), parseWarnings: ["xref-repaired"] }));
     const facts = parse(jsonl([docLine({ pageCount: TRUTH.length }), ...lines, runLine({ pagesEmitted: TRUTH.length })]), TRUTH.length);
     const mapped = pageLayoutFactsFromDopplerFacts(facts);
-    TRUTH.forEach((t, i) => {
-      // Pages the page-level rule counts prove gridless stay [] (as in #378); every other page's grids are unknown.
-      if (t.rules[0] >= 2 && t.rules[1] >= 3) expect(mapped.get(i + 1)!.grids, t.name).toBeNull();
-    });
+    // Every page's grids are unknown, the page-level rule proof's included (the contract's condition).
+    TRUTH.forEach((t, i) => expect(mapped.get(i + 1)!.grids, t.name).toBeNull());
     decisions(mapped, null, TRUTH).forEach((d, i) => {
       if (d.route === "table-heavy") expect(fromWalker[i]!.route, d.page).toBe("table-heavy");
     });

@@ -556,9 +556,14 @@ function vectors(value: unknown): DopplerVectorFacts | undefined {
   if (has(value, "unlistedRuledGrids") && facts.unlistedRuledGrids === undefined) return undefined;
   if (facts.unlistedRuledGrids !== undefined && facts.grids === undefined) return undefined;
   if (facts.unlistedRuledGrids === undefined && facts.grids?.some((g) => g.hRules !== undefined)) return undefined;
-  // A grid's distinct lines are some of the page's own rules (thin rules are rules; boxes and stencil masks are neither):
-  // more lines than the page has rules is a contradiction.
-  if (facts.grids?.some((g) => g.hRules !== undefined && (g.hRules > facts.hRules || g.vRules! > facts.vRules))) return undefined;
+  // A grid's distinct lines are some of the page's own rules (thin rules are rules; boxes are not): more lines than the
+  // page has rules contradicts them. Under `-glyphs` (pdftomarkdown --math) thin stencil masks are rules the page count
+  // leaves out, so this is also what a math run can write: the thin-rule counts are dropped (an older build's reading),
+  // and the rest of the family stands.
+  if (facts.grids?.some((g) => g.hRules !== undefined && (g.hRules > facts.hRules || g.vRules! > facts.vRules))) {
+    delete facts.unlistedRuledGrids;
+    facts.grids = facts.grids.map(({ hRules: _h, vRules: _v, outerSides: _o, connected: _c, ...g }) => g);
+  }
   return facts;
 }
 

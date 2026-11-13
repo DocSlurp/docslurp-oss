@@ -30,8 +30,9 @@ The facts come from a VM that read a customer file, so the worker treats every b
   (0..4) and `connected` (a boolean), all four or none; per page `unlistedRuledGrids` (an integer 0..2,048, only with the
   grid list, and required once any grid has counts); per image `visibleWordsCentredInside`/`invisibleWordsCentredInside`
   (both or neither, within the page's own word counts, and never below the whole-box counts, since a word wholly inside
-  has its centre inside). A grid with more distinct lines than the page has rules, a partial or malformed count set, or a
-  bad `unlistedRuledGrids` makes `vectors` unknown; a bad centred pair is dropped (contradicting whole-box counts go too);
+  has its centre inside). A partial or malformed count set, or a bad `unlistedRuledGrids`, makes `vectors` unknown; a grid
+  with more distinct lines than the page has rules (what a `-glyphs` run can write) loses the page's thin-rule counts, which
+  then read as an older build's; a bad centred pair is dropped (contradicting whole-box counts go too);
 - never reads `producer`, `creator` or `lang`, the document's own strings in the stream, nor any field it does not know; the run
   line's `version` and `commit` are kept only as a dotted version and a hex commit.
 
@@ -120,10 +121,10 @@ classify-route and page-image evidence read the facts unchanged:
 | `widthPt`, `heightPt` | `geometry.widthPt`, `heightPt` (the CropBox with rotation; the walker uses CropBox ∩ MediaBox) |
 | `images` | `images.items`: box, coverage, pixel size, bits, colour space and codec in the walker's vocabulary, ppi; `repeated` from `obj` across pages. Null when not computed or truncated |
 | `images[].coverage` | `coverage`, capped by the image's own box over the page |
-| `images[].wordsInside` | `visibleWordsCentredInside` + `invisibleWordsCentredInside` (Doppler #44): words whose box centre is inside, the walker's own test. Doppler allows 1 pt of slack and uses the image's clipped box where the walker has no slack and the unclipped placement, so a centre within 1 pt of the edge, or an image clipped by its page or clip path, can count differently. Without that pair (an older build): `visibleWordsInside` + `invisibleWordsInside`, words whose whole box is inside (within 1 pt), so a label straddling the edge counts for the walker only. Such a count above `mixedScanMaxWordsInside` (2) stands; a lower one only when the page's centre-based `textOverImageRatio` is 0 and the image's 64 × 64 ratio cells cover its whole box (no edge strip escapes them): then the walker's count is 0 too. Otherwise, or when absent, null: stricter than the walker, never looser |
+| `images[].wordsInside` | `visibleWordsCentredInside` + `invisibleWordsCentredInside` (Doppler #44): words whose box centre is inside, the walker's own test. Doppler allows 1 pt of slack and uses the image's clipped box where the walker has no slack and the unclipped placement, so a clipped image can count fewer words than the walker. A count above `mixedScanMaxWordsInside` (2) stands (it only blocks a read); a lower one only when the image's box is its whole placement: axis-aligned, either way round, and as large as `px` over `dpi` makes it, within 1 pt. Without that pair (an older build): `visibleWordsInside` + `invisibleWordsInside`, words whose whole box is inside (within 1 pt), so a label straddling the edge counts for the walker only. Such a count above `mixedScanMaxWordsInside` (2) stands; a lower one only when the page's centre-based `textOverImageRatio` is 0, the image's 64 × 64 ratio cells cover its whole box (no edge strip escapes them) and the image is its whole placement, as above: then the walker's count is 0 too. Otherwise, or when absent, null: stricter than the walker, never looser |
 | `images[].bytesPerPixel` | `bytesPerPixel`, one to one; null when absent (never 0). The exact declared `/Length`, where the walker divides `pdfimages -list`'s rounded size, so the two can differ near the scan-like threshold. What the file says, which a crafted file can inflate: a routing hint, never a billing input |
 | `grids` | `[]` when there is no walker grid: fewer than 2 horizontal or 3 vertical rules on the page. With thin-rule counts (Doppler #44), the [walker-grid contract](#walker-grids) decides: the walker's grids when known, else null. Without them (an older build): `[]` from a complete `vectors.grids` list with no grid of two or more columns (one column is parallel rules: weak evidence); any other grid Doppler found is unknown (null), since its search is not the walker's (shaded boxes count as rules, column lines need no outer sides). Null too when `gridsTruncated`, at the drawing cap, or without the list |
-| `tableCoverage` | the walker grids' boxes' union on the walker's 200 × 200 raster; 0 with a `[]` known from the list, else null. The walker also adds the Markdown tables' boxes, which facts do not carry, so a page whose borderless Markdown tables alone cover 40% of it, with fewer than 5 rows each, routes table-heavy from the walker only |
+| `tableCoverage` | 0 with a `[]` known from the list, else null, walker grids included: Doppler's grid `bbox` spans its grid search's group (shaded boxes and unconnected rules included), which can be far larger than the walker's box, its connected rules' extent, and the contract covers rows and columns only. Grid `coverage` is null for the same reason. Facts route a page table-heavy by rows, never by area, so a page the walker calls table-heavy only by coverage (ruled grids over 40% of it with fewer than 5 rows each, or borderless Markdown tables, whose boxes the walker adds) is missed |
 | `tables` | null: tables come from the Markdown |
 
 A page marked `xref-repaired-earlier` (an earlier page rebuilt the cross-reference table, so any of its facts may come
@@ -144,19 +145,29 @@ walker's grids") makes a page's walker grids **known** only when all of these ho
 - `parseWarnings` has neither `xref-repaired` nor `xref-repaired-earlier`.
 
 The walker's grids are then exactly the grids with `connected`, `hRules` ≥ 2 and `vRules` ≥ 3, each a table of
-`hRules - 1` rows by `vRules - 1` columns with Doppler's `coverage` (capped by its box). Every other grid on a known page
-(shaded zebra rows, column lines with one rule, stray underlines and ticks) is not a walker grid and is ignored. On a page
-that fails any condition every grid is unknown (null), and so is a page with a walker grid whose CropBox differs from
-its MediaBox (its boxes and the walker's page box are then measured differently). Doppler's parity test over the walker's
+`hRules - 1` rows by `vRules - 1` columns. Their coverage, and the page's `tableCoverage`, stay unknown: Doppler's box is
+its grid search's, not the walker's (see the table above). Every other grid on a known page (shaded zebra rows, column
+lines with one rule, stray underlines and ticks) is not a walker grid and is ignored. On a page that fails any condition
+every grid is unknown (null); with `xref-repaired` that includes the page-level rule proof. Doppler's parity test over the walker's
 public fixtures and the grid fixtures found no page known and wrong; pages it cannot match (`/Rotate 90` and `270`, rules
 lighter than luminance 0.97, rows more than 8 body sizes apart, a set the grid search splits) come out unknown.
 
 The contract covers facts from one `pdftotext -bbox-layout -rules -page-facts-fd N -page-facts-level full` run without
-`-glyphs`. `pdftomarkdown --page-facts` is such a run: it runs one pdftotext (`-bbox-layout -wordmeta -rules`, plus
-`-compact-layout`, `-images` with `--markers`) whose facts and XHTML come from the same pass. `pdftomarkdown --math` adds
+`-glyphs`, paired with that run's XHTML. Doppler's README lists `pdftomarkdown --page-facts` as outside it only because
+that run's XHTML is not exposed for a walker to read; core never pairs facts with XHTML, it substitutes them. pdftomarkdown
+runs one pdftotext (`-bbox-layout -wordmeta -rules`, plus `-compact-layout`, and `-images` with `--markers`) on the same
+pass, and the README states its facts are byte-identical to pdftotext's for the same range, level and families
+(`--markers` included), except under `--math`. Guest runs are ranged (`-f`/`-l`; long documents in host-planned shards with
+context pages), and the run-wide rule budget and any later cross-reference rebuild depend on where the range starts:
+Doppler withholds the counts in those cases, so they come out unknown. What remains is Doppler's documented residual: an
+older `/Prev` section read lazily, which neither run can see. `pdftomarkdown --math` adds
 `-glyphs`, which turns thin stencil masks into rules, so facts from a math batch (`DOCSLURP_FIRST_PASS_MATH=on` and a
 project asking for math) lose the walker-parity fields when they are accepted (`withoutWalkerParityFacts`) and map as an
 older build's would. The single-file guest never passes `--math`.
+
+Facts are routing evidence from a VM that read a hostile file. A compromised guest can forge a connected grid, and so
+route its own document table-heavy in `use` mode, as it could already forge words inside to select a mixed-scan read.
+That reaches only the document's own organization and run (a batch is one org and run), and never a charge's size.
 
 With words inside known, facts in `use` mode can select a mixed-scan read (`mixedScanImage`), as walker layout does: a
 page with native text and a placed, scan-like, readable image with at most 2 words inside. That read bills Rich like any

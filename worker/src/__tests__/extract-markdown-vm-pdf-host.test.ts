@@ -403,7 +403,7 @@ describe("the sandboxed PDF route on the worker host", () => {
       // The walker grids and centred counts reached the stored layout, and still sized nothing.
       const stored = [...h.json.entries()].find(([key]) => key.includes("page-layout-facts/"))![1] as { source: string; pages: Array<{ grids: Array<{ rows: number }> | null; tableCoverage: number | null; images: Array<{ wordsInside: number | null }> | null }> };
       expect(stored.source).toBe("vm-pdf-facts");
-      expect(stored.pages.every((p) => p.grids?.length === 64 && p.grids[0]!.rows === 4_095 && p.tableCoverage === 1)).toBe(true);
+      expect(stored.pages.every((p) => p.grids?.length === 64 && p.grids[0]!.rows === 4_095 && p.tableCoverage === null)).toBe(true);
       expect(stored.pages.every((p) => p.images?.[0]?.wordsInside === 410)).toBe(true);
       expect(recordPageEquivalents).not.toHaveBeenCalled();
     } finally { await h.cleanup(); }
