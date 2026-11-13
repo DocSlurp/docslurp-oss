@@ -165,6 +165,14 @@ describe("manifest v2: hostile or oversized manifests are refused", () => {
     ["totals.scan_bytes that disagree", (m) => { m.totals.scan_bytes += 1; }],
     ["totals.batches_cut that disagree", (m) => { m.totals.batches_cut = 1; }],
     ["a page outside the document", (m) => { entry(m, "p2.2").page = 4; entry(m, "p2.2").id = "p4.2"; }],
+    ["an unknown scan_pages mode", (m) => { m.scan_pages = "copy-all"; }],
+    ["scan-not-copyable on a not-extracted image", (m) => { entry(m, "p2.1").reason = "scan-not-copyable"; }],
+    ["scan-not-copyable on an extracted image", (m) => { Object.assign(entry(m, "p3.1"), { reason: "scan-not-copyable" }); }],
+    ["scan-not-copyable on an unlinked image that is not a background", (m) => { entry(m, "p2.2").reason = "scan-not-copyable"; }],
+    ["a not-extracted reason on an unlinked image", (m) => { Object.assign(entry(m, "p2.2"), { fate: "background", reason: "copy" }); }],
+    ["scan-not-copyable that repeats another image", (m) => { Object.assign(entry(m, "p2.2"), { fate: "background", reason: "scan-not-copyable", repeat_of: "p1.1" }); }],
+    ["an unlinked image that repeats another", (m) => { entry(m, "p2.2").repeat_of = "p1.1"; }],
+    ["scan-not-copyable on a vector", (m) => { Object.assign(entry(m, "p2.2"), { id: "p2.g2", kind: "vector", obj: null, fate: "background", reason: "scan-not-copyable" }); }],
   ];
   for (const [name, mutate] of cases) {
     it(`refuses ${name}`, async () => {
@@ -174,6 +182,10 @@ describe("manifest v2: hostile or oversized manifests are refused", () => {
 
   it("the cases above are each the only change: the unchanged fixture passes", async () => {
     expect(await rule()).toBe("accepted");
+  });
+
+  it("accepts --scan-pages copy (Doppler #39) with an unlinked background scan, reason scan-not-copyable", async () => {
+    expect(await rule((m) => { m.scan_pages = "copy"; Object.assign(entry(m, "p2.2"), { fate: "background", reason: "scan-not-copyable" }); })).toBe("accepted");
   });
 
   it("refuses an oversized manifest before parsing it (the cap scales with the page count)", async () => {
@@ -269,6 +281,8 @@ describe("version 1 maps into the ledger with what it has", () => {
         { id: "p3.2", page: 3, bbox: [0, 0, 10, 10], kind: "picture", fate: "mystery", file: null, format: null, bytes: null, sha256: null, width: null, height: null, skipped: "novel" },
         { id: "p4.1", page: 4, bbox: [0, 0, 10, 10], kind: "picture", fate: "page-scan", file: "p4.1.jpg", format: "jpg", bytes: 10, sha256: "d".repeat(64), width: 1700, height: 2200, fallback: "raster" },
         { id: "p5.1", page: 5, bbox: [0, 0, 10, 10], kind: "picture", fate: "block", file: "p5.1.jpg", format: "jpg", bytes: 10, sha256: "e".repeat(64), width: 17, height: 22 },
+        // An inherited property name is an unknown reason, never Object.prototype's value.
+        { id: "p6.1", page: 6, bbox: [0, 0, 10, 10], kind: "picture", fate: "block", file: null, format: null, bytes: null, sha256: null, width: null, height: null, skipped: "constructor" },
       ],
     });
     expect(parsed?.version).toBe(1);
@@ -281,7 +295,14 @@ describe("version 1 maps into the ledger with what it has", () => {
       ["p4.1", "page-scan", "extracted", null, "copy", "p4.1", "other", null],
       // A version 1 JPEG is a copy of the PDF's stream only for a page scan.
       ["p5.1", "block", "extracted", null, "render", "p5.1", null, null],
+      ["p6.1", "block", "not-extracted", "other", null, null, null, null],
     ]);
+  });
+
+  it("a version 1 skip reason outside the slug alphabet (__proto__) refuses the manifest", () => {
+    expect(parseDopplerManifest({ version: "doppler-figures@1", images: [
+      { id: "p1.1", page: 1, bbox: [0, 0, 10, 10], kind: "picture", fate: "block", file: null, format: null, bytes: null, sha256: null, width: null, height: null, skipped: "__proto__" },
+    ] })).toBeNull();
   });
 
   it("the v2 schema is strict about its own version", () => {
