@@ -411,7 +411,7 @@ export function queryEmbeddingCacheKey(query: string, embedding: EmbeddingConfig
 export function queryEmbeddingApiKey(route: { runtime: string; provider: string }): string | undefined {
   return route.runtime === "remote" && route.provider === "openai"
     ? process.env.OPENAI_API_KEY
-    : route.provider === "openrouter" ? process.env.OPENROUTER_API_KEY ?? process.env.OPENROUTER_KEY
+    : route.provider === "openrouter" ? process.env.OPENROUTER_API_KEY
       : route.provider === "perplexity" ? process.env.PERPLEXITY_API_KEY ?? process.env.PERPLEXITYAI_API_KEY
         : route.provider === "deepinfra" ? process.env.DEEPINFRA_API_KEY : undefined;
 }

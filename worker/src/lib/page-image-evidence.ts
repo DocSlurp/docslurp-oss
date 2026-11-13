@@ -69,7 +69,8 @@ export interface PageImageEvidence {
 
 export interface PageImageEvidenceArtifact {
   documentId: string;
-  source: "pdfimages" | "image-file";
+  /** `doppler-facts`: built from a sandboxed PDF run's validated page facts (lib/doppler-page-facts-evidence.ts), no command. */
+  source: "pdfimages" | "image-file" | "doppler-facts";
   /**
    * Source file bytes minus the bytes of every embedded image in the file, over page count, or
    * null when the image listing did not cover every page. Without any extracted text, a large
@@ -412,6 +413,27 @@ export async function verifySuspectPages(
 }
 
 /**
+ * The text layer's own quality per page (`assessTextLayer`): the PDF's layer where it is known, else the extracted text.
+ * Only garbled and suspect pages are returned; suspect ones are also listed for an OCR cross-check.
+ */
+export function assessPageTextLayers(
+  pageTexts: string[],
+  textLayerPages?: Array<string | null> | null,
+): { layers: Map<number, PageTextLayerEvidence>; suspectPages: Array<{ pageNumber: number; text: string }> } {
+  const layers = new Map<number, PageTextLayerEvidence>();
+  const suspectPages: Array<{ pageNumber: number; text: string }> = [];
+  pageTexts.forEach((extracted, index) => {
+    const layer = textLayerPages?.[index];
+    const { text, source } = typeof layer === "string" ? { text: layer, source: "text-layer" as const } : { text: extracted ?? "", source: "extracted" as const };
+    const assessment = assessTextLayer(text.length > ASSESSED_PAGE_CHARS ? text.slice(0, ASSESSED_PAGE_CHARS) : text);
+    if (assessment.verdict === "ok" || assessment.verdict === "empty") return;
+    layers.set(index + 1, { verdict: assessment.verdict, reasons: assessment.reasons, source, ...(assessment.verdict === "suspect" ? { matchesOcr: null } : {}) });
+    if (assessment.verdict === "suspect") suspectPages.push({ pageNumber: index + 1, text });
+  });
+  return { layers, suspectPages };
+}
+
+/**
  * Evidence for the pages of a PDF that need it, or null when no page does or the Poppler tools are unavailable or fail
  * (callers then keep text-only triage):
  *
@@ -443,15 +465,7 @@ export async function collectPageImageEvidence(args: {
     return typeof layer === "string" ? { text: layer, source: "text-layer" } : { text: args.pageTexts[index] ?? "", source: "extracted" };
   };
   const sparsePages = findSparsePages(args.pageTexts, args.textLayerPages);
-  const layers = new Map<number, PageTextLayerEvidence>();
-  const suspectPages: Array<{ pageNumber: number; text: string }> = [];
-  args.pageTexts.forEach((_, index) => {
-    const { text, source } = layerOf(index);
-    const assessment = assessTextLayer(text.length > ASSESSED_PAGE_CHARS ? text.slice(0, ASSESSED_PAGE_CHARS) : text);
-    if (assessment.verdict === "ok" || assessment.verdict === "empty") return;
-    layers.set(index + 1, { verdict: assessment.verdict, reasons: assessment.reasons, source, ...(assessment.verdict === "suspect" ? { matchesOcr: null } : {}) });
-    if (assessment.verdict === "suspect") suspectPages.push({ pageNumber: index + 1, text });
-  });
+  const { layers, suspectPages } = assessPageTextLayers(args.pageTexts, args.textLayerPages);
   if (sparsePages.size === 0 && layers.size === 0) return null;
 
   let evidence = new Map<number, PageImageEvidence>();
