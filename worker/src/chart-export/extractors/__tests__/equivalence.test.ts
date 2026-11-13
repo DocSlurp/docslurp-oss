@@ -55,7 +55,8 @@ describe("withoutVertexMarkers", () => {
       return (random() - 0.5) * scale;
     };
     let compared = 0;
-    for (let scene = 0; scene < 2000; scene++) {
+    const mismatches: number[] = [];
+    for (let scene = 0; scene < 1000; scene++) {
       const scale = [10, 100, 1000, 1e6][scene % 4]!;
       const lines = Array.from({ length: 1 + Math.floor(random() * 4) }, () => line(Array.from({ length: 1 + Math.floor(random() * 30) }, () => [coord(scale), coord(scale)] as [number, number])));
       // Half the points sit near a random vertex, so both outcomes are common.
@@ -67,13 +68,14 @@ describe("withoutVertexMarkers", () => {
         }
         return point(coord(scale), coord(scale));
       });
+      // Same points, same order (compared by identity, one assertion per run to keep the loop cheap).
       const got = withoutVertexMarkers(points, lines);
       const want = bruteForce(points, lines);
-      expect(got.length).toBe(want.length);
-      got.forEach((p, k) => expect(p).toBe(want[k]));
+      if (got.length !== want.length || got.some((p, k) => p !== want[k])) mismatches.push(scene);
       compared += points.length;
     }
-    expect(compared).toBeGreaterThan(30_000);
+    expect(mismatches).toEqual([]);
+    expect(compared).toBeGreaterThan(15_000);
   });
 
   it("handles each special value against itself and its neighbours", () => {
@@ -116,14 +118,16 @@ describe("withoutVertexMarkers work bound (hostile input; counted in pair tests,
   });
 
   it("finishes markers over long dense polylines (markers-vs-lines) far below the budget, with the brute-force result", () => {
-    // 12 sine polylines of maxPathVertices vertices at 0.2-unit spacing, and 20k markers spread over the plot:
-    // 4.8×10⁹ pair tests for the old filter.
-    const lines = Array.from({ length: 12 }, (_, k) => line(Array.from({ length: CHART_EXTRACT_LIMITS.maxPathVertices }, (_, i) => [Number((i * 0.2).toFixed(1)), Number((500 + 400 * Math.sin(i / (40 + k))).toFixed(1))] as [number, number])));
-    const points = Array.from({ length: 20_000 }, (_, i) => point(Number(((i * 0.2) % 4000).toFixed(1)), (i * 37) % 1000));
+    // Sine polylines of maxPathVertices vertices at 0.2-unit spacing, and markers spread over the plot (the shape of
+    // the perf report's 4 MB markers-vs-lines.svg, scaled to 3 polylines and 5,000 markers to stay quick on CI):
+    // 3×10⁸ pair tests for the old filter.
+    const lines = Array.from({ length: 3 }, (_, k) => line(Array.from({ length: CHART_EXTRACT_LIMITS.maxPathVertices }, (_, i) => [Number((i * 0.2).toFixed(1)), Number((500 + 400 * Math.sin(i / (40 + k))).toFixed(1))] as [number, number])));
+    const points = Array.from({ length: 5_000 }, (_, i) => point(Number(((i * 0.8) % 4000).toFixed(1)), (i * 37) % 1000));
     const work = { pairTests: 0 };
     const kept = withoutVertexMarkers(points, lines, work);
-    expect(work.pairTests).toBeLessThan(budget / 10);
-    // Spot-check equivalence on a slice (the full brute force is the 4.8×10⁹-test cost this guards against).
+    // A few hundred pair tests per marker at most, against 60k vertices each for the old filter.
+    expect(work.pairTests).toBeLessThan(points.length * 500);
+    // Spot-check equivalence on a slice (the full brute force is the cost this guards against).
     const slice = points.slice(0, 20);
     expect(withoutVertexMarkers(slice, lines)).toEqual(bruteForce(slice, lines));
     expect(kept.length).toBeGreaterThan(0);

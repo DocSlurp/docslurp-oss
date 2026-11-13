@@ -45,30 +45,39 @@ describe.skipIf(!built)("chart-export guest bundle (the production guest)", () =
     return readFile(output, "utf8");
   }
 
-  it("extracts Office charts (XLSX, DOCX, PPTX) exactly as in process", async () => {
-    const chart = chartXml({ title: "Revenue", plots: [barPlot([{ name: "A", cats: Q, vals: [1, 2, 3] }, { name: "B", cats: Q, vals: [3, 2, 1] }])] });
-    const line = chartXml({ plots: [linePlot([{ name: "L", cats: Q, vals: [5, 6, 7] }])] });
-    for (const bytes of [xlsx("S", [["q", "v"], ["Q1", 1], ["Q2", 2], ["Q3", 3]], chart), docx([chart, line]), pptx([[1, chart], [2, line]])]) {
+  // One guest process per test, so each stays well inside the default timeout on a busy runner.
+  const chart = chartXml({ title: "Revenue", plots: [barPlot([{ name: "A", cats: Q, vals: [1, 2, 3] }, { name: "B", cats: Q, vals: [3, 2, 1] }])] });
+  const line = chartXml({ plots: [linePlot([{ name: "L", cats: Q, vals: [5, 6, 7] }])] });
+  const office: Array<[string, () => Uint8Array]> = [
+    ["XLSX", () => xlsx("S", [["q", "v"], ["Q1", 1], ["Q2", 2], ["Q3", 3]], chart)],
+    ["DOCX", () => docx([chart, line])],
+    ["PPTX", () => pptx([[1, chart], [2, line]])],
+  ];
+  for (const [name, make] of office) {
+    it(`extracts Office charts (${name}) exactly as in process`, async () => {
+      const bytes = make();
       const got = await guest("office", [bytes]);
       expect(got).toBe(JSON.stringify(extractDeterministicVisuals({ kind: "office", bytes })));
       expect(JSON.parse(got).visuals.length).toBeGreaterThan(0);
-    }
-  });
+    });
+  }
 
-  it("extracts SVG charts and diagrams exactly as in process, with and without diagrams", async () => {
-    const svgs = [
-      matplotlibBar({ categories: Q, series: [{ name: "R", values: [12, 15, 9], color: "#1f77b4" }] }, { vmax: 20, title: "Revenue" }),
-      vegaBar(["a", "b", "c"], [1, 2, 3], 4),
-      genericBar(["x", "y"], [3, 1], 4),
-      MERMAID_FLOWCHART,
-      "<svg xmlns=\"http://www.w3.org/2000/svg\"><text>no chart</text></svg>",
-      "<svg><unclosed>",
-    ];
-    // One process per diagrams setting (a batch), then the first SVG on its own (the single-input path).
-    for (const diagrams of [true, false]) {
+  const svgs = [
+    matplotlibBar({ categories: Q, series: [{ name: "R", values: [12, 15, 9], color: "#1f77b4" }] }, { vmax: 20, title: "Revenue" }),
+    vegaBar(["a", "b", "c"], [1, 2, 3], 4),
+    genericBar(["x", "y"], [3, 1], 4),
+    MERMAID_FLOWCHART,
+    "<svg xmlns=\"http://www.w3.org/2000/svg\"><text>no chart</text></svg>",
+    "<svg><unclosed>",
+  ];
+  // One guest process per diagrams setting (a batch), then the first SVG on its own (the single-input path).
+  for (const diagrams of [true, false]) {
+    it(`extracts SVG charts${diagrams ? " and diagrams" : " (diagrams off)"} exactly as in process`, async () => {
       const got = await guest("svg", svgs, { diagrams, batch: svgs.length });
       expect(got).toBe(JSON.stringify({ schemaVersion: "chart-export-deterministic-batch@v1", results: svgs.map((text) => extractDeterministicVisuals({ kind: "svg", text }, { diagrams })) }));
-    }
+    });
+  }
+  it("extracts a single SVG exactly as in process", async () => {
     expect(await guest("svg", [svgs[0]!])).toBe(JSON.stringify(extractDeterministicVisuals({ kind: "svg", text: svgs[0]! })));
   });
 
