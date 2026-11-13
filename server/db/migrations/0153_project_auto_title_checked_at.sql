@@ -15,13 +15,21 @@ CREATE INDEX IF NOT EXISTS project_corpus_stats_auto_title_pending_idx
 --> statement-breakpoint
 -- Title evidence can arrive after the corpus stops changing: with indexing before enrichment a document completes
 -- (moving updated_at, so the sweep examines and marks the project) and its summary is written afterwards. A written
--- summary re-queues its project. Only a project already examined is touched, so later summaries in a project that
--- is already pending take no row lock on its stats row.
+-- summary re-queues its project. It always row-locks the project's stats row, the row the sweep claims with
+-- FOR UPDATE SKIP LOCKED for its whole examine-rename-checkpoint transaction, so a summary and a sweep serialize
+-- and no interleaving loses the summary; it writes only when the project was already examined.
 CREATE OR REPLACE FUNCTION project_auto_title_evidence_changed() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE
+  stats_project_id text;
 BEGIN
-  UPDATE project_corpus_stats cs SET auto_title_checked_at = NULL
-  FROM documents d
-  WHERE d.id = NEW.document_id AND cs.project_id = d.project_id AND cs.auto_title_checked_at IS NOT NULL;
+  SELECT cs.project_id INTO stats_project_id
+  FROM project_corpus_stats cs JOIN documents d ON d.project_id = cs.project_id
+  WHERE d.id = NEW.document_id
+  FOR NO KEY UPDATE OF cs;
+  IF stats_project_id IS NOT NULL THEN
+    UPDATE project_corpus_stats SET auto_title_checked_at = NULL
+    WHERE project_id = stats_project_id AND auto_title_checked_at IS NOT NULL;
+  END IF;
   RETURN NULL;
 END $$;
 --> statement-breakpoint

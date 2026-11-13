@@ -203,6 +203,48 @@ it.skipIf(!raceDatabaseUrl).each(["changed", "same"])("does not overwrite a conc
   }
 }, 15_000);
 
+it.skipIf(!raceDatabaseUrl)("keeps a project pending when its summary transaction is still open during a sweep", async () => {
+  const project = await ws.createProject({ userId: "u", orgId: "o" });
+  const doc = await addDocument(project.id, "scan.pdf");
+  await sql`insert into document_chunks (id, document_id, run_id, user_id, chunk_index, text, token_estimate, heading_path)
+    values (${doc.id + "-c0"}, ${doc.id}, ${doc.runId}, 'u', 0, 'Body.', 2, ${["Harbour Expansion Plan"]})`;
+  const pending = async () => (await sql<{ pending: boolean }[]>`
+    select auto_title_checked_at is distinct from updated_at as pending from project_corpus_stats where project_id = ${project.id}`)[0]!.pending;
+  expect(await pending()).toBe(true);
+  const connection = await concurrent.reserve();
+  try {
+    // The summary is written but not committed while the sweep runs (the checkpoint is still null).
+    await connection`begin`;
+    await connection`insert into document_summaries (id, document_id, run_id, user_id, summary)
+      values (${doc.id + "-summary"}, ${doc.id}, ${doc.runId}, 'u', 'This document is a harbour expansion budget for 2027, covering new berths.')`;
+    await naming.sweepProjectAutoTitles();
+    // The summary transaction holds the stats row, so the sweep skipped the project instead of marking it.
+    expect(await pending()).toBe(true);
+    await connection`commit`;
+  } finally {
+    await connection`rollback`;
+    connection.release();
+  }
+  await naming.sweepProjectAutoTitles();
+  expect((await state(project.id)).name).toBe("Harbour expansion budget for 2027");
+  expect(await pending()).toBe(false);
+}, 30_000);
+
+it.skipIf(!raceDatabaseUrl)("runs one sweep at a time", async () => {
+  const project = await ws.createProject({ userId: "u", orgId: "o" });
+  await addDocument(project.id, "file.pdf");
+  const connection = await concurrent.reserve();
+  try {
+    await connection`begin`;
+    await connection`select pg_advisory_xact_lock(hashtext('project-auto-title-sweep'))`;
+    expect(await naming.sweepProjectAutoTitles()).toBe(0);
+  } finally {
+    await connection`rollback`;
+    connection.release();
+  }
+  expect(await naming.sweepProjectAutoTitles()).toBeGreaterThan(0);
+}, 30_000);
+
 it.each(["superseded", "archived", "purged", "failed", "cancelled", "pii_blocked", "queued", "processing"])("excludes %s documents from all naming sources", async (excluded) => {
   const project = await ws.createProject({ userId: "u", orgId: "o" });
   const secret = await addDocument(project.id, "secret_merger.pdf");

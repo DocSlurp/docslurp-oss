@@ -71,7 +71,8 @@ Session, MFA and project access are re-read immediately before every append is
 published, and every two seconds while the turn is idle, so revoked work that
 publishes nothing still stops. The session is also re-read inside the publish
 transaction under a share lock on its row, so nothing is published after a
-sign-out or session revocation commits. A membership or project share removed
+sign-out or session revocation commits, except one payload whose publish timed out (after 3 s
+the transaction ends and its Redis command may still complete). A membership or project share removed
 in the few milliseconds between the pre-publish check and that commit can still
 let one append through; readers of the operation are authorized separately. An interrupted provider execution is not silently restarted.
 

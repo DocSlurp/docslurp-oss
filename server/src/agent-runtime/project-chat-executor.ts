@@ -146,7 +146,9 @@ export function createProjectChatExecutor(manager:BackgroundTaskManager,pubsub:P
         // Revocation fence: share-lock the session row, then re-validate it in this
         // transaction. A sign-out or session revocation (a delete or update of that
         // row) either committed first, and is seen here, or waits for this publish to
-        // commit; none can slip between the check and the publish.
+        // commit. One exception: a publish that times out (above) releases the lock
+        // while its Redis command may still complete later, so that single payload can
+        // appear after a revocation; readers of the operation are authorized separately.
         const [held]=await tx`select id from session where id=${actor.sessionId} and "userId"=${actor.userId} for share`;
         if(!held||!await revalidateRealtimeSession(actor,signal,tx))throw new Error("session_revoked");
         publicationAttempted=true;
