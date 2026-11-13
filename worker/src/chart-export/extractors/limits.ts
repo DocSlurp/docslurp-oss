@@ -16,9 +16,11 @@ export const CHART_EXTRACT_LIMITS = {
   maxPathCommands: 200_000,
   maxPathVertices: 20_000,
   /**
-   * svg-geometry marker/vertex de-duplication: point-to-vertex pair tests per SVG. Spread-out charts need a few per
-   * marker; only vertices packed into a few 3-unit cells come near this (a hostile input), and it stops them well inside
-   * the guest's timeout.
+   * svg-geometry marker/vertex de-duplication: point-to-vertex pair tests per guest input (shared by every SVG of one
+   * HTML, Office or EPUB input, and by a whole SVG batch). Spread-out charts need a few per marker; only vertices packed
+   * into a few 3-unit cells come near this (a hostile input). Measured on the parser VM's shape (2 vCPU, Node 24): about
+   * 3 ns per pair test, so the full budget is ~0.15 s, and 100 near-cap SVGs in one 3.8 MB HTML input took 2.9 s in all,
+   * mostly parsing (performance/chart-export-free-rungs/marker-cap-bench.mjs).
    */
   maxMarkerPairTests: 50_000_000,
   /** `<use>` expansion: references followed per document and nesting. */

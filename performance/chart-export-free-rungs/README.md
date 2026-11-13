@@ -66,14 +66,38 @@ per-page and pages-per-minute figures are inflated against the other sets. Per f
 | C1 | `d898d4902` guest imports `@docslurp/shared/chart-export` and `/file-sniff` (new subpath exports), not the package index | skips evaluating the whole shared index (OpenTelemetry, pricing, ...) | VM: CPU per run ×0.47, RSS −25 MB (median) | outputs byte-identical (26 workloads) |
 | C2 | `3be3eb7ee` worker build bundles the guest (extractors + zod) into `dist/chart-export/guest.bundle.mjs` with esbuild | removes ESM resolution/loading of ~200 files (profile: `url`, `resolve`, `loader`, `package_json_reader`) | VM: CPU per run ×0.28 vs base (×0.60 vs C1), RSS −7 MB more | outputs byte-identical; the build fails on an import outside an allowlist or over 1.25 MB; the VM contract refuses a stale bundle (inputs SHA-256), then imports it and extracts a built-in SVG and XLSX; `__tests__/guest-bundle.test.ts` (CI, after the worker build) runs the real guest script and requires byte-identical output |
 | C3 | `0619f3a3f` XML tokenizer: char-code predicates instead of a RegExp test per character | per-character RegExp calls were ~1/3 of `parseXml` | in process: PPTX −17%, XLSX 40 charts −9%, Vega SVGs −18 to −24%, many-rects −21%, many-texts −17%; neutral on matplotlib/Doppler SVGs | 658,778 differential cases (every UTF-16 code unit in 7 positions, 200k fuzz strings, all fixtures): 0 differences; committed: exhaustive test of the three predicates against the old regexes over all 65,536 code units |
-| C4 | `fbb6d0077` + council fix: svg-geometry marker/vertex de-duplication: 3-unit grid pruning, exact test unchanged, pair tests capped at `maxMarkerPairTests` (5×10⁷, refusal `svg-marker-limit`) | spread-out vertices: points × vertices → close to points + vertices. Vertices packed into a few cells: still points × packed vertices, now stopped at the cap | Doppler figure extraction −15% in process; spread hostile fixture `markers-vs-lines.svg` (4 MB) **56.7 s → 1.5 s** CPU. Packed-cell scene (council M1, up to 8×10⁹ pair tests within the input limits): the grid alone gave no gain (old 36 s, grid 49 s, loaded host); the cap refuses it after 5×10⁷ pair tests | `analyzeSvgChart` output identical on all fixtures plus 3,000 random scenes; committed: seeded property test against the brute-force filter, pair-count tests of both hostile scenes (`__tests__/equivalence.test.ts`) |
+| C4 | `fbb6d0077` + council fix: svg-geometry marker/vertex de-duplication: 3-unit grid pruning, exact test unchanged, pair tests capped at `maxMarkerPairTests` (5×10⁷ per guest input, refusal `svg-marker-limit`), indexed inner loop | spread-out vertices: points × vertices → close to points + vertices. Vertices packed into a few cells: still points × packed vertices, now stopped at the cap | Doppler figure extraction −15% in process; spread hostile fixture `markers-vs-lines.svg` (4 MB) **56.7 s → 1.5 s** CPU. Packed-cell scene (council M1, up to 8×10⁹ pair tests within the input limits): the grid alone gave no gain (old 36 s, grid 49 s, loaded host); the cap refuses it after 5×10⁷ pair tests, and 100 near-cap SVGs in one input share that one budget (calibration below) | `analyzeSvgChart` output identical on all fixtures plus 3,000 random scenes; committed: seeded property test against the brute-force filter, pair-count tests of both hostile scenes (`__tests__/equivalence.test.ts`) |
 
 C3 and C4 change guest CPU only within noise on normal documents, where startup still dominates. They pay off on
 large workbooks and on hostile input. The old C4 cost reached the guest's 60 s timeout. A timeout is reported as
-`guest-unavailable`, which also skips that document's remaining deterministic runs. With the cap, a packed-cell SVG is
-refused as `svg-marker-limit` for that SVG only.
+`guest-unavailable`, which also skips that document's remaining deterministic runs. With the cap, the pair tests of
+one guest input are bounded: every SVG of an HTML, Office or EPUB input, and every SVG of a Doppler batch, draws on
+one shared budget, and the SVG that exhausts it, and any after it, is refused as `svg-marker-limit`. SVGs that need no
+pair tests still extract.
 
-No limit was raised; `maxMarkerPairTests` is a new one. Every extractor still runs only in the parser VM, and refusal reasons are unchanged.
+No limit was raised; `maxMarkerPairTests` is a new one. Every extractor still runs only in the parser VM. There is one
+new refusal reason, `svg-marker-limit`; the existing reasons are unchanged.
+
+### Marker-cap calibration (parser VM shape)
+
+`marker-cap-bench.mjs`, run through the guest bundle by `run-in-modal-vm.mjs` in a Modal `runtime: "vm"` sandbox (2 vCPU,
+network blocked, Node 24.22.3), median of 3. Scenes pack the polyline vertices into one 3-unit cell and put the
+markers in the next cell, so no marker short-circuits.
+
+| scene | pair tests | time | per pair test |
+|---|--:|--:|--:|
+| 1 SVG, 2.5k vertices, no markers (parse + scene only) | 0 | 11 ms | |
+| 1 SVG, 2.5k vertices × 4k markers | 1.0×10⁷ | 50 ms | 3.9 ns |
+| 1 SVG, 2.5k vertices × 8k markers | 2.0×10⁷ | 62 ms | 2.6 ns |
+| 1 SVG, 2.5k vertices × 16k markers | 4.0×10⁷ | 119 ms | 2.7 ns |
+| HTML, 10 near-cap SVGs (0.4 MB) | 5.0×10⁷, then refused | 0.41 s | |
+| HTML, 100 near-cap SVGs (3.8 MB) | 5.0×10⁷, then refused | 2.9 s | |
+
+At about 3 ns per pair test the whole budget is ~0.15 s; the rest of the 100-SVG input is parsing and scene building,
+bounded by the existing limits. Before the shared budget, the same 100-SVG input ran 5×10⁹ pair tests (still running
+after 10 minutes on a loaded host, council round 2). The indexed loop over a flat coordinate array replaced a closure
+with `for…of` destructuring, which the council measured as roughly 5–14× slower per pair test; the output is the same
+(property test).
 
 ## Rejected
 

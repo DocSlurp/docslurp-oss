@@ -4,7 +4,7 @@ import { extractOfficeCharts } from "./office-chart-xml.js";
 import { openZipPackage } from "./safe-zip.js";
 import { clamp01, finalizeChart } from "./spec-utils.js";
 import { buildScene } from "./svg-scene.js";
-import { analyzeSvgChart } from "./svg-geometry.js";
+import { analyzeSvgChart, type MarkerWork } from "./svg-geometry.js";
 import { detectDiagramGenerator, graphvizDiagram, mermaidFlowchart } from "./svg-diagram.js";
 import { emptyVisual, type DeterministicRefusal, type DeterministicVisual, type DeterministicVisualResult } from "./types.js";
 import { parseXml } from "./xml.js";
@@ -30,11 +30,17 @@ export type DeterministicVisualInput =
 export interface DeterministicVisualOptions {
   /** Also extract diagrams (Mermaid / Graphviz SVG). Default true. */
   diagrams?: boolean;
+  /**
+   * The svg-geometry marker pair-test counter (`CHART_EXTRACT_LIMITS.maxMarkerPairTests`). Each call starts a fresh one
+   * shared by every SVG in its input (HTML, Office, EPUB); a guest batch passes one counter to every call, so the
+   * budget bounds the whole guest run, not each SVG.
+   */
+  markerWork?: MarkerWork;
 }
 
 export type { DeterministicVisual, DeterministicVisualResult, DeterministicRefusal } from "./types.js";
 
-interface Acc { visuals: DeterministicVisual[]; refusals: DeterministicRefusal[] }
+interface Acc { visuals: DeterministicVisual[]; refusals: DeterministicRefusal[]; markerWork: MarkerWork }
 
 function pushVisual(acc: Acc, v: DeterministicVisual) {
   if (acc.visuals.length >= CHART_EXTRACT_LIMITS.maxVisuals) throw new ExtractLimitError("visual-limit");
@@ -80,7 +86,7 @@ function handleSvg(text: string, locator: string, options: DeterministicVisualOp
     }
     const svgRoot = doc.children.find((c) => c.type === "element" && c.local === "svg");
     if (!svgRoot || svgRoot.type !== "element") throw new ExtractLimitError("svg-no-root");
-    const r = analyzeSvgChart(svgRoot);
+    const r = analyzeSvgChart(svgRoot, acc.markerWork);
     if (!r.spec && (r.reason === "no-numeric-axis" || r.reason === "no-text")) return; // not a chart we can see
     const v = emptyVisual("svg-geometry", locator);
     v.generator = r.generator;
@@ -133,7 +139,7 @@ function handleHtml(text: string, prefix: string, options: DeterministicVisualOp
 }
 
 export function extractDeterministicVisuals(input: DeterministicVisualInput, options: DeterministicVisualOptions = {}): DeterministicVisualResult {
-  const acc: Acc = { visuals: [], refusals: [] };
+  const acc: Acc = { visuals: [], refusals: [], markerWork: options.markerWork ?? { pairTests: 0 } };
   try {
     switch (input.kind) {
       case "svg": handleSvg(input.text, "svg", options, acc); break;

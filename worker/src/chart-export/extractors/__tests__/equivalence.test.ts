@@ -3,6 +3,7 @@
 // compared with the code it replaced, so a later edit that drifts from the old behaviour fails here.
 import { describe, expect, it } from "vitest";
 
+import { extractDeterministicVisuals } from "../index.js";
 import { CHART_EXTRACT_LIMITS, ExtractLimitError } from "../limits.js";
 import { withoutVertexMarkers } from "../svg-geometry.js";
 import type { LinePrim, PointPrim } from "../svg-scene.js";
@@ -93,7 +94,7 @@ describe("withoutVertexMarkers work bound (hostile input; counted in pair tests,
   const budget = CHART_EXTRACT_LIMITS.maxMarkerPairTests;
 
   it("caps the work far below the guest timeout", () => {
-    // ~0.2 s of pair tests on an idle core; the guest's timeout is 60 s.
+    // ~0.15 s of pair tests on the parser VM (about 3 ns each, measured by marker-cap-bench.mjs); the guest's timeout is 60 s.
     expect(budget).toBeLessThanOrEqual(5e7);
   });
 
@@ -132,6 +133,33 @@ describe("withoutVertexMarkers work bound (hostile input; counted in pair tests,
     expect(withoutVertexMarkers(slice, lines)).toEqual(bruteForce(slice, lines));
     expect(kept.length).toBeGreaterThan(0);
     expect(kept.length).toBeLessThan(points.length);
+  });
+
+  /** V polyline vertices (the two ends far apart, the rest packed into one 3-unit cell) and P markers in the next cell: (V − 2) × P pair tests. */
+  function packedSvg(vertices: number, markers: number): string {
+    const pts = ["10,90", ...Array.from({ length: vertices - 2 }, (_, i) => `${(30 + (i % 290) / 100).toFixed(2)},${(30 + (i % 97) / 34).toFixed(2)}`), "90,10"];
+    const ticks = [[0, 90], [10, 50], [20, 10]].map(([v, y]) => `<text x="2" y="${y}">${v}</text>`).join("");
+    return `<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"><polyline points="${pts.join(" ")}" stroke="#f00" fill="none"/>`
+      + `${'<circle cx="34.6" cy="34.6" r="1" fill="#00f"/>'.repeat(markers)}${ticks}<text x="10" y="98">A</text><text x="50" y="98">B</text><text x="90" y="98">C</text></svg>`;
+  }
+
+  it("shares one budget across every SVG of one input, so many near-cap SVGs cannot multiply it", () => {
+    // Council r2 M1: 100–200 SVGs just under a per-SVG cap in one HTML/Office/EPUB input or batch. The counter starts
+    // 25k short of the budget (standing in for the earlier SVGs' work, without running 5×10⁷ tests); each SVG here
+    // needs 9,800 pair tests (98 packed vertices × 100 markers), so two finish, the third crosses the budget, and every
+    // later one stops at its first test.
+    const one = packedSvg(100, 100);
+    const html = `<html><body>${one.repeat(6)}</body></html>`;
+    const markerWork = { pairTests: budget - 25_000 };
+    const r = extractDeterministicVisuals({ kind: "html", text: html }, { markerWork });
+    expect(r.visuals.filter((v) => v.source === "svg-geometry")).toHaveLength(2);
+    expect(r.refusals.map((x) => x.reason)).toEqual(["svg-marker-limit", "svg-marker-limit", "svg-marker-limit", "svg-marker-limit"]);
+    // budget + 1 for the SVG that crossed it, then one test for each of the three after it.
+    expect(markerWork.pairTests).toBe(budget + 4);
+    // Each SVG alone is far under the budget and extracts on its own (a fresh counter per input).
+    const alone = { pairTests: 0 };
+    expect(extractDeterministicVisuals({ kind: "svg", text: one }, { markerWork: alone }).refusals).toEqual([]);
+    expect(alone.pairTests).toBe(98 * 100);
   });
 
   it("does no pair tests for non-finite points or vertices", () => {

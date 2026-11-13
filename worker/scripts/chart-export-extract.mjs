@@ -21,10 +21,12 @@ if (request.batch !== undefined) {
   if (kind !== "svg" || !Number.isSafeInteger(batch) || batch < 1 || batch > 40 || more.length !== batch - 1) throw new Error("invalid chart extract batch");
   const refused = (reason) => ({ schemaVersion: "chart-export-deterministic@v1", visuals: [], refusals: [{ locator: "svg", reason }] });
   const results = [];
+  // One svg-geometry marker budget for the whole batch: a batch of near-cap SVGs cannot multiply it.
+  const batchOptions = { ...options, markerWork: { pairTests: 0 } };
   for (const file of [input, ...more]) {
     if ((await stat(file)).size > CHART_EXTRACT_LIMITS.maxTextBytes) { results.push(refused("input-too-large")); continue; }
     try {
-      results.push(extractDeterministicVisuals({ kind, text: (await readFile(file)).toString("utf8") }, options));
+      results.push(extractDeterministicVisuals({ kind, text: (await readFile(file)).toString("utf8") }, batchOptions));
     } catch {
       // One bad figure never sinks the others; the host sees a machine reason only.
       results.push(refused("extract-failed"));

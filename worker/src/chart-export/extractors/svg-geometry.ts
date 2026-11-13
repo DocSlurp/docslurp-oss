@@ -201,49 +201,58 @@ function findLegend(texts: TextPrim[], scene: Scene, exclude: Set<TextPrim>): Le
   return out;
 }
 
+/** Pair tests run so far by `withoutVertexMarkers`, shared across every SVG of one guest input (or one batch). */
+export interface MarkerWork { pairTests: number }
+
+/** The own cell first (a marker drawn on a vertex usually matches there), then the 8 neighbours. */
+const CELL_OFFSETS = [0, 0, -1, -1, -1, 0, -1, 1, 0, -1, 0, 1, 1, -1, 1, 0, 1, 1];
+
 /**
  * Points that do not sit on a line vertex (|dx| < 1.5 and |dy| < 1.5). Vertices are bucketed in 3-unit cells, so one
  * point tests only the vertices in its own and the 8 neighbouring cells; the exact test still decides each pair, and a
  * non-finite coordinate never passes it, so such points and vertices are skipped. For vertices spread over the plot this
  * is close to linear in points + vertices. Vertices packed into a few cells (a hostile SVG) still cost points × packed
- * vertices, so every pair test counts against `maxMarkerPairTests` and the SVG is refused (`svg-marker-limit`) past it.
- * `work` reports the pair tests run; `budget` is overridable only so tests can count the cap without running 5×10⁷ tests.
+ * vertices, so every pair test counts against `maxMarkerPairTests` in `work`, which the caller shares across all SVGs of
+ * one guest input, and the SVG is refused (`svg-marker-limit`) past it. `budget` is overridable only so tests can count
+ * the cap without running the full budget.
  */
-export function withoutVertexMarkers(points: PointPrim[], lines: LinePrim[], work: { pairTests: number } = { pairTests: 0 }, budget: number = CHART_EXTRACT_LIMITS.maxMarkerPairTests): PointPrim[] {
+export function withoutVertexMarkers(points: PointPrim[], lines: LinePrim[], work: MarkerWork = { pairTests: 0 }, budget: number = CHART_EXTRACT_LIMITS.maxMarkerPairTests): PointPrim[] {
   if (!points.length || !lines.length) return points;
   const CELL = 3;
-  const grid = new Map<string, Array<[number, number]>>();
+  // Bucket → flat [x0, y0, x1, y1, ...]: an indexed loop over plain numbers is several times cheaper per pair test
+  // than iterating and destructuring tuples.
+  const grid = new Map<string, number[]>();
   for (const l of lines) {
     for (const v of l.points) {
-      if (!Number.isFinite(v[0]) || !Number.isFinite(v[1])) continue;
-      const key = `${Math.floor(v[0] / CELL)},${Math.floor(v[1] / CELL)}`;
+      const x = v[0], y = v[1];
+      if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+      const key = `${Math.floor(x / CELL)},${Math.floor(y / CELL)}`;
       const bucket = grid.get(key);
-      if (bucket) bucket.push(v); else grid.set(key, [v]);
+      if (bucket) bucket.push(x, y); else grid.set(key, [x, y]);
     }
   }
-  const nearVertex = (bucket: Array<[number, number]> | undefined, px: number, py: number): boolean => {
-    if (!bucket) return false;
-    for (const [x, y] of bucket) {
-      if (++work.pairTests > budget) throw new ExtractLimitError("svg-marker-limit");
-      if (Math.abs(x - px) < 1.5 && Math.abs(y - py) < 1.5) return true;
-    }
-    return false;
-  };
-  return points.filter((p) => {
-    if (!Number.isFinite(p.x) || !Number.isFinite(p.y)) return true;
-    const cx = Math.floor(p.x / CELL), cy = Math.floor(p.y / CELL);
-    // Own cell first: a marker drawn on a vertex usually matches there.
-    if (nearVertex(grid.get(`${cx},${cy}`), p.x, p.y)) return false;
-    for (let dx = -1; dx <= 1; dx++) {
-      for (let dy = -1; dy <= 1; dy++) {
-        if ((dx || dy) && nearVertex(grid.get(`${cx + dx},${cy + dy}`), p.x, p.y)) return false;
+  let tests = work.pairTests;
+  const kept: PointPrim[] = [];
+  points: for (const p of points) {
+    const px = p.x, py = p.y;
+    if (!Number.isFinite(px) || !Number.isFinite(py)) { kept.push(p); continue; }
+    const cx = Math.floor(px / CELL), cy = Math.floor(py / CELL);
+    for (let k = 0; k < CELL_OFFSETS.length; k += 2) {
+      const bucket = grid.get(`${cx + CELL_OFFSETS[k]!},${cy + CELL_OFFSETS[k + 1]!}`);
+      if (bucket === undefined) continue;
+      for (let j = 0; j < bucket.length; j += 2) {
+        if (++tests > budget) { work.pairTests = tests; throw new ExtractLimitError("svg-marker-limit"); }
+        if (Math.abs(bucket[j]! - px) < 1.5 && Math.abs(bucket[j + 1]! - py) < 1.5) continue points;
       }
     }
-    return true;
-  });
+    kept.push(p);
+  }
+  work.pairTests = tests;
+  return kept;
 }
 
-export function analyzeSvgChart(root: XmlElement): SvgChartAnalysis {
+/** `work`: the marker pair-test counter shared across one guest input (see `withoutVertexMarkers`). */
+export function analyzeSvgChart(root: XmlElement, work: MarkerWork = { pairTests: 0 }): SvgChartAnalysis {
   const scene = buildScene(root);
   const generator = detectGenerator(scene);
   const texts = scene.texts.filter((t) => t.text.length > 0);
@@ -321,7 +330,7 @@ export function analyzeSvgChart(root: XmlElement): SvgChartAnalysis {
     });
   let points = scene.points.filter((p) => !inAxis(p) && !inLegend(p) && !legendSwatches.has(p) && (p.fill || p.stroke));
   // Markers drawn on a polyline's vertices duplicate it.
-  points = withoutVertexMarkers(points, lines);
+  points = withoutVertexMarkers(points, lines, work);
 
   const colorName = new Map(legend.map((e) => [e.color, e.name]));
   const series = new Map<string, DraftSeries & { color: string | null }>();
