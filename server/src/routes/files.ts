@@ -7,6 +7,7 @@ import { openFileToken } from "../lib/file-tokens.js";
 import { actorHasAnyApiKeyScope, getRequestActor } from "../lib/request-actor.js";
 import { acceptApiKeys } from "../lib/route-auth.js";
 import { userCanAccessArtifactUri } from "../services/documents.js";
+import { dopplerFolderServable, isDopplerSourcePointer } from "../services/document-assets.js";
 import { apiStatusError } from "../lib/api-error.js";
 import { DOPPLER_FIGURE_MEDIA_TYPES, parseArtifactUri, type DopplerFigureFormat } from "@docslurp/shared";
 
@@ -63,18 +64,42 @@ const SANDBOX_CSP = "default-src 'none'; img-src 'self'; media-src 'self'; style
 const PDF_CSP = "frame-ancestors 'self'";
 
 /**
- * Doppler figure files (worker extractors/doppler-figures.ts) live at `<artifact root>/doppler-figures/<document>/<id>.<format>`.
- * Their type is fixed by that name, never by stored metadata or the bytes. They are the only SVG this proxy renders,
- * and only with a CSP that loads nothing and runs nothing (the VM's SVG allowlist
- * is only a correctness filter: this CSP is what keeps a compromised figure inert).
+ * A document's Doppler output lives in Doppler's own folder layout under `<artifact root>/doppler/<document>/`
+ * (packages/shared DOPPLER_STORE_LAYOUT). Image files sit at `images/page-NNNN/(image|figure)-NNN.<format>`. Their type
+ * is fixed by that name, never by stored metadata or the bytes. They are the only SVG this proxy renders, and only with
+ * a CSP that loads nothing and runs nothing (the VM's SVG allowlist is only a correctness filter: this CSP is what keeps
+ * a compromised figure inert).
  */
-const DOPPLER_FIGURE_KEY = /\/doppler-figures\/[A-Za-z0-9-]{1,64}\/p[1-9][0-9]{0,8}\.g?(?:0|[1-9][0-9]{0,5})\.(webp|svg|png|jpg)$/;
+const DOPPLER_FIGURE_KEY = /\/doppler\/[A-Za-z0-9-]{1,64}\/images\/page-[0-9]{4,10}\/(?:image|figure)-[0-9]{3,7}\.(webp|svg|png|jpg)$/;
 const FIGURE_SVG_CSP = "default-src 'none'; style-src 'unsafe-inline'; sandbox; frame-ancestors 'self'";
+/**
+ * The folder's other files, typed by their fixed names and never rendered as active content: the manifest and the
+ * index as JSON, the Markdown as text. (The provider's page facts are never stored.) All of them still pass the artifact check (recorded slot,
+ * project, organization, PII withholding) like any other artifact.
+ */
+const DOPPLER_FOLDER_FILE_KEY = /\/doppler\/[A-Za-z0-9-]{1,64}\/(images\/manifest\.jsonl?|images\/shards\/[0-9]{4,10}-[0-9]{4,10}\/manifest\.jsonl|document\.md|index\.json)$/;
+const DOPPLER_FOLDER_FILE_TYPES: Readonly<Record<string, string>> = {
+  "images/manifest.json": "application/json; charset=utf-8",
+  "images/manifest.jsonl": "text/plain; charset=utf-8",
+  "index.json": "application/json; charset=utf-8",
+  "document.md": "text/markdown; charset=utf-8",
+};
 
 export function dopplerFigureFormat(uri: string): DopplerFigureFormat | null {
   const match = DOPPLER_FIGURE_KEY.exec(parseArtifactUri(uri)?.key ?? "");
   return match ? (match[1] as DopplerFigureFormat) : null;
 }
+
+/** The fixed content type of a Doppler folder file (manifest, Markdown, index), or null. */
+export function dopplerFolderFileType(uri: string): string | null {
+  const match = DOPPLER_FOLDER_FILE_KEY.exec(parseArtifactUri(uri)?.key ?? "");
+  if (!match) return null;
+  // A shard's manifest (`images/shards/<first>-<last>/manifest.jsonl`) is JSON Lines like the single one.
+  return DOPPLER_FOLDER_FILE_TYPES[match[1]!.startsWith("images/shards/") ? "images/manifest.jsonl" : match[1]!] ?? null;
+}
+
+/** Whether a URI names a document's Doppler source pointer, which is never served (services/document-assets.ts). */
+export { isDopplerSourcePointer };
 
 function notFound(c: Context) {
   c.header("Cache-Control", "no-store");
@@ -129,8 +154,11 @@ export const filesRoutes = new Hono()
     }
     if (name !== claims.name) return notFound(c);
 
+    if (isDopplerSourcePointer(claims.uri)) return notFound(c);
     const orgId = actor.type === "apiKey" ? actor.apiKey.orgId : undefined;
     if (!(await userCanAccessArtifactUri(claims.uri, actor.userId, orgId))) return notFound(c);
+    // A Doppler folder file is served only for a `completed` document (defense in depth behind the PII withholding).
+    if (!(await dopplerFolderServable(claims.uri))) return notFound(c);
 
     const range = c.req.header("range");
     let object: Awaited<ReturnType<typeof openArtifactObject>>;
@@ -158,7 +186,10 @@ export const filesRoutes = new Hono()
     }
 
     const figure = dopplerFigureFormat(claims.uri);
-    const { type, inline } = figure ? { type: DOPPLER_FIGURE_MEDIA_TYPES[figure], inline: true } : responseType(object.ContentType, claims.name);
+    const folderType = figure ? null : dopplerFolderFileType(claims.uri);
+    const { type, inline } = figure ? { type: DOPPLER_FIGURE_MEDIA_TYPES[figure], inline: true }
+      : folderType ? { type: folderType, inline: true }
+        : responseType(object.ContentType, claims.name);
     const headers = new Headers({
       "Content-Type": type,
       "Content-Disposition": contentDisposition(inline, claims.name),

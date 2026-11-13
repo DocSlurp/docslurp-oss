@@ -68,6 +68,14 @@ export interface CheckpointStore {
   setPageStageComplete(runId: string, documentId: string, stageName: string, pageNumber: number): Promise<void>;
   getCompletedPages(runId: string, documentId: string, stageName: string): Promise<Set<number>>;
   recordPrivacyAudit?(entries: readonly PrivacyAuditEntry[]): Promise<void>;
+  /** Document asset ledger and extraction level (db/document-asset-ledger.ts), in one org-scoped transaction. */
+  writeDocumentAssetLedger?(write: import("../db/document-asset-ledger.js").DocumentAssetLedgerWrite): Promise<unknown>;
+  /**
+   * PII withholding for artifacts written after the document's PII stage (the first pass's figure step): whether the
+   * document's recorded PII outcome withholds artifacts (it redacted or blocked), and adding URIs to its withheld list.
+   */
+  documentPiiWithholds?(documentId: string): Promise<boolean>;
+  appendWithheldArtifactUris?(documentId: string, uris: readonly string[]): Promise<void>;
   /** Per-page ingest facts (ingest report); best effort, idempotent per (document, page). */
   upsertPageFacts?(rows: readonly PageFactUpsert[]): Promise<void>;
   /** Reserves Fast page-image renders from the run's shared budget (db/fast-page-image-budget.ts). */
@@ -154,6 +162,11 @@ export class WorkflowState {
   readonly staleVectorIds = new Map<string, string[]>();
   pendingPerformance: PerformanceEvent[];
   pendingParserEvaluations: ParserEvaluation[];
+  /**
+   * Document asset ledger writes (db/document-asset-ledger.ts) waiting for the checkpoint that records the documents'
+   * Markdown and figure slots: the store writes them after that checkpoint commits, never before.
+   */
+  readonly pendingAssetLedger = new Map<string, import("../db/document-asset-ledger.js").PendingAssetLedgerWrite>();
   vectorIndexes: VectorIndex[];
   contentHashes: Map<string, string> = new Map();
   /** The document whose extraction registered each content hash (checkDedup never serves a document its own attempt). */
