@@ -1,5 +1,5 @@
 import postgres from "postgres";
-import { afterAll, beforeAll, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { startMigratedPostgres } from "@docslurp/worker/testing";
 let sql: postgres.Sql;
 let stop: () => Promise<void>;
@@ -160,4 +160,62 @@ it("refuses otherwise authorized resources outside the configured cohort", async
     expect(await backend.authorize("owner", {kind:"project",projectId:"project"})).toBeNull();
     await expect(backend.project("owner", {kind:"project",projectId:"project"})).rejects.toThrow("forbidden");
   } finally { vi.unstubAllEnvs(); }
+});
+
+describe("customer realtime frames carry no backend models (council round 4)", () => {
+  const privateRoute = "llm://private/acme-gpu/qwen/qwen3-vl-30b-a3b-instruct";
+  let hidden: { ids: readonly string[]; names: readonly string[] };
+  beforeAll(async () => {
+    const snapshot = await import("../services/progress-snapshot.js");
+    const shared = await import("@docslurp/shared");
+    hidden = { ids: snapshot.customerHiddenModelIds(), names: snapshot.customerHiddenModelNames() };
+    const pipeline = shared.resolveManagedPipeline(shared.normalizePipelineFeatures(shared.defaultPipelineFeatures), { vision: { modelUri: privateRoute } }, "test").pipeline;
+    // Every catalog id rides in the run's pipeline and free text too, so a stray field cannot slip through.
+    const runPipeline = { ...pipeline, textGeneration: { ...(pipeline as { textGeneration?: object }).textGeneration, models: { ...Object.fromEntries(hidden.ids.map((id, i) => [`task${i}`, id])), private: privateRoute } } };
+    await sql`insert into "user"(id,name,email,"emailVerified") values ('operator','Operator','operator@example.test',true)`;
+    // Own users: earlier tests in this file change the shared member's access.
+    await sql`insert into "user"(id,name,email) values ('customer','Customer','customer@example.test'),('custadmin','Customer admin','custadmin@example.test')`;
+    await sql`insert into org_memberships(org_id,user_id,role) values ('org','operator','member'),('org','customer','member'),('org','custadmin','admin')`;
+    await sql`insert into projects(id,org_id,user_id,name,pipeline,managed_models) values
+      ('models','org','owner','Models',${sql.json(JSON.parse(JSON.stringify(pipeline)))},${sql.json({ pipeline: { vision: { modelUri: privateRoute } } })})`;
+    await sql`insert into project_members(project_id,user_id,role) values ('models','customer','viewer'),('models','custadmin','editor'),('models','operator','viewer')`;
+    await sql`insert into project_runs(id,org_id,user_id,project_id,kind,status,stage,job_id,pipeline,error,stats) values
+      ('run-m','org','owner','models','upload','failed','vision-extract','job-m',${sql.json(JSON.parse(JSON.stringify(runPipeline)))},
+       ${`DeepSeek V4.1 Flash and GPT-6.1 Sol refused; ${privateRoute} timed out; ${hidden.ids.join(" ")}`},
+       ${sql.json({ pages: 3, decisionModel: "typesafe/jev-1.13", embeddingModel: "perplexity/pplx-embed-v1-0.6b", routerNote: `decision-chain:${hidden.ids[0]}=served` })})`;
+  });
+  afterEach(() => vi.unstubAllEnvs());
+
+  function leaks(value: unknown): string[] {
+    const text = JSON.stringify(value).toLowerCase();
+    return [...hidden.ids, ...hidden.names.map((name) => name.toLowerCase()), "llm://", "acme-gpu"].filter((needle) => text.includes(needle));
+  }
+  const resources = [
+    { kind: "project", projectId: "models" }, { kind: "activity", orgId: "org" }, { kind: "run", runId: "run-m" },
+    { kind: "documents", projectId: "models", page: 0 }, { kind: "suggestions", projectId: "models" },
+  ] as const;
+
+  it("a member who is not an operator reads every resource without a model id, display name or route", async () => {
+    vi.stubEnv("ADMIN_EMAILS", "operator@example.test");
+    for (const resource of resources) {
+      const frame = await backend.project("customer", resource).catch((error: Error) => { throw new Error(`${resource.kind}: ${error.message}`); });
+      expect({ resource: resource.kind, leaks: leaks(frame) }).toEqual({ resource: resource.kind, leaks: [] });
+    }
+    // An organization admin is a customer too.
+    for (const resource of resources) expect(leaks(await backend.project("custadmin", resource))).toEqual([]);
+    const project = await backend.project("customer", { kind: "project", projectId: "models" }) as { pipeline: Record<string, Record<string, unknown>> };
+    expect(project.pipeline.vision).not.toHaveProperty("modelUri");
+    expect(project.pipeline.embedding).not.toHaveProperty("modelUri");
+  });
+
+  it("a platform operator still sees the managed models and providers", async () => {
+    vi.stubEnv("ADMIN_EMAILS", "operator@example.test");
+    const project = await backend.project("operator", { kind: "project", projectId: "models" }) as { pipeline: Record<string, Record<string, unknown>> };
+    expect(String(project.pipeline.vision!.modelUri)).toMatch(/^llm:\/\//);
+    expect(String(project.pipeline.embedding!.modelUri)).toMatch(/^llm:\/\//);
+    const activity = await backend.project("operator", { kind: "activity", orgId: "org" }) as { runs: Array<{ id: string; pipeline: Record<string, Record<string, unknown>>; error?: string }> };
+    const run = activity.runs.find((r) => r.id === "run-m")!;
+    expect(String(run.pipeline.vision!.modelUri)).toMatch(/^llm:\/\//);
+    expect(leaks(run.pipeline).length).toBeGreaterThan(0);
+  });
 });
