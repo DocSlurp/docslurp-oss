@@ -1,5 +1,6 @@
+import { upgradeStoredPipelineChartExport } from "@docslurp/shared";
 import { z } from "zod";
-import { chartExportFormatSchema, CHART_EXPORT_FORMATS, migrateLegacyQualitySettings, qualityModeSchema, type QualityMode, updateProjectSearchChatSettingsSchema, updateProjectSearchRetrievalDefaultsSchema } from "@docslurp/shared";
+import { chartExportFormatSchema, chartExportTierSchema, CHART_EXPORT_FORMATS, migrateLegacyQualitySettings, qualityModeSchema, type QualityMode, updateProjectSearchChatSettingsSchema, updateProjectSearchRetrievalDefaultsSchema } from "@docslurp/shared";
 
 /**
  * A retired `vision: { forceAllPages }` patch (older ingest-report recommendations) arrives as `quality`:
@@ -8,6 +9,8 @@ import { chartExportFormatSchema, CHART_EXPORT_FORMATS, migrateLegacyQualitySett
  */
 function migrateLegacyPatch(value: unknown): unknown {
   if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  // Patches saved in chat history or an ingest report before migration 0151 carry chartExport.enabled/generatorModel.
+  value = upgradeStoredPipelineChartExport(value);
   const vision = (value as { vision?: unknown }).vision;
   const hadLegacyVision = !!vision && typeof vision === "object" && "forceAllPages" in vision;
   const migrated = migrateLegacyQualitySettings(value) as Record<string, unknown>;
@@ -44,14 +47,16 @@ const projectSettingsPipelinePatchObjectSchema = z.object({
   summarize: z.boolean().optional(), embed: z.boolean().optional(), indexVectors: z.boolean().optional(),
   preserveTables: z.boolean().optional(), preserveCode: z.boolean().optional(), preserveImages: z.boolean().optional(),
   pdfRegionExtraction: z.boolean().optional(), visionFallback: z.boolean().optional(),
+  /** Figure extraction from PDFs (on by default); off keeps existing figures until reprocess. */
+  figures: z.boolean().optional(),
   /** Processing quality (fast / auto / good): the setting the ingest report's vision recommendations change. */
   quality: qualityModeSchema.optional(),
   /**
-   * Chart and diagram export. Bounded: on/off, formats and diagrams only. The generator model is an operator and
+   * Chart and diagram export. Bounded: tier (off, free, models), formats and diagrams only. The generator model is an operator and
    * settings-page choice that chat can never propose (it would route customer pages to another model).
    */
   chartExport: z.object({
-    enabled: z.boolean().optional(),
+    tier: chartExportTierSchema.optional(),
     formats: z.array(chartExportFormatSchema).min(1).max(CHART_EXPORT_FORMATS.length)
       .refine((formats) => new Set(formats).size === formats.length, "formats must not repeat").optional(),
     diagrams: z.boolean().optional(),

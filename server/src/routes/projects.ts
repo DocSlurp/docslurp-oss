@@ -1,4 +1,5 @@
 import { quoteStoredDocuments } from "../services/stored-quote.js";
+import { runOriginOf } from "../lib/run-origin.js";
 import { SEARCH_SCOPES } from "../lib/search-tiers.js";
 import { projectRecommendationVisitsRoutes } from "./project-recommendation-visits.js";
 import { ChatToolBlockedError } from "../services/chat-tool-error.js";
@@ -1514,7 +1515,7 @@ export const projectsRoutes = new Hono()
       let applied: Awaited<ReturnType<typeof applyProjectChange>>;
       try {
         const plan = await planProjectChange({
-          projectId, userId, input, indexingMode: requestedMode.success ? requestedMode.data : undefined,
+          projectId, userId, input, indexingMode: requestedMode.success ? requestedMode.data : undefined, origin: runOriginOf(c),
         });
         applied = plan
           ? await applyProjectChange({ plan, userId, updateOptions: requestedMode.success ? { indexingMode: requestedMode.data } : undefined })
@@ -1522,7 +1523,7 @@ export const projectsRoutes = new Hono()
       } catch (error) {
         if (error instanceof ProjectSlugError) return apiStatusError(c, error.status, error.message);
         if (error instanceof ConfigConflictError) return apiStatusError(c, error.status, error.message, { details: { category: error.code } });
-        if (error instanceof ChartExportUnavailableError) return apiStatusError(c, error.status, error.message, { details: { category: error.code } });
+        if (error instanceof ChartExportUnavailableError) return apiStatusError(c, error.status, error.message, { code: error.code, details: { field: "chartExport.tier" } });
         return fail(error);
       }
 
@@ -1543,7 +1544,7 @@ export const projectsRoutes = new Hono()
       let indexingJob: { runIds: string[] } | undefined;
       if (modeChange && prepared && prepared.batches.length > 0) {
         try {
-          const started = await commitIndexJobs(prepared, userId);
+          const started = await commitIndexJobs(prepared, userId, runOriginOf(c));
           for (const runId of started.runIds) {
             const run = await getRun(runId, userId);
             if (run) await runLifecycle.start(run);
@@ -1592,7 +1593,7 @@ export const projectsRoutes = new Hono()
       }
       const access = await getProjectAccess(project.id, userId);
       if (!access || !canEditProject(access, userId)) return apiErrorResponse(c, 404, "project_not_found", "Project not found");
-      const result = await estimateProjectChange({ projectId: project.id, userId, input: c.req.valid("json") });
+      const result = await estimateProjectChange({ projectId: project.id, userId, input: c.req.valid("json"), origin: runOriginOf(c) });
       if (!result) return apiErrorResponse(c, 404, "project_not_found", "Project not found");
       return c.json(result);
     },

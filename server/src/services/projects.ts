@@ -1,4 +1,5 @@
 import { deferredProfilesEnabled, isBillingEnforced, PUBLIC_ERROR_MESSAGES, publicDiagnostics, publicDocumentError } from "@docslurp/shared";
+import { chartExportDefaults, upgradeStoredPipelineChartExport } from "@docslurp/shared";
 import { markProjectAutoNamed, refineProjectNames } from "./project-naming.js";
 import { forgetProjectProviderPolicy } from "../lib/provider-policy.js";
 import { jsonRecord } from "../lib/json-record.js";
@@ -310,6 +311,8 @@ function mapProject(row: ProjectRow): ProjectRecord {
     indexedPageCount: row.indexed_page_count ?? row.total_page_count ?? 0,
     deferredIndexingAvailable: deferredProfilesEnabled(),
     billingEnforced: isBillingEnforced(),
+    // The deployment's actual defaults (switch, app/API defaults, explicit-free gate), never a code default.
+    chartExportDefaults: chartExportDefaults(process.env),
     sourceBytes: Number(row.source_bytes ?? 0),
     pendingDocumentCount: row.pending_document_count ?? 0,
     pendingPageCount: row.pending_page_count ?? 0,
@@ -1275,7 +1278,9 @@ export async function rollbackProjectVersion(
     name: snapshot.name,
     templateKey: snapshot.templateKey,
     systemPrompt: snapshot.systemPrompt,
-    pipeline: snapshot.pipeline,
+    // A snapshot saved before migration 0151 carries chartExport.enabled/generatorModel (the audit log is never
+    // rewritten): mapped on read so the strict settings schema accepts it.
+    pipeline: upgradeStoredPipelineChartExport(snapshot.pipeline),
   });
 
   if (!updated) {

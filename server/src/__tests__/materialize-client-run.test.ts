@@ -48,7 +48,12 @@ describe("materialize run rows", () => {
     }
     const insert = mocks.calls.find((call) => call.text.includes("insert into project_runs"))!;
     const stored = insert.values.find((value) => typeof value === "object" && value !== null && "quality" in (value as object));
-    expect(stored).toEqual({ quality: "good", documentExtraction: { options: { dolphin: { mode: "page" } } } });
+    // A source pipeline with no chart export tier is stamped the machine default (off) on the materialize run.
+    expect(stored).toEqual({
+      quality: "good",
+      documentExtraction: { options: { dolphin: { mode: "page" } } },
+      chartExport: { tier: "off", formats: ["description", "mermaid"], diagrams: true },
+    });
     expect(JSON.stringify(insert.values)).not.toContain("/tmp/attacker");
   });
 

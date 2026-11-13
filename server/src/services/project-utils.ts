@@ -1,3 +1,4 @@
+import { upgradeStoredPipelineChartExport } from "@docslurp/shared";
 import { projectSchema, type SearchResult, type ProjectRecord } from "@docslurp/shared";
 
 export interface ProjectVersionSnapshot {
@@ -42,12 +43,14 @@ export function readProjectVersionSnapshot(
     return null;
   }
 
+  // Snapshots saved before migration 0151 carry chartExport.enabled/generatorModel; the audit log is never rewritten,
+  // so they are mapped on read (`enabled: true` -> tier `models`).
   const parsed = projectSchema.pick({
     name: true,
     templateKey: true,
     systemPrompt: true,
     pipeline: true,
-  }).safeParse(snapshot);
+  }).safeParse({ ...candidate, pipeline: upgradeStoredPipelineChartExport(candidate.pipeline) });
 
   if (!parsed.success) {
     return null;

@@ -1,4 +1,7 @@
 import { quoteStoredDocuments } from "../services/stored-quote.js";
+import { chartExportOverrideError } from "../services/chart-export-availability.js";
+import { CHART_EXPORT_TIER_UNAVAILABLE_CODE } from "@docslurp/shared";
+import { runOriginOf } from "../lib/run-origin.js";
 import { SEARCH_SCOPES } from "../lib/search-tiers.js";
 import { reportPublicError } from "../lib/public-errors.js";
 import { Hono, type Context } from "hono";
@@ -39,7 +42,7 @@ import { apiErrorResponse, apiStatusError } from "../lib/api-error.js";
 import { parseListLimit } from "../lib/list-cursor.js";
 import { inlineEstimate, jobMetaFor, jobStatusForMutation, recordJobMeta } from "../services/jobs.js";
 import { billingState } from "../services/config-change.js";
-import { estimateRunReprocess } from "../services/work-estimates.js";
+import { estimateRunReprocess, replayedRunPipeline } from "../services/work-estimates.js";
 import { apiKeyCanUpdateContent, CONTENT_UPDATE_SCOPE_MESSAGE } from "../lib/content-update-access.js";
 import { indexingModeErrorResponse } from "../lib/indexing-mode-error.js";
 import { IndexingModeError } from "../services/project-indexing-mode.js";
@@ -312,12 +315,23 @@ export const runsRoutes = new Hono()
     const denied = await denyRunContentUpdate(c, c.req.param("runId"));
     if (denied) return denied;
     const userId = c.get("sessionUser").id;
-    const estimate = await estimateRunReprocess({ runId: c.req.param("runId"), userId, options: c.req.valid("json") });
-    if (!estimate) return apiStatusError(c, 404, "Run not found");
-    // The same quote shape as POST /v1/estimate, from the run's measured documents (estimateRunReprocess checked access).
+    const body = c.req.valid("json");
+    // Access first: a run the caller cannot see is a 404 before the tier is looked at.
     const run = await getRun(c.req.param("runId"), userId, { cost: false });
-    const quote = run?.orgId
-      ? await quoteStoredDocuments({ scope: { orgId: run.orgId, projectId: run.projectId, runId: run.id }, pipeline: run.pipeline, estimate })
+    if (!run) return apiStatusError(c, 404, "Run not found");
+    const refused = chartExportOverrideError(body.chartExport?.tier, `reprocess estimate run=${c.req.param("runId")}`);
+    if (refused) return apiStatusError(c, 400, refused, { code: CHART_EXPORT_TIER_UNAVAILABLE_CODE, details: { field: "chartExport.tier" } });
+    const estimate = await estimateRunReprocess({ runId: c.req.param("runId"), userId, options: body });
+    if (!estimate) return apiStatusError(c, 404, "Run not found");
+    // The same quote shape as POST /v1/estimate, from the run's measured documents, quoting the pipeline the reprocess
+    // would run (the override, else the run's tier capped at what the project resolves to now), so
+    // `quote.settings.chartExport` labels the tier the estimate priced, never an old uncapped one (R3-L1).
+    const replayed = await replayedRunPipeline(run, body.chartExport?.tier ?? null);
+    const quote = run.orgId
+      ? await quoteStoredDocuments({
+        scope: { orgId: run.orgId, projectId: run.projectId, runId: run.id }, pipeline: replayed, estimate, origin: runOriginOf(c),
+        ...(body.chartExport ? { settings: { chartExport: body.chartExport.tier } } : {}),
+      })
       : null;
     return c.json({ estimate, quote, billing: billingState() });
   })
@@ -333,7 +347,7 @@ export const runsRoutes = new Hono()
     );
     let reprocessed: Awaited<ReturnType<typeof reprocessRun>>;
     try {
-      reprocessed = await reprocessRun(c.req.param("runId"), userId, body);
+      reprocessed = await reprocessRun(c.req.param("runId"), userId, { ...body, origin: runOriginOf(c), apiKeyId: c.get("apiKey")?.keyId ?? null });
     } catch (error) {
       if (isReprocessRejectedError(error)) {
         return apiStatusError(c, error.statusCode, error.message, { code: error.code, details: error.details });
