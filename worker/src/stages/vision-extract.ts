@@ -40,7 +40,7 @@ import { healthyDocuments } from "../pipeline/document-health.js";
 import type { CommandRunner } from "../tools/runner.js";
 import { type ArtifactStore, cleanupTempFile, keyFromStorageUri } from "../tools/storage.js";
 import { runArtifactRoot } from "../lib/artifact-root.js";
-import { configuredVisionServedRoute, executeVisionRuntime, visionCall } from "../tools/vision-runtime.js";
+import { configuredVisionServedRoute, executeVisionRuntime, visionCall, VisionImageOverBudgetError } from "../tools/vision-runtime.js";
 import { findVisionBilledUsage, findVisionOutputRejected } from "../tools/vision-stream.js";
 import { primaryFailureUsages, priceVisionResult, visionFailureUsages, type VisionFailureUsage } from "../lib/guarded-vision-call.js";
 import { allowHostedCall } from "../lib/privacy-guard.js";
@@ -82,7 +82,7 @@ import { MIXED_SCAN_IMAGE_SIGNAL, tableLeakPageCap } from "@docslurp/shared";
 import { buildVisionPageFacts, recordPageFacts, type VisionPageOutcome } from "../pipeline/page-facts.js";
 import { VISUAL_CANDIDATE_STATS_KEY, type BBox } from "@docslurp/shared";
 import { chargeChartExports, chartExportCanSpend } from "../chart-export/billing.js";
-import { chartExportActive, chartExportConfigOf } from "../chart-export/config.js";
+import { chartCallRuntimeOptions, chartExportActive, chartExportConfigOf } from "../chart-export/config.js";
 import { chartExportReasoning, chartExportVisionConfig } from "../chart-export/model-selection.js";
 import { ChartExportSession, type ChartExportRunBudget } from "../chart-export/session.js";
 import {
@@ -1796,6 +1796,7 @@ export class VisionExtractStage implements Stage {
               gate,
               promptText: request.prompt,
               ...(chartExportReasoning(request.modelUri) ? { reasoning: chartExportReasoning(request.modelUri)! } : {}),
+              ...chartCallRuntimeOptions(request),
               ...(request.signal ? { signal: request.signal } : {}),
             });
             recordVisionFailureUsages(state, primaryFailureUsages(result.primaryFailure, this.cfg, page));
@@ -1810,6 +1811,8 @@ export class VisionExtractStage implements Stage {
               finishReason: result.finishReason ?? null,
             };
           } catch (error) {
+            // Refused before admission (image above the chart limit): nothing was sent, so there is no attempt to record.
+            if (error instanceof VisionImageOverBudgetError) throw error;
             if (!findVisionGuardStop(error)) {
               this.recordFailedVisionAttempt(state, document, vision, { pageNumber: request.pageNumber, artifactUri: "" }, toError(error).message, error);
             } else {
@@ -1865,7 +1868,12 @@ export class VisionExtractStage implements Stage {
           stats: {
             ...result.stats,
             [VISUAL_CANDIDATE_STATS_KEY]: pass.stats,
-            chartExport: { ...totals, lowConfidenceCandidates: pass.lowConfidence, changedPages: pass.changedPages, artifactUri: pass.artifactUri },
+            chartExport: {
+              ...totals, lowConfidenceCandidates: pass.lowConfidence, changedPages: pass.changedPages, artifactUri: pass.artifactUri,
+              // Repeated pictures read once (readsAvoided: placements served by another placement's read, never charged).
+              dedupe: pass.dedupe,
+              ...(pass.facts ? { factsCandidates: pass.facts } : {}),
+            },
           },
         };
       } catch (error) {

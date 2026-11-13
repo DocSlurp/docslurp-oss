@@ -17,13 +17,12 @@ export const DEFAULT_PROJECT_CHAT_MODEL: ProjectChatModelId =
   "z-ai/glm-5.3-flash";
 
 /**
- * Speed boost on the default efficient model answers with DeepSeek V4.1 Flash
- * on Nitro instead of GLM 5.3 Flash on Nitro: measured 2026-11-10 (3 runs,
- * ~3k-token prompt), DeepSeek Nitro steps took 0.9-1.1 s against 2.3-2.7 s.
+ * Speed boost model swaps: a model Speed boost answers with instead of the chosen model's own Nitro variant. Empty:
+ * Speed boost answers with the chosen model on Nitro. The 2026-11-10 swap from GLM 5.3 Flash to DeepSeek V4.1 Flash
+ * on Nitro was removed (owner, 2026-11-13): a swap is an automatic selection, and DeepSeek V4.1 Flash is never
+ * selected automatically (automatic-model-selection.ts). A swap target must never be such a model.
  */
-export const SPEED_BOOST_MODEL_SWAPS: Readonly<Record<string, ProjectChatModelId>> = {
-  "z-ai/glm-5.3-flash": "deepseek/deepseek-v4.1-flash-1017:nitro",
-};
+export const SPEED_BOOST_MODEL_SWAPS: Readonly<Record<string, ProjectChatModelId>> = {};
 
 export function isProjectChatModelId(model: unknown): model is ProjectChatModelId {
   return PROJECT_CHAT_MODELS.some((candidate) => candidate.id === model);

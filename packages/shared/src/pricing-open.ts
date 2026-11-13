@@ -155,6 +155,8 @@ export const OPEN_PRICING: PricingProvider = {
   chatAnswerCredits: () => 0,
   featureCredits: () => 0,
   visualExportCredits: () => 0,
+  visualExportRetryCredits: () => 0,
+  chartExportExpectedRetriesPerRead: () => 0,
   speedBoostMultiplier: (speedBoost) => {
     if (typeof speedBoost !== "boolean") throw new Error("speedBoost must be a boolean");
     return 1;
@@ -186,6 +188,7 @@ export const OPEN_PRICING: PricingProvider = {
     sandboxCostCents: () => 0,
     sandboxRatesObservedAt: () => null,
     workerSlotUsdPerHour: () => null,
+    chartGeneratorMaxPricesUsdPerMTok: () => null,
   },
 };
 

@@ -119,6 +119,9 @@ export type ComputeRateOverrides = Partial<{
   storageCentsPerGbMonth: number;
 }>;
 
+/** Price ceilings for a chart & diagram export generator, USD per million tokens. */
+export type ChartGeneratorPriceCeiling = { inputUsdPerMTok: number; outputUsdPerMTok: number };
+
 export interface PricingProvider {
   apiVersion: typeof PRICING_PROVIDER_API_VERSION;
   /** Stable id for logs and receipts. `open` is reserved for the open default. */
@@ -161,6 +164,16 @@ export interface PricingProvider {
   featureCredits(feature: DocumentFeature, pages: number): number;
   /** Credits for chart & diagram export (per visual a generator model read, exported or not). */
   visualExportCredits(input: VisualExportChargeInput): number;
+  /**
+   * Credits for the second read of a model-read visual: the one repair of an invalid answer, or the one retry of an
+   * answer cut off at its output cap. Charged once per visual at most (a visual's first read plus at most one second read).
+   */
+  visualExportRetryCredits(): number;
+  /**
+   * Expected second reads per model-read visual, between 0 and 1, for estimates and quotes: they add this share of
+   * `visualExportRetryCredits()` to every model-read visual they price.
+   */
+  chartExportExpectedRetriesPerRead(): number;
   /** Multiplier on unit charges for the opt-in speed boost (1 when off). */
   speedBoostMultiplier(speedBoost: boolean): number;
   /** Share of the completion page charge a run pays, given the stages it executes and reuses. */
@@ -194,13 +207,20 @@ export interface PricingProvider {
     sandboxRatesObservedAt(provider: string): string | null;
     /** Infrastructure cost of one worker slot per hour in USD, for routing cost bounds; null when unknown. */
     workerSlotUsdPerHour(): number | null;
+    /**
+     * Highest input and output list prices (USD per million tokens) a chart & diagram export generator may have for the
+     * worker to call it, or null to let core derive them from `visualExportCredits` (worker
+     * chart-export/model-selection.ts).
+     */
+    chartGeneratorMaxPricesUsdPerMTok(): ChartGeneratorPriceCeiling | null;
   };
 }
 
 const REQUIRED_METHODS: ReadonlyArray<keyof PricingProvider> = [
   "pageCredits", "richPagesForOutputTokens", "mediaRichPages", "storageCreditsPerMonth", "extractRetentionCredits",
   "searchUnits", "searchCredits", "webSearchCredits", "webPageCredits", "webMapCredits", "chatModelTier",
-  "chatAnswerUnits", "chatAnswerCredits", "featureCredits", "visualExportCredits", "speedBoostMultiplier", "pageChargeShare",
+  "chatAnswerUnits", "chatAnswerCredits", "featureCredits", "visualExportCredits", "visualExportRetryCredits",
+  "chartExportExpectedRetriesPerRead", "speedBoostMultiplier", "pageChargeShare",
   "qualityModePricing", "publicPrices", "estimateIngest", "quoteUpload", "quote",
 ];
 
@@ -227,7 +247,7 @@ export function assertPricingProvider(value: unknown): asserts value is PricingP
   const cost = provider.internalCost;
   if (!cost || typeof cost.computeRates !== "function" || typeof cost.listCredits !== "function"
     || typeof cost.sandboxCostCents !== "function" || typeof cost.sandboxRatesObservedAt !== "function"
-    || typeof cost.workerSlotUsdPerHour !== "function") {
+    || typeof cost.workerSlotUsdPerHour !== "function" || typeof cost.chartGeneratorMaxPricesUsdPerMTok !== "function") {
     throw new Error(`pricing provider ${provider.id} has an incomplete internalCost`);
   }
 }

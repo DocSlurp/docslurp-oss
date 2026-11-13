@@ -90,6 +90,7 @@ export type {
 export * from "./openrouter-usage.js";
 export * from "./openrouter-routing.js";
 export * from "./provider-pools.js";
+export * from "./automatic-model-selection.js";
 export * from "./provider-tiers.js";
 export * from "./tier-options.js";
 export * from "./provider-regions.js";
