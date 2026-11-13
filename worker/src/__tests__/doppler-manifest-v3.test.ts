@@ -349,7 +349,7 @@ describe("sharded documents: one manifest per shard", () => {
     await rm(dir, { recursive: true, force: true });
     await writeShardedFolder(dir, shards, files);
     try {
-      return await readDopplerFigureDir(dir, { pageCount: 3, gaps: options.gaps ?? null });
+      return await readDopplerFigureDir(dir, { pageCount: 3, gaps: options.gaps ?? null, ...(options.partial ? { expect: "partial" as const } : {}) });
     } catch (error) {
       if (error instanceof DopplerFigureRejection) return error.rule;
       throw error;
@@ -411,15 +411,21 @@ describe("sharded documents: one manifest per shard", () => {
     expect(await shardRule((m) => [{ range: [1, 2], text: v3ShardText(m, [1, 2]) }, { range: [3, 4], text: v3ShardText(m, [3, 4]) }])).toBe("page-outside-document");
   }, 60_000);
 
-  it("a hole is allowed only where a reported gap covers it whole (the #464 contract: a range with no manifest)", async () => {
+  it("a partial outcome's declared gaps keep the extracted shards (council round 2 H2, app #464); an extracted one stays strict", async () => {
     const holed = (m: ReturnType<typeof base>) => [{ range: [1, 1] as [number, number], text: v3ShardText(m, [1, 1]) }, { range: [3, 3] as [number, number], text: v3ShardText(m, [3, 3]) }];
     const gap = (first: number, last: number) => ({ first, last, reason: "plugin:shard-over-share" as const });
-    expect(await shardRule(holed, { gaps: [gap(2, 2)] }).then((r) => typeof r === "string" ? r : "set")).toBe("set");
-    // A leading hole covered by a gap passes the contiguity rule (page 1's files then do not match: refused for that).
-    expect(await shardRule((m) => [{ range: [2, 3], text: v3ShardText(m, [2, 3]) }], { gaps: [gap(1, 1)] })).not.toBe("shards-not-contiguous");
-    // A gap elsewhere, or one only partly covering the hole, excuses nothing.
-    expect(await shardRule(holed, { gaps: [gap(3, 3)] })).toBe("shards-not-contiguous");
-    expect(await shardRule((m) => [{ range: [3, 3], text: v3ShardText(m, [3, 3]) }], { gaps: [gap(2, 2)] })).toBe("shards-not-contiguous");
+    const kind = (r: unknown) => typeof r === "string" ? r : "set";
+    // A middle gap: the shards on either side are read.
+    expect(kind(await shardRule(holed, { partial: true, gaps: [gap(2, 2)] }))).toBe("set");
+    // A first-batch gap and a trailing gap pass coverage (this fixture then refuses page 1's or page 3's files, which only a
+    // shard may hold: not a contiguity refusal).
+    expect(await shardRule((m) => [{ range: [2, 3], text: v3ShardText(m, [2, 3]) }], { partial: true, gaps: [gap(1, 1)] })).not.toBe("shards-not-contiguous");
+    expect(await shardRule((m) => [{ range: [1, 2], text: v3ShardText(m, [1, 2]) }], { partial: true, gaps: [gap(3, 3)] })).not.toBe("shards-not-contiguous");
+    // A gap overlapping a shard, or one that leaves a hole: refused.
+    expect(await shardRule(holed, { partial: true, gaps: [gap(2, 3)] })).toBe("gap-overlaps-shard");
+    expect(await shardRule((m) => [{ range: [3, 3], text: v3ShardText(m, [3, 3]) }], { partial: true, gaps: [gap(2, 2)] })).toBe("shards-not-contiguous");
+    // Not partial: a hole is refused even with a declared gap.
+    expect(await shardRule(holed, { gaps: [gap(2, 2)] })).toBe("shards-not-contiguous");
   }, 60_000);
 });
 

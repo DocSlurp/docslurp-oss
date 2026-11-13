@@ -158,6 +158,7 @@ function checkedShards(shards: readonly LedgerShard[], imagesPrefix: string, con
     }
     previous = shard.last;
   }
+  // Holes only where a recorded gap covers them whole (the folder itself passed dopplerShardCoverage when it was read).
   if (contiguous && !dopplerShardsContiguous(shards.map((shard) => [shard.first, shard.last] as const), contiguous.gaps)) {
     throw new DocumentAssetLedgerError("invalid-level");
   }

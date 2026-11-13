@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { imageAnchorsToAltText } from "../image-anchors.js";
-import { dopplerShardsContiguous } from "../doppler-assets.js";
+import { dopplerShardCoverage } from "../doppler-assets.js";
 import {
   DOPPLER_FIGURE_FILE_NAME, DOPPLER_FIGURE_LIMITS, DOPPLER_FIGURES_VERSION, dopplerFigureFileName, dopplerFigureManifestSchema,
   dopplerFigureUrls, dopplerImageMarkerIds, parseDopplerFigureId, parseDopplerImageMarkerLine, resolveDopplerImageMarkers,
@@ -150,18 +150,31 @@ describe("Doppler continuation comments", () => {
   });
 });
 
-describe("dopplerShardsContiguous: shards from page 1, holes only where a gap covers them whole", () => {
+describe("dopplerShardCoverage: shards plus declared gaps (partial) or the strict rule (extracted)", () => {
   const g = (first: number, last: number) => ({ first, last });
-  it("accepts contiguous shards and gap-covered holes", () => {
-    expect(dopplerShardsContiguous([[1, 4], [5, 9]], null)).toBe(true);
-    expect(dopplerShardsContiguous([[1, 4], [9, 9]], [g(5, 8)])).toBe(true);
-    expect(dopplerShardsContiguous([[1, 4], [9, 9]], [g(5, 6), g(7, 8)])).toBe(true);
-    expect(dopplerShardsContiguous([[3, 4]], [g(1, 2)])).toBe(true);
+  const doc = (last: number, partial: boolean) => ({ first: 1, last, partial });
+  it("a partial outcome keeps its shards around a first, middle or trailing gap", () => {
+    expect(dopplerShardCoverage([[3, 9]], [g(1, 2)], doc(9, true))).toBeNull();
+    expect(dopplerShardCoverage([[1, 4], [9, 9]], [g(5, 8)], doc(9, true))).toBeNull();
+    expect(dopplerShardCoverage([[1, 4], [9, 9]], [g(5, 6), g(7, 8)], doc(9, true))).toBeNull();
+    expect(dopplerShardCoverage([[1, 4]], [g(5, 9)], doc(9, true))).toBeNull();
   });
-  it("refuses an uncovered or partly covered hole, and overlaps", () => {
-    expect(dopplerShardsContiguous([[2, 4]], null)).toBe(false);
-    expect(dopplerShardsContiguous([[1, 4], [9, 9]], [g(5, 7)])).toBe(false);
-    expect(dopplerShardsContiguous([[1, 4], [9, 9]], [g(5, 6), g(8, 8)])).toBe(false);
-    expect(dopplerShardsContiguous([[1, 4], [4, 9]], null)).toBe(false);
+  it("refuses a hole no gap declares, a gap overlapping a shard, and anything outside the asked pages", () => {
+    expect(dopplerShardCoverage([[1, 4], [9, 9]], [g(5, 7)], doc(9, true))).toBe("shards-not-contiguous");
+    expect(dopplerShardCoverage([[1, 4]], [g(5, 8)], doc(9, true))).toBe("shards-not-contiguous");
+    expect(dopplerShardCoverage([[1, 4], [5, 9]], [g(4, 4)], doc(9, true))).toBe("gap-overlaps-shard");
+    expect(dopplerShardCoverage([[1, 4], [5, 10]], null, doc(9, false))).toBe("page-outside-document");
+    expect(dopplerShardCoverage([[1, 4]], [g(5, 10)], doc(9, true))).toBe("page-outside-document");
+  });
+  it("an extracted outcome keeps the strict rule: a hole is refused even with a declared gap", () => {
+    expect(dopplerShardCoverage([[1, 4], [5, 9]], null, doc(9, false))).toBeNull();
+    expect(dopplerShardCoverage([[1, 4]], null, doc(9, false))).toBeNull();
+    expect(dopplerShardCoverage([[2, 4]], null, doc(9, false))).toBe("shards-not-contiguous");
+    expect(dopplerShardCoverage([[1, 4], [9, 9]], [g(5, 8)], doc(9, false))).toBe("shards-not-contiguous");
+  });
+  it("a resumed range is checked over its own pages; after a gap's resume the document still covers", () => {
+    expect(dopplerShardCoverage([[5, 8]], null, { first: 5, last: 8, partial: false })).toBeNull();
+    // The gap 5-8 resumed as its shard: the document's shards now tile it with no gap left.
+    expect(dopplerShardCoverage([[1, 4], [5, 8], [9, 9]], [], doc(9, false))).toBeNull();
   });
 });

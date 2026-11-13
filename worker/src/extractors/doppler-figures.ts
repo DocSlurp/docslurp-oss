@@ -23,7 +23,7 @@ import type { Readable } from "node:stream";
 import {
   DOPPLER_FIGURE_FILE_NAME, DOPPLER_FIGURE_LIMITS, DOPPLER_FIGURE_MEDIA_TYPES, DOPPLER_FIGURES_INDEX_SLOT, DOPPLER_FIGURES_INDEX_VERSION,
   DOPPLER_FIGURES_MANIFEST, DOPPLER_MANIFEST_V3_FILE, DOPPLER_MANIFEST_V3_LINE_BYTES, DOPPLER_MANIFEST_V2_LIMITS, DOPPLER_STORE_LAYOUT,
-  DOPPLER_SHARDS_MAX, dopplerShardsContiguous, type DopplerFigureGap, DopplerManifestV3Error, DopplerManifestV3Validator, dopplerShardFolder, parseDopplerShardFolder, addDocumentAssetCount, dopplerAssetCaps, dopplerAssetPath, dopplerAssetStorageKey,
+  DOPPLER_SHARDS_MAX, dopplerShardCoverage, type DopplerFigureGap, DopplerManifestV3Error, DopplerManifestV3Validator, dopplerShardFolder, parseDopplerShardFolder, addDocumentAssetCount, dopplerAssetCaps, dopplerAssetPath, dopplerAssetStorageKey,
   dopplerDocumentPrefix, dopplerEntryFileCap, dopplerFigureSlot, dopplerImageExtractEnabled, dopplerImageMarkerIds, dopplerLedgerAssets,
   dopplerManifestRunFacts, dopplerManifestV3RunFacts, emptyDocumentAssetCounts, parseDopplerFigureId, parseDopplerManifest,
   type DocumentAsset, type DocumentAssetCounts, type DopplerAssetCaps, type DopplerFigureFormat, type DopplerFigureRecord,
@@ -406,8 +406,10 @@ export async function readDopplerFigureDir(
   dir: string,
   args: {
     pageCount: number; signal?: AbortSignal; expect?: DopplerFigureExpectation; sourceSha256?: string | null; hooks?: DopplerFigureReadHooks;
-    /** The outcome's gaps (SandboxedPdfFigureOutcome.gaps): the only holes allowed between version 3 shards. */
+    /** The outcome's declared gaps (SandboxedPdfFigureOutcome.gaps): with a partial outcome, the pages no shard covers. */
     gaps?: readonly DopplerFigureGap[] | null;
+    /** The pages this folder was asked for (a resumed shard or gap); the whole document by default. */
+    range?: readonly [number, number];
     /** Where a legacy (version 1 or 2) manifest's whole-JSON parse is reserved; the worker's figure budget by default. */
     parseBudget?: ByteBudget;
   },
@@ -455,14 +457,14 @@ export async function readDopplerFigureDir(
     }
     if (shardRanges.length === 0) throw new DopplerFigureRejection("missing-manifest");
     shardRanges.sort((a, b) => a[0] - b[0]);
-    // Shard ranges never overlap: page paths are global, and each page belongs to one shard's manifest. They start at
-    // page 1 and follow each other with no hole (the provider splits the document in order), and none ends past the
-    // document's last page.
+    // Shard ranges never overlap: page paths are global, and each page belongs to one shard's manifest.
     for (let i = 1; i < shardRanges.length; i += 1) if (shardRanges[i]![0] <= shardRanges[i - 1]![1]) throw new DopplerFigureRejection("shards-overlap");
-    // A hole is allowed only where the provider reported a gap covering it whole (a range with no manifest: it is
-    // resumed by a fresh pass over its pages, which becomes that range's shard).
-    if (!dopplerShardsContiguous(shardRanges, args.gaps)) throw new DopplerFigureRejection("shards-not-contiguous");
-    if (shardRanges.at(-1)![1] > pageCount) throw new DopplerFigureRejection("page-outside-document");
+    // Coverage (dopplerShardCoverage): a partial outcome's shards and declared gaps (a failed batch or shard publishes no
+    // folder) cover the asked pages exactly once; an extracted outcome keeps the strict rule (from the first page, no hole,
+    // within the document).
+    const asked = args.range ?? [1, pageCount] as const;
+    const coverage = dopplerShardCoverage(shardRanges, args.gaps, { first: asked[0], last: asked[1], partial: args.expect === "partial" });
+    if (coverage) throw new DopplerFigureRejection(coverage);
   }
   // Page folders as listed (device and inode), to refuse one swapped before it is opened.
   const listedDirs = new Map<string, Stats>();
