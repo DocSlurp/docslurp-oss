@@ -283,6 +283,7 @@ export class ChartExportSession {
   /** Partial index -> candidate id that claimed it. */
   private readonly claims = new Map<number, string>();
   private presence: DeterministicVisualResult["presence"] = {};
+  private deferred: NonNullable<DeterministicVisualResult["deferred"]> = [];
   private readonly selections = new Map<string, GeneratorSelection | null>();
   private readonly limits: ChartExportLimits;
   private readonly runBudget: ChartExportRunBudget;
@@ -382,6 +383,7 @@ export class ChartExportSession {
     this.partials = result.partials.slice(0, this.limits.maxVisuals);
     this.claims.clear();
     this.presence = result.presence ?? {};
+    this.deferred = (result.deferred ?? []).slice(0, 1000);
   }
 
   /** Pages deterministic partials sit on (partials without a page are on no known page). */
@@ -615,6 +617,6 @@ export class ChartExportSession {
   }
 
   stats(): VisualCandidateStats {
-    return buildVisualCandidateStats({ candidates: this.candidates, presence: this.presence, exported: this.visuals });
+    return buildVisualCandidateStats({ candidates: this.candidates, presence: this.presence, exported: this.visuals, deferred: this.deferred });
   }
 }

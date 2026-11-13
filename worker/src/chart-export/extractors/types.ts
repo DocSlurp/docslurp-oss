@@ -29,11 +29,16 @@ export interface DeterministicVisual {
 
 export interface DeterministicRefusal { locator: string; reason: string }
 
+/** A part left for a later, larger-budget pass (never dropped): today an SVG past the input's scene ceiling. */
+export interface DeterministicDeferral { locator: string; reason: string }
+
 export interface DeterministicVisualResult {
   schemaVersion: "chart-export-deterministic@v1";
   visuals: DeterministicVisual[];
   /** Parts that were skipped because a limit or parser refused them. */
   refusals: DeterministicRefusal[];
+  /** Parts deferred to a later pass; present only when non-empty. */
+  deferred?: DeterministicDeferral[];
 }
 
 export function emptyVisual(source: DeterministicSource, locator: string): DeterministicVisual {

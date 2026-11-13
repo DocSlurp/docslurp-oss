@@ -2,16 +2,20 @@
 // Calibrates CHART_EXTRACT_LIMITS.maxMarkerPairTests: times svg-geometry's marker/vertex de-duplication on hostile
 // packed-cell SVGs through the guest bundle, and reports the cost per pair test and per guest input.
 //
-//   node marker-cap-bench.mjs <worker/dist/chart-export/guest.bundle.mjs> [runs=3]
+//   node marker-cap-bench.mjs <worker/dist/chart-export/guest.bundle.mjs> [runs=3] [mode=calibrate|doc100]
+//
+// calibrate: per-pair-test cost on single SVGs (with an unlimited budget), and inputs of many near-cap SVGs.
+// doc100: only the council's 100-SVG HTML input with the production budget, in a fresh process, reporting wall time,
+// peak RSS and what happened to each SVG (exact, approximate, deferred, refused).
 //
 // Scenes (generated here, no files): V polyline vertices packed into one 3-unit cell and P markers in the next cell,
 // more than 1.5 from every vertex, so no marker short-circuits and the filter runs exactly V × P pair tests.
 // "html×N" puts N copies of a near-cap SVG in one HTML input, which shares one budget across its SVGs.
 import { pathToFileURL } from "node:url";
 
-const [bundle, runsArg] = process.argv.slice(2);
+const [bundle, runsArg, mode = "calibrate"] = process.argv.slice(2);
 const runs = Number(runsArg ?? 3);
-const { extractDeterministicVisuals, CHART_EXTRACT_LIMITS } = await import(pathToFileURL(bundle).href);
+const { extractDeterministicVisuals, markerBudget, CHART_EXTRACT_LIMITS } = await import(pathToFileURL(bundle).href);
 const budget = CHART_EXTRACT_LIMITS.maxMarkerPairTests;
 
 function packedSvg(vertices, markers) {
@@ -29,19 +33,28 @@ function packedSvg(vertices, markers) {
   return s + '<text x="10" y="98">A</text><text x="50" y="98">B</text><text x="90" y="98">C</text></svg>';
 }
 
-function time(input) {
+const unlimited = () => ({ remaining: Number.MAX_SAFE_INTEGER, pairTests: 0, primitives: 0, inputsAfter: 0 });
+function time(input, makeBudget = unlimited) {
   const out = [];
   for (let r = 0; r < runs; r++) {
-    const work = { pairTests: 0 };
+    const b = makeBudget();
     const t0 = process.hrtime.bigint();
-    const result = extractDeterministicVisuals(input, { markerWork: work });
+    const result = extractDeterministicVisuals(input, { markerBudget: b });
     const ms = Number(process.hrtime.bigint() - t0) / 1e6;
-    out.push({ ms, pairTests: work.pairTests, refusals: [...new Set(result.refusals.map((x) => x.reason))] });
+    const approximate = result.visuals.filter((v) => v.reason === "approximate-marker-dedup").length;
+    out.push({ ms, pairTests: b.pairTests, visuals: result.visuals.length, exact: result.visuals.length - approximate, approximate, deferred: result.deferred?.length ?? 0, refusals: [...new Set(result.refusals.map((x) => x.reason))] });
   }
   out.sort((a, b) => a.ms - b.ms);
   return out[Math.floor(out.length / 2)];
 }
 
+if (mode === "doc100") {
+  const near = packedSvg(2500, Math.floor(budget / 2500 / 100) * 100 - 100);
+  const html = `<html><body>${near.repeat(100)}</body></html>`;
+  const row = time({ kind: "html", text: html }, () => markerBudget());
+  console.log(JSON.stringify({ node: process.version, mode, scene: `html × 100 near-cap SVGs (${(html.length / 1e6).toFixed(1)} MB), production budget`, ...row, peakRssMb: Math.round(process.resourceUsage().maxRSS / 1024) }, null, 1));
+  process.exit(0);
+}
 const rows = [];
 // Baseline: the same SVG with no markers (parse + scene cost only), to subtract from the pair-test runs.
 const base = time({ kind: "svg", text: packedSvg(2500, 0) });
@@ -55,6 +68,6 @@ const perSvg = Math.floor(budget / 2500 / 100) * 100 - 100;
 const near = packedSvg(2500, perSvg);
 for (const copies of [10, 100]) {
   const html = `<html><body>${near.repeat(copies)}</body></html>`;
-  rows.push({ scene: `html × ${copies} SVGs of 2.5k × ${perSvg} (${(html.length / 1e6).toFixed(1)} MB)`, ...time({ kind: "html", text: html }) });
+  rows.push({ scene: `html × ${copies} SVGs of 2.5k × ${perSvg} (${(html.length / 1e6).toFixed(1)} MB), production budget`, ...time({ kind: "html", text: html }, () => markerBudget()) });
 }
 console.log(JSON.stringify({ node: process.version, budget, runs, rows }, null, 1));

@@ -188,6 +188,21 @@ export type ExportedVisual = z.infer<typeof exportedVisualSchema>;
  * Per-document visual stats, recorded at ingest even when chart export is off (free signals only), so chat suggestions
  * and the ingest report can say "this project has N charts that were not exported".
  */
+/**
+ * A visual the free (deterministic) extractor deferred instead of finishing in the document's run, for a later
+ * low-priority pass with a larger budget. `input` says what to re-read: the document's own source file, or one of its
+ * Doppler figure files (`figureId`, the figure's own id; its slot is `doppler-figure:<figureId>`). `locator` is where in
+ * that input (`svg`, `svg[3]`, `word/media/image2.svg`, ...); `reason` is a short machine slug. Never customer content.
+ */
+export const deferredVisualSchema = z.strictObject({
+  input: z.enum(["source", "doppler-figure"]),
+  locator: z.string().max(512),
+  reason: z.string().max(120),
+  pageNumber: z.number().int().positive().nullable(),
+  figureId: z.string().max(200).nullable(),
+});
+export type DeferredVisual = z.infer<typeof deferredVisualSchema>;
+
 export const visualCandidateStatsSchema = z.object({
   charts: z.number().int().nonnegative().default(0),
   diagrams: z.number().int().nonnegative().default(0),
@@ -195,8 +210,21 @@ export const visualCandidateStatsSchema = z.object({
   pagesWithUnexportedVisuals: z.array(z.number().int().positive()).max(5000).default([]),
   exported: z.number().int().nonnegative().default(0),
   bySource: z.partialRecord(visualSourceSchema, z.number().int().nonnegative()).default({}),
+  /** Visuals deferred to a later pass (present only when some were): never dropped, picked up by the deferred pass. */
+  deferred: z.array(deferredVisualSchema).max(1000).optional(),
 });
 export type VisualCandidateStats = z.infer<typeof visualCandidateStatsSchema>;
+
+/**
+ * The deferred visuals recorded in a stage's stats (`stats[VISUAL_CANDIDATE_STATS_KEY].deferred`): what a later pass
+ * reads to find work. Tolerant of missing or malformed stats (returns []); every entry is validated.
+ */
+export function deferredVisualsOf(stageStats: unknown): DeferredVisual[] {
+  const stats = stageStats && typeof stageStats === "object" ? (stageStats as Record<string, unknown>)[VISUAL_CANDIDATE_STATS_KEY] : null;
+  const list = stats && typeof stats === "object" ? (stats as Record<string, unknown>).deferred : null;
+  if (!Array.isArray(list)) return [];
+  return list.slice(0, 1000).flatMap((entry) => { const parsed = deferredVisualSchema.safeParse(entry); return parsed.success ? [parsed.data] : []; });
+}
 
 /** Key under document metadata / stage stats where `VisualCandidateStats` is stored. */
 export const VISUAL_CANDIDATE_STATS_KEY = "visualCandidates" as const;

@@ -7,7 +7,7 @@ import { visualSpecSchema } from "@docslurp/shared";
 import { vmOnlyParsing } from "../../lib/vm-only-parsing.js";
 import { resolveScriptsDir } from "../../tools/scripts-dir.js";
 import type { CommandRunner } from "../../tools/runner.js";
-import { extractDeterministicVisuals as guestExtract, type DeterministicVisualInput, type DeterministicVisualOptions } from "./index.js";
+import { extractDeterministicVisuals as guestExtract, markerBudget, type DeterministicVisualInput, type DeterministicVisualOptions } from "./index.js";
 import { CHART_EXTRACT_LIMITS } from "./limits.js";
 import type { DeterministicVisualResult } from "./types.js";
 
@@ -51,15 +51,22 @@ function validVisual(v: unknown): boolean {
   return true;
 }
 
-/** Validate a guest result (also used on in-process results so both paths return the same shape). */
+const validEntry = (r: unknown) => !!r && typeof r === "object" && !Array.isArray(r) && Object.keys(r).sort().join(",") === "locator,reason"
+  && isStr((r as Record<string, unknown>).locator, 512) && isStr((r as Record<string, unknown>).reason, 120);
+
+/**
+ * Validate a guest result (also used on in-process results so both paths return the same shape). `deferred` is optional:
+ * the guest sends it only when it deferred something, so a result without it has exactly the earlier shape.
+ */
 export function validateDeterministicResult(raw: unknown): DeterministicVisualResult {
   const o = raw as Record<string, unknown> | null;
+  const keys = o && typeof o === "object" ? Object.keys(o).sort().join(",") : "";
   const ok = !!o && typeof o === "object" && !Array.isArray(o)
-    && Object.keys(o).sort().join(",") === "refusals,schemaVersion,visuals"
+    && (keys === "refusals,schemaVersion,visuals" || (keys === "deferred,refusals,schemaVersion,visuals" && Array.isArray(o.deferred) && o.deferred.length > 0 && o.deferred.length <= 1000 && o.deferred.every(validEntry)))
     && o.schemaVersion === "chart-export-deterministic@v1"
     && Array.isArray(o.visuals) && o.visuals.length <= CHART_EXTRACT_LIMITS.maxVisuals && o.visuals.every(validVisual)
     && Array.isArray(o.refusals) && o.refusals.length <= 1000
-    && o.refusals.every((r) => !!r && typeof r === "object" && Object.keys(r).sort().join(",") === "locator,reason" && isStr((r as Record<string, unknown>).locator, 512) && isStr((r as Record<string, unknown>).reason, 120));
+    && o.refusals.every(validEntry);
   if (!ok) throw new ChartExtractRefusedError("invalid-guest-result");
   return o as unknown as DeterministicVisualResult;
 }
@@ -68,6 +75,12 @@ export function validateDeterministicResult(raw: unknown): DeterministicVisualRe
 export function extractDeterministicVisualsInProcess(input: DeterministicVisualInput, options: DeterministicVisualOptions = {}): DeterministicVisualResult {
   if (vmOnlyParsing()) throw new ChartExtractRefusedError("requires-parser-vm");
   return validateDeterministicResult(guestExtract(input, options));
+}
+
+/** The request's `pages` (the document's page count; scales the guest's SVG budget), only when a sane integer. */
+function pagesOf(options: DeterministicVisualOptions | undefined): { pages?: number } {
+  const pages = options?.pages;
+  return Number.isSafeInteger(pages) && pages! > 0 && pages! <= 100_000 ? { pages: pages! } : {};
 }
 
 function maxBytesFor(kind: DeterministicInputKind): number {
@@ -109,7 +122,7 @@ export async function extractDeterministicVisualsFile(args: DeterministicFileArg
   try {
     const request = path.join(dir, "request.json");
     const output = path.join(dir, "result.json");
-    await writeFile(request, JSON.stringify({ kind: args.kind, diagrams: args.options?.diagrams !== false }), { mode: 0o600 });
+    await writeFile(request, JSON.stringify({ kind: args.kind, diagrams: args.options?.diagrams !== false, ...pagesOf(args.options) }), { mode: 0o600 });
     try {
       await args.runner.run({ binary: "node", args: [path.join(resolveScriptsDir(), "chart-export-extract.mjs"), args.inputPath, request, output], available: true, readOnlyInputs: true, timeoutMs: 60_000 }, args.signal);
     } catch (error) {
@@ -167,10 +180,13 @@ export async function extractDeterministicVisualsBatch(args: DeterministicBatchA
   const refused = (reason: string): DeterministicVisualResult => ({ schemaVersion: "chart-export-deterministic@v1", visuals: [], refusals: [{ locator: "svg", reason }] } as DeterministicVisualResult);
   if (!vmOnlyParsing()) {
     const out: DeterministicVisualResult[] = [];
+    // One budget across the batch, as the guest does.
+    const budget = markerBudget(pagesOf(args.options).pages);
     for (const [i, file] of args.inputPaths.entries()) {
       if (tooLarge.has(i)) { out.push(refused("input-too-large")); continue; }
+      budget.inputsAfter = args.inputPaths.length - 1 - i;
       try {
-        out.push(validateDeterministicResult(guestExtract({ kind: "svg", text: (await readFile(file)).toString("utf8") }, args.options)));
+        out.push(validateDeterministicResult(guestExtract({ kind: "svg", text: (await readFile(file)).toString("utf8") }, { ...args.options, markerBudget: budget })));
       } catch {
         out.push(refused("extract-failed"));
       }
@@ -181,7 +197,7 @@ export async function extractDeterministicVisualsBatch(args: DeterministicBatchA
   try {
     const request = path.join(dir, "request.json");
     const output = path.join(dir, "result.json");
-    await writeFile(request, JSON.stringify({ kind: "svg", diagrams: args.options?.diagrams !== false, batch: args.inputPaths.length }), { mode: 0o600 });
+    await writeFile(request, JSON.stringify({ kind: "svg", diagrams: args.options?.diagrams !== false, batch: args.inputPaths.length, ...pagesOf(args.options) }), { mode: 0o600 });
     // argv: <first input> <request> <output> <more inputs...>: the single-input layout, extended.
     const [first, ...rest] = args.inputPaths;
     const timeoutMs = Math.min(180_000, 60_000 + 3_000 * rest.length);

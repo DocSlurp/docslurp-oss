@@ -11,6 +11,8 @@ export interface CandidateStatsInput {
   /** Presence counts from the deterministic extractor (Office chart parts, SVG figures) not tied to a candidate. */
   presence?: DeterministicVisualResult["presence"];
   exported: readonly ExportedVisual[];
+  /** Visuals the deterministic extractor deferred to a later pass. */
+  deferred?: DeterministicVisualResult["deferred"];
 }
 
 const key = (page: number | null, image: number | null, id: string) => (page === null ? `u:${id}` : image === null ? `p${page}:${id}` : `p${page}:i${image}`);
@@ -66,5 +68,7 @@ export function buildVisualCandidateStats(input: CandidateStatsInput): VisualCan
     pagesWithUnexportedVisuals: unexported,
     exported: input.exported.length,
     bySource,
+    // Only when something was deferred, so other stats keep their exact shape.
+    ...(input.deferred?.length ? { deferred: input.deferred.slice(0, 1000) } : {}),
   });
 }

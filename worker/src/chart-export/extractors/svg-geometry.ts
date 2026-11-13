@@ -201,36 +201,87 @@ function findLegend(texts: TextPrim[], scene: Scene, exclude: Set<TextPrim>): Le
   return out;
 }
 
-/** Pair tests run so far by `withoutVertexMarkers`, shared across every SVG of one guest input (or one batch). */
+/** Pair tests run so far by `withoutVertexMarkers`. */
 export interface MarkerWork { pairTests: number }
 
+const CELL = 3;
 /** The own cell first (a marker drawn on a vertex usually matches there), then the 8 neighbours. */
 const CELL_OFFSETS = [0, 0, -1, -1, -1, 0, -1, 1, 0, -1, 0, 1, 1, -1, 1, 0, 1, 1];
+const cellKey = (cx: number, cy: number) => `${cx},${cy}`;
 
 /**
- * Points that do not sit on a line vertex (|dx| < 1.5 and |dy| < 1.5). Vertices are bucketed in 3-unit cells, so one
- * point tests only the vertices in its own and the 8 neighbouring cells; the exact test still decides each pair, and a
- * non-finite coordinate never passes it, so such points and vertices are skipped. For vertices spread over the plot this
- * is close to linear in points + vertices. Vertices packed into a few cells (a hostile SVG) still cost points × packed
- * vertices, so every pair test counts against `maxMarkerPairTests` in `work`, which the caller shares across all SVGs of
- * one guest input, and the SVG is refused (`svg-marker-limit`) past it. `budget` is overridable only so tests can count
- * the cap without running the full budget.
+ * Polyline vertices bucketed in 3-unit cells, in typed buffers: `coords` holds each cell's vertices contiguously
+ * (x, y pairs, in input order within a cell), `cells` maps a cell key to its index, and the vertices of cell `i` are
+ * `coords[2 * starts[i] .. 2 * starts[i + 1])`. Non-finite vertices never pass the exact test and are left out.
+ * Throws `svg-marker-vertex-limit` above `maxMarkerVertices`: callers check `vertices` first and approximate instead.
+ */
+interface VertexGrid { cells: Map<string, number>; starts: Int32Array; coords: Float64Array }
+
+function vertexGrid(lines: LinePrim[]): VertexGrid {
+  let n = 0;
+  for (const l of lines) for (const v of l.points) if (Number.isFinite(v[0]) && Number.isFinite(v[1])) n++;
+  if (n > CHART_EXTRACT_LIMITS.maxMarkerVertices) throw new ExtractLimitError("svg-marker-vertex-limit");
+  const cells = new Map<string, number>();
+  const cellOf = new Int32Array(n);
+  const counts: number[] = [];
+  let k = 0;
+  for (const l of lines) {
+    for (const v of l.points) {
+      if (!Number.isFinite(v[0]) || !Number.isFinite(v[1])) continue;
+      const key = cellKey(Math.floor(v[0] / CELL), Math.floor(v[1] / CELL));
+      let id = cells.get(key);
+      if (id === undefined) { id = counts.length; cells.set(key, id); counts.push(0); }
+      counts[id]!++;
+      cellOf[k++] = id;
+    }
+  }
+  const starts = new Int32Array(counts.length + 1);
+  for (let i = 0; i < counts.length; i++) starts[i + 1] = starts[i]! + counts[i]!;
+  const fill = starts.slice(0, counts.length);
+  const coords = new Float64Array(2 * n);
+  k = 0;
+  for (const l of lines) {
+    for (const v of l.points) {
+      if (!Number.isFinite(v[0]) || !Number.isFinite(v[1])) continue;
+      const at = fill[cellOf[k++]!]!++;
+      coords[2 * at] = v[0];
+      coords[2 * at + 1] = v[1];
+    }
+  }
+  return { cells, starts, coords };
+}
+
+/**
+ * Upper bound on the pair tests `withoutVertexMarkers` runs: per finite marker, the vertices in its 9 cells (the exact
+ * pass stops early at a match, so it usually runs far fewer). O(markers + vertices); the schedule in `index.ts` orders
+ * and shares the budget by it.
+ */
+export function markerPairEstimate(points: PointPrim[], lines: LinePrim[]): number {
+  if (!points.length || !lines.length) return 0;
+  const { cells, starts } = vertexGrid(lines);
+  let total = 0;
+  for (const p of points) {
+    if (!Number.isFinite(p.x) || !Number.isFinite(p.y)) continue;
+    const cx = Math.floor(p.x / CELL), cy = Math.floor(p.y / CELL);
+    for (let k = 0; k < CELL_OFFSETS.length; k += 2) {
+      const id = cells.get(cellKey(cx + CELL_OFFSETS[k]!, cy + CELL_OFFSETS[k + 1]!));
+      if (id !== undefined) total += starts[id + 1]! - starts[id]!;
+    }
+  }
+  return total;
+}
+
+/**
+ * Points that do not sit on a line vertex (|dx| < 1.5 and |dy| < 1.5): the exact de-duplication. Each point tests only
+ * the vertices in its own and the 8 neighbouring 3-unit cells; a non-finite coordinate never passes the exact test, so
+ * such points are kept and such vertices skipped. Close to linear in points + vertices when vertices are spread out;
+ * packed into a few cells (a hostile SVG) it costs points × packed vertices, so every pair test is counted in `work`
+ * and the call stops with `svg-marker-limit` once `work.pairTests` passes `budget`. The schedule in `index.ts` catches
+ * that and approximates instead.
  */
 export function withoutVertexMarkers(points: PointPrim[], lines: LinePrim[], work: MarkerWork = { pairTests: 0 }, budget: number = CHART_EXTRACT_LIMITS.maxMarkerPairTests): PointPrim[] {
   if (!points.length || !lines.length) return points;
-  const CELL = 3;
-  // Bucket → flat [x0, y0, x1, y1, ...]: an indexed loop over plain numbers is several times cheaper per pair test
-  // than iterating and destructuring tuples.
-  const grid = new Map<string, number[]>();
-  for (const l of lines) {
-    for (const v of l.points) {
-      const x = v[0], y = v[1];
-      if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
-      const key = `${Math.floor(x / CELL)},${Math.floor(y / CELL)}`;
-      const bucket = grid.get(key);
-      if (bucket) bucket.push(x, y); else grid.set(key, [x, y]);
-    }
-  }
+  const { cells, starts, coords } = vertexGrid(lines);
   let tests = work.pairTests;
   const kept: PointPrim[] = [];
   points: for (const p of points) {
@@ -238,11 +289,11 @@ export function withoutVertexMarkers(points: PointPrim[], lines: LinePrim[], wor
     if (!Number.isFinite(px) || !Number.isFinite(py)) { kept.push(p); continue; }
     const cx = Math.floor(px / CELL), cy = Math.floor(py / CELL);
     for (let k = 0; k < CELL_OFFSETS.length; k += 2) {
-      const bucket = grid.get(`${cx + CELL_OFFSETS[k]!},${cy + CELL_OFFSETS[k + 1]!}`);
-      if (bucket === undefined) continue;
-      for (let j = 0; j < bucket.length; j += 2) {
+      const id = cells.get(cellKey(cx + CELL_OFFSETS[k]!, cy + CELL_OFFSETS[k + 1]!));
+      if (id === undefined) continue;
+      for (let j = 2 * starts[id]!, end = 2 * starts[id + 1]!; j < end; j += 2) {
         if (++tests > budget) { work.pairTests = tests; throw new ExtractLimitError("svg-marker-limit"); }
-        if (Math.abs(bucket[j]! - px) < 1.5 && Math.abs(bucket[j + 1]! - py) < 1.5) continue points;
+        if (Math.abs(coords[j]! - px) < 1.5 && Math.abs(coords[j + 1]! - py) < 1.5) continue points;
       }
     }
     kept.push(p);
@@ -251,8 +302,48 @@ export function withoutVertexMarkers(points: PointPrim[], lines: LinePrim[], wor
   return kept;
 }
 
-/** `work`: the marker pair-test counter shared across one guest input (see `withoutVertexMarkers`). */
+/**
+ * Bounded, deterministic stand-in for `withoutVertexMarkers` when an SVG is over its share or its vertex cap: a point is
+ * dropped when a vertex lies in its own 1.5-unit cell. Such a vertex is within 1.5 on both axes (up to rounding at cell
+ * edges), so this keeps some points the exact test would drop and practically never drops one it keeps. Indexes at most `maxMarkerVertices`
+ * cells, in input order. O(points + vertices), no pair tests.
+ */
+export function approximateVertexMarkers(points: PointPrim[], lines: LinePrim[]): PointPrim[] {
+  if (!points.length || !lines.length) return points;
+  const FINE = 1.5;
+  const occupied = new Set<string>();
+  outer: for (const l of lines) {
+    for (const v of l.points) {
+      if (!Number.isFinite(v[0]) || !Number.isFinite(v[1])) continue;
+      occupied.add(cellKey(Math.floor(v[0] / FINE), Math.floor(v[1] / FINE)));
+      if (occupied.size >= CHART_EXTRACT_LIMITS.maxMarkerVertices) break outer;
+    }
+  }
+  return points.filter((p) => !(Number.isFinite(p.x) && Number.isFinite(p.y) && occupied.has(cellKey(Math.floor(p.x / FINE), Math.floor(p.y / FINE)))));
+}
+
+/**
+ * An SVG chart parsed up to the marker/vertex de-duplication: `markers` and `lines` are its inputs, `complete` runs the
+ * rest of the analysis on the markers the caller kept. Lets the caller schedule the one step whose cost grows with
+ * markers × vertices (`withoutVertexMarkers`) across all SVGs of an input, and degrade it (`approximateVertexMarkers`).
+ */
+export interface PreparedSvgChart {
+  markers: PointPrim[];
+  lines: LinePrim[];
+  /** Polyline vertices across `lines` (the de-duplication's memory and work scale with it). */
+  vertices: number;
+  /** Scene primitives built for this SVG (points, rects, texts and every polyline vertex): its parse and scene cost. */
+  primitives: number;
+  complete(markers: PointPrim[]): SvgChartAnalysis;
+}
+
+/** `work`: the marker pair-test counter (see `withoutVertexMarkers`). */
 export function analyzeSvgChart(root: XmlElement, work: MarkerWork = { pairTests: 0 }): SvgChartAnalysis {
+  const prepared = prepareSvgChart(root);
+  return prepared.complete(withoutVertexMarkers(prepared.markers, prepared.lines, work));
+}
+
+export function prepareSvgChart(root: XmlElement): PreparedSvgChart {
   const scene = buildScene(root);
   const generator = detectGenerator(scene);
   const texts = scene.texts.filter((t) => t.text.length > 0);
@@ -328,155 +419,161 @@ export function analyzeSvgChart(root: XmlElement, work: MarkerWork = { pairTests
       const span = Math.max(...xs) - Math.min(...xs);
       return !xRange || span >= 0.15 * Math.max(1, xRange[1]! - xRange[0]!);
     });
-  let points = scene.points.filter((p) => !inAxis(p) && !inLegend(p) && !legendSwatches.has(p) && (p.fill || p.stroke));
-  // Markers drawn on a polyline's vertices duplicate it.
-  points = withoutVertexMarkers(points, lines, work);
+  const markers = scene.points.filter((p) => !inAxis(p) && !inLegend(p) && !legendSwatches.has(p) && (p.fill || p.stroke));
 
-  const colorName = new Map(legend.map((e) => [e.color, e.name]));
-  const series = new Map<string, DraftSeries & { color: string | null }>();
-  const getSeries = (key: string, color: string | null, mark: DraftSeries["mark"]) => {
-    let s = series.get(key);
-    if (!s) { s = { name: (color && colorName.get(color)) ?? "", mark, color, points: [] }; series.set(key, s); }
-    return s;
-  };
-  const nearestCat = (cats: Tick[], pos: number): Tick | null => {
-    if (!cats.length) return null;
-    const sorted = [...cats].sort((a, b) => a.pos - b.pos);
-    const pitch = sorted.length > 1 ? median(sorted.slice(1).map((c, k) => c.pos - sorted[k]!.pos)) : Infinity;
-    let best: Tick | null = null;
-    for (const c of sorted) if (!best || Math.abs(c.pos - pos) < Math.abs(best.pos - pos)) best = c;
-    return best && Math.abs(best.pos - pos) <= Math.max(pitch / 2, 2) ? best : null;
-  };
+  // Everything after the marker/vertex de-duplication, run once the caller has chosen how to de-duplicate.
+  const complete = (points: PointPrim[]): SvgChartAnalysis => {
+    const colorName = new Map(legend.map((e) => [e.color, e.name]));
+    const series = new Map<string, DraftSeries & { color: string | null }>();
+    const getSeries = (key: string, color: string | null, mark: DraftSeries["mark"]) => {
+      let s = series.get(key);
+      if (!s) { s = { name: (color && colorName.get(color)) ?? "", mark, color, points: [] }; series.set(key, s); }
+      return s;
+    };
+    const nearestCat = (cats: Tick[], pos: number): Tick | null => {
+      if (!cats.length) return null;
+      const sorted = [...cats].sort((a, b) => a.pos - b.pos);
+      const pitch = sorted.length > 1 ? median(sorted.slice(1).map((c, k) => c.pos - sorted[k]!.pos)) : Infinity;
+      let best: Tick | null = null;
+      for (const c of sorted) if (!best || Math.abs(c.pos - pos) < Math.abs(best.pos - pos)) best = c;
+      return best && Math.abs(best.pos - pos) <= Math.max(pitch / 2, 2) ? best : null;
+    };
 
-  let candidates = 0, mapped = 0, curved = 0, outOfRange = 0;
-  let stacked = false;
-  let horizontal = false;
-  const inRange = (v: number, s: Scale) => { const span = s.max - s.min; return v >= s.min - span * 0.25 && v <= s.max + span * 0.25; };
+    let candidates = 0, mapped = 0, curved = 0, outOfRange = 0;
+    let stacked = false;
+    let horizontal = false;
+    const inRange = (v: number, s: Scale) => { const span = s.max - s.min; return v >= s.min - span * 0.25 && v <= s.max + span * 0.25; };
 
-  // Bars.
-  if (rects.length) {
-    horizontal = !yScale && !!xScale;
-    const vScale = horizontal ? xScale : yScale;
-    let cats = horizontal ? yCats : xCats;
-    let pScale = horizontal ? yScale : xScale;
-    // Bars centred on numeric ticks (years, ids) are categories, not a histogram.
-    const posTicks = horizontal ? yTicks : xTicks;
-    const centerOf = (r: RectPrim) => (horizontal ? (r.y0 + r.y1) / 2 : (r.x0 + r.x1) / 2);
-    if (!cats.length && pScale && posTicks.length >= 2 && rects.every((r) => posTicks.some((t) => Math.abs(t.pos - centerOf(r)) < 1.5)) && new Set(rects.map((r) => r.fill)).size === 1) {
-      cats = posTicks;
-      pScale = null;
-      if (horizontal) yCats = posTicks; else { xCats = posTicks; xScale = null; }
-    }
-    if (vScale) {
-      const nearCount = new Map<number, number>();
-      for (const r of rects) for (const e of horizontal ? [r.x0, r.x1] : [r.y0, r.y1]) nearCount.set(Math.round(e), (nearCount.get(Math.round(e)) ?? 0) + 1);
-      const baseline = [...nearCount.entries()].sort((a, b) => b[1] - a[1])[0]![0];
-      const center = (r: RectPrim) => (horizontal ? (r.y0 + r.y1) / 2 : (r.x0 + r.x1) / 2);
-      const columns = cluster(rects, center, 1);
-      for (const col of columns) {
-        const colStacked = col.length > 1 && col.some((a) => col.some((b) => a !== b && (Math.abs(a.y0 - b.y1) < 0.6 || Math.abs(a.x1 - b.x0) < 0.6)));
-        if (colStacked) stacked = true;
-        for (const r of col) {
-          candidates++;
-          const c = center(r);
-          const cat = nearestCat(cats, c);
-          const x: string | number | null = cat ? cat.label : pScale ? roundTo(pScale.inv(c), pScale) : null;
-          if (x === null) continue;
-          let value: number;
-          if (colStacked) value = horizontal ? vScale.inv(r.x1) - vScale.inv(r.x0) : vScale.inv(r.y0) - vScale.inv(r.y1);
-          else {
-            const edges = horizontal ? [r.x0, r.x1] : [r.y0, r.y1];
-            const farEdge = Math.abs(edges[0]! - baseline) > Math.abs(edges[1]! - baseline) ? edges[0]! : edges[1]!;
-            value = vScale.inv(farEdge);
+    // Bars.
+    if (rects.length) {
+      horizontal = !yScale && !!xScale;
+      const vScale = horizontal ? xScale : yScale;
+      let cats = horizontal ? yCats : xCats;
+      let pScale = horizontal ? yScale : xScale;
+      // Bars centred on numeric ticks (years, ids) are categories, not a histogram.
+      const posTicks = horizontal ? yTicks : xTicks;
+      const centerOf = (r: RectPrim) => (horizontal ? (r.y0 + r.y1) / 2 : (r.x0 + r.x1) / 2);
+      if (!cats.length && pScale && posTicks.length >= 2 && rects.every((r) => posTicks.some((t) => Math.abs(t.pos - centerOf(r)) < 1.5)) && new Set(rects.map((r) => r.fill)).size === 1) {
+        cats = posTicks;
+        pScale = null;
+        if (horizontal) yCats = posTicks; else { xCats = posTicks; xScale = null; }
+      }
+      if (vScale) {
+        const nearCount = new Map<number, number>();
+        for (const r of rects) for (const e of horizontal ? [r.x0, r.x1] : [r.y0, r.y1]) nearCount.set(Math.round(e), (nearCount.get(Math.round(e)) ?? 0) + 1);
+        const baseline = [...nearCount.entries()].sort((a, b) => b[1] - a[1])[0]![0];
+        const center = (r: RectPrim) => (horizontal ? (r.y0 + r.y1) / 2 : (r.x0 + r.x1) / 2);
+        const columns = cluster(rects, center, 1);
+        for (const col of columns) {
+          const colStacked = col.length > 1 && col.some((a) => col.some((b) => a !== b && (Math.abs(a.y0 - b.y1) < 0.6 || Math.abs(a.x1 - b.x0) < 0.6)));
+          if (colStacked) stacked = true;
+          for (const r of col) {
+            candidates++;
+            const c = center(r);
+            const cat = nearestCat(cats, c);
+            const x: string | number | null = cat ? cat.label : pScale ? roundTo(pScale.inv(c), pScale) : null;
+            if (x === null) continue;
+            let value: number;
+            if (colStacked) value = horizontal ? vScale.inv(r.x1) - vScale.inv(r.x0) : vScale.inv(r.y0) - vScale.inv(r.y1);
+            else {
+              const edges = horizontal ? [r.x0, r.x1] : [r.y0, r.y1];
+              const farEdge = Math.abs(edges[0]! - baseline) > Math.abs(edges[1]! - baseline) ? edges[0]! : edges[1]!;
+              value = vScale.inv(farEdge);
+            }
+            if (!Number.isFinite(value)) continue;
+            if (!colStacked && !inRange(value, vScale)) { outOfRange++; continue; }
+            mapped++;
+            getSeries(`bar:${r.fill}`, r.fill, "bar").points.push({ x, y: roundTo(value, vScale) });
           }
-          if (!Number.isFinite(value)) continue;
-          if (!colStacked && !inRange(value, vScale)) { outOfRange++; continue; }
-          mapped++;
-          getSeries(`bar:${r.fill}`, r.fill, "bar").points.push({ x, y: roundTo(value, vScale) });
         }
       }
     }
-  }
 
-  // Lines.
-  if (yScale) {
-    for (const l of lines) {
-      candidates++;
-      if (l.curves) curved++;
-      const s = getSeries(`line:${l.stroke}:${l.order}`, l.stroke, "line");
-      let ok = 0;
-      for (const [px, py] of l.points) {
-        const cat = xScale ? null : nearestCat(xCats, px);
-        const x = xScale ? roundTo(xScale.inv(px), xScale) : cat ? cat.label : null;
-        if (x === null) continue;
-        const y = yScale.inv(py);
-        if (!Number.isFinite(y)) continue;
-        s.points.push({ x, y: roundTo(y, yScale) });
-        ok++;
+    // Lines.
+    if (yScale) {
+      for (const l of lines) {
+        candidates++;
+        if (l.curves) curved++;
+        const s = getSeries(`line:${l.stroke}:${l.order}`, l.stroke, "line");
+        let ok = 0;
+        for (const [px, py] of l.points) {
+          const cat = xScale ? null : nearestCat(xCats, px);
+          const x = xScale ? roundTo(xScale.inv(px), xScale) : cat ? cat.label : null;
+          if (x === null) continue;
+          const y = yScale.inv(py);
+          if (!Number.isFinite(y)) continue;
+          s.points.push({ x, y: roundTo(y, yScale) });
+          ok++;
+        }
+        if (ok >= 2 && ok >= l.points.length * 0.8) mapped++;
+        else series.delete(`line:${l.stroke}:${l.order}`);
       }
-      if (ok >= 2 && ok >= l.points.length * 0.8) mapped++;
-      else series.delete(`line:${l.stroke}:${l.order}`);
+      // Merge line series of the same colour (dashed lines split into many paths).
+      const byColor = new Map<string, DraftSeries & { color: string | null }>();
+      for (const [k, s] of [...series.entries()]) {
+        if (!k.startsWith("line:")) continue;
+        const prev = byColor.get(s.color ?? k);
+        if (prev) { prev.points.push(...s.points); series.delete(k); } else byColor.set(s.color ?? k, s);
+      }
     }
-    // Merge line series of the same colour (dashed lines split into many paths).
-    const byColor = new Map<string, DraftSeries & { color: string | null }>();
-    for (const [k, s] of [...series.entries()]) {
-      if (!k.startsWith("line:")) continue;
-      const prev = byColor.get(s.color ?? k);
-      if (prev) { prev.points.push(...s.points); series.delete(k); } else byColor.set(s.color ?? k, s);
+
+    // Scatter points.
+    if (yScale && points.length) {
+      for (const p of points) {
+        candidates++;
+        const cat = xScale ? null : nearestCat(xCats, p.x);
+        const x = xScale ? roundTo(xScale.inv(p.x), xScale) : cat ? cat.label : null;
+        const y = yScale.inv(p.y);
+        if (x === null || !Number.isFinite(y) || !inRange(y, yScale)) continue;
+        mapped++;
+        getSeries(`point:${p.fill ?? p.stroke}`, p.fill ?? p.stroke, "point").points.push({ x, y: roundTo(y, yScale) });
+      }
     }
-  }
 
-  // Scatter points.
-  if (yScale && points.length) {
-    for (const p of points) {
-      candidates++;
-      const cat = xScale ? null : nearestCat(xCats, p.x);
-      const x = xScale ? roundTo(xScale.inv(p.x), xScale) : cat ? cat.label : null;
-      const y = yScale.inv(p.y);
-      if (x === null || !Number.isFinite(y) || !inRange(y, yScale)) continue;
-      mapped++;
-      getSeries(`point:${p.fill ?? p.stroke}`, p.fill ?? p.stroke, "point").points.push({ x, y: roundTo(y, yScale) });
-    }
-  }
+    const all = [...series.values()].filter((s) => s.points.length);
+    const digest = buildDigest({ generator, title, xLabel, yLabel, xScale, yScale, xCats, yCats, legend, all, rects: rects.length, lines: lines.length, points: points.length, texts: rest });
 
-  const all = [...series.values()].filter((s) => s.points.length);
-  const digest = buildDigest({ generator, title, xLabel, yLabel, xScale, yScale, xCats, yCats, legend, all, rects: rects.length, lines: lines.length, points: points.length, texts: rest });
+    if (!yScale && !xScale) return { spec: null, confidence: 0, digest, generator, reason: texts.length ? "no-numeric-axis" : "no-text" };
+    if (!all.length) return { spec: null, confidence: 0, digest, generator, reason: candidates ? "marks-not-invertible" : "no-marks" };
 
-  if (!yScale && !xScale) return { spec: null, confidence: 0, digest, generator, reason: texts.length ? "no-numeric-axis" : "no-text" };
-  if (!all.length) return { spec: null, confidence: 0, digest, generator, reason: candidates ? "marks-not-invertible" : "no-marks" };
+    // Order points: categories by axis position; numeric by x.
+    const catOrder = new Map([...(horizontal ? yCats : xCats)].sort((a, b) => (horizontal ? b.pos - a.pos : a.pos - b.pos)).map((c, k) => [c.label, k]));
+    for (const s of all) s.points.sort((a, b) => (typeof a.x === "number" && typeof b.x === "number" ? a.x - b.x : (catOrder.get(String(a.x)) ?? 0) - (catOrder.get(String(b.x)) ?? 0)));
 
-  // Order points: categories by axis position; numeric by x.
-  const catOrder = new Map([...(horizontal ? yCats : xCats)].sort((a, b) => (horizontal ? b.pos - a.pos : a.pos - b.pos)).map((c, k) => [c.label, k]));
-  for (const s of all) s.points.sort((a, b) => (typeof a.x === "number" && typeof b.x === "number" ? a.x - b.x : (catOrder.get(String(a.x)) ?? 0) - (catOrder.get(String(b.x)) ?? 0)));
+    const marks = new Set(all.map((s) => s.mark));
+    let chartType: DraftChart["chartType"];
+    if (marks.size > 1) chartType = "combo";
+    else if (marks.has("bar")) chartType = horizontal ? "horizontal-bar" : stacked ? "stacked-bar" : all.length > 1 ? "grouped-bar" : xScale ? "histogram" : "bar";
+    else if (marks.has("line")) chartType = "line";
+    else chartType = "scatter";
+    if (chartType === "histogram" && !rects.length) chartType = "bar";
 
-  const marks = new Set(all.map((s) => s.mark));
-  let chartType: DraftChart["chartType"];
-  if (marks.size > 1) chartType = "combo";
-  else if (marks.has("bar")) chartType = horizontal ? "horizontal-bar" : stacked ? "stacked-bar" : all.length > 1 ? "grouped-bar" : xScale ? "histogram" : "bar";
-  else if (marks.has("line")) chartType = "line";
-  else chartType = "scatter";
-  if (chartType === "histogram" && !rects.length) chartType = "bar";
+    let unnamed = 0;
+    all.forEach((s) => { if (!s.name) { unnamed++; s.name = all.length === 1 ? yLabel?.text ?? title?.text ?? "Series 1" : `Series ${unnamed}`; } });
+    const vScale = horizontal ? xScale : yScale;
+    const draft: DraftChart = {
+      chartType,
+      title: title?.text ?? null,
+      xAxis: { label: horizontal ? yLabel?.text ?? null : xLabel?.text ?? null, scale: horizontal ? "band" : xScale ? xScale.kind : "band", min: !horizontal && xScale ? xScale.min : null, max: !horizontal && xScale ? xScale.max : null },
+      yAxis: { label: horizontal ? xLabel?.text ?? null : yLabel?.text ?? null, unit: vScale?.unit ?? null, scale: vScale?.kind ?? "linear", min: vScale?.min ?? null, max: vScale?.max ?? null },
+      series: all.map(({ color: _c, ...s }) => ({ ...s, mark: chartType === "combo" ? s.mark : null })),
+    };
 
-  let unnamed = 0;
-  all.forEach((s) => { if (!s.name) { unnamed++; s.name = all.length === 1 ? yLabel?.text ?? title?.text ?? "Series 1" : `Series ${unnamed}`; } });
-  const vScale = horizontal ? xScale : yScale;
-  const draft: DraftChart = {
-    chartType,
-    title: title?.text ?? null,
-    xAxis: { label: horizontal ? yLabel?.text ?? null : xLabel?.text ?? null, scale: horizontal ? "band" : xScale ? xScale.kind : "band", min: !horizontal && xScale ? xScale.min : null, max: !horizontal && xScale ? xScale.max : null },
-    yAxis: { label: horizontal ? xLabel?.text ?? null : yLabel?.text ?? null, unit: vScale?.unit ?? null, scale: vScale?.kind ?? "linear", min: vScale?.min ?? null, max: vScale?.max ?? null },
-    series: all.map(({ color: _c, ...s }) => ({ ...s, mark: chartType === "combo" ? s.mark : null })),
+    const fit = vScale ? 1 - Math.min(1, vScale.residual / 0.02) : 0;
+    const tickScore = vScale ? Math.min(1, (vScale.n - 1) / 4) : 0;
+    const coverage = candidates ? mapped / candidates : 0;
+    const naming = all.length === 1 || all.every((s) => colorName.size && [...colorName.values()].includes(s.name)) ? 1 : 0.4;
+    let confidence = 0.1 + 0.3 * fit + 0.15 * tickScore + 0.3 * coverage + 0.1 * naming + (generator ? 0.05 : 0);
+    if (curved) confidence -= 0.05;
+    if (outOfRange) confidence -= 0.1;
+    confidence = Math.min(0.95, clamp01(confidence));
+    return { spec: draft, confidence, digest, generator, reason: coverage < 1 ? "partial-mark-coverage" : null };
   };
-
-  const fit = vScale ? 1 - Math.min(1, vScale.residual / 0.02) : 0;
-  const tickScore = vScale ? Math.min(1, (vScale.n - 1) / 4) : 0;
-  const coverage = candidates ? mapped / candidates : 0;
-  const naming = all.length === 1 || all.every((s) => colorName.size && [...colorName.values()].includes(s.name)) ? 1 : 0.4;
-  let confidence = 0.1 + 0.3 * fit + 0.15 * tickScore + 0.3 * coverage + 0.1 * naming + (generator ? 0.05 : 0);
-  if (curved) confidence -= 0.05;
-  if (outOfRange) confidence -= 0.1;
-  confidence = Math.min(0.95, clamp01(confidence));
-  return { spec: draft, confidence, digest, generator, reason: coverage < 1 ? "partial-mark-coverage" : null };
+  let vertices = 0;
+  for (const l of lines) vertices += l.points.length;
+  let primitives = scene.points.length + scene.rects.length + scene.texts.length;
+  for (const l of scene.lines) primitives += l.points.length;
+  return { markers, lines, vertices, primitives, complete };
 }
 
 function fmt(v: number): string { return Number.isInteger(v) ? String(v) : String(Number(v.toPrecision(5))); }
