@@ -461,6 +461,8 @@ const indexWarmups = new WeakMap<lancedb.Table, IndexWarmup>();
 let indexWarmActive = 0;
 const indexWarmQueue: Array<() => void> = [];
 
+const INDEX_WARM_TIMEOUT_MS = 60_000;
+
 async function withIndexWarmSlot<T>(run: () => Promise<T>): Promise<T> {
   // A released slot is handed straight to the next waiter, so the count never exceeds the limit.
   if (indexWarmActive >= INDEX_WARM_CONCURRENCY) await new Promise<void>((resolve) => indexWarmQueue.push(resolve));
@@ -491,8 +493,11 @@ async function warmSearchIndexes(table: lancedb.Table, uri: string, capabilities
     const entry: IndexWarmup = {
       signature: capabilities.searchIndexSignature,
       settled: false,
-      done: withIndexWarmSlot(() => prewarmSearchIndexes(table, capabilities.searchIndexes, lanceNamespace(uri)))
-        .then((result) => result.errors.length === 0, () => false),
+      // A stalled object-store read must not hold one of the two slots forever: past the limit it counts as failed.
+      done: withIndexWarmSlot(() => Promise.race([
+        prewarmSearchIndexes(table, capabilities.searchIndexes, lanceNamespace(uri)).then((result) => result.errors.length === 0, () => false),
+        new Promise<boolean>((resolve) => { setTimeout(() => resolve(false), INDEX_WARM_TIMEOUT_MS).unref?.(); }),
+      ])),
     };
     void entry.done.then((ok) => {
       entry.settled = true;

@@ -1818,16 +1818,20 @@ function searchAdmission(options: SearchOptions): SearchAdmission {
 }
 
 /**
- * A search with nothing to retrieve (no document is searchable, keyword-served or page-served yet)
- * returns an empty response from cached state. It stays in the fast lane and never takes a main
- * slot, so it cannot queue behind searches that run retrieval. Deep search with deferred profiles
- * may still materialize pages, so it always takes a main slot.
+ * A search with nothing to retrieve: the whole project (no run or document filter, so the
+ * availability read is the project's own cached row, not one a caller can vary) has no searchable,
+ * indexed, keyword-only or page-only documents, and the mode is below deep, so no model strategy,
+ * sub-search, graph or deferred leg can run. Such a search still embeds its query and runs the
+ * legs over empty indexes; it stays in the fast lane and never takes a main slot, so it cannot
+ * queue behind, or hold a slot from, searches that run retrieval. Deep searches and filtered
+ * searches always take a main slot.
  */
-function hasNothingToRetrieve(setup: SearchSetup): boolean {
+export function hasNothingToRetrieve(setup: Pick<SearchSetup, "availabilityRow" | "resolvedOptions">): boolean {
   const row = setup.availabilityRow;
   if (!row) return false;
-  const mode = setup.resolvedOptions.searchMode ?? "deep";
-  if (deferredProfilesEnabled() && mode === "deep") return false;
+  const options = setup.resolvedOptions;
+  if ((options.searchMode ?? "deep") === "deep") return false;
+  if (options.runId || options.filters?.runId || options.filters?.documentId || options.filters?.documentIds?.length) return false;
   return row.searchable_documents === 0 && row.indexed_documents === 0 && (row.keyword_only_documents ?? 0) === 0 && (row.page_only_documents ?? 0) === 0;
 }
 
