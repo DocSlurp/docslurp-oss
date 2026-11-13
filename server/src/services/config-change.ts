@@ -25,6 +25,7 @@ import {
   type PipelineRunStage,
   type UpdateProjectInput,
   type ProjectRecord,
+  resolveManagedPipeline,
 } from "@docslurp/shared";
 
 import { sql } from "../db.js";
@@ -44,7 +45,7 @@ import {
 } from "./jobs.js";
 import { enforceLiveBudgetCaps } from "./run-creation.js";
 import { assertBackfillReusableMany, isReprocessRejectedError } from "./runs.js";
-import { getProject, resolveUpdatedPipeline, updateProject, type ProjectUpdateOptions } from "./projects.js";
+import { getProject, loadManagedPipelineOverrides, resolveUpdatedPipeline, updateProject, type ProjectUpdateOptions } from "./projects.js";
 
 /**
  * Config-change jobs (spec 6.2). A project PATCH is classified by `analyzePipelineChange`; changes that
@@ -358,15 +359,18 @@ export async function createReindexRuns(args: {
 }): Promise<ReindexRunResult> {
   assertPipelineSpeedBoost(args.pipeline);
   const { tx, project } = args;
+  // This path inserts its runs directly, so it applies the same managed-model resolution as runCreation.create:
+  // model values in the pipeline are dropped and only the project's explicit admin overrides apply.
+  const pipeline = resolveManagedPipeline(args.pipeline, await loadManagedPipelineOverrides(project.id, tx as never), `re-index in project ${project.id}`).pipeline;
   const runIds: string[] = [];
   const queuedRunIds: string[] = [];
   let blockedReason = args.blockedReason;
   const batches: Array<{ docs: ReindexTarget[]; pipeline: PipelineFeatures; partial: boolean }> = [];
-  const fullPipeline = { ...withoutStageSelection(args.pipeline) } as PipelineFeatures;
+  const fullPipeline = { ...withoutStageSelection(pipeline) } as PipelineFeatures;
   for (const group of args.reusable.partial) {
-    const pipeline = { ...withoutStageSelection(args.pipeline), stageSubset: [...group.stages] } as PipelineFeatures;
+    const partialPipeline = { ...withoutStageSelection(pipeline), stageSubset: [...group.stages] } as PipelineFeatures;
     for (let i = 0; i < group.docs.length; i += MAX_DOCUMENTS_PER_REINDEX_RUN) {
-      batches.push({ docs: group.docs.slice(i, i + MAX_DOCUMENTS_PER_REINDEX_RUN), pipeline, partial: true });
+      batches.push({ docs: group.docs.slice(i, i + MAX_DOCUMENTS_PER_REINDEX_RUN), pipeline: partialPipeline, partial: true });
     }
   }
   for (let i = 0; i < args.reusable.full.length; i += MAX_DOCUMENTS_PER_REINDEX_RUN) {

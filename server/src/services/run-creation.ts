@@ -937,8 +937,10 @@ export function createRunCreation(deps: RunCreationDeps) {
     const requestedPipeline = { ...request.pipeline, speedBoost: request.speedBoost === true };
     assertPipelineSpeedBoost(requestedPipeline);
     const source = `run creation in project ${request.projectId}`;
-    // Every run-creation path lands here (upload, extract, MCP, reprocess, bulk reprocess, retry-as-new, materialize,
-    // re-index, full index, config change), and callers often pass an old run snapshot. Model values in it are history,
+    // Most run-creation paths land here (upload, extract, MCP, reprocess, bulk reprocess, retry-as-new, materialize),
+    // and callers often pass an old run snapshot. The paths that insert runs directly apply the same resolution
+    // themselves: re-index and config change (config-change.ts createReindexRuns), full index and indexing-mode switches
+    // (project-indexing-mode.ts), retry in place (runs.ts retryRun). Model values in a snapshot are history,
     // never configuration: they are dropped and the project's explicit admin overrides and current defaults apply
     // (managed-pipeline-models.ts). Run-specific fields (speedBoost, indexingMode, stage selection) are kept.
     const [managedRow] = await sql<{ managed: unknown }[]>`select managed_models -> 'pipeline' as managed from projects where id = ${request.projectId}`;
