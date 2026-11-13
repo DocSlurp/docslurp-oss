@@ -9,6 +9,7 @@ import { pricing } from "./pricing-provider.js";
 export * from "./upload-pages.js";
 import { profilePageEquivalentRange } from "./upload-pages.js";
 import { compilePipelinePlan, type PipelineFeatures } from "./pipeline.js";
+import { figuresEnabled } from "./doppler-figures.js";
 
 /*
  * Upload quotes without a database: what `POST /v1/uploads/estimate` returns. This module holds the generic parts (page
@@ -51,17 +52,19 @@ export const estimateProfileSchema = z.strictObject({
   /** Stages an upload runs; only shown in the estimate's basis. */
   stageCount: z.number().int().nonnegative(),
   /**
-   * Whether this deployment extracts figures (DOCSLURP_DOPPLER_IMAGE_EXTRACT): stored figure files are billed as storage,
-   * measured after the fact. A pricing provider may show them as an informational hosting line; omitted means unknown.
+   * Whether this run extracts figures: the deploy flag (DOCSLURP_DOPPLER_IMAGE_EXTRACT) and the project's opt-out
+   * (`pipeline.figures`, figuresEnabled). Stored figure files are billed as storage, measured after the fact
+   * (QuoteFile.measured.assetBytes once stored); for a new upload a pricing provider may add its own prior when this is
+   * true. Omitted means unknown.
    */
   figures: z.boolean().optional(),
   billing: z.enum(["enforced", "disabled"]),
 });
 export type EstimateProfile = z.infer<typeof estimateProfileSchema>;
 
-/** DOCSLURP_DOPPLER_IMAGE_EXTRACT as the worker reads it (`1`/`true`/`on`); anything else is off for an estimate. */
-function figuresOn(env: Record<string, string | undefined>): boolean {
-  return ["1", "true", "on"].includes((env.DOCSLURP_DOPPLER_IMAGE_EXTRACT ?? "").trim().toLowerCase());
+/** figuresEnabled for an estimate: the deploy flag and the project's opt-out; a malformed flag is off here, never a throw. */
+function figuresOn(pipeline: { figures?: boolean | null }, env: Record<string, string | undefined>): boolean {
+  try { return figuresEnabled(pipeline, env); } catch { return false; }
 }
 
 /** Reduce a project pipeline to its EstimateProfile, exactly as the upload estimate prices it. */
@@ -82,7 +85,7 @@ export function estimateProfileFor(
     videoFrames: pipeline.mediaVideo?.enabled !== false,
     ...(options.workerSlots ? { workerSlots: options.workerSlots } : {}),
     stageCount: stages.length,
-    figures: figuresOn(options.env),
+    figures: figuresOn(pipeline as { figures?: boolean | null }, options.env),
     billing: isBillingEnforced(options.env) ? "enforced" : "disabled",
   };
 }
