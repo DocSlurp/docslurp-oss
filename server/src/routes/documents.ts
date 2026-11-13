@@ -15,6 +15,7 @@ import {
 import { getRequestActor, resolveActorProjectFilter } from "../lib/request-actor.js";
 import { requestIp, requestUserAgent } from "../lib/request-context.js";
 import { appendAuditLog } from "../services/audit-log.js";
+import { requestDocumentFigureResume } from "../services/figure-resume.js";
 import {
   getCorrectionWorkbench,
   reindexDocumentCorrection,

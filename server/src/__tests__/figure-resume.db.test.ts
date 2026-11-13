@@ -110,7 +110,7 @@ describe("POST /documents/:id/assets/resume", () => {
     expect((await post("doc-a", { authorization: `Bearer ${client.rawKey}` })).status).toBe(403);
     // A revoked key never authenticates.
     const revoked = await keys.createApiKey("ua", "revoked", { orgId: "org-a", scopes: ["ingest"], keyType: "server" });
-    await keys.revokeApiKey(revoked.id, "ua");
+    await keys.revokeApiKey(revoked.key.id, "ua");
     expect((await post("doc-a", { authorization: `Bearer ${revoked.rawKey}` })).status).toBe(401);
     // A member who cannot edit the project.
     expect((await post("doc-a", { "x-test-user": "uv" })).status).toBe(404);

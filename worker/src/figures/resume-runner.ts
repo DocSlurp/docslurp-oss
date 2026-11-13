@@ -50,12 +50,12 @@ export interface FigureResumeProvider {
   timeoutMs(pages: number): number;
 }
 
-export interface FigureResumeStorage extends DopplerFigureStorage, DopplerFolderReader, FigureObjectReader {
+export type FigureResumeStorage = Omit<DopplerFigureStorage, "openStream"> & DopplerFolderReader & FigureObjectReader & {
   bucket?: string;
   downloadToTempFile(key: string, pattern: string): Promise<string>;
   listKeys?(options: { prefix: string; maxKeys?: number }): Promise<{ keys: string[]; truncated: boolean }>;
   headObject?(key: string): Promise<{ size: number; lastModified: Date | null } | null>;
-}
+};
 
 export interface FigureResumeDeps {
   sql: Client;

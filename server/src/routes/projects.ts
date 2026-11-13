@@ -822,7 +822,7 @@ export const projectsRoutes = new Hono()
     try {
       return c.json(await applyFigureResumeProposal({ actor: getRequestActor(c), projectId: c.req.param("projectId"), token: body.token }));
     } catch (error) {
-      if (error instanceof FigureResumeProposalError) return apiErrorResponse(c, error.status, error.category, error.message);
+      if (error instanceof FigureResumeProposalError) return apiStatusError(c, error.status, error.message);
       throw error;
     }
   })
