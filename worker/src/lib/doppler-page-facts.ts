@@ -548,6 +548,11 @@ function pageExtent(geometry: DopplerGeometry | undefined): [number, number] | n
   return geometry.rotation === 90 || geometry.rotation === 270 ? [h, w] : [w, h];
 }
 
+/** The page's extent in the facts' coordinate space (exported for the layout mapper's box shares). */
+export function dopplerPageExtent(geometry: DopplerGeometry | undefined): [number, number] | null {
+  return pageExtent(geometry);
+}
+
 /** A box ordered and inside the page within PAGE_SLACK_PT. */
 function boxOnPage(b: Box, extent: [number, number]): boolean {
   const [w, h] = extent;
@@ -578,10 +583,11 @@ function crossCheckPage(out: DopplerPageFacts): void {
 
 /**
  * The page's facts may have been read from an object the file holds twice, after an earlier page rebuilt the
- * cross-reference table (`xref-repaired-earlier`): low confidence. Callers treat an image's `px`, `dpi` and
- * `bytesPerPixel` on such a page as unknown, so they never authorize a paid read.
+ * cross-reference table (`xref-repaired-earlier`): low confidence, for any fact of the page (its content stream is an
+ * object too). Callers treat what could authorize a paid read from such a page as unknown: images' `px`, `dpi`,
+ * `bytesPerPixel` and words inside, ruled grids, chart candidates; page-image evidence refuses the document.
  */
-export function dopplerPageImageSizesUntrusted(page: Pick<DopplerPageFacts, "parseWarnings">): boolean {
+export function dopplerPageFactsLowConfidence(page: Pick<DopplerPageFacts, "parseWarnings">): boolean {
   return page.parseWarnings.includes("xref-repaired-earlier");
 }
 

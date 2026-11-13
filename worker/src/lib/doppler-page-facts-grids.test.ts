@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 
 import { parseDopplerPageFacts, type DopplerPageFactsDocument } from "./doppler-page-facts.js";
 import { pageLayoutFactsFromDopplerFacts, rasterUnionCoverage } from "./doppler-page-facts-layout.js";
-import { pageImageEvidenceFromDopplerFacts } from "./doppler-page-facts-evidence.js";
+import { dopplerFactsCoverEvidence, pageImageEvidenceFromDopplerFacts } from "./doppler-page-facts-evidence.js";
 import { buildPageImageEvidence, findSparsePages, summarizeImageListing, type PageImageEvidence } from "./page-image-evidence.js";
 import type { PageLayoutFacts } from "./page-layout-facts.js";
 import { buildAdaptiveRoutingDecisionSurface } from "../stages/classify-route.js";
@@ -212,19 +212,22 @@ describe("doppler page facts: words inside and bytes per pixel", () => {
     expect(layoutOf(many).images).toBeNull();
   });
 
-  it("xref-repaired-earlier: px, dpi and bytesPerPixel are unknown, so they cannot select a mixed-scan read", () => {
+  it("xref-repaired-earlier: px, dpi, bytesPerPixel, words inside and grids are unknown, so none can select a read", () => {
     const scanLike = { visibleWordsInside: 0, invisibleWordsInside: 0, bytesPerPixel: 0.02, bbox: [72, 300, 540, 700], coverage: 0.39, px: [1950, 1667], dpi: [300, 300], filter: "dct" };
-    const ok = layoutOf(page({ item: scanLike })).images![0]!;
-    expect([ok.widthPx, ok.heightPx, ok.ppi, ok.bytesPerPixel]).toEqual([1950, 1667, [300, 300], 0.02]);
-    const low = layoutOf(page({ item: scanLike, extra: { parseWarnings: ["xref-repaired-earlier"] } })).images![0]!;
-    expect([low.widthPx, low.heightPx, low.ppi, low.bytesPerPixel]).toEqual([0, 0, [null, null], null]);
-    // Words inside are not a size: they stay.
-    expect(low.wordsInside).toBe(0);
+    const vectorsWithGrid = { grids: [TABLE], gridsTruncated: false };
+    const ok = layoutOf(page({ item: scanLike, vectors: vectorsWithGrid }));
+    expect([ok.images![0]!.widthPx, ok.images![0]!.heightPx, ok.images![0]!.ppi, ok.images![0]!.bytesPerPixel, ok.images![0]!.wordsInside]).toEqual([1950, 1667, [300, 300], 0.02, 0]);
+    expect(ok.grids).toHaveLength(1);
+    const low = layoutOf(page({ item: scanLike, vectors: vectorsWithGrid, extra: { parseWarnings: ["xref-repaired-earlier"] } }));
+    const image = low.images![0]!;
+    expect([image.widthPx, image.heightPx, image.ppi, image.bytesPerPixel, image.wordsInside]).toEqual([0, 0, [null, null], null, null]);
+    expect(low.grids).toBeNull();
+    expect(low.tableCoverage).toBeNull();
     // An unknown warning value is still dropped, as the contract asks.
     expect(one(page({ extra: { parseWarnings: ["xref-repaired-earlier", "from-the-future"] } })).pages.get(1)!.parseWarnings).toEqual(["xref-repaired-earlier"]);
   });
 
-  it("xref-repaired-earlier: the sparse page's image evidence is unknown, not a scan", () => {
+  it("xref-repaired-earlier on any page: no page-image evidence for the document (its furniture rule is shared)", () => {
     const scan = (warnings: string[]) => jsonl([docLine({ pageCount: 1 }), textPage(1, {
       text: { ...(base.text as object), charCount: 0, visibleCharCount: 0, wordCount: 0, visibleWordCount: 0, textLayer: "none" },
       images: { ...images, items: [{ ...item, bbox: [0, 0, 612, 792], coverage: 1, px: [2550, 3300], obj: 9 }] },
@@ -232,15 +235,25 @@ describe("doppler page facts: words inside and bytes per pixel", () => {
     }), runLine({ pagesEmitted: 1 })]);
     const known = pageImageEvidenceFromDopplerFacts({ facts: parse(scan([])), pageCount: 1, pageTexts: [""] })!;
     expect(known[0]).toMatchObject({ imagesKnown: true, imageCount: 1, largestImageCoverage: 1 });
-    const low = pageImageEvidenceFromDopplerFacts({ facts: parse(scan(["xref-repaired-earlier"])), pageCount: 1, pageTexts: [""] })!;
-    expect(low[0]).toMatchObject({ imagesKnown: false, imageCount: 0, largestImageCoverage: 0 });
-    // And classify-route reads it as unknown: no read.
-    const surface = (evidence: PageImageEvidence[]) => buildAdaptiveRoutingDecisionSurface({
+    expect(dopplerFactsCoverEvidence(parse(scan(["xref-repaired-earlier"])), 1)).toEqual({ covered: false, reason: "xref-repaired-earlier" });
+    expect(pageImageEvidenceFromDopplerFacts({ facts: parse(scan(["xref-repaired-earlier"])), pageCount: 1, pageTexts: [""] })).toBeNull();
+    // Without evidence classify-route reads the sparse page as unknown: no read.
+    const surface = (evidence: PageImageEvidence[] | null) => buildAdaptiveRoutingDecisionSurface({
       documentId: "d", filename: "f.pdf", text: "", pageCount: 1, routingV2: true,
-      evidence: { source: "page-image-evidence", artifactUri: "s3://x" }, pageImageEvidence: new Map(evidence.map((e) => [e.pageNumber, e])),
+      evidence: { source: "page-image-evidence", artifactUri: "s3://x" },
+      ...(evidence ? { pageImageEvidence: new Map(evidence.map((e) => [e.pageNumber, e])) } : {}),
     });
     expect(surface(known).pages[0]!.ocrDecision?.authorized).toBe(true);
-    expect(surface(low).pages[0]!.ocrDecision?.authorized).toBe(false);
+    expect(surface(null).pages[0]?.ocrDecision?.authorized ?? false).toBe(false);
+  });
+
+  it("per grid, the page's rules must allow it: shaded panels or sideless column lines larger than the rules are dropped", () => {
+    // 8 horizontal and 5 vertical rules on the page: a 6 x 4 table fits; 8 shaded panel bands with 2 columns do not.
+    const panels = { bbox: [72, 420, 540, 760], rows: 8, columns: 2, coverage: 0.3 };
+    const layout = layoutOf(page({ vectors: { grids: [TABLE, panels], gridsTruncated: false } }));
+    expect(layout.grids).toEqual([{ rows: 6, columns: 4, coverage: 0.2964 }]);
+    const wide = { ...TABLE, columns: 5 };
+    expect(layoutOf(page({ vectors: { grids: [wide], gridsTruncated: false } })).grids).toEqual([]);
   });
 });
 
@@ -406,6 +419,11 @@ function decisions(layout: Map<number, PageLayoutFacts>, evidence: PageImageEvid
   return surface.pages.map((entry, i) => ({ page: pages[i]!.name, route: entry.route, ocr: entry.ocrDecision, signals: entry.signals }));
 }
 
+/**
+ * Synthetic parity: both sides are built from one description of each page, so this checks that the mapping feeds every
+ * routing consumer the walker feeds, the same way, including where Doppler's own measures differ (TruthPage.doppler,
+ * wholeWordsInside). It does not measure how often Doppler and the walker agree on real PDFs: that is a corpus benchmark.
+ */
 describe("parity: facts-mapped layout routes like the walker's", () => {
   it("makes the same classify-route and page-image decisions on synthetic pages (table-heavy, mixed scan, raster, blank)", () => {
     const facts = parse(jsonl([docLine({ pageCount: TRUTH.length }), ...TRUTH.map((t, i) => factsLine(t, i + 1)), runLine({ pagesEmitted: TRUTH.length })]), TRUTH.length);

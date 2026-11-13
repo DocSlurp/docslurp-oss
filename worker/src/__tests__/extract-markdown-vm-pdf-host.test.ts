@@ -359,7 +359,7 @@ describe("the sandboxed PDF route on the worker host", () => {
       return {
         ...base,
         images: { ...images, items: images.items.map((item) => ({ ...item, bbox: [0, 0, 14_000, 14_000], coverage: 1, px: [60_000, 60_000], visibleWordsInside: 0, invisibleWordsInside: 0, bytesPerPixel: 1e9 })) },
-        vectors: { ...(base.vectors as object), grids: Array.from({ length: 64 }, () => ({ bbox: [0, 0, 14_000, 14_000], rows: 8_192, columns: 8_192, coverage: 1 })), gridsTruncated: false },
+        vectors: { ...(base.vectors as object), hRules: 20_000, vRules: 20_000, grids: Array.from({ length: 64 }, () => ({ bbox: [0, 0, 14_000, 14_000], rows: 8_192, columns: 8_192, coverage: 1 })), gridsTruncated: false },
       };
     };
     const pageFacts = jsonl([docLine(), page(1), page(2), page(3), runLine()]);

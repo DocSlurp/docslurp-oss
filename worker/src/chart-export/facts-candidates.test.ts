@@ -99,9 +99,11 @@ describe("candidatesFromPageFacts", () => {
     ]);
   });
 
-  it("nominates no image on a page marked xref-repaired-earlier: its pixel size is unknown, so it authorizes no read", () => {
+  it("nominates nothing on a page marked xref-repaired-earlier: its facts are low confidence, so they authorize no read", () => {
     const facts = parse([{ ...imagePage(1, 7), parseWarnings: ["xref-repaired-earlier"] }], 1);
     expect(candidatesFromPageFacts(facts, new Set([1])).candidates).toEqual([]);
+    // Nor a vector cluster: any fact of such a page may have been read from another object.
+    expect(candidatesFromPageFacts(parse([figurePage(1, { parseWarnings: ["xref-repaired-earlier"] })], 1), new Set([1])).candidates).toEqual([]);
   });
 
   it("treats an image object on many pages as furniture (a logo), never a candidate", () => {

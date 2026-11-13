@@ -98,7 +98,7 @@ Commands the facts cannot retire, and why:
 | Command | Feeds | Kept because |
 |---|---|---|
 | `pdfpagecount`, `pdftotext -f 1 -l 1` | page count, Poppler acceptance | billing and limits use the host's own count |
-| layout walker (`pdfimages -list`, `pdftotext -bbox-layout`, `pdf_layout_facts.py`) | layout facts | page-equivalent billing reads the walker's page sizes, never the facts'. Facts from a build with ruled grids, words inside and bytes per pixel (Doppler #42) cover every routing input the walker gives |
+| layout walker (`pdfimages -list`, `pdftotext -bbox-layout`, `pdf_layout_facts.py`) | layout facts | page-equivalent billing reads the walker's page sizes, never the facts'. Facts from a build with ruled grids, words inside and bytes per pixel (Doppler #42) stand in for the walker's grids and image inputs, mapped conservatively (below); `tables` and Markdown table boxes are not among them |
 | OCR ledger `pdftotext` | Rich reads of an extractor that OCRs without saying so | billing evidence; never on the sandboxed route |
 | `pdfinfo` before `pdftoppm` | render bounds, rendered page areas | bounds an untrusted render and sizes a charge |
 
@@ -113,16 +113,21 @@ classify-route and page-image evidence read the facts unchanged:
 | `invisibleWords`, `textLayer` | `text.invisibleWordCount`, `text.textLayer` |
 | `widthPt`, `heightPt` | `geometry.widthPt`, `heightPt` (the CropBox with rotation; the walker uses CropBox ∩ MediaBox) |
 | `images` | `images.items`: box, coverage, pixel size, bits, colour space and codec in the walker's vocabulary, ppi; `repeated` from `obj` across pages. Null when not computed or truncated |
-| `images[].wordsInside` | `visibleWordsInside` + `invisibleWordsInside`; null when absent |
-| `images[].bytesPerPixel` | `bytesPerPixel`, one to one; null when absent (never 0). What the file says, which a crafted file can inflate: a routing hint, never a billing input |
-| `grids` | `vectors.grids` with two or more columns (the walker's minimum grid; one column is parallel rules, weak evidence), as rows, columns and the box's coverage of the page. Null when `gridsTruncated`, at the drawing cap, or when the CropBox differs from the MediaBox. Without the list (older builds): `[]` when the rule counts prove there is no grid, otherwise null |
+| `images[].coverage` | `coverage`, capped by the image's own box over the page |
+| `images[].wordsInside` | `visibleWordsInside` + `invisibleWordsInside`: words whose whole box is inside (within 1 pt), where the walker counts word centres. Null when absent, and for every image of a page whose centre-based `textOverImageRatio` is absent or shows more text over images than the counts plus one average word explain (a label straddling an edge) |
+| `images[].bytesPerPixel` | `bytesPerPixel`, one to one; null when absent (never 0). The exact declared `/Length`, where the walker divides `pdfimages -list`'s rounded size, so the two can differ near the scan-like threshold. What the file says, which a crafted file can inflate: a routing hint, never a billing input |
+| `grids` | `vectors.grids` with two or more columns (the walker's minimum grid; one column is parallel rules, weak evidence) whose rows and columns the page's rule counts allow (`rows + 1` ≤ `hRules`, `columns + 1` ≤ `vRules`), as rows, columns and the box's coverage of the page. Doppler's `columns` counts inner column lines and its search also uses shaded boxes, so grids the rules do not support are dropped, and a page with fewer than 2 horizontal or 3 vertical rules has `[]`. Null when `gridsTruncated`, at the drawing cap, or when the CropBox differs from the MediaBox. Without the list (older builds): `[]` when the rule counts prove there is no grid, otherwise null |
 | `tableCoverage` | the union of the kept grid boxes on the walker's 200 × 200 raster, when the grids are known from the list; else null. The walker's value also covers Markdown table boxes, so this is never larger |
 | `tables` | null: tables come from the Markdown |
 
-A page marked `xref-repaired-earlier` (an earlier page rebuilt the cross-reference table, so its facts may come from an
-object the file holds twice) is low confidence: its images' pixel size, ppi and `bytesPerPixel` are unknown in the layout
-facts, its page-image evidence is unknown (`imagesKnown: false`), and chart export nominates none of its images. None of
-them can authorize a paid read.
+A page marked `xref-repaired-earlier` (an earlier page rebuilt the cross-reference table, so any of its facts may come
+from an object the file holds twice) is low confidence: its images' pixel size, ppi, `bytesPerPixel` and words inside
+and its grids are unknown in the layout facts, the document gets no facts-built page-image evidence
+(`xref-repaired-earlier`; the furniture rule is shared across pages), and chart export nominates nothing on the page.
+
+With words inside known, facts in `use` mode can select a mixed-scan read (`mixedScanImage`), as walker layout does: a
+page with native text and a placed, scan-like, readable image with at most 2 words inside. That read bills Rich like any
+other.
 
 `probeRowsFromDopplerFacts` (`worker/src/routing/probe/doppler-facts.ts`) builds the v2 router's `ProbeRow` with
 `probeEngine: "doppler-facts"` and no thumbnail; its header comment lists each field.

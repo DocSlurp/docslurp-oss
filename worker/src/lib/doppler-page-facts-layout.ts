@@ -35,7 +35,7 @@
  */
 import type { PageLayoutImage } from "@docslurp/shared";
 
-import { dopplerPageImageSizesUntrusted, type Box, type DopplerColorSpace, type DopplerImageFilter, type DopplerPageFacts, type DopplerPageFactsDocument, type DopplerScan, type DopplerTextLayer } from "./doppler-page-facts.js";
+import { dopplerPageExtent, dopplerPageFactsLowConfidence, type Box, type DopplerColorSpace, type DopplerImageFilter, type DopplerPageFacts, type DopplerPageFactsDocument, type DopplerScan, type DopplerTextLayer } from "./doppler-page-facts.js";
 import type { PageLayoutFacts } from "./page-layout-facts.js";
 
 /** The walker's `pdfimages -list` encodings (worker/scripts/pdf_layout_facts.py LISTING_ENCODINGS). */
@@ -80,11 +80,12 @@ function layoutImages(page: DopplerPageFacts, repeated: Set<number>): PageLayout
   const images = page.images;
   if (!images?.items || images.truncated || images.itemsTruncated || images.items.length < images.imageCount) return null;
   // Low confidence (an earlier page rebuilt the xref): sizes and stream ratios are unknown, so they authorize nothing.
-  const sizesUnknown = dopplerPageImageSizesUntrusted(page);
-  const insideKnown = wordsInsideCorroborated(page);
+  const sizesUnknown = dopplerPageFactsLowConfidence(page);
+  const insideKnown = !sizesUnknown && wordsInsideCorroborated(page);
+  const extent = dopplerPageExtent(page.geometry);
   return images.items.map((item) => ({
     bbox: [...item.bbox] as [number, number, number, number],
-    coverage: item.coverage,
+    coverage: boxCappedCoverage(item.coverage, item.bbox, extent),
     widthPx: sizesUnknown ? 0 : item.px[0],
     heightPx: sizesUnknown ? 0 : item.px[1],
     bitsPerComponent: item.bpc ?? null,
@@ -95,6 +96,18 @@ function layoutImages(page: DopplerPageFacts, repeated: Set<number>): PageLayout
     repeated: item.obj !== undefined && repeated.has(item.obj),
     wordsInside: insideKnown && item.visibleWordsInside !== undefined && item.invisibleWordsInside !== undefined ? item.visibleWordsInside + item.invisibleWordsInside : null,
   }));
+}
+
+/**
+ * An image's share of its page, never more than its own box allows: the reported coverage capped by the box clipped to the
+ * page (as page-image evidence caps it), so a forged coverage on a small box cannot pass for a large scan. Null (unknown)
+ * without a page extent.
+ */
+function boxCappedCoverage(coverage: number, bbox: Box, extent: [number, number] | null): number | null {
+  if (!extent || !(extent[0] > 0 && extent[1] > 0)) return null;
+  const [w, h] = extent;
+  const x = Math.max(0, Math.min(w, bbox[2]) - Math.max(0, bbox[0])), y = Math.max(0, Math.min(h, bbox[3]) - Math.max(0, bbox[1]));
+  return Math.min(coverage, Math.round((x * y) / (w * h) * 10_000) / 10_000);
 }
 
 /**
@@ -179,7 +192,8 @@ function roundLikePython(cells: number, total: number): number {
 
 function gridFacts(page: DopplerPageFacts): Pick<PageLayoutFacts, "grids" | "tableCoverage"> {
   const v = page.vectors;
-  if (!v || v.limitHit || v.gridsTruncated) return { grids: null, tableCoverage: null };
+  // Low confidence (`xref-repaired-earlier`): the rules may have been read from another object: unknown.
+  if (!v || v.limitHit || v.gridsTruncated || dopplerPageFactsLowConfidence(page)) return { grids: null, tableCoverage: null };
   // The walker's grid needs 2 horizontal and 3 vertical rules on the page. Doppler's search also builds grids from shaded
   // boxes and from inner column lines without outer sides (a two-column page's centre divider), which the walker never
   // reads as a table: on a page without the walker's minimum rules there is no walker grid, whatever the list says.
@@ -193,7 +207,12 @@ function gridFacts(page: DopplerPageFacts): Pick<PageLayoutFacts, "grids" | "tab
   if (!size) return { grids: null, tableCoverage: null };
   const [w, h] = size;
   const clip = (b: Box): Box => [Math.min(w, Math.max(0, b[0])), Math.min(h, Math.max(0, b[1])), Math.min(w, Math.max(0, b[2])), Math.min(h, Math.max(0, b[3]))];
-  const kept = v.grids.filter((g) => g.columns >= GRID_MIN_COLUMNS).map((g) => ({ ...g, bbox: clip(g.bbox) }));
+  // Per grid, the walker's rules must be there too: a grid's rows need rows + 1 horizontal rules and its columns
+  // columns + 1 vertical ones (outer sides included). Shaded boxes (two bands each) and sideless column lines can make a
+  // Doppler grid larger than the page's rules allow; such a grid is not one the walker would find.
+  const kept = v.grids
+    .filter((g) => g.columns >= GRID_MIN_COLUMNS && g.rows + 1 <= v.hRules && g.columns + 1 <= v.vRules)
+    .map((g) => ({ ...g, bbox: clip(g.bbox) }));
   return {
     grids: kept.map((g) => ({ rows: g.rows, columns: g.columns, coverage: rasterUnionCoverage([g.bbox], w, h) })),
     tableCoverage: rasterUnionCoverage(kept.map((g) => g.bbox), w, h),
