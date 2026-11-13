@@ -46,7 +46,7 @@ const FEATURES = [
 ] as const;
 const WARNINGS = [
   "bad-content-stream", "broken-image", "internal-error", "io-error", "limit-hit", "missing-font", "non-finite", "out-of-range",
-  "page-failed", "syntax-error", "syntax-warning", "unimplemented", "xref-repaired",
+  "page-failed", "syntax-error", "syntax-warning", "unimplemented", "xref-repaired", "xref-repaired-earlier",
 ] as const;
 const TEXT_LAYERS = ["none", "invisible", "visible", "mixed"] as const;
 const SCANS = ["none", "single", "tiled", "layered"] as const;
@@ -134,6 +134,19 @@ export interface DopplerImageItem {
   inline: boolean;
   obj?: number;
   copy: DopplerImageCopy;
+  /**
+   * Words of the page whose box lies inside this image's box (within 1 pt), visible and invisible as `text` counts them
+   * (added within /1). Both or neither: absent from older builds, without the `text` family, or when either contradicts
+   * the page's own counts.
+   */
+  visibleWordsInside?: number;
+  invisibleWordsInside?: number;
+  /**
+   * The stream's declared /Length over its pixels (added within /1): what the file says, which a crafted file can inflate.
+   * A routing hint only, never a billing input. Absent (unknown, never 0) without a consistent /Length, for inline images
+   * and for external (/F) data.
+   */
+  bytesPerPixel?: number;
 }
 
 export interface DopplerImageFacts {
@@ -159,6 +172,15 @@ export interface DopplerVectorCluster {
   segments: number;
 }
 
+/** A ruled grid (Doppler's ruled-table search, from the rules alone). `columns` 1 (horizontal rules only) is weak evidence. */
+export interface DopplerVectorGrid {
+  /** Page points, top-left origin, inside the page (within 1 pt). */
+  bbox: Box;
+  rows: number;
+  columns: number;
+  coverage: number;
+}
+
 export interface DopplerVectorFacts {
   paths: number;
   filled: number;
@@ -175,6 +197,13 @@ export interface DopplerVectorFacts {
   /** Absent when the list did not validate. */
   clusters?: DopplerVectorCluster[];
   clustersTruncated: boolean;
+  /**
+   * Ruled grids, at most 64 (added within /1). Absent from older builds: unknown. Present only with `gridsTruncated`; a
+   * list that does not validate, or a box off the page, makes the whole `vectors` family unknown.
+   */
+  grids?: DopplerVectorGrid[];
+  /** The grid list may be incomplete (a cap was hit): an empty list is then not proof that there is no table. */
+  gridsTruncated?: boolean;
   limitHit: boolean;
 }
 
@@ -394,7 +423,7 @@ function fonts(value: unknown): DopplerFontFacts | undefined {
 const MAX_ITEMS = 32;
 
 function imageItem(value: unknown): DopplerImageItem | undefined {
-  return family<DopplerImageItem>(value, {
+  const item = family<DopplerImageItem>(value, {
     index: (v) => count(v) !== undefined && (v as number) >= 1 ? v : undefined,
     bbox: box, coverage: ratio,
     px: (v) => Array.isArray(v) && v.length === 2 && v.every((n) => count(n) !== undefined) ? [v[0], v[1]] : undefined,
@@ -404,7 +433,18 @@ function imageItem(value: unknown): DopplerImageItem | undefined {
   }, {
     bpc: (v) => count(v, 32) !== undefined && (v as number) >= 1 ? v : undefined,
     obj: (v) => count(v) !== undefined && (v as number) >= 1 ? v : undefined,
+    visibleWordsInside: (v) => count(v), invisibleWordsInside: (v) => count(v),
+    bytesPerPixel: (v) => nonNegative(v, 1e9),
   });
+  if (!item) return undefined;
+  // Words inside come as a pair: one alone is not a count of the words inside.
+  if ((item.visibleWordsInside === undefined) !== (item.invisibleWordsInside === undefined)) {
+    delete item.visibleWordsInside;
+    delete item.invisibleWordsInside;
+  }
+  // The contract has no stream length for an inline image: a value there is not a fact.
+  if (item.inline) delete item.bytesPerPixel;
+  return item;
 }
 
 /** A list of family objects: over the cap, or any entry that does not validate, makes the whole list unknown. */
@@ -436,12 +476,28 @@ function cluster(value: unknown): DopplerVectorCluster | undefined {
   return family<DopplerVectorCluster>(value, { bbox: box, paths: count, curves: count, segments: count });
 }
 
+/** Doppler's cap on grids per page. */
+const MAX_GRIDS = 64;
+/** Grid rows and columns are bands between at most 4,096 rule rows (a shaded box counts two) and column lines a direction. */
+const MAX_GRID_BANDS = 8_192;
+
+function grid(value: unknown): DopplerVectorGrid | undefined {
+  const band = (v: unknown) => count(v, MAX_GRID_BANDS) !== undefined && (v as number) >= 1 ? v : undefined;
+  return family<DopplerVectorGrid>(value, { bbox: box, rows: band, columns: band, coverage: ratio });
+}
+
 function vectors(value: unknown): DopplerVectorFacts | undefined {
-  return family<DopplerVectorFacts>(value, {
+  const facts = family<DopplerVectorFacts>(value, {
     paths: (v) => count(v, 100_000), filled: count, stroked: count, coverage: ratio, hRules: count, vRules: count,
     ruleGridScore: ratio, shadings: count, patterns: count, clips: count, figureClusters: count,
     clusters: (v) => list(v, MAX_ITEMS, cluster), clustersTruncated: bool, limitHit: bool,
-  }, { uncoveredRatio: ratio });
+  }, { uncoveredRatio: ratio, grids: (v) => list(v, MAX_GRIDS, grid), gridsTruncated: bool });
+  if (!facts || !isObj(value)) return undefined;
+  // Grids decide table routing: a list (or flag) on the wire that does not validate, or a list without its truncation flag,
+  // makes the family unknown rather than leaving a partial or unqualified list. The flag alone (grouping cut short) stands.
+  if ((has(value, "grids") && facts.grids === undefined) || (has(value, "gridsTruncated") && facts.gridsTruncated === undefined)) return undefined;
+  if (facts.grids !== undefined && facts.gridsTruncated === undefined) return undefined;
+  return facts;
 }
 
 function forms(value: unknown): DopplerFormFacts | undefined {
@@ -477,6 +533,58 @@ function layers(value: unknown): DopplerLayerFacts | undefined {
 
 const PAGE_FAMILIES = { geometry, text, fonts, images, vectors, forms, annots, layers } as const;
 
+/** Slack for a box against the page's sides, as the contract allows a word box to pass an image's (1 pt). */
+const PAGE_SLACK_PT = 1;
+
+/**
+ * The page's extent in the facts' coordinate space (the MediaBox, rotated, origin top left): the rotated MediaBox when
+ * given, otherwise the page size (the two are given only when they differ from the CropBox). Null when unknown.
+ */
+function pageExtent(geometry: DopplerGeometry | undefined): [number, number] | null {
+  if (!geometry) return null;
+  const media = geometry.mediaBox;
+  if (!media) return [geometry.widthPt, geometry.heightPt];
+  const w = Math.abs(media[2] - media[0]), h = Math.abs(media[3] - media[1]);
+  return geometry.rotation === 90 || geometry.rotation === 270 ? [h, w] : [w, h];
+}
+
+/** A box ordered and inside the page within PAGE_SLACK_PT. */
+function boxOnPage(b: Box, extent: [number, number]): boolean {
+  const [w, h] = extent;
+  return b[0] <= b[2] && b[1] <= b[3] && b[0] >= -PAGE_SLACK_PT && b[1] >= -PAGE_SLACK_PT && b[2] <= w + PAGE_SLACK_PT && b[3] <= h + PAGE_SLACK_PT;
+}
+
+/**
+ * Checks across families of one page (the families validated alone first):
+ * - every grid box must be on the page: a grid off the page, or grids without a page geometry to bound them, make
+ *   `vectors` unknown;
+ * - words inside an image are bounded by the page's own counts: without `text`, or past them, the pair is unknown.
+ */
+function crossCheckPage(out: DopplerPageFacts): void {
+  const grids = out.vectors?.grids;
+  if (grids && grids.length > 0) {
+    const extent = pageExtent(out.geometry);
+    if (!extent || !grids.every((g) => boxOnPage(g.bbox, extent))) delete out.vectors;
+  }
+  for (const item of out.images?.items ?? []) {
+    if (item.visibleWordsInside === undefined || item.invisibleWordsInside === undefined) continue;
+    const text = out.text;
+    if (!text || item.visibleWordsInside > text.visibleWordCount || item.invisibleWordsInside > text.invisibleWordCount) {
+      delete item.visibleWordsInside;
+      delete item.invisibleWordsInside;
+    }
+  }
+}
+
+/**
+ * The page's facts may have been read from an object the file holds twice, after an earlier page rebuilt the
+ * cross-reference table (`xref-repaired-earlier`): low confidence. Callers treat an image's `px`, `dpi` and
+ * `bytesPerPixel` on such a page as unknown, so they never authorize a paid read.
+ */
+export function dopplerPageImageSizesUntrusted(page: Pick<DopplerPageFacts, "parseWarnings">): boolean {
+  return page.parseWarnings.includes("xref-repaired-earlier");
+}
+
 /**
  * Validate one page object (a wire `page` line). Null when the page number is missing,
  * out of 1..pageCount, or the required lists are malformed: the page is then unknown.
@@ -500,6 +608,7 @@ export function validateDopplerPage(value: unknown, pageCount: number): DopplerP
     const parsed = check(value[name]);
     if (parsed !== undefined) (out as unknown as Obj)[name] = parsed;
   }
+  crossCheckPage(out);
   const ms = nonNegative(value.factsMs, 86_400_000);
   if (ms !== undefined) out.factsMs = ms;
   return out;

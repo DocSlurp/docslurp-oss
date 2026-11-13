@@ -18,7 +18,7 @@
 import { PAGE_RASTER_ROUTING } from "@docslurp/shared";
 
 import { MIN_SIGNIFICANT_IMAGE_COVERAGE, MIN_SIGNIFICANT_IMAGE_PIXELS, SPARSE_PAGE_WORDS, pageEvidenceWordCount, type PageImageEvidence } from "./page-image-evidence.js";
-import type { DopplerPageFacts, DopplerPageFactsDocument } from "./doppler-page-facts.js";
+import { dopplerPageImageSizesUntrusted, type DopplerPageFacts, type DopplerPageFactsDocument } from "./doppler-page-facts.js";
 import { PAGE_FACTS_MAX_PAGES, plainTextBytes, type PageFactUpsert } from "../pipeline/page-facts.js";
 
 /** `document_page_facts.facts_source` and the page-image evidence artifact's `source` for facts-built evidence. */
@@ -90,6 +90,16 @@ function significantShare(item: CoveredPage["images"]["items"][number], page: Co
 }
 
 /**
+ * For the furniture rule only: on a page whose image sizes are unknown (`xref-repaired-earlier`), a placement counts by its
+ * share alone. That can only mark more objects as furniture, which leaves images out of other pages' totals: never more reads.
+ */
+function furnitureShare(item: CoveredPage["images"]["items"][number], page: CoveredPage): number | null {
+  if (!dopplerPageImageSizesUntrusted(page)) return significantShare(item, page);
+  const share = itemCoverage(item, page);
+  return share >= MIN_SIGNIFICANT_IMAGE_COVERAGE ? share : null;
+}
+
+/**
  * Furniture as the probe finds it (summarizeImageListing): an image object whose significant placements fall on at least
  * repeatedImageMinPages pages, and on at least repeatedImageMinShare of the `scope` pages listed (pages 1..scope).
  */
@@ -98,7 +108,7 @@ function repeatedSignificantObjects(facts: DopplerPageFactsDocument, scope: numb
   for (let pageNumber = 1; pageNumber <= scope; pageNumber += 1) {
     const page = facts.pages.get(pageNumber) as CoveredPage;
     for (const item of page.images.items) {
-      if (item.obj === undefined || significantShare(item, page) === null) continue;
+      if (item.obj === undefined || furnitureShare(item, page) === null) continue;
       const set = pagesOf.get(item.obj) ?? new Set<number>();
       set.add(pageNumber);
       pagesOf.set(item.obj, set);
@@ -158,6 +168,15 @@ export function pageImageEvidenceFromDopplerFacts(args: {
   for (const pageNumber of sparse.sort((a, b) => a - b)) {
     const page = facts.pages.get(pageNumber) as CoveredPage;
     const words = page.text.wordCount;
+    if (dopplerPageImageSizesUntrusted(page)) {
+      // Low confidence (an earlier page rebuilt the xref): the images' sizes are unknown, so the page's image totals are
+      // too. classify-route reads unknown images as unknown evidence, never as a scan to read.
+      evidence.set(pageNumber, {
+        pageNumber, wordCount: words, imagesKnown: false, anyImageCount: 0, repeatedImageCount: 0, imageCount: 0,
+        imageCoverage: 0, largestImageCoverage: 0, embeddedImageBytes: null,
+      });
+      continue;
+    }
     let imageCount = 0;
     let repeatedImageCount = 0;
     let coverage = 0;

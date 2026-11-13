@@ -12,18 +12,26 @@
  * - `images` ← `images.items` (`images-detail` family): `bbox`, `coverage`, `px` → `widthPx`/`heightPx`, `bpc` →
  *   `bitsPerComponent`, `dpi` → `ppi` (non-positive → null), `filter` → `encoding` and `colorSpace` in the walker's
  *   `pdfimages -list` vocabulary, `repeated` from `obj` across the pages given (the walker's furniture rule).
- *   Facts cannot supply `bytesPerPixel` (the stream is never read) or `wordsInside` (no word boxes): both null, so
- *   `mixedScanImage` never selects a facts-only image. Null (unknown) when the list was not computed, is truncated, or
- *   holds fewer items than `imageCount`.
- * - `grids` ← `[]` only when the `vectors` family proves there is no ruled grid: fewer than 2 horizontal or 3 vertical rules
- *   (the walker's minimum grid) and no cap hit. Facts have rule counts, not rule positions, so a page that may hold a grid
- *   is unknown (null), never a guessed grid.
- * - `tables` ← null: tables come from the extractor's Markdown. `tableCoverage` ← null: it needs table and grid boxes.
+ *   `wordsInside` ← `visibleWordsInside` + `invisibleWordsInside` (the walker counts every text-layer word whose centre is
+ *   inside; Doppler a word whose whole box is, within 1 pt), null when the pair is absent. `bytesPerPixel` ← `bytesPerPixel`
+ *   one to one, null when absent (never 0). Both are routing hints from what the file says: never a billing input. On a page
+ *   marked `xref-repaired-earlier` (its facts may come from an object the file holds twice) the image's `px` (→ 0, as the
+ *   layout reader reads an unknown size), `dpi` and `bytesPerPixel` are unknown, so they cannot select a mixed-scan read.
+ *   Null (unknown) when the list was not computed, is truncated, or holds fewer items than `imageCount`.
+ * - `grids` ← `vectors.grids` as `PageTable`s (rows, columns, coverage of the box clipped to the page; the type has no box),
+ *   keeping only grids of two or more columns: the walker's minimum grid (2 horizontals, 3 verticals). A one-column grid
+ *   (parallel rules: form lines, lined paper) is weak evidence and not a table. Unknown (null) when the list is truncated,
+ *   at the drawing cap, or on a page whose CropBox differs from its MediaBox (the boxes are in MediaBox space). Without the
+ *   list (older builds): `[]` only when the rule counts prove there is no grid (fewer than 2 horizontal or 3 vertical rules,
+ *   no cap hit), otherwise null, never a guessed grid.
+ * - `tables` ← null: tables come from the extractor's Markdown. `tableCoverage` ← the union of the kept grid boxes over the
+ *   page on the walker's 200 x 200 raster (overlaps once) when the grids are known from the list, else null. The walker's
+ *   value also covers the Markdown tables' boxes, so this is never larger than the walker's.
  * - A failed page (`error: failed`) is omitted: unknown.
  */
 import type { PageLayoutImage } from "@docslurp/shared";
 
-import type { DopplerColorSpace, DopplerImageFilter, DopplerPageFacts, DopplerPageFactsDocument, DopplerScan, DopplerTextLayer } from "./doppler-page-facts.js";
+import { dopplerPageImageSizesUntrusted, type Box, type DopplerColorSpace, type DopplerImageFilter, type DopplerPageFacts, type DopplerPageFactsDocument, type DopplerScan, type DopplerTextLayer } from "./doppler-page-facts.js";
 import type { PageLayoutFacts } from "./page-layout-facts.js";
 
 /** The walker's `pdfimages -list` encodings (worker/scripts/pdf_layout_facts.py LISTING_ENCODINGS). */
@@ -44,6 +52,10 @@ const MAX_SIDE_PT = 14_400;
 /** The walker's minimum ruled grid: 2 distinct horizontals and 3 distinct verticals. */
 const GRID_MIN_H = 2;
 const GRID_MIN_V = 3;
+/** The walker's minimum grid in columns (3 distinct verticals). */
+const GRID_MIN_COLUMNS = 2;
+/** The walker's union-coverage raster (pdf_layout_facts.py COVERAGE_RASTER). */
+const COVERAGE_RASTER = 200;
 
 /** Image objects drawn on enough of the `considered` pages to be page furniture (the walker's and the probe's rule). */
 export function repeatedDopplerImageObjects(pages: Iterable<DopplerPageFacts>, considered: number): Set<number> {
@@ -63,25 +75,72 @@ export function repeatedDopplerImageObjects(pages: Iterable<DopplerPageFacts>, c
 function layoutImages(page: DopplerPageFacts, repeated: Set<number>): PageLayoutImage[] | null {
   const images = page.images;
   if (!images?.items || images.truncated || images.itemsTruncated || images.items.length < images.imageCount) return null;
+  // Low confidence (an earlier page rebuilt the xref): sizes and stream ratios are unknown, so they authorize nothing.
+  const sizesUnknown = dopplerPageImageSizesUntrusted(page);
   return images.items.map((item) => ({
     bbox: [...item.bbox] as [number, number, number, number],
     coverage: item.coverage,
-    widthPx: item.px[0],
-    heightPx: item.px[1],
+    widthPx: sizesUnknown ? 0 : item.px[0],
+    heightPx: sizesUnknown ? 0 : item.px[1],
     bitsPerComponent: item.bpc ?? null,
     colorSpace: COLOR[item.colorSpace],
     encoding: ENCODING[item.filter],
-    ppi: [item.dpi[0] > 0 ? item.dpi[0] : null, item.dpi[1] > 0 ? item.dpi[1] : null],
-    bytesPerPixel: null,
+    ppi: sizesUnknown ? [null, null] : [item.dpi[0] > 0 ? item.dpi[0] : null, item.dpi[1] > 0 ? item.dpi[1] : null],
+    bytesPerPixel: sizesUnknown ? null : item.bytesPerPixel ?? null,
     repeated: item.obj !== undefined && repeated.has(item.obj),
-    wordsInside: null,
+    wordsInside: item.visibleWordsInside !== undefined && item.invisibleWordsInside !== undefined ? item.visibleWordsInside + item.invisibleWordsInside : null,
   }));
 }
 
-function grids(page: DopplerPageFacts): PageLayoutFacts["grids"] {
+/** The page's width and height when its grid boxes can be placed on it (CropBox = MediaBox, sides in range), else null. */
+function gridPage(page: DopplerPageFacts): [number, number] | null {
+  const g = page.geometry;
+  if (!g || !(g.widthPt >= MIN_SIDE_PT && g.widthPt <= MAX_SIDE_PT && g.heightPt >= MIN_SIDE_PT && g.heightPt <= MAX_SIDE_PT)) return null;
+  if (g.cropBox && g.mediaBox && g.cropBox.some((v, i) => Math.abs(v - g.mediaBox![i]!) > 0.5)) return null;
+  return [g.widthPt, g.heightPt];
+}
+
+/**
+ * Share of a `w` x `h` page covered by the union of `boxes`, on the walker's COVERAGE_RASTER grid (union_coverage: a box
+ * marks every cell it touches; overlaps count once), rounded to 4 places. Bands between the boxes' row edges, then merged
+ * column intervals per band: at most 2·n bands of n intervals, whatever the boxes.
+ */
+export function rasterUnionCoverage(boxes: readonly Box[], w: number, h: number): number {
+  const n = COVERAGE_RASTER;
+  const cells = boxes.map(([x0, y0, x1, y1]) => [
+    Math.max(0, Math.trunc(x0 / w * n)), Math.max(0, Math.trunc(y0 / h * n)),
+    Math.min(n, Math.ceil(x1 / w * n)), Math.min(n, Math.ceil(y1 / h * n)),
+  ] as const).filter(([c0, r0, c1, r1]) => c1 > c0 && r1 > r0).sort((a, b) => a[0] - b[0]);
+  const edges = [...new Set(cells.flatMap(([, r0, , r1]) => [r0, r1]))].sort((a, b) => a - b);
+  let covered = 0;
+  for (let i = 0; i + 1 < edges.length; i += 1) {
+    const top = edges[i]!, bottom = edges[i + 1]!;
+    let width = 0, end = -1;
+    for (const [c0, r0, c1, r1] of cells) {
+      if (r0 > top || r1 < bottom) continue;
+      if (c0 > end) { width += c1 - c0; end = c1; } else if (c1 > end) { width += c1 - end; end = c1; }
+    }
+    covered += width * (bottom - top);
+  }
+  return Math.round(covered / (n * n) * 10_000) / 10_000;
+}
+
+function gridFacts(page: DopplerPageFacts): Pick<PageLayoutFacts, "grids" | "tableCoverage"> {
   const v = page.vectors;
-  if (!v || v.limitHit) return null;
-  return v.hRules < GRID_MIN_H || v.vRules < GRID_MIN_V ? [] : null;
+  if (!v || v.limitHit || v.gridsTruncated) return { grids: null, tableCoverage: null };
+  if (v.grids === undefined) {
+    // An older build: rule counts can prove there is no grid, never where one is.
+    return { grids: v.hRules < GRID_MIN_H || v.vRules < GRID_MIN_V ? [] : null, tableCoverage: null };
+  }
+  const size = gridPage(page);
+  if (!size) return { grids: null, tableCoverage: null };
+  const [w, h] = size;
+  const clip = (b: Box): Box => [Math.min(w, Math.max(0, b[0])), Math.min(h, Math.max(0, b[1])), Math.min(w, Math.max(0, b[2])), Math.min(h, Math.max(0, b[3]))];
+  const kept = v.grids.filter((g) => g.columns >= GRID_MIN_COLUMNS).map((g) => ({ ...g, bbox: clip(g.bbox) }));
+  return {
+    grids: kept.map((g) => ({ rows: g.rows, columns: g.columns, coverage: rasterUnionCoverage([g.bbox], w, h) })),
+    tableCoverage: rasterUnionCoverage(kept.map((g) => g.bbox), w, h),
+  };
 }
 
 /** One page's layout facts, or null when the page is unknown (failed). `repeated`: furniture image objects of the document. */
@@ -91,8 +150,7 @@ export function pageLayoutFactsFromDopplerPage(page: DopplerPageFacts, repeated:
     images: layoutImages(page, repeated),
     tables: null,
     words: page.text?.wordCount ?? null,
-    grids: grids(page),
-    tableCoverage: null,
+    ...gridFacts(page),
   };
   const g = page.geometry;
   const side = (n: number) => n >= MIN_SIDE_PT && n <= MAX_SIDE_PT;
