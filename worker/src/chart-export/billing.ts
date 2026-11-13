@@ -3,9 +3,10 @@
  * generator model read, that is per candidate for which the provider answered at least one generator call, priced by
  * the pricing provider (`visualExportCredits`) by the formats requested when the call was made (at least one call's
  * worth). A visual whose answer needed its one repair, or its one retry after a cut-off answer, and got an answer to
- * it, is billed a second read (`visualExportRetryCredits`) as its own event (`<id>:retry`): at most two billed reads per
- * visual. Estimates price the same reads: candidates a model reads (deterministic ones are free) plus the provider's
- * expected share of second reads (`expectedVisualExportCredits`).
+ * it, is billed a second read (`visualExportRetryCredits`) as its own event (`<id>:retry`): at most one second read per
+ * visual, on top of a first read that bills one unit per generator call its formats need. Estimates price the same
+ * reads: candidates a model reads (deterministic ones are free) plus, when a spec call runs, the provider's expected
+ * share of second reads (`expectedVisualExportCredits`).
  *
  * - Charged on calls answered, whatever the outcome: exported from the model's answer, fell back to a deterministic
  *   spec (security M3), answered `none`, invalid after the repair, or read as a diagram while the project exports no

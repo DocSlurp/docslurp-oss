@@ -73,6 +73,8 @@ describe("chart export second reads (owner decision 2026-11-13)", () => {
     // A direct-mode format adds a first-read call, never a second read.
     expect(expectedVisualExportCredits({ visuals: 1, formats: ["description", "csv"], modes: { csv: "direct" } })).toBeCloseTo(0.2 + 0.05, 9);
     expect(expectedVisualExportCredits({ visuals: 0, formats: ["description"] })).toBe(0);
+    // All formats direct: one billed call each and no spec call, so no second read is expected.
+    expect(expectedVisualExportCredits({ visuals: 1, formats: ["mermaid", "csv"], modes: { mermaid: "direct", csv: "direct" } })).toBeCloseTo(0.2, 9);
     // A provider share outside 0..1 fails closed.
     installTestPricing({ ...DISTINCT_TEST_PRICING, chartExportExpectedRetriesPerRead: () => 1.5 });
     expect(() => expectedVisualExportCredits({ visuals: 1, formats: ["description"] })).toThrow(/expected chart retry share/);
