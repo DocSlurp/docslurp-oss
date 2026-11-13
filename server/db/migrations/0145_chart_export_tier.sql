@@ -9,7 +9,8 @@
 --    CLI token, connector, internal). Set server-side from the authenticated principal; existing rows are `machine`.
 --
 -- Idempotent: rows are rewritten only while they still carry `enabled` or `generatorModel`; columns and constraints are
--- guarded. NOTE: open PR core #355 adds 0140_document_asset_ledger; whichever lands second renumbers.
+-- guarded. NOTE: numbered 0145 (journal idx stays positional) to sit after the open PRs (#355: 0141, #357: 0142-0143, #365: 0144, #362: 0141). Whichever
+-- PR lands later renumbers and raises its journal `when` above every earlier entry.
 
 ALTER TABLE upload_sessions ADD COLUMN IF NOT EXISTS origin text NOT NULL DEFAULT 'machine';
 ALTER TABLE project_runs ADD COLUMN IF NOT EXISTS origin text NOT NULL DEFAULT 'machine';
@@ -24,25 +25,25 @@ BEGIN
   END IF;
 END $$;
 
-CREATE OR REPLACE FUNCTION docslurp_chart_export_tier_0141(chart jsonb) RETURNS jsonb
+CREATE OR REPLACE FUNCTION docslurp_chart_export_tier_0145(chart jsonb) RETURNS jsonb
 LANGUAGE sql IMMUTABLE AS $fn$
   SELECT (chart - 'enabled' - 'generatorModel')
     || CASE WHEN chart -> 'enabled' = 'true'::jsonb AND NOT chart ? 'tier' THEN '{"tier":"models"}'::jsonb ELSE '{}'::jsonb END
 $fn$;
 
 UPDATE projects
-SET pipeline = jsonb_set(pipeline, '{chartExport}', docslurp_chart_export_tier_0141(pipeline -> 'chartExport'))
+SET pipeline = jsonb_set(pipeline, '{chartExport}', docslurp_chart_export_tier_0145(pipeline -> 'chartExport'))
 WHERE jsonb_typeof(pipeline -> 'chartExport') = 'object'
   AND (pipeline -> 'chartExport' ? 'enabled' OR pipeline -> 'chartExport' ? 'generatorModel');
 
 UPDATE upload_sessions
-SET pipeline = jsonb_set(pipeline, '{chartExport}', docslurp_chart_export_tier_0141(pipeline -> 'chartExport'))
+SET pipeline = jsonb_set(pipeline, '{chartExport}', docslurp_chart_export_tier_0145(pipeline -> 'chartExport'))
 WHERE jsonb_typeof(pipeline -> 'chartExport') = 'object'
   AND (pipeline -> 'chartExport' ? 'enabled' OR pipeline -> 'chartExport' ? 'generatorModel');
 
 UPDATE project_runs
-SET pipeline = jsonb_set(pipeline, '{chartExport}', docslurp_chart_export_tier_0141(pipeline -> 'chartExport'))
+SET pipeline = jsonb_set(pipeline, '{chartExport}', docslurp_chart_export_tier_0145(pipeline -> 'chartExport'))
 WHERE jsonb_typeof(pipeline -> 'chartExport') = 'object'
   AND (pipeline -> 'chartExport' ? 'enabled' OR pipeline -> 'chartExport' ? 'generatorModel');
 
-DROP FUNCTION IF EXISTS docslurp_chart_export_tier_0141(jsonb);
+DROP FUNCTION IF EXISTS docslurp_chart_export_tier_0145(jsonb);
