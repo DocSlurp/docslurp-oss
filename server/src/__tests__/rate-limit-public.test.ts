@@ -163,6 +163,16 @@ describe("in-memory limiter fallback", () => {
     warn.mockRestore();
   });
 
+  it("counts a weighted consume in full or not at all", async () => {
+    const store = createMemoryRateLimitStore();
+    const consume = (weight: number) => store.consume({ blockKey: "w", now: 1_000, countDenied: false, weight,
+      counters: [{ key: "w:a", limit: 5, windowMs: 60_000 }, { key: "w:b", limit: 100, windowMs: 3_600_000 }] });
+    expect(await consume(3)).toMatchObject({ denied: -1, counted: true });
+    expect(await consume(3)).toMatchObject({ denied: 0, counted: false });
+    expect(await consume(2)).toMatchObject({ denied: -1, counted: true, windows: [{ current: 3 }, { current: 3 }] });
+    expect(await consume(1)).toMatchObject({ denied: 0, counted: false });
+  });
+
   it("reserves prefix capacity for every new counter before changing any state", async () => {
     const store = createMemoryRateLimitStore({ maxEntries: 1_000 });
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);

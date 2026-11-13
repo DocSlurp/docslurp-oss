@@ -13,11 +13,24 @@ const dateFilter = z.string().trim().max(64).optional()
   });
 // A query of only NUL bytes is empty once they are stripped before the Postgres lookups.
 const query = z.string().trim().min(1).max(16000).refine((value) => value.replaceAll("\u0000", "").trim().length > 0);
+/** Keyword queries one search may run in parallel when `q` is an array (keyword mode only). */
+export const KEYWORD_FANOUT_MAX = 100;
+/** Array terms that need the Postgres keyword path ("quoted phrases", -negation): each is a full-text query there. */
+export const KEYWORD_FANOUT_POSTGRES_MAX = 8;
+const keywordTerm = z.string().trim().min(1).max(1000).refine((value) => value.replaceAll("\u0000", "").trim().length > 0);
+const searchQuery = z.union([
+  query,
+  z.array(keywordTerm).min(1).max(KEYWORD_FANOUT_MAX),
+]).describe(`Query text, or an array of up to ${KEYWORD_FANOUT_MAX} keyword queries run in parallel in keyword mode and fused into one ranked list (each result lists the queries it matched in matchedQueries).`);
+/** True for terms BM25 cannot honour natively: "quoted phrases" and -negation (services/search.ts nativeLexicalQuerySupported). */
+function needsPostgresKeywordPath(term: string): boolean {
+  return /"[^"]*[^"\s][^"]*"/.test(term) || /(?:^|\s)-[\p{L}\p{N}"]/u.test(term);
+}
 const projectRef = id.optional().describe("Project ID, slug or name (names match by slug, so \"Legal Contracts\" finds legal-contracts). Omitted: the organization default project.");
 
 export const searchInputSchema = z.object({
   geo: geoPredicateSchema.optional(),
-  q: query,
+  q: searchQuery,
   /** Omitted: the organization's default project. */
   project: projectRef,
   orgId: id.optional(),
@@ -55,10 +68,34 @@ export const searchInputSchema = z.object({
   communityExpansion: z.boolean().optional(),
   graphHops: z.number().int().min(1).max(4).optional(),
   glossary: z.record(z.string().max(256), z.array(z.string().max(256)).max(20)).optional(),
-}).strict();
+}).strict().superRefine((value, ctx) => {
+  if (!Array.isArray(value.q)) return;
+  if (value.mode && value.mode !== "keyword") {
+    ctx.addIssue({ code: "custom", path: ["mode"], message: "An array q runs keyword queries; use mode keyword or omit mode." });
+  }
+  if (value.q.join(" ").length > 16000) {
+    ctx.addIssue({ code: "custom", path: ["q"], message: "The keyword queries together exceed 16000 characters." });
+  }
+  if (value.q.filter(needsPostgresKeywordPath).length > KEYWORD_FANOUT_POSTGRES_MAX) {
+    ctx.addIssue({ code: "custom", path: ["q"], message: `At most ${KEYWORD_FANOUT_POSTGRES_MAX} keyword queries may use "quoted phrases" or -negation.` });
+  }
+});
 export type SearchInput = z.infer<typeof searchInputSchema>;
+
+/** The queries an input runs: one for a string q, each array item for a keyword fan-out. */
+export function searchQueryTerms(q: SearchInput["q"]): string[] {
+  return Array.isArray(q) ? q : [q];
+}
+
+/** The text a search is logged, cached and reranked under: the query, or the keyword queries joined. */
+export function searchQueryText(q: SearchInput["q"]): string {
+  return Array.isArray(q) ? q.join(" ") : q;
+}
 export const batchSearchInputSchema = z.object({
-  queries: z.array(searchInputSchema).min(1).max(20),
+  queries: z.array(searchInputSchema).min(1).max(20)
+    // One request runs at most KEYWORD_FANOUT_MAX keyword fan-out queries, however they are split across items.
+    .refine((items) => items.reduce((sum, item) => sum + (Array.isArray(item.q) ? item.q.length : 0), 0) <= KEYWORD_FANOUT_MAX,
+      { message: `A batch may hold at most ${KEYWORD_FANOUT_MAX} keyword fan-out queries in all.` }),
   /** Parallel retrievals; the chat search agent clamps it to the turn's `agent.searchConcurrency`. */
   concurrency: z.number().int().min(1).max(8).default(4),
 }).strict();
@@ -119,7 +156,9 @@ export function searchOptions(body: SearchInput & { projectId: string }) {
       language: body.language ?? "", heading: body.heading ?? "",
       dateFrom: body.dateFrom ?? "", dateTo: body.dateTo ?? "",
     }), ...(body.geo ? {geo:body.geo} : {}) },
-    searchMode: body.mode,
+    // An array q is a keyword fan-out: keyword mode, one BM25 query per item (services/search.ts).
+    searchMode: Array.isArray(body.q) ? "keyword" as const : body.mode,
+    ...(Array.isArray(body.q) ? { keywordQueries: body.q.map((term) => term.replaceAll("\u0000", "")) } : {}),
     useHyDE: body.hyde, useRerank: body.rerank,
     candidateDepth: body.candidateDepth, resultOrder: body.resultOrder,
     useMmr: body.mmr, mmrLambda: body.mmrLambda,

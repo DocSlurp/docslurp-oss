@@ -51,6 +51,14 @@ describe("chat MCP tools", () => {
     expect(JSON.parse(t.dispatch.mock.calls[0]![1]!.body as string).queries[0].project).toBe("selected");
   });
 
+  it("sends a keyword fan-out from the chat agent as its joined text (one search inside the turn's price)", async () => {
+    const t = setup(["search"]);
+    await t.execute("search", { q: ["notice period", "termination"] });
+    expect(JSON.parse(t.dispatch.mock.calls[0]![1]!.body as string)).toEqual({ q: "notice period termination", project: "selected" });
+    await t.execute("search", { queries: [{ q: ["a", "b"] }, { q: "c" }] });
+    expect(JSON.parse(t.dispatch.mock.calls[1]![1]!.body as string).queries.map((query: { q: unknown }) => query.q)).toEqual(["a b", "c"]);
+  });
+
   it("does not offer ingestion tools that fetch URLs or start paid work (G-04)", () => {
     const t = setup(["search", "upload", "extract", "completeUpload", "listProjects"]);
     expect(Object.keys(t.tools)).toEqual(["search"]);

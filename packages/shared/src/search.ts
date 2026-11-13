@@ -29,6 +29,8 @@ export const searchResultSchema = z.object({
       temperature: z.enum(["cold", "warm", "hot"]).optional(),
     })
     .optional(),
+  /** Keyword fan-out (array `q`): indexes of the queries that matched this result. */
+  matchedQueries: z.array(z.number().int().nonnegative()).optional(),
 });
 export type SearchResult = z.infer<typeof searchResultSchema>;
 

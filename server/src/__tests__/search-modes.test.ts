@@ -281,6 +281,24 @@ describe("per-mode search limits", () => {
     await expect(response.json()).resolves.toMatchObject({ error: { code: "search_limit_exceeded", details: { mode: "deep", limit: 2 } } });
   });
 
+  it("counts a keyword fan-out's queries all or none, across every window", async () => {
+    const rules = [
+      { metric: "searches", mode: "keyword", limit: 10, windowSeconds: 3_600 },
+      { metric: "searches", mode: "keyword", limit: 5, windowSeconds: 60 },
+    ];
+    await inRequestAs(keyActor(["search:keyword"], "server", rules, "limit-fanout"), async () => {
+      await consumeSearchModeLimit("keyword", 3);
+      // 3 more would pass the hour (6 of 10) but not the minute (6 of 5): refused, and neither window counts them.
+      const refused = await consumeSearchModeLimit("keyword", 3).then(() => null, (caught: unknown) => caught);
+      expect(refused).toBeInstanceOf(SearchModeLimitError);
+      expect((refused as InstanceType<typeof SearchModeLimitError>).rule.windowSeconds).toBe(60);
+      await consumeSearchModeLimit("keyword", 2);
+      await expect(consumeSearchModeLimit("keyword")).rejects.toBeInstanceOf(SearchModeLimitError);
+      // A fan-out larger than the limit itself can never be admitted.
+      await expect(consumeSearchModeLimit("keyword", 11)).rejects.toBeInstanceOf(SearchModeLimitError);
+    });
+  });
+
   it("counts only its own mode, so a cheaper mode keeps working", async () => {
     await inRequestAs(keyActor(["search:deep"], "server", deepTwoPerMinute, "limit-2"), async () => {
       for (let i = 0; i < 2; i++) await consumeSearchModeLimit("deep");
