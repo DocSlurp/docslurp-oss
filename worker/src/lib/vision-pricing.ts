@@ -1,4 +1,5 @@
 import {
+  assertNoAutomaticSelectionDenied,
   DEEPINFRA_VISION_BASE_URL,
   DEFAULT_OPENROUTER_VISION_MODEL,
   isLoopbackModelBaseUrl,
@@ -253,10 +254,14 @@ export function visionInputTokenBound(image: ImageSize, prompt = "", model?: str
   return visionImageTokenBound(image, model) + visionPromptTokenBound(prompt) + PROMPT_OVERHEAD_TOKENS;
 }
 
-/** The worker's configured default hosted vision model: `DOCSLURP_VISION_MODEL_URI`, else the built-in default. */
+/**
+ * The worker's configured default hosted vision model: `DOCSLURP_VISION_MODEL_URI` (an operator's explicit choice),
+ * else the built-in default, which is never a model that is never selected automatically.
+ */
 export function configuredVisionModel(env: Record<string, string | undefined> = process.env): string {
   const override = readVisionModelUriOverride(env, () => undefined);
   if (override) return resolveVisionRoute({ target: "hosted", modelUri: override } as never).model;
+  assertNoAutomaticSelectionDenied("built-in vision default", [DEFAULT_OPENROUTER_VISION_MODEL]);
   return DEFAULT_OPENROUTER_VISION_MODEL;
 }
 

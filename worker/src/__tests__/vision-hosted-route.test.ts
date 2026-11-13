@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { DEFAULT_OPENROUTER_VISION_MODEL, NEMOTRON_SUPER_VL_VISION_MODEL, OPENROUTER_BASE_URL, visionConfigSchema } from "@docslurp/shared";
+import { DEFAULT_OPENROUTER_VISION_MODEL, NEMOTRON_SUPER_VL_VISION_MODEL, OPEN_WEIGHTS_OPENROUTER_VISION_MODEL, OPENROUTER_BASE_URL, visionConfigSchema } from "@docslurp/shared";
 
 import type { Config } from "../config.js";
 import { CommandRunner } from "../tools/runner.js";
@@ -22,7 +22,7 @@ async function pageImage() {
 }
 
 describe("hosted OpenRouter vision request shape", () => {
-  it("refuses the Nemotron route (no serving-level image-token evidence); the open-weights profile sends DeepSeek", async () => {
+  it("refuses the Nemotron route (no serving-level image-token evidence); the open-weights profile sends GLM 5.3 Flash", async () => {
     const refused = visionConfigSchema.safeParse({ modelUri: `llm://openrouter/${NEMOTRON_SUPER_VL_VISION_MODEL}` });
     expect(refused.success).toBe(false);
     expect(JSON.stringify(refused.error?.issues)).toContain("is not admitted");
@@ -48,11 +48,11 @@ describe("hosted OpenRouter vision request shape", () => {
     });
 
     const body = bodies[0]!;
-    expect(body.model).toBe(DEFAULT_OPENROUTER_VISION_MODEL);
+    expect(body.model).toBe(OPEN_WEIGHTS_OPENROUTER_VISION_MODEL);
     const parts = body.messages[1].content as Array<Record<string, any>>;
     expect(parts.map((part) => part.type)).toEqual(["text", "image_url"]);
     expect(parts[1]!.image_url.url).toMatch(/^data:image\/png;base64,/);
-    expect(result).toMatchObject({ model: DEFAULT_OPENROUTER_VISION_MODEL, inputTokens: 1800, outputTokens: 400, usageSource: "provider" });
+    expect(result).toMatchObject({ model: OPEN_WEIGHTS_OPENROUTER_VISION_MODEL, inputTokens: 1800, outputTokens: 400, usageSource: "provider" });
     expect(result.costCents).toBeCloseTo(0.047, 10);
   });
 

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { assertNoAutomaticSelectionDenied } from "./automatic-model-selection.js";
 import { lookupPrivateModelRoute, parsePrivateModelUri, PRIVATE_MODEL_PROVIDER } from "./private-endpoints.js";
 
 export const supportedEmbeddingModels = [
@@ -540,9 +541,16 @@ export const DEEPINFRA_VISION_BASE_URL = DEEPINFRA_EMBEDDING_BASE_URL;
  * change here: the profile label and description, the default config and the default-derived values follow.
  * It must be a hosted `visionModelCatalog` id (checked by the catalog tests).
  */
-// Tuned DeepSeek V4.1 Flash 1017 (US-hosted routes): best quality tier, fastest and cheaper per page than Gemini 3.1
-// Flash Lite on the 2026-10-22 vision holdout. Roll back without a deploy via DOCSLURP_VISION_MODEL_URI (app and worker).
-export const DEFAULT_OPENROUTER_VISION_MODEL = "deepseek/deepseek-v4.1-flash-1017";
+// Tuned GPT-6 Luna since 2026-11-13 (owner decision: the default is never DeepSeek V4.1 Flash, which is never selected
+// automatically; it stays an explicit catalog choice). On the 2026-10-22 vision holdout Luna had no significant deficit
+// against DeepSeek V4.1 Flash 1017 on content, reading order or math (math 0.994 vs 0.982), and a significant tolerant
+// tables deficit (-0.032); it is the cheapest allowed model at its most expensive host and about 3x slower per page.
+// Override without a deploy via DOCSLURP_VISION_MODEL_URI (app and worker).
+export const DEFAULT_OPENROUTER_VISION_MODEL = "openai/gpt-6-luna";
+/** The open-weights (MIT) model behind the `open-weights-hosted` profile. */
+export const OPEN_WEIGHTS_OPENROUTER_VISION_MODEL = "z-ai/glm-5.3-flash";
+// A built-in default is chosen by the system, not the caller: never a model that is never selected automatically.
+assertNoAutomaticSelectionDenied("vision defaults", [DEFAULT_OPENROUTER_VISION_MODEL, OPEN_WEIGHTS_OPENROUTER_VISION_MODEL]);
 /**
  * Hosted escalation read on DeepInfra's official endpoint (`llm://deepinfra/...`), billed per token like the
  * OpenRouter and OpenAI routes. DeepInfra list price checked 2026-11-04: $0.15/M input, $0.60/M output.
@@ -1032,13 +1040,13 @@ export const visionProfileCatalog = {
   },
   "open-weights-hosted": {
     label: "Open-weights hosted",
-    // Was Nemotron 3.5 Super VL, refused until its image-token bound has serving evidence (`refusedReason`).
-    description: `Open-weights (MIT) hosted route (${visionModelCatalogById[DEFAULT_OPENROUTER_VISION_MODEL].label}) through OpenRouter's US providers.`,
+    // Was Nemotron 3.5 Super VL (refused until its image-token bound has serving evidence), then the DeepSeek default.
+    description: `Open-weights (MIT) hosted route (${visionModelCatalogById[OPEN_WEIGHTS_OPENROUTER_VISION_MODEL].label}) through its measured OpenRouter hosts.`,
     tags: ["cost", "hosted", "open-weights"],
     config: {
       profile: "open-weights-hosted",
       target: "hosted",
-      modelUri: `llm://openrouter/${DEFAULT_OPENROUTER_VISION_MODEL}`,
+      modelUri: `llm://openrouter/${OPEN_WEIGHTS_OPENROUTER_VISION_MODEL}`,
     },
   },
 } as const satisfies Record<VisionProfileKey, {
