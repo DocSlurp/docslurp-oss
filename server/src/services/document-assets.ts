@@ -9,7 +9,7 @@
  * scope, project, PII policy). An image whose file the project's PII policy withholds keeps its size and hash but has no
  * slot, and says why with a fixed value (`refusal: "pii-policy"`), never error text or document content.
  */
-import { parseArtifactUri } from "@docslurp/shared";
+import { isPageWithheld, parseArtifactUri, piiWithholding, withheldPageOfSlot } from "@docslurp/shared";
 
 import { sql } from "../db.js";
 import { withheldArtifactUrisFromMetadata } from "./pii-artifact-guard.js";
@@ -175,8 +175,8 @@ export async function getDocumentAssetLedger(scope: DocumentAssetScope, page?: D
   const { limit, after, from, to } = checkedPage(page);
   const projectFilter = scope.projectId === undefined ? sql`` : sql`and d.project_id = ${scope.projectId}`;
   // Only a document the viewer would be shown: completed (not processing, failed or PII-blocked) and not purged.
-  const [document] = await sql<{ id: string; metadata: unknown; run_id: string | null }[]>`
-    select d.id, d.metadata, d.run_id from documents d
+  const [document] = await sql<{ id: string; status: string | null; metadata: unknown; run_id: string | null }[]>`
+    select d.id, d.status, d.metadata, d.run_id from documents d
     where d.id = ${scope.documentId} and d.org_id = ${scope.orgId} ${projectFilter}
       and d.status = 'completed' and d.purged_at is null`;
   if (!document) return null;
@@ -216,8 +216,13 @@ export async function getDocumentAssetLedger(scope: DocumentAssetScope, page?: D
   // PII withholding: by the exact URI recorded for the file's slot, or by the file's own object key.
   const withheld = withheldArtifactUrisFromMetadata(document.metadata);
   const withheldKeys = new Set([...withheld].map((uri) => parseArtifactUri(uri)?.key).filter((key): key is string => !!key));
+  // Page-scoped withholding: an image on a withheld page, or showing a file that belongs to one, is refused too, even
+  // when the file was stored after the scan and is not on the withheld list.
+  const pages = piiWithholding({ status: document.status, metadata: document.metadata });
+  const onWithheldPage = (row: (typeof rows)[number]) =>
+    isPageWithheld(pages, row.page_number) || (!!row.file_of && isPageWithheld(pages, withheldPageOfSlot(`doppler-figure:${row.file_of}`)));
   const isWithheld = (row: (typeof rows)[number]) =>
-    !!row.file_of && ((row.slot_uri !== null && withheld.has(row.slot_uri)) || (row.owner_key !== null && withheldKeys.has(row.owner_key)));
+    !!row.file_of && ((row.slot_uri !== null && withheld.has(row.slot_uri)) || (row.owner_key !== null && withheldKeys.has(row.owner_key)) || onWithheldPage(row));
 
   const pageRows = rows.slice(0, limit);
   const last = pageRows.at(-1);

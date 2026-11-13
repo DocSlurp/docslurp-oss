@@ -18,7 +18,7 @@ import { randomUUID, createHmac } from "node:crypto";
 
 import postgres, { type JSONValue, type PendingQuery, type Sql } from "postgres";
 import { flushAssetLedger, writeDocumentAssetLedger, type DocumentAssetLedgerResult, type DocumentAssetLedgerWrite } from "./document-asset-ledger.js";
-import { applyDefaultVisionOverride, defaultPipelineFeatures, normalizeStoredPipelineFeatures, PII_BLOCKED_DOCUMENT_STATUS, planRunFailure, type DerivedDocumentTitle, type PrivacyAuditEntry } from "@docslurp/shared";
+import { applyDefaultVisionOverride, defaultPipelineFeatures, piiWithholding, type PiiWithholding, normalizeStoredPipelineFeatures, PII_BLOCKED_DOCUMENT_STATUS, planRunFailure, type DerivedDocumentTitle, type PrivacyAuditEntry } from "@docslurp/shared";
 
 import { adoptBackfillDocuments } from "../deferred/backfill-adoption.js";
 import { insertPrivacyAuditRows } from "../lib/privacy-guard.js";
@@ -2711,6 +2711,12 @@ export class Store {
           then metadata->'pii'->'withheldArtifactUris' else '[]'::jsonb end), 0) > 0 as withholds
       from documents where id = ${documentId}`;
     return row?.withholds ?? true;
+  }
+
+  /** The document's recorded PII withholding (packages/shared/src/pii-withholding.ts); a missing document withholds everything. */
+  async documentPiiWithholding(documentId: string): Promise<PiiWithholding> {
+    const [row] = await this.sql<{ status: string | null; metadata: unknown }[]>`select status, metadata from documents where id = ${documentId}`;
+    return row ? piiWithholding(row) : { scope: "document", reason: "missing-document" };
   }
 
   /**

@@ -111,6 +111,28 @@ describe("getDocumentAssetLedger", () => {
     }
   });
 
+  it("page-scoped PII: refuses images on withheld pages, and images showing a file from one, even off the withheld list", async () => {
+    try {
+      await sql`update documents set metadata = ${sql.json({ pii: { scope: "pages", withheldPages: [2], withheldArtifactUris: [] } })} where id = 'doc-a'`;
+      let [owner, repeat] = (await service.getDocumentAssetLedger({ orgId: "org-a", documentId: "doc-a" }))!.assets;
+      expect(owner).toMatchObject({ id: "p1.1", slot: "doc-a:doppler-figure:p1.1", refusal: null });
+      expect(repeat).toMatchObject({ id: "p2.1", slot: null, refusal: "pii-policy" });
+
+      await sql`update documents set metadata = ${sql.json({ pii: { scope: "pages", withheldPages: [1], withheldArtifactUris: [] } })} where id = 'doc-a'`;
+      [owner, repeat] = (await service.getDocumentAssetLedger({ orgId: "org-a", documentId: "doc-a" }))!.assets;
+      expect(owner).toMatchObject({ id: "p1.1", slot: null, refusal: "pii-policy", sha256: SHA });
+      // Page 2 is clean, but its image shows page 1's withheld file.
+      expect(repeat).toMatchObject({ id: "p2.1", slot: null, refusal: "pii-policy" });
+
+      // A malformed outcome fails closed.
+      await sql`update documents set metadata = ${sql.json({ pii: { scope: "pages", withheldPages: "1" } })} where id = 'doc-a'`;
+      [owner] = (await service.getDocumentAssetLedger({ orgId: "org-a", documentId: "doc-a" }))!.assets;
+      expect(owner).toMatchObject({ slot: null, refusal: "pii-policy" });
+    } finally {
+      await sql`update documents set metadata = '{}'::jsonb where id = 'doc-a'`;
+    }
+  });
+
   it("answers only for a completed document: processing or PII-blocked reads as missing", async () => {
     expect(await service.getDocumentAssetLedger({ orgId: "org-a", documentId: "doc-busy" })).toBeNull();
     expect(await service.getDocumentAssetLedger({ orgId: "org-a", documentId: "doc-blocked" })).toBeNull();

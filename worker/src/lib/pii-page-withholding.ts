@@ -1,4 +1,5 @@
 import {
+  isPageWithheld,
   isPiiWithheldPlaceholder,
   pageOffsets,
   pagesOfMatch,
@@ -9,6 +10,7 @@ import {
   withholdTextSections,
   type PiiMatch,
   type PiiPolicy,
+  type PiiWithholding,
 } from "@docslurp/shared";
 
 /**
@@ -259,4 +261,23 @@ export function applyPlanToJson(plan: PiiWithholdingPlan, value: unknown, isStru
 export function perPageArtifactServable(slot: string, cleanPage: (page: number) => boolean): boolean {
   const page = withheldPageOfSlot(slot);
   return page !== null && cleanPage(page);
+}
+
+/**
+ * Whether `\f`-separated text (bytes of a Markdown slot read after the scan) is safe to keep as a copy under page-scoped
+ * withholding: its page breaks match the page count and every withheld page is exactly the placeholder. Anything else
+ * (unknown page breaks, a withheld page that still holds text, not UTF-8) is not.
+ */
+export function pageScopedTextVerified(bytes: Uint8Array | null, withholding: PiiWithholding, pageCount: number): boolean {
+  if (!bytes || withholding.scope !== "pages") return false;
+  let text: string;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    return false;
+  }
+  const offsets = pageOffsets(text, pageCount);
+  if (!offsets) return false;
+  return offsets.every((range, index) =>
+    !isPageWithheld(withholding, index + 1) || isPiiWithheldPlaceholder(text.slice(range.start, range.end)));
 }

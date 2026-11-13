@@ -75,6 +75,8 @@ export interface CheckpointStore {
    * document's recorded PII outcome withholds artifacts (it redacted or blocked), and adding URIs to its withheld list.
    */
   documentPiiWithholds?(documentId: string): Promise<boolean>;
+  /** The recorded page-scoped withholding (pii-withholding.ts), so clean pages' figures stay servable. */
+  documentPiiWithholding?(documentId: string): Promise<import("@docslurp/shared").PiiWithholding>;
   appendWithheldArtifactUris?(documentId: string, uris: readonly string[]): Promise<void>;
   /** Per-page ingest facts (ingest report); best effort, idempotent per (document, page). */
   upsertPageFacts?(rows: readonly PageFactUpsert[]): Promise<void>;
