@@ -1,4 +1,6 @@
 import { pageCredits, sanitizeStoredPipeline } from "@docslurp/shared";
+import { stampRunChartExport } from "../../services/chart-export-availability.js";
+import type { PipelineFeatures } from "@docslurp/shared";
 import { randomUUID } from "node:crypto";
 
 import {
@@ -91,7 +93,9 @@ export const defaultMaterializeDeps: MaterializeDeps = {
       left join project_runs r on r.id = d.run_id and r.project_id = ${args.projectId}
       left join projects w on w.id = ${args.projectId}
     `;
-    const pipeline = sanitizeStoredPipeline(source?.pipeline ?? {}, `materialize run ${id} source pipeline`);
+    // A materialize run reads pages a query needs: never chart export beyond what the source run already resolved (a
+    // project pipeline with no stamped tier resolves as machine, i.e. off by default).
+    const pipeline = stampRunChartExport(sanitizeStoredPipeline(source?.pipeline ?? {}, `materialize run ${id} source pipeline`) as PipelineFeatures, "machine");
     return acceptChatRunDependency({ ...args, pages: args.pageNumbers ?? [] }, async tx => {
     await tx`
       insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, total_documents, pages_total, pipeline, workflow_started_at, lease_expires_at, creation_ready_at, creation_expires_at)

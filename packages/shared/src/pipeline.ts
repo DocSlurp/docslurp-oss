@@ -602,9 +602,16 @@ export const pipelineFeaturesSchema = z
     }).default({ enabled: true }),
     /**
      * Chart and diagram export: re-express detected charts/diagrams as description, Mermaid, Vega-Lite,
-     * matplotlib and CSV. Off by default; enabling it or adding formats recommends a reindex.
+     * matplotlib and CSV. `tier` unset means the run origin's default (app uploads: `free`; API, MCP, SDK, CLI:
+     * `off`, see `resolveChartExportTier`); the server stamps the resolved tier on each run.
      */
     chartExport: chartExportConfigSchema.default(defaultChartExportConfig),
+    /**
+     * Figure extraction from PDFs (the sandboxed figure pass): on by default. Off skips the pass for this project's
+     * new runs; existing figures stay until the documents are reprocessed. The deployment ceiling
+     * (`DOCSLURP_DOPPLER_IMAGE_EXTRACT`) still decides whether the pass exists at all.
+     */
+    figures: z.boolean().default(true),
   })
   .superRefine((value, ctx) => {
     if (value.afterFirstPass === "none" && value.firstPass === "off") {
@@ -757,6 +764,7 @@ export const defaultPipelineFeatures: PipelineFeatures = {
   pageRouter: defaultPageRouterConfig,
   mediaVideo: { enabled: true },
   chartExport: defaultChartExportConfig,
+  figures: true,
 };
 
 const alwaysEnabled = () => true;
@@ -872,8 +880,10 @@ const basePipelineStagePlan: readonly PipelineStagePlanItem[] = [
     label: "Vision",
     phase: "extract",
     phaseLabel: "Extract",
-    // Chart export runs here too, with or without general vision fallback.
-    isEnabled: (features) => features.visionFallback || features.chartExport?.enabled === true,
+    // Chart export runs here too, with or without general vision fallback; the free tier (the default) included. The
+    // free tier only reads charts that carry their own data: no page is re-read and no model is called.
+    // An unset tier resolves per run (the server stamps it at run creation), so only an explicit `off` drops the stage.
+    isEnabled: (features) => features.visionFallback || features.chartExport?.tier !== "off",
   },
   {
     stage: "pii-detect",
@@ -1652,6 +1662,7 @@ const FIELD_SEED_STAGES: Record<keyof PipelineFeatures, readonly PipelineRunStag
   mediaVideo: ["extract-markdown"],
   // Routed visual extraction (chart-data / diagram assignments) runs in vision-extract; exports attach there.
   chartExport: ["vision-extract"],
+  figures: ["extract-markdown"],
 };
 
 /**

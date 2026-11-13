@@ -5,7 +5,7 @@
  *   chart-export evaluation (2026-11-10): GPT-6 Luna at reasoning `none` scored best on held-out charts and diagrams,
  *   Gemini 3.1 Flash Lite at reasoning `minimal` next; GLM 5.3 Flash is last for its unstable latency. A pure
  *   cheapest-first sort would have picked GLM.
- * - Override: a configured model (project `chartExport.generatorModel`, else env `CHART_EXPORT_GENERATOR_MODEL`) is
+ * - Override: a configured model (managed setting: env `CHART_EXPORT_GENERATOR_MODEL`; projects never name one) is
  *   used only when it is one of the candidates, the routing-target catalog admits it (image input, a list price, not
  *   Pro/Ultra, runtime-accepted) and its output list price is at most `CHART_EXPORT_MAX_OUTPUT_USD_PER_MTOK`. The
  *   per-visual price assumes a cheap generator, so anything else is refused (logged) and the default is used.

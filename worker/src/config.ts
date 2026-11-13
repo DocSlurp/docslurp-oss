@@ -1,4 +1,5 @@
 import "./env.js";
+import { warnChartExportSwitch } from "./chart-export/config.js";
 
 import { existsSync } from "node:fs";
 import { defaultDocConcurrency, resolveActivityConcurrency } from "./concurrency.js";
@@ -255,6 +256,8 @@ function parseDurationMs(value: string | undefined, fallback: number): number {
 }
 
 export function fromEnv(): Config {
+  // An unknown DOCSLURP_CHART_EXPORT value is off (fail closed); say so once per process.
+  warnChartExportSwitch(process.env);
   const storage = resolveObjectStorageConfig();
   const lancedb = resolveLanceDbConfig(process.env, storage);
   const maintenance = lanceDbMaintenanceSettings(lancedb.params);

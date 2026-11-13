@@ -19,6 +19,7 @@ import {
   type ReprocessRunInput,
 } from "@docslurp/shared";
 
+import { estimateChartExportCredits, type ChartExportTier, type RunOrigin } from "@docslurp/shared";
 import { sql } from "../db.js";
 import { estimateWork, orgWorkerSlots, sumEstimates, type EstimateEnv } from "./config-change.js";
 import { getRun } from "./runs.js";
@@ -38,6 +39,8 @@ export async function estimateRunReprocess(args: {
   const features: PipelineFeatures = {
     ...(JSON.parse(JSON.stringify(withoutStageSelection(run.pipeline))) as PipelineFeatures),
     speedBoost: args.options?.speedBoost === true,
+    // A per-request tier wins over the tier the run resolved; only `models` is priced.
+    ...(args.options?.chartExport ? { chartExport: { ...(run.pipeline.chartExport ?? {}), tier: args.options.chartExport.tier } } : {}),
     ...(args.options?.stages?.length ? { stageSubset: [...args.options.stages] } : {}),
     ...(args.options?.stageFrom && !args.options?.stages?.length ? { restartFromStage: args.options.stageFrom } : {}),
   };
@@ -117,16 +120,31 @@ export async function estimateUpload(args: {
   project: { pipeline: PipelineFeatures; orgId: string };
   settings?: Partial<QuoteSettings>;
   env?: EstimateEnv;
-}): Promise<{ estimate: CostEstimate; media: UploadMediaEstimate | null; profile: EstimateProfile; quote: EstimateQuote }> {
+  /** Per-request chart export tier (wins over the project's); null or unset uses the project's tier or the origin default. */
+  chartExportTier?: ChartExportTier | null;
+  origin?: RunOrigin;
+}): Promise<{ estimate: CostEstimate; media: UploadMediaEstimate | null; profile: EstimateProfile; quote: EstimateQuote; chartExport: { tier: ChartExportTier; source: "request" | "project" | "default"; credits: { low: number; high: number } | null } }> {
   const workerSlots = await orgWorkerSlots(args.project.orgId);
   const env = args.env ?? process.env;
   const profile = estimateProfileFor(args.project.pipeline, { workerSlots, env });
   // The same quote function as the public estimate, from the project's settings; the explicit speed boost wins.
   const quote = quoteEstimate(
-    { files: args.files.map((file) => ({ ...file, ...(file.type === null ? { type: undefined } : {}) })) as EstimateRequest["files"], settings: { ...args.settings, speedBoost: args.speedBoost === true } },
-    { base: quoteSettingsForPipeline(args.project.pipeline), workerSlots, env },
+    { files: args.files.map((file) => ({ ...file, ...(file.type === null ? { type: undefined } : {}) })) as EstimateRequest["files"], settings: { ...args.settings, speedBoost: args.speedBoost === true, ...(args.chartExportTier ? { chartExport: args.chartExportTier } : {}) } },
+    { base: quoteSettingsForPipeline(args.project.pipeline), workerSlots, env, origin: args.origin ?? "machine" },
   );
-  return { ...quoteUpload({ files: args.files, profile, speedBoost: args.speedBoost === true }), profile, quote };
+  const upload = quoteUpload({ files: args.files, profile, speedBoost: args.speedBoost === true });
+  // Chart export: the tier this upload would resolve to for the caller's surface; only `models` adds credits.
+  // The tier as it would run (request, project or caller default, capped by the deploy switch): what the quote priced.
+  const tier = quote.settings.chartExport;
+  const source = args.chartExportTier ? "request" : args.project.pipeline.chartExport?.tier ? "project" : "default";
+  const charts = estimateChartExportCredits({ features: args.project.pipeline, tier, pages: upload.estimate.pages, documents: Math.max(1, args.files.length), env });
+  const estimate = upload.estimate.credits && (charts.low > 0 || charts.high > 0)
+    ? { ...upload.estimate, credits: { low: upload.estimate.credits.low + charts.low, high: upload.estimate.credits.high + charts.high }, basis: `${upload.estimate.basis}${charts.note ?? ""}` }
+    : upload.estimate;
+  return {
+    ...upload, estimate, profile, quote,
+    chartExport: { tier, source, credits: upload.estimate.credits ? { low: charts.low, high: charts.high } : null },
+  };
 }
 
 /** The one project the (editable) documents belong to, or null when they span several or none are found. */

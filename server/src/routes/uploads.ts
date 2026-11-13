@@ -1,4 +1,7 @@
 import { reportPublicError } from "../lib/public-errors.js";
+import { chartExportOverrideSchema } from "@docslurp/shared";
+import { chartExportOverrideError } from "../services/chart-export-availability.js";
+import { runOriginOf } from "../lib/run-origin.js";
 import { Hono, type Context } from "hono";
 import { z } from "zod";
 import { zValidator } from "@hono/zod-validator";
@@ -308,6 +311,7 @@ export const createUploadsRoutes = (ports: ProjectIntakePorts = projectIntakePor
             orgId,
             apiKeyId: c.get("apiKey")?.keyId ?? null,
             allowedProjectIds: actorAllowedProjectIds(actor),
+            origin: runOriginOf(c),
             projectId: target.projectId,
             projectName: target.projectName,
             templateKey: input.templateKey ?? null,
@@ -449,6 +453,7 @@ export const createUploadsRoutes = (ports: ProjectIntakePorts = projectIntakePor
         newProject: requestedNewProject,
         templateKey: requestedTemplateKey,
         allowedProjectIds: actorAllowedProjectIds(getRequestActor(c)),
+        origin: runOriginOf(c),
         indexingMode: indexingModeSchema.safeParse(body.indexingMode).data,
         pipeline,
         speedBoost,
@@ -498,6 +503,7 @@ export const createUploadsRoutes = (ports: ProjectIntakePorts = projectIntakePor
           newProject: body.newProject,
           templateKey: body.templateKey,
           allowedProjectIds: actorAllowedProjectIds(getRequestActor(c)),
+          origin: runOriginOf(c),
           indexingMode: body.indexingMode,
           pipeline: body.pipeline,
           speedBoost: body.speedBoost === true,
@@ -568,6 +574,8 @@ const uploadEstimateSchema = z.object({
   files: z.array(quoteFileSchema).min(1).max(1000),
   /** Knobs to quote with instead of the project's own (the same as `POST /v1/estimate`). */
   settings: quoteSettingsSchema.partial().optional(),
+  /** The same per-request chart export override the upload takes; priced only for `models`. */
+  chartExport: chartExportOverrideSchema.optional(),
   project: projectInputSchema.optional(),
   orgId: z.string().optional(),
 });
@@ -585,6 +593,8 @@ export const uploadEstimateRoutes = new Hono().post(
     const userId = c.get("sessionUser").id;
     const body = c.req.valid("json");
     const actor = getRequestActor(c);
+    const refusedTier = chartExportOverrideError(body.chartExport?.tier, "upload estimate");
+    if (refusedTier) return apiStatusError(c, 400, refusedTier, { code: "chart_export_models_unavailable" });
     // Same gate as the upload itself: ingest scope, bound to the key's organization and projects.
     if (actor.type === "apiKey" && (actor.apiKey.keyType !== "server" || !actorHasAnyApiKeyScope(actor, ["ingest"]))) {
       return apiErrorResponse(c, 403, "forbidden", "Forbidden");
@@ -600,7 +610,10 @@ export const uploadEstimateRoutes = new Hono().post(
     if (!project || (actor.type === "apiKey" && !apiKeyCanUseProject(actor.apiKey, project))) {
       return apiErrorResponse(c, 404, "project_not_found", "Project not found");
     }
-    const { estimate, media, profile, quote } = await estimateUpload({ files: body.files, project, speedBoost: body.speedBoost === true, settings: body.settings });
+    const { estimate, media, profile, quote, chartExport } = await estimateUpload({
+      files: body.files, project, speedBoost: body.speedBoost === true, settings: body.settings,
+      chartExportTier: body.chartExport?.tier ?? null, origin: runOriginOf(c),
+    });
     // `orgId` is the organization whose credits the upload would spend, for reading its balance. `profile` is the
     // project's settings the estimate priced with; `kind` labels the answer an estimate, never a charge.
     return c.json({
@@ -611,6 +624,8 @@ export const uploadEstimateRoutes = new Hono().post(
       pricingVersion: pricingVersion(),
       // The full estimate (ingest, monthly hosting and usage, lines) for the project's settings and any overrides.
       quote,
+      // The chart export tier the upload would run with (request, project or the caller's default) and its credits.
+      chartExport,
       billing: billingState(),
       orgId: project.orgId,
       billingExempt: isBillingExemptOrg(project.orgId),

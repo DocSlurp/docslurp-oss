@@ -143,11 +143,11 @@ export async function prepareChartExport(input: ChartExportPassInput): Promise<P
   const legacy = input.routedPlan ? [] : candidatesFromLegacyRoutes(input.legacyPages);
   session.addCandidates(legacy);
   // A Doppler figure confirms a keyword page; read only when the document has a figure index and a keyword page.
-  const figures = legacy.length > 0 || session.enabled
+  const figures = legacy.length > 0 || session.runs
     ? await loadDopplerFigurePages(input.storage, input.ledger, document.id)
     : { pages: new Set<number>(), index: null };
 
-  if (!session.enabled) {
+  if (!session.runs) {
     if (input.presence) session.setDeterministic({ partials: [], presence: input.presence });
   } else {
     try {
@@ -188,14 +188,14 @@ export async function prepareChartExport(input: ChartExportPassInput): Promise<P
 /** Exports what the body did not, replaces this document's visual groups, and stores the visuals artifact. */
 export async function finishChartExport(input: ChartExportPassInput, prepared: PreparedChartExport): Promise<ChartExportPassResult> {
   const { session, document } = input;
-  if (session.enabled) {
+  if (session.runs) {
     await exportPending(input);
     await session.exportUnmatchedDeterministic(input.signal);
   }
   const stats = session.stats();
   const lowConfidence = session.lowConfidence.length;
   const prior = prepared.priorArtifactUri && !prepared.priorArtifactUri.endsWith(CLEARED_SUFFIX) ? prepared.priorArtifactUri : null;
-  if (!session.enabled || (session.visuals.length === 0 && !prior)) return { stats, lowConfidence, changedPages: [], artifactUri: null };
+  if (!session.runs || (session.visuals.length === 0 && !prior)) return { stats, lowConfidence, changedPages: [], artifactUri: null };
   const applied = await applyVisualGroups(input, {
     visuals: session.visuals,
     keep: session.routedIds,

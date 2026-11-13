@@ -1,4 +1,5 @@
 import { Hono, type Context } from "hono";
+import { runOriginOf } from "../lib/run-origin.js";
 import { z } from "zod";
 import { zValidator } from "@hono/zod-validator";
 import {
@@ -255,6 +256,7 @@ export const createExtractsRoutes = (ports: ProjectIntakePorts = projectIntakePo
         orgId: target.project.orgId,
         project: target.project.id,
         allowedProjectIds: actorAllowedProjectIds(actor),
+        origin: runOriginOf(c),
         indexingMode: indexingModeSchema.safeParse(body.indexingMode).data,
         pipeline: target.created ? undefined : pipeline,
         files,
@@ -301,6 +303,7 @@ export const createExtractsRoutes = (ports: ProjectIntakePorts = projectIntakePo
         orgId: target.project.orgId,
         project: target.project.id,
         allowedProjectIds: actorAllowedProjectIds(actor),
+        origin: runOriginOf(c),
         indexingMode: body.indexingMode,
         pipeline: target.created ? undefined : body.pipeline,
         tags: body.tags,
@@ -344,6 +347,7 @@ export const createExtractsRoutes = (ports: ProjectIntakePorts = projectIntakePo
         orgId: target.project.orgId,
         apiKeyId: c.get("apiKey")?.keyId ?? null,
         allowedProjectIds: actorAllowedProjectIds(actor),
+        origin: runOriginOf(c),
         projectId: target.project.id,
         projectName: null,
         templateKey: null,

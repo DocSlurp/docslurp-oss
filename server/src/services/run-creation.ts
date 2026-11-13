@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 
+import { chartExportModelsAllowed, type ResolvedChartExportConfig, type RunOrigin } from "@docslurp/shared";
+import { stampRunChartExport } from "./chart-export-availability.js";
 import {
   assertPipelineSpeedBoost,
   countedPagesForForecast,
@@ -24,6 +26,7 @@ import { currentRequestId } from "../lib/request-context.js";
 import { getAvailableCredits } from "./billing/credits.js";
 import {
   admitRunSpend,
+  assertCanSpend,
   SpendBlockedError,
   type SpendBlockedCode,
 } from "./billing/spend-guard.js";
@@ -83,6 +86,11 @@ export interface CreateRunInput {
   kind: string;
   pipeline: PipelineFeatures;
   apiKeyId?: string | null;
+  /**
+   * Where the run comes from, derived server-side from the authenticated principal (`runOriginOf`), never from a
+   * request field. It decides the chart export tier when neither the request nor the project sets one. Unset: machine.
+   */
+  origin?: RunOrigin;
   priority?: number;
   sources: RunSources;
   /**
@@ -663,7 +671,7 @@ export function createRunCreation(deps: RunCreationDeps) {
           id, org_id, user_id, project_id, kind, status, priority, control_state,
           control_requested_at, stage, total_documents, processed_documents,
           pages_total, pages_processed, stats, creation_source_keys, pipeline,
-          extract_id, storage_prefix
+          extract_id, storage_prefix, origin
         )
         values (
           ${args.id},
@@ -688,7 +696,8 @@ export function createRunCreation(deps: RunCreationDeps) {
           ${sql.array(args.sourceKeys)}::text[],
           ${sql.json(JSON.parse(JSON.stringify(args.pipeline)))},
           ${input.extract?.id ?? null},
-          ${input.extract?.storagePrefix ?? null}
+          ${input.extract?.storagePrefix ?? null},
+          ${input.origin ?? "machine"}
         )
         returning *
       )
@@ -934,7 +943,10 @@ export function createRunCreation(deps: RunCreationDeps) {
     // Run row never carries them (a Dolphin repoPath, an unknown extractor id). Request schemas stay strict.
     const requestedPipeline = { ...request.pipeline, speedBoost: request.speedBoost === true };
     assertPipelineSpeedBoost(requestedPipeline);
-    const input: CreateRunInput = { ...request, pipeline: sanitizeStoredPipeline(requestedPipeline, `run creation in project ${request.projectId}`) };
+    const sanitized = sanitizeStoredPipeline(requestedPipeline, `run creation in project ${request.projectId}`);
+    // The chart export tier is resolved here, once per run (request override, project tier, origin default), and
+    // stored on the run: a retry or resume reads it back, and the worker never re-resolves it.
+    const input: CreateRunInput = { ...request, pipeline: stampRunChartExport(sanitized, request.origin ?? "machine") };
     assertPipelineSpeedBoost(input.pipeline);
     const access = await getProjectAccess(input.projectId, input.userId);
     if (!access) throw new Error("Project not found");
@@ -967,6 +979,10 @@ export function createRunCreation(deps: RunCreationDeps) {
     // the reserved insert.
     await assertCreditFloor(access.orgId);
     await enforceLiveBudgetCaps(input.projectId, access.orgId);
+    // Reading charts with AI bills model reads: the same spend admission as other model-calling work.
+    if (chartExportModelsAllowed(input.pipeline.chartExport as ResolvedChartExportConfig, process.env)) {
+      await assertCanSpend(access.orgId, input.projectId, { kind: "job" });
+    }
 
     // Validated before the insert: a pipeline the preview schema rejects must fail the request with nothing
     // committed, not after the Run and its document versions exist (an orphan run recovery would retry forever).

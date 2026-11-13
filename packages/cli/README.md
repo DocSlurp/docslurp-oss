@@ -148,13 +148,13 @@ Run `docslurp` with no arguments, or `docslurp --help`, for built-in usage.
 
 | Command | What it does | Options |
 | --- | --- | --- |
-| `upload <files...>` | Upload files and print the project and run IDs | `--project <id\|slug\|name>` (created if no project matches), or `--new-project`; `--template`; `--quality <fast\|auto\|good>`; `--canonical-id` (one file only), `--path <folder>` (same path and filename is a new version), `--estimate` (print pages, credits and time, then exit), `--watch` |
-| `ingest-url <urls...>` | Fetch and ingest URLs, then print the project and run IDs | Same project options as `upload`, `--quality`, `--watch` |
+| `upload <files...>` | Upload files and print the project and run IDs | `--project <id\|slug\|name>` (created if no project matches), or `--new-project`; `--template`; `--quality <fast\|auto\|good>`; `--chart-export <off\|free\|models>`; `--canonical-id` (one file only), `--path <folder>` (same path and filename is a new version), `--estimate` (print pages, credits and time, then exit), `--watch` |
+| `ingest-url <urls...>` | Fetch and ingest URLs, then print the project and run IDs | Same project options as `upload`, `--quality`, `--chart-export`, `--watch` |
 | `extract <files...\|urls...>` | Upload files or ingest URLs (not both) whose files and outputs are deleted when the retention window ends; prints the extract ID and deletion time | Same options as `upload`; `--retention-days <n>` (longer than the free 48 hours is charged as storage), `--no-email`, `--download <markdown\|all>` |
 | `extract-status <extract-id>` | Print an extract's status, pages, download state and deletion time | `--json` |
 | `extract-download <extract-id>` | Print a two-minute signed URL for the extract's results zip (a server key with `artifacts`, or a login with `read`) | None |
 | `full-index` | Index every remaining page of a project (or one document) | `--project`, `--document`, `--estimate`, `--watch`, `--json` |
-| `reprocess <run-id>` | Re-run a run, optionally from a stage | `--stage-from`, `--estimate`, `--watch`, `--json` |
+| `reprocess <run-id>` | Re-run a run, optionally from a stage | `--stage-from`, `--chart-export`, `--estimate`, `--watch`, `--json` |
 | `jobs get <job-id>` / `jobs watch <job-id>` | Print a background job, or follow it (SSE, polling fallback) until it ends | `--json` (get), `--timeout` (watch; never applies while the job is blocked) |
 | `status <run-id>` | Print progress for a run | `--watch` |
 | `runs` | List the runs you can access | None |
@@ -170,6 +170,7 @@ Run `docslurp` with no arguments, or `docslurp --help`, for built-in usage.
 - `--json` works on search, chat, extract-status, jobs get, whoami, auth status, full-index, reprocess and any `--estimate`. Upload, ingest-url, status and runs print text. For machine-readable upload IDs, use the [Node SDK](https://docslurp.io/docs/sdk-reference) or the [HTTP API](https://docslurp.io/docs/http).
 - `--context` and `--json` can't be combined.
 - Search is scoped to a project (the default one unless you set another). `--run` is not supported.
+- `--chart-export off|free|models` sets chart and diagram export for that request (upload, ingest-url, reprocess and their `--estimate`). Without it, the project's setting applies; a project with no setting is `off` for CLI and API calls. `free` exports charts that carry their own data (Office charts, embedded chart specs, vector graphics) at no charge; `models` also reads other charts with AI, billed per chart read. Example: `docslurp upload q3-earnings.pdf --chart-export free`.
 - `--quality` sets processing quality for that upload: `fast` reads only the text layer (scanned pages stay images and aren't searchable), `auto` reads each page the cheapest faithful way, and `good` reads every page with a vision model. Without it, the project's setting applies (`auto` unless changed).
 
 ### Connection and timeout settings

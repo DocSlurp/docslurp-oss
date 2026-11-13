@@ -29,7 +29,8 @@ import {
 
 import { sql } from "../db.js";
 import { loadVisualStatsForEstimate, VISUAL_CANDIDATES_DOCUMENT_LIMIT, type VisualEstimateStats } from "./visual-candidates.js";
-import { assertChartExportChangeAllowed } from "./chart-export-availability.js";
+import { assertChartExportChangeAllowed, stampRunChartExport } from "./chart-export-availability.js";
+import type { RunOrigin } from "@docslurp/shared";
 import { notifySearchEligibilityChanged } from "../search/eligibility-hint.js";
 import { nextVersionNumber } from "./version-number.js";
 import { validateModeSwitch } from "./project-indexing-mode.js";
@@ -94,6 +95,8 @@ export type ProjectChangePlan = {
   input: UpdateProjectInput;
   nextPipeline: PipelineFeatures;
   impact: ConfigChangeImpact;
+  /** The caller's surface; re-index runs this plan queues resolve an unset chart export tier for it. */
+  origin: RunOrigin;
   /** What re-indexing means for this change; null when existing documents are unaffected. */
   reindex: ReindexMode | null;
   /** Whether this request queues the re-index job. */
@@ -258,7 +261,14 @@ export async function planProjectChange(args: {
   env?: EstimateEnv;
   /** Merge a narrow trusted proposal against the same project snapshot this plan versions. */
   pipelineOverrides?: PipelineFeatureOverrides;
+  /**
+   * The caller's surface (`runOriginOf`): an unset chart export tier resolves to its default for the impact, the estimate
+   * and the re-index runs this plan queues. Unset: machine.
+   */
+  origin?: RunOrigin;
 }): Promise<ProjectChangePlan | null> {
+  const origin: RunOrigin = args.origin ?? "machine";
+  const env = args.env ?? process.env;
   const input = updateProjectSchema.parse(args.input);
   // Read before the project: a change landing in between only makes apply re-plan, never apply stale data.
   const rowVersion = await projectRowVersion(sql, args.projectId);
@@ -268,7 +278,7 @@ export async function planProjectChange(args: {
   const nextPipeline = await resolveUpdatedPipeline(project.id, project, input, { indexingMode: args.indexingMode });
   // The deployment kill switch: chart export cannot be turned on while it is off (a stored "on" stays inert).
   assertChartExportChangeAllowed(project.pipeline, nextPipeline, args.env ?? process.env);
-  const base = analyzePipelineChange(project.pipeline, nextPipeline, { documents: 0, pages: 0 });
+  const base = analyzePipelineChange(project.pipeline, nextPipeline, { documents: 0, pages: 0, origin, env });
   const reindex: ReindexMode | null =
     base.kind === "reindex-required" ? "required" : base.kind === "reindex-recommended" ? "recommended" : null;
 
@@ -310,7 +320,7 @@ export async function planProjectChange(args: {
     const parts: CostEstimate[] = [];
     for (const group of groups.values()) {
       parts.push(await estimateWork({
-        features: { ...nextPipeline, speedBoost: input.speedBoost === true }, stages: group.stages, documents: group.documents, pages: group.pages, orgId: project.orgId, env: args.env,
+        features: stampRunChartExport({ ...nextPipeline, speedBoost: input.speedBoost === true }, origin, env), stages: group.stages, documents: group.documents, pages: group.pages, orgId: project.orgId, env: args.env,
         visualScope: { projectId: project.id, documentIds: group.documentIds },
       }));
     }
@@ -319,7 +329,7 @@ export async function planProjectChange(args: {
   return {
     project, input, nextPipeline, impact, reindex,
     willReindex: willReindex && targets.length > 0 && impact.stages.length > 0,
-    hashChanged, recordsIndexChange, beforeConfig, afterConfig, targets, estimate, rowVersion,
+    hashChanged, recordsIndexChange, beforeConfig, afterConfig, targets, estimate, rowVersion, origin,
   };
 }
 
@@ -590,7 +600,7 @@ export async function applyProjectChange(args: {
     if (attempt + 1 >= (args.maxAttempts ?? MAX_REPLANS)) break;
     // A concurrent change was saved after planning: plan again from what is stored now, so neither change is lost.
     const replanned = await planProjectChange({
-      projectId: plan.project.id, userId: args.userId, input: plan.input, indexingMode: args.updateOptions?.indexingMode, env: args.env,
+      projectId: plan.project.id, userId: args.userId, input: plan.input, indexingMode: args.updateOptions?.indexingMode, env: args.env, origin: plan.origin,
     });
     if (!replanned) return null;
     plan = replanned;
@@ -724,7 +734,7 @@ async function applyPlannedChange(args: {
     }
     split.partial = [...planned.values()];
     const runs = await createReindexRuns({
-      tx, project, pipeline: { ...plan.nextPipeline, speedBoost: plan.input.speedBoost === true }, userId,
+      tx, project, pipeline: stampRunChartExport({ ...plan.nextPipeline, speedBoost: plan.input.speedBoost === true }, plan.origin), userId,
       meta: jobMeta, blockedReason, reusable: split,
     });
     return { runs, cancelled };
@@ -770,6 +780,7 @@ export async function estimateProjectChange(args: {
   userId: string;
   input: UpdateProjectInput;
   env?: EstimateEnv;
+  origin?: RunOrigin;
 }): Promise<ProjectEstimateResponse | null> {
   const plan = await planProjectChange(args);
   if (!plan) return null;

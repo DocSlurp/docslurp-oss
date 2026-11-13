@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { fileProfileSchema, quoteSettingsSchema } from "@docslurp/shared";
+import { CHART_EXPORT_OVERRIDE_DESCRIPTION, CHART_EXPORT_TIERS, chartExportOverrideSchema, fileProfileSchema, quoteSettingsSchema } from "@docslurp/shared";
 
 /**
  * Estimate tools: one per work-creating operation, each forwarding the same body
@@ -10,6 +10,12 @@ import { fileProfileSchema, quoteSettingsSchema } from "@docslurp/shared";
 const PROJECT_REF = 'Optional project ID, slug or name (names match by slug). Omit for the organization default project.';
 const project = { type: "string", minLength: 1, maxLength: 256, description: PROJECT_REF };
 const freeObject = { type: "object", additionalProperties: true };
+/** The JSON Schema of `chartExportOverrideSchema` (contract-tested against it). */
+export const chartExportOverrideJsonSchema = {
+  type: "object", additionalProperties: false, required: ["tier"],
+  properties: { tier: { type: "string", enum: [...CHART_EXPORT_TIERS] } },
+  description: CHART_EXPORT_OVERRIDE_DESCRIPTION,
+};
 
 export const ESTIMATE_TOOL_NAMES = [
   "updateEstimate",
@@ -51,7 +57,7 @@ export const estimateToolDefinitions: Array<{ name: EstimateToolName; title: str
   { name: "searchSettingsEstimate", title: "Estimate search settings cost", description: "Impact and cost of changing a project's search settings. Read-only.", inputSchema: {
     type: "object", properties: { project, changes: { ...freeObject, description: "The search-settings PATCH body." } }, required: ["changes"] } },
   { name: "reprocessEstimate", title: "Estimate reprocessing cost", description: "Cost of re-running a run, optionally from a stage. Read-only.", inputSchema: {
-    type: "object", properties: { runId: { type: "string", minLength: 1 }, stages: { type: "array", items: { type: "string" } }, stageFrom: { type: "string" } }, required: ["runId"] } },
+    type: "object", properties: { runId: { type: "string", minLength: 1 }, stages: { type: "array", items: { type: "string" } }, stageFrom: { type: "string" }, chartExport: chartExportOverrideJsonSchema }, required: ["runId"] } },
   { name: "fullIndexEstimate", title: "Estimate full indexing cost", description: "Cost of fully indexing a deferred project, listed documents, or one document (documentId). Read-only.", inputSchema: {
     type: "object", properties: { project, documentId: { type: "string", minLength: 1 }, documentIds: { type: "array", items: { type: "string", minLength: 1 }, maxItems: 500 } } } },
   { name: "indexingModeEstimate", title: "Estimate indexing mode cost", description: "Cost of switching a project to full, map or visual indexing. Read-only.", inputSchema: {
@@ -60,7 +66,7 @@ export const estimateToolDefinitions: Array<{ name: EstimateToolName; title: str
     type: "object", properties: { project } } },
   { name: "uploadEstimate", title: "Estimate upload cost", description: "Estimated cost of ingesting files before any bytes are sent. Pass page counts when known; otherwise pages are estimated from size. Pass `profile` when the file was profiled locally with @docslurp/estimate (its facts narrow the estimate; never billed). Audio and video are priced by duration: pass durationSeconds (or the MIME type) and read `media` for their credits and the cheaper audio-track-only option. `quote` is the full estimate (ingest, monthly hosting and usage, neutral lines, ranges, pricing version); pass `settings` to quote other knobs than the project's (quality, indexing, features, hostingMonths, searchesPerMonth, chatAnswersPerMonth).", inputSchema: {
     type: "object", properties: { project, files: { type: "array", minItems: 1, maxItems: 500, items: {
-      type: "object", properties: { name: { type: "string", minLength: 1 }, size: { type: "integer", minimum: 0 }, pages: { type: "integer", minimum: 0 }, type: { type: "string" }, durationSeconds: { type: "number", exclusiveMinimum: 0 }, profile: { ...freeObject, description: "A file profile from @docslurp/estimate, unchanged." } }, required: ["name", "size"] } }, settings: { ...freeObject, description: "Quote knobs overriding the project's: quality (fast, auto, good), indexing (full, on-demand, visual), documentSummary, structuredFields, knowledgeGraph, propositions, videoFrames, speedBoost, hostingMonths (1-60), searchesPerMonth, chatAnswersPerMonth, chatTier." } }, required: ["files"] } },
+      type: "object", properties: { name: { type: "string", minLength: 1 }, size: { type: "integer", minimum: 0 }, pages: { type: "integer", minimum: 0 }, type: { type: "string" }, durationSeconds: { type: "number", exclusiveMinimum: 0 }, profile: { ...freeObject, description: "A file profile from @docslurp/estimate, unchanged." } }, required: ["name", "size"] } }, chartExport: chartExportOverrideJsonSchema, settings: { ...freeObject, description: "Quote knobs overriding the project's: quality (fast, auto, good), indexing (full, on-demand, visual), documentSummary, structuredFields, knowledgeGraph, propositions, videoFrames, speedBoost, hostingMonths (1-60), searchesPerMonth, chatAnswersPerMonth, chatTier, chartExport (off, free or models; omitted: the project's, else off)." } }, required: ["files"] } },
 ];
 
 export const jobsGetToolDefinition = {
@@ -74,11 +80,11 @@ const common = { project: z.string().min(1).max(256).optional() };
 const inputSchemas: Record<EstimateToolName, z.ZodType<Record<string, unknown>>> = {
   "updateEstimate": z.object({ ...common, changes: z.record(z.string(), z.unknown()) }),
   "searchSettingsEstimate": z.object({ ...common, changes: z.record(z.string(), z.unknown()) }),
-  "reprocessEstimate": z.object({ runId: z.string().min(1), stages: z.array(z.string()).min(1).optional(), stageFrom: z.string().optional() }),
+  "reprocessEstimate": z.object({ runId: z.string().min(1), stages: z.array(z.string()).min(1).optional(), stageFrom: z.string().optional(), chartExport: chartExportOverrideSchema.optional() }),
   "fullIndexEstimate": z.object({ ...common, documentId: z.string().min(1).optional(), documentIds: z.array(z.string().min(1)).max(500).optional() }),
   "indexingModeEstimate": z.object({ ...common, mode: z.enum(["full", "map", "visual"]) }),
   "graphRebuildEstimate": z.object({ ...common }),
-  "uploadEstimate": z.object({ ...common, files: z.array(z.object({ name: z.string().min(1), size: z.number().int().min(0), pages: z.number().int().min(0).optional(), type: z.string().max(255).optional(), durationSeconds: z.number().positive().max(24 * 3600).optional(), profile: fileProfileSchema.optional() })).min(1).max(500), settings: quoteSettingsSchema.partial().optional() }),
+  "uploadEstimate": z.object({ ...common, files: z.array(z.object({ name: z.string().min(1), size: z.number().int().min(0), pages: z.number().int().min(0).optional(), type: z.string().max(255).optional(), durationSeconds: z.number().positive().max(24 * 3600).optional(), profile: fileProfileSchema.optional() })).min(1).max(500), chartExport: chartExportOverrideSchema.optional(), settings: quoteSettingsSchema.partial().optional() }),
 };
 
 export function isEstimateToolName(name: string): name is EstimateToolName {
@@ -110,7 +116,7 @@ export function planEstimateTool(
         : { ok: true, plan: { path: `${ws}/full-index/estimate`, body: data.documentIds ? { documentIds: data.documentIds } : {} } };
     case "indexingModeEstimate": return { ok: true, plan: { path: `${ws}/indexing-mode/estimate`, body: { mode: data.mode } } };
     case "graphRebuildEstimate": return { ok: true, plan: { path: `${ws}/graph/jobs/estimate`, body: {} } };
-    case "uploadEstimate": return { ok: true, plan: { path: "/v1/uploads/estimate", body: { files: data.files, project, ...(data.settings ? { settings: data.settings } : {}) } } };
+    case "uploadEstimate": return { ok: true, plan: { path: "/v1/uploads/estimate", body: { files: data.files, project, ...(data.chartExport ? { chartExport: data.chartExport } : {}), ...(data.settings ? { settings: data.settings } : {}) } } };
   }
 }
 

@@ -56,14 +56,15 @@ export function firstPassDrainConcurrency(env: NodeJS.ProcessEnv = process.env):
   return Number.isSafeInteger(value) ? Math.max(1, Math.min(16, value)) : 4;
 }
 
-/** The batch options a project's pipeline asks for: math only when the project requests it, figures when the deploy has them. */
+/** The batch options a project's pipeline asks for: math only when the project requests it, figures when the deploy has them and the project did not opt out. */
 export function firstPassBatchOptions(pipeline: PipelineFeatures, env: NodeJS.ProcessEnv = process.env): SandboxedPdfBatchJob["options"] {
   const vmOptions = (pipeline.documentExtraction?.options as Record<string, { math?: unknown } | undefined> | undefined)?.["vm-pdf"];
   return {
     // Math reading stays behind its own deploy flag (default off) until the open council follow-up on the math reader is
     // closed (TODO.md: bound its scan on hostile pages); the project's request alone never turns it on.
     math: vmOptions?.math === true && env.DOCSLURP_FIRST_PASS_MATH?.trim().toLowerCase() === "on",
-    figures: dopplerImageExtractEnabled(env) && !!sandboxedPdfProvider()?.figures,
+    // The project may opt out (`figures: false`); the deploy flag stays the ceiling.
+    figures: pipeline.figures !== false && dopplerImageExtractEnabled(env) && !!sandboxedPdfProvider()?.figures,
   };
 }
 

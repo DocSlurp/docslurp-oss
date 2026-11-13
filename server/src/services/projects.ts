@@ -1,4 +1,5 @@
 import { deferredProfilesEnabled, isBillingEnforced, PUBLIC_ERROR_MESSAGES, publicDiagnostics, publicDocumentError } from "@docslurp/shared";
+import { chartExportModelsAvailable, defaultChartExportConfig, defaultChartExportTier, effectiveChartExportConfig } from "@docslurp/shared";
 import { markProjectAutoNamed, refineProjectNames } from "./project-naming.js";
 import { forgetProjectProviderPolicy } from "../lib/provider-policy.js";
 import { jsonRecord } from "../lib/json-record.js";
@@ -310,6 +311,11 @@ function mapProject(row: ProjectRow): ProjectRecord {
     indexedPageCount: row.indexed_page_count ?? row.total_page_count ?? 0,
     deferredIndexingAvailable: deferredProfilesEnabled(),
     billingEnforced: isBillingEnforced(),
+    chartExportDefaults: {
+      app: effectiveChartExportConfig({ ...defaultChartExportConfig, tier: defaultChartExportTier("app", process.env) }, process.env).tier,
+      machine: effectiveChartExportConfig({ ...defaultChartExportConfig, tier: defaultChartExportTier("machine", process.env) }, process.env).tier,
+      modelsAvailable: chartExportModelsAvailable(process.env),
+    },
     sourceBytes: Number(row.source_bytes ?? 0),
     pendingDocumentCount: row.pending_document_count ?? 0,
     pendingPageCount: row.pending_page_count ?? 0,

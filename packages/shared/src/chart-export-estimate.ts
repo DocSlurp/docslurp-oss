@@ -59,12 +59,15 @@ export const CHART_EXPORT_DOCUMENT_CAPS = {
  */
 export const CHART_EXPORT_VISUALS_PER_PAGE_PRIOR = { low: 0.02, high: 0.25 } as const;
 
-/** Read `pipeline.features.chartExport` tolerantly; anything absent or invalid is "off". */
+/**
+ * The billed chart export config: `pipeline.features.chartExport` when its tier is `models`, else null. The free tier
+ * calls no model, so estimates and billing price it at 0 credits; absent or invalid is null too.
+ */
 export function chartExportConfigOf(features: unknown): ChartExportConfig | null {
   const raw = features && typeof features === "object" ? (features as { chartExport?: unknown }).chartExport : undefined;
   if (raw === undefined || raw === null) return null;
   const parsed = chartExportConfigSchema.safeParse(raw);
-  return parsed.success && parsed.data.enabled ? parsed.data : null;
+  return parsed.success && parsed.data.tier === "models" ? parsed.data : null;
 }
 
 /**

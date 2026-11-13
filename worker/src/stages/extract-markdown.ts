@@ -529,7 +529,8 @@ export class ExtractMarkdownStage implements Stage {
                 }
                 // Doppler figures (DOCSLURP_DOPPLER_IMAGE_EXTRACT): from the same VM job, into an empty host folder per candidate.
                 // A first-pass document's figures come from its batch and are stored by the first pass itself.
-                if (isPdf && dopplerImageExtractEnabled() && sandboxedPdfProvider()?.figures && !firstPassServesDocument(state.run.id, document.id)) {
+                // The project may opt out (`pipeline.figures: false`); the deploy flag stays the ceiling.
+                if (isPdf && state.run.pipeline.figures !== false && dopplerImageExtractEnabled() && sandboxedPdfProvider()?.figures && !firstPassServesDocument(state.run.id, document.id)) {
                   for (const prepared of [isolated.primary.extractor, isolated.secondary?.extractor]) {
                     if (!prepared?.plan.sandboxedPdf) continue;
                     const dir = await mkdtemp(path.join(path.dirname(prepared.plan.sandboxedPdf.output), ".doppler-figures-"));

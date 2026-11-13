@@ -509,7 +509,7 @@ describe("chart export estimates", () => {
     // Seeded where the worker records them: the vision-extract stage stats of the document's run.
     await sql`insert into document_run_stage_states (run_id, document_id, stage_name, status, stats)
       values ('src', 'd0', 'vision-extract', 'completed', ${sql.json({ visualCandidates: { charts: 3, diagrams: 0, pagesWithUnexportedVisuals: [1], exported: 0, bySource: {} } })})`;
-    const features = pipeline({ chartExport: { enabled: true, formats: ["description", "mermaid"], diagrams: true, generatorModel: null } });
+    const features = pipeline({ chartExport: { tier: "models", formats: ["description", "mermaid"], diagrams: true } });
     const estimate = (documentIds: string[], projectId = "w") => change.estimateWork({
       features, stages: ["vision-extract"], documents: documentIds.length, pages: 10, orgId: "o1", env: { ...process.env, DOCSLURP_CHART_EXPORT: "on" },
       visualScope: { projectId, documentIds },
@@ -521,16 +521,45 @@ describe("chart export estimates", () => {
     expect((await estimate(["d0"], "other")).basis).toMatch(/per-page planning prior/);
   });
 
-  it("refuses to turn chart export on while the deployment kill switch is off", async () => {
+  it("refuses the models tier unless the deployment kill switch is on; free and off need no switch", async () => {
     await seed({ credits: 10_000, documents: 1 });
     const { ChartExportUnavailableError } = await import("../services/chart-export-availability.js");
-    await expect(change.planProjectChange({
-      projectId: "w", userId: "u1", input: { pipeline: { chartExport: { enabled: true } } } as never, env: { DOCSLURP_CHART_EXPORT: "off" },
-    })).rejects.toBeInstanceOf(ChartExportUnavailableError);
+    for (const flag of ["off", "free", "bogus"]) {
+      await expect(change.planProjectChange({
+        projectId: "w", userId: "u1", input: { pipeline: { chartExport: { tier: "models" } } } as never, env: { DOCSLURP_CHART_EXPORT: flag },
+      })).rejects.toBeInstanceOf(ChartExportUnavailableError);
+    }
+    for (const tier of ["free", "off"]) {
+      const plan = await change.planProjectChange({ projectId: "w", userId: "u1", input: { pipeline: { chartExport: { tier } } } as never, env: { DOCSLURP_CHART_EXPORT: "off" } });
+      expect(plan?.nextPipeline.chartExport.tier).toBe(tier);
+    }
     const allowed = await change.planProjectChange({
-      projectId: "w", userId: "u1", input: { pipeline: { chartExport: { enabled: true } } } as never, env: { ...process.env, DOCSLURP_CHART_EXPORT: "on" },
+      projectId: "w", userId: "u1", input: { pipeline: { chartExport: { tier: "models" } } } as never, env: { ...process.env, DOCSLURP_CHART_EXPORT: "on" },
     });
-    expect(allowed?.nextPipeline.chartExport.enabled).toBe(true);
+    expect(allowed?.nextPipeline.chartExport.tier).toBe("models");
+  });
+
+  it("classifies a tier change for the caller's surface and prices only models (the chat suggestion path)", async () => {
+    await seed({ credits: 10_000, documents: 2 });
+    const env = { ...process.env, DOCSLURP_CHART_EXPORT: "on" };
+    const plan = (tier: string, origin: "app" | "machine") => change.planProjectChange({
+      projectId: "w", userId: "u1", input: { apply: "reindex" }, pipelineOverrides: { chartExport: { tier } } as never, env, origin,
+    });
+    // Moving to models (what chat proposes): a billed reindex through vision-extract, with chart reads in the estimate.
+    const models = await plan("models", "app");
+    expect(models?.impact.kind).toBe("reindex-recommended");
+    expect(models?.impact.stages).toContain("vision-extract");
+    expect(models?.estimate?.basis).toMatch(/chart export: .* model-read visuals/);
+    // Moving an API caller (default off) to free: an optional reindex with no chart charge.
+    const free = await plan("free", "machine");
+    expect(free?.impact.kind).toBe("reindex-recommended");
+    expect(free?.estimate?.basis ?? "").not.toMatch(/chart export/);
+    // In the app the default is already free: nothing for stored documents.
+    expect((await plan("free", "app"))?.impact.kind).not.toBe("reindex-recommended");
+    // Off applies to new uploads only.
+    expect((await plan("off", "app"))?.impact.kind).toBe("new-uploads");
+    // The origin is recorded on the plan, so the re-index runs it queues resolve the same way.
+    expect(models?.origin).toBe("app");
   });
 });
 

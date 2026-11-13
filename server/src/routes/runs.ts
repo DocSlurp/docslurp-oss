@@ -1,4 +1,6 @@
 import { quoteStoredDocuments } from "../services/stored-quote.js";
+import { chartExportOverrideError } from "../services/chart-export-availability.js";
+import { runOriginOf } from "../lib/run-origin.js";
 import { SEARCH_SCOPES } from "../lib/search-tiers.js";
 import { reportPublicError } from "../lib/public-errors.js";
 import { Hono, type Context } from "hono";
@@ -312,6 +314,8 @@ export const runsRoutes = new Hono()
     const denied = await denyRunContentUpdate(c, c.req.param("runId"));
     if (denied) return denied;
     const userId = c.get("sessionUser").id;
+    const refused = chartExportOverrideError(c.req.valid("json").chartExport?.tier, `reprocess estimate run=${c.req.param("runId")}`);
+    if (refused) return apiStatusError(c, 400, refused, { code: "chart_export_models_unavailable" });
     const estimate = await estimateRunReprocess({ runId: c.req.param("runId"), userId, options: c.req.valid("json") });
     if (!estimate) return apiStatusError(c, 404, "Run not found");
     // The same quote shape as POST /v1/estimate, from the run's measured documents (estimateRunReprocess checked access).
@@ -333,7 +337,7 @@ export const runsRoutes = new Hono()
     );
     let reprocessed: Awaited<ReturnType<typeof reprocessRun>>;
     try {
-      reprocessed = await reprocessRun(c.req.param("runId"), userId, body);
+      reprocessed = await reprocessRun(c.req.param("runId"), userId, { ...body, origin: runOriginOf(c) });
     } catch (error) {
       if (isReprocessRejectedError(error)) {
         return apiStatusError(c, error.statusCode, error.message, { code: error.code, details: error.details });
