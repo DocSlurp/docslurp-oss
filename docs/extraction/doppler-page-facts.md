@@ -64,17 +64,23 @@ facts, with no command:
   `minSignificantImageCoverage`, the repeated-furniture rule), plus any page whose extracted text reads as garbled or suspect.
   `embeddedImageBytes` and `drawnBytesPerPage` are null: facts never read a stream;
 - per-page rows in `document_page_facts` (`facts_source = 'doppler-facts'`): `word_count`, `image_count` (image rows, as
-  `pdfimages -list` counts them) and `text_bytes`, which is 0 for a page with no text layer and otherwise null: facts count
-  characters, never bytes.
+  `pdfimages -list` counts them) and `text_bytes`, which is 0 for a page with no text layer and otherwise the extracted page's
+  whitespace-collapsed bytes (facts count characters, never bytes).
 
 Only facts that cover the document count: a complete stream (a run line last), no dropped line, no failed page, no document
-error or lock, every page of the host's own count present with the `text` family and a complete `images.items` list. Any
+error or lock, every page of the host's own count present with the `text` and `geometry` families and a complete
+`images.items` list. Any
 less, in any mode but `use`, or when another extractor won, nothing is built and the route goes without, as before; the
 stage records `dopplerFactsEvidence: { status: "skipped", reason }`.
 
-Billing does not move: no size or read comes from the facts, Rich reads stay the provider's `ocrPages`, page-equivalent
-sizes stay the walker's, and the per-page rows are not written for a run without a page billing pin, which still bills
-pages with no text bytes and an image as scans at completion (`runBillsScansAtCompletion`).
+No page count, size or charge comes from the facts: the page count stays the host's, page-equivalent sizes stay the
+walker's, extract-markdown's Rich reads stay the provider's `ocrPages`, and the per-page rows are not written for a run
+without a page billing pin, which still bills pages with no text bytes and an image as scans at completion
+(`runBillsScansAtCompletion`). The evidence is routing evidence, though: like the probe's, it can make classify-route send a
+sparse scan page to a vision read, and that read bills Rich when it happens, for a project with vision fallback on. To keep a
+counting gap or hostile facts from turning text pages into reads, the facts must agree with the extraction: a page the facts
+call sparse while the winning extraction read `sparsePageWords` or more words from it (not by OCR) refuses the whole
+document's evidence (`words-disagree`), and an image never counts for more of the page than its own box covers.
 
 Commands the facts cannot retire, and why:
 
