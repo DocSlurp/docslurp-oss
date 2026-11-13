@@ -51,17 +51,17 @@ END $$;
 --> statement-breakpoint
 -- Processing-only viewer and suggestion observation. These triggers publish
 -- only committed revisions; they never generate suggestions or read artifacts.
-CREATE TRIGGER realtime_changed AFTER INSERT OR UPDATE OR DELETE ON query_suggestions
+CREATE OR REPLACE TRIGGER realtime_changed AFTER INSERT OR UPDATE OR DELETE ON query_suggestions
 FOR EACH ROW EXECUTE FUNCTION realtime_changed();
 --> statement-breakpoint
-CREATE TRIGGER realtime_changed AFTER INSERT OR UPDATE OR DELETE ON document_pages
+CREATE OR REPLACE TRIGGER realtime_changed AFTER INSERT OR UPDATE OR DELETE ON document_pages
 FOR EACH ROW EXECUTE FUNCTION realtime_changed();
 --> statement-breakpoint
-CREATE TRIGGER realtime_changed AFTER INSERT OR UPDATE OR DELETE ON document_chunks
+CREATE OR REPLACE TRIGGER realtime_changed AFTER INSERT OR UPDATE OR DELETE ON document_chunks
 FOR EACH ROW EXECUTE FUNCTION realtime_changed();
 --> statement-breakpoint
 -- search_sessions carries workspace identity in metadata, rather than a column.
-CREATE FUNCTION realtime_search_session_changed() RETURNS trigger LANGUAGE plpgsql AS $$
+CREATE OR REPLACE FUNCTION realtime_search_session_changed() RETURNS trigger LANGUAGE plpgsql AS $$
 DECLARE
   workspace_id_value text;
   old_workspace_id text;
@@ -82,5 +82,5 @@ BEGIN
   RETURN NULL;
 END $$;
 --> statement-breakpoint
-CREATE TRIGGER realtime_changed AFTER INSERT OR UPDATE OR DELETE ON search_sessions
+CREATE OR REPLACE TRIGGER realtime_changed AFTER INSERT OR UPDATE OR DELETE ON search_sessions
 FOR EACH ROW EXECUTE FUNCTION realtime_search_session_changed();

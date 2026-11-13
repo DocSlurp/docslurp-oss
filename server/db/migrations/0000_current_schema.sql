@@ -1,4 +1,4 @@
-CREATE TABLE "credit_ledger" (
+CREATE TABLE IF NOT EXISTS "credit_ledger" (
 	"id" text PRIMARY KEY NOT NULL,
 	"user_id" text NOT NULL,
 	"delta" numeric(12, 2) NOT NULL,
@@ -7,7 +7,7 @@ CREATE TABLE "credit_ledger" (
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
-CREATE TABLE "organizations" (
+CREATE TABLE IF NOT EXISTS "organizations" (
 	"id" text PRIMARY KEY NOT NULL,
 	"name" text NOT NULL,
 	"slug" text,
@@ -30,7 +30,7 @@ CREATE TABLE "organizations" (
 	CONSTRAINT "organizations_budget_alert_threshold_percent_check" CHECK ((budget_alert_threshold_percent >= 1) AND (budget_alert_threshold_percent <= 100))
 );
 --> statement-breakpoint
-CREATE TABLE "vector_indexes" (
+CREATE TABLE IF NOT EXISTS "vector_indexes" (
 	"id" text PRIMARY KEY NOT NULL,
 	"document_id" text NOT NULL,
 	"backend" text NOT NULL,
@@ -41,7 +41,7 @@ CREATE TABLE "vector_indexes" (
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
-CREATE TABLE "usage_events" (
+CREATE TABLE IF NOT EXISTS "usage_events" (
 	"id" text PRIMARY KEY NOT NULL,
 	"user_id" text NOT NULL,
 	"run_id" text,
@@ -58,7 +58,7 @@ CREATE TABLE "usage_events" (
 	"output_tokens" integer DEFAULT 0 NOT NULL
 );
 --> statement-breakpoint
-CREATE TABLE "documents" (
+CREATE TABLE IF NOT EXISTS "documents" (
 	"id" text PRIMARY KEY NOT NULL,
 	"user_id" text NOT NULL,
 	"workspace_id" text NOT NULL,
@@ -82,7 +82,7 @@ CREATE TABLE "documents" (
 	CONSTRAINT "documents_dedup_scope_check" CHECK (dedup_scope = ANY (ARRAY['workspace'::text, 'org'::text]))
 );
 --> statement-breakpoint
-CREATE TABLE "performance_log" (
+CREATE TABLE IF NOT EXISTS "performance_log" (
 	"id" text PRIMARY KEY NOT NULL,
 	"user_id" text NOT NULL,
 	"run_id" text,
@@ -98,7 +98,7 @@ CREATE TABLE "performance_log" (
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
-CREATE TABLE "workspace_run_events" (
+CREATE TABLE IF NOT EXISTS "workspace_run_events" (
 	"id" text PRIMARY KEY NOT NULL,
 	"user_id" text NOT NULL,
 	"run_id" text NOT NULL,
@@ -113,7 +113,7 @@ CREATE TABLE "workspace_run_events" (
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
-CREATE TABLE "workspace_secrets" (
+CREATE TABLE IF NOT EXISTS "workspace_secrets" (
 	"id" text PRIMARY KEY NOT NULL,
 	"workspace_id" text NOT NULL,
 	"name" text NOT NULL,
@@ -127,14 +127,14 @@ CREATE TABLE "workspace_secrets" (
 	CONSTRAINT "workspace_secrets_workspace_id_name_key" UNIQUE("workspace_id","name")
 );
 --> statement-breakpoint
-CREATE TABLE "schema_migrations" (
+CREATE TABLE IF NOT EXISTS "schema_migrations" (
 	"name" text PRIMARY KEY NOT NULL,
 	"checksum" text NOT NULL,
 	"applied_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"execution_ms" integer DEFAULT 0 NOT NULL
 );
 --> statement-breakpoint
-CREATE TABLE "user" (
+CREATE TABLE IF NOT EXISTS "user" (
 	"id" text PRIMARY KEY NOT NULL,
 	"name" text NOT NULL,
 	"email" text NOT NULL,
@@ -145,7 +145,7 @@ CREATE TABLE "user" (
 	CONSTRAINT "user_email_key" UNIQUE("email")
 );
 --> statement-breakpoint
-CREATE TABLE "session" (
+CREATE TABLE IF NOT EXISTS "session" (
 	"id" text PRIMARY KEY NOT NULL,
 	"expiresAt" timestamp with time zone NOT NULL,
 	"token" text NOT NULL,
@@ -157,7 +157,7 @@ CREATE TABLE "session" (
 	CONSTRAINT "session_token_key" UNIQUE("token")
 );
 --> statement-breakpoint
-CREATE TABLE "verification" (
+CREATE TABLE IF NOT EXISTS "verification" (
 	"id" text PRIMARY KEY NOT NULL,
 	"identifier" text NOT NULL,
 	"value" text NOT NULL,
@@ -166,7 +166,7 @@ CREATE TABLE "verification" (
 	"updatedAt" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
-CREATE TABLE "account" (
+CREATE TABLE IF NOT EXISTS "account" (
 	"id" text PRIMARY KEY NOT NULL,
 	"accountId" text NOT NULL,
 	"providerId" text NOT NULL,
@@ -182,7 +182,7 @@ CREATE TABLE "account" (
 	"updatedAt" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
-CREATE TABLE "workspace_invites" (
+CREATE TABLE IF NOT EXISTS "workspace_invites" (
 	"id" text PRIMARY KEY NOT NULL,
 	"workspace_id" text NOT NULL,
 	"org_id" text NOT NULL,
@@ -198,7 +198,7 @@ CREATE TABLE "workspace_invites" (
 	CONSTRAINT "workspace_invites_token_key" UNIQUE("token")
 );
 --> statement-breakpoint
-CREATE TABLE "document_corrections" (
+CREATE TABLE IF NOT EXISTS "document_corrections" (
 	"id" text PRIMARY KEY NOT NULL,
 	"document_id" text NOT NULL,
 	"run_id" text,
@@ -213,7 +213,7 @@ CREATE TABLE "document_corrections" (
 	CONSTRAINT "document_corrections_document_id_key" UNIQUE("document_id")
 );
 --> statement-breakpoint
-CREATE TABLE "page_stage_states" (
+CREATE TABLE IF NOT EXISTS "page_stage_states" (
 	"id" text PRIMARY KEY DEFAULT (gen_random_uuid()) NOT NULL,
 	"run_id" text NOT NULL,
 	"document_id" text NOT NULL,
@@ -224,7 +224,7 @@ CREATE TABLE "page_stage_states" (
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
-CREATE TABLE "workspace_connectors" (
+CREATE TABLE IF NOT EXISTS "workspace_connectors" (
 	"id" text PRIMARY KEY DEFAULT (gen_random_uuid()) NOT NULL,
 	"workspace_id" text NOT NULL,
 	"type" text NOT NULL,
@@ -237,7 +237,7 @@ CREATE TABLE "workspace_connectors" (
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
-CREATE TABLE "webhooks" (
+CREATE TABLE IF NOT EXISTS "webhooks" (
 	"id" text PRIMARY KEY NOT NULL,
 	"user_id" text NOT NULL,
 	"url" text NOT NULL,
@@ -247,7 +247,7 @@ CREATE TABLE "webhooks" (
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
-CREATE TABLE "document_chunks" (
+CREATE TABLE IF NOT EXISTS "document_chunks" (
 	"id" text PRIMARY KEY NOT NULL,
 	"document_id" text NOT NULL,
 	"run_id" text NOT NULL,
@@ -265,7 +265,7 @@ CREATE TABLE "document_chunks" (
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
-CREATE TABLE "webhook_deliveries" (
+CREATE TABLE IF NOT EXISTS "webhook_deliveries" (
 	"id" text PRIMARY KEY NOT NULL,
 	"webhook_id" text NOT NULL,
 	"user_id" text NOT NULL,
@@ -280,7 +280,7 @@ CREATE TABLE "webhook_deliveries" (
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
-CREATE TABLE "notification_prefs" (
+CREATE TABLE IF NOT EXISTS "notification_prefs" (
 	"user_id" text PRIMARY KEY NOT NULL,
 	"org_id" text,
 	"workspace_id" text,
@@ -293,7 +293,7 @@ CREATE TABLE "notification_prefs" (
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
-CREATE TABLE "document_pages" (
+CREATE TABLE IF NOT EXISTS "document_pages" (
 	"id" text PRIMARY KEY NOT NULL,
 	"document_id" text NOT NULL,
 	"run_id" text NOT NULL,
@@ -304,7 +304,7 @@ CREATE TABLE "document_pages" (
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
-CREATE TABLE "notification_deliveries" (
+CREATE TABLE IF NOT EXISTS "notification_deliveries" (
 	"id" text PRIMARY KEY NOT NULL,
 	"user_id" text NOT NULL,
 	"org_id" text,
@@ -319,7 +319,7 @@ CREATE TABLE "notification_deliveries" (
 	"read_at" timestamp with time zone
 );
 --> statement-breakpoint
-CREATE TABLE "api_keys" (
+CREATE TABLE IF NOT EXISTS "api_keys" (
 	"id" text PRIMARY KEY NOT NULL,
 	"user_id" text NOT NULL,
 	"key_hash" text NOT NULL,
@@ -336,7 +336,7 @@ CREATE TABLE "api_keys" (
 	CONSTRAINT "api_keys_key_hash_key" UNIQUE("key_hash")
 );
 --> statement-breakpoint
-CREATE TABLE "document_summaries" (
+CREATE TABLE IF NOT EXISTS "document_summaries" (
 	"id" text PRIMARY KEY NOT NULL,
 	"document_id" text NOT NULL,
 	"run_id" text NOT NULL,
@@ -345,7 +345,7 @@ CREATE TABLE "document_summaries" (
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
-CREATE TABLE "search_sessions" (
+CREATE TABLE IF NOT EXISTS "search_sessions" (
 	"id" text PRIMARY KEY NOT NULL,
 	"user_id" text NOT NULL,
 	"query" text NOT NULL,
@@ -355,7 +355,7 @@ CREATE TABLE "search_sessions" (
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
-CREATE TABLE "search_session_results" (
+CREATE TABLE IF NOT EXISTS "search_session_results" (
 	"id" text PRIMARY KEY NOT NULL,
 	"session_id" text NOT NULL,
 	"chunk_id" text NOT NULL,
@@ -365,7 +365,7 @@ CREATE TABLE "search_session_results" (
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
-CREATE TABLE "audit_log" (
+CREATE TABLE IF NOT EXISTS "audit_log" (
 	"id" text PRIMARY KEY NOT NULL,
 	"org_id" text,
 	"user_id" text,
@@ -381,7 +381,7 @@ CREATE TABLE "audit_log" (
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
-CREATE TABLE "search_eval_fixtures" (
+CREATE TABLE IF NOT EXISTS "search_eval_fixtures" (
 	"id" text PRIMARY KEY NOT NULL,
 	"user_id" text NOT NULL,
 	"run_id" text,
@@ -391,7 +391,7 @@ CREATE TABLE "search_eval_fixtures" (
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
-CREATE TABLE "search_index_staleness" (
+CREATE TABLE IF NOT EXISTS "search_index_staleness" (
 	"id" text PRIMARY KEY NOT NULL,
 	"user_id" text NOT NULL,
 	"run_id" text NOT NULL,
@@ -402,7 +402,7 @@ CREATE TABLE "search_index_staleness" (
 	"reindex_completed_at" timestamp with time zone
 );
 --> statement-breakpoint
-CREATE TABLE "document_propositions" (
+CREATE TABLE IF NOT EXISTS "document_propositions" (
 	"id" text PRIMARY KEY NOT NULL,
 	"document_id" text NOT NULL,
 	"run_id" text NOT NULL,
@@ -415,7 +415,7 @@ CREATE TABLE "document_propositions" (
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
-CREATE TABLE "idempotency_cache" (
+CREATE TABLE IF NOT EXISTS "idempotency_cache" (
 	"id" text PRIMARY KEY DEFAULT (gen_random_uuid()) NOT NULL,
 	"idempotency_key" text NOT NULL,
 	"route_key" text NOT NULL,
@@ -428,7 +428,7 @@ CREATE TABLE "idempotency_cache" (
 	CONSTRAINT "idempotency_cache_idempotency_key_route_key_key" UNIQUE("idempotency_key","route_key")
 );
 --> statement-breakpoint
-CREATE TABLE "search_experiments" (
+CREATE TABLE IF NOT EXISTS "search_experiments" (
 	"id" text PRIMARY KEY NOT NULL,
 	"user_id" text NOT NULL,
 	"name" text NOT NULL,
@@ -443,14 +443,14 @@ CREATE TABLE "search_experiments" (
 	CONSTRAINT "search_experiments_traffic_percent_check" CHECK ((traffic_percent >= 0) AND (traffic_percent <= 100))
 );
 --> statement-breakpoint
-CREATE TABLE "chat_sessions" (
+CREATE TABLE IF NOT EXISTS "chat_sessions" (
 	"id" text PRIMARY KEY NOT NULL,
 	"workspace_id" text NOT NULL,
 	"user_id" text NOT NULL,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
-CREATE TABLE "chat_turns" (
+CREATE TABLE IF NOT EXISTS "chat_turns" (
 	"id" text PRIMARY KEY NOT NULL,
 	"session_id" text NOT NULL,
 	"role" text NOT NULL,
@@ -458,7 +458,7 @@ CREATE TABLE "chat_turns" (
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
-CREATE TABLE "ai_operations" (
+CREATE TABLE IF NOT EXISTS "ai_operations" (
 	"id" text PRIMARY KEY NOT NULL,
 	"user_id" text NOT NULL,
 	"org_id" text NOT NULL,
@@ -483,7 +483,7 @@ CREATE TABLE "ai_operations" (
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
-CREATE TABLE "workspaces" (
+CREATE TABLE IF NOT EXISTS "workspaces" (
 	"id" text PRIMARY KEY NOT NULL,
 	"user_id" text NOT NULL,
 	"name" text NOT NULL,
@@ -504,7 +504,7 @@ CREATE TABLE "workspaces" (
 	CONSTRAINT "workspaces_system_prompt_length_check" CHECK ((system_prompt IS NULL) OR (char_length(system_prompt) <= 2000))
 );
 --> statement-breakpoint
-CREATE TABLE "ai_operation_events" (
+CREATE TABLE IF NOT EXISTS "ai_operation_events" (
 	"id" text PRIMARY KEY NOT NULL,
 	"operation_id" text NOT NULL,
 	"sequence" integer NOT NULL,
@@ -514,7 +514,7 @@ CREATE TABLE "ai_operation_events" (
 	CONSTRAINT "ai_operation_events_operation_id_sequence_key" UNIQUE("operation_id","sequence")
 );
 --> statement-breakpoint
-CREATE TABLE "grounded_summaries" (
+CREATE TABLE IF NOT EXISTS "grounded_summaries" (
 	"id" text PRIMARY KEY NOT NULL,
 	"user_id" text NOT NULL,
 	"document_id" text,
@@ -531,7 +531,7 @@ CREATE TABLE "grounded_summaries" (
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
-CREATE TABLE "pii_detections" (
+CREATE TABLE IF NOT EXISTS "pii_detections" (
 	"id" text PRIMARY KEY DEFAULT (gen_random_uuid()) NOT NULL,
 	"document_id" text NOT NULL,
 	"run_id" text NOT NULL,
@@ -543,7 +543,7 @@ CREATE TABLE "pii_detections" (
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
-CREATE TABLE "chat_answer_evidence_spans" (
+CREATE TABLE IF NOT EXISTS "chat_answer_evidence_spans" (
 	"id" text PRIMARY KEY NOT NULL,
 	"answer_id" text NOT NULL,
 	"session_id" text NOT NULL,
@@ -561,7 +561,7 @@ CREATE TABLE "chat_answer_evidence_spans" (
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
-CREATE TABLE "parser_eval_fixtures" (
+CREATE TABLE IF NOT EXISTS "parser_eval_fixtures" (
 	"id" text PRIMARY KEY NOT NULL,
 	"user_id" text NOT NULL,
 	"run_id" text,
@@ -578,7 +578,7 @@ CREATE TABLE "parser_eval_fixtures" (
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
-CREATE TABLE "parser_eval_results" (
+CREATE TABLE IF NOT EXISTS "parser_eval_results" (
 	"id" text PRIMARY KEY NOT NULL,
 	"user_id" text NOT NULL,
 	"run_id" text NOT NULL,
@@ -597,7 +597,7 @@ CREATE TABLE "parser_eval_results" (
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
-CREATE TABLE "upload_sessions" (
+CREATE TABLE IF NOT EXISTS "upload_sessions" (
 	"id" text PRIMARY KEY NOT NULL,
 	"user_id" text NOT NULL,
 	"org_id" text,
@@ -610,7 +610,7 @@ CREATE TABLE "upload_sessions" (
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
-CREATE TABLE "upload_session_files" (
+CREATE TABLE IF NOT EXISTS "upload_session_files" (
 	"id" text PRIMARY KEY NOT NULL,
 	"session_id" text NOT NULL,
 	"filename" text NOT NULL,
@@ -628,7 +628,7 @@ CREATE TABLE "upload_session_files" (
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
-CREATE TABLE "workspace_runs" (
+CREATE TABLE IF NOT EXISTS "workspace_runs" (
 	"id" text PRIMARY KEY NOT NULL,
 	"user_id" text NOT NULL,
 	"workspace_id" text NOT NULL,
@@ -660,7 +660,7 @@ CREATE TABLE "workspace_runs" (
 	"dead_letter_reason" text
 );
 --> statement-breakpoint
-CREATE TABLE "search_zero_results" (
+CREATE TABLE IF NOT EXISTS "search_zero_results" (
 	"id" text PRIMARY KEY NOT NULL,
 	"session_id" text NOT NULL,
 	"user_id" text NOT NULL,
@@ -670,7 +670,7 @@ CREATE TABLE "search_zero_results" (
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
-CREATE TABLE "workspace_search_settings" (
+CREATE TABLE IF NOT EXISTS "workspace_search_settings" (
 	"workspace_id" text PRIMARY KEY NOT NULL,
 	"user_id" text NOT NULL,
 	"typo_tolerance" boolean DEFAULT true NOT NULL,
@@ -686,7 +686,7 @@ CREATE TABLE "workspace_search_settings" (
 	"compat_metadata" jsonb DEFAULT '{}'::jsonb NOT NULL
 );
 --> statement-breakpoint
-CREATE TABLE "query_suggestions" (
+CREATE TABLE IF NOT EXISTS "query_suggestions" (
 	"id" text PRIMARY KEY NOT NULL,
 	"user_id" text NOT NULL,
 	"workspace_id" text NOT NULL,
@@ -695,7 +695,7 @@ CREATE TABLE "query_suggestions" (
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
-CREATE TABLE "privacy_audit_log" (
+CREATE TABLE IF NOT EXISTS "privacy_audit_log" (
 	"id" text PRIMARY KEY DEFAULT (gen_random_uuid()) NOT NULL,
 	"document_id" text,
 	"run_id" text,
@@ -706,7 +706,7 @@ CREATE TABLE "privacy_audit_log" (
 	"sent_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
-CREATE TABLE "connector_sync_log" (
+CREATE TABLE IF NOT EXISTS "connector_sync_log" (
 	"id" text PRIMARY KEY DEFAULT (gen_random_uuid()) NOT NULL,
 	"connector_id" text NOT NULL,
 	"started_at" timestamp with time zone DEFAULT now() NOT NULL,
@@ -719,7 +719,7 @@ CREATE TABLE "connector_sync_log" (
 	"cost_cents" integer DEFAULT 0 NOT NULL
 );
 --> statement-breakpoint
-CREATE TABLE "oauth_accounts" (
+CREATE TABLE IF NOT EXISTS "oauth_accounts" (
 	"id" text PRIMARY KEY DEFAULT (gen_random_uuid()) NOT NULL,
 	"user_id" text NOT NULL,
 	"provider" text NOT NULL,
@@ -733,7 +733,7 @@ CREATE TABLE "oauth_accounts" (
 	CONSTRAINT "oauth_accounts_provider_provider_account_id_key" UNIQUE("provider","provider_account_id")
 );
 --> statement-breakpoint
-CREATE TABLE "sso_auth_requests" (
+CREATE TABLE IF NOT EXISTS "sso_auth_requests" (
 	"id" text PRIMARY KEY DEFAULT (gen_random_uuid()) NOT NULL,
 	"state" text NOT NULL,
 	"org_id" text NOT NULL,
@@ -748,7 +748,7 @@ CREATE TABLE "sso_auth_requests" (
 	CONSTRAINT "sso_auth_requests_provider_check" CHECK (provider = ANY (ARRAY['oidc'::text, 'saml'::text]))
 );
 --> statement-breakpoint
-CREATE TABLE "stripe_webhook_events" (
+CREATE TABLE IF NOT EXISTS "stripe_webhook_events" (
 	"event_id" text PRIMARY KEY NOT NULL,
 	"event_type" text NOT NULL,
 	"payload" jsonb NOT NULL,
@@ -756,7 +756,7 @@ CREATE TABLE "stripe_webhook_events" (
 	"processed_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
-CREATE TABLE "stripe_topups" (
+CREATE TABLE IF NOT EXISTS "stripe_topups" (
 	"payment_intent_id" text PRIMARY KEY NOT NULL,
 	"org_id" text NOT NULL,
 	"amount_cents" integer NOT NULL,
@@ -764,7 +764,7 @@ CREATE TABLE "stripe_topups" (
 	CONSTRAINT "stripe_topups_amount_cents_check" CHECK (amount_cents > 0)
 );
 --> statement-breakpoint
-CREATE TABLE "kg_nodes" (
+CREATE TABLE IF NOT EXISTS "kg_nodes" (
 	"id" text PRIMARY KEY NOT NULL,
 	"workspace_id" text NOT NULL,
 	"run_id" text NOT NULL,
@@ -782,7 +782,7 @@ CREATE TABLE "kg_nodes" (
 	CONSTRAINT "kg_nodes_workspace_id_normalized_name_entity_type_key" UNIQUE("workspace_id","normalized_name","entity_type")
 );
 --> statement-breakpoint
-CREATE TABLE "kg_edges" (
+CREATE TABLE IF NOT EXISTS "kg_edges" (
 	"id" text PRIMARY KEY NOT NULL,
 	"workspace_id" text NOT NULL,
 	"run_id" text NOT NULL,
@@ -799,7 +799,7 @@ CREATE TABLE "kg_edges" (
 	CONSTRAINT "kg_edges_workspace_id_source_node_id_target_node_id_normali_key" UNIQUE("workspace_id","source_node_id","target_node_id","normalized_predicate")
 );
 --> statement-breakpoint
-CREATE TABLE "kg_communities" (
+CREATE TABLE IF NOT EXISTS "kg_communities" (
 	"id" text PRIMARY KEY NOT NULL,
 	"workspace_id" text NOT NULL,
 	"run_id" text NOT NULL,
@@ -813,7 +813,7 @@ CREATE TABLE "kg_communities" (
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
-CREATE TABLE "org_memberships" (
+CREATE TABLE IF NOT EXISTS "org_memberships" (
 	"org_id" text NOT NULL,
 	"user_id" text NOT NULL,
 	"role" text NOT NULL,
@@ -821,7 +821,7 @@ CREATE TABLE "org_memberships" (
 	CONSTRAINT "org_memberships_pkey" PRIMARY KEY("org_id","user_id")
 );
 --> statement-breakpoint
-CREATE TABLE "document_tags" (
+CREATE TABLE IF NOT EXISTS "document_tags" (
 	"document_id" text NOT NULL,
 	"user_id" text NOT NULL,
 	"tag" text NOT NULL,
@@ -829,7 +829,7 @@ CREATE TABLE "document_tags" (
 	CONSTRAINT "document_tags_pkey" PRIMARY KEY("document_id","tag")
 );
 --> statement-breakpoint
-CREATE TABLE "api_key_usage" (
+CREATE TABLE IF NOT EXISTS "api_key_usage" (
 	"key_id" text NOT NULL,
 	"minute_bucket" timestamp with time zone NOT NULL,
 	"request_count" integer DEFAULT 0 NOT NULL,
@@ -837,7 +837,7 @@ CREATE TABLE "api_key_usage" (
 	CONSTRAINT "api_key_usage_pkey" PRIMARY KEY("key_id","minute_bucket")
 );
 --> statement-breakpoint
-CREATE TABLE "kg_community_members" (
+CREATE TABLE IF NOT EXISTS "kg_community_members" (
 	"community_id" text NOT NULL,
 	"node_id" text NOT NULL,
 	"workspace_id" text NOT NULL,
@@ -845,7 +845,7 @@ CREATE TABLE "kg_community_members" (
 	CONSTRAINT "kg_community_members_pkey" PRIMARY KEY("community_id","node_id")
 );
 --> statement-breakpoint
-CREATE TABLE "workspace_members" (
+CREATE TABLE IF NOT EXISTS "workspace_members" (
 	"workspace_id" text NOT NULL,
 	"user_id" text NOT NULL,
 	"role" text NOT NULL,
@@ -854,7 +854,7 @@ CREATE TABLE "workspace_members" (
 	CONSTRAINT "workspace_members_pkey" PRIMARY KEY("workspace_id","user_id")
 );
 --> statement-breakpoint
-CREATE TABLE "workspace_run_stage_states" (
+CREATE TABLE IF NOT EXISTS "workspace_run_stage_states" (
 	"run_id" text NOT NULL,
 	"stage_name" text NOT NULL,
 	"status" text NOT NULL,
@@ -868,7 +868,7 @@ CREATE TABLE "workspace_run_stage_states" (
 	CONSTRAINT "workspace_run_stage_states_pkey" PRIMARY KEY("run_id","stage_name")
 );
 --> statement-breakpoint
-CREATE TABLE "document_run_stage_states" (
+CREATE TABLE IF NOT EXISTS "document_run_stage_states" (
 	"run_id" text NOT NULL,
 	"document_id" text NOT NULL,
 	"stage_name" text NOT NULL,
@@ -883,7 +883,7 @@ CREATE TABLE "document_run_stage_states" (
 	CONSTRAINT "document_run_stage_states_pkey" PRIMARY KEY("run_id","document_id","stage_name")
 );
 --> statement-breakpoint
-CREATE TABLE "chunk_entities" (
+CREATE TABLE IF NOT EXISTS "chunk_entities" (
 	"chunk_id" text NOT NULL,
 	"workspace_id" text NOT NULL,
 	"run_id" text NOT NULL,
@@ -898,574 +898,1154 @@ CREATE TABLE "chunk_entities" (
 	CONSTRAINT "chunk_entities_pkey" PRIMARY KEY("chunk_id","node_id")
 );
 --> statement-breakpoint
-ALTER TABLE "credit_ledger" ADD CONSTRAINT "credit_ledger_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'credit_ledger_user_id_fkey' AND conrelid = '"credit_ledger"'::regclass) THEN
+    ALTER TABLE "credit_ledger" ADD CONSTRAINT "credit_ledger_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'organizations_created_by_user_id_fkey' AND conrelid = '"organizations"'::regclass) THEN
+    ALTER TABLE "organizations" ADD CONSTRAINT "organizations_created_by_user_id_fkey" FOREIGN KEY ("created_by_user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'organizations_personal_owner_user_id_fkey' AND conrelid = '"organizations"'::regclass) THEN
+    ALTER TABLE "organizations" ADD CONSTRAINT "organizations_personal_owner_user_id_fkey" FOREIGN KEY ("personal_owner_user_id") REFERENCES "public"."user"("id") ON DELETE set null ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'vector_indexes_document_id_fkey' AND conrelid = '"vector_indexes"'::regclass) THEN
+    ALTER TABLE "vector_indexes" ADD CONSTRAINT "vector_indexes_document_id_fkey" FOREIGN KEY ("document_id") REFERENCES "public"."documents"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'usage_events_run_id_fkey' AND conrelid = '"usage_events"'::regclass) THEN
+    ALTER TABLE "usage_events" ADD CONSTRAINT "usage_events_run_id_fkey" FOREIGN KEY ("run_id") REFERENCES "public"."workspace_runs"("id") ON DELETE set null ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'usage_events_document_id_fkey' AND conrelid = '"usage_events"'::regclass) THEN
+    ALTER TABLE "usage_events" ADD CONSTRAINT "usage_events_document_id_fkey" FOREIGN KEY ("document_id") REFERENCES "public"."documents"("id") ON DELETE set null ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'usage_events_user_id_fkey' AND conrelid = '"usage_events"'::regclass) THEN
+    ALTER TABLE "usage_events" ADD CONSTRAINT "usage_events_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'documents_workspace_id_fkey' AND conrelid = '"documents"'::regclass) THEN
+    ALTER TABLE "documents" ADD CONSTRAINT "documents_workspace_id_fkey" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'documents_run_id_fkey' AND conrelid = '"documents"'::regclass) THEN
+    ALTER TABLE "documents" ADD CONSTRAINT "documents_run_id_fkey" FOREIGN KEY ("run_id") REFERENCES "public"."workspace_runs"("id") ON DELETE set null ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'documents_user_id_fkey' AND conrelid = '"documents"'::regclass) THEN
+    ALTER TABLE "documents" ADD CONSTRAINT "documents_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'documents_deduped_from_document_id_fkey' AND conrelid = '"documents"'::regclass) THEN
+    ALTER TABLE "documents" ADD CONSTRAINT "documents_deduped_from_document_id_fkey" FOREIGN KEY ("deduped_from_document_id") REFERENCES "public"."documents"("id") ON DELETE set null ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'performance_log_run_id_fkey' AND conrelid = '"performance_log"'::regclass) THEN
+    ALTER TABLE "performance_log" ADD CONSTRAINT "performance_log_run_id_fkey" FOREIGN KEY ("run_id") REFERENCES "public"."workspace_runs"("id") ON DELETE set null ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'performance_log_document_id_fkey' AND conrelid = '"performance_log"'::regclass) THEN
+    ALTER TABLE "performance_log" ADD CONSTRAINT "performance_log_document_id_fkey" FOREIGN KEY ("document_id") REFERENCES "public"."documents"("id") ON DELETE set null ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'performance_log_user_id_fkey' AND conrelid = '"performance_log"'::regclass) THEN
+    ALTER TABLE "performance_log" ADD CONSTRAINT "performance_log_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'workspace_run_events_run_id_fkey' AND conrelid = '"workspace_run_events"'::regclass) THEN
+    ALTER TABLE "workspace_run_events" ADD CONSTRAINT "workspace_run_events_run_id_fkey" FOREIGN KEY ("run_id") REFERENCES "public"."workspace_runs"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'workspace_run_events_document_id_fkey' AND conrelid = '"workspace_run_events"'::regclass) THEN
+    ALTER TABLE "workspace_run_events" ADD CONSTRAINT "workspace_run_events_document_id_fkey" FOREIGN KEY ("document_id") REFERENCES "public"."documents"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'workspace_run_events_user_id_fkey' AND conrelid = '"workspace_run_events"'::regclass) THEN
+    ALTER TABLE "workspace_run_events" ADD CONSTRAINT "workspace_run_events_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'workspace_secrets_workspace_id_fkey' AND conrelid = '"workspace_secrets"'::regclass) THEN
+    ALTER TABLE "workspace_secrets" ADD CONSTRAINT "workspace_secrets_workspace_id_fkey" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'session_userId_fkey' AND conrelid = '"session"'::regclass) THEN
+    ALTER TABLE "session" ADD CONSTRAINT "session_userId_fkey" FOREIGN KEY ("userId") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'account_userId_fkey' AND conrelid = '"account"'::regclass) THEN
+    ALTER TABLE "account" ADD CONSTRAINT "account_userId_fkey" FOREIGN KEY ("userId") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'workspace_invites_workspace_id_fkey' AND conrelid = '"workspace_invites"'::regclass) THEN
+    ALTER TABLE "workspace_invites" ADD CONSTRAINT "workspace_invites_workspace_id_fkey" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'workspace_invites_org_id_fkey' AND conrelid = '"workspace_invites"'::regclass) THEN
+    ALTER TABLE "workspace_invites" ADD CONSTRAINT "workspace_invites_org_id_fkey" FOREIGN KEY ("org_id") REFERENCES "public"."organizations"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'workspace_invites_accepted_by_user_id_fkey' AND conrelid = '"workspace_invites"'::regclass) THEN
+    ALTER TABLE "workspace_invites" ADD CONSTRAINT "workspace_invites_accepted_by_user_id_fkey" FOREIGN KEY ("accepted_by_user_id") REFERENCES "public"."user"("id") ON DELETE set null ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'workspace_invites_invited_by_user_id_fkey' AND conrelid = '"workspace_invites"'::regclass) THEN
+    ALTER TABLE "workspace_invites" ADD CONSTRAINT "workspace_invites_invited_by_user_id_fkey" FOREIGN KEY ("invited_by_user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'document_corrections_document_id_fkey' AND conrelid = '"document_corrections"'::regclass) THEN
+    ALTER TABLE "document_corrections" ADD CONSTRAINT "document_corrections_document_id_fkey" FOREIGN KEY ("document_id") REFERENCES "public"."documents"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'document_corrections_run_id_fkey' AND conrelid = '"document_corrections"'::regclass) THEN
+    ALTER TABLE "document_corrections" ADD CONSTRAINT "document_corrections_run_id_fkey" FOREIGN KEY ("run_id") REFERENCES "public"."workspace_runs"("id") ON DELETE set null ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'document_corrections_user_id_fkey' AND conrelid = '"document_corrections"'::regclass) THEN
+    ALTER TABLE "document_corrections" ADD CONSTRAINT "document_corrections_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'page_stage_states_run_id_fkey' AND conrelid = '"page_stage_states"'::regclass) THEN
+    ALTER TABLE "page_stage_states" ADD CONSTRAINT "page_stage_states_run_id_fkey" FOREIGN KEY ("run_id") REFERENCES "public"."workspace_runs"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'page_stage_states_document_id_fkey' AND conrelid = '"page_stage_states"'::regclass) THEN
+    ALTER TABLE "page_stage_states" ADD CONSTRAINT "page_stage_states_document_id_fkey" FOREIGN KEY ("document_id") REFERENCES "public"."documents"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'workspace_connectors_workspace_id_fkey' AND conrelid = '"workspace_connectors"'::regclass) THEN
+    ALTER TABLE "workspace_connectors" ADD CONSTRAINT "workspace_connectors_workspace_id_fkey" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'webhooks_user_id_fkey' AND conrelid = '"webhooks"'::regclass) THEN
+    ALTER TABLE "webhooks" ADD CONSTRAINT "webhooks_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'document_chunks_document_id_fkey' AND conrelid = '"document_chunks"'::regclass) THEN
+    ALTER TABLE "document_chunks" ADD CONSTRAINT "document_chunks_document_id_fkey" FOREIGN KEY ("document_id") REFERENCES "public"."documents"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'document_chunks_run_id_fkey' AND conrelid = '"document_chunks"'::regclass) THEN
+    ALTER TABLE "document_chunks" ADD CONSTRAINT "document_chunks_run_id_fkey" FOREIGN KEY ("run_id") REFERENCES "public"."workspace_runs"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'document_chunks_parent_page_id_fkey' AND conrelid = '"document_chunks"'::regclass) THEN
+    ALTER TABLE "document_chunks" ADD CONSTRAINT "document_chunks_parent_page_id_fkey" FOREIGN KEY ("parent_page_id") REFERENCES "public"."document_pages"("id") ON DELETE no action ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'document_chunks_user_id_fkey' AND conrelid = '"document_chunks"'::regclass) THEN
+    ALTER TABLE "document_chunks" ADD CONSTRAINT "document_chunks_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'webhook_deliveries_webhook_id_fkey' AND conrelid = '"webhook_deliveries"'::regclass) THEN
+    ALTER TABLE "webhook_deliveries" ADD CONSTRAINT "webhook_deliveries_webhook_id_fkey" FOREIGN KEY ("webhook_id") REFERENCES "public"."webhooks"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'webhook_deliveries_replay_of_delivery_id_fkey' AND conrelid = '"webhook_deliveries"'::regclass) THEN
+    ALTER TABLE "webhook_deliveries" ADD CONSTRAINT "webhook_deliveries_replay_of_delivery_id_fkey" FOREIGN KEY ("replay_of_delivery_id") REFERENCES "public"."webhook_deliveries"("id") ON DELETE set null ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'webhook_deliveries_user_id_fkey' AND conrelid = '"webhook_deliveries"'::regclass) THEN
+    ALTER TABLE "webhook_deliveries" ADD CONSTRAINT "webhook_deliveries_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'notification_prefs_org_id_fkey' AND conrelid = '"notification_prefs"'::regclass) THEN
+    ALTER TABLE "notification_prefs" ADD CONSTRAINT "notification_prefs_org_id_fkey" FOREIGN KEY ("org_id") REFERENCES "public"."organizations"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'notification_prefs_workspace_id_fkey' AND conrelid = '"notification_prefs"'::regclass) THEN
+    ALTER TABLE "notification_prefs" ADD CONSTRAINT "notification_prefs_workspace_id_fkey" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'notification_prefs_user_id_fkey' AND conrelid = '"notification_prefs"'::regclass) THEN
+    ALTER TABLE "notification_prefs" ADD CONSTRAINT "notification_prefs_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'document_pages_document_id_fkey' AND conrelid = '"document_pages"'::regclass) THEN
+    ALTER TABLE "document_pages" ADD CONSTRAINT "document_pages_document_id_fkey" FOREIGN KEY ("document_id") REFERENCES "public"."documents"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'document_pages_run_id_fkey' AND conrelid = '"document_pages"'::regclass) THEN
+    ALTER TABLE "document_pages" ADD CONSTRAINT "document_pages_run_id_fkey" FOREIGN KEY ("run_id") REFERENCES "public"."workspace_runs"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'document_pages_user_id_fkey' AND conrelid = '"document_pages"'::regclass) THEN
+    ALTER TABLE "document_pages" ADD CONSTRAINT "document_pages_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'notification_deliveries_org_id_fkey' AND conrelid = '"notification_deliveries"'::regclass) THEN
+    ALTER TABLE "notification_deliveries" ADD CONSTRAINT "notification_deliveries_org_id_fkey" FOREIGN KEY ("org_id") REFERENCES "public"."organizations"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'notification_deliveries_workspace_id_fkey' AND conrelid = '"notification_deliveries"'::regclass) THEN
+    ALTER TABLE "notification_deliveries" ADD CONSTRAINT "notification_deliveries_workspace_id_fkey" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'notification_deliveries_user_id_fkey' AND conrelid = '"notification_deliveries"'::regclass) THEN
+    ALTER TABLE "notification_deliveries" ADD CONSTRAINT "notification_deliveries_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'api_keys_org_id_fkey' AND conrelid = '"api_keys"'::regclass) THEN
+    ALTER TABLE "api_keys" ADD CONSTRAINT "api_keys_org_id_fkey" FOREIGN KEY ("org_id") REFERENCES "public"."organizations"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'api_keys_user_id_fkey' AND conrelid = '"api_keys"'::regclass) THEN
+    ALTER TABLE "api_keys" ADD CONSTRAINT "api_keys_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'document_summaries_document_id_fkey' AND conrelid = '"document_summaries"'::regclass) THEN
+    ALTER TABLE "document_summaries" ADD CONSTRAINT "document_summaries_document_id_fkey" FOREIGN KEY ("document_id") REFERENCES "public"."documents"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'document_summaries_run_id_fkey' AND conrelid = '"document_summaries"'::regclass) THEN
+    ALTER TABLE "document_summaries" ADD CONSTRAINT "document_summaries_run_id_fkey" FOREIGN KEY ("run_id") REFERENCES "public"."workspace_runs"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'document_summaries_user_id_fkey' AND conrelid = '"document_summaries"'::regclass) THEN
+    ALTER TABLE "document_summaries" ADD CONSTRAINT "document_summaries_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'search_sessions_user_id_fkey' AND conrelid = '"search_sessions"'::regclass) THEN
+    ALTER TABLE "search_sessions" ADD CONSTRAINT "search_sessions_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'search_session_results_session_id_fkey' AND conrelid = '"search_session_results"'::regclass) THEN
+    ALTER TABLE "search_session_results" ADD CONSTRAINT "search_session_results_session_id_fkey" FOREIGN KEY ("session_id") REFERENCES "public"."search_sessions"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'audit_log_org_id_fkey' AND conrelid = '"audit_log"'::regclass) THEN
+    ALTER TABLE "audit_log" ADD CONSTRAINT "audit_log_org_id_fkey" FOREIGN KEY ("org_id") REFERENCES "public"."organizations"("id") ON DELETE set null ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'audit_log_workspace_id_fkey' AND conrelid = '"audit_log"'::regclass) THEN
+    ALTER TABLE "audit_log" ADD CONSTRAINT "audit_log_workspace_id_fkey" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE set null ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'audit_log_run_id_fkey' AND conrelid = '"audit_log"'::regclass) THEN
+    ALTER TABLE "audit_log" ADD CONSTRAINT "audit_log_run_id_fkey" FOREIGN KEY ("run_id") REFERENCES "public"."workspace_runs"("id") ON DELETE set null ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'audit_log_document_id_fkey' AND conrelid = '"audit_log"'::regclass) THEN
+    ALTER TABLE "audit_log" ADD CONSTRAINT "audit_log_document_id_fkey" FOREIGN KEY ("document_id") REFERENCES "public"."documents"("id") ON DELETE set null ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'audit_log_api_key_id_fkey' AND conrelid = '"audit_log"'::regclass) THEN
+    ALTER TABLE "audit_log" ADD CONSTRAINT "audit_log_api_key_id_fkey" FOREIGN KEY ("api_key_id") REFERENCES "public"."api_keys"("id") ON DELETE set null ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'audit_log_user_id_fkey' AND conrelid = '"audit_log"'::regclass) THEN
+    ALTER TABLE "audit_log" ADD CONSTRAINT "audit_log_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE set null ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'search_eval_fixtures_run_id_fkey' AND conrelid = '"search_eval_fixtures"'::regclass) THEN
+    ALTER TABLE "search_eval_fixtures" ADD CONSTRAINT "search_eval_fixtures_run_id_fkey" FOREIGN KEY ("run_id") REFERENCES "public"."workspace_runs"("id") ON DELETE set null ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'search_eval_fixtures_user_id_fkey' AND conrelid = '"search_eval_fixtures"'::regclass) THEN
+    ALTER TABLE "search_eval_fixtures" ADD CONSTRAINT "search_eval_fixtures_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'search_index_staleness_run_id_fkey' AND conrelid = '"search_index_staleness"'::regclass) THEN
+    ALTER TABLE "search_index_staleness" ADD CONSTRAINT "search_index_staleness_run_id_fkey" FOREIGN KEY ("run_id") REFERENCES "public"."workspace_runs"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'search_index_staleness_document_id_fkey' AND conrelid = '"search_index_staleness"'::regclass) THEN
+    ALTER TABLE "search_index_staleness" ADD CONSTRAINT "search_index_staleness_document_id_fkey" FOREIGN KEY ("document_id") REFERENCES "public"."documents"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'search_index_staleness_user_id_fkey' AND conrelid = '"search_index_staleness"'::regclass) THEN
+    ALTER TABLE "search_index_staleness" ADD CONSTRAINT "search_index_staleness_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'document_propositions_document_id_fkey' AND conrelid = '"document_propositions"'::regclass) THEN
+    ALTER TABLE "document_propositions" ADD CONSTRAINT "document_propositions_document_id_fkey" FOREIGN KEY ("document_id") REFERENCES "public"."documents"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'document_propositions_run_id_fkey' AND conrelid = '"document_propositions"'::regclass) THEN
+    ALTER TABLE "document_propositions" ADD CONSTRAINT "document_propositions_run_id_fkey" FOREIGN KEY ("run_id") REFERENCES "public"."workspace_runs"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'document_propositions_user_id_fkey' AND conrelid = '"document_propositions"'::regclass) THEN
+    ALTER TABLE "document_propositions" ADD CONSTRAINT "document_propositions_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'idempotency_cache_user_id_fkey' AND conrelid = '"idempotency_cache"'::regclass) THEN
+    ALTER TABLE "idempotency_cache" ADD CONSTRAINT "idempotency_cache_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE set null ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'search_experiments_user_id_fkey' AND conrelid = '"search_experiments"'::regclass) THEN
+    ALTER TABLE "search_experiments" ADD CONSTRAINT "search_experiments_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chat_sessions_workspace_id_fkey' AND conrelid = '"chat_sessions"'::regclass) THEN
+    ALTER TABLE "chat_sessions" ADD CONSTRAINT "chat_sessions_workspace_id_fkey" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chat_sessions_user_id_fkey' AND conrelid = '"chat_sessions"'::regclass) THEN
+    ALTER TABLE "chat_sessions" ADD CONSTRAINT "chat_sessions_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chat_turns_session_id_fkey' AND conrelid = '"chat_turns"'::regclass) THEN
+    ALTER TABLE "chat_turns" ADD CONSTRAINT "chat_turns_session_id_fkey" FOREIGN KEY ("session_id") REFERENCES "public"."chat_sessions"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ai_operations_org_id_fkey' AND conrelid = '"ai_operations"'::regclass) THEN
+    ALTER TABLE "ai_operations" ADD CONSTRAINT "ai_operations_org_id_fkey" FOREIGN KEY ("org_id") REFERENCES "public"."organizations"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ai_operations_workspace_id_fkey' AND conrelid = '"ai_operations"'::regclass) THEN
+    ALTER TABLE "ai_operations" ADD CONSTRAINT "ai_operations_workspace_id_fkey" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE set null ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ai_operations_api_key_id_fkey' AND conrelid = '"ai_operations"'::regclass) THEN
+    ALTER TABLE "ai_operations" ADD CONSTRAINT "ai_operations_api_key_id_fkey" FOREIGN KEY ("api_key_id") REFERENCES "public"."api_keys"("id") ON DELETE set null ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ai_operations_user_id_fkey' AND conrelid = '"ai_operations"'::regclass) THEN
+    ALTER TABLE "ai_operations" ADD CONSTRAINT "ai_operations_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'workspaces_user_id_fkey' AND conrelid = '"workspaces"'::regclass) THEN
+    ALTER TABLE "workspaces" ADD CONSTRAINT "workspaces_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ai_operation_events_operation_id_fkey' AND conrelid = '"ai_operation_events"'::regclass) THEN
+    ALTER TABLE "ai_operation_events" ADD CONSTRAINT "ai_operation_events_operation_id_fkey" FOREIGN KEY ("operation_id") REFERENCES "public"."ai_operations"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'grounded_summaries_document_id_fkey' AND conrelid = '"grounded_summaries"'::regclass) THEN
+    ALTER TABLE "grounded_summaries" ADD CONSTRAINT "grounded_summaries_document_id_fkey" FOREIGN KEY ("document_id") REFERENCES "public"."documents"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'grounded_summaries_run_id_fkey' AND conrelid = '"grounded_summaries"'::regclass) THEN
+    ALTER TABLE "grounded_summaries" ADD CONSTRAINT "grounded_summaries_run_id_fkey" FOREIGN KEY ("run_id") REFERENCES "public"."workspace_runs"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'grounded_summaries_workspace_id_fkey' AND conrelid = '"grounded_summaries"'::regclass) THEN
+    ALTER TABLE "grounded_summaries" ADD CONSTRAINT "grounded_summaries_workspace_id_fkey" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'grounded_summaries_user_id_fkey' AND conrelid = '"grounded_summaries"'::regclass) THEN
+    ALTER TABLE "grounded_summaries" ADD CONSTRAINT "grounded_summaries_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'pii_detections_document_id_fkey' AND conrelid = '"pii_detections"'::regclass) THEN
+    ALTER TABLE "pii_detections" ADD CONSTRAINT "pii_detections_document_id_fkey" FOREIGN KEY ("document_id") REFERENCES "public"."documents"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'pii_detections_run_id_fkey' AND conrelid = '"pii_detections"'::regclass) THEN
+    ALTER TABLE "pii_detections" ADD CONSTRAINT "pii_detections_run_id_fkey" FOREIGN KEY ("run_id") REFERENCES "public"."workspace_runs"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chat_answer_evidence_spans_session_id_fkey' AND conrelid = '"chat_answer_evidence_spans"'::regclass) THEN
+    ALTER TABLE "chat_answer_evidence_spans" ADD CONSTRAINT "chat_answer_evidence_spans_session_id_fkey" FOREIGN KEY ("session_id") REFERENCES "public"."chat_sessions"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chat_answer_evidence_spans_search_session_id_fkey' AND conrelid = '"chat_answer_evidence_spans"'::regclass) THEN
+    ALTER TABLE "chat_answer_evidence_spans" ADD CONSTRAINT "chat_answer_evidence_spans_search_session_id_fkey" FOREIGN KEY ("search_session_id") REFERENCES "public"."search_sessions"("id") ON DELETE set null ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chat_answer_evidence_spans_workspace_id_fkey' AND conrelid = '"chat_answer_evidence_spans"'::regclass) THEN
+    ALTER TABLE "chat_answer_evidence_spans" ADD CONSTRAINT "chat_answer_evidence_spans_workspace_id_fkey" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chat_answer_evidence_spans_user_id_fkey' AND conrelid = '"chat_answer_evidence_spans"'::regclass) THEN
+    ALTER TABLE "chat_answer_evidence_spans" ADD CONSTRAINT "chat_answer_evidence_spans_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'parser_eval_fixtures_run_id_fkey' AND conrelid = '"parser_eval_fixtures"'::regclass) THEN
+    ALTER TABLE "parser_eval_fixtures" ADD CONSTRAINT "parser_eval_fixtures_run_id_fkey" FOREIGN KEY ("run_id") REFERENCES "public"."workspace_runs"("id") ON DELETE set null ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'parser_eval_fixtures_document_id_fkey' AND conrelid = '"parser_eval_fixtures"'::regclass) THEN
+    ALTER TABLE "parser_eval_fixtures" ADD CONSTRAINT "parser_eval_fixtures_document_id_fkey" FOREIGN KEY ("document_id") REFERENCES "public"."documents"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'parser_eval_fixtures_user_id_fkey' AND conrelid = '"parser_eval_fixtures"'::regclass) THEN
+    ALTER TABLE "parser_eval_fixtures" ADD CONSTRAINT "parser_eval_fixtures_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'parser_eval_results_run_id_fkey' AND conrelid = '"parser_eval_results"'::regclass) THEN
+    ALTER TABLE "parser_eval_results" ADD CONSTRAINT "parser_eval_results_run_id_fkey" FOREIGN KEY ("run_id") REFERENCES "public"."workspace_runs"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'parser_eval_results_document_id_fkey' AND conrelid = '"parser_eval_results"'::regclass) THEN
+    ALTER TABLE "parser_eval_results" ADD CONSTRAINT "parser_eval_results_document_id_fkey" FOREIGN KEY ("document_id") REFERENCES "public"."documents"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'parser_eval_results_user_id_fkey' AND conrelid = '"parser_eval_results"'::regclass) THEN
+    ALTER TABLE "parser_eval_results" ADD CONSTRAINT "parser_eval_results_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'upload_sessions_user_id_fkey' AND conrelid = '"upload_sessions"'::regclass) THEN
+    ALTER TABLE "upload_sessions" ADD CONSTRAINT "upload_sessions_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'upload_sessions_org_id_fkey' AND conrelid = '"upload_sessions"'::regclass) THEN
+    ALTER TABLE "upload_sessions" ADD CONSTRAINT "upload_sessions_org_id_fkey" FOREIGN KEY ("org_id") REFERENCES "public"."organizations"("id") ON DELETE set null ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'upload_sessions_workspace_id_fkey' AND conrelid = '"upload_sessions"'::regclass) THEN
+    ALTER TABLE "upload_sessions" ADD CONSTRAINT "upload_sessions_workspace_id_fkey" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE set null ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'upload_session_files_session_id_fkey' AND conrelid = '"upload_session_files"'::regclass) THEN
+    ALTER TABLE "upload_session_files" ADD CONSTRAINT "upload_session_files_session_id_fkey" FOREIGN KEY ("session_id") REFERENCES "public"."upload_sessions"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'workspace_runs_workspace_id_fkey' AND conrelid = '"workspace_runs"'::regclass) THEN
+    ALTER TABLE "workspace_runs" ADD CONSTRAINT "workspace_runs_workspace_id_fkey" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'workspace_runs_user_id_fkey' AND conrelid = '"workspace_runs"'::regclass) THEN
+    ALTER TABLE "workspace_runs" ADD CONSTRAINT "workspace_runs_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'search_zero_results_session_id_fkey' AND conrelid = '"search_zero_results"'::regclass) THEN
+    ALTER TABLE "search_zero_results" ADD CONSTRAINT "search_zero_results_session_id_fkey" FOREIGN KEY ("session_id") REFERENCES "public"."search_sessions"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'search_zero_results_user_id_fkey' AND conrelid = '"search_zero_results"'::regclass) THEN
+    ALTER TABLE "search_zero_results" ADD CONSTRAINT "search_zero_results_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'search_zero_results_workspace_id_fkey' AND conrelid = '"search_zero_results"'::regclass) THEN
+    ALTER TABLE "search_zero_results" ADD CONSTRAINT "search_zero_results_workspace_id_fkey" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'workspace_search_settings_workspace_id_fkey' AND conrelid = '"workspace_search_settings"'::regclass) THEN
+    ALTER TABLE "workspace_search_settings" ADD CONSTRAINT "workspace_search_settings_workspace_id_fkey" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'workspace_search_settings_user_id_fkey' AND conrelid = '"workspace_search_settings"'::regclass) THEN
+    ALTER TABLE "workspace_search_settings" ADD CONSTRAINT "workspace_search_settings_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'query_suggestions_user_id_fkey' AND conrelid = '"query_suggestions"'::regclass) THEN
+    ALTER TABLE "query_suggestions" ADD CONSTRAINT "query_suggestions_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'query_suggestions_workspace_id_fkey' AND conrelid = '"query_suggestions"'::regclass) THEN
+    ALTER TABLE "query_suggestions" ADD CONSTRAINT "query_suggestions_workspace_id_fkey" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'privacy_audit_log_document_id_fkey' AND conrelid = '"privacy_audit_log"'::regclass) THEN
+    ALTER TABLE "privacy_audit_log" ADD CONSTRAINT "privacy_audit_log_document_id_fkey" FOREIGN KEY ("document_id") REFERENCES "public"."documents"("id") ON DELETE set null ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'privacy_audit_log_run_id_fkey' AND conrelid = '"privacy_audit_log"'::regclass) THEN
+    ALTER TABLE "privacy_audit_log" ADD CONSTRAINT "privacy_audit_log_run_id_fkey" FOREIGN KEY ("run_id") REFERENCES "public"."workspace_runs"("id") ON DELETE set null ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'privacy_audit_log_workspace_id_fkey' AND conrelid = '"privacy_audit_log"'::regclass) THEN
+    ALTER TABLE "privacy_audit_log" ADD CONSTRAINT "privacy_audit_log_workspace_id_fkey" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE set null ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'connector_sync_log_connector_id_fkey' AND conrelid = '"connector_sync_log"'::regclass) THEN
+    ALTER TABLE "connector_sync_log" ADD CONSTRAINT "connector_sync_log_connector_id_fkey" FOREIGN KEY ("connector_id") REFERENCES "public"."workspace_connectors"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'oauth_accounts_user_id_fkey' AND conrelid = '"oauth_accounts"'::regclass) THEN
+    ALTER TABLE "oauth_accounts" ADD CONSTRAINT "oauth_accounts_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'sso_auth_requests_org_id_fkey' AND conrelid = '"sso_auth_requests"'::regclass) THEN
+    ALTER TABLE "sso_auth_requests" ADD CONSTRAINT "sso_auth_requests_org_id_fkey" FOREIGN KEY ("org_id") REFERENCES "public"."organizations"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'stripe_topups_org_id_fkey' AND conrelid = '"stripe_topups"'::regclass) THEN
+    ALTER TABLE "stripe_topups" ADD CONSTRAINT "stripe_topups_org_id_fkey" FOREIGN KEY ("org_id") REFERENCES "public"."organizations"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'kg_nodes_workspace_id_fkey' AND conrelid = '"kg_nodes"'::regclass) THEN
+    ALTER TABLE "kg_nodes" ADD CONSTRAINT "kg_nodes_workspace_id_fkey" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'kg_nodes_run_id_fkey' AND conrelid = '"kg_nodes"'::regclass) THEN
+    ALTER TABLE "kg_nodes" ADD CONSTRAINT "kg_nodes_run_id_fkey" FOREIGN KEY ("run_id") REFERENCES "public"."workspace_runs"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'kg_nodes_user_id_fkey' AND conrelid = '"kg_nodes"'::regclass) THEN
+    ALTER TABLE "kg_nodes" ADD CONSTRAINT "kg_nodes_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'kg_edges_workspace_id_fkey' AND conrelid = '"kg_edges"'::regclass) THEN
+    ALTER TABLE "kg_edges" ADD CONSTRAINT "kg_edges_workspace_id_fkey" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'kg_edges_run_id_fkey' AND conrelid = '"kg_edges"'::regclass) THEN
+    ALTER TABLE "kg_edges" ADD CONSTRAINT "kg_edges_run_id_fkey" FOREIGN KEY ("run_id") REFERENCES "public"."workspace_runs"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'kg_edges_user_id_fkey' AND conrelid = '"kg_edges"'::regclass) THEN
+    ALTER TABLE "kg_edges" ADD CONSTRAINT "kg_edges_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'kg_edges_source_node_id_fkey' AND conrelid = '"kg_edges"'::regclass) THEN
+    ALTER TABLE "kg_edges" ADD CONSTRAINT "kg_edges_source_node_id_fkey" FOREIGN KEY ("source_node_id") REFERENCES "public"."kg_nodes"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'kg_edges_target_node_id_fkey' AND conrelid = '"kg_edges"'::regclass) THEN
+    ALTER TABLE "kg_edges" ADD CONSTRAINT "kg_edges_target_node_id_fkey" FOREIGN KEY ("target_node_id") REFERENCES "public"."kg_nodes"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'kg_communities_workspace_id_fkey' AND conrelid = '"kg_communities"'::regclass) THEN
+    ALTER TABLE "kg_communities" ADD CONSTRAINT "kg_communities_workspace_id_fkey" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'kg_communities_run_id_fkey' AND conrelid = '"kg_communities"'::regclass) THEN
+    ALTER TABLE "kg_communities" ADD CONSTRAINT "kg_communities_run_id_fkey" FOREIGN KEY ("run_id") REFERENCES "public"."workspace_runs"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'kg_communities_user_id_fkey' AND conrelid = '"kg_communities"'::regclass) THEN
+    ALTER TABLE "kg_communities" ADD CONSTRAINT "kg_communities_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'org_memberships_org_id_fkey' AND conrelid = '"org_memberships"'::regclass) THEN
+    ALTER TABLE "org_memberships" ADD CONSTRAINT "org_memberships_org_id_fkey" FOREIGN KEY ("org_id") REFERENCES "public"."organizations"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'org_memberships_user_id_fkey' AND conrelid = '"org_memberships"'::regclass) THEN
+    ALTER TABLE "org_memberships" ADD CONSTRAINT "org_memberships_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'document_tags_document_id_fkey' AND conrelid = '"document_tags"'::regclass) THEN
+    ALTER TABLE "document_tags" ADD CONSTRAINT "document_tags_document_id_fkey" FOREIGN KEY ("document_id") REFERENCES "public"."documents"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'document_tags_user_id_fkey' AND conrelid = '"document_tags"'::regclass) THEN
+    ALTER TABLE "document_tags" ADD CONSTRAINT "document_tags_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'api_key_usage_key_id_fkey' AND conrelid = '"api_key_usage"'::regclass) THEN
+    ALTER TABLE "api_key_usage" ADD CONSTRAINT "api_key_usage_key_id_fkey" FOREIGN KEY ("key_id") REFERENCES "public"."api_keys"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'kg_community_members_community_id_fkey' AND conrelid = '"kg_community_members"'::regclass) THEN
+    ALTER TABLE "kg_community_members" ADD CONSTRAINT "kg_community_members_community_id_fkey" FOREIGN KEY ("community_id") REFERENCES "public"."kg_communities"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'kg_community_members_node_id_fkey' AND conrelid = '"kg_community_members"'::regclass) THEN
+    ALTER TABLE "kg_community_members" ADD CONSTRAINT "kg_community_members_node_id_fkey" FOREIGN KEY ("node_id") REFERENCES "public"."kg_nodes"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'kg_community_members_workspace_id_fkey' AND conrelid = '"kg_community_members"'::regclass) THEN
+    ALTER TABLE "kg_community_members" ADD CONSTRAINT "kg_community_members_workspace_id_fkey" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'workspace_members_workspace_id_fkey' AND conrelid = '"workspace_members"'::regclass) THEN
+    ALTER TABLE "workspace_members" ADD CONSTRAINT "workspace_members_workspace_id_fkey" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'workspace_members_invited_by_user_id_fkey' AND conrelid = '"workspace_members"'::regclass) THEN
+    ALTER TABLE "workspace_members" ADD CONSTRAINT "workspace_members_invited_by_user_id_fkey" FOREIGN KEY ("invited_by_user_id") REFERENCES "public"."user"("id") ON DELETE set null ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'workspace_members_user_id_fkey' AND conrelid = '"workspace_members"'::regclass) THEN
+    ALTER TABLE "workspace_members" ADD CONSTRAINT "workspace_members_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'workspace_run_stage_states_run_id_fkey' AND conrelid = '"workspace_run_stage_states"'::regclass) THEN
+    ALTER TABLE "workspace_run_stage_states" ADD CONSTRAINT "workspace_run_stage_states_run_id_fkey" FOREIGN KEY ("run_id") REFERENCES "public"."workspace_runs"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'document_run_stage_states_run_id_fkey' AND conrelid = '"document_run_stage_states"'::regclass) THEN
+    ALTER TABLE "document_run_stage_states" ADD CONSTRAINT "document_run_stage_states_run_id_fkey" FOREIGN KEY ("run_id") REFERENCES "public"."workspace_runs"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'document_run_stage_states_document_id_fkey' AND conrelid = '"document_run_stage_states"'::regclass) THEN
+    ALTER TABLE "document_run_stage_states" ADD CONSTRAINT "document_run_stage_states_document_id_fkey" FOREIGN KEY ("document_id") REFERENCES "public"."documents"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chunk_entities_chunk_id_fkey' AND conrelid = '"chunk_entities"'::regclass) THEN
+    ALTER TABLE "chunk_entities" ADD CONSTRAINT "chunk_entities_chunk_id_fkey" FOREIGN KEY ("chunk_id") REFERENCES "public"."document_chunks"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chunk_entities_workspace_id_fkey' AND conrelid = '"chunk_entities"'::regclass) THEN
+    ALTER TABLE "chunk_entities" ADD CONSTRAINT "chunk_entities_workspace_id_fkey" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chunk_entities_run_id_fkey' AND conrelid = '"chunk_entities"'::regclass) THEN
+    ALTER TABLE "chunk_entities" ADD CONSTRAINT "chunk_entities_run_id_fkey" FOREIGN KEY ("run_id") REFERENCES "public"."workspace_runs"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chunk_entities_user_id_fkey' AND conrelid = '"chunk_entities"'::regclass) THEN
+    ALTER TABLE "chunk_entities" ADD CONSTRAINT "chunk_entities_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+DO $idem$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chunk_entities_node_id_fkey' AND conrelid = '"chunk_entities"'::regclass) THEN
+    ALTER TABLE "chunk_entities" ADD CONSTRAINT "chunk_entities_node_id_fkey" FOREIGN KEY ("node_id") REFERENCES "public"."kg_nodes"("id") ON DELETE cascade ON UPDATE no action;
+  END IF;
+END $idem$;
+--> statement-breakpoint
+CREATE UNIQUE INDEX IF NOT EXISTS "organizations_stripe_customer_id_idx" ON "organizations" USING btree ("stripe_customer_id") WHERE (stripe_customer_id IS NOT NULL);
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "vector_indexes_document_id_idx" ON "vector_indexes" USING btree ("document_id");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "usage_events_run_id_idx" ON "usage_events" USING btree ("run_id");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "documents_org_id_idx" ON "documents" USING btree ("org_id","created_at");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "documents_org_source_sha256_idx" ON "documents" USING btree ("org_id","source_sha256") WHERE (source_sha256 IS NOT NULL);
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "documents_run_id_idx" ON "documents" USING btree ("run_id");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "documents_workspace_id_idx" ON "documents" USING btree ("workspace_id","created_at");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "documents_workspace_source_sha256_idx" ON "documents" USING btree ("workspace_id","source_sha256") WHERE (source_sha256 IS NOT NULL);
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "performance_log_document_id_idx" ON "performance_log" USING btree ("document_id","created_at");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "performance_log_run_id_idx" ON "performance_log" USING btree ("run_id","created_at");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "performance_log_stage_name_idx" ON "performance_log" USING btree ("stage_name","created_at");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "workspace_run_events_run_id_idx" ON "workspace_run_events" USING btree ("run_id","created_at");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "workspace_run_events_user_id_idx" ON "workspace_run_events" USING btree ("user_id","created_at");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "workspace_secrets_expires_at_idx" ON "workspace_secrets" USING btree ("expires_at") WHERE (expires_at IS NOT NULL);
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "workspace_secrets_workspace_id_idx" ON "workspace_secrets" USING btree ("workspace_id");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "session_user_id_idx" ON "session" USING btree ("userId");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "verification_identifier_idx" ON "verification" USING btree ("identifier");
+--> statement-breakpoint
+CREATE UNIQUE INDEX IF NOT EXISTS "account_provider_account_idx" ON "account" USING btree ("providerId","accountId");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "account_user_id_idx" ON "account" USING btree ("userId");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "workspace_invites_email_idx" ON "workspace_invites" USING btree ("email","status","created_at");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "workspace_invites_workspace_id_idx" ON "workspace_invites" USING btree ("workspace_id","created_at");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "document_corrections_run_id_idx" ON "document_corrections" USING btree ("run_id","updated_at");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "document_corrections_user_id_idx" ON "document_corrections" USING btree ("user_id","updated_at");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "page_stage_states_run_doc_stage_idx" ON "page_stage_states" USING btree ("run_id","document_id","stage_name");
+--> statement-breakpoint
+CREATE UNIQUE INDEX IF NOT EXISTS "page_stage_states_unique_idx" ON "page_stage_states" USING btree ("run_id","document_id","stage_name","page_number");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "idx_workspace_connectors_status" ON "workspace_connectors" USING btree ("status");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "idx_workspace_connectors_workspace_id" ON "workspace_connectors" USING btree ("workspace_id");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "webhooks_user_id_idx" ON "webhooks" USING btree ("user_id");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "document_chunks_ts_content_idx" ON "document_chunks" USING gin ("ts_content" tsvector_ops);
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "document_chunks_ts_content_idx1" ON "document_chunks" USING gin ("ts_content" tsvector_ops);
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "document_chunks_user_id_run_id_idx" ON "document_chunks" USING btree ("user_id","run_id");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "document_chunks_user_id_run_id_idx1" ON "document_chunks" USING btree ("user_id","run_id");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "webhook_deliveries_user_id_idx" ON "webhook_deliveries" USING btree ("user_id","created_at");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "webhook_deliveries_webhook_id_idx" ON "webhook_deliveries" USING btree ("webhook_id","created_at");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "document_pages_document_id_page_number_idx" ON "document_pages" USING btree ("document_id","page_number");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "document_pages_document_id_page_number_idx1" ON "document_pages" USING btree ("document_id","page_number");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "document_pages_run_id_idx" ON "document_pages" USING btree ("run_id");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "document_pages_run_id_idx1" ON "document_pages" USING btree ("run_id");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "notification_deliveries_user_id_idx" ON "notification_deliveries" USING btree ("user_id","created_at");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "notification_deliveries_user_read_idx" ON "notification_deliveries" USING btree ("user_id","read_at","created_at");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "notification_deliveries_workspace_id_idx" ON "notification_deliveries" USING btree ("workspace_id","created_at");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "api_keys_org_id_idx" ON "api_keys" USING btree ("org_id","created_at");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "document_summaries_user_id_run_id_idx" ON "document_summaries" USING btree ("user_id","run_id");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "document_summaries_user_id_run_id_idx1" ON "document_summaries" USING btree ("user_id","run_id");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "search_sessions_user_id_created_at_idx" ON "search_sessions" USING btree ("user_id","created_at");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "search_sessions_user_id_created_at_idx1" ON "search_sessions" USING btree ("user_id","created_at");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "search_session_results_chunk_id_idx" ON "search_session_results" USING btree ("chunk_id");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "search_session_results_chunk_id_idx1" ON "search_session_results" USING btree ("chunk_id");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "search_session_results_session_id_idx" ON "search_session_results" USING btree ("session_id");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "search_session_results_session_id_idx1" ON "search_session_results" USING btree ("session_id");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "audit_log_action_idx" ON "audit_log" USING btree ("action","created_at");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "audit_log_created_at_idx" ON "audit_log" USING btree ("created_at","id");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "audit_log_org_id_idx" ON "audit_log" USING btree ("org_id","created_at");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "audit_log_resource_idx" ON "audit_log" USING btree ("resource_type","resource_id","created_at");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "audit_log_run_id_idx" ON "audit_log" USING btree ("run_id","created_at");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "audit_log_user_id_idx" ON "audit_log" USING btree ("user_id","created_at");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "audit_log_workspace_id_idx" ON "audit_log" USING btree ("workspace_id","created_at");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "search_eval_fixtures_user_id_idx" ON "search_eval_fixtures" USING btree ("user_id");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "search_eval_fixtures_user_id_idx1" ON "search_eval_fixtures" USING btree ("user_id");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "search_index_staleness_run_id_idx" ON "search_index_staleness" USING btree ("run_id");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "search_index_staleness_run_id_idx1" ON "search_index_staleness" USING btree ("run_id");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "search_index_staleness_user_id_detected_at_idx" ON "search_index_staleness" USING btree ("user_id","detected_at");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "search_index_staleness_user_id_detected_at_idx1" ON "search_index_staleness" USING btree ("user_id","detected_at");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "document_propositions_document_id_idx" ON "document_propositions" USING btree ("document_id");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "document_propositions_document_id_idx1" ON "document_propositions" USING btree ("document_id");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "document_propositions_ts_content_idx" ON "document_propositions" USING gin ("ts_content" tsvector_ops);
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "document_propositions_ts_content_idx1" ON "document_propositions" USING gin ("ts_content" tsvector_ops);
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "document_propositions_user_id_run_id_idx" ON "document_propositions" USING btree ("user_id","run_id");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "document_propositions_user_id_run_id_idx1" ON "document_propositions" USING btree ("user_id","run_id");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "idempotency_cache_expires_at_idx" ON "idempotency_cache" USING btree ("expires_at");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "search_experiments_user_id_active_idx" ON "search_experiments" USING btree ("user_id","active");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "search_experiments_user_id_active_idx1" ON "search_experiments" USING btree ("user_id","active");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "chat_sessions_user_id_idx" ON "chat_sessions" USING btree ("user_id","created_at");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "chat_sessions_workspace_id_idx" ON "chat_sessions" USING btree ("workspace_id","created_at");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "chat_turns_session_id_idx" ON "chat_turns" USING btree ("session_id","created_at");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "ai_operations_api_key_id_idx" ON "ai_operations" USING btree ("api_key_id","created_at");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "ai_operations_org_id_idx" ON "ai_operations" USING btree ("org_id","created_at");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "ai_operations_status_idx" ON "ai_operations" USING btree ("status","created_at");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "ai_operations_user_id_idx" ON "ai_operations" USING btree ("user_id","created_at");
 --> statement-breakpoint
-ALTER TABLE "organizations" ADD CONSTRAINT "organizations_created_by_user_id_fkey" FOREIGN KEY ("created_by_user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
+CREATE INDEX IF NOT EXISTS "ai_operations_workspace_id_idx" ON "ai_operations" USING btree ("workspace_id","created_at");
 --> statement-breakpoint
-ALTER TABLE "organizations" ADD CONSTRAINT "organizations_personal_owner_user_id_fkey" FOREIGN KEY ("personal_owner_user_id") REFERENCES "public"."user"("id") ON DELETE set null ON UPDATE no action;
+CREATE INDEX IF NOT EXISTS "workspaces_archived_at_idx" ON "workspaces" USING btree ("archived_at","updated_at");
 --> statement-breakpoint
-ALTER TABLE "vector_indexes" ADD CONSTRAINT "vector_indexes_document_id_fkey" FOREIGN KEY ("document_id") REFERENCES "public"."documents"("id") ON DELETE cascade ON UPDATE no action;
+CREATE INDEX IF NOT EXISTS "workspaces_org_id_idx" ON "workspaces" USING btree ("org_id","updated_at");
 --> statement-breakpoint
-ALTER TABLE "usage_events" ADD CONSTRAINT "usage_events_run_id_fkey" FOREIGN KEY ("run_id") REFERENCES "public"."workspace_runs"("id") ON DELETE set null ON UPDATE no action;
+CREATE INDEX IF NOT EXISTS "workspaces_user_id_idx" ON "workspaces" USING btree ("user_id","updated_at");
 --> statement-breakpoint
-ALTER TABLE "usage_events" ADD CONSTRAINT "usage_events_document_id_fkey" FOREIGN KEY ("document_id") REFERENCES "public"."documents"("id") ON DELETE set null ON UPDATE no action;
+CREATE INDEX IF NOT EXISTS "ai_operation_events_created_at_idx" ON "ai_operation_events" USING btree ("created_at");
 --> statement-breakpoint
-ALTER TABLE "usage_events" ADD CONSTRAINT "usage_events_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
+CREATE INDEX IF NOT EXISTS "ai_operation_events_operation_id_idx" ON "ai_operation_events" USING btree ("operation_id","sequence");
 --> statement-breakpoint
-ALTER TABLE "documents" ADD CONSTRAINT "documents_workspace_id_fkey" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;
+CREATE INDEX IF NOT EXISTS "grounded_summaries_document_id_idx" ON "grounded_summaries" USING btree ("document_id","created_at");
 --> statement-breakpoint
-ALTER TABLE "documents" ADD CONSTRAINT "documents_run_id_fkey" FOREIGN KEY ("run_id") REFERENCES "public"."workspace_runs"("id") ON DELETE set null ON UPDATE no action;
+CREATE INDEX IF NOT EXISTS "grounded_summaries_run_id_idx" ON "grounded_summaries" USING btree ("run_id","created_at");
 --> statement-breakpoint
-ALTER TABLE "documents" ADD CONSTRAINT "documents_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
+CREATE INDEX IF NOT EXISTS "grounded_summaries_workspace_id_idx" ON "grounded_summaries" USING btree ("workspace_id","created_at");
 --> statement-breakpoint
-ALTER TABLE "documents" ADD CONSTRAINT "documents_deduped_from_document_id_fkey" FOREIGN KEY ("deduped_from_document_id") REFERENCES "public"."documents"("id") ON DELETE set null ON UPDATE no action;
+CREATE INDEX IF NOT EXISTS "idx_pii_detections_document_id" ON "pii_detections" USING btree ("document_id");
 --> statement-breakpoint
-ALTER TABLE "performance_log" ADD CONSTRAINT "performance_log_run_id_fkey" FOREIGN KEY ("run_id") REFERENCES "public"."workspace_runs"("id") ON DELETE set null ON UPDATE no action;
+CREATE INDEX IF NOT EXISTS "idx_pii_detections_run_id" ON "pii_detections" USING btree ("run_id");
 --> statement-breakpoint
-ALTER TABLE "performance_log" ADD CONSTRAINT "performance_log_document_id_fkey" FOREIGN KEY ("document_id") REFERENCES "public"."documents"("id") ON DELETE set null ON UPDATE no action;
+CREATE INDEX IF NOT EXISTS "chat_answer_evidence_spans_answer_id_idx" ON "chat_answer_evidence_spans" USING btree ("answer_id","citation_index");
 --> statement-breakpoint
-ALTER TABLE "performance_log" ADD CONSTRAINT "performance_log_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
+CREATE INDEX IF NOT EXISTS "chat_answer_evidence_spans_session_id_idx" ON "chat_answer_evidence_spans" USING btree ("session_id","created_at");
 --> statement-breakpoint
-ALTER TABLE "workspace_run_events" ADD CONSTRAINT "workspace_run_events_run_id_fkey" FOREIGN KEY ("run_id") REFERENCES "public"."workspace_runs"("id") ON DELETE cascade ON UPDATE no action;
+CREATE INDEX IF NOT EXISTS "parser_eval_fixtures_document_id_idx" ON "parser_eval_fixtures" USING btree ("document_id","created_at");
 --> statement-breakpoint
-ALTER TABLE "workspace_run_events" ADD CONSTRAINT "workspace_run_events_document_id_fkey" FOREIGN KEY ("document_id") REFERENCES "public"."documents"("id") ON DELETE cascade ON UPDATE no action;
+CREATE INDEX IF NOT EXISTS "parser_eval_fixtures_parser_idx" ON "parser_eval_fixtures" USING btree ("parser","created_at");
 --> statement-breakpoint
-ALTER TABLE "workspace_run_events" ADD CONSTRAINT "workspace_run_events_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
+CREATE INDEX IF NOT EXISTS "parser_eval_fixtures_run_id_idx" ON "parser_eval_fixtures" USING btree ("run_id","created_at");
 --> statement-breakpoint
-ALTER TABLE "workspace_secrets" ADD CONSTRAINT "workspace_secrets_workspace_id_fkey" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;
+CREATE INDEX IF NOT EXISTS "parser_eval_fixtures_user_id_idx" ON "parser_eval_fixtures" USING btree ("user_id","created_at");
 --> statement-breakpoint
-ALTER TABLE "session" ADD CONSTRAINT "session_userId_fkey" FOREIGN KEY ("userId") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
+CREATE INDEX IF NOT EXISTS "parser_eval_results_document_id_idx" ON "parser_eval_results" USING btree ("document_id","created_at");
 --> statement-breakpoint
-ALTER TABLE "account" ADD CONSTRAINT "account_userId_fkey" FOREIGN KEY ("userId") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
+CREATE INDEX IF NOT EXISTS "parser_eval_results_parser_idx" ON "parser_eval_results" USING btree ("parser","created_at");
 --> statement-breakpoint
-ALTER TABLE "workspace_invites" ADD CONSTRAINT "workspace_invites_workspace_id_fkey" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;
+CREATE INDEX IF NOT EXISTS "parser_eval_results_run_id_idx" ON "parser_eval_results" USING btree ("run_id","created_at");
 --> statement-breakpoint
-ALTER TABLE "workspace_invites" ADD CONSTRAINT "workspace_invites_org_id_fkey" FOREIGN KEY ("org_id") REFERENCES "public"."organizations"("id") ON DELETE cascade ON UPDATE no action;
+CREATE INDEX IF NOT EXISTS "parser_eval_results_user_id_idx" ON "parser_eval_results" USING btree ("user_id","created_at");
 --> statement-breakpoint
-ALTER TABLE "workspace_invites" ADD CONSTRAINT "workspace_invites_accepted_by_user_id_fkey" FOREIGN KEY ("accepted_by_user_id") REFERENCES "public"."user"("id") ON DELETE set null ON UPDATE no action;
+CREATE INDEX IF NOT EXISTS "upload_sessions_user_id_idx" ON "upload_sessions" USING btree ("user_id","created_at");
 --> statement-breakpoint
-ALTER TABLE "workspace_invites" ADD CONSTRAINT "workspace_invites_invited_by_user_id_fkey" FOREIGN KEY ("invited_by_user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
+CREATE INDEX IF NOT EXISTS "upload_sessions_workspace_id_idx" ON "upload_sessions" USING btree ("workspace_id","created_at");
 --> statement-breakpoint
-ALTER TABLE "document_corrections" ADD CONSTRAINT "document_corrections_document_id_fkey" FOREIGN KEY ("document_id") REFERENCES "public"."documents"("id") ON DELETE cascade ON UPDATE no action;
+CREATE INDEX IF NOT EXISTS "upload_session_files_session_id_idx" ON "upload_session_files" USING btree ("session_id","created_at");
 --> statement-breakpoint
-ALTER TABLE "document_corrections" ADD CONSTRAINT "document_corrections_run_id_fkey" FOREIGN KEY ("run_id") REFERENCES "public"."workspace_runs"("id") ON DELETE set null ON UPDATE no action;
+CREATE INDEX IF NOT EXISTS "upload_session_files_source_key_idx" ON "upload_session_files" USING btree ("source_key");
 --> statement-breakpoint
-ALTER TABLE "document_corrections" ADD CONSTRAINT "document_corrections_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
+CREATE INDEX IF NOT EXISTS "workspace_runs_dead_letter_idx" ON "workspace_runs" USING btree ("control_state","dead_lettered_at");
 --> statement-breakpoint
-ALTER TABLE "page_stage_states" ADD CONSTRAINT "page_stage_states_run_id_fkey" FOREIGN KEY ("run_id") REFERENCES "public"."workspace_runs"("id") ON DELETE cascade ON UPDATE no action;
+CREATE INDEX IF NOT EXISTS "workspace_runs_lease_idx" ON "workspace_runs" USING btree ("status","lease_expires_at");
 --> statement-breakpoint
-ALTER TABLE "page_stage_states" ADD CONSTRAINT "page_stage_states_document_id_fkey" FOREIGN KEY ("document_id") REFERENCES "public"."documents"("id") ON DELETE cascade ON UPDATE no action;
+CREATE INDEX IF NOT EXISTS "workspace_runs_org_id_idx" ON "workspace_runs" USING btree ("org_id","created_at");
 --> statement-breakpoint
-ALTER TABLE "workspace_connectors" ADD CONSTRAINT "workspace_connectors_workspace_id_fkey" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;
+CREATE INDEX IF NOT EXISTS "workspace_runs_priority_idx" ON "workspace_runs" USING btree ("status","priority","created_at");
 --> statement-breakpoint
-ALTER TABLE "webhooks" ADD CONSTRAINT "webhooks_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
+CREATE INDEX IF NOT EXISTS "workspace_runs_status_idx" ON "workspace_runs" USING btree ("status","created_at");
 --> statement-breakpoint
-ALTER TABLE "document_chunks" ADD CONSTRAINT "document_chunks_document_id_fkey" FOREIGN KEY ("document_id") REFERENCES "public"."documents"("id") ON DELETE cascade ON UPDATE no action;
+CREATE INDEX IF NOT EXISTS "workspace_runs_workspace_id_idx" ON "workspace_runs" USING btree ("workspace_id","created_at");
 --> statement-breakpoint
-ALTER TABLE "document_chunks" ADD CONSTRAINT "document_chunks_run_id_fkey" FOREIGN KEY ("run_id") REFERENCES "public"."workspace_runs"("id") ON DELETE cascade ON UPDATE no action;
+CREATE INDEX IF NOT EXISTS "search_zero_results_user_idx" ON "search_zero_results" USING btree ("user_id","created_at");
 --> statement-breakpoint
-ALTER TABLE "document_chunks" ADD CONSTRAINT "document_chunks_parent_page_id_fkey" FOREIGN KEY ("parent_page_id") REFERENCES "public"."document_pages"("id") ON DELETE no action ON UPDATE no action;
+CREATE INDEX IF NOT EXISTS "search_zero_results_workspace_idx" ON "search_zero_results" USING btree ("workspace_id","created_at");
 --> statement-breakpoint
-ALTER TABLE "document_chunks" ADD CONSTRAINT "document_chunks_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
+CREATE INDEX IF NOT EXISTS "workspace_search_settings_updated_idx" ON "workspace_search_settings" USING btree ("updated_at");
 --> statement-breakpoint
-ALTER TABLE "webhook_deliveries" ADD CONSTRAINT "webhook_deliveries_webhook_id_fkey" FOREIGN KEY ("webhook_id") REFERENCES "public"."webhooks"("id") ON DELETE cascade ON UPDATE no action;
+CREATE INDEX IF NOT EXISTS "query_suggestions_ws_idx" ON "query_suggestions" USING btree ("workspace_id","weight","created_at");
 --> statement-breakpoint
-ALTER TABLE "webhook_deliveries" ADD CONSTRAINT "webhook_deliveries_replay_of_delivery_id_fkey" FOREIGN KEY ("replay_of_delivery_id") REFERENCES "public"."webhook_deliveries"("id") ON DELETE set null ON UPDATE no action;
+CREATE INDEX IF NOT EXISTS "idx_privacy_audit_log_document_id" ON "privacy_audit_log" USING btree ("document_id");
 --> statement-breakpoint
-ALTER TABLE "webhook_deliveries" ADD CONSTRAINT "webhook_deliveries_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
+CREATE INDEX IF NOT EXISTS "idx_privacy_audit_log_workspace_id" ON "privacy_audit_log" USING btree ("workspace_id");
 --> statement-breakpoint
-ALTER TABLE "notification_prefs" ADD CONSTRAINT "notification_prefs_org_id_fkey" FOREIGN KEY ("org_id") REFERENCES "public"."organizations"("id") ON DELETE cascade ON UPDATE no action;
+CREATE INDEX IF NOT EXISTS "idx_connector_sync_log_connector_id" ON "connector_sync_log" USING btree ("connector_id");
 --> statement-breakpoint
-ALTER TABLE "notification_prefs" ADD CONSTRAINT "notification_prefs_workspace_id_fkey" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;
+CREATE INDEX IF NOT EXISTS "idx_connector_sync_log_started_at" ON "connector_sync_log" USING btree ("started_at");
 --> statement-breakpoint
-ALTER TABLE "notification_prefs" ADD CONSTRAINT "notification_prefs_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
+CREATE INDEX IF NOT EXISTS "oauth_accounts_user_id_idx" ON "oauth_accounts" USING btree ("user_id");
 --> statement-breakpoint
-ALTER TABLE "document_pages" ADD CONSTRAINT "document_pages_document_id_fkey" FOREIGN KEY ("document_id") REFERENCES "public"."documents"("id") ON DELETE cascade ON UPDATE no action;
+CREATE INDEX IF NOT EXISTS "sso_auth_requests_expires_idx" ON "sso_auth_requests" USING btree ("expires_at");
 --> statement-breakpoint
-ALTER TABLE "document_pages" ADD CONSTRAINT "document_pages_run_id_fkey" FOREIGN KEY ("run_id") REFERENCES "public"."workspace_runs"("id") ON DELETE cascade ON UPDATE no action;
+CREATE INDEX IF NOT EXISTS "sso_auth_requests_org_idx" ON "sso_auth_requests" USING btree ("org_id");
 --> statement-breakpoint
-ALTER TABLE "document_pages" ADD CONSTRAINT "document_pages_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
+CREATE INDEX IF NOT EXISTS "sso_auth_requests_provider_idx" ON "sso_auth_requests" USING btree ("provider");
 --> statement-breakpoint
-ALTER TABLE "notification_deliveries" ADD CONSTRAINT "notification_deliveries_org_id_fkey" FOREIGN KEY ("org_id") REFERENCES "public"."organizations"("id") ON DELETE cascade ON UPDATE no action;
+CREATE INDEX IF NOT EXISTS "stripe_webhook_events_event_type_idx" ON "stripe_webhook_events" USING btree ("event_type");
 --> statement-breakpoint
-ALTER TABLE "notification_deliveries" ADD CONSTRAINT "notification_deliveries_workspace_id_fkey" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;
+CREATE INDEX IF NOT EXISTS "stripe_topups_org_id_idx" ON "stripe_topups" USING btree ("org_id","created_at");
 --> statement-breakpoint
-ALTER TABLE "notification_deliveries" ADD CONSTRAINT "notification_deliveries_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
+CREATE INDEX IF NOT EXISTS "kg_nodes_lookup_idx" ON "kg_nodes" USING btree ("workspace_id","entity_type","normalized_name");
 --> statement-breakpoint
-ALTER TABLE "api_keys" ADD CONSTRAINT "api_keys_org_id_fkey" FOREIGN KEY ("org_id") REFERENCES "public"."organizations"("id") ON DELETE cascade ON UPDATE no action;
+CREATE INDEX IF NOT EXISTS "kg_nodes_rank_idx" ON "kg_nodes" USING btree ("workspace_id","mention_count","source_document_count");
 --> statement-breakpoint
-ALTER TABLE "api_keys" ADD CONSTRAINT "api_keys_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
+CREATE INDEX IF NOT EXISTS "kg_edges_predicate_idx" ON "kg_edges" USING btree ("workspace_id","normalized_predicate","weight");
 --> statement-breakpoint
-ALTER TABLE "document_summaries" ADD CONSTRAINT "document_summaries_document_id_fkey" FOREIGN KEY ("document_id") REFERENCES "public"."documents"("id") ON DELETE cascade ON UPDATE no action;
+CREATE INDEX IF NOT EXISTS "kg_edges_source_idx" ON "kg_edges" USING btree ("workspace_id","source_node_id");
 --> statement-breakpoint
-ALTER TABLE "document_summaries" ADD CONSTRAINT "document_summaries_run_id_fkey" FOREIGN KEY ("run_id") REFERENCES "public"."workspace_runs"("id") ON DELETE cascade ON UPDATE no action;
+CREATE INDEX IF NOT EXISTS "kg_edges_target_idx" ON "kg_edges" USING btree ("workspace_id","target_node_id");
 --> statement-breakpoint
-ALTER TABLE "document_summaries" ADD CONSTRAINT "document_summaries_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
+CREATE INDEX IF NOT EXISTS "kg_communities_rank_idx" ON "kg_communities" USING btree ("workspace_id","level","member_count");
 --> statement-breakpoint
-ALTER TABLE "search_sessions" ADD CONSTRAINT "search_sessions_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
+CREATE INDEX IF NOT EXISTS "org_memberships_user_id_idx" ON "org_memberships" USING btree ("user_id","created_at");
 --> statement-breakpoint
-ALTER TABLE "search_session_results" ADD CONSTRAINT "search_session_results_session_id_fkey" FOREIGN KEY ("session_id") REFERENCES "public"."search_sessions"("id") ON DELETE cascade ON UPDATE no action;
+CREATE INDEX IF NOT EXISTS "document_tags_document_id_idx" ON "document_tags" USING btree ("document_id");
 --> statement-breakpoint
-ALTER TABLE "audit_log" ADD CONSTRAINT "audit_log_org_id_fkey" FOREIGN KEY ("org_id") REFERENCES "public"."organizations"("id") ON DELETE set null ON UPDATE no action;
+CREATE INDEX IF NOT EXISTS "document_tags_user_id_idx" ON "document_tags" USING btree ("user_id","tag");
 --> statement-breakpoint
-ALTER TABLE "audit_log" ADD CONSTRAINT "audit_log_workspace_id_fkey" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE set null ON UPDATE no action;
+CREATE INDEX IF NOT EXISTS "kg_community_members_node_idx" ON "kg_community_members" USING btree ("workspace_id","node_id");
 --> statement-breakpoint
-ALTER TABLE "audit_log" ADD CONSTRAINT "audit_log_run_id_fkey" FOREIGN KEY ("run_id") REFERENCES "public"."workspace_runs"("id") ON DELETE set null ON UPDATE no action;
+CREATE INDEX IF NOT EXISTS "workspace_members_user_id_idx" ON "workspace_members" USING btree ("user_id","created_at");
 --> statement-breakpoint
-ALTER TABLE "audit_log" ADD CONSTRAINT "audit_log_document_id_fkey" FOREIGN KEY ("document_id") REFERENCES "public"."documents"("id") ON DELETE set null ON UPDATE no action;
+CREATE INDEX IF NOT EXISTS "workspace_run_stage_states_run_id_idx" ON "workspace_run_stage_states" USING btree ("run_id","updated_at");
 --> statement-breakpoint
-ALTER TABLE "audit_log" ADD CONSTRAINT "audit_log_api_key_id_fkey" FOREIGN KEY ("api_key_id") REFERENCES "public"."api_keys"("id") ON DELETE set null ON UPDATE no action;
+CREATE INDEX IF NOT EXISTS "document_run_stage_states_run_id_idx" ON "document_run_stage_states" USING btree ("run_id","document_id","updated_at");
 --> statement-breakpoint
-ALTER TABLE "audit_log" ADD CONSTRAINT "audit_log_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE set null ON UPDATE no action;
+CREATE INDEX IF NOT EXISTS "chunk_entities_lookup_idx" ON "chunk_entities" USING btree ("workspace_id","entity_name","entity_type");
 --> statement-breakpoint
-ALTER TABLE "search_eval_fixtures" ADD CONSTRAINT "search_eval_fixtures_run_id_fkey" FOREIGN KEY ("run_id") REFERENCES "public"."workspace_runs"("id") ON DELETE set null ON UPDATE no action;
+CREATE INDEX IF NOT EXISTS "chunk_entities_node_idx" ON "chunk_entities" USING btree ("workspace_id","node_id");
 --> statement-breakpoint
-ALTER TABLE "search_eval_fixtures" ADD CONSTRAINT "search_eval_fixtures_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
+CREATE MATERIALIZED VIEW IF NOT EXISTS "public"."admin_stats" AS (SELECT date_trunc('hour'::text, created_at) AS hour, count(*) AS runs_count, sum(pages_total) AS pages_total, avg(output_cost_cents + input_cost_cents) AS avg_cost_cents FROM workspace_runs GROUP BY (date_trunc('hour'::text, created_at)));
 --> statement-breakpoint
-ALTER TABLE "search_index_staleness" ADD CONSTRAINT "search_index_staleness_run_id_fkey" FOREIGN KEY ("run_id") REFERENCES "public"."workspace_runs"("id") ON DELETE cascade ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "search_index_staleness" ADD CONSTRAINT "search_index_staleness_document_id_fkey" FOREIGN KEY ("document_id") REFERENCES "public"."documents"("id") ON DELETE cascade ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "search_index_staleness" ADD CONSTRAINT "search_index_staleness_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "document_propositions" ADD CONSTRAINT "document_propositions_document_id_fkey" FOREIGN KEY ("document_id") REFERENCES "public"."documents"("id") ON DELETE cascade ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "document_propositions" ADD CONSTRAINT "document_propositions_run_id_fkey" FOREIGN KEY ("run_id") REFERENCES "public"."workspace_runs"("id") ON DELETE cascade ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "document_propositions" ADD CONSTRAINT "document_propositions_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "idempotency_cache" ADD CONSTRAINT "idempotency_cache_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE set null ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "search_experiments" ADD CONSTRAINT "search_experiments_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "chat_sessions" ADD CONSTRAINT "chat_sessions_workspace_id_fkey" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "chat_sessions" ADD CONSTRAINT "chat_sessions_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "chat_turns" ADD CONSTRAINT "chat_turns_session_id_fkey" FOREIGN KEY ("session_id") REFERENCES "public"."chat_sessions"("id") ON DELETE cascade ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "ai_operations" ADD CONSTRAINT "ai_operations_org_id_fkey" FOREIGN KEY ("org_id") REFERENCES "public"."organizations"("id") ON DELETE cascade ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "ai_operations" ADD CONSTRAINT "ai_operations_workspace_id_fkey" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE set null ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "ai_operations" ADD CONSTRAINT "ai_operations_api_key_id_fkey" FOREIGN KEY ("api_key_id") REFERENCES "public"."api_keys"("id") ON DELETE set null ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "ai_operations" ADD CONSTRAINT "ai_operations_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "workspaces" ADD CONSTRAINT "workspaces_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "ai_operation_events" ADD CONSTRAINT "ai_operation_events_operation_id_fkey" FOREIGN KEY ("operation_id") REFERENCES "public"."ai_operations"("id") ON DELETE cascade ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "grounded_summaries" ADD CONSTRAINT "grounded_summaries_document_id_fkey" FOREIGN KEY ("document_id") REFERENCES "public"."documents"("id") ON DELETE cascade ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "grounded_summaries" ADD CONSTRAINT "grounded_summaries_run_id_fkey" FOREIGN KEY ("run_id") REFERENCES "public"."workspace_runs"("id") ON DELETE cascade ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "grounded_summaries" ADD CONSTRAINT "grounded_summaries_workspace_id_fkey" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "grounded_summaries" ADD CONSTRAINT "grounded_summaries_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "pii_detections" ADD CONSTRAINT "pii_detections_document_id_fkey" FOREIGN KEY ("document_id") REFERENCES "public"."documents"("id") ON DELETE cascade ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "pii_detections" ADD CONSTRAINT "pii_detections_run_id_fkey" FOREIGN KEY ("run_id") REFERENCES "public"."workspace_runs"("id") ON DELETE cascade ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "chat_answer_evidence_spans" ADD CONSTRAINT "chat_answer_evidence_spans_session_id_fkey" FOREIGN KEY ("session_id") REFERENCES "public"."chat_sessions"("id") ON DELETE cascade ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "chat_answer_evidence_spans" ADD CONSTRAINT "chat_answer_evidence_spans_search_session_id_fkey" FOREIGN KEY ("search_session_id") REFERENCES "public"."search_sessions"("id") ON DELETE set null ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "chat_answer_evidence_spans" ADD CONSTRAINT "chat_answer_evidence_spans_workspace_id_fkey" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "chat_answer_evidence_spans" ADD CONSTRAINT "chat_answer_evidence_spans_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "parser_eval_fixtures" ADD CONSTRAINT "parser_eval_fixtures_run_id_fkey" FOREIGN KEY ("run_id") REFERENCES "public"."workspace_runs"("id") ON DELETE set null ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "parser_eval_fixtures" ADD CONSTRAINT "parser_eval_fixtures_document_id_fkey" FOREIGN KEY ("document_id") REFERENCES "public"."documents"("id") ON DELETE cascade ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "parser_eval_fixtures" ADD CONSTRAINT "parser_eval_fixtures_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "parser_eval_results" ADD CONSTRAINT "parser_eval_results_run_id_fkey" FOREIGN KEY ("run_id") REFERENCES "public"."workspace_runs"("id") ON DELETE cascade ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "parser_eval_results" ADD CONSTRAINT "parser_eval_results_document_id_fkey" FOREIGN KEY ("document_id") REFERENCES "public"."documents"("id") ON DELETE cascade ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "parser_eval_results" ADD CONSTRAINT "parser_eval_results_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "upload_sessions" ADD CONSTRAINT "upload_sessions_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "upload_sessions" ADD CONSTRAINT "upload_sessions_org_id_fkey" FOREIGN KEY ("org_id") REFERENCES "public"."organizations"("id") ON DELETE set null ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "upload_sessions" ADD CONSTRAINT "upload_sessions_workspace_id_fkey" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE set null ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "upload_session_files" ADD CONSTRAINT "upload_session_files_session_id_fkey" FOREIGN KEY ("session_id") REFERENCES "public"."upload_sessions"("id") ON DELETE cascade ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "workspace_runs" ADD CONSTRAINT "workspace_runs_workspace_id_fkey" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "workspace_runs" ADD CONSTRAINT "workspace_runs_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "search_zero_results" ADD CONSTRAINT "search_zero_results_session_id_fkey" FOREIGN KEY ("session_id") REFERENCES "public"."search_sessions"("id") ON DELETE cascade ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "search_zero_results" ADD CONSTRAINT "search_zero_results_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "search_zero_results" ADD CONSTRAINT "search_zero_results_workspace_id_fkey" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "workspace_search_settings" ADD CONSTRAINT "workspace_search_settings_workspace_id_fkey" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "workspace_search_settings" ADD CONSTRAINT "workspace_search_settings_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "query_suggestions" ADD CONSTRAINT "query_suggestions_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "query_suggestions" ADD CONSTRAINT "query_suggestions_workspace_id_fkey" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "privacy_audit_log" ADD CONSTRAINT "privacy_audit_log_document_id_fkey" FOREIGN KEY ("document_id") REFERENCES "public"."documents"("id") ON DELETE set null ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "privacy_audit_log" ADD CONSTRAINT "privacy_audit_log_run_id_fkey" FOREIGN KEY ("run_id") REFERENCES "public"."workspace_runs"("id") ON DELETE set null ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "privacy_audit_log" ADD CONSTRAINT "privacy_audit_log_workspace_id_fkey" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE set null ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "connector_sync_log" ADD CONSTRAINT "connector_sync_log_connector_id_fkey" FOREIGN KEY ("connector_id") REFERENCES "public"."workspace_connectors"("id") ON DELETE cascade ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "oauth_accounts" ADD CONSTRAINT "oauth_accounts_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "sso_auth_requests" ADD CONSTRAINT "sso_auth_requests_org_id_fkey" FOREIGN KEY ("org_id") REFERENCES "public"."organizations"("id") ON DELETE cascade ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "stripe_topups" ADD CONSTRAINT "stripe_topups_org_id_fkey" FOREIGN KEY ("org_id") REFERENCES "public"."organizations"("id") ON DELETE cascade ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "kg_nodes" ADD CONSTRAINT "kg_nodes_workspace_id_fkey" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "kg_nodes" ADD CONSTRAINT "kg_nodes_run_id_fkey" FOREIGN KEY ("run_id") REFERENCES "public"."workspace_runs"("id") ON DELETE cascade ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "kg_nodes" ADD CONSTRAINT "kg_nodes_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "kg_edges" ADD CONSTRAINT "kg_edges_workspace_id_fkey" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "kg_edges" ADD CONSTRAINT "kg_edges_run_id_fkey" FOREIGN KEY ("run_id") REFERENCES "public"."workspace_runs"("id") ON DELETE cascade ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "kg_edges" ADD CONSTRAINT "kg_edges_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "kg_edges" ADD CONSTRAINT "kg_edges_source_node_id_fkey" FOREIGN KEY ("source_node_id") REFERENCES "public"."kg_nodes"("id") ON DELETE cascade ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "kg_edges" ADD CONSTRAINT "kg_edges_target_node_id_fkey" FOREIGN KEY ("target_node_id") REFERENCES "public"."kg_nodes"("id") ON DELETE cascade ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "kg_communities" ADD CONSTRAINT "kg_communities_workspace_id_fkey" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "kg_communities" ADD CONSTRAINT "kg_communities_run_id_fkey" FOREIGN KEY ("run_id") REFERENCES "public"."workspace_runs"("id") ON DELETE cascade ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "kg_communities" ADD CONSTRAINT "kg_communities_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "org_memberships" ADD CONSTRAINT "org_memberships_org_id_fkey" FOREIGN KEY ("org_id") REFERENCES "public"."organizations"("id") ON DELETE cascade ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "org_memberships" ADD CONSTRAINT "org_memberships_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "document_tags" ADD CONSTRAINT "document_tags_document_id_fkey" FOREIGN KEY ("document_id") REFERENCES "public"."documents"("id") ON DELETE cascade ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "document_tags" ADD CONSTRAINT "document_tags_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "api_key_usage" ADD CONSTRAINT "api_key_usage_key_id_fkey" FOREIGN KEY ("key_id") REFERENCES "public"."api_keys"("id") ON DELETE cascade ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "kg_community_members" ADD CONSTRAINT "kg_community_members_community_id_fkey" FOREIGN KEY ("community_id") REFERENCES "public"."kg_communities"("id") ON DELETE cascade ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "kg_community_members" ADD CONSTRAINT "kg_community_members_node_id_fkey" FOREIGN KEY ("node_id") REFERENCES "public"."kg_nodes"("id") ON DELETE cascade ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "kg_community_members" ADD CONSTRAINT "kg_community_members_workspace_id_fkey" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "workspace_members" ADD CONSTRAINT "workspace_members_workspace_id_fkey" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "workspace_members" ADD CONSTRAINT "workspace_members_invited_by_user_id_fkey" FOREIGN KEY ("invited_by_user_id") REFERENCES "public"."user"("id") ON DELETE set null ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "workspace_members" ADD CONSTRAINT "workspace_members_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "workspace_run_stage_states" ADD CONSTRAINT "workspace_run_stage_states_run_id_fkey" FOREIGN KEY ("run_id") REFERENCES "public"."workspace_runs"("id") ON DELETE cascade ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "document_run_stage_states" ADD CONSTRAINT "document_run_stage_states_run_id_fkey" FOREIGN KEY ("run_id") REFERENCES "public"."workspace_runs"("id") ON DELETE cascade ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "document_run_stage_states" ADD CONSTRAINT "document_run_stage_states_document_id_fkey" FOREIGN KEY ("document_id") REFERENCES "public"."documents"("id") ON DELETE cascade ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "chunk_entities" ADD CONSTRAINT "chunk_entities_chunk_id_fkey" FOREIGN KEY ("chunk_id") REFERENCES "public"."document_chunks"("id") ON DELETE cascade ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "chunk_entities" ADD CONSTRAINT "chunk_entities_workspace_id_fkey" FOREIGN KEY ("workspace_id") REFERENCES "public"."workspaces"("id") ON DELETE cascade ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "chunk_entities" ADD CONSTRAINT "chunk_entities_run_id_fkey" FOREIGN KEY ("run_id") REFERENCES "public"."workspace_runs"("id") ON DELETE cascade ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "chunk_entities" ADD CONSTRAINT "chunk_entities_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;
---> statement-breakpoint
-ALTER TABLE "chunk_entities" ADD CONSTRAINT "chunk_entities_node_id_fkey" FOREIGN KEY ("node_id") REFERENCES "public"."kg_nodes"("id") ON DELETE cascade ON UPDATE no action;
---> statement-breakpoint
-CREATE UNIQUE INDEX "organizations_stripe_customer_id_idx" ON "organizations" USING btree ("stripe_customer_id") WHERE (stripe_customer_id IS NOT NULL);
---> statement-breakpoint
-CREATE INDEX "vector_indexes_document_id_idx" ON "vector_indexes" USING btree ("document_id");
---> statement-breakpoint
-CREATE INDEX "usage_events_run_id_idx" ON "usage_events" USING btree ("run_id");
---> statement-breakpoint
-CREATE INDEX "documents_org_id_idx" ON "documents" USING btree ("org_id","created_at");
---> statement-breakpoint
-CREATE INDEX "documents_org_source_sha256_idx" ON "documents" USING btree ("org_id","source_sha256") WHERE (source_sha256 IS NOT NULL);
---> statement-breakpoint
-CREATE INDEX "documents_run_id_idx" ON "documents" USING btree ("run_id");
---> statement-breakpoint
-CREATE INDEX "documents_workspace_id_idx" ON "documents" USING btree ("workspace_id","created_at");
---> statement-breakpoint
-CREATE INDEX "documents_workspace_source_sha256_idx" ON "documents" USING btree ("workspace_id","source_sha256") WHERE (source_sha256 IS NOT NULL);
---> statement-breakpoint
-CREATE INDEX "performance_log_document_id_idx" ON "performance_log" USING btree ("document_id","created_at");
---> statement-breakpoint
-CREATE INDEX "performance_log_run_id_idx" ON "performance_log" USING btree ("run_id","created_at");
---> statement-breakpoint
-CREATE INDEX "performance_log_stage_name_idx" ON "performance_log" USING btree ("stage_name","created_at");
---> statement-breakpoint
-CREATE INDEX "workspace_run_events_run_id_idx" ON "workspace_run_events" USING btree ("run_id","created_at");
---> statement-breakpoint
-CREATE INDEX "workspace_run_events_user_id_idx" ON "workspace_run_events" USING btree ("user_id","created_at");
---> statement-breakpoint
-CREATE INDEX "workspace_secrets_expires_at_idx" ON "workspace_secrets" USING btree ("expires_at") WHERE (expires_at IS NOT NULL);
---> statement-breakpoint
-CREATE INDEX "workspace_secrets_workspace_id_idx" ON "workspace_secrets" USING btree ("workspace_id");
---> statement-breakpoint
-CREATE INDEX "session_user_id_idx" ON "session" USING btree ("userId");
---> statement-breakpoint
-CREATE INDEX "verification_identifier_idx" ON "verification" USING btree ("identifier");
---> statement-breakpoint
-CREATE UNIQUE INDEX "account_provider_account_idx" ON "account" USING btree ("providerId","accountId");
---> statement-breakpoint
-CREATE INDEX "account_user_id_idx" ON "account" USING btree ("userId");
---> statement-breakpoint
-CREATE INDEX "workspace_invites_email_idx" ON "workspace_invites" USING btree ("email","status","created_at");
---> statement-breakpoint
-CREATE INDEX "workspace_invites_workspace_id_idx" ON "workspace_invites" USING btree ("workspace_id","created_at");
---> statement-breakpoint
-CREATE INDEX "document_corrections_run_id_idx" ON "document_corrections" USING btree ("run_id","updated_at");
---> statement-breakpoint
-CREATE INDEX "document_corrections_user_id_idx" ON "document_corrections" USING btree ("user_id","updated_at");
---> statement-breakpoint
-CREATE INDEX "page_stage_states_run_doc_stage_idx" ON "page_stage_states" USING btree ("run_id","document_id","stage_name");
---> statement-breakpoint
-CREATE UNIQUE INDEX "page_stage_states_unique_idx" ON "page_stage_states" USING btree ("run_id","document_id","stage_name","page_number");
---> statement-breakpoint
-CREATE INDEX "idx_workspace_connectors_status" ON "workspace_connectors" USING btree ("status");
---> statement-breakpoint
-CREATE INDEX "idx_workspace_connectors_workspace_id" ON "workspace_connectors" USING btree ("workspace_id");
---> statement-breakpoint
-CREATE INDEX "webhooks_user_id_idx" ON "webhooks" USING btree ("user_id");
---> statement-breakpoint
-CREATE INDEX "document_chunks_ts_content_idx" ON "document_chunks" USING gin ("ts_content" tsvector_ops);
---> statement-breakpoint
-CREATE INDEX "document_chunks_ts_content_idx1" ON "document_chunks" USING gin ("ts_content" tsvector_ops);
---> statement-breakpoint
-CREATE INDEX "document_chunks_user_id_run_id_idx" ON "document_chunks" USING btree ("user_id","run_id");
---> statement-breakpoint
-CREATE INDEX "document_chunks_user_id_run_id_idx1" ON "document_chunks" USING btree ("user_id","run_id");
---> statement-breakpoint
-CREATE INDEX "webhook_deliveries_user_id_idx" ON "webhook_deliveries" USING btree ("user_id","created_at");
---> statement-breakpoint
-CREATE INDEX "webhook_deliveries_webhook_id_idx" ON "webhook_deliveries" USING btree ("webhook_id","created_at");
---> statement-breakpoint
-CREATE INDEX "document_pages_document_id_page_number_idx" ON "document_pages" USING btree ("document_id","page_number");
---> statement-breakpoint
-CREATE INDEX "document_pages_document_id_page_number_idx1" ON "document_pages" USING btree ("document_id","page_number");
---> statement-breakpoint
-CREATE INDEX "document_pages_run_id_idx" ON "document_pages" USING btree ("run_id");
---> statement-breakpoint
-CREATE INDEX "document_pages_run_id_idx1" ON "document_pages" USING btree ("run_id");
---> statement-breakpoint
-CREATE INDEX "notification_deliveries_user_id_idx" ON "notification_deliveries" USING btree ("user_id","created_at");
---> statement-breakpoint
-CREATE INDEX "notification_deliveries_user_read_idx" ON "notification_deliveries" USING btree ("user_id","read_at","created_at");
---> statement-breakpoint
-CREATE INDEX "notification_deliveries_workspace_id_idx" ON "notification_deliveries" USING btree ("workspace_id","created_at");
---> statement-breakpoint
-CREATE INDEX "api_keys_org_id_idx" ON "api_keys" USING btree ("org_id","created_at");
---> statement-breakpoint
-CREATE INDEX "document_summaries_user_id_run_id_idx" ON "document_summaries" USING btree ("user_id","run_id");
---> statement-breakpoint
-CREATE INDEX "document_summaries_user_id_run_id_idx1" ON "document_summaries" USING btree ("user_id","run_id");
---> statement-breakpoint
-CREATE INDEX "search_sessions_user_id_created_at_idx" ON "search_sessions" USING btree ("user_id","created_at");
---> statement-breakpoint
-CREATE INDEX "search_sessions_user_id_created_at_idx1" ON "search_sessions" USING btree ("user_id","created_at");
---> statement-breakpoint
-CREATE INDEX "search_session_results_chunk_id_idx" ON "search_session_results" USING btree ("chunk_id");
---> statement-breakpoint
-CREATE INDEX "search_session_results_chunk_id_idx1" ON "search_session_results" USING btree ("chunk_id");
---> statement-breakpoint
-CREATE INDEX "search_session_results_session_id_idx" ON "search_session_results" USING btree ("session_id");
---> statement-breakpoint
-CREATE INDEX "search_session_results_session_id_idx1" ON "search_session_results" USING btree ("session_id");
---> statement-breakpoint
-CREATE INDEX "audit_log_action_idx" ON "audit_log" USING btree ("action","created_at");
---> statement-breakpoint
-CREATE INDEX "audit_log_created_at_idx" ON "audit_log" USING btree ("created_at","id");
---> statement-breakpoint
-CREATE INDEX "audit_log_org_id_idx" ON "audit_log" USING btree ("org_id","created_at");
---> statement-breakpoint
-CREATE INDEX "audit_log_resource_idx" ON "audit_log" USING btree ("resource_type","resource_id","created_at");
---> statement-breakpoint
-CREATE INDEX "audit_log_run_id_idx" ON "audit_log" USING btree ("run_id","created_at");
---> statement-breakpoint
-CREATE INDEX "audit_log_user_id_idx" ON "audit_log" USING btree ("user_id","created_at");
---> statement-breakpoint
-CREATE INDEX "audit_log_workspace_id_idx" ON "audit_log" USING btree ("workspace_id","created_at");
---> statement-breakpoint
-CREATE INDEX "search_eval_fixtures_user_id_idx" ON "search_eval_fixtures" USING btree ("user_id");
---> statement-breakpoint
-CREATE INDEX "search_eval_fixtures_user_id_idx1" ON "search_eval_fixtures" USING btree ("user_id");
---> statement-breakpoint
-CREATE INDEX "search_index_staleness_run_id_idx" ON "search_index_staleness" USING btree ("run_id");
---> statement-breakpoint
-CREATE INDEX "search_index_staleness_run_id_idx1" ON "search_index_staleness" USING btree ("run_id");
---> statement-breakpoint
-CREATE INDEX "search_index_staleness_user_id_detected_at_idx" ON "search_index_staleness" USING btree ("user_id","detected_at");
---> statement-breakpoint
-CREATE INDEX "search_index_staleness_user_id_detected_at_idx1" ON "search_index_staleness" USING btree ("user_id","detected_at");
---> statement-breakpoint
-CREATE INDEX "document_propositions_document_id_idx" ON "document_propositions" USING btree ("document_id");
---> statement-breakpoint
-CREATE INDEX "document_propositions_document_id_idx1" ON "document_propositions" USING btree ("document_id");
---> statement-breakpoint
-CREATE INDEX "document_propositions_ts_content_idx" ON "document_propositions" USING gin ("ts_content" tsvector_ops);
---> statement-breakpoint
-CREATE INDEX "document_propositions_ts_content_idx1" ON "document_propositions" USING gin ("ts_content" tsvector_ops);
---> statement-breakpoint
-CREATE INDEX "document_propositions_user_id_run_id_idx" ON "document_propositions" USING btree ("user_id","run_id");
---> statement-breakpoint
-CREATE INDEX "document_propositions_user_id_run_id_idx1" ON "document_propositions" USING btree ("user_id","run_id");
---> statement-breakpoint
-CREATE INDEX "idempotency_cache_expires_at_idx" ON "idempotency_cache" USING btree ("expires_at");
---> statement-breakpoint
-CREATE INDEX "search_experiments_user_id_active_idx" ON "search_experiments" USING btree ("user_id","active");
---> statement-breakpoint
-CREATE INDEX "search_experiments_user_id_active_idx1" ON "search_experiments" USING btree ("user_id","active");
---> statement-breakpoint
-CREATE INDEX "chat_sessions_user_id_idx" ON "chat_sessions" USING btree ("user_id","created_at");
---> statement-breakpoint
-CREATE INDEX "chat_sessions_workspace_id_idx" ON "chat_sessions" USING btree ("workspace_id","created_at");
---> statement-breakpoint
-CREATE INDEX "chat_turns_session_id_idx" ON "chat_turns" USING btree ("session_id","created_at");
---> statement-breakpoint
-CREATE INDEX "ai_operations_api_key_id_idx" ON "ai_operations" USING btree ("api_key_id","created_at");
---> statement-breakpoint
-CREATE INDEX "ai_operations_org_id_idx" ON "ai_operations" USING btree ("org_id","created_at");
---> statement-breakpoint
-CREATE INDEX "ai_operations_status_idx" ON "ai_operations" USING btree ("status","created_at");
---> statement-breakpoint
-CREATE INDEX "ai_operations_user_id_idx" ON "ai_operations" USING btree ("user_id","created_at");
---> statement-breakpoint
-CREATE INDEX "ai_operations_workspace_id_idx" ON "ai_operations" USING btree ("workspace_id","created_at");
---> statement-breakpoint
-CREATE INDEX "workspaces_archived_at_idx" ON "workspaces" USING btree ("archived_at","updated_at");
---> statement-breakpoint
-CREATE INDEX "workspaces_org_id_idx" ON "workspaces" USING btree ("org_id","updated_at");
---> statement-breakpoint
-CREATE INDEX "workspaces_user_id_idx" ON "workspaces" USING btree ("user_id","updated_at");
---> statement-breakpoint
-CREATE INDEX "ai_operation_events_created_at_idx" ON "ai_operation_events" USING btree ("created_at");
---> statement-breakpoint
-CREATE INDEX "ai_operation_events_operation_id_idx" ON "ai_operation_events" USING btree ("operation_id","sequence");
---> statement-breakpoint
-CREATE INDEX "grounded_summaries_document_id_idx" ON "grounded_summaries" USING btree ("document_id","created_at");
---> statement-breakpoint
-CREATE INDEX "grounded_summaries_run_id_idx" ON "grounded_summaries" USING btree ("run_id","created_at");
---> statement-breakpoint
-CREATE INDEX "grounded_summaries_workspace_id_idx" ON "grounded_summaries" USING btree ("workspace_id","created_at");
---> statement-breakpoint
-CREATE INDEX "idx_pii_detections_document_id" ON "pii_detections" USING btree ("document_id");
---> statement-breakpoint
-CREATE INDEX "idx_pii_detections_run_id" ON "pii_detections" USING btree ("run_id");
---> statement-breakpoint
-CREATE INDEX "chat_answer_evidence_spans_answer_id_idx" ON "chat_answer_evidence_spans" USING btree ("answer_id","citation_index");
---> statement-breakpoint
-CREATE INDEX "chat_answer_evidence_spans_session_id_idx" ON "chat_answer_evidence_spans" USING btree ("session_id","created_at");
---> statement-breakpoint
-CREATE INDEX "parser_eval_fixtures_document_id_idx" ON "parser_eval_fixtures" USING btree ("document_id","created_at");
---> statement-breakpoint
-CREATE INDEX "parser_eval_fixtures_parser_idx" ON "parser_eval_fixtures" USING btree ("parser","created_at");
---> statement-breakpoint
-CREATE INDEX "parser_eval_fixtures_run_id_idx" ON "parser_eval_fixtures" USING btree ("run_id","created_at");
---> statement-breakpoint
-CREATE INDEX "parser_eval_fixtures_user_id_idx" ON "parser_eval_fixtures" USING btree ("user_id","created_at");
---> statement-breakpoint
-CREATE INDEX "parser_eval_results_document_id_idx" ON "parser_eval_results" USING btree ("document_id","created_at");
---> statement-breakpoint
-CREATE INDEX "parser_eval_results_parser_idx" ON "parser_eval_results" USING btree ("parser","created_at");
---> statement-breakpoint
-CREATE INDEX "parser_eval_results_run_id_idx" ON "parser_eval_results" USING btree ("run_id","created_at");
---> statement-breakpoint
-CREATE INDEX "parser_eval_results_user_id_idx" ON "parser_eval_results" USING btree ("user_id","created_at");
---> statement-breakpoint
-CREATE INDEX "upload_sessions_user_id_idx" ON "upload_sessions" USING btree ("user_id","created_at");
---> statement-breakpoint
-CREATE INDEX "upload_sessions_workspace_id_idx" ON "upload_sessions" USING btree ("workspace_id","created_at");
---> statement-breakpoint
-CREATE INDEX "upload_session_files_session_id_idx" ON "upload_session_files" USING btree ("session_id","created_at");
---> statement-breakpoint
-CREATE INDEX "upload_session_files_source_key_idx" ON "upload_session_files" USING btree ("source_key");
---> statement-breakpoint
-CREATE INDEX "workspace_runs_dead_letter_idx" ON "workspace_runs" USING btree ("control_state","dead_lettered_at");
---> statement-breakpoint
-CREATE INDEX "workspace_runs_lease_idx" ON "workspace_runs" USING btree ("status","lease_expires_at");
---> statement-breakpoint
-CREATE INDEX "workspace_runs_org_id_idx" ON "workspace_runs" USING btree ("org_id","created_at");
---> statement-breakpoint
-CREATE INDEX "workspace_runs_priority_idx" ON "workspace_runs" USING btree ("status","priority","created_at");
---> statement-breakpoint
-CREATE INDEX "workspace_runs_status_idx" ON "workspace_runs" USING btree ("status","created_at");
---> statement-breakpoint
-CREATE INDEX "workspace_runs_workspace_id_idx" ON "workspace_runs" USING btree ("workspace_id","created_at");
---> statement-breakpoint
-CREATE INDEX "search_zero_results_user_idx" ON "search_zero_results" USING btree ("user_id","created_at");
---> statement-breakpoint
-CREATE INDEX "search_zero_results_workspace_idx" ON "search_zero_results" USING btree ("workspace_id","created_at");
---> statement-breakpoint
-CREATE INDEX "workspace_search_settings_updated_idx" ON "workspace_search_settings" USING btree ("updated_at");
---> statement-breakpoint
-CREATE INDEX "query_suggestions_ws_idx" ON "query_suggestions" USING btree ("workspace_id","weight","created_at");
---> statement-breakpoint
-CREATE INDEX "idx_privacy_audit_log_document_id" ON "privacy_audit_log" USING btree ("document_id");
---> statement-breakpoint
-CREATE INDEX "idx_privacy_audit_log_workspace_id" ON "privacy_audit_log" USING btree ("workspace_id");
---> statement-breakpoint
-CREATE INDEX "idx_connector_sync_log_connector_id" ON "connector_sync_log" USING btree ("connector_id");
---> statement-breakpoint
-CREATE INDEX "idx_connector_sync_log_started_at" ON "connector_sync_log" USING btree ("started_at");
---> statement-breakpoint
-CREATE INDEX "oauth_accounts_user_id_idx" ON "oauth_accounts" USING btree ("user_id");
---> statement-breakpoint
-CREATE INDEX "sso_auth_requests_expires_idx" ON "sso_auth_requests" USING btree ("expires_at");
---> statement-breakpoint
-CREATE INDEX "sso_auth_requests_org_idx" ON "sso_auth_requests" USING btree ("org_id");
---> statement-breakpoint
-CREATE INDEX "sso_auth_requests_provider_idx" ON "sso_auth_requests" USING btree ("provider");
---> statement-breakpoint
-CREATE INDEX "stripe_webhook_events_event_type_idx" ON "stripe_webhook_events" USING btree ("event_type");
---> statement-breakpoint
-CREATE INDEX "stripe_topups_org_id_idx" ON "stripe_topups" USING btree ("org_id","created_at");
---> statement-breakpoint
-CREATE INDEX "kg_nodes_lookup_idx" ON "kg_nodes" USING btree ("workspace_id","entity_type","normalized_name");
---> statement-breakpoint
-CREATE INDEX "kg_nodes_rank_idx" ON "kg_nodes" USING btree ("workspace_id","mention_count","source_document_count");
---> statement-breakpoint
-CREATE INDEX "kg_edges_predicate_idx" ON "kg_edges" USING btree ("workspace_id","normalized_predicate","weight");
---> statement-breakpoint
-CREATE INDEX "kg_edges_source_idx" ON "kg_edges" USING btree ("workspace_id","source_node_id");
---> statement-breakpoint
-CREATE INDEX "kg_edges_target_idx" ON "kg_edges" USING btree ("workspace_id","target_node_id");
---> statement-breakpoint
-CREATE INDEX "kg_communities_rank_idx" ON "kg_communities" USING btree ("workspace_id","level","member_count");
---> statement-breakpoint
-CREATE INDEX "org_memberships_user_id_idx" ON "org_memberships" USING btree ("user_id","created_at");
---> statement-breakpoint
-CREATE INDEX "document_tags_document_id_idx" ON "document_tags" USING btree ("document_id");
---> statement-breakpoint
-CREATE INDEX "document_tags_user_id_idx" ON "document_tags" USING btree ("user_id","tag");
---> statement-breakpoint
-CREATE INDEX "kg_community_members_node_idx" ON "kg_community_members" USING btree ("workspace_id","node_id");
---> statement-breakpoint
-CREATE INDEX "workspace_members_user_id_idx" ON "workspace_members" USING btree ("user_id","created_at");
---> statement-breakpoint
-CREATE INDEX "workspace_run_stage_states_run_id_idx" ON "workspace_run_stage_states" USING btree ("run_id","updated_at");
---> statement-breakpoint
-CREATE INDEX "document_run_stage_states_run_id_idx" ON "document_run_stage_states" USING btree ("run_id","document_id","updated_at");
---> statement-breakpoint
-CREATE INDEX "chunk_entities_lookup_idx" ON "chunk_entities" USING btree ("workspace_id","entity_name","entity_type");
---> statement-breakpoint
-CREATE INDEX "chunk_entities_node_idx" ON "chunk_entities" USING btree ("workspace_id","node_id");
---> statement-breakpoint
-CREATE MATERIALIZED VIEW "public"."admin_stats" AS (SELECT date_trunc('hour'::text, created_at) AS hour, count(*) AS runs_count, sum(pages_total) AS pages_total, avg(output_cost_cents + input_cost_cents) AS avg_cost_cents FROM workspace_runs GROUP BY (date_trunc('hour'::text, created_at)));
---> statement-breakpoint
-CREATE VIEW "public"."search_experiment_results" AS (SELECT e.id AS experiment_id, e.name, s.variant, count(DISTINCT s.id) AS query_count, avg(s.result_count) AS avg_result_count, sum( CASE WHEN sr.clicked THEN 1 ELSE 0 END)::double precision / NULLIF(count(sr.id)::double precision, 0::double precision) AS ctr FROM search_experiments e JOIN search_sessions s ON s.variant = e.id OR s.variant = e.name LEFT JOIN search_session_results sr ON sr.session_id = s.id GROUP BY e.id, e.name, s.variant);
+CREATE OR REPLACE VIEW "public"."search_experiment_results" AS (SELECT e.id AS experiment_id, e.name, s.variant, count(DISTINCT s.id) AS query_count, avg(s.result_count) AS avg_result_count, sum( CASE WHEN sr.clicked THEN 1 ELSE 0 END)::double precision / NULLIF(count(sr.id)::double precision, 0::double precision) AS ctr FROM search_experiments e JOIN search_sessions s ON s.variant = e.id OR s.variant = e.name LEFT JOIN search_session_results sr ON sr.session_id = s.id GROUP BY e.id, e.name, s.variant);

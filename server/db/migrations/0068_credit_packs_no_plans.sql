@@ -13,9 +13,14 @@
 -- default, rate limits and video caps read funded instead of the plan.
 
 -- 1. Fold any included allowance into the prepaid pool, then record funding.
-UPDATE organizations
-SET credit_balance_cents = credit_balance_cents + included_credits_remaining, updated_at = now()
-WHERE included_credits_remaining > 0;
+-- Guarded on the column: step 3 drops it, so a second run folds nothing again.
+DO $idem$ BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'organizations' AND column_name = 'included_credits_remaining') THEN
+    UPDATE organizations
+    SET credit_balance_cents = credit_balance_cents + included_credits_remaining, updated_at = now()
+    WHERE included_credits_remaining > 0;
+  END IF;
+END $idem$;
 --> statement-breakpoint
 UPDATE credit_grants
 SET source = 'adjustment', metadata = metadata || jsonb_build_object('migratedFrom', 'subscription')
@@ -31,7 +36,7 @@ FROM (
   WHERE source IN ('topup', 'auto_recharge', 'adjustment', 'promo') AND credits - reversed_credits > 0
   GROUP BY org_id
 ) g
-WHERE g.org_id = o.id;
+WHERE g.org_id = o.id AND o.funded_at IS NULL;
 --> statement-breakpoint
 -- 2. Functions and triggers that read the columns dropped below.
 DROP TRIGGER IF EXISTS organizations_notify_spend_changed ON organizations;
@@ -78,7 +83,7 @@ ALTER TABLE credit_grants ADD CONSTRAINT credit_grants_source_check
   CHECK (source IN ('topup', 'auto_recharge', 'starter', 'promo', 'adjustment', 'refund'));
 --> statement-breakpoint
 -- 4. Single-pool ledger and balance functions.
-CREATE FUNCTION append_credit_ledger(
+CREATE OR REPLACE FUNCTION append_credit_ledger(
   p_org_id text,
   p_user_id text,
   p_credits numeric,
@@ -106,7 +111,7 @@ $$;
 --> statement-breakpoint
 -- Spend credits from the prepaid pool (may go negative so an admitted run can
 -- finish). FOR NO KEY UPDATE, as in 0028, so FK checks on the org row never wait.
-CREATE FUNCTION debit_org_credits(
+CREATE OR REPLACE FUNCTION debit_org_credits(
   p_org_id text,
   p_credits numeric,
   p_user_id text DEFAULT NULL,
@@ -135,7 +140,7 @@ END;
 $$;
 --> statement-breakpoint
 -- What admission, the overview and auto top-up compare against.
-CREATE FUNCTION org_available_credits(p_org_id text)
+CREATE OR REPLACE FUNCTION org_available_credits(p_org_id text)
 RETURNS TABLE (balance numeric, pending numeric, available numeric)
 LANGUAGE sql STABLE AS $$
   SELECT o.credit_balance_cents, x.pending, o.credit_balance_cents - x.pending
@@ -147,7 +152,7 @@ $$;
 -- Grant credits once per (source, external_id), after applying pending debits
 -- so the balance moves in the order usage happened. A paid source marks the
 -- org funded on its first grant and raises worker_slots to the funded ceiling.
-CREATE FUNCTION grant_org_credits(
+CREATE OR REPLACE FUNCTION grant_org_credits(
   p_org_id text,
   p_source text,
   p_external_id text,
@@ -280,7 +285,7 @@ END;
 $$;
 --> statement-breakpoint
 -- 5. Spend status: `funded` replaces `plan_id`.
-CREATE FUNCTION org_spend_status(
+CREATE OR REPLACE FUNCTION org_spend_status(
   p_org_id text,
   p_workspace_id text DEFAULT NULL,
   p_run_reserve numeric DEFAULT 0
@@ -318,7 +323,7 @@ $$;
 -- grant_credit_lease (0053) with the chat reserve chosen by funding:
 -- p_chat_reserve for funded orgs, p_chat_reserve_starter (default
 -- p_chat_reserve) for starter orgs. Same argument types as 0053.
-CREATE FUNCTION grant_credit_lease(
+CREATE OR REPLACE FUNCTION grant_credit_lease(
   p_org_id text,
   p_workspace_id text,
   p_holder_kind text,

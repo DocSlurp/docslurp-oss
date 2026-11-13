@@ -1,5 +1,5 @@
 -- Durable chat ownership. Delivery transports never own execution leases.
-CREATE TABLE chat_operations (
+CREATE TABLE IF NOT EXISTS chat_operations (
   id text PRIMARY KEY,
   root_id text NOT NULL REFERENCES chat_operations(id) ON DELETE CASCADE,
   parent_id text REFERENCES chat_operations(id) ON DELETE CASCADE,
@@ -22,9 +22,9 @@ CREATE TABLE chat_operations (
   created_at timestamptz NOT NULL DEFAULT now(),
   UNIQUE (user_id, workspace_id, idempotency_key)
 );
-CREATE INDEX chat_operations_queue ON chat_operations(status, created_at);
-CREATE INDEX chat_operations_tree ON chat_operations(root_id, created_at);
-CREATE TABLE chat_operation_events (
+CREATE INDEX IF NOT EXISTS chat_operations_queue ON chat_operations(status, created_at);
+CREATE INDEX IF NOT EXISTS chat_operations_tree ON chat_operations(root_id, created_at);
+CREATE TABLE IF NOT EXISTS chat_operation_events (
   operation_id text NOT NULL REFERENCES chat_operations(id) ON DELETE CASCADE,
   sequence integer NOT NULL,
   kind text NOT NULL,

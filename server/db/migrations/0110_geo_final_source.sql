@@ -1,5 +1,5 @@
 -- Workers need only this correction-presence bit, never access to human correction rows.
-ALTER TABLE documents ADD COLUMN geo_has_correction boolean NOT NULL DEFAULT false;
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS geo_has_correction boolean NOT NULL DEFAULT false;
 --> statement-breakpoint
 UPDATE documents d SET geo_has_correction=true WHERE EXISTS
  (SELECT 1 FROM document_corrections c WHERE c.document_id=d.id AND c.corrected_structured_data IS NOT NULL);
@@ -37,7 +37,7 @@ BEGIN
   RETURN NULL;
 END $$;
 --> statement-breakpoint
-CREATE TABLE geo_accepted_sources (
+CREATE TABLE IF NOT EXISTS geo_accepted_sources (
   document_id text PRIMARY KEY,
   workspace_id text NOT NULL,
   org_id text NOT NULL,
@@ -51,7 +51,7 @@ CREATE TABLE geo_accepted_sources (
 --> statement-breakpoint
 -- This entrypoint participates in the caller's successful stage transaction.
 -- It never reads a partial object-store artifact or accepts a caller-provided authority adapter.
-CREATE FUNCTION commit_geo_final_source(doc text, ws text, tenant text, rev bigint, run text, schema_hash text, result_hash text, admitted jsonb)
+CREATE OR REPLACE FUNCTION commit_geo_final_source(doc text, ws text, tenant text, rev bigint, run text, schema_hash text, result_hash text, admitted jsonb)
 RETURNS void LANGUAGE plpgsql AS $$
 BEGIN
   PERFORM 1 FROM workspaces WHERE id=ws AND org_id=tenant AND archived_at IS NULL FOR SHARE;
@@ -82,7 +82,7 @@ BEGIN
 END $$;
 
 --> statement-breakpoint
-CREATE FUNCTION commit_geo_corrected_source(doc text, ws text, tenant text, rev bigint, expected jsonb, schema_hash text, result_hash text, admitted jsonb)
+CREATE OR REPLACE FUNCTION commit_geo_corrected_source(doc text, ws text, tenant text, rev bigint, expected jsonb, schema_hash text, result_hash text, admitted jsonb)
 RETURNS void LANGUAGE plpgsql AS $$
 DECLARE source_run text;
 BEGIN

@@ -1,11 +1,11 @@
-alter table documents add column indexing_mode text not null default 'full'
+alter table documents add column IF NOT EXISTS indexing_mode text not null default 'full'
   check (indexing_mode in ('full','map','visual'));
 --> statement-breakpoint
-create index documents_workspace_deferred_idx on documents (workspace_id) where indexing_mode <> 'full';
+create index IF NOT EXISTS documents_workspace_deferred_idx on documents (workspace_id) where indexing_mode <> 'full';
 --> statement-breakpoint
-alter table api_keys add column materialization_policy jsonb not null default '{}'::jsonb;
+alter table api_keys add column IF NOT EXISTS materialization_policy jsonb not null default '{}'::jsonb;
 --> statement-breakpoint
-create table document_page_states (
+create table IF NOT EXISTS document_page_states (
   document_id text not null references documents(id) on delete cascade,
   page_number integer not null check (page_number >= 1),
   page_label text,
@@ -27,9 +27,9 @@ create table document_page_states (
   primary key (document_id, page_number)
 );
 --> statement-breakpoint
-create index document_page_states_doc_state_idx on document_page_states (document_id, state);
+create index IF NOT EXISTS document_page_states_doc_state_idx on document_page_states (document_id, state);
 --> statement-breakpoint
-create table document_maps (
+create table IF NOT EXISTS document_maps (
   document_id text primary key references documents(id) on delete cascade,
   run_id text not null,
   version integer not null default 1,
@@ -44,9 +44,9 @@ create table document_maps (
   updated_at timestamptz not null default now()
 );
 --> statement-breakpoint
-create index document_maps_search_idx on document_maps using gin (search_text);
+create index IF NOT EXISTS document_maps_search_idx on document_maps using gin (search_text);
 --> statement-breakpoint
-create table document_page_vectors (
+create table IF NOT EXISTS document_page_vectors (
   document_id text not null references documents(id) on delete cascade,
   page_number integer not null,
   model text not null,
@@ -60,4 +60,4 @@ create table document_page_vectors (
   primary key (document_id, page_number, model)
 );
 --> statement-breakpoint
-create index document_page_vectors_workspace_idx on document_page_vectors (workspace_id, model);
+create index IF NOT EXISTS document_page_vectors_workspace_idx on document_page_vectors (workspace_id, model);

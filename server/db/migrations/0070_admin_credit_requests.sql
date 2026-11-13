@@ -1,5 +1,5 @@
 -- Permanent request receipts outlive Stripe's idempotency-key retention.
-CREATE TABLE admin_credit_requests (
+CREATE TABLE IF NOT EXISTS admin_credit_requests (
   request_id uuid PRIMARY KEY,
   org_id text NOT NULL,
   actor_user_id text NOT NULL,

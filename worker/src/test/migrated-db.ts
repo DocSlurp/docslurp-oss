@@ -47,7 +47,7 @@ function findTag(tags: string[], name: string): number {
  * transaction-scoped statements (LOCK TABLE, SET LOCAL, ON COMMIT DROP temp
  * tables) behave here as they do in production.
  */
-async function applyMigration(db: PGlite, tag: string): Promise<void> {
+export async function applyMigration(db: PGlite, tag: string): Promise<void> {
   const sql = readFileSync(`${migrationsDir}${tag}.sql`, "utf8");
   await db.transaction(async (tx) => {
     for (const statement of sql.split("--> statement-breakpoint")) {

@@ -27,6 +27,8 @@
 --      sets it from DOCSLURP_ACK_0127). A missing or stale acknowledgement aborts the whole migration run and changes nothing.
 -- A unique index then refuses a second membership.
 --
+-- idempotent-migration: the backup and audit inserts read only the plan (removed_memberships, owner_promotions), which is computed from the current memberships; once every user has one live membership and every live team organization with members has an owner, a second run plans nothing and inserts nothing.
+--
 -- Locks: the release's lock prelude, the same in every lock-taking migration of it (0122, 0123, 0125, 0126, 0127; see 0122).
 SET LOCAL lock_timeout = '10s';
 --> statement-breakpoint
