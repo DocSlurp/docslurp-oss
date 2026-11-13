@@ -214,9 +214,13 @@ export function hasAiUsageLedgerTokens(event: AiUsageLedgerEvent): boolean {
 
 /**
  * Cost in cents. `inputTokens` counts every prompt token; `cachedInputTokens` and `cacheWriteInputTokens` are the
- * parts of it read from and written to the prompt cache, priced at the cache rates when the pricing lists them and
- * at the input rate otherwise (never below what the provider charges for an unknown rate).
+ * parts of it read from and written to the prompt cache, priced at the cache rates when the pricing lists them.
+ * Unknown rates err high: a read at the input rate (providers charge less), a write at 1.25x the input rate (the
+ * 5-minute write premium Anthropic and OpenAI list).
  */
+/** Write premium assumed when a model's cache-write rate is unknown (5-minute TTL; the 1-hour TTL is never used). */
+export const CACHE_WRITE_FALLBACK_MULTIPLIER = 1.25;
+
 export function calculateAiUsageCostCents(
   input: {
     inputTokens?: number | null;
@@ -237,7 +241,7 @@ export function calculateAiUsageCostCents(
   const inputRate = finiteRate(rates.costPer1kInputTokens, 0);
   const outputRate = finiteRate(rates.costPer1kOutputTokens, 0);
   const cacheReadRate = finiteRate(rates.costPer1kCacheReadInputTokens, inputRate);
-  const cacheWriteRate = finiteRate(rates.costPer1kCacheWriteInputTokens, inputRate);
+  const cacheWriteRate = finiteRate(rates.costPer1kCacheWriteInputTokens, inputRate * CACHE_WRITE_FALLBACK_MULTIPLIER);
   const rawCost =
     ((inputTokens - cachedTokens - writeTokens) / 1000) * inputRate +
     (cachedTokens / 1000) * cacheReadRate +
@@ -284,7 +288,12 @@ export function resolveAiUsagePricingWithSource(
   const matched = findAiUsageCatalogEntry(input, options.catalog ?? defaultAiUsagePricingCatalog);
   if (!options.catalog && normalizeAiUsageCatalogKey(input.provider) === "openrouter") {
     // A verified catalog rate (cents per 1K) bounds the live listing, in USD per token.
-    const reference = matched ? { input: matched.costPer1kInputTokens / 100_000, output: matched.costPer1kOutputTokens / 100_000 } : undefined;
+    const reference = matched ? {
+      input: matched.costPer1kInputTokens / 100_000,
+      output: matched.costPer1kOutputTokens / 100_000,
+      ...(matched.costPer1kCacheReadInputTokens !== undefined ? { cacheRead: matched.costPer1kCacheReadInputTokens / 100_000 } : {}),
+      ...(matched.costPer1kCacheWriteInputTokens !== undefined ? { cacheWrite: matched.costPer1kCacheWriteInputTokens / 100_000 } : {}),
+    } : undefined;
     const live = liveModelPrice(input.model, { promptTokens: input.inputTokens ?? undefined, reference });
     if (live) {
       // USD per token to cents per 1K tokens.

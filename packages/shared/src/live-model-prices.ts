@@ -154,8 +154,19 @@ export function liveModelPrice(
   const at = options.at ?? new Date(now);
   const override = entry.overrides.find((candidate) => overrideApplies(candidate, options.promptTokens, at));
   const input = override?.input ?? entry.input, output = override?.output ?? entry.output;
-  // Cache rates follow the matched tier: an override without its own cache rates leaves them unknown.
-  const cache = override ? { cacheRead: override.cacheRead, cacheWrite: override.cacheWrite } : { cacheRead: entry.cacheRead, cacheWrite: entry.cacheWrite };
+  // Cache rates follow the matched tier: an override without its own cache rates leaves them unknown. A listed rate
+  // outside the plausible band for this tier's input price (a "0" meaning unsupported, a typo) is dropped, so the
+  // caller's conservative fallback applies: reads 0 < read <= input, writes input <= write <= 4x input.
+  const listed = override ? { cacheRead: override.cacheRead, cacheWrite: override.cacheWrite } : { cacheRead: entry.cacheRead, cacheWrite: entry.cacheWrite };
+  const cache = {
+    cacheRead: listed.cacheRead !== undefined && listed.cacheRead > 0 && listed.cacheRead <= input ? listed.cacheRead : undefined,
+    cacheWrite: listed.cacheWrite !== undefined && listed.cacheWrite >= input && listed.cacheWrite <= input * 4 ? listed.cacheWrite : undefined,
+  };
+  if (options.reference) {
+    // Against a verified hardcoded cache rate, a listing far off is a catalog error: drop that rate.
+    if (cache.cacheRead !== undefined && options.reference.cacheRead !== undefined && drifted(cache.cacheRead, options.reference.cacheRead)) cache.cacheRead = undefined;
+    if (cache.cacheWrite !== undefined && options.reference.cacheWrite !== undefined && drifted(cache.cacheWrite, options.reference.cacheWrite)) cache.cacheWrite = undefined;
+  }
   // Against a verified hardcoded price, a listing far off either way is a catalog error, not a price change.
   if (options.reference && (drifted(input, options.reference.input) || drifted(output, options.reference.output))) {
     warnDrift(model.trim(), { input, output }, options.reference);

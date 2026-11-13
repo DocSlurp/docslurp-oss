@@ -2,6 +2,7 @@ import { nitroBaseModel, speedBoostMaxPrice } from "./project-chat-models.js";
 import { withServedProviderRegion } from "./provider-regions.js";
 import { chatModelPricePerToken } from "./chat-model-prices.js";
 import { liveModelPrice, refreshStaleLiveModelPrices } from "./live-model-prices.js";
+import { CACHE_WRITE_FALLBACK_MULTIPLIER } from "./usage.js";
 
 /** Provider charges are USD; the application ledger uses fractional USD cents. */
 export interface ProviderTextUsage {
@@ -107,7 +108,7 @@ async function resolveOpenRouterUsageInner(args: {
 
 /**
  * Cost in cents of a call without a receipt: cached prompt tokens at the listed cache-read rate and cache writes at
- * the cache-write rate, each at the input rate when the listing has none.
+ * the cache-write rate. Unknown rates err high: reads at the input rate, writes at 1.25x it.
  */
 function estimateTextCostCents(
   base: { inputTokens: number; outputTokens: number },
@@ -117,7 +118,7 @@ function estimateTextCostCents(
   const cached = Math.min(base.inputTokens, cache.cachedInputTokens ?? 0);
   const written = Math.min(base.inputTokens - cached, cache.cacheWriteInputTokens ?? 0);
   return ((base.inputTokens - cached - written) * price.input + cached * (price.cacheRead ?? price.input)
-    + written * (price.cacheWrite ?? price.input) + base.outputTokens * price.output) * 100;
+    + written * (price.cacheWrite ?? price.input * CACHE_WRITE_FALLBACK_MULTIPLIER) + base.outputTokens * price.output) * 100;
 }
 
 /** The generation receipt, null when not (yet) available, "incomplete" when BYOK accounting lacks the upstream cost. */

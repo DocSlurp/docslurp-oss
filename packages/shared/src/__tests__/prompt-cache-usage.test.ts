@@ -46,6 +46,9 @@ describe("prompt-cache token accounting", () => {
       .toBeCloseTo(0.01 + 0.002 + 0.0125 + 0.005);
     expect(calculateAiUsageCostCents({ inputTokens: 4000, cachedInputTokens: 2000, outputTokens: 0, costPer1kInputTokens: 0.01, costPer1kOutputTokens: 0.05 }))
       .toBeCloseTo(0.04);
+    // An unknown write rate errs high: 1.25x input, never the input rate.
+    expect(calculateAiUsageCostCents({ inputTokens: 1000, cacheWriteInputTokens: 1000, outputTokens: 0, costPer1kInputTokens: 0.01, costPer1kOutputTokens: 0 }))
+      .toBeCloseTo(0.0125);
     // Without cache counts the cost is unchanged from before.
     expect(calculateAiUsageCostCents({ inputTokens: 4000, outputTokens: 100, ...rates })).toBeCloseTo(0.045);
   });
@@ -69,6 +72,21 @@ describe("prompt-cache token accounting", () => {
     const event = buildPricedAiUsageLedgerEvent({ provider: "openrouter", model: "vendor/cached", metric: "chat",
       inputTokens: 10_000, cachedInputTokens: 8_000, outputTokens: 0 });
     expect(event.costCents).toBeCloseTo((2_000 * 0.0000001 + 8_000 * 0.00000001) * 100);
+  });
+
+  it("drops implausible live cache rates instead of pricing with them", () => {
+    setLiveModelPricesForTests({ models: Object.fromEntries(parseOpenRouterCatalog({ data: [
+      { id: "vendor/zero-read", pricing: { prompt: "0.0000001", completion: "0.0000005", input_cache_read: "0", input_cache_write: "0.000000125" } },
+      { id: "vendor/typo-write", pricing: { prompt: "0.0000001", completion: "0.0000005", input_cache_read: "0.00000001", input_cache_write: "0.0000125" } },
+      { id: "vendor/cheap-write", pricing: { prompt: "0.0000001", completion: "0.0000005", input_cache_write: "0.00000005" } },
+    ] })) });
+    expect(liveModelPrice("vendor/zero-read")?.cacheRead).toBeUndefined();
+    expect(liveModelPrice("vendor/zero-read")?.cacheWrite).toBe(0.000000125);
+    expect(liveModelPrice("vendor/typo-write")?.cacheWrite).toBeUndefined();
+    expect(liveModelPrice("vendor/cheap-write")?.cacheWrite).toBeUndefined();
+    // Against a verified cache rate, a drifted listing is dropped.
+    setLiveModelPricesForTests({ models: Object.fromEntries(parseOpenRouterCatalog(LISTING)) });
+    expect(liveModelPrice("vendor/cached", { reference: { input: 0.0000001, output: 0.0000005, cacheRead: 0.0000001 } })?.cacheRead).toBeUndefined();
   });
 
   it("logs cache fields only when present", () => {

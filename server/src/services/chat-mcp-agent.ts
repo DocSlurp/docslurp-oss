@@ -617,8 +617,9 @@ export async function runChatMcpAgent(args: {
     NO_VISIBLE_SELF_CORRECTION_INSTRUCTION,
     "If a needed action is absent from the tool catalog, say so. Keep the answer direct, grounded, and concise.",
     ...[chatModelPromptAddendum(args.model)].filter(Boolean),
-    // Per actor and per project: after the rules shared by every chat, so those stay one cached prefix across
-    // projects and actors.
+    // Per actor and per project: after the rules shared by every chat, so providers with automatic prefix caching
+    // (OpenAI-family, GLM) can share those rules across projects and actors. Claude caches this system message as one
+    // block at its breakpoint, so for Claude the reuse stays per actor and project.
     `Available tools for this actor and turn: ${Object.keys(context.tools).join(", ") || "none"}. If a tool mentioned in these instructions is absent, it is unavailable; never claim access to it.`,
     `The selected project is ${args.projectId}. Project data tools are limited to this project; to use another one the user selects it in the app.`,
     // Counts change between turns: after the static rules so provider prefix caching survives.

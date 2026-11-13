@@ -1,6 +1,6 @@
 import { DEFAULT_CHAT_REASONING, type ChatReasoningLevel } from "@docslurp/shared/project-chat-models";
 import { assertProviderAllowed, authorizePrivateModelCall, createOpenRouterReasoningFetch, createOpenRouterRoutingFetch, createOpenRouterUsageCapture, createOpenRouterChargeTotal, createOpenRouterPromptCacheFetch, needsExplicitPromptCache, chatModelPromptAddendum, isPrivateModelUri, readProviderCharge, PRIVATE_MODEL_PROVIDER, resolveOpenRouterUsage, servedTextModel, regionFallbackUsageMetadata, resolveSupportedModelIdWithWarning, type PrivacyMode, type PrivateCallAuditScope, type ProviderTextUsage } from "@docslurp/shared";
-import { createHash, randomBytes } from "node:crypto";
+import { createHmac, hkdfSync, randomBytes } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { withObservation, aiResultDetails, instrumentFetch } from "@docslurp/shared/observability";
@@ -236,23 +236,67 @@ export async function generateOpenRouterText(args: {
   );
 }
 
+let evidenceTagKey: Buffer | null = null;
+
 /**
- * A tag nonce derived from the evidence itself: 64 bits of SHA-256 over every block. Document text cannot predict
- * it (a document would have to contain the hash of a body that includes the hash), and the same evidence always gets
- * the same tag, so a follow-up turn over the same documents repeats the evidence bytes exactly and the provider's
- * prompt cache can serve them.
+ * Key for evidence tags: `EVIDENCE_TAG_KEY`, else derived (HKDF, own label) from `BETTER_AUTH_SECRET`, which startup
+ * requires in production. Without either (local development and tests) a per-process random key: tags then stay
+ * stable within one process only, which is still safe.
  */
-export function evidenceNonce(documents: Array<{ title: string; text: string; context?: string }>): string {
-  const hash = createHash("sha256");
-  for (const document of documents) hash.update(JSON.stringify([document.title, document.context ?? "", document.text])).update("\n");
-  return hash.digest("hex").slice(0, 16);
+function evidenceTagKeyBytes(): Buffer {
+  if (evidenceTagKey) return evidenceTagKey;
+  const secret = process.env.EVIDENCE_TAG_KEY?.trim() || process.env.BETTER_AUTH_SECRET?.trim();
+  evidenceTagKey = secret ? Buffer.from(hkdfSync("sha256", secret, "", "docslurp-evidence-tag-v1", 32)) : randomBytes(32);
+  return evidenceTagKey;
+}
+
+/** Test seam: forget the cached key so a test can change the environment. */
+export function resetEvidenceTagKeyForTests(): void {
+  evidenceTagKey = null;
 }
 
 /**
- * Retrieved documents as isolated evidence blocks. Each block is delimited by a per-call random tag name that
- * document text cannot predict, so a document can neither close its own block nor forge a neighbouring one
- * (the old `---` separator and `[n]` header could be imitated from inside a file). Text is passed verbatim;
- * no line is removed for looking like an instruction (see services/prompt-injection.ts).
+ * The keyed evidence nonce: 128 bits of HMAC-SHA256 under a server secret over the tenant scope (org id) and every
+ * block. Nobody without the key can compute it, so a document cannot be ground offline to contain its own closing
+ * tag, and the same evidence in another org gets a different tag (no cross-tenant shared cache prefix). Within one org
+ * the same evidence keeps the same tag, so a follow-up turn over the same documents can be served from the cache.
+ */
+export function evidenceNonce(documents: Array<{ title: string; text: string; context?: string }>, scope: string): string {
+  const mac = createHmac("sha256", evidenceTagKeyBytes()).update(scope).update("\0");
+  for (const document of documents) mac.update(JSON.stringify([document.title, document.context ?? "", document.text])).update("\n");
+  return mac.digest("hex").slice(0, 32);
+}
+
+/**
+ * The tag nonce for one call: the keyed nonce when the call has a tenant scope and no document already contains it,
+ * else a fresh random one (that call is not cacheable, which only costs the cache).
+ */
+export function evidenceTagNonce(
+  documents: Array<{ title: string; text: string; context?: string }>,
+  scope: string | null | undefined,
+  nonceOf: typeof evidenceNonce = evidenceNonce,
+): string {
+  if (!scope) return randomBytes(16).toString("hex");
+  const nonce = nonceOf(documents, scope);
+  const tag = `evidence-${nonce}`;
+  const named = documents.some((document) => document.title.includes(tag) || document.text.includes(tag) || (document.context ?? "").includes(tag));
+  return named ? randomBytes(16).toString("hex") : nonce;
+}
+
+/**
+ * Removes evidence tag names from text placed outside the evidence (conversation history, the question): an answer
+ * coaxed into echoing a tag, or a user string carrying one, must never form a valid block next to the real evidence.
+ */
+export function withoutEvidenceTags(text: string): string {
+  return text.replace(/evidence-[0-9a-f]{6,}/gi, "evidence");
+}
+
+/**
+ * Retrieved documents as isolated evidence blocks. Each block is delimited by a tag name document text cannot predict:
+ * a keyed per-org nonce (`evidenceTagNonce`) on hosted routes, a random one per call otherwise (the default). A
+ * document can therefore neither close its own block nor forge a neighbouring one (the old `---` separator and `[n]`
+ * header could be imitated from inside a file). Text is passed verbatim; no line is removed for looking like an
+ * instruction (see services/prompt-injection.ts).
  */
 export function formatEvidenceBlocks(documents: Array<{ title: string; text: string; context?: string }>, nonce = randomBytes(6).toString("hex")): string {
   const tag = `evidence-${nonce}`;
@@ -275,6 +319,11 @@ export async function generateOpenRouterDocumentText(args: {
     text: string;
     context?: string;
   }>;
+  /**
+   * Tenant scope of the evidence (the org id). Keys the evidence tag so the same evidence repeats byte for byte within
+   * the org (prompt cache) and differs across orgs. Absent: a random tag per call.
+   */
+  evidenceScope?: string | null;
   model?: string;
   /** Hosted answers: the chat model reference's `?reasoning=` option. Default none (each model's lowest setting). */
   reasoning?: ChatReasoningLevel;
@@ -298,7 +347,8 @@ export async function generateOpenRouterDocumentText(args: {
       operation: "api.chat.documents",
       modelUri: args.model,
       system: args.system,
-      prompt: `${args.prompt}\n\nProject evidence:\n\n${inlineDocuments}`,
+      // Private routes keep the question-first order and a random per-call tag: they have no shared prompt cache.
+      prompt: `${withoutEvidenceTags(args.prompt)}\n\nProject evidence:\n\n${inlineDocuments}`,
       maxOutputTokens: args.maxOutputTokens,
       privacyMode: args.privacyMode,
       auditScope: args.auditScope,
@@ -350,7 +400,7 @@ export async function generateOpenRouterDocumentText(args: {
     sources: Array<Record<string, unknown>>;
   finishReason?: string;
   }> {
-    const inlineDocuments = formatEvidenceBlocks(args.documents, evidenceNonce(args.documents));
+    const inlineDocuments = formatEvidenceBlocks(args.documents, evidenceTagNonce(args.documents, args.evidenceScope));
 
     return withObservation(
       {
@@ -376,11 +426,12 @@ export async function generateOpenRouterDocumentText(args: {
           // Responses API); the Responses API for the rest, as before.
           model: needsExplicitPromptCache(model) ? provider.chat(model) : provider(model),
           system: [args.system, chatModelPromptAddendum(model)].filter(Boolean).join("\n\n") || undefined,
-          // Stable first, per-request last: the evidence (identical across turns over the same documents) before
-          // the history and question, so it stays in the cached prefix.
+          // Stable first, per-request last: the evidence (byte-identical when a follow-up retrieves the same
+          // documents, within one org) before the history and question, so providers with automatic prefix caching
+          // can reuse it. Claude marks only the system prompt (openrouter-prompt-cache.ts).
           messages: [{ role: "user", content: [
             { type: "text", text: `Project evidence:\n\n${inlineDocuments}` },
-            { type: "text", text: args.prompt },
+            { type: "text", text: withoutEvidenceTags(args.prompt) },
           ] }],
           maxOutputTokens: args.maxOutputTokens,
           abortSignal: args.signal,

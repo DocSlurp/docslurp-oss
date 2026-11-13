@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createOpenRouterPromptCacheFetch, needsExplicitPromptCache, withPromptCacheBreakpoints } from "../openrouter-prompt-cache.js";
+import { createOpenRouterPromptCacheFetch, needsExplicitPromptCache, withOpenRouterClaudeChatShape, withPromptCacheBreakpoints } from "../openrouter-prompt-cache.js";
 
 const MARK = { type: "ephemeral" };
 
@@ -12,14 +12,14 @@ describe("prompt-cache breakpoints", () => {
     expect(withPromptCacheBreakpoints(body)).toBe(body);
   });
 
-  it("marks the system prompt and the stable part of the final user message, never the per-request tail", () => {
+  it("marks only the system prompt, never per-request content", () => {
     const body = { model: "anthropic/claude-haiku-5.5", messages: [
       { role: "system", content: "rules" },
       { role: "user", content: [{ type: "text", text: "evidence" }, { type: "text", text: "question" }] },
     ] };
     const marked = withPromptCacheBreakpoints(body) as any;
     expect(marked.messages[0].content).toEqual([{ type: "text", text: "rules", cache_control: MARK }]);
-    expect(marked.messages[1].content[0]).toEqual({ type: "text", text: "evidence", cache_control: MARK });
+    expect(marked.messages[1].content[0]).toEqual({ type: "text", text: "evidence" });
     expect(marked.messages[1].content[1]).toEqual({ type: "text", text: "question" });
     // The input is not mutated.
     expect(body.messages[0].content).toBe("rules");
@@ -42,5 +42,20 @@ describe("prompt-cache breakpoints", () => {
     expect(cc.messages[0].content[0].cache_control).toEqual(MARK);
     const responses = await (await cached("https://openrouter.ai/api/v1/responses", { method: "POST", body })).text();
     expect(responses).toBe(body);
+  });
+
+  it("marks a developer-role system prompt (reasoning requests) and maps Claude's reasoning and cap to OpenRouter's fields", () => {
+    const body = { model: "anthropic/claude-haiku-5.5", reasoning_effort: "low", max_completion_tokens: 900,
+      messages: [{ role: "developer", content: "rules" }, { role: "user", content: [{ type: "text", text: "evidence" }, { type: "text", text: "q" }] }] };
+    const shaped = withPromptCacheBreakpoints(withOpenRouterClaudeChatShape(body)) as any;
+    expect(shaped.reasoning).toEqual({ effort: "low" });
+    expect(shaped.reasoning_effort).toBeUndefined();
+    expect(shaped.max_tokens).toBe(900);
+    expect(shaped.max_completion_tokens).toBeUndefined();
+    expect(shaped.messages[0].content).toEqual([{ type: "text", text: "rules", cache_control: MARK }]);
+    expect(shaped.messages[1].content[0].cache_control).toBeUndefined();
+    // Other models keep the OpenAI fields untouched.
+    const luna = { model: "openai/gpt-6-luna", reasoning_effort: "low", max_completion_tokens: 900, messages: [] };
+    expect(withOpenRouterClaudeChatShape(luna)).toBe(luna);
   });
 });

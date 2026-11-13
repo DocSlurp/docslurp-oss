@@ -65,10 +65,7 @@ export const TIER_OPTIONS: readonly TierOption[] = defineTierOptions([
     id: "chat/claude-haiku-5.5",
     capability: "chat",
     pool: [`${HAIKU}?_provider=anthropic&_sort=latency`, `${HAIKU}?_provider=google-vertex`, `${HAIKU}?_provider=amazon-bedrock`],
-    // A peer of GPT-6 Luna (2026-11-13): same list price ($0.10 / $0.50 per 1M), parity with Luna and ahead of GLM 5.3
-    // Flash on the chat eval with its prompt addendum (chat-model-prompts.ts). Its tokenizer counts ~1.6x Luna's input
-    // tokens, so "cheapest" still ranks it by the live unit cost per answer.
-    tiers: ["cheapest", "fastest", "best"],
+    tiers: ["fastest", "best"],
     evalScore: null,
     evalRef: null,
   },
