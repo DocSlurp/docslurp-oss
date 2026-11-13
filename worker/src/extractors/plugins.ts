@@ -57,13 +57,6 @@ export interface SandboxedPdfJob {
     dir: string;
     limits?: DopplerImageLimits;
     /**
-     * Host-side, never sent to the VM: store one finished range now. A provider that streams finished batches or shards
-     * out of the VM (each in its own empty folder it created under `dir`'s parent) calls it per range, as often as it
-     * likes: deliveries are idempotent. The host also delivers the final folder after the run. Resolves when the range is
-     * stored and committed; never throws for a figure failure (it is logged), only for cancellation.
-     */
-    deliver?: (delivery: import("./doppler-figures.js").DopplerFigureDelivery) => Promise<void>;
-    /**
      * A retry or reprocess with the same PDF and settings: the stored canonical manifest of each range, downloaded to a
      * host file. A provider that supports it runs `--images-resume` for that range with only the manifest (no figure
      * files go back into the VM), so finished images are not redone.
@@ -366,6 +359,25 @@ export type SandboxedPdfFigureOutcome = ({ status: "extracted" } | { status: "pa
   gaps?: unknown;
 };
 const MAX_FIGURE_REASON_CHARS = 500;
+
+const figureDeliveries = new WeakMap<SandboxedPdfJob, (delivery: import("./doppler-figures.js").DopplerFigureDelivery) => Promise<void>>();
+
+/** Host only: how this job's finished figure ranges are stored (never part of the job a provider serializes). */
+export function setSandboxedPdfFigureDelivery(job: SandboxedPdfJob, deliver: (delivery: import("./doppler-figures.js").DopplerFigureDelivery) => Promise<void>): void {
+  figureDeliveries.set(job, deliver);
+}
+
+/**
+ * For a provider that streams finished batches or shards out of the VM: store one finished range now (a folder the
+ * provider created, empty, beside `job.figures.dir`, holding that range's `manifest.jsonl` and files). Call it per range
+ * as often as you like: deliveries are idempotent, and the host also delivers the final folder after the run. Resolves
+ * once the range is stored and committed; a figure failure is logged, never thrown; cancellation throws. A no-op for a
+ * job the host gave no delivery (figures off, or a store without the ledger).
+ */
+export async function deliverSandboxedPdfFigures(job: SandboxedPdfJob, delivery: import("./doppler-figures.js").DopplerFigureDelivery): Promise<void> {
+  const deliver = figureDeliveries.get(job);
+  if (deliver) await deliver(delivery);
+}
 
 /** Parse a provider's figure outcome (untrusted). Anything that is not a recognised answer is a failure. */
 export function parseSandboxedPdfFigureOutcome(raw: unknown, maxReasonChars = MAX_FIGURE_REASON_CHARS): SandboxedPdfFigureOutcome {

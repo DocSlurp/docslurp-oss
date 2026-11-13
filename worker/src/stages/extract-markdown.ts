@@ -7,6 +7,7 @@ import { DopplerFigureRejection, DopplerFigureStoreError, disposeDopplerFigureSe
 import { figureLedgerHooks, ledgerWriteForDeliveredFigures, ledgerWriteForFailedFigures, ledgerWriteForNoFigures, ledgerWriteForStoredFigures, queueAssetLedger } from "../db/document-asset-ledger.js";
 import {
   SANDBOXED_PDF_MAX_MARKDOWN_BYTES, VM_PDF_EXTRACTOR_ID, firstPassServedFigures, requireSandboxedPdfProvider, sandboxedPdfFigures, sandboxedPdfProvider, sandboxedPdfLayoutFacts, sandboxedPdfOcrPages,
+  deliverSandboxedPdfFigures, setSandboxedPdfFigureDelivery,
 } from "../extractors/plugins.js";
 import { buildSummaryEvidence } from "./summary-evidence.js";
 import type { CapacityLeaseStore } from "../media/capacity/types.js";
@@ -541,8 +542,9 @@ export class ExtractMarkdownStage implements Stage {
                     candidateDirs.push(dir);
                     prepared.plan.sandboxedPdf.figures = {
                       dir, limits: dopplerImageLimits(document.pageCount),
-                      ...(delivering && delivery ? { deliver: delivery.deliver, ...(delivery.resume ? { resume: delivery.resume } : {}) } : {}),
+                      ...(delivering && delivery?.resume ? { resume: delivery.resume } : {}),
                     };
+                    if (delivering && delivery) setSandboxedPdfFigureDelivery(prepared.plan.sandboxedPdf, delivery.deliver);
                     delivering = false;
                   }
                 }
@@ -1021,8 +1023,11 @@ export class ExtractMarkdownStage implements Stage {
                   // and writes their ledger.
                   const firstPassOwned = !!winningCandidate.figures && firstPassServedFigures(winningCandidate.plan.sandboxedPdf);
                   if (firstPassOwned) this.firstPassLedger.add(`${state.run.id}\u0000${document.id}`);
-                  const delivered = this.figureDeliveries.get(`${state.run.id}\u0000${document.id}`);
-                  const dopplerFigures = delivered && !firstPassOwned
+                  const deliveryKey = `${state.run.id}\u0000${document.id}`;
+                  const delivered = this.figureDeliveries.get(deliveryKey);
+                  // No committed delivery (a legacy version 1 or 2 folder, or every delivery refused): the single-folder path.
+                  if (delivered && delivered.deliveries.length === 0) this.figureDeliveries.delete(deliveryKey);
+                  const dopplerFigures = delivered && delivered.deliveries.length > 0 && !firstPassOwned
                     ? await this.finishDeliveredFigures({ document, state, candidate: winningCandidate, markdown: winningText, delivered, signal })
                     : winningCandidate.figures && !firstPassOwned
                     ? await this.storeWinningDopplerFigures({ document, runId: state.run.id, candidate: winningCandidate, markdown: winningText, signal, state })
@@ -2007,11 +2012,10 @@ export class ExtractMarkdownStage implements Stage {
     await this.runner.run(plan, signal);
     // The final images folder is one more delivery, stored now: before anything else can fail (the Markdown checks,
     // sanitizing, later stages), so a validated range is kept whatever happens next.
-    const deliver = plan.sandboxedPdf?.figures?.deliver;
-    if (plan.sandboxedPdf?.figures && deliver) {
+    if (plan.sandboxedPdf?.figures) {
       const outcome = sandboxedPdfFigures(plan.sandboxedPdf);
       if (outcome && outcome.status !== "failed") {
-        await deliver({
+        await deliverSandboxedPdfFigures(plan.sandboxedPdf, {
           dir: plan.sandboxedPdf.figures.dir, status: outcome.status === "partial" ? "partial" : "extracted",
           ...(outcome.exitCode !== undefined ? { exitCode: outcome.exitCode } : {}), ...(outcome.build ? { build: outcome.build } : {}),
           ...(outcome.gaps !== undefined ? { gaps: outcome.gaps } : {}),

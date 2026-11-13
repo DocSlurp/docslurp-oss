@@ -119,12 +119,16 @@ describe("Doppler figures in the extraction stage", () => {
     expect(out.stageState?.stats?.dopplerFigures).toMatchObject({ imagesConfined: false });
     expect(out.jobs[0].figures.dir).toMatch(/\.doppler-figures-/);
     expect(out.stageState?.status).toBe("completed");
-    expect(out.objects.get(`${figureRoot}/page-0003/image-001.webp`)?.type).toBe("image/webp");
-    expect(out.objects.get(`${figureRoot}/page-0003/figure-002.svg`)?.type).toBe("image/svg+xml");
-    expect(out.objects.get(`${figureRoot}/page-0005/figure-001.png`)?.type).toBe("image/png");
-    expect(out.ledger[`${DOC_ID}:doppler-figure:p3.g2`]).toBe(`s3://test/${figureRoot}/page-0003/figure-002.svg`);
+    // Content-addressed keys: the page path with the file's digest before the format.
+    const keyOf = (relative: string) => [...out.objects.keys()].find((key) => key.startsWith(`${figureRoot}/${relative.replace(/\.\w+$/, "")}.`) && /\.[0-9a-f]{16}\.\w+$/.test(key));
+    expect(out.objects.get(keyOf("page-0003/image-001.webp")!)?.type).toBe("image/webp");
+    expect(out.objects.get(keyOf("page-0003/figure-002.svg")!)?.type).toBe("image/svg+xml");
+    expect(out.objects.get(keyOf("page-0005/figure-001.png")!)?.type).toBe("image/png");
+    expect(out.ledger[`${DOC_ID}:doppler-figure:p3.g2`]).toBe(`s3://test/${keyOf("page-0003/figure-002.svg")}`);
     expect(out.ledger[`${DOC_ID}:doppler-figures`]).toBe(`s3://test/${folderRoot}/index.json`);
-    expect(out.ledger[`${DOC_ID}:doppler-manifest`]).toBe(`s3://test/${figureRoot}/manifest.json`);
+    // The canonical manifest is stored but never served: no slot.
+    expect(out.ledger[`${DOC_ID}:doppler-manifest`]).toBeUndefined();
+    expect(out.objects.has(`${figureRoot}/manifest.json`)).toBe(true);
     expect(out.ledger[`${DOC_ID}:doppler-markdown`]).toBe(`s3://test/${folderRoot}/document.md`);
     // document.md is Doppler's output exactly; source.json points at the source and is not a slot.
     expect(out.objects.get(`${folderRoot}/document.md`)?.bytes.toString()).toBe(MARKDOWN);
@@ -176,17 +180,19 @@ describe("Doppler figures in the extraction stage", () => {
     return { figures: { status: "extracted" as const, confined: true } };
   };
 
-  it("a failed figure object upload keeps the Markdown, removes partial figures and records no figure or index", async () => {
+  it("a failed figure object upload keeps the Markdown and the verified figures, deletes nothing and records no figure or index slot", async () => {
     registerProvider(true);
     vi.stubEnv("DOCSLURP_DOPPLER_IMAGE_EXTRACT", "1");
     const warn = vi.spyOn(console, "warn");
-    const out = await runStage(figureFolder, { putBytes: (key) => key.endsWith("/page-0003/figure-002.svg") });
+    const out = await runStage(figureFolder, { putBytes: (key) => /\/page-0003\/figure-002\.[0-9a-f]{16}\.svg$/.test(key) });
     expect(out.stageState?.status).toBe("completed");
     expect(out.markdown).toBe(MARKDOWN);
-    expect(out.stageState?.stats?.dopplerFigures).toEqual({ status: "failed", reason: "store-object-failed", cleanup: "deleted", imagesConfined: true, ledger: "queued" });
-    expect([...out.objects.keys()].some((key) => key.includes("/doppler/"))).toBe(false);
+    expect(out.stageState?.stats?.dopplerFigures).toEqual({ status: "failed", reason: "store-object-failed", cleanup: "kept", imagesConfined: true, ledger: "queued" });
+    // Verified uploads stay (a later attempt adopts them; the orphan GC removes what no row vouches for).
+    expect([...out.objects.keys()].every((key) => !key.includes("/doppler/") || /\.[0-9a-f]{16}\.\w+$/.test(key))).toBe(true);
     expect([...out.json.keys()].some((key) => key.includes("/doppler/"))).toBe(false);
-    expect(out.pending).toMatchObject({ level: { imagesStatus: "failed" }, assets: [] });
+    // The failure write is level-only: it never deletes rows.
+    expect(out.pending).toMatchObject({ level: { imagesStatus: "failed" }, assets: [], levelOnly: true });
     expect(Object.keys(out.ledger).some((slot) => slot.includes("doppler-figure"))).toBe(false);
     // Other document artifacts are still recorded.
     expect(out.ledger[`${DOC_ID}:markdown-manifest`]).toBeTruthy();
@@ -197,14 +203,14 @@ describe("Doppler figures in the extraction stage", () => {
     expect(JSON.stringify(out.stageState?.stats)).not.toContain("Prose before");
   });
 
-  it("a failed figure index upload keeps the Markdown and leaves no index or figure visible", async () => {
+  it("a failed figure index upload keeps the Markdown and the stored files, and leaves no index or figure visible", async () => {
     registerProvider(true);
     vi.stubEnv("DOCSLURP_DOPPLER_IMAGE_EXTRACT", "1");
     const out = await runStage(figureFolder, { putBytes: (key) => key === `${folderRoot}/index.json` });
     expect(out.stageState?.status).toBe("completed");
     expect(out.markdown).toBe(MARKDOWN);
-    expect(out.stageState?.stats?.dopplerFigures).toEqual({ status: "failed", reason: "store-index-failed", cleanup: "deleted", imagesConfined: true, ledger: "queued" });
-    expect([...out.objects.keys()].some((key) => key.includes("/doppler/"))).toBe(false);
+    expect(out.stageState?.stats?.dopplerFigures).toEqual({ status: "failed", reason: "store-index-failed", cleanup: "kept", imagesConfined: true, ledger: "queued" });
+    expect([...out.objects.keys()].some((key) => key === `${folderRoot}/index.json`)).toBe(false);
     expect(Object.keys(out.ledger).some((slot) => slot.includes("doppler-figure"))).toBe(false);
     expect(out.ledger[`${DOC_ID}:markdown-manifest`]).toBeTruthy();
   });

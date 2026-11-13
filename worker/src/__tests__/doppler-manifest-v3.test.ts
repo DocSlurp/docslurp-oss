@@ -254,7 +254,7 @@ describe("storing: fixed memory, bounded concurrency, verified streams", () => {
     expect(stored.stats.peakBufferBytes).toBeLessThanOrEqual(6 * 1024 * 1024);
   }, 60_000);
 
-  it("a file that fails verification midway aborts its upload and deletes the partial object, and nothing else stays", async () => {
+  it("a file that fails verification midway aborts its upload and deletes only that object; verified files stay", async () => {
     await scanBook(6, 2 * 1024 * 1024);
     const set = await readDopplerFigureDir(dir, { pageCount: 6, expect: "complete" });
     // Changed after the read: same size, different bytes near the end.
@@ -267,9 +267,10 @@ describe("storing: fixed memory, bounded concurrency, verified streams", () => {
     expect(error).toBeInstanceOf(DopplerFigureRejection);
     expect(error.rule).toBe("sha256-mismatch");
     const { deleted, objects, order } = storage.stats();
-    expect(deleted).toContain(`user-1/run-1/doppler/${DOC.id}/images/page-0004/image-001.jpg`);
-    expect(order).not.toContain(`user-1/run-1/doppler/${DOC.id}/images/page-0004/image-001.jpg`);
-    expect(objects.size).toBe(0);
+    const victimKey = `user-1/run-1/doppler/${DOC.id}/images/page-0004/image-001.${set.files.find((f) => f.id === "p4.1")!.sha256.slice(0, 16)}.jpg`;
+    expect(deleted).toEqual([victimKey]);
+    expect(order).not.toContain(victimKey);
+    expect(objects.has(victimKey)).toBe(false);
     expect(order.some((key) => key.endsWith("manifest.jsonl"))).toBe(false);
   }, 60_000);
 
@@ -305,12 +306,21 @@ describe("a real Doppler run (fixtures/doppler-golden/v3-repeats, see PROVENANCE
     await storeDopplerFigures({ storage, document: DOC, runId: "run-1", figures: set, markdown: "", dopplerMarkdownPath: markdownPath });
     const prefix = `user-1/run-1/doppler/${DOC.id}/`;
     const { objects } = storage.stats();
-    // The manifest bytes are Doppler's, unchanged.
-    expect(objects.get(`${prefix}images/manifest.jsonl`)!.equals(await readFile(path.join(GOLDEN, "v3-repeats", "images", "manifest.jsonl")))).toBe(true);
-    // Every link of document.md, resolved against the folder, is a stored object.
+    // The stored manifest is the canonical re-serialisation: the same lines as JSON values, and it validates again.
+    const canonical = objects.get(`${prefix}images/manifest.jsonl`)!.toString().trimEnd().split("\n").map((line) => JSON.parse(line));
+    const original = (await readFile(path.join(GOLDEN, "v3-repeats", "images", "manifest.jsonl"), "utf8")).trimEnd().split("\n").map((line) => JSON.parse(line));
+    expect(canonical.slice(0, -1)).toEqual(original.slice(0, -1));
+    expect(canonical.at(-1)).toEqual({ ...original.at(-1), sha256: expect.stringMatching(/^[0-9a-f]{64}$/) });
+    // Every link of document.md names a ledger row whose owner's file is a stored (content-addressed) object.
     const markdown = objects.get(`${prefix}document.md`)!.toString();
     const links = [...markdown.matchAll(/\]\(([^)]+)\)/g)].map((m) => m[1]!);
     expect(links.length).toBeGreaterThan(0);
-    for (const link of links) expect(objects.has(`${prefix}${link}`), link).toBe(true);
+    const rows = await rowsOf(set);
+    for (const link of links) {
+      const row = rows.find((r) => r.linkPath === link);
+      expect(row, link).toBeDefined();
+      const owner = rows.find((r) => r.assetId === row!.fileOf)!;
+      expect(objects.has(`${prefix}images/${link.slice("images/".length).replace(/\.(\w+)$/, `.${owner.sha256!.slice(0, 16)}.$1`)}`) || objects.has(`${prefix}images/${owner.linkPath!.slice("images/".length).replace(/\.(\w+)$/, `.${owner.sha256!.slice(0, 16)}.$1`)}`), link).toBe(true);
+    }
   });
 });
