@@ -62,7 +62,7 @@ import { enforceRunSpend, enforceRunSpendForCharge, largestFundedCharge, pauseRu
 import { retryTransaction } from "./transaction-retry.js";
 import { consumeRunCreditLease, creditLeasesActive, RunCreditLeases, type LeaseObservation } from "./credit-lease.js";
 import { PostgresVisionAttemptBackend } from "./vision-attempt-store.js";
-import { assertParseSourceRecord, bindDocumentUpload, PARSE_SOURCE_SCAN_VERSION, resolveDocumentSource, type ParseSourceDecisionRecord } from "../lib/parse-source.js";
+import { assertParseSourceRecord, bindDocumentUpload, PARSE_SOURCE_SCAN_VERSION, resolveDocumentSource, type ParseSourceDecisionRecord, type ResolvedDocumentSource } from "../lib/parse-source.js";
 import {
   lexicalColumnProbe,
   resolveWorkerCapabilities,
@@ -4616,6 +4616,21 @@ function toDate(value: string | Date): Date {
  * layout), so each run can be listed once. Keys with fewer segments are left
  * for a HEAD each.
  */
+/**
+ * The parse source of one document for a reader outside the stage pipeline (the figure resume runner): the loader's own
+ * resolution (lib/parse-source.ts resolveDocumentSource), so it is quarantine's decision and never the upload's key unless
+ * the scan read the upload itself. Org-scoped; null when the document is not the organization's. Only this module reads
+ * the upload's key (quarantine-council-r6 tripwire).
+ */
+export async function documentParseSource(
+  sql: Sql<Record<string, unknown>>, scope: { orgId: string; documentId: string }, env: NodeJS.ProcessEnv = process.env,
+): Promise<ResolvedDocumentSource | null> {
+  const [row] = await sql<Array<{ id: string; source_key: string; source_sha256: string | null; parse_source_key: string | null; parse_source_sha256: string | null; parse_source_scan_version: number | null }>>`
+    select id, source_key, source_sha256, parse_source_key, parse_source_sha256, parse_source_scan_version
+    from documents where id = ${scope.documentId} and org_id = ${scope.orgId}`;
+  return row ? resolveDocumentSource(row, env) : null;
+}
+
 export function groupReferencesByRunPrefix(keys: string[]): { byPrefix: Map<string, string[]>; ungrouped: string[] } {
   const byPrefix = new Map<string, string[]>();
   const ungrouped: string[] = [];

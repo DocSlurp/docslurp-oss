@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
-import { dopplerShardFolder } from "@docslurp/shared";
+import { dopplerShardFolder, PARSE_SOURCE_SCAN_VERSION } from "@docslurp/shared";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { PGlite } from "@electric-sql/pglite";
@@ -22,7 +22,7 @@ import { setSpendCheckConfig } from "../db/spend-check.js";
 import {
   auditFigureStorage, claimFigureResume, figureResumeBacklog, isPageWithheld, piiWithholding, resumeWithholding, runFigureResumes, FIGURE_FAILED_RETENTION_MS, FIGURE_ORPHAN_GRACE_MS, type FigureResumeProvider,
 } from "../figures/resume-runner.js";
-import { v2Manifest, v3Text, writeV3Folder, V2_SOURCE_SHA } from "../test/doppler-manifest-v2.js";
+import { v2Manifest, v3Text, writeV3Folder, V2_SOURCE_BYTES, V2_SOURCE_SHA } from "../test/doppler-manifest-v2.js";
 import { createMigratedDatabase } from "../test/migrated-db.js";
 import { serveOnRandomPort } from "../test/migrated-postgres.js";
 
@@ -60,6 +60,8 @@ beforeAll(async () => {
       ('doc-off', 'org-a', 'ua', 'proj-off', 'run-off', 'o.pdf', 'application/pdf', 'ko', 'completed', 3, '${V2_SOURCE_SHA}'),
       ('doc-b', 'org-b', 'ub', 'proj-b', 'run-b', 'b.pdf', 'application/pdf', 'kb', 'completed', 3, '${V2_SOURCE_SHA}');
   `);
+  // Each document has this build's quarantine decision: its upload, as scanned (lib/parse-source.ts "original").
+  await db.exec(`update documents set parse_source_scan_version = ${PARSE_SOURCE_SCAN_VERSION}, parse_source_sha256 = source_sha256`);
   const served = await serveOnRandomPort(db);
   server = served.server;
   store = new Store(`postgres://postgres@127.0.0.1:${served.port}/postgres`, 60_000, { poolMax: 1 });
@@ -81,7 +83,9 @@ beforeEach(async () => {
   await sql`delete from document_extraction_shards`;
   await sql`delete from figure_resume_org_days`;
   await sql`delete from pii_detections`;
-  await sql`update documents set status = 'completed', metadata = '{}'::jsonb`;
+  await sql`update documents set source_sha256 = ${V2_SOURCE_SHA} where source_sha256 is distinct from ${V2_SOURCE_SHA}`;
+  await sql`update documents set status = 'completed', metadata = '{}'::jsonb, parse_source_key = null, parse_source_sha256 = source_sha256,
+    parse_source_scan_version = ${PARSE_SOURCE_SCAN_VERSION}`;
   telemetry.calls.length = 0;
   await sql`update documents set run_id = case id when 'doc-m' then 'run-m' when 'doc-off' then 'run-off' when 'doc-b' then 'run-b' else 'run-a' end`;
   await sql`update project_runs set artifacts = '{}'::jsonb`;
@@ -103,7 +107,15 @@ function memoryStorage() {
       if (!v) throw Object.assign(new Error("missing"), { name: "NoSuchKey" });
       return { stream: (async function* () { yield v.bytes; })(), size: v.bytes.length };
     },
-    downloadToTempFile: async (key: string) => { const file = path.join(work, `src-${key}-${Math.random()}`); await writeFile(file, `pdf of ${key}`); return file; },
+    // Source reads (the decided parse source): the test PDF's bytes, unless a test put other bytes at the key.
+    sources: new Map<string, Buffer>(),
+    downloaded: [] as string[],
+    async downloadToTempFile(key: string) {
+      this.downloaded.push(key);
+      const file = path.join(work, `src-${key.replace(/[^a-z0-9]/gi, "_")}-${Math.random()}`);
+      await writeFile(file, this.sources.get(key) ?? V2_SOURCE_BYTES);
+      return file;
+    },
     listKeys: async ({ prefix }: { prefix: string }) => ({ keys: [...objects.keys()].filter((key) => key.startsWith(prefix)), truncated: false }),
     headObject: async (key: string) => { const v = objects.get(key); return v ? { size: v.bytes.length, lastModified: v.at } : null; },
     uri: (key: string) => `s3://b/${key}`,
@@ -839,3 +851,79 @@ describe("council round 2 (#365)", () => {
 function ledgerWriteForNoFiguresForTest() {
   return { level: { imagesStatus: "failed" as const, imagesExitCode: null, manifestVersion: null, dopplerBuild: null, run: null, manifest: null, markdownComplete: true }, assets: [], levelOnly: true };
 }
+
+describe("R6-H1: the resume converts quarantine's parse source, never the upload (lib/parse-source.ts)", () => {
+  const launches = async () => (await sql<{ n: number }[]>`select resume_vm_launches as n from document_extraction_levels where document_id = 'doc-a'`)[0]!.n;
+
+  it("an undecided document (no decision from this build's quarantine) is blocked unscanned: no download, no VM, counted", async () => {
+    const storage = memoryStorage();
+    await partialPass(storage);
+    await due();
+    await sql`update documents set parse_source_scan_version = null, parse_source_sha256 = null where id = 'doc-a'`;
+    const { provider, jobs } = fakeProvider();
+    await runFigureResumes({ sql, storage, provider, workerId: "w1", env: ON });
+    expect(jobs).toEqual([]);
+    expect(storage.downloaded).toEqual([]);
+    expect(await launches()).toBe(0);
+    expect(await level()).toMatchObject({ resume_blocked: "unscanned", queued: false });
+    expect(telemetry.calls).toEqual(expect.arrayContaining([expect.objectContaining({ name: "resume.parse_source_refused", labels: { reason: "unscanned" } })]));
+  });
+
+  it("a rejected decision (its hash is not the upload's server hash) is unscanned: refused the same way", async () => {
+    const storage = memoryStorage();
+    await partialPass(storage);
+    await due();
+    await sql`update documents set parse_source_sha256 = ${"c".repeat(64)} where id = 'doc-a'`;
+    const { provider, jobs } = fakeProvider();
+    await runFigureResumes({ sql, storage, provider, workerId: "w1", env: ON });
+    expect(jobs).toEqual([]);
+    expect(storage.downloaded).toEqual([]);
+    expect(await level()).toMatchObject({ resume_blocked: "unscanned" });
+  });
+
+  it("an encrypted PDF converts its scanned copy, hash-bound to the copy; the upload is never read", async () => {
+    const storage = memoryStorage();
+    await partialPass(storage);
+    await due();
+    // The upload's own bytes differ (the encrypted original); the scanned copy hashes to what the figures were made from.
+    await sql`update documents set source_sha256 = ${"d".repeat(64)}, parse_source_key = 'ua/run-a/quarantine/doc-a.scanned.pdf', parse_source_sha256 = ${V2_SOURCE_SHA} where id = 'doc-a'`;
+    storage.sources.set("ka", Buffer.from("%PDF-1.7 encrypted original"));
+    try {
+      const { provider, jobs } = fakeProvider();
+      await runFigureResumes({ sql, storage, provider, workerId: "w1", env: ON });
+      // The source read is the scanned copy; the upload ("ka") is never downloaded (document.md is read for the index).
+      expect(storage.downloaded.filter((key) => !key.endsWith("/document.md"))).toEqual(["ua/run-a/quarantine/doc-a.scanned.pdf"]);
+      expect(storage.downloaded).not.toContain("ka");
+      expect(jobs).toHaveLength(1);
+      expect(jobs[0]!.sourceSha256).toBe(V2_SOURCE_SHA);
+      expect(await level()).toMatchObject({ images_status: "complete" });
+    } finally {
+      await sql`update documents set source_sha256 = ${V2_SOURCE_SHA} where id = 'doc-a'`;
+    }
+  });
+
+  it("hash mismatch: a decided source other than the one the figures were made from is refused before any download", async () => {
+    const storage = memoryStorage();
+    await partialPass(storage);
+    await due();
+    await sql`update documents set parse_source_key = 'ua/run-a/quarantine/doc-a.scanned.pdf', parse_source_sha256 = ${"e".repeat(64)} where id = 'doc-a'`;
+    const { provider, jobs } = fakeProvider();
+    await runFigureResumes({ sql, storage, provider, workerId: "w1", env: ON });
+    expect(jobs).toEqual([]);
+    expect(storage.downloaded).toEqual([]);
+    expect(await level()).toMatchObject({ resume_blocked: "refused" });
+  });
+
+  it("hash mismatch: staged bytes that are not the decided source's (a swapped object) are refused: no VM, no launch counted", async () => {
+    const storage = memoryStorage();
+    await partialPass(storage);
+    await due();
+    storage.sources.set("ka", Buffer.from("%PDF-1.7 swapped after the scan"));
+    const { provider, jobs } = fakeProvider();
+    await runFigureResumes({ sql, storage, provider, workerId: "w1", env: ON });
+    expect(storage.downloaded).toEqual(["ka"]);
+    expect(jobs).toEqual([]);
+    expect(await launches()).toBe(0);
+    expect(await level()).toMatchObject({ resume_blocked: "refused", queued: false });
+  });
+});

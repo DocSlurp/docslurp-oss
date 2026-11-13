@@ -18,7 +18,7 @@ ALTER TABLE document_extraction_levels ADD COLUMN IF NOT EXISTS resume_lease_own
 ALTER TABLE document_extraction_levels ADD COLUMN IF NOT EXISTS resume_failures integer NOT NULL DEFAULT 0 CHECK (resume_failures BETWEEN 0 AND 1000);
 --> statement-breakpoint
 ALTER TABLE document_extraction_levels ADD COLUMN IF NOT EXISTS resume_blocked text
-  CHECK (resume_blocked IN ('attempts', 'figures-off', 'resume-off', 'stale', 'refused'));
+  CHECK (resume_blocked IN ('attempts', 'figures-off', 'resume-off', 'stale', 'refused', 'unscanned'));
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS document_extraction_levels_resume_queue_idx
   ON document_extraction_levels (resume_after, org_id) WHERE resume_after IS NOT NULL AND resume_blocked IS NULL;

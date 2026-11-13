@@ -9,6 +9,9 @@
  * launch cap, the organization may spend and has resume VM time left today (H4). The lease is fenced: every later runner
  * write matches the lease owner and the claimed run, so a reprocess or a second runner is never overwritten (M2).
  *
+ * The bytes converted are the document's parse source (lib/parse-source.ts, R6-H1): quarantine's decision, hash-bound, never
+ * the upload's key; a document without a decision from this build's quarantine is blocked `unscanned` with no VM.
+ *
  * One unit per claim (a shard, a gap or the unsharded document), then the document goes back to the queue (M6):
  *   1. adopt pending uploads a crashed attempt left (streamed SHA-256, no VM);
  *   2. if a runnable unit remains (below #355's per-unit and per-document caps): the lease is extended for the unit's
@@ -48,6 +51,9 @@ import {
   type DocumentAssetLedgerScope, type FigureObjectReader,
 } from "../db/document-asset-ledger.js";
 import { persistScopedUsageEvents } from "../db/usage-event-store.js";
+import { documentParseSource } from "../db/store.js";
+import { isUnscannedParseSourceKey } from "../lib/parse-source.js";
+import { SourceRefusalError, stageSourceFile } from "../sandbox/source-integrity.js";
 import { spendBlockCode, spendCheckConfig } from "../db/spend-check.js";
 import {
   DopplerFigureRejection, disposeDopplerFigureSet, dopplerFolderKey, downloadDopplerImagesDir, readDopplerFigureDir, storeDopplerFigureIndex,
@@ -85,7 +91,7 @@ export const FIGURE_RESUME_METRIC = "doppler-figures-resume-vm";
 const CLAIM_LEASE_MS = 10 * 60_000;
 
 interface ClaimedLevel {
-  document_id: string; org_id: string; project_id: string; run_id: string; user_id: string; page_count: number; source_key: string;
+  document_id: string; org_id: string; project_id: string; run_id: string; user_id: string; page_count: number;
   source_sha256: string | null; shards: number; resumes: number; manifest_sha256: string | null; storage_prefix: string | null;
   pipeline: unknown; run_pipeline: unknown; resume_vm_launches: number; gap_count: number;
   /** This claim's lease token (`<worker>:<uuid>`): every later runner write is fenced by it (R2 adversarial 5). */
@@ -109,7 +115,7 @@ function claimableSql(sql: Client) {
     and (l.resume_lease_until is null or l.resume_lease_until < now())`;
 }
 
-async function block(tx: Client, row: Pick<ClaimedLevel, "document_id" | "org_id">, reason: "attempts" | "figures-off" | "resume-off" | "stale" | "refused"): Promise<void> {
+async function block(tx: Client, row: Pick<ClaimedLevel, "document_id" | "org_id">, reason: "attempts" | "figures-off" | "resume-off" | "stale" | "refused" | "unscanned"): Promise<void> {
   await tx`update document_extraction_levels set resume_after = null, resume_blocked = ${reason} where document_id = ${row.document_id} and org_id = ${row.org_id}`;
   console.log(`[doppler-figures] resume capped doc=${row.document_id} reason=${reason}`);
   recordFigureTelemetry("resume.capped", 1, { reason });
@@ -129,7 +135,7 @@ export async function claimFigureResume(sql: Client, workerId: string, env: Reco
     if ((live?.n ?? 0) >= figureResumeGlobalMax(env)) return null;
     const candidates = await tx<ClaimedLevel[]>`
       select c.* from (
-        select distinct on (l.org_id) l.document_id, l.org_id, l.project_id, l.run_id, d.user_id, d.page_count, d.source_key, l.source_sha256,
+        select distinct on (l.org_id) l.document_id, l.org_id, l.project_id, l.run_id, d.user_id, d.page_count, l.source_sha256,
           l.shards, l.resumes, l.manifest_sha256, r.storage_prefix, p.pipeline, r.pipeline as run_pipeline, l.resume_vm_launches, l.resume_after,
           coalesce(jsonb_array_length(l.gaps), 0)::int as gap_count
         from document_extraction_levels l
@@ -558,6 +564,21 @@ async function resumeUnit(
 ): Promise<{ outcome: Outcome; blocked?: string; vmMs: number; added: number }> {
   const row = claimed;
   if (!row.source_sha256) return { outcome: "blocked", blocked: "refused", vmMs: 0, added: 0 };
+  // The bytes to convert are quarantine's decision for this document (R6-H1), resolved by the loader's own rule.
+  const parse = await documentParseSource(deps.sql, { orgId: row.org_id, documentId: row.document_id }, deps.env ?? process.env);
+  if (!parse || parse.parseSourceDecision === "unscanned" || isUnscannedParseSourceKey(parse.sourceKey)) {
+    // No decision from this build's quarantine (never scanned, refused, or rejected): no VM, blocked until a reprocess or
+    // a request after one records a decision (counted; never a silent drop).
+    console.warn(`[doppler-figures] resume refused doc=${row.document_id} reason=parse-source-unscanned`);
+    recordFigureTelemetry("resume.parse_source_refused", 1, { reason: "unscanned" });
+    return { outcome: "blocked", blocked: "unscanned", vmMs: 0, added: 0 };
+  }
+  // The figures were made from exactly these bytes: the level's source digest must be the decided parse source's hash.
+  if (!parse.sourceSha256 || parse.sourceSha256 !== row.source_sha256) {
+    console.warn(`[doppler-figures] resume refused doc=${row.document_id} reason=parse-source-mismatch`);
+    recordFigureTelemetry("resume.parse_source_refused", 1, { reason: "mismatch" });
+    return { outcome: "blocked", blocked: "refused", vmMs: 0, added: 0 };
+  }
   // Every ledger write of this unit is fenced by the claim's lease token (R2 adversarial 5).
   const fencedScope: DocumentAssetLedgerScope = { ...scope, lease: row.lease };
   const asked = unit.resumePages ?? (unit.shard ? [unit.shard.first, unit.shard.last] as const : [1, row.page_count] as const);
@@ -587,10 +608,10 @@ async function resumeUnit(
         ...(unit.shard ? { shard: unit.shard } : {}), signal,
       });
     }
-    // 2. The source (the provider stages it into its VM; the host never parses it) and a fresh VM, counted before it
-    //    starts (lifetime, per organization per day, its capped timeout reserved) and timed whatever happens.
-    const sourceKey = deps.storage.bucket ? keyOf(row.source_key, deps.storage.bucket) : row.source_key;
-    source = await deps.storage.downloadToTempFile(sourceKey, "figure-resume-source-*.pdf");
+    // 2. The parse source quarantine decided (lib/parse-source.ts, R6-H1), never the upload: an encrypted PDF's scanned copy,
+    //    or the upload exactly as the scan read it; hash-bound when staged (stageSourceFile). The provider stages it into a
+    //    fresh VM (the host never parses it), counted before it starts and timed whatever happens.
+    source = await stageSourceFile(deps.storage, { id: row.document_id, ...parse! }, "figure-resume-source-*.pdf");
     const outDir = path.join(work, "out");
     await mkdir(outDir, { mode: 0o700 });
     const counted = await deps.sql`
@@ -605,7 +626,7 @@ async function resumeUnit(
     let vmOutcome = "failed";
     try {
       raw = await deps.provider!.resume({
-        input: source, sourceSha256: row.source_sha256, manifest: unit.manifestSha256 ? path.join(manifestDir, "manifest.jsonl") : null,
+        input: source, sourceSha256: parse!.sourceSha256!, manifest: unit.manifestSha256 ? path.join(manifestDir, "manifest.jsonl") : null,
         pages: unit.shard ? [unit.shard.first, unit.shard.last] : null, resumePages: unit.resumePages ?? null, dir: outDir,
         limits: dopplerImageLimits(row.page_count), timeoutMs,
       }, signal);
@@ -680,6 +701,12 @@ async function resumeUnit(
   } catch (error) {
     // A lease lost mid-unit (heartbeat): nothing more is written; the new owner carries on.
     if (lost.signal.aborted && !deps.signal?.aborted) return { outcome: "lost", vmMs: 0, added: 0 };
+    // The staged bytes are not the decided parse source (swapped object, the original of a scanned copy): refused, no VM.
+    if (error instanceof SourceRefusalError) {
+      console.warn(`[doppler-figures] resume refused doc=${row.document_id} reason=${error.name}`);
+      recordFigureTelemetry("resume.parse_source_refused", 1, { reason: "integrity" });
+      return { outcome: "blocked", blocked: "refused", vmMs: 0, added: 0 };
+    }
     throw error;
   } finally {
     clearInterval(beat);
@@ -699,10 +726,6 @@ async function rebuildIndex(deps: FigureResumeDeps, set: DopplerFigureSet, docum
   }
 }
 
-function keyOf(sourceKey: string, bucket: string): string {
-  const prefix = `s3://${bucket}/`;
-  return sourceKey.startsWith(prefix) ? sourceKey.slice(prefix.length) : sourceKey;
-}
 
 // ---- Orphan GC, retention and audit ----
 
