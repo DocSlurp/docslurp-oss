@@ -127,7 +127,8 @@ describe("VM deterministic extractor adapter", () => {
     const run = vi.fn(async (plan: { args: string[]; timeoutMs?: number }) => {
       plans.push(plan);
       const request = JSON.parse(await readFile(plan.args[2]!, "utf8"));
-      expect(request).toEqual({ kind: "svg", diagrams: true, batch: 2 });
+      // pages: the document's page count, which scales the batch's SVG geometry budget.
+      expect(request).toEqual({ kind: "svg", diagrams: true, batch: 2, pages: 3 });
       await writeFile(plan.args[3]!, JSON.stringify({ schemaVersion: "chart-export-deterministic-batch@v1", results: [one("a"), one("b")] }));
       return { stdout: "", stderr: "" };
     });
@@ -150,6 +151,28 @@ describe("VM deterministic extractor adapter", () => {
     expect(result.presence).toMatchObject({ svgFigures: 2 });
     // Each partial carries its figure's placement from the host's own index ([0, 0, 10, 10] in page points).
     expect(result.partials.map((p) => p.bbox)).toEqual([{ x: 0, y: 0, width: 10, height: 10 }, { x: 0, y: 0, width: 10, height: 10 }]);
+  });
+
+  it("records SVGs the guest deferred, with their figure id and page, instead of dropping them", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    const store = storage(
+      { "fig/a.svg": genericBar(["a", "b"], [1, 2], 4), "fig/b.svg": genericBar(["c"], [3], 2) },
+      { "run/index.json": figureIndex([{ id: "p2.g0", page: 2, format: "svg" }, { id: "p3.g0", page: 3, format: "svg" }]) },
+    );
+    const done = { schemaVersion: "chart-export-deterministic@v1", visuals: [{ source: "svg-geometry", kind: "chart", confidence: 0.9, spec: { kind: "chart", chartType: "bar", series: [{ name: "s", points: [{ x: "a", y: 1 }] }] }, digest: null, locator: "svg", slide: null, sheet: null, generator: null, reason: null }], refusals: [] };
+    const later = { schemaVersion: "chart-export-deterministic@v1", visuals: [], refusals: [], deferred: [{ locator: "svg", reason: "svg-scene-budget" }] };
+    const run = vi.fn(async (plan: { args: string[] }) => { await writeFile(plan.args[3]!, JSON.stringify({ schemaVersion: "chart-export-deterministic-batch@v1", results: [done, later] })); return { stdout: "", stderr: "" }; });
+    const logs: string[] = [];
+    const extract = createVmDeterministicVisualExtractor({ runner: { run } as never, storage: store, log: (m) => logs.push(m) });
+    const result = await extract({
+      document: { id: "doc-d", mimeType: "application/pdf", pageCount: 3, sourceKey: "src/doc.pdf" },
+      candidates: [],
+      artifacts: { dopplerFiguresIndexUri: "s3://b/run/index.json", mediaMapUri: null, artifactUri: (slot) => ({ "doppler-figure:p2.g0": "s3://b/fig/a.svg", "doppler-figure:p3.g0": "s3://b/fig/b.svg" } as Record<string, string>)[slot] ?? null },
+    });
+    // The finished figure is kept; the deferred one is recorded for the later pass.
+    expect(result.partials).toHaveLength(1);
+    expect(result.deferred).toEqual([{ input: "doppler-figure", locator: "svg", reason: "svg-scene-budget", pageNumber: 3, figureId: "p3.g0" }]);
+    expect(logs.join("\n")).toContain("visuals deferred document=doc-d count=1");
   });
 
   it("reads a figure only from its own doppler-figure slot, never another artifact slot (adversarial L4)", async () => {

@@ -3,6 +3,7 @@
 // compared with the code it replaced, so a later edit that drifts from the old behaviour fails here.
 import { describe, expect, it } from "vitest";
 
+import { extractDeterministicVisuals } from "../index.js";
 import { CHART_EXTRACT_LIMITS, ExtractLimitError } from "../limits.js";
 import { withoutVertexMarkers } from "../svg-geometry.js";
 import type { LinePrim, PointPrim } from "../svg-scene.js";
@@ -93,21 +94,23 @@ describe("withoutVertexMarkers work bound (hostile input; counted in pair tests,
   const budget = CHART_EXTRACT_LIMITS.maxMarkerPairTests;
 
   it("caps the work far below the guest timeout", () => {
-    // ~0.2 s of pair tests on an idle core; the guest's timeout is 60 s.
+    // Per SVG ~0.15 s and per input ~3 s of pair tests on the parser VM (about 3 ns each, measured by
+    // marker-cap-bench.mjs); the guest's timeout is 60 s.
     expect(budget).toBeLessThanOrEqual(5e7);
+    expect(CHART_EXTRACT_LIMITS.maxMarkerPairTestsPerInput).toBeLessThanOrEqual(1e9);
   });
 
-  it("refuses vertices packed into one cell against markers in the next cell, at the SVG size limits", () => {
+  it("stops vertices packed into one cell against markers in the next cell at its budget, at the vertex cap", () => {
     // The council's packed-cell scene: vertices clustered in [30, 32.9)², markers at 34.6 (the neighbouring cell, and
-    // more than 1.5 from every vertex), so no marker short-circuits. Sized to the input limits: 20 polylines of
-    // maxPathVertices (400k vertices, within a 5 MB SVG) and maxUseExpansions markers.
+    // more than 1.5 from every vertex), so no marker short-circuits. Sized to what one call may index: polylines of
+    // maxPathVertices up to maxMarkerVertices (above it the schedule approximates without indexing), and
+    // maxUseExpansions markers.
     const V = CHART_EXTRACT_LIMITS.maxPathVertices;
-    const lines = Array.from({ length: 20 }, () => line(Array.from({ length: V }, (_, i) => [30 + (i % 290) / 100, 30 + (i % 97) / 34] as [number, number])));
+    const lines = Array.from({ length: Math.floor(CHART_EXTRACT_LIMITS.maxMarkerVertices / V) }, () => line(Array.from({ length: V }, (_, i) => [30 + (i % 290) / 100, 30 + (i % 97) / 34] as [number, number])));
     const points = Array.from({ length: CHART_EXTRACT_LIMITS.maxUseExpansions }, () => point(34.6, 34.6));
-    // Unbounded, this is 20k × 400k = 8×10⁹ pair tests. Each marker alone scans all 400k packed vertices, so even the
-    // first 125 markers exceed the production budget. The test injects a smaller cap to count it without running 5×10⁷
-    // tests; the counting is the same code path.
-    expect(points.length * lines.length * CHART_EXTRACT_LIMITS.maxPathVertices).toBeGreaterThan(100 * budget);
+    // Unbounded, this is 20k × 120k = 2.4×10⁹ pair tests. Each marker alone scans all 120k packed vertices. The test
+    // injects a smaller cap to count it without running the full budget; the counting is the same code path.
+    expect(points.length * lines.length * V).toBeGreaterThan(40 * budget);
     const cap = 1_000_000;
     const work = { pairTests: 0 };
     let error: unknown;
@@ -132,6 +135,37 @@ describe("withoutVertexMarkers work bound (hostile input; counted in pair tests,
     expect(withoutVertexMarkers(slice, lines)).toEqual(bruteForce(slice, lines));
     expect(kept.length).toBeGreaterThan(0);
     expect(kept.length).toBeLessThan(points.length);
+  });
+
+  /** V polyline vertices (the two ends far apart, the rest packed into one 3-unit cell) and P markers in the next cell: (V − 2) × P pair tests. */
+  function packedSvg(vertices: number, markers: number): string {
+    const pts = ["10,90", ...Array.from({ length: vertices - 2 }, (_, i) => `${(30 + (i % 290) / 100).toFixed(2)},${(30 + (i % 97) / 34).toFixed(2)}`), "90,10"];
+    const ticks = [[0, 90], [10, 50], [20, 10]].map(([v, y]) => `<text x="2" y="${y}">${v}</text>`).join("");
+    return `<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"><polyline points="${pts.join(" ")}" stroke="#f00" fill="none"/>`
+      + `${'<circle cx="34.6" cy="34.6" r="1" fill="#00f"/>'.repeat(markers)}${ticks}<text x="10" y="98">A</text><text x="50" y="98">B</text><text x="90" y="98">C</text></svg>`;
+  }
+
+  it("shares one budget across every SVG of one input: past it, SVGs are approximated, never refused", () => {
+    // Council r2 M1: many SVGs just under a per-SVG cap in one HTML/Office/EPUB input or batch. The budget starts 25k
+    // short of empty (standing in for earlier SVGs' work, without running 5×10⁷ tests). Each SVG needs 9,800 pair tests
+    // (98 packed vertices × 100 markers): two run exactly in place, then the rest wait for a share of what remains
+    // and are approximated when it is too small. All six still produce a visual.
+    const one = packedSvg(100, 100);
+    const text = `<html><body>${one.repeat(6)}</body></html>`;
+    const markerBudget = { remaining: 25_000, pairTests: 0, primitives: 0, inputsAfter: 0 };
+    const r = extractDeterministicVisuals({ kind: "html", text }, { markerBudget });
+    expect(r.refusals).toEqual([]);
+    expect(r.visuals.map((v) => v.locator)).toEqual([0, 1, 2, 3, 4, 5].map((k) => `svg[${k}]`));
+    expect(r.visuals.map((v) => v.reason === "approximate-marker-dedup")).toEqual([false, false, true, true, true, true]);
+    // Never more than the budget: 2 × 9,800 exact, then shares of the 5,400 left.
+    expect(markerBudget.pairTests).toBeLessThanOrEqual(25_000);
+    expect(markerBudget.pairTests).toBeGreaterThanOrEqual(2 * 9_800);
+    // Each SVG alone is far under the budget and extracts exactly (a fresh budget per input).
+    const alone = { remaining: 200_000_000, pairTests: 0, primitives: 0, inputsAfter: 0 };
+    const single = extractDeterministicVisuals({ kind: "svg", text: one }, { markerBudget: alone });
+    expect(single.refusals).toEqual([]);
+    expect(single.visuals[0]!.reason).not.toBe("approximate-marker-dedup");
+    expect(alone.pairTests).toBe(98 * 100);
   });
 
   it("does no pair tests for non-finite points or vertices", () => {

@@ -12,25 +12,46 @@ export const INPUTS_PATH = path.join(WORKER_ROOT, "dist/chart-export/guest.bundl
 /** About 0.93 MB today; the shared package index alone would add far more. */
 export const BUNDLE_MAX_BYTES = 1_250_000;
 
-/** SHA-256 over the listed worker dist files (paths relative to the worker root), in order. */
-export async function bundleInputsHash(files) {
-  const hash = createHash("sha256");
-  for (const file of files) {
-    hash.update(`${file}\0`);
-    hash.update(await readFile(path.join(WORKER_ROOT, file)));
-  }
-  return hash.digest("hex");
+const sha256 = (data) => createHash("sha256").update(data).digest("hex");
+
+/**
+ * Where to read a bundle input from, relative to the worker root, in a checkout and in the images alike: the worker's
+ * own dist, and @docslurp/shared through the worker's node_modules (a workspace link here, a deployed copy in the
+ * lean/full images). zod is not re-read: it is a transitive dependency at a different path after `pnpm deploy`, so a
+ * startup check could refuse a good image. Its version is recorded for diagnosis; a zod change comes only with a lockfile
+ * change, which rebuilds every image, and the bundle hash below still catches a swapped bundle.
+ */
+function sourceOf(input) {
+  if (/^dist\/[\w/.-]+\.js$/.test(input) && !input.includes("..")) return { file: input };
+  const shared = /^\.\.\/packages\/shared\/(dist\/[\w.-]+\.js)$/.exec(input);
+  if (shared) return { file: `node_modules/@docslurp/shared/${shared[1]}` };
+  if (/(^|\/)node_modules\/(\.pnpm\/zod@[^/]+\/node_modules\/)?zod\//.test(input)) return { zod: true };
+  throw new Error(`chart guest bundle: unexpected input ${input}`);
 }
 
-/** Throws when the bundle is missing, or was built from worker dist files that have since changed. */
+/** Hashes of every worker and @docslurp/shared input, the zod version (recorded only), and the bundle's own SHA-256. */
+export async function bundleManifest(inputs) {
+  const files = [...new Set(inputs.map(sourceOf).filter((s) => s.file).map((s) => s.file))].sort();
+  const hashes = {};
+  for (const file of files) hashes[file] = sha256(await readFile(path.join(WORKER_ROOT, file)));
+  const zod = [...new Set(inputs.map((i) => /zod@([^/]+)\//.exec(i)?.[1]).filter(Boolean))];
+  return { inputs: hashes, zod, bundleSha256: sha256(await readFile(BUNDLE_PATH)) };
+}
+
+/** Throws when the bundle is missing, was changed, or was built from inputs that have since changed. */
 export async function verifyChartGuestBundle() {
-  await readFile(BUNDLE_PATH).catch(() => { throw new Error(`chart guest bundle missing: ${BUNDLE_PATH} (run the worker build)`); });
+  const bundle = await readFile(BUNDLE_PATH).catch(() => { throw new Error(`chart guest bundle missing: ${BUNDLE_PATH} (run the worker build)`); });
   const manifest = JSON.parse(await readFile(INPUTS_PATH, "utf8").catch(() => { throw new Error(`chart guest bundle manifest missing: ${INPUTS_PATH} (run the worker build)`); }));
-  if (!Array.isArray(manifest.inputs) || !manifest.inputs.length || !manifest.inputs.every((f) => typeof f === "string" && f.startsWith("dist/") && !f.includes(".."))) {
+  const entries = Object.entries(manifest?.inputs ?? {});
+  const known = (file) => /^(dist|node_modules\/@docslurp\/shared\/dist)\/[\w/.-]+\.js$/.test(file) && !file.includes("..");
+  if (!entries.length || !entries.every(([file, hash]) => known(file) && typeof hash === "string") || typeof manifest.bundleSha256 !== "string") {
     throw new Error("chart guest bundle manifest is malformed");
   }
-  const actual = await bundleInputsHash(manifest.inputs).catch(() => null);
-  if (actual !== manifest.sha256) throw new Error("chart guest bundle is stale: worker dist changed after it was built (run the full worker build)");
+  if (sha256(bundle) !== manifest.bundleSha256) throw new Error("chart guest bundle is not the one its manifest describes (rebuild the worker)");
+  for (const [file, hash] of entries) {
+    const actual = await readFile(path.join(WORKER_ROOT, file)).then(sha256, () => null);
+    if (actual !== hash) throw new Error(`chart guest bundle is stale: ${file} changed after it was built (run the full worker build)`);
+  }
 }
 
 // Startup probe inputs (trusted, built in): a 2-category bar chart as SVG and as an XLSX chart part. Generated with the
