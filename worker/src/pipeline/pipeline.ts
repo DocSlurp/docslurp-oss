@@ -73,6 +73,7 @@ export interface CheckpointStore {
   /** Figure uploads in progress (db/document-asset-ledger.ts): pending before each upload step, stored after it. */
   markAssetsPending?(args: Parameters<typeof import("../db/document-asset-ledger.js").markAssetsPending>[1]): Promise<unknown>;
   markAssetsStored?(args: Parameters<typeof import("../db/document-asset-ledger.js").markAssetsStored>[1]): Promise<unknown>;
+  replaceUnvouchedObject?(args: Parameters<typeof import("../db/document-asset-ledger.js").replaceUnvouchedObject>[1]): Promise<void>;
   /** Per-page ingest facts (ingest report); best effort, idempotent per (document, page). */
   upsertPageFacts?(rows: readonly PageFactUpsert[]): Promise<void>;
   /** Reserves Fast page-image renders from the run's shared budget (db/fast-page-image-budget.ts). */

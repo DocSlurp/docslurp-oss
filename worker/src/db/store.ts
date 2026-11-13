@@ -17,7 +17,7 @@ import { WorkerSlotStore, resolveWorkerSlotOptions, tryMaintenanceLease, type Wo
 import { randomUUID, createHmac } from "node:crypto";
 
 import postgres, { type JSONValue, type PendingQuery, type Sql } from "postgres";
-import { adoptPendingAssets, flushAssetLedger, markAssetsLost, markAssetsPending, markAssetsStored, writeDocumentAssetLedger, type FigureObjectReader, type DocumentAssetLedgerResult, type DocumentAssetLedgerWrite } from "./document-asset-ledger.js";
+import { adoptPendingAssets, flushAssetLedger, markAssetsLost, markAssetsPending, markAssetsStored, replaceUnvouchedObject, writeDocumentAssetLedger, type FigureObjectReader, type DocumentAssetLedgerResult, type DocumentAssetLedgerWrite } from "./document-asset-ledger.js";
 import { applyDefaultVisionOverride, defaultPipelineFeatures, normalizeStoredPipelineFeatures, PII_BLOCKED_DOCUMENT_STATUS, planRunFailure, type DerivedDocumentTitle, type PrivacyAuditEntry } from "@docslurp/shared";
 
 import { adoptBackfillDocuments } from "../deferred/backfill-adoption.js";
@@ -2715,6 +2715,11 @@ export class Store {
 
   async markAssetsLost(args: Parameters<typeof markAssetsLost>[1]): Promise<{ lost: number }> {
     return await markAssetsLost(this.sql, args);
+  }
+
+  /** Repair a figure object of other bytes under the document's ledger lock (document-asset-ledger.ts). */
+  async replaceUnvouchedObject(args: Parameters<typeof replaceUnvouchedObject>[1]): Promise<void> {
+    await replaceUnvouchedObject(this.sql, args);
   }
 
   /**
