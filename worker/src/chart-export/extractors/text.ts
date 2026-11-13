@@ -6,7 +6,10 @@ import { VISUAL_SPEC_LIMITS } from "@docslurp/shared/chart-export";
  */
 export function cleanLabel(value: unknown, max: number = VISUAL_SPEC_LIMITS.maxLabelChars): string {
   if (typeof value !== "string" && typeof value !== "number") return "";
-  const s = String(value)
+  // Cut before any regex or copy: the cost is O(max), not O(input) (council r6 H1). 4 code units per kept character
+  // leaves room for the stripped controls and collapsed whitespace of any real label.
+  const raw = String(value);
+  const s = (raw.length > 4 * max ? raw.slice(0, 4 * max) : raw)
     // eslint-disable-next-line no-control-regex
     .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f​-‏‪-‮⁦-⁩﻿]/g, "")
     .replace(/\s+/g, " ")
@@ -62,6 +65,8 @@ export function parseTickNumber(raw: string): { value: number; unit: string | nu
 /** Normalise a CSS/SVG colour to `#rrggbb` (or null for none/transparent/url()). */
 export function normalizeColor(raw: string | null | undefined): string | null {
   if (!raw) return null;
+  // No real colour is longer than this; the rgb() regex below backtracks quadratically on long hostile values.
+  if (raw.length > 64) return null;
   const t = raw.trim().toLowerCase();
   if (t === "" || t === "none" || t === "transparent" || t.startsWith("url(")) return null;
   const hex = /^#([0-9a-f]{3}|[0-9a-f]{6})$/.exec(t);

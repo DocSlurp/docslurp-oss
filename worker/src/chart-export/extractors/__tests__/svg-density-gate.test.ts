@@ -3,7 +3,9 @@
 import { describe, expect, it } from "vitest";
 
 import { APPROXIMATE_MARKER_REASON, DEFERRED_SVG_REASON, extractDeterministicVisuals } from "../index.js";
-import { CHART_EXTRACT_LIMITS } from "../limits.js";
+import { CHART_EXTRACT_LIMITS, setGuestDeadline } from "../limits.js";
+import { buildScene } from "../svg-scene.js";
+import { parseXml, type XmlElement } from "../xml.js";
 import { columnStacked, nearestTick } from "../svg-geometry.js";
 import type { RectPrim } from "../svg-scene.js";
 import { genericBar, matplotlibBar, matplotlibLine, matplotlibScatter, MERMAID_FLOWCHART, plotlyBar, rechartsLine, vegaBar, zip } from "./fixtures.js";
@@ -38,9 +40,14 @@ describe("SVG density gate", () => {
       maxSvgBytes: L.maxSvgBytes, maxSvgUseExpansions: L.maxSvgUseExpansions, maxSvgPrimitives: L.maxSvgPrimitives,
       maxSvgPathSegments: L.maxSvgPathSegments, maxSvgWalkedElements: L.maxSvgWalkedElements, maxSvgElements: L.maxSvgElements,
       maxMarkerPairTests: L.maxMarkerPairTests, maxSvgsPerInput: L.maxSvgsPerInput,
+      maxSvgGeometryAttrBytes: L.maxSvgGeometryAttrBytes, maxSvgAttrBytes: L.maxSvgAttrBytes, maxSvgTextBytes: L.maxSvgTextBytes,
+      maxSvgTouchedBytes: L.maxSvgTouchedBytes,
     }).toEqual({
       maxSvgBytes: 655_360, maxSvgUseExpansions: 1_000, maxSvgPrimitives: 4_000, maxSvgPathSegments: 50_000,
       maxSvgWalkedElements: 3_000, maxSvgElements: 3_000, maxMarkerPairTests: 100_000, maxSvgsPerInput: 400,
+      // p99 / max: d|points 10.6 KB / 42 KB; other attributes 166 B / 16.2 KB; text per element 47 / 753 B;
+      // bytes touched by the walk 332 KB / 1.03 MB.
+      maxSvgGeometryAttrBytes: 65_536, maxSvgAttrBytes: 32_768, maxSvgTextBytes: 4_096, maxSvgTouchedBytes: 2_097_152,
     });
   });
 
@@ -64,8 +71,8 @@ describe("SVG density gate", () => {
       expect(one(subpaths(L.maxSvgPrimitives + 1))).toEqual(["svg-too-dense"]);
     });
     it("path segments", () => {
-      // Paths of at most maxPathVertices vertices each, adding up to exactly n.
-      const segs = (n: number) => { const out: string[] = []; for (let left = n; left > 0; left -= L.maxPathVertices) { const k = Math.min(left, L.maxPathVertices); out.push(`<path stroke="#000" fill="none" d="M0 0${" L1 1".repeat(k - 1)}"/>`); } return SVG(out.join("")); };
+      // Paths of at most 13,000 vertices each (a `d` under the 64 KiB attribute cap), adding up to exactly n.
+      const segs = (n: number) => { const out: string[] = []; for (let left = n; left > 0; left -= 13_000) { const k = Math.min(left, 13_000); out.push(`<path stroke="#000" fill="none" d="M0 0${" L1 1".repeat(k - 1)}"/>`); } return SVG(out.join("")); };
       expect(one(segs(L.maxSvgPathSegments))).toEqual([]);
       expect(one(segs(L.maxSvgPathSegments + 1))).toEqual(["svg-too-dense"]);
     });
@@ -75,6 +82,32 @@ describe("SVG density gate", () => {
       const walk = (n: number, extra = "") => SVG(`${extra}<defs><g id="g">${'<g display="none"/>'.repeat(n)}</g></defs><use href="#g"/><use href="#g"/>`);
       expect(one(walk(1497))).toEqual([]);
       expect(one(walk(1497, "<desc/>"))).toEqual(["svg-use-bomb"]);
+    });
+    it("attribute length (d / points, and any other attribute)", () => {
+      const d = (n: number) => SVG(`<path stroke="#000" fill="none" d="M0 0 L1 1${" ".repeat(n - 9)}"/>`);
+      expect(one(d(L.maxSvgGeometryAttrBytes))).toEqual([]);
+      expect(one(d(L.maxSvgGeometryAttrBytes + 1))).toEqual(["svg-too-dense"]);
+      const cls = (n: number) => SVG(`<g class="${"c".repeat(n)}"/>`);
+      expect(one(cls(L.maxSvgAttrBytes))).toEqual([]);
+      expect(one(cls(L.maxSvgAttrBytes + 1))).toEqual(["svg-too-dense"]);
+      // href is only looked up, never scanned per frame: an embedded raster image may be large.
+      expect(one(SVG(`<image href="data:image/png;base64,${"A".repeat(200_000)}"/>`))).toEqual([]);
+    });
+    it("text under one element (not <script>, <style>, <metadata>, <desc>, <title>)", () => {
+      const t = (n: number) => SVG(`<text x="1" y="1">${"a".repeat(n)}</text>`);
+      expect(one(t(L.maxSvgTextBytes))).toEqual([]);
+      expect(one(t(L.maxSvgTextBytes + 1))).toEqual(["svg-too-dense"]);
+      expect(one(SVG(`<metadata>${"a".repeat(100_000)}</metadata>`))).toEqual([]);
+    });
+    it("bytes touched by the walk, <use> re-walks included", () => {
+      // A group whose own attribute and text bytes are ~3 KB (each under its cap), re-walked by N references.
+      const heavy = (uses: number) => SVG(`<defs><g id="g" class="${"c".repeat(3000)}"/></defs>${'<use href="#g"/>'.repeat(uses)}`);
+      const counts = { useExpansions: 0, primitives: 0, segments: 0, walked: 0, touched: 0 };
+      const doc = parseXml(heavy(600));
+      buildScene(doc.children.find((c) => c.type === "element")! as XmlElement, counts);
+      expect(counts.touched).toBeLessThan(L.maxSvgTouchedBytes); // 600 × ~3 KB
+      expect(one(heavy(600))).toEqual([]);
+      expect(one(heavy(999))).toEqual(["svg-use-bomb"]); // 999 × ~3 KB > 2 MiB
     });
     it("parsed elements", () => {
       const els = (n: number) => SVG("<desc/>".repeat(n - 1)); // + the <svg> itself
@@ -100,6 +133,64 @@ describe("SVG density gate", () => {
     // The same shape with few hidden children per group but many references: under the element gate, stopped by the walk.
     const reWalk = `<svg xmlns="http://www.w3.org/2000/svg"><defs><g id="g">${'<g display="none"/>'.repeat(1000)}</g></defs>${'<use href="#g"/>'.repeat(999)}</svg>`;
     expect(reasons(extractDeterministicVisuals({ kind: "svg", text: reWalk }))).toEqual(["svg-use-bomb"]);
+  });
+
+  it("bounds the work per frame, not just the frames (council r6 H1): every repro shape is skipped or completes", () => {
+    const SVG = (body: string) => `<svg xmlns="http://www.w3.org/2000/svg" width="500" height="500">${body}</svg>`;
+    // Each was gate-passing at round 6 and took 0.8 s to over 75 s on the parser VM.
+    const cases: Array<[string, string, string[]]> = [
+      ["rgb( fill, 80 KB, one element", SVG(`<rect width="5" height="5" fill="rgb(1${" ".repeat(80_000)}x"/>`), ["svg-too-dense"]],
+      ["rgb( style × 999 <use>, 20 KB", SVG(`<defs><g id="g" style="fill:rgb(1${" ".repeat(4000)}x"/></defs>${'<use href="#g"/>'.repeat(999)}`), ["svg-use-bomb"]],
+      ["640 KiB x attribute × 999 <use>", SVG(`<defs><text id="t" x="${"0 ".repeat(300_000)}">a</text></defs>${'<use href="#t"/>'.repeat(999)}`), ["svg-too-dense"]],
+      ["640 KiB text × 999 <use>", SVG(`<defs><text id="t" x="1" y="1">${"a".repeat(600_000)}</text></defs>${'<use href="#t"/>'.repeat(999)}`), ["svg-too-dense"]],
+      ["points of no numbers × 999 <use>", SVG(`<defs><polyline id="p" points="${"-.".repeat(300_000)}"/></defs>${'<use href="#p"/>'.repeat(999)}`), ["svg-too-dense"]],
+      ["whitespace width × 999 <use>", SVG(`<defs><rect id="r" width="${" ".repeat(600_000)}x"/></defs>${'<use href="#r"/>'.repeat(999)}`), ["svg-too-dense"]],
+    ];
+    for (const [, svg, want] of cases) {
+      expect(svg.length).toBeLessThanOrEqual(L.maxSvgBytes);
+      expect(reasons(extractDeterministicVisuals({ kind: "svg", text: svg }))).toEqual(want);
+    }
+    // Deep nesting with long class names: still analysed, but the group string each primitive carries is bounded.
+    let deep = "";
+    for (let k = 0; k < 250; k++) deep += `<g class="${"c".repeat(190)}${k}">`;
+    deep += Array.from({ length: 2700 }, (_, k) => `<rect x="${k % 100}" y="${Math.floor(k / 100)}" width="1" height="1" fill="#0a0"/>`).join("") + "</g>".repeat(250);
+    const deepSvg = SVG(deep);
+    const scene = buildScene(parseXml(deepSvg).children.find((c) => c.type === "element")! as XmlElement);
+    expect(scene.rects).toHaveLength(2700);
+    expect(Math.max(...scene.rects.map((r) => r.groups.length))).toBeLessThanOrEqual(512);
+    expect(reasons(extractDeterministicVisuals({ kind: "svg", text: deepSvg }))).toEqual([]);
+  });
+
+  it("returns what it has at the guest deadline: later SVGs are a counted range, not a lost input", () => {
+    const charts = [genericBar(["a", "b"], [1, 2], 4), genericBar(["c", "d"], [3, 1], 4), genericBar(["e", "f"], [2, 2], 4)];
+    try {
+      setGuestDeadline(Date.now() - 1);
+      const r = extractDeterministicVisuals({ kind: "html", text: html(charts) });
+      expect(r.visuals).toEqual([]);
+      expect(r.deferred).toEqual([{ svgIndex: 0, count: 3, reason: "guest-deadline" }]);
+      // Mid-walk, the scene builder stops one slow SVG on its own (checked every 256 frames).
+      const svg = `<svg xmlns="http://www.w3.org/2000/svg">${"<g/>".repeat(600)}</svg>`;
+      expect(() => buildScene(parseXml(svg).children.find((c) => c.type === "element")! as XmlElement)).toThrow(/svg-too-slow/);
+    } finally {
+      setGuestDeadline(Infinity);
+    }
+    expect(extractDeterministicVisuals({ kind: "html", text: html(charts) }).visuals).toHaveLength(3);
+  });
+
+  it("counts every loss to a per-input cap (council r6 L1): visual cap, inline SVGs per HTML part, package parts", () => {
+    const chart = genericBar(["a", "b"], [1, 2], 4);
+    // 300 charts in two EPUB chapters: 256 exported, the other 44 counted from ordinal 256.
+    const chapter = `<html><body>${chart.repeat(150)}</body></html>`;
+    const full = extractDeterministicVisuals({ kind: "epub", bytes: zip({ "mimetype": "application/epub+zip", "OEBPS/a.xhtml": chapter, "OEBPS/b.xhtml": chapter }) });
+    expect(full.visuals).toHaveLength(L.maxVisuals);
+    expect(full.refusals).toEqual([]);
+    expect(full.deferred).toEqual([{ svgIndex: 256, count: 44, reason: "visual-limit" }]);
+    // 210 inline SVGs in one HTML part: 200 analysed, 10 counted.
+    const tiny = '<svg xmlns="http://www.w3.org/2000/svg"><rect width="1" height="1"/></svg>';
+    expect(extractDeterministicVisuals({ kind: "html", text: html(Array(210).fill(tiny)) }).deferred).toEqual([{ svgIndex: 200, count: 10, reason: "html-svg-limit" }]);
+    // 205 EPUB parts: 200 opened, 5 counted.
+    const parts = Object.fromEntries([["mimetype", "application/epub+zip"], ...Array.from({ length: 205 }, (_, i) => [`OEBPS/p${String(i).padStart(3, "0")}.svg`, tiny])]);
+    expect(extractDeterministicVisuals({ kind: "epub", bytes: zip(parts) }).deferred).toEqual([{ svgIndex: 200, count: 5, reason: "package-part-limit" }]);
   });
 
   it("puts the Mermaid / Graphviz diagram path under the same gate, with linear id handling (council r5 M1)", () => {

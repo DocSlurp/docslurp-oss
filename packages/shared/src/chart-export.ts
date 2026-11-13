@@ -506,7 +506,12 @@ export type ExportedVisual = z.infer<typeof exportedVisualSchema>;
  * ordinal within that input (document / package order), `count` how many from there, and `reason` a closed slug:
  * nothing from the input's names or content is stored.
  */
-export const DEFERRED_VISUAL_REASONS = ["svg-document-limit"] as const;
+/**
+ * Why visuals were deferred, each a per-input cap of the free extractor. `count` is of SVGs at consecutive ordinals
+ * from `svgIndex` for svg-document-limit, html-svg-limit and guest-deadline; for visual-limit it counts the visuals and
+ * SVGs lost to the output cap from `svgIndex` on; for package-part-limit, package parts never opened.
+ */
+export const DEFERRED_VISUAL_REASONS = ["svg-document-limit", "html-svg-limit", "guest-deadline", "visual-limit", "package-part-limit"] as const;
 export const deferredVisualSchema = z.strictObject({
   input: z.enum(["source", "doppler-figure"]),
   svgIndex: z.number().int().nonnegative().max(1_000_000),

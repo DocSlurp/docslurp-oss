@@ -18,6 +18,10 @@
 //          SVGs with 1 → 30 → 30 nested <use> over 450 groups; mermaid / mermaidEpub200: the hostile diagram shape.
 // textEpub400 / rectEpub400: the gate-passing worst case: an EPUB of 200 parts × 2 inline SVGs, each just under the
 //          element gate with numeric tick texts (council r5 L4) or rects.
+// Council round 6 (per-frame cost): rgbFill80k / rgbFill640k (one rect with a quadratic rgb( fill), rgbStyle20k /
+//          rgbStyleEpub8 (a 4,000-space rgb( style re-walked by 999 <use>), xsplit / xsplitEpub9 (a 640 KiB x attribute
+//          re-walked by 999 <use>), text999, points999, width999, deep1 / deepEpub300 (250 nested long-class groups
+//          over 2,700 rects; the EPUB's have no axis, so all 300 are analysed).
 import { readFileSync } from "node:fs";
 import { crc32 } from "node:zlib";
 import { pathToFileURL } from "node:url";
@@ -79,6 +83,17 @@ function zip(files) {
   return new Uint8Array(Buffer.concat([...local, cd, end]));
 }
 const epub = (parts) => ({ kind: "epub", bytes: zip({ mimetype: "application/epub+zip", ...parts }) });
+const fit = (prefix, unit, suffix) => prefix + unit.repeat(Math.floor((640 * 1024 - 400 - prefix.length - suffix.length) / unit.length)) + suffix;
+const reWalk = (target, id) => SVG(`<defs>${target}</defs>${`<use href="#${id}"/>`.repeat(999)}`);
+const r6 = {
+  rgbFill: (n) => SVG(`<rect width="5" height="5" fill="rgb(1${" ".repeat(n)}x"/>`),
+  rgbStyle: () => reWalk(`<g id="g" style="fill:rgb(1${" ".repeat(4000)}x"/>`, "g"),
+  xsplit: () => SVG(fit('<defs><text id="t" x="', "0 ", `">a</text></defs>${'<use href="#t"/>'.repeat(999)}`)),
+  text: () => SVG(fit('<defs><text id="t" x="1" y="1">', "a", `</text></defs>${'<use href="#t"/>'.repeat(999)}`)),
+  points: () => SVG(fit('<defs><polyline id="p" points="', "-.", `"/></defs>${'<use href="#p"/>'.repeat(999)}`)),
+  width: () => SVG(fit('<defs><rect id="r" width="', " ", `x"/></defs>${'<use href="#r"/>'.repeat(999)}`)),
+  deep: (axis) => { let d = ""; for (let k = 0; k < 250; k++) d += `<g class="${"c".repeat(190)}${k}">`; return SVG((axis ? [0, 25, 50, 75, 100].map((v, k) => `<text x="2" y="${400 - k * 80}">${v}</text>`).join("") : "") + d + Array.from({ length: 2700 }, (_, k) => `<rect x="${40 + (k % 100) * 4}" y="${100 + Math.floor(k / 100)}" width="3" height="${1 + k % 5}" fill="#0a0"/>`).join("") + "</g>".repeat(250)); },
+};
 const bar = (k) => `<svg xmlns="http://www.w3.org/2000/svg" width="400" height="260"><rect x="65" y="${170 - k % 50}" width="70" height="${50 + k % 50}" fill="#e45756"/><rect x="165" y="120" width="70" height="100" fill="#e45756"/><line x1="50" y1="220" x2="350" y2="220" stroke="black"/>${[0, 1, 2, 3, 4].map((v) => `<text x="44" y="${220 - v * 50}" text-anchor="end" font-size="10">${v}</text>`).join("")}<text x="100" y="234" text-anchor="middle" font-size="10">A</text><text x="200" y="234" text-anchor="middle" font-size="10">B</text></svg>`;
 
 const inputs = {
@@ -96,6 +111,17 @@ const inputs = {
   textEpub400: () => [epub(Object.fromEntries(Array.from({ length: 200 }, (_, i) => [`OEBPS/c${String(i).padStart(3, "0")}.xhtml`, `<html><body>${textAtCap()}${textAtCap()}</body></html>`])))],
   textNoAxisEpub400: () => [epub(Object.fromEntries(Array.from({ length: 200 }, (_, i) => [`OEBPS/c${String(i).padStart(3, "0")}.xhtml`, `<html><body>${textNoAxisAtCap()}${textNoAxisAtCap()}</body></html>`])))],
   rectEpub400: () => [epub(Object.fromEntries(Array.from({ length: 200 }, (_, i) => [`OEBPS/c${String(i).padStart(3, "0")}.xhtml`, `<html><body>${rectAtCap()}${rectAtCap()}</body></html>`])))],
+  rgbFill80k: () => [{ kind: "svg", text: r6.rgbFill(80_000) }],
+  rgbFill640k: () => [{ kind: "svg", text: r6.rgbFill(640 * 1024 - 200) }],
+  rgbStyle20k: () => [{ kind: "svg", text: r6.rgbStyle() }],
+  rgbStyleEpub8: () => [epub(Object.fromEntries(Array.from({ length: 8 }, (_, i) => [`OEBPS/s${i}.svg`, r6.rgbStyle()])))],
+  xsplit: () => [{ kind: "svg", text: r6.xsplit() }],
+  xsplitEpub9: () => [epub(Object.fromEntries(Array.from({ length: 9 }, (_, i) => [`OEBPS/x${i}.svg`, r6.xsplit()])))],
+  text999: () => [{ kind: "svg", text: r6.text() }],
+  points999: () => [{ kind: "svg", text: r6.points() }],
+  width999: () => [{ kind: "svg", text: r6.width() }],
+  deep1: () => [{ kind: "svg", text: r6.deep(true) }],
+  deepEpub300: () => [epub(Object.fromEntries(Array.from({ length: 150 }, (_, i) => [`OEBPS/d${String(i).padStart(3, "0")}.xhtml`, `<html><body>${r6.deep(false)}${r6.deep(false)}</body></html>`])))],
   legit: () => [{ kind: "html", text: `<html><body>${Array.from({ length: 100 }, (_, k) => bar(k)).join("")}</body></html>` }],
 }[mode]();
 const bytes = inputs.reduce((n, i) => n + (i.text?.length ?? i.bytes.length), 0);

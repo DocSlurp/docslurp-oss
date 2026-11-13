@@ -57,7 +57,9 @@ describe("hardened XML", () => {
 describe("SVG work limits", () => {
   it("refuses a path with too many vertices and documents with too many path commands", () => {
     const huge = `<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0${" L1 1".repeat(CHART_EXTRACT_LIMITS.maxPathVertices + 10)}"/></svg>`;
-    expect(refusalOf(extractDeterministicVisuals({ kind: "svg", text: huge }))).toEqual(["svg-path-vertex-limit"]);
+    // Its 100 KB `d` is over the density gate's 64 KiB geometry-attribute cap, which now fires first: no single
+    // attribute can carry the 20,000 vertices the per-path limit guards (at least 4 characters per vertex).
+    expect(refusalOf(extractDeterministicVisuals({ kind: "svg", text: huge }))).toEqual(["svg-too-dense"]);
     const one = `<path d="M0 0${" L1 1".repeat(9000)}"/>`;
     // 6 × 9,000 segments (270 KB): under the byte cap, over the 50,000-segment density gate.
     const many = `<svg xmlns="http://www.w3.org/2000/svg">${one.repeat(6)}</svg>`;

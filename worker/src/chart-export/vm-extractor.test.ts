@@ -127,7 +127,8 @@ describe("VM deterministic extractor adapter", () => {
     const run = vi.fn(async (plan: { args: string[]; timeoutMs?: number }) => {
       plans.push(plan);
       const request = JSON.parse(await readFile(plan.args[3]!, "utf8"));
-      expect(request).toEqual({ kind: "svg", diagrams: true, batch: 2 });
+      // budgetMs: the run's 63 s timeout less the 15 s margin; the guest returns what it has by then.
+      expect(request).toEqual({ kind: "svg", diagrams: true, batch: 2, budgetMs: 48_000 });
       await writeFile(plan.args[4]!, JSON.stringify({ schemaVersion: "chart-export-deterministic-batch@v1", results: [one("a"), one("b")] }));
       return { stdout: "", stderr: "" };
     });

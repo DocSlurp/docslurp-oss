@@ -5,7 +5,8 @@
 import { readFile, stat, writeFile } from "node:fs/promises";
 // One bundled module (built from dist/chart-export/extractors/guest-entry.js): loads in a fraction of the CPU the
 // separate ESM files take, which matters because every VM command starts a fresh process.
-import { CHART_EXTRACT_LIMITS, extractDeterministicVisuals } from "../dist/chart-export/guest.bundle.mjs";
+import { CHART_EXTRACT_LIMITS, extractDeterministicVisuals, setGuestDeadline } from "../dist/chart-export/guest.bundle.mjs";
+const started = Date.now();
 const [input, requestPath, output, ...more] = process.argv.slice(2);
 if ((await stat(requestPath)).size > 4096) throw new Error("chart extract request exceeds limit");
 const request = JSON.parse(await readFile(requestPath, "utf8"));
@@ -13,6 +14,10 @@ const kind = request?.kind;
 if (!["office", "epub", "svg", "html", "json"].includes(kind)) throw new Error("invalid chart extract kind");
 const packaged = kind === "office" || kind === "epub";
 const options = { diagrams: request.diagrams !== false };
+// Deadline below the host's timeout (the host sends its timeout minus a margin): past it, SVGs not yet analysed are
+// returned as a counted `guest-deadline` deferral, so a slow input keeps what it produced instead of being killed.
+const budgetMs = Number.isSafeInteger(request.budgetMs) && request.budgetMs >= 1_000 && request.budgetMs <= 175_000 ? request.budgetMs : 45_000;
+setGuestDeadline(started + budgetMs);
 const MAX_RESULT_BYTES = 16 * 1024 * 1024;
 
 let json;
