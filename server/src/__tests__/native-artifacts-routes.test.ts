@@ -3,6 +3,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const access = vi.hoisted(() => vi.fn());
 const preview = vi.hoisted(() => vi.fn());
+const completed = vi.hoisted(() => new Set<string>());
+vi.mock("../db.js", () => ({ sql: async (_s: TemplateStringsArray, ...values: unknown[]) => completed.has(String(values[0])) ? [{ ok: true }] : [] }));
 vi.mock("../services/documents.js", () => ({ userCanAccessArtifactUri: access }));
 vi.mock("../lib/artifacts.js", () => ({
   parseArtifactUri: (uri: string) => uri.startsWith("s3://") ? { bucket: "artifacts", key: "fixture" } : null,
@@ -42,6 +44,23 @@ describe("native bearer artifact access", () => {
     access.mockResolvedValueOnce(true);
     expect((await app().request("/artifacts/preview?uri=s3://artifacts/fixture")).status).toBe(200);
     expect(preview).toHaveBeenCalledWith("s3://artifacts/fixture", "text");
+  });
+  it("HIGH-1: refuses a Doppler folder file of a document that is not completed, and never the source pointer", async () => {
+    const DOC = "0b6f7e8c-3c1a-4f7e-9a51-2a1d3e4f5a6b";
+    const folder = (relative: string) => `s3://artifacts/u/r/doppler/${DOC}/${relative}`;
+    access.mockResolvedValue(true);
+    for (const relative of ["document.md", "index.json", "images/manifest.jsonl", "images/page-0001/image-001.webp"]) {
+      const result = await app().request(`/artifacts/preview?uri=${encodeURIComponent(folder(relative))}`);
+      expect(result.status, relative).toBe(404);
+    }
+    expect(preview).not.toHaveBeenCalled();
+    completed.add(DOC);
+    expect((await app().request(`/artifacts/preview?uri=${encodeURIComponent(folder("document.md"))}&kind=markdown`)).status).toBe(200);
+    access.mockClear();
+    const pointer = await app().request(`/artifacts/preview?uri=${encodeURIComponent(folder("source.json"))}&kind=json`);
+    expect(pointer.status).toBe(404);
+    expect(access).not.toHaveBeenCalled();
+    completed.clear();
   });
   it("no longer exposes the resolve endpoints", async () => {
     expect((await app().request("/artifacts/resolve?uri=s3://artifacts/fixture")).status).toBe(404);

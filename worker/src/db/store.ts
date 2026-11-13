@@ -17,6 +17,7 @@ import { WorkerSlotStore, resolveWorkerSlotOptions, tryMaintenanceLease, type Wo
 import { randomUUID, createHmac } from "node:crypto";
 
 import postgres, { type JSONValue, type PendingQuery, type Sql } from "postgres";
+import { flushAssetLedger, writeDocumentAssetLedger, type DocumentAssetLedgerResult, type DocumentAssetLedgerWrite } from "./document-asset-ledger.js";
 import { applyDefaultVisionOverride, defaultPipelineFeatures, normalizeStoredPipelineFeatures, PII_BLOCKED_DOCUMENT_STATUS, planRunFailure, type DerivedDocumentTitle, type PrivacyAuditEntry } from "@docslurp/shared";
 
 import { adoptBackfillDocuments } from "../deferred/backfill-adoption.js";
@@ -788,7 +789,12 @@ export class Store {
     options: { stageBoundary?: boolean; readControlState?: boolean; preloadRunState?: boolean } = {},
   ): Promise<ProgressWrite> {
     const previous = this.progressQueues.get(state) ?? Promise.resolve();
-    const next = previous.then(() => this.writeProgressGuarded(state, prelude, options));
+    // The asset ledger goes after the checkpoint commits: it may only describe Markdown and slots that are durable.
+    const next = previous.then(async () => {
+      const written = await this.writeProgressGuarded(state, prelude, options);
+      if (state.pendingAssetLedger.size > 0) await flushAssetLedger(state, (write) => this.writeDocumentAssetLedger(write));
+      return written;
+    });
     const tail = next.catch(() => undefined);
     this.progressQueues.set(state, tail);
     void tail.then(() => {
@@ -2688,6 +2694,47 @@ export class Store {
 
   }
 
+  /** Document asset ledger (db/document-asset-ledger.ts): one org-scoped transaction for a document's images and level. */
+  async writeDocumentAssetLedger(write: DocumentAssetLedgerWrite): Promise<DocumentAssetLedgerResult> {
+    return await writeDocumentAssetLedger(this.sql, write);
+  }
+
+  /**
+   * Whether the document's PII outcome withholds artifacts (`documents.metadata.pii`: it redacted or blocked, so it keeps
+   * a withheld list). A missing document withholds (fail closed).
+   */
+  async documentPiiWithholds(documentId: string): Promise<boolean> {
+    const [row] = await this.sql<{ withholds: boolean }[]>`
+      select coalesce((metadata->'pii'->>'blocked')::boolean, false)
+        or coalesce((metadata->'pii'->>'redacted')::boolean, false)
+        or coalesce(jsonb_array_length(case when jsonb_typeof(metadata->'pii'->'withheldArtifactUris') = 'array'
+          then metadata->'pii'->'withheldArtifactUris' else '[]'::jsonb end), 0) > 0 as withholds
+      from documents where id = ${documentId}`;
+    return row?.withholds ?? true;
+  }
+
+  /**
+   * Add URIs to the document's PII withheld list (`documents.metadata.pii.withheldArtifactUris`), for artifacts written
+   * after its PII stage. Throws when the document has no PII outcome to add to, so a caller never records the artifacts
+   * as servable on a write that did not land.
+   */
+  async appendWithheldArtifactUris(documentId: string, uris: readonly string[]): Promise<void> {
+    if (uris.length === 0) return;
+    const updated = await this.sql`
+      update documents d
+      set metadata = jsonb_set(d.metadata, '{pii,withheldArtifactUris}', (
+            select coalesce(jsonb_agg(u order by u), '[]'::jsonb) from (
+              select jsonb_array_elements_text(case when jsonb_typeof(d.metadata->'pii'->'withheldArtifactUris') = 'array'
+                then d.metadata->'pii'->'withheldArtifactUris' else '[]'::jsonb end) as u
+              union
+              select unnest(${this.sql.array([...uris])}::text[])
+            ) withheld), true),
+          updated_at = now()
+      where d.id = ${documentId} and jsonb_typeof(d.metadata->'pii') = 'object'
+      returning 1`;
+    if (updated.length !== 1) throw new Error("PII withheld list not updated: the document has no PII outcome");
+  }
+
   /**
    * Ingest report page facts. Source facts (text layer, images) and vision
    * outcomes come from different stages, so each write only touches its own
@@ -2696,6 +2743,7 @@ export class Store {
   async upsertPageFacts(rows: readonly PageFactUpsert[]): Promise<void> {
     const source = rows.filter((row) => row.textBytes !== undefined || row.imageCount !== undefined);
     const vision = rows.filter((row) => row.visionStatus !== undefined);
+    const routing = rows.filter((row) => row.textLayer != null || row.scanClass != null);
     for (const batch of batchedRows(source)) {
       const payload = batch.map((row) => ({
         document_id: row.documentId, page_number: row.pageNumber, run_id: row.runId,
@@ -2735,6 +2783,26 @@ export class Store {
         set run_id = excluded.run_id,
             vision_status = excluded.vision_status,
             vision_text_bytes = excluded.vision_text_bytes,
+            updated_at = now()
+      `;
+    }
+    // Routing facts (migration 0141): a value the write does not know keeps the stored one.
+    for (const batch of batchedRows(routing)) {
+      const payload = batch.map((row) => ({
+        document_id: row.documentId, page_number: row.pageNumber, run_id: row.runId,
+        text_layer: row.textLayer ?? null, scan_class: row.scanClass ?? null,
+      }));
+      await this.sql`
+        insert into document_page_facts (document_id, page_number, run_id, text_layer, scan_class)
+        select r.document_id, r.page_number, r.run_id, r.text_layer, r.scan_class
+        from jsonb_to_recordset(${this.sql.json(payload as unknown as JSONValue)}::jsonb) as r(
+          document_id text, page_number integer, run_id text, text_layer text, scan_class text
+        )
+        join documents d on d.id = r.document_id
+        on conflict (document_id, page_number) do update
+        set run_id = excluded.run_id,
+            text_layer = coalesce(excluded.text_layer, document_page_facts.text_layer),
+            scan_class = coalesce(excluded.scan_class, document_page_facts.scan_class),
             updated_at = now()
       `;
     }
