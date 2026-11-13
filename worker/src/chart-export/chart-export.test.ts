@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   defaultChartExportConfig,
   defaultPipelineFeatures,
@@ -21,10 +21,11 @@ import { chartExportCallEstimate, estimateTargetCost } from "../routing/estimate
 import { createPolicyEstimator } from "../routing/policy.js";
 import { createBaselineEstimator } from "../routing/routers/baseline.js";
 import { makePage, testCatalog, testPack } from "../routing/testing.js";
-import { chartExportActive, chartExportConfigOf, chartExportModelsActive, DETERMINISTIC_HIGH_CONFIDENCE } from "./config.js";
+import { CHART_EXPORT_LIMITS, chartExportActive, chartExportConfigOf, chartExportModelsActive, DETERMINISTIC_HIGH_CONFIDENCE, repairOutputTokenCap } from "./config.js";
 import { CHART_EXPORT_USAGE_METRIC, exportVisual, parseSpecAnswer, type ExportVisualArgs } from "./generator.js";
 import { stripVisualGroups, visualBlock, visualBody, wrapVisualGroup } from "./markdown.js";
-import { CHART_EXPORT_MAX_OUTPUT_USD_PER_MTOK, CHART_GENERATOR_CANDIDATES, DIAGRAM_GENERATOR_CANDIDATES, chartExportVisionConfig, selectGeneratorModel } from "./model-selection.js";
+import { DISTINCT_TEST_PRICING, installTestPricing, isAutomaticSelectionDenied, resetPricingProviderForTests, visionImageTokens, visionModelTokenPricing } from "@docslurp/shared";
+import { CHART_GENERATOR_CANDIDATES, DIAGRAM_GENERATOR_CANDIDATES, chartExportReasoning, chartExportVisionConfig, chartGeneratorPriceCeiling, selectGeneratorModel } from "./model-selection.js";
 import { sanitizeCsv, sanitizeMermaid, sanitizePython, sanitizeVegaLite } from "./sanitize.js";
 import { candidatesFromPlan, ChartExportSession, guardedScopesFromPlan, placementMatch } from "./session.js";
 import { clearChartExport, finishChartExport, prepareChartExport, runChartExportPass } from "./stage.js";
@@ -46,8 +47,10 @@ const config = (formats: ChartExportFormat[], extra: Partial<ResolvedChartExport
 const candidate: VisualCandidate = { id: "p2-i0", pageNumber: 2, imageIndex: 0, bbox: { x: 10, y: 20, width: 300, height: 200 }, kind: "chart", detectedBy: "router-inset" };
 const image = { path: "/nonexistent/chart.png", mimeType: "image/png" };
 
+type ScriptedAnswer = string | Error | { text: string; outputTokens: number; finishReason: string };
+
 /** Fake model: answers by purpose/format from a script, records every request. */
-function fakeClient(answers: Array<string | Error>): ChartModelClient & { requests: ChartModelRequest[] } {
+function fakeClient(answers: ScriptedAnswer[]): ChartModelClient & { requests: ChartModelRequest[] } {
   const requests: ChartModelRequest[] = [];
   return {
     requests,
@@ -56,7 +59,8 @@ function fakeClient(answers: Array<string | Error>): ChartModelClient & { reques
       const next = answers.shift();
       if (next === undefined) throw new Error("no scripted answer");
       if (next instanceof Error) throw next;
-      return { text: next, model: "google/gemini-3.1-flash-lite", provider: "openrouter", inputTokens: 1234, outputTokens: 321, costCents: 0.05, latencyMs: 900, finishReason: "stop" };
+      const answer = typeof next === "string" ? { text: next, outputTokens: 321, finishReason: "stop" } : next;
+      return { ...answer, model: "google/gemini-3.1-flash-lite", provider: "openrouter", inputTokens: 1234, costCents: 0.05, latencyMs: 900 };
     },
   };
 }
@@ -151,6 +155,39 @@ describe("derived mode repair and fallback", () => {
     const { visual } = await exportVisual(args({ client }));
     expect(visual?.outputs).toEqual({ description: "Revenue rises through the year." });
     expect(visual?.skipped.map((s) => s.reason)).toEqual(["invalid-spec", "invalid-spec", "invalid-spec", "invalid-spec"]);
+  });
+
+  it("caps every call's output, sizes the repair to the first answer and bounds its echo", async () => {
+    const longInvalid = `{${"x".repeat(20_000)}`;
+    const client = fakeClient([{ text: longInvalid, outputTokens: 900, finishReason: "stop" }, JSON.stringify(BAR_SPEC)]);
+    const { calls } = await exportVisual(args({ client, config: config(["description", "mermaid"]) }));
+    expect(calls.map((c) => c.purpose)).toEqual(["spec", "repair"]);
+    expect(client.requests[0]!.maxOutputTokens).toBe(CHART_EXPORT_LIMITS.maxOutputTokensPerCall);
+    expect(CHART_EXPORT_LIMITS.maxOutputTokensPerCall).toBe(2_048);
+    // The repair re-emits about the same spec: its cap is the first answer's output plus the slack.
+    expect(client.requests[1]!.maxOutputTokens).toBe(900 + CHART_EXPORT_LIMITS.repairOutputSlackTokens);
+    expect(repairOutputTokenCap(0)).toBe(CHART_EXPORT_LIMITS.minRepairOutputTokens);
+    expect(repairOutputTokenCap(1_900)).toBe(CHART_EXPORT_LIMITS.maxOutputTokensPerCall);
+    expect(repairOutputTokenCap(Number.NaN)).toBe(CHART_EXPORT_LIMITS.maxOutputTokensPerCall);
+    // A hostile first answer is echoed only up to the bound.
+    const echoed = client.requests[1]!.prompt.match(/\{x+/)?.[0] ?? "";
+    expect(echoed.length).toBe(CHART_EXPORT_LIMITS.maxRepairEchoChars);
+  });
+
+  it("retries a spec cut off at its cap once at the larger cap, and never repairs after it", async () => {
+    const cutOff = { text: `{"kind":"chart","chartType":"line","series":[{"name":"a","points":[${"{\"x\":1,\"y\":2},".repeat(300)}`, outputTokens: 2_048, finishReason: "length" };
+    const client = fakeClient([cutOff, { ...cutOff, outputTokens: 3_072 }]);
+    const a = args({ client, config: config(["description", "mermaid"]) });
+    const { visual, calls } = await exportVisual(a);
+    expect(calls.map((c) => c.purpose)).toEqual(["spec", "expand"]);
+    expect(client.requests[1]!.maxOutputTokens).toBe(CHART_EXPORT_LIMITS.maxExpandedOutputTokens);
+    expect(client.requests[1]!.prompt).toBe(client.requests[0]!.prompt);
+    expect(visual?.outputs.mermaid).toBeUndefined();
+    // A cut-off answer without a provider finish reason counts too (the whole cap used).
+    const silent = fakeClient([{ ...cutOff, finishReason: "" }, JSON.stringify(BAR_SPEC)]);
+    const second = await exportVisual(args({ client: silent, config: config(["description", "mermaid"]) }));
+    expect(second.calls.map((c) => c.purpose)).toEqual(["spec", "expand"]);
+    expect(second.visual?.outputs.mermaid).toBeTruthy();
   });
 
   it("never puts raw provider error text into skipped reasons", async () => {
@@ -331,26 +368,37 @@ describe("router estimators with chart export", () => {
 
 describe("generator model selection", () => {
   const catalog = testCatalog();
+  // The test provider states a $2/M output ceiling (DISTINCT_TEST_PRICING).
+  beforeEach(() => installTestPricing(DISTINCT_TEST_PRICING));
+  afterEach(() => resetPricingProviderForTests());
 
   it("picks the first admitted candidate in preference order and refuses overrides outside the allowlist or ceiling", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    // The test catalog prices GPT-6 Luna at $10/M output: over the ceiling, so the next preferred candidate wins.
+    // The test catalog prices GPT-6 Luna at $10/M output: over the ceiling, so the next admitted candidate wins (the test
+    // catalog has no DeepSeek 1017 target, so GLM).
     const chosen = selectGeneratorModel({ kind: "chart", catalog });
-    expect(chosen).toMatchObject({ reason: "preferred-candidate", modelUri: "llm://openrouter/google/gemini-3.1-flash-lite" });
+    expect(chosen).toMatchObject({ reason: "preferred-candidate", modelUri: "llm://openrouter/z-ai/glm-5.3-flash" });
     const live = catalog.map((t) => t.ref.modelUri === "llm://openrouter/openai/gpt-6-luna" ? { ...t, pricing: { ...t.pricing, inputUsdPerMTok: 0.1, outputUsdPerMTok: 0.5 } } : t);
     expect(selectGeneratorModel({ kind: "diagram", catalog: live })?.modelUri).toBe("llm://openrouter/openai/gpt-6-luna");
-    // The ceiling is $2/M output: a preferred candidate priced at $3/M is skipped.
-    expect(CHART_EXPORT_MAX_OUTPUT_USD_PER_MTOK).toBe(2);
+    // The provider's ceilings are $1/M input and $2/M output here: a preferred candidate priced at $3/M output is skipped.
+    expect(chartGeneratorPriceCeiling()).toEqual({ inputUsdPerMTok: 1, outputUsdPerMTok: 2 });
     const pricier = catalog.map((t) => t.ref.modelUri === "llm://openrouter/openai/gpt-6-luna" ? { ...t, pricing: { ...t.pricing, inputUsdPerMTok: 0.1, outputUsdPerMTok: 3 } } : t);
-    expect(selectGeneratorModel({ kind: "chart", catalog: pricier })?.modelUri).toBe("llm://openrouter/google/gemini-3.1-flash-lite");
-    // Not the cheapest-first pick (GLM is cheaper than Gemini 3.1 Flash Lite in the test catalog).
-    expect(chosen?.modelUri).not.toBe("llm://openrouter/z-ai/glm-5.3-flash");
-    const proOverride = selectGeneratorModel({ kind: "chart", catalog, projectModel: "llm://openrouter/openai/gpt-6-sol-pro" });
+    expect(selectGeneratorModel({ kind: "chart", catalog: pricier })?.modelUri).toBe("llm://openrouter/z-ai/glm-5.3-flash");
+    // Gemini 3.1 Flash Lite is admitted by the routing catalog but is no longer a chart generator (2026-11-13).
+    expect(CHART_GENERATOR_CANDIDATES).not.toContain("llm://openrouter/google/gemini-3.1-flash-lite");
+    expect(selectGeneratorModel({ kind: "chart", catalog, envModel: "google/gemini-3.1-flash-lite" })?.reason).toBe("preferred-candidate");
+    // DeepSeek V4.1 Flash is never selected automatically: not a candidate, and refused as an override even when admitted.
+    expect(CHART_GENERATOR_CANDIDATES.some((uri) => isAutomaticSelectionDenied(uri))).toBe(false);
+    expect(DIAGRAM_GENERATOR_CANDIDATES.some((uri) => isAutomaticSelectionDenied(uri))).toBe(false);
+    const withDeepSeek = [...catalog, { ...catalog.find((t) => t.ref.modelUri === "llm://openrouter/z-ai/glm-5.3-flash")!,
+      id: "vlm:openrouter/deepseek/deepseek-v4.1-flash-1017", ref: { modelUri: "llm://openrouter/deepseek/deepseek-v4.1-flash-1017" } }];
+    expect(selectGeneratorModel({ kind: "chart", catalog: withDeepSeek, envModel: "deepseek/deepseek-v4.1-flash-1017" })?.modelUri).not.toMatch(/deepseek/);
+    const proOverride = selectGeneratorModel({ kind: "chart", catalog, envModel: "llm://openrouter/openai/gpt-6-sol-pro" });
     expect(proOverride?.reason).toBe("preferred-candidate");
     // Admitted by the routing catalog, but not a chart generator: refused.
-    expect(selectGeneratorModel({ kind: "chart", catalog, projectModel: "google/gemini-3.5-flash" })?.reason).toBe("preferred-candidate");
+    expect(selectGeneratorModel({ kind: "chart", catalog, envModel: "google/gemini-3.5-flash" })?.reason).toBe("preferred-candidate");
     // A candidate over the output-price ceiling is refused as an override too.
-    expect(selectGeneratorModel({ kind: "chart", catalog, projectModel: "openai/gpt-6-luna" })?.reason).toBe("preferred-candidate");
+    expect(selectGeneratorModel({ kind: "chart", catalog, envModel: "openai/gpt-6-luna" })?.reason).toBe("preferred-candidate");
     const env = selectGeneratorModel({ kind: "chart", catalog, envModel: "z-ai/glm-5.3-flash" });
     expect(env).toMatchObject({ reason: "env-override", modelUri: "llm://openrouter/z-ai/glm-5.3-flash" });
     // Not on the allowlist: not an eval finalist.
@@ -358,20 +406,62 @@ describe("generator model selection", () => {
     expect(selectGeneratorModel({ kind: "chart", catalog, envModel: "google/gemini-3.5-flash-lite" })?.reason).toBe("preferred-candidate");
     expect(selectGeneratorModel({ kind: "chart", catalog: [] })).toBeNull();
     // Logged model strings carry no raw control characters (log injection).
-    selectGeneratorModel({ kind: "chart", catalog, projectModel: "evil\n[ai-usage] forged line" });
+    selectGeneratorModel({ kind: "chart", catalog, envModel: "evil\n[ai-usage] forged line" });
     const logged = warn.mock.calls.map((call) => String(call[0])).join("\n");
     expect(logged).not.toMatch(/evil\n\[ai-usage\]/);
     expect(logged).toContain('model="evil?[ai-usage] forged line"');
     warn.mockRestore();
   });
 
-  it("lists only candidates with a list price at or under the ceiling", () => {
+  it("takes input and output price ceilings from the pricing provider, derives them from the per-visual charge, or has none", () => {
+    const luna = catalog.map((t) => t.ref.modelUri === "llm://openrouter/openai/gpt-6-luna" ? { ...t, pricing: { ...t.pricing, inputUsdPerMTok: 0.11, outputUsdPerMTok: 0.55 } } : t);
+    const ceiling = (input: number, output: number) => installTestPricing({ ...DISTINCT_TEST_PRICING,
+      internalCost: { ...DISTINCT_TEST_PRICING.internalCost!, chartGeneratorMaxPricesUsdPerMTok: () => ({ inputUsdPerMTok: input, outputUsdPerMTok: output }) } });
+    // A ceiling below a candidate's output price refuses it; so does one below its input price (council round 2, L4).
+    ceiling(1, 0.5);
+    expect(selectGeneratorModel({ kind: "chart", catalog: luna })?.modelUri).not.toBe("llm://openrouter/openai/gpt-6-luna");
+    ceiling(0.1, 1);
+    expect(selectGeneratorModel({ kind: "chart", catalog: luna })?.modelUri).not.toBe("llm://openrouter/openai/gpt-6-luna");
+    ceiling(0.11, 0.55);
+    expect(selectGeneratorModel({ kind: "chart", catalog: luna })?.modelUri).toBe("llm://openrouter/openai/gpt-6-luna");
+    // Null: derived from the provider's per-visual charge (one call at the image limit, one answer at the output cap).
+    installTestPricing({
+      ...DISTINCT_TEST_PRICING,
+      visualExportCredits: ({ visuals, callsPerVisual }) => visuals * callsPerVisual * 0.5,
+      internalCost: { ...DISTINCT_TEST_PRICING.internalCost!, chartGeneratorMaxPricesUsdPerMTok: () => null },
+    });
+    const derived = chartGeneratorPriceCeiling()!;
+    expect(derived.outputUsdPerMTok).toBeCloseTo((0.005 * 1e6) / CHART_EXPORT_LIMITS.maxOutputTokensPerCall, 9);
+    expect(derived.inputUsdPerMTok).toBeCloseTo((0.005 * 1e6) / CHART_EXPORT_LIMITS.maxImageTokensPerCall, 9);
+    // Nothing charged per visual (the open default): no ceiling of its own.
+    resetPricingProviderForTests();
+    expect(chartGeneratorPriceCeiling()).toBeNull();
+    // An invalid stated ceiling fails closed.
+    for (const bad of [{ inputUsdPerMTok: Number.NaN, outputUsdPerMTok: 1 }, { inputUsdPerMTok: 1, outputUsdPerMTok: -1 }, 2 as never]) {
+      installTestPricing({ ...DISTINCT_TEST_PRICING, internalCost: { ...DISTINCT_TEST_PRICING.internalCost!, chartGeneratorMaxPricesUsdPerMTok: () => bad } });
+      expect(() => selectGeneratorModel({ kind: "chart", catalog: luna })).toThrow(/invalid chart generator price ceiling/);
+    }
+  });
+
+  it("prefers Luna, then Claude Haiku 5.5 with reasoning off, then GLM 5.3 Flash", () => {
+    expect([...CHART_GENERATOR_CANDIDATES]).toEqual([
+      "llm://openrouter/openai/gpt-6-luna",
+      "llm://openrouter/anthropic/claude-haiku-5.5",
+      "llm://openrouter/z-ai/glm-5.3-flash",
+    ]);
+    expect(chartExportReasoning("llm://openrouter/anthropic/claude-haiku-5.5")).toEqual({ enabled: false });
+    // Haiku is a priced, bounded vision catalog model: the worker can weigh and admit it.
+    expect(visionModelTokenPricing("anthropic/claude-haiku-5.5")).toMatchObject({ inputUsdPerMillion: 0.1, outputUsdPerMillion: 0.5 });
+    expect(visionImageTokens("anthropic/claude-haiku-5.5", null)).toBe(4_784);
+  });
+
+  it("lists only candidates with a list price at or under the test provider's ceiling", () => {
     const prices = (JSON.parse(readFileSync(new URL("../../../scripts/lib/model-prices.json", import.meta.url), "utf8")) as { models: Record<string, { output: number; prohibited?: string }> }).models;
     for (const uri of [...CHART_GENERATOR_CANDIDATES, ...DIAGRAM_GENERATOR_CANDIDATES]) {
       const id = uri.replace(/^llm:\/\/openrouter\//, "");
       expect(prices[id], id).toBeDefined();
       expect(prices[id]!.prohibited, id).toBeUndefined();
-      expect(prices[id]!.output, id).toBeLessThanOrEqual(CHART_EXPORT_MAX_OUTPUT_USD_PER_MTOK);
+      expect(prices[id]!.output, id).toBeLessThanOrEqual(chartGeneratorPriceCeiling()!.outputUsdPerMTok);
     }
   });
 

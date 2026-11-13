@@ -730,7 +730,7 @@ async function estimateCommand(files: string[], flags: Record<string, string | b
   console.log(quote.ingest.credits ? `Ingest:    ${range(quote.ingest.credits)} credits (estimate)` : "Ingest:    no credits (billing disabled on this deployment)");
   console.log(`Hosting:   ${range({ low: quote.hosting.bytes.low / 1e6, high: quote.hosting.bytes.high / 1e6 }, 1)} MB${quote.hosting.creditsPerMonth ? `, ${range(quote.hosting.creditsPerMonth)} credits per month` : ""}`);
   if (quote.rates.pagesPerDollar) console.log(`Pages/$1:  ${range(quote.rates.pagesPerDollar, 0)}`);
-  console.log(`Pricing:   ${quote.pricingVersion}, valid until ${quote.validUntil}`);
+  console.log(`Pricing:   ${quote.pricingVersion}, re-quote after ${quote.validUntil} (prices may change without notice)`);
 }
 
 /** POSTs to a `…/estimate` route, prints the estimate (or raw JSON with --json) and leaves the operation undone. */

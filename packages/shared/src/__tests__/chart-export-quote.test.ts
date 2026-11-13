@@ -4,6 +4,9 @@ import {
   defaultPipelineFeatures,
   DISTINCT_TEST_PRICING,
   estimateChartExportCredits,
+  expectedBillableVisuals,
+  expectedVisualExportCredits,
+  visualExportCredits,
   estimatePipelineWork,
   compilePipelinePlan,
   installTestPricing,
@@ -91,6 +94,35 @@ describe("chart export in the public quote", () => {
     expect(line.credits.high).toBeCloseTo(credits.high, 5);
     expect(quote.pages.low).toBe(quote.pages.high);
     expect(line.credits.low).toBeCloseTo(credits.low, 5);
+  });
+
+  it("prices the charts line through the provider's billed second reads (repair or cut-off retry), equal to expectedVisualExportCredits", () => {
+    // Arbitrary stub values, not any deployment's: a non-zero retry price and expected share of second reads.
+    installTestPricing({ ...DISTINCT_TEST_PRICING, visualExportRetryCredits: () => 0.013, chartExportExpectedRetriesPerRead: () => 0.37 });
+    const pipeline = { ...defaultPipelineFeatures, chartExport: { tier: "models" as const, formats: ["description", "vega-lite", "csv"] as const, diagrams: true } };
+    const base = quoteSettingsForPipeline(pipeline as never);
+    const quote = quoteEstimate({ files }, { env: ON, base });
+    const line = charts(quote)!;
+    const formats = ["description", "vega-lite", "csv"] as const;
+    const visuals = expectedBillableVisuals({ config: pipeline.chartExport, pages: quote.pages.high, documents: files.length });
+    expect(line.credits.high).toBeCloseTo(expectedVisualExportCredits({ visuals: visuals.high, formats: [...formats] }), 6);
+    expect(line.credits.low).toBeCloseTo(expectedVisualExportCredits({ visuals: visuals.low, formats: [...formats] }), 6);
+    // The retry share is really in it: above first reads alone by visuals x expected retries x retry credits.
+    const firstOnly = visualExportCredits({ visuals: visuals.high, source: "vision", formats: [...formats] });
+    expect(line.credits.high - firstOnly).toBeCloseTo(visuals.high * 0.37 * 0.013, 6);
+    // And equal to the stage estimate's chart credits for the same upload.
+    const stage = estimateChartExportCredits({ features: pipeline as never, tier: "models", pages: quote.pages.high, documents: files.length, env: ON });
+    expect(line.credits.high).toBeCloseTo(stage.high, 6);
+  });
+
+  it("the open default prices second reads at 0: the charts line equals first reads only", () => {
+    resetPricingProviderForTests();
+    const pipeline = { ...defaultPipelineFeatures, chartExport: { tier: "models" as const, formats: ["description", "mermaid"] as const, diagrams: true } };
+    const quote = quoteEstimate({ files }, { env: ON, base: quoteSettingsForPipeline(pipeline as never) });
+    const line = charts(quote);
+    if (!line) return; // the open provider may not bill at all without Stripe; nothing to compare
+    const visuals = expectedBillableVisuals({ config: pipeline.chartExport, pages: quote.pages.high, documents: files.length });
+    expect(line.credits.high).toBeCloseTo(visualExportCredits({ visuals: visuals.high, source: "vision", formats: ["description", "mermaid"] }), 6);
   });
 
   it("estimatePipelineWork prices chart reads only with the switch on, never at free", () => {

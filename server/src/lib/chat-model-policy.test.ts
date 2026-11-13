@@ -191,8 +191,9 @@ describe("explicit Speed boost admission", () => {
     expect(resolveSpeedBoostChatModel(model, true)).toBe(`${model}:nitro`);
     expect(resolveSpeedBoostChatModel(`${model}:nitro`, true)).toBe(`${model}:nitro`);
   });
-  it("answers boosted GLM 5.3 Flash with DeepSeek V4.1 Flash on Nitro, keeping an explicit GLM Nitro id", () => {
-    expect(resolveSpeedBoostChatModel("z-ai/glm-5.3-flash", true)).toBe("deepseek/deepseek-v4.1-flash-1017:nitro");
+  it("answers boosted GLM 5.3 Flash on its own Nitro variant, never swapping to another model", () => {
+    // No swap to another model since 2026-11-13: GLM answers on its own Nitro variant, never DeepSeek V4.1 Flash.
+    expect(resolveSpeedBoostChatModel("z-ai/glm-5.3-flash", true)).toBe("z-ai/glm-5.3-flash:nitro");
     expect(resolveSpeedBoostChatModel("z-ai/glm-5.3-flash:nitro", true)).toBe("z-ai/glm-5.3-flash:nitro");
   });
   it.each(["openai/gpt-6-luna-pro", "arbitrary/model", "openai/gpt-6.1-sol"])("refuses unsupported boost %s before spending", (model) => {

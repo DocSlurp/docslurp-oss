@@ -115,7 +115,60 @@ export const CHART_EXPORT_LIMITS = {
   maxDigestChars: 4000,
   /** Model output kept per format before validation (longer is refused). */
   maxOutputChars: 60_000,
+  /**
+   * Output token cap of a spec, repair or direct call (`max_tokens`, never above the model's own cap): above the longest
+   * spec and repair answers measured on real documents, with headroom, and it bounds what a hostile page can make one
+   * call write (the shared vision cap is 8-16k).
+   */
+  maxOutputTokensPerCall: 2_048,
+  /**
+   * Cap of the one retry after a spec answer was cut off at `maxOutputTokensPerCall` (lowest cap first, then more
+   * tokens). The retry replaces the repair, so a read makes at most two calls before its direct formats.
+   */
+  maxExpandedOutputTokens: 3_072,
+  /**
+   * A repair re-emits about the same spec: its cap is the first answer's output plus this slack (at least
+   * `minRepairOutputTokens`, at most `maxOutputTokensPerCall`).
+   */
+  repairOutputSlackTokens: 512,
+  minRepairOutputTokens: 512,
+  /** Characters of the invalid first answer echoed into the repair prompt (bounds the repair's input). */
+  maxRepairEchoChars: 4_000,
+  /**
+   * Largest image a chart call sends, in the generator's own image tokens at the image's size (a letter page at 200 DPI
+   * is about 9,200 on a patch-priced model). A larger image, or one of unknown size, gets no model read: the visual
+   * keeps its deterministic or description fallback, and the page's own transcription is unaffected.
+   */
+  maxImageTokensPerCall: 10_240,
 } as const;
+
+/**
+ * Runtime options for one chart-export model call: its own output cap, the image limit, and exactly one billed request
+ * (no stream retry or streaming fallback; a cut-off answer comes back with `finishReason: "length"` so the generator
+ * can retry once at the larger cap). Used by the chart model client in `stages/vision-extract.ts`.
+ */
+export function chartCallRuntimeOptions(request: { maxOutputTokens?: number }): { maxOutputTokens: number; maxImageTokens: number; singleAttempt: true } {
+  return {
+    maxOutputTokens: request.maxOutputTokens ?? CHART_EXPORT_LIMITS.maxOutputTokensPerCall,
+    maxImageTokens: CHART_EXPORT_LIMITS.maxImageTokensPerCall,
+    singleAttempt: true,
+  };
+}
+
+/** Output cap of the repair after a first answer of `firstOutputTokens` (see `CHART_EXPORT_LIMITS`). */
+export function repairOutputTokenCap(firstOutputTokens: number): number {
+  const first = Number.isFinite(firstOutputTokens) ? Math.max(0, Math.trunc(firstOutputTokens)) : CHART_EXPORT_LIMITS.maxOutputTokensPerCall;
+  return Math.min(
+    CHART_EXPORT_LIMITS.maxOutputTokensPerCall,
+    Math.max(CHART_EXPORT_LIMITS.minRepairOutputTokens, first + CHART_EXPORT_LIMITS.repairOutputSlackTokens),
+  );
+}
+
+/** Whether a call's answer was cut off at its output cap (provider `length`, or the whole cap used). */
+export function answerHitOutputCap(response: { finishReason?: string | null; outputTokens: number }, cap: number): boolean {
+  const reason = response.finishReason?.toLowerCase();
+  return reason === "length" || reason === "max_tokens" || response.outputTokens >= cap;
+}
 
 /** Formats the generator should produce for a visual of `kind` (diagrams carry no data series). */
 export function formatsFor(config: ChartExportConfig, kind: "chart" | "diagram" | null): ChartExportFormat[] {

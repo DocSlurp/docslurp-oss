@@ -6,7 +6,7 @@
  * Imports only modules that do not need the pricing provider at load time (pricing-provider.ts imports the open default,
  * which imports this).
  */
-import { chatAnswerCredits, creditsToDollars, searchCredits, storageCreditsPerMonth, visualExportCredits } from "./billing.js";
+import { chatAnswerCredits, creditsToDollars, expectedVisualExportCredits, searchCredits, storageCreditsPerMonth } from "./billing.js";
 import { defaultChartExportConfig, type ChartExportFormat } from "./chart-export.js";
 import { expectedBillableVisuals } from "./chart-export-estimate.js";
 import type { EstimateLine, EstimateQuote, ProviderEstimateArgs } from "./estimate-quote.js";
@@ -52,7 +52,8 @@ const rounded = (range: Range): Range => ({ low: round5(range.low), high: round5
 
 /**
  * Build the estimate. `ingest` is the provider's upload quote for these files and settings; `bytes` its stored-bytes
- * model; `validForMs` how long the quote holds (the provider's notice period for a price change).
+ * model; `validForMs` how long the provider expects these prices to stay current. Prices may change without notice, so
+ * `validUntil` is a freshness hint for re-quoting, never a price guarantee; billing follows what processing measures.
  */
 export function assembleEstimateQuote(args: ProviderEstimateArgs & {
   ingest: { estimate: CostEstimate; media: UploadMediaEstimate | null };
@@ -137,8 +138,10 @@ function chartCredits(pages: { low: number; high: number }, documents: number, s
   const formats = settings.chartFormats?.length ? [...settings.chartFormats] : defaultChartExportConfig.formats;
   const config = { ...defaultChartExportConfig, formats, diagrams: settings.chartDiagrams ?? defaultChartExportConfig.diagrams };
   const at = (count: number) => expectedBillableVisuals({ config, pages: count, documents: Math.max(1, documents) });
+  // First reads plus the expected billed second reads (one repair or cut-off retry per chart at most), priced by the
+  // active provider: the same function the stage estimate (`chartExportCredits`) uses, so the line equals its credits.
   return ordered({
-    low: visualExportCredits({ visuals: at(pages.low).low, source: "vision", formats }),
-    high: visualExportCredits({ visuals: at(pages.high).high, source: "vision", formats }),
+    low: expectedVisualExportCredits({ visuals: at(pages.low).low, formats }),
+    high: expectedVisualExportCredits({ visuals: at(pages.high).high, formats }),
   });
 }
