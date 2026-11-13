@@ -1,3 +1,4 @@
+import { isAutomaticSelectionDenied } from "@docslurp/shared";
 import { isSpeedBoostEligible, speedBoostModel } from "@docslurp/shared";
 import { SPEED_BOOST_MODEL_SWAPS } from "@docslurp/shared/project-chat-models";
 import {
@@ -162,6 +163,9 @@ export function managedChatModelProblem(model: string, evalModels: ReadonlySet<s
   if (nitroBaseModel(id)) return "fast-route variants are chosen by speedBoost, not mapped";
   if (!isProjectChatModelId(id) && !evalModels.has(id)) return "not a reviewed chat model";
   if (isProhibitedRoutingModelId(id)) return "prohibited model";
+  // A tier mapping is resolved for callers who chose only a category: automatic selection, so the same denylist
+  // applies (owner, 2026-11-13). Stored mappings are filtered on read through this check too.
+  if (isAutomaticSelectionDenied(id)) return "never selected automatically";
   const price = CHAT_MODEL_PRICES_USD_PER_MTOK[id];
   if (!price) return "no verified price";
   if (price.output >= MAX_OUTPUT_USD_PER_MTOK_EXCLUSIVE) return "output price at or above the cap";
@@ -203,10 +207,12 @@ export async function chatModelRefused(actor: RequestActor | undefined, model: s
 
 /**
  * A Nitro model cannot bypass explicit credit opt-in. Unsupported routes fail before spending.
- * Speed boost on GLM 5.3 Flash (default or picked) answers with DeepSeek V4.1 Flash on Nitro
- * (SPEED_BOOST_MODEL_SWAPS); an explicit `:nitro` id is honoured as named.
+ * Speed boost answers with the chosen model on Nitro, or its SPEED_BOOST_MODEL_SWAPS target (none today). A swap is an
+ * automatic selection, so a swap target that is never selected automatically is ignored. An explicit `:nitro` id is
+ * honoured as named.
  */
 export function resolveSpeedBoostChatModel(model: string, enabled: boolean = false): string {
   if ((model.endsWith(":nitro") && !enabled) || (enabled && !isSpeedBoostEligible(model))) throw new ChatModelNotAllowedError();
-  return (enabled ? SPEED_BOOST_MODEL_SWAPS[model] : undefined) ?? speedBoostModel(model, enabled);
+  const swap = enabled ? SPEED_BOOST_MODEL_SWAPS[model] : undefined;
+  return (swap && !isAutomaticSelectionDenied(swap) ? swap : undefined) ?? speedBoostModel(model, enabled);
 }

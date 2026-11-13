@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   DEFAULT_OPENROUTER_VISION_MODEL,
+  OPEN_WEIGHTS_OPENROUTER_VISION_MODEL,
+  isAutomaticSelectionDenied,
   DEFAULT_VISION_PROFILE,
   NEMOTRON_SUPER_VL_VISION_MODEL,
   OPENROUTER_BASE_URL,
@@ -42,13 +44,25 @@ describe("hosted vision catalog", () => {
     expect(new Set(visionModelCatalog.map((model) => model.id)).size).toBe(visionModelCatalog.length);
   });
 
+  it("never defaults to a model that is never selected automatically (owner decision 2026-11-13)", () => {
+    expect(DEFAULT_OPENROUTER_VISION_MODEL).toBe("openai/gpt-6-luna");
+    expect(isAutomaticSelectionDenied(DEFAULT_OPENROUTER_VISION_MODEL)).toBe(false);
+    expect(isAutomaticSelectionDenied(OPEN_WEIGHTS_OPENROUTER_VISION_MODEL)).toBe(false);
+    for (const profile of Object.values(visionProfileCatalog)) {
+      expect(isAutomaticSelectionDenied(profile.config.modelUri), profile.config.profile).toBe(false);
+    }
+    // DeepSeek V4.1 Flash 1017 stays an explicit catalog choice.
+    const deepseek = "llm://openrouter/deepseek/deepseek-v4.1-flash-1017";
+    expect(visionConfigSchema.parse({ modelUri: deepseek }).modelUri).toBe(deepseek);
+  });
+
   it("catalogs the tuned opt-in models with list prices and never a Pro/Ultra or :free variant", () => {
     const tuned = {
       // Priced at the most expensive host the route allows ($0.30/$1.20: US hosts, DeepSeek at peak), not the $0.15/$0.60 list price.
       "deepseek/deepseek-v4.1-flash-1017": { input: 0.3, output: 1.2, perPage: 0.103, checked: "2026-11-12", route: ["fireworks", "parasail"] },
       "xiaomi/mimo-v2.6-flash": { input: 0.14, output: 0.28, perPage: 0.056 },
       "openai/gpt-6-luna": { input: 0.1, output: 0.5, perPage: 0.061 },
-      "z-ai/glm-5.3-flash": { input: 0.15, output: 0.5, perPage: 0.073 },
+      "z-ai/glm-5.3-flash": { input: 0.15, output: 0.5, perPage: 0.073, checked: "2026-11-12", route: ["wafer/nvfp4", "friendli", "inference-net/fp4"] },
     };
     for (const [id, expected] of Object.entries(tuned)) {
       const uri = `llm://openrouter/${id}`;
@@ -121,14 +135,15 @@ describe("hosted vision catalog", () => {
     });
   });
 
-  it("resolves the open-weights profile to the admitted open-weights default, and refuses Nemotron", () => {
-    const defaultUri = `llm://openrouter/${DEFAULT_OPENROUTER_VISION_MODEL}`;
+  it("resolves the open-weights profile to the admitted open-weights model (GLM 5.3 Flash, MIT), and refuses Nemotron", () => {
+    const openWeightsUri = `llm://openrouter/${OPEN_WEIGHTS_OPENROUTER_VISION_MODEL}`;
     const config = visionConfigSchema.parse({ profile: "open-weights-hosted" });
-    expect(config).toMatchObject({ modelUri: defaultUri, target: "hosted" });
+    expect(config).toMatchObject({ modelUri: openWeightsUri, target: "hosted" });
+    expect(visionProfileCatalog["open-weights-hosted"].description).toContain("GLM 5.3 Flash");
     expect(resolveVisionRoute(config)).toMatchObject({
       provider: "openrouter",
       runtime: "openai-compatible",
-      model: DEFAULT_OPENROUTER_VISION_MODEL,
+      model: OPEN_WEIGHTS_OPENROUTER_VISION_MODEL,
       baseUrl: OPENROUTER_BASE_URL,
     });
     const refused = visionConfigSchema.safeParse({ modelUri: NEMOTRON_URI });
@@ -140,7 +155,7 @@ describe("hosted vision catalog", () => {
   it("accepts a per-run pipeline override and stored catalog model ids; a stored refused model fails loudly", () => {
     const glm = "llm://openrouter/z-ai/glm-5.3-flash";
     expect(normalizePipelineFeatures({ vision: { modelUri: glm } }).vision.modelUri).toBe(glm);
-    expect(normalizePipelineFeatures({ vision: { profile: "open-weights-hosted" } }).vision.modelUri).toBe(`llm://openrouter/${DEFAULT_OPENROUTER_VISION_MODEL}`);
+    expect(normalizePipelineFeatures({ vision: { profile: "open-weights-hosted" } }).vision.modelUri).toBe(`llm://openrouter/${OPEN_WEIGHTS_OPENROUTER_VISION_MODEL}`);
     const stored = { vision: { model: "z-ai/glm-5.3-flash", runtime: "openai-compatible", baseUrl: OPENROUTER_BASE_URL } };
     expect(normalizePipelineFeatures(stored as unknown as Parameters<typeof normalizePipelineFeatures>[0]).vision.modelUri).toBe(glm);
     const storedNemotron = { vision: { model: NEMOTRON_SUPER_VL_VISION_MODEL, runtime: "openai-compatible", baseUrl: OPENROUTER_BASE_URL } };

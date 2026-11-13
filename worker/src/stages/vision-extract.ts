@@ -1796,6 +1796,7 @@ export class VisionExtractStage implements Stage {
               gate,
               promptText: request.prompt,
               ...(chartExportReasoning(request.modelUri) ? { reasoning: chartExportReasoning(request.modelUri)! } : {}),
+              ...(request.maxOutputTokens ? { maxOutputTokens: request.maxOutputTokens } : {}),
               ...(request.signal ? { signal: request.signal } : {}),
             });
             recordVisionFailureUsages(state, primaryFailureUsages(result.primaryFailure, this.cfg, page));

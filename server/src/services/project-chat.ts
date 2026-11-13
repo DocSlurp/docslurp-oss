@@ -3,7 +3,7 @@ import { resolveSpeedBoostChatModel, ChatModelNotAllowedError } from "../lib/cha
 import { reportPublicError } from "../lib/public-errors.js";
 import { getDeferredContext } from "../search/deferred/deferred-context.js";
 import { hostedApiKeyForProject, loadProjectPrivacyMode, openRouterCall, privacyModeOf, privateTextModelForProject } from "../lib/privacy.js";
-import { BILLABLE_UNIT_METRICS, chatAnswerCredits, chatAnswerUnits, chatModelTier, ingestReportFocusPages, parsePrivateModelUri, requestsIngestReport } from "@docslurp/shared";
+import { BILLABLE_UNIT_METRICS, chatAnswerCredits, chatAnswerUnits, chatModelTier, ingestReportFocusPages, parsePrivateModelUri, requestsIngestReport, withoutAutomaticSelectionDenied } from "@docslurp/shared";
 import type { PrivacyMode } from "@docslurp/shared";
 import { env } from "../config.js";
 import type { RequestActor } from "../lib/request-actor.js";
@@ -112,8 +112,21 @@ type ProjectChatRuntimeSummary = {
   totalMs: number;
 };
 
-const PROJECT_CHAT_FAILOVER_MODEL: ProjectChatModelId =
-  "deepseek/deepseek-v4.1-flash-1017";
+/**
+ * The model a failed chat answer retries on. GPT-6 Luna since 2026-11-13: DeepSeek V4.1 Flash is never selected
+ * automatically (automatic-model-selection.ts), so it is never a failover target; buildModelFailoverOrder also drops
+ * any such model after the caller's own choice.
+ */
+export const PROJECT_CHAT_FAILOVER_MODEL: ProjectChatModelId =
+  "openai/gpt-6-luna";
+/**
+ * Failover candidates in order: the failover model, then GLM 5.3 Flash (same answer tier) for a project that already
+ * answers with the failover model, so a Luna outage does not leave Luna projects without a second model.
+ */
+export const PROJECT_CHAT_FAILOVER_MODELS: readonly ProjectChatModelId[] = [
+  PROJECT_CHAT_FAILOVER_MODEL,
+  "z-ai/glm-5.3-flash",
+];
 const DEFAULT_PENDING_SEARCH_RETRY = {
   maxAttempts: 8,
   intervalMs: 2000,
@@ -483,11 +496,17 @@ function buildUsageSummary(args?: {
 }
 
 /** Eval models never fail over: a comparison must not silently measure another model. */
-function buildModelFailoverOrder(
+/**
+ * The models one chat turn tries, in order: the caller's choice, then the first failover candidate that differs from
+ * it and is not denied. At most two attempts.
+ */
+export function buildModelFailoverOrder(
   preferredModel: string,
   failover = true,
 ): string[] {
-  return failover ? [...new Set([preferredModel, PROJECT_CHAT_FAILOVER_MODEL])] : [preferredModel];
+  if (!failover) return [preferredModel];
+  const next = withoutAutomaticSelectionDenied(PROJECT_CHAT_FAILOVER_MODELS).find((model) => model !== preferredModel);
+  return next ? [preferredModel, next] : [preferredModel];
 }
 
 async function generateProjectChatTextWithFailover(args: {

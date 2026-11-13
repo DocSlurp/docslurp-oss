@@ -1,3 +1,4 @@
+import { assertNoAutomaticSelectionDenied } from "./automatic-model-selection.js";
 import { normalizeHostedModelRef } from "./model-uri.js";
 
 export const PROJECT_CHAT_MODELS = [
@@ -17,13 +18,12 @@ export const DEFAULT_PROJECT_CHAT_MODEL: ProjectChatModelId =
   "z-ai/glm-5.3-flash";
 
 /**
- * Speed boost on the default efficient model answers with DeepSeek V4.1 Flash
- * on Nitro instead of GLM 5.3 Flash on Nitro: measured 2026-11-10 (3 runs,
- * ~3k-token prompt), DeepSeek Nitro steps took 0.9-1.1 s against 2.3-2.7 s.
+ * Speed boost model swaps: a model Speed boost answers with instead of the chosen model's own Nitro variant. Empty:
+ * Speed boost answers with the chosen model on Nitro. The 2026-11-10 swap from GLM 5.3 Flash to DeepSeek V4.1 Flash
+ * on Nitro was removed (owner, 2026-11-13): a swap is an automatic selection, and DeepSeek V4.1 Flash is never
+ * selected automatically (automatic-model-selection.ts). A swap target must never be such a model.
  */
-export const SPEED_BOOST_MODEL_SWAPS: Readonly<Record<string, ProjectChatModelId>> = {
-  "z-ai/glm-5.3-flash": "deepseek/deepseek-v4.1-flash-1017:nitro",
-};
+export const SPEED_BOOST_MODEL_SWAPS: Readonly<Record<string, ProjectChatModelId>> = {};
 
 export function isProjectChatModelId(model: unknown): model is ProjectChatModelId {
   return PROJECT_CHAT_MODELS.some((candidate) => candidate.id === model);
@@ -138,12 +138,18 @@ export const CHAT_TIERS = ["fastest", "balanced", "smart"] as const;
 export type ChatTier = (typeof CHAT_TIERS)[number];
 export const DEFAULT_CHAT_TIER: ChatTier = "fastest";
 
-/** Managed default model for each tier. Every entry is a reviewed catalog model priced under the output-price cap. */
+/**
+ * Managed default model for each tier. Every entry is a reviewed catalog model priced under the output-price cap and
+ * outside NO_AUTOMATIC_SELECTION_MODEL_FAMILIES: a tier is a category the system resolves on the caller's behalf, so
+ * it counts as automatic selection (owner, 2026-11-13: balanced moved off DeepSeek V4.1 Flash to GLM 5.3 Flash,
+ * standard credit tier; live peak $0.225/$0.75 per 1M across 42 endpoints, list $0.15/$0.50).
+ */
 export const CHAT_TIER_MODELS: Readonly<Record<ChatTier, ProjectChatModelId>> = {
   fastest: "z-ai/glm-5.3-flash",
-  balanced: "deepseek/deepseek-v4.1-flash-1017",
+  balanced: "z-ai/glm-5.3-flash",
   smart: "openai/gpt-6.1-sol",
 };
+assertNoAutomaticSelectionDenied("CHAT_TIER_MODELS", Object.values(CHAT_TIER_MODELS));
 
 export function isChatTier(value: unknown): value is ChatTier {
   return typeof value === "string" && (CHAT_TIERS as readonly string[]).includes(value);
@@ -164,14 +170,16 @@ export function chatTierModel(tier: ChatTier, overrides?: ChatTierModelMap | nul
  * The tier a resolved model answers for, for customer-facing responses: the turn's tier when known, else the
  * managed default tier whose model (or its `:nitro` variant) it is. Null for anything else (eval or unknown models).
  */
-export function chatTierForModel(model: string | null | undefined, overrides?: ChatTierModelMap | null): ChatTier | null {
+export function chatTierForModel(model: string | null | undefined, overrides?: ChatTierModelMap | null, preferred?: ChatTier | null): ChatTier | null {
   if (!model?.trim()) return null;
   if (isChatTier(model)) return model;
   const id = normalizeChatModelRef(model);
   const base = nitroBaseModel(id) ?? id;
+  // Tiers may share a model (fastest and balanced both use GLM 5.3 Flash): the turn's own tier wins.
+  if (preferred && chatTierModel(preferred, overrides) === base) return preferred;
   for (const tier of CHAT_TIERS) if (chatTierModel(tier, overrides) === base) return tier;
   for (const [base_, swapped] of Object.entries(SPEED_BOOST_MODEL_SWAPS)) {
-    if (swapped === id) return chatTierForModel(base_, overrides);
+    if (swapped === id) return chatTierForModel(base_, overrides, preferred);
   }
   return null;
 }

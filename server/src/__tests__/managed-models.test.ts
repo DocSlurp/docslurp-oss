@@ -49,7 +49,7 @@ describe("platform-admin managed model route", () => {
   });
 
   it("refuses unreviewed, prohibited, Nitro and llm:// models before writing", async () => {
-    for (const model of ["acme/unlisted-1", "openai/gpt-6-sol-pro", "z-ai/glm-5.3-flash:nitro", "llm://openrouter/anthropic/claude-haiku-5.5"]) {
+    for (const model of ["acme/unlisted-1", "openai/gpt-6-sol-pro", "z-ai/glm-5.3-flash:nitro", "llm://openrouter/anthropic/claude-haiku-5.5", "deepseek/deepseek-v4.1-flash-1017"]) {
       const response = await put(adminSession, { chat: { fastest: model } });
       expect(response.status, model).toBe(400);
     }
@@ -92,7 +92,7 @@ describe("platform-admin managed model route", () => {
 describe("stored tier mappings", () => {
   it("drops entries that no longer pass review", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    expect(parseStoredChatTierModels({ fastest: "anthropic/claude-haiku-5.5", smart: "openai/gpt-6-sol-pro", other: "x/y" }))
+    expect(parseStoredChatTierModels({ fastest: "anthropic/claude-haiku-5.5", smart: "openai/gpt-6-sol-pro", balanced: "deepseek/deepseek-v4.1-flash-1017", other: "x/y" }))
       .toEqual({ fastest: "anthropic/claude-haiku-5.5" });
     expect(parseStoredChatTierModels("nope")).toBeNull();
     expect(warn).toHaveBeenCalled();
@@ -106,16 +106,23 @@ describe("customer chat responses", () => {
       answer: "x",
       debug: {
         citations: 0, fallback: false, historyTurns: 0, mode: "retrieval" as const, wholeCorpus: {} as never,
-        model: "deepseek/deepseek-v4.1-flash-1017:nitro", requestedModel: "fastest",
-        resolvedModel: "deepseek/deepseek-v4.1-flash-1017-20261017", resolvedProvider: "Fireworks",
-        stepUsage: [{ step: 0, model: "z-ai/glm-5.3-flash", finishReason: "stop", inputTokens: 1, outputTokens: 1, toolCalls: [] }],
+        model: "z-ai/glm-5.3-flash:nitro", requestedModel: "smart",
+        resolvedModel: "z-ai/glm-5.3-flash-20261101", resolvedProvider: "Fireworks",
+        stepUsage: [{ step: 0, model: "openai/gpt-6.1-sol", finishReason: "stop", inputTokens: 1, outputTokens: 1, toolCalls: [] }],
       },
-    } as never, "fastest") as { debug: Record<string, unknown> };
-    expect(response.debug.model).toBe("balanced");
-    expect(response.debug.requestedModel).toBe("fastest");
+    } as never, "smart") as { debug: Record<string, unknown> };
+    // A fast-route GLM answer reads as GLM's tier; the turn's own step reads as smart.
+    expect(response.debug.model).toBe("fastest");
+    expect(response.debug.requestedModel).toBe("smart");
+    expect((response.debug.stepUsage as Array<{ model: string }>)[0]!.model).toBe("smart");
     expect(response.debug).not.toHaveProperty("resolvedModel");
     expect(response.debug).not.toHaveProperty("resolvedProvider");
     expect(JSON.stringify(response)).not.toMatch(BACKEND_ID);
+  });
+
+  it("report the turn's tier when tiers share a model", () => {
+    const response = customerChatResponse({ debug: { model: "z-ai/glm-5.3-flash", citations: 0 } } as never, "balanced") as { debug: { model: unknown } };
+    expect(response.debug.model).toBe("balanced");
   });
 
   it("report an unknown model as the turn's tier", () => {

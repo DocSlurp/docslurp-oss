@@ -11,24 +11,17 @@
  * - evalScore stays null until a recorded eval run measures the option; unmeasured options are never "smart".
  * - Together is omitted from every pool (owner, 2026-11-12): its DeepSeek V4.1 Flash 1017 endpoint fabricated page
  *   bodies on the tier benchmark (quality 0.565 and 0.301 against Fireworks 0.786 and 0.784).
+ * - DeepSeek V4.1 Flash is never an option (owner, 2026-11-13): it is never selected automatically
+ *   (automatic-model-selection.ts), and assertTierOptions refuses it.
  */
 import { defineTierOptions, type TierOption } from "./provider-tiers.js";
 
-const DEEPSEEK_1017 = "llm://openrouter/deepseek/deepseek-v4.1-flash-1017";
 const GLM = "llm://openrouter/z-ai/glm-5.3-flash";
 const MIMO = "llm://openrouter/xiaomi/mimo-v2.6-flash";
 const HAIKU = "llm://openrouter/anthropic/claude-haiku-5.5";
 const LUNA = "llm://openrouter/openai/gpt-6-luna";
 
 export const TIER_OPTIONS: readonly TierOption[] = defineTierOptions([
-  {
-    id: "page-ocr/deepseek-v4.1-flash-1017",
-    capability: "page-ocr",
-    pool: [`${DEEPSEEK_1017}?_provider=fireworks&_sort=latency`, `${DEEPSEEK_1017}?_provider=parasail`],
-    tiers: ["fastest", "balanced", "smart"],
-    evalScore: null,
-    evalRef: null,
-  },
   {
     id: "page-ocr/glm-5.3-flash",
     capability: "page-ocr",
@@ -49,14 +42,6 @@ export const TIER_OPTIONS: readonly TierOption[] = defineTierOptions([
     id: "chat/glm-5.3-flash",
     capability: "chat",
     pool: [`${GLM}?_provider=fireworks&_sort=price`, `${GLM}?_provider=friendli`],
-    tiers: ["fastest", "balanced", "smart"],
-    evalScore: null,
-    evalRef: null,
-  },
-  {
-    id: "chat/deepseek-v4.1-flash-1017",
-    capability: "chat",
-    pool: [`${DEEPSEEK_1017}?_provider=deepinfra/fp8&_sort=price`, `${DEEPSEEK_1017}?_provider=fireworks`, `${DEEPSEEK_1017}?_provider=parasail/fp8`],
     tiers: ["fastest", "balanced", "smart"],
     evalScore: null,
     evalRef: null,

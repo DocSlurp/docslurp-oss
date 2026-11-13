@@ -8,6 +8,7 @@
  * by signature and size only), and a hosted-mode image is the stored file as uploaded. Neither is a substitute for a
  * missing VM: escalation only follows a VM (or self-hosted) read, and hosted mode is its own operator setting.
  */
+import { isAutomaticSelectionDenied } from "@docslurp/shared";
 import { randomUUID } from "node:crypto";
 import { rm } from "node:fs/promises";
 import { resolveVisionRoute, type VisionConfig } from "@docslurp/shared";
@@ -80,8 +81,17 @@ export function ocrEscalationEnabled(env: NodeJS.ProcessEnv = process.env): bool
 /** Hosted providers the OCR reader may use; a local or private route would read the boundary's PNGs on another host. */
 const HOSTED_OCR_PROVIDERS = new Set(["deepinfra", "openrouter", "openai"]);
 
+/**
+ * The escalation model: `DOCSLURP_OCR_ESCALATION_MODEL`, else the default. Escalation is automatic, so a model that is
+ * never selected automatically (automatic-model-selection.ts) is refused as an override (logged) and the default used.
+ */
 export function ocrEscalationModel(env: NodeJS.ProcessEnv = process.env): string {
-  return env.DOCSLURP_OCR_ESCALATION_MODEL?.trim() || DEFAULT_OCR_ESCALATION_MODEL;
+  const configured = env.DOCSLURP_OCR_ESCALATION_MODEL?.trim();
+  if (configured && isAutomaticSelectionDenied(configured)) {
+    console.warn("[ocr] DOCSLURP_OCR_ESCALATION_MODEL names a model that is never selected automatically; using the default");
+    return DEFAULT_OCR_ESCALATION_MODEL;
+  }
+  return configured || DEFAULT_OCR_ESCALATION_MODEL;
 }
 
 export function ocrEscalationMaxPages(env: NodeJS.ProcessEnv = process.env): number {

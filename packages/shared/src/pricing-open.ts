@@ -184,6 +184,7 @@ export const OPEN_PRICING: PricingProvider = {
     sandboxCostCents: () => 0,
     sandboxRatesObservedAt: () => null,
     workerSlotUsdPerHour: () => null,
+    chartGeneratorMaxOutputUsdPerMTok: () => null,
   },
 };
 

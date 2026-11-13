@@ -96,8 +96,9 @@ export type EstimateLine = {
 
 export type EstimateQuote = {
   kind: "estimate";
-  /** The pricing rules that priced this estimate, and until when it holds. */
+  /** The pricing rules that priced this estimate. */
   pricingVersion: string;
+  /** When to re-quote: a freshness hint, not a price hold. Prices may change without notice. */
   validUntil: string;
   /** `disabled`: this deployment does not bill, and every credit figure is null. */
   billing: "enforced" | "disabled";

@@ -21,6 +21,7 @@
  *   select nothing (fail closed): the caller refuses or uses its default route and reports it.
  */
 import { CHAT_TIERS, type ChatTier } from "./project-chat-models.js";
+import { isAutomaticSelectionDenied } from "./automatic-model-selection.js";
 import { hostMatchesEndpoint, providerPool, type ProviderPool } from "./provider-pools.js";
 
 /** The customer tier vocabulary, reused for routing; there is no separate routing vocabulary. */
@@ -190,6 +191,8 @@ export function assertTierOptions(options: readonly TierOption[]): void {
     ids.add(option.id);
     if (option.model !== option.pool.model) throw new Error(`tier option ${option.id}: model must be the pool's model`);
     if (option.tiers.length === 0) throw new Error(`tier option ${option.id}: names no tier`);
+    // A tier picks among its options automatically, so a model that is never selected automatically is never an option.
+    if (isAutomaticSelectionDenied(option.model)) throw new Error(`tier option ${option.id}: ${option.model} is never selected automatically`);
     if (option.evalScore !== null && !(option.evalScore >= 0 && option.evalScore <= 1)) throw new Error(`tier option ${option.id}: evalScore must be 0-1`);
     if ((option.evalScore === null) !== (option.evalRef === null)) throw new Error(`tier option ${option.id}: evalScore and evalRef go together`);
   }

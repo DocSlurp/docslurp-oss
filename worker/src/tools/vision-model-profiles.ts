@@ -140,8 +140,12 @@ export const VISION_MODEL_PROFILES: Readonly<Record<string, VisionModelProfile>>
   // detail "high" caps image tokens ~7% below the default. Downscaling to a 1,600 px long side saved another ~13%
   // but blurred dense non-Latin script (Hebrew content F1 0.99 -> 0.95), so pages go at full size.
   // Probes: effort none, minimal and `{ enabled: false }` all return 200; unset spends ~240 reasoning tokens on a page.
+  // The default vision model since 2026-11-13. One 180°-rotated table page ran to the 16k shared cap on the 2026-10-21
+  // holdout (168 s); the 8k ceiling the previous default had bounds such loops and can only lower a smaller shared cap.
   "openai/gpt-6-luna": {
     defaultPrompt: "page-markdown-latex",
+    maxOutputTokens: 8_192,
+    maxOutputTokensMode: "ceiling",
     imageDetail: "high",
     reasoning: { effort: "none" },
     // Rare: some models wrap the whole page in a ```markdown fence.

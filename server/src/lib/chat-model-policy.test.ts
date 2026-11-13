@@ -44,7 +44,7 @@ describe("chat model resolution", () => {
   it("resolves tiers to managed models and the default tier when nothing is named", () => {
     expect(resolveChatModelRequest({ requested: undefined, isAdmin: false, evalModels })).toMatchObject({ model: "z-ai/glm-5.3-flash", source: "default", tier: "fastest" });
     expect(resolveChatModelRequest({ requested: "  ", isAdmin: false, evalModels }).source).toBe("default");
-    expect(resolveChatModelRequest({ tier: "balanced", isAdmin: false })).toMatchObject({ model: "deepseek/deepseek-v4.1-flash-1017", source: "tier", tier: "balanced" });
+    expect(resolveChatModelRequest({ tier: "balanced", isAdmin: false })).toMatchObject({ model: "z-ai/glm-5.3-flash", source: "tier", tier: "balanced" });
     expect(resolveChatModelRequest({ tier: "smart", isAdmin: false })).toMatchObject({ model: "openai/gpt-6.1-sol", tier: "smart" });
     expect(resolveChatModelRequest({ tier: "smart", reasoning: "high", isAdmin: false })).toMatchObject({ reasoning: "high" });
   });
@@ -53,7 +53,7 @@ describe("chat model resolution", () => {
     const tierModels = { fastest: "anthropic/claude-haiku-5.5" };
     expect(resolveChatModelRequest({ tier: "fastest", isAdmin: false, tierModels })).toMatchObject({ model: "anthropic/claude-haiku-5.5", tier: "fastest" });
     expect(resolveChatModelRequest({ isAdmin: false, tierModels })).toMatchObject({ model: "anthropic/claude-haiku-5.5", source: "default" });
-    expect(resolveChatModelRequest({ tier: "balanced", isAdmin: false, tierModels }).model).toBe("deepseek/deepseek-v4.1-flash-1017");
+    expect(resolveChatModelRequest({ tier: "balanced", isAdmin: false, tierModels }).model).toBe("z-ai/glm-5.3-flash");
   });
 
   it("refuses every backend model reference from callers without eval access, catalog ids included", () => {
@@ -127,7 +127,7 @@ describe("chat model resolution", () => {
   it("reads the reasoning level from an eval model reference's options", () => {
     expect(resolveChatModelRequest({ requested: undefined, isAdmin: false })).toMatchObject({ model: "z-ai/glm-5.3-flash", reasoning: "none" });
     expect(resolveChatModelRequest({ requested: "llm://openrouter/deepseek/deepseek-v4.1-flash-1017?reasoning=high", isAdmin: true }))
-      .toEqual({ model: "deepseek/deepseek-v4.1-flash-1017", source: "catalog", reasoning: "high", tier: "balanced" });
+      .toEqual({ model: "deepseek/deepseek-v4.1-flash-1017", source: "catalog", reasoning: "high", tier: null });
     expect(resolveChatModelRequest({ requested: "z-ai/glm-5.3-flash?effort=low", isAdmin: true })).toMatchObject({ model: "z-ai/glm-5.3-flash", reasoning: "low" });
     expect(resolveChatModelRequest({ requested: "z-ai/glm-5.3-flash?reasoning_effort=minimal", isAdmin: true })).toMatchObject({ reasoning: "minimal" });
     expect(resolveChatModelRequest({ requested: "z-ai/glm-5.3-flash?reasoning=off", isAdmin: true })).toMatchObject({ reasoning: "none" });
@@ -223,8 +223,9 @@ describe("explicit Speed boost admission", () => {
     expect(resolveSpeedBoostChatModel(model, true)).toBe(`${model}:nitro`);
     expect(resolveSpeedBoostChatModel(`${model}:nitro`, true)).toBe(`${model}:nitro`);
   });
-  it("answers boosted GLM 5.3 Flash with DeepSeek V4.1 Flash on Nitro, keeping an explicit GLM Nitro id", () => {
-    expect(resolveSpeedBoostChatModel("z-ai/glm-5.3-flash", true)).toBe("deepseek/deepseek-v4.1-flash-1017:nitro");
+  it("answers boosted GLM 5.3 Flash on its own Nitro variant, never swapping to another model", () => {
+    // No swap to another model since 2026-11-13: GLM answers on its own Nitro variant, never DeepSeek V4.1 Flash.
+    expect(resolveSpeedBoostChatModel("z-ai/glm-5.3-flash", true)).toBe("z-ai/glm-5.3-flash:nitro");
     expect(resolveSpeedBoostChatModel("z-ai/glm-5.3-flash:nitro", true)).toBe("z-ai/glm-5.3-flash:nitro");
   });
   it.each(["openai/gpt-6-luna-pro", "arbitrary/model", "openai/gpt-6.1-sol"])("refuses unsupported boost %s before spending", (model) => {
@@ -239,5 +240,7 @@ describe("managed tier mappings", () => {
     expect(managedChatModelProblem("llm://openrouter/anthropic/claude-haiku-5.5", new Set())).toMatch(/bare/);
     expect(managedChatModelProblem("liquid/lfm-2.5-24b-a2b", new Set())).toMatch(/reviewed/);
     expect(managedChatModelProblem("openai/gpt-6-sol-pro", new Set(["openai/gpt-6-sol-pro"]))).toBe("prohibited model");
+    // A tier mapping is automatic selection: DeepSeek V4.1 Flash is never mapped (owner, 2026-11-13).
+    expect(managedChatModelProblem("deepseek/deepseek-v4.1-flash-1017", new Set())).toBe("never selected automatically");
   });
 });

@@ -127,7 +127,7 @@ export function customerChatResponse<T extends Pick<ProjectChatResponse, "debug"
 ): T {
   const debug = response.debug;
   if (!debug) return response;
-  const tierOf = (model: string | null | undefined): ChatTier | null => model ? chatTierForModel(model, overrides) ?? tier : null;
+  const tierOf = (model: string | null | undefined): ChatTier | null => model ? chatTierForModel(model, overrides, tier) ?? tier : null;
   const { resolvedModel: _model, resolvedProvider: _provider, ...rest } = debug;
   return {
     ...response,

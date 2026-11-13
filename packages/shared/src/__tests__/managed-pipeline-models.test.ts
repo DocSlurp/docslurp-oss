@@ -10,6 +10,7 @@ import { customerSearchSettingsView, publicUpdateProjectSearchSettingsSchema } f
 import { defaultPipelineFeatures, normalizePipelineFeatures } from "../pipeline.js";
 import { CHAT_TIER_MODELS, chatTierForModel, isProjectChatModelId } from "../project-chat-models.js";
 import { CHAT_MODEL_PRICES_USD_PER_MTOK } from "../chat-model-prices.js";
+import { isAutomaticSelectionDenied } from "../automatic-model-selection.js";
 
 const BACKEND_ID = /llm:\/\/|openrouter|perplexity|gemini|deepseek|qwen|z-ai|openai/i;
 
@@ -99,7 +100,8 @@ describe("reranker category", () => {
 });
 
 describe("chat tiers", () => {
-  it("map to reviewed catalog models priced under the output cap", () => {
+  it("map to reviewed catalog models priced under the output cap, never an automatic-selection-denied model", () => {
+    for (const model of Object.values(CHAT_TIER_MODELS)) expect(isAutomaticSelectionDenied(model), model).toBe(false);
     for (const [tier, model] of Object.entries(CHAT_TIER_MODELS)) {
       expect(isProjectChatModelId(model), tier).toBe(true);
       expect(CHAT_MODEL_PRICES_USD_PER_MTOK[model]!.output, tier).toBeLessThan(50);
@@ -110,7 +112,8 @@ describe("chat tiers", () => {
   it("name the tier a served model answers for, including Speed boost swaps", () => {
     expect(chatTierForModel("z-ai/glm-5.3-flash")).toBe("fastest");
     expect(chatTierForModel("z-ai/glm-5.3-flash:nitro")).toBe("fastest");
-    expect(chatTierForModel("deepseek/deepseek-v4.1-flash-1017")).toBe("balanced");
+    expect(chatTierForModel("z-ai/glm-5.3-flash", null, "balanced")).toBe("balanced");
+    expect(chatTierForModel("deepseek/deepseek-v4.1-flash-1017")).toBeNull();
     expect(chatTierForModel("llm://openrouter/openai/gpt-6.1-sol")).toBe("smart");
     expect(chatTierForModel("anthropic/claude-haiku-5.5", { fastest: "anthropic/claude-haiku-5.5" })).toBe("fastest");
     expect(chatTierForModel("acme/unknown")).toBeNull();
