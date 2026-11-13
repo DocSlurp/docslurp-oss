@@ -29,7 +29,7 @@ vi.mock("../lib/ai.js", () => ({
   SEARCH_OPENROUTER_MODEL: "openrouter-test",
   embedConfiguredText,
   generateOpenRouterText,
-  resolveOpenRouterApiKey: vi.fn(() => process.env.OPENROUTER_API_KEY ?? process.env.OPENROUTER_KEY ?? process.env.ANTHROPIC_API_KEY),
+  resolveOpenRouterApiKey: vi.fn(() => process.env.OPENROUTER_API_KEY ?? process.env.ANTHROPIC_API_KEY),
 }));
 
 vi.mock("../search/rrf.js", () => ({

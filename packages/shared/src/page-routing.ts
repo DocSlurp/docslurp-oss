@@ -300,7 +300,7 @@ export const pageFeaturesSchema = z.object({
   /** Decision-model answers; null = triage not run. */
   decisions: decisionAnswersSchema.nullable(),
   provenance: z.object({
-    probe: z.enum(["native-pdf-probe"]),
+    probe: z.enum(["native-pdf-probe", "doppler-facts"]),
     probeMs: nonNegative,
   }),
 });

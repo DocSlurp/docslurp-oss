@@ -96,6 +96,20 @@ These rules are mandatory and override speed and convenience. When in doubt, tre
 - Fake, QA and agent-created accounts use a reserved email domain (`@example.com`, `@<run>.invalid`, `@<name>.test`) so `docslurp_reserved_test_email` (migration 0094) marks them `test` and admin customer metrics exclude them; for an address you cannot choose, use `TEST_ACCOUNT_EMAIL_PATTERNS`.
 - Benchmark and evaluation inputs are held-out evidence. Do not hard-code document names, field names or expected values from an evaluation into production code or prompts.
 
+## Scale targets
+
+Ingestion must perform equally well at both ends of the workload:
+
+- **Big:** one uploaded ~1 GB file of 10,000–20,000 pages.
+- **Many:** 10,000 files of variable size, from a few KB to a few MB each.
+
+"Equally well" covers latency (time to first searchable text, time to complete) and throughput (pages per minute, pages per $1). Judge every ingestion, extraction, storage or pipeline change against both ends before calling it done:
+
+- memory stays bounded whatever the document size;
+- limits scale with page count;
+- big documents shard;
+- small files batch, so per-file fixed costs such as VM start-up are amortised.
+
 ## Licensing
 
 The server, worker and CLI are BUSL-1.1 (free production use up to 16 worker vCPUs and 4 worker/GPU instances; each version converts to Apache-2.0 after three years); the SDKs, clients (including `contrib-algolia-server`) and `packages/shared` are MIT. New files inherit the license of the package they live in. Do not copy code from incompatibly licensed projects (for example AGPL or GPL sources) into any package.
