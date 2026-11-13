@@ -20,7 +20,7 @@ import { currentPrivacyAuditScope, openRouterTextCall, runWithPrivacyAuditScope 
 import { textUsageLabels } from "../lib/text-model-route.js";
 import type { EmbeddingProfile } from "../models.js";
 import { embedTextChunks, type RemoteEmbeddingUsage } from "../stages/embedding-runtime.js";
-import { executeVisionRuntime } from "../tools/vision-runtime.js";
+import { executeVisionRuntime, isPageTranscription, visionRenderLongEdge, visionRequestProfileForRoute } from "../tools/vision-runtime.js";
 import { priceVisionResult } from "../lib/guarded-vision-call.js";
 import { CommandRunner } from "../tools/runner.js";
 
@@ -34,6 +34,8 @@ const registry = [{
   models: [
     { id: "Qwen/Qwen3.6-35B-A3B-FP8", capability: "text", chatTemplateKwargs: { enable_thinking: false } },
     { id: "lightonai/LightOnOCR-3-0.8B", capability: "vision" },
+    { id: "acme/plain-vlm", capability: "vision" },
+    { id: "acme/tuned-vlm", capability: "vision", vision: { temperature: 0.1, topP: 0.8, maxOutputTokens: 4_096, maxLongEdgePx: 1_540 } },
     { id: "Qwen/Qwen3-Embedding-0.6B", capability: "embedding", dimensions: 16 },
   ],
   attestation: { tenancy: "single-tenant", hostProvider: "runpod", region: "us-east" },
@@ -216,5 +218,84 @@ describe("worker private endpoint vision", () => {
     expect(result.chargedTokens).toBeUndefined();
     expect(priceVisionResult(result, fromEnv())).toBeCloseTo(result.costCents!, 12);
     expect(audit).toEqual([expect.objectContaining({ projectId: "ws-1", documentId: "doc-1", endpoint: "private:gpu1:worker.vision" })]);
+  });
+});
+
+describe("worker private endpoint vision request profiles", () => {
+  async function sendPage(modelUri: string, extra: { prompt?: string; outputSchema?: Record<string, unknown>; maxOutputTokens?: number } = {}) {
+    const calls = mockPrivateServer();
+    const dir = await mkdtemp(join(tmpdir(), "private-vision-profile-"));
+    const imagePath = join(dir, "page.png");
+    await writeFile(imagePath, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+    await executeVisionRuntime({
+      imagePath,
+      outputPath: `${imagePath}.json`, gate: null,
+      ...(extra.outputSchema ? { outputSchema: extra.outputSchema } : {}),
+      ...(extra.maxOutputTokens !== undefined ? { maxOutputTokens: extra.maxOutputTokens } : {}),
+      vision: visionConfigSchema.parse({ modelUri, prompt: extra.prompt ?? "markdown" }),
+      cfg: fromEnv(),
+      runner: new CommandRunner(),
+      privacyMode: "standard",
+    });
+    return calls[0]!.body as { messages: Array<{ role: string; content: unknown }>; temperature?: number; top_p?: number; max_tokens?: number };
+  }
+
+  it("sends LightOnOCR-3 its authors' request: the image alone, no system message, temperature 0.2, top_p 1, no max_tokens", async () => {
+    const body = await sendPage("llm://private/gpu1/lightonai/LightOnOCR-3-0.8B");
+    expect(body.messages).toHaveLength(1);
+    expect(body.messages[0]!.role).toBe("user");
+    expect(body.messages[0]!.content).toEqual([expect.objectContaining({ type: "image_url" })]);
+    expect(body.temperature).toBe(0.2);
+    expect(body.top_p).toBe(1);
+    expect("max_tokens" in body).toBe(false);
+  });
+
+  it("applies an operator's registry profile over the generic request", async () => {
+    const body = await sendPage("llm://private/gpu1/acme/tuned-vlm");
+    expect(body.messages.map((message) => message.role)).toEqual(["system", "user"]);
+    expect(body.messages[1]!.content).toEqual([expect.objectContaining({ type: "text" }), expect.objectContaining({ type: "image_url" })]);
+    expect(body).toMatchObject({ temperature: 0.1, top_p: 0.8, max_tokens: 4_096 });
+  });
+
+  it("keeps the generic request for a model without a profile", async () => {
+    const body = await sendPage("llm://private/gpu1/acme/plain-vlm");
+    expect(body.messages.map((message) => message.role)).toEqual(["system", "user"]);
+    expect(body.temperature).toBe(0);
+    expect("top_p" in body).toBe(false);
+    expect(typeof body.max_tokens).toBe("number");
+  });
+
+  it("renders pages at each model's profiled long edge, and at the default size without one", () => {
+    const edge = (modelUri: string) => visionRenderLongEdge(visionConfigSchema.parse({ modelUri, prompt: "markdown" }));
+    expect(edge("llm://private/gpu1/lightonai/LightOnOCR-3-0.8B")).toBe(2_048);
+    expect(edge("llm://private/gpu1/acme/tuned-vlm")).toBe(1_540);
+    expect(edge("llm://private/gpu1/acme/plain-vlm")).toBeUndefined();
+    expect(edge("llm://private/gpu1/acme/unregistered")).toBeUndefined();
+  });
+
+  it("keeps the generic request, prompt included, for anything but plain page transcription", async () => {
+    const critique = await sendPage("llm://private/gpu1/lightonai/LightOnOCR-3-0.8B", { prompt: "Compare this page with the extracted text below and list corrections." });
+    expect(critique.messages.map((message) => message.role)).toEqual(["system", "user"]);
+    expect(critique.messages[1]!.content).toEqual([expect.objectContaining({ type: "text" }), expect.objectContaining({ type: "image_url" })]);
+    expect(critique.temperature).toBe(0);
+    const schema = await sendPage("llm://private/gpu1/lightonai/LightOnOCR-3-0.8B", { outputSchema: { type: "object", properties: { total: { type: "string" } } } });
+    expect(schema.messages[schema.messages.length - 1]!.content).toEqual([expect.objectContaining({ type: "text" }), expect.objectContaining({ type: "image_url" })]);
+    expect(typeof schema.max_tokens).toBe("number");
+  });
+
+  it("classifies transcription prompts, and never applies built-in profiles to hosted routes", () => {
+    expect(isPageTranscription({ vision: {} })).toBe(true);
+    expect(isPageTranscription({ vision: { prompt: "<OCR>" } })).toBe(true);
+    expect(isPageTranscription({ vision: { prompt: "chart-data" } })).toBe(false);
+    expect(isPageTranscription({ vision: { prompt: "markdown" }, promptText: "Extract the chart" })).toBe(false);
+    expect(isPageTranscription({ vision: { prompt: "markdown" }, outputSchema: { type: "object" } })).toBe(false);
+    expect(visionRequestProfileForRoute({ provider: "openrouter", model: "lightonai/LightOnOCR-3-0.8B" })).toBeUndefined();
+  });
+
+  it("sends a caller's output cap to a profiled model, and ignores an invalid one rather than sending the context size", async () => {
+    const capped = await sendPage("llm://private/gpu1/lightonai/LightOnOCR-3-0.8B", { maxOutputTokens: 512 });
+    expect(capped.max_tokens).toBe(512);
+    const invalid = await sendPage("llm://private/gpu1/lightonai/LightOnOCR-3-0.8B", { maxOutputTokens: 1.5 });
+    expect("max_tokens" in invalid).toBe(false);
   });
 });

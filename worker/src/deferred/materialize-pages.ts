@@ -39,7 +39,7 @@ import { deleteLanceDbRecords, writeLanceDbRecords } from "../stages/lancedb-wri
 import type { CommandRunner } from "../tools/runner.js";
 import { sanitizeVisionPageTables } from "../pipeline/vision-tables-vm.js";
 import type { ArtifactStore } from "../tools/storage.js";
-import { executeVisionRuntime, type VisionPrimaryFailure } from "../tools/vision-runtime.js";
+import { executeVisionRuntime, visionRenderLongEdge, type VisionPrimaryFailure } from "../tools/vision-runtime.js";
 import { guardedVisionCall, priceVisionResult, type GuardedVisionOutcome } from "../lib/guarded-vision-call.js";
 import { recordVisionRead, type VisionRequestGate } from "../lib/vision-attempt-guard.js";
 import { DocumentNotFoundError } from "../db/missing-document.js";
@@ -144,7 +144,9 @@ function defaultOps(deps: PageMaterializerDeps): PageMaterializerOps {
       // Fail closed: Fast never sends a page to a vision model.
       if (!qualityAllowsPageReading(ctx.pipeline.quality)) throw new Error(`quality fast does not read page ${page}`);
       const [artifact] = await raster().renderSelectedPages({
-        document, runId: ctx.runId, pageNumbers: [page], dpi: OCR_DPI, signal: ctx.signal,
+        document, runId: ctx.runId, pageNumbers: [page], dpi: OCR_DPI,
+        ...(visionRenderLongEdge(ctx.pipeline.vision) !== undefined ? { maxLongEdgePx: visionRenderLongEdge(ctx.pipeline.vision)! } : {}),
+        signal: ctx.signal,
       });
       if (!artifact) throw new Error(`could not render page ${page}`);
       const imagePath = await deps.storage.downloadToTempFile(artifact.artifactKey, `page-${page}-*.png`);

@@ -362,6 +362,36 @@ The rules are:
   reason by default and can spend a stage's whole output budget on reasoning,
   which returns empty summaries. Set `{ "enable_thinking": false }` for them, or
   start vLLM with `--default-chat-template-kwargs '{"enable_thinking":false}'`.
+- `vision` (optional, vision models only): how page requests to this model are
+  shaped, applied over any built-in profile for the same model id
+  (`packages/shared/src/vision-request-profile.ts`). Fields:
+  - `promptMode`: `"template"` (default) or `"image-only"`.
+  - `systemMessage`: send the worker's system message (default `true`). Turn it
+    off only for OCR-specialist models trained on a single user turn; the
+    worker logs every request that uses a profile.
+  - `temperature`, `topP`: sampling.
+  - `maxOutputTokens`: a number, or `"server"` to send no `max_tokens`
+    (requires `contextTokens`, which then bounds admission). Set
+    `contextTokens` to at least the server's `--max-model-len`: vLLM then
+    rejects any request that could produce more. `"server"` applies to private
+    models only; a hosted route always sends a concrete cap.
+  - `maxLongEdgePx`: the longest page-image edge, 256 to 4000; PDF pages render
+    no larger, by lowering each page's DPI.
+
+  Profiles shape plain page transcription only. A request with a project output
+  schema or a task prompt (form fields, map OCR) keeps the worker's generic
+  request, so its instructions are never dropped. Built-in profiles apply to
+  private-endpoint models only.
+
+  LightOnOCR-3 (`lightonai/LightOnOCR-3-0.8B`, `-4B`, `-1B`) has built-in
+  profiles copied from LightOn's own client: image only, no system message,
+  temperature 0.2, top_p 1.0, no `max_tokens`, and 2048 px pages (1540 px for
+  the 1B). Serve them as LightOn's README says: vLLM 0.30.0 with transformers
+  5.16.1, `--limit-mm-per-prompt '{"image": 1}' --max-model-len 18000`
+  (16384 for the 1B) `--default-chat-template-kwargs '{"enable_thinking": false}'
+  --mm-processor-cache-gb 0 --no-enable-prefix-caching`. Raster uploads (PNG,
+  JPEG and so on) are sent at their uploaded size: resizing them would decode
+  customer pixels outside an isolated provider.
 - `attestation`: `tenancy` must be `"single-tenant"`. `hostProvider` and
   `region` are required, and `note` is optional. These values appear in usage
   metadata.

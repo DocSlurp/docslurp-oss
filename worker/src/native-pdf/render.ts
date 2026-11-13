@@ -2,7 +2,7 @@ import { availableParallelism } from "node:os";
 
 import type { NativePdfDocument, NativePdfEngine, Bbox } from "./types.js";
 import { NativePdfError } from "./types.js";
-import { boundedRasterDpi, boundedRasterEdge } from "../lib/raster-bounds.js";
+import { longEdgeCappedDpi, longEdgeCappedEdge } from "../lib/raster-bounds.js";
 
 /**
  * Raster helper for the `native-pdf` engine: renders selected pages (and clipped
@@ -18,10 +18,17 @@ export interface NativeRenderedPage {
   widthPx: number | null;
   heightPx: number | null;
   mimeType: "image/png" | "image/jpeg";
+  /** The DPI this page actually rendered at (bounded, and lowered by `maxLongEdgePx`). */
+  dpi: number;
+  /** The page's measured size in points, when known: page-area billing uses it, as the pdftoppm path does. */
+  widthPt?: number;
+  heightPt?: number;
 }
 
 export interface NativeRenderOptions {
   dpi: number;
+  /** Longest rendered edge in pixels (a vision model's training size); lowers the page's DPI, never raises it. */
+  maxLongEdgePx?: number;
   /** Max simultaneous renders (one document handle each). */
   concurrency?: number;
   format?: "png" | "jpeg";
@@ -64,14 +71,14 @@ export async function renderPagesNative(
         const pageNumber = pages[cursor++]!;
         const page = doc.page(pageNumber - 1);
         const size = await page.size();
-        const dpi = boundedRasterDpi(size.widthPt, size.heightPt, options.dpi);
+        const dpi = longEdgeCappedDpi(size.widthPt, size.heightPt, options.dpi, options.maxLongEdgePx);
         const bytes = await page.render({
           dpi,
-          maxEdgePx: boundedRasterEdge(size.widthPt, size.heightPt, dpi),
+          maxEdgePx: longEdgeCappedEdge(size.widthPt, size.heightPt, dpi, options.maxLongEdgePx),
           format,
           ...(options.gray ? { gray: true } : {}),
         });
-        out.set(pageNumber, { pageNumber, bytes, ...imageDimensions(bytes), mimeType });
+        out.set(pageNumber, { pageNumber, bytes, ...imageDimensions(bytes), mimeType, dpi, widthPt: size.widthPt, heightPt: size.heightPt });
       }
     }));
   } finally {
@@ -107,6 +114,8 @@ export async function renderClipNative(
       bytes,
       ...imageDimensions(bytes),
       mimeType: format === "jpeg" ? "image/jpeg" : "image/png",
+      // The requested DPI; `maxEdgePx` can only lower the effective one. Clip renders are not area-billed.
+      dpi: options.dpi,
     };
   } finally {
     await doc.close().catch(() => undefined);

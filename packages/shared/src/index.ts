@@ -122,3 +122,4 @@ export * from "./geo-projection-contract.js";
 export * from "./realtime.js";
 
 export * from "./reserved-email.js";
+export * from "./vision-request-profile.js";
