@@ -13,6 +13,7 @@ import type { SearchFilters } from "./filters.js";
 import { currentChatSessionId } from "../lib/chat-agent-context.js";
 import { reportPublicError } from "../lib/public-errors.js";
 import { trackCurrentChatTurnWrite } from "../lib/chat-turn-context.js";
+import { enqueueSearchUsage } from "./lean-logging.js";
 
 export type SearchUsageEvent = UsageEvent;
 
@@ -288,6 +289,12 @@ class SqlSearchSessionJournal implements SearchSessionJournal {
   async persist(input: PersistSearchSessionInput): Promise<void> {
     // Snapshot now: the metadata and duration describe the search as it answered.
     const durationMs = Date.now() - this.startedAtMs;
+    // Lean searches (expiring history) sum their non-billable usage into per-key batches (lean-logging.ts).
+    const projectId = this.scope.projectId ?? input.metadata.projectId;
+    if (input.expiresInDays && projectId) {
+      const events = this.usage.divert((event) => event.metadata?.billable === false);
+      if (events.length > 0) enqueueSearchUsage({ userId: input.userId, orgId: this.scope.orgId ?? null, projectId }, events);
+    }
     if (this.writeBehind) {
       await this.flushUsageInline(input.userId, this.scope.projectId ?? input.metadata.projectId);
     }

@@ -2,7 +2,7 @@ import { searchCredits } from "@docslurp/shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const context = vi.hoisted(() => ({ apiKeyId: null as string | null, chatTurn: null as unknown }));
-const charges = vi.hoisted(() => ({ calls: [] as Array<Record<string, any>>, failNext: 0 }));
+const charges = vi.hoisted(() => ({ calls: [] as Array<Record<string, any>>, usage: [] as Array<Record<string, any>>, failNext: 0 }));
 
 vi.mock("../lib/request-context.js", async (original) => ({
   ...await original<typeof import("../lib/request-context.js")>(),
@@ -19,14 +19,20 @@ vi.mock("../lib/ai-usage.js", async (original) => ({
     if (charges.failNext > 0) { charges.failNext -= 1; throw new Error("connection reset"); }
     return {};
   }),
+  persistUsageEvent: vi.fn(async (args: Record<string, any>) => {
+    charges.usage.push(args);
+    return args.event;
+  }),
 }));
 
 const lean = await import("../search/lean-logging.js");
+const { createUsageLedger } = await vi.importActual<typeof import("../lib/ai-usage.js")>("../lib/ai-usage.js");
 
 beforeEach(() => {
   context.apiKeyId = "key1";
   context.chatTurn = null;
   charges.calls = [];
+  charges.usage = [];
   charges.failNext = 0;
 });
 afterEach(async () => {
@@ -94,5 +100,40 @@ describe("lean search logging", () => {
     expect(retried!.charge.amount).toBe(2);
     expect(next!.charge.id).not.toBe(failed!.charge.id);
     expect(next!.charge.amount).toBe(1);
+  });
+
+  it("sums non-billable search usage per key and model, keeping every call's tokens", async () => {
+    const embed = (tokens: number) => ({ provider: "openrouter", model: "embed-small", metric: "embed-query", inputTokens: tokens, outputTokens: 0, costCents: tokens / 1e6, metadata: { billable: false } });
+    lean.enqueueSearchUsage({ userId: "u", orgId: "o", projectId: "p" }, [embed(10), embed(14)]);
+    lean.enqueueSearchUsage({ userId: "u", orgId: "o", projectId: "p" }, [{ ...embed(5), model: "embed-large" }]);
+    expect(lean.pendingSearchUsageCalls()).toBe(3);
+    await lean.flushSearchCharges();
+    const rows = charges.usage.map((call) => [call.scope.apiKeyId, call.event.model, call.event.inputTokens, call.event.metadata.calls, call.event.metadata.billable]).sort();
+    expect(rows).toEqual([["key1", "embed-large", 5, 1, false], ["key1", "embed-small", 24, 2, false]]);
+    expect(charges.usage.every((call) => String(call.event.id).startsWith("search-usage-batch:"))).toBe(true);
+  });
+
+  it("never batches billable usage", () => {
+    expect(() => lean.enqueueSearchUsage({ userId: "u", orgId: "o", projectId: "p" }, [{ provider: "x", model: "m", metric: "llm", inputTokens: 1, outputTokens: 1, costCents: 1, metadata: {} }]))
+      .toThrow(/non-billable/);
+  });
+
+  it("a diverted ledger event stays visible but is never flushed by the ledger", async () => {
+    const ledger = createUsageLedger({ userId: "u" });
+    ledger.record({ provider: "openrouter", model: "embed-small", metric: "embed-query", inputTokens: 8 });
+    ledger.record({ provider: "openrouter", model: "chat", metric: "rewrite", inputTokens: 8, outputTokens: 4 });
+    const taken = ledger.divert((event) => event.metric === "embed-query");
+    expect(taken.map((event) => event.metric)).toEqual(["embed-query"]);
+    expect(ledger.divert((event) => event.metric === "embed-query")).toEqual([]);
+    expect(ledger.events().map((event) => event.metric)).toEqual(["embed-query", "rewrite"]);
+    // A recording client: each top-level insert is one tagged-template call whose text names usage_events.
+    const inserts: string[] = [];
+    const client = ((strings: TemplateStringsArray, ...values: unknown[]) => {
+      if (strings.join("").includes("insert into usage_events")) inserts.push(String(values.find((value) => value === "embed-query" || value === "rewrite")));
+      return Promise.resolve([]);
+    }) as never;
+    const batch = await ledger.flushWithin(client, { scope: { orgId: "o", projectId: "p" } });
+    expect(inserts).toEqual(["rewrite"]);
+    expect(batch.events.map((event) => event.metric)).toEqual(["rewrite"]);
   });
 });
