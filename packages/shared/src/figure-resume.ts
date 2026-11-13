@@ -47,6 +47,16 @@ function flagOn(env: Record<string, string | undefined>, name: string): boolean 
   const raw = (env[name] ?? "").trim().toLowerCase();
   return raw === "1" || raw === "true" || raw === "on";
 }
+/** The chat's resume offer (the `proposeFigureResume` tool, its instruction and the settings count): off until the app's card ships. */
+export const FIGURE_RESUME_CHAT_ENV = "DOCSLURP_FIGURE_RESUME_CHAT";
+/**
+ * Whether the chat may offer a figure resume (R2-M5): the runner is on (DOCSLURP_FIGURE_RESUME) and the chat offer is
+ * switched on (DOCSLURP_FIGURE_RESUME_CHAT, once the app renders the proposal card). Otherwise the tool, its instruction
+ * and `getProjectSettings`' figures block are not offered.
+ */
+export function figureResumeChatEnabled(env: Record<string, string | undefined> = process.env): boolean {
+  return figureResumeDeployEnabled(env) && flagOn(env, FIGURE_RESUME_CHAT_ENV);
+}
 /** Whether the audit may write the ledger (default off: dry run). */
 export function figureAuditWrites(env: Record<string, string | undefined> = process.env): boolean { return flagOn(env, FIGURE_AUDIT_ENV); }
 /** Whether the orphan GC may delete objects (default off: dry run). */

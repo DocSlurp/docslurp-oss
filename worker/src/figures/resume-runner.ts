@@ -30,6 +30,7 @@
  * rows and turns a current stored row whose object is confirmed missing (HEAD 404) or of another size into a resumable
  * `aborted` image; a truncated listing is never read as "missing".
  */
+import { randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -86,7 +87,18 @@ const CLAIM_LEASE_MS = 10 * 60_000;
 interface ClaimedLevel {
   document_id: string; org_id: string; project_id: string; run_id: string; user_id: string; page_count: number; source_key: string;
   source_sha256: string | null; shards: number; resumes: number; manifest_sha256: string | null; storage_prefix: string | null;
-  pipeline: unknown; run_pipeline: unknown; resume_vm_launches: number;
+  pipeline: unknown; run_pipeline: unknown; resume_vm_launches: number; gap_count: number;
+  /** This claim's lease token (`<worker>:<uuid>`): every later runner write is fenced by it (R2 adversarial 5). */
+  lease: string;
+}
+
+/**
+ * The lifetime resume VM launches of a document (R2-M3): #355's per-document resume total, min(3 × units, 12), with its
+ * shards and gaps as units, so a big sharded document can resume each unit; never below the old floor of 6 (an
+ * unsharded document, whose per-unit cap is 3, keeps room for failures). Never reset by a request; a new run resets it.
+ */
+export function figureResumeLaunchCap(units: number): number {
+  return Math.max(FIGURE_RESUME_LIMITS.maxVmLaunches, documentResumeTotalCap(Math.max(1, units)));
 }
 
 /** The figures of documents the queue may claim: completed, current run, Markdown committed (M1, PII rule). */
@@ -110,13 +122,16 @@ async function block(tx: Client, row: Pick<ClaimedLevel, "document_id" | "org_id
  */
 export async function claimFigureResume(sql: Client, workerId: string, env: Record<string, string | undefined> = process.env): Promise<ClaimedLevel | null> {
   return await sql.begin(async (tx) => {
-    // A fleet-wide ceiling on resumes running at once (every worker runs the runner).
+    // A fleet-wide ceiling on resumes running at once (every worker runs the runner), counted under one lock so concurrent
+    // claims never overshoot it (R2-L2).
+    await tx`select pg_advisory_xact_lock(hashtext('figure-resume-global'))`;
     const [live] = await tx<{ n: number }[]>`select count(*)::int as n from document_extraction_levels where resume_lease_until > now()`;
     if ((live?.n ?? 0) >= figureResumeGlobalMax(env)) return null;
     const candidates = await tx<ClaimedLevel[]>`
       select c.* from (
         select distinct on (l.org_id) l.document_id, l.org_id, l.project_id, l.run_id, d.user_id, d.page_count, d.source_key, l.source_sha256,
-          l.shards, l.resumes, l.manifest_sha256, r.storage_prefix, p.pipeline, r.pipeline as run_pipeline, l.resume_vm_launches, l.resume_after
+          l.shards, l.resumes, l.manifest_sha256, r.storage_prefix, p.pipeline, r.pipeline as run_pipeline, l.resume_vm_launches, l.resume_after,
+          coalesce(jsonb_array_length(l.gaps), 0)::int as gap_count
         from document_extraction_levels l
         join documents d on d.id = l.document_id and d.org_id = l.org_id and d.project_id = l.project_id and d.run_id = l.run_id
         join projects p on p.id = l.project_id and p.org_id = l.org_id
@@ -151,7 +166,7 @@ export async function claimFigureResume(sql: Client, workerId: string, env: Reco
         continue;
       }
       if (projectFigureResumeMode(row.pipeline) === "off") { await block(tx as unknown as Client, row, "resume-off"); continue; }
-      if (row.resume_vm_launches >= FIGURE_RESUME_LIMITS.maxVmLaunches) { await block(tx as unknown as Client, row, "attempts"); continue; }
+      if (row.resume_vm_launches >= figureResumeLaunchCap(row.shards + row.gap_count)) { await block(tx as unknown as Client, row, "attempts"); continue; }
       // A resume adds billable stored bytes: never for an organization that may not spend now (re-queued later).
       const [spend] = await tx<Array<{ funded: boolean | null; available: string | number; project_budget_paused: boolean; org_budget_paused: boolean; project_in_org: boolean }>>`
         select funded, available, project_budget_paused, org_budget_paused, project_in_org from org_spend_status(${row.org_id}, ${row.project_id}::text, 0)`;
@@ -163,7 +178,7 @@ export async function claimFigureResume(sql: Client, workerId: string, env: Reco
       }
       // Resume VM time is ours: each organization gets a daily budget (UTC); past it, the next day.
       const [today] = await tx<{ vm_ms: number }[]>`
-        select vm_ms::float8 as vm_ms from figure_resume_org_days where org_id = ${row.org_id} and day = (now() at time zone 'utc')::date`;
+        select (vm_ms + reserved_ms)::float8 as vm_ms from figure_resume_org_days where org_id = ${row.org_id} and day = (now() at time zone 'utc')::date`;
       if ((today?.vm_ms ?? 0) >= figureResumeOrgDailyVmMs(env)) {
         await tx`update document_extraction_levels
           set resume_after = ((now() at time zone 'utc')::date + 1)::timestamp at time zone 'utc' + interval '5 minutes'
@@ -172,30 +187,37 @@ export async function claimFigureResume(sql: Client, workerId: string, env: Reco
         recordFigureTelemetry("resume.deferred", 1, { reason: "org-daily-vm-budget" });
         continue;
       }
+      const lease = `${workerId.slice(0, 80)}:${randomUUID()}`;
       await tx`
         update document_extraction_levels set resume_lease_until = now() + ${`${CLAIM_LEASE_MS} milliseconds`}::interval,
-          resume_lease_owner = ${workerId.slice(0, 128)}
+          resume_lease_owner = ${lease}
         where document_id = ${row.document_id} and org_id = ${row.org_id} and run_id = ${row.run_id}`;
-      return row;
+      return { ...row, lease };
     }
     return null;
   });
 }
 
-/** Every runner write after the claim matches its lease and run (M2): a lost lease or a new run makes it a no-op. */
-function fenced(sql: Client, row: ClaimedLevel, workerId: string) {
-  return sql`document_id = ${row.document_id} and org_id = ${row.org_id} and run_id = ${row.run_id} and resume_lease_owner = ${workerId.slice(0, 128)}`;
+/**
+ * Every runner write after the claim matches this claim's lease token and run (M2, R2 adversarial 5): a lost lease, a
+ * second lane of the same worker, or a new run makes it a no-op.
+ */
+function fenced(sql: Client, row: ClaimedLevel) {
+  return sql`document_id = ${row.document_id} and org_id = ${row.org_id} and run_id = ${row.run_id} and resume_lease_owner = ${row.lease}`;
 }
 
-/** Extend the lease for the next unit; false when the lease is no longer ours (stop, touch nothing). */
-async function heartbeat(sql: Client, row: ClaimedLevel, workerId: string, ms: number): Promise<boolean> {
+/** Extend the lease; false when it is no longer ours (stop, touch nothing). */
+async function heartbeat(sql: Client, row: ClaimedLevel, ms: number): Promise<boolean> {
   const extended = await sql`
     update document_extraction_levels set resume_lease_until = now() + ${`${Math.max(60_000, Math.round(ms))} milliseconds`}::interval
-    where ${fenced(sql, row, workerId)} returning 1`;
+    where ${fenced(sql, row)} returning 1`;
   return extended.length === 1;
 }
+/** How often a running unit renews its lease, and how far ahead (R2-L3). */
+const HEARTBEAT_EVERY_MS = 2 * 60_000;
+const HEARTBEAT_LEASE_MS = 10 * 60_000;
 
-type Outcome = "done" | "retry" | "blocked" | "lost";
+type Outcome = "done" | "retry" | "blocked" | "lost" | "deferred";
 
 /**
  * Release a lease (fenced): `done` re-queues at once while the document is still resumable (the next unit); `retry` counts
@@ -203,58 +225,92 @@ type Outcome = "done" | "retry" | "blocked" | "lost";
  * theirs, or nothing runnable is left (H1). A lease that is no longer ours, or a level that moved to another run, is left
  * untouched.
  */
-async function release(sql: Client, row: ClaimedLevel, workerId: string, outcome: Exclude<Outcome, "lost">, blocked?: string, exhausted = false): Promise<void> {
-  const [level] = await sql<{ images_status: string; resume_failures: number; resume_vm_launches: number }[]>`
-    select images_status, resume_failures, resume_vm_launches from document_extraction_levels where ${fenced(sql, row, workerId)}`;
+async function release(sql: Client, row: ClaimedLevel, outcome: Exclude<Outcome, "lost">, blocked?: string, exhausted = false, unitKey?: string): Promise<void> {
+  const [level] = await sql<{ images_status: string; resume_failures: number; resume_vm_launches: number; resume_unit_failures: Record<string, number>; shards: number; gap_count: number }[]>`
+    select images_status, resume_failures, resume_vm_launches, resume_unit_failures, shards, coalesce(jsonb_array_length(gaps), 0)::int as gap_count
+    from document_extraction_levels where ${fenced(sql, row)}`;
   if (!level) return;
-  const failures = level.resume_failures + (outcome === "retry" ? 1 : 0);
+  // Failures count per unit (R2-M3): one failing shard never blocks the others; the level's total is kept for telemetry.
+  const retry = outcome === "retry";
+  const unitFailures = { ...(level.resume_unit_failures ?? {}) };
+  if (retry && unitKey) unitFailures[unitKey] = (unitFailures[unitKey] ?? 0) + 1;
+  const failures = level.resume_failures + (retry ? 1 : 0);
   const resumable = level.images_status === "resumable";
-  const spent = failures >= FIGURE_RESUME_LIMITS.maxAttempts || level.resume_vm_launches >= FIGURE_RESUME_LIMITS.maxVmLaunches || exhausted;
+  const spent = level.resume_vm_launches >= figureResumeLaunchCap(level.shards + level.gap_count) || exhausted;
   const nextBlocked = outcome === "blocked" ? blocked ?? "refused" : resumable && spent ? "attempts" : null;
   const after = !resumable || nextBlocked ? null
     : outcome === "done" ? new Date().toISOString()
-    : new Date(Date.now() + figureResumeBackoffMs(failures)).toISOString();
+    // Past the organization's daily resume VM budget: the next UTC day, no failure counted.
+    : outcome === "deferred" ? new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), new Date().getUTCDate() + 1, 0, 5)).toISOString()
+    : new Date(Date.now() + figureResumeBackoffMs(unitKey ? unitFailures[unitKey] ?? failures : failures)).toISOString();
   await sql`
     update document_extraction_levels set resume_lease_until = null, resume_lease_owner = null, resume_failures = ${failures},
+      resume_unit_failures = ${sql.json(unitFailures)}::jsonb,
       resume_after = ${after}::timestamptz, resume_blocked = coalesce(${nextBlocked}, resume_blocked)
-    where ${fenced(sql, row, workerId)}`;
+    where ${fenced(sql, row)}`;
   if (nextBlocked) {
     console.log(`[doppler-figures] resume capped doc=${row.document_id} reason=${nextBlocked}`);
     recordFigureTelemetry("resume.capped", 1, { reason: nextBlocked });
   }
 }
 
-type ResumeUnit = { shard: { first: number; last: number } | null; manifestSha256: string | null; gap: boolean };
+type ResumeUnit = {
+  shard: { first: number; last: number } | null; manifestSha256: string | null; gap: boolean;
+  /** A shard resume narrowed to an inner gap's pages (`--images-resume-pages`, FigureResumeJob.resumePages). */
+  resumePages?: [number, number];
+  /** The unit's key for per-unit failure counts: `<first>-<last>`, or `doc`. */
+  key: string;
+};
 
 /**
- * The runnable units of a claimed document, each one range, below #355's caps: every resumable shard of the claimed run
- * under its own cap and the document's total (documentResumeTotalCap); every effective gap (no shard covers it; a fresh
- * pass over its pages becomes its shard) while the document's total is not spent; or the unsharded document itself.
+ * The runnable units of a claimed document, each one range, below #355's caps (3 per unit, the document's total
+ * documentResumeTotalCap) and below 3 failures of its own (R2-M3):
+ *   - every resumable shard of the claimed run (its manifest);
+ *   - every gap no shard covers (a fresh pass over its pages becomes its shard);
+ *   - a gap inside a shard that is not complete (e.g. a gap resume's own inner gaps, R2 adversarial 8): that shard's resume
+ *     narrowed to the gap's pages, unless the shard is already a unit;
+ *   - or the unsharded document itself.
  */
 async function units(sql: Client, row: ClaimedLevel): Promise<ResumeUnit[]> {
-  const [level] = await sql<{ gaps: Array<{ first: number; last: number }> | null; resumes: number; assets_resumable: number; manifest_sha256: string | null; shards: number }[]>`
-    select gaps, resumes, assets_resumable, manifest_sha256, shards from document_extraction_levels
+  const [level] = await sql<{ gaps: Array<{ first: number; last: number }> | null; resumes: number; assets_resumable: number; manifest_sha256: string | null; shards: number; resume_unit_failures: Record<string, number> | null }[]>`
+    select gaps, resumes, assets_resumable, manifest_sha256, shards, resume_unit_failures from document_extraction_levels
     where document_id = ${row.document_id} and org_id = ${row.org_id} and project_id = ${row.project_id} and run_id = ${row.run_id}`;
   if (!level) return [];
+  const failed = level.resume_unit_failures ?? {};
+  const open = (key: string) => (failed[key] ?? 0) < FIGURE_RESUME_LIMITS.maxAttempts;
   const shards = await sql<Array<{ first_page: number; last_page: number; manifest_sha256: string; resumes: number; images_status: string }>>`
     select first_page, last_page, manifest_sha256, resumes, images_status from document_extraction_shards
     where document_id = ${row.document_id} and org_id = ${row.org_id} and project_id = ${row.project_id}
     order by first_page`;
   const out: ResumeUnit[] = [];
-  if (shards.length === 0 && level.manifest_sha256 && level.resumes < DOCUMENT_ASSET_RESUME_CAP && level.assets_resumable > 0) {
-    out.push({ shard: null, manifestSha256: level.manifest_sha256, gap: false });
+  if (shards.length === 0 && level.manifest_sha256 && level.resumes < DOCUMENT_ASSET_RESUME_CAP && level.assets_resumable > 0 && open("doc")) {
+    out.push({ shard: null, manifestSha256: level.manifest_sha256, gap: false, key: "doc" });
   }
   const total = shards.reduce((sum, shard) => sum + shard.resumes, 0);
   const totalOpen = total < documentResumeTotalCap(Math.max(1, shards.length));
   if (totalOpen) {
+    const keyOfRange = (first: number, last: number) => `${first}-${last}`;
     for (const shard of shards) {
-      if (shard.images_status === "resumable" && shard.resumes < DOCUMENT_ASSET_RESUME_CAP) {
-        out.push({ shard: { first: shard.first_page, last: shard.last_page }, manifestSha256: shard.manifest_sha256, gap: false });
+      const key = keyOfRange(shard.first_page, shard.last_page);
+      if (shard.images_status === "resumable" && shard.resumes < DOCUMENT_ASSET_RESUME_CAP && open(key)) {
+        out.push({ shard: { first: shard.first_page, last: shard.last_page }, manifestSha256: shard.manifest_sha256, gap: false, key });
       }
     }
     for (const gap of level.gaps ?? []) {
-      if (shards.some((shard) => shard.first_page <= gap.last && gap.first <= shard.last_page)) continue;
-      out.push({ shard: { first: gap.first, last: gap.last }, manifestSha256: null, gap: true });
+      const owner = shards.find((shard) => shard.first_page <= gap.last && gap.first <= shard.last_page);
+      if (!owner) {
+        const key = keyOfRange(gap.first, gap.last);
+        if (open(key)) out.push({ shard: { first: gap.first, last: gap.last }, manifestSha256: null, gap: true, key });
+        continue;
+      }
+      // Covered by a complete shard: no work. Inside a shard that is not complete: that shard's narrowed resume.
+      if (owner.images_status === "complete" || owner.resumes >= DOCUMENT_ASSET_RESUME_CAP) continue;
+      const shardKey = keyOfRange(owner.first_page, owner.last_page);
+      if (out.some((unit) => unit.key === shardKey) || !open(shardKey)) continue;
+      out.push({
+        shard: { first: owner.first_page, last: owner.last_page }, manifestSha256: owner.manifest_sha256, gap: false, key: shardKey,
+        resumePages: [Math.max(gap.first, owner.first_page), Math.min(gap.last, owner.last_page)],
+      });
     }
   }
   return out.sort((a, b) => (a.shard?.first ?? 0) - (b.shard?.first ?? 0));
@@ -292,9 +348,13 @@ async function resumeClaimed(deps: FigureResumeDeps, row: ClaimedLevel): Promise
   let exhausted = false;
   let vmMs = 0;
   let added = 0;
+  let unitKey: string | undefined;
   try {
     const adopted = await adoptPendingAssets(deps.sql, deps.storage, { scope, signal: deps.signal });
     if (adopted.adopted > 0) recordFigureTelemetry("adopted_files", adopted.adopted);
+    // Slots a crash after an earlier unit's ledger commit left out (R2-L1).
+    const repaired = await repairFigureSlots(deps.sql, deps.storage, scope).catch(() => 0);
+    if (repaired > 0) recordFigureTelemetry("resume.slots_repaired", repaired);
     // PII: a document withheld whole (or whose outcome cannot be read) resumes nothing and leaves the queue; a unit whose
     // pages are all withheld is skipped; clean pages resume normally.
     const withholding = await documentPiiWithholding(deps.sql, row);
@@ -319,6 +379,7 @@ async function resumeClaimed(deps: FigureResumeDeps, row: ClaimedLevel): Promise
       // Nothing runnable (caps spent, or adopt finished it): never re-queued forever (H1).
       exhausted = true;
     } else {
+      unitKey = unit.key;
       const result = await resumeUnit(deps, row, scope, document, unit);
       vmMs = result.vmMs;
       added = result.added;
@@ -334,16 +395,20 @@ async function resumeClaimed(deps: FigureResumeDeps, row: ClaimedLevel): Promise
     const rule = ruled ? ruled.rule : error instanceof Error ? error.name : "error";
     // A reprocess or a newer run overtook this resume: a no-op, never a mix (the fenced release then touches nothing).
     if (rule === "stale-write" || rule === "scope-mismatch") { outcome = "blocked"; blocked = "stale"; }
+    // A resume handing back other bytes for a stored image (a Doppler build change after a crash) can only repeat: refused
+    // at once, never three more VMs (R2-L4).
+    else if (rule === "resume-rewrite" || rule === "manifest-resume-rewrite") { outcome = "blocked"; blocked = "refused"; }
     else outcome = "retry";
     console.warn(`[doppler-figures] resume ${outcome === "blocked" ? "stale" : "failed"} doc=${row.document_id} rule=${rule}`);
   } finally {
     if (outcome !== "lost") {
-      await release(deps.sql, row, deps.workerId, outcome, blocked, exhausted)
+      await release(deps.sql, row, outcome, blocked, exhausted, unitKey)
         .catch((error) => console.warn(`[doppler-figures] resume release-failed doc=${row.document_id} error=${error instanceof Error ? error.name : typeof error}`));
     }
   }
   // The attempt's own outcome (L1), never the level another writer left.
-  const label = outcome === "done" ? (exhausted ? "exhausted" : "completed") : outcome === "blocked" ? (blocked === "stale" ? "stale" : "blocked") : outcome === "lost" ? "lease-lost" : "failed";
+  const label = outcome === "done" ? (exhausted ? "exhausted" : "completed") : outcome === "blocked" ? (blocked === "stale" ? "stale" : "blocked")
+    : outcome === "lost" ? "lease-lost" : outcome === "deferred" ? "deferred" : "failed";
   console.log(`[doppler-figures] resume done doc=${row.document_id} outcome=${label} added=${added} vmMs=${vmMs} ms=${Date.now() - started}`);
   recordFigureTelemetry("resume.attempts", 1, { outcome: label });
   if (added > 0) recordFigureTelemetry("resume.added_files", added);
@@ -354,11 +419,13 @@ async function resumeClaimed(deps: FigureResumeDeps, row: ClaimedLevel): Promise
  * `billable: false` (never a customer charge), plus the organization's daily total. Recorded for failed and timed-out
  * runs too.
  */
-async function recordResumeVmTime(sql: Client, row: ClaimedLevel, wallTimeMs: number, outcome: string): Promise<void> {
+async function recordResumeVmTime(sql: Client, row: ClaimedLevel, wallTimeMs: number, outcome: string, reservedMs = 0): Promise<void> {
   const ms = Math.max(0, Math.round(wallTimeMs));
+  // The real time joins the day's total and the launch's reservation is released (R2 adversarial 4).
   await sql`
     insert into figure_resume_org_days (org_id, day, launches, vm_ms) values (${row.org_id}, (now() at time zone 'utc')::date, 0, ${ms})
-    on conflict (org_id, day) do update set vm_ms = figure_resume_org_days.vm_ms + excluded.vm_ms`;
+    on conflict (org_id, day) do update set vm_ms = figure_resume_org_days.vm_ms + excluded.vm_ms,
+      reserved_ms = greatest(0, figure_resume_org_days.reserved_ms - ${Math.max(0, Math.round(reservedMs))})`;
   const profile = resolveWorkerDeploymentProfile();
   const event = buildLocalComputeUsageEvent({
     metric: FIGURE_RESUME_METRIC, profile, observation: buildAllocatedResourceObservation({ profile, wallTimeMs: ms }),
@@ -369,62 +436,97 @@ async function recordResumeVmTime(sql: Client, row: ClaimedLevel, wallTimeMs: nu
   recordFigureTelemetry("resume.vm_ms", ms, { outcome });
 }
 
-// ---- PII (page-scoped). Local until feat/pii-page-scoped lands: the same names and semantics as its
-// packages/shared/src/pii-withholding.ts (piiWithholding, isPageWithheld); whichever lands later dedupes. ----
+// ---- PII. piiWithholding and isPageWithheld are verbatim copies of feat/pii-page-scoped's
+// packages/shared/src/pii-withholding.ts (same names, same semantics); whichever lands later dedupes to the shared ones. ----
 
-export type PiiWithholding = { scope: "none" } | { scope: "document"; reason: string } | { scope: "pages"; pages: Set<number> };
+export type PiiWithholding =
+  | { scope: "none" }
+  | { scope: "sections"; sectionCount: number }
+  | { scope: "pages"; pages: ReadonlySet<number> }
+  | { scope: "document"; reason: string };
+
+function isPositiveInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 1;
+}
 
 /**
- * A document's PII withholding from its status and metadata, failing closed: status `pii_blocked`, `pii.blocked`, or a
- * malformed `metadata.pii` is `document`. `pii.scope = "pages"` with its page list is `pages`; a page-scoped outcome whose
- * pages cannot be read is `document`. A legacy outcome (no scope) that withholds anything takes its pages from the run's
- * `pii_detections` (`detectedPages`), or is `document` when they are missing or unpaged.
+ * The withholding recorded for a document. Fails closed: status `pii_blocked`, `pii.blocked`, an unknown scope or a
+ * malformed page list all withhold the whole document.
  */
-export function piiWithholding(args: { status: string | null | undefined; metadata: unknown; detectedPages?: ReadonlyArray<number | null> }): PiiWithholding {
-  if (args.status === "pii_blocked") return { scope: "document", reason: "pii_blocked" };
-  const metadata = args.metadata as { pii?: unknown } | null | undefined;
-  if (metadata !== null && metadata !== undefined && typeof metadata !== "object") return { scope: "document", reason: "malformed" };
-  const pii = metadata?.pii;
-  if (pii === undefined || pii === null) return { scope: "none" };
-  if (typeof pii !== "object" || Array.isArray(pii)) return { scope: "document", reason: "malformed" };
-  const value = pii as { blocked?: unknown; redacted?: unknown; scope?: unknown; pages?: unknown; withheldPages?: unknown; withheldArtifactUris?: unknown };
-  if (value.blocked === true) return { scope: "document", reason: "blocked" };
-  const pageList = (list: unknown): Set<number> | null =>
-    Array.isArray(list) && list.every((n) => Number.isSafeInteger(n) && (n as number) >= 1) ? new Set(list as number[]) : null;
-  if (value.scope === "document") return { scope: "document", reason: "document" };
-  if (value.scope === "pages") {
-    const pages = pageList(value.pages ?? value.withheldPages);
-    return pages ? { scope: "pages", pages } : { scope: "document", reason: "unreadable-pages" };
+export function piiWithholding(document: { status?: string | null; metadata?: unknown }): PiiWithholding {
+  if (document.status === "pii_blocked") return { scope: "document", reason: "pii-blocked" };
+  const metadata = document.metadata;
+  if (metadata === null || metadata === undefined) return { scope: "none" };
+  if (typeof metadata !== "object" || Array.isArray(metadata)) return { scope: "document", reason: "malformed-metadata" };
+  const pii = (metadata as { pii?: unknown }).pii;
+  if (pii === null || pii === undefined) return { scope: "none" };
+  if (typeof pii !== "object" || Array.isArray(pii)) return { scope: "document", reason: "malformed-metadata" };
+  const record = pii as { blocked?: unknown; scope?: unknown; withheldPages?: unknown; withheldSectionCount?: unknown };
+  if (record.blocked === true) return { scope: "document", reason: "pii-blocked" };
+  switch (record.scope) {
+    case undefined:
+    case null:
+    case "none":
+      if (record.withheldPages !== undefined) return { scope: "document", reason: "malformed-metadata" };
+      return { scope: "none" };
+    case "pages": {
+      const pages = record.withheldPages;
+      if (!Array.isArray(pages) || pages.length === 0 || !pages.every(isPositiveInteger)) {
+        return { scope: "document", reason: "malformed-metadata" };
+      }
+      return { scope: "pages", pages: new Set(pages) };
+    }
+    case "sections":
+      return { scope: "sections", sectionCount: isPositiveInteger(record.withheldSectionCount) ? record.withheldSectionCount : 1 };
+    case "document":
+      return { scope: "document", reason: "pii-blocked" };
+    default:
+      return { scope: "document", reason: "unknown-scope" };
   }
-  if (value.scope !== undefined && value.scope !== "none") return { scope: "document", reason: "malformed" };
-  const uris = value.withheldArtifactUris;
-  if (uris !== undefined && !Array.isArray(uris)) return { scope: "document", reason: "malformed" };
-  const withholds = value.redacted === true || (Array.isArray(uris) && uris.length > 0);
-  if (!withholds || value.scope === "none") return { scope: "none" };
-  const detected = args.detectedPages ?? [];
-  if (detected.length === 0 || detected.some((page) => page === null)) return { scope: "document", reason: "unpaged" };
-  return { scope: "pages", pages: new Set(detected as number[]) };
 }
 
-/** Whether a page (or any of several) is withheld; `document` always; a null or unknown page whenever any page is. */
-export function isPageWithheld(withholding: PiiWithholding, page: number | readonly number[] | null): boolean {
-  if (withholding.scope === "none") return false;
+/**
+ * Whether a page (or any page of a hit spanning several) is withheld. A hit without a page on a document that
+ * withholds pages is withheld: its text cannot be shown to come from a clean page.
+ */
+export function isPageWithheld(
+  withholding: PiiWithholding,
+  page: number | readonly (number | null | undefined)[] | null | undefined,
+): boolean {
   if (withholding.scope === "document") return true;
-  if (page === null) return withholding.pages.size > 0;
-  const pages = typeof page === "number" ? [page] : page;
-  if (pages.length === 0) return withholding.pages.size > 0;
-  return pages.some((n) => !Number.isSafeInteger(n) || withholding.pages.has(n));
+  if (withholding.scope !== "pages") return false;
+  const pages = Array.isArray(page) ? page : [page];
+  const known = pages.filter(isPositiveInteger);
+  if (known.length === 0 || known.length !== pages.length) return true;
+  return known.some((value) => withholding.pages.has(value));
 }
 
-/** The claimed document's withholding (its status, metadata and, for a legacy outcome, its run's detections). */
+/**
+ * What a figure resume may do under a document's PII outcome (R2 adversarial 1 and 7). Only a page-scoped outcome the
+ * PII stage itself wrote (`scope: "pages"` with its page list) narrows withholding to pages. Anything else that withholds
+ * artifacts is whole-document for a resume: a legacy outcome (no scope: `main`'s PII stage withholds every artifact under
+ * `redact_artifacts`), `scope: "none"` or `"sections"` with `redacted`, `blocked` or a non-empty withheld list
+ * (inconsistent metadata fails closed), and every `document` outcome. Never inferred from `pii_detections`, which records
+ * only the primary source's matches.
+ */
+export function resumeWithholding(document: { status?: string | null; metadata?: unknown }): PiiWithholding {
+  const withholding = piiWithholding(document);
+  if (withholding.scope === "document" || withholding.scope === "pages") return withholding;
+  const pii = (document.metadata as { pii?: unknown } | null | undefined)?.pii as { redacted?: unknown; blocked?: unknown; withheldArtifactUris?: unknown } | undefined;
+  const listed = pii?.withheldArtifactUris;
+  if (listed !== undefined && !Array.isArray(listed)) return { scope: "document", reason: "malformed-metadata" };
+  if (withholding.scope === "sections") return { scope: "document", reason: "sections" };
+  if (pii && (pii.redacted === true || pii.blocked === true || (Array.isArray(listed) && listed.length > 0))) {
+    return { scope: "document", reason: "legacy-withholding" };
+  }
+  return { scope: "none" };
+}
+
+/** The claimed document's resume withholding (its status and metadata only). */
 async function documentPiiWithholding(sql: Client, row: ClaimedLevel): Promise<PiiWithholding> {
   const [doc] = await sql<{ status: string; metadata: unknown }[]>`select status, metadata from documents where id = ${row.document_id} and org_id = ${row.org_id}`;
   if (!doc) return { scope: "document", reason: "missing" };
-  const first = piiWithholding({ status: doc.status, metadata: doc.metadata });
-  if (first.scope !== "document" || first.reason !== "unpaged") return first;
-  const detections = await sql<{ page_number: number | null }[]>`
-    select distinct page_number from pii_detections where document_id = ${row.document_id} and run_id = ${row.run_id}`;
-  return piiWithholding({ status: doc.status, metadata: doc.metadata, detectedPages: detections.map((d) => d.page_number) });
+  return resumeWithholding({ status: doc.status, metadata: doc.metadata });
 }
 
 /** Add URIs to the document's withheld list (scoped by its organization); throws when the write did not land. */
@@ -445,15 +547,35 @@ async function withholdUris(sql: Client, row: ClaimedLevel, uris: readonly strin
   if (updated.length !== 1) throw new Error("PII withheld list not updated");
 }
 
+/** A provider's failure reason for the log: a fixed slug, else `other` (never provider free text; R2-L7). */
+function reasonSlug(reason: unknown): string {
+  return typeof reason === "string" && /^[a-z0-9:_-]{1,64}$/.test(reason) ? reason : "other";
+}
+
 async function resumeUnit(
-  deps: FigureResumeDeps, row: ClaimedLevel, scope: DocumentAssetLedgerScope, document: { id: string; userId: string; runId: string; artifactRoot: string | null },
+  deps: FigureResumeDeps, claimed: ClaimedLevel, scope: DocumentAssetLedgerScope, document: { id: string; userId: string; runId: string; artifactRoot: string | null },
   unit: ResumeUnit,
 ): Promise<{ outcome: Outcome; blocked?: string; vmMs: number; added: number }> {
+  const row = claimed;
   if (!row.source_sha256) return { outcome: "blocked", blocked: "refused", vmMs: 0, added: 0 };
-  const pages = unit.shard ? unit.shard.last - unit.shard.first + 1 : row.page_count;
-  const timeoutMs = deps.provider!.timeoutMs(pages);
-  // Heartbeat: the lease covers this unit's VM budget, the download and the store (M2).
-  if (!await heartbeat(deps.sql, row, deps.workerId, 2 * timeoutMs + 10 * 60_000)) return { outcome: "lost", vmMs: 0, added: 0 };
+  // Every ledger write of this unit is fenced by the claim's lease token (R2 adversarial 5).
+  const fencedScope: DocumentAssetLedgerScope = { ...scope, lease: row.lease };
+  const asked = unit.resumePages ?? (unit.shard ? [unit.shard.first, unit.shard.last] as const : [1, row.page_count] as const);
+  const pages = asked[1] - asked[0] + 1;
+  // The launch's timeout is capped at what is left of the organization's daily resume VM budget (R2 adversarial 4).
+  const [today] = await deps.sql<{ used: number }[]>`
+    select (vm_ms + reserved_ms)::float8 as used from figure_resume_org_days where org_id = ${row.org_id} and day = (now() at time zone 'utc')::date`;
+  const remaining = figureResumeOrgDailyVmMs(deps.env ?? process.env) - (today?.used ?? 0);
+  if (remaining < 60_000) return { outcome: "deferred", vmMs: 0, added: 0 };
+  const timeoutMs = Math.max(60_000, Math.min(deps.provider!.timeoutMs(pages), remaining));
+  // Heartbeat: renewed every two minutes while this unit runs (R2-L3); a lease no longer ours aborts the unit.
+  if (!await heartbeat(deps.sql, row, HEARTBEAT_LEASE_MS)) return { outcome: "lost", vmMs: 0, added: 0 };
+  const lost = new AbortController();
+  const beat = setInterval(() => {
+    void heartbeat(deps.sql, row, HEARTBEAT_LEASE_MS).then((ok) => { if (!ok) lost.abort(); }, () => undefined);
+  }, HEARTBEAT_EVERY_MS);
+  beat.unref?.();
+  const signal = deps.signal ? AbortSignal.any([deps.signal, lost.signal]) : lost.signal;
   const work = await mkdtemp(path.join(tmpdir(), "figure-resume-"));
   let source: string | null = null;
   try {
@@ -462,39 +584,40 @@ async function resumeUnit(
     if (unit.manifestSha256) {
       await downloadDopplerImagesDir({
         storage: deps.storage, document, runId: row.run_id, manifestSha256: unit.manifestSha256, pageCount: row.page_count, dir: manifestDir,
-        ...(unit.shard ? { shard: unit.shard } : {}), signal: deps.signal,
+        ...(unit.shard ? { shard: unit.shard } : {}), signal,
       });
     }
     // 2. The source (the provider stages it into its VM; the host never parses it) and a fresh VM, counted before it
-    //    starts (lifetime, per organization per day) and timed whatever happens.
+    //    starts (lifetime, per organization per day, its capped timeout reserved) and timed whatever happens.
     const sourceKey = deps.storage.bucket ? keyOf(row.source_key, deps.storage.bucket) : row.source_key;
     source = await deps.storage.downloadToTempFile(sourceKey, "figure-resume-source-*.pdf");
     const outDir = path.join(work, "out");
     await mkdir(outDir, { mode: 0o700 });
     const counted = await deps.sql`
       update document_extraction_levels set resume_vm_launches = resume_vm_launches + 1
-      where ${fenced(deps.sql, row, deps.workerId)} and resume_vm_launches < ${FIGURE_RESUME_LIMITS.maxVmLaunches} returning 1`;
+      where ${fenced(deps.sql, row)} and resume_vm_launches < ${figureResumeLaunchCap(row.shards + row.gap_count)} returning 1`;
     if (counted.length !== 1) return { outcome: "lost", vmMs: 0, added: 0 };
     await deps.sql`
-      insert into figure_resume_org_days (org_id, day, launches, vm_ms) values (${row.org_id}, (now() at time zone 'utc')::date, 1, 0)
-      on conflict (org_id, day) do update set launches = figure_resume_org_days.launches + 1`;
+      insert into figure_resume_org_days (org_id, day, launches, vm_ms, reserved_ms) values (${row.org_id}, (now() at time zone 'utc')::date, 1, 0, ${timeoutMs})
+      on conflict (org_id, day) do update set launches = figure_resume_org_days.launches + 1, reserved_ms = figure_resume_org_days.reserved_ms + ${timeoutMs}`;
     const vmStarted = Date.now();
     let raw: unknown;
     let vmOutcome = "failed";
     try {
       raw = await deps.provider!.resume({
         input: source, sourceSha256: row.source_sha256, manifest: unit.manifestSha256 ? path.join(manifestDir, "manifest.jsonl") : null,
-        pages: unit.shard ? [unit.shard.first, unit.shard.last] : null, resumePages: null, dir: outDir, limits: dopplerImageLimits(row.page_count), timeoutMs,
-      }, deps.signal);
+        pages: unit.shard ? [unit.shard.first, unit.shard.last] : null, resumePages: unit.resumePages ?? null, dir: outDir,
+        limits: dopplerImageLimits(row.page_count), timeoutMs,
+      }, signal);
       vmOutcome = "returned";
     } finally {
-      await recordResumeVmTime(deps.sql, row, Date.now() - vmStarted, vmOutcome)
+      await recordResumeVmTime(deps.sql, row, Date.now() - vmStarted, vmOutcome, timeoutMs)
         .catch((error) => console.warn(`[doppler-figures] resume vm-cost-unrecorded doc=${row.document_id} error=${error instanceof Error ? error.name : typeof error}`));
     }
     const vmMs = Date.now() - vmStarted;
     const outcome = parseSandboxedPdfFigureOutcome(raw, 500, row.page_count);
     if (outcome.status === "failed") {
-      console.warn(`[doppler-figures] resume failed doc=${row.document_id} pages=${unit.shard ? `${unit.shard.first}-${unit.shard.last}` : "all"} reason=${JSON.stringify(outcome.reason)}`);
+      console.warn(`[doppler-figures] resume failed doc=${row.document_id} pages=${asked[0]}-${asked[1]} reason=${reasonSlug(outcome.reason)}`);
       return { outcome: "retry", vmMs, added: 0 };
     }
     // 3. Validated whole; stored images keep their digest and are never uploaded again.
@@ -502,14 +625,23 @@ async function resumeUnit(
       select asset_id, sha256 from document_assets where org_id = ${row.org_id} and project_id = ${row.project_id} and document_id = ${row.document_id}
         and run_id = ${row.run_id} and storage_state = 'stored'`).map((r) => [r.asset_id, r.sha256]));
     const set = await readDopplerFigureDir(outDir, {
-      pageCount: row.page_count, signal: deps.signal, expect: outcome.status === "partial" ? "partial" : "complete", sourceSha256: row.source_sha256,
+      pageCount: row.page_count, signal, expect: outcome.status === "partial" ? "partial" : "complete", sourceSha256: row.source_sha256,
       // A range resume (a shard or a gap) is checked over its own pages (dopplerShardCoverage), with its declared gaps.
       gaps: outcome.gaps ?? null, ...(unit.shard ? { range: [unit.shard.first, unit.shard.last] as const } : {}),
       resume: { stored },
     });
     try {
+      // The contract's shape, before anything is uploaded (R2-L5): a range resume publishes exactly one shard folder for
+      // that range; an unsharded resume, one manifest and no shards.
+      const shape = unit.shard
+        ? set.manifests.length === 1 && set.manifests[0]!.range?.[0] === unit.shard.first && set.manifests[0]!.range?.[1] === unit.shard.last
+        : set.manifests.length === 1 && set.manifests[0]!.range === null;
+      if (!shape) {
+        console.warn(`[doppler-figures] resume contract doc=${row.document_id} pages=${asked[0]}-${asked[1]} manifests=${set.manifests.length}`);
+        return { outcome: "blocked", blocked: "refused", vmMs, added: 0 };
+      }
       // PII (page-scoped): figures on a withheld page join the withheld list before any upload, so they are never served.
-      // (They are still uploaded: the ledger records the folder whole. The unit filter above skips ranges withheld whole.)
+      // (They are still uploaded and not billed: the ledger records the folder whole. Ranges withheld whole are skipped.)
       const withheld = await documentPiiWithholding(deps.sql, row);
       if (withheld.scope === "document") return { outcome: "blocked", blocked: "refused", vmMs, added: 0 };
       if (withheld.scope === "pages") {
@@ -518,32 +650,39 @@ async function resumeUnit(
         await withholdUris(deps.sql, row, uris);
         if (uris.length > 0) recordFigureTelemetry("resume.pii_withheld_files", uris.length);
       }
-      const ledger = figureLedgerHooks({ store: { markAssetsPending: (args) => markAssetsPending(deps.sql, args), markAssetsStored: (args) => markAssetsStored(deps.sql, args) }, run: { id: row.run_id, orgId: row.org_id, projectId: row.project_id } }, row.document_id);
+      // The new manifest staged by content before any file (R2-L4): a crash anywhere later still finds it.
+      await storeDopplerFolderManifests({ storage: deps.storage, set, document, runId: row.run_id, phase: "stage", signal });
+      const ledger = figureLedgerHooks({ store: { markAssetsPending: (args) => markAssetsPending(deps.sql, args), markAssetsStored: (args) => markAssetsStored(deps.sql, args) }, run: { id: row.run_id, orgId: row.org_id, projectId: row.project_id } }, row.document_id, row.lease);
       // Figure files only: the folder's manifests, Markdown and index are never rewritten before the ledger commits.
-      const result = await storeDopplerFigures({ storage: deps.storage, document, runId: row.run_id, figures: set, markdown: "", folderFiles: false, ...(ledger ? { ledger } : {}), signal: deps.signal });
-      // The new manifest staged by content first: a crash after the commit still finds it (downloadDopplerImagesDir).
-      await storeDopplerFolderManifests({ storage: deps.storage, set, document, runId: row.run_id, phase: "stage", signal: deps.signal });
+      const result = await storeDopplerFigures({ storage: deps.storage, document, runId: row.run_id, figures: set, markdown: "", folderFiles: false, ...(ledger ? { ledger } : {}), signal });
       const pending = ledgerWriteForStoredFigures({ set, stored: result, outcome });
       await writeDocumentAssetLedger(deps.sql, {
-        scope, level: { ...pending.level, markdownComplete: true }, assets: pending.assets,
+        scope: fencedScope, level: { ...pending.level, markdownComplete: true }, assets: pending.assets,
         resume: unit.shard ? unit.shard : true, ...(pending.shards ? { shards: unit.shard ? pending.shards.filter((s) => s.first === unit.shard!.first) : pending.shards } : {}),
       });
       // After the commit: the manifests at their places, and (unsharded) the index with the stored Markdown's markers.
-      await storeDopplerFolderManifests({ storage: deps.storage, set, document, runId: row.run_id, phase: "publish", signal: deps.signal });
+      await storeDopplerFolderManifests({ storage: deps.storage, set, document, runId: row.run_id, phase: "publish", signal });
       if (!unit.shard) await rebuildIndex(deps, set, document, row.run_id).catch((error) => console.warn(`[doppler-figures] resume index-not-rebuilt doc=${row.document_id} error=${error instanceof Error ? error.name : typeof error}`));
-      // The new files are served: their slots join the document's run (fenced by the lease, scoped by org and project).
+      // The new files are served: their slots join the document's run, only while this claim still holds the lease (a
+      // crash here is repaired by the next claim or the audit: repairFigureSlots, R2-L1).
       const slots: Record<string, string> = {};
       for (const { slot, uri } of result.slots) if (slot.startsWith("doppler-figure:")) slots[`${row.document_id}:${slot}`] = uri;
       if (Object.keys(slots).length > 0) {
         await deps.sql`update project_runs set artifacts = coalesce(artifacts, '{}'::jsonb) || ${deps.sql.json(slots)}::jsonb
-          where id = ${row.run_id} and org_id = ${row.org_id} and project_id = ${row.project_id}`;
+          where id = ${row.run_id} and org_id = ${row.org_id} and project_id = ${row.project_id}
+            and exists (select 1 from document_extraction_levels l where ${fenced(deps.sql, row)})`;
       }
-      console.log(`[doppler-figures] resume unit doc=${row.document_id} pages=${unit.shard ? `${unit.shard.first}-${unit.shard.last}` : "all"}${unit.gap ? " gap" : ""} added=${result.stats.files} bytes=${result.stats.bytes} vmMs=${vmMs}`);
+      console.log(`[doppler-figures] resume unit doc=${row.document_id} pages=${asked[0]}-${asked[1]}${unit.gap ? " gap" : ""} added=${result.stats.files} bytes=${result.stats.bytes} vmMs=${vmMs}`);
       return { outcome: "done", vmMs, added: result.stats.files };
     } finally {
       await disposeDopplerFigureSet(set);
     }
+  } catch (error) {
+    // A lease lost mid-unit (heartbeat): nothing more is written; the new owner carries on.
+    if (lost.signal.aborted && !deps.signal?.aborted) return { outcome: "lost", vmMs: 0, added: 0 };
+    throw error;
   } finally {
+    clearInterval(beat);
     if (source) await rm(source, { force: true }).catch(() => undefined);
     await rm(work, { recursive: true, force: true }).catch(() => undefined);
   }
@@ -579,25 +718,41 @@ const FIGURE_FILE = /^page-[0-9]{4,10}\/(?:image|figure)-[0-9]{3,7}\.(?:webp|svg
 
 export interface FigureAuditResult {
   documents: number; orphans: number; orphanBytes: number; expiredFiles: number; missing: number; sizeMismatch: number; adopted: number;
-  skippedTruncated: number; dryRun: { audit: boolean; gc: boolean };
+  skippedTruncated: number; skippedChanged: number; slotsRepaired: number; dryRun: { audit: boolean; gc: boolean };
 }
 
 interface AuditDoc {
   document_id: string; org_id: string; project_id: string; run_id: string | null; assets_current: boolean; doc_status: string;
-  expired: boolean; manifest_key: string | null;
+  expired: boolean; manifest_key: string | null; level_at: string; user_id: string; storage_prefix: string | null;
+}
+/** Keys collected per locked transaction (R2-L9). */
+const GC_BATCH = 500;
+
+/**
+ * The retention predicate (M11, R2-M4), one SQL fragment used for the selection and every re-check under the lock: a
+ * failed, cancelled or `pii_blocked` document past FIGURE_FAILED_RETENTION_MS, or a level that is no longer current past
+ * the grace period. `l` and `d` are the level and its document.
+ */
+function expiredSql(sql: Client, now: Date) {
+  return sql`((d.status in ('failed', 'cancelled', 'pii_blocked') and d.updated_at < ${now}::timestamptz - ${`${FIGURE_FAILED_RETENTION_MS} milliseconds`}::interval)
+    or (not l.assets_current and l.updated_at < ${now}::timestamptz - ${`${FIGURE_ORPHAN_GRACE_MS} milliseconds`}::interval))`;
 }
 
 /**
- * One pass over up to `limit` documents with figure rows or objects, oldest audited first (`audited_at`). Per document:
+ * One pass over up to `limit` documents with figures, oldest audited first. The selection is exactly the partial index's
+ * predicate (`asset_bytes > 0 or assets_pending > 0 or not assets_current`, R2-M1): documents whose figure step never ran
+ * stay current with no bytes and are never in it. Per document:
  *   - adopt pending rows older than the grace period (no VM; M3);
+ *   - re-add the figure slots of stored current rows a crash left without one (R2-L1);
  *   - list its folders whole (a truncated listing skips the document: never "absent" read as "missing", H2);
- *   - collect objects no row vouches for (page files only), or every object of an expired document (failed or cancelled
- *     past FIGURE_FAILED_RETENTION_MS, or a level no longer current past the grace period; M11), each re-checked under the
- *     document's ledger lock right before its delete (H2);
- *   - confirm each current stored row with HEAD: a 404 or another size turns it into a resumable `aborted` image (queued,
- *     never clearing an `attempts` block).
- * The ledger writes need DOCSLURP_FIGURE_AUDIT and the deletes DOCSLURP_FIGURE_GC_DELETE; otherwise logged and measured
- * only (M7).
+ *   - collect objects no row vouches for (page files only), or, for an expired document, every object of its folder, in
+ *     batches, each under the document's ledger lock with the full retention predicate re-checked against the level and
+ *     run that were selected (R2-H1): a document retried, reprocessed or revived meanwhile is left alone;
+ *   - for an expired document whose objects are all gone, drop only the rows whose objects were collected, close the level
+ *     (`none`, current, no bytes, no manifest: it leaves the audit set) and reset the run's extract-markdown checkpoint and
+ *     figure slots, so a retry re-extracts instead of completing with dangling links (R2-H1 b);
+ *   - confirm each current stored row with HEAD: a 404 or another size turns it into a resumable `aborted` image.
+ * The ledger writes need DOCSLURP_FIGURE_AUDIT and the deletes DOCSLURP_FIGURE_GC_DELETE (dry runs by default, M7).
  */
 export async function auditFigureStorage(deps: { sql: Client; storage: FigureResumeStorage; limit?: number; now?: Date; env?: Record<string, string | undefined> }): Promise<FigureAuditResult> {
   const env = deps.env ?? process.env;
@@ -605,20 +760,22 @@ export async function auditFigureStorage(deps: { sql: Client; storage: FigureRes
   const deletes = figureGcDeletes(env);
   const result: FigureAuditResult = {
     documents: 0, orphans: 0, orphanBytes: 0, expiredFiles: 0, missing: 0, sizeMismatch: 0, adopted: 0, skippedTruncated: 0,
-    dryRun: { audit: !writes, gc: !deletes },
+    skippedChanged: 0, slotsRepaired: 0, dryRun: { audit: !writes, gc: !deletes },
   };
   if (!deps.storage.listKeys) return result;
   const now = deps.now ?? new Date();
   const documents = await deps.sql<AuditDoc[]>`
-    select l.document_id, l.org_id, l.project_id, l.run_id, l.assets_current, d.status as doc_status, l.manifest_key,
-      ((d.status in ('failed', 'cancelled') and d.updated_at < ${now}::timestamptz - ${`${FIGURE_FAILED_RETENTION_MS} milliseconds`}::interval)
-        or (not l.assets_current and l.updated_at < ${now}::timestamptz - ${`${FIGURE_ORPHAN_GRACE_MS} milliseconds`}::interval)) as expired
-    from document_extraction_levels l
+    select l.document_id, l.org_id, l.project_id, l.run_id, l.assets_current, d.status as doc_status, l.manifest_key, l.updated_at::text as level_at,
+      d.user_id, r.storage_prefix, ${expiredSql(deps.sql, now)} as expired
+    from (
+      select * from document_extraction_levels
+      where asset_bytes > 0 or assets_pending > 0 or not assets_current
+      order by audited_at nulls first, document_id
+      limit ${Math.min(Math.max(deps.limit ?? 50, 1), 500)}
+    ) l
     join documents d on d.id = l.document_id and d.org_id = l.org_id
-    where l.asset_bytes > 0 or l.assets_pending > 0 or not l.assets_current
-      or exists (select 1 from document_assets a where a.document_id = l.document_id and a.org_id = l.org_id and a.storage_key is not null)
-    order by l.audited_at nulls first, l.document_id
-    limit ${Math.min(Math.max(deps.limit ?? 50, 1), 500)}`;
+    left join project_runs r on r.id = l.run_id
+    order by l.audited_at nulls first, l.document_id`;
   for (const doc of documents) {
     result.documents += 1;
     await deps.sql`update document_extraction_levels set audited_at = now() where document_id = ${doc.document_id} and org_id = ${doc.org_id}`;
@@ -626,13 +783,27 @@ export async function auditFigureStorage(deps: { sql: Client; storage: FigureRes
       console.warn(`[figure-audit] doc=${doc.document_id} failed error=${error instanceof Error ? error.name : typeof error}`);
     });
   }
+  // Housekeeping (R2-L10): the per-org daily resume budget rows older than five weeks.
+  if (writes) await deps.sql`delete from figure_resume_org_days where day < (now() at time zone 'utc')::date - 35`.catch(() => undefined);
   recordFigureTelemetry("gc.orphan_files", result.orphans, { mode: deletes ? "delete" : "dry-run" });
   recordFigureTelemetry("gc.orphan_bytes", result.orphanBytes, { mode: deletes ? "delete" : "dry-run" }, "counter", "By");
   recordFigureTelemetry("gc.expired_files", result.expiredFiles, { mode: deletes ? "delete" : "dry-run" });
   recordFigureTelemetry("audit.ledger_storage_drift", result.missing + result.sizeMismatch, { mode: writes ? "write" : "dry-run" });
   recordFigureTelemetry("audit.adopted_files", result.adopted);
   recordFigureTelemetry("audit.skipped_truncated", result.skippedTruncated);
+  recordFigureTelemetry("audit.skipped_changed", result.skippedChanged);
+  recordFigureTelemetry("audit.slots_repaired", result.slotsRepaired);
   return result;
+}
+
+/** Under the document's ledger lock: is the level still the one selected (same run, untouched) and does the rule still hold? */
+async function stillAsSelected(tx: Client, doc: AuditDoc, now: Date, expired: boolean): Promise<boolean> {
+  const [row] = await tx<{ ok: boolean }[]>`
+    select (l.run_id is not distinct from ${doc.run_id} and l.updated_at::text = ${doc.level_at}
+      and ${expired ? expiredSql(tx, now) : tx`true`}) as ok
+    from document_extraction_levels l join documents d on d.id = l.document_id and d.org_id = l.org_id
+    where l.document_id = ${doc.document_id} and l.org_id = ${doc.org_id}`;
+  return !!row?.ok;
 }
 
 async function auditDocument(
@@ -653,10 +824,14 @@ async function auditDocument(
       if (adopted) result.adopted += adopted.adopted;
     }
   }
+  // 2. Slots a crash between a resume's ledger commit and its slot update left out (R2-L1).
+  if (scope && writes && !doc.expired && doc.assets_current && doc.doc_status === "completed") {
+    result.slotsRepaired += await repairFigureSlots(deps.sql, deps.storage, { documentId: doc.document_id, orgId: doc.org_id, projectId: doc.project_id, runId: doc.run_id! });
+  }
   const rows = await deps.sql<Array<{ asset_id: string; storage_key: string; bytes: number; storage_state: string; run_id: string | null }>>`
     select asset_id, storage_key, bytes, storage_state, run_id from document_assets
     where document_id = ${doc.document_id} and org_id = ${doc.org_id} and storage_key is not null`;
-  // 2. The document's folders (every root its rows or its level use), each strictly this document's own.
+  // 3. The document's folders (every root its rows or its level use), each strictly this document's own.
   const marker = `/${DOPPLER_STORE_LAYOUT.folder}/${doc.document_id}/`;
   const folders = new Set<string>();
   for (const key of [...rows.map((row) => row.storage_key), ...(doc.manifest_key ? [doc.manifest_key] : [])]) {
@@ -664,42 +839,61 @@ async function auditDocument(
     if (at > 0) folders.add(key.slice(0, at + marker.length));
   }
   const vouched = new Set(rows.map((row) => row.storage_key));
-  let truncated = false;
+  const candidates: Array<{ key: string; size: number }> = [];
+  let young = 0;
   for (const folder of folders) {
     const listed = await deps.storage.listKeys!({ prefix: folder, maxKeys: AUDIT_LIST_MAX });
-    if (listed.truncated) { truncated = true; break; }
+    if (listed.truncated) {
+      result.skippedTruncated += 1;
+      console.warn(`[figure-audit] doc=${doc.document_id} listing truncated: skipped (no GC, no loss verdict)`);
+      return;
+    }
     for (const key of listed.keys) {
       const relative = key.slice(folder.length + DOPPLER_STORE_LAYOUT.imagesFolder.length);
       const figureFile = key.startsWith(`${folder}${DOPPLER_STORE_LAYOUT.imagesFolder}`) && FIGURE_FILE.test(relative);
       // Unexpired: only page files no row vouches for. Expired: every object of the document's folder.
       if (!doc.expired && (!figureFile || vouched.has(key))) continue;
       const head = deps.storage.headObject ? await deps.storage.headObject(key).catch(() => null) : null;
-      if (!head || !head.lastModified || now.getTime() - head.lastModified.getTime() < FIGURE_ORPHAN_GRACE_MS) continue;
-      if (await collectUnderLock(deps, doc, key, deletes)) {
-        if (doc.expired) result.expiredFiles += 1;
-        else { result.orphans += 1; result.orphanBytes += head.size; }
-      }
+      if (!head || !head.lastModified || now.getTime() - head.lastModified.getTime() < FIGURE_ORPHAN_GRACE_MS) { young += 1; continue; }
+      candidates.push({ key, size: head.size });
     }
   }
-  if (truncated) {
-    result.skippedTruncated += 1;
-    console.warn(`[figure-audit] doc=${doc.document_id} listing truncated: skipped (no GC, no loss verdict)`);
-    return;
+  // 4. Collect in batches, each under the ledger lock with the selection re-checked (R2-H1, R2-L9).
+  for (let at = 0; at < candidates.length; at += GC_BATCH) {
+    const batch = candidates.slice(at, at + GC_BATCH);
+    const outcome = await deps.sql.begin(async (tx) => {
+      await tx`select pg_advisory_xact_lock(hashtext(${`document-assets:${doc.document_id}`}))`;
+      if (!(await stillAsSelected(tx as unknown as Client, doc, now, doc.expired))) return { changed: true, collected: [] as typeof batch };
+      // Unexpired: only keys no row vouches for now (an adopt or a same-run retry may have just accepted one).
+      const vouching = doc.expired ? new Set<string>() : new Set((await tx<{ storage_key: string }[]>`
+        select storage_key from document_assets where document_id = ${doc.document_id} and org_id = ${doc.org_id}
+          and storage_key = any(${tx.array(batch.map((c) => c.key))}::text[])`).map((r) => r.storage_key));
+      const collected = batch.filter((c) => !vouching.has(c.key));
+      if (deletes && collected.length > 0) {
+        await deps.storage.deleteKeys?.(collected.map((c) => c.key));
+        // Only rows whose objects were just removed (an expired document's own rows; never another run's young ones).
+        await tx`delete from document_assets where document_id = ${doc.document_id} and org_id = ${doc.org_id}
+          and storage_key = any(${tx.array(collected.map((c) => c.key))}::text[])`;
+      }
+      return { changed: false, collected };
+    });
+    if (outcome.changed) {
+      result.skippedChanged += 1;
+      console.log(`[figure-audit] doc=${doc.document_id} changed since selection: left alone`);
+      return;
+    }
+    for (const c of outcome.collected) {
+      if (doc.expired) result.expiredFiles += 1;
+      else { result.orphans += 1; result.orphanBytes += c.size; }
+    }
   }
   if (doc.expired) {
-    // The rows of an expired document no longer vouch: removed once its objects are gone (deletes on only).
-    if (deletes && rows.length > 0) {
-      await deps.sql.begin(async (tx) => {
-        await tx`select pg_advisory_xact_lock(hashtext(${`document-assets:${doc.document_id}`}))`;
-        await tx`delete from document_assets where document_id = ${doc.document_id} and org_id = ${doc.org_id}`;
-        await tx`update document_extraction_levels set assets_current = false, asset_bytes = 0, folder_bytes = 0, resume_after = null
-          where document_id = ${doc.document_id} and org_id = ${doc.org_id}`;
-      });
-    }
-    console.log(`[figure-audit] doc=${doc.document_id} expired status=${doc.doc_status} current=${doc.assets_current} files=${result.expiredFiles} mode=${deletes ? "delete" : "dry-run"}`);
+    // Every object gone (none skipped as young): close the level and reset the run's checkpoint for this document.
+    if (deletes && young === 0) await closeExpired(deps.sql, doc, now);
+    console.log(`[figure-audit] doc=${doc.document_id} expired status=${doc.doc_status} current=${doc.assets_current} files=${result.expiredFiles} young=${young} mode=${deletes ? "delete" : "dry-run"}`);
     return;
   }
-  // 3. Current stored rows: HEAD each (bounded); only a confirmed 404 or another size is a loss.
+  // 5. Current stored rows: HEAD each (bounded); only a confirmed 404 or another size is a loss.
   if (!scope || !deps.storage.headObject) return;
   const lost: string[] = [];
   let checked = 0;
@@ -724,26 +918,49 @@ async function auditDocument(
 }
 
 /**
- * Delete one object under the document's ledger lock (the lock every ledger writer takes), re-checking right before the
- * delete that no row vouches for it now (an adopt or a same-run retry may have just accepted it) or, for an expired
- * document, that it is still expired. True when collected (or would be, in a dry run).
+ * An expired document whose figure objects are all collected, under the ledger lock and only if still as selected: its
+ * remaining rows (none vouch for an object any more) are dropped, the level is closed (`none`, current, no counts, bytes
+ * or manifest, off the queue: it leaves the audit set), and its run's extract-markdown checkpoint and figure slots are
+ * reset, so "Retry failed documents" re-extracts instead of completing with links to deleted objects (R2-H1 b).
  */
-async function collectUnderLock(deps: { sql: Client; storage: FigureResumeStorage }, doc: AuditDoc, key: string, deletes: boolean): Promise<boolean> {
-  return await deps.sql.begin(async (tx) => {
+async function closeExpired(sql: Client, doc: AuditDoc, now: Date): Promise<void> {
+  await sql.begin(async (tx) => {
     await tx`select pg_advisory_xact_lock(hashtext(${`document-assets:${doc.document_id}`}))`;
-    if (doc.expired) {
-      const [still] = await tx<{ ok: boolean }[]>`
-        select (d.status in ('failed', 'cancelled') or not l.assets_current) as ok
-        from document_extraction_levels l join documents d on d.id = l.document_id and d.org_id = l.org_id
-        where l.document_id = ${doc.document_id} and l.org_id = ${doc.org_id}`;
-      if (!still?.ok) return false;
-    } else {
-      const [vouch] = await tx`select 1 from document_assets where document_id = ${doc.document_id} and org_id = ${doc.org_id} and storage_key = ${key} limit 1`;
-      if (vouch) return false;
+    if (!(await stillAsSelected(tx as unknown as Client, doc, now, true))) return;
+    await tx`delete from document_assets where document_id = ${doc.document_id} and org_id = ${doc.org_id}`;
+    await tx`delete from document_extraction_shards where document_id = ${doc.document_id} and org_id = ${doc.org_id}`;
+    await tx`update document_extraction_levels set images_status = 'none', assets_current = true, gaps = null, shards = 0,
+        manifest_key = null, manifest_sha256 = null, assets_total = 0, assets_extracted = 0, assets_not_extracted = 0, assets_unlinked = 0,
+        assets_resumable = 0, assets_pending = 0, source_copy = 0, source_decode = 0, source_render = 0, asset_bytes = 0, folder_bytes = 0,
+        resume_after = null, updated_at = now()
+      where document_id = ${doc.document_id} and org_id = ${doc.org_id}`;
+    if (doc.run_id) {
+      await tx`delete from document_run_stage_states where run_id = ${doc.run_id} and document_id = ${doc.document_id} and stage_name = 'extract-markdown'`;
+      await tx`update project_runs set artifacts = (
+          select coalesce(jsonb_object_agg(key, value), '{}'::jsonb) from jsonb_each(coalesce(artifacts, '{}'::jsonb))
+          where key not like ${`${doc.document_id}:doppler-%`})
+        where id = ${doc.run_id} and org_id = ${doc.org_id}`;
     }
-    if (deletes) await deps.storage.deleteKeys?.([key]);
-    return true;
   });
+}
+
+/**
+ * Re-add `<doc>:doppler-figure:<id>` slots for the stored rows of the current run that have none (a crash between a
+ * resume's ledger commit and its slot update, R2-L1). Returns how many were added.
+ */
+export async function repairFigureSlots(sql: Client, storage: Pick<FigureResumeStorage, "uri">, scope: { documentId: string; orgId: string; projectId: string; runId: string }): Promise<number> {
+  const rows = await sql<{ asset_id: string; storage_key: string; has: boolean }[]>`
+    select a.asset_id, a.storage_key, coalesce(r.artifacts ? (${scope.documentId} || ':doppler-figure:' || a.asset_id), false) as has
+    from document_assets a join project_runs r on r.id = a.run_id and r.org_id = a.org_id
+    join document_extraction_levels l on l.document_id = a.document_id and l.org_id = a.org_id and l.run_id = a.run_id and l.assets_current
+    where a.document_id = ${scope.documentId} and a.org_id = ${scope.orgId} and a.run_id = ${scope.runId}
+      and a.storage_state = 'stored' and a.status = 'extracted'`;
+  const missing: Record<string, string> = {};
+  for (const row of rows) if (!row.has) missing[`${scope.documentId}:${dopplerFigureSlot(row.asset_id)}`] = storage.uri(row.storage_key);
+  if (Object.keys(missing).length === 0) return 0;
+  await sql`update project_runs set artifacts = coalesce(artifacts, '{}'::jsonb) || ${sql.json(missing)}::jsonb
+    where id = ${scope.runId} and org_id = ${scope.orgId} and project_id = ${scope.projectId}`;
+  return Object.keys(missing).length;
 }
 
 /** Backlog gauges for SigNoz: queued live documents and the oldest one's age (L3: dead documents are not counted). */

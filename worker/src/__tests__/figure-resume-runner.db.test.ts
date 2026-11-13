@@ -20,7 +20,7 @@ import { readDopplerFigureDir, storeDopplerFigures } from "../extractors/doppler
 import type { FigureResumeJob } from "../extractors/plugins.js";
 import { setSpendCheckConfig } from "../db/spend-check.js";
 import {
-  auditFigureStorage, claimFigureResume, figureResumeBacklog, isPageWithheld, piiWithholding, runFigureResumes, FIGURE_FAILED_RETENTION_MS, FIGURE_ORPHAN_GRACE_MS, type FigureResumeProvider,
+  auditFigureStorage, claimFigureResume, figureResumeBacklog, isPageWithheld, piiWithholding, resumeWithholding, runFigureResumes, FIGURE_FAILED_RETENTION_MS, FIGURE_ORPHAN_GRACE_MS, type FigureResumeProvider,
 } from "../figures/resume-runner.js";
 import { v2Manifest, v3Text, writeV3Folder, V2_SOURCE_SHA } from "../test/doppler-manifest-v2.js";
 import { createMigratedDatabase } from "../test/migrated-db.js";
@@ -257,6 +257,11 @@ describe("the runner", () => {
       await runFigureResumes({ sql, storage, provider, workerId: "w1", env: ON });
       expect(await level()).toMatchObject({ resume_failures: attempt, leased: false });
     }
+    // R2-M3: failures count per unit; the unit is closed at three, and the next claim finds nothing runnable.
+    await due();
+    const { provider: again, jobs } = fakeProvider();
+    await runFigureResumes({ sql, storage, provider: again, workerId: "w1", env: ON });
+    expect(jobs).toEqual([]);
     expect(await level()).toMatchObject({ resume_blocked: "attempts", queued: false, images_status: "resumable" });
     expect(storage.deletes).toEqual([]);
   });
@@ -273,7 +278,8 @@ describe("the runner", () => {
     expect(await sql`select asset_id, sha256, storage_state from document_assets where document_id = 'doc-a' order by asset_id`).toEqual(rows);
     // Adversarial M7: a refused resume never rewrote the folder's manifest (figure files only before the commit).
     expect(storage.objects.get(manifestKey)!.bytes.equals(manifestBefore)).toBe(true);
-    expect(await level()).toMatchObject({ images_status: "resumable", resume_failures: 1 });
+    // R2-L4: a rewrite can only repeat: refused at once, no more VMs.
+    expect(await level()).toMatchObject({ images_status: "resumable", resume_failures: 0, resume_blocked: "refused", queued: false });
   });
 
   it("a reprocess that lands mid-resume makes the resume a no-op (stale)", async () => {
@@ -443,7 +449,11 @@ describe("council fix round (#365): highs", () => {
     // The on-demand request (server figure-resume.ts): clears the backoff, never a counter.
     await sql`update document_extraction_levels set resume_after = now() - interval '1 second', resume_blocked = null where document_id = 'doc-a'`;
     await runFigureResumes({ sql, storage, provider, workerId: "w1", env: ON });
-    expect(await level()).toMatchObject({ resume_failures: 3, resume_vm_launches: 3, resume_blocked: "attempts", queued: false });
+    expect(await level()).toMatchObject({ resume_failures: 3, resume_vm_launches: 3 });
+    // The unit's three failures close it (R2-M3): the next claim launches nothing and blocks.
+    await due();
+    await runFigureResumes({ sql, storage, provider, workerId: "w1", env: ON });
+    expect(await level()).toMatchObject({ resume_vm_launches: 3, resume_blocked: "attempts", queued: false });
     const events = await sql<{ metadata: Record<string, unknown> }[]>`select metadata from usage_events where metric = 'doppler-figures-resume-vm'`;
     expect(events).toHaveLength(3);
     expect(events.every((event) => event.metadata.outcome === "failed" && event.metadata.billable === false)).toBe(true);
@@ -543,46 +553,56 @@ describe("council fix round (#365): mediums", () => {
   });
 });
 
-describe("PII (owner rule: page-scoped)", () => {
-  it("one withheld page never blocks the document: other pages resume normally, the PII page's resumed figures are withheld", async () => {
+describe("PII: legacy outcomes are whole-document for a resume (R2 adversarial 1, 7)", () => {
+  it("R2 repro: a legacy redact_artifacts outcome is never narrowed to pii_detections pages: nothing resumed, nothing served", async () => {
     const storage = memoryStorage();
     await partialPass(storage);
     await due();
-    await sql`update documents set metadata = '{"pii":{"redacted":true,"withheldArtifactUris":["s3://b/ua/run-a/doppler/doc-a/document.md"]}}'::jsonb where id = 'doc-a'`;
-    await sql`insert into pii_detections (document_id, run_id, pattern_type, matched_prefix, page_number) values ('doc-a', 'run-a', 'email', 'a@', 3)`;
+    // Legacy PII stage output: everything withheld document-wide; detections only for the primary source, page 1.
+    await sql`update documents set metadata = jsonb_build_object('pii', jsonb_build_object('redacted', true, 'withheldArtifactUris', jsonb_build_array('s3://b/ka', 's3://b/ua/run-a/doppler/doc-a/images/page-0001/image-001.webp'))) where id = 'doc-a'`;
+    await sql`insert into pii_detections (document_id, run_id, pattern_type, matched_prefix, page_number) values ('doc-a', 'run-a', 'email', 'a@', 1)`;
+    const { provider, jobs } = fakeProvider();
+    await runFigureResumes({ sql, storage, provider, workerId: "w1", env: ON });
+    expect(jobs).toEqual([]);
+    expect(await level()).toMatchObject({ resume_blocked: "refused", queued: false, resume_vm_launches: 0 });
+    const [run] = await sql<{ artifacts: Record<string, string> }[]>`select artifacts from project_runs where id = 'run-a'`;
+    expect(Object.values(run!.artifacts)).not.toContain(`s3://b/${P32}`);
+  });
+
+  it("scope none with an active withheld list, redacted or blocked fails closed (refused)", async () => {
+    for (const pii of [{ scope: "none", withheldArtifactUris: ["s3://b/x"] }, { scope: "none", redacted: true }, { scope: "sections", withheldSectionCount: 2 }]) {
+      const storage = memoryStorage();
+      await sql`delete from document_assets`; await sql`delete from document_extraction_levels`;
+      await partialPass(storage);
+      await due();
+      await sql`update documents set metadata = ${sql.json({ pii })} where id = 'doc-a'`;
+      const { provider, jobs } = fakeProvider();
+      await runFigureResumes({ sql, storage, provider, workerId: "w1", env: ON });
+      expect(jobs, JSON.stringify(pii)).toEqual([]);
+      expect(await level()).toMatchObject({ resume_blocked: "refused" });
+    }
+  });
+
+  it("no PII outcome, or one that withholds nothing, resumes normally", async () => {
+    const storage = memoryStorage();
+    await partialPass(storage);
+    await due();
+    await sql`update documents set metadata = '{"pii":{"scope":"none","redacted":false,"withheldArtifactUris":[]}}'::jsonb where id = 'doc-a'`;
     const { provider, jobs } = fakeProvider();
     await runFigureResumes({ sql, storage, provider, workerId: "w1", env: ON });
     expect(jobs).toHaveLength(1);
-    expect(await level()).toMatchObject({ images_status: "complete", resume_blocked: null });
-    const [doc] = await sql<{ withheld: string[] }[]>`select metadata->'pii'->'withheldArtifactUris' as withheld from documents where id = 'doc-a'`;
-    // p3.2 is on the PII page: withheld (never served); the earlier withheld URI stays.
-    expect(doc!.withheld).toEqual(expect.arrayContaining([`s3://b/${P32}`, "s3://b/ua/run-a/doppler/doc-a/document.md"]));
-  });
-
-  it("a PII page elsewhere withholds nothing resumed on clean pages", async () => {
-    const storage = memoryStorage();
-    await partialPass(storage);
-    await due();
-    await sql`update documents set metadata = '{"pii":{"redacted":true,"withheldArtifactUris":["s3://b/x"]}}'::jsonb where id = 'doc-a'`;
-    await sql`insert into pii_detections (document_id, run_id, pattern_type, matched_prefix, page_number) values ('doc-a', 'run-a', 'email', 'a@', 1)`;
-    const { provider } = fakeProvider();
-    await runFigureResumes({ sql, storage, provider, workerId: "w1", env: ON });
     expect(await level()).toMatchObject({ images_status: "complete" });
-    const [doc] = await sql<{ withheld: string[] }[]>`select metadata->'pii'->'withheldArtifactUris' as withheld from documents where id = 'doc-a'`;
-    expect(doc!.withheld).toEqual(["s3://b/x"]);
-    const [run] = await sql<{ artifacts: Record<string, string> }[]>`select artifacts from project_runs where id = 'run-a'`;
-    expect(run!.artifacts["doc-a:doppler-figure:p3.2"]).toBe(`s3://b/${P32}`);
   });
 });
 
 describe("PII withholding API (local until feat/pii-page-scoped lands)", () => {
-  it("piiWithholding fails closed; isPageWithheld follows the scope", () => {
+  it("piiWithholding (shared semantics) fails closed; isPageWithheld follows the scope; resumeWithholding is stricter", () => {
     expect(piiWithholding({ status: "completed", metadata: {} })).toEqual({ scope: "none" });
     expect(piiWithholding({ status: "pii_blocked", metadata: {} }).scope).toBe("document");
     expect(piiWithholding({ status: "completed", metadata: { pii: "garbage" } }).scope).toBe("document");
     expect(piiWithholding({ status: "completed", metadata: { pii: { blocked: true } } }).scope).toBe("document");
-    expect(piiWithholding({ status: "completed", metadata: { pii: { scope: "pages", pages: "x" } } }).scope).toBe("document");
-    const pages = piiWithholding({ status: "completed", metadata: { pii: { scope: "pages", pages: [3] } } });
+    expect(piiWithholding({ status: "completed", metadata: { pii: { scope: "pages", withheldPages: "x" } } }).scope).toBe("document");
+    const pages = piiWithholding({ status: "completed", metadata: { pii: { scope: "pages", withheldPages: [3] } } });
     expect(pages).toEqual({ scope: "pages", pages: new Set([3]) });
     expect(isPageWithheld(pages, 3)).toBe(true);
     expect(isPageWithheld(pages, 2)).toBe(false);
@@ -590,16 +610,18 @@ describe("PII withholding API (local until feat/pii-page-scoped lands)", () => {
     expect(isPageWithheld(pages, null)).toBe(true);
     expect(isPageWithheld({ scope: "document", reason: "x" }, 1)).toBe(true);
     expect(isPageWithheld({ scope: "none" }, null)).toBe(false);
-    // Legacy outcome (no scope): pages from the run's detections, or document when unpaged.
-    expect(piiWithholding({ status: "completed", metadata: { pii: { redacted: true } }, detectedPages: [2] })).toEqual({ scope: "pages", pages: new Set([2]) });
-    expect(piiWithholding({ status: "completed", metadata: { pii: { redacted: true } }, detectedPages: [null] }).scope).toBe("document");
+    // The resume's rule: a legacy or inconsistent outcome is whole-document.
+    expect(resumeWithholding({ status: "completed", metadata: { pii: { redacted: true } } }).scope).toBe("document");
+    expect(resumeWithholding({ status: "completed", metadata: { pii: { scope: "none", withheldArtifactUris: ["s3://b/x"] } } }).scope).toBe("document");
+    expect(resumeWithholding({ status: "completed", metadata: { pii: { scope: "pages", withheldPages: [3], withheldArtifactUris: ["s3://b/x"] } } }).scope).toBe("pages");
+    expect(resumeWithholding({ status: "completed", metadata: {} }).scope).toBe("none");
   });
 
   it("a page-scoped document (metadata.pii.scope = pages) resumes figures on clean pages; the PII page's figures are withheld", async () => {
     const storage = memoryStorage();
     await partialPass(storage);
     await due();
-    await sql`update documents set metadata = '{"pii":{"scope":"pages","pages":[3],"withheldArtifactUris":[]}}'::jsonb where id = 'doc-a'`;
+    await sql`update documents set metadata = '{"pii":{"scope":"pages","withheldPages":[3],"withheldArtifactUris":[]}}'::jsonb where id = 'doc-a'`;
     const { provider, jobs } = fakeProvider();
     await runFigureResumes({ sql, storage, provider, workerId: "w1", env: ON });
     expect(jobs).toHaveLength(1);
@@ -612,7 +634,7 @@ describe("PII withholding API (local until feat/pii-page-scoped lands)", () => {
     const storage = memoryStorage();
     await partialPass(storage);
     await due();
-    await sql`update documents set metadata = '{"pii":{"scope":"pages","pages":[1,2,3]}}'::jsonb where id = 'doc-a'`;
+    await sql`update documents set metadata = '{"pii":{"scope":"pages","withheldPages":[1,2,3]}}'::jsonb where id = 'doc-a'`;
     const { provider, jobs } = fakeProvider();
     await runFigureResumes({ sql, storage, provider, workerId: "w1", env: ON });
     expect(jobs).toEqual([]);
@@ -623,7 +645,7 @@ describe("PII withholding API (local until feat/pii-page-scoped lands)", () => {
     const storage = memoryStorage();
     await partialPass(storage);
     await due();
-    await sql`update documents set metadata = '{"pii":{"scope":"pages","pages":"unreadable"}}'::jsonb where id = 'doc-a'`;
+    await sql`update documents set metadata = '{"pii":{"scope":"pages","withheldPages":"unreadable"}}'::jsonb where id = 'doc-a'`;
     const { provider, jobs } = fakeProvider();
     await runFigureResumes({ sql, storage, provider, workerId: "w1", env: ON });
     expect(jobs).toEqual([]);
@@ -638,3 +660,182 @@ describe("PII withholding API (local until feat/pii-page-scoped lands)", () => {
     expect(await claimFigureResume(sql, "w1", ON)).toBeNull();
   });
 });
+
+/** A complete unsharded pass with `gaps` (ranges no shard returned), committed as the stage does. */
+async function gapPass(storage: ReturnType<typeof memoryStorage>, gaps: Array<{ first: number; last: number }>) {
+  const built = v2Manifest();
+  const dir = await mkdtemp(path.join(work, "pass-"));
+  await writeV3Folder(dir, v3Text(built.manifest), built.files);
+  const set = await readDopplerFigureDir(dir, { pageCount: 3, expect: "complete", sourceSha256: V2_SOURCE_SHA });
+  const stored = await storeDopplerFigures({ storage, document: { id: "doc-a", userId: "ua", runId: "run-a" }, runId: "run-a", figures: set, markdown: "" });
+  const write = ledgerWriteForStoredFigures({ set, stored, outcome: { status: "partial", exitCode: 5, gaps: gaps.map((g) => ({ ...g, reason: "plugin:shard-over-share" as const })) } });
+  await writeDocumentAssetLedger(sql, { scope: scopeOf("doc-a"), level: { ...write.level, markdownComplete: true }, assets: write.assets });
+}
+
+/** A provider for gap units: an empty shard folder for exactly the asked range (or `split`: two folders). */
+function gapProvider(options: { split?: boolean } = {}) {
+  const jobs: FigureResumeJob[] = [];
+  const provider: FigureResumeProvider = {
+    timeoutMs: () => 60 * 60_000,
+    resume: async (job) => {
+      jobs.push(job);
+      const ranges: Array<[number, number]> = options.split && job.pages && job.pages[0] < job.pages[1]
+        ? [[job.pages[0], job.pages[0]], [job.pages[0] + 1, job.pages[1]]] : [job.pages ?? [1, 3]];
+      for (const [first, last] of ranges) {
+        const empty = { ...v2Manifest().manifest, images: [], batches: [{ pages: [first, last], status: "ok" }], complete: true, resumable: false };
+        empty.totals = Object.fromEntries(Object.keys(empty.totals).map((key) => [key, key === "batches" ? 1 : 0]));
+        const shardDir = path.join(job.dir, "shards", dopplerShardFolder(first, last));
+        await mkdir(shardDir, { recursive: true });
+        await writeFile(path.join(shardDir, "manifest.jsonl"), v3Text(empty as never, { pages: [first, last] }));
+      }
+      return { status: "extracted", exitCode: 0 };
+    },
+  };
+  return { provider, jobs };
+}
+
+describe("council round 2 (#365)", () => {
+  it("R2-H1 / repro R1 inverted: a document retried between the audit's selection and its collection loses nothing", async () => {
+    const storage = memoryStorage();
+    await partialPass(storage);
+    for (const value of storage.objects.values()) value.at = new Date(Date.now() - FIGURE_FAILED_RETENTION_MS - 60_000);
+    await sql`update documents set status = 'failed', updated_at = now() - interval '8 days' where id = 'doc-a'`;
+    const before = (await sql<{ n: number }[]>`select count(*)::int as n from document_assets where document_id = 'doc-a'`)[0]!.n;
+    const objectsBefore = [...storage.objects.keys()].filter((key) => key.includes("/doc-a/")).length;
+    const list = storage.listKeys;
+    storage.listKeys = async (args) => {
+      await sql`update documents set status = 'queued', updated_at = now() where id = 'doc-a'`;
+      return await list(args);
+    };
+    const result = await auditFigureStorage({ sql, storage, limit: 10, env: GC });
+    expect(result.skippedChanged).toBe(1);
+    expect((await sql<{ n: number }[]>`select count(*)::int as n from document_assets where document_id = 'doc-a'`)[0]!.n).toBe(before);
+    expect([...storage.objects.keys()].filter((key) => key.includes("/doc-a/")).length).toBe(objectsBefore);
+    expect((await sql`select assets_current from document_extraction_levels where document_id = 'doc-a'`)[0]).toEqual({ assets_current: true });
+  });
+
+  it("R2-H1: a non-current level revived during the pass is left alone", async () => {
+    const storage = memoryStorage();
+    await partialPass(storage);
+    for (const value of storage.objects.values()) value.at = OLD();
+    await sql`update document_extraction_levels set assets_current = false, updated_at = now() - interval '2 days' where document_id = 'doc-a'`;
+    const list = storage.listKeys;
+    storage.listKeys = async (args) => {
+      await sql`update document_extraction_levels set assets_current = true, updated_at = now() where document_id = 'doc-a'`;
+      return await list(args);
+    };
+    await auditFigureStorage({ sql, storage, limit: 10, env: GC });
+    expect(storage.deletes).toEqual([]);
+    expect((await sql<{ n: number }[]>`select count(*)::int as n from document_assets where document_id = 'doc-a'`)[0]!.n).toBeGreaterThan(0);
+  });
+
+  it("R2-H1 (b): retention resets the run's extract-markdown checkpoint and figure slots, so a retry re-extracts; pii_blocked documents expire too", async () => {
+    const storage = memoryStorage();
+    await partialPass(storage);
+    for (const value of storage.objects.values()) value.at = new Date(Date.now() - FIGURE_FAILED_RETENTION_MS - 60_000);
+    await sql`update project_runs set artifacts = '{"doc-a:doppler-figure:p1.1":"s3://b/x","doc-a:doppler-figures":"s3://b/y","doc-a:markdown":"s3://b/m"}'::jsonb where id = 'run-a'`;
+    await sql`insert into document_run_stage_states (run_id, document_id, stage_name, status) values ('run-a', 'doc-a', 'extract-markdown', 'completed'), ('run-a', 'doc-a', 'embed', 'failed')
+      on conflict do nothing`;
+    await sql`update documents set status = 'pii_blocked', updated_at = now() - interval '8 days' where id = 'doc-a'`;
+    try {
+      await auditFigureStorage({ sql, storage, limit: 10, env: GC });
+      expect([...storage.objects.keys()].filter((key) => key.includes("/doc-a/"))).toEqual([]);
+      expect((await sql<{ n: number }[]>`select count(*)::int as n from document_assets where document_id = 'doc-a'`)[0]!.n).toBe(0);
+      // The level leaves the audit set: none, current, no bytes.
+      expect((await sql`select images_status, assets_current, asset_bytes::int as b from document_extraction_levels where document_id = 'doc-a'`)[0]).toEqual({ images_status: "none", assets_current: true, b: 0 });
+      expect(await sql`select stage_name from document_run_stage_states where run_id = 'run-a' and document_id = 'doc-a' order by stage_name`).toEqual([{ stage_name: "embed" }]);
+      const [run] = await sql<{ artifacts: Record<string, string> }[]>`select artifacts from project_runs where id = 'run-a'`;
+      expect(run!.artifacts).toEqual({ "doc-a:markdown": "s3://b/m" });
+    } finally {
+      await sql`delete from document_run_stage_states where run_id = 'run-a'`;
+    }
+  });
+
+  it("R2-M1: documents whose figure step never ran are not in the audit set; the selection can use the partial index", async () => {
+    const storage = memoryStorage();
+    await partialPass(storage);
+    // A document with a level but no figures (a non-PDF, figures off): current, no bytes.
+    await sql`insert into document_extraction_levels (document_id, org_id, project_id, run_id, markdown_complete, images_status, assets_current)
+      values ('doc-a2', 'org-a', 'proj-a', 'run-a', true, 'none', true)`;
+    const result = await auditFigureStorage({ sql, storage, limit: 10 });
+    expect(result.documents).toBe(1);
+    await sql.begin(async (tx) => {
+      await tx`set local enable_seqscan = off`;
+      const plan = (await tx.unsafe(`explain select * from document_extraction_levels where asset_bytes > 0 or assets_pending > 0 or not assets_current
+        order by audited_at nulls first, document_id limit 50`)).map((r) => Object.values(r)[0]).join("\n");
+      expect(plan).toContain("document_extraction_levels_audit_idx");
+    });
+  });
+
+  it("R2-M3: failures count per unit: a unit at three failures is skipped, the others still resume", async () => {
+    const storage = memoryStorage();
+    await gapPass(storage, [{ first: 2, last: 2 }, { first: 3, last: 3 }]);
+    await sql`update document_extraction_levels set resume_unit_failures = '{"2-2": 3}'::jsonb where document_id = 'doc-a'`;
+    await due();
+    const { provider, jobs } = gapProvider();
+    await runFigureResumes({ sql, storage, provider, workerId: "w1", env: ON });
+    expect(jobs.map((job) => job.pages)).toEqual([[3, 3]]);
+  });
+
+  it("R2 adversarial 4: a launch's timeout is capped at the organization's remaining daily budget, reserved, then settled", async () => {
+    const storage = memoryStorage();
+    await gapPass(storage, [{ first: 3, last: 3 }]);
+    await due();
+    // 115 of the 120 daily minutes used: 5 minutes left.
+    await sql`insert into figure_resume_org_days (org_id, day, launches, vm_ms) values ('org-a', (now() at time zone 'utc')::date, 1, ${115 * 60_000})`;
+    const { provider, jobs } = gapProvider();
+    await runFigureResumes({ sql, storage, provider, workerId: "w1", env: ON });
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0]!.timeoutMs).toBeLessThanOrEqual(5 * 60_000);
+    expect((await sql`select reserved_ms::int as r from figure_resume_org_days where org_id = 'org-a'`)[0]).toEqual({ r: 0 });
+  });
+
+  it("R2 adversarial 4: under a minute of daily budget left, the unit is deferred to the next UTC day: no VM, no failure", async () => {
+    const storage = memoryStorage();
+    await gapPass(storage, [{ first: 3, last: 3 }]);
+    await due();
+    await sql`insert into figure_resume_org_days (org_id, day, launches, vm_ms) values ('org-a', (now() at time zone 'utc')::date, 1, ${120 * 60_000 - 30_000})`;
+    const { provider, jobs } = gapProvider();
+    await runFigureResumes({ sql, storage, provider, workerId: "w1", env: ON });
+    expect(jobs).toEqual([]);
+    const [row] = await sql<{ later: boolean; failures: number; launches: number }[]>`
+      select resume_after > now() as later, resume_failures as failures, resume_vm_launches as launches from document_extraction_levels where document_id = 'doc-a'`;
+    expect(row).toEqual({ later: true, failures: 0, launches: 0 });
+  });
+
+  it("R2-L5: a range resume that comes back in another shape is refused before anything is uploaded", async () => {
+    const storage = memoryStorage();
+    await gapPass(storage, [{ first: 2, last: 3 }]);
+    await due();
+    const before = new Set(storage.objects.keys());
+    const { provider } = gapProvider({ split: true });
+    await runFigureResumes({ sql, storage, provider, workerId: "w1", env: ON });
+    expect([...storage.objects.keys()].filter((key) => !before.has(key))).toEqual([]);
+    expect(await level()).toMatchObject({ resume_blocked: "refused" });
+  });
+
+  it("R2 adversarial 5: a runner write with a lease that is no longer the document's lands nothing (stale-write)", async () => {
+    const storage = memoryStorage();
+    await partialPass(storage);
+    await sql`update document_extraction_levels set resume_lease_owner = 'w2:aaaaaaaa', resume_lease_until = now() + interval '1 hour' where document_id = 'doc-a'`;
+    const write = ledgerWriteForNoFiguresForTest();
+    await expect(writeDocumentAssetLedger(sql, { scope: { ...scopeOf("doc-a"), lease: "w1:bbbbbbbb" }, ...write })).rejects.toMatchObject({ rule: "stale-write" });
+  });
+
+  it("R2-L1: a crash between a resume's ledger commit and its slot update is repaired (claim or audit)", async () => {
+    const storage = memoryStorage();
+    await partialPass(storage);
+    await due();
+    const { provider } = fakeProvider();
+    await runFigureResumes({ sql, storage, provider, workerId: "w1", env: ON });
+    await sql`update project_runs set artifacts = artifacts - 'doc-a:doppler-figure:p3.2' where id = 'run-a'`;
+    const result = await auditFigureStorage({ sql, storage, limit: 10, env: GC });
+    expect(result.slotsRepaired).toBeGreaterThanOrEqual(1);
+    const [run] = await sql<{ artifacts: Record<string, string> }[]>`select artifacts from project_runs where id = 'run-a'`;
+    expect(run!.artifacts["doc-a:doppler-figure:p3.2"]).toBe(`s3://b/${P32}`);
+  });
+});
+
+function ledgerWriteForNoFiguresForTest() {
+  return { level: { imagesStatus: "failed" as const, imagesExitCode: null, manifestVersion: null, dopplerBuild: null, run: null, manifest: null, markdownComplete: true }, assets: [], levelOnly: true };
+}

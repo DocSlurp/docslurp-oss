@@ -3662,6 +3662,7 @@ export const documentExtractionLevels = pgTable("document_extraction_levels", {
   resumeFailures: integer("resume_failures").default(0).notNull(),
   // Lifetime resume VM launches (reset only by a new run) and the audit cursor.
   resumeVmLaunches: integer("resume_vm_launches").default(0).notNull(),
+  resumeUnitFailures: jsonb("resume_unit_failures").default({}).notNull(),
   auditedAt: timestamp("audited_at", { withTimezone: true, mode: "string" }),
   gaps: jsonb(),
   shards: integer().default(0).notNull(),
@@ -3689,6 +3690,7 @@ export const figureResumeOrgDays = pgTable("figure_resume_org_days", {
   day: date().notNull(),
   launches: integer().default(0).notNull(),
   vmMs: bigint("vm_ms", { mode: "number" }).default(0).notNull(),
+  reservedMs: bigint("reserved_ms", { mode: "number" }).default(0).notNull(),
 }, (table) => [primaryKey({ columns: [table.orgId, table.day], name: "figure_resume_org_days_pkey" })]);
 
 /** Migration 0148: applied figure resume proposals (single-use chat tokens). */

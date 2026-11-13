@@ -8,7 +8,7 @@ import { acquireChatSlot } from "../middleware/chat-concurrency.js";
 import { proposeProjectSettings, SettingsProposalError } from "./project-settings-proposals.js";
 import { FigureResumeProposalError, proposeFigureResume } from "./figure-resume-proposals.js";
 import { countResumableFigureDocuments } from "./figure-resume.js";
-import { figureResumeProposalInputSchema, projectFigureResumeMode } from "@docslurp/shared";
+import { figureResumeChatEnabled, figureResumeProposalInputSchema, projectFigureResumeMode } from "@docslurp/shared";
 import { publicErrorMiddleware } from "../lib/public-errors.js";
 import { apiErrorResponse, apiStatusError, usesNativeErrorEnvelope } from "../lib/api-error.js";
 import { mapValidationIssues, type ValidationErrorSource } from "../lib/validation.js";
@@ -126,9 +126,10 @@ const mcpAdapterRoutes = new Hono()
         pipeline: Object.fromEntries(Object.keys(projectSettingsPipelinePatchSchema.shape).map(key => [key, key === "mediaVideo" ? { enabled: project.pipeline.mediaVideo?.enabled !== false }
           : project.pipeline[key as keyof typeof project.pipeline]])),
         chat: settings.chat, retrieval: settings.retrievalDefaults,
-        // Figures a processing pass left out that a resume could finish (proposeFigureResume), and the project's mode.
-        figures: { resumeMode: projectFigureResumeMode(project.pipeline),
-          resumableDocuments: project.orgId ? await countResumableFigureDocuments({ orgId: project.orgId, projectId: project.id }) : 0 } });
+        // Figures a processing pass left out that a resume could finish (proposeFigureResume), and the project's mode;
+        // only while the chat's resume offer is on (R2-M5).
+        ...(figureResumeChatEnabled() ? { figures: { resumeMode: projectFigureResumeMode(project.pipeline),
+          resumableDocuments: project.orgId ? await countResumableFigureDocuments({ orgId: project.orgId, projectId: project.id }) : 0 } } : {}) });
     }
 
     if (toolId === "proposeProjectSettings") {
@@ -148,6 +149,7 @@ const mcpAdapterRoutes = new Hono()
     }
 
     if (toolId === "proposeFigureResume") {
+      if (!figureResumeChatEnabled()) return adapterError(c, 404, "Unknown MCP tool");
       const parsed = figureResumeProposalInputSchema.safeParse(body);
       if (!parsed.success) return invalidInput(c, parsed.error);
       const sessionId = currentChatSessionId();

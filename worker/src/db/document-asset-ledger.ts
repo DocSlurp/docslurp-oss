@@ -30,6 +30,11 @@ export interface DocumentAssetLedgerScope {
   documentId: string;
   /** The run that wrote them: it must be the document's current run, of the same organization and project. */
   runId: string;
+  /**
+   * The figure resume runner's lease token (migration 0148): when set, the write lands only while the document's resume
+   * lease is still this one (a runner that lost its lease writes nothing: `stale-write`).
+   */
+  lease?: string;
 }
 
 export interface DocumentExtractionLevelInput {
@@ -115,7 +120,8 @@ const BATCH = 1000;
 
 function assertScope(scope: DocumentAssetLedgerScope): void {
   if (!scope || typeof scope.orgId !== "string" || !ID.test(scope.orgId) || typeof scope.projectId !== "string" || !ID.test(scope.projectId) ||
-      typeof scope.documentId !== "string" || !DOCUMENT_ID.test(scope.documentId) || typeof scope.runId !== "string" || !ID.test(scope.runId)) {
+      typeof scope.documentId !== "string" || !DOCUMENT_ID.test(scope.documentId) || typeof scope.runId !== "string" || !ID.test(scope.runId) ||
+      (scope.lease !== undefined && (typeof scope.lease !== "string" || scope.lease.length < 8 || scope.lease.length > 128))) {
     throw new DocumentAssetLedgerError("invalid-scope");
   }
 }
@@ -257,6 +263,7 @@ export async function writeDocumentAssetLedger(sql: Sql<Record<string, unknown>>
   return await sql.begin(async (tx) => {
     // Serialize writers of one document (a re-run racing a resume), then check the scope against the document itself.
     await tx`select pg_advisory_xact_lock(hashtext(${`document-assets:${documentId}`}))`;
+    await checkLease(tx, write.scope);
     const [document] = await tx<{ user_id: string; run_id: string | null }[]>`
       select user_id, run_id from documents where id = ${documentId} and org_id = ${orgId} and project_id = ${projectId} for key share`;
     if (!document) throw new DocumentAssetLedgerError("scope-mismatch");
@@ -828,9 +835,19 @@ type Tx = import("postgres").TransactionSql<Record<string, unknown>>;
  * and the run against the document's current run, not older than the level's writer (else `stale-write`, the same rule as
  * writeDocumentAssetLedger). Returns the document's artifact root.
  */
+/** A runner write (scope.lease) lands only while the document's resume lease is that token (R2 adversarial 5). */
+async function checkLease(tx: Tx, scope: DocumentAssetLedgerScope): Promise<void> {
+  if (scope.lease === undefined) return;
+  const [held] = await tx<{ ok: boolean }[]>`
+    select (resume_lease_owner = ${scope.lease} and resume_lease_until > now()) as ok from document_extraction_levels
+    where document_id = ${scope.documentId} and org_id = ${scope.orgId}`;
+  if (!held?.ok) throw new DocumentAssetLedgerError("stale-write");
+}
+
 async function lockAndCheck(tx: Tx, scope: DocumentAssetLedgerScope): Promise<{ root: string; level: { run_id: string | null } | undefined }> {
   const { orgId, projectId, documentId, runId } = scope;
   await tx`select pg_advisory_xact_lock(hashtext(${`document-assets:${documentId}`}))`;
+  await checkLease(tx, scope);
   const [document] = await tx<{ user_id: string; run_id: string | null }[]>`
     select user_id, run_id from documents where id = ${documentId} and org_id = ${orgId} and project_id = ${projectId} for key share`;
   if (!document) throw new DocumentAssetLedgerError("scope-mismatch");
@@ -1194,10 +1211,12 @@ export function figureLedgerHooks(
     run: { id: string; orgId: string | null; projectId?: string | null };
   },
   documentId: string,
+  /** The resume runner's lease token: every hook write is fenced by it. */
+  lease?: string,
 ): DopplerFigureLedgerHooks | undefined {
   const store = state.store;
   if (!store?.markAssetsPending || !store.markAssetsStored || !state.run.orgId || !state.run.projectId) return undefined;
-  const scope = { orgId: state.run.orgId, projectId: state.run.projectId, documentId, runId: state.run.id };
+  const scope = { orgId: state.run.orgId, projectId: state.run.projectId, documentId, runId: state.run.id, ...(lease ? { lease } : {}) };
   return {
     pending: async (rows) => { await store.markAssetsPending!({ scope, rows }); },
     stored: async (files) => { await store.markAssetsStored!({ scope, files }); },
@@ -1302,6 +1321,7 @@ export function resumeRunChangeSql(tx: Sql<Record<string, unknown>> | Tx) {
     resume_lease_owner = case when ${changed} then null else document_extraction_levels.resume_lease_owner end,
     resume_failures = case when ${changed} then 0 else document_extraction_levels.resume_failures end,
     resume_vm_launches = case when ${changed} then 0 else document_extraction_levels.resume_vm_launches end,
+    resume_unit_failures = case when ${changed} then '{}'::jsonb else document_extraction_levels.resume_unit_failures end,
     resume_blocked = case when ${changed} then null else document_extraction_levels.resume_blocked end`;
 }
 

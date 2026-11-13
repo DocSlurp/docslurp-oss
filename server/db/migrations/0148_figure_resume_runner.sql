@@ -53,3 +53,10 @@ CREATE TABLE IF NOT EXISTS figure_resume_proposal_uses (
 );
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS figure_resume_proposal_uses_used_idx ON figure_resume_proposal_uses (used_at);
+--> statement-breakpoint
+-- Failed attempts per resume unit (R2-M3): `{"<first>-<last>" | "doc": n}`. A unit is skipped at
+-- FIGURE_RESUME_LIMITS.maxAttempts; one failing shard never blocks the others. Reset with the run, like the counters above.
+ALTER TABLE document_extraction_levels ADD COLUMN IF NOT EXISTS resume_unit_failures jsonb NOT NULL DEFAULT '{}'::jsonb;
+--> statement-breakpoint
+-- Resume VM time reserved at launch (the unit's capped timeout), settled to the real time when the VM returns (R2 adversarial 4).
+ALTER TABLE figure_resume_org_days ADD COLUMN IF NOT EXISTS reserved_ms bigint NOT NULL DEFAULT 0 CHECK (reserved_ms >= 0);

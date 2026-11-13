@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { dynamicTool, jsonSchema, type ToolSet } from "ai";
-import { figureResumeProposalSchema, projectSettingsProposalSchema, type FigureResumeProposal, type ProjectSettingsProposal, CHAT_AGENT_LIMIT_DEFAULTS, CHAT_MAX_RETRIEVED_PASSAGES, searchResultSchema, type SearchResult, type ProjectSearchRetrievalDefaults } from "@docslurp/shared";
+import { figureResumeChatEnabled, figureResumeProposalSchema, projectSettingsProposalSchema, type FigureResumeProposal, type ProjectSettingsProposal, CHAT_AGENT_LIMIT_DEFAULTS, CHAT_MAX_RETRIEVED_PASSAGES, searchResultSchema, type SearchResult, type ProjectSearchRetrievalDefaults } from "@docslurp/shared";
 import type { WebToolActivity } from "@docslurp/shared/project-chat-ui";
 import { startTelemetrySpan, type TelemetrySpan } from "@docslurp/shared/observability";
 import type { McpDispatch, McpManifest } from "../lib/mcp-http.js";
@@ -490,6 +490,7 @@ export function createChatMcpTools(args: {
   }
 
   const offered = (id: string) => !CHAT_EXCLUDED_TOOLS.has(id)
+    && (id !== "proposeFigureResume" || figureResumeChatEnabled())
     && (args.settingsTools === true || !CHAT_SETTINGS_TOOLS.has(id))
     && (args.publicClient !== true || !CHAT_PUBLIC_CLIENT_EXCLUDED_TOOLS.has(id)) && (!id.startsWith("web") || (args.webTools === true && CHAT_WEB_TOOLS.has(id)));
   for (const definition of args.manifest.capabilities.filter(item => item.category === "tool" && offered(item.id))) {
