@@ -123,12 +123,13 @@ export function chartExportCallEstimate(
 
 /** Chart export settings an estimate prices (modes default to `FORMAT_MODE`, chart-export/config.ts). */
 export interface ChartExportEstimateOptions {
-  config: Pick<ChartExportConfig, "enabled" | "formats" | "diagrams">;
+  config: Pick<ChartExportConfig, "tier" | "formats" | "diagrams">;
   modes?: Record<ChartExportFormat, "derived" | "direct">;
 }
 
 function chartExportFor(role: AssignmentRole, options: ChartExportEstimateOptions | undefined): ChartExportCallEstimate | null {
-  if (!options?.config.enabled) return null;
+  // Only the billed `models` tier calls a generator; free and off add no model output.
+  if (options?.config.tier !== "models") return null;
   if (role === "chart-data") return chartExportCallEstimate("chart", options.config, options.modes ?? FORMAT_MODE);
   if (role === "diagram" && options.config.diagrams) return chartExportCallEstimate("diagram", options.config, options.modes ?? FORMAT_MODE);
   return null;

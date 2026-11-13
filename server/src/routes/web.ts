@@ -1,4 +1,5 @@
 import { zValidator } from "@hono/zod-validator";
+import { runOriginOf } from "../lib/run-origin.js";
 import { Hono, type Context } from "hono";
 
 import { apiStatusError, nativeApiErrors } from "../lib/api-error.js";
@@ -9,7 +10,7 @@ import { apiKeyCanUseWebTools } from "../lib/web-tool-access.js";
 import { assertCanSpend, spendAwareErrorHandler } from "../services/billing/spend-guard.js";
 import { ProjectIntakeError } from "../services/project-intake.js";
 import { validationHook } from "../lib/validation.js";
-import { createWebsiteProjectIntake } from "../services/project-intake-actions.js";
+import { assertIntakeChartExportTier, createWebsiteProjectIntake } from "../services/project-intake-actions.js";
 import { runCreationErrorResponse, projectIntakeErrorResponse } from "./uploads.js";
 import { ingestWebsiteInput, webCrawlInput, webFetchInput, webMapInput, webSearchInput, type WebCrawlRequest } from "../services/web/schemas.js";
 import { runWebCapability, type WebSurface } from "../services/web/service.js";
@@ -88,6 +89,8 @@ function createWebRoutes(surface: WebSurface) {
       return apiStatusError(c, 403, "Project-scoped API keys cannot create new projects", { code: "project_scope_forbidden" });
     }
     try {
+      // Refused before any paid crawl, with the same code as uploads (400 chart_export_tier_unavailable).
+      assertIntakeChartExportTier(body.chartExport?.tier, "web ingest");
       // Preflight before any paid crawl: the target must exist and be usable, or be a
       // new name the actor may create; spend must allow the ingest run that follows.
       const lookup = await lookupActorProject(actor, body.project?.trim() || null);
@@ -108,6 +111,9 @@ function createWebRoutes(surface: WebSurface) {
         project: body.project?.trim() || (restricted ? scope.id : null),
         newProject: body.newProject,
         allowedProjectIds: restricted && actor.type === "apiKey" ? actor.apiKey.projectIds! : null,
+        origin: runOriginOf(c),
+        apiKeyId: actor.type === "apiKey" ? actor.apiKey.keyId : null,
+        ...(body.chartExport ? { pipeline: { chartExport: body.chartExport } } : {}),
         tags: body.tags,
         startUrl: body.url,
         crawlOptions: { limit: body.limit, maxDepth: body.maxDepth, includePaths: body.includePaths ?? null, excludePaths: body.excludePaths ?? null },

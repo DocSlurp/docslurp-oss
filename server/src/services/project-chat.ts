@@ -54,6 +54,7 @@ import { sql } from "../db.js";
 import { loadChatProjectInventory } from "./chat-project-inventory.js";
 import { loadChatVisualCandidates } from "./visual-candidates.js";
 import { chartExportEnabledOnServer } from "./chart-export-availability.js";
+import { chartExportDefaults, effectiveTierFromDefaults, type ChartExportTier } from "@docslurp/shared";
 import { classifyUntrustedEvidenceText, logInjectionIndicators } from "./prompt-injection.js";
 import {
   hybridSearch,
@@ -1302,8 +1303,9 @@ async function chatProjectTurn(
     // decide relevance, and the model applies the fixed core rule (decline
     // unrelated requests politely and suggest related ones).
     const suggestionsRequested = firstPartyApp && args.agent?.suggestions === true;
-    const chartExportEnabled = (project.pipeline as { chartExport?: { enabled?: unknown } } | null)?.chartExport?.enabled === true;
-    // Deployment kill switch off: chart export is never suggested (and the candidate query is skipped).
+    // Suggestions offer the billed `models` tier (the free tier is on by default): only projects not already on it.
+    const chartExportEnabled = (project.pipeline as { chartExport?: { tier?: unknown } } | null)?.chartExport?.tier === "models";
+    // Deployment kill switch not `on`: reading charts with a model is never suggested (and the candidate query is skipped).
     const chartExportOffered = chartExportEnabledOnServer();
     const [{ runChatMcpAgent }, projectInventory, visualCandidates] = await Promise.all([
       import("./chat-mcp-agent.js"),
@@ -1326,7 +1328,13 @@ async function chatProjectTurn(
       projectWebTools: (project.pipeline as { webTools?: unknown } | null)?.webTools !== false,
       web: args.agent?.web, suggestions: firstPartyApp && args.agent?.suggestions === true,
       retrievalDefaults: searchSettings.retrievalDefaults, projectInventory,
-      ...(chartExportOffered ? { chartExport: { enabled: chartExportEnabled, unexportedVisuals: visualCandidates?.unexported ?? null } } : {}),
+      ...(chartExportOffered ? { chartExport: {
+        enabled: chartExportEnabled,
+        unexportedVisuals: visualCandidates?.unexported ?? null,
+        // The deployment's real app default (production holds it off), never a code default.
+        effectiveTier: effectiveTierFromDefaults((project.pipeline as { chartExport?: { tier?: ChartExportTier } } | null)?.chartExport?.tier, "app", chartExportDefaults(process.env)),
+        freeAvailable: chartExportDefaults(process.env).freeAvailable,
+      } } : {}),
       instructionsFor: ({ webTools }) => composeAgentProjectInstructions({
         ingestInstructions: project.systemPrompt,
         searchInstructions: searchSettings.chat.searchInstructions,

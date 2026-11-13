@@ -1,3 +1,4 @@
+import { CHART_EXPORT_OVERRIDE_DESCRIPTION, chartExportOverrideSchema } from "@docslurp/shared";
 import { z } from "zod";
 
 const httpUrl = z.url().max(2_048).refine((url) => /^https?:\/\//i.test(url), "Use HTTP or HTTPS URLs");
@@ -51,6 +52,8 @@ export const ingestWebsiteInput = webCrawlInput.omit({ maxCharacters: true, proj
   project: z.string().min(1).max(256).optional().describe("Project ID, slug or name to ingest into. A name that matches no project creates it. Omit for the default project."),
   newProject: z.boolean().optional().describe("Without project: ingest into a fresh self-titled project."),
   tags: z.array(z.string().trim().min(1).max(64)).max(20).optional(),
+  /** The same per-request chart export override uploads take (`{ tier }`); refused when the deployment does not offer it. */
+  chartExport: chartExportOverrideSchema.optional().describe(CHART_EXPORT_OVERRIDE_DESCRIPTION),
 }).strict();
 
 export type WebSearchRequest = z.infer<typeof webSearchInput>;

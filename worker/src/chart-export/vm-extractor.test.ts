@@ -212,9 +212,47 @@ describe("VM deterministic extractor adapter", () => {
       "[chart-export] parser VM skipped document=d1 kind=office reason=no-chart-signal",
       "[chart-export] parser VM skipped document=d2 kind=html reason=no-chart-signal",
     ]);
-    expect(sourceRunReason("svg", {})).toBe("standalone-document");
+    // A file type alone never boots the VM (council M1): standalone SVG and JSON need a candidate or an embed hint.
+    expect(sourceRunReason("svg", {})).toBeNull();
+    expect(sourceRunReason("json", {})).toBeNull();
+    expect(sourceRunReason("json", { candidates: 0, htmlEmbedHints: false })).toBeNull();
+    expect(sourceRunReason("svg", { candidates: 2 })).toBe("candidates");
+    expect(sourceRunReason("json", { htmlEmbedHints: true })).toBe("embed-hints");
     expect(sourceRunReason("html", { candidates: 1 })).toBe("candidates");
     expect(sourceRunReason("epub", { htmlEmbedHints: true })).toBe("embed-hints");
+  });
+
+  it("boots no parser VM for a tiny standalone JSON or SVG with no signal (the explicit-free abuse case)", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    const store = storage({ "src/a.json": "{}", "src/b.svg": "<svg/>" });
+    const run = vi.fn();
+    const logs: string[] = [];
+    const usage: unknown[] = [];
+    const extract = createVmDeterministicVisualExtractor({ runner: { run }, storage: store, log: (m) => logs.push(m) });
+    for (const [id, mimeType, key] of [["j", "application/json", "src/a.json"], ["s", "image/svg+xml", "src/b.svg"]] as const) {
+      await extract({ document: { id, mimeType, pageCount: 1, sourceKey: key }, candidates: [], artifacts: { dopplerFiguresIndexUri: null, mediaMapUri: null }, signals: { candidates: 0 }, recordUsage: (event) => usage.push(event) });
+    }
+    expect(run).not.toHaveBeenCalled();
+    expect(store.downloads).toEqual([]);
+    expect(usage).toEqual([]);
+    expect(logs).toEqual([
+      "[chart-export] parser VM skipped document=j kind=json reason=no-chart-signal",
+      "[chart-export] parser VM skipped document=s kind=svg reason=no-chart-signal",
+    ]);
+  });
+
+  it("boots no parser VM when the org's free VM cap refuses the document, asking once", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    const store = storage({ "src/deck.pptx": pptx([[1, slideChart]]) });
+    const run = vi.fn();
+    const logs: string[] = [];
+    const admitVmRun = vi.fn(async () => false);
+    const extract = createVmDeterministicVisualExtractor({ runner: { run }, storage: store, log: (m) => logs.push(m) });
+    const result = await extract({ document: { id: "d1", mimeType: PPTX, pageCount: 1, sourceKey: "src/deck.pptx" }, candidates: [], artifacts: { dopplerFiguresIndexUri: null, mediaMapUri: null }, signals: { officeChartParts: 1 }, admitVmRun });
+    expect(run).not.toHaveBeenCalled();
+    expect(admitVmRun).toHaveBeenCalledTimes(1);
+    expect(result.partials).toEqual([]);
+    expect(logs).toContain("[chart-export] parser VM skipped document=d1 reason=org-free-vm-cap");
   });
 
   it("counts refused chart parts as present", () => {
