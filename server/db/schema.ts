@@ -211,6 +211,33 @@ export const projectCorpusStats = pgTable(
   ],
 );
 
+/**
+ * Search-session and chat-turn counters per project (0160), maintained by triggers on search_sessions, chat_turns
+ * and chat_sessions. Up to 8 rows per project (one per writer slot); a read sums them.
+ */
+export const projectActivityStats = pgTable(
+  "project_activity_stats",
+  {
+    projectId: text("project_id").notNull(),
+    slot: smallint().notNull(),
+    searchSessions: bigint("search_sessions", { mode: "number" }).default(0).notNull(),
+    searchResultCount: bigint("search_result_count", { mode: "number" }).default(0).notNull(),
+    zeroResultSearches: bigint("zero_result_searches", { mode: "number" }).default(0).notNull(),
+    searchDurationCount: bigint("search_duration_count", { mode: "number" }).default(0).notNull(),
+    searchDurationMs: numeric("search_duration_ms").default("0").notNull(),
+    chatTurns: bigint("chat_turns", { mode: "number" }).default(0).notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.projectId, table.slot], name: "project_activity_stats_pkey" }),
+    foreignKey({
+      columns: [table.projectId],
+      foreignColumns: [projects.id],
+      name: "project_activity_stats_project_id_fkey",
+    }).onDelete("cascade"),
+    check("project_activity_stats_slot_check", sql`slot >= 0 AND slot < 8`),
+  ],
+);
+
 /** Worker-recorded webhook events, drained and signed by the API. */
 export const webhookOutbox = pgTable(
   "webhook_outbox",
