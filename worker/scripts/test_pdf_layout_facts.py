@@ -762,8 +762,6 @@ def random_tree(rng, depth=0, budget=None):
         budget[0] -= 1
         return 'P'
     kids = [random_tree(rng, depth + 1, budget) for _ in range(rng.randint(0 if depth else 1, 6))]
-    if rng.random() < 0.1:
-        kids.insert(rng.randint(0, len(kids)), rng.choice(['null', 'free']))
     spec = {'kids': kids, 'count': rng.choice(['auto', 'auto', 'auto', None, '2.0', '/Seven'])}
     if rng.random() < 0.3:
         spec['extra'] = rng.choice(['/Rotate 90', '/MediaBox [0 0 500 700]', '/CropBox [10 10 90 200] /Rotate 270'])
@@ -792,6 +790,8 @@ class PageIndexTest(Scratch):
             data = TreeBuilder().build(random_tree(rng))
             path = self.write(data, f'tree-{case}.pdf')
             index = facts.page_index(path)
+            if isinstance(index, facts.Unknown) and str(index) == 'no-pages':   # a tree of empty nodes
+                continue
             self.assertIsInstance(index, facts.PageIndex, case)
             index = facts.PageIndex.loads(index.dumps())
             file = facts.PdfFile(path)
@@ -833,9 +833,9 @@ class PageIndexTest(Scratch):
             data = TreeBuilder().build({'kids': [{'kids': ['P', 'P', 'P'], 'count': ignored}, 'P', 'P']})
             walks = self.walk(data, 4, 5)
             self.assertEqual({n: w.width for n, w in walks.items()}, {4: 104.0, 5: 105.0})
-        # The root's /Count is the document's page count, not a position: not checked.
-        walks = self.walk(TreeBuilder().build({'kids': ['P', 'P'], 'count': 7}), 1, 9)
-        self.assertEqual(sorted(walks), [1, 2])
+        # The root's /Count is the document's page count: renderers stop there, so it must agree too.
+        self.assert_unknown(TreeBuilder().build({'kids': ['P', 'P'], 'count': 7}), 'page-tree-count')
+        self.assertEqual(sorted(self.walk(TreeBuilder().build({'kids': ['P', 'P'], 'count': '/Seven'}), 1, 9)), [1, 2])
 
     def test_shared_kids_and_cycles_fail_closed(self):
         page = '<< /Type /Page /MediaBox [0 0 100 100] >>'
@@ -865,9 +865,14 @@ class PageIndexTest(Scratch):
             self.assert_unknown(TreeBuilder().build({'kids': ['P'] * 60}), 'tree-size')
         finally:
             facts.MAX_TREE_NODES = original
-        # A kid that is not a dictionary (null, a free object, a number) takes no page number, as before.
-        walks = self.walk(TreeBuilder().build({'kids': ['P', 'null', 'free', {'kids': ['free', 'P']}, 'P']}), 1, 5)
-        self.assertEqual({n: w.width for n, w in walks.items()}, {1: 101.0, 2: 102.0, 3: 103.0})
+        # A kid that is not a dictionary (null, a free object), or a /Pages node without a Kids array: renderers disagree
+        # on whether it takes a page number, so the tree fails closed rather than guess.
+        for kids in (['P', 'null', 'P'], ['P', 'free', 'P'], ['P', {'kids': ['free', 'P']}, 'P']):
+            self.assert_unknown(TreeBuilder().build({'kids': kids}), 'page-tree-kid')
+        page = '<< /Type /Page /MediaBox [0 0 100 100] >>'
+        for odd in ('<< /Type /Pages /Count 1 >>', '<< /Type /Pages /Kids 7 /Count 1 >>', '42'):
+            data = raw_pdf({1: page, 2: odd, 3: page, 4: '<< /Type /Pages /Kids [1 0 R 2 0 R 3 0 R] >>'}, '4 0 R')
+            self.assert_unknown(data, 'page-tree-kid')
         # A kid whose object is broken makes the whole tree unknown, wherever the chunk is.
         data = TreeBuilder().build({'kids': ['P', 'P', 'P']})
         broken = data.replace(b'2 0 obj', b'9 0 obj', 1)
@@ -882,7 +887,7 @@ class PageIndexTest(Scratch):
         path = self.write(raw_pdf(objects, f'{pages + 1} 0 R'))
         index = facts.page_index(path)
         self.assertEqual(index.pages, pages)
-        self.assertLess(len(index.dumps()), 100_000)
+        self.assertLess(len(index.dumps()), 150_000)
         loads = []
         original = facts.PdfFile.load
 
@@ -912,10 +917,11 @@ class PageIndexTest(Scratch):
         self.assertEqual(facts.PageIndex.loads(blob).pages, 3)
         header = facts.PageIndex.HEADER
         bad = [blob[:-1], blob + b'\0', b'X' + blob[1:], b'', blob[:header.size]]
-        # parent not before its child; leaf parent out of range; negative slot
+        # parent not before its child; a slot past its parent's Kids; leaf parent out of range; negative slot; bad object
         magic, size, root, nodes, n = header.unpack_from(blob)
         body = bytearray(blob[header.size:])
-        for offset, value in ((4 * 1, 1), (4 * (2 * nodes), nodes), (4 * (2 * nodes + n), -2)):
+        for offset, value in ((4 * 1, 1), (4 * (nodes + 1), 9), (4 * (3 * nodes), nodes), (4 * (3 * nodes + n), -2),
+                              (4 * (3 * nodes + 2 * n), -5)):
             changed = bytearray(body)
             changed[offset:offset + 4] = value.to_bytes(4, 'little', signed=True)
             bad.append(blob[:header.size] + bytes(changed))
@@ -929,10 +935,22 @@ class PageIndexTest(Scratch):
             facts.walk_document(other, 1, 3, index=index)
         self.assertEqual(str(caught.exception), 'page-index')
         # A path that no longer matches the tree (a slot off the end, a page where a node should be) is refused.
-        moved = facts.PageIndex(index.size, index.root, index.node_parent, index.node_slot, index.leaf_parent,
-                                facts.array.array('i', [0, 7, 1]))
+        moved = facts.PageIndex(index.size, index.root, index.node_parent, index.node_slot, index.node_kids, index.leaf_parent,
+                                facts.array.array('i', [0, 7, 1]), index.leaf_object)
         with self.assertRaises(facts.Unknown):
             facts.walk_document(path, 1, 3, index=moved)
+        # Another file of the same size and page-tree root, whose pages sit elsewhere: the recorded Kids lengths and page
+        # objects do not match, so its walk fails closed instead of naming another page (council #395 adversarial M1).
+        a = TreeBuilder().build({'kids': [{'kids': ['P', 'P']}, {'kids': ['P', 'P']}]})
+        b = TreeBuilder().build({'kids': [{'kids': ['P', 'P', 'P']}, {'kids': ['P']}]})
+        a, b = a + b' ' * max(0, len(b) - len(a)), b + b' ' * max(0, len(a) - len(b))
+        a_index = facts.page_index(self.write(a, 'a.pdf'))
+        b_path = self.write(b, 'b.pdf')
+        self.assertEqual((a_index.size, a_index.root), (facts.page_index(b_path).size, facts.page_index(b_path).root))
+        for first, last in ((1, 3), (3, 3), (1, 1)):
+            with self.assertRaises(facts.Unknown) as caught:
+                facts.walk_document(b_path, first, last, index=a_index)
+            self.assertEqual(str(caught.exception), 'page-index')
         with self.assertRaises(facts.Unknown):
             facts.walk_document(path, 1, 3, index=facts.Unknown('page-tree-count'))
         with self.assertRaises(TypeError):
@@ -989,6 +1007,10 @@ class PageIndexTest(Scratch):
         page = '<< /Type /Page /MediaBox [0 0 100 100] >>'
         # Two nodes share one Kids array object of inline pages: 4 pages for 2, every /Count consistent.
         data = raw_pdf({1: f'[{page} {page}]', 2: '<< /Type /Pages /Kids 1 0 R /Count 2 >>',
+                        3: '<< /Type /Pages /Kids 1 0 R /Count 2 >>', 4: '<< /Type /Pages /Kids [2 0 R 3 0 R] /Count 4 >>'}, '4 0 R')
+        self.assert_unknown(data, 'page-tree-shared')
+        # The same array reached through a reference chain (Kids 5 0 R, object 5 is `1 0 R`): still one object twice.
+        data = raw_pdf({1: f'[{page} {page}]', 5: '1 0 R', 2: '<< /Type /Pages /Kids 5 0 R /Count 2 >>',
                         3: '<< /Type /Pages /Kids 1 0 R /Count 2 >>', 4: '<< /Type /Pages /Kids [2 0 R 3 0 R] /Count 4 >>'}, '4 0 R')
         self.assert_unknown(data, 'page-tree-shared')
         # One indirect Kids array, used once, is an ordinary tree.

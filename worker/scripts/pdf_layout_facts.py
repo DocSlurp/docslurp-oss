@@ -701,60 +701,65 @@ def _inherited(file, node, key, trail):
 
 
 class PageIndex:
-    """Where each page sits in the page tree, from one complete, checked walk (`page_index`), so a chunk reaches its pages
-    by their paths instead of walking every earlier page again.
+    """Where each page sits in the page tree, from one complete, checked walk (`build_page_index`), so a chunk reaches its
+    pages by their paths instead of walking every earlier page again.
 
-    Internal nodes are numbered in depth-first order, the root first: `node_parent[i]` (always < i; -1 for the root) and
-    `node_slot[i]` (its position in the parent's Kids). Page n is `leaf_parent[n - 1]`'s Kids entry `leaf_slot[n - 1]`
-    (both -1 when the root itself is the only page). Bound to its file by size and page-tree root object. A few int32
-    arrays: at most 1.6 MB for MAX_TREE_NODES."""
-    __slots__ = ('size', 'root', 'node_parent', 'node_slot', 'leaf_parent', 'leaf_slot')
-    MAGIC = b'DSPGIX1\n'
+    Internal nodes are numbered in depth-first order, the root first: `node_parent[i]` (always < i; -1 for the root),
+    `node_slot[i]` (its position in the parent's Kids) and `node_kids[i]` (the length of its Kids array). Page n is
+    `leaf_parent[n - 1]`'s Kids entry `leaf_slot[n - 1]`, object `leaf_object[n - 1]` (-1 for a direct dictionary); all
+    three are -1 when the root itself is the only page. Every one of these is checked again when a page is reached
+    (indexed_pages), so an index that is not this file's fails closed instead of naming another page. Bound to its file by
+    size and page-tree root object. A few int32 arrays: at most 2.4 MB for MAX_TREE_NODES."""
+    __slots__ = ('size', 'root', 'node_parent', 'node_slot', 'node_kids', 'leaf_parent', 'leaf_slot', 'leaf_object')
+    MAGIC = b'DSPGIX2\n'
     HEADER = struct.Struct('<8sQqII')
 
-    def __init__(self, size, root, node_parent, node_slot, leaf_parent, leaf_slot):
+    def __init__(self, size, root, node_parent, node_slot, node_kids, leaf_parent, leaf_slot, leaf_object):
         self.size, self.root = size, root
-        self.node_parent, self.node_slot, self.leaf_parent, self.leaf_slot = node_parent, node_slot, leaf_parent, leaf_slot
+        self.node_parent, self.node_slot, self.node_kids = node_parent, node_slot, node_kids
+        self.leaf_parent, self.leaf_slot, self.leaf_object = leaf_parent, leaf_slot, leaf_object
 
     @property
     def pages(self):
         return len(self.leaf_parent)
 
     def dumps(self):
-        arrays = (self.node_parent, self.node_slot, self.leaf_parent, self.leaf_slot)
+        arrays = (self.node_parent, self.node_slot, self.node_kids, self.leaf_parent, self.leaf_slot, self.leaf_object)
         body = b''.join(_le32(a) for a in arrays)
         return self.HEADER.pack(self.MAGIC, self.size, self.root, len(self.node_parent), len(self.leaf_parent)) + body
 
     @classmethod
     def loads(cls, data):
-        """Strict: ValueError for anything but a well-formed index (every parent before its child, depth and size in budget)."""
+        """Strict: ValueError for anything but a well-formed index (every parent before its child, each slot inside its
+        parent's Kids, depth and size in budget)."""
         if type(data) is not bytes or len(data) < cls.HEADER.size:
             raise ValueError('page index')
         magic, size, root, nodes, pages = cls.HEADER.unpack_from(data)
         if magic != cls.MAGIC or not 1 <= nodes <= MAX_TREE_NODES or not 1 <= pages <= MAX_TREE_NODES \
-                or len(data) != cls.HEADER.size + 4 * (2 * nodes + 2 * pages) or root < -1:
+                or len(data) != cls.HEADER.size + 4 * (3 * nodes + 3 * pages) or root < -1:
             raise ValueError('page index')
         arrays, offset = [], cls.HEADER.size
-        for n in (nodes, nodes, pages, pages):
+        for n in (nodes, nodes, nodes, pages, pages, pages):
             arrays.append(_from_le32(data[offset:offset + 4 * n]))
             offset += 4 * n
-        node_parent, node_slot, leaf_parent, leaf_slot = arrays
-        if node_parent[0] != -1 or node_slot[0] != -1:
+        node_parent, node_slot, node_kids, leaf_parent, leaf_slot, leaf_object = arrays
+        if node_parent[0] != -1 or node_slot[0] != -1 or node_kids[0] < 0:
             raise ValueError('page index')
         depth = [0] * nodes
         for i in range(1, nodes):
             parent = node_parent[i]
-            if not 0 <= parent < i or node_slot[i] < 0 or depth[parent] + 1 > MAX_TREE_DEPTH:
+            if not 0 <= parent < i or not 0 <= node_slot[i] < node_kids[parent] or node_kids[i] < 0 \
+                    or depth[parent] + 1 > MAX_TREE_DEPTH:
                 raise ValueError('page index')
             depth[i] = depth[parent] + 1
         if leaf_parent[0] == -1:
-            if not (pages == 1 and nodes == 1 and leaf_slot[0] == -1):
+            if not (pages == 1 and nodes == 1 and leaf_slot[0] == -1 and leaf_object[0] == -1):
                 raise ValueError('page index')
         else:
-            for parent, slot in zip(leaf_parent, leaf_slot):
-                if not 0 <= parent < nodes or slot < 0 or depth[parent] + 1 > MAX_TREE_DEPTH:
+            for parent, slot, obj in zip(leaf_parent, leaf_slot, leaf_object):
+                if not 0 <= parent < nodes or not 0 <= slot < node_kids[parent] or obj < -1 or depth[parent] + 1 > MAX_TREE_DEPTH:
                     raise ValueError('page index')
-        return cls(size, root, node_parent, node_slot, leaf_parent, leaf_slot)
+        return cls(size, root, node_parent, node_slot, node_kids, leaf_parent, leaf_slot, leaf_object)
 
 
 def _le32(values):
@@ -787,39 +792,52 @@ def _page_tree_root(file):
     return root, (ref.num if isinstance(ref, Ref) else -1)
 
 
-def build_page_index(file):
-    """One complete walk of the page tree into a PageIndex. Pages are numbered in depth-first Kids order; a kid that is
-    not a dictionary (missing, free or broken-typed) is skipped and takes no page number.
+def _object_number(value):
+    return value.num if isinstance(value, Ref) and 0 <= value.num < 2 ** 31 else -1
 
-    Fails closed (Unknown, so every page is unknown) on a tree that does not check out: an object reached twice (shared
-    kids, shared indirect Kids arrays, cycles, a kid pointing back at the root: 'page-tree-shared'), an intermediate node whose integer /Count is not
-    the number of pages under it ('page-tree-count'), a tree deeper than MAX_TREE_DEPTH or larger than MAX_TREE_NODES, a
-    broken object, or the deadline. /Count is never used to find a page, only checked: a lying /Count cannot move one.
-    The root's own /Count is not checked: nothing here reads it (it is the document's page count, not a position)."""
+
+def build_page_index(file):
+    """One complete walk of the page tree into a PageIndex. Pages are numbered in depth-first Kids order.
+
+    Fails closed (Unknown, so every page is unknown) on a tree that does not check out, wherever the problem is:
+    * an object reached twice: shared kids, a shared indirect Kids array (or any object on its reference chain), cycles,
+      a kid pointing back at the root ('page-tree-shared');
+    * a kid that is not a dictionary (null, free, a number), or a node typed /Pages without a Kids array: renderers
+      disagree on whether such a kid takes a page number ('page-tree-kid');
+    * an integer /Count, the root's included, that is not the number of pages under its node ('page-tree-count');
+    * a tree deeper than MAX_TREE_DEPTH or larger than MAX_TREE_NODES, a broken object, or the deadline.
+    /Count is never used to find a page, only checked: a lying /Count cannot move one. A /Count that is not a
+    non-negative integer is not checked (the walk before this index never used one either)."""
     root, root_num = _page_tree_root(file)
-    node_parent, node_slot = array.array('i', [-1]), array.array('i', [-1])
-    leaf_parent, leaf_slot = array.array('i'), array.array('i')
+    node_parent, node_slot, node_kids = array.array('i', [-1]), array.array('i', [-1]), array.array('i', [0])
+    leaf_parent, leaf_slot, leaf_object = array.array('i'), array.array('i'), array.array('i')
     seen = {root_num} if root_num >= 0 else set()
     visited = [1]
 
     def kids_of(node):
-        """A node's Kids, refusing an indirect Kids array that another node already used (its pages would count twice)."""
+        """A node's Kids, claiming every object on an indirect Kids array's reference chain (so no two nodes share one)."""
         value = node.get('Kids')
-        if isinstance(value, Ref):
-            if value.num in seen:
+        chain = []
+        while isinstance(value, Ref):
+            if value.num in seen or value.num in chain or len(chain) >= 16:
                 raise Unknown('page-tree-shared')
-            kids = file.deref(value)
-            if isinstance(kids, list):
-                seen.add(value.num)
-            return kids
-        return file.deref(value)
+            chain.append(value.num)
+            value = file.load(value.num)
+        if isinstance(value, list):
+            seen.update(chain)
+        return value
 
-    def visit(node, node_id, kids, depth):
+    def check_count(node, pages):
+        count = file.deref(node.get('Count'))
+        if isinstance(count, int) and 0 <= count and count != pages:
+            raise Unknown('page-tree-count')
+
+    def visit(node_id, kids, depth):
         for slot, kid in enumerate(kids):
             file.check_time()
             child = file.deref(kid)
             if not isinstance(child, dict):
-                continue
+                raise Unknown('page-tree-kid')
             if isinstance(kid, Ref):
                 if kid.num in seen:
                     raise Unknown('page-tree-shared')
@@ -831,38 +849,47 @@ def build_page_index(file):
                 raise Unknown('tree-size')
             child_kids = kids_of(child) if child.get('Type') != 'Page' else file.deref(child.get('Kids'))
             if _is_page_node(child, child_kids):
+                if child.get('Type') == 'Pages':
+                    raise Unknown('page-tree-kid')
                 leaf_parent.append(node_id)
                 leaf_slot.append(slot)
+                leaf_object.append(_object_number(kid))
                 continue
-            count = file.deref(child.get('Count'))
             child_id = len(node_parent)
             node_parent.append(node_id)
             node_slot.append(slot)
+            node_kids.append(len(child_kids))
             before = len(leaf_parent)
-            visit(child, child_id, child_kids, depth + 1)
-            if isinstance(count, int) and 0 <= count and count != len(leaf_parent) - before:
-                raise Unknown('page-tree-count')
+            visit(child_id, child_kids, depth + 1)
+            check_count(child, len(leaf_parent) - before)
 
     file.check_time()
     root_kids = kids_of(root) if root.get('Type') != 'Page' else file.deref(root.get('Kids'))
     if _is_page_node(root, root_kids):
+        if root.get('Type') == 'Pages':
+            raise Unknown('page-tree-kid')
         leaf_parent.append(-1)
         leaf_slot.append(-1)
+        leaf_object.append(-1)
     else:
-        visit(root, 0, root_kids, 0)
+        node_kids[0] = len(root_kids)
+        visit(0, root_kids, 0)
+        check_count(root, len(leaf_parent))
     if not leaf_parent:
         raise Unknown('no-pages')
-    return PageIndex(file.size, root_num, node_parent, node_slot, leaf_parent, leaf_slot)
+    return PageIndex(file.size, root_num, node_parent, node_slot, node_kids, leaf_parent, leaf_slot, leaf_object)
 
 
 def page_index(path, deadline=None):
     """The checked page index of the PDF at `path` (build_page_index), or the Unknown that says why there is none: either way
     a value to hand to walk_document / layout_facts (`index=`), so a caller that walks one document in many chunks walks
-    its page tree once. Never raises Unknown; other errors (MemoryError, ...) propagate."""
+    its page tree once. Never raises Unknown; MemoryError propagates."""
     try:
         file = PdfFile(path, deadline)
     except Unknown as error:
         return error
+    except (RecursionError, ValueError, TypeError, IndexError, KeyError, struct.error):
+        return Unknown('unreadable')
     try:
         return build_page_index(file)
     except Unknown as error:
@@ -873,17 +900,18 @@ def page_index(path, deadline=None):
         file.close()
 
 
-MAX_PAGE_INDEX_BYTES = PageIndex.HEADER.size + 4 * 2 * 2 * (MAX_TREE_NODES + 1)
+MAX_PAGE_INDEX_BYTES = PageIndex.HEADER.size + 4 * 3 * 2 * (MAX_TREE_NODES + 1)
 
 
 def page_index_file(path, index_path, deadline=None):
     """page_index for a walker that runs as one process per chunk: the index (or the reason there is none) is read from
     `index_path` when an earlier chunk of the same job left one there for this file, else built and left there for the next.
 
-    The file is only ever this function's own output in the job's own directory; it is still read strictly (bounded,
-    no symlinks, regular file, PageIndex.loads) and bound to `path` by size and page-tree root, and anything else is
-    ignored and rebuilt. A deadline failure is not recorded (a later chunk may have more time); a write that fails or finds
-    the file already there leaves it alone."""
+    The record is only ever this function's own output in the job's own directory; it is still read strictly (bounded,
+    no symlinks, regular file, PageIndex.loads), bound to `path` by size and page-tree root, and every page's path, Kids
+    lengths and object number are checked again on use, so a record that is not this file's fails closed. Anything
+    unreadable is ignored and rebuilt. A deadline or unexpected failure is not recorded (a later chunk may have more time);
+    a record already there is never replaced. Leaves at most `index_path` and `index_path + '.partial'` behind."""
     try:
         fd = os.open(index_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except OSError:
@@ -900,13 +928,17 @@ def page_index_file(path, index_path, deadline=None):
         if recorded is not None:
             return recorded
     result = page_index(path, deadline)
-    if isinstance(result, Unknown) and str(result) in ('time-budget', 'page-tree-error'):
+    if isinstance(result, Unknown) and str(result) in ('time-budget', 'page-tree-error', 'unreadable'):
         return result
     record = result.dumps() if isinstance(result, PageIndex) else _UNKNOWN_RECORD + _file_size(path).to_bytes(8, 'little') \
         + str(result).encode('ascii', 'replace')[:64]
-    # Written whole under a private name, then linked into place (never replacing a record): a reader sees a complete record
-    # or none, and a writer killed mid-write leaves no truncated record that would block the next chunk's.
-    partial = f'{index_path}.{os.getpid()}.partial'
+    # Written whole under one private name, then linked into place (never replacing a record): a reader sees a complete
+    # record or none, and a writer killed mid-write leaves no truncated record that would block the next chunk's.
+    partial = f'{index_path}.partial'
+    try:
+        os.unlink(partial)
+    except OSError:
+        pass
     try:
         fd = os.open(partial, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     except OSError:
@@ -943,7 +975,7 @@ def _file_size(path):
 
 def _parse_index_record(data, path):
     """A recorded index or failure for the file at `path`, or None when the record is absent, malformed or for another
-    file (by size; the page-tree root is checked again when the index is used)."""
+    file (by size; the page-tree root and every path are checked again when the index is used)."""
     if data.startswith(_UNKNOWN_RECORD):
         rest = data[len(_UNKNOWN_RECORD):]
         if len(rest) < 9 or int.from_bytes(rest[:8], 'little') != _file_size(path) or not _SLUG.match(rest[8:]):
@@ -959,37 +991,45 @@ def _parse_index_record(data, path):
 def indexed_pages(file, index, numbers):
     """Yield (page_number, page_dict, objnum, ancestors) for each page in `numbers` (ascending) that the document has,
     reaching each one by its path in `index` and loading only the nodes on that path. Each step is checked against the
-    file (an internal node on the way, a page at the end); a step that does not match raises Unknown('page-index')."""
+    file: an internal node with the recorded Kids length on the way, a page with the recorded object number at the end.
+    A step that does not match raises Unknown('page-index'). Holds at most a bounded set of resolved nodes."""
     root, root_num = _page_tree_root(file)
     if index.size != file.size or index.root != root_num:
         raise Unknown('page-index')
     resolved = {}
 
+    def kid(kids, slot):
+        if not 0 <= slot < len(kids):
+            raise Unknown('page-index')
+        value = kids[slot]
+        node = file.deref(value)
+        if not isinstance(node, dict):
+            raise Unknown('page-index')
+        return value, node
+
     def internal(node_id):
-        """(node, its Kids, trail) for an internal node, resolved once per call."""
+        """(node, its Kids) for an internal node, checked against the index; resolved once while it stays cached."""
         hit = resolved.get(node_id)
         if hit is not None:
             return hit
         if node_id == 0:
-            node, trail = root, [root]
+            node = root
         else:
-            parent, parent_kids, parent_trail = internal(index.node_parent[node_id])
-            node = _kid(parent_kids, index.node_slot[node_id])[1]
-            trail = [node] + parent_trail
+            _value, node = kid(internal(index.node_parent[node_id])[1], index.node_slot[node_id])
         kids = file.deref(node.get('Kids'))
-        if _is_page_node(node, kids):
+        if _is_page_node(node, kids) or len(kids) != index.node_kids[node_id]:
             raise Unknown('page-index')
-        resolved[node_id] = hit = (node, kids, trail)
+        if len(resolved) >= 4 * MAX_TREE_DEPTH:
+            resolved.clear()
+        resolved[node_id] = hit = (node, kids)
         return hit
 
-    def _kid(kids, slot):
-        if not 0 <= slot < len(kids):
-            raise Unknown('page-index')
-        kid = kids[slot]
-        node = file.deref(kid)
-        if not isinstance(node, dict):
-            raise Unknown('page-index')
-        return kid, node
+    def trail(node_id):
+        out = []
+        while node_id != -1:
+            out.append(internal(node_id)[0])
+            node_id = index.node_parent[node_id]
+        return out
 
     for number in numbers:
         if not 1 <= number <= index.pages:
@@ -997,15 +1037,14 @@ def indexed_pages(file, index, numbers):
         file.check_time()
         parent_id = index.leaf_parent[number - 1]
         if parent_id == -1:
-            if _is_page_node(root, file.deref(root.get('Kids'))):
-                yield number, root, None, [root]
-                continue
+            if not _is_page_node(root, file.deref(root.get('Kids'))):
+                raise Unknown('page-index')
+            yield number, root, None, [root]
+            continue
+        value, page = kid(internal(parent_id)[1], index.leaf_slot[number - 1])
+        if not _is_page_node(page, file.deref(page.get('Kids'))) or _object_number(value) != index.leaf_object[number - 1]:
             raise Unknown('page-index')
-        _parent, kids, trail = internal(parent_id)
-        kid, page = _kid(kids, index.leaf_slot[number - 1])
-        if not _is_page_node(page, file.deref(page.get('Kids'))):
-            raise Unknown('page-index')
-        yield number, page, (kid.num if isinstance(kid, Ref) else None), [page] + trail
+        yield number, page, (value.num if isinstance(value, Ref) else None), [page] + trail(parent_id)
 
 
 def _box(file, value):
