@@ -375,7 +375,8 @@ export function ensureApiStartup(): Promise<void> {
 
       // Open the most recently searched projects' LanceDB tables and load their indexes in the
       // background (search/boot-warm.ts), so the first search after a start is not the cold one.
-      if (process.env.NODE_ENV === "production") setTimeout(() => { void warmRecentSearchIndexes(); }, 2_000).unref();
+      // A few seconds of spread, so machines restarted together do not all read the same indexes at once.
+      if (process.env.NODE_ENV === "production") setTimeout(() => { void warmRecentSearchIndexes(); }, 2_000 + Math.floor(Math.random() * 3_000)).unref();
 
       console.log(`[api] cors_allowed_origins=${env.corsAllowedOrigins.join(",")}`);
       // Boolean env flags this process booted with (MEDIA_REMOTE_ENABLED, AI_RATE_LIMIT_ENABLED, ...); unset ones

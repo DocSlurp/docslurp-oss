@@ -1,3 +1,4 @@
+import { normalizeStoredPipelineFeatures, resolveEmbeddingRoute } from "@docslurp/shared";
 import { sql } from "../db.js";
 import { warmLanceDbSearch } from "./lancedb.js";
 
@@ -6,8 +7,8 @@ import { warmLanceDbSearch } from "./lancedb.js";
  * search of a table: loading the LanceDB library, the first storage connection, opening the
  * table and loading its vector and full-text indexes (seconds, even from the local disk
  * cache). Every cold search seen in production came within minutes of a process start, so
- * the process does that work itself, in the background, for the projects searched most
- * recently. It opens tables and loads indexes only: no query runs and nothing is returned.
+ * the process does that work itself, in the background, for the projects searched most in
+ * the last week. It opens tables and loads indexes only: no query runs and nothing is returned.
  *
  * SEARCH_BOOT_WARM_PROJECTS: how many projects (default 5, at most 50; 0 turns it off, as
  * does SEARCH_LANCE_WARM=0). Production only (server.ts).
@@ -31,39 +32,74 @@ export function bootWarmProjectLimit(env: Record<string, string | undefined> = p
 
 export interface BootWarmTarget { orgId: string; projectId: string; embeddingModel: string; dimension: number }
 
+/** No organization takes more than this many of the warm places, however much it searches. */
+const MAX_PROJECTS_PER_ORG = 2;
+/** The whole lookup may hold a database connection this long; past it the warm-up is skipped. */
+const LOOKUP_TIMEOUT_MS = 3_000;
+
 /**
- * The most recently searched projects that have a LanceDB index, newest first. Org and
- * project ids come from the projects table, never from the search session's metadata.
+ * The projects to warm: the most searched of the last week that are not archived and have
+ * indexed documents in the embedding space a search of them would use, at most
+ * MAX_PROJECTS_PER_ORG per organization. Returned least searched first, so the busiest
+ * project is loaded last and is the last to be evicted if the index cache fills.
+ * - Org and project ids come from the projects table, never from a session's metadata.
+ * - The embedding space comes from the project's pipeline, as it does for a search. The
+ *   index rows only confirm that a table exists there (a project that changed its model
+ *   still has rows for the old one).
  */
 export async function recentSearchTargets(limit: number): Promise<BootWarmTarget[]> {
   if (limit <= 0) return [];
-  const rows = await sql<Array<{ org_id: string; project_id: string; embedding_model: string; dimension: number }>>`
-    with recent as (
-      select project_id, max(created_at) as last_search
-      from search_sessions
-      where project_id is not null and created_at > now() - make_interval(days => ${RECENT_DAYS})
-      group by project_id
-      order by last_search desc
-      limit ${limit}
-    )
-    select p.org_id, p.id as project_id, v.embedding_model, v.dimension
-    from recent r
-    join projects p on p.id = r.project_id
-    cross join lateral (
-      select vi.embedding_model, vi.dimension
-      from documents d
-      join vector_indexes vi on vi.document_id = d.id
-      where d.project_id = p.id and vi.backend = 'lancedb'
-      limit 1
-    ) v
-    order by r.last_search desc
-  `;
-  return rows.map((row) => ({ orgId: row.org_id, projectId: row.project_id, embeddingModel: row.embedding_model, dimension: Number(row.dimension) }));
+  return await sql.begin(async (tx) => {
+    await tx.unsafe(`set local statement_timeout = ${LOOKUP_TIMEOUT_MS}`);
+    // More candidates than places: some have no index, and an organization's surplus is passed over.
+    const candidates = await tx<Array<{ org_id: string | null; project_id: string; pipeline: unknown }>>`
+      with recent as (
+        select project_id, count(*) as searches, max(created_at) as last_search
+        from search_sessions
+        where project_id is not null and created_at > now() - make_interval(days => ${RECENT_DAYS})
+        group by project_id
+      )
+      select p.org_id, p.id as project_id, p.pipeline
+      from recent r
+      join projects p on p.id = r.project_id
+      where p.archived_at is null and p.org_id is not null
+      order by r.searches desc, r.last_search desc
+      limit ${limit * 4}
+    `;
+    const targets: BootWarmTarget[] = [];
+    const perOrg = new Map<string, number>();
+    for (const row of candidates) {
+      if (targets.length >= limit) break;
+      const orgId = row.org_id ?? "";
+      if (!orgId || (perOrg.get(orgId) ?? 0) >= MAX_PROJECTS_PER_ORG) continue;
+      let embedding: { model: string; dimensions: number };
+      try {
+        embedding = resolveEmbeddingRoute(normalizeStoredPipelineFeatures(row.pipeline ?? null, `project ${row.project_id}`).embedding);
+      } catch {
+        continue; // A stored pipeline this build cannot read: that project is simply not warmed.
+      }
+      const [indexed] = await tx<Array<{ found: boolean }>>`
+        select exists (
+          select 1
+          from documents d
+          join vector_indexes vi on vi.document_id = d.id
+          where d.project_id = ${row.project_id} and d.status = 'completed'
+            and vi.backend = 'lancedb' and vi.embedding_model = ${embedding.model} and vi.dimension = ${embedding.dimensions}
+        ) as found
+      `;
+      if (!indexed?.found) continue;
+      perOrg.set(orgId, (perOrg.get(orgId) ?? 0) + 1);
+      targets.push({ orgId, projectId: row.project_id, embeddingModel: embedding.model, dimension: embedding.dimensions });
+    }
+    return targets.reverse();
+  });
 }
 
 /**
  * Warm the recently searched projects, one after another (the index loader bounds its own
  * concurrency, and a search that arrives meanwhile joins a load in flight). Never throws.
+ * `projects` counts the tables it asked for; a table that failed to load is retried by the
+ * first search of it, as before.
  */
 export async function warmRecentSearchIndexes(deps: {
   limit?: number;

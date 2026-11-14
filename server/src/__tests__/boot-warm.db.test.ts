@@ -10,58 +10,63 @@ let sql: postgres.Sql;
 let stop: () => Promise<void>;
 let boot: typeof import("../search/boot-warm.js");
 const P = (n: number) => `00000000-0000-4000-8000-00000000000${n}`;
+/** The embedding space a search of a project with the default pipeline uses. */
+let space: { model: string; dimensions: number };
+const target = (org: string, n: number) => ({ orgId: org, projectId: P(n), embeddingModel: space.model, dimension: space.dimensions });
 
 beforeAll(async () => {
   const pg = await startMigratedPostgres();
   stop = pg.stop;
   sql = postgres(pg.url, { max: 1, prepare: false, onnotice: () => {} });
   vi.doMock("../db.js", () => ({ sql }));
+  const shared = await import("@docslurp/shared");
+  space = shared.resolveEmbeddingRoute(shared.normalizeStoredPipelineFeatures(null, "test").embedding);
   await sql`insert into "user" (id, name, email) values ('user-a', 'A', 'a@bootwarm.test'), ('user-b', 'B', 'b@bootwarm.test')`;
   await sql`insert into organizations (id, name, slug, created_by_user_id, credit_balance_cents) values ('org-a', 'Org A', 'bw-a', 'user-a', 1000), ('org-b', 'Org B', 'bw-b', 'user-b', 1000)`;
-  await sql`insert into projects (id, org_id, user_id, name, is_default) values
-    (${P(1)}, 'org-a', 'user-a', 'Searched yesterday', true), (${P(2)}, 'org-b', 'user-b', 'Searched just now', true),
-    (${P(3)}, 'org-a', 'user-a', 'Searched, no index', false), (${P(4)}, 'org-a', 'user-a', 'Searched long ago', false), (${P(5)}, 'org-b', 'user-b', 'Never searched', false)`;
-  for (const [n, org, user] of [[1, "org-a", "user-a"], [2, "org-b", "user-b"], [3, "org-a", "user-a"], [4, "org-a", "user-a"], [5, "org-b", "user-b"]] as const) {
+  // [project, org, searches, age of the newest search, index rows: current space | old space only | none]
+  const projects = [
+    [1, "org-a", 2, "1 day", "current"], [2, "org-b", 1, "1 minute", "current"], [3, "org-a", 1, "2 minutes", "none"],
+    [4, "org-a", 9, "30 days", "current"], [5, "org-b", 0, "", "current"], [6, "org-a", 3, "1 hour", "old"],
+    [7, "org-a", 5, "2 hours", "current"], [8, "org-a", 1, "3 minutes", "current"], [9, "org-b", 4, "1 hour", "current"],
+  ] as const;
+  for (const [n, org, searches, age, index] of projects) {
+    const user = org === "org-a" ? "user-a" : "user-b";
+    await sql`insert into projects (id, org_id, user_id, name, is_default, archived_at) values (${P(n)}, ${org}, ${user}, ${`Project ${n}`}, ${n <= 2}, ${n === 9 ? new Date().toISOString() : null})`;
     await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline) values (${`run-${n}`}, ${org}, ${user}, ${P(n)}, 'bulk-upload', 'completed', 'completed', '{}')`;
-    for (const d of [1, 2]) {
-      await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status) values (${`doc-${n}-${d}`}, ${org}, ${user}, ${P(n)}, ${`run-${n}`}, 'a.txt', 'text/plain', ${`k-${n}-${d}`}, 'completed')`;
-      if (n !== 3) await sql`insert into vector_indexes (id, document_id, backend, bucket, path, embedding_model, dimension) values (${`vi-${n}-${d}`}, ${`doc-${n}-${d}`}, 'lancedb', 'b', 'p', 'BAAI/bge-m3', 1024)`;
+    // The first document is superseded work in progress and must not count as an index.
+    for (const [d, status] of [[1, "failed"], [2, "completed"]] as const) {
+      await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status) values (${`doc-${n}-${d}`}, ${org}, ${user}, ${P(n)}, ${`run-${n}`}, 'a.txt', 'text/plain', ${`k-${n}-${d}`}, ${status})`;
+      const row = (id: string, backend: string, model: string, dimension: number) =>
+        sql`insert into vector_indexes (id, document_id, backend, bucket, path, embedding_model, dimension) values (${id}, ${`doc-${n}-${d}`}, ${backend}, 'b', 'p', ${model}, ${dimension})`;
+      if (index === "current" || (index === "none" && d === 1)) await row(`vi-${n}-${d}`, "lancedb", space.model, space.dimensions);
+      if (index === "old" || n === 1) await row(`vi-${n}-${d}-old`, "lancedb", "old/model", 384);
+      if (index === "none") await row(`vi-${n}-${d}-pg`, "pgvector", space.model, space.dimensions);
+    }
+    for (let k = 0; k < searches; k++) {
+      await sql`insert into search_sessions (id, user_id, project_id, query, created_at) values (${`s-${n}-${k}`}, ${user}, ${P(n)}, 'q', now() - ${age}::interval - make_interval(secs => ${k}))`;
     }
   }
-  // A non-LanceDB row must not make project 3 look indexed.
-  await sql`insert into vector_indexes (id, document_id, backend, bucket, path, embedding_model, dimension) values ('vi-3-other', 'doc-3-1', 'pgvector', 'b', 'p', 'other', 8)`;
-  const search = (id: string, user: string, project: string | null, age: string) =>
-    sql`insert into search_sessions (id, user_id, project_id, query, created_at) values (${id}, ${user}, ${project}, 'q', now() - ${age}::interval)`;
-  await search("s1", "user-a", P(1), "1 day");
-  await search("s1b", "user-a", P(1), "3 days");
-  await search("s2", "user-b", P(2), "1 minute");
-  await search("s3", "user-a", P(3), "2 minutes");
-  await search("s4", "user-a", P(4), "30 days");
-  await search("s0", "user-a", null, "1 second");
+  await sql`insert into search_sessions (id, user_id, project_id, query) values ('s-none', 'user-a', null, 'q')`;
   boot = await import("../search/boot-warm.js");
 }, 120_000);
 afterAll(async () => { await sql?.end(); await stop?.(); });
 
-it("lists recently searched projects that have a LanceDB index, newest first, each with its own org", async () => {
-  expect(await boot.recentSearchTargets(10)).toEqual([
-    { orgId: "org-b", projectId: P(2), embeddingModel: "BAAI/bge-m3", dimension: 1024 },
-    { orgId: "org-a", projectId: P(1), embeddingModel: "BAAI/bge-m3", dimension: 1024 },
-  ]);
-  // The limit applies to searched projects, so an unindexed one may use a place.
-  expect((await boot.recentSearchTargets(2)).map((target) => target.projectId)).toEqual([P(2)]);
+it("picks the most searched indexed projects in the space search uses, capped per organization, busiest last", async () => {
+  // By searches: 7 (5), 6 (3: only an old model's table), 1 (2), then 2, 3 (no completed index), 8 (org-a is full).
+  // 4 was searched long ago, 5 never, 9 is archived.
+  expect(await boot.recentSearchTargets(10)).toEqual([target("org-b", 2), target("org-a", 1), target("org-a", 7)]);
+  expect(await boot.recentSearchTargets(1)).toEqual([target("org-a", 7)]);
+  expect(await boot.recentSearchTargets(2)).toEqual([target("org-a", 1), target("org-a", 7)]);
   expect(await boot.recentSearchTargets(0)).toEqual([]);
 });
 
 it("warms them in order, survives a failing project, and does nothing when turned off", async () => {
   const lines: string[] = [];
   warm.mockImplementationOnce(async () => { throw new Error("storage down"); });
-  expect((await boot.warmRecentSearchIndexes({ limit: 10, log: (line) => lines.push(line) })).projects).toBe(2);
-  expect(warm.mock.calls.map(([target]) => target)).toEqual([
-    { orgId: "org-b", projectId: P(2), embeddingModel: "BAAI/bge-m3", dimension: 1024, hydrate: true },
-    { orgId: "org-a", projectId: P(1), embeddingModel: "BAAI/bge-m3", dimension: 1024, hydrate: true },
-  ]);
+  expect((await boot.warmRecentSearchIndexes({ limit: 10, log: (line) => lines.push(line) })).projects).toBe(3);
+  expect(warm.mock.calls.map(([warmed]) => warmed)).toEqual([target("org-b", 2), target("org-a", 1), target("org-a", 7)].map((entry) => ({ ...entry, hydrate: true })));
   expect(lines).toHaveLength(1);
-  expect(lines[0]).toMatch(/^\[search\] boot warm projects=2 limit=10 ms=\d+$/);
+  expect(lines[0]).toMatch(/^\[search\] boot warm projects=3 limit=10 ms=\d+$/);
   warm.mockClear();
   expect(await boot.warmRecentSearchIndexes({ limit: 0, log: (line) => lines.push(line) })).toMatchObject({ projects: 0 });
   expect(warm).not.toHaveBeenCalled();
