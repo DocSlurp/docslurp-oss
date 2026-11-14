@@ -83,8 +83,10 @@ export async function sweepProjectActivityStatsDrift(
       });
     } catch (error) {
       if ((error as { code?: string }).code !== "57014") throw error;
-      console.warn(`[project-activity-stats] drift check of ${projectIds.length} projects cancelled after ${STATEMENT_TIMEOUT_MS}ms; run the full check from server/db/project-activity-stats.mjs`);
-      return [];
+      // The busiest projects are the ones whose history is slow to read and whose rows most need folding,
+      // so a cancelled check still compacts them.
+      console.warn(`[project-activity-stats] drift check of ${projectIds.length} projects (${projectIds[0]} … ${projectIds.at(-1)}) cancelled after ${STATEMENT_TIMEOUT_MS}ms; run the full check from server/db/project-activity-stats.mjs`);
+      drift = [];
     }
     // Fold the rows a burst of concurrent writers left for these projects (reads sum a project's rows). It locks
     // only rows no writer holds and waits for nothing.

@@ -260,14 +260,25 @@ END $$;
 -- it re-reads the row), which a move's own update never waits out: measured as one miscounted turn in most runs
 -- of 6 sessions moved while 10 connections insert turns.
 --
+-- One statement that writes turns in more than 256 sessions (an import, a retention delete) takes the single
+-- lock (163003, 0) shared instead of one lock per session, which would fill the shared lock table and fail other
+-- transactions with it; a move takes that lock exclusively as well, so it still waits for such a statement.
+--
+-- These guarantees assume READ COMMITTED, where each trigger statement reads a fresh snapshot. Nothing writes
+-- these tables at another isolation level; a REPEATABLE READ writer could miscount a turn across a session move.
+--
 -- A delete needs no lock: apply_chat_session_activity_stats() below subtracts exactly the turns it removes.
 -- A turn whose session is not visible here is being removed by that function, which counts it.
 CREATE OR REPLACE FUNCTION apply_chat_turn_activity_stats() RETURNS trigger
 LANGUAGE plpgsql SET search_path=pg_catalog,pg_temp AS $$
 BEGIN
   IF TG_OP = 'INSERT' THEN
-    PERFORM pg_advisory_xact_lock_shared(163002, hashtext(k.id))
-    FROM (SELECT DISTINCT t.session_id AS id FROM new_rows t ORDER BY 1) k;
+    IF (SELECT count(DISTINCT t.session_id) FROM new_rows t) > 256 THEN
+      PERFORM pg_advisory_xact_lock_shared(163003, 0);
+    ELSE
+      PERFORM pg_advisory_xact_lock_shared(163002, hashtext(k.id))
+      FROM (SELECT DISTINCT t.session_id AS id FROM new_rows t ORDER BY 1) k;
+    END IF;
     INSERT INTO public.project_activity_stats AS s (project_id, slot, chat_turns)
     SELECT g.project_id, public.project_activity_stats_slot(), g.turns
     FROM (
@@ -279,8 +290,12 @@ BEGIN
   ELSIF TG_OP = 'DELETE' THEN
     -- Only sessions that still exist: a cascade from a deleted session, user or project takes no lock here,
     -- however many sessions it removes.
-    PERFORM pg_advisory_xact_lock_shared(163002, hashtext(k.id))
-    FROM (SELECT cs.id FROM public.chat_sessions cs WHERE cs.id IN (SELECT t.session_id FROM old_rows t) ORDER BY 1) k;
+    IF (SELECT count(*) FROM public.chat_sessions cs WHERE cs.id IN (SELECT t.session_id FROM old_rows t)) > 256 THEN
+      PERFORM pg_advisory_xact_lock_shared(163003, 0);
+    ELSE
+      PERFORM pg_advisory_xact_lock_shared(163002, hashtext(k.id))
+      FROM (SELECT cs.id FROM public.chat_sessions cs WHERE cs.id IN (SELECT t.session_id FROM old_rows t) ORDER BY 1) k;
+    END IF;
     INSERT INTO public.project_activity_stats AS s (project_id, slot, chat_turns)
     SELECT g.project_id, public.project_activity_stats_slot(), -g.turns
     FROM (
@@ -345,6 +360,8 @@ BEGIN
     END IF;
     RETURN NULL;
   END IF;
+  -- The bulk lock first (see apply_chat_turn_activity_stats), then this session's.
+  PERFORM pg_advisory_xact_lock(163003, 0);
   PERFORM pg_advisory_xact_lock(163002, hashtext(OLD.id));
   SELECT count(*) INTO turn_count FROM public.chat_turns t WHERE t.session_id = OLD.id;
   IF turn_count > 0 THEN
@@ -520,8 +537,10 @@ $$;
 -- same rows: no session or turn is counted twice or missed. Reads of these tables are not blocked by this lock
 -- (the top of this file lists every lock and what else can hold readers up). With lock_timeout this fails fast
 -- behind a long-open writer instead of queueing every search behind it; a retried deploy finishes the work.
--- Same table order as rebuild_project_activity_stats().
-LOCK TABLE "chat_sessions", "chat_turns", "search_sessions" IN SHARE ROW EXCLUSIVE MODE;
+-- projects first: the trigger created on it below needs the same lock, and a project delete takes projects before
+-- its cascade reaches these tables, so the other order could deadlock with one. Then the order of
+-- rebuild_project_activity_stats().
+LOCK TABLE "projects", "chat_sessions", "chat_turns", "search_sessions" IN SHARE ROW EXCLUSIVE MODE;
 --> statement-breakpoint
 CREATE OR REPLACE TRIGGER search_sessions_activity_stats_insert AFTER INSERT ON "search_sessions"
 REFERENCING NEW TABLE AS new_rows FOR EACH STATEMENT EXECUTE FUNCTION apply_search_session_activity_stats();

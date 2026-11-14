@@ -1,5 +1,11 @@
 # TODO
 
+- Project activity counters (0163), council follow-ups 2026-11-14:
+  - Bulk chat-session delete is quadratic in a surviving project: the row-level delete trigger removes each session's turns and rewrites the same counter row per session (20,000 sessions 7.5 s against 0.3 s without the trigger; account offboarding hits it). Make it statement-level with a transition table.
+  - The drift sweep's cursor is per process and restarts at the first id, so with regular deploys later projects are rarely sampled; persist or randomise it, and bisect a batch whose check timed out.
+  - The concurrency tests skip in CI (`PROJECT_ACTIVITY_STATS_RACE_DATABASE_URL` unset; PGlite runs one statement at a time). Point them at the workflow's native Postgres service.
+  - All 1,024 writer slots held makes search and chat writes block with no statement timeout; needs over 1,024 concurrent writing transactions or a database role doing it on purpose.
+  - Document `pg_restore --data-only` into a live schema in `docs/self-host/operations.md` (triggers fire during the load: rebuild afterwards).
 - Figure resume budget constants (council #388 M3, 2026-11-13): before `DOCSLURP_FIGURE_RESUME` is on in production, measure the per-pass VM time the budget assumes (`DOCSLURP_FIGURE_RESUME_VM_MS_PER_PAGE` 50 and `_VM_MS_PER_LAUNCH` 3,000 are estimates). Run the runner on a held-back slice of partial documents (small, 1,000-page unsharded, 10K+ sharded), read the `resume pass … msPerPage estimateMs` log lines and `resume.pass_ms_per_page`, and set the defaults from the measured p95. Alert on `resume.capped{reason="vm-budget"}` so a low estimate never silently drops completeness.
 - Materialize runs have non-UUID ids (`mat_<uuid>`, `server/src/search/deferred/materialize-client.ts`), yet the realtime `run` resource requires a UUID and the activity projection lists them. A first-party client that watches active runs sends `run:mat_…` and the socket is closed with 1008 `invalid_frame` (reproduced 2026-11-14). Give materialize runs UUID ids or keep them out of the activity inventory; do not loosen `realtimeResourceSchema`.
 - First pass (sandboxed PDF batches, 2026-11-11; `DOCSLURP_FIRST_PASS`, default off). Remaining before it is on by default:
