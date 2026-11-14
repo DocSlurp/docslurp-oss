@@ -120,7 +120,7 @@ export class ConcurrencyLimiter {
   private readonly rotation: string[] = [];
   private readonly groupSlots = new Map<string, number>();
 
-  constructor(private readonly options: SearchLimiterOptions) {}
+  constructor(readonly options: SearchLimiterOptions) {}
 
   stats(): { running: number; queued: number; maxConcurrency: number; waitingTenants: number } {
     return { running: this.running, queued: this.queued, maxConcurrency: this.options.maxConcurrency, waitingTenants: this.rotation.length };
@@ -128,14 +128,26 @@ export class ConcurrencyLimiter {
 
   async run<T>(fn: () => Promise<T>, signal?: AbortSignal, admission: SearchAdmission = {}): Promise<T> {
     if (this.options.maxConcurrency <= 0) return fn();
-    const group = admission.group ?? null;
-    const tenant = this.options.fairTenants === false ? ANONYMOUS_TENANT : admission.tenant ?? ANONYMOUS_TENANT;
-    await this.acquire(signal, tenant, group);
+    const release = await this.enter(signal, admission);
     try {
       return await fn();
     } finally {
-      this.release(group);
+      release();
     }
+  }
+
+  /** Wait for a slot; the returned function frees it (idempotent). */
+  async enter(signal?: AbortSignal, admission: SearchAdmission = {}): Promise<() => void> {
+    if (this.options.maxConcurrency <= 0) return () => undefined;
+    const group = admission.group ?? null;
+    const tenant = this.options.fairTenants === false ? ANONYMOUS_TENANT : admission.tenant ?? ANONYMOUS_TENANT;
+    await this.acquire(signal, tenant, group);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.release(group);
+    };
   }
 
   private groupHasRoom(group: string | null): boolean {
@@ -256,6 +268,97 @@ export function currentSearchAdmissionGroup(): string | null {
   return admissionGroup.getStore() ?? null;
 }
 
+/**
+ * Fast lane: a second, larger semaphore every root search crosses first, for
+ * setup only (one Postgres round trip for access, settings and pipeline). A
+ * search whose project has nothing to retrieve keeps its fast-lane slot to the
+ * end and never takes a main slot, so it cannot queue behind (or hold a slot
+ * from) searches that run retrieval. Every other search frees its fast-lane
+ * slot after setup and then queues for a main slot exactly as before.
+ *
+ * The fast lane inherits the main limiter's queue bound, timeout and fairness.
+ * SEARCH_FAST_LANE_CONCURRENCY overrides its size (default 2x the main cap, at
+ * least 4); 0 turns it off, which restores a single lane (setup inside the slot).
+ */
+export function resolveFastLaneOptions(main: SearchLimiterOptions, env: NodeJS.ProcessEnv = process.env): SearchLimiterOptions | null {
+  if (main.maxConcurrency <= 0) return null;
+  const size = readInt(env.SEARCH_FAST_LANE_CONCURRENCY, Math.max(4, main.maxConcurrency * 2), 0, 10_000);
+  return size > 0 ? { ...main, maxConcurrency: size, maxSlotsPerGroup: 0 } : null;
+}
+
+let fastLane: ConcurrencyLimiter | null | undefined;
+
+function fastLaneLimiter(): ConcurrencyLimiter | null {
+  if (fastLane !== undefined) return fastLane;
+  const options = resolveFastLaneOptions(searchLimiter().options);
+  return fastLane = options ? new ConcurrencyLimiter(options) : null;
+}
+
+export type SearchLane = "main" | "fast" | "nested" | "unlimited";
+
+export interface SearchLaneReport {
+  lane: SearchLane;
+  /** Main-lane searches running and waiting when this search arrived. */
+  running: number;
+  queued: number;
+  /** Time spent waiting for a fast-lane and for a main slot. */
+  fastWaitMs: number;
+  mainWaitMs: number;
+}
+
+/**
+ * Admit one root search: `setup` runs in the fast lane; `isLight(setup)` says
+ * nothing is left to retrieve; `run` then holds either the fast-lane slot
+ * (light) or a main slot (everything else). Nested searches reuse the caller's
+ * slot. Slots are released on success, error and abort.
+ */
+export async function withSearchLanes<S, T>(signal: AbortSignal | undefined, admission: SearchAdmission, steps: {
+  setup: () => Promise<S>;
+  isLight: (setup: S) => boolean;
+  /** Tenant for the main queue once setup knows the organization. */
+  tenantOf?: (setup: S) => string | null | undefined;
+  run: (setup: S) => Promise<T>;
+  onAdmitted?: (report: SearchLaneReport) => void;
+}): Promise<T> {
+  const main = searchLimiter();
+  const arrival = main.stats();
+  const report = (lane: SearchLane, fastWaitMs: number, mainWaitMs: number) =>
+    steps.onAdmitted?.({ lane, running: arrival.running, queued: arrival.queued, fastWaitMs, mainWaitMs });
+  if (holdsSlot.getStore()) {
+    const setup = await steps.setup();
+    report("nested", 0, 0);
+    return steps.run(setup);
+  }
+  const group = admission.group ?? currentSearchAdmissionGroup();
+  const fast = fastLaneLimiter();
+  if (!fast) {
+    // One lane: setup and retrieval share the main slot.
+    const started = performance.now();
+    return withSearchSlot(signal, async () => {
+      report(main.options.maxConcurrency <= 0 ? "unlimited" : "main", 0, performance.now() - started);
+      return steps.run(await steps.setup());
+    }, { tenant: admission.tenant, group });
+  }
+  const fastStarted = performance.now();
+  const releaseFast = await fast.enter(signal, { tenant: admission.tenant });
+  const fastWaitMs = performance.now() - fastStarted;
+  let setup: S;
+  try {
+    setup = await steps.setup();
+    if (steps.isLight(setup)) {
+      report("fast", fastWaitMs, 0);
+      return await holdsSlot.run(true, () => steps.run(setup));
+    }
+  } finally {
+    releaseFast();
+  }
+  const mainStarted = performance.now();
+  return main.run(() => {
+    report("main", fastWaitMs, performance.now() - mainStarted);
+    return holdsSlot.run(true, () => steps.run(setup));
+  }, signal, { tenant: steps.tenantOf?.(setup) ?? admission.tenant, group });
+}
+
 /** Run one search under the process-wide limit; nested searches reuse the caller's slot. */
 export function withSearchSlot<T>(signal: AbortSignal | undefined, fn: () => Promise<T>, admission: SearchAdmission = {}): Promise<T> {
   if (holdsSlot.getStore()) return fn();
@@ -269,4 +372,5 @@ export function searchLimiterStats(): { running: number; queued: number; maxConc
 /** Tests: rebuild the limiter from the current env. */
 export function resetSearchLimiterForTests(options?: SearchLimiterOptions): void {
   limiter = options ? new ConcurrencyLimiter(options) : null;
+  fastLane = undefined;
 }

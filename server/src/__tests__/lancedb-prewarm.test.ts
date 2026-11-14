@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { prewarmTable, type PrewarmableTable } from "../search/lancedb-prewarm.js";
+import { prewarmSearchIndexes, prewarmTable, type PrewarmableTable } from "../search/lancedb-prewarm.js";
 
 function fakeTable(overrides: Partial<PrewarmableTable> = {}): PrewarmableTable & { prewarmIndex: ReturnType<typeof vi.fn>; prewarmData: ReturnType<typeof vi.fn> } {
   return {
@@ -51,5 +51,22 @@ describe("prewarmTable", () => {
     const result = await prewarmTable(table, "t", { prewarmIndex: false, prewarmData: false }, vi.fn());
     expect(result.indexes).toEqual([]);
     expect(table.prewarmIndex).not.toHaveBeenCalled();
+  });
+
+  it("prewarmSearchIndexes loads the named indexes concurrently and reports failures without throwing", async () => {
+    let active = 0;
+    let peak = 0;
+    const table = { prewarmIndex: vi.fn(async (name: string) => {
+      active += 1;
+      peak = Math.max(peak, active);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      active -= 1;
+      if (name === "text_idx") throw new Error("boom\nstack");
+    }) };
+    const log = vi.fn();
+    const result = await prewarmSearchIndexes(table, ["vector_idx", "text_idx"], "org/project/vectors", log);
+    expect(peak).toBe(2);
+    expect(result).toMatchObject({ indexes: ["vector_idx"], errors: ["index text_idx: boom"] });
+    expect(log).toHaveBeenCalledWith(expect.stringMatching(/^\[lancedb-session\] index-warm table=org\/project\/vectors indexes=vector_idx ms=\d+ errors=/));
   });
 });
