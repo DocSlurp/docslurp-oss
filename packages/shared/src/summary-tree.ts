@@ -190,6 +190,13 @@ export const SUMMARY_TREE_MIN_GROUP_SIZE = 4;
 export const SUMMARY_TREE_MAX_GROUP_SIZE = 12;
 /** Children per node above the leaf level. */
 export const SUMMARY_TREE_MAX_FAN_IN = 8;
+/**
+ * Fewest siblings that get a summary node of their own above the leaf level (the root excepted): a smaller run of
+ * siblings joins its parent's siblings instead, so a deeply nested outline does not grow a chain of near-identical
+ * summaries. With the maximum above, a tree of `SUMMARY_TREE_MAX_NODES_PER_DOCUMENT` nodes always fits
+ * `SUMMARY_TREE_MAX_LEVELS`.
+ */
+export const SUMMARY_TREE_MIN_FAN_IN = 4;
 /** Documents with fewer leaf chunks get no tree (the long-document floor). */
 export const SUMMARY_TREE_MIN_DOCUMENT_LEAVES = 24;
 /** Hard cap on nodes per document; a document that would exceed it is marked partial, never truncated silently. */

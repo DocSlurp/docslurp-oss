@@ -23,7 +23,7 @@ import {
 } from "./index.js";
 
 const DIMENSIONS = 24;
-const LIMITS: Partial<SummaryTreeLimits> = { minLeavesPerGroup: 4, maxLeavesPerGroup: 16, minFanIn: 3, maxFanIn: 10, minDocumentLeaves: 8 };
+const LIMITS: Partial<SummaryTreeLimits> = { minLeavesPerGroup: 4, maxLeavesPerGroup: 16, minFanIn: 3, maxFanIn: 10, minDocumentLeaves: 8, maxLevels: 8 };
 const CONTEXT: SummaryTreeHashContext = {
   modelId: "example/text-model",
   textGeneration: { profile: "provider-default", reasoningEffort: "none", maxOutputTokens: 546 },
@@ -173,29 +173,98 @@ describe("grouping", () => {
     expect(second.hashes).toEqual(first.hashes);
   });
 
-  it("cuts at every heading change and never merges short sections", () => {
+  const shape = (tree: SummaryTree) => leafGroups(tree).map((node) => [node.headingPath.join("/"), node.leafCount]);
+
+  it("keeps sections of at least the minimum apart and joins a short one to its neighbour under the same heading", () => {
     const { tree } = build(headedDocument());
-    expect(leafGroups(tree).map((node) => [node.headingPath.join("/"), node.leafCount])).toEqual([
-      ["Report", 3], ["Report/Revenue", 9], ["Report/Revenue/By region", 6], ["Report/Hiring", 12], ["Report/Outlook", 2], ["Appendix", 7],
-    ]);
+    // "Report" (3) joins "Report/Revenue" (9); "Report/Outlook" (2) joins "Report/Hiring" (12). Each joined group
+    // carries the heading both share. "Report/Revenue/By region" (6) and "Appendix" (7) are large enough to stand.
+    expect(shape(tree)).toEqual([["Report", 12], ["Report/Revenue/By region", 6], ["Report", 14], ["Appendix", 7]]);
     expect(checkSummaryTreeCoverage(tree)).toEqual([]);
   });
 
-  it("groups upper levels by shared heading prefix, one level shallower at a time, up to one root", () => {
-    const { tree } = build(headedDocument());
-    const describeNode = (index: number): unknown => {
+  it("joins short sibling sections under their parent before anything further away, and never passes the maximum", () => {
+    const { tree } = build([
+      ...section(["A", "One"], 1, 1),
+      ...section(["A", "Two"], 2, 2),
+      ...section(["A", "Three"], 1, 3),
+      ...section(["B", "One"], 2, 4),
+      ...section(["B", "Two"], 16, 5),
+      ...section(["B", "Three"], 1, 6),
+      ...section(["C"], 5, 7),
+    ]);
+    // The three short sections of A become one group under A, not three single-chunk groups. B/One (2) and B/Three (1)
+    // cannot join the full B/Two (16), so they are offered to the document level: only there, with nothing nearer that
+    // fits, do they cross a parent heading, into A's group and C.
+    expect(shape(tree)).toEqual([["", 6], ["B/Two", 16], ["", 6]]);
+    for (const node of leafGroups(tree)) expect(node.leafCount).toBeLessThanOrEqual(16);
+    expect(checkSummaryTreeCoverage(tree)).toEqual([]);
+  });
+
+  it("leaves a short section alone when every neighbour is full", () => {
+    const { tree } = build([...section(["A", "One"], 16, 1), ...section(["A", "Two"], 1, 2), ...section(["A", "Three"], 16, 3)]);
+    expect(shape(tree)).toEqual([["A/One", 16], ["A/Two", 1], ["A/Three", 16]]);
+  });
+
+  it("turns an outline of single-chunk sections into groups of several chunks", () => {
+    // 120 headings with one chunk each, ten to a chapter: one group per section would be 120 single-chunk calls.
+    const paragraphs = Array.from({ length: 120 }, (_, i) => section([`Chapter ${Math.floor(i / 10)}`, `Clause ${i}`], 1, i)).flat();
+    const { tree } = build(paragraphs, { limits: { ...LIMITS, maxLeavesPerGroup: 12 } });
+    const groups = leafGroups(tree);
+    expect(groups.filter((node) => node.leafCount === 1)).toEqual([]);
+    expect(groups.map((node) => node.leafCount)).toEqual(new Array(12).fill(10));
+    // Every group stays inside its chapter.
+    expect(groups.map((node) => node.headingPath.join("/"))).toEqual(Array.from({ length: 12 }, (_, chapter) => `Chapter ${chapter}`));
+  });
+
+  it("groups upper levels by shared heading prefix and gives fewer than the minimum fan-in no parent of their own", () => {
+    const describeNode = (tree: SummaryTree, index: number): unknown => {
       const node = tree.nodes[index]!;
-      return node.childKind === "leaf" ? node.headingPath.join("/") : { [node.headingPath.join("/") || "(root)"]: node.children.map(describeNode) };
+      return node.childKind === "leaf" ? node.headingPath.join("/") : { [node.headingPath.join("/") || "(root)"]: node.children.map((child) => describeNode(tree, child)) };
     };
-    expect(describeNode(tree.root!)).toEqual({
+    // Four groups in all fit one parent, so the three under "Report" wait for it: one root, no "Report" node inside it.
+    const small = build(headedDocument()).tree;
+    expect(describeNode(small, small.root!)).toEqual({ "(root)": ["Report", "Report/Revenue/By region", "Report", "Appendix"] });
+    expect(small.nodes[small.root!]).toMatchObject({ level: 2, parent: null, chunkStart: 0, chunkEnd: 76, pageStart: 1, pageEnd: 4, leafCount: 39 });
+
+    const chapter = (name: string, sections: number) => Array.from({ length: sections }, (_, i) => section([name, `${name}.${i + 1}`], 6, i)).flat();
+    const { tree } = build([...chapter("One", 5), ...chapter("Two", 2), ...chapter("Three", 4), ...section(["Appendix"], 7, 9)], { limits: { ...LIMITS, minFanIn: 4, maxFanIn: 8 } });
+    // Chapters One (5 sections) and Three (4) get a node each. Chapter Two's two sections do not: they sit under the root
+    // beside them, as does the lone appendix group.
+    expect(describeNode(tree, tree.root!)).toEqual({
       "(root)": [
-        { Report: ["Report", { "Report/Revenue": ["Report/Revenue", "Report/Revenue/By region"] }, "Report/Hiring", "Report/Outlook"] },
+        { One: ["One/One.1", "One/One.2", "One/One.3", "One/One.4", "One/One.5"] },
+        "Two/Two.1", "Two/Two.2",
+        { Three: ["Three/Three.1", "Three/Three.2", "Three/Three.3", "Three/Three.4"] },
         "Appendix",
       ],
     });
-    const root = tree.nodes[tree.root!]!;
-    expect(root).toMatchObject({ level: 4, parent: null, chunkStart: 0, chunkEnd: 76, pageStart: 1, pageEnd: 4, leafCount: 39 });
     for (const node of tree.nodes) expect(node.children.length === 1 && node.childKind === "node").toBe(false);
+    expect(checkSummaryTreeCoverage(tree)).toEqual([]);
+  });
+
+  it("does not grow a chain of single nodes above a deeply nested outline", () => {
+    // Ten headings nested one inside the next, each with its own text: the old rule gave one more level per heading.
+    const paragraphs = Array.from({ length: 10 }, (_, depth) => section(Array.from({ length: depth + 1 }, (_, i) => `H${i}`), 6, depth)).flat();
+    const { tree } = build(paragraphs, { limits: { ...LIMITS, minFanIn: 4, maxFanIn: 8 } });
+    const perLevel = new Map<number, number>();
+    for (const node of tree.nodes) perLevel.set(node.level, (perLevel.get(node.level) ?? 0) + 1);
+    // Eight of the ten groups share one parent (the fan-in maximum); the root holds it and the two outermost groups.
+    expect([...perLevel].sort(([a], [b]) => a - b)).toEqual([[1, 10], [2, 1], [3, 1]]);
+    expect(tree.nodes[tree.root!]!.children).toHaveLength(3);
+    expect(checkSummaryTreeCoverage(tree)).toEqual([]);
+  });
+
+  it("never passes the level limit, whatever the headings", () => {
+    for (const maxLevels of [2, 3, 4, 8]) {
+      const paragraphs = Array.from({ length: 400 }, (_, i) => section(Array.from({ length: 1 + (i % 9) }, (_, d) => `H${d}-${Math.floor(i / (3 + d))}`), 5, i)).flat();
+      const { tree } = build(paragraphs, { limits: { ...LIMITS, minFanIn: 4, maxFanIn: 8, maxLevels } });
+      expect(Math.max(...tree.nodes.map((node) => node.level))).toBeLessThanOrEqual(maxLevels);
+      expect(checkSummaryTreeCoverage(tree)).toEqual([]);
+      expect(tree.nodes[tree.root!]!.leafCount).toBe(paragraphs.length);
+      // Only the last allowed level may pass the fan-in maximum (one root over what is left).
+      for (const node of tree.nodes) if (node.childKind === "node" && node.level < maxLevels) expect(node.children.length).toBeLessThanOrEqual(8);
+    }
   });
 
   it("cuts a heading-less long document at its lowest-similarity boundaries", () => {
@@ -235,7 +304,8 @@ describe("grouping", () => {
         expect(node.children.length).toBeGreaterThanOrEqual(4);
         expect(node.children.length).toBeLessThanOrEqual(16);
       } else {
-        expect(node.children.length).toBeGreaterThanOrEqual(2);
+        // The root may hold fewer than the fan-in minimum; every other parent holds at least it.
+        expect(node.children.length).toBeGreaterThanOrEqual(node.parent === null ? 2 : 3);
         expect(node.children.length).toBeLessThanOrEqual(10);
       }
     }
@@ -285,12 +355,13 @@ describe("node hashes and reuse", () => {
     edited.splice(at, 0, { text: "A new paragraph about the Lisbon office opening", headingPath: ["Report", "Hiring"], topic: 4, page: 2 });
     const after = build(edited);
 
-    const group = after.tree.nodes.findIndex((node) => node.childKind === "leaf" && node.headingPath.join("/") === "Report/Hiring");
+    // The group that holds "Report/Hiring" (with the short "Report/Outlook" joined to it) is the third leaf group.
+    const group = 2;
+    expect(leafGroups(after.tree)[group]!.leafCount).toBe(leafGroups(before.tree)[group]!.leafCount + 1);
     expect(changedNodes(before, after).sort((a, b) => a - b)).toEqual([group, ...ancestors(after.tree, group)].sort((a, b) => a - b));
     // Boundaries elsewhere are the same groups of the same leaves, though every later chunk index moved.
-    const unchanged = after.groupsByLeafHashes.filter((_, index) => leafGroups(after.tree)[index]!.headingPath.join("/") !== "Report/Hiring");
-    expect(unchanged).toEqual(before.groupsByLeafHashes.filter((_, index) => leafGroups(before.tree)[index]!.headingPath.join("/") !== "Report/Hiring"));
-    expect(leafGroups(after.tree)[5]!.chunkStart).toBe(leafGroups(before.tree)[5]!.chunkStart + 2);
+    expect(after.groupsByLeafHashes.filter((_, index) => index !== group)).toEqual(before.groupsByLeafHashes.filter((_, index) => index !== group));
+    expect(leafGroups(after.tree)[3]!.chunkStart).toBe(leafGroups(before.tree)[3]!.chunkStart + 2);
   });
 
   it("changes only the edited group and its ancestors when a paragraph is inserted in a heading-less document", () => {
@@ -323,11 +394,9 @@ describe("node hashes and reuse", () => {
     const changed = changedNodes(before, after);
     const touched = after.tree.nodes.flatMap((node, index) => (node.headingPath.includes("Income") ? [index, ...ancestors(after.tree, index)] : []));
     expect(changed.sort((a, b) => a - b)).toEqual([...new Set(touched)].sort((a, b) => a - b));
-    const untouched = ["Report", "Report/Hiring", "Report/Outlook", "Appendix"];
-    for (const path of untouched) {
-      const index = after.tree.nodes.findIndex((node) => node.childKind === "leaf" && node.headingPath.join("/") === path);
-      expect(after.hashes[index]).toBe(before.hashes[index]);
-    }
+    // A group whose shared heading does not name the renamed section keeps its hash, even with that section's leaves in it.
+    expect(changed).toEqual(expect.arrayContaining([1]));
+    for (const index of [0, 2, 3]) expect(after.hashes[index]).toBe(before.hashes[index]);
   });
 
   it("excludes chunk ids, page numbers and position from node hashes", () => {
@@ -343,7 +412,7 @@ describe("node hashes and reuse", () => {
   it("changes every node hash with the prompt version, model, text settings, length target or key version", () => {
     const base = build(headedDocument()).hashes;
     const variants: SummaryTreeHashContext[] = [
-      { ...CONTEXT, promptVersion: "summary-tree-prompt@2" },
+      { ...CONTEXT, promptVersion: "summary-tree-prompt@next" },
       { ...CONTEXT, modelId: "example/other-model" },
       { ...CONTEXT, textGeneration: { ...CONTEXT.textGeneration, reasoningEffort: "low" } },
       { ...CONTEXT, lengthTargetWords: 200 },

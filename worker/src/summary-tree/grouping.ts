@@ -1,6 +1,13 @@
-import { headingPathKey, normalizeHeadingPath } from "./hash.js";
-import type { SummaryTreeLeaf } from "./leaves.js";
+import { normalizeHeadingPath } from "./hash.js";
 import { resolveSummaryTreeLimits, SummaryTreeInputError, type SummaryTreeLimits } from "./limits.js";
+
+/** The fields of a leaf that grouping reads. It never reads leaf text, so a caller need not hold it. */
+export interface SummaryTreeLeafRef {
+  chunkIndex: number;
+  headingPath: readonly string[];
+  pageStart: number | null;
+  pageEnd: number | null;
+}
 
 /**
  * One summary node. Nodes are stored children-first, so a node's index is larger than every index under it
@@ -129,18 +136,152 @@ interface FrontierItem {
 interface PlannedRun {
   start: number;
   end: number;
+  /** False: too few siblings for a parent of their own; the items are carried to the next layer as they are. */
+  merge: boolean;
+  /** False: the run becomes one node whatever its size (the last allowed level). */
+  cut: boolean;
+}
+
+/** A leaf group being formed: leaves `[from, to)` by position, and the heading path its leaves share. */
+interface LeafUnit {
+  from: number;
+  to: number;
+  path: string[];
+}
+
+function commonPrefix(a: readonly string[], b: readonly string[]): string[] {
+  const shared: string[] = [];
+  for (let i = 0; i < a.length && i < b.length && a[i] === b[i]; i++) shared.push(a[i]!);
+  return shared;
+}
+
+/**
+ * Joins a small group to its neighbour: left to right, two adjacent groups become one when at least one of them
+ * is under `min` and together they are at most `max`. The joined group carries the heading path both share.
+ */
+function mergeSmallNeighbours(items: LeafUnit[], min: number, max: number): LeafUnit[] {
+  const merged: LeafUnit[] = [];
+  for (const item of items) {
+    const previous = merged[merged.length - 1];
+    const size = item.to - item.from;
+    const previousSize = previous ? previous.to - previous.from : 0;
+    if (previous && previousSize + size <= max && (previousSize < min || size < min)) {
+      previous.to = item.to;
+      previous.path = commonPrefix(previous.path, item.path);
+    } else {
+      merged.push(item);
+    }
+  }
+  return merged;
+}
+
+/**
+ * Leaf groups of one document, as `[from, to)` leaf positions in order.
+ *
+ * 1. A section is a run of adjacent leaves with the same heading path. A section over `max` is cut at its
+ *    lowest adjacent-similarity boundaries (`cutBySimilarity`); every piece keeps at least `min` leaves.
+ * 2. A group under `min` leaves then joins a neighbour, deepest headings first: inside each heading, in document
+ *    order, two adjacent groups are joined when at least one is under `min` and together they fit `max`. What is
+ *    still small after its own heading has been tried is offered to its neighbours inside the parent heading,
+ *    and so on up to the document. So a short section joins its sibling sections under the same parent before
+ *    it can join anything further away, and it crosses a parent heading only when nothing nearer fits.
+ *
+ * Rule 2 relaxes the plan's "short sections never merge across a heading" on measured evidence: with one group
+ * per section however small, 340 of 1,067 leaf groups in the phase-0 corpus held a single chunk, each paying a
+ * model call to restate one chunk (docs/evals/summary-tree/phase0-2026-11-14.md, finding 9). A group that
+ * cannot join anything without passing `max` stays small.
+ *
+ * The rule is a pure function of the leaves' order, heading paths and adjacent similarities: no token count,
+ * page number or id takes part, so an edit moves boundaries only inside the heading it touches (or, for a group
+ * that changes between small and not small, its neighbours in the enclosing heading).
+ */
+export function groupSummaryTreeLeaves(
+  leaves: readonly SummaryTreeLeafRef[],
+  leafSimilarities: ArrayLike<number>,
+  limits: Pick<SummaryTreeLimits, "minLeavesPerGroup" | "maxLeavesPerGroup">,
+): LeafUnit[] {
+  const { minLeavesPerGroup: min, maxLeavesPerGroup: max } = limits;
+  const units: LeafUnit[] = [];
+  for (let sectionStart = 0; sectionStart < leaves.length;) {
+    const path = normalizeHeadingPath(leaves[sectionStart]!.headingPath);
+    const key = JSON.stringify(path);
+    let sectionEnd = sectionStart + 1;
+    while (sectionEnd < leaves.length && JSON.stringify(normalizeHeadingPath(leaves[sectionEnd]!.headingPath)) === key) sectionEnd++;
+    const count = sectionEnd - sectionStart;
+    const offset = sectionStart;
+    const starts = cutBySimilarity({ count, similarityAt: (gap) => leafSimilarities[offset + gap]!, min, max });
+    for (let i = 0; i < starts.length; i++) {
+      units.push({ from: offset + starts[i]!, to: offset + (starts[i + 1] ?? count), path });
+    }
+    sectionStart = sectionEnd;
+  }
+  // `pack(lo, hi, depth)`: units lo..hi share their first `depth` path segments. Each run of units that also
+  // share segment `depth` is a sub-heading, packed first; then everything directly inside this heading is merged.
+  const pack = (lo: number, hi: number, depth: number): LeafUnit[] => {
+    const items: LeafUnit[] = [];
+    for (let i = lo; i < hi;) {
+      const segment = units[i]!.path[depth];
+      if (segment === undefined) {
+        items.push(units[i]!);
+        i++;
+        continue;
+      }
+      let end = i + 1;
+      while (end < hi && units[end]!.path[depth] === segment) end++;
+      for (const item of pack(i, end, depth + 1)) items.push(item);
+      i = end;
+    }
+    return mergeSmallNeighbours(items, min, max);
+  };
+  return pack(0, units.length, 0);
+}
+
+/**
+ * Whether the run `[start, end)` and every adjacent item inside the heading one level up number at most `max`.
+ * Such a run is not given a parent yet: once paths are shortened it joins those neighbours under one parent.
+ */
+function fitsEnclosingRun(frontier: readonly FrontierItem[], start: number, end: number, max: number): boolean {
+  const path = frontier[start]!.path;
+  if (path.length === 0) return false;
+  const depth = path.length - 1;
+  const inside = (item: FrontierItem) => {
+    if (item.path.length < depth) return false;
+    for (let i = 0; i < depth; i++) if (item.path[i] !== path[i]) return false;
+    return true;
+  };
+  let size = end - start;
+  for (let left = start - 1; left >= 0 && size <= max && inside(frontier[left]!); left--) size++;
+  for (let right = end; right < frontier.length && size <= max && inside(frontier[right]!); right++) size++;
+  return size <= max;
+}
+
+/** Fewest further layers that bring `count` siblings down to one when every parent may have as few as `minFanIn` children. */
+function layersNeeded(count: number, minFanIn: number): number {
+  let layers = 0;
+  for (let capacity = 1; capacity < count; capacity *= minFanIn) layers++;
+  return layers;
 }
 
 /**
  * Builds one document's tree a level at a time.
  *
- * Leaf groups (level 1) exist as soon as the builder is constructed: a hard cut wherever the heading path
- * changes, one group per section that fits, and similarity cuts inside a section that does not. Each
- * `advance()` then adds one layer of parents: neighbours with the same path merge first; when no two
- * neighbours share a path, the deepest paths lose their last segment and the merge is tried again. A run of
- * siblings over the fan-in maximum is cut by the similarity of the siblings' summary vectors, which is why
- * upper layers wait for the caller: `vectorsNeeded()` names the nodes whose summaries must be embedded first.
- * A lone sibling is carried up as it is rather than summarized again, so no node has exactly one child.
+ * Leaf groups (level 1) exist as soon as the builder is constructed (`groupSummaryTreeLeaves`). Each
+ * `advance()` then adds one layer of parents:
+ *
+ * - Neighbours grouped by the same heading path form a run. A run of at least `minFanIn` siblings gets a parent,
+ *   unless it and its neighbours inside the heading one level up would fit one parent together: then it waits
+ *   for them. A smaller run is carried up as it is, and joins its parent heading's siblings once paths are
+ *   shortened. When no run gets a parent, the deepest paths lose their last segment and the runs are formed
+ *   again, until one does or every path is empty (the whole frontier is then one run and gets the root,
+ *   however few it holds). So a deeply nested outline does not grow a chain of near-identical summaries above
+ *   its real sections (the phase-0 eval measured a nine-level tree whose top five levels held one node each),
+ *   and no node ever has exactly one child.
+ * - A run over the fan-in maximum is cut by the similarity of the siblings' summary vectors, which is why upper
+ *   layers wait for the caller: `vectorsNeeded()` names the nodes whose summaries must be embedded first.
+ * - Depth is bounded by `maxLevels`. A layer shaped by headings may shrink the frontier very little, so it is
+ *   taken only if the layers left after it would still suffice with every later parent at `minFanIn` children.
+ *   Otherwise headings are ignored for that layer and the whole frontier is cut by similarity; at the last
+ *   allowed level whatever remains goes under one root.
  */
 export class SummaryTreeBuilder {
   readonly nodes: SummaryTreeNode[] = [];
@@ -148,8 +289,10 @@ export class SummaryTreeBuilder {
   private readonly limits: SummaryTreeLimits;
   private frontier: FrontierItem[] = [];
   private plan: PlannedRun[] | null = null;
+  /** Highest level of any node so far. */
+  private top = 1;
 
-  constructor(leaves: readonly SummaryTreeLeaf[], leafSimilarities: ArrayLike<number>, limitOverrides?: Partial<SummaryTreeLimits>) {
+  constructor(leaves: readonly SummaryTreeLeafRef[], leafSimilarities: ArrayLike<number>, limitOverrides?: Partial<SummaryTreeLimits>) {
     this.limits = resolveSummaryTreeLimits(limitOverrides);
     if (leaves.length > 0 && leafSimilarities.length !== leaves.length - 1) {
       throw new SummaryTreeInputError(`expected ${leaves.length - 1} leaf similarities, got ${leafSimilarities.length}`);
@@ -158,36 +301,22 @@ export class SummaryTreeBuilder {
     for (let i = 1; i < leaves.length; i++) {
       if (leaves[i]!.chunkIndex <= leaves[i - 1]!.chunkIndex) throw new SummaryTreeInputError("summary tree leaves must be in increasing chunk order");
     }
-    const { minLeavesPerGroup: min, maxLeavesPerGroup: max } = this.limits;
-    let sectionStart = 0;
-    while (sectionStart < leaves.length) {
-      const path = normalizeHeadingPath(leaves[sectionStart]!.headingPath);
-      const key = JSON.stringify(path);
-      let sectionEnd = sectionStart + 1;
-      while (sectionEnd < leaves.length && headingPathKey(leaves[sectionEnd]!.headingPath) === key) sectionEnd++;
-      const count = sectionEnd - sectionStart;
-      const offset = sectionStart;
-      const starts = cutBySimilarity({ count, similarityAt: (gap) => leafSimilarities[offset + gap]!, min, max });
-      for (let i = 0; i < starts.length; i++) {
-        const from = offset + starts[i]!;
-        const to = offset + (starts[i + 1] ?? count);
-        let pageStart: number | null = null;
-        let pageEnd: number | null = null;
-        const children: number[] = [];
-        for (let position = from; position < to; position++) {
-          const leaf = leaves[position]!;
-          children.push(leaf.chunkIndex);
-          if (leaf.pageStart !== null) pageStart = pageStart === null ? leaf.pageStart : Math.min(pageStart, leaf.pageStart);
-          if (leaf.pageEnd !== null) pageEnd = pageEnd === null ? leaf.pageEnd : Math.max(pageEnd, leaf.pageEnd);
-        }
-        this.nodes.push({
-          level: 1, childKind: "leaf", children, parent: null,
-          chunkStart: children[0]!, chunkEnd: children[children.length - 1]!,
-          pageStart, pageEnd, headingPath: path, leafCount: children.length,
-        });
-        this.frontier.push({ node: this.nodes.length - 1, path, key });
+    for (const unit of groupSummaryTreeLeaves(leaves, leafSimilarities, this.limits)) {
+      let pageStart: number | null = null;
+      let pageEnd: number | null = null;
+      const children: number[] = [];
+      for (let position = unit.from; position < unit.to; position++) {
+        const leaf = leaves[position]!;
+        children.push(leaf.chunkIndex);
+        if (leaf.pageStart !== null) pageStart = pageStart === null ? leaf.pageStart : Math.min(pageStart, leaf.pageStart);
+        if (leaf.pageEnd !== null) pageEnd = pageEnd === null ? leaf.pageEnd : Math.max(pageEnd, leaf.pageEnd);
       }
-      sectionStart = sectionEnd;
+      this.nodes.push({
+        level: 1, childKind: "leaf", children, parent: null,
+        chunkStart: children[0]!, chunkEnd: children[children.length - 1]!,
+        pageStart, pageEnd, headingPath: unit.path, leafCount: children.length,
+      });
+      this.frontier.push({ node: this.nodes.length - 1, path: unit.path, key: JSON.stringify(unit.path) });
     }
   }
 
@@ -200,25 +329,52 @@ export class SummaryTreeBuilder {
     return this.done && this.frontier.length === 1 ? this.frontier[0]!.node : null;
   }
 
-  /** Runs of neighbours that share a path, shortening the deepest paths until at least one run can merge. */
+  /** Nodes without a parent yet, in document order. */
+  get frontierNodes(): number[] {
+    return this.frontier.map((item) => item.node);
+  }
+
   private planStep(): PlannedRun[] {
     if (this.plan) return this.plan;
+    const { minFanIn, maxFanIn, maxLevels } = this.limits;
+    const count = this.frontier.length;
+    const remaining = maxLevels - this.top;
+    const whole = (cut: boolean): PlannedRun[] => {
+      this.frontier = this.frontier.map((item) => (item.path.length === 0 ? item : { node: item.node, path: [], key: "[]" }));
+      return (this.plan = [{ start: 0, end: count, merge: true, cut }]);
+    };
+    // The last allowed level: one root over whatever is left.
+    if (remaining <= 1) return whole(false);
+    let frontier = this.frontier;
     for (;;) {
       const runs: PlannedRun[] = [];
       let mergeable = false;
-      for (let start = 0; start < this.frontier.length;) {
+      // Most items the next frontier can hold: a cut run leaves at most one piece per `minFanIn` siblings.
+      let nextAtMost = 0;
+      for (let start = 0; start < count;) {
         let end = start + 1;
-        while (end < this.frontier.length && this.frontier[end]!.key === this.frontier[start]!.key) end++;
-        if (end - start > 1) mergeable = true;
-        runs.push({ start, end });
+        while (end < count && frontier[end]!.key === frontier[start]!.key) end++;
+        const size = end - start;
+        // Enough siblings for a parent, unless the enclosing heading's siblings would all fit one parent too: then
+        // the run waits for them (below), and the tree gets one node instead of a node inside a node.
+        const merge = size === count || (size >= minFanIn && !fitsEnclosingRun(frontier, start, end, maxFanIn));
+        if (merge) mergeable = true;
+        nextAtMost += !merge ? size : size <= maxFanIn ? 1 : Math.floor(size / minFanIn);
+        runs.push({ start, end, merge, cut: true });
         start = end;
       }
-      if (mergeable) return (this.plan = runs);
+      if (mergeable) {
+        // A layer shaped by headings may shrink the frontier very little. Take it only if the layers left after
+        // it would still do with every later parent at the minimum; otherwise cut the whole frontier by similarity.
+        if (layersNeeded(nextAtMost, minFanIn) > remaining - 1) return whole(true);
+        this.frontier = frontier;
+        return (this.plan = runs);
+      }
       let deepest = 0;
-      for (const item of this.frontier) deepest = Math.max(deepest, item.path.length);
-      // Distinct neighbours cannot all have the empty path, so there is always a segment left to drop.
+      for (const item of frontier) deepest = Math.max(deepest, item.path.length);
+      // With every path empty the frontier is one run, which always merges, so there is a segment left to drop.
       if (deepest === 0) throw new SummaryTreeInputError("summary tree frontier cannot be reduced");
-      this.frontier = this.frontier.map((item) => {
+      frontier = frontier.map((item) => {
         if (item.path.length !== deepest) return item;
         const path = item.path.slice(0, -1);
         return { node: item.node, path, key: JSON.stringify(path) };
@@ -234,7 +390,7 @@ export class SummaryTreeBuilder {
     if (this.done) return [];
     const needed: number[] = [];
     for (const run of this.planStep()) {
-      if (run.end - run.start <= this.limits.maxFanIn) continue;
+      if (!run.merge || !run.cut || run.end - run.start <= this.limits.maxFanIn) continue;
       for (let position = run.start; position < run.end; position++) needed.push(this.frontier[position]!.node);
     }
     return needed;
@@ -249,12 +405,12 @@ export class SummaryTreeBuilder {
     const next: FrontierItem[] = [];
     for (const run of runs) {
       const count = run.end - run.start;
-      if (count === 1) {
-        next.push(this.frontier[run.start]!);
+      if (!run.merge || count === 1) {
+        for (let position = run.start; position < run.end; position++) next.push(this.frontier[position]!);
         continue;
       }
       let starts = [0];
-      if (count > max) {
+      if (run.cut && count > max) {
         const vector = (position: number) => {
           const node = this.frontier[run.start + position]!.node;
           const found = vectorOf?.(node);
@@ -268,10 +424,6 @@ export class SummaryTreeBuilder {
       for (let i = 0; i < starts.length; i++) {
         const from = run.start + starts[i]!;
         const to = run.start + (starts[i + 1] ?? count);
-        if (to - from === 1) {
-          next.push(this.frontier[from]!);
-          continue;
-        }
         const parent = this.nodes.length;
         const children: number[] = [];
         let level = 0;
@@ -293,6 +445,7 @@ export class SummaryTreeBuilder {
           chunkStart: this.nodes[children[0]!]!.chunkStart, chunkEnd: this.nodes[children[children.length - 1]!]!.chunkEnd,
           pageStart, pageEnd, headingPath: path, leafCount,
         });
+        this.top = Math.max(this.top, level + 1);
         created.push(parent);
         next.push({ node: parent, path, key });
       }
@@ -314,7 +467,7 @@ export class SummaryTreeBuilder {
  * similarity cut needs, after `onLevel` has seen them.
  */
 export async function buildSummaryTree(args: {
-  leaves: readonly SummaryTreeLeaf[];
+  leaves: readonly SummaryTreeLeafRef[];
   leafSimilarities: ArrayLike<number>;
   limits?: Partial<SummaryTreeLimits>;
   onLevel?: (nodeIndexes: number[], builder: SummaryTreeBuilder) => void | Promise<void>;

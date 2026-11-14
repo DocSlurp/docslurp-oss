@@ -6,6 +6,8 @@ import type { StoredSummary } from "./reuse.js";
 /** Characters of source one prompt may carry; a full leaf group is well under it. */
 export const SUMMARY_TREE_MAX_PROMPT_CONTENT_CHARS = 100_000;
 const MAX_TITLE_CHARS = 200;
+/** The delimiter `buildTrustedDocumentTaskPrompt` wraps untrusted text in, in any case and spacing. */
+const UNTRUSTED_BLOCK_TAG_RE = /<\s*\/?\s*untrusted_document_content\s*>/gi;
 
 /**
  * Output tokens for the first attempt. Generous on purpose: the length is a target stated in words, and
@@ -25,7 +27,8 @@ export interface SummaryPromptPart {
  * The prompt for one node. The instruction is fixed: there is no tenant-supplied wording, and no language
  * code is passed (the model is told to write in the language of the source). Everything that comes from the
  * document, the heading path and child summaries included, goes inside the untrusted block: headings are
- * document text, and a child summary is model output over document text.
+ * document text, and a child summary is model output over document text. The block's own delimiter tags are
+ * removed from that text first, so a document cannot close the block and continue as instructions.
  */
 export function buildSummaryTreePrompt(args: {
   parts: readonly SummaryPromptPart[];
@@ -41,7 +44,7 @@ export function buildSummaryTreePrompt(args: {
       const title = part.title?.trim();
       return title ? `${title}\n${part.text.trim()}` : part.text.trim();
     }).filter((part) => part.length > 0),
-  ].join("\n\n");
+  ].join("\n\n").replace(UNTRUSTED_BLOCK_TAG_RE, "");
   return buildTrustedDocumentTaskPrompt({
     instruction: "Summarize this part of a document for a search index. Cover its topics, named entities, figures and conclusions, using only what the text states.",
     outputContract: `Write in the language of the source. Line 1: a short title. Then a summary of about ${words} words. Plain text only, with no markdown, labels or commentary.`,

@@ -44,7 +44,7 @@ describe("summary prompt", () => {
     const a = buildSummaryTreePrompt({ parts: [{ text: "one" }] });
     const b = buildSummaryTreePrompt({ parts: [{ text: "two" }], headingPath: ["Other"] });
     expect(a.system).toBe(b.system);
-    expect(a.system).toContain("about 150 words");
+    expect(a.system).toContain("about 120 words");
     const cut = buildSummaryTreePrompt({ parts: [{ text: "word ".repeat(200) }], maxContentChars: 100 });
     expect(cut.truncated).toBe(true);
     expect(cut.droppedChars).toBeGreaterThan(0);
