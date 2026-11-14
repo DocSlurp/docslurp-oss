@@ -593,7 +593,7 @@ describe("chart export tier: origin defaults, per-request override and its guard
     expect((await post(appFor("u1", undefined, { session: true }), "/v1/runs/run/reprocess", { chartExport: { tier: "models" } })).status).toBe(201);
   });
 
-  it("a contributor (an org member uploading to the default project) cannot read charts with AI above the project's tier", async () => {
+  it("a contributor (an org member uploading to the default project) cannot reprocess at all, at any tier (council L3)", async () => {
     vi.stubEnv("DOCSLURP_CHART_EXPORT", "on");
     await setProjectTier("wd", "free");
     await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total, artifacts)
@@ -601,12 +601,11 @@ describe("chart export tier: origin defaults, per-request override and its guard
     await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source, canonical_id)
       values ('dwd', 'o1', 'u2', 'wd', 'runwd', 'c.pdf', 'application/pdf', 'k3', 'completed', 3, 'counted', 'c3')`;
     const before = await runCount();
+    // Reprocessing spends credits on existing content: editors only, so the member is refused before any tier check.
     const member = await post(appFor("u2", undefined, { session: true }), "/v1/runs/runwd/reprocess", { chartExport: { tier: "models" } });
     expect(member.status).toBe(403);
-    expect(await member.json()).toMatchObject({ error: { code: "chart_export_models_forbidden" } });
+    expect(await post(appFor("u2", undefined, { session: true }), "/v1/runs/runwd/reprocess", {}).then((response) => response.status)).toBe(403);
     expect(await runCount()).toBe(before);
-    // The member may still reprocess at the project's own tier.
-    expect((await post(appFor("u2", undefined, { session: true }), "/v1/runs/runwd/reprocess", {})).status).toBe(201);
   });
 
   it("checks access before the tier: a wrong-scope key gets 403 and another org 404, never the tier refusal (L4/L6)", async () => {
@@ -677,8 +676,10 @@ describe("chart export tier: origin defaults, per-request override and its guard
     expect(billed.estimate.basis).toMatch(/chart export/);
   });
 
-  it("a contributor's plain reprocess of an old models run on a project now off runs at off (R2-M1)", async () => {
+  it("a project editor's plain reprocess of an old models run on a project now off runs at off (R2-M1)", async () => {
     vi.stubEnv("DOCSLURP_CHART_EXPORT", "on");
+    // A project editor without an elevated org role: reprocessing needs edit access (council L3); the tier cap is the point.
+    await sql`insert into project_members (project_id, user_id, role) values ('wd', 'u2', 'editor')`;
     await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total, artifacts)
       values ('runwd2', 'o1', 'u2', 'wd', 'upload', 'completed', 'index', ${sql.json({ ...JSON.parse(JSON.stringify(defaultPipelineFeatures)), chartExport: { tier: "models", formats: ["description", "mermaid"], diagrams: true } })}, 1, 3, '{}')`;
     await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source, canonical_id)
