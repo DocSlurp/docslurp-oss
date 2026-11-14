@@ -163,11 +163,19 @@ export function combineSummaryTreeOutcomes(plan: SummaryTreeSearchPlan, children
 
 // --- Deadline ---------------------------------------------------------------------------------------------------------
 
-/** Test and measurement hook: called with every settled leg (see scripts/summary-tree-deadline.mts). */
-export type SummaryTreeLegObserver = (sample: { vectorMs: number; treeMs: number | null; deadlineMs: number; skipped: SummaryTreeSearchSkipReason | null }) => void;
+/**
+ * Test and measurement hook: called with every leg once both it and the vector leg have settled, with the leg's own
+ * time even when the search had already given up on it. `ignoreDeadline` lets every leg finish (its full time,
+ * Postgres read included, is what calibrating `SUMMARY_TREE_DEADLINE_FACTOR` and `_GRACE_MS` needs); it is for
+ * measurement runs only (SUMMARY_TREE_DEADLINE_MEASURE in search-summary-tree.db.test.ts) and nothing in the
+ * server sets it.
+ */
+export type SummaryTreeLegObserver = (sample: { vectorMs: number; treeMs: number; deadlineMs: number; skipped: SummaryTreeSearchSkipReason | null }) => void;
 let legObserver: SummaryTreeLegObserver | null = null;
-export function observeSummaryTreeLegs(observer: SummaryTreeLegObserver | null): void {
+let ignoreDeadlineForMeasurement = false;
+export function observeSummaryTreeLegs(observer: SummaryTreeLegObserver | null, options: { ignoreDeadline?: boolean } = {}): void {
   legObserver = observer;
+  ignoreDeadlineForMeasurement = observer !== null && options.ignoreDeadline === true;
 }
 
 /**
@@ -185,7 +193,6 @@ export async function runSummaryTreeLegWithDeadline(args: {
 }): Promise<SummaryTreeLegResult> {
   let expired = false;
   const elapsed = () => performance.now() - args.startedAt;
-  let treeMs: number | null = null;
   const work = Promise.resolve()
     .then(() => args.run(() => expired))
     .catch((error: unknown) => {
@@ -193,22 +200,14 @@ export async function runSummaryTreeLegWithDeadline(args: {
       console.warn(`[search] summary-tree leg failed: ${error instanceof Error ? error.name : "error"}`);
       return skippedResult("error", elapsed());
     })
-    .then((result) => {
-      treeMs = elapsed();
-      return { ...result, ms: treeMs };
-    });
+    .then((result) => ({ ...result, ms: elapsed() }));
   let timer: ReturnType<typeof setTimeout> | undefined;
-  let vectorMs = 0;
-  let deadlineMs = 0;
-  const deadline = args.vectorSettled.catch(() => elapsed()).then((ms) => {
-    vectorMs = ms;
-    deadlineMs = summaryTreeDeadlineMs(ms);
-    return new Promise<"deadline">((resolve) => {
-      timer = setTimeout(() => resolve("deadline"), Math.max(0, deadlineMs - elapsed()));
-      timer.unref?.();
-    });
-  });
-  const winner = await Promise.race([work, deadline]);
+  const vectorSettled = args.vectorSettled.catch(() => elapsed());
+  const deadline = vectorSettled.then((vectorMs) => new Promise<"deadline">((resolve) => {
+    timer = setTimeout(() => resolve("deadline"), Math.max(0, summaryTreeDeadlineMs(vectorMs) - elapsed()));
+    timer.unref?.();
+  }));
+  const winner = await (ignoreDeadlineForMeasurement ? work : Promise.race([work, deadline]));
   if (timer) clearTimeout(timer);
   let result: SummaryTreeLegResult;
   if (winner === "deadline") {
@@ -220,12 +219,17 @@ export async function runSummaryTreeLegWithDeadline(args: {
   }
   recordSearchPhase("summaryTree", result.ms);
   if (result.skipped) countSearchEvent("summaryTreeSkipped");
-  if (legObserver) {
-    const observer = legObserver;
-    // The abandoned leg's own time is what a calibration needs, so report once both are known.
-    void Promise.all([work, args.vectorSettled.catch(() => elapsed())]).then(([settled, vector]) => {
+  const observer = legObserver;
+  if (observer || result.skipped === "deadline") {
+    // Once the abandoned leg does settle, its own time is known: what a calibration of the deadline needs.
+    void Promise.all([work, vectorSettled]).then(([settled, vectorMs]) => {
+      const deadlineMs = summaryTreeDeadlineMs(vectorMs);
+      if (result.skipped === "deadline") {
+        // Its time stops before the Postgres read (the leg was told to stop), so it is a lower bound.
+        console.info(`[search-timing] summaryTreeLate vector=${Math.round(vectorMs)} tree=${Math.round(settled.ms)} deadline=${Math.round(deadlineMs)}`);
+      }
       try {
-        observer({ vectorMs: vector, treeMs: settled.ms, deadlineMs: summaryTreeDeadlineMs(vector), skipped: result.skipped ?? null });
+        observer?.({ vectorMs, treeMs: settled.ms, deadlineMs, skipped: result.skipped ?? null });
       } catch { /* a measurement hook never affects search */ }
     });
   }

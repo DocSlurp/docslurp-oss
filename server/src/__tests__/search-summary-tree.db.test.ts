@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -667,6 +667,50 @@ describe("summary tree: deadline and failure", () => {
     expect(response.timings?.summaryTreeTableMissing).toBe(1);
     expect(response.results.length).toBeGreaterThan(0);
   });
+});
+
+/**
+ * Local deadline measurement (not a pass/fail test). Every leg is allowed to finish, and the report gives the
+ * distribution of the tree leg's time against the vector leg's, the skip rate at the constants in summary-tree.ts,
+ * and the smallest grace that keeps skips at or under 1% for a few factors:
+ *
+ *   SUMMARY_TREE_DEADLINE_MEASURE=1000 SUMMARY_TREE_DEADLINE_OUT=report.json pnpm --filter @docslurp/server exec vitest run src/__tests__/search-summary-tree.db.test.ts -t "deadline factors"
+ *
+ * This corpus is small and on local disk; the constants are set from the same numbers on production storage, where
+ * `[search-timing]` lines carry `vector=`, `summaryTree=` and, for a skipped leg, a `summaryTreeLate` line.
+ */
+describe("summary tree: deadline factors", () => {
+  const rounds = Number(process.env.SUMMARY_TREE_DEADLINE_MEASURE ?? 0);
+  it.runIf(rounds > 0)("measures the tree leg against the vector leg", async () => {
+    const samples: Array<{ vectorMs: number; treeMs: number }> = [];
+    tree.observeSummaryTreeLegs((sample) => samples.push(sample), { ignoreDeadline: true });
+    let seed = 5;
+    const random = () => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648; };
+    for (let round = 0; round < rounds; round += 1) {
+      const queryVector = new Array<number>(DIM).fill(0).map(() => random() - 0.5);
+      const norm = Math.hypot(...queryVector);
+      await run({ summaryTree: "guide", queryVector: queryVector.map((value) => value / norm) });
+    }
+    await vi.waitFor(() => expect(samples.length).toBe(rounds), { timeout: 30_000 });
+    const percentile = (values: number[], p: number) => [...values].sort((a, b) => a - b)[Math.min(values.length - 1, Math.floor(values.length * p))]!;
+    const skipRate = (factor: number, grace: number) => samples.filter((sample) => sample.treeMs > Math.max(sample.vectorMs * factor, sample.vectorMs + grace)).length / samples.length;
+    const smallestGrace = (factor: number) => { for (let grace = 0; grace <= 2_000; grace += 5) if (skipRate(factor, grace) <= 0.01) return grace; return null; };
+    const { SUMMARY_TREE_DEADLINE_FACTOR: factor, SUMMARY_TREE_DEADLINE_GRACE_MS: grace } = await import("@docslurp/shared");
+    const report = {
+      searches: samples.length,
+      vectorMs: { p50: percentile(samples.map((sample) => sample.vectorMs), 0.5), p95: percentile(samples.map((sample) => sample.vectorMs), 0.95) },
+      treeMs: { p50: percentile(samples.map((sample) => sample.treeMs), 0.5), p95: percentile(samples.map((sample) => sample.treeMs), 0.95) },
+      treeMinusVectorMs: { p50: percentile(samples.map((sample) => sample.treeMs - sample.vectorMs), 0.5), p95: percentile(samples.map((sample) => sample.treeMs - sample.vectorMs), 0.95), p99: percentile(samples.map((sample) => sample.treeMs - sample.vectorMs), 0.99) },
+      treeOverVector: { p50: percentile(samples.map((sample) => sample.treeMs / Math.max(sample.vectorMs, 0.001)), 0.5), p95: percentile(samples.map((sample) => sample.treeMs / Math.max(sample.vectorMs, 0.001)), 0.95), p99: percentile(samples.map((sample) => sample.treeMs / Math.max(sample.vectorMs, 0.001)), 0.99) },
+      skipRateAtCurrentConstants: { factor, graceMs: grace, rate: skipRate(factor, grace) },
+      smallestGraceMsForOnePercent: Object.fromEntries([1, 1.25, 1.5, 2, 3].map((value) => [value, smallestGrace(value)])),
+    };
+    const line = `[summary-tree-deadline] ${JSON.stringify(report, (_key, value) => typeof value === "number" ? Math.round(value * 100) / 100 : value)}\n`;
+    // Passing tests' console output is not shown, so the report goes to the file named by SUMMARY_TREE_DEADLINE_OUT, else to stderr.
+    if (process.env.SUMMARY_TREE_DEADLINE_OUT) await writeFile(process.env.SUMMARY_TREE_DEADLINE_OUT, line);
+    else process.stderr.write(line);
+    expect(samples.length).toBe(rounds);
+  }, 600_000);
 });
 
 describe("summaries table access", () => {

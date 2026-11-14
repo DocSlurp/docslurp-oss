@@ -2,13 +2,17 @@
 --
 -- 1. document_chunks (document_id, chunk_index).
 -- `guide` mode fetches the chunks a summary node covers with one query: up to five ranges of
--- `chunk_index BETWEEN chunk_start AND chunk_end` inside one document each. document_chunks had only
--- document_chunks_document_id_idx, so each range read every chunk of its document and filtered: on a document of
--- 62,000 chunks (about 20,000 pages) that is the whole document per search. With this index a range is one index
--- range scan of the rows it returns, whatever the document size. Measurements are in the pull request.
+-- `chunk_index BETWEEN chunk_start AND chunk_end`, each inside one document. document_chunks had only
+-- document_chunks_document_id_idx, so each range read every chunk of its document and filtered.
+-- Measured on Postgres 17 (2026-11-14), 362,000 chunk rows of about 600 bytes: one document of 62,000 chunks
+-- (about 20,000 pages) and 10,000 documents of 30 chunks; five ranges of 12 chunks per query:
+--   62,000-chunk document: median 215 ms, p95 293 ms before (12,448 buffers per range); 0.13 ms, p95 0.19 ms after.
+--   30-chunk documents:    median 0.55 ms before; 0.28 ms after.
+--   Index: 0.9 s to build, 10 MB (the single-column index is 3.6 MB). 30,000 chunk inserts took 12.9 s with it and
+--   14.5 s without: no measurable write cost beside the full-text index.
 -- Built without CONCURRENTLY (migrations run in a transaction, as 0087 and 0152): the build holds a SHARE lock on
--- document_chunks, so chunk inserts wait for it while reads continue. The older single-column index stays; it is a
--- prefix of this one and can be dropped in a later release.
+-- document_chunks, so chunk inserts wait for it (about 2.4 s per million rows at the measured rate) while reads
+-- continue. The older single-column index stays; it is a prefix of this one and can be dropped in a later release.
 CREATE INDEX IF NOT EXISTS document_chunks_document_chunk_index_idx ON document_chunks (document_id, chunk_index);
 --> statement-breakpoint
 -- 2. Tree readiness rides the search eligibility hint.
