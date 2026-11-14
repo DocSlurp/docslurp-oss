@@ -9,7 +9,7 @@ export const OCR_PAGE_READER_MODES = ["off", "escalation", "all"] as const;
 export type OcrPageReaderMode = (typeof OCR_PAGE_READER_MODES)[number];
 
 export const OCR_PAGE_READER_METRIC = "ocr-page-reader";
-/** Pages per document the reader may read unless `DOCSLURP_OCR_PAGE_READER_MAX_PAGES` says otherwise. */
+/** Most pages one document may send to the reader unless `DOCSLURP_OCR_PAGE_READER_MAX_PAGES` says otherwise. */
 export const DEFAULT_OCR_PAGE_READER_MAX_PAGES = 2000;
 export const OCR_PAGE_READER_MAX_PAGES_LIMIT = 20_000;
 
@@ -23,7 +23,7 @@ export function ocrPageReaderMode(env: NodeJS.ProcessEnv = process.env): OcrPage
   return raw as OcrPageReaderMode;
 }
 
-/** `DOCSLURP_OCR_PAGE_READER_MAX_PAGES`: pages per document, 0..20000 (default 2000). Throws on anything else. */
+/** `DOCSLURP_OCR_PAGE_READER_MAX_PAGES`: the per-document page budget, 0..20000 (default 2000). Throws on anything else. */
 export function ocrPageReaderMaxPages(env: NodeJS.ProcessEnv = process.env): number {
   const raw = env.DOCSLURP_OCR_PAGE_READER_MAX_PAGES?.trim();
   if (!raw) return DEFAULT_OCR_PAGE_READER_MAX_PAGES;

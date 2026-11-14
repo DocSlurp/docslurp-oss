@@ -2,6 +2,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { BILLABLE_UNIT_METRICS, UNIT_CHARGE_PROVIDER } from "@docslurp/shared";
 
 import {
   EXTRACTOR_PLUGIN_API_VERSION, loadedPluginCapabilities, PAGE_READER_USAGE_PROPERTY, pageReaderUsageOf, registerExtractorPlugin, resetExtractorPluginsForTest,
@@ -94,7 +95,7 @@ describe("configuration", () => {
   });
 
   it("refuses an unknown mode", () => {
-    for (const value of ["on", "true", "1", "gpu", "escalation,all"]) {
+    for (const value of ["on", "true", "1", "fast", "escalation,all"]) {
       expect(() => ocrPageReaderMode({ DOCSLURP_OCR_PAGE_READER: value }), value).toThrow(/DOCSLURP_OCR_PAGE_READER must be one of/);
       expect(() => assertOcrPageReaderConfiguration({ DOCSLURP_OCR_PAGE_READER: value }, "vm"), value).toThrow(/must be one of/);
     }
@@ -203,7 +204,7 @@ describe("readPagesWithProvider", () => {
     const outcome = await outcomeWith([{ pageNumber: 1 }]);
     const sneaky: ReadImpl = async (job) => ({
       results: [{ key: job.pages[0]!.key, status: "read", markdown: "x" }],
-      usage: [{ provider: "price-card", model: "price-card", metric: "ingest-page-rich", amount: 1, unit: "page", costCents: 999, metadata: { unitCharge: true, orgId: "org-2" } }],
+      usage: [{ provider: UNIT_CHARGE_PROVIDER, model: UNIT_CHARGE_PROVIDER, metric: BILLABLE_UNIT_METRICS.richPage, amount: 1, unit: "page", costCents: 999, metadata: { unitCharge: true, orgId: "org-2" } }],
     });
     await readPagesWithProvider(outcome, reader(sneaky), ctx(state));
     const events = readerEvents(state);

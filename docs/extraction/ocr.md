@@ -261,7 +261,7 @@ not install unstructured at all; it comes with the `unstructured` vendor bundle.
 | `DOCSLURP_OCR_ESCALATION_MAX_PAGES` | `25` | Hosted reads per document. |
 | `DOCSLURP_OCR_ESCALATION_MAX_ATTEMPTS` | pages + a fifth (`30`) | Hosted requests per document, every page and retry included, counted in the durable vision attempt ledger. |
 | `DOCSLURP_OCR_PAGE_READER` | `off` | `escalation` or `all` to read pages with the page image reader plugin first (see [Page reader](#page-reader)). |
-| `DOCSLURP_OCR_PAGE_READER_MAX_PAGES` | `2000` | Page reader pages per document (0 to 20000). |
+| `DOCSLURP_OCR_PAGE_READER_MAX_PAGES` | `2000` | Most pages one document sends to the page reader (0 to 20000). |
 | `DOCSLURP_OCR_MAX_ATTEMPTS` | `3` | Recogniser attempts per page under `auto` (1 to 7). |
 | `DOCSLURP_OCR_LANGUAGE` | `auto` | Default language for projects left on `auto`. |
 | `DOCSLURP_OCR_MAX_LONG_EDGE` | `2000` | Long-edge cap in pixels (640 to 4000). Above 2000 is an explicit opt-in (see [Sizing](#sizing)). |
