@@ -604,6 +604,19 @@ class LayoutFactsTest(unittest.TestCase):
                 with self.subTest(pages=bad):
                     self.assertNotEqual(run('--pages', bad).returncode, 0)
 
+    def test_dots_cannot_use_up_the_rule_budget_and_a_page_over_it_is_unknown(self):
+        def page(rules):
+            return '<page width="612" height="792">' + ''.join(
+                f'<rule xMin="{a}" yMin="{b}" xMax="{c}" yMax="{d}"/>' for a, b, c, d in rules) + '</page>'
+        grid = [(72, 100 + 30 * r, 540, 100.5 + 30 * r) for r in range(6)] + [(72 + 117 * c, 100, 72.5 + 117 * c, 250) for c in range(5)]
+        dots = [(10 + (i % 500), 700 + i // 500, 10.5 + (i % 500), 700.5 + i // 500) for i in range(6000)]
+        xhtml = '<doc>' + page(dots + grid) + page(dots) + page(grid * 500) + '</doc>'
+        rules = facts.page_rules(xhtml, [0, 1, 2])
+        self.assertEqual(len(rules[0]), len(grid))          # the dots are dropped as they are read; the table is seen
+        self.assertEqual(facts.ruled_grids(rules[0])[0]['columns'], 4)
+        self.assertEqual(rules[1], [])                      # dots alone: known, no grid
+        self.assertIsNone(rules[2])                         # more usable rules than the budget: unknown, never cut short
+
     def test_unknown_inputs_are_null_never_zero(self):
         data = PdfBuilder().build() if hasattr(PdfBuilder(), 'build') else None
         if data is None:
@@ -1108,6 +1121,167 @@ class PageIndexTest(Scratch):
         for first, last, only in ((1, 32, None), (33, 40, None), (33, 40, [35, 39])):
             self.assertEqual(facts.layout_facts(path, None, None, None, first, last, pages=only, index=index),
                              facts.layout_facts(path, None, None, None, first, last, pages=only))
+
+
+
+class LayoutDocumentTest(Scratch):
+    """One open PDF for every chunk of a file (LayoutDocument): the same answers as a fresh open per chunk, each call under
+    its own deadline, and nothing but parsed objects carried from one call to the next."""
+
+    def chunked(self, path, size, last, document=None, index=None, content=True, only=None):
+        out = []
+        for first in range(1, last + 1, size):
+            chunk_last = min(first + size - 1, last)
+            pages = None if only is None else [n for n in only if first <= n <= chunk_last] or None
+            out.append(facts.layout_facts(path, None, None, None, first, chunk_last, content=content, pages=pages,
+                                          index=index, document=document))
+        return out
+
+    def test_chunks_through_one_document_equal_a_fresh_open_per_chunk(self):
+        import random
+        rng = random.Random(20261114)
+        checked = 0
+        for case in range(16):
+            path = self.write(TreeBuilder().build(random_tree(rng)), f'tree-{case}.pdf')
+            index = facts.page_index(path)
+            pages = index.pages if isinstance(index, facts.PageIndex) else 9
+            for content in (True, False):
+                for size, only in ((7, None), (32, None), (5, set(range(2, pages + 1, 3)))):
+                    with facts.LayoutDocument(path) as document:
+                        self.assertEqual(self.chunked(path, size, pages, document=document, content=content, only=only),
+                                         self.chunked(path, size, pages, content=content, only=only), (case, content, size))
+                        if isinstance(index, facts.PageIndex):
+                            self.assertEqual(self.chunked(path, size, pages, document=document, index=index, content=content, only=only),
+                                             self.chunked(path, size, pages, content=content, only=only), (case, content, size))
+                    checked += 1
+        self.assertGreater(checked, 90)
+
+    def test_images_and_walks_match_through_one_document(self):
+        b = PdfBuilder()
+        im = b.image(4, 4, solid_rgb(4, 4, (9, 9, 9)))
+        for n in range(1, 71):
+            b.page(place(10 * n, 10, 0, 0), {'Im': im}, rotate=90 * (n % 4))
+        path = self.write(b.build())
+        index = facts.page_index(path)
+        with facts.LayoutDocument(path) as document:
+            for first, last in ((1, 32), (33, 64), (65, 70), (1, 32)):
+                kept = facts.walk_document(path, first, last, index=index, document=document)
+                fresh = facts.walk_document(path, first, last, index=index)
+                self.assertEqual(sorted(kept), sorted(fresh))
+                for n in kept:
+                    self.assertEqual((kept[n].objnum, kept[n].rotate, kept[n].width, kept[n].height, kept[n].unknown),
+                                     (fresh[n].objnum, fresh[n].rotate, fresh[n].width, fresh[n].height, fresh[n].unknown))
+                    self.assertEqual([facts.placement_from_draw(d, kept[n]) for d in kept[n].draws],
+                                     [facts.placement_from_draw(d, fresh[n]) for d in fresh[n].draws])
+
+    def test_the_file_is_opened_once_and_the_root_is_not_reread_per_chunk(self):
+        data = TreeBuilder().build({'kids': ['P'] * 300})
+        path = self.write(data)
+        index = facts.page_index(path)
+        opened, loads = [0], [0]
+        original_init, original_load = facts.PdfFile.__init__, facts.PdfFile._parse_indirect
+
+        def counting_init(file, *args, **kwargs):
+            opened[0] += 1
+            original_init(file, *args, **kwargs)
+
+        def counting_load(file, offset, num):
+            loads[0] += 1
+            return original_load(file, offset, num)
+        facts.PdfFile.__init__, facts.PdfFile._parse_indirect = counting_init, counting_load
+        try:
+            with facts.LayoutDocument(path) as document:
+                self.chunked(path, 32, 300, document=document, index=index, content=False)
+            once, once_loads = opened[0], loads[0]
+            opened[0] = loads[0] = 0
+            self.chunked(path, 32, 300, index=index, content=False)
+        finally:
+            facts.PdfFile.__init__, facts.PdfFile._parse_indirect = original_init, original_load
+        self.assertEqual(once, 1)
+        self.assertEqual(opened[0], 10)
+        self.assertLess(once_loads, loads[0])
+
+    def test_each_call_has_its_own_deadline(self):
+        b = PdfBuilder()
+        im = b.image(4, 4, solid_rgb(4, 4, (9, 9, 9)))
+        for n in range(1, 11):
+            b.page(place(10, 10, 0, 0), {'Im': im})
+        path = self.write(b.build())
+        with facts.LayoutDocument(path) as document:
+            fresh = facts.layout_facts(path, None, None, None, 1, 10)
+            first = facts.layout_facts(path, None, None, None, 1, 10, document=document)
+            self.assertEqual(first, fresh)
+            late = facts.layout_facts(path, None, None, None, 1, 10, deadline=time.monotonic() - 1, document=document)
+            self.assertTrue(all(not page['known'] for page in late['pages']))
+            again = facts.layout_facts(path, None, None, None, 1, 10, deadline=time.monotonic() + 30, document=document)
+            self.assertEqual(again, fresh)
+
+    def test_an_unexpected_error_drops_the_open_file(self):
+        b = PdfBuilder()
+        im = b.image(4, 4, solid_rgb(4, 4, (9, 9, 9)))
+        for n in range(1, 6):
+            b.page(place(10, 10, 0, 0), {'Im': im})
+        path = self.write(b.build())
+        fresh = facts.layout_facts(path, None, None, None, 1, 5)
+        with facts.LayoutDocument(path) as document:
+            facts.layout_facts(path, None, None, None, 1, 5, document=document)
+            held = document._file
+            original = facts.Walker.walk_page
+
+            def failing(walker, walk, page, resources):
+                raise RecursionError('deep')
+            facts.Walker.walk_page = failing
+            try:
+                broken = facts.layout_facts(path, None, None, None, 1, 5, document=document)
+            finally:
+                facts.Walker.walk_page = original
+            self.assertTrue(all(page['reason'] == 'walker-error' for page in broken['pages']))
+            self.assertIsNone(document._file)
+            self.assertEqual(facts.layout_facts(path, None, None, None, 1, 5, document=document), fresh)
+            self.assertIsNot(document._file, held)
+            # Anything a call raises past the walker (not Unknown) drops it too.
+            original_pages = facts.indexed_pages
+
+            def raising(*_args, **_kwargs):
+                raise MemoryError()
+                yield  # pragma: no cover
+            facts.indexed_pages = raising
+            try:
+                with self.assertRaises(MemoryError):
+                    facts.walk_document(path, 1, 5, document=document)
+            finally:
+                facts.indexed_pages = original_pages
+            self.assertIsNone(document._file)
+            self.assertEqual(facts.layout_facts(path, None, None, None, 1, 5, document=document), fresh)
+
+    def test_whole_file_failures_are_answered_per_call_and_never_cached(self):
+        lying = self.write(TreeBuilder().build({'kids': [{'kids': ['P', 'P', 'P'], 'count': 5}, 'P']}), 'lying.pdf')
+        with facts.LayoutDocument(lying) as document:
+            for _ in range(2):
+                result = facts.layout_facts(lying, None, None, None, 1, 4, document=document)
+                self.assertEqual({page['reason'] for page in result['pages']}, {'page-tree-count'})
+                self.assertEqual(result['walkerUnknown'], {'reason': 'page-tree-count', 'pages': 4})
+                listed = facts.layout_facts(lying, None, None, None, 1, 4, pages=[2, 4], document=document)
+                self.assertEqual(listed['walkerUnknown'], {'reason': 'page-tree-count', 'pages': 2})
+        intact = self.write(TreeBuilder().build({'kids': ['P', 'P']}), 'intact.pdf')
+        self.assertNotIn('walkerUnknown', facts.layout_facts(intact, None, None, None, 1, 2))
+        garbage = self.write(b'%PDF-1.4 not a pdf', 'garbage.pdf')
+        before = len(os.listdir('/proc/self/fd'))
+        with facts.LayoutDocument(garbage) as document:
+            for _ in range(50):
+                with self.assertRaises(facts.Unknown):
+                    facts.walk_document(garbage, 1, 1, document=document)
+                self.assertIsNone(document._file)
+        self.assertEqual(len(os.listdir('/proc/self/fd')), before)   # a failed open keeps no descriptor
+
+    def test_a_document_is_bound_to_its_path(self):
+        a = self.write(TreeBuilder().build({'kids': ['P']}), 'a.pdf')
+        other = self.write(TreeBuilder().build({'kids': ['P']}), 'b.pdf')
+        with facts.LayoutDocument(a) as document:
+            with self.assertRaises(TypeError):
+                facts.walk_document(other, 1, 1, document=document)
+            with self.assertRaises(TypeError):
+                facts.walk_document(a, 1, 1, document=object())
 
 
 if __name__ == '__main__':
