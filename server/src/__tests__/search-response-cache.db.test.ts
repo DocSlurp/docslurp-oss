@@ -306,3 +306,131 @@ describe("search response cache isolation", () => {
     }
   });
 });
+
+describe("search response cache and the summary tree", () => {
+  const body = { q: "pump", project: WS.std, summaryTree: "include" as const };
+  const summary = { kind: "summary", id: "n1", documentId: "d1", filename: "a.pdf", level: 1, summary: "A model-written section summary.",
+    headingPath: [], pageStart: 1, pageEnd: 2, chunkStart: 0, chunkEnd: 7, relevance: 0.8 };
+  const answer = (summaryTree: Record<string, unknown>, summaries?: unknown[]) =>
+    async (_q: string, userId: string, options: { filters?: { projectId?: string } }) => ({
+      results: [{ id: `hit-for-${userId}-in-${options.filters?.projectId}` }],
+      sessionId: crypto.randomUUID(),
+      availability: { status: "complete", isPartial: false, scope: { projectId: options.filters?.projectId, runId: null } },
+      summaryTree,
+      ...(summaries ? { summaries } : {}),
+    });
+
+  it("passes the request's summaryTree to the search and returns its outcome and summaries", async () => {
+    hybridSearch.mockImplementationOnce(answer({ requested: "include", applied: "include", ms: 12 }, [summary]));
+    const response = await post({ key: "a1" }, body);
+    expect(response.status).toBe(200);
+    expect(hybridSearch.mock.calls[0]![2]).toMatchObject({ summaryTree: "include" });
+    expect(response.json.summaryTree).toEqual({ requested: "include", applied: "include", ms: 12 });
+    expect(response.json.summaries).toEqual([summary]);
+    // A request that does not ask sends no override and gets no field.
+    const plain = await post({ key: "a1" }, { q: "pump", project: WS.std });
+    expect(hybridSearch.mock.calls[1]![2].summaryTree).toBeUndefined();
+    expect(plain.json).not.toHaveProperty("summaryTree");
+    expect(plain.json).not.toHaveProperty("summaries");
+  });
+
+  it("rejects an unknown summaryTree value", async () => {
+    expect((await post({ key: "a1" }, { q: "pump", project: WS.std, summaryTree: "always" })).status).toBe(400);
+    expect(hybridSearch).not.toHaveBeenCalled();
+  });
+
+  it("stores an answer only when the tree applied as requested", async () => {
+    for (const skipped of ["deadline", "not-ready", "error", "mode"] as const) {
+      routes.clearSearchResponseCacheForTests();
+      hybridSearch.mockClear();
+      hybridSearch.mockImplementationOnce(answer({ requested: "include", applied: "off", skipped, ms: 60 }));
+      const first = await post({ key: "a1" }, body);
+      expect(first.json.summaryTree).toMatchObject({ applied: "off", skipped });
+      // Not replayed: the next identical request searches again, and this time the tree applies.
+      hybridSearch.mockImplementationOnce(answer({ requested: "include", applied: "include", ms: 9 }, [summary]));
+      const second = await post({ key: "a1" }, body);
+      expect([skipped, cachedReplay(second.json), hybridSearch.mock.calls.length]).toEqual([skipped, false, 2]);
+      expect(second.json.summaryTree).toMatchObject({ applied: "include" });
+      // That one is stored and replayed with its summaries.
+      const third = await post({ key: "a1" }, body);
+      expect(cachedReplay(third.json)).toBe(true);
+      expect(third.json.summaries).toEqual([summary]);
+      expect(hybridSearch).toHaveBeenCalledTimes(2);
+    }
+    // A sub-search answer that applied `guide` for an `include` request is not what was asked either.
+    routes.clearSearchResponseCacheForTests();
+    hybridSearch.mockClear();
+    hybridSearch.mockImplementation(answer({ requested: "include", applied: "guide", ms: 9 }));
+    try {
+      await post({ key: "a1" }, body);
+      expect(cachedReplay((await post({ key: "a1" }, body)).json)).toBe(false);
+      expect(hybridSearch).toHaveBeenCalledTimes(2);
+    } finally {
+      hybridSearch.mockImplementation(async (_q: string, userId: string, options: { filters?: { projectId?: string } }) => ({
+        results: [{ id: `hit-for-${userId}-in-${options.filters?.projectId}` }],
+        sessionId: crypto.randomUUID(),
+        availability: { status: "complete", isPartial: false, scope: { projectId: options.filters?.projectId, runId: null } },
+      }));
+    }
+  });
+
+  it("keys on summaryTree: an answer shaped by the tree is never replayed for a request that did not ask", async () => {
+    hybridSearch.mockImplementationOnce(answer({ requested: "include", applied: "include", ms: 9 }, [summary]));
+    await post({ key: "a1" }, body);
+    const plain = await post({ key: "a1" }, { q: "pump", project: WS.std });
+    expect(cachedReplay(plain.json)).toBe(false);
+    expect(plain.json).not.toHaveProperty("summaries");
+    const guide = await post({ key: "a1" }, { ...body, summaryTree: "guide" });
+    expect(cachedReplay(guide.json)).toBe(false);
+    expect(hybridSearch).toHaveBeenCalledTimes(3);
+  });
+
+  it("drops cached tree answers on a readiness hint: a withdrawal at once, an arrival within the debounce window", async () => {
+    vi.stubEnv("SEARCH_ELIGIBLE_DEBOUNCE_MS", "0");
+    const { handleSearchEligibilityHint } = await import("../search/eligible-documents.js");
+    hybridSearch.mockImplementation(answer({ requested: "include", applied: "include", ms: 9 }, [summary]));
+    try {
+      await post({ key: "a1" }, body);
+      expect(cachedReplay((await post({ key: "a1" }, body)).json)).toBe(true);
+      // The trigger of migration 0164 sends this when a tree leaves `ready`.
+      handleSearchEligibilityHint(JSON.stringify({ projectIds: [WS.std] }));
+      expect(cachedReplay((await post({ key: "a1" }, body)).json)).toBe(false);
+      expect(cachedReplay((await post({ key: "a1" }, body)).json)).toBe(true);
+      // And this when one becomes `ready`.
+      handleSearchEligibilityHint(JSON.stringify({ projectIds: [WS.std], debounce: true }));
+      expect(cachedReplay((await post({ key: "a1" }, body)).json)).toBe(false);
+    } finally {
+      hybridSearch.mockImplementation(async (_q: string, userId: string, options: { filters?: { projectId?: string } }) => ({
+        results: [{ id: `hit-for-${userId}-in-${options.filters?.projectId}` }],
+        sessionId: crypto.randomUUID(),
+        availability: { status: "complete", isPartial: false, scope: { projectId: options.filters?.projectId, runId: null } },
+      }));
+    }
+  });
+
+  it("gives a revoked or wrong-scope key no summary node, even from a warm cache", async () => {
+    const created = await apiKeys.createApiKey("alice", "tree revoked", { orgId: "org-a" });
+    keys.tree = { id: created.key.id, raw: created.rawKey };
+    hybridSearch.mockImplementationOnce(answer({ requested: "include", applied: "include", ms: 9 }, [summary]));
+    expect((await post({ key: "tree" }, body)).json.summaries).toEqual([summary]);
+    expect(cachedReplay((await post({ key: "tree" }, body)).json)).toBe(true);
+
+    // Scope without search: refused before the cache is read or a search runs.
+    await sql`update api_keys set scopes = ${sql.array(["chat"])} where id = ${created.key.id}`;
+    const noScope = await post({ key: "tree" }, body);
+    expect([noScope.status, noScope.json.summaries, noScope.json.results]).toEqual([403, undefined, undefined]);
+    // Allowlist that leaves the project out.
+    await sql`update api_keys set scopes = ${sql.array(["search"])}, project_ids = ${sql.array([WS.strict])} where id = ${created.key.id}`;
+    const outside = await post({ key: "tree" }, body);
+    expect([outside.status, outside.json.summaries, outside.json.results]).toEqual([404, undefined, undefined]);
+    // Revoked.
+    await sql`update api_keys set scopes = ${sql.array(["search"])}, project_ids = '{}' where id = ${created.key.id}`;
+    await apiKeys.revokeApiKey(created.key.id, "alice");
+    const revoked = await post({ key: "tree" }, body);
+    expect([revoked.status, revoked.json.summaries, revoked.json.results]).toEqual([401, undefined, undefined]);
+    // Another organization's key with the identical body: no cached node, no access.
+    const foreign = await post({ key: "c1" }, body);
+    expect([foreign.json.summaries, foreign.json.results]).toEqual([undefined, undefined]);
+    expect(hybridSearch).toHaveBeenCalledTimes(1);
+  });
+});

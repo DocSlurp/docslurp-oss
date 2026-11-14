@@ -11,7 +11,7 @@ import { reportPublicError } from "../lib/public-errors.js";
 import { startTelemetrySpan } from "@docslurp/shared/observability";
 import { calibrateSearchConfidence } from "./confidence.js";
 import { compressChunks } from "./contextual-compression.js";
-import { emitSearchPhase, recordSearchPhase, timePhase } from "./timings.js";
+import { countSearchEvent, emitSearchPhase, recordSearchPhase, timePhase } from "./timings.js";
 import { mmrSelectWithDiagnostics } from "./mmr.js";
 import { lostInTheMiddleReorder } from "./position-reorder.js";
 import { rerankHosted } from "./hosted-rerank.js";
@@ -312,6 +312,8 @@ export async function executeSearchSessionRetrieval(
   const tree = input.summaryTree?.result() ?? null;
   let chunks = rankedChunks;
   if (input.summaryTree) {
+    // A leg that never started (this search's mode cannot run it) is a skip too; one that ran counted its own.
+    if (!tree) countSearchEvent("summaryTreeSkipped");
     let placed = 0;
     let protectedPrefix = rankedChunks.length;
     if (tree && tree.applied !== "off" && tree.guided.length > 0) {

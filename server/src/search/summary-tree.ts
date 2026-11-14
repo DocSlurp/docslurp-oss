@@ -189,6 +189,7 @@ export async function runSummaryTreeLegWithDeadline(args: {
   const work = Promise.resolve()
     .then(() => args.run(() => expired))
     .catch((error: unknown) => {
+      // The error's name only: its message can quote a query or a row.
       console.warn(`[search] summary-tree leg failed: ${error instanceof Error ? error.name : "error"}`);
       return skippedResult("error", elapsed());
     })
@@ -276,16 +277,16 @@ async function validateAndFetch(args: {
   dimension: number;
   filters: SearchFilters | undefined;
   runId: string | undefined;
-  hits: Array<{ hit_id: string; document_id: string; run_id: string; fetch: boolean }>;
+  hits: Array<{ hit_id: string; document_id: string; run_id: string; guide: boolean }>;
 }): Promise<GuideRow[]> {
   countSearchEvent("summaryTreeFetch");
   const scope = retrievalScope({ projectId: args.projectId, filters: args.filters, runId: args.runId });
   return await sql<GuideRow[]>`
     with hits as (
-      select * from jsonb_to_recordset(${sql.json(args.hits)}::jsonb) as h(hit_id text, document_id text, run_id text, fetch boolean)
+      select * from jsonb_to_recordset(${sql.json(args.hits)}::jsonb) as h(hit_id text, document_id text, run_id text, guide boolean)
     ),
     valid as (
-      select h.hit_id, h.fetch, d.id as document_id, d.run_id, d.filename,
+      select h.hit_id, h.guide, d.id as document_id, d.run_id, d.filename,
         n.level, n.chunk_start, n.chunk_end, n.page_start, n.page_end
       from hits h
       join documents d on d.id = h.document_id
@@ -310,7 +311,7 @@ async function validateAndFetch(args: {
     left join lateral (
       select c.id, c.run_id, c.chunk_index, c.text, c.heading_path, c.page_number, c.token_estimate, c.metadata
       from document_chunks c
-      where v.fetch
+      where v.guide
         and v.chunk_end - v.chunk_start < ${SUMMARY_TREE_GUIDE_MAX_RANGE}
         and c.document_id = v.document_id
         and c.chunk_index between v.chunk_start and v.chunk_end
@@ -395,9 +396,9 @@ export async function summaryTreeLeg(args: {
   // The first SUMMARY_TREE_GUIDE_HITS hits narrow enough to guide have their range fetched.
   let guides = 0;
   const hits = ranked.map((hit) => {
-    const fetch = guides < SUMMARY_TREE_GUIDE_HITS && hit.chunkEnd - hit.chunkStart < SUMMARY_TREE_GUIDE_MAX_RANGE;
-    if (fetch) guides += 1;
-    return { hit_id: hit.id, document_id: hit.documentId, run_id: hit.runId, fetch };
+    const guide = guides < SUMMARY_TREE_GUIDE_HITS && hit.chunkEnd - hit.chunkStart < SUMMARY_TREE_GUIDE_MAX_RANGE;
+    if (guide) guides += 1;
+    return { hit_id: hit.id, document_id: hit.documentId, run_id: hit.runId, guide };
   });
   const rows = await validateAndFetch({
     projectId: args.projectId, orgId: args.orgId, embeddingModel: embedding.model, dimension: args.queryVector.length,
@@ -473,11 +474,16 @@ export async function summaryTreeLeg(args: {
  * So a list shorter than `limit - slots` loses nothing (guided chunks are appended), and a full list gives up at most
  * its last `slots` entries.
  *
- * `dedupeKey` is the project's one-result-per-file control (search-controls.ts `dedupeByFilename`), which runs after
- * this and keeps the first result of each file once results span more than one file. With it, a guided chunk whose
- * file already has a result in the protected prefix, or an earlier guided chunk, is not placed: it would take a
- * `base` entry's position and then be removed. On such a project the tree can therefore add at most one chunk for
- * each file the chunk legs' top results do not already cover.
+ * `dedupeKey` is the project's one-result-per-file control (search-controls.ts `dedupeByFilename`, on by default),
+ * which runs after this: once results span more than one file it keeps only the first result of each file. Guided
+ * chunks never change what that control does to `base`:
+ * - `base` is all from one file (the control would leave it alone): only guided chunks of that same file are placed.
+ *   A chunk from a second file would make the control collapse `base` to one result.
+ * - otherwise (the control collapses `base` anyway, or `base` is empty): a guided chunk is placed only when it will be
+ *   the first result of its file, so one whose file already has a result in the protected prefix, or an earlier guided
+ *   chunk, is left out instead of taking a position and then being removed.
+ * So with that control on, the tree adds at most one chunk per file the chunk legs' top results do not cover, and
+ * nothing across files when they found a single file.
  */
 export function placeGuidedChunks<T extends { id: string }>(args: {
   base: T[];
@@ -488,11 +494,12 @@ export function placeGuidedChunks<T extends { id: string }>(args: {
   const limit = Math.max(0, Math.floor(args.limit));
   const base = args.base.slice(0, limit);
   const seenGuided = new Set<string>();
-  const guided = args.guided.filter((item) => !seenGuided.has(item.id) && Boolean(seenGuided.add(item.id)));
-  const dedupe = args.dedupeKey
-    && new Set([...base, ...guided].map((item) => args.dedupeKey!(item)).filter(Boolean)).size > 1
-    ? args.dedupeKey
-    : undefined;
+  const guidedAll = args.guided.filter((item) => !seenGuided.has(item.id) && Boolean(seenGuided.add(item.id)));
+  const baseKeys = new Set(args.dedupeKey ? base.map((item) => args.dedupeKey!(item)).filter(Boolean) : []);
+  // One file in `base`: keep to it, and the control stays untriggered (no per-file filtering below).
+  const singleFile = args.dedupeKey && baseKeys.size === 1 ? [...baseKeys][0]! : null;
+  const guided = singleFile === null ? guidedAll : guidedAll.filter((item) => args.dedupeKey!(item) === singleFile);
+  const dedupe = args.dedupeKey && singleFile === null ? args.dedupeKey : undefined;
   const place = (slots: number): { results: T[]; placed: number; protectedPrefix: number } => {
     const protectedPrefix = Math.min(base.length, limit - slots);
     const prefix = base.slice(0, protectedPrefix);
