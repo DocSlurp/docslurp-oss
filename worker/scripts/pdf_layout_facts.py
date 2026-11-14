@@ -1964,8 +1964,11 @@ COVERAGE_RASTER = 200        # union coverage is measured on a COVERAGE_RASTER x
 
 
 def page_rules(xhtml, wanted):
-    """{page_offset: [(x0, y0, x1, y1), ...]}: Doppler's ruling lines (`pdftotext -rules`) for the pages in `wanted`.
-    Debian's pdftotext has no -rules: its output simply has none, and grids are then unknown (absent pages)."""
+    """{page_offset: [(x0, y0, x1, y1), ...]}: Doppler's ruling lines (`pdftotext -rules`) for the pages in `wanted`, only
+    the ones ruled_grids can use (a thin horizontal or vertical line of at least RULE_MIN_LENGTH_PT): dots and short
+    segments are dropped as they are read, so they cannot use up the page's budget. A page with more usable rules than
+    MAX_RULES_PER_PAGE maps to None (grids unknown, marked gridsUnknown by layout_facts), never cut to its first rules: a table drawn after the cap must not read
+    as no table. Debian's pdftotext has no -rules: its output simply has none, and grids are then unknown (absent pages)."""
     if '<rule ' not in xhtml:
         return {}
     starts = [m.start() for m in _PAGE.finditer(xhtml)]
@@ -1976,10 +1979,16 @@ def page_rules(xhtml, wanted):
         end = starts[offset + 1] if offset + 1 < len(starts) else len(xhtml)
         rules = []
         for m in _RULE.finditer(xhtml, starts[offset], end):
+            rule = (float(m[1]), float(m[2]), float(m[3]), float(m[4]))
+            width, height = rule[2] - rule[0], rule[3] - rule[1]
+            if not ((height <= RULE_THICKNESS_PT and width >= RULE_MIN_LENGTH_PT)
+                    or (width <= RULE_THICKNESS_PT and height >= RULE_MIN_LENGTH_PT)):
+                continue
             if len(rules) >= MAX_RULES_PER_PAGE:
+                rules = None
                 break
-            rules.append((float(m[1]), float(m[2]), float(m[3]), float(m[4])))
-        out[offset] = rules
+            rules.append(rule)
+        out[offset] = rules   # None: over the budget (layout_facts marks the page gridsUnknown)
     return out
 
 
@@ -2213,6 +2222,9 @@ def layout_facts(path, listing_text, xhtml_text, page_markdowns, first, last, de
         if page_rule_list is None or walk is None:
             entry['grids'] = None
             entry['tableCoverage'] = None
+            if number - first in rules and walk is not None:
+                # More usable rules than the budget: a table may be among them. Unknown, and routed as one (gridsUnknown).
+                entry['gridsUnknown'] = True
         else:
             grids = ruled_grids(page_rule_list)[:MAX_LAYOUT_TABLES_PER_PAGE]
             box_of_page = visible_box(walk)

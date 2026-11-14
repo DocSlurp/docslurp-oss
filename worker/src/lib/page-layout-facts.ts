@@ -19,6 +19,11 @@ export interface PageLayoutFacts {
   invisibleWords?: number | null;
   /** What the page's text layer is: none, invisible (an OCR layer), visible or mixed; absent when unknown. */
   textLayer?: "none" | "invisible" | "visible" | "mixed" | null;
+  /**
+   * Set (only with `grids: null`) when neither the walker nor the job's Doppler page facts could say whether the page has a
+   * ruled grid (settleUnknownGrids). Routing then takes the table path: an unknown grid is never read as "no table".
+   */
+  gridsUnknown?: true;
 }
 
 const TEXT_LAYERS = new Set(["none", "invisible", "visible", "mixed"]);
@@ -57,6 +62,7 @@ export function parsePageLayoutFacts(payload: unknown, maxPage = 100_000): Map<n
     const invisibleWords = invisible !== null && Number.isSafeInteger(invisible) && invisible >= 0 ? invisible : null;
     const textLayer = typeof page.textLayer === "string" && TEXT_LAYERS.has(page.textLayer) ? page.textLayer as NonNullable<PageLayoutFacts["textLayer"]> : null;
     out.set(pageNumber, { images, tables, words: num(page.words), grids, tableCoverage: num(page.tableCoverage),
+      ...(grids === null && page.gridsUnknown === true ? { gridsUnknown: true as const } : {}),
       ...(widthPt !== null && heightPt !== null ? { widthPt, heightPt } : {}),
       ...(invisibleWords !== null ? { invisibleWords } : {}), ...(textLayer !== null ? { textLayer } : {}) });
   }
