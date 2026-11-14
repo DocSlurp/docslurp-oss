@@ -1,13 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const database = vi.hoisted(() => {
-  const query = vi.fn(async (_strings: TemplateStringsArray, ..._values: unknown[]) => []);
+  const query = vi.fn(async (_strings: TemplateStringsArray, ..._values: unknown[]): Promise<unknown[]> => []);
   return { query, begin: vi.fn(), end: vi.fn(async () => {}), connect: vi.fn() };
 });
 vi.mock("postgres", () => ({ default: database.connect }));
 vi.mock("better-auth/crypto", () => ({ hashPassword: vi.fn(async (password: string) => `hash:${password}`) }));
 
-import { seedNonProductionUsers } from "./seed-users.js";
+import { realtimeResourceSchema } from "@docslurp/shared";
+import { SEED_IDS, seedNonProductionUsers } from "./seed-users.js";
 
 describe("automatic seed users", () => {
   beforeEach(() => {
@@ -76,5 +77,41 @@ describe("automatic seed users", () => {
     const statements = database.query.mock.calls.map(([strings]) => strings.join("?"));
     expect(statements.some(statement => statement.includes('insert into "user"'))).toBe(true);
     expect(statements.some(statement => statement.includes("insert into project_runs"))).toBe(true);
+  });
+
+  it("seeds ids the realtime contract accepts", async () => {
+    for (const resource of [
+      { kind: "activity", orgId: SEED_IDS.org },
+      { kind: "billing", orgId: SEED_IDS.org },
+      { kind: "economics", orgId: SEED_IDS.org, page: 0 },
+      { kind: "project", projectId: SEED_IDS.project },
+      { kind: "suggestions", projectId: SEED_IDS.project },
+      { kind: "documents", projectId: SEED_IDS.project, page: 0 },
+      { kind: "run", runId: SEED_IDS.queuedRun },
+    ]) expect(realtimeResourceSchema.safeParse(resource).success, JSON.stringify(resource)).toBe(true);
+
+    // The rows are written with exactly those ids, and with no others for an organization, project or run.
+    vi.stubEnv("NODE_ENV", "test");
+    await seedNonProductionUsers({ includeFixtures: true });
+    const inserted = (table: string) => database.query.mock.calls
+      .filter(([strings]) => strings.join("?").includes(`insert into ${table}`))
+      .flatMap(([, ...parameters]) => parameters);
+    expect(inserted("organizations (")).toContain(SEED_IDS.org);
+    expect(inserted("org_memberships")).toContain(SEED_IDS.org);
+    expect(inserted("projects (")).toEqual(expect.arrayContaining([SEED_IDS.project, SEED_IDS.org]));
+    expect(inserted("project_members")).toContain(SEED_IDS.project);
+    expect(inserted("project_runs")).toEqual(expect.arrayContaining([SEED_IDS.queuedRun, SEED_IDS.org, SEED_IDS.project]));
+    const statements = database.query.mock.calls.map(([strings]) => strings.join("?")).join("\n");
+    expect(statements).not.toMatch(/'seed-(shared-project|queued-run)'|\(\s*'seed-shared-org',\s*\?/);
+  });
+
+  it("refuses a database seeded with the old non-UUID ids and says how to reset it", async () => {
+    vi.stubEnv("NODE_ENV", "development");
+    database.query.mockImplementation(async (strings: TemplateStringsArray, ...values: unknown[]) =>
+      strings.join("?").includes("from organizations where id =") && values[0] === "seed-shared-org" ? [{ id: "seed-shared-org" }] : []);
+    await expect(seedNonProductionUsers()).rejects.toThrow(/old id "seed-shared-org".*Reset the development database/s);
+    const statements = database.query.mock.calls.map(([strings]) => strings.join("?"));
+    expect(statements.some(statement => statement.includes("insert into"))).toBe(false);
+    expect(database.end).toHaveBeenCalledOnce();
   });
 });

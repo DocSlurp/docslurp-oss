@@ -1,5 +1,6 @@
 # TODO
 
+- Materialize runs have non-UUID ids (`mat_<uuid>`, `server/src/search/deferred/materialize-client.ts`), yet the realtime `run` resource requires a UUID and the activity projection lists them. A first-party client that watches active runs sends `run:mat_…` and the socket is closed with 1008 `invalid_frame` (reproduced 2026-11-14). Give materialize runs UUID ids or keep them out of the activity inventory; do not loosen `realtimeResourceSchema`.
 - First pass (sandboxed PDF batches, 2026-11-11; `DOCSLURP_FIRST_PASS`, default off). Remaining before it is on by default:
   council review of the seam, the activity and the workflow wiring (one organization per batch, the publish gate, page-count
   billing); measurement on the run (`first_keyword_searchable_at`, `fully_indexed_at`, pages per minute and per $1 through
