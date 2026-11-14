@@ -29,6 +29,12 @@ import {
 import { isPrivateModelUri, parsePrivateModelUri } from "./private-endpoints.js";
 import { normalizeHostedModelRef } from "./model-uri.js";
 import { chartExportConfigSchema, defaultChartExportConfig, upgradeStoredPipelineChartExport } from "./chart-export.js";
+import {
+  defaultSummaryTreePipelineConfig,
+  summaryTreeEnabled,
+  summaryTreePipelineConfigSchema,
+  summaryTreeVectorProblem,
+} from "./summary-tree.js";
 
 export const organizationRoleSchema = z.enum([
   "owner",
@@ -617,8 +623,19 @@ export const pipelineFeaturesSchema = z
      * (`DOCSLURP_DOPPLER_IMAGE_EXTRACT`) still decides whether the pass exists at all.
      */
     figures: z.boolean().default(true),
+    /**
+     * Summary tree (summary-tree.ts): model-written section summaries inside each long document, searched beside the
+     * chunks. Off unless the project turns it on through its own endpoint (`PATCH /v1/projects/:projectId/summary-tree`):
+     * no template, default, upload override or general settings save can enable it. It needs `embed` and
+     * `indexVectors`, and turns `summarize` on.
+     */
+    summaryTree: summaryTreePipelineConfigSchema.default(defaultSummaryTreePipelineConfig),
   })
   .superRefine((value, ctx) => {
+    const summaryTreeProblem = summaryTreeVectorProblem(value);
+    if (summaryTreeProblem) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["summaryTree", "enabled"], message: summaryTreeProblem });
+    }
     if (value.afterFirstPass === "none" && value.firstPass === "off") {
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["afterFirstPass"], message: "afterFirstPass 'none' needs the first pass (firstPass is 'off')" });
     }
@@ -771,6 +788,7 @@ export const defaultPipelineFeatures: PipelineFeatures = {
   mediaVideo: { enabled: true },
   chartExport: defaultChartExportConfig,
   figures: true,
+  summaryTree: defaultSummaryTreePipelineConfig,
 };
 
 const alwaysEnabled = () => true;
@@ -1090,6 +1108,12 @@ export function normalizePipelineFeatures(
       ...defaultProjectWebhookSettings,
       ...(source?.webhooks ?? {}),
     },
+    summaryTree: {
+      ...defaultSummaryTreePipelineConfig,
+      ...(source?.summaryTree ?? {}),
+    },
+    // The tree's root is the document summary, so the tree turns summaries on; `summarize` never implies the tree.
+    ...(summaryTreeEnabled(source) ? { summarize: true } : {}),
     // Good means a vision model reads every page, so it turns vision on: `{ quality: "good", visionFallback: false }`
     // would otherwise bill as Good while skipping vision. A run cost cap (maxCostCents) can still stop vision early.
     ...(source?.quality === "good" ? { visionFallback: true } : {}),
@@ -1180,6 +1204,12 @@ export function mergePipelineFeatures(
 ): PipelineFeatures {
   const normalizedBase = normalizePipelineFeatures(base ?? defaultPipelineFeatures);
   overrides = migrateLegacyQualitySettings(overrides);
+  // The summary tree is never an override: the base's stored value always wins (summary-tree.ts). An upload, a chat
+  // proposal or a report recommendation that names it changes nothing.
+  if (overrides && "summaryTree" in overrides) {
+    const { summaryTree: _summaryTree, ...rest } = overrides;
+    overrides = rest;
+  }
   if (!overrides || Object.keys(overrides).length === 0) return normalizedBase;
   // A profile override changes the model: the base's model URI and target (its old profile's, or an admin override of
   // it) go, so the new profile's default applies, unless the override names its own.
@@ -1682,6 +1712,8 @@ const FIELD_SEED_STAGES: Record<keyof PipelineFeatures, readonly PipelineRunStag
   // Routed visual extraction (chart-data / diagram assignments) runs in vision-extract; exports attach there.
   chartExport: ["vision-extract"],
   figures: ["extract-markdown"],
+  // No seed stage: saving the setting never queues a build. Existing documents get a tree only from its own job.
+  summaryTree: [],
 };
 
 /**

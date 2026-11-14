@@ -6,6 +6,14 @@ import { z } from "zod";
 import { documentTagsSchema } from "./document-tags.js";
 import { indexingModeSchema } from "./deferred-indexing.js";
 import {
+  defaultSummaryTreePipelineConfig,
+  SUMMARY_TREE_SUMMARIZE_LOCKED_CODE,
+  SUMMARY_TREE_SUMMARIZE_LOCKED_MESSAGE,
+  SummaryTreeConfigError,
+  summaryTreeEnabled,
+  summaryTreeSearchModeSchema,
+} from "./summary-tree.js";
+import {
   defaultPipelineFeatures,
   mergePipelineFeatures,
   normalizePipelineFeatures,
@@ -552,7 +560,14 @@ export const projectSearchRetrievalDefaultsSchema = z.object({
   queryDecompose: z.boolean().default(false),
   stepback: z.boolean().default(false),
   parentRetrieval: z.boolean().default(true),
+  /** Seeds retrieval from per-document score sums over chunks. It does not read the summary tree (see `summaryTree`). */
   summarySeed: z.boolean().default(false),
+  /**
+   * How search uses the project's summary tree (summary-tree.ts): `off`, `guide` (summary hits select chunk ranges;
+   * evidence is chunks only) or `include` (summary text is also returned, labelled). It runs only when the project's
+   * pipeline has the tree enabled and the deployment serves it: see `effectiveSummaryTreeSearchMode`.
+   */
+  summaryTree: summaryTreeSearchModeSchema.default("off"),
   selfQuery: z.boolean().default(false),
   iterativeMultiHop: z.boolean().default(false),
   // Graph controls stay unset unless the project chooses them, so retrieval
@@ -672,6 +687,7 @@ export const updateProjectSearchRetrievalDefaultsSchema = z.object({
   stepback: z.boolean().optional(),
   parentRetrieval: z.boolean().optional(),
   summarySeed: z.boolean().optional(),
+  summaryTree: summaryTreeSearchModeSchema.optional(),
   selfQuery: z.boolean().optional(),
   iterativeMultiHop: z.boolean().optional(),
   // null clears an explicit choice so retrieval derives it from the pipeline again.
@@ -722,6 +738,7 @@ export const projectSearchSettingsSchema = z.object({
     stepback: false,
     parentRetrieval: true,
     summarySeed: false,
+    summaryTree: "off",
     selfQuery: false,
     iterativeMultiHop: false,
   }),
@@ -973,7 +990,8 @@ export type UpdateProjectInput = z.infer<typeof updateProjectSchema>;
 
 type TemplatePipelineOverrides = Omit<
   Partial<import("./pipeline.js").PipelineFeatures>,
-  "vision" | "embedding" | "piiPolicy" | "documentExtraction" | "graph"
+  // summaryTree: never part of a template (summary-tree.ts); a project turns it on through its own endpoint.
+  "vision" | "embedding" | "piiPolicy" | "documentExtraction" | "graph" | "summaryTree"
 > & {
   graph?: Partial<import("./pipeline.js").PipelineFeatures["graph"]>;
   vision?: Partial<import("./pipeline.js").PipelineFeatures["vision"]>;
@@ -985,7 +1003,8 @@ type TemplatePipelineOverrides = Omit<
 function buildTemplatePipeline(
   overrides: TemplatePipelineOverrides,
 ): import("./pipeline.js").PipelineFeatures {
-  return normalizePipelineFeatures(overrides);
+  // The type keeps the key out; this keeps it out of a template written with a cast, too.
+  return normalizePipelineFeatures({ ...overrides, summaryTree: defaultSummaryTreePipelineConfig });
 }
 
 const projectTemplateLockedSettingPaths: Record<
@@ -1066,6 +1085,15 @@ export function applyProjectTemplateLocks(
       : templateOrKey;
   if (!template || template.lockedSettings.length === 0) {
     return pipelineFeaturesSchema.parse(pipeline);
+  }
+  // The tree needs document summaries. A template that pins them off cannot hold the tree: refuse loudly instead of
+  // unlocking the template or storing a tree that can never build its root.
+  if (
+    summaryTreeEnabled(pipeline) &&
+    template.lockedSettings.includes("summarize") &&
+    readNestedValue(template.pipeline, projectTemplateLockedSettingPaths.summarize) === false
+  ) {
+    throw new SummaryTreeConfigError(SUMMARY_TREE_SUMMARIZE_LOCKED_CODE, SUMMARY_TREE_SUMMARIZE_LOCKED_MESSAGE, 409);
   }
 
   const nextPipeline = JSON.parse(JSON.stringify(pipeline)) as Record<

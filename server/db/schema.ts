@@ -3791,6 +3791,85 @@ export const documentMaps = pgTable(
   ],
 );
 
+/** Summary tree build state, one row per document (migration 0163; packages/shared/src/summary-tree.ts). No text. */
+export const documentSummaryTrees = pgTable(
+  "document_summary_trees",
+  {
+    documentId: text("document_id").primaryKey().notNull(),
+    orgId: text("org_id").notNull(),
+    projectId: text("project_id").notNull(),
+    runId: text("run_id"),
+    status: text().default("pending").notNull(),
+    skipReason: text("skip_reason"),
+    treeKeyVersion: integer("tree_key_version").default(1).notNull(),
+    configHash: text("config_hash"),
+    embeddingModel: text("embedding_model"),
+    dimension: integer(),
+    leafCount: integer("leaf_count").default(0).notNull(),
+    nodeCount: integer("node_count").default(0).notNull(),
+    levelCount: integer("level_count").default(0).notNull(),
+    rootNodeId: text("root_node_id"),
+    error: text(),
+    builtAt: timestamp("built_at", { withTimezone: true, mode: "string" }),
+    createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
+  },
+  (table) => [
+    index("document_summary_trees_project_status_idx").using(
+      "btree",
+      table.projectId.asc().nullsLast().op("text_ops"),
+      table.status.asc().nullsLast().op("text_ops"),
+    ),
+    foreignKey({
+      columns: [table.documentId],
+      foreignColumns: [documents.id],
+      name: "document_summary_trees_document_id_fkey",
+    }).onDelete("cascade"),
+  ],
+);
+
+/** Summary tree node registry (migration 0163): hash, level, parent, status and chunk range. No summary text. */
+export const documentSummaryTreeNodes = pgTable(
+  "document_summary_tree_nodes",
+  {
+    id: text().primaryKey().notNull(),
+    documentId: text("document_id").notNull(),
+    orgId: text("org_id").notNull(),
+    projectId: text("project_id").notNull(),
+    runId: text("run_id"),
+    nodeHash: text("node_hash").notNull(),
+    level: integer().notNull(),
+    parentId: text("parent_id"),
+    ordinal: integer().default(0).notNull(),
+    status: text().default("pending").notNull(),
+    chunkStart: integer("chunk_start").notNull(),
+    chunkEnd: integer("chunk_end").notNull(),
+    pageStart: integer("page_start"),
+    pageEnd: integer("page_end"),
+    createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
+  },
+  (table) => [
+    index("document_summary_tree_nodes_document_idx").using(
+      "btree",
+      table.documentId.asc().nullsLast().op("text_ops"),
+      table.level.asc().nullsLast().op("int4_ops"),
+      table.ordinal.asc().nullsLast().op("int4_ops"),
+    ),
+    index("document_summary_tree_nodes_hash_idx").using(
+      "btree",
+      table.documentId.asc().nullsLast().op("text_ops"),
+      table.nodeHash.asc().nullsLast().op("text_ops"),
+    ),
+    index("document_summary_tree_nodes_parent_idx").using("btree", table.parentId.asc().nullsLast().op("text_ops")).where(sql`parent_id IS NOT NULL`),
+    foreignKey({
+      columns: [table.documentId],
+      foreignColumns: [documents.id],
+      name: "document_summary_tree_nodes_document_id_fkey",
+    }).onDelete("cascade"),
+  ],
+);
+
 export const documentPageVectors = pgTable(
   "document_page_vectors",
   {

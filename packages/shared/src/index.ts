@@ -39,6 +39,7 @@ export * from "./artifacts.js";
 export * from "./pii.js";
 export * from "./temporal-connection.js";
 export * from "./vector-namespace.js";
+export * from "./summary-tree.js";
 
 // Sub-modules created during refactor
 export * from "./embedding.js";

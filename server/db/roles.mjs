@@ -57,6 +57,8 @@ export const WORKER_TABLES = Object.freeze({
   document_propositions: { privileges: DML, evidence: "worker/src/db/store.ts propositions" },
   document_run_stage_states: { privileges: DML, evidence: "worker/src/db/store.ts stage state" },
   document_summaries: { privileges: DML, evidence: "worker/src/db/store.ts summaries" },
+  document_summary_tree_nodes: { privileges: DML, evidence: "worker/src/db/summary-tree-store.ts node registry; superseded-purge.ts" },
+  document_summary_trees: { privileges: DML, evidence: "worker/src/db/summary-tree-store.ts per-document tree state; superseded-purge.ts" },
   documents: { privileges: DML, evidence: "worker/src/db/store.ts and most stages" },
   embedding_reuse_refs: { privileges: DML, evidence: "worker/src/db/store.ts embedding reuse" },
   graph_jobs: { privileges: DML, evidence: "worker/src/graph/rebuild-job.ts" },
