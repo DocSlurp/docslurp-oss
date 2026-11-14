@@ -1,8 +1,8 @@
-import { createServer, type IncomingHttpHeaders } from "node:http";
+import { createServer, request as httpRequest, type IncomingHttpHeaders } from "node:http";
 import { afterAll, expect, it, vi } from "vitest";
 import type { ReadableSpan } from "@opentelemetry/sdk-trace-base";
 import { initializeObservability, shutdownObservability } from "../observability.js";
-import { LanceS3Stats, beginSearchReadScope, classifyS3Request, lanceObjectClass, rangeSizeBucket, searchReadAttributes, withLanceSearchSpan, getLanceS3TraceStats, keyPrefix, signUpstreamRequest, startLanceS3Proxy, withLanceS3Proxy } from "../lancedb-s3-trace.js";
+import { LanceS3Stats, beginSearchReadScope, bulkDeleteKeys, classifyS3Request, lanceObjectClass, rangeSizeBucket, searchReadAttributes, withLanceSearchSpan, getLanceS3TraceStats, keyPrefix, signUpstreamRequest, startLanceS3Proxy, withLanceS3Proxy } from "../lancedb-s3-trace.js";
 
 vi.stubEnv("OTEL_ENABLED", "true");
 vi.stubEnv("LANGFUSE_ENABLED", "false");
@@ -224,5 +224,110 @@ it("puts search request counts on the search span and in the summary line", asyn
   } finally {
     await proxy.close();
     await new Promise<void>((r) => { upstream.close(() => r()); upstream.closeAllConnections(); });
+  }
+});
+
+it("serves only its own client: no secret, another bucket or root, a dot segment or a foreign copy source is refused before anything is signed", async () => {
+  const seen: string[] = [];
+  const upstream = createServer((req, res) => { seen.push(`${req.method} ${req.url}`); req.resume(); res.writeHead(200); res.end("ok"); });
+  await new Promise<void>((r) => upstream.listen(0, "127.0.0.1", r));
+  const stats = new LanceS3Stats();
+  const proxy = await startLanceS3Proxy({ endpoint: `http://127.0.0.1:${(upstream.address() as { port: number }).port}`, region: "us-east-1", credentials: { accessKeyId: "AK", secretAccessKey: "SK" }, stats, logIntervalMs: 0, roots: ["bkt/idx"] });
+  const status = async (url: string, init?: RequestInit) => (await fetch(url, init)).status;
+  try {
+    expect(proxy.endpoint.startsWith(`${proxy.address}/`)).toBe(true);
+    expect(proxy.endpoint.length - proxy.address.length).toBeGreaterThan(40);
+    // No secret, a wrong one, and a right-length wrong one: all refused, whatever Authorization or Host they carry.
+    for (const url of [`${proxy.address}/bkt/idx/k`, `${proxy.address}/nope/bkt/idx/k`, `${proxy.address}/${"0".repeat(64)}/bkt/idx/k`, `${proxy.endpoint}x/bkt/idx/k`]) {
+      expect(await status(url, { headers: { authorization: "AWS4-HMAC-SHA256 Credential=AK/20260101/us-east-1/s3/aws4_request" } }), url.replace(proxy.endpoint, "<endpoint>")).toBe(403);
+    }
+    for (const method of ["PUT", "DELETE"]) expect(await status(`${proxy.address}/bkt/idx/k`, { method, body: method === "PUT" ? "x" : undefined })).toBe(403);
+    // The right secret, but outside the root: another bucket (also percent-encoded), another prefix, dot segments.
+    const outside = ["/other/idx/k", "/%6fther/idx/k", "/bkt/uploads/k", "/bkt/idxx/k", "/bkt/idx/../uploads/k"];
+    for (const path of outside) expect(await status(`${proxy.endpoint}${path}`), path).toBe(403);
+    // Bucket-level requests: only a listing under the root.
+    const bucketLevel: Array<[string, RequestInit?]> = [["/other?list-type=2&prefix=idx%2F"], ["/bkt?list-type=2"], ["/bkt?list-type=2&prefix=uploads%2F"], ["/bkt?list-type=2&prefix=idx%2F..%2Fuploads%2F"], ["/bkt?policy"], ["/bkt?uploads"], ["/bkt", { method: "HEAD" }], ["/bkt?delete", { method: "POST", body: "<Delete/>" }]];
+    for (const [path, init] of bucketLevel) expect(await status(`${proxy.endpoint}${path}`, init), path).toBe(403);
+    // Copy sources are held to the same roots.
+    for (const source of ["/other/idx/secret", "bkt/uploads/secret", "/bkt/idx/../uploads/secret", "arn:aws:s3:::other/idx/secret"]) {
+      expect(await status(`${proxy.endpoint}/bkt/idx/k`, { method: "PUT", headers: { "x-amz-copy-source": source } }), source).toBe(403);
+    }
+    expect(await status(`${proxy.endpoint}/bkt/idx/%zz`)).toBe(400);
+    // Dot segments, sent as written (fetch would resolve them first): the store must never be the one to resolve them.
+    const raw = (path: string) => new Promise<number>((resolve, reject) => {
+      const url = new URL(proxy.endpoint);
+      httpRequest({ host: url.hostname, port: url.port, path: `${url.pathname}${path}`, method: "GET" }, (response) => { response.resume(); resolve(response.statusCode ?? 0); }).on("error", reject).end();
+    });
+    const dotted = ["/bkt/idx/../uploads/k", "/bkt/idx/%2e%2e/uploads/k", "/bkt/idx/./k", "/bkt/idx/%2E/k", "/bkt/../other/idx/k"];
+    for (const path of dotted) expect(await raw(path), path).toBe(403);
+    // A bulk delete is held to the roots key by key.
+    const bulk = (keys: string[]) => status(`${proxy.endpoint}/bkt?delete`, { method: "POST", body: `<Delete>${keys.map((key) => `<Object><Key>${key}</Key></Object>`).join("")}</Delete>` });
+    expect(await bulk(["idx/t.lance/data/a.lance", "uploads/secret.pdf"])).toBe(403);
+    expect(await bulk(["idx/../uploads/secret.pdf"])).toBe(403);
+    expect(seen).toEqual([]);
+    expect(stats.refused).toBe(6 + outside.length + bucketLevel.length + 4 + 1 + dotted.length + 2);
+    expect(await bulk(["idx/t.lance/data/a.lance", "idx/t.lance/_indices/u/a&amp;b.idx"])).toBe(200);
+    expect(bulkDeleteKeys(Buffer.from("<Delete><Object><Key>a&amp;b/&#x41;&#66;&lt;</Key></Object><Object><Key>c</Key></Object></Delete>"))).toEqual(["a&b/AB<", "c"]);
+    seen.length = 0;
+    // Its own client, its own root.
+    expect(await status(`${proxy.endpoint}/bkt/idx/t.lance/_versions/1.manifest`)).toBe(200);
+    expect(await status(`${proxy.endpoint}/bkt?list-type=2&prefix=idx%2Ft.lance%2F`)).toBe(200);
+    expect(await status(`${proxy.endpoint}/bkt/idx/k`, { method: "PUT", headers: { "x-amz-copy-source": "/bkt/idx/src?versionId=3" } })).toBe(200);
+    proxy.allowRoot("other", "");
+    expect(await status(`${proxy.endpoint}/other/anything/k`)).toBe(200);
+    expect(seen.map((line) => line.split("?")[0])).toEqual(["GET /bkt/idx/t.lance/_versions/1.manifest", "GET /bkt", "PUT /bkt/idx/k", "GET /other/anything/k"]);
+  } finally {
+    await proxy.close();
+    await new Promise<void>((r) => { upstream.close(() => r()); upstream.closeAllConnections(); });
+  }
+});
+
+it("stays off behind a forward proxy that would take loopback requests, and drops forward-proxy options", async () => {
+  const options = { region: "auto", endpoint: "https://x.example", aws_access_key_id: "a", aws_secret_access_key: "b", proxy_url: "http://egress:3128", AWS_PROXY_URL: "http://egress:3128" };
+  const on = { LANCEDB_S3_TRACE: "1" };
+  // Read as Lance's client reads it: NO_PROXY wins when set at all, and only a literal 127.0.0.1 excludes loopback.
+  for (const env of [
+    { HTTP_PROXY: "http://egress:3128" },
+    { all_proxy: "socks5://egress:1080", NO_PROXY: "localhost" },
+    { HTTP_PROXY: "http://egress:3128", NO_PROXY: "*" },
+    { HTTP_PROXY: "http://egress:3128", NO_PROXY: "example.com", no_proxy: "127.0.0.1" },
+    { HTTP_PROXY: "http://egress:3128", NO_PROXY: "", no_proxy: "127.0.0.1" },
+  ]) expect(await withLanceS3Proxy("s3://b/lancedb", options, { ...on, ...env }), JSON.stringify(env)).toBe(options);
+  for (const env of [{ HTTP_PROXY: "http://egress:3128", NO_PROXY: "localhost, 127.0.0.1" }, { http_proxy: "http://egress:3128", no_proxy: "127.0.0.1" }, { HTTPS_PROXY: "http://egress:3128" }]) {
+    const routed = await withLanceS3Proxy("s3://b/lancedb", options, { ...on, ...env });
+    expect(routed!.endpoint, JSON.stringify(env)).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/[0-9a-f]{64}$/);
+    expect(routed!.aws_endpoint_url_s3).toBe(routed!.endpoint);
+    expect(Object.keys(routed!).sort()).toEqual(["allow_http", "aws_access_key_id", "aws_endpoint_url_s3", "aws_secret_access_key", "endpoint", "region", "virtual_hosted_style_request"]);
+  }
+});
+
+it("sends to the endpoint a direct Lance connection would use, in Lance's order", async () => {
+  const listen = async () => {
+    const seen: string[] = [];
+    const server = createServer((req, res) => { seen.push(`${req.method} ${req.url}`); req.resume(); res.writeHead(200); res.end(); });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    return { seen, url: `http://127.0.0.1:${(server.address() as { port: number }).port}`, close: () => new Promise<void>((r) => { server.close(() => r()); server.closeAllConnections(); }) };
+  };
+  const [a, b] = [await listen(), await listen()];
+  const base = { region: "auto", aws_secret_access_key: "s" };
+  const on = { LANCEDB_S3_TRACE: "1" };
+  let n = 0;
+  const reaches = async (options: Record<string, string>, env: Record<string, string>) => {
+    a.seen.length = 0; b.seen.length = 0;
+    // A fresh key id per case: proxies are shared per upstream and credential set.
+    const routed = await withLanceS3Proxy("s3://envbkt/lancedb", { ...base, aws_access_key_id: `case-${n++}`, ...options }, { ...on, ...env });
+    expect((await fetch(`${routed!.endpoint}/envbkt/lancedb/k`)).status).toBe(200);
+    expect((await fetch(`${routed!.endpoint}/envbkt/elsewhere/k`)).status).toBe(403);
+    return a.seen.length ? "a" : b.seen.length ? "b" : "none";
+  };
+  try {
+    expect(await reaches({}, { AWS_ENDPOINT_URL_S3: a.url })).toBe("a");
+    expect(await reaches({ endpoint: b.url }, { AWS_ENDPOINT_URL_S3: a.url })).toBe("a");
+    expect(await reaches({ endpoint: a.url }, { AWS_ENDPOINT: b.url, AWS_ENDPOINT_URL: b.url })).toBe("a");
+    expect(await reaches({ endpoint_url: a.url }, { AWS_ENDPOINT_URL: b.url })).toBe("a");
+    expect(await reaches({}, { AWS_ENDPOINT: a.url, AWS_ENDPOINT_URL: b.url })).toBe("a");
+    expect(await reaches({}, { AWS_ENDPOINT_URL: a.url })).toBe("a");
+  } finally {
+    await a.close(); await b.close();
   }
 });

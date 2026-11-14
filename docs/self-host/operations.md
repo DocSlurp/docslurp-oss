@@ -165,10 +165,32 @@ LANCEDB_S3_CACHE_MAX_GB=10               # LRU limit, default 10
 LANCEDB_S3_CACHE_BLOCK_KB=1024           # fill granularity, default 1024
 ```
 
+Check that it is in use: the `[lancedb-s3]` log line must show `requests` above zero after a
+search. A line that stays at zero means Lance is not going through the proxy.
+
 Setting the directory starts the same localhost re-signing proxy that
 `LANCEDB_S3_TRACE` uses (tracing itself stays off) and needs explicit credentials in the
 storage URI or `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`. It works with any
 S3-compatible provider.
+
+The proxy and the cache directory serve this process only:
+
+- The proxy listens on `127.0.0.1` and answers only requests that carry its own per-process
+  secret, for keys under the bucket and first path segment of `LANCEDB_URI` (`lancedb/` in
+  `s3://bucket/lancedb`). Anything else gets 403 and counts as `refused` on
+  the `[lancedb-s3]` line; a non-zero count means something else on the host is probing it.
+- The cache directory must be owned by the server's user and not writable by group or others.
+  It is kept at mode 0700. A directory that fails this is not used: the server logs
+  `disk cache ... is unusable` and searches without it.
+- Changing `LANCEDB_S3_CACHE_BLOCK_KB` empties the cache at the next start.
+- With `HTTP_PROXY` or `ALL_PROXY` set, add the literal `127.0.0.1` to `NO_PROXY` (upper case
+  if you set it at all; `*` is not enough). Otherwise the proxy and the cache stay off
+  (logged), because Lance would send its loopback requests to that proxy.
+- The proxy sends to the endpoint a direct connection would use: `AWS_ENDPOINT_URL_S3` when
+  set, then the storage URI's endpoint.
+- Deleted documents: files removed from the bucket by another process (the worker's cleanup
+  and compaction) stay in this directory until the size limit evicts them. Nothing requests
+  them again, but the bytes remain on the volume. Delete the directory to clear them at once.
 
 What is cached, and what is not:
 
@@ -341,7 +363,8 @@ This is scaling on a single host, not a multi-host design.
 | `Invalid sandbox configuration; missing required: DOCSLURP_MODAL_IMAGE (DOCSLURP_VERSION is unset, ...)` (provider `modal`) | The worker runs from source or a local image build, which has no release version to pick the default image from. | Set `DOCSLURP_MODAL_IMAGE` to an image that contains the parser binaries. |
 | `Invalid sandbox configuration; invalid: DOCSLURP_MODAL_IMAGE_DIGEST (...)` or `invalid: DOCSLURP_MODAL_IMAGE (digest must be sha256:<64 hex>)` (provider `modal`) | The digest is not `sha256:` plus 64 lowercase hex characters, or it differs from the digest already in `DOCSLURP_MODAL_IMAGE`. | Copy the digest from the `worker-images.yml` run summary or `docker buildx imagetools inspect`, after verifying it ([Verifying worker images](security.md#verifying-worker-images)). Set it in one place, or the same value in both. |
 | Activities fail with `modal sandbox creation failed: ...` although the worker started (provider `modal`) | The start-up probe only checks the token and app; it does not pull the image. A wrong `DOCSLURP_MODAL_IMAGE`, a private GHCR package, or a missing `DOCSLURP_MODAL_REGISTRY_SECRET` shows up at the first activity that runs a parser. `probe-cli` and `check-worker-prerequisites.mjs --sandbox` skip the binary checks for Modal, so they do not catch it either. | Check the image name and that Modal can pull it: make the GHCR package public, or set `DOCSLURP_MODAL_REGISTRY_SECRET`. |
-| `parser sandbox provider 'none' is not allowed in production` | `DOCSLURP_PARSER_SANDBOX=none` with `NODE_ENV=production`. | Choose a real provider, or set `DOCSLURP_PARSER_SANDBOX_ALLOW_UNISOLATED=true` knowing parsers then run on the host. |
+| `parser sandbox provider 'none' runs parsers on the host ... allowed only in development or test` | Provider `none` (set, or the non-Linux default) outside development or test. | Configure the VM provider in production, or `bubblewrap` or `landlock` elsewhere. Only development runs parsers on the host unisolated. |
+| `... weakens untrusted-file protection as set and is allowed only in development or test ...; refusing to start` | A [development-only setting](configuration.md#development-only-settings) is set outside development or test. | Unset it, or set it to `false`. |
 | `Unknown DOCSLURP_PARSER_SANDBOX provider` | Typo in the provider id. | Use `bubblewrap`, `landlock`, `modal` or `none`. |
 | `TEMPORAL_NAMESPACE must be set to a non-default namespace in production` | `TEMPORAL_NAMESPACE` is unset or `default`. | Compose sets `docslurp`. Set a non-default namespace if you changed it. |
 | Full worker shows `[worker-start] installing deferred Python deps` for a long time | With no vendor bundle source, the full worker pip-installs several GB on first boot. | Wait, or set `DOCSLURP_VENDOR_BUNDLE_BASE_URL`. See [Worker image and vendor bundles](../worker-image.md). |

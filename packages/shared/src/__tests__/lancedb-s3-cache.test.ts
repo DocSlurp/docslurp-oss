@@ -1,4 +1,4 @@
-import { mkdtemp, readdir, rm, truncate, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -274,5 +274,72 @@ describe("DiskBlockCache", () => {
     expect(line).toContain("cache_bytes_served=16");
     expect(cache.summaryFragment()).toContain("cache_hits=0 cache_misses=0");
     expect(cache.cumulative.hits).toBe(1);
+  });
+});
+
+describe("cache directory ownership", () => {
+  const upstreamOf = (body: Buffer) => fakeUpstream({ [KEY]: body });
+  const read = (cache: DiskBlockCache, fetchUpstream: ReturnType<typeof fakeUpstream>["fetchUpstream"]) =>
+    serveCachedRequest({ cache, namespace: "h:", method: "GET", bucket: "b", key: KEY, headers: { range: "bytes=0-9" }, fetchUpstream });
+
+  it("keeps the directory and every file private to this user", async () => {
+    await chmod(dir, 0o755);
+    const cache = new DiskBlockCache({ dir, maxBytes: 1 << 20, blockBytes: B });
+    await cache.ready;
+    await read(cache, upstreamOf(Buffer.alloc(40, 7)).fetchUpstream);
+    expect((await stat(dir)).mode & 0o777).toBe(0o700);
+    const modes: number[] = [];
+    const walk = async (path: string): Promise<void> => {
+      for (const entry of await readdir(path, { withFileTypes: true })) {
+        const child = join(path, entry.name);
+        modes.push((await stat(child)).mode & 0o077);
+        if (entry.isDirectory()) await walk(child);
+      }
+    };
+    await walk(dir);
+    expect(modes.length).toBeGreaterThan(3);
+    expect(modes.every((mode) => mode === 0)).toBe(true);
+  });
+
+  it("refuses a directory that group or others can write", async () => {
+    await chmod(dir, 0o777);
+    const cache = new DiskBlockCache({ dir, maxBytes: 1 << 20, blockBytes: B });
+    await expect(cache.ready).rejects.toThrow(/writable by group or others/);
+  });
+
+  it("refuses a symbolic link, and a parent others can rename entries in", async () => {
+    const real = join(dir, "real");
+    await mkdir(join(real, "ab"), { recursive: true });
+    await writeFile(join(real, "ab", "victim"), "keep");
+    await symlink(real, join(dir, "link"));
+    await expect(new DiskBlockCache({ dir: join(dir, "link"), maxBytes: 1 << 20, blockBytes: B }).ready).rejects.toThrow(/symbolic link/);
+    expect(await readFile(join(real, "ab", "victim"), "utf8")).toBe("keep");
+    await chmod(dir, 0o777);
+    await expect(new DiskBlockCache({ dir: join(dir, "cache"), maxBytes: 1 << 20, blockBytes: B }).ready).rejects.toThrow(/sticky bit/);
+    await chmod(dir, 0o1777);
+    await new DiskBlockCache({ dir: join(dir, "cache"), maxBytes: 1 << 20, blockBytes: B }).ready;
+    await chmod(dir, 0o700);
+  });
+
+  it("empties its own shards when the block size changed, and leaves other files alone", async () => {
+    const first = new DiskBlockCache({ dir, maxBytes: 1 << 20, blockBytes: B });
+    await first.ready;
+    await read(first, upstreamOf(Buffer.alloc(40, 7)).fetchUpstream);
+    expect(first.sizeBytes).toBeGreaterThan(0);
+    await mkdir(join(dir, "not-ours"));
+    await writeFile(join(dir, "not-ours", "keep.txt"), "keep");
+    const second = new DiskBlockCache({ dir, maxBytes: 1 << 20, blockBytes: B * 2 });
+    await second.ready;
+    expect((await readdir(dir)).filter((name) => /^[0-9a-f]{2}$/.test(name))).toEqual([]);
+    expect(await readFile(join(dir, "not-ours", "keep.txt"), "utf8")).toBe("keep");
+    expect(JSON.parse(await readFile(join(dir, "layout.json"), "utf8"))).toEqual({ blockBytes: B * 2 });
+    // Same block size again: the cache is kept.
+    const upstream = upstreamOf(Buffer.alloc(40, 7));
+    await read(second, upstream.fetchUpstream);
+    const third = new DiskBlockCache({ dir, maxBytes: 1 << 20, blockBytes: B * 2 });
+    await third.ready;
+    const again = upstreamOf(Buffer.alloc(40, 7));
+    await read(third, again.fetchUpstream);
+    expect(again.calls.filter((call) => call.startsWith("GET"))).toEqual([]);
   });
 });

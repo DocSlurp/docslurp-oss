@@ -489,10 +489,10 @@ describe("worker checkpoints", () => {
 
 /**
  * True concurrency against a real Postgres (PGlite serves one connection at a
- * time). Opt-in: CREDIT_LEASE_TEST_DATABASE_URL=postgres://… (a throwaway,
+ * time). Opt-in: TEST_DATABASE_URL=postgres://… (a throwaway,
  * migrated database; rows are seeded and wiped).
  */
-const realUrl = process.env.CREDIT_LEASE_TEST_DATABASE_URL;
+const realUrl = process.env.TEST_DATABASE_URL;
 describe.skipIf(!realUrl)("credit leases under real concurrency", () => {
   let pg: Sql;
 

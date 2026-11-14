@@ -10,11 +10,11 @@ import { freezeProcess, startSeverableProxy, type SeverableProxy } from "./helpe
  * the variant reproduced here, never completed.
  *
  * Needs a real Postgres (PGlite serves one connection at a time and crashes on
- * abrupt closes): RESUME_TEST_DATABASE_URL=postgres://user:pass@host:port/db.
+ * abrupt closes): TEST_DATABASE_URL=postgres://user:pass@host:port/db.
  * A TCP proxy in another process resets every connection ("the network forgot
  * them"), then this process is frozen so the RSTs sit unread, as in a snapshot.
  */
-const target = process.env.RESUME_TEST_DATABASE_URL ? new URL(process.env.RESUME_TEST_DATABASE_URL) : null;
+const target = process.env.TEST_DATABASE_URL ? new URL(process.env.TEST_DATABASE_URL) : null;
 let proxy: SeverableProxy;
 let url: string;
 const pools: ApiPool[] = [];
