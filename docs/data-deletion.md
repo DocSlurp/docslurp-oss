@@ -40,6 +40,30 @@ is removed directly; an object-storage root must live in the artifact bucket,
 otherwise only the known tables are dropped and the sweep logs a warning. While documents are
 still in flight the drop waits out the same 15-minute grace as their cleanup.
 
+### The summary tree's table
+
+A project that builds a summary tree (`pipeline.summaryTree`, see
+`packages/shared/src/summary-tree.ts`) has a second table, `summaries`, beside
+`chunks` in the same database. It holds the summary text and vector of each
+node; Postgres holds only build state and a node registry without text
+(`document_summary_trees`, `document_summary_tree_nodes`). Every path that
+removes a document removes its part of the tree:
+
+| What | How it goes |
+| --- | --- |
+| Rows in `summaries` | With the document's chunk rows: document delete and artifact retention (the cleanup queue), supersede and archive (the sweep). The table is looked up beside every chunks table the document is indexed in, and in the embedding space its tree state names, so no flag has to be right for the rows to be found. |
+| The `summaries` table | Project and organization deletion queue a `vector_table` entry naming it (`"table": "summaries"`), so it is dropped even where the prefix purge cannot reach the LanceDB root. |
+| Registry rows | Foreign-key cascade from `documents`; the sweep deletes them when a superseded version is archived or purged, and artifact retention deletes them with the run's chunks. |
+
+Summary rows always use the strict delete (`purgeHistory`, below): the table is
+compacted and its older versions pruned in the same call, and the cleanup stays
+queued until that succeeds. Unlike chunk rows they are never shared with a
+dedup copy, so they go even when the chunk rows stay for a live copy. A summary
+row can only be written for a live document of that organization and project
+that is indexed in that embedding space and has a tree state row
+(`worker/src/stages/lancedb-summaries.ts`), so a row cannot exist where these
+paths would not find it.
+
 Org-level tables from before per-project databases are deleted by the
 relocation CLI's `--drop-legacy` step (see [operations](self-host/operations.md#moving-to-per-project-lancedb-databases-migration-0082));
 cleanup rows queued for them before migration 0082 drop them by their legacy
@@ -83,7 +107,7 @@ in the table's files until maintenance rewrites them:
    from, and a later pass after retention removes them. A pass that compacted
    nothing settles the prune if it started after the due time. A table that no
    longer exists drops its mark.
-3. An expired extract uses the strict path instead (`purgeHistory`): two
+3. An expired extract, and every delete from a summary tree's table, uses the strict path instead (`purgeHistory`): two
    passes with zero retention, in the cleanup itself, and the cleanup row
    stays queued until they succeed.
 

@@ -1,6 +1,9 @@
 import { EDITOR_REQUIRED_CODE, EDITOR_REQUIRED_MESSAGE, deferredProfilesEnabled, isBillingEnforced, PUBLIC_ERROR_MESSAGES, publicDiagnostics, publicDocumentError, resolveManagedPipeline, parseManagedPipelineOverrides, storedManagedPipeline, stripManagedPipelineFields, type ManagedPipelineOverrides } from "@docslurp/shared";
 import { chartExportDefaults, upgradeStoredPipelineChartExport } from "@docslurp/shared";
-import { defaultSummaryTreePipelineConfig, type SummaryTreePipelineConfig } from "@docslurp/shared";
+import {
+  defaultSummaryTreePipelineConfig, SUMMARY_TREE_REQUIRES_VECTORS_CODE, SUMMARY_TREE_REQUIRES_VECTORS_MESSAGE, SummaryTreeConfigError,
+  type SummaryTreePipelineConfig,
+} from "@docslurp/shared";
 import { markProjectAutoNamed } from "./project-naming.js";
 import { forgetProjectProviderPolicy } from "../lib/provider-policy.js";
 import { jsonRecord } from "../lib/json-record.js";
@@ -1042,13 +1045,19 @@ export async function resolveUpdatedPipeline(
 
   // The summary tree changes only through its own endpoint (options.summaryTree); otherwise the stored value stays.
   const summaryTree = options.summaryTree ?? current.pipeline.summaryTree ?? defaultSummaryTreePipelineConfig;
-  const draftPipeline = normalizePipelineFeatures({
+  const draftSource = {
     ...(parsed.pipeline ??
       (parsed.templateKey !== undefined
         ? template?.pipeline ?? defaultPipelineFeatures
         : current.pipeline)),
     summaryTree,
-  });
+  };
+  // A save that would leave a stored tree without embeddings or the vector index is refused by name, not as a
+  // generic validation failure: the caller turns the tree off first.
+  if (summaryTree.enabled && (draftSource.embed === false || draftSource.indexVectors === false)) {
+    throw new SummaryTreeConfigError(SUMMARY_TREE_REQUIRES_VECTORS_CODE, SUMMARY_TREE_REQUIRES_VECTORS_MESSAGE, 400);
+  }
+  const draftPipeline = normalizePipelineFeatures(draftSource);
   // The tree keeps document summaries on (summary-tree.ts); `summaries: false` cannot turn them off under it.
   if (parsed.summaries !== undefined) draftPipeline.summarize = parsed.summaries || summaryTree.enabled;
   // Managed model fields (backend models, providers, routes) are never a customer choice: keep the stored ones

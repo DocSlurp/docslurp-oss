@@ -1499,20 +1499,23 @@ export function withoutStageSelection<T extends { restartFromStage?: unknown; st
  * Pipeline features for version hashes: drops stage selection plus
  * `indexingMode`/`materialization`/`visualPages`, so switching modes (or the
  * new `visualPages` default appearing on stored pipelines) never marks chunks stale.
+ * `summaryTree` is dropped too: the tree is a separate index built from the chunks, so
+ * turning it on or off (or the key appearing on stored pipelines) changes no chunk.
  * The stored pipeline keeps those fields (use `withoutStageSelection` there).
  */
 export function pipelineVersionFeatures<T extends object>(
   features: T,
-): Omit<T, "restartFromStage" | "stageSubset" | "indexingMode" | "materialization" | "visualPages"> {
+): Omit<T, "restartFromStage" | "stageSubset" | "indexingMode" | "materialization" | "visualPages" | "summaryTree"> {
   const {
     restartFromStage: _restart,
     stageSubset: _subset,
     indexingMode: _mode,
     materialization: _materialization,
     visualPages: _visualPages,
+    summaryTree: _summaryTree,
     ...rest
   } = features as T & Record<string, unknown>;
-  return rest as Omit<T, "restartFromStage" | "stageSubset" | "indexingMode" | "materialization" | "visualPages">;
+  return rest as Omit<T, "restartFromStage" | "stageSubset" | "indexingMode" | "materialization" | "visualPages" | "summaryTree">;
 }
 
 function selectStages(

@@ -169,7 +169,10 @@ describe("summary tree setting", () => {
     await projects.updateProject("ws", "owner", { pipeline: defaultPipelineFeatures });
     await tree.updateProjectSummaryTree("ws", "owner", { enabled: true }, ON);
     await expect(projects.updateProject("ws", "owner", { pipeline: { ...defaultPipelineFeatures, embed: false, indexVectors: false } }))
-      .rejects.toThrow(/summary tree needs embeddings/);
+      .rejects.toMatchObject({ name: "SummaryTreeConfigError", code: "summary_tree_requires_vectors", status: 400 });
+    // So is a move to a template that keeps summaries off.
+    await expect(projects.updateProject("ws", "owner", { templateKey: "legal-contracts" }))
+      .rejects.toMatchObject({ name: "SummaryTreeConfigError", code: "summary_tree_summarize_locked", status: 409 });
     expect((await projects.getProject("ws", "owner"))!.pipeline).toMatchObject({ embed: true, indexVectors: true, summaryTree: { enabled: true } });
   });
 

@@ -9,6 +9,7 @@ import {
   parseStoredPipelineFeatures,
   pipelineFeatureOverridesSchema,
   pipelineFeaturesSchema,
+  pipelineVersionFeatures,
   type PipelineFeatures,
 } from "../pipeline.js";
 import {
@@ -133,6 +134,13 @@ describe("summary tree: never on by default", () => {
     const impact = analyzePipelineChange(before, after, { documents: 12, pages: 400 });
     expect(impact).toMatchObject({ kind: "new-uploads", stages: [] });
     expect(impact.reasons.map((reason) => reason.field)).toEqual(["summaryTree"]);
+  });
+
+  it("is not part of the chunk pipeline version: the key appearing, or the tree switching, marks no chunk stale", () => {
+    const version = (features: object) => JSON.stringify(pipelineVersionFeatures(features));
+    const { summaryTree: _summaryTree, ...before } = normalizePipelineFeatures({ summarize: true });
+    expect(version(normalizePipelineFeatures({ summarize: true }))).toBe(version(before));
+    expect(version(treeOn({ summarize: true }))).toBe(version(before));
   });
 });
 
