@@ -7,7 +7,7 @@ import { anchorImageMarkdownFile } from "../extractors/image-markdown.js";
 import { DOPPLER_PAGE_FACTS_SLOT, DopplerFigureRejection, DopplerFigureStoreError, disposeDopplerFigureSet, dopplerFolderKey, dopplerSourcePointer, DOPPLER_MARKDOWN_SLOT, readDopplerFigureDir, storeDopplerFigures } from "../extractors/doppler-figures.js";
 import { figureLedgerHooks, ledgerWriteForFailedFigures, ledgerWriteForNoFigures, ledgerWriteForStoredFigures, queueAssetLedger } from "../db/document-asset-ledger.js";
 import {
-  SANDBOXED_PDF_MAX_MARKDOWN_BYTES, VM_PDF_EXTRACTOR_ID, firstPassServedFigures, requireSandboxedPdfProvider, sandboxedPdfFigures, sandboxedPdfSalvagedFigures, sandboxedPdfProvider, sandboxedPdfLayoutFacts, sandboxedPdfLayoutFactsSource, sandboxedPdfOcrPages,
+  SANDBOXED_PDF_MAX_MARKDOWN_BYTES, VM_PDF_EXTRACTOR_ID, firstPassServedFigures, requireSandboxedPdfProvider, sandboxedPdfFigures, sandboxedPdfSalvagedFigures, sandboxedPdfProvider, sandboxedPdfGridSettlement, sandboxedPdfLayoutFacts, sandboxedPdfLayoutFactsSource, sandboxedPdfLayoutWalkerUnknown, sandboxedPdfOcrPages,
 } from "../extractors/plugins.js";
 import { buildSummaryEvidence } from "./summary-evidence.js";
 import type { CapacityLeaseStore } from "../media/capacity/types.js";
@@ -1253,6 +1253,10 @@ export class ExtractMarkdownStage implements Stage {
                       hostPdfProbes,
                       // Sandboxed route: whether Doppler page facts stood in for those probes, and why not.
                       ...(factsEvidence ? { dopplerFactsEvidence: factsEvidence.stats } : {}),
+                      // The layout walker could not walk this file (a page tree that does not check out, say): reason and pages.
+                      ...(winningCandidate.layoutWalkerUnknown ? { layoutWalkerUnknown: winningCandidate.layoutWalkerUnknown } : {}),
+                      // Pages whose unknown walker grids the page facts settled, and pages neither knew (routed as tables).
+                      ...(winningCandidate.layoutGrids ? { layoutGrids: winningCandidate.layoutGrids } : {}),
                       ...ocrReadStats(ocrReadPages, winningCandidate.ocrPages ? "extractor-reported" : "inferred", scanFill?.pages ?? [], ocrFailedPages(state.artifactLedger, document.id).size),
                     },
                   };
@@ -2164,6 +2168,9 @@ export class ExtractMarkdownStage implements Stage {
     const ocrPages = plan.sandboxedPdf ? sandboxedPdfOcrPages(plan.sandboxedPdf) : undefined;
     const layoutFacts = plan.sandboxedPdf ? sandboxedPdfLayoutFacts(plan.sandboxedPdf) : undefined;
     const layoutFactsSource = plan.sandboxedPdf ? sandboxedPdfLayoutFactsSource(plan.sandboxedPdf) : undefined;
+    const layoutWalkerUnknown = plan.sandboxedPdf ? sandboxedPdfLayoutWalkerUnknown(plan.sandboxedPdf) : undefined;
+    const layoutGrids = plan.sandboxedPdf ? sandboxedPdfGridSettlement(plan.sandboxedPdf) : undefined;
+    if (layoutGrids && layoutGrids.unknown > 0) console.log(`[extract-tables] grids unknown pages=${layoutGrids.unknown} fromFacts=${layoutGrids.fromFacts} filled=${layoutGrids.filled}`);
     const pageFacts = plan.sandboxedPdf ? sandboxedPdfPageFacts(plan.sandboxedPdf) : undefined;
     const figureOutcome = plan.sandboxedPdf?.figures ? sandboxedPdfFigures(plan.sandboxedPdf) : undefined;
 
@@ -2175,6 +2182,8 @@ export class ExtractMarkdownStage implements Stage {
       tempTextPath: outputPath,
       ...(ocrPages ? { ocrPages: [...ocrPages] } : {}),
       ...(layoutFacts ? { layoutFacts, ...(layoutFactsSource ? { layoutFactsSource } : {}) } : {}),
+      ...(layoutWalkerUnknown ? { layoutWalkerUnknown } : {}),
+      ...(layoutGrids && (layoutGrids.fromFacts > 0 || layoutGrids.unknown > 0 || layoutGrids.filled > 0) ? { layoutGrids } : {}),
       ...(pageFacts ? { pageFacts } : {}),
       ...(plan.sandboxedPdf?.figures && figureOutcome ? { figures: { dir: plan.sandboxedPdf.figures.dir, outcome: figureOutcome, ...(plan.sandboxedPdf.figures.charts ? { charts: true } : {}) } } : {}),
     };

@@ -29,6 +29,7 @@ import { initializePrivateModelEndpoints } from "./lib/privacy.js";
 import { setCurrentRequestError, requestContextMiddleware } from "./lib/request-context.js";
 import { multipartBodyLimit } from "./lib/upload-policy.js";
 import { emitPostHogApiLog } from "./lib/posthog-ai-observability.js";
+import { warmRecentSearchIndexes } from "./search/boot-warm.js";
 import { apiActorRateLimit, apiIpRateLimit, logRateLimitBackendAtStartup, warnSelfHostedBrowserKeysWithoutTrustedProxy } from "./middleware/rate-limit.js";
 import { assertChatConcurrencyBackend, chatConcurrencyLimit } from "./middleware/chat-concurrency.js";
 import { sessionAuth } from "./middleware/session-auth.js";
@@ -371,6 +372,11 @@ export function ensureApiStartup(): Promise<void> {
             .catch((error: unknown) => console.error(`[search] embedding warm-up failed: ${error instanceof Error ? error.message : String(error)}`));
         }, 1_000).unref();
       }
+
+      // Open the most recently searched projects' LanceDB tables and load their indexes in the
+      // background (search/boot-warm.ts), so the first search after a start is not the cold one.
+      // A few seconds of spread, so machines restarted together do not all read the same indexes at once.
+      if (process.env.NODE_ENV === "production") setTimeout(() => { void warmRecentSearchIndexes(); }, 2_000 + Math.floor(Math.random() * 3_000)).unref();
 
       console.log(`[api] cors_allowed_origins=${env.corsAllowedOrigins.join(",")}`);
       // Boolean env flags this process booted with (MEDIA_REMOTE_ENABLED, AI_RATE_LIMIT_ENABLED, ...); unset ones

@@ -28,6 +28,10 @@ export interface ExtractedCandidate {
   layoutFacts?: Map<number, import("../lib/page-layout-facts.js").PageLayoutFacts>;
   /** Where `layoutFacts` came from: the provider's layout walker, or its page facts (DOCSLURP_DOPPLER_PAGE_FACTS=use). */
   layoutFactsSource?: "vm-pdf" | "vm-pdf-facts";
+  /** The provider's layout walker left the whole file unknown: why (a fixed slug) and for how many pages. */
+  layoutWalkerUnknown?: import("../lib/page-layout-facts.js").LayoutWalkerUnknown;
+  /** Pages whose unknown walker grids the job's page facts settled, and pages neither source knew (routed as tables). */
+  layoutGrids?: { fromFacts: number; unknown: number; filled: number };
   /** Doppler page facts the sandboxed PDF provider returned from the same VM job (validated; see SandboxedPdfResult). */
   pageFacts?: import("../lib/doppler-page-facts.js").DopplerPageFactsDocument;
   /** The extractor already charged its OCR reads through the ledger (the OCR engine does); the stage must not again. */
