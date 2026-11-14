@@ -374,3 +374,24 @@ export async function findSummaryReusePredecessor(sql: Client, scope: SummaryTre
   if (!candidate.artifact_uri) return { refused: "predecessor-artifact-unregistered" };
   return { predecessor: { documentId: candidate.id, artifactUri: candidate.artifact_uri } };
 }
+
+/**
+ * Registers a build's text artifact as the document's `summary-tree` stage artifact, for a build that ran outside
+ * a run's own stage checkpoint (the backfill job). The document delete and purge paths remove registered
+ * artifacts, and the next version's reuse lookup reads the predecessor's artifact from here. `runId` must be a run
+ * of the document's project.
+ */
+export async function registerSummaryTreeArtifact(sql: Client, args: { scope: SummaryTreeScope; documentId: string; runId: string; artifactUri: string; stats?: Record<string, unknown> }): Promise<void> {
+  assertScope(args.scope);
+  const rows = await sql<{ document_id: string }[]>`
+    insert into document_run_stage_states (run_id, document_id, stage_name, status, attempts, artifact_uri, stats, started_at, completed_at, updated_at)
+    select r.id, d.id, 'summary-tree', 'completed', 1, ${args.artifactUri}, ${JSON.stringify(args.stats ?? {})}::text::jsonb, now(), now(), now()
+    from documents d
+    join project_runs r on r.id = ${args.runId} and r.project_id = d.project_id
+    where d.id = ${args.documentId} and d.org_id = ${args.scope.orgId} and d.project_id = ${args.scope.projectId} and d.purged_at is null
+    on conflict (run_id, document_id, stage_name) do update set
+      status = 'completed', artifact_uri = excluded.artifact_uri, stats = excluded.stats, error = null, completed_at = now(), updated_at = now()
+    returning document_id
+  `;
+  if (rows.length !== 1) throw new SummaryTreeStateRefused("The summary tree artifact was not registered: the document or the run is not this project's");
+}

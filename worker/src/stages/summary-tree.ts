@@ -251,9 +251,12 @@ export async function runSummaryTreeForDocument(args: SummaryTreeDocumentRun): P
     return { text: result.text, finishReason: result.finishReason, usage: result.usage };
   });
 
-  const embed: SummaryTreeEmbedder = overrides.embed ?? (async (texts, signal) => {
+  const embed: SummaryTreeEmbedder = async (texts, signal) => {
     if (!profile) throw new Error("summary tree embedding has no profile");
-    const embedded = await embedTextChunks({ chunks: texts, profile, config: args.config, privacyMode: args.pipeline.privacyMode, signal, runner: args.runner });
+    // An override replaces the provider request only: the usage of every embedding request is recorded here.
+    const embedded = overrides.embed
+      ? { vectors: await overrides.embed(texts, signal), totalTokens: undefined, costCents: undefined }
+      : await embedTextChunks({ chunks: texts, profile, config: args.config, privacyMode: args.pipeline.privacyMode, signal, runner: args.runner });
     const tokens = embedded.totalTokens ?? texts.reduce((sum, text) => sum + estimateTokens(text), 0);
     args.usage.record({
       provider: profile.provider,
@@ -268,7 +271,7 @@ export async function runSummaryTreeForDocument(args: SummaryTreeDocumentRun): P
       metadata: { ...usageMetadata, runtime: profile.runtime, summaries: texts.length },
     });
     return embedded.vectors;
-  });
+  };
 
   const spendRefusal = async (): Promise<string | null> => {
     const hosted = await args.hostedCallRefusal?.();

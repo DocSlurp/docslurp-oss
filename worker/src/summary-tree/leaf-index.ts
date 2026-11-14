@@ -98,6 +98,8 @@ export async function scanEmbeddingArtifactLeaves(args: {
   texts: Pick<LeafTextStore, "append">;
   limits?: Partial<SummaryTreeLimits>;
   signal?: AbortSignal;
+  /** Called as the scan advances, so a long artifact does not look like stalled work. */
+  onProgress?: () => void;
 }): Promise<SummaryTreeLeafIndex> {
   const selector = createSummaryTreeLeafSelector(args.document, args.limits);
   const leaves: SummaryTreeLeafRef[] = [];
@@ -151,8 +153,10 @@ export async function scanEmbeddingArtifactLeaves(args: {
       failure = error;
     }
   };
+  let received = 0;
   for await (const bytes of args.bytes) {
     args.signal?.throwIfAborted();
+    if (++received % 64 === 0) args.onProgress?.();
     parser.write(bytes);
     if (failure) throw failure;
     if (pendingTexts.length > 0) {

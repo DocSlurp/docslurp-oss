@@ -363,7 +363,7 @@ export async function buildDocumentSummaryTree(deps: SummaryTreeBuildDeps, input
   try {
     let index: SummaryTreeLeafIndex;
     try {
-      index = await scanEmbeddingArtifactLeaves({ bytes, document: input.document, texts, limits, signal });
+      index = await scanEmbeddingArtifactLeaves({ bytes, document: input.document, texts, limits, signal, onProgress: () => deps.noteProgress?.("summary-tree:scan") });
     } catch (error) {
       if (!(error instanceof SummaryTreeInputError)) throw error;
       // The artifact is not usable for grouping (a leaf without a vector, mixed dimensions, no raw text).

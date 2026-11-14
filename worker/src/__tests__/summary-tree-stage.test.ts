@@ -1,0 +1,364 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+
+import type { PGlite } from "@electric-sql/pglite";
+import type { PGLiteSocketServer } from "@electric-sql/pglite-socket";
+import {
+  artifactUri,
+  executionStageOrder,
+  getPipelineStageOrder,
+  normalizePipelineFeatures,
+  pipelineStageOrder,
+  pipelineTextOperationSchema,
+  postIndexStages,
+  stageDataFlow,
+  type PipelineFeatures,
+} from "@docslurp/shared";
+import postgres from "postgres";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+
+import type { Config } from "../config.js";
+import { orgSpendRefusal, setSpendCheckConfig } from "../db/spend-check.js";
+import { resolveEmbeddingModel } from "../embeddings/resolver.js";
+import { artifactExportPath } from "../exports/build-document-export.js";
+import type { Document, ProjectRun } from "../models.js";
+import { WorkflowState, type CheckpointStore } from "../pipeline/pipeline.js";
+import type { CommandRunner } from "../tools/runner.js";
+import { createStages } from "../stages/index.js";
+import {
+  runSummaryTreeForDocument,
+  SUMMARY_TREE_EMBEDDING_USAGE_METRIC,
+  SUMMARY_TREE_STAGE,
+  SUMMARY_TREE_USAGE_METRIC,
+  SummaryTreeStage,
+  type SummaryTreeOverrides,
+  type SummaryTreeStorage,
+} from "../stages/summary-tree.js";
+import type { SummaryTreeModelRequest } from "../summary-tree/index.js";
+import { WORKFLOW_STAGE_ORDER } from "../temporal/workflow-stage-order.js";
+import { createMigratedDatabase } from "../test/migrated-db.js";
+import { serveOnRandomPort } from "../test/migrated-postgres.js";
+
+/**
+ * The `summary-tree` stage as the pipeline runs it: where it sits, when it runs, what it records in the run's
+ * usage ledger and stage checkpoints. The model and the embedder are fakes; nothing is sent to a provider.
+ */
+
+const config = { costPer1kInputTokens: 0.001, costPer1kOutputTokens: 0.002, openRouterApiKey: "test-key" } as unknown as Config;
+const enabledPipeline = (overrides: Record<string, unknown> = {}): PipelineFeatures => normalizePipelineFeatures({ summaryTree: { enabled: true }, ...overrides } as never);
+const profile = resolveEmbeddingModel(config, enabledPipeline());
+const MODEL = profile.model;
+const DIM = profile.dimensions;
+const BUCKET = "test-bucket";
+const ON = { DOCSLURP_SUMMARY_TREE_BUILD: "on" };
+
+let db: PGlite;
+let server: PGLiteSocketServer;
+let sql: postgres.Sql<Record<string, unknown>>;
+let lanceRoot: string;
+let spoolRoot: string;
+
+beforeAll(async () => {
+  db = await createMigratedDatabase();
+  const served = await serveOnRandomPort(db);
+  server = served.server;
+  sql = postgres(`postgres://postgres@127.0.0.1:${served.port}/postgres`, { max: 1, prepare: false, onnotice: () => {} });
+  await sql`insert into "user"(id, name, email) values ('u1', 'A', 'a@example.com')`;
+  await sql`insert into organizations(id, name, slug, created_by_user_id) values ('o1', 'Org', 'org', 'u1')`;
+}, 60_000);
+
+afterAll(async () => {
+  setSpendCheckConfig(null);
+  await sql?.end();
+  await server?.stop();
+  await db?.close();
+});
+
+let logs: string[];
+beforeEach(async () => {
+  vi.restoreAllMocks();
+  logs = [];
+  vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => { logs.push(args.join(" ")); });
+  vi.spyOn(console, "warn").mockImplementation(() => undefined);
+  setSpendCheckConfig({ enabled: false, pages: 0, credits: 0 });
+  lanceRoot = await mkdtemp(path.join(tmpdir(), "docslurp-summary-stage-lance-"));
+  spoolRoot = await mkdtemp(path.join(tmpdir(), "docslurp-summary-stage-spool-"));
+  await sql`delete from projects`;
+  await sql`insert into projects(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W')`;
+});
+
+afterEach(async () => {
+  await rm(lanceRoot, { recursive: true, force: true });
+  await rm(spoolRoot, { recursive: true, force: true });
+});
+
+class MemoryStorage implements SummaryTreeStorage {
+  readonly bucket = BUCKET;
+  readonly objects = new Map<string, Buffer>();
+  readonly opened: string[] = [];
+  uri(key: string) { return artifactUri(this.bucket, key); }
+  async getBytes(key: string) {
+    const found = this.objects.get(key);
+    if (!found) throw Object.assign(new Error("The specified key does not exist."), { name: "NoSuchKey" });
+    return found;
+  }
+  async putBytes(key: string, data: Uint8Array) { this.objects.set(key, Buffer.from(data)); }
+  async listKeys(options?: { prefix?: string }) {
+    return { keys: [...this.objects.keys()].filter((key) => key.startsWith(options?.prefix ?? "")).sort(), truncated: false };
+  }
+  async deleteKeys(keys: string[]) { for (const key of keys) this.objects.delete(key); }
+  async openStream(key: string) {
+    this.opened.push(key);
+    const data = await this.getBytes(key);
+    return { stream: (async function* () { for (let at = 0; at < data.length; at += 64 * 1024) yield data.subarray(at, at + 64 * 1024); })() };
+  }
+}
+
+function embedArtifact(documentId: string, leaves: number): Buffer {
+  return Buffer.from(JSON.stringify({
+    documentId,
+    embedding: { provider: "test", model: MODEL, dimensions: DIM, runtime: "local" },
+    chunks: Array.from({ length: leaves }, (_, index) => {
+      const sectionIndex = Math.floor(index / 10);
+      const vector = Array.from({ length: DIM }, (_, d) => Math.sin(index * 0.01 + d) * 0.05);
+      vector[sectionIndex % DIM]! += 1;
+      return {
+        index, headingPath: [`Chapter ${Math.floor(sectionIndex / 6) + 1}`, `Section ${sectionIndex + 1}`], pageNumbers: [1 + Math.floor(index / 3)],
+        vector, metadata: { rawText: `Section ${sectionIndex + 1} paragraph ${index} on the expansion plan.`, overlapIndex: 0 },
+      };
+    }),
+  }));
+}
+
+async function seed(storage: MemoryStorage, pipeline: PipelineFeatures, documents: Array<{ id: string; leaves: number; mimeType?: string; format?: string }>) {
+  await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline)
+    values ('run-1', 'o1', 'u1', 'w', 'bulk-upload', 'processing', 'summary-tree', '{}')`;
+  const run = {
+    id: "run-1", orgId: "o1", userId: "u1", projectId: "w", kind: "bulk-upload", status: "processing", stage: SUMMARY_TREE_STAGE,
+    totalDocuments: documents.length, processedDocuments: 0, pagesTotal: 1, pagesProcessed: 0, spentCents: 0,
+    pipeline, error: null, stats: {}, artifacts: {}, claimId: null, createdAt: new Date(), updatedAt: new Date(),
+  } as ProjectRun;
+  const rows: Document[] = [];
+  for (const document of documents) {
+    await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, canonical_id, page_count, file_size)
+      values (${document.id}, 'o1', 'u1', 'w', 'run-1', ${`${document.id}.md`}, ${document.mimeType ?? "text/markdown"}, ${`u1/src/${document.id}`}, 'processing', ${`/${document.id}`}, 10, 10)`;
+    await sql`insert into vector_indexes (id, document_id, backend, bucket, path, embedding_model, dimension)
+      values (${`vi-${document.id}`}, ${document.id}, 'lancedb', 'b', 'p', ${MODEL}, ${DIM})`;
+    storage.objects.set(`u1/run-1/embeddings/${document.id}.json`, embedArtifact(document.id, document.leaves));
+    rows.push({
+      id: document.id, userId: "u1", runId: "run-1", filename: `${document.id}.md`, mimeType: document.mimeType ?? "text/markdown", sourceKey: `u1/src/${document.id}`,
+      parseSourceDecision: "unscanned-allowed", status: "processing", extractionMode: "hybrid", pageCount: 10, createdAt: new Date(), updatedAt: new Date(),
+    } as Document);
+  }
+  const state = new WorkflowState(run, rows);
+  for (const document of documents) {
+    state.artifactLedger.recordDocument(document.id, "normalizedFormat", document.format ?? "markdown");
+    state.setDocumentStage({
+      runId: "run-1", documentId: document.id, stageName: "embed", status: "completed", attempts: 1,
+      artifactUri: storage.uri(`u1/run-1/embeddings/${document.id}.json`), stats: { chunks: document.leaves },
+    } as unknown as Parameters<WorkflowState["setDocumentStage"]>[0]);
+  }
+  const store = {
+    startDocumentStage: vi.fn(async () => undefined), completeDocumentStage: vi.fn(async () => undefined), failDocumentStage: vi.fn(async () => undefined),
+    updateProgress: vi.fn(async () => undefined), startRunStage: vi.fn(async () => undefined), completeRunStage: vi.fn(async () => undefined),
+    failRunStage: vi.fn(async () => undefined), appendEvent: vi.fn(async () => undefined), setPageStageComplete: vi.fn(async () => undefined),
+    getCompletedPages: vi.fn(async () => new Set<number>()),
+  } satisfies CheckpointStore;
+  state.store = store;
+  return { state, store };
+}
+
+function fakes() {
+  const requests: SummaryTreeModelRequest[] = [];
+  const embedded: string[][] = [];
+  const overrides = (env: Record<string, string | undefined>): SummaryTreeOverrides => ({
+    env, lanceRoot, tmpDirectory: spoolRoot, concurrency: 4,
+    summarize: async (request) => {
+      requests.push(request);
+      return { text: `Title ${request.nodeId}\nSummary of ${request.nodeId}.`, finishReason: "stop", usage: { inputTokens: 210, outputTokens: 55, metadata: { generationId: `gen-${requests.length}` } } };
+    },
+    embed: async (texts) => {
+      embedded.push(texts);
+      return texts.map((text) => Array.from({ length: DIM }, (_, d) => Math.sin(text.length + d)));
+    },
+  });
+  return { requests, embedded, overrides };
+}
+
+const stageOf = (storage: MemoryStorage, overrides: SummaryTreeOverrides) =>
+  new SummaryTreeStage({} as CommandRunner, storage, config, () => sql, overrides);
+
+describe("placement", () => {
+  it("is the last stage, after index, in every order a run can execute", () => {
+    expect(pipelineStageOrder.at(-1)).toBe(SUMMARY_TREE_STAGE);
+    expect(pipelineStageOrder.indexOf(SUMMARY_TREE_STAGE)).toBeGreaterThan(pipelineStageOrder.indexOf("index"));
+    expect(WORKFLOW_STAGE_ORDER.at(-1)).toBe(SUMMARY_TREE_STAGE);
+    const order = getPipelineStageOrder(enabledPipeline({ graphRag: true, pageIndex: true }));
+    expect(order.at(-1)).toBe(SUMMARY_TREE_STAGE);
+    // Time to searchable ends at `index`: with enrichment moved after it, the tree still runs after everything else.
+    const moved = executionStageOrder(order, { indexBeforeEnrich: true });
+    expect(moved.at(-1)).toBe(SUMMARY_TREE_STAGE);
+    expect(moved.indexOf("index")).toBeLessThan(moved.indexOf(SUMMARY_TREE_STAGE));
+    expect(postIndexStages).not.toContain(SUMMARY_TREE_STAGE);
+    // Nothing a document needs to be searchable reads the tree.
+    for (const stage of ["embed", "index"] as const) expect(stageDataFlow[stage].consumes ?? []).not.toContain("summary-tree");
+    expect(stageDataFlow[SUMMARY_TREE_STAGE].alwaysRerun).toBeTruthy();
+  });
+
+  it("is in a run's plan only when the project turned the tree on", () => {
+    expect(getPipelineStageOrder(normalizePipelineFeatures({}))).not.toContain(SUMMARY_TREE_STAGE);
+    expect(getPipelineStageOrder(enabledPipeline())).toContain(SUMMARY_TREE_STAGE);
+    expect(pipelineTextOperationSchema.options).toContain("summary-tree");
+  });
+
+  it("is created with the other stages and needs a database client", () => {
+    const stages = createStages({ runner: {} as CommandRunner, storage: new MemoryStorage() as never, config: { ...config, databaseUrl: "postgres://worker@127.0.0.1:1/docslurp" } as Config });
+    expect(stages.at(-1)?.name).toBe(SUMMARY_TREE_STAGE);
+  });
+
+  it("keeps its text artifact out of document exports", () => {
+    expect(artifactExportPath(SUMMARY_TREE_STAGE, artifactUri(BUCKET, "u1/run-1/summary-tree/d1/summaries.jsonl"))).toBeNull();
+  });
+});
+
+describe("stage", () => {
+  it("makes zero model calls and writes nothing while the build switch is off", async () => {
+    for (const env of [{}, { DOCSLURP_SUMMARY_TREE_BUILD: "off" }, { DOCSLURP_SUMMARY_TREE_BUILD: "maybe" }]) {
+      await sql`delete from documents`;
+      await sql`delete from project_runs`;
+      const storage = new MemoryStorage();
+      const { requests, embedded, overrides } = fakes();
+      const { state, store } = await seed(storage, enabledPipeline(), [{ id: "d1", leaves: 300 }]);
+      await stageOf(storage, overrides(env)).run(state);
+      expect(requests).toEqual([]);
+      expect(embedded).toEqual([]);
+      expect(storage.opened).toEqual([]);
+      expect(store.startDocumentStage).not.toHaveBeenCalled();
+      expect(state.usageLedger.pendingCount).toBe(0);
+      expect((await sql`select count(*)::int as n from document_summary_trees`)[0]).toMatchObject({ n: 0 });
+    }
+  });
+
+  it("does nothing for a project that has not enabled the tree, whatever the switch says", async () => {
+    const storage = new MemoryStorage();
+    const { requests, overrides } = fakes();
+    const { state, store } = await seed(storage, normalizePipelineFeatures({}), [{ id: "d1", leaves: 300 }]);
+    await stageOf(storage, overrides(ON)).run(state);
+    expect(requests).toEqual([]);
+    expect(store.startDocumentStage).not.toHaveBeenCalled();
+  });
+
+  it("builds long documents, records a skip for the others, and stamps every usage event with org, project and run", async () => {
+    const storage = new MemoryStorage();
+    const { requests, embedded, overrides } = fakes();
+    const { state, store } = await seed(storage, enabledPipeline(), [
+      { id: "long", leaves: 300 },
+      { id: "short", leaves: 12 },
+      { id: "sheet", leaves: 300, format: "office-excel" },
+      { id: "talk", leaves: 300, mimeType: "audio/mpeg", format: "unknown" },
+    ]);
+    await stageOf(storage, overrides(ON)).run(state);
+
+    expect(requests).toHaveLength(36);
+    expect(state.documentStage("long", SUMMARY_TREE_STAGE)).toMatchObject({
+      status: "completed", artifactUri: artifactUri(BUCKET, "u1/run-1/summary-tree/long/summaries.jsonl"),
+      stats: { summaryTreeStatus: "ready", leaves: 300, groups: 30, nodes: 36, levels: 3, modelCalls: 36, failedGroups: 0 },
+    });
+    expect(state.documentStage("short", SUMMARY_TREE_STAGE)?.stats).toMatchObject({ summaryTreeStatus: "skipped", summaryTreeSkipReason: "short", modelCalls: 0 });
+    expect(state.documentStage("sheet", SUMMARY_TREE_STAGE)?.stats).toMatchObject({ summaryTreeStatus: "skipped", summaryTreeSkipReason: "format" });
+    expect(state.documentStage("talk", SUMMARY_TREE_STAGE)?.stats).toMatchObject({ summaryTreeStatus: "skipped", summaryTreeSkipReason: "media" });
+    // Short, spreadsheet and audio documents never had their artifact read.
+    expect(storage.opened).toEqual(["u1/run-1/embeddings/long.json"]);
+    expect(await sql`select document_id, status, skip_reason from document_summary_trees order by document_id`).toMatchObject([
+      { document_id: "long", status: "ready", skip_reason: null },
+      { document_id: "sheet", status: "skipped", skip_reason: "format" },
+      { document_id: "short", status: "skipped", skip_reason: "short" },
+      { document_id: "talk", status: "skipped", skip_reason: "media" },
+    ]);
+    // The artifact is the stage's registered artifact, under the run root.
+    expect(state.artifacts[`long:${SUMMARY_TREE_STAGE}`]).toBe(artifactUri(BUCKET, "u1/run-1/summary-tree/long/summaries.jsonl"));
+    expect(store.completeDocumentStage).toHaveBeenCalledTimes(4);
+
+    // One usage event per model attempt and per embedding request, through the run's ledger.
+    const events = state.usageLedger.snapshot();
+    const generation = events.filter((event) => event.metric === SUMMARY_TREE_USAGE_METRIC);
+    const embedding = events.filter((event) => event.metric === SUMMARY_TREE_EMBEDDING_USAGE_METRIC);
+    expect(state.usageLedger.runId).toBe("run-1");
+    expect(generation).toHaveLength(36);
+    expect(embedding).toHaveLength(embedded.length);
+    for (const event of generation) {
+      expect(event).toMatchObject({ provider: "openrouter", inputTokens: 210, outputTokens: 55, unit: "node", amount: 1 });
+      expect(event.metadata).toMatchObject({ orgId: "o1", projectId: "w", runId: "run-1", documentId: "long", operation: "summary-tree", attempt: 1, finishReason: "stop" });
+      expect(typeof event.metadata?.nodeId).toBe("string");
+      expect(event.metadata?.generationId).toMatch(/^gen-/);
+    }
+    for (const event of embedding) expect(event.metadata).toMatchObject({ orgId: "o1", projectId: "w", runId: "run-1", documentId: "long" });
+    expect(logs.filter((line) => line.startsWith(`[ai-usage] ${SUMMARY_TREE_USAGE_METRIC} model=`) && line.includes("input_tokens=210") && line.includes("output_tokens=55"))).toHaveLength(36);
+    expect(logs.some((line) => line.includes("[summary-tree] run=run-1 document=long status=ready"))).toBe(true);
+  }, 60_000);
+
+  it("skips a completed checkpoint on a retried activity without a call", async () => {
+    const storage = new MemoryStorage();
+    const { requests, overrides } = fakes();
+    const { state } = await seed(storage, enabledPipeline(), [{ id: "long", leaves: 300 }]);
+    const stage = stageOf(storage, overrides(ON));
+    await stage.run(state);
+    requests.length = 0;
+    await stage.run(state);
+    expect(requests).toEqual([]);
+  }, 60_000);
+
+  it("refuses before any call when privacy mode forbids a hosted model, and says so", async () => {
+    const storage = new MemoryStorage();
+    const { embedded, overrides } = fakes();
+    const { state } = await seed(storage, { ...enabledPipeline(), privacyMode: "local-only" }, [{ id: "long", leaves: 300 }]);
+    // No fake model: the real route would be used, and must not be reached.
+    const { summarize: _summarize, ...withoutModel } = overrides(ON);
+    await stageOf(storage, withoutModel).run(state);
+    expect(state.documentStage("long", SUMMARY_TREE_STAGE)?.stats).toMatchObject({ summaryTreeStatus: "blocked", summaryTreeReason: "privacy-mode", modelCalls: 0 });
+    expect(embedded).toEqual([]);
+    expect(state.usageLedger.pendingCount).toBe(0);
+    expect((await sql`select status, error from document_summary_trees where document_id = 'long'`)[0]).toMatchObject({ status: "pending", error: "privacy-mode" });
+  });
+
+  it("stops at the run cost cap before the first call", async () => {
+    const storage = new MemoryStorage();
+    const { requests, overrides } = fakes();
+    const { state } = await seed(storage, { ...enabledPipeline(), maxCostCents: 5 }, [{ id: "long", leaves: 300 }]);
+    state.run.spentCents = 5;
+    await stageOf(storage, overrides(ON)).run(state);
+    expect(requests).toEqual([]);
+    expect(state.documentStage("long", SUMMARY_TREE_STAGE)?.stats).toMatchObject({ summaryTreeStatus: "partial", summaryTreeReason: "stopped:run-cost-cap", modelCalls: 0 });
+  });
+});
+
+describe("spend guard", () => {
+  it("refuses a document of an organization that may not spend, through the default balance check", async () => {
+    setSpendCheckConfig({ enabled: true, pages: 25, credits: 10 });
+    const storage = new MemoryStorage();
+    const { requests, embedded, overrides } = fakes();
+    await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline)
+      values ('run-1', 'o1', 'u1', 'w', 'bulk-upload', 'processing', 'summary-tree', '{}')`;
+    await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, canonical_id, page_count, file_size)
+      values ('d1', 'o1', 'u1', 'w', 'run-1', 'd1.md', 'text/markdown', 'u1/src/d1', 'processing', '/d1', 10, 10)`;
+    storage.objects.set("u1/run-1/embeddings/d1.json", embedArtifact("d1", 300));
+    // The project is not this organization's: the shared spend rule answers `plan_not_entitled`.
+    expect(await orgSpendRefusal(sql, { orgId: "o-unknown", projectId: "w" })).toBe("plan_not_entitled");
+    expect(await orgSpendRefusal(sql, { orgId: null, projectId: "w" })).toBe("plan_not_entitled");
+
+    const usage: unknown[] = [];
+    const result = await runSummaryTreeForDocument({
+      sql, storage, config, pipeline: enabledPipeline(), scope: { orgId: "o1", projectId: "w" }, runId: "run-1", runRoot: "u1/run-1",
+      document: { id: "d1", normalizedFormat: "markdown", mimeType: "text/markdown" },
+      embeddingArtifactUri: storage.uri("u1/run-1/embeddings/d1.json"),
+      usage: { record: (input) => { usage.push(input); } },
+      spendRefusal: () => orgSpendRefusal(sql, { orgId: "o-unknown", projectId: "w" }),
+      overrides: overrides(ON),
+    });
+    expect(result).toMatchObject({ status: "blocked", reason: "plan_not_entitled" });
+    expect(requests).toEqual([]);
+    expect(embedded).toEqual([]);
+    expect(usage).toEqual([]);
+  });
+});
