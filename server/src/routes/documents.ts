@@ -405,13 +405,13 @@ export const documentsRoutes = new Hono()
     if (!owner || (apiKey && !apiKeyCanUseProject(apiKey, owner))) return apiStatusError(c, 404, "Document not found");
     const deniedResume = await denyReprocessOfVisible(c, [owner]);
     if (deniedResume) return deniedResume;
-    const status = await requestDocumentFigureResume({ orgId: owner.orgId, projectId: owner.projectId, documentId: docId });
+    const { status, reason, granted, grantsLeft } = await requestDocumentFigureResume({ orgId: owner.orgId, projectId: owner.projectId, documentId: docId });
     await appendAuditLog({
       orgId: owner.orgId, userId, projectId: owner.projectId, documentId: docId, apiKeyId: apiKey?.keyId ?? null,
       action: "document.figures.resume_requested", resourceType: "document", resourceId: docId, ipAddress: requestIp(c),
-      metadata: { status, userAgent: requestUserAgent(c) },
+      metadata: { status, reason, granted, userAgent: requestUserAgent(c) },
     });
-    return c.json({ documentId: docId, status }, status === "queued" || status === "already-queued" ? 202 : 200);
+    return c.json({ documentId: docId, status, reason, granted, grantsLeft }, status === "queued" || status === "already-queued" ? 202 : 200);
   })
   .get("/:docId/structured", async (c) => {
     const userId = c.get("sessionUser").id;

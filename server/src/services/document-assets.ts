@@ -12,6 +12,7 @@
 import { dataUnavailable, figureResumeUnavailableReason, parseArtifactUri, UNKNOWN_INGEST_VERSION, type DataUnavailable, type DopplerLedgerReason } from "@docslurp/shared";
 
 import { sql } from "../db.js";
+import { documentFigureResumeState, type FigureResumeStateView } from "./figure-resume.js";
 import { withheldArtifactUrisFromMetadata } from "./pii-artifact-guard.js";
 
 /** A document's Doppler folder (`<artifact root>/doppler/<document>/...`): the document id its key names, or null. */
@@ -108,6 +109,8 @@ export interface DocumentExtractionLevelView {
     bySource: { copy: number; decode: number; render: number };
     bytes: number;
   };
+  /** The figure resume state while images are resumable (why resumes stopped, when, grants left); null otherwise. */
+  resume: FigureResumeStateView | null;
   updatedAt: string;
 }
 
@@ -264,6 +267,7 @@ export async function getDocumentAssetLedger(scope: DocumentAssetScope, page?: D
         resumable: level.assets_resumable, bySource: { copy: level.source_copy, decode: level.source_decode, render: level.source_render },
         bytes: Number(level.asset_bytes),
       },
+      resume: await documentFigureResumeState({ orgId: scope.orgId, documentId: scope.documentId }),
       updatedAt: level.updated_at,
     } : null,
     assets: pageRows.map((row) => {

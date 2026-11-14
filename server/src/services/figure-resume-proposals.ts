@@ -14,7 +14,7 @@ import { isFirstPartyAppActor } from "../lib/first-party-app.js";
 import { openSettingsProposal, sealSettingsProposal } from "../lib/settings-proposal-tokens.js";
 import { canEditProject, getProjectAccess } from "./organizations.js";
 import { appendAuditLog } from "./audit-log.js";
-import { countResumableFigureDocuments, requestDocumentFigureResume, requestProjectFigureResumes, type FigureResumeRequestStatus } from "./figure-resume.js";
+import { countResumableFigureDocuments, requestDocumentFigureResume, requestProjectFigureResumes, resumableWhere, type FigureResumeRequestStatus } from "./figure-resume.js";
 
 const claimsSchema = z.object({
   purpose: z.literal("figure-resume-proposal-v1"), actor: z.string(), userId: z.string(), sessionId: z.string().min(1),
@@ -42,12 +42,10 @@ async function authorize(actor: RequestActor, projectId: string, sessionId: stri
 /** How many documents an Apply would queue now (one document: 1 or 0). */
 async function resumable(scope: { orgId: string; projectId: string }, documentId: string | null): Promise<number> {
   if (!documentId) return await countResumableFigureDocuments(scope);
+  // One document: the user's own request, so a budget-blocked document with grants left counts (Apply grants one).
   const [row] = await sql<{ n: number }[]>`
     select count(*)::int as n from document_extraction_levels l join documents d on d.id = l.document_id and d.org_id = l.org_id
-    where l.document_id = ${documentId} and l.org_id = ${scope.orgId} and l.project_id = ${scope.projectId}
-      and l.images_status = 'resumable' and l.assets_current and l.markdown_complete and d.status = 'completed'
-      and d.run_id is not distinct from l.run_id and d.superseded_at is null and d.archived_at is null and d.purged_at is null
-      and l.resume_vm_launches < ${FIGURE_RESUME_LIMITS.maxVmLaunches} and (l.resume_blocked is null or l.resume_blocked <> 'attempts')`;
+    where l.document_id = ${documentId} and ${resumableWhere(scope, "grantable")}`;
   return row?.n ?? 0;
 }
 
@@ -85,8 +83,9 @@ export async function applyFigureResumeProposal(args: { actor: RequestActor; pro
   let status: FigureResumeRequestStatus | "queued" | "off";
   let queued: number;
   if (claims.documentId) {
-    status = await requestDocumentFigureResume({ ...scope, documentId: claims.documentId });
-    queued = status === "queued" ? 1 : 0;
+    const result = await requestDocumentFigureResume({ ...scope, documentId: claims.documentId });
+    status = result.status;
+    queued = result.status === "queued" ? 1 : 0;
   } else {
     const result = await requestProjectFigureResumes(scope);
     status = result.status;

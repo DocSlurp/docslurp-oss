@@ -6,10 +6,25 @@
  *
  * Also the backstop sweep: a resumable level the commit-time enqueue missed is queued again (auto projects only).
  */
-import { FIGURE_RESUME_LIMITS, projectFigureResumeMode } from "@docslurp/shared";
+import {
+  FIGURE_RESUME_BUDGET_BLOCKS, FIGURE_RESUME_LIMITS, figureResumeBudgetConfig, isFigureResumeBudgetBlock, projectFigureResumeMode,
+  type FigureResumeBlockReason,
+} from "@docslurp/shared";
 import { sql } from "../db.js";
 
 export type FigureResumeRequestStatus = "queued" | "already-queued" | "not-resumable" | "capped" | "off";
+
+/**
+ * A single-document request's answer: the status, the block reason the document has (or had, when this request cleared
+ * it), and whether the request granted a budget extension. Reason codes are fixed (FIGURE_RESUME_BLOCK_REASONS).
+ */
+export interface FigureResumeRequestResult {
+  status: FigureResumeRequestStatus;
+  reason: FigureResumeBlockReason | null;
+  granted: boolean;
+  /** Extensions left for this run after this request. */
+  grantsLeft: number;
+}
 
 export interface FigureResumeScope {
   orgId: string;
@@ -25,22 +40,36 @@ function assertScope(scope: FigureResumeScope): void {
   }
 }
 
+/** Blocks no request clears (`unscanned`: only a new run that records a parse decision, R6-H1 F3). */
+const STICKY_BLOCKS = ["unscanned"] as const;
+
 /**
- * Live, completed documents of the scope whose current level a resume could finish: the Markdown committed, under the
- * lifetime VM launch cap, not blocked `attempts` or `unscanned`, and some unit below its cap (the unsharded document, a resumable shard,
- * or a gap). The runner re-checks all of it at claim.
+ * Live, completed documents of the scope whose current level has figure work left (the unsharded document's resumable
+ * images, a resumable shard, or a gap), the Markdown committed. `budget`:
+ *   - `exclude`: not blocked by a budget stop (`attempts`, `vm-budget`, `no-progress`) or `unscanned` (bulk, counts);
+ *   - `grantable`: a budget-blocked document still counts while it has request grants left (one document's request);
+ *   - `blocked`: only documents a budget stop or `unscanned` holds (what a bulk request skipped, by reason).
+ * The page-scaled caps themselves are the runner's (it re-checks everything at claim and blocks with a reason, never
+ * starting a VM past them).
  */
-function resumableWhere(scope: FigureResumeScope) {
+export function resumableWhere(scope: FigureResumeScope, budget: "exclude" | "grantable" | "blocked" = "exclude") {
+  const maxGrants = figureResumeBudgetConfig().maxGrants;
+  const blocks = sql.array([...FIGURE_RESUME_BUDGET_BLOCKS]);
+  const blockOk = budget === "blocked"
+    ? sql`(l.resume_blocked = any(${blocks}::text[]) or l.resume_blocked = any(${sql.array([...STICKY_BLOCKS])}::text[]))`
+    : budget === "exclude"
+    ? sql`(l.resume_blocked is null or not (l.resume_blocked = any(${blocks}::text[]) or l.resume_blocked = any(${sql.array([...STICKY_BLOCKS])}::text[])))`
+    : sql`(l.resume_blocked is null or not (l.resume_blocked = any(${sql.array([...STICKY_BLOCKS])}::text[]))) and (l.resume_blocked is null
+        or not (l.resume_blocked = any(${blocks}::text[])) or l.resume_grants < ${maxGrants})`;
   return sql`
     l.org_id = ${scope.orgId} and l.project_id = ${scope.projectId}
-      and l.images_status = 'resumable' and l.assets_current and l.markdown_complete
-      and l.resume_vm_launches < ${FIGURE_RESUME_LIMITS.maxVmLaunches} and coalesce(l.resume_blocked, '') not in ('attempts', 'unscanned')
+      and l.images_status = 'resumable' and l.assets_current and l.markdown_complete and ${blockOk}
       and d.id = l.document_id and d.org_id = l.org_id and d.project_id = l.project_id and d.run_id is not distinct from l.run_id
       and d.status = 'completed' and d.superseded_at is null and d.archived_at is null and d.purged_at is null
       and (
-        (l.shards = 0 and l.resumes < ${FIGURE_RESUME_LIMITS.maxAttempts} and (l.assets_resumable > 0 or l.assets_pending > 0))
+        (l.shards = 0 and (l.assets_resumable > 0 or l.assets_pending > 0))
         or exists (select 1 from document_extraction_shards s where s.document_id = l.document_id and s.org_id = l.org_id
-          and s.run_id is not distinct from l.run_id and s.images_status = 'resumable' and s.resumes < ${FIGURE_RESUME_LIMITS.maxAttempts})
+          and s.run_id is not distinct from l.run_id and s.images_status = 'resumable')
         or coalesce(jsonb_array_length(l.gaps), 0) > 0
       )`;
 }
@@ -51,47 +80,79 @@ async function projectMode(scope: FigureResumeScope) {
 }
 
 /**
- * Queue one document's resume now. `off` when the project's figures or resumes are off; `capped` when every unit spent
- * its attempts or the document its lifetime VM launches; `not-resumable` when nothing is left (or the document is not this
- * scope's: the route answers 404 for that before calling). A request clears only an earlier block reason other than the
- * cap (`attempts`) and `unscanned` (no parse decision: only a new run that records one clears it, R6-H1 F3), and the
- * backoff: it never resets a counter (H4: a request cannot buy more VM time).
+ * Queue one document's resume now. `off` when the project's figures or resumes are off; `not-resumable` when nothing is
+ * left (or the document is not this scope's: the route answers 404 for that before calling); `capped` with its reason when
+ * the document is past a budget stop and has no grant left, or blocked `unscanned` (only a new run that records a parse
+ * decision clears that, R6-H1 F3).
+ *
+ * A budget block (`attempts`, `vm-budget`, `no-progress`) is cleared by granting one extension: resume_grants + 1 (each
+ * adds half the page-scaled caps again, at least the floors; each unit's failure and no-progress limits once more,
+ * figure-resume-limits.ts) and the document's no-progress count resets. A unit's own counts are kept (H1), so a unit
+ * that keeps failing stays sorted after the others. At
+ * most DOCSLURP_FIGURE_RESUME_MAX_GRANTS per run, so a request buys a bounded amount of VM time (H4); a reprocess (a new,
+ * customer-paid run) starts every counter clean. Other blocks and the backoff are cleared without a grant.
  */
-export async function requestDocumentFigureResume(scope: FigureResumeScope & { documentId: string }): Promise<FigureResumeRequestStatus> {
+export async function requestDocumentFigureResume(scope: FigureResumeScope & { documentId: string }): Promise<FigureResumeRequestResult> {
   assertScope(scope);
-  if (typeof scope.documentId !== "string" || !DOCUMENT_ID.test(scope.documentId)) return "not-resumable";
+  const maxGrants = figureResumeBudgetConfig().maxGrants;
+  const answer = (status: FigureResumeRequestStatus, reason: FigureResumeBlockReason | null = null, granted = false, grants = 0): FigureResumeRequestResult =>
+    ({ status, reason, granted, grantsLeft: Math.max(0, maxGrants - grants) });
+  if (typeof scope.documentId !== "string" || !DOCUMENT_ID.test(scope.documentId)) return answer("not-resumable");
   const mode = await projectMode(scope);
-  if (!mode || mode === "off") return "off";
-  const [level] = await sql<{ queued: boolean; resumable: boolean; capped: boolean }[]>`
-    select l.resume_after is not null and l.resume_blocked is null as queued,
-      exists (select 1 from documents d where ${resumableWhere(scope)}) as resumable,
-      (l.resume_blocked = 'attempts' or l.resume_vm_launches >= ${FIGURE_RESUME_LIMITS.maxVmLaunches}) as capped
+  if (!mode || mode === "off") return answer("off");
+  const [level] = await sql<{ queued: boolean; resumable: boolean; blocked: FigureResumeBlockReason | null; grants: number; status: string }[]>`
+    select l.resume_after is not null and l.resume_blocked is null as queued, l.resume_blocked as blocked, l.resume_grants as grants,
+      l.images_status as status,
+      exists (select 1 from documents d where ${resumableWhere(scope, "grantable")}) as resumable
     from document_extraction_levels l
     where l.document_id = ${scope.documentId} and l.org_id = ${scope.orgId} and l.project_id = ${scope.projectId}`;
-  if (!level) return "not-resumable";
-  if (level.capped) return "capped";
+  if (!level) return answer("not-resumable");
+  const budgetBlocked = isFigureResumeBudgetBlock(level.blocked);
   if (!level.resumable) {
-    const [spent] = await sql<{ n: number }[]>`
-      select count(*)::int as n from document_extraction_levels l
-      where l.document_id = ${scope.documentId} and l.org_id = ${scope.orgId} and l.images_status = 'resumable'`;
-    return (spent?.n ?? 0) > 0 ? "capped" : "not-resumable";
+    const capped = level.status === "resumable" && (level.blocked === "unscanned" || (budgetBlocked && level.grants >= maxGrants));
+    const result = answer(capped ? "capped" : "not-resumable", level.blocked, false, level.grants);
+    console.log(`[doppler-figures] resume requested doc=${scope.documentId} org=${scope.orgId} status=${result.status} reason=${level.blocked ?? "none"} grants=${level.grants}/${maxGrants}`);
+    return result;
   }
-  if (level.queued) return "already-queued";
-  const updated = await sql`
-    update document_extraction_levels l set resume_after = now(), resume_blocked = null
+  if (level.queued) return answer("already-queued", null, false, level.grants);
+  // One statement: the grant only when the row is still budget-blocked with grants left (a concurrent request grants once).
+  const [updated] = await sql<{ grants: number; granted: boolean }[]>`
+    update document_extraction_levels l set resume_after = now(), resume_blocked = null, resume_blocked_at = null,
+      resume_grants = l.resume_grants + case when l.resume_blocked = any(${sql.array([...FIGURE_RESUME_BUDGET_BLOCKS])}::text[]) then 1 else 0 end,
+      resume_stalls = case when l.resume_blocked = any(${sql.array([...FIGURE_RESUME_BUDGET_BLOCKS])}::text[]) then 0 else l.resume_stalls end,
+      resume_failures = case when l.resume_blocked = any(${sql.array([...FIGURE_RESUME_BUDGET_BLOCKS])}::text[]) then 0 else l.resume_failures end
     from documents d
-    where l.document_id = ${scope.documentId} and ${resumableWhere(scope)} and (coalesce(l.resume_blocked, '') not in ('attempts', 'unscanned'))
-    returning 1`;
-  console.log(`[doppler-figures] resume requested doc=${scope.documentId} org=${scope.orgId} status=${updated.length > 0 ? "queued" : "not-resumable"}`);
-  return updated.length > 0 ? "queued" : "not-resumable";
+    where l.document_id = ${scope.documentId} and ${resumableWhere(scope, "grantable")}
+      and l.resume_blocked is not distinct from ${level.blocked}::text
+    returning l.resume_grants as grants, l.resume_grants > ${level.grants} as granted`;
+  const result = updated ? answer("queued", level.blocked, updated.granted, updated.grants) : answer("not-resumable", level.blocked, false, level.grants);
+  console.log(`[doppler-figures] resume requested doc=${scope.documentId} org=${scope.orgId} status=${result.status} reason=${level.blocked ?? "none"} granted=${result.granted} grants=${updated?.grants ?? level.grants}/${maxGrants}`);
+  return result;
 }
 
-/** Queue up to `limit` (at most 100) of a project's resumable documents, oldest first. */
-export async function requestProjectFigureResumes(scope: FigureResumeScope & { limit?: number }): Promise<{ status: "queued" | "off"; queued: number; alreadyQueued: number; capped: boolean }> {
+/** A bulk request's answer: what it queued, and the documents it skipped because a budget stop (or `unscanned`) holds them. */
+export interface ProjectFigureResumeResult {
+  status: "queued" | "off";
+  queued: number;
+  alreadyQueued: number;
+  capped: boolean;
+  /** Documents with figure work left that this request did not queue, by block reason (only reasons present). */
+  blocked: Partial<Record<FigureResumeBlockReason, number>>;
+}
+
+/**
+ * Queue up to `limit` (at most 100) of a project's resumable documents, oldest first. Never grants: a budget-blocked
+ * document is left blocked and counted in `blocked` (one document's request can grant).
+ */
+export async function requestProjectFigureResumes(scope: FigureResumeScope & { limit?: number }): Promise<ProjectFigureResumeResult> {
   assertScope(scope);
   const limit = Math.min(Math.max(Math.floor(scope.limit ?? FIGURE_RESUME_LIMITS.bulkMax) || 1, 1), FIGURE_RESUME_LIMITS.bulkMax);
   const mode = await projectMode(scope);
-  if (!mode || mode === "off") return { status: "off", queued: 0, alreadyQueued: 0, capped: false };
+  if (!mode || mode === "off") return { status: "off", queued: 0, alreadyQueued: 0, capped: false, blocked: {} };
+  const blockedRows = await sql<{ reason: FigureResumeBlockReason; n: number }[]>`
+    select l.resume_blocked as reason, count(*)::int as n from document_extraction_levels l join documents d on d.id = l.document_id
+    where ${resumableWhere(scope, "blocked")} group by l.resume_blocked order by l.resume_blocked`;
+  const blocked = Object.fromEntries(blockedRows.map((row) => [row.reason, row.n])) as ProjectFigureResumeResult["blocked"];
   const [already] = await sql<{ n: number }[]>`
     select count(*)::int as n from document_extraction_levels l join documents d on d.id = l.document_id
     where ${resumableWhere(scope)} and l.resume_after is not null and l.resume_blocked is null`;
@@ -104,13 +165,40 @@ export async function requestProjectFigureResumes(scope: FigureResumeScope & { l
   const capped = picked.length > limit;
   const ids = picked.slice(0, limit).map((row) => row.document_id);
   const queued = ids.length === 0 ? [] : await sql<{ document_id: string }[]>`
-    update document_extraction_levels l set resume_after = now(), resume_blocked = null
+    update document_extraction_levels l set resume_after = now(), resume_blocked = null, resume_blocked_at = null
     from documents d
     where l.document_id = any(${sql.array(ids)}::text[]) and ${resumableWhere(scope)} and l.resume_after is null
     returning l.document_id`;
   const count = Math.min(queued.length, limit);
-  console.log(`[doppler-figures] resume requested project=${scope.projectId} org=${scope.orgId} queued=${count} already=${already?.n ?? 0} capped=${capped}`);
-  return { status: "queued", queued: count, alreadyQueued: already?.n ?? 0, capped };
+  const skipped = blockedRows.map((row) => `${row.reason}:${row.n}`).join(",") || "none";
+  console.log(`[doppler-figures] resume requested project=${scope.projectId} org=${scope.orgId} queued=${count} already=${already?.n ?? 0} capped=${capped} blocked=${skipped}`);
+  return { status: "queued", queued: count, alreadyQueued: already?.n ?? 0, capped, blocked };
+}
+
+/** A document's figure resume state for its detail and asset-ledger reads (fixed reason codes, no internals). */
+export interface FigureResumeStateView {
+  /** Queued for the runner now. */
+  queued: boolean;
+  /** Why resumes stopped, or null. */
+  blocked: FigureResumeBlockReason | null;
+  blockedAt: string | null;
+  /** Extensions a single-document request may still grant this run (budget blocks only). */
+  grantsLeft: number;
+}
+
+/**
+ * The resume state of a document's current level, scoped by organization and document, or null when it has nothing left
+ * to resume (no level, or its figures are not resumable).
+ */
+export async function documentFigureResumeState(scope: { orgId: string; documentId: string }): Promise<FigureResumeStateView | null> {
+  if (!scope || typeof scope.orgId !== "string" || !ID.test(scope.orgId) || typeof scope.documentId !== "string" || !ID.test(scope.documentId)) return null;
+  const [level] = await sql<{ queued: boolean; blocked: FigureResumeBlockReason | null; blocked_at: string | null; grants: number }[]>`
+    select l.resume_after is not null and l.resume_blocked is null as queued, l.resume_blocked as blocked,
+      to_char(l.resume_blocked_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') as blocked_at, l.resume_grants as grants
+    from document_extraction_levels l join documents d on d.id = l.document_id and d.org_id = l.org_id and d.run_id is not distinct from l.run_id
+    where l.document_id = ${scope.documentId} and l.org_id = ${scope.orgId} and l.images_status = 'resumable' and l.assets_current`;
+  if (!level) return null;
+  return { queued: level.queued, blocked: level.blocked, blockedAt: level.blocked_at, grantsLeft: Math.max(0, figureResumeBudgetConfig().maxGrants - level.grants) };
 }
 
 /** How many of a project's documents a resume could finish now (for the chat's offer and the settings read). */
@@ -136,7 +224,6 @@ export async function sweepFigureResumeQueue(now = Date.now()): Promise<number> 
       join projects p on p.id = l2.project_id and p.org_id = l2.org_id
       join documents d on d.id = l2.document_id and d.org_id = l2.org_id and d.run_id = l2.run_id
       where l2.images_status = 'resumable' and l2.assets_current and l2.markdown_complete and l2.resume_after is null and l2.resume_blocked is null
-        and l2.resume_vm_launches < ${FIGURE_RESUME_LIMITS.maxVmLaunches} and l2.resume_failures < ${FIGURE_RESUME_LIMITS.maxAttempts}
         and d.status = 'completed' and d.superseded_at is null and d.archived_at is null and d.purged_at is null
         and l2.updated_at < now() - interval '5 minutes'
         and coalesce(p.pipeline ->> 'figureResume', 'auto') = 'auto'

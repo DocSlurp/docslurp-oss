@@ -840,10 +840,29 @@ export type DeletedDocument = JsonObject & {
   sourceKey?: string;
 };
 
+/** Why a document's figure resumes stopped (fixed codes). The first three are budget stops a single-document request may extend. */
+export type FigureResumeBlockReason = "attempts" | "vm-budget" | "no-progress" | "figures-off" | "resume-off" | "stale" | "refused" | "unscanned";
+
 /** Answer of {@link DocSlurpClient.resumeDocumentFigures}. */
-export type FigureResumeRequest = { documentId: string; status: "queued" | "already-queued" | "not-resumable" | "capped" | "off" };
+export type FigureResumeRequest = {
+  documentId: string;
+  status: "queued" | "already-queued" | "not-resumable" | "capped" | "off";
+  /**
+   * Why the document's resumes stopped, when they did (or had, when this request cleared it): `attempts` (launch cap),
+   * `vm-budget` (VM time), `no-progress`, `unscanned`, `refused`, `stale`, `resume-off` or `figures-off`; else null.
+   */
+  reason: FigureResumeBlockReason | null;
+  /** Whether this request granted an extension past a budget stop (bounded per run; a reprocess starts clean). */
+  granted: boolean;
+  /** Extensions left for the document's current run. */
+  grantsLeft: number;
+};
 /** Answer of {@link DocSlurpClient.resumeProjectFigures}: how many were queued, already queued, and whether more remain. */
-export type ProjectFigureResumeRequest = { projectId: string; status: "queued" | "off"; queued: number; alreadyQueued: number; capped: boolean };
+export type ProjectFigureResumeRequest = {
+  projectId: string; status: "queued" | "off"; queued: number; alreadyQueued: number; capped: boolean;
+  /** Documents with figures left that this request did not queue, by block reason (a bulk request never grants). */
+  blocked: Partial<Record<FigureResumeBlockReason, number>>;
+};
 
 /** Input of {@link DocSlurpClient.reprocessRun}: all stages, from one stage on, or only the listed stages. */
 export type ReprocessRunInput = { stageFrom?: string; stages?: string[]; speedBoost?: boolean; chartExport?: ChartExportOverride };
