@@ -24,6 +24,7 @@ export const OUT = () => { const dir = need("SUMMARY_TREE_EVAL_OUT"); mkdirSync(
 export const sha = (data: string | Uint8Array) => createHash("sha256").update(data).digest("hex");
 export const readJson = <T,>(path: string) => JSON.parse(readFileSync(path, "utf8")) as T;
 export const TEXT_MODEL = DEFAULT_PIPELINE_TEXT_MODEL;
+export const FALLBACK_TEXT_MODEL = "openai/gpt-oss-120b";
 export const EMBEDDING = defaultPipelineFeatures.embedding;
 export const EMBEDDING_ROUTE = resolveEmbeddingRoute(EMBEDDING);
 export const ORG = "stevalorg", USER = "steval-user", PROJECT = "steval-project", RUN = "steval-run";
@@ -32,6 +33,8 @@ export const ORG = "stevalorg", USER = "steval-user", PROJECT = "steval-project"
 export const LIST_PRICE: Record<string, { input: number; output: number }> = {
   [TEXT_MODEL]: { input: 0.065, output: 0.26 },
   [EMBEDDING_ROUTE.model]: { input: 0.004, output: 0 },
+  // The product's own fallback when the default model's hosts are not allowed; used here only for provider content refusals.
+  [FALLBACK_TEXT_MODEL]: { input: 0.04, output: 0.19 },
 };
 
 export function loadProviderKey(): void {
@@ -74,7 +77,9 @@ export class VectorCache {
     for (const line of readFileSync(this.file(), "utf8").split("\n")) {
       if (!line) continue;
       const tab = line.indexOf("\t");
-      this.known.set(line.slice(0, tab), new Float32Array(Buffer.from(line.slice(tab + 1), "base64").buffer.slice(0)));
+      // Copy out of the Buffer: small Buffers share a pooled ArrayBuffer, so its bytes start at byteOffset.
+      const bytes = Buffer.from(line.slice(tab + 1), "base64");
+      this.known.set(line.slice(0, tab), new Float32Array(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)));
     }
   }
   key(text: string) { return sha(`${this.scope}\n${text}`); }
@@ -90,10 +95,14 @@ export class VectorCache {
  * Worker provider calls read a per-job provider policy and fail closed (restricted hosts) outside one. A project's
  * default policy allows every host of the default text model, so the eval runs under that default.
  */
-async function withDefaultProviderPolicy<T>(fn: () => Promise<T>): Promise<T> {
+async function withProviderPolicy<T>(allowAllHosts: boolean, fn: () => Promise<T>): Promise<T> {
   const { runWithProviderRateScope } = await import("../../worker/src/lib/provider-rate-limit.js");
-  return runWithProviderRateScope({ orgId: null, allowChinaProviders: true }, fn);
+  return runWithProviderRateScope({ orgId: null, allowChinaProviders: allowAllHosts }, fn);
 }
+const withDefaultProviderPolicy = <T,>(fn: () => Promise<T>) => withProviderPolicy(true, fn);
+
+/** The default model's host refused the output on content grounds (seen on historical fiction). */
+export const isContentRefusal = (error: unknown) => /inappropriate content/i.test(`${(error as Error)?.message ?? ""} ${(error as { responseBody?: string })?.responseBody ?? ""} ${JSON.stringify((error as { cause?: { value?: unknown } })?.cause?.value ?? "")}`);
 
 let workerConfig: unknown;
 async function config() {
@@ -141,21 +150,37 @@ export async function embedQueries(queries: string[], step: string): Promise<Flo
   return queries.map((query) => cache.get(query)!);
 }
 
-export async function generate(step: string, system: string, prompt: string, maxOutputTokens: number): Promise<{ text: string; finishReason: string; inputTokens: number; outputTokens: number; ms: number }> {
+export type Generated = { text: string; finishReason: string; inputTokens: number; outputTokens: number; ms: number; model: string };
+/**
+ * One text call on the default model. `restrictedHosts` routes it the way the product does for a project that
+ * disallows the default model's hosts (its built-in fallback model); callers use it only after a content refusal.
+ */
+export async function generate(step: string, system: string, prompt: string, maxOutputTokens: number, options: { restrictedHosts?: boolean } = {}): Promise<Generated> {
   assertBudget();
   const { generateOpenRouterText } = await import("../../worker/src/lib/ai.js");
   await config();
   const started = Date.now();
-  const result = await withDefaultProviderPolicy(() => generateOpenRouterText({
+  const result = await withProviderPolicy(!options.restrictedHosts, () => generateOpenRouterText({
     operation: "document-summary", apiKey: process.env.OPENROUTER_API_KEY!, privacyMode: "standard", model: TEXT_MODEL, maxOutputTokens,
     textGeneration: { model: null, models: {}, reasoningEfforts: { "document-summary": "none" }, maxOutputTokens: { "document-summary": maxOutputTokens } } as never,
     system, prompt,
   }));
   const served = String((result.usage as { metadata?: { routedModel?: string } }).metadata?.routedModel ?? TEXT_MODEL);
-  if (served !== TEXT_MODEL) throw new Error(`Served by ${served}, not the default text model; results would not be comparable`);
+  const expected = options.restrictedHosts ? FALLBACK_TEXT_MODEL : TEXT_MODEL;
+  if (served !== expected) throw new Error(`Served by ${served}, expected ${expected}; results would not be comparable`);
   const inputTokens = result.usage.inputTokens ?? 0, outputTokens = result.usage.outputTokens ?? 0;
-  recordSpend(step, TEXT_MODEL, inputTokens, outputTokens, (result.usage as { costCents?: number }).costCents);
-  return { text: result.text, finishReason: result.finishReason, inputTokens, outputTokens, ms: Date.now() - started };
+  recordSpend(step, served, inputTokens, outputTokens, (result.usage as { costCents?: number }).costCents);
+  return { text: result.text, finishReason: result.finishReason, inputTokens, outputTokens, ms: Date.now() - started, model: served };
+}
+
+/** `generate`, and on a provider content refusal one more call through the product's restricted-host fallback route. */
+export async function generateWithRefusalFallback(step: string, system: string, prompt: string, maxOutputTokens: number): Promise<Generated & { refused: boolean }> {
+  try { return { ...(await generate(step, system, prompt, maxOutputTokens)), refused: false }; }
+  catch (error) {
+    if (!isContentRefusal(error)) throw error;
+    console.log(`[content-refusal] ${step}: default model's host refused; using the restricted-host fallback route`);
+    return { ...(await generate(`${step}:refusal-fallback`, system, prompt, maxOutputTokens, { restrictedHosts: true })), refused: true };
+  }
 }
 
 export type EvalChunk = {

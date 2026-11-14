@@ -15,7 +15,8 @@
       "role": "corpus",
       "rawSha256": "a2cec1773719f1331c175b78d4bc9f9a7d20bc04e6187919e591af125e0af369",
       "preparedSha256": "1a01e1023cd2986de92d8af7a6d40793da84d2b7184a51f29a9649cee7b03204",
-      "pages": 262
+      "pages": 262,
+      "reuseBase": true
     },
     {
       "id": "federalist-papers",
@@ -45,7 +46,8 @@
       "role": "corpus",
       "rawSha256": "e4ce1aceda201ea95d4c1717348435086d2a66e9b8f4a0c1f0249a8a823eab51",
       "preparedSha256": "e3bf72b9e54107a4d7bb70ef2b81aca511ab37b6973510ae3f78edd350ad1b41",
-      "pages": 182
+      "pages": 182,
+      "reuseBase": true
     },
     {
       "id": "voyage-of-the-beagle",
@@ -88,7 +90,8 @@
       "role": "corpus",
       "rawSha256": "0be501b21b790ae4fa1db0cfe3d3ee935a94f69dc8e0ef7e32a04250eaa30f13",
       "preparedSha256": "a2ce432c32b86f4d8245c18c08a386444b7df1ad819ee0dc38260b52ab3a4517",
-      "pages": 68
+      "pages": 68,
+      "reuseBase": true
     },
     {
       "id": "huckleberry-finn",
@@ -148,7 +151,8 @@
       "role": "corpus",
       "rawSha256": "720196308ba75205761d1a763f6e42d3fb4bec8f8457a77c181f9df3bcf75eb8",
       "preparedSha256": "2a854178b15964eecf5c8cb3b4c7eca5f8818ff7ef65cbc5a873231e28221fba",
-      "pages": 90
+      "pages": 90,
+      "reuseBase": true
     },
     {
       "id": "leviathan",

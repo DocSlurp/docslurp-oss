@@ -1,0 +1,144 @@
+{
+  "grouping": "stand-in",
+  "trees": [
+    {
+      "document": "federalist-papers",
+      "nodes": 374,
+      "byLevel": {
+        "1": 266,
+        "2": 85,
+        "3": 18,
+        "4": 4,
+        "5": 1
+      },
+      "summaryChars": 359012,
+      "treeSha256": "35d69eb8d65e6bd9e4bca0ef99c7f357fe9e48722c559ca86fbd6add845a9c05"
+    },
+    {
+      "document": "frankenstein",
+      "nodes": 80,
+      "byLevel": {
+        "1": 62,
+        "2": 14,
+        "3": 3,
+        "4": 1
+      },
+      "summaryChars": 73747,
+      "treeSha256": "72da861ffb4aa54a55f11d14d7308f0e89d0c9b29e7bbda76d92a3854cd316f6"
+    },
+    {
+      "document": "huckleberry-finn",
+      "nodes": 87,
+      "byLevel": {
+        "1": 71,
+        "2": 13,
+        "3": 2,
+        "4": 1
+      },
+      "summaryChars": 77344,
+      "treeSha256": "0d52f776652964d9906afe776683801c0f1ed2b58fe9454ca44938f79be8b4e5"
+    },
+    {
+      "document": "leviathan",
+      "nodes": 226,
+      "byLevel": {
+        "1": 182,
+        "2": 36,
+        "3": 7,
+        "4": 1
+      },
+      "summaryChars": 219432,
+      "treeSha256": "687e18b98f5f32dc7d98305d4a6a30c0ad1dffd73804db84bb60802464bcdb0f"
+    },
+    {
+      "document": "origin-of-species",
+      "nodes": 193,
+      "byLevel": {
+        "1": 153,
+        "2": 32,
+        "3": 7,
+        "4": 1
+      },
+      "summaryChars": 193954,
+      "treeSha256": "744a1c381792f26482ae18ed8d7eabc99c5f2ce8743b807efcae8d1cf9911d55"
+    },
+    {
+      "document": "rfc9110",
+      "nodes": 405,
+      "byLevel": {
+        "1": 317,
+        "2": 8,
+        "3": 41,
+        "4": 28,
+        "5": 8,
+        "6": 2,
+        "7": 1
+      },
+      "summaryChars": 324826,
+      "treeSha256": "2fbe7c9b0f1d30e465b56360af1527020e73a8a35122823875b15c59fe691d0b"
+    },
+    {
+      "document": "rfc9293",
+      "nodes": 127,
+      "byLevel": {
+        "1": 96,
+        "2": 4,
+        "3": 5,
+        "4": 11,
+        "5": 5,
+        "6": 5,
+        "7": 1
+      },
+      "summaryChars": 106632,
+      "treeSha256": "b7ddfca4c851a63f9f107ca786e28a8a3c9d2d4690f50b266350841f244264b7"
+    },
+    {
+      "document": "second-treatise",
+      "nodes": 60,
+      "byLevel": {
+        "1": 48,
+        "2": 9,
+        "3": 2,
+        "4": 1
+      },
+      "summaryChars": 58081,
+      "treeSha256": "6e7b34624f090e3250b0af7ffc964cfe5c64d688c252eb033a28cdedb5f1c631"
+    },
+    {
+      "document": "sherlock-holmes",
+      "nodes": 86,
+      "byLevel": {
+        "1": 69,
+        "2": 13,
+        "3": 3,
+        "4": 1
+      },
+      "summaryChars": 77737,
+      "treeSha256": "4130512359473895ff013114aac74d61624361eac446103c3f50705985fab2fe"
+    },
+    {
+      "document": "voyage-of-the-beagle",
+      "nodes": 237,
+      "byLevel": {
+        "1": 188,
+        "2": 40,
+        "3": 8,
+        "4": 1
+      },
+      "summaryChars": 227681,
+      "treeSha256": "4f63e201d583181c0d3ae9c18ee89562f6e4c57f4b639551e37b7e3f917c9dfc"
+    },
+    {
+      "document": "walden",
+      "nodes": 121,
+      "byLevel": {
+        "1": 97,
+        "2": 18,
+        "3": 5,
+        "4": 1
+      },
+      "summaryChars": 112240,
+      "treeSha256": "3091268f05cc8f222adc88aa837333ec178f10be3e9ddf26608392f521586219"
+    }
+  ]
+}

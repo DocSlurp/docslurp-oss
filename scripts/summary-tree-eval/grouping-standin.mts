@@ -62,6 +62,7 @@ export function similarityCuts(vectors: ArrayLike<number>[], start: number, end:
     const similarity = cosine(vectors[at - 1]!, vectors[at]!);
     if (similarity < bestSimilarity) { bestSimilarity = similarity; best = at; }
   }
+  if (best < 0) throw new Error(`No comparable adjacent vectors in [${start}, ${end}): a vector is missing, empty or of another dimension`);
   return [...similarityCuts(vectors, start, best, max, min), ...similarityCuts(vectors, best, end, max, min)];
 }
 
