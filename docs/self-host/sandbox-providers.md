@@ -13,7 +13,7 @@ OCR follows the same rule. For files the service manages, OCR runs only in an ex
 | Bubblewrap | `bubblewrap` | Isolated | Fully blocked (`full`) | Yes | Local |
 | Landlock | `landlock` | Isolated | TCP blocked (`tcp-only`) | Yes, when the host allows user namespaces; otherwise the probe fails | Local |
 | Modal | `modal` | Isolated | Fully blocked (`full`) | On the worker host only; a remote descendant can outlive its command inside the session (see below) | Remote |
-| None | `none` | Not isolated | Not isolated (`none`) | Yes, when the host allows user namespaces; otherwise only with `DOCSLURP_PARSER_SANDBOX_ALLOW_UNISOLATED=true` | Local |
+| None (development and test only) | `none` | Not isolated | Not isolated (`none`) | Yes, when the host allows user namespaces; otherwise only with `DOCSLURP_PARSER_SANDBOX_ALLOW_UNISOLATED=true` | Local |
 
 ### Process teardown
 
@@ -58,6 +58,8 @@ The pinned landrun version, download URLs and sha256 sums are in `worker/sandbox
 Set `DOCSLURP_PARSER_SANDBOX` to `bubblewrap`, `landlock`, `modal` or `none`. An unknown value stops the worker at start.
 
 Unset, production defaults to `modal`; outside production Linux defaults to `bubblewrap` and other platforms to `none`. Upgrades need a pinned parser image and Modal control credentials before production startup.
+
+`none` runs parsers on the host with no filesystem or network isolation, so it is development and test only: with `NODE_ENV` other than `development`, `test` or unset (compared after trimming ASCII whitespace and ignoring ASCII case; staging and preview included) or under the service profile, the worker refuses to start with it, whether it was set explicitly or is the platform default. bubblewrap and landlock stay allowed outside production: both confine the parser's filesystem, block network egress and give each command its own PID namespace.
 
 At start the worker loads the provider, probes it and checks the policy below. If any step fails, the worker exits. It never falls back to running parsers unsandboxed. On success it logs one line:
 

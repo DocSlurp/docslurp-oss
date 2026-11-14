@@ -64,6 +64,8 @@ The worker now runs a `quarantine` stage before format detection and normalizati
 - `QUARANTINE_MAX_SINGLE_ENTRY_BYTES`
 - `QUARANTINE_MAX_EXPANSION_RATIO`
 
+`QUARANTINE_ENABLED=false` is development-only: outside `NODE_ENV` `development`, `test` or unset (and always under the service profile) quarantine stays on and the worker and entrypoint refuse to start with it set to anything but an on value.
+
 `QUARANTINE_FAIL_OPEN_ON_TOOL_MISSING` is development-only: with `NODE_ENV` `development`, `test` or unset it defaults to `true` (set `false` to block); anywhere else it is off and the worker refuses to start with it set, so missing or broken ClamAV tooling blocks ingestion.
 
 ## CI Supply-Chain Checks
@@ -89,7 +91,9 @@ The worker entrypoint can now manage ClamAV readiness before the Temporal worker
 - `DOCSLURP_CLAMAV_CLAMD_CONF=/etc/clamav/clamd.conf`
 - `DOCSLURP_CLAMAV_FRESHCLAM_CONF=/etc/clamav/freshclam.conf`
 
-Production defaults now prefer `clamdscan`, refresh signatures on startup, and fail the worker start when the signature database is missing or older than the configured max age. The container images place the ClamAV daemon socket under `/tmp/clamav` so the unprivileged worker can recreate runtime state after each boot. Local development defaults stay more permissive unless you explicitly opt into the stricter settings.
+Outside development (any `NODE_ENV` other than `development`, `test` or unset, compared after trimming ASCII whitespace and ignoring ASCII case) the entrypoint refreshes signatures on startup, runs the managed updater, and fails the worker start when a ClamAV directory is missing or unwritable, freshclam is unavailable or fails with stale signatures, or the signature database is missing or older than the configured max age. The container images place the ClamAV daemon socket under `/tmp/clamav` so the unprivileged worker can recreate runtime state after each boot. In development, directory and refresh problems only warn; stale or missing signatures still stop startup unless you opt in with `DOCSLURP_CLAMAV_FAIL_OPEN_ON_STALE_DB=true`.
+
+The worker images set `NODE_ENV=production`, because an unset `NODE_ENV` counts as development. Run one as a local development container with `-e NODE_ENV=development`.
 
 ## Parser Trust Boundary
 
@@ -100,8 +104,9 @@ Useful env overrides:
 - `DOCSLURP_PARSER_SANDBOX=bubblewrap|landlock|modal|none`
 - `DOCSLURP_PARSER_SANDBOX_ROOT=/tmp/docslurp-parser-sandbox`
 
-Local macOS workers default `DOCSLURP_PARSER_SANDBOX` to `none`
-because the isolated launcher depends on Linux `bubblewrap`. Linux workers
+Local macOS workers default `DOCSLURP_PARSER_SANDBOX` to `none` in development
+because the isolated launcher depends on Linux `bubblewrap`; outside development
+`none` is refused. Linux workers
 default to `bubblewrap`.
 
 This is the baseline parser boundary. Additional egress-deny and kernel/filesystem sandboxing layers can build on the same launcher path without changing the worker call sites.
@@ -132,12 +137,14 @@ Useful env overrides:
 - `DOCSLURP_PARSER_SANDBOX_ROOT=/tmp/docslurp-parser-sandbox`
 - `DOCSLURP_PARSER_SANDBOX_WRITABLE_PATHS=` (empty by default; set only for trusted extra writable mounts)
 
-When `bubblewrap` is unavailable, set `DOCSLURP_PARSER_SANDBOX=none` only for
-trusted local development. `DOCSLURP_PARSER_SANDBOX_ALLOW_UNISOLATED`,
-`DOCSLURP_SANDBOX_ALLOW_UNFILTERED_SOCKETS`, `QUARANTINE_FAIL_OPEN_ON_TOOL_MISSING`
-and `DOCSLURP_CLAMAV_FAIL_OPEN_ON_STALE_DB` are development-only: the entrypoint
-and the worker refuse to start with any of them set unless `NODE_ENV` is
-`development`, `test` or unset.
+When `bubblewrap` is unavailable, `DOCSLURP_PARSER_SANDBOX=none` works only for
+trusted local development: the worker refuses `none` (explicit or the non-Linux
+default) anywhere else. `DOCSLURP_PARSER_SANDBOX_ALLOW_UNISOLATED`,
+`DOCSLURP_SANDBOX_ALLOW_UNFILTERED_SOCKETS`, `QUARANTINE_FAIL_OPEN_ON_TOOL_MISSING`,
+`DOCSLURP_CLAMAV_FAIL_OPEN_ON_STALE_DB`, `QUARANTINE_ENABLED=false` and
+`DOCSLURP_PARSER_SANDBOX=none` are development-only: the entrypoint and the worker
+refuse to start with any of them set unless `NODE_ENV` is `development`, `test`
+or unset.
 
 ## Deployment and benchmark cost profiles
 

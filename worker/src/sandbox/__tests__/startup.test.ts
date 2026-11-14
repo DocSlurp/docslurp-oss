@@ -15,9 +15,10 @@ describe("initializeParserSandbox", () => {
   afterEach(() => vi.restoreAllMocks());
 
   it("refuses provider none in production without the override", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
     await expect(
       initializeParserSandbox({ DOCSLURP_PARSER_SANDBOX: "none", NODE_ENV: "production" }, "linux"),
-    ).rejects.toBeInstanceOf(SandboxPolicyError);
+    ).rejects.toThrow(/DOCSLURP_PARSER_SANDBOX.*refusing to start/);
   });
 
   it("refuses explicitly unisolated production startup before reporting readiness", async () => {
@@ -35,6 +36,29 @@ describe("initializeParserSandbox", () => {
     await expect(initializeParserSandbox({ DOCSLURP_PARSER_SANDBOX: "modal", NODE_ENV: "production", [name]: "true" }, "linux"))
       .rejects.toThrow(new RegExp(`${name}.*refusing to start`));
     expect(probe).not.toHaveBeenCalled();
+  });
+
+  // #398 council: disabling quarantine and the unisolated none provider stop startup outside development too.
+  it.each([
+    ["QUARANTINE_ENABLED", "false"],
+    ["DOCSLURP_PARSER_SANDBOX", "none"],
+  ])("refuses %s=%s outside development before probing a provider", async (name, value) => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const { default: modal } = await import("../providers/modal/index.js");
+    const probe = vi.spyOn(modal, "probe");
+    for (const nodeEnv of ["production", "staging", "\u00a0development"]) {
+      await expect(initializeParserSandbox({ DOCSLURP_PARSER_SANDBOX: "modal", NODE_ENV: nodeEnv, [name]: value }, "linux"))
+        .rejects.toThrow(new RegExp(`${name}.*refusing to start`));
+    }
+    expect(probe).not.toHaveBeenCalled();
+  });
+
+  it("refuses the platform-default none provider outside development", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const { default: none } = await import("../providers/none/index.js");
+    vi.spyOn(none, "probe").mockResolvedValue({ ok: true, detail: "test", isolation: { filesystem: false, network: "none", processes: true, location: "local" } });
+    await expect(initializeParserSandbox({ NODE_ENV: "staging" }, "darwin")).rejects.toBeInstanceOf(SandboxPolicyError);
+    await expect(initializeParserSandbox({ NODE_ENV: "development" }, "darwin")).resolves.toMatchObject({ provider: none });
   });
 
   it("fails with the probe detail when isolation is unavailable", async () => {

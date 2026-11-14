@@ -255,17 +255,24 @@ never runs without isolation. Setting the old names has no effect.
 
 These settings weaken untrusted-file protection. They exist for local
 development and tests. `scripts/start-worker.sh` and the worker both refuse to
-start when one is set to anything other than an explicit off value (`false`,
-`0`, `no`, `off` or empty) unless `NODE_ENV` is `development`, `test` or unset
-and the service profile is off. Compose sets `NODE_ENV=production`, so a
-Compose deployment refuses them.
+start when one of the fail-open flags is set to anything other than an explicit
+off value (`false`, `0`, `no`, `off` or empty), when `QUARANTINE_ENABLED` is set
+to anything other than an on value (`true`, `1`, `yes`, `on` or empty), or when
+`DOCSLURP_PARSER_SANDBOX` is `none`, unless `NODE_ENV` is `development`, `test`
+or unset and the service profile is off. `NODE_ENV` is compared after trimming
+ASCII whitespace and ignoring ASCII case; any other value, staging and preview
+included, counts as deployed. Compose sets `NODE_ENV=production`, and so do the
+published worker images, so a Compose deployment or a bare `docker run` refuses
+them.
 
 | Variable | Effect in development |
 | --- | --- |
 | `DOCSLURP_PARSER_SANDBOX_ALLOW_UNISOLATED` | Provider `none` runs parsers without a PID namespace. |
 | `DOCSLURP_SANDBOX_ALLOW_UNFILTERED_SOCKETS` | Socket-denied commands run on a provider that cannot filter UNIX sockets. |
 | `QUARANTINE_FAIL_OPEN_ON_TOOL_MISSING` | A missing quarantine inspection tool accepts the file. Defaults to `true` in development and test so local ingestion works without ClamAV; set `false` to block. |
-| `DOCSLURP_CLAMAV_FAIL_OPEN_ON_STALE_DB` | A stale or missing ClamAV signature database only warns. Defaults to `false` everywhere. |
+| `DOCSLURP_CLAMAV_FAIL_OPEN_ON_STALE_DB` | A stale or missing ClamAV signature database only warns. Defaults to `false` everywhere, development included: set `true` in a local `.env` if you run without fresh signatures. |
+| `QUARANTINE_ENABLED=false` | Files parse unscanned. Outside development quarantine is always on. |
+| `DOCSLURP_PARSER_SANDBOX=none` | Parsers run on the host with no filesystem or network isolation. Outside development the worker also refuses `none` as the platform default. |
 
 The pre-URI variables `S3_BUCKET`, `AWS_ENDPOINT_URL_S3`, and `AWS_REGION` are
 deprecated. They are honored only when `STORAGE_URI` is unset and are no longer

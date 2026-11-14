@@ -30,18 +30,40 @@ FRESHCLAM_PID=""
 WORKER_PID=""
 CLAMD_BIN="${DOCSLURP_CLAMD_BIN:-}"
 
-is_production_env() {
-  [[ "${NODE_ENV:-}" == "production" ]]
+# One rule for "development" in this script and the worker (packages/shared/src/runtime-environment.ts; a parity test
+# in worker/src/lib/unsafe-overrides.test.ts runs both over odd values): trim ASCII whitespace from both ends and
+# lower-case ASCII letters only, then NODE_ENV development, test or empty is development and any other value is not.
+# A DOCSLURP_SERVICE_PROFILE containing "service" is never development.
+normalize_env_setting() {
+  local LC_ALL=C
+  local value="$1" ws=$' \t\n\v\f\r'
+  value="${value#"${value%%[!${ws}]*}"}"
+  value="${value%"${value##*[!${ws}]}"}"
+  printf '%s' "${value,,}"
 }
 
+is_development_env() {
+  local node_env profile
+  node_env="$(normalize_env_setting "${NODE_ENV:-}")"
+  profile="$(normalize_env_setting "${DOCSLURP_SERVICE_PROFILE:-}")"
+  [[ "${profile}" != *service* ]] && [[ -z "${node_env}" || "${node_env}" == "development" || "${node_env}" == "test" ]]
+}
+
+if [[ "${1:-}" == "--environment-class" ]]; then
+  # Prints how this script classifies the environment, for the parity test; starts nothing.
+  if is_development_env; then echo development; else echo deployed; fi
+  exit 0
+fi
+
+# Development-only fail-open default: true in development, the safe value anywhere else.
 default_bool_for_env() {
-  local production_value="$1"
+  local deployed_value="$1"
   local development_value="$2"
 
-  if is_production_env; then
-    echo "${production_value}"
-  else
+  if is_development_env; then
     echo "${development_value}"
+  else
+    echo "${deployed_value}"
   fi
 }
 
@@ -54,8 +76,9 @@ if [[ -z "${CLAMAV_REQUIRE_DAEMON}" ]]; then
 fi
 
 # Development-only settings that weaken untrusted-file protection (#398; the worker's own check is
-# worker/src/lib/unsafe-overrides.ts). Outside development or test (NODE_ENV development, test or unset, without the
-# service profile) any of them set to anything but an explicit off value stops startup here, before ClamAV or the worker.
+# worker/src/lib/unsafe-overrides.ts). Outside development or test any of them set as below stops startup here, before
+# ClamAV or the worker: the four fail-open flags set to anything but an explicit off value, QUARANTINE_ENABLED set to
+# anything but an on value, and DOCSLURP_PARSER_SANDBOX=none.
 UNSAFE_OVERRIDES=(
   DOCSLURP_PARSER_SANDBOX_ALLOW_UNISOLATED
   DOCSLURP_SANDBOX_ALLOW_UNFILTERED_SOCKETS
@@ -63,29 +86,27 @@ UNSAFE_OVERRIDES=(
   DOCSLURP_CLAMAV_FAIL_OPEN_ON_STALE_DB
 )
 
-is_development_env() {
-  local node_env="${NODE_ENV:-}" profile="${DOCSLURP_SERVICE_PROFILE:-}"
-  node_env="${node_env,,}"
-  profile="${profile,,}"
-  node_env="${node_env//[[:space:]]/}"
-  profile="${profile//[[:space:]]/}"
-  [[ "${profile}" != "service" ]] && [[ -z "${node_env}" || "${node_env}" == "development" || "${node_env}" == "test" ]]
-}
-
 refuse_unsafe_overrides() {
   is_development_env && return 0
   local name value refused=()
   for name in "${UNSAFE_OVERRIDES[@]}"; do
-    value="${!name:-}"
-    value="${value,,}"
-    value="${value//[[:space:]]/}"
+    value="$(normalize_env_setting "${!name:-}")"
     case "${value}" in
       ""|0|false|no|off) ;;
       *) refused+=("${name}") ;;
     esac
   done
+  value="$(normalize_env_setting "${QUARANTINE_ENABLED:-}")"
+  case "${value}" in
+    ""|1|true|yes|on) ;;
+    *) refused+=(QUARANTINE_ENABLED) ;;
+  esac
+  value="$(normalize_env_setting "${DOCSLURP_PARSER_SANDBOX:-}")"
+  if [[ "${value}" == "none" ]]; then
+    refused+=(DOCSLURP_PARSER_SANDBOX)
+  fi
   if (( ${#refused[@]} > 0 )); then
-    echo "[worker-start] error: ${refused[*]} weaken untrusted-file protection and are allowed only in development or test (NODE_ENV=${NODE_ENV:-unset}); unset them. Refusing to start." >&2
+    echo "[worker-start] error: ${refused[*]} weaken untrusted-file protection as set and are allowed only in development or test (NODE_ENV=${NODE_ENV:-unset}); unset them. Refusing to start." >&2
     exit 1
   fi
 }
@@ -532,7 +553,9 @@ bootstrap_clamav() {
     return
   fi
 
-  prepare_clamav_runtime || return
+  # Outside development every preparation failure has already stopped startup; in development it warned, so skip the
+  # rest of the ClamAV bootstrap and start the worker (return 0: a bare return would trip set -e).
+  prepare_clamav_runtime || return 0
   run_freshclam_update
   verify_clamav_signature_freshness
   ensure_clamd_ready

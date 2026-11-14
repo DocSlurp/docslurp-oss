@@ -32,6 +32,15 @@ itself; elsewhere install a C++ toolchain, CMake, Ninja and the FreeType, Fontco
 Little CMS and zlib development packages first. Without it, PDF page counts refuse ("pdfpagecount ... is not installed")
 and the real-tool tests skip; CI sets `DOCSLURP_REQUIRE_DOPPLER_TOOLS=1` so they cannot.
 
+Local development runs with `NODE_ENV` `development` (or unset). Only there does the worker accept the development-only
+settings that weaken untrusted-file protection; anywhere else, including staging and preview, it refuses to start with
+any of them set: `QUARANTINE_ENABLED=false`, `DOCSLURP_PARSER_SANDBOX=none`, `DOCSLURP_PARSER_SANDBOX_ALLOW_UNISOLATED`,
+`DOCSLURP_SANDBOX_ALLOW_UNFILTERED_SOCKETS`, `QUARANTINE_FAIL_OPEN_ON_TOOL_MISSING` and
+`DOCSLURP_CLAMAV_FAIL_OPEN_ON_STALE_DB`. ClamAV fails closed on a stale or missing signature database by default, in
+development too: keep signatures fresh (`freshclam`), or opt in to a warning for local work with
+`DOCSLURP_CLAMAV_FAIL_OPEN_ON_STALE_DB=true` in your `.env`. The worker images set `NODE_ENV=production`; pass
+`-e NODE_ENV=development` to run one as a local development container.
+
 The web dashboard is not part of this repository, so there is no `pnpm dev` UI host here. Exercise changes through the REST API, the CLI, the SDK or MCP.
 
 ## Before you open a pull request
