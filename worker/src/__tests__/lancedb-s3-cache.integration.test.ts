@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { CreateBucketCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { connect } from "@lancedb/lancedb";
 import { DiskBlockCache } from "@docslurp/shared/lancedb-s3-cache";
-import { LanceS3Stats, startLanceS3Proxy, type LanceS3Proxy } from "@docslurp/shared/lancedb-s3-trace";
+import { LanceS3Stats, lanceS3ProxyStorageOptions, startLanceS3Proxy, type LanceS3Proxy } from "@docslurp/shared/lancedb-s3-trace";
 import { afterAll, beforeAll, expect, it } from "vitest";
 
 // Needs MinIO (`pnpm db:up`); skipped when unreachable. Override with LANCEDB_S3_TRACE_TEST_ENDPOINT.
@@ -110,7 +110,7 @@ it.skipIf(!reachable)("a real Lance table queried through the cache returns the 
   const direct = await startLanceS3Proxy({ endpoint, region: "us-east-1", credentials, logIntervalMs: 0, stats: new LanceS3Stats() });
   proxies.push(direct);
   const { proxy: cached, cache } = await startProxy();
-  const options = (via: LanceS3Proxy) => ({ region: "us-east-1", aws_access_key_id: credentials.accessKeyId, aws_secret_access_key: credentials.secretAccessKey, endpoint: via.endpoint, allow_http: "true", virtual_hosted_style_request: "false" });
+  const options = (via: LanceS3Proxy) => lanceS3ProxyStorageOptions({ region: "us-east-1", aws_access_key_id: credentials.accessKeyId, aws_secret_access_key: credentials.secretAccessKey }, via.endpoint);
   const dim = 32;
   const rows = Array.from({ length: 3000 }, (_, id) => ({ id, vector: Array.from({ length: dim }, (_, d) => Math.sin((id + 1) * (d + 1))) }));
   const writer = await connect(`s3://${lanceBucket}/idx`, { storageOptions: options(direct) });

@@ -11,11 +11,20 @@ describe("malware scan policy", () => {
     expect(policy.maxSignatureAgeHours).toBe(24);
   });
 
-  it("keeps stale-definition warnings non-blocking in local development by default", () => {
+  // #398: stale definitions block scanning by default everywhere; only an explicit development opt-in warns.
+  it("fails closed on stale definitions in local development by default", () => {
     const policy = resolveMalwareScanPolicy({ NODE_ENV: "development" });
 
     expect(policy.requireDaemon).toBe(false);
-    expect(policy.failOpenOnStaleDefinitions).toBe(true);
+    expect(policy.failOpenOnStaleDefinitions).toBe(false);
+  });
+
+  it.each(["development", "test"])("honours an explicit stale-definition opt-in in %s", (nodeEnv) => {
+    expect(resolveMalwareScanPolicy({ NODE_ENV: nodeEnv, DOCSLURP_CLAMAV_FAIL_OPEN_ON_STALE_DB: "true" }).failOpenOnStaleDefinitions).toBe(true);
+  });
+
+  it.each(["production", "staging"])("never fails open on stale definitions in %s, even when asked", (nodeEnv) => {
+    expect(resolveMalwareScanPolicy({ NODE_ENV: nodeEnv, DOCSLURP_CLAMAV_FAIL_OPEN_ON_STALE_DB: "true" }).failOpenOnStaleDefinitions).toBe(false);
   });
 });
 

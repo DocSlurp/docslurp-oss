@@ -9,8 +9,8 @@ import {
 } from "../middleware/rate-limit.js";
 
 // Runs the Lua sliding-window script against a real Redis and checks it agrees
-// with the in-process store step for step. Skipped without RATE_LIMIT_TEST_REDIS_URL.
-const redisUrl = process.env.RATE_LIMIT_TEST_REDIS_URL ?? "";
+// with the in-process store step for step. Skipped without TEST_REDIS_URL.
+const redisUrl = process.env.TEST_REDIS_URL ?? "";
 
 /** A store that throws instead of silently falling back, so script errors fail the test. */
 const failingFallback: RateLimitStore = {

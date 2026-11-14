@@ -20,13 +20,13 @@ import type { executeVisionRuntime, VisionExecutionResult } from "../tools/visio
  * The OCR escalation page budget and migration 0128 against a real, migrated Postgres (PGlite serves one connection at a
  * time, so it cannot show a race):
  *
- *   OCR_BUDGET_TEST_DATABASE_URL=postgres://… pnpm --filter worker test -- ocr-escalation-budget
+ *   TEST_DATABASE_URL=postgres://… pnpm --filter worker test -- ocr-escalation-budget
  *
  * The budget is counted in vision_run_attempts under the run's advisory lock, so concurrent activities on one run and
  * document (separate pools, as separate workers would have) admit at most the budget between them, and a retried activity
  * starts from the rows its predecessors left.
  */
-const url = process.env.OCR_BUDGET_TEST_DATABASE_URL;
+const url = process.env.TEST_DATABASE_URL;
 const runId = "ocrbudget-run";
 const budget = 25;
 const config: VisionGuardConfig = {

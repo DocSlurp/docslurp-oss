@@ -129,6 +129,7 @@ answers searches. Instead the server re-prewarms open tables every
 | `LANCEDB_METADATA_CACHE_MB` | 5% of usable memory, 32 MB to 1 GB | File footer and schema cache size. LanceDB's own default is a fixed 1 GB. |
 | `LANCEDB_PREWARM_INDEX` | `false` | Prewarm vector and FTS indexes when a table opens. Off by default: on MinIO with injected 40 ms latency it did not measurably change search latency (`server/scripts/lancedb-session-bench.ts`). Failures are logged (`[lancedb-session] prewarm ... errors=`), never thrown. |
 | `SEARCH_LANCE_WARM_INDEX` | `1` | A search starts loading its table's vector and full-text indexes while the query is planned and embedded: once per open table and index generation, at most two tables at a time, shared by concurrent searches. It loads what the first query would read anyway (at 100,000 chunks: a 106 MB vector index read either way, plus about 6 MB for the whole full-text index and about 35 MB of memory). `[search-timing]` reports `lanceIndexCold` and `lanceIndexLoad` (ms) on a cold table, `lanceIndexWarm` afterwards. `0` disables. |
+| `SEARCH_BOOT_WARM_PROJECTS` | `5` | With `NODE_ENV=production`, a few seconds after it starts the server opens the LanceDB tables of the most searched projects of the last 7 days and loads their indexes in the background, so the first search after a restart is not the slow one. It warms the embedding space the project's pipeline names, skips archived projects, and gives one organization at most two places. At most 50; `0` turns it off, as does `SEARCH_LANCE_WARM=0`. Logs `[search] boot warm projects=… ms=…`. |
 | `LANCEDB_PREWARM_BLOCKING` | `false` | `true` makes the first search wait for the prewarm. Off, the first searches run while it loads. |
 | `LANCEDB_PREWARM_REFRESH_SECONDS` | `60` | With `LANCEDB_PREWARM_INDEX=true`, re-prewarm open tables this often. `0` disables. |
 | `LANCEDB_PREWARM_DATA` | `false` | Also load the `vector`, `id` and `documentId` columns, so refine and `documentId` filters read memory. Costs RAM of that size. |
@@ -220,7 +221,7 @@ read them through `packages/shared/src/temporal-security.ts`.
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `DOCSLURP_PARSER_SANDBOX` | `bubblewrap` on Linux; `none` elsewhere outside production | Provider: `bubblewrap`, `landlock`, `modal` or `none`. |
-| `DOCSLURP_PARSER_SANDBOX_ALLOW_UNISOLATED` | unset | `true` allows provider `none` in production and logs `[parser-sandbox] status=unisolated` at start. |
+| `DOCSLURP_PARSER_SANDBOX_ALLOW_UNISOLATED` | unset | Development and test only: `true` lets provider `none` run without a PID namespace and logs `[parser-sandbox] status=unisolated` at start. Anywhere else (any `NODE_ENV` other than `development`, `test` or unset, or the service profile) the worker refuses to start with it set. See [Development-only settings](#development-only-settings). |
 | `DOCSLURP_PARSER_SANDBOX_ROOT` | `/tmp/docslurp-parser-sandbox` | Scratch root (bubblewrap, landlock). |
 | `DOCSLURP_PARSER_SANDBOX_WRITABLE_PATHS` | empty | Comma-separated private projects parsers may write (bubblewrap, landlock). |
 | `DOCSLURP_LANDRUN_BINARY` | `landrun` | landrun executable (landlock). |
@@ -248,9 +249,31 @@ The other OCR settings (escalation, attempts, language, size and concurrency lim
 `DOCSLURP_PARSER_SANDBOX_ENABLED`, `DOCSLURP_PARSER_SANDBOX_MODE` and
 `DOCSLURP_PARSER_SANDBOX_SCRIPT` were removed with no replacement of the same
 name. Use `DOCSLURP_PARSER_SANDBOX` to choose a provider; to run without
-isolation, set `DOCSLURP_PARSER_SANDBOX=none` (and
-`DOCSLURP_PARSER_SANDBOX_ALLOW_UNISOLATED=true` in production). Setting the old
-names has no effect.
+isolation in development, set `DOCSLURP_PARSER_SANDBOX=none`. Production
+never runs without isolation. Setting the old names has no effect.
+
+### Development-only settings
+
+These settings weaken untrusted-file protection. They exist for local
+development and tests. `scripts/start-worker.sh` and the worker both refuse to
+start when one of the fail-open flags is set to anything other than an explicit
+off value (`false`, `0`, `no`, `off` or empty), when `QUARANTINE_ENABLED` is set
+to anything other than an on value (`true`, `1`, `yes`, `on` or empty), or when
+`DOCSLURP_PARSER_SANDBOX` is `none`, unless `NODE_ENV` is `development`, `test`
+or unset and the service profile is off. `NODE_ENV` is compared after trimming
+ASCII whitespace and ignoring ASCII case; any other value, staging and preview
+included, counts as deployed. Compose sets `NODE_ENV=production`, and so do the
+published worker images, so a Compose deployment or a bare `docker run` refuses
+them.
+
+| Variable | Effect in development |
+| --- | --- |
+| `DOCSLURP_PARSER_SANDBOX_ALLOW_UNISOLATED` | Provider `none` runs parsers without a PID namespace. |
+| `DOCSLURP_SANDBOX_ALLOW_UNFILTERED_SOCKETS` | Socket-denied commands run on a provider that cannot filter UNIX sockets. |
+| `QUARANTINE_FAIL_OPEN_ON_TOOL_MISSING` | A missing quarantine inspection tool accepts the file. Defaults to `true` in development and test so local ingestion works without ClamAV; set `false` to block. |
+| `DOCSLURP_CLAMAV_FAIL_OPEN_ON_STALE_DB` | A stale or missing ClamAV signature database only warns. Defaults to `false` everywhere, development included: set `true` in a local `.env` if you run without fresh signatures. |
+| `QUARANTINE_ENABLED=false` | Files parse unscanned. Outside development quarantine is always on. |
+| `DOCSLURP_PARSER_SANDBOX=none` | Parsers run on the host with no filesystem or network isolation. Outside development the worker also refuses `none` as the platform default. |
 
 The pre-URI variables `S3_BUCKET`, `AWS_ENDPOINT_URL_S3`, and `AWS_REGION` are
 deprecated. They are honored only when `STORAGE_URI` is unset and are no longer

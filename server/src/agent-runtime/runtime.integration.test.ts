@@ -11,8 +11,8 @@ import type { RequestActor } from "../lib/request-actor.js";
 import { StrictCachingPubSub } from "./strict-pubsub.js";
 import { operationOutputTopic } from "./operation-delivery.js";
 const state=vi.hoisted(()=>({chat:vi.fn()}));
-const url=process.env.NATIVE_CHAT_TEST_DATABASE_URL;
-const redis=process.env.NATIVE_CHAT_TEST_REDIS_URL;
+const url=process.env.TEST_DATABASE_URL;
+const redis=process.env.TEST_REDIS_URL;
 const enabled=!!url&&!!redis;
 let sql:postgres.Sql;
 /** Every statement the application's postgres.js client sends (native Mastra storage uses its own pg pool). */

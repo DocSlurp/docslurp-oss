@@ -29,7 +29,7 @@ import type { Stage, WorkflowState } from "../pipeline/pipeline.js";
 import { embedPageImages, withinCostCap, type PageEmbedDeps } from "./page-embed.js";
 import type { CommandRunner } from "../tools/runner.js";
 import type { ArtifactStore } from "../tools/storage.js";
-import { executeVisionRuntime } from "../tools/vision-runtime.js";
+import { executeVisionRuntime, visionRenderLongEdge } from "../tools/vision-runtime.js";
 import { guardedVisionCall, priceVisionResult } from "../lib/guarded-vision-call.js";
 import { recordVisionRead, visionGuardFor } from "../lib/vision-attempt-guard.js";
 
@@ -427,7 +427,8 @@ export class DocumentMapStage implements Stage {
     // Fail closed: Fast never sends a page to a vision model, whoever asks.
     if (!qualityAllowsPageReading(state.run.pipeline.quality)) return { pageTexts: pageNumbers.map(() => ""), costCents: 0 };
 
-    const artifacts = await this.rasters.renderSelectedPages({ document, runId: state.run.id, pageNumbers, dpi: OCR_DPI, signal: args.signal });
+    const maxLongEdgePx = visionRenderLongEdge(state.run.pipeline.vision);
+    const artifacts = await this.rasters.renderSelectedPages({ document, runId: state.run.id, pageNumbers, dpi: OCR_DPI, ...(maxLongEdgePx !== undefined ? { maxLongEdgePx } : {}), signal: args.signal });
     const byPage = new Map(artifacts.map((a) => [a.pageNumber, a]));
     let costCents = 0;
     const pageTexts: string[] = [];
