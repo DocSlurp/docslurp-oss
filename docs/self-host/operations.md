@@ -165,10 +165,32 @@ LANCEDB_S3_CACHE_MAX_GB=10               # LRU limit, default 10
 LANCEDB_S3_CACHE_BLOCK_KB=1024           # fill granularity, default 1024
 ```
 
+Check that it is in use: the `[lancedb-s3]` log line must show `requests` above zero after a
+search. A line that stays at zero means Lance is not going through the proxy.
+
 Setting the directory starts the same localhost re-signing proxy that
 `LANCEDB_S3_TRACE` uses (tracing itself stays off) and needs explicit credentials in the
 storage URI or `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`. It works with any
 S3-compatible provider.
+
+The proxy and the cache directory serve this process only:
+
+- The proxy listens on `127.0.0.1` and answers only requests that carry its own per-process
+  secret, for keys under the bucket and first path segment of `LANCEDB_URI` (`lancedb/` in
+  `s3://bucket/lancedb`). Anything else gets 403 and counts as `refused` on
+  the `[lancedb-s3]` line; a non-zero count means something else on the host is probing it.
+- The cache directory must be owned by the server's user and not writable by group or others.
+  It is kept at mode 0700. A directory that fails this is not used: the server logs
+  `disk cache ... is unusable` and searches without it.
+- Changing `LANCEDB_S3_CACHE_BLOCK_KB` empties the cache at the next start.
+- With `HTTP_PROXY` or `ALL_PROXY` set, add the literal `127.0.0.1` to `NO_PROXY` (upper case
+  if you set it at all; `*` is not enough). Otherwise the proxy and the cache stay off
+  (logged), because Lance would send its loopback requests to that proxy.
+- The proxy sends to the endpoint a direct connection would use: `AWS_ENDPOINT_URL_S3` when
+  set, then the storage URI's endpoint.
+- Deleted documents: files removed from the bucket by another process (the worker's cleanup
+  and compaction) stay in this directory until the size limit evicts them. Nothing requests
+  them again, but the bytes remain on the volume. Delete the directory to clear them at once.
 
 What is cached, and what is not:
 
