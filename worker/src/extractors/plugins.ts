@@ -551,14 +551,18 @@ const UNKNOWN_PAGE: PageLayoutFacts = { images: null, tables: null, words: null,
  * page 1..the host's page count gets an entry (council #2 F1/F2): a page the walker left out (it failed for the whole
  * file, for that chunk, or for that page; its time budget ran out) takes the page facts' grids where they know them, and
  * is otherwise marked gridsUnknown. Only grids come from the facts for such a page (outside `use` mode they steer nothing
- * else). Computed once per accepted result.
+ * else). A run that returned no layout facts and no walker reason is left without layout facts. Computed once per
+ * accepted result.
  */
 function settleJobLayout(job: SandboxedPdfJob): SettledLayout | null {
   if (settledLayouts.has(job)) return settledLayouts.get(job)!;
   const facts = sandboxedPdfPageFacts(job);
+  const reported = reportedLayoutFacts.get(job) ?? sandboxedPdfPageFactsLayout(job);
   let settled: SettledLayout | null = null;
-  if (facts) {
-    const base = new Map(reportedLayoutFacts.get(job) ?? sandboxedPdfPageFactsLayout(job) ?? []);
+  // Only a job that has layout facts to settle: the walker's, the facts' own (`use`), or a walker that said why it could
+  // not walk the file. A run that returned no layout at all keeps routing without one, as before (store mode).
+  if (facts && (reported || reportedWalkerUnknown.has(job))) {
+    const base = new Map(reported ?? []);
     let last = reportedPageCount.get(job) ?? 0;
     if (last === 0) for (const page of [...base.keys(), ...facts.pages.keys()]) last = Math.max(last, page);
     let filled = 0;
