@@ -1,7 +1,7 @@
 import { CreateBucketCommand, S3Client } from "@aws-sdk/client-s3";
 import { connect, type Connection } from "@lancedb/lancedb";
 import { initializeObservability, shutdownObservability } from "@docslurp/shared/observability";
-import { lanceS3Stats, startLanceS3Proxy, withLanceS3Proxy, type LanceS3Proxy } from "@docslurp/shared/lancedb-s3-trace";
+import { lanceS3ProxyStorageOptions, lanceS3Stats, startLanceS3Proxy, withLanceS3Proxy, type LanceS3Proxy } from "@docslurp/shared/lancedb-s3-trace";
 type ReadableSpan = { name: string; attributes: Record<string, unknown> };
 import { afterAll, beforeAll, expect, it, vi } from "vitest";
 
@@ -18,7 +18,7 @@ initializeObservability({ spanProcessors: [{ onStart() {}, onEnd(span) { spans.p
 const bucket = `lance-trace-${Date.now()}`;
 let proxy: LanceS3Proxy;
 let direct: Record<string, string>;
-const open = (): Promise<Connection> => connect(`s3://${bucket}/idx`, { storageOptions: { ...direct, endpoint: proxy.endpoint, allow_http: "true", virtual_hosted_style_request: "false" } });
+const open = (): Promise<Connection> => connect(`s3://${bucket}/idx`, { storageOptions: lanceS3ProxyStorageOptions(direct, proxy.endpoint) });
 
 beforeAll(async () => {
   if (!reachable) return;
@@ -32,9 +32,19 @@ afterAll(async () => { await proxy?.close(); await shutdownObservability(); vi.u
 it.skipIf(!reachable)("withLanceS3Proxy rewrites storage options to the local proxy", async () => {
   const rewritten = await withLanceS3Proxy(`s3://${bucket}/idx`, { ...direct, endpoint }, { LANCEDB_S3_TRACE: "1" });
   expect(rewritten).toMatchObject({ allow_http: "true", virtual_hosted_style_request: "false" });
-  expect(rewritten!.endpoint).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+  expect(rewritten!.endpoint).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/[0-9a-f]{64}$/);
   expect(rewritten!.endpoint).not.toBe(endpoint);
-});
+  // Everything Lance does on a table fits inside the root the proxy allows for this URI.
+  const db = await connect(`s3://${bucket}/idx`, { storageOptions: rewritten });
+  const table = await db.createTable("rooted", Array.from({ length: 300 }, (_, id) => ({ id, vector: Array.from({ length: 8 }, (_, i) => (i === id % 8 ? 1 : id / 1000)) })), { mode: "overwrite" });
+  await table.add([{ id: 1000, vector: Array.from({ length: 8 }, () => 0.5) }]);
+  await table.createIndex("id");
+  await table.optimize();
+  expect(await table.countRows()).toBe(301);
+  expect((await table.search(Array.from({ length: 8 }, () => 0.5)).limit(1).toArray())[0].id).toBe(1000);
+  await db.dropTable("rooted");
+  expect(lanceS3Stats.refused).toBe(0);
+}, 120_000);
 
 it.skipIf(!reachable)("Lance create/add/search work through the proxy and concurrent commits lose nothing", async () => {
   spans.length = 0;

@@ -6,7 +6,7 @@ import { startMigratedPostgres } from "@docslurp/worker/testing";
 let sql: postgres.Sql;
 let stop: () => Promise<void>;
 let concurrent: postgres.Sql;
-const raceDatabaseUrl = process.env.PROJECT_NAMING_RACE_DATABASE_URL;
+const raceDatabaseUrl = process.env.TEST_DATABASE_URL;
 let ws: typeof import("../services/projects.js");
 let naming: typeof import("../services/project-naming.js");
 

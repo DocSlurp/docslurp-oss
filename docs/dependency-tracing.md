@@ -114,7 +114,7 @@ Langfuse-only startup proves production SigNoz delivery.
 Real local exporter tests exercise Langfuse's OTLP JSON payload and the SigNoz
 protobuf path, including child relationships and cost/correlation attributes.
 S3 tests use the actual AWS SDK against a local HTTP server. PostgreSQL integration
-tests use `GRAPH_PURGE_TEST_DATABASE_URL` pointing at a disposable database.
+tests use `TEST_DATABASE_URL` pointing at a disposable database.
 Provider transport tests verify lazy streaming, cancellation and error identity.
 
 During production testing or performance tuning, inspect errors and latency before,

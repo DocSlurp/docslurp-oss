@@ -16,7 +16,7 @@ import type { SqlClient } from "../db.js";
 // queue exactly as the migrations create them). Every test seeds uniquely
 // named tenants inside one transaction and rolls it back. Skipped without a
 // local DB.
-const databaseUrl = process.env.USAGE_ATTRIBUTION_DATABASE_URL ?? "";
+const databaseUrl = process.env.TEST_DATABASE_URL ?? "";
 const isLocal =
   databaseUrl !== "" && ["localhost", "127.0.0.1"].includes(new URL(databaseUrl).hostname);
 

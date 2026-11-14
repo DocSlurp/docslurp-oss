@@ -11,7 +11,7 @@ let failLease: "none" | "throw-after-grant" | "refuse" = "none";
 beforeAll(async () => {
   // A real migrated database is required for concurrent transactions. PGlite's
   // socket serves one connection, so ordinary local runs retain its max: 1.
-  const databaseUrl = process.env.CONFIG_CHANGE_TEST_DATABASE_URL;
+  const databaseUrl = process.env.TEST_DATABASE_URL;
   const pg = databaseUrl ? null : await startMigratedPostgres();
   stop = pg?.stop ?? (async () => {});
   sql = postgres(databaseUrl ?? pg!.url, { max: databaseUrl ? 2 : 1, prepare: false, onnotice: () => {} }) as unknown as postgres.Sql<Record<string, unknown>>;
@@ -101,7 +101,7 @@ describe("config-change transactional credit admission", () => {
     expect(applied!.job!.runIds).toHaveLength(2);
   });
 
-  it.skipIf(!process.env.CONFIG_CHANGE_TEST_DATABASE_URL)("serializes concurrent boosted admissions across projects in one organization", async () => {
+  it.skipIf(!process.env.TEST_DATABASE_URL)("serializes concurrent boosted admissions across projects in one organization", async () => {
     await seed({ credits: 105, documents: 1 });
     await sql`insert into projects(id, org_id, user_id, name, pipeline)
       values ('w2', 'o1', 'u1', 'Second', ${sql.json(JSON.parse(JSON.stringify(pipeline())))})`;

@@ -32,6 +32,15 @@ itself; elsewhere install a C++ toolchain, CMake, Ninja and the FreeType, Fontco
 Little CMS and zlib development packages first. Without it, PDF page counts refuse ("pdfpagecount ... is not installed")
 and the real-tool tests skip; CI sets `DOCSLURP_REQUIRE_DOPPLER_TOOLS=1` so they cannot.
 
+Local development runs with `NODE_ENV` `development` (or unset). Only there does the worker accept the development-only
+settings that weaken untrusted-file protection; anywhere else, including staging and preview, it refuses to start with
+any of them set: `QUARANTINE_ENABLED=false`, `DOCSLURP_PARSER_SANDBOX=none`, `DOCSLURP_PARSER_SANDBOX_ALLOW_UNISOLATED`,
+`DOCSLURP_SANDBOX_ALLOW_UNFILTERED_SOCKETS`, `QUARANTINE_FAIL_OPEN_ON_TOOL_MISSING` and
+`DOCSLURP_CLAMAV_FAIL_OPEN_ON_STALE_DB`. ClamAV fails closed on a stale or missing signature database by default, in
+development too: keep signatures fresh (`freshclam`), or opt in to a warning for local work with
+`DOCSLURP_CLAMAV_FAIL_OPEN_ON_STALE_DB=true` in your `.env`. The worker images set `NODE_ENV=production`; pass
+`-e NODE_ENV=development` to run one as a local development container.
+
 The web dashboard is not part of this repository, so there is no `pnpm dev` UI host here. Exercise changes through the REST API, the CLI, the SDK or MCP.
 
 ## Before you open a pull request
@@ -44,6 +53,21 @@ The web dashboard is not part of this repository, so there is no `pnpm dev` UI h
 Tests that need third-party PDFs fetch them on first use with `pnpm fixtures:fetch` into the gitignored `.cache/`; never commit them.
 
 Database schema changes go only through `server/db/migrations` (`pnpm db:generate`, or a hand-written `NNNN_name.sql` plus its `meta/_journal.json` entry). Tests build their databases by applying the migrations in order.
+
+### Real Postgres and Redis tests
+
+Most tests use an in-memory PGlite database. Tests that need real Postgres (lock contention, concurrent transactions, roles) or Redis read `TEST_DATABASE_URL` and/or `TEST_REDIS_URL` and skip without them. `scripts/run-database-tests.mjs` finds them by those two names, gives each file its own fresh copy of a migrated template database, and fails on any skipped test. CI runs it in the `database integration` job. To run it locally against disposable services:
+
+```bash
+docker compose up -d postgres redis   # or any local Postgres/Redis whose databases you can throw away
+export TEST_DATABASE_ADMIN_URL=postgres://docslurp:docslurp@127.0.0.1:5432 TEST_DATABASE_TEMPLATE=docslurp_test_tmpl
+export TEST_REDIS_URL=redis://127.0.0.1:6379
+docker compose exec postgres createdb -U docslurp docslurp_test_tmpl
+DATABASE_URL="$TEST_DATABASE_ADMIN_URL/$TEST_DATABASE_TEMPLATE" node server/db/migrate.mjs
+node scripts/run-database-tests.mjs [file filter]
+```
+
+A new test of this kind just reads `TEST_DATABASE_URL` / `TEST_REDIS_URL`; there is nothing to register. Do not give it its own variable: the runner refuses test files gated on a database or Redis variable it never sets. Never export `TEST_DATABASE_URL` for a whole `pnpm test` run, since every gated file would then share and wipe one database. The server and worker test setups refuse a `TEST_DATABASE_URL` that is not on a loopback host or whose database name does not look disposable (a `test`, `tmp` or `scratch` word, or the runner's `dbtest_<n>`), so a mistyped URL fails loudly instead of writing to your development database.
 
 ## Style
 
