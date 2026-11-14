@@ -238,7 +238,7 @@ registry rows when the skip is recorded.
 | Status | Meaning | Served |
 | --- | --- | --- |
 | `pending` | A build was refused before any call (`error` says why: an organization that may not spend, privacy mode, no model key) | No |
-| `building` | A build is running, or was interrupted and will resume | No |
+| `building` | A build is running (`build_owner` names it and it touches `updated_at`), or was interrupted and will resume | No |
 | `partial` | The build ended without a servable tree; `error` names the reason | No |
 | `ready` | The coverage invariant held | Yes |
 | `skipped` | The document gets no tree (`skip_reason`) | No |
@@ -249,9 +249,15 @@ registry rows when the skip is recorded.
   `content-refusal`, `truncated-output`, `invalid-output:<detail>`,
   `prompt-too-large`, `model-error`, `leaf-text-mismatch`.
 - `stopped:build-switch-off`, `stopped:run-cost-cap`,
-  `stopped:stage-time-budget`: the build stopped before its next call.
-- `node-cap`: the document needs more nodes than
-  `SUMMARY_TREE_MAX_NODES_PER_DOCUMENT`. Refused before any call.
+  `stopped:stage-time-budget`, and from the backfill job `stopped:cost-cap`,
+  `stopped:cancelled`, `stopped:lease-lost`: the build stopped before its next
+  call.
+- `node-cap`: the document needs more nodes than its cap. The cap scales with
+  the document (`summaryTreeNodeCap`: `SUMMARY_TREE_MAX_NODES_PER_LEAF` nodes a
+  leaf, at least `SUMMARY_TREE_BASE_NODES_PER_DOCUMENT`, at most
+  `SUMMARY_TREE_MAX_NODES_PER_DOCUMENT`), so a 20,000-page document fits it.
+  It bounds tree shape, not spend: spend and time are bounded by the caller's
+  cost cap and time budget. Refused before any call.
 - `coverage:<checks>`: the invariant did not hold.
 - `embedding-space-mismatch`, `leaf-vectors-unusable`: the embed artifact is not
   in the project's embedding space, or a leaf has no usable vector.
@@ -264,6 +270,38 @@ document of the run's organization and project).
 
 A later build of a `partial` or `building` document resumes: it pays only for
 the groups that have no stored text, and for the levels above them.
+
+### What search may read, and when
+
+Search serves a document's nodes only while its state row is `ready` for the
+document's current run and the project's embedding space, with `built_at` set.
+The build keeps that true at every step:
+
+- Summary rows are written before the row turns `ready`, with the document's
+  run id, and each row's id is its registry row's id.
+- A rebuild leaves `ready` before it removes or replaces a row. That includes a
+  rebuild with other settings or another embedding space, and a document that
+  no longer qualifies: both wipe the earlier tree, and both write `building`
+  first.
+- `built_at` is set only by a `ready` write, so a rebuild always carries a later
+  one.
+
+`server/src/__tests__/summary-tree-build-search.db.test.ts` runs the real build
+and then the real search leg against one database and one LanceDB directory.
+
+### Who is building a document
+
+A `building` row names its builder in `build_owner` (`run:<runId>` for a run's
+own stage, `job:<jobId>#<claim>` for the backfill job) and the build touches
+`updated_at` at every commit and at least every 30 seconds.
+
+- A row not touched for `SUMMARY_TREE_BUILD_STALE_MS` (10 minutes) was left by a
+  worker that died. It blocks nothing: any build takes it over, and the project
+  state counts it as `partial`, not `building`.
+- A run's own stage always takes its document's row (its retry after a crash
+  must not wait). The backfill job leaves a row another builder still reports
+  on, and comes back to it in a later job.
+- A build whose row was taken stops at its next commit and writes no outcome.
 
 One stage activity starts model calls for at most
 `WORKER_SUMMARY_TREE_STAGE_BUDGET_SECONDS` (default 20 minutes), so an optional
@@ -351,6 +389,110 @@ its own scope and its own cost cap as `stopReason`, then registers the returned
 `artifactUri` with `registerSummaryTreeArtifact`
 (`worker/src/summary-tree/state-store.ts`).
 
+### Backfill: trees for documents a project already holds
+
+Turning the tree on covers new uploads. Documents indexed before that, documents
+a run left `partial` or never started (the stage's time budget), and documents
+whose builder died are built by a backfill job
+(`worker/src/summary-tree/backfill-job.ts`, table `summary_tree_jobs`).
+
+| | |
+| --- | --- |
+| Status and estimate | `GET /v1/projects/:projectId/summary-tree/backfill` |
+| Estimate only | `POST /v1/projects/:projectId/summary-tree/backfill/estimate` |
+| Start | `POST /v1/projects/:projectId/summary-tree/backfill` with `{ "maxCostCents": n }` |
+| Job | `GET /v1/projects/:projectId/summary-tree/backfill/:jobId`, or the shared `GET /v1/jobs/:jobId` and `GET /v1/jobs/:jobId/events` (SSE) |
+| Cancel | `POST /v1/projects/:projectId/summary-tree/backfill/:jobId/cancel` |
+| SDK | `getSummaryTreeBackfill`, `summaryTreeBackfillEstimate`, `startSummaryTreeBackfill`, `getSummaryTreeBackfillJob`, `cancelSummaryTreeBackfill` |
+| CLI | `docslurp summary-tree backfill --max-cost-cents <n> [--estimate] [--watch]`, `summary-tree status`, `summary-tree cancel <jobId>` |
+
+Reading needs project access (a server key with any project scope); estimating,
+starting and cancelling need edit access (a server key with `projects:manage`).
+
+**Start.** Refused unless the tree is on for the project, the deployment builds
+trees, and the organization may spend. `maxCostCents` is required; there is no
+uncapped job. One active job per project.
+
+**What it builds.** The project's current documents (completed, not superseded,
+purged or archived) that have no tree search can read for their current run:
+no state row, `pending`, `partial`, a `building` row nobody reports on, a tree
+of another run or embedding space, or a tree older than a correction reindex.
+`ready` and `skipped` documents are not touched. Each document is built by
+`runSummaryTreeForDocument` with its own run id, run root and embed artifact, so
+the model route, the fleet rate limiter, the artifact and every write are the
+stage's own.
+
+**The estimate** counts leaves in Postgres (chunks of the current run that are
+neither overlap chunks nor table row or cell chunks) and the tokens stored on
+them; no artifact is read and no model is called. It is one aggregate over the
+chunks of the documents that need work, on `document_chunks (document_id,
+chunk_index)`. Node and call counts use the middle of the group and fan-in
+ranges until finished builds calibrate them: builds register their stats on the
+document's `summary-tree` stage row, and the estimate reads whole builds of the
+same organization (this project's first). Cost uses the server's configured
+token rates. It assumes no reuse.
+
+**Spend.**
+
+- The cap is checked before every model call, with a reserve held for each call
+  in flight (twice the largest call seen), so the job passes its cap by less
+  than one group whatever the concurrency.
+- Every model attempt and embedding request is written to `usage_events` and
+  added to the job's totals in one transaction when it returns. A worker that
+  dies loses no record of a paid call.
+- A group that fails is retried by the build and once more by the job. Then the
+  document stays `partial` and unserved. No text is written in a summary's
+  place.
+- At the cap the job ends `cancelled` with the note `Stopped at the cost cap`;
+  a later job continues from what was built.
+
+**Parking.** A job that cannot proceed for a reason that clears on its own is
+`blocked`: it holds no lease, makes no call, and is looked at again after a
+minute.
+
+| `blockedReason` | Cause | `/v1/jobs` reason |
+| --- | --- | --- |
+| `build-off` | `DOCSLURP_SUMMARY_TREE_BUILD` is off. Both switches are read before the claim and before every batch; the build reads the build switch before every call | `unavailable` |
+| `balance` | the deployment's provider balance probe reports below its floor, or could not answer | `capacity` |
+| `credits` | the organization may not spend | `credits` |
+| `policy` | the project's privacy mode does not allow the summary model | `policy` |
+
+**Provider balance probe.** Nothing else at runtime reads a model provider's
+live balance. A deployment may name a module in
+`DOCSLURP_PROVIDER_BALANCE_PROBE` (an absolute path or `file:` URL) that exports
+`createProviderBalanceProbe(host)` and returns `{ check(request) }`
+(`worker/src/lib/provider-balance-probe.ts`). The job asks it before the claim
+and before every batch with the usage-ledger provider and model labels of the
+summary route. The module decides which account it reads and what is enough; no
+probe, provider code or floor ships with this repository. Unset means no check.
+A module that cannot be loaded, and a probe that throws or takes longer than ten
+seconds, read as not sufficient.
+
+**Lease and resume.** The job is leased for five minutes and renews while it
+runs. When a worker dies, another claims the job after the lease expires,
+starts after the cursor (the last document the job finished) and resumes the
+document in progress from its artifact: groups whose call returned are read
+back, never called again. A worker that lost its lease stops at its next call,
+and nothing it writes afterwards lands on the new holder's rows.
+
+**Scale.**
+
+- Many small documents: a batch selects 200 documents; those under the
+  long-document floor with no state row are marked `skipped` in one statement,
+  with no artifact read.
+- One very large document: built like any other, committed window by window,
+  resumable across leases at any group.
+- One job runs at a time, on the maintenance leader
+  (`WORKER_SUMMARY_TREE_JOB_POLL_INTERVAL`); documents inside it are built
+  `WORKER_SUMMARY_TREE_JOB_DOCUMENT_CONCURRENCY` at a time and share
+  `WORKER_SUMMARY_TREE_CONCURRENCY` model calls.
+
+**Tenant boundary.** Every statement that selects or writes documents names the
+job's organization and project. The cursor is a position inside that scope
+only. A document deleted while its tree is being built is skipped, and the
+summary rows and artifact parts written before the delete are removed by the
+job.
+
 ### Measured behaviour (2026-11-14, development machine)
 
 | | Measured |
@@ -366,11 +508,10 @@ phase-0 eval measured.
 
 ### Not done yet
 
-- A 20,000-page document needs more nodes than
-  `SUMMARY_TREE_MAX_NODES_PER_DOCUMENT` allows today and ends `partial` with
-  `node-cap` before any call.
 - The tree root does not replace the document summary.
-- There is no price-card unit for the tree, so the run cost cap sees other
-  spend only.
+- There is no price-card unit for the tree: summary calls record provider usage
+  and bill nothing by themselves. The run cost cap sees other spend only, and
+  the backfill job's cap counts provider cost.
+- Backfill jobs run one at a time, on the maintenance leader.
 - The scan parses the whole embed artifact; a vectors-only sidecar would remove
   most of that time for very large documents.

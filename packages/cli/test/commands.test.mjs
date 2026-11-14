@@ -383,6 +383,57 @@ test("full-index and reprocess --estimate hit estimate routes only", async () =>
   assert.deepEqual(JSON.parse(re.requests[0].body), { stageFrom: "embed" });
 });
 
+test("summary-tree backfill needs a cap, estimates without starting, and reads and cancels its job", async () => {
+  const job = (status, extra = {}) => ({
+    id: "tj1", projectId: "w", status, blockedReason: null, maxCostCents: 500, costCents: 12.5, documentsTotal: 10, documentsReady: 3, documentsSkipped: 5,
+    documentsPartial: 0, nodesBuilt: 42, modelCalls: 44, error: null, ...extra,
+  });
+  // No cap: refused before any request.
+  const uncapped = await invoke(["summary-tree", "backfill", "--project", "w"], () => ({ body: {} }));
+  assert.notEqual(uncapped.code, 0);
+  assert.match(uncapped.stderr, /--max-cost-cents is required/);
+  assert.deepEqual(uncapped.requests, []);
+  for (const bad of ["0", "-5", "abc"]) {
+    const refused = await invoke(["summary-tree", "backfill", "--project", "w", "--max-cost-cents", bad], () => ({ body: {} }));
+    assert.notEqual(refused.code, 0, bad);
+    assert.deepEqual(refused.requests, [], bad);
+  }
+
+  const estimate = { estimate: { pages: 90, documents: 2, billing: "enforced", credits: { low: 2, high: 4 }, seconds: { low: 30, high: 60 }, basis: "b" }, billing: "enforced" };
+  const estimated = await invoke(["summary-tree", "backfill", "--project", "w", "--estimate"], () => ({ body: estimate }));
+  assert.equal(estimated.code, 0, estimated.stderr);
+  assert.deepEqual(estimated.requests.map((r) => [r.method, r.url]), [["POST", "/v1/projects/w/summary-tree/backfill/estimate"]]);
+  assert.match(estimated.stdout, /nothing was started/);
+
+  const started = await invoke(["summary-tree", "backfill", "--project", "w", "--max-cost-cents", "500"], () => ({ status: 202, body: job("queued") }));
+  assert.equal(started.code, 0, started.stderr);
+  assert.deepEqual(started.requests.map((r) => [r.method, r.url]), [["POST", "/v1/projects/w/summary-tree/backfill"]]);
+  assert.deepEqual(JSON.parse(started.requests[0].body), { maxCostCents: 500 });
+  assert.match(started.stdout, /Job tj1: summary-tree-backfill queued/);
+  assert.match(started.stdout, /12\.50 of 500\.00 cents \(cap\)/);
+
+  const status = await invoke(["summary-tree", "status", "--project", "w"], () => ({ body: { projectId: "w", estimate: { documents: 2, documentsToBuild: 1, nodes: 9 }, activeJob: job("blocked", { blockedReason: "balance" }), lastJob: null } }));
+  assert.deepEqual(status.requests.map((r) => [r.method, r.url]), [["GET", "/v1/projects/w/summary-tree/backfill"]]);
+  assert.match(status.stdout, /Without a tree: 2 documents/);
+  assert.match(status.stdout, /summary-tree-backfill blocked \(balance\)/);
+  assert.match(status.stdout, /8 of 10 \(3 built, 5 need no tree, 0 incomplete\)/);
+
+  const cancelled = await invoke(["summary-tree", "cancel", "tj1", "--project", "w"], () => ({ body: job("cancelled", { error: "Cancelled by request" }) }));
+  assert.deepEqual(cancelled.requests.map((r) => [r.method, r.url]), [["POST", "/v1/projects/w/summary-tree/backfill/tj1/cancel"]]);
+  assert.match(cancelled.stdout, /cancelled/);
+  assert.match(cancelled.stdout, /Cancelled by request/);
+
+  const refused = await invoke(["summary-tree", "backfill", "--project", "w", "--max-cost-cents", "500"], () => ({ status: 403, body: { error: { code: "forbidden", message: "This endpoint requires a server API key with the projects:manage scope" } } }));
+  assert.notEqual(refused.code, 0);
+  // --estimate never turns a cancel into a request.
+  const guarded = await invoke(["summary-tree", "cancel", "tj1", "--project", "w", "--estimate"], () => ({ body: {} }));
+  assert.notEqual(guarded.code, 0);
+  assert.deepEqual(guarded.requests, []);
+  const usage = await invoke(["summary-tree", "cancel"], () => ({ body: {} }));
+  assert.notEqual(usage.code, 0);
+  assert.deepEqual(usage.requests, []);
+});
+
 test("jobs get prints the job and watch polls to completion", async () => {
   const job = (status) => ({ id: "j1", kind: "reindex", status, runIds: [], queue: { position: null, ahead: null }, estimate: null, statusUrl: "/v1/jobs/j1" });
   const got = await invoke(["jobs", "get", "j1"], () => ({ body: job("blocked") }));

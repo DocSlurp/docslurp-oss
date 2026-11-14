@@ -85,6 +85,8 @@ export const SUMMARY_TREE_JOB_DEFAULT_PARK_MS = 60_000;
 export const SUMMARY_TREE_JOB_DEFAULT_PROBE_TTL_MS = 15_000;
 /** A reserve of this many times the largest call seen so far is held for every call in flight. */
 const RESERVE_FACTOR = 2;
+/** This many documents in a row failing with an error ends the job: the fault is not the documents'. */
+const MAX_CONSECUTIVE_DOCUMENT_ERRORS = 5;
 
 export interface SummaryTreeJobRunnerOptions {
   workerId: string;
@@ -185,9 +187,7 @@ export async function runSummaryTreeJobs(sql: Client, options: SummaryTreeJobRun
   }
   const probe = options.balanceProbe === undefined ? await providerBalanceProbe(env) : options.balanceProbe;
   const gate = balanceGate(probe, options.probeTtlMs ?? SUMMARY_TREE_JOB_DEFAULT_PROBE_TTL_MS);
-  // The route is not resolved yet (that needs the project): the probe is asked about the deployment's default route.
-  const defaultLabels = textUsageLabels(options.config.textGenerationModel ?? "");
-  const first = await gate.check(defaultLabels);
+  const first = probe ? await gate.check(await candidateRouteLabels(sql, candidate.project_id, options.config)) : { sufficient: true };
   if (!first.sufficient) {
     await parkUnclaimed("balance", first.retryAfterSeconds ? first.retryAfterSeconds * 1_000 : parkMs);
     return 0;
@@ -223,6 +223,22 @@ export async function runSummaryTreeJobs(sql: Client, options: SummaryTreeJobRun
     `;
   }
   return 1;
+}
+
+/**
+ * The usage-ledger labels of the summary route the candidate's project would call, for the probe before the claim.
+ * A project whose pipeline cannot be resolved here is asked about under the deployment's default text route; the
+ * claimed job resolves (and polices) the route again.
+ */
+async function candidateRouteLabels(sql: Client, projectId: string, config: Config): Promise<{ provider: string; model: string }> {
+  try {
+    const [project] = await sql<{ pipeline: unknown }[]>`select pipeline from projects where id = ${projectId}`;
+    if (project) {
+      const pipeline = normalizeStoredPipelineFeatures(project.pipeline as PipelineFeatures, `project ${projectId}`);
+      return textUsageLabels(resolveAllowedPipelineTextModel(pipeline, SUMMARY_TREE_TEXT_OPERATION, config.textGenerationModel));
+    }
+  } catch { /* the default route below */ }
+  return textUsageLabels(config.textGenerationModel ?? "");
 }
 
 function balanceGate(probe: ProviderBalanceProbe | null, ttlMs: number) {
@@ -405,6 +421,7 @@ async function runClaimedJob(
     const documentConcurrency = Math.max(1, options.documentConcurrency ?? SUMMARY_TREE_JOB_DEFAULT_DOCUMENT_CONCURRENCY);
     const staleMs = options.buildStaleMs ?? options.overrides?.buildStaleMs ?? SUMMARY_TREE_BUILD_STALE_MS;
     let cursor = job.cursor;
+    let consecutiveErrors = 0;
     console.log(`[summary-tree-job] started job=${job.id} project=${job.project_id} serve=${summaryTreeServeAvailable(env) ? "on" : "off"}`);
 
     /** Builds one document; the outcome it is counted under, or null when the job has to stop first. */
@@ -584,14 +601,32 @@ async function runClaimedJob(
       // --- The rest, a few at a time, sharing the job's call slots. ---
       const large = documents.filter((document) => !outcomes.has(document.id));
       let next = 0;
+      let fatal: unknown = null;
       const worker = async () => {
-        while (next < large.length && !halt && !leaseLost && !cancelRequested) {
+        while (next < large.length && !halt && !leaseLost && !cancelRequested && !fatal) {
           const document = large[next++]!;
-          const built = await buildDocument(document);
-          outcomes.set(document.id, built ? { outcome: built.outcome, nodes: built.result?.stats.generatedNodes ?? 0 } : null);
+          try {
+            const built = await buildDocument(document);
+            outcomes.set(document.id, built ? { outcome: built.outcome, nodes: built.result?.stats.generatedNodes ?? 0 } : null);
+            if (built) consecutiveErrors = 0;
+          } catch (error) {
+            // Unrecorded usage, an aborted job, or one failure after another: the job itself fails. Otherwise the
+            // fault is this document's (an unreadable artifact, say): it stays unserved for a later job, and the
+            // rest of the project is still built. The error's name only; its message may quote the document.
+            consecutiveErrors += 1;
+            if (persistError || abort.signal.aborted || consecutiveErrors >= MAX_CONSECUTIVE_DOCUMENT_ERRORS) {
+              fatal ??= error;
+              abort.abort(error);
+              return;
+            }
+            console.warn(`[summary-tree-job] document failed job=${job.id} document=${document.id} error=${error instanceof Error ? error.name : "error"}`);
+            outcomes.set(document.id, { outcome: "partial", nodes: 0 });
+          }
         }
       };
-      await Promise.all(Array.from({ length: Math.min(documentConcurrency, Math.max(1, large.length)) }, worker));
+      // Every worker settles before anything else happens: no build keeps running behind a failed job.
+      await Promise.allSettled(Array.from({ length: Math.min(documentConcurrency, Math.max(1, large.length)) }, worker));
+      if (fatal) throw fatal;
       await flush();
 
       // --- Progress: the documents of the batch's finished prefix, with the cursor, in one fenced write. ---

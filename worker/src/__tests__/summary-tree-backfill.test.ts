@@ -347,6 +347,27 @@ describe("tenant boundary", () => {
   });
 });
 
+describe("usage", () => {
+  it("is in the ledger and in the job's totals before the next call starts", async () => {
+    const f = fakes();
+    await seedDocument(f.storage, "w", "a-big", BIG_LEAVES);
+    const jobId = await queueJob("w");
+    const seen: Array<{ call: number; events: number; calls: number; cost: number }> = [];
+    f.beforeAnswer = async (_request, call) => {
+      const [events] = await sql<Array<{ count: number }>>`select count(*)::int as count from usage_events where metric = ${SUMMARY_TREE_USAGE_METRIC}`;
+      const job = await jobOf(jobId);
+      seen.push({ call, events: events!.count, calls: Number(job.model_calls), cost: Number(job.cost_cents) });
+    };
+    await f.run();
+    // One call in flight at a time: when call n starts, the n - 1 before it are already recorded, with their cost.
+    expect(seen.map((entry) => entry.events)).toEqual(Array.from({ length: BIG_NODES }, (_, index) => index));
+    expect(seen.map((entry) => entry.calls)).toEqual(Array.from({ length: BIG_NODES }, (_, index) => index));
+    for (const entry of seen) expect(entry.cost).toBeGreaterThanOrEqual((entry.call - 1) * CALL_CENTS - 1e-9);
+    // A worker that dies here loses nothing: the totals a successor reads are the ledger's.
+    expect(Number((await jobOf(jobId)).cost_cents)).toBeCloseTo((await providerSpend()).cost, 6);
+  });
+});
+
 describe("cost cap", () => {
   it("never passes the cap by more than one group, with calls in flight", async () => {
     const f = fakes();
@@ -505,23 +526,19 @@ describe("lease", () => {
     await seedDocument(f.storage, "w", "a-big", BIG_LEAVES);
     await seedDocument(f.storage, "w", "b-big", BIG_LEAVES);
     const jobId = await queueJob("w");
+    // The second worker is another process over the same bucket and tables.
     const second = fakes();
-    // The same bucket and tables: the second worker is another process over the same storage.
-    for (const [key, value] of f.storage.objects) second.storage.objects.set(key, value);
     let takeover: Promise<number> | null = null;
     const committedByFirst: string[] = [];
-    f.beforeAnswer = async (request, call) => {
+    f.beforeAnswer = async (_request, call) => {
       if (call <= 3) return;
       if (call === 4) {
         committedByFirst.push(...f.requests.slice(0, 3).map((earlier) => earlier.nodeId));
         // The first worker stalls inside its fourth call; its lease runs out and another worker claims the job.
         await sql`update summary_tree_jobs set lease_expires_at = now() - interval '1 second' where id = ${jobId}`;
-        for (const [key, value] of f.storage.objects) second.storage.objects.set(key, value);
-        second.storage.objects.forEach((value, key) => f.storage.objects.set(key, value));
         takeover = second.run({ workerId: "worker-b", storage: f.storage });
         await takeover;
       }
-      void request;
     };
     await f.run({ workerId: "worker-a" });
     expect(await takeover).toBe(1);
@@ -541,6 +558,26 @@ describe("lease", () => {
     expect(job.model_calls).toBe(f.requests.length + second.requests.length);
     const rows = (await summaryRowsOf("w"))!;
     expect(new Set(rows.map((row) => row.id)).size).toBe(2 * BIG_NODES);
+  });
+
+  it("keeps its lease while it runs longer than the lease lasts", async () => {
+    const f = fakes();
+    await seedDocument(f.storage, "w", "a-big", BIG_LEAVES);
+    await seedDocument(f.storage, "w", "b-big", BIG_LEAVES);
+    const jobId = await queueJob("w");
+    const other = fakes();
+    const claimedMeanwhile: number[] = [];
+    f.beforeAnswer = async (_request, call) => {
+      // Fourteen calls of 60 ms against a 150 ms lease: the job outlives its lease several times over.
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      // Another worker polling all the while never gets the job.
+      if (call % 4 === 0) claimedMeanwhile.push(await other.run({ workerId: "worker-b", storage: f.storage, leaseMs: 150 }));
+    };
+    await f.run({ leaseMs: 150 });
+    expect(claimedMeanwhile).toEqual([0, 0, 0]);
+    expect(other.requests).toEqual([]);
+    expect(await jobOf(jobId)).toMatchObject({ status: "completed", documents_ready: 2, model_calls: 2 * BIG_NODES });
+    expect(f.requests).toHaveLength(2 * BIG_NODES);
   });
 
   it("does not claim a job another worker holds", async () => {
@@ -574,6 +611,31 @@ describe("documents that change under the job", () => {
     // No further call was made for it, and what was paid is still recorded.
     expect(f.requests.filter((request) => request.nodeId.startsWith("a-gone:"))).toHaveLength(3);
     expect(await modelUsage()).toHaveLength(f.requests.length);
+  });
+
+  it("leaves a document it cannot read for a later job and builds the rest; a run of such failures fails the job", async () => {
+    const f = fakes();
+    await seedDocument(f.storage, "w", "a-broken", BIG_LEAVES);
+    await seedDocument(f.storage, "w", "b-big", BIG_LEAVES);
+    f.storage.objects.set("u1/run-w/embeddings/a-broken.json", Buffer.from("{ this is not an embed artifact"));
+    const jobId = await queueJob("w");
+    await f.run();
+    expect(await jobOf(jobId)).toMatchObject({ status: "completed", documents_ready: 1, documents_partial: 1, model_calls: BIG_NODES });
+    expect((await treeStatuses())["b-big"]).toBe("ready");
+    expect(f.requests.every((request) => request.nodeId.startsWith("b-big:"))).toBe(true);
+
+    // Every document failing the same way is not the documents' fault: the job fails instead of marking a project partial.
+    await sql`delete from document_summary_trees`;
+    await sql`delete from documents where id = 'b-big'`;
+    for (const id of ["c", "d", "e", "f", "g"]) {
+      await seedDocument(f.storage, "w", `${id}-broken`, BIG_LEAVES);
+      f.storage.objects.set(`u1/run-w/embeddings/${id}-broken.json`, Buffer.from("{ this is not an embed artifact"));
+    }
+    const failing = await queueJob("w");
+    await f.run();
+    const failed = await jobOf(failing);
+    expect(failed).toMatchObject({ status: "failed", documents_ready: 0, lease_owner: null });
+    expect(failed.error).toBeTruthy();
   });
 
   it("retries a failed group once more, then leaves the document partial with no fallback text", async () => {

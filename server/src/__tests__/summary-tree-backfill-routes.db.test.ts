@@ -226,8 +226,14 @@ describe("start", () => {
       expect(await (await app.request(`/v1/projects/w/summary-tree/backfill/${job.id}`)).json()).toMatchObject({ status: "blocked", blockedReason: stored });
     }
     await sql`update summary_tree_jobs set status = 'running', blocked_reason = null, documents_ready = 1, documents_skipped = 1 where id = ${job.id}`;
-    const events = await app.request(`/v1/jobs/${job.id}/events`, { signal: AbortSignal.timeout(400) }).then((response) => response.status);
-    expect(events).toBe(200);
+    // The shared event stream accepts the job: its first frame is the job's status.
+    const events = await app.request(`/v1/jobs/${job.id}/events`);
+    expect(events.status).toBe(200);
+    const reader = events.body!.getReader();
+    const first = new TextDecoder().decode((await reader.read()).value);
+    expect(first).toContain("event: status");
+    expect(first).toContain("summary-tree-backfill");
+    await reader.cancel();
     expect(await (await app.request(`/v1/jobs/${job.id}`)).json()).toMatchObject({ status: "processing", progress: { documents: 2, documentsTotal: 3 } });
 
     // The worker's failure text never reaches a caller.

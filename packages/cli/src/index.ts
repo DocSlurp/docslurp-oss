@@ -88,6 +88,9 @@ function usage(): void {
   docslurp extract-download <extractId>
   docslurp full-index [--project <id|slug|name>] [--document <id>] [--estimate] [--watch]
   docslurp reprocess <runId> [--stage-from <stage>] [--chart-export <off|free|models>] [--estimate] [--watch]
+  docslurp summary-tree backfill [--project <id|slug|name>] --max-cost-cents <n> [--estimate] [--watch] [--json]
+  docslurp summary-tree status [--project <id|slug|name>] [--json]
+  docslurp summary-tree cancel <jobId> [--project <id|slug|name>] [--json]
   docslurp jobs get <jobId> [--json]
   docslurp jobs watch <jobId> [--timeout <seconds>]
   docslurp status <runId> [--api-url <url>] [--watch] [--timeout <seconds>]
@@ -300,6 +303,7 @@ const VALUE_FLAGS: ReadonlySet<string> = new Set([
   "project", "api-url", "api-key", "run", "source", "out", "queries-file", "concurrency", "min-score", "session", "canonical-id", "path",
   "template", "document", "stage-from", "retention-days", "download", "quality", "chart-export", "idempotency-key",
   "timeout", "limit", "cursor", "mode", "summary-tree", "tier", "reasoning", "months", "indexing", "model", "scopes", "profile",
+  "max-cost-cents",
 ]);
 
 const camel = (name: string) => name.replace(/-([a-z])/g, (_, c: string) => c.toUpperCase());
@@ -815,6 +819,79 @@ async function startWork(pathname: string, body: unknown, flags: Record<string, 
   if (flags.watch === true && runId) await statusCommand(runId, flags);
 }
 
+type SummaryTreeJobView = {
+  id: string; status: string; blockedReason: string | null; maxCostCents: number; costCents: number;
+  documentsTotal: number; documentsReady: number; documentsSkipped: number; documentsPartial: number;
+  nodesBuilt: number; modelCalls: number; error: string | null; job?: JobStatus;
+};
+
+function printSummaryTreeJob(job: SummaryTreeJobView): void {
+  const done = job.documentsReady + job.documentsSkipped + job.documentsPartial;
+  console.log(`Job ${job.id}: summary-tree-backfill ${job.status}${job.blockedReason ? ` (${job.blockedReason})` : ""}`);
+  console.log(`Documents: ${done} of ${job.documentsTotal} (${job.documentsReady} built, ${job.documentsSkipped} need no tree, ${job.documentsPartial} incomplete)`);
+  console.log(`Summaries: ${job.nodesBuilt} sections, ${job.modelCalls} model calls`);
+  console.log(`Spend:     ${job.costCents.toFixed(2)} of ${job.maxCostCents.toFixed(2)} cents (cap)`);
+  if (job.error) console.log(`Note:      ${job.error}`);
+}
+
+/**
+ * Summary tree backfill: builds the tree for a project's already indexed documents (turning the tree on only covers
+ * new uploads). `backfill` needs --max-cost-cents: the job stops before the model call that would pass it.
+ */
+async function summaryTreeCommand(action: string | undefined, jobId: string | undefined, flags: Record<string, string | boolean>): Promise<void> {
+  const base = `/v1/projects/${encodeURIComponent(resolveProject(flags))}/summary-tree/backfill`;
+  const read = async (pathname: string, init?: RequestInit): Promise<unknown | null> => {
+    const response = await apiFetch(pathname, flags, init);
+    if (!response.ok) {
+      printFailure(await responseFailure(response));
+      process.exitCode = 1;
+      return null;
+    }
+    return await response.json();
+  };
+  const post = { method: "POST", headers: { "Content-Type": "application/json" } };
+  // Only `backfill` has an estimate; anywhere else the flag would run the command instead.
+  if (flags.estimate === true && action !== "backfill") throw new Error("--estimate is only supported by summary-tree backfill.");
+  if (action === "backfill") {
+    if (flags.estimate === true) return runEstimate(`${base}/estimate`, {}, flags);
+    const maxCostCents = Number(flags.maxCostCents);
+    if (typeof flags.maxCostCents !== "string" || !Number.isFinite(maxCostCents) || maxCostCents <= 0) {
+      throw new Error("--max-cost-cents is required: the most this backfill may spend, in cents. Use --estimate to see what it would cost.");
+    }
+    const job = await read(base, { ...post, body: JSON.stringify({ maxCostCents }) }) as SummaryTreeJobView | null;
+    if (!job) return;
+    if (flags.json === true) console.log(JSON.stringify(job, null, 2));
+    else {
+      printSummaryTreeJob(job);
+      if (job.job?.estimate) console.log(formatEstimate(job.job.estimate));
+    }
+    if (flags.watch === true) await jobsCommand("watch", job.id, flags);
+    return;
+  }
+  if (action === "status") {
+    const status = await read(base) as { estimate: { documents: number; documentsToBuild: number; nodes: number }; activeJob: SummaryTreeJobView | null; lastJob: SummaryTreeJobView | null } | null;
+    if (!status) return;
+    if (flags.json === true) {
+      console.log(JSON.stringify(status, null, 2));
+      return;
+    }
+    console.log(`Without a tree: ${status.estimate.documents} documents (${status.estimate.documentsToBuild} long enough to get one, about ${status.estimate.nodes} section summaries)`);
+    if (status.activeJob) printSummaryTreeJob(status.activeJob);
+    else if (status.lastJob) printSummaryTreeJob(status.lastJob);
+    else console.log("No backfill has run for this project.");
+    return;
+  }
+  if (action === "cancel" && jobId) {
+    const job = await read(`${base}/${encodeURIComponent(jobId)}/cancel`, { ...post, body: "{}" }) as SummaryTreeJobView | null;
+    if (!job) return;
+    if (flags.json === true) console.log(JSON.stringify(job, null, 2));
+    else printSummaryTreeJob(job);
+    return;
+  }
+  console.error("Usage: docslurp summary-tree backfill --max-cost-cents <n> | status | cancel <jobId>");
+  process.exitCode = 1;
+}
+
 const TERMINAL_JOB_STATUSES = new Set(["completed", "failed", "cancelled"]);
 
 async function jobsCommand(action: string | undefined, jobId: string | undefined, flags: Record<string, string | boolean>): Promise<void> {
@@ -989,7 +1066,7 @@ async function urlEstimateFiles(urls: string[]): Promise<Array<{ name: string; s
 }
 
 /** Commands that read `--estimate`; anywhere else the flag is refused, so it can never silently run billed work. */
-const ESTIMATE_COMMANDS: ReadonlySet<string> = new Set(["upload", "ingest-url", "full-index", "reprocess"]);
+const ESTIMATE_COMMANDS: ReadonlySet<string> = new Set(["upload", "ingest-url", "full-index", "reprocess", "summary-tree"]);
 
 /** `docslurp extract`: files or URLs (not both), with the retention options. */
 async function extractCommand(inputs: string[], flags: Record<string, string | boolean>): Promise<void> {
@@ -1683,6 +1760,9 @@ async function main(): Promise<void> {
       break;
     case "reprocess":
       await reprocessCommand(positional[0], flags);
+      break;
+    case "summary-tree":
+      await summaryTreeCommand(positional[0], positional[1], flags);
       break;
     case "jobs":
       await jobsCommand(positional[0], positional[1], flags);
