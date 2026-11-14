@@ -800,8 +800,8 @@ def build_page_index(file):
     """One complete walk of the page tree into a PageIndex. Pages are numbered in depth-first Kids order.
 
     Fails closed (Unknown, so every page is unknown) on a tree that does not check out, wherever the problem is:
-    * an object reached twice: shared kids, a shared indirect Kids array (or any object on its reference chain), cycles,
-      a kid pointing back at the root ('page-tree-shared');
+    * an object reached twice, by any alias (every object on a kid's or an indirect Kids array's reference chain is
+      claimed): shared kids, shared Kids arrays, cycles, a kid pointing back at the root ('page-tree-shared');
     * a kid that is not a dictionary (null, free, a number), or a node typed /Pages without a Kids array: renderers
       disagree on whether such a kid takes a page number ('page-tree-kid');
     * an integer /Count, the root's included, that is not the number of pages under its node ('page-tree-count');
@@ -816,13 +816,7 @@ def build_page_index(file):
 
     def kids_of(node):
         """A node's Kids, claiming every object on an indirect Kids array's reference chain (so no two nodes share one)."""
-        value = node.get('Kids')
-        chain = []
-        while isinstance(value, Ref):
-            if value.num in seen or value.num in chain or len(chain) >= 16:
-                raise Unknown('page-tree-shared')
-            chain.append(value.num)
-            value = file.load(value.num)
+        value, chain = claim(node.get('Kids'))
         if isinstance(value, list):
             seen.update(chain)
         return value
@@ -832,16 +826,23 @@ def build_page_index(file):
         if isinstance(count, int) and 0 <= count and count != pages:
             raise Unknown('page-tree-count')
 
+    def claim(value):
+        """Resolve a reference chain, claiming every object on it: no object may be reached twice, by any alias."""
+        chain = []
+        while isinstance(value, Ref):
+            if value.num in seen or value.num in chain or len(chain) >= 16:
+                raise Unknown('page-tree-shared')
+            chain.append(value.num)
+            value = file.load(value.num)
+        return value, chain
+
     def visit(node_id, kids, depth):
         for slot, kid in enumerate(kids):
             file.check_time()
-            child = file.deref(kid)
+            child, chain = claim(kid)
             if not isinstance(child, dict):
                 raise Unknown('page-tree-kid')
-            if isinstance(kid, Ref):
-                if kid.num in seen:
-                    raise Unknown('page-tree-shared')
-                seen.add(kid.num)
+            seen.update(chain)
             if depth + 1 > MAX_TREE_DEPTH:
                 raise Unknown('tree-depth')
             visited[0] += 1

@@ -1013,6 +1013,14 @@ class PageIndexTest(Scratch):
         data = raw_pdf({1: f'[{page} {page}]', 5: '1 0 R', 2: '<< /Type /Pages /Kids 5 0 R /Count 2 >>',
                         3: '<< /Type /Pages /Kids 1 0 R /Count 2 >>', 4: '<< /Type /Pages /Kids [2 0 R 3 0 R] /Count 4 >>'}, '4 0 R')
         self.assert_unknown(data, 'page-tree-shared')
+        # Two kids that reach one page or one node through reference-to-reference aliases (council #395 re-check M1).
+        alias_page = raw_pdf({3: page, 5: '3 0 R', 6: '3 0 R', 8: page, 9: '<< /Type /Pages /Kids [5 0 R 6 0 R 8 0 R] >>'}, '9 0 R')
+        alias_node = raw_pdf({1: f'<< /Type /Pages /Kids [{page} {page}] >>', 5: '1 0 R', 6: '1 0 R',
+                              9: '<< /Type /Pages /Kids [5 0 R 6 0 R] >>'}, '9 0 R')
+        self.assert_unknown(alias_page, 'page-tree-shared')
+        self.assert_unknown(alias_node, 'page-tree-shared')
+        # A kid reached through one alias, once, is still an ordinary page.
+        self.assertEqual(self.index(raw_pdf({3: page, 5: '3 0 R', 9: '<< /Type /Pages /Kids [5 0 R] >>'}, '9 0 R')).pages, 1)
         # One indirect Kids array, used once, is an ordinary tree.
         data = raw_pdf({1: f'[{page} {page}]', 2: '<< /Type /Pages /Kids 1 0 R /Count 2 >>'}, '2 0 R')
         self.assertEqual(self.index(data).pages, 2)
@@ -1078,6 +1086,17 @@ class PageIndexTest(Scratch):
         self.assertEqual(str(facts.page_index_file(path, str(record))), 'page-tree-count')
         record.write_bytes(facts._UNKNOWN_RECORD + len(data).to_bytes(8, 'little') + b'Not A Slug!')
         self.assertIsInstance(facts.page_index_file(path, str(record)), facts.PageIndex)
+
+    def test_recursion_while_reading_is_an_unknown_not_a_crash(self):
+        original = facts.PdfFile._load_xref
+
+        def recursing(file):
+            raise RecursionError('maximum recursion depth exceeded')
+        facts.PdfFile._load_xref = recursing
+        try:
+            self.assertEqual(str(facts.page_index(self.write(TreeBuilder().build({'kids': ['P']})))), 'unreadable')
+        finally:
+            facts.PdfFile._load_xref = original
 
     def test_layout_facts_with_an_index_match_layout_facts_without(self):
         b = PdfBuilder()
