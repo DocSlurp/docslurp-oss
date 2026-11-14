@@ -93,6 +93,7 @@
 
 ## Search performance follow-ups (2026-11-13 tuning loop)
 
+- Deleted rows below LanceDB's 10% compaction threshold stay in their fragment file (hidden, not searchable): `Table.optimize` in `@lancedb/lancedb` 0.41 exposes no `materialize_deletions_threshold`. Measured locally: 1 of 100 rows deleted, text still on disk after a zero-retention optimize; 30 of 100, gone after two passes. When the binding exposes compaction options, pass threshold 0 on the erasure path (`requireLanceDbMaintenance`) and on history-prune passes (`docs/data-deletion.md`, "Known limit").
 - Cold first search: the first vector query on a table reads nearly the whole vector index (106 MB at 100,000 chunks) from object storage, 6-9 s in production. Warm the most recently searched projects at process start or resume, bounded, and check that the local LanceDB block cache survives restarts. Confirm with `lanceIndexCold` / `lanceIndexLoad` on `[search-timing]`.
 - Return early for a project with nothing to retrieve instead of embedding and running the legs over empty indexes.
 - Size `SEARCH_MAX_CONCURRENCY` from measured pool wait now that retrieval is LanceDB-bound; size the fast lane from measured setup time (`lane`, `fastWait`, `inflight`).

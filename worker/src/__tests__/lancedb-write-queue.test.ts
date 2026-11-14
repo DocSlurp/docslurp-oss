@@ -13,6 +13,7 @@ import {
   LanceDbWriteQueue,
   VectorIndexWriteFailed,
   lanceTableKey,
+  markLanceDbHistoryPruneDue,
   type LanceDbWriteQueueDeps,
   type VectorOutboxRow,
 } from "../stages/lancedb-write-queue.js";
@@ -224,6 +225,67 @@ describe("LanceDbWriteQueue", () => {
     expect(await queue({ maintain, maintenance: background, pool }).sweepDueMaintenance()).toBe(1);
     await pool.idle();
     expect(maintain).toHaveBeenCalledWith(dir, TABLE, expect.anything());
+  }, 30_000);
+
+  it("sweeps a table with no new rows once a delete's history prune is due, and re-arms once after a compacting pass", async () => {
+    const results = [
+      { ok: true, rows: 10, optimizedMs: 1, indexCreated: false, fragmentsRemoved: 1 },
+      { ok: true, rows: 10, optimizedMs: 1, indexCreated: false, fragmentsRemoved: 0 },
+    ];
+    const maintain = vi.fn(async () => results.shift()!);
+    const pool = new KeyedTaskPool({ concurrency: 1, log: () => undefined });
+    const background = {
+      enabled: true, mode: "background" as const, vectorIndexMinRows: 1_000_000, optimizeEveryRows: 20_000,
+      optimizeIntervalMs: 300_000, versionRetentionMs: 600_000,
+    };
+    await queue({ maintain, maintenance: { ...background, enabled: false }, pool }).indexDocument(job("hp-1", makeDocument("hp-1", 10), 10));
+    const key = lanceTableKey(dir, TABLE);
+    const q = queue({ maintain, maintenance: background, pool });
+    const dueIn = async () => (await sql<{ seconds: number | null }[]>`
+      select extract(epoch from history_prune_due_at - now())::int as seconds from vector_index_tables where table_key = ${key}`)[0]!.seconds;
+
+    // A quiet, freshly optimized table: nothing is due.
+    await sql`update vector_index_tables set rows_since_optimize = 0, commits_since_optimize = 0, last_optimized_at = now() where table_key = ${key}`;
+    expect(await q.sweepDueMaintenance()).toBe(0);
+
+    // A delete marks it; it is not due until the retention window has passed.
+    await markLanceDbHistoryPruneDue(sql, dir, TABLE, background.versionRetentionMs);
+    expect(await dueIn()).toBeGreaterThanOrEqual(600);
+    expect(await q.sweepDueMaintenance()).toBe(0);
+
+    // Due: the pass compacted, so the fragment it replaced needs one more pass after retention.
+    await sql`update vector_index_tables set history_prune_due_at = now() - interval '1 second' where table_key = ${key}`;
+    expect(await q.sweepDueMaintenance()).toBe(1);
+    await pool.idle();
+    expect(await dueIn()).toBeGreaterThanOrEqual(600);
+
+    // The second pass had nothing left to compact: settled, and the table goes quiet again.
+    await sql`update vector_index_tables set history_prune_due_at = now() - interval '1 second' where table_key = ${key}`;
+    expect(await q.sweepDueMaintenance()).toBe(1);
+    await pool.idle();
+    expect(await dueIn()).toBeNull();
+    expect(await q.sweepDueMaintenance()).toBe(0);
+    expect(maintain).toHaveBeenCalledTimes(2);
+  }, 30_000);
+
+  it("keeps a history prune that a delete scheduled while maintenance was running", async () => {
+    const key = lanceTableKey(dir, TABLE);
+    const pool = new KeyedTaskPool({ concurrency: 1, log: () => undefined });
+    const background = {
+      enabled: true, mode: "background" as const, vectorIndexMinRows: 1_000_000, optimizeEveryRows: 20_000,
+      optimizeIntervalMs: 300_000, versionRetentionMs: 600_000,
+    };
+    const maintain = vi.fn(async () => {
+      await markLanceDbHistoryPruneDue(sql, dir, TABLE, background.versionRetentionMs);
+      return { ok: true, rows: 10, optimizedMs: 1, indexCreated: false, fragmentsRemoved: 0 };
+    });
+    await queue({ maintain, maintenance: { ...background, enabled: false }, pool }).indexDocument(job("hp-2", makeDocument("hp-2", 10), 10));
+    await sql`update vector_index_tables set rows_since_optimize = 0, last_optimized_at = now(),
+      history_prune_due_at = now() - interval '1 second' where table_key = ${key}`;
+    expect(await queue({ maintain, maintenance: background, pool }).sweepDueMaintenance()).toBe(1);
+    await pool.idle();
+    const [row] = await sql<{ pending: boolean }[]>`select history_prune_due_at > now() as pending from vector_index_tables where table_key = ${key}`;
+    expect(row!.pending).toBe(true);
   }, 30_000);
 
   it("background mode returns once rows are committed and runs maintenance in the pool", async () => {

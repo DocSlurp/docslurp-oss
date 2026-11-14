@@ -18,6 +18,7 @@ import { connectLanceDb } from "../stages/lancedb-connection.js";
 import { deleteLanceDbRecords } from "../stages/lancedb-writer.js";
 import { legacyEmbeddingLocations, legacyOrgTable } from "../stages/lancedb-legacy-layout.js";
 import { lanceDbMaintenanceSettings, requestLanceDbMaintenance, requireLanceDbMaintenance } from "../stages/lancedb-maintenance.js";
+import { markLanceDbHistoryPruneDue } from "../stages/lancedb-write-queue.js";
 
 /**
  * Superseded-version purge.
@@ -523,7 +524,19 @@ async function deleteDocumentVectors(
       options.lancedbRoot, doc.org_id, doc.project_id, vector.embedding_model, vector.dimension,
     );
     await deleteVectorRows({ uri: location.uri, table: location.table, documentIds: [doc.id] });
+    await scheduleHistoryPrune(client, location);
   }
+}
+
+/**
+ * The delete above only hides rows. Their bytes leave object storage when a maintenance pass
+ * prunes the table's history after the retention window; this makes that pass due even when the
+ * table is never written again.
+ */
+async function scheduleHistoryPrune(client: Sql<Record<string, unknown>>, location: { uri: string; table: string }): Promise<void> {
+  if (!(await tableExists(client, "vector_index_tables"))) return;
+  const { versionRetentionMs } = lanceDbMaintenanceSettings(resolveLanceDbConfig().params);
+  await markLanceDbHistoryPruneDue(client, location.uri, location.table, versionRetentionMs);
 }
 
 /**
@@ -626,25 +639,49 @@ export async function knowledgeGraphNodesForDocument(
 /**
  * Re-derives graph elements after a document's chunks and edge evidence were
  * removed (see `refreshGraphElements`): nodes and edges no current document
- * supports are deleted, then affected community sizes are recounted.
+ * supports are deleted.
+ *
+ * A community summary is written from its member entities and the relations
+ * between them, so a community that lost a member or a relation here still
+ * describes the removed document. Those communities are deleted, not
+ * recounted: community search must not serve them, and the next community
+ * refresh rebuilds them from what remains. A community whose members and
+ * relations all survive (other documents still support them) is kept.
  */
 export async function refreshKnowledgeGraphNodes(
   sql: Sql<Record<string, unknown>>,
   nodeIds: string[],
 ): Promise<void> {
   if (nodeIds.length === 0 || !(await tableExists(sql, "kg_nodes"))) return;
-  const communities = await sql<{ community_id: string }[]>`
-    select distinct community_id from kg_community_members where node_id = any(${sql.array(nodeIds)})
+  const ids = sql.array([...new Set(nodeIds)]);
+  const memberships = await sql<{ community_id: string; node_id: string }[]>`
+    select community_id, node_id from kg_community_members where node_id = any(${ids})
+  `;
+  // Relations inside a community: both endpoints are members of it.
+  const relations = memberships.length === 0 ? [] : await sql<{ community_id: string; edge_id: string }[]>`
+    select distinct source_member.community_id, e.id as edge_id
+    from kg_edges e
+    join kg_community_members source_member on source_member.node_id = e.source_node_id
+    join kg_community_members target_member
+      on target_member.node_id = e.target_node_id and target_member.community_id = source_member.community_id
+    where e.source_node_id = any(${ids}) or e.target_node_id = any(${ids})
   `;
   await refreshGraphElements(sql, { nodeIds });
-  if (communities.length > 0) {
-    await sql`
-      update kg_communities k
-      set member_count = (select count(*)::int from kg_community_members m where m.community_id = k.id),
-          updated_at = now()
-      where k.id = any(${sql.array(communities.map((row) => row.community_id))})
-    `;
-  }
+  if (memberships.length === 0) return;
+
+  const survivingNodes = new Set(
+    (await sql<{ id: string }[]>`select id from kg_nodes where id = any(${ids})`).map((row) => row.id),
+  );
+  const edgeIds = [...new Set(relations.map((row) => row.edge_id))];
+  const survivingEdges = new Set(edgeIds.length === 0 ? [] : (
+    await sql<{ id: string }[]>`select id from kg_edges where id = any(${sql.array(edgeIds)})`
+  ).map((row) => row.id));
+  const stale = new Set<string>();
+  for (const row of memberships) if (!survivingNodes.has(row.node_id)) stale.add(row.community_id);
+  for (const row of relations) if (!survivingEdges.has(row.edge_id)) stale.add(row.community_id);
+  if (stale.size === 0) return;
+  // Memberships cascade.
+  await sql`delete from kg_communities where id = any(${sql.array([...stale])})`;
 }
 
 async function tableExists(sql: Sql<Record<string, unknown>>, name: string): Promise<boolean> {
@@ -852,6 +889,7 @@ async function cleanDeletedDocuments(
   }
   for (const { location, documentIds, purgeHistory } of byTable.values()) {
     await deleteVectorRows({ uri: location.uri, table: location.table, documentIds: [...documentIds], ...(purgeHistory ? { purgeHistory } : {}) });
+    await scheduleHistoryPrune(client, location);
   }
 
   const keys = new Set<string>();

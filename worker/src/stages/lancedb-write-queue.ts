@@ -142,6 +142,34 @@ export function lanceTableKey(uri: string, table: string): string {
   return `${uri}#${table}`;
 }
 
+/** Slack past the retention window, so the pass's cutoff is safely after the delete's version. */
+const HISTORY_PRUNE_MARGIN_MS = 60_000;
+
+/** How long after a delete (or a compacting pass) history can first be pruned. */
+export function historyPruneDelayMs(versionRetentionMs: number | undefined): number {
+  return Math.max(0, versionRetentionMs ?? 0) + HISTORY_PRUNE_MARGIN_MS;
+}
+
+/**
+ * Records that rows were deleted from a table, so the maintenance sweep prunes them out of the
+ * table's history once the retention window has passed, even if nobody writes to it again.
+ * Only tables the write queue tracks are marked; a table written in direct mode has no row here
+ * and is pruned by its next write's maintenance.
+ */
+export async function markLanceDbHistoryPruneDue(
+  sql: postgres.Sql<Record<string, unknown>>,
+  uri: string,
+  table: string,
+  versionRetentionMs: number | undefined,
+): Promise<void> {
+  const delayMs = historyPruneDelayMs(versionRetentionMs);
+  await sql`
+    update vector_index_tables set
+      history_prune_due_at = greatest(coalesce(history_prune_due_at, '-infinity'::timestamptz), now() + (${delayMs} * interval '1 millisecond')),
+      updated_at = now()
+    where table_key = ${lanceTableKey(uri, table)}`;
+}
+
 function errorText(error: unknown): string {
   return (error instanceof Error ? error.message : String(error)).split("\n")[0]!.slice(0, 1_000);
 }
@@ -263,28 +291,33 @@ export class LanceDbWriteQueue {
     return scheduled;
   }
 
-  /** lanceDbMaintenanceDue() over vector_index_tables "t", plus a free maintenance lease. */
+  /**
+   * lanceDbMaintenanceDue() over vector_index_tables "t", plus a free maintenance lease. A due
+   * history prune (set by deletes) makes the table due whatever its write counters say.
+   */
   private dueSql() {
     const policy = this.deps.maintenance;
     if (policy.mode === "inline") {
       // The trigger before the cadence policy, unchanged.
       return this.sql`
         t.maint_expires_at < now()
-        and t.rows_since_optimize > 0
-        and (t.rows_since_optimize >= ${policy.optimizeEveryRows}
-             or t.last_optimized_at is null and t.rows_since_optimize >= ${Math.min(policy.optimizeEveryRows, 1_000)}
-             or t.last_optimized_at < now() - (${policy.optimizeIntervalMs} * interval '1 millisecond'))`;
+        and (t.history_prune_due_at <= now()
+          or t.rows_since_optimize > 0
+          and (t.rows_since_optimize >= ${policy.optimizeEveryRows}
+               or t.last_optimized_at is null and t.rows_since_optimize >= ${Math.min(policy.optimizeEveryRows, 1_000)}
+               or t.last_optimized_at < now() - (${policy.optimizeIntervalMs} * interval '1 millisecond')))`;
     }
     const everyCommits = policy.optimizeEveryCommits ?? 2_147_483_647;
     const minIntervalMs = policy.optimizeMinIntervalMs ?? 0;
     return this.sql`
       t.maint_expires_at < now()
-      and t.rows_since_optimize > 0
-      and (t.last_optimized_at is null
-           or t.last_optimized_at < now() - (${minIntervalMs} * interval '1 millisecond')
-              and (t.rows_since_optimize >= ${policy.optimizeEveryRows}
-                   or t.commits_since_optimize >= ${everyCommits}
-                   or t.last_optimized_at < now() - (${policy.optimizeIntervalMs} * interval '1 millisecond')))`;
+      and (t.history_prune_due_at <= now()
+        or t.rows_since_optimize > 0
+        and (t.last_optimized_at is null
+             or t.last_optimized_at < now() - (${minIntervalMs} * interval '1 millisecond')
+                and (t.rows_since_optimize >= ${policy.optimizeEveryRows}
+                     or t.commits_since_optimize >= ${everyCommits}
+                     or t.last_optimized_at < now() - (${policy.optimizeIntervalMs} * interval '1 millisecond'))))`;
   }
 
   async enqueue(tableKey: string, job: VectorWriteJob): Promise<{ id: number; generation: number }> {
@@ -502,11 +535,11 @@ export class LanceDbWriteQueue {
     const policy = this.deps.maintenance;
     const holder = `${this.workerId}:${randomUUID()}`;
     const ttlMs = policy.leaseTtlMs ?? 600_000;
-    const [claim] = await this.sql<{ rows_since_optimize: string | number; commits_since_optimize: number }[]>`
+    const [claim] = await this.sql<{ rows_since_optimize: string | number; commits_since_optimize: number; prune_due: boolean }[]>`
       update vector_index_tables t set maint_holder = ${holder},
         maint_expires_at = now() + (${ttlMs} * interval '1 millisecond'), updated_at = now()
       where t.table_key = ${tableKey} and ${this.dueSql()}
-      returning t.rows_since_optimize, t.commits_since_optimize`;
+      returning t.rows_since_optimize, t.commits_since_optimize, coalesce(t.history_prune_due_at <= now(), false) as prune_due`;
     if (!claim) return null;
     const snapshot = Number(claim.rows_since_optimize);
     const commitsSnapshot = Number(claim.commits_since_optimize);
@@ -531,10 +564,19 @@ export class LanceDbWriteQueue {
       clearInterval(renew);
     }
     if (result.ok) {
+      // A due history prune is settled by this pass unless the pass itself compacted: the
+      // fragment it replaced stays referenced by the version it compacted from until one more
+      // pass after retention. A delete that landed during the pass set a later time; keep it.
+      const rearm = claim.prune_due && (result.fragmentsRemoved ?? 0) > 0;
+      const rearmMs = historyPruneDelayMs(policy.versionRetentionMs);
       await this.sql`
         update vector_index_tables set
           rows_since_optimize = greatest(0, rows_since_optimize - ${snapshot}),
           commits_since_optimize = greatest(0, commits_since_optimize - ${commitsSnapshot}),
+          history_prune_due_at = case
+            when history_prune_due_at > now() then history_prune_due_at
+            when ${rearm} then now() + (${rearmMs} * interval '1 millisecond')
+            else null end,
           last_optimized_at = now(), last_maintenance_error = null,
           maint_holder = null, maint_expires_at = now(), updated_at = now()
         where table_key = ${tableKey} and maint_holder = ${holder}`;

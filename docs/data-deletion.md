@@ -65,6 +65,42 @@ The worker leader runs the sweep every 30 s (`purgeSupersededDocuments` in
    prefix and drops queued LanceDB tables. A prefix must have exactly two
    segments (`user/run/`). Wider prefixes are refused.
 
+### What a LanceDB delete removes, and when
+
+A LanceDB delete hides rows at once (a deletion vector), but their bytes stay
+in the table's files until maintenance rewrites them:
+
+1. Each delete sets `vector_index_tables.history_prune_due_at` to the
+   version-retention window (10 minutes by default) plus one minute. The
+   maintenance sweep then runs a pass on that table even if nobody writes to
+   it again. Before migration 0162 a table with no later writes kept deleted
+   rows in its older versions indefinitely.
+2. That pass prunes the versions from before the delete. If it compacted, the
+   fragment it replaced is still referenced by the version it compacted from,
+   so the pass re-arms once and a second pass after retention removes it.
+3. An expired extract uses the strict path instead (`purgeHistory`): two
+   passes with zero retention, in the cleanup itself, and the cleanup row
+   stays queued until they succeed.
+
+**Known limit.** Compaction rewrites a fragment only when more than 10% of its
+rows are deleted, and `@lancedb/lancedb` 0.41 does not expose that threshold.
+When a deleted document is a small share of a large fragment, its rows stay in
+that fragment's file, hidden from every query, until later deletes or a table
+rebuild cross the threshold. This applies to the strict path too. A verified
+erasure request that cannot wait needs the table rebuilt (reindex the project)
+or dropped.
+
+### Community summaries
+
+A graph community summary is written from its member entities and the
+relations between them. When the cleanup above removes a document's graph
+contributions, every community that lost a member entity or an internal
+relation is deleted with its summary, and the next community refresh rebuilds
+it from what remains. A community whose members and relations are all still
+supported by other documents is kept. Until the sweep runs (30 s; 15 minutes
+for a document that was still processing) community search can still return
+the old summary.
+
 When a batch fails, the sweep retries it row by row so that one bad row cannot
 block the others. A failed row is retried on later sweeps, up to 10 attempts,
 and `last_error` holds the cause.
@@ -177,6 +213,8 @@ ledger entries, so it can no longer cascade into shared data.
 | --- | --- |
 | Rows removed and content no longer searchable or listable | Immediate (the request returns after commit) |
 | LanceDB rows and storage artifacts deleted | Within 5 minutes; within 20 minutes for work that was in flight (15 min grace plus a sweep) |
+| Community summaries that drew on the document deleted | With the row above |
+| Deleted rows pruned from LanceDB table history | About 11 minutes after the delete, or about 22 when the pass compacted; see the known limit above for small deletes |
 | Interrupted org deletion completed | Within 10 minutes (resumed by the maintenance sweep) |
 | Backups and snapshots age out | Within 35 days: Neon history window (≤ 30 days), Tigris snapshots and the backup bucket's 35-day lifecycle (`docs/disaster-recovery.md`). For a verified erasure request that cannot wait, delete the specific object `versionId`s. |
 

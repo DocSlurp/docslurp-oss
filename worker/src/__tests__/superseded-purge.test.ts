@@ -41,6 +41,7 @@ beforeEach(async () => {
   vi.restoreAllMocks();
   await sql`delete from documents`;
   await sql`delete from kg_nodes`;
+  await sql`delete from kg_communities`;
   await sql`delete from project_runs`;
   // The delete triggers just enqueued cleanup for the rows above.
   await sql`delete from document_cleanup_queue`;
@@ -357,6 +358,89 @@ describe("superseded version purge", () => {
       .toEqual([{ id: "shared", mention_count: 2, source_document_count: 1 }]);
   });
 
+  it("deletes community summaries that drew on a purged document, and keeps the ones that did not", async () => {
+    await seedRun("run-1");
+    await seedRun("run-2");
+    await seedVersion({ id: "v1", runId: "run-1", createdAt: "2026-01-01" });
+    await sql`update documents set status = 'completed' where id = 'v1'`;
+    await seedVersion({ id: "v2", runId: "run-2", createdAt: "2026-01-02" });
+    await seedEntity("only-old", ["v1-000"]);
+    await seedEntity("shared-a", ["v1-000", "v2-000"]);
+    await seedEntity("shared-b", ["v1-000", "v2-000"]);
+    await seedEntity("shared-c", ["v1-000", "v2-000"]);
+    // shared-a -> shared-b is stated only by the old version; shared-b -> shared-c by both.
+    for (const [id, source, target, documents] of [
+      ["old-relation", "shared-a", "shared-b", ["v1"]],
+      ["kept-relation", "shared-b", "shared-c", ["v1", "v2"]],
+    ] as const) {
+      await sql`insert into kg_edges (id, project_id, run_id, user_id, source_node_id, target_node_id, predicate, normalized_predicate)
+        values (${id}, 'w', 'run-1', 'u1', ${source}, ${target}, 'acquired', 'acquired')`;
+      for (const documentId of documents) {
+        await sql`insert into kg_edge_evidence (edge_id, document_id, project_id) values (${id}, ${documentId}, 'w')`;
+      }
+    }
+    const communities: Record<string, string[]> = {
+      "lost-member": ["only-old", "shared-c"],
+      "lost-relation": ["shared-a", "shared-b"],
+      "untouched": ["shared-b", "shared-c"],
+      "parent": ["only-old", "shared-a", "shared-b", "shared-c"],
+    };
+    for (const [id, members] of Object.entries(communities)) {
+      await sql`insert into kg_communities (id, project_id, run_id, user_id, label, summary, member_count)
+        values (${id}, 'w', 'run-1', 'u1', ${id}, ${`summary of ${id}`}, ${members.length})`;
+      for (const nodeId of members) {
+        await sql`insert into kg_community_members (community_id, node_id, project_id) values (${id}, ${nodeId}, 'w')`;
+      }
+    }
+    await sql`update documents set status = 'completed' where id = 'v2'`;
+
+    const { storage } = fakeStorage([]);
+    await purgeSupersededDocuments(sql, storage, options(async () => {}));
+    expect((await sql`select id from kg_nodes order by id`).map((row) => row.id)).toEqual(["shared-a", "shared-b", "shared-c"]);
+    expect((await sql`select id from kg_edges order by id`).map((row) => row.id)).toEqual(["kept-relation"]);
+    // Every member and relation of "untouched" is still supported by the current version.
+    expect(await sql`select id, summary from kg_communities order by id`).toEqual([{ id: "untouched", summary: "summary of untouched" }]);
+    expect((await sql`select distinct community_id from kg_community_members`).map((row) => row.community_id)).toEqual(["untouched"]);
+  });
+
+  it("deletes the community summaries of a document deleted by hand", async () => {
+    await seedRun("run-1");
+    await seedVersion({ id: "solo", runId: "run-1", createdAt: "2026-01-01" });
+    await sql`update documents set status = 'completed', canonical_id = null where id = 'solo'`;
+    await seedEntity("secret-entity", ["solo-000"]);
+    await sql`insert into kg_communities (id, project_id, run_id, user_id, label, summary, member_count)
+      values ('c1', 'w', 'run-1', 'u1', 'secret-entity', 'Secret entity acquired another secret.', 1)`;
+    await sql`insert into kg_community_members (community_id, node_id, project_id) values ('c1', 'secret-entity', 'w')`;
+
+    await sql`delete from documents where id = 'solo'`;
+    const { storage } = fakeStorage([]);
+    expect(await drainDocumentCleanupQueue(sql, storage, options(async () => {}))).toEqual({ purged: 1, failed: 0 });
+    expect(await sql`select id from kg_communities`).toEqual([]);
+    expect(await sql`select id from kg_nodes`).toEqual([]);
+  });
+
+  it("schedules a history prune for the LanceDB table it deleted rows from", async () => {
+    await seedRun("run-1");
+    await seedRun("run-2");
+    await seedVersion({ id: "v1", runId: "run-1", createdAt: "2026-01-01" });
+    await sql`update documents set status = 'completed' where id = 'v1'`;
+    await seedVersion({ id: "v2", runId: "run-2", createdAt: "2026-01-02" });
+    await sql`update documents set status = 'completed' where id = 'v2'`;
+    const uri = "/tmp/lance/o1/w/vectors-model%2Fx-4";
+    await sql`delete from vector_index_tables`;
+    await sql`insert into vector_index_tables (table_key, lance_uri, lance_table, last_optimized_at)
+      values (${`${uri}#chunks`}, ${uri}, 'chunks', now())`;
+
+    const { storage } = fakeStorage([]);
+    expect(await purgeSupersededDocuments(sql, storage, options(async () => {}))).toEqual({ purged: 1, failed: 0 });
+    // Not before the version-retention window (10 minutes by default) has passed.
+    const [row] = await sql<{ due_in_seconds: number; rows_since_optimize: string }[]>`
+      select extract(epoch from history_prune_due_at - now())::int as due_in_seconds, rows_since_optimize
+      from vector_index_tables where table_key = ${`${uri}#chunks`}`;
+    expect(row!.due_in_seconds).toBeGreaterThanOrEqual(600);
+    expect(Number(row!.rows_since_optimize)).toBe(0);
+  });
+
   it("never deletes another document's files through a dedup copy's inherited artifact URIs", async () => {
     await seedRun("run-1");
     await seedRun("run-2");
@@ -423,7 +507,8 @@ describe("superseded version purge", () => {
       .toEqual([{ document_id: "extract-doc", last_error: "history prune failed" }]);
     vectorDeletes.length = 0;
     expect(await drainDocumentCleanupQueue(sql, storage, options(remove))).toEqual({ purged: 1, failed: 0 });
-    expect(optimize).toHaveBeenCalledTimes(2);
+    // One failed pass, then the erasure's two: compact, then prune the version compacted from.
+    expect(optimize).toHaveBeenCalledTimes(3);
     expect(vectorDeletes).toEqual([{ uri: "/tmp/lance/o1/w/vectors-model%2Fx-4", table: "chunks", documentIds: ["extract-doc"], purgeHistory: true }]);
     expect(await sql`select document_id from document_cleanup_queue`).toEqual([]);
   });

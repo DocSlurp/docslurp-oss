@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { connect } from "@lancedb/lancedb";
@@ -257,8 +257,10 @@ describe("LanceDB maintenance", () => {
     const args = { uri: dir, table: "chunks", documentIds: ["erased"], purgeHistory: true };
     await expect(deleteLanceDbDocumentRows(args)).rejects.toThrow(message);
     await expect(deleteLanceDbDocumentRows(args)).resolves.toBeUndefined();
-    expect(optimize).toHaveBeenCalledTimes(2);
+    // One failed pass, then the erasure's two: compact, then prune the version compacted from.
+    expect(optimize).toHaveBeenCalledTimes(3);
     expect(optimize.mock.calls[1]![0].cleanupOlderThan).toBeInstanceOf(Date);
+    expect(optimize.mock.calls[2]![0].cleanupOlderThan).toBeInstanceOf(Date);
     optimize.mockRejectedValueOnce(new Error(message));
     await expect(requestLanceDbMaintenance(dir, "chunks", { vectorIndexMinRows: 100 })).resolves.toBeUndefined();
   });
@@ -275,6 +277,31 @@ describe("LanceDB maintenance", () => {
     await Promise.all([first, ordinary, strict]);
     expect(runs).toEqual(["ordinary", "strict"]);
     expect(coordinator.activeKeys()).toBe(0);
+  });
+
+  it("erasure removes a deleted document's text from every file under the table", async () => {
+    const secret = (index: number): VectorBackendRecord => ({ ...record("secret", index), text: `ERASEME-${index} confidential` });
+    await writeLanceDbRecords(dir, "chunks", [
+      ...Array.from({ length: 30 }, (_, i) => secret(i)),
+      ...Array.from({ length: 70 }, (_, i) => record("kept", 100 + i)),
+    ]);
+    const filesWithSecret = async () => {
+      const hits: string[] = [];
+      for (const entry of await readdir(dir, { recursive: true, withFileTypes: true })) {
+        if (!entry.isFile()) continue;
+        const file = path.join(entry.parentPath, entry.name);
+        if ((await readFile(file)).includes("ERASEME-")) hits.push(file);
+      }
+      return hits;
+    };
+    expect((await filesWithSecret()).length).toBeGreaterThan(0);
+    await withTable((table) => table.delete(`"documentId" IN ('secret')`));
+    // The delete only hides the rows.
+    expect((await filesWithSecret()).length).toBeGreaterThan(0);
+
+    const result = await runLanceDbMaintenance(dir, "chunks", { vectorIndexMinRows: 1_000_000, versionRetentionMs: 0 });
+    expect(result).toMatchObject({ ok: true, rows: 70 });
+    expect(await filesWithSecret()).toEqual([]);
   });
 
   it("optimizes, builds the vector index past the threshold, and keeps search working", async () => {
