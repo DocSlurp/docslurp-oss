@@ -10,7 +10,8 @@ const args = { projectId: "state-project", orgId: "state-org", recentWindowHours
 describe("project state", () => {
   it("retains missing samples, zero throughput, and fractional cost without invented performance", () => {
     const state = mapProjectState({ observed_at: "2026-10-06T12:00:00Z", source_bytes: "2500000", text_bytes: "125000", cost_cents: "0.005", total_pages: "10", indexed_pages: "3", search_samples: "1", search_p50: 0, search_p95: 0, search_max: 0 }, args);
-    expect(projectStateSchema.parse(state)).toEqual(state);
+    // mapProjectState maps the aggregate row; getProjectState adds the summary tree block (project-summary-tree.db.test.ts).
+    expect(projectStateSchema.omit({ summaryTree: true }).parse(state)).toEqual(state);
     expect(state.pages).toMatchObject({ total: 10, indexed: 3, notIndexed: 7 });
     expect(state.storage).toMatchObject({ sourceMb: 2.5, textMb: 0.125, vectorBytes: null, artifactBytes: null });
     expect(state.searches.latencyMs).toEqual({ sampleCount: 1, p50: 0, p95: 0, max: 0 });

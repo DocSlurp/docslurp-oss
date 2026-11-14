@@ -1,5 +1,5 @@
 import { realtimeMetrics } from "./realtime/broker.js";
-import { chartExportDefaultsWarnings, chartExportSwitchWarning } from "@docslurp/shared";
+import { chartExportDefaultsWarnings, chartExportSwitchWarning, summaryTreeSwitchWarnings } from "@docslurp/shared";
 import { loadPricingProvider, pricingDurableStateFromSql } from "@docslurp/shared/pricing-loader";
 import { sql as pricingStateSql } from "./db.js";
 import { closeDirectUploadLockPool } from "./lib/direct-upload-locks.js";
@@ -319,6 +319,8 @@ export function ensureApiStartup(): Promise<void> {
       const chartExportWarning = chartExportSwitchWarning(process.env);
       if (chartExportWarning) console.warn(chartExportWarning);
       for (const warning of chartExportDefaultsWarnings(process.env)) console.warn(warning);
+      // The same for the two summary tree switches (build, serve).
+      for (const warning of summaryTreeSwitchWarnings(process.env)) console.warn(warning);
       // The pricing provider (DOCSLURP_PRICING_PLUGIN) prices every quote and charge; the service profile refuses to
       // start without one rather than price with the open default.
       // Its durable state (pricing_provider_state, 0131) is read-only through this process's pool; only the operator raises it.

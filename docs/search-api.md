@@ -186,7 +186,7 @@ Every error from the native JSON API (`/v1/*`, including authentication, rate li
 - Billing: `payment_required`, `credit_exhausted`, `project_budget_paused`, `org_budget_paused`, `minimum_credit_required`, `plan_not_entitled`.
 - Uploads and extracts: `unsupported_type`, `remote_format_disabled`, `file_too_large`, `unreadable_source`, `extract_not_found`, `extract_expired`, `retention_exceeds_cap`, `download_not_ready`, `download_failed`.
 - Web tools and privacy: `web_disabled`, `web_scope_required`, `url_blocked`, `privacy_mode_blocked`.
-- Projects and runs: `project_forbidden`, `project_scope_forbidden` (a key limited to specific projects tried to create one), `no_stages_to_run`, `source_not_reusable` and `missing_stage_artifacts` (a reprocess the source run can't satisfy).
+- Projects and runs: `project_forbidden`, `project_scope_forbidden` (a key limited to specific projects tried to create one), `no_stages_to_run`, `source_not_reusable` and `missing_stage_artifacts` (a reprocess the source run can't satisfy), `summary_tree_unavailable`, `summary_tree_requires_vectors` and `summary_tree_summarize_locked` (the project's summary tree can't be turned on: the deployment doesn't build trees, the project doesn't index vectors, or its template keeps document summaries off).
 - Organizations: `organization_not_found`, `organization_forbidden`, `organization_conflict`, `personal_organization`, `membership_exists`, `membership_forbidden`, `membership_not_found`, `last_owner`, `ownership_transfer_required`, `user_not_found`.
 - Admin billing: `credit_request_rejected`, `credit_reconciliation_required`, `idempotency_conflict`.
 - Anything else: `unavailable` and `internal`.

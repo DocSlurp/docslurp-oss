@@ -2,6 +2,7 @@ import { SPEED_BOOST_UNAVAILABLE_MESSAGE } from "./project-chat-models.js";
 import { z } from "zod";
 import { PUBLIC_ERROR_MESSAGES } from "./public-errors.js";
 import { PARSE_SOURCE_RESCAN_MESSAGE } from "./parse-source-decision.js";
+import { SUMMARY_TREE_REQUIRES_VECTORS_MESSAGE, SUMMARY_TREE_SUMMARIZE_LOCKED_MESSAGE } from "./summary-tree.js";
 
 /**
  * The one refusal for work that needs edit access to the project: reprocessing, re-indexing, full index, figure resume,
@@ -81,6 +82,9 @@ export const API_ERROR_CODES = [
   "speed_boost_unavailable",
   "chart_export_tier_unavailable",
   "chart_export_models_forbidden",
+  "summary_tree_unavailable",
+  "summary_tree_requires_vectors",
+  "summary_tree_summarize_locked",
   "chat_deadline_exceeded",
   "chat_tool_failed",
   "chat_capacity_unavailable",
@@ -189,6 +193,9 @@ export const API_ERROR_PUBLIC_MESSAGES: Record<ApiErrorCode, string> = {
   speed_boost_unavailable: SPEED_BOOST_UNAVAILABLE_MESSAGE,
   chart_export_tier_unavailable: "That chart export tier isn’t available on this deployment. Leave the tier unset to use the deployment’s default, or turn chart export off.",
   chart_export_models_forbidden: "This project’s chart export tier is set below reading charts with AI. Ask a project editor to change it, or use an API key with the pipeline:billed-features scope.",
+  summary_tree_unavailable: "The summary tree isn’t available on this deployment.",
+  summary_tree_requires_vectors: SUMMARY_TREE_REQUIRES_VECTORS_MESSAGE,
+  summary_tree_summarize_locked: SUMMARY_TREE_SUMMARIZE_LOCKED_MESSAGE,
   chat_deadline_exceeded: PUBLIC_ERROR_MESSAGES.chatDeadline,
   chat_tool_failed: PUBLIC_ERROR_MESSAGES.chatToolFailed,
   chat_capacity_unavailable: PUBLIC_ERROR_MESSAGES.chatCapacityUnavailable,
