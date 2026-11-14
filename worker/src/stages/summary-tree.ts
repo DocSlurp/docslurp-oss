@@ -67,6 +67,13 @@ export const SUMMARY_TREE_USAGE_METRIC = "summary-tree-generation";
 export const SUMMARY_TREE_EMBEDDING_USAGE_METRIC = "summary-tree-embedding";
 /** Model calls in flight at once across the stage (`WORKER_SUMMARY_TREE_CONCURRENCY`). */
 export const SUMMARY_TREE_DEFAULT_CONCURRENCY = 4;
+/**
+ * How long one stage activity keeps starting model calls (`WORKER_SUMMARY_TREE_STAGE_BUDGET_SECONDS`). The stage's
+ * activity has the ordinary stage timeout, and a run must not fail or wait hours on an optional index: past the
+ * budget, a document in progress ends `partial` (its committed groups are kept and a later build resumes them) and
+ * a document not started is left without a tree for the backfill job.
+ */
+export const SUMMARY_TREE_DEFAULT_STAGE_BUDGET_MS = 20 * 60_000;
 /** Documents built at once inside one stage activity. */
 const SUMMARY_TREE_MAX_DOCUMENT_CONCURRENCY = 4;
 /** The stage flushes its usage to the run at most this often; the run's stage checkpoint flushes the rest. */
@@ -106,6 +113,9 @@ export interface SummaryTreeOverrides {
   limits?: Partial<SummaryTreeLimits>;
   env?: Env;
   concurrency?: number;
+  /** Replaces the stage's time budget and clock. */
+  stageBudgetMs?: number;
+  now?: () => number;
 }
 
 /** The text artifact's storage calls over the run bucket. A missing object is null; an incomplete listing throws. */
@@ -137,6 +147,11 @@ export function summaryTreeArtifactIO(storage: SummaryTreeStorage): SummaryTreeB
 export function summaryTreeConcurrency(env: Env = process.env): number {
   const parsed = Number.parseInt(env.WORKER_SUMMARY_TREE_CONCURRENCY ?? "", 10);
   return Number.isFinite(parsed) && parsed >= 1 ? Math.min(parsed, 32) : SUMMARY_TREE_DEFAULT_CONCURRENCY;
+}
+
+export function summaryTreeStageBudgetMs(env: Env = process.env): number {
+  const seconds = Number.parseFloat(env.WORKER_SUMMARY_TREE_STAGE_BUDGET_SECONDS ?? "");
+  return Number.isFinite(seconds) && seconds >= 0 ? seconds * 1_000 : SUMMARY_TREE_DEFAULT_STAGE_BUDGET_MS;
 }
 
 export interface SummaryTreeDocumentRun {
@@ -365,6 +380,9 @@ export class SummaryTreeStage implements Stage {
       return (await hosted) ? null : "privacy-mode";
     };
     const callLimiter = createConcurrencyLimiter(this.overrides.concurrency ?? summaryTreeConcurrency(env));
+    const now = this.overrides.now ?? Date.now;
+    const deadline = now() + (this.overrides.stageBudgetMs ?? summaryTreeStageBudgetMs(env));
+    const stopReason = () => (isCostCapExceeded(state) ? "run-cost-cap" : now() >= deadline ? "stage-time-budget" : null);
     let lastFlushAt = Date.now();
     let flushing: Promise<void> | null = null;
     const flush = async () => {
@@ -387,6 +405,11 @@ export class SummaryTreeStage implements Stage {
         `${document.id}:${SUMMARY_TREE_STAGE}`,
         "summary tree ready",
         async () => {
+          if (now() >= deadline) {
+            // Not started: no artifact is read and no state row is written, so the document counts as having no tree yet.
+            console.log(`[summary-tree] run=${state.run.id} document=${document.id} status=blocked reason=stage-time-budget`);
+            return { stats: { summaryTreeStatus: "blocked", summaryTreeReason: "stage-time-budget", modelCalls: 0 }, message: "Summary tree not started (stage-time-budget)" };
+          }
           const embedStage = state.documentStage(document.id, "embed");
           const chunks = (embedStage?.stats as { chunks?: unknown } | undefined)?.chunks;
           const result = await runSummaryTreeForDocument({
@@ -409,7 +432,7 @@ export class SummaryTreeStage implements Stage {
               || this.storage.uri(`${runArtifactRoot(state.run, document.userId)}/embeddings/${document.id}.json`),
             usage: { record: (input) => { state.usageLedger.record(input); }, flush },
             hostedCallRefusal,
-            stopReason: () => (isCostCapExceeded(state) ? "run-cost-cap" : null),
+            stopReason,
             callLimiter,
             signal,
             overrides: this.overrides,

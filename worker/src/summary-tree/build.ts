@@ -280,6 +280,12 @@ export function summaryRowText(summary: StoredSummary): string {
   return summary.title ? `${summary.title}\n${summary.text}` : summary.text;
 }
 
+/** The heading trail of a summary row, cut on a code point so no half surrogate pair is stored. */
+function headingPathText(headingPath: readonly string[]): string {
+  const joined = headingPath.join(" > ");
+  return joined.length <= HEADING_PATH_MAX_CHARS ? joined : Array.from(joined).slice(0, HEADING_PATH_MAX_CHARS / 2).join("");
+}
+
 function emptyStats(): SummaryTreeBuildStats {
   return {
     summaryTreeStatus: "off", chunks: 0, leaves: 0, tableLeaves: 0, overlapChunks: 0, tableDetailChunks: 0,
@@ -478,7 +484,7 @@ export async function buildDocumentSummaryTree(deps: SummaryTreeBuildDeps, input
           id: nodeIds[nodeIndex]!, documentId, runId, level: node.level,
           chunkStart: node.chunkStart, chunkEnd: node.chunkEnd,
           pageStart: Math.max(0, node.pageStart ?? 0), pageEnd: Math.max(0, node.pageEnd ?? node.pageStart ?? 0),
-          headingPath: node.headingPath.join(" > ").slice(0, HEADING_PATH_MAX_CHARS),
+          headingPath: headingPathText(node.headingPath),
           text: summaryRowText(summaries.get(nodeIndex)!),
           vector: Array.from(vectors.get(nodeIndex)!),
         };

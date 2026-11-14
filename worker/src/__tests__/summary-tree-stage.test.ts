@@ -337,6 +337,35 @@ describe("stage", () => {
   });
 });
 
+describe("stage time budget", () => {
+  it("stops starting calls past its budget: the document in progress is partial, the rest are not started, the run does not fail", async () => {
+    const storage = new MemoryStorage();
+    const { requests, overrides } = fakes();
+    const { state, store } = await seed(storage, enabledPipeline(), [{ id: "first", leaves: 300 }, { id: "second", leaves: 300 }]);
+    state.docConcurrency = 1;
+    let clock = 0;
+    const base = overrides(ON);
+    await stageOf(storage, {
+      ...base, concurrency: 1, stageBudgetMs: 10_000, now: () => clock,
+      summarize: async (request) => {
+        clock += 1_000; // every call takes a second of the budget
+        return await base.summarize!(request);
+      },
+    }).run(state);
+
+    expect(requests).toHaveLength(10);
+    expect(state.documentStage("first", SUMMARY_TREE_STAGE)).toMatchObject({ status: "completed", stats: { summaryTreeStatus: "partial", summaryTreeReason: "stopped:stage-time-budget", modelCalls: 10 } });
+    expect(state.documentStage("second", SUMMARY_TREE_STAGE)).toMatchObject({ status: "completed", stats: { summaryTreeStatus: "blocked", summaryTreeReason: "stage-time-budget", modelCalls: 0 } });
+    expect(store.failDocumentStage).not.toHaveBeenCalled();
+    expect(storage.opened).toEqual(["u1/run-1/embeddings/first.json"]);
+    expect(await sql`select document_id, status, error from document_summary_trees order by document_id`).toMatchObject([
+      { document_id: "first", status: "partial", error: "stopped:stage-time-budget" },
+    ]);
+    // The ten paid summaries are on disk for the next build.
+    expect([...storage.objects.keys()].filter((key) => key.includes("/summary-tree/first/parts/"))).toHaveLength(10);
+  }, 60_000);
+});
+
 describe("spend guard", () => {
   it("refuses a document of an organization that may not spend, through the default balance check", async () => {
     setSpendCheckConfig({ enabled: true, pages: 25, credits: 10 });

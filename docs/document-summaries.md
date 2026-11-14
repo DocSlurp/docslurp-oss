@@ -248,8 +248,8 @@ registry rows when the skip is recorded.
 - `group-failed:<reasons>`: a group still failed after one retry. Reasons:
   `content-refusal`, `truncated-output`, `invalid-output:<detail>`,
   `prompt-too-large`, `model-error`, `leaf-text-mismatch`.
-- `stopped:build-switch-off`, `stopped:run-cost-cap`: the build stopped before
-  its next call.
+- `stopped:build-switch-off`, `stopped:run-cost-cap`,
+  `stopped:stage-time-budget`: the build stopped before its next call.
 - `node-cap`: the document needs more nodes than
   `SUMMARY_TREE_MAX_NODES_PER_DOCUMENT`. Refused before any call.
 - `coverage:<checks>`: the invariant did not hold.
@@ -264,6 +264,13 @@ document of the run's organization and project).
 
 A later build of a `partial` or `building` document resumes: it pays only for
 the groups that have no stored text, and for the levels above them.
+
+One stage activity starts model calls for at most
+`WORKER_SUMMARY_TREE_STAGE_BUDGET_SECONDS` (default 20 minutes), so an optional
+index never times a run out. Past the budget the document in progress ends
+`partial` and documents not yet started are left without a tree state
+(`blocked`, `stage-time-budget` in the stage stats); both are finished by a
+later build.
 
 ### Model calls and spend
 
