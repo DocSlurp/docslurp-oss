@@ -13,7 +13,7 @@ import { deleteLanceDbDocumentRows, type DeleteVectorRows } from "../db/supersed
 import type { VectorBackendRecord } from "./embedding-runtime.js";
 import { connectLanceDb } from "./lancedb-connection.js";
 import type { VectorScope } from "./lancedb-location.js";
-import { lanceDbMaintenanceSettings, requireLanceDbMaintenance } from "./lancedb-maintenance.js";
+import { lanceDbMaintenanceSettings, requireLanceDbMaintenance, scheduleLanceDbMaintenance } from "./lancedb-maintenance.js";
 import { deleteLanceDbRecords, writeLanceDbRecords, type LanceWriteRetryOptions } from "./lancedb-writer.js";
 
 /**
@@ -154,4 +154,16 @@ export async function deleteSummaryRowsById(args: {
     ...lanceDbMaintenanceSettings(resolveLanceDbConfig().params),
     versionRetentionMs: 0,
   });
+}
+
+/**
+ * Hands one project's summaries table to the background maintenance pool (compaction of the small fragments a
+ * tree build commits window by window, index refresh) without waiting. Never part of an erasure: deletes use the
+ * strict calls above. Returns false when maintenance is disabled or the pool is closing.
+ */
+export function scheduleSummariesMaintenance(args: { scope: { orgId: string; projectId: string }; space: { model: string; dimensions: number }; root?: string }): boolean {
+  const settings = lanceDbMaintenanceSettings(resolveLanceDbConfig().params);
+  if (!settings.enabled) return false;
+  const location = projectSummariesLocation(args.scope, args.space, args.root);
+  return scheduleLanceDbMaintenance(location.uri, location.table, settings);
 }

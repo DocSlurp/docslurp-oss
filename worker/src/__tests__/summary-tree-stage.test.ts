@@ -172,8 +172,10 @@ async function seed(storage: MemoryStorage, pipeline: PipelineFeatures, document
 function fakes() {
   const requests: SummaryTreeModelRequest[] = [];
   const embedded: string[][] = [];
+  const compactions: string[] = [];
   const overrides = (env: Record<string, string | undefined>): SummaryTreeOverrides => ({
     env, lanceRoot, tmpDirectory: spoolRoot, concurrency: 4,
+    tableChanged: (changed) => { compactions.push(`${changed.scope.orgId}/${changed.scope.projectId}`); },
     summarize: async (request) => {
       requests.push(request);
       return { text: `Title ${request.nodeId}\nSummary of ${request.nodeId}.`, finishReason: "stop", usage: { inputTokens: 210, outputTokens: 55, metadata: { generationId: `gen-${requests.length}` } } };
@@ -183,7 +185,7 @@ function fakes() {
       return texts.map((text) => Array.from({ length: DIM }, (_, d) => Math.sin(text.length + d)));
     },
   });
-  return { requests, embedded, overrides };
+  return { requests, embedded, compactions, overrides };
 }
 
 const stageOf = (storage: MemoryStorage, overrides: SummaryTreeOverrides) =>
@@ -251,7 +253,7 @@ describe("stage", () => {
 
   it("builds long documents, records a skip for the others, and stamps every usage event with org, project and run", async () => {
     const storage = new MemoryStorage();
-    const { requests, embedded, overrides } = fakes();
+    const { requests, embedded, compactions, overrides } = fakes();
     const { state, store } = await seed(storage, enabledPipeline(), [
       { id: "long", leaves: 300 },
       { id: "short", leaves: 12 },
@@ -279,6 +281,8 @@ describe("stage", () => {
     // The artifact is the stage's registered artifact, under the run root.
     expect(state.artifacts[`long:${SUMMARY_TREE_STAGE}`]).toBe(artifactUri(BUCKET, "u1/run-1/summary-tree/long/summaries.jsonl"));
     expect(store.completeDocumentStage).toHaveBeenCalledTimes(4);
+    // One compaction request for the table the ready tree was written to; none for the skipped documents.
+    expect(compactions).toEqual(["o1/w"]);
 
     // One usage event per model attempt and per embedding request, through the run's ledger.
     const events = state.usageLedger.snapshot();

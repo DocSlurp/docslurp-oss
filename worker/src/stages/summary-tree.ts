@@ -45,7 +45,7 @@ import { DEFAULT_SUMMARY_TREE_LIMITS } from "../summary-tree/limits.js";
 import type { CommandRunner } from "../tools/runner.js";
 import { keyFromStorageUri } from "../tools/storage.js";
 import { embedTextChunks, embeddingCallCostCents, estimateTokens } from "./embedding-runtime.js";
-import { deleteDocumentSummaryRows, deleteSummaryRowsById, writeSummaryRows } from "./lancedb-summaries.js";
+import { deleteDocumentSummaryRows, deleteSummaryRowsById, scheduleSummariesMaintenance, writeSummaryRows } from "./lancedb-summaries.js";
 
 /**
  * The `summary-tree` stage: section summaries of long documents (packages/shared summary-tree.ts,
@@ -99,6 +99,8 @@ export interface SummaryTreeOverrides {
   writeRows?: SummaryTreeBuildDeps["writeRows"];
   deleteRowsById?: SummaryTreeBuildDeps["deleteRowsById"];
   deleteDocumentRows?: SummaryTreeBuildDeps["deleteDocumentRows"];
+  /** Replaces the background compaction request made when a tree becomes ready. */
+  tableChanged?: SummaryTreeBuildDeps["tableChanged"];
   lanceRoot?: string;
   tmpDirectory?: string;
   limits?: Partial<SummaryTreeLimits>;
@@ -303,6 +305,7 @@ export async function runSummaryTreeForDocument(args: SummaryTreeDocumentRun): P
     writeRows: overrides.writeRows ?? ((write) => writeSummaryRows(write)),
     deleteRowsById: overrides.deleteRowsById ?? deleteSummaryRowsById,
     deleteDocumentRows: overrides.deleteDocumentRows ?? deleteDocumentSummaryRows,
+    tableChanged: overrides.tableChanged ?? ((changed) => { scheduleSummariesMaintenance(changed); }),
     lanceRoot: overrides.lanceRoot,
     tmpDirectory: overrides.tmpDirectory,
     noteProgress: noteWorkProgress,

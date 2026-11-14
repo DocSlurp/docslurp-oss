@@ -26,6 +26,20 @@
 - Realtime row triggers still on per-page tables (council, 2026-11-13): 0153 moved `document_chunks`, `document_pages` and `page_stage_states` to statement triggers (`realtime_statement_changed()`; a 20,000-row chunk insert went from about 1.5 s to about 10 ms in the trigger). `document_page_states` (`realtime_materialization_changed()`) and `document_run_stage_states` still pay the lookup and two counter inserts per row; measure a deferred-materialization run and a many-document run, then move them the same way if the trigger shows up.
 - Retire the search-session project backfill (2026-11-13, migration 0152): once every deployment has run `sweepSearchSessionProjectBackfill` to completion (it logs `nothing left`), drop the sweep and, one release after no writer omits the column, the `search_sessions_set_project_id` trigger. Until the sweep finishes on a deployment, project reads undercount sessions older than the migration.
 
+## Summary tree build stage follow-ups (2026-11-14)
+
+See [the stage notes](docs/document-summaries.md#summary-tree-section-summaries-for-long-documents).
+
+- [ ] **Node cap against the big-document target.** `SUMMARY_TREE_MAX_NODES_PER_DOCUMENT` (5,000) is below what a 20,000-page document needs (about 6,600 leaf groups alone at 54,000 leaves), so such a document ends `partial` (`node-cap`) before any call. Decide whether the cap scales with leaves or the group size grows with the document.
+- [ ] **Root as the document summary.** The tree root does not replace the sampled `document-summary`: `document_summaries` rows are insert-only and feed project naming, chat overviews and media evidence. Needs an update path and a rule for `partial` and `skipped` trees.
+- [ ] **Price-card unit and cap.** Summary calls record provider usage but no billable unit, so `pipeline.maxCostCents` cannot see tree spend. The private rate card adds the unit; the stage then charges it per group and the cap applies per group.
+- [ ] **Content-refusal route.** Worker text calls have no fallback when the default model's host refuses output; a group refused twice leaves the document `partial`. Add a route with another host, or record the refusal as a permanent leaf-level omission.
+- [ ] **`SUMMARY_TREE_MIN_FAN_IN` in the state block.** The constant exists; `summaryTreeConstantsSchema` and the OpenAPI block do not list it yet.
+- [ ] **Stale `building` rows.** A build interrupted for good (run cancelled) leaves `building`; the backfill job should treat an old `building` row as resumable.
+- [ ] **Vectors-only sidecar for the scan.** The stage stream-parses the whole embed artifact (about 12 MB a second on one core). A sidecar with leaf vectors or precomputed adjacent similarities would cut that for very large documents.
+- [ ] **Similarity cuts on preamble-free vectors.** Leaf vectors include the contextual preamble (page numbers), so an insertion moves cuts in heading-less documents (phase-0 reuse table). Unchanged by this stage.
+- [ ] **Summaries-table index policy.** A ready tree requests the same background maintenance as the chunks table (compaction, vector, id and documentId indexes, full-text index). The retrieval leg should confirm which indexes it wants.
+
 ## Quarantine scanner snapshots (2026-11-11, `perf/quarantine-latency`, flags off)
 
 - [ ] Enable `DOCSLURP_QUARANTINE_SCAN_SNAPSHOT` on production (council reviewed in PR #339; batch flag removed) and

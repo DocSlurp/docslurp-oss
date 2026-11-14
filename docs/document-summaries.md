@@ -106,3 +106,264 @@ A rare change outside sampled text can be missed. Use document retrieval or
 structured extraction for exact prices, product records and version comparisons.
 The limits above constrain summary work; they do not replace ingestion limits
 for parsing, OCR, page indexing or storage.
+
+## Summary tree: section summaries for long documents
+
+A project that turns the summary tree on gets, for each long document, summaries
+of its contiguous sections and one root summary for the whole document. The
+summaries are a derived search index: they live in the project's `summaries`
+LanceDB table beside `chunks`. This section covers how the tree is built.
+Settings, the kill switches and the state block are in
+`packages/shared/src/summary-tree.ts`; deletion is in
+[data deletion](data-deletion.md#the-summary-trees-table). The document summary
+described above is unchanged: the tree's root does not replace it yet.
+
+### When the stage runs
+
+`summary-tree` is the last stage of a run, after `index`. A document is
+searchable before its tree is built, and no stage that makes it searchable reads
+the tree.
+
+The stage runs only when all three hold (`summaryTreeBuildActive`):
+
+- the project stores `pipeline.summaryTree.enabled: true`;
+- the pipeline embeds and indexes vectors;
+- the deployment sets `DOCSLURP_SUMMARY_TREE_BUILD=on`.
+
+Otherwise it reads nothing, writes nothing and makes no model call. The switch is
+asked again before every model call, so turning it off stops a build at its next
+call. A project with the tree on always re-runs this stage in a partial
+reprocess: summary rows belong to one document version and are never copied from
+another.
+
+### What a build does
+
+1. **Format skip.** Decided from the file alone (see [skip rules](#skip-rules)).
+2. **Scan the embed artifact.** One streamed pass over
+   `<run root>/embeddings/<documentId>.json`. Per leaf it keeps the chunk index,
+   heading path, pages, the leaf hash and the cosine similarity to the previous
+   leaf. Vectors are dropped as they pass; leaf text goes to a temporary file
+   and is read back one group at a time.
+3. **Select leaves.** A leaf is a chunk with `overlapIndex` 0 and no row or cell
+   table granularity. Whole-table chunks count toward the table share and are
+   then left out.
+4. **State row.** `document_summary_trees` is set to `building` before anything
+   else is written.
+5. **Level by level.** For each new layer of nodes: reuse what can be reused,
+   call the model for the rest, embed the new summaries with the project's
+   embedding model, write registry rows and summary rows.
+6. **Compact** the text artifact to one object.
+7. **Coverage invariant**, read back from Postgres: every leaf lies in exactly
+   one level-1 group, every node but the root has exactly one ready parent above
+   it, no row is unfinished.
+8. **`ready`**, or **`partial`**. Search serves a document's nodes only while its
+   row is `ready`.
+
+What is committed when:
+
+- A summary's text is written to the artifact as its own immutable part the
+  moment its model call returns. A build killed after N calls and started again
+  makes exactly total − N calls.
+- Registry rows and summary rows are written once per window of at most
+  `WORKER_SUMMARY_TREE_CONCURRENCY` model calls (default 4): one embedding
+  request and one table commit per window. A kill between a part and its window
+  costs an embedding request on resume, never a model call.
+- A registry row is written (`pending`) before its summary row and set `ready`
+  after it, so a row in the table always has a registry row naming it.
+
+### Grouping
+
+Sizes are counted in leaves, never tokens. The values are the server constants
+in `packages/shared/src/summary-tree.ts`.
+
+Leaf groups:
+
+1. A section is a run of adjacent leaves with the same heading path. A section
+   over the maximum is cut at its lowest adjacent-similarity boundaries; each
+   piece keeps at least the minimum. Only relative minima decide, never a fixed
+   threshold.
+2. A group under the minimum joins a neighbour, deepest headings first: inside
+   each heading, in document order, two adjacent groups become one when at least
+   one is under the minimum and together they fit the maximum. What is still
+   small is offered to its neighbours inside the parent heading, and so on up to
+   the document. A short section therefore joins its sibling sections before
+   anything further away, and crosses a parent heading only when nothing nearer
+   fits. A group that fits nowhere stays small.
+
+Rule 2 is a deliberate change from the original plan, which never merged a short
+section across a heading. The phase-0 eval measured 340 of 1,067 leaf groups
+holding a single chunk under that rule, each a model call that restates one
+chunk ([report](evals/summary-tree/phase0-2026-11-14.md), finding 9).
+
+Upper levels:
+
+- Neighbours with the same heading path form a run. A run of at least the
+  minimum fan-in gets a parent, unless it and its neighbours inside the heading
+  one level up would fit one parent together: then it waits for them. A smaller
+  run gets no parent of its own and joins its parent heading's siblings.
+- When no run gets a parent, the deepest paths lose their last segment and runs
+  are formed again.
+- A run over the maximum fan-in is cut by the similarity of the siblings'
+  summary vectors.
+- Depth never passes `SUMMARY_TREE_MAX_LEVELS`. A layer shaped by headings is
+  taken only if the layers left after it would still suffice; otherwise the
+  whole frontier is cut by similarity, and at the last level whatever remains
+  goes under one root.
+
+No node has exactly one child, and a deeply nested outline does not grow a chain
+of near-identical summaries (the eval measured a nine-level tree whose top five
+levels held one node each).
+
+### Skip rules
+
+A skipped document gets a state row with `status: skipped` and the reason; the
+stage stats carry the finer detail and the counts. Nothing is skipped silently.
+
+| `skip_reason` | Detail in stats (`summaryTreeSkipDetail`) | When |
+| --- | --- | --- |
+| `format` | `spreadsheet-format`, `structured-data-format` | `office-excel`, `structured-csv`, `structured-json` |
+| `media` | `audio-video` | audio or video, by format or MIME type |
+| `short` | `chunk-count-below-floor`, `below-long-document-floor` | fewer leaves than `SUMMARY_TREE_MIN_DOCUMENT_LEAVES`. With a stored chunk count under the floor the artifact is not read |
+| `tables` | `table-heavy` | more than `SUMMARY_TREE_MAX_TABLE_LEAF_SHARE` of the leaves are tables |
+| `no-leaves` | `no-leaves`, `no-embedding-artifact` | nothing to summarize |
+| `pii` | `pii-blocked` | the document is blocked by the PII policy |
+
+A document that had a tree and no longer qualifies loses its summary rows and
+registry rows when the skip is recorded.
+
+### Statuses
+
+`document_summary_trees.status`:
+
+| Status | Meaning | Served |
+| --- | --- | --- |
+| `pending` | A build was refused before any call (`error` says why: an organization that may not spend, privacy mode, no model key) | No |
+| `building` | A build is running, or was interrupted and will resume | No |
+| `partial` | The build ended without a servable tree; `error` names the reason | No |
+| `ready` | The coverage invariant held | Yes |
+| `skipped` | The document gets no tree (`skip_reason`) | No |
+
+`partial` reasons:
+
+- `group-failed:<reasons>`: a group still failed after one retry. Reasons:
+  `content-refusal`, `truncated-output`, `invalid-output:<detail>`,
+  `prompt-too-large`, `model-error`, `leaf-text-mismatch`.
+- `stopped:build-switch-off`, `stopped:run-cost-cap`: the build stopped before
+  its next call.
+- `node-cap`: the document needs more nodes than
+  `SUMMARY_TREE_MAX_NODES_PER_DOCUMENT`. Refused before any call.
+- `coverage:<checks>`: the invariant did not hold.
+- `embedding-space-mismatch`, `leaf-vectors-unusable`: the embed artifact is not
+  in the project's embedding space, or a leaf has no usable vector.
+
+The stage's own checkpoint is `completed` in every case above: a `partial` or
+`blocked` tree never fails the document or the run. The stage stats
+(`summaryTreeStatus`) add three outcomes that write no tree: `off` (the switch),
+`blocked` (state row `pending`) and `refused` (the document is not a live
+document of the run's organization and project).
+
+A later build of a `partial` or `building` document resumes: it pays only for
+the groups that have no stored text, and for the levels above them.
+
+### Model calls and spend
+
+- Text operation `summary-tree`, model from the project's text model chain.
+  Reasoning is fixed at the lowest effort; the project's reasoning and output
+  settings for other operations do not apply. There is no tenant-supplied
+  prompt.
+- A cut-off answer (`finishReason: length`) is retried once at double the output
+  budget. A summary that is still cut off, or that breaks the output contract,
+  is never stored. Every attempt that returned is recorded with the provider's
+  own token counts.
+- Requests go through the fleet rate limiter (`runWithProviderRateLimit`). A
+  rate rule for the text route is deployment configuration (`AI_RATE_LIMITS`);
+  without one the limiter passes requests through.
+- A content refusal by the model's host is a failed group with the reason
+  `content-refusal`. Worker text calls have no content-refusal fallback route,
+  so a group refused twice leaves the document `partial`.
+- Everything from the document (leaf text, headings, child summaries) is inside
+  the prompt's untrusted block. The block's own delimiter is removed from that
+  text first, so a document cannot close the block.
+- Before the first call: the project's privacy mode must allow a hosted model,
+  a model key must exist, and the organization must be allowed to spend
+  (`org_spend_status`, read-only). A refusal makes no call.
+- Before every call: the run's cost cap (`pipeline.maxCostCents`).
+- Usage events: `summary-tree-generation` per model attempt and
+  `summary-tree-embedding` per embedding request, with `orgId`, `projectId`,
+  `runId`, `documentId`, node and attempt in the metadata, through the run's
+  usage ledger.
+
+### Reuse
+
+A node hash covers the tree key version, prompt version, resolved model, text
+settings, length target, level, heading path and ordered child hashes. It holds
+no document, tenant or page identity, so identical text hashes the same
+anywhere. Where a summary may be copied from is therefore a tenant boundary:
+
+1. This document's own artifact (a resumed build).
+2. The version this document directly replaces: the completed document of the
+   same organization, project and canonical id that is older than this one and
+   is either still current or was superseded by exactly this document.
+
+Reuse from the predecessor is refused, and every node is generated, when:
+
+- the document has no canonical id, there is no such version, or more than one;
+- the predecessor, or its run's artifacts, is purged or archived;
+- the predecessor is PII-blocked, redacted, or withholds artifacts;
+- the predecessor has no tree, or its build registered no artifact, or the
+  registered artifact is not that document's own tree artifact.
+
+A deleted document has no row, and a version superseded by a since-deleted
+document names that document, so delete then re-upload regenerates. Another
+organization or project with identical content gets no hit. A dedup copy is not
+in its source's chain: it gets its own tree, rows and artifact. Copied text is
+written into the new version's own artifact; nothing later reads the
+predecessor's.
+
+### Artifact and stats
+
+Text is stored under `<run root>/summary-tree/<documentId>/`: one
+`parts/<hash>.jsonl` per committed summary while building, then
+`summaries.jsonl`. Records hold a node hash, a title and the text. The pack is
+the stage's registered artifact (`document_run_stage_states.artifact_uri`), so
+document, version, run and project deletes remove it with the document's other
+artifacts. It is not a readable output and is not part of document exports.
+
+Stage stats: `summaryTreeStatus`, `summaryTreeSkipReason`,
+`summaryTreeSkipDetail`, `summaryTreeReason`, `chunks`, `leaves`, `tableLeaves`,
+`overlapChunks`, `tableDetailChunks`, `groups`, `nodes`, `levels`, `modelCalls`,
+`generatedNodes`, `reusedFromResume`, `reusedFromPredecessor`,
+`predecessorReuse`, `failedGroups`, `failureReasons`, `truncationRetries`,
+`inputTokens`, `outputTokens`, `embeddedSummaries`, `rowsWritten`,
+`staleRowsDeleted`, `durationMs`.
+
+`runSummaryTreeForDocument` (`worker/src/stages/summary-tree.ts`) builds,
+resumes or rebuilds one document's tree outside a run. The caller passes the
+document's own run id and run root, its embed artifact, a usage recorder with
+its own scope and its own cost cap as `stopReason`, then registers the returned
+`artifactUri` with `registerSummaryTreeArtifact`
+(`worker/src/summary-tree/state-store.ts`).
+
+### Measured behaviour (2026-11-14, development machine)
+
+| | Measured |
+| --- | --- |
+| Embed-artifact scan | about 12 MB of JSON a second on one core |
+| Leaf grouping, 54,000 leaves | about 0.1 s |
+| Leaf text read-back, 54,000 leaves | about 1.2 s |
+| Retained heap during a 54,000-leaf build | under a third of the artifact's size, sampled after forced collection |
+| Document under the floor with a stored chunk count | two small SQL statements, no artifact read |
+
+A 54,000-leaf document is about 20,000 pages at the 2.7 leaves a page the
+phase-0 eval measured.
+
+### Not done yet
+
+- A 20,000-page document needs more nodes than
+  `SUMMARY_TREE_MAX_NODES_PER_DOCUMENT` allows today and ends `partial` with
+  `node-cap` before any call.
+- The tree root does not replace the document summary.
+- There is no price-card unit for the tree, so the run cost cap sees other
+  spend only.
+- The scan parses the whole embed artifact; a vectors-only sidecar would remove
+  most of that time for very large documents.

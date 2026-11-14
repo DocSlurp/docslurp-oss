@@ -164,6 +164,8 @@ export interface SummaryTreeBuildDeps {
   deleteRowsById(args: { scope: SummaryTreeScope; space: { model: string; dimensions: number }; ids: string[]; root?: string }): Promise<void>;
   /** Strict delete of every summary row of the document in one embedding space. */
   deleteDocumentRows(args: { scope: SummaryTreeScope; space: { model: string; dimensions: number }; documentIds: string[]; root?: string }): Promise<unknown>;
+  /** Called once when a build that wrote or removed summary rows ends `ready`: the table has many small commits to compact. */
+  tableChanged?(args: { scope: SummaryTreeScope; space: { model: string; dimensions: number }; root?: string }): void;
   /** LanceDB root override (tests). */
   lanceRoot?: string;
   /** Directory for the leaf text spool; the system temporary directory when unset. */
@@ -695,6 +697,7 @@ export async function buildDocumentSummaryTree(deps: SummaryTreeBuildDeps, input
       leafCount: index.leaves.length, nodeCount: tree.nodes.length, levelCount: stats.levels, rootNodeId: nodeIds[tree.root]!,
     });
     await deps.flushUsage?.();
+    if (stats.rowsWritten > 0 || stats.staleRowsDeleted > 0) deps.tableChanged?.({ scope, space, root: deps.lanceRoot });
     return finish("ready", { artifactUri });
 
     async function loadPredecessorSource(): Promise<SummaryReuseSource | null> {
