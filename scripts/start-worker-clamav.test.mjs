@@ -342,3 +342,59 @@ for (const first of ["SIGTERM", "SIGINT"])
           assert.throws(() => process.kill(c.pid, 0), { code: "ESRCH" });
       },
     );
+
+// #398: development-only settings that weaken untrusted-file protection stop startup anywhere else, before ClamAV
+// refreshes or the worker starts, and are never silently ignored.
+const unsafeOverrides = [
+  "DOCSLURP_PARSER_SANDBOX_ALLOW_UNISOLATED",
+  "DOCSLURP_SANDBOX_ALLOW_UNFILTERED_SOCKETS",
+  "QUARANTINE_FAIL_OPEN_ON_TOOL_MISSING",
+  "DOCSLURP_CLAMAV_FAIL_OPEN_ON_STALE_DB",
+];
+for (const name of unsafeOverrides)
+  for (const [label, envPatch] of [
+    ["NODE_ENV=production", { NODE_ENV: "production" }],
+    ["NODE_ENV=staging", { NODE_ENV: "staging" }],
+    ["the service profile", { NODE_ENV: "", DOCSLURP_SERVICE_PROFILE: "service" }],
+  ])
+    for (const value of ["true", "1", " TRUE ", "ture"])
+      test(`${name}=${JSON.stringify(value)} under ${label} refuses startup`, async (t) => {
+        const f = await fixture(t, { age: 1 });
+        Object.assign(f.env, envPatch, { [name]: value });
+        const r = f.run();
+        assert.equal(r.status, 1, r.stdout + r.stderr);
+        assert.match(r.stderr, new RegExp(`error: .*${name}.*Refusing to start`));
+        await assert.rejects(readFile(f.worker), { code: "ENOENT" });
+        assert.deepEqual(await f.readCalls(), [], "refused before any ClamAV work");
+      });
+
+for (const value of ["", "false", "0", "off", "no"])
+  test(`explicit off value ${JSON.stringify(value)} for every override starts in production`, async (t) => {
+    const f = await fixture(t, { age: 1 });
+    for (const name of unsafeOverrides) f.env[name] = value;
+    const r = f.run();
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    await readFile(f.worker);
+  });
+
+test("stale signatures fail closed by default in development", async (t) => {
+  const f = await fixture(t, { updateFails: true });
+  f.env.NODE_ENV = "development";
+  delete f.env.DOCSLURP_CLAMAV_FAIL_OPEN_ON_STALE_DB;
+  const r = f.run();
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /error: ClamAV signature database is stale/);
+  await assert.rejects(readFile(f.worker), { code: "ENOENT" });
+});
+
+for (const nodeEnv of ["development", "test", ""])
+  test(`an explicit stale-signature opt-in warns and starts under NODE_ENV=${nodeEnv || "unset"}`, async (t) => {
+    const f = await fixture(t, { updateFails: true });
+    f.env.NODE_ENV = nodeEnv;
+    f.env.DOCSLURP_CLAMAV_FAIL_OPEN_ON_STALE_DB = "true";
+    f.env.DOCSLURP_SANDBOX_ALLOW_UNFILTERED_SOCKETS = "1";
+    const r = f.run();
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.match(r.stderr, /warning: ClamAV signature database is stale/);
+    await readFile(f.worker);
+  });

@@ -44,7 +44,7 @@ The scan policy comes from `resolveMalwareScanPolicy` in `worker/src/tools/runne
 | Variable | Default in production | Default otherwise | Meaning |
 | --- | --- | --- | --- |
 | `DOCSLURP_CLAMAV_REQUIRE_DAEMON` | `false` | `false` | Require `clamdscan`. If it is unavailable, the scan returns an error ("clamdscan is required but unavailable"). |
-| `DOCSLURP_CLAMAV_FAIL_OPEN_ON_STALE_DB` | `false` | `true` | When `false`, a stale or missing signature database blocks scanning. When `true`, it only produces a warning. |
+| `DOCSLURP_CLAMAV_FAIL_OPEN_ON_STALE_DB` | `false`; setting it stops startup | `false` | When `false`, a stale or missing signature database blocks scanning. In development and test only, `true` makes it a warning; anywhere else the worker refuses to start with it set ([development-only settings](configuration.md#development-only-settings)). |
 | `DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS` | `24` | `24` | Age after which signatures count as stale. |
 | `DOCSLURP_CLAMAV_DB_DIR` | `/var/lib/clamav` | `/var/lib/clamav` | Signature directory. |
 

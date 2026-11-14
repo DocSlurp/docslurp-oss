@@ -64,7 +64,7 @@ The worker now runs a `quarantine` stage before format detection and normalizati
 - `QUARANTINE_MAX_SINGLE_ENTRY_BYTES`
 - `QUARANTINE_MAX_EXPANSION_RATIO`
 
-`QUARANTINE_FAIL_OPEN_ON_TOOL_MISSING` now defaults to `false` when `NODE_ENV=production`, so missing or broken ClamAV tooling blocks ingestion instead of silently downgrading quarantine to a warning. Local development keeps the permissive default unless you explicitly set the env var to `false`.
+`QUARANTINE_FAIL_OPEN_ON_TOOL_MISSING` is development-only: with `NODE_ENV` `development`, `test` or unset it defaults to `true` (set `false` to block); anywhere else it is off and the worker refuses to start with it set, so missing or broken ClamAV tooling blocks ingestion.
 
 ## CI Supply-Chain Checks
 
@@ -81,7 +81,7 @@ The worker entrypoint can now manage ClamAV readiness before the Temporal worker
 - `DOCSLURP_CLAMAV_UPDATE_IF_OLDER_THAN_HOURS=12`
 - `DOCSLURP_CLAMAV_PRIVATE_MIRROR=https://...` (shared signature mirror for large fleets)
 - build arg `DOCSLURP_BAKE_CLAMAV_SIGNATURES=true` (lean image) downloads signatures at build time
-- `DOCSLURP_CLAMAV_FAIL_OPEN_ON_STALE_DB=true|false`
+- `DOCSLURP_CLAMAV_FAIL_OPEN_ON_STALE_DB=true|false` (default `false`; `true` is development-only and stops startup anywhere else)
 - `DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS=24`
 - `DOCSLURP_CLAMAV_DB_DIR=/var/lib/clamav`
 - `DOCSLURP_CLAMAV_RUN_DIR=/tmp/clamav`
@@ -133,9 +133,11 @@ Useful env overrides:
 - `DOCSLURP_PARSER_SANDBOX_WRITABLE_PATHS=` (empty by default; set only for trusted extra writable mounts)
 
 When `bubblewrap` is unavailable, set `DOCSLURP_PARSER_SANDBOX=none` only for
-trusted local development. In production that also needs
-`DOCSLURP_PARSER_SANDBOX_ALLOW_UNISOLATED=true`; keep an isolating provider for
-production Docker workers.
+trusted local development. `DOCSLURP_PARSER_SANDBOX_ALLOW_UNISOLATED`,
+`DOCSLURP_SANDBOX_ALLOW_UNFILTERED_SOCKETS`, `QUARANTINE_FAIL_OPEN_ON_TOOL_MISSING`
+and `DOCSLURP_CLAMAV_FAIL_OPEN_ON_STALE_DB` are development-only: the entrypoint
+and the worker refuse to start with any of them set unless `NODE_ENV` is
+`development`, `test` or unset.
 
 ## Deployment and benchmark cost profiles
 
