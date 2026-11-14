@@ -497,6 +497,111 @@ class LayoutFactsTest(unittest.TestCase):
                         compared += 1
         self.assertGreater(compared, 10)
 
+    def test_page_list_gives_the_whole_runs_entries_for_those_pages(self):
+        """`pages` (the selective walker's per-page list): only the listed pages come back, in page order, each equal to a
+        run over the whole range, for a full walk and tables only, with synthetic and (when installed) Poppler XHTML and
+        `pdfimages -list` rows; pages left out are neither walked nor reported."""
+        def xhtml_for(pages):
+            body = []
+            for page in range(pages):
+                rules = ''.join(f'<rule xMin="72" yMin="{100 + 30 * r}" xMax="540" yMax="{100.5 + 30 * r}"/>' for r in range(2 + page % 4))
+                rules += ''.join(f'<rule xMin="{72 + 117 * c}" yMin="100" xMax="{72.5 + 117 * c}" yMax="250"/>' for c in range(5))
+                words = ''.join(f'<word xMin="{80 + 40 * i}" yMin="300" xMax="{110 + 40 * i}" yMax="310">w{i}</word>' for i in range(2 + page))
+                body.append(f'<page width="612" height="792"><flow><block><line>{words}</line></block></flow>{rules}</page>')
+            return '<html><body><doc>' + ''.join(body) + '</doc></body></html>'
+        compared = 0
+        for name in sorted(p.name for p in self.FIXTURES.glob('*.pdf')):
+            source = str(self.FIXTURES / name)
+            md_path = self.FIXTURES / 'doppler-md' / (name + '.md')
+            markdown = md_path.read_text().split('\f') if md_path.exists() else ['| a | b |\n| --- | --- |\n| w0 | w1 |']
+            pages = min(len(markdown), 8)
+            if pages < 2:
+                continue
+            texts = [xhtml_for(pages)]
+            listing = None
+            if shutil.which('pdftotext'):
+                with tempfile.TemporaryDirectory() as d:
+                    out = Path(d) / 'layout.xhtml'
+                    if subprocess.run(['pdftotext', '-bbox-layout', '-f', '1', '-l', str(pages), source, str(out)], capture_output=True).returncode == 0:
+                        texts.append(out.read_text(errors='replace'))
+            if shutil.which('pdfimages'):
+                done = subprocess.run(['pdfimages', '-list', '-f', '1', '-l', str(pages), source], capture_output=True, text=True)
+                listing = done.stdout if done.returncode == 0 else None
+            md = {i + 1: m for i, m in enumerate(markdown[:pages])}
+            for wanted in ([pages], [1, pages], list(range(2, pages + 1, 2))):
+                for xhtml in texts:
+                    for content in (True, False):
+                        whole = facts.layout_facts(source, listing, xhtml, md, 1, pages, content=content)['pages']
+                        some = facts.layout_facts(source, listing, xhtml, md, 1, pages, content=content, pages=wanted)['pages']
+                        with self.subTest(fixture=name, pages=wanted, content=content):
+                            self.assertEqual([page['pageNumber'] for page in some], sorted(set(wanted)))
+                            self.assertEqual(some, [whole[number - 1] for number in sorted(set(wanted))])
+                            compared += len(some)
+        self.assertGreater(compared, 40)
+
+    def test_page_list_only_walks_the_listed_pages(self):
+        b = PdfBuilder()
+        im = b.image(4, 4, rgb_gradient(4, 4))
+        for _ in range(6):
+            b.page(place(20, 20, 10, 10), {'Im': im})
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / 'x.pdf'
+            path.write_bytes(b.build())
+            walked = []
+            original = facts.walk_document
+
+            def spy(*args, **kwargs):
+                result = original(*args, **kwargs)
+                walked.append(sorted(result))
+                return result
+            facts.walk_document = spy
+            try:
+                result = facts.layout_facts(str(path), None, None, None, 1, 6, pages=[5, 2])
+            finally:
+                facts.walk_document = original
+        self.assertEqual(walked, [[2, 5]])
+        self.assertEqual([page['pageNumber'] for page in result['pages']], [2, 5])
+        for bad in ([], [0], [7], [2, '3'], [True], [2.0]):
+            with self.subTest(pages=bad), self.assertRaises(ValueError):
+                facts.layout_facts(str(path), None, None, None, 1, 6, pages=bad)
+
+    def test_page_list_text_is_strict_and_bounded(self):
+        self.assertEqual(facts.parse_page_list('3,5,9-12', 1, 32), [3, 5, 9, 10, 11, 12])
+        self.assertEqual(facts.parse_page_list('20000', 19969, 20000), [20000])
+        for pages in ([1], [3, 5, 6, 7, 32], list(range(1, 33)), [2, 4, 6, 8]):
+            self.assertEqual(facts.parse_page_list(facts.format_page_list(pages), 1, 32), pages)
+        self.assertEqual(facts.format_page_list([3, 5, 6, 7]), '3,5-7')
+        for bad in ('', ',', '1,', '0', '33', '5-3', '1-40', ' 1', '1 ', '+1', '-1', '1--2', '1-2-3', '0x10', '١', '1' * 8,
+                    'a', '1;2', '7,7', '6-8,7', '5,3', '1-5,5-9', None, 5):
+            with self.subTest(text=bad), self.assertRaises(ValueError):
+                facts.parse_page_list(bad, 1, 32)
+        started = time.monotonic()
+        for hostile in (','.join(['1'] * (facts.MAX_LAYOUT_PAGES + 1)), ','.join([f'1-{facts.MAX_LAYOUT_PAGES}'] * 4_000),
+                        '1-9999999', '1' * 1_000_000, ',' * 100_000):
+            with self.assertRaises(ValueError):
+                facts.parse_page_list(hostile, 1, facts.MAX_LAYOUT_PAGES)
+        self.assertLess(time.monotonic() - started, 1)
+        # A whole 5,000-page range in its compact form parses quickly and expands to exactly the range.
+        self.assertEqual(len(facts.parse_page_list(f'1-{facts.MAX_LAYOUT_PAGES}', 1, facts.MAX_LAYOUT_PAGES)), facts.MAX_LAYOUT_PAGES)
+
+    def test_cli_page_list(self):
+        source = self.FIXTURES / 'tables-multipage-financials.pdf'
+        markdown = (self.FIXTURES / 'doppler-md' / (source.name + '.md')).read_text()
+        with tempfile.TemporaryDirectory() as d:
+            md = Path(d) / 'x.md'
+            md.write_text(markdown)
+            run = lambda *extra: subprocess.run([sys.executable, '-I', str(HERE / 'pdf_layout_facts.py'), '--input', str(source),
+                                                 '--first', '1', '--last', '3', '--markdown', str(md), '--tables-only', *extra],
+                                                capture_output=True, text=True, timeout=60)
+            whole, some = run(), run('--pages', '1,3')
+            self.assertEqual(whole.returncode, 0, whole.stderr)
+            self.assertEqual(some.returncode, 0, some.stderr)
+            pages = json.loads(whole.stdout)['pages']
+            self.assertEqual(json.loads(some.stdout)['pages'], [pages[0], pages[2]])
+            for bad in ('0', '4', '1-4', 'x', ''):
+                with self.subTest(pages=bad):
+                    self.assertNotEqual(run('--pages', bad).returncode, 0)
+
     def test_unknown_inputs_are_null_never_zero(self):
         data = PdfBuilder().build() if hasattr(PdfBuilder(), 'build') else None
         if data is None:

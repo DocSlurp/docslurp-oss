@@ -1668,7 +1668,50 @@ def union_coverage(boxes, visible_box_):
     return round(len(covered) / (n * n), 4)
 
 
-def layout_facts(path, listing_text, xhtml_text, page_markdowns, first, last, deadline=None, repeated=None, content=True):
+_PAGE_LIST_ITEM = re.compile(r'([0-9]{1,7})(?:-([0-9]{1,7}))?\Z')
+
+
+def parse_page_list(text, first, last):
+    """`3,5,9-12` -> the sorted page numbers it names, each in [first, last]; ValueError for anything else.
+
+    Strict and bounded before anything is expanded: at most MAX_LAYOUT_PAGES items of at most 7 digits, every item inside
+    [first, last] and after the one before it (ascending, no overlap: the form format_page_list writes), so the work and the
+    result never exceed last - first + 1 pages, whatever the text says."""
+    if type(text) is not str or not text or len(text) > 16 * MAX_LAYOUT_PAGES:
+        raise ValueError('page list')
+    items = text.split(',')
+    if len(items) > MAX_LAYOUT_PAGES:
+        raise ValueError('page list')
+    pages = []
+    for item in items:
+        match = _PAGE_LIST_ITEM.match(item)
+        if not match:
+            raise ValueError('page list')
+        low = int(match[1])
+        high = int(match[2]) if match[2] is not None else low
+        if not first <= low <= high <= last or (pages and low <= pages[-1]):
+            raise ValueError('page list')
+        pages.extend(range(low, high + 1))
+    return pages
+
+
+def format_page_list(pages):
+    """The compact form parse_page_list reads: sorted, consecutive pages as ranges (`[3, 5, 6, 7]` -> `3,5-7`)."""
+    out, run = [], None
+    for page in sorted(set(pages)):
+        if run is not None and page == run[1] + 1:
+            run[1] = page
+            continue
+        if run is not None:
+            out.append(str(run[0]) if run[0] == run[1] else f'{run[0]}-{run[1]}')
+        run = [page, page]
+    if run is not None:
+        out.append(str(run[0]) if run[0] == run[1] else f'{run[0]}-{run[1]}')
+    return ','.join(out)
+
+
+def layout_facts(path, listing_text, xhtml_text, page_markdowns, first, last, deadline=None, repeated=None, content=True,
+                 pages=None):
     """Structural layout facts for routing, per page in [first, last]:
 
     * images: each listed image drawn on the page with its placement (walker), stream facts (`pdfimages -list`: pixel
@@ -1687,11 +1730,25 @@ def layout_facts(path, listing_text, xhtml_text, page_markdowns, first, last, de
     `content=False` (tables only): the page tree's geometry without reading content streams (walk_document), for callers
     that need the tables, grids and table coverage alone: those are the same as a full walk's for every page whose content
     the full walk can read; images are then unknown (null) and must not be read from the result.
+
+    `pages` (an explicit page list, every page in [first, last]): only those pages are walked, read from the XHTML and
+    reported, in page order; the result has no entry for any other page (the caller answers those itself). `xhtml_text`
+    still covers [first, last] in order, as for a full run. Each listed page's entry is the one a run over the whole range
+    gives, except that page furniture defaults to `repeated_objects` over the listing as given (pass `repeated` for the
+    whole range's). Lets a caller walk only the pages that need it inside a chunk, with the same bounded memory.
     """
     if last - first + 1 > MAX_LAYOUT_PAGES:
         raise Unknown('range')
+    if pages is not None:
+        selected = frozenset(pages)
+        if not selected or any(type(page) is not int or not first <= page <= last for page in selected):
+            raise ValueError('pages')
+        numbers = sorted(selected)
+    else:
+        selected, numbers = None, range(first, last + 1)
+    offsets = [number - first for number in numbers]
     try:
-        walks = walk_document(path, first, last, deadline, content=content)
+        walks = walk_document(path, first, last, deadline, only_pages=selected, content=content)
     except Unknown as error:
         walks, whole_unknown = {}, str(error) or 'unknown'
     else:
@@ -1709,10 +1766,10 @@ def layout_facts(path, listing_text, xhtml_text, page_markdowns, first, last, de
     placed = match_placements(rows, walks) if listing_text is not None else {}
     if repeated is None:
         repeated = repeated_objects(rows, last - first + 1)
-    words = page_words(xhtml_text, range(last - first + 1)) if xhtml_text is not None else {}
-    rules = page_rules(xhtml_text, range(last - first + 1)) if xhtml_text is not None else {}
-    pages = []
-    for number in range(first, last + 1):
+    words = page_words(xhtml_text, offsets) if xhtml_text is not None else {}
+    rules = page_rules(xhtml_text, offsets) if xhtml_text is not None else {}
+    result = []
+    for number in numbers:
         walk = walks.get(number)
         page_word_entry = words.get(number - first)
         page_words_list = page_word_entry[1] if page_word_entry else None
@@ -1773,8 +1830,8 @@ def layout_facts(path, listing_text, xhtml_text, page_markdowns, first, last, de
             box_of_page = visible_box(walk)
             entry['grids'] = [{'rows': g['rows'], 'columns': g['columns'], 'coverage': union_coverage([g['bbox']], box_of_page)} for g in grids]
             entry['tableCoverage'] = union_coverage(([] if markdown is None else boxes) + [g['bbox'] for g in grids], box_of_page)
-        pages.append(entry)
-    return {'version': LAYOUT_VERSION, 'pages': pages}
+        result.append(entry)
+    return {'version': LAYOUT_VERSION, 'pages': result}
 
 
 def main(argv):
@@ -1790,16 +1847,21 @@ def main(argv):
     parser.add_argument('--markdown', help='the extractor output, one form feed between pages, starting at --first')
     parser.add_argument('--seconds', type=float, default=60.0)
     parser.add_argument('--tables-only', action='store_true', help='page geometry only, no content streams (images unknown)')
+    parser.add_argument('--pages', help='only these pages of --first..--last, as 3,5,9-12 (the XHTML still covers the range)')
     args = parser.parse_args(argv)
     if not 1 <= args.first <= args.last or args.last - args.first + 1 > MAX_LAYOUT_PAGES:
         parser.error('invalid page range')
+    try:
+        only = parse_page_list(args.pages, args.first, args.last) if args.pages is not None else None
+    except ValueError:
+        parser.error('invalid page list')
     read = lambda name, limit: (open(name, 'rb').read(limit + 1).decode('utf-8', 'replace') if name else None)
     listing = read(args.listing, 64 * 1024 * 1024)
     xhtml = read(args.xhtml, 256 * 1024 * 1024)
     markdown = read(args.markdown, 256 * 1024 * 1024)
     pages = {args.first + index: text for index, text in enumerate(markdown.split('\f'))} if markdown is not None else None
     facts = layout_facts(args.input, listing, xhtml, pages, args.first, args.last, deadline=time.monotonic() + args.seconds,
-                         content=not args.tables_only)
+                         content=not args.tables_only, pages=only)
     sys.stdout.write(json.dumps(facts, separators=(',', ':')))
     return 0
 
