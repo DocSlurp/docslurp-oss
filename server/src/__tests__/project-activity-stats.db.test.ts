@@ -17,7 +17,7 @@ let driftService: typeof import("../services/project-activity-stats-drift.js");
  * PGlite runs one statement at a time, so it cannot show lost updates, lock waits or deadlocks. Point this at an
  * isolated PostgreSQL database migrated with db/migrate.mjs to run the concurrency block at the end of this file.
  */
-const raceDatabaseUrl = process.env.PROJECT_ACTIVITY_STATS_RACE_DATABASE_URL;
+const raceDatabaseUrl = process.env.TEST_DATABASE_URL;
 
 type Totals = {
   project_id: string; search_sessions: number; search_result_count: number; zero_result_searches: number;
