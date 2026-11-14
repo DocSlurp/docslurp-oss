@@ -18,7 +18,7 @@ import { ApiKeyPolicyError, ClientKeyProjectsRequiredError, validateApiKey, type
 
 export { ApiKeyPolicyError, ClientKeyProjectsRequiredError };
 import { validateOAuthApiToken } from "../services/mcp-oauth.js";
-import { ensureDefaultProject, findProjectForInput, getProject, type ProjectInputScope } from "../services/projects.js";
+import { ensureDefaultProject, findProjectForInput, resolveDefaultProjectId, getProject, type ProjectInputScope } from "../services/projects.js";
 import { getProjectAccess, type ProjectAccess } from "../services/organizations.js";
 import { invalidProjectInputError, ProjectAccessError, projectInputNotFoundError } from "../services/default-project.js";
 
@@ -390,6 +390,12 @@ export async function resolveActorProjectId(
   actor: RequestActor,
   project?: string | null,
   orgId?: string | null,
+  /**
+   * `"caller"`: the caller authorizes the id right after (search routes run `authorizeActorProjectSearch`), so the
+   * default project is resolved without its own access read and project record. Never skips an authorization; the
+   * explicit-reference path is unchanged.
+   */
+  options: { authorization?: "here" | "caller" } = {},
 ): Promise<string> {
   const lookup = await lookupActorProject(actor, project, orgId);
   if (lookup.ref.kind !== "default") {
@@ -401,13 +407,15 @@ export async function resolveActorProjectId(
   }
   if (actor.type === "apiKey") {
     const allowlist = actor.apiKey.projectIds ?? [];
-    const defaultProject = await ensureDefaultProject({ userId: actor.userId, orgId: actor.apiKey.orgId });
+    const defaultProjectId = options.authorization === "caller"
+      ? await resolveDefaultProjectId({ userId: actor.userId, orgId: actor.apiKey.orgId })
+      : (await ensureDefaultProject({ userId: actor.userId, orgId: actor.apiKey.orgId })).id;
     // A key bound to projects defaults to the org default only when it is
     // allowlisted; otherwise to the key's first allowlisted project.
-    return allowlist.length === 0 || allowlist.includes(defaultProject.id) ? defaultProject.id : allowlist[0]!;
+    return allowlist.length === 0 || allowlist.includes(defaultProjectId) ? defaultProjectId : allowlist[0]!;
   }
-  const defaultProject = await ensureDefaultProject({ userId: actor.userId, orgId });
-  return defaultProject.id;
+  if (options.authorization === "caller") return await resolveDefaultProjectId({ userId: actor.userId, orgId });
+  return (await ensureDefaultProject({ userId: actor.userId, orgId })).id;
 }
 
 /**

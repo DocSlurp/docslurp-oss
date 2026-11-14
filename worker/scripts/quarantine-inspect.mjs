@@ -32,7 +32,8 @@ await put(own);
 if (charts) {
   let answer;
   try {
-    answer = chartModule ? await chartModule.inlineCharts(bytes, charts, inspection, input) : refused("worker-failed");
+    // The command started with this process (performance.now() 0): the inspection's time counts against the chart step.
+    answer = chartModule ? await chartModule.inlineCharts(bytes, charts, inspection, input, undefined, undefined, { commandStartedAt: 0 }) : refused("worker-failed");
   } catch {
     answer = refused("worker-failed");
   }

@@ -50,6 +50,13 @@ images and 64 tables per page, a caller-given deadline; anything it cannot estab
 listing rows); the VM guest passes one per shard while it walks 32-page chunks. Repetition is therefore judged per shard
 for very long documents.
 
+`layout_facts(..., pages=)` (CLI `--pages 3,5,9-12`) walks and reports only the listed pages of `first..last`, in page
+order; every listed page's entry is the one a run over the whole range gives (with the same `repeated`), and no other page
+gets an entry, so the caller answers those itself. The XHTML still covers the whole range. A caller that already knows
+which pages need the walker (from facts of its own) passes them per chunk, so the walker's cost follows the pages that
+need it rather than the chunk. The list is strict: digits and ascending ranges inside the range only, at most 5,000 items,
+checked before anything is expanded; anything else is refused.
+
 ## The offline profiler
 
 `@docslurp/estimate` (`packages/estimate`) applies the scan-beside-text rule in the browser from the same thresholds:

@@ -146,22 +146,157 @@ export function contentTerms(query: string): string[] {
   return [...new Set(matchTerms(query).filter((term) => !coverageStopWords.has(term)))];
 }
 
+/** How a content term is looked up in folded text. */
+type TermKind = "cjk" | "exact" | "inflected";
+
+interface PreparedTerm {
+  term: string;
+  kind: TermKind;
+  /** Stem for inflected terms; the term itself otherwise. */
+  root: string;
+}
+
+/** Everything about a query that does not depend on the chunk being scored. */
+interface PreparedQuery {
+  terms: PreparedTerm[];
+  /** Three-word windows holding two or more content terms, in window order (computed on first phrase use). */
+  windows?: PreparedTerm[][];
+}
+
+function prepareTerms(terms: string[]): PreparedTerm[] {
+  return terms.map((term) => {
+    if (hasCjk(term)) return { term, kind: "cjk", root: term };
+    // Inflection is only modelled for ASCII-letter words; other scripts need the whole word.
+    if (!/^[a-z]+$/.test(term)) return { term, kind: "exact", root: term };
+    return { term, kind: "inflected", root: stem(term) };
+  });
+}
+
+/**
+ * Prepared queries by query string. Bounded: at most PREPARED_QUERY_CACHE_SIZE entries, none for queries over
+ * PREPARED_QUERY_MAX_LENGTH characters, so the cache holds at most ~64 x 2 KB of query text plus its derived terms
+ * (a few KB), and no chunk text. Query text is never logged.
+ */
+const PREPARED_QUERY_CACHE_SIZE = 64;
+const PREPARED_QUERY_MAX_LENGTH = 2048;
+const preparedQueries = new Map<string, PreparedQuery>();
+
+function prepareQuery(query: string): PreparedQuery {
+  const cached = preparedQueries.get(query);
+  if (cached) {
+    preparedQueries.delete(query);
+    preparedQueries.set(query, cached);
+    return cached;
+  }
+  const prepared: PreparedQuery = { terms: prepareTerms(contentTerms(query)) };
+  if (query.length <= PREPARED_QUERY_MAX_LENGTH) {
+    preparedQueries.set(query, prepared);
+    if (preparedQueries.size > PREPARED_QUERY_CACHE_SIZE) preparedQueries.delete(preparedQueries.keys().next().value!);
+  }
+  return prepared;
+}
+
+function preparedWindows(prepared: PreparedQuery, query: string): PreparedTerm[][] {
+  if (prepared.windows) return prepared.windows;
+  const windows: PreparedTerm[][] = [];
+  for (const window of queryPhraseWindows(query)) {
+    const terms = contentTerms(window);
+    if (terms.length >= 2) windows.push(prepareTerms(terms));
+  }
+  prepared.windows = windows;
+  return windows;
+}
+
+const TOKEN_CHAR = /[\p{L}\p{N}\p{M}-]/u;
+
+/** Length in UTF-16 units of the word character at `index` (the class the word split uses), or 0 when it is a separator. */
+function tokenCharLength(text: string, index: number): number {
+  if (index >= text.length) return 0;
+  const unit = text.charCodeAt(index);
+  if (unit < 128) return (unit >= 97 && unit <= 122) || (unit >= 48 && unit <= 57) || (unit >= 65 && unit <= 90) || unit === 45 ? 1 : 0;
+  if (unit >= 0xd800 && unit <= 0xdbff) {
+    const next = text.charCodeAt(index + 1);
+    if (next >= 0xdc00 && next <= 0xdfff) return TOKEN_CHAR.test(text.slice(index, index + 2)) ? 2 : 0;
+  }
+  return TOKEN_CHAR.test(text[index]!) ? 1 : 0;
+}
+
+/** Whether a word starts at `index`: the character before it is a separator or the text starts there. */
+function atWordStart(text: string, index: number): boolean {
+  if (index === 0) return true;
+  const unit = text.charCodeAt(index - 1);
+  if (unit >= 0xdc00 && unit <= 0xdfff && index >= 2) {
+    const high = text.charCodeAt(index - 2);
+    if (high >= 0xd800 && high <= 0xdbff) return !TOKEN_CHAR.test(text.slice(index - 2, index));
+  }
+  return tokenCharLength(text, index - 1) === 0;
+}
+
+function wordEnd(text: string, from: number): number {
+  let end = from;
+  for (let length = tokenCharLength(text, end); length > 0; length = tokenCharLength(text, end)) end += length;
+  return end;
+}
+
+/**
+ * Whether the folded text holds a word equal to `term` (exact) or sharing its root (inflected), without
+ * splitting the text: candidate positions come from indexOf, and only a position at a word start counts.
+ */
+function hasWord(folded: string, term: PreparedTerm): boolean {
+  const { root } = term;
+  const exact = term.kind === "exact";
+  for (let from = 0; ;) {
+    const index = folded.indexOf(root, from);
+    if (index < 0) return false;
+    if (atWordStart(folded, index)) {
+      const rootEnd = index + root.length;
+      const end = wordEnd(folded, rootEnd);
+      if (end === rootEnd) return true;
+      if (!exact) {
+        const rest = folded.slice(rootEnd, end);
+        if (INFLECTION.test(rest) || (rest[0] === root.at(-1) && INFLECTION.test(rest.slice(1)))) return true;
+      }
+    }
+    from = index + 1;
+  }
+}
+
+function termMatches(folded: string, term: PreparedTerm): boolean {
+  // Unsegmented scripts have no word boundaries: a character pair is looked up in the running text.
+  return term.kind === "cjk" ? folded.includes(term.term) : hasWord(folded, term);
+}
+
+function matchedCount(terms: PreparedTerm[], folded: string): number {
+  let matched = 0;
+  for (const term of terms) if (termMatches(folded, term)) matched += 1;
+  return matched;
+}
+
+function coverageOf(terms: PreparedTerm[], folded: string): number {
+  return terms.length === 0 ? 0 : matchedCount(terms, folded) / terms.length;
+}
+
+/** Same value as `lexicalRelevance`, stopping at the first term that makes a majority unreachable. */
+function lexicalOf(terms: PreparedTerm[], folded: string): number {
+  const total = terms.length;
+  if (total === 0) return 0;
+  let matched = 0;
+  let missed = 0;
+  for (const term of terms) {
+    if (termMatches(folded, term)) matched += 1;
+    else {
+      missed += 1;
+      if ((total - missed) / total <= LEXICAL_MIN_COVERAGE) return 0;
+    }
+  }
+  const coverage = matched / total;
+  return coverage > LEXICAL_MIN_COVERAGE ? coverage : 0;
+}
+
 /** Share of the query's distinct content terms present in the text (accent-insensitive, root plus inflection). */
 export function termCoverage(query: string, text: string): number {
-  const terms = contentTerms(query);
-  if (terms.length === 0) return 0;
-  const folded = foldText(text);
-  const words = new Set(folded.split(/[^\p{L}\p{N}\p{M}-]+/u).filter(Boolean));
-  const matched = terms.filter((term) => {
-    // Unsegmented scripts have no word boundaries: a character pair is looked up in the running text.
-    if (hasCjk(term)) return folded.includes(term);
-    // Inflection is only modelled for ASCII-letter words; other scripts need the whole word.
-    if (!/^[a-z]+$/.test(term)) return words.has(term);
-    const root = stem(term);
-    for (const word of words) if (sharesRoot(word, root)) return true;
-    return false;
-  });
-  return matched.length / terms.length;
+  const { terms } = prepareQuery(query);
+  return terms.length === 0 ? 0 : coverageOf(terms, foldText(text));
 }
 
 /**
@@ -180,16 +315,50 @@ export function queryPhraseWindows(query: string): string[] {
  * the row only shared a single word and gets the strict-majority score.
  */
 export function phraseRelevance(query: string, text: string): number {
-  for (const window of queryPhraseWindows(query)) {
-    if (contentTerms(window).length >= 2 && termCoverage(window, text) === 1) return 1;
-  }
-  return lexicalRelevance(query, text);
+  const prepared = prepareQuery(query);
+  const windows = preparedWindows(prepared, query);
+  // The reference scored the text once per window and once more for the fallback; the folded text is the same each time.
+  const folded = foldText(text);
+  for (const terms of windows) if (matchedCount(terms, folded) === terms.length) return 1;
+  return lexicalOf(prepared.terms, folded);
 }
 
 /** Coverage counts as lexical evidence only for a majority of the query's terms. */
 export function lexicalRelevance(query: string, text: string): number {
-  const coverage = termCoverage(query, text);
-  return coverage > LEXICAL_MIN_COVERAGE ? coverage : 0;
+  return lexicalOf(prepareQuery(query).terms, foldText(text));
+}
+
+interface ChunkRelevanceMemo {
+  query: string;
+  phrase: boolean;
+  text: string;
+  filename: string;
+  headingPath: string[];
+  headings: string[];
+  value: number;
+}
+
+/**
+ * Lexical relevance per chunk object for the query that scored it, so a second annotation pass over the same
+ * chunks in one search is free. Weakly keyed: nothing outlives the chunk. An entry is reused only while the
+ * chunk's text, filename and heading path are unchanged.
+ */
+const chunkRelevanceMemo = new WeakMap<SearchChunk, ChunkRelevanceMemo>();
+
+function memoizedLexicalRelevance(query: string, chunk: SearchChunk): number {
+  const phrase = chunk.lexicalMatch === "phrase";
+  const memo = chunkRelevanceMemo.get(chunk);
+  if (
+    memo && memo.query === query && memo.phrase === phrase && memo.text === chunk.text && memo.filename === chunk.filename
+    && memo.headingPath === chunk.headingPath && memo.headings.length === chunk.headingPath.length
+    && memo.headings.every((heading, index) => heading === chunk.headingPath[index])
+  ) return memo.value;
+  const haystack = [chunk.text, chunk.headingPath.join(" "), chunk.filename].join("\n");
+  const value = phrase ? phraseRelevance(query, haystack) : lexicalRelevance(query, haystack);
+  chunkRelevanceMemo.set(chunk, {
+    query, phrase, text: chunk.text, filename: chunk.filename, headingPath: chunk.headingPath, headings: [...chunk.headingPath], value,
+  });
+  return value;
 }
 
 /**
@@ -211,10 +380,7 @@ export function annotateEvidenceRelevance(
     // A keyword fan-out already scored the chunk against the queries that found it.
     if (chunk.queryRelevance !== undefined) return chunk.queryRelevance;
     if (chunk.lexicalMatch === undefined) return 1;
-    const haystack = [chunk.text, chunk.headingPath.join(" "), chunk.filename].join("\n");
-    return chunk.lexicalMatch === "phrase"
-      ? phraseRelevance(args.query, haystack)
-      : lexicalRelevance(args.query, haystack);
+    return memoizedLexicalRelevance(args.query, chunk);
   };
   const annotated: EvidenceRetrievalResult[] = results.map((result) => ({
     adapter: result.adapter,

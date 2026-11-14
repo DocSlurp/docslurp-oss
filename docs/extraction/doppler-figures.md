@@ -385,11 +385,12 @@ returned; a slot resolves to a file URL through the document detail, under the f
 whose `images_status` is `resumable` and that have a stored manifest, and, for a sharded document, each resumable shard
 as its own entry (`shard: { first, last }`), oldest first with a keyset cursor, with the hashes a resume must present and
 the manifest's SHA-256. A shard's resume writes with `resume: { first, last }` and that shard alone: only its pages' rows
-are upserted and pruned, its record's `resumes` goes up by one (capped at 3 like a whole document's), and the level is
-recomputed from all rows and shard records. A sharded document's resumes across all its shards are capped too, at
-`min(3 x shards, 12)`: past it neither the queue lists nor the ledger accepts a resume of any of its shards. The host counts resumes itself (previous + 1 on each resume write; the
-manifest's own `resumes` is telemetry only) and leaves a document out of the queue at 3, so a manifest that never finishes
-cannot keep it there. A resume worker rebuilds Doppler's DIR from stored state with `downloadDopplerImagesDir`: it
+are upserted and pruned, its record's `resumes` goes up by one, and the level is recomputed from all rows and shard
+records. The ledger's own caps are backstops: 128 resumes per unit (a shard or a whole document) and 512 across a
+sharded document's shards. Past them neither the queue lists nor the ledger accepts a resume (`resume-cap`). The resume
+policy (see "Caps" below) scales with pages and stops far below them. The host counts resumes itself (previous + 1 on
+each resume write; the manifest's own `resumes` is telemetry only), so a manifest that never finishes cannot keep a
+document in the queue. A resume worker rebuilds Doppler's DIR from stored state with `downloadDopplerImagesDir`: it
 downloads `images/manifest.jsonl`, checks its SHA-256 against the level's `manifest_sha256`, validates it line by line,
 and downloads each `extracted` file from the key derived from its id (never a listing) into `DIR/page-NNNN/...`, checking
 its size and SHA-256. `DIR` must be absent or an empty directory. It then runs `pdftomarkdown --images-resume DIR` in the PDF VM with the
@@ -476,15 +477,64 @@ no organization default above it.
   run: the release, the heartbeat, launch counting, the ledger writes (`scope.lease`), the pending and stored hooks, and
   the slot update. The lease is renewed every two minutes while a unit runs, and a lease that is lost aborts the unit.
 
-**Caps.**
+**Caps.** Every limit lives in `packages/shared/src/figure-resume-limits.ts`, with its environment override and bounds.
+An override outside its bounds, or one that does not parse, keeps the default and logs a warning; it is never clamped.
+One resume VM returns at most 64 MiB and 2,048 files, whatever the document's own allowance (2,048 + 2 per page files,
+64 MiB + 1.25 MiB per page, up to 32,768 files and 4 GiB). So a big figure-heavy document needs many passes, and a small
+one at most one or two. The caps scale with pages:
 
-- Each unit (a shard, a gap or the document) is closed after 3 failures of its own (`resume_unit_failures`). One
-  failing shard never blocks the others.
-- A document gets `max(6, min(3 × units, 12))` VM launches over its lifetime. That is #355's per-document resume total,
-  with its shards and gaps as units. No request resets it; only a new run does.
-- Each launch's timeout is capped at what is left of the organization's daily VM budget, and that time is reserved at
-  launch, then settled to the real time on return. With under a minute left, the unit waits for the next UTC day and no
-  failure is counted.
+- *Launches:* 1.5 × the passes the allowance needs after the first pass, and at least one per open unit, clamped to
+  `DOCSLURP_FIGURE_RESUME_LAUNCH_FLOOR`..`_CEILING` (default 3..128). 10 pages: 3. 1,000 pages: 30. 20,000 pages: 95.
+- *VM time:* `DOCSLURP_FIGURE_RESUME_VM_HEADROOM` (2) × the expected passes × one launch's estimated time. A launch is
+  `DOCSLURP_FIGURE_RESUME_VM_MS_PER_LAUNCH` (3,000) plus `DOCSLURP_FIGURE_RESUME_VM_MS_PER_PAGE` (50) for each page it
+  converts: one shard of a sharded document, every page of an unsharded one (gaps or not). The two constants are
+  estimates until measured (TODO.md); each pass logs `resume pass … pages vmMs msPerPage estimateMs` for tuning. Clamped to
+  `DOCSLURP_FIGURE_RESUME_DOC_VM_SECONDS_FLOOR`..`_CEILING` (180 s..4 h, the ceiling at most 12 h). Grants included, no
+  document's budget passes a hard 12 hours per run. Measured VM time is charged to the document
+  (`resume_vm_ms`), each launch's timeout is capped at what is left, and under a minute left the document stops.
+- *Per unit:* the passes its share of the allowance needs (1.25 MiB a page for a shard; the whole document's expected
+  passes for an unsharded one) plus two, at least 3, at most 128. 625-page shard: 15. 3,000 pages unsharded: 61.
+- *Per-unit strikes:* a unit is closed after 3 failures of its own (`resume_unit_failures`) or
+  `DOCSLURP_FIGURE_RESUME_NO_PROGRESS` resumes of its own without progress (`resume_unit_stalls`). Units run fewest strikes
+  first, then in page order, so a unit that keeps failing yields to the others. A unit closing at its limit, with others
+  still open, resets the document's no-progress count. One failing shard never blocks the others.
+- *No progress:* `DOCSLURP_FIGURE_RESUME_NO_PROGRESS` (3) launched resumes in a row, across units, whose gain is under
+  the minimum (failed ones included) stop the document. With units taken fewest strikes first, that means every open
+  unit is stalling, not one. The gain is measured against what one pass can deliver (64 MiB / 2,048 files), never against
+  the backlog, so a big document storing full passes always progresses. A pass progresses with
+  `DOCSLURP_FIGURE_RESUME_MIN_PROGRESS_PERCENT` (5) of a pass's bytes (3.2 MiB), or that share of its files (103, carrying
+  `DOCSLURP_FIGURE_RESUME_MIN_PROGRESS_BYTES`, 4,096, in all), or that share of the work items one pass could close (at
+  least one). A source that yields one tiny figure a pass on a big backlog still stops. Enough progress resets the count; a resume that
+  never launched a VM does not count.
+- *Per organization:* one resume at a time, and the daily VM budget as before. Each launch's timeout is capped at what is
+  left of the day, reserved at launch and settled to the real time on return. With under a minute left, the unit waits
+  for the next UTC day and no failure is counted.
+- *Backstop:* the ledger refuses a resume write past 128 per unit or 512 per document (`resume-cap`), whatever the policy.
+  The database allows at most 10 grants per run (`resume_grants`, `DOCSLURP_FIGURE_RESUME_MAX_GRANTS`'s bound).
+
+| Document | Old launches | New launches | New VM budget | Expected resume VM time |
+|---|---|---|---|---|
+| 10 pages | 6 (3 per unit) | 3 | 180 s | 1 pass, about 4 s |
+| 1,000 pages, unsharded | 6 | 30 | 2,120 s | 20 passes × 53 s = 1,060 s |
+| 20,000 pages, 32 shards | 12 | 95 | 4,316 s | 63 passes × 34 s = 2,160 s |
+
+**Blocks.** A stopped document is blocked with a reason code (`attempts` for launches, `vm-budget`, `no-progress`; the
+others are `figures-off`, `resume-off`, `stale`, `refused` and `unscanned`), with `resume_blocked_at`, a log line with its
+numbers (`pages`, `launches`, `vmMs`, `stalls`, `grants`) and the `resume.capped` counter by reason. Nothing is dropped:
+the level stays resumable. The document detail (`figureResume`) and the asset ledger (`level.resume`) show `queued`,
+`blocked`, `blockedAt` and `grantsLeft` while the figures are resumable. A bulk request answers `blocked`, the documents
+it skipped by reason.
+
+- A reprocess (a new run) clears every block and counter.
+- A single-document request (`POST /v1/documents/{id}/assets/resume`, or the chat's offer for one document) clears a
+  budget block by granting one extension. The document's launch cap, VM budget and each unit's resume cap grow by half
+  their base again (at least the floors: 3 launches, 180 s, 3 resumes), each unit's strike limits by their base again,
+  and the document's no-progress count resets. A unit's own strike counts are kept, so a poisoned unit stays last. At most `DOCSLURP_FIGURE_RESUME_MAX_GRANTS` (2) per run, so a request buys a bounded amount of VM time.
+  `DOCSLURP_FIGURE_RESUME_MAX_GRANTS=0` is the kill switch: no request extends a budget, and only a reprocess does.
+  The answer carries `reason`, `granted` and `grantsLeft`; past the grants it is `capped` with its reason.
+- Bulk requests and the backstop sweep never grant: they leave budget-blocked documents blocked.
+- `unscanned` is cleared only by a reprocess. Other blocks are cleared by any request, without a grant, and the clear
+  resets `resume_blocked_at` too.
 
 **One unit per claim.** A unit is the unsharded document, one resumable shard, one gap with no shard, or a gap inside a
 shard that is not complete. The last kind runs as that shard's resume narrowed to the gap's pages (`resumePages`). For

@@ -47,4 +47,9 @@ try { await access("/sys/fs/cgroup/cgroup.controllers"); cgroupV2 = true; } catc
 import { execFileSync } from "node:child_process";
 let qpdfVersion = null;
 try { qpdfVersion = /^qpdf version (\d+\.\d+\.\d+)/m.exec(execFileSync("qpdf", ["--version"], { encoding: "utf8", timeout: 10_000 }))?.[1] ?? null; } catch { /* absent */ }
-console.log(JSON.stringify({ protocol: "parser-vm@5", uid: process.getuid?.() ?? null, tools, links, hardening, cgroupV2, qpdfVersion }));
+// capabilities: guest features the host requires per feature, without a protocol bump. "inline-command-budget" (#387):
+// the inline chart step is charged against the quarantine command's budget (inlineStepBudget, measured worker start-up);
+// the host refuses inline charts on an image without it (DOCSLURP_CHART_EXPORT_INLINE=1).
+const { inlineStepBudget } = await import("../dist/chart-export/inline-guest.js");
+const capabilities = typeof inlineStepBudget === "function" ? ["inline-command-budget"] : [];
+console.log(JSON.stringify({ protocol: "parser-vm@5", uid: process.getuid?.() ?? null, tools, links, hardening, cgroupV2, qpdfVersion, capabilities }));

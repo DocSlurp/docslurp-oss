@@ -8,7 +8,7 @@ import { withApiErrorDetails } from "../lib/api-error.js";
 
 export const DEFAULT_PROJECT_NAME = "Default";
 
-export type ProjectAccessErrorCode = Extract<ApiErrorCode, "organization_not_found" | "project_not_found" | "project_forbidden" | "project_ambiguous" | "invalid_request" | "forbidden">;
+export type ProjectAccessErrorCode = Extract<ApiErrorCode, "organization_not_found" | "project_not_found" | "project_forbidden" | "project_ambiguous" | "invalid_request" | "forbidden" | "editor_required">;
 
 /**
  * A project reference that cannot be served to the caller. Extends Hono's

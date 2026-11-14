@@ -16,6 +16,9 @@ const listenForRunEventsMock = vi.fn();
 const listRunEventsMock = vi.fn();
 const isApiKeyLiveMock = vi.fn(async () => true);
 vi.mock("../services/api-key-liveness.js", () => ({ isApiKeyLive: isApiKeyLiveMock }));
+// Who may reprocess is decided against the database (reprocess-editors-only.db.test.ts); these route tests stub it.
+const denyReprocessMock = vi.fn(async (..._args: unknown[]): Promise<Response | null> => null);
+vi.mock("../lib/reprocess-access.js", () => ({ denyReprocessOfVisible: denyReprocessMock, callerCanReprocess: vi.fn(async () => true) }));
 
 class MockReprocessRejectedError extends Error {
   constructor(
@@ -121,6 +124,7 @@ describe("runsRoutes validation", () => {
     reprocessRunMock.mockReset();
     retryRunMock.mockReset();
     startPipelineWorkflowMock.mockReset();
+    getRunMock.mockResolvedValue({ id: "run-1", projectId: "ws-1", orgId: "org-1" });
   });
 
   it("returns preview validation issues before querying preview estimates", async () => {

@@ -15,9 +15,9 @@ import { barPlot, chartXml, docx, genericBar, pptx, xlsx } from "./extractors/__
 import { extractDeterministicVisuals } from "./extractors/index.js";
 import { CHART_EXTRACT_LIMITS } from "./extractors/limits.js";
 import { chartExportInlineEnabled, freeInlineMode, inlineChartsInProcess, inlineHasWork, readStoredInlineCharts, validateInlineCharts } from "./inline.js";
-import { INLINE_CHART_LIMITS, inlineChartPlan, inlineDeadlineMs, scriptTypes } from "./inline-guest.js";
+import { INLINE_CHART_LIMITS, INLINE_COMMAND_BUDGET_CAPABILITY, INLINE_MIN_REMAINING_MS, INLINE_STEP_TAIL_MS, inlineChartPlan, inlineDeadlineMs, inlineStepBudget, scriptTypes } from "./inline-guest.js";
 import { createVmDeterministicVisualExtractor } from "./vm-extractor.js";
-import { inlineChartRequest } from "../stages/quarantine.js";
+import { inlineChartAdmission, inlineChartRequest } from "../stages/quarantine.js";
 
 const run = promisify(execFile);
 const workerRoot = fileURLToPath(new URL("../../", import.meta.url));
@@ -177,15 +177,26 @@ console.log(JSON.stringify({ status: out.status, calls: out.result?.calls, visua
       await run(process.execPath, [path.join(hooked, "scripts/chart-export-extract.mjs"), input, request, output], { cwd: workerRoot, env: { ...process.env, DOCSLURP_CHART_GUEST_TEST_FAULT: fault } });
       return JSON.parse(await readFile(output, "utf8"));
     }
-    it.each([["crash", "unit-crashed"], ["oom", "unit-crashed"]])("a unit that %ss is lost alone and counted; the other chart stands; the same as the standalone guest", async (fault, reason) => {
+    // An oom unit that outgrows the file's measured work time (council #387 M2: a small file gets ~0.5 s of work, not the
+    // 5 s start-up allowance) ends as unit-timeout, before the memory watch would call it a crash: lost alone either way.
+    it.each([["crash", ["unit-crashed"]], ["oom", ["unit-crashed", "unit-timeout"]]])("a unit that %ss is lost alone and counted; the other chart stands; the same visuals as the standalone guest", async (fault, reasons) => {
       const bytes = deck();
       const out = await contained(bytes, "office", `${fault}:chart2`);
       expect(out.status).toBe("ok");
       const result = (out as { result: { visuals: unknown[]; deferred?: Array<{ reason: string; count: number }> } }).result;
       expect(result.visuals).toHaveLength(1);
-      expect(result.deferred).toEqual([expect.objectContaining({ reason, count: 1 })]);
+      // The lost unit is counted. With oom, the rest may be counted too, never dropped: as guest-deadline when the unit's
+      // growth used up the file's work time, or as one unplaced unit-crashed when the count-only worker after it cannot
+      // start under the memory the dying worker has not yet returned.
+      expect(result.deferred!.length).toBeGreaterThanOrEqual(1);
+      expect(reasons).toContain(result.deferred![0]!.reason);
+      for (const d of result.deferred!) expect([...reasons, "guest-deadline"]).toContain(d.reason);
+      if (fault === "crash") expect(result.deferred).toEqual([expect.objectContaining({ reason: "unit-crashed", count: 1 })]);
+      else expect(result.deferred!.length).toBeLessThanOrEqual(2);
       expect(validateInlineCharts(out)).toMatchObject({ status: "ok" });
-      expect(result).toEqual(await standaloneWith(bytes, "office", `${fault}:chart2`));
+      const standalone = await standaloneWith(bytes, "office", `${fault}:chart2`) as { visuals: unknown[] };
+      expect(result.visuals).toEqual(standalone.visuals);
+      if (fault === "crash") expect(result).toEqual(standalone);
     }, 60_000);
     it("the production bundle ignores the fault variable: nothing is lost", async () => {
       const file = path.join(dir, `prod-${Math.random().toString(36).slice(2)}`);
@@ -201,6 +212,68 @@ console.log(JSON.stringify({ status: out.status, calls: out.result?.calls, visua
         delete process.env.DOCSLURP_CHART_GUEST_TEST_FAULT;
       }
     }, 60_000);
+    it("a slow inspection refuses the charts (command-budget) instead of timing out quarantine (council #369 L4)", async () => {
+      const hang = path.join(dir, `hang-${Math.random().toString(36).slice(2)}.mjs`);
+      await writeFile(hang, `import { parentPort } from "node:worker_threads";\nparentPort.on("message", () => { for (;;); });`);
+      const { inlineCharts } = await import(pathToFileURL(path.join(workerRoot, "scripts/chart-inline.mjs")).href);
+      const inspection = { sniffed: { encoding: "utf-8", container: null }, archive: null };
+      const svgBytes = Buffer.from(genericBar(["A", "B"], [1, 2], 3));
+      const svg = path.join(dir, `late-${Math.random().toString(36).slice(2)}.svg`);
+      await writeFile(svg, svgBytes);
+      // The inspection took 36 s of the command: too little left to start a worker.
+      const started = Date.now();
+      const out = await inlineCharts(svgBytes, { kind: "svg", diagrams: true }, inspection, svg, pathToFileURL(hang), null, { commandStartedAt: performance.now() - 36_000 });
+      expect(out).toEqual({ status: "refused", reason: "command-budget", ms: 0 });
+      expect(Date.now() - started).toBeLessThan(1_000);
+      expect(inlineHasWork(validateInlineCharts(out))).toBe(true);
+      // 33.5 s in: the step starts, but a hanging worker is cut at the command cutoff, not at the step's own (longer) end.
+      const big = Buffer.concat([svgBytes, Buffer.alloc(2 * 1024 * 1024, 0x20)]);
+      const bigFile = path.join(dir, `late-big-${Math.random().toString(36).slice(2)}.svg`);
+      await writeFile(bigFile, big);
+      const remaining = INLINE_CHART_LIMITS.commandCutoffMs - 33_500;
+      expect(INLINE_CHART_LIMITS.startupMs + inlineDeadlineMs(big.length)).toBeGreaterThan(remaining + 2_500);
+      const clamped = await inlineCharts(big, { kind: "svg", diagrams: true }, inspection, bigFile, pathToFileURL(hang), null, { commandStartedAt: performance.now() - 33_500 });
+      expect(clamped).toMatchObject({ status: "refused", reason: "deadline" });
+      expect((clamped as { ms: number }).ms).toBeGreaterThanOrEqual(remaining - 100);
+      expect((clamped as { ms: number }).ms).toBeLessThanOrEqual(remaining + INLINE_STEP_TAIL_MS + 500);
+    }, 30_000);
+    it("the real quarantine guest charges charts against its own command clock: a slow inspection refuses them (council #387 L1)", async () => {
+      // The guest process's clock is moved 36 s ahead (as if the inspection had taken that long); quarantine-inspect.mjs
+      // must pass its process start as the command start, or the step would think it has its full budget.
+      const late = path.join(dir, `late-clock-${Math.random().toString(36).slice(2)}.mjs`);
+      await writeFile(late, `import { performance } from "node:perf_hooks";\nconst now = performance.now.bind(performance);\nperformance.now = () => now() + 36_000;\n`);
+      const tag = Math.random().toString(36).slice(2);
+      const input = path.join(dir, `${tag}-late.svg`);
+      const options = path.join(dir, `${tag}-options.json`);
+      const output = path.join(dir, `${tag}-out.json`);
+      await writeFile(input, genericBar(["North", "South"], [4, 6], 8));
+      await writeFile(options, JSON.stringify({ filename: "late.svg", policy: POLICY, charts: { kind: "svg", diagrams: true } }));
+      await run(process.execPath, ["--import", pathToFileURL(late).href, path.join(workerRoot, "scripts/quarantine-inspect.mjs"), input, options, output], { cwd: workerRoot });
+      const out = JSON.parse(await readFile(output, "utf8")) as { charts: unknown; sniffed: unknown };
+      expect(out.charts).toEqual({ status: "refused", reason: "command-budget", ms: 0 });
+      // The inspection itself stands.
+      expect(out.sniffed).toBeTruthy();
+      // The same file with the real clock exports normally (the shift alone made the difference).
+      await run(process.execPath, [path.join(workerRoot, "scripts/quarantine-inspect.mjs"), input, options, output], { cwd: workerRoot });
+      expect((JSON.parse(await readFile(output, "utf8")) as { charts: { status: string } }).charts.status).toBe("ok");
+    }, 60_000);
+    it("the step ends at the worker's measured start plus the file's deadline, not a flat start-up allowance (council #387 M2)", async () => {
+      // A hostile unit that holds the worker as soon as it is ready: the step must end near deadlineBaseMs after ready,
+      // never banking the 5 s start-up allowance as extra time for the file.
+      const hold = path.join(dir, `hold-${Math.random().toString(36).slice(2)}.mjs`);
+      await writeFile(hold, `import { parentPort } from "node:worker_threads";\nparentPort.on("message", (task) => { parentPort.postMessage({ t: "ready", deadlineMs: task.deadlineMs }); for (;;); });`);
+      const { inlineCharts } = await import(pathToFileURL(path.join(workerRoot, "scripts/chart-inline.mjs")).href);
+      const svgBytes = Buffer.from(genericBar(["A", "B"], [1, 2], 3));
+      const svg = path.join(dir, `hold-${Math.random().toString(36).slice(2)}.svg`);
+      await writeFile(svg, svgBytes);
+      const out = await inlineCharts(svgBytes, { kind: "svg", diagrams: true }, { sniffed: { encoding: "utf-8", container: null }, archive: null }, svg, pathToFileURL(hold), null);
+      expect(out).toMatchObject({ status: "refused", reason: "deadline" });
+      const ms = (out as { ms: number }).ms;
+      expect(ms).toBeGreaterThanOrEqual(inlineDeadlineMs(svgBytes.length) - 50);
+      // Ready within a few hundred ms here, then the deadline, then the exit wait: far under the 5 s allowance.
+      expect(ms).toBeLessThan(inlineDeadlineMs(svgBytes.length) + INLINE_CHART_LIMITS.terminateWaitMs + 1_500);
+      expect(ms).toBeLessThan(INLINE_CHART_LIMITS.startupMs);
+    }, 30_000);
     it("the compile cache is used only read-only, and handed to every worker (#364 compileCacheDir, council r10)", async () => {
       const { readOnlyCompileCache } = await import(pathToFileURL(path.join(workerRoot, "scripts/chart-inline.mjs")).href);
       const cache = path.join(dir, `cache-${Math.random().toString(36).slice(2)}`);
@@ -406,6 +479,40 @@ describe("inline chart plan and host validation", () => {
     expect(inlineDeadlineMs(100 * 1024 * 1024)).toBe(10_000);
   });
 
+  it("charges the inline step against the quarantine command's budget (council #369 L4, #383)", () => {
+    const MiB = 1024 * 1024;
+    // A fast inspection: the step keeps its own size-scaled budget.
+    const fresh = inlineStepBudget({ now: 200, commandStartedAt: 0, sizeBytes: 4 * MiB })!;
+    expect(fresh.endsAt - 200).toBe(INLINE_CHART_LIMITS.startupMs + inlineDeadlineMs(4 * MiB));
+    expect(fresh.softMs).toBe(INLINE_CHART_LIMITS.startupMs + Math.floor(inlineDeadlineMs(4 * MiB) * INLINE_CHART_LIMITS.softDeadlineShare));
+    expect(fresh.deadlineMs).toBe(inlineDeadlineMs(4 * MiB));
+    // A slow inspection: the step ends at the command cutoff, its soft deadline inside it.
+    const late = inlineStepBudget({ now: 33_000, commandStartedAt: 0, sizeBytes: 4 * MiB })!;
+    expect(late.endsAt).toBe(INLINE_CHART_LIMITS.commandCutoffMs);
+    expect(late.softMs).toBeLessThan(late.endsAt - 33_000);
+    // Cut to the minimum: start-up keeps its whole allowance, the soft deadline the share of what is left after it (L2).
+    const tight = inlineStepBudget({ now: INLINE_CHART_LIMITS.commandCutoffMs - INLINE_MIN_REMAINING_MS, commandStartedAt: 0, sizeBytes: 4 * MiB })!;
+    expect(tight.softMs).toBe(INLINE_CHART_LIMITS.startupMs + Math.floor((INLINE_MIN_REMAINING_MS - INLINE_CHART_LIMITS.startupMs) * INLINE_CHART_LIMITS.softDeadlineShare));
+    expect(tight.softMs).toBeGreaterThan(INLINE_CHART_LIMITS.startupMs);
+    expect(tight.softMs).toBeLessThan(INLINE_MIN_REMAINING_MS);
+    // Too little left to start a worker: no budget (the guest refuses with command-budget).
+    expect(inlineStepBudget({ now: INLINE_CHART_LIMITS.commandCutoffMs - INLINE_MIN_REMAINING_MS + 1, commandStartedAt: 0, sizeBytes: 10 })).toBeNull();
+    expect(inlineStepBudget({ now: INLINE_CHART_LIMITS.commandCutoffMs - INLINE_MIN_REMAINING_MS, commandStartedAt: 0, sizeBytes: 10 })).not.toBeNull();
+    expect(inlineStepBudget({ now: 59_000, commandStartedAt: 0, sizeBytes: 10 })).toBeNull();
+    expect(inlineStepBudget({ now: Number.NaN, commandStartedAt: 0, sizeBytes: 10 })).toBeNull();
+    // Whenever the inspection finishes, the step (plus its count-only tail) ends well before the command times out.
+    for (let now = 0; now <= 60_000; now += 250) {
+      for (const size of [0, 1024, 4 * MiB, 100 * MiB]) {
+        const budget = inlineStepBudget({ now, commandStartedAt: 0, sizeBytes: size });
+        if (budget) expect(budget.endsAt + INLINE_STEP_TAIL_MS).toBeLessThanOrEqual(INLINE_CHART_LIMITS.commandTimeoutMs - 15_000);
+      }
+    }
+    // The refusal is a valid, counted answer: the host records it as a deferral, never a silent skip.
+    const refused = validateInlineCharts({ status: "refused", reason: "command-budget", ms: 0 });
+    expect(refused).toEqual({ status: "refused", reason: "command-budget", ms: 0 });
+    expect(inlineHasWork(refused)).toBe(true);
+  });
+
   it("the HTML and JSON prefilters skip only files that extract nothing (council L1, M3)", () => {
     const skipped: Array<readonly ["html" | "json", string]> = [
       ["html", "<html><p>Expansion to Tokyo.</p><pre>{\"mark\":\"bar\"}</pre></html>"],
@@ -494,6 +601,41 @@ describe("inline chart plan and host validation", () => {
     expect(freeInlineMode(free, env)).toBe(true);
     expect(freeInlineMode({ chartExport: { tier: "models" } }, env)).toBe(false);
   });
+
+  it("admits inline charts only on an image with the command-budget guest, and free ones only with an org free-VM grant (council #387 M1, M2)", async () => {
+    const env = { DOCSLURP_CHART_EXPORT: "on", DOCSLURP_CHART_EXPORT_INLINE: "1", DOCSLURP_CHART_EXPORT_FREE_VM_RUNS_PER_ORG_HOUR: "7" };
+    const free = { chartExport: { tier: "free" } };
+    const models = { chartExport: { tier: "models" } };
+    const has = (capability: string) => capability === INLINE_COMMAND_BUDGET_CAPABILITY;
+    const grant = (granted: boolean | Error) => ({ reserveChartExportFreeVmRun: vi.fn(async () => { if (granted instanceof Error) throw granted; return granted; }) });
+    const base = { documentId: "d1", runId: "r1", orgId: "o1", env, hasCapability: has };
+    // An image without the capability (an older parser-vm@5): refused, counted, for every tier, before any reservation.
+    const store = grant(true);
+    for (const pipeline of [free, models]) {
+      expect(await inlineChartAdmission({ ...base, pipeline, store, hasCapability: () => false })).toEqual({ status: "refused", reason: "image-unsupported", ms: 0 });
+    }
+    expect(store.reserveChartExportFreeVmRun).not.toHaveBeenCalled();
+    // No sandbox known yet: refused the same way, and the log says the sandbox is not ready rather than blaming the image.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect(await inlineChartAdmission({ ...base, pipeline: free, store, hasCapability: () => "sandbox-not-ready" })).toEqual({ status: "refused", reason: "image-unsupported", ms: 0 });
+    expect(warn.mock.calls.flat().join(" ")).toMatch(/parser sandbox not ready/);
+    expect(warn.mock.calls.flat().join(" ")).not.toMatch(/image does not report/);
+    warn.mockRestore();
+    // Free: one reservation against the org's hourly cap (the grant a standalone fallback reuses); granted goes ahead.
+    const ok = grant(true);
+    expect(await inlineChartAdmission({ ...base, pipeline: free, store: ok })).toBeNull();
+    expect(ok.reserveChartExportFreeVmRun).toHaveBeenCalledWith({ orgId: "o1", runId: "r1", documentId: "d1", perHour: 7 });
+    // Over the cap, a failed reservation, no store or no org: refused, counted (fail closed).
+    for (const args of [{ store: grant(false) }, { store: grant(new Error("db down")) }, { store: undefined }, { store: grant(true), orgId: null }]) {
+      expect(await inlineChartAdmission({ ...base, pipeline: free, ...args })).toEqual({ status: "refused", reason: "free-vm-cap", ms: 0 });
+    }
+    // Models is billed and passes spend admission instead: no free-VM reservation.
+    const billed = grant(false);
+    expect(await inlineChartAdmission({ ...base, pipeline: models, store: billed })).toBeNull();
+    expect(billed.reserveChartExportFreeVmRun).not.toHaveBeenCalled();
+    // The admission refusals are valid, counted answers.
+    for (const reason of ["image-unsupported", "free-vm-cap"]) expect(inlineHasWork(validateInlineCharts({ status: "refused", reason, ms: 0 }))).toBe(true);
+  });
 });
 
 describe("the extractor uses the inline answer instead of a parser VM run", () => {
@@ -538,6 +680,35 @@ describe("the extractor uses the inline answer instead of a parser VM run", () =
     expect(inlineHasWork({ status: "ok", ms: 1, result: { ...visuals, visuals: [], deferred: [{ svgIndex: 0, count: 38, reason: "unit-crashed" }] } })).toBe(true);
     expect(inlineHasWork({ status: "ok", ms: 1, result: { ...visuals, visuals: [], overflow: 3 } })).toBe(true);
     expect(inlineHasWork({ status: "skipped", reason: "no-signal" })).toBe(false);
+  });
+
+  it("an admission refusal (image-unsupported, free-vm-cap) is a counted deferral and boots no standalone VM", async () => {
+    for (const [reason, deferral] of [["image-unsupported", "guest-unavailable"], ["free-vm-cap", "vm-cap"]] as const) {
+      const { runs, deps, extract } = extractor();
+      const out = await extract({ ...(input({ kind: "svg", status: "refused", reason, ms: 0 }) as object), signals: { candidates: 1 }, admitVmRun: vi.fn(async () => true) } as never) as { partials: unknown[]; deferred?: Array<{ reason: string }> };
+      expect(runs, reason).toEqual([]);
+      expect(deps.storage.downloadToTempFile, reason).not.toHaveBeenCalled();
+      expect(out.deferred, reason).toEqual([expect.objectContaining({ input: "source", reason: deferral, count: 1 })]);
+    }
+  });
+
+  it("every standalone fallback of a free document asks the org free-VM cap first (council #387 L1)", async () => {
+    // result-too-large, answer-missing, and no inline answer at all (a worker on an image or build without inline charts
+    // during a mixed-version rollout): each is a standalone source run, and each needs the grant.
+    const cases: Array<[string, unknown]> = [
+      ["result-too-large", { kind: "svg", status: "refused", reason: "result-too-large", ms: 0 }],
+      ["answer-missing", { kind: "svg", status: "refused", reason: "answer-missing", ms: 0 }],
+      ["no inline answer", undefined],
+    ];
+    for (const [name, inline] of cases) {
+      const { runs, deps, extract } = extractor();
+      const admitVmRun = vi.fn(async () => false);
+      const out = await extract({ ...(input(inline) as object), signals: { candidates: 1 }, admitVmRun } as never) as { deferred?: Array<{ reason: string }> };
+      expect(admitVmRun, name).toHaveBeenCalledTimes(1);
+      expect(runs, name).toEqual([]);
+      expect(deps.storage.downloadToTempFile, name).not.toHaveBeenCalled();
+      expect(out.deferred, name).toEqual(expect.arrayContaining([expect.objectContaining({ input: "source", reason: "vm-cap" })]));
+    }
   });
 
   it("result-too-large and answer-missing are the refusals that go to the standalone guest", async () => {

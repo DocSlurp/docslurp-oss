@@ -1,4 +1,4 @@
-import { deferredProfilesEnabled, isBillingEnforced, PUBLIC_ERROR_MESSAGES, publicDiagnostics, publicDocumentError, resolveManagedPipeline, parseManagedPipelineOverrides, storedManagedPipeline, stripManagedPipelineFields, type ManagedPipelineOverrides } from "@docslurp/shared";
+import { EDITOR_REQUIRED_CODE, EDITOR_REQUIRED_MESSAGE, deferredProfilesEnabled, isBillingEnforced, PUBLIC_ERROR_MESSAGES, publicDiagnostics, publicDocumentError, resolveManagedPipeline, parseManagedPipelineOverrides, storedManagedPipeline, stripManagedPipelineFields, type ManagedPipelineOverrides } from "@docslurp/shared";
 import { chartExportDefaults, upgradeStoredPipelineChartExport } from "@docslurp/shared";
 import { markProjectAutoNamed } from "./project-naming.js";
 import { forgetProjectProviderPolicy } from "../lib/provider-policy.js";
@@ -619,6 +619,32 @@ export async function ensureDefaultProject(args: {
 }
 
 /**
+ * The id of the organization's default project (created when missing), without the access read and project record
+ * `ensureDefaultProject` adds. Membership of an explicit `orgId` is still checked. The caller MUST authorize the
+ * returned id (for search: `authorizeActorProjectSearch`) before reading anything of the project; this is only the
+ * reference resolution. Reads first and inserts only when the default is missing, so a warm request issues no write.
+ */
+export async function resolveDefaultProjectId(args: { userId: string; orgId?: string | null }): Promise<string> {
+  const orgId = args.orgId
+    ? await sql<{ id: string }[]>`
+        select om.org_id as id
+        from org_memberships om
+        where om.org_id = ${args.orgId} and om.user_id = ${args.userId}
+        limit 1
+      `.then((rows) => rows[0]?.id ?? null)
+    : (await resolveDefaultOrganization(args.userId)).id;
+  if (!orgId) throw new ProjectAccessError(404, "organization_not_found", "Organization not found");
+  const readDefault = async () => (await sql<{ id: string }[]>`select id from projects where org_id = ${orgId} and is_default limit 1`)[0]?.id;
+  let id = await readDefault();
+  if (!id) {
+    await insertDefaultProject(sql, { orgId, userId: args.userId });
+    id = await readDefault();
+  }
+  if (!id) throw new ProjectAccessError(403, "project_forbidden", "Default project is not accessible");
+  return id;
+}
+
+/**
  * Read-only lookup of the organization's default project (personal org when `orgId` is omitted). Unlike
  * `ensureDefaultProject` it creates nothing: null when the org, membership or default project is missing.
  */
@@ -721,7 +747,7 @@ async function readProject(projectId: string, orgId: string): Promise<ProjectRec
     from projects w
     -- Current corpus totals are trigger-maintained; never aggregate documents here.
     left join project_corpus_stats cs on cs.project_id = w.id
-    -- Search-session and chat-turn totals are trigger-maintained too (0160): at most 8 counter rows per project,
+    -- Search-session and chat-turn totals are trigger-maintained too (0162): at most 8 counter rows per project,
     -- keyed by the project already authorized above, so history is never counted here.
     left join lateral (
       select sum(a.search_sessions) as search_sessions, sum(a.chat_turns) as chat_turns
@@ -828,7 +854,7 @@ export async function listProjects(userId: string): Promise<ProjectRecord[]> {
     from projects w
     -- Current corpus totals are trigger-maintained; never aggregate documents here.
     left join project_corpus_stats cs on cs.project_id = w.id
-    -- Search-session and chat-turn totals are trigger-maintained too (0160): at most 8 counter rows per project,
+    -- Search-session and chat-turn totals are trigger-maintained too (0162): at most 8 counter rows per project,
     -- keyed by the project already authorized above, so history is never counted here.
     left join lateral (
       select sum(a.search_sessions) as search_sessions, sum(a.chat_turns) as chat_turns
@@ -1226,7 +1252,7 @@ export async function cloneProject(
 
   const access = await assertProjectAccess(projectId, userId);
   if (!canEditProject(access, userId)) {
-    throw new ProjectAccessError(403, "project_forbidden", "Forbidden");
+    throw new ProjectAccessError(403, EDITOR_REQUIRED_CODE, EDITOR_REQUIRED_MESSAGE);
   }
 
   const clone = await createProject({
@@ -1299,7 +1325,7 @@ export async function rollbackProjectVersion(
 ): Promise<ProjectRecord> {
   const access = await assertProjectAccess(projectId, userId);
   if (!canEditProject(access, userId)) {
-    throw new ProjectAccessError(403, "project_forbidden", "Forbidden");
+    throw new ProjectAccessError(403, EDITOR_REQUIRED_CODE, EDITOR_REQUIRED_MESSAGE);
   }
 
   const [row] = await sql<ProjectVersionRow[]>`

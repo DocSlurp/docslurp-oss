@@ -9,6 +9,7 @@ import {
   type PipelineFeatures,
   type ProjectRun,
 } from "@docslurp/shared";
+import { ingestRecordFields } from "@docslurp/shared";
 
 import type { RunUsageCostSummary } from "./usage-attribution.js";
 import { toPublicRunRowStage } from "../lib/public-run-stage.js";
@@ -45,6 +46,8 @@ export type ProjectRunRow = {
   error: string | null;
   created_at: string | Date;
   updated_at: string | Date;
+  ingest_version?: number | null;
+  ingest_capabilities?: string[] | null;
 };
 
 export type DocumentRow = {
@@ -77,6 +80,8 @@ export type DocumentRow = {
   indexing_mode?: string | null;
   created_at: string | Date;
   updated_at: string | Date;
+  ingest_version?: number | null;
+  ingest_capabilities?: string[] | null;
 };
 
 export function serializeTimestamp(value: string | Date): string {
@@ -141,6 +146,7 @@ export function mapProjectRun(row: ProjectRunRow, cost?: Pick<RunUsageCostSummar
     stats: publicDiagnostics(jsonRecord(row.stats)),
     artifacts: jsonRecord(row.artifacts),
     error: publicDocumentError(row.error),
+    ...ingestRecordFields(row),
     createdAt: serializeTimestamp(row.created_at),
     updatedAt: serializeTimestamp(row.updated_at),
   });
@@ -170,6 +176,7 @@ export function mapDocument(row: DocumentRow): DocumentRecord {
     tags: row.tags ?? [],
     supersededAt: row.superseded_at ? serializeTimestamp(row.superseded_at) : null,
     supersededByDocumentId: row.superseded_by_document_id ?? null,
+    ...ingestRecordFields(row),
     createdAt: serializeTimestamp(row.created_at),
     updatedAt: serializeTimestamp(row.updated_at),
   });

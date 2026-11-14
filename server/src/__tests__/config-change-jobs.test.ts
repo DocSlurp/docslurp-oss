@@ -566,8 +566,11 @@ describe("chart export estimates", () => {
     const free = await plan("free", "machine");
     expect(free?.impact.kind).toBe("reindex-recommended");
     expect(free?.estimate?.basis ?? "").not.toMatch(/chart export/);
-    // In the app the default is already free: nothing for stored documents.
-    expect((await plan("free", "app"))?.impact.kind).not.toBe("reindex-recommended");
+    // The app default is off too (the code default): free is an optional reindex there as well.
+    expect((await plan("free", "app"))?.impact.kind).toBe("reindex-recommended");
+    // A deployment whose app default is free: nothing for stored documents.
+    const appFree = { ...env, DOCSLURP_CHART_EXPORT_APP_DEFAULT: "free" };
+    expect((await change.planProjectChange({ projectId: "w", userId: "u1", input: { apply: "reindex" }, pipelineOverrides: { chartExport: { tier: "free" } } as never, env: appFree, origin: "app" }))?.impact.kind).not.toBe("reindex-recommended");
     // Off applies to new uploads only.
     expect((await plan("off", "app"))?.impact.kind).toBe("new-uploads");
     // The origin is recorded on the plan, so the re-index runs it queues resolve the same way.
@@ -576,7 +579,9 @@ describe("chart export estimates", () => {
 
   it("a reindex on a project with no tier keeps each document's source-run tier and records the caller's origin (M5, T3)", async () => {
     await seed({ credits: 10_000, documents: 2 });
-    // The documents were uploaded from the app with free chart exports (their run's stamp).
+    // Callers may choose free explicitly here, so a replay keeps a source run's free tier on a project with no tier.
+    vi.stubEnv("DOCSLURP_CHART_EXPORT_FREE_EXPLICIT", "on");
+    // The documents were uploaded with free chart exports (their run's stamp).
     await sql`update project_runs set pipeline = jsonb_set(pipeline, '{chartExport}', ${sql.json({ tier: "free", formats: ["description", "mermaid"], diagrams: true })}) where id = 'src'`;
     const plan = await change.planProjectChange({ projectId: "w", userId: "u1", input: { ...embeddingChange(), apply: "reindex" } as never, origin: "machine" });
     const applied = await change.applyProjectChange({ plan: plan!, userId: "u1" });
@@ -585,6 +590,7 @@ describe("chart export estimates", () => {
     expect(runs.length).toBeGreaterThan(0);
     // An API-key reindex (machine default off) does not drop the documents' free exports.
     for (const run of runs) expect(run).toMatchObject({ origin: "machine", pipeline: { chartExport: { tier: "free" } } });
+    vi.unstubAllEnvs();
   });
 
   it("a reindex after the project moved from models to unset inherits at most the project's current tier (R2-M1)", async () => {

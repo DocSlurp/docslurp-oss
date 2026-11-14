@@ -1,4 +1,4 @@
-import { pageRenderSlot, pageRenderDpi, pageRenderCapabilities, parseSourceRescanRequired, type ParseSourceDecisionColumns } from "@docslurp/shared";
+import { PII_BLOCKED_DOCUMENT_STATUS, type DataUnavailableReason, pageRenderSlot, pageRenderDpi, pageRenderCapabilities, parseSourceRescanRequired, type ParseSourceDecisionColumns } from "@docslurp/shared";
 import { canEditProject, getProjectAccess } from "./organizations.js";
 import { sql } from "../db.js";
 import { startPageRenderWorkflow } from "../lib/temporal.js";
@@ -15,7 +15,8 @@ export async function requestDocumentPageRender(documentId: string, pageNumber: 
   if (!Number.isInteger(pageNumber) || pageNumber < 1 || pageNumber > doc.pageCount) return { status: "missing" as const };
   if (start) {
     const access = await getProjectAccess(doc.projectId, userId);
-    if (!access || !canEditProject(access, userId)) return { status: "missing" as const };
+    // Starting a render spends: editors only. The document is visible here, so say so (403), not "missing".
+    if (!access || !canEditProject(access, userId)) return { status: "editor-required" as const };
   }
   const observation=doc.runId?{kind:"page-image" as const,documentId:doc.id,runId:doc.runId,pageNumber,quality}:undefined;
   const dpi = pageRenderDpi(quality);
@@ -29,7 +30,9 @@ export async function requestDocumentPageRender(documentId: string, pageNumber: 
   }
   if (artifact) return { status: "ready" as const, dpi, capabilities, observation, artifact: { ...artifact, slot: `${documentId}:page-${pageNumber}` } };
   // Withheld sources may never be recreated as unredacted page images.
-  if (doc.mimeType !== "application/pdf" || doc.status !== "completed" || !doc.runId || !viewer.source?.url) return { status: "unavailable" as const };
+  const unavailable = pageRenderUnavailableReason(doc, Boolean(viewer.source?.url));
+  if (unavailable || !doc.runId) return { status: "unavailable" as const, reason: unavailable ?? "processing", document: doc };
+  const runId = doc.runId;
   // Scan what we parse (PR #339): the worker refuses to render a document without a parse decision from the current scan
   // (one quarantined before it). Say so, stably, instead of queueing a render that can only fail and polling "pending".
   const [decision] = await sql<ParseSourceDecisionColumns[]>`
@@ -37,9 +40,19 @@ export async function requestDocumentPageRender(documentId: string, pageNumber: 
   if (!decision) return { status: "missing" as const };
   if (parseSourceRescanRequired(decision)) {
     console.warn(`[page-render] status=rescan-required metric=page_render_rescan_required document=${doc.id} run=${doc.runId} page=${pageNumber}`);
-    return { status: "rescan-required" as const, documentId: doc.id };
+    return { status: "rescan-required" as const, document: doc };
   }
-  if (!start) return { status: "pending" as const, dpi, capabilities, observation };
+  if (!start) {
+    // A read answers "pending" (202) only while a render is actually queued or running, so a poller never waits forever.
+    const [queued] = await sql<{ queued: boolean }[]>`select true as queued from document_page_renders
+      where document_id=${doc.id} and run_id=${runId} and page_number=${pageNumber} and quality=${quality} and dpi=${dpi}
+        and expires_at>now() limit 1`;
+    if (queued) return { status: "pending" as const, dpi, capabilities, observation };
+    // Nothing in flight: an editor may start it (a typed not-rendered state); anyone else is told who can (403).
+    const access = await getProjectAccess(doc.projectId, userId);
+    if (!access || !canEditProject(access, userId)) return { status: "editor-required" as const };
+    return { status: "not-rendered" as const, dpi, capabilities, observation, document: doc };
+  }
   await assertCanSpend(doc.orgId, doc.projectId, { kind: "interactive" });
   const admitted = await sql.begin(async tx => {
     await tx`select pg_advisory_xact_lock(hashtext(${`page-render:${doc.orgId}`}))`;
@@ -54,6 +67,20 @@ export async function requestDocumentPageRender(documentId: string, pageNumber: 
     return true;
   });
   if (!admitted) return { status: "busy" as const };
-  await startPageRenderWorkflow({ documentId: doc.id, runId: doc.runId, pageNumber, quality, dpi });
+  await startPageRenderWorkflow({ documentId: doc.id, runId, pageNumber, quality, dpi });
   return { status: "pending" as const, dpi, capabilities, observation };
+}
+
+/**
+ * Why no page image can be made for a document the caller may see, or null when one can. Checked in this order so the
+ * most useful reason wins: a PII block before anything else, then the file type, the run state and a withheld source.
+ */
+export function pageRenderUnavailableReason(doc: { mimeType: string; status: string; runId: string | null }, hasSource: boolean): DataUnavailableReason | null {
+  if (doc.status === PII_BLOCKED_DOCUMENT_STATUS) return "withheld";
+  if (doc.mimeType !== "application/pdf") return "not-supported";
+  // A failed or cancelled document produced nothing to render; any other non-completed status is a stage still running.
+  if (doc.status === "failed" || doc.status === "cancelled") return "not-extracted";
+  if (doc.status !== "completed" || !doc.runId) return "processing";
+  if (!hasSource) return "withheld";
+  return null;
 }

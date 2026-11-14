@@ -67,6 +67,33 @@ export async function prewarmTable(
   return result;
 }
 
+/**
+ * Load the named search indexes into the session cache, concurrently. Used by the first-search
+ * warm-up (warmLanceDbSearch), which already knows the index names. Never throws.
+ * `label` is the project namespace: every project table is named "chunks".
+ */
+export async function prewarmSearchIndexes(
+  table: Pick<PrewarmableTable, "prewarmIndex">,
+  indexes: string[],
+  label: string,
+  log: (line: string) => void = console.log,
+): Promise<PrewarmResult> {
+  const started = performance.now();
+  const result: PrewarmResult = { indexes: [], dataColumns: [], errors: [], ms: 0 };
+  await Promise.all(indexes.map(async (name) => {
+    try {
+      await table.prewarmIndex(name);
+      result.indexes.push(name);
+    } catch (error) {
+      result.errors.push(`index ${name}: ${messageOf(error)}`);
+    }
+  }));
+  result.ms = Math.round(performance.now() - started);
+  const status = result.errors.length ? `errors=${JSON.stringify(result.errors)}` : "ok";
+  log(`[lancedb-session] index-warm table=${label} indexes=${result.indexes.join(",") || "-"} ms=${result.ms} ${status}`);
+  return result;
+}
+
 function messageOf(error: unknown): string {
   return (error instanceof Error ? error.message : String(error)).split("\n")[0] ?? "";
 }

@@ -21,6 +21,7 @@ import { fileURLToPath } from "node:url";
 import { searchCompatRoutes } from "./routes/search-compat.js";
 import { serviceCors } from "./middleware/widget-cors.js";
 import { Hono } from "hono";
+import { EditorRequiredError } from "./lib/editor-required.js";
 
 import { env } from "./config.js";
 import { seedNonProductionUsers } from "./lib/seed-users.js";
@@ -56,6 +57,7 @@ import { inviteRoutes, metaRoutes, dashboardRoutes, waitlistRoutes } from "./rou
 import { customerPipelineGuard } from "./middleware/customer-pipeline-guard.js";
 import { filesRoutes } from "./routes/files.js";
 import { capabilitiesRoutes } from "./routes/capabilities.js";
+import { ingestVersionRoutes } from "./routes/ingest-version.js";
 import { notificationsRoutes } from "./routes/notifications.js";
 import { feedbackRoutes } from "./routes/feedback.js";
 import { mcpRoutes } from "./routes/mcp.js";
@@ -139,6 +141,8 @@ export function createApiApp(): Hono {
     // The request span records it (message, stack) once the response is sent.
     setCurrentRequestError(error);
     if (error instanceof QuoteSettingsError) return c.json({ error: error.message, code: error.code }, 400);
+    // A service's editor-only refusal (EditorRequiredError): 403 editor_required in the native envelope.
+    if (error instanceof EditorRequiredError) return c.json({ error: error.message, code: error.code }, 403);
     return error instanceof UnreadableSourceError
       ? c.json({ error: error.message, code: error.code }, error.statusCode)
       : spendAwareErrorHandler(error, c);
@@ -225,6 +229,7 @@ export function createApiApp(): Hono {
   app.route("/v1/files", filesRoutes);
   app.route("/v1/api-keys", apiKeysRoutes);
   app.route("/v1/capabilities", capabilitiesRoutes);
+  app.route("/v1/ingest-version", ingestVersionRoutes);
   app.route("/v1/notifications", notificationsRoutes);
   app.route("/v1/feedback", feedbackRoutes);
   app.route("/v1/search", searchRoutes);

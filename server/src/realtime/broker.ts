@@ -120,13 +120,15 @@ export class RealtimeBroker {
     this.kickTimer = setTimeout(() => { this.kickTimer = undefined; void this.tick({ onlyNew: true }); }, 10);
     this.kickTimer.unref();
   }
-  async tick(options: { onlyNew?: boolean } = {}): Promise<void> {
-    if (this.running || this.closed || !this.entries.size) return;
+  /** Resolves false when it did nothing because another sweep was still running. */
+  async tick(options: { onlyNew?: boolean } = {}): Promise<boolean> {
+    if (this.running) return false;
+    if (this.closed || !this.entries.size) return true;
     // Never projected: no version yet. A failed first projection stays in this set and is retried on the interval too.
     const entries = options.onlyNew
       ? [...this.entries.values()].filter(entry => entry.version === undefined)
       : [...this.entries.values()];
-    if (!entries.length) return;
+    if (!entries.length) return true;
     this.running = true;
     try {
       realtimeMetrics.revisionQueries++;
@@ -186,6 +188,7 @@ export class RealtimeBroker {
       this.running = false;
       if (this.rerun) { this.rerun = false; this.kick(); }
     }
+    return true;
   }
   async close() {
     this.closed = true;
