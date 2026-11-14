@@ -32,7 +32,7 @@ describe("project state", () => {
 // Optional real PostgreSQL seam against a fully migrated database: seeds
 // uniquely named tenants inside one transaction and rolls it back, so the
 // corpus-stats triggers and the usage_attribution view run as in production.
-const integrationUrl = process.env.PROJECT_STATE_TEST_DATABASE_URL;
+const integrationUrl = process.env.TEST_DATABASE_URL;
 const client = integrationUrl ? postgres(integrationUrl, { max: 1, onnotice: () => {} }) : null;
 afterAll(async () => { await client?.end(); });
 

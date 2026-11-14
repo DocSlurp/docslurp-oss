@@ -3,7 +3,7 @@ import { afterAll, expect, it } from "vitest";
 
 // Real Postgres (scripts/run-database-tests.mjs gives each file a fresh migrated database, connected as its owner):
 // concurrent pricing_state_raise calls to one value, each on its own connection, so they really race (council K #6).
-const url = process.env.PRICING_STATE_TEST_DATABASE_URL;
+const url = process.env.TEST_DATABASE_URL;
 const clients: Client[] = [];
 afterAll(async () => { await Promise.all(clients.map((client) => client.end().catch(() => {}))); });
 async function connect() { const client = new Client({ connectionString: url }); await client.connect(); clients.push(client); return client; }

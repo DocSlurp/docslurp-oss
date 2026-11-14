@@ -7,7 +7,7 @@ let sql: postgres.Sql;
 let stop: () => Promise<void>;
 let ops: typeof import("../services/chat-operations.js");
 beforeAll(async () => {
-  const external = process.env.CHAT_OPERATION_TEST_DATABASE_URL;
+  const external = process.env.TEST_DATABASE_URL;
   if (external && new URL(external).hostname !== "127.0.0.1") throw new Error("Race tests require an isolated loopback database");
   const database = external ? { url: external, stop: async () => {} } : await startMigratedPostgres();
   stop = database.stop;
@@ -143,7 +143,7 @@ it("retains a near-limit successful streamed result without charging its text tw
 });
 
 
-it.skipIf(!process.env.CHAT_OPERATION_TEST_DATABASE_URL).each(["cancel", "deadline"])("fences append contending on the root lock with %s", async reason => {
+it.skipIf(!process.env.TEST_DATABASE_URL).each(["cancel", "deadline"])("fences append contending on the root lock with %s", async reason => {
   const task = await launch(`concurrent_${reason}`);
   const claim = await ops.claimChatOperation();
   let locked!: () => void;

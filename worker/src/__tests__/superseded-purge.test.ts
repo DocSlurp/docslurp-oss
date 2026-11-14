@@ -15,7 +15,7 @@ import { deleteLanceDbDocumentRows, artifactOwner, drainDocumentCleanupQueue, pu
 let db: PGlite;
 let server: PGLiteSocketServer;
 let sql: postgres.Sql<Record<string, unknown>>;
-const realUrl = process.env.GRAPH_PURGE_TEST_DATABASE_URL;
+const realUrl = process.env.TEST_DATABASE_URL;
 
 beforeAll(async () => {
   if (realUrl) {

@@ -14,7 +14,7 @@ Read it before you pick a provider for a cloud platform. The platform boundary d
 | Runtime class | gVisor or Kata runtime for the parser pod, set by the cluster. | Not planned. You can run the worker in such a pod, but DocSlurp has no provider for it, and bubblewrap and landlock do not work under gVisor. |
 | Other remote sandboxes | Vercel Sandbox, Cloudflare Sandbox, E2B and similar. | Not planned. The provider interface allows them later. |
 
-If the platform has no supported mode, the worker does not start in production. It never falls back to unsandboxed parsing. The `none` provider needs the explicit `DOCSLURP_PARSER_SANDBOX_ALLOW_UNISOLATED=true` override.
+If the platform has no supported mode, the worker does not start in production. It never falls back to unsandboxed parsing. The `none` provider is for development only; its `DOCSLURP_PARSER_SANDBOX_ALLOW_UNISOLATED=true` override stops startup outside development and test.
 
 ## What production accepts
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { hasCurrentParseDecision, PARSE_SOURCE_SCAN_VERSION, parseSourceRescanRequired } from "../parse-source-decision.js";
+import { hasCurrentParseDecision, PARSE_SOURCE_SCAN_VERSION, parseSourceRescanRequired, quarantineRequired } from "../parse-source-decision.js";
 
 const a = "a".repeat(64);
 const c = "c".repeat(64);
@@ -22,6 +22,32 @@ describe("parse source decision (PR #339)", () => {
       expect(parseSourceRescanRequired(row, { NODE_ENV: "production", QUARANTINE_ENABLED: "false" } as NodeJS.ProcessEnv)).toBe(true);
       expect(parseSourceRescanRequired(row, { NODE_ENV: "development", QUARANTINE_ENABLED: "false" } as NodeJS.ProcessEnv)).toBe(false);
     }
+  });
+});
+
+describe("quarantineRequired (#398: disabling quarantine is development-only)", () => {
+  const env = (values: Record<string, string>) => values as NodeJS.ProcessEnv;
+
+  it("honours an explicit off value only in development or test", () => {
+    for (const nodeEnv of ["", "development", "test", " Development ", "TEST"]) {
+      for (const off of ["0", "false", "no", "off", " OFF "]) expect(quarantineRequired(env({ NODE_ENV: nodeEnv, QUARANTINE_ENABLED: off }))).toBe(false);
+    }
+    expect(quarantineRequired(env({ NODE_ENV: "development" }))).toBe(true);
+    expect(quarantineRequired(env({ NODE_ENV: "development", QUARANTINE_ENABLED: "true" }))).toBe(true);
+  });
+
+  it.each(["production", "staging", "preview", "Production", "\u00a0development", "\ufeffdevelopment", "dev elopment", "prod"])(
+    "is always required under NODE_ENV=%j, whatever QUARANTINE_ENABLED says",
+    (nodeEnv) => {
+      for (const off of ["0", "false", "no", "off"]) {
+        expect(quarantineRequired(env({ NODE_ENV: nodeEnv, QUARANTINE_ENABLED: off }))).toBe(true);
+        expect(parseSourceRescanRequired({}, env({ NODE_ENV: nodeEnv, QUARANTINE_ENABLED: off }))).toBe(true);
+      }
+    },
+  );
+
+  it("is always required under the service profile, even with NODE_ENV=development", () => {
+    expect(quarantineRequired(env({ NODE_ENV: "development", DOCSLURP_SERVICE_PROFILE: "service", QUARANTINE_ENABLED: "false" }))).toBe(true);
   });
 });
 
