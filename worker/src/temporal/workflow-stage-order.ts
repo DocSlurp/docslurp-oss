@@ -28,4 +28,5 @@ export const WORKFLOW_STAGE_ORDER = [
   "page-index",
   "proposition-index",
   "index",
+  "summary-tree",
 ] as const;

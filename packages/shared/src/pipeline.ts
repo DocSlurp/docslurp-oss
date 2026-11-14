@@ -96,6 +96,8 @@ export const runStageSchema = z.enum([
   "proposition-index",
   "document-map",
   "page-embed",
+  /** Section summaries of long documents (summary-tree.ts). After `index`: it never delays a document becoming searchable. */
+  "summary-tree",
   "completed",
 ]);
 export type RunStage = z.infer<typeof runStageSchema>;
@@ -232,6 +234,8 @@ export const DEFAULT_PIPELINE_TEXT_MODEL = "qwen/qwen3.5-flash-02-23";
 export const pipelineTextOperationSchema = z.enum([
   "document-summary", "document-map", "proposition-extraction", "structured-extraction",
   "graph-extraction", "community-summary", "contextual-chunk-preamble",
+  // Section summaries of the summary tree (summary-tree.ts). Its prompt and reasoning effort are fixed by the worker.
+  "summary-tree",
 ]);
 export type PipelineTextOperation = z.infer<typeof pipelineTextOperationSchema>;
 // `llm://openrouter/<id>` (stored as the bare OpenRouter id, which is also
@@ -968,6 +972,15 @@ const basePipelineStagePlan: readonly PipelineStagePlanItem[] = [
     phaseLabel: "Index",
     isEnabled: (features) => features.indexVectors,
   },
+  {
+    // Last, after `index`: the document is searchable before its tree is built. The stage itself also needs the
+    // deployment's build switch (summaryTreeBuildActive) and makes no model call without it.
+    stage: "summary-tree",
+    label: "Summary tree",
+    phase: "index",
+    phaseLabel: "Index",
+    isEnabled: (features) => summaryTreeEnabled(features) && features.embed && features.indexVectors,
+  },
 ];
 
 const deferredLocatorStages: ReadonlySet<PipelineRunStage> = new Set(["document-map", "page-embed"]);
@@ -1436,6 +1449,13 @@ export const stageDataFlow: Record<PipelineRunStage, StageDataFlow> = {
     sameRun: ["embeddings"],
     produces: ["vectors"],
     alwaysRerun: "vector rows are keyed to the new document",
+  },
+  "summary-tree": {
+    consumes: ["embeddings", "vectors"],
+    sameRun: ["embeddings"],
+    produces: ["summary-tree"],
+    // Never copied from a source document: unchanged sections reuse the replaced version's summary text by hash instead.
+    alwaysRerun: "summary rows are keyed to the new document",
   },
 };
 

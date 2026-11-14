@@ -304,6 +304,7 @@ const STAGE_WEIGHT: Record<PipelineRunStage, number> = {
   "page-index": 0.02,
   "proposition-index": 0.06,
   index: 0.04,
+  "summary-tree": 0.08,
 };
 
 
