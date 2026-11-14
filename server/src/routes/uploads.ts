@@ -2,6 +2,7 @@ import { reportPublicError } from "../lib/public-errors.js";
 import { CHART_EXPORT_TIER_UNAVAILABLE_CODE, chartExportOverrideSchema } from "@docslurp/shared";
 import { chartExportOverrideError } from "../services/chart-export-availability.js";
 import { runOriginOf } from "../lib/run-origin.js";
+import { withPayloadCanEdit } from "../lib/reprocess-access.js";
 import { Hono, type Context } from "hono";
 import { z } from "zod";
 import { zValidator } from "@hono/zod-validator";
@@ -332,7 +333,7 @@ export const createUploadsRoutes = (ports: ProjectIntakePorts = projectIntakePor
           },
         });
         if (replayed) c.header("Idempotency-Replayed", "true");
-        return c.json(session, status);
+        return c.json(await withPayloadCanEdit(c, session), status);
       } catch (error) {
         const response = projectIntakeErrorResponse(c, error);
         if (response) return response;
@@ -347,7 +348,7 @@ export const createUploadsRoutes = (ports: ProjectIntakePorts = projectIntakePor
     if (!session) {
       return apiStatusError(c, 404, "Upload session not found");
     }
-    return c.json(session);
+    return c.json(await withPayloadCanEdit(c, session));
   })
   .post("/direct/sessions/:sessionId/files/:fileId/parts/sign",
     zValidator("json", z.object({ partNumbers: z.array(z.number().int().min(1).max(10000)).min(1).max(100) }), validationHook),
@@ -417,7 +418,7 @@ export const createUploadsRoutes = (ports: ProjectIntakePorts = projectIntakePor
       c.header("X-Temporal-Deferred", "true");
     }
 
-    return c.json(result.payload, result.status);
+    return c.json(await withPayloadCanEdit(c, result.payload), result.status);
   })
   .post("/bulk", async (c) => {
     const idempotencyKey = c.req.header("Idempotency-Key")?.trim();
@@ -485,7 +486,7 @@ export const createUploadsRoutes = (ports: ProjectIntakePorts = projectIntakePor
       c.header("X-Temporal-Deferred", "true");
     }
 
-    return c.json(result.payload, result.status);
+    return c.json(await withPayloadCanEdit(c, result.payload), result.status);
   })
   .post(
     "/url",
@@ -536,7 +537,7 @@ export const createUploadsRoutes = (ports: ProjectIntakePorts = projectIntakePor
         c.header("X-Temporal-Deferred", "true");
       }
 
-      return c.json(result.payload, result.status);
+      return c.json(await withPayloadCanEdit(c, result.payload), result.status);
     },
   ));
 

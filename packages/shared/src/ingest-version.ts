@@ -114,6 +114,7 @@ export function workspaceIngestVersion(): WorkspaceIngestVersion {
  * - not-supported: this kind of data does not exist for this file type.
  * - disabled: a project setting turns the feature off.
  * - temporarily-unavailable: storage or a dependency did not answer; retrying later may help.
+ * - not-rendered: a page image nobody has rendered and none is in flight; a project editor's request starts it.
  */
 export const DATA_UNAVAILABLE_REASONS = [
   "needs-reprocess",
@@ -123,6 +124,7 @@ export const DATA_UNAVAILABLE_REASONS = [
   "not-supported",
   "disabled",
   "temporarily-unavailable",
+  "not-rendered",
 ] as const;
 export type DataUnavailableReason = (typeof DATA_UNAVAILABLE_REASONS)[number];
 
@@ -135,6 +137,7 @@ export const DATA_UNAVAILABLE_MESSAGES: Record<DataUnavailableReason, string> = 
   "not-supported": "This isn't available for this file type.",
   disabled: "This feature is turned off for the project.",
   "temporarily-unavailable": "This isn't available right now. Try again shortly.",
+  "not-rendered": "This page hasn't been rendered yet. Opening it as a project editor renders it.",
 };
 
 /** Reasons a reprocess can resolve; `canReprocess` is also gated on the caller being allowed to reprocess. */

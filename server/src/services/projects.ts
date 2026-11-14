@@ -1,4 +1,4 @@
-import { deferredProfilesEnabled, isBillingEnforced, PUBLIC_ERROR_MESSAGES, publicDiagnostics, publicDocumentError, resolveManagedPipeline, parseManagedPipelineOverrides, storedManagedPipeline, stripManagedPipelineFields, type ManagedPipelineOverrides } from "@docslurp/shared";
+import { EDITOR_REQUIRED_CODE, EDITOR_REQUIRED_MESSAGE, deferredProfilesEnabled, isBillingEnforced, PUBLIC_ERROR_MESSAGES, publicDiagnostics, publicDocumentError, resolveManagedPipeline, parseManagedPipelineOverrides, storedManagedPipeline, stripManagedPipelineFields, type ManagedPipelineOverrides } from "@docslurp/shared";
 import { chartExportDefaults, upgradeStoredPipelineChartExport } from "@docslurp/shared";
 import { markProjectAutoNamed } from "./project-naming.js";
 import { forgetProjectProviderPolicy } from "../lib/provider-policy.js";
@@ -1256,7 +1256,7 @@ export async function cloneProject(
 
   const access = await assertProjectAccess(projectId, userId);
   if (!canEditProject(access, userId)) {
-    throw new ProjectAccessError(403, "project_forbidden", "Forbidden");
+    throw new ProjectAccessError(403, EDITOR_REQUIRED_CODE, EDITOR_REQUIRED_MESSAGE);
   }
 
   const clone = await createProject({
@@ -1329,7 +1329,7 @@ export async function rollbackProjectVersion(
 ): Promise<ProjectRecord> {
   const access = await assertProjectAccess(projectId, userId);
   if (!canEditProject(access, userId)) {
-    throw new ProjectAccessError(403, "project_forbidden", "Forbidden");
+    throw new ProjectAccessError(403, EDITOR_REQUIRED_CODE, EDITOR_REQUIRED_MESSAGE);
   }
 
   const [row] = await sql<ProjectVersionRow[]>`

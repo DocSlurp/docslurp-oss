@@ -414,6 +414,19 @@ test("HTTP failures print reviewed recovery copy and a safe support ID", async (
   assert.doesNotMatch(result.stderr, /secret|private/);
 });
 
+test("editor_required prints the reviewed 'ask a project editor' copy, and --json keeps the code", async () => {
+  const body = { error: { code: "editor_required", message: "raw server text", requestId: "req-ed-1" } };
+  const plain = await invoke(["search", "question"], () => ({ status: 403, body }));
+  assert.equal(plain.code, 1);
+  assert.match(plain.stderr, /Ask a project editor or an organization admin/);
+  assert.match(plain.stderr, /req-ed-1/);
+  assert.doesNotMatch(plain.stderr, /raw server text/);
+  const json = await invoke(["search", "question", "--json"], () => ({ status: 403, body }));
+  const parsed = JSON.parse(json.stderr);
+  assert.equal(parsed.error.code, "editor_required");
+  assert.equal(parsed.error.status, 403);
+});
+
 test("--json emits a safe typed HTTP error without raw body diagnostics", async () => {
   const result = await invoke(["search", "question", "--json"], () => ({ status: 402, body: {
     error: { code: "credit_exhausted", message: "secret provider text", requestId: "req-safe-2", details: { secret: "private", retryAfterSeconds: 30 } },

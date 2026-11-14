@@ -101,6 +101,7 @@ and worker reasons stay in logs and traces.
 | `not-supported` | The data does not exist for this file type (page images of a non-PDF). | No |
 | `disabled` | A project setting turns the feature off: figure resume blocked `figures-off` or `resume-off`, or no structured result in a project without an `outputSchema`. | No |
 | `temporarily-unavailable` | Storage did not answer (an unreadable structured result). Retry later. | No |
+| `not-rendered` | A page image nobody has rendered and none is in flight, read (`GET`) by a project editor. `POST` starts it. A non-editor gets `403 editor_required` instead, and a `202` means a render is actually queued or running. | No |
 
 Where the states appear:
 
