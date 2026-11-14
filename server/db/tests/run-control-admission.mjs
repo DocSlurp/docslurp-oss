@@ -2,9 +2,11 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import postgres from 'postgres';
 
-// PGlite's wire adapter serializes connections; it cannot establish lock contention.
-if (process.env.NATIVE_PG_TESTS === '1') {
-  const url = new URL(process.env.DATABASE_URL);
+// PGlite's wire adapter serializes connections; it cannot establish lock contention, so this
+// needs a real, migrated, disposable local Postgres in TEST_DATABASE_URL (scripts/run-database-tests.mjs
+// sets it for server/src/__tests__/run-control-native.db.test.ts, which runs this file).
+if (process.env.TEST_DATABASE_URL) {
+  const url = new URL(process.env.TEST_DATABASE_URL);
   assert.ok(['localhost', '127.0.0.1'].includes(url.hostname));
   const sql = postgres(url.toString(), { max: 4 });
   const { createRunLifecycle } = await import('../../src/services/run-lifecycle.ts');
@@ -63,5 +65,5 @@ if (process.env.NATIVE_PG_TESTS === '1') {
     await sql.end();
   }
 } else {
-  console.log('SKIP native run-control contention tests: set NATIVE_PG_TESTS=1 with a migrated local DATABASE_URL.');
+  console.log('SKIP native run-control contention tests: set TEST_DATABASE_URL to a migrated, disposable local Postgres.');
 }

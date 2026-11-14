@@ -9,7 +9,7 @@ let deps: typeof import("../search/deferred/materialize-client.js").defaultMater
 let snapshots: typeof import("../services/chat-operation-access.js");
 let allowed = true;
 beforeAll(async () => {
-  const external=process.env.CHAT_OPERATION_TEST_DATABASE_URL;
+  const external=process.env.TEST_DATABASE_URL;
   if(external && new URL(external).hostname!=="127.0.0.1")throw new Error("Requires isolated loopback database");
   const pg=external ? {url:external,stop:async()=>{}} : await startMigratedPostgres(); stop=pg.stop;
   sql=postgres(pg.url,{max:external?5:1,prepare:false,onnotice:()=>{}});
@@ -87,7 +87,7 @@ it("counts completed answers with outstanding shared work against active root ad
   await expect(ops.launchChatOperation({userId:"u",orgId:"o",projectId:"w",key:"ninth_root",input:{}})).resolves.toBeTruthy();
 });
 
-it.skipIf(!process.env.CHAT_OPERATION_TEST_DATABASE_URL).each(['session','membership','abort'])("rejects %s invalidation while materialization waits for the root lock", async reason => {
+it.skipIf(!process.env.TEST_DATABASE_URL).each(['session','membership','abort'])("rejects %s invalidation while materialization waits for the root lock", async reason => {
   const t=await task();
   const abort=new AbortController();
   let locked!:()=>void, unlock!:()=>void;

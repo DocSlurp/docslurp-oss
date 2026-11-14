@@ -15,8 +15,8 @@ import {
   type ChatSlotBackend,
 } from "../middleware/chat-concurrency.js";
 
-// Cluster-wide chat slots against a real Redis. Skipped without CHAT_CONCURRENCY_TEST_REDIS_URL.
-const redisUrl = process.env.CHAT_CONCURRENCY_TEST_REDIS_URL ?? "";
+// Cluster-wide chat slots against a real Redis. Skipped without TEST_REDIS_URL.
+const redisUrl = process.env.TEST_REDIS_URL ?? "";
 
 const backends: ChatSlotBackend[] = [];
 /** A separate client per call: what a second API process holds. */

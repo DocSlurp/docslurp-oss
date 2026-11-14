@@ -4,7 +4,7 @@ import { afterAll, beforeAll, expect, it } from "vitest";
 import { reconcileRoleGrants } from "../../db/roles.mjs";
 import { startRevisionMaintenance, revisionMaintenanceMetrics } from "./revision-maintenance.js";
 
-const url = process.env.REALTIME_PUBLICATION_TEST_DATABASE_URL;
+const url = process.env.TEST_DATABASE_URL;
 const clients: Client[] = [];
 let owner: Client;
 let stop: (() => Promise<void>) | undefined;

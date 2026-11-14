@@ -16,7 +16,7 @@ import { LIFT_ONE_ORG_PER_USER_POLICY } from "./helpers/multi-org.js";
  * REST-audience tokens on /v1 with mapped scopes, and every negative case the
  * identity boundary requires. Only the browser session and the default
  * project lookup are stand-ins.
- * CLI_OAUTH_TEST_DATABASE_URL enables real concurrent transactions and owner
+ * TEST_DATABASE_URL enables real concurrent transactions and owner
  * PATCH checks; point it only at a disposable, migrated Postgres database.
  */
 
@@ -63,15 +63,15 @@ const cookie = (user: string) => `docslurp-test-session=${user}`;
 const q = (sqlText: string, params: unknown[] = []) => pool.current!.query(sqlText, params);
 
 beforeAll(async () => {
-  const pg = process.env.CLI_OAUTH_TEST_DATABASE_URL
-    ? { url: process.env.CLI_OAUTH_TEST_DATABASE_URL, stop: async () => {} }
+  const pg = process.env.TEST_DATABASE_URL
+    ? { url: process.env.TEST_DATABASE_URL, stop: async () => {} }
     : await startMigratedPostgres();
   stopDb = pg.stop;
   sqlConnection.current = (await import("postgres")).default(pg.url, { max: 1 });
   const { Pool } = await import("pg");
-  pool.current = new Pool({ connectionString: pg.url, max: process.env.CLI_OAUTH_TEST_DATABASE_URL ? 24 : 1 });
+  pool.current = new Pool({ connectionString: pg.url, max: process.env.TEST_DATABASE_URL ? 24 : 1 });
   // Only in the throwaway database: never change an external one.
-  if (!process.env.CLI_OAUTH_TEST_DATABASE_URL) await q(LIFT_ONE_ORG_PER_USER_POLICY);
+  if (!process.env.TEST_DATABASE_URL) await q(LIFT_ONE_ORG_PER_USER_POLICY);
   for (const user of ["owner", "other"]) {
     await q(`insert into "user"(id, name, email) values ($1, $1, $1 || '@example.test') on conflict do nothing`, [user]);
     await q(`insert into "session"(id, "expiresAt", token, "userId") values ('sess-' || $1, now() + interval '1 day', 'tok-' || $1, $1) on conflict do nothing`, [user]);
@@ -323,7 +323,7 @@ describe("delegated tokens are never platform admins", () => {
 });
 
 describe("scope mapping on the REST API", () => {
-  it.skipIf(!process.env.CLI_OAUTH_TEST_DATABASE_URL)("applies live owner key restrictions to current and refreshed tokens", async () => {
+  it.skipIf(!process.env.TEST_DATABASE_URL)("applies live owner key restrictions to current and refreshed tokens", async () => {
     const issued = await login({ scope: "search read chat" });
     const key = await oauth.validateOAuthApiToken(issued.access_token);
     const patch = (user: string) => fetch(`${api}/api-keys/${key!.keyId}`, {
@@ -581,7 +581,7 @@ describe("device authorization grant", () => {
     expect(me.credential.apiKeyScopes.sort()).toEqual(["artifacts", "chat", "search:deep"]);
   });
 
-  it.skipIf(!process.env.CLI_OAUTH_TEST_DATABASE_URL)("serializes different accounts sharing the last IP attempt", async () => {
+  it.skipIf(!process.env.TEST_DATABASE_URL)("serializes different accounts sharing the last IP attempt", async () => {
     const ip = "203.0.113.42";
     await q("insert into mcp_oauth_device_attempts(user_id, ip) select 'owner', $1 from generate_series(1,19)", [ip]);
     for (let i = 0; i < 16; i++) {

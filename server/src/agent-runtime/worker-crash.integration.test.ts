@@ -5,8 +5,8 @@ import {Pool} from "pg";
 import {expect,it,vi} from "vitest";
 import {createNativeChatHost} from "./native-host.js";
 import {readNativeOperationOutput} from "./operation-delivery.js";
-const url=process.env.NATIVE_CHAT_TEST_DATABASE_URL;
-const redis=process.env.NATIVE_CHAT_TEST_REDIS_URL;
+const url=process.env.TEST_DATABASE_URL;
+const redis=process.env.TEST_REDIS_URL;
 it.runIf(!!url&&!!redis).each(["SIGKILL", "SIGTERM"] as const)("retains accepted output after %s with an already-running survivor and no paid retry",async(signal)=>{
   if(new URL(url!).hostname!=="127.0.0.1"||new URL(redis!).hostname!=="127.0.0.1")throw new Error("loopback fixture only");
   const pool=new Pool({connectionString:url,max:3});

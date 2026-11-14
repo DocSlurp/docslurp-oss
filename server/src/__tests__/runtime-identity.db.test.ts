@@ -6,7 +6,7 @@ import { assertRuntimeDatabaseIdentity, RUNTIME_IDENTITY_SQL, RUNTIME_SECURITY_D
 
 // Real Postgres (scripts/run-database-tests.mjs: a fresh migrated database, connected as a superuser): each way council O
 // found to slip past the runtime identity check is refused, by the rule the deploy gate and startup share (council O #1).
-const url = process.env.RUNTIME_IDENTITY_TEST_DATABASE_URL;
+const url = process.env.TEST_DATABASE_URL;
 const suffix = randomBytes(4).toString("hex");
 const runtime = `rt_app_${suffix}`;
 const owner = `rt_owner_${suffix}`;

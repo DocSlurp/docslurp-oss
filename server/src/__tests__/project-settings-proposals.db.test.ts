@@ -12,7 +12,7 @@ let service: typeof import("../services/project-settings-proposals.js");
 let counter = 0;
 beforeAll(async () => {
   vi.stubEnv("BETTER_AUTH_SECRET", "settings-proposal-test-secret-with-enough-entropy");
-  const nativeUrl = process.env.SETTINGS_LOCK_TEST_DATABASE_URL;
+  const nativeUrl = process.env.TEST_DATABASE_URL;
   const db = nativeUrl ? { url: nativeUrl, stop: async () => {} } : await startMigratedPostgres(); stop = db.stop;
   sql = postgres(db.url, { max: nativeUrl ? 4 : 1, prepare: false, onnotice: () => {} });
   vi.doMock("../db.js", () => ({ sql }));
@@ -175,7 +175,7 @@ it("reads compatibility merge state inside the lock and preserves newly approved
 });
 
 
-it.skipIf(!process.env.SETTINGS_LOCK_TEST_DATABASE_URL)("blocks an initial compatibility insert until real Apply commits, then merges its approved fields", async () => {
+it.skipIf(!process.env.TEST_DATABASE_URL)("blocks an initial compatibility insert until real Apply commits, then merges its approved fields", async () => {
   const f = await fixture();
   const proposal = await service.proposeProjectSettings({ ...f, changes: { chat: { answerStyle: "detailed" }, retrieval: { resultCount: 6 } } });
   const audit = await import("../services/audit-log.js");
