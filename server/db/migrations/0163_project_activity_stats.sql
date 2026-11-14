@@ -15,16 +15,22 @@
 -- Sessions without a project_id (0152: older rows the backfill sweep has not reached, and rows whose project is gone)
 -- are in no counter, exactly as they were in no project read; the sweep's UPDATE adds them when it sets the column.
 --
--- A project's counters are the sum of its rows. A counter write never waits for a lock:
---   - it adds to the first of the project's rows that no other transaction has locked (FOR UPDATE SKIP LOCKED), or
---     inserts a new row when every row is taken. Skipping a locked row loses nothing: the amount is always written
---     to some row in the writer's own transaction, so it commits or rolls back with the session or turn it counts.
+-- A project's counters are the sum of its rows, one row per (project, slot). A counter write never waits for
+-- another writer:
+--   - a writing transaction first takes a slot that no other transaction holds (a transaction-level advisory lock,
+--     tried without waiting, lowest free slot first) and writes only rows of that slot. Until it ends, no other
+--     writer touches those rows, so its counter writes find no row lock to wait for, in whatever order it and the
+--     others touch projects. The amount is written in the writer's own transaction and commits or rolls back with
+--     the session or turn it counts.
 --   - the table has no foreign key to projects, so a write never waits for a project row either.
--- Two transactions therefore cannot deadlock on counter rows, in whatever order they touch projects, and a search
--- or chat write is never queued behind another one's commit. A project has at most as many rows as it ever had
--- writing transactions open at the same moment (bounded by the connection count); a read sums them, and
+-- Two writers therefore cannot deadlock on counter rows, and a search or chat write is never queued behind
+-- another one's commit. (The one wait a counter adds: a chat turn written while its session is being moved to
+-- another project waits for that move, and the move for it; see apply_chat_turn_activity_stats().) A project has at most as many rows as there were writing transactions open at the same
+-- moment across the database (bounded by the connection count); a read sums them, and
 -- compact_project_activity_stats() (the maintenance sweep) and rebuild_project_activity_stats() fold them back
 -- into one.
+-- (Choosing a free row with FOR UPDATE SKIP LOCKED instead was measured and rejected: when the row's last writer
+-- commits at that instant, Postgres follows the row's update chain and waits for whoever holds the newer version.)
 --
 -- Why no foreign key: with one, a project delete (which holds the project row and waits for the session rows its
 -- cascade removes) and a writer holding one of those session rows (whose counter insert then waits for the project
@@ -55,20 +61,21 @@
 -- lock_timeout makes each of them fail fast behind a long-open transaction instead of queueing traffic behind it;
 -- a retried deploy finishes the work.
 --
--- destructive-migration: nothing is removed. The matches are the AFTER DELETE and AFTER TRUNCATE trigger events below (they remove or zero counters when their project or history goes) the rebuild function, which replaces every counter row with the same totals recomputed, and the fold function, which merges a project's counter rows into one with the same totals.
+-- destructive-migration: nothing is removed that was not already going. The matches are the AFTER DELETE and AFTER TRUNCATE trigger events below (they remove or zero counters when their project or history goes), the chat session delete trigger function (it removes the deleted session's turns itself, the rows the foreign-key cascade would remove a moment later, so that it can count them), the rebuild function, which replaces every counter row with the same totals recomputed, and the fold function, which merges a project's counter rows into one with the same totals.
 -- idempotent-migration: the backfill calls rebuild_project_activity_stats(), which deletes every counter row and re-inserts the aggregates while writers are locked out, so a second run stores the same totals.
 SET LOCAL lock_timeout = '5s';
 --> statement-breakpoint
 CREATE TABLE IF NOT EXISTS "project_activity_stats" (
   "project_id" text NOT NULL,
-  "slot" bigint GENERATED ALWAYS AS IDENTITY,
+  "slot" smallint NOT NULL,
   "search_sessions" bigint NOT NULL DEFAULT 0,
   "search_result_count" bigint NOT NULL DEFAULT 0,
   "zero_result_searches" bigint NOT NULL DEFAULT 0,
   "search_duration_count" bigint NOT NULL DEFAULT 0,
   "search_duration_ms" numeric NOT NULL DEFAULT 0,
   "chat_turns" bigint NOT NULL DEFAULT 0,
-  CONSTRAINT "project_activity_stats_pkey" PRIMARY KEY ("project_id", "slot")
+  CONSTRAINT "project_activity_stats_pkey" PRIMARY KEY ("project_id", "slot"),
+  CONSTRAINT "project_activity_stats_slot_check" CHECK ("slot" >= 0 AND "slot" < 1024)
 ) WITH (fillfactor = 50);
 --> statement-breakpoint
 -- The duration the project board averages: metadata.durationMs as the search wrote it (a JSON number). Two older
@@ -116,51 +123,49 @@ LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$
   END
 $$;
 --> statement-breakpoint
--- Adds one statement's amounts to a project's counters without waiting for any lock (see the top of this file).
--- The inner SELECT locks the project's first row that no other transaction holds; a row this transaction already
--- wrote counts as free, so a transaction keeps to one row per project. When there is none, the amounts go into a
--- new row: slot is an identity value, so the insert cannot collide with another one.
-CREATE OR REPLACE FUNCTION project_activity_stats_add(
-  p_project_id text, p_search_sessions bigint, p_search_result_count bigint, p_zero_result_searches bigint,
-  p_search_duration_count bigint, p_search_duration_ms numeric, p_chat_turns bigint
-) RETURNS void
+-- The counter slot this transaction writes (see the top of this file): the one it already holds, else the lowest
+-- slot no other transaction holds. pg_try_advisory_xact_lock never waits, the lock is released when the
+-- transaction ends (or the savepoint that took it rolls back), and the transaction-local setting is only a hint
+-- that saves the search on later calls: the lock is always taken again, which succeeds at once for its holder.
+-- The two-key advisory locks (163001, slot) are used by nothing else; (163002, ...) are the chat session locks below. If all 1,024 slots are ever held at once
+-- (more writing transactions than that open together), the caller waits for one instead of failing.
+CREATE OR REPLACE FUNCTION project_activity_stats_slot() RETURNS smallint
 LANGUAGE plpgsql SET search_path=pg_catalog,pg_temp AS $$
+DECLARE
+  hint text := current_setting('docslurp.project_activity_stats_slot', true);
+  k integer;
 BEGIN
-  IF p_project_id IS NULL OR (p_search_sessions = 0 AND p_search_result_count = 0 AND p_zero_result_searches = 0
-      AND p_search_duration_count = 0 AND p_search_duration_ms = 0 AND p_chat_turns = 0) THEN
-    RETURN;
+  IF hint ~ '^[0-9]{1,4}$' AND hint::integer < 1024 AND pg_try_advisory_xact_lock(163001, hint::integer) THEN
+    RETURN hint::smallint;
   END IF;
-  UPDATE public.project_activity_stats s SET
-    search_sessions = s.search_sessions + p_search_sessions,
-    search_result_count = s.search_result_count + p_search_result_count,
-    zero_result_searches = s.zero_result_searches + p_zero_result_searches,
-    search_duration_count = s.search_duration_count + p_search_duration_count,
-    search_duration_ms = s.search_duration_ms + p_search_duration_ms,
-    chat_turns = s.chat_turns + p_chat_turns
-  WHERE s.project_id = p_project_id AND s.slot = (
-    SELECT c.slot FROM public.project_activity_stats c
-    WHERE c.project_id = p_project_id ORDER BY c.slot LIMIT 1 FOR UPDATE SKIP LOCKED
-  );
-  IF NOT FOUND THEN
-    INSERT INTO public.project_activity_stats
-      (project_id, search_sessions, search_result_count, zero_result_searches, search_duration_count, search_duration_ms, chat_turns)
-    VALUES (p_project_id, p_search_sessions, p_search_result_count, p_zero_result_searches,
-      p_search_duration_count, p_search_duration_ms, p_chat_turns);
-  END IF;
+  FOR k IN 0..1023 LOOP
+    IF pg_try_advisory_xact_lock(163001, k) THEN
+      PERFORM set_config('docslurp.project_activity_stats_slot', k::text, true);
+      RETURN k::smallint;
+    END IF;
+  END LOOP;
+  k := pg_backend_pid() % 1024;
+  PERFORM pg_advisory_xact_lock(163001, k);
+  PERFORM set_config('docslurp.project_activity_stats_slot', k::text, true);
+  RETURN k::smallint;
 END $$;
 --> statement-breakpoint
 -- One function for the three search_sessions triggers. PL/pgSQL plans a statement when it first runs, so each
 -- trigger only ever plans the branch whose transition tables it has. An upsert fires both the insert and the update
--- trigger; the one whose transition tables are empty aggregates nothing and writes nothing.
--- A project that no longer exists (its delete cascades here) is skipped: its counters go with it.
+-- trigger; the one whose transition tables are empty aggregates nothing, takes no slot and writes nothing.
+-- The slot is taken in the select list, so only a statement that has something to write takes one, and before
+-- any counter row is touched. A project that no longer exists (its delete cascades here) is skipped: its counters
+-- go with it.
 CREATE OR REPLACE FUNCTION apply_search_session_activity_stats() RETURNS trigger
 LANGUAGE plpgsql SET search_path=pg_catalog,pg_temp AS $$
 BEGIN
   IF TG_OP = 'INSERT' THEN
     -- The session's own foreign key has already checked that the project exists.
-    PERFORM public.project_activity_stats_add(g.project_id, g.sessions, g.results, g.zero, g.durations, g.duration_ms, 0)
+    INSERT INTO public.project_activity_stats AS s
+      (project_id, slot, search_sessions, search_result_count, zero_result_searches, search_duration_count, search_duration_ms)
+    SELECT g.project_id, public.project_activity_stats_slot(), g.sessions, g.results, g.zero, g.durations, g.duration_ms
     FROM (
-      SELECT d.project_id, count(*) AS sessions, sum(d.result_count::bigint)::bigint AS results,
+      SELECT d.project_id, count(*) AS sessions, sum(d.result_count::bigint) AS results,
         count(*) FILTER (WHERE d.result_count = 0) AS zero, count(d.duration_ms) AS durations,
         coalesce(sum(d.duration_ms), 0) AS duration_ms
       FROM (
@@ -168,11 +173,19 @@ BEGIN
         FROM new_rows n WHERE n.project_id IS NOT NULL
       ) d
       GROUP BY d.project_id
-    ) g;
+    ) g
+    ON CONFLICT (project_id, slot) DO UPDATE SET
+      search_sessions = s.search_sessions + EXCLUDED.search_sessions,
+      search_result_count = s.search_result_count + EXCLUDED.search_result_count,
+      zero_result_searches = s.zero_result_searches + EXCLUDED.zero_result_searches,
+      search_duration_count = s.search_duration_count + EXCLUDED.search_duration_count,
+      search_duration_ms = s.search_duration_ms + EXCLUDED.search_duration_ms;
   ELSIF TG_OP = 'DELETE' THEN
-    PERFORM public.project_activity_stats_add(g.project_id, -g.sessions, -g.results, -g.zero, -g.durations, -g.duration_ms, 0)
+    INSERT INTO public.project_activity_stats AS s
+      (project_id, slot, search_sessions, search_result_count, zero_result_searches, search_duration_count, search_duration_ms)
+    SELECT g.project_id, public.project_activity_stats_slot(), -g.sessions, -g.results, -g.zero, -g.durations, -g.duration_ms
     FROM (
-      SELECT d.project_id, count(*) AS sessions, sum(d.result_count::bigint)::bigint AS results,
+      SELECT d.project_id, count(*) AS sessions, sum(d.result_count::bigint) AS results,
         count(*) FILTER (WHERE d.result_count = 0) AS zero, count(d.duration_ms) AS durations,
         coalesce(sum(d.duration_ms), 0) AS duration_ms
       FROM (
@@ -181,19 +194,28 @@ BEGIN
       ) d
       WHERE EXISTS (SELECT 1 FROM public.projects p WHERE p.id = d.project_id)
       GROUP BY d.project_id
-    ) g;
+    ) g
+    ON CONFLICT (project_id, slot) DO UPDATE SET
+      search_sessions = s.search_sessions + EXCLUDED.search_sessions,
+      search_result_count = s.search_result_count + EXCLUDED.search_result_count,
+      zero_result_searches = s.zero_result_searches + EXCLUDED.zero_result_searches,
+      search_duration_count = s.search_duration_count + EXCLUDED.search_duration_count,
+      search_duration_ms = s.search_duration_ms + EXCLUDED.search_duration_ms;
   ELSIF TG_OP = 'UPDATE' THEN
-    -- Every search insert is an upsert, which fires this trigger with nothing updated: leave before the aggregate.
+    -- Every search insert is an upsert, which fires this trigger with nothing updated: leave before the aggregate
+    -- (measured: 0.006 ms instead of 0.04 ms per search).
     PERFORM 1 FROM new_rows LIMIT 1;
     IF NOT FOUND THEN RETURN NULL; END IF;
-    -- New values minus old values per project; a project whose totals did not change gets no write and no row
-    -- lock. This covers a changed result_count or metadata, a project_id set by the 0152 sweep, and a session moved
-    -- between projects.
-    PERFORM public.project_activity_stats_add(g.project_id, g.sessions, g.results, g.zero, g.durations, g.duration_ms, 0)
+    -- New values minus old values per project; a project whose totals did not change gets no write, no row lock
+    -- and no slot. This covers a changed result_count or metadata, a project_id set by the 0152 sweep, and a
+    -- session moved between projects.
+    INSERT INTO public.project_activity_stats AS s
+      (project_id, slot, search_sessions, search_result_count, zero_result_searches, search_duration_count, search_duration_ms)
+    SELECT g.project_id, public.project_activity_stats_slot(), g.sessions, g.results, g.zero, g.durations, g.duration_ms
     FROM (
-      SELECT d.project_id, sum(d.sign)::bigint AS sessions, sum(d.sign * d.result_count::bigint)::bigint AS results,
-        coalesce(sum(d.sign) FILTER (WHERE d.result_count = 0), 0)::bigint AS zero,
-        coalesce(sum(d.sign) FILTER (WHERE d.duration_ms IS NOT NULL), 0)::bigint AS durations,
+      SELECT d.project_id, sum(d.sign) AS sessions, sum(d.sign * d.result_count::bigint) AS results,
+        coalesce(sum(d.sign) FILTER (WHERE d.result_count = 0), 0) AS zero,
+        coalesce(sum(d.sign) FILTER (WHERE d.duration_ms IS NOT NULL), 0) AS durations,
         coalesce(sum(d.sign * d.duration_ms), 0) AS duration_ms
       FROM (
         SELECT n.project_id, 1 AS sign, n.result_count, public.search_session_duration_ms(n.metadata) AS duration_ms
@@ -209,7 +231,13 @@ BEGIN
         OR coalesce(sum(d.sign) FILTER (WHERE d.result_count = 0), 0) <> 0
         OR coalesce(sum(d.sign) FILTER (WHERE d.duration_ms IS NOT NULL), 0) <> 0
         OR coalesce(sum(d.sign * d.duration_ms), 0) <> 0
-    ) g;
+    ) g
+    ON CONFLICT (project_id, slot) DO UPDATE SET
+      search_sessions = s.search_sessions + EXCLUDED.search_sessions,
+      search_result_count = s.search_result_count + EXCLUDED.search_result_count,
+      zero_result_searches = s.zero_result_searches + EXCLUDED.zero_result_searches,
+      search_duration_count = s.search_duration_count + EXCLUDED.search_duration_count,
+      search_duration_ms = s.search_duration_ms + EXCLUDED.search_duration_ms;
   ELSIF TG_OP = 'TRUNCATE' THEN
     UPDATE public.project_activity_stats
     SET search_sessions = 0, search_result_count = 0, zero_result_searches = 0,
@@ -220,44 +248,56 @@ BEGIN
   RETURN NULL;
 END $$;
 --> statement-breakpoint
--- Chat turns carry no project: it is their session's. A turn whose session is no longer visible is being removed
--- by that session's delete, which apply_chat_session_activity_stats() below has already counted.
+-- Chat turns carry no project: it is their session's, read when the turn is written. Two things can change that
+-- under a turn write: the session moves to another project, or the session is deleted.
 --
--- Every branch first takes a key-share lock on the sessions involved (the lock a turn insert's foreign-key check
--- takes anyway). A session being deleted or moved to another project holds FOR UPDATE on its row, so this waits
--- for that transaction and then reads the session's project as committed; without it a turn deleted while its
--- session moved would be subtracted from the old project after the move had already carried it to the new one.
--- Deleting single turns of a session that is being deleted at the same moment can deadlock on that session lock
--- (not on a counter row); Postgres aborts one of the two and no count is lost (no code deletes single turns).
+-- A move and the turn writes of that session exclude each other with a transaction-level advisory lock on the
+-- session (163002, hash of its id): turn writes take it shared before they read the session's project, a move
+-- takes it exclusively before it counts the session's turns. So a move waits for the turn writes in flight and
+-- counts their result, and later ones wait for the move and read the new project.
+-- Row locks cannot do this. A turn insert's foreign-key check takes FOR KEY SHARE on the session, and Postgres
+-- can grant that beside a concurrent FOR UPDATE on the same row (heap_lock_tuple re-checks only for updates after
+-- it re-reads the row), which a move's own update never waits out: measured as one miscounted turn in most runs
+-- of 6 sessions moved while 10 connections insert turns.
+--
+-- A delete needs no lock: apply_chat_session_activity_stats() below subtracts exactly the turns it removes.
+-- A turn whose session is not visible here is being removed by that function, which counts it.
 CREATE OR REPLACE FUNCTION apply_chat_turn_activity_stats() RETURNS trigger
 LANGUAGE plpgsql SET search_path=pg_catalog,pg_temp AS $$
 BEGIN
   IF TG_OP = 'INSERT' THEN
-    PERFORM 1 FROM public.chat_sessions cs
-    WHERE cs.id IN (SELECT t.session_id FROM new_rows t) ORDER BY cs.id FOR KEY SHARE;
-    PERFORM public.project_activity_stats_add(g.project_id, 0, 0, 0, 0, 0, g.turns)
+    PERFORM pg_advisory_xact_lock_shared(163002, hashtext(k.id))
+    FROM (SELECT DISTINCT t.session_id AS id FROM new_rows t ORDER BY 1) k;
+    INSERT INTO public.project_activity_stats AS s (project_id, slot, chat_turns)
+    SELECT g.project_id, public.project_activity_stats_slot(), g.turns
     FROM (
       SELECT cs.project_id, count(*) AS turns
       FROM new_rows t JOIN public.chat_sessions cs ON cs.id = t.session_id
       GROUP BY cs.project_id
-    ) g;
+    ) g
+    ON CONFLICT (project_id, slot) DO UPDATE SET chat_turns = s.chat_turns + EXCLUDED.chat_turns;
   ELSIF TG_OP = 'DELETE' THEN
-    PERFORM 1 FROM public.chat_sessions cs
-    WHERE cs.id IN (SELECT t.session_id FROM old_rows t) ORDER BY cs.id FOR KEY SHARE;
-    PERFORM public.project_activity_stats_add(g.project_id, 0, 0, 0, 0, 0, -g.turns)
+    -- Only sessions that still exist: a cascade from a deleted session, user or project takes no lock here,
+    -- however many sessions it removes.
+    PERFORM pg_advisory_xact_lock_shared(163002, hashtext(k.id))
+    FROM (SELECT cs.id FROM public.chat_sessions cs WHERE cs.id IN (SELECT t.session_id FROM old_rows t) ORDER BY 1) k;
+    INSERT INTO public.project_activity_stats AS s (project_id, slot, chat_turns)
+    SELECT g.project_id, public.project_activity_stats_slot(), -g.turns
     FROM (
       SELECT cs.project_id, count(*) AS turns
       FROM old_rows t JOIN public.chat_sessions cs ON cs.id = t.session_id
       WHERE EXISTS (SELECT 1 FROM public.projects p WHERE p.id = cs.project_id)
       GROUP BY cs.project_id
-    ) g;
+    ) g
+    ON CONFLICT (project_id, slot) DO UPDATE SET chat_turns = s.chat_turns + EXCLUDED.chat_turns;
   ELSIF TG_OP = 'UPDATE' THEN
     -- A turn moved to another session (no code does this): one row, so a row-level trigger.
-    PERFORM 1 FROM public.chat_sessions cs
-    WHERE cs.id IN (OLD.session_id, NEW.session_id) ORDER BY cs.id FOR KEY SHARE;
-    PERFORM public.project_activity_stats_add(g.project_id, 0, 0, 0, 0, 0, g.turns)
+    PERFORM pg_advisory_xact_lock_shared(163002, hashtext(k.id))
+    FROM (SELECT DISTINCT u.id FROM unnest(ARRAY[OLD.session_id, NEW.session_id]) AS u(id) ORDER BY 1) k;
+    INSERT INTO public.project_activity_stats AS s (project_id, slot, chat_turns)
+    SELECT g.project_id, public.project_activity_stats_slot(), g.turns
     FROM (
-      SELECT d.project_id, sum(d.sign)::bigint AS turns
+      SELECT d.project_id, sum(d.sign) AS turns
       FROM (
         SELECT cs.project_id, 1 AS sign FROM public.chat_sessions cs WHERE cs.id = NEW.session_id
         UNION ALL
@@ -266,41 +306,55 @@ BEGIN
       WHERE EXISTS (SELECT 1 FROM public.projects p WHERE p.id = d.project_id)
       GROUP BY d.project_id
       HAVING sum(d.sign) <> 0
-    ) g;
+    ) g
+    ON CONFLICT (project_id, slot) DO UPDATE SET chat_turns = s.chat_turns + EXCLUDED.chat_turns;
   ELSIF TG_OP = 'TRUNCATE' THEN
     UPDATE public.project_activity_stats SET chat_turns = 0 WHERE chat_turns <> 0;
   END IF;
   RETURN NULL;
 END $$;
 --> statement-breakpoint
--- A chat session leaving its project (deleted, or moved to another project) takes its turns' count with it.
--- BEFORE the row changes, because the cascade removes the turns before any AFTER trigger could count them.
--- FOR UPDATE on the session makes the count final: turn inserts and deletes hold a key-share lock on their session
--- until they commit (above), so this waits for the ones in flight and counts their result, and later ones wait for
--- this transaction and then see the session gone or in its new project. When the project itself is gone (its
--- delete cascades here) nothing is written: its counters go with it.
--- This runs once per session, so one statement that removes sessions of several projects writes their counters in
--- row order, and a transaction may delete sessions over several statements; neither can deadlock with another such
--- transaction, because the counter write does not wait (project_activity_stats_add).
+-- A chat session leaving its project takes its turns' count with it.
+--
+-- Moved to another project (BEFORE the update; no code does this): under the session's advisory lock, taken
+-- exclusively, so the count below is final (see apply_chat_turn_activity_stats() above).
+--
+-- Deleted (AFTER the row is gone, and before the foreign-key cascade to chat_turns: the trigger's name sorts
+-- before RI_ConstraintTrigger_...): this function removes the session's turns itself and subtracts the number it
+-- removed. By then the delete has waited for every turn insert that held the session, and none can start, so the
+-- rows removed here are all of them and each was counted once when it was written. Counting them before the
+-- delete instead (as a BEFORE trigger must) misses a turn committed in between. The cascade then finds nothing.
+-- When the project itself is gone (its delete cascades here) nothing is written: its counters go with it.
+--
+-- Neither path can deadlock with another one on a counter row: each transaction writes only the rows of its slot.
 CREATE OR REPLACE FUNCTION apply_chat_session_activity_stats() RETURNS trigger
 LANGUAGE plpgsql SET search_path=pg_catalog,pg_temp AS $$
 DECLARE
   turn_count bigint;
 BEGIN
-  IF TG_OP = 'DELETE' AND NOT EXISTS (SELECT 1 FROM public.projects p WHERE p.id = OLD.project_id) THEN
-    RETURN OLD;
+  IF TG_OP = 'DELETE' THEN
+    IF NOT EXISTS (SELECT 1 FROM public.projects p WHERE p.id = OLD.project_id) THEN
+      RETURN NULL;
+    END IF;
+    WITH gone AS (DELETE FROM public.chat_turns t WHERE t.session_id = OLD.id RETURNING 1)
+    SELECT count(*) INTO turn_count FROM gone;
+    IF turn_count > 0 THEN
+      INSERT INTO public.project_activity_stats AS s (project_id, slot, chat_turns)
+      VALUES (OLD.project_id, public.project_activity_stats_slot(), -turn_count)
+      ON CONFLICT (project_id, slot) DO UPDATE SET chat_turns = s.chat_turns + EXCLUDED.chat_turns;
+    END IF;
+    RETURN NULL;
   END IF;
-  PERFORM 1 FROM public.chat_sessions cs WHERE cs.id = OLD.id FOR UPDATE;
+  PERFORM pg_advisory_xact_lock(163002, hashtext(OLD.id));
   SELECT count(*) INTO turn_count FROM public.chat_turns t WHERE t.session_id = OLD.id;
   IF turn_count > 0 THEN
-    IF EXISTS (SELECT 1 FROM public.projects p WHERE p.id = OLD.project_id) THEN
-      PERFORM public.project_activity_stats_add(OLD.project_id, 0, 0, 0, 0, 0, -turn_count);
-    END IF;
-    IF TG_OP = 'UPDATE' AND EXISTS (SELECT 1 FROM public.projects p WHERE p.id = NEW.project_id) THEN
-      PERFORM public.project_activity_stats_add(NEW.project_id, 0, 0, 0, 0, 0, turn_count);
-    END IF;
+    INSERT INTO public.project_activity_stats AS s (project_id, slot, chat_turns)
+    SELECT d.project_id, public.project_activity_stats_slot(), d.turns
+    FROM (VALUES (OLD.project_id, -turn_count), (NEW.project_id, turn_count)) AS d(project_id, turns)
+    WHERE d.project_id IS NOT NULL AND EXISTS (SELECT 1 FROM public.projects p WHERE p.id = d.project_id)
+    ON CONFLICT (project_id, slot) DO UPDATE SET chat_turns = s.chat_turns + EXCLUDED.chat_turns;
   END IF;
-  RETURN CASE WHEN TG_OP = 'DELETE' THEN OLD ELSE NEW END;
+  RETURN NEW;
 END $$;
 --> statement-breakpoint
 -- A deleted project's counter rows go with it (there is no foreign key to cascade; see the top of this file).
@@ -315,7 +369,7 @@ BEGIN
   RETURN NULL;
 END $$;
 --> statement-breakpoint
--- Repair: replaces every counter row with one row per project holding the totals recomputed from history, and
+-- Repair: replaces every counter row with one row per project (slot 0) holding the totals recomputed from history, and
 -- returns the number of rows written. Exact under the locks it takes: SHARE ROW EXCLUSIVE on the three history
 -- tables makes writers (and so every counter write) wait until the caller's transaction commits, while reads go on.
 -- Call it in a short transaction of its own with a lock_timeout, as the role that owns or writes these tables:
@@ -331,8 +385,8 @@ BEGIN
   LOCK TABLE public.chat_sessions, public.chat_turns, public.search_sessions IN SHARE ROW EXCLUSIVE MODE;
   DELETE FROM public.project_activity_stats;
   INSERT INTO public.project_activity_stats
-    (project_id, search_sessions, search_result_count, zero_result_searches, search_duration_count, search_duration_ms, chat_turns)
-  SELECT w.id, coalesce(s.sessions, 0), coalesce(s.results, 0), coalesce(s.zero, 0), coalesce(s.durations, 0),
+    (project_id, slot, search_sessions, search_result_count, zero_result_searches, search_duration_count, search_duration_ms, chat_turns)
+  SELECT w.id, 0, coalesce(s.sessions, 0), coalesce(s.results, 0), coalesce(s.zero, 0), coalesce(s.durations, 0),
     coalesce(s.duration_ms, 0), coalesce(c.turns, 0)
   FROM public.projects w
   LEFT JOIN (
@@ -356,10 +410,12 @@ BEGIN
 END $$;
 --> statement-breakpoint
 -- Folds each named project's counter rows into one, and returns the number of rows removed. A burst of concurrent
--- writers leaves a project one row per writer; reads sum them, so the maintenance sweep folds a few projects at a
--- time. Exact and non-blocking: one statement locks the rows no other transaction holds (SKIP LOCKED), deletes
--- all but the first and adds what they held to it. It creates no row, so a project delete running at the same
--- moment still removes everything, and a writer that finds these rows locked writes another one meanwhile.
+-- writers leaves a project one row per slot they used; reads sum them, so the maintenance sweep folds a few
+-- projects at a time. Exact and non-blocking: it folds only rows whose slot it could take without waiting (so no
+-- writer is using them) and that no other transaction has locked (SKIP LOCKED: a project delete or a rebuild in
+-- progress keeps its rows). One statement per project deletes all of those but the first and adds what they held
+-- to it. It creates no row, so a project delete running at the same moment still removes everything. The slots
+-- stay taken until the caller's transaction ends: call it on its own, not inside a long transaction.
 CREATE OR REPLACE FUNCTION compact_project_activity_stats(p_project_ids text[]) RETURNS bigint
 LANGUAGE plpgsql SET search_path=pg_catalog,pg_temp AS $$
 DECLARE
@@ -368,9 +424,12 @@ DECLARE
   step bigint;
 BEGIN
   FOR target IN SELECT DISTINCT u.id FROM unnest(p_project_ids) AS u(id) WHERE u.id IS NOT NULL ORDER BY u.id LOOP
-    WITH free AS MATERIALIZED (
+    WITH mine AS MATERIALIZED (
       SELECT c.slot FROM public.project_activity_stats c
-      WHERE c.project_id = target ORDER BY c.slot FOR UPDATE SKIP LOCKED
+      WHERE c.project_id = target AND pg_try_advisory_xact_lock(163001, c.slot::integer)
+    ), free AS MATERIALIZED (
+      SELECT c.slot FROM public.project_activity_stats c
+      WHERE c.project_id = target AND c.slot IN (SELECT m.slot FROM mine m) ORDER BY c.slot FOR UPDATE SKIP LOCKED
     ), gone AS (
       DELETE FROM public.project_activity_stats d
       WHERE d.project_id = target AND d.slot IN (SELECT f.slot FROM free f) AND d.slot <> (SELECT min(f.slot) FROM free f)
@@ -488,7 +547,9 @@ FOR EACH ROW WHEN (OLD.session_id IS DISTINCT FROM NEW.session_id) EXECUTE FUNCT
 CREATE OR REPLACE TRIGGER chat_turns_activity_stats_truncate AFTER TRUNCATE ON "chat_turns"
 FOR EACH STATEMENT EXECUTE FUNCTION apply_chat_turn_activity_stats();
 --> statement-breakpoint
-CREATE OR REPLACE TRIGGER chat_sessions_activity_stats_delete BEFORE DELETE ON "chat_sessions"
+-- The name is quoted to keep its capital: triggers of one kind fire in name order, and this one must run before
+-- the cascade to chat_turns (RI_ConstraintTrigger_...).
+CREATE OR REPLACE TRIGGER "A_chat_sessions_activity_stats_delete" AFTER DELETE ON "chat_sessions"
 FOR EACH ROW EXECUTE FUNCTION apply_chat_session_activity_stats();
 --> statement-breakpoint
 CREATE OR REPLACE TRIGGER chat_sessions_activity_stats_move BEFORE UPDATE OF project_id ON "chat_sessions"

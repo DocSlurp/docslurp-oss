@@ -379,6 +379,29 @@ describe("tenant boundary", () => {
       order by tgname::text collate "C"`).map((row) => row.tgname);
     expect(names.at(-1)).toBe("zz_projects_activity_stats_delete");
     expect(names.some((name) => name.startsWith("RI_ConstraintTrigger_"))).toBe(true);
+    // The chat session delete trigger counts the turns it removes, so it must run before the cascade removes them.
+    const chatNames = (await sql<{ tgname: string }[]>`
+      select tgname from pg_trigger where tgrelid = 'chat_sessions'::regclass and tgtype & 8 = 8 and tgtype & 1 = 1 and tgtype & 2 = 0
+      order by tgname::text collate "C"`).map((row) => row.tgname);
+    expect(chatNames[0]).toBe("A_chat_sessions_activity_stats_delete");
+    expect(chatNames.some((name) => name.startsWith("RI_ConstraintTrigger_"))).toBe(true);
+  });
+
+  it("keeps one slot per transaction and refuses a slot outside the range", async () => {
+    await expect(sql`insert into project_activity_stats (project_id, slot) values ('p-a1', 1024)`).rejects.toThrow(/slot_check/);
+    const held = await sql.begin(async (tx) => {
+      await tx`insert into search_sessions (id, user_id, project_id, query, result_count, metadata) values ('slot-1', 'u-a', 'p-a1', 'q', 1, '{}'), ('slot-2', 'u-a', 'p-a2', 'q', 1, '{}')`;
+      await tx`delete from search_sessions where id = 'slot-1'`;
+      await tx`update search_sessions set result_count = 4 where id = 'slot-2'`;
+      await tx`delete from search_sessions where id = 'slot-2'`;
+      return await tx<{ slots: number }[]>`
+        select count(*)::int as slots from pg_locks where locktype = 'advisory' and classid = 163001 and pid = pg_backend_pid()`;
+    });
+    expect(held[0]!.slots).toBe(1);
+    // Released with the transaction.
+    const [after] = await sql<{ slots: number }[]>`select count(*)::int as slots from pg_locks where locktype = 'advisory' and classid = 163001`;
+    expect(after!.slots).toBe(0);
+    await expectCountersMatchHistory();
   });
 
   it("zeroes the counters when a table is truncated", async () => {
@@ -418,7 +441,7 @@ describe("drift check and rebuild", () => {
     await sql`delete from search_sessions where id in (select id from search_sessions where project_id = 'p-a2' order by id limit 1)`;
     await sql`alter table search_sessions enable trigger search_sessions_activity_stats_delete`;
     // A counter row left for a project that does not exist.
-    await sql`insert into project_activity_stats (project_id, search_sessions) values ('gone-project', 9)`;
+    await sql`insert into project_activity_stats (project_id, slot, search_sessions) values ('gone-project', 0, 9)`;
     expect(await counters()).toEqual(exact); // nothing above moved a counter
 
     const all = await drifted();
@@ -477,8 +500,8 @@ describe("drift check and rebuild", () => {
   it("folds a project's counter rows into one without changing a total", async () => {
     const stored = await counters();
     // Rows as concurrent writers leave them: several per project, here splitting amounts that cancel out.
-    await sql`insert into project_activity_stats (project_id, search_sessions, search_result_count, search_duration_ms, chat_turns) values
-      ('p-a1', 5, 12, 7, 2), ('p-a1', -5, -12, -7, -2), ('p-a1', 0, 0, 0, 0), ('p-b1', 3, 1, 0, 0), ('p-b1', -3, -1, 0, 0)`;
+    await sql`insert into project_activity_stats (project_id, slot, search_sessions, search_result_count, search_duration_ms, chat_turns) values
+      ('p-a1', 7, 5, 12, 7, 2), ('p-a1', 8, -5, -12, -7, -2), ('p-a1', 9, 0, 0, 0, 0), ('p-b1', 7, 3, 1, 0, 0), ('p-b1', 8, -3, -1, 0, 0)`;
     expect(await counters()).toEqual(stored);
     const [{ removed }] = await sql<{ removed: string }[]>`select compact_project_activity_stats(array['p-a1', 'p-a1', 'no-such-project']) as removed`;
     expect(Number(removed)).toBe(3);
@@ -497,8 +520,8 @@ describe("drift check and rebuild", () => {
   it("is a plain invoker function that names every object by schema", async () => {
     const functions = await sql<{ proname: string; prosecdef: boolean; proconfig: string[] | null; prosrc: string }[]>`
       select proname, prosecdef, proconfig, prosrc from pg_proc
-      where proname in ('rebuild_project_activity_stats', 'project_activity_stats_drift', 'project_activity_stats_add',
-        'delete_project_activity_stats', 'compact_project_activity_stats')
+      where proname in ('rebuild_project_activity_stats', 'project_activity_stats_drift',
+        'delete_project_activity_stats', 'compact_project_activity_stats', 'project_activity_stats_slot')
       order by proname`;
     expect(functions).toHaveLength(5);
     for (const fn of functions) {
@@ -559,16 +582,13 @@ describe.skipIf(!raceDatabaseUrl)("concurrent writers (native PostgreSQL)", () =
   const CONNECTIONS = 16;
   let pool: postgres.Sql;
   const failures: string[] = [];
-  /**
-   * Expected refusals: a foreign-key violation for a write into a session or project deleted meanwhile, and a
-   * deadlock abort when a single turn is deleted while its session is (0163 documents it). Neither may cost a count.
-   */
+  /** The one expected refusal: a foreign-key violation for a write into a session or project deleted meanwhile. */
   const attempt = async (work: () => Promise<unknown>) => {
     try {
       await work();
     } catch (error) {
       const code = (error as { code?: string }).code;
-      if (code !== "23503" && code !== "40P01") failures.push(`${code ?? "?"} ${(error as Error).message}`);
+      if (code !== "23503") failures.push(`${code ?? "?"} ${(error as Error).message}`);
     }
   };
 
@@ -851,9 +871,11 @@ describe.skipIf(!raceDatabaseUrl)("concurrent writers (native PostgreSQL)", () =
       await pool`update search_sessions set variant = 'b' where id = 'race-free-0'`;
       expect(Date.now() - started).toBeLessThan(5_000);
       const [{ locked }] = await pool<{ locked: number }[]>`
-        select count(*)::int as locked from pg_locks l join pg_stat_activity a on a.pid = l.pid
-        where l.locktype = 'transactionid' and not l.granted`;
+        select count(*)::int as locked from pg_locks l where not l.granted and l.database = (select oid from pg_database where datname = current_database())`;
       expect(locked).toBe(0);
+      // The open transaction still holds its slot.
+      const [{ slots }] = await pool<{ slots: number }[]>`select count(*)::int as slots from pg_locks where locktype = 'advisory' and classid = 163001`;
+      expect(slots).toBeGreaterThanOrEqual(1);
       release();
       expect(await open).toMatch(/roll back/);
       const after = (await raceRows()).find((row) => row.project_id === "race-p3")!;
@@ -864,6 +886,47 @@ describe.skipIf(!raceDatabaseUrl)("concurrent writers (native PostgreSQL)", () =
       await holder.end();
     }
   }, 60_000);
+
+  it("counts every turn in its session's project while sessions move and are deleted under the inserts, with no aborts", async () => {
+    // Few sessions, many writers and movers: the turn insert that reads its session's project while the session
+    // moves, and the one that commits while its session is deleted. Session row locks alone miscount here.
+    const errors: string[] = [];
+    const run = async (work: () => Promise<unknown>) => {
+      const result = await settle(work());
+      // A turn written into a session deleted meanwhile is refused by its foreign key; nothing else may fail.
+      if (result !== "ok" && !result.startsWith("23503")) errors.push(result);
+    };
+    for (let round = 0; round < 4; round += 1) {
+      const tag = `race-mv-${round}`;
+      await pool`insert into chat_sessions (id, project_id, user_id) select ${tag} || '-c' || g, 'race-p1', 'race-u' from generate_series(1, 8) g`;
+      await pool`insert into chat_turns (id, session_id, role, content)
+        select ${tag} || '-seed-' || s || '-' || g, ${tag} || '-c' || s, 'user', 'x' from generate_series(1, 8) s, generate_series(1, 10) g`;
+      const writers = Array.from({ length: 9 }, async (_, worker) => {
+        for (let i = 0; i < 90; i += 1) {
+          const session = `${tag}-c${1 + ((worker * 7 + i) % 8)}`;
+          await run(() => pool`insert into chat_turns (id, session_id, role, content) values (${`${tag}-t-${worker}-${i}`}, ${session}, 'user', 'x')`);
+          if (i % 4 === 0) await run(() => pool`delete from chat_turns where id = (select id from chat_turns where session_id = ${session} order by id desc limit 1)`);
+        }
+      });
+      const movers = Array.from({ length: 5 }, async (_, worker) => {
+        for (let i = 0; i < 70; i += 1) {
+          await run(() => pool`update chat_sessions set project_id = case when project_id = 'race-p1' then 'race-p3' else 'race-p1' end
+            where id = ${`${tag}-c${1 + ((worker * 5 + i) % 6)}`}`);
+        }
+      });
+      const removers = (async () => {
+        for (const session of [7, 8]) {
+          await pause(20 + round * 15);
+          await run(() => pool`delete from chat_sessions where id = ${`${tag}-c${session}`}`);
+        }
+      })();
+      await Promise.all([...writers, ...movers, removers]);
+    }
+    expect(errors).toEqual([]);
+    expect(await raceRows()).toEqual(await raceHistory());
+    await pool`delete from chat_sessions where id like 'race-mv-%'`;
+    expect(await raceRows()).toEqual(await raceHistory());
+  }, 120_000);
 
   it("folds counter rows while writers and project deletes keep arriving, exactly and without making anyone wait", async () => {
     let stop = false;
