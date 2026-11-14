@@ -67,7 +67,7 @@ DATABASE_URL="$TEST_DATABASE_ADMIN_URL/$TEST_DATABASE_TEMPLATE" node server/db/m
 node scripts/run-database-tests.mjs [file filter]
 ```
 
-A new test of this kind just reads `TEST_DATABASE_URL` / `TEST_REDIS_URL`; there is nothing to register. Do not give it its own variable: the runner refuses test files gated on a database or Redis variable it never sets. Never export `TEST_DATABASE_URL` for a whole `pnpm test` run, since every gated file would then share and wipe one database.
+A new test of this kind just reads `TEST_DATABASE_URL` / `TEST_REDIS_URL`; there is nothing to register. Do not give it its own variable: the runner refuses test files gated on a database or Redis variable it never sets. Never export `TEST_DATABASE_URL` for a whole `pnpm test` run, since every gated file would then share and wipe one database. The server and worker test setups refuse a `TEST_DATABASE_URL` that is not on a loopback host or whose database name does not look disposable (a `test`, `tmp` or `scratch` word, or the runner's `dbtest_<n>`), so a mistyped URL fails loudly instead of writing to your development database.
 
 ## Style
 

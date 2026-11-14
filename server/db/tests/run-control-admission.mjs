@@ -6,8 +6,10 @@ import postgres from 'postgres';
 // needs a real, migrated, disposable local Postgres in TEST_DATABASE_URL (scripts/run-database-tests.mjs
 // sets it for server/src/__tests__/run-control-native.db.test.ts, which runs this file).
 if (process.env.TEST_DATABASE_URL) {
+  // Loopback host and a disposable database name, as the gated test setups require (#400).
+  const { assertDisposableTestDatabaseUrl } = await import('@docslurp/shared');
+  assertDisposableTestDatabaseUrl(process.env.TEST_DATABASE_URL);
   const url = new URL(process.env.TEST_DATABASE_URL);
-  assert.ok(['localhost', '127.0.0.1'].includes(url.hostname));
   const sql = postgres(url.toString(), { max: 4 });
   const { createRunLifecycle } = await import('../../src/services/run-lifecycle.ts');
   const { requireRunCreditLease } = await import('../../src/services/billing/spend-guard.ts');

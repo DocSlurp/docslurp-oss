@@ -39,3 +39,29 @@ test("a test gated on its own variable is reported, since the runner would never
   assert.deepEqual(unsupportedGatedFiles(scanned), ["server/src/__tests__/new-thing.db.test.ts (NEW_THING_TEST_DATABASE_URL, OTHER_PG_URL)"]);
   assert.deepEqual(gatedFiles(scanned), []);
 });
+
+test("bracket and destructured reads of a foreign gate variable are reported too", () => {
+  for (const source of [
+    'process.env["NEW_THING_DATABASE_URL"]',
+    "process.env['NEW_THING_DATABASE_URL']",
+    "process.env[ `NEW_THING_DATABASE_URL` ]",
+    "const { NEW_THING_DATABASE_URL } = process.env;",
+    "const { LOG_LEVEL, NEW_THING_DATABASE_URL: url = '' } = process.env;",
+    "let {\n  NEW_THING_DATABASE_URL,\n} = process.env",
+  ]) {
+    assert.deepEqual(classifyTestSource(source).other, ["NEW_THING_DATABASE_URL"], source);
+  }
+  assert.deepEqual(classifyTestSource('const { TEST_DATABASE_URL } = process.env; process.env["TEST_REDIS_URL"]'), { db: true, redis: true, other: [] });
+  assert.deepEqual(classifyTestSource("const { LOG_LEVEL } = process.env; process.env['HOME']").other, []);
+});
+
+test("server/db/tests scripts are scanned but never run directly", () => {
+  const scanned = scanTestFiles();
+  const scripts = Object.fromEntries(scanned.filter((entry) => entry.script).map((entry) => [entry.file, entry]));
+  assert.deepEqual(scripts["server/db/tests/project-cutover-roles.mjs"]?.other, ["PROJECT_CUTOVER_DATABASE_URL"]);
+  assert.ok(NOT_RUN["server/db/tests/project-cutover-roles.mjs"], "the cutover reproducer is listed with a reason");
+  assert.equal(scripts["server/db/tests/run-control-admission.mjs"]?.db, true);
+  assert.ok(!gatedFiles(scanned).some((entry) => entry.file.startsWith("server/db/tests/")), "scripts run through their wrappers");
+  const unlisted = [{ file: "server/db/tests/new-script.mjs", script: true, ...classifyTestSource("process.env.NEW_SCRIPT_DATABASE_URL") }];
+  assert.deepEqual(unsupportedGatedFiles(unlisted), ["server/db/tests/new-script.mjs (NEW_SCRIPT_DATABASE_URL)"]);
+});

@@ -17,6 +17,9 @@
 // can create databases; each file connects as that role, so tests that create roles
 // or extra databases need it to be a superuser (CI uses the container superuser).
 // The template must already be migrated: DATABASE_URL=<admin>/tmpl node server/db/migrate.mjs
+//
+// The server and worker test setups refuse a TEST_DATABASE_URL off loopback or naming a database that does not look
+// disposable (packages/shared/src/test-database-guard.ts); the dbtest_<n> databases made here pass.
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -28,40 +31,64 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 /** Gated files that need more than a database (fixtures, benchmarks, live services). */
 export const NOT_RUN = {
   "server/src/__tests__/search-native.bench.test.ts": "benchmark: needs a qrels file and a populated corpus",
+  "server/db/tests/project-cutover-roles.mjs":
+    "manual migration reproducer: needs an empty database (not the migrated template) whose owner holds the cutover roles",
 };
 
 const DB = /(?<![A-Za-z0-9_])TEST_DATABASE_URL(?![A-Za-z0-9_])/;
 const REDIS = /(?<![A-Za-z0-9_])TEST_REDIS_URL(?![A-Za-z0-9_])/;
-/** Any database or Redis URL variable a test reads; the runner sets only the two above. */
-const GATE = /process\.env\.([A-Z0-9_]*(?:DATABASE_URL|_PG_URL|REDIS_URL))\b/g;
+/** A database or Redis URL variable name; the runner sets only the two above. */
+const GATE_NAME = /^[A-Z0-9_]*(?:DATABASE_URL|_PG_URL|REDIS_URL)$/;
 const STANDARD = new Set(["DATABASE_URL", "TEST_DATABASE_URL", "TEST_REDIS_URL"]);
+/** Environment reads: `process.env.X`, `process.env["X"]` (any quote) and `const { X, Y: y } = process.env`. */
+const DOT_READ = /process\.env\.([A-Za-z0-9_]+)/g;
+const INDEX_READ = /process\.env\[\s*(["'`])([A-Za-z0-9_]+)\1\s*\]/g;
+const DESTRUCTURED_READ = /\{([^{}]*)\}\s*=\s*process\.env\b/g;
+
+/** Every environment variable name the source reads, by any of the forms above. */
+export function environmentReads(source) {
+  const names = new Set();
+  for (const m of source.matchAll(DOT_READ)) names.add(m[1]);
+  for (const m of source.matchAll(INDEX_READ)) names.add(m[2]);
+  for (const m of source.matchAll(DESTRUCTURED_READ)) {
+    for (const part of m[1].split(",")) {
+      const name = part.replace(/^\s*\.\.\.\s*/, "").split(/[:=]/)[0].trim();
+      if (/^[A-Za-z0-9_]+$/.test(name)) names.add(name);
+    }
+  }
+  return names;
+}
 
 /** What a test file's source needs from the runner, and any gate variable it would never get. */
 export function classifyTestSource(source) {
-  const other = [...new Set([...source.matchAll(GATE)].map((m) => m[1]).filter((v) => !STANDARD.has(v)))];
+  const other = [...environmentReads(source)].filter((v) => GATE_NAME.test(v) && !STANDARD.has(v));
   return { db: DB.test(source), redis: REDIS.test(source), other };
 }
 
-/** Test files under server/src, worker/src and packages with their needs, relative to the repo root. */
+/**
+ * Test files under server/src, worker/src and packages with their needs, relative to the repo root, plus the
+ * server/db/tests scripts (`script: true`). Those run through server's test:db or a vitest wrapper
+ * (run-control-native.db.test.ts runs run-control-admission.mjs), never directly here, but they are scanned so a script
+ * gated on a variable the runner never sets is reported too.
+ */
 export function scanTestFiles(dir = root) {
   const found = [];
-  for (const top of ["server/src", "worker/src", "packages"]) {
-    const walk = (current) => {
-      for (const name of readdirSync(current)) {
-        if (name === "node_modules" || name === "dist") continue;
-        const full = path.join(current, name);
-        if (statSync(full).isDirectory()) walk(full);
-        else if (/\.test\.(ts|mjs)$/.test(name)) found.push({ file: path.relative(dir, full), ...classifyTestSource(readFileSync(full, "utf8")) });
-      }
-    };
-    walk(path.join(dir, top));
-  }
+  const walk = (current, pattern, extra) => {
+    for (const name of readdirSync(current)) {
+      if (name === "node_modules" || name === "dist") continue;
+      const full = path.join(current, name);
+      if (statSync(full).isDirectory()) walk(full, pattern, extra);
+      else if (pattern.test(name)) found.push({ file: path.relative(dir, full), ...classifyTestSource(readFileSync(full, "utf8")), ...extra });
+    }
+  };
+  for (const top of ["server/src", "worker/src", "packages"]) walk(path.join(dir, top), /\.test\.(ts|mjs)$/, {});
+  walk(path.join(dir, "server/db/tests"), /\.(ts|mjs)$/, { script: true });
   return found.sort((a, b) => a.file.localeCompare(b.file));
 }
 
-/** Files the runner runs: those reading TEST_DATABASE_URL or TEST_REDIS_URL, minus NOT_RUN. */
+/** Files the runner runs: test files reading TEST_DATABASE_URL or TEST_REDIS_URL, minus NOT_RUN and scripts. */
 export function gatedFiles(scanned) {
-  return scanned.filter((entry) => (entry.db || entry.redis) && !NOT_RUN[entry.file]);
+  return scanned.filter((entry) => (entry.db || entry.redis) && !entry.script && !NOT_RUN[entry.file]);
 }
 
 /** Files gated on a variable the runner never sets: they would skip unnoticed. */

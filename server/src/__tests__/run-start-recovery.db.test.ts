@@ -12,8 +12,8 @@ import type { SqlClient } from "../db.js";
 // applying server/db/migrations (pnpm db:migrate); server/db/migrations is the
 // only schema source. Each test seeds its own user, organization and project
 // with unique ids and deletes them afterwards. Recovery sweeps every due Run in
-// the database, so do not point this at a database other processes are using.
-//   TEST_DATABASE_URL=$DATABASE_URL npx vitest run --project api run-start-recovery.db
+// the database, so do not point this at a database other processes are using: run it with
+// scripts/run-database-tests.mjs, which gives each file a fresh disposable database.
 const databaseUrl = process.env.TEST_DATABASE_URL ?? "";
 const isLocal =
   databaseUrl !== "" && ["localhost", "127.0.0.1"].includes(new URL(databaseUrl).hostname);
