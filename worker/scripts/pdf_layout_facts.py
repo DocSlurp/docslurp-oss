@@ -1365,7 +1365,45 @@ def struct_alt_text(file):
     return out
 
 
-def walk_document(path, first, last, deadline=None, only_pages=None, content=True, index=None):
+class LayoutDocument:
+    """One PDF held open for a caller that walks it in many calls (chunks): walk_document and layout_facts take it as
+    `document=`. The file is opened, its cross-reference read and its objects cached once for every call instead of once
+    per call: on a flat 10,000-page tree, re-reading the root's Kids array was most of a 32-page chunk's cost. Parsed
+    objects are never changed after they are read, so each call's answer is the one a fresh open gives.
+
+    Every call runs under its own deadline. Nothing but parsed objects is kept between calls: an open that fails is tried
+    again by the next call, and a call that raises anything but Unknown, or has a page fail with an unexpected error, drops
+    the open file so the next call starts from a fresh one. Holds one descriptor and the open file's bounded caches
+    (MAX_OBJECTS_CACHED objects, four object streams). Bound to one path; close() when done."""
+
+    def __init__(self, path):
+        self.path = path
+        self._file = None
+
+    def open(self, deadline=None):
+        """The open file with `deadline` as its budget; opened now when it is not (raises Unknown as PdfFile does)."""
+        if self._file is None:
+            self._file = PdfFile(self.path, deadline)
+        self._file.deadline = deadline
+        return self._file
+
+    def discard(self):
+        """Close the open file, if any: the next call opens the PDF again."""
+        file, self._file = self._file, None
+        if file is not None:
+            file.close()
+
+    close = discard
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        self.discard()
+        return False
+
+
+def walk_document(path, first, last, deadline=None, only_pages=None, content=True, index=None, document=None):
     """Walk pages [first, last]. Returns {page: PageWalk}; a page with `unknown` set carries no reliable draws.
 
     Raises Unknown only for whole-file reasons (encrypted, unreadable xref, a page tree that does not check out); callers
@@ -1376,6 +1414,9 @@ def walk_document(path, first, last, deadline=None, only_pages=None, content=Tru
     `index`: page_index()'s result for this file (a PageIndex, or the Unknown it returned), from a caller that walks one
     document in several calls; without it the page tree is walked whole here (build_page_index). Either way the cost of
     finding the pages does not grow with how far into the document `first` is, once the index exists.
+
+    `document` (a LayoutDocument for this `path`): the open file to walk instead of opening it again, for a caller that
+    walks one document in several calls.
     """
     if last - first + 1 > MAX_PAGES_WALKED:
         raise Unknown('range')
@@ -1383,15 +1424,20 @@ def walk_document(path, first, last, deadline=None, only_pages=None, content=Tru
         raise Unknown(str(index) or 'unknown')
     if index is not None and not isinstance(index, PageIndex):
         raise TypeError('index')
-    file = PdfFile(path, deadline)
+    if document is not None and (not isinstance(document, LayoutDocument) or document.path != path):
+        raise TypeError('document')
+    file = document.open(deadline) if document is not None else PdfFile(path, deadline)
+    clean = dirty = False
     try:
         if index is None:
             index = build_page_index(file)
         numbers = sorted(n for n in only_pages if first <= n <= last) if only_pages is not None else range(first, last + 1)
         try:
             alt = struct_alt_text(file) if content else {}
-        except (Unknown, RecursionError, MemoryError, ValueError, TypeError, IndexError, KeyError, struct.error):
+        except Unknown:
             alt = {}
+        except (RecursionError, MemoryError, ValueError, TypeError, IndexError, KeyError, struct.error):
+            alt, dirty = {}, True
         walker = Walker(file, alt)
         pages = {}
         for number, page, objnum, trail in indexed_pages(file, index, numbers):
@@ -1406,9 +1452,17 @@ def walk_document(path, first, last, deadline=None, only_pages=None, content=Tru
                 walk.unknown, walk.draws = str(error) or 'unknown', []
             except (RecursionError, MemoryError, ValueError, TypeError, IndexError, KeyError, OverflowError, struct.error):
                 walk.unknown, walk.draws = 'walker-error', []
+                dirty = True
+        clean = not dirty
         return pages
+    except Unknown:
+        clean = not dirty   # a whole-file answer; the open file holds only objects it read completely
+        raise
     finally:
-        file.close()
+        if document is None:
+            file.close()
+        elif not clean:
+            document.discard()
 
 
 # ---- from a matrix to published placement facts ----
@@ -2028,7 +2082,7 @@ def format_page_list(pages):
 
 
 def layout_facts(path, listing_text, xhtml_text, page_markdowns, first, last, deadline=None, repeated=None, content=True,
-                 pages=None, index=None):
+                 pages=None, index=None, document=None):
     """Structural layout facts for routing, per page in [first, last]:
 
     * images: each listed image drawn on the page with its placement (walker), stream facts (`pdfimages -list`: pixel
@@ -2057,6 +2111,12 @@ def layout_facts(path, listing_text, xhtml_text, page_markdowns, first, last, de
 
     `index` (page_index's result for this file): a caller that runs a long document chunk by chunk passes the same one to
     every chunk, so each chunk loads only its own pages' path through the page tree (walk_document).
+
+    `document` (a LayoutDocument for `path`): the same caller keeps the PDF open across its chunks (walk_document).
+
+    When the walk fails for the whole file (walk_document raised Unknown: a page tree that does not check out, encryption,
+    an unreadable file, the deadline), every page is unknown and the result also carries `walkerUnknown`: that reason slug
+    and how many pages it left unknown, for counters. Never document content.
     """
     if last - first + 1 > MAX_LAYOUT_PAGES:
         raise Unknown('range')
@@ -2072,7 +2132,7 @@ def layout_facts(path, listing_text, xhtml_text, page_markdowns, first, last, de
         selected, numbers = None, range(first, last + 1)
     offsets = [number - first for number in numbers]
     try:
-        walks = walk_document(path, first, last, deadline, only_pages=selected, content=content, index=index)
+        walks = walk_document(path, first, last, deadline, only_pages=selected, content=content, index=index, document=document)
     except Unknown as error:
         walks, whole_unknown = {}, str(error) or 'unknown'
     else:
@@ -2155,7 +2215,11 @@ def layout_facts(path, listing_text, xhtml_text, page_markdowns, first, last, de
             entry['grids'] = [{'rows': g['rows'], 'columns': g['columns'], 'coverage': union_coverage([g['bbox']], box_of_page)} for g in grids]
             entry['tableCoverage'] = union_coverage(([] if markdown is None else boxes) + [g['bbox'] for g in grids], box_of_page)
         result.append(entry)
-    return {'version': LAYOUT_VERSION, 'pages': result}
+    out = {'version': LAYOUT_VERSION, 'pages': result}
+    if whole_unknown is not None and result:
+        # Why the whole file is unknown (a page tree that does not check out, say), for counters: a fixed slug and a count.
+        out['walkerUnknown'] = {'reason': whole_unknown, 'pages': len(result)}
+    return out
 
 
 def main(argv):
