@@ -5,13 +5,15 @@ import { reportPublicError } from "../lib/public-errors.js";
 import { chatSessionForRequest, CHAT_SESSION_TOKEN_HEADER } from "../lib/chat-session-tokens.js";
 import { apiErrorResponse, envelopeForError, nativeApiErrors, withApiErrorDetails } from "../lib/api-error.js";
 import { Hono, type Context } from "hono";
+import { callerCanReprocess } from "../lib/reprocess-access.js";
+import { apiKeyCanUseProject } from "../lib/api-key-project-scope.js";
 import { batchSearchInputSchema, searchFormError, searchInputSchema, searchOptions, searchQueryText, projectChatRequestSchema, type SearchInput } from "../lib/search-input.js";
 import { streamSSE } from "hono/streaming";
 import { assertCanSpend } from "../services/billing/spend-guard.js";
 import { enforceActorCategoryRateLimit } from "../middleware/rate-limit.js";
 import { acquireChatSlot, chatSlotRefusedResponse } from "../middleware/chat-concurrency.js";
 
-import { aggregateProjectRagSearchRequestSchema, deferredProfilesEnabled, PARSE_SOURCE_RESCAN_REASON, PUBLIC_ERROR_MESSAGES, type ApiErrorCode } from "@docslurp/shared";
+import { aggregateProjectRagSearchRequestSchema, dataUnavailable, deferredProfilesEnabled, PARSE_SOURCE_RESCAN_REASON, PUBLIC_ERROR_MESSAGES, type ApiErrorCode } from "@docslurp/shared";
 
 import {
   actorHasAnyApiKeyScope,
@@ -25,9 +27,10 @@ import { defaultMaterializeDeps, pageKey } from "../search/deferred/materialize-
 import { loadProjectPipeline } from "../search/session-setup.js";
 import { resolveMaterializationPolicy } from "../services/materialization-policy.js";
 import { aggregateProjectRagSearch } from "../services/aggregate-rag.js";
-import { resolveDefaultOrganization } from "../services/organizations.js";
+import { listAccessibleProjectIds, resolveDefaultOrganization } from "../services/organizations.js";
 import { ProjectAccessError } from "../services/default-project.js";
 import { CrossProjectScopeError, hybridSearch, MissingProjectScopeError, ProjectNotFoundError } from "../services/search.js";
+import { withSearchRequestMemo } from "../search/session-setup.js";
 import { prefetchBatchQueryEmbeddings } from "../search/batch-embeddings.js";
 import { chatProject, projectChatDisabledBody } from "../services/project-chat.js";
 import { ProjectChatDisabledError } from "../services/project-chat-errors.js";
@@ -71,11 +74,19 @@ async function runSearchBatch(c: Context, parsed: { queries: SearchInput[]; conc
   if (signal.aborted) return results;
   // One access and privacy lookup per project for the whole batch, never reused by another request.
   const memo = createCacheScopeMemo();
+  const references = new Map<string, Promise<string>>();
   const authorizations = new Map<string, Promise<AuthorizedProjectSearch | { ok: false; status: 403 | 404 }>>();
   // Scope and API-key checks first, so embeddings are only prefetched for queries that will run.
   const inputs = await Promise.all(queries.map(async (query, index) => {
     try {
-      const projectId = await resolveActorProjectId(getRequestActor(c), query.project, query.orgId);
+      // Items naming the same project reference resolve it once; the actor is the request's, so (reference, org) is the whole key.
+      const referenceKey = JSON.stringify([query.project ?? null, query.orgId ?? null]);
+      let reference = references.get(referenceKey);
+      if (!reference) {
+        reference = resolveActorProjectId(getRequestActor(c), query.project, query.orgId, { authorization: "caller" });
+        references.set(referenceKey, reference);
+      }
+      const projectId = await reference;
       let authorization = authorizations.get(projectId);
       if (!authorization) {
         authorization = authorizeActorProjectSearch(getRequestActor(c), projectId, "search");
@@ -118,8 +129,8 @@ async function runSearchBatch(c: Context, parsed: { queries: SearchInput[]; conc
       }
     }
   }
-  await withSearchAdmissionGroup(`batch:${randomUUID()}`, () =>
-    Promise.all(Array.from({ length: Math.min(concurrency, queries.length) }, () => worker())));
+  await withSearchRequestMemo(() => withSearchAdmissionGroup(`batch:${randomUUID()}`, () =>
+    Promise.all(Array.from({ length: Math.min(concurrency, queries.length) }, () => worker()))));
   return results;
 }
 
@@ -211,7 +222,7 @@ async function handleProjectChat(c: Context, mode: "public" | "grounded") {
   const body = parsed.data;
   const userId = c.get("sessionUser")?.id;
   if (!userId) return apiErrorResponse(c, 401, "unauthorized", "Missing session");
-  const projectId = await resolveActorProjectId(getRequestActor(c), body.project, body.orgId);
+  const projectId = await resolveActorProjectId(getRequestActor(c), body.project, body.orgId, { authorization: "caller" });
   const authorized = await authorizeProject(c, projectId, "chat");
   if (authorized instanceof Response) return authorized;
   // Before the turn starts, so a disabled chat is a plain 403 (chatProject enforces it too, for every caller).
@@ -317,7 +328,7 @@ async function projectChatStreamHandler(c: Context) {
   const { q: query, sessionToken, model } = parsed.data;
 
   const userId = c.get("sessionUser").id;
-  const projectId = await resolveActorProjectId(getRequestActor(c), parsed.data.project, parsed.data.orgId);
+  const projectId = await resolveActorProjectId(getRequestActor(c), parsed.data.project, parsed.data.orgId, { authorization: "caller" });
   const authorized = await authorizeProject(c, projectId, "chat");
   if (authorized instanceof Response) return authorized;
   // Checked before the stream opens so a disabled chat is a real 403, not an error event.
@@ -502,6 +513,7 @@ async function prepareGetSearch(c: Context): Promise<PreparedSearch | Response> 
     getRequestActor(c),
     c.req.query("project"),
     c.req.query("orgId"),
+    { authorization: "caller" },
   );
   const authorized = await authorizeProject(c, projectId);
   if (authorized instanceof Response) return authorized;
@@ -559,7 +571,7 @@ async function prepareGetSearch(c: Context): Promise<PreparedSearch | Response> 
 async function preparePostSearch(c: Context, input: SearchInput): Promise<PreparedSearch | Response> {
   const userId = c.get("sessionUser")?.id;
   if (!userId) return apiErrorResponse(c, 401, "unauthorized", "Missing session");
-  const projectId = await resolveActorProjectId(getRequestActor(c), input.project, input.orgId);
+  const projectId = await resolveActorProjectId(getRequestActor(c), input.project, input.orgId, { authorization: "caller" });
   const authorized = await authorizeProject(c, projectId);
   if (authorized instanceof Response) return authorized;
   const deferred = await deferredRequestContext(c, projectId);
@@ -1064,12 +1076,49 @@ export const searchesRoutes = new Hono().get("/:sessionId/materialization", asyn
     .filter((p): p is { documentId: string; page: number } =>
       typeof p?.documentId === "string" && Number.isInteger(p?.page))
     .map((p) => ({ documentId: p.documentId, page: p.page }));
-  const states = await defaultMaterializeDeps.loadPageStates(candidates);
+  // Only documents the caller can reach, in the session project's organization, report a state: a candidate naming any
+  // other document reads as "unseen", with no state, reason or version (the ledger read below is not tenant-scoped).
+  const [owner] = await sql<{ org_id: string }[]>`select org_id from projects where id = ${row.project_id}`;
+  const reachable = new Map<string, { projectId: string; ingestVersion: number }>();
+  const ids = [...new Set(candidates.map((p) => p.documentId))];
+  if (owner && ids.length > 0) {
+    const projectIds = await listAccessibleProjectIds(userId);
+    const apiKey = c.get("apiKey");
+    for (const doc of await sql<{ id: string; project_id: string; ingest_version: number }[]>`
+      select id, project_id, ingest_version from documents
+      where id = any(${sql.array(ids)}::text[]) and org_id = ${owner.org_id} and project_id = any(${sql.array(projectIds)}::text[])`) {
+      if (apiKey && !apiKeyCanUseProject(apiKey, { orgId: owner.org_id, projectId: doc.project_id })) continue;
+      reachable.set(doc.id, { projectId: doc.project_id, ingestVersion: doc.ingest_version });
+    }
+  }
+  const scoped = candidates.filter((p) => reachable.has(p.documentId));
+  const states = await defaultMaterializeDeps.loadPageStates(scoped);
+  // Typed states for pages that will not materialize (ingest-version.ts). Whether the caller may reprocess is decided per
+  // document's own project, never the session's: a session can list candidates from several projects.
+  const canEditByProject = new Map<string, boolean>();
+  for (const p of scoped) {
+    const state = states.get(pageKey(p.documentId, p.page))?.state;
+    const projectId = reachable.get(p.documentId)!.projectId;
+    if (!owner || (state !== "failed" && state !== "blocked-pii") || canEditByProject.has(projectId)) continue;
+    canEditByProject.set(projectId, await callerCanReprocess(c, { orgId: owner.org_id, projectId }));
+  }
   const pages = candidates.map((p) => {
-    const page = states.get(pageKey(p.documentId, p.page));
+    const page = reachable.has(p.documentId) ? states.get(pageKey(p.documentId, p.page)) : undefined;
     // A page the worker refused because its document predates the current scan (PR #339): stable reason, never raw text.
     const rescan = page?.state === "failed" && page.failureReason === "source-unscanned";
-    return { ...p, state: page?.state ?? "unseen", ...(rescan ? { reason: PARSE_SOURCE_RESCAN_REASON } : {}) };
+    const reason = rescan ? "needs-reprocess" as const
+      : page?.state === "blocked-pii" ? "withheld" as const
+        : page?.state === "failed" ? "not-extracted" as const
+          : null;
+    return {
+      ...p,
+      state: page?.state ?? "unseen",
+      ...(rescan ? { reason: PARSE_SOURCE_RESCAN_REASON } : {}),
+      ...(reason ? { availability: dataUnavailable(reason, {
+        canEdit: canEditByProject.get(reachable.get(p.documentId)!.projectId) === true,
+        ingestVersion: reachable.get(p.documentId)?.ingestVersion ?? null,
+      }) } : {}),
+    };
   });
   const failed = pages.filter((p) => p.state === "failed" || p.state === "blocked-pii").length;
   const ready = pages.filter((p) => p.state === "indexed").length;

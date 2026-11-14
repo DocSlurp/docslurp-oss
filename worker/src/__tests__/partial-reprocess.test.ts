@@ -209,6 +209,13 @@ describe("partial reprocess", () => {
 
     const [run] = await sql<{ status: string }[]>`select status from project_runs where id = 'run-re'`;
     expect(run?.status).toBe("completed");
+    // A reindex reused the source's extraction, so the new version keeps the source's ingest version (an old source
+    // here: 0), plus the parse decision its own quarantine recorded; the run is not stamped as current output.
+    const [stamp] = await sql<{ ingest_version: number; ingest_capabilities: string[] }[]>`
+      select ingest_version, ingest_capabilities from documents where id = 're'`;
+    expect(stamp).toEqual({ ingest_version: 0, ingest_capabilities: ["parseSourceDecision"] });
+    const [runStamp] = await sql<{ ingest_version: number }[]>`select ingest_version from project_runs where id = 'run-re'`;
+    expect(runStamp?.ingest_version).toBe(0);
     // The run start pinned evidence routing (v3) in the persisted run artifacts.
     expect(artifacts["run:vision-routing-version"]).toBe("v3");
     const [pinned] = await sql<{ version: string | null }[]>`

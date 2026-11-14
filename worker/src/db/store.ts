@@ -22,6 +22,7 @@ import { adoptPendingAssets, flushAssetLedger, listHostPageImagePages, markAsset
 import { applyDefaultVisionOverride, defaultPipelineFeatures, normalizeStoredPipelineFeatures, PII_BLOCKED_DOCUMENT_STATUS, planRunFailure, type DerivedDocumentTitle, type PrivacyAuditEntry } from "@docslurp/shared";
 
 import { adoptBackfillDocuments } from "../deferred/backfill-adoption.js";
+import { completingDocumentStamp, runReusesExtraction, runStamp, runStampsIngestVersion, stampDocumentIngestVersion } from "./ingest-version.js";
 import { insertPrivacyAuditRows } from "../lib/privacy-guard.js";
 import type {
   Document,
@@ -1173,10 +1174,15 @@ export class Store {
         const completed = await completeRunDocuments(client, state.run.id);
         const replacements = await supersededInThisTransaction(client, completed.filter(id => !adopted.has(id)));
         await this.announceReplacements(state, replacements, client, logicalId);
-        await client`update project_runs set status = 'completed', stage = 'completed',
+        // The run's ingest stamp and its documents' (db/ingest-version.ts) ride on this statement: no extra round trip.
+        const stamps = runStampsIngestVersion(state.run.kind);
+        const stampMode = runReusesExtraction(state.run.pipeline) ? "inherited" as const : "extracted" as const;
+        const stampDocuments = stamps ? client`with stamped as (${stampDocumentIngestVersion(client, state.run.id, stampMode)} returning 1)` : client``;
+        const stampRun = stamps ? runStamp(client, stampMode) : client``;
+        await client`${stampDocuments} update project_runs set status = 'completed', stage = 'completed',
           processed_documents = total_documents, pages_processed = pages_total,
           stats = coalesce(stats, '{}'::jsonb) || ${this.toJson({ pageCharges })}::jsonb,
-          lease_expires_at = null, updated_at = now() where id = ${state.run.id}`;
+          lease_expires_at = null, updated_at = now() ${stampRun} where id = ${state.run.id}`;
         await insertProjectRunEvents({ sql: client, events: [{ ...buildRunCompletedEvent(state, "pipeline completed"), id: logicalId }] });
         await this.triggerWebhooks(state.run.id, "run.completed", client, logicalId);
       });
@@ -1742,14 +1748,17 @@ export class Store {
           ...this.vectorIndexStatements(vectors, client),
           stageStateUpdate(client),
           client`
-            update documents
+            update documents d
             set status = case
                   when status = 'pii_blocked' then status
                   when status = 'completed' and ${indexedInRun(client, state.run.id, documentId)} then status
                   else 'completed'
                 end,
                 updated_at = now()
-            where id = ${documentId}`,
+                ${runStampsIngestVersion(state.run.kind)
+                  ? completingDocumentStamp(client, state.run.id, runReusesExtraction(state.run.pipeline) ? "inherited" : "extracted")
+                  : client``}
+            where d.id = ${documentId}`,
           supersededInThisTransactionQuery(client, [documentId]),
         ]);
         return mapSuperseded(results.at(-1) as Parameters<typeof mapSuperseded>[0]);

@@ -9,5 +9,6 @@ import type { IndexingModeError } from "../services/project-indexing-mode.js";
  * `details.category` so clients can branch on it.
  */
 export function indexingModeErrorResponse(c: Context, error: IndexingModeError): Response {
-  return apiStatusError(c, error.status, error.message, { details: { category: error.code } });
+  // The editor-only refusal is the shared `editor_required` code, like every other route's.
+  return apiStatusError(c, error.status, error.message, { ...(error.code === "editor_required" ? { code: error.code } : {}), details: { category: error.code } });
 }

@@ -1,0 +1,59 @@
+import type { Context } from "hono";
+import { apiKeyCanUseProject } from "./api-key-project-scope.js";
+import { apiErrorResponse, apiStatusError } from "./api-error.js";
+import { EDITOR_REQUIRED_CODE, EDITOR_REQUIRED_MESSAGE } from "@docslurp/shared";
+import { apiKeyCanUpdateContent, CONTENT_UPDATE_SCOPE_MESSAGE } from "./content-update-access.js";
+import { canEditProject, getProjectAccess } from "../services/organizations.js";
+
+/**
+ * Who may reprocess or spend credits on existing content (owner decision, council L3, 2026-11-13): a session that may
+ * edit the project (canEditProject: org owners and admins, the project's owner, its admins and editors), or a server key
+ * with content-update (`ingest`) scope that may use the project and whose user may edit it. Membership of the org's
+ * default project alone does not qualify (it still allows uploads: canContributeToProject).
+ *
+ * The same rule decides `canReprocess` on typed unavailable states and refuses every reprocess and spend path:
+ * single and bulk document reprocess, run reprocess and retry, correction re-index, document and project full index,
+ * figure resume, and the chat proposal Apply routes.
+ */
+export async function callerCanReprocess(c: Context, document: { orgId: string; projectId: string }): Promise<boolean> {
+  const apiKey = c.get("apiKey");
+  if (apiKey && (!apiKeyCanUpdateContent(apiKey) || !apiKeyCanUseProject(apiKey, document))) return false;
+  const userId = c.get("sessionUser")?.id;
+  if (!userId) return false;
+  const access = await getProjectAccess(document.projectId, userId);
+  return Boolean(access && access.orgId === document.orgId && canEditProject(access, userId));
+}
+
+/** The one editor-only refusal (shared EDITOR_REQUIRED_CODE): 403 `editor_required` with its reviewed message. */
+export function editorRequired(c: Context): Response {
+  return apiErrorResponse(c, 403, EDITOR_REQUIRED_CODE, EDITOR_REQUIRED_MESSAGE);
+}
+
+/**
+ * Refuse a change to a project the caller can already see when they may not edit it (session or key user; any key scope
+ * gate runs before this): 403 `editor_required`, or null. A project they cannot see is the caller's 404, before this.
+ */
+export async function denyEditOfVisibleProject(c: Context, project: { id: string; orgId: string }): Promise<Response | null> {
+  const userId = c.get("sessionUser")?.id;
+  if (!userId) return editorRequired(c);
+  // Access is read for this project's own id, so it is that project's (and organization's) access.
+  const access = await getProjectAccess(project.id, userId);
+  return access && canEditProject(access, userId) ? null : editorRequired(c);
+}
+
+/**
+ * Refuse a reprocess of projects the caller can already see: 403 for a key without content-update scope or a caller who
+ * may not edit. Call only after the caller was shown to reach every target (anything else answers the same 404 as a
+ * missing resource, before this).
+ */
+export async function denyReprocessOfVisible(c: Context, targets: ReadonlyArray<{ orgId: string; projectId: string }>): Promise<Response | null> {
+  const apiKey = c.get("apiKey");
+  if (apiKey && !apiKeyCanUpdateContent(apiKey)) return apiStatusError(c, 403, CONTENT_UPDATE_SCOPE_MESSAGE);
+  const seen = new Set<string>();
+  for (const target of targets) {
+    if (seen.has(target.projectId)) continue;
+    seen.add(target.projectId);
+    if (!await callerCanReprocess(c, target)) return editorRequired(c);
+  }
+  return null;
+}

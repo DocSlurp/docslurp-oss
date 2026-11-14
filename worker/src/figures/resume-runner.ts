@@ -96,7 +96,7 @@ interface ClaimedLevel {
   document_id: string; org_id: string; project_id: string; run_id: string; user_id: string; page_count: number;
   source_sha256: string | null; shards: number; resumes: number; manifest_sha256: string | null; storage_prefix: string | null;
   pipeline: unknown; run_pipeline: unknown; resume_vm_launches: number; gap_count: number;
-  /** Measured resume VM time, resumes in a row without progress, and request grants of this run (migration 0160). */
+  /** Measured resume VM time, resumes in a row without progress, and request grants of this run (migration 0161). */
   resume_vm_ms: number; resume_stalls: number; resume_grants: number;
   /** This claim's lease token (`<worker>:<uuid>`): every later runner write is fenced by it (R2 adversarial 5). */
   lease: string;

@@ -4,7 +4,8 @@ const mocks = vi.hoisted(() => ({
   prepare: vi.fn(), start: vi.fn(), lease: vi.fn(), admit: vi.fn(),
 }));
 vi.mock("../db.js",()=>({sql:Object.assign(vi.fn(async()=>[{}]),{array:(v:unknown)=>v})}));
-vi.mock("../services/organizations.js",()=>({listAccessibleProjectIds:async()=>['retry-w'],getProjectAccess:async()=>({}),canContributeToProject:()=>true}));
+vi.mock("../services/organizations.js",()=>({listAccessibleProjectIds:async()=>['retry-w'],getProjectAccess:async()=>({}),canContributeToProject:()=>true,canEditProject:()=>true}));
+// Retry needs edit access (council L3); this suite tests admission, not who may retry.
 vi.mock("../services/run-records.js",async original=>({...await original<object>(),mapProjectRun:()=>mocks.run}));
 vi.mock("../services/usage-attribution.js",async original=>({...await original<object>(),runUsageCostSummaries:async()=>new Map()}));
 vi.mock("../services/run-lifecycle.js",async original=>({...await original<object>(),runLifecycle:{prepareRetry:mocks.prepare,start:mocks.start}}));

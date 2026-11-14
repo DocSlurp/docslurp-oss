@@ -8,7 +8,7 @@ import type { RunProgressSnapshot, ProjectState, OrganizationRecord, Organizatio
 export type * from "./state.js";
 import type { IngestReport } from "./ingest-report.js";
 export type * from "./ingest-report.js";
-import type { DocumentVersionEntry, DocumentViewerPayload } from "./document.js";
+import type { DocumentVersionEntry, DocumentViewerPayload, WorkspaceIngestVersion } from "./document.js";
 export type * from "./document.js";
 
 /** One `search.results` frame is the whole search response, so the search stream accepts far larger frames than other streams (1 MiB). */
@@ -281,6 +281,10 @@ export type DocumentRecord = JsonObject & {
   title?: string | null;
   id: string;
   status: string;
+  /** Ingest version of the pipeline that produced the document; 0 = unknown (produced before tagging). */
+  ingestVersion?: number;
+  /** What the document's run measurably stored (e.g. `parseSourceDecision`, `pageFacts`, `figureLedger`). */
+  ingestCapabilities?: string[];
 };
 
 /** How much of the scope search covered; present on every search and chat response. */
@@ -2544,6 +2548,11 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
 
     getDocument(documentId: string, requestOptions?: RequestOptions): Promise<DocumentViewerPayload> {
       return request<DocumentViewerPayload>(`/v1/documents/${encodeURIComponent(documentId)}`, {}, requestOptions, true);
+    },
+
+    /** The ingest version this deployment produces; a document whose `ingestVersion` is lower can be reprocessed to update it. */
+    getIngestVersion(requestOptions?: RequestOptions): Promise<WorkspaceIngestVersion> {
+      return request<WorkspaceIngestVersion>("/v1/ingest-version", {}, requestOptions, true);
     },
 
     /**

@@ -658,6 +658,29 @@ export async function listAccessibleProjectIds(userId: string): Promise<string[]
   return withinRequestKeyAllowlist(rows.map((row) => row.project_id));
 }
 
+/**
+ * Projects the user may reprocess or spend on (re-index, full index, figure resume): canEditProject, the same rule as
+ * callerCanReprocess. Unlike listEditableProjectIds (the upload/contribute rule), membership of the org's default project
+ * alone does not qualify: org owners and admins, the project's owner, and its admins and editors do (owner decision,
+ * council L3, 2026-11-13).
+ */
+export async function listReprocessableProjectIds(userId: string): Promise<string[]> {
+  const rows = await sql<{ project_id: string }[]>`
+    select w.id as project_id
+    from projects w
+    left join org_memberships om on om.org_id = w.org_id and om.user_id = ${userId}
+    left join project_members wm on wm.project_id = w.id and wm.user_id = ${userId}
+    where (om.user_id is not null or wm.user_id is not null)
+      and (om.role in ('owner', 'admin') or w.user_id = ${userId} or wm.role in ('admin', 'editor'))
+      and docslurp_project_access(w.id, ${userId})
+  `;
+  return withinRequestKeyAllowlist(rows.map((row) => row.project_id));
+}
+
+/**
+ * Projects the user may contribute to: upload into, tag documents in. Includes every org member for the org's default
+ * project (canContributeToProject). Not for reprocessing or other spend on existing documents: listReprocessableProjectIds.
+ */
 export async function listEditableProjectIds(userId: string): Promise<string[]> {
   const rows = await sql<{ project_id: string }[]>`
     with editable as (
