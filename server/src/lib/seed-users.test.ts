@@ -105,13 +105,19 @@ describe("automatic seed users", () => {
     expect(statements).not.toMatch(/'seed-(shared-project|queued-run)'|\(\s*'seed-shared-org',\s*\?/);
   });
 
-  it("refuses a database seeded with the old non-UUID ids and says how to reset it", async () => {
+  it("keeps the old ids, with a warning, on a database seeded before the ids became UUIDs", async () => {
     vi.stubEnv("NODE_ENV", "development");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     database.query.mockImplementation(async (strings: TemplateStringsArray, ...values: unknown[]) =>
       strings.join("?").includes("from organizations where id =") && values[0] === "seed-shared-org" ? [{ id: "seed-shared-org" }] : []);
-    await expect(seedNonProductionUsers()).rejects.toThrow(/old id "seed-shared-org".*Reset the development database/s);
-    const statements = database.query.mock.calls.map(([strings]) => strings.join("?"));
-    expect(statements.some(statement => statement.includes("insert into"))).toBe(false);
-    expect(database.end).toHaveBeenCalledOnce();
+    try {
+      await seedNonProductionUsers();
+      expect(warn).toHaveBeenCalledWith(expect.stringMatching(/old id "seed-shared-org".*reset the development database/s));
+      const values = database.query.mock.calls.flatMap(([, ...rest]) => rest);
+      expect(values).toEqual(expect.arrayContaining(["seed-shared-org", "seed-shared-project"]));
+      // Never a second organization beside the old one: its slug is unique and the admin's membership would move.
+      expect(values).not.toContain(SEED_IDS.org);
+      expect(values).not.toContain(SEED_IDS.project);
+    } finally { warn.mockRestore(); }
   });
 });

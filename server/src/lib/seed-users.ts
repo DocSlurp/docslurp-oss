@@ -11,8 +11,12 @@ export const SEED_IDS = Object.freeze({
   project: "5eed0000-0000-4000-8000-000000000002",
   queuedRun: "5eed0000-0000-4000-8000-000000000003",
 });
-/** The organization id the seed used before it switched to UUIDs. */
-const LEGACY_SEED_ORG_ID = "seed-shared-org";
+/**
+ * The ids the seed used before it switched to UUIDs. A database seeded with them keeps them: many checkouts can
+ * share one development database, and refusing to start (or renaming rows that stored objects, vector tables and
+ * history are keyed by) would break all of them at once. Realtime stays on its REST fallback there until a reset.
+ */
+const LEGACY_SEED_IDS = Object.freeze({ org: "seed-shared-org", project: "seed-shared-project", queuedRun: "seed-queued-run" });
 
 /** Sync development credentials or explicitly requested non-production fixtures. */
 export async function seedNonProductionUsers({ includeFixtures = false } = {}): Promise<void> {
@@ -124,15 +128,14 @@ export async function seedNonProductionUsers({ includeFixtures = false } = {}): 
       `;
     }
 
-    // Renaming the old rows in place would miss everything keyed by their ids outside these tables (stored objects,
-    // vector tables, usage and search history), so an old database is refused instead of half-migrated.
-    const [legacy] = await sql<{ id: string }[]>`select id from organizations where id = ${LEGACY_SEED_ORG_ID} limit 1`;
+    const [legacy] = await sql<{ id: string }[]>`select id from organizations where id = ${LEGACY_SEED_IDS.org} limit 1`;
+    const ids = legacy ? LEGACY_SEED_IDS : SEED_IDS;
     if (legacy) {
-      throw new Error(
-        `[seed] This database holds the seed organization under its old id "${LEGACY_SEED_ORG_ID}". `
-        + "Seed ids are now UUIDs, which realtime subscriptions require. Reset the development database "
-        + "(for the compose stack: docker compose down -v, then pnpm db:up && pnpm db:migrate && pnpm db:seed) "
-        + "or point DATABASE_URL at a fresh one.",
+      console.warn(
+        `[seed] This database holds the seed organization under its old id "${LEGACY_SEED_IDS.org}", so the seed keeps `
+        + "the old ids. Realtime subscriptions require UUID ids and fall back to REST polling for this organization. "
+        + "For live updates, reset the development database (for the compose stack: docker compose down -v, then "
+        + "pnpm db:up && pnpm db:migrate && pnpm db:seed) or point DATABASE_URL at a fresh one.",
       );
     }
 
@@ -151,7 +154,7 @@ export async function seedNonProductionUsers({ includeFixtures = false } = {}): 
         monthly_budget_cents
       )
       values (
-        ${SEED_IDS.org},
+        ${ids.org},
         'Seed Shared Org',
         'seed-shared-org',
         false,
@@ -172,13 +175,13 @@ export async function seedNonProductionUsers({ includeFixtures = false } = {}): 
     // any other membership they picked up (a personal org from sign-up) is dropped first.
     await sql`
       delete from org_memberships
-      where user_id in (${adminUserId}, ${memberUserId}) and org_id <> ${SEED_IDS.org}
+      where user_id in (${adminUserId}, ${memberUserId}) and org_id <> ${ids.org}
     `;
     await sql`
       insert into org_memberships (org_id, user_id, role)
       values
-        (${SEED_IDS.org}, ${adminUserId}, 'owner'),
-        (${SEED_IDS.org}, ${memberUserId}, 'member')
+        (${ids.org}, ${adminUserId}, 'owner'),
+        (${ids.org}, ${memberUserId}, 'member')
       on conflict (org_id, user_id) do update
       set role = excluded.role
     `;
@@ -196,8 +199,8 @@ export async function seedNonProductionUsers({ includeFixtures = false } = {}): 
         pipeline
       )
       values (
-        ${SEED_IDS.project},
-        ${SEED_IDS.org},
+        ${ids.project},
+        ${ids.org},
         ${adminUserId},
         'Seed Shared Project',
         'meeting-notes',
@@ -218,8 +221,8 @@ export async function seedNonProductionUsers({ includeFixtures = false } = {}): 
     await sql`
       insert into project_members (project_id, user_id, role, invited_by_user_id)
       values
-        (${SEED_IDS.project}, ${adminUserId}, 'admin', ${adminUserId}),
-        (${SEED_IDS.project}, ${memberUserId}, 'editor', ${adminUserId})
+        (${ids.project}, ${adminUserId}, 'admin', ${adminUserId}),
+        (${ids.project}, ${memberUserId}, 'editor', ${adminUserId})
       on conflict (project_id, user_id) do update
       set role = excluded.role,
           invited_by_user_id = excluded.invited_by_user_id
@@ -242,10 +245,10 @@ export async function seedNonProductionUsers({ includeFixtures = false } = {}): 
           pipeline
         )
         values (
-          ${SEED_IDS.queuedRun},
-          ${SEED_IDS.org},
+          ${ids.queuedRun},
+          ${ids.org},
           ${adminUserId},
-          ${SEED_IDS.project},
+          ${ids.project},
           'bulk-upload',
           'queued',
           'queued',
@@ -269,9 +272,9 @@ export async function seedNonProductionUsers({ includeFixtures = false } = {}): 
     console.log("[seed] Seed users and shared project ready:");
     console.log(`- admin:  ${adminIdentity.email}`);
     console.log(`- member: ${memberIdentity.email}`);
-    console.log(`- org:    ${SEED_IDS.org} (slug seed-shared-org)`);
-    console.log(`- ws:     ${SEED_IDS.project}`);
-    if (includeFixtures) console.log(`- run:    ${SEED_IDS.queuedRun}`);
+    console.log(`- org:    ${ids.org} (slug seed-shared-org)`);
+    console.log(`- ws:     ${ids.project}`);
+    if (includeFixtures) console.log(`- run:    ${ids.queuedRun}`);
   }
 
   try {
