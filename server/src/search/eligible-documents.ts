@@ -1,3 +1,5 @@
+import { summaryTreeServeAvailable } from "@docslurp/shared";
+
 import { apiPool, sql } from "../db.js";
 import type { SqlFragment } from "../lib/sql-fragments.js";
 import { SEARCH_ELIGIBILITY_CHANNEL } from "./eligibility-hint.js";
@@ -20,6 +22,8 @@ import { envInt, TtlLruCache } from "./ttl-lru.js";
  *   blocked, failed, cancelled, corrected, purged, or served early by a run that
  *   stopped before completing it). Dropped immediately, always. A run that
  *   finishes with every document completed withdraws nothing and sends none.
+ *   A hint carrying `"debounce": true` is an arrival instead (a summary tree became ready, migration 0164) and is
+ *   debounced like run progress.
  * - `run_events` (worker run progress): mostly documents arriving. During a bulk
  *   ingest these fire many times a second, and reloading a 10,000-document set on
  *   each one made nearly every search pay the full eligibility query. They are
@@ -51,6 +55,13 @@ export interface EligibleDocument {
    * search leaves the document to Postgres FTS.
    */
   lanceStale: boolean;
+  /**
+   * The document has a summary tree search may read (summary-tree.ts): its `document_summary_trees` row is `ready`
+   * for the document's current run and the set's embedding space, in this project, and no correction reindex
+   * completed after it was built. Always false while the deployment's serve switch is off. This flag, never a probe
+   * of the summaries table, decides whether the table is read at all.
+   */
+  treeReady: boolean;
 }
 
 export interface EligibleDocumentSet {
@@ -75,6 +86,7 @@ type EligibleRow = {
   owner_id: string | null;
   owner_index_config_hash: string | null;
   lance_stale: boolean;
+  tree_ready: boolean;
 };
 
 function falsy(value: string | undefined): boolean {
@@ -215,9 +227,26 @@ function stringIds(payload: string, field: "runIds" | "projectIds"): string[] {
   }
 }
 
-/** A search_eligibility hint (a withdrawal): drop the named projects immediately, never debounced. */
+/** Only the literal `"debounce": true` marks an arrival; anything else (absent, malformed) is a withdrawal. */
+function isArrivalHint(payload: string): boolean {
+  try {
+    return (JSON.parse(payload) as Record<string, unknown>).debounce === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * A search_eligibility hint. A withdrawal (the default) drops the named projects immediately, never debounced. An
+ * arrival (`"debounce": true`: a summary tree became ready) adds something to search and is debounced like run
+ * progress, so a backfill does not reload the eligible set on every commit.
+ */
 export function handleSearchEligibilityHint(payload: string): void {
-  for (const projectId of stringIds(payload, "projectIds")) invalidateSearchProject(projectId);
+  const arrival = isArrivalHint(payload);
+  for (const projectId of stringIds(payload, "projectIds")) {
+    if (arrival) invalidateSearchProjectDebounced(projectId);
+    else invalidateSearchProject(projectId);
+  }
 }
 
 /**
@@ -241,6 +270,24 @@ export function ensureInvalidationListener(): void {
   });
 }
 
+/**
+ * `tree_ready` of the eligibility query. With the serve switch off it is the constant false, so the query reads
+ * neither summary-tree table.
+ */
+function treeReadyColumn(embeddingModel: string, dimension: number): SqlFragment {
+  if (!summaryTreeServeAvailable(process.env)) return sql`false`;
+  return sql`(d.status = 'completed' and d.superseded_at is null and exists (
+    select 1 from document_summary_trees t
+    where t.document_id = d.id and t.project_id = d.project_id and t.org_id = d.org_id
+      and t.status = 'ready' and t.run_id = d.run_id and t.built_at is not null
+      and t.embedding_model = ${embeddingModel} and t.dimension = ${dimension}
+      and not exists (
+        select 1 from document_corrections dc
+        where dc.document_id = d.id and dc.reindex_completed_at > t.built_at
+      )
+  ))`;
+}
+
 async function queryEligibleDocuments(projectId: string, embeddingModel: string, dimension: number): Promise<EligibleDocumentSet> {
   const lexical: SqlFragment = lexicalSearchableDocument("d");
   // The vector part is the per-search `current_docs` CTE of vectorSearch,
@@ -260,7 +307,8 @@ async function queryEligibleDocuments(projectId: string, embeddingModel: string,
           select 1 from document_corrections dc
           join vector_indexes v on v.document_id = d.id and v.backend = 'lancedb'
           where dc.document_id = d.id and dc.reindex_completed_at > v.created_at
-        ) as lance_stale
+        ) as lance_stale,
+        ${treeReadyColumn(embeddingModel, dimension)} as tree_ready
       from documents d
       where d.project_id = ${projectId}
         and ((d.status = 'completed' and d.superseded_at is null) or ${lexical})
@@ -281,7 +329,7 @@ async function queryEligibleDocuments(projectId: string, embeddingModel: string,
       from chain join documents owner on owner.id = chain.node
       order by chain.id, chain.depth desc
     )
-    select s.id, s.filename, s.mime_type, s.run_id, s.vector_ready, s.lexical, s.page_only_completed, s.lance_stale,
+    select s.id, s.filename, s.mime_type, s.run_id, s.vector_ready, s.lexical, s.page_only_completed, s.lance_stale, s.tree_ready,
       o.owner_id, o.index_config_hash as owner_index_config_hash,
       (select array_agg(t.tag) from document_tags t where t.document_id = s.id) as tags
     from scoped s
@@ -298,6 +346,7 @@ async function queryEligibleDocuments(projectId: string, embeddingModel: string,
     ownerId: row.vector_ready ? row.owner_id ?? row.id : null,
     ownerIndexConfigHash: row.owner_index_config_hash,
     lanceStale: row.lance_stale,
+    treeReady: row.vector_ready && row.tree_ready === true,
   }));
   return {
     projectId,

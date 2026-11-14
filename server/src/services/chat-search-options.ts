@@ -5,6 +5,7 @@ import {
   type ChatRetrievalOverrides,
   type PrivacyMode,
   type ProjectSearchSettings,
+  type SummaryTreeSearchMode,
 } from "@docslurp/shared";
 import { sql } from "../db.js";
 import { generateOpenRouterText } from "../lib/ai.js";
@@ -89,6 +90,20 @@ export function withThreadRetrieval(
     // Tuning retrieval for a thread means the thread wants retrieved passages.
     chat: { ...settings.chat, mode: "retrieval" },
   };
+}
+
+/**
+ * The summary-tree mode a chat turn sends with its searches: the thread's or request's override when it differs from
+ * the project's stored default, otherwise undefined so the project default decides inside search. Search treats a
+ * value sent with the request as an explicit ask (it reports and does not cache a search that cannot run it), which
+ * a project default must not become.
+ */
+export function chatSummaryTreeOverride(
+  effective: Pick<ProjectSearchSettings, "retrievalDefaults">,
+  project: Pick<ProjectSearchSettings, "retrievalDefaults">,
+): SummaryTreeSearchMode | undefined {
+  const mode = effective.retrievalDefaults.summaryTree;
+  return mode === project.retrievalDefaults.summaryTree ? undefined : mode;
 }
 
 /** The retrieval overrides saved on a chat thread, or {} when none (or unreadable). */

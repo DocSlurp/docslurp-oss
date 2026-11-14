@@ -439,6 +439,7 @@ In-process caches cut repeated-query latency. Each is per server process and nev
   - **Privacy.** Searches of a `strict-privacy` project (including the default project when the request names none) are never cached or served from the cache. The project's access and privacy mode are read again on every request, and once more just before a response is stored, so a project switched to strict-privacy while a search runs gets no entry. A lookup that fails or takes longer than `SEARCH_RESPONSE_CACHE_LOOKUP_TIMEOUT_MS` (default 250) skips the cache.
   - **Authorization.** Authentication, key scopes, the key's project allowlist and project access are checked on every request before the cache is read, so a revoked or narrowed key, or a user removed from the project, is refused rather than served a cached answer. Entries are keyed on a hash of the organization, user, API key, resolved project and the request.
   - **Staleness.** A cached answer can be up to one TTL (30 seconds by default) old. Document deletes and moves, project setting, pipeline and privacy changes, and search-setting changes drop the project's entries in every API process through the `search_eligibility` and run-event hints, but those hints are best effort, so the TTL is the bound. Set `SEARCH_RESPONSE_CACHE_TTL_MS=0` where that is too stale.
+  - **Summary tree.** A response is stored only when its `summaryTree.applied` equals `summaryTree.requested` (or it has no `summaryTree` field). One whose tree leg was skipped is never replayed, so the next identical request tries the tree again. A document's tree becoming ready, or ceasing to be, drops the project's entries through the same `search_eligibility` hint.
   - **Memory.** Entries are partitioned by organization (at most 100 entries and 8 MB each, 500 entries and 32 MB in total); a response over 1 MB is not kept, and global pressure evicts from the largest organization first, so one tenant cannot push out another's entries.
 
 - **Query-embedding cache** (on by default). Keyed by organization, provider, runtime, endpoint, model, dimensions, normalization and the query text after trimming and collapsing whitespace (case is preserved). The cache stores only a hash of that key. A hit skips the provider call and records no usage event, so `usage` and `usage_events` still count only provider calls actually made. Projects in `strict-privacy` mode always call through, because that mode writes an audit row for every private embedding call; `standard` and `local-only` use the cache. Set `SEARCH_EMBEDDING_CACHE_MAX_ENTRIES` (default 1000, `0` disables) and `SEARCH_EMBEDDING_CACHE_TTL_SECONDS` (default 3600).
@@ -446,6 +447,59 @@ In-process caches cut repeated-query latency. Each is per server process and nev
 - **Privacy and tracing.** `strict-privacy` never reads or writes the embedding or vector-result cache. The `embed.cache` and `lancedb.result_cache` spans carry `docslurp.privacy.mode`, `docslurp.cache.hit`, `docslurp.cache.bypassed` and `docslurp.cache.bypass_reason` (`strict-privacy`, or `no-org` for the embedding cache), and search timings count `embedCacheBypass` / `resultCacheBypass`.
 
 Hits and misses appear as `embedCacheHit`/`embedCacheMiss` and `resultCacheHit`/`resultCacheMiss` counters in search timings, in the session diagnostics (`embeddingCache`), as `[search-cache]` log lines, and as `embed.cache` and `lancedb.result_cache` spans (`docslurp.cache.hit`).
+
+## Summary tree: `guide` and `include`
+
+A project that builds a summary tree (`pipeline.summaryTree`, off by default) has model-written summaries of the
+sections of each long document. Search can use them to reach passages the chunk search ranks low: a broad question
+matches a section's summary better than any single chunk of it.
+
+| `summaryTree` | What search does |
+| --- | --- |
+| `off` (default) | Never reads the summaries. |
+| `guide` | The best-matching summaries pick chunks from the sections they cover. `results` hold real chunks only. |
+| `include` | `guide`, and the matching summaries are also returned in `summaries`. |
+
+Send it per request (`"summaryTree": "guide"` on `POST /v1/search` and the stream, `?summaryTree=guide` on `GET`,
+`retrieval.summaryTree` on `/v1/chat`), or store it as the project's retrieval default. The request wins. It never
+turns itself on: a project that builds a tree still searches without it until a request or the default asks.
+
+- **Where it runs.** Hybrid and deep mode. Not in keyword mode, not with a spatial (`geo`) filter or a chunk-level
+  filter (page range, heading, language, date), and never on the Algolia, Meilisearch, Typesense and Pagefind
+  compatible routes.
+- **No model call.** The leg reuses the query vector of the chunk search. It runs beside the other legs and has a
+  deadline relative to the vector leg; past it, the search answers without the tree.
+- **`results` are never summaries.** Guided chunks take at most the last 30% of the result positions. The first 70%
+  are exactly what the search returns without the tree, in the same order, so a top result is never removed or
+  demoted. When the search returns fewer results than `limit`, guided chunks are appended and nothing is displaced.
+- **`summaries`** (`include` only) is a separate list. Each entry has `kind: "summary"`, the `summary` text, the
+  document, heading path, page range and chunk range it covers, and a `relevance`. It has no `text` and no
+  `citation`: show it as a summary, and cite the chunks in `results`. Summaries take at most a quarter of the returned
+  context (their tokens against the result text plus theirs), best first.
+- **One result per file.** A project's `dedupeByFilename` control (on by default) keeps one result per file once
+  results span more than one file. The tree never changes what that control does to the chunk search's results: when
+  they all come from one file, only guided chunks of that file are added; when they span files, a guided chunk is
+  added only for a file the top results do not already cover, one per file. Turn the control off to get several
+  passages of one long document.
+- **Only finished trees.** A document's summaries are used only while its tree is `ready` for the document's current
+  version. A deleted, replaced or corrected document's summaries stop being used at once, before any cleanup runs.
+
+The response says what happened:
+
+```json
+"summaryTree": { "requested": "guide", "applied": "guide", "ms": 31 }
+```
+
+`applied` is `off` with a `skipped` reason when the tree contributed nothing: `deadline` (it was not done in time),
+`not-ready` (no document in scope has a finished tree), `mode` (this search cannot use it: keyword mode, an
+unsupported filter, or a project that does not build or serve a tree) or `error` (it failed; the search still
+answered). A search split into sub-searches (decomposition, stepback, multi-hop) applies `guide` at most. The field
+is absent when the request did not ask and the project default is off or cannot run for this search, so such a
+response is the same as before the tree existed. `timings.summaryTreeMs` and the `summaryTreeSkipped` counter carry
+the same information for logs.
+
+`summarySeed` is unrelated: it narrows retrieval to the five documents whose chunks score highest for the query and
+reads no summaries.
 
 ## Candidate depth and result order
 

@@ -1073,6 +1073,12 @@ export const documentChunks = pgTable(
       "gin",
       table.tsContent.asc().nullsLast().op("tsvector_ops"),
     ),
+    // Chunk ranges of one document (summary-tree guide mode), migration 0164.
+    index("document_chunks_document_chunk_index_idx").using(
+      "btree",
+      table.documentId.asc().nullsLast().op("text_ops"),
+      table.chunkIndex.asc().nullsLast().op("int4_ops"),
+    ),
     index("document_chunks_user_id_run_id_idx").using(
       "btree",
       table.userId.asc().nullsLast().op("text_ops"),

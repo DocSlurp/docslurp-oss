@@ -366,3 +366,85 @@ export type SummaryRow = z.infer<typeof summaryRowSchema>;
 export const SUMMARY_ROW_COLUMNS = [
   "id", "documentId", "runId", "level", "chunkStart", "chunkEnd", "pageStart", "pageEnd", "headingPath", "text", "vector",
 ] as const satisfies ReadonlyArray<keyof SummaryRow>;
+
+// --- Retrieval leg ----------------------------------------------------------------------------------------------------
+
+/** Summary rows one search reads from the summaries table (all levels), before any re-check. */
+export const SUMMARY_TREE_SEARCH_HITS = 10;
+/** `guide`: the best summary hits whose chunk range is fetched. */
+export const SUMMARY_TREE_GUIDE_HITS = 5;
+/** `guide`: chunks taken from one summary hit's range. */
+export const SUMMARY_TREE_GUIDE_CHUNKS_PER_HIT = 3;
+/**
+ * `guide`: a summary hit covering more `chunk_index` positions than this guides nothing (an upper-level node spans
+ * whole chapters; fetching it would be a document scan). It is still returned by `include`.
+ */
+export const SUMMARY_TREE_GUIDE_MAX_RANGE = 48;
+/**
+ * `guide`: guided chunks take at most this share of the returned results, always the last positions. The chunk
+ * legs' own ranking keeps the rest (the protected prefix), so the tree never removes or demotes a top result.
+ */
+export const SUMMARY_TREE_GUIDE_RESULT_SHARE = 0.3;
+
+/**
+ * How many of `limit` results guided chunks may take (the positions after the protected prefix). At least one once
+ * there are two results to return, never the first position.
+ */
+export function summaryTreeGuideSlots(limit: number): number {
+  if (!Number.isFinite(limit) || limit < 2) return 0;
+  return Math.max(1, Math.floor(limit * SUMMARY_TREE_GUIDE_RESULT_SHARE));
+}
+
+/**
+ * Why the tree leg contributed nothing.
+ * - `deadline`: it had not settled by `summaryTreeDeadlineMs` of the chunk vector leg.
+ * - `not-ready`: no document in scope has a ready tree for its current run in this embedding space.
+ * - `mode`: this search cannot run the leg (keyword mode, a spatial filter, a chunk-level filter, a compatibility
+ *   route, or the tree is not enabled or not served for this project).
+ * - `error`: the leg failed; the search answered without it.
+ */
+export const SUMMARY_TREE_SEARCH_SKIP_REASONS = ["deadline", "not-ready", "mode", "error"] as const;
+export const summaryTreeSearchSkipReasonSchema = z.enum(SUMMARY_TREE_SEARCH_SKIP_REASONS);
+export type SummaryTreeSearchSkipReason = z.infer<typeof summaryTreeSearchSkipReasonSchema>;
+
+/**
+ * The `summaryTree` field of a search response. Present when the request asked for `guide` or `include`, or the
+ * project's retrieval default did and this search could run the leg; absent otherwise. A response is reused from the
+ * response cache only when `applied` equals `requested`.
+ */
+export const summaryTreeSearchOutcomeSchema = z.object({
+  /** The mode asked for: the request's `summaryTree`, else the project's retrieval default. */
+  requested: summaryTreeSearchModeSchema,
+  /** The mode that shaped this response. `off` when the leg was skipped. */
+  applied: summaryTreeSearchModeSchema,
+  skipped: summaryTreeSearchSkipReasonSchema.optional(),
+  /** Wall time of the leg in milliseconds, measured from the start of the retrieval legs; 0 when it never started. */
+  ms: z.number().nonnegative(),
+});
+export type SummaryTreeSearchOutcome = z.infer<typeof summaryTreeSearchOutcomeSchema>;
+
+/**
+ * One section summary returned by `include`. It is model-written text about a range of a document, never a passage of
+ * the document: it has no `text` and no `citation`, so no client can show it as a quote or cite it. Cite the chunks
+ * in `results` instead.
+ */
+export const summaryTreeSummarySchema = z.object({
+  kind: z.literal("summary"),
+  /** The summary node's id. */
+  id: z.string(),
+  documentId: z.string(),
+  filename: z.string(),
+  /** 1 is a section of the document; higher levels summarize the levels below. */
+  level: z.number().int().min(1),
+  /** The model-written summary. Not source text. */
+  summary: z.string(),
+  headingPath: z.array(z.string()),
+  pageStart: z.number().int().nullable(),
+  pageEnd: z.number().int().nullable(),
+  /** Inclusive chunk positions the summary covers. */
+  chunkStart: z.number().int().nonnegative(),
+  chunkEnd: z.number().int().nonnegative(),
+  /** Match strength of the summary against the query, 0..1. */
+  relevance: z.number().min(0).max(1),
+}).strict();
+export type SummaryTreeSummary = z.infer<typeof summaryTreeSummarySchema>;

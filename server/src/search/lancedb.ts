@@ -459,6 +459,117 @@ export function summariesSearchTarget(
   return { uri: target.uri, name: target.name, documentIds: [...args.documentIds] };
 }
 
+/** One row of the summaries table as a search returns it (never the vector). */
+export interface LanceDbSummaryHit {
+  id: string;
+  documentId: string;
+  runId: string;
+  level: number;
+  chunkStart: number;
+  chunkEnd: number;
+  pageStart: number | null;
+  pageEnd: number | null;
+  headingPath: string;
+  text: string;
+  /** `1 / (1 + distance)`, the same scale as chunk vector hits. */
+  score: number;
+}
+
+const SUMMARY_RESULT_COLUMNS = ["id", "documentId", "runId", "level", "chunkStart", "chunkEnd", "pageStart", "pageEnd", "headingPath", "text", "_distance"];
+
+function summaryHit(row: Record<string, unknown>): LanceDbSummaryHit | null {
+  const integer = (value: unknown): number | null => {
+    const number = typeof value === "bigint" ? Number(value) : value;
+    return typeof number === "number" && Number.isSafeInteger(number) && number >= 0 ? number : null;
+  };
+  const level = integer(row.level);
+  const chunkStart = integer(row.chunkStart);
+  const chunkEnd = integer(row.chunkEnd);
+  if (typeof row.id !== "string" || typeof row.documentId !== "string" || typeof row.runId !== "string" || typeof row.text !== "string"
+    || !row.id || !row.text || level === null || level < 1 || chunkStart === null || chunkEnd === null || chunkEnd < chunkStart) return null;
+  const distance = typeof row._distance === "number" && Number.isFinite(row._distance) ? row._distance : Infinity;
+  return {
+    id: row.id, documentId: row.documentId, runId: row.runId, level, chunkStart, chunkEnd,
+    pageStart: integer(row.pageStart), pageEnd: integer(row.pageEnd),
+    headingPath: typeof row.headingPath === "string" ? row.headingPath : "",
+    text: row.text, score: 1 / (1 + Math.max(0, distance)),
+  };
+}
+
+/**
+ * Nearest summary rows of one project's summaries table (summary-tree.ts), for the summary-tree retrieval leg.
+ *
+ * Tenant boundary: the table is the one `summariesSearchTarget` derives from the authorized org and project, and that
+ * function refuses without the serve switch and without `documentIds`. The query always filters
+ * `documentId IN (documentIds)` before ranking (there is no unfiltered or NOT IN form), and every returned row is
+ * checked against `documentIds` again. The caller passes documents whose tree Postgres reports ready, and re-checks
+ * each hit afterwards (search/summary-tree.ts).
+ *
+ * `missing`: the table does not exist although the caller believes trees are ready. Throws when the table cannot be
+ * opened or the query fails; the caller turns either into a skipped leg, never a failed search. No result cache.
+ */
+export async function lanceDbSummarySearch(args: {
+  orgId: string;
+  projectId: string;
+  embeddingModel: string;
+  queryVector: number[];
+  documentIds: string[];
+  limit: number;
+}, env: Readonly<Record<string, string | undefined>> = process.env): Promise<{ status: "ok"; hits: LanceDbSummaryHit[] } | { status: "missing" }> {
+  if (!args.orgId.trim() || !args.projectId.trim()) throw new SummariesTargetRefused("no-document-scope");
+  const target = summariesSearchTarget({ ...args, dimension: args.queryVector.length }, env);
+  const opened = await openTarget(target.uri, target.name);
+  if (opened.failed) throw new Error("The summaries table could not be opened");
+  const table = opened.table;
+  if (!table) return { status: "missing" };
+  const filter = documentIdFilter(target.documentIds);
+  // Unreachable (summariesSearchTarget refused an empty scope); kept so no code path can send an unfiltered query.
+  if (!filter || filter === "false") throw new SummariesTargetRefused("no-document-scope");
+  try {
+    const query = table.vectorSearch(args.queryVector).column("vector").select(SUMMARY_RESULT_COLUMNS).where(filter).limit(args.limit);
+    const tuning = lanceDbQueryTuning(args.limit, target.documentIds.length, process.env.LANCEDB_REFINE_FACTOR);
+    if (tuning.ef !== undefined) query.ef(tuning.ef);
+    if (tuning.refineFactor !== undefined) query.refineFactor(tuning.refineFactor);
+    const rows = (await lanceSpan("summary_search", () => query.toArray(), target.uri)) as Array<Record<string, unknown>>;
+    const allowed = new Set(target.documentIds);
+    const seen = new Set<string>();
+    const hits: LanceDbSummaryHit[] = [];
+    for (const row of rows) {
+      const hit = summaryHit(row);
+      if (!hit || !allowed.has(hit.documentId) || seen.has(hit.id)) continue;
+      seen.add(hit.id);
+      hits.push(hit);
+    }
+    hits.sort((a, b) => b.score - a.score);
+    return { status: "ok", hits: hits.slice(0, args.limit) };
+  } catch (error) {
+    dropTable(target.uri, target.name, table);
+    throw error;
+  }
+}
+
+/**
+ * Warm the summaries table handle (and its vector index) while the query is embedded, as `warmLanceDbSearch` does for
+ * the chunks table. Called only for documents Postgres reports a ready tree for. Best effort; never throws.
+ * `summaryTreeWarm` (ms) covers it.
+ */
+export async function warmLanceDbSummaries(args: { orgId: string; projectId: string; embeddingModel: string; dimension: number; documentIds: string[] }): Promise<void> {
+  if (!args.orgId.trim() || !args.projectId.trim()) return;
+  const started = performance.now();
+  try {
+    const target = summariesSearchTarget(args);
+    const table = await getTable(target.uri, target.name);
+    if (table) {
+      const [capabilities] = await Promise.all([lanceTableCapabilities(table), table.version()]);
+      await warmSearchIndexes(table, target.uri, capabilities);
+    }
+  } catch {
+    // The leg itself reopens or drops the handle on failure, and is skipped when it cannot read.
+  } finally {
+    recordSearchPhase("summaryTreeWarm", performance.now() - started);
+  }
+}
+
 function documentIdSet(documentIds?: string[]): Set<string> | null {
   if (documentIds === undefined) {
     return null;

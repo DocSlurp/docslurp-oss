@@ -622,6 +622,13 @@ export type SearchInput = {
    */
   mode?: "keyword" | "hybrid" | "deep";
   /**
+   * How this search uses the project's summary tree (section summaries built beside the chunks): `off`, `guide`
+   * (summaries pick extra chunks; `results` stay real chunks) or `include` (the matching summaries are also returned in
+   * `summaries`). Omitted: the project's retrieval default. Hybrid and deep mode only, and only for a project that
+   * builds the tree; `SearchResponse.summaryTree` says what ran.
+   */
+  summaryTree?: SummaryTreeSearchMode;
+  /**
    * Query text, or up to 100 keyword queries run in parallel as one keyword-mode search and fused into one ranked
    * list (`mode` must be `keyword` or omitted). Each result's `matchedQueries` lists the queries it matched.
    */
@@ -676,6 +683,44 @@ export type SearchUsage = {
   scope: "retrieval";
 };
 
+export type SummaryTreeSearchMode = "off" | "guide" | "include";
+
+/** What the summary tree did for one search. `applied` differs from `requested` when the leg was skipped. */
+export type SummaryTreeSearchOutcome = {
+  requested: SummaryTreeSearchMode;
+  applied: SummaryTreeSearchMode;
+  /**
+   * Why it contributed nothing: it missed its deadline, no document in scope has a ready tree, this search cannot use
+   * the tree (keyword mode, a filter it does not support, or a project without one), or it failed.
+   */
+  skipped?: "deadline" | "not-ready" | "mode" | "error";
+  /** Wall time of the tree's part of retrieval, in milliseconds. */
+  ms: number;
+};
+
+/**
+ * A section summary returned by `summaryTree: "include"`. It is model-written text about part of a document, not a
+ * passage from it: it has no `text` and no `citation`. Show it as a summary and cite the chunks in `results`.
+ */
+export type SearchSummary = {
+  kind: "summary";
+  id: string;
+  documentId: string;
+  filename: string;
+  /** 1 is a section of the document; higher levels summarize the levels below. */
+  level: number;
+  /** The model-written summary. Not source text. */
+  summary: string;
+  headingPath: string[];
+  pageStart: number | null;
+  pageEnd: number | null;
+  /** Inclusive chunk positions the summary covers. */
+  chunkStart: number;
+  chunkEnd: number;
+  /** Match strength against the query, 0..1. */
+  relevance: number;
+};
+
 export type SearchResponse = {
   usage: SearchUsage;
   availability: SearchAvailability | null;
@@ -691,6 +736,10 @@ export type SearchResponse = {
   sessionId: string;
   /** Present for deferred (map/visual) projects. */
   deferred?: DeferredSearchStats;
+  /** Present when the request, or a project default this search could run, asked for the summary tree. */
+  summaryTree?: SummaryTreeSearchOutcome;
+  /** `summaryTree: "include"`: section summaries beside `results`, capped to a quarter of the returned context. */
+  summaries?: SearchSummary[];
 };
 
 export type SearchBatchOptions = {
