@@ -9,7 +9,15 @@ import { startDependencySpan, withDependencySpan } from "@docslurp/shared/observ
  */
 import * as lancedb from "@lancedb/lancedb";
 
-import { resolveLanceDbConfig, VectorNamespaceManager, type PrivacyMode } from "@docslurp/shared";
+import {
+  LANCEDB_CHUNKS_TABLE,
+  LANCEDB_SUMMARIES_TABLE,
+  resolveLanceDbConfig,
+  summaryTreeServeAvailable,
+  VectorNamespaceManager,
+  type LanceDbVectorTable,
+  type PrivacyMode,
+} from "@docslurp/shared";
 import { privacyModeBypassesCaches } from "../lib/cache-privacy.js";
 import { LANCE_HYDRATION_COLUMNS } from "@docslurp/shared/lancedb-hydration";
 import { withLanceDdb } from "@docslurp/shared/lancedb-ddb";
@@ -417,10 +425,38 @@ function hydratedFields(row: LanceDbRow): Pick<LanceDbSearchHit, "text" | "runId
 
 interface LanceTarget { uri: string; name: string; documentIds?: string[] }
 
-/** The one table a search may read: this project's database for the query's embedding space. */
-function searchTarget(args: { orgId: string; projectId: string; embeddingModel: string; dimension: number; documentIds?: string[] }): LanceTarget {
-  const location = VectorNamespaceManager.getEmbeddingLocation(resolveLanceDbConfig().root, args.orgId, args.projectId, args.embeddingModel, args.dimension);
+/** The one table a search may read: a table of this project's database for the query's embedding space. */
+function searchTarget(
+  args: { orgId: string; projectId: string; embeddingModel: string; dimension: number; documentIds?: string[] },
+  table: LanceDbVectorTable = LANCEDB_CHUNKS_TABLE,
+): LanceTarget {
+  const location = VectorNamespaceManager.getEmbeddingLocation(resolveLanceDbConfig().root, args.orgId, args.projectId, args.embeddingModel, args.dimension, table);
   return { uri: location.uri, name: location.table, documentIds: args.documentIds };
+}
+
+/** The summaries table was asked for without what makes reading it safe. Never caught to fall back to a wider read. */
+export class SummariesTargetRefused extends Error {
+  constructor(readonly reason: "serve-off" | "no-document-scope") {
+    super(reason === "serve-off"
+      ? "Summary tree search is off on this deployment"
+      : "The summaries table is never read without an explicit document scope");
+    this.name = "SummariesTargetRefused";
+  }
+}
+
+/**
+ * The summaries table of one project and embedding space (summary-tree.ts), for the retrieval leg that reads it.
+ * Refuses unless the deployment serves the tree and the caller names the documents it may read: `documentIds` is the
+ * eligible-document set, used as the prefilter and re-checked on every returned row. There is no unscoped form.
+ */
+export function summariesSearchTarget(
+  args: { orgId: string; projectId: string; embeddingModel: string; dimension: number; documentIds: string[] },
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): { uri: string; name: string; documentIds: string[] } {
+  if (!summaryTreeServeAvailable(env)) throw new SummariesTargetRefused("serve-off");
+  if (!Array.isArray(args.documentIds) || args.documentIds.length === 0) throw new SummariesTargetRefused("no-document-scope");
+  const target = searchTarget(args, LANCEDB_SUMMARIES_TABLE);
+  return { uri: target.uri, name: target.name, documentIds: [...args.documentIds] };
 }
 
 function documentIdSet(documentIds?: string[]): Set<string> | null {

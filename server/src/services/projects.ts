@@ -1,5 +1,6 @@
 import { EDITOR_REQUIRED_CODE, EDITOR_REQUIRED_MESSAGE, deferredProfilesEnabled, isBillingEnforced, PUBLIC_ERROR_MESSAGES, publicDiagnostics, publicDocumentError, resolveManagedPipeline, parseManagedPipelineOverrides, storedManagedPipeline, stripManagedPipelineFields, type ManagedPipelineOverrides } from "@docslurp/shared";
 import { chartExportDefaults, upgradeStoredPipelineChartExport } from "@docslurp/shared";
+import { defaultSummaryTreePipelineConfig, type SummaryTreePipelineConfig } from "@docslurp/shared";
 import { markProjectAutoNamed } from "./project-naming.js";
 import { forgetProjectProviderPolicy } from "../lib/provider-policy.js";
 import { jsonRecord } from "../lib/json-record.js";
@@ -389,6 +390,9 @@ export async function createProject(input: CreateProjectInput): Promise<ProjectR
     normalizePipelineFeatures({
       ...(parsed.pipeline ?? template?.pipeline ?? defaultPipelineFeatures),
       summarize: parsed.summaries,
+      // Never on at creation, whatever the request, template or cloned project holds: a project turns the summary
+      // tree on through its own endpoint (services/project-summary-tree.ts).
+      summaryTree: defaultSummaryTreePipelineConfig,
     }),
     template,
   );
@@ -1007,6 +1011,12 @@ type ProjectSqlClient = typeof sql;
 
 export type ProjectUpdateOptions = {
   indexingMode?: PipelineFeatures["indexingMode"];
+  /**
+   * The summary-tree setting to store. Only services/project-summary-tree.ts passes it. Without it every update keeps
+   * the stored value, whatever `input.pipeline.summaryTree` says: a settings form that resends the whole pipeline
+   * (with a value read before someone turned the tree off) changes nothing.
+   */
+  summaryTree?: SummaryTreePipelineConfig;
   /** Run the write on this transaction client (config-change jobs save the config and create runs atomically). */
   client?: ProjectSqlClient;
   /**
@@ -1024,19 +1034,23 @@ export async function resolveUpdatedPipeline(
   projectId: string,
   current: ProjectRecord,
   parsed: UpdateProjectInput,
-  options: Pick<ProjectUpdateOptions, "indexingMode"> = {},
+  options: Pick<ProjectUpdateOptions, "indexingMode" | "summaryTree"> = {},
 ): Promise<PipelineFeatures> {
   const template = parsed.templateKey !== undefined
     ? getProjectTemplate(parsed.templateKey)
     : getProjectTemplate(current.templateKey);
 
-  const draftPipeline = normalizePipelineFeatures(
-    parsed.pipeline ??
+  // The summary tree changes only through its own endpoint (options.summaryTree); otherwise the stored value stays.
+  const summaryTree = options.summaryTree ?? current.pipeline.summaryTree ?? defaultSummaryTreePipelineConfig;
+  const draftPipeline = normalizePipelineFeatures({
+    ...(parsed.pipeline ??
       (parsed.templateKey !== undefined
         ? template?.pipeline ?? defaultPipelineFeatures
-        : current.pipeline),
-  );
-  if (parsed.summaries !== undefined) draftPipeline.summarize = parsed.summaries;
+        : current.pipeline)),
+    summaryTree,
+  });
+  // The tree keeps document summaries on (summary-tree.ts); `summaries: false` cannot turn them off under it.
+  if (parsed.summaries !== undefined) draftPipeline.summarize = parsed.summaries || summaryTree.enabled;
   // Managed model fields (backend models, providers, routes) are never a customer choice: keep the stored ones
   // (platform-admin settings) across every edit; the routes refuse them in requests.
   // Managed model fields (backend models, providers, routes) are never a customer choice: whatever the draft holds
@@ -1116,7 +1130,15 @@ export async function updateProject(
       slug = ${nextSlug},
       template_key = ${parsed.templateKey ?? (parsed.templateKey === null ? null : current.templateKey)},
       system_prompt = ${parsed.systemPrompt ?? (parsed.systemPrompt === null ? null : current.systemPrompt)},
-      pipeline = ${sql.json(storedPipeline as never)},
+      -- The summary tree setting is written only by its own endpoint. Every other update keeps the row's value, taken
+      -- here in the same statement so a save racing a switch-off cannot store a stale "on".
+      pipeline = case
+        when ${options.summaryTree !== undefined} then ${sql.json(storedPipeline as never)}::jsonb
+        else jsonb_set(
+          ${sql.json(storedPipeline as never)}::jsonb, '{summaryTree}',
+          coalesce(projects.pipeline -> 'summaryTree', '{"enabled": false}'::jsonb)
+        )
+      end,
       monthly_budget_cents = ${nextBudget},
       artifact_retention_days = ${nextArtifactRetention},
       run_retention_days = ${nextRunRetention},

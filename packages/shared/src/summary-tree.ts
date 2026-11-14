@@ -333,8 +333,11 @@ export type ProjectSummaryTreeState = z.infer<typeof projectSummaryTreeStateSche
  * One row of the `summaries` LanceDB table. `chunkStart`/`chunkEnd` are inclusive `document_chunks.chunk_index`
  * bounds, so `guide` mode fetches the covered chunks with one Postgres query. One row belongs to one document.
  */
+/** A summary row id: safe to quote in a LanceDB filter. */
+export const summaryRowIdSchema = z.string().min(1).max(200).regex(/^[A-Za-z0-9_:.-]+$/);
+
 export const summaryRowSchema = z.object({
-  id: z.string().min(1).max(200).regex(/^[A-Za-z0-9_:.-]+$/),
+  id: summaryRowIdSchema,
   documentId: z.string().min(1).max(200).regex(/^[A-Za-z0-9_-]+$/),
   runId: z.string().min(1).max(200),
   level: z.number().int().min(1).max(SUMMARY_TREE_MAX_LEVELS),

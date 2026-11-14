@@ -3,6 +3,9 @@ import { setTimeout as delay } from "node:timers/promises";
 
 import {
   DEFAULT_RETAINED_VERSIONS,
+  isLanceDbVectorTable,
+  LANCEDB_CHUNKS_TABLE,
+  LANCEDB_SUMMARIES_TABLE,
   MAX_RETAINED_VERSIONS,
   MIN_RETAINED_VERSIONS,
   resolveLanceDbConfig,
@@ -49,6 +52,9 @@ const DERIVED_TABLES = [
   "document_page_states",
   "document_maps",
   "document_page_vectors",
+  // Summary tree registry (no text); the summaries table rows go through deleteDocumentSummaries.
+  "document_summary_tree_nodes",
+  "document_summary_trees",
 ] as const;
 
 /**
@@ -68,6 +74,9 @@ const ARCHIVE_TABLES = [
   "document_page_states",
   "document_maps",
   "document_page_vectors",
+  // The summary tree is a search index: an archived version keeps none of it.
+  "document_summary_tree_nodes",
+  "document_summary_trees",
 ] as const;
 
 const SAFE_DOCUMENT_ID = /^[A-Za-z0-9_-]+$/;
@@ -86,7 +95,8 @@ export type DeleteVectorRows = (args: {
   /**
    * Also compact the table and prune every older version now (cleanupOlderThan: now), so the
    * deleted rows' text and vectors leave the bucket instead of lingering in old fragments for
-   * the version-retention window. Set for expired extracts.
+   * the version-retention window. Set for expired extracts and for every summaries-table delete.
+   * Strict: the call rejects unless compaction and history pruning succeeded.
    */
   purgeHistory?: boolean;
   // Resolves "missing" when the table does not exist: nothing was deleted, no history to prune.
@@ -455,6 +465,7 @@ export async function purgeSupersededDocuments(
         // its own project, its vectors; keep those until the last such copy
         // is gone. Its own derived rows are still removed.
         if (!doc.vectors_shared) await deleteDocumentVectors(client, doc, options, deleteVectorRows);
+        await deleteDocumentSummaries(client, doc, options, deleteVectorRows);
         // Partial reprocesses copy stage outputs but point at this version's
         // storage artifacts; their vectors are their own, so only the
         // artifacts stay.
@@ -532,6 +543,44 @@ async function deleteDocumentVectors(
 }
 
 /**
+ * Deletes a document's summary-tree rows (text and vector) from the `summaries` table of its project's database(s).
+ *
+ * Unlike chunk rows, summary rows are never shared with a dedup copy (one node belongs to one document, and its
+ * registry rows are deleted with it), so this runs whether or not the chunk vectors stay. The delete is strict
+ * (`purgeHistory`): the table is compacted and its older versions pruned now, and a failure rejects, so the purge
+ * transaction rolls back and the document is retried. A project that never built a tree has no such table; that is
+ * "missing", not an error.
+ *
+ * The table is looked up beside every chunks table the document is indexed in, plus the embedding space its tree
+ * state names, so no Postgres flag has to be right for the rows to be found.
+ */
+async function deleteDocumentSummaries(
+  client: Sql<Record<string, unknown>>,
+  doc: ClaimedDocument,
+  options: SupersededPurgeOptions,
+  deleteVectorRows: DeleteVectorRows,
+): Promise<void> {
+  const spaces = await client<{ embedding_model: string; dimension: number }[]>`
+    select distinct embedding_model, dimension from vector_indexes where document_id = ${doc.id} and backend = 'lancedb'
+  `;
+  if (await tableExists(client, "document_summary_trees")) {
+    spaces.push(...await client<{ embedding_model: string; dimension: number }[]>`
+      select embedding_model, dimension from document_summary_trees
+      where document_id = ${doc.id} and embedding_model is not null and dimension is not null
+    `);
+  }
+  const seen = new Set<string>();
+  for (const space of spaces) {
+    const location = VectorNamespaceManager.getEmbeddingLocation(
+      options.lancedbRoot, doc.org_id, doc.project_id, space.embedding_model, space.dimension, LANCEDB_SUMMARIES_TABLE,
+    );
+    if (seen.has(location.uri)) continue;
+    seen.add(location.uri);
+    await deleteVectorRows({ uri: location.uri, table: location.table, documentIds: [doc.id], purgeHistory: true });
+  }
+}
+
+/**
  * The delete above only hides rows. Their bytes leave object storage when a maintenance pass
  * prunes the table's history after the retention window; this makes that pass due even when the
  * table is never written again.
@@ -575,6 +624,7 @@ async function archiveDocument(
   archiveTables: readonly string[],
 ): Promise<void> {
   if (!doc.vectors_shared) await deleteDocumentVectors(client, doc, options, deleteVectorRows);
+  await deleteDocumentSummaries(client, doc, options, deleteVectorRows);
   const kgNodeIds = await knowledgeGraphNodesForDocument(client, doc.id);
   for (const table of archiveTables) {
     await client`delete from ${client(table)} where document_id = ${doc.id}`;
@@ -712,7 +762,8 @@ async function tableExists(sql: Sql<Record<string, unknown>>, name: string): Pro
 }
 
 type VectorTarget =
-  | { backend: string; embeddingModel: string; dimension: number }
+  // `table` names one of the project database's tables (chunks when absent).
+  | { backend: string; embeddingModel: string; dimension: number; table?: string }
   | { backend: string; uri: string; table: string };
 
 type CleanupRow = {
@@ -739,7 +790,10 @@ function resolveVectorLocation(lancedbRoot: string, orgId: string, projectId: st
   if (target.backend !== "lancedb") return null;
   if ("uri" in target && target.uri && target.table) return { uri: target.uri, table: target.table };
   if (!("embeddingModel" in target) || !SAFE_ID.test(orgId) || !SAFE_ID.test(projectId)) return null;
-  return VectorNamespaceManager.getEmbeddingLocation(lancedbRoot, orgId, projectId, target.embeddingModel, target.dimension);
+  // A payload may name the table (the summaries table of a deleted project); an unknown name resolves to nothing.
+  const table = target.table ?? LANCEDB_CHUNKS_TABLE;
+  if (!isLanceDbVectorTable(table)) return null;
+  return VectorNamespaceManager.getEmbeddingLocation(lancedbRoot, orgId, projectId, target.embeddingModel, target.dimension, table);
 }
 
 function legacyLocationsFor(lancedbRoot: string, orgId: string, payload: Record<string, unknown>): VectorLocation[] {
@@ -891,7 +945,7 @@ async function cleanDeletedDocuments(
   const owned = rows.filter((row) => !row.keep_shared_artifacts);
 
   // Tables queued for a whole drop (org deletion) need no row deletes.
-  const orgIds = [...new Set(vectorOwners.map((row) => row.org_id))];
+  const orgIds = [...new Set(rows.map((row) => row.org_id))];
   const droppedTables = new Set(
     (await client<{ payload: VectorTarget; org_id: string | null }[]>`
       select payload, org_id from storage_cleanup_queue
@@ -916,6 +970,25 @@ async function cleanDeletedDocuments(
   for (const { location, documentIds, purgeHistory } of byTable.values()) {
     const outcome = await deleteVectorRows({ uri: location.uri, table: location.table, documentIds: [...documentIds], ...(purgeHistory ? { purgeHistory } : {}) });
     if (outcome !== "missing") scheduleHistoryPrune(location);
+  }
+
+  // Summary-tree rows: the `summaries` table beside every chunks table a deleted document was indexed in. Every row
+  // counts, sharing or not: summary rows are never shared with a dedup copy. Always strict (see deleteDocumentSummaries):
+  // a failure rejects and the queue rows stay for the next sweep.
+  const summaries = new Map<string, { location: VectorLocation; documentIds: Set<string> }>();
+  for (const row of rows) {
+    for (const target of row.vector_targets) {
+      const chunks = resolveVectorLocation(options.lancedbRoot, row.org_id, row.project_id, target);
+      if (!chunks) continue;
+      const location = VectorNamespaceManager.summariesLocation(chunks);
+      if (droppedTables.has(locationKey(location))) continue;
+      const group = summaries.get(locationKey(location)) ?? { location, documentIds: new Set<string>() };
+      group.documentIds.add(row.document_id);
+      summaries.set(locationKey(location), group);
+    }
+  }
+  for (const { location, documentIds } of summaries.values()) {
+    await deleteVectorRows({ uri: location.uri, table: location.table, documentIds: [...documentIds], purgeHistory: true });
   }
 
   const keys = new Set<string>();

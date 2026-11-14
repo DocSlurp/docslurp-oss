@@ -3843,6 +3843,18 @@ export class Store {
           where run_id = ${row.run_id}
         `;
       }
+      if (await this.tableExists("document_summary_trees")) {
+        // The summary tree is derived from this run's chunks. Its registry rows go here; its rows in the project's
+        // summaries table go with the vector targets handed to the cleanup sweep below (strict delete).
+        await this.sql`
+          delete from document_summary_tree_nodes
+          where document_id in (select id from documents where run_id = ${row.run_id})
+        `;
+        await this.sql`
+          delete from document_summary_trees
+          where document_id in (select id from documents where run_id = ${row.run_id})
+        `;
+      }
       if (await this.tableExists("document_chunks")) {
         await this.sql`
           delete from document_chunks

@@ -56,6 +56,24 @@ export type ProjectState = {
   searches: { total: number; recentCount: number; recentZeroResultCount: number; latencyMs: DistributionStats };
   performance: { completedRuns: number; failedRuns: number; completedPages: number; durationMs: DistributionStats; pagesPerMinute: number | null; minutesPer100Pages: number | null; basis: "run-wall-time-including-queue" };
   usage: RunUsage;
+  /**
+   * Summary tree (section summaries searched beside the chunks): the project's stored setting, whether this deployment
+   * builds and serves trees, the build status, document counts and the read-only server constants.
+   */
+  summaryTree: ProjectSummaryTreeState;
+};
+export type SummaryTreeSearchMode = "off" | "guide" | "include";
+export type ProjectSummaryTreeState = {
+  enabled: boolean; buildAvailable: boolean; serveAvailable: boolean;
+  searchMode: SummaryTreeSearchMode; effectiveSearchMode: SummaryTreeSearchMode;
+  status: "off" | "building" | "partial" | "ready";
+  documents: { total: number; ready: number; building: number; partial: number; skipped: number; missing: number };
+  nodes: number;
+  constants: {
+    keyVersion: number; minGroupSize: number; maxGroupSize: number; maxFanIn: number; minDocumentLeaves: number;
+    maxNodesPerDocument: number; maxLevels: number; summaryTargetWords: number; maxTableLeafShare: number;
+    includeContextShare: number; deadlineFactor: number; deadlineGraceMs: number; deadlineCalibrated: boolean; skippedFormats: string[];
+  };
 };
 export type OrganizationRole = "owner" | "admin" | "member" | "billing";
 export type OrganizationRecord = {

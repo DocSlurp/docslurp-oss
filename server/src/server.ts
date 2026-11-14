@@ -52,6 +52,7 @@ import { apiKeysRoutes } from "./routes/api-keys.js";
 import { searchRoutes, searchesRoutes, projectChatRoutes } from "./routes/search.js";
 import { webRoutes } from "./routes/web.js";
 import { projectGraphRoutes } from "./routes/project-graph.js";
+import { projectSummaryTreeRoutes } from "./routes/project-summary-tree.js";
 import { artifactsRoutes } from "./routes/artifacts.js";
 import { inviteRoutes, metaRoutes, dashboardRoutes, waitlistRoutes } from "./routes/frontend.js";
 import { customerPipelineGuard } from "./middleware/customer-pipeline-guard.js";
@@ -196,7 +197,7 @@ export function createApiApp(): Hono {
   app.use("/dashboard/*", customerPipelineGuard);
   app.use("/v1/*", rejectLegacyProjectSelection);
   // `/v1/projects/:slug|default/...` → resolved project UUID routes.
-  const projectRefs = projectRefPath([projectsRoutes, chatInstructionsRoutes, connectorsRoutes, secretsRoutes, projectGraphRoutes]);
+  const projectRefs = projectRefPath([projectsRoutes, chatInstructionsRoutes, connectorsRoutes, secretsRoutes, projectGraphRoutes, projectSummaryTreeRoutes]);
   app.use("/v1/projects/:projectRef", projectRefs);
   app.use("/v1/projects/:projectRef/*", projectRefs);
 
@@ -250,6 +251,7 @@ export function createApiApp(): Hono {
   app.route("/v1/admin/projects", adminProjectsRoutes);
   app.route("/v1/projects", secretsRoutes);
   app.route("/v1/projects", projectGraphRoutes);
+  app.route("/v1/projects", projectSummaryTreeRoutes);
   app.route("/v1/user-settings", userSettingsRoutes);
   app.route("/v1/account", accountRoutes);
   app.route("/v1/whoami", whoamiRoutes);
