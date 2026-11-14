@@ -1577,6 +1577,7 @@ async function chatProjectTurn(
     queryDecompose: searchSettings.retrievalDefaults.queryDecompose,
     stepback: searchSettings.retrievalDefaults.stepback,
     summarySeed: searchSettings.retrievalDefaults.summarySeed,
+    summaryTree: searchSettings.retrievalDefaults.summaryTree,
     selfQuery: searchSettings.retrievalDefaults.selfQuery,
     iterativeMultiHop: searchSettings.retrievalDefaults.iterativeMultiHop,
     enableGraphExpansion:

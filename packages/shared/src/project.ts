@@ -607,6 +607,8 @@ export const chatRetrievalOverridesSchema = z.object({
   graphHops: z.number().int().min(1).max(3).optional(),
   /** false: cite matched chunks only, without attaching each hit's whole parent page text. Smaller prompts and faster retrieval. */
   parentRetrieval: z.boolean().optional(),
+  /** How this thread's retrieval uses the project's summary tree; it stays off unless the project builds one. */
+  summaryTree: summaryTreeSearchModeSchema.optional(),
 }).strict();
 export type ChatRetrievalOverrides = z.infer<typeof chatRetrievalOverridesSchema>;
 

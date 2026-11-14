@@ -452,7 +452,7 @@ export function createChatMcpTools(args: {
     candidateDepth: defaults.candidateDepth, resultOrder: defaults.resultOrder,
     compression: defaults.useContextualCompression, mmrLambda: defaults.mmrLambda,
     minScore: defaults.minScore, parentRetrieval: defaults.parentRetrieval,
-    summarySeed: defaults.summarySeed, queryRewrite: defaults.queryRewrite,
+    summarySeed: defaults.summarySeed, summaryTree: defaults.summaryTree, queryRewrite: defaults.queryRewrite,
     queryDecompose: defaults.queryDecompose, stepback: defaults.stepback,
     selfQuery: defaults.selfQuery, iterativeMultiHop: defaults.iterativeMultiHop,
     graphExpansion: defaults.enableGraphExpansion, communityExpansion: defaults.enableCommunityExpansion,

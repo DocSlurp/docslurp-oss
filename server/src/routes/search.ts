@@ -472,8 +472,10 @@ async function lookupRetrieve(body: SearchInput & { projectId: string }, scope: 
   return { run: async () => {
     const search = () => hybridSearch(searchQueryText(body.q), userId, searchOptions(body), scope);
     const data = publicSearchResponse(await (deferred ? withDeferredContext(deferred, search) : search()));
-    // A response with pages still materializing must not be replayed as final.
-    if (ticket && data.availability?.status === "complete" && !(data.deferred && data.deferred.pendingPages > 0)) {
+    // A response with pages still materializing must not be replayed as final. Nor one the summary tree was asked
+    // to shape and did not (deadline, not ready, error, mode): only `applied === requested` is the answer to replay.
+    const treeApplied = !data.summaryTree || data.summaryTree.applied === data.summaryTree.requested;
+    if (ticket && treeApplied && data.availability?.status === "complete" && !(data.deferred && data.deferred.pendingPages > 0)) {
       await storeResponse(ticket, data, data.availability?.scope?.projectId);
     }
     return data;

@@ -73,6 +73,8 @@ const facetQuerySchema = queryBodySchema.pick({ query: true, filters: true, face
 const compatRetrievalOptions = {
   parentRetrieval: false,
   summarySeed: false,
+  // Compatibility clients get chunk results only: the summary tree never runs here, whatever the project default.
+  summaryTree: "off" as const,
   useContextualCompression: false,
   useHyDE: false,
   useMmr: false,

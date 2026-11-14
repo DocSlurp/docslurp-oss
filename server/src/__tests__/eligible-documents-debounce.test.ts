@@ -56,6 +56,20 @@ describe("eligible-set invalidation", () => {
     expect(drops).toEqual(["p", "p", "p"]);
   });
 
+  it("debounces an arrival hint (a summary tree became ready) and never a withdrawal", () => {
+    eligible.handleSearchEligibilityHint(JSON.stringify({ projectIds: ["p"], debounce: true }));
+    expect(drops).toEqual(["p"]); // nothing dropped recently: applied at once
+    vi.advanceTimersByTime(100);
+    eligible.handleSearchEligibilityHint(JSON.stringify({ projectIds: ["p"], debounce: true }));
+    eligible.handleSearchEligibilityHint(JSON.stringify({ projectIds: ["p"], debounce: true }));
+    expect(drops).toEqual(["p"]); // inside the window: one drop at its end
+    vi.advanceTimersByTime(1_000);
+    expect(drops).toEqual(["p", "p"]);
+    // Only the literal true debounces; any other value is a withdrawal and drops now.
+    for (const debounce of ["true", 1, null, false]) eligible.handleSearchEligibilityHint(JSON.stringify({ projectIds: ["p"], debounce }));
+    expect(drops).toHaveLength(6);
+  });
+
   it("serves the cached set inside the window and a fresh one after it", async () => {
     const { sql } = await import("../db.js") as unknown as { sql: ReturnType<typeof vi.fn> };
     let rows = [{ id: "d1", filename: "a", mime_type: null, run_id: "r", tags: null, vector_ready: true, lexical: true, page_only_completed: false, owner_id: null, owner_index_config_hash: null, lance_stale: false }];
@@ -84,7 +98,7 @@ describe("eligible-set invalidation", () => {
 
 describe("excludedTableDocuments", () => {
   const document = (id: string, extra: Partial<import("../search/eligible-documents.js").EligibleDocument> = {}) => ({
-    id, filename: id, mimeType: null, runId: "r", tags: [], vectorReady: true, lexical: true, ownerId: id, ownerIndexConfigHash: null, lanceStale: false, ...extra,
+    id, filename: id, mimeType: null, runId: "r", tags: [], vectorReady: true, lexical: true, ownerId: id, ownerIndexConfigHash: null, lanceStale: false, treeReady: false, ...extra,
   });
   const set = { projectId: "p", embeddingModel: "m", dimension: 2, pageOnlyCompletedDocuments: 0, loadedAt: 0, documents: [
     document("a"), document("b"), document("copy", { ownerId: "a" }), document("early", { vectorReady: false, ownerId: null }),
