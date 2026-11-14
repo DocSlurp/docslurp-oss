@@ -561,6 +561,17 @@ function settleJobLayout(job: SandboxedPdfJob): SettledLayout | null {
   let settled: SettledLayout | null = null;
   // Only a job that has layout facts to settle: the walker's, the facts' own (`use`), or a walker that said why it could
   // not walk the file. A run that returned no layout at all keeps routing without one, as before (store mode).
+  // Without page facts (core refused them, or a non-walker source the guest marked), a layout that says it is partial (a
+  // gridsUnknown page or a walker reason) still gets every page: the missing ones unknown, routed as tables (council #2
+  // re-check N1).
+  if (!facts && reported && (reportedWalkerUnknown.has(job) || [...reported.values()].some((page) => page.gridsUnknown === true))) {
+    const layout = new Map(reported);
+    const last = reportedPageCount.get(job) ?? Math.max(0, ...layout.keys());
+    let filled = 0;
+    for (let page = 1; page <= last; page += 1) if (!layout.has(page)) { layout.set(page, { ...UNKNOWN_PAGE }); filled += 1; }
+    const unknown = [...layout.values()].filter((page) => page.gridsUnknown === true).length;
+    settled = { layout: new Map([...layout].sort(([a], [b]) => a - b)), fromFacts: 0, unknown, filled };
+  }
   if (facts && (reported || reportedWalkerUnknown.has(job))) {
     const base = new Map(reported ?? []);
     let last = reportedPageCount.get(job) ?? 0;

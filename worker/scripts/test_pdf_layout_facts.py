@@ -615,7 +615,7 @@ class LayoutFactsTest(unittest.TestCase):
         self.assertEqual(len(rules[0]), len(grid))          # the dots are dropped as they are read; the table is seen
         self.assertEqual(facts.ruled_grids(rules[0])[0]['columns'], 4)
         self.assertEqual(rules[1], [])                      # dots alone: known, no grid
-        self.assertNotIn(2, rules)                          # more usable rules than the budget: unknown, never cut short
+        self.assertIsNone(rules[2])                         # more usable rules than the budget: unknown, never cut short
 
     def test_unknown_inputs_are_null_never_zero(self):
         data = PdfBuilder().build() if hasattr(PdfBuilder(), 'build') else None

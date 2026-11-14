@@ -98,6 +98,21 @@ describe("unknown walker grids settle from page facts", () => {
     expect(sandboxedPdfLayoutFacts(job)).toBe(layout);
   });
 
+  it("fills a partial layout without page facts too: missing pages are unknown, never no table (council #2 N1)", () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const job: SandboxedPdfJob = { input: "/a", output: "/b" };
+    const pages = [{ pageNumber: 1, known: true, ...walkerPage(null), gridsUnknown: true }, { pageNumber: 2, known: true, ...walkerPage([]) }];
+    acceptSandboxedPdfResult(job, { exitCode: 0, stdout: "", stderr: "", layoutFacts: { version: "pdf-layout-facts@1", pages } }, 4);
+    const layout = sandboxedPdfLayoutFacts(job)!;
+    expect([...layout.keys()]).toEqual([1, 2, 3, 4]);
+    expect(layout.get(3)).toMatchObject({ gridsUnknown: true });
+    expect(sandboxedPdfGridSettlement(job)).toEqual({ fromFacts: 0, unknown: 3, filled: 2 });
+    // A complete walker layout without marks stays as it is (layout source walker).
+    const plain: SandboxedPdfJob = { input: "/a", output: "/b" };
+    acceptSandboxedPdfResult(plain, { exitCode: 0, stdout: "", stderr: "", layoutFacts: { version: "pdf-layout-facts@1", pages: [pages[1]] } }, 4);
+    expect([...sandboxedPdfLayoutFacts(plain)!.keys()]).toEqual([2]);
+  });
+
   it("lets page facts stand in when the walker could not walk the file at all", () => {
     vi.spyOn(console, "warn").mockImplementation(() => {});
     const job: SandboxedPdfJob = { input: "/a", output: "/b" };
