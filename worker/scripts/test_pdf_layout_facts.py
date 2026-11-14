@@ -561,7 +561,7 @@ class LayoutFactsTest(unittest.TestCase):
                 facts.walk_document = original
         self.assertEqual(walked, [[2, 5]])
         self.assertEqual([page['pageNumber'] for page in result['pages']], [2, 5])
-        for bad in ([], [0], [7], [2, '3'], [True], [2.0]):
+        for bad in ([], [0], [7], [2, '3'], [True], [2.0], 5, None.__class__):
             with self.subTest(pages=bad), self.assertRaises(ValueError):
                 facts.layout_facts(str(path), None, None, None, 1, 6, pages=bad)
 

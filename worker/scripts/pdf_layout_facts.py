@@ -1733,14 +1733,18 @@ def layout_facts(path, listing_text, xhtml_text, page_markdowns, first, last, de
 
     `pages` (an explicit page list, every page in [first, last]): only those pages are walked, read from the XHTML and
     reported, in page order; the result has no entry for any other page (the caller answers those itself). `xhtml_text`
-    still covers [first, last] in order, as for a full run. Each listed page's entry is the one a run over the whole range
-    gives, except that page furniture defaults to `repeated_objects` over the listing as given (pass `repeated` for the
-    whole range's). Lets a caller walk only the pages that need it inside a chunk, with the same bounded memory.
+    still covers [first, last] in order, as for a full run: each listed page's entry is then the one a run over the whole
+    range with the same inputs gives (a page's grids depend on whether that XHTML has any ruling line, so a caller that
+    narrows the XHTML to fewer pages can turn a known `[]` into unknown). Lets a caller walk only the pages that need it
+    inside a chunk, with the same bounded memory.
     """
     if last - first + 1 > MAX_LAYOUT_PAGES:
         raise Unknown('range')
     if pages is not None:
-        selected = frozenset(pages)
+        try:
+            selected = frozenset(pages)
+        except TypeError:
+            raise ValueError('pages') from None
         if not selected or any(type(page) is not int or not first <= page <= last for page in selected):
             raise ValueError('pages')
         numbers = sorted(selected)
