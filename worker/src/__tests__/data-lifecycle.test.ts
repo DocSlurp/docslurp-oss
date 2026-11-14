@@ -50,6 +50,7 @@ beforeEach(async () => {
   await sql`delete from storage_cleanup_queue`;
   await sql`delete from upload_cleanup_owners`;
   await sql`delete from vector_index_outbox`;
+  await sql`delete from vector_index_tables`;
   await sql`insert into projects(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W'), ('keep', 'o1', 'u1', 'Keep')`;
 });
 

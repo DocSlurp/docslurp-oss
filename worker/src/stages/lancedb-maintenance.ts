@@ -421,6 +421,15 @@ export async function runLanceDbMaintenance(
     // and folds newly written rows into any existing indices (as one new index segment).
     const optimizeStarted = performance.now();
     const stats = await table.optimize(optimizeOptions());
+    if (retentionMs !== undefined && retentionMs <= 0) {
+      // Erasure: the pass above keeps the version it compacted from (versions the call itself
+      // creates are newer than its cutoff), and that version still references the fragment
+      // holding the deleted rows. A second pass prunes it.
+      const pruned = await table.optimize(optimizeOptions());
+      stats.compaction.fragmentsRemoved += pruned.compaction.fragmentsRemoved;
+      stats.prune.oldVersionsRemoved += pruned.prune.oldVersionsRemoved;
+      stats.prune.bytesRemoved += pruned.prune.bytesRemoved;
+    }
     optimizedMs = Math.round(performance.now() - optimizeStarted);
     rows = await table.countRows();
     let indices = await table.listIndices();

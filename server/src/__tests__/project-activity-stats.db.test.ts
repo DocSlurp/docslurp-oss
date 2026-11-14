@@ -3,7 +3,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { applyRemainingMigrations, createMigratedDatabase, serveOnRandomPort, startMigratedPostgres } from "@docslurp/worker/testing";
 
 /**
- * project_activity_stats (migration 0162) against a database built from db/migrations: every counter equals the
+ * project_activity_stats (migration 0163) against a database built from db/migrations: every counter equals the
  * aggregate over search_sessions / chat_turns it replaced, after every kind of write, and the project reads return
  * those numbers only for projects the caller can see.
  */
@@ -23,7 +23,7 @@ type Totals = {
   search_duration_count: number; search_duration_ms: string; chat_turns: number;
 };
 
-/** The history aggregates the project list and board ran before 0162, for every project. */
+/** The history aggregates the project list and board ran before 0163, for every project. */
 async function oracle(client: postgres.Sql = sql): Promise<Totals[]> {
   return await client<Totals[]>`
     select w.id as project_id,
@@ -378,7 +378,7 @@ describe("tenant boundary", () => {
   });
 });
 
-describe("migration 0162 backfill", () => {
+describe("migration 0163 backfill", () => {
   it("counts existing history, skips sessions without a project, and is the same on a second run", async () => {
     const db = await createMigratedDatabase({ stopBefore: "project_activity_stats" });
     const { server, port } = await serveOnRandomPort(db);
@@ -428,7 +428,7 @@ describe.skipIf(!raceDatabaseUrl)("concurrent writers (native PostgreSQL)", () =
   const failures: string[] = [];
   /**
    * Expected refusals: a foreign-key violation for a write into a session or project deleted meanwhile, and a
-   * deadlock abort when a single turn is deleted while its session is (0162 documents it). Neither may cost a count.
+   * deadlock abort when a single turn is deleted while its session is (0163 documents it). Neither may cost a count.
    */
   const attempt = async (work: () => Promise<unknown>) => {
     try {

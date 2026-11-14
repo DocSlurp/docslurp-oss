@@ -212,7 +212,7 @@ export const projectCorpusStats = pgTable(
 );
 
 /**
- * Search-session and chat-turn counters per project (0162), maintained by triggers on search_sessions, chat_turns
+ * Search-session and chat-turn counters per project (0163), maintained by triggers on search_sessions, chat_turns
  * and chat_sessions. Up to 8 rows per project (one per writer slot); a read sums them.
  */
 export const projectActivityStats = pgTable(

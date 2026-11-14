@@ -1084,7 +1084,14 @@
       "idx": 154,
       "version": "7",
       "when": 1797200000000,
-      "tag": "0162_project_activity_stats",
+      "tag": "0162_vector_history_prune_due",
+      "breakpoints": true
+    },
+    {
+      "idx": 155,
+      "version": "7",
+      "when": 1797300000000,
+      "tag": "0163_project_activity_stats",
       "breakpoints": true
     }
   ]
