@@ -302,6 +302,55 @@ shows the rescan message.
 
 Watch disk, memory, worker errors and `/health` before inviting users.
 
+## Project search and chat counters
+
+The project list and board read each project's search and chat totals from
+`project_activity_stats` instead of counting history on every request. Triggers
+on `search_sessions`, `chat_turns` and `chat_sessions` keep those counters equal
+to history in the same transaction as each write.
+
+The counters can only drift when a write bypasses the triggers:
+
+- `session_replication_role = replica` (logical replication apply, and some
+  restore and copy tools set it);
+- `ALTER TABLE ... DISABLE TRIGGER` on one of the three tables;
+- a manual change to `project_activity_stats` or to history with triggers off;
+- a restore of some of these tables without the others. A full `pg_restore` of
+  the database restores the counters with the history and needs nothing.
+
+**Detect.** The server compares a few projects with their history every 10
+minutes (`PROJECT_ACTIVITY_STATS_DRIFT_CHECK_INTERVAL_MS`, `0` turns it off) and
+logs `[project-activity-stats] counter drift in ...` with the stored and actual
+numbers. It reports only; it never repairs. (The same sweep folds the spare
+counter rows that concurrent writers leave for a project into one, which changes
+no total.) To check every project on demand:
+
+```sh
+docker compose --env-file .env.selfhost -f compose.selfhost.yml exec server \
+  node server/db/project-activity-stats.mjs            # exit 1 and one line per project on drift
+node server/db/project-activity-stats.mjs --project <project-id>   # from a checkout, with DATABASE_URL set
+```
+
+The check is one read-only statement (`select * from project_activity_stats_drift()`):
+it blocks nothing and is exact while traffic flows. Without `--project` it reads
+all search and chat history, about a second per million search sessions, so run
+it off-peak on a large database.
+
+**Repair.**
+
+```sh
+node server/db/project-activity-stats.mjs --rebuild
+```
+
+This recomputes every counter from history (`rebuild_project_activity_stats()`)
+in one transaction and then runs the check. While it reads the history, search
+and chat writes wait (reads continue): about a second per million search
+sessions. It waits at most `PROJECT_ACTIVITY_STATS_LOCK_TIMEOUT_MS` (default
+`5000`) for its table locks and retries, so it never queues traffic behind a
+long-open transaction, and a failed attempt changes nothing. Running it twice
+stores the same totals. After any operation from the list above, run the
+rebuild once the triggers are back on.
+
 ## Scaling workers on one host
 
 Each worker processes `WORKER_DOC_CONCURRENCY` documents at a time (default `1`).
