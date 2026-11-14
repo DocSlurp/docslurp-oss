@@ -17,7 +17,7 @@ export async function readProjectSuggestions(userId: string, projectId: string, 
     select s.query as phrase, 10 as weight
     from search_sessions s
     where s.user_id = ${userId}
-      and (s.metadata ->> 'projectId') = ${projectId}
+      and s.project_id = ${projectId}
       and s.query not like 'enc:%' and s.query not like 'redacted:%'
       and s.query ilike ${like}
     order by s.created_at desc

@@ -5,6 +5,11 @@ import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/cli
 
 const validateApiKey = vi.fn();
 const validateMcpToken = vi.fn();
+// Route access reads (lib/search-access.ts) answered from this file's getProject mock with the real scope rules.
+vi.mock("../lib/search-access.js", async () => {
+  const { authorizeFromProjectMock } = await import("./helpers/search-access.js");
+  return { authorizeActorProjectSearch: authorizeFromProjectMock(async (id, userId) => (await import("../services/projects.js")).getProject(id, userId)) };
+});
 vi.mock("../services/mcp-oauth.js", async (original) => ({
   ...await original<typeof import("../services/mcp-oauth.js")>(), validateMcpToken,
 }));
@@ -146,7 +151,7 @@ describe("mcpRoutes", () => {
     ]);
     const response = await app.request("/mcp/tools/listProjects", { method: "POST", headers: { Authorization: "Bearer key", "Content-Type": "application/json" }, body: '{"limit":1}' });
     expect(await response.json()).toEqual({ projects: [{ id: "allowed", slug: "manuals", name: "Manuals", isDefault: true }], total: 1, nextOffset: null });
-    expect(listProjects).toHaveBeenCalledWith("user-1", { refineNames: false });
+    expect(listProjects).toHaveBeenCalledWith("user-1");
   });
 
   it("resolves the uploader target read-only and hides the tool while the MCP Apps flag is off", async () => {
@@ -164,7 +169,8 @@ describe("mcpRoutes", () => {
       expect(defaulted).toEqual({
         project: { id: "default-ws", slug: "main", name: "Main", isDefault: true },
         projects: [{ id: "default-ws", slug: "main", name: "Main", isDefault: true }, { id: "ws-2", slug: "legal", name: "Legal", isDefault: false }],
-        limits: { maxFiles: 10, maxFileBytes: 5368709120 },
+        // The server's own upload limit (MAX_UPLOAD_BYTES), not a fixed 5 GiB.
+        limits: { maxFiles: 10, maxFileBytes: env.maxUploadBytes },
         uploader: { resourceUri: UPLOAD_UI_URI },
         hint: expect.any(String),
       });
@@ -545,7 +551,7 @@ describe("mcpRoutes", () => {
     expect((await client.listTools()).tools.map(tool => tool.name)).toContain("search");
     const called = await client.callTool({ name: "search", arguments: { q: "audience?", project: "ws-1" } });
     expect(called.isError).toBe(false);
-    expect(hybridSearch).toHaveBeenCalledWith("audience?", "user-1", expect.anything());
+    expect(hybridSearch).toHaveBeenCalledWith("audience?", "user-1", expect.anything(), expect.objectContaining({ orgId: expect.any(String) }));
     await client.close();
   });
 
@@ -572,7 +578,7 @@ describe("mcpRoutes", () => {
     const chat = await call("chat", { project: "ws-1", q: "Support hours?", sessionId: "chat-existing" });
     expect(await chat.json()).toMatchObject({ answer: "Weekdays [1]", citations: [{ filename: "guide.txt" }], usage: { outputTokens: 3 } });
     expect(chatProject).toHaveBeenCalledWith(expect.objectContaining({ projectId: "ws-1", userId: "user-1", query: "Support hours?", sessionId: "chat-existing" }));
-    expect(hybridSearch).toHaveBeenCalledWith("Support hours?", "user-1", expect.objectContaining({ useHyDE: undefined, useRerank: undefined, queryRewrite: undefined }));
+    expect(hybridSearch).toHaveBeenCalledWith("Support hours?", "user-1", expect.objectContaining({ useHyDE: undefined, useRerank: undefined, queryRewrite: undefined }), expect.objectContaining({ orgId: expect.any(String) }));
   });
 
   it("keeps parallel retrieval results ordered and denies foreign projects before retrieval", async () => {
@@ -582,7 +588,7 @@ describe("mcpRoutes", () => {
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ results: [{ ok: true, data: { sessionId: "retrieval-1" } }, { ok: false, error: { code: "PROJECT_NOT_FOUND", status: 404 } }] });
     expect(hybridSearch).toHaveBeenCalledTimes(1);
-    expect(hybridSearch).toHaveBeenCalledWith("first", "user-1", expect.anything());
+    expect(hybridSearch).toHaveBeenCalledWith("first", "user-1", expect.anything(), expect.objectContaining({ orgId: expect.any(String) }));
     expect(chatProject).not.toHaveBeenCalled();
   });
 
@@ -631,7 +637,7 @@ describe("session MCP tools", () => {
   it("uses the authenticated session identity and preserves project access checks", async () => {
     const response = await app.request("/tools/tools/search", { method: "POST", headers, body: JSON.stringify({ project: "ws-1", q: "hello" }) });
     expect(response.status).toBe(200);
-    expect(hybridSearch).toHaveBeenCalledWith("hello", "user-1", expect.anything());
+    expect(hybridSearch).toHaveBeenCalledWith("hello", "user-1", expect.anything(), expect.objectContaining({ orgId: expect.any(String) }));
     expect((await app.request("/tools/tools/suggestQueries", { method: "POST", headers, body: JSON.stringify({ project: "foreign" }) })).status).toBe(404);
   });
 

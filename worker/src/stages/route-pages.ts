@@ -348,11 +348,13 @@ export class RoutePagesStage implements Stage {
         },
       };
       const chainReport: ChainReport | undefined = chain ? { trace: chain.trace, servedBy: chain.servedBy } : undefined;
-      const pixelNote = pixelSkipped.length > 0 && decisionModels.length > 0 ? `decision-model-skipped:no-host-pixels:${pixelSkipped.join("|")}` : undefined;
+      // The note names no model (customers can read it): models skipped and attempts by position. The model ids stay in
+      // the decisionModel / decisionChain fields, which only platform operators read.
+      const pixelNote = pixelSkipped.length > 0 && decisionModels.length > 0 ? `decision-model-skipped:no-host-pixels:${pixelSkipped.length}` : undefined;
       const routerNote = [
         selectNote,
         pixelNote,
-        chainReport ? `decision-chain:${chainReport.trace.map((t) => `${t.model}=${t.outcome}`).join(",")}` : undefined,
+        chainReport ? `decision-chain:${chainReport.trace.map((t, i) => `${i + 1}=${t.outcome}`).join(",")}` : undefined,
       ].filter(Boolean).join(" ") || undefined;
       const plan: RoutePlan = routePlanSchema.parse({
         ...raw,
@@ -550,8 +552,8 @@ export class RoutePagesStage implements Stage {
     if (settings.router === "baseline") return { router: baseline() };
 
     if (args.decisionModels.length === 0) {
-      if (args.pixelSkipped.length > 0) return { router: baseline(), routerNote: `decision-model-skipped:no-host-pixels:${args.pixelSkipped.join("|")}` };
-      return { router: baseline(), routerNote: `decision-model-unavailable:${args.requestedModels.join("|")}` };
+      if (args.pixelSkipped.length > 0) return { router: baseline(), routerNote: `decision-model-skipped:no-host-pixels:${args.pixelSkipped.length}` };
+      return { router: baseline(), routerNote: `decision-model-unavailable:${args.requestedModels.length}` };
     }
     // Decision calls cost money and send page images or text to a hosted provider: the run's own
     // cost cap and the project privacy mode both gate them (strict-privacy audits the block).

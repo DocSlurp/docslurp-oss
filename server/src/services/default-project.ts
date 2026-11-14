@@ -2,13 +2,13 @@ import { randomUUID } from "node:crypto";
 import type postgres from "postgres";
 import { HTTPException } from "hono/http-exception";
 
-import { apiError, apiErrorCodeForStatus, defaultPipelineFeatures, isApiErrorCode, normalizePipelineFeatures, type ApiErrorCode, type ApiErrorDetails } from "@docslurp/shared";
+import { apiError, apiErrorCodeForStatus, defaultPipelineFeatures, isApiErrorCode, normalizePipelineFeatures, stripManagedPipelineFields, type ApiErrorCode, type ApiErrorDetails } from "@docslurp/shared";
 
 import { withApiErrorDetails } from "../lib/api-error.js";
 
 export const DEFAULT_PROJECT_NAME = "Default";
 
-export type ProjectAccessErrorCode = Extract<ApiErrorCode, "organization_not_found" | "project_not_found" | "project_forbidden" | "project_ambiguous" | "invalid_request" | "forbidden">;
+export type ProjectAccessErrorCode = Extract<ApiErrorCode, "organization_not_found" | "project_not_found" | "project_forbidden" | "project_ambiguous" | "invalid_request" | "forbidden" | "editor_required">;
 
 /**
  * A project reference that cannot be served to the caller. Extends Hono's
@@ -70,7 +70,7 @@ export async function insertDefaultProject(
       ${args.userId},
       ${DEFAULT_PROJECT_NAME},
       true,
-      ${query.json(JSON.parse(JSON.stringify(normalizePipelineFeatures(defaultPipelineFeatures))))}
+      ${query.json(stripManagedPipelineFields(JSON.parse(JSON.stringify(normalizePipelineFeatures(defaultPipelineFeatures)))))}
     )
     on conflict (org_id) where is_default do nothing
   `;

@@ -74,6 +74,21 @@ describe.skipIf(!redisUrl)("Redis sliding-window rate limit store", () => {
     expect(denials).toBeGreaterThan(3);
   });
 
+  it("matches the in-memory store for multi-unit (weighted) consumes, all or none", async () => {
+    const redis = createRedisRateLimitStore(redisUrl, failingFallback);
+    const memory = createMemoryRateLimitStore();
+    const base = `rl-test:{${randomUUID()}}`;
+    const start = Math.ceil(Date.now() / 1_000) * 1_000 + 1_000;
+    for (const [offset, weight] of [[0, 3], [10, 3], [20, 2], [30, 1], [40, 4]] as const) {
+      const input: RateLimitConsumeInput = {
+        blockKey: `${base}:block`, now: start + offset, countDenied: false, weight,
+        counters: [{ key: `${base}:w:60000`, limit: 5, windowMs: 60_000 }],
+      };
+      const fromRedis = await redis.consume(input);
+      expect(fromRedis, `step +${offset}ms`).toEqual({ ...(await memory.consume(input)), shared: true });
+    }
+  });
+
   it("re-loads the script after SCRIPT FLUSH", async () => {
     const { createClient } = await import("redis");
     const client = createClient({ url: redisUrl });

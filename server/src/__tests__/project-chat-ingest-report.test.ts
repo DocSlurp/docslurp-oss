@@ -29,7 +29,19 @@ vi.mock("../lib/ai.js", () => ({
   generateOpenRouterDocumentText: generateOpenRouterText,
 }));
 
-const { chatProject } = await import("../services/project-chat.js");
+// The turn's one context read, from the getProject mock (a project the user cannot read is "Project not found").
+vi.mock("../services/chat-turn-context.js", () => ({
+  loadChatTurnContext: vi.fn(async (projectId: string, userId: string) => {
+    const project = await getProject(projectId, userId) as { orgId: string; name: string } | null;
+    if (!project) throw new Error("Project not found");
+    return { projectId, orgId: project.orgId, name: project.name, systemPrompt: null, pipeline: defaultPipelineFeatures,
+      privacyMode: "standard", settings: defaultProjectSearchSettings };
+  }),
+}));
+
+const { chatProject: chatProjectWithScope } = await import("../services/project-chat.js");
+const chatProject = (args: Omit<Parameters<typeof chatProjectWithScope>[0], "scope">) =>
+  chatProjectWithScope({ scope: { orgId: "org-1", projectIds: "org", modeCeiling: null }, ...args });
 const { buildIngestReport } = await import("../services/ingest-report.js");
 
 const report = buildIngestReport({

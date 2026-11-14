@@ -74,8 +74,8 @@ export type ChartExportTier = z.infer<typeof chartExportTierSchema>;
 
 /**
  * Per-project option (`pipeline.features.chartExport`). `tier` unset means "the default for the run's origin"
- * (`resolveChartExportTier`): stored config never pins a concrete default, so one project serves the app (free steps on)
- * and machine callers (off unless asked) alike.
+ * (`resolveChartExportTier`): stored config never pins a concrete default. Both origin defaults are `off` unless the
+ * deployment sets them, so chart export runs only when a caller asks for it (request override or project tier).
  */
 export const chartExportConfigSchema = z
   .object({
@@ -104,24 +104,37 @@ export const RUN_ORIGINS = ["app", "machine"] as const;
 export type RunOrigin = (typeof RUN_ORIGINS)[number];
 
 /**
- * Deploy-wide default tier for machine-origin runs on projects with no explicit tier: `off` (default) or `free`.
- * Flipped without a code change once the free steps cost and run close enough to having them off.
+ * Deploy-wide default tier for machine-origin runs (API, SDK, CLI, MCP) on projects with no explicit tier: `off` (code
+ * default) or `free`. Flipped without a code change once the free steps cost and run close enough to having them off.
  */
 export const CHART_EXPORT_API_DEFAULT_ENV_FLAG = "DOCSLURP_CHART_EXPORT_API_DEFAULT";
 
 /**
- * Deploy-wide default tier for app-origin runs on projects with no explicit tier: `free` (code default) or `off`. Lets a
- * deployment hold the app default off until the free steps pass their cost gate, without a code change.
+ * Deploy-wide default tier for app-origin runs on projects with no explicit tier: `off` (code default) or `free`. Chart
+ * export is opt-in everywhere; a deployment may turn the free steps on for app uploads once they pass its cost gate.
  */
 export const CHART_EXPORT_APP_DEFAULT_ENV_FLAG = "DOCSLURP_CHART_EXPORT_APP_DEFAULT";
 
 /**
  * Whether a caller may choose `free` explicitly (a request override or a project's stored tier):
- * `DOCSLURP_CHART_EXPORT_FREE_EXPLICIT`, `on` or `off` (default). Off, an explicit `free` is refused on requests and
- * project changes, and a stored `free` counts as unset (the origin default). Each free run boots an unbilled parser VM,
- * so only the deployment's own defaults may turn it on until extraction folds into a VM the document already boots.
+ * `DOCSLURP_CHART_EXPORT_FREE_EXPLICIT`, `on` or `off`. Unset or empty, it follows inline extraction
+ * (`DOCSLURP_CHART_EXPORT_INLINE=1`): the free steps then ride in the quarantine VM every document already boots, so a
+ * caller's `free` adds no VM boot of its own. Without inline extraction each free run boots an unbilled parser VM, so
+ * unset means refused. Off, an explicit `free` is refused on requests and project changes, and a stored `free` counts
+ * as unset (the origin default).
  */
 export const CHART_EXPORT_FREE_EXPLICIT_ENV_FLAG = "DOCSLURP_CHART_EXPORT_FREE_EXPLICIT";
+
+/**
+ * Inline free chart extraction (`DOCSLURP_CHART_EXPORT_INLINE=1`, exactly): the free steps run inside the quarantine
+ * inspection every document already runs in the parser VM. Read by the worker and, for the explicit-free default, by
+ * the server; keep it equal on both.
+ */
+export const CHART_EXPORT_INLINE_ENV_FLAG = "DOCSLURP_CHART_EXPORT_INLINE";
+
+export function chartExportInlineEnabled(env: Readonly<Record<string, string | undefined>>): boolean {
+  return env[CHART_EXPORT_INLINE_ENV_FLAG]?.trim() === "1";
+}
 
 type Env = Readonly<Record<string, string | undefined>>;
 
@@ -166,12 +179,17 @@ export function chartExportMachineDefault(env: Env): "off" | "free" {
 }
 
 export function chartExportAppDefault(env: Env): "off" | "free" {
-  return offOrFree(env, CHART_EXPORT_APP_DEFAULT_ENV_FLAG, "free");
+  return offOrFree(env, CHART_EXPORT_APP_DEFAULT_ENV_FLAG, "off");
 }
 
-/** Whether an explicit `free` (request or project) is allowed: `DOCSLURP_CHART_EXPORT_FREE_EXPLICIT=on` only. */
+/**
+ * Whether an explicit `free` (request or project) is allowed: `DOCSLURP_CHART_EXPORT_FREE_EXPLICIT=on`, or unset (or
+ * empty) with inline extraction on. `off` and unknown values refuse it (fail toward lower cost).
+ */
 export function chartExportFreeExplicitAllowed(env: Env): boolean {
-  return CHART_EXPORT_ENV_ON_VALUES.includes(env[CHART_EXPORT_FREE_EXPLICIT_ENV_FLAG]?.trim().toLowerCase() ?? "");
+  const raw = env[CHART_EXPORT_FREE_EXPLICIT_ENV_FLAG];
+  if (raw === undefined || raw.trim() === "") return chartExportInlineEnabled(env);
+  return CHART_EXPORT_ENV_ON_VALUES.includes(raw.trim().toLowerCase());
 }
 
 /**
@@ -198,7 +216,7 @@ export function chartExportDefaultsWarnings(env: Env): string[] {
   return out;
 }
 
-/** The default tier for a run of `origin` on a project with no explicit tier: the app default (free) or the machine default (off). */
+/** The default tier for a run of `origin` on a project with no explicit tier: the app or machine default (both `off` unless set). */
 export function defaultChartExportTier(origin: RunOrigin, env: Env): ChartExportTier {
   return origin === "app" ? chartExportAppDefault(env) : chartExportMachineDefault(env);
 }
@@ -246,7 +264,7 @@ export const CONSERVATIVE_CHART_EXPORT_DEFAULTS: ChartExportDefaults = { app: "o
 
 /**
  * The tier one run uses, before the deploy ceiling: a per-request override, else the project's explicit tier, else the
- * origin default. An explicit `free` counts only while `DOCSLURP_CHART_EXPORT_FREE_EXPLICIT=on`; otherwise it is the
+ * origin default. An explicit `free` counts only while `chartExportFreeExplicitAllowed`; otherwise it is the
  * origin default (requests that ask for it are refused earlier, `chartExportOverrideRefusal`). The deploy kill switch
  * (`effectiveChartExportConfig`) then caps it; it is never raised by this.
  */
@@ -280,15 +298,16 @@ export function explicitProjectChartTier(project: Pick<ChartExportConfig, "tier"
 
 /**
  * The most a replayed or inherited tier may run at in a project now (reprocess, bulk reprocess, reindex, full index):
- * the project's explicit tier, else the higher of the two origin defaults (an unset project never resolves to `models`).
- * A replay never raises a run above this; only an explicit request override can, through the editor/scope ceiling.
+ * the project's explicit tier, else the highest of the two origin defaults and, while callers may choose `free`
+ * explicitly, `free` (a document uploaded with a `free` request override keeps its free exports on a reindex). An unset
+ * project never resolves to `models`. A replay never raises a run above this; only an explicit request override can,
+ * through the editor/scope ceiling.
  */
 export function projectChartExportTierCap(project: Pick<ChartExportConfig, "tier"> | null | undefined, env: Env): ChartExportTier {
   const explicit = explicitProjectChartTier(project, env);
   if (explicit) return explicit;
-  const app = defaultChartExportTier("app", env);
-  const machine = defaultChartExportTier("machine", env);
-  return CHART_EXPORT_TIER_RANK[app] >= CHART_EXPORT_TIER_RANK[machine] ? app : machine;
+  const floor: ChartExportTier = chartExportFreeExplicitAllowed(env) ? "free" : "off";
+  return [defaultChartExportTier("app", env), defaultChartExportTier("machine", env)].reduce((a, b) => (CHART_EXPORT_TIER_RANK[a] >= CHART_EXPORT_TIER_RANK[b] ? a : b), floor);
 }
 
 /** The project's chart export config with its tier resolved for one run (see `resolveChartExportTier`). */
@@ -330,7 +349,7 @@ export const CHART_EXPORT_TIER_UNAVAILABLE_CODE = "chart_export_tier_unavailable
 
 /**
  * Why an explicitly chosen tier (request override or project change) is refused on this deployment, or null when it is
- * allowed: `models` while the switch is not `on`; `free` while `DOCSLURP_CHART_EXPORT_FREE_EXPLICIT` is not `on` or the
+ * allowed: `models` while the switch is not `on`; `free` while `chartExportFreeExplicitAllowed` is false or the
  * switch is `off`. `off` is always allowed.
  */
 export function chartExportOverrideRefusal(tier: ChartExportTier, env: Env): typeof CHART_EXPORT_TIER_UNAVAILABLE_CODE | null {
@@ -499,6 +518,38 @@ export type ExportedVisual = z.infer<typeof exportedVisualSchema>;
  * Per-document visual stats, recorded at ingest even when chart export is off (free signals only), so chat suggestions
  * and the ingest report can say "this project has N charts that were not exported".
  */
+/**
+ * A visual the free (deterministic) extractor deferred instead of finishing in the document's run, for a later
+ * low-priority pass. `input` says what to re-read: the document's own source file, or one of its Doppler figure files
+ * (`figureId`, the figure's own id; its slot is `doppler-figure:<figureId>`). `svgIndex` is the first deferred SVG's
+ * ordinal within that input (document / package order), `count` how many from there, and `reason` a closed slug:
+ * nothing from the input's names or content is stored.
+ */
+/**
+ * Why visuals were deferred, each a per-input cap of the free extractor. `count` is of SVGs at consecutive ordinals
+ * from `svgIndex` for svg-document-limit, html-svg-limit and guest-deadline; for visual-limit it counts the visuals and
+ * SVGs lost to the output cap from `svgIndex` on (output-limit: the same, past the input's output-byte budget); for package-part-limit and guest-deadline-part, package parts (chart
+ * XML, media SVGs, EPUB parts) never opened; for figure-batch-limit and figure-unavailable, one Doppler figure
+ * (`figureId`) past the per-document batch cap or without a readable file; for unit-crashed and unit-timeout, extraction
+ * units (a chart part, an SVG, an embedded scan) whose isolated worker crashed, ran out of memory or overran its time;
+ * for guest-unavailable and vm-cap (host-only), a source or figure whose guest run failed or the org's free-VM cap
+ * turned away, recorded whole; for figure-charts-refused (host-only), one Doppler figure whose in-VM chart pass (Doppler
+ * protocol 15) returned no result: its shard's or its document's chart answer was refused.
+ */
+export const DEFERRED_VISUAL_REASONS = ["svg-document-limit", "html-svg-limit", "guest-deadline", "visual-limit", "package-part-limit", "guest-deadline-part", "unit-crashed", "unit-timeout", "output-limit", "figure-batch-limit", "figure-unavailable", "guest-unavailable", "vm-cap", "figure-charts-refused"] as const;
+/** The reasons the parser-VM guest itself may report (the figure reasons are the host's own). */
+export const GUEST_DEFERRAL_REASONS = ["svg-document-limit", "html-svg-limit", "guest-deadline", "visual-limit", "package-part-limit", "guest-deadline-part", "unit-crashed", "unit-timeout", "output-limit"] as const;
+export const deferredVisualSchema = z.strictObject({
+  input: z.enum(["source", "doppler-figure"]),
+  svgIndex: z.number().int().nonnegative().max(1_000_000),
+  /** How many consecutive SVGs from `svgIndex` on were deferred. */
+  count: z.number().int().positive().max(1_000_000),
+  reason: z.enum(DEFERRED_VISUAL_REASONS),
+  pageNumber: z.number().int().positive().nullable(),
+  figureId: z.string().max(200).nullable(),
+});
+export type DeferredVisual = z.infer<typeof deferredVisualSchema>;
+
 export const visualCandidateStatsSchema = z.object({
   charts: z.number().int().nonnegative().default(0),
   diagrams: z.number().int().nonnegative().default(0),
@@ -506,8 +557,23 @@ export const visualCandidateStatsSchema = z.object({
   pagesWithUnexportedVisuals: z.array(z.number().int().positive()).max(5000).default([]),
   exported: z.number().int().nonnegative().default(0),
   bySource: z.partialRecord(visualSourceSchema, z.number().int().nonnegative()).default({}),
+  /** Visuals deferred to a later pass (present only when some were): never dropped, picked up by the deferred pass. */
+  deferred: z.array(deferredVisualSchema).max(1000).optional(),
+  /** Candidates and entries past a per-input list cap (or the guest deadline), counted but not listed. */
+  overflow: z.number().int().positive().optional(),
 });
 export type VisualCandidateStats = z.infer<typeof visualCandidateStatsSchema>;
+
+/**
+ * The deferred visuals recorded in a stage's stats (`stats[VISUAL_CANDIDATE_STATS_KEY].deferred`): what a later pass
+ * reads to find work. Tolerant of missing or malformed stats (returns []); every entry is validated.
+ */
+export function deferredVisualsOf(stageStats: unknown): DeferredVisual[] {
+  const stats = stageStats && typeof stageStats === "object" ? (stageStats as Record<string, unknown>)[VISUAL_CANDIDATE_STATS_KEY] : null;
+  const list = stats && typeof stats === "object" ? (stats as Record<string, unknown>).deferred : null;
+  if (!Array.isArray(list)) return [];
+  return list.slice(0, 1000).flatMap((entry) => { const parsed = deferredVisualSchema.safeParse(entry); return parsed.success ? [parsed.data] : []; });
+}
 
 /** Key under document metadata / stage stats where `VisualCandidateStats` is stored. */
 export const VISUAL_CANDIDATE_STATS_KEY = "visualCandidates" as const;

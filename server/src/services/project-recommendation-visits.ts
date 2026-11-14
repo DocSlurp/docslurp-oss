@@ -51,7 +51,7 @@ export async function getRecommendationVisit(scope: Scope): Promise<Recommendati
           where user_id = ${userId} and org_id = ${orgId} and project_id = ${projectId}
         ), searches as (
           select 'search'::text as source, s.id as event_id, s.created_at as event_created_at, s.result_count = 0 as empty
-          from search_sessions s join projects w on w.id = s.metadata ->> 'projectId'
+          from search_sessions s join projects w on w.id = s.project_id
           where w.id = ${projectId} and w.org_id = ${orgId}
             and s.created_at > ${since}::timestamptz and s.created_at <= ${through}::timestamptz
             and not exists (select 1 from seen where source = 'search' and event_id = s.id)

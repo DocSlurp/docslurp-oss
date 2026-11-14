@@ -136,6 +136,16 @@ if (args.includes('--sandbox')) {
     else if (result.status !== 0) failures.push(`parser isolation unavailable: ${result.error?.message || result.stdout.trim() || result.stderr.trim()}`);
   }
 }
+// The parser-VM chart guest runs worker/dist/chart-export/guest.bundle.mjs. A `tsc`-only rebuild leaves it stale (or, on a
+// dist from before the bundle, missing), and every chart document would then run old code or fail in the guest.
+if (existsSync(path.join(root, 'worker/dist/chart-export/extractors/index.js'))) {
+  try {
+    const { verifyChartGuestBundle } = await import(path.join(root, 'worker/scripts/chart-guest-bundle.mjs'));
+    await verifyChartGuestBundle();
+  } catch (error) {
+    failures.push(error instanceof Error ? error.message : String(error));
+  }
+}
 for (const failure of failures) console.error(`[worker-prerequisites] ${failure}`);
 console.log(`[worker-prerequisites] profile=${profile} status=${failures.length ? 'failed' : 'ready'} missing=${failures.length}`);
 process.exitCode = failures.length ? 1 : 0;

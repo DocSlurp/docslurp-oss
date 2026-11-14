@@ -25,6 +25,7 @@ import {
   type PipelineRunStage,
   type UpdateProjectInput,
   type ProjectRecord,
+  resolveManagedPipeline,
 } from "@docslurp/shared";
 
 import { sql } from "../db.js";
@@ -45,7 +46,7 @@ import {
 } from "./jobs.js";
 import { enforceLiveBudgetCaps } from "./run-creation.js";
 import { assertBackfillReusableMany, isReprocessRejectedError } from "./runs.js";
-import { getProject, resolveUpdatedPipeline, updateProject, type ProjectUpdateOptions } from "./projects.js";
+import { getProject, loadManagedPipelineOverrides, resolveUpdatedPipeline, updateProject, type ProjectUpdateOptions } from "./projects.js";
 
 /**
  * Config-change jobs (spec 6.2). A project PATCH is classified by `analyzePipelineChange`; changes that
@@ -370,6 +371,9 @@ export async function createReindexRuns(args: {
 }): Promise<ReindexRunResult> {
   assertPipelineSpeedBoost(args.pipeline);
   const { tx, project } = args;
+  // This path inserts its runs directly, so it applies the same managed-model resolution as runCreation.create:
+  // model values in the pipeline are dropped and only the project's explicit admin overrides apply.
+  const pipeline = resolveManagedPipeline(args.pipeline, await loadManagedPipelineOverrides(project.id, tx as never), `re-index in project ${project.id}`).pipeline;
   // A project with no chart tier: each document keeps the tier its source run stamped (as reprocess does), not the
   // tier of the surface that triggered this reindex (council M5). An explicit project tier applies to every document.
   // "Explicit" uses the same rule as run resolution: a stored free the deployment does not allow counts as unset (R2-L4).
@@ -377,7 +381,7 @@ export async function createReindexRuns(args: {
   const inheritTier = !explicitProjectChartTier(projectChart, process.env);
   const allDocs = [...args.reusable.partial.flatMap((group) => group.docs), ...args.reusable.full];
   const sourceTiers = inheritTier ? await sourceRunChartTiers(tx as never, { orgId: project.orgId, projectId: project.id }, allDocs.map((doc) => doc.id)) : new Map<string, ChartExportTier>();
-  const fallbackTier = (args.pipeline.chartExport as { tier?: ChartExportTier } | undefined)?.tier ?? "off";
+  const fallbackTier = (pipeline.chartExport as { tier?: ChartExportTier } | undefined)?.tier ?? "off";
   // Inherited tiers never exceed what the project resolves to now (R2-M1).
   const tierCap = projectChartExportTierCap(projectChart, process.env);
   const withTier = (pipeline: PipelineFeatures, tier: ChartExportTier): PipelineFeatures => ({ ...pipeline, chartExport: { ...pipeline.chartExport, tier } });
@@ -385,12 +389,12 @@ export async function createReindexRuns(args: {
   const queuedRunIds: string[] = [];
   let blockedReason = args.blockedReason;
   const batches: Array<{ docs: ReindexTarget[]; pipeline: PipelineFeatures; partial: boolean }> = [];
-  const fullPipeline = { ...withoutStageSelection(args.pipeline) } as PipelineFeatures;
+  const fullPipeline = { ...withoutStageSelection(pipeline) } as PipelineFeatures;
   for (const group of args.reusable.partial) {
-    const pipeline = { ...withoutStageSelection(args.pipeline), stageSubset: [...group.stages] } as PipelineFeatures;
+    const partialPipeline = { ...withoutStageSelection(pipeline), stageSubset: [...group.stages] } as PipelineFeatures;
     for (const [tier, docs] of groupByChartTier(group.docs, sourceTiers, fallbackTier, tierCap)) {
       for (let i = 0; i < docs.length; i += MAX_DOCUMENTS_PER_REINDEX_RUN) {
-        batches.push({ docs: docs.slice(i, i + MAX_DOCUMENTS_PER_REINDEX_RUN), pipeline: withTier(pipeline, tier), partial: true });
+        batches.push({ docs: docs.slice(i, i + MAX_DOCUMENTS_PER_REINDEX_RUN), pipeline: withTier(partialPipeline, tier), partial: true });
       }
     }
   }

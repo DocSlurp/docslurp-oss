@@ -225,6 +225,12 @@ const DIGEST = /^sha256:[0-9a-f]{64}$/;
 export const MIN_PARSER_VM_QPDF = "11.0.0";
 
 /** Whether a contract's `qpdfVersion` is a qpdf release at or above MIN_PARSER_VM_QPDF. */
+/** The contract's capability slugs, validated (anything malformed is dropped: a capability is never assumed). */
+export function parserVmCapabilities(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  return [...new Set(raw.filter((c): c is string => typeof c === "string" && /^[a-z0-9][a-z0-9-]{0,63}$/.test(c)))].slice(0, 32);
+}
+
 export function supportedQpdfVersion(version: unknown): boolean {
   if (typeof version !== "string" || !/^\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(version)) return false;
   const have = version.split(".").map(Number);
@@ -722,7 +728,7 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
         session = await provider.openSession({ ...config, sessionTimeoutSeconds: Math.min(config.sessionTimeoutSeconds, PROBE_SESSION_TIMEOUT_SECONDS) }, { activityId: "startup-probe", unmetered: true });
         const result = await session.run!({ binary: "node", args: ["/app/worker/scripts/parser-vm-contract.mjs"], env: { PATH: "/usr/local/bin:/usr/bin:/bin" }, readablePaths: [], inputPaths: [], writablePaths: [], limits: { timeoutMs: 30_000 } });
         const contract = result.exitCode === 0 ? JSON.parse(result.stdout) as { protocol?: unknown; uid?: unknown; tools?: unknown; links?: { hardlinks?: unknown; symlinks?: unknown }; hardening?: { suidDumpable?: unknown; ptraceScope?: unknown }; cgroupV2?: unknown; qpdfVersion?: unknown } : null;
-        if (contract?.protocol !== "parser-vm@4") throw new Error("parser VM image contract unavailable");
+        if (contract?.protocol !== "parser-vm@5") throw new Error("parser VM image contract unavailable");
         // Quarantine decrypts empty-user-password PDFs with the image's qpdf (runner.decryptPdfForScan); without a supported
         // one every such PDF would be refused, so the image is refused at startup instead.
         if (!supportedQpdfVersion(contract.qpdfVersion)) throw new Error(`parser VM qpdf is missing or older than ${MIN_PARSER_VM_QPDF} (${JSON.stringify(contract.qpdfVersion ?? null)})`);
@@ -750,7 +756,10 @@ export function createModalProvider(loadSdk: () => Promise<ModalSdk>): ParserSan
           }
         }
         const tools = Array.isArray(contract.tools) ? contract.tools.filter((tool): tool is string => typeof tool === "string" && /^[a-z0-9][a-z0-9_.-]{0,63}$/.test(tool)) : undefined;
-        return { ok: true, isolation: ISOLATION, detail: `VM image contract verified for '${config.app}'`, ...(tools ? { tools } : {}) };
+        // Guest capabilities (absent on an older @5 image: none). Checked per feature by the host (parserImageHasCapability).
+        const capabilities = parserVmCapabilities((contract as { capabilities?: unknown }).capabilities);
+        console.log(`[parser-sandbox] provider=modal probe capabilities=${capabilities.join(",") || "none"}`);
+        return { ok: true, isolation: ISOLATION, detail: `VM image contract verified for '${config.app}'`, ...(tools ? { tools } : {}), capabilities };
       } catch (error) {
         return { ok: false, isolation: ISOLATION, detail: safeMessage(config, error) };
       } finally {

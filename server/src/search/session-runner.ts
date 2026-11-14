@@ -26,6 +26,8 @@ import type {
   SearchResponse,
 } from "../services/search.js";
 import { timePhase } from "./timings.js";
+import { currentSearchStreamSink } from "./stream-events.js";
+import { createProvisionalHitPolicy, emitLegHits, type ProvisionalHitPolicy } from "./stream-hits.js";
 import { acquisitionDepth, validateRetrievalControls } from "./retrieval-controls.js";
 
 export interface SearchSessionRunnerAdapters {
@@ -242,6 +244,18 @@ async function executeSearchSession(args: Parameters<typeof runSearchSession>[0]
         retrieveCandidateLists: async () => {
           // Runs alongside normal retrieval, not before it: the hot path adds no
           // latency, and a cold one overlaps materialization with retrieval.
+          // Only a streaming search builds the provisional-hit policy (it filters like the final list).
+          const provisional: ProvisionalHitPolicy | undefined = currentSearchStreamSink()
+            ? createProvisionalHitPolicy({
+                query: retrievalQuery,
+                embeddingPipeline: embeddingPipelineOf(setup),
+                minScore: resolveMinScore(effectiveOptions.minScore),
+                candidateDepth: effectiveOptions.candidateDepth,
+                filters: effectiveOptions.filters,
+                runId: effectiveOptions.runId,
+              })
+            : undefined;
+          const deferredStartedAt = performance.now();
           const deferredPromise = adapters.deferredPageSearch
             ? Promise.resolve(queryVector).then((resolvedVector) => adapters.deferredPageSearch!({
                 query,
@@ -249,7 +263,11 @@ async function executeSearchSession(args: Parameters<typeof runSearchSession>[0]
                 queryVector: resolvedVector,
                 userId,
                 options: { ...effectiveOptions, limit: options.limit ?? 20 },
-              })).catch(() => null)
+              })).then((result) => {
+                // A scope without deferred documents (null) or a failed leg (below) reports nothing.
+                if (result) emitLegHits({ leg: "deferred", chunks: result.chunks, startedAt: deferredStartedAt, policy: provisional });
+                return result;
+              }).catch(() => null)
             : Promise.resolve(null);
           const evidenceResults = await timePhase("retrieve", () => retrieveEvidence(
             createEvidenceRetrievalAdapters({
@@ -268,6 +286,7 @@ async function executeSearchSession(args: Parameters<typeof runSearchSession>[0]
               userId,
               projectId: normalizedScope.projectId,
               options: { ...effectiveOptions, limit: acquisitionDepth(effectiveOptions, options.limit ?? 20) },
+              provisional,
             },
             { parallel: adapters.parallelRetrieval },
           ));

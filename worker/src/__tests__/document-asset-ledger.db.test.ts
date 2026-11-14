@@ -10,7 +10,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { DocumentAsset } from "@docslurp/shared";
 
 import {
-  DOCUMENT_ASSET_RESUME_CAP, DocumentAssetLedgerError, flushAssetLedger, ledgerWriteForFailedFigures, ledgerWriteForNoFigures,
+  DOCUMENT_ASSET_RESUME_CAP, DOCUMENT_ASSET_RESUME_TOTAL_CAP, DocumentAssetLedgerError, flushAssetLedger, ledgerWriteForFailedFigures, ledgerWriteForNoFigures,
   ledgerWriteForStoredFigures, listResumableDocuments, writeDocumentAssetLedger,
   type DocumentAssetLedgerScope, type DocumentAssetLedgerWrite, type LedgerAsset, type PendingAssetLedgerWrite,
 } from "../db/document-asset-ledger.js";
@@ -112,7 +112,7 @@ async function figureWrite(scope: DocumentAssetLedgerScope, options: { partial?:
 }
 
 const complete = (scope: DocumentAssetLedgerScope, pending: PendingAssetLedgerWrite, resume?: boolean): DocumentAssetLedgerWrite =>
-  ({ scope, level: { ...pending.level, markdownComplete: true }, assets: pending.assets, ...(resume ? { resume: true } : {}) });
+  ({ scope, level: { ...pending.level, markdownComplete: true }, assets: pending.assets, ...(resume ? { resume: true } : {}), ...(pending.levelOnly ? { levelOnly: true } : {}) });
 
 const assets = async (documentId: string) => sql<Array<Record<string, unknown>>>`
   select asset_id, org_id, project_id, status, reason, resumable, source, file_of, link_path, storage_key is not null as stored
@@ -203,6 +203,7 @@ describe("writing the ledger", () => {
     expect(await listResumableDocuments(sql, { orgId: "org-a" })).toEqual([]);
   });
 
+  // DOCUMENT_ASSET_RESUME_CAP (the backstop, 64) writes in a row: an explicit timeout, never the 5 s default.
   it("a hostile manifest that reports resumes:0 and stays resumable forever leaves the queue at the host's cap", async () => {
     await store.writeDocumentAssetLedger(await figureWrite(A, { partial: true }));
     for (let i = 1; i <= DOCUMENT_ASSET_RESUME_CAP; i += 1) {
@@ -216,7 +217,7 @@ describe("writing the ledger", () => {
     // A fresh run (not a resume) starts the count again.
     await store.writeDocumentAssetLedger(await figureWrite(A, { partial: true }));
     expect(await level("doc-a")).toMatchObject({ resumes: 0 });
-  });
+  }, 60_000);
 
   it("a version 1 folder maps into the ledger with what it has", async () => {
     const dir = await mkdtemp(path.join(work, "v1-"));
@@ -234,22 +235,29 @@ describe("writing the ledger", () => {
     expect(await level("doc-a")).toMatchObject({ images_status: "complete", manifest_version: 1, images_exit_code: null, source_sha256: null, assets_total: 5, assets_extracted: 3, source_render: 3 });
   });
 
-  it("a failed step clears older rows and records the images as failed", async () => {
+  it("a failed step never deletes stored figures: rows kept, status honest; with nothing stored it is `failed`", async () => {
     await store.writeDocumentAssetLedger(await figureWrite(A));
+    const before = await assets("doc-a");
     await store.writeDocumentAssetLedger(complete(A, ledgerWriteForFailedFigures({ outcome: { exitCode: 6 } })));
-    expect(await assets("doc-a")).toEqual([]);
-    expect(await level("doc-a")).toMatchObject({ images_status: "failed", images_exit_code: 6, manifest_version: null, manifest_key: null, assets_total: 0 });
+    expect(await assets("doc-a")).toEqual(before);
+    expect(await level("doc-a")).toMatchObject({ images_status: "partial", images_exit_code: 6, assets_total: 5 });
+    await store.writeDocumentAssetLedger(complete(B, ledgerWriteForFailedFigures({ outcome: { exitCode: 6 } })));
+    expect(await level("doc-b")).toMatchObject({ images_status: "failed", images_exit_code: 6, assets_total: 0 });
   });
 
-  it("committed Markdown without a figure step leaves the resume queue (MEDIUM-3): resumable, then a re-run with figures off", async () => {
+  it("committed Markdown without a figure step leaves the resume queue (MEDIUM-3), keeping the rows but not as current", async () => {
     await store.writeDocumentAssetLedger(await figureWrite(A, { partial: true }));
     expect(await listResumableDocuments(sql, { orgId: "org-a" })).toHaveLength(1);
+    const before = await assets("doc-a");
     await store.writeDocumentAssetLedger(complete(A, ledgerWriteForNoFigures("disabled")));
     expect(await listResumableDocuments(sql, { orgId: "org-a" })).toEqual([]);
-    expect(await assets("doc-a")).toEqual([]);
-    expect(await level("doc-a")).toMatchObject({ images_status: "disabled", assets_total: 0, manifest_key: null });
+    expect(await assets("doc-a")).toEqual(before);
+    expect(await level("doc-a")).toMatchObject({ images_status: "disabled", assets_total: 0, asset_bytes: 0 });
     await store.writeDocumentAssetLedger(complete(A, ledgerWriteForNoFigures("none")));
     expect(await level("doc-a")).toMatchObject({ images_status: "none" });
+    // A later figure pass makes rows current again.
+    await store.writeDocumentAssetLedger(await figureWrite(A, { partial: true }));
+    expect(await listResumableDocuments(sql, { orgId: "org-a" })).toHaveLength(1);
   });
 });
 
@@ -369,16 +377,20 @@ describe("tenant isolation", () => {
       values ('doc-a', 'org-b', 'proj-b', 'p1.1', 1, 'picture', 'block', 'unlinked')`).rejects.toMatchObject({ code: "23503" });
     await expect(sql`insert into document_extraction_levels (document_id, org_id, project_id) values ('doc-a', 'org-b', 'proj-a')`)
       .rejects.toMatchObject({ code: "23503" });
-    const insert = (documentId: string, key: string) => sql`insert into document_assets (document_id, org_id, project_id, asset_id, page_number, kind, fate, status, source, format, bytes, sha256, width, height, file_of, storage_key)
-      values (${documentId}, 'org-a', 'proj-a', 'p1.1', 1, 'picture', 'block', 'extracted', 'render', 'webp', 10, ${"e".repeat(64)}, 1, 1, 'p1.1', ${key})`;
+    const insert = (documentId: string, key: string) => sql`insert into document_assets (document_id, org_id, project_id, asset_id, page_number, kind, fate, status, source, format, bytes, sha256, width, height, file_of, storage_key, storage_state)
+      values (${documentId}, 'org-a', 'proj-a', 'p1.1', 1, 'picture', 'block', 'extracted', 'render', 'webp', 10, ${"e".repeat(64)}, 1, 1, 'p1.1', ${key}, 'stored')`;
     await expect(insert("doc-a", "ub/run-b/doppler/doc-b/images/page-0001/image-001.webp")).rejects.toMatchObject({ code: "23514" });
     await expect(insert("doc-a", "ua/run-a/doppler/doc-a/images/page-0001/image-002.webp")).rejects.toMatchObject({ code: "23514" });
+    // An extracted row always has a storage state (pending or stored); `none` is refused (migration 0156).
+    await expect(sql`insert into document_assets (document_id, org_id, project_id, asset_id, page_number, kind, fate, status, source, format, bytes, sha256, width, height, file_of, storage_key, storage_state)
+      values ('doc-a', 'org-a', 'proj-a', 'p1.1', 1, 'picture', 'block', 'extracted', 'render', 'webp', 10, ${"e".repeat(64)}, 1, 1, 'p1.1', 'ua/run-a/doppler/doc-a/images/page-0001/image-001.webp', 'none')`)
+      .rejects.toMatchObject({ code: "23514" });
     // A document id with a LIKE wildcard (`_`) matches only itself: `docXw` is another document's folder.
     await expect(insert("doc_w", "ua/run-a/doppler/docXw/images/page-0001/image-001.webp")).rejects.toMatchObject({ code: "23514" });
     await insert("doc_w", "ua/run-a/doppler/doc_w/images/page-0001/image-001.webp");
     // A page scan may pass 8 MiB only as a copy or decode; a picture never.
-    await expect(sql`insert into document_assets (document_id, org_id, project_id, asset_id, page_number, kind, fate, status, source, format, bytes, sha256, width, height, file_of, storage_key)
-      values ('doc-a', 'org-a', 'proj-a', 'p1.1', 1, 'picture', 'block', 'extracted', 'render', 'webp', 9000000, ${"e".repeat(64)}, 1, 1, 'p1.1', 'ua/run-a/doppler/doc-a/images/page-0001/image-001.webp')`)
+    await expect(sql`insert into document_assets (document_id, org_id, project_id, asset_id, page_number, kind, fate, status, source, format, bytes, sha256, width, height, file_of, storage_key, storage_state)
+      values ('doc-a', 'org-a', 'proj-a', 'p1.1', 1, 'picture', 'block', 'extracted', 'render', 'webp', 9000000, ${"e".repeat(64)}, 1, 1, 'p1.1', 'ua/run-a/doppler/doc-a/images/page-0001/image-001.webp', 'stored')`)
       .rejects.toMatchObject({ code: "23514" });
   });
 
@@ -424,9 +436,13 @@ describe("tenant isolation", () => {
   });
 
   it("pages left to the host's page image are read for the asking organization's document only", async () => {
-    const insert = (documentId: string, orgId: string, projectId: string, id: string, page: number, fate: string, status: string, reason: string | null, link: string | null = null) =>
-      sql`insert into document_assets (document_id, org_id, project_id, asset_id, page_number, kind, fate, status, reason, format, link_path)
-        values (${documentId}, ${orgId}, ${projectId}, ${id}, ${page}, 'picture', ${fate}, ${status}, ${reason}, ${link ? "jpg" : null}, ${link})`;
+    const insert = (documentId: string, orgId: string, projectId: string, id: string, page: number, fate: string, status: string, reason: string | null, link: string | null = null, runId = orgId === "org-a" ? "run-a" : "run-b") =>
+      sql`insert into document_assets (document_id, org_id, project_id, run_id, asset_id, page_number, kind, fate, status, reason, format, link_path)
+        values (${documentId}, ${orgId}, ${projectId}, ${runId}, ${id}, ${page}, 'picture', ${fate}, ${status}, ${reason}, ${link ? "jpg" : null}, ${link})`;
+    // The current levels of each document's run (rows of another run, or of a non-current level, never count).
+    await sql`insert into document_extraction_levels (document_id, org_id, project_id, run_id, markdown_complete, images_status)
+      values ('doc-a', 'org-a', 'proj-a', 'run-a', true, 'partial'), ('doc-b', 'org-b', 'proj-b', 'run-b', true, 'partial')
+      on conflict (document_id) do update set run_id = excluded.run_id, assets_current = true`;
     await insert("doc-a", "org-a", "proj-a", "p1.1", 1, "page-scan", "not-extracted", "copy", "images/page-0001/image-001.jpg");
     await insert("doc-a", "org-a", "proj-a", "p2.1", 2, "background", "unlinked", "scan-not-copyable");
     await insert("doc-a", "org-a", "proj-a", "p2.2", 2, "background", "unlinked", "scan-not-copyable");
@@ -440,6 +456,15 @@ describe("tenant isolation", () => {
     expect(await store.listHostPageImagePages({ orgId: "org-a", documentId: "doc-b" })).toEqual([]);
     await expect(store.listHostPageImagePages({ orgId: "", documentId: "doc-a" })).rejects.toBeInstanceOf(DocumentAssetLedgerError);
     await expect(store.listHostPageImagePages({ orgId: "org-a", documentId: "doc-a' or 1=1 --" })).rejects.toBeInstanceOf(DocumentAssetLedgerError);
+    // An earlier run's rows (kept until a newer full write) never decide this run's page images (core #357 with #376).
+    await sql`delete from document_assets where document_id = 'doc-a'`;
+    await insert("doc-a", "org-a", "proj-a", "p2.1", 2, "background", "unlinked", "scan-not-copyable", null, "run-a-old");
+    expect(await store.listHostPageImagePages({ orgId: "org-a", documentId: "doc-a" })).toEqual([]);
+    // Nor do a non-current level's.
+    await insert("doc-a", "org-a", "proj-a", "p2.2", 2, "background", "unlinked", "scan-not-copyable");
+    expect(await store.listHostPageImagePages({ orgId: "org-a", documentId: "doc-a" })).toEqual([2]);
+    await sql`update document_extraction_levels set assets_current = false where document_id = 'doc-a'`;
+    expect(await store.listHostPageImagePages({ orgId: "org-a", documentId: "doc-a" })).toEqual([]);
   });
 
   it("the resume queue lists only the asking organization's documents", async () => {
@@ -523,7 +548,7 @@ describe("resume from stored state (HIGH-2)", () => {
     // What a resume worker does: download images/ (the manifest, then each extracted file by its derived key).
     const dir = path.join(await mkdtemp(path.join(work, "resume-")), "DIR");
     const rebuilt = await downloadDopplerImagesDir({
-      storage, document: { id: "doc-a", userId: "ua", runId: "run-a" }, runId: "run-a", manifestSha256: queued!.manifestSha256!, pageCount: 3, dir,
+      storage, document: { id: "doc-a", userId: "ua", runId: "run-a" }, runId: "run-a", manifestSha256: queued!.manifestSha256!, pageCount: 3, dir, manifestOnly: false,
     });
     expect(rebuilt).toMatchObject({ files: 3 });
     // Exactly Doppler's DIR: manifest.jsonl and page folders, nothing else; the manifest bytes are the stored ones.
@@ -606,14 +631,14 @@ describe("sharded documents: a record per shard, the level is the aggregate, res
     const rows3 = (await inMemory(full)).assets.filter((asset) => asset.pageNumber === 3);
     const resume = (): DocumentAssetLedgerWrite => ({ ...full, assets: rows3, shards: shard3, resume: { first: 3, last: 3 } });
     for (let i = 1; i <= DOCUMENT_ASSET_RESUME_CAP; i += 1) await store.writeDocumentAssetLedger(resume());
-    expect((await shards()).map((row) => [row.first_page, row.resumes])).toEqual([[1, 0], [3, 3]]);
+    expect((await shards()).map((row) => [row.first_page, row.resumes])).toEqual([[1, 0], [3, DOCUMENT_ASSET_RESUME_CAP]]);
     // Rows of the other shard were neither pruned nor rewritten.
     expect((await assets("doc-a")).map((row) => row.asset_id)).toEqual(["p1.1", "p1.g1", "p2.1", "p2.2", "p3.1", "p3.2"]);
     expect(await listResumableDocuments(sql, { orgId: "org-a" })).toEqual([]);
     await expect(store.writeDocumentAssetLedger(resume())).rejects.toMatchObject({ rule: "resume-cap" });
     // A shard resume may not write another shard's pages.
     await expect(store.writeDocumentAssetLedger({ ...resume(), assets: (await inMemory(full)).assets })).rejects.toMatchObject({ rule: expect.stringMatching(/invalid-assets|resume-cap/) });
-  });
+  }, 60_000);
 
   it("refuses a shard record whose key is not its folder's, or ranges that overlap", async () => {
     const write = await shardedWrite();
@@ -626,6 +651,12 @@ describe("sharded documents: a record per shard, the level is the aggregate, res
 describe("LOW-5: shard ranges and the document's total resume cap", () => {
   const H = "a".repeat(64);
   async function insertShards(resumes: number[], resumableFrom = 0) {
+    // Shards are listed only under the current, resumable level of their run (MEDIUM-3).
+    await sql`insert into document_extraction_levels (document_id, org_id, project_id, run_id, markdown_complete, images_status, assets_total,
+        assets_not_extracted, assets_resumable, shards)
+      values ('doc-a', 'org-a', 'proj-a', 'run-a', true, 'resumable', 1, 1, 1, ${resumes.length})
+      on conflict (document_id) do update set run_id = 'run-a', images_status = 'resumable', assets_total = 1, assets_extracted = 0,
+        assets_not_extracted = 1, assets_unlinked = 0, assets_resumable = 1, assets_current = true, shards = excluded.shards`;
     for (const [i, n] of resumes.entries()) {
       const page = i + 1;
       const folder = `${String(page).padStart(4, "0")}-${String(page).padStart(4, "0")}`;
@@ -648,13 +679,17 @@ describe("LOW-5: shard ranges and the document's total resume cap", () => {
     expect(await sql`select 1 from document_extraction_shards where document_id = 'doc-a'`).toHaveLength(0);
   });
 
-  it("past min(3 x shards, 12) resumes in all, no shard of the document is listed or resumed", async () => {
-    // Five shards: each under its own cap of 3, but 12 resumes in all (the absolute cap).
-    await insertShards([3, 3, 3, 2, 1], 3);
+  it("past the backstop total (min(unit cap x shards, hard document cap)) no shard of the document is listed or resumed", async () => {
+    // Each shard under its own cap, but DOCUMENT_ASSET_RESUME_TOTAL_CAP resumes in all.
+    const unit = DOCUMENT_ASSET_RESUME_CAP - 1;
+    const fullShards = Math.floor(DOCUMENT_ASSET_RESUME_TOTAL_CAP / unit);
+    const rest = DOCUMENT_ASSET_RESUME_TOTAL_CAP - fullShards * unit;
+    expect(Math.min(DOCUMENT_ASSET_RESUME_CAP * (fullShards + 1), DOCUMENT_ASSET_RESUME_TOTAL_CAP)).toBe(DOCUMENT_ASSET_RESUME_TOTAL_CAP);
+    await insertShards([...Array.from({ length: fullShards }, () => unit), rest], 3);
     expect(await listResumableDocuments(sql, { orgId: "org-a" })).toEqual([]);
     await sql`delete from document_extraction_shards`;
     // Under the total, the resumable shards are listed.
-    await insertShards([3, 3, 2, 2, 1], 3);
+    await insertShards([unit, unit, unit, 2, 1], 3);
     expect((await listResumableDocuments(sql, { orgId: "org-a" })).map((row) => row.shard)).toEqual([{ first: 4, last: 4 }, { first: 5, last: 5 }]);
     await sql`delete from document_extraction_shards`;
   });

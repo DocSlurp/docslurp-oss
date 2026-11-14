@@ -199,6 +199,8 @@ export const projectCorpusStats = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" })
       .defaultNow()
       .notNull(),
+    /** The updated_at the automatic-title sweep last examined (0154); the project is pending while they differ. */
+    autoTitleCheckedAt: timestamp("auto_title_checked_at", { withTimezone: true, mode: "string" }),
   },
   (table) => [
     foreignKey({
@@ -369,6 +371,10 @@ export const documents = pgTable(
     dedupedFromDocumentId: text("deduped_from_document_id"),
     reusedFromDocumentId: text("reused_from_document_id"),
     dedupScope: text("dedup_scope"),
+    /** Ingest version of the pipeline that produced the document; 0 = unknown (migration 0160, ingest-version.ts). */
+    ingestVersion: integer("ingest_version").default(0).notNull(),
+    /** Capabilities measured from what the producing run stored, or the reused/deduplicated source's (migration 0160). */
+    ingestCapabilities: text("ingest_capabilities").array().default(sql`'{}'::text[]`).notNull(),
     // You can use { mode: "bigint" } if numbers are exceeding js number limitations
     fileSize: bigint("file_size", { mode: "number" }).default(0).notNull(),
     metadata: jsonb().default({}).notNull(),
@@ -1388,9 +1394,12 @@ export const searchSessions = pgTable(
       .notNull(),
     /** API-key keyword and hybrid searches only (0139); the maintenance sweep deletes the session after it. */
     expiresAt: timestamp("expires_at", { withTimezone: true, mode: "string" }),
+    /** The searched project (0141). Project reads filter and date sessions by it, never by metadata. */
+    projectId: text("project_id"),
   },
   (table) => [
     index("search_sessions_expires_at_idx").on(table.expiresAt).where(sql`expires_at is not null`),
+    index("search_sessions_project_id_created_at_idx").using("btree", table.projectId, table.createdAt, table.id),
     index("search_sessions_user_id_created_at_idx").using(
       "btree",
       table.userId.asc().nullsLast().op("text_ops"),
@@ -1405,6 +1414,11 @@ export const searchSessions = pgTable(
       columns: [table.userId],
       foreignColumns: [user.id],
       name: "search_sessions_user_id_fkey",
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.projectId],
+      foreignColumns: [projects.id],
+      name: "search_sessions_project_id_fkey",
     }).onDelete("cascade"),
   ],
 );
@@ -1910,6 +1924,8 @@ export const projects = pgTable(
     artifactRetentionDays: integer("artifact_retention_days"),
     runRetentionDays: integer("run_retention_days").default(30),
     pipeline: jsonb().default({}).notNull(),
+    /** Platform-admin-only model mapping per category (migration 0141); never returned to customers. */
+    managedModels: jsonb("managed_models").default({}).notNull(),
     systemPrompt: text("system_prompt"),
     budgetPaused: boolean("budget_paused").default(false).notNull(),
     archivedAt: timestamp("archived_at", {
@@ -2333,6 +2349,10 @@ export const projectRuns = pgTable(
     origin: text().default("machine").notNull(),
     stats: jsonb().default({}).notNull(),
     artifacts: jsonb().default({}).notNull(),
+    /** Ingest version of the build that completed the run with extraction; 0 = unknown or reused extraction (migration 0160). */
+    ingestVersion: integer("ingest_version").default(0).notNull(),
+    /** What that build's pipeline supports (migration 0160). */
+    ingestCapabilities: text("ingest_capabilities").array().default(sql`'{}'::text[]`).notNull(),
     runId: text("run_id"),
     leaseExpiresAt: timestamp("lease_expires_at", {
       withTimezone: true,
@@ -3332,6 +3352,8 @@ export const storageMeterDays = pgTable(
     objectBytes: bigint("object_bytes", { mode: "number" }).default(0).notNull(),
     // You can use { mode: "bigint" } if numbers are exceeding js number limitations
     indexBytes: bigint("index_bytes", { mode: "number" }).default(0).notNull(),
+    // Of objectBytes, the figure bytes measured from the asset ledger (migration 0155).
+    measuredArtifactBytes: bigint("measured_artifact_bytes", { mode: "number" }).default(0).notNull(),
     credits: numeric({ precision: 24, scale: 12, mode: "number" }).default(0).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "string" })
       .defaultNow()
@@ -3597,6 +3619,8 @@ export const documentAssets = pgTable("document_assets", {
   linkPath: text("link_path"),
   fileOf: text("file_of"),
   storageKey: text("storage_key"),
+  // Migration 0156: none (no file), pending (written before its upload), stored (landed and checked; served and billed).
+  storageState: text("storage_state").default("none").notNull(),
   objNum: integer("obj_num"),
   objGen: integer("obj_gen"),
   bbox: doublePrecision().array(),
@@ -3617,6 +3641,7 @@ export const documentAssets = pgTable("document_assets", {
     name: "document_assets_run_scope_fkey",
   }),
   index("document_assets_org_document_idx").on(table.orgId, table.documentId, table.pageNumber, table.assetId),
+  index("document_assets_storage_key_idx").on(table.documentId, table.storageKey).where(sql`storage_key IS NOT NULL`),
   index("document_assets_resumable_idx").on(table.orgId, table.documentId).where(sql`resumable`),
   index("document_assets_run_idx").on(table.runId).where(sql`run_id IS NOT NULL`),
 ]);
@@ -3648,6 +3673,28 @@ export const documentExtractionLevels = pgTable("document_extraction_levels", {
   sourceDecode: integer("source_decode").default(0).notNull(),
   sourceRender: integer("source_render").default(0).notNull(),
   assetBytes: bigint("asset_bytes", { mode: "number" }).default(0).notNull(),
+  // Migration 0156: false after a re-run that skipped the figure step (rows kept, not served, counted or billed).
+  assetsCurrent: boolean("assets_current").default(true).notNull(),
+  // Migration 0156: uploads a crash left pending (resumable work, adopted without a VM) and the folder files' bytes.
+  assetsPending: integer("assets_pending").default(0).notNull(),
+  folderBytes: bigint("folder_bytes", { mode: "number" }).default(0).notNull(),
+
+  // Migration 0159: the resume runner's queue and lease (one per document).
+  resumeAfter: timestamp("resume_after", { withTimezone: true, mode: "string" }),
+  resumeLeaseUntil: timestamp("resume_lease_until", { withTimezone: true, mode: "string" }),
+  resumeLeaseOwner: text("resume_lease_owner"),
+  resumeBlocked: text("resume_blocked"),
+  resumeFailures: integer("resume_failures").default(0).notNull(),
+  // Lifetime resume VM launches (reset only by a new run) and the audit cursor.
+  resumeVmLaunches: integer("resume_vm_launches").default(0).notNull(),
+  resumeUnitFailures: jsonb("resume_unit_failures").default({}).notNull(),
+  // Migration 0161: measured resume VM time, resumes in a row without progress, request grants, and when the block was set.
+  resumeVmMs: bigint("resume_vm_ms", { mode: "number" }).default(0).notNull(),
+  resumeStalls: integer("resume_stalls").default(0).notNull(),
+  resumeGrants: integer("resume_grants").default(0).notNull(),
+  resumeBlockedAt: timestamp("resume_blocked_at", { withTimezone: true, mode: "string" }),
+  resumeUnitStalls: jsonb("resume_unit_stalls").default({}).notNull(),
+  auditedAt: timestamp("audited_at", { withTimezone: true, mode: "string" }),
   gaps: jsonb(),
   shards: integer().default(0).notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
@@ -3667,6 +3714,22 @@ export const documentExtractionLevels = pgTable("document_extraction_levels", {
   index("document_extraction_levels_org_idx").on(table.orgId, table.projectId),
   index("document_extraction_levels_run_idx").on(table.runId).where(sql`run_id IS NOT NULL`),
 ]);
+
+/** Migration 0159: resume VM time per organization per UTC day (the runner's daily budget). */
+export const figureResumeOrgDays = pgTable("figure_resume_org_days", {
+  orgId: text("org_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
+  day: date().notNull(),
+  launches: integer().default(0).notNull(),
+  vmMs: bigint("vm_ms", { mode: "number" }).default(0).notNull(),
+  reservedMs: bigint("reserved_ms", { mode: "number" }).default(0).notNull(),
+}, (table) => [primaryKey({ columns: [table.orgId, table.day], name: "figure_resume_org_days_pkey" })]);
+
+/** Migration 0159: applied figure resume proposals (single-use chat tokens). */
+export const figureResumeProposalUses = pgTable("figure_resume_proposal_uses", {
+  jti: text().primaryKey().notNull(),
+  orgId: text("org_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
+  usedAt: timestamp("used_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
+}, (table) => [index("figure_resume_proposal_uses_used_idx").on(table.usedAt)]);
 
 /** Migration 0141: one row per shard manifest of a sharded document (resume runs per shard). */
 export const documentExtractionShards = pgTable("document_extraction_shards", {

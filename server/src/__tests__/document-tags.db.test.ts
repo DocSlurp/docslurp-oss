@@ -1,6 +1,9 @@
 import postgres from "postgres";
 import { afterAll, beforeAll, expect, it, vi } from "vitest";
 import { startMigratedPostgres } from "@docslurp/worker/testing";
+/** The explicit search access scope every search caller passes (search/access-scope.ts). */
+const TEST_SEARCH_SCOPE = { orgId: "o", projectIds: "org", modeCeiling: null } as const;
+
 
 let sql: postgres.Sql;
 let stop: () => Promise<void>;
@@ -53,7 +56,7 @@ it.each([false, true])("filters document evidence and preserves qualified summar
     parentRetrieval: false, useContextualCompression: false, useHyDE: false,
     stepback: false, iterativeMultiHop: false, enableGraphExpansion: graph,
     enableCommunityExpansion: graph,
-  });
+  }, TEST_SEARCH_SCOPE);
   const docs = result.results.filter((hit) => hit.citation.source === "document");
   expect(docs.length).toBeGreaterThan(0);
   expect([...new Set(docs.map((hit) => hit.citation.documentId))]).toEqual(["selected"]);

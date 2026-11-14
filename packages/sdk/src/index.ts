@@ -1,13 +1,20 @@
 import { safeHttpFailure, retryAfterSeconds } from "./http-failure.js";
+/** The reviewed message of a 403 `editor_required` (`DocSlurpApiError.code`): the caller may see but not change the project. */
+export { EDITOR_REQUIRED_MESSAGE } from "./http-failure.js";
 import { readSse } from "./sse.js";
+import { searchResultId, type SearchStreamEvent } from "./search-stream.js";
+export * from "./search-stream.js";
 import { assertBrowserSafeApiKey, assertSecureApiOrigin } from "./keys.js";
 export { apiKeyKind, assertBrowserSafeApiKey, assertSecureApiOrigin, PRIVATE_API_KEY_PREFIX, PUBLIC_API_KEY_PREFIX, UnsafeApiKeyError, type ApiKeyKind } from "./keys.js";
 import type { RunProgressSnapshot, ProjectState, OrganizationRecord, OrganizationDetails, OrganizationAccess, OrganizationMembership, OrganizationMember, OrganizationRole, OrganizationApiKey, CreateOrganizationInput, UpdateOrganizationInput, OrganizationInvite, CreateOrganizationInviteInput } from "./state.js";
 export type * from "./state.js";
 import type { IngestReport } from "./ingest-report.js";
 export type * from "./ingest-report.js";
-import type { DocumentVersionEntry, DocumentViewerPayload } from "./document.js";
+import type { DocumentVersionEntry, DocumentViewerPayload, WorkspaceIngestVersion } from "./document.js";
 export type * from "./document.js";
+
+/** One `search.results` frame is the whole search response, so the search stream accepts far larger frames than other streams (1 MiB). */
+const SEARCH_STREAM_MAX_FRAME_BYTES = 32 * 1_048_576;
 
 export type DocSlurpFetch = typeof fetch;
 
@@ -276,6 +283,10 @@ export type DocumentRecord = JsonObject & {
   title?: string | null;
   id: string;
   status: string;
+  /** Ingest version of the pipeline that produced the document; 0 = unknown (produced before tagging). */
+  ingestVersion?: number;
+  /** What the document's run measurably stored (e.g. `parseSourceDecision`, `pageFacts`, `figureLedger`). */
+  ingestCapabilities?: string[];
 };
 
 /** How much of the scope search covered; present on every search and chat response. */
@@ -350,6 +361,8 @@ export type SearchResult = JsonObject & {
   parentText?: string;
   /** How this result was retrieved (deferred projects). */
   retrieval?: { stage: RetrievalStage; pageNumbers?: number[]; materialized?: boolean };
+  /** Keyword fan-out (array `q`): indexes into `q` of the queries this result matched. */
+  matchedQueries?: number[];
 };
 
 /** Reserved project ID for the organization's default project. */
@@ -608,7 +621,11 @@ export type SearchInput = {
    * hosted rerank and AI query strategies). Omitted: the most the key's search scope allows; never more.
    */
   mode?: "keyword" | "hybrid" | "deep";
-  q: string;
+  /**
+   * Query text, or up to 100 keyword queries run in parallel as one keyword-mode search and fused into one ranked
+   * list (`mode` must be `keyword` or omitted). Each result's `matchedQueries` lists the queries it matched.
+   */
+  q: string | string[];
   tags?: string;
   /** Project ID, slug or name; omitted: the client project. */
   project?: string;
@@ -616,6 +633,37 @@ export type SearchInput = {
 
 /** Await the response metadata or iterate its hits; both share one request. */
 export type SearchRequest = Promise<SearchResponse> & AsyncIterable<SearchResult>;
+
+export type SearchStreamInput = Omit<SearchInput, "q"> & {
+  /** One query. Batches and keyword arrays use `search()`. */
+  q: string;
+  /** Ask for per-leg and per-phase timings on `search.phase`, `search.hits` and `search.done`. */
+  stats?: boolean;
+};
+
+export type SearchStreamOptions = RequestOptions & {
+  /**
+   * `auto` (default) streams and falls back to `POST /v1/search` only when the stream never started: HTTP 404, 405,
+   * 406 or 501, a 2xx that is not `text/event-stream`, or a connection failure before any response. After the first
+   * event, a dropped connection, a malformed frame or a stream that ends without `search.results` throws a
+   * `DocSlurpApiError` with `code: "stream_interrupted"` and never issues a second search, because a search is
+   * billed once it has produced hits. A drop after `search.results` still returns the answer. `sse` never falls back.
+   * `json` skips the stream and synthesizes the same events from one JSON response.
+   */
+  transport?: "auto" | "sse" | "json";
+};
+
+/**
+ * The events of one search, then its answer. Iterate it once for `search.started`, `search.phase`, `search.hits`,
+ * `search.results` and `search.done`; `response` resolves with the final body, the same one `search()` returns.
+ * `response` works before, after or without iteration and does not consume events; one iterator receives every event
+ * exactly once, and a second iterator throws. Iteration throws on `search.error` and on `stream_interrupted`.
+ */
+export type SearchStream = AsyncIterable<SearchStreamEvent> & {
+  readonly response: Promise<SearchResponse>;
+  /** Which transport produced the events: `sse`, or `json` after a fallback. Meaningful once events have arrived. */
+  readonly transport: "sse" | "json";
+};
 
 export type SearchUsage = {
   inputTokens: number;
@@ -637,6 +685,8 @@ export type SearchResponse = {
   relevanceFloor?: { minScore: number; dropped: number };
   /** The mode the search ran in: what was asked for, capped at the key's search scope. */
   mode?: "keyword" | "hybrid" | "deep";
+  /** Keyword fan-out (array `q`): each query as sent and how many chunks it matched before fusion. */
+  keywordQueries?: Array<{ q: string; hits: number }>;
   results: SearchResult[];
   sessionId: string;
   /** Present for deferred (map/visual) projects. */
@@ -667,6 +717,23 @@ export function formatSearchContext(response: SearchResponse): string {
   }).join("\n\n");
 }
 
+/** DocSlurp's chat tiers, fastest first. */
+export const CHAT_TIERS = ["fastest", "balanced", "smart"] as const;
+export type ChatTier = (typeof CHAT_TIERS)[number];
+
+/** Thrown before any request when chat input names a backend model; send `tier` instead. */
+export class DocSlurpManagedModelError extends Error {
+  readonly code = "model_not_allowed";
+  constructor() {
+    super(`Chat models are managed by DocSlurp. Send tier (${CHAT_TIERS.join(", ")}) instead of a model.`);
+    this.name = "DocSlurpManagedModelError";
+  }
+}
+
+function assertNoBackendModel(input: object): void {
+  if (Object.hasOwn(input, "model") && (input as { model?: unknown }).model !== undefined) throw new DocSlurpManagedModelError();
+}
+
 export type ChatInput = {
   filters?: {geo?:GeoPredicate;documentIds?:string[];mimeTypes?:string[];tags?:string[];dateFrom?:string;dateTo?:string};
   /** Explicit opt-in: speed-boosted processing, billed at the speed-boost rate (docslurp.io/pricing); omitted/false keeps standard routing. */
@@ -678,14 +745,14 @@ export type ChatInput = {
   /** Project ID, slug or name; omitted: the client project. */
   project?: string;
   /**
-   * Chat model for this request, as an `llm://` model URI such as
-   * `llm://openrouter/anthropic/claude-haiku-5.5` (the bare OpenRouter id also
-   * works). Omitted: the default. Add `?reasoning=low|medium|high` (OpenRouter's
-   * native effort names; default `none`, the fastest answer) for long multi-part
-   * questions. An unavailable model or option is refused with HTTP 400
-   * `model_not_allowed`, never replaced by the default.
+   * Chat tier for this request: `fastest` (default), `balanced` or `smart`. DocSlurp manages the model behind each
+   * tier; backend model ids are not accepted (the server answers 400 `model_not_allowed`).
    */
-  model?: string;
+  tier?: ChatTier;
+  /** How much the answering model reasons: `none` (default, fastest), `minimal`, `low`, `medium` or `high`. */
+  reasoning?: "none" | "minimal" | "low" | "medium" | "high";
+  /** Not accepted: backend models are managed by DocSlurp. Use `tier`. */
+  model?: never;
   /** Search-agent budgets and modes for this turn (`chat()` only; `chatStream` ignores them); non-admin callers can only lower the budgets. */
   agent?: {
     /** Model steps, 1-12 (default 8). The last step always answers. */
@@ -734,9 +801,13 @@ export type ChatResponse = {
   };
 };
 
-/** SSE events from {@link DocSlurpClient.chatStream}: retrieval status, the answer, then the done envelope. */
+/**
+ * SSE events from {@link DocSlurpClient.chatStream}: retrieval status, answer text deltas as the model writes them,
+ * the full answer, then the done envelope. `message.data.answer` is authoritative; the deltas concatenated are it.
+ */
 export type ChatStreamEvent =
   | { event: "status"; data: { stage: string; message: string } }
+  | { event: "delta"; data: { text: string } }
   | { event: "message"; data: ChatResponse }
   | { event: "done"; data: { id: string; sessionId: string; sessionToken?: string; searchSessionId: string | null } };
 
@@ -769,6 +840,30 @@ export type DeletedDocument = JsonObject & {
   projectId?: string | null;
   runId?: string | null;
   sourceKey?: string;
+};
+
+/** Why a document's figure resumes stopped (fixed codes). The first three are budget stops a single-document request may extend. */
+export type FigureResumeBlockReason = "attempts" | "vm-budget" | "no-progress" | "figures-off" | "resume-off" | "stale" | "refused" | "unscanned";
+
+/** Answer of {@link DocSlurpClient.resumeDocumentFigures}. */
+export type FigureResumeRequest = {
+  documentId: string;
+  status: "queued" | "already-queued" | "not-resumable" | "capped" | "off";
+  /**
+   * Why the document's resumes stopped, when they did (or had, when this request cleared it): `attempts` (launch cap),
+   * `vm-budget` (VM time), `no-progress`, `unscanned`, `refused`, `stale`, `resume-off` or `figures-off`; else null.
+   */
+  reason: FigureResumeBlockReason | null;
+  /** Whether this request granted an extension past a budget stop (bounded per run; a reprocess starts clean). */
+  granted: boolean;
+  /** Extensions left for the document's current run. */
+  grantsLeft: number;
+};
+/** Answer of {@link DocSlurpClient.resumeProjectFigures}: how many were queued, already queued, and whether more remain. */
+export type ProjectFigureResumeRequest = {
+  projectId: string; status: "queued" | "off"; queued: number; alreadyQueued: number; capped: boolean;
+  /** Documents with figures left that this request did not queue, by block reason (a bulk request never grants). */
+  blocked: Partial<Record<FigureResumeBlockReason, number>>;
 };
 
 /** Input of {@link DocSlurpClient.reprocessRun}: all stages, from one stage on, or only the listed stages. */
@@ -847,6 +942,14 @@ export class DocSlurpRunError extends Error {
     this.name = "DocSlurpRunError";
   }
 }
+
+const SEARCH_STREAM_EVENT_TYPES: ReadonlySet<string> = new Set(["search.started", "search.phase", "search.hits", "search.results", "search.error", "search.done"]);
+/** Internal: carries the typed error of a `search.error` event out of the stream loop without triggering the fallback. */
+class SearchStreamFailure { constructor(readonly cause: DocSlurpApiError) {} }
+/** Internal: the stream ended without `search.results`. */
+class SearchStreamDropped extends Error { constructor() { super("DocSlurp search stream ended before search.results"); } }
+/** Marks the error of a successful response that is not an event stream (an old server or a proxy), the only 2xx case that may fall back. */
+const NOT_AN_EVENT_STREAM = Symbol("docslurp.notAnEventStream");
 
 export class DocSlurpTimeoutError extends Error {
   constructor(message: string, readonly run?: ProjectRun) {
@@ -1331,7 +1434,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     }
   }
 
-  async function* streamEventsAt(path: string, streamOptions: RequestOptions = {}, extraHeaders: Record<string, string> = {}, jsonBody?: string): AsyncGenerator<RunStreamEvent> {
+  async function* streamEventsAt(path: string, streamOptions: RequestOptions = {}, extraHeaders: Record<string, string> = {}, jsonBody?: string, maxFrameBytes?: number): AsyncGenerator<RunStreamEvent> {
     const bound = deadline(positiveDuration(streamOptions.timeoutMs ?? 300_000, "timeoutMs"), streamOptions.signal);
     let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
     const onAbort = () => { void reader?.cancel().catch(() => {}); };
@@ -1360,12 +1463,12 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
       }
       if (!response.headers.get("content-type")?.includes("text/event-stream") || !response.body) {
         await response.body?.cancel();
-        throw new DocSlurpApiError("Expected a DocSlurp event stream", response.status, null);
+        throw Object.assign(new DocSlurpApiError("Expected a DocSlurp event stream", response.status, null), { [NOT_AN_EVENT_STREAM]: true });
       }
       reader = response.body.getReader();
       bound.signal.addEventListener("abort", onAbort, { once: true });
       bound.signal.throwIfAborted();
-      for await (const frame of readSse(reader)) {
+      for await (const frame of readSse(reader, maxFrameBytes)) {
         bound.signal.throwIfAborted();
         const data: unknown = JSON.parse(frame.data);
         if (!data || typeof data !== "object" || Array.isArray(data)) throw new Error("Invalid DocSlurp event payload");
@@ -1707,6 +1810,141 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     }
     const response = request<SearchResponse>("/v1/search", jsonRequest("POST", inProject(input)), options);
     return Object.assign(response, { async *[Symbol.asyncIterator]() { yield* (await response).results; } });
+  }
+
+
+  /** Events of one streamed search; falls back to the JSON endpoint only when the stream never started (see {@link SearchStreamOptions}). */
+  function searchStream(input: SearchStreamInput, options: SearchStreamOptions = {}): SearchStream {
+    rejectLegacyProjectOptions(input);
+    rejectUncopyableIntakeSelection(input);
+    if (typeof input?.q !== "string") throw new TypeError("searchStream accepts one query string; use search() for batches.");
+    if ("queries" in input) throw new TypeError("searchStream does not accept a queries batch; use search().");
+    const transportMode = options.transport ?? "auto";
+    if (!["auto", "sse", "json"].includes(transportMode)) throw new RangeError("Invalid search stream transport");
+    const { transport: _transport, ...callerOptions } = options;
+    // Closing the iterator early stops the request through this controller, unless `response` still wants the answer.
+    const stop = new AbortController();
+    const requestOptions: RequestOptions = { ...callerOptions, signal: callerOptions.signal ? AbortSignal.any([callerOptions.signal, stop.signal]) : stop.signal };
+    const target = inProject(input);
+    const { stats, ...searchFields } = target;
+    let used: "sse" | "json" = transportMode === "json" ? "json" : "sse";
+    let settle!: { resolve(value: SearchResponse): void; reject(error: unknown): void };
+    const response = new Promise<SearchResponse>((resolve, reject) => { settle = { resolve, reject }; });
+    response.catch(() => {}); // A caller that only iterates never sees an unhandled rejection from this promise.
+    let final: SearchResponse | undefined;
+    const startedAt = Date.now();
+
+    const interrupted = () => new DocSlurpApiError(publicHttpError(502), 502, { error: { code: "stream_interrupted" } });
+
+    async function* events(): AsyncGenerator<SearchStreamEvent> {
+      try {
+        // True once any frame arrived: the server has accepted the search and may bill it, so a second search is never issued.
+        let received = false;
+        if (transportMode !== "json") {
+          try {
+            const body = JSON.stringify({ ...searchFields, ...(stats === undefined ? {} : { stats }) });
+            for await (const frame of streamEventsAt("/v1/search/stream", requestOptions, {}, body, SEARCH_STREAM_MAX_FRAME_BYTES)) {
+              received = true;
+              const event = frame.data as unknown as SearchStreamEvent;
+              if (!event || !SEARCH_STREAM_EVENT_TYPES.has(event.type)) continue;
+              if (event.type === "search.error") {
+                const { code, status } = event.error ?? {};
+                const failure = new DocSlurpApiError(publicHttpError(status ?? 500), typeof status === "number" ? status : 500, { error: { code } });
+                throw new SearchStreamFailure(failure);
+              }
+              if (event.type === "search.results") final = event.response;
+              yield event;
+              if (event.type === "search.done") break;
+            }
+            if (!final) throw new SearchStreamDropped();
+          } catch (error) {
+            if (error instanceof SearchStreamFailure) throw error.cause;
+            // The caller's abort and the deadline are final.
+            if (requestOptions.signal?.aborted || error instanceof DocSlurpTimeoutError) throw error;
+            // A drop after search.results keeps the answer.
+            if (final) return;
+            // After the first frame: a drop, a malformed frame or a stream without search.results is an error, never a second search.
+            const malformed = error instanceof SyntaxError || (error instanceof Error && error.message === "Invalid DocSlurp event payload") || (error instanceof Error && /exceeds \d+ MiB/.test(error.message));
+            if (received || malformed) throw interrupted();
+            // Not started: only a missing endpoint or a non-stream 2xx may fall back. Auth, billing, rate-limit and validation refusals are real answers.
+            if (error instanceof DocSlurpApiError) {
+              const missing = [404, 405, 406, 501].includes(error.status) || (error as unknown as Record<symbol, unknown>)[NOT_AN_EVENT_STREAM] === true;
+              if (!missing) throw error;
+            }
+            if (transportMode === "sse") throw error;
+          }
+          if (final) return;
+        }
+        used = "json";
+        const body = await request<SearchResponse>("/v1/search", jsonRequest("POST", searchFields), requestOptions);
+        final = body;
+        const searchId = `json-${body.sessionId}`;
+        let seq = 0;
+        const envelope = () => ({ searchId, seq: seq++, elapsedMs: Date.now() - startedAt });
+        const projectId = searchFields.project;
+        yield { ...envelope(), type: "search.started", protocol: 1, ...(projectId ? { projectId } : {}), cached: false };
+        yield { ...envelope(), type: "search.results", ids: body.results.map(result => searchResultId(result)), response: body };
+        yield { ...envelope(), type: "search.done", sessionId: body.sessionId, resultCount: body.results.length };
+      } catch (error) {
+        settle.reject(error);
+        throw error;
+      } finally {
+        if (final) settle.resolve(final);
+        else settle.reject(new Error("DocSlurp search stream closed before search.results"));
+      }
+    }
+
+    // One pump drives the request. Events are buffered for the single iterator, so `response` and iteration work in either order.
+    const buffer: SearchStreamEvent[] = [];
+    let pumped = false;
+    let finished = false;
+    let failure: { error: unknown } | undefined;
+    let iterating = false;
+    let consumerClosed = false;
+    let wantsResponse = false;
+    let wake: (() => void) | undefined;
+    const pump = () => {
+      if (pumped) return;
+      pumped = true;
+      void (async () => {
+        try { for await (const event of events()) if (!consumerClosed) { buffer.push(event); wake?.(); } }
+        catch (error) { failure = { error }; }
+        finally { finished = true; wake?.(); }
+      })();
+    };
+    return {
+      [Symbol.asyncIterator](): AsyncIterator<SearchStreamEvent> {
+        if (iterating) throw new Error("A search stream can be iterated once; read `response` for the answer again.");
+        iterating = true;
+        pump();
+        return {
+          async next() {
+            while (true) {
+              const event = buffer.shift();
+              if (event) return { value: event, done: false };
+              if (finished) {
+                if (failure) { const { error } = failure; failure = undefined; throw error; }
+                return { value: undefined, done: true };
+              }
+              await new Promise<void>(resolve => { wake = resolve; });
+              wake = undefined;
+            }
+          },
+          async return() {
+            consumerClosed = true;
+            buffer.length = 0;
+            if (!wantsResponse) stop.abort(new Error("DocSlurp search stream closed by the caller"));
+            return { value: undefined, done: true };
+          },
+        };
+      },
+      get transport() { return used; },
+      get response() {
+        wantsResponse = true;
+        pump();
+        return response;
+      },
+    };
   }
 
   function upload(input: Array<Blob | File | UploadFileInput>, options?: UploadOptions): Promise<UploadResponse>;
@@ -2275,7 +2513,8 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
       return request(`/v1/organizations/${encodeURIComponent(orgId)}/api-keys`, { method: "DELETE" }, options);
     },
 
-    chat(input: ChatInput, requestOptions?: RequestOptions): Promise<ChatResponse> {
+    async chat(input: ChatInput, requestOptions?: RequestOptions): Promise<ChatResponse> {
+      assertNoBackendModel(input);
       return request<ChatResponse>("/v1/chat", {
         body: JSON.stringify(inProject(input)),
         headers: { "Content-Type": "application/json" },
@@ -2285,14 +2524,15 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
 
     /**
      * Streamed grounded answer, as a streaming companion to chat(). Yields a
-     * retrieval `status`, the `message` (a full ChatResponse) and a final `done`
-     * envelope. Throws if the stream ends before `done`, so a truncated answer
-     * is never mistaken for success. Posts the question in the body of
-     * POST /v1/chat/stream, so it never sits in a URL, proxy log or browser
-     * history; for OpenAI-style token streaming use POST /v1/chat/completions
-     * with stream: true.
+     * retrieval `status`, `delta` events with answer text as it is written,
+     * the `message` (a full ChatResponse, whose answer is authoritative) and a
+     * final `done` envelope. Throws if the stream ends before `done`, so a
+     * truncated answer is never mistaken for success. Posts the question in the
+     * body of POST /v1/chat/stream, so it never sits in a URL, proxy log or
+     * browser history.
      */
     async *chatStream(input: ChatInput, requestOptions: RequestOptions = {}): AsyncGenerator<ChatStreamEvent> {
+      assertNoBackendModel(input);
       const target = inProject(input);
       // The session grant goes in a header, never the URL or the body, as before.
       const { sessionToken, ...body } = target;
@@ -2300,7 +2540,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
       let completed = false;
       const grant: Record<string, string> = sessionToken ? { "X-DocSlurp-Chat-Session-Token": sessionToken } : {};
       for await (const frame of streamEventsAt("/v1/chat/stream", requestOptions, grant, payload)) {
-        if (frame.event === "status" || frame.event === "message" || frame.event === "done") {
+        if (frame.event === "status" || frame.event === "delta" || frame.event === "message" || frame.event === "done") {
           if (frame.event === "done") completed = true;
           yield { event: frame.event, data: frame.data } as ChatStreamEvent;
         }
@@ -2310,6 +2550,27 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
 
     getDocument(documentId: string, requestOptions?: RequestOptions): Promise<DocumentViewerPayload> {
       return request<DocumentViewerPayload>(`/v1/documents/${encodeURIComponent(documentId)}`, {}, requestOptions, true);
+    },
+
+    /** The ingest version this deployment produces; a document whose `ingestVersion` is lower can be reprocessed to update it. */
+    getIngestVersion(requestOptions?: RequestOptions): Promise<WorkspaceIngestVersion> {
+      return request<WorkspaceIngestVersion>("/v1/ingest-version", {}, requestOptions, true);
+    },
+
+    /**
+     * Finish extracting the figures a document's pass left out (a timed-out shard, a budget stop). Only queues the work: the
+     * service runs it in a fresh VM under its own caps (three attempts, one document per organization at a time). Server
+     * keys need `ingest`. `status` is `queued`, `already-queued`, `not-resumable`, `capped` (attempts spent) or `off`
+     * (the project's figures or resumes are off).
+     */
+    resumeDocumentFigures(documentId: string, requestOptions?: RequestOptions): Promise<FigureResumeRequest> {
+      return request<FigureResumeRequest>(`/v1/documents/${encodeURIComponent(documentId)}/assets/resume`, jsonRequest("POST", {}), requestOptions);
+    },
+
+    /** Queue every document of a project whose figures a resume could finish, at most `limit` (1 to 100, default 100). */
+    resumeProjectFigures(id: string | undefined, input: { limit?: number } = {}, requestOptions?: RequestOptions): Promise<ProjectFigureResumeRequest> {
+      const limit = input.limit === undefined ? "" : `?limit=${encodeURIComponent(String(input.limit))}`;
+      return request<ProjectFigureResumeRequest>(`/v1/projects/${encodeURIComponent(id?.trim() || clientProject)}/figures/resume${limit}`, jsonRequest("POST", {}), requestOptions);
     },
 
     /** One page of documents in a project (the client default unless one is passed), newest first. Follow `nextCursor` for the rest. */
@@ -2390,6 +2651,7 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
     },
 
     search,
+    searchStream,
 
     upload,
 

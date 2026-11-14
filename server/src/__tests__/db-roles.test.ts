@@ -125,6 +125,23 @@ describe("worker role", () => {
     } finally { await db.exec(`revoke execute on function public.realtime_changed() from ${worker}`); }
   });
 
+  it("rejects forged statement-trigger sources even if EXECUTE were accidentally granted", async () => {
+    expect(await denied(worker, `create temp table document_chunks(document_id text, run_id text);
+      create trigger realtime_changed_insert after insert on document_chunks referencing new table as new_rows
+        for each statement execute function public.realtime_statement_changed()`)).toBe(true);
+    await db.exec(`grant execute on function public.realtime_statement_changed() to ${worker}`);
+    try {
+      // A look-alike temp table, the wrong trigger name, and a row-level attachment are all refused.
+      expect(await denied(worker, `create temp table document_chunks(document_id text, run_id text);
+        create trigger realtime_changed_insert after insert on document_chunks referencing new table as new_rows
+          for each statement execute function public.realtime_statement_changed();
+        insert into document_chunks values('role-realtime-doc','role-realtime-run')`)).toBe(true);
+    } finally { await db.exec(`revoke execute on function public.realtime_statement_changed() from ${worker}`); }
+    const { rows } = await db.query<{ prosecdef: boolean; owner: string }>(
+      "select prosecdef, pg_get_userbyid(proowner) as owner from pg_proc where proname = 'realtime_statement_changed'");
+    expect(rows).toEqual([{ prosecdef: true, owner: "docslurp_realtime_publisher" }]);
+  });
+
   it("publishes ingestion revisions through validated triggers immediately after migration", async () => {
     await db.exec(`insert into "user"(id,name,email) values('role-realtime','Test','role-realtime@example.test');
       insert into organizations(id,name,slug,created_by_user_id) values('role-realtime','Test','role-realtime','role-realtime');
@@ -141,6 +158,10 @@ describe("worker role", () => {
     await as(worker, () => db.exec(`insert into document_page_states(document_id,page_number,state)
       values('role-realtime-doc',1,'indexed')`));
     expect(BigInt(await read())).toBe(before + 3n);
+    // The statement-level triggers (pages, chunks, page stages) publish as the worker too.
+    await as(worker, () => db.exec(`insert into document_chunks(id,document_id,run_id,user_id,chunk_index,text,token_estimate)
+      select 'role-realtime-chunk-'||g,'role-realtime-doc','role-realtime-run','role-realtime',g,'text',1 from generate_series(1,25) g`));
+    expect(BigInt(await read())).toBe(before + 4n);
     const { rows } = await db.query<{prosecdef:boolean}>(`select prosecdef from pg_proc where proname in
       ('realtime_changed','realtime_record_change','realtime_materialization_changed','realtime_search_session_changed')`);
     expect(rows).toHaveLength(4);

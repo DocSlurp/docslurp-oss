@@ -10,6 +10,8 @@ import {
   intakePageCountSource,
   pageRouterModeSchema,
   sanitizeStoredPipeline,
+  parseManagedPipelineOverrides,
+  resolveManagedPipeline,
   stageSelectionKeys,
   withoutStageSelection,
   withPlatformPageRouterMode,
@@ -31,6 +33,7 @@ import {
   type SpendBlockedCode,
 } from "./billing/spend-guard.js";
 import { canContributeToProject, canEditProject, getProjectAccessWithPipeline } from "./organizations.js";
+import { EditorRequiredError } from "../lib/editor-required.js";
 import { attributedUsage } from "./usage-attribution.js";
 import { buildRunProcessingPreview } from "./run-processing-preview.js";
 import { RunPipelineInvalidError, runLifecycle, type RunLifecycleRun, type RunStartOutcome } from "./run-lifecycle.js";
@@ -978,11 +981,30 @@ export function createRunCreation(deps: RunCreationDeps) {
     // Run row never carries them (a Dolphin repoPath, an unknown extractor id). Request schemas stay strict.
     const requestedPipeline = { ...request.pipeline, speedBoost: request.speedBoost === true };
     assertPipelineSpeedBoost(requestedPipeline);
-    const sanitized = sanitizeStoredPipeline(requestedPipeline, `run creation in project ${request.projectId}`);
+    const source = `run creation in project ${request.projectId}`;
+    // Most run-creation paths land here (upload, extract, MCP, reprocess, bulk reprocess, retry-as-new, materialize),
+    // and callers often pass an old run snapshot. The paths that insert runs directly apply the same resolution
+    // themselves: re-index and config change (config-change.ts createReindexRuns), full index and indexing-mode switches
+    // (project-indexing-mode.ts), retry in place (runs.ts retryRun). Model values in a snapshot are history,
+    // never configuration: they are dropped and the project's explicit admin overrides and current defaults apply
+    // (managed-pipeline-models.ts). Run-specific fields (speedBoost, indexingMode, stage selection) are kept.
+    const [managedRow] = await sql<{ managed: unknown }[]>`select managed_models -> 'pipeline' as managed from projects where id = ${request.projectId}`;
+    const managed = resolveManagedPipeline(
+      sanitizeStoredPipeline(requestedPipeline, source),
+      parseManagedPipelineOverrides(managedRow?.managed, `project ${request.projectId}`),
+      source,
+    );
+    const sanitized = { ...managed.pipeline, speedBoost: request.speedBoost === true };
     // With the stored pipeline: the project's chart tier is the ceiling checked below, and the cap on a replayed tier.
     const access = await getProjectAccessWithPipeline(request.projectId, request.userId);
     if (!access) throw new Error("Project not found");
-    if (!canContributeToProject(access, request.userId)) throw new Error("Forbidden");
+    // New files: any contributor (the default project admits every org member). New versions of existing documents spend
+    // credits on content the caller did not upload: editors only (canEditProject, council L3).
+    const reprocessing = request.sources.kind === "versionsOf";
+    if (reprocessing ? !canEditProject(access, request.userId) : !canContributeToProject(access, request.userId)) {
+      if (reprocessing && canContributeToProject(access, request.userId)) throw new EditorRequiredError();
+      throw new Error("Forbidden");
+    }
     const projectChartExport = upgradeStoredChartExport((access.pipeline as { chartExport?: unknown } | null | undefined)?.chartExport) as { tier?: ChartExportTier } | null;
     // The chart export tier is resolved here, once per run, and stored on the run: a retry or resume reads it back, and
     // the worker never re-resolves it. A new run: request override, project tier, origin default. A replay (reprocess,

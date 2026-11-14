@@ -93,6 +93,18 @@
     "./page-table-routing": {
       "types": "./dist/page-table-routing.d.ts",
       "import": "./dist/page-table-routing.js"
+    },
+    "./chart-export": {
+      "types": "./dist/chart-export.d.ts",
+      "import": "./dist/chart-export.js"
+    },
+    "./zod-jitless": {
+      "types": "./dist/zod-jitless.d.ts",
+      "import": "./dist/zod-jitless.js"
+    },
+    "./file-sniff": {
+      "types": "./dist/file-sniff.d.ts",
+      "import": "./dist/file-sniff.js"
     }
   },
   "files": [

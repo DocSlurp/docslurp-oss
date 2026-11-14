@@ -46,7 +46,7 @@ it("retries a Nitro 404 once on the base model's normal route", async () => {
   const retry = JSON.parse(send.mock.calls[1]![1]!.body as string);
   expect(retry.model).toBe("z-ai/glm-5.3-flash");
   expect(retry.provider.sort).toBe("price");
-  expect(retry.provider.max_price).toBeUndefined();
+  expect(retry.provider.max_price).toEqual({ completion: 49.99 });
   expect(retry.provider.preferred_max_latency).toBeUndefined();
   expect(retry.provider.only.length).toBeGreaterThan(0);
   expect(warn).toHaveBeenCalledWith(expect.stringContaining("nitro_fallback"));

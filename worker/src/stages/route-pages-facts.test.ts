@@ -152,7 +152,9 @@ describe("route-pages on a sandboxed deployment", () => {
     // The image model needs pixels the host may not render: skipped, the baseline router plans instead.
     expect(plan!.routerKind).not.toBe("decision-model");
     const chunk = metrics("page-route-chunk-estimate")[0]!.metadata as Record<string, unknown>;
-    expect(String(chunk.routerNote)).toContain("decision-model-skipped:no-host-pixels:cloudflare/clef-flash");
+    expect(String(chunk.routerNote)).toContain("decision-model-skipped:no-host-pixels:1");
+    // The note customers can read names no model.
+    expect(String(chunk.routerNote)).not.toContain("clef-flash");
     expect(chunk.probeSource).toBe("doppler-facts");
     expect(metrics("page-route-host-pdf-refused")).toEqual([]);
     expect(metrics("page-route-error")).toEqual([]);

@@ -1,3 +1,4 @@
+import { customerPipelineView } from "@docslurp/shared";
 import postgres from "postgres";
 import { afterAll, beforeAll, expect, it, vi } from "vitest";
 import { defaultPipelineFeatures, mergePipelineFeatures } from "@docslurp/shared";
@@ -232,7 +233,8 @@ it("proposes the quality change the ingest report recommends, with new-upload im
   expect(proposal.estimate?.pages).toBeGreaterThan(0);
   // Optional reprocessing: saving without consent changes settings only, and keeps every other vision setting.
   await expect(service.applySettingsProposal({ ...f, token: proposal.token, reprocessExisting: false })).resolves.toMatchObject({ applied: true, reprocess: { requested: false, status: 'not-requested' } });
-  expect(await saved(f.id)).toMatchObject({ vision: before.vision, preserveCode: false, quality: 'good' });
+  // Compared through the customer view: the row stores the managed form (no schema-filled model URIs).
+  expect(customerPipelineView(await saved(f.id))).toMatchObject({ vision: customerPipelineView(before).vision, preserveCode: false, quality: 'good' });
   // The per-file vision page limit was removed; proposing it is rejected rather than silently ignored.
   await expect(service.proposeProjectSettings({ ...f, changes: { pipeline: { vision: { forceAllPages: true, maxPagesPerDocument: 8 } } } })).rejects.toBeDefined();
 });
@@ -266,4 +268,19 @@ it("words the impact of answer and retrieval changes differently from pipeline c
   expect(effects['retrieval.resultCount']).toMatch(/how searches rank and return passages.*next search.*no documents are reprocessed/);
   const mixed = await service.proposeProjectSettings({ ...f, changes: { pipeline: { mediaVideo: { enabled: true } }, chat: { citations: false } } });
   expect(mixed.impact.reasons.map(r => r.field)).toEqual(expect.arrayContaining(['mediaVideo', 'chat.citations']));
+});
+
+it("in the org's default project, a plain member may not apply a proposal and a project editor may (council L3)", async () => {
+  const f = await fixture();
+  await sql`update projects set is_default = true where id = ${f.id}`;
+  const proposal = await service.proposeProjectSettings({ ...f, changes });
+  // The same user, no longer an editor: org membership of the default project alone does not qualify.
+  await sql`delete from project_members where project_id = ${f.id} and user_id = ${f.userId}`;
+  await expect(service.applySettingsProposal({ ...f, token: proposal.token, reprocessExisting: false })).rejects.toMatchObject({ status: 403 });
+  await expect(service.proposeProjectSettings({ ...f, changes })).rejects.toMatchObject({ status: 403 });
+  expect((await saved(f.id)).mediaVideo.enabled).toBe(false);
+  // Restored as a project editor of the default project: the same proposal applies.
+  await sql`insert into project_members(project_id,user_id,role) values (${f.id},${f.userId},'editor')`;
+  expect(await service.applySettingsProposal({ ...f, token: proposal.token, reprocessExisting: false })).toMatchObject({ applied: true });
+  expect((await saved(f.id)).mediaVideo.enabled).toBe(true);
 });

@@ -54,7 +54,52 @@ export interface SandboxedPdfJob {
    * `--images-doc-max-bytes`, `--images-batch-pages`, `--images-link-prefix`): a provider passes them so that Doppler's own
    * budgets stop it (a resumable `budget`/`doc_budget`) before the host would refuse the folder.
    */
-  figures?: { dir: string; limits?: DopplerImageLimits };
+  figures?: {
+    dir: string; limits?: DopplerImageLimits;
+    /**
+     * Also extract charts from the figure SVGs in the same VM (the free chart rungs, given each figure's words), writing
+     * `charts.json` (FIGURE_CHARTS_FILE, doppler-figure-charts@1) into `dir` beside the figures. Only when the provider
+     * declares `figures.charts` and the run's chart tier asks for it (chart-export/figure-charts.ts figureChartsRequest).
+     * A provider must never fail the figures or the Markdown because the charts failed: it writes a refusal instead.
+     */
+    charts?: { diagrams: boolean };
+  };
+}
+
+/**
+ * One figure resume (provider `figures.resume`), always for one range: a shard's pages, a gap's pages, or (for an unsharded
+ * document) the whole document. Paths are host paths the provider stages into a fresh VM; the host reads nothing of the
+ * source. The answer is a figure outcome like SandboxedPdfResult.figures (`extracted`, `partial` with optional `gaps`
+ * inside the range, or `failed` with a telemetry-only reason), and the host validates `dir` exactly like a first pass's
+ * folder (no figure file it already stores may come back different: `resume-rewrite`).
+ *
+ * Folder the provider writes into `dir` (created empty):
+ * - a range (`pages` set): `shards/<first>-<last>/manifest.jsonl` (4-digit zero padding, the converter's own manifest for
+ *   `--images-pages first-last`) and only the new files under `page-NNNN/`;
+ * - a whole document (`pages` null): `manifest.jsonl` and only the new files under `page-NNNN/`.
+ */
+export interface FigureResumeJob {
+  /** The document's PDF (the converter checks it against `sourceSha256` and refuses another). */
+  input: string;
+  sourceSha256: string;
+  /**
+   * The range's stored manifest (the resume folder holds only it: `--images-resume` with a manifest-only folder), or null
+   * for a gap (no manifest ever came back): a fresh figure pass over `pages` (`--images-pages first-last`).
+   */
+  manifest: string | null;
+  /** The range (bound into the manifest's settings digest by `--images-pages`), or null for an unsharded document. */
+  pages: [number, number] | null;
+  /**
+   * Narrow a resume inside the range (Doppler `--images-resume-pages A-B`, not part of the settings digest); null resumes
+   * all of it. Always within `pages`; never set for a gap.
+   */
+  resumePages: [number, number] | null;
+  /** Empty folder for the resumed images (layout above). */
+  dir: string;
+  /** The document's caps as Doppler flags (as for a first pass): a resume never exceeds them. */
+  limits: DopplerImageLimits;
+  /** Wall-time budget for the VM run; the guest should set `--images-deadline` a margin below it. */
+  timeoutMs: number;
 }
 
 export interface SandboxedPdfRunContext {
@@ -153,7 +198,16 @@ export interface SandboxedPdfExtractorProvider {
     read(output: string, signal?: AbortSignal): Promise<EmbeddedImageSet>;
   };
   /** Present when the provider can return Doppler figure crops beside the Markdown (SandboxedPdfJob.figures). */
-  figures?: { producerId: string };
+  figures?: {
+    producerId: string;
+    /**
+     * Finish the images a figure pass left resumable, in a fresh VM (`pdftomarkdown --images-resume` with the stored
+     * manifest only: no figure file goes back into the VM). Optional: without it, resumable documents stay resumable.
+     */
+    resume?(job: FigureResumeJob, signal?: AbortSignal): Promise<unknown>;
+    /** True when the provider can extract charts from its figures in the same VM (SandboxedPdfJob.figures.charts). */
+    charts?: boolean;
+  };
   /** Page-shard cost profile: calibration refines the prior from observed shard timings under `key`. */
   shardProfile?: { key: string; prior: ShardCostProfile };
   /**
@@ -438,7 +492,7 @@ function figureOutcome(job: SandboxedPdfJob, raw: unknown, pages: number): Sandb
  * Validate a provider run's `ocrPages` against the page count and keep them for the job. A malformed list refuses the
  * run: provider output is untrusted, and billing evidence must not be guessed from it.
  */
-export function acceptSandboxedPdfResult(job: SandboxedPdfJob, result: SandboxedPdfResult, pages: number): SandboxedPdfResult {
+export function acceptSandboxedPdfResult(job: SandboxedPdfJob, result: SandboxedPdfResult, pages: number, options: { glyphs?: boolean } = {}): SandboxedPdfResult {
   reportedOcrPages.delete(job);
   reportedLayoutFacts.delete(job);
   reportedFigures.delete(job);
@@ -467,7 +521,8 @@ export function acceptSandboxedPdfResult(job: SandboxedPdfJob, result: Sandboxed
     reportedOcrPages.set(job, ocrPages);
   }
   // Last, once nothing else can refuse the result: page facts bounded by the host's own count only (without one, dropped).
-  acceptSandboxedPdfPageFacts(job, pageFacts, pages);
+  // `glyphs`: the run read math, so its facts are not walker-parity facts (acceptSandboxedPdfPageFacts).
+  acceptSandboxedPdfPageFacts(job, pageFacts, pages, process.env, { glyphs: options.glyphs === true });
   return ocrPages ? { ...result, ocrPages } : result;
 }
 
@@ -482,6 +537,25 @@ export function sandboxedPdfLayoutFacts(job: SandboxedPdfJob): Map<number, PageL
 /** Where `sandboxedPdfLayoutFacts` came from: the provider's layout walker, or its page facts (`use` mode). */
 export function sandboxedPdfLayoutFactsSource(job: SandboxedPdfJob): "vm-pdf" | "vm-pdf-facts" | undefined {
   return reportedLayoutFacts.has(job) ? "vm-pdf" : sandboxedPdfPageFactsLayout(job) ? "vm-pdf-facts" : undefined;
+}
+
+/**
+ * Figures a failed job salvaged (the provider's `error.figures`, published into `job.figures.dir`; only when the host
+ * declares `partial` in figureOutcomes): the shards that finished before the failure. Parsed as untrusted; anything but
+ * `extracted` or `partial` salvages nothing.
+ */
+const salvagedFigures = new WeakMap<SandboxedPdfJob, SandboxedPdfFigureOutcome>();
+export function noteSalvagedFigures(job: SandboxedPdfJob, error: unknown, pages: number): void {
+  salvagedFigures.delete(job);
+  const raw = (error as { figures?: unknown } | null)?.figures;
+  if (!job.figures || raw === undefined) return;
+  const outcome = parseSandboxedPdfFigureOutcome(raw, MAX_FIGURE_REASON_CHARS, pages);
+  if (outcome.status !== "failed") salvagedFigures.set(job, outcome);
+}
+export function sandboxedPdfSalvagedFigures(job: SandboxedPdfJob): SandboxedPdfFigureOutcome | undefined {
+  const outcome = salvagedFigures.get(job);
+  salvagedFigures.delete(job);
+  return outcome;
 }
 
 /** The figure outcome of a finished job that asked for figures, or undefined when it did not ask. */

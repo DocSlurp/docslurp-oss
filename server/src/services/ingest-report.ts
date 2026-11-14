@@ -1,4 +1,4 @@
-import {
+import { EDITOR_REQUIRED_CODE, EDITOR_REQUIRED_MESSAGE,
   buildByteHistogram,
   classifyIngestFailure,
   extractionWarningMessage,
@@ -694,8 +694,9 @@ export function buildConfigItems(pipeline: PipelineFeatures, observed: Observed)
       note: `${QUALITY_MODES[pipeline.quality].description} ${qualityModePriceRange(pipeline.quality)} per 1,000 pages.`,
     });
     items.push({
-      key: "vision.modelUri", label: "Vision model", value: model.replace(/^llm:\/\//, "") || "default",
-      note: perPage !== undefined ? `Catalog estimate ${formatCents(perPage)} per page.` : "No catalog price for this model.",
+      // The profile (a category), never the backend model id behind it.
+      key: "vision.profile", label: "Vision", value: visionProfileCatalog[pipeline.vision.profile]?.label ?? pipeline.vision.profile,
+      note: perPage !== undefined ? `Catalog estimate ${formatCents(perPage)} per page.` : "Estimated from the project's quality setting.",
     });
     if (pipeline.pageRouter?.mode && pipeline.pageRouter.mode !== "off") {
       items.push({ key: "pageRouter.mode", label: "Page router", value: pipeline.pageRouter.mode, note: "The decision-model router chooses an extractor per page; only active mode changes extraction." });
@@ -1352,7 +1353,7 @@ export function applyRecommendationPatch(pipeline: PipelineFeatures, patch: Reco
 // ---- Acting on recommendations -------------------------------------------
 
 export class IngestReportActionError extends Error {
-  constructor(message: string, readonly status: 403 | 404 | 409) {
+  constructor(message: string, readonly status: 403 | 404 | 409, readonly code?: "editor_required") {
     super(message);
     this.name = "IngestReportActionError";
   }
@@ -1376,7 +1377,7 @@ async function editableRecommendation(args: RecommendationAction): Promise<Inges
   const access = await getProjectAccess(args.project.id, args.userId);
   if (!access) throw new IngestReportActionError("Project not found", 404);
   if (!canEditProject(access, args.userId)) {
-    throw new IngestReportActionError("Only project editors can change ingest settings or reprocess files.", 403);
+    throw new IngestReportActionError(EDITOR_REQUIRED_MESSAGE, 403, EDITOR_REQUIRED_CODE);
   }
   // Recompute: the change comes from the server's own rules, never from the client.
   const report = await loadIngestReport({

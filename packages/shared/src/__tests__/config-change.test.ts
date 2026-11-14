@@ -132,9 +132,10 @@ describe("analyzePipelineChange", () => {
   it("chart export: an unset tier resolves for the caller's surface", () => {
     const free = withF({ chartExport: { tier: "free" } });
     const ctx = { documents: 3, pages: 120, env: { DOCSLURP_CHART_EXPORT: "on", DOCSLURP_CHART_EXPORT_FREE_EXPLICIT: "on" } };
-    // In the app the default is already free: setting it explicitly changes nothing stored.
-    expect(analyzePipelineChange(base, free, { ...ctx, origin: "app" }).kind).toBe("new-uploads");
-    // For API callers the default is off: free is an optional (free) reindex.
+    // With no default set, every surface defaults to off: free is an optional (free) reindex.
+    expect(analyzePipelineChange(base, free, { ...ctx, origin: "app" }).kind).toBe("reindex-recommended");
+    // DOCSLURP_CHART_EXPORT_APP_DEFAULT=free makes the app's default free: setting it explicitly changes nothing stored.
+    expect(analyzePipelineChange(base, free, { ...ctx, origin: "app", env: { ...ctx.env, DOCSLURP_CHART_EXPORT_APP_DEFAULT: "free" } }).kind).toBe("new-uploads");
     expect(analyzePipelineChange(base, free, { ...ctx, origin: "machine" }).kind).toBe("reindex-recommended");
     // DOCSLURP_CHART_EXPORT_API_DEFAULT=free makes API callers' default free too.
     expect(analyzePipelineChange(base, free, { ...ctx, origin: "machine", env: { ...ctx.env, DOCSLURP_CHART_EXPORT_API_DEFAULT: "free" } }).kind).toBe("new-uploads");

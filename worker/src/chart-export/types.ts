@@ -7,7 +7,7 @@
  * - `ChartModelClient`: one image + prompt model call. The production client goes through the vision runtime (attempt
  *   guard, privacy gate, model-swap and fallback handling); tests use a fake.
  */
-import type { BBox, ChartExportFormat, ExportedVisual, VisualSource, VisualSpec } from "@docslurp/shared";
+import type { BBox, ChartExportFormat, DeferredVisual, ExportedVisual, VisualSource, VisualSpec } from "@docslurp/shared";
 
 import type { UsageEvent } from "../models.js";
 
@@ -104,6 +104,11 @@ export interface DeterministicVisualInput {
   /** The parsed Doppler figure index when the caller already read it (saves a second read). */
   dopplerFiguresIndex?: unknown;
   /**
+   * The source's inline answer from the quarantine guest (DOCSLURP_CHART_EXPORT_INLINE): when present for the source's
+   * kind, the extractor uses it and runs no parser VM for the source (except a `result-too-large` refusal).
+   */
+  inline?: import("./inline.js").StoredInlineCharts | null;
+  /**
    * Records a cost-only usage event (parser-VM time spent on this document's chart extraction) in the stage's usage
    * ledger. Never a customer charge.
    */
@@ -121,6 +126,10 @@ export interface DeterministicVisualResult {
   /** Free presence counts the extractor saw without exporting (Office chart parts, SVG figures). */
   /** `svgFigures` is telemetry only: SVG figures are also candidates (Doppler figures), so stats do not add it. */
   presence?: { officeChartParts?: number; svgFigures?: number; embeddedSpecs?: number };
+  /** Visuals deferred to a later pass (recorded in the candidate stats, never dropped). */
+  deferred?: DeferredVisual[];
+  /** Candidates and refusals past a per-input list cap or the guest deadline, not listed individually: their count. */
+  overflow?: number;
 }
 
 /** S2's entry (`extractDeterministicVisuals`) satisfies this; the default does nothing. */
@@ -168,6 +177,9 @@ export interface ChartModelResponse {
   costCents: number;
   latencyMs: number;
   finishReason?: string | null;
+  /** Prompt tokens served from / written to the provider's prompt cache (included in inputTokens), when reported. */
+  cachedInputTokens?: number;
+  cacheWriteInputTokens?: number;
 }
 
 export interface ChartModelClient {

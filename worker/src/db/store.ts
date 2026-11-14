@@ -18,10 +18,11 @@ import { WorkerSlotStore, resolveWorkerSlotOptions, tryMaintenanceLease, type Wo
 import { randomUUID, createHmac } from "node:crypto";
 
 import postgres, { type JSONValue, type PendingQuery, type Sql } from "postgres";
-import { flushAssetLedger, listHostPageImagePages, writeDocumentAssetLedger, type DocumentAssetLedgerResult, type DocumentAssetLedgerWrite } from "./document-asset-ledger.js";
+import { adoptPendingAssets, flushAssetLedger, listHostPageImagePages, markAssetsLost, markAssetsPending, markAssetsStored, replaceUnvouchedObject, writeDocumentAssetLedger, type FigureObjectReader, type DocumentAssetLedgerResult, type DocumentAssetLedgerWrite } from "./document-asset-ledger.js";
 import { applyDefaultVisionOverride, defaultPipelineFeatures, normalizeStoredPipelineFeatures, PII_BLOCKED_DOCUMENT_STATUS, planRunFailure, type DerivedDocumentTitle, type PrivacyAuditEntry } from "@docslurp/shared";
 
 import { adoptBackfillDocuments } from "../deferred/backfill-adoption.js";
+import { completingDocumentStamp, runReusesExtraction, runStamp, runStampsIngestVersion, stampDocumentIngestVersion } from "./ingest-version.js";
 import { insertPrivacyAuditRows } from "../lib/privacy-guard.js";
 import type {
   Document,
@@ -62,7 +63,7 @@ import { enforceRunSpend, enforceRunSpendForCharge, largestFundedCharge, pauseRu
 import { retryTransaction } from "./transaction-retry.js";
 import { consumeRunCreditLease, creditLeasesActive, RunCreditLeases, type LeaseObservation } from "./credit-lease.js";
 import { PostgresVisionAttemptBackend } from "./vision-attempt-store.js";
-import { assertParseSourceRecord, bindDocumentUpload, PARSE_SOURCE_SCAN_VERSION, resolveDocumentSource, type ParseSourceDecisionRecord } from "../lib/parse-source.js";
+import { assertParseSourceRecord, bindDocumentUpload, PARSE_SOURCE_SCAN_VERSION, resolveDocumentSource, type ParseSourceDecisionRecord, type ResolvedDocumentSource } from "../lib/parse-source.js";
 import {
   lexicalColumnProbe,
   resolveWorkerCapabilities,
@@ -1173,10 +1174,15 @@ export class Store {
         const completed = await completeRunDocuments(client, state.run.id);
         const replacements = await supersededInThisTransaction(client, completed.filter(id => !adopted.has(id)));
         await this.announceReplacements(state, replacements, client, logicalId);
-        await client`update project_runs set status = 'completed', stage = 'completed',
+        // The run's ingest stamp and its documents' (db/ingest-version.ts) ride on this statement: no extra round trip.
+        const stamps = runStampsIngestVersion(state.run.kind);
+        const stampMode = runReusesExtraction(state.run.pipeline) ? "inherited" as const : "extracted" as const;
+        const stampDocuments = stamps ? client`with stamped as (${stampDocumentIngestVersion(client, state.run.id, stampMode)} returning 1)` : client``;
+        const stampRun = stamps ? runStamp(client, stampMode) : client``;
+        await client`${stampDocuments} update project_runs set status = 'completed', stage = 'completed',
           processed_documents = total_documents, pages_processed = pages_total,
           stats = coalesce(stats, '{}'::jsonb) || ${this.toJson({ pageCharges })}::jsonb,
-          lease_expires_at = null, updated_at = now() where id = ${state.run.id}`;
+          lease_expires_at = null, updated_at = now() ${stampRun} where id = ${state.run.id}`;
         await insertProjectRunEvents({ sql: client, events: [{ ...buildRunCompletedEvent(state, "pipeline completed"), id: logicalId }] });
         await this.triggerWebhooks(state.run.id, "run.completed", client, logicalId);
       });
@@ -1742,14 +1748,17 @@ export class Store {
           ...this.vectorIndexStatements(vectors, client),
           stageStateUpdate(client),
           client`
-            update documents
+            update documents d
             set status = case
                   when status = 'pii_blocked' then status
                   when status = 'completed' and ${indexedInRun(client, state.run.id, documentId)} then status
                   else 'completed'
                 end,
                 updated_at = now()
-            where id = ${documentId}`,
+                ${runStampsIngestVersion(state.run.kind)
+                  ? completingDocumentStamp(client, state.run.id, runReusesExtraction(state.run.pipeline) ? "inherited" : "extracted")
+                  : client``}
+            where d.id = ${documentId}`,
           supersededInThisTransactionQuery(client, [documentId]),
         ]);
         return mapSuperseded(results.at(-1) as Parameters<typeof mapSuperseded>[0]);
@@ -2709,6 +2718,29 @@ export class Store {
     return await writeDocumentAssetLedger(this.sql, write);
   }
 
+  /** Figure uploads in progress (document-asset-ledger.ts): pending rows before an upload step, stored once it landed. */
+  async markAssetsPending(args: Parameters<typeof markAssetsPending>[1]): Promise<{ pending: number }> {
+    return await markAssetsPending(this.sql, args);
+  }
+
+  async markAssetsStored(args: Parameters<typeof markAssetsStored>[1]): Promise<{ stored: number }> {
+    return await markAssetsStored(this.sql, args);
+  }
+
+  /** The adopt pass: pending rows checked against storage (streamed SHA-256), no VM. */
+  async adoptPendingAssets(reader: FigureObjectReader, args: Parameters<typeof adoptPendingAssets>[2]) {
+    return await adoptPendingAssets(this.sql, reader, args);
+  }
+
+  async markAssetsLost(args: Parameters<typeof markAssetsLost>[1]): Promise<{ lost: number }> {
+    return await markAssetsLost(this.sql, args);
+  }
+
+  /** Repair a figure object of other bytes under the document's ledger lock (document-asset-ledger.ts). */
+  async replaceUnvouchedObject(args: Parameters<typeof replaceUnvouchedObject>[1]): Promise<void> {
+    await replaceUnvouchedObject(this.sql, args);
+  }
+
   /**
    * Whether the document's PII outcome withholds artifacts (`documents.metadata.pii`: it redacted or blocked, so it keeps
    * a withheld list). A missing document withholds (fail closed).
@@ -3376,6 +3408,24 @@ export class Store {
       name: project.name,
       templateDescription: projectTemplates.find((template) => template.key === project.template_key)?.description,
     });
+  }
+
+  /** Claims and runs queued figure resumes (figures/resume-runner.ts); a no-op while DOCSLURP_FIGURE_RESUME is off. */
+  async runFigureResumes(deps: Omit<import("../figures/resume-runner.js").FigureResumeDeps, "sql">): Promise<number> {
+    const { runFigureResumes } = await import("../figures/resume-runner.js");
+    return await runFigureResumes({ ...deps, sql: this.sql });
+  }
+
+  /** Orphan GC and the stored-figure audit (figures/resume-runner.ts). */
+  async auditFigureStorage(deps: { storage: import("../figures/resume-runner.js").FigureResumeStorage; limit?: number }) {
+    const { auditFigureStorage } = await import("../figures/resume-runner.js");
+    return await auditFigureStorage({ ...deps, sql: this.sql });
+  }
+
+  /** The resume backlog gauges (emitted on the OTel meter by figureResumeBacklog). */
+  async figureResumeBacklog() {
+    const { figureResumeBacklog } = await import("../figures/resume-runner.js");
+    return await figureResumeBacklog(this.sql);
   }
 
   /** Claims and runs queued project graph rebuilds (see graph/rebuild-job.ts). */
@@ -4568,6 +4618,22 @@ function mapStageState(row: StageStateRow): StageState {
 
 function toDate(value: string | Date): Date {
   return value instanceof Date ? value : new Date(value);
+}
+
+/**
+ * The parse source of one document for a reader outside the stage pipeline (the figure resume runner): the loader's own
+ * resolution (lib/parse-source.ts resolveDocumentSource), so it is quarantine's decision and never the upload's key unless
+ * the scan read the upload itself. Org-scoped; null when the document is not the organization's. Only this module reads
+ * the upload's key (quarantine-council-r6 tripwire). Read for the claimed run only, and only while the document is completed
+ * (a reprocess or a failure since the claim reads nothing).
+ */
+export async function documentParseSource(
+  sql: Sql<Record<string, unknown>>, scope: { orgId: string; documentId: string; runId: string }, env: NodeJS.ProcessEnv = process.env,
+): Promise<ResolvedDocumentSource | null> {
+  const [row] = await sql<Array<{ id: string; source_key: string; source_sha256: string | null; parse_source_key: string | null; parse_source_sha256: string | null; parse_source_scan_version: number | null }>>`
+    select id, source_key, source_sha256, parse_source_key, parse_source_sha256, parse_source_scan_version
+    from documents where id = ${scope.documentId} and org_id = ${scope.orgId} and run_id = ${scope.runId} and status = 'completed'`;
+  return row ? resolveDocumentSource(row, env) : null;
 }
 
 /**

@@ -43,17 +43,17 @@ it("shares immutable pending evidence across devices and never acknowledges mere
 });
 it("scopes activity and tokens, serializes concurrent reads, and retains activity after the snapshot", async () => {
   await sql`update project_recommendation_visits set tracking_since = now() - interval '1 day' where project_id = 'w'`;
-  await sql`insert into search_sessions (id, user_id, query, result_count, metadata) values
-    ('s', 'u', 'private query never returned', 0, '{"projectId":"w"}'),
-    ('other', 'v', 'secret', 0, '{"projectId":"other"}')`;
-  await sql`insert into search_sessions (id, user_id, query, result_count, metadata)
-    select 'busy-' || n, 'u', 'q', 1, '{"projectId":"w"}'::jsonb from generate_series(1, 19) n`;
+  await sql`insert into search_sessions (id, user_id, query, result_count, metadata, project_id) values
+    ('s', 'u', 'private query never returned', 0, '{"projectId":"w"}', 'w'),
+    ('other', 'v', 'secret', 0, '{"projectId":"other"}', 'other')`;
+  await sql`insert into search_sessions (id, user_id, query, result_count, metadata, project_id)
+    select 'busy-' || n, 'u', 'q', 1, '{"projectId":"w"}'::jsonb, 'w' from generate_series(1, 19) n`;
   const [a, b] = await Promise.all([getVisit(scope), getVisit(scope)]);
   expect(a).toEqual(b); expect(a.searches).toBe(20); expect(a.emptySearches).toBe(1);
   expect(JSON.stringify(a)).not.toContain('private query');
   expect(await ack({ ...scope, userId: 'v' }, a.token)).toBe(false);
   expect(await ack({ ...scope, orgId: 'other', projectId: 'other' }, a.token)).toBe(false);
-  await sql`insert into search_sessions (id, user_id, query, result_count, metadata) values ('later', 'u', 'later', 2, '{"projectId":"w"}')`;
+  await sql`insert into search_sessions (id, user_id, query, result_count, metadata, project_id) values ('later', 'u', 'later', 2, '{"projectId":"w"}', 'w')`;
   expect(await getVisit(scope)).toEqual(a);
   expect((await Promise.all([ack(scope, a.token), ack(scope, a.token)])).sort()).toEqual([false, true]);
   const next = await getVisit(scope);
@@ -63,8 +63,8 @@ it("scopes activity and tokens, serializes concurrent reads, and retains activit
 });
 it("bounds retained evidence and labels truncation", async () => {
   const pending = await getVisit(scope); await ack(scope, pending.token);
-  await sql`insert into search_sessions (id, user_id, query, result_count, metadata)
-    select 'bulk-' || n, 'u', 'q', 0, '{"projectId":"w"}'::jsonb from generate_series(1, 1100) n`;
+  await sql`insert into search_sessions (id, user_id, query, result_count, metadata, project_id)
+    select 'bulk-' || n, 'u', 'q', 0, '{"projectId":"w"}'::jsonb, 'w' from generate_series(1, 1100) n`;
   const next = await getVisit(scope);
   expect(next.searches).toBe(1001); expect(next.capped).toBe(true);
 });
@@ -73,11 +73,11 @@ it("quiet activity accumulates across reads and acknowledgement consumes only ob
   const current = await getVisit(scope); await ack(scope, current.token);
   // Complete any capped remainder, then start a quiet batch.
   const remainder = await getVisit(scope); await ack(scope, remainder.token);
-  await sql`insert into search_sessions (id, user_id, query, result_count, metadata)
-    select 'quiet-' || n, 'u', 'q', 1, '{"projectId":"w"}'::jsonb from generate_series(1, 19) n`;
+  await sql`insert into search_sessions (id, user_id, query, result_count, metadata, project_id)
+    select 'quiet-' || n, 'u', 'q', 1, '{"projectId":"w"}'::jsonb, 'w' from generate_series(1, 19) n`;
   const quiet = await getVisit(scope); expect(quiet.searches).toBe(19);
   expect(await getVisit(scope)).toEqual(quiet);
-  await sql`insert into search_sessions (id, user_id, query, result_count, metadata) values ('threshold', 'u', 'q', 1, '{"projectId":"w"}')`;
+  await sql`insert into search_sessions (id, user_id, query, result_count, metadata, project_id) values ('threshold', 'u', 'q', 1, '{"projectId":"w"}', 'w')`;
   const busy = await getVisit(scope); expect(busy.searches).toBe(20);
   expect(await ack(scope, quiet.token)).toBe(false);
   expect(await ack(scope, busy.token)).toBe(true);
@@ -91,8 +91,8 @@ it.skipIf(!process.env.RECOMMENDATION_TEST_DATABASE_URL)("retains a transaction 
       const [a] = await tx`select pg_backend_pid() as pid`;
       const [b] = await sql`select pg_backend_pid() as pid`;
       expect(a!.pid).not.toBe(b!.pid);
-      await tx`insert into search_sessions (id, user_id, query, result_count, metadata)
-        values ('late-commit', 'u', 'q', 0, '{"projectId":"w"}')`;
+      await tx`insert into search_sessions (id, user_id, query, result_count, metadata, project_id)
+        values ('late-commit', 'u', 'q', 0, '{"projectId":"w"}', 'w')`;
       pending = await getVisit(scope);
       expect(pending.searches).toBe(0);
     });

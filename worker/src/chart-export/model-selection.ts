@@ -18,7 +18,7 @@ import {
   assertNoAutomaticSelectionDenied,
   creditsToDollars,
   isAutomaticSelectionDenied,
-  MAX_OUTPUT_USD_PER_MTOK_EXCLUSIVE,
+  OUTPUT_PRICE_CEILING_USD_PER_MTOK,
   pricing,
   visualExportCredits,
   type ChartGeneratorPriceCeiling,
@@ -62,8 +62,11 @@ export function chartGeneratorPriceCeiling(): ChartGeneratorPriceCeiling | null 
   };
 }
 
-/** The highest output price any chart generator may have: just under the routing catalog's exclusive $50 limit. */
-export const CHART_GENERATOR_MAX_OUTPUT_USD_PER_MTOK = MAX_OUTPUT_USD_PER_MTOK_EXCLUSIVE - 0.01;
+/**
+ * The highest output price any chart generator may have: the platform output ceiling every OpenRouter request carries
+ * (openrouter-routing.ts), just under the routing catalog's exclusive $50 limit. One constant, so the two never drift.
+ */
+export const CHART_GENERATOR_MAX_OUTPUT_USD_PER_MTOK = OUTPUT_PRICE_CEILING_USD_PER_MTOK;
 
 /**
  * Admitted chart generators, in preference order. Every entry must have a list price in `scripts/lib/model-prices.json`

@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, afterAll } from "vitest";
 import { createProjectIntakeFakes, fakeProject } from "./helpers/project-intake-fakes.js";
 
 /**
@@ -22,6 +22,19 @@ const mocks = vi.hoisted(() => ({
   hasRun: false,
 }));
 
+// Every intake response is labelled with the target project's canEdit (lib/reprocess-access withPayloadCanEdit, one
+// lookup per request: project-flags-cost.test.ts); the label itself is covered against a database
+// (editor-required-followup.db.test.ts). Here: the routes call it on what they return.
+const labelProjects = vi.hoisted(() => vi.fn(async (_c: unknown, payload: unknown) => payload));
+vi.mock("../lib/reprocess-access.js", async (load) => ({
+  ...(await load<typeof import("../lib/reprocess-access.js")>()),
+  withPayloadCanEdit: labelProjects,
+}));
+afterAll(() => {
+  // At least one intake response in this suite went through the label, with the payload the route answered.
+  expect(labelProjects).toHaveBeenCalled();
+  expect(labelProjects.mock.calls.some(([, payload]) => Boolean(payload && typeof payload === "object" && ("project" in payload || "result" in payload || "run" in payload)))).toBe(true);
+});
 vi.mock("../services/extracts.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../services/extracts.js")>();
   const { SpendBlockedError } = await import("../services/billing/spend-guard.js");

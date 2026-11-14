@@ -75,13 +75,14 @@ describe.skipIf(!client)("project state PostgreSQL aggregates", () => {
           ('{chunk3}', '{doc}', '{current-run}', '{user}', 2, 2, null, 'chunk3'),
           ('{invalid}', '{doc}', '{current-run}', '{user}', 3, 99, null, 'invalid'),
           ('{pending-chunk}', '{pending}', '{current-run}', '{user}', 0, 2, null, 'not searchable yet');
-        insert into search_sessions (id, user_id, query, result_count, created_at, metadata) values
-          ('{numeric}', '{user}', 'q', 1, now(), '{"projectId":"{state-project}","durationMs":100}'),
-          ('{multi}', '{user}', 'q', 0, now(), '{"projectIds":["{state-project}","{other-project}"],"durationMs":300}'),
-          ('{bad-number}', '{user}', 'q', 1, now(), '{"projectId":"{state-project}","durationMs":"invalid"}'),
-          ('{null}', '{user}', 'q', 1, now(), '{"projectId":"{state-project}","durationMs":null}'),
-          ('{bad-json}', '{user}', 'q', 1, now(), '"not json"'),
-          ('{other-search}', '{user}', 'q', 1, now(), '{"projectId":"{other-project}","durationMs":900}');
+        -- A session belongs to one project (search_sessions.project_id, 0141); a row without one counts nowhere.
+        insert into search_sessions (id, user_id, project_id, query, result_count, created_at, metadata) values
+          ('{numeric}', '{user}', '{state-project}', 'q', 1, now(), '{"projectId":"{state-project}","durationMs":100}'),
+          ('{multi}', '{user}', null, 'q', 0, now(), '{"projectIds":["{state-project}","{other-project}"],"durationMs":300}'),
+          ('{bad-number}', '{user}', '{state-project}', 'q', 1, now(), '{"projectId":"{state-project}","durationMs":"invalid"}'),
+          ('{null}', '{user}', '{state-project}', 'q', 1, now(), '{"projectId":"{state-project}","durationMs":null}'),
+          ('{bad-json}', '{user}', '{state-project}', 'q', 0, now(), '"not json"'),
+          ('{other-search}', '{user}', '{other-project}', 'q', 1, now(), '{"projectId":"{other-project}","durationMs":900}');
         -- Stamped with its tenant columns, as the usage ledgers write it (migration 0042).
         insert into usage_events (id, user_id, run_id, provider, model, metric, amount, unit, input_tokens, output_tokens, cost_cents, metadata, org_id, project_id) values
           ('{usage}', '{user}', '{current-run}', 'test', 'm', 'extract', 15, 'token', 10, 5, 0.005, '{"runId":"{current-run}"}', '{state-org}', '{state-project}'),
@@ -96,7 +97,7 @@ describe.skipIf(!client)("project state PostgreSQL aggregates", () => {
         expect(state.documents).toMatchObject({ total: 1, completed: 1, queued: 2, processing: 1, failed: 0, unknownPageCount: 0 });
         expect(state.pages).toEqual({ total: 3, indexed: 2, notIndexed: 1, basis: "text-searchable-unique-pages" });
         expect(state.storage).toMatchObject({ sourceMb: 2, documentsWithUnknownSize: 0 });
-        expect(state.searches).toEqual({ total: 4, recentCount: 4, recentZeroResultCount: 1, latencyMs: { sampleCount: 2, p50: 200, p95: 290, max: 300 } });
+        expect(state.searches).toEqual({ total: 4, recentCount: 4, recentZeroResultCount: 1, latencyMs: { sampleCount: 1, p50: 100, p95: 100, max: 100 } });
         expect(state.performance).toMatchObject({ completedRuns: 1, completedPages: 3, pagesPerMinute: 3 });
         expect(state.usage).toEqual({ inputTokens: 10, outputTokens: 5, costCents: 0.005 });
         const empty = await getProjectState({ ...args, projectId: id("empty") }, tx as unknown as SqlClient);

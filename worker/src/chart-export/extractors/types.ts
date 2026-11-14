@@ -1,4 +1,4 @@
-import type { VisualSpec } from "@docslurp/shared";
+import type { VisualSpec } from "@docslurp/shared/chart-export";
 
 export type DeterministicSource = "office-chart-xml" | "embedded-spec" | "svg-geometry";
 
@@ -29,11 +29,26 @@ export interface DeterministicVisual {
 
 export interface DeterministicRefusal { locator: string; reason: string }
 
+/**
+ * SVGs left for a later pass (never dropped): today those past the input's `maxSvgsPerInput`. Recorded as a range of
+ * ordinals (`svgIndex` = the first one's position among the input's SVGs in document / package order, `count` of them)
+ * and a closed reason, never by a name from the input.
+ */
+export interface DeterministicDeferral {
+  svgIndex: number;
+  count: number;
+  reason: "svg-document-limit" | "html-svg-limit" | "guest-deadline" | "visual-limit" | "package-part-limit" | "guest-deadline-part" | "unit-crashed" | "unit-timeout" | "output-limit";
+}
+
 export interface DeterministicVisualResult {
   schemaVersion: "chart-export-deterministic@v1";
   visuals: DeterministicVisual[];
   /** Parts that were skipped because a limit or parser refused them. */
   refusals: DeterministicRefusal[];
+  /** Parts deferred to a later pass; present only when non-empty. */
+  deferred?: DeterministicDeferral[];
+  /** Embedded-spec candidates past their caps or the deadline, plus refusals past the 1,000 listed; present when > 0. */
+  overflow?: number;
 }
 
 export function emptyVisual(source: DeterministicSource, locator: string): DeterministicVisual {

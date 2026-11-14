@@ -3,7 +3,7 @@ import { link, mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from "
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { dopplerAssetCaps, dopplerImageLimits, dopplerLedgerAssets, dopplerManifestV2Schema, parseDopplerManifest } from "@docslurp/shared";
+import { dopplerAssetCaps, dopplerImageLimits, dopplerLedgerAssets, dopplerManifestV2Schema, isDocumentAssetRow, parseDopplerManifest } from "@docslurp/shared";
 
 import { DopplerFigureRejection, dopplerFigureRecords, readDopplerFigureDir, readLedgerSpill, storeDopplerFigures, type DopplerFigureSet } from "../extractors/doppler-figures.js";
 import { ByteBudget } from "../extractors/doppler-upload.js";
@@ -13,7 +13,7 @@ async function rowsOf(set: DopplerFigureSet) {
   for await (const row of readLedgerSpill(set.ledger.spill)) rows.push(row);
   return rows;
 }
-import { v2Manifest, writeV2Folder, type V2Manifest } from "../test/doppler-manifest-v2.js";
+import { v2Manifest, writeV2Folder, V2_SOURCE_SHA, type V2Manifest } from "../test/doppler-manifest-v2.js";
 
 const DOC = { id: "0b6f7e8c-3c1a-4f7e-9a51-2a1d3e4f5a6b", userId: "user-1", runId: "run-1" };
 
@@ -204,7 +204,7 @@ describe("manifest v2: hostile or oversized manifests are refused", () => {
   it("refuses a link prefix other than the images/ folder the host asks for, and a manifest of another PDF", async () => {
     expect(await rule((m) => { m.link_prefix = "img/"; for (const e of m.images) if (e.link) e.link = `img/${e.path}`; })).toBe("link-prefix");
     expect(await rule(() => undefined, { sourceSha256: "c".repeat(64) })).toBe("source-mismatch");
-    expect(await rule(() => undefined, { sourceSha256: "a".repeat(64) })).toBe("accepted");
+    expect(await rule(() => undefined, { sourceSha256: V2_SOURCE_SHA })).toBe("accepted");
   });
 
   it("refuses files the manifest does not name, misplaced files, links and nesting", async () => {
@@ -270,6 +270,37 @@ describe("manifest v2: hostile or oversized manifests are refused", () => {
 });
 
 describe("version 1 maps into the ledger with what it has", () => {
+  it("a scan Doppler would not copy (skipped: scan-not-copyable) is the unlinked row render-images renders on the host", async () => {
+    const none = { file: null, format: null, bytes: null, sha256: null, width: null, height: null } as const;
+    const parsed = parseDopplerManifest({
+      version: "doppler-figures@1",
+      images: [
+        { id: "p1.1", page: 1, bbox: [0, 0, 612, 792], kind: "picture", fate: "background", ...none, skipped: "scan-not-copyable" },
+        { id: "p2.1", page: 2, bbox: [0, 0, 612, 792], kind: "mask", fate: "background", ...none, skipped: "scan-not-copyable" },
+        // Not a background picture or mask, or with an error: an `other` skip, never a host page.
+        { id: "p3.1", page: 3, bbox: [0, 0, 612, 792], kind: "picture", fate: "block", ...none, skipped: "scan-not-copyable" },
+        { id: "p4.g1", page: 4, bbox: [0, 0, 612, 792], kind: "vector", fate: "background", ...none, skipped: "scan-not-copyable" },
+        { id: "p5.1", page: 5, bbox: [0, 0, 612, 792], kind: "picture", fate: "background", ...none, skipped: "scan-not-copyable", error: "xref" },
+        // A page scan whose copy Doppler refused (error: xref): rendered on the host too; `copy` on any other fate stays `other`.
+        { id: "p6.1", page: 6, bbox: [0, 0, 612, 792], kind: "picture", fate: "page-scan", ...none, skipped: "copy", error: "xref" },
+        { id: "p7.1", page: 7, bbox: [0, 0, 612, 792], kind: "picture", fate: "block", ...none, skipped: "copy" },
+      ],
+    });
+    const rows = dopplerLedgerAssets(parsed!);
+    expect(rows.map((a) => [a.assetId, a.status, a.reason, a.fileOf])).toEqual([
+      ["p1.1", "unlinked", "scan-not-copyable", null],
+      ["p2.1", "unlinked", "scan-not-copyable", null],
+      ["p3.1", "not-extracted", "other", null],
+      ["p4.g1", "not-extracted", "other", null],
+      ["p5.1", "not-extracted", "error", null],
+      ["p6.1", "not-extracted", "copy", null],
+      ["p7.1", "not-extracted", "other", null],
+    ]);
+    expect(rows.every((row) => isDocumentAssetRow(row))).toBe(true);
+    const { hostPageImagePagesOf } = await import("../db/document-asset-ledger.js");
+    expect(await hostPageImagePagesOf(rows.map((row) => ({ ...row, storageKey: null })))).toEqual([1, 2, 6]);
+  });
+
   it("files are extracted, repeats and errors not extracted, fate skips unlinked, unknown values other", () => {
     const parsed = parseDopplerManifest({
       version: "doppler-figures@1",

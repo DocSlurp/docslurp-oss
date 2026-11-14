@@ -1,3 +1,4 @@
+import { withPayloadCanEdit } from "../lib/reprocess-access.js";
 import { Hono, type Context } from "hono";
 import type { PipelineFeatureOverrides } from "@docslurp/shared";
 import { runOriginOf } from "../lib/run-origin.js";
@@ -8,6 +9,7 @@ import {
   extractOptionsSchema,
   indexingModeSchema,
   pipelineFeatureOverridesSchema,
+  publicPipelineFeatureOverridesSchema,
   PROJECT_INPUT_MAX_LENGTH,
   projectTemplateKeySchema,
   type ExtractOptions,
@@ -83,7 +85,7 @@ const ingestUrlSchema = z.object({
     z.string().url(),
     z.object({ url: z.string().url(), canonicalId: canonicalIdSchema.optional() }),
   ])).min(1),
-  pipeline: pipelineFeatureOverridesSchema.optional(),
+  pipeline: publicPipelineFeatureOverridesSchema.optional(),
 }).extend(extractOptionsSchema.shape);
 
 const createDirectSessionSchema = z.object({
@@ -93,7 +95,7 @@ const createDirectSessionSchema = z.object({
   project: projectInputSchema.optional(),
   newProject: z.boolean().optional(),
   templateKey: projectTemplateKeySchema.optional(),
-  pipeline: pipelineFeatureOverridesSchema.optional(),
+  pipeline: publicPipelineFeatureOverridesSchema.optional(),
   files: z.array(directUploadFileSchema).min(1),
 }).extend(extractOptionsSchema.shape);
 
@@ -284,7 +286,7 @@ export const createExtractsRoutes = (ports: ProjectIntakePorts = projectIntakePo
         c.header("Idempotency-Replayed", "true");
       }
       if (result.temporalDeferred) c.header("X-Temporal-Deferred", "true");
-      return c.json(result.payload, result.status);
+      return c.json(await withPayloadCanEdit(c, result.payload), result.status);
     } catch (error) {
       await releaseFailedExtract(extractId, target, ports);
       return intakeFailure(c, error);
@@ -329,7 +331,7 @@ export const createExtractsRoutes = (ports: ProjectIntakePorts = projectIntakePo
         c.header("Idempotency-Replayed", "true");
       }
       if (result.temporalDeferred) c.header("X-Temporal-Deferred", "true");
-      return c.json(result.payload, result.status);
+      return c.json(await withPayloadCanEdit(c, result.payload), result.status);
     } catch (error) {
       await releaseFailedExtract(extractId, target, ports);
       return intakeFailure(c, error);

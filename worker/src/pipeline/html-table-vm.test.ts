@@ -7,9 +7,9 @@ vi.mock("./table-cells-guest.js", () => ({ readTableCells: local }));
 afterEach(() => { vi.unstubAllEnvs(); local.mockClear(); });
 const source = (name: string) => `<table><tr><td>${name.repeat(80)}</td></tr></table>`;
 function runner(invalid = false) { return { run: vi.fn(async (plan) => {
- const batch: string[] = JSON.parse(await readFile(plan.args[1], "utf8"));
+ const batch: string[] = JSON.parse(await readFile(plan.args.filter((a: string) => !a.startsWith("--"))[1], "utf8"));
  const cells = batch.map(s => [{ label: invalid ? "hostile\nlabel" : "row 1 column 1 rowspan 1 colspan 1", value: s.includes("tenantA") ? "tenantA".repeat(80) : "tenantB".repeat(80) }]);
- await writeFile(plan.args[2], JSON.stringify(cells));
+ await writeFile(plan.args.filter((a: string) => !a.startsWith("--"))[2], JSON.stringify(cells));
  return { stdout: "", stderr: "" };
 }) }; }
 describe("production HTML table boundary", () => {
@@ -24,14 +24,14 @@ describe("production HTML table boundary", () => {
  it("splits batches by encoded UTF-8 bytes for large tables", async () => {
   vi.stubEnv("NODE_ENV", "production");
   const sources=Array.from({length:4},(_,i)=>`<table><tr><td>${"界".repeat(3_000_000)}${i}</td></tr></table>`);
-  const run=vi.fn(async(plan)=>{const raw=await readFile(plan.args[1]);expect(raw.length).toBeLessThanOrEqual(32*1024*1024);const batch=JSON.parse(raw.toString());await writeFile(plan.args[2],JSON.stringify(batch.map(()=>[])));return {stdout:"",stderr:""};});
+  const run=vi.fn(async(plan)=>{const raw=await readFile(plan.args.filter((a: string) => !a.startsWith("--"))[1]);expect(raw.length).toBeLessThanOrEqual(32*1024*1024);const batch=JSON.parse(raw.toString());await writeFile(plan.args.filter((a: string) => !a.startsWith("--"))[2],JSON.stringify(batch.map(()=>[])));return {stdout:"",stderr:""};});
   await withPreparedHtmlTables(sources,{run},()=>{});expect(run).toHaveBeenCalledTimes(2);
  });
  it("applies the text budget across multiple batches", async () => {
   vi.stubEnv("NODE_ENV", "production");
   const sources=Array.from({length:65},(_,i)=>source(`table${i}`));
   const cells=Array.from({length:128},()=>({label:"row 1 column 1 rowspan 1 colspan 1",value:"x".repeat(4096)}));
-  const run=vi.fn(async(plan)=>{const batch=JSON.parse(await readFile(plan.args[1],"utf8"));await writeFile(plan.args[2],JSON.stringify(batch.map(()=>cells)));return {stdout:"",stderr:""};});
+  const run=vi.fn(async(plan)=>{const batch=JSON.parse(await readFile(plan.args.filter((a: string) => !a.startsWith("--"))[1],"utf8"));await writeFile(plan.args.filter((a: string) => !a.startsWith("--"))[2],JSON.stringify(batch.map(()=>cells)));return {stdout:"",stderr:""};});
   await expect(withPreparedHtmlTables(sources,{run},()=>{})).rejects.toThrow(/text exceeds limit/);expect(run).toHaveBeenCalledTimes(2);
  });
  it("rejects hostile guest labels and missing VM credentials without fallback", async () => {

@@ -49,6 +49,8 @@ const projectSettingsPipelinePatchObjectSchema = z.object({
   pdfRegionExtraction: z.boolean().optional(), visionFallback: z.boolean().optional(),
   /** Figure extraction from PDFs (on by default); off keeps existing figures until reprocess. */
   figures: z.boolean().optional(),
+  /** Finishing figures a pass left out: auto (queued on their own), manual (only on request) or off (figure-resume.ts). */
+  figureResume: z.enum(["auto", "manual", "off"]).optional(),
   /** Processing quality (fast / auto / good): the setting the ingest report's vision recommendations change. */
   quality: qualityModeSchema.optional(),
   /**

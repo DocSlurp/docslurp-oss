@@ -40,9 +40,10 @@ describe("pipeline text calls and the China-provider policy", () => {
 
   it("a default run sends price-routed models to their cheapest host, China-based ones included", async () => {
     const [body] = await textBodies("z-ai/glm-5.3-flash", { allowChinaProviders: true });
-    expect(body!.provider).toEqual({ sort: "price", quantizations: ["fp8", "fp16", "bf16", "fp32", "unknown"], allow_fallbacks: true });
+    // Every routed request carries the output-price ceiling under the $50/M cap.
+    expect(body!.provider).toEqual({ sort: "price", quantizations: ["fp8", "fp16", "bf16", "fp32", "unknown"], allow_fallbacks: true, max_price: { completion: 49.99 } });
     const [qwen] = await textBodies(DEFAULT_PIPELINE_TEXT_MODEL, { allowChinaProviders: true });
-    expect(qwen!.provider).toBeUndefined();
+    expect(qwen!.provider).toEqual({ max_price: { completion: 49.99 } });
   });
 });
 

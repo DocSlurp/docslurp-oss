@@ -11,13 +11,13 @@ const obs = (model: string, endpoint: string, input: number, output: number, ext
 
 const entries = (model: string, hosts: string[], options = "") => hosts.map((host, index) => `llm://openrouter/${model}?_provider=${host}${index === 0 ? options : ""}`);
 const [ocrA, ocrB, chat] = defineTierOptions([
-  { id: "ocr-a", capability: "page-ocr", pool: entries("acme/ocr-a", ["fireworks", "parasail", "together"], "&_sort=latency"), tiers: ["cheapest", "fastest", "best"], evalScore: 0.91, evalRef: "run-a" },
-  { id: "ocr-b", capability: "page-ocr", pool: entries("acme/ocr-b", ["wafer/nvfp4", "friendli"]), tiers: ["cheapest", "fastest", "best"], evalScore: 0.95, evalRef: "run-b" },
-  { id: "chat-a", capability: "chat", pool: entries("acme/chat", ["deepinfra/fp8"]), tiers: ["cheapest"], evalScore: null, evalRef: null },
+  { id: "ocr-a", capability: "page-ocr", pool: entries("acme/ocr-a", ["fireworks", "parasail", "together"], "&_sort=latency"), tiers: ["fastest", "balanced", "smart"], evalScore: 0.91, evalRef: "run-a" },
+  { id: "ocr-b", capability: "page-ocr", pool: entries("acme/ocr-b", ["wafer/nvfp4", "friendli"]), tiers: ["fastest", "balanced", "smart"], evalScore: 0.95, evalRef: "run-b" },
+  { id: "chat-a", capability: "chat", pool: entries("acme/chat", ["deepinfra/fp8"]), tiers: ["balanced"], evalScore: null, evalRef: null },
 ]) as [TierOption, TierOption, TierOption];
 const options = [ocrA, ocrB, chat];
 const problems = (uris: string[]) => parseProviderPool(uris).problems;
-const base = (over: Partial<TierSelectionInput>): TierSelectionInput => ({ capability: "page-ocr", tier: "cheapest", options, observations: [], unitRevenueUsd: null, unit: PAGE, now: NOW, ...over });
+const base = (over: Partial<TierSelectionInput>): TierSelectionInput => ({ capability: "page-ocr", tier: "balanced", options, observations: [], unitRevenueUsd: null, unit: PAGE, now: NOW, ...over });
 
 describe("provider pools", () => {
   it("parses llm:// entries: model from the path, model options from the query, pool options from _ params or the fragment", () => {
@@ -89,7 +89,25 @@ describe("tier selection", () => {
     expect(() => assertTierOptions([{ ...ocrA, evalScore: 1.5 }])).toThrow(/0-1/);
     expect(() => assertTierOptions([{ ...ocrA, evalRef: null }])).toThrow(/together/);
     expect(() => assertTierOptions([{ ...ocrA, model: "acme/other" }])).toThrow(/pool's model/);
-    expect(() => defineTierOptions([{ id: "bad", capability: "chat", pool: ["llm://openrouter/acme/m?_provider=a&_nope=1"], tiers: ["cheapest"], evalScore: null, evalRef: null }])).toThrow(/^tier option bad: .*unknown pool option _nope/);
+    expect(() => defineTierOptions([{ id: "bad", capability: "chat", pool: ["llm://openrouter/acme/m?_provider=a&_nope=1"], tiers: ["balanced"], evalScore: null, evalRef: null }])).toThrow(/^tier option bad: .*unknown pool option _nope/);
+  });
+
+  it("never lists or routes to a Pro/Ultra model, and never to a host billing at or above the $50/M output cap", () => {
+    expect(() => defineTierOptions([{ id: "pro", capability: "chat", pool: entries("acme/chat-pro", ["deepinfra"]), tiers: ["smart"], evalScore: 0.99, evalRef: "run-pro" }])).toThrow(/not allowed \(prohibited model\)/);
+    expect(() => defineTierOptions([{ id: "ultra", capability: "chat", pool: entries("acme/chat-ultra", ["deepinfra"]), tiers: ["smart"], evalScore: 0.99, evalRef: "run-ultra" }])).toThrow(/not allowed/);
+    // An option list built without assertTierOptions still cannot route "smart" to a Pro model.
+    const pro = { ...ocrB, id: "ocr-pro", model: "acme/ocr-pro", pool: { ...ocrB.pool, model: "acme/ocr-pro" }, evalScore: 0.99, evalRef: "run-pro" } as TierOption;
+    const unchecked = selectTierRoute(base({ tier: "smart", options: [ocrA, pro], observations: [obs("acme/ocr-pro", "wafer/nvfp4", 0.1, 0.2), obs("acme/ocr-a", "fireworks", 0.3, 1.2)] }));
+    expect(unchecked.basis).toBe("live");
+    if (unchecked.basis === "live") expect(unchecked.option.id).toBe("ocr-a");
+    const staticPick = selectTierRoute(base({ tier: "smart", options: [ocrA, pro] }));
+    expect(staticPick.basis === "static" && staticPick.option.id).toBe("ocr-a");
+    // Smart's best-scored option only has an over-cap host: the next score serves, never the $60/M host.
+    const capped = selectTierRoute(base({ tier: "smart", observations: [obs("acme/ocr-b", "wafer/nvfp4", 1, 60), obs("acme/ocr-a", "fireworks", 0.3, 1.2)] }));
+    expect(capped.basis).toBe("live");
+    if (capped.basis === "live") expect(capped.option.id).toBe("ocr-a");
+    const onlyOverCap = selectTierRoute(base({ options: [ocrA], observations: [obs("acme/ocr-a", "fireworks", 1, 50)] }));
+    expect(onlyOverCap.basis).toBe("none");
   });
 
   it("never routes to an observed endpoint outside the option's pool, however cheap", () => {
@@ -145,7 +163,7 @@ describe("tier selection", () => {
     expect(selectTierRoute(base({ options: [ocrA], observations, unitRevenueUsd: 0.0016 }))).toMatchObject({ provider: { order: ["parasail"] } });
     expect(selectTierRoute(base({ options: [ocrA], observations, unitRevenueUsd: 0.0016, preferredMargin: 0.1 }))).toMatchObject({ policy: "speed", provider: { order: ["fireworks"] }, marginWarning: null });
     expect(selectTierRoute(base({ options: [ocrA], observations, unitRevenueUsd: 0.0016, preferredMargin: 0.1, warnBelowMargin: 0.15 }))).toMatchObject({ provider: { order: ["fireworks"] }, marginWarning: { threshold: 0.15 } });
-    const [loose] = defineTierOptions([{ id: "loose", capability: "page-ocr", pool: entries("acme/ocr-a", ["fireworks", "parasail"], "#preferredMargin=0.1"), tiers: ["cheapest"], evalScore: null, evalRef: null }]);
+    const [loose] = defineTierOptions([{ id: "loose", capability: "page-ocr", pool: entries("acme/ocr-a", ["fireworks", "parasail"], "#preferredMargin=0.1"), tiers: ["balanced"], evalScore: null, evalRef: null }]);
     expect(selectTierRoute(base({ options: [loose!], observations, unitRevenueUsd: 0.0016 }))).toMatchObject({ provider: { order: ["fireworks"] } });
   });
 
@@ -182,25 +200,25 @@ describe("tier selection", () => {
   it("uses the first host of the first option, alone, when every candidate's observations are stale", () => {
     const stale = obs("acme/ocr-a", "fireworks", 0.3, 1.2, { observedAt: new Date(NOW.getTime() - 3 * 3600_000) });
     expect(selectTierRoute(base({ observations: [stale] }))).toMatchObject({ basis: "static", option: { id: "ocr-a" }, provider: { order: ["fireworks"], allow_fallbacks: false } });
-    expect(selectTierRoute(base({ tier: "best" }))).toMatchObject({ basis: "static", option: { id: "ocr-b" }, provider: { order: ["wafer/nvfp4"] } });
+    expect(selectTierRoute(base({ tier: "smart" }))).toMatchObject({ basis: "static", option: { id: "ocr-b" }, provider: { order: ["wafer/nvfp4"] } });
   });
 
-  it("best takes the top eval score that has a host within the margin, then its fastest host; unmeasured options never best", () => {
+  it("smart takes the top eval score that has a host within the margin, then its fastest host; unmeasured options never smart", () => {
     const observations = [
       obs("acme/ocr-a", "fireworks", 0.3, 1.2, { latencyP50Ms: 400 }),
       obs("acme/ocr-b", "wafer/nvfp4", 0.065, 0.24), obs("acme/ocr-b", "friendli", 0.15, 0.5, { latencyP50Ms: 1_500 }),
     ];
-    const best = selectTierRoute(base({ tier: "best", observations, unitRevenueUsd: 0.01 }));
+    const best = selectTierRoute(base({ tier: "smart", observations, unitRevenueUsd: 0.01 }));
     expect(best).toMatchObject({ basis: "live", option: { id: "ocr-b" }, provider: { order: ["friendli"] } });
     // ocr-b's hosts down: best falls to the next score rather than failing.
     const down = observations.map((observation) => observation.model === "acme/ocr-b" ? { ...observation, status: -1 } : observation);
-    expect(selectTierRoute(base({ tier: "best", observations: down, unitRevenueUsd: 0.01 }))).toMatchObject({ basis: "live", option: { id: "ocr-a" } });
-    expect(selectTierRoute(base({ capability: "chat", tier: "best", observations: [obs("acme/chat", "deepinfra/fp8", 0.1, 0.3)] }))).toMatchObject({ basis: "none" });
+    expect(selectTierRoute(base({ tier: "smart", observations: down, unitRevenueUsd: 0.01 }))).toMatchObject({ basis: "live", option: { id: "ocr-a" } });
+    expect(selectTierRoute(base({ capability: "chat", tier: "smart", observations: [obs("acme/chat", "deepinfra/fp8", 0.1, 0.3)] }))).toMatchObject({ basis: "none" });
   });
 
   it("a large pool still sends one host; the others are alternatives", () => {
     const hosts = Array.from({ length: 12 }, (_, index) => `h${index}`);
-    const [wide] = defineTierOptions([{ id: "wide", capability: "page-ocr", pool: entries("acme/ocr-a", hosts), tiers: ["cheapest"], evalScore: null, evalRef: null }]);
+    const [wide] = defineTierOptions([{ id: "wide", capability: "page-ocr", pool: entries("acme/ocr-a", hosts), tiers: ["balanced"], evalScore: null, evalRef: null }]);
     const observations = hosts.map((host, index) => obs("acme/ocr-a", host, 0.1, 0.5, { latencyP50Ms: 3_000 - index * 100 }));
     const selection = selectTierRoute(base({ options: [wide!], observations }));
     if (selection.basis !== "live") throw new Error(selection.basis);
@@ -209,7 +227,7 @@ describe("tier selection", () => {
   });
 
   it("applies a pool's _minUptime and _maxAge over the caller's defaults", () => {
-    const [strict] = defineTierOptions([{ id: "strict", capability: "page-ocr", pool: entries("acme/ocr-a", ["fireworks", "parasail"], "&_minUptime=99&_maxAge=5m"), tiers: ["cheapest"], evalScore: null, evalRef: null }]);
+    const [strict] = defineTierOptions([{ id: "strict", capability: "page-ocr", pool: entries("acme/ocr-a", ["fireworks", "parasail"], "&_minUptime=99&_maxAge=5m"), tiers: ["balanced"], evalScore: null, evalRef: null }]);
     const observations = [obs("acme/ocr-a", "fireworks", 0.3, 1.2, { uptime30m: 97 }), obs("acme/ocr-a", "parasail", 0.3, 1.2)];
     const selection = selectTierRoute(base({ options: [strict!], observations: [...observations, obs("acme/ocr-a", "parasail", 0.3, 1.2, { observedAt: new Date(NOW.getTime() - 60_000) })] }));
     if (selection.basis !== "live") throw new Error(selection.basis);

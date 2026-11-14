@@ -1,4 +1,4 @@
-import { VISUAL_SPEC_LIMITS } from "@docslurp/shared";
+import { VISUAL_SPEC_LIMITS } from "@docslurp/shared/chart-export";
 
 /**
  * Labels from customer files are data: strip control and bidi-override characters, collapse whitespace and cap the
@@ -6,12 +6,16 @@ import { VISUAL_SPEC_LIMITS } from "@docslurp/shared";
  */
 export function cleanLabel(value: unknown, max: number = VISUAL_SPEC_LIMITS.maxLabelChars): string {
   if (typeof value !== "string" && typeof value !== "number") return "";
-  const s = String(value)
+  // Cut before any regex or copy: the cost is O(max), not O(input) (council r6 H1). 4 code units per kept character
+  // leaves room for the stripped controls and collapsed whitespace of any real label.
+  const raw = String(value);
+  const s = (raw.length > 4 * max ? raw.slice(0, 4 * max) : raw)
     // eslint-disable-next-line no-control-regex
     .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f​-‏‪-‮⁦-⁩﻿]/g, "")
     .replace(/\s+/g, " ")
     .trim();
-  return [...s].slice(0, max).join("");
+  // At most `max` code units is at most `max` code points: nothing to cut, so skip the code-point copy.
+  return s.length <= max ? s : [...s].slice(0, max).join("");
 }
 
 export function cleanLabelOrNull(value: unknown): string | null {
@@ -23,8 +27,11 @@ export function cleanLabelOrNull(value: unknown): string | null {
 export function finiteOrNull(value: unknown): number | null {
   if (typeof value === "number") return Number.isFinite(value) ? value : null;
   if (typeof value !== "string") return null;
+  // No finite number needs this many characters; the cap and the unambiguous pattern (same language as
+  // /^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/, which split a digit run every possible way) keep this O(n) (council r8 H1).
+  if (value.length > 512) return null;
   const t = value.trim();
-  if (t === "" || !/^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/.test(t)) return null;
+  if (t === "" || !/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(t)) return null;
   const v = Number(t);
   return Number.isFinite(v) ? v : null;
 }
@@ -62,6 +69,8 @@ export function parseTickNumber(raw: string): { value: number; unit: string | nu
 /** Normalise a CSS/SVG colour to `#rrggbb` (or null for none/transparent/url()). */
 export function normalizeColor(raw: string | null | undefined): string | null {
   if (!raw) return null;
+  // No real colour is longer than this; the rgb() regex below backtracks quadratically on long hostile values.
+  if (raw.length > 64) return null;
   const t = raw.trim().toLowerCase();
   if (t === "" || t === "none" || t === "transparent" || t.startsWith("url(")) return null;
   const hex = /^#([0-9a-f]{3}|[0-9a-f]{6})$/.exec(t);

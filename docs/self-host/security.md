@@ -96,7 +96,8 @@ Scanner sessions follow these rules:
 | --- | --- |
 | `POSTGRES_PASSWORD`, `DATABASE_URL` | The database. Keep the password in `DATABASE_URL` in step with `POSTGRES_PASSWORD`. Postgres reads the password only when its volume is created, so editing the file does not change an existing database. |
 | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | Object storage. In this stack they are also the MinIO root user and password. |
-| `BETTER_AUTH_SECRET` | Better Auth, the sign-in layer. It is also the last fallback root for file proxy URL tokens. |
+| `BETTER_AUTH_SECRET` | Better Auth, the sign-in layer. It is also the last fallback root for file proxy URL tokens, and the root the chat evidence-tag key is derived from when `EVIDENCE_TAG_KEY` is unset. |
+| `EVIDENCE_TAG_KEY` (optional) | Keys the tags that delimit retrieved evidence in chat prompts and the per-org salt at the start of chat system prompts, so documents cannot forge evidence boundaries and orgs never share a cached prompt prefix. At least 32 characters; production refuses a shorter value. |
 | `OAUTH_TOKEN_ENCRYPTION_KEY` | OAuth tokens persisted in `oauth_accounts`. |
 | `CREDENTIALS_ENCRYPTION_KEY` | Connector credentials. |
 | `SECRETS_ENCRYPTION_KEY` | Project secrets stored at rest. It is also the first fallback root for file proxy URL tokens. |

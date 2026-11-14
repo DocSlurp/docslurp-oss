@@ -1,3 +1,4 @@
+import { managedPipelineFieldMessage, managedPipelineModelPaths } from "@docslurp/shared";
 import { quoteStoredDocuments } from "../services/stored-quote.js";
 import { chartExportOverrideError } from "../services/chart-export-availability.js";
 import { CHART_EXPORT_TIER_UNAVAILABLE_CODE } from "@docslurp/shared";
@@ -24,6 +25,7 @@ import { streamRunProgressSnapshots } from "../services/run-progress-stream.js";
 import { type RunStartOutcome } from "../services/run-lifecycle.js";
 import {
   controlRun,
+  RunControlForbiddenError,
   getRun,
   getRunProcessingPreview,
   getRunProgress,
@@ -37,7 +39,13 @@ import {
   retryRun
 } from "../services/runs.js";
 import { redactOperatorEvent, redactOperatorRun } from "../services/progress-snapshot.js";
+
+/** A run as the caller may read it: platform operators see everything; customers never see backend models or machines. */
+async function customerRun<R extends { stats?: unknown; pipeline?: unknown }>(c: Context, run: R): Promise<R> {
+  return await isPlatformAdminActor(getRequestActor(c)) ? run : redactOperatorRun(run);
+}
 import { acceptApiKeys } from "../lib/route-auth.js";
+import { denyReprocessOfVisible, editorRequired } from "../lib/reprocess-access.js";
 import { apiErrorResponse, apiStatusError } from "../lib/api-error.js";
 import { parseListLimit } from "../lib/list-cursor.js";
 import { inlineEstimate, jobMetaFor, jobStatusForMutation, recordJobMeta } from "../services/jobs.js";
@@ -55,6 +63,17 @@ async function denyRunContentUpdate(c: Context, runId: string): Promise<Response
   const run = await getRun(runId, actor.userId, { cost: false });
   if (!run || !await loadActorScopedProject(run.projectId, actor)) return apiStatusError(c, 404, "Run not found");
   return null;
+}
+
+/**
+ * Run reprocess and retry spend credits: a run outside the caller's reach is the same 404 as a missing one; a run the
+ * caller sees but may not reprocess (callerCanReprocess: editors, or a key with ingest) is 403.
+ */
+async function denyRunReprocess(c: Context, runId: string): Promise<Response | null> {
+  const actor = getRequestActor(c);
+  const run = await getRun(runId, actor.userId, { cost: false });
+  if (!run || !run.orgId || (actor.type === "apiKey" && !await loadActorScopedProject(run.projectId, actor))) return apiStatusError(c, 404, "Run not found");
+  return denyReprocessOfVisible(c, [{ orgId: run.orgId, projectId: run.projectId }]);
 }
 
 /**
@@ -300,7 +319,13 @@ export const runsRoutes = new Hono()
       }
     });
   })
-  .post("/preview", zValidator("json", runProcessingPreviewRequestSchema, runValidationHook), async (c) => {
+  .post("/preview", async (c, next) => {
+    // A preview calls no model, but it takes the same pipeline as a write: managed model fields are refused, not ignored.
+    const raw = await c.req.json().catch(() => null) as { pipeline?: unknown } | null;
+    const paths = managedPipelineModelPaths(raw?.pipeline);
+    if (paths.length) return apiErrorResponse(c, 400, "model_not_allowed", managedPipelineFieldMessage(paths), { paths });
+    await next();
+  }, zValidator("json", runProcessingPreviewRequestSchema, runValidationHook), async (c) => {
     const userId = c.get("sessionUser").id;
     const body = c.req.valid("json");
     try {
@@ -312,7 +337,8 @@ export const runsRoutes = new Hono()
     }
   })
   .post("/:runId/reprocess/estimate", zValidator("json", reprocessRunSchema, validationHook), async (c) => {
-    const denied = await denyRunContentUpdate(c, c.req.param("runId"));
+    // Same rule as the reprocess it prices (and the full-index estimate): editors, or a key with ingest (council L1).
+    const denied = await denyRunContentUpdate(c, c.req.param("runId")) ?? await denyRunReprocess(c, c.req.param("runId"));
     if (denied) return denied;
     const userId = c.get("sessionUser").id;
     const body = c.req.valid("json");
@@ -338,7 +364,7 @@ export const runsRoutes = new Hono()
   .post("/:runId/reprocess", zValidator("json", reprocessRunSchema, validationHook), async (c) => {
     const userId = c.get("sessionUser").id;
     const body = c.req.valid("json");
-    const denied = await denyRunContentUpdate(c, c.req.param("runId"));
+    const denied = await denyRunContentUpdate(c, c.req.param("runId")) ?? await denyRunReprocess(c, c.req.param("runId"));
     if (denied) return denied;
     const actor = getRequestActor(c);
     const inline = await inlineEstimate(
@@ -388,13 +414,15 @@ export const runsRoutes = new Hono()
 
     if (deferred) {
       c.header("X-Temporal-Deferred", "true");
-      return c.json({ run, warnings: [deferred], job }, 201);
+      return c.json({ run: await customerRun(c, run), warnings: [deferred], job }, 201);
     }
 
-    return c.json({ ...run, job }, 201);
+    return c.json({ ...(await customerRun(c, run)), job }, 201);
   })
   .post("/:runId/retry", async (c) => {
     const userId = c.get("sessionUser").id;
+    const deniedRetry = await denyRunContentUpdate(c, c.req.param("runId")) ?? await denyRunReprocess(c, c.req.param("runId"));
+    if (deniedRetry) return deniedRetry;
     const retried = await retryRun(c.req.param("runId"), userId);
 
     if (!retried) {
@@ -421,18 +449,21 @@ export const runsRoutes = new Hono()
 
     if (deferred) {
       c.header("X-Temporal-Deferred", "true");
-      return c.json({ run, warnings: [deferred] });
+      return c.json({ run: await customerRun(c, run), warnings: [deferred] });
     }
 
-    return c.json(run);
+    return c.json(await customerRun(c, run));
   })
   .post("/:runId/control", zValidator("json", controlRunSchema, validationHook), async (c) => {
     const userId = c.get("sessionUser").id;
     const body = c.req.valid("json");
-    const run = await controlRun(c.req.param("runId"), userId, {
-      action: body.action,
-      priority: body.priority
-    });
+    let run: Awaited<ReturnType<typeof controlRun>>;
+    try {
+      run = await controlRun(c.req.param("runId"), userId, { action: body.action, priority: body.priority });
+    } catch (error) {
+      if (error instanceof RunControlForbiddenError) return editorRequired(c);
+      throw error;
+    }
 
     if (!run) {
       return apiStatusError(c, 404, "Run not found");
@@ -455,7 +486,7 @@ export const runsRoutes = new Hono()
       }
     });
 
-    return c.json(run);
+    return c.json(await customerRun(c, run));
   });
 
 acceptApiKeys(runsRoutes, [

@@ -94,14 +94,14 @@ test("chatStream posts the question in the body to /v1/chat/stream and streams s
     ]);
   } });
   const events = [];
-  for await (const event of client.chatStream({ q: "hi", sessionId: "s1", model: "project:manuals" })) events.push(event);
+  for await (const event of client.chatStream({ q: "hi", sessionId: "s1", tier: "balanced" })) events.push(event);
   assert.deepEqual(events.map(event => event.event), ["status", "message", "done"]);
   assert.equal(events[1].data.answer, "Hi");
   assert.equal(events[2].data.sessionId, "s1");
   // The question is never in the URL.
   assert.equal(url, "https://example.test/v1/chat/stream");
   assert.equal(init_.method, "POST");
-  assert.deepEqual(JSON.parse(init_.body), { q: "hi", project: "manuals", sessionId: "s1", model: "project:manuals" });
+  assert.deepEqual(JSON.parse(init_.body), { q: "hi", project: "manuals", sessionId: "s1", tier: "balanced" });
   assert.equal(new Headers(init_.headers).get("Content-Type"), "application/json");
   assert.equal(accept, "text/event-stream");
 });
@@ -132,4 +132,14 @@ test("chatStream surfaces auth failures instead of finishing quietly", async () 
     async () => { for await (const _event of client.chatStream({ q: "hi" })) {} },
     error => error.status === 403,
   );
+});
+
+test("chat and chatStream refuse a backend model before any request", async () => {
+  let called = false;
+  const client = createDocSlurpClient({ apiUrl: "https://example.test", fetch: async () => { called = true; return new Response("{}"); } });
+  for (const model of ["anthropic/claude-haiku-5.5", "llm://openrouter/openai/gpt-6.1-sol"]) {
+    await assert.rejects(() => client.chat({ q: "hi", model }), (error) => error.code === "model_not_allowed" && /fastest, balanced, smart/.test(error.message));
+    await assert.rejects(async () => { for await (const _ of client.chatStream({ q: "hi", model })) { /* never */ } }, { name: "DocSlurpManagedModelError" });
+  }
+  assert.equal(called, false);
 });

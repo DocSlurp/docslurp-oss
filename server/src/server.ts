@@ -21,6 +21,7 @@ import { fileURLToPath } from "node:url";
 import { searchCompatRoutes } from "./routes/search-compat.js";
 import { serviceCors } from "./middleware/widget-cors.js";
 import { Hono } from "hono";
+import { EditorRequiredError } from "./lib/editor-required.js";
 
 import { env } from "./config.js";
 import { seedNonProductionUsers } from "./lib/seed-users.js";
@@ -29,7 +30,7 @@ import { setCurrentRequestError, requestContextMiddleware } from "./lib/request-
 import { multipartBodyLimit } from "./lib/upload-policy.js";
 import { emitPostHogApiLog } from "./lib/posthog-ai-observability.js";
 import { apiActorRateLimit, apiIpRateLimit, logRateLimitBackendAtStartup, warnSelfHostedBrowserKeysWithoutTrustedProxy } from "./middleware/rate-limit.js";
-import { chatConcurrencyLimit } from "./middleware/chat-concurrency.js";
+import { assertChatConcurrencyBackend, chatConcurrencyLimit } from "./middleware/chat-concurrency.js";
 import { sessionAuth } from "./middleware/session-auth.js";
 import { chatCompletionsRoutes } from "./routes/chat-completions.js";
 import { documentsRoutes } from "./routes/documents.js";
@@ -53,8 +54,10 @@ import { webRoutes } from "./routes/web.js";
 import { projectGraphRoutes } from "./routes/project-graph.js";
 import { artifactsRoutes } from "./routes/artifacts.js";
 import { inviteRoutes, metaRoutes, dashboardRoutes, waitlistRoutes } from "./routes/frontend.js";
+import { customerPipelineGuard } from "./middleware/customer-pipeline-guard.js";
 import { filesRoutes } from "./routes/files.js";
 import { capabilitiesRoutes } from "./routes/capabilities.js";
+import { ingestVersionRoutes } from "./routes/ingest-version.js";
 import { notificationsRoutes } from "./routes/notifications.js";
 import { feedbackRoutes } from "./routes/feedback.js";
 import { mcpRoutes } from "./routes/mcp.js";
@@ -66,6 +69,7 @@ import { samlCallbackRoutes, ssoRoutes } from "./routes/sso.js";
 import { connectorsRoutes } from "./routes/connectors.js";
 import { adminBillingRoutes } from "./routes/admin-billing.js";
 import { adminUsersRoutes } from "./routes/admin-users.js";
+import { adminProjectsRoutes } from "./routes/admin-projects.js";
 import { clientSurfaceMiddleware, clientSurfaceRecorder } from "./services/client-surface.js";
 import { drainSearchSessionWrites as drainSessionWrites } from "./search/session.js";
 import { drainSearchCharges } from "./search/lean-logging.js";
@@ -137,6 +141,8 @@ export function createApiApp(): Hono {
     // The request span records it (message, stack) once the response is sent.
     setCurrentRequestError(error);
     if (error instanceof QuoteSettingsError) return c.json({ error: error.message, code: error.code }, 400);
+    // A service's editor-only refusal (EditorRequiredError): 403 editor_required in the native envelope.
+    if (error instanceof EditorRequiredError) return c.json({ error: error.message, code: error.code }, 403);
     return error instanceof UnreadableSourceError
       ? c.json({ error: error.message, code: error.code }, error.statusCode)
       : spendAwareErrorHandler(error, c);
@@ -185,6 +191,9 @@ export function createApiApp(): Hono {
   // The Algolia adapter reads JSON itself; bound it like the other compat adapters.
   app.use("/compat/algolia/*", nativeBodyLimit(256 * 1024));
   app.use("*", rejectNulBytes);
+  // Backstop: no JSON response to a non-operator carries a pipeline's managed model fields (routes return customer views).
+  app.use("/v1/*", customerPipelineGuard);
+  app.use("/dashboard/*", customerPipelineGuard);
   app.use("/v1/*", rejectLegacyProjectSelection);
   // `/v1/projects/:slug|default/...` → resolved project UUID routes.
   const projectRefs = projectRefPath([projectsRoutes, chatInstructionsRoutes, connectorsRoutes, secretsRoutes, projectGraphRoutes]);
@@ -220,6 +229,7 @@ export function createApiApp(): Hono {
   app.route("/v1/files", filesRoutes);
   app.route("/v1/api-keys", apiKeysRoutes);
   app.route("/v1/capabilities", capabilitiesRoutes);
+  app.route("/v1/ingest-version", ingestVersionRoutes);
   app.route("/v1/notifications", notificationsRoutes);
   app.route("/v1/feedback", feedbackRoutes);
   app.route("/v1/search", searchRoutes);
@@ -237,6 +247,7 @@ export function createApiApp(): Hono {
   app.route("/v1/billing", billingRoutes);
   app.route("/v1/admin/billing", adminBillingRoutes);
   app.route("/v1/admin/users", adminUsersRoutes);
+  app.route("/v1/admin/projects", adminProjectsRoutes);
   app.route("/v1/projects", secretsRoutes);
   app.route("/v1/projects", projectGraphRoutes);
   app.route("/v1/user-settings", userSettingsRoutes);
@@ -298,6 +309,9 @@ async function stopApiBackgroundTasks(): Promise<void> {
 export function ensureApiStartup(): Promise<void> {
   if (!startupPromise) {
     startupPromise = (async () => {
+      // Environment only, so it runs first: production refuses to start when chat concurrency caps
+      // would be counted per process (no shared Redis, or half of a REST pair) without the explicit opt-out.
+      assertChatConcurrencyBackend();
       initializeObservability({ serviceName: "docslurp-api" });
       // An unknown DOCSLURP_CHART_EXPORT (or default) value is off (fail closed); say so once.
       const chartExportWarning = chartExportSwitchWarning(process.env);

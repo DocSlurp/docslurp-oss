@@ -197,7 +197,8 @@ export function acceptSandboxedPdfBatchEvent(job: SandboxedPdfBatchJob, raw: unk
       if (result!.figures !== undefined) fail("figures on a text result");
       const single: SandboxedPdfJob = { input: file.input, output: file.output };
       const slots = (processed as number | undefined) ?? (pages as number);
-      const accepted = acceptSandboxedPdfResult(single, result!, slots);
+      // A math batch runs pdftotext with -glyphs: its facts lose the walker-parity fields (acceptSandboxedPdfPageFacts).
+      const accepted = acceptSandboxedPdfResult(single, result!, slots, { glyphs: job.options.math });
       const jobs = textJobs.get(job) ?? new Map<number, SandboxedPdfJob>();
       textJobs.set(job, jobs);
       jobs.set(index as number, single);

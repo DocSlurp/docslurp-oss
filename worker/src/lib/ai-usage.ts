@@ -16,6 +16,9 @@ export interface WorkerAiUsageInput {
   metric: string;
   inputTokens?: number | null;
   outputTokens?: number | null;
+  /** Of inputTokens, those served from / written to the provider's prompt cache (else read from metadata). */
+  cachedInputTokens?: number | null;
+  cacheWriteInputTokens?: number | null;
   amount?: number;
   unit?: string;
   costCents?: number;

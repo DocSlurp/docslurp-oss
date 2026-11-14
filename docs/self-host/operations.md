@@ -257,10 +257,11 @@ version and the sha256 of the bytes parsers read. Every parser, the page
 renderer and materialization refuse a document without a decision from the
 current scan. That includes every document ingested before this upgrade. Its
 existing Markdown, search index and cached page images keep working. A page
-image that was never rendered gets HTTP 409 `quarantine_rescan_required`
-("This document needs to be scanned again; reprocess it to view pages"), and
-search materialization reports such pages with reason
-`quarantine-rescan-required`. Reprocessing a document runs quarantine again
+image that was never rendered answers the typed state `{ "status":
+"unavailable", "reason": "needs-reprocess", "canReprocess": ... }` (HTTP 200,
+see [ingest versions](../ingest-version.md)). Search materialization reports
+such pages with reason `quarantine-rescan-required` and the same typed
+`availability`. Reprocessing a document runs quarantine again
 first and records a decision.
 
 1. Drain every worker running an older release before starting new workers.

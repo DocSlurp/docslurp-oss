@@ -1,6 +1,7 @@
 import { readFile, writeFile } from "node:fs/promises";
 
 import { inspectQuarantineBytes } from "../lib/quarantine-bytes.js";
+import { GUEST_NODE_FLAGS } from "../sandbox/guest-node-flags.js";
 import type { CommandRunner } from "../tools/runner.js";
 
 /**
@@ -12,10 +13,14 @@ import type { CommandRunner } from "../tools/runner.js";
 export function withFakeParserVm(runner: CommandRunner): CommandRunner {
   const commands: string[] = [];
   const run = async (plan: { binary: string; args: string[] }) => {
-    commands.push(`${plan.binary} ${plan.args[0] ?? ""}`);
-    if (plan.binary !== "node" || !plan.args[0]?.endsWith("quarantine-inspect.mjs")) throw new Error(`fake parser VM refused: ${plan.binary} ${plan.args[0] ?? ""}`);
-    const options = JSON.parse(await readFile(plan.args[2]!, "utf8")) as { filename: string; policy: Parameters<typeof inspectQuarantineBytes>[2] };
-    await writeFile(plan.args[3]!, JSON.stringify(inspectQuarantineBytes(await readFile(plan.args[1]!), options.filename, options.policy)));
+    // The host passes exactly GUEST_NODE_FLAGS before the script (sandbox/guest-node-flags.ts); anything else is refused.
+    const flags = plan.args.slice(0, GUEST_NODE_FLAGS.length);
+    const [script, input, optionsFile, output] = plan.args.slice(GUEST_NODE_FLAGS.length);
+    commands.push(`${plan.binary} ${script ?? ""}`);
+    const flagsMatch = flags.length === GUEST_NODE_FLAGS.length && flags.every((flag, index) => flag === GUEST_NODE_FLAGS[index]);
+    if (plan.binary !== "node" || !flagsMatch || !script?.endsWith("quarantine-inspect.mjs")) throw new Error(`fake parser VM refused: ${plan.binary} ${plan.args.join(" ")}`);
+    const options = JSON.parse(await readFile(optionsFile!, "utf8")) as { filename: string; policy: Parameters<typeof inspectQuarantineBytes>[2] };
+    await writeFile(output!, JSON.stringify(inspectQuarantineBytes(await readFile(input!), options.filename, options.policy)));
     return { stdout: "", stderr: "", exitCode: 0 };
   };
   return Object.assign(Object.create(runner) as CommandRunner, { run, vmCommands: commands });

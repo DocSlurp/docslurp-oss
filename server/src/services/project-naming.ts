@@ -3,6 +3,9 @@ import path from "node:path";
 import { cleanDocumentTitle } from "@docslurp/shared";
 import { sql } from "../db.js";
 
+/** The pool, or the sweep's transaction. */
+type Db = typeof sql;
+
 /**
  * Automatic project titles move forward through phases, each a stronger signal
  * than the last: an untitled project (`empty`), its uploaded filenames
@@ -14,8 +17,8 @@ import { sql } from "../db.js";
  * The state lives in `project_search_settings.compat_metadata.autoTitle`
  * (`{ phase, name, source? }`). Automatic naming applies only while
  * `autoTitle.name` equals the project's name, so a manual rename stops it for
- * good. Renames run lazily (project reads, uploads and the first chat turn);
- * no timer or background job is involved.
+ * good. Upload titles are written by the upload itself; content titles by the
+ * maintenance sweep after ingest (sweepProjectAutoTitles). Project reads never rename.
  */
 export const AUTO_TITLE_PHASES = ["empty", "upload", "content", "chat"] as const;
 export type AutoTitlePhase = (typeof AUTO_TITLE_PHASES)[number];
@@ -99,8 +102,11 @@ export async function markProjectAutoNamed(projectId: string, userId: string, na
  * Same-name transitions still admit a metadata update without changing updated_at.
  * Returns whether the name changed.
  */
-async function applyAutoTitle(args: { projectId: string; currentName: string; name: string; phase: AutoTitlePhase; source?: AutoTitleSource }): Promise<boolean> {
-  const rows = await sql<{ renamed: boolean }[]>`
+async function applyAutoTitle(
+  args: { projectId: string; currentName: string; name: string; phase: AutoTitlePhase; source?: AutoTitleSource },
+  db: Db = sql,
+): Promise<boolean> {
+  const rows = await db<{ renamed: boolean }[]>`
     with admitted as (
       update projects set name = ${args.name},
         updated_at = case when name <> ${args.name} then now() else updated_at end
@@ -155,15 +161,100 @@ export async function nameProjectFromUpload(args: { projectId: string; filenames
   return (await applyAutoTitle({ projectId: args.projectId, currentName: row.name, name, phase: "upload" })) ? name : null;
 }
 
+const AUTO_TITLE_SWEEP_BATCH = 50;
+/** Batches per sweep, so a backlog (first run, or after an outage) drains over a few ticks without one long pass. */
+const AUTO_TITLE_SWEEP_MAX_BATCHES = 10;
+const AUTO_TITLE_SWEEP_LOCK = "project-auto-title-sweep";
+
 /**
- * Advances automatic titles from content (lazily, on project reads). Content prefers the first stored
+ * After ingest: refines the automatic titles of projects whose current corpus
+ * changed since the sweep last examined them. project_corpus_stats.updated_at
+ * moves as documents complete (trigger-maintained); auto_title_checked_at is
+ * the updated_at the sweep last saw (0154). A project is pending while the two
+ * differ, with no lookback window, and the oldest change goes first: a project
+ * the sweep cannot rename is marked examined like any other, so it cannot hold
+ * a place in the queue, and an outage of any length is caught up afterwards.
+ *
+ * Runs from the maintenance sweep, so project reads (dashboard, chat, search)
+ * never write. One instance at a time (transaction-scoped advisory lock per
+ * batch); the others skip the tick. Returns the number of projects examined.
+ */
+export async function sweepProjectAutoTitles(options: { batchSize?: number; maxBatches?: number } = {}): Promise<number> {
+  const batchSize = options.batchSize ?? AUTO_TITLE_SWEEP_BATCH;
+  let examined = 0;
+  for (let i = 0; i < (options.maxBatches ?? AUTO_TITLE_SWEEP_MAX_BATCHES); i += 1) {
+    // One transaction per batch: claim, read evidence, rename, checkpoint, commit. The claim row-locks each
+    // project's stats row, and a summary write locks the same row (0154 trigger), so the two serialize:
+    // - a summary written while the batch holds the row waits, then clears the checkpoint (pending again);
+    // - a summary transaction already holding the row makes the claim skip it (still pending);
+    // - a summary committed before the claim is visible to the evidence read.
+    // A crash or failed rename rolls the checkpoint back with everything else. The advisory lock keeps one sweep
+    // at a time, so overlapping sweeps cannot apply stale evidence over newer evidence.
+    // Bounded: the claimed stats rows block summary writes and document completions for those projects until this
+    // commits, so the batch never waits long on another lock or runs long. A timeout (or a deadlock) rolls the whole
+    // batch back; its projects stay pending and the next tick retries.
+    let batch: { claimed: number } | null;
+    try {
+      batch = await sql.begin(async (transaction) => {
+        const tx = transaction as unknown as Db;
+        await tx`set local lock_timeout = '2s'`;
+        await tx`set local statement_timeout = '10s'`;
+        const [lock] = await tx<{ locked: boolean }[]>`select pg_try_advisory_xact_lock(hashtext(${AUTO_TITLE_SWEEP_LOCK})) as locked`;
+        if (!lock?.locked) return null;
+        // updated_at as text: a JS Date drops the microseconds the comparison needs.
+        const rows = await tx<{ id: string; seen: string }[]>`
+          select cs.project_id as id, cs.updated_at::text as seen
+          from project_corpus_stats cs
+          where cs.auto_title_checked_at is distinct from cs.updated_at
+          order by cs.updated_at, cs.project_id
+          limit ${batchSize}
+          for update skip locked
+        `;
+        if (rows.length === 0) return { claimed: 0 };
+        const ids = rows.map((row) => row.id);
+        const eligible = await tx<{ id: string }[]>`
+          select w.id from projects w join project_search_settings s on s.project_id = w.id
+          where w.id = any(${tx.array(ids)}::text[]) and s.compat_metadata -> 'autoTitle' ->> 'name' = w.name
+            and (
+              s.compat_metadata -> 'autoTitle' ->> 'phase' in ('empty', 'upload')
+              or (s.compat_metadata -> 'autoTitle' ->> 'phase' = 'content'
+                and coalesce(s.compat_metadata -> 'autoTitle' ->> 'source', 'heading') <> 'summary')
+            )
+        `;
+        await refineProjectNames(eligible.map((row) => row.id), tx);
+        // Recorded as the updated_at that was read: a document completing after the claim waits for this commit and
+        // then moves updated_at past it, so the project is pending again.
+        await tx`
+          update project_corpus_stats cs set auto_title_checked_at = v.seen::timestamptz
+          from unnest(${tx.array(ids)}::text[], ${tx.array(rows.map((row) => row.seen))}::text[]) as v(id, seen)
+          where cs.project_id = v.id
+        `;
+        return { claimed: rows.length };
+      });
+    } catch (error) {
+      const code = (error as { code?: string }).code;
+      if (code !== "55P03" && code !== "57014" && code !== "40P01") throw error;
+      console.warn(`[project-naming] status=sweep-batch-rolled-back code=${code}: projects stay pending for the next sweep`);
+      break;
+    }
+    // Another instance holds the lock and is doing this work.
+    if (!batch) break;
+    examined += batch.claimed;
+    // A short page is the end of what can be claimed now; rows held by ingest wait for the next sweep.
+    if (batch.claimed < batchSize) break;
+  }
+  return examined;
+}
+
+/**
+ * Advances automatic titles from content (after ingest, from the maintenance sweep). Content prefers the first stored
  * document summary over the first chunk heading or Index Map title; a
  * heading-titled project is upgraded once when a summary arrives. A manual
  * edit stops automatic naming.
  */
-export async function refineProjectNames(projectIds: string[]) {
+export async function refineProjectNames(projectIds: string[], db: Db = sql) {
   if (!projectIds.length) return;
-  const rows = await sql<{ id: string; name: string; phase: AutoTitlePhase; summary: string | null; title: string | null }[]>`
+  const rows = await db<{ id: string; name: string; phase: AutoTitlePhase; summary: string | null; title: string | null }[]>`
     select w.id, w.name,
       s.compat_metadata -> 'autoTitle' ->> 'phase' as phase,
       (select ds.summary from documents d
@@ -204,12 +295,12 @@ export async function refineProjectNames(projectIds: string[]) {
     const fromSummary = row.summary ? projectSummarySubject(row.summary) : null;
     // Within the content phase only a summary may replace a heading-derived title.
     if (row.phase === "content") {
-      if (fromSummary) await applyAutoTitle({ projectId: row.id, currentName: row.name, name: fromSummary, phase: "content", source: "summary" });
+      if (fromSummary) await applyAutoTitle({ projectId: row.id, currentName: row.name, name: fromSummary, phase: "content", source: "summary" }, db);
       continue;
     }
     const fromHeading = row.title ? projectSubject(row.title) : null;
     const name = fromSummary ?? fromHeading;
     if (!name) continue;
-    await applyAutoTitle({ projectId: row.id, currentName: row.name, name, phase: "content", source: fromSummary ? "summary" : "heading" });
+    await applyAutoTitle({ projectId: row.id, currentName: row.name, name, phase: "content", source: fromSummary ? "summary" : "heading" }, db);
   }
 }

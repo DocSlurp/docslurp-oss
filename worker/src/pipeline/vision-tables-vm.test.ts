@@ -14,6 +14,7 @@ vi.mock("./vision-tables-guest.js", async (importOriginal) => {
 
 import * as guestModule from "./vision-tables-guest.js";
 import { renderVisionTablePages, sanitizeVisionPageTables } from "./vision-tables-vm.js";
+import { GUEST_NODE_FLAGS } from "../sandbox/guest-node-flags.js";
 
 const actual = (guestModule as unknown as { __actual: typeof import("./vision-tables-guest.js") }).__actual;
 
@@ -22,10 +23,10 @@ function vmRunner(transform?: (result: unknown[]) => unknown) {
   return {
     run: vi.fn(async (plan: { binary: string; args: string[] }) => {
       expect(plan.binary).toBe("node");
-      expect(plan.args[0]).toMatch(/vision-tables\.mjs$/);
-      const pages = JSON.parse(await readFile(plan.args[1]!, "utf8"));
+      expect(plan.args[GUEST_NODE_FLAGS.length + 0]).toMatch(/vision-tables\.mjs$/);
+      const pages = JSON.parse(await readFile(plan.args[GUEST_NODE_FLAGS.length + 1]!, "utf8"));
       const result = actual.readVisionTablesBatch(pages);
-      await writeFile(plan.args[2]!, JSON.stringify(transform ? transform(result) : result));
+      await writeFile(plan.args[GUEST_NODE_FLAGS.length + 2]!, JSON.stringify(transform ? transform(result) : result));
       return { stdout: "", stderr: "" };
     }),
   };

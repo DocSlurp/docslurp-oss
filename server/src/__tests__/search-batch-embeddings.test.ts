@@ -15,6 +15,9 @@ const { prefetchBatchQueryEmbeddings } = await import("../search/batch-embedding
 const { embeddingCache, resetEmbeddingCacheForTests } = await import("../search/embedding-cache.js");
 const { queryEmbeddingCacheKey } = await import("../search/session-planner.js");
 
+/** The explicit search access scope the route passes with each batch item. */
+const S = { orgId: "o", projectIds: "org", modeCeiling: null } as const;
+
 function context(privacyMode: "standard" | "strict-privacy" = "standard") {
   const pipeline = { ...normalizePipelineFeatures(null), privacyMode };
   return { scope: { projectId: "w", orgId: "o" }, settings: { ...defaultProjectSearchSettings, projectId: "w", userId: "u" }, indexing: { pipeline, indexConfigs: {} } };
@@ -36,7 +39,7 @@ beforeEach(() => {
 describe("batch query embeddings", () => {
   it("embeds a batch's distinct query texts in one call, seeds the cache and records usage once", async () => {
     mocks.context.mockResolvedValue(context());
-    const items = ["pump seals", "valve torque", "pump seals", "bearing wear"].map((query) => ({ query, projectId: "w", options: {} }));
+    const items = ["pump seals", "valve torque", "pump seals", "bearing wear"].map((query) => ({ query, projectId: "w", scope: S, options: {} }));
     expect(await prefetchBatchQueryEmbeddings(items, "u")).toEqual({ prefetched: 3, calls: 1 });
     expect(mocks.embedConfiguredTexts).toHaveBeenCalledTimes(1);
     expect(mocks.embedConfiguredTexts.mock.calls[0]![0].values).toEqual(["pump seals", "valve torque", "bearing wear"]);
@@ -50,13 +53,13 @@ describe("batch query embeddings", () => {
   it("skips queries that would not embed their own text, and strict-privacy projects", async () => {
     mocks.context.mockResolvedValue(context());
     await prefetchBatchQueryEmbeddings([
-      { query: "a", projectId: "w", options: { useHyDE: true } },
-      { query: "b", projectId: "w", options: { queryRewrite: true } },
-      { query: "c", projectId: "w", options: {} },
+      { query: "a", projectId: "w", scope: S, options: { useHyDE: true } },
+      { query: "b", projectId: "w", scope: S, options: { queryRewrite: true } },
+      { query: "c", projectId: "w", scope: S, options: {} },
     ], "u");
     expect(mocks.embedConfiguredTexts).not.toHaveBeenCalled();
     mocks.context.mockResolvedValue(context("strict-privacy"));
-    await prefetchBatchQueryEmbeddings([{ query: "a", projectId: "w", options: {} }, { query: "b", projectId: "w", options: {} }], "u");
+    await prefetchBatchQueryEmbeddings([{ query: "a", projectId: "w", scope: S, options: {} }, { query: "b", projectId: "w", scope: S, options: {} }], "u");
     expect(mocks.embedConfiguredTexts).not.toHaveBeenCalled();
     expect(mocks.recordUsageEvent).not.toHaveBeenCalled();
   });
@@ -64,7 +67,7 @@ describe("batch query embeddings", () => {
   it("does nothing for projects off native search (flag off keeps per-query embeddings)", async () => {
     vi.stubEnv("SEARCH_LANCEDB_NATIVE_PROJECTS", "other");
     mocks.context.mockResolvedValue(context());
-    expect(await prefetchBatchQueryEmbeddings([{ query: "a", projectId: "w", options: {} }, { query: "b", projectId: "w", options: {} }], "u"))
+    expect(await prefetchBatchQueryEmbeddings([{ query: "a", projectId: "w", scope: S, options: {} }, { query: "b", projectId: "w", scope: S, options: {} }], "u"))
       .toEqual({ prefetched: 0, calls: 0 });
     expect(mocks.context).not.toHaveBeenCalled();
     expect(mocks.embedConfiguredTexts).not.toHaveBeenCalled();
@@ -72,7 +75,7 @@ describe("batch query embeddings", () => {
 
   it("leaves the searches to embed one by one when the project is not readable", async () => {
     mocks.context.mockRejectedValue(new Error("Project not found"));
-    expect(await prefetchBatchQueryEmbeddings([{ query: "a", projectId: "w", options: {} }, { query: "b", projectId: "w", options: {} }], "u"))
+    expect(await prefetchBatchQueryEmbeddings([{ query: "a", projectId: "w", scope: S, options: {} }, { query: "b", projectId: "w", scope: S, options: {} }], "u"))
       .toEqual({ prefetched: 0, calls: 0 });
     expect(mocks.embedConfiguredTexts).not.toHaveBeenCalled();
   });

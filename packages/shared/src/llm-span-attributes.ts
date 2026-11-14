@@ -76,6 +76,11 @@ export class LlmResponseScanner {
     if (input !== undefined) attributes["gen_ai.usage.input_tokens"] = input;
     if (output !== undefined) attributes["gen_ai.usage.output_tokens"] = output;
     if (cost !== undefined) attributes["docslurp.llm.cost_usd"] = cost;
+    // Prompt-cache reads and writes (prompt_tokens_details / input_tokens_details), which SigNoz prices separately.
+    const cacheRead = numberField(usage, "cached_tokens");
+    const cacheWrite = numberField(usage, "cache_write_tokens");
+    if (cacheRead !== undefined && cacheRead > 0) attributes["gen_ai.usage.cache_read.input_tokens"] = cacheRead;
+    if (cacheWrite !== undefined && cacheWrite > 0) attributes["gen_ai.usage.cache_creation.input_tokens"] = cacheWrite;
     if (!attributes["docslurp.llm.upstream_provider"]) {
       const provider = stringField(this.tail, "provider");
       if (provider) attributes["docslurp.llm.upstream_provider"] = provider;
