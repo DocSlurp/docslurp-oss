@@ -419,12 +419,16 @@ class PdfFile:
         self.trailer = {}
         self.cache = {}
         self.objstm_cache = collections.OrderedDict()
-        self._load_xref()
-        if 'Encrypt' in self.trailer:
-            raise Unknown('encrypted')
-        self.catalog = self.deref(self.trailer.get('Root'))
-        if not isinstance(self.catalog, dict):
-            raise Unknown('no-catalog')
+        try:
+            self._load_xref()
+            if 'Encrypt' in self.trailer:
+                raise Unknown('encrypted')
+            self.catalog = self.deref(self.trailer.get('Root'))
+            if not isinstance(self.catalog, dict):
+                raise Unknown('no-catalog')
+        except BaseException:
+            os.close(self.fd)   # a failed open keeps no descriptor (a LayoutDocument tries again on every call)
+            raise
 
     def close(self):
         try:

@@ -514,7 +514,7 @@ export function acceptSandboxedPdfResult(job: SandboxedPdfJob, result: Sandboxed
       console.warn(`[vm-pdf] layout walker unknown reason=${walkerUnknown.reason} pages=${walkerUnknown.pages}`);
     }
     if (layout.size > 0) reportedLayoutFacts.set(job, layout);
-    else console.warn("[vm-pdf] layout facts unusable; routing continues without them");
+    else if (!walkerUnknown) console.warn("[vm-pdf] layout facts unusable; routing continues without them");
     result = { ...result, layoutFacts: undefined };
   }
   const raw: unknown = result.ocrPages;

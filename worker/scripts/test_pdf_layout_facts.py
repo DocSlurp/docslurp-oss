@@ -1253,11 +1253,13 @@ class LayoutDocumentTest(Scratch):
         intact = self.write(TreeBuilder().build({'kids': ['P', 'P']}), 'intact.pdf')
         self.assertNotIn('walkerUnknown', facts.layout_facts(intact, None, None, None, 1, 2))
         garbage = self.write(b'%PDF-1.4 not a pdf', 'garbage.pdf')
+        before = len(os.listdir('/proc/self/fd'))
         with facts.LayoutDocument(garbage) as document:
-            for _ in range(2):
+            for _ in range(50):
                 with self.assertRaises(facts.Unknown):
                     facts.walk_document(garbage, 1, 1, document=document)
                 self.assertIsNone(document._file)
+        self.assertEqual(len(os.listdir('/proc/self/fd')), before)   # a failed open keeps no descriptor
 
     def test_a_document_is_bound_to_its_path(self):
         a = self.write(TreeBuilder().build({'kids': ['P']}), 'a.pdf')
