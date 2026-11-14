@@ -35,6 +35,8 @@ type Entry = {
   /** Data revision of the last projection; organization revision of the last authorization. */
   version?: string; accessVersion?: string;
   revision: number; dirty: boolean;
+  /** A sweep has tried this entry; a subscribe-time sweep takes only entries no sweep has tried. */
+  attempted?: boolean;
 };
 
 /**
@@ -64,6 +66,8 @@ export class RealtimeBroker {
   private kickTimer?: ReturnType<typeof setTimeout>;
   /** A subscription arrived while a sweep was running; sweep again as soon as it ends. */
   private rerun = false;
+  /** An interval sweep found another sweep running; it runs as soon as that one ends, so subscribes cannot starve it. */
+  private fullPending = false;
   constructor(private backend: RealtimeBackend, private intervalMs = 1_000) {}
   async subscribe(userId: string, resource: DashboardResource, observer: Observer): Promise<() => void> {
     if (this.closed) throw new Error("draining");
@@ -110,8 +114,10 @@ export class RealtimeBroker {
    * Gives a new subscription its first snapshot soon after it subscribes instead of up to one interval later.
    * This sweep serves only entries that have never been projected. Entries that already have a snapshot,
    * whoever owns them, are re-authorized and re-projected on the interval alone, so one client's subscribes
-   * cannot raise the rate of anyone else's projections (or of its own). Subscriptions that arrive during a
-   * sweep get the next one as soon as it ends. Authorization before projection is unchanged.
+   * cannot raise the rate of anyone else's projections (or of its own), and an entry whose first projection
+   * failed is retried on the interval, not by the next subscribe. Nor can they lower it: an interval sweep that
+   * lands on a running one is deferred, not dropped (see tick). Subscriptions that arrive during a sweep get
+   * the next one as soon as it ends. Authorization before projection is unchanged.
    */
   private kick() {
     if (this.closed) return;
@@ -120,15 +126,18 @@ export class RealtimeBroker {
     this.kickTimer = setTimeout(() => { this.kickTimer = undefined; void this.tick({ onlyNew: true }); }, 10);
     this.kickTimer.unref();
   }
-  /** Resolves false when it did nothing because another sweep was still running. */
+  /**
+   * Resolves false when another sweep was still running. A full sweep that finds one running is not lost: it runs
+   * when that one ends, so back-to-back first-snapshot sweeps cannot keep existing subscribers from their updates.
+   */
   async tick(options: { onlyNew?: boolean } = {}): Promise<boolean> {
-    if (this.running) return false;
+    if (this.running) { if (!options.onlyNew) this.fullPending = true; return false; }
     if (this.closed || !this.entries.size) return true;
-    // Never projected: no version yet. A failed first projection stays in this set and is retried on the interval too.
     const entries = options.onlyNew
-      ? [...this.entries.values()].filter(entry => entry.version === undefined)
+      ? [...this.entries.values()].filter(entry => entry.version === undefined && !entry.attempted)
       : [...this.entries.values()];
     if (!entries.length) return true;
+    for (const entry of entries) entry.attempted = true;
     this.running = true;
     try {
       realtimeMetrics.revisionQueries++;
@@ -186,7 +195,9 @@ export class RealtimeBroker {
     } catch { realtimeMetrics.errors++; for (const entry of this.entries.values()) for (const observer of entry.observers) observer.failed?.(); }
     finally {
       this.running = false;
-      if (this.rerun) { this.rerun = false; this.kick(); }
+      // The deferred full sweep also serves anything a kick was waiting for.
+      if (this.fullPending && !this.closed) { this.fullPending = false; this.rerun = false; void this.tick(); }
+      else if (this.rerun) { this.rerun = false; this.kick(); }
     }
     return true;
   }

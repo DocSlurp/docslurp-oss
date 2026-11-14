@@ -178,3 +178,39 @@ it("a subscribe never re-projects or re-authorizes entries that already have a s
   expect(victim).toHaveLength(2);
   closeVictim(); closes.forEach(close => close()); await broker.close();
 });
+it("keeps the interval sweep running for existing subscribers while new subscriptions keep arriving", async () => {
+  // Each new resource gets its own first-snapshot sweep; with slow projections they run back to back.
+  let revision = 1;
+  const backend: RealtimeBackend = { authorize: async (_user, r) => (r as { orgId: string }).orgId,
+    project: async (user) => { if (user === "churner") await new Promise(done => setTimeout(done, 40)); return { revision }; },
+    revisions: async ids => new Map(ids.map(id => [id, id === "victim-org" ? String(revision) : "1"])), listen: async () => async () => {} };
+  const broker = new RealtimeBroker(backend, 100);
+  const received: unknown[] = [];
+  const detach = [await broker.subscribe("victim", { kind: "activity", orgId: "victim-org" }, async data => { received.push(data); })];
+  await vi.waitFor(() => expect(received).toHaveLength(1));
+  let page = 0;
+  const churn = setInterval(() => { void broker.subscribe("churner", { kind: "economics", orgId: "churn-org", page: page++ }, async () => {}).then(d => detach.push(d)); }, 15);
+  try {
+    for (let n = 0; n < 10; n++) { revision++; await new Promise(done => setTimeout(done, 100)); }
+  } finally { clearInterval(churn); }
+  await vi.waitFor(() => expect(received.at(-1)).toEqual({ revision }));
+  // Ten changes over one second at a 100 ms interval: most of them arrive, where a dropped interval sweep delivered almost none.
+  expect(received.length).toBeGreaterThanOrEqual(6);
+  detach.forEach(fn => fn()); await broker.close();
+});
+it("leaves an entry whose first projection failed to the interval, not to the next subscribe", async () => {
+  const project = vi.fn(async (user: string) => { if (user === "broken") throw new Error("projection failed"); return {}; });
+  const backend: RealtimeBackend = { authorize: async () => "org", project,
+    revisions: async () => new Map([["org", "1"]]), listen: async () => async () => {} };
+  const broker = new RealtimeBroker(backend, 60_000);
+  const detach = [await broker.subscribe("broken", resource, Object.assign(async () => {}, { failed: () => {} }))];
+  await vi.waitFor(() => expect(project).toHaveBeenCalledTimes(1));
+  for (let n = 0; n < 5; n++) {
+    detach.push(await broker.subscribe(`user-${n}`, resource, async () => {}));
+    await vi.waitFor(() => expect(project).toHaveBeenCalledWith(`user-${n}`, resource));
+  }
+  expect(project.mock.calls.filter(([user]) => user === "broken")).toHaveLength(1);
+  await broker.tick();
+  expect(project.mock.calls.filter(([user]) => user === "broken")).toHaveLength(2);
+  detach.forEach(fn => fn()); await broker.close();
+});

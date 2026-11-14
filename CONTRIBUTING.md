@@ -25,7 +25,8 @@ pnpm dev:worker     # worker, in a second terminal
 ```
 
 `pnpm db:seed` can be run again at any time. A database seeded before the seed ids became UUIDs (organization
-`seed-shared-org`) is refused: reset it (`docker compose down -v`, then `pnpm db:up && pnpm db:migrate && pnpm db:seed`).
+`seed-shared-org`) keeps its old ids and logs a warning: live updates need UUID ids, so that organization falls back to
+polling until you reset the database (`docker compose down -v`, then `pnpm db:up && pnpm db:migrate && pnpm db:seed`).
 
 Worker tests and local PDF mode count PDF pages with Doppler's `pdfpagecount` (under `prlimit`, from util-linux). Install the
 pinned Doppler utilities once per pin with `bash scripts/install-doppler.sh`: it verifies the source tarball pinned in
