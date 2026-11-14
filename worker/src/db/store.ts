@@ -3449,7 +3449,8 @@ export class Store {
    * evidence and extraction state) before retention drops their chunks or the
    * run itself, then re-derive the touched nodes and edges. Facts that other
    * documents still support survive with recomputed weights and counts;
-   * project communities are recounted rather than deleted.
+   * communities that lost a member or an internal relation are deleted with
+   * their summaries (see `refreshKnowledgeGraphNodes`).
    */
   private async removeRunGraphContributions(projectId: string, runId: string): Promise<void> {
     if (!(await this.tableExists("kg_nodes"))) return;
