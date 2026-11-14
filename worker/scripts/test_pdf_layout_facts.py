@@ -604,6 +604,19 @@ class LayoutFactsTest(unittest.TestCase):
                 with self.subTest(pages=bad):
                     self.assertNotEqual(run('--pages', bad).returncode, 0)
 
+    def test_dots_cannot_use_up_the_rule_budget_and_a_page_over_it_is_unknown(self):
+        def page(rules):
+            return '<page width="612" height="792">' + ''.join(
+                f'<rule xMin="{a}" yMin="{b}" xMax="{c}" yMax="{d}"/>' for a, b, c, d in rules) + '</page>'
+        grid = [(72, 100 + 30 * r, 540, 100.5 + 30 * r) for r in range(6)] + [(72 + 117 * c, 100, 72.5 + 117 * c, 250) for c in range(5)]
+        dots = [(10 + (i % 500), 700 + i // 500, 10.5 + (i % 500), 700.5 + i // 500) for i in range(6000)]
+        xhtml = '<doc>' + page(dots + grid) + page(dots) + page(grid * 500) + '</doc>'
+        rules = facts.page_rules(xhtml, [0, 1, 2])
+        self.assertEqual(len(rules[0]), len(grid))          # the dots are dropped as they are read; the table is seen
+        self.assertEqual(facts.ruled_grids(rules[0])[0]['columns'], 4)
+        self.assertEqual(rules[1], [])                      # dots alone: known, no grid
+        self.assertIsNone(rules[2])                         # more usable rules than the budget: unknown, never cut short
+
     def test_unknown_inputs_are_null_never_zero(self):
         data = PdfBuilder().build() if hasattr(PdfBuilder(), 'build') else None
         if data is None:

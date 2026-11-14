@@ -1180,6 +1180,13 @@ export function classifyAdaptivePage(
     extractorHint = "layout-aware";
     confidence = 0.79;
     signals.push("field-markers", "label-value-layout");
+  } else if (options.layout?.gridsUnknown === true) {
+    // Neither the walker nor the page facts could say whether this page has a ruled grid (settleUnknownGrids): the table
+    // path, never a guessed "no table" a document could steer its own pages into.
+    route = "table-heavy";
+    extractorHint = "layout-aware";
+    confidence = 0.6;
+    signals.push("grids-unknown");
   } else if (pageIsTableHeavy({ text, alignedRows: alignedTableRowLines, numericRows: numericRowLines, layout: options.layout, ...(tableScan !== undefined ? { tableScan } : {}) })) {
     route = "table-heavy";
     extractorHint = "layout-aware";
