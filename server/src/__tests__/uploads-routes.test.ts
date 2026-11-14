@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi, afterAll } from "vitest";
 import { defaultPipelineFeatures } from "@docslurp/shared";
 
 import { createUploadsRoutes } from "../routes/uploads.js";
@@ -11,11 +11,19 @@ import { createProjectIntakeFakes, fakeProject } from "./helpers/project-intake-
 
 // safeExternalFetch sends through undici's own fetch; route it to the global
 // that each test stubs.
-// Project canEdit on responses is covered against a database (editor-required-followup.db.test.ts).
+// Every intake response is labelled with the target project's canEdit (lib/reprocess-access withPayloadCanEdit, one
+// lookup per request: project-flags-cost.test.ts); the label itself is covered against a database
+// (editor-required-followup.db.test.ts). Here: the routes call it on what they return.
+const labelProjects = vi.hoisted(() => vi.fn(async (_c: unknown, payload: unknown) => payload));
 vi.mock("../lib/reprocess-access.js", async (load) => ({
   ...(await load<typeof import("../lib/reprocess-access.js")>()),
-  withPayloadCanEdit: async (_c: unknown, payload: unknown) => payload,
+  withPayloadCanEdit: labelProjects,
 }));
+afterAll(() => {
+  // At least one intake response in this suite went through the label, with the payload the route answered.
+  expect(labelProjects).toHaveBeenCalled();
+  expect(labelProjects.mock.calls.some(([, payload]) => Boolean(payload && typeof payload === "object" && ("project" in payload || "result" in payload || "run" in payload)))).toBe(true);
+});
 vi.mock("undici", async (importOriginal) => ({
   ...await importOriginal<typeof import("undici")>(),
   fetch: (...args: Parameters<typeof fetch>) => globalThis.fetch(...args),

@@ -71,6 +71,8 @@ export const projectSchema = z.object({
    * `ingest`). Present on project reads (list, detail, dashboard bootstrap); clients hide change actions without it.
    */
   canEdit: z.boolean().optional(),
+  /** Whether this caller may manage the project (archive, delete, members): an org owner or admin, the project's owner or admin. */
+  canManage: z.boolean().optional(),
   /** Readable URL identifier (e.g. amber-falcon-ridge); prefer it over the UUID in links. */
   slug: z.string(),
   userId: z.string(),

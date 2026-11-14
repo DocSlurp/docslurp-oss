@@ -169,6 +169,10 @@ export const documentsRoutes = new Hono()
       if (result.status === "busy") { c.header("Retry-After", "5"); return apiStatusError(c, 429, "Page image queue is busy"); }
       if (result.status === "missing") return apiStatusError(c, 404, "Document page not found");
       if (result.status === "editor-required") return editorRequired(c);
+      // Not rendered and nothing in flight: a typed state (with the image capabilities), not a 202 to poll forever.
+      if (result.status === "not-rendered") {
+        return c.json({ ...dataUnavailable("not-rendered", { ingestVersion: result.document.ingestVersion ?? UNKNOWN_INGEST_VERSION }), capabilities: result.capabilities, dpi: result.dpi });
+      }
       // An expected partial-data state, not an error: a typed 200 the client shows calmly (ingest-version.ts). The
       // refusal itself is unchanged; a document without a current parse decision is never rendered.
       if (result.status === "unavailable" || result.status === "rescan-required") {

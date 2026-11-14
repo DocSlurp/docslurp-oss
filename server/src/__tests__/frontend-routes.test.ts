@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   listProjects: vi.fn(),
   listReprocessableProjectIds: vi.fn(),
+  listManageableProjectIds: vi.fn(),
   getInvitePreview: vi.fn(),
   notifySignup: vi.fn(),
   insert: vi.fn(),
@@ -17,7 +18,7 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("../services/projects.js", () => ({ listProjects: mocks.listProjects }));
-vi.mock("../services/organizations.js", () => ({ getInvitePreview: mocks.getInvitePreview, listOrganizations: mocks.listOrganizations, listReprocessableProjectIds: mocks.listReprocessableProjectIds }));
+vi.mock("../services/organizations.js", () => ({ getInvitePreview: mocks.getInvitePreview, listOrganizations: mocks.listOrganizations, listReprocessableProjectIds: mocks.listReprocessableProjectIds, listManageableProjectIds: mocks.listManageableProjectIds }));
 vi.mock("../lib/signup-notifications.js", () => ({ notifySignup: mocks.notifySignup }));
 vi.mock("../db.js", () => ({ sql: (...args: unknown[]) => mocks.insert(...args) }));
 vi.mock("../lib/auth.js", () => ({ appDbPool: { query: mocks.consentQuery } }));
@@ -55,9 +56,10 @@ describe("GET /dashboard/bootstrap", () => {
     mocks.listOrganizations.mockResolvedValue([{ id: "o1" }]);
     mocks.listProjects.mockResolvedValue([{ id: "w1", orgId: "o1" }, { id: "w2", orgId: "o1" }]);
     mocks.listReprocessableProjectIds.mockResolvedValue(["w1"]);
+    mocks.listManageableProjectIds.mockResolvedValue([]);
     const res = await appAs(session("u1", true)).request("/dashboard/bootstrap");
     // Each project says whether this caller may change it (canEdit).
-    expect(await res.json()).toEqual({ isOperator: true, isAdmin: true, organizations: [{ id: "o1" }], projects: [{ id: "w1", orgId: "o1", canEdit: true }, { id: "w2", orgId: "o1", canEdit: false }] });
+    expect(await res.json()).toEqual({ isOperator: true, isAdmin: true, organizations: [{ id: "o1" }], projects: [{ id: "w1", orgId: "o1", canEdit: true, canManage: false }, { id: "w2", orgId: "o1", canEdit: false, canManage: false }] });
     expect(mocks.ensure).not.toHaveBeenCalled();
     expect(mocks.admit).not.toHaveBeenCalled();
     expect(res.headers.get("Cache-Control")).toBe("private, no-store");

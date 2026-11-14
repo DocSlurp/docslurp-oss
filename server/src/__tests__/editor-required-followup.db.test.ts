@@ -117,6 +117,14 @@ describe("project reads carry canEdit (R1)", () => {
     }
   });
 
+  it("canManage: org admins and the project's owner, not editors or viewers", async () => {
+    const flag = async (user: string) => (await (await send(as(user), "GET", "/v1/projects/proj-a")).json() as { canManage?: boolean }).canManage;
+    expect(await flag("ua")).toBe(true);
+    expect(await flag("ux")).toBe(true);
+    expect(await flag("ue")).toBe(false);
+    expect(await flag("uv")).toBe(false);
+  });
+
   it("the dashboard bootstrap carries it too", async () => {
     const flag = async (user: string) => ((await (await send(as(user), "GET", "/dashboard/bootstrap")).json()) as { projects: Array<{ id: string; canEdit?: boolean }> })
       .projects.find((project) => project.id === "proj-a")?.canEdit;
@@ -163,9 +171,22 @@ describe("editor-only refusals answer 403 editor_required (R3)", () => {
     expect((await call(as("ua"), true)).status).toBe(404);
   });
 
-  it("a viewer may still read a page image (GET) without starting a render", async () => {
-    const response = await send(as("uv"), "GET", "/v1/documents/doc-a/pages/1/image");
-    expect(response.status).not.toBe(403);
+  it("a read (GET) answers 202 only while a render is queued; otherwise editor_required or a typed not-rendered state (re-check Medium)", async () => {
+    // Earlier tests in this file started renders as editors; begin with nothing in flight.
+    await sql`delete from document_page_renders where document_id = 'doc-a'`;
+    const viewer = await send(as("uv"), "GET", "/v1/documents/doc-a/pages/1/image");
+    expect(viewer.status).toBe(403);
+    expect(await viewer.json()).toMatchObject({ error: { code: "editor_required" } });
+    const editor = await send(as("ue"), "GET", "/v1/documents/doc-a/pages/1/image");
+    expect(editor.status).toBe(200);
+    expect(await editor.json()).toMatchObject({ status: "unavailable", reason: "not-rendered", canReprocess: false, capabilities: expect.any(Object) });
+    await sql`insert into document_page_renders (document_id, run_id, page_number, org_id, project_id, quality, dpi, expires_at)
+      values ('doc-a', 'run-a', 1, 'org-a', 'proj-a', 'reader', 120, now() + interval '10 minutes')`;
+    try {
+      for (const user of ["uv", "ue"]) expect((await send(as(user), "GET", "/v1/documents/doc-a/pages/1/image")).status, user).toBe(202);
+    } finally {
+      await sql`delete from document_page_renders where document_id = 'doc-a'`;
+    }
   });
 });
 

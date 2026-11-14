@@ -110,6 +110,8 @@ vi.mock("../services/organizations.js", () => ({
   updateProjectMemberRole: updateProjectMemberRoleMock,
   // Project reads carry canEdit (lib/reprocess-access withCanEdit); these route tests read every project as editable.
   listReprocessableProjectIds: vi.fn(async () => ["ws-1", "ws-2", "ws-other"]),
+  listManageableProjectIds: vi.fn(async () => ["ws-1", "ws-2", "ws-other"]),
+  canManageProject: vi.fn(() => true),
 }));
 
 vi.mock("../services/audit-log.js", () => ({
@@ -1133,7 +1135,7 @@ describe("project bearer resource reads", () => {
     const response = await buildApp({ orgId: "org-a", scopes: ["search:deep"] }).request("/projects");
     expect(response.status).toBe(200);
     // A search-only key may not change anything: canEdit false.
-    expect(await response.json()).toEqual({ projects: [{ id: "one", orgId: "org-a", canEdit: false }] });
+    expect(await response.json()).toEqual({ projects: [{ id: "one", orgId: "org-a", canEdit: false, canManage: false }] });
   });
   it("hides foreign organization project details", async () => {
     getProjectMock.mockResolvedValueOnce({ id: "foreign", orgId: "org-b" });
