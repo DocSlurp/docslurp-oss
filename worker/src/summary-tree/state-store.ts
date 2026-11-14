@@ -436,3 +436,25 @@ export async function registerSummaryTreeArtifact(sql: Client, args: { scope: Su
   `;
   if (rows.length !== 1) throw new SummaryTreeStateRefused("The summary tree artifact was not registered: the document or the run is not this project's");
 }
+
+/**
+ * Marks documents that have no tree state yet as `skipped`, in one statement: the backfill job's path for the many
+ * small documents of a project (below the long-document floor by their stored chunk count), which need no artifact
+ * read and no per-document round trips. A document that already has a state row, or is not a live document of
+ * exactly this organization and project, is left alone. Returns the ids that were marked.
+ */
+export async function markSummaryTreesSkipped(sql: Client, args: { scope: SummaryTreeScope; documentIds: readonly string[]; skipReason: SummaryTreeSkipReason }): Promise<string[]> {
+  assertScope(args.scope);
+  if (args.documentIds.length === 0) return [];
+  const rows = await sql<{ document_id: string }[]>`
+    insert into document_summary_trees (document_id, org_id, project_id, run_id, status, skip_reason, tree_key_version, updated_at)
+    select d.id, d.org_id, d.project_id, d.run_id, 'skipped', ${args.skipReason}, ${SUMMARY_TREE_KEY_VERSION}, now()
+    from documents d
+    where d.id = any(${sql.array([...args.documentIds])}::text[])
+      and d.org_id = ${args.scope.orgId} and d.project_id = ${args.scope.projectId}
+      and d.purged_at is null and d.superseded_at is null and d.archived_at is null
+    on conflict (document_id) do nothing
+    returning document_id
+  `;
+  return rows.map((row) => row.document_id);
+}

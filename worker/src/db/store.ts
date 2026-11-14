@@ -49,6 +49,7 @@ import {
 } from "../graph/communities.js";
 import { lockProjectGraph, replaceDocumentGraph, type ReplaceDocumentGraphInput } from "../graph/graph-store.js";
 import { runGraphJobs, type GraphJobRunnerOptions } from "../graph/rebuild-job.js";
+import { runSummaryTreeJobs, type SummaryTreeJobRunnerOptions } from "../summary-tree/backfill-job.js";
 import {
   drainDocumentCleanupQueue,
   drainStorageCleanupQueue,
@@ -3426,6 +3427,11 @@ export class Store {
   async figureResumeBacklog() {
     const { figureResumeBacklog } = await import("../figures/resume-runner.js");
     return await figureResumeBacklog(this.sql);
+  }
+
+  /** Claims and runs one queued, parked or lease-expired summary tree backfill job (see summary-tree/backfill-job.ts). */
+  async runSummaryTreeJobs(options: SummaryTreeJobRunnerOptions): Promise<number> {
+    return await runSummaryTreeJobs(this.sql, options);
   }
 
   /** Claims and runs queued project graph rebuilds (see graph/rebuild-job.ts). */

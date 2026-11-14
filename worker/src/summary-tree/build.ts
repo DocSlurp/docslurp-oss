@@ -166,8 +166,12 @@ export interface SummaryTreeBuildDeps {
   spendRefusal(): Promise<string | null>;
   /** A named reason to stop before the next model call (a cost cap), or null. */
   stopReason?(): string | null;
-  /** Called once for every model call that `stopReason` let through, when it has settled (returned or thrown). */
-  callSettled?(): void;
+  /**
+   * Admission of one model call: awaited before `stopReason` is asked, and may wait (a caller that reserves budget
+   * for calls in flight holds a call back until one of them has reported its cost). The returned function is called
+   * once when the call has settled, sent or not, after its usage was recorded.
+   */
+  acquireCall?(): Promise<() => void>;
   writeRows: SummaryTreeRowWriter;
   /** Strict delete of summary rows by id (nodes a rebuild replaced). */
   deleteRowsById(args: { scope: SummaryTreeScope; space: { model: string; dimensions: number }; ids: string[]; root?: string }): Promise<void>;
@@ -588,22 +592,22 @@ export async function buildDocumentSummaryTree(deps: SummaryTreeBuildDeps, input
         const result = await generateSummaryWithRetry({
           maxOutputTokens: budget,
           call: async (maxOutputTokens, attempt) => {
-            beforeCall();
-            stats.modelCalls++;
-            if (attempt > 1) stats.truncationRetries++;
-            let response: SummaryCallResult;
+            const release = await deps.acquireCall?.();
             try {
-              response = await deps.summarize({ system: prompt.system, prompt: prompt.prompt, maxOutputTokens, attempt, nodeId: nodeIds[nodeIndex]!, level: node.level, signal });
+              beforeCall();
+              stats.modelCalls++;
+              if (attempt > 1) stats.truncationRetries++;
+              const response = await deps.summarize({ system: prompt.system, prompt: prompt.prompt, maxOutputTokens, attempt, nodeId: nodeIds[nodeIndex]!, level: node.level, signal });
+              // Billed whether or not the answer is kept.
+              deps.recordUsage(response.usage, { nodeId: nodeIds[nodeIndex]!, level: node.level, attempt, finishReason: response.finishReason });
+              stats.inputTokens += response.usage.inputTokens;
+              stats.outputTokens += response.usage.outputTokens;
+              deps.noteProgress?.("summary-tree:model-call");
+              if (response.finishReason === "content-filter") throw new SummaryContentRefusalError();
+              return response;
             } finally {
-              deps.callSettled?.();
+              release?.();
             }
-            // Billed whether or not the answer is kept.
-            deps.recordUsage(response.usage, { nodeId: nodeIds[nodeIndex]!, level: node.level, attempt, finishReason: response.finishReason });
-            stats.inputTokens += response.usage.inputTokens;
-            stats.outputTokens += response.usage.outputTokens;
-            deps.noteProgress?.("summary-tree:model-call");
-            if (response.finishReason === "content-filter") throw new SummaryContentRefusalError();
-            return response;
           },
         });
         if (result.status === "ok") {

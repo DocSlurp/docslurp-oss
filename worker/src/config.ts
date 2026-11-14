@@ -128,6 +128,10 @@ export interface Config {
   graphJobPollIntervalMs?: number;
   /** Documents a graph rebuild extracts at once. */
   graphJobConcurrency?: number;
+  /** How often the maintenance leader looks for summary tree backfill jobs; 0 disables. */
+  summaryTreeJobPollIntervalMs?: number;
+  /** Documents a summary tree backfill job builds at once (their model calls share `WORKER_SUMMARY_TREE_CONCURRENCY`). */
+  summaryTreeJobDocumentConcurrency?: number;
   retentionSweepBatchSize: number;
   apiKeyUsageRetentionDays: number;
   perfLogRetentionDays: number;
@@ -357,6 +361,11 @@ export function fromEnv(): Config {
       5_000,
     ),
     graphJobConcurrency: Math.max(1, readNumber(process.env.WORKER_GRAPH_JOB_CONCURRENCY, 4)),
+    summaryTreeJobPollIntervalMs: parseDurationMs(
+      process.env.WORKER_SUMMARY_TREE_JOB_POLL_INTERVAL,
+      5_000,
+    ),
+    summaryTreeJobDocumentConcurrency: Math.max(1, readNumber(process.env.WORKER_SUMMARY_TREE_JOB_DOCUMENT_CONCURRENCY, 2)),
     retentionSweepBatchSize: readNumber(
       process.env.WORKER_RETENTION_SWEEP_BATCH_SIZE,
       25,

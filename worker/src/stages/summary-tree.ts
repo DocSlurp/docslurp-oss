@@ -180,8 +180,8 @@ export interface SummaryTreeDocumentRun {
   spendRefusal?: () => Promise<string | null>;
   /** A named reason to stop before the next model call (the caller's cost cap), or null. */
   stopReason?: () => string | null;
-  /** Called once for every model call `stopReason` let through, when it has settled. */
-  onCallSettled?: () => void;
+  /** Admission of one model call (may wait); the returned function is called when the call has settled. */
+  acquireCall?: () => Promise<() => void>;
   /** Who builds (`job:<jobId>`); default `run:<runId>`. */
   owner?: string;
   /** False: leave a document another builder is working on (`blocked`, `build-in-progress`). Default true. */
@@ -326,7 +326,7 @@ export async function runSummaryTreeForDocument(args: SummaryTreeDocumentRun): P
     buildActive,
     spendRefusal,
     stopReason: args.stopReason,
-    callSettled: args.onCallSettled,
+    acquireCall: args.acquireCall,
     writeRows: overrides.writeRows ?? ((write) => writeSummaryRows(write)),
     deleteRowsById: overrides.deleteRowsById ?? deleteSummaryRowsById,
     deleteDocumentRows: overrides.deleteDocumentRows ?? deleteDocumentSummaryRows,

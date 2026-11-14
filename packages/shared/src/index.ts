@@ -40,6 +40,7 @@ export * from "./pii.js";
 export * from "./temporal-connection.js";
 export * from "./vector-namespace.js";
 export * from "./summary-tree.js";
+export * from "./summary-tree-job.js";
 
 // Sub-modules created during refactor
 export * from "./embedding.js";
