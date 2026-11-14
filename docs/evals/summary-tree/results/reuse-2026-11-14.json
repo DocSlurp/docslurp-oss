@@ -1,6 +1,5 @@
 {
   "grouping": "stand-in",
-  "upperLevelVectors": "mean of leaf vectors (proxy for summary vectors)",
   "options": {
     "maxGroup": 8,
     "minGroup": 3,
@@ -14,6 +13,7 @@
     "textSettings": "reasoning=none",
     "lengthTarget": 120
   },
+  "upperLevelVectors": "mean of leaf vectors (proxy for summary vectors)",
   "rows": [
     {
       "document": "origin-of-species",
@@ -43,8 +43,8 @@
           "reused": 34,
           "reusePercent": 100,
           "newSummaryCalls": 0,
-          "boundaries": 35,
-          "priorBoundaries": 35,
+          "boundaries": 34,
+          "priorBoundaries": 34,
           "boundariesKeptPercent": 100,
           "boundariesSharedOfNewPercent": 100
         },
@@ -100,8 +100,8 @@
           "reused": 31,
           "reusePercent": 91.2,
           "newSummaryCalls": 3,
-          "boundaries": 35,
-          "priorBoundaries": 35,
+          "boundaries": 34,
+          "priorBoundaries": 34,
           "boundariesKeptPercent": 97.1,
           "boundariesSharedOfNewPercent": 97.1
         },
@@ -157,8 +157,8 @@
           "reused": 33,
           "reusePercent": 97.1,
           "newSummaryCalls": 1,
-          "boundaries": 35,
-          "priorBoundaries": 35,
+          "boundaries": 34,
+          "priorBoundaries": 34,
           "boundariesKeptPercent": 97.1,
           "boundariesSharedOfNewPercent": 97.1
         },
@@ -215,8 +215,8 @@
           "reusePercent": 0,
           "newSummaryCalls": 31,
           "boundaries": 30,
-          "priorBoundaries": 35,
-          "boundariesKeptPercent": 11.4,
+          "priorBoundaries": 34,
+          "boundariesKeptPercent": 11.8,
           "boundariesSharedOfNewPercent": 13.3
         },
         {
@@ -556,8 +556,8 @@
           "reused": 4,
           "reusePercent": 100,
           "newSummaryCalls": 0,
-          "boundaries": 89,
-          "priorBoundaries": 89,
+          "boundaries": 4,
+          "priorBoundaries": 4,
           "boundariesKeptPercent": 100,
           "boundariesSharedOfNewPercent": 100
         },
@@ -567,8 +567,8 @@
           "reused": 5,
           "reusePercent": 100,
           "newSummaryCalls": 0,
-          "boundaries": 71,
-          "priorBoundaries": 71,
+          "boundaries": 5,
+          "priorBoundaries": 5,
           "boundariesKeptPercent": 100,
           "boundariesSharedOfNewPercent": 100
         },
@@ -578,8 +578,8 @@
           "reused": 11,
           "reusePercent": 100,
           "newSummaryCalls": 0,
-          "boundaries": 37,
-          "priorBoundaries": 37,
+          "boundaries": 11,
+          "priorBoundaries": 11,
           "boundariesKeptPercent": 100,
           "boundariesSharedOfNewPercent": 100
         },
@@ -589,8 +589,8 @@
           "reused": 5,
           "reusePercent": 100,
           "newSummaryCalls": 0,
-          "boundaries": 19,
-          "priorBoundaries": 19,
+          "boundaries": 5,
+          "priorBoundaries": 5,
           "boundariesKeptPercent": 100,
           "boundariesSharedOfNewPercent": 100
         },
@@ -600,8 +600,8 @@
           "reused": 4,
           "reusePercent": 100,
           "newSummaryCalls": 0,
-          "boundaries": 5,
-          "priorBoundaries": 5,
+          "boundaries": 4,
+          "priorBoundaries": 4,
           "boundariesKeptPercent": 100,
           "boundariesSharedOfNewPercent": 100
         },
@@ -646,10 +646,10 @@
           "reused": 4,
           "reusePercent": 100,
           "newSummaryCalls": 0,
-          "boundaries": 89,
-          "priorBoundaries": 89,
-          "boundariesKeptPercent": 97.8,
-          "boundariesSharedOfNewPercent": 97.8
+          "boundaries": 4,
+          "priorBoundaries": 4,
+          "boundariesKeptPercent": 100,
+          "boundariesSharedOfNewPercent": 100
         },
         {
           "level": 3,
@@ -657,10 +657,10 @@
           "reused": 5,
           "reusePercent": 100,
           "newSummaryCalls": 0,
-          "boundaries": 71,
-          "priorBoundaries": 71,
-          "boundariesKeptPercent": 97.2,
-          "boundariesSharedOfNewPercent": 97.2
+          "boundaries": 5,
+          "priorBoundaries": 5,
+          "boundariesKeptPercent": 100,
+          "boundariesSharedOfNewPercent": 100
         },
         {
           "level": 4,
@@ -668,8 +668,8 @@
           "reused": 10,
           "reusePercent": 90.9,
           "newSummaryCalls": 1,
-          "boundaries": 37,
-          "priorBoundaries": 37,
+          "boundaries": 11,
+          "priorBoundaries": 11,
           "boundariesKeptPercent": 100,
           "boundariesSharedOfNewPercent": 100
         },
@@ -679,8 +679,8 @@
           "reused": 4,
           "reusePercent": 80,
           "newSummaryCalls": 1,
-          "boundaries": 19,
-          "priorBoundaries": 19,
+          "boundaries": 5,
+          "priorBoundaries": 5,
           "boundariesKeptPercent": 100,
           "boundariesSharedOfNewPercent": 100
         },
@@ -690,8 +690,8 @@
           "reused": 3,
           "reusePercent": 75,
           "newSummaryCalls": 1,
-          "boundaries": 5,
-          "priorBoundaries": 5,
+          "boundaries": 4,
+          "priorBoundaries": 4,
           "boundariesKeptPercent": 100,
           "boundariesSharedOfNewPercent": 100
         },
@@ -736,10 +736,10 @@
           "reused": 4,
           "reusePercent": 100,
           "newSummaryCalls": 0,
-          "boundaries": 89,
-          "priorBoundaries": 89,
-          "boundariesKeptPercent": 97.8,
-          "boundariesSharedOfNewPercent": 97.8
+          "boundaries": 4,
+          "priorBoundaries": 4,
+          "boundariesKeptPercent": 100,
+          "boundariesSharedOfNewPercent": 100
         },
         {
           "level": 3,
@@ -747,10 +747,10 @@
           "reused": 4,
           "reusePercent": 80,
           "newSummaryCalls": 1,
-          "boundaries": 71,
-          "priorBoundaries": 71,
-          "boundariesKeptPercent": 98.6,
-          "boundariesSharedOfNewPercent": 98.6
+          "boundaries": 5,
+          "priorBoundaries": 5,
+          "boundariesKeptPercent": 100,
+          "boundariesSharedOfNewPercent": 100
         },
         {
           "level": 4,
@@ -758,10 +758,10 @@
           "reused": 10,
           "reusePercent": 90.9,
           "newSummaryCalls": 1,
-          "boundaries": 37,
-          "priorBoundaries": 37,
-          "boundariesKeptPercent": 97.3,
-          "boundariesSharedOfNewPercent": 97.3
+          "boundaries": 11,
+          "priorBoundaries": 11,
+          "boundariesKeptPercent": 90.9,
+          "boundariesSharedOfNewPercent": 90.9
         },
         {
           "level": 5,
@@ -769,8 +769,8 @@
           "reused": 4,
           "reusePercent": 80,
           "newSummaryCalls": 1,
-          "boundaries": 19,
-          "priorBoundaries": 19,
+          "boundaries": 5,
+          "priorBoundaries": 5,
           "boundariesKeptPercent": 100,
           "boundariesSharedOfNewPercent": 100
         },
@@ -780,8 +780,8 @@
           "reused": 3,
           "reusePercent": 75,
           "newSummaryCalls": 1,
-          "boundaries": 5,
-          "priorBoundaries": 5,
+          "boundaries": 4,
+          "priorBoundaries": 4,
           "boundariesKeptPercent": 100,
           "boundariesSharedOfNewPercent": 100
         },

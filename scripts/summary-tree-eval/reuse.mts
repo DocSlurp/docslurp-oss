@@ -2,7 +2,10 @@
  * Reuse experiment: how much of a document's tree survives a new version.
  * Grouping and hashing only; no summary is generated.
  *
- *   tsx scripts/summary-tree-eval/reuse.mts MANIFEST OUTPUT.json
+ *   [SUMMARY_TREE_EVAL_GROUPING=product SUMMARY_TREE_EVAL_LIB=…] tsx scripts/summary-tree-eval/reuse.mts MANIFEST OUTPUT.json
+ *
+ * SUMMARY_TREE_EVAL_GROUPING=product uses the product summary-tree library
+ * (see tree-product.mts); otherwise the stand-in.
  *
  * Version pairs per base document: identical bytes; one paragraph inserted;
  * one heading renamed; a different extractor (another rendition of the same
@@ -17,10 +20,11 @@
  */
 import { writeFileSync } from "node:fs";
 
-import { groupLeaves, hashTree, meanVector, STANDIN_GROUP_OPTIONS, type Tree, type TreeNode } from "./grouping-standin.mts";
+import { groupLeaves, hashTree, meanVector, STANDIN_GROUP_OPTIONS, type TreeNode } from "./grouping-standin.mts";
 import { buildDocument, leavesOf, loadManifest, sourceText } from "./lib.mts";
 import { paginate } from "./prepare-sources.mts";
 import { HASH_SETTINGS } from "./tree.mts";
+import { hashContext, loadLibrary, selectLeaves } from "./tree-product.mts";
 
 const INSERTED_PARAGRAPH = "Editorial note added for this edition. The surrounding passage was compared against an earlier printing, and a small number of spelling variants were left as the first printer set them. Readers who consult both printings will find the pagination differs slightly, while the wording of the text itself is unchanged. No other alteration has been made to this part of the work.";
 
@@ -46,27 +50,51 @@ export function renameHeading(text: string): string | null {
   return lines.join("\n");
 }
 
-type Built = { tree: Tree; hashes: string[][]; leafHashes: string[] };
+/** One version's tree reduced to what reuse needs: per level, each summarized node's hash and first leaf position. */
+type Built = { leafHashes: string[]; levels: Array<Array<{ hash: string; leafStart: number }>> };
+const useProductLibrary = process.env.SUMMARY_TREE_EVAL_GROUPING === "product";
+
 async function build(base: { id: string; title: string }, text: string | undefined, documentId: string): Promise<Built> {
   const document = await buildDocument(base, { text, documentId, step: "reuse" });
+  if (useProductLibrary) {
+    const lib = await loadLibrary();
+    const selection = selectLeaves(lib, document);
+    if (selection.skipReason) throw new Error(`The library skips ${documentId}: ${selection.skipReason}`);
+    const leaves = selection.leaves as Array<{ chunkIndex: number; rawText: string }>;
+    const byIndex = new Map(document.chunks.map((chunk) => [chunk.index, chunk]));
+    const position = new Map(leaves.map((leaf, i) => [leaf.chunkIndex, i]));
+    const leafVectors = leaves.map((leaf) => byIndex.get(leaf.chunkIndex)!.vector);
+    let builderNodes: Array<{ chunkStart: number; chunkEnd: number; level: number }> = [];
+    const tree = await lib.buildSummaryTree({
+      leaves, leafSimilarities: lib.adjacentSimilarities(leaves.length, (at: number) => leafVectors[at]),
+      onLevel: (_indexes: number[], builder: { nodes: typeof builderNodes }) => { builderNodes = builder.nodes; },
+      vectorOf: (index: number) => { const node = builderNodes[index]!; return meanVector(leafVectors.slice(position.get(node.chunkStart)!, position.get(node.chunkEnd)! + 1)); },
+    });
+    const leafHashByChunkIndex = lib.leafHashesByChunkIndex(leaves);
+    const hashes: string[] = lib.hashSummaryTreeNodes({ nodes: tree.nodes, leafHashByChunkIndex, context: hashContext(lib) });
+    const levels: Built["levels"] = [];
+    (tree.nodes as typeof builderNodes).forEach((node, index) => { (levels[node.level - 1] ??= []).push({ hash: hashes[index]!, leafStart: position.get(node.chunkStart)! }); });
+    return { leafHashes: leaves.map((leaf) => leafHashByChunkIndex.get(leaf.chunkIndex)!), levels: levels.map((level) => level ?? []) };
+  }
   const { leaves, chunks } = leavesOf(document);
   const leafVectors = chunks.map((chunk) => chunk.vector);
   const tree = await groupLeaves(leaves, leafVectors, STANDIN_GROUP_OPTIONS, (nodes: TreeNode[]) => nodes.map((node) => meanVector(leafVectors.slice(node.leafStart, node.leafEnd + 1))));
-  return { tree, hashes: hashTree(tree, HASH_SETTINGS), leafHashes: leaves.map((leaf) => leaf.hash) };
+  const hashes = hashTree(tree, HASH_SETTINGS);
+  return { leafHashes: leaves.map((leaf) => leaf.hash), levels: tree.levels.map((nodes, levelIndex) => nodes.flatMap((node, i) => node.promoted ? [] : [{ hash: hashes[levelIndex]![i]!, leafStart: node.leafStart }])) };
 }
 
-const boundaries = (built: Built, levelIndex: number) => new Set(built.tree.levels[levelIndex]!.slice(1).map((node) => `${built.leafHashes[node.leafStart - 1]}|${built.leafHashes[node.leafStart]}`));
+/** Group boundaries of a level, each identified by the leaf hashes on its two sides. */
+const boundaries = (built: Built, levelIndex: number) => new Set((built.levels[levelIndex] ?? []).filter((node) => node.leafStart > 0).map((node) => `${built.leafHashes[node.leafStart - 1]}|${built.leafHashes[node.leafStart]}`));
 const share = (part: number, whole: number) => whole ? Math.round((1000 * part) / whole) / 10 : null;
 
 export function compare(prior: Built, next: Built) {
   const priorLeaves = new Set(prior.leafHashes);
-  const levels = next.tree.levels.map((nodes, levelIndex) => {
-    // A node hash covers its level, so reuse is looked up in every prior level's set of that node level.
-    const priorHashes = new Set(prior.hashes.flat());
-    const own = nodes.map((node, i) => ({ node, hash: next.hashes[levelIndex]![i]! })).filter(({ node }) => !node.promoted);
+  // A node hash covers its level, so one set of every prior node hash is enough.
+  const priorHashes = new Set(prior.levels.flat().map((node) => node.hash));
+  const levels = next.levels.map((own, levelIndex) => {
     const reused = own.filter(({ hash }) => priorHashes.has(hash)).length;
     const nextBoundaries = boundaries(next, levelIndex);
-    const priorBoundaries = levelIndex < prior.tree.levels.length ? boundaries(prior, levelIndex) : new Set<string>();
+    const priorBoundaries = boundaries(prior, levelIndex);
     const shared = [...nextBoundaries].filter((boundary) => priorBoundaries.has(boundary)).length;
     return { level: levelIndex + 1, nodes: own.length, reused, reusePercent: share(reused, own.length), newSummaryCalls: own.length - reused,
       boundaries: nextBoundaries.size, priorBoundaries: priorBoundaries.size, boundariesKeptPercent: share(shared, priorBoundaries.size), boundariesSharedOfNewPercent: share(shared, nextBoundaries.size) };
@@ -101,6 +129,7 @@ if (process.argv[1]?.endsWith("reuse.mts")) {
       console.log(id, "|", variant, "| leaves", result.leafReusePercent, "% | nodes", result.nodeReusePercent, "% | calls", result.newSummaryCalls, "|", result.levels.map((level) => `L${level.level} ${level.reusePercent}% b${level.boundariesKeptPercent}%`).join(" "));
     }
   }
-  writeFileSync(output!, JSON.stringify({ grouping: "stand-in", upperLevelVectors: "mean of leaf vectors (proxy for summary vectors)", options: STANDIN_GROUP_OPTIONS, hashSettings: HASH_SETTINGS, rows }, null, 2) + "\n");
+  const settings = useProductLibrary ? { grouping: "product library", options: (await loadLibrary()).DEFAULT_SUMMARY_TREE_LIMITS } : { grouping: "stand-in", options: STANDIN_GROUP_OPTIONS, hashSettings: HASH_SETTINGS };
+  writeFileSync(output!, JSON.stringify({ ...settings, upperLevelVectors: "mean of leaf vectors (proxy for summary vectors)", rows }, null, 2) + "\n");
   process.exit(0);
 }

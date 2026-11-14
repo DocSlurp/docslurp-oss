@@ -1,8 +1,33 @@
 {
   "grouping": "stand-in",
+  "options": {
+    "maxGroup": 8,
+    "minGroup": 3,
+    "fanIn": 8,
+    "minFanIn": 2
+  },
+  "build": {
+    "pages": 2304,
+    "nodes": 1996,
+    "nodesPerPage": 0.866,
+    "level1Groups": 1549,
+    "singleLeafGroups": 337,
+    "calls": 1998,
+    "truncationRetries": 2,
+    "contentRefusalFallbacks": 0,
+    "inputTokens": 2564473,
+    "outputTokens": 370001,
+    "sumCallSeconds": 3577.5,
+    "listPriceUsd": 0.2629,
+    "pagesPerDollar": 8764,
+    "pagesPerMinutePerConcurrentCall": 38.6,
+    "summaryTextBytes": 1830686,
+    "vectorBytesFloat32": 8175616
+  },
   "trees": [
     {
       "document": "federalist-papers",
+      "leaves": 1020,
       "nodes": 374,
       "byLevel": {
         "1": 266,
@@ -16,6 +41,7 @@
     },
     {
       "document": "frankenstein",
+      "leaves": 306,
       "nodes": 80,
       "byLevel": {
         "1": 62,
@@ -28,6 +54,7 @@
     },
     {
       "document": "huckleberry-finn",
+      "leaves": 386,
       "nodes": 87,
       "byLevel": {
         "1": 71,
@@ -40,6 +67,7 @@
     },
     {
       "document": "leviathan",
+      "leaves": 951,
       "nodes": 226,
       "byLevel": {
         "1": 182,
@@ -52,6 +80,7 @@
     },
     {
       "document": "origin-of-species",
+      "leaves": 774,
       "nodes": 193,
       "byLevel": {
         "1": 153,
@@ -64,6 +93,7 @@
     },
     {
       "document": "rfc9110",
+      "leaves": 533,
       "nodes": 405,
       "byLevel": {
         "1": 317,
@@ -79,6 +109,7 @@
     },
     {
       "document": "rfc9293",
+      "leaves": 196,
       "nodes": 127,
       "byLevel": {
         "1": 96,
@@ -94,6 +125,7 @@
     },
     {
       "document": "second-treatise",
+      "leaves": 258,
       "nodes": 60,
       "byLevel": {
         "1": 48,
@@ -106,6 +138,7 @@
     },
     {
       "document": "sherlock-holmes",
+      "leaves": 378,
       "nodes": 86,
       "byLevel": {
         "1": 69,
@@ -118,6 +151,7 @@
     },
     {
       "document": "voyage-of-the-beagle",
+      "leaves": 982,
       "nodes": 237,
       "byLevel": {
         "1": 188,
@@ -130,6 +164,7 @@
     },
     {
       "document": "walden",
+      "leaves": 520,
       "nodes": 121,
       "byLevel": {
         "1": 97,

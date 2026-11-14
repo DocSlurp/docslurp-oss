@@ -31,7 +31,7 @@ import { score } from "../retrieval-quality/eval.mjs";
 import { loadCases, type EvalCase } from "./cases.mts";
 import { cosine } from "./grouping-standin.mts";
 import { embedQueries, generateWithRefusalFallback, loadDocument, need, ORG, PROJECT, readJson, USER, type EvalChunk, type EvalDocument } from "./lib.mts";
-import { treePath, type StoredNode, type StoredTree } from "./tree.mts";
+import { skipPath, treePath, type StoredNode, type StoredTree } from "./tree.mts";
 
 export const K = 10;
 /** Summary hits considered, chunks taken per hit, and slots `include` gives to summaries: fixed before any run. */
@@ -89,7 +89,9 @@ if (process.argv[1]?.endsWith("arms.mts")) {
   const trees = documentIds.filter((id) => existsSync(treePath(id))).map((id) => readJson<StoredTree>(treePath(id)));
   const nodes = trees.flatMap((tree) => tree.nodes);
   const treeArms = arms.some((arm) => arm.startsWith("tree-"));
-  if (treeArms && trees.length !== documentIds.length) throw new Error(`Frozen trees exist for ${trees.length} of ${documentIds.length} documents; tree arms need all of them`);
+  // A document the grouping library skipped has no nodes and is served by the chunk leg alone, as in the product.
+  const untreed = documentIds.filter((id) => !existsSync(treePath(id)) && !existsSync(skipPath(id)));
+  if (treeArms && untreed.length) throw new Error(`No frozen tree or recorded skip for ${untreed.length} of ${documentIds.length} documents`);
   const search = await import("../../server/src/services/search.js");
   const controls = await import("../../server/src/services/search-controls.js");
   let dedupeNow: boolean | null = null;
@@ -115,7 +117,7 @@ if (process.argv[1]?.endsWith("arms.mts")) {
     for (const arm of arms) {
       const file = join(runDir!, `${arm}--${item.id}.json`);
       if (existsSync(file)) { rows.push(readJson(file)); continue; }
-      let results: Result[] | null = null, mapped: Result[] | null = null, ms = 0, context: string | null = null, skipped: string | undefined;
+      let results: Result[] | null = null, mapped: Result[] | null = null, ms = 0, context: string | null = null, skipped: string | undefined, trace: Record<string, unknown> | undefined;
       if (arm === "current") ({ results, ms } = await once("current", {}));
       else if (arm === "current-default") ({ results, ms } = await run({}, true));
       else if (arm === "summary-seed") ({ results, ms } = await once("seed", { summarySeed: true }));
@@ -132,7 +134,10 @@ if (process.argv[1]?.endsWith("arms.mts")) {
           .filter((chunk) => chunk.index >= node.chunkStart && chunk.index <= node.chunkEnd)
           .map((chunk) => ({ chunk, similarity: cosine(queryVector, chunk.vector) })).sort((a, b) => b.similarity - a.similarity)
           .slice(0, TREE_RULE.chunksPerHit).map(({ chunk }) => key(node.documentId, chunk.index)));
-        const legByKey = new Map(leg.results.map((result) => [key(result.citation.documentId, result.citation.chunkIndex ?? -1), result]));
+        // The chunk leg keeps the product's own top-K order (the `current` arm) and continues with the deeper fetch,
+        // so a tree arm differs from `current` only by what the summary leg adds. A deeper fetch alone reorders the top.
+        const top = await once("current", {});
+        const legByKey = new Map([...top.results, ...leg.results].map((result) => [key(result.citation.documentId, result.citation.chunkIndex ?? -1), result] as const).filter(([, ], i, all) => all.findIndex(([other]) => other === all[i]![0]) === i));
         const fused = rrf([[...legByKey.keys()], [...new Set(guided)]], TREE_RULE.rrfK);
         const asResult = (fusedKey: string): Result => {
           const fromLeg = legByKey.get(fusedKey);
@@ -140,6 +145,8 @@ if (process.argv[1]?.endsWith("arms.mts")) {
           const [documentId, index] = fusedKey.split("\u0000");
           return chunkResult(documentId!, document(documentId!).chunks.find((chunk) => chunk.index === Number(index))!);
         };
+        const readable = (fusedKey: string) => fusedKey.replace("\u0000", "#").replace(/#0+(\d)/, "#$1");
+        trace = { chunkLeg: [...legByKey.keys()].slice(0, 2 * K).map(readable), guided: [...new Set(guided)].map(readable), summaryHits: hits.map((node) => ({ id: node.id.slice(0, 12), document: node.documentId, level: node.level, chunkStart: node.chunkStart, chunkEnd: node.chunkEnd })) };
         if (arm === "tree-guide") results = fused.slice(0, K).map(asResult);
         else {
           const summaries = hits.slice(0, TREE_RULE.includeSummarySlots);
@@ -148,7 +155,7 @@ if (process.argv[1]?.endsWith("arms.mts")) {
           results = [...chunksOnly, ...summaryResults];
           mapped = [...chunksOnly, ...summaries.map(mappedLeaves)];
         }
-        ms = leg.ms + (performance.now() - started);
+        ms = top.ms + leg.ms + (performance.now() - started);
       } else if (arm === "long-context") {
         const texts = [...new Set(item.premises.map((premise) => premise.documentId))].map((id) => `# ${document(id).title}\n\n${document(id).text.replaceAll("\f", "\n")}`);
         if (texts.join("").length > LONG_CONTEXT_MAX_CHARS) skipped = "does-not-fit";
@@ -165,7 +172,7 @@ if (process.argv[1]?.endsWith("arms.mts")) {
         const checked = scoreCase({ id: item.id, requiredPatterns: item.requiredPatterns }, { answer: reply.text, citations: [] }, {});
         answer = { text: reply.text, finishReason: reply.finishReason, inputTokens: reply.inputTokens, outputTokens: reply.outputTokens, ms: reply.ms, model: reply.model, refused: reply.refused, answerCheck: checked.checks.answer };
       }
-      const row = { id: item.id, arm, split, class: item.class, slice: item.slice, searchMs: Math.round(ms), skipped, retrieval, mappedRetrieval, answer,
+      const row = { id: item.id, arm, split, class: item.class, slice: item.slice, searchMs: Math.round(ms), skipped, retrieval, mappedRetrieval, answer, trace,
         results: results?.map((result) => ({ kind: result.kind ?? "chunk", citation: result.citation, summary: result.summary, text: result.text })) };
       writeFileSync(file, JSON.stringify(row, null, 2), { flag: "wx" });
       rows.push(row);

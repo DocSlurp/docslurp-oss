@@ -16,8 +16,7 @@ gate (`scripts/evaluation-integrity-judge.mjs`) checks that.
 | Search arms `current-default`, `current`, `summary-seed` | Product `hybridSearch`, in process, over a seeded throwaway database and a local LanceDB directory |
 | Retrieval scoring | Existing scorer: `scripts/retrieval-quality/eval.mjs` `score` |
 | Answer check | Existing deterministic check: `scripts/multisearch-quality/score.mjs` `scoreCase` (`answer`) |
-| Grouping and hashing | **Stand-in** (`grouping-standin.mts`) following the plan's rules; swap in the product library through the same interface |
-| Summary prompt | **Stand-in** following the plan's contract, built with `buildTrustedDocumentTaskPrompt` |
+| Grouping, hashing, summary prompt | Either the product summary-tree library (`tree-product.mts`, loaded at run time from `worker/src/summary-tree` or `SUMMARY_TREE_EVAL_LIB`) or the **stand-in** (`grouping-standin.mts`, `tree.mts`) written before the library existed |
 | `tree-guide`, `tree-include` | **Simulation** in `arms.mts`: the retrieval leg does not exist yet; the fusion rule is fixed in `TREE_RULE` |
 | Production deadline for `guide` | Not modelled: needs the phase-0 latency experiment |
 
@@ -41,10 +40,11 @@ tsx scripts/summary-tree-eval/corpus.mts $M                                     
 tsx scripts/summary-tree-eval/cases.mts build AUTHORED $M OUTPUT [--sealed]          # verify every quote
 DATABASE_URL=postgres://…/docslurp_<throwaway> node server/db/migrate.mjs
 DATABASE_URL=… LANCEDB_URI=$SUMMARY_TREE_EVAL_ROOT/lancedb tsx scripts/summary-tree-eval/seed.mts $M
-tsx scripts/summary-tree-eval/tree.mts $M                                            # frozen tree (paid)
-DATABASE_URL=… LANCEDB_URI=… tsx scripts/summary-tree-eval/arms.mts CASES RUN_DIR    # all arms, raw outputs kept
+tsx scripts/summary-tree-eval/tree.mts $M                                            # frozen tree, stand-in grouping (paid)
+SUMMARY_TREE_EVAL_TREE_DIR=tree-product tsx scripts/summary-tree-eval/tree-product.mts $M   # frozen tree, product library (paid)
+DATABASE_URL=… LANCEDB_URI=… [SUMMARY_TREE_EVAL_TREE_DIR=tree-product] tsx scripts/summary-tree-eval/arms.mts CASES RUN_DIR   # all arms, raw outputs kept
 tsx scripts/summary-tree-eval/report.mts RUN_DIR SUMMARY.json
-tsx scripts/summary-tree-eval/reuse.mts $M REUSE.json                                # grouping + hashing only
+[SUMMARY_TREE_EVAL_GROUPING=product] tsx scripts/summary-tree-eval/reuse.mts $M REUSE.json   # grouping + hashing only
 tsx scripts/summary-tree-eval/integrity-export.mts DATASET AUTHOR CASES… [--confirmation]
 node scripts/evaluation-integrity-judge.mjs --dataset DATASET --repo . --base origin/main
 tsx --test scripts/summary-tree-eval/grouping-standin.test.mts

@@ -29,11 +29,15 @@ export type StoredNode = {
   id: string; documentId: string; level: number; headingPath: string[]; leafStart: number; leafEnd: number;
   chunkStart: number; chunkEnd: number; pageStart: number | null; pageEnd: number | null; text: string; vector: number[];
 };
-export type StoredTree = { documentId: string; settings: HashSettings; options: typeof STANDIN_GROUP_OPTIONS; grouping: "stand-in"; leafChunkIndexes: number[]; nodes: StoredNode[]; rootId: string; calls: number; reused: number };
+export type StoredTree = { documentId: string; settings: unknown; options: unknown; grouping: string; leafChunkIndexes: number[]; nodes: StoredNode[]; rootId: string; calls: number; reused: number };
 type NodeSummary = { text: string; attempts: Array<{ inputTokens: number; outputTokens: number; ms: number; finishReason: string; model: string; refused: boolean }> };
 
-const summaryDir = () => { const dir = join(ROOT(), "tree", "summaries"); mkdirSync(dir, { recursive: true }); return dir; };
-export const treePath = (documentId: string) => join(ROOT(), "tree", `${documentId}.tree.json`);
+const summaryDir = () => { const dir = join(treeDir(), "summaries"); mkdirSync(dir, { recursive: true }); return dir; };
+/** Trees live under `tree/` (stand-in grouping) or the directory named by SUMMARY_TREE_EVAL_TREE_DIR (e.g. the product library's). */
+export const treeDir = () => join(ROOT(), process.env.SUMMARY_TREE_EVAL_TREE_DIR ?? "tree");
+export const treePath = (documentId: string) => join(treeDir(), `${documentId}.tree.json`);
+/** Written instead of a tree when the grouping library skips the document, with its reason. */
+export const skipPath = (documentId: string) => join(treeDir(), `${documentId}.skip.json`);
 
 async function pool<T, R>(items: T[], worker: (item: T, index: number) => Promise<R>): Promise<R[]> {
   const out = new Array<R>(items.length);
