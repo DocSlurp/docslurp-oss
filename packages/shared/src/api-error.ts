@@ -4,6 +4,16 @@ import { PUBLIC_ERROR_MESSAGES } from "./public-errors.js";
 import { PARSE_SOURCE_RESCAN_MESSAGE } from "./parse-source-decision.js";
 
 /**
+ * The one refusal for work that needs edit access to the project: reprocessing, re-indexing, full index, figure resume,
+ * settings and their estimates, run control beyond a creator's own upload, corrections, deletes and tag changes, and the
+ * chat proposal Apply routes. HTTP 403 with this code and message, for a caller who can see the project or document but
+ * may not change it (org owners and admins, the project's owner, and its admins and editors may). Clients show "ask a
+ * project editor", never a retry.
+ */
+export const EDITOR_REQUIRED_CODE = "editor_required" as const;
+export const EDITOR_REQUIRED_MESSAGE = "This needs edit access to the project. Ask a project editor or an organization admin.";
+
+/**
  * The native API error envelope: `{ error: { code, message, details?, requestId } }`.
  * `code` is a closed, machine-readable vocabulary; clients branch on it, never
  * on `message`. It is the only error shape of the native JSON API. Protocol
@@ -18,6 +28,7 @@ export const API_ERROR_CODES = [
   "idempotency_conflict",
   "unauthorized",
   "forbidden",
+  "editor_required",
   "web_scope_required",
   "mfa_required",
   "not_found",
@@ -125,6 +136,7 @@ export const API_ERROR_PUBLIC_MESSAGES: Record<ApiErrorCode, string> = {
   idempotency_conflict: "This credit request ID belongs to different parameters or an administrator. Reconcile the original request.",
   unauthorized: PUBLIC_ERROR_MESSAGES.unauthorized,
   forbidden: PUBLIC_ERROR_MESSAGES.forbidden,
+  editor_required: EDITOR_REQUIRED_MESSAGE,
   not_found: PUBLIC_ERROR_MESSAGES.missing,
   project_not_found: PUBLIC_ERROR_MESSAGES.projectMissing,
   project_forbidden: PUBLIC_ERROR_MESSAGES.forbidden,
