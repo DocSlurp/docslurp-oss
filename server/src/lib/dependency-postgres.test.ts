@@ -8,8 +8,8 @@ const spans: Array<{ name: string; attributes: Record<string, unknown> }> = [];
 initializeObservability({ spanProcessors: [{ onStart() {}, onEnd(span) { spans.push(span); }, async shutdown() {}, async forceFlush() {} }] });
 afterAll(async () => { await shutdownObservability(); vi.unstubAllEnvs(); });
 
-it.skipIf(!process.env.GRAPH_PURGE_TEST_DATABASE_URL)("preserves lazy queries, fragments, transactions, cursors and SQL errors", async () => {
-  const url = process.env.GRAPH_PURGE_TEST_DATABASE_URL!;
+it.skipIf(!process.env.TEST_DATABASE_URL)("preserves lazy queries, fragments, transactions, cursors and SQL errors", async () => {
+  const url = process.env.TEST_DATABASE_URL!;
   const sql = instrumentPostgres(postgres(url, { max: 2 }), url);
   try {
     const query = sql`select ${42}::int as answer`;

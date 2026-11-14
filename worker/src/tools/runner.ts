@@ -65,6 +65,7 @@ import {
   resolveWorkerDeploymentProfile,
 } from "../pipeline/local-compute-cost.js";
 import { vmOnlyParsing } from "../lib/vm-only-parsing.js";
+import { requestedUnsafeOverrides, unsafeOverrideEnabled } from "../lib/unsafe-overrides.js";
 import { CLAM_SCAN_COMMAND_TIMEOUT_MS, clamscanLimitArgs, isClamEncryptedAlert } from "./clam-limits.js";
 import { ClamdPolicyCache, type ClamdPolicyVerdict, type ClamdProbeResult } from "./clamd-policy.js";
 
@@ -2376,9 +2377,9 @@ function commandFailure(error: unknown, stopping: Error | null): Error {
   return stopping ?? (error as Error);
 }
 
-/** Only provider none, with the explicit override, may run parser work without a PID namespace. */
+/** Only provider none, with the explicit development override, may run parser work without a PID namespace. */
 function allowsUnisolated(session: SandboxSession): boolean {
-  return session.providerId === "none" && process.env.DOCSLURP_PARSER_SANDBOX_ALLOW_UNISOLATED === "true";
+  return session.providerId === "none" && unsafeOverrideEnabled("DOCSLURP_PARSER_SANDBOX_ALLOW_UNISOLATED");
 }
 
 /**
@@ -2473,17 +2474,16 @@ let warnedUnfilteredSockets = false;
 /**
  * A local provider that cannot enforce the AF_UNIX filter (landlock, none) must not run a command
  * that asks for it: two such commands could meet on a socket and trip the teardown breaker, or
- * worse. bubblewrap filters with seccomp, landlock with landrun's socket scoping (>= 0.1.17). DOCSLURP_SANDBOX_ALLOW_UNFILTERED_SOCKETS=1 runs them anyway for local development; it is
- * refused when NODE_ENV=production. Remote providers are exempt: their commands run in the
+ * worse. bubblewrap filters with seccomp, landlock with landrun's socket scoping (>= 0.1.17). DOCSLURP_SANDBOX_ALLOW_UNFILTERED_SOCKETS=1 runs them anyway in development and
+ * tests; anywhere else the worker refuses to start with it set (lib/unsafe-overrides.ts), and it has no effect here. Remote providers are exempt: their commands run in the
  * session's own VM, terminated with the activity, and never hold a worker-side teardown.
  */
 export function assertUnixSocketFilter(session: Pick<SandboxSession, "providerId" | "filtersUnixSockets">, command: Pick<SandboxCommand, "binary" | "denyUnixSockets">): void {
   if (session.filtersUnixSockets) return;
   // Landlock must scope even parsers that need sockets to their own domain.
   if (session.providerId !== "landlock" && !command.denyUnixSockets) return;
-  const optIn = ["1", "true"].includes(process.env.DOCSLURP_SANDBOX_ALLOW_UNFILTERED_SOCKETS?.trim().toLowerCase() ?? "");
-  const production = vmOnlyParsing();
-  if (optIn && !production) {
+  const requested = requestedUnsafeOverrides().includes("DOCSLURP_SANDBOX_ALLOW_UNFILTERED_SOCKETS");
+  if (unsafeOverrideEnabled("DOCSLURP_SANDBOX_ALLOW_UNFILTERED_SOCKETS")) {
     if (!warnedUnfilteredSockets) {
       warnedUnfilteredSockets = true;
       console.warn(
@@ -2495,7 +2495,7 @@ export function assertUnixSocketFilter(session: Pick<SandboxSession, "providerId
   }
   console.error(
     `[parser-sandbox] status=refused provider=${session.providerId} reason=no-unix-socket-filter ` +
-      `binary=${path.basename(command.binary)}${optIn ? " detail=opt-in ignored under NODE_ENV=production" : ""}`,
+      `binary=${path.basename(command.binary)}${requested ? " detail=opt-in refused outside development" : ""}`,
   );
   throw new SandboxPolicyError(
     `parser sandbox provider '${session.providerId}' cannot stop '${path.basename(command.binary)}' from creating UNIX sockets; ` +
@@ -2948,16 +2948,13 @@ export async function readClamDefinitionsHeader(files: readonly string[]): Promi
 export function resolveMalwareScanPolicy(
   env: NodeJS.ProcessEnv = process.env,
 ): MalwareScanPolicy {
-  const production = (env.NODE_ENV ?? "").trim().toLowerCase() === "production";
   return {
     requireDaemon: readBooleanFlag(
       env.DOCSLURP_CLAMAV_REQUIRE_DAEMON,
       false,
     ),
-    failOpenOnStaleDefinitions: readBooleanFlag(
-      env.DOCSLURP_CLAMAV_FAIL_OPEN_ON_STALE_DB,
-      !production,
-    ),
+    // Fails closed by default everywhere; only an explicit development opt-in warns instead (#398).
+    failOpenOnStaleDefinitions: unsafeOverrideEnabled("DOCSLURP_CLAMAV_FAIL_OPEN_ON_STALE_DB", env),
     maxSignatureAgeHours:
       readPositiveNumber(env.DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS) ?? 24,
     databaseDirectory: env.DOCSLURP_CLAMAV_DB_DIR?.trim() || "/var/lib/clamav",

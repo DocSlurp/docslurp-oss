@@ -8,7 +8,7 @@ import { spawnSync } from "node:child_process";
 import { afterAll, afterEach, beforeAll, expect, it } from "vitest";
 import { applyOwnedMigrations } from "../../db/owned-migrations.mjs";
 
-const url = process.env.MIGRATION_OWNER_TEST_DATABASE_URL;
+const url = process.env.TEST_DATABASE_URL;
 const folder = resolve("db/migrations");
 const owner = `migration_owner_${process.pid}`;
 const outsider = `migration_outsider_${process.pid}`;

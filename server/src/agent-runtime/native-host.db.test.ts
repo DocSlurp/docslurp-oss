@@ -21,8 +21,8 @@ it("keeps native storage DDL reproducible and out of runtime startup",async()=>{
   const result=await pool.query("select to_regclass('docslurp_mastra.mastra_workflow_snapshot') as table_name");
   expect(result.rows[0].table_name).toBeTruthy();
 });
-it.runIf(!!process.env.NATIVE_CHAT_TEST_REDIS_URL)("replays from another native host through shared storage/cache without re-execution",async()=>{
-  const url=new URL(process.env.NATIVE_CHAT_TEST_REDIS_URL!);
+it.runIf(!!process.env.TEST_REDIS_URL)("replays from another native host through shared storage/cache without re-execution",async()=>{
+  const url=new URL(process.env.TEST_REDIS_URL!);
   if(url.hostname!=="127.0.0.1")throw new Error("local test Redis required");
   const namespace=`native-test:${randomUUID()}`;
   let executions=0;

@@ -108,6 +108,11 @@ maintenance is switched off (`maintenance=off`).
   by writes, so ordinary maintenance prunes them, and any pass that compacts
   re-arms the prune.
 
+With the [local disk cache](self-host/operations.md#local-disk-cache-for-lancedb) on, each
+API machine also keeps a copy of the index and data files it has read. Files that cleanup or
+compaction later remove from the bucket stay in that directory until its size limit evicts
+them; no search reads them again. Delete the cache directory to remove them at once.
+
 ### Community summaries
 
 A graph community summary is written from its member entities and the

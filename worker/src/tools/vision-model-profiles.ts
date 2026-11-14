@@ -4,7 +4,7 @@ import { nitroBaseModel } from "@docslurp/shared";
  * OpenRouter model id. Models without an entry keep the generic defaults.
  */
 
-import { openRouterReasoningParams, type OpenRouterReasoning } from "@docslurp/shared";
+import { openRouterReasoningParams, type OpenRouterReasoning, type VisionRequestProfile } from "@docslurp/shared";
 
 import { unwrapWholeMarkdownFence } from "./vision-markdown-fence.js";
 import { normalizeMarkdownMathDelimiters } from "./vision-math-delimiters.js";
@@ -99,6 +99,8 @@ export interface VisionModelProfile {
   contentFilterRetryProvider?: OpenRouterProviderPreferences;
   /** Repair applied to the model's transcription text. */
   postProcess?: (text: string) => string;
+  /** Request shape for this hosted model (prompt mode, sampling, output cap, page long edge); see vision-request-profile.ts. */
+  request?: VisionRequestProfile;
 }
 
 /** Add a model with one entry; add a template to `visionPromptTemplates` only if it needs a new prompt. */

@@ -2,9 +2,9 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 /**
  * Runs the Project Graph module against a real, migrated Postgres. Opt-in:
- *   PROJECT_GRAPH_TEST_DATABASE_URL=postgres://… (a throwaway database; it is seeded and wiped)
+ *   TEST_DATABASE_URL=postgres://… (a throwaway database; it is seeded and wiped)
  */
-const databaseUrl = process.env.PROJECT_GRAPH_TEST_DATABASE_URL;
+const databaseUrl = process.env.TEST_DATABASE_URL;
 
 describe.skipIf(!databaseUrl)("project graph service (database)", () => {
   let service: typeof import("../services/project-graph.js");
