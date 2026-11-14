@@ -7,13 +7,13 @@ import { defaultPipelineFeatures } from "@docslurp/shared";
 import { createRunLifecycle } from "../services/run-lifecycle.js";
 import type { SqlClient } from "../db.js";
 
-// Real-Postgres check of Run Lifecycle transitions. RUN_LIFECYCLE_DATABASE_URL
+// Real-Postgres check of Run Lifecycle transitions. TEST_DATABASE_URL
 // must point at a disposable local database built by applying
 // server/db/migrations (pnpm db:migrate); server/db/migrations is the only
 // schema source. Each test seeds its own user, organization and project with
-// unique ids and deletes them afterwards. Skipped without a local DB:
-//   RUN_LIFECYCLE_DATABASE_URL=$DATABASE_URL npx vitest run --project api run-lifecycle.db
-const databaseUrl = process.env.RUN_LIFECYCLE_DATABASE_URL ?? "";
+// unique ids and deletes them afterwards. Skipped without TEST_DATABASE_URL; run it with
+// scripts/run-database-tests.mjs, which gives each file a fresh disposable database.
+const databaseUrl = process.env.TEST_DATABASE_URL ?? "";
 const isLocal =
   databaseUrl !== "" && ["localhost", "127.0.0.1"].includes(new URL(databaseUrl).hostname);
 

@@ -7,7 +7,7 @@ let sql: postgres.Sql;
 let stop: () => Promise<void>;
 let svc: typeof import("../services/project-indexing-mode.js");
 let failGrant = false;
-const external = process.env.FULL_INDEX_TEST_DATABASE_URL;
+const external = process.env.TEST_DATABASE_URL;
 const actor = { type: "session", userId: "fx-user", sessionId: "fx-session", user: { id: "fx-user", email: "fx@example.test", name: "FX" } } as const;
 const policy = { maxPagesPerQuery: 40, maxCreditsPerQuery: 25, deadlineMs: 20000, allowFullIndexRequest: true, allowAgentDiscovery: true, mapRouter: "always" as const };
 beforeAll(async () => {

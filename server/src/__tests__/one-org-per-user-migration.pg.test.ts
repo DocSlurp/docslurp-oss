@@ -22,7 +22,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
  *   - a personal organization whose owner leaves while a guest stays is never left ownerless or handed to the guest: 0127
  *     aborts and names it until an operator resolves it, and the acknowledgement of the old plan no longer matches after.
  */
-const url = process.env.ONE_ORG_MIGRATION_TEST_DATABASE_URL;
+const url = process.env.TEST_DATABASE_URL;
 const root = fileURLToPath(new URL("../../../", import.meta.url));
 const journal = JSON.parse(readFileSync(new URL("../../db/migrations/meta/_journal.json", import.meta.url), "utf8"));
 const fixtureName = `one_org_upgrade_${process.pid}`;

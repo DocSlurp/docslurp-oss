@@ -4,9 +4,9 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 /**
  * Statement timeout and abort against a real Postgres (PGlite has no
  * statement_timeout and runs one statement at a time). Opt-in:
- * SEARCH_BOUNDS_PG_URL=postgres://... pnpm vitest run src/__tests__/query-bounds.pg.test.ts
+ * TEST_DATABASE_URL=postgres://... pnpm vitest run src/__tests__/query-bounds.pg.test.ts
  */
-const url = process.env.SEARCH_BOUNDS_PG_URL;
+const url = process.env.TEST_DATABASE_URL;
 let sql: postgres.Sql<Record<string, unknown>>;
 let bounds: typeof import("../search/query-bounds.js");
 

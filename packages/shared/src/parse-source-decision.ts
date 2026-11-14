@@ -20,13 +20,20 @@ export interface ParseSourceDecisionColumns {
   parse_source_scan_version?: number | null;
 }
 
+import { isDevelopmentEnvironment, normalizeEnvSetting } from "./runtime-environment.js";
+
 const SHA256_HEX = /^[0-9a-f]{64}$/;
 
-/** Whether quarantine must scan every document (the worker's config.quarantineEnabled): always in production. */
+/**
+ * Whether quarantine must scan every document (the worker's config.quarantineEnabled). Disabling it
+ * (QUARANTINE_ENABLED=0/false/no/off) is development-only (#398): outside development and test (runtime-environment.ts:
+ * NODE_ENV other than development, test or unset, or a service profile) quarantine is always required, and the worker
+ * refuses to start with it disabled (worker/src/lib/unsafe-overrides.ts).
+ */
 export function quarantineRequired(env: NodeJS.ProcessEnv = process.env): boolean {
-  if ((env.NODE_ENV ?? "").trim().toLowerCase() === "production") return true;
-  const value = env.QUARANTINE_ENABLED?.trim().toLowerCase();
-  return !(value && ["0", "false", "no", "off"].includes(value));
+  if (!isDevelopmentEnvironment(env)) return true;
+  const value = normalizeEnvSetting(env.QUARANTINE_ENABLED);
+  return !["0", "false", "no", "off"].includes(value);
 }
 
 /**

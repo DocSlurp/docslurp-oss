@@ -3,9 +3,9 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 /**
  * Billing SQL (migration 0068 functions + the services that call them) against
  * a real, migrated Postgres. Opt-in:
- *   BILLING_TEST_DATABASE_URL=postgres://… (a throwaway database; rows are seeded and wiped)
+ *   TEST_DATABASE_URL=postgres://… (a throwaway database; rows are seeded and wiped)
  */
-const databaseUrl = process.env.BILLING_TEST_DATABASE_URL;
+const databaseUrl = process.env.TEST_DATABASE_URL;
 const ORG = "org-billing-db";
 const USER = "user-billing-db";
 

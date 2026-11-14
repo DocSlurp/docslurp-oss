@@ -4,9 +4,9 @@ import { afterAll, describe, expect, it } from "vitest";
 /**
  * Better Auth's sliding session refresh against a real, migrated Postgres.
  * Opt-in:
- *   AUTH_SESSION_TEST_DATABASE_URL=postgres://… (a throwaway database)
+ *   TEST_DATABASE_URL=postgres://… (a throwaway database)
  */
-const databaseUrl = process.env.AUTH_SESSION_TEST_DATABASE_URL;
+const databaseUrl = process.env.TEST_DATABASE_URL;
 const secret = "x".repeat(40);
 
 describe.skipIf(!databaseUrl)("Better Auth session refresh (database)", () => {

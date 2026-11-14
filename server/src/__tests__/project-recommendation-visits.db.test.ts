@@ -9,7 +9,7 @@ let getVisit: typeof import("../services/project-recommendation-visits.js").getR
 let ack: typeof import("../services/project-recommendation-visits.js").acknowledgeRecommendationVisit;
 const scope = { userId: "u", orgId: "o", projectId: "w" };
 beforeAll(async () => {
-  const external = process.env.RECOMMENDATION_TEST_DATABASE_URL;
+  const external = process.env.TEST_DATABASE_URL;
   const db = external ? null : await startMigratedPostgres();
   stop = db?.stop ?? (async () => {});
   sql = postgres(external ?? db!.url, { max: external ? 4 : 1, prepare: false, onnotice: () => {} });
@@ -83,8 +83,8 @@ it("quiet activity accumulates across reads and acknowledgement consumes only ob
   expect(await ack(scope, busy.token)).toBe(true);
 });
 
-it.skipIf(!process.env.RECOMMENDATION_TEST_DATABASE_URL)("retains a transaction committed after its snapshot on a different PostgreSQL backend", async () => {
-  const writer = postgres(process.env.RECOMMENDATION_TEST_DATABASE_URL!, { max: 1, prepare: false });
+it.skipIf(!process.env.TEST_DATABASE_URL)("retains a transaction committed after its snapshot on a different PostgreSQL backend", async () => {
+  const writer = postgres(process.env.TEST_DATABASE_URL!, { max: 1, prepare: false });
   let pending!: Awaited<ReturnType<typeof getVisit>>;
   try {
     await writer.begin(async tx => {
