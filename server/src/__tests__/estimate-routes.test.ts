@@ -604,7 +604,7 @@ describe("chart export tier: origin defaults, per-request override and its guard
     // Reprocessing spends credits on existing content: editors only, so the member is refused before any tier check.
     const member = await post(appFor("u2", undefined, { session: true }), "/v1/runs/runwd/reprocess", { chartExport: { tier: "models" } });
     expect(member.status).toBe(403);
-    expect(await post(appFor("u2", undefined, { session: true }), "/v1/runs/runwd/reprocess", {}).then((response) => response.status)).toBe(403);
+    expect((await post(appFor("u2", undefined, { session: true }), "/v1/runs/runwd/reprocess", {})).status).toBe(403);
     expect(await runCount()).toBe(before);
   });
 

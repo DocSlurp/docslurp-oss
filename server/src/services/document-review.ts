@@ -5,7 +5,7 @@ import { splitTextIntoPages as splitDocumentPages } from "@docslurp/shared";
 import { sql } from "../db.js";
 import { notifySearchEligibilityChanged } from "../search/eligibility-hint.js";
 import { getArtifactJson, getArtifactText } from "../lib/artifacts.js";
-import { listAccessibleProjectIds } from "./organizations.js";
+import { canEditProject, getProjectAccess, listAccessibleProjectIds } from "./organizations.js";
 import { getDocumentViewerPayload, setDocumentTags } from "./documents.js";
 
 type ReviewDocumentRow = {
@@ -430,6 +430,17 @@ export function calculateReviewSeverity(input: {
   );
 }
 
+/** A visible document the caller may not correct (403; one they cannot see is a 404). */
+export class CorrectionForbiddenError extends Error {
+  readonly status = 403 as const;
+  constructor() { super("Correcting a document needs edit access to the project"); this.name = "CorrectionForbiddenError"; }
+}
+
+async function assertCanEditCorrection(projectId: string, orgId: string, userId: string): Promise<void> {
+  const access = await getProjectAccess(projectId, userId);
+  if (!access || access.orgId !== orgId || !canEditProject(access, userId)) throw new CorrectionForbiddenError();
+}
+
 async function getAccessibleDocument(docId: string, userId: string): Promise<ReviewDocumentRow | null> {
   const projectIds = await listAccessibleProjectIds(userId);
   if (projectIds.length === 0) {
@@ -792,6 +803,8 @@ export async function saveDocumentCorrection(args: {
   if (!document) {
     return null;
   }
+  // Corrected text is published to search (and a re-index re-embeds it): editors only (council L3 M2).
+  await assertCanEditCorrection(document.project_id, document.org_id, args.userId);
 
   if (args.tags) {
     await setDocumentTags(args.docId, args.userId, args.tags);
@@ -854,6 +867,8 @@ export async function reindexDocumentCorrection(args: {
   if (!document || !document.run_id) {
     return null;
   }
+  // Corrected text is published to search (and a re-index re-embeds it): editors only (council L3 M2).
+  await assertCanEditCorrection(document.project_id, document.org_id, args.userId);
 
   const [correction, reviewSignal] = await Promise.all([
     getCorrectionRow(args.docId),

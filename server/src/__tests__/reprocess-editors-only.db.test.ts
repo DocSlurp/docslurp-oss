@@ -36,7 +36,12 @@ beforeAll(async () => {
     startMaterializeWorkflow: vi.fn(async () => undefined), signalPipelineCancel: vi.fn(), signalPipelinePause: vi.fn(),
     signalPipelineResume: vi.fn(), isTemporalClientConnected: () => true, onTemporalClientConnected: vi.fn(), warmTemporalClient: vi.fn(),
   }));
-  vi.doMock("../services/run-lifecycle.js", () => ({ runLifecycle: { start: vi.fn(async () => ({ status: "started" })) } }));
+  vi.doMock("../services/run-lifecycle.js", () => ({ runLifecycle: {
+    start: vi.fn(async () => ({ status: "started" })),
+    // Control succeeds as a no-op change: these tests decide who may control, not what a control does.
+    control: vi.fn(async (run: { id: string }) => run.id),
+    signalResume: vi.fn(async () => undefined),
+  } }));
 
   await sql`insert into "user"(id, name, email) values
     ('ua', 'Admin', 'admin@example.com'), ('ue', 'Editor', 'editor@example.com'), ('uv', 'Viewer', 'viewer@example.com'),
@@ -53,7 +58,9 @@ beforeAll(async () => {
   await sql`insert into project_members (project_id, user_id, role) values ('proj-a', 'ue', 'editor'), ('proj-a', 'uv', 'viewer')`;
   await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total) values
     ('run-a', 'org-a', 'uv', 'proj-a', 'bulk-upload', 'failed', 'failed', ${sql.json(defaultPipelineFeatures as never)}, 1, 4),
-    ('run-b', 'org-b', 'ub', 'proj-b', 'bulk-upload', 'failed', 'failed', ${sql.json(defaultPipelineFeatures as never)}, 1, 4)`;
+    ('run-b', 'org-b', 'ub', 'proj-b', 'bulk-upload', 'failed', 'failed', ${sql.json(defaultPipelineFeatures as never)}, 1, 4),
+    ('run-mine', 'org-a', 'um', 'proj-a', 'bulk-upload', 'processing', 'extract-markdown', ${sql.json(defaultPipelineFeatures as never)}, 1, 4),
+    ('run-mine-reprocess', 'org-a', 'um', 'proj-a', 'bulk-reprocess', 'processing', 'extract-markdown', ${sql.json(defaultPipelineFeatures as never)}, 1, 4)`;
   await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, indexing_mode) values
     ('doc-a', 'org-a', 'uv', 'proj-a', 'run-a', 'a.pdf', 'application/pdf', 'uv/raw/a.pdf', 'completed', 4, 'map'),
     ('doc-b', 'org-b', 'ub', 'proj-b', 'run-b', 'b.pdf', 'application/pdf', 'ub/raw/b.pdf', 'completed', 4, 'map')`;
@@ -211,5 +218,104 @@ describe("chat proposal Apply", () => {
     await expect(applyFigureResumeProposal({ actor, projectId: "proj-a", token })).rejects.toMatchObject({ status: 403 });
     const response = await post(as("uv"), "/v1/projects/proj-a/figure-resume-proposals/apply", { token });
     expect(response.status).toBe(403);
+  });
+
+  it("lets a project editor apply the same kind of proposal", async () => {
+    const { sealSettingsProposal } = await import("../lib/settings-proposal-tokens.js");
+    await sql`insert into chat_sessions (id, user_id, project_id) values ('chat-ue', 'ue', 'proj-a') on conflict do nothing`;
+    const token = sealSettingsProposal({
+      purpose: "figure-resume-proposal-v1", actor: "session:ue:session-ue", userId: "ue", sessionId: "chat-ue",
+      projectId: "proj-a", orgId: "org-a", documentId: null, expiresAt: Date.now() + 60_000, jti: randomUUID(),
+    });
+    const response = await post(as("ue"), "/v1/projects/proj-a/figure-resume-proposals/apply", { token });
+    expect(response.status, await response.clone().text()).toBe(200);
+    expect(await response.json()).toMatchObject({ applied: true, projectId: "proj-a" });
+  });
+});
+
+describe("run control (council M1)", () => {
+  const control = (caller: Caller, runId: string, action: string) =>
+    post(caller, `/v1/runs/${runId}/control`, action === "reprioritize" ? { action, priority: 5 } : { action });
+  const ACTIONS = ["cancel", "pause", "resume", "recover", "reprioritize"] as const;
+
+  it("an editor and an org admin may do anything", async () => {
+    for (const user of ["ue", "ua"]) for (const action of ACTIONS) {
+      const response = await control(as(user), "run-mine", action);
+      expect(pastAuthorization(response), `${user} ${action}: ${response.status} ${await response.text()}`).toBe(true);
+    }
+  });
+
+  it("the creator may cancel, pause, resume and recover their own upload run, never reprioritize", async () => {
+    for (const action of ["cancel", "pause", "resume", "recover"]) {
+      const response = await control(as("um"), "run-mine", action);
+      expect(pastAuthorization(response), `${action}: ${response.status} ${await response.text()}`).toBe(true);
+    }
+    expect((await control(as("um"), "run-mine", "reprioritize")).status).toBe(403);
+  });
+
+  it("the creator of a reprocess run may cancel or pause it, but not resume or recover it (that spends on existing content)", async () => {
+    for (const action of ["cancel", "pause"]) expect(pastAuthorization(await control(as("um"), "run-mine-reprocess", action)), action).toBe(true);
+    for (const action of ["resume", "recover", "reprioritize"]) expect((await control(as("um"), "run-mine-reprocess", action)).status, action).toBe(403);
+  });
+
+  it("a default-project viewer and a member who did not create the run are refused with 403", async () => {
+    // uv views the default project; ua created no run here, so check uv on um's run and um on uv's run.
+    for (const action of ACTIONS) {
+      expect((await control(as("uv"), "run-mine", action)).status, `uv ${action}`).toBe(403);
+      expect((await control(as("um"), "run-a", action)).status, `um ${action}`).toBe(403);
+    }
+  });
+
+  it("another organization gets 404", async () => {
+    for (const action of ACTIONS) expect((await control(as("ub"), "run-mine", action)).status, action).toBe(404);
+  });
+});
+
+describe("saving corrections (council M2)", () => {
+  const save = (caller: Caller, docId = "doc-a") => app.request(`/v1/documents/${docId}/correction-workbench`, {
+    method: "PUT", headers: { ...caller.headers, "content-type": "application/json" }, body: JSON.stringify({ markdown: "# Corrected", notes: "fix" }),
+  });
+
+  it("a viewer and a plain member are refused; nothing is saved", async () => {
+    for (const user of ["uv", "um"]) expect((await save(as(user))).status, user).toBe(403);
+    expect(await sql`select 1 from document_corrections where document_id = 'doc-a'`).toHaveLength(0);
+  });
+
+  it("an editor may save a correction", async () => {
+    const response = await save(as("ue"));
+    expect(response.status, await response.clone().text()).toBe(200);
+    expect(await sql`select 1 from document_corrections where document_id = 'doc-a'`).toHaveLength(1);
+  });
+
+  it("another organization gets 404", async () => {
+    expect((await save(as("ub"))).status).toBe(404);
+    expect((await save(as("ua"), "doc-b")).status).toBe(404);
+  });
+});
+
+describe("a demoted user's key (council L3)", () => {
+  it("loses reprocess and spend rights as soon as its user is no longer an editor", async () => {
+    const { rawKey } = await keys.createApiKey("ue", `demoted-${randomUUID()}`, { orgId: "org-a", scopes: ["artifacts", "ingest"], projectIds: ["proj-a"] });
+    const reprocess = () => post(bearer(rawKey), "/v1/documents/bulk", { action: "reprocess", documentIds: ["doc-a"] });
+    const runReprocess = () => post(bearer(rawKey), "/v1/runs/run-a/reprocess", {});
+    const fullIndex = () => post(bearer(rawKey), "/v1/documents/doc-a/full-index", {});
+    expect(pastAuthorization(await reprocess())).toBe(true);
+    await sql`update project_members set role = 'viewer' where project_id = 'proj-a' and user_id = 'ue'`;
+    try {
+      for (const call of [reprocess, runReprocess, fullIndex]) expect((await call()).status).toBe(403);
+    } finally {
+      await sql`update project_members set role = 'editor' where project_id = 'proj-a' and user_id = 'ue'`;
+    }
+    expect(pastAuthorization(await runReprocess())).toBe(true);
+  });
+});
+
+describe("run reprocess estimate (council L1)", () => {
+  it("follows the reprocess rule: viewer 403, editor allowed, another org 404", async () => {
+    const estimate = (caller: Caller, runId = "run-a") => post(caller, `/v1/runs/${runId}/reprocess/estimate`, {});
+    for (const user of ["uv", "um"]) expect((await estimate(as(user))).status, user).toBe(403);
+    expect(pastAuthorization(await estimate(as("ue")))).toBe(true);
+    expect((await estimate(as("ub"))).status).toBe(404);
+    expect((await estimate(as("ua"), "run-b")).status).toBe(404);
   });
 });

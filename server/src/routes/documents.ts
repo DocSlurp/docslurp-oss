@@ -19,7 +19,8 @@ import { requestDocumentFigureResume } from "../services/figure-resume.js";
 import {
   getCorrectionWorkbench,
   reindexDocumentCorrection,
-  saveDocumentCorrection
+  saveDocumentCorrection,
+  CorrectionForbiddenError
 } from "../services/document-review.js";
 import {
   addDocumentTags,
@@ -479,14 +480,20 @@ export const documentsRoutes = new Hono()
   .put("/:docId/correction-workbench", zValidator("json", saveCorrectionSchema, validationHook), async (c) => {
     const userId = c.get("sessionUser").id;
     const body = c.req.valid("json");
-    const payload = await saveDocumentCorrection({
-      docId: c.req.param("docId"),
-      userId,
-      markdown: body.markdown,
-      structuredData: body.structuredData,
-      notes: body.notes,
-      tags: body.tags
-    });
+    let payload: Awaited<ReturnType<typeof saveDocumentCorrection>>;
+    try {
+      payload = await saveDocumentCorrection({
+        docId: c.req.param("docId"),
+        userId,
+        markdown: body.markdown,
+        structuredData: body.structuredData,
+        notes: body.notes,
+        tags: body.tags
+      });
+    } catch (error) {
+      if (error instanceof CorrectionForbiddenError) return apiStatusError(c, 403, error.message);
+      throw error;
+    }
 
     if (!payload) {
       return apiStatusError(c, 404, "Document not found");
@@ -519,10 +526,13 @@ export const documentsRoutes = new Hono()
     if (!correctionOwner || (c.get("apiKey") && !apiKeyCanUseProject(c.get("apiKey"), correctionOwner))) return apiStatusError(c, 404, "Correction not found");
     const deniedReindex = await denyReprocessOfVisible(c, [correctionOwner]);
     if (deniedReindex) return deniedReindex;
-    const result = await reindexDocumentCorrection({
-      docId: c.req.param("docId"),
-      userId
-    });
+    let result: Awaited<ReturnType<typeof reindexDocumentCorrection>>;
+    try {
+      result = await reindexDocumentCorrection({ docId: c.req.param("docId"), userId });
+    } catch (error) {
+      if (error instanceof CorrectionForbiddenError) return apiStatusError(c, 403, error.message);
+      throw error;
+    }
 
     if (!result) {
       return apiStatusError(c, 404, "Correction not found");

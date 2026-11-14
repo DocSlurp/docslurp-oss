@@ -25,6 +25,7 @@ import { streamRunProgressSnapshots } from "../services/run-progress-stream.js";
 import { type RunStartOutcome } from "../services/run-lifecycle.js";
 import {
   controlRun,
+  RunControlForbiddenError,
   getRun,
   getRunProcessingPreview,
   getRunProgress,
@@ -336,7 +337,8 @@ export const runsRoutes = new Hono()
     }
   })
   .post("/:runId/reprocess/estimate", zValidator("json", reprocessRunSchema, validationHook), async (c) => {
-    const denied = await denyRunContentUpdate(c, c.req.param("runId"));
+    // Same rule as the reprocess it prices (and the full-index estimate): editors, or a key with ingest (council L1).
+    const denied = await denyRunContentUpdate(c, c.req.param("runId")) ?? await denyRunReprocess(c, c.req.param("runId"));
     if (denied) return denied;
     const userId = c.get("sessionUser").id;
     const body = c.req.valid("json");
@@ -455,10 +457,13 @@ export const runsRoutes = new Hono()
   .post("/:runId/control", zValidator("json", controlRunSchema, validationHook), async (c) => {
     const userId = c.get("sessionUser").id;
     const body = c.req.valid("json");
-    const run = await controlRun(c.req.param("runId"), userId, {
-      action: body.action,
-      priority: body.priority
-    });
+    let run: Awaited<ReturnType<typeof controlRun>>;
+    try {
+      run = await controlRun(c.req.param("runId"), userId, { action: body.action, priority: body.priority });
+    } catch (error) {
+      if (error instanceof RunControlForbiddenError) return apiStatusError(c, 403, error.message);
+      throw error;
+    }
 
     if (!run) {
       return apiStatusError(c, 404, "Run not found");

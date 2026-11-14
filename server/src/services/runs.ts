@@ -50,6 +50,7 @@ import {
   canEditProject,
   getProjectAccess,
   listAccessibleProjectIds,
+  type ProjectAccess,
 } from "./organizations.js";
 import {
   admitRunSpend,
@@ -545,6 +546,30 @@ export async function retryRun(
 
 export { planRunControlUpdate, type RunControlAction };
 
+/** Run kinds that carry a user's own new files (not a reprocess, re-index or full index of existing content). */
+export const UPLOAD_RUN_KINDS: ReadonlySet<string> = new Set(["upload", "bulk-upload", "direct-upload", "url-ingest"]);
+
+/** A visible run the caller may not control this way (403; a run they cannot see is a 404). */
+export class RunControlForbiddenError extends Error {
+  readonly status = 403 as const;
+  constructor() { super("Controlling this run needs edit access to the project"); this.name = "RunControlForbiddenError"; }
+}
+
+/**
+ * Who may control a run (council L3 follow-up M1). Editors (canEditProject) may do anything. The run's own creator, while
+ * still a contributor to the project, may cancel or pause their run, and resume or recover it only when it is their own
+ * upload run (resuming spends credits on their files, never on a reprocess they could not start). Reprioritize is
+ * editors only: it moves the organization's queue.
+ */
+export function mayControlRun(run: { userId: string; kind: string }, access: ProjectAccess, userId: string, action: RunControlAction): boolean {
+  if (canEditProject(access, userId)) return true;
+  const creator = run.userId === userId && canContributeToProject(access, userId);
+  if (!creator) return false;
+  if (action === "cancel" || action === "pause") return true;
+  if (action === "resume" || action === "recover") return UPLOAD_RUN_KINDS.has(run.kind);
+  return false;
+}
+
 export async function controlRun(
   runId: string,
   userId: string,
@@ -555,9 +580,8 @@ export async function controlRun(
     return null;
   }
   const access = await getProjectAccess(run.projectId, userId);
-  if (!access || !canContributeToProject(access, userId)) {
-    throw new Error("Forbidden");
-  }
+  if (!access) return null;
+  if (!mayControlRun(run, access, userId, input.action)) throw new RunControlForbiddenError();
 
   if (
     ["completed", "failed"].includes(run.status) &&
