@@ -1,3 +1,4 @@
+import { LANCEDB_SUMMARIES_TABLE } from "@docslurp/shared";
 import { Index, type Connection, type Table } from "@lancedb/lancedb";
 import { performance } from "node:perf_hooks";
 import { connectLanceDb } from "./lancedb-connection.js";
@@ -457,7 +458,9 @@ export async function runLanceDbMaintenance(
       // merge-insert joins on "id"; a btree lets it look keys up instead of scanning the table.
       await table.createIndex("id", { config: Index.btree(), replace: false });
     }
-    if (rows >= ID_INDEX_MIN_ROWS && !indices.some((index) => index.columns.includes("documentId"))) {
+    // The summaries table is read only by documentId (every search prefilters on it), so it is indexed at any size.
+    const documentIdIndexMinRows = tableName === LANCEDB_SUMMARIES_TABLE ? 1 : ID_INDEX_MIN_ROWS;
+    if (rows >= documentIdIndexMinRows && !indices.some((index) => index.columns.includes("documentId"))) {
       // Search scopes every query by documentId (an IN list, or NOT IN a few excluded documents)
       // and purges delete by it. BTREE rather than BITMAP: a large project holds thousands of
       // distinct documents, and LanceDB recommends BITMAP only below a few hundred distinct values.
