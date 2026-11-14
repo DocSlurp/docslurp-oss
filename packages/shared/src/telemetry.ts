@@ -71,6 +71,8 @@ const SECRET_PATTERNS: Array<[RegExp, string]> = [
   [/(X-Amz-(?:Signature|Credential|Security-Token)=)[^&\s"']+/gi, "$1[redacted]"],
   [/((?:password|passwd|secret|secret_access_key|api[._-]?key|access[._-]?token|refresh[._-]?token|session[._-]?token|token|cookie|set-cookie|authorization)["'\s]*[:=]\s*["']?)[^\s"',;&]+/gi, "$1[redacted]"],
   [/(\b[a-z][a-z0-9+.-]*:\/\/[^:/@\s]*:)[^@\s/]+@/gi, "$1[redacted]@"],
+  // The Lance S3 proxy's per-process caller secret: Lance prints request URLs in its storage errors.
+  [/(\bhttp:\/\/127\.0\.0\.1:\d+\/)[0-9a-f]{64}/g, "$1[redacted]"],
 ];
 
 /** Text for spans and logs: credentials scrubbed, length capped. Messages and stacks are what support needs to act on a failure. */

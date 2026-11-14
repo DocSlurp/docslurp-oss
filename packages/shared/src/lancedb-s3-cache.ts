@@ -1,6 +1,6 @@
 // Server-only. Read-through disk cache for the immutable files Lance reads through the localhost S3 proxy.
 import { createHash, randomBytes } from "node:crypto";
-import { mkdir, open, readdir, readFile, rename, rm, stat, unlink, utimes, writeFile, type FileHandle } from "node:fs/promises";
+import { chmod, lstat, mkdir, open, readdir, readFile, realpath, rename, rm, stat, unlink, utimes, writeFile, type FileHandle } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import type { IncomingHttpHeaders } from "node:http";
 
@@ -84,10 +84,13 @@ const newCounters = (): CacheCounters => ({ hits: 0, misses: 0, bypass: 0, bytes
 export interface DiskBlockCacheOptions { dir: string; maxBytes: number; blockBytes?: number; maxSpanBlocks?: number; log?: (line: string) => void }
 
 const TEMP_MARK = ".tmp-";
+/** Records the block size the directory was filled at; not a cache entry. */
+const LAYOUT_FILE = "layout.json";
 const TOUCH_INTERVAL_MS = 60_000;
 
 export class DiskBlockCache {
-  readonly dir: string;
+  /** Resolved once the directory is claimed; every path is built from it. */
+  dir: string;
   readonly maxBytes: number;
   readonly blockBytes: number;
   readonly maxSpanBlocks: number;
@@ -122,14 +125,46 @@ export class DiskBlockCache {
   private rel(id: string, name: string): string { return `${id.slice(0, 2)}/${id}/${name}`; }
   private abs(rel: string): string { return join(this.dir, rel); }
 
+  /**
+   * The directory holds every tenant's index bytes and its blocks are served without re-checking
+   * them, so it must be ours alone: owned by this user, closed to group and others (0700), and laid
+   * out for this block size. A directory someone else owns or can write is refused. Blocks are
+   * addressed by index, so a directory filled at another block size is emptied instead of reused.
+   */
+  private async claimDirectory(): Promise<void> {
+    await mkdir(this.dir, { recursive: true, mode: 0o700 });
+    // A symlink here would point the checks, and the emptying below, at a directory of someone's choosing.
+    if ((await lstat(this.dir)).isSymbolicLink()) throw new Error(`cache directory ${this.dir} is a symbolic link`);
+    // Pin the resolved path: every later read and write uses it, whatever happens to links above it.
+    this.dir = await realpath(this.dir);
+    // Our own directory cannot be swapped by another user unless its parent lets them rename entries:
+    // writable by group or others without the sticky bit.
+    const parent = await stat(dirname(this.dir));
+    if ((parent.mode & 0o022) && !(parent.mode & 0o1000)) throw new Error(`the parent of cache directory ${this.dir} is writable by group or others without the sticky bit`);
+    const info = await stat(this.dir);
+    const uid = process.getuid?.();
+    if (uid !== undefined && info.uid !== uid) throw new Error(`cache directory ${this.dir} is owned by uid ${info.uid}, not this process (uid ${uid})`);
+    if (info.mode & 0o022) throw new Error(`cache directory ${this.dir} is writable by group or others (mode ${(info.mode & 0o777).toString(8)})`);
+    if (info.mode & 0o077) await chmod(this.dir, 0o700);
+    const layoutPath = join(this.dir, LAYOUT_FILE);
+    const layout = await readFile(layoutPath, "utf8").then((text) => JSON.parse(text) as { blockBytes?: number }, () => undefined);
+    if (layout?.blockBytes === this.blockBytes) return;
+    for (const dirent of await readdir(this.dir, { withFileTypes: true })) {
+      // Only this cache's own two-hex-digit shard directories: a mistaken LANCEDB_S3_CACHE_DIR must not lose other files.
+      if (dirent.isDirectory() && !dirent.isSymbolicLink() && /^[0-9a-f]{2}$/.test(dirent.name)) await rm(join(this.dir, dirent.name), { recursive: true, force: true });
+    }
+    await writeFile(layoutPath, JSON.stringify({ blockBytes: this.blockBytes }), { mode: 0o600 });
+  }
+
   /** Rebuilds the LRU index from disk (oldest mtime first), drops leftover temp files and trims to the size limit. */
   private async scan(): Promise<void> {
-    await mkdir(this.dir, { recursive: true });
+    await this.claimDirectory();
     const found: Array<{ rel: string; size: number; mtimeMs: number }> = [];
     const walk = async (relDir: string): Promise<void> => {
       for (const dirent of await readdir(join(this.dir, relDir), { withFileTypes: true }).catch(() => [])) {
         const rel = relDir ? `${relDir}/${dirent.name}` : dirent.name;
         if (dirent.isDirectory()) await walk(rel);
+        else if (!relDir && dirent.name === LAYOUT_FILE) continue;
         else if (dirent.name.includes(TEMP_MARK)) await unlink(this.abs(rel)).catch(() => undefined);
         else {
           const info = await stat(this.abs(rel)).catch(() => undefined);
@@ -160,8 +195,8 @@ export class DiskBlockCache {
     const path = this.abs(rel);
     const temp = `${path}${TEMP_MARK}${process.pid}-${randomBytes(4).toString("hex")}`;
     try {
-      await mkdir(dirname(path), { recursive: true });
-      await writeFile(temp, data);
+      await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+      await writeFile(temp, data, { mode: 0o600 });
       await rename(temp, path);
     } catch (error) {
       await unlink(temp).catch(() => undefined);
