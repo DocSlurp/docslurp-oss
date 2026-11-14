@@ -15,7 +15,8 @@ export async function requestDocumentPageRender(documentId: string, pageNumber: 
   if (!Number.isInteger(pageNumber) || pageNumber < 1 || pageNumber > doc.pageCount) return { status: "missing" as const };
   if (start) {
     const access = await getProjectAccess(doc.projectId, userId);
-    if (!access || !canEditProject(access, userId)) return { status: "missing" as const };
+    // Starting a render spends: editors only. The document is visible here, so say so (403), not "missing".
+    if (!access || !canEditProject(access, userId)) return { status: "editor-required" as const };
   }
   const observation=doc.runId?{kind:"page-image" as const,documentId:doc.id,runId:doc.runId,pageNumber,quality}:undefined;
   const dpi = pageRenderDpi(quality);
@@ -41,7 +42,17 @@ export async function requestDocumentPageRender(documentId: string, pageNumber: 
     console.warn(`[page-render] status=rescan-required metric=page_render_rescan_required document=${doc.id} run=${doc.runId} page=${pageNumber}`);
     return { status: "rescan-required" as const, document: doc };
   }
-  if (!start) return { status: "pending" as const, dpi, capabilities, observation };
+  if (!start) {
+    // A read answers "pending" (202) only while a render is actually queued or running, so a poller never waits forever.
+    const [queued] = await sql<{ queued: boolean }[]>`select true as queued from document_page_renders
+      where document_id=${doc.id} and run_id=${runId} and page_number=${pageNumber} and quality=${quality} and dpi=${dpi}
+        and expires_at>now() limit 1`;
+    if (queued) return { status: "pending" as const, dpi, capabilities, observation };
+    // Nothing in flight: an editor may start it (a typed not-rendered state); anyone else is told who can (403).
+    const access = await getProjectAccess(doc.projectId, userId);
+    if (!access || !canEditProject(access, userId)) return { status: "editor-required" as const };
+    return { status: "not-rendered" as const, dpi, capabilities, observation, document: doc };
+  }
   await assertCanSpend(doc.orgId, doc.projectId, { kind: "interactive" });
   const admitted = await sql.begin(async tx => {
     await tx`select pg_advisory_xact_lock(hashtext(${`page-render:${doc.orgId}`}))`;

@@ -8,6 +8,7 @@ import { isConfiguredAdminUserSql } from "../lib/admin-emails.js";
 import { projectUsageTotals, runUsageCostSummaries } from "../services/usage-attribution.js";
 import { getBillingOverview } from "../services/billing/overview.js";
 import { getAuthorizedProjectRecord } from "../services/projects.js";
+import { canEditProject, getProjectAccess } from "../services/organizations.js";
 import { listDocumentIndexEntries, getRealtimeViewerPayload } from "../services/documents.js";
 import { mapProjectRun, type ProjectRunRow } from "../services/run-records.js";
 import { buildRunProgressSnapshot } from "../services/runs.js";
@@ -154,8 +155,11 @@ export const realtimeBackend: RealtimeBackend = {
         return viewer;
       }
       case "project": {
-        const project = await getAuthorizedProjectRecord(resource.projectId, orgId);
-        if (!project) throw new Error("not_found");
+        const record = await getAuthorizedProjectRecord(resource.projectId, orgId);
+        if (!record) throw new Error("not_found");
+        // Each subscription is one user's (broker entries are keyed by user), so canEdit is that subscriber's, like REST.
+        const access = await getProjectAccess(record.id, userId);
+        const project = { ...record, canEdit: Boolean(access && access.orgId === record.orgId && canEditProject(access, userId)) };
         // The REST routes return publicProjectView; the socket applies the same customer view (no managed model fields).
         if (await isConfiguredAdminUserSql(sql, userId)) return project;
         return { ...project, pipeline: customerPipelineView(project.pipeline) };

@@ -425,6 +425,17 @@ for the reconciler, Token authentication, bucket filter and deployment order.
 
 ## API changes
 
+- **2026-11-13, non-breaking.**
+  - Project records carry `canEdit`: whether this caller may change the project or its documents. It uses the same rule as a document's `canReprocess`, and it appears wherever a project record is returned: project list and detail, the dashboard bootstrap, the realtime project snapshot (per subscriber), project create, update, clone, archive, restore and rollback, and upload, URL-ingest, extract and upload-session responses.
+  - More editor-only refusals now answer `403 editor_required` to a caller who can see the project. Earlier they answered `403 forbidden`, `403 project_forbidden`, `400` or `404`:
+    - knowledge-graph settings, rebuild, its estimate and cancel;
+    - chat-instructions Improve;
+    - starting a page render (`POST /v1/documents/:id/pages/:n/image`);
+    - project clone and version rollback.
+  - The SDK (`DocSlurpApiError.code`) and the CLI (`--json` `error.code`) keep the `editor_required` code and show its reviewed message.
+  - Project records also carry `canManage`: whether this caller may archive or delete the project and manage its members. Org owners and admins, the project's owner and its admins may; a server key also needs `projects:manage`.
+  - `GET /v1/documents/:id/pages/:n/image` answers `202` only while a render is queued or running. With nothing in flight, a project editor gets the typed `not-rendered` state (HTTP 200, with `capabilities`) and anyone else gets `403 editor_required`, so a reader never polls a render that will not happen.
+  - Known limitation: a live realtime project snapshot keeps the `canEdit` and `canManage` it was projected with until the project next changes or the client reconnects. A role change alone does not re-project it. REST reads are always current, and the server enforces the rule on every request.
 - **2026-11-13, breaking.** Changing a project or its documents now needs edit access, in the organization's default project too. Viewers and plain members are read-only everywhere.
   - **Who has edit access:** org owners and admins, the project's owner, and its admins and editors. A server key needs `ingest` (or `projects:manage` for settings), and its user needs edit access.
   - **The refusal:** a caller who can see the project or document but may not change it gets `403` with code `editor_required` and one message: "This needs edit access to the project. Ask a project editor or an organization admin." See [error codes](#editor-required). Earlier, some of these routes answered `404` or `forbidden`, and default-project members were allowed. Content outside your organization is still `404`.

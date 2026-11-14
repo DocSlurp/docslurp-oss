@@ -121,7 +121,8 @@ import { runLifecycle } from "../services/run-lifecycle.js";
 import { resolveMaterializationPolicy } from "../services/materialization-policy.js";
 import { inlineEstimate, jobMetaFor, jobStatusForMutation, recordJobMeta } from "../services/jobs.js";
 import { estimateDocumentReprocess } from "../services/work-estimates.js";
-import { denyEditOfVisibleProject, denyReprocessOfVisible, editorRequired } from "../lib/reprocess-access.js";
+import { ProjectAccessError } from "../services/default-project.js";
+import { denyEditOfVisibleProject, denyReprocessOfVisible, editorRequired, withCanEdit } from "../lib/reprocess-access.js";
 import {
   commitIndexJobs,
   estimateFullIndex,
@@ -725,9 +726,8 @@ export const projectsRoutes = new Hono()
     }
     if (actor.type === "session") await ensurePersonalDefaultProject(userId);
     const projects = await listProjects(userId);
-    return c.json({ projects: (actor.type === "apiKey"
-      ? projects.filter((project) => apiKeyCanUseProject(actor.apiKey, project))
-      : projects).map(project => publicProjectView(project, actor)) });
+    const visible = actor.type === "apiKey" ? projects.filter((project) => apiKeyCanUseProject(actor.apiKey, project)) : projects;
+    return c.json({ projects: (await withCanEdit(c, visible)).map(project => publicProjectView(project, actor)) });
   })
   .get("/board", async (c) => {
     const userId = c.get("sessionUser").id;
@@ -937,7 +937,8 @@ export const projectsRoutes = new Hono()
       return apiErrorResponse(c, 404, "project_not_found", "Project not found");
     }
 
-    return c.json(publicProjectView(project, getRequestActor(c)));
+    const [flagged] = await withCanEdit(c, [project]);
+    return c.json(publicProjectView(flagged, getRequestActor(c)));
   })
   .get("/:projectId/search-settings", async (c) => {
     const userId = c.get("sessionUser").id;
@@ -1050,7 +1051,7 @@ export const projectsRoutes = new Hono()
         userAgent: requestUserAgent(c),
       },
     });
-    return c.json(publicProjectView(project, getRequestActor(c)), 201);
+    return c.json(publicProjectView((await withCanEdit(c, [project]))[0], getRequestActor(c)), 201);
   })
   .post(
     "/:projectId/clone",
@@ -1084,8 +1085,10 @@ export const projectsRoutes = new Hono()
             userAgent: requestUserAgent(c),
           },
         });
-        return c.json(publicProjectView(project, getRequestActor(c)), 201);
+        return c.json(publicProjectView((await withCanEdit(c, [project]))[0], getRequestActor(c)), 201);
       } catch (error) {
+        // Access refusals keep their status and code (404 project_not_found, 403 editor_required); the rest is a 400.
+        if (error instanceof ProjectAccessError) return apiErrorResponse(c, error.status as 403 | 404, error.code, error.message);
         return apiStatusError(c, 400, reportPublicError(error));
       }
     },
@@ -1117,7 +1120,7 @@ export const projectsRoutes = new Hono()
           },
         });
 
-        return c.json(publicProjectView(project, getRequestActor(c)));
+        return c.json(publicProjectView((await withCanEdit(c, [project]))[0], getRequestActor(c)));
       } catch (error) {
         return projectMutationError(c, error);
       }
@@ -1149,7 +1152,7 @@ export const projectsRoutes = new Hono()
           },
         });
 
-        return c.json(publicProjectView(project, getRequestActor(c)));
+        return c.json(publicProjectView((await withCanEdit(c, [project]))[0], getRequestActor(c)));
       } catch (error) {
         return projectMutationError(c, error);
       }
@@ -1385,8 +1388,10 @@ export const projectsRoutes = new Hono()
           },
         });
 
-        return c.json(publicProjectView(project, getRequestActor(c)));
+        return c.json(publicProjectView((await withCanEdit(c, [project]))[0], getRequestActor(c)));
       } catch (error) {
+        // Access refusals keep their status and code (404 project_not_found, 403 editor_required); the rest is a 400.
+        if (error instanceof ProjectAccessError) return apiErrorResponse(c, error.status as 403 | 404, error.code, error.message);
         return apiStatusError(c, 400, reportPublicError(error));
       }
     },
@@ -1556,7 +1561,7 @@ export const projectsRoutes = new Hono()
         },
       });
 
-      return c.json({ ...publicProjectView(project, getRequestActor(c)), ...(indexingJob ? { indexingJob } : {}), ...(applied.job ? { job: applied.job } : {}) });
+      return c.json({ ...publicProjectView((await withCanEdit(c, [project]))[0], getRequestActor(c)), ...(indexingJob ? { indexingJob } : {}), ...(applied.job ? { job: applied.job } : {}) });
     },
   )
   .post(

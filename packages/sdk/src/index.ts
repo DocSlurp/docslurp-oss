@@ -1,4 +1,6 @@
 import { safeHttpFailure, retryAfterSeconds } from "./http-failure.js";
+/** The reviewed message of a 403 `editor_required` (`DocSlurpApiError.code`): the caller may see but not change the project. */
+export { EDITOR_REQUIRED_MESSAGE } from "./http-failure.js";
 import { readSse } from "./sse.js";
 import { searchResultId, type SearchStreamEvent } from "./search-stream.js";
 export * from "./search-stream.js";

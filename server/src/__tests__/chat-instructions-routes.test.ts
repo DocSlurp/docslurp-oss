@@ -116,10 +116,12 @@ describe("POST /v1/projects/:id/chat-instructions/improve", () => {
     expect(mocks.updateProjectSearchSettingsForUser).not.toHaveBeenCalled();
   });
 
-  it("needs edit access, and hides projects the user cannot see", async () => {
+  it("needs edit access (403 editor_required for a viewer), and hides projects the user cannot see", async () => {
     mocks.session.mockResolvedValue(sessionActor);
     mocks.getProjectAccess.mockResolvedValueOnce({ role: "viewer" });
-    expect((await improve(app())).status).toBe(404);
+    const viewer = await improve(app());
+    expect(viewer.status).toBe(403);
+    expect(await viewer.json()).toMatchObject({ error: { code: "editor_required" } });
     mocks.getProjectAccess.mockResolvedValueOnce(null);
     expect((await improve(app())).status).toBe(404);
     expect(mocks.improve).not.toHaveBeenCalled();

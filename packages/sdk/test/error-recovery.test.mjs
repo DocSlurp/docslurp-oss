@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { createDocSlurpClient, DocSlurpApiError } from "../dist/index.js";
+import { createDocSlurpClient, DocSlurpApiError, EDITOR_REQUIRED_MESSAGE } from "../dist/index.js";
 const json = (body, status, headers = {}) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", ...headers } });
 
 test("a 60 second server wait exceeding the deadline returns timing without retrying", async () => {
@@ -74,6 +74,24 @@ test("nonretryable AI refusals still expose the wait without replaying the call"
   await assert.rejects(client.chat({ message: "question" }), error => {
     assert.ok(error instanceof DocSlurpApiError);
     assert.equal(error.retryAfterSeconds, 60);
+    return true;
+  });
+  assert.equal(calls, 1);
+});
+
+test("editor_required keeps its code and the reviewed message, and is not retried", async () => {
+  let calls = 0;
+  const client = createDocSlurpClient({ apiUrl: "https://example.test", fetch: async () => {
+    calls++;
+    return json({ error: { code: "editor_required", message: "raw server text", requestId: "req-ed" } }, 403);
+  } });
+  await assert.rejects(client.getRun("run"), error => {
+    assert.ok(error instanceof DocSlurpApiError);
+    assert.equal(error.status, 403);
+    assert.equal(error.code, "editor_required");
+    assert.equal(error.message, EDITOR_REQUIRED_MESSAGE);
+    assert.equal(EDITOR_REQUIRED_MESSAGE, "This needs edit access to the project. Ask a project editor or an organization admin.");
+    assert.equal(error.requestId, "req-ed");
     return true;
   });
   assert.equal(calls, 1);
