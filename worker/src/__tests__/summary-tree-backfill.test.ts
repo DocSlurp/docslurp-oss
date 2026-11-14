@@ -613,6 +613,37 @@ describe("documents that change under the job", () => {
     expect(await modelUsage()).toHaveLength(f.requests.length);
   });
 
+  it("builds no tree for a corrected document, before or during its build, and never marks one ready", async () => {
+    const f = fakes();
+    await seedDocument(f.storage, "w", "a-corrected", BIG_LEAVES);
+    await seedDocument(f.storage, "w", "b-mid", BIG_LEAVES);
+    await seedDocument(f.storage, "w", "c-big", BIG_LEAVES);
+    // What the API's correction reindex leaves (summary-tree-withdrawal.ts). The worker's role cannot read the corrections table.
+    const correct = (id: string) => sql`
+      insert into document_summary_trees (document_id, org_id, project_id, run_id, status, skip_reason)
+      values (${id}, 'o1', 'w', 'run-w', 'skipped', 'corrected')
+      on conflict (document_id) do update set status = 'skipped', skip_reason = 'corrected', build_owner = null, built_at = null`;
+    await correct("a-corrected");
+    f.beforeAnswer = async (request, call) => {
+      if (call === 2 && request.nodeId.startsWith("b-mid:")) await correct("b-mid");
+    };
+    const jobId = await queueJob("w");
+    await f.run();
+    expect(await jobOf(jobId)).toMatchObject({ status: "completed", documents_ready: 1 });
+    expect(await treeStatuses()).toEqual({ "a-corrected": "skipped", "b-mid": "skipped", "c-big": "ready" });
+    expect(await treeOf("b-mid")).toMatchObject({ skip_reason: "corrected", built_at: null });
+    expect(f.storage.opened).not.toContain("u1/run-w/embeddings/a-corrected.json");
+    expect(f.requests.some((request) => request.nodeId.startsWith("a-corrected:"))).toBe(false);
+    // No call for the corrected document after the correction landed.
+    expect(f.requests.filter((request) => request.nodeId.startsWith("b-mid:")).length).toBeLessThanOrEqual(2);
+    // A later job does not pick either of them up.
+    const again = await queueJob("w");
+    const calls = f.requests.length;
+    await f.run();
+    expect(await jobOf(again)).toMatchObject({ status: "completed", model_calls: 0 });
+    expect(f.requests).toHaveLength(calls);
+  });
+
   it("leaves a document it cannot read for a later job and builds the rest; a run of such failures fails the job", async () => {
     const f = fakes();
     await seedDocument(f.storage, "w", "a-broken", BIG_LEAVES);

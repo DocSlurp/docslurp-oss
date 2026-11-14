@@ -6,6 +6,7 @@ import {
   isLanceDbVectorTable,
   LANCEDB_CHUNKS_TABLE,
   LANCEDB_SUMMARIES_TABLE,
+  SUMMARY_TREE_CLEANUP_KIND,
   MAX_RETAINED_VERSIONS,
   MIN_RETAINED_VERSIONS,
   resolveLanceDbConfig,
@@ -1159,7 +1160,7 @@ async function referencedDocumentsUnderPrefix(
 
 type StorageCleanupRow = {
   id: string;
-  kind: "storage_prefix" | "vector_table" | "vector_prefix" | "vector_rows" | "upload_original" | "doppler_folder";
+  kind: "storage_prefix" | "vector_table" | "vector_prefix" | "vector_rows" | "upload_original" | "doppler_folder" | typeof SUMMARY_TREE_CLEANUP_KIND;
   org_id: string | null;
   target: string;
   payload: Record<string, unknown>;
@@ -1194,6 +1195,104 @@ async function deleteOrphanVectorRows(client: Sql<Record<string, unknown>>, opti
   if (orphans.length > 0) {
     await deleteIds({ uri: location.uri, table: location.table, ids: orphans });
     scheduleHistoryPrune(location);
+  }
+}
+
+const SAFE_ROOT_SEGMENT = /^[A-Za-z0-9_.@-]+$/;
+
+/** `<run root>/summary-tree/<documentId>` with a two- or three-segment run root, and nothing else. */
+function safeSummaryTreeArtifactRoot(root: unknown, documentId: string): string | null {
+  if (typeof root !== "string") return null;
+  const segments = root.split("/");
+  if (segments.length !== 4 && segments.length !== 5) return null;
+  if (segments.some((segment) => !SAFE_ROOT_SEGMENT.test(segment) || segment === "." || segment === "..")) return null;
+  return segments.at(-2) === "summary-tree" && segments.at(-1) === documentId ? root : null;
+}
+
+/**
+ * `summary_tree_document` (state-store.ts enqueueSummaryTreeCleanup; the API's correction reindex and PII block):
+ * removes one document's summary data: its rows in the summaries table of every embedding space it may have been
+ * written in, strictly (compaction and history pruning must succeed, or the entry stays), and every object under its
+ * text artifact folders. The entry names where a build wrote for a document that no longer exists; for a document
+ * that still has rows in Postgres its tree state, vector indexes and stage states name the rest.
+ *
+ * The document's row is locked first (`for update`), which waits for a summary row write in flight
+ * (lancedb-summaries.ts writeSummaryRows) and holds off the next one, so nothing is written behind this removal. A
+ * tree state that still says `ready` or `building` afterwards would name rows that are gone: it becomes `partial`
+ * (never served), its registry rows go, and a builder that still held it is refused at its next write.
+ */
+async function removeDocumentSummaryTree(
+  client: Sql<Record<string, unknown>>,
+  storage: PurgeStorage,
+  options: SupersededPurgeOptions,
+  row: StorageCleanupRow,
+): Promise<void> {
+  const payload = row.payload as { documentId?: unknown; spaces?: unknown; artifactRoots?: unknown };
+  const documentId = typeof payload.documentId === "string" ? payload.documentId : "";
+  const orgId = row.org_id ?? "";
+  const projectId = payloadProjectId(row.payload);
+  if (!SAFE_DOCUMENT_ID.test(documentId) || !SAFE_ID.test(orgId) || !SAFE_ID.test(projectId) || row.target !== `${orgId}|${projectId}|${documentId}`) {
+    throw new Error(`Refusing malformed summary_tree_document entry: ${row.target}`);
+  }
+  const [doc] = await client<{ org_id: string | null; project_id: string | null }[]>`
+    select org_id, project_id from documents where id = ${documentId} for update
+  `;
+  // A queue row never reaches into another tenant's document.
+  if (doc && (doc.org_id !== orgId || doc.project_id !== projectId)) {
+    throw new Error(`Refusing summary_tree_document entry for a document of another project: ${row.target}`);
+  }
+
+  const spaces = new Map<string, { embeddingModel: string; dimension: number }>();
+  const addSpace = (embeddingModel: unknown, dimension: unknown) => {
+    if (typeof embeddingModel !== "string" || !embeddingModel || typeof dimension !== "number" || !Number.isInteger(dimension) || dimension <= 0) return;
+    spaces.set(`${embeddingModel}\u0000${dimension}`, { embeddingModel, dimension });
+  };
+  for (const space of Array.isArray(payload.spaces) ? payload.spaces : []) {
+    addSpace((space as { embeddingModel?: unknown } | null)?.embeddingModel, (space as { dimension?: unknown } | null)?.dimension);
+  }
+  const roots = new Set<string>();
+  for (const root of Array.isArray(payload.artifactRoots) ? payload.artifactRoots : []) {
+    const safe = safeSummaryTreeArtifactRoot(root, documentId);
+    if (!safe) throw new Error(`Refusing unsafe summary tree artifact folder: ${row.target}`);
+    roots.add(safe);
+  }
+  if (doc) {
+    for (const space of await client<{ embedding_model: string; dimension: number }[]>`
+      select embedding_model, dimension from vector_indexes where document_id = ${documentId} and backend = 'lancedb'
+      union
+      select embedding_model, dimension from document_summary_trees
+      where document_id = ${documentId} and embedding_model is not null and dimension is not null
+    `) addSpace(space.embedding_model, Number(space.dimension));
+    for (const stage of await client<{ root: string | null }[]>`
+      select distinct coalesce(r.storage_prefix, d.user_id || '/' || r.id) || '/summary-tree/' || d.id as root
+      from documents d
+      join project_runs r on r.id = d.run_id or r.id in (
+        select s.run_id from document_run_stage_states s where s.document_id = d.id and s.stage_name = 'summary-tree'
+      )
+      where d.id = ${documentId}
+    `) {
+      const safe = safeSummaryTreeArtifactRoot(stage.root, documentId);
+      if (safe) roots.add(safe);
+    }
+  }
+
+  const deleteVectorRows = options.deleteVectorRows ?? deleteLanceDbDocumentRows;
+  const seen = new Set<string>();
+  for (const space of spaces.values()) {
+    const location = VectorNamespaceManager.getEmbeddingLocation(options.lancedbRoot, orgId, projectId, space.embeddingModel, space.dimension, LANCEDB_SUMMARIES_TABLE);
+    if (seen.has(location.uri)) continue;
+    seen.add(location.uri);
+    await deleteVectorRows({ uri: location.uri, table: location.table, documentIds: [documentId], purgeHistory: true });
+  }
+  for (const root of roots) await purgePrefix(storage, `${root}/`, () => false);
+
+  if (doc) {
+    await client`
+      update document_summary_trees
+      set status = 'partial', error = 'rows-removed', build_owner = null, built_at = null, root_node_id = null, node_count = 0, level_count = 0, updated_at = now()
+      where document_id = ${documentId} and status in ('ready', 'building')
+    `;
+    await client`delete from document_summary_tree_nodes where document_id = ${documentId}`;
   }
 }
 
@@ -1316,6 +1415,8 @@ export async function drainStorageCleanupQueue(
           await purgeProjectVectorPrefix(client, storage, options.lancedbRoot, row.org_id ?? "", payloadProjectId(row.payload));
         } else if (row.kind === "vector_rows") {
           await deleteOrphanVectorRows(client, options, row);
+        } else if (row.kind === SUMMARY_TREE_CLEANUP_KIND) {
+          await removeDocumentSummaryTree(client, txStorage, options, row);
         } else {
           // Queued before projects had their own databases (migration 0082 marks them):
           // a deleted org's org-level tables, dropped with their legacy names.

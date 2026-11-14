@@ -1,5 +1,7 @@
 import {
   SUMMARY_TREE_BUILD_STALE_MS,
+  SUMMARY_TREE_CLEANUP_KIND,
+  SUMMARY_TREE_CORRECTED_SKIP_REASON,
   SUMMARY_TREE_KEY_VERSION,
   type SummaryTreeDocumentStatus,
   type SummaryTreeNodeStatus,
@@ -14,6 +16,11 @@ import type { Sql } from "postgres";
  *
  * Every statement names the organization and the project as well as the document. A write that matches no row
  * of that tenant throws `SummaryTreeStateRefused`; nothing here falls back to a document id alone.
+ *
+ * A corrected document has no tree. A completed correction reindex (the API) leaves the document's state row
+ * `skipped` with skip reason `corrected`, creating the row when there is none. The worker has no access to the
+ * corrections themselves; that row is how it knows. No write here replaces it and no node is registered under it, so
+ * a build that was running when the correction landed is refused at its next write.
  */
 
 type Client = Sql<Record<string, unknown>>;
@@ -39,6 +46,7 @@ function assertScope(scope: SummaryTreeScope): void {
 
 export interface SummaryTreeStateRow {
   status: SummaryTreeDocumentStatus;
+  skipReason: SummaryTreeSkipReason | null;
   runId: string | null;
   configHash: string | null;
   treeKeyVersion: number;
@@ -55,14 +63,14 @@ export interface SummaryTreeStateRow {
 
 export async function loadSummaryTreeState(sql: Client, scope: SummaryTreeScope, documentId: string, staleMs: number = SUMMARY_TREE_BUILD_STALE_MS): Promise<SummaryTreeStateRow | null> {
   assertScope(scope);
-  const [row] = await sql<{ status: SummaryTreeDocumentStatus; run_id: string | null; config_hash: string | null; tree_key_version: number; embedding_model: string | null; dimension: number | null; build_owner: string | null; build_live: boolean }[]>`
-    select status, run_id, config_hash, tree_key_version, embedding_model, dimension, build_owner,
+  const [row] = await sql<{ status: SummaryTreeDocumentStatus; skip_reason: SummaryTreeSkipReason | null; run_id: string | null; config_hash: string | null; tree_key_version: number; embedding_model: string | null; dimension: number | null; build_owner: string | null; build_live: boolean }[]>`
+    select status, skip_reason, run_id, config_hash, tree_key_version, embedding_model, dimension, build_owner,
       (status = 'building' and updated_at > now() - ${`${Math.max(0, staleMs)} milliseconds`}::interval) as build_live
     from document_summary_trees
     where document_id = ${documentId} and org_id = ${scope.orgId} and project_id = ${scope.projectId}
   `;
   return row ? {
-    status: row.status, runId: row.run_id, configHash: row.config_hash, treeKeyVersion: Number(row.tree_key_version),
+    status: row.status, skipReason: row.skip_reason, runId: row.run_id, configHash: row.config_hash, treeKeyVersion: Number(row.tree_key_version),
     embeddingModel: row.embedding_model, dimension: row.dimension === null ? null : Number(row.dimension),
     buildOwner: row.build_owner, buildLive: row.build_live === true,
   } : null;
@@ -94,9 +102,10 @@ export interface SummaryTreeStateWrite {
 /**
  * Inserts or replaces the document's tree state. Refuses unless the document is a live document of exactly this
  * organization and project (not purged, superseded or archived), and unless an existing state row is this
- * tenant's (and, with `expectOwner`, still held by that builder). `built_at` is set only by a `ready` write, so a
- * rebuild that ends `ready` again always carries a later `built_at`. Every write is also the build's heartbeat
- * (`updated_at`).
+ * tenant's (and, with `expectOwner`, still held by that builder), and never over a `corrected` row: the check is part
+ * of the write itself, so a correction that commits while a build runs wins whichever order the two arrive in.
+ * `built_at` is set only by a `ready` write, so a rebuild that ends `ready` again always carries a later `built_at`.
+ * Every write is also the build's heartbeat (`updated_at`).
  */
 export async function writeSummaryTreeState(sql: Client, write: SummaryTreeStateWrite): Promise<void> {
   assertScope(write.scope);
@@ -121,13 +130,14 @@ export async function writeSummaryTreeState(sql: Client, write: SummaryTreeState
       root_node_id = excluded.root_node_id, error = excluded.error, build_owner = excluded.build_owner,
       built_at = excluded.built_at, updated_at = now()
     where document_summary_trees.org_id = excluded.org_id and document_summary_trees.project_id = excluded.project_id
+      and document_summary_trees.skip_reason is distinct from ${SUMMARY_TREE_CORRECTED_SKIP_REASON}
       and (${write.expectOwner ?? null}::text is null or document_summary_trees.build_owner is not distinct from ${write.expectOwner ?? null}::text)
     returning document_id
   `;
   if (rows.length !== 1) {
     throw new SummaryTreeStateRefused(write.expectOwner
-      ? "The document is not a live document of this project, or another build took its tree over"
-      : "The document is not a live document of this project");
+      ? "The document is not a live document of this project, was corrected, or another build took its tree over"
+      : "The document is not a live document of this project, or was corrected");
   }
 }
 
@@ -144,6 +154,68 @@ export async function touchSummaryTreeBuild(sql: Client, scope: SummaryTreeScope
     returning document_id
   `;
   return rows.length === 1;
+}
+
+/**
+ * Where a document stands for its summary tree, read at the moment of asking:
+ * - `live`: a current document of this organization and project that may have a tree;
+ * - `corrected`: live, but a correction reindex replaced its chunks (see the note at the top of this file);
+ * - `retired`: superseded or archived; the purge paths own what is left of it;
+ * - `gone`: deleted, purged, or not this tenant's.
+ */
+export type SummaryTreeDocumentStanding = "live" | "corrected" | "retired" | "gone";
+
+export async function summaryTreeDocumentStanding(sql: Client, scope: SummaryTreeScope, documentId: string): Promise<SummaryTreeDocumentStanding> {
+  assertScope(scope);
+  const [row] = await sql<{ purged: boolean; retired: boolean; corrected: boolean }[]>`
+    select d.purged_at is not null as purged,
+      (d.superseded_at is not null or d.archived_at is not null) as retired,
+      exists (
+        select 1 from document_summary_trees t
+        where t.document_id = d.id and t.skip_reason = ${SUMMARY_TREE_CORRECTED_SKIP_REASON}
+      ) as corrected
+    from documents d
+    where d.id = ${documentId} and d.org_id = ${scope.orgId} and d.project_id = ${scope.projectId}
+  `;
+  if (!row || row.purged) return "gone";
+  if (row.retired) return "retired";
+  return row.corrected ? "corrected" : "live";
+}
+
+/**
+ * Queues strict removal of one document's summary rows and text artifact (`storage_cleanup_queue`, drained by
+ * `drainStorageCleanupQueue`). `spaces` and `artifactRoots` name where a build of a document that no longer exists
+ * wrote; for a document that still has rows in Postgres the sweep also finds them itself. Queuing again while an
+ * entry waits makes that entry due now and resets its attempts, so a removal asked for after a failed one is not
+ * lost to the first one's count.
+ */
+export async function enqueueSummaryTreeCleanup(sql: Client, args: {
+  scope: SummaryTreeScope;
+  documentId: string;
+  reason: string;
+  spaces?: ReadonlyArray<{ model: string; dimensions: number }>;
+  artifactRoots?: readonly string[];
+}): Promise<void> {
+  assertScope(args.scope);
+  const payload = {
+    projectId: args.scope.projectId,
+    documentId: args.documentId,
+    spaces: (args.spaces ?? []).filter((space) => space.model && space.dimensions > 0).map((space) => ({ embeddingModel: space.model, dimension: space.dimensions })),
+    artifactRoots: [...new Set(args.artifactRoots ?? [])],
+  };
+  await sql`
+    insert into storage_cleanup_queue (kind, org_id, target, payload, reason)
+    values (${SUMMARY_TREE_CLEANUP_KIND}, ${args.scope.orgId}, ${`${args.scope.orgId}|${args.scope.projectId}|${args.documentId}`},
+      ${JSON.stringify(payload)}::text::jsonb, ${args.reason})
+    on conflict (kind, target) do update set
+      payload = jsonb_build_object(
+        'projectId', excluded.payload -> 'projectId',
+        'documentId', excluded.payload -> 'documentId',
+        'spaces', coalesce(storage_cleanup_queue.payload -> 'spaces', '[]'::jsonb) || coalesce(excluded.payload -> 'spaces', '[]'::jsonb),
+        'artifactRoots', coalesce(storage_cleanup_queue.payload -> 'artifactRoots', '[]'::jsonb) || coalesce(excluded.payload -> 'artifactRoots', '[]'::jsonb)
+      ),
+      reason = excluded.reason, not_before = now(), attempts = 0, last_error = null
+  `;
 }
 
 export interface SummaryTreeNodeRecord {
@@ -199,6 +271,7 @@ export async function upsertSummaryTreeNodes(sql: Client, args: { scope: Summary
     where exists (
       select 1 from document_summary_trees t
       where t.document_id = ${args.documentId} and t.org_id = ${args.scope.orgId} and t.project_id = ${args.scope.projectId}
+        and t.status <> 'skipped'
     )
     on conflict (id) do update set
       run_id = excluded.run_id, node_hash = excluded.node_hash, level = excluded.level, ordinal = excluded.ordinal,
@@ -210,7 +283,7 @@ export async function upsertSummaryTreeNodes(sql: Client, args: { scope: Summary
     returning id
   `;
   if (written.length !== args.rows.length) {
-    throw new SummaryTreeStateRefused("Summary tree nodes were not written: the document has no tree state in this project, or a node id belongs elsewhere");
+    throw new SummaryTreeStateRefused("Summary tree nodes were not written: the document has no tree being built in this project, or a node id belongs elsewhere");
   }
 }
 

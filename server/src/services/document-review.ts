@@ -8,6 +8,7 @@ import { getArtifactJson, getArtifactText } from "../lib/artifacts.js";
 import { canEditProject, getProjectAccess, listAccessibleProjectIds } from "./organizations.js";
 import { EditorRequiredError } from "../lib/editor-required.js";
 import { getDocumentViewerPayload, setDocumentTags } from "./documents.js";
+import { withdrawSummaryTreeForCorrection } from "./summary-tree-withdrawal.js";
 
 type ReviewDocumentRow = {
   id: string;
@@ -946,6 +947,10 @@ export async function reindexDocumentCorrection(args: {
   await sql.begin(async (tx) => {
     const transaction = tx as unknown as typeof sql;
 
+    // The document's row, held for the whole replacement: a worker writing derived rows for this document under its
+    // own key-share lock (summary rows, lancedb-summaries.ts) finishes first, and the next one sees this commit.
+    await transaction`select id from documents where id = ${args.docId} for update`;
+
     await transaction`
       update document_corrections
       set reindex_requested_at = coalesce(reindex_requested_at, now()),
@@ -953,6 +958,9 @@ export async function reindexDocumentCorrection(args: {
           updated_at = now()
       where document_id = ${args.docId}
     `;
+    // The summary tree was built from the text this correction replaces: it is withdrawn in the same transaction
+    // and its rows and artifact are queued for strict removal.
+    await withdrawSummaryTreeForCorrection(transaction, args.docId);
 
     // Human-corrected content supersedes source-derived materialization. Fence
     // every in-flight reader under the document lock before replacing rows.

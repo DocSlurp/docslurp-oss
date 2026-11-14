@@ -24,6 +24,7 @@ import {
   SummaryRowsRefused,
   writeSummaryRows,
 } from "../stages/lancedb-summaries.js";
+import { enqueueSummaryTreeCleanup } from "../summary-tree/state-store.js";
 import { createMigratedDatabase } from "../test/migrated-db.js";
 import { serveOnRandomPort } from "../test/migrated-postgres.js";
 
@@ -403,5 +404,100 @@ describe("summary tree purge", () => {
       ('vector_table', 'o1', 'o1|w|model/x|4|bogus', ${sql.json({ projectId: "w", embeddingModel: MODEL, dimension: DIM, table: "../../w2/vectors-model%2Fx-4/summaries" })}, 'project_deleted')`;
     expect(await drainStorageCleanupQueue(sql, storage, options())).toMatchObject({ purged: 0, failed: 1 });
     expect(await summaryDocuments(W)).toEqual(["a"]);
+  });
+});
+
+describe("queued removal of one document's summary tree (summary_tree_document)", () => {
+  function objectStore(keys: string[]) {
+    const objects = new Set(keys);
+    return {
+      objects,
+      bucket: "b",
+      async listKeys({ prefix }: { prefix: string }) { return { keys: [...objects].filter((key) => key.startsWith(prefix)).sort() }; },
+      async deleteKeys(deleted: string[]) { for (const key of deleted) objects.delete(key); },
+    };
+  }
+
+  it("removes the document's rows strictly, its artifact and its registry rows, and nothing of another document", async () => {
+    await seedDocument("a", W);
+    await seedTree("a", W, (index) => `ERASEME-${index} text from before the correction`);
+    await seedDocument("b", W);
+    await seedTree("b", W, (index) => `KEEPME-b-${index}`);
+    const store = objectStore([
+      "u1/run-1/summary-tree/a/summaries.jsonl", "u1/run-1/summary-tree/a/parts/x.jsonl",
+      "u1/run-1/summary-tree/b/summaries.jsonl", "u1/run-1/summary-tree/ab/summaries.jsonl", "u1/run-1/embeddings/a.json",
+    ]);
+    // What the API queues with a correction reindex: the ids only. The tree row is already `skipped`.
+    await sql`update document_summary_trees set status = 'skipped', skip_reason = 'corrected' where document_id = 'a'`;
+    await enqueueSummaryTreeCleanup(sql, { scope: W, documentId: "a", reason: "document_corrected", artifactRoots: ["u1/run-1/summary-tree/a"] });
+
+    expect(await drainStorageCleanupQueue(sql, store, options())).toEqual({ purged: 1, failed: 0 });
+    expect(await summaryDocuments(W)).toEqual(["b"]);
+    expect(await filesContaining("ERASEME-")).toEqual([]);
+    expect([...store.objects].sort()).toEqual(["u1/run-1/embeddings/a.json", "u1/run-1/summary-tree/ab/summaries.jsonl", "u1/run-1/summary-tree/b/summaries.jsonl"]);
+    expect(await registry("a")).toEqual({ trees: 1, nodes: 0 });
+    expect(await sql`select status, skip_reason from document_summary_trees where document_id = 'a'`).toEqual([{ status: "skipped", skip_reason: "corrected" }]);
+    expect(await registry("b")).toEqual({ trees: 1, nodes: 6 });
+    expect(await sql`select kind from storage_cleanup_queue`).toEqual([]);
+  });
+
+  it("removes what a build left for a document that no longer exists, from the spaces and folders the entry names", async () => {
+    await seedDocument("a", W);
+    await seedTree("a", W, (index) => `ERASEME-${index} late write`);
+    // The document's own delete swept first; these rows and this part were written behind it.
+    await sql`delete from documents where id = 'a'`;
+    await sql`delete from document_cleanup_queue`;
+    const store = objectStore(["u1/run-1/summary-tree/a/parts/late.jsonl"]);
+    await enqueueSummaryTreeCleanup(sql, { scope: W, documentId: "a", reason: "document_gone", spaces: [space], artifactRoots: ["u1/run-1/summary-tree/a"] });
+    expect(await drainStorageCleanupQueue(sql, store, options())).toEqual({ purged: 1, failed: 0 });
+    expect(await summaryDocuments(W)).toEqual([]);
+    expect(await filesContaining("ERASEME-")).toEqual([]);
+    expect([...store.objects]).toEqual([]);
+  });
+
+  it("never leaves a tree ready over removed rows, and keeps the entry until the strict delete succeeds", async () => {
+    await seedDocument("a", W);
+    await seedTree("a", W, (index) => `ERASEME-${index}`);
+    await enqueueSummaryTreeCleanup(sql, { scope: W, documentId: "a", reason: "pii_blocked" });
+    let fail = true;
+    const calls: Array<{ table: string; purgeHistory?: boolean }> = [];
+    const flaky: DeleteVectorRows = async (args) => {
+      calls.push({ table: args.table, ...(args.purgeHistory ? { purgeHistory: true } : {}) });
+      if (fail) throw new Error("history prune failed");
+      return await deleteLanceDbDocumentRows(args);
+    };
+    expect(await drainStorageCleanupQueue(sql, storage, options({ deleteVectorRows: flaky }))).toEqual({ purged: 0, failed: 1 });
+    expect(calls).toEqual([{ table: LANCEDB_SUMMARIES_TABLE, purgeHistory: true }]);
+    expect(await sql`select attempts, last_error from storage_cleanup_queue`).toEqual([{ attempts: 1, last_error: "history prune failed" }]);
+    // Nothing was committed: the tree is as it was.
+    expect(await sql`select status from document_summary_trees where document_id = 'a'`).toEqual([{ status: "ready" }]);
+    // Asking again makes the entry due at once with its attempts reset.
+    await enqueueSummaryTreeCleanup(sql, { scope: W, documentId: "a", reason: "pii_blocked" });
+    expect(await sql`select attempts, last_error from storage_cleanup_queue`).toEqual([{ attempts: 0, last_error: null }]);
+    fail = false;
+    expect(await drainStorageCleanupQueue(sql, storage, options({ deleteVectorRows: flaky }))).toEqual({ purged: 1, failed: 0 });
+    expect(await summaryDocuments(W)).toEqual([]);
+    expect(await sql`select status, error, built_at, build_owner from document_summary_trees where document_id = 'a'`)
+      .toEqual([{ status: "partial", error: "rows-removed", built_at: null, build_owner: null }]);
+    expect(await registry("a")).toEqual({ trees: 1, nodes: 0 });
+  });
+
+  it("refuses an entry that names another tenant's document, a folder that is not the document's, or a malformed target", async () => {
+    await seedDocument("a", W);
+    await seedTree("a", W, (index) => `KEEPME-a-${index}`);
+    await seedDocument("x1", X);
+    await seedTree("x1", X, (index) => `KEEPME-x-${index}`);
+    const store = objectStore(["u1/run-1/summary-tree/a/summaries.jsonl", "u1/run-1/embeddings/a.json", "u2/run-1/summary-tree/x1/summaries.jsonl"]);
+    await sql`insert into storage_cleanup_queue (kind, org_id, target, payload, reason) values
+      ('summary_tree_document', 'o1', 'o1|w|x1', ${sql.json({ projectId: "w", documentId: "x1", spaces: [{ embeddingModel: MODEL, dimension: DIM }] })}, 'test'),
+      ('summary_tree_document', 'o1', 'o1|w|a', ${sql.json({ projectId: "w", documentId: "a", artifactRoots: ["u1/run-1/embeddings"] })}, 'test'),
+      ('summary_tree_document', 'o1', 'o1|w|../a', ${sql.json({ projectId: "w", documentId: "../a" })}, 'test'),
+      ('summary_tree_document', 'o1', 'o1|w2|a', ${sql.json({ projectId: "w", documentId: "a" })}, 'test')`;
+    expect(await drainStorageCleanupQueue(sql, store, options())).toEqual({ purged: 0, failed: 4 });
+    expect(await summaryDocuments(W)).toEqual(["a"]);
+    expect(await summaryDocuments(X)).toEqual(["x1"]);
+    expect(store.objects.size).toBe(3);
+    expect(await registry("a")).toEqual({ trees: 1, nodes: 6 });
+    expect(await registry("x1")).toEqual({ trees: 1, nodes: 6 });
   });
 });

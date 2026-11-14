@@ -546,6 +546,9 @@ async function runClaimedJob(
       }
 
       // --- The next documents of this project without a servable tree, in id order. ---
+      // A corrected document is never selected: the correction leaves its state row `skipped` (state-store.ts), and
+      // a `skipped` row of the document's current run ends the selection below. The corrections table itself is not
+      // readable by the worker's database role.
       const documents = await sql<DocumentRow[]>`
         select d.id, d.user_id, d.run_id, d.filename, d.mime_type, r.storage_prefix,
           coalesce((d.metadata->'pii'->>'blocked')::boolean, false) as pii_blocked,
@@ -572,10 +575,7 @@ async function runClaimedJob(
               and (
                 t.status = 'skipped'
                 or (t.status = 'ready' and t.built_at is not null
-                  and t.embedding_model = ${space.model} and t.dimension = ${space.dimensions}
-                  and not exists (
-                    select 1 from document_corrections dc where dc.document_id = d.id and dc.reindex_completed_at > t.built_at
-                  ))
+                  and t.embedding_model = ${space.model} and t.dimension = ${space.dimensions})
                 or (t.status = 'building' and not starts_with(coalesce(t.build_owner, ''), ${ownerPrefix})
                   and t.updated_at > now() - ${interval(staleMs)}::interval)
               )

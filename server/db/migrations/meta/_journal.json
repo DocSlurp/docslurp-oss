@@ -1107,6 +1107,13 @@
       "when": 1797500000000,
       "tag": "0165_summary_tree_backfill",
       "breakpoints": true
+    },
+    {
+      "idx": 158,
+      "version": "7",
+      "when": 1797600000000,
+      "tag": "0166_summary_tree_cleanup",
+      "breakpoints": true
     }
   ]
 }

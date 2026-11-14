@@ -355,8 +355,19 @@ export const SUMMARY_TREE_NODE_STATUSES = ["pending", "ready", "failed"] as cons
 export const summaryTreeNodeStatusSchema = z.enum(SUMMARY_TREE_NODE_STATUSES);
 export type SummaryTreeNodeStatus = z.infer<typeof summaryTreeNodeStatusSchema>;
 
-/** `document_summary_trees.skip_reason`. */
-export const SUMMARY_TREE_SKIP_REASONS = ["format", "tables", "short", "media", "pii", "no-leaves"] as const;
+/**
+ * `document_summary_trees.skip_reason`. `corrected`: a correction reindex replaced the document's chunks. The tree is
+ * built from the run's extraction, which still holds the earlier text, so a corrected document has no tree until a new
+ * version of it is processed. No build replaces a `corrected` row.
+ */
+export const SUMMARY_TREE_SKIP_REASONS = ["format", "tables", "short", "media", "pii", "no-leaves", "corrected"] as const;
+/** The `skip_reason` a completed correction reindex leaves on a document's tree state. */
+export const SUMMARY_TREE_CORRECTED_SKIP_REASON = "corrected" satisfies (typeof SUMMARY_TREE_SKIP_REASONS)[number];
+/**
+ * `storage_cleanup_queue.kind` of one document's summary data: its rows in the summaries table (strict delete) and its
+ * text artifact. Target `<orgId>|<projectId>|<documentId>`; payload `{ projectId, documentId, spaces?, artifactRoots? }`.
+ */
+export const SUMMARY_TREE_CLEANUP_KIND = "summary_tree_document";
 export const summaryTreeSkipReasonSchema = z.enum(SUMMARY_TREE_SKIP_REASONS);
 export type SummaryTreeSkipReason = z.infer<typeof summaryTreeSkipReasonSchema>;
 

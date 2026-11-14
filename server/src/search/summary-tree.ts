@@ -40,7 +40,8 @@ import { estimateTextTokens } from "./token-estimate.js";
  *
  * Tenant boundary. A summary node is served only when all of these hold:
  * 1. Its document is in the project's eligible set, in the request's scope, with `treeReady` (Postgres: a `ready`
- *    tree for the document's current run and this embedding space) and without a pending correction reindex. That
+ *    tree for the document's current run and this embedding space) and without a completed correction reindex: a
+ *    corrected document has no tree, whenever its tree was built (the build never reads corrected chunks). That
  *    set is the `documentId IN (…)` prefilter of the LanceDB query; the table is never read without it and never
  *    probed to find out whether trees exist.
  * 2. After the query, each hit is checked against the eligible set again (a hint may have dropped the cached set
@@ -311,9 +312,11 @@ async function validateAndFetch(args: {
         and t.project_id = d.project_id and t.org_id = d.org_id
         and t.status = 'ready' and t.run_id = d.run_id and t.built_at is not null
         and t.embedding_model = ${args.embeddingModel} and t.dimension = ${args.dimension}
+        -- A completed correction reindex disqualifies the tree outright, whenever it was built: a build reads the
+        -- run's extraction, never the corrected chunks, so no build after the correction describes them either.
         and not exists (
           select 1 from document_corrections dc
-          where dc.document_id = d.id and dc.reindex_completed_at > t.built_at
+          where dc.document_id = d.id and dc.reindex_completed_at is not null
         )
         and n.status = 'ready' and n.run_id = d.run_id and n.project_id = d.project_id
         and ${scope.vectorDocument()}

@@ -210,16 +210,17 @@ async function documentsToBackfill(project: ProjectRecord, pipeline: PipelineFea
       from documents d
       where d.org_id = ${project.orgId} and d.project_id = ${project.id}
         and d.status = 'completed' and d.superseded_at is null and d.purged_at is null and d.archived_at is null
+        -- A corrected document gets no tree (the build cannot read corrected chunks), so there is nothing to backfill.
+        and not exists (
+          select 1 from document_corrections dc where dc.document_id = d.id and dc.reindex_completed_at is not null
+        )
         and not exists (
           select 1 from document_summary_trees t
           where t.document_id = d.id and t.org_id = d.org_id and t.project_id = d.project_id and t.run_id = d.run_id
             and (
               t.status = 'skipped'
               or (t.status = 'ready' and t.built_at is not null
-                and t.embedding_model = ${route.model} and t.dimension = ${route.dimensions}
-                and not exists (
-                  select 1 from document_corrections dc where dc.document_id = d.id and dc.reindex_completed_at > t.built_at
-                ))
+                and t.embedding_model = ${route.model} and t.dimension = ${route.dimensions})
               or (t.status = 'building' and t.updated_at > now() - ${`${SUMMARY_TREE_BUILD_STALE_MS} milliseconds`}::interval)
             )
         )

@@ -57,8 +57,9 @@ export interface EligibleDocument {
   lanceStale: boolean;
   /**
    * The document has a summary tree search may read (summary-tree.ts): its `document_summary_trees` row is `ready`
-   * for the document's current run and the set's embedding space, in this project, and no correction reindex
-   * completed after it was built. Always false while the deployment's serve switch is off. This flag, never a probe
+   * for the document's current run and the set's embedding space, in this project, and the document has no
+   * completed correction reindex (a tree is never built from corrected chunks, so a correction disqualifies it
+   * whenever it was built). Always false while the deployment's serve switch is off. This flag, never a probe
    * of the summaries table, decides whether the table is read at all.
    */
   treeReady: boolean;
@@ -283,7 +284,7 @@ function treeReadyColumn(embeddingModel: string, dimension: number): SqlFragment
       and t.embedding_model = ${embeddingModel} and t.dimension = ${dimension}
       and not exists (
         select 1 from document_corrections dc
-        where dc.document_id = d.id and dc.reindex_completed_at > t.built_at
+        where dc.document_id = d.id and dc.reindex_completed_at is not null
       )
   ))`;
 }

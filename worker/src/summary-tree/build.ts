@@ -1,4 +1,4 @@
-import { SUMMARY_TREE_BUILD_HEARTBEAT_MS, SUMMARY_TREE_BUILD_STALE_MS, summaryTreeNodeCap, type SummaryRow, type SummaryTreeSkipReason } from "@docslurp/shared";
+import { SUMMARY_TREE_BUILD_HEARTBEAT_MS, SUMMARY_TREE_BUILD_STALE_MS, SUMMARY_TREE_CORRECTED_SKIP_REASON, summaryTreeNodeCap, type SummaryRow, type SummaryTreeSkipReason } from "@docslurp/shared";
 import type { Sql } from "postgres";
 
 import {
@@ -26,6 +26,7 @@ import {
   readSummaryTreeCoverage,
   staleSummaryTreeNodeIds,
   summaryTreeCoverageProblems,
+  summaryTreeDocumentStanding,
   SummaryTreeStateRefused,
   touchSummaryTreeBuild,
   upsertSummaryTreeNodes,
@@ -145,7 +146,10 @@ export interface SummaryTreeUsageDetail {
 
 export type SummaryTreeRowWriter = (args: {
   sql: Client; scope: SummaryTreeScope; space: { model: string; dimensions: number };
-  documentId: string; runId: string; rows: SummaryRow[]; root?: string; signal?: AbortSignal;
+  documentId: string; runId: string; rows: SummaryRow[];
+  /** The builder writing; the writer refuses once this builder no longer holds the document's tree. */
+  owner?: string;
+  root?: string; signal?: AbortSignal;
 }) => Promise<unknown>;
 
 export interface SummaryTreeBuildDeps {
@@ -241,7 +245,7 @@ export interface SummaryTreeBuildStats {
   summaryTreeStatus: SummaryTreeBuildStatus;
   summaryTreeSkipReason?: SummaryTreeSkipReason;
   /** The library's finer skip reason (`spreadsheet-format`, `table-heavy`, ...). */
-  summaryTreeSkipDetail?: SummaryTreeDocumentSkipReason | "pii-blocked" | "chunk-count-below-floor" | "no-embedding-artifact";
+  summaryTreeSkipDetail?: SummaryTreeDocumentSkipReason | "pii-blocked" | "chunk-count-below-floor" | "no-embedding-artifact" | "corrected";
   /** Why the build is `blocked`, `refused` or `partial`. */
   summaryTreeReason?: string;
   chunks: number;
@@ -366,6 +370,13 @@ export async function buildDocumentSummaryTree(deps: SummaryTreeBuildDeps, input
   // Another builder holds the document and still reports: a caller that must not take it over leaves it untouched.
   if (prior?.buildLive && prior.buildOwner !== owner && input.takeOverLiveBuild === false) {
     return finish("blocked", { reason: "build-in-progress" });
+  }
+  // A corrected document has no tree (state-store.ts): the build reads the run's extraction, which still holds the
+  // text from before the correction. Nothing is read, written or called; the correction queued the removal of
+  // whatever an earlier build left.
+  if (prior?.status === "skipped" && prior.skipReason === SUMMARY_TREE_CORRECTED_SKIP_REASON) {
+    stats.summaryTreeSkipDetail = "corrected";
+    return finish("skipped", { skipReason: SUMMARY_TREE_CORRECTED_SKIP_REASON });
   }
   const priorSpace = prior?.embeddingModel && prior.dimension ? { model: prior.embeddingModel, dimensions: prior.dimension } : null;
 
@@ -549,7 +560,7 @@ export async function buildDocumentSummaryTree(deps: SummaryTreeBuildDeps, input
           vector: Array.from(vectors.get(nodeIndex)!),
         };
       });
-      await deps.writeRows({ sql: deps.sql, scope, space, documentId, runId, rows, root: deps.lanceRoot, signal });
+      await deps.writeRows({ sql: deps.sql, scope, space, documentId, runId, rows, owner, root: deps.lanceRoot, signal });
       await upsertSummaryTreeNodes(deps.sql, { scope, documentId, runId, rows: pending.map((nodeIndex) => nodeRecord(nodeIndex, "ready")) });
       for (const nodeIndex of pending) registry.set(nodeIds[nodeIndex]!, { id: nodeIds[nodeIndex]!, nodeHash: hashes[nodeIndex]!, status: "ready", runId });
       stats.rowsWritten += rows.length;
@@ -810,7 +821,13 @@ export async function buildDocumentSummaryTree(deps: SummaryTreeBuildDeps, input
     // takes its writer as a dependency.
     if (error instanceof SummaryTreeStateRefused || (error instanceof Error && error.name === "SummaryRowsRefused")) {
       await deps.flushUsage?.();
-      return finish("refused", { reason: takenOver ? "build-taken-over" : "document-not-live" });
+      const standing = await summaryTreeDocumentStanding(deps.sql, scope, documentId);
+      // Still a live document: another build holds its tree now (the row writer and the state writes refuse a
+      // builder that lost the row). That build's state and rows are not this one's to touch.
+      if (standing === "live" && holding && (takenOver || !(await touchSummaryTreeBuild(deps.sql, scope, documentId, owner)))) {
+        return finish("partial", { reason: "stopped:build-taken-over", artifactUri });
+      }
+      return finish("refused", { reason: standing === "corrected" ? "document-corrected" : "document-not-live" });
     }
     throw error;
   } finally {

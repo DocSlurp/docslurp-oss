@@ -227,9 +227,32 @@ stage stats carry the finer detail and the counts. Nothing is skipped silently.
 | `tables` | `table-heavy` | more than `SUMMARY_TREE_MAX_TABLE_LEAF_SHARE` of the leaves are tables |
 | `no-leaves` | `no-leaves`, `no-embedding-artifact` | nothing to summarize |
 | `pii` | `pii-blocked` | the document is blocked by the PII policy |
+| `corrected` | `corrected` | a correction reindex replaced the document's chunks (below) |
 
 A document that had a tree and no longer qualifies loses its summary rows and
 registry rows when the skip is recorded.
+
+**Corrected documents have no tree.** A build reads the run's embed artifact. A
+correction reindex (`POST /v1/documents/:docId/correction-workbench/reindex`)
+replaces
+the document's chunks in Postgres and leaves that artifact as it was, so a tree
+built after the correction would summarize the text from before it, and its
+chunk ranges would name chunks that no longer exist. In the transaction that
+replaces the chunks, the API therefore:
+
+- sets the document's tree state to `skipped` / `corrected`, creating the row
+  when the document had none (the worker's database role cannot read
+  corrections; this row is how a build knows);
+- deletes its registry rows;
+- queues strict removal of its summary rows and text artifact
+  (`storage_cleanup_queue`, kind `summary_tree_document`).
+
+No build replaces a `corrected` row: the stage and the backfill skip the
+document without reading anything, and a build that was running is refused at
+its next write (`refused`, `document-corrected`), including the `ready` write
+itself. Search also refuses the tree of any document with a completed correction
+reindex, whatever its state row says. The document gets a tree again when a new
+version of it is processed.
 
 ### Statuses
 
@@ -266,7 +289,8 @@ The stage's own checkpoint is `completed` in every case above: a `partial` or
 `blocked` tree never fails the document or the run. The stage stats
 (`summaryTreeStatus`) add three outcomes that write no tree: `off` (the switch),
 `blocked` (state row `pending`) and `refused` (the document is not a live
-document of the run's organization and project).
+document of the run's organization and project: `document-not-live`; or it was
+corrected while the build ran: `document-corrected`).
 
 A later build of a `partial` or `building` document resumes: it pays only for
 the groups that have no stored text, and for the levels above them.
@@ -274,7 +298,8 @@ the groups that have no stored text, and for the levels above them.
 ### What search may read, and when
 
 Search serves a document's nodes only while its state row is `ready` for the
-document's current run and the project's embedding space, with `built_at` set.
+document's current run and the project's embedding space, with `built_at` set,
+and the document has no completed correction reindex.
 The build keeps that true at every step:
 
 - Summary rows are written before the row turns `ready`, with the document's
@@ -415,9 +440,9 @@ uncapped job. One active job per project.
 
 **What it builds.** The project's current documents (completed, not superseded,
 purged or archived) that have no tree search can read for their current run:
-no state row, `pending`, `partial`, a `building` row nobody reports on, a tree
-of another run or embedding space, or a tree older than a correction reindex.
-`ready` and `skipped` documents are not touched. Each document is built by
+no state row, `pending`, `partial`, a `building` row nobody reports on, or a
+tree of another run or embedding space. `ready` and `skipped` documents are not
+touched; that includes corrected documents, which are `skipped` and get no tree. Each document is built by
 `runSummaryTreeForDocument` with its own run id, run root and embed artifact, so
 the model route, the fleet rate limiter, the artifact and every write are the
 stage's own.

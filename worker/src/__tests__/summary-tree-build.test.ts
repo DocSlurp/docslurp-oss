@@ -553,6 +553,88 @@ describe("controls", () => {
   });
 });
 
+describe("corrected documents", () => {
+  /** What the API's correction reindex leaves in the same transaction as the corrected chunks (summary-tree-withdrawal.ts). */
+  const correct = async (documentId: string, scope: Scope) => {
+    await sql`
+      insert into document_summary_trees (document_id, org_id, project_id, run_id, status, skip_reason)
+      values (${documentId}, ${scope.orgId}, ${scope.projectId}, ${`run-${documentId}`}, 'skipped', 'corrected')
+      on conflict (document_id) do update set status = 'skipped', skip_reason = 'corrected', build_owner = null, built_at = null, root_node_id = null`;
+    await sql`delete from document_summary_tree_nodes where document_id = ${documentId}`;
+  };
+
+  it("builds no tree for a corrected document: nothing is read, written or called", async () => {
+    const h = harness();
+    await seedDocument("d1", W);
+    h.putArtifact("d1", W, book());
+    await correct("d1", W);
+    const result = await h.build("d1", W);
+    expect(result).toMatchObject({ status: "skipped", skipReason: "corrected" });
+    expect(result.stats.summaryTreeSkipDetail).toBe("corrected");
+    expect(h.model.requests).toEqual([]);
+    expect(h.embedded).toEqual([]);
+    expect(h.storage.opened).toEqual([]);
+    expect(await stateOf("d1")).toMatchObject({ status: "skipped", skip_reason: "corrected", built_at: null });
+    expect(await summaryRows(W)).toBeNull();
+  });
+
+  it("does not build over a correction again on a retry, a resume or a rebuild with other settings", async () => {
+    const h = harness();
+    await seedDocument("d1", W);
+    h.putArtifact("d1", W, book());
+    expect((await h.build("d1", W)).status).toBe("ready");
+    await correct("d1", W);
+    const calls = h.model.requests.length;
+    for (const hashContext of [HASH_CONTEXT, { ...HASH_CONTEXT, modelId: "text/model-b" }]) {
+      expect(await h.build("d1", W, { hashContext })).toMatchObject({ status: "skipped", skipReason: "corrected" });
+    }
+    expect(h.model.requests).toHaveLength(calls);
+    expect(await stateOf("d1")).toMatchObject({ status: "skipped", skip_reason: "corrected", built_at: null });
+  });
+
+  it("never ends ready when the correction lands while the build runs, and writes nothing after it", async () => {
+    let corrected = false;
+    const h = harness(fakeModel(async (request, call) => {
+      // The correction commits while the fourth call is in flight.
+      if (call === 4 && !corrected) {
+        corrected = true;
+        await correct("d1", W);
+      }
+      return ok(request, call);
+    }));
+    await seedDocument("d1", W);
+    h.putArtifact("d1", W, book());
+    const result = await h.build("d1", W, { concurrency: 2 });
+    expect(result).toMatchObject({ status: "refused", reason: "document-corrected" });
+    // The window in flight finished; no later window started.
+    expect(h.model.requests.length).toBeLessThanOrEqual(4);
+    expect(await stateOf("d1")).toMatchObject({ status: "skipped", skip_reason: "corrected", built_at: null, build_owner: null });
+    expect(await nodesOf("d1")).toEqual([]);
+    // The rows of the window before the correction are the queued removal's to delete; none was written after it.
+    expect((await summaryRows(W) ?? []).length).toBeLessThanOrEqual(2);
+  });
+
+  it("refuses the ready write itself when the correction commits just before it", async () => {
+    const h = harness();
+    await seedDocument("d1", W);
+    h.putArtifact("d1", W, book());
+    // The last statement before the `ready` write is the coverage read; the correction lands right after the last row write.
+    let writes = 0;
+    const result = await h.build("d1", W, {
+      deps: {
+        writeRows: async (write) => {
+          const written = await writeSummaryRows(write);
+          writes += write.rows.length;
+          if (writes === BOOK_NODES) await correct("d1", W);
+          return written;
+        },
+      },
+    });
+    expect(result).toMatchObject({ status: "refused", reason: "document-corrected" });
+    expect(await stateOf("d1")).toMatchObject({ status: "skipped", skip_reason: "corrected", built_at: null });
+  });
+});
+
 describe("failed groups", () => {
   const failing = (match: (request: SummaryTreeModelRequest) => boolean, failure: (request: SummaryTreeModelRequest, call: number) => SummaryCallResult) =>
     fakeModel((request, call) => (match(request) ? failure(request, call) : ok(request, call)));

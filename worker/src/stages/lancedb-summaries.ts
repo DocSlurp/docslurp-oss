@@ -57,6 +57,8 @@ export type WriteSummaryRowsArgs = {
   documentId: string;
   runId: string;
   rows: SummaryRow[];
+  /** The builder writing (`document_summary_trees.build_owner`): the rows are refused once another build, a correction or a cleanup took the tree. */
+  owner?: string;
   root?: string;
   signal?: AbortSignal;
   retry?: LanceWriteRetryOptions;
@@ -70,10 +72,15 @@ export type WriteSummaryRowsArgs = {
  * - the document is a live document of exactly this org and project (not purged, not superseded, not archived);
  * - the document is indexed in this embedding space (a `vector_indexes` row), which is where the purge paths look for
  *   its summary rows;
- * - the document has a tree state row naming this embedding space (`document_summary_trees`), which gates serving and
- *   is deleted with the document.
+ * - the document has a tree state row naming this embedding space (`document_summary_trees`) that is not `skipped`
+ *   (a corrected or withheld document has no tree), and, with `owner`, that this builder still holds.
  *
  * So a summary row can only exist where a delete path will find it.
+ *
+ * The check and the table write happen under one lock on the document's row (`for key share`, the lock a foreign-key
+ * check takes): deleting the document, purging or archiving a replaced version (`for update ... skip locked`) and a
+ * correction reindex (`for update`) each wait for the write to finish or run before its check. So whichever of them
+ * commits, its own cleanup starts after every row this call wrote, and nothing lands behind a sweep that already ran.
  */
 export async function writeSummaryRows(args: WriteSummaryRowsArgs): Promise<VectorLocation> {
   const location = projectSummariesLocation(args.scope, args.space, args.root);
@@ -85,29 +92,40 @@ export async function writeSummaryRows(args: WriteSummaryRowsArgs): Promise<Vect
     if (row.vector.length !== args.space.dimensions) throw new SummaryRowsRefused("A summary vector does not match the embedding space");
   }
   if (new Set(rows.map((row) => row.id)).size !== rows.length) throw new SummaryRowsRefused("Summary row ids must be unique");
-  const [owner] = await args.sql<{ indexed: boolean; tracked: boolean }[]>`
-    select
-      exists (
-        select 1 from vector_indexes vi
-        where vi.document_id = d.id and vi.backend = 'lancedb'
-          and vi.embedding_model = ${args.space.model} and vi.dimension = ${args.space.dimensions}
-      ) as indexed,
-      exists (
-        select 1 from document_summary_trees t
-        where t.document_id = d.id and t.org_id = d.org_id and t.project_id = d.project_id
-          and t.embedding_model = ${args.space.model} and t.dimension = ${args.space.dimensions}
-      ) as tracked
-    from documents d
-    where d.id = ${args.documentId} and d.org_id = ${args.scope.orgId} and d.project_id = ${args.scope.projectId}
-      and d.purged_at is null and d.superseded_at is null and d.archived_at is null
-  `;
-  if (!owner) throw new SummaryRowsRefused("The document is not a live document of this project");
-  if (!owner.indexed) throw new SummaryRowsRefused("The document is not indexed in this embedding space");
-  if (!owner.tracked) throw new SummaryRowsRefused("The document has no summary tree state for this embedding space");
-  if (rows.length === 0) return location;
-  // The writer is typed for chunk records; it upserts any rows keyed by "id" into the named table.
-  await writeLanceDbRecords(location.uri, location.table, rows as unknown as VectorBackendRecord[], args.signal, args.retry);
-  await ensureSummariesDocumentIndex(location, args.retry);
+  const guarded = async (client: Sql<Record<string, unknown>>): Promise<void> => {
+    const [owner] = await client<{ indexed: boolean; tracked: boolean }[]>`
+      select
+        exists (
+          select 1 from vector_indexes vi
+          where vi.document_id = d.id and vi.backend = 'lancedb'
+            and vi.embedding_model = ${args.space.model} and vi.dimension = ${args.space.dimensions}
+        ) as indexed,
+        exists (
+          select 1 from document_summary_trees t
+          where t.document_id = d.id and t.org_id = d.org_id and t.project_id = d.project_id
+            and t.embedding_model = ${args.space.model} and t.dimension = ${args.space.dimensions}
+            and t.status <> 'skipped'
+            and (${args.owner ?? null}::text is null or (t.status = 'building' and t.build_owner = ${args.owner ?? null}::text))
+        ) as tracked
+      from documents d
+      where d.id = ${args.documentId} and d.org_id = ${args.scope.orgId} and d.project_id = ${args.scope.projectId}
+        and d.purged_at is null and d.superseded_at is null and d.archived_at is null
+      for key share of d
+    `;
+    if (!owner) throw new SummaryRowsRefused("The document is not a live document of this project");
+    if (!owner.indexed) throw new SummaryRowsRefused("The document is not indexed in this embedding space");
+    if (!owner.tracked) throw new SummaryRowsRefused("The document has no summary tree being built for this embedding space");
+    if (rows.length === 0) return;
+    // The writer is typed for chunk records; it upserts any rows keyed by "id" into the named table.
+    await writeLanceDbRecords(location.uri, location.table, rows as unknown as VectorBackendRecord[], args.signal, args.retry);
+  };
+  // A caller already inside a transaction holds the lock for as long as its own transaction lasts.
+  if (typeof (args.sql as { begin?: unknown }).begin === "function") {
+    await args.sql.begin(async (tx) => { await guarded(tx as unknown as Sql<Record<string, unknown>>); });
+  } else {
+    await guarded(args.sql);
+  }
+  if (rows.length > 0) await ensureSummariesDocumentIndex(location, args.retry);
   return location;
 }
 

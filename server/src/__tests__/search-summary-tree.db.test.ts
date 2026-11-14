@@ -479,21 +479,34 @@ describe("summary tree: tenant boundary", () => {
     expect(cold).not.toHaveProperty("summaries");
   });
 
-  it("serves no node of a document whose correction reindex finished after its tree was built", async () => {
+  it("serves no node of a corrected document, also when its tree was finished after the correction", async () => {
     const scope = ["docCor", "docB"];
     expect(documentsOf(await run({ documentIds: scope, summaryTree: "include" }))).toContain("docCor");
+    // The correction reindex completed before the tree's `built_at`: the build was still running, or was retried,
+    // resumed or backfilled afterwards. It read the run's extraction, not the corrected chunks.
     await sql`insert into document_corrections (id, document_id, run_id, user_id, corrected_markdown, reindex_completed_at)
-      values ('cor1', 'docCor', 'run-w', 'u', 'fixed', now() + interval '1 minute')`;
+      values ('cor1', 'docCor', 'run-w', 'u', 'fixed', now() - interval '1 minute')`;
+    await sql`update document_summary_trees set built_at = now() where document_id = 'docCor'`;
+    // Warm: the cached eligible set still says the tree is ready; the request-time check refuses every node.
     const warm = await run({ documentIds: scope, summaryTree: "include" });
     expect(documentsOf(warm)).not.toContain("docCor");
     expect(warm.summaries).toEqual([]);
+    // Cold: the document is not a candidate and the table is not read.
     eligible.resetEligibleDocumentCachesForTests();
+    summaryReads.calls.length = 0;
     const cold = await run({ documentIds: scope, summaryTree: "include" });
     expect(cold.summaryTree).toMatchObject({ applied: "off", skipped: "not-ready" });
-    // Rebuilding the tree after the correction serves it again.
+    expect(cold).not.toHaveProperty("summaries");
+    expect(summaryReads.calls).toHaveLength(0);
+    // Building again later, with the chunk vectors reindexed too, changes nothing.
     await sql`update document_summary_trees set built_at = now() + interval '2 minutes' where document_id = 'docCor'`;
-    // The correction also marks the chunk vectors stale until they are reindexed; a rebuilt index clears that.
     await sql`update vector_indexes set created_at = now() + interval '2 minutes' where document_id = 'docCor'`;
+    eligible.resetEligibleDocumentCachesForTests();
+    const rebuilt = await run({ documentIds: scope, summaryTree: "include" });
+    expect(documentsOf(rebuilt)).not.toContain("docCor");
+    expect(rebuilt.summaryTree).toMatchObject({ applied: "off", skipped: "not-ready" });
+    // A correction that was saved but never reindexed replaced no chunk and withdraws nothing.
+    await sql`update document_corrections set reindex_completed_at = null where document_id = 'docCor'`;
     eligible.resetEligibleDocumentCachesForTests();
     expect(documentsOf(await run({ documentIds: scope, summaryTree: "include" }))).toContain("docCor");
   });
