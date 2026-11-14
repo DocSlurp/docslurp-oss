@@ -11,7 +11,7 @@ import { artifactUri, keyFromArtifactUri, type SummaryRow } from "@docslurp/shar
 import postgres from "postgres";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { deleteDocumentSummaryRows, deleteSummaryRowsById, projectSummariesLocation, writeSummaryRows } from "../stages/lancedb-summaries.js";
+import { deleteDocumentSummaryRows, deleteSummaryRowsById, ensureSummariesDocumentIndex, projectSummariesLocation, resetSummariesIndexMemoForTests, writeSummaryRows } from "../stages/lancedb-summaries.js";
 import { summaryTreeArtifactIO, type SummaryTreeStorage } from "../stages/summary-tree.js";
 import {
   buildDocumentSummaryTree,
@@ -233,6 +233,8 @@ interface BuildOptions {
   hashContext?: SummaryTreeHashContext;
   deps?: Partial<SummaryTreeBuildDeps>;
   register?: boolean;
+  /** Ownership and heartbeat settings of the build. */
+  input?: Pick<SummaryTreeBuildInput, "owner" | "takeOverLiveBuild" | "buildStaleMs" | "heartbeatMs">;
 }
 
 const runRootOf = (scope: Scope, runId: string) => `${userOf(scope)}/${runId}`;
@@ -288,6 +290,7 @@ function harness(model: FakeModel = fakeModel()): Harness {
         limits: options.limits,
         concurrency: options.concurrency ?? 4,
         signal: options.signal,
+        ...options.input,
       });
       // What the stage checkpoint does with the returned artifact.
       if (options.register !== false && result.artifactUri) {
@@ -1000,9 +1003,8 @@ describe("scale", () => {
       tmpDirectory: spoolRoot,
     }, {
       scope: W, documentId: "big", runId: "run-big", document: { normalizedFormat: "pdf" }, runRoot: "u1/run-big",
+      // No limits injected: the shared node cap scales with the document's leaves.
       space: { model: MODEL, dimensions: SCALE_DIM }, hashContext: HASH_CONTEXT, concurrency: 16,
-      // The shared node cap is below what a document this size needs (see the stage notes); the build itself is what is measured.
-      limits: { maxNodes: 20_000 },
     });
     peakMb = Math.max(peakMb, retained());
 
@@ -1024,6 +1026,135 @@ describe("scale", () => {
     expect(peakMb - baselineMb).toBeLessThan(streamedMb / 3);
     expect(await readdir(spoolRoot)).toEqual([]);
   }, 300_000);
+});
+
+describe("serving contract and ownership of a building row", () => {
+  it("leaves ready before a rebuild with other settings removes a single row, and bumps built_at", async () => {
+    const h = harness();
+    await seedDocument("d1", W);
+    h.putArtifact("d1", W, book());
+    expect((await h.build("d1", W)).status).toBe("ready");
+    const first = await stateOf("d1");
+    expect((await summaryRows(W))!.every((row) => row.runId === "run-d1")).toBe(true);
+
+    const statusAtWipe: unknown[] = [];
+    const rebuilt = await h.build("d1", W, {
+      hashContext: { ...HASH_CONTEXT, modelId: "text/model-b" },
+      deps: {
+        deleteDocumentRows: async (args) => {
+          statusAtWipe.push((await stateOf("d1"))!.status, (await stateOf("d1"))!.built_at);
+          return await deleteDocumentSummaryRows(args);
+        },
+      },
+    });
+    expect(rebuilt.status).toBe("ready");
+    // The row had already left `ready` (and lost built_at) when the earlier tree's rows were deleted.
+    expect(statusAtWipe).toEqual(["building", null]);
+    const second = await stateOf("d1");
+    expect(second).toMatchObject({ status: "ready", build_owner: null });
+    expect(new Date(second!.built_at as string).getTime()).toBeGreaterThan(new Date(first!.built_at as string).getTime());
+    // Registry ids are the summaries table's row ids, all ready, all of the document's run.
+    const nodes = await nodesOf("d1");
+    expect(new Set((await summaryRows(W))!.map((row) => row.id))).toEqual(new Set(nodes.map((node) => node.id)));
+    expect(nodes.every((node) => node.status === "ready" && node.run_id === "run-d1")).toBe(true);
+  });
+
+  it("leaves ready before wiping the tree of a document that no longer qualifies", async () => {
+    const h = harness();
+    await seedDocument("d1", W);
+    h.putArtifact("d1", W, book());
+    expect((await h.build("d1", W)).status).toBe("ready");
+    const statusAtWipe: unknown[] = [];
+    const result = await h.build("d1", W, {
+      document: { normalizedFormat: "office-excel" },
+      deps: { deleteDocumentRows: async (args) => { statusAtWipe.push((await stateOf("d1"))!.status); return await deleteDocumentSummaryRows(args); } },
+    });
+    expect(result).toMatchObject({ status: "skipped", skipReason: "format" });
+    expect(statusAtWipe).toEqual(["building"]);
+    expect(await stateOf("d1")).toMatchObject({ status: "skipped", build_owner: null });
+    expect(await summaryRows(W)).toEqual([]);
+    expect(await nodesOf("d1")).toEqual([]);
+  });
+
+  it("names its builder on the building row and clears it with the outcome", async () => {
+    const owners: unknown[] = [];
+    const h = harness(fakeModel(async (request, call) => {
+      if (call === 1) owners.push((await stateOf("d1"))!.build_owner);
+      return ok(request, call);
+    }));
+    await seedDocument("d1", W);
+    h.putArtifact("d1", W, book());
+    expect((await h.build("d1", W, { input: { owner: "job:j1" } })).status).toBe("ready");
+    expect(owners).toEqual(["job:j1"]);
+    expect((await stateOf("d1"))!.build_owner).toBeNull();
+  });
+
+  it("a caller that must not take over leaves a live build alone, and takes over one that stopped reporting", async () => {
+    const h = harness();
+    await seedDocument("d1", W);
+    h.putArtifact("d1", W, book());
+    // Another builder's row, reporting now.
+    await sql`insert into document_summary_trees (document_id, org_id, project_id, run_id, status, build_owner, embedding_model, dimension)
+      values ('d1', 'o1', 'w', 'run-d1', 'building', 'run:run-d1', ${MODEL}, ${DIM})`;
+    const blocked = await h.build("d1", W, { input: { owner: "job:j1", takeOverLiveBuild: false } });
+    expect(blocked).toMatchObject({ status: "blocked", reason: "build-in-progress" });
+    expect(h.model.requests).toEqual([]);
+    expect(h.storage.opened).toEqual([]);
+    expect(await stateOf("d1")).toMatchObject({ status: "building", build_owner: "run:run-d1" });
+
+    // The builder died: no heartbeat for longer than the staleness age. The row blocks nothing.
+    await sql`update document_summary_trees set updated_at = now() - interval '11 minutes' where document_id = 'd1'`;
+    const taken = await h.build("d1", W, { input: { owner: "job:j1", takeOverLiveBuild: false } });
+    expect(taken.status).toBe("ready");
+    expect(h.model.requests).toHaveLength(BOOK_NODES);
+  });
+
+  it("the document's own run takes a live build over; the build it replaced stops and writes no outcome", async () => {
+    let second: Promise<SummaryTreeBuildResult> | null = null;
+    const h2 = harness();
+    const h1 = harness(fakeModel(async (request, call) => {
+      // While the first build is in its second window, the run's own stage starts and takes the row.
+      if (call === 5) second = h2.build("d1", W, { input: { owner: "run:run-d1" } });
+      if (call >= 5) await second;
+      return ok(request, call);
+    }));
+    await seedDocument("d1", W);
+    h1.putArtifact("d1", W, book());
+    h2.storage.objects.set(embeddingKeyOf(W, "run-d1", "d1"), h1.storage.objects.get(embeddingKeyOf(W, "run-d1", "d1"))!);
+    const first = await h1.build("d1", W, { input: { owner: "job:j1", heartbeatMs: 60_000 }, register: false });
+    expect((await second!).status).toBe("ready");
+    // The first build noticed at its next commit, made no further call and did not overwrite the newer state.
+    expect(first.status).toBe("partial");
+    expect(first.reason).toBe("stopped:build-taken-over");
+    expect(h1.model.requests.length).toBeLessThanOrEqual(8);
+    expect(await stateOf("d1")).toMatchObject({ status: "ready", build_owner: null });
+  });
+
+  it("creates the summaries table with a scalar index on documentId", async () => {
+    const h = harness();
+    await seedDocument("d1", W);
+    h.putArtifact("d1", W, book());
+    expect((await h.build("d1", W)).status).toBe("ready");
+    const location = projectSummariesLocation(W, SPACE, lanceRoot);
+    const connection = await connect(location.uri);
+    const table = await connection.openTable(location.table);
+    try {
+      const indices = await table.listIndices();
+      expect(indices.filter((index) => index.columns.includes("documentId")).map((index) => index.indexType)).toEqual(["BTree"]);
+      // A table an earlier release created without the index gets it on the next write.
+      await table.dropIndex(indices.find((index) => index.columns.includes("documentId"))!.name);
+      expect((await table.listIndices()).some((index) => index.columns.includes("documentId"))).toBe(false);
+    } finally {
+      table.close();
+      connection.close();
+    }
+    resetSummariesIndexMemoForTests();
+    expect(await ensureSummariesDocumentIndex(location)).toBe(true);
+    expect(await ensureSummariesDocumentIndex(location)).toBe(false);
+    // Deletes by document still work with the index in place.
+    await deleteDocumentSummaryRows({ scope: W, space: SPACE, documentIds: ["d1"], root: lanceRoot });
+    expect(await summaryRows(W)).toEqual([]);
+  });
 });
 
 describe("predecessor lookup", () => {

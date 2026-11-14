@@ -70,9 +70,13 @@ export type ProjectSummaryTreeState = {
   documents: { total: number; ready: number; building: number; partial: number; skipped: number; missing: number };
   nodes: number;
   constants: {
-    keyVersion: number; minGroupSize: number; maxGroupSize: number; maxFanIn: number; minDocumentLeaves: number;
-    maxNodesPerDocument: number; maxLevels: number; summaryTargetWords: number; maxTableLeafShare: number;
-    includeContextShare: number; deadlineFactor: number; deadlineGraceMs: number; deadlineCalibrated: boolean; skippedFormats: string[];
+    keyVersion: number; minGroupSize: number; maxGroupSize: number; minFanIn: number; maxFanIn: number; minDocumentLeaves: number;
+    /** Node cap of one document: `maxNodesPerLeaf` per leaf, at least `baseNodesPerDocument`, at most `maxNodesPerDocument`. */
+    baseNodesPerDocument: number; maxNodesPerLeaf: number; maxNodesPerDocument: number;
+    maxLevels: number; summaryTargetWords: number; maxTableLeafShare: number;
+    includeContextShare: number; deadlineFactor: number; deadlineGraceMs: number; deadlineCalibrated: boolean;
+    searchHits: number; guideHits: number; guideChunksPerHit: number; guideMaxRange: number; guideResultShare: number;
+    buildStaleSeconds: number; skippedFormats: string[];
   };
 };
 export type OrganizationRole = "owner" | "admin" | "member" | "billing";

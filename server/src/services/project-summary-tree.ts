@@ -4,6 +4,7 @@ import {
   effectiveSummaryTreeSearchMode,
   normalizePipelineFeatures,
   SUMMARY_TREE_BUILD_ENV_FLAG,
+  SUMMARY_TREE_BUILD_STALE_MS,
   SUMMARY_TREE_BUILD_UNAVAILABLE_CODE,
   SUMMARY_TREE_CONSTANTS,
   SUMMARY_TREE_REQUIRES_VECTORS_CODE,
@@ -57,7 +58,8 @@ type TreeCountsRow = {
 
 /**
  * The `summaryTree` block of the project state. Counts cover the project's current documents only (completed, not
- * superseded). Caller must establish project access first; every query is scoped to `projectId` and `orgId`.
+ * superseded). A document left `building` by a worker that died (no heartbeat for `SUMMARY_TREE_BUILD_STALE_MS`)
+ * counts as partial: nothing is building it, and the backfill job picks it up. Caller must establish project access first; every query is scoped to `projectId` and `orgId`.
  */
 export async function getProjectSummaryTreeState(
   args: { projectId: string; orgId: string; pipeline?: PipelineFeatures | null },
@@ -71,7 +73,10 @@ export async function getProjectSummaryTreeState(
         and d.status = 'completed' and d.superseded_at is null and d.purged_at is null
     ),
     trees as (
-      select t.document_id, t.status from document_summary_trees t
+      -- A building row whose build stopped reporting was left by a dead worker: it is not being built.
+      select t.document_id,
+        case when t.status = 'building' and t.updated_at <= now() - ${`${SUMMARY_TREE_BUILD_STALE_MS} milliseconds`}::interval then 'abandoned' else t.status end as status
+      from document_summary_trees t
       join docs on docs.id = t.document_id
       where t.project_id = ${args.projectId} and t.org_id = ${args.orgId}
     )
@@ -79,7 +84,7 @@ export async function getProjectSummaryTreeState(
       (select count(*)::int from docs) as total,
       (select count(*)::int from trees where status = 'ready') as ready,
       (select count(*)::int from trees where status in ('pending', 'building')) as building,
-      (select count(*)::int from trees where status = 'partial') as partial,
+      (select count(*)::int from trees where status in ('partial', 'abandoned')) as partial,
       (select count(*)::int from trees where status = 'skipped') as skipped,
       (select count(*)::int from document_summary_tree_nodes n
         join docs on docs.id = n.document_id

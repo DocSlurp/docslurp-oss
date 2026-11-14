@@ -194,13 +194,31 @@ export const SUMMARY_TREE_MAX_FAN_IN = 8;
  * Fewest siblings that get a summary node of their own above the leaf level (the root excepted): a smaller run of
  * siblings joins its parent's siblings instead, so a deeply nested outline does not grow a chain of near-identical
  * summaries. With the maximum above, a tree of `SUMMARY_TREE_MAX_NODES_PER_DOCUMENT` nodes always fits
- * `SUMMARY_TREE_MAX_LEVELS`.
+ * `SUMMARY_TREE_MAX_LEVELS` (at the minimum fan-in everywhere, eight levels hold 8 * 4^6 leaf groups).
  */
 export const SUMMARY_TREE_MIN_FAN_IN = 4;
 /** Documents with fewer leaf chunks get no tree (the long-document floor). */
 export const SUMMARY_TREE_MIN_DOCUMENT_LEAVES = 24;
-/** Hard cap on nodes per document; a document that would exceed it is marked partial, never truncated silently. */
-export const SUMMARY_TREE_MAX_NODES_PER_DOCUMENT = 5_000;
+/**
+ * Node cap of one document. It scales with the document: `summaryTreeNodeCap(leaves)` allows
+ * `SUMMARY_TREE_MAX_NODES_PER_LEAF` nodes per leaf, never fewer than `SUMMARY_TREE_BASE_NODES_PER_DOCUMENT` and never
+ * more than `SUMMARY_TREE_MAX_NODES_PER_DOCUMENT`. A document that would exceed its cap is marked partial before any
+ * call, never truncated silently. The cap is a sanity bound on tree shape (a document cut into one-leaf sections);
+ * what a build may spend and how long it may run are bounded by the caller's cost cap and time budget.
+ */
+export const SUMMARY_TREE_BASE_NODES_PER_DOCUMENT = 5_000;
+export const SUMMARY_TREE_MAX_NODES_PER_LEAF = 0.5;
+/** Hard ceiling of the node cap: about four times the nodes of a 20,000-page document at the usual group size. */
+export const SUMMARY_TREE_MAX_NODES_PER_DOCUMENT = 40_000;
+
+/** Nodes a document of `leafCount` leaves may have. */
+export function summaryTreeNodeCap(leafCount: number): number {
+  const leaves = Number.isFinite(leafCount) && leafCount > 0 ? leafCount : 0;
+  return Math.min(
+    SUMMARY_TREE_MAX_NODES_PER_DOCUMENT,
+    Math.max(SUMMARY_TREE_BASE_NODES_PER_DOCUMENT, Math.ceil(leaves * SUMMARY_TREE_MAX_NODES_PER_LEAF)),
+  );
+}
 /** Levels above the leaves, root included. */
 export const SUMMARY_TREE_MAX_LEVELS = 8;
 /** Target summary length in words. A target, not a cap: a truncated summary is retried, never stored. */
@@ -218,6 +236,41 @@ export const SUMMARY_TREE_DEADLINE_FACTOR = 1.5;
 export const SUMMARY_TREE_DEADLINE_GRACE_MS = 50;
 export const SUMMARY_TREE_DEADLINE_CALIBRATED = false;
 
+/** Summary rows one search reads from the summaries table (all levels), before any re-check. */
+export const SUMMARY_TREE_SEARCH_HITS = 10;
+/** `guide`: the best summary hits whose chunk range is fetched. */
+export const SUMMARY_TREE_GUIDE_HITS = 5;
+/** `guide`: chunks taken from one summary hit's range. */
+export const SUMMARY_TREE_GUIDE_CHUNKS_PER_HIT = 3;
+/**
+ * `guide`: a summary hit covering more `chunk_index` positions than this guides nothing (an upper-level node spans
+ * whole chapters; fetching it would be a document scan). It is still returned by `include`.
+ */
+export const SUMMARY_TREE_GUIDE_MAX_RANGE = 48;
+/**
+ * `guide`: guided chunks take at most this share of the returned results, always the last positions. The chunk
+ * legs' own ranking keeps the rest (the protected prefix), so the tree never removes or demotes a top result.
+ */
+export const SUMMARY_TREE_GUIDE_RESULT_SHARE = 0.3;
+
+/**
+ * How many of `limit` results guided chunks may take (the positions after the protected prefix). At least one once
+ * there are two results to return, never the first position.
+ */
+export function summaryTreeGuideSlots(limit: number): number {
+  if (!Number.isFinite(limit) || limit < 2) return 0;
+  return Math.max(1, Math.floor(limit * SUMMARY_TREE_GUIDE_RESULT_SHARE));
+}
+
+/**
+ * A `building` state row is kept alive by its build (`updated_at` is touched at every committed window and at least
+ * every `SUMMARY_TREE_BUILD_HEARTBEAT_MS` while calls are in flight). One that has not been touched for this long was
+ * left by a worker that died: it no longer blocks another build or the backfill job, and the project state counts it
+ * as partial instead of building.
+ */
+export const SUMMARY_TREE_BUILD_STALE_MS = 10 * 60_000;
+export const SUMMARY_TREE_BUILD_HEARTBEAT_MS = 30_000;
+
 /** Normalized formats that never get a tree: tabular and structured data has no prose sections to summarize. */
 export const SUMMARY_TREE_SKIPPED_FORMATS: readonly string[] = ["office-excel", "structured-csv", "structured-json"];
 
@@ -231,8 +284,12 @@ export const summaryTreeConstantsSchema = z.object({
   keyVersion: z.number().int(),
   minGroupSize: z.number().int(),
   maxGroupSize: z.number().int(),
+  minFanIn: z.number().int(),
   maxFanIn: z.number().int(),
   minDocumentLeaves: z.number().int(),
+  /** Node cap of one document: `maxNodesPerLeaf` per leaf, at least `baseNodesPerDocument`, at most `maxNodesPerDocument`. */
+  baseNodesPerDocument: z.number().int(),
+  maxNodesPerLeaf: z.number(),
   maxNodesPerDocument: z.number().int(),
   maxLevels: z.number().int(),
   summaryTargetWords: z.number().int(),
@@ -241,6 +298,15 @@ export const summaryTreeConstantsSchema = z.object({
   deadlineFactor: z.number(),
   deadlineGraceMs: z.number(),
   deadlineCalibrated: z.boolean(),
+  /** Summary rows one search reads before any re-check. */
+  searchHits: z.number().int(),
+  /** `guide`: summary hits whose chunk range is fetched, chunks taken per hit, widest range that guides, and the share of results guided chunks may take. */
+  guideHits: z.number().int(),
+  guideChunksPerHit: z.number().int(),
+  guideMaxRange: z.number().int(),
+  guideResultShare: z.number(),
+  /** A `building` document whose build has not reported for this long counts as abandoned and may be taken over. */
+  buildStaleSeconds: z.number().int(),
   skippedFormats: z.array(z.string()),
 });
 export type SummaryTreeConstants = z.infer<typeof summaryTreeConstantsSchema>;
@@ -250,8 +316,11 @@ export const SUMMARY_TREE_CONSTANTS: SummaryTreeConstants = Object.freeze({
   keyVersion: SUMMARY_TREE_KEY_VERSION,
   minGroupSize: SUMMARY_TREE_MIN_GROUP_SIZE,
   maxGroupSize: SUMMARY_TREE_MAX_GROUP_SIZE,
+  minFanIn: SUMMARY_TREE_MIN_FAN_IN,
   maxFanIn: SUMMARY_TREE_MAX_FAN_IN,
   minDocumentLeaves: SUMMARY_TREE_MIN_DOCUMENT_LEAVES,
+  baseNodesPerDocument: SUMMARY_TREE_BASE_NODES_PER_DOCUMENT,
+  maxNodesPerLeaf: SUMMARY_TREE_MAX_NODES_PER_LEAF,
   maxNodesPerDocument: SUMMARY_TREE_MAX_NODES_PER_DOCUMENT,
   maxLevels: SUMMARY_TREE_MAX_LEVELS,
   summaryTargetWords: SUMMARY_TREE_SUMMARY_TARGET_WORDS,
@@ -260,6 +329,12 @@ export const SUMMARY_TREE_CONSTANTS: SummaryTreeConstants = Object.freeze({
   deadlineFactor: SUMMARY_TREE_DEADLINE_FACTOR,
   deadlineGraceMs: SUMMARY_TREE_DEADLINE_GRACE_MS,
   deadlineCalibrated: SUMMARY_TREE_DEADLINE_CALIBRATED,
+  searchHits: SUMMARY_TREE_SEARCH_HITS,
+  guideHits: SUMMARY_TREE_GUIDE_HITS,
+  guideChunksPerHit: SUMMARY_TREE_GUIDE_CHUNKS_PER_HIT,
+  guideMaxRange: SUMMARY_TREE_GUIDE_MAX_RANGE,
+  guideResultShare: SUMMARY_TREE_GUIDE_RESULT_SHARE,
+  buildStaleSeconds: SUMMARY_TREE_BUILD_STALE_MS / 1_000,
   skippedFormats: [...SUMMARY_TREE_SKIPPED_FORMATS],
 });
 
@@ -367,33 +442,7 @@ export const SUMMARY_ROW_COLUMNS = [
   "id", "documentId", "runId", "level", "chunkStart", "chunkEnd", "pageStart", "pageEnd", "headingPath", "text", "vector",
 ] as const satisfies ReadonlyArray<keyof SummaryRow>;
 
-// --- Retrieval leg ----------------------------------------------------------------------------------------------------
-
-/** Summary rows one search reads from the summaries table (all levels), before any re-check. */
-export const SUMMARY_TREE_SEARCH_HITS = 10;
-/** `guide`: the best summary hits whose chunk range is fetched. */
-export const SUMMARY_TREE_GUIDE_HITS = 5;
-/** `guide`: chunks taken from one summary hit's range. */
-export const SUMMARY_TREE_GUIDE_CHUNKS_PER_HIT = 3;
-/**
- * `guide`: a summary hit covering more `chunk_index` positions than this guides nothing (an upper-level node spans
- * whole chapters; fetching it would be a document scan). It is still returned by `include`.
- */
-export const SUMMARY_TREE_GUIDE_MAX_RANGE = 48;
-/**
- * `guide`: guided chunks take at most this share of the returned results, always the last positions. The chunk
- * legs' own ranking keeps the rest (the protected prefix), so the tree never removes or demotes a top result.
- */
-export const SUMMARY_TREE_GUIDE_RESULT_SHARE = 0.3;
-
-/**
- * How many of `limit` results guided chunks may take (the positions after the protected prefix). At least one once
- * there are two results to return, never the first position.
- */
-export function summaryTreeGuideSlots(limit: number): number {
-  if (!Number.isFinite(limit) || limit < 2) return 0;
-  return Math.max(1, Math.floor(limit * SUMMARY_TREE_GUIDE_RESULT_SHARE));
-}
+// --- Retrieval leg: response -----------------------------------------------------------------------------------------
 
 /**
  * Why the tree leg contributed nothing.

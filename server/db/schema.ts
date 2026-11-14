@@ -3816,6 +3816,8 @@ export const documentSummaryTrees = pgTable(
     levelCount: integer("level_count").default(0).notNull(),
     rootNodeId: text("root_node_id"),
     error: text(),
+    /** Who holds a `building` row (migration 0165). */
+    buildOwner: text("build_owner"),
     builtAt: timestamp("built_at", { withTimezone: true, mode: "string" }),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
@@ -3873,6 +3875,48 @@ export const documentSummaryTreeNodes = pgTable(
       foreignColumns: [documents.id],
       name: "document_summary_tree_nodes_document_id_fkey",
     }).onDelete("cascade"),
+  ],
+);
+
+/** Summary tree backfill jobs (migration 0165; worker/src/summary-tree/backfill-job.ts). Counters and settings only. */
+export const summaryTreeJobs = pgTable(
+  "summary_tree_jobs",
+  {
+    id: text().primaryKey().notNull(),
+    orgId: text("org_id").notNull(),
+    projectId: text("project_id").notNull(),
+    userId: text("user_id").notNull(),
+    status: text().default("queued").notNull(),
+    blockedReason: text("blocked_reason"),
+    resumeAfter: timestamp("resume_after", { withTimezone: true, mode: "string" }),
+    estimate: jsonb().default({}).notNull(),
+    maxCostCents: numeric("max_cost_cents", { precision: 12, scale: 4, mode: "number" }).notNull(),
+    documentsTotal: integer("documents_total").default(0).notNull(),
+    documentsReady: integer("documents_ready").default(0).notNull(),
+    documentsSkipped: integer("documents_skipped").default(0).notNull(),
+    documentsPartial: integer("documents_partial").default(0).notNull(),
+    nodesBuilt: integer("nodes_built").default(0).notNull(),
+    modelCalls: integer("model_calls").default(0).notNull(),
+    inputTokens: bigint("input_tokens", { mode: "number" }).default(0).notNull(),
+    outputTokens: bigint("output_tokens", { mode: "number" }).default(0).notNull(),
+    costCents: numeric("cost_cents", { precision: 12, scale: 4, mode: "number" }).default(0).notNull(),
+    cursor: text(),
+    error: text(),
+    leaseOwner: text("lease_owner"),
+    leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true, mode: "string" }),
+    cancelRequestedAt: timestamp("cancel_requested_at", { withTimezone: true, mode: "string" }),
+    createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
+    startedAt: timestamp("started_at", { withTimezone: true, mode: "string" }),
+    finishedAt: timestamp("finished_at", { withTimezone: true, mode: "string" }),
+    updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex("summary_tree_jobs_one_active_per_project").using("btree", table.projectId.asc().nullsLast().op("text_ops")).where(sql`status IN ('queued', 'running', 'blocked')`),
+    index("summary_tree_jobs_claim_idx").using("btree", table.status.asc().nullsLast().op("text_ops"), table.createdAt.asc().nullsLast().op("timestamptz_ops")),
+    index("summary_tree_jobs_project_idx").using("btree", table.projectId.asc().nullsLast().op("text_ops"), table.createdAt.asc().nullsLast().op("timestamptz_ops")),
+    foreignKey({ columns: [table.orgId], foreignColumns: [organizations.id], name: "summary_tree_jobs_org_id_fkey" }).onDelete("cascade"),
+    foreignKey({ columns: [table.projectId], foreignColumns: [projects.id], name: "summary_tree_jobs_project_id_fkey" }).onDelete("cascade"),
+    foreignKey({ columns: [table.userId], foreignColumns: [user.id], name: "summary_tree_jobs_user_id_fkey" }).onDelete("cascade"),
   ],
 );
 

@@ -110,6 +110,9 @@ export interface SummaryTreeOverrides {
   tableChanged?: SummaryTreeBuildDeps["tableChanged"];
   lanceRoot?: string;
   tmpDirectory?: string;
+  /** Replace the staleness age and heartbeat interval of a `building` row. */
+  buildStaleMs?: number;
+  heartbeatMs?: number;
   limits?: Partial<SummaryTreeLimits>;
   env?: Env;
   concurrency?: number;
@@ -177,6 +180,12 @@ export interface SummaryTreeDocumentRun {
   spendRefusal?: () => Promise<string | null>;
   /** A named reason to stop before the next model call (the caller's cost cap), or null. */
   stopReason?: () => string | null;
+  /** Called once for every model call `stopReason` let through, when it has settled. */
+  onCallSettled?: () => void;
+  /** Who builds (`job:<jobId>`); default `run:<runId>`. */
+  owner?: string;
+  /** False: leave a document another builder is working on (`blocked`, `build-in-progress`). Default true. */
+  takeOverLiveBuild?: boolean;
   /** Shares model-call slots with other documents built by the same caller. */
   callLimiter?: ConcurrencyLimiter;
   signal?: AbortSignal;
@@ -317,6 +326,7 @@ export async function runSummaryTreeForDocument(args: SummaryTreeDocumentRun): P
     buildActive,
     spendRefusal,
     stopReason: args.stopReason,
+    callSettled: args.onCallSettled,
     writeRows: overrides.writeRows ?? ((write) => writeSummaryRows(write)),
     deleteRowsById: overrides.deleteRowsById ?? deleteSummaryRowsById,
     deleteDocumentRows: overrides.deleteDocumentRows ?? deleteDocumentSummaryRows,
@@ -339,6 +349,10 @@ export async function runSummaryTreeForDocument(args: SummaryTreeDocumentRun): P
     },
     limits,
     concurrency: overrides.concurrency ?? args.callLimiter?.limit ?? summaryTreeConcurrency(env),
+    owner: args.owner,
+    takeOverLiveBuild: args.takeOverLiveBuild,
+    buildStaleMs: overrides.buildStaleMs,
+    heartbeatMs: overrides.heartbeatMs,
     signal: args.signal,
   });
 }

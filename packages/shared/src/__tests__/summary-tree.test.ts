@@ -21,6 +21,7 @@ import {
   updateProjectSearchRetrievalDefaultsSchema,
 } from "../project.js";
 import { projectStateSchema } from "../project-state.js";
+import * as summaryTree from "../summary-tree.js";
 import {
   DEFAULT_SUMMARY_TREE_SEARCH_MODE,
   defaultSummaryTreePipelineConfig,
@@ -209,6 +210,39 @@ describe("summary tree constants and state", () => {
     expect(summaryTreeDeadlineMs(100)).toBe(Math.max(100 * SUMMARY_TREE_CONSTANTS.deadlineFactor, 100 + SUMMARY_TREE_CONSTANTS.deadlineGraceMs));
     expect(summaryTreeDeadlineMs(Number.NaN)).toBe(SUMMARY_TREE_CONSTANTS.deadlineGraceMs);
     expect(projectStateSchema.shape.summaryTree).toBeDefined();
+  });
+
+  it("reports the retrieval constants, the minimum fan-in and the node cap in the state block", () => {
+    expect(SUMMARY_TREE_CONSTANTS).toMatchObject({
+      minFanIn: summaryTree.SUMMARY_TREE_MIN_FAN_IN,
+      searchHits: summaryTree.SUMMARY_TREE_SEARCH_HITS,
+      guideHits: summaryTree.SUMMARY_TREE_GUIDE_HITS,
+      guideChunksPerHit: summaryTree.SUMMARY_TREE_GUIDE_CHUNKS_PER_HIT,
+      guideMaxRange: summaryTree.SUMMARY_TREE_GUIDE_MAX_RANGE,
+      guideResultShare: summaryTree.SUMMARY_TREE_GUIDE_RESULT_SHARE,
+      baseNodesPerDocument: summaryTree.SUMMARY_TREE_BASE_NODES_PER_DOCUMENT,
+      maxNodesPerLeaf: summaryTree.SUMMARY_TREE_MAX_NODES_PER_LEAF,
+      maxNodesPerDocument: summaryTree.SUMMARY_TREE_MAX_NODES_PER_DOCUMENT,
+      buildStaleSeconds: summaryTree.SUMMARY_TREE_BUILD_STALE_MS / 1_000,
+    });
+    // A build reports several times within the age at which it counts as abandoned.
+    expect(summaryTree.SUMMARY_TREE_BUILD_HEARTBEAT_MS * 4).toBeLessThanOrEqual(summaryTree.SUMMARY_TREE_BUILD_STALE_MS);
+  });
+
+  it("scales the node cap with the document's leaves, between a floor and a hard ceiling", () => {
+    const { summaryTreeNodeCap, SUMMARY_TREE_BASE_NODES_PER_DOCUMENT: base, SUMMARY_TREE_MAX_NODES_PER_DOCUMENT: ceiling } = summaryTree;
+    expect(summaryTreeNodeCap(0)).toBe(base);
+    expect(summaryTreeNodeCap(Number.NaN)).toBe(base);
+    expect(summaryTreeNodeCap(2_000)).toBe(base);
+    expect(summaryTreeNodeCap(30_000)).toBe(15_000);
+    expect(summaryTreeNodeCap(10_000_000)).toBe(ceiling);
+    // A 20,000-page document: about three leaves a page, cut into the smallest groups the grouping makes, with every
+    // parent at the minimum fan-in, still fits its cap, and the cap fits the level limit.
+    const leaves = 20_000 * 3;
+    const groups = Math.ceil(leaves / SUMMARY_TREE_MIN_GROUP_SIZE);
+    const worstCaseNodes = Math.ceil(groups * summaryTree.SUMMARY_TREE_MIN_FAN_IN / (summaryTree.SUMMARY_TREE_MIN_FAN_IN - 1));
+    expect(worstCaseNodes).toBeLessThanOrEqual(summaryTreeNodeCap(leaves));
+    expect(ceiling).toBeLessThanOrEqual(summaryTree.SUMMARY_TREE_MAX_FAN_IN * summaryTree.SUMMARY_TREE_MIN_FAN_IN ** (summaryTree.SUMMARY_TREE_MAX_LEVELS - 2) * 4 / 3);
   });
 
   it("derives the project build status", () => {

@@ -1,4 +1,5 @@
 import {
+  SUMMARY_TREE_BUILD_STALE_MS,
   SUMMARY_TREE_KEY_VERSION,
   type SummaryTreeDocumentStatus,
   type SummaryTreeNodeStatus,
@@ -43,18 +44,27 @@ export interface SummaryTreeStateRow {
   treeKeyVersion: number;
   embeddingModel: string | null;
   dimension: number | null;
+  /** Who holds a `building` row (`run:<runId>`, `job:<jobId>`); null otherwise. */
+  buildOwner: string | null;
+  /**
+   * A `building` row whose build still reports: touched within `SUMMARY_TREE_BUILD_STALE_MS` (the database's clock).
+   * False for every other status and for a row a dead worker left behind.
+   */
+  buildLive: boolean;
 }
 
-export async function loadSummaryTreeState(sql: Client, scope: SummaryTreeScope, documentId: string): Promise<SummaryTreeStateRow | null> {
+export async function loadSummaryTreeState(sql: Client, scope: SummaryTreeScope, documentId: string, staleMs: number = SUMMARY_TREE_BUILD_STALE_MS): Promise<SummaryTreeStateRow | null> {
   assertScope(scope);
-  const [row] = await sql<{ status: SummaryTreeDocumentStatus; run_id: string | null; config_hash: string | null; tree_key_version: number; embedding_model: string | null; dimension: number | null }[]>`
-    select status, run_id, config_hash, tree_key_version, embedding_model, dimension
+  const [row] = await sql<{ status: SummaryTreeDocumentStatus; run_id: string | null; config_hash: string | null; tree_key_version: number; embedding_model: string | null; dimension: number | null; build_owner: string | null; build_live: boolean }[]>`
+    select status, run_id, config_hash, tree_key_version, embedding_model, dimension, build_owner,
+      (status = 'building' and updated_at > now() - ${`${Math.max(0, staleMs)} milliseconds`}::interval) as build_live
     from document_summary_trees
     where document_id = ${documentId} and org_id = ${scope.orgId} and project_id = ${scope.projectId}
   `;
   return row ? {
     status: row.status, runId: row.run_id, configHash: row.config_hash, treeKeyVersion: Number(row.tree_key_version),
     embeddingModel: row.embedding_model, dimension: row.dimension === null ? null : Number(row.dimension),
+    buildOwner: row.build_owner, buildLive: row.build_live === true,
   } : null;
 }
 
@@ -72,24 +82,34 @@ export interface SummaryTreeStateWrite {
   rootNodeId?: string | null;
   /** A short named reason (never document text or a provider message). */
   error?: string | null;
+  /** The builder taking the row (`building` only); every other status clears the owner. */
+  buildOwner?: string | null;
+  /**
+   * When set, an existing row is replaced only while this builder still holds it: a build that another one took
+   * over cannot write its outcome over the newer build's state.
+   */
+  expectOwner?: string;
 }
 
 /**
  * Inserts or replaces the document's tree state. Refuses unless the document is a live document of exactly this
  * organization and project (not purged, superseded or archived), and unless an existing state row is this
- * tenant's. `built_at` is set only by a `ready` write.
+ * tenant's (and, with `expectOwner`, still held by that builder). `built_at` is set only by a `ready` write, so a
+ * rebuild that ends `ready` again always carries a later `built_at`. Every write is also the build's heartbeat
+ * (`updated_at`).
  */
 export async function writeSummaryTreeState(sql: Client, write: SummaryTreeStateWrite): Promise<void> {
   assertScope(write.scope);
   const rows = await sql<{ document_id: string }[]>`
     insert into document_summary_trees (
       document_id, org_id, project_id, run_id, status, skip_reason, tree_key_version, config_hash,
-      embedding_model, dimension, leaf_count, node_count, level_count, root_node_id, error, built_at, updated_at
+      embedding_model, dimension, leaf_count, node_count, level_count, root_node_id, error, build_owner, built_at, updated_at
     )
     select d.id, d.org_id, d.project_id, ${write.runId}, ${write.status}, ${write.skipReason ?? null}, ${SUMMARY_TREE_KEY_VERSION},
       ${write.configHash ?? null}, ${write.space?.model ?? null}, ${write.space?.dimensions ?? null}::int,
       ${write.leafCount ?? 0}::int, ${write.nodeCount ?? 0}::int, ${write.levelCount ?? 0}::int, ${write.rootNodeId ?? null},
-      ${write.error ?? null}, case when ${write.status} = 'ready' then now() else null end, now()
+      ${write.error ?? null}, ${write.status === "building" ? write.buildOwner ?? null : null},
+      case when ${write.status} = 'ready' then now() else null end, now()
     from documents d
     where d.id = ${write.documentId} and d.org_id = ${write.scope.orgId} and d.project_id = ${write.scope.projectId}
       and d.purged_at is null and d.superseded_at is null and d.archived_at is null
@@ -98,11 +118,32 @@ export async function writeSummaryTreeState(sql: Client, write: SummaryTreeState
       tree_key_version = excluded.tree_key_version, config_hash = excluded.config_hash,
       embedding_model = excluded.embedding_model, dimension = excluded.dimension,
       leaf_count = excluded.leaf_count, node_count = excluded.node_count, level_count = excluded.level_count,
-      root_node_id = excluded.root_node_id, error = excluded.error, built_at = excluded.built_at, updated_at = now()
+      root_node_id = excluded.root_node_id, error = excluded.error, build_owner = excluded.build_owner,
+      built_at = excluded.built_at, updated_at = now()
     where document_summary_trees.org_id = excluded.org_id and document_summary_trees.project_id = excluded.project_id
+      and (${write.expectOwner ?? null}::text is null or document_summary_trees.build_owner is not distinct from ${write.expectOwner ?? null}::text)
     returning document_id
   `;
-  if (rows.length !== 1) throw new SummaryTreeStateRefused("The document is not a live document of this project");
+  if (rows.length !== 1) {
+    throw new SummaryTreeStateRefused(write.expectOwner
+      ? "The document is not a live document of this project, or another build took its tree over"
+      : "The document is not a live document of this project");
+  }
+}
+
+/**
+ * The heartbeat of a build: touches the `building` row this builder holds. False when the row is gone, is no longer
+ * `building`, or another builder took it: the caller stops without writing an outcome.
+ */
+export async function touchSummaryTreeBuild(sql: Client, scope: SummaryTreeScope, documentId: string, owner: string): Promise<boolean> {
+  assertScope(scope);
+  const rows = await sql<{ document_id: string }[]>`
+    update document_summary_trees set updated_at = now()
+    where document_id = ${documentId} and org_id = ${scope.orgId} and project_id = ${scope.projectId}
+      and status = 'building' and build_owner = ${owner}
+    returning document_id
+  `;
+  return rows.length === 1;
 }
 
 export interface SummaryTreeNodeRecord {

@@ -29,7 +29,10 @@ export interface SummaryTreeLimits {
   maxFanIn: number;
   /** Levels above the leaves, root included. */
   maxLevels: number;
-  /** Nodes one document may have; the caller refuses a document over it before any model call. */
+  /**
+   * Hard ceiling of nodes one document may have. The cap a build applies scales with the document's leaves
+   * (`summaryTreeNodeCap`, at most this); the caller refuses a document over it before any model call.
+   */
   maxNodes: number;
   /** Documents with fewer summarizable leaves are skipped. */
   minDocumentLeaves: number;

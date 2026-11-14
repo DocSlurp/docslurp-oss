@@ -14,7 +14,7 @@ import type { VectorBackendRecord } from "./embedding-runtime.js";
 import { connectLanceDb } from "./lancedb-connection.js";
 import type { VectorScope } from "./lancedb-location.js";
 import { lanceDbMaintenanceSettings, requireLanceDbMaintenance, scheduleLanceDbMaintenance } from "./lancedb-maintenance.js";
-import { deleteLanceDbRecords, writeLanceDbRecords, type LanceWriteRetryOptions } from "./lancedb-writer.js";
+import { deleteLanceDbRecords, ensureLanceScalarIndex, writeLanceDbRecords, type LanceWriteRetryOptions } from "./lancedb-writer.js";
 
 /**
  * Write and delete primitives for the summary tree's LanceDB table (`summaries`, @docslurp/shared summary-tree.ts).
@@ -107,7 +107,36 @@ export async function writeSummaryRows(args: WriteSummaryRowsArgs): Promise<Vect
   if (rows.length === 0) return location;
   // The writer is typed for chunk records; it upserts any rows keyed by "id" into the named table.
   await writeLanceDbRecords(location.uri, location.table, rows as unknown as VectorBackendRecord[], args.signal, args.retry);
+  await ensureSummariesDocumentIndex(location, args.retry);
   return location;
+}
+
+/** Tables this process has already seen with their `documentId` index: asked once per table, not once per write. */
+const indexedSummariesTables = new Set<string>();
+
+/**
+ * The summaries table is only ever read and purged by `documentId` (`documentId IN (...)` is the tenant prefilter of
+ * every search, summary-tree.ts in the server), so it carries a BTREE scalar index on that column from its first
+ * write: created with the table, and added to a table an earlier release created without it the first time this
+ * process writes to it. Maintenance ensures the same index (lancedb-maintenance.ts), which covers a table that is
+ * never written again. The index is an optimization: a failure to build it is logged and retried on the next write,
+ * and never fails the write that committed the rows.
+ */
+export async function ensureSummariesDocumentIndex(location: Pick<VectorLocation, "uri" | "table">, retry?: LanceWriteRetryOptions): Promise<boolean> {
+  const key = `${location.uri}\u0000${location.table}`;
+  if (indexedSummariesTables.has(key)) return false;
+  try {
+    const created = await ensureLanceScalarIndex(location.uri, location.table, "documentId", retry);
+    indexedSummariesTables.add(key);
+    return created;
+  } catch (error) {
+    console.warn(`[summary-tree] documentId index not built table=${location.table} error=${error instanceof Error ? error.name : "error"}`);
+    return false;
+  }
+}
+
+export function resetSummariesIndexMemoForTests(): void {
+  indexedSummariesTables.clear();
 }
 
 /**

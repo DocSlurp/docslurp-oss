@@ -1,4 +1,4 @@
-import type { SummaryRow, SummaryTreeSkipReason } from "@docslurp/shared";
+import { SUMMARY_TREE_BUILD_HEARTBEAT_MS, SUMMARY_TREE_BUILD_STALE_MS, summaryTreeNodeCap, type SummaryRow, type SummaryTreeSkipReason } from "@docslurp/shared";
 import type { Sql } from "postgres";
 
 import {
@@ -27,8 +27,10 @@ import {
   staleSummaryTreeNodeIds,
   summaryTreeCoverageProblems,
   SummaryTreeStateRefused,
+  touchSummaryTreeBuild,
   upsertSummaryTreeNodes,
-  writeSummaryTreeState,
+  writeSummaryTreeState as writeSummaryTreeStateRow,
+  type SummaryTreeStateWrite,
   type StoredSummaryTreeNode,
   type SummaryTreeNodeRecord,
   type SummaryTreeScope,
@@ -60,7 +62,12 @@ import {
  *   model calls: one embedding request and one table commit for the window instead of one per summary. A kill
  *   between a part and its window costs an embedding call on resume, never a model call.
  * - The state row is `building` from before the first write until the last check passes. Search serves a
- *   document's nodes only while its row is `ready`, so nothing of an unfinished tree is served.
+ *   document's nodes only while its row is `ready`, so nothing of an unfinished tree is served. A rebuild leaves
+ *   `ready` before it removes or replaces a single row of the earlier tree, and a document that stops qualifying
+ *   leaves `ready` before its rows are wiped.
+ * - A `building` row names its builder and is kept alive by it (`touchSummaryTreeBuild`). A build stops, without
+ *   writing an outcome, as soon as another build has taken the row. A row whose builder stopped reporting for
+ *   `SUMMARY_TREE_BUILD_STALE_MS` was left by a dead worker and blocks nothing.
  *
  * Nothing is skipped silently: every outcome is a status with a named reason and counts.
  */
@@ -159,6 +166,8 @@ export interface SummaryTreeBuildDeps {
   spendRefusal(): Promise<string | null>;
   /** A named reason to stop before the next model call (a cost cap), or null. */
   stopReason?(): string | null;
+  /** Called once for every model call that `stopReason` let through, when it has settled (returned or thrown). */
+  callSettled?(): void;
   writeRows: SummaryTreeRowWriter;
   /** Strict delete of summary rows by id (nodes a rebuild replaced). */
   deleteRowsById(args: { scope: SummaryTreeScope; space: { model: string; dimensions: number }; ids: string[]; root?: string }): Promise<void>;
@@ -193,6 +202,18 @@ export interface SummaryTreeBuildInput {
   limits?: Partial<SummaryTreeLimits>;
   /** Model calls in flight at once, and the size of one commit window. */
   concurrency?: number;
+  /** Who builds: stamped on the `building` row. Default `run:<runId>`. */
+  owner?: string;
+  /**
+   * What to do when another builder holds the document's `building` row and still reports. True (the default, a
+   * run's own stage: its retry after a crash must not wait): take the row over; the other build stops at its next
+   * heartbeat. False (the backfill job): leave the document alone and return `blocked` (`build-in-progress`).
+   * A row whose builder stopped reporting is always taken over.
+   */
+  takeOverLiveBuild?: boolean;
+  /** Replaces `SUMMARY_TREE_BUILD_STALE_MS` and `SUMMARY_TREE_BUILD_HEARTBEAT_MS` (tests). */
+  buildStaleMs?: number;
+  heartbeatMs?: number;
   signal?: AbortSignal;
 }
 
@@ -201,7 +222,10 @@ export type SummaryTreeBuildStatus =
   | "off"
   /** The document gets no tree (`skipReason`). */
   | "skipped"
-  /** The organization may not spend, or the model route is unavailable: nothing was called. State row `pending`. */
+  /**
+   * The organization may not spend, or the model route is unavailable: nothing was called, state row `pending`. Or
+   * another build holds the document (`build-in-progress`): nothing was read or written.
+   */
   | "blocked"
   /** The document is not a live document of this project: nothing was written. */
   | "refused"
@@ -326,19 +350,38 @@ export async function buildDocumentSummaryTree(deps: SummaryTreeBuildDeps, input
   const artifactRoot = summaryTreeArtifactRoot(input.runRoot, documentId);
   const artifactUri = deps.artifacts.uri(summaryTreePackKey(artifactRoot));
   let space = { model: input.space.model, dimensions: input.space.dimensions };
+  const owner = input.owner ?? `run:${runId}`;
 
   let prior: Awaited<ReturnType<typeof loadSummaryTreeState>>;
   try {
-    prior = await loadSummaryTreeState(deps.sql, scope, documentId);
+    prior = await loadSummaryTreeState(deps.sql, scope, documentId, input.buildStaleMs ?? SUMMARY_TREE_BUILD_STALE_MS);
   } catch (error) {
     if (error instanceof SummaryTreeStateRefused) return finish("refused", { reason: "tenant-scope" });
     throw error;
   }
+  // Another builder holds the document and still reports: a caller that must not take it over leaves it untouched.
+  if (prior?.buildLive && prior.buildOwner !== owner && input.takeOverLiveBuild === false) {
+    return finish("blocked", { reason: "build-in-progress" });
+  }
   const priorSpace = prior?.embeddingModel && prior.dimension ? { model: prior.embeddingModel, dimensions: prior.dimension } : null;
 
-  /** Removes every summary row and registry row an earlier build left for this document. */
+  /** Whether this build wrote the `building` row: from then on its outcome is written only while it still holds it. */
+  let holding = false;
+  const writeSummaryTreeState = async (_sql: Client, write: SummaryTreeStateWrite): Promise<void> => {
+    await writeSummaryTreeStateRow(deps.sql, { ...write, buildOwner: owner, ...(holding ? { expectOwner: owner } : {}) });
+    holding = write.status === "building";
+  };
+
+  /**
+   * Removes every summary row and registry row an earlier build left for this document. A tree that is being
+   * served leaves `ready` first (keeping the earlier build's settings and embedding space on the row, so a build
+   * that dies here is still found by the next one): search never reads a tree that is being taken apart.
+   */
   const wipeEarlierTree = async () => {
     if (!prior) return;
+    if (prior.status === "ready") {
+      await writeSummaryTreeState(deps.sql, { scope, documentId, runId: prior.runId ?? runId, status: "building", configHash: prior.configHash, space: priorSpace });
+    }
     if (priorSpace) await deps.deleteDocumentRows({ scope, space: priorSpace, documentIds: [documentId], root: deps.lanceRoot });
     await deleteSummaryTreeNodes(deps.sql, scope, documentId, "all");
   };
@@ -368,6 +411,9 @@ export async function buildDocumentSummaryTree(deps: SummaryTreeBuildDeps, input
   const bytes = await deps.openEmbeddingArtifact(signal);
   if (!bytes) return await skip("no-embedding-artifact", "no-leaves");
   const texts: LeafTextStore = await createLeafTextSpool({ directory: deps.tmpDirectory });
+  /** Set when the heartbeat finds the `building` row gone or held by another builder. */
+  let takenOver = false;
+  let heartbeat: ReturnType<typeof setInterval> | undefined;
   try {
     let index: SummaryTreeLeafIndex;
     try {
@@ -397,7 +443,9 @@ export async function buildDocumentSummaryTree(deps: SummaryTreeBuildDeps, input
     stats.nodes = builder.nodes.length;
     // Fewest nodes any tree over these groups can have. Over the cap: refuse before a single call is paid for.
     const fewestNodes = builder.nodes.length + (builder.nodes.length > 1 ? Math.ceil((builder.nodes.length - 1) / (limits.maxFanIn - 1)) : 0);
-    if (fewestNodes > limits.maxNodes) {
+    // The cap scales with the document (limits scale with page count); an explicit limit is absolute.
+    const nodeCap = input.limits?.maxNodes ?? Math.min(limits.maxNodes, summaryTreeNodeCap(index.leaves.length));
+    if (fewestNodes > nodeCap) {
       return await endWithoutCalls("partial", "node-cap", index.leaves.length);
     }
 
@@ -417,6 +465,14 @@ export async function buildDocumentSummaryTree(deps: SummaryTreeBuildDeps, input
       if (error instanceof SummaryTreeStateRefused) return finish("refused", { reason: "document-not-live" });
       throw error;
     }
+
+    // The heartbeat: keeps the row alive while calls are in flight and notices a takeover between windows.
+    const beat = async () => {
+      if (takenOver) return;
+      if (!(await touchSummaryTreeBuild(deps.sql, scope, documentId, owner))) takenOver = true;
+    };
+    heartbeat = setInterval(() => { void beat().catch(() => undefined); }, Math.max(1, input.heartbeatMs ?? SUMMARY_TREE_BUILD_HEARTBEAT_MS));
+    heartbeat.unref?.();
 
     const registry: Map<string, StoredSummaryTreeNode> = sameBuild ? await loadSummaryTreeNodes(deps.sql, scope, documentId) : new Map();
     const own = await readSummaryTreeArtifact(deps.artifacts, artifactRoot);
@@ -497,6 +553,7 @@ export async function buildDocumentSummaryTree(deps: SummaryTreeBuildDeps, input
 
     const beforeCall = () => {
       signal?.throwIfAborted();
+      if (takenOver) throw new SummaryTreeStopped("build-taken-over");
       if (!deps.buildActive()) throw new SummaryTreeStopped("build-switch-off");
       const reason = deps.stopReason?.() ?? null;
       if (reason) throw new SummaryTreeStopped(reason);
@@ -534,7 +591,12 @@ export async function buildDocumentSummaryTree(deps: SummaryTreeBuildDeps, input
             beforeCall();
             stats.modelCalls++;
             if (attempt > 1) stats.truncationRetries++;
-            const response = await deps.summarize({ system: prompt.system, prompt: prompt.prompt, maxOutputTokens, attempt, nodeId: nodeIds[nodeIndex]!, level: node.level, signal });
+            let response: SummaryCallResult;
+            try {
+              response = await deps.summarize({ system: prompt.system, prompt: prompt.prompt, maxOutputTokens, attempt, nodeId: nodeIds[nodeIndex]!, level: node.level, signal });
+            } finally {
+              deps.callSettled?.();
+            }
             // Billed whether or not the answer is kept.
             deps.recordUsage(response.usage, { nodeId: nodeIds[nodeIndex]!, level: node.level, attempt, finishReason: response.finishReason });
             stats.inputTokens += response.usage.inputTokens;
@@ -591,6 +653,10 @@ export async function buildDocumentSummaryTree(deps: SummaryTreeBuildDeps, input
           if (item.origin === "model") calls++;
         }
         signal?.throwIfAborted();
+        if (takenOver) {
+          stopped = "build-taken-over";
+          return;
+        }
         const copied = window.filter((item) => item.origin === "predecessor");
         if (copied.length > 0) {
           // Copied into this version's own artifact: nothing later reads the predecessor's.
@@ -623,6 +689,7 @@ export async function buildDocumentSummaryTree(deps: SummaryTreeBuildDeps, input
           await upsertSummaryTreeNodes(deps.sql, { scope, documentId, runId, rows: failedNodes.map((nodeIndex) => nodeRecord(nodeIndex, "failed")) });
         }
         await deps.flushUsage?.();
+        await beat();
         deps.noteProgress?.("summary-tree:commit");
         const rejected = settled.find((outcome): outcome is PromiseRejectedResult => outcome.status === "rejected");
         if (rejected) {
@@ -655,7 +722,7 @@ export async function buildDocumentSummaryTree(deps: SummaryTreeBuildDeps, input
       // Vectors are kept only for nodes that still wait for a parent.
       for (const nodeIndex of [...vectors.keys()]) if (builder.nodes[nodeIndex]!.parent !== null) vectors.delete(nodeIndex);
       stats.nodes = builder.nodes.length;
-      if (builder.nodes.length > limits.maxNodes) {
+      if (builder.nodes.length > nodeCap) {
         partialReason = "node-cap";
         break;
       }
@@ -664,6 +731,11 @@ export async function buildDocumentSummaryTree(deps: SummaryTreeBuildDeps, input
     stats.levels = builder.nodes.reduce((top, node) => Math.max(top, node.level), 0);
 
     const writePartial = async (reason: string): Promise<SummaryTreeBuildResult> => {
+      // Another build holds the row now: its state is not this build's to write.
+      if (takenOver) {
+        await deps.flushUsage?.();
+        return finish("partial", { reason: "stopped:build-taken-over", artifactUri });
+      }
       await writeSummaryTreeState(deps.sql, {
         scope, documentId, runId, status: "partial", configHash: contextKey, space, error: reason,
         leafCount: index.leaves.length, nodeCount: [...registry.values()].filter((node) => node.status === "ready").length, levelCount: stats.levels,
@@ -727,7 +799,18 @@ export async function buildDocumentSummaryTree(deps: SummaryTreeBuildDeps, input
         eligibility: { sameOrgProjectAndCanonicalChain: true, sourceNotPurged: true, sourceNotPiiBlockedOrRedacted: true },
       };
     }
+  } catch (error) {
+    // The document left the project (deleted, superseded, archived) or another build took the row while this one
+    // ran: what was paid for is recorded, nothing more is written, and the caller is told instead of failed.
+    // `SummaryRowsRefused` is the row writer's refusal (stages/lancedb-summaries.ts), matched by name: this module
+    // takes its writer as a dependency.
+    if (error instanceof SummaryTreeStateRefused || (error instanceof Error && error.name === "SummaryRowsRefused")) {
+      await deps.flushUsage?.();
+      return finish("refused", { reason: takenOver ? "build-taken-over" : "document-not-live" });
+    }
+    throw error;
   } finally {
+    if (heartbeat) clearInterval(heartbeat);
     await texts.dispose();
   }
 
