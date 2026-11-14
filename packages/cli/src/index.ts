@@ -1249,7 +1249,7 @@ function printSearch(data: CliSearchResponse, flags: Record<string, string | boo
     printSummaries(data);
     return;
   }
-  if (!data.results.length) { console.log(data.noMatch ? "No relevant match found. Lower --min-score (0 disables the floor) to see weaker passages." : "No results found."); return; }
+  if (!data.results.length) { console.log(data.noMatch ? "No relevant match found. Lower --min-score (0 disables the floor) to see weaker passages." : "No results found."); printSummaries(data); return; }
   for (const [index, hit] of data.results.entries()) {
     const page = hit.citation.pageNumbers?.length ? hit.citation.pageNumbers.join(", ") : hit.citation.pageNumber ?? "-";
     console.log(`${String(index + 1).padStart(3)}. [${hit.score.toFixed(4)}] ${hit.citation.filename} (p.${page})`);

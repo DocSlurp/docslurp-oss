@@ -73,6 +73,34 @@ test("search --min-score validates its value instead of silently disabling the f
   }
 });
 
+test("search --summary-tree sends the mode and prints summaries apart from passages", async () => {
+  const body = {
+    results: [{ score: 1, text: "A real passage about expansion.", citation: { documentId: "d1", filename: "report.pdf", pageNumber: 4 } }],
+    summaryTree: { requested: "include", applied: "include", ms: 12 },
+    summaries: [{ kind: "summary", filename: "report.pdf", level: 1, summary: "The section covers record growth.", pageStart: 3, pageEnd: 6 }],
+  };
+  const ok = await invoke(["search", "question", "--summary-tree", "include"], () => ({ body }), { project: "project" });
+  assert.equal(ok.code, 0, ok.stderr);
+  assert.equal(new URL(ok.requests[0].url, "http://localhost").searchParams.get("summaryTree"), "include");
+  assert.match(ok.stdout, /A real passage about expansion/);
+  // The summary is marked as model-written and printed after the passages, never as one of them.
+  assert.match(ok.stdout, /Section summaries \(model-written, not quotes\):\n  \[summary\] report\.pdf \(pp\.3-6\)\n     The section covers record growth\./);
+  assert.ok(ok.stdout.indexOf("A real passage") < ok.stdout.indexOf("Section summaries"));
+
+  const skipped = await invoke(["search", "question", "--summary-tree", "guide"], () => ({ body: { results: [], summaryTree: { requested: "guide", applied: "off", skipped: "not-ready", ms: 0 } } }), { project: "project" });
+  assert.match(skipped.stderr, /Summary tree not used \(not-ready\)/);
+
+  // Omitted: no parameter, so the project default decides.
+  const plain = await invoke(["search", "question"], () => ({ body: { results: [] } }), { project: "project" });
+  assert.equal(new URL(plain.requests[0].url, "http://localhost").searchParams.has("summaryTree"), false);
+  for (const args of [["--summary-tree"], ["--summary-tree", "always"]]) {
+    const bad = await invoke(["search", "question", ...args], () => ({ body: { results: [] } }), { project: "project" });
+    assert.notEqual(bad.code, 0, JSON.stringify(args));
+    assert.match(bad.stderr, /--summary-tree must be off, guide or include|--summary-tree needs a value/);
+    assert.deepEqual(bad.requests, []);
+  }
+});
+
 test("search without a project uses the default project; API commands require a key before network access", async () => {
   let result = await invoke(["search", "question"], () => ({ body: { results: [] } }));
   assert.equal(result.code, 0, result.stderr);

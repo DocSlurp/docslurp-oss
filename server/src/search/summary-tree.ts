@@ -126,6 +126,15 @@ function skippedResult(reason: SummaryTreeSearchSkipReason, ms: number, stats = 
   return { applied: "off", skipped: reason, ms, guided: [], summaries: [], stats };
 }
 
+/**
+ * A leg that was started and left no result (its adapter rejected outside the deadline wrapper). Reported as an
+ * error, never as "this search cannot run the tree".
+ */
+export function lostSummaryTreeLeg(): SummaryTreeLegResult {
+  countSearchEvent("summaryTreeSkipped");
+  return skippedResult("error", 0);
+}
+
 /** The leg result behind the (empty or guided) chunk list a retrieval adapter returned. */
 const legResults = new WeakMap<SearchChunk[], SummaryTreeLegResult>();
 

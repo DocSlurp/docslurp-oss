@@ -29,7 +29,7 @@ import { timePhase } from "./timings.js";
 import { currentSearchStreamSink } from "./stream-events.js";
 import { createProvisionalHitPolicy, emitLegHits, type ProvisionalHitPolicy } from "./stream-hits.js";
 import { acquisitionDepth, validateRetrievalControls } from "./retrieval-controls.js";
-import { summaryTreeLegResultOf, type SummaryTreeLegResult } from "./summary-tree.js";
+import { lostSummaryTreeLeg, summaryTreeLegResultOf, type SummaryTreeLegResult } from "./summary-tree.js";
 import type { EvidenceLegTiming } from "./retrieval-adapters.js";
 
 export interface SearchSessionRunnerAdapters {
@@ -312,7 +312,8 @@ async function executeSearchSession(args: Parameters<typeof runSearchSession>[0]
             },
             { parallel: adapters.parallelRetrieval },
           ));
-          treeResult = summaryTreeLegResultOf(evidenceResults.find((result) => result.adapter === "summary-tree")?.chunks);
+          treeResult = summaryTreeLegResultOf(evidenceResults.find((result) => result.adapter === "summary-tree")?.chunks)
+            ?? (runTree ? lostSummaryTreeLeg() : null);
           const boundedResults = effectiveOptions.candidateDepth === undefined
             ? evidenceResults
             : evidenceResults.map((result) => ({ ...result, chunks: result.chunks.slice(0, effectiveOptions.candidateDepth) }));
