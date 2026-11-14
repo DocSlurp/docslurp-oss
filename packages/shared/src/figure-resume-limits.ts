@@ -191,9 +191,9 @@ export function figureResumeLaunchVmMs(args: { pageCount: number; shards?: numbe
 /**
  * The document's lifetime resume VM time (ms): vmHeadroom x its expected passes x one launch's estimated time, clamped to
  * [docVmSecondsFloor, docVmSecondsCeiling], plus what its grants added. 10 pages: 180 s. 1,000 pages unsharded: 8,600 s.
- * 20,000 pages in 32 shards: the 4 h ceiling. The per-launch and per-page defaults are measured: the estimate covers the
- * 90th percentile of measured resume launches, and the headroom the rest (an unsharded launch re-reading every page is the
- * costly case; a sharded document's launches stay well under the ceiling).
+ * 20,000 pages in 32 shards: the 4 h ceiling. The per-launch and per-page defaults are measured: the estimate covers about
+ * nine in ten measured manifest resumes, and the 2x headroom covers about nine in ten fresh gap passes (an unsharded launch
+ * re-reading every page is the costly case; a sharded document's launches stay under the ceiling).
  */
 export function figureResumeVmBudgetMs(args: { pageCount: number; shards?: number; grants?: number }, config: FigureResumeBudgetConfig = figureResumeBudgetConfig()): number {
   const estimate = config.vmHeadroom * figureResumeExpectedPasses(args.pageCount) * figureResumeLaunchVmMs(args, config);

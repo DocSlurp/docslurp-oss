@@ -488,7 +488,8 @@ one at most one or two. The caps scale with pages:
 - *VM time:* `DOCSLURP_FIGURE_RESUME_VM_HEADROOM` (2) × the expected passes × one launch's estimated time. A launch is
   `DOCSLURP_FIGURE_RESUME_VM_MS_PER_LAUNCH` (15,000) plus `DOCSLURP_FIGURE_RESUME_VM_MS_PER_PAGE` (200) for each page it
   converts: one shard of a sharded document, every page of an unsharded one (gaps or not). Both defaults are measured on
-  resume launches in the production VM: the estimate covers the 90th percentile launch, and the 2× headroom the rest. A
+  resume launches in the production VM: the estimate covers about nine in ten manifest resumes, and the 2× headroom about
+  nine in ten fresh gap passes. A
   launch's time includes staging the source PDF into its VM, which every launch repeats. Each pass logs
   `resume pass … pages vmMs msPerPage estimateMs` for re-tuning. Clamped to
   `DOCSLURP_FIGURE_RESUME_DOC_VM_SECONDS_FLOOR`..`_CEILING` (180 s..4 h, the ceiling at most 12 h). Grants included, no
