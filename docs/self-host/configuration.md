@@ -240,7 +240,7 @@ Details are in [Parser sandbox providers](sandbox-providers.md#configuration).
 | `DOCSLURP_DOPPLER_BIN_DIR` | `/usr/lib/doppler/bin` | Where Doppler's `pdftomarkdown` is (the worker images install it there, off `PATH`). `local` mode refuses to start without it. |
 | `DOCSLURP_OCR_PYTHON`, `DOCSLURP_OCR_MODEL_DIR` | `/opt/docslurp/ocr-venv/bin/python3`, `/opt/docslurp/ocr-models` | The local OCR runtime (`local` mode). The full worker image sets both. |
 
-The other OCR settings (escalation, attempts, language, size and concurrency limits) are in `.env.example` and
+The other OCR settings (escalation, the page reader, attempts, language, size and concurrency limits) are in `.env.example` and
 [OCR](../extraction/ocr.md).
 
 ## Removed and deprecated

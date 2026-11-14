@@ -118,6 +118,53 @@ the Arabic or Devanagari (Hindi) recogniser, and pages in a script no recogniser
 
 
 Escalation reads survive activity retries. Each hosted call is persisted as it returns (`ocr_escalation_reads`, migration 0129, deleted with its run): a retried activity reuses a page's completed read instead of calling the provider again, and re-records every earlier call's usage under its original id, so a call's provider cost is recorded exactly once even when the activity that made it failed before its checkpoint. A call that does repeat (the first one failed) is recorded again with its own cost and counts against `DOCSLURP_OCR_ESCALATION_MAX_ATTEMPTS`. Escalation rows bill 0 credits and keep their cost as `providerCostCents`, which the provider-cost loss alert reads.
+
+## Page reader
+
+A deployment can give OCR'd pages a second read by a page image reader: an extractor plugin's `pageImageReader`
+provider ([Extractor plugins](extractor-plugins.md#page-image-reader-pageimagereader)) that reads the PNGs the OCR
+boundary wrote, inside its own isolated VM, and returns Markdown per page. It runs after the recogniser's read and
+before hosted escalation.
+
+`DOCSLURP_OCR_PAGE_READER` chooses what it reads:
+
+- `off` (the default, also when unset): nothing changes.
+- `escalation`: the pages escalation would read (degraded, low-confidence, Arabic or Devanagari, unsupported script).
+  The boundary keeps their PNGs even when hosted escalation is off.
+- `all`: every page the boundary read. The boundary keeps a PNG of every frame it found text or text regions on; blank
+  frames have nothing to read.
+
+A page the reader returns Markdown for takes that text (reader `page-reader:<provider id>`) and leaves hosted escalation.
+A page it fails, answers empty, or never reaches keeps the recogniser's text and stays an escalation candidate, so the
+hosted reader handles it exactly as it would without a page reader. Markdown tables in a read are rebuilt in the parser
+VM, as for escalation reads.
+
+What fails closed:
+
+- An unknown `DOCSLURP_OCR_PAGE_READER` or `DOCSLURP_OCR_PAGE_READER_MAX_PAGES` stops the worker at start.
+- With the reader on, the worker refuses to start without a registered provider, when the provider's
+  `assertConfigured()` throws, or when `DOCSLURP_OCR_MODE` is not `vm` or `local` (no boundary PNGs to read).
+- A job is sent only under an explicit tenant scope, the run's organization and run. A run without an organization is
+  skipped and logged; the provider is never called without a scope.
+- The host re-checks every PNG by signature and IHDR size against the frame the boundary read and the provider's byte
+  cap. It never decodes pixels. A PNG that fails is not sent.
+- Each page gets an opaque key, never a document id. The response is validated strictly: known keys, at most one result
+  per key, a known status and failure reason, Markdown within the provider's byte cap, token counts as non-negative
+  integers. A malformed response rejects the whole job, logged to telemetry only.
+- A job that throws, whether refused or failed to run, never fails a page or a document, and the read never moves to
+  the worker host or a weaker boundary: its pages keep the recogniser's text and fall through to hosted escalation.
+
+Isolation: a provider meets the same requirements as every VM provider
+([Isolation requirements](extractor-plugins.md#isolation-requirements)). Each job runs in a fresh VM bound to one
+organization for its whole life, with no network beyond the job's own connection, no credentials, no cloud metadata
+access and bounded output that the host validates.
+
+Budget and cost: `DOCSLURP_OCR_PAGE_READER_MAX_PAGES` (default 2000, 0 to 20000) bounds the pages a document sends,
+counted across its OCR batches in one activity. Jobs carry at most the provider's `maxPagesPerJob` pages; the run's
+cost cap is checked before each job. Each job logs
+`[ai-usage] ocr-page-reader model=<model> input_tokens=<n> output_tokens=<n>`, and once per document
+`[ocr] page-reader document=... attempted=... replaced=... failed={...} skipped={...}`.
+
 ## Billing and usage
 
 - An uploaded image: every frame the engine read is one Rich page read, metric `page-ocr`, with or without text in it
@@ -133,6 +180,9 @@ Escalation reads survive activity retries. Each hosted call is persisted as it r
   actual input and output tokens and cost. An escalated page bills at most one Rich page, whatever the output length
   (escalation output tokens add no Rich pages), and an escalation that returned no text charges nothing; its provider
   cost is still recorded.
+- Page reader jobs are recorded as `ocr-page-reader` at provider cost, billing 0 credits (`providerCostCents`), also
+  when the job failed. The host sets the metric, model and tenant scope of each event; a provider cannot record a
+  billable charge. A page the reader replaced is one Rich page, charged once per run like the recogniser's read of it.
 - Quotes count a TIFF's frames as its pages, up to 64.
 
 ## Host phases outside OCR
@@ -210,6 +260,8 @@ not install unstructured at all; it comes with the `unstructured` vendor bundle.
 | `DOCSLURP_OCR_ESCALATION_MODEL` | `llm://deepinfra/Qwen/Qwen3-VL-30B-A3B-Instruct` | Hosted reader for escalation and `hosted` mode. |
 | `DOCSLURP_OCR_ESCALATION_MAX_PAGES` | `25` | Hosted reads per document. |
 | `DOCSLURP_OCR_ESCALATION_MAX_ATTEMPTS` | pages + a fifth (`30`) | Hosted requests per document, every page and retry included, counted in the durable vision attempt ledger. |
+| `DOCSLURP_OCR_PAGE_READER` | `off` | `escalation` or `all` to read pages with the page image reader plugin first (see [Page reader](#page-reader)). |
+| `DOCSLURP_OCR_PAGE_READER_MAX_PAGES` | `2000` | Page reader pages per document (0 to 20000). |
 | `DOCSLURP_OCR_MAX_ATTEMPTS` | `3` | Recogniser attempts per page under `auto` (1 to 7). |
 | `DOCSLURP_OCR_LANGUAGE` | `auto` | Default language for projects left on `auto`. |
 | `DOCSLURP_OCR_MAX_LONG_EDGE` | `2000` | Long-edge cap in pixels (640 to 4000). Above 2000 is an explicit opt-in (see [Sizing](#sizing)). |
