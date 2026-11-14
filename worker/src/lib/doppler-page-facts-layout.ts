@@ -206,6 +206,37 @@ export function pageLayoutFactsFromDopplerFacts(facts: Pick<DopplerPageFactsDocu
   return out;
 }
 
+/**
+ * The walker's layout facts with every page whose ruled grids it left unknown (`grids: null`) settled from the same job's
+ * Doppler page facts (layout source `selective` or `both`, where the job has both). Unknown is never read as "no grid":
+ * - the facts know the page's grids (gridFacts: `[]` from too few rules or a complete list without a walker grid, or the
+ *   walker's own grids from thin-rule counts): those grids stand in, and the walker's table coverage is kept;
+ * - the facts do not know either (failed, low confidence, truncated, a grid the walker might find), or have no line for
+ *   the page: the page is marked `gridsUnknown`, and classify-route sends it down the table path.
+ * Without page facts the walker's answer is used as it is (layout source `walker`: a null there is the walker's own
+ * "no ruling line in this range"). Pure; returns the counts for telemetry.
+ */
+export function settleUnknownGrids(layout: ReadonlyMap<number, PageLayoutFacts>, facts: Pick<DopplerPageFactsDocument, "pages">):
+  { layout: Map<number, PageLayoutFacts>; fromFacts: number; unknown: number } {
+  const out = new Map<number, PageLayoutFacts>();
+  let fromFacts = 0;
+  let unknown = 0;
+  for (const [number, page] of layout) {
+    if (page.grids !== null) { out.set(number, page); continue; }
+    const entry = facts.pages.get(number);
+    const mapped = entry ? pageLayoutFactsFromDopplerPage(entry) : null;
+    if (mapped && Array.isArray(mapped.grids)) {
+      const { gridsUnknown: _ignored, ...rest } = page;
+      out.set(number, { ...rest, grids: mapped.grids });
+      fromFacts += 1;
+    } else {
+      out.set(number, { ...page, gridsUnknown: true });
+      unknown += 1;
+    }
+  }
+  return { layout: out, fromFacts, unknown };
+}
+
 /** A page's routing facts as document_page_facts stores them (buildRoutingPageFacts): closed enums only. */
 export interface PageRoutingFacts {
   textLayer?: DopplerTextLayer | null;

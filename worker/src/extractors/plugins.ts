@@ -29,7 +29,8 @@ import { SandboxRunError, type SandboxResult } from "../sandbox/types.js";
 import type { UsageEvent } from "../models.js";
 import { currentPerfContext } from "../lib/perf-context.js";
 import { pageLayoutWalkerUnknown, parsePageLayoutFacts, type LayoutWalkerUnknown, type PageLayoutFacts } from "../lib/page-layout-facts.js";
-import { acceptSandboxedPdfPageFacts, clearSandboxedPdfPageFacts, sandboxedPdfPageFactsLayout } from "./sandboxed-pdf-page-facts.js";
+import { acceptSandboxedPdfPageFacts, clearSandboxedPdfPageFacts, sandboxedPdfPageFacts, sandboxedPdfPageFactsLayout } from "./sandboxed-pdf-page-facts.js";
+import { pageLayoutFactsFromDopplerFacts, settleUnknownGrids } from "../lib/doppler-page-facts-layout.js";
 import { planPageShards, type ShardCostProfile } from "../temporal/page-shards.js";
 import { registerShardProfile } from "../temporal/page-shard-profiles.js";
 import { resolveModalImage, type ModalSdk } from "../sandbox/providers/modal/index.js";
@@ -539,7 +540,25 @@ export function acceptSandboxedPdfResult(job: SandboxedPdfJob, result: Sandboxed
  * DOCSLURP_DOPPLER_PAGE_FACTS=use, layout facts mapped from its page facts stand in when it returned none.
  */
 export function sandboxedPdfLayoutFacts(job: SandboxedPdfJob): Map<number, PageLayoutFacts> | undefined {
-  return reportedLayoutFacts.get(job) ?? sandboxedPdfPageFactsLayout(job);
+  const walker = reportedLayoutFacts.get(job);
+  const facts = sandboxedPdfPageFacts(job);
+  if (walker) return facts ? settleUnknownGrids(walker, facts).layout : walker;
+  // The walker could not walk the file at all (a page tree that does not check out, say): with page facts in hand, their
+  // layout stands in, its own unknown grids marked, rather than no layout at all.
+  if (facts && reportedWalkerUnknown.has(job)) {
+    const mapped = pageLayoutFactsFromDopplerFacts(facts);
+    if (mapped.size > 0) return settleUnknownGrids(mapped, facts).layout;
+  }
+  return sandboxedPdfPageFactsLayout(job);
+}
+
+/** How many of the job's pages had unknown walker grids settled from page facts, or left unknown (routed as tables). */
+export function sandboxedPdfGridSettlement(job: SandboxedPdfJob): { fromFacts: number; unknown: number } | undefined {
+  const facts = sandboxedPdfPageFacts(job);
+  const walker = reportedLayoutFacts.get(job) ?? (facts && reportedWalkerUnknown.has(job) ? pageLayoutFactsFromDopplerFacts(facts) : undefined);
+  if (!walker || !facts) return undefined;
+  const { fromFacts, unknown } = settleUnknownGrids(walker, facts);
+  return { fromFacts, unknown };
 }
 
 /** The whole-file reason the provider's layout walker reported for a finished job (a fixed slug and a page count), if any. */
@@ -549,7 +568,8 @@ export function sandboxedPdfLayoutWalkerUnknown(job: SandboxedPdfJob): LayoutWal
 
 /** Where `sandboxedPdfLayoutFacts` came from: the provider's layout walker, or its page facts (`use` mode). */
 export function sandboxedPdfLayoutFactsSource(job: SandboxedPdfJob): "vm-pdf" | "vm-pdf-facts" | undefined {
-  return reportedLayoutFacts.has(job) ? "vm-pdf" : sandboxedPdfPageFactsLayout(job) ? "vm-pdf-facts" : undefined;
+  if (reportedLayoutFacts.has(job)) return "vm-pdf";
+  return sandboxedPdfLayoutFacts(job) ? "vm-pdf-facts" : undefined;
 }
 
 /**
