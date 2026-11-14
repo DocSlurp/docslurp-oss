@@ -290,8 +290,8 @@ export interface SandboxedOcrProvider {
 
 /**
  * One page image read job: Markdown for page PNGs the OCR boundary (sandboxedOcr VM or the self-hosted sandbox) already
- * wrote and the host validated by PNG signature and size. The provider stages the PNGs into a fresh VM or microVM bound to
- * `scope.orgId` for its whole life, reads them there, and returns only bounded Markdown per page. The VM gets no
+ * wrote and the host validated by PNG signature and size. The provider reads them in a VM or microVM bound to `scope.orgId`
+ * for that VM's whole life (it may serve several jobs of that organization, never another's), reads them there, and returns only bounded Markdown per page. The VM gets no
  * credentials, no metadata endpoint and no network beyond the job's own connection.
  */
 export interface PageImageReadJob {

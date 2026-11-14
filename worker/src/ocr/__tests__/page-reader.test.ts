@@ -16,8 +16,9 @@ import type { HostedOcrReader } from "../hosted-reader.js";
 import { assertOcrConfiguration } from "../mode.js";
 import {
   assertOcrPageReaderConfiguration, DEFAULT_OCR_PAGE_READER_MAX_PAGES, ocrPageReaderMaxPages, ocrPageReaderMode, readPagesWithProvider, validatePageReadResults,
-  type PageReaderContext,
+  readOcrPagesWithConfiguredReader, MAX_PAGE_READER_TOKENS_PER_PAGE, type PageReaderContext,
 } from "../page-reader.js";
+import { ocrPageReaderMaxCostCents } from "../page-reader-mode.js";
 import { ocrDocument } from "../read-document.js";
 
 let scratch: string;
@@ -323,6 +324,57 @@ describe("readPagesWithProvider", () => {
     const summary = await readPagesWithProvider(await outcomeWith([{ pageNumber: 1 }]), provider, ctx(state));
     expect(provider.read).not.toHaveBeenCalled();
     expect(summary.skipped).toEqual({ "cost-cap": 1 });
+  });
+
+  it("stops at the document's provider-cost cap, which the run cost cap does not see", async () => {
+    const state = runState();
+    const provider = reader(echo, { maxPagesPerJob: 1 });
+    const outcome = await outcomeWith([{ pageNumber: 1 }, { pageNumber: 2 }, { pageNumber: 3 }]);
+    const summary = await readPagesWithProvider(outcome, provider, ctx(state, { maxCostCents: 0.5 }));
+    // 0.3 cents per job: the second job reaches 0.6, so the third is not sent.
+    expect(provider.read).toHaveBeenCalledTimes(2);
+    expect(summary.skipped).toEqual({ "provider-cost-cap": 1 });
+    expect(outcome.pages[2]!.text).toBe("recogniser 3");
+  });
+
+  it("parses the provider-cost cap, refusing anything outside 0..1000000", () => {
+    expect(ocrPageReaderMaxCostCents({})).toBe(500);
+    expect(ocrPageReaderMaxCostCents({ DOCSLURP_OCR_PAGE_READER_MAX_COST_CENTS: "0" })).toBe(0);
+    expect(() => ocrPageReaderMaxCostCents({ DOCSLURP_OCR_PAGE_READER_MAX_COST_CENTS: "-1" })).toThrow();
+    expect(() => ocrPageReaderMaxCostCents({ DOCSLURP_OCR_PAGE_READER_MAX_COST_CENTS: "2000000" })).toThrow();
+  });
+
+  it("rejects a job whose per-page token counts are implausible and clamps usage tokens to the job's pages", async () => {
+    const state = runState();
+    const huge = MAX_PAGE_READER_TOKENS_PER_PAGE + 1;
+    const provider = reader(async (job) => ({
+      results: job.pages.map((page) => ({ key: page.key, status: "read" as const, markdown: "# x", inputTokens: huge })),
+      usage: [{ provider: "vm", model: "x", metric: "m", amount: 1, unit: "page", costCents: 0.1, inputTokens: 1e12, outputTokens: 1e12 }],
+    }));
+    const outcome = await outcomeWith([{ pageNumber: 1 }]);
+    const summary = await readPagesWithProvider(outcome, provider, ctx(state));
+    expect(summary.failed).toEqual({ "invalid-response": 1 });
+    expect(outcome.pages[0]!.text).toBe("recogniser 1");
+    const event = readerEvents(state)[0]!;
+    expect(event.inputTokens).toBe(MAX_PAGE_READER_TOKENS_PER_PAGE);
+    expect(event.outputTokens).toBe(MAX_PAGE_READER_TOKENS_PER_PAGE);
+  });
+
+  it("strips NUL and other control characters from returned Markdown", async () => {
+    const provider = reader(async (job) => ({ results: job.pages.map((page) => ({ key: page.key, status: "read" as const, markdown: "a\u0000b\u001bc\td\ne" })), usage: [] }));
+    const outcome = await outcomeWith([{ pageNumber: 1 }]);
+    await readPagesWithProvider(outcome, provider, ctx(runState()));
+    expect(outcome.pages[0]!.text).toBe("abc\td\ne");
+  });
+
+  it("never fails the document when the reader path itself throws; only an abort propagates", async () => {
+    registerExtractorPlugin({ apiVersion: EXTRACTOR_PLUGIN_API_VERSION, name: "test-reader-plugin", pageImageReader: reader(echo) } as never);
+    const state = runState();
+    vi.spyOn(state.usageLedger, "enqueue").mockImplementation(() => { throw new Error("ledger down"); });
+    const outcome = await outcomeWith([{ pageNumber: 1 }]);
+    const result = await readOcrPagesWithConfiguredReader(outcome, { state, documentId: "doc-1" }, { DOCSLURP_OCR_PAGE_READER: "escalation" });
+    expect(result).toBeNull();
+    expect(outcome.pages[0]!.text).toBe("recogniser 1");
   });
 
   it("propagates an abort", async () => {

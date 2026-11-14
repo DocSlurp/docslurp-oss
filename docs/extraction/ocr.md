@@ -155,9 +155,14 @@ What fails closed:
   the worker host or a weaker boundary: its pages keep the recogniser's text and fall through to hosted escalation.
 
 Isolation: a provider meets the same requirements as every VM provider
-([Isolation requirements](extractor-plugins.md#isolation-requirements)). Each job runs in a fresh VM bound to one
-organization for its whole life, with no network beyond the job's own connection, no credentials, no cloud metadata
+([Isolation requirements](extractor-plugins.md#isolation-requirements)). Pages are read in a VM bound to one
+organization for that VM's whole life (it may serve several jobs of that organization, never another's), with no network beyond the job's own connection, no credentials, no cloud metadata
 access and bounded output that the host validates.
+
+Reader usage bills 0 credits, so the run cost cap does not bound it: `DOCSLURP_OCR_PAGE_READER_MAX_COST_CENTS` (default
+500, 0 to 1000000) caps the provider cost one document's reader jobs may record before its remaining pages keep the
+recogniser read. Token counts over 100,000 per page are rejected, control characters are stripped from returned Markdown,
+and any error inside the reader path is logged and leaves the pages with their reads (only an abort propagates).
 
 Budget and cost: `DOCSLURP_OCR_PAGE_READER_MAX_PAGES` (default 2000, 0 to 20000) bounds the pages a document sends,
 counted across its OCR batches in one activity. Jobs carry at most the provider's `maxPagesPerJob` pages; the run's

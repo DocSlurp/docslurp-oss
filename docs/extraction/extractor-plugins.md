@@ -157,8 +157,8 @@ flag on and no provider (or `assertConfigured()` throwing), the worker refuses t
 - The provider receives a `PageImageReadJob` (`worker/src/extractors/plugins.ts`): `scope` (`orgId`, `runId`) and
   `pages`, each an opaque `key` and the absolute path of a PNG the OCR boundary wrote and the host checked by signature
   and size. It never receives the customer's stored file, a document id or credentials.
-- It reads the pages in a fresh VM or microVM bound to `scope.orgId` for its whole life, and refuses a job for another
-  organization. The VM has no network beyond the job's own connection, no credentials and no cloud metadata access.
+- It reads the pages in a VM or microVM bound to `scope.orgId` for that VM's whole life. The VM may serve several jobs
+  of that organization, never another's, and refuses a job for another organization. The VM has no network beyond the job's own connection, no credentials and no cloud metadata access.
 - `read(job, signal)` resolves with `results` (at most one per key: `{ key, status: "read", markdown, inputTokens?,
   outputTokens? }` or `{ key, status: "failed", reason }`, reason one of `timeout`, `refused`, `oversized`, `invalid`,
   `vm-lost`, `capacity`) and `usage`, the provider cost of the job as usage events.

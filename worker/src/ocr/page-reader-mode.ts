@@ -34,6 +34,24 @@ export function ocrPageReaderMaxPages(env: NodeJS.ProcessEnv = process.env): num
   return parsed;
 }
 
+/** Default per-document cap on the reader's provider cost, in cents (`DOCSLURP_OCR_PAGE_READER_MAX_COST_CENTS`). */
+export const DEFAULT_OCR_PAGE_READER_MAX_COST_CENTS = 500;
+
+/**
+ * `DOCSLURP_OCR_PAGE_READER_MAX_COST_CENTS`: provider cost one document's reader jobs may record before the rest of its pages
+ * keep the recogniser read, 0..1000000 (default 500). The run cost cap counts only billable credits, and reader usage
+ * bills 0 credits, so this is the reader's own spend bound.
+ */
+export function ocrPageReaderMaxCostCents(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.DOCSLURP_OCR_PAGE_READER_MAX_COST_CENTS?.trim();
+  if (!raw) return DEFAULT_OCR_PAGE_READER_MAX_COST_CENTS;
+  const parsed = Number(raw);
+  if (!/^\d+$/.test(raw) || !Number.isSafeInteger(parsed) || parsed > 1_000_000) {
+    throw new Error(`DOCSLURP_OCR_PAGE_READER_MAX_COST_CENTS must be an integer from 0 to 1000000; got ${JSON.stringify(raw)}`);
+  }
+  return parsed;
+}
+
 /** Which frames the OCR boundary should keep as PNG for the reader (engine.ts OcrReadInput.keepFrames). */
 export function ocrPageReaderKeepFrames(mode: OcrPageReaderMode): "candidates" | "all" | undefined {
   return mode === "all" ? "all" : mode === "escalation" ? "candidates" : undefined;

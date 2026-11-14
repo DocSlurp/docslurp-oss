@@ -31,7 +31,7 @@ import type { UsageEvent } from "../models.js";
 import { isCostCapExceeded } from "../pipeline/checkpoints.js";
 import type { WorkflowState } from "../pipeline/pipeline.js";
 import type { OcrPageRead, OcrReadOutcome } from "./engine.js";
-import { ocrPageReaderMaxPages, ocrPageReaderMode, OCR_PAGE_READER_METRIC, type OcrPageReaderMode } from "./page-reader-mode.js";
+import { ocrPageReaderMaxCostCents, ocrPageReaderMaxPages, ocrPageReaderMode, OCR_PAGE_READER_METRIC, type OcrPageReaderMode } from "./page-reader-mode.js";
 
 export * from "./page-reader-mode.js";
 
@@ -58,8 +58,22 @@ export interface PageReaderContext {
   documentId: string;
   mode: Exclude<OcrPageReaderMode, "off">;
   maxPages: number;
+  /** Provider cost (cents) this document's reader jobs may record (DOCSLURP_OCR_PAGE_READER_MAX_COST_CENTS). */
+  maxCostCents?: number;
   signal?: AbortSignal;
 }
+
+/** No page reports more tokens than this; a larger count is not a real read (a provider bug or a hostile VM). */
+export const MAX_PAGE_READER_TOKENS_PER_PAGE = 100_000;
+
+/** Markdown from the boundary without NUL and other C0 control characters (tab, newline and carriage return stay). */
+export function stripControlCharacters(text: string): string {
+  // eslint-disable-next-line no-control-regex
+  return text.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "");
+}
+
+/** Provider cost each document's reader jobs recorded in this worker, keyed like pagesSent. */
+const costSpent = new WeakMap<object, Map<string, number>>();
 
 /**
  * Pages of each document the reader has been sent in this worker, per run state (the per-document budget across the
@@ -111,6 +125,7 @@ export function validatePageReadResults(raw: unknown, keys: ReadonlySet<string>,
       if (Buffer.byteLength(record.markdown, "utf8") > maxMarkdownBytes) throw new Error(`result ${index} markdown exceeds ${maxMarkdownBytes} bytes`);
       for (const field of ["inputTokens", "outputTokens"] as const) {
         if (record[field] !== undefined && !isCount(record[field])) throw new Error(`result ${index} ${field} is not a non-negative integer`);
+        if ((record[field] as number | undefined ?? 0) > MAX_PAGE_READER_TOKENS_PER_PAGE) throw new Error(`result ${index} ${field} is over ${MAX_PAGE_READER_TOKENS_PER_PAGE}`);
       }
       out.set(key, {
         key, status: "read", markdown: record.markdown,
@@ -144,13 +159,18 @@ function recordProviderUsage(
   const totals = { inputTokens: 0, outputTokens: 0 };
   if (!Array.isArray(events)) return totals;
   const run = ctx.state.run!;
+  // Bounded by the pages the job carried: a provider cannot inflate token telemetry or the ledger past that.
+  const tokenCap = details.pages * MAX_PAGE_READER_TOKENS_PER_PAGE;
+  let spent = costSpent.get(ctx.state.usageLedger);
+  if (!spent) costSpent.set(ctx.state.usageLedger, (spent = new Map()));
   for (const raw of events) {
     if (!raw || typeof raw !== "object") continue;
     const event = raw as Partial<UsageEvent>;
     const number = (value: unknown) => (typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0);
-    const inputTokens = Math.floor(number(event.inputTokens));
-    const outputTokens = Math.floor(number(event.outputTokens));
+    const inputTokens = Math.min(tokenCap, Math.floor(number(event.inputTokens)));
+    const outputTokens = Math.min(tokenCap, Math.floor(number(event.outputTokens)));
     const costCents = number(event.costCents);
+    spent.set(ctx.documentId, (spent.get(ctx.documentId) ?? 0) + costCents);
     totals.inputTokens += inputTokens;
     totals.outputTokens += outputTokens;
     const priced = priceAiUsageEvent({
@@ -238,6 +258,12 @@ export async function readPagesWithProvider(outcome: OcrReadOutcome, provider: P
       console.warn(`[ocr] page-reader stopped document=${ctx.documentId}: run cost cap reached`);
       break;
     }
+    const spentCents = costSpent.get(ctx.state.usageLedger)?.get(ctx.documentId) ?? 0;
+    if (ctx.maxCostCents !== undefined && spentCents >= ctx.maxCostCents) {
+      bump(summary.skipped, "provider-cost-cap", ready.length - start);
+      console.warn(`[ocr] page-reader stopped document=${ctx.documentId}: provider cost ${spentCents.toFixed(2)} cents reached its cap ${ctx.maxCostCents}`);
+      break;
+    }
     const byKey = new Map<string, OcrPageRead>();
     const job: PageImageReadJob = { scope: { ...scope }, pages: [] };
     for (const item of chunk) {
@@ -284,7 +310,7 @@ export async function readPagesWithProvider(outcome: OcrReadOutcome, provider: P
       const result = results.get(key);
       if (!result) { bump(summary.failed, "missing"); continue; }
       if (result.status === "failed") { bump(summary.failed, result.reason); continue; }
-      const text = result.markdown.trim();
+      const text = stripControlCharacters(result.markdown).trim();
       if (!text) { summary.empty += 1; continue; }
       page.text = text;
       page.recogniser = `page-reader:${provider.id}`;
@@ -327,5 +353,13 @@ export async function readOcrPagesWithConfiguredReader(
     console.error(`[ocr] page-reader mode=${mode} has no provider; document=${ctx.documentId} keeps the recogniser read`);
     return null;
   }
-  return await readPagesWithProvider(outcome, provider, { ...ctx, mode, maxPages: ocrPageReaderMaxPages(env) });
+  try {
+    return await readPagesWithProvider(outcome, provider, { ...ctx, mode, maxPages: ocrPageReaderMaxPages(env), maxCostCents: ocrPageReaderMaxCostCents(env) });
+  } catch (error) {
+    // The reader never fails a page or document: anything it throws (a ledger write, a file check) is telemetry, and the
+    // pages keep the recogniser's text (or a reader text already validated and applied). Only an abort propagates.
+    if (ctx.signal?.aborted) throw error;
+    console.error(`[ocr] page-reader error document=${ctx.documentId}; pages keep their reads: ${(error instanceof Error ? error.stack ?? error.message : String(error)).slice(0, 600)}`);
+    return null;
+  }
 }
