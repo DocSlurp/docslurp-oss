@@ -219,9 +219,10 @@ export function createVmDeterministicVisualExtractor(deps: VmExtractorDeps): Det
         // SVGs past the scene budget are recorded for the later deferred pass, exactly as from the standalone guest.
         for (const d of inline.result.deferred ?? []) deferred.push({ input: "source", svgIndex: d.svgIndex, count: d.count, reason: d.reason, pageNumber: null, figureId: null });
       } else if (inline.status === "refused") {
-        // A refused inline answer (deadline, worker-failed, memory-limit, result-invalid, cache-inherited) lost the whole
-        // source: recorded as the standalone path records a failed run (council #369/#510 r4 L4).
-        deferred.push({ input: "source", svgIndex: 0, count: 1, reason: "guest-unavailable", pageNumber: null, figureId: null });
+        // A refused inline answer (deadline, worker-failed, memory-limit, result-invalid, cache-inherited, command-budget,
+        // image-unsupported) lost the whole source: recorded as the standalone path records a failed run (council #369/#510
+        // r4 L4). One the org's free-VM cap turned away (free-vm-cap) is recorded as the cap's own deferral.
+        deferred.push({ input: "source", svgIndex: 0, count: 1, reason: inline.reason === "free-vm-cap" ? "vm-cap" : "guest-unavailable", pageNumber: null, figureId: null });
       }
       log(`[chart-export] parser VM skipped ${context} kind=${sourceKind} reason=inline-${inline.status}${inline.status === "ok" ? ` visuals=${inline.result.visuals.length}` : ` detail=${inline.reason}`}`);
     }

@@ -342,3 +342,36 @@ describe("per-mode search limits", () => {
     expect(apiKeyRateLimitRulesSchema.safeParse([{ metric: "searches", mode: "everything", limit: 1, windowSeconds: 60 }]).success).toBe(false);
   });
 });
+
+describe("fast lane: a search with nothing to retrieve", () => {
+  const empty = { searchable_documents: 0, indexed_documents: 0, keyword_only_documents: 0, page_only_documents: 0 };
+  const setupOf = (resolvedOptions: Record<string, unknown>, availabilityRow: Record<string, unknown> | undefined = empty) =>
+    ({ availabilityRow, resolvedOptions }) as never;
+
+  it("is a keyword or hybrid search over a whole project with no documents to serve", async () => {
+    const { hasNothingToRetrieve } = await import("../services/search.js");
+    expect(hasNothingToRetrieve(setupOf({ searchMode: "keyword" }))).toBe(true);
+    expect(hasNothingToRetrieve(setupOf({ searchMode: "hybrid" }))).toBe(true);
+  });
+
+  it("never covers deep mode, where model strategies and sub-searches can run", async () => {
+    const { hasNothingToRetrieve } = await import("../services/search.js");
+    expect(hasNothingToRetrieve(setupOf({ searchMode: "deep" }))).toBe(false);
+    expect(hasNothingToRetrieve(setupOf({}))).toBe(false);
+  });
+
+  it("never covers a run or document filter, which a caller could invent on a populated project", async () => {
+    const { hasNothingToRetrieve } = await import("../services/search.js");
+    expect(hasNothingToRetrieve(setupOf({ searchMode: "keyword", runId: "run-1" }))).toBe(false);
+    expect(hasNothingToRetrieve(setupOf({ searchMode: "keyword", filters: { runId: "run-1" } }))).toBe(false);
+    expect(hasNothingToRetrieve(setupOf({ searchMode: "keyword", filters: { documentId: "doc-1" } }))).toBe(false);
+    expect(hasNothingToRetrieve(setupOf({ searchMode: "keyword", filters: { documentIds: ["doc-1"] } }))).toBe(false);
+  });
+
+  it("takes a main slot when anything is searchable or availability is unknown", async () => {
+    const { hasNothingToRetrieve } = await import("../services/search.js");
+    expect(hasNothingToRetrieve(setupOf({ searchMode: "keyword" }, { ...empty, page_only_documents: 1 }))).toBe(false);
+    expect(hasNothingToRetrieve(setupOf({ searchMode: "keyword" }, { ...empty, keyword_only_documents: 2 }))).toBe(false);
+    expect(hasNothingToRetrieve({ availabilityRow: undefined, resolvedOptions: { searchMode: "keyword" } } as never)).toBe(false);
+  });
+});

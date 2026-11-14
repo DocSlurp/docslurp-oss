@@ -1,4 +1,6 @@
 import { safeHttpFailure, retryAfterSeconds } from "./http-failure.js";
+/** The reviewed message of a 403 `editor_required` (`DocSlurpApiError.code`): the caller may see but not change the project. */
+export { EDITOR_REQUIRED_MESSAGE } from "./http-failure.js";
 import { readSse } from "./sse.js";
 import { searchResultId, type SearchStreamEvent } from "./search-stream.js";
 export * from "./search-stream.js";
@@ -8,7 +10,7 @@ import type { RunProgressSnapshot, ProjectState, OrganizationRecord, Organizatio
 export type * from "./state.js";
 import type { IngestReport } from "./ingest-report.js";
 export type * from "./ingest-report.js";
-import type { DocumentVersionEntry, DocumentViewerPayload } from "./document.js";
+import type { DocumentVersionEntry, DocumentViewerPayload, WorkspaceIngestVersion } from "./document.js";
 export type * from "./document.js";
 
 /** One `search.results` frame is the whole search response, so the search stream accepts far larger frames than other streams (1 MiB). */
@@ -281,6 +283,10 @@ export type DocumentRecord = JsonObject & {
   title?: string | null;
   id: string;
   status: string;
+  /** Ingest version of the pipeline that produced the document; 0 = unknown (produced before tagging). */
+  ingestVersion?: number;
+  /** What the document's run measurably stored (e.g. `parseSourceDecision`, `pageFacts`, `figureLedger`). */
+  ingestCapabilities?: string[];
 };
 
 /** How much of the scope search covered; present on every search and chat response. */
@@ -836,10 +842,29 @@ export type DeletedDocument = JsonObject & {
   sourceKey?: string;
 };
 
+/** Why a document's figure resumes stopped (fixed codes). The first three are budget stops a single-document request may extend. */
+export type FigureResumeBlockReason = "attempts" | "vm-budget" | "no-progress" | "figures-off" | "resume-off" | "stale" | "refused" | "unscanned";
+
 /** Answer of {@link DocSlurpClient.resumeDocumentFigures}. */
-export type FigureResumeRequest = { documentId: string; status: "queued" | "already-queued" | "not-resumable" | "capped" | "off" };
+export type FigureResumeRequest = {
+  documentId: string;
+  status: "queued" | "already-queued" | "not-resumable" | "capped" | "off";
+  /**
+   * Why the document's resumes stopped, when they did (or had, when this request cleared it): `attempts` (launch cap),
+   * `vm-budget` (VM time), `no-progress`, `unscanned`, `refused`, `stale`, `resume-off` or `figures-off`; else null.
+   */
+  reason: FigureResumeBlockReason | null;
+  /** Whether this request granted an extension past a budget stop (bounded per run; a reprocess starts clean). */
+  granted: boolean;
+  /** Extensions left for the document's current run. */
+  grantsLeft: number;
+};
 /** Answer of {@link DocSlurpClient.resumeProjectFigures}: how many were queued, already queued, and whether more remain. */
-export type ProjectFigureResumeRequest = { projectId: string; status: "queued" | "off"; queued: number; alreadyQueued: number; capped: boolean };
+export type ProjectFigureResumeRequest = {
+  projectId: string; status: "queued" | "off"; queued: number; alreadyQueued: number; capped: boolean;
+  /** Documents with figures left that this request did not queue, by block reason (a bulk request never grants). */
+  blocked: Partial<Record<FigureResumeBlockReason, number>>;
+};
 
 /** Input of {@link DocSlurpClient.reprocessRun}: all stages, from one stage on, or only the listed stages. */
 export type ReprocessRunInput = { stageFrom?: string; stages?: string[]; speedBoost?: boolean; chartExport?: ChartExportOverride };
@@ -2525,6 +2550,11 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
 
     getDocument(documentId: string, requestOptions?: RequestOptions): Promise<DocumentViewerPayload> {
       return request<DocumentViewerPayload>(`/v1/documents/${encodeURIComponent(documentId)}`, {}, requestOptions, true);
+    },
+
+    /** The ingest version this deployment produces; a document whose `ingestVersion` is lower can be reprocessed to update it. */
+    getIngestVersion(requestOptions?: RequestOptions): Promise<WorkspaceIngestVersion> {
+      return request<WorkspaceIngestVersion>("/v1/ingest-version", {}, requestOptions, true);
     },
 
     /**

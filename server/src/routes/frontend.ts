@@ -11,6 +11,7 @@ import { getInvitePreview, listOrganizations } from "../services/organizations.j
 import { listProjects } from "../services/projects.js";
 import { apiStatusError } from "../lib/api-error.js";
 import { publicProjectView } from "../lib/public-project.js";
+import { withCanEdit } from "../lib/reprocess-access.js";
 
 /**
  * Endpoints the dashboard (a separate process in hosting mode b) reads over HTTP
@@ -31,7 +32,7 @@ export const dashboardRoutes = new Hono().get("/", async (c) => {
   const isOperator = actor.user.isAdmin === true;
   const [organizations, projects] = await Promise.all([listOrganizations(actor.userId), listProjects(actor.userId)]);
   // Projects as customers read them (no managed model fields), as on GET /v1/projects; operators see them whole.
-  return c.json({ isOperator, isAdmin: isOperator, organizations, projects: projects.map((project) => publicProjectView(project, actor)) });
+  return c.json({ isOperator, isAdmin: isOperator, organizations, projects: (await withCanEdit(c, projects)).map((project) => publicProjectView(project, actor)) });
 });
 
 /** GET /v1/invites/:token?kind=organization|project: what the accept page offers. The token is the credential. */

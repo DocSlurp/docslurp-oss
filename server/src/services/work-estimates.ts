@@ -24,7 +24,7 @@ import { replayChartExport } from "./run-creation.js";
 import { sql } from "../db.js";
 import { estimateWork, orgWorkerSlots, sumEstimates, type EstimateEnv } from "./config-change.js";
 import { getRun } from "./runs.js";
-import { listEditableProjectIds } from "./organizations.js";
+import { listReprocessableProjectIds } from "./organizations.js";
 
 /** Estimates for work-creating routes other than config changes. Each is shared by the mutation and its `/estimate` twin. */
 
@@ -97,7 +97,7 @@ export async function estimateDocumentReprocess(args: {
   projectId?: string;
   env?: EstimateEnv;
 }): Promise<CostEstimate | null> {
-  const projectIds = await listEditableProjectIds(args.userId);
+  const projectIds = await listReprocessableProjectIds(args.userId);
   if (projectIds.length === 0 || args.documentIds.length === 0) return null;
   const rows = await sql<{ id: string; project_id: string; org_id: string; page_count: number; indexing_mode: string | null; pipeline: PipelineFeatures | null }[]>`
     select d.id, d.project_id, d.org_id, d.page_count, d.indexing_mode,
@@ -181,7 +181,7 @@ export async function estimateUpload(args: {
 
 /** The one project the (editable) documents belong to, or null when they span several or none are found. */
 export async function singleProjectOf(documentIds: string[], userId: string): Promise<string | null> {
-  const projectIds = await listEditableProjectIds(userId);
+  const projectIds = await listReprocessableProjectIds(userId);
   if (projectIds.length === 0 || documentIds.length === 0) return null;
   const rows = await sql<{ project_id: string }[]>`
     select distinct project_id from documents

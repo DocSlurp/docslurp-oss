@@ -43,11 +43,71 @@ export const INLINE_CHART_LIMITS = {
   outputBudget: 4 * 1024 * 1024 - 512 * 1024,
   /** The inspection's own JSON, without the chart answer (unchanged from before inline charts). */
   maxInspectionBytes: 2 * 1024 * 1024,
+  /** The quarantine command's own timeout (lib/quarantine.ts): a timed-out command loses the document's verdict. */
+  commandTimeoutMs: 60_000,
+  /**
+   * The inline step's hard end, measured from the command's start (council #369 L4, #383): the inspection's time counts
+   * against it. Past it, only the count-only pass and worker exits run (`INLINE_STEP_TAIL_MS`), leaving the rest of the
+   * command timeout for writing the answer, so a slow inspection never costs the document its quarantine verdict.
+   */
+  commandCutoffMs: 40_000,
+  /** A count-only worker (past the step's deadline) gets this long once ready: it parses nothing, it records what is left. */
+  countOnlyMs: 1_000,
+  /** How long a count-only worker may take to load our bundle and report ready (measured, like any worker's start-up). */
+  countOnlyStartupMs: 2_000,
+  /** How long a finished worker gets to exit before the next one starts anyway. */
+  terminateWaitMs: 1_000,
 } as const;
+
+/** The most the step runs past its hard end: one count-only worker (start-up and count) plus its exit wait, and one more exit wait. */
+export const INLINE_STEP_TAIL_MS = INLINE_CHART_LIMITS.countOnlyStartupMs + INLINE_CHART_LIMITS.countOnlyMs + 2 * INLINE_CHART_LIMITS.terminateWaitMs;
+
+/** Below this much time left before the cutoff the step does not start: worker start-up plus the smallest deadline. */
+export const INLINE_MIN_REMAINING_MS = INLINE_CHART_LIMITS.startupMs + INLINE_CHART_LIMITS.deadlineBaseMs;
+
+export interface InlineStepBudget {
+  /**
+   * Hard end of the step (the `now` clock) before start-up is measured: the start-up allowance plus the deadline, cut at
+   * the command cutoff: the cap on the whole step. Within it, only time workers spend after reporting ready counts
+   * against `deadlineMs`.
+   */
+  endsAt: number;
+  /** The size-scaled deadline for the file's own work: time workers spend after their measured start-up. */
+  deadlineMs: number;
+  /** Milliseconds from now to the latest soft deadline the command budget allows (a cap on the measured one). */
+  softMs: number;
+  /** One unit's cap. */
+  unitCapMs: number;
+}
+
+/**
+ * The inline step's time budget, charged against the quarantine command (council #369 L4): its own deadline from the
+ * file size, cut at `commandCutoffMs` after the command started. Null when too little is left to start a worker: the
+ * step is then refused (`command-budget`), which the host records as a counted deferral, and the inspection stands.
+ * `now` and `commandStartedAt` share one clock (performance.now() in the guest, where 0 is the process start).
+ */
+export function inlineStepBudget(args: { now: number; commandStartedAt: number; sizeBytes: number }): InlineStepBudget | null {
+  const cutoff = args.commandStartedAt + INLINE_CHART_LIMITS.commandCutoffMs;
+  const remaining = cutoff - args.now;
+  if (!(remaining >= INLINE_MIN_REMAINING_MS)) return null;
+  const deadline = inlineDeadlineMs(args.sizeBytes);
+  const own = INLINE_CHART_LIMITS.startupMs + deadline;
+  const span = Math.min(own, remaining);
+  const ownSoft = INLINE_CHART_LIMITS.startupMs + Math.floor(deadline * INLINE_CHART_LIMITS.softDeadlineShare);
+  // Cut by the command: start-up keeps its allowance and the soft deadline the same share of the work time left after it
+  // (council #387 correctness L2), so units still end counted, not killed, and a late start still does useful work.
+  const softMs = span < own
+    ? Math.min(ownSoft, INLINE_CHART_LIMITS.startupMs + Math.floor(Math.max(0, span - INLINE_CHART_LIMITS.startupMs) * INLINE_CHART_LIMITS.softDeadlineShare))
+    : ownSoft;
+  return { endsAt: args.now + span, deadlineMs: deadline, softMs, unitCapMs: Math.max(3_000, Math.floor(deadline / 4)) };
+}
 
 /** Fixed slugs a guest may report (the host refuses any other). */
 export const INLINE_SKIP_REASONS = ["no-chart-parts", "no-signal", "archive-refused", "not-text", "input-too-large", "kind-unsupported"] as const;
-export const INLINE_REFUSE_REASONS = ["deadline", "worker-failed", "result-too-large", "result-invalid", "memory-limit", "cache-inherited", "answer-missing"] as const;
+export const INLINE_REFUSE_REASONS = ["deadline", "worker-failed", "result-too-large", "result-invalid", "memory-limit", "cache-inherited", "answer-missing", "command-budget", "image-unsupported", "free-vm-cap"] as const;
+
+/** The parser-image contract capability for the command-budget guest (#387); the host requires it for inline charts. */
+export const INLINE_COMMAND_BUDGET_CAPABILITY = "inline-command-budget";
 
 export function inlineDeadlineMs(sizeBytes: number): number {
   const kib = Math.ceil(Math.max(0, sizeBytes) / 1024);

@@ -29,8 +29,8 @@ beforeAll(async () => {
   vi.doMock("../services/audit-log.js", () => ({ appendAuditLog: vi.fn(async () => undefined) }));
   vi.doMock("../services/documents.js", () => ({
     getDocumentViewerPayload: async (id: string) => {
-      const [row] = await sql<{ id: string; project_id: string }[]>`select id, project_id from documents where id = ${id}`;
-      return row ? { document: { id: row.id, projectId: row.project_id } } : null;
+      const [row] = await sql<{ id: string; project_id: string; org_id: string }[]>`select id, project_id, org_id from documents where id = ${id}`;
+      return row ? { document: { id: row.id, projectId: row.project_id, orgId: row.org_id } } : null;
     },
   }));
   await sql`insert into "user"(id, name, email) values ('u1', 'A', 'a@x')`;

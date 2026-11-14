@@ -174,7 +174,7 @@ function fakeProvider(options: { fail?: boolean; rewrite?: boolean; onResume?: (
 
 const level = async (doc = "doc-a") => (await sql<Array<Record<string, unknown>>>`
   select images_status, resumes, resume_failures, resume_vm_launches, resume_after is not null as queued, resume_blocked, resume_lease_until is not null as leased,
-    resume_lease_owner, assets_resumable
+    resume_lease_owner, assets_resumable, resume_vm_ms::float8 as resume_vm_ms, resume_stalls, resume_grants, resume_blocked_at is not null as blocked_at
   from document_extraction_levels where document_id = ${doc}`)[0];
 const due = async (doc = "doc-a") => { await sql`update document_extraction_levels set resume_after = now() - interval '1 second' where document_id = ${doc} and resume_after is not null`; };
 
@@ -269,12 +269,13 @@ describe("the runner", () => {
       await runFigureResumes({ sql, storage, provider, workerId: "w1", env: ON });
       expect(await level()).toMatchObject({ resume_failures: attempt, leased: false });
     }
-    // R2-M3: failures count per unit; the unit is closed at three, and the next claim finds nothing runnable.
-    await due();
+    // Three launches in a row without progress (a 3-page document's launch cap is also 3): stopped `no-progress` at once,
+    // and the next claim finds nothing to run.
+    expect(await level()).toMatchObject({ resume_blocked: "no-progress", resume_stalls: 3, queued: false, images_status: "resumable", blocked_at: true });
+    await sql`update document_extraction_levels set resume_after = now() - interval '1 second' where document_id = 'doc-a'`;
     const { provider: again, jobs } = fakeProvider();
     await runFigureResumes({ sql, storage, provider: again, workerId: "w1", env: ON });
     expect(jobs).toEqual([]);
-    expect(await level()).toMatchObject({ resume_blocked: "attempts", queued: false, images_status: "resumable" });
     expect(storage.deletes).toEqual([]);
   });
 
@@ -462,19 +463,20 @@ describe("council fix round (#365): highs", () => {
     await sql`update document_extraction_levels set resume_after = now() - interval '1 second', resume_blocked = null where document_id = 'doc-a'`;
     await runFigureResumes({ sql, storage, provider, workerId: "w1", env: ON });
     expect(await level()).toMatchObject({ resume_failures: 3, resume_vm_launches: 3 });
-    // The unit's three failures close it (R2-M3): the next claim launches nothing and blocks.
+    // Three launches without progress, and the page-scaled launch cap of a 3-page document (3): stopped, no fourth VM.
     await due();
     await runFigureResumes({ sql, storage, provider, workerId: "w1", env: ON });
-    expect(await level()).toMatchObject({ resume_vm_launches: 3, resume_blocked: "attempts", queued: false });
+    expect(await level()).toMatchObject({ resume_vm_launches: 3, resume_blocked: "no-progress", queued: false });
     const events = await sql<{ metadata: Record<string, unknown> }[]>`select metadata from usage_events where metric = 'doppler-figures-resume-vm'`;
     expect(events).toHaveLength(3);
     expect(events.every((event) => event.metadata.outcome === "failed" && event.metadata.billable === false)).toBe(true);
     // Lifetime: even with the failures cleared by hand, a document past its launches is blocked at claim.
-    await sql`update document_extraction_levels set resume_failures = 0, resume_blocked = null, resume_after = now() - interval '1 second', resume_vm_launches = 6 where document_id = 'doc-a'`;
+    await sql`update document_extraction_levels set resume_failures = 0, resume_stalls = 0, resume_unit_failures = '{}'::jsonb, resume_blocked = null,
+      resume_after = now() - interval '1 second', resume_vm_launches = 3 where document_id = 'doc-a'`;
     const { provider: fresh, jobs } = fakeProvider();
     await runFigureResumes({ sql, storage, provider: fresh, workerId: "w1", env: ON });
     expect(jobs).toEqual([]);
-    expect(await level()).toMatchObject({ resume_blocked: "attempts", resume_vm_launches: 6 });
+    expect(await level()).toMatchObject({ resume_blocked: "attempts", resume_vm_launches: 3 });
   });
 
   it("H4: an organization past its daily resume VM budget is deferred to the next UTC day", async () => {
@@ -486,6 +488,200 @@ describe("council fix round (#365): highs", () => {
     const [row] = await sql<{ later: boolean }[]>`
       select resume_after > now() and resume_after <= now() + interval '25 hours' as later from document_extraction_levels where document_id = 'doc-a'`;
     expect(row).toEqual({ later: true });
+  });
+});
+
+describe("page-scaled resume budget (figure-resume-limits.ts)", () => {
+  const capped = (reason: string) => telemetry.calls.filter((call) => call.name === "resume.capped" && call.labels.reason === reason).length;
+
+  it("a small document gets 3 launches and 180 s of VM time: under a minute left, it is blocked `vm-budget` with no VM", async () => {
+    const storage = memoryStorage();
+    await partialPass(storage);
+    await sql`update document_extraction_levels set resume_vm_ms = 130000 where document_id = 'doc-a'`;
+    await due();
+    const { provider, jobs } = fakeProvider();
+    const log = vi.spyOn(console, "log");
+    await runFigureResumes({ sql, storage, provider, workerId: "w1", env: ON });
+    expect(jobs).toEqual([]);
+    expect(await level()).toMatchObject({ resume_blocked: "vm-budget", blocked_at: true, queued: false, resume_vm_launches: 0 });
+    expect(capped("vm-budget")).toBe(1);
+    // Logged with its numbers (counts only).
+    expect(log.mock.calls.map((call) => String(call[0])).find((line) => line.includes("reason=vm-budget")))
+      .toMatch(/pages=3 launches=0\/3 vmMs=130000\/180000 stalls=0\/3 grants=0/);
+    log.mockRestore();
+  });
+
+  it("each launch's timeout is capped at the document's remaining VM time, and exactly the measured time is charged to the document", async () => {
+    const storage = memoryStorage();
+    await gapPass(storage, [{ first: 3, last: 3 }]);
+    await sql`update document_extraction_levels set resume_vm_ms = 60000 where document_id = 'doc-a'`;
+    await due();
+    const { provider: inner, jobs } = gapProvider();
+    // A VM that takes measurable time, so a charge of 0 cannot pass.
+    const provider: FigureResumeProvider = { timeoutMs: inner.timeoutMs, resume: async (job, signal) => { await new Promise((r) => setTimeout(r, 40)); return inner.resume(job, signal); } };
+    const log = vi.spyOn(console, "log");
+    await runFigureResumes({ sql, storage, provider, workerId: "w1", env: ON });
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0]!.timeoutMs).toBeLessThanOrEqual(120_000);
+    const charged = Number((await level())!.resume_vm_ms) - 60_000;
+    const [day] = await sql<{ vm_ms: number }[]>`select vm_ms::float8 as vm_ms from figure_resume_org_days where org_id = 'org-a'`;
+    expect(charged).toBeGreaterThanOrEqual(35);
+    // The same measured time joins the document's budget and the organization's day.
+    expect(charged).toBe(day!.vm_ms);
+    // M3: the pass is logged against the estimate, for tuning.
+    expect(log.mock.calls.map((call) => String(call[0])).find((line) => line.includes("resume pass doc=doc-a")))
+      .toMatch(new RegExp(`pages=1 launchPages=\\d+ vmMs=${charged} msPerPage=\\S+ estimateMs=\\d+ outcome=returned`));
+    log.mockRestore();
+  });
+
+  it("H1: one unit that always fails never blocks the others: the next unit still runs and completes", async () => {
+    const storage = memoryStorage();
+    await gapPass(storage, [{ first: 2, last: 2 }, { first: 3, last: 3 }]);
+    const { provider: inner, jobs } = gapProvider();
+    const provider: FigureResumeProvider = {
+      timeoutMs: inner.timeoutMs,
+      resume: async (job, signal) => {
+        if (job.pages?.[0] === 2) { jobs.push(job); throw new Error("poisoned range"); }
+        return inner.resume(job, signal);
+      },
+    };
+    const env = { ...ON, DOCSLURP_FIGURE_RESUME_LAUNCH_FLOOR: "20" };
+    for (let pass = 0; pass < 8; pass += 1) {
+      await due();
+      await runFigureResumes({ sql, storage, provider, workerId: "w1", env });
+    }
+    const ranges = jobs.map((job) => job.pages![0]);
+    // The poisoned unit ran first, then yielded to the other unit, which completed.
+    expect(ranges.slice(0, 2)).toEqual([2, 3]);
+    expect(ranges.filter((page) => page === 3)).toHaveLength(1);
+    expect(ranges.filter((page) => page === 2).length).toBeLessThanOrEqual(3);
+    const [shard] = await sql<{ images_status: string }[]>`select images_status from document_extraction_shards where document_id = 'doc-a' and first_page = 3`;
+    expect(shard).toEqual({ images_status: "complete" });
+    const row = (await sql<Array<Record<string, unknown>>>`select resume_unit_failures, resume_blocked from document_extraction_levels where document_id = 'doc-a'`)[0]!;
+    expect(row.resume_unit_failures).toEqual({ "2-2": 3 });
+    // Nothing runnable is left: the poisoned unit is closed, and the document stops without re-queueing.
+    expect(row.resume_blocked).not.toBeNull();
+    expect(capped("no-progress") + capped("attempts")).toBe(1);
+  });
+
+  it("r2 M2: a unit closing at its own failure limit while another is open resets the document's no-progress count", async () => {
+    const storage = memoryStorage();
+    await gapPass(storage, [{ first: 2, last: 2 }, { first: 3, last: 3 }]);
+    const jobs: FigureResumeJob[] = [];
+    const provider: FigureResumeProvider = { timeoutMs: () => 60_000, resume: async (job) => { jobs.push(job); throw new Error("every range fails"); } };
+    // A no-progress limit above the unit failure limit (3): the units close one at a time before the document stops.
+    const env = { ...ON, DOCSLURP_FIGURE_RESUME_LAUNCH_FLOOR: "20", DOCSLURP_FIGURE_RESUME_NO_PROGRESS: "5" };
+    for (let pass = 0; pass < 10; pass += 1) {
+      await due();
+      await runFigureResumes({ sql, storage, provider, workerId: "w1", env });
+    }
+    // 2-2's third failure closes it with 3-3 still open: the document's count resets (5 in a row would have stopped it
+    // `no-progress` before 3-3's third attempt). 3-3 then closes too, and nothing runnable is left.
+    expect(jobs.map((job) => job.pages![0])).toEqual([2, 3, 2, 3, 2, 3]);
+    expect(await level()).toMatchObject({ resume_blocked: "attempts", resume_vm_launches: 6, resume_stalls: 1, queued: false });
+    expect(telemetry.calls.filter((call) => call.name === "resume.unit_closed").map((call) => call.labels)).toEqual([{ reason: "failures" }]);
+    expect(capped("no-progress")).toBe(0);
+  });
+
+  it("r2 M2: a unit at its own no-progress limit is closed, even with no failures, and the other units still run", async () => {
+    const storage = memoryStorage();
+    await gapPass(storage, [{ first: 2, last: 2 }, { first: 3, last: 3 }]);
+    await sql`update document_extraction_levels set resume_unit_stalls = '{"2-2": 3}'::jsonb where document_id = 'doc-a'`;
+    const { provider, jobs } = gapProvider();
+    for (let pass = 0; pass < 4; pass += 1) {
+      await due();
+      await runFigureResumes({ sql, storage, provider, workerId: "w1", env: ON });
+    }
+    expect(jobs.map((job) => job.pages![0])).toEqual([3]);
+    // A grant raises the unit's limit (its count is kept), so it runs again.
+    await sql`update document_extraction_levels set resume_blocked = null, resume_grants = 1, resume_after = now() - interval '1 second' where document_id = 'doc-a'`;
+    await runFigureResumes({ sql, storage, provider, workerId: "w1", env: ON });
+    expect(jobs.map((job) => job.pages![0])).toEqual([3, 2]);
+  });
+
+  it("H1: when every unit fails, the document still stops `no-progress` after N launches in a row, across units", async () => {
+    const storage = memoryStorage();
+    await gapPass(storage, [{ first: 2, last: 2 }, { first: 3, last: 3 }]);
+    const jobs: FigureResumeJob[] = [];
+    const provider: FigureResumeProvider = { timeoutMs: () => 60_000, resume: async (job) => { jobs.push(job); throw new Error("every range fails"); } };
+    const env = { ...ON, DOCSLURP_FIGURE_RESUME_LAUNCH_FLOOR: "20" };
+    for (let pass = 0; pass < 6; pass += 1) {
+      await due();
+      await runFigureResumes({ sql, storage, provider, workerId: "w1", env });
+    }
+    // Fewest strikes first: the failures alternate between units, and three in a row stop the document.
+    expect(jobs.map((job) => job.pages![0])).toEqual([2, 3, 2]);
+    expect(await level()).toMatchObject({ resume_blocked: "no-progress", resume_stalls: 3, resume_vm_launches: 3, queued: false });
+    const [row] = await sql<{ f: Record<string, number>; s: Record<string, number> }[]>`
+      select resume_unit_failures as f, resume_unit_stalls as s from document_extraction_levels where document_id = 'doc-a'`;
+    expect(row).toEqual({ f: { "2-2": 2, "3-3": 1 }, s: { "2-2": 2, "3-3": 1 } });
+  });
+
+  it("a huge document keeps resuming past the old cap of 12 launches, up to its own page-scaled cap", async () => {
+    const storage = memoryStorage();
+    await partialPass(storage);
+    await sql`update documents set page_count = 20000 where id = 'doc-a'`;
+    try {
+      await sql`update document_extraction_levels set resume_vm_launches = 12 where document_id = 'doc-a'`;
+      await due();
+      const claimed = await claimFigureResume(sql, "w1", ON);
+      expect(claimed?.document_id).toBe("doc-a");
+      await sql`update document_extraction_levels set resume_lease_until = null, resume_lease_owner = null, resume_vm_launches = 95 where document_id = 'doc-a'`;
+      expect(await claimFigureResume(sql, "w1", ON)).toBeNull();
+      expect(await level()).toMatchObject({ resume_blocked: "attempts", queued: false });
+      expect(capped("attempts")).toBe(1);
+      // An operator can lower the ceiling (DOCSLURP_FIGURE_RESUME_LAUNCH_CEILING) for the same document.
+      await sql`update document_extraction_levels set resume_blocked = null, resume_after = now() - interval '1 second', resume_vm_launches = 12 where document_id = 'doc-a'`;
+      expect(await claimFigureResume(sql, "w1", { ...ON, DOCSLURP_FIGURE_RESUME_LAUNCH_CEILING: "12" })).toBeNull();
+      expect(await level()).toMatchObject({ resume_blocked: "attempts" });
+    } finally {
+      await sql`update documents set page_count = 3 where id = 'doc-a'`;
+    }
+  });
+
+  it("no progress: N launched resumes in a row that add nothing stop the document (`no-progress`), before the unit's failure cap", async () => {
+    const storage = memoryStorage();
+    await partialPass(storage);
+    const env = { ...ON, DOCSLURP_FIGURE_RESUME_NO_PROGRESS: "2" };
+    const { provider } = fakeProvider({ fail: true });
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      await due();
+      await runFigureResumes({ sql, storage, provider, workerId: "w1", env });
+    }
+    expect(await level()).toMatchObject({ resume_failures: 2, resume_stalls: 2, resume_vm_launches: 2, resume_blocked: "no-progress", queued: false });
+    expect(capped("no-progress")).toBe(1);
+  });
+
+  it("progress resets the no-progress count; a resume that never launched a VM does not count", async () => {
+    const storage = memoryStorage();
+    await partialPass(storage);
+    await sql`update document_extraction_levels set resume_stalls = 2 where document_id = 'doc-a'`;
+    // Under a minute of daily budget left: deferred, no VM, the count stays.
+    await sql`insert into figure_resume_org_days (org_id, day, launches, vm_ms) values ('org-a', (now() at time zone 'utc')::date, 1, ${120 * 60_000 - 30_000})`;
+    await due();
+    const { provider, jobs } = fakeProvider();
+    await runFigureResumes({ sql, storage, provider, workerId: "w1", env: ON });
+    expect(jobs).toEqual([]);
+    expect(await level()).toMatchObject({ resume_stalls: 2, resume_blocked: null });
+    await sql`delete from figure_resume_org_days`;
+    await sql`update document_extraction_levels set resume_after = now() - interval '1 second' where document_id = 'doc-a'`;
+    await runFigureResumes({ sql, storage, provider, workerId: "w1", env: ON });
+    expect(jobs).toHaveLength(1);
+    expect(await level()).toMatchObject({ resume_stalls: 0, resume_blocked: null, images_status: "complete" });
+  });
+
+  it("a request grant raises the caps: a 3-page document blocked at 3 launches resumes again", async () => {
+    const storage = memoryStorage();
+    await partialPass(storage);
+    await sql`update document_extraction_levels set resume_vm_launches = 3, resume_after = now() - interval '1 second' where document_id = 'doc-a'`;
+    expect(await claimFigureResume(sql, "w1", ON)).toBeNull();
+    expect(await level()).toMatchObject({ resume_blocked: "attempts" });
+    // What the API's request does for a budget block (server figure-resume.ts): one grant, the block cleared.
+    await sql`update document_extraction_levels set resume_blocked = null, resume_grants = 1, resume_after = now() - interval '1 second' where document_id = 'doc-a'`;
+    const { provider, jobs } = fakeProvider();
+    await runFigureResumes({ sql, storage, provider, workerId: "w1", env: ON });
+    expect(jobs).toHaveLength(1);
+    expect(await level()).toMatchObject({ resume_vm_launches: 4, images_status: "complete" });
   });
 });
 
@@ -502,11 +698,13 @@ describe("council fix round (#365): mediums", () => {
     await sql`update document_extraction_levels set markdown_complete = false where document_id = 'doc-a'`;
     expect(await claimFigureResume(sql, "w1", ON)).toBeNull();
     // A fresh pass in a new run: failures, launches, the block and the lease all start again.
-    await sql`update document_extraction_levels set markdown_complete = true, resume_failures = 2, resume_vm_launches = 4, resume_blocked = 'stale',
+    await sql`update document_extraction_levels set markdown_complete = true, resume_failures = 2, resume_vm_launches = 4, resume_blocked = 'vm-budget',
+      resume_blocked_at = now(), resume_vm_ms = 999000, resume_stalls = 2, resume_grants = 2,
       resume_lease_owner = 'w9', resume_lease_until = now() + interval '1 hour' where document_id = 'doc-a'`;
     await sql`update documents set run_id = 'run-a2' where id = 'doc-a'`;
     await partialPass(storage, "doc-a", "org-a", "proj-a", "run-a2");
-    expect(await level()).toMatchObject({ resume_failures: 0, resume_vm_launches: 0, resume_blocked: null, leased: false, resume_lease_owner: null, queued: true });
+    expect(await level()).toMatchObject({ resume_failures: 0, resume_vm_launches: 0, resume_blocked: null, leased: false, resume_lease_owner: null, queued: true,
+      resume_vm_ms: 0, resume_stalls: 0, resume_grants: 0, blocked_at: false });
   });
 
   it("M2: a runner that lost its lease never overwrites the new owner's queue state", async () => {
