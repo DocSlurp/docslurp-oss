@@ -15,7 +15,8 @@ export async function requestDocumentPageRender(documentId: string, pageNumber: 
   if (!Number.isInteger(pageNumber) || pageNumber < 1 || pageNumber > doc.pageCount) return { status: "missing" as const };
   if (start) {
     const access = await getProjectAccess(doc.projectId, userId);
-    if (!access || !canEditProject(access, userId)) return { status: "missing" as const };
+    // Starting a render spends: editors only. The document is visible here, so say so (403), not "missing".
+    if (!access || !canEditProject(access, userId)) return { status: "editor-required" as const };
   }
   const observation=doc.runId?{kind:"page-image" as const,documentId:doc.id,runId:doc.runId,pageNumber,quality}:undefined;
   const dpi = pageRenderDpi(quality);

@@ -18,7 +18,8 @@ describe("exact page image requests", () => {
     expect(await requestDocumentPageRender("doc", 4, "user", true, () => {})).toEqual({ status: "missing" });
     expect(await requestDocumentPageRender("doc", 0, "user", true, () => {})).toEqual({ status: "missing" });
     vi.mocked(canEditProject).mockReturnValue(false);
-    expect(await requestDocumentPageRender("doc", 3, "user", true, () => {})).toEqual({ status: "missing" });
+    // A read-only user may see the document: starting a render is refused as editor-only (403), not "missing".
+    expect(await requestDocumentPageRender("doc", 3, "user", true, () => {})).toEqual({ status: "editor-required" });
     vi.mocked(canEditProject).mockReturnValue(true);
     vi.mocked(getDocumentViewerPayload).mockResolvedValue({ ...viewer, source: { url: "" } } as never);
     expect(await requestDocumentPageRender("doc", 3, "user", true, () => {})).toMatchObject({ status: "unavailable", reason: "withheld", document: { id: "doc" } });
@@ -48,7 +49,8 @@ describe("exact page image requests", () => {
   it("requires editor access even when a POST could return cached pixels", async () => {
     vi.mocked(getDocumentViewerPayload).mockResolvedValue({ ...viewer, artifacts: [{ slot: "doc:raster-v3-reader-120dpi-page-3", url: "/signed", uri: "s3://page" }] } as never);
     vi.mocked(canEditProject).mockReturnValue(false);
-    expect(await requestDocumentPageRender("doc", 3, "user", true, () => {})).toEqual({ status: "missing" });
+    // A read-only user may see the document: starting a render is refused as editor-only (403), not "missing".
+    expect(await requestDocumentPageRender("doc", 3, "user", true, () => {})).toEqual({ status: "editor-required" });
     expect(await requestDocumentPageRender("doc", 3, "user", false, () => {})).toMatchObject({ status: "ready" });
   });
   it("queues only the exact authorized known page", async () => {

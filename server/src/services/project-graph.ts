@@ -1,3 +1,4 @@
+import { EDITOR_REQUIRED_CODE, EDITOR_REQUIRED_MESSAGE } from "@docslurp/shared";
 import { randomUUID } from "node:crypto";
 
 import {
@@ -42,6 +43,7 @@ export class ProjectGraphError extends Error {
     message: string,
     readonly status: 400 | 403 | 404 | 409,
     readonly activeJob?: GraphJob,
+    readonly code?: typeof EDITOR_REQUIRED_CODE,
   ) {
     super(message);
   }
@@ -146,7 +148,7 @@ async function requireProject(projectRef: string, userId: string, edit: boolean)
   if (edit) {
     const access = await getProjectAccess(project.id, userId);
     if (!access || !canEditProject(access, userId)) {
-      throw new ProjectGraphError("You cannot change this project", 403);
+      throw new ProjectGraphError(EDITOR_REQUIRED_MESSAGE, 403, undefined, EDITOR_REQUIRED_CODE);
     }
   }
   return project;

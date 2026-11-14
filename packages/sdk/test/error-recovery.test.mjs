@@ -78,3 +78,20 @@ test("nonretryable AI refusals still expose the wait without replaying the call"
   });
   assert.equal(calls, 1);
 });
+
+test("editor_required keeps its code and the reviewed message, and is not retried", async () => {
+  let calls = 0;
+  const client = createDocSlurpClient({ apiUrl: "https://example.test", fetch: async () => {
+    calls++;
+    return json({ error: { code: "editor_required", message: "raw server text", requestId: "req-ed" } }, 403);
+  } });
+  await assert.rejects(client.getRun("run"), error => {
+    assert.ok(error instanceof DocSlurpApiError);
+    assert.equal(error.status, 403);
+    assert.equal(error.code, "editor_required");
+    assert.equal(error.message, "This needs edit access to the project. Ask a project editor or an organization admin.");
+    assert.equal(error.requestId, "req-ed");
+    return true;
+  });
+  assert.equal(calls, 1);
+});

@@ -168,6 +168,7 @@ export const documentsRoutes = new Hono()
         document => assertApiKeyProjectScope(c.get("apiKey"), document), quality);
       if (result.status === "busy") { c.header("Retry-After", "5"); return apiStatusError(c, 429, "Page image queue is busy"); }
       if (result.status === "missing") return apiStatusError(c, 404, "Document page not found");
+      if (result.status === "editor-required") return editorRequired(c);
       // An expected partial-data state, not an error: a typed 200 the client shows calmly (ingest-version.ts). The
       // refusal itself is unchanged; a document without a current parse decision is never rendered.
       if (result.status === "unavailable" || result.status === "rescan-required") {

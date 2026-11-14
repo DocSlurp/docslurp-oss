@@ -65,6 +65,12 @@ export function isDefaultProjectAlias(projectId: string | null | undefined): boo
 
 export const projectSchema = z.object({
   id: z.string(),
+  /**
+   * Whether this caller may change the project or its documents: reprocess, retry, re-index, full index, settings,
+   * deletes and tags. The same rule as a document's `canReprocess` (an editor or admin; a server key also needs
+   * `ingest`). Present on project reads (list, detail, dashboard bootstrap); clients hide change actions without it.
+   */
+  canEdit: z.boolean().optional(),
   /** Readable URL identifier (e.g. amber-falcon-ridge); prefer it over the UUID in links. */
   slug: z.string(),
   userId: z.string(),

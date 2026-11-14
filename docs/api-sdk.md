@@ -425,6 +425,14 @@ for the reconciler, Token authentication, bucket filter and deployment order.
 
 ## API changes
 
+- **2026-11-13, non-breaking.**
+  - Project reads (`GET /v1/projects`, `GET /v1/projects/:project` and the dashboard bootstrap) carry `canEdit`: whether this caller may change the project or its documents. It uses the same rule as a document's `canReprocess`.
+  - More editor-only refusals now answer `403 editor_required` to a caller who can see the project. Earlier they answered `403 forbidden`, `403 project_forbidden`, `400` or `404`:
+    - knowledge-graph settings, rebuild, its estimate and cancel;
+    - chat-instructions Improve;
+    - starting a page render (`POST /v1/documents/:id/pages/:n/image`);
+    - project clone and version rollback.
+  - The SDK (`DocSlurpApiError.code`) and the CLI (`--json` `error.code`) keep the `editor_required` code and show its reviewed message.
 - **2026-11-13, breaking.** Changing a project or its documents now needs edit access, in the organization's default project too. Viewers and plain members are read-only everywhere.
   - **Who has edit access:** org owners and admins, the project's owner, and its admins and editors. A server key needs `ingest` (or `projects:manage` for settings), and its user needs edit access.
   - **The refusal:** a caller who can see the project or document but may not change it gets `403` with code `editor_required` and one message: "This needs edit access to the project. Ask a project editor or an organization admin." See [error codes](#editor-required). Earlier, some of these routes answered `404` or `forbidden`, and default-project members were allowed. Content outside your organization is still `404`.

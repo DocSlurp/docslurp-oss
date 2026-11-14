@@ -1,9 +1,10 @@
 import type { Context } from "hono";
 import { apiKeyCanUseProject } from "./api-key-project-scope.js";
+import { getRequestActor } from "./request-actor.js";
 import { apiErrorResponse, apiStatusError } from "./api-error.js";
 import { EDITOR_REQUIRED_CODE, EDITOR_REQUIRED_MESSAGE } from "@docslurp/shared";
 import { apiKeyCanUpdateContent, CONTENT_UPDATE_SCOPE_MESSAGE } from "./content-update-access.js";
-import { canEditProject, getProjectAccess } from "../services/organizations.js";
+import { canEditProject, getProjectAccess, listReprocessableProjectIds } from "../services/organizations.js";
 
 /**
  * Who may reprocess or spend credits on existing content (owner decision, council L3, 2026-11-13): a session that may
@@ -56,4 +57,16 @@ export async function denyReprocessOfVisible(c: Context, targets: ReadonlyArray<
     if (!await callerCanReprocess(c, target)) return editorRequired(c);
   }
   return null;
+}
+
+/**
+ * Project records with this caller's `canEdit` (the callerCanReprocess rule: an editor or admin of the project; a server
+ * key also needs content-update scope and must be allowed the project). One lookup for the whole list.
+ */
+export async function withCanEdit<T extends { id: string; orgId: string }>(c: Context, projects: T[]): Promise<Array<T & { canEdit: boolean }>> {
+  const userId = getRequestActor(c).userId as string | undefined;
+  const apiKey = c.get("apiKey");
+  const editable = userId && projects.length > 0 ? new Set(await listReprocessableProjectIds(userId)) : new Set<string>();
+  const keyMay = (project: T) => !apiKey || (apiKeyCanUpdateContent(apiKey) && apiKeyCanUseProject(apiKey, { orgId: project.orgId, projectId: project.id }));
+  return projects.map((project) => ({ ...project, canEdit: editable.has(project.id) && keyMay(project) }));
 }
