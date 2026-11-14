@@ -131,7 +131,8 @@ export async function ocrDocument(input: OcrDocumentInput): Promise<OcrDocumentR
         ...(page.sourceWidth && page.sourceHeight ? { sourceWidth: page.sourceWidth, sourceHeight: page.sourceHeight } : {}) });
     }
     // A page reader or hosted escalation read may hold model HTML tables: read in the parser VM (one job per document) and rebuilt.
-    if (escalation || pageReader?.replaced) await rebuildPageTables(pages, input);
+    // Decided from the pages themselves, so pages a reader replaced before a later error in its path are still rebuilt.
+    if (escalation || pages.some((page) => page.reader.startsWith("page-reader:"))) await rebuildPageTables(pages, input);
     return {
       mode: outcome.mode,
       pages,

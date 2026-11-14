@@ -434,6 +434,26 @@ describe("ocrDocument with the page reader", () => {
     expect(result.pageReader).toMatchObject({ mode: "escalation", attempted: 2, replaced: 1, failed: { capacity: 1 } });
   });
 
+  it("still rebuilds tables of pages the reader replaced when a later step in the reader path throws", async () => {
+    const provider = reader(async (job) => ({ results: job.pages.map((page) => ({ key: page.key, status: "read" as const, markdown: "<table><tr><td>a</td></tr></table>" })), usage: [] }));
+    registerExtractorPlugin({ apiVersion: EXTRACTOR_PLUGIN_API_VERSION, name: "test-reader-plugin", pageImageReader: provider });
+    const { runner } = fakeOcrRunner(() => [{ frame: 1, text: "low", meanConfidence: 0.3, image: true }]);
+    const state = runState();
+    // The reader's own charge (made after its text is applied) throws; the recogniser's charges go through.
+    const original = state.usageLedger.chargeRichPage.bind(state.usageLedger);
+    vi.spyOn(state.usageLedger, "chargeRichPage").mockImplementation((charge) => {
+      if (charge.readBy === "ocr-page-reader") throw new Error("ledger down");
+      return original(charge);
+    });
+    const tables = await import("../../pipeline/vision-tables-vm.js");
+    const sanitize = vi.spyOn(tables, "sanitizeVisionPageTables");
+    const result = await ocrDocument({ runner, state, documentId: "doc-1", source, kind: "pdf", pages: [1], stage: "s",
+      env: { DOCSLURP_OCR_MODE: "vm", DOCSLURP_OCR_SCRATCH_DIR: scratch, DOCSLURP_OCR_PAGE_READER: "escalation" } });
+    expect(result.pageReader).toBeUndefined();
+    expect(result.pages[0]!.reader).toBe("page-reader:test-page-reader");
+    expect(sanitize).toHaveBeenCalledTimes(1);
+  });
+
   it("keeps candidate frames for the reader even when hosted escalation is off, and never calls the hosted reader", async () => {
     const provider = reader(echo);
     registerExtractorPlugin({ apiVersion: EXTRACTOR_PLUGIN_API_VERSION, name: "test-reader-plugin", pageImageReader: provider });
