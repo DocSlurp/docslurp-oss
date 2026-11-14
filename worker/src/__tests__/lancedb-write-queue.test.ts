@@ -268,6 +268,40 @@ describe("LanceDbWriteQueue", () => {
     expect(maintain).toHaveBeenCalledTimes(2);
   }, 30_000);
 
+  it("a write-triggered pass that compacted schedules the prune of what it replaced", async () => {
+    const key = lanceTableKey(dir, TABLE);
+    const pool = new KeyedTaskPool({ concurrency: 1, log: () => undefined });
+    const background = {
+      enabled: true, mode: "background" as const, vectorIndexMinRows: 1_000_000, optimizeEveryRows: 20_000,
+      optimizeIntervalMs: 300_000, versionRetentionMs: 600_000,
+    };
+    const maintain = vi.fn(async () => ({ ok: true, rows: 10, optimizedMs: 1, indexCreated: false, fragmentsRemoved: 2 }));
+    await queue({ maintain, maintenance: { ...background, enabled: false }, pool }).indexDocument(job("hp-3", makeDocument("hp-3", 10), 10));
+    // Due by the write counters only; no delete has marked it.
+    await sql`update vector_index_tables set last_optimized_at = null, history_prune_due_at = null where table_key = ${key}`;
+    expect(await queue({ maintain, maintenance: background, pool }).sweepDueMaintenance()).toBe(1);
+    await pool.idle();
+    const [row] = await sql<{ seconds: number }[]>`
+      select extract(epoch from history_prune_due_at - now())::int as seconds from vector_index_tables where table_key = ${key}`;
+    expect(row!.seconds).toBeGreaterThanOrEqual(600);
+  }, 30_000);
+
+  it("inline and direct-write deployments sweep due history prunes only", async () => {
+    const key = lanceTableKey(dir, TABLE);
+    const pool = new KeyedTaskPool({ concurrency: 1, log: () => undefined });
+    const inline = { enabled: true, mode: "inline" as const, vectorIndexMinRows: 1_000_000, optimizeEveryRows: 5, optimizeIntervalMs: 1_000, versionRetentionMs: 600_000 };
+    const maintain = vi.fn(async () => ({ ok: true, rows: 10, optimizedMs: 1, indexCreated: false, fragmentsRemoved: 0 }));
+    await queue({ maintain, maintenance: { ...inline, enabled: false }, pool }).indexDocument(job("hp-4", makeDocument("hp-4", 10), 10));
+    const q = queue({ maintain, maintenance: inline, pool });
+    // Due by the write counters, which this sweep ignores.
+    await sql`update vector_index_tables set rows_since_optimize = 50, last_optimized_at = now() - interval '1 hour' where table_key = ${key}`;
+    expect(await q.sweepDueMaintenance(50, true)).toBe(0);
+    await sql`update vector_index_tables set history_prune_due_at = now() - interval '1 second' where table_key = ${key}`;
+    expect(await q.sweepDueMaintenance(50, true)).toBe(1);
+    await pool.idle();
+    expect(maintain).toHaveBeenCalledTimes(1);
+  }, 30_000);
+
   it("keeps a history prune that a delete scheduled while maintenance was running", async () => {
     const key = lanceTableKey(dir, TABLE);
     const pool = new KeyedTaskPool({ concurrency: 1, log: () => undefined });

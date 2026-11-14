@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import type { Sql } from "postgres";
 import {
@@ -138,6 +138,55 @@ function propagateLabels(ids: string[], edges: Array<{ source: string; target: s
   return [...groups.values()];
 }
 
+type SummaryInputNode = { id: string; name: string; type: string };
+type SummaryInputEdge = { source: string; target: string; predicate: string };
+
+/**
+ * What a community's summary is written from: its member entities and the relations between
+ * them. `member_hash` covers node ids only, so a summary keyed on it alone outlives a relation
+ * (or an entity's name) that the document it came from took with it. Weights and mention counts
+ * are left out: they change with every document and never justify a new summary on their own.
+ */
+export function communityInputHashes(
+  communities: Array<{ memberHash: string; nodeIds: string[] }>,
+  nodes: SummaryInputNode[],
+  edges: SummaryInputEdge[],
+): Map<string, string> {
+  const nodesById = new Map(nodes.map((node) => [node.id, node]));
+  const communitiesByNode = new Map<string, number[]>();
+  communities.forEach((community, index) => {
+    for (const nodeId of community.nodeIds) {
+      const list = communitiesByNode.get(nodeId);
+      if (list) list.push(index);
+      else communitiesByNode.set(nodeId, [index]);
+    }
+  });
+  const relations: string[][] = communities.map(() => []);
+  for (const edge of edges) {
+    const targets = new Set(communitiesByNode.get(edge.target));
+    for (const index of communitiesByNode.get(edge.source) ?? []) {
+      if (targets.has(index)) relations[index]!.push(JSON.stringify([edge.source, edge.predicate, edge.target]));
+    }
+  }
+  const hashes = new Map<string, string>();
+  communities.forEach((community, index) => {
+    const hash = createHash("sha256");
+    for (const nodeId of [...community.nodeIds].sort()) {
+      const node = nodesById.get(nodeId);
+      // A member that no longer exists never matches a hash taken while it did.
+      hash.update(JSON.stringify(node ? [node.id, node.name, node.type] : [nodeId, null]));
+      hash.update("\n");
+    }
+    hash.update("--\n");
+    for (const relation of relations[index]!.sort()) {
+      hash.update(relation);
+      hash.update("\n");
+    }
+    hashes.set(community.memberHash, hash.digest("hex"));
+  });
+  return hashes;
+}
+
 function hashMembers(ids: string[], level = 0): string {
   let hash = 0x811c9dc5;
   const text = `${level}|${[...ids].sort().join(",")}`;
@@ -191,26 +240,28 @@ export async function refreshProjectCommunities(args: {
     from kg_edges where project_id = ${projectId}
   `;
   const detected = detectCommunities([...nodes], [...edges]);
-  const existing = await sql<{ member_hash: string; label: string; summary: string; summary_source: string | null }[]>`
-    select member_hash, label, summary, metadata->>'summarySource' as summary_source
+  const existing = await sql<{ member_hash: string; label: string; summary: string; summary_source: string | null; input_hash: string | null }[]>`
+    select member_hash, label, summary, metadata->>'summarySource' as summary_source, metadata->>'inputHash' as input_hash
     from kg_communities
     where project_id = ${projectId} and member_hash is not null
   `;
   const previous = new Map(existing.map((row) => [row.member_hash, row]));
   const nodesById = new Map(nodes.map((node) => [node.id, node]));
+  const inputHashes = communityInputHashes(detected, nodes, edges);
 
   const result: CommunityRefreshResult = { communities: detected.length, summarized: 0, reused: 0, inputTokens: 0, outputTokens: 0 };
-  const records: Array<{
+  const all: Array<{
     id: string;
     level: number;
     label: string;
     summary: string;
     summarySource: "llm" | "heuristic" | null;
     memberHash: string;
+    inputHash: string;
     nodeIds: string[];
     childHashes: string[];
   }> = [];
-  const pending: Array<{ record: (typeof records)[number]; prompt: string }> = [];
+  const pending: Array<{ record: (typeof all)[number]; prompt: string }> = [];
   // Largest communities first, so the LLM cap goes where retrieval benefits most.
   const ordered = [...detected].sort((left, right) => right.nodeIds.length - left.nodeIds.length);
   let llmBudget = MAX_SUMMARIZED_GRAPH_COMMUNITIES;
@@ -221,14 +272,17 @@ export async function refreshProjectCommunities(args: {
       .filter((node): node is (typeof nodes)[number] => Boolean(node))
       .sort((left, right) => right.mentions - left.mentions);
     const label = members.slice(0, 5).map((member) => member.name).join(", ").slice(0, 120) || "Graph community";
+    const inputHash = inputHashes.get(community.memberHash)!;
     const reused = previous.get(community.memberHash);
+    // Reuse only a summary written from exactly these entities and relations: one written while
+    // a since-removed document still supplied a relation must not outlive it.
     // A heuristic stand-in (the model was unavailable last time) is summarized again once a model is.
-    if (reused && !(args.context.apiKey && reused.summary_source === "heuristic")) {
+    if (reused && reused.input_hash === inputHash && !(args.context.apiKey && reused.summary_source === "heuristic")) {
       result.reused += 1;
-      records.push({
+      all.push({
         id: randomUUID(), level: community.level, label: reused.label, summary: reused.summary,
         summarySource: reused.summary_source === "llm" || reused.summary_source === "heuristic" ? reused.summary_source : null,
-        memberHash: community.memberHash, nodeIds: community.nodeIds, childHashes: community.childHashes,
+        memberHash: community.memberHash, inputHash, nodeIds: community.nodeIds, childHashes: community.childHashes,
       });
       continue;
     }
@@ -241,9 +295,9 @@ export async function refreshProjectCommunities(args: {
       .slice(0, 8)
       .map((edge) => `${nodesById.get(edge.source)?.name ?? edge.source} -> ${edge.predicate} -> ${nodesById.get(edge.target)?.name ?? edge.target} (weight: ${edge.weight})`);
     const summary = `Community focus: ${memberLabels.join(", ")}. Strongest relations: ${edgeLabels.join("; ") || "sparse graph connections"}.`.slice(0, MAX_COMMUNITY_SUMMARY_CHARS);
-    const record: (typeof records)[number] = { id: randomUUID(), level: community.level, label, summary, summarySource: "heuristic", memberHash: community.memberHash, nodeIds: community.nodeIds, childHashes: community.childHashes };
+    const record: (typeof all)[number] = { id: randomUUID(), level: community.level, label, summary, summarySource: "heuristic", memberHash: community.memberHash, inputHash, nodeIds: community.nodeIds, childHashes: community.childHashes };
     result.summarized += 1;
-    records.push(record);
+    all.push(record);
     if (args.context.apiKey && llmBudget > 0) {
       llmBudget -= 1;
       pending.push({
@@ -311,11 +365,24 @@ export async function refreshProjectCommunities(args: {
     console.warn(`[graph-communities] project=${projectId} model=${args.context.model} llm_fallback communities=${llmFailures}/${pending.length} first=${operationErrorSummary(firstFailure ?? {})}`);
   }
 
-  const idByHash = new Map(records.map((record) => [record.memberHash, record.id]));
   await sql.begin(async (tx) => {
     const client = tx as unknown as Client;
     await lockProjectGraph(client, projectId);
     await client`delete from kg_communities where project_id = ${projectId}`;
+    // The graph was read, and the summaries written, without the lock. A document deleted or
+    // re-extracted since then may have taken entities or relations with it; a community whose
+    // inputs changed is dropped here (the next refresh rebuilds it), never published stale.
+    const currentNodes = await client<SummaryInputNode[]>`
+      select id, canonical_name as name, entity_type as type from kg_nodes where project_id = ${projectId}
+    `;
+    const currentEdges = await client<SummaryInputEdge[]>`
+      select source_node_id as source, target_node_id as target, normalized_predicate as predicate
+      from kg_edges where project_id = ${projectId}
+    `;
+    const currentHashes = communityInputHashes(all, [...currentNodes], [...currentEdges]);
+    const records = all.filter((record) => currentHashes.get(record.memberHash) === record.inputHash);
+    result.communities = records.length;
+    const idByHash = new Map(records.map((record) => [record.memberHash, record.id]));
     if (!records.length) return;
     await client`
       insert into kg_communities (id, project_id, run_id, user_id, level, label, summary, member_count, member_hash, metadata)
@@ -329,6 +396,7 @@ export async function refreshProjectCommunities(args: {
         ${client.array(records.map((record) => record.memberHash))}::text[],
         ${client.array(records.map((record) => JSON.stringify({
           childCommunityIds: record.childHashes.map((hash) => idByHash.get(hash)).filter(Boolean),
+          inputHash: record.inputHash,
           ...(record.summarySource ? { summarySource: record.summarySource } : {}),
         })))}::text[]
       ) as community(id, level, label, summary, member_count, member_hash, metadata)

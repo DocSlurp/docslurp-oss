@@ -153,8 +153,11 @@ export function historyPruneDelayMs(versionRetentionMs: number | undefined): num
 /**
  * Records that rows were deleted from a table, so the maintenance sweep prunes them out of the
  * table's history once the retention window has passed, even if nobody writes to it again.
- * Only tables the write queue tracks are marked; a table written in direct mode has no row here
- * and is pruned by its next write's maintenance.
+ *
+ * Call it after the Lance delete and outside the transaction that drove it: the due time is the
+ * statement's clock, and the write queue updates this same row on every lease renewal, so a
+ * long transaction must not hold its lock. A table the write queue never registered (direct
+ * write mode, page vectors written directly) is registered here.
  */
 export async function markLanceDbHistoryPruneDue(
   sql: postgres.Sql<Record<string, unknown>>,
@@ -164,10 +167,14 @@ export async function markLanceDbHistoryPruneDue(
 ): Promise<void> {
   const delayMs = historyPruneDelayMs(versionRetentionMs);
   await sql`
-    update vector_index_tables set
-      history_prune_due_at = greatest(coalesce(history_prune_due_at, '-infinity'::timestamptz), now() + (${delayMs} * interval '1 millisecond')),
-      updated_at = now()
-    where table_key = ${lanceTableKey(uri, table)}`;
+    insert into vector_index_tables (table_key, lance_uri, lance_table, history_prune_due_at)
+    values (${lanceTableKey(uri, table)}, ${uri}, ${table}, clock_timestamp() + (${delayMs} * interval '1 millisecond'))
+    on conflict (table_key) do update set
+      history_prune_due_at = greatest(
+        coalesce(vector_index_tables.history_prune_due_at, '-infinity'::timestamptz), excluded.history_prune_due_at),
+      lance_uri = coalesce(vector_index_tables.lance_uri, excluded.lance_uri),
+      lance_table = coalesce(vector_index_tables.lance_table, excluded.lance_table),
+      updated_at = now()`;
 }
 
 function errorText(error: unknown): string {
@@ -273,8 +280,13 @@ export class LanceDbWriteQueue {
    * policy and not leased, including tables nobody has written to since (their unindexed tail
    * would otherwise wait for the next write). Returns the number of checks scheduled.
    */
-  async sweepDueMaintenance(limit = 50): Promise<number> {
+  async sweepDueMaintenance(limit = 50, historyPruneOnly = false): Promise<number> {
     if (!this.deps.maintenance.enabled) return 0;
+    // Inline and direct-write deployments maintain after writes only, except for due history
+    // prunes: deleted rows must leave a table nobody writes to again.
+    const due = historyPruneOnly
+      ? this.sql`t.maint_expires_at < now() and t.history_prune_due_at <= now()`
+      : this.dueSql();
     // The table's own location; the outbox only for rows registered before migration 0083.
     const rows = await this.sql<{ table_key: string; lance_uri: string; lance_table: string }[]>`
       select t.table_key, coalesce(t.lance_uri, o.lance_uri) as lance_uri, coalesce(t.lance_table, o.lance_table) as lance_table
@@ -283,7 +295,7 @@ export class LanceDbWriteQueue {
         select lance_uri, lance_table from vector_index_outbox o
         where t.lance_uri is null and o.table_key = t.table_key order by o.id desc limit 1
       ) o on true
-      where ${this.dueSql()} and coalesce(t.lance_uri, o.lance_uri) is not null
+      where ${due} and coalesce(t.lance_uri, o.lance_uri) is not null
       order by t.last_optimized_at nulls first
       limit ${limit}`;
     let scheduled = 0;
@@ -535,11 +547,11 @@ export class LanceDbWriteQueue {
     const policy = this.deps.maintenance;
     const holder = `${this.workerId}:${randomUUID()}`;
     const ttlMs = policy.leaseTtlMs ?? 600_000;
-    const [claim] = await this.sql<{ rows_since_optimize: string | number; commits_since_optimize: number; prune_due: boolean }[]>`
+    const [claim] = await this.sql<{ rows_since_optimize: string | number; commits_since_optimize: number }[]>`
       update vector_index_tables t set maint_holder = ${holder},
         maint_expires_at = now() + (${ttlMs} * interval '1 millisecond'), updated_at = now()
       where t.table_key = ${tableKey} and ${this.dueSql()}
-      returning t.rows_since_optimize, t.commits_since_optimize, coalesce(t.history_prune_due_at <= now(), false) as prune_due`;
+      returning t.rows_since_optimize, t.commits_since_optimize`;
     if (!claim) return null;
     const snapshot = Number(claim.rows_since_optimize);
     const commitsSnapshot = Number(claim.commits_since_optimize);
@@ -564,18 +576,20 @@ export class LanceDbWriteQueue {
       clearInterval(renew);
     }
     if (result.ok) {
-      // A due history prune is settled by this pass unless the pass itself compacted: the
-      // fragment it replaced stays referenced by the version it compacted from until one more
-      // pass after retention. A delete that landed during the pass set a later time; keep it.
-      const rearm = claim.prune_due && (result.fragmentsRemoved ?? 0) > 0;
+      // Any pass that compacted leaves the fragments it replaced referenced by the version it
+      // compacted from, so they need one more pass after retention, whether or not a prune was
+      // due: a write-triggered pass can be the one that compacts deleted rows away. A pass that
+      // compacted nothing settles a due prune. A delete during the pass set a later time; keep it.
+      const rearm = (result.fragmentsRemoved ?? 0) > 0;
       const rearmMs = historyPruneDelayMs(policy.versionRetentionMs);
       await this.sql`
         update vector_index_tables set
           rows_since_optimize = greatest(0, rows_since_optimize - ${snapshot}),
           commits_since_optimize = greatest(0, commits_since_optimize - ${commitsSnapshot}),
           history_prune_due_at = case
+            when ${rearm} then greatest(
+              coalesce(history_prune_due_at, '-infinity'::timestamptz), clock_timestamp() + (${rearmMs} * interval '1 millisecond'))
             when history_prune_due_at > now() then history_prune_due_at
-            when ${rearm} then now() + (${rearmMs} * interval '1 millisecond')
             else null end,
           last_optimized_at = now(), last_maintenance_error = null,
           maint_holder = null, maint_expires_at = now(), updated_at = now()

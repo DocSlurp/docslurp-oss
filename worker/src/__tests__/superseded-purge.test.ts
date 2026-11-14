@@ -8,6 +8,7 @@ import { createMigratedDatabase } from "../test/migrated-db.js";
 import { serveOnRandomPort } from "../test/migrated-postgres.js";
 
 import * as lanceConnection from "../stages/lancedb-connection.js";
+import { lanceTableKey } from "../stages/lancedb-write-queue.js";
 import { deleteLanceDbDocumentRows, artifactOwner, drainDocumentCleanupQueue, purgeSupersededDocuments, type DeleteVectorRows } from "../db/superseded-purge.js";
 
 
@@ -385,6 +386,13 @@ describe("superseded version purge", () => {
       "untouched": ["shared-b", "shared-c"],
       "parent": ["only-old", "shared-a", "shared-b", "shared-c"],
     };
+    // Another project's community over its own entities must be left alone.
+    await sql`insert into projects(id, org_id, user_id, name) values ('other', 'o1', 'u1', 'Other') on conflict do nothing`;
+    await sql`insert into kg_nodes (id, project_id, run_id, user_id, canonical_name, normalized_name, entity_type, mention_count, source_document_count)
+      values ('other-node', 'other', 'run-1', 'u1', 'only-old', 'only-old', 'thing', 1, 1)`;
+    await sql`insert into kg_communities (id, project_id, run_id, user_id, label, summary, member_count)
+      values ('other-community', 'other', 'run-1', 'u1', 'other', 'summary of other', 1)`;
+    await sql`insert into kg_community_members (community_id, node_id, project_id) values ('other-community', 'other-node', 'other')`;
     for (const [id, members] of Object.entries(communities)) {
       await sql`insert into kg_communities (id, project_id, run_id, user_id, label, summary, member_count)
         values (${id}, 'w', 'run-1', 'u1', ${id}, ${`summary of ${id}`}, ${members.length})`;
@@ -396,11 +404,15 @@ describe("superseded version purge", () => {
 
     const { storage } = fakeStorage([]);
     await purgeSupersededDocuments(sql, storage, options(async () => {}));
-    expect((await sql`select id from kg_nodes order by id`).map((row) => row.id)).toEqual(["shared-a", "shared-b", "shared-c"]);
+    expect((await sql`select id from kg_nodes order by id`).map((row) => row.id)).toEqual(["other-node", "shared-a", "shared-b", "shared-c"]);
     expect((await sql`select id from kg_edges order by id`).map((row) => row.id)).toEqual(["kept-relation"]);
     // Every member and relation of "untouched" is still supported by the current version.
-    expect(await sql`select id, summary from kg_communities order by id`).toEqual([{ id: "untouched", summary: "summary of untouched" }]);
-    expect((await sql`select distinct community_id from kg_community_members`).map((row) => row.community_id)).toEqual(["untouched"]);
+    expect(await sql`select id, summary from kg_communities order by id`).toEqual([
+      { id: "other-community", summary: "summary of other" },
+      { id: "untouched", summary: "summary of untouched" },
+    ]);
+    expect((await sql`select distinct community_id from kg_community_members order by 1`).map((row) => row.community_id))
+      .toEqual(["other-community", "untouched"]);
   });
 
   it("deletes the community summaries of a document deleted by hand", async () => {
@@ -427,18 +439,33 @@ describe("superseded version purge", () => {
     await seedVersion({ id: "v2", runId: "run-2", createdAt: "2026-01-02" });
     await sql`update documents set status = 'completed' where id = 'v2'`;
     const uri = "/tmp/lance/o1/w/vectors-model%2Fx-4";
+    // Not registered by the write queue (direct writes): the delete registers it.
     await sql`delete from vector_index_tables`;
-    await sql`insert into vector_index_tables (table_key, lance_uri, lance_table, last_optimized_at)
-      values (${`${uri}#chunks`}, ${uri}, 'chunks', now())`;
 
     const { storage } = fakeStorage([]);
     expect(await purgeSupersededDocuments(sql, storage, options(async () => {}))).toEqual({ purged: 1, failed: 0 });
     // Not before the version-retention window (10 minutes by default) has passed.
-    const [row] = await sql<{ due_in_seconds: number; rows_since_optimize: string }[]>`
-      select extract(epoch from history_prune_due_at - now())::int as due_in_seconds, rows_since_optimize
-      from vector_index_tables where table_key = ${`${uri}#chunks`}`;
-    expect(row!.due_in_seconds).toBeGreaterThanOrEqual(600);
-    expect(Number(row!.rows_since_optimize)).toBe(0);
+    const rows = await sql<{ table_key: string; lance_uri: string; lance_table: string; due_in_seconds: number; rows_since_optimize: string }[]>`
+      select table_key, lance_uri, lance_table, rows_since_optimize,
+        extract(epoch from history_prune_due_at - now())::int as due_in_seconds
+      from vector_index_tables`;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ table_key: lanceTableKey(uri, "chunks"), lance_uri: uri, lance_table: "chunks" });
+    expect(rows[0]!.due_in_seconds).toBeGreaterThanOrEqual(600);
+    expect(Number(rows[0]!.rows_since_optimize)).toBe(0);
+  });
+
+  it("schedules no history prune when the table does not exist or the delete failed before reaching it", async () => {
+    await seedRun("run-1");
+    await seedRun("run-2");
+    await seedVersion({ id: "v1", runId: "run-1", createdAt: "2026-01-01" });
+    await sql`update documents set status = 'completed' where id = 'v1'`;
+    await seedVersion({ id: "v2", runId: "run-2", createdAt: "2026-01-02" });
+    await sql`update documents set status = 'completed' where id = 'v2'`;
+    await sql`delete from vector_index_tables`;
+    const { storage } = fakeStorage([]);
+    expect(await purgeSupersededDocuments(sql, storage, options(async () => "missing"))).toEqual({ purged: 1, failed: 0 });
+    expect(await sql`select table_key from vector_index_tables`).toEqual([]);
   });
 
   it("never deletes another document's files through a dedup copy's inherited artifact URIs", async () => {

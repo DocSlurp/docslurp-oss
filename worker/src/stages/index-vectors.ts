@@ -387,10 +387,11 @@ export class IndexStage implements Stage {
    * that are due but have no drainer coming, e.g. the last write before traffic stopped.
    */
   async sweepLanceDbMaintenance(): Promise<number> {
-    // Inline mode keeps the old behaviour: maintenance only follows writes.
-    if (!this.lance.enabled || this.lance.mode === "inline" || this.lance.writeMode !== "queued"
-      || !this.config.vectorBackends.includes("lancedb")) return 0;
-    return await this.writeQueue().sweepDueMaintenance();
+    if (!this.lance.enabled || !this.config.vectorBackends.includes("lancedb")) return 0;
+    // Inline mode and direct writes keep the old behaviour, maintenance only follows writes,
+    // except for history prunes that deletes scheduled.
+    const historyPruneOnly = this.lance.mode === "inline" || this.lance.writeMode !== "queued";
+    return await this.writeQueue().sweepDueMaintenance(50, historyPruneOnly);
   }
 
   async close(): Promise<void> {

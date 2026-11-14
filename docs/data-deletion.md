@@ -70,36 +70,63 @@ The worker leader runs the sweep every 30 s (`purgeSupersededDocuments` in
 A LanceDB delete hides rows at once (a deletion vector), but their bytes stay
 in the table's files until maintenance rewrites them:
 
-1. Each delete sets `vector_index_tables.history_prune_due_at` to the
-   version-retention window (10 minutes by default) plus one minute. The
-   maintenance sweep then runs a pass on that table even if nobody writes to
-   it again. Before migration 0162 a table with no later writes kept deleted
-   rows in its older versions indefinitely.
-2. That pass prunes the versions from before the delete. If it compacted, the
-   fragment it replaced is still referenced by the version it compacted from,
-   so the pass re-arms once and a second pass after retention removes it.
+1. After each cleanup transaction the sweep sets
+   `vector_index_tables.history_prune_due_at` for every table it deleted rows
+   from, to the version-retention window (10 minutes by default) plus one
+   minute. The maintenance sweep then runs a pass on that table even if nobody
+   writes to it again. Before migration 0162 a table with no later writes kept
+   deleted rows in its older versions indefinitely. A table the write queue
+   never registered (direct writes) is registered by the delete.
+2. That pass prunes the versions from before the delete. Any pass that
+   compacted, due or write-triggered, re-arms the prune: the fragments it
+   replaced are still referenced by the version it compacted from, and a later
+   pass after retention removes them. A pass that compacted nothing settles it.
 3. An expired extract uses the strict path instead (`purgeHistory`): two
    passes with zero retention, in the cleanup itself, and the cleanup row
    stays queued until they succeed.
 
-**Known limit.** Compaction rewrites a fragment only when more than 10% of its
-rows are deleted, and `@lancedb/lancedb` 0.41 does not expose that threshold.
-When a deleted document is a small share of a large fragment, its rows stay in
-that fragment's file, hidden from every query, until later deletes or a table
-rebuild cross the threshold. This applies to the strict path too. A verified
-erasure request that cannot wait needs the table rebuilt (reindex the project)
-or dropped.
+The scheduled pass also runs in inline maintenance mode and with direct
+writes, where maintenance otherwise only follows writes. It does not run when
+maintenance is switched off (`maintenance=off`).
+
+**Known limits.**
+
+- Compaction rewrites a fragment only when more than 10% of its rows are
+  deleted, and `@lancedb/lancedb` 0.41 does not expose that threshold. When a
+  deleted document is a small share of a large fragment, its rows stay in that
+  fragment's file, hidden from every query, until later deletes or a table
+  rebuild cross the threshold. This applies to the strict path too. A verified
+  erasure request that cannot wait needs the table rebuilt (reindex the
+  project) or dropped.
+- Row deletes outside document cleanup (a re-embed replacing stale chunk
+  vectors, a page-vector rollback) do not schedule a prune. They are followed
+  by writes, so ordinary maintenance prunes them, and any pass that compacts
+  re-arms the prune.
 
 ### Community summaries
 
 A graph community summary is written from its member entities and the
-relations between them. When the cleanup above removes a document's graph
-contributions, every community that lost a member entity or an internal
-relation is deleted with its summary, and the next community refresh rebuilds
-it from what remains. A community whose members and relations are all still
-supported by other documents is kept. Until the sweep runs (30 s; 15 minutes
-for a document that was still processing) community search can still return
-the old summary.
+relations between them. Three rules keep one from outliving a removed
+document:
+
+- When cleanup removes a document's graph contributions, every community that
+  lost a member entity or an internal relation is deleted with its summary. A
+  community whose members and relations are all still supported by other
+  documents is kept.
+- A refresh reuses an earlier summary only when its entities (id, name, type)
+  and internal relations are exactly the same (`metadata.inputHash`), not just
+  the same member ids.
+- A refresh re-reads the graph under the project graph lock before publishing
+  and drops any community whose inputs changed while it was being summarized.
+
+Nothing schedules a refresh after a delete. Deleted communities are rebuilt by
+the project's next graph-enabled run or graph rebuild job; until then
+community search has no entry for those entities. Chunk, graph and lexical
+search are unaffected.
+
+Community search can still return the old summary until the cleanup sweep
+runs: 30 s after a delete, 60 s grace plus a sweep for a superseded version,
+15 minutes for a document deleted while still processing.
 
 When a batch fails, the sweep retries it row by row so that one bad row cannot
 block the others. A failed row is retried on later sweeps, up to 10 attempts,
@@ -214,7 +241,7 @@ ledger entries, so it can no longer cascade into shared data.
 | Rows removed and content no longer searchable or listable | Immediate (the request returns after commit) |
 | LanceDB rows and storage artifacts deleted | Within 5 minutes; within 20 minutes for work that was in flight (15 min grace plus a sweep) |
 | Community summaries that drew on the document deleted | With the row above |
-| Deleted rows pruned from LanceDB table history | About 11 minutes after the delete, or about 22 when the pass compacted; see the known limit above for small deletes |
+| Deleted rows pruned from LanceDB table history | About 11 minutes after the delete, or about 22 when the pass compacted; see the known limits above for small deletes |
 | Interrupted org deletion completed | Within 10 minutes (resumed by the maintenance sweep) |
 | Backups and snapshots age out | Within 35 days: Neon history window (≤ 30 days), Tigris snapshots and the backup bucket's 35-day lifecycle (`docs/disaster-recovery.md`). For a verified erasure request that cannot wait, delete the specific object `versionId`s. |
 

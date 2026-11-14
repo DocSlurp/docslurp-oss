@@ -89,7 +89,8 @@ export type DeleteVectorRows = (args: {
    * the version-retention window. Set for expired extracts.
    */
   purgeHistory?: boolean;
-}) => Promise<void>;
+  // Resolves "missing" when the table does not exist: nothing was deleted, no history to prune.
+}) => Promise<void | "missing">;
 
 /** Drops a whole LanceDB table (org deletion). Missing tables are not an error. */
 export type DropVectorTable = (args: { uri: string; table: string }) => Promise<void>;
@@ -280,7 +281,8 @@ export const deleteLanceDbDocumentRows: DeleteVectorRows = async ({ uri, table: 
   }
   const db = await connectLanceDb(uri);
   try {
-    if (!(await db.tableNames()).includes(tableName)) return;
+    // Nothing was deleted, so there is no history to prune.
+    if (!(await db.tableNames()).includes(tableName)) return "missing";
     for (let attempt = 0; ; attempt += 1) {
       const table = await db.openTable(tableName);
       try {
@@ -500,6 +502,7 @@ export async function purgeSupersededDocuments(
         `[superseded-purge] failed error=${error instanceof Error ? error.message.split("\n")[0] : String(error)}`,
       );
     }
+    await flushHistoryPrunes(sql);
   }
 
   if (result.purged > 0 || result.failed > 0 || (result.archived ?? 0) > 0) {
@@ -523,8 +526,8 @@ async function deleteDocumentVectors(
     const location = VectorNamespaceManager.getEmbeddingLocation(
       options.lancedbRoot, doc.org_id, doc.project_id, vector.embedding_model, vector.dimension,
     );
-    await deleteVectorRows({ uri: location.uri, table: location.table, documentIds: [doc.id] });
-    await scheduleHistoryPrune(client, location);
+    const outcome = await deleteVectorRows({ uri: location.uri, table: location.table, documentIds: [doc.id] });
+    if (outcome !== "missing") scheduleHistoryPrune(location);
   }
 }
 
@@ -532,11 +535,30 @@ async function deleteDocumentVectors(
  * The delete above only hides rows. Their bytes leave object storage when a maintenance pass
  * prunes the table's history after the retention window; this makes that pass due even when the
  * table is never written again.
+ *
+ * Only noted here. The purge transaction is long (other tables, storage listings) and the write
+ * queue updates the same vector_index_tables row on every lease renewal, so the row is written
+ * by `flushHistoryPrunes` on the root connection once the transaction has ended. The Lance
+ * delete is not transactional, so the note is kept even when the transaction rolls back.
  */
-async function scheduleHistoryPrune(client: Sql<Record<string, unknown>>, location: { uri: string; table: string }): Promise<void> {
-  if (!(await tableExists(client, "vector_index_tables"))) return;
+const pendingHistoryPrunes = new Map<string, { uri: string; table: string }>();
+
+function scheduleHistoryPrune(location: { uri: string; table: string }): void {
+  pendingHistoryPrunes.set(`${location.uri}#${location.table}`, { uri: location.uri, table: location.table });
+}
+
+/** Writes the history prunes noted since the last flush. A failure keeps them for the next one. */
+export async function flushHistoryPrunes(sql: Sql<Record<string, unknown>>): Promise<void> {
+  if (pendingHistoryPrunes.size === 0) return;
   const { versionRetentionMs } = lanceDbMaintenanceSettings(resolveLanceDbConfig().params);
-  await markLanceDbHistoryPruneDue(client, location.uri, location.table, versionRetentionMs);
+  for (const [key, location] of [...pendingHistoryPrunes]) {
+    try {
+      await markLanceDbHistoryPruneDue(sql, location.uri, location.table, versionRetentionMs);
+      pendingHistoryPrunes.delete(key);
+    } catch (error) {
+      console.warn(`[lancedb] history prune not scheduled table=${location.table} error=${error instanceof Error ? error.message.split("\n")[0] : String(error)}`);
+    }
+  }
 }
 
 /**
@@ -798,8 +820,10 @@ export async function drainDocumentCleanupQueue(
       }
       if (claimed.length === 0) break;
     }
+    await flushHistoryPrunes(sql);
     if (claimed.length < claimSize) break;
   }
+  await flushHistoryPrunes(sql);
 
   if (result.purged > 0 || result.failed > 0) {
     console.log(`[document-cleanup] cleaned=${result.purged} failed=${result.failed}`);
@@ -830,6 +854,8 @@ async function cleanOneDocument(
   } catch (error) {
     await recordDocumentCleanupFailure(sql, [documentId], error);
     return "failed";
+  } finally {
+    await flushHistoryPrunes(sql);
   }
 }
 
@@ -888,8 +914,8 @@ async function cleanDeletedDocuments(
     }
   }
   for (const { location, documentIds, purgeHistory } of byTable.values()) {
-    await deleteVectorRows({ uri: location.uri, table: location.table, documentIds: [...documentIds], ...(purgeHistory ? { purgeHistory } : {}) });
-    await scheduleHistoryPrune(client, location);
+    const outcome = await deleteVectorRows({ uri: location.uri, table: location.table, documentIds: [...documentIds], ...(purgeHistory ? { purgeHistory } : {}) });
+    if (outcome !== "missing") scheduleHistoryPrune(location);
   }
 
   const keys = new Set<string>();
@@ -1092,7 +1118,10 @@ async function deleteOrphanVectorRows(client: Sql<Record<string, unknown>>, opti
   `).map((r) => r.id));
   const orphans = (ids as string[]).filter((id) => !live.has(id));
   const deleteIds = options.deleteVectorIds ?? (({ uri, table, ids: rows }) => deleteLanceDbRecords(uri, table, rows));
-  if (orphans.length > 0) await deleteIds({ uri: location.uri, table: location.table, ids: orphans });
+  if (orphans.length > 0) {
+    await deleteIds({ uri: location.uri, table: location.table, ids: orphans });
+    scheduleHistoryPrune(location);
+  }
 }
 
 /** `<userId>/<runId>/`: two safe segments, never a bucket root or a whole user. */
@@ -1258,6 +1287,7 @@ export async function drainStorageCleanupQueue(
   if (result.purged > 0 || result.failed > 0) {
     console.log(`[storage-cleanup] cleaned=${result.purged} failed=${result.failed}`);
   }
+  await flushHistoryPrunes(sql);
   return result;
 }
 
