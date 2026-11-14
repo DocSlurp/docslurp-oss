@@ -22,6 +22,11 @@ const mocks = vi.hoisted(() => ({
   hasRun: false,
 }));
 
+// Project canEdit on responses is covered against a database (editor-required-followup.db.test.ts).
+vi.mock("../lib/reprocess-access.js", async (load) => ({
+  ...(await load<typeof import("../lib/reprocess-access.js")>()),
+  withPayloadCanEdit: async (_c: unknown, payload: unknown) => payload,
+}));
 vi.mock("../services/extracts.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../services/extracts.js")>();
   const { SpendBlockedError } = await import("../services/billing/spend-guard.js");

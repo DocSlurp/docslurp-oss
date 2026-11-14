@@ -11,6 +11,11 @@ import { createProjectIntakeFakes, fakeProject } from "./helpers/project-intake-
 
 // safeExternalFetch sends through undici's own fetch; route it to the global
 // that each test stubs.
+// Project canEdit on responses is covered against a database (editor-required-followup.db.test.ts).
+vi.mock("../lib/reprocess-access.js", async (load) => ({
+  ...(await load<typeof import("../lib/reprocess-access.js")>()),
+  withPayloadCanEdit: async (_c: unknown, payload: unknown) => payload,
+}));
 vi.mock("undici", async (importOriginal) => ({
   ...await importOriginal<typeof import("undici")>(),
   fetch: (...args: Parameters<typeof fetch>) => globalThis.fetch(...args),

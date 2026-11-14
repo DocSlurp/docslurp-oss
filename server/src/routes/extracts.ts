@@ -1,3 +1,4 @@
+import { withPayloadCanEdit } from "../lib/reprocess-access.js";
 import { Hono, type Context } from "hono";
 import type { PipelineFeatureOverrides } from "@docslurp/shared";
 import { runOriginOf } from "../lib/run-origin.js";
@@ -285,7 +286,7 @@ export const createExtractsRoutes = (ports: ProjectIntakePorts = projectIntakePo
         c.header("Idempotency-Replayed", "true");
       }
       if (result.temporalDeferred) c.header("X-Temporal-Deferred", "true");
-      return c.json(result.payload, result.status);
+      return c.json(await withPayloadCanEdit(c, result.payload), result.status);
     } catch (error) {
       await releaseFailedExtract(extractId, target, ports);
       return intakeFailure(c, error);
@@ -330,7 +331,7 @@ export const createExtractsRoutes = (ports: ProjectIntakePorts = projectIntakePo
         c.header("Idempotency-Replayed", "true");
       }
       if (result.temporalDeferred) c.header("X-Temporal-Deferred", "true");
-      return c.json(result.payload, result.status);
+      return c.json(await withPayloadCanEdit(c, result.payload), result.status);
     } catch (error) {
       await releaseFailedExtract(extractId, target, ports);
       return intakeFailure(c, error);

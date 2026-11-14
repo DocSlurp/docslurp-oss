@@ -1,3 +1,4 @@
+import { withPayloadCanEdit } from "../lib/reprocess-access.js";
 import { zValidator } from "@hono/zod-validator";
 import { runOriginOf } from "../lib/run-origin.js";
 import { Hono, type Context } from "hono";
@@ -128,7 +129,7 @@ function createWebRoutes(surface: WebSurface) {
       });
       if (result.idempotencyReplayed) c.header("Idempotency-Replayed", "true");
       if (result.temporalDeferred) c.header("X-Temporal-Deferred", "true");
-      return c.json(result.payload, result.status);
+      return c.json(await withPayloadCanEdit(c, result.payload), result.status);
     } catch (error) {
       const response = webErrorResponse(c, error);
       if (response) return response;

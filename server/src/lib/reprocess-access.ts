@@ -70,3 +70,20 @@ export async function withCanEdit<T extends { id: string; orgId: string }>(c: Co
   const keyMay = (project: T) => !apiKey || (apiKeyCanUpdateContent(apiKey) && apiKeyCanUseProject(apiKey, { orgId: project.orgId, projectId: project.id }));
   return projects.map((project) => ({ ...project, canEdit: editable.has(project.id) && keyMay(project) }));
 }
+
+type MaybeProject = { id?: unknown; orgId?: unknown } | null | undefined;
+/**
+ * A response that carries a project record (`project`, or `result.project` on an upload session) with this caller's
+ * `canEdit`, so a client that stores the record never loses the flag (upload, create and session responses).
+ */
+export async function withPayloadCanEdit<T>(c: Context, payload: T): Promise<T> {
+  const flag = async (project: MaybeProject) => project && typeof project.id === "string" && typeof project.orgId === "string"
+    ? (await withCanEdit(c, [project as { id: string; orgId: string }]))[0]
+    : project;
+  if (!payload || typeof payload !== "object") return payload;
+  const body = payload as { project?: MaybeProject; result?: { project?: MaybeProject } | null };
+  let next: Record<string, unknown> = { ...(payload as Record<string, unknown>) };
+  if (body.project && typeof body.project === "object") next = { ...next, project: await flag(body.project) };
+  if (body.result && typeof body.result === "object" && body.result.project) next = { ...next, result: { ...body.result, project: await flag(body.result.project) } };
+  return next as T;
+}

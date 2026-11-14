@@ -426,7 +426,7 @@ for the reconciler, Token authentication, bucket filter and deployment order.
 ## API changes
 
 - **2026-11-13, non-breaking.**
-  - Project reads (`GET /v1/projects`, `GET /v1/projects/:project` and the dashboard bootstrap) carry `canEdit`: whether this caller may change the project or its documents. It uses the same rule as a document's `canReprocess`.
+  - Project records carry `canEdit`: whether this caller may change the project or its documents. It uses the same rule as a document's `canReprocess`, and it appears wherever a project record is returned: project list and detail, the dashboard bootstrap, the realtime project snapshot (per subscriber), project create, update, clone, archive, restore and rollback, and upload, URL-ingest, extract and upload-session responses.
   - More editor-only refusals now answer `403 editor_required` to a caller who can see the project. Earlier they answered `403 forbidden`, `403 project_forbidden`, `400` or `404`:
     - knowledge-graph settings, rebuild, its estimate and cancel;
     - chat-instructions Improve;

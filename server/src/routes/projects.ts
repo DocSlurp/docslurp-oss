@@ -1051,7 +1051,7 @@ export const projectsRoutes = new Hono()
         userAgent: requestUserAgent(c),
       },
     });
-    return c.json(publicProjectView(project, getRequestActor(c)), 201);
+    return c.json(publicProjectView((await withCanEdit(c, [project]))[0], getRequestActor(c)), 201);
   })
   .post(
     "/:projectId/clone",
@@ -1085,7 +1085,7 @@ export const projectsRoutes = new Hono()
             userAgent: requestUserAgent(c),
           },
         });
-        return c.json(publicProjectView(project, getRequestActor(c)), 201);
+        return c.json(publicProjectView((await withCanEdit(c, [project]))[0], getRequestActor(c)), 201);
       } catch (error) {
         // Access refusals keep their status and code (404 project_not_found, 403 editor_required); the rest is a 400.
         if (error instanceof ProjectAccessError) return apiErrorResponse(c, error.status as 403 | 404, error.code, error.message);
@@ -1120,7 +1120,7 @@ export const projectsRoutes = new Hono()
           },
         });
 
-        return c.json(publicProjectView(project, getRequestActor(c)));
+        return c.json(publicProjectView((await withCanEdit(c, [project]))[0], getRequestActor(c)));
       } catch (error) {
         return projectMutationError(c, error);
       }
@@ -1152,7 +1152,7 @@ export const projectsRoutes = new Hono()
           },
         });
 
-        return c.json(publicProjectView(project, getRequestActor(c)));
+        return c.json(publicProjectView((await withCanEdit(c, [project]))[0], getRequestActor(c)));
       } catch (error) {
         return projectMutationError(c, error);
       }
@@ -1388,7 +1388,7 @@ export const projectsRoutes = new Hono()
           },
         });
 
-        return c.json(publicProjectView(project, getRequestActor(c)));
+        return c.json(publicProjectView((await withCanEdit(c, [project]))[0], getRequestActor(c)));
       } catch (error) {
         // Access refusals keep their status and code (404 project_not_found, 403 editor_required); the rest is a 400.
         if (error instanceof ProjectAccessError) return apiErrorResponse(c, error.status as 403 | 404, error.code, error.message);
@@ -1561,7 +1561,7 @@ export const projectsRoutes = new Hono()
         },
       });
 
-      return c.json({ ...publicProjectView(project, getRequestActor(c)), ...(indexingJob ? { indexingJob } : {}), ...(applied.job ? { job: applied.job } : {}) });
+      return c.json({ ...publicProjectView((await withCanEdit(c, [project]))[0], getRequestActor(c)), ...(indexingJob ? { indexingJob } : {}), ...(applied.job ? { job: applied.job } : {}) });
     },
   )
   .post(

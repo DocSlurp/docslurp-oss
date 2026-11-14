@@ -168,3 +168,36 @@ describe("editor-only refusals answer 403 editor_required (R3)", () => {
     expect(response.status).not.toBe(403);
   });
 });
+
+describe("canEdit survives every path a client stores the project from (council A1)", () => {
+  it("the realtime project snapshot carries the subscriber's own canEdit", async () => {
+    const { realtimeBackend } = await import("../realtime/backend.js");
+    const snapshot = async (user: string) => await realtimeBackend.project(user, { kind: "project", projectId: "proj-a" } as never) as { canEdit?: boolean };
+    expect((await snapshot("uv")).canEdit).toBe(false);
+    expect((await snapshot("um")).canEdit).toBe(false);
+    expect((await snapshot("ue")).canEdit).toBe(true);
+    expect((await snapshot("ux")).canEdit).toBe(true);
+    await expect(realtimeBackend.project("ub", { kind: "project", projectId: "proj-a" } as never)).rejects.toThrow();
+  });
+
+  it("a created project comes back with canEdit for its creator", async () => {
+    const response = await send(as("ue"), "POST", "/v1/projects", { name: `Fresh ${randomUUID().slice(0, 6)}` });
+    expect(response.status, await response.clone().text()).toBe(201);
+    expect(await response.json()).toMatchObject({ canEdit: true });
+  });
+
+  it("upload and session payloads carry canEdit on project and result.project", async () => {
+    const { withPayloadCanEdit } = await import("../lib/reprocess-access.js");
+    const probe = new Hono();
+    probe.use("*", async (c, next) => { c.set("sessionUser", { id: c.req.header("x-test-user") ?? "nobody" } as never); await next(); });
+    probe.get("/", async (c) => c.json(await withPayloadCanEdit(c, {
+      project: { id: "proj-a", orgId: "org-a", name: "A" },
+      result: { project: { id: "proj-a", orgId: "org-a" }, run: { id: "r" } },
+      run: { id: "r" },
+    })));
+    const editor = await (await probe.request("/", { headers: { "x-test-user": "ue" } })).json();
+    expect(editor).toMatchObject({ project: { id: "proj-a", canEdit: true }, result: { project: { canEdit: true }, run: { id: "r" } }, run: { id: "r" } });
+    const viewer = await (await probe.request("/", { headers: { "x-test-user": "uv" } })).json();
+    expect(viewer).toMatchObject({ project: { canEdit: false }, result: { project: { canEdit: false } } });
+  });
+});
