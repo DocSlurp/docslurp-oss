@@ -165,6 +165,9 @@ LANCEDB_S3_CACHE_MAX_GB=10               # LRU limit, default 10
 LANCEDB_S3_CACHE_BLOCK_KB=1024           # fill granularity, default 1024
 ```
 
+Check that it is in use: the `[lancedb-s3]` log line must show `requests` above zero after a
+search. A line that stays at zero means Lance is not going through the proxy.
+
 Setting the directory starts the same localhost re-signing proxy that
 `LANCEDB_S3_TRACE` uses (tracing itself stays off) and needs explicit credentials in the
 storage URI or `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`. It works with any

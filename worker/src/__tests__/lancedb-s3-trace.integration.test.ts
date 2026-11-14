@@ -1,7 +1,7 @@
 import { CreateBucketCommand, S3Client } from "@aws-sdk/client-s3";
 import { connect, type Connection } from "@lancedb/lancedb";
 import { initializeObservability, shutdownObservability } from "@docslurp/shared/observability";
-import { lanceS3Stats, startLanceS3Proxy, withLanceS3Proxy, type LanceS3Proxy } from "@docslurp/shared/lancedb-s3-trace";
+import { lanceS3ProxyStorageOptions, lanceS3Stats, startLanceS3Proxy, withLanceS3Proxy, type LanceS3Proxy } from "@docslurp/shared/lancedb-s3-trace";
 type ReadableSpan = { name: string; attributes: Record<string, unknown> };
 import { afterAll, beforeAll, expect, it, vi } from "vitest";
 
@@ -18,7 +18,7 @@ initializeObservability({ spanProcessors: [{ onStart() {}, onEnd(span) { spans.p
 const bucket = `lance-trace-${Date.now()}`;
 let proxy: LanceS3Proxy;
 let direct: Record<string, string>;
-const open = (): Promise<Connection> => connect(`s3://${bucket}/idx`, { storageOptions: { ...direct, endpoint: proxy.endpoint, allow_http: "true", virtual_hosted_style_request: "false" } });
+const open = (): Promise<Connection> => connect(`s3://${bucket}/idx`, { storageOptions: lanceS3ProxyStorageOptions(direct, proxy.endpoint) });
 
 beforeAll(async () => {
   if (!reachable) return;

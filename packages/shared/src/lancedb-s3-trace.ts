@@ -474,12 +474,24 @@ export function lanceS3ProxyEnabled(env: Record<string, string | undefined> = pr
   return lanceS3TraceEnabled(env) || lanceS3CacheConfig(env) !== undefined;
 }
 
-const ENDPOINT_KEYS = ["endpoint", "aws_endpoint", "aws_endpoint_url", "allow_http", "aws_allow_http", "virtual_hosted_style_request", "aws_virtual_hosted_style_request"];
+const ENDPOINT_KEYS = ["endpoint", "aws_endpoint", "aws_endpoint_url", "aws_endpoint_url_s3", "allow_http", "aws_allow_http", "virtual_hosted_style_request", "aws_virtual_hosted_style_request"];
 const proxies = new Map<string, Promise<LanceS3Proxy>>();
 
 function option(options: Record<string, string>, ...names: string[]): string | undefined {
   for (const name of names) for (const [key, value] of Object.entries(options)) if (key.toLowerCase() === name) return value;
   return undefined;
+}
+
+/**
+ * Storage options that send Lance to a local proxy at `proxied` instead of the store's own endpoint.
+ * Lance reads AWS_ENDPOINT_URL_S3 from the process environment and prefers it to `endpoint`, so a host that
+ * sets it (common with S3-compatible stores) would send every request past the proxy: tracing and the disk
+ * cache would see nothing. The option of the same name wins over the variable (lancedb 0.41;
+ * lancedb-s3-proxy-env.test.ts holds it to that).
+ */
+export function lanceS3ProxyStorageOptions(storageOptions: Record<string, string>, proxied: string): Record<string, string> {
+  const next = Object.fromEntries(Object.entries(storageOptions).filter(([name]) => !ENDPOINT_KEYS.includes(name.toLowerCase())));
+  return { ...next, endpoint: proxied, aws_endpoint_url_s3: proxied, allow_http: "true", virtual_hosted_style_request: "false" };
 }
 
 /**
@@ -508,6 +520,5 @@ export async function withLanceS3Proxy(uri: string, storageOptions: Record<strin
     void proxy.then((started) => console.log(`[lancedb-s3] proxy ${started.endpoint} -> ${endpoint ?? `https://s3.${region}.amazonaws.com`} (path-style, summary every 60s${cacheConfig ? `, disk cache ${cacheConfig.dir} max ${(cacheConfig.maxBytes / 1024 ** 3).toFixed(1)} GB block ${cacheConfig.blockBytes / 1024} KB` : ""})`));
   }
   const { endpoint: proxied } = await proxy;
-  const next = Object.fromEntries(Object.entries(storageOptions).filter(([name]) => !ENDPOINT_KEYS.includes(name.toLowerCase())));
-  return { ...next, endpoint: proxied, allow_http: "true", virtual_hosted_style_request: "false" };
+  return lanceS3ProxyStorageOptions(storageOptions, proxied);
 }
