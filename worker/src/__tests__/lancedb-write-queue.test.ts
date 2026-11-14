@@ -277,13 +277,61 @@ describe("LanceDbWriteQueue", () => {
     };
     const maintain = vi.fn(async () => ({ ok: true, rows: 10, optimizedMs: 1, indexCreated: false, fragmentsRemoved: 2 }));
     await queue({ maintain, maintenance: { ...background, enabled: false }, pool }).indexDocument(job("hp-3", makeDocument("hp-3", 10), 10));
-    // Due by the write counters only; no delete has marked it.
+    const q = queue({ maintain, maintenance: background, pool });
+    const dueIn = async () => (await sql<{ seconds: number | null }[]>`
+      select extract(epoch from history_prune_due_at - now())::int as seconds from vector_index_tables where table_key = ${key}`)[0]!.seconds;
+    // No delete marked the table: a compacting pass schedules nothing.
     await sql`update vector_index_tables set last_optimized_at = null, history_prune_due_at = null where table_key = ${key}`;
+    expect(await q.sweepDueMaintenance()).toBe(1);
+    await pool.idle();
+    expect(await dueIn()).toBeNull();
+
+    // A delete marked it, not yet due; a write-triggered pass compacts before the due time.
+    await sql`update vector_index_tables set rows_since_optimize = 5, last_optimized_at = null,
+      history_prune_due_at = now() + interval '5 minutes' where table_key = ${key}`;
+    expect(await q.sweepDueMaintenance()).toBe(1);
+    await pool.idle();
+    expect(await dueIn()).toBeGreaterThanOrEqual(600);
+  }, 30_000);
+
+  it("does not settle a prune that came due while a pass started earlier was still running", async () => {
+    const key = lanceTableKey(dir, TABLE);
+    const pool = new KeyedTaskPool({ concurrency: 1, log: () => undefined });
+    const background = {
+      enabled: true, mode: "background" as const, vectorIndexMinRows: 1_000_000, optimizeEveryRows: 20_000,
+      optimizeIntervalMs: 300_000, versionRetentionMs: 600_000,
+    };
+    // The pass's cutoff predates the delete; the prune comes due while it is still running.
+    const maintain = vi.fn(async () => {
+      await sql`update vector_index_tables set history_prune_due_at = clock_timestamp() + interval '40 milliseconds' where table_key = ${key}`;
+      await new Promise((resolve) => setTimeout(resolve, 120));
+      return { ok: true, rows: 10, optimizedMs: 1, indexCreated: false, fragmentsRemoved: 0 };
+    });
+    await queue({ maintain, maintenance: { ...background, enabled: false }, pool }).indexDocument(job("hp-5", makeDocument("hp-5", 10), 10));
+    await sql`update vector_index_tables set rows_since_optimize = 5, last_optimized_at = null,
+      history_prune_due_at = now() + interval '5 minutes' where table_key = ${key}`;
     expect(await queue({ maintain, maintenance: background, pool }).sweepDueMaintenance()).toBe(1);
     await pool.idle();
-    const [row] = await sql<{ seconds: number }[]>`
-      select extract(epoch from history_prune_due_at - now())::int as seconds from vector_index_tables where table_key = ${key}`;
-    expect(row!.seconds).toBeGreaterThanOrEqual(600);
+    // Past due by the time the pass finished, and still pending.
+    const [row] = await sql<{ overdue: boolean | null }[]>`select history_prune_due_at <= now() as overdue from vector_index_tables where table_key = ${key}`;
+    expect(row!.overdue).toBe(true);
+  }, 30_000);
+
+  it("drops the prune of a table that no longer exists", async () => {
+    const key = lanceTableKey(dir, TABLE);
+    const pool = new KeyedTaskPool({ concurrency: 1, log: () => undefined });
+    const background = {
+      enabled: true, mode: "background" as const, vectorIndexMinRows: 1_000_000, optimizeEveryRows: 20_000,
+      optimizeIntervalMs: 300_000, versionRetentionMs: 600_000,
+    };
+    const maintain = vi.fn(async () => ({ ok: false, rows: null, optimizedMs: null, indexCreated: false, error: "Table 'chunks' was not found" }));
+    await queue({ maintain, maintenance: { ...background, enabled: false }, pool }).indexDocument(job("hp-6", makeDocument("hp-6", 10), 10));
+    await sql`update vector_index_tables set rows_since_optimize = 0, last_optimized_at = now(),
+      history_prune_due_at = now() - interval '1 second' where table_key = ${key}`;
+    expect(await queue({ maintain, maintenance: background, pool }).sweepDueMaintenance()).toBe(1);
+    await pool.idle();
+    const [row] = await sql<{ pending: boolean }[]>`select history_prune_due_at is not null as pending from vector_index_tables where table_key = ${key}`;
+    expect(row!.pending).toBe(false);
   }, 30_000);
 
   it("inline and direct-write deployments sweep due history prunes only", async () => {

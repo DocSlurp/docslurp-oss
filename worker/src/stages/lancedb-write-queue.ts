@@ -547,11 +547,11 @@ export class LanceDbWriteQueue {
     const policy = this.deps.maintenance;
     const holder = `${this.workerId}:${randomUUID()}`;
     const ttlMs = policy.leaseTtlMs ?? 600_000;
-    const [claim] = await this.sql<{ rows_since_optimize: string | number; commits_since_optimize: number }[]>`
+    const [claim] = await this.sql<{ rows_since_optimize: string | number; commits_since_optimize: number; claimed_at: string }[]>`
       update vector_index_tables t set maint_holder = ${holder},
         maint_expires_at = now() + (${ttlMs} * interval '1 millisecond'), updated_at = now()
       where t.table_key = ${tableKey} and ${this.dueSql()}
-      returning t.rows_since_optimize, t.commits_since_optimize`;
+      returning t.rows_since_optimize, t.commits_since_optimize, clock_timestamp()::text as claimed_at`;
     if (!claim) return null;
     const snapshot = Number(claim.rows_since_optimize);
     const commitsSnapshot = Number(claim.commits_since_optimize);
@@ -576,10 +576,13 @@ export class LanceDbWriteQueue {
       clearInterval(renew);
     }
     if (result.ok) {
-      // Any pass that compacted leaves the fragments it replaced referenced by the version it
-      // compacted from, so they need one more pass after retention, whether or not a prune was
-      // due: a write-triggered pass can be the one that compacts deleted rows away. A pass that
-      // compacted nothing settles a due prune. A delete during the pass set a later time; keep it.
+      // History prune, for a table a delete marked:
+      // - A pass that compacted leaves the fragments it replaced referenced by the version it
+      //   compacted from, so they need one more pass after retention. This holds for a
+      //   write-triggered pass too: it can be the one that compacts the deleted rows away.
+      // - A pass that compacted nothing settles the prune only if the prune was already due
+      //   when the pass started; an earlier start means a cutoff from before the delete.
+      // - Otherwise the mark stands (a delete during the pass, or a prune not yet due).
       const rearm = (result.fragmentsRemoved ?? 0) > 0;
       const rearmMs = historyPruneDelayMs(policy.versionRetentionMs);
       await this.sql`
@@ -587,10 +590,10 @@ export class LanceDbWriteQueue {
           rows_since_optimize = greatest(0, rows_since_optimize - ${snapshot}),
           commits_since_optimize = greatest(0, commits_since_optimize - ${commitsSnapshot}),
           history_prune_due_at = case
-            when ${rearm} then greatest(
-              coalesce(history_prune_due_at, '-infinity'::timestamptz), clock_timestamp() + (${rearmMs} * interval '1 millisecond'))
-            when history_prune_due_at > now() then history_prune_due_at
-            else null end,
+            when history_prune_due_at is null then null
+            when ${rearm} then greatest(history_prune_due_at, clock_timestamp() + (${rearmMs} * interval '1 millisecond'))
+            when history_prune_due_at <= ${claim.claimed_at}::timestamptz then null
+            else history_prune_due_at end,
           last_optimized_at = now(), last_maintenance_error = null,
           maint_holder = null, maint_expires_at = now(), updated_at = now()
         where table_key = ${tableKey} and maint_holder = ${holder}`;
@@ -599,9 +602,12 @@ export class LanceDbWriteQueue {
         delete from vector_index_outbox
         where table_key = ${tableKey} and status = 'written' and written_at < now() - interval '1 day'`;
     } else {
-      // Leave the counters; the lease expiry doubles as the retry back-off.
+      // Leave the counters; the lease expiry doubles as the retry back-off. A table that is
+      // gone (dropped with its project, or never created) has no history left to prune.
+      const tableGone = /was not found|does not exist|not found/i.test(result.error ?? "");
       await this.sql`
         update vector_index_tables set
+          history_prune_due_at = case when ${tableGone} then null else history_prune_due_at end,
           last_maintenance_error = ${result.error ?? "unknown"}, maint_holder = null,
           maint_expires_at = now() + (${policy.optimizeIntervalMs} * interval '1 millisecond'), updated_at = now()
         where table_key = ${tableKey} and maint_holder = ${holder}`;

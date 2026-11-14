@@ -151,7 +151,7 @@ export function communityInputHashes(
   communities: Array<{ memberHash: string; nodeIds: string[] }>,
   nodes: SummaryInputNode[],
   edges: SummaryInputEdge[],
-): Map<string, string> {
+): string[] {
   const nodesById = new Map(nodes.map((node) => [node.id, node]));
   const communitiesByNode = new Map<string, number[]>();
   communities.forEach((community, index) => {
@@ -168,8 +168,8 @@ export function communityInputHashes(
       if (targets.has(index)) relations[index]!.push(JSON.stringify([edge.source, edge.predicate, edge.target]));
     }
   }
-  const hashes = new Map<string, string>();
-  communities.forEach((community, index) => {
+  // One hash per community, in input order: member_hash is 32 bits and can collide.
+  return communities.map((community, index) => {
     const hash = createHash("sha256");
     for (const nodeId of [...community.nodeIds].sort()) {
       const node = nodesById.get(nodeId);
@@ -182,9 +182,8 @@ export function communityInputHashes(
       hash.update(relation);
       hash.update("\n");
     }
-    hashes.set(community.memberHash, hash.digest("hex"));
+    return hash.digest("hex");
   });
-  return hashes;
 }
 
 function hashMembers(ids: string[], level = 0): string {
@@ -247,7 +246,8 @@ export async function refreshProjectCommunities(args: {
   `;
   const previous = new Map(existing.map((row) => [row.member_hash, row]));
   const nodesById = new Map(nodes.map((node) => [node.id, node]));
-  const inputHashes = communityInputHashes(detected, nodes, edges);
+  const detectedHashes = communityInputHashes(detected, nodes, edges);
+  const inputHashes = new Map(detected.map((community, index) => [community, detectedHashes[index]!]));
 
   const result: CommunityRefreshResult = { communities: detected.length, summarized: 0, reused: 0, inputTokens: 0, outputTokens: 0 };
   const all: Array<{
@@ -272,7 +272,7 @@ export async function refreshProjectCommunities(args: {
       .filter((node): node is (typeof nodes)[number] => Boolean(node))
       .sort((left, right) => right.mentions - left.mentions);
     const label = members.slice(0, 5).map((member) => member.name).join(", ").slice(0, 120) || "Graph community";
-    const inputHash = inputHashes.get(community.memberHash)!;
+    const inputHash = inputHashes.get(community)!;
     const reused = previous.get(community.memberHash);
     // Reuse only a summary written from exactly these entities and relations: one written while
     // a since-removed document still supplied a relation must not outlive it.
@@ -380,7 +380,7 @@ export async function refreshProjectCommunities(args: {
       from kg_edges where project_id = ${projectId}
     `;
     const currentHashes = communityInputHashes(all, [...currentNodes], [...currentEdges]);
-    const records = all.filter((record) => currentHashes.get(record.memberHash) === record.inputHash);
+    const records = all.filter((record, index) => currentHashes[index] === record.inputHash);
     result.communities = records.length;
     const idByHash = new Map(records.map((record) => [record.memberHash, record.id]));
     if (!records.length) return;

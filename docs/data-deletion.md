@@ -77,10 +77,12 @@ in the table's files until maintenance rewrites them:
    writes to it again. Before migration 0162 a table with no later writes kept
    deleted rows in its older versions indefinitely. A table the write queue
    never registered (direct writes) is registered by the delete.
-2. That pass prunes the versions from before the delete. Any pass that
-   compacted, due or write-triggered, re-arms the prune: the fragments it
-   replaced are still referenced by the version it compacted from, and a later
-   pass after retention removes them. A pass that compacted nothing settles it.
+2. That pass prunes the versions from before the delete. While a table is
+   marked, any pass that compacted, due or write-triggered, re-arms the prune:
+   the fragments it replaced are still referenced by the version it compacted
+   from, and a later pass after retention removes them. A pass that compacted
+   nothing settles the prune if it started after the due time. A table that no
+   longer exists drops its mark.
 3. An expired extract uses the strict path instead (`purgeHistory`): two
    passes with zero retention, in the cleanup itself, and the cleanup row
    stays queued until they succeed.
@@ -98,6 +100,9 @@ maintenance is switched off (`maintenance=off`).
   rebuild cross the threshold. This applies to the strict path too. A verified
   erasure request that cannot wait needs the table rebuilt (reindex the
   project) or dropped.
+- The mark is written after the cleanup transaction, from process memory. A
+  worker that dies between the commit and that write loses it, and the table
+  is then pruned by its next write's maintenance.
 - Row deletes outside document cleanup (a re-embed replacing stale chunk
   vectors, a page-vector rollback) do not schedule a prune. They are followed
   by writes, so ordinary maintenance prunes them, and any pass that compacts
