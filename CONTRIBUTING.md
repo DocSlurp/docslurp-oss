@@ -45,6 +45,21 @@ Tests that need third-party PDFs fetch them on first use with `pnpm fixtures:fet
 
 Database schema changes go only through `server/db/migrations` (`pnpm db:generate`, or a hand-written `NNNN_name.sql` plus its `meta/_journal.json` entry). Tests build their databases by applying the migrations in order.
 
+### Real Postgres and Redis tests
+
+Most tests use an in-memory PGlite database. Tests that need real Postgres (lock contention, concurrent transactions, roles) or Redis read `TEST_DATABASE_URL` and/or `TEST_REDIS_URL` and skip without them. `scripts/run-database-tests.mjs` finds them by those two names, gives each file its own fresh copy of a migrated template database, and fails on any skipped test. CI runs it in the `database integration` job. To run it locally against disposable services:
+
+```bash
+docker compose up -d postgres redis   # or any local Postgres/Redis whose databases you can throw away
+export TEST_DATABASE_ADMIN_URL=postgres://docslurp:docslurp@127.0.0.1:5432 TEST_DATABASE_TEMPLATE=docslurp_test_tmpl
+export TEST_REDIS_URL=redis://127.0.0.1:6379
+docker compose exec postgres createdb -U docslurp docslurp_test_tmpl
+DATABASE_URL="$TEST_DATABASE_ADMIN_URL/$TEST_DATABASE_TEMPLATE" node server/db/migrate.mjs
+node scripts/run-database-tests.mjs [file filter]
+```
+
+A new test of this kind just reads `TEST_DATABASE_URL` / `TEST_REDIS_URL`; there is nothing to register. Do not give it its own variable: the runner refuses test files gated on a database or Redis variable it never sets. Never export `TEST_DATABASE_URL` for a whole `pnpm test` run, since every gated file would then share and wipe one database.
+
 ## Style
 
 - TypeScript strict mode, 2-space indentation, double quotes in server code.

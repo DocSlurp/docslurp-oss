@@ -4,24 +4,38 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
-import { GATED, NOT_RUN, findGatedTestFiles, unregisteredGatedFiles } from "./run-database-tests.mjs";
+import { NOT_RUN, classifyTestSource, gatedFiles, scanTestFiles, unsupportedGatedFiles } from "./run-database-tests.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
-test("every test file gated on a database or Redis URL is registered", () => {
-  assert.deepEqual(unregisteredGatedFiles(findGatedTestFiles()), []);
+test("no test file is gated on a database or Redis variable the runner never sets", () => {
+  assert.deepEqual(unsupportedGatedFiles(scanTestFiles()), []);
 });
 
-test("registered gated files exist and name the variables they read", async () => {
-  const { readFileSync } = await import("node:fs");
-  for (const [file, { db = [], redis = [] }] of Object.entries(GATED)) {
-    assert.ok(existsSync(path.join(root, file)), `${file} is registered but missing`);
-    const source = readFileSync(path.join(root, file), "utf8");
-    for (const variable of [...db, ...redis]) assert.ok(source.includes(variable), `${file} no longer reads ${variable}`);
+test("the runner finds the gated database and Redis test files", () => {
+  const gated = gatedFiles(scanTestFiles());
+  const byFile = Object.fromEntries(gated.map((entry) => [entry.file, entry]));
+  assert.ok(gated.length > 10, `expected the gated suite, found ${gated.length} file(s)`);
+  assert.deepEqual(byFile["server/src/__tests__/billing-credits.db.test.ts"], { file: "server/src/__tests__/billing-credits.db.test.ts", db: true, redis: false, other: [] });
+  assert.deepEqual(byFile["server/src/__tests__/rate-limit.redis.test.ts"], { file: "server/src/__tests__/rate-limit.redis.test.ts", db: false, redis: true, other: [] });
+  assert.deepEqual(byFile["server/src/agent-runtime/runtime.integration.test.ts"], { file: "server/src/agent-runtime/runtime.integration.test.ts", db: true, redis: true, other: [] });
+  for (const file of Object.keys(NOT_RUN)) {
+    assert.ok(existsSync(path.join(root, file)), `${file} is listed in NOT_RUN but missing`);
+    assert.ok(!byFile[file], `${file} is in NOT_RUN but would run`);
   }
-  for (const file of Object.keys(NOT_RUN)) assert.ok(existsSync(path.join(root, file)), `${file} is listed in NOT_RUN but missing`);
 });
 
-test("an unregistered gated file is reported", () => {
-  assert.deepEqual(unregisteredGatedFiles(["server/src/__tests__/new-thing.db.test.ts"]), ["server/src/__tests__/new-thing.db.test.ts"]);
+test("classifies a test file by the variables it reads", () => {
+  assert.deepEqual(classifyTestSource("const url = process.env.TEST_DATABASE_URL;"), { db: true, redis: false, other: [] });
+  assert.deepEqual(classifyTestSource("it.runIf(!!process.env.TEST_REDIS_URL)"), { db: false, redis: true, other: [] });
+  assert.deepEqual(classifyTestSource("process.env.TEST_DATABASE_URL; process.env.TEST_REDIS_URL"), { db: true, redis: true, other: [] });
+  assert.deepEqual(classifyTestSource("process.env.DATABASE_URL"), { db: false, redis: false, other: [] });
+  assert.deepEqual(classifyTestSource("const x = 1;"), { db: false, redis: false, other: [] });
+});
+
+test("a test gated on its own variable is reported, since the runner would never set it", () => {
+  const scanned = [{ file: "server/src/__tests__/new-thing.db.test.ts", ...classifyTestSource("process.env.NEW_THING_TEST_DATABASE_URL; process.env.OTHER_PG_URL") }];
+  assert.equal(scanned[0].db, false, "a prefixed name is not TEST_DATABASE_URL");
+  assert.deepEqual(unsupportedGatedFiles(scanned), ["server/src/__tests__/new-thing.db.test.ts (NEW_THING_TEST_DATABASE_URL, OTHER_PG_URL)"]);
+  assert.deepEqual(gatedFiles(scanned), []);
 });
