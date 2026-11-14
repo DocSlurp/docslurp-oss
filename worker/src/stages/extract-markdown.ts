@@ -2170,7 +2170,7 @@ export class ExtractMarkdownStage implements Stage {
     const layoutFactsSource = plan.sandboxedPdf ? sandboxedPdfLayoutFactsSource(plan.sandboxedPdf) : undefined;
     const layoutWalkerUnknown = plan.sandboxedPdf ? sandboxedPdfLayoutWalkerUnknown(plan.sandboxedPdf) : undefined;
     const layoutGrids = plan.sandboxedPdf ? sandboxedPdfGridSettlement(plan.sandboxedPdf) : undefined;
-    if (layoutGrids && layoutGrids.unknown > 0) console.log(`[extract-tables] grids unknown pages=${layoutGrids.unknown} fromFacts=${layoutGrids.fromFacts}`);
+    if (layoutGrids && layoutGrids.unknown > 0) console.log(`[extract-tables] grids unknown pages=${layoutGrids.unknown} fromFacts=${layoutGrids.fromFacts} filled=${layoutGrids.filled}`);
     const pageFacts = plan.sandboxedPdf ? sandboxedPdfPageFacts(plan.sandboxedPdf) : undefined;
     const figureOutcome = plan.sandboxedPdf?.figures ? sandboxedPdfFigures(plan.sandboxedPdf) : undefined;
 
@@ -2183,7 +2183,7 @@ export class ExtractMarkdownStage implements Stage {
       ...(ocrPages ? { ocrPages: [...ocrPages] } : {}),
       ...(layoutFacts ? { layoutFacts, ...(layoutFactsSource ? { layoutFactsSource } : {}) } : {}),
       ...(layoutWalkerUnknown ? { layoutWalkerUnknown } : {}),
-      ...(layoutGrids && (layoutGrids.fromFacts > 0 || layoutGrids.unknown > 0) ? { layoutGrids } : {}),
+      ...(layoutGrids && (layoutGrids.fromFacts > 0 || layoutGrids.unknown > 0 || layoutGrids.filled > 0) ? { layoutGrids } : {}),
       ...(pageFacts ? { pageFacts } : {}),
       ...(plan.sandboxedPdf?.figures && figureOutcome ? { figures: { dir: plan.sandboxedPdf.figures.dir, outcome: figureOutcome, ...(plan.sandboxedPdf.figures.charts ? { charts: true } : {}) } } : {}),
     };

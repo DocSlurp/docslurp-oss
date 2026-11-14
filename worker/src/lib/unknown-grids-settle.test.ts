@@ -69,11 +69,33 @@ describe("unknown walker grids settle from page facts", () => {
     acceptSandboxedPdfResult(job, { exitCode: 0, stdout: "", stderr: "", layoutFacts, pageFacts: facts([page(1, NO_RULES), page(2, TRUNCATED)]) }, 2);
     expect(sandboxedPdfLayoutFacts(job)?.get(1)).toMatchObject({ grids: [] });
     expect(sandboxedPdfLayoutFacts(job)?.get(2)).toMatchObject({ gridsUnknown: true });
-    expect(sandboxedPdfGridSettlement(job)).toEqual({ fromFacts: 1, unknown: 1 });
+    expect(sandboxedPdfGridSettlement(job)).toEqual({ fromFacts: 1, unknown: 1, filled: 0 });
     const walkerOnly: SandboxedPdfJob = { input: "/a", output: "/b" };
     acceptSandboxedPdfResult(walkerOnly, { exitCode: 0, stdout: "", stderr: "", layoutFacts }, 2);
     expect(sandboxedPdfLayoutFacts(walkerOnly)?.get(1)).not.toHaveProperty("gridsUnknown");
     expect(sandboxedPdfGridSettlement(walkerOnly)).toBeUndefined();
+  });
+
+  it("fills every page the walker left out: a flagged page dropped by a failed walk is never read as no table (council F1)", () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const RULED = { ...NO_RULES, hRules: 7, vRules: 5, grids: [{ bbox: [72, 100, 540, 400], rows: 6, columns: 4, coverage: 0.29, hRules: 7, vRules: 5, outerSides: 4, connected: true }], unlistedRuledGrids: 0 };
+    // The guest's real shape under selective with a lying page tree: the pages it did not walk are present (no table), the
+    // flagged pages it walked are absent, and the walker's whole-file reason rides along.
+    const unwalked = [1, 2, 4].map((n) => ({ pageNumber: n, known: true, ...walkerPage(null) }));
+    const job: SandboxedPdfJob = { input: "/a", output: "/b" };
+    acceptSandboxedPdfResult(job, { exitCode: 0, stdout: "", stderr: "",
+      layoutFacts: { version: "pdf-layout-facts@1", pages: unwalked, walkerUnknown: { reason: "page-tree-count", pages: 2 } },
+      pageFacts: facts([page(1, NO_RULES), page(2, NO_RULES), page(3, RULED), page(4, NO_RULES), page(5, TRUNCATED)]) }, 6);
+    const layout = sandboxedPdfLayoutFacts(job)!;
+    expect([...layout.keys()]).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(layout.get(3)?.grids).toEqual([{ rows: 6, columns: 4, coverage: null }]);   // the facts' walker-parity grid
+    expect(layout.get(5)).toMatchObject({ grids: null, gridsUnknown: true });         // facts do not know either
+    expect(layout.get(6)).toMatchObject({ grids: null, gridsUnknown: true, tables: null });   // no facts line at all
+    expect(classifyAdaptivePage(3, prose, { layout: layout.get(3)! }).route).toBe("table-heavy");
+    expect(classifyAdaptivePage(6, prose, { layout: layout.get(6)! }).route).toBe("table-heavy");
+    expect(sandboxedPdfGridSettlement(job)).toEqual({ fromFacts: 4, unknown: 2, filled: 3 });
+    // Computed once per accepted result.
+    expect(sandboxedPdfLayoutFacts(job)).toBe(layout);
   });
 
   it("lets page facts stand in when the walker could not walk the file at all", () => {
