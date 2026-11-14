@@ -186,6 +186,15 @@ describe("canEdit survives every path a client stores the project from (council 
     expect(await response.json()).toMatchObject({ canEdit: true });
   });
 
+  it("clone and PATCH responses carry canEdit", async () => {
+    const clone = await send(as("ue"), "POST", "/v1/projects/proj-a/clone", { name: "Copy for canEdit" });
+    expect(clone.status, await clone.clone().text()).toBe(201);
+    expect(await clone.json()).toMatchObject({ canEdit: true });
+    const patched = await send(as("ue"), "PATCH", "/v1/projects/proj-a", { systemPrompt: "Be precise." });
+    expect(patched.status, await patched.clone().text()).toBe(200);
+    expect(await patched.json()).toMatchObject({ canEdit: true });
+  });
+
   it("upload and session payloads carry canEdit on project and result.project", async () => {
     const { withPayloadCanEdit } = await import("../lib/reprocess-access.js");
     const probe = new Hono();

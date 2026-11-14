@@ -1,3 +1,10 @@
+/**
+ * The reviewed copy for `editor_required` (403): the same text as @docslurp/shared EDITOR_REQUIRED_MESSAGE. This package is
+ * published without dependencies, so it keeps its own copy; packages/shared/src/__tests__/editor-required-copy.test.ts
+ * fails if the copies drift.
+ */
+export const EDITOR_REQUIRED_MESSAGE = "This needs edit access to the project. Ask a project editor or an organization admin.";
+
 /** Reviewed recovery copy; response text and unknown codes never become display text. */
 const RECOVERY_MESSAGES: Record<string, string> = {
   mfa_required: "Set up an authenticator app or passkey in Settings, Security, then try again.",
@@ -15,7 +22,7 @@ const RECOVERY_MESSAGES: Record<string, string> = {
   chat_disabled: "Chat is disabled for this project. Enable chat in project settings.",
   invalid_search_scope: "Choose a valid search scope in this project and try again.",
   project_scope_forbidden: "Choose a project this API key can access.",
-  editor_required: "This needs edit access to the project. Ask a project editor or an organization admin.",
+  editor_required: EDITOR_REQUIRED_MESSAGE,
   model_not_allowed: "Choose a model allowed by this project.",
   chat_capacity_unavailable: "Chat is temporarily unavailable. Wait a few seconds, then try again.",
   unavailable: "The service is temporarily unavailable. Try again later.",
