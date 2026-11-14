@@ -1,6 +1,6 @@
 // Server-only. Read-through disk cache for the immutable files Lance reads through the localhost S3 proxy.
 import { createHash, randomBytes } from "node:crypto";
-import { chmod, mkdir, open, readdir, readFile, rename, rm, stat, unlink, utimes, writeFile, type FileHandle } from "node:fs/promises";
+import { chmod, lstat, mkdir, open, readdir, readFile, realpath, rename, rm, stat, unlink, utimes, writeFile, type FileHandle } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import type { IncomingHttpHeaders } from "node:http";
 
@@ -89,7 +89,8 @@ const LAYOUT_FILE = "layout.json";
 const TOUCH_INTERVAL_MS = 60_000;
 
 export class DiskBlockCache {
-  readonly dir: string;
+  /** Resolved once the directory is claimed; every path is built from it. */
+  dir: string;
   readonly maxBytes: number;
   readonly blockBytes: number;
   readonly maxSpanBlocks: number;
@@ -132,6 +133,14 @@ export class DiskBlockCache {
    */
   private async claimDirectory(): Promise<void> {
     await mkdir(this.dir, { recursive: true, mode: 0o700 });
+    // A symlink here would point the checks, and the emptying below, at a directory of someone's choosing.
+    if ((await lstat(this.dir)).isSymbolicLink()) throw new Error(`cache directory ${this.dir} is a symbolic link`);
+    // Pin the resolved path: every later read and write uses it, whatever happens to links above it.
+    this.dir = await realpath(this.dir);
+    // Our own directory cannot be swapped by another user unless its parent lets them rename entries:
+    // writable by group or others without the sticky bit.
+    const parent = await stat(dirname(this.dir));
+    if ((parent.mode & 0o022) && !(parent.mode & 0o1000)) throw new Error(`the parent of cache directory ${this.dir} is writable by group or others without the sticky bit`);
     const info = await stat(this.dir);
     const uid = process.getuid?.();
     if (uid !== undefined && info.uid !== uid) throw new Error(`cache directory ${this.dir} is owned by uid ${info.uid}, not this process (uid ${uid})`);
@@ -142,7 +151,7 @@ export class DiskBlockCache {
     if (layout?.blockBytes === this.blockBytes) return;
     for (const dirent of await readdir(this.dir, { withFileTypes: true })) {
       // Only this cache's own two-hex-digit shard directories: a mistaken LANCEDB_S3_CACHE_DIR must not lose other files.
-      if (dirent.isDirectory() && /^[0-9a-f]{2}$/.test(dirent.name)) await rm(join(this.dir, dirent.name), { recursive: true, force: true });
+      if (dirent.isDirectory() && !dirent.isSymbolicLink() && /^[0-9a-f]{2}$/.test(dirent.name)) await rm(join(this.dir, dirent.name), { recursive: true, force: true });
     }
     await writeFile(layoutPath, JSON.stringify({ blockBytes: this.blockBytes }), { mode: 0o600 });
   }

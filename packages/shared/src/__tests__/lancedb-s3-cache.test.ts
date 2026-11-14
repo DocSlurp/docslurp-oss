@@ -1,4 +1,4 @@
-import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, truncate, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -305,6 +305,20 @@ describe("cache directory ownership", () => {
     await chmod(dir, 0o777);
     const cache = new DiskBlockCache({ dir, maxBytes: 1 << 20, blockBytes: B });
     await expect(cache.ready).rejects.toThrow(/writable by group or others/);
+  });
+
+  it("refuses a symbolic link, and a parent others can rename entries in", async () => {
+    const real = join(dir, "real");
+    await mkdir(join(real, "ab"), { recursive: true });
+    await writeFile(join(real, "ab", "victim"), "keep");
+    await symlink(real, join(dir, "link"));
+    await expect(new DiskBlockCache({ dir: join(dir, "link"), maxBytes: 1 << 20, blockBytes: B }).ready).rejects.toThrow(/symbolic link/);
+    expect(await readFile(join(real, "ab", "victim"), "utf8")).toBe("keep");
+    await chmod(dir, 0o777);
+    await expect(new DiskBlockCache({ dir: join(dir, "cache"), maxBytes: 1 << 20, blockBytes: B }).ready).rejects.toThrow(/sticky bit/);
+    await chmod(dir, 0o1777);
+    await new DiskBlockCache({ dir: join(dir, "cache"), maxBytes: 1 << 20, blockBytes: B }).ready;
+    await chmod(dir, 0o700);
   });
 
   it("empties its own shards when the block size changed, and leaves other files alone", async () => {

@@ -34,7 +34,17 @@ it.skipIf(!reachable)("withLanceS3Proxy rewrites storage options to the local pr
   expect(rewritten).toMatchObject({ allow_http: "true", virtual_hosted_style_request: "false" });
   expect(rewritten!.endpoint).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/[0-9a-f]{64}$/);
   expect(rewritten!.endpoint).not.toBe(endpoint);
-});
+  // Everything Lance does on a table fits inside the root the proxy allows for this URI.
+  const db = await connect(`s3://${bucket}/idx`, { storageOptions: rewritten });
+  const table = await db.createTable("rooted", Array.from({ length: 300 }, (_, id) => ({ id, vector: Array.from({ length: 8 }, (_, i) => (i === id % 8 ? 1 : id / 1000)) })), { mode: "overwrite" });
+  await table.add([{ id: 1000, vector: Array.from({ length: 8 }, () => 0.5) }]);
+  await table.createIndex("id");
+  await table.optimize();
+  expect(await table.countRows()).toBe(301);
+  expect((await table.search(Array.from({ length: 8 }, () => 0.5)).limit(1).toArray())[0].id).toBe(1000);
+  await db.dropTable("rooted");
+  expect(lanceS3Stats.refused).toBe(0);
+}, 120_000);
 
 it.skipIf(!reachable)("Lance create/add/search work through the proxy and concurrent commits lose nothing", async () => {
   spans.length = 0;
