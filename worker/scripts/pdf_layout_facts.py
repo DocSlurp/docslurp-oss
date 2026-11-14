@@ -744,7 +744,7 @@ class PageIndex:
         depth = [0] * nodes
         for i in range(1, nodes):
             parent = node_parent[i]
-            if not 0 <= parent < i or node_slot[i] < 0 or depth[parent] + 1 >= MAX_TREE_DEPTH:
+            if not 0 <= parent < i or node_slot[i] < 0 or depth[parent] + 1 > MAX_TREE_DEPTH:
                 raise ValueError('page index')
             depth[i] = depth[parent] + 1
         if leaf_parent[0] == -1:
@@ -752,7 +752,7 @@ class PageIndex:
                 raise ValueError('page index')
         else:
             for parent, slot in zip(leaf_parent, leaf_slot):
-                if not 0 <= parent < nodes or slot < 0:
+                if not 0 <= parent < nodes or slot < 0 or depth[parent] + 1 > MAX_TREE_DEPTH:
                     raise ValueError('page index')
         return cls(size, root, node_parent, node_slot, leaf_parent, leaf_slot)
 
@@ -792,7 +792,7 @@ def build_page_index(file):
     not a dictionary (missing, free or broken-typed) is skipped and takes no page number.
 
     Fails closed (Unknown, so every page is unknown) on a tree that does not check out: an object reached twice (shared
-    kids, cycles, a kid pointing back at the root: 'page-tree-shared'), an intermediate node whose integer /Count is not
+    kids, shared indirect Kids arrays, cycles, a kid pointing back at the root: 'page-tree-shared'), an intermediate node whose integer /Count is not
     the number of pages under it ('page-tree-count'), a tree deeper than MAX_TREE_DEPTH or larger than MAX_TREE_NODES, a
     broken object, or the deadline. /Count is never used to find a page, only checked: a lying /Count cannot move one.
     The root's own /Count is not checked: nothing here reads it (it is the document's page count, not a position)."""
@@ -801,6 +801,18 @@ def build_page_index(file):
     leaf_parent, leaf_slot = array.array('i'), array.array('i')
     seen = {root_num} if root_num >= 0 else set()
     visited = [1]
+
+    def kids_of(node):
+        """A node's Kids, refusing an indirect Kids array that another node already used (its pages would count twice)."""
+        value = node.get('Kids')
+        if isinstance(value, Ref):
+            if value.num in seen:
+                raise Unknown('page-tree-shared')
+            kids = file.deref(value)
+            if isinstance(kids, list):
+                seen.add(value.num)
+            return kids
+        return file.deref(value)
 
     def visit(node, node_id, kids, depth):
         for slot, kid in enumerate(kids):
@@ -817,7 +829,7 @@ def build_page_index(file):
             visited[0] += 1
             if visited[0] > MAX_TREE_NODES:
                 raise Unknown('tree-size')
-            child_kids = file.deref(child.get('Kids'))
+            child_kids = kids_of(child) if child.get('Type') != 'Page' else file.deref(child.get('Kids'))
             if _is_page_node(child, child_kids):
                 leaf_parent.append(node_id)
                 leaf_slot.append(slot)
@@ -832,7 +844,7 @@ def build_page_index(file):
                 raise Unknown('page-tree-count')
 
     file.check_time()
-    root_kids = file.deref(root.get('Kids'))
+    root_kids = kids_of(root) if root.get('Type') != 'Page' else file.deref(root.get('Kids'))
     if _is_page_node(root, root_kids):
         leaf_parent.append(-1)
         leaf_slot.append(-1)
@@ -892,16 +904,29 @@ def page_index_file(path, index_path, deadline=None):
         return result
     record = result.dumps() if isinstance(result, PageIndex) else _UNKNOWN_RECORD + _file_size(path).to_bytes(8, 'little') \
         + str(result).encode('ascii', 'replace')[:64]
+    # Written whole under a private name, then linked into place (never replacing a record): a reader sees a complete record
+    # or none, and a writer killed mid-write leaves no truncated record that would block the next chunk's.
+    partial = f'{index_path}.{os.getpid()}.partial'
     try:
-        fd = os.open(index_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        fd = os.open(partial, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     except OSError:
         return result
     try:
-        os.write(fd, record)
+        view = memoryview(record)
+        while view:
+            view = view[os.write(fd, view):]
+        os.close(fd)
+        fd = None
+        os.link(partial, index_path, follow_symlinks=False)
     except OSError:
         pass
     finally:
-        os.close(fd)
+        if fd is not None:
+            os.close(fd)
+        try:
+            os.unlink(partial)
+        except OSError:
+            pass
     return result
 
 

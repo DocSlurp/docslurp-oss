@@ -985,6 +985,78 @@ class PageIndexTest(Scratch):
         finally:
             facts.build_page_index = original
 
+    def test_shared_indirect_kids_arrays_fail_closed(self):
+        page = '<< /Type /Page /MediaBox [0 0 100 100] >>'
+        # Two nodes share one Kids array object of inline pages: 4 pages for 2, every /Count consistent.
+        data = raw_pdf({1: f'[{page} {page}]', 2: '<< /Type /Pages /Kids 1 0 R /Count 2 >>',
+                        3: '<< /Type /Pages /Kids 1 0 R /Count 2 >>', 4: '<< /Type /Pages /Kids [2 0 R 3 0 R] /Count 4 >>'}, '4 0 R')
+        self.assert_unknown(data, 'page-tree-shared')
+        # One indirect Kids array, used once, is an ordinary tree.
+        data = raw_pdf({1: f'[{page} {page}]', 2: '<< /Type /Pages /Kids 1 0 R /Count 2 >>'}, '2 0 R')
+        self.assertEqual(self.index(data).pages, 2)
+
+    def test_the_deepest_tree_the_builder_accepts_round_trips(self):
+        spec = {'kids': ['P', {'kids': []}]}
+        for _ in range(facts.MAX_TREE_DEPTH - 1):
+            spec = {'kids': [spec]}
+        index = self.index(TreeBuilder().build(spec))
+        self.assertIsInstance(index, facts.PageIndex)
+        self.assertEqual(facts.PageIndex.loads(index.dumps()).pages, 1)
+
+    def test_inherited_resources_and_content_through_a_nested_tree(self):
+        b = PdfBuilder()
+        im = b.image(4, 4, solid_rgb(4, 4, (9, 9, 9)))
+        objects = {n: body.decode('latin-1') for n, body in b.objects.items()}
+        nodes, number = [], max(objects) + 1
+        for group in range(5):
+            kids = []
+            for k in range(7):
+                n = group * 7 + k + 1
+                objects[number] = f'<< /Length {len(place(n * 3, 10, 0, 0))} >>\nstream\n{place(n * 3, 10, 0, 0)}\nendstream'
+                objects[number + 1] = f'<< /Type /Page /Contents {number} 0 R >>'
+                kids.append(f'{number + 1} 0 R')
+                number += 2
+            # Resources, MediaBox and Rotate inherited from the intermediate node.
+            objects[number] = (f'<< /Type /Pages /Kids [{" ".join(kids)}] /Count 7 /Resources << /XObject << /Im {im} 0 R >> >> '
+                               f'/MediaBox [0 0 {400 + group} 800] /Rotate {90 * group % 360} >>')
+            nodes.append(f'{number} 0 R')
+            number += 1
+        objects[number] = f'<< /Type /Pages /Kids [{" ".join(nodes)}] /Count 35 >>'
+        path = self.write(raw_pdf(objects, f'{number} 0 R'))
+        index = facts.page_index(path)
+        file = facts.PdfFile(path)
+        try:
+            for first in (1, 8, 20, 30):
+                expected = geometry(file, legacy_iter_pages(file, first, first + 5))
+                got = geometry(file, facts.indexed_pages(file, index, range(first, first + 6)))
+                self.assertEqual(got, expected)
+        finally:
+            file.close()
+        for first in (1, 15, 33):
+            walks = facts.walk_document(path, first, first + 2, index=index)
+            for n, walk in walks.items():
+                self.assertIsNone(walk.unknown)
+                self.assertEqual((walk.media[2], walk.rotate), (400 + (n - 1) // 7, 90 * ((n - 1) // 7) % 360))
+                self.assertEqual(len(walk.draws), 1)
+                self.assertIn(float(n * 3), [abs(v) for v in walk.draws[0].matrix[:4]])   # after the display rotation
+
+    def test_index_records_survive_truncation_and_ignore_other_files_failures(self):
+        data = TreeBuilder().build({'kids': ['P', 'P', 'P']})
+        path = self.write(data)
+        record = Path(self.dir.name) / 'page-index'
+        index = facts.page_index_file(path, str(record))
+        self.assertEqual(record.read_bytes(), index.dumps())
+        self.assertEqual([p.name for p in Path(self.dir.name).iterdir() if p.name.endswith('.partial')], [])
+        record.write_bytes(index.dumps()[:-3])            # a writer killed mid-record (an older writer, or a full disk)
+        self.assertEqual(facts.page_index_file(path, str(record)).pages, 3)
+        # A recorded failure for another file (another size) is ignored.
+        record.write_bytes(facts._UNKNOWN_RECORD + (len(data) + 1).to_bytes(8, 'little') + b'page-tree-count')
+        self.assertIsInstance(facts.page_index_file(path, str(record)), facts.PageIndex)
+        record.write_bytes(facts._UNKNOWN_RECORD + len(data).to_bytes(8, 'little') + b'page-tree-count')
+        self.assertEqual(str(facts.page_index_file(path, str(record))), 'page-tree-count')
+        record.write_bytes(facts._UNKNOWN_RECORD + len(data).to_bytes(8, 'little') + b'Not A Slug!')
+        self.assertIsInstance(facts.page_index_file(path, str(record)), facts.PageIndex)
+
     def test_layout_facts_with_an_index_match_layout_facts_without(self):
         b = PdfBuilder()
         im = b.image(4, 4, solid_rgb(4, 4, (9, 9, 9)))
