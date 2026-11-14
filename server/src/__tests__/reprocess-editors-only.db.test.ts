@@ -3,7 +3,7 @@ import { Hono } from "hono";
 import postgres from "postgres";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { defaultPipelineFeatures } from "@docslurp/shared";
+import { defaultPipelineFeatures, EDITOR_REQUIRED_MESSAGE } from "@docslurp/shared";
 import { startMigratedPostgres } from "@docslurp/worker/testing";
 
 /**
@@ -45,11 +45,11 @@ beforeAll(async () => {
 
   await sql`insert into "user"(id, name, email) values
     ('ua', 'Admin', 'admin@example.com'), ('ue', 'Editor', 'editor@example.com'), ('uv', 'Viewer', 'viewer@example.com'),
-    ('um', 'Member', 'member@example.com'), ('ub', 'Other', 'other@example.com')`;
+    ('um', 'Member', 'member@example.com'), ('ub', 'Other', 'other@example.com'), ('ux', 'Second admin', 'admin2@example.com')`;
   await sql`insert into organizations(id, name, slug, created_by_user_id, credit_balance_cents, funded_at) values
     ('org-a', 'A', 'a', 'ua', 100000, now()), ('org-b', 'B', 'b', 'ub', 100000, now())`;
   await sql`insert into org_memberships(org_id, user_id, role) values
-    ('org-a', 'ua', 'admin'), ('org-a', 'ue', 'member'), ('org-a', 'uv', 'member'), ('org-a', 'um', 'member'), ('org-b', 'ub', 'owner')`;
+    ('org-a', 'ua', 'admin'), ('org-a', 'ue', 'member'), ('org-a', 'uv', 'member'), ('org-a', 'um', 'member'), ('org-a', 'ux', 'admin'), ('org-b', 'ub', 'owner')`;
   // proj-a is org A's default project: every member reaches it, which used to be enough to reprocess in it.
   // Slugs equal to the ids: a key names a project by reference, and these test ids are not UUIDs.
   await sql`insert into projects(id, org_id, user_id, name, slug, is_default, pipeline) values
@@ -60,7 +60,9 @@ beforeAll(async () => {
     ('run-a', 'org-a', 'uv', 'proj-a', 'bulk-upload', 'failed', 'failed', ${sql.json(defaultPipelineFeatures as never)}, 1, 4),
     ('run-b', 'org-b', 'ub', 'proj-b', 'bulk-upload', 'failed', 'failed', ${sql.json(defaultPipelineFeatures as never)}, 1, 4),
     ('run-mine', 'org-a', 'um', 'proj-a', 'bulk-upload', 'processing', 'extract-markdown', ${sql.json(defaultPipelineFeatures as never)}, 1, 4),
-    ('run-mine-reprocess', 'org-a', 'um', 'proj-a', 'bulk-reprocess', 'processing', 'extract-markdown', ${sql.json(defaultPipelineFeatures as never)}, 1, 4)`;
+    ('run-mine-reprocess', 'org-a', 'um', 'proj-a', 'bulk-reprocess', 'processing', 'extract-markdown', ${sql.json(defaultPipelineFeatures as never)}, 1, 4),
+    ('run-dead', 'org-a', 'um', 'proj-a', 'bulk-upload', 'failed', 'failed', ${sql.json(defaultPipelineFeatures as never)}, 1, 4)`;
+  await sql`update project_runs set control_state = 'dead-letter' where id = 'run-dead'`;
   await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, indexing_mode) values
     ('doc-a', 'org-a', 'uv', 'proj-a', 'run-a', 'a.pdf', 'application/pdf', 'uv/raw/a.pdf', 'completed', 4, 'map'),
     ('doc-b', 'org-b', 'ub', 'proj-b', 'run-b', 'b.pdf', 'application/pdf', 'ub/raw/b.pdf', 'completed', 4, 'map')`;
@@ -158,12 +160,13 @@ describe.each(PATHS)("$name", ({ call, keys: acceptsKeys, allowed = pastAuthoriz
     for (const user of ["uv", "um"]) {
       const response = await call(as(user));
       expect(response.status, user).toBe(403);
+      expect(await response.json(), user).toMatchObject({ error: { code: "editor_required", message: EDITOR_REQUIRED_MESSAGE } });
     }
     expect(await runsQueued()).toBe(before);
   });
 
-  it("lets a project editor and an org admin past authorization", async () => {
-    for (const user of ["ue", "ua"]) {
+  it("lets a project editor, the owning admin and an org admin who does not own the project past authorization", async () => {
+    for (const user of ["ue", "ua", "ux"]) {
       const response = await call(as(user));
       const body = await response.text();
       expect(allowed(response, body), `${user} got ${response.status}: ${body}`).toBe(true);
@@ -391,5 +394,107 @@ describe("document changes: delete and tags (owner decision: viewers are read-on
       const access = await getProjectAccess("proj-a", user);
       expect(access && canContributeToProject(access, user), user).toBe(true);
     }
+  });
+});
+
+describe("estimates follow their action's rule (council F2)", () => {
+  const ESTIMATES: Array<[string, (caller: Caller, foreign?: boolean) => Promise<Response>]> = [
+    ["settings change", (caller, f) => post(caller, `/v1/projects/${f ? "proj-b" : "proj-a"}/estimate`, { name: "Renamed" })],
+    ["search settings", (caller, f) => post(caller, `/v1/projects/${f ? "proj-b" : "proj-a"}/search-settings/estimate`, {})],
+    ["indexing mode", (caller, f) => post(caller, `/v1/projects/${f ? "proj-b" : "proj-a"}/indexing-mode/estimate`, { mode: "full" })],
+    ["bulk reprocess", (caller, f) => post(caller, `/v1/projects/${f ? "proj-b" : "proj-a"}/documents/bulk/estimate`, { action: "reprocess", documentIds: [f ? "doc-b" : "doc-a"] })],
+    ["bulk delete", (caller, f) => post(caller, `/v1/projects/${f ? "proj-b" : "proj-a"}/documents/bulk/estimate`, { action: "delete", documentIds: [f ? "doc-b" : "doc-a"] })],
+    ["project full index", (caller, f) => post(caller, `/v1/projects/${f ? "proj-b" : "proj-a"}/full-index/estimate`, {})],
+    ["document full index", (caller, f) => post(caller, `/v1/documents/${f ? "doc-b" : "doc-a"}/full-index/estimate`, {})],
+    ["run reprocess", (caller, f) => post(caller, `/v1/runs/${f ? "run-b" : "run-a"}/reprocess/estimate`, {})],
+  ];
+  it.each(ESTIMATES)("%s: viewer and member 403 editor_required, editors and admins allowed, another org 404", async (_name, estimate) => {
+    for (const user of ["uv", "um"]) {
+      const response = await estimate(as(user));
+      expect(response.status, user).toBe(403);
+      expect(await response.json(), user).toMatchObject({ error: { code: "editor_required" } });
+    }
+    for (const user of ["ue", "ua", "ux"]) {
+      const response = await estimate(as(user));
+      expect(pastAuthorization(response), `${user}: ${response.status} ${await response.text()}`).toBe(true);
+    }
+    expect((await estimate(as("ub"))).status).toBe(404);
+    expect((await estimate(as("ua"), true)).status).toBe(404);
+  });
+  it("an export estimate stays a read", async () => {
+    expect(pastAuthorization(await post(as("uv"), "/v1/projects/proj-a/documents/bulk/estimate", { action: "export-artifacts", documentIds: ["doc-a"] }))).toBe(true);
+  });
+});
+
+describe("other editor-only paths (council F4)", () => {
+  it("ingest-report reprocess: viewer and member 403 editor_required, an editor past authorization", async () => {
+    const reprocess = (caller: Caller) => post(caller, "/v1/projects/proj-a/ingest-report/reprocess", { recommendationId: "retry-failed" });
+    for (const user of ["uv", "um"]) {
+      const response = await reprocess(as(user));
+      expect(response.status, user).toBe(403);
+      expect(await response.json()).toMatchObject({ error: { code: "editor_required" } });
+    }
+    expect([401, 403]).not.toContain((await reprocess(as("ue"))).status);
+    expect((await reprocess(as("ub"))).status).toBe(404);
+  });
+
+  it("MCP fullIndex: the service refuses a viewer with editor_required and admits an editor", async () => {
+    const { createMcpDispatcher } = await import("../services/mcp-tools.js");
+    const call = (user: string) => createMcpDispatcher({ type: "session", userId: user, sessionId: `session-${user}`, user: { id: user } } as never)(
+      "/tools/fullIndex", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ project: "proj-a" }) });
+    for (const user of ["uv", "um"]) {
+      const response = await call(user);
+      expect(response.status, user).toBe(403);
+      expect(await response.text(), user).toContain("editor_required");
+    }
+    expect([401, 403, 404]).not.toContain((await call("ue")).status);
+    expect((await call("ub")).status).toBe(404);
+  });
+
+  it("a failed, dead-lettered upload run: its creator may recover it; a viewer may not; another org gets 404", async () => {
+    const recover = (user: string) => post(as(user), "/v1/runs/run-dead/control", { action: "recover" });
+    expect(pastAuthorization(await recover("um"))).toBe(true);
+    expect(pastAuthorization(await recover("ue"))).toBe(true);
+    const viewer = await recover("uv");
+    expect(viewer.status).toBe(403);
+    expect(await viewer.json()).toMatchObject({ error: { code: "editor_required" } });
+    expect((await recover("ub")).status).toBe(404);
+  });
+});
+
+describe("the services refuse on their own, bypassing every route (council F4)", () => {
+  it("reprocess, retry, run control, run creation from versions, full index, deletes, tags, corrections and estimates", async () => {
+    const runs = await import("../services/runs.js");
+    const documents = await import("../services/documents.js");
+    const review = await import("../services/document-review.js");
+    const indexing = await import("../services/project-indexing-mode.js");
+    const estimates = await import("../services/work-estimates.js");
+    const { EditorRequiredError } = await import("../lib/editor-required.js");
+    const { DEFAULT_SERVER_MATERIALIZATION_POLICY } = await import("@docslurp/shared");
+    const before = await runsQueued();
+    for (const user of ["uv", "um"]) {
+      await expect(runs.reprocessRun("run-a", user, {}), user).rejects.toBeInstanceOf(EditorRequiredError);
+      await expect(runs.retryRun("run-a", user), user).rejects.toBeInstanceOf(EditorRequiredError);
+      await expect(runs.controlRun("run-a", user, { action: "reprioritize", priority: 3 }), user).rejects.toBeInstanceOf(EditorRequiredError);
+      expect((await documents.bulkReprocessDocuments(["doc-a"], user)).runs, user).toEqual([]);
+      await expect(documents.deleteDocuments(["doc-a"], user), user).rejects.toBeInstanceOf(EditorRequiredError);
+      await expect(documents.addDocumentTags(["doc-a"], user, ["x"]), user).rejects.toBeInstanceOf(EditorRequiredError);
+      await expect(documents.removeDocumentTags(["doc-a"], user, ["x"]), user).rejects.toBeInstanceOf(EditorRequiredError);
+      await expect(documents.setDocumentTags("doc-a", user, ["x"]), user).rejects.toBeInstanceOf(EditorRequiredError);
+      await expect(review.saveDocumentCorrection({ docId: "doc-a", userId: user, markdown: "x" }), user).rejects.toBeInstanceOf(EditorRequiredError);
+      await expect(indexing.requestFullIndex({
+        orgId: "org-a", projectId: "proj-a", actor: { type: "session", userId: user, sessionId: "s", user: { id: user } } as never,
+        policy: DEFAULT_SERVER_MATERIALIZATION_POLICY,
+      }), user).rejects.toMatchObject({ status: 403, code: "editor_required" });
+      expect(await estimates.estimateDocumentReprocess({ documentIds: ["doc-a"], userId: user }), user).toBeNull();
+      expect(await estimates.singleProjectOf(["doc-a"], user), user).toBeNull();
+    }
+    expect(await runsQueued()).toBe(before);
+    expect(await sql`select 1 from documents where id = 'doc-a'`).toHaveLength(1);
+    // Another org's documents are invisible to the services too: nothing to refuse, nothing changed.
+    expect(await documents.deleteDocuments(["doc-a"], "ub")).toBe(0);
+    expect(await runs.reprocessRun("run-a", "ub", {})).toBeNull();
+    // A second org admin (not the project's owner) passes the same checks.
+    expect(await estimates.singleProjectOf(["doc-a"], "ux")).toBe("proj-a");
   });
 });

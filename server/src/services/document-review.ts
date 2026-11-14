@@ -6,6 +6,7 @@ import { sql } from "../db.js";
 import { notifySearchEligibilityChanged } from "../search/eligibility-hint.js";
 import { getArtifactJson, getArtifactText } from "../lib/artifacts.js";
 import { canEditProject, getProjectAccess, listAccessibleProjectIds } from "./organizations.js";
+import { EditorRequiredError } from "../lib/editor-required.js";
 import { getDocumentViewerPayload, setDocumentTags } from "./documents.js";
 
 type ReviewDocumentRow = {
@@ -431,9 +432,8 @@ export function calculateReviewSeverity(input: {
 }
 
 /** A visible document the caller may not correct (403; one they cannot see is a 404). */
-export class CorrectionForbiddenError extends Error {
-  readonly status = 403 as const;
-  constructor() { super("Correcting a document needs edit access to the project"); this.name = "CorrectionForbiddenError"; }
+export class CorrectionForbiddenError extends EditorRequiredError {
+  constructor() { super(); this.name = "CorrectionForbiddenError"; }
 }
 
 async function assertCanEditCorrection(projectId: string, orgId: string, userId: string): Promise<void> {

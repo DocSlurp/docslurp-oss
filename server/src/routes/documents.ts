@@ -56,7 +56,7 @@ import { inlineEstimate, jobMetaFor, jobStatusForMutation, recordJobMeta } from 
 import { billingState } from "../services/config-change.js";
 import { estimateDocumentReprocess, singleProjectOf } from "../services/work-estimates.js";
 import { apiKeyCanUpdateContent, CONTENT_UPDATE_SCOPE_MESSAGE } from "../lib/content-update-access.js";
-import { callerCanReprocess, denyReprocessOfVisible } from "../lib/reprocess-access.js";
+import { callerCanReprocess, denyReprocessOfVisible, editorRequired } from "../lib/reprocess-access.js";
 import { sql } from "../db.js";
 import { withheldArtifactUrisFromMetadata } from "../services/pii-artifact-guard.js";
 import { apiKeyCanUseProject } from "../lib/api-key-project-scope.js";
@@ -317,7 +317,7 @@ export const documentsRoutes = new Hono()
     try {
       deleted = await deleteDocument(c.req.param("docId"), userId);
     } catch (error) {
-      if (error instanceof DocumentMutationForbiddenError) return apiStatusError(c, 403, error.message);
+      if (error instanceof DocumentMutationForbiddenError) return editorRequired(c);
       // Deleting a document whose run is still processing races the pipeline and
       // hits a foreign-key violation (the run's rows still reference it). Answer
       // 409 so clients retry; every other failure keeps its 500 contract.
@@ -493,7 +493,7 @@ export const documentsRoutes = new Hono()
         tags: body.tags
       });
     } catch (error) {
-      if (error instanceof CorrectionForbiddenError) return apiStatusError(c, 403, error.message);
+      if (error instanceof CorrectionForbiddenError) return editorRequired(c);
       throw error;
     }
 
@@ -532,7 +532,7 @@ export const documentsRoutes = new Hono()
     try {
       result = await reindexDocumentCorrection({ docId: c.req.param("docId"), userId });
     } catch (error) {
-      if (error instanceof CorrectionForbiddenError) return apiStatusError(c, 403, error.message);
+      if (error instanceof CorrectionForbiddenError) return editorRequired(c);
       throw error;
     }
 
@@ -567,7 +567,7 @@ export const documentsRoutes = new Hono()
     try {
       tags = await setDocumentTags(c.req.param("docId"), userId, body.tags);
     } catch (error) {
-      if (error instanceof DocumentMutationForbiddenError) return apiStatusError(c, 403, error.message);
+      if (error instanceof DocumentMutationForbiddenError) return editorRequired(c);
       throw error;
     }
 
@@ -606,7 +606,7 @@ export const documentsRoutes = new Hono()
       if ((await listDocumentOwners(ids, userId)).length !== ids.length) return apiStatusError(c, 404, "Document not found");
     }
     const forbidden = (error: unknown) => {
-      if (error instanceof DocumentMutationForbiddenError) return apiStatusError(c, 403, error.message);
+      if (error instanceof DocumentMutationForbiddenError) return editorRequired(c);
       throw error;
     };
 

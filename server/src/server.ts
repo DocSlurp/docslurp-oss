@@ -21,6 +21,7 @@ import { fileURLToPath } from "node:url";
 import { searchCompatRoutes } from "./routes/search-compat.js";
 import { serviceCors } from "./middleware/widget-cors.js";
 import { Hono } from "hono";
+import { EditorRequiredError } from "./lib/editor-required.js";
 
 import { env } from "./config.js";
 import { seedNonProductionUsers } from "./lib/seed-users.js";
@@ -140,6 +141,8 @@ export function createApiApp(): Hono {
     // The request span records it (message, stack) once the response is sent.
     setCurrentRequestError(error);
     if (error instanceof QuoteSettingsError) return c.json({ error: error.message, code: error.code }, 400);
+    // A service's editor-only refusal (EditorRequiredError): 403 editor_required in the native envelope.
+    if (error instanceof EditorRequiredError) return c.json({ error: error.message, code: error.code }, 403);
     return error instanceof UnreadableSourceError
       ? c.json({ error: error.message, code: error.code }, error.statusCode)
       : spendAwareErrorHandler(error, c);

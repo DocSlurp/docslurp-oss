@@ -23,6 +23,7 @@ import { documentWithholdsUri, withheldArtifactUrisFromMetadata } from "./pii-ar
 import { andSqlFragments, type SqlFragment } from "../lib/sql-fragments.js";
 import { decodeListCursor, encodeListCursor } from "../lib/list-cursor.js";
 import { getProjectAccess, listAccessibleProjectIds, listReprocessableProjectIds } from "./organizations.js";
+import { EditorRequiredError } from "../lib/editor-required.js";
 import { runCreation } from "./run-creation.js";
 import {
   documentUsageTotals,
@@ -1357,9 +1358,8 @@ export async function getDocumentViewerPayload(docId: string, userId: string): P
 }
 
 /** A document the caller can read but may not change (403; one they cannot read is a 404). */
-export class DocumentMutationForbiddenError extends Error {
-  readonly status = 403 as const;
-  constructor() { super("Changing documents needs edit access to the project"); this.name = "DocumentMutationForbiddenError"; }
+export class DocumentMutationForbiddenError extends EditorRequiredError {
+  constructor() { super(); this.name = "DocumentMutationForbiddenError"; }
 }
 
 /**

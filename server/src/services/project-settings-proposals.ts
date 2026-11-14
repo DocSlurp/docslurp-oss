@@ -1,7 +1,7 @@
 import { resolveLegacyQualityPatch, projectSettingsProposalInputSchema, projectSettingsPipelinePatchSchema } from "./project-settings-proposal-input.js";
 import { createHash } from "node:crypto";
 import { z } from "zod";
-import { analyzeSearchSettingsChange, type ProjectSettingsProposal, type PipelineFeatures } from "@docslurp/shared";
+import { EDITOR_REQUIRED_CODE, EDITOR_REQUIRED_MESSAGE, analyzeSearchSettingsChange, type ProjectSettingsProposal, type PipelineFeatures } from "@docslurp/shared";
 import { sql } from "../db.js";
 import type { RequestActor } from "../lib/request-actor.js";
 import { isFirstPartyAppActor } from "../lib/first-party-app.js";
@@ -40,7 +40,7 @@ async function authorize(actor: RequestActor, projectId: string, sessionId: stri
   // Rechecked under the configuration lock, like every other authorization.
   assertFirstPartyApp(actor);
   const access = await getProjectAccess(projectId, actor.userId, client);
-  if (!access || !canEditProject(access, actor.userId)) return fail(403, "settings_proposal_forbidden", "Project editing permission is required");
+  if (!access || !canEditProject(access, actor.userId)) return fail(403, EDITOR_REQUIRED_CODE, EDITOR_REQUIRED_MESSAGE);
   const [session] = await client<{ id: string }[]>`select id from chat_sessions where id=${sessionId} and user_id=${actor.userId} and project_id=${projectId}`;
   if (!session) return fail(403, "settings_proposal_forbidden", "The proposal must belong to your project conversation");
   return access;

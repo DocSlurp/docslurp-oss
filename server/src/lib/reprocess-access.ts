@@ -1,6 +1,7 @@
 import type { Context } from "hono";
 import { apiKeyCanUseProject } from "./api-key-project-scope.js";
-import { apiStatusError } from "./api-error.js";
+import { apiErrorResponse, apiStatusError } from "./api-error.js";
+import { EDITOR_REQUIRED_CODE, EDITOR_REQUIRED_MESSAGE } from "@docslurp/shared";
 import { apiKeyCanUpdateContent, CONTENT_UPDATE_SCOPE_MESSAGE } from "./content-update-access.js";
 import { canEditProject, getProjectAccess } from "../services/organizations.js";
 
@@ -23,7 +24,22 @@ export async function callerCanReprocess(c: Context, document: { orgId: string; 
   return Boolean(access && access.orgId === document.orgId && canEditProject(access, userId));
 }
 
-export const REPROCESS_FORBIDDEN_MESSAGE = "Reprocessing and other paid work need edit access to the project";
+/** The one editor-only refusal (shared EDITOR_REQUIRED_CODE): 403 `editor_required` with its reviewed message. */
+export function editorRequired(c: Context): Response {
+  return apiErrorResponse(c, 403, EDITOR_REQUIRED_CODE, EDITOR_REQUIRED_MESSAGE);
+}
+
+/**
+ * Refuse a change to a project the caller can already see when they may not edit it (session or key user; any key scope
+ * gate runs before this): 403 `editor_required`, or null. A project they cannot see is the caller's 404, before this.
+ */
+export async function denyEditOfVisibleProject(c: Context, project: { id: string; orgId: string }): Promise<Response | null> {
+  const userId = c.get("sessionUser")?.id;
+  if (!userId) return editorRequired(c);
+  // Access is read for this project's own id, so it is that project's (and organization's) access.
+  const access = await getProjectAccess(project.id, userId);
+  return access && canEditProject(access, userId) ? null : editorRequired(c);
+}
 
 /**
  * Refuse a reprocess of projects the caller can already see: 403 for a key without content-update scope or a caller who
@@ -37,7 +53,7 @@ export async function denyReprocessOfVisible(c: Context, targets: ReadonlyArray<
   for (const target of targets) {
     if (seen.has(target.projectId)) continue;
     seen.add(target.projectId);
-    if (!await callerCanReprocess(c, target)) return apiStatusError(c, 403, REPROCESS_FORBIDDEN_MESSAGE);
+    if (!await callerCanReprocess(c, target)) return editorRequired(c);
   }
   return null;
 }

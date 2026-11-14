@@ -52,6 +52,7 @@ import {
   listAccessibleProjectIds,
   type ProjectAccess,
 } from "./organizations.js";
+import { EditorRequiredError } from "../lib/editor-required.js";
 import {
   admitRunSpend,
   SpendBlockedError,
@@ -376,8 +377,9 @@ export async function reprocessRun(
   if (!original) return null;
   const access = await getProjectAccess(original.projectId, userId);
   // Spends credits: editors only (canEditProject), not default-project contributors (council L3).
-  if (!access || !canEditProject(access, userId)) {
-    throw new Error("Forbidden");
+  if (!access) throw new Error("Forbidden");
+  if (!canEditProject(access, userId)) {
+    throw new EditorRequiredError();
   }
   // Access first (a caller with no access never learns what the deployment offers), then the tier.
   const refused = chartExportOverrideError(options?.chartExport?.tier, `reprocess run=${runId}`);
@@ -511,8 +513,9 @@ export async function retryRun(
   }
   const access = await getProjectAccess(run.projectId, userId);
   // Spends credits: editors only (canEditProject), not default-project contributors (council L3).
-  if (!access || !canEditProject(access, userId)) {
-    throw new Error("Forbidden");
+  if (!access) throw new Error("Forbidden");
+  if (!canEditProject(access, userId)) {
+    throw new EditorRequiredError();
   }
 
   // A retried run keeps its categories and stage selection, but its model values are re-resolved: a run from before
@@ -550,9 +553,8 @@ export { planRunControlUpdate, type RunControlAction };
 export const UPLOAD_RUN_KINDS: ReadonlySet<string> = new Set(["upload", "bulk-upload", "direct-upload", "url-ingest"]);
 
 /** A visible run the caller may not control this way (403; a run they cannot see is a 404). */
-export class RunControlForbiddenError extends Error {
-  readonly status = 403 as const;
-  constructor() { super("Controlling this run needs edit access to the project"); this.name = "RunControlForbiddenError"; }
+export class RunControlForbiddenError extends EditorRequiredError {
+  constructor() { super(); this.name = "RunControlForbiddenError"; }
 }
 
 /**

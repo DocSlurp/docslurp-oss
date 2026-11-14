@@ -45,7 +45,7 @@ async function customerRun<R extends { stats?: unknown; pipeline?: unknown }>(c:
   return await isPlatformAdminActor(getRequestActor(c)) ? run : redactOperatorRun(run);
 }
 import { acceptApiKeys } from "../lib/route-auth.js";
-import { denyReprocessOfVisible } from "../lib/reprocess-access.js";
+import { denyReprocessOfVisible, editorRequired } from "../lib/reprocess-access.js";
 import { apiErrorResponse, apiStatusError } from "../lib/api-error.js";
 import { parseListLimit } from "../lib/list-cursor.js";
 import { inlineEstimate, jobMetaFor, jobStatusForMutation, recordJobMeta } from "../services/jobs.js";
@@ -461,7 +461,7 @@ export const runsRoutes = new Hono()
     try {
       run = await controlRun(c.req.param("runId"), userId, { action: body.action, priority: body.priority });
     } catch (error) {
-      if (error instanceof RunControlForbiddenError) return apiStatusError(c, 403, error.message);
+      if (error instanceof RunControlForbiddenError) return editorRequired(c);
       throw error;
     }
 

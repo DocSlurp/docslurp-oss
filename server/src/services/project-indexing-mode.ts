@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import type { RunOrigin } from "@docslurp/shared";
 import { groupByChartTier, sourceRunChartTiers, stampRunChartExport } from "./chart-export-availability.js";
-import { explicitProjectChartTier, projectChartExportTierCap, upgradeStoredChartExport, type ChartExportTier } from "@docslurp/shared";
+import { EDITOR_REQUIRED_CODE, EDITOR_REQUIRED_MESSAGE, explicitProjectChartTier, projectChartExportTierCap, upgradeStoredChartExport, type ChartExportTier } from "@docslurp/shared";
 import { isFirstPartyAppActor } from "../lib/first-party-app.js";
 import {
   pageCredits,
@@ -46,7 +46,7 @@ export class IndexingModeError extends Error {
       | "visual_mode_quality"
       | "invalid_pipeline"
       | "full_index_not_allowed"
-      | "full_index_forbidden"
+      | "editor_required"
       | "document_not_found"
       | "nothing_to_index"
       | "backfill_not_possible",
@@ -360,7 +360,7 @@ export async function prepareFullIndex(args: FullIndexArgs): Promise<PreparedInd
   if (!access) throw new IndexingModeError("Project not found", 404, "document_not_found");
   // A full index spends credits: editors only (canEditProject, council L3); a visible project is a 403.
   if (!canEditProject(access, args.actor.userId)) {
-    throw new IndexingModeError("A full index needs edit access to the project", 403, "full_index_forbidden");
+    throw new IndexingModeError(EDITOR_REQUIRED_MESSAGE, 403, EDITOR_REQUIRED_CODE);
   }
   const [ws] = await sql<{ pipeline: PipelineFeatures | null }[]>`
     select pipeline from projects where id = ${args.projectId} and org_id = ${args.orgId}

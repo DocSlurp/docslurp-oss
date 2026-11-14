@@ -5,7 +5,7 @@
  * session, sealed and short-lived. Apply queues resumes under the runner's caps (figure-resume.ts); nothing is charged
  * for the resume itself.
  */
-import { FIGURE_RESUME_LIMITS, type FigureResumeProposal } from "@docslurp/shared";
+import { EDITOR_REQUIRED_CODE, EDITOR_REQUIRED_MESSAGE, FIGURE_RESUME_LIMITS, type FigureResumeProposal } from "@docslurp/shared";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { sql } from "../db.js";
@@ -33,7 +33,7 @@ const identity = (actor: RequestActor) => actor.type === "session" ? `session:${
 async function authorize(actor: RequestActor, projectId: string, sessionId: string) {
   if (!isFirstPartyAppActor(actor)) return fail(403, "figure_resume_forbidden", "Finishing figures from chat is available only in the DocSlurp app");
   const access = await getProjectAccess(projectId, actor.userId);
-  if (!access || !canEditProject(access, actor.userId)) return fail(403, "figure_resume_forbidden", "Project editing permission is required");
+  if (!access || !canEditProject(access, actor.userId)) return fail(403, EDITOR_REQUIRED_CODE, EDITOR_REQUIRED_MESSAGE);
   const [session] = await sql<{ id: string }[]>`select id from chat_sessions where id = ${sessionId} and user_id = ${actor.userId} and project_id = ${projectId}`;
   if (!session) return fail(403, "figure_resume_forbidden", "The proposal must belong to your project conversation");
   return access;
