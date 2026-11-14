@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
-  FIGURE_RESUME_BUDGET_ENV, FIGURE_RESUME_HARD, figureResumeLaunchPages, figureResumeBudgetConfig, figureResumeConcurrency, figureResumeGlobalMax, figureResumeProgressed, figureResumeExpectedPasses, figureResumeLaunchCap, figureResumeOrgDailyVmMs,
+  FIGURE_RESUME_BUDGET_ENV, FIGURE_RESUME_HARD, figureResumeLaunchPages, figureResumeLaunchVmMs, figureResumeBudgetConfig, figureResumeConcurrency, figureResumeGlobalMax, figureResumeProgressed, figureResumeExpectedPasses, figureResumeLaunchCap, figureResumeOrgDailyVmMs,
   figureResumeUnitCap, figureResumeVmBudgetMs, isFigureResumeBudgetBlock,
 } from "../figure-resume-limits.js";
 
@@ -19,16 +19,19 @@ describe("figure resume limits", () => {
     expect(figureResumeExpectedPasses(0)).toBe(1);
   });
 
-  it("small documents: 3 launches, 180 s, 3 resumes per unit; huge documents: 95 launches, 4,316 s, 15 per 625-page shard", () => {
+  it("small documents: 3 launches, 180 s, 3 resumes per unit; huge documents: 95 launches, the 4 h ceiling, 15 per 625-page shard", () => {
     expect(figureResumeLaunchCap({ pageCount: 10 }, defaults)).toBe(3);
     expect(figureResumeVmBudgetMs({ pageCount: 10 }, defaults)).toBe(180_000);
     expect(figureResumeUnitCap({ unitPages: 10, whole: true })).toBe(3);
     expect(figureResumeLaunchCap({ pageCount: 1_000 }, defaults)).toBe(30);
-    // Unsharded: every resume converts all 1,000 pages (3 s + 50 s), 20 passes, 2x headroom.
-    expect(figureResumeVmBudgetMs({ pageCount: 1_000 }, defaults)).toBe(2_120_000);
+    // Unsharded: every resume converts all 1,000 pages (15 s + 200 s), 20 passes, 2x headroom.
+    expect(figureResumeVmBudgetMs({ pageCount: 1_000 }, defaults)).toBe(8_600_000);
     expect(figureResumeLaunchCap({ pageCount: 20_000, units: 32 }, defaults)).toBe(95);
-    // 32 shards of 625 pages: each resume is one shard (3 s + 31.25 s), 63 passes, 2x headroom.
-    expect(figureResumeVmBudgetMs({ pageCount: 20_000, shards: 32 }, defaults)).toBe(4_315_500);
+    // 32 shards of 625 pages: each resume is one shard (15 s + 125 s), 63 passes, 2x headroom: past the ceiling (4 h).
+    expect(figureResumeVmBudgetMs({ pageCount: 20_000, shards: 32 }, defaults)).toBe(4 * 3_600_000);
+    // 8 shards of 250 pages: 40 passes of (15 s + 50 s), 2x headroom, under the ceiling.
+    expect(figureResumeExpectedPasses(2_000)).toBe(40);
+    expect(figureResumeVmBudgetMs({ pageCount: 2_000, shards: 8 }, defaults)).toBe(2 * 40 * (15_000 + 250 * 200));
     // The same document unsharded would need 63 full passes: the ceiling (4 h) bounds it.
     expect(figureResumeVmBudgetMs({ pageCount: 20_000 }, defaults)).toBe(4 * 3_600_000);
     expect(figureResumeUnitCap({ unitPages: 625, documentPages: 20_000 })).toBe(15);
@@ -50,15 +53,15 @@ describe("figure resume limits", () => {
   it("M2: an unsharded document's launch converts every page, gaps or not; a sharded one, one shard", () => {
     expect(figureResumeLaunchPages({ pageCount: 1_000 })).toBe(1_000);
     expect(figureResumeLaunchPages({ pageCount: 20_000, shards: 32 })).toBe(625);
-    // 1,000 pages unsharded with gaps: still 20 passes of 53 s, 2x headroom (the gaps never divide it).
-    expect(figureResumeVmBudgetMs({ pageCount: 1_000, shards: 0 }, defaults)).toBe(2_120_000);
+    // 1,000 pages unsharded with gaps: still 20 passes of 215 s, 2x headroom (the gaps never divide it).
+    expect(figureResumeVmBudgetMs({ pageCount: 1_000, shards: 0 }, defaults)).toBe(8_600_000);
   });
 
   it("grants add half the base again (at least the floors), bounded by the hard ceilings", () => {
     expect(figureResumeLaunchCap({ pageCount: 10, grants: 1 }, defaults)).toBe(6);
     expect(figureResumeLaunchCap({ pageCount: 20_000, grants: 2 }, defaults)).toBe(95 + 2 * 48);
     expect(figureResumeVmBudgetMs({ pageCount: 10, grants: 1 }, defaults)).toBe(360_000);
-    expect(figureResumeVmBudgetMs({ pageCount: 20_000, shards: 32, grants: 1 }, defaults)).toBe(4_315_500 + 2_157_750);
+    expect(figureResumeVmBudgetMs({ pageCount: 20_000, shards: 32, grants: 1 }, defaults)).toBe(4 * 3_600_000 + 2 * 3_600_000);
     expect(figureResumeUnitCap({ unitPages: 10, whole: true, grants: 1 })).toBe(6);
     expect(figureResumeLaunchCap({ pageCount: 20_000, grants: 100 }, { ...defaults, launchCeiling: 512 })).toBe(FIGURE_RESUME_HARD.documentLaunches);
     expect(figureResumeUnitCap({ unitPages: 100_000, whole: true, grants: 100 })).toBe(FIGURE_RESUME_HARD.unitResumes);
@@ -136,28 +139,34 @@ describe("figure resume limits", () => {
     expect(figureResumeProgressed({ before: 0, after: 0, added: 0, addedBytes: 0 }, defaults)).toBe(false);
   });
 
-  it("r2 H1: a 3,000-page unsharded document making steady 218-figure passes resumes to completion inside every cap", () => {
+  it("r2 H1: a 3,000-page document in 12 shards making steady 218-figure passes resumes to completion inside every cap", () => {
     const MiB = 1024 * 1024;
-    const pageCount = 3_000;
-    const launchCap = figureResumeLaunchCap({ pageCount }, defaults);
-    const unitCap = figureResumeUnitCap({ unitPages: pageCount, documentPages: pageCount, whole: true });
-    const vmBudget = figureResumeVmBudgetMs({ pageCount, shards: 0 }, defaults);
-    const passMs = 3_000 + pageCount * 50;
-    // The allowance after the first pass, in 300 KB figures: (3,814 - 64) MiB.
-    let work = Math.floor((3_750 * MiB) / 307_200);
+    const pageCount = 3_000, shards = 12;
+    const launchCap = figureResumeLaunchCap({ pageCount, units: shards }, defaults);
+    const unitCap = figureResumeUnitCap({ unitPages: pageCount / shards, documentPages: pageCount });
+    const vmBudget = figureResumeVmBudgetMs({ pageCount, shards }, defaults);
+    const passMs = figureResumeLaunchVmMs({ pageCount, shards }, defaults);
+    // The allowance after the first pass, in 300 KB figures ((3,814 - 64) MiB), spread over the shards.
+    const perShard = Math.ceil(Math.floor((3_750 * MiB) / 307_200) / shards);
     let launches = 0, stalls = 0, vmMs = 0;
-    while (work > 0) {
-      expect(launches).toBeLessThan(Math.min(launchCap, unitCap));
-      expect(vmBudget - vmMs).toBeGreaterThanOrEqual(60_000);
-      const added = Math.min(work, 218);
-      const next = work - added;
-      launches += 1; vmMs += passMs;
-      stalls = figureResumeProgressed({ before: work, after: next, added, addedBytes: added * 307_200 }, defaults) ? 0 : stalls + 1;
-      expect(stalls).toBeLessThan(defaults.noProgressLimit);
-      work = next;
+    for (let shard = 0; shard < shards; shard++) {
+      let work = perShard, unitLaunches = 0;
+      while (work > 0) {
+        expect(launches).toBeLessThan(launchCap);
+        expect(unitLaunches).toBeLessThan(unitCap);
+        expect(vmBudget - vmMs).toBeGreaterThanOrEqual(60_000);
+        const added = Math.min(work, 218);
+        const next = work - added;
+        launches += 1; unitLaunches += 1; vmMs += passMs;
+        stalls = figureResumeProgressed({ before: work, after: next, added, addedBytes: added * 307_200 }, defaults) ? 0 : stalls + 1;
+        expect(stalls).toBeLessThan(defaults.noProgressLimit);
+        work = next;
+      }
     }
-    expect(launches).toBe(59);
-    expect(unitCap).toBe(61);
+    expect(launches).toBe(60);
+    expect(unitCap).toBe(7);
+    // Unsharded, every launch would convert all 3,000 pages: the estimate passes the ceiling, which bounds it.
+    expect(figureResumeVmBudgetMs({ pageCount }, defaults)).toBe(4 * 3_600_000);
   });
 
   it("only the three budget stops are grantable", () => {
