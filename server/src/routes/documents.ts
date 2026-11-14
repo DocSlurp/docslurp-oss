@@ -356,9 +356,10 @@ export const documentsRoutes = new Hono()
     const scoped = await requireApiKeyDocumentScope(c, c.req.param("docId"), userId);
     if (scoped.response) return scoped.response;
     const viewer = scoped.viewer;
-    // Whether this caller may act on "update available" (an editor session, or a server key with ingest for the project).
-    const canReprocess = (viewer.ingest.updateAvailable || viewer.ingest.updateRecommended) && await callerCanReprocess(c, viewer.document);
-    return c.json({ ...viewer, ingest: { ...viewer.ingest, canReprocess } });
+    // Whether this caller may reprocess or otherwise change the document (an editor session, or a server key with ingest
+    // whose user may edit): clients show Reprocess, Retry and the update badge only when it is true.
+    const canReprocess = await callerCanReprocess(c, viewer.document);
+    return c.json({ ...viewer, canReprocess, ingest: { ...viewer.ingest, canReprocess } });
   })
   // The asset ledger: every image Doppler reported (extracted, not extracted with why, unlinked) and the extraction level,
   // one keyset page at a time (`limit`, `after`, `pageFrom`, `pageTo`). Same gate as the document detail: the caller must

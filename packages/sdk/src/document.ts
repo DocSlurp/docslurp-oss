@@ -60,6 +60,8 @@ export type DocumentViewerPayload = {
   pageStats: { pageCount: number; chunkCount: number; pageTextCount: number };
   /** The ingest version that produced the document against the workspace's current one. */
   ingest?: IngestStatus;
+  /** Whether this caller may reprocess or change the document (edit access to its project); show Reprocess and Retry only then. */
+  canReprocess?: boolean;
   run: { id: string; projectId: string; stage: string; status: ProjectRun["status"]; updatedAt: string } | null;
   usage: {
     document: { inputTokens: number; outputTokens: number; costCents: number; events: number };

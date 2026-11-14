@@ -161,7 +161,8 @@ describe("document detail", () => {
   });
 
   it("offers the update only to a caller who may reprocess", async () => {
-    expect((await (await app.request("/documents/doc-old", as("uv"))).json()).ingest).toMatchObject({ updateAvailable: true, canReprocess: false });
+    expect(await (await app.request("/documents/doc-old", as("uv"))).json()).toMatchObject({ canReprocess: false, ingest: { updateAvailable: true, canReprocess: false } });
+    expect(await (await app.request("/documents/doc-old", as("ua"))).json()).toMatchObject({ canReprocess: true });
     // ue edits project C but only views A, where doc-old lives.
     expect((await (await app.request("/documents/doc-old", as("ue"))).json()).ingest).toMatchObject({ updateAvailable: true, canReprocess: false });
     const { rawKey: readOnly } = await keys.createApiKey("ua", "artifacts-only", { orgId: "org-a", scopes: ["artifacts"], projectIds: ["proj-a"] });
@@ -173,7 +174,7 @@ describe("document detail", () => {
     try {
       const body = await (await app.request("/documents/doc-text", as("ua"))).json();
       expect(body.ingest).toEqual({ version: CURRENT_INGEST_VERSION, capabilities: ["pageFacts"], currentVersion: CURRENT_INGEST_VERSION, updateAvailable: false,
-        missingCapabilities: [], updateRecommended: false, canReprocess: false });
+        missingCapabilities: [], updateRecommended: false, canReprocess: true });
     } finally {
       await sql`update documents set ingest_version = 0, ingest_capabilities = '{}' where id = 'doc-text'`;
     }

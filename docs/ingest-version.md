@@ -26,7 +26,7 @@ produced it. The serving API answers data it cannot show with a typed
   - `updateRecommended` is true when that list is non-empty, and it is the only
     case to badge "Update available". Version-0 documents that serve fine are
     not badged.
-  - `canReprocess` says whether this caller may start the reprocess.
+  - `canReprocess` (also top-level on the document detail) says whether this caller may reprocess or change the document, whether or not an update is available. Clients show Reprocess, Retry and the badge only when it is true.
 - Runs carry `ingestVersion` and `ingestCapabilities`. A run's capabilities are
   what its pipeline build supports. A document's capabilities are measured from
   what its run actually stored:
