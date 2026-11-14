@@ -74,8 +74,8 @@ export type ChartExportTier = z.infer<typeof chartExportTierSchema>;
 
 /**
  * Per-project option (`pipeline.features.chartExport`). `tier` unset means "the default for the run's origin"
- * (`resolveChartExportTier`): stored config never pins a concrete default, so one project serves the app (free steps on)
- * and machine callers (off unless asked) alike.
+ * (`resolveChartExportTier`): stored config never pins a concrete default. Both origin defaults are `off` unless the
+ * deployment sets them, so chart export runs only when a caller asks for it (request override or project tier).
  */
 export const chartExportConfigSchema = z
   .object({
@@ -104,24 +104,37 @@ export const RUN_ORIGINS = ["app", "machine"] as const;
 export type RunOrigin = (typeof RUN_ORIGINS)[number];
 
 /**
- * Deploy-wide default tier for machine-origin runs on projects with no explicit tier: `off` (default) or `free`.
- * Flipped without a code change once the free steps cost and run close enough to having them off.
+ * Deploy-wide default tier for machine-origin runs (API, SDK, CLI, MCP) on projects with no explicit tier: `off` (code
+ * default) or `free`. Flipped without a code change once the free steps cost and run close enough to having them off.
  */
 export const CHART_EXPORT_API_DEFAULT_ENV_FLAG = "DOCSLURP_CHART_EXPORT_API_DEFAULT";
 
 /**
- * Deploy-wide default tier for app-origin runs on projects with no explicit tier: `free` (code default) or `off`. Lets a
- * deployment hold the app default off until the free steps pass their cost gate, without a code change.
+ * Deploy-wide default tier for app-origin runs on projects with no explicit tier: `off` (code default) or `free`. Chart
+ * export is opt-in everywhere; a deployment may turn the free steps on for app uploads once they pass its cost gate.
  */
 export const CHART_EXPORT_APP_DEFAULT_ENV_FLAG = "DOCSLURP_CHART_EXPORT_APP_DEFAULT";
 
 /**
  * Whether a caller may choose `free` explicitly (a request override or a project's stored tier):
- * `DOCSLURP_CHART_EXPORT_FREE_EXPLICIT`, `on` or `off` (default). Off, an explicit `free` is refused on requests and
- * project changes, and a stored `free` counts as unset (the origin default). Each free run boots an unbilled parser VM,
- * so only the deployment's own defaults may turn it on until extraction folds into a VM the document already boots.
+ * `DOCSLURP_CHART_EXPORT_FREE_EXPLICIT`, `on` or `off`. Unset or empty, it follows inline extraction
+ * (`DOCSLURP_CHART_EXPORT_INLINE=1`): the free steps then ride in the quarantine VM every document already boots, so a
+ * caller's `free` adds no VM boot of its own. Without inline extraction each free run boots an unbilled parser VM, so
+ * unset means refused. Off, an explicit `free` is refused on requests and project changes, and a stored `free` counts
+ * as unset (the origin default).
  */
 export const CHART_EXPORT_FREE_EXPLICIT_ENV_FLAG = "DOCSLURP_CHART_EXPORT_FREE_EXPLICIT";
+
+/**
+ * Inline free chart extraction (`DOCSLURP_CHART_EXPORT_INLINE=1`, exactly): the free steps run inside the quarantine
+ * inspection every document already runs in the parser VM. Read by the worker and, for the explicit-free default, by
+ * the server; keep it equal on both.
+ */
+export const CHART_EXPORT_INLINE_ENV_FLAG = "DOCSLURP_CHART_EXPORT_INLINE";
+
+export function chartExportInlineEnabled(env: Readonly<Record<string, string | undefined>>): boolean {
+  return env[CHART_EXPORT_INLINE_ENV_FLAG]?.trim() === "1";
+}
 
 type Env = Readonly<Record<string, string | undefined>>;
 
@@ -166,12 +179,17 @@ export function chartExportMachineDefault(env: Env): "off" | "free" {
 }
 
 export function chartExportAppDefault(env: Env): "off" | "free" {
-  return offOrFree(env, CHART_EXPORT_APP_DEFAULT_ENV_FLAG, "free");
+  return offOrFree(env, CHART_EXPORT_APP_DEFAULT_ENV_FLAG, "off");
 }
 
-/** Whether an explicit `free` (request or project) is allowed: `DOCSLURP_CHART_EXPORT_FREE_EXPLICIT=on` only. */
+/**
+ * Whether an explicit `free` (request or project) is allowed: `DOCSLURP_CHART_EXPORT_FREE_EXPLICIT=on`, or unset (or
+ * empty) with inline extraction on. `off` and unknown values refuse it (fail toward lower cost).
+ */
 export function chartExportFreeExplicitAllowed(env: Env): boolean {
-  return CHART_EXPORT_ENV_ON_VALUES.includes(env[CHART_EXPORT_FREE_EXPLICIT_ENV_FLAG]?.trim().toLowerCase() ?? "");
+  const raw = env[CHART_EXPORT_FREE_EXPLICIT_ENV_FLAG];
+  if (raw === undefined || raw.trim() === "") return chartExportInlineEnabled(env);
+  return CHART_EXPORT_ENV_ON_VALUES.includes(raw.trim().toLowerCase());
 }
 
 /**
@@ -198,7 +216,7 @@ export function chartExportDefaultsWarnings(env: Env): string[] {
   return out;
 }
 
-/** The default tier for a run of `origin` on a project with no explicit tier: the app default (free) or the machine default (off). */
+/** The default tier for a run of `origin` on a project with no explicit tier: the app or machine default (both `off` unless set). */
 export function defaultChartExportTier(origin: RunOrigin, env: Env): ChartExportTier {
   return origin === "app" ? chartExportAppDefault(env) : chartExportMachineDefault(env);
 }
@@ -246,7 +264,7 @@ export const CONSERVATIVE_CHART_EXPORT_DEFAULTS: ChartExportDefaults = { app: "o
 
 /**
  * The tier one run uses, before the deploy ceiling: a per-request override, else the project's explicit tier, else the
- * origin default. An explicit `free` counts only while `DOCSLURP_CHART_EXPORT_FREE_EXPLICIT=on`; otherwise it is the
+ * origin default. An explicit `free` counts only while `chartExportFreeExplicitAllowed`; otherwise it is the
  * origin default (requests that ask for it are refused earlier, `chartExportOverrideRefusal`). The deploy kill switch
  * (`effectiveChartExportConfig`) then caps it; it is never raised by this.
  */
@@ -280,15 +298,16 @@ export function explicitProjectChartTier(project: Pick<ChartExportConfig, "tier"
 
 /**
  * The most a replayed or inherited tier may run at in a project now (reprocess, bulk reprocess, reindex, full index):
- * the project's explicit tier, else the higher of the two origin defaults (an unset project never resolves to `models`).
- * A replay never raises a run above this; only an explicit request override can, through the editor/scope ceiling.
+ * the project's explicit tier, else the highest of the two origin defaults and, while callers may choose `free`
+ * explicitly, `free` (a document uploaded with a `free` request override keeps its free exports on a reindex). An unset
+ * project never resolves to `models`. A replay never raises a run above this; only an explicit request override can,
+ * through the editor/scope ceiling.
  */
 export function projectChartExportTierCap(project: Pick<ChartExportConfig, "tier"> | null | undefined, env: Env): ChartExportTier {
   const explicit = explicitProjectChartTier(project, env);
   if (explicit) return explicit;
-  const app = defaultChartExportTier("app", env);
-  const machine = defaultChartExportTier("machine", env);
-  return CHART_EXPORT_TIER_RANK[app] >= CHART_EXPORT_TIER_RANK[machine] ? app : machine;
+  const floor: ChartExportTier = chartExportFreeExplicitAllowed(env) ? "free" : "off";
+  return [defaultChartExportTier("app", env), defaultChartExportTier("machine", env)].reduce((a, b) => (CHART_EXPORT_TIER_RANK[a] >= CHART_EXPORT_TIER_RANK[b] ? a : b), floor);
 }
 
 /** The project's chart export config with its tier resolved for one run (see `resolveChartExportTier`). */
@@ -330,7 +349,7 @@ export const CHART_EXPORT_TIER_UNAVAILABLE_CODE = "chart_export_tier_unavailable
 
 /**
  * Why an explicitly chosen tier (request override or project change) is refused on this deployment, or null when it is
- * allowed: `models` while the switch is not `on`; `free` while `DOCSLURP_CHART_EXPORT_FREE_EXPLICIT` is not `on` or the
+ * allowed: `models` while the switch is not `on`; `free` while `chartExportFreeExplicitAllowed` is false or the
  * switch is `off`. `off` is always allowed.
  */
 export function chartExportOverrideRefusal(tier: ChartExportTier, env: Env): typeof CHART_EXPORT_TIER_UNAVAILABLE_CODE | null {

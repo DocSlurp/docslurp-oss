@@ -11,6 +11,7 @@ import type { Config } from "../config.js";
 import type { Document, ProjectRun } from "../models.js";
 import { type CheckpointStore, WorkflowState } from "../pipeline/pipeline.js";
 import { sha256Bytes } from "../sandbox/source-integrity.js";
+import { setDefaultParserSandbox } from "../sandbox/startup.js";
 import { QuarantineStage } from "../stages/quarantine.js";
 import type { CommandRunner } from "../tools/runner.js";
 import type { ArtifactStore } from "../tools/storage.js";
@@ -18,12 +19,15 @@ import type { ArtifactStore } from "../tools/storage.js";
 // Inline chart extraction in the real quarantine stage (in-process inspection, the development path): the answer is
 // kept only on accepted documents, only when asked for, and an infected file's answer is dropped with its verdict.
 const dirs: string[] = [];
-afterEach(async () => { vi.unstubAllEnvs(); await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true }))); });
+afterEach(async () => { vi.unstubAllEnvs(); setDefaultParserSandbox(undefined); await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true }))); });
+// The development path: a local sandbox runs this checkout's own guest scripts (every capability). Registered per test.
+const localSandbox = () => setDefaultParserSandbox({ provider: {} as never, config: {}, isolation: { filesystem: "restricted", network: "blocked", processes: "isolated", location: "local" } as never });
 
 const CHART = genericBar(["London", "Tokyo", "Austin"], [4, 6, 9], 10);
 const INFECTED = CHART.replace("</svg>", "<!-- INFECTED --></svg>");
 
 async function fixture(pipeline: Record<string, unknown>, extra: Array<[string, Buffer, string]> = []) {
+  localSandbox();
   vi.stubEnv("NODE_ENV", "test");
   vi.stubEnv("DOCSLURP_SERVICE_PROFILE", "development");
   const dir = await mkdtemp(join(process.env.TMPDIR || tmpdir(), "quarantine-chart-inline-")); dirs.push(dir);
@@ -45,6 +49,8 @@ async function fixture(pipeline: Record<string, unknown>, extra: Array<[string, 
     updateProgress: vi.fn(async () => {}), startRunStage: vi.fn(async () => {}), completeRunStage: vi.fn(async () => {}), failRunStage: vi.fn(async () => {}),
     appendEvent: vi.fn(async () => {}), setPageStageComplete: vi.fn(async () => {}), getCompletedPages: vi.fn(async () => new Set<number>()),
     setDocumentFileFacts: vi.fn(async () => {}), setDocumentParseSource: vi.fn(async () => true),
+    // The org's free-VM cap grants every free-tier inline step here (council #387 M2; its refusal is tested in inline.test.ts).
+    reserveChartExportFreeVmRun: vi.fn(async () => true),
   } as unknown as CheckpointStore;
   const artifacts = new Map<string, Record<string, unknown>>();
   let sequence = 0;
@@ -84,6 +90,17 @@ describe("quarantine stage: inline chart extraction", () => {
     expect(events[0]!.metadata).toMatchObject({ stage: "quarantine", documentId: "chart.svg", reason: "inline", outcome: "ok", billable: false });
     expect(f.state.artifactLedger.readDocument("infected.svg", "chart-inline")).toBeUndefined();
     expect(f.state.artifactLedger.readDocument("notes.pdf", "chart-inline")).toBeUndefined();
+  });
+
+  it("no sandbox known: inline charts are refused, counted (image-unsupported), and the document is still accepted (council #387 r2 L1)", async () => {
+    vi.stubEnv("DOCSLURP_CHART_EXPORT", "on");
+    vi.stubEnv("DOCSLURP_CHART_EXPORT_INLINE", "1");
+    const f = await fixture({ chartExport: { tier: "free" } });
+    setDefaultParserSandbox(undefined);
+    await f.stage.run(f.state);
+    expect(f.state.documentStage("chart.svg", "quarantine")?.status).toBe("completed");
+    expect(f.artifacts.get("chart.svg")!.chartInline).toEqual({ kind: "svg", status: "refused", reason: "image-unsupported", ms: 0 });
+    expect(f.state.artifactLedger.readDocument("chart.svg", "chart-inline")).toMatch(/#chart-inline=work$/);
   });
 
   it("drops the answer when the verified type is not the kind it was read as (council r4 L2)", async () => {

@@ -14,6 +14,7 @@ import { DocumentStageError } from "../pipeline/checkpoints.js";
 import { CommandExitError, type MalwareScanResult } from "../tools/runner.js";
 import type { CommandRunner } from "../tools/runner.js";
 import { vmOnlyParsing } from "./vm-only-parsing.js";
+import { INLINE_CHART_LIMITS } from "../chart-export/inline-guest.js";
 import { isClamEncryptedAlert, isClamLimitAlert } from "../tools/clam-limits.js";
 
 export interface QuarantineReason {
@@ -439,7 +440,7 @@ async function inspectInVm(args: InspectArgs): Promise<QuarantineInspection> {
     // V8 refuses code generation from strings in this command and in the inline chart worker it starts (worker threads take
     // the flag from their process; it cannot be set per worker), as in every chart guest run (host.ts GUEST_NODE_FLAGS).
     try {
-      await args.runner.run({ binary: "node", args: [...GUEST_NODE_FLAGS, path.join(resolveScriptsDir(), "quarantine-inspect.mjs"), args.tempFile, options, output], available: true, readOnlyInputs: true, timeoutMs: 60_000 }, args.signal);
+      await args.runner.run({ binary: "node", args: [...GUEST_NODE_FLAGS, path.join(resolveScriptsDir(), "quarantine-inspect.mjs"), args.tempFile, options, output], available: true, readOnlyInputs: true, timeoutMs: INLINE_CHART_LIMITS.commandTimeoutMs }, args.signal);
     } catch (error) {
       // The guest writes the inspection before charts run (council r3 L1). When the command exited non-zero after that,
       // with charts asked, the inspection stands and the charts are a refusal. Without charts, or with no inspection

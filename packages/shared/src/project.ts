@@ -104,7 +104,8 @@ export const projectSchema = z.object({
   /**
    * This deployment's chart export defaults for a project with no tier: `app` (DocSlurp app uploads) and `machine`
    * (API, MCP, SDK, CLI), after the kill switch; whether the billed `models` tier is offered (`DOCSLURP_CHART_EXPORT=on`);
-   * whether `free` may be chosen explicitly (`DOCSLURP_CHART_EXPORT_FREE_EXPLICIT=on`); and the switch itself. Clients
+   * whether `free` may be chosen explicitly (`DOCSLURP_CHART_EXPORT_FREE_EXPLICIT=on`, or unset with
+   * `DOCSLURP_CHART_EXPORT_INLINE=1`); and the switch itself. Clients
    * label the default and classify changes from these, never from a code default. Absent (an older server): treat as
    * `CONSERVATIVE_CHART_EXPORT_DEFAULTS` and hide tier controls.
    */
@@ -884,7 +885,7 @@ export type ChartExportOverride = z.infer<typeof chartExportOverrideSchema>;
 
 /** One description for the override on every machine surface (MCP tools, SDK and CLI docs). */
 export const CHART_EXPORT_OVERRIDE_DESCRIPTION =
-  "Chart and diagram export for this request: { tier: \"off\" | \"free\" | \"models\" }. Omit for the project's setting; a project with no setting uses the deployment's default for the caller (see the project record's chartExportDefaults; API, MCP, SDK and CLI calls default to off). free exports charts that carry their own data (Office charts, embedded chart specs, vector graphics) at no charge; models also reads other charts with AI, billed per chart read. Each tier is available only where the deployment turns it on: a tier it does not offer is refused with 400 chart_export_tier_unavailable, never silently lowered. models on a project whose tier is set to off or free needs project editor rights (or an API key with the pipeline:billed-features scope).";
+  "Chart and diagram export for this request: { tier: \"off\" | \"free\" | \"models\" }. Omit for the project's setting; a project with no setting uses the deployment's default for the caller (see the project record's chartExportDefaults; API, MCP, SDK and CLI calls default to off). free exports charts that carry their own data (Office charts, embedded chart specs, vector graphics) at no charge; models also reads other charts with AI, billed per chart read. Each tier is available only where the deployment turns it on: a tier it does not offer is refused with 400 chart_export_tier_unavailable, never silently lowered. models on a project whose tier is not models (unset included) needs project editor rights (or an API key with the pipeline:billed-features scope).";
 
 /** The chart export override description with the deployment's actual defaults, for tool and prompt text built at runtime. */
 export function chartExportOverrideDescriptionFor(defaults: { app: string; machine: string; modelsAvailable: boolean; freeAvailable: boolean }): string {

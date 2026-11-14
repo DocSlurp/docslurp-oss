@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   chartExportDefaults,
+  chartExportFreeExplicitAllowed,
   chartExportFreeVmCap,
   explicitProjectChartTier,
   minChartExportTier,
@@ -26,17 +27,17 @@ const ON = { DOCSLURP_CHART_EXPORT: "on" };
 const FREE_OK = { DOCSLURP_CHART_EXPORT_FREE_EXPLICIT: "on" };
 
 describe("chart export tier resolution", () => {
-  it("defaults by origin: app free, machine off; the env flag flips the machine default", () => {
-    expect(defaultChartExportTier("app", {})).toBe("free");
+  it("defaults by origin: off for every origin with no env; each origin's flag flips its own default", () => {
+    expect(defaultChartExportTier("app", {})).toBe("off");
     expect(defaultChartExportTier("machine", {})).toBe("off");
     expect(defaultChartExportTier("machine", { DOCSLURP_CHART_EXPORT_API_DEFAULT: "free" })).toBe("free");
     expect(defaultChartExportTier("machine", { DOCSLURP_CHART_EXPORT_API_DEFAULT: " FREE " })).toBe("free");
     // Unknown and `models` never become a machine default.
     for (const value of ["models", "on", "bogus", ""]) expect(defaultChartExportTier("machine", { DOCSLURP_CHART_EXPORT_API_DEFAULT: value })).toBe("off");
     // The app default never changes with the machine flag.
-    expect(defaultChartExportTier("app", { DOCSLURP_CHART_EXPORT_API_DEFAULT: "off" })).toBe("free");
-    // The app default has its own flag (held off until the cost gate passes). Parsed strictly: only `free` (or unset) is
-    // free; the off words and any unknown value are off (fail closed, toward lower cost).
+    expect(defaultChartExportTier("app", { DOCSLURP_CHART_EXPORT_API_DEFAULT: "free" })).toBe("off");
+    // The app default has its own flag. Parsed strictly: only `free` is free; unset, the off words and any unknown value
+    // are off (fail closed, toward lower cost).
     expect(defaultChartExportTier("app", { DOCSLURP_CHART_EXPORT_APP_DEFAULT: "free" })).toBe("free");
     for (const value of ["off", "0", "false", "no", "", "disabled", "off # comment", "models", "on"]) {
       expect(defaultChartExportTier("app", { DOCSLURP_CHART_EXPORT_APP_DEFAULT: value })).toBe("off");
@@ -46,7 +47,7 @@ describe("chart export tier resolution", () => {
 
   it("precedence: request override, then project tier, then origin default", () => {
     for (const origin of ["app", "machine"] as const) {
-      expect(resolveChartExportTier({ origin, env: {} })).toBe(origin === "app" ? "free" : "off");
+      expect(resolveChartExportTier({ origin, env: {} })).toBe("off");
       // An explicit project tier wins over both origin defaults.
       expect(resolveChartExportTier({ project: { tier: "models" }, origin, env: {} })).toBe("models");
       expect(resolveChartExportTier({ project: { tier: "off" }, origin, env: {} })).toBe("off");
@@ -71,13 +72,36 @@ describe("chart export tier resolution", () => {
     expect(effectiveChartExportConfig(off, ON).tier).toBe("off");
   });
 
-  it("an explicit free counts only behind DOCSLURP_CHART_EXPORT_FREE_EXPLICIT=on; otherwise it is the origin default", () => {
+  it("an explicit free counts only when allowed (FREE_EXPLICIT=on, or unset with inline extraction); otherwise it is the origin default", () => {
     expect(resolveChartExportTier({ requested: "free", project: { tier: "off" }, origin: "machine", env: {} })).toBe("off");
     expect(resolveChartExportTier({ project: { tier: "free" }, origin: "machine", env: {} })).toBe("off");
-    expect(resolveChartExportTier({ project: { tier: "free" }, origin: "app", env: {} })).toBe("free");
-    expect(resolveChartExportTier({ project: { tier: "free" }, origin: "app", env: { DOCSLURP_CHART_EXPORT_APP_DEFAULT: "off" } })).toBe("off");
+    expect(resolveChartExportTier({ project: { tier: "free" }, origin: "app", env: {} })).toBe("off");
+    expect(resolveChartExportTier({ project: { tier: "free" }, origin: "app", env: { DOCSLURP_CHART_EXPORT_APP_DEFAULT: "free" } })).toBe("free");
     expect(resolveChartExportTier({ project: { tier: "free" }, origin: "machine", env: FREE_OK })).toBe("free");
     expect(resolveChartExportTier({ project: { tier: "free" }, origin: "machine", env: { DOCSLURP_CHART_EXPORT_FREE_EXPLICIT: "yes please" } })).toBe("off");
+  });
+
+  it("explicit free follows inline extraction when DOCSLURP_CHART_EXPORT_FREE_EXPLICIT is unset; an explicit value wins", () => {
+    const INLINE = { DOCSLURP_CHART_EXPORT_INLINE: "1" };
+    expect(chartExportFreeExplicitAllowed({})).toBe(false);
+    expect(chartExportFreeExplicitAllowed(INLINE)).toBe(true);
+    expect(chartExportFreeExplicitAllowed({ DOCSLURP_CHART_EXPORT_INLINE: "true" })).toBe(false);
+    expect(chartExportFreeExplicitAllowed({ ...INLINE, DOCSLURP_CHART_EXPORT_FREE_EXPLICIT: "off" })).toBe(false);
+    expect(chartExportFreeExplicitAllowed({ ...INLINE, DOCSLURP_CHART_EXPORT_FREE_EXPLICIT: " " })).toBe(true);
+    expect(chartExportFreeExplicitAllowed({ DOCSLURP_CHART_EXPORT_FREE_EXPLICIT: "" })).toBe(false);
+    expect(chartExportFreeExplicitAllowed({ ...INLINE, DOCSLURP_CHART_EXPORT_FREE_EXPLICIT: "bogus" })).toBe(false);
+    expect(chartExportFreeExplicitAllowed({ DOCSLURP_CHART_EXPORT_FREE_EXPLICIT: "on" })).toBe(true);
+    // The recommended production shape: defaults off, callers opt in per request or per project.
+    const production = { ...ON, ...INLINE, DOCSLURP_CHART_EXPORT_APP_DEFAULT: "off", DOCSLURP_CHART_EXPORT_API_DEFAULT: "off" };
+    expect(chartExportOverrideRefusal("free", production)).toBeNull();
+    expect(chartExportOverrideRefusal("models", production)).toBeNull();
+    for (const origin of ["app", "machine"] as const) {
+      expect(resolveChartExportTier({ origin, env: production })).toBe("off");
+      expect(resolveChartExportTier({ project: { tier: "free" }, origin, env: production })).toBe("free");
+      expect(resolveChartExportTier({ requested: "models", project: { tier: "free" }, origin, env: production })).toBe("models");
+      expect(resolveChartExportTier({ requested: "off", project: { tier: "free" }, origin, env: production })).toBe("off");
+    }
+    expect(chartExportDefaults(production)).toEqual({ app: "off", machine: "off", modelsAvailable: true, freeAvailable: true, ceiling: "on" });
   });
 
   it("one refusal code for any tier the deployment does not allow; off is always allowed", () => {
@@ -95,8 +119,8 @@ describe("chart export tier resolution", () => {
   it("reports the deployment's actual defaults (production: app off, explicit free refused)", () => {
     const production = { DOCSLURP_CHART_EXPORT: "on", DOCSLURP_CHART_EXPORT_APP_DEFAULT: "off" };
     expect(chartExportDefaults(production)).toEqual({ app: "off", machine: "off", modelsAvailable: true, freeAvailable: false, ceiling: "on" });
-    expect(chartExportDefaults({ DOCSLURP_CHART_EXPORT: "on" })).toEqual({ app: "free", machine: "off", modelsAvailable: true, freeAvailable: false, ceiling: "on" });
-    expect(chartExportDefaults({ DOCSLURP_CHART_EXPORT: "free", ...FREE_OK })).toEqual({ app: "free", machine: "off", modelsAvailable: false, freeAvailable: true, ceiling: "free" });
+    expect(chartExportDefaults({ DOCSLURP_CHART_EXPORT: "on" })).toEqual({ app: "off", machine: "off", modelsAvailable: true, freeAvailable: false, ceiling: "on" });
+    expect(chartExportDefaults({ DOCSLURP_CHART_EXPORT: "free", DOCSLURP_CHART_EXPORT_APP_DEFAULT: "free", ...FREE_OK })).toEqual({ app: "free", machine: "off", modelsAvailable: false, freeAvailable: true, ceiling: "free" });
     expect(chartExportDefaults({})).toEqual({ app: "off", machine: "off", modelsAvailable: false, freeAvailable: false, ceiling: "off" });
   });
 
@@ -114,7 +138,11 @@ describe("chart export tier resolution", () => {
     expect(projectChartExportTierCap({ tier: "off" }, {})).toBe("off");
     expect(projectChartExportTierCap({ tier: "models" }, {})).toBe("models");
     // Unset: the higher origin default, never models.
-    expect(projectChartExportTierCap({}, {})).toBe("free");
+    expect(projectChartExportTierCap({}, {})).toBe("off");
+    expect(projectChartExportTierCap({}, { DOCSLURP_CHART_EXPORT_APP_DEFAULT: "free" })).toBe("free");
+    // While callers may pick free explicitly, an unset project keeps a replayed free (a request-level free upload).
+    expect(projectChartExportTierCap({}, FREE_OK)).toBe("free");
+    expect(projectChartExportTierCap({}, { DOCSLURP_CHART_EXPORT_INLINE: "1" })).toBe("free");
     expect(projectChartExportTierCap(null, { DOCSLURP_CHART_EXPORT_APP_DEFAULT: "off" })).toBe("off");
     expect(projectChartExportTierCap(null, { DOCSLURP_CHART_EXPORT_APP_DEFAULT: "off", DOCSLURP_CHART_EXPORT_API_DEFAULT: "free" })).toBe("free");
     // One "explicit" rule: a disallowed stored free counts as unset (R2-L4).

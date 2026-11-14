@@ -1,3 +1,4 @@
+import { chartExportInlineEnabled as sharedChartExportInlineEnabled } from "@docslurp/shared";
 import { chartExportActive, chartExportModelsActive } from "./config.js";
 import { extractDeterministicVisuals as guestExtract } from "./extractors/index.js";
 import { validateDeterministicResult } from "./extractors/host.js";
@@ -26,7 +27,7 @@ export function chartInlineSlotHasWork(value: string | undefined): boolean {
 }
 
 export function chartExportInlineEnabled(env: Readonly<Record<string, string | undefined>> = process.env): boolean {
-  return env.DOCSLURP_CHART_EXPORT_INLINE?.trim() === "1";
+  return sharedChartExportInlineEnabled(env);
 }
 
 /**

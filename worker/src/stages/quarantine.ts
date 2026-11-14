@@ -17,8 +17,11 @@ import { runArtifactRoot } from "../lib/artifact-root.js";
 import { quarantineScanSnapshotEnabled, type CommandRunner } from "../tools/runner.js";
 import { trustedTempDownloadPattern } from "../lib/temp-file-names.js";
 import { sha256Bytes, verifyQuarantineUpload } from "../sandbox/source-integrity.js";
-import { chartExportActive, chartExportConfigOf } from "../chart-export/config.js";
-import { CHART_INLINE_SLOT, chartExportInlineEnabled, chartInlineSlotValue, inlineHasWork, type InlineChartRequest } from "../chart-export/inline.js";
+import { chartExportActive, chartExportConfigOf, chartExportModelsActive } from "../chart-export/config.js";
+import { chartExportFreeVmCap } from "../db/chart-export-free-vm-cap.js";
+import { parserImageCapability } from "../sandbox/startup.js";
+import { CHART_INLINE_SLOT, chartExportInlineEnabled, chartInlineSlotValue, inlineHasWork, type InlineChartRequest, type InlineCharts } from "../chart-export/inline.js";
+import { INLINE_COMMAND_BUDGET_CAPABILITY } from "../chart-export/inline-guest.js";
 import { chartExportVmUsageEvent, deterministicSourceKind } from "../chart-export/vm-extractor.js";
 import { applyParseSource, clearParseSource, originalSourceForQuarantine } from "../lib/parse-source.js";
 
@@ -82,7 +85,11 @@ export class QuarantineStage implements Stage {
               verifyQuarantineUpload(original, scannedSha256);
               // The API only glanced at this file; this is the first full look, before any parser.
               // One inspection of the bytes (in the parser VM in production) serves the intake check and the scan.
-              const charts = inlineChartRequest(state.run.pipeline, document.mimeType, process.env);
+              // Inline charts need an image whose guest charges them against this command's budget, and (free tier) a grant
+              // from the org's free-VM cap. Either missing: no chart request; a counted refusal stands in for the answer.
+              const wanted = inlineChartRequest(state.run.pipeline, document.mimeType, process.env);
+              const inlineRefusal = wanted ? await inlineChartAdmission({ pipeline: state.run.pipeline, documentId: document.id, runId: state.run.id, orgId: state.run.orgId ?? null, store: state.store }) : null;
+              const charts = inlineRefusal ? null : wanted;
               const inspection = await inspectQuarantine({ bytes, filename: document.filename, tempFile, runner: this.runner, policy: this.config, ...(charts ? { charts } : {}), ...(signal ? { signal } : {}) });
               const verified = verifyIntakeFileFacts(document, inspection);
               const artifact = await scanDocumentForQuarantine({
@@ -129,17 +136,18 @@ export class QuarantineStage implements Stage {
               else clearParseSource(document);
               // Inline charts stay only on an accepted document whose verified type is still the kind they were read as.
               const verifiedMime = verified && !verified.refused ? verified.facts.mimeType : document.mimeType;
-              if (accepted && charts && inspection.charts && deterministicSourceKind(verifiedMime) === charts.kind) {
-                artifact.chartInline = { ...inspection.charts, kind: charts.kind };
+              const chartAnswer: InlineCharts | undefined = inlineRefusal ?? (charts ? inspection.charts : undefined);
+              if (accepted && wanted && chartAnswer && deterministicSourceKind(verifiedMime) === wanted.kind) {
+                artifact.chartInline = { ...chartAnswer, kind: wanted.kind };
                 // The inline worker's time (start-up included) is parser-VM time spent on chart export: a cost-only event,
                 // like the standalone guest's, attributed to the document. The quarantine command's own VM metering already
                 // carries the provider cost, so it rolls up as included, never twice, and is never a customer charge.
-                if (inspection.charts.status !== "skipped") {
+                if (!inlineRefusal && chartAnswer.status !== "skipped") {
                   // `ms` is the guest's own measure (council r4 L3): attribution only; the event is cost-only, included, never
                   // billable, and the quarantine command's VM time is metered with the command itself.
-                  state.usageLedger.enqueue(chartExportVmUsageEvent({ documentId: document.id, wallTimeMs: inspection.charts.ms, reason: "inline", inputs: 1, outcome: inspection.charts.status === "ok" ? "ok" : "refused", stage: "quarantine" }));
+                  state.usageLedger.enqueue(chartExportVmUsageEvent({ documentId: document.id, wallTimeMs: chartAnswer.ms, reason: "inline", inputs: 1, outcome: chartAnswer.status === "ok" ? "ok" : "refused", stage: "quarantine" }));
                 }
-                console.log(`[chart-export] inline document=${document.id} kind=${charts.kind} status=${inspection.charts.status} ${inspection.charts.status === "ok" ? `visuals=${inspection.charts.result.visuals.length} deferred_svgs=${(inspection.charts.result.deferred ?? []).reduce((n, d) => n + d.count, 0)} overflow=${inspection.charts.result.overflow ?? 0} ms=${inspection.charts.ms}` : `reason=${inspection.charts.reason}`}`);
+                console.log(`[chart-export] inline document=${document.id} kind=${wanted.kind} status=${chartAnswer.status} ${chartAnswer.status === "ok" ? `visuals=${chartAnswer.result.visuals.length} deferred_svgs=${(chartAnswer.result.deferred ?? []).reduce((n, d) => n + d.count, 0)} overflow=${chartAnswer.result.overflow ?? 0} ms=${chartAnswer.ms}` : `reason=${chartAnswer.reason}`}`);
               }
 
               await this.storage.putArtifactJson(key, artifact);
@@ -178,6 +186,53 @@ export class QuarantineStage implements Stage {
       );
     });
   }
+}
+
+const warned = new Set<string>();
+
+/**
+ * Whether a wanted inline chart request may go to the guest, or the counted refusal that stands in for its answer
+ * (council #387): `image-unsupported` when the parser image's guest does not charge the step against the quarantine
+ * command's budget (its contract lacks the capability); `free-vm-cap` when a free-tier document gets no grant from the
+ * org's hourly free-VM cap (the same grant a standalone fallback of this document then reuses, so one document never
+ * spends it twice). No store or no org: refused (fail closed). The billed `models` tier passes spend admission instead.
+ * A refusal is recorded like any refused inline answer: a counted deferral, and no standalone VM run for the source.
+ */
+export async function inlineChartAdmission(args: {
+  pipeline: unknown;
+  documentId: string;
+  runId: string;
+  orgId: string | null;
+  store: { reserveChartExportFreeVmRun?(a: { orgId: string; runId: string; documentId: string; perHour: number }): Promise<boolean> } | undefined;
+  env?: Readonly<Record<string, string | undefined>>;
+  hasCapability?: (capability: string) => boolean | "present" | "missing" | "sandbox-not-ready";
+}): Promise<InlineCharts | null> {
+  const env = args.env ?? process.env;
+  const raw = (args.hasCapability ?? parserImageCapability)(INLINE_COMMAND_BUDGET_CAPABILITY);
+  const state = raw === true ? "present" : raw === false ? "missing" : raw;
+  if (state !== "present") {
+    // Each cause logged once per process, in its own words: an image that lacks the guest, or no sandbox known yet.
+    if (!warned.has(state)) {
+      console.warn(state === "sandbox-not-ready"
+        ? "[chart-export] inline charts refused: parser sandbox not ready (none registered or initialized), so its capabilities are unknown"
+        : `[chart-export] inline charts refused: the parser image does not report ${INLINE_COMMAND_BUDGET_CAPABILITY} (DOCSLURP_CHART_EXPORT_INLINE=1 needs an image with core #387's guest)`);
+      warned.add(state);
+    }
+    return { status: "refused", reason: "image-unsupported", ms: 0 };
+  }
+  if (chartExportModelsActive(args.pipeline, env)) return null;
+  const reserve = args.store?.reserveChartExportFreeVmRun?.bind(args.store);
+  let granted = false;
+  if (reserve && args.orgId) {
+    try {
+      granted = await reserve({ orgId: args.orgId, runId: args.runId, documentId: args.documentId, perHour: chartExportFreeVmCap(env) });
+    } catch (error) {
+      console.warn(`[chart-export] inline free VM reservation failed document=${args.documentId} error=${error instanceof Error ? error.message : "unknown"}`);
+    }
+  }
+  if (granted) return null;
+  console.log(`[chart-export] inline charts skipped document=${args.documentId} reason=org-free-vm-cap`);
+  return { status: "refused", reason: "free-vm-cap", ms: 0 };
 }
 
 /**

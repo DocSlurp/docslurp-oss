@@ -82,7 +82,7 @@ function usage(): void {
   console.log(`Usage:
   docslurp estimate <files...> [--quality <fast|auto|good>] [--indexing <full|on-demand|visual>] [--chart-export <off|free|models>] [--months <n>] [--json]
   docslurp upload <files...> [--project <id|slug|name> | --new-project] [--template <key>] [--quality <fast|auto|good>] [--chart-export <off|free|models>] [--canonical-id <id>] [--path <folder>] [--idempotency-key <key>] [--estimate] [--watch] [--api-url <url>]
-  docslurp ingest-url <urls...> [--project <id|slug|name> | --new-project] [--template <key>] [--quality <fast|auto|good>] [--chart-export <off|free|models>] [--watch] [--api-url <url>]
+  docslurp ingest-url <urls...> [--project <id|slug|name> | --new-project] [--template <key>] [--quality <fast|auto|good>] [--chart-export <off|free|models>] [--estimate] [--watch] [--api-url <url>]
   docslurp extract <files...|urls...> [--retention-days <n>] [--no-email] [--download <markdown|all>] [upload options]
   docslurp extract-status <extractId> [--json]
   docslurp extract-download <extractId>
@@ -289,6 +289,27 @@ function normalizeCompatImportPayload(args: {
   };
 }
 
+/** Flags that take no value, by their command-line name, and the key commands read them as. */
+const BOOLEAN_FLAGS: Readonly<Record<string, string>> = {
+  watch: "watch", json: "json", context: "context", estimate: "estimate", device: "device", force: "force", stream: "stream", stats: "stats",
+  "no-browser": "noBrowser", "no-email": "noEmail", "new-project": "newProject",
+};
+
+/** Flags that take a value (`--flag value` or `--flag=value`); the key is the camelCase name. */
+const VALUE_FLAGS: ReadonlySet<string> = new Set([
+  "project", "api-url", "api-key", "run", "source", "out", "queries-file", "concurrency", "min-score", "session", "canonical-id", "path",
+  "template", "document", "stage-from", "retention-days", "download", "quality", "chart-export", "idempotency-key",
+  "timeout", "limit", "cursor", "mode", "tier", "reasoning", "months", "indexing", "model", "scopes", "profile",
+]);
+
+const camel = (name: string) => name.replace(/-([a-z])/g, (_, c: string) => c.toUpperCase());
+
+/**
+ * The command, its positional arguments and its flags. Strict (council #387 r2 M1): an unknown flag is an error, never a
+ * flag that swallows the next argument (`--yes --estimate` once started a billed ingest); a value flag never takes a
+ * value that starts with `--`; a flag without a value takes none (`--estimate=true` is an error, not a different flag);
+ * `--flag=value` works for value flags. A bare `-x` stays positional as before.
+ */
 function parseCliArgs(argv: string[]) {
   const command = argv[0];
   const positional: string[] = [];
@@ -296,32 +317,31 @@ function parseCliArgs(argv: string[]) {
 
   let i = 1;
   while (i < argv.length) {
-    const arg = argv[i];
-    if (/^--(?:workspace(?:-id|-name)?|new-workspace)(?:=|$)/.test(arg ?? "")) throw new Error("Legacy workspace flags are no longer supported; use --project or --new-project.");
-    if (arg === "--watch" || arg === "--json" || arg === "--context" || arg === "--estimate" || arg === "--device" || arg === "--force" || arg === "--stream" || arg === "--stats") {
-      flags[arg.slice(2)] = true;
+    const arg = argv[i] ?? "";
+    if (/^--(?:workspace(?:-id|-name)?|new-workspace)(?:=|$)/.test(arg)) throw new Error("Legacy workspace flags are no longer supported; use --project or --new-project.");
+    if (!arg.startsWith("--")) {
+      positional.push(arg);
       i++;
-    } else if (arg === "--no-browser") {
-      flags.noBrowser = true;
+      continue;
+    }
+    const eq = arg.indexOf("=");
+    const name = eq >= 0 ? arg.slice(2, eq) : arg.slice(2);
+    if (name === "project-name" || name === "project-id") {
+      throw new Error(`--${name} was removed: pass a project ID, slug or name with --project (a name that matches no project is created on upload).`);
+    }
+    const boolean = BOOLEAN_FLAGS[name];
+    if (boolean) {
+      if (eq >= 0) throw new Error(`--${name} takes no value (got ${arg}).`);
+      flags[boolean] = true;
       i++;
-    } else if (arg === "--no-email") {
-      flags.noEmail = true;
-      i++;
-    } else if (arg === "--new-project") {
-      flags.newProject = true;
-      i++;
-    } else if (arg === "--project-name" || arg === "--project-id") {
-      throw new Error(`${arg} was removed: pass a project ID, slug or name with --project (a name that matches no project is created on upload).`);
-    } else if (arg === "--project" || arg === "--api-url" || arg === "--run" || arg === "--api-key" || arg === "--source" || arg === "--out" || arg === "--queries-file" || arg === "--concurrency" || arg === "--min-score" || arg === "--session" || arg === "--canonical-id" || arg === "--path" || arg === "--template" || arg === "--document" || arg === "--stage-from" || arg === "--retention-days" || arg === "--download" || arg === "--quality" || arg === "--chart-export" || arg === "--idempotency-key") {
-      const key = arg.replace(/^--/, "").replace(/-([a-z])/g, (_, c: string) => c.toUpperCase());
-      flags[key] = argv[i + 1] ?? "";
-      i += 2;
-    } else if (arg?.startsWith("--")) {
-      flags[arg.replace(/^--/, "")] = argv[i + 1] ?? "";
-      i += 2;
+    } else if (VALUE_FLAGS.has(name)) {
+      const value = eq >= 0 ? arg.slice(eq + 1) : argv[i + 1];
+      // An empty value is never meant (`--project=` would otherwise quietly mean the default project).
+      if (value === undefined || value.trim() === "" || (eq < 0 && value.startsWith("--"))) throw new Error(`--${name} needs a value.`);
+      flags[camel(name)] = value;
+      i += eq >= 0 ? 1 : 2;
     } else {
-      positional.push(arg ?? "");
-      i++;
+      throw new Error(`Unknown flag --${name}${command ? ` for ${command}` : ""}. Run docslurp --help for the flags each command takes.`);
     }
   }
 
@@ -708,7 +728,7 @@ async function estimateCommand(files: string[], flags: Record<string, string | b
   const chartExport = resolveChartExportFlag(flags);
   if (chartExport) settings.chartExport = chartExport.tier;
   const body = { files: await profiledEstimateFiles(files), ...(Object.keys(settings).length ? { settings } : {}) };
-  const base = (typeof flags["api-url"] === "string" ? flags["api-url"] : process.env.DOCSLURP_API_URL ?? "https://docslurp.io").replace(/\/$/, "");
+  const base = (typeof flags.apiUrl === "string" ? flags.apiUrl : process.env.DOCSLURP_API_URL ?? "https://docslurp.io").replace(/\/$/, "");
   const response = await fetch(`${base}/v1/estimate`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
   if (!response.ok) {
     console.error(`Error: estimate failed (${response.status}): ${await response.text()}`);
@@ -901,6 +921,18 @@ async function ingestUrlCommand(urls: string[], flags: Record<string, string | b
     process.exitCode = 1;
     return;
   }
+  // Every argument must be an http(s) URL, checked here before anything is sent (council #387 r3): a dash-led word such as
+  // `-e` or `—estimate` is a mistyped flag, never a URL to ingest.
+  assertIngestUrls(urls);
+  if (flags.estimate === true) {
+    // An estimate never starts an ingest (council #387 M1): sizes come from each URL's own headers, read from here.
+    const files = await urlEstimateFiles(urls);
+    const target = resolveIntakeTarget(flags);
+    const chartExport = resolveChartExportFlag(flags);
+    const quality = resolveQualityPipeline(flags).pipeline?.quality;
+    await runEstimate("/v1/uploads/estimate", { files, ...(target.project ? { project: target.project } : {}), ...(chartExport ? { chartExport } : {}), ...(quality ? { settings: { quality } } : {}) }, flags);
+    return;
+  }
   const response = await apiFetch(`${intake.base}/url`, flags, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -913,6 +945,51 @@ async function ingestUrlCommand(urls: string[], flags: Record<string, string | b
   }
   await printIntakeResult(response, flags);
 }
+
+/** Hyphen, the Unicode dashes and minus signs: an argument that starts with one is a mistyped flag. */
+const DASH_LED = /^[-\u2010-\u2015\u2212\uFE58\uFE63\uFF0D]/;
+
+/** Throws unless every argument is an absolute http(s) URL with a host and no credentials. */
+export function assertIngestUrls(urls: readonly string[]): void {
+  for (const raw of urls) {
+    if (DASH_LED.test(raw)) throw new Error(`${raw} looks like a flag, not a URL. Flags start with two ASCII hyphens (--estimate); run docslurp --help.`);
+    let url: URL;
+    try { url = new URL(raw); } catch { throw new Error(`${raw} is not a URL. ingest-url takes http(s) URLs.`); }
+    if ((url.protocol !== "https:" && url.protocol !== "http:") || !url.hostname) throw new Error(`${raw} is not an http(s) URL.`);
+    if (url.username || url.password) throw new Error(`${url.protocol}//${url.host}: URLs with credentials are not accepted.`);
+  }
+}
+
+/**
+ * Estimate inputs for URLs: name from the path, size and type from a HEAD request (redirects followed, 15 s each). A URL
+ * that reports no usable size cannot be estimated: the command fails before any request to DocSlurp, rather than
+ * guessing. The sizes are the server's own claim and only shape the estimate; the ingest is billed by what is measured.
+ */
+async function urlEstimateFiles(urls: string[]): Promise<Array<{ name: string; size: number; type?: string }>> {
+  const files: Array<{ name: string; size: number; type?: string }> = [];
+  for (const raw of urls) {
+    let url: URL;
+    try { url = new URL(raw); } catch { throw new Error(`--estimate: ${raw} is not a URL.`); }
+    if (url.protocol !== "https:" && url.protocol !== "http:") throw new Error(`--estimate: ${raw} is not an http(s) URL.`);
+    let response: Response;
+    try {
+      response = await fetch(url, { method: "HEAD", redirect: "follow", signal: AbortSignal.timeout(15_000) });
+    } catch {
+      throw new Error(`--estimate: could not reach ${url.href} to read its size. Download it and run docslurp estimate <file>.`);
+    }
+    const size = Number(response.headers.get("content-length"));
+    if (!response.ok || !Number.isSafeInteger(size) || size <= 0) {
+      throw new Error(`--estimate: ${url.href} reports no size (HTTP ${response.status}). Download it and run docslurp estimate <file>.`);
+    }
+    const name = decodeURIComponent(url.pathname.split("/").filter(Boolean).at(-1) ?? "") || url.hostname;
+    const type = response.headers.get("content-type")?.split(";")[0]?.trim();
+    files.push({ name: name.slice(0, 255), size, ...(type ? { type } : {}) });
+  }
+  return files;
+}
+
+/** Commands that read `--estimate`; anywhere else the flag is refused, so it can never silently run billed work. */
+const ESTIMATE_COMMANDS: ReadonlySet<string> = new Set(["upload", "ingest-url", "full-index", "reprocess"]);
 
 /** `docslurp extract`: files or URLs (not both), with the retention options. */
 async function extractCommand(inputs: string[], flags: Record<string, string | boolean>): Promise<void> {
@@ -1559,6 +1636,9 @@ async function main(): Promise<void> {
   }
 
   const { command, positional, flags } = parseCliArgs(own);
+  if (flags.estimate === true && !ESTIMATE_COMMANDS.has(command ?? "")) {
+    throw new Error(`--estimate is not supported by ${command ?? "this command"}: it would run the command instead of estimating it. Commands with --estimate: ${[...ESTIMATE_COMMANDS].join(", ")}.`);
+  }
 
   switch (command) {
     case "upload":

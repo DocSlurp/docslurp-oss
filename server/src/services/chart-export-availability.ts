@@ -30,7 +30,7 @@ export const CHART_EXPORT_UNAVAILABLE_MESSAGE = "That chart export tier is not a
 
 /**
  * A tier the deployment does not offer, chosen explicitly (a request override or a project change): `models` while the
- * kill switch is not `on`, or `free` while `DOCSLURP_CHART_EXPORT_FREE_EXPLICIT` is not `on`. One code and status on
+ * kill switch is not `on`, or `free` while explicit free is not allowed (`chartExportFreeExplicitAllowed`). One code and status on
  * every surface: 400 `chart_export_tier_unavailable`.
  */
 export class ChartExportUnavailableError extends Error {
@@ -83,10 +83,10 @@ export class ChartExportModelsForbiddenError extends HTTPException {
 }
 
 /**
- * A project's explicit tier is a ceiling for per-run choices: a run that would use `models` on a project whose stored
- * tier is `off` or `free` needs a caller who may edit the project (sessions) or, for an API key, the key's user's editor
- * rights plus the `pipeline:billed-features` (or `projects:manage`) scope. An ingest-only key or a contributor is
- * refused. Projects with no tier or with `models` keep the existing rules (spend admission). Fails closed: an API key id
+ * A project's tier is a ceiling for per-run choices: a run that would use `models` on a project whose stored tier is
+ * `off`, `free` or unset (no tier means Off) needs a caller who may edit the project (sessions) or, for an API key, the
+ * key's user's editor rights plus the `pipeline:billed-features` (or `projects:manage`) scope. An ingest-only key or a
+ * contributor is refused. Only a project saved on `models` keeps spend admission alone. Fails closed: an API key id
  * whose scopes cannot be read is refused.
  */
 export async function assertChartExportModelsCeiling(args: {
@@ -97,7 +97,9 @@ export async function assertChartExportModelsCeiling(args: {
   apiKeyScopes?: (apiKeyId: string) => Promise<readonly string[] | null>;
   context: string;
 }): Promise<void> {
-  if (args.runTier !== "models" || (args.projectTier !== "off" && args.projectTier !== "free")) return;
+  // Only a project saved on `models` lets any spend-admitted caller choose it; an unset tier is a ceiling of `off` like an
+  // explicit one (no tier means Off on every surface), so it needs the same rights.
+  if (args.runTier !== "models" || args.projectTier === "models") return;
   let allowed = args.canEdit;
   if (allowed && args.apiKeyId) {
     const scopes = args.apiKeyScopes ? await args.apiKeyScopes(args.apiKeyId).catch(() => null) : null;

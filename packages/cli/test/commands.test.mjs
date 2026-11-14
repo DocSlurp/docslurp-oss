@@ -14,13 +14,14 @@ async function invoke(args, respond, options = {}) {
     requests.push({ url: request.url, method: request.method, headers: request.headers, body: Buffer.concat(chunks).toString() });
     const result = respond(requests.at(-1), requests.length);
     if (result.delayMs) await new Promise((resolve) => setTimeout(resolve, result.delayMs));
-    response.writeHead(result.status ?? 200, { "content-type": "application/json" });
+    response.writeHead(result.status ?? 200, { "content-type": "application/json", ...(result.headers ?? {}) });
     response.end(JSON.stringify(result.body));
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   try {
     const url = `http://127.0.0.1:${server.address().port}`;
-    const child = spawn(process.execPath, ["dist/index.js", ...args, ...(options.environmentUrl ? [] : ["--api-url", `${url}/`])], {
+    // "{{server}}" in an argument is this test server (URLs the CLI itself fetches, such as ingest-url --estimate).
+    const child = spawn(process.execPath, ["dist/index.js", ...args.map((arg) => arg.replaceAll("{{server}}", url)), ...(options.environmentUrl ? [] : ["--api-url", `${url}/`])], {
       cwd: new URL("..", import.meta.url),
       env: { ...process.env, NO_PROXY: "127.0.0.1", no_proxy: "127.0.0.1", DOCSLURP_API_KEY: options.noKey ? "" : "test-key", DOCSLURP_URL: options.environmentUrl ? `${url}/` : "https://ignored-env.test", DOCSLURP_PROJECT: options.project ?? "" },
     });
@@ -67,7 +68,7 @@ test("search --min-score validates its value instead of silently disabling the f
   for (const args of [["--min-score"], ["--min-score", ""], ["--min-score", "abc"], ["--min-score", "2"]]) {
     const bad = await invoke(["search", "question", ...args], () => ({ body: { results: [] } }), { project: "project" });
     assert.notEqual(bad.code, 0, JSON.stringify(args));
-    assert.match(bad.stderr, /--min-score must be a number from 0 to 1/);
+    assert.match(bad.stderr, /--min-score must be a number from 0 to 1|--min-score needs a value/);
     assert.deepEqual(bad.requests, []);
   }
 });
@@ -457,7 +458,7 @@ test("--chart-export sends pipeline.chartExport on upload and ingest-url, chartE
     for (const bad of ["smart", "on", ""]) {
       result = await invoke(["upload", file, "--chart-export", bad], respond);
       assert.notEqual(result.code, 0);
-      assert.match(result.stderr, /--chart-export must be off, free or models/);
+      assert.match(result.stderr, /--chart-export must be off, free or models|--chart-export needs a value/);
       assert.deepEqual(result.requests, []);
     }
   } finally { await rm(dir, { recursive: true, force: true }); }
@@ -486,6 +487,102 @@ test("--quality sends pipeline.quality on upload and ingest-url, and rejects unk
     assert.match(result.stderr, /--quality must be fast, auto or good/);
     assert.deepEqual(result.requests, []);
   } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test("ingest-url --estimate prices the URLs and never starts an ingest (council #387 M1)", async () => {
+  const estimate = { estimate: { pages: 4, documents: 1, billing: "enforced", credits: { low: 1, high: 2 }, seconds: null, basis: "b" } };
+  const respond = (request) => request.method === "HEAD"
+    ? { headers: { "content-length": "2400000", "content-type": "application/pdf; charset=binary" }, body: null }
+    : { body: estimate };
+  const result = await invoke(["ingest-url", "{{server}}/files/q3-earnings.pdf", "--chart-export", "models", "--quality", "good", "--project", "w", "--estimate"], respond);
+  assert.equal(result.code, 0, result.stderr);
+  assert.deepEqual(result.requests.map((r) => [r.method, r.url]), [["HEAD", "/files/q3-earnings.pdf"], ["POST", "/v1/uploads/estimate"]]);
+  assert.deepEqual(JSON.parse(result.requests[1].body), {
+    files: [{ name: "q3-earnings.pdf", size: 2400000, type: "application/pdf" }], project: "w", chartExport: { tier: "models" }, settings: { quality: "good" },
+  });
+  assert.ok(!result.requests.some((r) => r.url === "/v1/uploads/url"));
+  assert.match(result.stdout, /nothing was started/);
+});
+
+test("ingest-url --estimate fails, sending nothing to DocSlurp, when a URL reports no size", async () => {
+  const respond = (request) => request.method === "HEAD" ? { status: 404, body: null } : { body: {} };
+  const result = await invoke(["ingest-url", "{{server}}/missing.pdf", "--estimate"], respond);
+  assert.notEqual(result.code, 0);
+  assert.match(result.stderr, /reports no size/);
+  assert.deepEqual(result.requests.map((r) => r.method), ["HEAD"]);
+});
+
+test("a flag can never swallow --estimate: unknown flags, --flag=value and missing values (council #387 r2 M1)", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "docslurp-cli-"));
+  try {
+    const file = join(dir, "q3.pdf");
+    await writeFile(file, "%PDF-1.4 tiny");
+    const respond = (request) => request.method === "HEAD"
+      ? { headers: { "content-length": "123456", "content-type": "application/pdf" }, body: null }
+      : { body: { estimate: { pages: 1, documents: 1, billing: "enforced", credits: { low: 1, high: 1 }, seconds: null, basis: "b" } } };
+    const url = "{{server}}/files/q3.pdf";
+    // The reviewer's repro, on both commands: each refused before anything reaches DocSlurp.
+    const refused = [
+      [["ingest-url", url, "--yes", "--estimate"], /Unknown flag --yes/],
+      [["ingest-url", url, "--estimate=true"], /--estimate takes no value/],
+      [["ingest-url", "--dry-run", "--estimate", url], /Unknown flag --dry-run/],
+      [["ingest-url", "--project", "--estimate", url], /--project needs a value/],
+      [["upload", file, "--yes", "--estimate"], /Unknown flag --yes/],
+      [["upload", file, "--estimate=true"], /--estimate takes no value/],
+      [["upload", "--dry-run", "--estimate", file], /Unknown flag --dry-run/],
+      [["upload", "--project", "--estimate", file], /--project needs a value/],
+      [["upload", file, "--chart-export"], /--chart-export needs a value/],
+    ];
+    for (const [args, message] of refused) {
+      const result = await invoke(args, respond);
+      assert.notEqual(result.code, 0, args.join(" "));
+      assert.match(result.stderr, message, args.join(" "));
+      assert.deepEqual(result.requests, [], args.join(" "));
+    }
+    // --flag=value works, and the estimate still only estimates.
+    const ok = await invoke(["ingest-url", url, "--chart-export=models", "--project=w", "--estimate"], respond);
+    assert.equal(ok.code, 0, ok.stderr);
+    assert.deepEqual(ok.requests.map((r) => [r.method, r.url]), [["HEAD", "/files/q3.pdf"], ["POST", "/v1/uploads/estimate"]]);
+    assert.deepEqual(JSON.parse(ok.requests[1].body), { files: [{ name: "q3.pdf", size: 123456, type: "application/pdf" }], project: "w", chartExport: { tier: "models" } });
+    const upload = await invoke(["upload", file, "--chart-export=free", "--estimate"], respond);
+    assert.equal(upload.code, 0, upload.stderr);
+    assert.deepEqual(upload.requests.map((r) => r.url), ["/v1/uploads/estimate"]);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test("ingest-url checks every URL before sending anything: dash-led words, non-URLs, other schemes, credentials (council #387 r3)", async () => {
+  const respond = () => ({ body: { run: { id: "run" }, project: { id: "p", name: "P" }, documents: [{}] } });
+  const cases = [
+    ["-e", /looks like a flag/], ["-estimate", /looks like a flag/], ["\u2014estimate", /looks like a flag/], ["\u2013estimate", /looks like a flag/],
+    ["\u2212estimate", /looks like a flag/], ["\uFF0Destimate", /looks like a flag/],
+    ["q3-earnings.pdf", /is not a URL/], ["ftp://example.test/a.pdf", /not an http\(s\) URL/], ["https://user:pw@example.test/a.pdf", /credentials/],
+  ];
+  for (const [bad, message] of cases) {
+    for (const extra of [[], ["--estimate"]]) {
+      const result = await invoke(["ingest-url", "https://example.test/ok.pdf", bad, ...extra], respond);
+      assert.notEqual(result.code, 0, `${bad} ${extra.join(" ")}`);
+      assert.match(result.stderr, message, bad);
+      assert.deepEqual(result.requests, [], bad);
+    }
+  }
+});
+
+test("an empty flag value is an error, never a silent default (--project=)", async () => {
+  for (const args of [["ingest-url", "https://example.test/a.pdf", "--project="], ["search", "q", "--project="], ["ingest-url", "https://example.test/a.pdf", "--project", " "]]) {
+    const result = await invoke(args, () => ({ body: {} }));
+    assert.notEqual(result.code, 0, args.join(" "));
+    assert.match(result.stderr, /--project needs a value/);
+    assert.deepEqual(result.requests, []);
+  }
+});
+
+test("--estimate is refused on commands that do not estimate, before any request", async () => {
+  for (const args of [["extract", "https://example.test/a.pdf", "--estimate"], ["search", "q", "--estimate"]]) {
+    const result = await invoke(args, () => ({ body: {} }));
+    assert.notEqual(result.code, 0, args.join(" "));
+    assert.match(result.stderr, /--estimate is not supported by/);
+    assert.deepEqual(result.requests, []);
+  }
 });
 
 async function invokeStream(args, handler, options = {}) {
