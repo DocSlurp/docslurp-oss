@@ -42,6 +42,11 @@ export interface OcrPageRead {
   elapsedMs: number;
   /** Why this page should get a hosted second read, and the boundary's PNG of it; null when it should not. */
   escalation: { reason: OcrEscalationReason; imagePath: string; width: number; height: number } | null;
+  /**
+   * The boundary's PNG of the frame (signature and IHDR size checked, never decoded), when the read kept one for the page
+   * reader (OcrReadInput.keepFrames). Present on escalation candidates and, with `keepFrames: "all"`, on every frame with text.
+   */
+  image?: { imagePath: string; width: number; height: number };
   /** The boundary's bounded raw RGB rendition of the frame (validated by header and exact size; there is nothing to decode), when asked for. */
   rendition?: { imagePath: string; width: number; height: number };
   /** The frame's decoded pixel size before any downscaling (the boundary decoded it): its page area. */
@@ -80,8 +85,14 @@ export interface OcrReadInput {
   maxFrames?: number;
   /** Project OCR language setting (`auto` or codes). */
   languageSetting?: string;
-  /** Keep PNGs of pages that qualify for escalation. */
+  /** Keep PNGs of pages that qualify for escalation, and mark them as hosted escalation candidates. */
   escalation: boolean;
+  /**
+   * Keep PNGs for the page image reader (page-reader.ts): `candidates` keeps the frames escalation would (whether or not
+   * hosted escalation is on); `all` keeps every frame the boundary read words or regions on. Candidacy for hosted escalation
+   * still follows `escalation` and the usual confidence rule.
+   */
+  keepFrames?: "candidates" | "all";
   /** Ask the boundary for a bounded rendition of every frame (visual indexing of uploaded images). */
   rendition?: { maxLongEdge: number; maxBytes: number };
   signal?: AbortSignal;
@@ -257,6 +268,19 @@ async function pngDimensions(file: string, maxBytes = OCR_ESCALATION_IMAGE_MAX_B
   }
 }
 
+/**
+ * Which frames the boundary keeps as PNG (SandboxedOcrJob.escalation). Escalation and the page reader's `candidates` keep
+ * low-confidence frames and frames read by an escalated recogniser. The page reader's `all` keeps every frame: no mean
+ * confidence reaches 1 below a frame with text, and every recogniser the job may use is listed (the CLI also keeps
+ * non-blank frames it read nothing on). Blank frames are never kept: there is nothing to read.
+ */
+function frameImagePolicy(input: OcrReadInput, language: OcrLanguagePlan): SandboxedOcrJob["escalation"] {
+  if (input.keepFrames === "all") {
+    return { belowConfidence: 1, recognisers: [...new Set([...language.recognisers, ...ESCALATE_RECOGNISERS])] };
+  }
+  return input.escalation || input.keepFrames ? { belowConfidence: OCR_ESCALATE_BELOW, recognisers: [...ESCALATE_RECOGNISERS] } : null;
+}
+
 /** Why a frame deserves a hosted second read, or null. */
 export function escalationReason(frame: { recogniser: string | null; meanConfidence: number | null; chars: number }, language: OcrLanguagePlan, belowConfidence = OCR_ESCALATE_BELOW): OcrEscalationReason | null {
   if (frame.recogniser !== null && (ESCALATE_RECOGNISERS as readonly string[]).includes(frame.recogniser)) return "script";
@@ -301,7 +325,7 @@ export async function readWithOcr(runner: OcrRunner, input: OcrReadInput): Promi
       retryBelow: OCR_RETRY_BELOW,
       maxFrames,
       maxLongEdge: ocrMaxLongEdge(env),
-      escalation: input.escalation ? { belowConfidence: OCR_ESCALATE_BELOW, recognisers: [...ESCALATE_RECOGNISERS] } : null,
+      escalation: frameImagePolicy(input, language),
       // Renditions only where the boundary makes them (local CLI, or a VM provider whose guest declares them).
       ...(input.rendition && input.kind === "image" && (mode === "local" || provider?.renditions === true) ? { rendition: { ...input.rendition } } : {}),
     };
@@ -327,13 +351,18 @@ export async function readWithOcr(runner: OcrRunner, input: OcrReadInput): Promi
     const pages: OcrPageRead[] = [];
     for (const frame of result.frames) {
       let escalation: OcrPageRead["escalation"] = null;
-      const reason = input.escalation ? escalationReason(frame, language) : null;
-      if (reason && frame.image) {
+      let image: OcrPageRead["image"];
+      const candidate = input.escalation || input.keepFrames ? escalationReason(frame, language) : null;
+      const reason = input.escalation ? candidate : null;
+      const wanted = Boolean(candidate) || input.keepFrames === "all";
+      if (wanted && frame.image) {
         const imagePath = path.join(imageDir, frame.image);
         const dims = await pngDimensions(imagePath);
         // The PNG must be the frame the boundary read; anything else is dropped, never decoded here.
-        if (dims && dims.width === frame.width && dims.height === frame.height) escalation = { reason, imagePath, width: dims.width, height: dims.height };
-        else console.warn(`[ocr] frame=${frame.frame} escalation image refused (missing or not the frame read)`);
+        if (dims && dims.width === frame.width && dims.height === frame.height) {
+          if (reason) escalation = { reason, imagePath, width: dims.width, height: dims.height };
+          if (input.keepFrames && (candidate || input.keepFrames === "all")) image = { imagePath, width: dims.width, height: dims.height };
+        } else console.warn(`[ocr] frame=${frame.frame} escalation image refused (missing or not the frame read)`);
       }
       const rendition = input.rendition ? await validRendition(frame, imageDir, input.rendition) : undefined;
       pages.push({
@@ -345,6 +374,7 @@ export async function readWithOcr(runner: OcrRunner, input: OcrReadInput): Promi
         chars: frame.chars,
         elapsedMs: frame.elapsedMs,
         escalation,
+        ...(image ? { image } : {}),
         sourceWidth: frame.sourceWidth,
         sourceHeight: frame.sourceHeight,
       });

@@ -1,6 +1,6 @@
 /*
  * OCR of one document's pages for a pipeline stage: the configured boundary's read (engine.ts), billed per page
- * (ledger.ts), then the escalation reads (escalation.ts). In `hosted` mode, a stored image's bytes go to the hosted reader
+ * (ledger.ts), then the optional page reader (page-reader.ts) and the escalation reads (escalation.ts). In `hosted` mode, a stored image's bytes go to the hosted reader
  * as uploaded. Every refusal throws; the caller fails the page or document and never substitutes another reader.
  */
 import { lstat, readFile } from "node:fs/promises";
@@ -14,10 +14,12 @@ import { imageTooManyFramesError } from "./image-frames.js";
 import { recordOcrReads } from "./ledger.js";
 import { sanitizeVisionPageTables } from "../pipeline/vision-tables-vm.js";
 import { OcrRefusedError, resolveOcrMode } from "./mode.js";
+import { ocrPageReaderKeepFrames, ocrPageReaderMode, readOcrPagesWithConfiguredReader, type PageReaderSummary } from "./page-reader.js";
 
 export interface OcrDocumentInput {
   runner: Pick<CommandRunner, "run" | "sandboxedOcrRead" | "localOcrRead">;
-  state: Pick<WorkflowState, "usageLedger">;
+  /** The run state: its usage ledger, and its run (tenant scope and cost cap) for the page reader, which never reads without it. */
+  state: Pick<WorkflowState, "usageLedger"> & { run?: WorkflowState["run"] };
   documentId: string;
   /** Stored file (private temp copy); never decoded on the host. */
   source: string;
@@ -68,6 +70,8 @@ export interface OcrDocumentResult {
   /** Requested pages the boundary did not reach (past its frame cap); the caller fails them. */
   unreadPages: number[];
   escalation: EscalationSummary | null;
+  /** The page reader's work on this document (DOCSLURP_OCR_PAGE_READER); absent when it is off. */
+  pageReader?: PageReaderSummary | null;
 }
 
 export async function ocrDocument(input: OcrDocumentInput): Promise<OcrDocumentResult> {
@@ -76,6 +80,9 @@ export async function ocrDocument(input: OcrDocumentInput): Promise<OcrDocumentR
   if (mode === "off") throw new OcrRefusedError("OCR is off (DOCSLURP_OCR_MODE=off)", "off");
   if (mode === "hosted") return await hostedDocument(input);
   let outcome: OcrReadOutcome | null = null;
+  const pageReaderMode = ocrPageReaderMode(env);
+  const hostedEscalation = Boolean(input.hostedReader) && ocrEscalationEnabled(env);
+  const keepFrames = ocrPageReaderKeepFrames(pageReaderMode);
   const budget = input.kind === "image" && input.frameBudget ? Math.max(1, Math.min(OCR_DEFAULT_MAX_FRAMES, await input.frameBudget(OCR_DEFAULT_MAX_FRAMES))) : null;
   try {
     outcome = await readWithOcr(input.runner, {
@@ -84,7 +91,8 @@ export async function ocrDocument(input: OcrDocumentInput): Promise<OcrDocumentR
       kind: input.kind,
       ...(input.pages ? { pages: input.pages } : {}),
       ...(input.languageSetting ? { languageSetting: input.languageSetting } : {}),
-      escalation: Boolean(input.hostedReader) && ocrEscalationEnabled(env),
+      escalation: hostedEscalation,
+      ...(keepFrames ? { keepFrames } : {}),
       ...(input.rendition ? { rendition: input.rendition } : {}),
       ...(input.signal ? { signal: input.signal } : {}),
       env,
@@ -103,7 +111,11 @@ export async function ocrDocument(input: OcrDocumentInput): Promise<OcrDocumentR
     // The recogniser's reads are billed first; an escalation read of the same page is the same Rich page (the ledger sums
     // readers per page), with its own provider cost.
     const chargedPages = recordOcrReads(input.state.usageLedger, input.documentId, outcome, { stage: input.stage, kind: input.kind });
-    const escalation = input.hostedReader && outcome.pages.some((page) => page.escalation)
+    // The page reader reads first, in its own VM; a page it read leaves escalation, the rest keep the recogniser's text.
+    const pageReader = pageReaderMode === "off" ? null : await readOcrPagesWithConfiguredReader(outcome, {
+      state: input.state, documentId: input.documentId, ...(input.signal ? { signal: input.signal } : {}),
+    }, env);
+    const escalation = input.hostedReader && hostedEscalation && outcome.pages.some((page) => page.escalation)
       ? await escalateOcrPages(outcome, input.hostedReader, input.documentId, input.signal)
       : null;
     console.log(
@@ -118,8 +130,8 @@ export async function ocrDocument(input: OcrDocumentInput): Promise<OcrDocumentR
       pages.push({ pageNumber: page.pageNumber, text: page.text, reader: page.recogniser, ...(rendition ? { rendition } : {}),
         ...(page.sourceWidth && page.sourceHeight ? { sourceWidth: page.sourceWidth, sourceHeight: page.sourceHeight } : {}) });
     }
-    // A hosted escalation read may hold model HTML tables: read in the parser VM (one job per document) and rebuilt.
-    if (escalation) await rebuildPageTables(pages, input);
+    // A page reader or hosted escalation read may hold model HTML tables: read in the parser VM (one job per document) and rebuilt.
+    if (escalation || pageReader?.replaced) await rebuildPageTables(pages, input);
     return {
       mode: outcome.mode,
       pages,
@@ -127,6 +139,7 @@ export async function ocrDocument(input: OcrDocumentInput): Promise<OcrDocumentR
       truncatedFrames: outcome.truncatedFrames,
       unreadPages: outcome.unreadPages,
       escalation,
+      ...(pageReader ? { pageReader } : {}),
     };
   } finally {
     await outcome?.dispose();
