@@ -130,7 +130,7 @@ it.skipIf(!url)("refuses a column-level INSERT or UPDATE, at startup and at the 
   } finally {
     await admin.query(`revoke docslurp_app from ${runtime}`);
   }
-});
+}, 30_000); // About forty role switches and catalog reads: over the 5 s default on a busy CI runner.
 
 it.skipIf(!url)("evaluates privileges for every role held, so a SET ROLE into the allowed role is covered (recheck Q #5a)", async () => {
   const login = `rt_login_${suffix}`;
