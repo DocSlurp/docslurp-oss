@@ -20,6 +20,7 @@ import { assertOcrConfiguration } from "../ocr/mode.js";
 import { pinnedOcrModels } from "../ocr/models.js";
 import { initializeParserSandbox } from "../sandbox/startup.js";
 import { assertServiceProfileRuntime, vmOnlyParsing } from "../lib/vm-only-parsing.js";
+import { assertNoUnsafeOverrides } from "../lib/unsafe-overrides.js";
 
 export interface PreflightStepResult {
   step: string;
@@ -74,6 +75,7 @@ export async function runWorkerPreflight(env: NodeJS.ProcessEnv = process.env, d
 
   await step("runtime environment", () => {
     assertServiceProfileRuntime(env);
+    assertNoUnsafeOverrides(env);
     return `NODE_ENV=${env.NODE_ENV?.trim() || "unset"} vmOnlyParsing=${vmOnlyParsing(env)}`;
   });
   await step("parser sandbox", async () => {

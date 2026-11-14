@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { Client } from "pg";
 import { afterAll, expect, it } from "vitest";
 
-const url = process.env.MIGRATION_LOCK_TEST_DATABASE_URL;
+const url = process.env.TEST_DATABASE_URL;
 const clients: Client[] = [];
 afterAll(async () => { await Promise.all(clients.map(client => client.end().catch(() => {}))); });
 async function connect() { const client = new Client({ connectionString: url }); await client.connect(); clients.push(client); return client; }

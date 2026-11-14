@@ -9,7 +9,7 @@ import type { SqlClient } from "../db.js";
 let sql: postgres.Sql;
 let stop: () => Promise<void>;
 beforeAll(async () => {
-  const databaseUrl = process.env.RUN_RETRY_BOOST_TEST_DATABASE_URL;
+  const databaseUrl = process.env.TEST_DATABASE_URL;
   const database = databaseUrl ? null : await startMigratedPostgres();
   stop = database?.stop ?? (async () => {});
   sql = postgres(databaseUrl ?? database!.url, { max: 1, prepare: false, onnotice: () => {} });

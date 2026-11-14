@@ -14,7 +14,7 @@ import { WorkflowState } from "../pipeline/pipeline.js";
  * concurrency. PGlite serves one connection at a time, so this needs a real,
  * migrated, throwaway Postgres:
  *
- *   CHECKPOINT_LOCK_TEST_DATABASE_URL=postgres://… pnpm --filter worker test -- checkpoint-lock-order
+ *   TEST_DATABASE_URL=postgres://… pnpm --filter worker test -- checkpoint-lock-order
  *
  * Regression for the `deadlock detected` (40P01) a 10-document sharded batch
  * hit in extract-markdown (internal research notes):
@@ -26,7 +26,7 @@ import { WorkflowState } from "../pipeline/pipeline.js";
  */
 type Sql = postgres.Sql<Record<string, unknown>>;
 
-const realUrl = process.env.CHECKPOINT_LOCK_TEST_DATABASE_URL;
+const realUrl = process.env.TEST_DATABASE_URL;
 const prefix = "lockorder";
 const runId = `${prefix}-run`;
 const docIds = Array.from({ length: 16 }, (_, index) => `${prefix}-doc-${index}`);
