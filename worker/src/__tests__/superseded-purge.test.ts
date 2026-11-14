@@ -116,7 +116,7 @@ describe("superseded version purge", () => {
     const held = await sql.reserve();
     const vectorDeletes: string[] = [];
     const { storage, deleted } = fakeStorage(["u1/run-1/markdown/v1.md"]);
-    const purgeOptions = options(async ({ documentIds }) => { vectorDeletes.push(...documentIds); });
+    const purgeOptions = options(async ({ table, documentIds }) => { if (table === "chunks") vectorDeletes.push(...documentIds); });
     try {
       await held`select pg_advisory_lock(hashtextextended('kg:w', 0))`;
       expect(await purgeSupersededDocuments(sql, storage, purgeOptions)).toEqual({ purged: 0, failed: 0 });
@@ -156,7 +156,11 @@ describe("superseded version purge", () => {
 
     expect(result).toEqual({ purged: 1, failed: 0 });
     expect(deleted.sort()).toEqual(["u1/run-1/images/v1/150dpi/page-1.png", "u1/run-1/markdown/v1.md"]);
-    expect(vectorDeletes).toEqual([{ uri: "/tmp/lance/o1/w/vectors-model%2Fx-4", table: "chunks", documentIds: ["v1"] }]);
+    // The chunk rows, then the summary tree's rows beside them (always the strict delete).
+    expect(vectorDeletes).toEqual([
+      { uri: "/tmp/lance/o1/w/vectors-model%2Fx-4", table: "chunks", documentIds: ["v1"] },
+      { uri: "/tmp/lance/o1/w/vectors-model%2Fx-4", table: "summaries", documentIds: ["v1"], purgeHistory: true },
+    ]);
     const [v1] = await sql`select purged_at is not null as purged, superseded_by_document_id from documents where id = 'v1'`;
     expect(v1).toEqual({ purged: true, superseded_by_document_id: "v2" });
     expect(await sql`select document_id from document_chunks order by document_id`).toEqual([{ document_id: "v2" }]);
@@ -206,7 +210,7 @@ describe("superseded version purge", () => {
 
     let vectorDeletes = 0;
     const { storage, deleted } = fakeStorage(["u1/run-1/markdown/v1.md"]);
-    expect(await purgeSupersededDocuments(sql, storage, options(async () => { vectorDeletes += 1; })))
+    expect(await purgeSupersededDocuments(sql, storage, options(async ({ table }) => { if (table === "chunks") vectorDeletes += 1; })))
       .toEqual({ purged: 1, failed: 0 });
     expect(deleted).toEqual([]);
     expect(vectorDeletes).toBe(0);
@@ -233,7 +237,7 @@ describe("superseded version purge", () => {
 
     const vectorDeletes: Array<{ uri: string; documentIds: readonly string[] }> = [];
     const { storage, deleted } = fakeStorage(["u1/run-1/markdown/v1.md"]);
-    expect(await purgeSupersededDocuments(sql, storage, options(async ({ uri, documentIds }) => { vectorDeletes.push({ uri, documentIds }); })))
+    expect(await purgeSupersededDocuments(sql, storage, options(async ({ uri, table, documentIds }) => { if (table === "chunks") vectorDeletes.push({ uri, documentIds }); })))
       .toEqual({ purged: 1, failed: 0 });
     expect(vectorDeletes).toEqual([{ uri: "/tmp/lance/o1/w/vectors-model%2Fx-4", documentIds: ["v1"] }]);
     // The copy's stage states still point at v1's artifacts.
@@ -251,7 +255,7 @@ describe("superseded version purge", () => {
 
     const vectorDeletes: string[] = [];
     const { storage, deleted } = fakeStorage(["u1/run-1/markdown/v1.md"]);
-    expect(await purgeSupersededDocuments(sql, storage, options(async (args) => { vectorDeletes.push(...args.documentIds); })))
+    expect(await purgeSupersededDocuments(sql, storage, options(async (args) => { if (args.table === "chunks") vectorDeletes.push(...args.documentIds); })))
       .toEqual({ purged: 1, failed: 0 });
     expect(deleted).toEqual([]);
     expect(vectorDeletes).toEqual(["v1"]);
@@ -506,7 +510,10 @@ describe("superseded version purge", () => {
     expect(await drainDocumentCleanupQueue(sql, storage, options(async (args) => { vectorDeletes.push(args); })))
       .toEqual({ purged: 1, failed: 0 });
     expect(deleted.sort()).toEqual(["u1/run-1/images/deleted/page-1.png", "u1/run-1/markdown/deleted.md", "u1/src/raw/deleted.pdf"]);
-    expect(vectorDeletes).toEqual([{ uri: "/tmp/lance/o1/w/vectors-model%2Fx-4", table: "chunks", documentIds: ["deleted"] }]);
+    expect(vectorDeletes).toEqual([
+      { uri: "/tmp/lance/o1/w/vectors-model%2Fx-4", table: "chunks", documentIds: ["deleted"] },
+      { uri: "/tmp/lance/o1/w/vectors-model%2Fx-4", table: "summaries", documentIds: ["deleted"], purgeHistory: true },
+    ]);
     expect(await sql`select id from kg_nodes`).toEqual([]);
     expect(await sql`select document_id from document_cleanup_queue`).toEqual([]);
   });
@@ -536,7 +543,11 @@ describe("superseded version purge", () => {
     expect(await drainDocumentCleanupQueue(sql, storage, options(remove))).toEqual({ purged: 1, failed: 0 });
     // One failed pass, then the erasure's two: compact, then prune the version compacted from.
     expect(optimize).toHaveBeenCalledTimes(3);
-    expect(vectorDeletes).toEqual([{ uri: "/tmp/lance/o1/w/vectors-model%2Fx-4", table: "chunks", documentIds: ["extract-doc"], purgeHistory: true }]);
+    // The project has no summaries table (tableNames above), so that delete finds nothing and optimizes nothing.
+    expect(vectorDeletes).toEqual([
+      { uri: "/tmp/lance/o1/w/vectors-model%2Fx-4", table: "chunks", documentIds: ["extract-doc"], purgeHistory: true },
+      { uri: "/tmp/lance/o1/w/vectors-model%2Fx-4", table: "summaries", documentIds: ["extract-doc"], purgeHistory: true },
+    ]);
     expect(await sql`select document_id from document_cleanup_queue`).toEqual([]);
   });
 

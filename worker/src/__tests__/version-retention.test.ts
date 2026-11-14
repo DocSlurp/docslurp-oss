@@ -126,7 +126,7 @@ describe("retention-aware superseded purge", () => {
   it("the default keeps current plus one archived version with pages but no search data", async () => {
     await seedChain(3);
     const deletes: string[] = [];
-    const result = await sweep(async (a) => { deletes.push(...a.documentIds); });
+    const result = await sweep(async (a) => { if (a.table === "chunks") deletes.push(...a.documentIds); });
     expect(result).toMatchObject({ purged: 1, archived: 1, failed: 0 });
     const s = await states();
     expect(s.v1!.purged).toBe(true);
@@ -176,7 +176,7 @@ describe("retention-aware superseded purge", () => {
       values ('copy', 'o1', 'u1', 'w', 'run', 'a.md', 'text/markdown', 'k', 'completed', 'v1')
     `;
     const deletes: string[] = [];
-    await sweep(async (a) => { deletes.push(...a.documentIds); });
+    await sweep(async (a) => { if (a.table === "chunks") deletes.push(...a.documentIds); });
     expect(deletes).toEqual([]);
     const s = await states();
     expect(s.v1).toMatchObject({ archived: true, chunks: 0, pages: 1 });
