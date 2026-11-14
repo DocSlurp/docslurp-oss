@@ -62,3 +62,30 @@ export function parsePageLayoutFacts(payload: unknown, maxPage = 100_000): Map<n
   }
   return out;
 }
+
+/**
+ * Whole-file reasons the layout walker leaves every page of a file unknown for (worker/scripts/pdf_layout_facts.py: a page
+ * tree that does not check out, and the other failures that stop a file before any page). A provider reports one as the
+ * payload's `walkerUnknown` ({ reason, pages }); any other slug is counted as `other`. Counters only, never document content.
+ */
+export const LAYOUT_WALKER_UNKNOWN_REASONS = [
+  "page-tree-count", "page-tree-shared", "page-tree-kid", "tree-depth", "tree-size", "no-page-tree", "no-pages", "page-index",
+  "page-tree-error", "encrypted", "unreadable", "no-catalog", "time-budget",
+] as const;
+export type LayoutWalkerUnknownReason = (typeof LAYOUT_WALKER_UNKNOWN_REASONS)[number] | "other";
+export interface LayoutWalkerUnknown { reason: LayoutWalkerUnknownReason; pages: number }
+
+/**
+ * The walker's whole-file failure a pdf-layout-facts@1 payload reports (`walkerUnknown`), or undefined when it reports none
+ * or a malformed one. `pages` is the pages it left unknown, bounded by `maxPage`. Telemetry only: routing reads the pages.
+ */
+export function pageLayoutWalkerUnknown(payload: unknown, maxPage = 100_000): LayoutWalkerUnknown | undefined {
+  const root = payload as { version?: unknown; walkerUnknown?: unknown } | null;
+  if (!root || typeof root !== "object" || root.version !== "pdf-layout-facts@1") return undefined;
+  const value = root.walkerUnknown as { reason?: unknown; pages?: unknown } | null | undefined;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const pages = value.pages;
+  if (typeof pages !== "number" || !Number.isSafeInteger(pages) || pages < 1 || pages > maxPage) return undefined;
+  const reason = (LAYOUT_WALKER_UNKNOWN_REASONS as readonly unknown[]).includes(value.reason) ? value.reason as LayoutWalkerUnknownReason : "other";
+  return { reason, pages };
+}

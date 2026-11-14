@@ -28,7 +28,7 @@ import {
 import { SandboxRunError, type SandboxResult } from "../sandbox/types.js";
 import type { UsageEvent } from "../models.js";
 import { currentPerfContext } from "../lib/perf-context.js";
-import { parsePageLayoutFacts, type PageLayoutFacts } from "../lib/page-layout-facts.js";
+import { pageLayoutWalkerUnknown, parsePageLayoutFacts, type LayoutWalkerUnknown, type PageLayoutFacts } from "../lib/page-layout-facts.js";
 import { acceptSandboxedPdfPageFacts, clearSandboxedPdfPageFacts, sandboxedPdfPageFactsLayout } from "./sandboxed-pdf-page-facts.js";
 import { planPageShards, type ShardCostProfile } from "../temporal/page-shards.js";
 import { registerShardProfile } from "../temporal/page-shard-profiles.js";
@@ -399,6 +399,7 @@ export function requireSandboxedPdfProvider(): SandboxedPdfExtractorProvider {
 
 const reportedOcrPages = new WeakMap<SandboxedPdfJob, number[]>();
 const reportedLayoutFacts = new WeakMap<SandboxedPdfJob, Map<number, PageLayoutFacts>>();
+const reportedWalkerUnknown = new WeakMap<SandboxedPdfJob, LayoutWalkerUnknown>();
 const reportedFigures = new WeakMap<SandboxedPdfJob, SandboxedPdfFigureOutcome>();
 
 /**
@@ -495,6 +496,7 @@ function figureOutcome(job: SandboxedPdfJob, raw: unknown, pages: number): Sandb
 export function acceptSandboxedPdfResult(job: SandboxedPdfJob, result: SandboxedPdfResult, pages: number, options: { glyphs?: boolean } = {}): SandboxedPdfResult {
   reportedOcrPages.delete(job);
   reportedLayoutFacts.delete(job);
+  reportedWalkerUnknown.delete(job);
   reportedFigures.delete(job);
   clearSandboxedPdfPageFacts(job);
   const figures = figureOutcome(job, result.figures, pages);
@@ -505,8 +507,14 @@ export function acceptSandboxedPdfResult(job: SandboxedPdfJob, result: Sandboxed
   if (result.layoutFacts !== undefined) {
     // Routing evidence, not billing evidence: a malformed payload is dropped (routing then has no layout facts), never repaired.
     const layout = parsePageLayoutFacts(result.layoutFacts, Number.isSafeInteger(pages) && pages > 0 ? pages : MAX_REPORTED_PAGES);
+    // A whole file the walker could not walk (a page tree that does not check out, say): counted, so it is never silent.
+    const walkerUnknown = pageLayoutWalkerUnknown(result.layoutFacts, Number.isSafeInteger(pages) && pages > 0 ? pages : MAX_REPORTED_PAGES);
+    if (walkerUnknown) {
+      reportedWalkerUnknown.set(job, walkerUnknown);
+      console.warn(`[vm-pdf] layout walker unknown reason=${walkerUnknown.reason} pages=${walkerUnknown.pages}`);
+    }
     if (layout.size > 0) reportedLayoutFacts.set(job, layout);
-    else console.warn("[vm-pdf] layout facts unusable; routing continues without them");
+    else if (!walkerUnknown) console.warn("[vm-pdf] layout facts unusable; routing continues without them");
     result = { ...result, layoutFacts: undefined };
   }
   const raw: unknown = result.ocrPages;
@@ -532,6 +540,11 @@ export function acceptSandboxedPdfResult(job: SandboxedPdfJob, result: Sandboxed
  */
 export function sandboxedPdfLayoutFacts(job: SandboxedPdfJob): Map<number, PageLayoutFacts> | undefined {
   return reportedLayoutFacts.get(job) ?? sandboxedPdfPageFactsLayout(job);
+}
+
+/** The whole-file reason the provider's layout walker reported for a finished job (a fixed slug and a page count), if any. */
+export function sandboxedPdfLayoutWalkerUnknown(job: SandboxedPdfJob): LayoutWalkerUnknown | undefined {
+  return reportedWalkerUnknown.get(job);
 }
 
 /** Where `sandboxedPdfLayoutFacts` came from: the provider's layout walker, or its page facts (`use` mode). */
