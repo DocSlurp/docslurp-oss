@@ -319,3 +319,77 @@ describe("run reprocess estimate (council L1)", () => {
     expect((await estimate(as("ua"), "run-b")).status).toBe(404);
   });
 });
+
+describe("document changes: delete and tags (owner decision: viewers are read-only)", () => {
+  let n = 0;
+  /** A fresh document in org A's default project, uploaded by the viewer (uploading stays open to members). */
+  async function freshDocument(): Promise<string> {
+    const id = `doc-change-${++n}`;
+    await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count)
+      values (${id}, 'org-a', 'uv', 'proj-a', 'run-a', ${`${id}.pdf`}, 'application/pdf', ${`uv/raw/${id}.pdf`}, 'completed', 1)`;
+    await sql`insert into document_tags (document_id, user_id, tag) values (${id}, 'uv', 'keep')`;
+    return id;
+  }
+  const exists = async (id: string) => (await sql`select 1 from documents where id = ${id}`).length === 1;
+  const tagsOf = async (id: string) => (await sql<{ tag: string }[]>`select tag from document_tags where document_id = ${id} order by tag`).map((row) => row.tag);
+
+  const OPERATIONS: Array<{ name: string; run: (caller: Caller, id: string) => Promise<Response>; changed: (id: string) => Promise<boolean> }> = [
+    { name: "delete one", run: async (caller, id) => await app.request(`/v1/documents/${id}`, { method: "DELETE", headers: caller.headers }), changed: async (id) => !await exists(id) },
+    { name: "bulk delete", run: (caller, id) => post(caller, "/v1/documents/bulk", { action: "delete", documentIds: [id] }), changed: async (id) => !await exists(id) },
+    {
+      name: "set tags", changed: async (id) => (await tagsOf(id)).join() === "new",
+      run: async (caller, id) => await app.request(`/v1/documents/${id}/tags`, { method: "PUT", headers: { ...caller.headers, "content-type": "application/json" }, body: JSON.stringify({ tags: ["new"] }) }),
+    },
+    { name: "add tags", run: (caller, id) => post(caller, "/v1/documents/bulk", { action: "apply-tags", documentIds: [id], tags: ["added"] }), changed: async (id) => (await tagsOf(id)).includes("added") },
+    { name: "remove tags", run: (caller, id) => post(caller, "/v1/documents/bulk", { action: "remove-tags", documentIds: [id], tags: ["keep"] }), changed: async (id) => !(await tagsOf(id)).includes("keep") },
+  ];
+
+  describe.each(OPERATIONS)("$name", ({ run, changed }) => {
+    it("a default-project viewer (even the uploader) and a plain member get 403; nothing changes", async () => {
+      for (const user of ["uv", "um"]) {
+        const id = await freshDocument();
+        const response = await run(as(user), id);
+        expect(response.status, `${user}: ${await response.text()}`).toBe(403);
+        expect(await changed(id), user).toBe(false);
+      }
+    });
+
+    it("a project editor and an org admin may", async () => {
+      for (const user of ["ue", "ua"]) {
+        const id = await freshDocument();
+        const response = await run(as(user), id);
+        expect(response.status, `${user}: ${await response.text()}`).toBe(200);
+        expect(await changed(id), user).toBe(true);
+      }
+    });
+
+    it("another organization gets 404 and changes nothing", async () => {
+      const id = await freshDocument();
+      const response = await run(as("ub"), id);
+      expect(response.status).toBe(404);
+      expect(await response.text()).not.toContain(id);
+      expect(await changed(id)).toBe(false);
+    });
+  });
+
+  it("one non-editable document in a bulk request refuses the whole request", async () => {
+    await sql`insert into projects(id, org_id, user_id, name, slug) values ('proj-a-mine', 'org-a', 'um', 'Mine', 'proj-a-mine') on conflict do nothing`;
+    await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count)
+      values ('doc-um-own', 'org-a', 'um', 'proj-a-mine', null, 'own.pdf', 'application/pdf', 'um/raw/own.pdf', 'completed', 1) on conflict do nothing`;
+    const shared = await freshDocument();
+    // um owns proj-a-mine (an editor there) but only a member of the default project.
+    expect((await post(as("um"), "/v1/documents/bulk", { action: "delete", documentIds: ["doc-um-own", shared] })).status).toBe(403);
+    expect(await exists("doc-um-own")).toBe(true);
+    expect(await exists(shared)).toBe(true);
+    expect((await post(as("um"), "/v1/documents/bulk", { action: "delete", documentIds: ["doc-um-own"] })).status).toBe(200);
+    expect(await exists("doc-um-own")).toBe(false);
+  });
+
+  it("uploads stay open: a default-project member may still contribute", async () => {
+    const { canContributeToProject, getProjectAccess } = await import("../services/organizations.js");
+    for (const user of ["uv", "um"]) {
+      const access = await getProjectAccess("proj-a", user);
+      expect(access && canContributeToProject(access, user), user).toBe(true);
+    }
+  });
+});

@@ -25,6 +25,7 @@ import {
 import {
   addDocumentTags,
   bulkReprocessDocuments,
+  DocumentMutationForbiddenError,
   deleteDocument,
   deleteDocuments,
   exportDocumentArtifacts,
@@ -316,6 +317,7 @@ export const documentsRoutes = new Hono()
     try {
       deleted = await deleteDocument(c.req.param("docId"), userId);
     } catch (error) {
+      if (error instanceof DocumentMutationForbiddenError) return apiStatusError(c, 403, error.message);
       // Deleting a document whose run is still processing races the pipeline and
       // hits a foreign-key violation (the run's rows still reference it). Answer
       // 409 so clients retry; every other failure keeps its 500 contract.
@@ -561,7 +563,13 @@ export const documentsRoutes = new Hono()
     const body = c.req.valid("json");
     const denied = await denyOutOfScopeDocuments(c, [c.req.param("docId")], userId);
     if (denied) return denied;
-    const tags = await setDocumentTags(c.req.param("docId"), userId, body.tags);
+    let tags: Awaited<ReturnType<typeof setDocumentTags>>;
+    try {
+      tags = await setDocumentTags(c.req.param("docId"), userId, body.tags);
+    } catch (error) {
+      if (error instanceof DocumentMutationForbiddenError) return apiStatusError(c, 403, error.message);
+      throw error;
+    }
 
     if (tags === null) {
       return apiStatusError(c, 404, "Document not found");
@@ -590,8 +598,21 @@ export const documentsRoutes = new Hono()
     if (denied) return denied;
     const apiKeyId = c.get("apiKey")?.keyId ?? null;
 
+    // Document changes (owner decision, 2026-11-13): every listed document must be readable (else the same 404 as a
+    // missing one), and the caller must be an editor of each one's project (else 403, from the service), default project
+    // included. Viewers are read-only.
+    if (body.action === "apply-tags" || body.action === "remove-tags" || body.action === "delete") {
+      const ids = [...new Set(body.documentIds)];
+      if ((await listDocumentOwners(ids, userId)).length !== ids.length) return apiStatusError(c, 404, "Document not found");
+    }
+    const forbidden = (error: unknown) => {
+      if (error instanceof DocumentMutationForbiddenError) return apiStatusError(c, 403, error.message);
+      throw error;
+    };
+
     if (body.action === "apply-tags") {
-      const updated = await addDocumentTags(body.documentIds, userId, body.tags ?? []);
+      let updated: number;
+      try { updated = await addDocumentTags(body.documentIds, userId, body.tags ?? []); } catch (error) { return forbidden(error); }
       await appendAuditLog({
         userId,
         apiKeyId,
@@ -609,7 +630,8 @@ export const documentsRoutes = new Hono()
     }
 
     if (body.action === "remove-tags") {
-      const updated = await removeDocumentTags(body.documentIds, userId, body.tags ?? []);
+      let updated: number;
+      try { updated = await removeDocumentTags(body.documentIds, userId, body.tags ?? []); } catch (error) { return forbidden(error); }
       await appendAuditLog({
         userId,
         apiKeyId,
@@ -627,7 +649,8 @@ export const documentsRoutes = new Hono()
     }
 
     if (body.action === "delete") {
-      const deleted = await deleteDocuments(body.documentIds, userId);
+      let deleted: number;
+      try { deleted = await deleteDocuments(body.documentIds, userId); } catch (error) { return forbidden(error); }
       await appendAuditLog({
         userId,
         apiKeyId,

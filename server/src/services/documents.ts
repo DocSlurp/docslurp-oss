@@ -22,7 +22,7 @@ import { fileUrlForArtifact } from "../lib/file-urls.js";
 import { documentWithholdsUri, withheldArtifactUrisFromMetadata } from "./pii-artifact-guard.js";
 import { andSqlFragments, type SqlFragment } from "../lib/sql-fragments.js";
 import { decodeListCursor, encodeListCursor } from "../lib/list-cursor.js";
-import { getProjectAccess, listAccessibleProjectIds, listEditableProjectIds, listReprocessableProjectIds } from "./organizations.js";
+import { getProjectAccess, listAccessibleProjectIds, listReprocessableProjectIds } from "./organizations.js";
 import { runCreation } from "./run-creation.js";
 import {
   documentUsageTotals,
@@ -1356,9 +1356,34 @@ export async function getDocumentViewerPayload(docId: string, userId: string): P
   };
 }
 
+/** A document the caller can read but may not change (403; one they cannot read is a 404). */
+export class DocumentMutationForbiddenError extends Error {
+  readonly status = 403 as const;
+  constructor() { super("Changing documents needs edit access to the project"); this.name = "DocumentMutationForbiddenError"; }
+}
+
+/**
+ * The listed documents the caller may change (delete, retag, correct, reprocess): canEditProject, in the org's default
+ * project too (owner decision, 2026-11-13; viewers are read-only). Documents the caller cannot read are dropped (the route
+ * answers 404 when nothing is left); any the caller can read but may not edit fail the whole request with
+ * DocumentMutationForbiddenError, before anything changes.
+ */
+async function editableDocumentsOrForbid(documentIds: string[], userId: string): Promise<Array<{ id: string; project_id: string }>> {
+  const ids = [...new Set(documentIds)];
+  if (ids.length === 0) return [];
+  const readable = await listAccessibleProjectIds(userId);
+  if (readable.length === 0) return [];
+  const rows = await sql<{ id: string; project_id: string }[]>`
+    select id, project_id from documents where id = any(${sql.array(ids)}) and project_id = any(${sql.array(readable)})`;
+  if (rows.length === 0) return [];
+  const editable = new Set(await listReprocessableProjectIds(userId));
+  if (rows.some((row) => !editable.has(row.project_id))) throw new DocumentMutationForbiddenError();
+  return rows;
+}
+
 export async function setDocumentTags(docId: string, userId: string, tags: string[]): Promise<string[] | null> {
   const document = await getDocumentRow(docId, userId);
-  if (!document || !(await listEditableProjectIds(userId)).includes(document.project_id)) {
+  if (!document || (await editableDocumentsOrForbid([docId], userId)).length === 0) {
     return null;
   }
 
@@ -1383,17 +1408,7 @@ export async function addDocumentTags(documentIds: string[], userId: string, tag
     return 0;
   }
 
-  const accessibleProjectIds = await listEditableProjectIds(userId);
-  if (accessibleProjectIds.length === 0) {
-    return 0;
-  }
-
-  const scopedIds = await sql<{ id: string; project_id: string }[]>`
-    select d.id, d.project_id
-    from documents d
-    where d.id = any(${sql.array(documentIds)})
-      and d.project_id = any(${sql.array(accessibleProjectIds)})
-  `;
+  const scopedIds = await editableDocumentsOrForbid(documentIds, userId);
 
   const rows = scopedIds.flatMap((document) =>
     normalized.map((tag) => ({
@@ -1424,17 +1439,7 @@ export async function removeDocumentTags(documentIds: string[], userId: string, 
     return 0;
   }
 
-  const accessibleProjectIds = await listEditableProjectIds(userId);
-  if (accessibleProjectIds.length === 0) {
-    return 0;
-  }
-
-  const scopedIds = await sql<{ id: string; project_id: string }[]>`
-    select d.id, d.project_id
-    from documents d
-    where d.id = any(${sql.array(documentIds)})
-      and d.project_id = any(${sql.array(accessibleProjectIds)})
-  `;
+  const scopedIds = await editableDocumentsOrForbid(documentIds, userId);
 
   if (scopedIds.length === 0) {
     return 0;
@@ -1466,10 +1471,11 @@ async function deleteDocumentRows(documentIds: string[], userId: string): Promis
     return [];
   }
 
-  const editableProjectIds = await listEditableProjectIds(userId);
-  if (editableProjectIds.length === 0) {
+  const editable = await editableDocumentsOrForbid(normalizedIds, userId);
+  if (editable.length === 0) {
     return [];
   }
+  const editableProjectIds = [...new Set(editable.map((row) => row.project_id))];
 
   return await sql.begin(async (tx) => {
     const transaction = tx as unknown as typeof sql;
@@ -1477,7 +1483,7 @@ async function deleteDocumentRows(documentIds: string[], userId: string): Promis
     const docs = await transaction<Pick<DocumentRow, "id" | "project_id" | "filename" | "run_id" | "source_key" | "previous_version_id">[]>`
       select id, project_id, filename, run_id, source_key, previous_version_id
       from documents
-      where id = any(${transaction.array(normalizedIds)})
+      where id = any(${transaction.array(editable.map((row) => row.id))})
         and project_id = any(${transaction.array(editableProjectIds)})
     `;
 
