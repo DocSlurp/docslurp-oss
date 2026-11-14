@@ -136,6 +136,21 @@ describe("worker preflight", () => {
     expect(error.message).toMatch(/requires NODE_ENV=production/);
   });
 
+  // #398: a development-only fail-open setting stops preflight in production before the sandbox step.
+  it("refuses a development-only fail-open setting in production before anything else", async () => {
+    const silenced = vi.spyOn(console, "error").mockImplementation(() => {});
+    const sandbox = vi.fn(stubs.initializeParserSandbox!);
+    const error = await runWorkerPreflight(
+      { NODE_ENV: "production", QUARANTINE_FAIL_OPEN_ON_TOOL_MISSING: "true", DOCSLURP_OCR_MODE: "off" },
+      { ...stubs, initializeParserSandbox: sandbox },
+    ).catch((e) => e);
+    expect(error).toBeInstanceOf(WorkerPreflightError);
+    expect(error.step).toBe("runtime environment");
+    expect(error.message).toMatch(/QUARANTINE_FAIL_OPEN_ON_TOOL_MISSING.*refusing to start/);
+    expect(sandbox).not.toHaveBeenCalled();
+    silenced.mockRestore();
+  });
+
   it("stops at a failing sandbox or native engine check", async () => {
     expect((await runWorkerPreflight({}, { ...stubs, initializeParserSandbox: async () => { throw new Error("no isolation"); } }).catch((e) => e)).step).toBe("parser sandbox");
     expect((await runWorkerPreflight({ DOCSLURP_OCR_MODE: "off" }, { ...stubs, assertNativePdfEngineAtStartup: async () => { throw new Error("engine missing"); } }).catch((e) => e)).step).toBe("native pdf engine");
