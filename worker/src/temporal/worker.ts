@@ -32,6 +32,7 @@ import { createSandboxActivityInterceptor } from "../sandbox/activity-intercepto
 import { configureSourceQuarantine, postgresSourceQuarantine } from "../sandbox/source-quarantine.js";
 import { onTeardownBreakerOpen, quarantineForceExitMs, scheduleQuarantineForceExit, workerShutdownForceMs } from "../sandbox/teardown-breaker.js";
 import { initializeParserSandbox, setDefaultParserSandbox } from "../sandbox/startup.js";
+import { assertNoUnsafeOverrides } from "../lib/unsafe-overrides.js";
 import { loadPricingThenParserSandbox } from "./startup-order.js";
 import { loadExtractorPlugins, setExtractorDocumentOwners } from "../extractors/plugins.js";
 import { loadPricingProvider, pricingDurableStateFromSql } from "@docslurp/shared/pricing-loader";
@@ -84,6 +85,13 @@ let quarantineExitTimer: NodeJS.Timeout | null = null;
 
 async function main(): Promise<void> {
   installWorkerProcessGuards({ report: (error, attributes) => reportException(error, attributes) });
+  // Development-only fail-open settings stop startup before anything else outside development (#398).
+  // initializeParserSandbox repeats the check for CLIs and preflight that start there.
+  try {
+    assertNoUnsafeOverrides(process.env);
+  } catch (error) {
+    throw new FatalWorkerError("startup", error instanceof Error ? error.message : String(error), { cause: error });
+  }
   const cfg = fromEnv();
   initializeObservability({ serviceName: "docslurp-worker" });
   initializeWorkerErrorReporting();
@@ -362,9 +370,7 @@ async function main(): Promise<void> {
   // a stale WORKER_ACTIVITY_CONCURRENCY=1 secret once left every machine running
   // one activity while the scaler counted eight.
   const assumedSlots = resolveWorkerScalerConfig(process.env, cfg.workerActivityConcurrency).slotsPerMachine;
-  // WORKER_ALLOW_SLOT_MISMATCH=true is for the small always-on floor machine (fly.worker.toml), which runs
-  // fewer slots than the burst fleet on purpose and is outside the autoscaler's sizing.
-  if (assumedSlots !== slotTuning.nominalSlots && process.env.WORKER_ALLOW_SLOT_MISMATCH !== "true") {
+  if (assumedSlots !== slotTuning.nominalSlots) {
     console.error(
       `[temporal-worker] WORKER_ACTIVITY_CONCURRENCY=${slotTuning.nominalSlots} but the autoscaler assumes ` +
         `${assumedSlots} slots per machine (DOCSLURP_WORKER_SLOTS_PER_MACHINE); the fleet will be mis-sized. ` +

@@ -111,6 +111,17 @@ describe("fromEnv", () => {
     delete process.env.QUARANTINE_FAIL_OPEN_ON_TOOL_MISSING;
 
     expect(fromEnv().quarantineFailOpenOnToolMissing).toBe(true);
+    process.env.QUARANTINE_FAIL_OPEN_ON_TOOL_MISSING = "false";
+    expect(fromEnv().quarantineFailOpenOnToolMissing).toBe(false);
+  });
+
+  // #398: outside development and test the setting is never in effect (and worker startup refuses it).
+  it.each(["staging", "preview"])("fails closed in %s, by default and when asked to fail open", (nodeEnv) => {
+    process.env.NODE_ENV = nodeEnv;
+    delete process.env.QUARANTINE_FAIL_OPEN_ON_TOOL_MISSING;
+    expect(fromEnv().quarantineFailOpenOnToolMissing).toBe(false);
+    process.env.QUARANTINE_FAIL_OPEN_ON_TOOL_MISSING = "true";
+    expect(fromEnv().quarantineFailOpenOnToolMissing).toBe(false);
   });
 });
 

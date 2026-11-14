@@ -1,4 +1,5 @@
 import { assertServiceProfileRuntime } from "../lib/vm-only-parsing.js";
+import { assertNoUnsafeOverrides } from "../lib/unsafe-overrides.js";
 import { assertSandboxPolicy } from "./policy.js";
 import { loadSandboxProvider, resolveSandboxProviderId } from "./registry.js";
 import { type ParserSandboxProvider, type SandboxIsolation } from "./types.js";
@@ -22,6 +23,8 @@ export async function initializeParserSandbox(
   platform: NodeJS.Platform,
 ): Promise<InitializedParserSandbox> {
   assertServiceProfileRuntime(env);
+  // Development-only fail-open settings stop startup anywhere else (#398); they are never silently ignored.
+  assertNoUnsafeOverrides(env);
   const id = resolveSandboxProviderId(env, platform);
   const provider = await loadSandboxProvider(id);
   const config = provider.readConfig(env) as Record<string, unknown>;

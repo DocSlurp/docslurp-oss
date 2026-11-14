@@ -53,8 +53,48 @@ if [[ -z "${CLAMAV_REQUIRE_DAEMON}" ]]; then
   CLAMAV_REQUIRE_DAEMON="false"
 fi
 
+# Development-only settings that weaken untrusted-file protection (#398; the worker's own check is
+# worker/src/lib/unsafe-overrides.ts). Outside development or test (NODE_ENV development, test or unset, without the
+# service profile) any of them set to anything but an explicit off value stops startup here, before ClamAV or the worker.
+UNSAFE_OVERRIDES=(
+  DOCSLURP_PARSER_SANDBOX_ALLOW_UNISOLATED
+  DOCSLURP_SANDBOX_ALLOW_UNFILTERED_SOCKETS
+  QUARANTINE_FAIL_OPEN_ON_TOOL_MISSING
+  DOCSLURP_CLAMAV_FAIL_OPEN_ON_STALE_DB
+)
+
+is_development_env() {
+  local node_env="${NODE_ENV:-}" profile="${DOCSLURP_SERVICE_PROFILE:-}"
+  node_env="${node_env,,}"
+  profile="${profile,,}"
+  node_env="${node_env//[[:space:]]/}"
+  profile="${profile//[[:space:]]/}"
+  [[ "${profile}" != "service" ]] && [[ -z "${node_env}" || "${node_env}" == "development" || "${node_env}" == "test" ]]
+}
+
+refuse_unsafe_overrides() {
+  is_development_env && return 0
+  local name value refused=()
+  for name in "${UNSAFE_OVERRIDES[@]}"; do
+    value="${!name:-}"
+    value="${value,,}"
+    value="${value//[[:space:]]/}"
+    case "${value}" in
+      ""|0|false|no|off) ;;
+      *) refused+=("${name}") ;;
+    esac
+  done
+  if (( ${#refused[@]} > 0 )); then
+    echo "[worker-start] error: ${refused[*]} weaken untrusted-file protection and are allowed only in development or test (NODE_ENV=${NODE_ENV:-unset}); unset them. Refusing to start." >&2
+    exit 1
+  fi
+}
+
+refuse_unsafe_overrides
+
+# Stale or missing signatures stop startup unless a developer explicitly opts in (only reachable in development).
 if [[ -z "${CLAMAV_FAIL_OPEN_ON_STALE_DB}" ]]; then
-  CLAMAV_FAIL_OPEN_ON_STALE_DB="$(default_bool_for_env false true)"
+  CLAMAV_FAIL_OPEN_ON_STALE_DB="false"
 fi
 
 bool_env() {

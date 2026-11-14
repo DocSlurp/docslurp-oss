@@ -19,6 +19,17 @@ describe("assertSandboxPolicy in production", () => {
     expect(() => assertSandboxPolicy({ providerId, isolation: iso(true, "full"), env })).toThrow(/VM boundary/);
   });
 
+  // #398: the override has no effect outside development; worker startup also refuses it (lib/unsafe-overrides.ts).
+  it.each([PROD, { NODE_ENV: "staging" }, { DOCSLURP_SERVICE_PROFILE: "service" }])(
+    "the unisolated override never lets none run without a PID namespace (%o)",
+    (base) => {
+      const env = { ...base, DOCSLURP_PARSER_SANDBOX_ALLOW_UNISOLATED: "true" };
+      expect(() => assertSandboxPolicy({ providerId: "none", isolation: NONE_NO_PID_NAMESPACE, env })).toThrow(
+        /cannot guarantee that a parser's processes die with it/,
+      );
+    },
+  );
+
   it("accepts the remote Modal VM boundary", () => {
     expect(assertSandboxPolicy({ providerId: "modal", isolation: { ...iso(true, "full"), location: "remote" }, env: PROD }))
       .toEqual({ warnings: [] });

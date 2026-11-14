@@ -9,6 +9,7 @@ import {
 } from "../startup.js";
 import { probePidNamespace, spawnContained } from "../teardown.js";
 import { SandboxPolicyError } from "../types.js";
+import { UNSAFE_OVERRIDES, UnsafeOverrideError } from "../../lib/unsafe-overrides.js";
 
 describe("initializeParserSandbox", () => {
   afterEach(() => vi.restoreAllMocks());
@@ -21,8 +22,19 @@ describe("initializeParserSandbox", () => {
 
   it("refuses explicitly unisolated production startup before reporting readiness", async () => {
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
-    await expect(initializeParserSandbox({ DOCSLURP_PARSER_SANDBOX: "none", NODE_ENV: "production", DOCSLURP_PARSER_SANDBOX_ALLOW_UNISOLATED: "true" }, "linux")).rejects.toThrow(/VM boundary/);
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    await expect(initializeParserSandbox({ DOCSLURP_PARSER_SANDBOX: "none", NODE_ENV: "production", DOCSLURP_PARSER_SANDBOX_ALLOW_UNISOLATED: "true" }, "linux")).rejects.toBeInstanceOf(UnsafeOverrideError);
     expect(log).not.toHaveBeenCalled();
+  });
+
+  // #398: every development-only fail-open setting stops startup outside development, even with an audited provider.
+  it.each(UNSAFE_OVERRIDES)("refuses %s in production before probing a provider", async (name) => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const { default: modal } = await import("../providers/modal/index.js");
+    const probe = vi.spyOn(modal, "probe");
+    await expect(initializeParserSandbox({ DOCSLURP_PARSER_SANDBOX: "modal", NODE_ENV: "production", [name]: "true" }, "linux"))
+      .rejects.toThrow(new RegExp(`${name}.*refusing to start`));
+    expect(probe).not.toHaveBeenCalled();
   });
 
   it("fails with the probe detail when isolation is unavailable", async () => {

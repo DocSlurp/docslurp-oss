@@ -2,7 +2,7 @@ import { probePidNamespace, spawnContained } from "../../teardown.js";
 import type { ParserSandboxProvider, SandboxIsolation } from "../../types.js";
 
 /** No filesystem or network isolation. Commands still get a PID namespace where the host allows it,
- * so their processes die with them; without one, untrusted work needs DOCSLURP_PARSER_SANDBOX_ALLOW_UNISOLATED. */
+ * so their processes die with them; without one, untrusted work needs DOCSLURP_PARSER_SANDBOX_ALLOW_UNISOLATED (development and test only). */
 function isolation(): SandboxIsolation {
   return { filesystem: false, network: "none", processes: probePidNamespace().ok, location: "local" };
 }
