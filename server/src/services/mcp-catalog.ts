@@ -3,7 +3,7 @@ import { SEARCH_SCOPES, type SearchScope } from "../lib/search-tiers.js";
 import { z } from "zod";
 
 import { uploadBundleAvailable } from "../lib/mcp-ui-resources.js";
-import { deferredProfilesEnabled, qualityModeSchema } from "@docslurp/shared";
+import { CHART_EXPORT_OVERRIDE_DESCRIPTION, chartExportOverrideSchema, deferredProfilesEnabled, figureResumeChatEnabled, figureResumeProposalInputSchema, qualityModeSchema } from "@docslurp/shared";
 
 import { env } from "../config.js";
 import { batchSearchInputSchema, searchInputSchema, projectChatInputSchema } from "../lib/search-input.js";
@@ -43,6 +43,7 @@ const uploadInputShape = {
     .describe(`Small files sent in this call (at most ${INLINE_UPLOAD_MAX_BYTES / 1024} KiB in total) when you cannot make HTTP requests to storage upload URLs.`),
   idempotencyKey: z.string().min(1).max(200).optional().describe("For URL and inline uploads: reuse the same key when retrying this exact request to avoid duplicate ingestion."),
   quality: qualityModeSchema.optional().describe("Processing quality for these files; omit for the project setting (auto by default). fast: text layer only, scanned pages kept as images and not searchable ($0.05 per 1,000 pages). auto: each page read the cheapest faithful way ($0.05 to $2.50). good: a vision model reads every page ($2.50)."),
+  chartExport: chartExportOverrideSchema.optional().describe(CHART_EXPORT_OVERRIDE_DESCRIPTION),
 };
 const exactlyOneSource = (value: { urls?: unknown; files?: unknown; inlineFiles?: unknown }) => [value.urls, value.files, value.inlineFiles].filter(Boolean).length === 1;
 export const uploadInput = z.object(uploadInputShape).strict().refine(exactlyOneSource, "Supply exactly one of urls, files or inlineFiles");
@@ -100,7 +101,7 @@ function searchToolInputSchema() {
     type: "object", additionalProperties: false,
     properties: {
       ...single.properties,
-      q: { ...single.properties.q, description: "One search query. Send either q (with the other top-level options) or queries, never both." },
+      q: { ...single.properties.q, description: "One search query, or an array of up to 100 keyword queries run in parallel in keyword mode and fused into one ranked list (each result lists the matched queries in matchedQueries). Send either q (with the other top-level options) or queries, never both." },
       queries: { ...batch.queries, description: "Batch form: up to 20 independent queries, each an object with its own q and options. Use instead of q; only concurrency may accompany it." },
       concurrency: { ...batch.concurrency, description: "Batch form only: parallel retrievals for queries (1-8, default 4)." },
     },
@@ -136,7 +137,7 @@ export interface McpTool {
 }
 
 /** Project settings tools: app-only, so a customer cannot expose them to its own end users. */
-export const FIRST_PARTY_APP_SETTINGS_TOOLS: ReadonlySet<string> = new Set(["getProjectSettings", "proposeProjectSettings"]);
+export const FIRST_PARTY_APP_SETTINGS_TOOLS: ReadonlySet<string> = new Set(["getProjectSettings", "proposeProjectSettings", "proposeFigureResume"]);
 
 /**
  * Listing order for every surface that keeps server order (tools/list, manifest, chat tools): discover → upload →
@@ -146,7 +147,7 @@ export const FIRST_PARTY_APP_SETTINGS_TOOLS: ReadonlySet<string> = new Set(["get
  */
 const TOOL_ORDER = [
   "listProjects", "upload", "getUploadStatus", "search", "chat", "openUploader", "extract", "getMediaEvidence", "suggestQueries",
-  "getProjectSettings", "proposeProjectSettings", "fullIndex",
+  "getProjectSettings", "proposeProjectSettings", "proposeFigureResume", "fullIndex",
   "webSearch", "webFetch", "webMap", "webCrawl", "ingestWebsite",
   "uploadEstimate", "fullIndexEstimate", "reprocessEstimate", "updateEstimate", "searchSettingsEstimate", "indexingModeEstimate", "graphRebuildEstimate",
   "getJob", "completeUpload",
@@ -167,14 +168,20 @@ export function mcpTools(baseUrl: string): McpTool[] {
     { id: "proposeProjectSettings", title: "Propose project settings", scopes: [...SEARCH_SCOPES, "ingest"],
       // No API key of any type may list or call it: the signed-in app only.
       keyAccess: () => false, firstPartyAppOnly: true, annotations: READ_ONLY,
-      description: "Prepare an exact project-settings change and impact for the signed-in chat's Apply card. Does not save settings or start work. Requires project editor access. Call proactively when configuration would help the user's goal, including enabling video frames. Safe chat changes (changes.chat): enabled, mode, answerStyle, citations, searchInstructions. Safe retrieval changes (changes.retrieval): resultCount, useRerank, useMmr, mmrLambda, candidateDepth, resultOrder. Allowed pipeline toggles: mediaVideo.enabled, chunkOverlap, summarize, embed, indexVectors, preserveTables, preserveCode, preserveImages, pdfRegionExtraction, visionFallback, and quality (fast reads the text layer only and keeps scanned pages as images, $0.05 per 1,000 pages; auto reads each page the cheapest faithful way, $0.05 to $2.50; good reads every page with vision, $2.50; a change applies to new uploads, while existing files need reprocessing). Example: {changes:{pipeline:{mediaVideo:{enabled:true}}}}. An ingest report recommendation that has a patch can be proposed as {changes:{pipeline:<patch>}}. The user applies the structured card; never claim the proposal has been applied. Existing-document reprocessing requires separate explicit consent. Available inside a project chat session only.",
+      description: "Prepare an exact project-settings change and impact for the signed-in chat's Apply card. Does not save settings or start work. Requires project editor access. Call proactively when configuration would help the user's goal, including enabling video frames. Safe chat changes (changes.chat): enabled, mode, answerStyle, citations, searchInstructions. Safe retrieval changes (changes.retrieval): resultCount, useRerank, useMmr, mmrLambda, candidateDepth, resultOrder. Allowed pipeline toggles: mediaVideo.enabled, chunkOverlap, summarize, embed, indexVectors, preserveTables, preserveCode, preserveImages, pdfRegionExtraction, visionFallback, figures (figure extraction from PDFs, on by default; off keeps existing figures until reprocess), chartExport.tier (off; free: exports charts that carry their own data at no charge; models: also reads other charts with AI, billed per chart; chart export is off by default: an unset tier uses this deployment's app default, which getProjectSettings and the project record report as chartExportDefaults.app (off unless the deployment sets it); a tier the deployment does not offer is refused with chart_export_tier_unavailable), chartExport.formats, chartExport.diagrams, and quality (fast reads the text layer only and keeps scanned pages as images, $0.05 per 1,000 pages; auto reads each page the cheapest faithful way, $0.05 to $2.50; good reads every page with vision, $2.50; a change applies to new uploads, while existing files need reprocessing). Example: {changes:{pipeline:{mediaVideo:{enabled:true}}}}. An ingest report recommendation that has a patch can be proposed as {changes:{pipeline:<patch>}}. The user applies the structured card; never claim the proposal has been applied. Existing-document reprocessing requires separate explicit consent. Available inside a project chat session only.",
       inputSchema: toolInputJsonSchema(projectSettingsProposalInputSchema) },
+    // Listed only while the chat resume offer is on, like its call (mcp-tools.ts answers 404 otherwise).
+    ...(figureResumeChatEnabled() ? [{ id: "proposeFigureResume", title: "Propose finishing figures", scopes: [...SEARCH_SCOPES, "ingest" as const],
+      // No API key of any type may list or call it: the signed-in app only.
+      keyAccess: () => false, firstPartyAppOnly: true, annotations: READ_ONLY,
+      description: "Prepare the offer to finish extracting the figures a document's processing left out (getProjectSettings reports figures.resumableDocuments), for the signed-in chat's Apply card. Pass documentId for one document, or omit it for every such document in the project (at most 100 per Apply). It does not start anything: the user applies the card, and the service then runs it in the background at no charge (stored figures are billed as storage). Never claim it has been applied. Available inside a project chat session only.",
+      inputSchema: toolInputJsonSchema(figureResumeProposalInputSchema) }] : []),
     { id: "listProjects", title: "List projects", scopes: [...SEARCH_SCOPES, "ingest"], annotations: READ_ONLY,
       description: "List projects you can access, including their IDs, slugs, default project, document/page counts and latest processing status. Pass a returned slug (or the name) as project in upload, search or chat. Does not call AI.",
       inputSchema: toolInputJsonSchema(listProjectsInput) },
     { id: "upload", title: "Upload documents", scopes: ["ingest"],
       annotations: { readOnly: false, destructive: false, idempotent: false, openWorld: true, consequential: true },
-      description: `Upload documents using exactly one of urls, files or inlineFiles. urls: DocSlurp's server downloads each HTTP(S) file directly, so prefer it for a file that is already public; do not fetch it with web tools first. files: return direct storage upload targets for up to 10 files (5 GiB each, subject to account limits). Small files use putUrl with the declared Content-Type; large files use multipart pendingParts URLs with byte slices determined by partNumber, partSize and sizeBytes. Upload every part. Storage notifications and background reconciliation automatically complete known-size uploads and start ingestion; no completeUpload call is needed. Follow getUploadStatus with sessionId. inlineFiles: if you cannot make HTTP requests to the upload URLs (for example a sandbox firewall blocks them), send small files in this call as text or contentBase64, ${INLINE_UPLOAD_MAX_BYTES / 1024} KiB in total; ingestion starts immediately and the response has project and run IDs for getUploadStatus. Never send local paths. Omit project for the default project; a name that matches no project creates it. Ingestion can incur cost. idempotencyKey applies to URL and inline upload retries.`,
+      description: `Upload documents using exactly one of urls, files or inlineFiles. urls: DocSlurp's server downloads each HTTP(S) file directly, so prefer it for a file that is already public; do not fetch it with web tools first. files: return direct storage upload targets for up to 10 files (each within the server's upload size limit, which openUploader reports as limits.maxFileBytes). Small files use putUrl with the declared Content-Type; large files use multipart pendingParts URLs with byte slices determined by partNumber, partSize and sizeBytes. Upload every part. Storage notifications and background reconciliation automatically complete known-size uploads and start ingestion; no completeUpload call is needed. Follow getUploadStatus with sessionId. inlineFiles: if you cannot make HTTP requests to the upload URLs (for example a sandbox firewall blocks them), send small files in this call as text or contentBase64, ${INLINE_UPLOAD_MAX_BYTES / 1024} KiB in total; ingestion starts immediately and the response has project and run IDs for getUploadStatus. Never send local paths. Omit project for the default project; a name that matches no project creates it. Ingestion can incur cost. idempotencyKey applies to URL and inline upload retries.`,
       // Flat like every tool schema: uploadInput's refinement enforces exactly one of urls, files or inlineFiles.
       inputSchema: toolInputJsonSchema(uploadInput) },
     ...(env.mcpAppsUiEnabled && uploadBundleAvailable() ? [{ id: "openUploader", title: "Open uploader", scopes: ["ingest" as const], annotations: READ_ONLY,
@@ -189,7 +196,7 @@ export function mcpTools(baseUrl: string): McpTool[] {
       description: "Legacy fallback for single-PUT sessions: verify uploaded files and start ingestion after every PUT succeeds. Normal uploads complete automatically; use getUploadStatus with sessionId instead. Pass sessionId and fileIds from upload. Do not use for multipart uploads.",
       inputSchema: toolInputJsonSchema(completeUploadInput) },
     { id: "search", title: "Search documents", scopes: [...SEARCH_SCOPES], annotations: READ_ONLY,
-      description: "Retrieve cited passages for one query (q) or up to 20 independent queries (queries). Supply exactly one form: q with top-level options, or queries (each item has its own q and options) with optional concurrency; a call with both is rejected. Batch results stay in input order with per-query errors; each query can select a project; concurrency (1-8, default 4) bounds parallel retrieval. Omitted project uses the default. Does not generate answers.",
+      description: "Retrieve cited passages for one query (q), several keyword queries at once (q as an array of up to 100 strings: keyword mode, fused results with matchedQueries), or up to 20 independent queries (queries). Supply exactly one form: q with top-level options, or queries (each item has its own q and options) with optional concurrency; a call with both is rejected. Batch results stay in input order with per-query errors; each query can select a project; concurrency (1-8, default 4) bounds parallel retrieval. Omitted project uses the default. Does not generate answers.",
       inputSchema: searchToolInputSchema() },
     { id: "chat", title: "Chat with project", scopes: ["chat"],
       annotations: { readOnly: false, destructive: false, idempotent: false, openWorld: false, consequential: false },

@@ -7,7 +7,7 @@ import {
   DEFAULT_SERVER_MATERIALIZATION_POLICY,
   narrowMaterializationPolicy,
   qualityAllowsPageReading,
-  resolvePipelineTextModel,
+  resolveAllowedPipelineTextModel,
   type MaterializationPolicy,
 } from "@docslurp/shared";
 
@@ -375,7 +375,7 @@ export class DocumentMapStage implements Stage {
   }): Promise<SiphonLoopResult | null> {
     const { state, document, ops, pageCount } = args;
     const tg = state.run.pipeline.textGeneration;
-    const model = resolvePipelineTextModel(state.run.pipeline, tg?.models["document-map"] ? "document-map" : "document-summary", this.config.textGenerationModel);
+    const model = resolveAllowedPipelineTextModel(state.run.pipeline, tg?.models["document-map"] ? "document-map" : "document-summary", this.config.textGenerationModel);
     // The siphon inherits document-summary's effort and output limits unless "document-map" sets its own.
     const textGeneration = tg && {
       ...tg,

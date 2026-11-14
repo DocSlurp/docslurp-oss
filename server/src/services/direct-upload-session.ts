@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 
+import type { RunOrigin } from "@docslurp/shared";
 import type { PipelineFeatureOverrides, ProjectTemplateKey } from "@docslurp/shared";
 
 import { sql } from "../db.js";
@@ -49,6 +50,8 @@ export interface DirectUploadSessionFileInput {
 
 export interface CreateDirectUploadSessionInput {
   apiKeyId?: string | null;
+  /** Where the run will come from, derived from the authenticated principal at session creation. Unset: machine. */
+  origin?: RunOrigin;
   allowedProjectIds?: readonly string[] | null;
   tags?: string[];
   userId: string;
@@ -76,6 +79,7 @@ export type UploadSessionRow = {
   result?: unknown;
   last_error?: string | null;
   api_key_id?: string | null;
+  origin?: RunOrigin | null;
   allowed_project_ids?: string[] | null;
   tags?: string[];
   extract_id?: string | null;
@@ -131,7 +135,7 @@ export async function loadDirectUploadSession(
   userId: string,
 ): Promise<LoadedDirectUploadSession | null> {
   const [session] = await sql<UploadSessionRow[]>`
-    select id, user_id, org_id, project_id, project_name, template_key, pipeline, tags, status, result, last_error, api_key_id, allowed_project_ids, extract_id
+    select id, user_id, org_id, project_id, project_name, template_key, pipeline, tags, status, result, last_error, api_key_id, origin, allowed_project_ids, extract_id
     from upload_sessions
     where id = ${sessionId} and user_id = ${userId}
     limit 1
@@ -316,6 +320,7 @@ export async function createDirectUploadSession(input: CreateDirectUploadSession
       pipeline,
       tags,
       api_key_id,
+      origin,
       allowed_project_ids,
       extract_id,
       status
@@ -330,6 +335,7 @@ export async function createDirectUploadSession(input: CreateDirectUploadSession
       ${sql.json(JSON.parse(JSON.stringify(input.pipeline)))},
       ${sql.array(input.tags ?? [])},
       ${input.apiKeyId ?? null},
+      ${input.origin ?? "machine"},
       ${input.allowedProjectIds ? sql.array([...input.allowedProjectIds]) : null},
       ${input.extract?.id ?? null},
       'initializing'

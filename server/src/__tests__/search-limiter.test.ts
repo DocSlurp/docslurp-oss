@@ -1,12 +1,15 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   ConcurrencyLimiter,
   SearchCapacityError,
+  resolveFastLaneOptions,
   resetSearchLimiterForTests,
   resolveSearchLimiterOptions,
   searchLimiterStats,
+  withSearchLanes,
   withSearchSlot,
+  type SearchLaneReport,
 } from "../search/search-limiter.js";
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -152,5 +155,198 @@ describe("search limiter", () => {
   it("is a pass-through when disabled", async () => {
     const limiter = new ConcurrencyLimiter({ maxConcurrency: 0, maxQueue: 0, queueTimeoutMs: 100 });
     expect(await Promise.all([1, 2, 3].map((n) => limiter.run(async () => n)))).toEqual([1, 2, 3]);
+  });
+});
+
+describe("search fast lane", () => {
+  const main = { maxConcurrency: 2, maxQueue: 50, queueTimeoutMs: 60_000, maxSlotsPerGroup: 0, fairTenants: true };
+  type Setup = { light: boolean };
+
+  /** Admit one search whose setup takes setupMs and whose retrieval takes runMs (fake timers). */
+  function search(setup: Setup, signal?: AbortSignal, tenant = "org:a", times = { setupMs: 5, runMs: 200 }) {
+    const log: SearchLaneReport[] = [];
+    const promise = withSearchLanes<Setup, string>(signal, { tenant }, {
+      setup: async () => { await sleep(times.setupMs); return setup; },
+      isLight: (value) => value.light,
+      run: async () => { await sleep(setup.light ? 5 : times.runMs); return "done"; },
+      onAdmitted: (report) => log.push(report),
+    });
+    return { promise, log };
+  }
+
+  it("keeps a search with nothing to retrieve out of the main slots", async () => {
+    vi.useFakeTimers();
+    try {
+      resetSearchLimiterForTests(main);
+      // Both main slots are busy with long retrievals; a third heavy search queues.
+      const heavy = [search({ light: false }), search({ light: false }), search({ light: false })];
+      await vi.advanceTimersByTimeAsync(10);
+      expect(searchLimiterStats()).toMatchObject({ running: 2, queued: 1 });
+      const light = search({ light: true });
+      await vi.advanceTimersByTimeAsync(20);
+      await expect(light.promise).resolves.toBe("done");
+      expect(light.log[0]).toMatchObject({ lane: "fast", running: 2, queued: 1, mainWaitMs: 0 });
+      expect(searchLimiterStats().queued).toBe(1);
+      await vi.advanceTimersByTimeAsync(1_000);
+      await Promise.all(heavy.map((entry) => entry.promise));
+      expect(searchLimiterStats()).toMatchObject({ running: 0, queued: 0 });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("queues a search that has something to retrieve for a main slot, as before", async () => {
+    vi.useFakeTimers();
+    try {
+      resetSearchLimiterForTests({ ...main, maxConcurrency: 1 });
+      const first = search({ light: false });
+      const second = search({ light: false });
+      await vi.advanceTimersByTimeAsync(10);
+      expect(searchLimiterStats()).toMatchObject({ running: 1, queued: 1 });
+      await vi.advanceTimersByTimeAsync(1_000);
+      await Promise.all([first.promise, second.promise]);
+      expect(first.log[0]).toMatchObject({ lane: "main", mainWaitMs: 0 });
+      expect(second.log[0]!.mainWaitMs).toBeGreaterThanOrEqual(190);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("releases the fast lane and the main slot when setup or retrieval fails or the client aborts", async () => {
+    resetSearchLimiterForTests({ ...main, maxConcurrency: 1 });
+    await expect(withSearchLanes(undefined, {}, {
+      setup: async () => { throw new Error("setup failed"); }, isLight: () => true, run: async () => "x",
+    })).rejects.toThrow("setup failed");
+    await expect(withSearchLanes(undefined, {}, {
+      setup: async () => ({}), isLight: () => false, run: async () => { throw new Error("retrieval failed"); },
+    })).rejects.toThrow("retrieval failed");
+    await expect(withSearchLanes(undefined, {}, {
+      setup: async () => ({}), isLight: () => true, run: async () => { throw new Error("light failed"); },
+    })).rejects.toThrow("light failed");
+    // Abort while queued for a main slot, with the only main slot held.
+    let release!: () => void;
+    const holder = withSearchSlot(undefined, () => new Promise<void>((resolve) => { release = resolve; }));
+    const controller = new AbortController();
+    const waiting = search({ light: false }, controller.signal);
+    await sleep(20);
+    expect(searchLimiterStats().queued).toBe(1);
+    controller.abort();
+    await expect(waiting.promise).rejects.toMatchObject({ name: "AbortError" });
+    release();
+    await holder;
+    expect(searchLimiterStats()).toMatchObject({ running: 0, queued: 0 });
+    // The fast lane is free again: a light search still goes through.
+    await expect(search({ light: true }).promise).resolves.toBe("done");
+  });
+
+  it("keeps the queue bound and its 503 for searches that need a main slot", async () => {
+    resetSearchLimiterForTests({ ...main, maxConcurrency: 1, maxQueue: 1 });
+    let release!: () => void;
+    const holder = withSearchSlot(undefined, () => new Promise<void>((resolve) => { release = resolve; }));
+    const queued = search({ light: false });
+    await sleep(20);
+    await expect(search({ light: false }).promise).rejects.toBeInstanceOf(SearchCapacityError);
+    // A light search is not counted against, and not refused by, the main queue.
+    await expect(search({ light: true }).promise).resolves.toBe("done");
+    release();
+    await Promise.all([holder, queued.promise]);
+  });
+
+  it("still serves tenants fairly in the main queue and uses the org learned during setup", async () => {
+    resetSearchLimiterForTests({ ...main, maxConcurrency: 1 });
+    let release!: () => void;
+    const holder = withSearchSlot(undefined, () => new Promise<void>((resolve) => { release = resolve; }));
+    const order: string[] = [];
+    const run = (label: string, tenant: string) => withSearchLanes<Setup, void>(undefined, { tenant: `project:${label}` }, {
+      setup: async () => ({ light: false }), isLight: () => false, tenantOf: () => tenant,
+      run: async () => { order.push(label); },
+    });
+    const runs = [run("a1", "org:a"), run("a2", "org:a"), run("a3", "org:a")];
+    await sleep(5);
+    runs.push(run("b1", "org:b"));
+    await sleep(5);
+    release();
+    await Promise.all([holder, ...runs]);
+    expect(order).toEqual(["a1", "b1", "a2", "a3"]);
+  });
+
+  it("lets nested searches reuse the parent's slot, light or not, without taking a fast-lane slot", async () => {
+    resetSearchLimiterForTests({ ...main, maxConcurrency: 1 });
+    const result = await withSearchLanes(undefined, {}, {
+      setup: async () => ({ light: true }), isLight: () => true,
+      run: () => withSearchLanes(undefined, {}, { setup: async () => 1, isLight: () => false, run: async () => "child" }),
+    });
+    expect(result).toBe("child");
+    const heavy = await withSearchLanes(undefined, {}, {
+      setup: async () => 0, isLight: () => false,
+      run: () => withSearchLanes(undefined, {}, { setup: async () => 1, isLight: () => false, run: async () => "child" }),
+    });
+    expect(heavy).toBe("child");
+  });
+
+  it("falls back to one lane (setup inside the main slot) when SEARCH_FAST_LANE_CONCURRENCY is 0", async () => {
+    expect(resolveFastLaneOptions(main, { SEARCH_FAST_LANE_CONCURRENCY: "0" })).toBeNull();
+    expect(resolveFastLaneOptions(main, {})).toMatchObject({ maxConcurrency: 4, maxQueue: 50, maxSlotsPerGroup: 0 });
+    expect(resolveFastLaneOptions({ ...main, maxConcurrency: 0 }, {})).toBeNull();
+    const previous = process.env.SEARCH_FAST_LANE_CONCURRENCY;
+    process.env.SEARCH_FAST_LANE_CONCURRENCY = "0";
+    try {
+      resetSearchLimiterForTests({ ...main, maxConcurrency: 1 });
+      const report = search({ light: true });
+      await expect(report.promise).resolves.toBe("done");
+      expect(report.log[0]!.lane).toBe("main");
+    } finally {
+      if (previous === undefined) delete process.env.SEARCH_FAST_LANE_CONCURRENCY; else process.env.SEARCH_FAST_LANE_CONCURRENCY = previous;
+    }
+  });
+
+  /**
+   * Deterministic simulation (fake timers): 32 concurrent searches, two thirds against
+   * projects with nothing to retrieve, 6 main slots; heavy retrieval 300 ms, setup 8 ms,
+   * empty retrieval and finalize 20 ms. Prints the queue wait before (one lane) and after.
+   */
+  it("simulates 32 concurrent searches, two thirds with nothing to retrieve", async () => {
+    const simulate = async (fastLane: boolean) => {
+      vi.useFakeTimers();
+      const previous = process.env.SEARCH_FAST_LANE_CONCURRENCY;
+      if (!fastLane) process.env.SEARCH_FAST_LANE_CONCURRENCY = "0"; else delete process.env.SEARCH_FAST_LANE_CONCURRENCY;
+      try {
+        resetSearchLimiterForTests({ ...main, maxConcurrency: 6 });
+        const waits: { light: boolean; waitMs: number; lane: string }[] = [];
+        const runs = Array.from({ length: 32 }, (_, index) => {
+          const light = index % 3 !== 0;
+          const started = Date.now();
+          return withSearchLanes<Setup, void>(undefined, { tenant: `org:${index % 4}` }, {
+            setup: async () => { await sleep(8); return { light }; },
+            isLight: (setup) => setup.light,
+            run: async () => { await sleep(light ? 20 : 300); },
+            onAdmitted: (report) => waits.push({ light, waitMs: report.fastWaitMs + report.mainWaitMs, lane: report.lane }),
+          }).then(() => ({ light, totalMs: Date.now() - started }));
+        });
+        await vi.advanceTimersByTimeAsync(10_000);
+        const done = await Promise.all(runs);
+        const p = (values: number[], q: number) => [...values].sort((a, b) => a - b)[Math.min(values.length - 1, Math.floor(q * values.length))]!;
+        const light = done.filter((entry) => entry.light).map((entry) => entry.totalMs);
+        return {
+          lightCount: light.length,
+          lightP50: p(light, 0.5), lightP90: p(light, 0.9),
+          lightQueued: waits.filter((entry) => entry.light && entry.waitMs > 50).length,
+          heavyMaxWait: Math.max(...waits.filter((entry) => !entry.light).map((entry) => entry.waitMs)),
+          mainLane: waits.filter((entry) => entry.lane === "main").length,
+        };
+      } finally {
+        if (previous === undefined) delete process.env.SEARCH_FAST_LANE_CONCURRENCY; else process.env.SEARCH_FAST_LANE_CONCURRENCY = previous;
+        vi.useRealTimers();
+      }
+    };
+    const before = await simulate(false);
+    const after = await simulate(true);
+    console.info("[limiter-simulation]", JSON.stringify({ before, after }));
+    expect(before.lightQueued).toBeGreaterThan(10);
+    expect(after.lightQueued).toBe(0);
+    expect(after.lightP90).toBeLessThan(before.lightP90);
+    // Heavy searches wait no longer than before (they only gain slots the light ones used to hold).
+    expect(after.heavyMaxWait).toBeLessThanOrEqual(before.heavyMaxWait);
+    expect(after.mainLane).toBe(32 - after.lightCount);
   });
 });

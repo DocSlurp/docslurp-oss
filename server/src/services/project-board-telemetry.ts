@@ -109,9 +109,10 @@ export async function listProjectBoardSummaries(
     with requested_projects as (
       select jsonb_array_elements_text(${sql.json(projectIds)}::jsonb) as id
     ), normalized_search_sessions as (
-      select id, result_count, case when jsonb_typeof(metadata) = 'string'
+      select id, project_id, result_count, case when jsonb_typeof(metadata) = 'string'
         then (metadata #>> '{}')::jsonb else metadata end as metadata
       from search_sessions
+      where project_id in (select id from requested_projects)
     ), document_summary as (
       -- Current corpus (completed, not superseded) from trigger-maintained counters.
       select
@@ -165,14 +166,13 @@ export async function listProjectBoardSummaries(
     ),
     search_summary as (
       select
-        s.metadata ->> 'projectId' as project_id,
+        s.project_id,
         count(*)::int as search_sessions,
         coalesce(sum(s.result_count), 0)::int as search_result_count,
         count(*) filter (where s.result_count = 0)::int as zero_result_searches,
         avg((s.metadata ->> 'durationMs')::double precision) as average_search_ms
       from normalized_search_sessions s
-      where s.metadata ->> 'projectId' in (select id from requested_projects)
-      group by s.metadata ->> 'projectId'
+      group by s.project_id
     ),
     usage_project_scope as (
       select

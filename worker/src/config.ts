@@ -1,4 +1,5 @@
 import "./env.js";
+import { warnChartExportSwitch } from "./chart-export/config.js";
 
 import { existsSync } from "node:fs";
 import { defaultDocConcurrency, resolveActivityConcurrency } from "./concurrency.js";
@@ -14,6 +15,7 @@ import {
 import { assertSupportedVectorBackends, resolveLanceDbConfig, resolveObjectStorageConfig, type LanceDbConfig, type ObjectStorageConfig } from "@docslurp/shared";
 import { lanceDbMaintenanceSettings } from "./stages/lancedb-maintenance.js";
 import { quarantineRequired } from "./lib/parse-source.js";
+import { unsafeOverrideEnabled } from "./lib/unsafe-overrides.js";
 
 const defaultDatabaseUrl =
   "postgres://docslurp:docslurp@localhost:5432/docslurp";
@@ -31,10 +33,6 @@ function readEnv(value: string | undefined): string | undefined {
 export function readPageRouterMode(value: string | undefined): PageRouterMode {
   const parsed = pageRouterModeSchema.safeParse(readEnv(value)?.toLowerCase());
   return parsed.success ? parsed.data : "off";
-}
-
-function isProductionEnvironment(): boolean {
-  return (readEnv(process.env.NODE_ENV) ?? "").toLowerCase() === "production";
 }
 
 function rewriteDockerHostname(
@@ -255,6 +253,8 @@ function parseDurationMs(value: string | undefined, fallback: number): number {
 }
 
 export function fromEnv(): Config {
+  // An unknown DOCSLURP_CHART_EXPORT value is off (fail closed); say so once per process.
+  warnChartExportSwitch(process.env);
   const storage = resolveObjectStorageConfig();
   const lancedb = resolveLanceDbConfig(process.env, storage);
   const maintenance = lanceDbMaintenanceSettings(lancedb.params);
@@ -365,10 +365,9 @@ export function fromEnv(): Config {
       process.env.WORKER_INTEGRITY_SWEEP_PREFIX?.trim() || null,
     // The same rule the parse-source resolver applies (lib/parse-source.ts): with quarantine on, nothing parses unscanned.
     quarantineEnabled: quarantineRequired(),
-    quarantineFailOpenOnToolMissing: !isProductionEnvironment() && readBoolean(
-      process.env.QUARANTINE_FAIL_OPEN_ON_TOOL_MISSING,
-      !isProductionEnvironment(),
-    ),
+    // Development and test only (lib/unsafe-overrides.ts): there it defaults to accepting files whose inspection tool is
+    // missing, so local ingestion works without ClamAV; everywhere else it is off and worker startup refuses it.
+    quarantineFailOpenOnToolMissing: unsafeOverrideEnabled("QUARANTINE_FAIL_OPEN_ON_TOOL_MISSING", process.env, true),
     quarantineMaxArchiveEntries: readNumber(
       process.env.QUARANTINE_MAX_ARCHIVE_ENTRIES,
       2_000,

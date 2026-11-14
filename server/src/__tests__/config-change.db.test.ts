@@ -1,4 +1,5 @@
 import postgres from "postgres";
+import { normalizePipelineFeatures } from "@docslurp/shared";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { defaultPipelineFeatures, type PipelineFeatures } from "@docslurp/shared";
 import { startMigratedPostgres } from "@docslurp/worker/testing";
@@ -10,7 +11,7 @@ let failLease: "none" | "throw-after-grant" | "refuse" = "none";
 beforeAll(async () => {
   // A real migrated database is required for concurrent transactions. PGlite's
   // socket serves one connection, so ordinary local runs retain its max: 1.
-  const databaseUrl = process.env.CONFIG_CHANGE_TEST_DATABASE_URL;
+  const databaseUrl = process.env.TEST_DATABASE_URL;
   const pg = databaseUrl ? null : await startMigratedPostgres();
   stop = pg?.stop ?? (async () => {});
   sql = postgres(databaseUrl ?? pg!.url, { max: databaseUrl ? 2 : 1, prepare: false, onnotice: () => {} }) as unknown as postgres.Sql<Record<string, unknown>>;
@@ -32,6 +33,9 @@ afterEach(() => vi.unstubAllEnvs());
 beforeEach(() => { failLease = "none"; vi.stubEnv("WORKER_CREDIT_LEASES", "off"); });
 
 const pipeline = (patch: Partial<PipelineFeatures> = {}): PipelineFeatures => ({ ...defaultPipelineFeatures, ...patch });
+/** An embedding config chosen by profile (a category): the model comes from the profile, never a raw URI. */
+const profileEmbedding = (profile: "fastest-local" | "cheapest-local") =>
+  normalizePipelineFeatures({ ...defaultPipelineFeatures, embedding: { profile } } as never).embedding;
 
 async function seed(args: { credits: number; autoConfirm?: boolean; documents?: number; vectorized?: boolean }) {
   await sql`delete from project_runs`;
@@ -55,7 +59,7 @@ async function seed(args: { credits: number; autoConfirm?: boolean; documents?: 
   }
 }
 
-const embeddingChange = () => ({ pipeline: pipeline({ embedding: { ...defaultPipelineFeatures.embedding, target: "local" as const, modelUri: "llm://transformers.js/Xenova/gte-small" as never } }) });
+const embeddingChange = () => ({ pipeline: pipeline({ embedding: profileEmbedding("fastest-local") }) });
 
 async function patch(input: Record<string, unknown>) {
   const plan = await change.planProjectChange({ projectId: "w", userId: "u1", input: input as never });
@@ -97,7 +101,7 @@ describe("config-change transactional credit admission", () => {
     expect(applied!.job!.runIds).toHaveLength(2);
   });
 
-  it.skipIf(!process.env.CONFIG_CHANGE_TEST_DATABASE_URL)("serializes concurrent boosted admissions across projects in one organization", async () => {
+  it.skipIf(!process.env.TEST_DATABASE_URL)("serializes concurrent boosted admissions across projects in one organization", async () => {
     await seed({ credits: 105, documents: 1 });
     await sql`insert into projects(id, org_id, user_id, name, pipeline)
       values ('w2', 'o1', 'u1', 'Second', ${sql.json(JSON.parse(JSON.stringify(pipeline())))})`;

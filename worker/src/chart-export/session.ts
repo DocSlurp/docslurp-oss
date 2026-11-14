@@ -9,6 +9,7 @@ import {
   type AssignmentRole,
   type BBox,
   type ChartExportConfig,
+  type ResolvedChartExportConfig,
   type ExportedVisual,
   type RoutePlan,
   type RoutingTarget,
@@ -45,7 +46,7 @@ import type {
 
 export interface ChartExportSessionInput {
   documentId: string;
-  config: ChartExportConfig;
+  config: ResolvedChartExportConfig;
   /** Privacy-filtered admitted routing catalog (lazy: only built when a model rung is reached). */
   catalog: () => readonly RoutingTarget[];
   envModel?: string | null;
@@ -294,6 +295,8 @@ export class ChartExportSession {
   /** Partial index -> candidate id that claimed it. */
   private readonly claims = new Map<number, string>();
   private presence: DeterministicVisualResult["presence"] = {};
+  private deferred: NonNullable<DeterministicVisualResult["deferred"]> = [];
+  private overflow = 0;
   private readonly selections = new Map<string, GeneratorSelection | null>();
   private readonly limits: ChartExportLimits;
   private readonly runBudget: ChartExportRunBudget;
@@ -325,7 +328,8 @@ export class ChartExportSession {
     this.dedupe = input.dedupeRepeated ?? chartFactsUse().dedupe;
     this.limits = { ...DEFAULT_CHART_EXPORT_LIMITS, ...input.limits };
     this.runBudget = input.runBudget ?? { calls: 0 };
-    const inner = input.client;
+    // The free tier never holds a model client: whatever the caller passed, only `models` keeps it.
+    const inner = input.config.tier === "models" ? input.client : null;
     // Every generator call is counted before it is made, so caps bound attempts (failed and `none` answers too).
     this.client = inner ? {
       complete: async (request) => {
@@ -337,8 +341,14 @@ export class ChartExportSession {
     } : null;
   }
 
-  get enabled(): boolean {
-    return this.input.config.enabled;
+  /** Whether this document exports anything (any tier but off). */
+  get runs(): boolean {
+    return this.input.config.tier !== "off";
+  }
+
+  /** Whether the billed model steps may run: tier `models` with a model client. */
+  get modelsAllowed(): boolean {
+    return this.input.config.tier === "models" && this.client !== null;
   }
 
   get config(): ChartExportConfig {
@@ -352,7 +362,7 @@ export class ChartExportSession {
 
   /** Whether the project exports this kind (diagrams are opt-out). */
   exportsKind(kind: VisualKind | null): boolean {
-    return this.enabled && (kind !== "diagram" || this.input.config.diagrams);
+    return this.runs && (kind !== "diagram" || this.input.config.diagrams);
   }
 
   /**
@@ -412,6 +422,8 @@ export class ChartExportSession {
     this.partials = result.partials.slice(0, this.limits.maxVisuals);
     this.claims.clear();
     this.presence = result.presence ?? {};
+    this.deferred = (result.deferred ?? []).slice(0, 1000);
+    this.overflow = (result.overflow ?? 0) + Math.max(0, (result.deferred ?? []).length - 1000);
   }
 
   /** Pages deterministic partials sit on (partials without a page are on no known page). */
@@ -488,7 +500,7 @@ export class ChartExportSession {
     if (!this.selections.has(key)) {
       let selection: GeneratorSelection | null = null;
       try {
-        selection = selectGeneratorModel({ kind, catalog: this.input.catalog(), projectModel: this.input.config.generatorModel, envModel: this.input.envModel ?? null });
+        selection = selectGeneratorModel({ kind, catalog: this.input.catalog(), envModel: this.input.envModel ?? null });
       } catch (error) {
         console.warn(`[chart-export] generator catalog unavailable document=${this.input.documentId} error=${error instanceof Error ? error.message : String(error)}`);
       }
@@ -513,7 +525,8 @@ export class ChartExportSession {
   }
 
   private canCallModel(): boolean {
-    return this.callBudgetLeft() && (this.input.canCallModel?.() ?? true);
+    // The tier is the first fence (no client is built for free); caps and the spend gate are the second.
+    return this.modelsAllowed && this.callBudgetLeft() && (this.input.canCallModel?.() ?? true);
   }
 
   /**
@@ -759,7 +772,7 @@ export class ChartExportSession {
    * candidate; they are exported on their own with no page (`u-d<n>`), and the stage appends them as unpaged blocks.
    */
   async exportUnmatchedDeterministic(signal?: AbortSignal): Promise<ExportedVisual[]> {
-    if (!this.enabled) return [];
+    if (!this.runs) return [];
     const out: ExportedVisual[] = [];
     for (let i = 0; i < this.partials.length; i += 1) {
       if (this.claims.has(i) || this.atLimit()) continue;
@@ -786,6 +799,6 @@ export class ChartExportSession {
   }
 
   stats(): VisualCandidateStats {
-    return buildVisualCandidateStats({ candidates: this.candidates, presence: this.presence, exported: this.visuals, groupOf: (c) => this.groupKey(c) });
+    return buildVisualCandidateStats({ candidates: this.candidates, presence: this.presence, exported: this.visuals, groupOf: (c) => this.groupKey(c), deferred: this.deferred, overflow: this.overflow });
   }
 }

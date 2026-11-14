@@ -31,7 +31,7 @@
 
 import { hasCurrentParseDecision, PARSE_SOURCE_SCAN_VERSION, quarantineRequired } from "@docslurp/shared";
 
-import { UnscannedParseSourceError } from "../sandbox/source-integrity.js";
+import { claimQuarantineUploadIssuer, type QuarantineUpload, UnscannedParseSourceError } from "../sandbox/source-integrity.js";
 
 /** The scan version and the shared decision predicate live in @docslurp/shared (the API reports rescans with them). */
 export { PARSE_SOURCE_SCAN_VERSION, quarantineRequired };
@@ -156,6 +156,8 @@ export function effectiveParseSourceDecision(document: Pick<SourcedDocument, "pa
 }
 
 interface UploadSource { key: string; sha256: string | null }
+/** The only issuer of uploads the quarantine stage may verify without a decision (sandbox/source-integrity.ts; claimed once, here). */
+const issueQuarantineUpload = claimQuarantineUploadIssuer();
 /** Loader document -> its upload. Module-private: the only reader is originalSourceForQuarantine. */
 const uploads = new WeakMap<object, UploadSource>();
 
@@ -191,12 +193,12 @@ export function hasScannedParseCopy(document: Pick<SourcedDocument, "parseSource
  * binding is missing (copied or serialized after loading) fails: its key is not the upload's. A document built in memory
  * (no decision field outside production, or "unscanned-allowed": tests) is its own upload.
  */
-export function originalSourceForQuarantine(document: SourcedDocument): { id: string; sourceKey: string; sourceSha256: string | null } {
+export function originalSourceForQuarantine(document: SourcedDocument): QuarantineUpload {
   const upload = uploads.get(document);
-  if (upload) return { id: document.id, sourceKey: upload.key, sourceSha256: upload.sha256 };
+  if (upload) return issueQuarantineUpload({ id: document.id, sourceKey: upload.key, sourceSha256: upload.sha256 });
   const decision = effectiveParseSourceDecision(document);
   if (decision !== undefined && decision !== "unscanned-allowed") throw new Error(`document ${document.id}: quarantine has no upload binding for a loaded document`);
-  return { id: document.id, sourceKey: document.sourceKey, sourceSha256: document.sourceSha256 ?? null };
+  return issueQuarantineUpload({ id: document.id, sourceKey: document.sourceKey, sourceSha256: document.sourceSha256 ?? null });
 }
 
 /** Point an in-memory document at what quarantine decided: its scanned copy, or the upload bytes it scanned. */

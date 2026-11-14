@@ -2,6 +2,9 @@ import postgres from "postgres";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { normalizePipelineFeatures, defaultProjectSearchSettings } from "@docslurp/shared";
 import { startMigratedPostgres } from "@docslurp/worker/testing";
+/** The explicit search access scope every search caller passes (search/access-scope.ts). */
+const TEST_SEARCH_SCOPE = { orgId: "hosted-org", projectIds: "org", modeCeiling: null } as const;
+
 
 let sql: postgres.Sql;
 let stop: () => Promise<void>;
@@ -50,7 +53,7 @@ describe("real hybrid search with hosted reranking and actual SQL usage", () => 
     parentRetrieval: false, queryRewrite: false, selfQuery: false, useContextualCompression: false,
     useHyDE: false, stepback: false, iterativeMultiHop: false, enableGraphExpansion: false, enableCommunityExpansion: false };
   it("reads project opt-in, preserves citations and persists scoped actual tokens", async () => {
-    const result = await hybridSearch("pump maintenance", "hosted-user", options);
+    const result = await hybridSearch("pump maintenance", "hosted-user", options, TEST_SEARCH_SCOPE);
     expect(http).toHaveBeenCalledTimes(1);
     // The reranker is fused with the hybrid order (a two-candidate swap ties and keeps the hybrid order), but the
     // candidate it scored still carries its own citation and body.
@@ -58,6 +61,7 @@ describe("real hybrid search with hosted reranking and actual SQL usage", () => 
     expect(valve?.citation).toMatchObject({ documentId: "hosted-doc", pageNumber: 2 });
     expect(result.results).toHaveLength(2);
     expect(result.usageEvents).toMatchObject([{ model: "Qwen/Qwen3-Reranker-0.6B", inputTokens: 174 }]);
+    await (await import("../search/session.js")).drainSearchSessionWrites();
     const { attributedUsage } = await import("../services/usage-attribution.js");
     const events = await sql`select org_id,project_id,input_tokens,run_id,metric,cost_cents from ${attributedUsage(null)} au where au.metadata->>'sessionId'=${result.sessionId} order by au.metric`;
     // The rerank call's provider tokens (billing 0) and the billable search unit.
@@ -71,8 +75,8 @@ describe("real hybrid search with hosted reranking and actual SQL usage", () => 
   });
   it("rerank off and denied tenant access make no provider request", async () => {
     const before = http.mock.calls.length;
-    await hybridSearch("pump maintenance", "hosted-user", { ...options, useRerank: false });
-    await expect(hybridSearch("pump maintenance", "outsider", options)).rejects.toThrow();
+    await hybridSearch("pump maintenance", "hosted-user", { ...options, useRerank: false }, TEST_SEARCH_SCOPE);
+    await expect(hybridSearch("pump maintenance", "outsider", options, TEST_SEARCH_SCOPE)).rejects.toThrow();
     expect(http).toHaveBeenCalledTimes(before);
   });
   it("persists late sibling usage before returning a parallel fallback", async () => {
@@ -82,7 +86,7 @@ describe("real hybrid search with hosted reranking and actual SQL usage", () => 
     const waiting: Array<(r:Response)=>void> = [];
     http.mockImplementation(()=>new Promise<Response>(resolve=>waiting.push(resolve)));
     let returned=false;
-    const running=hybridSearch("pump maintenance","hosted-user",{...options,rootSessionId:"hosted-parallel"}).then(r=>{returned=true;return r;});
+    const running=hybridSearch("pump maintenance","hosted-user",{...options,rootSessionId:"hosted-parallel"}, TEST_SEARCH_SCOPE).then(r=>{returned=true;return r;});
     await vi.waitFor(()=>expect(waiting).toHaveLength(2));
     waiting[0](Response.json({input_tokens:10},{status:429}));
     await new Promise<void>(resolve=>setImmediate(resolve));
@@ -90,6 +94,9 @@ describe("real hybrid search with hosted reranking and actual SQL usage", () => 
     waiting[1](Response.json({input_tokens:20,scores:Array(25).fill(.5)}));
     const result=await running;
     expect(result.usageEvents?.reduce((n,e)=>n+(e.inputTokens??0),0)).toBe(30);
+    // Both siblings' usage is in the journal the search answered with; write-behind commits it just after.
+    const { drainSearchSessionWrites }=await import("../search/session.js");
+    await drainSearchSessionWrites();
     const { attributedUsage }=await import("../services/usage-attribution.js");
     const events=await sql`select input_tokens from ${attributedUsage(null)} au where au.metadata->>'sessionId'=${result.sessionId}`;
     expect(events).toHaveLength(2);
@@ -100,10 +107,10 @@ describe("real hybrid search with hosted reranking and actual SQL usage", () => 
   it("privacy and actual exhausted budget block provider calls", async () => {
     const before = http.mock.calls.length;
     await sql`update projects set pipeline=jsonb_set(pipeline,'{privacyMode}','"local-only"') where id='hosted-ws'`;
-    await hybridSearch("pump maintenance", "hosted-user", options);
+    await hybridSearch("pump maintenance", "hosted-user", options, TEST_SEARCH_SCOPE);
     await sql`update projects set pipeline=jsonb_set(pipeline,'{privacyMode}','"standard"') where id='hosted-ws'`;
     await sql`update organizations set credit_balance_cents=-100000 where id='hosted-org'`;
-    await hybridSearch("pump maintenance", "hosted-user", options);
+    await hybridSearch("pump maintenance", "hosted-user", options, TEST_SEARCH_SCOPE);
     expect(http).toHaveBeenCalledTimes(before);
   });
 });

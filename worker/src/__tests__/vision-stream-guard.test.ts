@@ -316,3 +316,18 @@ it("rejects partial text with a choice-level provider error and fails over", asy
     expect.objectContaining({ generationId: "failed-text", outcome: "provider-error" }),
   ]));
 });
+
+it("sums prompt-cache reads and writes over every attempt into the usage metadata", async () => {
+  vi.stubEnv("AI_PROVIDER_MAX_RETRIES", "1");
+  stubFetch([
+    new Response(JSON.stringify({ id: "gen-cached-failure", provider: "ProvA", model: "m", error: { code: 503 },
+      usage: { prompt_tokens: 1000, completion_tokens: 2, cost: 0.0002, prompt_tokens_details: { cached_tokens: 600 } } }), { status: 503 }),
+    sse([delta("# Page\n\nHello"), finish("stop", { prompt_tokens: 1000, completion_tokens: 50, cost: 0.0003,
+      prompt_tokens_details: { cached_tokens: 900, cache_write_tokens: 40 } })]),
+  ]);
+  const result = await run();
+  expect(result.costMetadata).toMatchObject({ cachedInputTokens: 1500, cacheWriteInputTokens: 40 });
+  expect(result.costMetadata?.visionAttempts).toEqual(expect.arrayContaining([
+    expect.objectContaining({ generationId: "gen-cached-failure", cachedInputTokens: 600 }),
+  ]));
+});

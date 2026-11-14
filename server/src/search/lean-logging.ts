@@ -70,8 +70,8 @@ let flushing: Promise<void> | null = null;
 /** Set by the shutdown drain: from then on every enqueue writes at once instead of waiting for the timer. */
 let draining = false;
 
-/** Counts one lean search charge for the current request's API key. */
-export function enqueueSearchCharge(group: Omit<ChargeGroup, "apiKeyId"> & { apiKeyId?: string | null }): void {
+/** Counts lean search charges (one per query; a keyword fan-out is several) for the current request's API key. */
+export function enqueueSearchCharge(group: Omit<ChargeGroup, "apiKeyId"> & { apiKeyId?: string | null }, searches = 1): void {
   const apiKeyId = group.apiKeyId ?? currentRequestApiKeyId();
   if (!apiKeyId) throw new Error("a batched search charge needs an API key");
   // The organization is fixed now, while the request knows it: a project deleted before the flush must not leave a
@@ -81,7 +81,7 @@ export function enqueueSearchCharge(group: Omit<ChargeGroup, "apiKeyId"> & { api
   const existing = open.get(key);
   const batch: ChargeBatch = existing?.kind === "charge" ? existing
     : { kind: "charge", ...group, orgId, apiKeyId, id: `search-batch:${randomUUID()}`, searches: 0, firstSearchAt: new Date().toISOString() };
-  batch.searches += 1;
+  batch.searches += Math.max(1, Math.floor(searches));
   open.set(key, batch);
   scheduleFlush(batch.searches >= BATCH_MAX_SEARCHES);
 }

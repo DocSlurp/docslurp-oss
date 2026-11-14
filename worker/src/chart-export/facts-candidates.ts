@@ -22,7 +22,7 @@
  */
 import type { BBox } from "@docslurp/shared";
 
-import { DOPPLER_PAGE_FACTS_MAX_PAGES, dopplerPageFactsByteBudget, dopplerPageFactsMode, parseDopplerPageFacts, type Box, type DopplerPageFacts, type DopplerPageFactsDocument } from "../lib/doppler-page-facts.js";
+import { DOPPLER_PAGE_FACTS_MAX_PAGES, dopplerPageFactsByteBudget, dopplerPageFactsMode, dopplerPageFactsLowConfidence, parseDopplerPageFacts, type Box, type DopplerPageFacts, type DopplerPageFactsDocument } from "../lib/doppler-page-facts.js";
 import { DOPPLER_PAGE_FACTS_SLOT } from "../extractors/doppler-figures.js";
 import type { DocumentArtifactLedger } from "../pipeline/artifact-ledger.js";
 import { keyFromStorageUri, type ArtifactStore } from "../tools/storage.js";
@@ -141,7 +141,8 @@ export function candidatesFromPageFacts(facts: Pick<DopplerPageFactsDocument, "p
   const out: VisualCandidate[] = [];
   const pages = [...facts.pages.values()].sort((a, b) => a.page - b.page);
   for (const page of pages) {
-    if (page.failed || !page.geometry) continue;
+    // Low confidence (`xref-repaired-earlier`): any fact of the page may come from another object; it nominates nothing.
+    if (page.failed || !page.geometry || dopplerPageFactsLowConfidence(page)) continue;
     const voted = keywordPages.has(page.page);
     const found: Array<{ c: VisualCandidate; area: number }> = [];
     const vectors = page.vectors;

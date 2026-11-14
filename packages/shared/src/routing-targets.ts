@@ -286,8 +286,20 @@ function lookupPrice(
   return map[model] ?? map[`openai/${model}`];
 }
 
+/**
+ * Pro/Ultra check on a model id or reference, normalized first: percent-decoded (up to three passes), with any
+ * `?query` or `#fragment` removed, so `openai/gpt-6-sol-pro?reasoning=high` or an encoded form cannot slip past.
+ */
 export function isProhibitedRoutingModelId(id: string): boolean {
-  return PROHIBITED_MODEL_ID_PATTERN.test(id);
+  let value = id.trim();
+  for (let pass = 0; pass < 3; pass += 1) {
+    let next = value;
+    try { next = decodeURIComponent(value); } catch { /* keep the raw text */ }
+    if (next === value) break;
+    value = next;
+  }
+  const bare = value.split(/[?#]/, 1)[0] ?? "";
+  return PROHIBITED_MODEL_ID_PATTERN.test(bare) || PROHIBITED_MODEL_ID_PATTERN.test(value);
 }
 
 export function buildRoutingTargetCatalog(

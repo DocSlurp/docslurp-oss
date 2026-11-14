@@ -163,6 +163,16 @@ describe("in-memory limiter fallback", () => {
     warn.mockRestore();
   });
 
+  it("counts a weighted consume in full or not at all", async () => {
+    const store = createMemoryRateLimitStore();
+    const consume = (weight: number) => store.consume({ blockKey: "w", now: 1_000, countDenied: false, weight,
+      counters: [{ key: "w:a", limit: 5, windowMs: 60_000 }, { key: "w:b", limit: 100, windowMs: 3_600_000 }] });
+    expect(await consume(3)).toMatchObject({ denied: -1, counted: true });
+    expect(await consume(3)).toMatchObject({ denied: 0, counted: false });
+    expect(await consume(2)).toMatchObject({ denied: -1, counted: true, windows: [{ current: 3 }, { current: 3 }] });
+    expect(await consume(1)).toMatchObject({ denied: 0, counted: false });
+  });
+
   it("reserves prefix capacity for every new counter before changing any state", async () => {
     const store = createMemoryRateLimitStore({ maxEntries: 1_000 });
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
@@ -283,9 +293,12 @@ describe("chat concurrency", () => {
     expect((await app.request("/v1/chat", from("203.0.113.81"))).status).toBe(200);
   });
 
-  it("leaves server keys uncapped by default (backend batch callers), and honours a key's own concurrent rule", async () => {
+  it("caps server keys at 64 by default (room for backend batch callers), and honours a key's own concurrent rule", async () => {
     const batch = concurrencyApp(keyActor("server", "srv-batch"));
-    for (let i = 0; i < 40; i++) expect((await batch.app.request("/v1/chat", from("198.51.100.1"))).status).toBe(200);
+    for (let i = 0; i < 64; i++) expect((await batch.app.request("/v1/chat", from("198.51.100.1"))).status).toBe(200);
+    expect((await batch.app.request("/v1/chat", from("198.51.100.1"))).status).toBe(429);
+    vi.stubEnv("API_CHAT_MAX_CONCURRENT_PER_SERVER_KEY", "0");
+    expect((await batch.app.request("/v1/chat", from("198.51.100.1"))).status).toBe(200);
     const own = keyActor("server", "srv-own");
     if (own.type === "apiKey") own.apiKey.rateLimits = [{ metric: "concurrent", limit: 2, windowSeconds: 1 }];
     const capped = concurrencyApp(own);

@@ -1,4 +1,5 @@
 import { quoteStoredDocuments } from "../services/stored-quote.js";
+import { runOriginOf } from "../lib/run-origin.js";
 import { SEARCH_SCOPES } from "../lib/search-tiers.js";
 import { projectRecommendationVisitsRoutes } from "./project-recommendation-visits.js";
 import { ChatToolBlockedError } from "../services/chat-tool-error.js";
@@ -23,7 +24,8 @@ import {
   chatSearchFiltersSchema,
   createProjectInviteSchema,
   createProjectSchema,
-  updateProjectSearchSettingsSchema,
+  publicUpdateProjectSearchSettingsSchema,
+  customerSearchSettingsView,
   updateProjectMemberSchema,
   updateProjectSchema,
   projectTemplates,
@@ -37,8 +39,11 @@ import {
   isProhibitedRoutingModelId,
 } from "@docslurp/shared";
 
-import { chatModelRefused, ChatModelNotAllowedError } from "../lib/chat-model-policy.js";
-import { actorHasAnyApiKeyScope, getRequestActor, apiKeyCanUseProject, isFirstPartyAppActor, type RequestActor } from "../lib/request-actor.js";
+import { chatModelRefused, ChatModelNotAllowedError, SpeedBoostUnavailableError } from "../lib/chat-model-policy.js";
+import { publicProjectView } from "../lib/public-project.js";
+import { managedPipelineFieldMessage, managedPipelineModelPaths } from "@docslurp/shared";
+import { CHAT_REASONING_LEVELS, CHAT_TIERS } from "@docslurp/shared/project-chat-models";
+import { actorHasAnyApiKeyScope, getRequestActor, apiKeyCanUseProject, isFirstPartyAppActor, isPlatformAdminActor, type RequestActor } from "../lib/request-actor.js";
 import { requestIp, requestUserAgent } from "../lib/request-context.js";
 import { isProjectChatAgent } from "../lib/mastra.js";
 import { chatVoiceRoutes } from "./chat-voice.js";
@@ -75,6 +80,7 @@ import {
   reprocessIngestRecommendation,
 } from "../services/ingest-report.js";
 import { chatProject, projectChatDisabledBody, type ChatSearchActivity } from "../services/project-chat.js";
+import { ProjectChatDisabledError } from "../services/project-chat-errors.js";
 import { InvalidRetrievalQueryError, parseRetrievalQueryFlags } from "../lib/retrieval-query-flags.js";
 import { deleteChatFeedback, upsertChatFeedback } from "../services/chat-feedback.js";
 import {
@@ -93,7 +99,6 @@ import {
   getProjectSearchSettingsForUser,
   updateProjectSearchSettingsForUser,
 } from "../services/search-controls.js";
-import { hybridSearch } from "../services/search.js";
 import { parseFilters } from "../search/filters.js";
 import { searchHitStatementTimeout } from "../search/timings.js";
 import {
@@ -105,7 +110,10 @@ import {
   type ProjectChatUIMessage,
 } from "@docslurp/shared/project-chat-ui";
 import { acceptApiKeys } from "../lib/route-auth.js";
+import { authorizeActorProjectSearch } from "../lib/search-access.js";
 import { apiKeyCanUpdateContent, CONTENT_UPDATE_SCOPE_MESSAGE } from "../lib/content-update-access.js";
+import { requestProjectFigureResumes } from "../services/figure-resume.js";
+import { applyFigureResumeProposal, FigureResumeProposalError } from "../services/figure-resume-proposals.js";
 import { apiErrorResponse, apiStatusError } from "../lib/api-error.js";
 import { indexingModeErrorResponse } from "../lib/indexing-mode-error.js";
 import { getRun } from "../services/runs.js";
@@ -113,6 +121,8 @@ import { runLifecycle } from "../services/run-lifecycle.js";
 import { resolveMaterializationPolicy } from "../services/materialization-policy.js";
 import { inlineEstimate, jobMetaFor, jobStatusForMutation, recordJobMeta } from "../services/jobs.js";
 import { estimateDocumentReprocess } from "../services/work-estimates.js";
+import { ProjectAccessError } from "../services/default-project.js";
+import { denyEditOfVisibleProject, denyReprocessOfVisible, editorRequired, withCanEdit } from "../lib/reprocess-access.js";
 import {
   commitIndexJobs,
   estimateFullIndex,
@@ -141,6 +151,12 @@ const chatFeedbackSchema = z.object({
   model: optionalText(200),
 });
 
+/** A chat turn's category choice: the tier and reasoning level. Backend models are never a customer choice. */
+const chatTierChoiceSchema = z.object({
+  tier: z.enum(CHAT_TIERS).optional(),
+  reasoning: z.enum(CHAT_REASONING_LEVELS).optional(),
+});
+
 const cloneProjectSchema = z.object({
   name: z.string().trim().min(1).max(120).optional(),
 });
@@ -153,8 +169,6 @@ const projectConfirmationSchema = z.object({
   confirmationText: z.string().trim().min(1).max(240),
 });
 
-const PROJECT_SEARCH_STREAM_POLL_MS = 2000;
-const PROJECT_SEARCH_STREAM_TIMEOUT_MS = 15000;
 const PROJECT_CHAT_STREAM_KEEPALIVE_MS = 10000;
 
 type ProjectChatResponseValue = Awaited<ReturnType<typeof chatProject>>;
@@ -163,7 +177,10 @@ type ProjectChatPostBody = {
   speedBoost?: boolean;
   messages?: ProjectChatUIMessage[];
   sessionId?: string;
+  /** Operator evaluation only; customers send `tier`. */
   model?: string;
+  tier?: unknown;
+  reasoning?: unknown;
   /** Thread retrieval overrides from the composer. */
   retrieval?: unknown;
   /** Composer filters (documents, types, tags, dates). */
@@ -284,15 +301,19 @@ async function createProjectAgentChatResponse(c: Context) {
     return apiStatusError(c, 400, "Missing query");
   }
 
-  const project = await getProject(projectId, userId);
-  if (!project) {
+  // One access read (no dashboard-sized project record): it also yields the explicit search access scope.
+  const authorized = await authorizeActorProjectSearch(getRequestActor(c), projectId, "chat");
+  if (!authorized.ok) {
     return apiErrorResponse(c, 404, "project_not_found", "Project not found");
   }
+  const project = { id: authorized.access.projectId, orgId: authorized.access.orgId };
   const chatDisabled = await projectChatDisabledBody(project.id, userId);
   if (chatDisabled) return apiErrorResponse(c, 403, "chat_disabled", chatDisabled.error);
   if (await chatModelRefused(getRequestActor(c), body.model, project.id)) {
     return apiErrorResponse(c, 400, "model_not_allowed", new ChatModelNotAllowedError().message);
   }
+  const choice = chatTierChoiceSchema.safeParse({ tier: body.tier, reasoning: body.reasoning });
+  if (!choice.success) return apiErrorResponse(c, 400, "invalid_request", "Invalid tier or reasoning", { issues: choice.error.issues });
 
   return createUIMessageStreamResponse({
     headers: {
@@ -394,6 +415,7 @@ async function createProjectAgentChatResponse(c: Context) {
           response = await chatProject({
             projectId,
             userId,
+            scope: authorized.scope,
             query,
             actor: getRequestActor(c), signal: c.req.raw.signal,
             answerIngestReport: getRequestActor(c).type === "session",
@@ -406,7 +428,7 @@ async function createProjectAgentChatResponse(c: Context) {
               } });
             },
             sessionId: body.sessionId,
-            model: body.model, speedBoost: body.speedBoost === true,
+            model: body.model, tier: choice.data.tier, reasoning: choice.data.reasoning, speedBoost: body.speedBoost === true,
             ...(scope.retrieval ? { retrieval: scope.retrieval } : {}),
             ...(scope.filters ? { filters: scope.filters } : {}),
             onSearchActivity: (activity) => {
@@ -592,6 +614,18 @@ function findProhibitedModelId(value: unknown): string | null {
 }
 
 /**
+ * Backend models, providers and routes in a pipeline are managed settings: a request naming one is refused (for every
+ * caller; platform admins use /v1/admin/projects), with the paths and the categories to use instead. The refused
+ * values are logged, never echoed.
+ */
+function refuseManagedPipelineFields(c: Context, rawPipeline: unknown): Response | null {
+  const paths = managedPipelineModelPaths(rawPipeline);
+  if (!paths.length) return null;
+  console.warn(`[managed-models] refused pipeline fields=${paths.join(",")} user=${getRequestActor(c).userId}`);
+  return apiErrorResponse(c, 400, "model_not_allowed", managedPipelineFieldMessage(paths), { paths });
+}
+
+/**
  * API-key gate for the search-settings mutation and its estimate, the same as
  * PATCH /:projectId: a server key with the opt-in projects:manage scope
  * (403 otherwise), bound to the project's organization and allowlist (404
@@ -614,6 +648,16 @@ async function denySearchSettingsApiKey(
   return null;
 }
 
+/** Rerank providers and models are managed: a request naming one is refused, pointing to `reranker`. */
+const refuseManagedSearchFields: MiddlewareHandler = async (c, next) => {
+  const raw = await c.req.json().catch(() => null) as { retrievalDefaults?: Record<string, unknown> } | null;
+  const named = ["rerankProvider", "rerankModel"].filter(key => raw?.retrievalDefaults && Object.hasOwn(raw.retrievalDefaults, key));
+  if (named.length) {
+    return apiErrorResponse(c, 400, "model_not_allowed", `${named.map(key => `retrievalDefaults.${key}`).join(", ")} ${named.length === 1 ? "is" : "are"} managed by DocSlurp. Use retrievalDefaults.reranker (keyword or model) instead.`, { paths: named.map(key => `retrievalDefaults.${key}`) });
+  }
+  await next();
+};
+
 /** Runs the search-settings key gate before body validation, so a refused key gets 403/404, never a schema 400. */
 const searchSettingsKeyGate: MiddlewareHandler = async (c, next) => {
   const actor = getRequestActor(c);
@@ -631,7 +675,7 @@ export const projectsRoutes = new Hono()
       const result = await applySettingsProposal({ actor: getRequestActor(c), projectId: String(c.req.param("projectId")), ...c.req.valid("json") });
       return c.json(result);
     } catch (error) {
-      if (error instanceof SettingsProposalError) return apiStatusError(c, error.status, error.message, { details: { category: error.category } });
+      if (error instanceof SettingsProposalError) return apiStatusError(c, error.status, error.message, { code: error.category, details: { category: error.category } });
       throw error;
     }
   })
@@ -682,9 +726,8 @@ export const projectsRoutes = new Hono()
     }
     if (actor.type === "session") await ensurePersonalDefaultProject(userId);
     const projects = await listProjects(userId);
-    return c.json({ projects: actor.type === "apiKey"
-      ? projects.filter((project) => apiKeyCanUseProject(actor.apiKey, project))
-      : projects });
+    const visible = actor.type === "apiKey" ? projects.filter((project) => apiKeyCanUseProject(actor.apiKey, project)) : projects;
+    return c.json({ projects: (await withCanEdit(c, visible)).map(project => publicProjectView(project, actor)) });
   })
   .get("/board", async (c) => {
     const userId = c.get("sessionUser").id;
@@ -726,7 +769,11 @@ export const projectsRoutes = new Hono()
         c.req.param("projectId"),
         userId,
       );
-      return c.json({ versions });
+      // Snapshots hold the stored pipeline of their time, model ids and private aliases included: customers get the
+      // category view (rollback drops snapshot model values too; services/projects.ts).
+      const actor = getRequestActor(c);
+      if (await isPlatformAdminActor(actor)) return c.json({ versions });
+      return c.json({ versions: versions.map((version) => ({ ...version, snapshot: version.snapshot ? publicProjectView(version.snapshot, actor) : version.snapshot })) });
     } catch (error) {
       return apiStatusError(c, 404, reportPublicError(error));
     }
@@ -806,11 +853,44 @@ export const projectsRoutes = new Hono()
           userAgent: requestUserAgent(c),
         },
       });
-      return c.json({ recommendationId: body.recommendationId, patch: result.recommendation.patch, pipeline: result.pipeline });
+      return c.json(publicProjectView({ recommendationId: body.recommendationId, patch: result.recommendation.patch, pipeline: result.pipeline }, getRequestActor(c)));
     } catch (error) {
-      if (error instanceof IngestReportActionError) return apiStatusError(c, error.status, error.message);
+      if (error instanceof IngestReportActionError) return apiStatusError(c, error.status, error.message, { code: error.code });
       throw error;
     }
+  })
+  // The trusted Apply of a chat figure-resume proposal (first-party app only; figure-resume-proposals.ts).
+  .post("/:projectId/figure-resume-proposals/apply", async c => {
+    let body: { token?: unknown };
+    try { body = await c.req.json(); } catch { return apiStatusError(c, 400, "Expected a JSON object"); }
+    if (typeof body?.token !== "string") return apiStatusError(c, 400, "token is required");
+    try {
+      return c.json(await applyFigureResumeProposal({ actor: getRequestActor(c), projectId: c.req.param("projectId"), token: body.token }));
+    } catch (error) {
+      if (error instanceof FigureResumeProposalError) return apiStatusError(c, error.status, error.message, { code: error.category });
+      throw error;
+    }
+  })
+  // Queue the project's documents whose figures a resume could finish (at most 100 per request; figure-resume.ts).
+  .post("/:projectId/figures/resume", async (c) => {
+    const userId = c.get("sessionUser").id;
+    const actor = getRequestActor(c);
+    if (actor.type === "apiKey" && !apiKeyCanUpdateContent(actor.apiKey)) return apiStatusError(c, 403, CONTENT_UPDATE_SCOPE_MESSAGE);
+    const project = await getProject(c.req.param("projectId"), userId);
+    if (!project || !project.orgId || (actor.type === "apiKey" && !apiKeyCanUseProject(actor.apiKey, project))) return apiErrorResponse(c, 404, "project_not_found", "Project not found");
+    // Finishing figures spends credits: editors only (callerCanReprocess); a visible project is a 403, not a 404.
+    const deniedResume = await denyReprocessOfVisible(c, [{ orgId: project.orgId, projectId: project.id }]);
+    if (deniedResume) return deniedResume;
+    const raw = c.req.query("limit");
+    const limit = raw === undefined ? undefined : /^[1-9][0-9]{0,3}$/.test(raw) ? Number(raw) : null;
+    if (limit === null) return apiStatusError(c, 400, "Invalid limit");
+    const result = await requestProjectFigureResumes({ orgId: project.orgId, projectId: project.id, ...(limit ? { limit } : {}) });
+    await appendAuditLog({
+      orgId: project.orgId, userId, projectId: project.id, apiKeyId: actor.type === "apiKey" ? actor.apiKey.keyId : null,
+      action: "project.figures.resume_requested", resourceType: "project", resourceId: project.id, ipAddress: requestIp(c),
+      metadata: { ...result, userAgent: requestUserAgent(c) },
+    });
+    return c.json({ projectId: project.id, ...result }, result.queued > 0 ? 202 : 200);
   })
   .post("/:projectId/ingest-report/reprocess", zValidator("json", reprocessIngestRecommendationSchema, validationHook), async (c) => {
     const userId = c.get("sessionUser").id;
@@ -841,7 +921,7 @@ export const projectsRoutes = new Hono()
       });
       return c.json(result, 201);
     } catch (error) {
-      if (error instanceof IngestReportActionError) return apiStatusError(c, error.status, error.message);
+      if (error instanceof IngestReportActionError) return apiStatusError(c, error.status, error.message, { code: error.code });
       throw error;
     }
   })
@@ -857,7 +937,8 @@ export const projectsRoutes = new Hono()
       return apiErrorResponse(c, 404, "project_not_found", "Project not found");
     }
 
-    return c.json(project);
+    const [flagged] = await withCanEdit(c, [project]);
+    return c.json(publicProjectView(flagged, getRequestActor(c)));
   })
   .get("/:projectId/search-settings", async (c) => {
     const userId = c.get("sessionUser").id;
@@ -870,125 +951,7 @@ export const projectsRoutes = new Hono()
       return apiErrorResponse(c, 404, "project_not_found", "Project not found");
     }
 
-    return c.json(settings);
-  })
-  .get("/:projectId/search/stream", async (c) => {
-    const query = c.req.query("q");
-    const userId = c.get("sessionUser").id;
-    if (!query) {
-      return apiStatusError(c, 400, "Missing q");
-    }
-
-    const project = await getProject(c.req.param("projectId"), userId);
-    if (!project) {
-      return apiErrorResponse(c, 404, "project_not_found", "Project not found");
-    }
-
-    const runId = c.req.query("runId");
-    const limit = c.req.query("limit");
-    const variant = c.req.query("variant");
-    // Omitted flags stay undefined so the project's retrieval defaults apply
-    // (they used to become false); graph and multi-hop flags are honoured too.
-    let flags: ReturnType<typeof parseRetrievalQueryFlags>;
-    try {
-      flags = parseRetrievalQueryFlags((name) => c.req.query(name));
-    } catch (error) {
-      if (error instanceof InvalidRetrievalQueryError) return apiStatusError(c, 400, error.message);
-      throw error;
-    }
-    const rootSessionId = c.req.query("sessionId") ?? randomUUID();
-
-    const filters = parseFilters({
-      documentId: c.req.query("documentId") ?? "",
-      runId: runId ?? "",
-      projectId: c.req.param("projectId"),
-      filenameContains: c.req.query("filenameContains") ?? "",
-      mimeTypes: c.req.query("mimeTypes") ?? "",
-      tags: c.req.query("tags") ?? "",
-      pageFrom: c.req.query("pageFrom") ?? "",
-      pageTo: c.req.query("pageTo") ?? "",
-      language: c.req.query("language") ?? "",
-      heading: c.req.query("heading") ?? "",
-      dateFrom: c.req.query("dateFrom") ?? "",
-      dateTo: c.req.query("dateTo") ?? "",
-    });
-
-    c.header("Cache-Control", "no-cache");
-    c.header("X-Accel-Buffering", "no");
-
-    return streamSSE(c, async (stream) => {
-      await stream.writeSSE({
-        event: "status",
-        data: JSON.stringify({
-          stage: "retrieval",
-          message: "Running project search",
-        }),
-      });
-
-      const deadline = Date.now() + PROJECT_SEARCH_STREAM_TIMEOUT_MS;
-      let latestResponse: Awaited<ReturnType<typeof hybridSearch>> | null =
-        null;
-
-      while (Date.now() < deadline && !stream.aborted) {
-        latestResponse = await hybridSearch(query, userId, {
-          runId: runId || undefined,
-          limit: limit ? Number(limit) : undefined,
-          ...flags,
-          filters,
-          variant: variant || undefined,
-          rootSessionId,
-        });
-
-        await stream.writeSSE({
-          event: "results",
-          data: JSON.stringify({
-            results: latestResponse.results,
-            sessionId: latestResponse.sessionId,
-            availability: latestResponse.availability,
-          }),
-        });
-
-        const activeRunCount =
-          (latestResponse.availability?.coverage.queuedRuns ?? 0) +
-          (latestResponse.availability?.coverage.processingRuns ?? 0);
-        if (
-          latestResponse.availability?.status === "complete" ||
-          latestResponse.availability?.status === "empty" ||
-          activeRunCount === 0 ||
-          // A statement that hit SEARCH_STATEMENT_TIMEOUT_MS would time out again on the next poll.
-          searchHitStatementTimeout(latestResponse)
-        ) {
-          break;
-        }
-
-        await stream.writeSSE({
-          event: "status",
-          data: JSON.stringify({
-            stage: "indexing",
-            message:
-              latestResponse.availability?.message ??
-              "Waiting for more searchable content",
-            availability: latestResponse.availability,
-            pollMs: PROJECT_SEARCH_STREAM_POLL_MS,
-          }),
-        });
-
-        await stream.sleep(PROJECT_SEARCH_STREAM_POLL_MS);
-      }
-
-      // The latest snapshot is already persisted and delivered. Finalization
-      // must not repeat retrieval (or incur another embedding/model call).
-      if (!latestResponse || stream.aborted) return;
-
-      await stream.writeSSE({
-        event: "done",
-        data: JSON.stringify({
-          sessionId: latestResponse.sessionId,
-          resultCount: latestResponse.results.length,
-          availability: latestResponse.availability,
-        }),
-      });
-    });
+    return c.json(customerSearchSettingsView(settings));
   })
   .post("/:projectId/chat/:agentId", async (c) => {
     const agentId = c.req.param("agentId");
@@ -1051,13 +1014,15 @@ export const projectsRoutes = new Hono()
   .post("/", zValidator("json", createProjectSchema, validationHook), async (c) => {
     const userId = c.get("sessionUser").id;
     const valid = c.req.valid("json");
-    const prohibitedModel = findProhibitedModelId(valid.pipeline);
-    if (prohibitedModel) {
-      return apiErrorResponse(c, 400, "invalid_request", `Model "${prohibitedModel}" is not permitted in pipeline configuration`);
-    }
     // The schema defaults a missing pipeline.indexingMode to "full"; only an explicit
     // mode in the raw body may override the organization default.
     const raw = await c.req.json().catch(() => null) as { pipeline?: { indexingMode?: unknown } } | null;
+    const managed = refuseManagedPipelineFields(c, raw?.pipeline);
+    if (managed) return managed;
+    const prohibitedModel = findProhibitedModelId(valid.pipeline);
+    if (prohibitedModel) {
+      return apiErrorResponse(c, 400, "invalid_request", "A model in this pipeline configuration is not permitted");
+    }
     const explicit = indexingModeSchema.safeParse(raw?.pipeline?.indexingMode).success;
     const { indexingMode: _defaulted, ...pipelineWithoutMode } = valid.pipeline ?? ({} as NonNullable<typeof valid.pipeline>);
     const input = {
@@ -1086,7 +1051,7 @@ export const projectsRoutes = new Hono()
         userAgent: requestUserAgent(c),
       },
     });
-    return c.json(project, 201);
+    return c.json(publicProjectView((await withCanEdit(c, [project]))[0], getRequestActor(c)), 201);
   })
   .post(
     "/:projectId/clone",
@@ -1120,8 +1085,10 @@ export const projectsRoutes = new Hono()
             userAgent: requestUserAgent(c),
           },
         });
-        return c.json(project, 201);
+        return c.json(publicProjectView((await withCanEdit(c, [project]))[0], getRequestActor(c)), 201);
       } catch (error) {
+        // Access refusals keep their status and code (404 project_not_found, 403 editor_required); the rest is a 400.
+        if (error instanceof ProjectAccessError) return apiErrorResponse(c, error.status as 403 | 404, error.code, error.message);
         return apiStatusError(c, 400, reportPublicError(error));
       }
     },
@@ -1153,7 +1120,7 @@ export const projectsRoutes = new Hono()
           },
         });
 
-        return c.json(project);
+        return c.json(publicProjectView((await withCanEdit(c, [project]))[0], getRequestActor(c)));
       } catch (error) {
         return projectMutationError(c, error);
       }
@@ -1185,7 +1152,7 @@ export const projectsRoutes = new Hono()
           },
         });
 
-        return c.json(project);
+        return c.json(publicProjectView((await withCanEdit(c, [project]))[0], getRequestActor(c)));
       } catch (error) {
         return projectMutationError(c, error);
       }
@@ -1318,6 +1285,8 @@ export const projectsRoutes = new Hono()
       speedBoost?: boolean;
       sessionId?: string;
       model?: string;
+      tier?: unknown;
+      reasoning?: unknown;
       retrievalOnly?: boolean;
       retrieval?: unknown;
       filters?: unknown;
@@ -1330,12 +1299,15 @@ export const projectsRoutes = new Hono()
     if (body.speedBoost !== undefined && typeof body.speedBoost !== "boolean") return apiStatusError(c, 400, "speedBoost must be a boolean");
     const scope = parseChatScope(body);
     if (!scope) return apiStatusError(c, 400, "Invalid retrieval or filters");
+    const choice = chatTierChoiceSchema.safeParse({ tier: body.tier, reasoning: body.reasoning });
+    if (!choice.success) return apiErrorResponse(c, 400, "invalid_request", "Invalid tier or reasoning", { issues: choice.error.issues });
 
     const userId = c.get("sessionUser").id;
-    const project = await getProject(c.req.param("projectId"), userId);
-    if (!project) {
+    const authorized = await authorizeActorProjectSearch(getRequestActor(c), c.req.param("projectId"), "chat");
+    if (!authorized.ok) {
       return apiErrorResponse(c, 404, "project_not_found", "Project not found");
     }
+    const project = { id: authorized.access.projectId, orgId: authorized.access.orgId };
     const chatDisabled = await projectChatDisabledBody(project.id, userId);
     if (chatDisabled) return apiErrorResponse(c, 403, "chat_disabled", chatDisabled.error);
 
@@ -1344,18 +1316,21 @@ export const projectsRoutes = new Hono()
       response = await chatProject({
         projectId: c.req.param("projectId"),
         userId,
+        scope: authorized.scope,
         query: body.q,
         actor: body.retrievalOnly === true ? undefined : getRequestActor(c), signal: c.req.raw.signal,
         allowConfiguration: body.retrievalOnly === true ? false : undefined,
         answerIngestReport: getRequestActor(c).type === "session",
         agent: composerAgentModes(body, getRequestActor(c)),
         sessionId: body.sessionId,
-        model: body.model, speedBoost: body.speedBoost === true,
+        model: body.model, tier: choice.data.tier, reasoning: choice.data.reasoning, speedBoost: body.speedBoost === true,
         ...(scope.retrieval ? { retrieval: scope.retrieval } : {}),
         ...(scope.filters ? { filters: scope.filters } : {}),
       });
     } catch (error) {
       if (error instanceof ChatModelNotAllowedError) return apiErrorResponse(c, 400, "model_not_allowed", error.message);
+      if (error instanceof SpeedBoostUnavailableError) return apiErrorResponse(c, 400, "speed_boost_unavailable", error.message);
+      if (error instanceof ProjectChatDisabledError) return apiErrorResponse(c, 403, "chat_disabled", error.message);
       throw error;
     }
 
@@ -1413,8 +1388,10 @@ export const projectsRoutes = new Hono()
           },
         });
 
-        return c.json(project);
+        return c.json(publicProjectView((await withCanEdit(c, [project]))[0], getRequestActor(c)));
       } catch (error) {
+        // Access refusals keep their status and code (404 project_not_found, 403 editor_required); the rest is a 400.
+        if (error instanceof ProjectAccessError) return apiErrorResponse(c, error.status as 403 | 404, error.code, error.message);
         return apiStatusError(c, 400, reportPublicError(error));
       }
     },
@@ -1422,12 +1399,16 @@ export const projectsRoutes = new Hono()
   .patch(
     "/:projectId/search-settings",
     searchSettingsKeyGate,
-    zValidator("json", updateProjectSearchSettingsSchema, validationHook),
+    refuseManagedSearchFields,
+    zValidator("json", publicUpdateProjectSearchSettingsSchema, validationHook),
     async (c) => {
       const userId = c.get("sessionUser").id;
       const actor = getRequestActor(c);
       const project = await getProject(String(c.req.param("projectId")), userId);
       if (!project) return apiErrorResponse(c, 404, "project_not_found", "Project not found");
+      // A settings change: editors only (search changes can queue a paid re-index). Visible to a non-editor: 403.
+      const deniedSearch = await denyEditOfVisibleProject(c, project);
+      if (deniedSearch) return deniedSearch;
       const settings = await updateProjectSearchSettingsForUser({
         projectId: project.id,
         userId,
@@ -1454,7 +1435,7 @@ export const projectsRoutes = new Hono()
         },
       });
 
-      return c.json(settings);
+      return c.json(customerSearchSettingsView(settings));
     },
   )
   .patch(
@@ -1475,9 +1456,18 @@ export const projectsRoutes = new Hono()
           return apiErrorResponse(c, 404, "project_not_found", "Project not found");
         }
       }
+      // Settings changes can queue a paid re-index: a project the caller sees but may not edit is a 403, not a 404
+      // (owner decision, council L3). Default-project membership alone does not qualify.
+      const visible = await getProject(projectId, userId);
+      if (visible) {
+        const editAccess = await getProjectAccess(projectId, userId);
+        if (!editAccess || !canEditProject(editAccess, userId)) return editorRequired(c);
+      }
+      const managed = refuseManagedPipelineFields(c, (await c.req.json().catch(() => null) as { pipeline?: unknown } | null)?.pipeline);
+      if (managed) return managed;
       const prohibitedModel = findProhibitedModelId(c.req.valid("json").pipeline);
       if (prohibitedModel) {
-        return apiErrorResponse(c, 400, "invalid_request", `Model "${prohibitedModel}" is not permitted in pipeline configuration`);
+        return apiErrorResponse(c, 400, "invalid_request", "A model in this pipeline configuration is not permitted");
       }
       // The schema defaults a missing pipeline.indexingMode to "full", so read the raw body
       // to tell an explicit mode change (and `indexAll`) from an unrelated pipeline edit.
@@ -1514,7 +1504,7 @@ export const projectsRoutes = new Hono()
       let applied: Awaited<ReturnType<typeof applyProjectChange>>;
       try {
         const plan = await planProjectChange({
-          projectId, userId, input, indexingMode: requestedMode.success ? requestedMode.data : undefined,
+          projectId, userId, input, indexingMode: requestedMode.success ? requestedMode.data : undefined, origin: runOriginOf(c),
         });
         applied = plan
           ? await applyProjectChange({ plan, userId, updateOptions: requestedMode.success ? { indexingMode: requestedMode.data } : undefined })
@@ -1522,7 +1512,7 @@ export const projectsRoutes = new Hono()
       } catch (error) {
         if (error instanceof ProjectSlugError) return apiStatusError(c, error.status, error.message);
         if (error instanceof ConfigConflictError) return apiStatusError(c, error.status, error.message, { details: { category: error.code } });
-        if (error instanceof ChartExportUnavailableError) return apiStatusError(c, error.status, error.message, { details: { category: error.code } });
+        if (error instanceof ChartExportUnavailableError) return apiStatusError(c, error.status, error.message, { code: error.code, details: { field: "chartExport.tier" } });
         return fail(error);
       }
 
@@ -1543,7 +1533,7 @@ export const projectsRoutes = new Hono()
       let indexingJob: { runIds: string[] } | undefined;
       if (modeChange && prepared && prepared.batches.length > 0) {
         try {
-          const started = await commitIndexJobs(prepared, userId);
+          const started = await commitIndexJobs(prepared, userId, runOriginOf(c));
           for (const runId of started.runIds) {
             const run = await getRun(runId, userId);
             if (run) await runLifecycle.start(run);
@@ -1571,13 +1561,15 @@ export const projectsRoutes = new Hono()
         },
       });
 
-      return c.json({ ...project, ...(indexingJob ? { indexingJob } : {}), ...(applied.job ? { job: applied.job } : {}) });
+      return c.json({ ...publicProjectView((await withCanEdit(c, [project]))[0], getRequestActor(c)), ...(indexingJob ? { indexingJob } : {}), ...(applied.job ? { job: applied.job } : {}) });
     },
   )
   .post(
     "/:projectId/estimate",
     zValidator("json", updateProjectSchema, validationHook),
     async (c) => {
+      const managed = refuseManagedPipelineFields(c, (await c.req.json().catch(() => null) as { pipeline?: unknown } | null)?.pipeline);
+      if (managed) return managed;
       const userId = c.get("sessionUser").id;
       const project = await getProject(c.req.param("projectId"), userId);
       if (!project) return apiErrorResponse(c, 404, "project_not_found", "Project not found");
@@ -1590,9 +1582,10 @@ export const projectsRoutes = new Hono()
         }
         if (!apiKeyCanUseProject(actor.apiKey, project)) return apiErrorResponse(c, 404, "project_not_found", "Project not found");
       }
-      const access = await getProjectAccess(project.id, userId);
-      if (!access || !canEditProject(access, userId)) return apiErrorResponse(c, 404, "project_not_found", "Project not found");
-      const result = await estimateProjectChange({ projectId: project.id, userId, input: c.req.valid("json") });
+      // Same rule as the PATCH it prices: a visible project the caller may not edit is 403 editor_required.
+      const deniedEstimate = await denyEditOfVisibleProject(c, project);
+      if (deniedEstimate) return deniedEstimate;
+      const result = await estimateProjectChange({ projectId: project.id, userId, input: c.req.valid("json"), origin: runOriginOf(c) });
       if (!result) return apiErrorResponse(c, 404, "project_not_found", "Project not found");
       return c.json(result);
     },
@@ -1601,13 +1594,15 @@ export const projectsRoutes = new Hono()
     "/:projectId/search-settings/estimate",
     // Same gates as the PATCH. The MCP in-process forward bypasses sessionAuth, so they run here.
     searchSettingsKeyGate,
-    zValidator("json", updateProjectSearchSettingsSchema, validationHook),
+    refuseManagedSearchFields,
+    zValidator("json", publicUpdateProjectSearchSettingsSchema, validationHook),
     async (c) => {
       const userId = c.get("sessionUser").id;
       const projectId = String(c.req.param("projectId"));
       const before = await getProjectSearchSettingsForUser(projectId, userId);
       const access = before ? await getProjectAccess(projectId, userId) : null;
-      if (!before || !access || !canEditProject(access, userId)) return apiErrorResponse(c, 404, "project_not_found", "Project not found");
+      if (!before || !access) return apiErrorResponse(c, 404, "project_not_found", "Project not found");
+      if (!canEditProject(access, userId)) return editorRequired(c);
       const after = mergeProjectSearchSettings(before, c.req.valid("json"));
       return c.json({ impact: analyzeSearchSettingsChange(before, after), estimate: null, billing: billingState() });
     },
@@ -1628,6 +1623,9 @@ export const projectsRoutes = new Hono()
         }
         if (!apiKeyCanUseProject(actor.apiKey, project)) return apiErrorResponse(c, 404, "project_not_found", "Project not found");
       }
+      // Switching the mode is a settings change: editors only, like the PATCH.
+      const deniedModeEstimate = await denyEditOfVisibleProject(c, project);
+      if (deniedModeEstimate) return deniedModeEstimate;
       return c.json(await estimateModeSwitch(project.id, c.req.valid("json").mode, c.req.valid("json").speedBoost === true));
     },
   )
@@ -1646,7 +1644,7 @@ export const projectsRoutes = new Hono()
         return apiErrorResponse(c, 403, "forbidden", "Forbidden");
       }
       const access = await getProjectAccess(project.id, userId);
-      if (!access || !canEditProject(access, userId)) return apiErrorResponse(c, 403, "forbidden", "Forbidden");
+      if (!access || !canEditProject(access, userId)) return editorRequired(c);
       const resolved = await resolveMaterializationPolicy({
         projectPipeline: project.pipeline,
         apiKey: actor.type === "apiKey" ? actor.apiKey : null,
@@ -1696,7 +1694,7 @@ export const projectsRoutes = new Hono()
         return apiErrorResponse(c, 403, "forbidden", "Forbidden");
       }
       const access = await getProjectAccess(project.id, userId);
-      if (!access || !canEditProject(access, userId)) return apiErrorResponse(c, 403, "forbidden", "Forbidden");
+      if (!access || !canEditProject(access, userId)) return editorRequired(c);
       const resolved = await resolveMaterializationPolicy({
         projectPipeline: project.pipeline,
         apiKey: actor.type === "apiKey" ? actor.apiKey : null,
@@ -1731,6 +1729,11 @@ export const projectsRoutes = new Hono()
       const project = await getProject(c.req.param("projectId"), userId);
       if (!project || (actor.type === "apiKey" && !apiKeyCanUseProject(actor.apiKey, project))) return apiErrorResponse(c, 404, "project_not_found", "Project not found");
       const body = c.req.valid("json");
+      // Every bulk action but an export changes documents: the same editor rule as the action itself (403, not an empty 200).
+      if (body.action !== "export-artifacts") {
+        const deniedBulkEstimate = await denyReprocessOfVisible(c, [{ orgId: project.orgId, projectId: project.id }]);
+        if (deniedBulkEstimate) return deniedBulkEstimate;
+      }
       const estimate = body.action === "reprocess"
         ? await estimateDocumentReprocess({ speedBoost: body.speedBoost === true, documentIds: body.documentIds, userId, projectId: project.id })
         : null;

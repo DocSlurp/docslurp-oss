@@ -59,23 +59,42 @@ export function resolveQualityPipeline(flags: Record<string, string | boolean>):
   return { pipeline: { quality: quality as (typeof QUALITY_MODES)[number] } };
 }
 
+const CHART_EXPORT_TIERS = ["off", "free", "models"] as const;
+type ChartExportTier = (typeof CHART_EXPORT_TIERS)[number];
+
+/** `--chart-export off|free|models` as a per-request override, or null when the project setting (or the API default, off) applies. */
+export function resolveChartExportFlag(flags: Record<string, string | boolean>): { tier: ChartExportTier } | null {
+  if (flags.chartExport === undefined) return null;
+  const tier = typeof flags.chartExport === "string" ? flags.chartExport.trim().toLowerCase() : "";
+  if (!(CHART_EXPORT_TIERS as readonly string[]).includes(tier)) throw new Error("--chart-export must be off, free or models.");
+  return { tier: tier as ChartExportTier };
+}
+
+/** `--quality` and `--chart-export` as one pipeline override, or {} when neither is given. */
+export function resolveIntakePipeline(flags: Record<string, string | boolean>): { pipeline?: { quality?: (typeof QUALITY_MODES)[number]; chartExport?: { tier: ChartExportTier } } } {
+  const quality = resolveQualityPipeline(flags).pipeline?.quality;
+  const chartExport = resolveChartExportFlag(flags);
+  const pipeline = { ...(quality ? { quality } : {}), ...(chartExport ? { chartExport } : {}) };
+  return Object.keys(pipeline).length ? { pipeline } : {};
+}
+
 function usage(): void {
   console.log(`Usage:
-  docslurp estimate <files...> [--quality <fast|auto|good>] [--indexing <full|on-demand|visual>] [--months <n>] [--json]
-  docslurp upload <files...> [--project <id|slug|name> | --new-project] [--template <key>] [--quality <fast|auto|good>] [--canonical-id <id>] [--path <folder>] [--idempotency-key <key>] [--estimate] [--watch] [--api-url <url>]
-  docslurp ingest-url <urls...> [--project <id|slug|name> | --new-project] [--template <key>] [--quality <fast|auto|good>] [--watch] [--api-url <url>]
+  docslurp estimate <files...> [--quality <fast|auto|good>] [--indexing <full|on-demand|visual>] [--chart-export <off|free|models>] [--months <n>] [--json]
+  docslurp upload <files...> [--project <id|slug|name> | --new-project] [--template <key>] [--quality <fast|auto|good>] [--chart-export <off|free|models>] [--canonical-id <id>] [--path <folder>] [--idempotency-key <key>] [--estimate] [--watch] [--api-url <url>]
+  docslurp ingest-url <urls...> [--project <id|slug|name> | --new-project] [--template <key>] [--quality <fast|auto|good>] [--chart-export <off|free|models>] [--estimate] [--watch] [--api-url <url>]
   docslurp extract <files...|urls...> [--retention-days <n>] [--no-email] [--download <markdown|all>] [upload options]
   docslurp extract-status <extractId> [--json]
   docslurp extract-download <extractId>
   docslurp full-index [--project <id|slug|name>] [--document <id>] [--estimate] [--watch]
-  docslurp reprocess <runId> [--stage-from <stage>] [--estimate] [--watch]
+  docslurp reprocess <runId> [--stage-from <stage>] [--chart-export <off|free|models>] [--estimate] [--watch]
   docslurp jobs get <jobId> [--json]
   docslurp jobs watch <jobId> [--timeout <seconds>]
   docslurp status <runId> [--api-url <url>] [--watch] [--timeout <seconds>]
   docslurp runs [--limit <1-100>] [--cursor <nextCursor>] [--api-url <url>]
-  docslurp search <query> [--project <id|slug|name>] [--min-score <0..1>] [--mode <keyword|hybrid|deep>] [--json | --context]
+  docslurp search <query> [--project <id|slug|name>] [--min-score <0..1>] [--mode <keyword|hybrid|deep>] [--stream [--stats]] [--json | --context]
   docslurp search --queries-file <queries.json> [--project <id|slug|name>] [--concurrency <1..4>] [--json | --context]
-  docslurp chat <question> [--project <id|slug|name>] [--session <id>] [--json]
+  docslurp chat <question> [--project <id|slug|name>] [--session <id>] [--tier fastest|balanced|smart] [--reasoning none|minimal|low|medium|high] [--json]
   docslurp mcp-server [--api-url <url>] [--api-key <key>]   (alias: docslurp mcp)
   docslurp login [--device] [--scopes "search:deep read chat ingest"] [--no-browser] [--profile <name>] [--api-url <url>]
   docslurp logout [--profile <name>] [--force]
@@ -104,6 +123,10 @@ it with that name (and --template, if given); other commands answer project not 
 fast reads the text layer only and keeps scanned pages as images, not read (lowest price);
 auto reads each page the cheapest faithful way (its price depends on the mix of pages);
 good reads every page with a vision model (highest price). Prices: https://docslurp.io/pricing
+--chart-export sets chart and diagram export for this request (default: the project's setting,
+off for CLI and API calls when the project has none): off; free exports charts that carry
+their own data (Office charts, embedded chart specs, vector graphics) at no charge; models
+also reads other charts with AI, billed per chart read. upload --estimate and estimate price it.
 --estimate prints the work estimate (pages, documents, credits, time) for the operation and exits without doing it.
 Mutations that queue background work print their job; follow it with docslurp jobs watch <jobId>.
 --watch waits up to five minutes by default; --timeout sets its limit.
@@ -266,6 +289,27 @@ function normalizeCompatImportPayload(args: {
   };
 }
 
+/** Flags that take no value, by their command-line name, and the key commands read them as. */
+const BOOLEAN_FLAGS: Readonly<Record<string, string>> = {
+  watch: "watch", json: "json", context: "context", estimate: "estimate", device: "device", force: "force", stream: "stream", stats: "stats",
+  "no-browser": "noBrowser", "no-email": "noEmail", "new-project": "newProject",
+};
+
+/** Flags that take a value (`--flag value` or `--flag=value`); the key is the camelCase name. */
+const VALUE_FLAGS: ReadonlySet<string> = new Set([
+  "project", "api-url", "api-key", "run", "source", "out", "queries-file", "concurrency", "min-score", "session", "canonical-id", "path",
+  "template", "document", "stage-from", "retention-days", "download", "quality", "chart-export", "idempotency-key",
+  "timeout", "limit", "cursor", "mode", "tier", "reasoning", "months", "indexing", "model", "scopes", "profile",
+]);
+
+const camel = (name: string) => name.replace(/-([a-z])/g, (_, c: string) => c.toUpperCase());
+
+/**
+ * The command, its positional arguments and its flags. Strict (council #387 r2 M1): an unknown flag is an error, never a
+ * flag that swallows the next argument (`--yes --estimate` once started a billed ingest); a value flag never takes a
+ * value that starts with `--`; a flag without a value takes none (`--estimate=true` is an error, not a different flag);
+ * `--flag=value` works for value flags. A bare `-x` stays positional as before.
+ */
 function parseCliArgs(argv: string[]) {
   const command = argv[0];
   const positional: string[] = [];
@@ -273,32 +317,31 @@ function parseCliArgs(argv: string[]) {
 
   let i = 1;
   while (i < argv.length) {
-    const arg = argv[i];
-    if (/^--(?:workspace(?:-id|-name)?|new-workspace)(?:=|$)/.test(arg ?? "")) throw new Error("Legacy workspace flags are no longer supported; use --project or --new-project.");
-    if (arg === "--watch" || arg === "--json" || arg === "--context" || arg === "--estimate" || arg === "--device" || arg === "--force") {
-      flags[arg.slice(2)] = true;
+    const arg = argv[i] ?? "";
+    if (/^--(?:workspace(?:-id|-name)?|new-workspace)(?:=|$)/.test(arg)) throw new Error("Legacy workspace flags are no longer supported; use --project or --new-project.");
+    if (!arg.startsWith("--")) {
+      positional.push(arg);
       i++;
-    } else if (arg === "--no-browser") {
-      flags.noBrowser = true;
+      continue;
+    }
+    const eq = arg.indexOf("=");
+    const name = eq >= 0 ? arg.slice(2, eq) : arg.slice(2);
+    if (name === "project-name" || name === "project-id") {
+      throw new Error(`--${name} was removed: pass a project ID, slug or name with --project (a name that matches no project is created on upload).`);
+    }
+    const boolean = BOOLEAN_FLAGS[name];
+    if (boolean) {
+      if (eq >= 0) throw new Error(`--${name} takes no value (got ${arg}).`);
+      flags[boolean] = true;
       i++;
-    } else if (arg === "--no-email") {
-      flags.noEmail = true;
-      i++;
-    } else if (arg === "--new-project") {
-      flags.newProject = true;
-      i++;
-    } else if (arg === "--project-name" || arg === "--project-id") {
-      throw new Error(`${arg} was removed: pass a project ID, slug or name with --project (a name that matches no project is created on upload).`);
-    } else if (arg === "--project" || arg === "--api-url" || arg === "--run" || arg === "--api-key" || arg === "--source" || arg === "--out" || arg === "--queries-file" || arg === "--concurrency" || arg === "--min-score" || arg === "--session" || arg === "--canonical-id" || arg === "--path" || arg === "--template" || arg === "--document" || arg === "--stage-from" || arg === "--retention-days" || arg === "--download" || arg === "--quality" || arg === "--idempotency-key") {
-      const key = arg.replace(/^--/, "").replace(/-([a-z])/g, (_, c: string) => c.toUpperCase());
-      flags[key] = argv[i + 1] ?? "";
-      i += 2;
-    } else if (arg?.startsWith("--")) {
-      flags[arg.replace(/^--/, "")] = argv[i + 1] ?? "";
-      i += 2;
+    } else if (VALUE_FLAGS.has(name)) {
+      const value = eq >= 0 ? arg.slice(eq + 1) : argv[i + 1];
+      // An empty value is never meant (`--project=` would otherwise quietly mean the default project).
+      if (value === undefined || value.trim() === "" || (eq < 0 && value.startsWith("--"))) throw new Error(`--${name} needs a value.`);
+      flags[camel(name)] = value;
+      i += eq >= 0 ? 1 : 2;
     } else {
-      positional.push(arg ?? "");
-      i++;
+      throw new Error(`Unknown flag --${name}${command ? ` for ${command}` : ""}. Run docslurp --help for the flags each command takes.`);
     }
   }
 
@@ -572,7 +615,8 @@ async function uploadCommand(files: string[], flags: Record<string, string | boo
   if (flags.estimate === true && intake === UPLOAD_MODE) {
     const target = resolveIntakeTarget(flags);
     const estimateFiles = await profiledEstimateFiles(files);
-    await runEstimate("/v1/uploads/estimate", { files: estimateFiles, ...(target.project ? { project: target.project } : {}) }, flags);
+    const chartExport = resolveChartExportFlag(flags);
+    await runEstimate("/v1/uploads/estimate", { files: estimateFiles, ...(target.project ? { project: target.project } : {}), ...(chartExport ? { chartExport } : {}) }, flags);
     return;
   }
 
@@ -583,8 +627,8 @@ async function uploadCommand(files: string[], flags: Record<string, string | boo
   if (target.project) formData.append("project", target.project);
   if (target.newProject) formData.append("newProject", "true");
   if (target.templateKey) formData.append("templateKey", target.templateKey);
-  const qualityPipeline = resolveQualityPipeline(flags).pipeline;
-  if (qualityPipeline) formData.append("pipeline", JSON.stringify(qualityPipeline));
+  const intakePipeline = resolveIntakePipeline(flags).pipeline;
+  if (intakePipeline) formData.append("pipeline", JSON.stringify(intakePipeline));
   if (typeof flags.canonicalId === "string") {
     // Re-uploading with the same canonical ID replaces the previous version in search.
     if (files.length !== 1) throw new Error("--canonical-id applies to a single file.");
@@ -681,8 +725,10 @@ async function estimateCommand(files: string[], flags: Record<string, string | b
   if (typeof flags.quality === "string") settings.quality = resolveQualityPipeline(flags).pipeline?.quality;
   if (typeof flags.indexing === "string") settings.indexing = flags.indexing;
   if (typeof flags.months === "string") settings.hostingMonths = Number.parseInt(flags.months, 10);
+  const chartExport = resolveChartExportFlag(flags);
+  if (chartExport) settings.chartExport = chartExport.tier;
   const body = { files: await profiledEstimateFiles(files), ...(Object.keys(settings).length ? { settings } : {}) };
-  const base = (typeof flags["api-url"] === "string" ? flags["api-url"] : process.env.DOCSLURP_API_URL ?? "https://docslurp.io").replace(/\/$/, "");
+  const base = (typeof flags.apiUrl === "string" ? flags.apiUrl : process.env.DOCSLURP_API_URL ?? "https://docslurp.io").replace(/\/$/, "");
   const response = await fetch(`${base}/v1/estimate`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
   if (!response.ok) {
     console.error(`Error: estimate failed (${response.status}): ${await response.text()}`);
@@ -744,7 +790,8 @@ async function reprocessCommand(runId: string | undefined, flags: Record<string,
     return;
   }
   const base = `/v1/runs/${encodeURIComponent(runId)}/reprocess`;
-  const body = typeof flags.stageFrom === "string" && flags.stageFrom ? { stageFrom: flags.stageFrom } : {};
+  const chartExport = resolveChartExportFlag(flags);
+  const body = { ...(typeof flags.stageFrom === "string" && flags.stageFrom ? { stageFrom: flags.stageFrom } : {}), ...(chartExport ? { chartExport } : {}) };
   if (flags.estimate === true) return runEstimate(`${base}/estimate`, body, flags);
   await startWork(base, body, flags);
 }
@@ -874,10 +921,22 @@ async function ingestUrlCommand(urls: string[], flags: Record<string, string | b
     process.exitCode = 1;
     return;
   }
+  // Every argument must be an http(s) URL, checked here before anything is sent (council #387 r3): a dash-led word such as
+  // `-e` or `—estimate` is a mistyped flag, never a URL to ingest.
+  assertIngestUrls(urls);
+  if (flags.estimate === true) {
+    // An estimate never starts an ingest (council #387 M1): sizes come from each URL's own headers, read from here.
+    const files = await urlEstimateFiles(urls);
+    const target = resolveIntakeTarget(flags);
+    const chartExport = resolveChartExportFlag(flags);
+    const quality = resolveQualityPipeline(flags).pipeline?.quality;
+    await runEstimate("/v1/uploads/estimate", { files, ...(target.project ? { project: target.project } : {}), ...(chartExport ? { chartExport } : {}), ...(quality ? { settings: { quality } } : {}) }, flags);
+    return;
+  }
   const response = await apiFetch(`${intake.base}/url`, flags, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ urls, ...resolveIntakeTarget(flags), ...resolveQualityPipeline(flags), ...intake.fields }),
+    body: JSON.stringify({ urls, ...resolveIntakeTarget(flags), ...resolveIntakePipeline(flags), ...intake.fields }),
   });
   if (!response.ok) {
     printFailure(await responseFailure(response));
@@ -886,6 +945,51 @@ async function ingestUrlCommand(urls: string[], flags: Record<string, string | b
   }
   await printIntakeResult(response, flags);
 }
+
+/** Hyphen, the Unicode dashes and minus signs: an argument that starts with one is a mistyped flag. */
+const DASH_LED = /^[-\u2010-\u2015\u2212\uFE58\uFE63\uFF0D]/;
+
+/** Throws unless every argument is an absolute http(s) URL with a host and no credentials. */
+export function assertIngestUrls(urls: readonly string[]): void {
+  for (const raw of urls) {
+    if (DASH_LED.test(raw)) throw new Error(`${raw} looks like a flag, not a URL. Flags start with two ASCII hyphens (--estimate); run docslurp --help.`);
+    let url: URL;
+    try { url = new URL(raw); } catch { throw new Error(`${raw} is not a URL. ingest-url takes http(s) URLs.`); }
+    if ((url.protocol !== "https:" && url.protocol !== "http:") || !url.hostname) throw new Error(`${raw} is not an http(s) URL.`);
+    if (url.username || url.password) throw new Error(`${url.protocol}//${url.host}: URLs with credentials are not accepted.`);
+  }
+}
+
+/**
+ * Estimate inputs for URLs: name from the path, size and type from a HEAD request (redirects followed, 15 s each). A URL
+ * that reports no usable size cannot be estimated: the command fails before any request to DocSlurp, rather than
+ * guessing. The sizes are the server's own claim and only shape the estimate; the ingest is billed by what is measured.
+ */
+async function urlEstimateFiles(urls: string[]): Promise<Array<{ name: string; size: number; type?: string }>> {
+  const files: Array<{ name: string; size: number; type?: string }> = [];
+  for (const raw of urls) {
+    let url: URL;
+    try { url = new URL(raw); } catch { throw new Error(`--estimate: ${raw} is not a URL.`); }
+    if (url.protocol !== "https:" && url.protocol !== "http:") throw new Error(`--estimate: ${raw} is not an http(s) URL.`);
+    let response: Response;
+    try {
+      response = await fetch(url, { method: "HEAD", redirect: "follow", signal: AbortSignal.timeout(15_000) });
+    } catch {
+      throw new Error(`--estimate: could not reach ${url.href} to read its size. Download it and run docslurp estimate <file>.`);
+    }
+    const size = Number(response.headers.get("content-length"));
+    if (!response.ok || !Number.isSafeInteger(size) || size <= 0) {
+      throw new Error(`--estimate: ${url.href} reports no size (HTTP ${response.status}). Download it and run docslurp estimate <file>.`);
+    }
+    const name = decodeURIComponent(url.pathname.split("/").filter(Boolean).at(-1) ?? "") || url.hostname;
+    const type = response.headers.get("content-type")?.split(";")[0]?.trim();
+    files.push({ name: name.slice(0, 255), size, ...(type ? { type } : {}) });
+  }
+  return files;
+}
+
+/** Commands that read `--estimate`; anywhere else the flag is refused, so it can never silently run billed work. */
+const ESTIMATE_COMMANDS: ReadonlySet<string> = new Set(["upload", "ingest-url", "full-index", "reprocess"]);
 
 /** `docslurp extract`: files or URLs (not both), with the retention options. */
 async function extractCommand(inputs: string[], flags: Record<string, string | boolean>): Promise<void> {
@@ -1172,6 +1276,11 @@ async function searchCommand(query: string, flags: Record<string, string | boole
   if (minScore !== undefined && !(minScore >= 0 && minScore <= 1)) throw new Error("--min-score must be a number from 0 to 1.");
   const mode = typeof flags.mode === "string" ? flags.mode.trim() : undefined;
   if (flags.mode !== undefined && !["keyword", "hybrid", "deep"].includes(mode ?? "")) throw new Error("--mode must be keyword, hybrid or deep.");
+  if (flags.stats && !flags.stream) throw new Error("--stats requires --stream.");
+  if (flags.stream) {
+    await searchStreamCommand({ q: query, ...(project ? { project } : {}), ...(minScore === undefined ? {} : { minScore }), ...(mode ? { mode } : {}), ...(flags.stats ? { stats: true } : {}) }, flags);
+    return;
+  }
   const params = new URLSearchParams({ q: query, ...(project ? { project } : {}), ...(minScore === undefined ? {} : { minScore: String(minScore) }), ...(mode ? { mode } : {}) });
   const response = await apiFetch(`/v1/search?${params.toString()}`, flags);
   if (!response.ok) throw await responseFailure(response);
@@ -1179,13 +1288,164 @@ async function searchCommand(query: string, flags: Record<string, string | boole
   if (flags.json) console.log(JSON.stringify(data)); else printSearch(data, flags);
 }
 
+
+type CliSearchStreamEvent = { type: string; searchId?: string; seq?: number; elapsedMs?: number; [key: string]: unknown };
+
+/** Complete SSE frames from a byte stream: handles CRLF, comments, split chunks and multi-line data. */
+async function* sseFrames(body: AsyncIterable<Uint8Array>, maxFrameBytes = 1_048_576): AsyncGenerator<{ event: string; data: string }> {
+  const decoder = new TextDecoder();
+  let buffer = "";
+  const frame = (block: string) => {
+    let event = "message";
+    const data: string[] = [];
+    for (const line of block.split("\n")) {
+      if (!line || line.startsWith(":")) continue;
+      const colon = line.indexOf(":");
+      const field = colon < 0 ? line : line.slice(0, colon);
+      const value = colon < 0 ? "" : line.slice(colon + 1).replace(/^ /, "");
+      if (field === "event") event = value;
+      else if (field === "data") data.push(value);
+    }
+    return data.length ? { event, data: data.join("\n") } : null;
+  };
+  for await (const chunk of body) {
+    buffer = (buffer + decoder.decode(chunk, { stream: true })).replace(/\r\n?/g, (m, offset, whole) => (m === "\r" && offset === whole.length - 1 ? m : "\n"));
+    if (buffer.length > maxFrameBytes) throw new Error(`DocSlurp SSE frame exceeds ${Math.round(maxFrameBytes / 1_048_576)} MiB`);
+    let split: number;
+    while ((split = buffer.indexOf("\n\n")) >= 0) {
+      const parsed = frame(buffer.slice(0, split));
+      buffer = buffer.slice(split + 2);
+      if (parsed) yield parsed;
+    }
+  }
+  const rest = frame(buffer.replace(/\r/g, "\n"));
+  if (rest) yield rest;
+}
+
+/**
+ * `search --stream`: prints each retrieval leg's hits to stderr as they land (completion order, provisional), then the final ranked list
+ * to stdout exactly as without `--stream`. With `--json` stdout is one event per line (NDJSON), each event verbatim. A search is billed once
+ * it has produced hits, so it falls back to `GET /v1/search` only when the stream never started: HTTP 404/405/406/501, a 2xx that is not an
+ * event stream, or a connection failure before any response. After the first event a drop, a malformed or oversized frame, or a stream that
+ * ends without `search.results` is an error and never a second search; a drop after `search.results` still prints the answer.
+ */
+async function searchStreamCommand(input: { q: string; project?: string; minScore?: number; mode?: string; stats?: boolean }, flags: Record<string, string | boolean>): Promise<void> {
+  const json = flags.json === true;
+  const started = Date.now();
+  let final: CliSearchResponse | undefined;
+  let seq = 0;
+  const emit = (event: CliSearchStreamEvent) => { if (json) console.log(JSON.stringify(event)); };
+  const note = (line: string) => { if (!json) console.error(line); };
+  const unavailable = (response: Response) => [404, 405, 406, 501].includes(response.status) || (response.ok && !response.headers.get("content-type")?.includes("text/event-stream"));
+  const interrupted = (why: string) => new Error(`The search stream ${why} after it started. Not retried: a search is billed once it has produced hits. Run the search again.`);
+  let fallbackReason: string | undefined;
+  {
+    let response: Response | undefined;
+    try {
+      response = await apiFetch("/v1/search/stream", flags, {
+        method: "POST", headers: { "Content-Type": "application/json", Accept: "text/event-stream" }, body: JSON.stringify(input),
+      }, Number(flags.timeout ?? 120) * 1000);
+    } catch (error) {
+      // A connection failure before any response: the search never started.
+      if (!(error instanceof TypeError)) throw error;
+      fallbackReason = "could not connect to the stream endpoint";
+    }
+    if (response) {
+      if (unavailable(response)) {
+        await response.body?.cancel().catch(() => undefined);
+        fallbackReason = "stream endpoint unavailable";
+      } else if (!response.ok) throw await responseFailure(response);
+      else if (!response.body) fallbackReason = "stream endpoint unavailable";
+      else {
+        let received = false;
+        // The first leg and rank of each hit body already printed, for hits a later leg reports by id only.
+        const printed = new Map<string, string>();
+        try {
+          for await (const frame of sseFrames(response.body as unknown as AsyncIterable<Uint8Array>, 32 * 1_048_576)) {
+            received = true;
+            let event: CliSearchStreamEvent;
+            try { event = JSON.parse(frame.data); } catch { throw interrupted("sent a malformed event"); }
+            if (!event || typeof event.type !== "string") continue;
+            if (typeof event.seq === "number") seq = Math.max(seq, event.seq + 1);
+            if (event.type === "search.error") {
+              const error = event.error as { code?: string; status?: number } | undefined;
+              const status = typeof error?.status === "number" ? error.status : 500;
+              emit(event);
+              throw new CliApiError(status, safeHttpFailure(status, { error: { code: error?.code } }));
+            }
+            if (event.type === "search.hits") {
+              emit(event);
+              const hits = (event.hits as Array<{ id: string; legRank: number; result?: CliSearchResponse["results"][number] }>) ?? [];
+              const stats = event.stats as { ms?: number; candidates?: number; timedOut?: boolean } | undefined;
+              const detail = flags.stats && stats ? ` ${stats.ms}ms${stats.candidates === undefined ? "" : `, ${stats.candidates} candidates`}${stats.timedOut ? ", timed out" : ""}` : "";
+              const scope = typeof event.subSearch === "number" ? ` (sub-search ${event.subSearch + 1})` : "";
+              note(`[${String(event.leg)}]${scope} ${hits.length} hit${hits.length === 1 ? "" : "s"}${event.truncated ? "+" : ""}${detail}`);
+              for (const hit of hits) {
+                if (!hit.result) {
+                  note(`  ${String(event.leg)} #${hit.legRank + 1} also found by ${printed.get(hit.id) ?? "an earlier leg"}`);
+                  continue;
+                }
+                const page = hit.result.citation.pageNumbers?.length ? hit.result.citation.pageNumbers.join(", ") : hit.result.citation.pageNumber ?? "-";
+                if (!printed.has(hit.id)) printed.set(hit.id, `${String(event.leg)} #${hit.legRank + 1} (${hit.result.citation.filename}, p.${page})`);
+                note(`  ${String(event.leg)} #${hit.legRank + 1} ${hit.result.citation.filename} (p.${page}) ${hit.result.text.slice(0, 100).replace(/\n/g, " ")}`);
+              }
+            } else if (event.type === "search.phase") {
+              emit(event);
+              const stats = event.stats as { ms?: number } | undefined;
+              if (flags.stats) note(`[${String(event.phase)}] ${stats?.ms}ms`);
+            } else if (event.type === "search.results") {
+              emit(event);
+              final = (event.response as CliSearchResponse);
+            } else if (event.type === "search.started" || event.type === "search.done") {
+              emit(event);
+              if (event.type === "search.done" && flags.stats && event.timings) note(`timings: ${Object.entries(event.timings as Record<string, number>).map(([name, ms]) => `${name} ${ms}ms`).join(", ")}`);
+            }
+          }
+          if (!final) {
+            if (received) throw interrupted("ended without the final results");
+            fallbackReason = "stream ended before any event";
+          }
+        } catch (error) {
+          // The answer arrived: a later drop does not matter. Otherwise nothing is retried once the stream started.
+          if (final) { /* print it below */ }
+          else if (error instanceof CliApiError || (error instanceof Error && error.message.startsWith("The search stream "))) throw error;
+          else if (received || (error instanceof Error && /exceeds \d+ MiB/.test(error.message))) throw interrupted(error instanceof Error && /exceeds \d+ MiB/.test(error.message) ? "sent an oversized event" : "dropped");
+          else fallbackReason = "stream dropped before any event";
+        }
+      }
+    }
+  }
+  if (!final) {
+    note(`Falling back to the JSON search (${fallbackReason ?? "stream unavailable"}).`);
+    const params = new URLSearchParams({ q: input.q, ...(input.project ? { project: input.project } : {}), ...(input.minScore === undefined ? {} : { minScore: String(input.minScore) }), ...(input.mode ? { mode: input.mode } : {}) });
+    const response = await apiFetch(`/v1/search?${params.toString()}`, flags);
+    if (!response.ok) throw await responseFailure(response);
+    final = await response.json() as CliSearchResponse;
+    const sessionId = String((final as { sessionId?: unknown }).sessionId ?? "");
+    const envelope = () => ({ searchId: `json-${sessionId}`, seq: seq++, elapsedMs: Date.now() - started });
+    emit({ ...envelope(), type: "search.results", response: final });
+    emit({ ...envelope(), type: "search.done", sessionId, resultCount: final.results.length });
+  }
+  if (!json) {
+    if (flags.context !== true) console.log(flags.stats ? `\nFinal ranking (${Date.now() - started}ms):` : "\nFinal ranking:");
+    printSearch(final, flags);
+  }
+}
+
+const CHAT_TIERS = ["fastest", "balanced", "smart"] as const;
+
 async function chatCommand(question: string, flags: Record<string, string | boolean>): Promise<void> {
   const project = resolveProject(flags);
   if (!question.trim()) throw new Error("Chat question required.");
   if (flags.context || flags.queriesFile || flags.concurrency) throw new Error("Chat accepts one question; batch/context options are for search.");
+  if (flags.model !== undefined) throw new Error(`Chat models are managed by DocSlurp. Use --tier (${CHAT_TIERS.join(", ")}) instead of --model.`);
+  const tier = flags.tier === undefined ? undefined : String(flags.tier);
+  if (tier !== undefined && !(CHAT_TIERS as readonly string[]).includes(tier)) throw new Error(`--tier must be one of ${CHAT_TIERS.join(", ")}.`);
+  const reasoning = flags.reasoning === undefined ? undefined : String(flags.reasoning);
+  if (reasoning !== undefined && !["none", "minimal", "low", "medium", "high"].includes(reasoning)) throw new Error("--reasoning must be one of none, minimal, low, medium, high.");
   const response = await apiFetch("/v1/chat", flags, {
     method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ q: question, ...(project ? { project } : {}), ...(flags.session ? { sessionId: String(flags.session) } : {}) }),
+    body: JSON.stringify({ q: question, ...(project ? { project } : {}), ...(flags.session ? { sessionId: String(flags.session) } : {}), ...(tier ? { tier } : {}), ...(reasoning ? { reasoning } : {}) }),
   });
   if (!response.ok) throw await responseFailure(response);
   const data = await response.json() as { answer: string; sessionId: string; citations: CliSearchResponse["results"]; usage?: unknown; availability?: { message?: string | null } };
@@ -1376,6 +1636,9 @@ async function main(): Promise<void> {
   }
 
   const { command, positional, flags } = parseCliArgs(own);
+  if (flags.estimate === true && !ESTIMATE_COMMANDS.has(command ?? "")) {
+    throw new Error(`--estimate is not supported by ${command ?? "this command"}: it would run the command instead of estimating it. Commands with --estimate: ${[...ESTIMATE_COMMANDS].join(", ")}.`);
+  }
 
   switch (command) {
     case "upload":

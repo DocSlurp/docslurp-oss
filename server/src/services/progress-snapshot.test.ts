@@ -81,3 +81,17 @@ describe("operator diagnostics nested in events and stage stats", () => {
     expect(JSON.stringify(redactOperatorKeys(deep))).not.toContain("rssBytes");
   });
 });
+
+describe("customer run events carry no backend models", () => {
+  it("drops the routing stage's decision model and decision trace from stage.completed events", () => {
+    const event = {
+      id: "e1", type: "stage.completed",
+      stats: { pages: 4, decisionModel: "openai/gpt-6-luna-decisions", decisionChain: [{ model: "cloudflare/clef-flash", outcome: "fallback", reason: "clef-flash timed out" }], cpuMs: 12 },
+      payload: { route: { model: "typesafe/jev-1.13", pages: 4 } },
+    };
+    const out = redactOperatorEvent(event);
+    expect(out.stats).toEqual({ pages: 4 });
+    expect(out.payload).toEqual({ route: { pages: 4 } });
+    expect(JSON.stringify(out)).not.toMatch(/luna|clef|jev|openai\/|cloudflare\/|typesafe\//);
+  });
+});

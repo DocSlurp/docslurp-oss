@@ -16,6 +16,9 @@ const listenForRunEventsMock = vi.fn();
 const listRunEventsMock = vi.fn();
 const isApiKeyLiveMock = vi.fn(async () => true);
 vi.mock("../services/api-key-liveness.js", () => ({ isApiKeyLive: isApiKeyLiveMock }));
+// Who may reprocess is decided against the database (reprocess-editors-only.db.test.ts); these route tests stub it.
+const denyReprocessMock = vi.fn(async (..._args: unknown[]): Promise<Response | null> => null);
+vi.mock("../lib/reprocess-access.js", () => ({ denyReprocessOfVisible: denyReprocessMock, callerCanReprocess: vi.fn(async () => true) }));
 
 class MockReprocessRejectedError extends Error {
   constructor(
@@ -121,6 +124,7 @@ describe("runsRoutes validation", () => {
     reprocessRunMock.mockReset();
     retryRunMock.mockReset();
     startPipelineWorkflowMock.mockReset();
+    getRunMock.mockResolvedValue({ id: "run-1", projectId: "ws-1", orgId: "org-1" });
   });
 
   it("returns preview validation issues before querying preview estimates", async () => {
@@ -186,7 +190,7 @@ describe("runsRoutes validation", () => {
 
     expect(response.status).toBe(409);
     await expect(response.json()).resolves.toMatchObject({ error: { code: "missing_stage_artifacts" } });
-    expect(reprocessRunMock).toHaveBeenCalledWith("run-1", "user-1", { stageFrom: "embed" });
+    expect(reprocessRunMock).toHaveBeenCalledWith("run-1", "user-1", { stageFrom: "embed", origin: "machine", apiKeyId: null });
   });
 
   it("rejects unknown reprocess stages before creating a run", async () => {
@@ -248,7 +252,7 @@ describe("API-key run reads", () => {
     const app = new Hono();
     app.use("*", async (c, next) => {
       c.set("sessionUser", { id: "user-1", email: "", name: "API key" });
-      c.set("apiKey", { userId: "user-1", orgId: "org-1", scopes, keyType } as never);
+      c.set("apiKey", { keyId: "key-1", userId: "user-1", orgId: "org-1", scopes, keyType } as never);
       await next();
     });
     return app.route("/runs", runsRoutes);
@@ -304,7 +308,8 @@ describe("API-key run reads", () => {
     expect((await post(keyApp())).status).toBe(404);
     expect(reprocessRunMock).not.toHaveBeenCalled();
     expect((await post(keyApp())).status).toBe(201);
-    expect(reprocessRunMock).toHaveBeenCalledWith("run-1", "user-1", { stageFrom: "extract-markdown" });
+    // The run records the key that asked for it: the chart export ceiling checks that key's scopes.
+    expect(reprocessRunMock).toHaveBeenCalledWith("run-1", "user-1", { stageFrom: "extract-markdown", origin: "machine", apiKeyId: "key-1" });
     expect((await post(keyApp(["search"]), "/runs/run-1/reprocess/estimate")).status).toBe(403);
     const { listRouteAuthModes } = await import("../lib/route-auth.js");
     const modes = Object.fromEntries(listRouteAuthModes(runsRoutes).map((route) => [`${route.method} ${route.path}`, route.mode]));

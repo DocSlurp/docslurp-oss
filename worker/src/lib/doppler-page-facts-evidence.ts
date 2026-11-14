@@ -18,7 +18,7 @@
 import { PAGE_RASTER_ROUTING } from "@docslurp/shared";
 
 import { MIN_SIGNIFICANT_IMAGE_COVERAGE, MIN_SIGNIFICANT_IMAGE_PIXELS, SPARSE_PAGE_WORDS, pageEvidenceWordCount, type PageImageEvidence } from "./page-image-evidence.js";
-import type { DopplerPageFacts, DopplerPageFactsDocument } from "./doppler-page-facts.js";
+import { dopplerPageFactsLowConfidence, type DopplerPageFacts, type DopplerPageFactsDocument } from "./doppler-page-facts.js";
 import { PAGE_FACTS_MAX_PAGES, plainTextBytes, type PageFactUpsert } from "../pipeline/page-facts.js";
 
 /** `document_page_facts.facts_source` and the page-image evidence artifact's `source` for facts-built evidence. */
@@ -59,6 +59,9 @@ export function dopplerFactsCoverEvidence(facts: DopplerPageFactsDocument | unde
     if (!entry.text) return { covered: false, reason: "text-family-missing" };
     if (!entry.geometry) return { covered: false, reason: "geometry-missing" };
     if (!coveredPage(entry)) return { covered: false, reason: "images-family-incomplete" };
+    // A page whose facts may come from an object the file holds twice (an earlier page rebuilt the xref) is low confidence:
+    // its image sizes, and so the furniture rule other pages share with it, are unknown. All or nothing, as above.
+    if (dopplerPageFactsLowConfidence(entry)) return { covered: false, reason: "xref-repaired-earlier" };
   }
   return { covered: true, pages: pageCount };
 }

@@ -15,6 +15,7 @@ import {
 } from "../lib/api-key-authorization.js";
 import { apiKeyAuth } from "../middleware/api-key-auth.js";
 import { hybridSearch } from "../services/search.js";
+import { searchAccessScopeFor, type SearchAccessScope } from "../search/access-scope.js";
 import { cacheableApiKeyId, readCachedResponse, responseCacheTicket, searchResponseCacheTtlMs, storeResponse } from "../search/response-cache.js";
 import { highlightMatches } from "../search/highlight.js";
 import { currentRequestApiKeyId, currentRequestSearchCeiling } from "../lib/request-context.js";
@@ -194,7 +195,12 @@ type CompatSearchResponse = Awaited<ReturnType<typeof hybridSearch>>;
  * project, query, filters and fetch size) ran moments ago. Authorization (scope, project) happened before
  * this call; the cache re-checks project access and never stores strict-privacy projects.
  */
-async function compatSearch(args: { query: string; apiKey: ValidatedKey; projectId: string; filters: SearchFilters; limit: number }): Promise<Pick<CompatSearchResponse, "results" | "sessionId">> {
+/** The explicit search scope of an API key in the project's org; null (404) when the key cannot search there. */
+function keySearchScope(apiKey: ValidatedKey, project: { orgId: string }): SearchAccessScope | null {
+  return searchAccessScopeFor({ type: "apiKey", apiKey }, project);
+}
+
+async function compatSearch(args: { query: string; apiKey: ValidatedKey; projectId: string; scope: SearchAccessScope; filters: SearchFilters; limit: number }): Promise<Pick<CompatSearchResponse, "results" | "sessionId">> {
   const ttl = searchResponseCacheTtlMs();
   const apiKeyId = cacheableApiKeyId(args.apiKey.keyId, currentRequestApiKeyId());
   const ticket = ttl > 0 && apiKeyId !== undefined
@@ -212,7 +218,7 @@ async function compatSearch(args: { query: string; apiKey: ValidatedKey; project
     variant: "algolia-compat",
     ...compatRetrievalOptions,
     mmrLambda: undefined,
-  } as never);
+  } as never, args.scope);
   const data = { results: response.results, sessionId: response.sessionId };
   if (ticket && response.availability?.status === "complete") await storeResponse(ticket, data, args.projectId);
   return data;
@@ -468,7 +474,8 @@ export const algoliaCompatRoutes = new Hono()
     if (filters instanceof Response) return filters;
 
     const project = await loadScopedProject(indexName, apiKey);
-    if (!project) {
+    const scope = project ? keySearchScope(apiKey, project) : null;
+    if (!project || !scope) {
       return c.json({ message: "index (project) not found" }, 404);
     }
 
@@ -479,7 +486,7 @@ export const algoliaCompatRoutes = new Hono()
     const fetchLimit = stableFetchLimit(compatFetchLimit(pageStart, hitsPerPage));
     filters.projectId = project.id;
 
-    const { results, sessionId } = await compatSearch({ query, apiKey, projectId: project.id, filters, limit: fetchLimit });
+    const { results, sessionId } = await compatSearch({ query, apiKey, projectId: project.id, scope, filters, limit: fetchLimit });
 
     const pageResults = results.slice(pageStart, pageStart + hitsPerPage);
     const mappedHits = pageResults.map((result) => buildAlgoliaHit({
@@ -530,7 +537,8 @@ export const algoliaCompatRoutes = new Hono()
     for (const [index, request] of requests.entries()) {
       const startedAt = performance.now();
       const project = await loadScopedProject(request.indexName, apiKey);
-      if (!project || !request.query) {
+      const scope = project ? keySearchScope(apiKey, project) : null;
+      if (!project || !scope || !request.query) {
         results.push({ hits: [], nbHits: 0, page: 0, hitsPerPage: request.hitsPerPage ?? 10, nbPages: 0, processingTimeMS: 0, query: request.query ?? "", params: "" });
         continue;
       }
@@ -539,7 +547,7 @@ export const algoliaCompatRoutes = new Hono()
       const pageStart = page * hitsPerPage;
       const fetchLimit = stableFetchLimit(compatFetchLimit(pageStart, hitsPerPage));
       const filters = { ...requestFilters[index]!, projectId: project.id };
-      const response = await compatSearch({ query: request.query, apiKey, projectId: project.id, filters, limit: fetchLimit });
+      const response = await compatSearch({ query: request.query, apiKey, projectId: project.id, scope, filters, limit: fetchLimit });
       const pageResults = response.results.slice(pageStart, pageStart + hitsPerPage);
       const { nbHits, exhaustive } = compatHitCount(response.results.length, fetchLimit);
       results.push({
@@ -588,6 +596,8 @@ export const algoliaCompatRoutes = new Hono()
     const query = typedQuery || body.facetQuery?.trim() || "*";
     filters.projectId = project.id;
 
+    const scope = keySearchScope(apiKey, project);
+    if (!scope) return c.json({ message: "index (project) not found" }, 404);
     const { results } = await hybridSearch(query, apiKey.userId, {
       limit: Math.min(1000, maxFacetHits * 10),
       filters,
@@ -595,7 +605,7 @@ export const algoliaCompatRoutes = new Hono()
       ...compatRetrievalOptions,
       // A facet-value prefix or the "*" wildcard is not a relevance query: only a typed query is floored.
       ...(typedQuery ? {} : { minScore: 0 }),
-    });
+    }, scope);
 
     return c.json(buildFacetHits({
       facetName,
@@ -706,7 +716,7 @@ export const algoliaCompatRoutes = new Hono()
         coalesce((
           select count(*)::int
           from search_sessions s
-          where s.metadata->>'projectId' = ${project.id}
+          where s.project_id = ${project.id}
         ), 0) as queries,
         coalesce((
           select count(*)::int

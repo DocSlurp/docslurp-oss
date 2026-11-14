@@ -27,7 +27,8 @@ vi.mock("../services/documents.js", () => ({
   listDocumentsWithFilters: listDocumentsWithFiltersMock,
   listDocumentOwners: listDocumentOwnersMock,
   removeDocumentTags: removeDocumentTagsMock,
-  setDocumentTags: setDocumentTagsMock
+  setDocumentTags: setDocumentTagsMock,
+  DocumentMutationForbiddenError: class DocumentMutationForbiddenError extends Error {}
 }));
 
 vi.mock("../services/document-review.js", () => ({
@@ -71,6 +72,8 @@ describe("documentsRoutes bulk actions", () => {
 
   beforeEach(() => {
     app = buildApp();
+    // Every listed document is readable here; who may change them is covered against a database (reprocess-editors-only).
+    listDocumentOwnersMock.mockImplementation(async (ids: string[]) => ids.map((id) => ({ id, projectId: "ws-1", orgId: "org-1" })));
     addDocumentTagsMock.mockReset();
     bulkReprocessDocumentsMock.mockReset();
     deleteDocumentMock.mockReset();

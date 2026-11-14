@@ -4,6 +4,9 @@
  * Records per-query totalMs + timings + result chunk ids.
  */
 import { readFileSync, writeFileSync } from "node:fs";
+/** The explicit search access scope every search caller passes (search/access-scope.ts). */
+const TEST_SEARCH_SCOPE = { orgId: "perforg", projectIds: "org", modeCeiling: null } as const;
+
 const [qfile, vfile, label, outDir, nArg, concArg] = process.argv.slice(2);
 const queries: any[] = JSON.parse(readFileSync(qfile!, "utf8"));
 const vectors: Record<string, number[]> = JSON.parse(readFileSync(vfile!, "utf8"));
@@ -14,7 +17,7 @@ const session = await import("../../src/search/session.js");
 const useVec = process.env.BENCH_QUERY_VECTOR !== "0";
 const one = async (q: any) => {
   const t = performance.now();
-  const r = await search.hybridSearch(q.q, "perfu", { limit: 10, ...(useVec ? { queryVector: vectors[q.id] } : {}), filters: { projectId: "perfw" } } as any);
+  const r = await search.hybridSearch(q.q, "perfu", { limit: 10, ...(useVec ? { queryVector: vectors[q.id] } : {}), filters: { projectId: "perfw" } } as any, TEST_SEARCH_SCOPE);
   return { id: q.id, wall: performance.now() - t, timings: r.timings, ids: r.results.map((x: any) => `${x.citation.documentId}-${x.citation.chunkIndex}`), docs: r.results.map((x: any) => x.citation.documentId) };
 };
 const out: any = { label, env: Object.fromEntries(Object.entries(process.env).filter(([k]) => /^(LANCEDB|SEARCH|BENCH)/.test(k))), n: N, conc, cold: null as any, runs: [] as any[] };

@@ -87,17 +87,23 @@ describe("first pass: figures stored after the PII stage are withheld with it (H
         documentPiiWithholds: async () => true,
         appendWithheldArtifactUris: async (_id: string, uris: readonly string[]) => {
           recordedAtAppend.push(Object.keys(env.state.artifactLedger.all()).length);
+          uploadedAtAppend.push([...env.objects.keys()].filter((key) => key.includes("/doppler/")).length);
           appended.push([...uris]);
         },
       };
+      const uploadedAtAppend: number[] = [];
       const result = await run(env, await folder());
       expect(result.stats.dopplerFigures).toMatchObject({ status: "stored", piiWithheld: true });
       const slots = Object.entries(env.state.artifactLedger.all() as Record<string, string>).filter(([slot]) => slot.startsWith(`${DOC_ID}:doppler`));
       expect(slots.length).toBeGreaterThan(3);
       // Every recorded Doppler slot (figures, index, manifest) is withheld, and the stage's artifact (the index) too.
-      expect(new Set(appended.flat())).toEqual(new Set(slots.map(([, uri]) => uri)));
+      // Withheld first, from the layout, before any object is uploaded or any row is marked stored (the ledger serves
+      // stored rows); then the recorded slots again (a union).
+      expect(uploadedAtAppend[0]).toBe(0);
+      for (const [, uri] of slots) expect(appended[0]).toContain(uri);
+      expect(new Set(appended.flat())).toEqual(new Set([...slots.map(([, uri]) => uri), `s3://b/u/r/doppler/${DOC_ID}/document.md`]));
       expect(appended.flat()).toContain(result.artifactUri);
-      expect(recordedAtAppend).toEqual([0]);
+      expect(recordedAtAppend.every((n) => n === 0)).toBe(true);
       expect([...env.objects.keys()].some((key) => key.endsWith("/document.md"))).toBe(false);
       expect(slots.some(([slot]) => slot.endsWith(":doppler-markdown"))).toBe(false);
       expect([...env.objects.keys()].some((key) => key.includes("page-facts"))).toBe(false);
@@ -156,24 +162,19 @@ describe("first pass: document.md is exactly the scanned Markdown slot (M1, L2)"
     expect(await readMarkdownSlotBytes({ bucket: "b", getBytes: async () => Buffer.from("x") } as any, undefined)).toBeNull();
   });
 
-  it("L2: an append that fails after the store removes every object it wrote, except committed ones", async () => {
+  it("L2: an append that fails stores nothing and deletes nothing (withheld before upload; orphan GC is the only deleter)", async () => {
     const env = setup({ piiPolicy: { enabled: true, patterns: ["ssn"], action: "block_indexing" } });
     (env.state as any).store = { documentPiiWithholds: async () => true, appendWithheldArtifactUris: async () => { throw new Error("db down"); } };
-    // An earlier committed object at one of the keys this store writes again.
-    const committedKey = `u/r/doppler/${DOC_ID}/images/manifest.jsonl`;
     const deleted: string[][] = [];
     const remove = env.storage.deleteKeys;
     env.storage.deleteKeys = async (keys: string[]) => { deleted.push(keys); await remove(keys); };
-    env.state.artifactLedger.recordDocument(DOC_ID, "doppler-manifest", `s3://b/${committedKey}`);
     const dir = path.join(work, "images");
     await cp(path.join(FIXTURE, "images"), dir, { recursive: true });
     const result = await storeFirstPassFigures({ state: env.state, document: env.document, dir, outcome: { status: "extracted", exitCode: 0 },
       markdownSlot: null, storage: env.storage, runId: "r", signal: new AbortController().signal });
     expect(result.stats.dopplerFigures).toMatchObject({ status: "failed" });
-    // The fake store had nothing at the committed key; what matters is that every other object is gone and that one was
-    // never deleted (so a committed object there would survive).
-    expect([...env.objects.keys()].filter((k) => k !== committedKey)).toEqual([]);
-    expect(deleted.flat()).not.toContain(committedKey);
-    expect(deleted.flat().length).toBeGreaterThan(0);
+    expect([...env.objects.keys()].filter((key) => key.includes("/doppler/"))).toEqual([]);
+    expect(deleted.flat()).toEqual([]);
+    expect(Object.keys(env.state.artifactLedger.all()).some((slot) => slot.includes("doppler"))).toBe(false);
   });
 });

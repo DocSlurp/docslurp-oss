@@ -13,6 +13,7 @@
  *
  * Raw objects written by a failed intake are removed before the error surfaces.
  */
+import type { RunOrigin } from "@docslurp/shared";
 import { randomUUID } from "node:crypto";
 import { Transform, type Readable } from "node:stream";
 
@@ -65,7 +66,7 @@ export type ProjectIntakeStatusCode = 400 | 403 | 404 | 409 | 413 | 415 | 422 | 
  * processed, so retry with the same key. `idempotency_key_reused`: the key was used for a different request. `upload_session_closed`:
  * the session remembered for the key can no longer take uploads, so use a new key.
  */
-export type ProjectIntakeErrorCode = "remote_format_disabled" | "idempotency_in_flight" | "idempotency_key_reused" | "upload_session_closed";
+export type ProjectIntakeErrorCode = "remote_format_disabled" | "idempotency_in_flight" | "idempotency_key_reused" | "upload_session_closed" | "chart_export_tier_unavailable";
 
 export class ProjectIntakeError extends Error {
   constructor(
@@ -145,6 +146,8 @@ export interface ProjectIntakeRequest {
   indexingMode?: IndexingMode;
   runId?: string;
   apiKeyId?: string | null;
+  /** Derived from the authenticated principal (`runOriginOf`), never a request field. Unset: machine. */
+  origin?: RunOrigin;
   kind: ProjectIntakeKind;
   items: Iterable<ProjectIntakeItem> | AsyncIterable<ProjectIntakeItem>;
   /** Remote URLs behind the items; used for the title and redacted audit origins. */
@@ -246,6 +249,7 @@ export interface ProjectIntakeRecords {
     pipeline: PipelineFeatures;
     runId?: string;
   apiKeyId?: string | null;
+    origin?: RunOrigin;
     files: StoredIntakeFile[];
     extract?: IntakeExtract;
   }): Promise<CreatedRun>;
@@ -657,6 +661,7 @@ export async function intakeIntoProject(
         speedBoost: request.speedBoost === true,
         pipeline,
         apiKeyId: request.apiKeyId,
+        ...(request.origin ? { origin: request.origin } : {}),
         runId: request.runId,
         files,
         ...(request.extract ? { extract: request.extract } : {}),

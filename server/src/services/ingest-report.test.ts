@@ -768,7 +768,7 @@ describe("ingest report: chart export", () => {
     const rec = report.recommendations.find((entry) => entry.id === "export-charts");
     expect(rec).toMatchObject({
       severity: "info", affectedPages: 3, affectedDocuments: 2,
-      patch: { chartExport: { enabled: true } }, reprocessDocumentIds: ["q3", "flows"],
+      patch: { chartExport: { tier: "models" } }, reprocessDocumentIds: ["q3", "flows"],
     });
     expect(rec?.reason).toContain("4 charts and diagrams in 2 files were kept as images or text guesses");
     expect(rec?.cost.reprocessCents).toBeNull();
@@ -785,7 +785,7 @@ describe("ingest report: chart export", () => {
   });
 
   it("stays quiet when export is on, everything was exported, or the stats are malformed", () => {
-    const on = build({ pipeline: pipeline({ chartExport: { enabled: true } }), documents: [doc("a")], stages: [visualStage("a", candidates(2, 0, [1]))] });
+    const on = build({ pipeline: pipeline({ chartExport: { tier: "models" } }), documents: [doc("a")], stages: [visualStage("a", candidates(2, 0, [1]))] });
     expect(on.recommendations.some((entry) => entry.id === "export-charts")).toBe(false);
     const done = build({ documents: [doc("a")], stages: [visualStage("a", candidates(2, 0, [], 2))] });
     expect(done.recommendations.some((entry) => entry.id === "export-charts")).toBe(false);
@@ -803,10 +803,22 @@ describe("ingest report: chart export", () => {
   it("the proposal schema accepts bounded chart export patches and never the generator model", async () => {
     const { projectSettingsProposalInputSchema } = await import("./project-settings-proposal-input.js");
     const parse = (pipeline: unknown) => projectSettingsProposalInputSchema.safeParse({ changes: { pipeline } });
-    expect(parse({ chartExport: { enabled: true } }).success).toBe(true);
-    expect(parse({ chartExport: { enabled: true, formats: ["description", "mermaid", "csv"], diagrams: false } }).success).toBe(true);
-    expect(parse({ chartExport: { generatorModel: "llm://openrouter/some/model" } }).success).toBe(false);
-    expect(parse({ chartExport: { enabled: true, generatorModel: null } }).success).toBe(false);
+    expect(parse({ chartExport: { tier: "models" } }).success).toBe(true);
+    expect(parse({ chartExport: { tier: "free", formats: ["description", "mermaid", "csv"], diagrams: false } }).success).toBe(true);
+    expect(parse({ chartExport: { tier: "off" } }).success).toBe(true);
+    expect(parse({ figures: false }).success).toBe(true);
+    expect(parse({ chartExport: { tier: "smart" } }).success).toBe(false);
+    // Patches stored before the tier (chat history, ingest reports) are upgraded: `enabled: true` is `models`, and a
+    // generator model is dropped, never carried into the proposal.
+    const chartExportOf = (pipeline: unknown) => {
+      const parsed = parse(pipeline);
+      expect(parsed.success).toBe(true);
+      return (parsed.data?.changes.pipeline as { chartExport?: unknown } | undefined)?.chartExport;
+    };
+    expect(chartExportOf({ chartExport: { enabled: true } })).toEqual({ tier: "models" });
+    expect(chartExportOf({ chartExport: { generatorModel: "llm://openrouter/some/model" } })).toEqual({});
+    expect(chartExportOf({ chartExport: { tier: "models", generatorModel: null } })).toEqual({ tier: "models" });
+    expect(chartExportOf({ chartExport: { tier: "off", enabled: true } })).toEqual({ tier: "off" });
     expect(parse({ chartExport: { formats: [] } }).success).toBe(false);
     expect(parse({ chartExport: { formats: ["png"] } }).success).toBe(false);
     expect(parse({ chartExport: { formats: ["csv", "csv"] } }).success).toBe(false);

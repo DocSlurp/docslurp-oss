@@ -556,6 +556,21 @@ export function summarizeRunUsageCost(row?: RunUsageCostTotalsRow | null) {
 export type RunUsageCostSummary = ReturnType<typeof summarizeRunUsageCost>;
 
 /**
+ * Credits a run was charged: its billable unit events only (pages, media minutes, per-document features, chat
+ * answers, searches), never provider or compute cost. What customer billing views show for a run.
+ */
+export async function runChargedCredits(args: { runId: string; orgId: string }, client: SqlClient = sql): Promise<number> {
+  // Tenant-scoped like runCostBreakdown, on the same run key (source_run_id): a run of another org reads 0.
+  const [row] = await client<{ credits: number }[]>`
+    select coalesce(sum(au.cost_cents), 0)::double precision as credits
+    from usage_attribution au
+    where au.source_run_id = ${args.runId} and au.org_id = ${args.orgId}
+      and au.metric = any(${[...INGEST_UNIT_METRICS, BILLABLE_UNIT_METRICS.search, BILLABLE_UNIT_METRICS.chatAnswer]}::text[])
+  `;
+  return Number(row?.credits ?? 0);
+}
+
+/**
  * summarizeRunUsageCost for several runs in one statement (run lists, boards).
  * Runs without usage are absent from the map; summarize `undefined` for 0.
  */

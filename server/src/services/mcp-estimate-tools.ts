@@ -28,6 +28,8 @@ function buildForwardApp(): Hono {
   const app = new Hono().use("*", publicErrorMiddleware).use("*", async (c, next) => {
     const actor = actors.get(c.req.raw);
     if (actor) setRequestActor(c, actor);
+    // MCP is a machine surface: estimates resolve an unset chart export tier as an API call would.
+    c.set("runOrigin", "machine");
     await next();
   });
   for (const { prefix, routes } of ROUTE_MOUNTS) app.route(prefix, routes);

@@ -59,12 +59,19 @@ export interface ChartExportPassInput {
   legacyPages: ReadonlyArray<{ pageNumber: number; route?: string | null }>;
   /** Quarantine's free presence counts (Office chart parts): stats with export off, the VM signal with export on. */
   presence?: DeterministicVisualResult["presence"];
+  /** The quarantine guest's inline chart answer for the source (DOCSLURP_CHART_EXPORT_INLINE). */
+  inline?: import("./inline.js").StoredInlineCharts | null;
   /** Page raster (the caller cleans it up through `release`). */
   pageImage: (pageNumber: number) => Promise<PageImage | null>;
   /** Crops a page raster to a placement in page points; null when cropping is unavailable (the page is used). */
   cropImage?: (image: PageImage, bbox: BBox) => Promise<PageImage | null>;
   /** The stage's usage ledger for cost-only events (parser-VM time of the deterministic extractor). */
   recordUsage?: (event: UsageEvent) => void;
+  /**
+   * Reserves this document's free-tier VM run against the org's hourly cap. Asked only on the free tier (on `models` the
+   * reads are billed); unset on the free tier means no store to reserve from, and the VM run is refused (fail closed).
+   */
+  reserveFreeVmRun?: () => Promise<boolean>;
   signal?: AbortSignal;
 }
 
@@ -165,11 +172,11 @@ export async function prepareChartExport(input: ChartExportPassInput): Promise<P
     session.invalidateGroups();
   }
   // A Doppler figure confirms a keyword page; read only when the document has a figure index and a keyword page.
-  const figures = legacy.length > 0 || session.enabled
+  const figures = legacy.length > 0 || session.runs
     ? await loadDopplerFigurePages(input.storage, input.ledger, document.id)
     : { pages: new Set<number>(), index: null };
 
-  if (!session.enabled) {
+  if (!session.runs) {
     if (input.presence) session.setDeterministic({ partials: [], presence: input.presence });
   } else {
     try {
@@ -192,7 +199,9 @@ export async function prepareChartExport(input: ChartExportPassInput): Promise<P
           candidates: session.candidates.length,
         },
         ...(figures.index ? { dopplerFiguresIndex: figures.index } : {}),
+        ...(input.inline ? { inline: input.inline } : {}),
         ...(input.recordUsage ? { recordUsage: input.recordUsage } : {}),
+        ...(session.config.tier === "free" ? { admitVmRun: input.reserveFreeVmRun ?? (async () => false) } : {}),
         diagrams: session.config.diagrams,
         ...(input.signal ? { signal: input.signal } : {}),
       }));
@@ -210,7 +219,7 @@ export async function prepareChartExport(input: ChartExportPassInput): Promise<P
 /** Exports what the body did not, replaces this document's visual groups, and stores the visuals artifact. */
 export async function finishChartExport(input: ChartExportPassInput, prepared: PreparedChartExport): Promise<ChartExportPassResult> {
   const { session, document } = input;
-  if (session.enabled) {
+  if (session.runs) {
     await exportPending(input);
     await session.exportUnmatchedDeterministic(input.signal);
   }
@@ -218,7 +227,7 @@ export async function finishChartExport(input: ChartExportPassInput, prepared: P
   const lowConfidence = session.lowConfidence.length;
   const extra = { dedupe: session.dedupeStats(), ...(prepared.facts ? { facts: prepared.facts } : {}) };
   const prior = prepared.priorArtifactUri && !prepared.priorArtifactUri.endsWith(CLEARED_SUFFIX) ? prepared.priorArtifactUri : null;
-  if (!session.enabled || (session.visuals.length === 0 && !prior)) return { stats, lowConfidence, ...extra, changedPages: [], artifactUri: null };
+  if (!session.runs || (session.visuals.length === 0 && !prior)) return { stats, lowConfidence, ...extra, changedPages: [], artifactUri: null };
   const applied = await applyVisualGroups(input, {
     visuals: session.visuals,
     keep: session.routedIds,

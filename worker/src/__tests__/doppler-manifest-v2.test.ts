@@ -3,7 +3,7 @@ import { link, mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from "
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { dopplerAssetCaps, dopplerImageLimits, dopplerLedgerAssets, dopplerManifestV2Schema, parseDopplerManifest } from "@docslurp/shared";
+import { dopplerAssetCaps, dopplerImageLimits, dopplerLedgerAssets, dopplerManifestV2Schema, isDocumentAssetRow, parseDopplerManifest } from "@docslurp/shared";
 
 import { DopplerFigureRejection, dopplerFigureRecords, readDopplerFigureDir, readLedgerSpill, storeDopplerFigures, type DopplerFigureSet } from "../extractors/doppler-figures.js";
 import { ByteBudget } from "../extractors/doppler-upload.js";
@@ -13,7 +13,7 @@ async function rowsOf(set: DopplerFigureSet) {
   for await (const row of readLedgerSpill(set.ledger.spill)) rows.push(row);
   return rows;
 }
-import { v2Manifest, writeV2Folder, type V2Manifest } from "../test/doppler-manifest-v2.js";
+import { v2Manifest, writeV2Folder, V2_SOURCE_SHA, type V2Manifest } from "../test/doppler-manifest-v2.js";
 
 const DOC = { id: "0b6f7e8c-3c1a-4f7e-9a51-2a1d3e4f5a6b", userId: "user-1", runId: "run-1" };
 
@@ -165,6 +165,14 @@ describe("manifest v2: hostile or oversized manifests are refused", () => {
     ["totals.scan_bytes that disagree", (m) => { m.totals.scan_bytes += 1; }],
     ["totals.batches_cut that disagree", (m) => { m.totals.batches_cut = 1; }],
     ["a page outside the document", (m) => { entry(m, "p2.2").page = 4; entry(m, "p2.2").id = "p4.2"; }],
+    ["an unknown scan_pages mode", (m) => { m.scan_pages = "copy-all"; }],
+    ["scan-not-copyable on a not-extracted image", (m) => { entry(m, "p2.1").reason = "scan-not-copyable"; }],
+    ["scan-not-copyable on an extracted image", (m) => { Object.assign(entry(m, "p3.1"), { reason: "scan-not-copyable" }); }],
+    ["scan-not-copyable on an unlinked image that is not a background", (m) => { entry(m, "p2.2").reason = "scan-not-copyable"; }],
+    ["a not-extracted reason on an unlinked image", (m) => { Object.assign(entry(m, "p2.2"), { fate: "background", reason: "copy" }); }],
+    ["scan-not-copyable that repeats another image", (m) => { Object.assign(entry(m, "p2.2"), { fate: "background", reason: "scan-not-copyable", repeat_of: "p1.1" }); }],
+    ["an unlinked image that repeats another", (m) => { entry(m, "p2.2").repeat_of = "p1.1"; }],
+    ["scan-not-copyable on a vector", (m) => { Object.assign(entry(m, "p2.2"), { id: "p2.g2", kind: "vector", obj: null, fate: "background", reason: "scan-not-copyable" }); }],
   ];
   for (const [name, mutate] of cases) {
     it(`refuses ${name}`, async () => {
@@ -174,6 +182,10 @@ describe("manifest v2: hostile or oversized manifests are refused", () => {
 
   it("the cases above are each the only change: the unchanged fixture passes", async () => {
     expect(await rule()).toBe("accepted");
+  });
+
+  it("accepts --scan-pages copy (Doppler #39) with an unlinked background scan, reason scan-not-copyable", async () => {
+    expect(await rule((m) => { m.scan_pages = "copy"; Object.assign(entry(m, "p2.2"), { fate: "background", reason: "scan-not-copyable" }); })).toBe("accepted");
   });
 
   it("refuses an oversized manifest before parsing it (the cap scales with the page count)", async () => {
@@ -192,7 +204,7 @@ describe("manifest v2: hostile or oversized manifests are refused", () => {
   it("refuses a link prefix other than the images/ folder the host asks for, and a manifest of another PDF", async () => {
     expect(await rule((m) => { m.link_prefix = "img/"; for (const e of m.images) if (e.link) e.link = `img/${e.path}`; })).toBe("link-prefix");
     expect(await rule(() => undefined, { sourceSha256: "c".repeat(64) })).toBe("source-mismatch");
-    expect(await rule(() => undefined, { sourceSha256: "a".repeat(64) })).toBe("accepted");
+    expect(await rule(() => undefined, { sourceSha256: V2_SOURCE_SHA })).toBe("accepted");
   });
 
   it("refuses files the manifest does not name, misplaced files, links and nesting", async () => {
@@ -258,6 +270,37 @@ describe("manifest v2: hostile or oversized manifests are refused", () => {
 });
 
 describe("version 1 maps into the ledger with what it has", () => {
+  it("a scan Doppler would not copy (skipped: scan-not-copyable) is the unlinked row render-images renders on the host", async () => {
+    const none = { file: null, format: null, bytes: null, sha256: null, width: null, height: null } as const;
+    const parsed = parseDopplerManifest({
+      version: "doppler-figures@1",
+      images: [
+        { id: "p1.1", page: 1, bbox: [0, 0, 612, 792], kind: "picture", fate: "background", ...none, skipped: "scan-not-copyable" },
+        { id: "p2.1", page: 2, bbox: [0, 0, 612, 792], kind: "mask", fate: "background", ...none, skipped: "scan-not-copyable" },
+        // Not a background picture or mask, or with an error: an `other` skip, never a host page.
+        { id: "p3.1", page: 3, bbox: [0, 0, 612, 792], kind: "picture", fate: "block", ...none, skipped: "scan-not-copyable" },
+        { id: "p4.g1", page: 4, bbox: [0, 0, 612, 792], kind: "vector", fate: "background", ...none, skipped: "scan-not-copyable" },
+        { id: "p5.1", page: 5, bbox: [0, 0, 612, 792], kind: "picture", fate: "background", ...none, skipped: "scan-not-copyable", error: "xref" },
+        // A page scan whose copy Doppler refused (error: xref): rendered on the host too; `copy` on any other fate stays `other`.
+        { id: "p6.1", page: 6, bbox: [0, 0, 612, 792], kind: "picture", fate: "page-scan", ...none, skipped: "copy", error: "xref" },
+        { id: "p7.1", page: 7, bbox: [0, 0, 612, 792], kind: "picture", fate: "block", ...none, skipped: "copy" },
+      ],
+    });
+    const rows = dopplerLedgerAssets(parsed!);
+    expect(rows.map((a) => [a.assetId, a.status, a.reason, a.fileOf])).toEqual([
+      ["p1.1", "unlinked", "scan-not-copyable", null],
+      ["p2.1", "unlinked", "scan-not-copyable", null],
+      ["p3.1", "not-extracted", "other", null],
+      ["p4.g1", "not-extracted", "other", null],
+      ["p5.1", "not-extracted", "error", null],
+      ["p6.1", "not-extracted", "copy", null],
+      ["p7.1", "not-extracted", "other", null],
+    ]);
+    expect(rows.every((row) => isDocumentAssetRow(row))).toBe(true);
+    const { hostPageImagePagesOf } = await import("../db/document-asset-ledger.js");
+    expect(await hostPageImagePagesOf(rows.map((row) => ({ ...row, storageKey: null })))).toEqual([1, 2, 6]);
+  });
+
   it("files are extracted, repeats and errors not extracted, fate skips unlinked, unknown values other", () => {
     const parsed = parseDopplerManifest({
       version: "doppler-figures@1",
@@ -269,6 +312,8 @@ describe("version 1 maps into the ledger with what it has", () => {
         { id: "p3.2", page: 3, bbox: [0, 0, 10, 10], kind: "picture", fate: "mystery", file: null, format: null, bytes: null, sha256: null, width: null, height: null, skipped: "novel" },
         { id: "p4.1", page: 4, bbox: [0, 0, 10, 10], kind: "picture", fate: "page-scan", file: "p4.1.jpg", format: "jpg", bytes: 10, sha256: "d".repeat(64), width: 1700, height: 2200, fallback: "raster" },
         { id: "p5.1", page: 5, bbox: [0, 0, 10, 10], kind: "picture", fate: "block", file: "p5.1.jpg", format: "jpg", bytes: 10, sha256: "e".repeat(64), width: 17, height: 22 },
+        // An inherited property name is an unknown reason, never Object.prototype's value.
+        { id: "p6.1", page: 6, bbox: [0, 0, 10, 10], kind: "picture", fate: "block", file: null, format: null, bytes: null, sha256: null, width: null, height: null, skipped: "constructor" },
       ],
     });
     expect(parsed?.version).toBe(1);
@@ -281,7 +326,14 @@ describe("version 1 maps into the ledger with what it has", () => {
       ["p4.1", "page-scan", "extracted", null, "copy", "p4.1", "other", null],
       // A version 1 JPEG is a copy of the PDF's stream only for a page scan.
       ["p5.1", "block", "extracted", null, "render", "p5.1", null, null],
+      ["p6.1", "block", "not-extracted", "other", null, null, null, null],
     ]);
+  });
+
+  it("a version 1 skip reason outside the slug alphabet (__proto__) refuses the manifest", () => {
+    expect(parseDopplerManifest({ version: "doppler-figures@1", images: [
+      { id: "p1.1", page: 1, bbox: [0, 0, 10, 10], kind: "picture", fate: "block", file: null, format: null, bytes: null, sha256: null, width: null, height: null, skipped: "__proto__" },
+    ] })).toBeNull();
   });
 
   it("the v2 schema is strict about its own version", () => {

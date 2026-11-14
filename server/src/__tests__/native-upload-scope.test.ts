@@ -10,7 +10,7 @@ vi.mock("../lib/request-actor.js", () => ({
 vi.mock("../services/project-intake-actions.js", () => ({
   createBulkProjectIntake: mocks.intake, createRemoteUrlProjectIntake: mocks.intake,
   parseFormProjectIntakePipeline: vi.fn(), parseProjectIntakePipeline: vi.fn(),
-  parseFormDocumentTags: vi.fn(),
+  parseFormDocumentTags: vi.fn(), assertIntakeChartExportTier: vi.fn(),
   parseProjectIntakeTemplateKey: vi.fn(value => value), confirmDirectUploadProjectIntake: vi.fn(),
 }));
 vi.mock("../services/direct-upload-session.js", () => ({

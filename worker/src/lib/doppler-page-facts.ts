@@ -46,7 +46,7 @@ const FEATURES = [
 ] as const;
 const WARNINGS = [
   "bad-content-stream", "broken-image", "internal-error", "io-error", "limit-hit", "missing-font", "non-finite", "out-of-range",
-  "page-failed", "syntax-error", "syntax-warning", "unimplemented", "xref-repaired",
+  "page-failed", "syntax-error", "syntax-warning", "unimplemented", "xref-repaired", "xref-repaired-earlier",
 ] as const;
 const TEXT_LAYERS = ["none", "invisible", "visible", "mixed"] as const;
 const SCANS = ["none", "single", "tiled", "layered"] as const;
@@ -134,6 +134,26 @@ export interface DopplerImageItem {
   inline: boolean;
   obj?: number;
   copy: DopplerImageCopy;
+  /**
+   * Words of the page whose box lies inside this image's box (within 1 pt), visible and invisible as `text` counts them
+   * (added within /1). Both or neither: absent from older builds, without the `text` family, or when either contradicts
+   * the page's own counts.
+   */
+  visibleWordsInside?: number;
+  invisibleWordsInside?: number;
+  /**
+   * Words of the page whose box *centre* lies inside this image's box (within 1 pt), visible and invisible (Doppler #44,
+   * added within /1): the layout walker's `wordsInside` test. Both or neither; absent from older builds, without the
+   * `text` family, past the page's own counts, or below the whole-box counts (a word wholly inside has its centre inside).
+   */
+  visibleWordsCentredInside?: number;
+  invisibleWordsCentredInside?: number;
+  /**
+   * The stream's declared /Length over its pixels (added within /1): what the file says, which a crafted file can inflate.
+   * A routing hint only, never a billing input. Absent (unknown, never 0) without a consistent /Length, for inline images
+   * and for external (/F) data.
+   */
+  bytesPerPixel?: number;
 }
 
 export interface DopplerImageFacts {
@@ -159,6 +179,24 @@ export interface DopplerVectorCluster {
   segments: number;
 }
 
+/** A ruled grid (Doppler's ruled-table search, from the rules alone). `columns` 1 (horizontal rules only) is weak evidence. */
+export interface DopplerVectorGrid {
+  /** Page points, top-left origin, inside the page (within 1 pt). */
+  bbox: Box;
+  rows: number;
+  columns: number;
+  coverage: number;
+  /**
+   * Thin-rule counts (Doppler #44, added within /1): the distinct horizontal and vertical thin-rule lines of the grid as the
+   * layout walker's `ruled_grids` counts them, the box sides those rules cover (0..4), and whether they are one connected
+   * set (the walker's grid). All four or none: absent from older builds and when Doppler withholds them.
+   */
+  hRules?: number;
+  vRules?: number;
+  outerSides?: number;
+  connected?: boolean;
+}
+
 export interface DopplerVectorFacts {
   paths: number;
   filled: number;
@@ -175,6 +213,18 @@ export interface DopplerVectorFacts {
   /** Absent when the list did not validate. */
   clusters?: DopplerVectorCluster[];
   clustersTruncated: boolean;
+  /**
+   * Ruled grids, at most 64 (added within /1). Absent from older builds: unknown. Present only with `gridsTruncated`; a
+   * list that does not validate, or a box off the page, makes the whole `vectors` family unknown.
+   */
+  grids?: DopplerVectorGrid[];
+  /** The grid list may be incomplete (a cap was hit): an empty list is then not proof that there is no table. */
+  gridsTruncated?: boolean;
+  /**
+   * Walker grids (connected thin rules) that no counted grid stands for (Doppler #44, added within /1). Absent from older
+   * builds and when the thin-rule search was incomplete. Present only with `grids`; required when any grid has counts.
+   */
+  unlistedRuledGrids?: number;
   limitHit: boolean;
 }
 
@@ -394,7 +444,7 @@ function fonts(value: unknown): DopplerFontFacts | undefined {
 const MAX_ITEMS = 32;
 
 function imageItem(value: unknown): DopplerImageItem | undefined {
-  return family<DopplerImageItem>(value, {
+  const item = family<DopplerImageItem>(value, {
     index: (v) => count(v) !== undefined && (v as number) >= 1 ? v : undefined,
     bbox: box, coverage: ratio,
     px: (v) => Array.isArray(v) && v.length === 2 && v.every((n) => count(n) !== undefined) ? [v[0], v[1]] : undefined,
@@ -404,7 +454,33 @@ function imageItem(value: unknown): DopplerImageItem | undefined {
   }, {
     bpc: (v) => count(v, 32) !== undefined && (v as number) >= 1 ? v : undefined,
     obj: (v) => count(v) !== undefined && (v as number) >= 1 ? v : undefined,
+    visibleWordsInside: (v) => count(v), invisibleWordsInside: (v) => count(v),
+    visibleWordsCentredInside: (v) => count(v), invisibleWordsCentredInside: (v) => count(v),
+    bytesPerPixel: (v) => nonNegative(v, 1e9),
   });
+  if (!item) return undefined;
+  // Words inside come as pairs: one alone is not a count of the words inside.
+  if ((item.visibleWordsInside === undefined) !== (item.invisibleWordsInside === undefined)) {
+    delete item.visibleWordsInside;
+    delete item.invisibleWordsInside;
+  }
+  if ((item.visibleWordsCentredInside === undefined) !== (item.invisibleWordsCentredInside === undefined)) dropCentred(item);
+  // A word wholly inside the box has its centre inside it: centred counts below the whole-box ones contradict them, and
+  // neither pair is a fact then.
+  if (item.visibleWordsCentredInside !== undefined && item.visibleWordsInside !== undefined &&
+      (item.visibleWordsInside > item.visibleWordsCentredInside || item.invisibleWordsInside! > item.invisibleWordsCentredInside!)) {
+    dropCentred(item);
+    delete item.visibleWordsInside;
+    delete item.invisibleWordsInside;
+  }
+  // The contract has no stream length for an inline image: a value there is not a fact.
+  if (item.inline) delete item.bytesPerPixel;
+  return item;
+}
+
+function dropCentred(item: DopplerImageItem): void {
+  delete item.visibleWordsCentredInside;
+  delete item.invisibleWordsCentredInside;
 }
 
 /** A list of family objects: over the cap, or any entry that does not validate, makes the whole list unknown. */
@@ -436,12 +512,59 @@ function cluster(value: unknown): DopplerVectorCluster | undefined {
   return family<DopplerVectorCluster>(value, { bbox: box, paths: count, curves: count, segments: count });
 }
 
+/** Doppler's cap on grids per page. */
+const MAX_GRIDS = 64;
+/** Grid rows and columns are bands between at most 4,096 rule rows (a shaded box counts two) and column lines a direction. */
+const MAX_GRID_BANDS = 8_192;
+/** Distinct thin-rule lines a grid can count in one direction (Doppler withholds the counts past 4,096 thin rules a way). */
+const MAX_THIN_RULE_LINES = 4_096;
+/** Thin-rule sets with 2 or more horizontal lines: at most half the 4,096 horizontal thin rules a page can have counted. */
+const MAX_UNLISTED_GRIDS = MAX_THIN_RULE_LINES / 2;
+const THIN_RULE_KEYS = ["hRules", "vRules", "outerSides", "connected"] as const;
+
+function grid(value: unknown): DopplerVectorGrid | undefined {
+  const band = (v: unknown) => count(v, MAX_GRID_BANDS) !== undefined && (v as number) >= 1 ? v : undefined;
+  const out = family<DopplerVectorGrid>(value, { bbox: box, rows: band, columns: band, coverage: ratio }, {
+    hRules: (v) => count(v, MAX_THIN_RULE_LINES), vRules: (v) => count(v, MAX_THIN_RULE_LINES), outerSides: (v) => count(v, 4),
+    connected: bool,
+  });
+  if (!out || !isObj(value)) return undefined;
+  // The thin-rule counts come as a set: all four valid, or none on the wire. A partial or malformed set is not the
+  // walker's count, and the grid (so its list, so `vectors`) is unknown rather than read as an older build's grid.
+  const onWire = THIN_RULE_KEYS.filter((key) => has(value, key)).length;
+  const kept = THIN_RULE_KEYS.filter((key) => out[key] !== undefined).length;
+  if (onWire !== 0 && (onWire !== THIN_RULE_KEYS.length || kept !== THIN_RULE_KEYS.length)) return undefined;
+  return out;
+}
+
 function vectors(value: unknown): DopplerVectorFacts | undefined {
-  return family<DopplerVectorFacts>(value, {
+  const facts = family<DopplerVectorFacts>(value, {
     paths: (v) => count(v, 100_000), filled: count, stroked: count, coverage: ratio, hRules: count, vRules: count,
     ruleGridScore: ratio, shadings: count, patterns: count, clips: count, figureClusters: count,
     clusters: (v) => list(v, MAX_ITEMS, cluster), clustersTruncated: bool, limitHit: bool,
-  }, { uncoveredRatio: ratio });
+  }, {
+    uncoveredRatio: ratio, grids: (v) => list(v, MAX_GRIDS, grid), gridsTruncated: bool,
+    unlistedRuledGrids: (v) => count(v, MAX_UNLISTED_GRIDS),
+  });
+  if (!facts || !isObj(value)) return undefined;
+  // Grids decide table routing: a list (or flag) on the wire that does not validate, or a list without its truncation flag,
+  // makes the family unknown rather than leaving a partial or unqualified list. The flag alone (grouping cut short) stands.
+  if ((has(value, "grids") && facts.grids === undefined) || (has(value, "gridsTruncated") && facts.gridsTruncated === undefined)) return undefined;
+  if (facts.grids !== undefined && facts.gridsTruncated === undefined) return undefined;
+  // Thin-rule counts (Doppler #44) qualify the list: `unlistedRuledGrids` that does not validate, comes without the list,
+  // or is missing while a grid carries counts (Doppler writes both from one complete search) makes the family unknown.
+  if (has(value, "unlistedRuledGrids") && facts.unlistedRuledGrids === undefined) return undefined;
+  if (facts.unlistedRuledGrids !== undefined && facts.grids === undefined) return undefined;
+  if (facts.unlistedRuledGrids === undefined && facts.grids?.some((g) => g.hRules !== undefined)) return undefined;
+  // A grid's distinct lines are some of the page's own rules (thin rules are rules; boxes are not): more lines than the
+  // page has rules contradicts them. Under `-glyphs` (pdftomarkdown --math) thin stencil masks are rules the page count
+  // leaves out, so this is also what a math run can write: the thin-rule counts are dropped (an older build's reading),
+  // and the rest of the family stands.
+  if (facts.grids?.some((g) => g.hRules !== undefined && (g.hRules > facts.hRules || g.vRules! > facts.vRules))) {
+    delete facts.unlistedRuledGrids;
+    facts.grids = facts.grids.map(({ hRules: _h, vRules: _v, outerSides: _o, connected: _c, ...g }) => g);
+  }
+  return facts;
 }
 
 function forms(value: unknown): DopplerFormFacts | undefined {
@@ -477,6 +600,69 @@ function layers(value: unknown): DopplerLayerFacts | undefined {
 
 const PAGE_FAMILIES = { geometry, text, fonts, images, vectors, forms, annots, layers } as const;
 
+/** Slack for a box against the page's sides, as the contract allows a word box to pass an image's (1 pt). */
+const PAGE_SLACK_PT = 1;
+
+/**
+ * The page's extent in the facts' coordinate space (the MediaBox, rotated, origin top left): the rotated MediaBox when
+ * given, otherwise the page size (the two are given only when they differ from the CropBox). Null when unknown.
+ */
+function pageExtent(geometry: DopplerGeometry | undefined): [number, number] | null {
+  if (!geometry) return null;
+  const media = geometry.mediaBox;
+  if (!media) return [geometry.widthPt, geometry.heightPt];
+  const w = Math.abs(media[2] - media[0]), h = Math.abs(media[3] - media[1]);
+  return geometry.rotation === 90 || geometry.rotation === 270 ? [h, w] : [w, h];
+}
+
+/** The page's extent in the facts' coordinate space (exported for the layout mapper's box shares). */
+export function dopplerPageExtent(geometry: DopplerGeometry | undefined): [number, number] | null {
+  return pageExtent(geometry);
+}
+
+/** A box ordered and inside the page within PAGE_SLACK_PT. */
+function boxOnPage(b: Box, extent: [number, number]): boolean {
+  const [w, h] = extent;
+  return b[0] <= b[2] && b[1] <= b[3] && b[0] >= -PAGE_SLACK_PT && b[1] >= -PAGE_SLACK_PT && b[2] <= w + PAGE_SLACK_PT && b[3] <= h + PAGE_SLACK_PT;
+}
+
+/**
+ * Checks across families of one page (the families validated alone first):
+ * - every grid box must be on the page: a grid off the page, or grids without a page geometry to bound them, make
+ *   `vectors` unknown;
+ * - words inside an image (whole-box and centred) are bounded by the page's own counts: without `text`, or past them, the
+ *   pair is unknown.
+ */
+function crossCheckPage(out: DopplerPageFacts): void {
+  const grids = out.vectors?.grids;
+  if (grids && grids.length > 0) {
+    const extent = pageExtent(out.geometry);
+    if (!extent || !grids.every((g) => boxOnPage(g.bbox, extent))) delete out.vectors;
+  }
+  for (const item of out.images?.items ?? []) {
+    const text = out.text;
+    if (item.visibleWordsInside !== undefined && item.invisibleWordsInside !== undefined &&
+        (!text || item.visibleWordsInside > text.visibleWordCount || item.invisibleWordsInside > text.invisibleWordCount)) {
+      delete item.visibleWordsInside;
+      delete item.invisibleWordsInside;
+    }
+    if (item.visibleWordsCentredInside !== undefined && item.invisibleWordsCentredInside !== undefined &&
+        (!text || item.visibleWordsCentredInside > text.visibleWordCount || item.invisibleWordsCentredInside > text.invisibleWordCount)) {
+      dropCentred(item);
+    }
+  }
+}
+
+/**
+ * The page's facts may have been read from an object the file holds twice, after an earlier page rebuilt the
+ * cross-reference table (`xref-repaired-earlier`): low confidence, for any fact of the page (its content stream is an
+ * object too). Callers treat what could authorize a paid read from such a page as unknown: images' `px`, `dpi`,
+ * `bytesPerPixel` and words inside, ruled grids, chart candidates; page-image evidence refuses the document.
+ */
+export function dopplerPageFactsLowConfidence(page: Pick<DopplerPageFacts, "parseWarnings">): boolean {
+  return page.parseWarnings.includes("xref-repaired-earlier");
+}
+
 /**
  * Validate one page object (a wire `page` line). Null when the page number is missing,
  * out of 1..pageCount, or the required lists are malformed: the page is then unknown.
@@ -500,9 +686,33 @@ export function validateDopplerPage(value: unknown, pageCount: number): DopplerP
     const parsed = check(value[name]);
     if (parsed !== undefined) (out as unknown as Obj)[name] = parsed;
   }
+  crossCheckPage(out);
   const ms = nonNegative(value.factsMs, 86_400_000);
   if (ms !== undefined) out.factsMs = ms;
   return out;
+}
+
+/**
+ * The facts without Doppler #44's walker-parity fields (each grid's thin-rule counts, `unlistedRuledGrids`, and images'
+ * centred word counts). Doppler vouches for them only when facts and Markdown come from one `pdftotext -bbox-layout -rules`
+ * run without `-glyphs`; `pdftomarkdown --math` adds `-glyphs`, which turns thin stencil masks into rules. A caller that
+ * asked for math strips them: the page then maps as a build without them would (grids unknown, whole-box word counts).
+ * Returns a copy; the input is not changed.
+ */
+export function withoutWalkerParityFacts<T extends Pick<DopplerPageFactsDocument, "pages">>(facts: T): T {
+  const pages = new Map<number, DopplerPageFacts>();
+  for (const [number, page] of facts.pages) {
+    const copy: DopplerPageFacts = { ...page };
+    if (page.vectors) {
+      const { unlistedRuledGrids: _u, ...vectors } = page.vectors;
+      copy.vectors = { ...vectors, ...(vectors.grids ? { grids: vectors.grids.map(({ hRules: _h, vRules: _v, outerSides: _o, connected: _c, ...g }) => g) } : {}) };
+    }
+    if (page.images?.items) {
+      copy.images = { ...page.images, items: page.images.items.map(({ visibleWordsCentredInside: _a, invisibleWordsCentredInside: _b, ...item }) => item) };
+    }
+    pages.set(number, copy);
+  }
+  return { ...facts, pages };
 }
 
 /** The run line's build stamps, narrowed so they cannot carry free text: a dotted version and a hex commit. */

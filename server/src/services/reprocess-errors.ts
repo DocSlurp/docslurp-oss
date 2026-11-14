@@ -3,7 +3,7 @@ export class ReprocessRejectedError extends Error {
   constructor(
     message: string,
     readonly statusCode: 400 | 409,
-    readonly code: "no_stages_to_run" | "source_not_reusable" | "missing_stage_artifacts" | "extract_not_reprocessable",
+    readonly code: "no_stages_to_run" | "source_not_reusable" | "missing_stage_artifacts" | "extract_not_reprocessable" | "chart_export_tier_unavailable",
     readonly details: Record<string, unknown> = {},
   ) {
     super(message);

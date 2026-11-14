@@ -224,7 +224,7 @@ Values are matched by slug: the value is lowercased, accents are stripped, every
 
 **Where `project` is accepted:** request bodies, query strings and form fields of uploads, URL ingest, direct upload sessions, upload estimates, search GET/POST and each batch query, chat and chat stream, suggest, document and notification listing filters, run previews, and the MCP tools. Aggregate search (`POST /v1/search/aggregate`) takes a `projects` array of the same values. REST paths `/v1/projects/:project/...` accept a UUID, slug, former slug or `default` (a name in a path is matched by its slug). [Compatible search](https://docslurp.io/docs/search-integrations) index/collection names (`/compat/meilisearch/indexes/default/search`) and `model: "project:default"` for [OpenAI-compatible chat](https://docslurp.io/docs/chat) (`GET /v1/models` lists `project:<uuid>` IDs; `project:<slug>` also works) use the same resolver. Responses keep reporting the resolved `projectId` (a UUID) and the project record with its `slug`.
 
-**Model URIs:** every field that names a model takes an `llm://<provider>/<model>` URI: `model` on `/v1/chat` and `/v1/chat/stream` (`llm://openrouter/anthropic/claude-haiku-5.5`), `docslurp.model` on `/v1/chat/completions` (its `model` stays the project), and the project `pipeline` model fields (`textGeneration`, `structuredExtraction`, `vision.modelUri`, `embedding.modelUri`). Hosted chat and text models also accept the bare OpenRouter id as shorthand. See [Model URIs](https://docslurp.io/docs/models) and [model configuration](model-configuration.md#model-uris-llm).
+**Models are managed:** callers choose categories, never a backend model or provider: `tier` (`fastest`, `balanced`, `smart`) on `/v1/chat`, `/v1/chat/stream`, MCP `chat` and `docslurp.tier` on `/v1/chat/completions` (its `model` stays the project); `pipeline.quality`, `pipeline.embedding.profile`, `pipeline.vision.profile` and `pipeline.inferenceLane` for ingestion; `retrievalDefaults.reranker` for search. Requests that name a backend model, provider or `llm://` URI get HTTP 400 `model_not_allowed`, and project and settings responses omit the managed model fields. Usage events and traces still record the concrete model. See [model configuration](model-configuration.md).
 
 **Which organization:** API keys use their own organization. Dashboard sessions use the personal organization for the default project unless the request passes `orgId` (body field, or `?orgId=` on query-string and `/v1/projects/default/...` requests); with `orgId`, names and slugs only match projects in that organization.
 
@@ -274,6 +274,7 @@ curl -X PATCH "$api_url/v1/projects/amber-falcon-ridge" \
 | Update or rename project | `PATCH /v1/projects/:project` (session or `projects:manage` key) | `updateProject(id, { slug })` | Use HTTP |
 | Retrieve passages | `POST /v1/search` or `GET /v1/search` | `search` | `search` |
 | Batch retrieval | `POST /v1/search` with `{ queries }` | `search({ queries })` | `search --queries-file` |
+| Streaming retrieval (SSE, each leg as it lands) | `POST /v1/search/stream` ([events](search-api.md#streaming-search)) | `searchStream` | `search --stream` |
 | Grounded chat | `POST /v1/chat` | `chat` | `chat` |
 | Grounded chat over SSE | `GET /v1/chat/stream` | `chatStream` | Use SDK/HTTP |
 | OpenAI-compatible chat | `POST /v1/chat/completions`, `GET /v1/models` ([chat](https://docslurp.io/docs/chat)) | Use an OpenAI SDK | Use HTTP |
@@ -424,6 +425,38 @@ for the reconciler, Token authentication, bucket filter and deployment order.
 
 ## API changes
 
+- **2026-11-13, non-breaking.**
+  - Project records carry `canEdit`: whether this caller may change the project or its documents. It uses the same rule as a document's `canReprocess`, and it appears wherever a project record is returned: project list and detail, the dashboard bootstrap, the realtime project snapshot (per subscriber), project create, update, clone, archive, restore and rollback, and upload, URL-ingest, extract and upload-session responses.
+  - More editor-only refusals now answer `403 editor_required` to a caller who can see the project. Earlier they answered `403 forbidden`, `403 project_forbidden`, `400` or `404`:
+    - knowledge-graph settings, rebuild, its estimate and cancel;
+    - chat-instructions Improve;
+    - starting a page render (`POST /v1/documents/:id/pages/:n/image`);
+    - project clone and version rollback.
+  - The SDK (`DocSlurpApiError.code`) and the CLI (`--json` `error.code`) keep the `editor_required` code and show its reviewed message.
+  - Project records also carry `canManage`: whether this caller may archive or delete the project and manage its members. Org owners and admins, the project's owner and its admins may; a server key also needs `projects:manage`.
+  - `GET /v1/documents/:id/pages/:n/image` answers `202` only while a render is queued or running. With nothing in flight, a project editor gets the typed `not-rendered` state (HTTP 200, with `capabilities`) and anyone else gets `403 editor_required`, so a reader never polls a render that will not happen.
+  - Known limitation: a live realtime project snapshot keeps the `canEdit` and `canManage` it was projected with until the project next changes or the client reconnects. A role change alone does not re-project it. REST reads are always current, and the server enforces the rule on every request.
+- **2026-11-13, breaking.** Changing a project or its documents now needs edit access, in the organization's default project too. Viewers and plain members are read-only everywhere.
+  - **Who has edit access:** org owners and admins, the project's owner, and its admins and editors. A server key needs `ingest` (or `projects:manage` for settings), and its user needs edit access.
+  - **The refusal:** a caller who can see the project or document but may not change it gets `403` with code `editor_required` and one message: "This needs edit access to the project. Ask a project editor or an organization admin." See [error codes](#editor-required). Earlier, some of these routes answered `404` or `forbidden`, and default-project members were allowed. Content outside your organization is still `404`.
+  - **Reprocessing and paid work:**
+    - document reprocess, single and bulk;
+    - run reprocess;
+    - run retry: a member can no longer retry their own failed upload run, because retry spends credits; a run's creator may still `recover` it, see run control below;
+    - correction re-index;
+    - document and project full index, including the MCP `fullIndex` tool;
+    - figure resume;
+    - the ingest-report apply and reprocess actions;
+    - the chat proposal Apply routes.
+  - **Settings:** every settings `PATCH` from a non-editor is `403`, including `PATCH /v1/projects/:project`, `PATCH /v1/projects/:project/search-settings` and indexing-mode changes, whether or not it would re-index.
+  - **Documents:** deleting documents (`DELETE /v1/documents/:id`, bulk `delete`), changing tags (`PUT /v1/documents/:id/tags`, bulk `apply-tags` and `remove-tags`) and saving a correction (`PUT /v1/documents/:id/correction-workbench`, which publishes corrected text to search). A bulk request that names a document you cannot see answers `404` and changes nothing.
+  - **Run control (`POST /v1/runs/:id/control`):** editors may take any action. A run's creator, while still a project member, may `cancel` or `pause` it, and may `resume` or `recover` it only when it is their own upload run. `reprioritize` is for editors only.
+  - **Estimates:** each estimate follows its action's rule:
+    - `POST /v1/projects/:project/estimate`, `.../search-settings/estimate`, `.../indexing-mode/estimate`, `.../full-index/estimate`;
+    - the project bulk estimate for every action except `export-artifacts`, which returns `403` where it used to return an empty `200`;
+    - `POST /v1/documents/:id/full-index/estimate` and `POST /v1/runs/:id/reprocess/estimate`.
+  - **Unchanged:** uploading into the default project; every org member may.
+- **2026-11-13, breaking.** Documents and runs gain `ingestVersion` and `ingestCapabilities`. `GET /v1/documents/:id` gains `ingest`, and the new `GET /v1/ingest-version` (SDK `getIngestVersion`) returns the workspace's current version. A page image, figure or structured result that exists for the caller but cannot be shown now answers a typed `{ status: "unavailable", reason, message, canReprocess, ingestVersion, currentIngestVersion }` state with HTTP 200. Page images no longer return `409 quarantine_rescan_required` or `409`, and `GET /v1/documents/:id/structured` no longer returns 404 or 500 for a missing or unreadable result. See [ingest versions and unavailable states](ingest-version.md).
 - **2026-11-05, non-breaking.** New projects, including each organization's default project and projects created by uploads, default to `summaries: false`, so ingestion no longer adds a per-document summary charge unless you turn it on. Existing projects keep their saved setting; templates that enable summaries still do. See [document summaries](document-summaries.md).
 - **2026-11-03, breaking.** `POST /v1/search/aggregate` defaults `generateAnswer`, `queryRewrite` and `selfQuery` to `false`, like `POST /v1/search`; send them to turn them on. `generateAnswer: true` with an API key now needs a server key with `chat` as well as `search` (403 `forbidden` otherwise; browser keys are refused), counts against chat rate limits and the key's output cap, answers 400 when the projects span more than one organization, and answers `answer: null` with a warning when chat is off in an answered project or no project is accessible. `PATCH /v1/projects/:project/search-settings` and its estimate accept a server key with `projects:manage` (previously signed-in sessions only); browser keys and OAuth tokens are refused. `rankingRules`, `synonyms` and `pinnedResults` updates are limited to 500 entries and 64 KB each. A key's mutation of `/v1/projects/default/...` means the organization default project and answers 404 when the key's project allowlist excludes it. The SDK's `updateSearchSettings` now types its result as the stored settings (`ProjectSearchSettingsResponse`), which is what the route returns. See [aggregate search](search-api.md#aggregate-search).
 - **2026-10-29, non-breaking.** Projects gain `allowChinaProviders` (default `true`; `PATCH /v1/projects/:project`), which narrows the organization's setting. With either off, OpenRouter requests carry a `provider.only` allowlist of providers with a known non-China headquarters, unknown-region providers are excluded and unknown scope is restricted. See [provider regions](provider-regions.md).
@@ -431,6 +464,17 @@ for the reconciler, Token authentication, bucket filter and deployment order.
 
 - **2026-10-20.** New projects default to `summaries: true`. Create/update bodies and project responses expose this document-summary option. It adds a one-time processing cost to improve document search and project overviews. See [document summaries, costs and limits](document-summaries.md).
 - **2026-10-14, non-breaking.** Responses of work-creating routes (project `PATCH`, search-settings `PATCH`, uploads, reprocess, full-index, graph rebuild) gain an optional `job`. New `POST …/estimate` routes, `GET /v1/jobs/:id` and `GET /v1/jobs/:id/events`. Projects gain `autoConfirmReindex` and `retainDocumentVersions`; organizations gain `retainDocumentVersions`. Uploads accept `path`. Config `PATCH` requests that succeeded before still succeed and never return `409`; a `reindex-required` change now queues a re-index. See [config-change jobs](config-change-jobs.md).
+
+<a id="editor-required"></a>
+### Editor-only actions: `editor_required`
+
+Changing a project or its documents answers `403` with this envelope when the caller can see the project but may not edit it:
+
+```json
+{ "error": { "code": "editor_required", "message": "This needs edit access to the project. Ask a project editor or an organization admin.", "requestId": "..." } }
+```
+
+It is the only code for that refusal. Show "ask a project editor" and don't offer a retry, which never helps. Org owners and admins, the project's owner, and its admins and editors have edit access. A server key needs the scope its route documents (`ingest`, or `projects:manage` for settings), and its user needs edit access. A key that lacks the scope gets `403 forbidden`, not `editor_required`.
 
 ## Live ingestion progress
 
@@ -1051,9 +1095,9 @@ X-DocSlurp-Spend: "key-spend-1d";q=500;r=212;w=86400;u=usd-cents
 | Searches per mode | — (`Retry-After` only) | Searches in one mode (`keyword`, `hybrid` or `deep`), counted when each starts (a search that then fails still counts), in fixed windows aligned to the clock. Once reached, searches in that mode return 429 `search_limit_exceeded` (`details.mode`, `details.limit`, `details.windowSeconds`, `details.retryAfterSeconds`); a cheaper mode keeps working under its own limit. Each batch item and each project of `/v1/search/aggregate` counts as one search. Cached answers and the searches a chat turn runs don't count. Without a shared Redis limiter each server process counts separately. |
 | Daily pages | — | Uploads stop with `daily_page_limit` once the key's pages-per-day cap is used. |
 | Per visitor of a browser key | `client-visitor-<category>` | Browser (publishable) keys only: each visitor address gets a share of the key's budget per minute, by default 20 `chat-ai` and 120 `search`, so one visitor cannot use up a widget's whole allowance. A visitor is an IP address (an IPv6 /64), so people behind one office or NAT address share it; requests with no known address share one bucket. |
-| Chat in progress | `chat-concurrency` | AI chat turns still running or streaming at once. Browser keys: 16 per key and 3 per visitor address. Server keys: no default cap, so backend batch jobs aren't throttled; set one with a `concurrent` rule. A turn frees its slot when its response ends, the client disconnects, or the turn deadline plus 15 seconds passes, whichever is first. An MCP `chat` tool call counts as `chat-ai` and takes a slot too. |
+| Chat in progress | `chat-concurrency` | AI chat turns still running or streaming at once. Browser keys: 16 per key and 3 per visitor address. Server keys: 64 per key, a bound on runaway loops that leaves room for backend batch jobs; set a different one with a `concurrent` rule. Counts are shared across every API instance. If the shared counter can't be reached, chat turns from capped keys get a 503 `chat_capacity_unavailable` with `Retry-After` instead of running uncounted; retry after the delay. A turn frees its slot when its response ends, the client disconnects, or the turn deadline plus 15 seconds passes, whichever is first. An MCP `chat` tool call counts as `chat-ai` and takes a slot too. |
 
-Custom request and spend windows are set per key on the API keys page (under "Permissions and limits", then "Advanced rate limits") or with `rateLimits` on `POST`/`PATCH /v1/api-keys`, e.g. `[{ "metric": "requests", "limit": 1000, "windowSeconds": 3600 }, { "metric": "spend", "limit": 500, "windowSeconds": 86400 }, { "metric": "concurrent", "limit": 32, "windowSeconds": 1 }]` (spend in US cents; `concurrent` caps chat turns in progress, per server process, and ignores `windowSeconds`; at most five rules, one per metric and window, windows up to 31 days). Spend is recorded when the work it pays for finishes and is refreshed every few seconds, so a request already running can carry a key slightly past its spend limit.
+Custom request and spend windows are set per key on the API keys page (under "Permissions and limits", then "Advanced rate limits") or with `rateLimits` on `POST`/`PATCH /v1/api-keys`, e.g. `[{ "metric": "requests", "limit": 1000, "windowSeconds": 3600 }, { "metric": "spend", "limit": 500, "windowSeconds": 86400 }, { "metric": "concurrent", "limit": 32, "windowSeconds": 1 }]` (spend in US cents; `concurrent` caps chat turns in progress across all API instances and ignores `windowSeconds`; at most five rules, one per metric and window, windows up to 31 days). Spend is recorded when the work it pays for finishes and is refreshed every few seconds, so a request already running can carry a key slightly past its spend limit.
 
 Per-mode search limits use the `searches` metric with a `mode`, e.g. `[{ "metric": "searches", "mode": "deep", "limit": 1000, "windowSeconds": 86400 }, { "metric": "searches", "mode": "keyword", "limit": 100000, "windowSeconds": 86400 }]` for 1,000 deep and 100,000 keyword searches a day. A key takes up to 8 limits, one per metric, mode and window.
 
@@ -1091,6 +1135,8 @@ Every 429 has `Retry-After` and the [error envelope](https://docslurp.io/docs/se
 }
 ```
 
+A 503 with `error.code` `chat_capacity_unavailable` is not a limit you reached: the service couldn't count chat turns in progress and refused the turn. It carries `Retry-After` and `details.policy` `chat-concurrency`. On `/v1/chat/completions` it is an OpenAI-shaped 503 with `error.type` `server_error` and `error.code` `chat_capacity_unavailable`.
+
 `spend_limit_exceeded`, `search_limit_exceeded` and `daily_page_limit` are the key's own limits, so their `links.apiKeys` points at the API keys page. IP-level limits only link these docs. An IP is blocked for a while after an extreme burst or after repeatedly presenting invalid API keys, so stop and fix credentials rather than retrying 401s in a loop.
 
 ### Processing quality
@@ -1109,18 +1155,153 @@ Current Fast and Rich page prices are on [docslurp.io/pricing](https://docslurp.
 
 ### Chart and diagram export
 
-`pipeline.chartExport` (off by default) re-expresses each detected chart or diagram as text an assistant or a notebook can use. A deployment enables the feature with `DOCSLURP_CHART_EXPORT=on` on the API and worker; while it is off, turning `enabled` on is refused with `400 chart_export_unavailable`, a stored `enabled: true` has no effect, and estimates, chat suggestions and the ingest report never offer it. Set it on the project (`PATCH /v1/projects/:project` with `{ "pipeline": { "chartExport": { "enabled": true } } }`) or per upload in the request's `pipeline` overrides.
+`pipeline.chartExport` re-expresses each detected chart or diagram as text an assistant or a notebook can use. You choose a **tier**, never a model:
+
+| Tier | What runs | Cost |
+| --- | --- | --- |
+| `off` | Nothing. Charts stay images (and their counts are still recorded). | none |
+| `free` | Charts that carry their own data: Office chart parts (DOCX, PPTX, XLSX), embedded Vega, Vega-Lite or Plotly specs, and vector figures with readable axes. No model is called. | no credits |
+| `models` | The free steps, plus reading every other chart or diagram with AI. | billed per chart or diagram read (`feature-chart-export`) |
+
+**Chart export is off by default.** A project with no `tier` set uses the caller's default, decided by the server from
+how you authenticated (never from a request field). With no deployment settings, both defaults are `off`:
+
+- **API, MCP, SDK and CLI calls** (API keys and OAuth tokens): `off`.
+- **The DocSlurp app** (signed-in browser sessions, including chat uploads): `off`.
+
+Turn it on per request or per project (below). The project record reports what a deployment actually runs as
+`chartExportDefaults`: `{ app, machine, modelsAvailable, freeAvailable, ceiling }`. Read it instead of assuming either
+default; `freeAvailable` and `modelsAvailable` say which tiers you may choose.
+
+A deployment sets these without a code change. Each value is parsed strictly, and an unknown value is treated as `off`
+and logged at startup:
+
+- `DOCSLURP_CHART_EXPORT=off|free|on` (default `off`): the ceiling for every tier (see precedence below). Self-hosters
+  set it to `free` or `on` to offer chart export at all.
+- `DOCSLURP_CHART_EXPORT_API_DEFAULT=off|free` (default `off`) for API callers on projects with no tier.
+- `DOCSLURP_CHART_EXPORT_APP_DEFAULT=off|free` (default `off`) for the app on projects with no tier.
+- `DOCSLURP_CHART_EXPORT_INLINE=1` (default unset): the free steps run inside the sandboxed inspection every document
+  already gets, instead of a separate sandbox run per document. A sandbox image whose inspection does not support it
+  skips those charts and counts them as deferred.
+- `DOCSLURP_CHART_EXPORT_FREE_EXPLICIT=on|off` (default: follows `DOCSLURP_CHART_EXPORT_INLINE`). Whether callers may
+  choose `free` explicitly. Unset, it is allowed exactly when inline extraction is on. While it is refused, a request
+  or project change that asks for `free` is refused, and a stored `free` counts as unset.
+- `DOCSLURP_CHART_EXPORT_FREE_VM_RUNS_PER_ORG_HOUR` (default `200`): per-organization hourly cap on free-tier
+  documents whose charts run in a sandbox, inline or in a separate run, across every worker. One document counts once.
+  Past the cap, that document's charts are skipped and counted as deferred; the document itself is processed as usual.
+
+**Precedence**, highest first:
+
+1. The request's own override (below).
+2. The project's `pipeline.chartExport.tier`.
+3. The default for the caller (above).
+4. The deployment ceiling, `DOCSLURP_CHART_EXPORT` (`off`, `free` or `on`), caps all of these: `off` disables chart export everywhere, `free` allows only the free steps, `on` allows `models` too.
+
+The resolved tier is stored on the run (`pipeline.chartExport.tier`), so a retry or resume runs with the same tier.
+
+**Per project:** `PATCH /v1/projects/:project` with `{ "pipeline": { "chartExport": { "tier": "free" } } }` (`"off"`,
+`"free"` or `"models"`; a server key with `projects:manage`, or a project editor's session). New uploads to the project
+then use that tier unless a request overrides it. A tier the deployment does not offer
+(`chartExportDefaults.freeAvailable` / `modelsAvailable` false) is refused with `400 chart_export_tier_unavailable`.
+Remove the field to go back to the caller's default. In a project chat, the settings proposal tool
+(`proposeProjectSettings`) offers the same change as an Apply card: `{ changes: { pipeline: { chartExport: { tier: "free" } } } }`.
+
+```bash
+curl -X PATCH "https://docslurp.io/v1/projects/q3-earnings" \
+  -H "Authorization: Bearer $DOCSLURP_API_KEY" \
+  -H "content-type: application/json" \
+  -d '{ "pipeline": { "chartExport": { "tier": "free" } } }'
+```
+
+```ts
+import { createDocSlurpClient } from "@docslurp/sdk";
+
+const client = createDocSlurpClient(); // Reads DOCSLURP_API_KEY.
+await client.updateProject("q3-earnings", { pipeline: { chartExport: { tier: "free" } } });
+```
+
+**Replays never raise the tier.** Reprocess, bulk reprocess, reindex and full index run each document at its source run's tier capped at what the project resolves to now: after a project moves from `models` to `off` (or unset), a plain reprocess or a later reindex runs without billed chart reads, and a contributor's plain reprocess is not refused. Only an explicit request override (`chartExport: { "tier": "models" }`) raises it, and it then needs project editor rights (and, for an API key, `pipeline:billed-features`).
+
+**Per request:** upload, URL ingest and direct upload sessions take it in the request's `pipeline` overrides; reprocess and the estimate endpoints take a top-level `chartExport`. A request override wins over the project's tier (within the deployment ceiling, and `models` above a project's `off`/`free` needs the rights below):
+
+```bash
+curl -X POST "https://docslurp.io/v1/uploads/url" \
+  -H "Authorization: Bearer $DOCSLURP_API_KEY" \
+  -H "content-type: application/json" \
+  -d '{ "urls": ["https://example.com/q3-earnings.pptx"], "pipeline": { "chartExport": { "tier": "free" } } }'
+```
+
+```ts
+import { createReadStream } from "node:fs";
+
+await client.upload(createReadStream("q3-earnings.pptx"), { chartExport: { tier: "free" } });
+await client.upload({ urls: ["https://example.com/q3-earnings.pdf"] }, { chartExport: { tier: "models" } });
+await client.reprocessRun(runId, { chartExport: { tier: "free" } });
+```
+
+```bash
+docslurp upload q3-earnings.pptx --chart-export free
+docslurp ingest-url https://example.com/q3-earnings.pdf --chart-export models --estimate
+docslurp reprocess <runId> --chart-export free
+```
+
+`--estimate` prints the estimate and starts nothing. For `ingest-url` it reads each URL's size from the URL's own
+headers, and fails if a URL reports none; download the file and run `docslurp estimate <file>` instead. Commands without
+an estimate (such as `extract`) refuse the flag.
+
+The same bodies over JSON:
+
+```json
+POST /v1/uploads/url
+{ "urls": ["https://example.com/q3-earnings.pdf"], "pipeline": { "chartExport": { "tier": "off" } } }
+
+POST /v1/runs/:runId/reprocess
+{ "chartExport": { "tier": "models" } }
+
+POST /v1/uploads/estimate
+{ "files": [{ "name": "q3-earnings.pdf", "size": 2400000 }], "chartExport": { "tier": "models" } }
+```
+
+The upload estimate answers `chartExport: { tier, source, credits }`, where `source` is `request`, `project` or `default`. Only `models` adds credits. The quote in every estimate (`POST /v1/estimate`, the `quote` of `POST /v1/uploads/estimate`, SDK, CLI and MCP `uploadEstimate`) also takes `settings.chartExport` (`off`, `free` or `models`), resolves an omitted one the same way, and shows `models` as a separate `charts` line. Anonymous `POST /v1/estimate` calls are treated as API calls (default `off`). `POST /v1/runs/:runId/reprocess/estimate` prices the same override.
+
+Website ingest (`POST /v1/web/ingest`) takes a top-level `chartExport` too.
+
+Other surfaces: SDK `chartExport: { tier }` on `upload`, `uploadUrls`/`ingestUrls`, `reprocessRun`, `reprocessEstimate` and `uploadEstimate`; CLI `--chart-export off|free|models` on `upload`, `ingest-url`, `reprocess` and their `--estimate`; MCP `chartExport` on `upload`, `extract`, `uploadEstimate` and `reprocessEstimate`.
+
+**Refusals:** a tier the deployment does not offer is refused with `400 chart_export_tier_unavailable` on every surface:
+uploads, URL ingest, direct sessions (at creation and again at confirm), extracts, website ingest, reprocess, the
+estimates and project changes. The tier is never silently lowered. `models` is offered only where the ceiling is `on`,
+and an explicit `free` only where `chartExportDefaults.freeAvailable` is true. The access check comes first, so a caller
+without access gets its 403 or 404 before any tier refusal.
+
+**A project's tier is a ceiling.** Choosing `models` per request on a project
+whose tier is `off`, `free` or unset (no tier means off) needs project editor rights. An API key additionally needs the
+`pipeline:billed-features` scope (or `projects:manage`). Otherwise the request is refused with
+`403 chart_export_models_forbidden`. Only a project saved on `models` lets any caller with spend allowance choose it.
+
+**Billing for `models`:** a `models` run passes the same spend admission as other model-calling work: credits, budgets,
+and the `ingest` scope on a server key. An unknown tier, a `generatorModel` field, or any other unknown key is a
+validation error. The model that reads charts is chosen by DocSlurp from managed settings; requests cannot pick one.
+
+**Reindex and full index** of a project with no tier keep each document's own tier, the one its source run stamped, as
+reprocess does, capped at what the project resolves to now. They do not take the tier of whoever started them.
+
+**Figures and PDF charts:** PDF charts are read from the PDF's extracted figures, so `figures: false` also turns off
+chart export for PDFs.
 
 | Field | Default | Meaning |
 | --- | --- | --- |
-| `enabled` | `false` | Turn export on. Enabling it (or adding formats, or turning `diagrams` on) recommends a reindex: existing documents gain exports only when you reprocess them. |
+| `tier` | unset (caller's default) | `off`, `free` or `models`, as above. Moving up a tier recommends a reindex: a billed one for `models`, an optional free one for `free`. Turning it down or off applies to new uploads only. |
 | `formats` | `["description", "mermaid"]` | Any of `description` (short prose: type, axes, series, ranges and trend), `mermaid` (rendered in chat; GitHub renders it too), `vega-lite` (v5 JSON with inline data), `matplotlib` (a self-contained Python snippet) and `csv` (RFC 4180; diagrams export an edge list). |
 | `diagrams` | `true` | Also export flowcharts, org charts, sequence, state, ER and mind-map diagrams (Mermaid, description and CSV edge list). |
-| `generatorModel` | `null` | Optional `llm://provider/model` override for charts that need a model. Only the worker's chart generator candidates priced at or under the deployment's generator output-price ceiling are accepted; any other value is ignored (logged) and the default generator is used. Chat proposals never set it. |
 
-Charts that carry their own data (Office chart parts, embedded Vega/Vega-Lite/Plotly specs, vector graphics with readable axes) are exported without a model call; others are read by a model and charged once per chart or diagram the model read (`feature-chart-export`), whatever the outcome: also when the exported data came from the file in the end, when the model found no chart, or when it found a diagram while diagram export is off. The first read bills one generator call per call its formats need (formats derived from one spec share a call; each direct-mode format is its own call). When the spec's first answer needs a repair (it did not validate), or a second try because it was cut off at its length limit, that second call is billed as one more read, its own line in usage; a chart or diagram gets at most one such second read. Estimates and quotes include the expected share of second reads when a spec call runs. A request that failed before the model answered is not charged. Every format is derived from one validated `VisualSpec` (`@docslurp/shared`, `renderVisual`), and a format with no faithful form for a visual (for example a heatmap in Mermaid) is skipped and reported rather than approximated. Labels from documents are escaped for each format, so they cannot add Mermaid directives or click handlers, Python code or spreadsheet formulas. Generated Python is never executed by DocSlurp. Pricing for model-read visuals is on [docslurp.io/pricing](https://docslurp.io/pricing).
+Charts that carry their own data (Office chart parts, embedded Vega/Vega-Lite/Plotly specs, vector graphics with readable axes) are exported without a model call (the `free` tier). With `models`, other charts are read by a model and charged once per chart or diagram the model read (`feature-chart-export`), whatever the outcome: also when the exported data came from the file in the end, when the model found no chart, or when it found a diagram while diagram export is off. The first read bills one generator call per call its formats need (formats derived from one spec share a call; each direct-mode format is its own call). When the spec's first answer needs a repair (it did not validate), or a second try because it was cut off at its length limit, that second call is billed as one more read, its own line in usage; a chart or diagram gets at most one such second read. Estimates and quotes include the expected share of second reads when a spec call runs. A request that failed before the model answered is not charged. Every format is derived from one validated `VisualSpec` (`@docslurp/shared`, `renderVisual`), and a format with no faithful form for a visual (for example a heatmap in Mermaid) is skipped and reported rather than approximated. Labels from documents are escaped for each format, so they cannot add Mermaid directives or click handlers, Python code or spreadsheet formulas. Generated Python is never executed by DocSlurp. Pricing for model-read visuals is on [docslurp.io/pricing](https://docslurp.io/pricing).
 
-Ingest records chart and diagram counts per document even when export is off, so chat suggestions (DocSlurp app) and the ingest report's `export-charts` recommendation can point out charts that were kept only as images.
+Ingest records chart and diagram counts per document whatever the tier. That lets chat suggestions (DocSlurp app) and the ingest report's `export-charts` recommendation point out charts that were not exported as data, and propose `chartExport: { tier: "models" }`.
+
+### Figure extraction
+
+`pipeline.figures` (default `true`) extracts figures from PDFs into the document's image map. Set it to `false` to skip the figure pass for a project's new runs; existing documents keep their figures until they are reprocessed. Turning it back on recommends a reindex, and the figure pass adds sandbox time. The deployment's `DOCSLURP_DOPPLER_IMAGE_EXTRACT` decides whether the pass exists at all. Change it per project (`PATCH /v1/projects/:project` with `{ "pipeline": { "figures": false } }`), per upload in the `pipeline` overrides, or from chat in the DocSlurp app.
 
 ### Credits and budgets
 

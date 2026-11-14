@@ -12,6 +12,7 @@ let stop: () => Promise<void>;
 let sql: postgres.Sql<Record<string, unknown>>;
 let reprocessRun: typeof import("../services/runs.js").reprocessRun;
 let isReprocessRejectedError: typeof import("../services/runs.js").isReprocessRejectedError;
+let retryRun: typeof import("../services/runs.js").retryRun;
 
 beforeAll(async () => {
   const pg = await startMigratedPostgres();
@@ -32,7 +33,7 @@ beforeAll(async () => {
   await sql`insert into organizations(id, name, slug, created_by_user_id, credit_balance_cents) values ('o1', 'Org', 'org', 'u1', 1000)`;
   await sql`insert into org_memberships(org_id, user_id, role) values ('o1', 'u1', 'owner')`;
   await sql`insert into projects(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W')`;
-  ({ reprocessRun, isReprocessRejectedError } = await import("../services/runs.js"));
+  ({ reprocessRun, isReprocessRejectedError, retryRun } = await import("../services/runs.js"));
 }, 120_000);
 
 afterAll(async () => {
@@ -192,5 +193,45 @@ describe("reprocessRun", () => {
     await seedSource({ artifacts: {} });
     const run = (await reprocessRun("run-src", "u1", { stageFrom: "extract-markdown" }))?.run;
     expect(run?.pipeline.restartFromStage).toBe("extract-markdown");
+  });
+});
+
+describe("reprocess never replays a run snapshot's model values", () => {
+  it("drops raw text models and the former DeepSeek vision default, and applies the project's explicit overrides", async () => {
+    const legacy = {
+      ...defaultPipelineFeatures,
+      vision: { profile: "good-fast-hosted", modelUri: "llm://openrouter/deepseek/deepseek-v4.1-flash-1017", target: "hosted", remoteFallbackModelUri: null },
+      textGeneration: { model: "z-ai/glm-5.3-flash", models: { "document-summary": "qwen/qwen3.5-flash-02-23" } },
+      structuredExtraction: { model: "openai/gpt-6.1-sol", supportingPrompt: null, maxOutputTokens: 4096 },
+    };
+    await seedSource();
+    await sql`update project_runs set pipeline = ${sql.json(legacy as unknown as postgres.JSONValue)} where id = 'run-src'`;
+    await sql`update projects set managed_models = ${sql.json({ pipeline: { textGeneration: { model: "llm://private/gpu1/acme/text" } } })} where id = 'w'`;
+    try {
+      const run = (await reprocessRun("run-src", "u1"))?.run;
+      const [stored] = await sql<{ pipeline: Record<string, Record<string, unknown>> }[]>`select pipeline from project_runs where id = ${run!.id}`;
+      expect(stored!.pipeline.vision!.modelUri).not.toMatch(/deepseek/);
+      expect(stored!.pipeline.textGeneration).toMatchObject({ model: "llm://private/gpu1/acme/text", models: {} });
+      expect(stored!.pipeline.structuredExtraction!.model).toBeNull();
+    } finally {
+      await sql`update projects set managed_models = '{}'::jsonb where id = 'w'`;
+    }
+  });
+});
+
+describe("retrying a run from before managed models", () => {
+  it("re-resolves its stored model values instead of replaying the former DeepSeek vision route", async () => {
+    const legacy = {
+      ...defaultPipelineFeatures,
+      vision: { profile: "good-fast-hosted", modelUri: "llm://openrouter/deepseek/deepseek-v4.1-flash-1017", target: "hosted", remoteFallbackModelUri: null },
+      textGeneration: { model: "z-ai/glm-5.3-flash", models: {} },
+    };
+    await seedSource({ docStatus: "failed" });
+    await sql`update project_runs set status = 'failed', stage = 'vision-extract', pipeline = ${sql.json(legacy as unknown as postgres.JSONValue)} where id = 'run-src'`;
+    const result = await retryRun("run-src", "u1");
+    expect(result?.outcome.status).not.toBe("not-retryable");
+    const [stored] = await sql<{ pipeline: Record<string, Record<string, unknown>> }[]>`select pipeline from project_runs where id = 'run-src'`;
+    expect(stored!.pipeline.vision!.modelUri).not.toMatch(/deepseek/);
+    expect(stored!.pipeline.textGeneration).toMatchObject({ model: null });
   });
 });

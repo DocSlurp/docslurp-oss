@@ -10,11 +10,12 @@ The reader waits for up to about one minute. If rendering takes longer, reopenin
 
 `POST /v1/documents/:documentId/pages/:pageNumber/image` requests a page; `GET` checks the result without starting work. Both authorize the document before returning cached artifacts and use private, non-cacheable responses. The POST uses session authentication and project edit permission; it is not an API-key mutation endpoint.
 
-- `200`: a ready artifact, using the existing authenticated file URL.
+- `200`: a ready artifact, using the existing authenticated file URL, or a typed
+  unavailable state (`status: "unavailable"`: needs a reprocess, withheld, not a
+  PDF, still processing); see [ingest versions and unavailable states](ingest-version.md).
 - `202`: pending; poll GET after the `Retry-After` interval.
 - `429`: the organization's render queue is full; retry later.
 - `404`: missing page/document or insufficient scoped access.
-- `409`: the source is not eligible for rendering.
 - Spend denial uses the standard billing error response.
 
 ## Operations

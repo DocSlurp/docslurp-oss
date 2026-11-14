@@ -1,4 +1,7 @@
 import type { SearchChunk, SearchOptions } from "../services/search.js";
+import { LEG_TIMEOUT_EVENTS, emitLegHits, type ProvisionalHitPolicy } from "./stream-hits.js";
+import { searchEventCount } from "./timings.js";
+import { currentSearchStreamSink } from "./stream-events.js";
 
 export type EvidenceAdapterName =
   | "vector"
@@ -18,6 +21,8 @@ export interface EvidenceRetrievalContext {
   userId: string;
   projectId: string;
   options: SearchOptions;
+  /** Filters for provisional stream hits; without it a streaming search reports legs with no hit bodies. */
+  provisional?: ProvisionalHitPolicy;
 }
 
 export interface EvidenceRetrievalResult {
@@ -70,6 +75,19 @@ export interface EvidenceRetrievalFns {
   }): Promise<SearchChunk[]>;
 }
 
+const skippedLegs = new WeakSet<SearchChunk[]>();
+
+/**
+ * The empty result of a leg that did not run (disabled for the search mode,
+ * nothing to search). Streaming searches report no event for it, unlike a leg
+ * that ran and found nothing.
+ */
+export function skippedLeg(): SearchChunk[] {
+  const chunks: SearchChunk[] = [];
+  skippedLegs.add(chunks);
+  return chunks;
+}
+
 export function createEvidenceRetrievalAdapters(
   fns: EvidenceRetrievalFns,
 ): EvidenceRetrievalAdapter[] {
@@ -92,7 +110,7 @@ export function createEvidenceRetrievalAdapters(
               projectId: context.projectId,
               options: context.options,
             })
-          : Promise.resolve([]),
+          : Promise.resolve(skippedLeg()),
     },
     {
       name: "community",
@@ -103,7 +121,7 @@ export function createEvidenceRetrievalAdapters(
               projectId: context.projectId,
               options: context.options,
             })
-          : Promise.resolve([]),
+          : Promise.resolve(skippedLeg()),
     },
     {
       name: "progressive-page",
@@ -136,7 +154,7 @@ export function createEvidenceRetrievalAdapters(
               projectId: context.projectId,
               options: context.options,
             })
-          : [];
+          : skippedLeg();
       },
     },
   ];
@@ -150,9 +168,12 @@ export async function retrieveEvidence(
   if (options.parallel) return await retrieveEvidenceInParallel(adapters, context);
   const results: EvidenceRetrievalResult[] = [];
   const previousResults: Partial<Record<EvidenceAdapterName, SearchChunk[]>> = {};
+  const streaming = currentSearchStreamSink() !== undefined;
 
   for (const adapter of adapters) {
+    const startedAt = performance.now();
     const chunks = await adapter.retrieve(context, previousResults);
+    if (streaming) reportLeg(adapter.name, chunks, startedAt, context);
     previousResults[adapter.name] = chunks;
     results.push({ adapter: adapter.name, chunks });
   }
@@ -170,6 +191,8 @@ async function retrieveEvidenceInParallel(
 ): Promise<EvidenceRetrievalResult[]> {
   const pending = new Map<EvidenceAdapterName, Promise<SearchChunk[]>>();
   const settled: Partial<Record<EvidenceAdapterName, SearchChunk[]>> = {};
+  const streaming = currentSearchStreamSink() !== undefined;
+  const startedAt = performance.now();
   for (const adapter of adapters) {
     const run = adapter.name === "completed-page"
       ? (pending.get("lexical") ?? Promise.resolve([] as SearchChunk[])).then((lexical) =>
@@ -177,10 +200,34 @@ async function retrieveEvidenceInParallel(
       : adapter.retrieve(context, settled);
     // Observe rejections now; Promise.all below still surfaces the first one.
     run.catch(() => undefined);
+    // Report each leg the moment it lands (completion order). A rejected leg reports nothing.
+    if (streaming) run.then((chunks) => reportLeg(adapter.name, chunks, startedAt, context), () => undefined);
     pending.set(adapter.name, run);
   }
   const lists = await Promise.all(adapters.map((adapter) => pending.get(adapter.name)!));
   return adapters.map((adapter, index) => ({ adapter: adapter.name, chunks: lists[index]! }));
+}
+
+/** Side effect only: never throws, never changes what the leg returns. Disabled legs are skipped by the callers' own empty results. */
+function reportLeg(
+  leg: EvidenceAdapterName,
+  chunks: SearchChunk[],
+  startedAt: number,
+  context: EvidenceRetrievalContext,
+): void {
+  if (skippedLegs.has(chunks)) return;
+  try {
+    const timeoutEvent = LEG_TIMEOUT_EVENTS[leg];
+    emitLegHits({
+      leg,
+      chunks,
+      startedAt,
+      policy: context.provisional,
+      timedOut: timeoutEvent ? () => searchEventCount(timeoutEvent) > 0 : undefined,
+    });
+  } catch {
+    // Streaming is best effort.
+  }
 }
 
 export function flattenEvidenceResults(

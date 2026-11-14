@@ -29,6 +29,17 @@ const MAX_CATALOG_BYTES = 20 * 1024 * 1024;
 export interface LiveTokenRates {
   input: number;
   output: number;
+  /** Prompt tokens served from the provider's prompt cache (`input_cache_read`), when listed. */
+  cacheRead?: number;
+  /** Prompt tokens written to the provider's prompt cache (`input_cache_write`, the 5-minute TTL), when listed. */
+  cacheWrite?: number;
+}
+
+/** The listed cache rates of a pricing object, only those present and valid. */
+function cacheRates(value: Record<string, unknown>): Pick<LiveTokenRates, "cacheRead" | "cacheWrite"> {
+  const cacheRead = value.input_cache_read === undefined ? null : rate(value.input_cache_read);
+  const cacheWrite = value.input_cache_write === undefined ? null : rate(value.input_cache_write);
+  return { ...(cacheRead !== null ? { cacheRead } : {}), ...(cacheWrite !== null ? { cacheWrite } : {}) };
 }
 
 interface LivePriceOverride extends LiveTokenRates {
@@ -76,7 +87,7 @@ function parseOverride(raw: unknown): LivePriceOverride | null {
   const value = raw as Record<string, unknown>;
   const input = rate(value.prompt), output = rate(value.completion);
   if (input === null || output === null) return null;
-  const override: LivePriceOverride = { input, output };
+  const override: LivePriceOverride = { input, output, ...cacheRates(value) };
   const min = count(value.min_prompt_tokens);
   if (min !== null) override.minPromptTokens = min;
   if (Array.isArray(value.utc_days)) override.utcDays = value.utc_days.filter((day): day is string => typeof day === "string").map((day) => day.toLowerCase());
@@ -101,7 +112,7 @@ export function parseOpenRouterCatalog(payload: unknown): Map<string, LiveModelP
     const overrides = Array.isArray(pricing.overrides)
       ? pricing.overrides.map(parseOverride).filter((entry): entry is LivePriceOverride => entry !== null)
       : [];
-    models.set(id, { input, output, overrides });
+    models.set(id, { input, output, ...cacheRates(pricing), overrides });
   }
   return models;
 }
@@ -143,6 +154,19 @@ export function liveModelPrice(
   const at = options.at ?? new Date(now);
   const override = entry.overrides.find((candidate) => overrideApplies(candidate, options.promptTokens, at));
   const input = override?.input ?? entry.input, output = override?.output ?? entry.output;
+  // Cache rates follow the matched tier: an override without its own cache rates leaves them unknown. A listed rate
+  // outside the plausible band for this tier's input price (a "0" meaning unsupported, a typo) is dropped, so the
+  // caller's conservative fallback applies: reads 0 < read <= input, writes input <= write <= 4x input.
+  const listed = override ? { cacheRead: override.cacheRead, cacheWrite: override.cacheWrite } : { cacheRead: entry.cacheRead, cacheWrite: entry.cacheWrite };
+  const cache = {
+    cacheRead: listed.cacheRead !== undefined && listed.cacheRead > 0 && listed.cacheRead <= input ? listed.cacheRead : undefined,
+    cacheWrite: listed.cacheWrite !== undefined && listed.cacheWrite >= input && listed.cacheWrite <= input * 4 ? listed.cacheWrite : undefined,
+  };
+  if (options.reference) {
+    // Against a verified hardcoded cache rate, a listing far off is a catalog error: drop that rate.
+    if (cache.cacheRead !== undefined && options.reference.cacheRead !== undefined && drifted(cache.cacheRead, options.reference.cacheRead)) cache.cacheRead = undefined;
+    if (cache.cacheWrite !== undefined && options.reference.cacheWrite !== undefined && drifted(cache.cacheWrite, options.reference.cacheWrite)) cache.cacheWrite = undefined;
+  }
   // Against a verified hardcoded price, a listing far off either way is a catalog error, not a price change.
   if (options.reference && (drifted(input, options.reference.input) || drifted(output, options.reference.output))) {
     warnDrift(model.trim(), { input, output }, options.reference);
@@ -151,6 +175,8 @@ export function liveModelPrice(
   return {
     input,
     output,
+    ...(cache.cacheRead !== undefined ? { cacheRead: cache.cacheRead } : {}),
+    ...(cache.cacheWrite !== undefined ? { cacheWrite: cache.cacheWrite } : {}),
     pricingSource: "openrouter-live",
     fetchedAt: new Date(snapshot.fetchedAt).toISOString(),
     ...(override ? { override: override.minPromptTokens !== undefined ? "min-prompt-tokens" as const : "utc-window" as const } : {}),

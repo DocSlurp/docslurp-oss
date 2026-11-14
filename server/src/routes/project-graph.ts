@@ -52,7 +52,7 @@ async function authorizeApiKey(c: Context, projectRef: string, write: boolean): 
 
 function graphError(c: Context, error: unknown) {
   if (error instanceof ProjectGraphError) {
-    return apiStatusError(c, error.status, error.message, error.activeJob ? { details: { activeJob: error.activeJob } } : {});
+    return apiStatusError(c, error.status, error.message, { ...(error.code ? { code: error.code } : {}), ...(error.activeJob ? { details: { activeJob: error.activeJob } } : {}) });
   }
   throw error;
 }

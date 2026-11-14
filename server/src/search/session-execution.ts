@@ -2,7 +2,7 @@ import { GeoSearchError } from "./geo-scope.js";
 import { boundedSearchQuery, isSearchBoundError } from "./query-bounds.js";
 import { retrievalScope } from "./retrieval-scope.js";
 import { lexicalSearchableDocument } from "./eligibility.js";
-import { qualifyCommunitySummary } from "./community-context.js";
+import { qualifyCommunityResults, searchChunkToResult } from "./search-result.js";
 import type { PrivacyMode } from "@docslurp/shared";
 import type { SearchResult } from "@docslurp/shared";
 
@@ -11,7 +11,7 @@ import { reportPublicError } from "../lib/public-errors.js";
 import { startTelemetrySpan } from "@docslurp/shared/observability";
 import { calibrateSearchConfidence } from "./confidence.js";
 import { compressChunks } from "./contextual-compression.js";
-import { recordSearchPhase, timePhase } from "./timings.js";
+import { emitSearchPhase, recordSearchPhase, timePhase } from "./timings.js";
 import { mmrSelectWithDiagnostics } from "./mmr.js";
 import { lostInTheMiddleReorder } from "./position-reorder.js";
 import { rerankHosted } from "./hosted-rerank.js";
@@ -38,6 +38,8 @@ import {
   recordZeroResultDiagnostics,
 } from "../services/search-controls.js";
 import { leanSearchHistory } from "./lean-logging.js";
+
+export { searchChunkToResult };
 
 export interface SearchSessionExecutionInput {
   query: string;
@@ -84,41 +86,6 @@ export interface SearchSessionRetrievalInput
   rerankScope?: { orgId: string; projectId: string };
   openRouterApiKey?: string | null;
   privacyMode: PrivacyMode;
-}
-
-export function searchChunkToResult(chunk: SearchChunk): SearchResult {
-  const stage = chunk.deferredLocator ?? (chunk.retrievalStage === "page-index" ? "page-text" : "chunk");
-  return {
-    text: chunk.text,
-    score: chunk.score,
-    ...(chunk.relevance === undefined ? {} : { relevance: chunk.relevance }),
-    citation: {
-      source: chunk.source,
-      documentId: chunk.documentId,
-      filename: chunk.filename,
-      pageNumber: chunk.pageNumber,
-      pageNumbers: chunk.pageNumbers,
-      headingPath: chunk.headingPath,
-      chunkIndex: chunk.chunkIndex,
-      blockIds: chunk.blockIds,
-      blockTypes: chunk.blockTypes,
-      evidenceType: chunk.evidenceType,
-      canonicalDocumentUri: chunk.canonicalDocumentUri,
-      tableGranularity: chunk.tableGranularity,
-      tableRowIndex: chunk.tableRowIndex,
-      tableRowCount: chunk.tableRowCount,
-      tableColumnNames: chunk.tableColumnNames,
-      tableColumnTypes: chunk.tableColumnTypes,
-      tableCells: chunk.tableCells,
-      tableCell: chunk.tableCell,
-      regionBoxes: chunk.regionBoxes,
-      regions: chunk.regions,
-      regionCoordinateSpace: chunk.regionCoordinateSpace,
-      sourceTrace: chunk.sourceTrace ?? undefined,
-      locator: chunk.locator ?? null,
-    },
-    ...(stage === "chunk" ? {} : { retrieval: { stage } }),
-  };
 }
 
 export function searchResultsToChunks(results: SearchResult[]): SearchChunk[] {
@@ -202,12 +169,14 @@ export async function applySearchPostRetrievalProcessing(
   }));
 
   if (input.options.useRerank) {
+    const rerankStarted = performance.now();
     const reranked = input.options.rerankProvider === "deepinfra"
       ? await rerankHosted({ query: input.query, chunks: ranked, model: input.options.rerankModel,
           apiKey: input.rerankApiKey, scope: input.rerankScope,
           privacyMode: input.privacyMode, session: input.session })
       : rerankBM25(input.query, ranked);
     ranked = fuseWithRerank(ranked, reranked);
+    emitSearchPhase("rerank", performance.now() - rerankStarted);
   }
 
   if (input.options.useContextualCompression) {
@@ -389,9 +358,7 @@ export async function finalizeSearchSessionExecution(
   }
 
   // Compression may rewrite the text; restore the scope qualification afterward.
-  results = results.map((result) => result.citation.source === "community_summary"
-    ? { ...result, text: qualifyCommunitySummary(result.text, { ...input.filters, ...(input.options.runId ? { runId: input.options.runId } : {}) }) }
-    : result);
+  results = qualifyCommunityResults(results, input.filters, input.options.runId);
 
   if (input.options.parentRetrieval) {
     await attachParentText(results, input);

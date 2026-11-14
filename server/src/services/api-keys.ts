@@ -1,3 +1,4 @@
+import { isConfiguredAdminUserSql } from "../lib/admin-emails.js";
 import type postgres from "postgres";
 import { isSearchScope, searchModeOfScopes, SEARCH_SCOPE_BY_MODE, SEARCH_SCOPES } from "../lib/search-tiers.js";
 import { randomBytes, randomUUID, createHash } from "node:crypto";
@@ -66,7 +67,7 @@ export const API_KEY_MAX_IP_ALLOWLIST = 50;
  * Opt-in scopes; never granted by default. projects:manage renames projects and changes their settings.
  * `web` is client-key only: server keys use web tools through `search:deep`.
  */
-export const supportedApiKeyScopes = ["ingest", ...SEARCH_SCOPES, "chat", "artifacts", "web", "organizations:read", "organizations:manage", "projects:manage"] as const;
+export const supportedApiKeyScopes = ["ingest", ...SEARCH_SCOPES, "chat", "artifacts", "web", "organizations:read", "organizations:manage", "projects:manage", "pipeline:billed-features", "admin:models"] as const;
 export const apiKeyTypes = ["server", "client"] as const;
 export type ApiKeyType = (typeof apiKeyTypes)[number];
 
@@ -324,6 +325,7 @@ export async function createApiKey(
     : [...(keyType === "client" ? defaultClientApiKeyScopes : defaultApiKeyScopes)];
   return await withOrganizationLock(orgId, userId, async (tx, actor) => {
     assertOrganizationKeyScopes(keyType, scopes, actor.role);
+    await assertAdminModelsScopeOwner(tx, scopes, userId);
     const projectIds = await normalizeKeyProjectIds(tx, orgId, userId, limits?.projectIds);
     assertClientKeyProjects(keyType, projectIds);
     const [row] = await tx<ApiKeyRow[]>`
@@ -408,6 +410,17 @@ export async function revokeOrganizationApiKeys(orgId: string, userId: string): 
   });
 }
 
+/**
+ * `admin:models` reaches only the platform-admin managed-models route, so only a platform admin (ADMIN_EMAILS) may mint
+ * or keep a key with it; an org admin sees it refused instead of holding a scope that never works.
+ */
+async function assertAdminModelsScopeOwner(tx: Parameters<typeof isConfiguredAdminUserSql>[0], scopes: readonly string[], userId: string): Promise<void> {
+  if (!scopes.includes("admin:models")) return;
+  if (!(await isConfiguredAdminUserSql(tx, userId))) {
+    throw new OrganizationError(403, "organization_forbidden", "Only a platform administrator can create keys with the admin:models scope");
+  }
+}
+
 function assertOrganizationKeyScopes(keyType: ApiKeyType, scopes: string[], role: string) {
   if (scopes.some(scope => !(supportedApiKeyScopes as readonly string[]).includes(scope))) throw new OrganizationError(400, "invalid_key_scope", "Unsupported API key scope");
   // A browser key sits in page source: search and chat only, never server powers.
@@ -420,6 +433,11 @@ function assertOrganizationKeyScopes(keyType: ApiKeyType, scopes: string[], role
   }
   if (keyType !== "client" && scopes.includes("web")) {
     throw new OrganizationError(400, "invalid_key_scope", "The web scope applies to client API keys; server keys use web tools with search:deep");
+  }
+  // admin:models reaches only the platform-admin managed-models route, which also requires the key's owner to be a
+  // platform admin (ADMIN_EMAILS); a browser key can never carry it.
+  if (keyType === "client" && scopes.includes("admin:models")) {
+    throw new OrganizationError(400, "invalid_key_scope", "Client API keys cannot manage models");
   }
   if (keyType === "client" && scopes.includes("projects:manage")) {
     throw new OrganizationError(400, "invalid_key_scope", "Client API keys cannot manage projects");
@@ -507,6 +525,7 @@ export async function updateApiKey(id: string, userId: string, updates: {
     // A legacy browser key saved without new scopes is narrowed to what it may hold.
     const nextScopes = updates.scopes ? [...new Set(updates.scopes)] : effectiveKeyScopes(nextKeyType, existing.scopes ?? [], existing.project_ids ?? []);
     assertOrganizationKeyScopes(nextKeyType, nextScopes, role);
+    await assertAdminModelsScopeOwner(tx, nextScopes, userId);
     const nextProjectIds = updates.projectIds !== undefined
       ? await normalizeKeyProjectIds(tx, existing.org_id, userId, updates.projectIds)
       : existing.project_ids ?? [];
@@ -548,6 +567,7 @@ export async function rotateApiKey(id: string, userId: string, options: { overla
     const keyType = parseApiKeyType(existing.key_type);
     const scopes = effectiveKeyScopes(keyType, existing.scopes ?? [], existing.project_ids ?? []);
     assertOrganizationKeyScopes(keyType, scopes, role);
+    await assertAdminModelsScopeOwner(tx, scopes, userId);
     const rawKey = generateRawKey(keyType);
     if (overlap === 0) {
       const [row] = await tx<ApiKeyRow[]>`update api_keys set key_hash = ${hashKey(rawKey)}, last_used_at = null, last_used_ip = null, scopes = ${tx.array(scopes)}

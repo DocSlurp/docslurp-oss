@@ -1,4 +1,14 @@
 import {
+  CHAT_MODEL_PRICES_USD_PER_MTOK,
+  customerPipelineView,
+  DEFAULT_PIPELINE_TEXT_MODEL,
+  defaultPipelineFeatures,
+  embeddingProfileCatalog,
+  supportedEmbeddingModels,
+  visionModelCatalog,
+} from "@docslurp/shared";
+import { CHAT_TIER_MODELS, PROJECT_CHAT_MODELS } from "@docslurp/shared/project-chat-models";
+import {
   compilePipelinePlan,
   inferExecutionStageOrder,
   getPipelineStageLabel,
@@ -341,14 +351,117 @@ export function redactOperatorKeys<T>(value: T, depth = 0): T {
 
 /** A run event for a caller that is not a platform operator: heartbeat metrics, stats and progress without worker diagnostics. */
 export function redactOperatorEvent<E extends { progress?: unknown; stats?: unknown; payload?: unknown }>(event: E): E {
-  const redacted: E = { ...event };
-  for (const field of ["progress", "stats", "payload"] as const) if (field in event) redacted[field] = redactOperatorKeys(event[field]) as E[typeof field];
+  // Customers never see backend models in events either (the routing stage's decisionModel and its decision trace, a
+  // provider error's message): every field loses model keys and model ids, and the stat fields lose operator keys.
+  const redacted = redactModelKeys(event);
+  for (const field of ["progress", "stats", "payload"] as const) if (field in redacted) redacted[field] = redactOperatorKeys(redacted[field]) as E[typeof field];
   return redacted;
 }
 
-/** A run (GET /runs, the activity stream) for a caller that is not a platform operator: its stats without worker diagnostics. */
-export function redactOperatorRun<R extends { stats?: unknown }>(run: R): R {
-  return "stats" in run ? { ...run, stats: redactOperatorKeys(run.stats) } : run;
+/**
+ * Keys that name, describe or count a backend model or provider: kept for platform operators, removed for customers.
+ * Fail-closed by name: any key containing "model" or "provider" goes (embeddingModel, servedModel, decisionChain's
+ * models, providerCostUsd...), plus the router's free-text note and decision traces, which carry model ids in values.
+ */
+const MODEL_KEY = /model|provider|^(?:decisionChain|decisionServedBy|routerNote|remoteFallback\w*)$/i;
+
+/** Model ids DocSlurp can call (chat, pipeline defaults, embedding and vision catalogs), as they may appear in text. */
+const CUSTOMER_HIDDEN_MODEL_IDS: readonly string[] = (() => {
+  const ids = new Set<string>();
+  const add = (raw: string) => {
+    const value = raw.trim();
+    if (!value || /\s/.test(value)) return;
+    const bare = value.startsWith("llm://") ? value.slice("llm://".length).split("/").slice(1).join("/") : value;
+    for (const id of [value, bare, bare.replace(/:[a-z-]+$/i, "")]) {
+      if (id.length >= 5) ids.add(id.toLowerCase());
+      const tail = id.split("/").at(-1) ?? "";
+      // The vendor-less name ("gpt-6-luna"), when it is distinctive enough not to match ordinary words.
+      if (tail.length >= 6 && /\d/.test(tail)) ids.add(tail.toLowerCase());
+    }
+  };
+  const walk = (value: unknown, key = "", depth = 0): void => {
+    if (depth > 8 || value === null || value === undefined) return;
+    if (typeof value === "string") { if (/model|uri/i.test(key) || value.startsWith("llm://")) add(value); return; }
+    if (Array.isArray(value)) { for (const item of value) walk(item, key, depth + 1); return; }
+    if (typeof value === "object") for (const [k, item] of Object.entries(value)) walk(item, k, depth + 1);
+  };
+  for (const model of PROJECT_CHAT_MODELS) add(model.id);
+  for (const model of Object.values(CHAT_TIER_MODELS) as string[]) add(model);
+  for (const model of Object.keys(CHAT_MODEL_PRICES_USD_PER_MTOK)) add(model);
+  for (const model of supportedEmbeddingModels) add(model);
+  for (const model of visionModelCatalog) { add(model.id); add(model.uri); }
+  walk(embeddingProfileCatalog);
+  walk(defaultPipelineFeatures);
+  add(DEFAULT_PIPELINE_TEXT_MODEL);
+  // Longest first, so a full id is replaced before its vendor-less tail.
+  return [...ids].sort((a, b) => b.length - a.length);
+})();
+
+/**
+ * Display names of the chat and vision model catalogs ("DeepSeek V4.1 Flash", "GPT-6.1 Sol", "Qwen3-VL 30B A3B"), with
+ * and without a parenthesized host or variant. Embedding-profile labels are customer category words and stay.
+ */
+const CUSTOMER_HIDDEN_MODEL_NAMES: readonly string[] = (() => {
+  const names = new Set<string>();
+  for (const label of [...PROJECT_CHAT_MODELS.map((model) => model.label), ...visionModelCatalog.map((model) => model.label)]) {
+    for (const name of [label, label.replace(/\s*\([^)]*\)\s*$/, "")]) if (name.trim().length >= 5) names.add(name.trim());
+  }
+  return [...names].sort((a, b) => b.length - a.length);
+})();
+
+const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
+const MODEL_ID_PATTERN = new RegExp([
+  // Any model route, operator private routes (llm://private/<alias>/...) included.
+  String.raw`\b(?:llm|vlm):\/{0,2}[^\s"'<>,;)]+`,
+  ...CUSTOMER_HIDDEN_MODEL_IDS.map(escapeRegExp),
+  ...CUSTOMER_HIDDEN_MODEL_NAMES.map((name) => escapeRegExp(name).replace(/\s+/g, "\\s+")),
+].join("|"), "gi");
+
+/**
+ * A string with model routes (`llm://...`, private routes too), catalog model ids and catalog display names replaced by
+ * a neutral word. Best effort: customer-visible errors are mapped to public messages first; this is the second layer.
+ */
+export function redactModelIdsInText(text: string): string {
+  return text.replace(MODEL_ID_PATTERN, "managed-model");
+}
+
+/** The catalog display names customers must never see (tests walk customer payloads against them). */
+export function customerHiddenModelNames(): readonly string[] {
+  return CUSTOMER_HIDDEN_MODEL_NAMES;
+}
+
+/** The catalog model ids customers must never see (tests walk customer payloads against it). */
+export function customerHiddenModelIds(): readonly string[] {
+  return CUSTOMER_HIDDEN_MODEL_IDS;
+}
+
+/**
+ * Removes backend model and provider keys from a stats structure, at any depth (bounded like redactOperatorKeys), and
+ * replaces any catalog model id left inside a string value (an error message, a note) with a neutral word.
+ */
+export function redactModelKeys<T>(value: T, depth = 0): T {
+  if (typeof value === "string") return redactModelIdsInText(value) as T;
+  if (value === null || typeof value !== "object") return value;
+  if (depth >= OPERATOR_KEY_MAX_DEPTH) return null as T;
+  if (Array.isArray(value)) return value.map((item) => redactModelKeys(item, depth + 1)) as T;
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .filter(([key]) => !MODEL_KEY.test(key))
+      .map(([key, item]) => [key, redactModelKeys(item, depth + 1)]),
+  ) as T;
+}
+
+/**
+ * A run as customers read it: operator machine stats removed, backend model and provider keys and model ids removed from
+ * every field (stats, error text), and the managed model fields removed from its pipeline snapshot
+ * (managed-pipeline-models.ts).
+ */
+export function redactOperatorRun<R extends { stats?: unknown; pipeline?: unknown }>(run: R): R {
+  const { pipeline, ...rest } = run as R & Record<string, unknown>;
+  const out = redactModelKeys(rest) as R;
+  if ("stats" in run) out.stats = redactOperatorKeys(out.stats);
+  if ("pipeline" in run) out.pipeline = pipeline ? customerPipelineView(pipeline) : pipeline;
+  return out;
 }
 
 /**
@@ -367,10 +480,13 @@ export function redactOperatorRunFields(snapshot: ProjectRunProgressSnapshot): P
   };
   return {
     ...snapshot,
-    run: { ...snapshot.run, stats: redactOperatorKeys(snapshot.run.stats) },
-    stages: snapshot.stages.map((stage) => ({ ...stage, stats: redactOperatorKeys(stage.stats) })),
+    run: redactOperatorRun(snapshot.run),
+    stages: snapshot.stages.map((stage) => {
+      const redacted = redactModelKeys(stage);
+      return { ...redacted, stats: redactOperatorKeys(redacted.stats) };
+    }),
     recentEvents: snapshot.recentEvents.map(redactOperatorEvent),
-    stats: redactOperatorKeys(snapshot.stats),
-    progress,
+    stats: redactOperatorKeys(redactModelKeys(snapshot.stats)),
+    progress: redactModelKeys(progress),
   };
 }

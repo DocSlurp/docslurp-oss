@@ -79,7 +79,7 @@ describe("models never selected automatically", () => {
     }
     expect(() => defineTierOptions([{
       id: "chat/denied", capability: "chat", pool: ["llm://openrouter/deepseek/deepseek-v4.1-flash-1017?_provider=fireworks"],
-      tiers: ["cheapest"], evalScore: null, evalRef: null,
+      tiers: ["balanced"], evalScore: null, evalRef: null,
     }])).toThrow(/never selected automatically/);
   });
 

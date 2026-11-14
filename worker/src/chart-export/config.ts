@@ -3,38 +3,69 @@
  */
 import {
   CHART_EXPORT_DOCUMENT_CAPS,
-  chartExportAvailable,
   chartExportConfigSchema,
+  chartExportModelsAllowed,
+  chartExportRuns,
+  chartExportSwitch,
+  chartExportSwitchWarning,
+  chartExportDefaultsWarnings,
+  upgradeStoredChartExport,
   defaultChartExportConfig,
+  effectiveChartExportConfig,
+  resolveChartExportConfig,
   type ChartExportConfig,
+  type ResolvedChartExportConfig,
   type ChartExportFormat,
+  type ChartExportSwitch,
 } from "@docslurp/shared";
 
 /**
- * The deployment kill switch (`DOCSLURP_CHART_EXPORT=on|1|true|yes`, default off), read here and nowhere else in the
- * worker; parsed by the shared `chartExportAvailable`, the same function estimates and the server use.
- * Off: no document exports anything, whatever its project says.
+ * The deployment kill switch (`DOCSLURP_CHART_EXPORT=off|free|on`, unset and unknown values are `off`), read here and
+ * nowhere else in the worker; parsed by the shared `chartExportSwitch`, the same function estimates and the server use.
  */
-export function chartExportFlagOn(env: Readonly<Record<string, string | undefined>> = process.env): boolean {
-  return chartExportAvailable(env);
+export function chartExportSwitchOf(env: Readonly<Record<string, string | undefined>> = process.env): ChartExportSwitch {
+  return chartExportSwitch(env);
+}
+
+let switchWarned = false;
+/** Logs once per process when the switch holds an unknown value (it is treated as `off`). Called at worker startup. */
+export function warnChartExportSwitch(env: Readonly<Record<string, string | undefined>> = process.env): void {
+  if (switchWarned) return;
+  const warnings = [chartExportSwitchWarning(env), ...chartExportDefaultsWarnings(env)].filter((w): w is string => Boolean(w));
+  if (warnings.length > 0) {
+    switchWarned = true;
+    for (const warning of warnings) console.warn(warning);
+  }
 }
 
 /**
- * `pipeline.features.chartExport`, tolerant of the field being absent (older configs, and before the option lands in
- * `PipelineFeatures`) or malformed (falls back to the off default rather than throwing mid-run). With the kill switch
- * off, `enabled` is always false: every caller that gates on the config is switched off with it.
+ * The run's `pipeline.chartExport` as it runs on this deployment. The server stamps the resolved tier on every run at
+ * creation (request override, project tier, origin default); the kill switch then caps it (`off` -> off, `free` -> at
+ * most free). A run without a stamped tier, or with a malformed config, resolves as a machine-origin run (`off` unless
+ * `DOCSLURP_CHART_EXPORT_API_DEFAULT=free`): it fails closed and never reaches the billed `models` tier.
  */
-export function chartExportConfigOf(pipeline: unknown, env: Readonly<Record<string, string | undefined>> = process.env): ChartExportConfig {
+export function chartExportConfigOf(pipeline: unknown, env: Readonly<Record<string, string | undefined>> = process.env): ResolvedChartExportConfig {
   const raw = pipeline && typeof pipeline === "object" ? (pipeline as { chartExport?: unknown }).chartExport : undefined;
-  if (raw === undefined || raw === null) return defaultChartExportConfig;
-  const parsed = chartExportConfigSchema.safeParse(raw);
-  if (!parsed.success) return defaultChartExportConfig;
-  return parsed.data.enabled && !chartExportFlagOn(env) ? { ...parsed.data, enabled: false } : parsed.data;
+  // Runs written before migration 0151 or by an older API during a deploy carry `enabled`/`generatorModel`: mapped on
+  // read (`enabled: true` -> `models`), so a skew-window run keeps the tier it was created with.
+  const parsed = raw === undefined || raw === null ? null : chartExportConfigSchema.safeParse(upgradeStoredChartExport(raw));
+  const project = parsed?.success ? parsed.data : defaultChartExportConfig;
+  // A stamped tier is already resolved (the server applied overrides, project tier, origin default and the explicit-free
+  // gate at run creation): it is used as is, only capped by the switch. Unstamped resolves as a machine run.
+  const resolved: ResolvedChartExportConfig = project.tier
+    ? { ...project, tier: project.tier }
+    : resolveChartExportConfig({ project, origin: "machine", env });
+  return effectiveChartExportConfig(resolved, env);
 }
 
-/** Whether chart export runs for this run's pipeline: the kill switch is on and the project enabled it. */
+/** Whether chart export runs for this run's pipeline (any tier but off, kill switch not off). */
 export function chartExportActive(pipeline: unknown, env: Readonly<Record<string, string | undefined>> = process.env): boolean {
-  return chartExportConfigOf(pipeline, env).enabled;
+  return chartExportRuns(chartExportConfigOf(pipeline, env), env);
+}
+
+/** Whether the billed model steps may run for this run's pipeline (tier `models`, kill switch `on`). */
+export function chartExportModelsActive(pipeline: unknown, env: Readonly<Record<string, string | undefined>> = process.env): boolean {
+  return chartExportModelsAllowed(chartExportConfigOf(pipeline, env), env);
 }
 
 /**

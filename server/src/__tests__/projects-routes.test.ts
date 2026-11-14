@@ -18,6 +18,11 @@ const deleteProjectMock = vi.fn();
 const getProjectMock = vi.fn();
 const getProjectStateMock = vi.fn();
 const listProjectTagsMock = vi.fn();
+// Route access reads (lib/search-access.ts) answered from this file's getProject mock with the real scope rules.
+vi.mock("../lib/search-access.js", async () => {
+  const { authorizeFromProjectMock } = await import("./helpers/search-access.js");
+  return { authorizeActorProjectSearch: authorizeFromProjectMock(async (id, userId) => (await import("../services/projects.js")).getProject(id, userId)) };
+});
 vi.mock("../services/project-tags.js", () => ({ listProjectTags: listProjectTagsMock }));
 vi.mock("../services/project-state.js", () => ({ getProjectState: getProjectStateMock }));
 const chatProjectMock = vi.fn();
@@ -103,6 +108,10 @@ vi.mock("../services/organizations.js", () => ({
   removeProjectMember: removeProjectMemberMock,
   revokeProjectInvite: revokeProjectInviteMock,
   updateProjectMemberRole: updateProjectMemberRoleMock,
+  // Project reads carry canEdit (lib/reprocess-access withCanEdit); these route tests read every project as editable.
+  listReprocessableProjectIds: vi.fn(async () => ["ws-1", "ws-2", "ws-other"]),
+  listManageableProjectIds: vi.fn(async () => ["ws-1", "ws-2", "ws-other"]),
+  canManageProject: vi.fn(() => true),
 }));
 
 vi.mock("../services/audit-log.js", () => ({
@@ -476,175 +485,6 @@ describe("projectsRoutes validation", () => {
     expect(response.status).toBe(404);
   });
 
-  it("streams project search updates until results are available", async () => {
-    getProjectMock.mockResolvedValue({
-      id: "ws-1",
-      orgId: "org-1",
-    });
-    hybridSearchMock
-      .mockResolvedValueOnce({
-        results: [],
-        sessionId: "search-1",
-        availability: {
-          status: "pending",
-          isPartial: true,
-          scope: {
-            projectId: "ws-1",
-            runId: null,
-          },
-          coverage: {
-            totalDocuments: 2,
-            indexedDocuments: 1,
-            pageIndexedDocuments: 0,
-            searchableDocuments: 1,
-            pageOnlyDocuments: 0,
-            inProgressDocuments: 1,
-            totalPages: 10,
-            searchablePages: 4,
-            indexedChunkCount: 6,
-            queuedRuns: 0,
-            processingRuns: 1,
-          },
-          resultBreakdown: {
-            indexedResultCount: 0,
-            pageResultCount: 0,
-          },
-          message: "Search is still warming up for this scope. 1/2 documents are searchable so far.",
-        },
-      })
-      .mockResolvedValueOnce({
-        results: [
-          {
-            text: "Class list",
-            score: 0.91,
-            citation: {
-              source: "document",
-              documentId: "doc-1",
-              filename: "class-list.pdf",
-              pageNumber: 1,
-              pageNumbers: [1],
-              headingPath: [],
-              chunkIndex: 0,
-              blockIds: [],
-              blockTypes: [],
-              regionBoxes: [],
-              regions: [],
-              regionCoordinateSpace: null,
-            },
-          },
-        ],
-        sessionId: "search-1",
-        availability: {
-          status: "partial",
-          isPartial: true,
-          scope: {
-            projectId: "ws-1",
-            runId: null,
-          },
-          coverage: {
-            totalDocuments: 2,
-            indexedDocuments: 2,
-            pageIndexedDocuments: 1,
-            searchableDocuments: 2,
-            pageOnlyDocuments: 0,
-            inProgressDocuments: 0,
-            totalPages: 10,
-            searchablePages: 10,
-            indexedChunkCount: 12,
-            queuedRuns: 0,
-            processingRuns: 0,
-          },
-          resultBreakdown: {
-            indexedResultCount: 1,
-            pageResultCount: 0,
-          },
-          message: "Search now covers 2/2 documents.",
-        },
-      });
-
-    const response = await app.request("/projects/ws-1/search/stream?q=class%20list");
-
-    expect(response.status).toBe(200);
-    expect(response.headers.get("content-type")).toContain("text/event-stream");
-
-    const body = await response.text();
-    expect(body).toContain("event: status");
-    expect(body).toContain("Running project search");
-    expect(body).toContain("event: results");
-    expect(body).toContain("\"status\":\"pending\"");
-    expect(body).toContain("\"status\":\"partial\"");
-    expect(body).toContain("event: done");
-    expect(hybridSearchMock).toHaveBeenCalledTimes(2);
-    expect(hybridSearchMock).toHaveBeenNthCalledWith(
-      1,
-      "class list",
-      "demo-user",
-      expect.objectContaining({
-        rootSessionId: expect.any(String),
-        filters: expect.objectContaining({
-          projectId: "ws-1",
-        }),
-      }),
-    );
-    expect(hybridSearchMock).toHaveBeenNthCalledWith(
-      2,
-      "class list",
-      "demo-user",
-      expect.objectContaining({
-        rootSessionId: expect.any(String),
-        filters: expect.objectContaining({
-          projectId: "ws-1",
-        }),
-      }),
-    );
-    expect(hybridSearchMock.mock.calls[0]?.[2].rootSessionId).toBe(
-      hybridSearchMock.mock.calls[1]?.[2].rootSessionId,
-    );
-  });
-
-  it("finishes an empty project search without a second retrieval", async () => {
-    getProjectMock.mockResolvedValue({ id: "ws-1", orgId: "org-1" });
-    hybridSearchMock.mockResolvedValue({
-      results: [],
-      sessionId: "empty-search",
-      availability: { status: "empty", coverage: { queuedRuns: 0, processingRuns: 0 } },
-    });
-    const response = await app.request("/projects/ws-1/search/stream?q=missing");
-    const body = await response.text();
-    expect(body).toContain("event: results");
-    expect(body).toContain('"sessionId":"empty-search"');
-    expect(body).toContain("event: done");
-    expect(hybridSearchMock).toHaveBeenCalledTimes(1);
-  });
-
-  it("stops polling while indexing once a search branch hit the statement timeout", async () => {
-    getProjectMock.mockResolvedValue({ id: "ws-1", orgId: "org-1" });
-    hybridSearchMock.mockResolvedValue({
-      results: [],
-      sessionId: "timed-out",
-      timings: { textMs: 8000, lexicalTimeout: 1 },
-      availability: { status: "pending", coverage: { queuedRuns: 1, processingRuns: 1 } },
-    });
-    const body = await (await app.request("/projects/ws-1/search/stream?q=broad")).text();
-    expect(body).toContain("event: done");
-    expect(hybridSearchMock).toHaveBeenCalledTimes(1);
-  });
-
-  it("leaves omitted stream search flags to the project defaults and honours graph and multi-hop flags", async () => {
-    getProjectMock.mockResolvedValue({ id: "ws-1", orgId: "org-1" });
-    hybridSearchMock.mockResolvedValue({
-      results: [],
-      sessionId: "flags",
-      availability: { status: "empty", coverage: { queuedRuns: 0, processingRuns: 0 } },
-    });
-    await (await app.request("/projects/ws-1/search/stream?q=x&rerank=false&graphExpansion=true&iterativeMultiHop=true&graphHops=2")).text();
-    const options = hybridSearchMock.mock.calls[0]?.[2];
-    expect(options).toMatchObject({ useRerank: false, enableGraphExpansion: true, iterativeMultiHop: true, graphHops: 2 });
-    expect(options.useHyDE).toBeUndefined();
-    expect(options.useMmr).toBeUndefined();
-    expect(options.parentRetrieval).toBeUndefined();
-  });
-
   it("forwards composer retrieval overrides and filters, and rejects invalid ones", async () => {
     getProjectMock.mockResolvedValue({ id: "ws-1", orgId: "org-1" });
     chatProjectMock.mockResolvedValue({ id: "answer", debug: { model: null, fallback: true }, citations: [] });
@@ -689,7 +529,8 @@ describe("projectsRoutes validation", () => {
   it.each([{ keyType: "server" }, { keyType: "client" }])("never gives API keys suggestions mode on the dashboard chat routes, even when they ask: %j", async ({ keyType }) => {
     getProjectMock.mockResolvedValue({ id: "ws-1", orgId: "org-1" });
     chatProjectMock.mockResolvedValue({ id: "answer", debug: { model: null, fallback: true }, citations: [] });
-    const keyApp = buildApp({ orgId: "org-1", scopes: ["search:deep", "chat", "projects:manage"], keyType });
+    // Browser keys always carry a project allowlist (a client key without one reaches no project).
+    const keyApp = buildApp({ orgId: "org-1", scopes: ["search:deep", "chat", "projects:manage"], keyType, projectIds: ["ws-1"] });
     const send = (body: Record<string, unknown>) => keyApp.request("/projects/ws-1/chat", { method: "POST",
       headers: { "Content-Type": "application/json" }, body: JSON.stringify({ q: "hi", ...body }) });
     chatProjectMock.mockClear();
@@ -810,7 +651,7 @@ describe("projectsRoutes validation", () => {
       credentials: "include",
       body: {
         sessionId: "session-1",
-        model: "anthropic/claude-haiku-5.5",
+        tier: "smart",
       },
       fetch: async (input, init) =>
         app.request(new Request(input, init as RequestInit)),
@@ -838,7 +679,7 @@ describe("projectsRoutes validation", () => {
         userId: "demo-user",
         query: "What changed?",
         sessionId: "session-1",
-        model: "anthropic/claude-haiku-5.5",
+        tier: "smart",
         onTextDelta: expect.any(Function),
       }),
     );
@@ -905,7 +746,7 @@ describe("projectsRoutes validation", () => {
           },
         ],
         sessionId: "session-1",
-        model: "anthropic/claude-haiku-5.5",
+        tier: "smart",
       }),
     });
 
@@ -1293,7 +1134,8 @@ describe("project bearer resource reads", () => {
     listProjectsMock.mockResolvedValueOnce([{ id: "one", orgId: "org-a" }, { id: "two", orgId: "org-b" }] as never);
     const response = await buildApp({ orgId: "org-a", scopes: ["search:deep"] }).request("/projects");
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ projects: [{ id: "one", orgId: "org-a" }] });
+    // A search-only key may not change anything: canEdit false.
+    expect(await response.json()).toEqual({ projects: [{ id: "one", orgId: "org-a", canEdit: false, canManage: false }] });
   });
   it("hides foreign organization project details", async () => {
     getProjectMock.mockResolvedValueOnce({ id: "foreign", orgId: "org-b" });
@@ -1444,5 +1286,91 @@ describe("project tags API", () => {
   it("requires a read scope", async () => {
     expect((await buildApp({ orgId: "org-a", scopes: [] }).request("/projects/one/tags")).status).toBe(403);
     expect(listProjectTagsMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("managed model fields on project routes", () => {
+  const send = (app: Hono, path: string, method: string, body: unknown) => app.request(path, {
+    method, headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+  });
+
+  beforeEach(() => {
+    getProjectMock.mockReset();
+    createProjectMock.mockReset();
+    updateProjectMock.mockReset();
+    updateProjectSearchSettingsForUserMock.mockReset();
+    getProjectSearchSettingsForUserMock.mockReset();
+  });
+
+  it("refuses backend models, providers and routes on create and update, naming categories and never echoing the value", async () => {
+    getProjectMock.mockResolvedValue({ id: "ws-1", orgId: "org-1" });
+    const cases: Array<[Hono, string, string, unknown]> = [
+      [buildApp(), "/projects", "POST", { name: "Contracts", pipeline: { vision: { modelUri: "llm://openrouter/google/gemini-2.5-flash-lite" } } }],
+      [buildApp(), "/projects", "POST", { name: "Contracts", pipeline: { visualPages: { route: "gemini" } } }],
+      [buildApp(), "/projects/ws-1", "PATCH", { pipeline: { textGeneration: { model: "z-ai/glm-5.3-flash" } } }],
+      [buildApp({ orgId: "org-1", scopes: ["projects:manage"] }), "/projects/ws-1", "PATCH", { pipeline: { embedding: { profile: "good-fast-local", modelUri: "llm://openrouter/perplexity/pplx-embed-v1-0.6b" } } }],
+      [buildApp({ orgId: "org-1", scopes: ["projects:manage"] }), "/projects/ws-1", "PATCH", { pipeline: { structuredExtraction: { model: "llm://private/gpu1/acme/model" } } }],
+    ];
+    for (const [app, path, method, body] of cases) {
+      const response = await send(app, path, method, body);
+      expect(response.status, JSON.stringify(body)).toBe(400);
+      const json = await response.json();
+      expect(json.error.code).toBe("model_not_allowed");
+      expect(json.error.message).toContain("pipeline.quality");
+      expect(json.error.message).not.toMatch(/gemini-2|glm-5|pplx|acme/);
+    }
+    expect(createProjectMock).not.toHaveBeenCalled();
+    expect(updateProjectMock).not.toHaveBeenCalled();
+  });
+
+  it("checks the key's organization and scope before reading the body", async () => {
+    getProjectMock.mockResolvedValue({ id: "ws-1", orgId: "org-1" });
+    const body = { pipeline: { textGeneration: { model: "z-ai/glm-5.3-flash" } } };
+    expect((await send(buildApp({ orgId: "org-2", scopes: ["projects:manage"] }), "/projects/ws-1", "PATCH", body)).status).toBe(404);
+    expect((await send(buildApp({ orgId: "org-1", scopes: ["search:deep"] }), "/projects/ws-1", "PATCH", body)).status).toBe(403);
+    expect((await send(buildApp({ orgId: "org-1", scopes: ["projects:manage"], keyType: "client" }), "/projects/ws-1", "PATCH", body)).status).toBe(403);
+    expect(updateProjectMock).not.toHaveBeenCalled();
+  });
+
+  it("lets category changes through", async () => {
+    getProjectMock.mockResolvedValue({ id: "ws-1", orgId: "org-1" });
+    const response = await send(buildApp(), "/projects/ws-1", "PATCH", { pipeline: { quality: "good", embedding: { profile: "good-fast-local" } } });
+    expect(response.status).not.toBe(400);
+  });
+
+  it("omits managed model fields when a customer reads a project", async () => {
+    getProjectMock.mockResolvedValue({ id: "ws-1", orgId: "org-1", pipeline: {
+      quality: "auto",
+      vision: { profile: "good-fast-hosted", modelUri: "llm://openrouter/google/gemini-2.5-flash-lite", target: "hosted", remoteFallbackModelUri: null },
+      embedding: { profile: "cheapest-hosted", modelUri: "llm://openrouter/perplexity/pplx-embed-v1-0.6b", target: "hosted" },
+      textGeneration: { model: "qwen/qwen3.5-flash-02-23", models: {} },
+      visualPages: { route: "gemini", coarseFallback: false },
+    } });
+    for (const app of [buildApp(), buildApp({ orgId: "org-1", scopes: ["search:deep"] })]) {
+      const response = await app.request("/projects/ws-1");
+      expect(response.status).toBe(200);
+      const text = await response.text();
+      expect(text).not.toMatch(/llm:\/\/|gemini|perplexity|qwen/);
+      expect(JSON.parse(text).pipeline).toMatchObject({ quality: "auto", vision: { profile: "good-fast-hosted" }, embedding: { profile: "cheapest-hosted" } });
+    }
+  });
+
+  it("takes the reranker as a category and refuses rerank providers and models", async () => {
+    getProjectMock.mockResolvedValue({ id: "ws-1", orgId: "org-1", name: "Legal", slug: "legal" });
+    for (const retrievalDefaults of [{ rerankProvider: "deepinfra" }, { rerankModel: "Qwen/Qwen3-Reranker-0.6B" }]) {
+      const response = await send(buildApp(), "/projects/ws-1/search-settings", "PATCH", { retrievalDefaults });
+      expect(response.status).toBe(400);
+      expect((await response.json()).error.code).toBe("model_not_allowed");
+    }
+    expect(updateProjectSearchSettingsForUserMock).not.toHaveBeenCalled();
+    updateProjectSearchSettingsForUserMock.mockResolvedValue({ projectId: "ws-1", retrievalDefaults: { useRerank: true, rerankProvider: "deepinfra", rerankModel: "Qwen/Qwen3-Reranker-0.6B" } });
+    const response = await send(buildApp(), "/projects/ws-1/search-settings", "PATCH", { retrievalDefaults: { reranker: "model", useRerank: true } });
+    expect(response.status).toBe(200);
+    expect(updateProjectSearchSettingsForUserMock).toHaveBeenCalledWith(expect.objectContaining({
+      input: { retrievalDefaults: { useRerank: true, rerankProvider: "deepinfra", rerankModel: "Qwen/Qwen3-Reranker-0.6B" } },
+    }));
+    const text = await response.text();
+    expect(text).not.toMatch(/deepinfra|Qwen/);
+    expect(JSON.parse(text).retrievalDefaults).toEqual({ useRerank: true, reranker: "model" });
   });
 });

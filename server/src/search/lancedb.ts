@@ -18,7 +18,7 @@ import { withLanceS3Proxy, withLanceSearchSpan } from "@docslurp/shared/lancedb-
 import { formatLanceSessionLog, resolveLanceSessionConfig, type LanceSessionConfig } from "@docslurp/shared/lancedb-session";
 
 import { lanceDbQueryTuning } from "./lancedb-query-tuning.js";
-import { prewarmTable } from "./lancedb-prewarm.js";
+import { prewarmSearchIndexes, prewarmTable } from "./lancedb-prewarm.js";
 import { isLanceTableNotFound, lanceOpenFailure, openLanceTable } from "./lancedb-open.js";
 export { isLanceTableNotFound } from "./lancedb-open.js";
 import { resultCache, resultCacheKey } from "./result-cache.js";
@@ -108,6 +108,10 @@ export interface LanceTableCapabilities {
   /** A native FTS (BM25) index covers `text`; rows added since are flat-scanned. */
   fullTextIndex: boolean;
   columns: string[];
+  /** Vector and full-text index names: what a search loads on first use. */
+  searchIndexes: string[];
+  /** Changes when the worker rebuilds one of them (new index UUID), which needs loading again. */
+  searchIndexSignature: string;
 }
 
 /** listIndices reads the manifest; refreshed at most this often per open table. */
@@ -120,7 +124,10 @@ export function lanceTableCapabilities(table: lancedb.Table, now = Date.now()): 
   const value = Promise.all([table.schema(), table.listIndices()]).then(([schema, indices]) => {
     const names = schema.fields.map((field) => field.name);
     const present = new Set(names);
+    const searchIndexes = indices.filter((index) => index.columns.includes("vector") || /fts|inverted/i.test(index.indexType ?? ""));
     return {
+      searchIndexes: searchIndexes.map((index) => index.name),
+      searchIndexSignature: searchIndexes.map((index) => `${index.name}:${(index as { indexUuid?: string }).indexUuid ?? ""}`).sort().join(","),
       columns: names,
       hydrationColumns: HYDRATION_RESULT_COLUMNS.every((name) => present.has(name)),
       fullTextIndex: indices.some((index) => index.columns.includes("text") && /fts|inverted/i.test(index.indexType ?? "")),
@@ -136,11 +143,71 @@ function nativeColumns(capabilities: LanceTableCapabilities, score: "_distance" 
   return [...["id", "documentId", "chunkIndex", ...HYDRATION_RESULT_COLUMNS].filter((name) => present.has(name)), score];
 }
 
+function documentIdLiterals(documentIds: string[]): string {
+  return [...new Set(documentIds)].map(id => `'${id.replace(/'/g, "''")}'`).join(", ");
+}
+
 function documentIdFilter(documentIds: string[] | undefined): string | null {
   if (documentIds === undefined) return null;
   if (documentIds.length === 0) return "false";
-  const literals = [...new Set(documentIds)].map(id => `'${id.replace(/'/g, "''")}'`);
-  return `"documentId" IN (${literals.join(", ")})`;
+  return `"documentId" IN (${documentIdLiterals(documentIds)})`;
+}
+
+/**
+ * How a scoped query narrows the table before ranking.
+ * - `in`: `"documentId" IN (<every in-scope document>)`. Exact, but a 10,000-document
+ *   project sends (and LanceDB parses and evaluates) a 10,000-literal predicate per leg.
+ * - `exclude`: the caller's eligibility view says the scope is nearly the whole table, so
+ *   the query filters `NOT IN` the few known out-of-scope documents (no filter when there
+ *   are none) and over-fetches `fetchLimit` rows.
+ * Either way the rows are then checked against the in-scope set, so a row of any other
+ * document (a deleted or superseded one not purged yet, a foreign row) is never returned.
+ */
+export type LanceScopePlan =
+  | { mode: "in"; fetchLimit: number }
+  | { mode: "exclude"; excluded: string[]; fetchLimit: number };
+
+/** SEARCH_LANCE_SCOPE_EXCLUDE_MAX (default 256; 0 disables): the most out-of-scope documents filtered by NOT IN. */
+export function lanceScopeExcludeMax(env: NodeJS.ProcessEnv = process.env): number {
+  const value = Number.parseInt(env.SEARCH_LANCE_SCOPE_EXCLUDE_MAX ?? "256", 10);
+  return Number.isSafeInteger(value) && value >= 0 ? value : 256;
+}
+
+export function lanceScopePlan(args: { documentIds: string[]; excludedDocumentIds?: string[]; limit: number }, env: NodeJS.ProcessEnv = process.env): LanceScopePlan {
+  const excluded = args.excludedDocumentIds === undefined ? undefined : [...new Set(args.excludedDocumentIds)];
+  const max = lanceScopeExcludeMax(env);
+  // NOT IN only pays off while the excluded list is the shorter one.
+  if (excluded === undefined || max === 0 || excluded.length > max || excluded.length >= new Set(args.documentIds).size) {
+    return { mode: "in", fetchLimit: args.limit };
+  }
+  // Rows outside the caller's view (deleted or superseded documents awaiting purge) take
+  // ranks the guard then drops: over-fetch, and fall back to the IN list when that is not enough.
+  return { mode: "exclude", excluded, fetchLimit: Math.min(args.limit * 2, args.limit + 100) };
+}
+
+function scopeFilter(plan: LanceScopePlan, documentIds: string[] | undefined): string | null {
+  if (plan.mode === "in") return documentIdFilter(documentIds);
+  return plan.excluded.length ? `"documentId" NOT IN (${documentIdLiterals(plan.excluded)})` : null;
+}
+
+/**
+ * Run a scoped query under `plan`; an `exclude` plan whose guard dropped rows and left
+ * fewer than `limit` falls back to the exact IN-list query (top-k starvation).
+ */
+async function runScoped(
+  plan: LanceScopePlan,
+  documentIds: string[] | undefined,
+  limit: number,
+  run: (filter: string | null, fetchLimit: number) => Promise<LanceDbRow[]>,
+): Promise<LanceDbRow[]> {
+  const rows = await run(scopeFilter(plan, documentIds), plan.fetchLimit);
+  const kept = filterLanceDbRowsByDocumentIds(rows, documentIds);
+  if (plan.mode === "in") return kept;
+  countSearchEvent("lanceScopeExclude");
+  if (kept.length >= limit || kept.length === rows.length) return kept;
+  countSearchEvent("lanceScopeFallback");
+  const exact: LanceScopePlan = { mode: "in", fetchLimit: limit };
+  return filterLanceDbRowsByDocumentIds(await run(scopeFilter(exact, documentIds), limit), documentIds);
 }
 
 /** SQL for a page range over the `pageNumber` column; null without bounds. */
@@ -308,6 +375,8 @@ export function resetLanceDbConnectionForTests(): void {
   missingTables.clear();
   missingWithDocumentsLoggedAt.clear();
   lastPrewarm.clear();
+  indexWarmActive = 0;
+  indexWarmQueue.length = 0;
   if (sessionState) clearInterval(sessionState.timer);
   sessionState = undefined;
 }
@@ -373,9 +442,82 @@ export function filterLanceDbRowsByDocumentIds(
 }
 
 /**
+ * First-search index load. A cold vector query reads the whole HNSW-SQ index partition from
+ * storage before it can rank (measured: 106 MB of a 122 MB index at 100,000 chunks), and the
+ * BM25 leg reads its index beside it. The warm-up starts both loads when the search starts, so
+ * they overlap planning and query embedding instead of beginning inside each leg.
+ * - Once per open table handle and index generation: later searches only look the entry up.
+ * - Concurrent first searches share the one in-flight load; Lance also de-duplicates a query
+ *   that needs an index already being loaded (measured: no second read of the index).
+ * - At most INDEX_WARM_CONCURRENCY tables load at once, bounding the burst of storage requests
+ *   and memory. It loads only what the first query on that table would load anyway.
+ * - A failed load is retried no sooner than INDEX_WARM_RETRY_MS later; search works without it.
+ * SEARCH_LANCE_WARM_INDEX=0 turns it off (the warm-up then reads version and schema only).
+ */
+const INDEX_WARM_CONCURRENCY = 2;
+const INDEX_WARM_RETRY_MS = 60_000;
+interface IndexWarmup { signature: string; done: Promise<boolean>; settled: boolean; failedAt?: number }
+const indexWarmups = new WeakMap<lancedb.Table, IndexWarmup>();
+let indexWarmActive = 0;
+const indexWarmQueue: Array<() => void> = [];
+
+const INDEX_WARM_TIMEOUT_MS = 60_000;
+
+async function withIndexWarmSlot<T>(run: () => Promise<T>): Promise<T> {
+  // A released slot is handed straight to the next waiter, so the count never exceeds the limit.
+  if (indexWarmActive >= INDEX_WARM_CONCURRENCY) await new Promise<void>((resolve) => indexWarmQueue.push(resolve));
+  else indexWarmActive += 1;
+  try {
+    return await run();
+  } finally {
+    const next = indexWarmQueue.shift();
+    if (next) next(); else indexWarmActive -= 1;
+  }
+}
+
+/**
+ * Timings vocabulary ([search-timing]): `lanceIndexCold` this search started or joined an index
+ * load and `lanceIndexLoad` (ms) how long it lasted; `lanceIndexWarm` the indexes were already
+ * loaded in this process; `lanceIndexWarmFailed` the load failed (the legs read on demand).
+ */
+async function warmSearchIndexes(table: lancedb.Table, uri: string, capabilities: LanceTableCapabilities): Promise<void> {
+  if (process.env.SEARCH_LANCE_WARM_INDEX === "0" || capabilities.searchIndexes.length === 0) return;
+  let warmup = indexWarmups.get(table);
+  const retry = warmup?.failedAt !== undefined && Date.now() - warmup.failedAt >= INDEX_WARM_RETRY_MS;
+  if (warmup && warmup.signature === capabilities.searchIndexSignature && !retry) {
+    if (warmup.settled) {
+      countSearchEvent(warmup.failedAt === undefined ? "lanceIndexWarm" : "lanceIndexWarmFailed");
+      return;
+    }
+  } else {
+    const entry: IndexWarmup = {
+      signature: capabilities.searchIndexSignature,
+      settled: false,
+      // A stalled object-store read must not hold one of the two slots forever: past the limit it counts as failed.
+      done: withIndexWarmSlot(() => Promise.race([
+        prewarmSearchIndexes(table, capabilities.searchIndexes, lanceNamespace(uri)).then((result) => result.errors.length === 0, () => false),
+        new Promise<boolean>((resolve) => { setTimeout(() => resolve(false), INDEX_WARM_TIMEOUT_MS).unref?.(); }),
+      ])),
+    };
+    void entry.done.then((ok) => {
+      entry.settled = true;
+      if (!ok) entry.failedAt = Date.now();
+    });
+    indexWarmups.set(table, entry);
+    warmup = entry;
+  }
+  countSearchEvent("lanceIndexCold");
+  const started = performance.now();
+  const ok = await warmup.done;
+  recordSearchPhase("lanceIndexLoad", performance.now() - started);
+  if (!ok) countSearchEvent("lanceIndexWarmFailed");
+}
+
+/**
  * Warm the tables a vector search will read while the query is still being embedded (or rewritten):
- * open the handle, refresh a stale version and load the schema/capabilities, so the nearest-neighbour
- * query that follows does not start with those storage round trips. Best effort; never throws.
+ * open the handle, refresh a stale version, load the schema/capabilities and start loading the
+ * vector and full-text indexes (warmSearchIndexes), so the legs that follow do not start with those
+ * storage round trips. `lanceWarm` (ms) covers all of it. Best effort; never throws.
  */
 export async function warmLanceDbSearch(args: { orgId: string; projectId: string; embeddingModel: string; dimension: number; hydrate?: boolean }): Promise<void> {
   if (!args.orgId.trim() || !args.projectId.trim()) return;
@@ -383,8 +525,10 @@ export async function warmLanceDbSearch(args: { orgId: string; projectId: string
   try {
     const target = searchTarget(args);
     const table = await getTable(target.uri, target.name);
-    if (table) await Promise.all([table.version(), args.hydrate ? lanceTableCapabilities(table) : resultColumns(table)]);
-    countSearchEvent("lanceWarm");
+    if (table) {
+      const [capabilities] = await Promise.all([lanceTableCapabilities(table), table.version(), args.hydrate ? undefined : resultColumns(table)]);
+      await warmSearchIndexes(table, target.uri, capabilities);
+    }
   } catch {
     // The search itself reopens or drops the handle on failure.
   } finally {
@@ -406,6 +550,12 @@ export async function lanceDbVectorSearch(args: {
   embeddingModel: string;
   queryVector: number[];
   documentIds?: string[];
+  /**
+   * Plan hint for a scoped search: documents of this project's table the caller knows are
+   * out of scope (its eligibility view minus `documentIds`). It only chooses the query
+   * plan (lanceScopePlan); `documentIds` alone decides which rows may be returned.
+   */
+  excludedDocumentIds?: string[];
   limit: number;
   /** strict-privacy never reads or writes the result cache. */
   privacyMode?: PrivacyMode;
@@ -486,19 +636,29 @@ export async function lanceDbVectorSearch(args: {
     try {
       // Filter before nearest-neighbor selection. Overfetching a global top-k
       // and filtering afterward can miss every scoped document when other
-      // documents (another run, tag or folder) occupy the first neighbors.
+      // documents (another run, tag or folder) occupy the first neighbors: an
+      // `exclude` plan is chosen only when the scope is nearly the whole table,
+      // still filters the known exclusions first, and falls back to the IN list
+      // when unknown rows starve its over-fetched top-k (runScoped).
       const capabilities = args.hydrate || args.where ? await lanceTableCapabilities(table) : null;
       // A page filter needs the pageNumber column; a table without it cannot honor the filter.
       if (args.where && !capabilities?.hydrationColumns) return [];
-      const query = table.vectorSearch(args.queryVector).column("vector")
-        .select(capabilities && args.hydrate ? nativeColumns(capabilities, "_distance") : await resultColumns(table)).limit(args.limit);
-      const filter = andFilters(documentIdFilter(documentIds), args.where);
-      if (filter) query.where(filter);
-      const tuning = lanceDbQueryTuning(args.limit, documentIds?.length ?? 0, refineFactor);
-      if (tuning.ef !== undefined) query.ef(tuning.ef);
-      if (tuning.refineFactor !== undefined) query.refineFactor(tuning.refineFactor);
-      // Retain an independent scope check at the storage boundary.
-      return filterLanceDbRowsByDocumentIds((await lanceSpan("search", () => query.toArray(), uri)) as LanceDbRow[], documentIds);
+      const columns = capabilities && args.hydrate ? nativeColumns(capabilities, "_distance") : await resultColumns(table);
+      const plan: LanceScopePlan = documentIds === undefined
+        ? { mode: "in", fetchLimit: args.limit }
+        : lanceScopePlan({ documentIds, excludedDocumentIds: args.excludedDocumentIds, limit: args.limit });
+      // Every plan ends in the same independent scope check at the storage boundary.
+      return await runScoped(plan, documentIds, args.limit, async (scope, fetchLimit) => {
+        const query = table.vectorSearch(args.queryVector).column("vector").select(columns).limit(fetchLimit);
+        const filter = andFilters(scope, args.where);
+        if (filter) query.where(filter);
+        // Both plans keep the scoped search breadth (ef) of the in-scope document count, so
+        // dropping the IN list changes the predicate, never the recall budget.
+        const tuning = lanceDbQueryTuning(fetchLimit, documentIds?.length ?? 0, refineFactor);
+        if (tuning.ef !== undefined) query.ef(tuning.ef);
+        if (tuning.refineFactor !== undefined) query.refineFactor(tuning.refineFactor);
+        return (await lanceSpan("search", () => query.toArray(), uri)) as LanceDbRow[];
+      });
     } catch {
       failed = true;
       dropTable(uri, name, table);
@@ -546,6 +706,8 @@ export async function lanceDbFullTextSearch(args: {
   dimension: number;
   query: string;
   documentIds: string[];
+  /** Plan hint, as for lanceDbVectorSearch; never widens what is returned. */
+  excludedDocumentIds?: string[];
   limit: number;
   where?: string | null;
 }): Promise<{ indexed: boolean; hits: LanceDbSearchHit[]; fallback?: LanceFtsFallbackReason; table?: string }> {
@@ -566,11 +728,14 @@ export async function lanceDbFullTextSearch(args: {
   // A failing query throws to the caller (Postgres FTS answers); the shared table handle stays open.
   const rows = (await Promise.all(opened.map(async ({ uri, documentIds, table }, index) => {
     const caps = capabilities[index]!;
-    const query = table.query().fullTextSearch(args.query, { columns: "text" })
-      .select(nativeColumns(caps, "_score")).limit(args.limit);
-    const filter = andFilters(documentIdFilter(documentIds), args.where);
-    if (filter) query.where(filter);
-    return filterLanceDbRowsByDocumentIds((await lanceSpan("fts", () => query.toArray(), uri)) as LanceDbRow[], documentIds);
+    const plan = lanceScopePlan({ documentIds: documentIds ?? args.documentIds, excludedDocumentIds: args.excludedDocumentIds, limit: args.limit });
+    return await runScoped(plan, documentIds ?? args.documentIds, args.limit, async (scope, fetchLimit) => {
+      const query = table.query().fullTextSearch(args.query, { columns: "text" })
+        .select(nativeColumns(caps, "_score")).limit(fetchLimit);
+      const filter = andFilters(scope, args.where);
+      if (filter) query.where(filter);
+      return (await lanceSpan("fts", () => query.toArray(), uri)) as LanceDbRow[];
+    });
   }))).flat();
   rows.sort((a, b) => (b._score ?? 0) - (a._score ?? 0));
   const seen = new Set<string>();

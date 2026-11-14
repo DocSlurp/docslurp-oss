@@ -9,6 +9,15 @@ vi.mock("../lib/request-actor.js", () => ({
   assertApiKeyProjectAccess: mocks.access, getRequestActor: vi.fn(), actorHasAnyApiKeyScope: vi.fn(),
   resolveActorProjectId: async (_actor: unknown, projectId?: string) => projectId ?? "default-project",
 }));
+// The route's one access read: refused when mocks.access answers a Response (its status), granted otherwise.
+vi.mock("../lib/search-access.js", () => ({
+  authorizeActorProjectSearch: async (_actor: unknown, projectId: string) => {
+    const denied = await mocks.access(undefined, projectId);
+    if (denied) return { ok: false, status: denied.status };
+    return { ok: true, access: { projectId, orgId: "org-1", projectOwnerUserId: "user", orgRole: "owner", projectRole: null, pipeline: {} },
+      scope: { orgId: "org-1", projectIds: "org", modeCeiling: null } };
+  },
+}));
 const { searchRoutes, projectChatRoutes } = await import("../routes/search.js");
 function app() {
   const server = new Hono();
@@ -71,7 +80,7 @@ describe("batch retrieval and canonical chat", () => {
     const result = await app().request("/v1/search", json({ queries: [{ ...queries[0], documentId: "doc", filenameContains: "manual", tags: "one,two", limit: 3, hyde: true }] }));
     expect(result.status).toBe(200);
     expect(mocks.search).toHaveBeenCalledWith("one", "user", expect.objectContaining({ limit: 3, useHyDE: true,
-      filters: expect.objectContaining({ documentId: "doc", filenameContains: "manual", tags: ["one", "two"] }) }));
+      filters: expect.objectContaining({ documentId: "doc", filenameContains: "manual", tags: ["one", "two"] }) }), expect.objectContaining({ orgId: expect.any(String) }));
   });
   it("does not start retrieval for an already disconnected request", async () => {
     const controller = new AbortController(); controller.abort();
@@ -118,7 +127,8 @@ describe("batch retrieval and canonical chat", () => {
     mocks.chat.mockResolvedValue({ answer: "answer", citations: [] });
     expect((await app().request(path, json({ q: "hello", project: "project", sessionId: "session", model: "model" }))).status).toBe(200);
     expect(mocks.chat).toHaveBeenCalledWith({ query: "hello", projectId: "project", userId: "user", sessionId: "session", model: "model",
-      actor: undefined, allowAgentTools: true, signal: expect.any(AbortSignal) });
+      actor: undefined, allowAgentTools: true, signal: expect.any(AbortSignal),
+      scope: { orgId: "org-1", projectIds: "org", modeCeiling: null } });
   });
   it.each([{ q: 7, project: "project" }, { q: "hello", project: {} }, { q: "hello", project: "project", model: "x".repeat(257) },
     { q: "hello", project: "project", sessionId: 42 }, { q: "x".repeat(16001), project: "project" }])("rejects malformed chat before service calls: %j", async body => {
@@ -127,5 +137,45 @@ describe("batch retrieval and canonical chat", () => {
   it("enforces chat project scope before any model calls", async () => {
     mocks.access.mockResolvedValue(new Response(null, { status: 404 }));
     expect((await app().request("/v1/chat", json(queries[0]))).status).toBe(404); expect(mocks.chat).not.toHaveBeenCalled();
+  });
+  it("runs an array q as one keyword fan-out search", async () => {
+    const res = await app().request("/v1/search", json({ q: ["notice period", "termination", "notice period"], project: "project" }));
+    expect(res.status).toBe(200);
+    expect(mocks.search).toHaveBeenCalledTimes(1);
+    const [text, , options] = mocks.search.mock.calls[0]!;
+    expect(text).toBe("notice period termination notice period");
+    expect(options).toMatchObject({ searchMode: "keyword", keywordQueries: ["notice period", "termination", "notice period"] });
+  });
+  it("accepts a keyword fan-out inside a batch item", async () => {
+    const res = await app().request("/v1/search", json({ queries: [{ q: ["a1", "b2"], project: "project" }, { q: "plain", project: "project" }] }));
+    expect(res.status).toBe(200);
+    expect(mocks.search.mock.calls.map(call => call[2].keywordQueries)).toEqual(expect.arrayContaining([["a1", "b2"], undefined]));
+  });
+  it.each([
+    { q: ["a", "b"], mode: "hybrid" },
+    { q: ["a", "b"], mode: "deep" },
+    { q: [] },
+    { q: Array.from({ length: 101 }, (_, i) => `term${i}`) },
+    { q: ["ok", " "] },
+    { q: ["x".repeat(1001)] },
+    { q: Array.from({ length: 17 }, () => "y".repeat(1000)) },
+    { q: Array.from({ length: 9 }, (_, i) => `"exact phrase ${i}"`) },
+    { q: Array.from({ length: 9 }, (_, i) => `term -excluded${i}`) },
+  ])("refuses an invalid keyword fan-out before retrieval: %#", async body => {
+    expect((await app().request("/v1/search", json({ ...body, project: "project" }))).status).toBe(400);
+    expect(mocks.search).not.toHaveBeenCalled();
+  });
+  it("caps keyword fan-out queries across a whole batch", async () => {
+    const item = { q: Array.from({ length: 60 }, (_, i) => `t${i}`), project: "project" };
+    expect((await app().request("/v1/search", json({ queries: [item, item] }))).status).toBe(400);
+    expect(mocks.search).not.toHaveBeenCalled();
+  });
+  it("strips NUL bytes from keyword fan-out queries", async () => {
+    expect((await app().request("/v1/search", json({ q: ["a\u0000b", "c"], project: "project" }))).status).toBe(200);
+    expect(mocks.search.mock.calls[0]![2].keywordQueries).toEqual(["ab", "c"]);
+  });
+  it("accepts 100 keyword queries and up to 8 that need the Postgres path", async () => {
+    const q = [...Array.from({ length: 92 }, (_, i) => `term${i}`), ...Array.from({ length: 8 }, (_, i) => `"phrase ${i}"`)];
+    expect((await app().request("/v1/search", json({ q, project: "project", mode: "keyword" }))).status).toBe(200);
   });
 });

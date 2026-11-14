@@ -4,7 +4,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { startMigratedPostgres } from "@docslurp/worker/testing";
 
 // Only point this at a disposable database built with server/db/migrate.mjs.
-const databaseUrl = process.env.RUN_ADMISSION_TEST_DATABASE_URL;
+const databaseUrl = process.env.TEST_DATABASE_URL;
 let stop: () => Promise<void>;
 let sql: postgres.Sql<Record<string, unknown>>;
 let guard: typeof import("../services/billing/spend-guard.js");
@@ -20,6 +20,8 @@ beforeAll(async () => {
     listAccessibleProjectIds: async () => ["admission-w1", "admission-w2"],
     getProjectAccess: async () => ({}),
     canContributeToProject: () => true,
+    // Retry spends credits and needs edit access (council L3); this suite tests admission, not who may retry.
+    canEditProject: () => true,
   }));
   vi.doMock("../services/worker-fleet.js", () => ({ fleetSupportsNow: () => true, taskQueueForOrgKey: () => ({ taskQueue: "test" }) }));
   vi.doMock("../services/billing/credit-leases.js", async () => {

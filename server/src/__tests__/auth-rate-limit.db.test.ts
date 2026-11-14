@@ -3,9 +3,9 @@ import { afterAll, describe, expect, it } from "vitest";
 /**
  * Better Auth's database-backed rate limiter (migration 0038 "rateLimit")
  * against a real, migrated Postgres. Opt-in:
- *   AUTH_RATE_LIMIT_TEST_DATABASE_URL=postgres://… (a throwaway database)
+ *   TEST_DATABASE_URL=postgres://… (a throwaway database)
  */
-const databaseUrl = process.env.AUTH_RATE_LIMIT_TEST_DATABASE_URL;
+const databaseUrl = process.env.TEST_DATABASE_URL;
 
 describe.skipIf(!databaseUrl)("Better Auth rate limits (database)", () => {
   let pool: import("pg").Pool | null = null;

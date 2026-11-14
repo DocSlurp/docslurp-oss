@@ -6,7 +6,7 @@
  *   matched it on a 2026-11-13 development screen; GLM 5.3 Flash is last for its unstable latency. Removed: Gemini 3.1
  *   Flash Lite (cost per read on real documents) and DeepSeek V4.1 Flash (never selected automatically,
  *   automatic-model-selection.ts).
- * - Override: a configured model (project `chartExport.generatorModel`, else env `CHART_EXPORT_GENERATOR_MODEL`) is
+ * - Override: a configured model (managed setting: env `CHART_EXPORT_GENERATOR_MODEL`; projects never name one) is
  *   used only when it is one of the candidates, the routing-target catalog admits it (image input, a list price, not
  *   Pro/Ultra, runtime-accepted) and its input and output list prices are at most `chartGeneratorPriceCeiling()`. The
  *   per-visual price assumes a cheap generator, so anything else is refused (logged) and the default is used. The
@@ -18,7 +18,7 @@ import {
   assertNoAutomaticSelectionDenied,
   creditsToDollars,
   isAutomaticSelectionDenied,
-  MAX_OUTPUT_USD_PER_MTOK_EXCLUSIVE,
+  OUTPUT_PRICE_CEILING_USD_PER_MTOK,
   pricing,
   visualExportCredits,
   type ChartGeneratorPriceCeiling,
@@ -62,8 +62,11 @@ export function chartGeneratorPriceCeiling(): ChartGeneratorPriceCeiling | null 
   };
 }
 
-/** The highest output price any chart generator may have: just under the routing catalog's exclusive $50 limit. */
-export const CHART_GENERATOR_MAX_OUTPUT_USD_PER_MTOK = MAX_OUTPUT_USD_PER_MTOK_EXCLUSIVE - 0.01;
+/**
+ * The highest output price any chart generator may have: the platform output ceiling every OpenRouter request carries
+ * (openrouter-routing.ts), just under the routing catalog's exclusive $50 limit. One constant, so the two never drift.
+ */
+export const CHART_GENERATOR_MAX_OUTPUT_USD_PER_MTOK = OUTPUT_PRICE_CEILING_USD_PER_MTOK;
 
 /**
  * Admitted chart generators, in preference order. Every entry must have a list price in `scripts/lib/model-prices.json`
@@ -85,7 +88,7 @@ export interface GeneratorSelection {
   targetId: string;
   inputUsdPerMTok: number;
   outputUsdPerMTok: number;
-  reason: "project-override" | "env-override" | "preferred-candidate";
+  reason: "env-override" | "preferred-candidate";
 }
 
 function normalizeUri(uri: string): string {
@@ -128,7 +131,7 @@ function toSelection(target: RoutingTarget, reason: GeneratorSelection["reason"]
 export function selectGeneratorModel(args: {
   kind: VisualKind | null;
   catalog: readonly RoutingTarget[];
-  projectModel?: string | null;
+  /** The managed override (env `CHART_EXPORT_GENERATOR_MODEL`). Projects and requests never name a model. */
   envModel?: string | null;
   candidates?: readonly string[];
 }): GeneratorSelection | null {
@@ -136,7 +139,7 @@ export function selectGeneratorModel(args: {
   const allowed = new Set(pool);
   const ceiling = chartGeneratorPriceCeiling();
   const byUri = new Map(args.catalog.filter((t) => t.ref.modelUri).map((t) => [t.ref.modelUri!, t]));
-  for (const [configured, reason] of [[args.projectModel, "project-override"], [args.envModel, "env-override"]] as const) {
+  for (const [configured, reason] of [[args.envModel, "env-override"]] as const) {
     if (!configured?.trim()) continue;
     const uri = normalizeUri(configured);
     const target = allowed.has(uri) ? byUri.get(uri) : undefined;

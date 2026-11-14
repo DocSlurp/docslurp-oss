@@ -831,6 +831,8 @@ describe("pipelineStagePlan", () => {
       ...defaultPipelineFeatures,
       htmlExtraction: false,
       visionFallback: false,
+      // An unset chart tier resolves per run, so only an explicit off drops vision-extract.
+      chartExport: { ...defaultPipelineFeatures.chartExport, tier: "off" },
       embed: false,
       indexVectors: false,
       pageIndex: true,

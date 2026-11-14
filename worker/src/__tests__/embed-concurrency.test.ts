@@ -47,6 +47,7 @@ import { WorkflowState } from "../pipeline/pipeline.js";
 import { EmbedStage, embedPreambleMode } from "../stages/embed.js";
 import type { CommandRunner } from "../tools/runner.js";
 import type { ArtifactStore } from "../tools/storage.js";
+import { GUEST_NODE_FLAGS } from "../sandbox/guest-node-flags.js";
 
 class MemoryStorage {
   readonly bucket = "t";
@@ -215,7 +216,7 @@ describe("EmbedStage concurrency", () => {
     const runner = {
       run: vi.fn(async (plan: { args: string[] }) => {
         order.push(`vm:preamble-started=${calls.preamble}`);
-        const [, input, output] = plan.args;
+        const [, input, output] = plan.args.slice(GUEST_NODE_FLAGS.length);
         const batch = JSON.parse(await readFile(input!, "utf8")) as string[];
         await sleep(30);
         await writeFile(output!, JSON.stringify(batch.map(() => null)));
@@ -237,7 +238,7 @@ describe("EmbedStage concurrency", () => {
     const runner = {
       run: vi.fn(async (plan: { args: string[] }) => {
         order.push(`vm:preamble-started=${calls.preamble}`);
-        const [, input, output] = plan.args;
+        const [, input, output] = plan.args.slice(GUEST_NODE_FLAGS.length);
         const batch = JSON.parse(await readFile(input!, "utf8")) as string[];
         await writeFile(output!, JSON.stringify(batch.map(() => null)));
         return { exitCode: 0, stdout: "", stderr: "" };

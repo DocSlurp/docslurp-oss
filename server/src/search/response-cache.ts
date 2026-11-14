@@ -41,6 +41,19 @@ export function createCacheScopeMemo(): CacheScopeMemo {
   return new Map();
 }
 
+/**
+ * Seeds the memo with the access read the route itself made for this request
+ * (lib/search-access.ts: the same docslurp_project_access query, key
+ * allowlist and pipeline), so issuing the ticket does not repeat it. Only a
+ * granted read is primed; `storeResponse` still re-reads access and privacy
+ * unmemoized before writing, so a project made strict-privacy or unshared
+ * while the search ran never gets an entry.
+ */
+export function primeCacheScope(memo: CacheScopeMemo, userId: string, access: { projectId: string; orgId: string; pipeline: unknown }): void {
+  if (!access.orgId) return;
+  memo.set(JSON.stringify([userId, access.projectId]), Promise.resolve({ orgId: access.orgId, privacyMode: privacyModeOf(access.pipeline) }));
+}
+
 export interface ResponseCacheTicket {
   readonly key: string;
   readonly orgKey: string;

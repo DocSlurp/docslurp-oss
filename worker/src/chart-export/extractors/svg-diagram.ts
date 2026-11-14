@@ -1,4 +1,4 @@
-import type { DiagramSpec } from "@docslurp/shared";
+import type { DiagramSpec } from "@docslurp/shared/chart-export";
 
 import { finalizeDiagram } from "./spec-utils.js";
 import { parseTransform, apply, type Matrix, IDENTITY, multiply } from "./svg-path.js";
@@ -34,13 +34,17 @@ function allElements(root: XmlElement): XmlElement[] {
 function idMaker() {
   const used = new Map<string, string>();
   const taken = new Set<string>();
+  // Next suffix to try per base, so many colliding ids cost O(1) each, not O(collisions) (council r5 M1).
+  const nextSuffix = new Map<string, number>();
   return (raw: string): string => {
     const prior = used.get(raw);
     if (prior) return prior;
     let base = raw.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 56) || "n";
     if (/^[0-9-]/.test(base)) base = `n${base}`.slice(0, 56);
     let id = base;
-    for (let k = 2; taken.has(id); k++) id = `${base}_${k}`;
+    let k = nextSuffix.get(base) ?? 2;
+    while (taken.has(id)) id = `${base}_${k++}`;
+    nextSuffix.set(base, k);
     taken.add(id);
     used.set(raw, id);
     return id;
@@ -105,25 +109,30 @@ export function mermaidFlowchart(root: XmlElement): SvgDiagramResult {
   const els = allElements(root);
   const makeId = idMaker();
   const nodes: Node[] = [];
-  const rawIds: string[] = [];
+  const rawIds = new Set<string>();
   const centers = new Map<string, [number, number]>();
   for (const g of els) {
     if (g.local !== "g" || !classes(g).includes("node")) continue;
-    const m = /^(?:[A-Za-z0-9_-]*?-)?flowchart-(.+)-\d+$/.exec(g.attrs.id ?? "");
+    // Real Mermaid node ids are short; the lazy prefix makes this regex quadratic on a long hostile id.
+    const gid = g.attrs.id ?? "";
+    const m = gid.length <= 256 ? /^(?:[A-Za-z0-9_-]*?-)?flowchart-(.+)-\d+$/.exec(gid) : null;
     if (!m) continue;
     const raw = m[1]!;
-    if (rawIds.includes(raw)) continue;
-    rawIds.push(raw);
+    if (rawIds.has(raw)) continue;
+    rawIds.add(raw);
     const id = makeId(raw);
     nodes.push({ id, label: labelOf(g) || raw, shape: shapeOf(g), group: null });
     centers.set(id, translateOf(g));
   }
   if (!nodes.length) return { spec: null, generator: "mermaid", confidence: 0, reason: "mermaid-not-flowchart" };
+  // An edge id is "<from><sep><to>"; real Mermaid ids split into a few parts. Over MAX_EDGE_ID_PARTS it is not one.
+  const MAX_EDGE_ID_PARTS = 64;
   const split = (body: string, sep: string): [string, string] | null => {
-    const parts = body.split(sep);
+    const parts = body.split(sep, MAX_EDGE_ID_PARTS + 1);
+    if (parts.length > MAX_EDGE_ID_PARTS) return null;
     for (let k = 1; k < parts.length; k++) {
       const a = parts.slice(0, k).join(sep), b = parts.slice(k).join(sep);
-      if (rawIds.includes(a) && rawIds.includes(b)) return [a, b];
+      if (rawIds.has(a) && rawIds.has(b)) return [a, b];
     }
     return null;
   };
@@ -140,12 +149,12 @@ export function mermaidFlowchart(root: XmlElement): SvgDiagramResult {
     let styleSource = el;
     if (el.local === "path" && (cls.includes("flowchart-link") || el.attrs["data-edge"] === "true")) {
       key = el.attrs["data-id"] ?? el.attrs.id ?? "";
-      const m = /^L[_-](.+)[_-]\d+$/.exec(key);
+      const m = key.length <= 4096 ? /^L[_-](.+)[_-]\d+$/.exec(key) : null;
       pair = m ? split(m[1]!, "_") ?? split(m[1]!, "-") : null;
     } else if (el.local === "g" && cls.includes("edgePath")) {
       const ls = cls.find((c) => c.startsWith("LS-"))?.slice(3);
       const le = cls.find((c) => c.startsWith("LE-"))?.slice(3);
-      pair = ls && le && rawIds.includes(ls) && rawIds.includes(le) ? [ls, le] : null;
+      pair = ls && le && rawIds.has(ls) && rawIds.has(le) ? [ls, le] : null;
       key = el.attrs.id ?? "";
       styleSource = firstChild(el, "path") ?? el;
     } else continue;
@@ -215,7 +224,8 @@ export function graphvizDiagram(root: XmlElement): SvgDiagramResult {
     const title = textContent(firstChild(g, "title")).trim();
     const directed = title.includes("->");
     const parts = title.split(directed ? "->" : "--");
-    const strip = (s: string) => { const t = s.trim(); return known.has(t) ? t : t.replace(/:[^:]*$/, ""); };
+    // Drop a trailing ":port" (from the last colon on), with lastIndexOf: `/:[^:]*$/` retries from every colon.
+    const strip = (s: string) => { const t = s.trim(); if (known.has(t)) return t; const c = t.lastIndexOf(":"); return c >= 0 ? t.slice(0, c) : t; };
     if (parts.length !== 2 || !known.has(strip(parts[0]!)) || !known.has(strip(parts[1]!))) { unresolved++; continue; }
     const path = firstChild(g, "path");
     const dash = path?.attrs["stroke-dasharray"] ?? /stroke-dasharray/.test(path?.attrs.style ?? "") ? "x" : "";
