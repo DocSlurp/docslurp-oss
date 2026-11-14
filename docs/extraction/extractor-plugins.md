@@ -137,8 +137,12 @@ to start; it never moves OCR to the worker host or to a hosted model instead. Se
 - It runs the fixed `worker/scripts/docslurp_ocr.py` CLI inside the VM with exactly those settings and the models
   pinned in `worker/ocr-models.json`, and copies back the CLI's JSON result to `output` and the PNGs it wrote (bounded
   by `maxLongEdge`) to the image directory.
-- It must isolate every job in a fresh VM or microVM, with the requirements below. One job never sees another
-  job's files.
+- It must isolate every job in a VM or microVM, with the requirements below. By default each job gets a fresh one, and
+  one job never sees another job's files.
+- `run(job, signal, context)` also receives the job's owner from the stage's run context: `tenantKey` (the run's
+  organization) and `affinityKey` (the document). A provider that keeps a VM warm between jobs, to amortise its start
+  over many small files, may reuse it only for jobs with the same `tenantKey`, after removing the previous job's files
+  and processes. A job without one gets a VM of its own, destroyed after it. `affinityKey` only prefers a VM that already holds the document's source.
 - `maxSourceBytes` refuses larger inputs before any VM work; `timeoutMs(frames)` bounds one run's wall time;
   `assertConfigured()` throws when the image, models or credentials are missing, which stops the worker at start.
 - The host validates everything it gets back: the result against the shared OCR result schema, page numbers, sizes,

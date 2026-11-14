@@ -1865,7 +1865,10 @@ export class CommandRunner {
     if (plan.sandboxedOcr) {
       const provider = requireSandboxedOcrProvider();
       const frames = plan.pages ?? plan.sandboxedOcr.maxFrames;
-      return { remote: provider.run(plan.sandboxedOcr, signal), timeoutMs: provider.timeoutMs(frames), release: async () => {} };
+      // The run's organization and document travel with the job: a provider that keeps VMs warm reuses one only within a tenant.
+      const context = currentPerfContext();
+      const ocrContext = { ...(context?.orgId ? { tenantKey: context.orgId } : {}), ...(context?.documentId ? { affinityKey: context.documentId } : {}) };
+      return { remote: provider.run(plan.sandboxedOcr, signal, ocrContext), timeoutMs: provider.timeoutMs(frames), release: async () => {} };
     }
     if (plan.sandboxedPdf) {
       const provider = requireSandboxedPdfProvider();
