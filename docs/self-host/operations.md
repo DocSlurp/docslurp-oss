@@ -173,6 +173,21 @@ Setting the directory starts the same localhost re-signing proxy that
 storage URI or `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`. It works with any
 S3-compatible provider.
 
+The proxy and the cache directory serve this process only:
+
+- The proxy listens on `127.0.0.1` and answers only requests that carry its own per-process
+  secret, for the bucket of `LANCEDB_URI`. Anything else gets 403 and counts as `refused` on
+  the `[lancedb-s3]` line; a non-zero count means something else on the host is probing it.
+- The cache directory must be owned by the server's user and not writable by group or others.
+  It is kept at mode 0700. A directory that fails this is not used: the server logs
+  `disk cache ... is unusable` and searches without it.
+- Changing `LANCEDB_S3_CACHE_BLOCK_KB` empties the cache at the next start.
+- With `HTTP_PROXY` or `ALL_PROXY` set, add `127.0.0.1` to `NO_PROXY`. Otherwise the proxy and
+  the cache stay off (logged), because Lance would send its loopback requests to that proxy.
+- Deleted documents: files removed from the bucket by another process (the worker's cleanup
+  and compaction) stay in this directory until the size limit evicts them. Nothing requests
+  them again, but the bytes remain on the volume. Delete the directory to clear them at once.
+
 What is cached, and what is not:
 
 - Cached: `GET` (whole object and byte ranges) and `HEAD` for keys under

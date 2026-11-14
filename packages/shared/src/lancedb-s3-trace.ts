@@ -1,5 +1,5 @@
 // Server-only. Opt-in tracing proxy for LanceDB's native (Rust object_store) S3 traffic.
-import { createHash, createHmac } from "node:crypto";
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer, request as httpRequest, type IncomingHttpHeaders, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { Agent as HttpsAgent, request as httpsRequest } from "node:https";
 import { Agent as HttpAgent } from "node:http";
@@ -234,6 +234,8 @@ export class LanceS3Stats {
   readonly upstreamByOperation = new Map<string, number>();
   windowUpstream = 0;
   upstreamTotal = 0;
+  /** Requests the proxy refused (no caller secret, or a bucket it does not serve). Anything above zero deserves a look. */
+  refused = 0;
   upstream(operation: string): void {
     this.upstreamByOperation.set(operation, (this.upstreamByOperation.get(operation) ?? 0) + 1);
     this.upstreamTotal++; this.windowUpstream++;
@@ -283,7 +285,7 @@ export class LanceS3Stats {
     const fmt = (map: Map<string, number>) => [...map].sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k}=${v}`).join(",") || "none";
     const line = `[lancedb-s3] window=${windowSeconds}s requests=${w.requests} errors=${w.errors} retries=${w.retries} bytes_in=${w.bytesIn} bytes_out=${w.bytesOut} `
       + `avg_ms=${w.avgMs} avg_ttfb_ms=${w.avgTtfbMs} p50_ms=${w.p50Ms} p95_ms=${w.p95Ms} p99_ms=${w.p99Ms} ops=${fmt(this.windowByOperation)} statuses=${fmt(this.windowByStatus)} `
-      + `total_requests=${this.cumulative.requests} upstream_requests=${this.windowUpstream}`
+      + `total_requests=${this.cumulative.requests} upstream_requests=${this.windowUpstream} refused=${this.refused}`
       + (this.windowSearch.searches ? ` searches=${this.windowSearch.searches} search_overlapped=${this.windowSearch.overlapped} search_requests=${this.windowSearch.requests} search_by_class=${fmt(this.windowSearch.byClass)}` : "")
       + (this.cache ? ` ${this.cache.summaryFragment()}` : "");
     this.window = newAggregate();
@@ -329,8 +331,18 @@ export function keyPrefix(key: string): string {
   return prefix.length > 96 ? prefix.slice(0, 96) : prefix;
 }
 
-export interface LanceS3ProxyOptions { cache?: DiskBlockCache; endpoint?: string; region: string; credentials: Credentials; logIntervalMs?: number; stats?: LanceS3Stats; log?: (line: string) => void; maxSockets?: number }
-export interface LanceS3Proxy { endpoint: string; port: number; close(): Promise<void>; stats: LanceS3Stats }
+export interface LanceS3ProxyOptions { cache?: DiskBlockCache; endpoint?: string; region: string; credentials: Credentials; logIntervalMs?: number; /** Buckets the proxy may reach; omitted means any (tests). */ buckets?: Iterable<string>; stats?: LanceS3Stats; log?: (line: string) => void; maxSockets?: number }
+export interface LanceS3Proxy {
+  /** What Lance is given: the listener's address plus this proxy's secret path segment. Never log it. */
+  endpoint: string;
+  /** The listener's address without the secret, for logs. */
+  address: string;
+  port: number;
+  /** Let requests for this bucket through. A proxy started with `buckets` refuses every other bucket. */
+  allowBucket(bucket: string): void;
+  close(): Promise<void>;
+  stats: LanceS3Stats;
+}
 
 export async function startLanceS3Proxy(options: LanceS3ProxyOptions): Promise<LanceS3Proxy> {
   const upstreamUrl = new URL(options.endpoint ?? `https://s3.${options.region}.amazonaws.com`);
@@ -347,9 +359,34 @@ export async function startLanceS3Proxy(options: LanceS3ProxyOptions): Promise<L
   const recentFailures = new Map<string, number>();
   const fingerprint = (req: IncomingMessage) => `${req.method} ${req.url} ${req.headers.range ?? ""}`;
 
+  // The proxy signs whatever it forwards with the real credentials, so it must only serve its own Lance
+  // client. A caller proves it is that client by the secret first path segment of the endpoint it was
+  // given; anything else on the host that finds the port gets 403 and nothing is signed or sent.
+  // The secret is per process and only ever travels over loopback. Lance prints request URLs in its
+  // error messages, so it can reach this process's own logs; it is useless to anyone off the host.
+  const token = randomBytes(32).toString("hex");
+  const tokenBytes = Buffer.from(token);
+  const buckets = options.buckets ? new Set(options.buckets) : undefined;
+  const refuse = (res: ServerResponse, reason: string): void => {
+    stats.refused += 1;
+    res.writeHead(403, { "content-type": "text/plain", connection: "close" });
+    res.end(`lancedb-s3 proxy refused: ${reason}`);
+  };
+
   const handle = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     const method = req.method ?? "GET";
-    const rawUrl = req.url ?? "/";
+    const incomingUrl = req.url ?? "/";
+    const presented = Buffer.from(incomingUrl.slice(1, 1 + token.length));
+    const next = incomingUrl.charAt(1 + token.length);
+    if (presented.length !== tokenBytes.length || !timingSafeEqual(presented, tokenBytes) || (next !== "/" && next !== "?" && next !== "")) { req.resume(); return refuse(res, "caller not recognized"); }
+    const rawUrl = incomingUrl.slice(1 + token.length) || "/";
+    if (buckets) {
+      const bucket = classifyS3Request(method, rawUrl, req.headers).bucket;
+      // A copy names a second bucket in its source header; Lance copies within its own bucket.
+      const source = req.headers["x-amz-copy-source"];
+      const sourceBucket = typeof source === "string" ? decodeURIComponent(source.replace(/^\//, "").split("/")[0] ?? "") : undefined;
+      if (!buckets.has(bucket) || (sourceBucket !== undefined && !buckets.has(sourceBucket))) { req.resume(); return refuse(res, "bucket not allowed"); }
+    }
     /** One signed, fully buffered upstream request for the cache. Only Range is forwarded, never client conditionals. */
     const bufferedUpstream = async (m: "GET" | "HEAD", range?: string): Promise<BufferedUpstream> => {
       const signed = await signUpstreamRequest(m, rawUrl, range ? { range } : {}, target, options.credentials);
@@ -458,7 +495,8 @@ export async function startLanceS3Proxy(options: LanceS3ProxyOptions): Promise<L
   timer?.unref();
   server.unref();
   return {
-    endpoint: `http://127.0.0.1:${port}`, port, stats,
+    endpoint: `http://127.0.0.1:${port}/${token}`, address: `http://127.0.0.1:${port}`, port, stats,
+    allowBucket: (bucket: string) => { buckets?.add(bucket); },
     close: async () => { if (timer) clearInterval(timer); agent.destroy(); await new Promise<void>((resolve) => { server.close(() => resolve()); server.closeAllConnections(); }); },
   };
 }
@@ -474,7 +512,39 @@ export function lanceS3ProxyEnabled(env: Record<string, string | undefined> = pr
   return lanceS3TraceEnabled(env) || lanceS3CacheConfig(env) !== undefined;
 }
 
-const ENDPOINT_KEYS = ["endpoint", "aws_endpoint", "aws_endpoint_url", "aws_endpoint_url_s3", "allow_http", "aws_allow_http", "virtual_hosted_style_request", "aws_virtual_hosted_style_request"];
+const ENDPOINT_KEYS = [
+  "endpoint", "endpoint_url", "aws_endpoint", "aws_endpoint_url", "aws_endpoint_url_s3", "allow_http", "aws_allow_http",
+  "virtual_hosted_style_request", "aws_virtual_hosted_style_request",
+  // A forward proxy option would carry the loopback requests off the host.
+  "proxy_url", "proxy_ca_certificate", "proxy_excludes",
+];
+
+/** An HTTP forward proxy from the environment that would also take requests for 127.0.0.1. */
+function forwardProxyForLoopback(env: Record<string, string | undefined>): string | undefined {
+  const name = ["HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"].find((candidate) => env[candidate]?.trim());
+  if (!name) return undefined;
+  const excluded = `${env.NO_PROXY ?? ""},${env.no_proxy ?? ""}`.split(",").map((entry) => entry.trim());
+  return excluded.includes("127.0.0.1") || excluded.includes("*") ? undefined : name;
+}
+
+function originOf(endpoint: string): string {
+  try { return new URL(endpoint).origin; } catch { return "(unparsable endpoint)"; }
+}
+
+const usableCaches = new Map<string, Promise<DiskBlockCache | undefined>>();
+/** The shared disk cache once its directory is usable; undefined (logged once, loudly) when it is not: reads then go uncached. */
+function usableDiskCache(config: NonNullable<ReturnType<typeof lanceS3CacheConfig>>): Promise<DiskBlockCache | undefined> {
+  let usable = usableCaches.get(config.dir);
+  if (!usable) {
+    const cache = sharedDiskBlockCache(config);
+    usable = cache.ready.then(() => cache, (error: unknown) => {
+      console.error(`[lancedb-s3] disk cache ${config.dir} is unusable, searching WITHOUT it: ${error instanceof Error ? error.message : String(error)}`);
+      return undefined;
+    });
+    usableCaches.set(config.dir, usable);
+  }
+  return usable;
+}
 const proxies = new Map<string, Promise<LanceS3Proxy>>();
 
 function option(options: Record<string, string>, ...names: string[]): string | undefined {
@@ -509,16 +579,26 @@ export async function withLanceS3Proxy(uri: string, storageOptions: Record<strin
   }
   const sessionToken = option(storageOptions, "aws_session_token", "session_token") ?? env.AWS_SESSION_TOKEN;
   const region = option(storageOptions, "region", "aws_region") ?? env.AWS_REGION ?? "us-east-1";
-  const endpoint = option(storageOptions, "endpoint", "aws_endpoint", "aws_endpoint_url");
+  const forwardProxy = forwardProxyForLoopback(env);
+  if (forwardProxy) {
+    console.warn(`[lancedb-s3] ${forwardProxy} is set and NO_PROXY does not list 127.0.0.1: Lance would send its loopback requests to that proxy; proxy, tracing and cache disabled`);
+    return storageOptions;
+  }
+  // The configured endpoint first. Without one, the variables Lance itself would have followed, so the
+  // proxy never sends this store's credentials to a different host than a direct connection would.
+  const endpoint = option(storageOptions, "aws_endpoint_url_s3", "endpoint", "aws_endpoint", "aws_endpoint_url") ?? (env.AWS_ENDPOINT_URL_S3?.trim() || env.AWS_ENDPOINT_URL?.trim() || undefined);
+  const bucket = /^s3(?:a|\+ddb)?:\/\/([^/?]+)/.exec(uri)?.[1];
+  if (!bucket) return storageOptions;
   const key = JSON.stringify([endpoint ?? null, region, accessKeyId, secretAccessKey, sessionToken ?? null]);
   let proxy = proxies.get(key);
   if (!proxy) {
     const cacheConfig = lanceS3CacheConfig(env);
-    proxy = startLanceS3Proxy({ endpoint, region, credentials: { accessKeyId, secretAccessKey, sessionToken }, cache: cacheConfig ? sharedDiskBlockCache(cacheConfig) : undefined });
+    proxy = (cacheConfig ? usableDiskCache(cacheConfig) : Promise.resolve(undefined)).then((cache) => startLanceS3Proxy({ endpoint, region, credentials: { accessKeyId, secretAccessKey, sessionToken }, cache, buckets: [] }));
     proxy.catch(() => proxies.delete(key));
     proxies.set(key, proxy);
-    void proxy.then((started) => console.log(`[lancedb-s3] proxy ${started.endpoint} -> ${endpoint ?? `https://s3.${region}.amazonaws.com`} (path-style, summary every 60s${cacheConfig ? `, disk cache ${cacheConfig.dir} max ${(cacheConfig.maxBytes / 1024 ** 3).toFixed(1)} GB block ${cacheConfig.blockBytes / 1024} KB` : ""})`));
+    void proxy.then((started) => console.log(`[lancedb-s3] proxy ${started.address} -> ${endpoint ? originOf(endpoint) : `https://s3.${region}.amazonaws.com`} (path-style, summary every 60s${cacheConfig ? `, disk cache ${cacheConfig.dir} max ${(cacheConfig.maxBytes / 1024 ** 3).toFixed(1)} GB block ${cacheConfig.blockBytes / 1024} KB` : ""})`));
   }
-  const { endpoint: proxied } = await proxy;
-  return lanceS3ProxyStorageOptions(storageOptions, proxied);
+  const started = await proxy;
+  started.allowBucket(bucket);
+  return lanceS3ProxyStorageOptions(storageOptions, started.endpoint);
 }

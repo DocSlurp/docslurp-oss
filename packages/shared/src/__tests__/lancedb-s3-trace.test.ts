@@ -226,3 +226,62 @@ it("puts search request counts on the search span and in the summary line", asyn
     await new Promise<void>((r) => { upstream.close(() => r()); upstream.closeAllConnections(); });
   }
 });
+
+it("serves only its own client: no secret, another bucket or a cross-bucket copy source is refused before anything is signed", async () => {
+  const seen: string[] = [];
+  const upstream = createServer((req, res) => { seen.push(`${req.method} ${req.url}`); req.resume(); res.writeHead(200); res.end("ok"); });
+  await new Promise<void>((r) => upstream.listen(0, "127.0.0.1", r));
+  const stats = new LanceS3Stats();
+  const proxy = await startLanceS3Proxy({ endpoint: `http://127.0.0.1:${(upstream.address() as { port: number }).port}`, region: "us-east-1", credentials: { accessKeyId: "AK", secretAccessKey: "SK" }, stats, logIntervalMs: 0, buckets: ["bkt"] });
+  try {
+    expect(proxy.endpoint.startsWith(`${proxy.address}/`)).toBe(true);
+    expect(proxy.endpoint.length - proxy.address.length).toBeGreaterThan(40);
+    // No secret, a wrong one, and a right-length wrong one: all refused, whatever Authorization or Host they carry.
+    for (const url of [`${proxy.address}/bkt/k`, `${proxy.address}/nope/bkt/k`, `${proxy.address}/${"0".repeat(64)}/bkt/k`, `${proxy.endpoint}x/bkt/k`]) {
+      const refused = await fetch(url, { headers: { authorization: "AWS4-HMAC-SHA256 Credential=AK/20260101/us-east-1/s3/aws4_request" } });
+      expect(refused.status, url.replace(proxy.endpoint, "<endpoint>")).toBe(403);
+    }
+    for (const method of ["PUT", "DELETE"]) expect((await fetch(`${proxy.address}/bkt/k`, { method, body: method === "PUT" ? "x" : undefined })).status).toBe(403);
+    // The right secret, the wrong bucket (also percent-encoded), a bucket listing and a copy from elsewhere.
+    expect((await fetch(`${proxy.endpoint}/other/k`)).status).toBe(403);
+    expect((await fetch(`${proxy.endpoint}/other?list-type=2`)).status).toBe(403);
+    expect((await fetch(`${proxy.endpoint}/%6fther/k`)).status).toBe(403);
+    expect((await fetch(`${proxy.endpoint}/bkt/k`, { method: "PUT", headers: { "x-amz-copy-source": "/other/secret" } })).status).toBe(403);
+    expect(seen).toEqual([]);
+    expect(stats.refused).toBe(10);
+    // Its own client, its own bucket.
+    expect((await fetch(`${proxy.endpoint}/bkt/k`)).status).toBe(200);
+    expect((await fetch(`${proxy.endpoint}/bkt/k`, { method: "PUT", headers: { "x-amz-copy-source": "/bkt/src" } })).status).toBe(200);
+    proxy.allowBucket("other");
+    expect((await fetch(`${proxy.endpoint}/other/k`)).status).toBe(200);
+    expect(seen).toEqual(["GET /bkt/k", "PUT /bkt/k", "GET /other/k"]);
+  } finally {
+    await proxy.close();
+    await new Promise<void>((r) => { upstream.close(() => r()); upstream.closeAllConnections(); });
+  }
+});
+
+it("stays off behind a forward proxy that would take loopback requests, and drops forward-proxy options", async () => {
+  const options = { region: "auto", endpoint: "https://x.example", aws_access_key_id: "a", aws_secret_access_key: "b", proxy_url: "http://egress:3128", Endpoint_URL: "https://y.example" };
+  expect(await withLanceS3Proxy("s3://b/lancedb", options, { LANCEDB_S3_TRACE: "1", HTTP_PROXY: "http://egress:3128" })).toBe(options);
+  expect(await withLanceS3Proxy("s3://b/lancedb", options, { LANCEDB_S3_TRACE: "1", all_proxy: "socks5://egress:1080", NO_PROXY: "localhost" })).toBe(options);
+  const routed = await withLanceS3Proxy("s3://b/lancedb", options, { LANCEDB_S3_TRACE: "1", HTTP_PROXY: "http://egress:3128", NO_PROXY: "localhost, 127.0.0.1" });
+  expect(routed!.endpoint).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/[0-9a-f]{64}$/);
+  expect(routed!.aws_endpoint_url_s3).toBe(routed!.endpoint);
+  expect(Object.keys(routed!).sort()).toEqual(["allow_http", "aws_access_key_id", "aws_endpoint_url_s3", "aws_secret_access_key", "endpoint", "region", "virtual_hosted_style_request"]);
+});
+
+it("sends to the endpoint Lance would have used when the options name none", async () => {
+  const seen: string[] = [];
+  const upstream = createServer((req, res) => { seen.push(`${req.method} ${req.url}`); req.resume(); res.writeHead(200); res.end(); });
+  await new Promise<void>((r) => upstream.listen(0, "127.0.0.1", r));
+  const fromEnv = `http://127.0.0.1:${(upstream.address() as { port: number }).port}`;
+  try {
+    const routed = await withLanceS3Proxy("s3://envbkt/lancedb", { region: "auto", aws_access_key_id: "env-a", aws_secret_access_key: "env-b" }, { LANCEDB_S3_TRACE: "1", AWS_ENDPOINT_URL_S3: fromEnv });
+    expect((await fetch(`${routed!.endpoint}/envbkt/k`)).status).toBe(200);
+    expect((await fetch(`${routed!.endpoint}/elsewhere/k`)).status).toBe(403);
+    expect(seen).toEqual(["GET /envbkt/k"]);
+  } finally {
+    await new Promise<void>((r) => { upstream.close(() => r()); upstream.closeAllConnections(); });
+  }
+});

@@ -32,7 +32,7 @@ afterAll(async () => { await proxy?.close(); await shutdownObservability(); vi.u
 it.skipIf(!reachable)("withLanceS3Proxy rewrites storage options to the local proxy", async () => {
   const rewritten = await withLanceS3Proxy(`s3://${bucket}/idx`, { ...direct, endpoint }, { LANCEDB_S3_TRACE: "1" });
   expect(rewritten).toMatchObject({ allow_http: "true", virtual_hosted_style_request: "false" });
-  expect(rewritten!.endpoint).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+  expect(rewritten!.endpoint).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/[0-9a-f]{64}$/);
   expect(rewritten!.endpoint).not.toBe(endpoint);
 });
 
