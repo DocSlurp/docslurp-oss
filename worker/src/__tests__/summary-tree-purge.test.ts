@@ -208,10 +208,20 @@ describe("writing summary rows", () => {
     await expect(write({ space: { model: "model/y", dimensions: DIM } })).rejects.toThrow(/not indexed in this embedding space/);
     await expect(write({ rows: [{ ...rows[0]!, id: "a' OR '1'='1" }] })).rejects.toThrow();
     await expect(write({ rows: [{ ...rows[0]!, chunkEnd: -1 }] })).rejects.toThrow();
+    // A builder that does not hold the document's tree: another build took it, or it is no longer being built.
+    await sql`update document_summary_trees set build_owner = 'run:run-2' where document_id = 'a'`;
+    await expect(write({ owner: "run:run-1" })).rejects.toThrow(/no summary tree being built/);
+    await sql`update document_summary_trees set status = 'ready', build_owner = null where document_id = 'a'`;
+    await expect(write({ owner: "run:run-1" })).rejects.toThrow(/no summary tree being built/);
+    // A corrected (or otherwise skipped) document has no tree to write rows for, with or without a named builder.
+    await sql`update document_summary_trees set status = 'skipped', skip_reason = 'corrected' where document_id = 'a'`;
+    await expect(write()).rejects.toThrow(/no summary tree being built/);
+    await expect(write({ owner: "run:run-1" })).rejects.toThrow(/no summary tree being built/);
     expect(await summaryDocuments(W)).toBeNull();
     expect(await summaryDocuments(W2)).toBeNull();
 
-    await write();
+    await sql`update document_summary_trees set status = 'building', skip_reason = null, build_owner = 'run:run-1' where document_id = 'a'`;
+    await write({ owner: "run:run-1" });
     expect(await summaryDocuments(W)).toEqual(["a"]);
     // Replay converges on one row per id.
     await write();

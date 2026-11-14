@@ -1,4 +1,4 @@
-import { mkdtemp, readdir, rm } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import v8 from "node:v8";
@@ -11,6 +11,9 @@ import { artifactUri, keyFromArtifactUri, type SummaryRow } from "@docslurp/shar
 import postgres from "postgres";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { drainDocumentCleanupQueue, drainStorageCleanupQueue } from "../db/superseded-purge.js";
+import type { VectorBackendRecord } from "../stages/embedding-runtime.js";
+import { writeLanceDbRecords } from "../stages/lancedb-writer.js";
 import { deleteDocumentSummaryRows, deleteSummaryRowsById, ensureSummariesDocumentIndex, projectSummariesLocation, resetSummariesIndexMemoForTests, writeSummaryRows } from "../stages/lancedb-summaries.js";
 import { summaryTreeArtifactIO, type SummaryTreeStorage } from "../stages/summary-tree.js";
 import {
@@ -99,6 +102,8 @@ class MemoryStorage implements SummaryTreeStorage {
   readonly objects = new Map<string, Buffer>();
   readonly opened: string[] = [];
   onPut: ((key: string) => Promise<void> | void) | null = null;
+  /** Runs before the object exists: what happens while a write is in flight. */
+  beforePut: ((key: string) => Promise<void> | void) | null = null;
   uri(key: string) { return artifactUri(this.bucket, key); }
   async getBytes(key: string) {
     const found = this.objects.get(key);
@@ -106,6 +111,7 @@ class MemoryStorage implements SummaryTreeStorage {
     return found;
   }
   async putBytes(key: string, data: Uint8Array) {
+    await this.beforePut?.(key);
     this.objects.set(key, Buffer.from(data));
     await this.onPut?.(key);
   }
@@ -632,6 +638,151 @@ describe("corrected documents", () => {
     });
     expect(result).toMatchObject({ status: "refused", reason: "document-corrected" });
     expect(await stateOf("d1")).toMatchObject({ status: "skipped", skip_reason: "corrected", built_at: null });
+  });
+});
+
+describe("a document deleted while its tree is being built", () => {
+  /** The delete and the whole sweep behind it: the cleanup queue row of a document is due at once and is gone after this. */
+  const deleteAndSweep = async (h: Harness, documentId: string) => {
+    await sql`delete from documents where id = ${documentId}`;
+    const swept = await drainDocumentCleanupQueue(sql, h.storage, { graceSeconds: 0, batchSize: 10, deleteSources: false, lancedbRoot: lanceRoot });
+    expect(swept).toEqual({ purged: 1, failed: 0 });
+    expect(await sql`select 1 from document_cleanup_queue where document_id = ${documentId}`).toEqual([]);
+  };
+  const treeObjects = (h: Harness, documentId: string) => [...h.storage.objects.keys()].filter((key) => key.includes(`/summary-tree/${documentId}/`));
+  const rowsOf = async (scope: Scope, documentId: string) => (await summaryRows(scope) ?? []).filter((row) => row.documentId === documentId);
+
+  beforeEach(async () => {
+    await sql`delete from document_cleanup_queue`;
+    await sql`delete from storage_cleanup_queue`;
+  });
+
+  it("writes no text part for a call that returns after the delete, and removes what it had written", async () => {
+    let deleted = false;
+    const putsAfterDelete: string[] = [];
+    const h = harness(fakeModel(async (request, call) => {
+      // Two windows are committed (parts and rows); the delete and its sweep run while the document's fifth call is in flight.
+      if (!deleted && request.nodeId.startsWith("d1:") && h.model.requests.filter((sent) => sent.nodeId.startsWith("d1:")).length === 5) {
+        deleted = true;
+        await deleteAndSweep(h, "d1");
+      }
+      return ok(request, call);
+    }));
+    h.storage.beforePut = (key) => { if (deleted) putsAfterDelete.push(key); };
+    await seedDocument("d1", W);
+    await seedDocument("d2", W);
+    // A completed document (the backfill's case): its cleanup is due the moment it is deleted, with no grace period.
+    await complete("d1");
+    h.putArtifact("d1", W, book());
+    h.putArtifact("d2", W, book());
+    expect((await h.build("d2", W)).status).toBe("ready");
+    const calls = h.model.requests.length;
+
+    const result = await h.build("d1", W, { concurrency: 2 });
+    expect(result).toMatchObject({ status: "refused", reason: "document-not-live" });
+    // The summary of the call that returned after the delete was never written.
+    expect(putsAfterDelete).toEqual([]);
+    expect(treeObjects(h, "d1")).toEqual([]);
+    expect(await rowsOf(W, "d1")).toEqual([]);
+    expect(h.model.requests.length - calls).toBeLessThanOrEqual(6);
+    // The other document of the project is untouched.
+    expect(await rowsOf(W, "d2")).toHaveLength(BOOK_NODES);
+    expect(treeObjects(h, "d2")).toHaveLength(1);
+  });
+
+  it("removes a text part that lands after the delete's sweep has finished", async () => {
+    const h = harness();
+    await seedDocument("d1", W);
+    await complete("d1");
+    h.putArtifact("d1", W, book());
+    let swept = false;
+    // The third part is in flight to object storage when the document is deleted and its cleanup runs to the end:
+    // the sweep lists the folder before the object exists, and no queue row is left to find it afterwards.
+    h.storage.beforePut = async (key) => {
+      if (!swept && key.includes("/summary-tree/d1/parts/") && treeObjects(h, "d1").length >= 2) {
+        swept = true;
+        await deleteAndSweep(h, "d1");
+        expect(treeObjects(h, "d1")).toEqual([]);
+      }
+    };
+    const result = await h.build("d1", W, { concurrency: 1 });
+    expect(swept).toBe(true);
+    expect(result).toMatchObject({ status: "refused", reason: "document-not-live" });
+    expect(treeObjects(h, "d1")).toEqual([]);
+    expect(await rowsOf(W, "d1")).toEqual([]);
+    expect(await stateOf("d1")).toBeNull();
+    // The queued removal behind the inline one finds nothing left and clears itself.
+    expect(await sql`select kind, target, reason from storage_cleanup_queue`).toEqual([{ kind: "summary_tree_document", target: "o1|w|d1", reason: "document_gone" }]);
+    expect(await drainStorageCleanupQueue(sql, h.storage, { graceSeconds: 0, batchSize: 10, deleteSources: false, lancedbRoot: lanceRoot })).toEqual({ purged: 1, failed: 0 });
+    expect(await sql`select 1 from storage_cleanup_queue`).toEqual([]);
+  });
+
+  it("removes summary rows that land in the table after the delete's sweep has finished", async () => {
+    const h = harness();
+    await seedDocument("d1", W);
+    await seedDocument("d2", W);
+    await complete("d1");
+    h.putArtifact("d1", W, book());
+    h.putArtifact("d2", W, book());
+    expect((await h.build("d2", W)).status).toBe("ready");
+    h.rowWrites.length = 0;
+    let swept = false;
+    const location = projectSummariesLocation(W, SPACE, lanceRoot);
+    const result = await h.build("d1", W, {
+      concurrency: 2,
+      deps: {
+        // A table write that passed its liveness check, then lost the race: the delete and its sweep finish while
+        // the rows are on their way, and they land afterwards.
+        writeRows: async (write) => {
+          if (swept) throw new Error("no write may follow the refusal");
+          if (h.rowWrites.length === 1) {
+            swept = true;
+            await deleteAndSweep(h, "d1");
+            await writeLanceDbRecords(location.uri, location.table, write.rows as unknown as VectorBackendRecord[]);
+            return location;
+          }
+          h.rowWrites.push(write.rows.length);
+          return await writeSummaryRows(write);
+        },
+      },
+    });
+    expect(swept).toBe(true);
+    expect(result).toMatchObject({ status: "refused", reason: "document-not-live" });
+    expect(await rowsOf(W, "d1")).toEqual([]);
+    expect(treeObjects(h, "d1")).toEqual([]);
+    // Strict: the late rows' text is in no file under the table any more.
+    const files = await readdir(location.uri, { recursive: true, withFileTypes: true });
+    for (const entry of files.filter((file) => file.isFile())) {
+      expect((await readFile(path.join(entry.parentPath, entry.name))).includes("Title of d1:")).toBe(false);
+    }
+    expect(await rowsOf(W, "d2")).toHaveLength(BOOK_NODES);
+  });
+
+  it("queues the removal when it cannot remove what it wrote", async () => {
+    let deleted = false;
+    const h = harness(fakeModel(async (request, call) => {
+      if (call === 3 && !deleted) {
+        deleted = true;
+        await deleteAndSweep(h, "d1");
+      }
+      return ok(request, call);
+    }));
+    await seedDocument("d1", W);
+    await complete("d1");
+    h.putArtifact("d1", W, book());
+    const warned = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const result = await h.build("d1", W, {
+      concurrency: 2,
+      deps: { deleteDocumentRows: async () => { throw new Error("table busy"); } },
+    });
+    expect(result.status).toBe("refused");
+    expect(warned.mock.calls.flat().join(" ")).toContain("removal=queued");
+    const [queued] = await sql<Array<{ payload: { spaces: unknown; artifactRoots: unknown } }>>`select payload from storage_cleanup_queue where kind = 'summary_tree_document' and target = 'o1|w|d1'`;
+    expect(queued!.payload).toMatchObject({ projectId: "w", documentId: "d1", spaces: [{ embeddingModel: MODEL, dimension: DIM }], artifactRoots: ["u1/run-d1/summary-tree/d1"] });
+    // The sweep finishes it.
+    expect(await drainStorageCleanupQueue(sql, h.storage, { graceSeconds: 0, batchSize: 10, deleteSources: false, lancedbRoot: lanceRoot })).toEqual({ purged: 1, failed: 0 });
+    expect(await rowsOf(W, "d1")).toEqual([]);
+    expect(treeObjects(h, "d1")).toEqual([]);
   });
 });
 

@@ -26,7 +26,6 @@ import { allowHostedCallForProject, openRouterTextCall, runWithPrivacyAuditScope
 import { providerBalanceProbe, readProviderBalance, type ProviderBalanceProbe } from "../lib/provider-balance-probe.js";
 import { projectProviderScope, runWithProviderRateScope } from "../lib/provider-rate-limit.js";
 import { textUsageLabels } from "../lib/text-model-route.js";
-import { deleteDocumentSummaryRows } from "../stages/lancedb-summaries.js";
 import {
   runSummaryTreeForDocument,
   SUMMARY_TREE_USAGE_METRIC,
@@ -35,7 +34,6 @@ import {
   type SummaryTreeStorage,
 } from "../stages/summary-tree.js";
 import type { CommandRunner } from "../tools/runner.js";
-import { summaryTreeArtifactRoot } from "./artifact.js";
 import type { SummaryTreeBuildResult } from "./build.js";
 import { SUMMARY_TREE_TEXT_OPERATION } from "./limits.js";
 import { markSummaryTreesSkipped, registerSummaryTreeArtifact } from "./state-store.js";
@@ -482,7 +480,8 @@ async function runClaimedJob(
             halt ??= { kind: "park", reason: "build-off" };
             return null;
           case "refused":
-            await removeIfGone(document, runRoot);
+            // The document left the project or was corrected under the build, which removed what it had written
+            // (build.ts): this job is done with it.
             return { outcome: "skipped", result };
           case "blocked":
             // Another build holds it and still reports: left to that build (and to the next job if it dies).
@@ -503,20 +502,6 @@ async function runClaimedJob(
           }
         }
       }
-    };
-
-    /**
-     * A document that left the project while its tree was being built leaves nothing behind: the delete removed its
-     * state and registry rows, and what this build wrote after that (summary rows, artifact parts) is removed here.
-     * A document that still exists (superseded or archived) is left to the purge paths, which own its rows.
-     */
-    const removeIfGone = async (document: DocumentRow, runRoot: string) => {
-      const [live] = await sql<{ id: string }[]>`select id from documents where id = ${document.id} and org_id = ${job.org_id} and project_id = ${job.project_id}`;
-      if (live) return;
-      await (options.overrides?.deleteDocumentRows ?? deleteDocumentSummaryRows)({ scope, space, documentIds: [document.id], root: options.overrides?.lanceRoot });
-      const listed = await options.storage.listKeys({ prefix: `${summaryTreeArtifactRoot(runRoot, document.id)}/`, maxKeys: 100_000 });
-      if (listed.keys.length > 0) await options.storage.deleteKeys(listed.keys);
-      console.log(`[summary-tree-job] job=${job.id} document=${document.id} removed=rows-of-deleted-document artifacts=${listed.keys.length}`);
     };
 
     for (;;) {

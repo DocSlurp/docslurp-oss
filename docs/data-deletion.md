@@ -65,6 +65,23 @@ that is indexed in that embedding space and has a tree state row
 (`worker/src/stages/lancedb-summaries.ts`), so a row cannot exist where these
 paths would not find it.
 
+**A document deleted while its tree is being built.** The cleanup of a completed
+document is due the moment it is deleted, so the sweep can finish while a model
+call or a write of the build is still in flight. Two things keep a late write
+from staying behind:
+
+- The row writer checks the document and writes the table under a lock on the
+  document's row (`for key share`). A delete, a purge or archive of a replaced
+  version and a correction reindex wait for a write in flight, and a write that
+  starts after them is refused.
+- The build asks whether it may still write after every model call (before the
+  text part is written) and again once a window's parts and its summary rows
+  have landed. On a refusal it removes everything it wrote for the document: its
+  summary rows (strict) and every object under
+  `<run root>/summary-tree/<documentId>/`. A `summary_tree_document` entry is
+  queued before that removal starts, so a crash or a failed delete still ends
+  with the data gone.
+
 Org-level tables from before per-project databases are deleted by the
 relocation CLI's `--drop-legacy` step (see [operations](self-host/operations.md#moving-to-per-project-lancedb-databases-migration-0082));
 cleanup rows queued for them before migration 0082 drop them by their legacy

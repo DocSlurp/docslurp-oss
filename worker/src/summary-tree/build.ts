@@ -19,12 +19,14 @@ import { resolveSummaryTreeLimits, SummaryTreeInputError, type SummaryTreeLimits
 import { planSummaryReuse, type StoredSummary, type SummaryReuseSource } from "./reuse.js";
 import {
   deleteSummaryTreeNodes,
+  enqueueSummaryTreeCleanup,
   findSummaryReusePredecessor,
   linkSummaryTreeNodes,
   loadSummaryTreeNodes,
   loadSummaryTreeState,
   readSummaryTreeCoverage,
   staleSummaryTreeNodeIds,
+  summaryTreeBuildStanding,
   summaryTreeCoverageProblems,
   summaryTreeDocumentStanding,
   SummaryTreeStateRefused,
@@ -69,6 +71,14 @@ import {
  * - A `building` row names its builder and is kept alive by it (`touchSummaryTreeBuild`). A build stops, without
  *   writing an outcome, as soon as another build has taken the row. A row whose builder stopped reporting for
  *   `SUMMARY_TREE_BUILD_STALE_MS` was left by a dead worker and blocks nothing.
+ * - A document can be deleted, purged or corrected while its tree is being built, and the sweep that removes its
+ *   summary data can finish while a model call or a write of this build is still in flight. So the build asks
+ *   whether it may still write (`summaryTreeBuildStanding`) after every model call, before the text part is written,
+ *   and again once a window's parts and once its summary rows have landed. A write that landed behind a delete
+ *   is found by the second check: the build then removes everything it wrote for the document (summary rows,
+ *   strictly, and the artifact folder) before it returns `refused`, with a queued removal behind it in case that
+ *   fails (`enqueueSummaryTreeCleanup`). The row writer additionally holds a lock on the document's row across its
+ *   table write (lancedb-summaries.ts), so a delete or correction waits for a write in flight.
  *
  * Nothing is skipped silently: every outcome is a status with a named reason and counts.
  */
@@ -382,9 +392,39 @@ export async function buildDocumentSummaryTree(deps: SummaryTreeBuildDeps, input
 
   /** Whether this build wrote the `building` row: from then on its outcome is written only while it still holds it. */
   let holding = false;
+  /** Whether this build ever held the row, i.e. may have written text parts or summary rows. */
+  let everHeld = false;
   const writeSummaryTreeState = async (_sql: Client, write: SummaryTreeStateWrite): Promise<void> => {
     await writeSummaryTreeStateRow(deps.sql, { ...write, buildOwner: owner, ...(holding ? { expectOwner: owner } : {}) });
     holding = write.status === "building";
+    everHeld ||= holding;
+  };
+
+  /**
+   * Removes everything a build wrote for a document that was deleted, purged or corrected under it: its summary
+   * rows in every embedding space this build or the one before it wrote in (strict), and every object under its
+   * artifact folder. The removal is queued first, so a crash or a failed delete here still ends with the data gone;
+   * the queued entry runs again after this and finds nothing.
+   */
+  const removeWhatWasWritten = async (standing: "gone" | "corrected"): Promise<void> => {
+    const spaces = [space, ...(priorSpace ? [priorSpace] : [])]
+      .filter((candidate) => candidate.model && candidate.dimensions > 0)
+      .filter((candidate, position, all) => all.findIndex((other) => other.model === candidate.model && other.dimensions === candidate.dimensions) === position);
+    await enqueueSummaryTreeCleanup(deps.sql, {
+      scope, documentId, reason: standing === "corrected" ? "document_corrected" : "document_gone", spaces, artifactRoots: [artifactRoot],
+    });
+    try {
+      for (const target of spaces) await deps.deleteDocumentRows({ scope, space: target, documentIds: [documentId], root: deps.lanceRoot });
+      const keys = await deps.artifacts.listKeys(`${artifactRoot}/`);
+      if (keys.length > 0) {
+        if (!deps.artifacts.deleteKeys) throw new Error("summary tree artifact storage cannot delete");
+        await deps.artifacts.deleteKeys(keys);
+      }
+      console.log(`[summary-tree] document=${documentId} removed=build-leftovers standing=${standing} artifacts=${keys.length}`);
+    } catch (error) {
+      // The error's name only. The queued removal does it again.
+      console.warn(`[summary-tree] document=${documentId} removal=queued standing=${standing} error=${error instanceof Error ? error.name : "error"}`);
+    }
   };
 
   /**
@@ -561,9 +601,26 @@ export async function buildDocumentSummaryTree(deps: SummaryTreeBuildDeps, input
         };
       });
       await deps.writeRows({ sql: deps.sql, scope, space, documentId, runId, rows, owner, root: deps.lanceRoot, signal });
+      // The writer checks under a lock; this covers a writer that holds none and a document that left right after.
+      await assertMayWrite();
       await upsertSummaryTreeNodes(deps.sql, { scope, documentId, runId, rows: pending.map((nodeIndex) => nodeRecord(nodeIndex, "ready")) });
       for (const nodeIndex of pending) registry.set(nodeIds[nodeIndex]!, { id: nodeIds[nodeIndex]!, nodeHash: hashes[nodeIndex]!, status: "ready", runId });
       stats.rowsWritten += rows.length;
+    };
+
+    /**
+     * Whether this build may still write for the document. Throws `SummaryTreeStateRefused` when the document left
+     * the project or was corrected (the caller's catch removes what the build wrote), and stops the build when
+     * another one took the tree over.
+     */
+    const assertMayWrite = async (): Promise<void> => {
+      const standing = await summaryTreeBuildStanding(deps.sql, scope, documentId, owner);
+      if (standing === "holding") return;
+      if (standing === "taken-over") {
+        takenOver = true;
+        throw new SummaryTreeStopped("build-taken-over");
+      }
+      throw new SummaryTreeStateRefused("The document left the project or was corrected while its summary tree was being built");
     };
 
     const beforeCall = () => {
@@ -622,10 +679,12 @@ export async function buildDocumentSummaryTree(deps: SummaryTreeBuildDeps, input
           },
         });
         if (result.status === "ok") {
-          item.summary = result.summary;
-          item.failure = undefined;
+          // The call may have taken minutes: a document deleted or corrected meanwhile gets no part written.
+          await assertMayWrite();
           // Durable before anything else happens to it: a build killed now does not pay for this call again.
           await appendSummaryTreeRecords(deps.artifacts, artifactRoot, [{ hash: item.hash, ...result.summary }]);
+          item.summary = result.summary;
+          item.failure = undefined;
           own.entries.set(item.hash, result.summary);
           return;
         }
@@ -676,10 +735,30 @@ export async function buildDocumentSummaryTree(deps: SummaryTreeBuildDeps, input
         if (copied.length > 0) {
           // Copied into this version's own artifact: nothing later reads the predecessor's.
           const records: SummaryTreeRecord[] = copied.map((item) => ({ hash: item.hash, ...item.summary! }));
+          await assertMayWrite().catch((error: unknown) => {
+            if (!(error instanceof SummaryTreeStopped)) throw error;
+          });
+          if (takenOver) {
+            stopped = "build-taken-over";
+            return;
+          }
           await appendSummaryTreeRecords(deps.artifacts, artifactRoot, records);
           for (const record of records) own.entries.set(record.hash, { title: record.title, text: record.text });
         }
         const settled = await Promise.allSettled(window.filter((item) => item.origin === "model").map((item) => generate(item)));
+        // A part of this window may have landed behind a delete whose sweep had already run: asked again once the
+        // window's parts are written, before anything is committed. A refusal here ends in the removal of everything
+        // the build wrote (the catch below).
+        if (copied.length > 0 || window.some((item) => item.origin === "model" && item.summary)) {
+          try {
+            await assertMayWrite();
+          } catch (error) {
+            if (!(error instanceof SummaryTreeStopped)) throw error;
+            await deps.flushUsage?.();
+            stopped = error.reason;
+            return;
+          }
+        }
         // Commit what the window produced before reporting what stopped it, so every paid call is kept.
         const done: number[] = [];
         const failedNodes: number[] = [];
@@ -699,7 +778,14 @@ export async function buildDocumentSummaryTree(deps: SummaryTreeBuildDeps, input
             failedNodes.push(...item.nodes);
           }
         }
-        await commitNodes(done);
+        try {
+          await commitNodes(done);
+        } catch (error) {
+          if (!(error instanceof SummaryTreeStopped)) throw error;
+          await deps.flushUsage?.();
+          stopped = error.reason;
+          return;
+        }
         if (failedNodes.length > 0) {
           await upsertSummaryTreeNodes(deps.sql, { scope, documentId, runId, rows: failedNodes.map((nodeIndex) => nodeRecord(nodeIndex, "failed")) });
         }
@@ -827,6 +913,9 @@ export async function buildDocumentSummaryTree(deps: SummaryTreeBuildDeps, input
       if (standing === "live" && holding && (takenOver || !(await touchSummaryTreeBuild(deps.sql, scope, documentId, owner)))) {
         return finish("partial", { reason: "stopped:build-taken-over", artifactUri });
       }
+      // Deleted, purged or corrected: nothing this build wrote stays. A superseded or archived version is left to
+      // the purge paths, which own its rows and wait for a row write in flight.
+      if (everHeld && (standing === "gone" || standing === "corrected")) await removeWhatWasWritten(standing);
       return finish("refused", { reason: standing === "corrected" ? "document-corrected" : "document-not-live" });
     }
     throw error;

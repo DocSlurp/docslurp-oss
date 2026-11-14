@@ -218,6 +218,26 @@ export async function enqueueSummaryTreeCleanup(sql: Client, args: {
   `;
 }
 
+/**
+ * Whether a builder may still write for its document, read at the moment of asking:
+ * - `holding`: the document is a live document of this tenant and its `building` row is this builder's;
+ * - `taken-over`: the document is live and uncorrected, but another build (or a cleanup) holds its tree now;
+ * - `refused`: the document was deleted, purged, superseded, archived or corrected, or is not this tenant's.
+ */
+export async function summaryTreeBuildStanding(sql: Client, scope: SummaryTreeScope, documentId: string, owner: string): Promise<"holding" | "taken-over" | "refused"> {
+  assertScope(scope);
+  const [row] = await sql<{ live: boolean; holding: boolean | null; corrected: boolean | null }[]>`
+    select (d.purged_at is null and d.superseded_at is null and d.archived_at is null) as live,
+      (t.status = 'building' and t.build_owner = ${owner}) as holding,
+      (t.skip_reason = ${SUMMARY_TREE_CORRECTED_SKIP_REASON}) as corrected
+    from documents d
+    left join document_summary_trees t on t.document_id = d.id and t.org_id = d.org_id and t.project_id = d.project_id
+    where d.id = ${documentId} and d.org_id = ${scope.orgId} and d.project_id = ${scope.projectId}
+  `;
+  if (!row || !row.live || row.corrected === true) return "refused";
+  return row.holding === true ? "holding" : "taken-over";
+}
+
 export interface SummaryTreeNodeRecord {
   id: string;
   nodeHash: string;
