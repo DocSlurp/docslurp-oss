@@ -15,6 +15,7 @@ import { composeAgentProjectInstructions, composeSystemMessage, type ChatScope, 
 import { chatSessionForRequest, requiresChatSessionToken, sealChatSessionToken } from "../lib/chat-session-tokens.js";
 import type { ChatToolActivity } from "./chat-mcp-tools.js";
 import {
+  chatSummaryTreeOverride,
   configureSearchFromChat,
   describeSearchSettingsForAgent,
   type SearchConfigurationOutcome,
@@ -1395,7 +1396,7 @@ async function chatProjectTurn(
       query: args.query, history, apiKey: chatApiKey, privacyMode, model, reasoning: policy.reasoning,
       projectWebTools: (project.pipeline as { webTools?: unknown } | null)?.webTools !== false,
       web: args.agent?.web, suggestions: firstPartyApp && args.agent?.suggestions === true,
-      retrievalDefaults: searchSettings.retrievalDefaults, projectInventory,
+      retrievalDefaults: searchSettings.retrievalDefaults, summaryTree: chatSummaryTreeOverride(searchSettings, context.settings), projectInventory,
       ...(chartExportOffered ? { chartExport: {
         enabled: chartExportEnabled,
         unexportedVisuals: visualCandidates?.unexported ?? null,
@@ -1577,7 +1578,7 @@ async function chatProjectTurn(
     queryDecompose: searchSettings.retrievalDefaults.queryDecompose,
     stepback: searchSettings.retrievalDefaults.stepback,
     summarySeed: searchSettings.retrievalDefaults.summarySeed,
-    summaryTree: searchSettings.retrievalDefaults.summaryTree,
+    summaryTree: chatSummaryTreeOverride(searchSettings, context.settings),
     selfQuery: searchSettings.retrievalDefaults.selfQuery,
     iterativeMultiHop: searchSettings.retrievalDefaults.iterativeMultiHop,
     enableGraphExpansion:

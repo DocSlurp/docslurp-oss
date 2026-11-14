@@ -17,7 +17,7 @@ import { ChatToolBlockedError } from "./chat-tool-error.js";
 import { isCancellation } from "@docslurp/shared/cancellation";
 import { createChatMcpTools, type ChatSearchCallStats, type ChatToolActivity } from "./chat-mcp-tools.js";
 import { ChatClientAbortError, ChatTurnDeadline, ChatTurnDeadlineError, chatTurnTimeBudget, raceAbort, type ChatTurnTimeBudget } from "./chat-turn-deadline.js";
-import { detectVisualDataIntent, VISUAL_INTENT_THRESHOLD, type SearchResult, type ProjectSearchRetrievalDefaults } from "@docslurp/shared";
+import { detectVisualDataIntent, VISUAL_INTENT_THRESHOLD, type SearchResult, type ProjectSearchRetrievalDefaults, type SummaryTreeSearchMode } from "@docslurp/shared";
 
 const MAX_AGENT_OUTPUT_TOKENS = 4096;
 const DEFAULT_LIMITS: ChatAgentLimits = { ...CHAT_AGENT_LIMIT_DEFAULTS, baseSteps: CHAT_AGENT_BASE_STEPS, clamped: [] };
@@ -332,6 +332,8 @@ export async function runChatMcpAgent(args: {
   /** Suggestions mode only: chart export setting and free ingest signals (see chartExportSuggestionInstruction). */
   chartExport?: ChatChartExportContext;
   retrievalDefaults?: ProjectSearchRetrievalDefaults;
+  /** This thread's summary-tree override; undefined: the project default decides. */
+  summaryTree?: SummaryTreeSearchMode;
   onTextDelta?: (delta: string) => void | Promise<void>;
   onToolActivity?: (activity: ChatToolActivity) => void;
   onEvidence?: (citations: SearchResult[]) => void;
@@ -369,7 +371,7 @@ export async function runChatMcpAgent(args: {
     settingsTools: firstPartyApp,
     publicClient: args.actor.type === "apiKey" && args.actor.apiKey.keyType !== "server",
     dispatch: createMcpDispatcher(args.actor), projectId: args.projectId, signal,
-    retrievalDefaults: args.retrievalDefaults,
+    retrievalDefaults: args.retrievalDefaults, summaryTree: args.summaryTree,
     maxToolCalls: limits.maxToolCalls, searchConcurrency: limits.searchConcurrency,
     chatSessionId: args.sessionId, traceParent: agentSpan,
     toolBudgetMs: () => deadline.toolBudgetMs(),

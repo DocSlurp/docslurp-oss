@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { dynamicTool, jsonSchema, type ToolSet } from "ai";
-import { figureResumeChatEnabled, figureResumeProposalSchema, projectSettingsProposalSchema, type FigureResumeProposal, type ProjectSettingsProposal, CHAT_AGENT_LIMIT_DEFAULTS, CHAT_MAX_RETRIEVED_PASSAGES, searchResultSchema, type SearchResult, type ProjectSearchRetrievalDefaults } from "@docslurp/shared";
+import { figureResumeChatEnabled, figureResumeProposalSchema, projectSettingsProposalSchema, type FigureResumeProposal, type ProjectSettingsProposal, CHAT_AGENT_LIMIT_DEFAULTS, CHAT_MAX_RETRIEVED_PASSAGES, searchResultSchema, type SearchResult, type ProjectSearchRetrievalDefaults, type SummaryTreeSearchMode } from "@docslurp/shared";
 import type { WebToolActivity } from "@docslurp/shared/project-chat-ui";
 import { startTelemetrySpan, type TelemetrySpan } from "@docslurp/shared/observability";
 import type { McpDispatch, McpManifest } from "../lib/mcp-http.js";
@@ -390,6 +390,8 @@ export function createChatMcpTools(args: {
   dispatch: McpDispatch;
   projectId: string;
   retrievalDefaults?: ProjectSearchRetrievalDefaults;
+  /** This thread's summary-tree override (chatSummaryTreeOverride); undefined: the project default decides. */
+  summaryTree?: SummaryTreeSearchMode;
   signal: AbortSignal;
   onActivity?: (activity: ChatToolActivity) => void;
   onEvidence?: (citations: SearchResult[]) => void;
@@ -452,7 +454,8 @@ export function createChatMcpTools(args: {
     candidateDepth: defaults.candidateDepth, resultOrder: defaults.resultOrder,
     compression: defaults.useContextualCompression, mmrLambda: defaults.mmrLambda,
     minScore: defaults.minScore, parentRetrieval: defaults.parentRetrieval,
-    summarySeed: defaults.summarySeed, summaryTree: defaults.summaryTree, queryRewrite: defaults.queryRewrite,
+    summarySeed: defaults.summarySeed, queryRewrite: defaults.queryRewrite,
+    ...(args.summaryTree === undefined ? {} : { summaryTree: args.summaryTree }),
     queryDecompose: defaults.queryDecompose, stepback: defaults.stepback,
     selfQuery: defaults.selfQuery, iterativeMultiHop: defaults.iterativeMultiHop,
     graphExpansion: defaults.enableGraphExpansion, communityExpansion: defaults.enableCommunityExpansion,
