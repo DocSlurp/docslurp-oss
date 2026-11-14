@@ -18,6 +18,7 @@ import { connectLanceDb } from "../stages/lancedb-connection.js";
 import { deleteLanceDbRecords } from "../stages/lancedb-writer.js";
 import { legacyEmbeddingLocations, legacyOrgTable } from "../stages/lancedb-legacy-layout.js";
 import { lanceDbMaintenanceSettings, requestLanceDbMaintenance, requireLanceDbMaintenance } from "../stages/lancedb-maintenance.js";
+import { markLanceDbHistoryPruneDue } from "../stages/lancedb-write-queue.js";
 
 /**
  * Superseded-version purge.
@@ -88,7 +89,8 @@ export type DeleteVectorRows = (args: {
    * the version-retention window. Set for expired extracts.
    */
   purgeHistory?: boolean;
-}) => Promise<void>;
+  // Resolves "missing" when the table does not exist: nothing was deleted, no history to prune.
+}) => Promise<void | "missing">;
 
 /** Drops a whole LanceDB table (org deletion). Missing tables are not an error. */
 export type DropVectorTable = (args: { uri: string; table: string }) => Promise<void>;
@@ -279,7 +281,8 @@ export const deleteLanceDbDocumentRows: DeleteVectorRows = async ({ uri, table: 
   }
   const db = await connectLanceDb(uri);
   try {
-    if (!(await db.tableNames()).includes(tableName)) return;
+    // Nothing was deleted, so there is no history to prune.
+    if (!(await db.tableNames()).includes(tableName)) return "missing";
     for (let attempt = 0; ; attempt += 1) {
       const table = await db.openTable(tableName);
       try {
@@ -499,6 +502,7 @@ export async function purgeSupersededDocuments(
         `[superseded-purge] failed error=${error instanceof Error ? error.message.split("\n")[0] : String(error)}`,
       );
     }
+    await flushHistoryPrunes(sql);
   }
 
   if (result.purged > 0 || result.failed > 0 || (result.archived ?? 0) > 0) {
@@ -522,7 +526,38 @@ async function deleteDocumentVectors(
     const location = VectorNamespaceManager.getEmbeddingLocation(
       options.lancedbRoot, doc.org_id, doc.project_id, vector.embedding_model, vector.dimension,
     );
-    await deleteVectorRows({ uri: location.uri, table: location.table, documentIds: [doc.id] });
+    const outcome = await deleteVectorRows({ uri: location.uri, table: location.table, documentIds: [doc.id] });
+    if (outcome !== "missing") scheduleHistoryPrune(location);
+  }
+}
+
+/**
+ * The delete above only hides rows. Their bytes leave object storage when a maintenance pass
+ * prunes the table's history after the retention window; this makes that pass due even when the
+ * table is never written again.
+ *
+ * Only noted here. The purge transaction is long (other tables, storage listings) and the write
+ * queue updates the same vector_index_tables row on every lease renewal, so the row is written
+ * by `flushHistoryPrunes` on the root connection once the transaction has ended. The Lance
+ * delete is not transactional, so the note is kept even when the transaction rolls back.
+ */
+const pendingHistoryPrunes = new Map<string, { uri: string; table: string }>();
+
+function scheduleHistoryPrune(location: { uri: string; table: string }): void {
+  pendingHistoryPrunes.set(`${location.uri}#${location.table}`, { uri: location.uri, table: location.table });
+}
+
+/** Writes the history prunes noted since the last flush. A failure keeps them for the next one. */
+export async function flushHistoryPrunes(sql: Sql<Record<string, unknown>>): Promise<void> {
+  if (pendingHistoryPrunes.size === 0) return;
+  const { versionRetentionMs } = lanceDbMaintenanceSettings(resolveLanceDbConfig().params);
+  for (const [key, location] of [...pendingHistoryPrunes]) {
+    try {
+      await markLanceDbHistoryPruneDue(sql, location.uri, location.table, versionRetentionMs);
+      pendingHistoryPrunes.delete(key);
+    } catch (error) {
+      console.warn(`[lancedb] history prune not scheduled table=${location.table} error=${error instanceof Error ? error.message.split("\n")[0] : String(error)}`);
+    }
   }
 }
 
@@ -626,25 +661,49 @@ export async function knowledgeGraphNodesForDocument(
 /**
  * Re-derives graph elements after a document's chunks and edge evidence were
  * removed (see `refreshGraphElements`): nodes and edges no current document
- * supports are deleted, then affected community sizes are recounted.
+ * supports are deleted.
+ *
+ * A community summary is written from its member entities and the relations
+ * between them, so a community that lost a member or a relation here still
+ * describes the removed document. Those communities are deleted, not
+ * recounted: community search must not serve them, and the next community
+ * refresh rebuilds them from what remains. A community whose members and
+ * relations all survive (other documents still support them) is kept.
  */
 export async function refreshKnowledgeGraphNodes(
   sql: Sql<Record<string, unknown>>,
   nodeIds: string[],
 ): Promise<void> {
   if (nodeIds.length === 0 || !(await tableExists(sql, "kg_nodes"))) return;
-  const communities = await sql<{ community_id: string }[]>`
-    select distinct community_id from kg_community_members where node_id = any(${sql.array(nodeIds)})
+  const ids = sql.array([...new Set(nodeIds)]);
+  const memberships = await sql<{ community_id: string; node_id: string }[]>`
+    select community_id, node_id from kg_community_members where node_id = any(${ids})
+  `;
+  // Relations inside a community: both endpoints are members of it.
+  const relations = memberships.length === 0 ? [] : await sql<{ community_id: string; edge_id: string }[]>`
+    select distinct source_member.community_id, e.id as edge_id
+    from kg_edges e
+    join kg_community_members source_member on source_member.node_id = e.source_node_id
+    join kg_community_members target_member
+      on target_member.node_id = e.target_node_id and target_member.community_id = source_member.community_id
+    where e.source_node_id = any(${ids}) or e.target_node_id = any(${ids})
   `;
   await refreshGraphElements(sql, { nodeIds });
-  if (communities.length > 0) {
-    await sql`
-      update kg_communities k
-      set member_count = (select count(*)::int from kg_community_members m where m.community_id = k.id),
-          updated_at = now()
-      where k.id = any(${sql.array(communities.map((row) => row.community_id))})
-    `;
-  }
+  if (memberships.length === 0) return;
+
+  const survivingNodes = new Set(
+    (await sql<{ id: string }[]>`select id from kg_nodes where id = any(${ids})`).map((row) => row.id),
+  );
+  const edgeIds = [...new Set(relations.map((row) => row.edge_id))];
+  const survivingEdges = new Set(edgeIds.length === 0 ? [] : (
+    await sql<{ id: string }[]>`select id from kg_edges where id = any(${sql.array(edgeIds)})`
+  ).map((row) => row.id));
+  const stale = new Set<string>();
+  for (const row of memberships) if (!survivingNodes.has(row.node_id)) stale.add(row.community_id);
+  for (const row of relations) if (!survivingEdges.has(row.edge_id)) stale.add(row.community_id);
+  if (stale.size === 0) return;
+  // Memberships cascade.
+  await sql`delete from kg_communities where id = any(${sql.array([...stale])})`;
 }
 
 async function tableExists(sql: Sql<Record<string, unknown>>, name: string): Promise<boolean> {
@@ -761,8 +820,10 @@ export async function drainDocumentCleanupQueue(
       }
       if (claimed.length === 0) break;
     }
+    await flushHistoryPrunes(sql);
     if (claimed.length < claimSize) break;
   }
+  await flushHistoryPrunes(sql);
 
   if (result.purged > 0 || result.failed > 0) {
     console.log(`[document-cleanup] cleaned=${result.purged} failed=${result.failed}`);
@@ -793,6 +854,8 @@ async function cleanOneDocument(
   } catch (error) {
     await recordDocumentCleanupFailure(sql, [documentId], error);
     return "failed";
+  } finally {
+    await flushHistoryPrunes(sql);
   }
 }
 
@@ -851,7 +914,8 @@ async function cleanDeletedDocuments(
     }
   }
   for (const { location, documentIds, purgeHistory } of byTable.values()) {
-    await deleteVectorRows({ uri: location.uri, table: location.table, documentIds: [...documentIds], ...(purgeHistory ? { purgeHistory } : {}) });
+    const outcome = await deleteVectorRows({ uri: location.uri, table: location.table, documentIds: [...documentIds], ...(purgeHistory ? { purgeHistory } : {}) });
+    if (outcome !== "missing") scheduleHistoryPrune(location);
   }
 
   const keys = new Set<string>();
@@ -1054,7 +1118,10 @@ async function deleteOrphanVectorRows(client: Sql<Record<string, unknown>>, opti
   `).map((r) => r.id));
   const orphans = (ids as string[]).filter((id) => !live.has(id));
   const deleteIds = options.deleteVectorIds ?? (({ uri, table, ids: rows }) => deleteLanceDbRecords(uri, table, rows));
-  if (orphans.length > 0) await deleteIds({ uri: location.uri, table: location.table, ids: orphans });
+  if (orphans.length > 0) {
+    await deleteIds({ uri: location.uri, table: location.table, ids: orphans });
+    scheduleHistoryPrune(location);
+  }
 }
 
 /** `<userId>/<runId>/`: two safe segments, never a bucket root or a whole user. */
@@ -1220,6 +1287,7 @@ export async function drainStorageCleanupQueue(
   if (result.purged > 0 || result.failed > 0) {
     console.log(`[storage-cleanup] cleaned=${result.purged} failed=${result.failed}`);
   }
+  await flushHistoryPrunes(sql);
   return result;
 }
 
