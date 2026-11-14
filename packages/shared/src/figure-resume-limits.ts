@@ -82,8 +82,8 @@ export const FIGURE_RESUME_GLOBAL_ENV = "DOCSLURP_FIGURE_RESUME_GLOBAL_MAX";
 export const FIGURE_RESUME_BUDGET_ENV = {
   launchFloor: { name: "DOCSLURP_FIGURE_RESUME_LAUNCH_FLOOR", fallback: 3, min: 1, max: 64 },
   launchCeiling: { name: "DOCSLURP_FIGURE_RESUME_LAUNCH_CEILING", fallback: 128, min: 1, max: FIGURE_RESUME_HARD.documentLaunches },
-  vmMsPerPage: { name: "DOCSLURP_FIGURE_RESUME_VM_MS_PER_PAGE", fallback: 50, min: 1, max: 2_000 },
-  vmMsPerLaunch: { name: "DOCSLURP_FIGURE_RESUME_VM_MS_PER_LAUNCH", fallback: 3_000, min: 0, max: 120_000 },
+  vmMsPerPage: { name: "DOCSLURP_FIGURE_RESUME_VM_MS_PER_PAGE", fallback: 200, min: 1, max: 2_000 },
+  vmMsPerLaunch: { name: "DOCSLURP_FIGURE_RESUME_VM_MS_PER_LAUNCH", fallback: 15_000, min: 0, max: 120_000 },
   vmHeadroom: { name: "DOCSLURP_FIGURE_RESUME_VM_HEADROOM", fallback: 2, min: 1, max: 16 },
   docVmSecondsFloor: { name: "DOCSLURP_FIGURE_RESUME_DOC_VM_SECONDS_FLOOR", fallback: 180, min: 60, max: 3_600 },
   docVmSecondsCeiling: { name: "DOCSLURP_FIGURE_RESUME_DOC_VM_SECONDS_CEILING", fallback: 4 * 3_600, min: 60, max: 12 * 3_600 },
@@ -190,8 +190,10 @@ export function figureResumeLaunchVmMs(args: { pageCount: number; shards?: numbe
 
 /**
  * The document's lifetime resume VM time (ms): vmHeadroom x its expected passes x one launch's estimated time, clamped to
- * [docVmSecondsFloor, docVmSecondsCeiling], plus what its grants added. 10 pages: 180 s. 1,000 pages unsharded: 2,120 s.
- * 20,000 pages in 32 shards: 4,316 s.
+ * [docVmSecondsFloor, docVmSecondsCeiling], plus what its grants added. 10 pages: 180 s. 1,000 pages unsharded: 8,600 s.
+ * 20,000 pages in 32 shards: the 4 h ceiling. The per-launch and per-page defaults are measured: the estimate covers the
+ * 90th percentile of measured resume launches, and the headroom the rest (an unsharded launch re-reading every page is the
+ * costly case; a sharded document's launches stay well under the ceiling).
  */
 export function figureResumeVmBudgetMs(args: { pageCount: number; shards?: number; grants?: number }, config: FigureResumeBudgetConfig = figureResumeBudgetConfig()): number {
   const estimate = config.vmHeadroom * figureResumeExpectedPasses(args.pageCount) * figureResumeLaunchVmMs(args, config);

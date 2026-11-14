@@ -486,9 +486,11 @@ one at most one or two. The caps scale with pages:
 - *Launches:* 1.5 × the passes the allowance needs after the first pass, and at least one per open unit, clamped to
   `DOCSLURP_FIGURE_RESUME_LAUNCH_FLOOR`..`_CEILING` (default 3..128). 10 pages: 3. 1,000 pages: 30. 20,000 pages: 95.
 - *VM time:* `DOCSLURP_FIGURE_RESUME_VM_HEADROOM` (2) × the expected passes × one launch's estimated time. A launch is
-  `DOCSLURP_FIGURE_RESUME_VM_MS_PER_LAUNCH` (3,000) plus `DOCSLURP_FIGURE_RESUME_VM_MS_PER_PAGE` (50) for each page it
-  converts: one shard of a sharded document, every page of an unsharded one (gaps or not). The two constants are
-  estimates until measured (TODO.md); each pass logs `resume pass … pages vmMs msPerPage estimateMs` for tuning. Clamped to
+  `DOCSLURP_FIGURE_RESUME_VM_MS_PER_LAUNCH` (15,000) plus `DOCSLURP_FIGURE_RESUME_VM_MS_PER_PAGE` (200) for each page it
+  converts: one shard of a sharded document, every page of an unsharded one (gaps or not). Both defaults are measured on
+  resume launches in the production VM: the estimate covers the 90th percentile launch, and the 2× headroom the rest. A
+  launch's time includes staging the source PDF into its VM, which every launch repeats. Each pass logs
+  `resume pass … pages vmMs msPerPage estimateMs` for re-tuning. Clamped to
   `DOCSLURP_FIGURE_RESUME_DOC_VM_SECONDS_FLOOR`..`_CEILING` (180 s..4 h, the ceiling at most 12 h). Grants included, no
   document's budget passes a hard 12 hours per run. Measured VM time is charged to the document
   (`resume_vm_ms`), each launch's timeout is capped at what is left, and under a minute left the document stops.
@@ -514,9 +516,9 @@ one at most one or two. The caps scale with pages:
 
 | Document | Old launches | New launches | New VM budget | Expected resume VM time |
 |---|---|---|---|---|
-| 10 pages | 6 (3 per unit) | 3 | 180 s | 1 pass, about 4 s |
-| 1,000 pages, unsharded | 6 | 30 | 2,120 s | 20 passes × 53 s = 1,060 s |
-| 20,000 pages, 32 shards | 12 | 95 | 4,316 s | 63 passes × 34 s = 2,160 s |
+| 10 pages | 6 (3 per unit) | 3 | 180 s | 1 pass, at most 17 s |
+| 1,000 pages, unsharded | 6 | 30 | 8,600 s | 20 passes × 215 s = 4,300 s |
+| 20,000 pages, 32 shards | 12 | 95 | 14,400 s (ceiling) | 63 passes × 140 s = 8,820 s |
 
 **Blocks.** A stopped document is blocked with a reason code (`attempts` for launches, `vm-budget`, `no-progress`; the
 others are `figures-off`, `resume-off`, `stale`, `refused` and `unscanned`), with `resume_blocked_at`, a log line with its
