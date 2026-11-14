@@ -121,6 +121,7 @@ import { runLifecycle } from "../services/run-lifecycle.js";
 import { resolveMaterializationPolicy } from "../services/materialization-policy.js";
 import { inlineEstimate, jobMetaFor, jobStatusForMutation, recordJobMeta } from "../services/jobs.js";
 import { estimateDocumentReprocess } from "../services/work-estimates.js";
+import { denyEditOfVisibleProject, denyReprocessOfVisible, editorRequired } from "../lib/reprocess-access.js";
 import {
   commitIndexJobs,
   estimateFullIndex,
@@ -673,7 +674,7 @@ export const projectsRoutes = new Hono()
       const result = await applySettingsProposal({ actor: getRequestActor(c), projectId: String(c.req.param("projectId")), ...c.req.valid("json") });
       return c.json(result);
     } catch (error) {
-      if (error instanceof SettingsProposalError) return apiStatusError(c, error.status, error.message, { details: { category: error.category } });
+      if (error instanceof SettingsProposalError) return apiStatusError(c, error.status, error.message, { code: error.category, details: { category: error.category } });
       throw error;
     }
   })
@@ -854,7 +855,7 @@ export const projectsRoutes = new Hono()
       });
       return c.json(publicProjectView({ recommendationId: body.recommendationId, patch: result.recommendation.patch, pipeline: result.pipeline }, getRequestActor(c)));
     } catch (error) {
-      if (error instanceof IngestReportActionError) return apiStatusError(c, error.status, error.message);
+      if (error instanceof IngestReportActionError) return apiStatusError(c, error.status, error.message, { code: error.code });
       throw error;
     }
   })
@@ -866,7 +867,7 @@ export const projectsRoutes = new Hono()
     try {
       return c.json(await applyFigureResumeProposal({ actor: getRequestActor(c), projectId: c.req.param("projectId"), token: body.token }));
     } catch (error) {
-      if (error instanceof FigureResumeProposalError) return apiStatusError(c, error.status, error.message);
+      if (error instanceof FigureResumeProposalError) return apiStatusError(c, error.status, error.message, { code: error.category });
       throw error;
     }
   })
@@ -877,8 +878,9 @@ export const projectsRoutes = new Hono()
     if (actor.type === "apiKey" && !apiKeyCanUpdateContent(actor.apiKey)) return apiStatusError(c, 403, CONTENT_UPDATE_SCOPE_MESSAGE);
     const project = await getProject(c.req.param("projectId"), userId);
     if (!project || !project.orgId || (actor.type === "apiKey" && !apiKeyCanUseProject(actor.apiKey, project))) return apiErrorResponse(c, 404, "project_not_found", "Project not found");
-    const access = await getProjectAccess(project.id, userId);
-    if (!access || !canEditProject(access, userId)) return apiErrorResponse(c, 404, "project_not_found", "Project not found");
+    // Finishing figures spends credits: editors only (callerCanReprocess); a visible project is a 403, not a 404.
+    const deniedResume = await denyReprocessOfVisible(c, [{ orgId: project.orgId, projectId: project.id }]);
+    if (deniedResume) return deniedResume;
     const raw = c.req.query("limit");
     const limit = raw === undefined ? undefined : /^[1-9][0-9]{0,3}$/.test(raw) ? Number(raw) : null;
     if (limit === null) return apiStatusError(c, 400, "Invalid limit");
@@ -919,7 +921,7 @@ export const projectsRoutes = new Hono()
       });
       return c.json(result, 201);
     } catch (error) {
-      if (error instanceof IngestReportActionError) return apiStatusError(c, error.status, error.message);
+      if (error instanceof IngestReportActionError) return apiStatusError(c, error.status, error.message, { code: error.code });
       throw error;
     }
   })
@@ -1399,6 +1401,9 @@ export const projectsRoutes = new Hono()
       const actor = getRequestActor(c);
       const project = await getProject(String(c.req.param("projectId")), userId);
       if (!project) return apiErrorResponse(c, 404, "project_not_found", "Project not found");
+      // A settings change: editors only (search changes can queue a paid re-index). Visible to a non-editor: 403.
+      const deniedSearch = await denyEditOfVisibleProject(c, project);
+      if (deniedSearch) return deniedSearch;
       const settings = await updateProjectSearchSettingsForUser({
         projectId: project.id,
         userId,
@@ -1445,6 +1450,13 @@ export const projectsRoutes = new Hono()
         if (!current || !apiKeyCanUseProject(actor.apiKey, current)) {
           return apiErrorResponse(c, 404, "project_not_found", "Project not found");
         }
+      }
+      // Settings changes can queue a paid re-index: a project the caller sees but may not edit is a 403, not a 404
+      // (owner decision, council L3). Default-project membership alone does not qualify.
+      const visible = await getProject(projectId, userId);
+      if (visible) {
+        const editAccess = await getProjectAccess(projectId, userId);
+        if (!editAccess || !canEditProject(editAccess, userId)) return editorRequired(c);
       }
       const managed = refuseManagedPipelineFields(c, (await c.req.json().catch(() => null) as { pipeline?: unknown } | null)?.pipeline);
       if (managed) return managed;
@@ -1565,8 +1577,9 @@ export const projectsRoutes = new Hono()
         }
         if (!apiKeyCanUseProject(actor.apiKey, project)) return apiErrorResponse(c, 404, "project_not_found", "Project not found");
       }
-      const access = await getProjectAccess(project.id, userId);
-      if (!access || !canEditProject(access, userId)) return apiErrorResponse(c, 404, "project_not_found", "Project not found");
+      // Same rule as the PATCH it prices: a visible project the caller may not edit is 403 editor_required.
+      const deniedEstimate = await denyEditOfVisibleProject(c, project);
+      if (deniedEstimate) return deniedEstimate;
       const result = await estimateProjectChange({ projectId: project.id, userId, input: c.req.valid("json"), origin: runOriginOf(c) });
       if (!result) return apiErrorResponse(c, 404, "project_not_found", "Project not found");
       return c.json(result);
@@ -1583,7 +1596,8 @@ export const projectsRoutes = new Hono()
       const projectId = String(c.req.param("projectId"));
       const before = await getProjectSearchSettingsForUser(projectId, userId);
       const access = before ? await getProjectAccess(projectId, userId) : null;
-      if (!before || !access || !canEditProject(access, userId)) return apiErrorResponse(c, 404, "project_not_found", "Project not found");
+      if (!before || !access) return apiErrorResponse(c, 404, "project_not_found", "Project not found");
+      if (!canEditProject(access, userId)) return editorRequired(c);
       const after = mergeProjectSearchSettings(before, c.req.valid("json"));
       return c.json({ impact: analyzeSearchSettingsChange(before, after), estimate: null, billing: billingState() });
     },
@@ -1604,6 +1618,9 @@ export const projectsRoutes = new Hono()
         }
         if (!apiKeyCanUseProject(actor.apiKey, project)) return apiErrorResponse(c, 404, "project_not_found", "Project not found");
       }
+      // Switching the mode is a settings change: editors only, like the PATCH.
+      const deniedModeEstimate = await denyEditOfVisibleProject(c, project);
+      if (deniedModeEstimate) return deniedModeEstimate;
       return c.json(await estimateModeSwitch(project.id, c.req.valid("json").mode, c.req.valid("json").speedBoost === true));
     },
   )
@@ -1622,7 +1639,7 @@ export const projectsRoutes = new Hono()
         return apiErrorResponse(c, 403, "forbidden", "Forbidden");
       }
       const access = await getProjectAccess(project.id, userId);
-      if (!access || !canEditProject(access, userId)) return apiErrorResponse(c, 403, "forbidden", "Forbidden");
+      if (!access || !canEditProject(access, userId)) return editorRequired(c);
       const resolved = await resolveMaterializationPolicy({
         projectPipeline: project.pipeline,
         apiKey: actor.type === "apiKey" ? actor.apiKey : null,
@@ -1672,7 +1689,7 @@ export const projectsRoutes = new Hono()
         return apiErrorResponse(c, 403, "forbidden", "Forbidden");
       }
       const access = await getProjectAccess(project.id, userId);
-      if (!access || !canEditProject(access, userId)) return apiErrorResponse(c, 403, "forbidden", "Forbidden");
+      if (!access || !canEditProject(access, userId)) return editorRequired(c);
       const resolved = await resolveMaterializationPolicy({
         projectPipeline: project.pipeline,
         apiKey: actor.type === "apiKey" ? actor.apiKey : null,
@@ -1707,6 +1724,11 @@ export const projectsRoutes = new Hono()
       const project = await getProject(c.req.param("projectId"), userId);
       if (!project || (actor.type === "apiKey" && !apiKeyCanUseProject(actor.apiKey, project))) return apiErrorResponse(c, 404, "project_not_found", "Project not found");
       const body = c.req.valid("json");
+      // Every bulk action but an export changes documents: the same editor rule as the action itself (403, not an empty 200).
+      if (body.action !== "export-artifacts") {
+        const deniedBulkEstimate = await denyReprocessOfVisible(c, [{ orgId: project.orgId, projectId: project.id }]);
+        if (deniedBulkEstimate) return deniedBulkEstimate;
+      }
       const estimate = body.action === "reprocess"
         ? await estimateDocumentReprocess({ speedBoost: body.speedBoost === true, documentIds: body.documentIds, userId, projectId: project.id })
         : null;

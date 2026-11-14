@@ -75,3 +75,30 @@ export function searchEventCount(name: string): number {
 export function searchHitStatementTimeout(response: { timings?: Record<string, number> }): boolean {
   return Object.entries(response.timings ?? {}).some(([key, value]) => key.endsWith("Timeout") && value > 0);
 }
+
+export interface SearchTimingContext {
+  mode: string;
+  /** Sub-search of a decomposition, stepback or multi-hop parent. */
+  sub: boolean;
+  /** Admission group kind: an API batch, a chat agent turn, or none. */
+  group: "batch" | "chat" | "none";
+  streamed: boolean;
+  /** Admission lane and the main lane's load when the search arrived. */
+  lane?: string;
+  running?: number;
+  queued?: number;
+  /** Time spent waiting for the fast lane and for a main slot, in ms. */
+  fastWaitMs?: number;
+  requestId?: string | null;
+  traceId?: string | null;
+}
+
+/** Trailing ` key=value` fields of the `[search-timing]` line (no user content; unset fields are omitted). */
+export function formatSearchTimingContext(context: SearchTimingContext): string {
+  const fields: Array<[string, string | number | null | undefined]> = [
+    ["mode", context.mode], ["sub", context.sub ? 1 : 0], ["group", context.group], ["streamed", context.streamed ? 1 : 0],
+    ["lane", context.lane], ["inflight", context.running], ["waiting", context.queued], ["fastWait", context.fastWaitMs === undefined ? undefined : Math.round(context.fastWaitMs)],
+    ["request", context.requestId], ["trace", context.traceId],
+  ];
+  return fields.filter(([, value]) => value !== undefined && value !== null && value !== "").map(([key, value]) => ` ${key}=${value}`).join("");
+}

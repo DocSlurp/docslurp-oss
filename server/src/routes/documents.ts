@@ -4,7 +4,7 @@ import { isSpendBlockedError, spendBlockedResponse } from "../services/billing/s
 import { Hono } from "hono";
 import type { Context } from "hono";
 import { z } from "zod";
-import { documentTagsSchema, PARSE_SOURCE_RESCAN_MESSAGE, PARSE_SOURCE_RESCAN_REASON } from "@docslurp/shared";
+import { compilePipelinePlan, dataUnavailable, documentTagsSchema, parseStoredPipelineFeatures, UNKNOWN_INGEST_VERSION } from "@docslurp/shared";
 import { zValidator } from "@hono/zod-validator";
 
 import { getArtifactJson } from "../lib/artifacts.js";
@@ -19,11 +19,13 @@ import { requestDocumentFigureResume } from "../services/figure-resume.js";
 import {
   getCorrectionWorkbench,
   reindexDocumentCorrection,
-  saveDocumentCorrection
+  saveDocumentCorrection,
+  CorrectionForbiddenError
 } from "../services/document-review.js";
 import {
   addDocumentTags,
   bulkReprocessDocuments,
+  DocumentMutationForbiddenError,
   deleteDocument,
   deleteDocuments,
   exportDocumentArtifacts,
@@ -54,6 +56,9 @@ import { inlineEstimate, jobMetaFor, jobStatusForMutation, recordJobMeta } from 
 import { billingState } from "../services/config-change.js";
 import { estimateDocumentReprocess, singleProjectOf } from "../services/work-estimates.js";
 import { apiKeyCanUpdateContent, CONTENT_UPDATE_SCOPE_MESSAGE } from "../lib/content-update-access.js";
+import { callerCanReprocess, denyReprocessOfVisible, editorRequired } from "../lib/reprocess-access.js";
+import { sql } from "../db.js";
+import { withheldArtifactUrisFromMetadata } from "../services/pii-artifact-guard.js";
 import { apiKeyCanUseProject } from "../lib/api-key-project-scope.js";
 import { DocumentAssetQueryError, getDocumentAssetLedger } from "../services/document-assets.js";
 import { redactOperatorRun } from "../services/progress-snapshot.js";
@@ -90,6 +95,19 @@ async function requireApiKeyDocumentScope(c: Context, docId: string, userId: str
     return { response: apiStatusError(c, 404, "Document not found") };
   }
   return { viewer };
+}
+
+/** Whether the project's current pipeline runs structured extraction (a non-empty `outputSchema`; compilePipelinePlan). */
+async function projectExtractsStructured(projectId: string): Promise<boolean> {
+  const [row] = await sql<{ pipeline: unknown }[]>`select pipeline from projects where id = ${projectId}`;
+  if (!row) return false;
+  return compilePipelinePlan(parseStoredPipelineFeatures(row.pipeline, `project ${projectId}`)).stageOrder.includes("structured-extract");
+}
+
+/** Whether the document's PII policy withheld this exact structured result (metadata.pii.withheldArtifactUris). */
+async function structuredResultWithheld(documentId: string, uri: string): Promise<boolean> {
+  const [row] = await sql<{ metadata: unknown }[]>`select metadata from documents where id = ${documentId}`;
+  return !row || withheldArtifactUrisFromMetadata(row.metadata).has(uri);
 }
 
 /** Document changes a server key with `ingest` may make: delete, retag and bulk reprocess/retag/delete. */
@@ -150,9 +168,15 @@ export const documentsRoutes = new Hono()
         document => assertApiKeyProjectScope(c.get("apiKey"), document), quality);
       if (result.status === "busy") { c.header("Retry-After", "5"); return apiStatusError(c, 429, "Page image queue is busy"); }
       if (result.status === "missing") return apiStatusError(c, 404, "Document page not found");
-      if (result.status === "unavailable") return apiStatusError(c, 409, "Page image unavailable");
-      if (result.status === "rescan-required") {
-        return apiErrorResponse(c, 409, "quarantine_rescan_required", PARSE_SOURCE_RESCAN_MESSAGE, { category: PARSE_SOURCE_RESCAN_REASON, action: "reprocess" });
+      // An expected partial-data state, not an error: a typed 200 the client shows calmly (ingest-version.ts). The
+      // refusal itself is unchanged; a document without a current parse decision is never rendered.
+      if (result.status === "unavailable" || result.status === "rescan-required") {
+        const reason = result.status === "rescan-required" ? "needs-reprocess" : result.reason;
+        console.info(`[page-render] status=unavailable reason=${reason} metric=page_render_unavailable document=${result.document.id} page=${raw}`);
+        return c.json(dataUnavailable(reason, {
+          canEdit: await callerCanReprocess(c, result.document),
+          ingestVersion: result.document.ingestVersion ?? UNKNOWN_INGEST_VERSION,
+        }));
       }
       if (result.status === "pending") { c.header("Retry-After", "2"); return c.json(result, 202); }
       return c.json(result);
@@ -197,6 +221,9 @@ export const documentsRoutes = new Hono()
         return apiErrorResponse(c, 404, "not_found", "Document not found");
       }
     }
+    // Spends credits: editors only (callerCanReprocess); a document the caller sees but may not edit is a 403.
+    const deniedFullIndex = await denyReprocessOfVisible(c, [viewer.document]);
+    if (deniedFullIndex) return deniedFullIndex;
     const resolved = await resolveMaterializationPolicy({
       projectPipeline: project.pipeline,
       apiKey,
@@ -254,8 +281,8 @@ export const documentsRoutes = new Hono()
     if (!resolved.policy.allowFullIndexRequest) {
       return apiErrorResponse(c, 403, "forbidden", "This key or capability may not request a full index.", { category: "full_index_not_allowed" });
     }
-    const access = await getProjectAccess(project.id, userId);
-    if (!access || !canEditProject(access, userId)) return apiErrorResponse(c, 404, "not_found", "Document not found");
+    const deniedEstimate = await denyReprocessOfVisible(c, [viewer.document]);
+    if (deniedEstimate) return deniedEstimate;
     const estimate = await estimateFullIndex({ speedBoost: c.req.valid("json").speedBoost === true, projectId: project.id, orgId: project.orgId, documentIds: [viewer.document.id] });
     const quote = estimate
       ? await quoteStoredDocuments({ scope: { orgId: project.orgId, projectId: project.id, documentIds: [viewer.document.id] }, pipeline: project.pipeline, estimate, settings: { indexing: "full" } })
@@ -290,6 +317,7 @@ export const documentsRoutes = new Hono()
     try {
       deleted = await deleteDocument(c.req.param("docId"), userId);
     } catch (error) {
+      if (error instanceof DocumentMutationForbiddenError) return editorRequired(c);
       // Deleting a document whose run is still processing races the pipeline and
       // hits a foreign-key violation (the run's rows still reference it). Answer
       // 409 so clients retry; every other failure keeps its 500 contract.
@@ -327,8 +355,11 @@ export const documentsRoutes = new Hono()
     const userId = c.get("sessionUser").id;
     const scoped = await requireApiKeyDocumentScope(c, c.req.param("docId"), userId);
     if (scoped.response) return scoped.response;
-
-    return c.json(scoped.viewer);
+    const viewer = scoped.viewer;
+    // Whether this caller may reprocess or otherwise change the document (an editor session, or a server key with ingest
+    // whose user may edit): clients show Reprocess, Retry and the update badge only when it is true.
+    const canReprocess = await callerCanReprocess(c, viewer.document);
+    return c.json({ ...viewer, canReprocess, ingest: { ...viewer.ingest, canReprocess } });
   })
   // The asset ledger: every image Doppler reported (extracted, not extracted with why, unlinked) and the extraction level,
   // one keyset page at a time (`limit`, `after`, `pageFrom`, `pageTo`). Same gate as the document detail: the caller must
@@ -355,7 +386,7 @@ export const documentsRoutes = new Hono()
       ledger = await getDocumentAssetLedger({ orgId: owner.orgId, projectId: owner.projectId, documentId: docId }, {
         ...(limit === undefined ? {} : { limit }), ...(after === undefined ? {} : { after }),
         ...(pageFrom === undefined ? {} : { pageFrom }), ...(pageTo === undefined ? {} : { pageTo }),
-      });
+      }, { canEdit: await callerCanReprocess(c, owner) });
     } catch (error) {
       if (error instanceof DocumentAssetQueryError) return apiStatusError(c, 400, "Invalid asset page parameters");
       throw error;
@@ -372,8 +403,8 @@ export const documentsRoutes = new Hono()
     if (apiKey && !apiKeyCanUpdateContent(apiKey)) return apiStatusError(c, 403, CONTENT_UPDATE_SCOPE_MESSAGE);
     const [owner] = await listDocumentOwners([docId], userId);
     if (!owner || (apiKey && !apiKeyCanUseProject(apiKey, owner))) return apiStatusError(c, 404, "Document not found");
-    const access = await getProjectAccess(owner.projectId, userId);
-    if (!access || access.orgId !== owner.orgId || !canEditProject(access, userId)) return apiStatusError(c, 404, "Document not found");
+    const deniedResume = await denyReprocessOfVisible(c, [owner]);
+    if (deniedResume) return deniedResume;
     const status = await requestDocumentFigureResume({ orgId: owner.orgId, projectId: owner.projectId, documentId: docId });
     await appendAuditLog({
       orgId: owner.orgId, userId, projectId: owner.projectId, documentId: docId, apiKeyId: apiKey?.keyId ?? null,
@@ -388,14 +419,26 @@ export const documentsRoutes = new Hono()
     if (scoped.response) return scoped.response;
     const viewer = scoped.viewer;
     const structuredUri = viewer.stages.find((stage) => stage.stage_name === "structured-extract")?.artifact_uri;
+    const ingestVersion = viewer.document.ingestVersion ?? UNKNOWN_INGEST_VERSION;
+    // PII: a blocked document's fields, or a result its policy withheld, are never served, whatever the stage recorded.
+    if (viewer.document.status === "pii_blocked" || (structuredUri && await structuredResultWithheld(viewer.document.id, structuredUri))) {
+      return c.json({ structured: null, uri: null, availability: dataUnavailable("withheld", { ingestVersion }) });
+    }
     if (!structuredUri) {
-      return apiStatusError(c, 404, "No structured artifact for this document");
+      const finished = viewer.document.status === "completed" || viewer.document.status === "failed" || viewer.document.status === "cancelled";
+      // Nothing recorded and the project has no schema: the feature is off, and a reprocess would not produce fields.
+      const reason = !(await projectExtractsStructured(viewer.document.projectId)) ? "disabled"
+        : finished ? "not-extracted" : "processing";
+      const canEdit = reason === "not-extracted" && await callerCanReprocess(c, viewer.document);
+      return c.json({ structured: null, uri: null, availability: dataUnavailable(reason, { canEdit, ingestVersion }) });
     }
     try {
       const json = await getArtifactJson<Record<string, unknown>>(structuredUri);
       return c.json({ structured: json, uri: structuredUri });
-    } catch {
-      return apiStatusError(c, 500, "Unable to read structured artifact");
+    } catch (error) {
+      // Raw storage errors go to telemetry only; the caller gets a stable, retryable state.
+      console.warn(`[documents] status=structured-unreadable metric=structured_artifact_unreadable document=${viewer.document.id} error=${JSON.stringify(error instanceof Error ? error.message : String(error)).slice(0, 300)}`);
+      return c.json({ structured: null, uri: null, availability: dataUnavailable("temporarily-unavailable", { ingestVersion }) });
     }
   })
   .get("/:docId/versions", async (c) => {
@@ -440,14 +483,20 @@ export const documentsRoutes = new Hono()
   .put("/:docId/correction-workbench", zValidator("json", saveCorrectionSchema, validationHook), async (c) => {
     const userId = c.get("sessionUser").id;
     const body = c.req.valid("json");
-    const payload = await saveDocumentCorrection({
-      docId: c.req.param("docId"),
-      userId,
-      markdown: body.markdown,
-      structuredData: body.structuredData,
-      notes: body.notes,
-      tags: body.tags
-    });
+    let payload: Awaited<ReturnType<typeof saveDocumentCorrection>>;
+    try {
+      payload = await saveDocumentCorrection({
+        docId: c.req.param("docId"),
+        userId,
+        markdown: body.markdown,
+        structuredData: body.structuredData,
+        notes: body.notes,
+        tags: body.tags
+      });
+    } catch (error) {
+      if (error instanceof CorrectionForbiddenError) return editorRequired(c);
+      throw error;
+    }
 
     if (!payload) {
       return apiStatusError(c, 404, "Document not found");
@@ -475,10 +524,18 @@ export const documentsRoutes = new Hono()
   })
   .post("/:docId/correction-workbench/reindex", zValidator("json", reindexCorrectionSchema, validationHook), async (c) => {
     const userId = c.get("sessionUser").id;
-    const result = await reindexDocumentCorrection({
-      docId: c.req.param("docId"),
-      userId
-    });
+    // Re-embeds the document (paid): editors only. A document outside the caller's reach is the same 404 as a missing one.
+    const [correctionOwner] = await listDocumentOwners([c.req.param("docId")], userId);
+    if (!correctionOwner || (c.get("apiKey") && !apiKeyCanUseProject(c.get("apiKey"), correctionOwner))) return apiStatusError(c, 404, "Correction not found");
+    const deniedReindex = await denyReprocessOfVisible(c, [correctionOwner]);
+    if (deniedReindex) return deniedReindex;
+    let result: Awaited<ReturnType<typeof reindexDocumentCorrection>>;
+    try {
+      result = await reindexDocumentCorrection({ docId: c.req.param("docId"), userId });
+    } catch (error) {
+      if (error instanceof CorrectionForbiddenError) return editorRequired(c);
+      throw error;
+    }
 
     if (!result) {
       return apiStatusError(c, 404, "Correction not found");
@@ -507,7 +564,13 @@ export const documentsRoutes = new Hono()
     const body = c.req.valid("json");
     const denied = await denyOutOfScopeDocuments(c, [c.req.param("docId")], userId);
     if (denied) return denied;
-    const tags = await setDocumentTags(c.req.param("docId"), userId, body.tags);
+    let tags: Awaited<ReturnType<typeof setDocumentTags>>;
+    try {
+      tags = await setDocumentTags(c.req.param("docId"), userId, body.tags);
+    } catch (error) {
+      if (error instanceof DocumentMutationForbiddenError) return editorRequired(c);
+      throw error;
+    }
 
     if (tags === null) {
       return apiStatusError(c, 404, "Document not found");
@@ -536,8 +599,21 @@ export const documentsRoutes = new Hono()
     if (denied) return denied;
     const apiKeyId = c.get("apiKey")?.keyId ?? null;
 
+    // Document changes (owner decision, 2026-11-13): every listed document must be readable (else the same 404 as a
+    // missing one), and the caller must be an editor of each one's project (else 403, from the service), default project
+    // included. Viewers are read-only.
+    if (body.action === "apply-tags" || body.action === "remove-tags" || body.action === "delete") {
+      const ids = [...new Set(body.documentIds)];
+      if ((await listDocumentOwners(ids, userId)).length !== ids.length) return apiStatusError(c, 404, "Document not found");
+    }
+    const forbidden = (error: unknown) => {
+      if (error instanceof DocumentMutationForbiddenError) return editorRequired(c);
+      throw error;
+    };
+
     if (body.action === "apply-tags") {
-      const updated = await addDocumentTags(body.documentIds, userId, body.tags ?? []);
+      let updated: number;
+      try { updated = await addDocumentTags(body.documentIds, userId, body.tags ?? []); } catch (error) { return forbidden(error); }
       await appendAuditLog({
         userId,
         apiKeyId,
@@ -555,7 +631,8 @@ export const documentsRoutes = new Hono()
     }
 
     if (body.action === "remove-tags") {
-      const updated = await removeDocumentTags(body.documentIds, userId, body.tags ?? []);
+      let updated: number;
+      try { updated = await removeDocumentTags(body.documentIds, userId, body.tags ?? []); } catch (error) { return forbidden(error); }
       await appendAuditLog({
         userId,
         apiKeyId,
@@ -573,7 +650,8 @@ export const documentsRoutes = new Hono()
     }
 
     if (body.action === "delete") {
-      const deleted = await deleteDocuments(body.documentIds, userId);
+      let deleted: number;
+      try { deleted = await deleteDocuments(body.documentIds, userId); } catch (error) { return forbidden(error); }
       await appendAuditLog({
         userId,
         apiKeyId,
@@ -593,6 +671,15 @@ export const documentsRoutes = new Hono()
       const artifacts = await exportDocumentArtifacts(body.documentIds, userId);
       return c.json({ artifacts });
     }
+
+    // Reprocess spends credits: every document must be reachable (else the same 404 as a missing one) and the caller must
+    // be allowed to reprocess each one's project (else 403), before any estimate or run.
+    const reprocessIds = [...new Set(body.documentIds)];
+    const reprocessOwners = (await listDocumentOwners(reprocessIds, userId))
+      .filter((owner) => !apiKeyId || apiKeyCanUseProject(c.get("apiKey"), owner));
+    if (reprocessOwners.length !== reprocessIds.length) return apiStatusError(c, 404, "Document not found");
+    const deniedBulk = await denyReprocessOfVisible(c, reprocessOwners);
+    if (deniedBulk) return deniedBulk;
 
     // Same selection as the project-scoped twin when the documents live in one project.
     const bulkProjectId = await singleProjectOf(body.documentIds, userId);

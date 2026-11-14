@@ -89,3 +89,14 @@
 - [ ] Rename names that hide their meaning, updating `.env.example`, docs and any deploy config that sets them: `CHAT_INGEST_REPORT_NATURAL` (chat may answer "how did my files process?" with the ingest report), `MEDIA_CAPACITY_HOST_CLASS_APPROVED`, `DOCSLURP_DEFERRED_PROFILES`, `VISION_ORG_UNCHARGED_LIMIT_CENTS` and `SKIP_RUN_BUDGET_GUARDS_IN_DEV`. Pick names that say what the switch does.
 - [ ] Rename the `TEST_PRIVATE_GPU1_TOKEN`/`TEST_WORKER_GPU1_TOKEN` fixtures in `packages/shared/src/__tests__/private-endpoints.test.ts` so the names don't embed a machine number.
 - [ ] Drop the `PERPLEXITYAI_API_KEY` alias once production sets `PERPLEXITY_API_KEY` (app `TODO.md`, "Env and flag cleanup").
+
+## Search performance follow-ups (2026-11-13 tuning loop)
+
+- Cold first search: the first vector query on a table reads nearly the whole vector index (106 MB at 100,000 chunks) from object storage, 6-9 s in production. Warm the most recently searched projects at process start or resume, bounded, and check that the local LanceDB block cache survives restarts. Confirm with `lanceIndexCold` / `lanceIndexLoad` on `[search-timing]`.
+- Return early for a project with nothing to retrieve instead of embedding and running the legs over empty indexes.
+- Size `SEARCH_MAX_CONCURRENCY` from measured pool wait now that retrieval is LanceDB-bound; size the fast lane from measured setup time (`lane`, `fastWait`, `inflight`).
+- Keyword fan-out: the page leg opens one transaction per term (80 of 95 statements at 20 terms); run it once per fan-out.
+- Annotate relevance once per search in `session-runner.ts` and derive the non-vector lists from it.
+- Non-native path: one-statement project context read, and the cached availability read.
+- Stream follow-ups from #386: open only on a non-empty `search.hits`; no `seq` gap for a stalled reader; strategy-rate charge on failure when usage is known; gate fusion in the detached-billing e2e test; lean-batch failure charge test.
+- `[search-timing]`: `lanceWarm` now includes the index load when one starts; `service.version` is unset in telemetry, so latency cannot be split by deploy.

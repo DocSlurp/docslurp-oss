@@ -117,8 +117,8 @@ describe("POST /documents/:id/assets/resume", () => {
     const revoked = await keys.createApiKey("ua", "revoked", { orgId: "org-a", scopes: ["ingest"], keyType: "server" });
     await keys.revokeApiKey(revoked.key.id, "ua");
     expect((await post("doc-a", { authorization: `Bearer ${revoked.rawKey}` })).status).toBe(401);
-    // A member who cannot edit the project.
-    expect((await post("doc-a", { "x-test-user": "uv" })).status).toBe(404);
+    // A member who sees the document but cannot edit the project: 403, not a 404 (owner decision, council L3).
+    expect((await post("doc-a", { "x-test-user": "uv" })).status).toBe(403);
     expect(await queued("doc-a")).toBe(false);
   });
 
