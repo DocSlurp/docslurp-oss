@@ -121,6 +121,7 @@ import { runLifecycle } from "../services/run-lifecycle.js";
 import { resolveMaterializationPolicy } from "../services/materialization-policy.js";
 import { inlineEstimate, jobMetaFor, jobStatusForMutation, recordJobMeta } from "../services/jobs.js";
 import { estimateDocumentReprocess } from "../services/work-estimates.js";
+import { denyReprocessOfVisible } from "../lib/reprocess-access.js";
 import {
   commitIndexJobs,
   estimateFullIndex,
@@ -877,8 +878,9 @@ export const projectsRoutes = new Hono()
     if (actor.type === "apiKey" && !apiKeyCanUpdateContent(actor.apiKey)) return apiStatusError(c, 403, CONTENT_UPDATE_SCOPE_MESSAGE);
     const project = await getProject(c.req.param("projectId"), userId);
     if (!project || !project.orgId || (actor.type === "apiKey" && !apiKeyCanUseProject(actor.apiKey, project))) return apiErrorResponse(c, 404, "project_not_found", "Project not found");
-    const access = await getProjectAccess(project.id, userId);
-    if (!access || !canEditProject(access, userId)) return apiErrorResponse(c, 404, "project_not_found", "Project not found");
+    // Finishing figures spends credits: editors only (callerCanReprocess); a visible project is a 403, not a 404.
+    const deniedResume = await denyReprocessOfVisible(c, [{ orgId: project.orgId, projectId: project.id }]);
+    if (deniedResume) return deniedResume;
     const raw = c.req.query("limit");
     const limit = raw === undefined ? undefined : /^[1-9][0-9]{0,3}$/.test(raw) ? Number(raw) : null;
     if (limit === null) return apiStatusError(c, 400, "Invalid limit");
@@ -1445,6 +1447,13 @@ export const projectsRoutes = new Hono()
         if (!current || !apiKeyCanUseProject(actor.apiKey, current)) {
           return apiErrorResponse(c, 404, "project_not_found", "Project not found");
         }
+      }
+      // Settings changes can queue a paid re-index: a project the caller sees but may not edit is a 403, not a 404
+      // (owner decision, council L3). Default-project membership alone does not qualify.
+      const visible = await getProject(projectId, userId);
+      if (visible) {
+        const editAccess = await getProjectAccess(projectId, userId);
+        if (!editAccess || !canEditProject(editAccess, userId)) return apiErrorResponse(c, 403, "forbidden", "Changing project settings needs edit access to the project");
       }
       const managed = refuseManagedPipelineFields(c, (await c.req.json().catch(() => null) as { pipeline?: unknown } | null)?.pipeline);
       if (managed) return managed;

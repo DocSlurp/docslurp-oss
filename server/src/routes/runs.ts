@@ -44,6 +44,7 @@ async function customerRun<R extends { stats?: unknown; pipeline?: unknown }>(c:
   return await isPlatformAdminActor(getRequestActor(c)) ? run : redactOperatorRun(run);
 }
 import { acceptApiKeys } from "../lib/route-auth.js";
+import { denyReprocessOfVisible } from "../lib/reprocess-access.js";
 import { apiErrorResponse, apiStatusError } from "../lib/api-error.js";
 import { parseListLimit } from "../lib/list-cursor.js";
 import { inlineEstimate, jobMetaFor, jobStatusForMutation, recordJobMeta } from "../services/jobs.js";
@@ -61,6 +62,17 @@ async function denyRunContentUpdate(c: Context, runId: string): Promise<Response
   const run = await getRun(runId, actor.userId, { cost: false });
   if (!run || !await loadActorScopedProject(run.projectId, actor)) return apiStatusError(c, 404, "Run not found");
   return null;
+}
+
+/**
+ * Run reprocess and retry spend credits: a run outside the caller's reach is the same 404 as a missing one; a run the
+ * caller sees but may not reprocess (callerCanReprocess: editors, or a key with ingest) is 403.
+ */
+async function denyRunReprocess(c: Context, runId: string): Promise<Response | null> {
+  const actor = getRequestActor(c);
+  const run = await getRun(runId, actor.userId, { cost: false });
+  if (!run || !run.orgId || (actor.type === "apiKey" && !await loadActorScopedProject(run.projectId, actor))) return apiStatusError(c, 404, "Run not found");
+  return denyReprocessOfVisible(c, [{ orgId: run.orgId, projectId: run.projectId }]);
 }
 
 /**
@@ -350,7 +362,7 @@ export const runsRoutes = new Hono()
   .post("/:runId/reprocess", zValidator("json", reprocessRunSchema, validationHook), async (c) => {
     const userId = c.get("sessionUser").id;
     const body = c.req.valid("json");
-    const denied = await denyRunContentUpdate(c, c.req.param("runId"));
+    const denied = await denyRunContentUpdate(c, c.req.param("runId")) ?? await denyRunReprocess(c, c.req.param("runId"));
     if (denied) return denied;
     const actor = getRequestActor(c);
     const inline = await inlineEstimate(
@@ -407,6 +419,8 @@ export const runsRoutes = new Hono()
   })
   .post("/:runId/retry", async (c) => {
     const userId = c.get("sessionUser").id;
+    const deniedRetry = await denyRunContentUpdate(c, c.req.param("runId")) ?? await denyRunReprocess(c, c.req.param("runId"));
+    if (deniedRetry) return deniedRetry;
     const retried = await retryRun(c.req.param("runId"), userId);
 
     if (!retried) {

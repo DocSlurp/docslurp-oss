@@ -54,7 +54,7 @@ import { inlineEstimate, jobMetaFor, jobStatusForMutation, recordJobMeta } from 
 import { billingState } from "../services/config-change.js";
 import { estimateDocumentReprocess, singleProjectOf } from "../services/work-estimates.js";
 import { apiKeyCanUpdateContent, CONTENT_UPDATE_SCOPE_MESSAGE } from "../lib/content-update-access.js";
-import { callerCanReprocess } from "../lib/reprocess-access.js";
+import { callerCanReprocess, denyReprocessOfVisible } from "../lib/reprocess-access.js";
 import { sql } from "../db.js";
 import { withheldArtifactUrisFromMetadata } from "../services/pii-artifact-guard.js";
 import { apiKeyCanUseProject } from "../lib/api-key-project-scope.js";
@@ -219,6 +219,9 @@ export const documentsRoutes = new Hono()
         return apiErrorResponse(c, 404, "not_found", "Document not found");
       }
     }
+    // Spends credits: editors only (callerCanReprocess); a document the caller sees but may not edit is a 403.
+    const deniedFullIndex = await denyReprocessOfVisible(c, [viewer.document]);
+    if (deniedFullIndex) return deniedFullIndex;
     const resolved = await resolveMaterializationPolicy({
       projectPipeline: project.pipeline,
       apiKey,
@@ -276,8 +279,8 @@ export const documentsRoutes = new Hono()
     if (!resolved.policy.allowFullIndexRequest) {
       return apiErrorResponse(c, 403, "forbidden", "This key or capability may not request a full index.", { category: "full_index_not_allowed" });
     }
-    const access = await getProjectAccess(project.id, userId);
-    if (!access || !canEditProject(access, userId)) return apiErrorResponse(c, 404, "not_found", "Document not found");
+    const deniedEstimate = await denyReprocessOfVisible(c, [viewer.document]);
+    if (deniedEstimate) return deniedEstimate;
     const estimate = await estimateFullIndex({ speedBoost: c.req.valid("json").speedBoost === true, projectId: project.id, orgId: project.orgId, documentIds: [viewer.document.id] });
     const quote = estimate
       ? await quoteStoredDocuments({ scope: { orgId: project.orgId, projectId: project.id, documentIds: [viewer.document.id] }, pipeline: project.pipeline, estimate, settings: { indexing: "full" } })
@@ -396,8 +399,8 @@ export const documentsRoutes = new Hono()
     if (apiKey && !apiKeyCanUpdateContent(apiKey)) return apiStatusError(c, 403, CONTENT_UPDATE_SCOPE_MESSAGE);
     const [owner] = await listDocumentOwners([docId], userId);
     if (!owner || (apiKey && !apiKeyCanUseProject(apiKey, owner))) return apiStatusError(c, 404, "Document not found");
-    const access = await getProjectAccess(owner.projectId, userId);
-    if (!access || access.orgId !== owner.orgId || !canEditProject(access, userId)) return apiStatusError(c, 404, "Document not found");
+    const deniedResume = await denyReprocessOfVisible(c, [owner]);
+    if (deniedResume) return deniedResume;
     const status = await requestDocumentFigureResume({ orgId: owner.orgId, projectId: owner.projectId, documentId: docId });
     await appendAuditLog({
       orgId: owner.orgId, userId, projectId: owner.projectId, documentId: docId, apiKeyId: apiKey?.keyId ?? null,
@@ -511,6 +514,11 @@ export const documentsRoutes = new Hono()
   })
   .post("/:docId/correction-workbench/reindex", zValidator("json", reindexCorrectionSchema, validationHook), async (c) => {
     const userId = c.get("sessionUser").id;
+    // Re-embeds the document (paid): editors only. A document outside the caller's reach is the same 404 as a missing one.
+    const [correctionOwner] = await listDocumentOwners([c.req.param("docId")], userId);
+    if (!correctionOwner || (c.get("apiKey") && !apiKeyCanUseProject(c.get("apiKey"), correctionOwner))) return apiStatusError(c, 404, "Correction not found");
+    const deniedReindex = await denyReprocessOfVisible(c, [correctionOwner]);
+    if (deniedReindex) return deniedReindex;
     const result = await reindexDocumentCorrection({
       docId: c.req.param("docId"),
       userId
@@ -629,6 +637,15 @@ export const documentsRoutes = new Hono()
       const artifacts = await exportDocumentArtifacts(body.documentIds, userId);
       return c.json({ artifacts });
     }
+
+    // Reprocess spends credits: every document must be reachable (else the same 404 as a missing one) and the caller must
+    // be allowed to reprocess each one's project (else 403), before any estimate or run.
+    const reprocessIds = [...new Set(body.documentIds)];
+    const reprocessOwners = (await listDocumentOwners(reprocessIds, userId))
+      .filter((owner) => !apiKeyId || apiKeyCanUseProject(c.get("apiKey"), owner));
+    if (reprocessOwners.length !== reprocessIds.length) return apiStatusError(c, 404, "Document not found");
+    const deniedBulk = await denyReprocessOfVisible(c, reprocessOwners);
+    if (deniedBulk) return deniedBulk;
 
     // Same selection as the project-scoped twin when the documents live in one project.
     const bulkProjectId = await singleProjectOf(body.documentIds, userId);

@@ -47,6 +47,7 @@ import {
 } from "./run-processing-preview.js";
 import {
   canContributeToProject,
+  canEditProject,
   getProjectAccess,
   listAccessibleProjectIds,
 } from "./organizations.js";
@@ -373,7 +374,8 @@ export async function reprocessRun(
   const original = await getRun(runId, userId);
   if (!original) return null;
   const access = await getProjectAccess(original.projectId, userId);
-  if (!access || !canContributeToProject(access, userId)) {
+  // Spends credits: editors only (canEditProject), not default-project contributors (council L3).
+  if (!access || !canEditProject(access, userId)) {
     throw new Error("Forbidden");
   }
   // Access first (a caller with no access never learns what the deployment offers), then the tier.
@@ -507,7 +509,8 @@ export async function retryRun(
     return null;
   }
   const access = await getProjectAccess(run.projectId, userId);
-  if (!access || !canContributeToProject(access, userId)) {
+  // Spends credits: editors only (canEditProject), not default-project contributors (council L3).
+  if (!access || !canEditProject(access, userId)) {
     throw new Error("Forbidden");
   }
 

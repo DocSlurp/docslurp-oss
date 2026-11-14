@@ -997,7 +997,10 @@ export function createRunCreation(deps: RunCreationDeps) {
     // With the stored pipeline: the project's chart tier is the ceiling checked below, and the cap on a replayed tier.
     const access = await getProjectAccessWithPipeline(request.projectId, request.userId);
     if (!access) throw new Error("Project not found");
-    if (!canContributeToProject(access, request.userId)) throw new Error("Forbidden");
+    // New files: any contributor (the default project admits every org member). New versions of existing documents spend
+    // credits on content the caller did not upload: editors only (canEditProject, council L3).
+    const reprocessing = request.sources.kind === "versionsOf";
+    if (!(reprocessing ? canEditProject(access, request.userId) : canContributeToProject(access, request.userId))) throw new Error("Forbidden");
     const projectChartExport = upgradeStoredChartExport((access.pipeline as { chartExport?: unknown } | null | undefined)?.chartExport) as { tier?: ChartExportTier } | null;
     // The chart export tier is resolved here, once per run, and stored on the run: a retry or resume reads it back, and
     // the worker never re-resolves it. A new run: request override, project tier, origin default. A replay (reprocess,

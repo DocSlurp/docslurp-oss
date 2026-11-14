@@ -22,7 +22,7 @@ import { fileUrlForArtifact } from "../lib/file-urls.js";
 import { documentWithholdsUri, withheldArtifactUrisFromMetadata } from "./pii-artifact-guard.js";
 import { andSqlFragments, type SqlFragment } from "../lib/sql-fragments.js";
 import { decodeListCursor, encodeListCursor } from "../lib/list-cursor.js";
-import { getProjectAccess, listAccessibleProjectIds, listEditableProjectIds } from "./organizations.js";
+import { getProjectAccess, listAccessibleProjectIds, listEditableProjectIds, listReprocessableProjectIds } from "./organizations.js";
 import { runCreation } from "./run-creation.js";
 import {
   documentUsageTotals,
@@ -1618,7 +1618,8 @@ export async function bulkReprocessDocuments(
     return result;
   }
 
-  const projectIds = await listEditableProjectIds(userId);
+  // Reprocess spends credits: canEditProject (listReprocessableProjectIds), never the default-project contribute rule.
+  const projectIds = await listReprocessableProjectIds(userId);
   if (projectIds.length === 0) {
     return result;
   }
