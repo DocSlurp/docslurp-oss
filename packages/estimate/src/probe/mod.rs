@@ -140,6 +140,11 @@ pub struct PdfProfile {
     /// unknown): a page with no text-layer word is OCR'd (billed when something is drawn on it), a page whose ruled grids
     /// are unknown or make it table-heavy takes the table path, the rest keep their text layer.
     pub route_pages: [u32; cost_route::PAGE_COST_ROUTES],
+    /// Bounded sampled observations, independent of export settings. Semantic charts are not observable.
+    pub observed_vector_paths: u64,
+    pub observed_image_placements: u32,
+    pub lexical_pages: [u32; 3],
+    pub chart_candidate_unknown_pages: u32,
 }
 
 /// Facts about an Office or EPUB package.

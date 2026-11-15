@@ -55,7 +55,7 @@ pub fn page_cost_route(tables: &PageTableRouting, facts: &PageCostFacts<'_>) -> 
         return if facts.images.is_none() || facts.vector_paths.is_none() { PageCostRoute::Unknown } else { PageCostRoute::OcrBlank };
     }
     match facts.grids {
-        None => PageCostRoute::Table,
+        None => PageCostRoute::Unknown,
         Some(grids) if table_heavy(tables, grids, facts.grid_coverage) => PageCostRoute::Table,
         Some(_) => PageCostRoute::Text,
     }

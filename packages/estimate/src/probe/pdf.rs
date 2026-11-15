@@ -176,6 +176,10 @@ fn probe_document(rules: &Rules, document: &Document, file_bytes: usize, mut res
             let bpp = [0.0, 0.05, 0.2, 0.5, 1.0].iter().rposition(|bound| image.bytes_per_pixel >= *bound).unwrap_or(0);
             profile.image_bytes_per_pixel[bpp] = profile.image_bytes_per_pixel[bpp].saturating_add(1);
         }
+        profile.observed_vector_paths = profile.observed_vector_paths.saturating_add(reading.path_operations as u64);
+        profile.observed_image_placements = profile.observed_image_placements.saturating_add(reading.images.len() as u32);
+        profile.lexical_pages[match reading.lexical { Some(true) => 0, Some(false) => 1, None => 2 }] += 1;
+        profile.chart_candidate_unknown_pages += 1;
         let facts = page_layout(rules, reading, &repeated);
         profile.glyphs_over_images = profile.glyphs_over_images.saturating_add(count(facts.glyphs_over_images));
         if facts.glyphs_over_images >= 20.0 {
@@ -193,7 +197,7 @@ fn probe_document(rules: &Rules, document: &Document, file_bytes: usize, mut res
         // `pageCostRoute`: what production does with the page (scan-fill OCR, table path or text layer).
         let grids: Option<Vec<(u32, Option<f64>)>> = facts.grids.as_ref().map(|grids| grids.iter().map(|grid| (grid.0, Some(grid.2))).collect());
         let route = super::cost_route::page_cost_route(&rules.page_table_routing, &super::cost_route::PageCostFacts {
-            words: (!reading.exhausted).then_some(reading.words),
+            words: reading.lexical.map(|present| if present { reading.words.max(1.0) } else { 0.0 }),
             images: (!reading.exhausted).then_some(reading.images.len() as f64),
             vector_paths: (!reading.exhausted).then_some(reading.path_operations as f64),
             grids: grids.as_deref(),
@@ -394,6 +398,7 @@ fn has_name(bytes: &[u8], name: &[u8]) -> bool {
 #[derive(Default)]
 struct WordCounter {
     runs: f64,
+    encoding_unknown: bool,
     characters: f64,
     run_length: usize,
     /// Glyphs shown since the last text move, to tell a next-character move from a word gap.
@@ -412,6 +417,7 @@ impl WordCounter {
         if bytes.is_empty() {
             return;
         }
+        self.encoding_unknown |= bytes.iter().any(|byte| !byte.is_ascii() || *byte == 0);
         let zero_high_bytes = bytes.iter().step_by(2).filter(|byte| **byte == 0).count();
         if bytes.len() >= 4 && zero_high_bytes * 2 >= bytes.len() / 2 {
             let glyphs = bytes.len() as f64 / 2.0;
@@ -709,6 +715,7 @@ fn lookup_xobject<'a>(document: &'a Document, resources: &[&'a Dictionary], name
 
 struct PageReading {
     words: f64,
+    lexical: Option<bool>,
     path_operations: usize,
     images: Vec<ImageUse>,
     exhausted: bool,
@@ -762,7 +769,7 @@ fn classify_page(routing: &PageRasterRouting, document: &Document, page_id: Obje
         stats.text.estimated = true;
     }
     let (width, height) = ((visible[2] - visible[0]).max(0.0), (visible[3] - visible[1]).max(0.0));
-    Some(PageReading { words: stats.words.words(), path_operations: stats.path_operations, images: stats.images, exhausted: stats.exhausted, unmapped_text: stats.unmapped_text, area, width, height, text: stats.text, words_at: stats.words_at, words_overflow: stats.words_overflow, rules: stats.rules, display_visible: display.visible })
+    Some(PageReading { lexical: if stats.exhausted || stats.unmapped_text || stats.words.encoding_unknown { None } else { Some(stats.words.characters > 0.0) }, words: stats.words.words(), path_operations: stats.path_operations, images: stats.images, exhausted: stats.exhausted, unmapped_text: stats.unmapped_text, area, width, height, text: stats.text, words_at: stats.words_at, words_overflow: stats.words_overflow, rules: stats.rules, display_visible: display.visible })
 }
 
 /// The worker's drawn-content rule (`classify-route.ts`): a document with no extractable text anywhere whose bytes,
@@ -1301,6 +1308,19 @@ mod tests {
     }
 
     #[test]
+    fn lexical_presence_is_not_whitespace_word_count() {
+        let mut punctuation = WordCounter::default();
+        punctuation.show(b"---");
+        assert_eq!(punctuation.characters, 0.0);
+        let mut digit = WordCounter::default();
+        digit.show(b"7");
+        assert_eq!(digit.characters, 1.0);
+        let mut encoded = WordCounter::default();
+        encoded.show(&[0, 7, 0, 8]);
+        assert!(encoded.encoding_unknown);
+    }
+
+    #[test]
     fn finds_names_with_escapes_and_ignores_prefixes() {
         assert!(has_name(b"<< /Encrypt 5 0 R >>", b"Encrypt"));
         assert!(has_name(b"<</Encr#79pt 5 0 R>>", b"Encrypt"));
@@ -1349,6 +1369,7 @@ mod tests {
         let id = |number: u32| (number, 0);
         let page = |ids: &[u32]| PageReading {
             words: 0.0,
+            lexical: Some(false),
             path_operations: 0,
             images: ids.iter().map(|number| ImageUse::plain(Some(id(*number)), 0.9)).collect(),
             exhausted: false,

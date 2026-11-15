@@ -143,6 +143,10 @@ export const pdfProfileSchema = z.strictObject({
    * table, text, unknown): what production does with the page. Absent from profilers before it.
    */
   routePages: z.array(count).length(5).optional(),
+  observedVectorPaths: z.number().int().nonnegative().max(10 ** 12).optional(),
+  observedImagePlacements: count.optional(),
+  lexicalPages: z.array(count).length(3).optional(),
+  chartCandidateUnknownPages: count.optional(),
 });
 export type PdfProfile = z.infer<typeof pdfProfileSchema>;
 

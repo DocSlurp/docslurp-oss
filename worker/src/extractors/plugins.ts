@@ -1,3 +1,4 @@
+import { parsePageCostEvidence } from "../lib/page-cost-evidence.js";
 /*
  * Extractor plugins: optional providers a deployment loads by configuration, never by import.
  *
@@ -359,6 +360,8 @@ export function pageReaderUsageOf(error: unknown): UsageEvent[] {
 export interface ExtractorPlugin {
   apiVersion: typeof EXTRACTOR_PLUGIN_API_VERSION;
   name: string;
+  /** Count-only observations from already validated results; never source bytes. */
+  costEvidence?: (facts: unknown, text: ReadonlyMap<number, string>) => ReadonlyMap<number, unknown>;
   sandboxedPdf?: SandboxedPdfExtractorProvider;
   imageOrientation?: ImageOrientationProvider;
   sandboxedOcr?: SandboxedOcrProvider;
@@ -366,6 +369,20 @@ export interface ExtractorPlugin {
 }
 
 /** Host values a plugin uses at runtime. Plugins import only types from the worker. */
+export function providerCostEvidence(facts: unknown, text: ReadonlyMap<number, string>, pageCount: number): Map<number, unknown> {
+  const out = new Map<number, unknown>();
+  if (!facts || !Number.isSafeInteger(pageCount) || pageCount < 1 || pageCount > 100_000) return out;
+  for (const plugin of plugins) {
+    if (!plugin.costEvidence) continue;
+    try {
+      for (const [page, value] of plugin.costEvidence(facts, text)) {
+        if (Number.isSafeInteger(page) && page >= 1 && page <= pageCount) out.set(page, parsePageCostEvidence(value));
+      }
+    } catch { /* A refused observation stays unknown; extraction is independent. */ }
+  }
+  return out;
+}
+
 export interface ExtractorPluginHost {
   apiVersion: typeof EXTRACTOR_PLUGIN_API_VERSION;
   SandboxRunError: typeof SandboxRunError;

@@ -62,7 +62,7 @@ export function pageCostRoute(facts: PageCostFacts, tables: typeof PAGE_TABLE_RO
     if ((facts.images ?? 0) > 0 || (facts.vectorPaths ?? 0) > 0) return "ocr-read";
     return facts.images === null || facts.vectorPaths === null ? "unknown" : "ocr-blank";
   }
-  if (facts.grids === null) return "table";
+  if (facts.grids === null) return "unknown";
   return isTableHeavy(facts.grids, facts.gridCoverage, tables) ? "table" : "text";
 }
 

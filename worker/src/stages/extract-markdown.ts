@@ -1,3 +1,4 @@
+import { providerCostEvidence } from "../extractors/plugins.js";
 import { FIGURE_CHARTS_SCHEMA, FIGURE_CHARTS_SLOT, figureChartsHaveWork, figureChartsObjectName, figureChartsRequest, takeFigureCharts, validateFigureCharts, type TakenFigureCharts } from "../chart-export/figure-charts.js";
 import { createHash } from "node:crypto";
 import { committedDocumentUris, countDeferredPdfPages, firstPassServesDocument, primeFirstPassResults, readMarkdownSlotBytes } from "../pipeline/first-pass.js";
@@ -1258,7 +1259,7 @@ export class ExtractMarkdownStage implements Stage {
                       ...(winningCandidate.layoutGrids ? { layoutGrids: winningCandidate.layoutGrids } : {}),
                       // What the document holds that a setting can change the cost of, counted from its page facts whatever this
                       // run's settings skipped (chart export, figures, walker, scan copy): what a quote for other settings reads.
-                      ...(isPdf ? { costFacts: documentCostStats(winningCandidate.layoutFacts, document.pageCount) } : {}),
+                      ...(isPdf ? { costFacts: documentCostStats(winningCandidate.layoutFacts, document.pageCount, providerCostEvidence(winningCandidate.pageFacts, new Map((splitTextIntoPagesStrict(winningText, document.pageCount) ?? []).map((text, index) => [index + 1, text])), document.pageCount)) } : {}),
                       ...ocrReadStats(ocrReadPages, winningCandidate.ocrPages ? "extractor-reported" : "inferred", scanFill?.pages ?? [], ocrFailedPages(state.artifactLedger, document.id).size),
                     },
                   };
