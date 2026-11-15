@@ -1661,6 +1661,7 @@ export class Store {
         set status = 'processing',
             attempts = document_run_stage_states.attempts + 1,
             error = null,
+            failure = null,
             started_at = now(),
             completed_at = null,
             updated_at = now()
