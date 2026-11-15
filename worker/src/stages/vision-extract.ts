@@ -886,11 +886,11 @@ export class VisionExtractStage implements Stage {
       ? { ...decision, rung: "fast" as const, reason: `${decision.reason};no-ocr-reader` }
       : decision);
     const allowed = new Set(finalDecisions.filter((decision) => decision.rung !== "fast").map((decision) => decision.pageNumber));
-    const loweredRead = lowered.filter((page) => !unread.has(page));
+    const loweredRead = new Set(lowered.filter((page) => !unread.has(page)));
     const nextHints: LegacyPageHints = {
       ...hints,
       ...(vmOcr ? { vmOcrPages: new Set([...(hints.vmOcrPages ?? []), ...loweredRead]) } : {}),
-      ...(hints.figurePages ? { figurePages: new Set([...hints.figurePages].filter((page) => !loweredRead.includes(page))) } : {}),
+      ...(hints.figurePages ? { figurePages: new Set([...hints.figurePages].filter((page) => !loweredRead.has(page))) } : {}),
     };
     const finalPlan = { ...plan, decisions: finalDecisions };
     const summary = { ...ladderPlanSummary(finalPlan, policy.ladder), loweredReader: vmOcr ? "ocr-vm" : reader ? "page-reader" : transcription ? "vision-transcription" : "none" };
