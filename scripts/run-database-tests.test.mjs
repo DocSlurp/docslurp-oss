@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import path from "node:path";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
@@ -78,7 +79,7 @@ test("server/db/tests scripts are scanned but never run directly", () => {
 });
 
 test("discovers JavaScript and TSX package tests", () => {
-  const dir = mkdtempSync(path.join(process.env.TMPDIR || "/home/dan/tmp/agents", "database-discovery-"));
+  const dir = mkdtempSync(path.join(tmpdir(), "database-discovery-"));
   try {
     for (const name of ["server/src", "worker/src", "packages/sample/src", "server/db/tests"]) mkdirSync(path.join(dir, name), { recursive: true });
     for (const ext of ["js", "tsx", "jsx", "cjs", "mts"]) writeFileSync(path.join(dir, `packages/sample/src/db.test.${ext}`), "process.env.TEST_DATABASE_URL");
