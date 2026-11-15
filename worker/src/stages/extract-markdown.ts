@@ -719,10 +719,11 @@ export class ExtractMarkdownStage implements Stage {
                     winningText,
                     document.pageCount,
                   ).plausibilityScore;
-                  let heatmapPages = buildPerPageHeatmap(
-                    winningText,
-                    document.pageCount,
-                    strategy,
+                  // Critique is opt-in: defer its input heatmap until its guards pass. Reuse it
+                  // for publication only if neither critique nor normalization changes the text.
+                  let heatmapPages: PageHeatmapEntry[] | undefined;
+                  const getHeatmap = () => heatmapPages ??= buildPerPageHeatmap(
+                    winningText, document.pageCount, strategy,
                   );
                   const heatmapKey = `${runArtifactRoot(state.run, document.userId)}/heatmap/${document.id}.json`;
                   const critique = await this.runSelfCritique({
@@ -732,7 +733,7 @@ export class ExtractMarkdownStage implements Stage {
                     strategy,
                     winningText,
                     winningTextUri: scanFill?.textUri ?? winningCandidate.textUri,
-                    heatmapPages,
+                    heatmapPages: getHeatmap,
                     signal,
                   });
                   if (critique && critique.acceptedPages.length > 0) {
@@ -742,11 +743,7 @@ export class ExtractMarkdownStage implements Stage {
                       winningText,
                       document.pageCount,
                     ).plausibilityScore;
-                    heatmapPages = buildPerPageHeatmap(
-                      winningText,
-                      document.pageCount,
-                      strategy,
-                    );
+                    heatmapPages = undefined;
                     partialArtifactUri = critique.correctedTextUri ?? partialArtifactUri;
                     console.log(
                       `[extract-debug] document=${document.id} critiqueAccepted=${critique.acceptedPages.length} ` +
@@ -764,15 +761,12 @@ export class ExtractMarkdownStage implements Stage {
                       winningText,
                       document.pageCount,
                     ).plausibilityScore;
-                    heatmapPages = buildPerPageHeatmap(
-                      winningText,
-                      document.pageCount,
-                      strategy,
-                    );
+                    heatmapPages = undefined;
                     console.log(
                       `[extract-debug] document=${document.id} normalizedMarkdown=true preserveTables=${state.run.pipeline.preserveTables}`,
                     );
                   }
+                  heatmapPages = getHeatmap();
                   const nativePdfMode = resolveNativePdfMode();
                   const nativeEngineState = isPdf && winningCandidate.label !== VM_PDF_EXTRACTOR_ID ? await nativePdfEngineState() : null;
                   const nativePdfStats: NativePdfStageStats | null = nativeEngineState
@@ -2347,7 +2341,7 @@ export class ExtractMarkdownStage implements Stage {
     strategy: string;
     winningText: string;
     winningTextUri: string;
-    heatmapPages: PageHeatmapEntry[];
+    heatmapPages: () => PageHeatmapEntry[];
     signal?: AbortSignal;
   }): Promise<SelfCritiqueResult | null> {
     const maxCostCents = Number.parseFloat(
@@ -2375,7 +2369,7 @@ export class ExtractMarkdownStage implements Stage {
     // Pages whose OCR failed in its boundary stay failed: critique never re-reads them with a hosted model.
     const ocrFailed = ocrFailedPages(args.state.artifactLedger, args.document.id);
     const critiquePages = budgetCritiquePages(
-      selectCritiquePages(args.heatmapPages).filter((page) => !ocrFailed.has(page)),
+      selectCritiquePages(args.heatmapPages()).filter((page) => !ocrFailed.has(page)),
       maxCostCents,
       maxCostPerPageCents,
     );

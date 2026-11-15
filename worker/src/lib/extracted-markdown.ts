@@ -1,3 +1,4 @@
+import { countWhitespaceAndWords } from "./text-counts.js";
 import { assessTextLayer, pageWordCount } from "@docslurp/shared";
 import { stripLeadingFrontmatter } from "./markdown-structure.js";
 
@@ -132,7 +133,7 @@ export function scoreExtractionPlausibility(
   }
   const wordCount = pageWordCount(sanitized);
   const charCount = sanitized.length;
-  const whitespaceCount = (sanitized.match(/\s/g) ?? []).length;
+  const { whitespaceCount, words } = countWhitespaceAndWords(sanitized);
   const windows = charCount <= PLAUSIBILITY_WINDOW_CHARS * 3
     ? [sanitized]
     : [
@@ -142,7 +143,6 @@ export function scoreExtractionPlausibility(
       ];
   const readability = windows.reduce((sum, window) => sum + (READABILITY[assessTextLayer(window).verdict] ?? 0), 0) / windows.length;
   const charYield = Math.min(1, charCount / (pageCount * 500));
-  const words = sanitized.trim().split(/\s+/).filter(Boolean).length;
   const averageWordLengthPlausibility = Math.min(1, (words > 0 ? charCount / words : 0) / 6);
   const whitespaceRatio = charCount > 0 ? whitespaceCount / charCount : 0;
   const whitespacePlausibility = whitespaceRatio > 0.05 && whitespaceRatio < 0.4 ? 1 : 0.5;
