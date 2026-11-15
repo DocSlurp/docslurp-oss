@@ -203,6 +203,11 @@ export class WorkflowState {
    * (vision then refuses every request); absent only in store-less runs, which count per process.
    */
   visionAttempts?: import("../lib/vision-attempt-guard.js").VisionAttemptBackend | null;
+  /**
+   * The page reader's fleet-wide org daily spend ledger (ocr/page-reader-budget.ts). Set by loadRunState from the store,
+   * null when that store has none (the reader then sends nothing); absent only in store-less runs, which count per process.
+   */
+  pageReaderBudget?: import("../ocr/page-reader-budget.js").PageReaderOrgBudget | null;
   /** Page-level progress for granular percent-complete computation */
   pageProgress: Map<string, PageProgress> = new Map();
   /** Last time updateProgress was called (throttle granular flushes) */

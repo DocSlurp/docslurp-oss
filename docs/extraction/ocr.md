@@ -159,9 +159,13 @@ Isolation: a provider meets the same requirements as every VM provider
 organization for that VM's whole life (it may serve several jobs of that organization, never another's), with no network beyond the job's own connection, no credentials, no cloud metadata
 access and bounded output that the host validates.
 
-Reader usage bills 0 credits, so the run cost cap does not bound it: `DOCSLURP_OCR_PAGE_READER_MAX_COST_CENTS` (default
-500, 0 to 1000000) caps the provider cost one document's reader jobs may record before its remaining pages keep the
-recogniser read. Token counts over 100,000 per page are rejected, control characters are stripped from returned Markdown,
+Reader usage bills 0 credits, so the run cost cap does not bound it: `DOCSLURP_OCR_PAGE_READER_ORG_DAILY_MAX_COST_CENTS`
+(default 2000, 0 to 10000000; 0 sends nothing) caps the provider cost one organization's reader jobs may commit per UTC
+day, across every worker. Each job is admitted against a shared ledger before it is sent: under the organization's
+advisory lock, the day's settled cost plus the reservations of unsettled jobs plus this job's reservation (the provider's
+optional `estimateJobCostCents`) must stay within the cap, or the job's pages keep the recogniser read. A job settles its
+reservation with the cost it recorded; a job that never settles (a crashed worker) keeps its reservation for the day, and a
+ledger that cannot answer sends nothing. Token counts over 100,000 per page are rejected, control characters are stripped from returned Markdown,
 and any error inside the reader path is logged and leaves the pages with their reads (only an abort propagates).
 
 Budget and cost: `DOCSLURP_OCR_PAGE_READER_MAX_PAGES` (default 2000, 0 to 20000) bounds the pages a document sends,

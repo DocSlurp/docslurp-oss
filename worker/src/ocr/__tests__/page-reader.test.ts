@@ -18,7 +18,8 @@ import {
   assertOcrPageReaderConfiguration, DEFAULT_OCR_PAGE_READER_MAX_PAGES, ocrPageReaderMaxPages, ocrPageReaderMode, readPagesWithProvider, validatePageReadResults,
   readOcrPagesWithConfiguredReader, MAX_PAGE_READER_TOKENS_PER_PAGE, type PageReaderContext,
 } from "../page-reader.js";
-import { ocrPageReaderMaxCostCents } from "../page-reader-mode.js";
+import { InMemoryPageReaderOrgBudget } from "../page-reader-budget.js";
+import { ocrPageReaderOrgDailyMaxCostCents } from "../page-reader-mode.js";
 import { ocrDocument } from "../read-document.js";
 
 let scratch: string;
@@ -42,6 +43,8 @@ function runState(run: Record<string, unknown> = {}): WorkflowState {
     ...run,
   } as unknown as ProjectRun, []);
   state.usageLedger.runId = String(run.id ?? "run-1");
+  // Each test has its own org daily ledger (the process ledger would carry spend between tests).
+  state.pageReaderBudget = new InMemoryPageReaderOrgBudget();
   return state;
 }
 
@@ -326,22 +329,67 @@ describe("readPagesWithProvider", () => {
     expect(summary.skipped).toEqual({ "cost-cap": 1 });
   });
 
-  it("stops at the document's provider-cost cap, which the run cost cap does not see", async () => {
+  it("stops at the organization's daily provider-cost cap, which the run cost cap does not see", async () => {
     const state = runState();
     const provider = reader(echo, { maxPagesPerJob: 1 });
     const outcome = await outcomeWith([{ pageNumber: 1 }, { pageNumber: 2 }, { pageNumber: 3 }]);
-    const summary = await readPagesWithProvider(outcome, provider, ctx(state, { maxCostCents: 0.5 }));
+    const summary = await readPagesWithProvider(outcome, provider, ctx(state, { orgDailyMaxCostCents: 0.5 } as never));
     // 0.3 cents per job: the second job reaches 0.6, so the third is not sent.
     expect(provider.read).toHaveBeenCalledTimes(2);
-    expect(summary.skipped).toEqual({ "provider-cost-cap": 1 });
+    expect(summary.skipped).toEqual({ "org-daily-cost-cap": 1 });
     expect(outcome.pages[2]!.text).toBe("recogniser 3");
+    // The cap is the organization's for the day, not the document's: another document of the org is refused too.
+    const other = await readPagesWithProvider(await outcomeWith([{ pageNumber: 1 }]), provider, ctx(state, { orgDailyMaxCostCents: 0.5, documentId: "doc-2" } as never));
+    expect(other.skipped).toEqual({ "org-daily-cost-cap": 1 });
+    // Another organization has its own budget.
+    const otherOrg = runState({ id: "run-2", orgId: "org-2" });
+    otherOrg.pageReaderBudget = state.pageReaderBudget;
+    const fresh = await readPagesWithProvider(await outcomeWith([{ pageNumber: 1 }]), provider, ctx(otherOrg, { orgDailyMaxCostCents: 0.5 } as never));
+    expect(fresh.attempted).toBe(1);
   });
 
-  it("parses the provider-cost cap, refusing anything outside 0..1000000", () => {
-    expect(ocrPageReaderMaxCostCents({})).toBe(500);
-    expect(ocrPageReaderMaxCostCents({ DOCSLURP_OCR_PAGE_READER_MAX_COST_CENTS: "0" })).toBe(0);
-    expect(() => ocrPageReaderMaxCostCents({ DOCSLURP_OCR_PAGE_READER_MAX_COST_CENTS: "-1" })).toThrow();
-    expect(() => ocrPageReaderMaxCostCents({ DOCSLURP_OCR_PAGE_READER_MAX_COST_CENTS: "2000000" })).toThrow();
+  it("reserves the provider's job estimate so concurrent jobs of one organization cannot pass the cap together", async () => {
+    const budget = new InMemoryPageReaderOrgBudget();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const provider = reader(async (job) => { await gate; return echo(job); }, { estimateJobCostCents: () => 0.4 });
+    const states = [runState({ id: "run-a" }), runState({ id: "run-b" }), runState({ id: "run-c" })];
+    for (const state of states) state.pageReaderBudget = budget;
+    const runs = states.map(async (state, index) =>
+      readPagesWithProvider(await outcomeWith([{ pageNumber: index + 1 }]), provider, ctx(state, { orgDailyMaxCostCents: 1, documentId: `doc-${index}` } as never)));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    release();
+    const summaries = await Promise.all(runs);
+    // 0.4 reserved each: two fit under 1 cent, the third is refused before it is sent.
+    expect(provider.read).toHaveBeenCalledTimes(2);
+    expect(summaries.filter((summary) => summary.skipped["org-daily-cost-cap"] === 1)).toHaveLength(1);
+  });
+
+  it("sends nothing when the organization ledger is missing or fails (fail closed)", async () => {
+    const provider = reader(echo);
+    const missing = runState();
+    missing.pageReaderBudget = null;
+    expect((await readPagesWithProvider(await outcomeWith([{ pageNumber: 1 }]), provider, ctx(missing))).skipped).toEqual({ "budget-ledger-unavailable": 1 });
+    const broken = runState();
+    broken.pageReaderBudget = { admit: async () => { throw new Error("database down"); }, settle: async () => undefined };
+    expect((await readPagesWithProvider(await outcomeWith([{ pageNumber: 1 }]), provider, ctx(broken))).skipped).toEqual({ "budget-ledger-unavailable": 1 });
+    expect(provider.read).not.toHaveBeenCalled();
+  });
+
+  it("settles a failed job with the cost it carried", async () => {
+    const state = runState();
+    const budget = state.pageReaderBudget as InMemoryPageReaderOrgBudget;
+    const settle = vi.spyOn(budget, "settle");
+    const provider = reader(async () => { throw Object.assign(new Error("vm lost"), { pageReaderUsage: [{ provider: "x", model: "x", metric: "x", amount: 1, unit: "page", costCents: 0.7 }] }); });
+    await readPagesWithProvider(await outcomeWith([{ pageNumber: 1 }]), provider, ctx(state));
+    expect(settle).toHaveBeenCalledWith(expect.any(String), 0.7);
+  });
+
+  it("parses the org daily provider-cost cap, refusing anything outside 0..10000000", () => {
+    expect(ocrPageReaderOrgDailyMaxCostCents({})).toBe(2000);
+    expect(ocrPageReaderOrgDailyMaxCostCents({ DOCSLURP_OCR_PAGE_READER_ORG_DAILY_MAX_COST_CENTS: "0" })).toBe(0);
+    expect(() => ocrPageReaderOrgDailyMaxCostCents({ DOCSLURP_OCR_PAGE_READER_ORG_DAILY_MAX_COST_CENTS: "-1" })).toThrow();
+    expect(() => ocrPageReaderOrgDailyMaxCostCents({ DOCSLURP_OCR_PAGE_READER_ORG_DAILY_MAX_COST_CENTS: "20000000" })).toThrow();
   });
 
   it("rejects a job whose per-page token counts are implausible and clamps usage tokens to the job's pages", async () => {

@@ -31,7 +31,8 @@ import type { UsageEvent } from "../models.js";
 import { isCostCapExceeded } from "../pipeline/checkpoints.js";
 import type { WorkflowState } from "../pipeline/pipeline.js";
 import type { OcrPageRead, OcrReadOutcome } from "./engine.js";
-import { ocrPageReaderMaxCostCents, ocrPageReaderMaxPages, ocrPageReaderMode, OCR_PAGE_READER_METRIC, type OcrPageReaderMode } from "./page-reader-mode.js";
+import { processPageReaderOrgBudget, type PageReaderOrgBudget } from "./page-reader-budget.js";
+import { ocrPageReaderMaxPages, ocrPageReaderMode, ocrPageReaderOrgDailyMaxCostCents, OCR_PAGE_READER_METRIC, type OcrPageReaderMode } from "./page-reader-mode.js";
 
 export * from "./page-reader-mode.js";
 
@@ -46,7 +47,7 @@ export interface PageReaderSummary {
   empty: number;
   /** Pages sent but not read, by reason (provider failures, `job-failed`, `job-refused`, `invalid-response`, `missing`). */
   failed: Record<string, number>;
-  /** Candidate pages never sent, by reason (`no-scope`, `budget`, `cost-cap`, `image-refused`). */
+  /** Candidate pages never sent, by reason (`no-scope`, `budget`, `cost-cap`, `org-daily-cost-cap`, `budget-ledger-unavailable`, `image-refused`). */
   skipped: Record<string, number>;
   jobs: number;
   inputTokens: number;
@@ -54,12 +55,16 @@ export interface PageReaderSummary {
 }
 
 export interface PageReaderContext {
-  state: Pick<WorkflowState, "usageLedger"> & { run?: Pick<WorkflowState["run"], "id" | "orgId" | "projectId" | "spentCents" | "pipeline"> };
+  state: Pick<WorkflowState, "usageLedger"> & {
+    run?: Pick<WorkflowState["run"], "id" | "orgId" | "projectId" | "spentCents" | "pipeline">;
+    /** The fleet-wide org daily ledger (page-reader-budget.ts): null refuses every job; absent (store-less runs) counts in this process. */
+    pageReaderBudget?: PageReaderOrgBudget | null;
+  };
   documentId: string;
   mode: Exclude<OcrPageReaderMode, "off">;
   maxPages: number;
-  /** Provider cost (cents) this document's reader jobs may record (DOCSLURP_OCR_PAGE_READER_MAX_COST_CENTS). */
-  maxCostCents?: number;
+  /** Provider cost (cents) one organization's reader jobs may commit per UTC day (DOCSLURP_OCR_PAGE_READER_ORG_DAILY_MAX_COST_CENTS). */
+  orgDailyMaxCostCents?: number;
   signal?: AbortSignal;
 }
 
@@ -71,9 +76,6 @@ export function stripControlCharacters(text: string): string {
   // eslint-disable-next-line no-control-regex
   return text.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "");
 }
-
-/** Provider cost each document's reader jobs recorded in this worker, keyed like pagesSent. */
-const costSpent = new WeakMap<object, Map<string, number>>();
 
 /**
  * Pages of each document the reader has been sent in this worker, per run state (the per-document budget across the
@@ -155,14 +157,12 @@ function recordProviderUsage(
   provider: PageImageReaderProvider,
   ctx: PageReaderContext,
   details: { pages: number; outcome: "completed" | "failed" },
-): { inputTokens: number; outputTokens: number } {
-  const totals = { inputTokens: 0, outputTokens: 0 };
+): { inputTokens: number; outputTokens: number; costCents: number } {
+  const totals = { inputTokens: 0, outputTokens: 0, costCents: 0 };
   if (!Array.isArray(events)) return totals;
   const run = ctx.state.run!;
   // Bounded by the pages the job carried: a provider cannot inflate token telemetry or the ledger past that.
   const tokenCap = details.pages * MAX_PAGE_READER_TOKENS_PER_PAGE;
-  let spent = costSpent.get(ctx.state.usageLedger);
-  if (!spent) costSpent.set(ctx.state.usageLedger, (spent = new Map()));
   for (const raw of events) {
     if (!raw || typeof raw !== "object") continue;
     const event = raw as Partial<UsageEvent>;
@@ -170,7 +170,7 @@ function recordProviderUsage(
     const inputTokens = Math.min(tokenCap, Math.floor(number(event.inputTokens)));
     const outputTokens = Math.min(tokenCap, Math.floor(number(event.outputTokens)));
     const costCents = number(event.costCents);
-    spent.set(ctx.documentId, (spent.get(ctx.documentId) ?? 0) + costCents);
+    totals.costCents += costCents;
     totals.inputTokens += inputTokens;
     totals.outputTokens += outputTokens;
     const priced = priceAiUsageEvent({
@@ -258,71 +258,123 @@ export async function readPagesWithProvider(outcome: OcrReadOutcome, provider: P
       console.warn(`[ocr] page-reader stopped document=${ctx.documentId}: run cost cap reached`);
       break;
     }
-    const spentCents = costSpent.get(ctx.state.usageLedger)?.get(ctx.documentId) ?? 0;
-    if (ctx.maxCostCents !== undefined && spentCents >= ctx.maxCostCents) {
-      bump(summary.skipped, "provider-cost-cap", ready.length - start);
-      console.warn(`[ocr] page-reader stopped document=${ctx.documentId}: provider cost ${spentCents.toFixed(2)} cents reached its cap ${ctx.maxCostCents}`);
+    // The organization's daily reader spend, fleet-wide: admitted atomically with this job's reservation, or not sent.
+    const admission = await admitJob(provider, ctx, run.orgId, chunk.length);
+    if ("skip" in admission) {
+      bump(summary.skipped, admission.skip, ready.length - start);
       break;
     }
-    const byKey = new Map<string, OcrPageRead>();
-    const job: PageImageReadJob = { scope: { ...scope }, pages: [] };
-    for (const item of chunk) {
-      const key = randomUUID();
-      byKey.set(key, item.page);
-      job.pages.push({ key, imagePath: item.imagePath });
-    }
-    sent.set(ctx.documentId, (sent.get(ctx.documentId) ?? 0) + chunk.length);
-    summary.attempted += chunk.length;
-    summary.jobs += 1;
-    let response: { results: PageImageReadResult[]; usage: UsageEvent[] };
+    const { ticket } = admission;
+    let jobCostCents = 0;
     try {
-      response = await provider.read(job, ctx.signal);
-    } catch (error) {
-      const tokens = recordProviderUsage(pageReaderUsageOf(error), provider, ctx, { pages: chunk.length, outcome: "failed" });
-      logAiUsage(provider, tokens, summary);
-      if (ctx.signal?.aborted) throw error;
-      const reason = jobFailureReason(error);
-      bump(summary.failed, reason, chunk.length);
-      console.warn(`[ocr] page-reader job failed document=${ctx.documentId} pages=${chunk.map((item) => item.page.pageNumber).join(",")} reason=${reason}: ${(error instanceof Error ? error.message : String(error)).slice(0, 300)}`);
-      continue;
-    }
-    const usage = (response as { usage?: unknown } | null)?.usage;
-    let results: Map<string, PageImageReadResult>;
-    try {
-      results = validatePageReadResults((response as { results?: unknown } | null)?.results, new Set(byKey.keys()), provider.maxMarkdownBytes);
-    } catch (error) {
-      const tokens = recordProviderUsage(usage, provider, ctx, { pages: chunk.length, outcome: "failed" });
-      logAiUsage(provider, tokens, summary);
-      bump(summary.failed, "invalid-response", chunk.length);
-      // Raw details go to telemetry only; the pages keep the recogniser's text.
-      console.error(`[ocr] page-reader response rejected document=${ctx.documentId} provider=${provider.id}: ${(error instanceof Error ? error.message : String(error)).slice(0, 300)}`);
-      continue;
-    }
-    let tokens = recordProviderUsage(usage, provider, ctx, { pages: chunk.length, outcome: "completed" });
-    if (!tokens.inputTokens && !tokens.outputTokens) {
-      for (const result of results.values()) {
-        if (result.status !== "read") continue;
-        tokens = { inputTokens: tokens.inputTokens + (result.inputTokens ?? 0), outputTokens: tokens.outputTokens + (result.outputTokens ?? 0) };
+      const byKey = new Map<string, OcrPageRead>();
+      const job: PageImageReadJob = { scope: { ...scope }, pages: [] };
+      for (const item of chunk) {
+        const key = randomUUID();
+        byKey.set(key, item.page);
+        job.pages.push({ key, imagePath: item.imagePath });
       }
-    }
-    logAiUsage(provider, tokens, summary);
-    for (const [key, page] of byKey) {
-      const result = results.get(key);
-      if (!result) { bump(summary.failed, "missing"); continue; }
-      if (result.status === "failed") { bump(summary.failed, result.reason); continue; }
-      const text = stripControlCharacters(result.markdown).trim();
-      if (!text) { summary.empty += 1; continue; }
-      page.text = text;
-      page.recogniser = `page-reader:${provider.id}`;
-      // Read by the reader: the hosted escalation reader does not read it again.
-      page.escalation = null;
-      // One Rich page, once per run: the recogniser's read usually charged it already (the ledger dedups); a PDF page the
-      // recogniser found no words on is charged now that it has text.
-      ctx.state.usageLedger.chargeRichPage({ documentId: ctx.documentId, pageNumber: page.pageNumber, readBy: OCR_PAGE_READER_METRIC, model: provider.model });
-      summary.replaced += 1;
+      sent.set(ctx.documentId, (sent.get(ctx.documentId) ?? 0) + chunk.length);
+      summary.attempted += chunk.length;
+      summary.jobs += 1;
+      let response: { results: PageImageReadResult[]; usage: UsageEvent[] };
+      try {
+        response = await provider.read(job, ctx.signal);
+      } catch (error) {
+        const tokens = recordProviderUsage(pageReaderUsageOf(error), provider, ctx, { pages: chunk.length, outcome: "failed" });
+        jobCostCents += tokens.costCents;
+        logAiUsage(provider, tokens, summary);
+        if (ctx.signal?.aborted) throw error;
+        const reason = jobFailureReason(error);
+        bump(summary.failed, reason, chunk.length);
+        console.warn(`[ocr] page-reader job failed document=${ctx.documentId} pages=${chunk.map((item) => item.page.pageNumber).join(",")} reason=${reason}: ${(error instanceof Error ? error.message : String(error)).slice(0, 300)}`);
+        continue;
+      }
+      const usage = (response as { usage?: unknown } | null)?.usage;
+      let results: Map<string, PageImageReadResult>;
+      try {
+        results = validatePageReadResults((response as { results?: unknown } | null)?.results, new Set(byKey.keys()), provider.maxMarkdownBytes);
+      } catch (error) {
+        const tokens = recordProviderUsage(usage, provider, ctx, { pages: chunk.length, outcome: "failed" });
+        jobCostCents += tokens.costCents;
+        logAiUsage(provider, tokens, summary);
+        bump(summary.failed, "invalid-response", chunk.length);
+        // Raw details go to telemetry only; the pages keep the recogniser's text.
+        console.error(`[ocr] page-reader response rejected document=${ctx.documentId} provider=${provider.id}: ${(error instanceof Error ? error.message : String(error)).slice(0, 300)}`);
+        continue;
+      }
+      let tokens = recordProviderUsage(usage, provider, ctx, { pages: chunk.length, outcome: "completed" });
+      jobCostCents += tokens.costCents;
+      if (!tokens.inputTokens && !tokens.outputTokens) {
+        for (const result of results.values()) {
+          if (result.status !== "read") continue;
+          tokens = { ...tokens, inputTokens: tokens.inputTokens + (result.inputTokens ?? 0), outputTokens: tokens.outputTokens + (result.outputTokens ?? 0) };
+        }
+      }
+      logAiUsage(provider, tokens, summary);
+      for (const [key, page] of byKey) {
+        const result = results.get(key);
+        if (!result) { bump(summary.failed, "missing"); continue; }
+        if (result.status === "failed") { bump(summary.failed, result.reason); continue; }
+        const text = stripControlCharacters(result.markdown).trim();
+        if (!text) { summary.empty += 1; continue; }
+        page.text = text;
+        page.recogniser = `page-reader:${provider.id}`;
+        // Read by the reader: the hosted escalation reader does not read it again.
+        page.escalation = null;
+        // One Rich page, once per run: the recogniser's read usually charged it already (the ledger dedups); a PDF page the
+        // recogniser found no words on is charged now that it has text.
+        ctx.state.usageLedger.chargeRichPage({ documentId: ctx.documentId, pageNumber: page.pageNumber, readBy: OCR_PAGE_READER_METRIC, model: provider.model });
+        summary.replaced += 1;
+      }
+    } finally {
+      await settleJob(ctx, ticket, jobCostCents);
     }
   }
   return logSummary(summary, ctx);
+}
+
+/**
+ * Admit one job against its organization's daily reader spend. Returns its ticket, or the skip reason: `org-daily-cost-cap`
+ * when the day's committed cost plus this job's reservation would pass the cap, `budget-ledger-unavailable` when the ledger
+ * cannot answer (fail closed: no answer, no job).
+ */
+async function admitJob(provider: PageImageReaderProvider, ctx: PageReaderContext, orgId: string, pages: number): Promise<{ ticket: string } | { skip: "org-daily-cost-cap" | "budget-ledger-unavailable" }> {
+  const budget = ctx.state.pageReaderBudget === undefined ? processPageReaderOrgBudget : ctx.state.pageReaderBudget;
+  if (!budget) {
+    console.error(`[ocr] page-reader stopped document=${ctx.documentId}: no organization spend ledger`);
+    return { skip: "budget-ledger-unavailable" };
+  }
+  const capCents = ctx.orgDailyMaxCostCents ?? ocrPageReaderOrgDailyMaxCostCents();
+  let reserveCents = 0;
+  try {
+    const estimate = provider.estimateJobCostCents?.(pages);
+    reserveCents = typeof estimate === "number" && Number.isFinite(estimate) && estimate > 0 ? estimate : 0;
+  } catch (error) {
+    console.warn(`[ocr] page-reader cost estimate failed provider=${provider.id}: ${(error instanceof Error ? error.message : String(error)).slice(0, 200)}`);
+  }
+  try {
+    const admission = await budget.admit({ orgId, reserveCents, capCents });
+    if (admission.admitted) return { ticket: admission.ticket };
+    console.warn(
+      `[ocr] page-reader stopped document=${ctx.documentId}: organization reader cost today ${admission.committedCents.toFixed(2)} cents ` +
+        `plus this job's ${reserveCents.toFixed(2)} reaches the daily cap ${capCents}`,
+    );
+    return { skip: "org-daily-cost-cap" };
+  } catch (error) {
+    console.error(`[ocr] page-reader stopped document=${ctx.documentId}: organization spend ledger failed: ${(error instanceof Error ? error.message : String(error)).slice(0, 300)}`);
+    return { skip: "budget-ledger-unavailable" };
+  }
+}
+
+/** Settle a job's ticket with the cost it recorded. A failure leaves the reservation standing for the day (fail closed). */
+async function settleJob(ctx: PageReaderContext, ticket: string, costCents: number): Promise<void> {
+  const budget = ctx.state.pageReaderBudget === undefined ? processPageReaderOrgBudget : ctx.state.pageReaderBudget;
+  try {
+    await budget?.settle(ticket, costCents);
+  } catch (error) {
+    console.error(`[ocr] page-reader spend settle failed document=${ctx.documentId}; the reservation stands: ${(error instanceof Error ? error.message : String(error)).slice(0, 300)}`);
+  }
 }
 
 function logAiUsage(provider: PageImageReaderProvider, tokens: { inputTokens: number; outputTokens: number }, summary: PageReaderSummary): void {
@@ -354,7 +406,7 @@ export async function readOcrPagesWithConfiguredReader(
     return null;
   }
   try {
-    return await readPagesWithProvider(outcome, provider, { ...ctx, mode, maxPages: ocrPageReaderMaxPages(env), maxCostCents: ocrPageReaderMaxCostCents(env) });
+    return await readPagesWithProvider(outcome, provider, { ...ctx, mode, maxPages: ocrPageReaderMaxPages(env), orgDailyMaxCostCents: ocrPageReaderOrgDailyMaxCostCents(env) });
   } catch (error) {
     // The reader never fails a page or document: anything it throws (a ledger write, a file check) is telemetry, and the
     // pages keep the recogniser's text (or a reader text already validated and applied). Only an abort propagates.

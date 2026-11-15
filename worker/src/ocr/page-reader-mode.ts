@@ -34,20 +34,22 @@ export function ocrPageReaderMaxPages(env: NodeJS.ProcessEnv = process.env): num
   return parsed;
 }
 
-/** Default per-document cap on the reader's provider cost, in cents (`DOCSLURP_OCR_PAGE_READER_MAX_COST_CENTS`). */
-export const DEFAULT_OCR_PAGE_READER_MAX_COST_CENTS = 500;
+/** Default daily cap on one organization's reader provider cost, in cents (`DOCSLURP_OCR_PAGE_READER_ORG_DAILY_MAX_COST_CENTS`). */
+export const DEFAULT_OCR_PAGE_READER_ORG_DAILY_MAX_COST_CENTS = 2000;
+export const OCR_PAGE_READER_ORG_DAILY_MAX_COST_CENTS_LIMIT = 10_000_000;
 
 /**
- * `DOCSLURP_OCR_PAGE_READER_MAX_COST_CENTS`: provider cost one document's reader jobs may record before the rest of its pages
- * keep the recogniser read, 0..1000000 (default 500). The run cost cap counts only billable credits, and reader usage
- * bills 0 credits, so this is the reader's own spend bound.
+ * `DOCSLURP_OCR_PAGE_READER_ORG_DAILY_MAX_COST_CENTS`: provider cost one organization's reader jobs may commit per UTC day,
+ * across every worker, before further pages keep the recogniser read (page-reader-budget.ts), 0..10000000 (default 2000;
+ * 0 sends nothing). The run cost cap counts only billable credits, and reader usage bills 0 credits, so this is the
+ * reader's own spend bound.
  */
-export function ocrPageReaderMaxCostCents(env: NodeJS.ProcessEnv = process.env): number {
-  const raw = env.DOCSLURP_OCR_PAGE_READER_MAX_COST_CENTS?.trim();
-  if (!raw) return DEFAULT_OCR_PAGE_READER_MAX_COST_CENTS;
+export function ocrPageReaderOrgDailyMaxCostCents(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.DOCSLURP_OCR_PAGE_READER_ORG_DAILY_MAX_COST_CENTS?.trim();
+  if (!raw) return DEFAULT_OCR_PAGE_READER_ORG_DAILY_MAX_COST_CENTS;
   const parsed = Number(raw);
-  if (!/^\d+$/.test(raw) || !Number.isSafeInteger(parsed) || parsed > 1_000_000) {
-    throw new Error(`DOCSLURP_OCR_PAGE_READER_MAX_COST_CENTS must be an integer from 0 to 1000000; got ${JSON.stringify(raw)}`);
+  if (!/^\d+$/.test(raw) || !Number.isSafeInteger(parsed) || parsed > OCR_PAGE_READER_ORG_DAILY_MAX_COST_CENTS_LIMIT) {
+    throw new Error(`DOCSLURP_OCR_PAGE_READER_ORG_DAILY_MAX_COST_CENTS must be an integer from 0 to ${OCR_PAGE_READER_ORG_DAILY_MAX_COST_CENTS_LIMIT}; got ${JSON.stringify(raw)}`);
   }
   return parsed;
 }
@@ -65,6 +67,7 @@ export function ocrPageReaderKeepFrames(mode: OcrPageReaderMode): "candidates" |
 export function assertOcrPageReaderConfiguration(env: NodeJS.ProcessEnv, ocrMode: OcrMode): OcrPageReaderMode {
   const mode = ocrPageReaderMode(env);
   const maxPages = ocrPageReaderMaxPages(env);
+  const orgDailyMaxCostCents = ocrPageReaderOrgDailyMaxCostCents(env);
   if (mode === "off") return mode;
   if (ocrMode !== "vm" && ocrMode !== "local") {
     throw new Error(`DOCSLURP_OCR_PAGE_READER=${mode} reads the OCR boundary's page images and needs DOCSLURP_OCR_MODE=vm or local (got ${ocrMode}); refusing to start`);
@@ -74,6 +77,6 @@ export function assertOcrPageReaderConfiguration(env: NodeJS.ProcessEnv, ocrMode
     throw new Error(`DOCSLURP_OCR_PAGE_READER=${mode} needs a page image reader plugin (pageImageReader in DOCSLURP_EXTRACTOR_PLUGINS); refusing to start rather than read pages anywhere else`);
   }
   provider.assertConfigured();
-  console.log(`[ocr] page-reader mode=${mode} provider=${provider.id} maxPages=${maxPages}`);
+  console.log(`[ocr] page-reader mode=${mode} provider=${provider.id} maxPages=${maxPages} orgDailyMaxCostCents=${orgDailyMaxCostCents}`);
   return mode;
 }

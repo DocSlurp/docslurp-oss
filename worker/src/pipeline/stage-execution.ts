@@ -160,6 +160,8 @@ export async function loadRunState(
     readStageStates?(runId: string): Promise<unknown>;
     /** The shared vision attempt ledger (page bound, rejection breaker, org bound). */
     visionAttempts?: import("../lib/vision-attempt-guard.js").VisionAttemptBackend;
+    /** The page reader's org daily spend ledger. */
+    pageReaderBudget?: import("../ocr/page-reader-budget.js").PageReaderOrgBudget;
   },
   runId: string,
   options: LoadRunOptions = {},
@@ -176,6 +178,7 @@ export async function loadRunState(
   const state = WorkflowState.create(coerceIndexingModeForFlag(run), documents);
   // A store-backed run never falls back to a per-process count: without the shared ledger, vision refuses.
   state.visionAttempts = store.visionAttempts ?? null;
+  state.pageReaderBudget = store.pageReaderBudget ?? null;
   if (options.docConcurrency !== undefined) state.docConcurrency = options.docConcurrency;
   if (options.totalStages !== undefined) {
     state.totalStages = typeof options.totalStages === "function" ? options.totalStages(state.run) : options.totalStages;

@@ -323,6 +323,12 @@ export interface PageImageReaderProvider {
   /** Throw when the deployment is not ready (unpinned image, missing endpoint). The worker then refuses to start. */
   assertConfigured(): void;
   /**
+   * Optional upper estimate of one job's provider cost in cents, for `pages` pages. The host reserves it against the
+   * organization's daily reader budget before sending the job (DOCSLURP_OCR_PAGE_READER_ORG_DAILY_MAX_COST_CENTS), so
+   * concurrent jobs cannot pass the cap together; the job's recorded cost replaces it. Without it the host reserves 0.
+   */
+  estimateJobCostCents?(pages: number): number;
+  /**
    * Read the job's pages. Resolves with one result per page it answers (at most one per key) and the provider cost of
    * every VM or request it ran. A rejection that spent compute carries that cost as `pageReaderUsage` (PAGE_READER_USAGE_PROPERTY,
    * read with pageReaderUsageOf); set `ocrRefused: true` when the reader refused the job's input rather than failing to run.
@@ -451,6 +457,7 @@ export function registerExtractorPlugin(plugin: ExtractorPlugin): void {
     for (const name of ["assertConfigured", "read"] as const) {
       if (typeof reader[name] !== "function") throw new Error(`Page image reader provider lacks ${name}()`);
     }
+    if (reader.estimateJobCostCents !== undefined && typeof reader.estimateJobCostCents !== "function") throw new Error("Page image reader provider's estimateJobCostCents must be a function");
   }
   plugins.push(plugin);
   if (pdf?.shardProfile) registerShardProfile(pdf.shardProfile.key, pdf.shardProfile.prior);

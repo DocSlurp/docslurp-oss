@@ -170,6 +170,9 @@ flag on and no provider (or `assertConfigured()` throwing), the worker refuses t
   in the product.
 - The host validates every response and records usage under its own metric (`ocr-page-reader`) and scope, at provider
   cost and 0 credits.
+- Optional `estimateJobCostCents(pages)`: an upper estimate of one job's provider cost. The host reserves it against the
+  organization's daily reader budget (`DOCSLURP_OCR_PAGE_READER_ORG_DAILY_MAX_COST_CENTS`, [OCR](ocr.md#page-reader))
+  before sending the job, so concurrent jobs cannot pass the cap together; without it the host reserves 0.
 
 At load the worker lists the capability as `page-reader`.
 
