@@ -51,8 +51,8 @@ beforeAll(async () => {
   await sql`insert into "user"(id, name, email) values ('deadline-user', 'Deadline', 'deadline@example.test')`;
   await sql`insert into organizations(id, name, slug, created_by_user_id, credit_balance_cents) values ('deadline-org', 'Deadline', 'deadline-org', 'deadline-user', 10)`;
   await sql`insert into projects(id, org_id, user_id, name) values ('deadline-ws', 'deadline-org', 'deadline-user', 'Deadline')`;
-  await sql`insert into project_runs(id, org_id, project_id, user_id, kind, status, stage, pipeline, control_state, pause_reason)
-    values ('deadline-run', 'deadline-org', 'deadline-ws', 'deadline-user', 'bulk-upload', 'processing', 'vision-extract', '{}', 'paused', 'credit_exhausted')`;
+  await sql`insert into project_runs(monthly_reservation_cents,id, org_id, project_id, user_id, kind, status, stage, pipeline, control_state, pause_reason)
+    values (100, 'deadline-run', 'deadline-org', 'deadline-ws', 'deadline-user', 'bulk-upload', 'processing', 'vision-extract', '{}', 'paused', 'credit_exhausted')`;
 }, 60000);
 
 afterAll(async () => {

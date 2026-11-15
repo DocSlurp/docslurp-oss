@@ -88,8 +88,8 @@ async function newExtract(options: { retentionDays?: number } = {}) {
 /** What intake and the worker leave behind: an extract run with documents and objects under the prefix. */
 async function seedRun(extract: { id: string; storagePrefix: string }, status = "completed") {
   const runId = `run-${extract.id.slice(4, 12)}`;
-  await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, extract_id, storage_prefix)
-    values (${runId}, 'o', 'u', 'w', 'bulk-upload', ${status}, ${status}, '{}', ${extract.id}, ${extract.storagePrefix})`;
+  await sql`insert into project_runs (monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage, pipeline, extract_id, storage_prefix)
+    values (100, ${runId}, 'o', 'u', 'w', 'bulk-upload', ${status}, ${status}, '{}', ${extract.id}, ${extract.storagePrefix})`;
   await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, file_size, page_count, canonical_id)
     values (${`${runId}-d1`}, 'o', 'u', 'w', ${runId}, 'Report.pdf', 'application/pdf', ${`${extract.storagePrefix}/raw/r.pdf`}, ${status === "completed" ? "completed" : "processing"}, ${2 * MB}, 10, ${`docslurp:extract:${extract.id}:d1`})`;
   await extracts.attachExtractRun(extract.id, runId);
@@ -314,7 +314,7 @@ describe("extract sweep", () => {
       values ('rmj-1', 'rk-1', 'o', 'w', ${runId}, ${`${runId}-d1`}, 'provider', 'model', 'completed', 1)`;
     await sql`insert into media_video_admissions (document_id, org_id, run_id, duration_seconds, reserved_frames) values (${`${runId}-d1`}, 'o', ${runId}, 60, 10)`;
     // A copy outside the extract run (a re-index from before the guard), chained by reindex_of.
-    await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline) values ('kept-run', 'o', 'u', 'w', 'reindex', 'completed', 'completed', '{}')`;
+    await sql`insert into project_runs (monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage, pipeline) values (100, 'kept-run', 'o', 'u', 'w', 'reindex', 'completed', 'completed', '{}')`;
     await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, previous_version_id, reindex_of)
       values ('copy-1', 'o', 'u', 'w', 'kept-run', 'Report.pdf', 'application/pdf', 'u/kept-run/raw/r.pdf', 'completed', 10, ${`${runId}-d1`}, ${`${runId}-d1`})`;
     const second = await newExtract();
@@ -377,7 +377,7 @@ describe("extract sweep", () => {
   it("leaves live extract documents off the daily storage meter, by the project's org", async () => {
     const extract = await newExtract();
     await seedRun(extract);
-    await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline) values ('kept', 'o', 'u', 'w', 'bulk-upload', 'completed', 'completed', '{}')`;
+    await sql`insert into project_runs (monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage, pipeline) values (100, 'kept', 'o', 'u', 'w', 'bulk-upload', 'completed', 'completed', '{}')`;
     await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, file_size, page_count)
       values ('kept-1', 'o', 'u', 'w', 'kept', 'Kept.pdf', 'application/pdf', 'u/kept/raw/k.pdf', 'completed', ${3 * MB}, 4)`;
     const { getOrgStorage } = await import("../services/billing/overview.js");
@@ -389,7 +389,7 @@ describe("extract sweep", () => {
 
   it("counts a stuffed document's measured page equivalents in the storage estimate", async () => {
     // A 1-page PDF whose extraction measured 50 page equivalents (billing_pages): its chunks and vectors scale with that.
-    await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline) values ('stuffed', 'o', 'u', 'w', 'bulk-upload', 'completed', 'completed', '{}')`;
+    await sql`insert into project_runs (monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage, pipeline) values (100, 'stuffed', 'o', 'u', 'w', 'bulk-upload', 'completed', 'completed', '{}')`;
     const { getOrgStorage } = await import("../services/billing/overview.js");
     const before = await getOrgStorage("o", sql as never, { excludeExtracts: true });
     await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, file_size, page_count, page_count_source, billing_pages, billing_pages_method)

@@ -40,9 +40,9 @@ beforeEach(async () => {
     ["observe-other-run", "observe-other-org", "observe-other", "observe-other-project"],
   ]) {
     await sql`insert into project_runs
-      (id, org_id, user_id, project_id, kind, status, stage, pipeline,
+      (monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage, pipeline,
        execution_generation, last_heartbeat_at, lease_expires_at, updated_at)
-      values (${id!}, ${org!}, ${user!}, ${project!}, 'bulk-upload', 'processing', 'queued',
+      values (100, ${id!}, ${org!}, ${user!}, ${project!}, 'bulk-upload', 'processing', 'queued',
         ${sql.json(defaultPipelineFeatures as unknown as postgres.JSONValue)},
         'current-generation', now() - interval '20 minutes', now() - interval '15 minutes', now() - interval '20 minutes')`;
   }

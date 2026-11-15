@@ -40,8 +40,8 @@ describe("commit-visible realtime coverage", () => {
     expect(await revision()).toBe(created + 1);
   });
   it("publishes run/stage changes, membership revocation and credit changes", async () => {
-    await db.exec(`insert into project_runs(id,user_id,org_id,project_id,kind,status,stage)
-      values ('realtime-run','realtime-user','realtime-org','realtime-project','upload','processing','extract')`);
+    await db.exec(`insert into project_runs(monthly_reservation_cents,id,user_id,org_id,project_id,kind,status,stage)
+      values (100, 'realtime-run','realtime-user','realtime-org','realtime-project','upload','processing','extract')`);
     let before = await revision();
     await db.exec(`insert into project_run_stage_states(run_id,stage_name,status) values('realtime-run','extract','completed')`);
     expect(await revision()).toBe(before + 1);
@@ -76,8 +76,8 @@ describe("commit-visible realtime coverage", () => {
 
   it("records project and run scopes so one project's change leaves another's revision alone", async () => {
     await db.exec(`insert into projects(id,org_id,user_id,name) values ('realtime-project-b','realtime-org','realtime-user','B') on conflict do nothing;
-      insert into project_runs(id,user_id,org_id,project_id,kind,status,stage)
-        values ('realtime-run-b','realtime-user','realtime-org','realtime-project-b','upload','processing','extract') on conflict do nothing`);
+      insert into project_runs(monthly_reservation_cents,id,user_id,org_id,project_id,kind,status,stage)
+        values (100, 'realtime-run-b','realtime-user','realtime-org','realtime-project-b','upload','processing','extract') on conflict do nothing`);
     const scoped = async (scope: string) => Number((await db.query<{ revision: string }>(
       `select revision::text from realtime_scope_revisions where org_id='realtime-org' and scope=$1`, [scope])).rows[0]?.revision ?? 0);
     const snapshot = async () => ({ org: await revision(), a: await scoped("project:realtime-project"), b: await scoped("project:realtime-project-b"),
@@ -107,10 +107,10 @@ describe("commit-visible realtime coverage", () => {
   it("bumps each affected scope once for a multi-row page, chunk or page-stage statement", async () => {
     // Two documents in different projects and runs, written by one statement.
     await db.exec(`insert into projects(id,org_id,user_id,name) values ('bulk-project-a','realtime-org','realtime-user','A'),('bulk-project-b','realtime-org','realtime-user','B');
-      insert into project_runs(id,user_id,org_id,project_id,kind,status,stage) values
-        ('bulk-run-a','realtime-user','realtime-org','bulk-project-a','upload','processing','extract'),
-        ('bulk-run-b','realtime-user','realtime-org','bulk-project-b','upload','processing','extract'),
-        ('bulk-run-reindex','realtime-user','realtime-org','bulk-project-a','reindex','processing','extract');
+      insert into project_runs(monthly_reservation_cents,id,user_id,org_id,project_id,kind,status,stage) values
+        (100, 'bulk-run-a','realtime-user','realtime-org','bulk-project-a','upload','processing','extract'),
+        (100, 'bulk-run-b','realtime-user','realtime-org','bulk-project-b','upload','processing','extract'),
+        (100, 'bulk-run-reindex','realtime-user','realtime-org','bulk-project-a','reindex','processing','extract');
       insert into documents(id,user_id,org_id,project_id,run_id,filename,mime_type,source_key,status) values
         ('bulk-doc-a','realtime-user','realtime-org','bulk-project-a','bulk-run-a','a.txt','text/plain','bulk-a','processing'),
         ('bulk-doc-b','realtime-user','realtime-org','bulk-project-b','bulk-run-b','b.txt','text/plain','bulk-b','processing')`);
@@ -218,8 +218,8 @@ describe("commit-visible realtime coverage", () => {
     const hints: string[] = [];
     const unlisten = await db.listen("search_eligibility", (payload) => { hints.push(payload); });
     const settle = () => new Promise((resolve) => setTimeout(resolve, 50));
-    const run = (id: string) => db.exec(`insert into project_runs(id,user_id,org_id,project_id,kind,status,stage)
-      values ('${id}','realtime-user','realtime-org','realtime-project','upload','processing','extract')`);
+    const run = (id: string) => db.exec(`insert into project_runs(monthly_reservation_cents,id,user_id,org_id,project_id,kind,status,stage)
+      values (100, '${id}','realtime-user','realtime-org','realtime-project','upload','processing','extract')`);
     const document = (id: string, runId: string, status: string, early: boolean, projectId = "realtime-project") =>
       db.exec(`insert into documents(id,user_id,org_id,project_id,run_id,filename,mime_type,source_key,status,lexical_searchable_at)
         values('${id}','realtime-user','realtime-org','${projectId}','${runId}','${id}.txt','text/plain','${id}','${status}',${early ? "now()" : "null"})`);

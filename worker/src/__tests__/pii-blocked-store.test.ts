@@ -21,8 +21,8 @@ beforeAll(async () => {
     insert into "user"(id, name, email) values ('u1', 'A', 'a@x');
     insert into organizations(id, name, slug, created_by_user_id) values ('o1', 'Org', 'org', 'u1');
     insert into projects(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W');
-    insert into project_runs (execution_generation, id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents)
-      values (null, 'run-1', 'o1', 'u1', 'w', 'upload', 'processing', 'pii-detect', '{}', 2);
+    insert into project_runs (monthly_reservation_cents,execution_generation, id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents)
+      values (100, null, 'run-1', 'o1', 'u1', 'w', 'upload', 'processing', 'pii-detect', '{}', 2);
     insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, created_at)
       values ('d-block', 'o1', 'u1', 'w', 'run-1', 'hr.pdf', 'application/pdf', 'k1', 'processing', 2, '2026-01-01'),
              ('d-ok', 'o1', 'u1', 'w', 'run-1', 'ok.pdf', 'application/pdf', 'k2', 'processing', 1, '2026-01-02');

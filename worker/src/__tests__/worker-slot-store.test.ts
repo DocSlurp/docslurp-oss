@@ -34,11 +34,11 @@ beforeAll(async () => {
   await sql`insert into organizations(id, name, slug, created_by_user_id, worker_slots)
     values ('free', 'Free', 'free', 'u1', 2), ('gold', 'Gold', 'gold', 'u1', 5)`;
   await sql`insert into projects(id, org_id, user_id, name) values ('wf', 'free', 'u1', 'F'), ('wg', 'gold', 'u1', 'G'), ('wn', null, 'u1', 'N')`;
-  await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline) values
-    ('run-free-1', 'free', 'u1', 'wf', 'bulk-upload', 'processing', 'vision-extract', '{}'),
-    ('run-free-2', 'free', 'u1', 'wf', 'bulk-upload', 'processing', 'vision-extract', '{}'),
-    ('run-gold', 'gold', 'u1', 'wg', 'bulk-upload', 'processing', 'vision-extract', '{}'),
-    ('run-orgless', null, 'u1', 'wn', 'bulk-upload', 'processing', 'vision-extract', '{}')`;
+  await sql`insert into project_runs (monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage, pipeline) values
+    (100, 'run-free-1', 'free', 'u1', 'wf', 'bulk-upload', 'processing', 'vision-extract', '{}'),
+    (100, 'run-free-2', 'free', 'u1', 'wf', 'bulk-upload', 'processing', 'vision-extract', '{}'),
+    (100, 'run-gold', 'gold', 'u1', 'wg', 'bulk-upload', 'processing', 'vision-extract', '{}'),
+    (100, 'run-orgless', null, 'u1', 'wn', 'bulk-upload', 'processing', 'vision-extract', '{}')`;
 }, 120_000);
 
 afterAll(async () => {

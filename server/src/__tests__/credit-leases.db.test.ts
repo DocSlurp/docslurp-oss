@@ -59,8 +59,8 @@ beforeEach(async () => {
 
 async function admit(id: string) {
   return await guard.admitRunSpend("o1", "w", (tx) => tx`
-    insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline)
-    values (${id}, 'o1', 'u1', 'w', 'bulk-upload', 'queued', 'queued', '{}')
+    insert into project_runs (monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage, pipeline)
+    values (100, ${id}, 'o1', 'u1', 'w', 'bulk-upload', 'queued', 'queued', '{}')
     returning id
   `, { leaseRunId: id });
 }
@@ -82,9 +82,9 @@ describe("credit leases (app)", () => {
   });
 
   it("resumes a spend-paused run only when it gets a lease, and sweeps one org on notification", async () => {
-    await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, control_state, pause_reason)
-      values ('p1', 'o1', 'u1', 'w', 'bulk-upload', 'processing', 'vision-extract', '{}', 'paused', 'credit_exhausted'),
-             ('p2', 'o1', 'u1', 'w', 'bulk-upload', 'processing', 'vision-extract', '{}', 'paused', 'credit_exhausted')`;
+    await sql`insert into project_runs (monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage, pipeline, control_state, pause_reason)
+      values (100, 'p1', 'o1', 'u1', 'w', 'bulk-upload', 'processing', 'vision-extract', '{}', 'paused', 'credit_exhausted'),
+             (100, 'p2', 'o1', 'u1', 'w', 'bulk-upload', 'processing', 'vision-extract', '{}', 'paused', 'credit_exhausted')`;
     await sql`update organizations set credit_balance_cents = 0.5 where id = 'o1'`;
     const result = await paused.sweepSpendPausedRuns({ sql: sql as never, signals, orgId: "o1" });
     // The first run takes the 0.5 credits; the second finds nothing free and stays paused.
@@ -106,8 +106,8 @@ describe("credit leases (app)", () => {
   });
 
   it("keeps the durable pause and lease unchanged after failed resume delivery, then retries once", async () => {
-    await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, control_state, pause_reason)
-      values ('delivery', 'o1', 'u1', 'w', 'bulk-upload', 'processing', 'vision-extract', '{}', 'paused', 'credit_exhausted')`;
+    await sql`insert into project_runs (monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage, pipeline, control_state, pause_reason)
+      values (100, 'delivery', 'o1', 'u1', 'w', 'bulk-upload', 'processing', 'vision-extract', '{}', 'paused', 'credit_exhausted')`;
     signals.resume.mockRejectedValueOnce(new Error("Temporal unavailable"));
     expect(await paused.resumeSpendPausedRunOutcome("delivery", { sql: sql as never, signals })).toEqual({ status: "deferred" });
     expect((await sql`select control_state, pause_reason from project_runs where id = 'delivery'`)[0]).toMatchObject({ control_state: "paused", pause_reason: "credit_exhausted" });

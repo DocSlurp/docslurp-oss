@@ -33,9 +33,9 @@ beforeAll(async () => {
     insert into "user"(id, name, email) values ('u1', 'A', 'a@example.com');
     insert into organizations(id, name, slug, created_by_user_id, worker_slots, credit_balance_cents) values ('o1', 'Org', 'org', 'u1', 8, 100000), ('o2', 'Other', 'other', 'u1', 8, 100000);
     insert into projects(id, org_id, user_id, name) values ('w1', 'o1', 'u1', 'W1'), ('w2', 'o2', 'u1', 'W2');
-    insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
-      values ('r1', 'o1', 'u1', 'w1', 'bulk-upload', 'processing', 'vision-extract', '{}', ${DOCUMENTS}, ${DOCUMENTS}),
-             ('r2', 'o2', 'u1', 'w2', 'bulk-upload', 'processing', 'vision-extract', '{}', ${DOCUMENTS}, ${DOCUMENTS});
+    insert into project_runs (monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
+      values (100, 'r1', 'o1', 'u1', 'w1', 'bulk-upload', 'processing', 'vision-extract', '{}', ${DOCUMENTS}, ${DOCUMENTS}),
+             (100, 'r2', 'o2', 'u1', 'w2', 'bulk-upload', 'processing', 'vision-extract', '{}', ${DOCUMENTS}, ${DOCUMENTS});
     insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count) values ${documents("o1", "r1", "w1")}, ${documents("o2", "r2", "w2")};
   `);
   const served = await serveOnRandomPort(db, { maxConnections: 8 });

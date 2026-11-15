@@ -17,11 +17,11 @@ describe("org_spend_status", () => {
       insert into organizations (id, name, slug, created_by_user_id, credit_balance_cents)
         values ('org-1', 'One', 'one', 'u1', 3), ('org-2', 'Two', 'two', 'u1', 10);
       insert into projects (id, org_id, user_id, name) values ('ws-1', 'org-1', 'u1', 'W'), ('ws-2', 'org-2', 'u1', 'X');
-      insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, input_cost_cents) values
-        ('fresh', 'org-1', 'u1', 'ws-1', 'bulk-upload', 'processing', 'embed', '{}', 0),
-        ('half-spent', 'org-1', 'u1', 'ws-1', 'bulk-upload', 'queued', 'queued', '{}', 0.25),
-        ('spent', 'org-1', 'u1', 'ws-1', 'bulk-upload', 'processing', 'embed', '{}', 5),
-        ('done', 'org-1', 'u1', 'ws-1', 'bulk-upload', 'completed', 'completed', '{}', 0);
+      insert into project_runs (monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage, pipeline, input_cost_cents) values
+        (100, 'fresh', 'org-1', 'u1', 'ws-1', 'bulk-upload', 'processing', 'embed', '{}', 0),
+        (100, 'half-spent', 'org-1', 'u1', 'ws-1', 'bulk-upload', 'queued', 'queued', '{}', 0.25),
+        (100, 'spent', 'org-1', 'u1', 'ws-1', 'bulk-upload', 'processing', 'embed', '{}', 5),
+        (100, 'done', 'org-1', 'u1', 'ws-1', 'bulk-upload', 'completed', 'completed', '{}', 0);
       select enqueue_org_credit_debit('org-1', 1, 'u1', 'usage', null, null, '{}'::jsonb);
     `);
   }, 120_000);
