@@ -1,3 +1,4 @@
+import { publicDocumentFailure } from "@docslurp/shared";
 import { MIME_BY_EXTENSION, fileExtension, realtimeViewerSnapshotSchema, cleanDocumentTitle, mediaSummarySchema, publicDiagnostics, publicDocumentError, sanitizeStoredPipeline, type MediaSummary } from "@docslurp/shared";
 import { ingestRecordFields, ingestStatus, missingServingCapabilities, type IngestStatus } from "@docslurp/shared";
 
@@ -75,6 +76,7 @@ type DocumentIndexRow = DocumentRow & {
 };
 
 type DocumentStageRow = {
+  failure?: import("@docslurp/shared").DocumentFailure | null;
   stage_name: string;
   status: string;
   attempts: number;
@@ -1200,7 +1202,7 @@ export async function getDocumentViewerPayload(docId: string, userId: string): P
 
   const stages = row.run_id
     ? await sql<DocumentStageRow[]>`
-        select stage_name, status, attempts, artifact_uri, stats, error, updated_at::text
+        select stage_name, status, attempts, artifact_uri, stats, error, failure, updated_at::text
         from document_run_stage_states
         where run_id = ${row.run_id} and document_id = ${docId}
         order by updated_at desc
@@ -1334,7 +1336,7 @@ export async function getDocumentViewerPayload(docId: string, userId: string): P
       },
       baseline: null
     }),
-    stages: stages.map(stage => ({ ...stage, error: publicDocumentError(stage.error), stats: publicDiagnostics(stage.stats) as Record<string, unknown> | null })),
+    stages: stages.map(stage => ({ ...stage, failure: publicDocumentFailure(stage.failure), error: publicDocumentError(stage.error), stats: publicDiagnostics(stage.stats) as Record<string, unknown> | null })),
     artifacts,
     source,
     pageStats: {
@@ -1743,8 +1745,8 @@ export async function getRealtimeViewerPayload(documentId: string, userId: strin
   if (!row) return null;
   const document = mapDocument(row);
   const stages = row.run_id ? await sql<{
-    stage_name: string; status: string; attempts: number; error: string | null; updated_at: string;
-  }[]>`select stage_name,status,attempts,error,updated_at::text from document_run_stage_states
+    stage_name: string; status: string; attempts: number; error: string | null; failure?: unknown; updated_at: string;
+  }[]>`select stage_name,status,attempts,error,failure,updated_at::text from document_run_stage_states
     where document_id=${documentId} and run_id=${row.run_id} order by stage_name limit 65` : [];
   if (stages.length > 64) throw new Error("snapshot_too_large");
   const [run] = row.run_id ? await sql<{
@@ -1780,7 +1782,7 @@ export async function getRealtimeViewerPayload(documentId: string, userId: strin
       updatedAt: document.updatedAt,
     },
     tags: document.tags,
-    stages: stages.map(stage => ({ ...stage, error: publicDocumentError(stage.error)?.slice(0,2048) ?? null })),
+    stages: stages.map(stage => ({ ...stage, failure: publicDocumentFailure(stage.failure), error: publicDocumentError(stage.error)?.slice(0,2048) ?? null })),
     pageStats: { pageCount: Math.max(pages?.pages ?? 0,document.pageCount), chunkCount: pages?.chunks ?? 0, pageTextCount: pages?.pages ?? 0 },
     run: run ? { id: run.id,projectId: run.project_id,stage: run.stage,status: run.status,updatedAt: run.updated_at } : null,
     usage: { document: documentUsage, run: fullRunUsage, estimatedDocument },

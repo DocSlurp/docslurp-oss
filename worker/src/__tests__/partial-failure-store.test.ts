@@ -184,7 +184,9 @@ describe("partial Document failure in the store", () => {
     await withStore(async (store) => {
       const state = await loadRunState(store, "run-fail");
       await store.startDocumentStage(state, "run-fail-bad", "embed");
-      await store.failDocumentStage(state, "run-fail-bad", "embed", "unparseable");
+      await store.failDocumentStage(state, "run-fail-bad", "embed", "unparseable", undefined, undefined, { code: "source_rejected", retryable: false });
+      const saved = await db.query<{ failure: unknown }>("select failure from document_run_stage_states where run_id='run-fail' and document_id='run-fail-bad' and stage_name='embed'");
+      expect(saved.rows[0]?.failure).toEqual({ code: "source_rejected", retryable: false });
       await store.startDocumentStage(state, "run-fail-mid", "extract");
       await store.completeDocumentStage(state, "run-fail-mid", "extract", "s3://x", {});
       await store.failRun("run-fail", "embed", "database went away", { runId: "run-fail", orgId: "o1", projectId: "w" });
