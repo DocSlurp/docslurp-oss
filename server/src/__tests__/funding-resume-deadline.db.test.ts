@@ -60,9 +60,12 @@ afterAll(async () => {
   for (const session of sessions) session.destroy();
   await new Promise<void>(resolve => grpc.close(() => resolve()));
   await sql?.end(); await stop?.();
-  for (const [key, value] of [["WORKER_CREDIT_LEASES", previous.leases], ["CHAT_CREDIT_RESERVE_CREDITS", previous.funded], ["CHAT_CREDIT_RESERVE_STARTER_CREDITS", previous.starter]]) {
-    if (value === undefined) delete process.env[key!]; else process.env[key!] = value;
-  }
+  if (previous.leases === undefined) delete process.env.WORKER_CREDIT_LEASES;
+  else process.env.WORKER_CREDIT_LEASES = previous.leases;
+  if (previous.funded === undefined) delete process.env.CHAT_CREDIT_RESERVE_CREDITS;
+  else process.env.CHAT_CREDIT_RESERVE_CREDITS = previous.funded;
+  if (previous.starter === undefined) delete process.env.CHAT_CREDIT_RESERVE_STARTER_CREDITS;
+  else process.env.CHAT_CREDIT_RESERVE_STARTER_CREDITS = previous.starter;
 });
 
 it("cancels a stalled resume RPC, releases SQL/credit locks and retries without a false resume", async () => {
