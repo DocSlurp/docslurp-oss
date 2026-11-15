@@ -975,7 +975,8 @@ function samlCallbackUrl(c: any, org: OrgRow): string {
   return `${inferApiOrigin(c.req.raw)}/v1/auth/saml/${encodeURIComponent(org.slug ?? org.id)}/callback`;
 }
 
-function createSamlClient(c: any, org: OrgRow, samlMetadata: SamlMetadata, uniqueId?: string, sensitiveRequest?: SsoRequestRow, forceAuthn = false): SAML {
+function createSamlClient(c: any, org: OrgRow, samlMetadata: SamlMetadata, uniqueId?: string, callbackRequest?: SsoRequestRow, forceAuthn = false): SAML {
+  if (!samlMetadata.issuer) throw new Error("SAML requires an explicit IdP issuer");
   return new SAML({
     entryPoint: samlMetadata.entryPoint,
     idpCert: samlMetadata.certificates,
@@ -983,8 +984,8 @@ function createSamlClient(c: any, org: OrgRow, samlMetadata: SamlMetadata, uniqu
     callbackUrl: samlCallbackUrl(c, org),
     identifierFormat: null,
     validateInResponseTo: ValidateInResponseTo.always,
-    cacheProvider: sensitiveRequest ? sensitiveSamlRequestCache(sensitiveRequest.state, sensitiveRequest.created_at ?? "", sensitiveRequest.expires_at) : createSamlRequestCacheProvider(org.id),
-    ...(sensitiveRequest || forceAuthn ? { forceAuthn: true } : {}),
+    cacheProvider: callbackRequest ? sensitiveSamlRequestCache(callbackRequest.state, callbackRequest.created_at ?? "", callbackRequest.expires_at) : createSamlRequestCacheProvider(org.id),
+    ...(callbackRequest?.sensitive_user_id || forceAuthn ? { forceAuthn: true } : {}),
     ...(uniqueId ? { generateUniqueId: () => uniqueId } : {}),
     disableRequestedAuthnContext: true,
     acceptedClockSkewMs: 5_000,
@@ -1467,7 +1468,7 @@ export const samlCallbackRoutes = new Hono()
     }
 
     const samlMetadata = await fetchSamlMetadata(config.metadataUrl!);
-    const validated = await createSamlClient(c, org, samlMetadata, undefined, requestRow.sensitive_user_id ? requestRow : undefined).validatePostResponseAsync({ SAMLResponse: samlResponse });
+    const validated = await createSamlClient(c, org, samlMetadata, undefined, requestRow).validatePostResponseAsync({ SAMLResponse: samlResponse });
     const profile = validated.profile as Record<string, unknown> | null;
     if (!profile) {
       return apiStatusError(c, 400, "SAML response did not contain an authenticated profile");
