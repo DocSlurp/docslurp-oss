@@ -264,8 +264,11 @@ export async function readPagesWithProvider(outcome: OcrReadOutcome, provider: P
       bump(summary.skipped, admission.skip, ready.length - start);
       break;
     }
-    const { ticket } = admission;
+    const { ticket, reservedCents } = admission;
     let jobCostCents = 0;
+    // A job that throws may have run a VM it could not report (a lease that failed while booting, an abort): it keeps at
+    // least its reservation, so cancelling jobs never releases spend the ledger did not see.
+    let jobFailed = true;
     try {
       const byKey = new Map<string, OcrPageRead>();
       const job: PageImageReadJob = { scope: { ...scope }, pages: [] };
@@ -305,6 +308,7 @@ export async function readPagesWithProvider(outcome: OcrReadOutcome, provider: P
       }
       let tokens = recordProviderUsage(usage, provider, ctx, { pages: chunk.length, outcome: "completed" });
       jobCostCents += tokens.costCents;
+      jobFailed = false;
       if (!tokens.inputTokens && !tokens.outputTokens) {
         for (const result of results.values()) {
           if (result.status !== "read") continue;
@@ -328,7 +332,7 @@ export async function readPagesWithProvider(outcome: OcrReadOutcome, provider: P
         summary.replaced += 1;
       }
     } finally {
-      await settleJob(ctx, ticket, jobCostCents);
+      await settleJob(ctx, ticket, jobFailed ? Math.max(reservedCents, jobCostCents) : jobCostCents);
     }
   }
   return logSummary(summary, ctx);
@@ -339,7 +343,7 @@ export async function readPagesWithProvider(outcome: OcrReadOutcome, provider: P
  * when the day's committed cost plus this job's reservation would pass the cap, `budget-ledger-unavailable` when the ledger
  * cannot answer (fail closed: no answer, no job).
  */
-async function admitJob(provider: PageImageReaderProvider, ctx: PageReaderContext, orgId: string, pages: number): Promise<{ ticket: string } | { skip: "org-daily-cost-cap" | "budget-ledger-unavailable" }> {
+async function admitJob(provider: PageImageReaderProvider, ctx: PageReaderContext, orgId: string, pages: number): Promise<{ ticket: string; reservedCents: number } | { skip: "org-daily-cost-cap" | "budget-ledger-unavailable" }> {
   const budget = ctx.state.pageReaderBudget === undefined ? processPageReaderOrgBudget : ctx.state.pageReaderBudget;
   if (!budget) {
     console.error(`[ocr] page-reader stopped document=${ctx.documentId}: no organization spend ledger`);
@@ -355,7 +359,7 @@ async function admitJob(provider: PageImageReaderProvider, ctx: PageReaderContex
   }
   try {
     const admission = await budget.admit({ orgId, reserveCents, capCents });
-    if (admission.admitted) return { ticket: admission.ticket };
+    if (admission.admitted) return { ticket: admission.ticket, reservedCents: reserveCents };
     console.warn(
       `[ocr] page-reader stopped document=${ctx.documentId}: organization reader cost today ${admission.committedCents.toFixed(2)} cents ` +
         `plus this job's ${reserveCents.toFixed(2)} reaches the daily cap ${capCents}`,

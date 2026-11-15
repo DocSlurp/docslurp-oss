@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { OCR_ROUTE_OPTIONS, selectOcrRoute } from "../tier-options.js";
 
-const measured = { evalScore: 0.925 };
+const measured = { evalScore: 0.95 };
 
 describe("scanned-page OCR route tiers", () => {
   it("fastest is the recogniser alone, with hosted escalation of doubted pages as configured", () => {
@@ -21,6 +21,19 @@ describe("scanned-page OCR route tiers", () => {
       expect(selectOcrRoute("smart", { pageReader, hostedEscalation: true }).pageReader).toBe("off");
       expect(selectOcrRoute("balanced", { pageReader, hostedEscalation: true }).pageReader).toBe("off");
     }
+  });
+
+  it("never picks a reader at or under the recogniser alone, even with escalation off", () => {
+    expect(selectOcrRoute("smart", { pageReader: { evalScore: 0.1 }, hostedEscalation: false }).pageReader).toBe("off");
+    expect(selectOcrRoute("balanced", { pageReader: { evalScore: 0.1 }, hostedEscalation: false }).pageReader).toBe("off");
+  });
+
+  it("treats a hosted escalation model other than the measured one as unmeasured", () => {
+    const other = { pageReader: null, hostedEscalation: true, hostedEscalationModel: "llm://openrouter/some/other-model" };
+    expect(selectOcrRoute("smart", other).optionId).toBe("scan-ocr/recogniser");
+    expect(selectOcrRoute("smart", { ...other, hostedEscalationModel: "llm://deepinfra/Qwen/Qwen3-VL-30B-A3B-Instruct" }).optionId).toBe("scan-ocr/hosted-escalation");
+    // A page reader measured above the recogniser still wins smart when the escalation model is unmeasured.
+    expect(selectOcrRoute("smart", { ...other, pageReader: { evalScore: 0.6 } }).pageReader).toBe("all");
   });
 
   it("falls back to the recogniser when nothing else is available", () => {

@@ -72,8 +72,13 @@ export class PostgresPageReaderOrgBudget implements PageReaderOrgBudget {
   async admit({ orgId, reserveCents, capCents }: PageReaderAdmitRequest): Promise<PageReaderAdmission> {
     const reserve = cents(reserveCents);
     return await this.sql.begin(async (tx: Tx) => {
+      // A holder that never lets go makes this admission fail (closed) instead of waiting forever.
+      await tx`set local lock_timeout = '10s'`;
       await tx`select pg_advisory_xact_lock(hashtextextended(${`ocr-page-reader-org:${orgId}`}, 0))`;
-      await tx`delete from ocr_page_reader_org_spend where org_id = ${orgId} and day < (now() at time zone 'utc')::date - 1`;
+      // Older days, of any organization, a bounded batch per admission.
+      await tx`
+        delete from ocr_page_reader_org_spend
+        where id in (select id from ocr_page_reader_org_spend where day < (now() at time zone 'utc')::date - 1 limit 500)`;
       const [row] = await tx<{ committed: string | number }[]>`
         select coalesce(sum(case when settled then cost_cents else greatest(reserved_cents, cost_cents) end), 0) as committed
         from ocr_page_reader_org_spend

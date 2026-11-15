@@ -35,7 +35,11 @@ export function ocrPageReaderRoute(tier: RouteTier, env: NodeJS.ProcessEnv = pro
   const provider = pageImageReaderProvider();
   // DOCSLURP_OCR_ESCALATION, read as hosted-reader.ts ocrEscalationEnabled does (not imported: this module stays free of the pipeline).
   const escalation = ["on", "1", "true"].includes(env.DOCSLURP_OCR_ESCALATION?.trim().toLowerCase() ?? "");
-  return selectOcrRoute(tier, { pageReader: provider ? { evalScore: provider.evalScore ?? null } : null, hostedEscalation: escalation });
+  return selectOcrRoute(tier, {
+    pageReader: provider ? { evalScore: provider.evalScore ?? null } : null,
+    hostedEscalation: escalation,
+    hostedEscalationModel: env.DOCSLURP_OCR_ESCALATION_MODEL ?? null,
+  });
 }
 
 /** `DOCSLURP_OCR_PAGE_READER_MAX_PAGES`: the per-document page budget, 0..20000 (default 2000). Throws on anything else. */

@@ -101,6 +101,8 @@ export type OcrRouteReader = (typeof OCR_ROUTE_READERS)[number];
 export interface OcrRouteOption {
   readonly id: string;
   readonly reader: OcrRouteReader;
+  /** The model the score was measured on (hosted escalation): another configured model is unmeasured. */
+  readonly model?: string;
   readonly tiers: readonly RouteTier[];
   readonly evalScore: number | null;
   readonly evalRef: string | null;
@@ -118,6 +120,7 @@ export const OCR_ROUTE_OPTIONS: readonly OcrRouteOption[] = Object.freeze([
   {
     id: "scan-ocr/hosted-escalation",
     reader: "hosted-escalation",
+    model: "llm://deepinfra/Qwen/Qwen3-VL-30B-A3B-Instruct",
     tiers: ["balanced", "smart"],
     // Production route and prompt: composite 0.913 (tolerant text 0.922, tables 0.874, math 0.989).
     evalScore: 0.913,
@@ -144,13 +147,16 @@ export interface OcrRouteAvailability {
   readonly pageReader: { readonly evalScore: number | null } | null;
   /** Whether hosted escalation is enabled for this deployment. */
   readonly hostedEscalation: boolean;
+  /** The configured escalation model (DOCSLURP_OCR_ESCALATION_MODEL); unset means the default the score was measured on. */
+  readonly hostedEscalationModel?: string | null;
 }
 
 /**
  * The OCR route of a tier. fastest: the recogniser alone (doubted pages still escalate when escalation is on).
  * smart: the best-scored available reader of every scanned page, the hosted escalation reader as the fallback.
  * balanced: the page reader on the pages the recogniser doubts when one is registered and measured, else hosted
- * escalation of those pages. A page reader without a score is never chosen.
+ * escalation of those pages. A reader without a score, or scoring at or under the recogniser alone, is never chosen; a
+ * hosted escalation model other than the one measured is unmeasured.
  */
 export function selectOcrRoute(tier: RouteTier, available: OcrRouteAvailability, options: readonly OcrRouteOption[] = OCR_ROUTE_OPTIONS): OcrRoute {
   const escalation = available.hostedEscalation;
@@ -159,11 +165,16 @@ export function selectOcrRoute(tier: RouteTier, available: OcrRouteAvailability,
       const measured = available.pageReader?.evalScore;
       return typeof measured === "number" && Number.isFinite(measured) && measured >= 0 && measured <= 1 ? measured : null;
     }
-    if (option.reader === "hosted-escalation" && !escalation) return null;
+    if (option.reader === "hosted-escalation") {
+      if (!escalation) return null;
+      const configured = available.hostedEscalationModel?.trim();
+      if (configured && option.model && configured !== option.model) return null;
+    }
     return option.evalScore;
   };
-  const eligible = options.filter((option) => option.tiers.includes(tier) && score(option) !== null);
   const recogniser = options.find((option) => option.reader === "recogniser")!;
+  const floor = recogniser.evalScore ?? 0;
+  const eligible = options.filter((option) => option.tiers.includes(tier) && (score(option) ?? -1) > floor);
   const fallback: OcrRoute = { optionId: recogniser.id, pageReader: "off", hostedEscalation: escalation };
   if (tier === "fastest" || !eligible.length) return fallback;
   if (tier === "smart") {

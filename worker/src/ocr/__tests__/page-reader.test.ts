@@ -105,7 +105,7 @@ describe("configuration", () => {
     };
     // No reader registered: every tier keeps the recogniser route.
     for (const tier of ["fastest", "balanced", "smart"]) expect(ocrPageReaderMode({ DOCSLURP_OCR_PAGE_READER: tier })).toBe("off");
-    register({ evalScore: 0.925, evalRef: "tier-benchmark-v1/page-ocr/development/run" });
+    register({ evalScore: 0.95, evalRef: "tier-benchmark-v1/page-ocr/development/run" });
     expect(ocrPageReaderMode({ DOCSLURP_OCR_PAGE_READER: "fastest" })).toBe("off");
     expect(ocrPageReaderMode({ DOCSLURP_OCR_PAGE_READER: "balanced" })).toBe("escalation");
     expect(ocrPageReaderMode({ DOCSLURP_OCR_PAGE_READER: "smart", DOCSLURP_OCR_ESCALATION: "on" })).toBe("all");
@@ -400,6 +400,19 @@ describe("readPagesWithProvider", () => {
     broken.pageReaderBudget = { admit: async () => { throw new Error("database down"); }, settle: async () => undefined };
     expect((await readPagesWithProvider(await outcomeWith([{ pageNumber: 1 }]), provider, ctx(broken))).skipped).toEqual({ "budget-ledger-unavailable": 1 });
     expect(provider.read).not.toHaveBeenCalled();
+  });
+
+  it("settles a failed job at no less than its reservation (a VM it could not report still ran)", async () => {
+    const state = runState();
+    const budget = state.pageReaderBudget as InMemoryPageReaderOrgBudget;
+    const settle = vi.spyOn(budget, "settle");
+    const provider = reader(async () => { throw new Error("lease failed while booting"); }, { estimateJobCostCents: () => 4 });
+    await readPagesWithProvider(await outcomeWith([{ pageNumber: 1 }]), provider, ctx(state));
+    expect(settle).toHaveBeenCalledWith(expect.any(String), 4);
+    // A completed job settles at what it recorded, below its reservation.
+    const ok = reader(echo, { estimateJobCostCents: () => 4 });
+    await readPagesWithProvider(await outcomeWith([{ pageNumber: 2 }]), ok, ctx(state));
+    expect(settle).toHaveBeenLastCalledWith(expect.any(String), 0.3);
   });
 
   it("settles a failed job with the cost it carried", async () => {

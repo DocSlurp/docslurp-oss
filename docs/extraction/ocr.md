@@ -170,9 +170,12 @@ Reader usage bills 0 credits, so the run cost cap does not bound it: `DOCSLURP_O
 (default 2000, 0 to 10000000; 0 sends nothing) caps the provider cost one organization's reader jobs may commit per UTC
 day, across every worker. Each job is admitted against a shared ledger before it is sent: under the organization's
 advisory lock, the day's settled cost plus the reservations of unsettled jobs plus this job's reservation (the provider's
-optional `estimateJobCostCents`) must stay within the cap, or the job's pages keep the recogniser read. A job settles its
-reservation with the cost it recorded; a job that never settles (a crashed worker) keeps its reservation for the day, and a
-ledger that cannot answer sends nothing. Token counts over 100,000 per page are rejected, control characters are stripped from returned Markdown,
+optional `estimateJobCostCents`) must stay within the cap, or the job's pages keep the recogniser read. A completed job
+settles its reservation with the cost it recorded; a job that throws (a lease that failed while booting, an abort) settles
+at no less than its reservation, since it may have run a VM it could not report; a job that never settles (a crashed
+worker) keeps its reservation for the day. A ledger that cannot answer, or whose organization lock is not free within
+10 s, sends nothing. A tier word never picks a reader scoring at or under the recogniser alone, and treats a hosted
+escalation model other than the measured one as unmeasured. Token counts over 100,000 per page are rejected, control characters are stripped from returned Markdown,
 and any error inside the reader path is logged and leaves the pages with their reads (only an abort propagates).
 
 Budget and cost: `DOCSLURP_OCR_PAGE_READER_MAX_PAGES` (default 2000, 0 to 20000) bounds the pages a document sends,
