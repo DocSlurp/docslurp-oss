@@ -10,6 +10,7 @@ import {
   pageReadingQuality,
   pipelineLadderSchema,
   planLadder,
+  tighterLadder,
   type LadderPageNeed,
 } from "./auto-ladder.js";
 import { defaultPipelineFeatures, estimatePipelineWork, normalizePipelineFeatures, pipelineFeatureOverridesSchema, quoteEstimate, quoteUpload, estimateProfileFor, quoteSettingsForPipeline } from "./index.js";
@@ -72,6 +73,19 @@ describe("pipeline.ladder settings", () => {
     expect(ladderAllowsMore(auto({ maxRung: "intelligent" }), auto({ maxRung: "ocr" }))).toBe(false);
     expect(ladderAllowsMore(auto({ maxRung: "intelligent", maxEscalationShare: { aboveFast: 0.2 } }), auto({ maxRung: "intelligent" }))).toBe(true);
     expect(ladderAllowsMore(auto({ maxRung: "intelligent" }), auto({ maxRung: "intelligent", maxEscalationShare: { aboveFast: 0.2 } }))).toBe(false);
+  });
+});
+
+describe("tighterLadder (run overrides from non-editors)", () => {
+  it("keeps the stricter limit of each kind and never loosens the project's", () => {
+    expect(tighterLadder({ maxRung: "ocr" }, { maxRung: "intelligent" })).toEqual({ maxRung: "ocr" });
+    expect(tighterLadder({ maxRung: "intelligent" }, { maxRung: "fast" })).toEqual({ maxRung: "fast" });
+    expect(tighterLadder({ maxRung: "intelligent", maxEscalationShare: { aboveFast: 0.2 } }, { maxRung: "intelligent", maxEscalationShare: null }))
+      .toEqual({ maxRung: "intelligent", maxEscalationShare: { aboveFast: 0.2 } });
+    expect(tighterLadder({ maxRung: "intelligent", maxEscalationShare: { aboveFast: 0.2 } }, { maxRung: "intelligent", maxEscalationShare: { aboveFast: 0.9, aboveOcr: 0.5 } }))
+      .toEqual({ maxRung: "intelligent", maxEscalationShare: { aboveFast: 0.2, aboveOcr: 0.2 } });
+    expect(tighterLadder(null, { maxRung: "ocr", maxEscalationShare: { aboveFast: 0.1 } })).toEqual({ maxRung: "ocr", maxEscalationShare: { aboveFast: 0.1 } });
+    expect(tighterLadder(null, null)).toEqual({ maxRung: "intelligent" });
   });
 });
 

@@ -132,6 +132,31 @@ export function ladderChartExportTier<T extends string | null | undefined>(pipel
   return tier === "models" && LADDER_RUNG_RANK[effectiveLadder(pipeline).maxRung] < LADDER_RUNG_RANK.intelligent ? "free" : tier;
 }
 
+/**
+ * The stricter of two ladders, limit by limit: the lower `maxRung` and, for each share, the smaller one (unset means no
+ * cap). A run override from a caller who cannot edit the project goes through this with the project's stored ladder, so
+ * it can only tighten the project's limits, never loosen them.
+ */
+export function tighterLadder(project: Partial<PipelineLadder> | null | undefined, run: Partial<PipelineLadder> | null | undefined): PipelineLadder {
+  const rung = (value: unknown): LadderRung => (ladderRungSchema.safeParse(value).success ? value as LadderRung : "intelligent");
+  const a = rung(project?.maxRung);
+  const b = rung(run?.maxRung);
+  const maxRung = LADDER_RUNG_RANK[a] <= LADDER_RUNG_RANK[b] ? a : b;
+  const pick = (x: unknown, y: unknown): number | undefined => {
+    const values = [share(x), share(y)].filter((value): value is number => value !== undefined);
+    return values.length ? Math.min(...values) : undefined;
+  };
+  const aboveFast = pick(project?.maxEscalationShare?.aboveFast, run?.maxEscalationShare?.aboveFast);
+  let aboveOcr = pick(project?.maxEscalationShare?.aboveOcr, run?.maxEscalationShare?.aboveOcr);
+  if (aboveFast !== undefined && aboveOcr !== undefined && aboveOcr > aboveFast) aboveOcr = aboveFast;
+  return {
+    maxRung,
+    ...(aboveFast !== undefined || aboveOcr !== undefined
+      ? { maxEscalationShare: { ...(aboveFast !== undefined ? { aboveFast } : {}), ...(aboveOcr !== undefined ? { aboveOcr } : {}) } }
+      : {}),
+  };
+}
+
 /** Pages of a `pageCount`-page document a share allows: floor(share x pages), a maximum never rounded up. */
 export function ladderShareBudget(shareValue: number | undefined, pageCount: number): number {
   const pages = Math.max(0, Math.floor(Number.isFinite(pageCount) ? pageCount : 0));

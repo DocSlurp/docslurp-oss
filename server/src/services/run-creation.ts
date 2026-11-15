@@ -1,7 +1,7 @@
 import { bindIntakeReceipt } from "./intake-receipt-context.js";
 import { randomUUID } from "node:crypto";
 
-import { chartExportModelsAllowed, minChartExportTier, projectChartExportTierCap, upgradeStoredChartExport, type ChartExportTier, type ResolvedChartExportConfig, type RunOrigin } from "@docslurp/shared";
+import { chartExportModelsAllowed, minChartExportTier, tighterLadder, type PipelineLadder, projectChartExportTierCap, upgradeStoredChartExport, type ChartExportTier, type ResolvedChartExportConfig, type RunOrigin } from "@docslurp/shared";
 import { assertChartExportModelsCeiling, stampRunChartExport } from "./chart-export-availability.js";
 import {
   assertPipelineSpeedBoost,
@@ -950,6 +950,17 @@ export function createRunCreation(deps: RunCreationDeps) {
       storedSummaryTree(access.pipeline)),
     };
     assertPipelineSpeedBoost(input.pipeline);
+    // The project's Auto ladder limits (pipeline.ladder) are a ceiling for callers who cannot edit the project: their run
+    // override may tighten them (a lower rung, a smaller share), never loosen them. Clamped, not refused.
+    if (!canEditProject(access, input.userId)) {
+      const projectLadder = (access.pipeline as { ladder?: Partial<PipelineLadder> | null } | null | undefined)?.ladder ?? null;
+      const runLadder = (input.pipeline as { ladder?: Partial<PipelineLadder> | null }).ladder ?? null;
+      const clamped = tighterLadder(projectLadder, runLadder);
+      if (JSON.stringify(clamped) !== JSON.stringify(runLadder)) {
+        console.log(`[run-creation] ladder override clamped to the project's limits project=${input.projectId}`);
+      }
+      input.pipeline = { ...input.pipeline, ladder: clamped } as typeof input.pipeline;
+    }
     // The project's explicit chart tier is a ceiling: `models` above a stored `off`/`free` needs editor rights (and, for
     // an API key, the billed-features scope). Every run (upload, URL, extract, MCP, reprocess) lands here.
     await assertChartExportModelsCeiling({
