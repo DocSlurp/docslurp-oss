@@ -174,6 +174,12 @@ export interface PricingProvider {
    * `visualExportRetryCredits()` to every model-read visual they price.
    */
   chartExportExpectedRetriesPerRead(): number;
+  /**
+   * Optional. Credits for one summary-tree unit: one section-summary model call that returned (billing.ts
+   * `summaryTreeUnitPrice`). A provider without this method has no price for the unit, and a deployment that bills
+   * (`summaryTreeBillingActive`) then builds no summary tree: the unit is never priced from a default.
+   */
+  summaryTreeCallCredits?(): number;
   /** Multiplier on unit charges for the opt-in speed boost (1 when off). */
   speedBoostMultiplier(speedBoost: boolean): number;
   /** Share of the completion page charge a run pays, given the stages it executes and reuses. */

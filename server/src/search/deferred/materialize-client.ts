@@ -16,6 +16,7 @@ import { sql } from "../../db.js";
 import { startMaterializeWorkflow } from "../../lib/temporal.js";
 import { assertCanSpend, canSpend, isSpendBlockedError } from "../../services/billing/spend-guard.js";
 import { enforceLiveBudgetCaps } from "../../services/run-creation.js";
+import { storedSummaryTree, withProjectSummaryTree } from "../../services/run-summary-tree.js";
 import type { MaterializeEvent } from "./deferred-context.js";
 
 export const MATERIALIZE_POLL_MS = 250;
@@ -91,9 +92,9 @@ export const defaultMaterializeDeps: MaterializeDeps = {
     // so the stale-lease alerts and health counts flag a materialize run only when its worker really died.
     // The stored source pipeline may predate the strict extractor schemas: drop what they reject (a Dolphin
     // repoPath, an unknown extractor id) before it is copied into the new run, as every other run path does.
-    const [source] = await sql<{ pipeline: Record<string, unknown> | null; managed: unknown; origin: string | null }[]>`
+    const [source] = await sql<{ pipeline: Record<string, unknown> | null; managed: unknown; origin: string | null; summary_tree: unknown }[]>`
       select coalesce(nullif(r.pipeline, '{}'::jsonb), nullif(w.pipeline, '{}'::jsonb), '{}'::jsonb) as pipeline,
-        w.managed_models -> 'pipeline' as managed, r.origin
+        w.managed_models -> 'pipeline' as managed, r.origin, w.pipeline -> 'summaryTree' as summary_tree
       from (select 1) one
       left join documents d on d.id = ${args.documentId} and d.project_id = ${args.projectId}
       left join project_runs r on r.id = d.run_id and r.project_id = ${args.projectId}
@@ -107,7 +108,11 @@ export const defaultMaterializeDeps: MaterializeDeps = {
     ).pipeline;
     // A materialize run reads pages a query needs: never chart export beyond what the source run already resolved (a
     // project pipeline with no stamped tier resolves as machine, i.e. off by default).
-    const pipeline = stampRunChartExport(resolved as PipelineFeatures, "machine", process.env, { stamped: true });
+    // The summary tree is the project's stored setting, not the source run's snapshot (run-summary-tree.ts).
+    const pipeline = withProjectSummaryTree(
+      stampRunChartExport(resolved as PipelineFeatures, "machine", process.env, { stamped: true }),
+      storedSummaryTree({ summaryTree: source?.summary_tree }),
+    );
     const origin = source?.origin === "app" ? "app" : "machine";
     return acceptChatRunDependency({ ...args, pages: args.pageNumbers ?? [] }, async tx => {
     await assertCanSpend(args.orgId, args.projectId, { client: tx, kind: "interactive", hold: false });

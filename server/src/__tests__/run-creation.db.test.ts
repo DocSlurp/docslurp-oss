@@ -17,7 +17,7 @@ const prepare = vi.fn();
 const startWorkflow = vi.fn(async () => {});
 /** What intake sniffs for a PDF; the mocked resolveSourceMetadata returns it beside the counts. */
 const pdfFacts = { declaredMimeType: "application/pdf", sniffedMimeType: "application/pdf", mimeType: "application/pdf", format: "pdf", container: null, encoding: null, mismatch: "none" };
-const files = ["a.pdf", "b.pdf"].map((filename) => ({ filename, mimeType: "application/pdf", sourceKey: `u/raw/${filename}` }));
+const files = ["a.pdf", "b.pdf"].map((filename) => ({ filename, mimeType: "application/pdf", sourceKey: `u/raw/${filename}`, fileSize: 1000 }));
 const input = {
   userId: "u", projectId: "w", kind: "bulk-upload", pipeline: defaultPipelineFeatures,
   sources: { kind: "files" as const, files },
@@ -193,8 +193,8 @@ describe("Run creation and recovery together", () => {
   });
 
   it("cleans abandoned creation even if every Document was inserted but publication never committed", async () => {
-    await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, total_documents, creation_source_keys, creation_expires_at)
-      values ('half', 'o', 'u', 'w', 'bulk-upload', 'queued', 'queued', 1, ${["u/raw/a.pdf"]}, now() - interval '1 second')`;
+    await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, total_documents, creation_source_keys, creation_expires_at, monthly_reservation_cents)
+      values ('half', 'o', 'u', 'w', 'bulk-upload', 'queued', 'queued', 1, ${["u/raw/a.pdf"]}, now() - interval '1 second', 1)`;
     await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count)
       values ('half-doc', 'o', 'u', 'w', 'half', 'a.pdf', 'application/pdf', 'u/raw/a.pdf', 'queued', 3)`;
     expect(await recovery.sweepOnce()).toMatchObject({ claimed: 0 });
@@ -467,4 +467,11 @@ it("stores upload tags atomically and retains them on reprocessing", async () =>
   const reprocessed = await runCreation.create({ ...input, sources: { kind: "versionsOf", documentIds: [originalId] } });
   const copied = await sql`select tag from document_tags where document_id = ${reprocessed.documents[0]!.id} order by tag`;
   expect(copied.map((row) => row.tag)).toEqual(["FY26", "finance"]);
+});
+
+it.each([undefined, 0, -1, NaN, Infinity])("refuses unknown source workload (%s) before publishing", async fileSize => {
+  await expect(runCreation.create({ ...input, sources: { kind: "files", files: [{ ...files[0]!, fileSize }] } }))
+    .rejects.toThrow(/trusted positive source size/);
+  expect(await sql`select id from project_runs`).toHaveLength(0);
+  expect(start).not.toHaveBeenCalled();
 });

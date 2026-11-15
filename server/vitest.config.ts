@@ -19,6 +19,7 @@ export default defineConfig({
   },
   resolve: {
     alias: {
+      "@docslurp/shared/page-table-routing": shared("page-table-routing"),
       "@docslurp/worker/testing": resolve(__dirname, "../worker/src/testing.ts"),
       "@docslurp/shared/cancellation": shared("cancellation"),
       "@docslurp/shared/pricing-loader": shared("pricing-loader"),

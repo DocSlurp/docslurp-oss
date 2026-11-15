@@ -118,3 +118,24 @@ describe("conversational search configuration", () => {
     expect(await loadChatSessionSearchOverrides("session")).toEqual({});
   });
 });
+
+describe("chatSummaryTreeOverride", () => {
+  it("sends the summary-tree mode only when the thread or request changed it from the project default", async () => {
+    const { defaultProjectSearchSettings } = await import("@docslurp/shared");
+    const { chatSummaryTreeOverride, withThreadRetrieval } = await import("../services/chat-search-options.js");
+    const project = { ...defaultProjectSearchSettings, projectId: "p", userId: "u" };
+    // No override: the project default decides inside search, and stays silent where it cannot run.
+    expect(chatSummaryTreeOverride(withThreadRetrieval(project, {}), project)).toBeUndefined();
+    const guideProject = { ...project, retrievalDefaults: { ...project.retrievalDefaults, summaryTree: "guide" as const } };
+    expect(chatSummaryTreeOverride(withThreadRetrieval(guideProject, { useRerank: true }), guideProject)).toBeUndefined();
+    // A thread or request override is an explicit ask.
+    expect(chatSummaryTreeOverride(withThreadRetrieval(project, { summaryTree: "guide" }), project)).toBe("guide");
+    // Chat never asks for `include`: summaries have no isolated place in a turn. It runs as an explicit `guide`,
+    // whether a thread, a request or the project default asked for it.
+    expect(chatSummaryTreeOverride(withThreadRetrieval(project, { summaryTree: "include" }), project)).toBe("guide");
+    const includeProject = { ...project, retrievalDefaults: { ...project.retrievalDefaults, summaryTree: "include" as const } };
+    expect(chatSummaryTreeOverride(withThreadRetrieval(includeProject, {}), includeProject)).toBe("guide");
+    expect(chatSummaryTreeOverride(withThreadRetrieval(guideProject, { summaryTree: "guide" }, { summaryTree: "include" }), guideProject)).toBe("guide");
+    expect(chatSummaryTreeOverride(withThreadRetrieval(guideProject, { summaryTree: "guide" }, { summaryTree: "off" }), guideProject)).toBe("off");
+  });
+});

@@ -9,7 +9,17 @@ export type EvidenceAdapterName =
   | "graph"
   | "community"
   | "progressive-page"
-  | "completed-page";
+  | "completed-page"
+  /** The summary tree (search/summary-tree.ts). Its chunks are placed after fusion; they are never a fusion list. */
+  | "summary-tree";
+
+/** What the parallel path tells a leg about its peers. */
+export interface EvidenceLegTiming {
+  /** `performance.now()` when the legs started. */
+  startedAt: number;
+  /** The chunk vector leg's elapsed ms since `startedAt`, once it settles (resolved or rejected). */
+  vectorSettled: Promise<number>;
+}
 
 export interface EvidenceRetrievalContext {
   query: string;
@@ -35,6 +45,7 @@ export interface EvidenceRetrievalAdapter {
   retrieve(
     context: EvidenceRetrievalContext,
     previousResults: Partial<Record<EvidenceAdapterName, SearchChunk[]>>,
+    timing?: EvidenceLegTiming,
   ): Promise<SearchChunk[]>;
 }
 
@@ -72,6 +83,17 @@ export interface EvidenceRetrievalFns {
     projectId: string;
     options: SearchOptions;
     shouldSearch: boolean;
+  }): Promise<SearchChunk[]>;
+  /**
+   * The summary-tree leg, present only when this search runs it (parallel path only). It settles within its
+   * deadline of the vector leg and never rejects; its result is read with `summaryTreeLegResultOf`.
+   */
+  summaryTreeSearch?(args: {
+    query: string;
+    queryVector: number[] | null;
+    projectId: string;
+    options: SearchOptions;
+    timing: EvidenceLegTiming;
   }): Promise<SearchChunk[]>;
 }
 
@@ -157,6 +179,21 @@ export function createEvidenceRetrievalAdapters(
           : skippedLeg();
       },
     },
+    // Last, so the vector leg has started by the time this one is given its settle time.
+    ...(fns.summaryTreeSearch ? [{
+      name: "summary-tree" as const,
+      retrieve: async (context: EvidenceRetrievalContext, _previous: Partial<Record<EvidenceAdapterName, SearchChunk[]>>, timing?: EvidenceLegTiming) =>
+        // Without peer timing (the sequential path) there is no deadline to hold the leg to: it does not run.
+        timing
+          ? fns.summaryTreeSearch!({
+              query: context.query,
+              queryVector: await context.queryVector,
+              projectId: context.projectId,
+              options: context.options,
+              timing,
+            })
+          : skippedLeg(),
+    }] : []),
   ];
 }
 
@@ -172,7 +209,7 @@ export async function retrieveEvidence(
 
   for (const adapter of adapters) {
     const startedAt = performance.now();
-    const chunks = await adapter.retrieve(context, previousResults);
+    const chunks = adapter.name === "summary-tree" ? skippedLeg() : await adapter.retrieve(context, previousResults);
     if (streaming) reportLeg(adapter.name, chunks, startedAt, context);
     previousResults[adapter.name] = chunks;
     results.push({ adapter: adapter.name, chunks });
@@ -194,9 +231,16 @@ async function retrieveEvidenceInParallel(
   const streaming = currentSearchStreamSink() !== undefined;
   const startedAt = performance.now();
   for (const adapter of adapters) {
+    const elapsed = () => performance.now() - startedAt;
     const run = adapter.name === "completed-page"
       ? (pending.get("lexical") ?? Promise.resolve([] as SearchChunk[])).then((lexical) =>
           adapter.retrieve(context, { ...settled, lexical }))
+      : adapter.name === "summary-tree"
+      // The tree never fails a search: a rejection here is an empty leg.
+      ? adapter.retrieve(context, settled, {
+          startedAt,
+          vectorSettled: (pending.get("vector") ?? Promise.resolve([] as SearchChunk[])).then(elapsed, elapsed),
+        }).catch(() => skippedLeg())
       : adapter.retrieve(context, settled);
     // Observe rejections now; Promise.all below still surfaces the first one.
     run.catch(() => undefined);
@@ -215,7 +259,8 @@ function reportLeg(
   startedAt: number,
   context: EvidenceRetrievalContext,
 ): void {
-  if (skippedLegs.has(chunks)) return;
+  // The tree leg is not a stream leg: its chunks reach the client only in the final results.
+  if (leg === "summary-tree" || skippedLegs.has(chunks)) return;
   try {
     const timeoutEvent = LEG_TIMEOUT_EVENTS[leg];
     emitLegHits({

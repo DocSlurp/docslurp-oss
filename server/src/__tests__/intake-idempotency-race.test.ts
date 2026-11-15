@@ -59,7 +59,7 @@ vi.mock("../services/project-intake.js", async (original) => ({
 }));
 const { createBulkProjectIntake } = await import("../services/project-intake-actions.js");
 const args = { userId: "u", orgId: "o", project: "p", idempotencyKey: "same", files: [new File(["hello"], "a.txt", { type: "text/plain" })] };
-beforeEach(() => { state.rich = false; state.stableFailure = false; state.preRunFault = false; state.durable = null; state.persistReceipt = false; state.cacheFailure = false; state.cache.clear(); state.locks.clear(); state.executions = 0; state.access = true; state.contribute = true; state.keyLive = true; state.keyProjects = []; state.keyScopes = ["ingest"]; });
+beforeEach(() => { state.rich = false; state.stableFailure = false; state.preRunFault = false; state.durable = null; state.persistReceipt = true; state.cacheFailure = false; state.cache.clear(); state.locks.clear(); state.executions = 0; state.access = true; state.contribute = true; state.keyLive = true; state.keyProjects = []; state.keyScopes = ["ingest"]; });
 it("executes exactly one concurrent same-key intake and replays after completion", async () => {
   const results = await Promise.allSettled(Array.from({ length: 8 }, () => createBulkProjectIntake(args)));
   expect(state.executions).toBe(1);
@@ -70,7 +70,9 @@ it("executes exactly one concurrent same-key intake and replays after completion
 });
 it("never shares replay entries across tenants or API keys", async () => {
   await createBulkProjectIntake({ ...args, apiKeyId: "key-a" });
+  state.durable = null;
   await createBulkProjectIntake({ ...args, apiKeyId: "key-b" });
+  state.durable = null;
   await createBulkProjectIntake({ ...args, orgId: "other", apiKeyId: "key-a" });
   expect(state.executions).toBe(3);
 });
@@ -179,5 +181,13 @@ it("keeps the original extract receipt after cache expiry", async () => {
   state.cache.clear();
   const replay = await createBulkProjectIntake({...args, extract: {id:"retry-extract"} as never});
   expect(replay.payload.extract).toEqual(original.payload.extract);
+  expect(state.executions).toBe(1);
+});
+
+it.each([null, {}])("refuses cache replay without a complete durable envelope (%s)", async stable => {
+  state.persistReceipt = true;
+  await createBulkProjectIntake(args);
+  state.durable = { ...state.durable, stable_result: stable };
+  await expect(createBulkProjectIntake(args)).rejects.toMatchObject({ statusCode: 409 });
   expect(state.executions).toBe(1);
 });

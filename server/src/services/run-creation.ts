@@ -47,6 +47,7 @@ import {
 import { extractNotReprocessable } from "./reprocess-errors.js";
 import { assertVisualModeAllowed, IndexingModeError } from "./project-indexing-mode.js";
 import { EXTRACT_EXPIRED_MESSAGE, ExtractError } from "./extracts.js";
+import { storedSummaryTree, withProjectSummaryTree } from "./run-summary-tree.js";
 
 // Long source preparation renews this lease. Expiry only authorizes cleanup;
 // it never authorizes processing. Every document write and publication locks
@@ -938,11 +939,14 @@ export function createRunCreation(deps: RunCreationDeps) {
     // the worker never re-resolves it. A new run: request override, project tier, origin default. A replay (reprocess,
     // bulk reprocess): the request's explicit override, else the source run's stamp capped at what the project resolves
     // to now, so a project moved to off (or unset) never replays billed reads and never refuses a plain reprocess.
+    // The summary tree is the project's stored setting as it is now, whatever the caller's pipeline carries (a source
+    // run's snapshot on reprocess, a request body, a template): run-summary-tree.ts.
     const input: CreateRunInput = {
       ...request,
-      pipeline: request.chartExportReplay
+      pipeline: withProjectSummaryTree(request.chartExportReplay
         ? replayChartExport(sanitized, request.chartExportReplay.requested ?? null, projectChartExport, request.origin ?? "machine")
         : stampRunChartExport(sanitized, request.origin ?? "machine", process.env, { stamped: request.chartExportStamped === true }),
+      storedSummaryTree(access.pipeline)),
     };
     assertPipelineSpeedBoost(input.pipeline);
     // The project's explicit chart tier is a ceiling: `models` above a stored `off`/`free` needs editor rights (and, for
@@ -1004,7 +1008,14 @@ export function createRunCreation(deps: RunCreationDeps) {
         ...forecastPages(doc),
       }));
     // The preview schema needs at least one file; with none (an empty run) the call only validates the pipeline.
+    if (sources.kind === "files" && sources.files.some(file => !Number.isFinite(file.fileSize) || (file.fileSize ?? 0) <= 0)) {
+      throw new Error("Monthly admission requires trusted positive source size evidence");
+    }
     const validationFiles = forecastFilesOfSources();
+    if (validationFiles.some(file => !(Number.isFinite(file.sizeBytes) && file.sizeBytes > 0) &&
+        !(Number.isSafeInteger(file.pages) && (file.pages ?? 0) > 0))) {
+      throw new Error("Monthly admission requires trusted positive workload evidence");
+    }
     const admissionForecast = costForecastFor(validationFiles.length > 0 ? validationFiles : [{ filename: "validation.pdf", mimeType: "application/pdf", sizeBytes: 1, pages: 1 }]);
 
     const runId = input.runId ?? randomUUID();

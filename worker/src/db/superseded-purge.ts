@@ -3,6 +3,11 @@ import { setTimeout as delay } from "node:timers/promises";
 
 import {
   DEFAULT_RETAINED_VERSIONS,
+  isLanceDbVectorTable,
+  LANCEDB_CHUNKS_TABLE,
+  LANCEDB_SUMMARIES_TABLE,
+  SUMMARY_TREE_BUILD_STALE_MS,
+  SUMMARY_TREE_CLEANUP_KIND,
   MAX_RETAINED_VERSIONS,
   MIN_RETAINED_VERSIONS,
   resolveLanceDbConfig,
@@ -49,6 +54,9 @@ const DERIVED_TABLES = [
   "document_page_states",
   "document_maps",
   "document_page_vectors",
+  // Summary tree registry (no text); the summaries table rows go through deleteDocumentSummaries.
+  "document_summary_tree_nodes",
+  "document_summary_trees",
 ] as const;
 
 /**
@@ -68,6 +76,9 @@ const ARCHIVE_TABLES = [
   "document_page_states",
   "document_maps",
   "document_page_vectors",
+  // The summary tree is a search index: an archived version keeps none of it.
+  "document_summary_tree_nodes",
+  "document_summary_trees",
 ] as const;
 
 const SAFE_DOCUMENT_ID = /^[A-Za-z0-9_-]+$/;
@@ -86,7 +97,8 @@ export type DeleteVectorRows = (args: {
   /**
    * Also compact the table and prune every older version now (cleanupOlderThan: now), so the
    * deleted rows' text and vectors leave the bucket instead of lingering in old fragments for
-   * the version-retention window. Set for expired extracts.
+   * the version-retention window. Set for expired extracts and for every summaries-table delete.
+   * Strict: the call rejects unless compaction and history pruning succeeded.
    */
   purgeHistory?: boolean;
   // Resolves "missing" when the table does not exist: nothing was deleted, no history to prune.
@@ -103,6 +115,11 @@ export interface SupersededPurgeOptions {
   lancedbRoot: string;
   deleteVectorRows?: DeleteVectorRows;
   dropVectorTable?: DropVectorTable;
+  /**
+   * Compacts a table and prunes every older version now, without deleting a current row (strict: rejects unless both
+   * succeeded). Used when a queued summary-tree removal finds a tree rebuilt after it was asked for.
+   */
+  pruneVectorHistory?: (args: { uri: string; table: string }) => Promise<unknown>;
   /** Deletes LanceDB rows by id (`vector_rows` queue entries). Defaults to deleteLanceDbRecords. */
   deleteVectorIds?: (args: { uri: string; table: string; ids: string[] }) => Promise<void>;
   /** Cleanup-queue rows claimed per batch; vector and storage work is grouped per batch. */
@@ -455,6 +472,7 @@ export async function purgeSupersededDocuments(
         // its own project, its vectors; keep those until the last such copy
         // is gone. Its own derived rows are still removed.
         if (!doc.vectors_shared) await deleteDocumentVectors(client, doc, options, deleteVectorRows);
+        await deleteDocumentSummaries(client, doc, options, deleteVectorRows);
         // Partial reprocesses copy stage outputs but point at this version's
         // storage artifacts; their vectors are their own, so only the
         // artifacts stay.
@@ -532,6 +550,44 @@ async function deleteDocumentVectors(
 }
 
 /**
+ * Deletes a document's summary-tree rows (text and vector) from the `summaries` table of its project's database(s).
+ *
+ * Unlike chunk rows, summary rows are never shared with a dedup copy (one node belongs to one document, and its
+ * registry rows are deleted with it), so this runs whether or not the chunk vectors stay. The delete is strict
+ * (`purgeHistory`): the table is compacted and its older versions pruned now, and a failure rejects, so the purge
+ * transaction rolls back and the document is retried. A project that never built a tree has no such table; that is
+ * "missing", not an error.
+ *
+ * The table is looked up beside every chunks table the document is indexed in, plus the embedding space its tree
+ * state names, so no Postgres flag has to be right for the rows to be found.
+ */
+async function deleteDocumentSummaries(
+  client: Sql<Record<string, unknown>>,
+  doc: ClaimedDocument,
+  options: SupersededPurgeOptions,
+  deleteVectorRows: DeleteVectorRows,
+): Promise<void> {
+  const spaces = await client<{ embedding_model: string; dimension: number }[]>`
+    select distinct embedding_model, dimension from vector_indexes where document_id = ${doc.id} and backend = 'lancedb'
+  `;
+  if (await tableExists(client, "document_summary_trees")) {
+    spaces.push(...await client<{ embedding_model: string; dimension: number }[]>`
+      select embedding_model, dimension from document_summary_trees
+      where document_id = ${doc.id} and embedding_model is not null and dimension is not null
+    `);
+  }
+  const seen = new Set<string>();
+  for (const space of spaces) {
+    const location = VectorNamespaceManager.getEmbeddingLocation(
+      options.lancedbRoot, doc.org_id, doc.project_id, space.embedding_model, space.dimension, LANCEDB_SUMMARIES_TABLE,
+    );
+    if (seen.has(location.uri)) continue;
+    seen.add(location.uri);
+    await deleteVectorRows({ uri: location.uri, table: location.table, documentIds: [doc.id], purgeHistory: true });
+  }
+}
+
+/**
  * The delete above only hides rows. Their bytes leave object storage when a maintenance pass
  * prunes the table's history after the retention window; this makes that pass due even when the
  * table is never written again.
@@ -575,6 +631,7 @@ async function archiveDocument(
   archiveTables: readonly string[],
 ): Promise<void> {
   if (!doc.vectors_shared) await deleteDocumentVectors(client, doc, options, deleteVectorRows);
+  await deleteDocumentSummaries(client, doc, options, deleteVectorRows);
   const kgNodeIds = await knowledgeGraphNodesForDocument(client, doc.id);
   for (const table of archiveTables) {
     await client`delete from ${client(table)} where document_id = ${doc.id}`;
@@ -712,7 +769,8 @@ async function tableExists(sql: Sql<Record<string, unknown>>, name: string): Pro
 }
 
 type VectorTarget =
-  | { backend: string; embeddingModel: string; dimension: number }
+  // `table` names one of the project database's tables (chunks when absent).
+  | { backend: string; embeddingModel: string; dimension: number; table?: string }
   | { backend: string; uri: string; table: string };
 
 type CleanupRow = {
@@ -739,7 +797,10 @@ function resolveVectorLocation(lancedbRoot: string, orgId: string, projectId: st
   if (target.backend !== "lancedb") return null;
   if ("uri" in target && target.uri && target.table) return { uri: target.uri, table: target.table };
   if (!("embeddingModel" in target) || !SAFE_ID.test(orgId) || !SAFE_ID.test(projectId)) return null;
-  return VectorNamespaceManager.getEmbeddingLocation(lancedbRoot, orgId, projectId, target.embeddingModel, target.dimension);
+  // A payload may name the table (the summaries table of a deleted project); an unknown name resolves to nothing.
+  const table = target.table ?? LANCEDB_CHUNKS_TABLE;
+  if (!isLanceDbVectorTable(table)) return null;
+  return VectorNamespaceManager.getEmbeddingLocation(lancedbRoot, orgId, projectId, target.embeddingModel, target.dimension, table);
 }
 
 function legacyLocationsFor(lancedbRoot: string, orgId: string, payload: Record<string, unknown>): VectorLocation[] {
@@ -859,14 +920,33 @@ async function cleanOneDocument(
   }
 }
 
+/**
+ * A cleanup queue row is tried this many times, then left in place and never claimed again. A row that stops here
+ * holds data that should be gone (a deleted document's summary rows whose strict delete keeps failing, an artifact
+ * folder that cannot be listed): `logCleanupAttemptLimit` says so once, at error level, with a fixed message to
+ * alert on.
+ */
+export const CLEANUP_ATTEMPT_LIMIT = 10;
+
+/** The stable error line for a cleanup row that reached `CLEANUP_ATTEMPT_LIMIT`. Ids only; never an error message. */
+function logCleanupAttemptLimit(queue: "document_cleanup_queue" | "storage_cleanup_queue", row: { id: string; kind?: string; orgId?: string | null }): void {
+  console.error(
+    `[cleanup] status=attempt-limit-reached queue=${queue} id=${row.id}${row.kind ? ` kind=${row.kind}` : ""}${row.orgId ? ` org=${row.orgId}` : ""}` +
+      ` attempts=${CLEANUP_ATTEMPT_LIMIT} action=manual-reconciliation-required`,
+  );
+}
+
 async function recordDocumentCleanupFailure(sql: Sql<Record<string, unknown>>, documentIds: string[], error: unknown) {
   const message = error instanceof Error ? error.message.split("\n")[0] ?? "" : String(error);
   if (documentIds.length > 0) {
-    await sql`
+    const rows = await sql<{ document_id: string; org_id: string | null; attempts: number }[]>`
       update document_cleanup_queue
       set attempts = attempts + 1, last_error = ${message.slice(0, 2000)}
       where document_id = any(${sql.array(documentIds)})
-    `.catch(() => {});
+      returning document_id, org_id, attempts
+    `.catch(() => []);
+    // Exactly at the limit: said once, when the row stops being retried.
+    for (const row of rows) if (Number(row.attempts) === CLEANUP_ATTEMPT_LIMIT) logCleanupAttemptLimit("document_cleanup_queue", { id: row.document_id, orgId: row.org_id });
   }
   console.warn(`[document-cleanup] failed documents=${documentIds.join(",") || "?"} error=${message}`);
 }
@@ -891,7 +971,7 @@ async function cleanDeletedDocuments(
   const owned = rows.filter((row) => !row.keep_shared_artifacts);
 
   // Tables queued for a whole drop (org deletion) need no row deletes.
-  const orgIds = [...new Set(vectorOwners.map((row) => row.org_id))];
+  const orgIds = [...new Set(rows.map((row) => row.org_id))];
   const droppedTables = new Set(
     (await client<{ payload: VectorTarget; org_id: string | null }[]>`
       select payload, org_id from storage_cleanup_queue
@@ -916,6 +996,25 @@ async function cleanDeletedDocuments(
   for (const { location, documentIds, purgeHistory } of byTable.values()) {
     const outcome = await deleteVectorRows({ uri: location.uri, table: location.table, documentIds: [...documentIds], ...(purgeHistory ? { purgeHistory } : {}) });
     if (outcome !== "missing") scheduleHistoryPrune(location);
+  }
+
+  // Summary-tree rows: the `summaries` table beside every chunks table a deleted document was indexed in. Every row
+  // counts, sharing or not: summary rows are never shared with a dedup copy. Always strict (see deleteDocumentSummaries):
+  // a failure rejects and the queue rows stay for the next sweep.
+  const summaries = new Map<string, { location: VectorLocation; documentIds: Set<string> }>();
+  for (const row of rows) {
+    for (const target of row.vector_targets) {
+      const chunks = resolveVectorLocation(options.lancedbRoot, row.org_id, row.project_id, target);
+      if (!chunks) continue;
+      const location = VectorNamespaceManager.summariesLocation(chunks);
+      if (droppedTables.has(locationKey(location))) continue;
+      const group = summaries.get(locationKey(location)) ?? { location, documentIds: new Set<string>() };
+      group.documentIds.add(row.document_id);
+      summaries.set(locationKey(location), group);
+    }
+  }
+  for (const { location, documentIds } of summaries.values()) {
+    await deleteVectorRows({ uri: location.uri, table: location.table, documentIds: [...documentIds], purgeHistory: true });
   }
 
   const keys = new Set<string>();
@@ -1086,7 +1185,7 @@ async function referencedDocumentsUnderPrefix(
 
 type StorageCleanupRow = {
   id: string;
-  kind: "storage_prefix" | "vector_table" | "vector_prefix" | "vector_rows" | "upload_original" | "doppler_folder";
+  kind: "storage_prefix" | "vector_table" | "vector_prefix" | "vector_rows" | "upload_original" | "doppler_folder" | typeof SUMMARY_TREE_CLEANUP_KIND;
   org_id: string | null;
   target: string;
   payload: Record<string, unknown>;
@@ -1124,6 +1223,155 @@ async function deleteOrphanVectorRows(client: Sql<Record<string, unknown>>, opti
   }
 }
 
+const SAFE_ROOT_SEGMENT = /^[A-Za-z0-9_.@-]+$/;
+
+/** `<run root>/summary-tree/<documentId>` with a two- or three-segment run root, and nothing else. */
+function safeSummaryTreeArtifactRoot(root: unknown, documentId: string): string | null {
+  if (typeof root !== "string") return null;
+  const segments = root.split("/");
+  if (segments.length !== 4 && segments.length !== 5) return null;
+  if (segments.some((segment) => !SAFE_ROOT_SEGMENT.test(segment) || segment === "." || segment === "..")) return null;
+  return segments.at(-2) === "summary-tree" && segments.at(-1) === documentId ? root : null;
+}
+
+/**
+ * `summary_tree_document` (state-store.ts enqueueSummaryTreeCleanup; the API's correction reindex and PII block):
+ * removes one document's summary data: its rows in the summaries table of every embedding space it may have been
+ * written in, strictly (compaction and history pruning must succeed, or the entry stays), and every object under its
+ * text artifact folders. The entry names where a build wrote for a document that no longer exists; for a document
+ * that still has rows in Postgres its tree state, vector indexes and stage states name the rest.
+ *
+ * The document's row is locked first (`for update`), which waits for a summary row write in flight
+ * (lancedb-summaries.ts writeSummaryRows) and holds off the next one, so nothing is written behind this removal. A
+ * tree state that still says `ready` or `building` afterwards would name rows that are gone: it becomes `partial`
+ * (never served), its registry rows go, and a builder that still held it is refused at its next write.
+ *
+ * A tree rebuilt after the removal was asked for is not this entry's to delete. The entry carries the document's
+ * build generation at the time it was queued (`payload.generation`); when the document's tree state is of a later
+ * generation and is not `skipped`:
+ * - a build that still reports (`building`, touched within the staleness window): `deferred`. Nothing is removed
+ *   under a live build; the entry is looked at again in a few minutes.
+ * - `ready`: `kept`. The finished build already replaced what the removal was asked about: its last step rewrote the
+ *   text artifact with the current nodes only and deleted the rows of every node it did not produce. What is left of
+ *   the earlier tree is in older versions of the table, so those are pruned (strict), and artifact folders other than
+ *   the tree's own are emptied. The tree's rows, registry and state are untouched.
+ * - anything else (`partial`, `pending`, an abandoned `building` row): removed as before. An unfinished rebuild may
+ *   still sit beside rows and text of the earlier tree, and nothing of that may stay.
+ * An entry without a generation (queued before the column existed) is removed as before.
+ */
+async function removeDocumentSummaryTree(
+  client: Sql<Record<string, unknown>>,
+  storage: PurgeStorage,
+  options: SupersededPurgeOptions,
+  row: StorageCleanupRow,
+): Promise<"removed" | "kept" | "deferred"> {
+  const payload = row.payload as { documentId?: unknown; spaces?: unknown; artifactRoots?: unknown; generation?: unknown };
+  const documentId = typeof payload.documentId === "string" ? payload.documentId : "";
+  const orgId = row.org_id ?? "";
+  const projectId = payloadProjectId(row.payload);
+  if (!SAFE_DOCUMENT_ID.test(documentId) || !SAFE_ID.test(orgId) || !SAFE_ID.test(projectId) || row.target !== `${orgId}|${projectId}|${documentId}`) {
+    throw new Error(`Refusing malformed summary_tree_document entry: ${row.target}`);
+  }
+  const [doc] = await client<{ org_id: string | null; project_id: string | null }[]>`
+    select org_id, project_id from documents where id = ${documentId} for update
+  `;
+  // A queue row never reaches into another tenant's document.
+  if (doc && (doc.org_id !== orgId || doc.project_id !== projectId)) {
+    throw new Error(`Refusing summary_tree_document entry for a document of another project: ${row.target}`);
+  }
+
+  const spaces = new Map<string, { embeddingModel: string; dimension: number }>();
+  const addSpace = (embeddingModel: unknown, dimension: unknown) => {
+    if (typeof embeddingModel !== "string" || !embeddingModel || typeof dimension !== "number" || !Number.isInteger(dimension) || dimension <= 0) return;
+    spaces.set(`${embeddingModel}\u0000${dimension}`, { embeddingModel, dimension });
+  };
+  for (const space of Array.isArray(payload.spaces) ? payload.spaces : []) {
+    addSpace((space as { embeddingModel?: unknown } | null)?.embeddingModel, (space as { dimension?: unknown } | null)?.dimension);
+  }
+  const roots = new Set<string>();
+  for (const root of Array.isArray(payload.artifactRoots) ? payload.artifactRoots : []) {
+    const safe = safeSummaryTreeArtifactRoot(root, documentId);
+    if (!safe) throw new Error(`Refusing unsafe summary tree artifact folder: ${row.target}`);
+    roots.add(safe);
+  }
+  if (doc) {
+    for (const space of await client<{ embedding_model: string; dimension: number }[]>`
+      select embedding_model, dimension from vector_indexes where document_id = ${documentId} and backend = 'lancedb'
+      union
+      select embedding_model, dimension from document_summary_trees
+      where document_id = ${documentId} and embedding_model is not null and dimension is not null
+    `) addSpace(space.embedding_model, Number(space.dimension));
+    for (const stage of await client<{ root: string | null }[]>`
+      select distinct coalesce(r.storage_prefix, d.user_id || '/' || r.id) || '/summary-tree/' || d.id as root
+      from documents d
+      join project_runs r on r.id = d.run_id or r.id in (
+        select s.run_id from document_run_stage_states s where s.document_id = d.id and s.stage_name = 'summary-tree'
+      )
+      where d.id = ${documentId}
+    `) {
+      const safe = safeSummaryTreeArtifactRoot(stage.root, documentId);
+      if (safe) roots.add(safe);
+    }
+  }
+
+  // A tree of a later build generation than the one this removal was asked at (see the note above).
+  const queuedGeneration = typeof payload.generation === "number" && Number.isFinite(payload.generation) ? payload.generation : null;
+  const [tree] = doc && queuedGeneration !== null ? await client<{ status: string; live: boolean; root: string | null }[]>`
+    select t.status,
+      (t.status = 'building' and t.updated_at > now() - ${`${SUMMARY_TREE_BUILD_STALE_MS} milliseconds`}::interval) as live,
+      (select coalesce(r.storage_prefix, d.user_id || '/' || r.id) || '/summary-tree/' || d.id
+        from documents d join project_runs r on r.id = t.run_id and r.project_id = d.project_id where d.id = t.document_id) as root
+    from document_summary_trees t
+    where t.document_id = ${documentId} and t.org_id = ${orgId} and t.project_id = ${projectId}
+      and t.status <> 'skipped' and t.build_generation > ${queuedGeneration}
+  ` : [];
+  if (tree?.live) return "deferred";
+  const rebuilt = tree?.status === "ready";
+  const currentRoot = rebuilt ? safeSummaryTreeArtifactRoot(tree!.root, documentId) : null;
+  // A rebuilt tree whose own folder cannot be named is not kept: nothing is skipped on a guess.
+  const keep = rebuilt && currentRoot !== null;
+
+  const deleteVectorRows = options.deleteVectorRows ?? deleteLanceDbDocumentRows;
+  const pruneVectorHistory = options.pruneVectorHistory ?? pruneLanceDbHistory;
+  const seen = new Set<string>();
+  for (const space of spaces.values()) {
+    const location = VectorNamespaceManager.getEmbeddingLocation(options.lancedbRoot, orgId, projectId, space.embeddingModel, space.dimension, LANCEDB_SUMMARIES_TABLE);
+    if (seen.has(location.uri)) continue;
+    seen.add(location.uri);
+    if (keep) await pruneVectorHistory({ uri: location.uri, table: location.table });
+    else await deleteVectorRows({ uri: location.uri, table: location.table, documentIds: [documentId], purgeHistory: true });
+  }
+  for (const root of roots) {
+    if (keep && root === currentRoot) continue;
+    await purgePrefix(storage, `${root}/`, () => false);
+  }
+  if (keep) {
+    console.log(`[storage-cleanup] summary-tree kept=rebuilt document=${documentId} queued_generation=${queuedGeneration}`);
+    return "kept";
+  }
+
+  if (doc) {
+    await client`
+      update document_summary_trees
+      set status = 'partial', error = 'rows-removed', build_owner = null, built_at = null, root_node_id = null, node_count = 0, level_count = 0, updated_at = now()
+      where document_id = ${documentId} and status in ('ready', 'building')
+    `;
+    await client`delete from document_summary_tree_nodes where document_id = ${documentId}`;
+  }
+  return "removed";
+}
+
+/** Compacts a LanceDB table and prunes every older version now; a missing table has no history. Strict. */
+const pruneLanceDbHistory = async ({ uri, table }: { uri: string; table: string }): Promise<void> => {
+  const db = await connectLanceDb(uri);
+  try {
+    if (!(await db.tableNames()).includes(table)) return;
+  } finally {
+    db.close();
+  }
+  await requireLanceDbMaintenance(uri, table, { ...lanceDbMaintenanceSettings(resolveLanceDbConfig().params), versionRetentionMs: 0 });
+};
+
 /** `<userId>/<runId>/`: two safe segments, never a bucket root or a whole user. */
 const SAFE_RUN_PREFIX = /^[A-Za-z0-9_.@-]+\/[A-Za-z0-9_-]+\/$/;
 
@@ -1153,7 +1401,7 @@ export async function drainStorageCleanupQueue(
         const txStorage = forgettingEmbeddingReuseRefs(client, storage);
         const [row] = await client<StorageCleanupRow[]>`
           select id::text, kind, org_id, target, payload, artifact_uris from storage_cleanup_queue
-          where (attempts < 10 or kind = 'upload_original') and not_before <= now()
+          where (attempts < 10 or kind = 'upload_original' or (kind = 'summary_tree_document' and payload->>'artifactWatch' = 'true')) and not_before <= now()
             and id::text <> all(${client.array(failedIds)}::text[])
           order by created_at, id
           limit 1
@@ -1243,6 +1491,42 @@ export async function drainStorageCleanupQueue(
           await purgeProjectVectorPrefix(client, storage, options.lancedbRoot, row.org_id ?? "", payloadProjectId(row.payload));
         } else if (row.kind === "vector_rows") {
           await deleteOrphanVectorRows(client, options, row);
+        } else if (row.kind === SUMMARY_TREE_CLEANUP_KIND) {
+          if (row.payload.artifactWatch === true) {
+            const documentId = typeof row.payload.documentId === "string" ? row.payload.documentId : "";
+            const orgId = row.org_id ?? "";
+            const projectId = payloadProjectId(row.payload);
+            if (!SAFE_DOCUMENT_ID.test(documentId) || !SAFE_ID.test(orgId) || !SAFE_ID.test(projectId)
+              || row.target !== `${orgId}|${projectId}|${documentId}|artifact-watch`) throw new Error("Refusing malformed summary tree artifact watch");
+            const roots = Array.isArray(row.payload.artifactRoots) ? row.payload.artifactRoots : [];
+            if (roots.length === 0 || roots.some((root) => !safeSummaryTreeArtifactRoot(root, documentId))) throw new Error("Refusing unsafe summary tree artifact watch roots");
+            const [doc] = await client<{ org_id: string; project_id: string; withdrawn: boolean }[]>`
+              select d.org_id, d.project_id,
+                (d.purged_at is not null or coalesce((d.metadata->'pii'->>'blocked')::boolean, false)
+                 or coalesce((d.metadata->'pii'->>'redacted')::boolean, false)
+                 or coalesce(jsonb_array_length(case when jsonb_typeof(d.metadata->'pii'->'withheldArtifactUris') = 'array'
+                    then d.metadata->'pii'->'withheldArtifactUris' else '[]'::jsonb end), 0) > 0
+                 or exists (select 1 from pii_detections pd where pd.document_id = d.id and pd.redacted)
+                 or exists (select 1 from document_summary_trees t where t.document_id = d.id
+                    and (t.skip_reason = 'corrected' or t.error = 'pii-withheld'))) as withdrawn
+              from documents d where d.id = ${documentId} for update of d`;
+            if (doc && (doc.org_id !== orgId || doc.project_id !== projectId)) throw new Error("Artifact watch document belongs to another project");
+            if (!doc || doc.withdrawn) {
+              for (const root of roots) await purgePrefix(txStorage, `${root}/`, () => false);
+              result.purged += 1;
+            } else result.deferred = (result.deferred ?? 0) + 1;
+            // Deliberately retain the tombstone: an S3 PUT can complete after a crashed
+            // process loses its DB connection, including after the first erasure pass.
+            await client`update storage_cleanup_queue set attempts = 0, last_error = null,
+              not_before = now() + interval '1 day' where id = ${row.id}`;
+            return;
+          }
+          if ((await removeDocumentSummaryTree(client, txStorage, options, row)) === "deferred") {
+            // A build is writing this document's tree right now: decided again once it has ended.
+            await client`update storage_cleanup_queue set not_before = now() + interval '2 minutes' where id = ${row.id}`;
+            result.deferred = (result.deferred ?? 0) + 1;
+            return;
+          }
         } else {
           // Queued before projects had their own databases (migration 0082 marks them):
           // a deleted org's org-level tables, dropped with their legacy names.
@@ -1268,13 +1552,18 @@ export async function drainStorageCleanupQueue(
       const row = claimed as StorageCleanupRow | null;
       if (row) {
         failedIds.push(row.id);
-        await sql`
+        const updated = await sql<{ attempts: number }[]>`
           update storage_cleanup_queue
           set attempts = attempts + 1, last_error = ${message.slice(0, 2000)},
             not_before = case when kind = 'upload_original' and ${message === 'Original upload ownership cannot be verified'} then 'infinity'::timestamptz
-              when kind = 'upload_original' then now() + interval '1 hour' else not_before end
+              when kind = 'upload_original' or payload->>'artifactWatch' = 'true' then now() + interval '1 hour' else not_before end
           where id = ${row.id}
-        `.catch(() => {});
+          returning attempts
+        `.catch(() => []);
+        // Original-upload and artifact-watch tombstones retry without a limit.
+        if (row.kind !== "upload_original" && row.payload.artifactWatch !== true && Number(updated[0]?.attempts) === CLEANUP_ATTEMPT_LIMIT) {
+          logCleanupAttemptLimit("storage_cleanup_queue", { id: row.id, kind: row.kind, orgId: row.org_id });
+        }
       }
       if (row?.kind === "upload_original" && message === "Original upload ownership cannot be verified") {
         console.error(`[storage-cleanup] status=ownership-quarantined id=${row.id} org=${row.org_id} action=manual-reconciliation-required`);

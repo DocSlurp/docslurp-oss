@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { projectSummaryTreeStateSchema } from "./summary-tree.js";
+
 const count = z.number().nonnegative().finite();
 export const projectStateDistributionSchema = z.object({
   sampleCount: count,
@@ -38,5 +40,7 @@ export const projectStateSchema = z.object({
     basis: z.literal("run-wall-time-including-queue"),
   }),
   usage: z.object({ inputTokens: count, outputTokens: count, costCents: count }),
+  /** Summary tree: stored setting, deployment switches, build status, document counts and the read-only server constants. */
+  summaryTree: projectSummaryTreeStateSchema,
 });
 export type ProjectState = z.infer<typeof projectStateSchema>;

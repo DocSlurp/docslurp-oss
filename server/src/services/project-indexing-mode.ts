@@ -34,6 +34,7 @@ import { canEditProject, getProjectAccess } from "./organizations.js";
 import { enforceLiveBudgetCaps } from "./run-creation.js";
 import { assertBackfillReusableMany, isReprocessRejectedError } from "./runs.js";
 import { estimateWork, type EstimateEnv } from "./config-change.js";
+import { loadProjectSummaryTree, withProjectSummaryTree } from "./run-summary-tree.js";
 
 /** Domain failure with an HTTP status and machine-readable code. */
 export class IndexingModeError extends Error {
@@ -277,6 +278,8 @@ export async function commitIndexJobs(prepared: PreparedIndexJobs, userId: strin
     await tx`select pg_advisory_xact_lock(hashtextextended(${`full-index:${prepared.projectId}`}, 0))`;
     const [managedRow] = await tx<{ managed: unknown }[]>`select managed_models -> 'pipeline' as managed from projects where id = ${prepared.projectId}`;
     const managedOverrides = parseManagedPipelineOverrides(managedRow?.managed, `project ${prepared.projectId}`);
+    // The project's stored summary-tree setting, read under the same lock (run-summary-tree.ts).
+    const summaryTree = await loadProjectSummaryTree(prepared.projectId, tx as never);
     // Chart tier: an explicit project tier applies to every document; with none, each document keeps the tier its
     // source run stamped (as reprocess does), and only documents without one take the caller's origin default (M5).
     const stamped: RunBatch[] = [];
@@ -307,7 +310,7 @@ export async function commitIndexJobs(prepared: PreparedIndexJobs, userId: strin
       const pages = docs.reduce((sum, doc) => sum + Math.max(0, doc.page_count ?? 0), 0);
       // A direct insert, so the same managed-model resolution as runCreation.create: model values in the pipeline
       // are dropped and only the project's explicit admin overrides apply.
-      const runPipeline = resolveManagedPipeline(batch.pipeline, managedOverrides, `full index in project ${prepared.projectId}`).pipeline;
+const runPipeline = withProjectSummaryTree(resolveManagedPipeline(batch.pipeline, managedOverrides, `full index in project ${prepared.projectId}`).pipeline, summaryTree);
       if (docs.some(doc => !Number.isFinite(doc.billing_pages ?? doc.page_count) || (doc.billing_pages ?? doc.page_count ?? 0) <= 0)) throw new Error("Monthly admission requires known positive page counts");
       const reservation = Math.max(1, buildRunProcessingPreview({
         request: { project: prepared.projectId, pipeline: runPipeline, urls: [], files: docs.map(doc => ({
