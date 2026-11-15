@@ -478,7 +478,13 @@ for (const [label, patch] of Object.entries({
     const corrupt = async (path, body, opts) => {
       const out = await api(path, body, opts);
       if (path.startsWith("/experiment-items?")) for (const row of out.data) row.scores = [];
-      if (path.startsWith("/v3/scores?")) out.data = out.data.map(score => ({ ...score, ...patch }));
+      if (path.startsWith("/v3/scores?")) out.data = out.data.map(score => {
+        const subject = { kind: "observation", id: score.observationId, traceId: score.traceId };
+        const change = label === "trace" ? { subject: { ...subject, traceId: "wrong" } }
+          : label === "observation" ? { subject: { ...subject, id: "wrong" } }
+          : label === "missingTrace" ? { subject: { kind: "observation", id: score.observationId } } : patch;
+        return { ...score, subject, ...change };
+      });
       return out;
     };
     await assert.rejects(syncRun(corrupt, run, { timeoutMs: -1 }), /readback incomplete/);
@@ -540,4 +546,17 @@ test("empty embedded scores accept exact v3 subject identity, including boolean 
   const again = await syncRun(subjects, run, { timeoutMs: -1 });
   assert.equal(again.itemsWritten + again.scoresWritten, 0);
   assert.equal(state.writes.length, writes);
+});
+
+test("config enrichment rejects a lookup with a different subject or value", async () => {
+  const { api, run } = await scoredRunFixture();
+  for (const patch of [{ traceId: "wrong" }, { observationId: "wrong" }, { value: 0.1 }]) {
+    const corrupt = async (path, body, opts) => {
+      const out = await api(path, body, opts);
+      if (path.startsWith("/experiment-items?")) for (const row of out.data) for (const score of row.scores) delete score.configId;
+      if (path.startsWith("/v3/scores?")) out.data = out.data.map(score => ({ ...score, ...patch }));
+      return out;
+    };
+    await assert.rejects(syncRun(corrupt, run, { timeoutMs: -1 }), /readback incomplete/);
+  }
 });
