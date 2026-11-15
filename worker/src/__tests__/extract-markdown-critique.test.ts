@@ -9,7 +9,7 @@ import type { Config } from "../config.js";
 import { priceVisionResult } from "../lib/guarded-vision-call.js";
 import type { VisionServedRoute } from "../lib/vision-pricing.js";
 import { PipelineUsageEventLedger } from "../pipeline/usage-ledger.js";
-import { budgetCritiquePages, buildPerPageHeatmap, mergeCritiquedPages, recordCritiqueUsage, selectCritiquePages } from "../stages/extract-markdown.js";
+import { ExtractMarkdownStage, budgetCritiquePages, buildPerPageHeatmap, mergeCritiquedPages, recordCritiqueUsage, selectCritiquePages } from "../stages/extract-markdown.js";
 import { CommandRunner } from "../tools/runner.js";
 import { configuredVisionServedRoute, executeVisionRuntime } from "../tools/vision-runtime.js";
 import { scoreExtractionPlausibility } from "../lib/extracted-markdown.js";
@@ -132,6 +132,24 @@ describe("recordCritiqueUsage", () => {
     } finally {
       vi.unstubAllGlobals();
       vi.restoreAllMocks();
+    }
+  });
+});
+
+
+describe("lazy critique heatmap", () => {
+  it("does not build a heatmap with critique disabled or without a budget", async () => {
+    const saved = process.env.DOCSLURP_CRITIQUE_MAX_COST_CENTS;
+    process.env.DOCSLURP_CRITIQUE_MAX_COST_CENTS = "0";
+    try {
+      const heatmapPages = vi.fn(() => { throw new Error("unexpected heatmap build"); });
+      // The budget guard must return before reading workflow state or document bytes.
+      const result = await Reflect.get(ExtractMarkdownStage.prototype, "runSelfCritique").call({}, { heatmapPages });
+      expect(result).toBeNull();
+      expect(heatmapPages).not.toHaveBeenCalled();
+    } finally {
+      if (saved === undefined) delete process.env.DOCSLURP_CRITIQUE_MAX_COST_CENTS;
+      else process.env.DOCSLURP_CRITIQUE_MAX_COST_CENTS = saved;
     }
   });
 });
