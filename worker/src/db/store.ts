@@ -82,6 +82,7 @@ import {
 
 type ProjectRunRow = {
   id: string;
+  execution_generation?: string | null;
   org_id: string;
   /**
    * The run's org, else its project's (runRowQuery): the one org admission, usage attribution and the
@@ -711,6 +712,15 @@ export class Store {
    * document, run, user or org identifiers, so one tenant's plan cannot learn anything about another's content.
    * Served by performance_log_shard_timing_idx (0098).
    */
+  async authorizeComputeCohort(scope: import("@docslurp/shared").ComputeExecutionScope): Promise<import("@docslurp/shared").ComputeCohortGrant | null> {
+    for (const value of [scope.orgId, scope.projectId, scope.runId, scope.documentId]) {
+      if (!value || value.length > 200) throw new Error("Invalid compute execution scope");
+    }
+    const [row] = await this.sql<{ cohort_id: string | null; valid_until: Date }[]>`
+      select * from public.authorize_compute_cohort(${scope.orgId}, ${scope.projectId}, ${scope.runId}, ${scope.documentId}, ${scope.executionGeneration})`;
+    return row ? { cohortId: row.cohort_id, validUntil: new Date(row.valid_until).toISOString() } : null;
+  }
+
   async computeObservations(profileIds: readonly string[]): Promise<ComputeObservations> {
     if (profileIds.length > 100 || profileIds.some((id) => !id || id.length > 200)) throw new Error("Invalid compute profile selection");
     if (!profileIds.length) return { prices: [], calibrations: [] };
@@ -4374,6 +4384,7 @@ export class Store {
 function mapRun(row: ProjectRunRow): ProjectRun {
   return {
     id: row.id,
+    executionGeneration: row.execution_generation ?? null,
     orgId: row.canonical_org_id ?? row.org_id ?? null,
     ...(row.org_funded !== undefined && row.org_funded !== null ? { orgFunded: row.org_funded } : {}),
     allowChinaProviders: row.allow_china_providers === true,

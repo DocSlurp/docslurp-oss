@@ -222,6 +222,7 @@ export const WORKER_DENIED_TABLES = Object.freeze({
  * revokes EXECUTE on every other owner definer function, and the runtime identity rule refuses one a runtime role reaches.
  */
 export const RUNTIME_SECURITY_DEFINER_ALLOWLIST = Object.freeze([
+  "public.authorize_compute_cohort(pg_catalog.text, pg_catalog.text, pg_catalog.text, pg_catalog.text, pg_catalog.text)",
   "public.realtime_changed()",
   "public.realtime_statement_changed()",
   "public.realtime_search_session_changed()",
@@ -304,6 +305,12 @@ export function roleGrantStatements({ owner, roles = DEFAULT_DB_ROLES, present, 
         `grant select on drizzle.__drizzle_migrations to ${worker}`,
       );
     }
+  }
+  if (existingColumns?.project_runs?.includes("compute_input_manifest_hash")) {
+    const signature = "public.authorize_compute_cohort(text,text,text,text,text)";
+    statements.push(`revoke all on function ${signature} from public`);
+    if (has(roles.app)) statements.push(`revoke all on function ${signature} from ${quoteIdent(roles.app)}`);
+    if (has(roles.worker)) statements.push(`grant execute on function ${signature} to ${quoteIdent(roles.worker)}`);
   }
   if (relations.includes("realtime_revision_counters")) {
     // Schema-wide application grants must never expose publication internals.

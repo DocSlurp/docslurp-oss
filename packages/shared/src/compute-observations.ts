@@ -49,6 +49,20 @@ export interface ComputeObservations {
   calibrations: ComputeCalibrationObservation[];
 }
 
+export interface ComputeExecutionScope {
+  orgId: string;
+  projectId: string;
+  runId: string;
+  documentId: string;
+  executionGeneration: string | null;
+}
+
+/** Null cohort means authorized single-use execution, never permission to reuse by organization. */
+export interface ComputeCohortGrant {
+  cohortId: string | null;
+  validUntil: string;
+}
+
 export const computePriceColumns = {
   id: "id", offerId: "offer_id", provider: "provider", sku: "sku", region: "region", market: "market",
   observedAt: "observed_at", validUntil: "valid_until", sourceUrl: "source_url", sourceHash: "source_hash",

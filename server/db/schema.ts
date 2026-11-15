@@ -2354,6 +2354,7 @@ export const uploadSessionFiles = pgTable(
 export const projectRuns = pgTable(
   "project_runs",
   {
+    computeInputManifestHash: text("compute_input_manifest_hash"),
     id: text().primaryKey().notNull(),
     userId: text("user_id").notNull(),
     projectId: text("project_id").notNull(),

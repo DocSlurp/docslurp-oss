@@ -334,6 +334,7 @@ export function createStageExecution(deps: {
       artifacts,
       preloaded: runtime.preloaded,
     });
+    state.executionGeneration = input.executionGeneration;
     const shard = runtime.documentIds !== undefined;
     if (runtime.firstPassRun) state.firstPassRun = true;
     if (runtime.pipelineOverride) {
