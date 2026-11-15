@@ -813,6 +813,35 @@ describe("a document deleted while its tree is being built", () => {
     expect(await sql`select 1 from storage_cleanup_queue`).toEqual([]);
   });
 
+  it("removes a late text part at once, while the window's other calls are still in flight", async () => {
+    let swept = false;
+    let partsSeenByTheOtherCall: string[] | null = null;
+    const h = harness(fakeModel(async (request, call) => {
+      // The window's second call is still with the model while the first one's part lands behind the sweep.
+      if (h.model.requests.length === 2) {
+        while (!swept) await new Promise((resolve) => setTimeout(resolve, 5));
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        partsSeenByTheOtherCall = treeObjects(h, "d1");
+      }
+      return ok(request, call);
+    }));
+    await seedDocument("d1", W);
+    await complete("d1");
+    h.putArtifact("d1", W, book());
+    h.storage.beforePut = async (key) => {
+      if (!swept && key.includes("/summary-tree/d1/parts/")) {
+        swept = true;
+        await deleteAndSweep(h, "d1");
+      }
+    };
+    const result = await h.build("d1", W, { concurrency: 2 });
+    expect(result).toMatchObject({ status: "refused", reason: "document-not-live" });
+    // The part was gone long before the window settled: a worker dying in between would have left nothing.
+    expect(partsSeenByTheOtherCall).toEqual([]);
+    expect(treeObjects(h, "d1")).toEqual([]);
+    expect(await rowsOf(W, "d1")).toEqual([]);
+  });
+
   it("removes summary rows that land in the table after the delete's sweep has finished", async () => {
     const h = harness();
     await seedDocument("d1", W);

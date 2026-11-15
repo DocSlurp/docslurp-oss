@@ -77,7 +77,8 @@ import {
  *   and again once a window's parts and once its summary rows have landed. A write that landed behind a delete
  *   is found by the second check: the build then removes everything it wrote for the document (summary rows,
  *   strictly, and the artifact folder) before it returns `refused`, with a queued removal behind it in case that
- *   fails (`enqueueSummaryTreeCleanup`). The row writer additionally holds a lock on the document's row across its
+ *   fails (`enqueueSummaryTreeCleanup`). After a text part the second check runs at once, and the removal with it.
+ *   What remains: a worker that dies between writing a part and that check leaves the part (TODO.md). The row writer additionally holds a lock on the document's row across its
  *   table write (lancedb-summaries.ts), so a delete or correction waits for a write in flight.
  *
  * Nothing is skipped silently: every outcome is a status with a named reason and counts.
@@ -703,6 +704,16 @@ export async function buildDocumentSummaryTree(deps: SummaryTreeBuildDeps, input
           await assertMayWrite();
           // Durable before anything else happens to it: a build killed now does not pay for this call again.
           await appendSummaryTreeRecords(deps.artifacts, artifactRoot, [{ hash: item.hash, ...result.summary }]);
+          // Asked again at once, not only when the window's other calls have settled: a part that landed behind a
+          // delete whose sweep had already run is removed now (the removal is queued first), so the time in which a
+          // dying worker could leave it behind is this one statement, not the rest of the window.
+          await assertMayWrite().catch(async (error: unknown) => {
+            if (error instanceof SummaryTreeStateRefused) {
+              const standing = await summaryTreeDocumentStanding(deps.sql, scope, documentId);
+              if (standing === "gone" || standing === "corrected") await removeWhatWasWritten(standing);
+            }
+            throw error;
+          });
           item.summary = result.summary;
           item.failure = undefined;
           own.entries.set(item.hash, result.summary);
