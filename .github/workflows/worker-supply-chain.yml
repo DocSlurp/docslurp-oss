@@ -81,9 +81,9 @@ jobs:
       # carry a sha256 for every artifact (uv pip compile --generate-hashes).
       - name: Rebuild tracked worker lockfiles
         run: |
-          UV_TORCH_BACKEND=cpu uv pip compile worker/requirements-base.txt --generate-hashes --python-version 3.11 --python-platform x86_64-unknown-linux-gnu --output-file worker/requirements-base.lock.txt
-          UV_TORCH_BACKEND=cpu uv pip compile worker/requirements.txt --generate-hashes --python-version 3.11 --python-platform x86_64-unknown-linux-gnu --output-file worker/requirements.lock.txt
-          UV_TORCH_BACKEND=cpu uv pip compile worker/requirements-fallback.txt --generate-hashes --python-version 3.11 --python-platform x86_64-unknown-linux-gnu --output-file worker/requirements-fallback.lock.txt
+          UV_TORCH_BACKEND=cpu uv pip compile worker/requirements-base.txt --generate-hashes --python-version 3.11.5 --python-platform x86_64-unknown-linux-gnu --output-file worker/requirements-base.lock.txt
+          UV_TORCH_BACKEND=cpu uv pip compile worker/requirements.txt --generate-hashes --python-version 3.11.5 --python-platform x86_64-unknown-linux-gnu --output-file worker/requirements.lock.txt
+          UV_TORCH_BACKEND=cpu uv pip compile worker/requirements-fallback.txt --generate-hashes --python-version 3.11.5 --python-platform x86_64-unknown-linux-gnu --output-file worker/requirements-fallback.lock.txt
           uv pip compile worker/requirements-ocr.txt --generate-hashes --python-version 3.13 --python-platform x86_64-unknown-linux-gnu --output-file worker/requirements-ocr.lock.txt
           uv pip compile scripts/uv-installer.txt --generate-hashes --universal --python-version 3.11 --output-file scripts/uv-installer.lock.txt
 
