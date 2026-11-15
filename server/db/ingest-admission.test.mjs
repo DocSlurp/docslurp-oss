@@ -17,8 +17,8 @@ test('database triggers fence all tenants, sessions and run readmission while al
   await db.exec("CREATE TABLE project_runs(id text, status text); CREATE TABLE documents(id text); CREATE TABLE upload_sessions(id text);");
   await db.exec(readFileSync(new URL('./migrations/0165_ingest_admission.sql',import.meta.url),'utf8'));
   await db.exec("INSERT INTO project_runs VALUES ('existing','queued');");
-  await db.exec("CREATE ROLE admission_untrusted; GRANT INSERT ON documents, upload_sessions, project_runs TO admission_untrusted; SET ROLE admission_untrusted");
-  await assert.rejects(db.exec("UPDATE public.ingest_admission SET holder=NULL"), /permission denied/);
+  await db.exec("CREATE ROLE admission_untrusted; GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO admission_untrusted; SET ROLE admission_untrusted");
+  await assert.rejects(db.exec("UPDATE docslurp_deploy.ingest_admission SET holder=NULL"), /permission denied/);
   await db.exec('RESET ROLE');
   await admission(db,'pause','deploy-12345');
   await db.exec('SET ROLE admission_untrusted');
