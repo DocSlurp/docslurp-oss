@@ -1,3 +1,6 @@
+import { candidatesFromPageFacts, FACTS_CANDIDATE_RULES } from "../chart-export/facts-candidates.js";
+import { classifyAdaptivePage } from "../stages/classify-route.js";
+import { parsePageCostEvidence } from "../lib/page-cost-evidence.js";
 /*
  * Extractor plugins: optional providers a deployment loads by configuration, never by import.
  *
@@ -368,6 +371,8 @@ export function pageReaderUsageOf(error: unknown): UsageEvent[] {
 export interface ExtractorPlugin {
   apiVersion: typeof EXTRACTOR_PLUGIN_API_VERSION;
   name: string;
+  /** Count-only observations from already validated results; never source bytes. */
+  costEvidence?: (facts: unknown, text: ReadonlyMap<number, string>, tools: { nominate: typeof candidatesFromPageFacts; rules: typeof FACTS_CANDIDATE_RULES; classify: typeof classifyAdaptivePage }) => ReadonlyMap<number, unknown>;
   sandboxedPdf?: SandboxedPdfExtractorProvider;
   imageOrientation?: ImageOrientationProvider;
   sandboxedOcr?: SandboxedOcrProvider;
@@ -375,6 +380,20 @@ export interface ExtractorPlugin {
 }
 
 /** Host values a plugin uses at runtime. Plugins import only types from the worker. */
+export function providerCostEvidence(facts: unknown, text: ReadonlyMap<number, string>, pageCount: number): Map<number, unknown> {
+  const out = new Map<number, unknown>();
+  if (!facts || !Number.isSafeInteger(pageCount) || pageCount < 1 || pageCount > 100_000) return out;
+  for (const plugin of plugins) {
+    if (!plugin.costEvidence) continue;
+    try {
+      for (const [page, value] of plugin.costEvidence(facts, text, { nominate: candidatesFromPageFacts, rules: FACTS_CANDIDATE_RULES, classify: classifyAdaptivePage })) {
+        if (Number.isSafeInteger(page) && page >= 1 && page <= pageCount) out.set(page, parsePageCostEvidence(value));
+      }
+    } catch { /* A refused observation stays unknown; extraction is independent. */ }
+  }
+  return out;
+}
+
 export interface ExtractorPluginHost {
   apiVersion: typeof EXTRACTOR_PLUGIN_API_VERSION;
   SandboxRunError: typeof SandboxRunError;
@@ -501,7 +520,7 @@ const reportedWalkerUnknown = new WeakMap<SandboxedPdfJob, LayoutWalkerUnknown>(
 const reportedPageCount = new WeakMap<SandboxedPdfJob, number>();
 /** settleJobLayout's answer per job, computed once per accepted result. */
 const settledLayouts = new WeakMap<SandboxedPdfJob, SettledLayout | null>();
-interface SettledLayout { layout: Map<number, PageLayoutFacts>; fromFacts: number; unknown: number; filled: number }
+interface SettledLayout { layout: Map<number, PageLayoutFacts>; fromFacts: number; unknown: number; filled: number; walker: number }
 const reportedFigures = new WeakMap<SandboxedPdfJob, SandboxedPdfFigureOutcome>();
 
 /**
@@ -639,6 +658,13 @@ export function acceptSandboxedPdfResult(job: SandboxedPdfJob, result: Sandboxed
   return ocrPages ? { ...result, ocrPages } : result;
 }
 
+/** Pages whose ruled grids the walker itself reported (layout source per page: walker; the rest came from facts or stay unknown). */
+function walkerPages(reported: ReadonlyMap<number, PageLayoutFacts> | undefined): number {
+  let pages = 0;
+  for (const page of reported?.values() ?? []) if (page.grids !== null) pages += 1;
+  return pages;
+}
+
 /** A page neither the walker nor the page facts could describe: everything unknown, its grids too (routed as tables). */
 const UNKNOWN_PAGE: PageLayoutFacts = { images: null, tables: null, words: null, grids: null, tableCoverage: null, gridsUnknown: true };
 
@@ -666,7 +692,7 @@ function settleJobLayout(job: SandboxedPdfJob): SettledLayout | null {
     let filled = 0;
     for (let page = 1; page <= last; page += 1) if (!layout.has(page)) { layout.set(page, { ...UNKNOWN_PAGE }); filled += 1; }
     const unknown = [...layout.values()].filter((page) => page.gridsUnknown === true).length;
-    settled = { layout: new Map([...layout].sort(([a], [b]) => a - b)), fromFacts: 0, unknown, filled };
+    settled = { layout: new Map([...layout].sort(([a], [b]) => a - b)), fromFacts: 0, unknown, filled, walker: walkerPages(reported) };
   }
   if (facts && (reported || reportedWalkerUnknown.has(job))) {
     const base = new Map(reported ?? []);
@@ -679,7 +705,7 @@ function settleJobLayout(job: SandboxedPdfJob): SettledLayout | null {
       filled += 1;
     }
     const { layout, fromFacts, unknown } = settleUnknownGrids(base, facts);
-    settled = { layout: new Map([...layout].sort(([a], [b]) => a - b)), fromFacts, unknown, filled };
+    settled = { layout: new Map([...layout].sort(([a], [b]) => a - b)), fromFacts, unknown, filled, walker: walkerPages(reported) };
   }
   settledLayouts.set(job, settled);
   return settled;
@@ -698,9 +724,9 @@ export function sandboxedPdfLayoutFacts(job: SandboxedPdfJob): Map<number, PageL
 
 /** How many of the job's pages had unknown walker grids settled from page facts, were left unknown (routed as tables), or
  * were missing from the walker's layout and filled in. */
-export function sandboxedPdfGridSettlement(job: SandboxedPdfJob): { fromFacts: number; unknown: number; filled: number } | undefined {
+export function sandboxedPdfGridSettlement(job: SandboxedPdfJob): { fromFacts: number; unknown: number; filled: number; walker: number } | undefined {
   const settled = settleJobLayout(job);
-  return settled ? { fromFacts: settled.fromFacts, unknown: settled.unknown, filled: settled.filled } : undefined;
+  return settled ? { fromFacts: settled.fromFacts, unknown: settled.unknown, filled: settled.filled, walker: settled.walker } : undefined;
 }
 
 /** The whole-file reason the provider's layout walker reported for a finished job (a fixed slug and a page count), if any. */

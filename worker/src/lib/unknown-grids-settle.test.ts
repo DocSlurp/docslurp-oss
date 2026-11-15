@@ -69,7 +69,7 @@ describe("unknown walker grids settle from page facts", () => {
     acceptSandboxedPdfResult(job, { exitCode: 0, stdout: "", stderr: "", layoutFacts, pageFacts: facts([page(1, NO_RULES), page(2, TRUNCATED)]) }, 2);
     expect(sandboxedPdfLayoutFacts(job)?.get(1)).toMatchObject({ grids: [] });
     expect(sandboxedPdfLayoutFacts(job)?.get(2)).toMatchObject({ gridsUnknown: true });
-    expect(sandboxedPdfGridSettlement(job)).toEqual({ fromFacts: 1, unknown: 1, filled: 0 });
+    expect(sandboxedPdfGridSettlement(job)).toEqual({ fromFacts: 1, unknown: 1, filled: 0, walker: 0 });
     const walkerOnly: SandboxedPdfJob = { input: "/a", output: "/b" };
     acceptSandboxedPdfResult(walkerOnly, { exitCode: 0, stdout: "", stderr: "", layoutFacts }, 2);
     expect(sandboxedPdfLayoutFacts(walkerOnly)?.get(1)).not.toHaveProperty("gridsUnknown");
@@ -93,7 +93,7 @@ describe("unknown walker grids settle from page facts", () => {
     expect(layout.get(6)).toMatchObject({ grids: null, gridsUnknown: true, tables: null });   // no facts line at all
     expect(classifyAdaptivePage(3, prose, { layout: layout.get(3)! }).route).toBe("table-heavy");
     expect(classifyAdaptivePage(6, prose, { layout: layout.get(6)! }).route).toBe("table-heavy");
-    expect(sandboxedPdfGridSettlement(job)).toEqual({ fromFacts: 4, unknown: 2, filled: 3 });
+    expect(sandboxedPdfGridSettlement(job)).toEqual({ fromFacts: 4, unknown: 2, filled: 3, walker: 0 });
     // Computed once per accepted result.
     expect(sandboxedPdfLayoutFacts(job)).toBe(layout);
   });
@@ -106,7 +106,7 @@ describe("unknown walker grids settle from page facts", () => {
     const layout = sandboxedPdfLayoutFacts(job)!;
     expect([...layout.keys()]).toEqual([1, 2, 3, 4]);
     expect(layout.get(3)).toMatchObject({ gridsUnknown: true });
-    expect(sandboxedPdfGridSettlement(job)).toEqual({ fromFacts: 0, unknown: 3, filled: 2 });
+    expect(sandboxedPdfGridSettlement(job)).toEqual({ fromFacts: 0, unknown: 3, filled: 2, walker: 1 });
     // A complete walker layout without marks stays as it is (layout source walker).
     const plain: SandboxedPdfJob = { input: "/a", output: "/b" };
     acceptSandboxedPdfResult(plain, { exitCode: 0, stdout: "", stderr: "", layoutFacts: { version: "pdf-layout-facts@1", pages: [pages[1]] } }, 4);
