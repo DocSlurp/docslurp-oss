@@ -71,6 +71,13 @@ const chunk = (id: string, score = 0.9) => ({ id, score });
 type Serve = { embedding: { modelUri?: string }; hash: { op: string; value: string } | null } | null;
 
 describe("servedVectorSearch", () => {
+  it("uses the stored generation normalization rather than the latest preference", () => {
+    const unnormalized = { ...cfg(C), normalize: false };
+    expect(serving.embeddingConfigFor(C.embedding, unnormalized).normalize).toBe(false);
+    const { normalize: _normalize, ...legacy } = cfg(C);
+    expect(() => serving.embeddingConfigFor({ ...C.embedding, normalize: false }, legacy)).toThrow("normalization is unknown");
+  });
+
   beforeEach(() => vi.clearAllMocks());
 
   it("runs no query and no extra search when only one config exists", async () => {

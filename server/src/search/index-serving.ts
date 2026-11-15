@@ -56,10 +56,12 @@ export function parseIndexConfigs(value: unknown): IndexConfigMap {
 
 /** The embedding config that reproduces a stored index config's query vectors. */
 export function embeddingConfigFor(current: EmbeddingConfig, config: IndexConfig): EmbeddingConfig {
+  if (config.normalize === undefined) throw new Error("Stored index normalization is unknown; rebuild the index before vector search");
   const native = embeddingModelCatalogByUri[embeddingModelBaseUri(config.embeddingModel)]?.dimensions ?? null;
   return {
     ...current,
     modelUri: config.embeddingModel,
+    normalize: config.normalize,
     dimensions: config.dims !== null && config.dims !== native ? config.dims : undefined,
     lateChunking: config.chunking.lateChunking,
     lateChunkingWindow: config.chunking.lateChunkingWindow,
