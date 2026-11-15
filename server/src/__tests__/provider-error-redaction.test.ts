@@ -25,3 +25,62 @@ it.each([false, true])("keeps provider secrets out of SDK errors with stream=%s"
   expect(String(caught)).not.toContain("sentinel-provider-secret");
   expect(JSON.stringify(caught)).not.toContain("sentinel-provider-secret");
 });
+
+const secret = "sentinel-private-diagnostic";
+function chunked(raw: string, width: number, contentType = "text/event-stream") {
+  const bytes = new TextEncoder().encode(raw);
+  let offset = 0;
+  return new Response(new ReadableStream({ pull(c) {
+    if (offset >= bytes.length) { c.close(); return; }
+    c.enqueue(bytes.slice(offset, offset += width));
+  } }), {headers: {"content-type": contentType}});
+}
+it("normalizes protocol errors through the real OpenAI SDK, including named events and CR framing", async () => {
+  const {default: OpenAI} = await import("openai");
+  for (const ending of ["\n", "\r", "\r\n"]) for (const width of [1, 7, 65536]) {
+    for (const payload of [
+      `event: error${ending}data: {"message":"${secret}"}`,
+      `data: {"type":"response.failed","response":{"error":{"message":"${secret}"}}}`,
+      `data: {"type":"response.error","error":"${secret}"}`,
+      `data: {"error":{"message":"${secret}"}}`,
+      `data: {"error":"${secret}"}`,
+    ]) {
+      for (const suffix of ["", ending + ending]) {
+        const http = instrumentFetch("test", "negative", async () => chunked(payload + suffix, width));
+        const client = new OpenAI({apiKey: "unused", baseURL: "https://example.test", fetch: http, maxRetries: 0});
+        let observed = "";
+        try { for await (const item of await client.chat.completions.create({model: "test", messages: [], stream: true})) observed += JSON.stringify(item); }
+        catch (error) { observed += String(error); }
+        expect(observed).not.toContain(secret);
+        expect(observed).toContain("Provider request failed");
+      }
+    }
+    const content = {choices: [{index: 0, delta: {content: "valid ☃ error prose", tool_calls: [{index: 0, id: "tool", type: "function", function: {name: "f", arguments: "{}"}}]}}], usage: {prompt_tokens: 5, completion_tokens: 2}};
+    const client = new OpenAI({apiKey: "unused", baseURL: "https://example.test", maxRetries: 0,
+      fetch: instrumentFetch("test", "success", async () => chunked(`data: ${JSON.stringify(content)}${ending}${ending}data: [DONE]${ending}${ending}`, width))});
+    const items = [];
+    for await (const item of await client.chat.completions.create({model: "test", messages: [], stream: true})) items.push(item);
+    expect(items).toEqual([content]);
+  }
+});
+
+it("keeps transport and reader diagnostics out of actual SDK public errors", async () => {
+  for (const http of [async () => { throw new Error(secret); }, async () => new Response(new ReadableStream({pull(c) {c.error(new Error(secret));}}), {headers: {"content-type": "text/event-stream"}})]) {
+    const client = new OpenAI({apiKey: "unused", baseURL: "https://example.test", maxRetries: 0, fetch: instrumentFetch("test", "broken", http)});
+    let caught;
+    try { for await (const item of await client.chat.completions.create({model: "test", messages: [], stream: true})) void item; }
+    catch (error) { caught = error; }
+    expect(caught).toBeDefined();
+    expect(String(caught)).not.toContain(secret);
+  }
+});
+
+it("normalizes non-SSE Responses failure equivalents before actual SDK consumption", async () => {
+  for (const payload of [{type: "response.failed", response: {error: {message: secret}}}, {type: "response.error", error: secret}, {error: secret}]) {
+    const client = new OpenAI({apiKey: "unused", baseURL: "https://example.test", maxRetries: 0,
+      fetch: instrumentFetch("test", "json-failure", async () => chunked(JSON.stringify(payload), 1, "application/json"))});
+    const result = await client.chat.completions.create({model: "test", messages: []});
+    expect(JSON.stringify(result)).not.toContain(secret);
+    expect(JSON.stringify(result)).toContain("Provider request failed");
+  }
+});

@@ -20,12 +20,15 @@
 //
 // The server and worker test setups refuse a TEST_DATABASE_URL off loopback or naming a database that does not look
 // disposable (packages/shared/src/test-database-guard.ts); the dbtest_<n> databases made here pass.
+import { createHash } from "node:crypto";
 import ts from "typescript-compiler-api";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+
+const reviewed = JSON.parse(readFileSync(new URL("./database-discovery-reviewed.json", import.meta.url), "utf8"));
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -36,60 +39,103 @@ export const NOT_RUN = {
     "manual migration reproducer: needs an empty database (not the migrated template) whose owner holds the cutover roles",
 };
 
-const DB = /(?<![A-Za-z0-9_])TEST_DATABASE_URL(?![A-Za-z0-9_])/;
-const REDIS = /(?<![A-Za-z0-9_])TEST_REDIS_URL(?![A-Za-z0-9_])/;
 /** A database or Redis URL variable name; the runner sets only the two above. */
 const GATE_NAME = /^[A-Z0-9_]*(?:DATABASE_URL|_PG_URL|REDIS_URL)$/;
 const STANDARD = new Set(["DATABASE_URL", "TEST_DATABASE_URL", "TEST_REDIS_URL"]);
 /** Discover static environment access through typed expressions and nested bindings. */
 export function environmentReads(source) {
   const names = new Set();
-  const tree = ts.createSourceFile("test.tsx", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
-  const aliases = new Map([["process", ["process"]]]);
+  if (!/\bprocess\b/.test(source)) return names;
+  let tree = ts.createSourceFile("test.tsx", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  if (tree.parseDiagnostics.length) {
+    const plain = ts.createSourceFile("test.tsx", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+    if (plain.parseDiagnostics.length < tree.parseDiagnostics.length) tree = plain;
+  }
+  const host = ts.createCompilerHost({ noLib: true, noResolve: true, types: [] });
+  host.getSourceFile = name => name === "test.tsx" ? tree : undefined;
+  const checker = ts.createProgram(["test.tsx"], { noLib: true, noResolve: true, types: [] }, host).getTypeChecker();
+  const aliases = new Map();
+  const constants = new Map();
+  const symbol = node => ts.isShorthandPropertyAssignment(node.parent) ? checker.getShorthandAssignmentValueSymbol(node.parent) : checker.getSymbolAtLocation(node);
+  const keyOf = node => {
+    if (!node) return;
+    if (ts.isStringLiteralLike(node)) return node.text;
+    if (ts.isComputedPropertyName(node)) return keyOf(node.expression);
+    if (ts.isIdentifier(node)) return constants.get(symbol(node));
+  };
+  let final = false;
+  const unknown = () => { if (final) names.add("<unresolved environment access>"); };
   const record = (parts) => {
     if (parts?.[0] === "process" && parts[1] === "env" && parts[2]) names.add(parts[2]);
     return parts;
   };
   const resolve = (node) => {
     if (!node) return;
-    if (ts.isIdentifier(node)) return aliases.get(node.text);
+    if (ts.isIdentifier(node)) return aliases.get(symbol(node)) ?? (node.text === "process" && !symbol(node) ? ["process"] : undefined);
     if (ts.isParenthesizedExpression(node) || ts.isAsExpression(node) || ts.isTypeAssertionExpression(node) || ts.isNonNullExpression(node) || ts.isSatisfiesExpression(node)) return resolve(node.expression);
     const base = (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) && resolve(node.expression);
     if (!base) return;
     const key = ts.isPropertyAccessExpression(node) ? node.name.text :
-      node.argumentExpression && (ts.isStringLiteralLike(node.argumentExpression) ? node.argumentExpression.text : undefined);
+      keyOf(node.argumentExpression);
     if (key) return record([...base, key]);
+    if (base[0] === "process" && base.length <= 2) unknown();
   };
   let changed = true;
   const bind = (name, parts) => {
     if (!parts) return;
     record(parts);
+    if (parts.length > 2) return;
     if (ts.isIdentifier(name)) {
-      if (!aliases.has(name.text)) { aliases.set(name.text, parts); changed = true; }
+      const id = symbol(name);
+      if (id && !aliases.has(id)) { aliases.set(id, parts); changed = true; }
+      else if (id && aliases.get(id).join(".") !== parts.join(".")) unknown();
     } else if (ts.isObjectBindingPattern(name)) {
       for (const element of name.elements) {
         if (element.dotDotDotToken) { bind(element.name, parts); continue; }
         const key = element.propertyName ?? element.name;
-        if (ts.isIdentifier(key) || ts.isStringLiteralLike(key)) bind(element.name, [...parts, key.text]);
+        const property = ts.isIdentifier(key) || ts.isStringLiteralLike(key) ? key.text : keyOf(key);
+        if (property) bind(element.name, [...parts, property]); else unknown();
       }
-    }
+    } else if (ts.isObjectLiteralExpression(name)) {
+      for (const property of name.properties) {
+        if (ts.isShorthandPropertyAssignment(property)) bind(property.name, [...parts, property.name.text]);
+        else if (ts.isPropertyAssignment(property)) {
+          const key = ts.isIdentifier(property.name) ? property.name.text : keyOf(property.name);
+          if (key) bind(property.initializer, [...parts, key]); else unknown();
+        } else unknown();
+      }
+    } else unknown();
   };
-  while (changed) {
+  let passes = 0;
+  while (changed || !final) {
+    if (++passes > 32) { names.add("<unresolved environment access>"); break; }
+    if (!changed) final = true;
     changed = false;
     const visit = (node) => {
-      if (ts.isVariableDeclaration(node)) bind(node.name, resolve(node.initializer));
+      if (ts.isVariableDeclaration(node)) {
+        bind(node.name, resolve(node.initializer));
+        if (ts.isIdentifier(node.name)) {
+          const value = keyOf(node.initializer), id = symbol(node.name);
+          if (value && id && !constants.has(id)) { constants.set(id, value); changed = true; }
+        }
+      }
+      if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
+        bind(node.left, resolve(node.right));
+      }
       resolve(node);
       ts.forEachChild(node, visit);
     };
     visit(tree);
   }
+  if (tree.parseDiagnostics.length && /\bprocess\b/.test(source)) names.add("<unresolved environment access>");
   return names;
 }
 
 /** What a test file's source needs from the runner, and any gate variable it would never get. */
 export function classifyTestSource(source) {
-  const other = [...environmentReads(source)].filter((v) => GATE_NAME.test(v) && !STANDARD.has(v));
-  return { db: DB.test(source), redis: REDIS.test(source), other };
+  const reads = environmentReads(source);
+  const other = [...reads].filter(v => v === "<unresolved environment access>" || GATE_NAME.test(v) && !STANDARD.has(v));
+  return { db: reads.has("TEST_DATABASE_URL"), redis: reads.has("TEST_REDIS_URL"), other };
 }
 
 /**
@@ -105,7 +151,16 @@ export function scanTestFiles(dir = root) {
       if (name === "node_modules" || name === "dist") continue;
       const full = path.join(current, name);
       if (statSync(full).isDirectory()) walk(full, pattern, extra);
-      else if (pattern.test(name)) found.push({ file: path.relative(dir, full), ...classifyTestSource(readFileSync(full, "utf8")), ...extra });
+      else if (pattern.test(name)) {
+        const file = path.relative(dir, full), source = readFileSync(full, "utf8");
+        const entry = classifyTestSource(source);
+        // Explicit, content-pinned review of existing setup helpers. A changed or
+        // new dynamic access fails closed; concrete gates are never exempted.
+        if (reviewed[file]?.sha256 === createHash("sha256").update(source).digest("hex")) {
+          entry.other = entry.other.filter(name => name !== "<unresolved environment access>");
+        }
+        found.push({ file, ...entry, ...extra });
+      }
     }
   };
   for (const top of ["server/src", "worker/src", "packages"]) walk(path.join(dir, top), /\.test\.(?:[cm]?[jt]s|tsx|jsx)$/, {});
@@ -125,6 +180,7 @@ export function unsupportedGatedFiles(scanned) {
 
 function main() {
   const scanned = scanTestFiles();
+  console.error("[database-tests] dynamic setup helpers are explicitly reviewed in scripts/database-discovery-reviewed.json; modified/unlisted unresolved syntax is refused");
   const unsupported = unsupportedGatedFiles(scanned);
   if (unsupported.length) {
     console.error(`[database-tests] test files gated on a variable this runner never sets; read TEST_DATABASE_URL / TEST_REDIS_URL instead (or list the file in NOT_RUN):\n  ${unsupported.join("\n  ")}`);

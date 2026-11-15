@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -94,4 +94,39 @@ test("typed, nested and destructured aliases report unsupported gates", () => {
     "const {env: {OTHER_DATABASE_URL: url}} = process;",
     "const p = process; const {env: environment} = p; const next = (environment!); next.OTHER_DATABASE_URL",
   ]) assert.deepEqual(classifyTestSource(source).other, ["OTHER_DATABASE_URL"], source);
+});
+
+ test("computed and assignment aliases are discovered without identifier-text inference", () => {
+  for (const source of [
+    'const key = "OTHER_DATABASE_URL"; process.env[key];',
+    'let env; env = process.env; env.OTHER_DATABASE_URL;',
+    'const { ["OTHER_DATABASE_URL"]: url } = process.env;',
+    'let env, next; env = process.env; next = env; next?.OTHER_DATABASE_URL;',
+    'let url; ({["OTHER_DATABASE_URL"]: url} = process.env);',
+    'let env; ({env} = process); env?.OTHER_DATABASE_URL;',
+    'let url; ({env: {["OTHER_DATABASE_URL"]: url}} = process);',
+  ]) {
+    const entry = {file: "negative.test.ts", ...classifyTestSource(source)};
+    assert.deepEqual(unsupportedGatedFiles([entry]), ["negative.test.ts (OTHER_DATABASE_URL)"], source);
+  }
+  assert.deepEqual(classifyTestSource('const TEST_DATABASE_URL = "irrelevant"; const obj = {TEST_REDIS_URL: 1}'), {db: false, redis: false, other: []});
+  assert.deepEqual(classifyTestSource('function f(process) { return process.env.OTHER_DATABASE_URL }'), {db: false, redis: false, other: []});
+  for (const source of ['process.env[unknownKey]', 'const {[unknownKey]: url} = process.env']) {
+    assert.ok(unsupportedGatedFiles([{file: "unknown.test.ts", ...classifyTestSource(source)}]).length, source);
+  }
+ });
+
+test("reviewed setup helpers are content pinned and cannot exempt new gates", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "discovery-review-"));
+  try {
+    for (const name of ["server/src", "worker/src", "packages/sdk/test", "server/db/tests"]) mkdirSync(path.join(dir, name), {recursive: true});
+    const file = "packages/sdk/test/client.test.mjs";
+    const original = readFileSync(path.join(root, file), "utf8");
+    writeFileSync(path.join(dir, file), original);
+    assert.deepEqual(unsupportedGatedFiles(scanTestFiles(dir)), []);
+    writeFileSync(path.join(dir, file), original + '\nprocess.env[unresolvedKey]; process.env.NEW_DATABASE_URL;');
+    const rejected = unsupportedGatedFiles(scanTestFiles(dir)).join(" ");
+    assert.match(rejected, /unresolved environment access/);
+    assert.match(rejected, /NEW_DATABASE_URL/);
+  } finally { rmSync(dir, {recursive: true, force: true}); }
 });

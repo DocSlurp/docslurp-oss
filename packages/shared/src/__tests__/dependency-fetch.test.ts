@@ -29,14 +29,14 @@ it("keeps streaming lazy and spans open until consumed, with request-chain corre
   expect(JSON.stringify(child.attributes)).not.toContain("secret");
 });
 
-it("preserves transport and body errors without repeating requests", async () => {
+it("normalizes transport and body errors without repeating requests", async () => {
   const error = new Error("transport failure");
   const http = vi.fn(async () => { throw error; });
-  await expect(instrumentFetch("test", "failed", http)("https://example.test")).rejects.toBe(error);
+  await expect(instrumentFetch("test", "failed", http)("https://example.test")).rejects.toThrow("Provider request failed");
   expect(http).toHaveBeenCalledTimes(1);
   const brokenBody = new Response(new ReadableStream({ pull(controller) { controller.error(error); } }));
   const response = await instrumentFetch("test", "body-failed", async () => brokenBody)("https://example.test");
-  await expect(response.text()).rejects.toBe(error);
+  await expect(response.text()).rejects.toThrow("Provider request failed");
   for (const name of ["test.failed", "test.body-failed"]) expect(exporter.getFinishedSpans().find(span => span.name === name)?.status.code).toBe(2);
 });
 
@@ -127,9 +127,38 @@ it.each(["text/event-stream", "application/json"])("redacts HTTP 200 error envel
 it("preserves successful SSE content and refuses oversized or malformed events before exposure", async () => {
   const frame = 'data: {"choices":[{"delta":{"content":"error is ordinary prose ☃"}}]}\r\n\r\ndata: [DONE]\r\n\r\n';
   const response = await instrumentFetch("test", "ok", async () => new Response(frame, { headers: { "content-type": "text/event-stream" } }))("https://example.test");
-  expect(await response.text()).toBe(frame);
+  expect(await response.text()).toBe(frame.replace(/\r\n/g, "\n"));
   for (const frame of ['data: {broken sentinel-secret}\n\n', `data: ${"x".repeat(1024 * 1024 + 1)}`]) {
     const response = await instrumentFetch("test", "invalid", async () => new Response(frame, { headers: { "content-type": "text/event-stream" } }))("https://example.test");
     await expect(response.text()).rejects.toThrow(/Invalid provider response|exceeds limit/);
   }
+});
+
+const secret = "sentinel-private-diagnostic";
+function chunked(raw: string, width: number, contentType = "text/event-stream") {
+  const bytes = new TextEncoder().encode(raw);
+  let offset = 0;
+  return new Response(new ReadableStream({ pull(c) {
+    if (offset >= bytes.length) { c.close(); return; }
+    c.enqueue(bytes.slice(offset, offset += width));
+  } }), {headers: {"content-type": contentType}});
+}
+it("normalizes JSON equivalents and strips SSE metadata diagnostics", async () => {
+  for (const envelope of [{type: "response.failed", response: {error: secret}}, {type: "response.error", error: secret}, {error: secret}]) {
+    const response = await instrumentFetch("test", "json", async () => chunked(JSON.stringify(envelope), 1, "application/json"))("https://example.test");
+    expect(await response.text()).toContain("Provider request failed");
+  }
+  const response = await instrumentFetch("test", "metadata", async () => chunked(`: ${secret}\nid: ${secret}\n\ndata: [DONE]\n\n`, 1))("https://example.test");
+  expect(await response.text()).not.toContain(secret);
+});
+it("refuses invalid UTF-8 without releasing diagnostic bytes", async () => {
+  const response = await instrumentFetch("test", "utf8", async () => new Response(new Uint8Array([0xc3, 0x28]), {headers: {"content-type": "text/event-stream"}}))("https://example.test");
+  await expect(response.text()).rejects.toThrow("Invalid provider response");
+});
+
+it("refuses oversized JSON envelopes and malformed trailing UTF-8", async () => {
+  const response = await instrumentFetch("test", "large-json", async () => new Response('"' + 'x'.repeat(16 * 1024 * 1024) + '"', {headers: {"content-type": "application/json"}}))("https://example.test");
+  await expect(response.text()).rejects.toThrow(/exceeds limit/);
+  const invalid = await instrumentFetch("test", "truncated", async () => new Response(new Uint8Array([0xc3]), {headers: {"content-type": "application/json"}}))("https://example.test");
+  await expect(invalid.text()).rejects.toThrow("Invalid provider response");
 });

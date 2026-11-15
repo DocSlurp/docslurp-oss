@@ -8,36 +8,60 @@ const GENERIC_ERROR = JSON.stringify({ error: { message: "Provider request faile
 
 /** Buffer one SSE event (or one JSON envelope) before releasing any of its bytes. */
 function redactProviderBody(body: ReadableStream<Uint8Array>, eventStream: boolean): ReadableStream<Uint8Array> {
-  const decoder = new TextDecoder();
+  const decoder = new TextDecoder("utf-8", { fatal: true });
   const encoder = new TextEncoder();
-  let pending = "";
-  const sanitize = (frame: string) => {
-    const data = eventStream ? frame.split(/\r?\n/).filter(line => line.startsWith("data:")).map(line => line.slice(5).trimStart()).join("\n") : frame;
-    if (!data.trim() || data.trim() === "[DONE]") return frame;
+  let pending = "", line = "";
+  let lines: string[] = [];
+  let afterCR = false, size = 0;
+  const failure = () => eventStream ? `data: ${GENERIC_ERROR}\n\n` : GENERIC_ERROR;
+  const sanitize = (frame: string[]) => {
+    // Only data and protocol event names belong to the public generated stream.
+    const fields = frame.map(raw => {
+      const colon = raw.indexOf(":");
+      return [colon < 0 ? raw : raw.slice(0, colon), colon < 0 ? "" : raw.slice(colon + 1).replace(/^ /, "")];
+    });
+    const event = fields.filter(([key]) => key === "event").at(-1)?.[1];
+    const data = eventStream ? fields.filter(([key]) => key === "data").map(([, value]) => value).join("\n") : frame[0];
+    if (["error", "response.failed", "response.error"].includes(event ?? "")) return failure();
+    if (!data?.trim()) return "";
+    if (data.trim() === "[DONE]") return "data: [DONE]\n\n";
     let value: unknown;
-    try { value = JSON.parse(data); }
-    catch { throw new Error("Invalid provider response"); }
-    if (value && typeof value === "object" && ("error" in value || ("type" in value && value.type === "error"))) {
-      return eventStream ? `data: ${GENERIC_ERROR}\n\n` : GENERIC_ERROR;
+    try { value = JSON.parse(data); } catch { throw new Error("Invalid provider response"); }
+    if (value && typeof value === "object") {
+      const envelope = value as Record<string, unknown>;
+      const response = envelope.response as Record<string, unknown> | undefined;
+      if (envelope.error != null || ["error", "response.failed", "response.error"].includes(String(envelope.type)) ||
+          (response && typeof response === "object" && (response.error != null || response.status === "failed"))) return failure();
     }
-    return frame;
+    if (!eventStream) return data;
+    if (event && !/^(?:message|completion|ping|content_block_(?:start|delta|stop)|message_(?:start|delta|stop)|response\.[a-z0-9_.]+)$/.test(event)) throw new Error("Invalid provider response");
+    return `${event ? `event: ${event}\n` : ""}${fields.filter(([key]) => key === "data").map(([, value]) => `data: ${value}\n`).join("")}\n`;
   };
-  const drain = (controller: TransformStreamDefaultController<Uint8Array>, finish: boolean) => {
-    if (eventStream) {
-      let match: RegExpExecArray | null;
-      while ((match = /\r?\n\r?\n/.exec(pending))) {
-        const end = match.index + match[0].length;
-        const frame = pending.slice(0, end); pending = pending.slice(end);
-        if (frame.length > 1024 * 1024) throw new Error("Provider response exceeds limit");
-        controller.enqueue(encoder.encode(sanitize(frame)));
-      }
+  const consume = (text: string, controller: TransformStreamDefaultController<Uint8Array>) => {
+    if (!eventStream) { pending += text; if (pending.length > 16 * 1024 * 1024) throw new Error("Provider response exceeds limit"); return; }
+    for (const character of text) {
+      if (afterCR) { afterCR = false; if (character === "\n") continue; }
+      if (++size > 1024 * 1024) throw new Error("Provider response exceeds limit");
+      if (character === "\r" || character === "\n") {
+        afterCR = character === "\r";
+        if (line) { lines.push(line); line = ""; }
+        else { const output = sanitize(lines); if (output) controller.enqueue(encoder.encode(output)); lines = []; size = 0; }
+      } else line += character;
     }
-    if (pending.length > (eventStream ? 1024 * 1024 : 16 * 1024 * 1024)) throw new Error("Provider response exceeds limit");
-    if (finish && pending) { controller.enqueue(encoder.encode(sanitize(pending))); pending = ""; }
   };
   return body.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
-    transform(chunk, controller) { pending += decoder.decode(chunk, { stream: true }); drain(controller, false); },
-    flush(controller) { pending += decoder.decode(); drain(controller, true); },
+    transform(chunk, controller) {
+      // Decode bounded slices; never concatenate an unbounded upstream chunk.
+      try { for (let offset = 0; offset < chunk.byteLength; offset += 16384) consume(decoder.decode(chunk.subarray(offset, offset + 16384), { stream: true }), controller); }
+      catch { throw new Error("Invalid provider response or response exceeds limit"); }
+    },
+    flush(controller) {
+      try {
+        consume(decoder.decode(), controller);
+        if (eventStream) { if (line) lines.push(line); if (lines.length) controller.enqueue(encoder.encode(sanitize(lines))); }
+        else if (pending) controller.enqueue(encoder.encode(sanitize([pending])));
+      } catch { throw new Error("Invalid provider response"); }
+    },
   }));
 }
 
@@ -58,7 +82,7 @@ export function instrumentFetch(provider: string, operation: string, http: typeo
     const started = performance.now();
     let response: Response;
     try { response = await span.run(() => http(input, { ...init, redirect: "error" })); }
-    catch (error) { span.end(error); throw error; }
+    catch (error) { span.end(error); throw new Error("Provider request failed"); }
     span.set({ "http.response.status_code": response.status,
       ...(llm ? { "docslurp.llm.time_to_headers_ms": Math.round(performance.now() - started) } : {}),
       "docslurp.providerRequestId": response.headers.get("x-request-id") ?? response.headers.get("request-id") ?? undefined,
@@ -145,7 +169,7 @@ export function instrumentFetch(provider: string, operation: string, http: typeo
             }
             bytes += result.value.byteLength; controller.enqueue(result.value);
           }
-        } catch (error) { span.end(error); controller.error(error); }
+        } catch (error) { span.end(error); controller.error(new Error("Provider request failed")); }
       },
       async cancel(reason) {
         try { await reader.cancel(reason); }
