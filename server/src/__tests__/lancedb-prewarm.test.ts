@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { prewarmSearchIndexes, prewarmTable, type PrewarmableTable } from "../search/lancedb-prewarm.js";
+import { prewarmSkipReason, prewarmSearchIndexes, prewarmTable, type PrewarmableTable } from "../search/lancedb-prewarm.js";
 
 function fakeTable(overrides: Partial<PrewarmableTable> = {}): PrewarmableTable & { prewarmIndex: ReturnType<typeof vi.fn>; prewarmData: ReturnType<typeof vi.fn> } {
   return {
@@ -8,6 +8,7 @@ function fakeTable(overrides: Partial<PrewarmableTable> = {}): PrewarmableTable 
       { name: "id_idx", indexType: "BTree", columns: ["id"] },
       { name: "text_idx", indexType: "FTS", columns: ["text"] },
     ],
+    stats: async () => ({ totalBytes: 100 }),
     prewarmIndex: vi.fn(async () => undefined),
     prewarmData: vi.fn(async () => undefined),
     schema: async () => ({ fields: [{ name: "id" }, { name: "vector" }, { name: "documentId" }] }),
@@ -56,7 +57,7 @@ describe("prewarmTable", () => {
   it("prewarmSearchIndexes loads the named indexes concurrently and reports failures without throwing", async () => {
     let active = 0;
     let peak = 0;
-    const table = { prewarmIndex: vi.fn(async (name: string) => {
+    const table = { stats: async () => ({ totalBytes: 100 }), prewarmIndex: vi.fn(async (name: string) => {
       active += 1;
       peak = Math.max(peak, active);
       await new Promise((resolve) => setTimeout(resolve, 5));
@@ -68,5 +69,25 @@ describe("prewarmTable", () => {
     expect(peak).toBe(2);
     expect(result).toMatchObject({ indexes: ["vector_idx"], errors: ["index text_idx: boom"] });
     expect(log).toHaveBeenCalledWith(expect.stringMatching(/^\[lancedb-session\] index-warm table=org\/project\/vectors indexes=vector_idx ms=\d+ errors=/));
+  });
+});
+
+
+describe("prewarm size admission", () => {
+  it("refuses unknown, invalid and oversized table sizes before loading bytes", async () => {
+    for (const totalBytes of [Number.MAX_SAFE_INTEGER, NaN, -1, Infinity]) {
+      const table = fakeTable({ stats: async () => ({ totalBytes }) });
+      const result = await prewarmTable(table, "large", { prewarmIndex: true, prewarmData: true }, vi.fn());
+      expect(result.skipped).toBeTruthy();
+      expect(table.prewarmIndex).not.toHaveBeenCalled();
+      expect(table.prewarmData).not.toHaveBeenCalled();
+    }
+    expect(await prewarmSkipReason({ stats: async () => { throw new Error("offline"); } })).toBe("unknown-size");
+  });
+
+  it("also guards the per-search eager loader", async () => {
+    const table = fakeTable({ stats: async () => ({ totalBytes: Number.MAX_SAFE_INTEGER }) });
+    expect((await prewarmSearchIndexes(table, ["vector_idx"], "tenant/project", vi.fn())).skipped).toContain("size-budget");
+    expect(table.prewarmIndex).not.toHaveBeenCalled();
   });
 });

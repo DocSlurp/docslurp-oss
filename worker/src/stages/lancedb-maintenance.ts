@@ -1,4 +1,5 @@
 import { LANCEDB_SUMMARIES_TABLE } from "@docslurp/shared";
+import { vectorIndexConfig } from "./lancedb-vector-index.js";
 import { Index, type Connection, type Table } from "@lancedb/lancedb";
 import { performance } from "node:perf_hooks";
 import { connectLanceDb } from "./lancedb-connection.js";
@@ -390,13 +391,6 @@ export async function ensureChunkTextFtsIndex(
       `[lancedb] could not drop the old fts index ${stale.name}: ${error instanceof Error ? error.message : String(error)}`));
   }
   return { rebuilt: true, ms: Math.round(performance.now() - started) };
-}
-
-/** Choose ANN parameters; L2 matches the app's default vectorSearch distance. */
-function vectorIndexConfig(rows: number): Index {
-  // HNSW_SQ needs no PQ training minimum (IVF_PQ requires >= 256 rows) and keeps 8-bit
-  // scalar codes, so recall stays high without a refine step at query time.
-  return Index.hnswSq({ distanceType: "l2", numPartitions: Math.max(1, Math.ceil(rows / 1_000_000)) });
 }
 
 export async function runLanceDbMaintenance(
