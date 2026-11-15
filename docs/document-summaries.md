@@ -266,6 +266,22 @@ itself. Search also refuses the tree of any document with a completed correction
 reindex, whatever its state row says. The document gets a tree again when a new
 version of it is processed.
 
+A correction completed by a server instance that predates this (during a rolling
+deploy) leaves no mark. The API's maintenance sweep
+(`summary-tree-corrected-reconcile`) finds corrected documents without it and
+does the same three things for each, under the document's row lock. It is
+idempotent, runs on the first sweep after start, and then every ten minutes
+while there is nothing to do.
+
+A queued removal carries the document's build generation
+(`document_summary_trees.build_generation`, raised by every build that takes
+the document) at the time it was asked for. A tree of a later generation was
+rebuilt after the request: while a build is still writing it the sweep waits;
+once it is `ready` the sweep keeps its rows, registry and own artifact folder
+and strictly prunes the table's older versions instead, so what the removal was
+asked about still leaves storage. An unfinished later build is removed with the
+rest.
+
 ### Statuses
 
 `document_summary_trees.status`:

@@ -1,6 +1,6 @@
 import { SUMMARY_TREE_CLEANUP_KIND, SUMMARY_TREE_CORRECTED_SKIP_REASON } from "@docslurp/shared";
 
-import type { SqlClient } from "../db.js";
+import { sql as defaultSql, type SqlClient } from "../db.js";
 
 /*
  * Withdrawing one document's summary tree (packages/shared/src/summary-tree.ts) from the API side.
@@ -55,4 +55,77 @@ export async function withdrawSummaryTreeForCorrection(tx: SqlClient, documentId
   `;
   await tx`delete from document_summary_tree_nodes where document_id = ${documentId}`;
   await queueSummaryTreeRemoval(tx, documentId, "document_corrected");
+}
+
+/** Documents reconciled per pass, and how often a process looks once a pass found nothing. */
+const RECONCILE_BATCH = 200;
+const RECONCILE_IDLE_INTERVAL_MS = 10 * 60_000;
+let reconciling = false;
+let reconcileIdleUntil = 0;
+
+/**
+ * Marks and withdraws corrected documents that lack the mark. Every completed correction reindex leaves the
+ * document's tree state `skipped` / `corrected` in its own transaction (`withdrawSummaryTreeForCorrection`), and
+ * migration 0166 did the same for corrections completed before it. A correction completed after that migration by a
+ * server instance that predates the withdrawal (a rolling deploy) leaves none, and such a document's tree would be
+ * built, or kept, from the text the correction replaced. This pass finds those documents and does for each what the
+ * reindex would have done: the mark, the registry rows, and the queued strict removal.
+ *
+ * Idempotent, and safe on every instance at once: a document that carries the mark is not selected, each document is
+ * handled in its own transaction under its row lock (`for update skip locked`), and marking twice changes nothing.
+ * A pass that finds nothing makes the process look again only every ten minutes. Returns the documents marked.
+ */
+export async function sweepCorrectedSummaryTrees(
+  options: { sql?: typeof defaultSql; limit?: number; force?: boolean; now?: number } = {},
+): Promise<number> {
+  const now = options.now ?? Date.now();
+  if (reconciling || (!options.force && now < reconcileIdleUntil)) return 0;
+  const sql = options.sql ?? defaultSql;
+  reconciling = true;
+  let marked = 0;
+  try {
+    const candidates = await sql<{ id: string }[]>`
+      select d.id from documents d
+      join document_corrections dc on dc.document_id = d.id and dc.reindex_completed_at is not null
+      where d.org_id is not null and d.project_id is not null
+        and not exists (
+          select 1 from document_summary_trees t
+          where t.document_id = d.id and t.skip_reason = ${SUMMARY_TREE_CORRECTED_SKIP_REASON}
+        )
+      order by d.id
+      limit ${options.limit ?? RECONCILE_BATCH}
+    `;
+    for (const candidate of candidates) {
+      marked += await sql.begin(async (tx) => {
+        const transaction = tx as unknown as SqlClient;
+        // The same lock the reindex holds: a summary row write in flight finishes first. A document another instance
+        // is handling right now is left to it.
+        const [document] = await transaction<{ id: string }[]>`
+          select d.id from documents d
+          where d.id = ${candidate.id}
+            and exists (select 1 from document_corrections dc where dc.document_id = d.id and dc.reindex_completed_at is not null)
+            and not exists (
+              select 1 from document_summary_trees t
+              where t.document_id = d.id and t.skip_reason = ${SUMMARY_TREE_CORRECTED_SKIP_REASON}
+            )
+          for update of d skip locked
+        `;
+        if (!document) return 0;
+        await withdrawSummaryTreeForCorrection(transaction, document.id);
+        return 1;
+      });
+    }
+    if (marked > 0) console.log(`[summary-tree] reconciled corrected documents marked=${marked}`);
+    // Nothing left to do: look again later. A full batch means more may wait: the next sweep continues.
+    reconcileIdleUntil = candidates.length === 0 ? now + RECONCILE_IDLE_INTERVAL_MS : 0;
+    return marked;
+  } finally {
+    reconciling = false;
+  }
+}
+
+/** Tests: forget when the last empty pass ran. */
+export function resetCorrectedSummaryTreeReconcileForTests(): void {
+  reconcileIdleUntil = 0;
+  reconciling = false;
 }

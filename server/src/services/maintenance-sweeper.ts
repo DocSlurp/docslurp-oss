@@ -16,6 +16,7 @@ import { resumeOrganizationDeletions } from "./tenant-offboarding.js";
 import { requestWebhookOutboxDrain } from "./webhooks.js";
 import { sweepFigureResumeQueue } from "./figure-resume.js";
 import { sweepProjectAutoTitles } from "./project-naming.js";
+import { sweepCorrectedSummaryTrees } from "./summary-tree-withdrawal.js";
 
 /**
  * Periodic in-process recovery for work that can otherwise get stuck: queued
@@ -66,6 +67,9 @@ const sweeps: Array<[name: string, run: () => Promise<unknown>]> = [
   ["search-session-project-backfill", () => sweepSearchSessionProjectBackfill()],
   // Automatic project titles from ingested content; project reads never rename (project-naming.ts).
   ["project-auto-titles", () => sweepProjectAutoTitles()],
+  // Corrected documents whose correction was completed by an instance that did not mark their summary tree (a rolling
+  // deploy): marked and withdrawn here. The first sweep after start runs it; then every ten minutes while idle.
+  ["summary-tree-corrected-reconcile", () => sweepCorrectedSummaryTrees()],
 ];
 
 let timer: ReturnType<typeof setInterval> | null = null;
