@@ -7,7 +7,7 @@ const LLM_GENERATION_PATHS = new Set(["/api/v1/chat/completions", "/api/v1/compl
 const GENERIC_ERROR = JSON.stringify({ error: { message: "Provider request failed", type: "provider_error" } });
 
 /** Buffer one SSE event (or one JSON envelope) before releasing any of its bytes. */
-function redactProviderBody(body: ReadableStream<Uint8Array>, eventStream: boolean): ReadableStream<Uint8Array> {
+function redactProviderBody(body: ReadableStream<Uint8Array>, eventStream: boolean, responseFormat: "json" | "password-range"): ReadableStream<Uint8Array> {
   const decoder = new TextDecoder("utf-8", { fatal: true });
   const encoder = new TextEncoder();
   let pending = "", line = "";
@@ -25,6 +25,13 @@ function redactProviderBody(body: ReadableStream<Uint8Array>, eventStream: boole
     if (["error", "response.failed", "response.error"].includes(event ?? "")) return failure();
     if (!data?.trim()) return "";
     if (eventStream && data.trim() === "[DONE]") return "data: [DONE]\n\n";
+    // The password-range service returns only SHA-1 suffix/count records.
+    // Validate the representation before releasing it, regardless of upstream MIME.
+    if (responseFormat === "password-range") {
+      const records = data.split(/\r?\n/).filter(record => record.trim());
+      if (!records.length || records.some(record => !/^[0-9A-F]{35}:\d{1,12}$/i.test(record))) throw new Error("Invalid provider response");
+      return data;
+    }
     let value: unknown;
     try { value = JSON.parse(data); } catch { throw new Error("Invalid provider response"); }
     if (value && typeof value === "object") {
@@ -77,7 +84,7 @@ function redactProviderBody(body: ReadableStream<Uint8Array>, eventStream: boole
 }
 
 /** Instrument provider transport through response consumption, including streamed output. */
-export function instrumentFetch(provider: string, operation: string, http: typeof fetch = globalThis.fetch): typeof fetch {
+export function instrumentFetch(provider: string, operation: string, http: typeof fetch = globalThis.fetch, responseFormat: "json" | "password-range" = "json"): typeof fetch {
   return async (input, init) => {
     const url = new URL(input instanceof Request ? input.url : String(input));
     const method = init?.method ?? (input instanceof Request ? input.method : "GET");
@@ -192,7 +199,7 @@ export function instrumentFetch(provider: string, operation: string, http: typeo
 
     const outputHeaders = new Headers(response.headers);
     outputHeaders.delete("content-length"); outputHeaders.delete("content-encoding");
-    const wrapped = new Response(redactProviderBody(body, contentType.includes("text/event-stream")), { status: response.status, statusText: response.statusText, headers: outputHeaders });
+    const wrapped = new Response(redactProviderBody(body, responseFormat === "json" && contentType.includes("text/event-stream"), responseFormat), { status: response.status, statusText: response.statusText, headers: outputHeaders });
     for (const key of ["url", "redirected", "type"] as const) Object.defineProperty(wrapped, key, { value: response[key] });
     return wrapped;
   };

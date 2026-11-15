@@ -123,7 +123,7 @@ export function createBreachLookup(policy: Pick<BreachedPasswordPolicy, "timeout
         const signal = AbortSignal.timeout(policy.timeoutMs);
         let response: Response;
         try {
-          response = await instrumentFetch("hibp", "password-range")(`${RANGE_API}${digest.slice(0, 5)}`, {
+          response = await instrumentFetch("hibp", "password-range", globalThis.fetch, "password-range")(`${RANGE_API}${digest.slice(0, 5)}`, {
             headers: { "Add-Padding": "true", "User-Agent": "DocSlurp password check" },
             signal,
           });

@@ -162,3 +162,21 @@ it("refuses oversized JSON envelopes and malformed trailing UTF-8", async () => 
   const invalid = await instrumentFetch("test", "truncated", async () => new Response(new Uint8Array([0xc3]), {headers: {"content-type": "application/json"}}))("https://example.test");
   await expect(invalid.text()).rejects.toThrow("Invalid provider response");
 });
+
+
+it("validates the explicitly selected password-range protocol independently of MIME", async () => {
+  const range = `${"A".repeat(35)}:42\r\n${"B".repeat(35)}:0\r\n`;
+  for (const contentType of ["text/plain", "application/json", "text/event-stream"]) {
+    const http: typeof fetch = async () => new Response(range, { headers: { "content-type": contentType } });
+    expect(await (await instrumentFetch("hibp", "password-range", http, "password-range")("https://example.test/range/ABCDE")).text()).toBe(range);
+  }
+  for (const invalid of ["", "sentinel-secret", `${"A".repeat(35)}:42\nsentinel-secret`, `data: {"error":"sentinel-secret"}\n\n`, `${"A".repeat(35)}:1234567890123`]) {
+    const http: typeof fetch = async () => new Response(invalid);
+    const response = await instrumentFetch("hibp", "password-range", http, "password-range")("https://example.test/range/ABCDE");
+    if (!invalid) expect(await response.text()).toBe("");
+    else await expect(response.text()).rejects.toThrow("Invalid provider response");
+  }
+  // A plaintext MIME cannot select this format for ordinary model responses.
+  const response = await instrumentFetch("openai", "chat", async () => new Response(range))("https://example.test");
+  await expect(response.text()).rejects.toThrow("Invalid provider response");
+});
