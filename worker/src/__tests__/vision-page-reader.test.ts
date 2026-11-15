@@ -16,6 +16,7 @@ import { assertVisionPageReaderConfiguration, visionPageReaderMode } from "../oc
 import { WorkflowState } from "../pipeline/pipeline.js";
 import { VisionExtractStage, legacyPageHints, type LegacyPageHints } from "../stages/vision-extract.js";
 import { visionPageReaderDecision } from "../stages/vision-page-reader.js";
+import { visionConfigForModel } from "../routing/routed-vision.js";
 import { pngHeader } from "../test/fake-ocr.js";
 import type { Config } from "../config.js";
 import type { CommandRunner } from "../tools/runner.js";
@@ -46,7 +47,7 @@ function reader(read: ReadImpl, overrides: Partial<PageImageReaderProvider> = {}
   const provider = {
     id: "test-page-reader", model: "test-reader-model", maxPagesPerJob: 8, maxImageBytes: 1 << 20, maxMarkdownBytes: 4096,
     maxLongEdgePx: 2048, evalScore: 0.925, evalRef: "tier-benchmark-v1/page-ocr/development/test",
-    assertConfigured: vi.fn(),
+    assertConfigured: vi.fn(), estimateJobCostCents: () => 0.01,
     read: vi.fn(async (job: PageImageReadJob, signal?: AbortSignal) => {
       jobs.push({ scope: { ...job.scope }, files: job.pages.map((page) => path.basename(page.imagePath)) });
       return await read(job, signal);
@@ -120,10 +121,13 @@ function harness(options: { files?: Record<number, Buffer>; renderEdge?: number[
   return { stage, internals, rendered, hosted };
 }
 
-const NO_HINTS: LegacyPageHints = { inkCheckPages: new Set(), fallbackTextPages: new Set() };
+const NO_HINTS: LegacyPageHints = { inkCheckPages: new Set(), fallbackTextPages: new Set(), triaged: true };
 
-async function extract(h: ReturnType<typeof harness>, state: WorkflowState, document: Document, pages: number[], hints: LegacyPageHints = NO_HINTS) {
-  return await h.internals.extractVisionPagesFromCache(state, document, state.run.pipeline.vision, pages, undefined, undefined, undefined, false, { hints, skips: new Map() });
+/** The legacy whole-document read (run()), the only caller that may use the reader. */
+async function extract(h: ReturnType<typeof harness>, state: WorkflowState, document: Document, pages: number[], hints: LegacyPageHints = NO_HINTS,
+  options: { pageReader?: boolean; bypassCache?: boolean } = {}) {
+  return await h.internals.extractVisionPagesFromCache(state, document, state.run.pipeline.vision, pages, undefined, undefined, undefined,
+    options.bypassCache ?? false, { hints, skips: new Map(), pageReader: options.pageReader ?? true });
 }
 
 const readerOutputs = (outputs: Array<{ pageNumber: number; runtime: string }>) => outputs.filter((output) => output.runtime === "page-reader").map((output) => output.pageNumber);
@@ -139,6 +143,9 @@ describe("tier vocabulary", () => {
       expect(selectVisionTranscriptionRoute(tier, at(Number.NaN)).pageReader).toBe(false);
     }
     expect(selectVisionTranscriptionRoute("fastest", at(0.5)).pageReader).toBe(true);
+    // Never a reader at or under the OCR recogniser alone (0.477), whatever the tier; and balanced needs a hosted score.
+    expect(selectVisionTranscriptionRoute("fastest", at(0.4)).pageReader).toBe(false);
+    expect(selectVisionTranscriptionRoute("balanced", at(0.99), []).pageReader).toBe(false);
     expect(selectVisionTranscriptionRoute("balanced", at(best - VISION_PAGE_READER_BALANCED_MARGIN)).pageReader).toBe(true);
     expect(selectVisionTranscriptionRoute("balanced", at(best - VISION_PAGE_READER_BALANCED_MARGIN - 0.001)).pageReader).toBe(false);
     expect(selectVisionTranscriptionRoute("smart", at(best - 0.001)).pageReader).toBe(false);
@@ -161,6 +168,9 @@ describe("tier vocabulary", () => {
     const { provider } = reader(echo, { assertConfigured: () => { throw new Error("reader not configured"); } });
     register(provider);
     expect(() => assertVisionPageReaderConfiguration({ DOCSLURP_VISION_PAGE_READER: "all" })).toThrow(/not configured/);
+    resetExtractorPluginsForTest();
+    register(reader(echo, { estimateJobCostCents: undefined }).provider);
+    expect(() => assertVisionPageReaderConfiguration({ DOCSLURP_VISION_PAGE_READER: "all" })).toThrow(/estimateJobCostCents/);
   });
 
   it("refuses a provider whose maxLongEdgePx is out of range", () => {
@@ -179,7 +189,7 @@ describe("which pages the reader reads", () => {
     const document = pdf();
     const state = runState(document);
     const h = harness();
-    const hints: LegacyPageHints = { inkCheckPages: new Set([4]), fallbackTextPages: new Set(), figurePages: new Set([3]), tableRescuePages: new Set([5]) };
+    const hints: LegacyPageHints = { inkCheckPages: new Set([4]), fallbackTextPages: new Set(), figurePages: new Set([3]), tableRescuePages: new Set([5]), triaged: true };
     const outputs = await extract(h, state, document, [1, 2, 3, 4, 5, 6], hints);
     expect(jobs).toEqual([{ scope: { orgId: "org-1", runId: "run-1" }, files: ["run-1-p1.png", "run-1-p2.png", "run-1-p6.png"] }]);
     expect(h.rendered[0]).toEqual({ runId: "run-1", pages: [1, 2, 6], maxLongEdgePx: 2048 });
@@ -226,6 +236,41 @@ describe("which pages the reader reads", () => {
     expect(visionPageReaderDecision(standard, standard.run.pipeline.vision, { DOCSLURP_VISION_PAGE_READER: "all" })).toHaveProperty("provider");
     expect(visionPageReaderDecision(standard, standard.run.pipeline.vision, {})).toEqual({ refused: "off" });
     expect(visionPageReaderDecision(standard, standard.run.pipeline.vision, { DOCSLURP_VISION_PAGE_READER: "bogus" })).toEqual({ refused: "off" });
+  });
+
+  it.each([
+    ["a routed group or page task (not the legacy whole-document read)", { pageReader: false }],
+    ["a cascade escalation leg (bypassCache)", { bypassCache: true }],
+  ])("never sends %s to the reader", async (_label, options) => {
+    const { provider } = reader(echo);
+    register(provider);
+    const document = pdf();
+    const state = runState(document);
+    const h = harness();
+    await extract(h, state, document, [1, 2], NO_HINTS, options);
+    expect(provider.read).not.toHaveBeenCalled();
+    expect(h.hosted).toHaveLength(2);
+  });
+
+  it("keeps a document without page triage on the hosted route (no page is known not to be a figure)", async () => {
+    const { provider } = reader(echo);
+    register(provider);
+    const document = pdf();
+    const state = runState(document);
+    const h = harness();
+    await extract(h, state, document, [1, 2], { inkCheckPages: new Set(), fallbackTextPages: new Set() });
+    expect(provider.read).not.toHaveBeenCalled();
+    expect(h.hosted).toHaveLength(2);
+  });
+
+  it("keeps a run pinned to a loopback OpenAI-compatible model (vLLM, Ollama) on that model", async () => {
+    register(reader(echo).provider);
+    const document = pdf();
+    for (const modelUri of ["llm://vllm/qwen/qwen3-vl-8b-instruct", "llm://ollama/qwen3-vl:8b"]) {
+      const vision = visionConfigForModel(defaultPipelineFeatures.vision, modelUri);
+      const state = runState(document, {}, { vision });
+      expect(visionPageReaderDecision(state, vision, { DOCSLURP_VISION_PAGE_READER: "all" }), modelUri).toEqual({ refused: "configured-route" });
+    }
   });
 
   it("keeps raster uploads (not PDF renders) on the hosted route", async () => {
@@ -292,7 +337,7 @@ describe("hosted fallback", () => {
     expect(h.hosted.map((call) => call.page).sort()).toEqual([1, 2]);
   });
 
-  it("sends pages to the hosted route when the reader's render or download fails", async () => {
+  it("propagates a render failure as the hosted route would, without reading anything", async () => {
     const { provider } = reader(echo);
     register(provider);
     const document = pdf();
@@ -304,10 +349,22 @@ describe("hosted fallback", () => {
       if (args.maxLongEdgePx === 2048) throw new Error("renderer unavailable");
       return await render(args);
     });
-    const outputs = await extract(h, state, document, [1, 2]);
+    await expect(extract(h, state, document, [1, 2])).rejects.toThrow(/renderer unavailable/);
     expect(provider.read).not.toHaveBeenCalled();
-    expect(readerOutputs(outputs)).toEqual([]);
-    expect(h.hosted).toHaveLength(2);
+    expect(h.hosted).toHaveLength(0);
+  });
+
+  it("sends pages to the hosted route when the reader path throws past the job (a ledger write)", async () => {
+    const { provider } = reader(echo);
+    register(provider);
+    const document = pdf();
+    const state = runState(document);
+    vi.spyOn(state.usageLedger, "chargeRichPage").mockImplementation(() => { throw new Error("ledger down"); });
+    const h = harness();
+    const outputs = await extract(h, state, document, [1, 2]);
+    // Page 1 was read (kept, never sent hosted too); page 2 goes hosted.
+    expect(readerOutputs(outputs)).toEqual([1]);
+    expect(h.hosted.map((call) => call.page)).toEqual([2]);
   });
 
   it("propagates an abort instead of falling back", async () => {
@@ -317,7 +374,7 @@ describe("hosted fallback", () => {
     const document = pdf();
     const state = runState(document);
     const h = harness();
-    await expect(h.internals.extractVisionPagesFromCache(state, document, state.run.pipeline.vision, [1, 2], controller.signal)).rejects.toThrow();
+    await expect(h.internals.extractVisionPagesFromCache(state, document, state.run.pipeline.vision, [1, 2], controller.signal, undefined, undefined, false, { hints: NO_HINTS, pageReader: true })).rejects.toThrow();
     expect(h.hosted).toEqual([]);
   });
 });
@@ -325,26 +382,28 @@ describe("hosted fallback", () => {
 describe("caps", () => {
   beforeEach(() => vi.stubEnv("DOCSLURP_VISION_PAGE_READER", "all"));
 
-  it("stops at the organization's daily reader cost cap and sends the rest hosted", async () => {
+  it("stops at the organization's daily reader cost cap, renders nothing more at the reader edge, and sends the rest hosted", async () => {
     vi.stubEnv("DOCSLURP_OCR_PAGE_READER_ORG_DAILY_MAX_COST_CENTS", "1");
-    const { provider } = reader(echo, { maxPagesPerJob: 2, estimateJobCostCents: () => 0.6 });
+    const { provider } = reader(echo, { maxPagesPerJob: 2, estimateJobCostCents: () => 0.9 });
     register(provider);
     const document = pdf();
     const state = runState(document);
     const h = harness();
-    const outputs = await extract(h, state, document, [1, 2, 3, 4]);
-    // The first job (0.6 reserved, 0.3 recorded) fits; the second's reservation would pass the cap only if the first
-    // settled above 0.4. It settled at 0.3, so it is admitted; a third does not exist.
-    expect(provider.read).toHaveBeenCalledTimes(2);
-    expect(readerOutputs(outputs)).toEqual([1, 2, 3, 4]);
+    const outputs = await extract(h, state, document, [1, 2, 3, 4, 5, 6, 7, 8]);
+    // One job (0.9 reserved) fits under the 1-cent cap; a second reservation does not.
+    expect(provider.read).toHaveBeenCalledTimes(1);
+    expect(readerOutputs(outputs)).toHaveLength(2);
+    expect(h.hosted).toHaveLength(6);
+    // Two batches in flight at most were rendered at the reader edge before the cap stopped the loop.
+    expect(h.rendered.filter((render) => render.maxLongEdgePx === 2048).length).toBeLessThanOrEqual(3);
     const capped = runState(document, { id: "run-2" });
     capped.pageReaderBudget = state.pageReaderBudget;
     const h2 = harness();
     const second = await extract(h2, capped, document, [1, 2]);
-    // 0.6 committed today plus a 0.6 reservation passes the 1-cent cap: nothing sent, every page hosted.
-    expect(provider.read).toHaveBeenCalledTimes(2);
+    // 0.3 committed today plus a 0.9 reservation passes the 1-cent cap: nothing sent, every page hosted.
+    expect(provider.read).toHaveBeenCalledTimes(1);
     expect(readerOutputs(second)).toEqual([]);
-    expect(h2.hosted.map((call) => call.page)).toEqual([1, 2]);
+    expect(h2.hosted.map((call) => call.page).sort()).toEqual([1, 2]);
   });
 
   it("sends nothing when the organization spend ledger is unavailable (fail closed to hosted)", async () => {
@@ -369,9 +428,11 @@ describe("caps", () => {
     const outputs = await extract(h, state, document, [1, 2, 3]);
     expect(readerOutputs(outputs)).toEqual([1, 2]);
     expect(h.hosted.map((call) => call.page)).toEqual([3]);
-    // A later batch of the same document in the same run gets nothing more.
+    // A later batch of the same document in the same run gets nothing more, and is not even rendered at the reader edge.
+    const renders = h.rendered.length;
     const again = await extract(h, state, document, [4]);
     expect(readerOutputs(again)).toEqual([]);
+    expect(h.rendered.slice(renders).every((render) => render.maxLongEdgePx === undefined)).toBe(true);
   });
 
   it("sends nothing once the run cost cap is reached", async () => {
@@ -494,7 +555,7 @@ describe("hostile images", () => {
 });
 
 describe("page task planning", () => {
-  it("does not fan a reader document out into one-page tasks", async () => {
+  it("fans out only the pages the reader will not read; routed documents and page tasks never use it", async () => {
     const { provider } = reader(echo);
     register(provider);
     const document = pdf();
@@ -502,11 +563,16 @@ describe("page task planning", () => {
     const h = harness();
     vi.spyOn(h.internals, "visionAllowed").mockResolvedValue(true);
     vi.spyOn(h.internals, "loadRoutedExecution").mockResolvedValue(null);
-    const needs = vi.spyOn(h.internals, "checkNeedsVision").mockResolvedValue({ needed: true, selectedPages: [1, 2, 3], hints: NO_HINTS });
-    expect(await h.stage.planPageTasks(state)).toHaveLength(3);
+    const hints: LegacyPageHints = { ...NO_HINTS, figurePages: new Set([2]), tableRescuePages: new Set([4]) };
+    vi.spyOn(h.internals, "checkNeedsVision").mockResolvedValue({ needed: true, selectedPages: [1, 2, 3, 4, 5], hints });
+    expect((await h.stage.planPageTasks(state)).map((task) => task.pageNumber)).toEqual([1, 2, 3, 4, 5]);
     vi.stubEnv("DOCSLURP_VISION_PAGE_READER", "all");
-    needs.mockClear();
-    expect(await h.stage.planPageTasks(state)).toEqual([]);
-    expect(needs).not.toHaveBeenCalled();
+    const tasks = await h.stage.planPageTasks(state);
+    expect(tasks.map((task) => task.pageNumber)).toEqual([2, 4]);
+    // A page task reads on the hosted route even with the reader on.
+    const task = tasks[0]!;
+    await h.stage.runPageTask(state, task);
+    expect(provider.read).not.toHaveBeenCalled();
+    expect(h.hosted.map((call) => call.page)).toEqual([2]);
   });
 });

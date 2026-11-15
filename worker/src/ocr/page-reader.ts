@@ -209,6 +209,14 @@ function jobFailureReason(error: unknown): "job-refused" | "job-failed" {
   return (error as { ocrRefused?: unknown } | null)?.ocrRefused === true ? "job-refused" : "job-failed";
 }
 
+/** Pages of `documentId` the reader may still be sent in this run state (the per-document budget, `maxPages`). */
+export function pageReaderPagesRemaining(ledger: object, documentId: string, maxPages: number): number {
+  return Math.max(0, maxPages - (pagesSent.get(ledger)?.get(documentId) ?? 0));
+}
+
+/** Skip reasons after which no further job of this document (or organization) can be sent now. */
+export const PAGE_READER_STOP_REASONS = ["no-scope", "budget", "cost-cap", "org-daily-cost-cap", "budget-ledger-unavailable"] as const;
+
 /** One page image the host sends to the reader. */
 export interface PageImageInput {
   pageNumber: number;
@@ -279,6 +287,9 @@ export async function readPageImagesWithProvider(
     console.warn(`${use.logTag} budget spent document=${ctx.documentId} max=${ctx.maxPages}: ${ready.length - allowed} pages are not sent`);
     ready.length = allowed;
   }
+  // Reserved now, before any await: concurrent calls for the same document can never pass the budget together. Pages
+  // reserved but never sent (a cap or the ledger stopped the loop) stay counted (fail closed).
+  sent.set(ctx.documentId, used + ready.length);
 
   for (let start = 0; start < ready.length; start += provider.maxPagesPerJob) {
     ctx.signal?.throwIfAborted();
@@ -307,7 +318,6 @@ export async function readPageImagesWithProvider(
         byKey.set(key, page);
         job.pages.push({ key, imagePath: page.imagePath });
       }
-      sent.set(ctx.documentId, (sent.get(ctx.documentId) ?? 0) + chunk.length);
       summary.attempted += chunk.length;
       summary.jobs += 1;
       let response: { results: PageImageReadResult[]; usage: UsageEvent[] };
@@ -373,17 +383,18 @@ const OCR_READ_USE = { metric: OCR_PAGE_READER_METRIC, logTag: "[ocr] page-reade
  * page is left as the recogniser read it.
  */
 export async function readPagesWithProvider(outcome: OcrReadOutcome, provider: PageImageReaderProvider, ctx: PageReaderContext): Promise<PageReaderSummary> {
-  const byNumber = new Map<number, OcrPageRead>();
+  const byInput = new Map<PageImageInput, OcrPageRead>();
   const inputs: PageImageInput[] = [];
   for (const page of outcome.pages) {
     if (!page.image) continue;
-    byNumber.set(page.pageNumber, page);
-    inputs.push({ pageNumber: page.pageNumber, imagePath: page.image.imagePath, expect: { width: page.image.width, height: page.image.height } });
+    const input: PageImageInput = { pageNumber: page.pageNumber, imagePath: page.image.imagePath, expect: { width: page.image.width, height: page.image.height } };
+    byInput.set(input, page);
+    inputs.push(input);
   }
   return await readPageImagesWithProvider(inputs, provider, ctx, {
     ...OCR_READ_USE,
     onRead(input, read) {
-      const page = byNumber.get(input.pageNumber)!;
+      const page = byInput.get(input)!;
       page.text = read.text;
       page.recogniser = `page-reader:${provider.id}`;
       // Read by the reader: the hosted escalation reader does not read it again.

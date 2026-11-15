@@ -8,10 +8,12 @@
  * - Only plain page transcription goes to the reader: a transcription prompt template with no output schema and no task
  *   prompt (vision-runtime.ts isPageTranscription), on a PDF page the renderer wrote as PNG, in a `standard` privacy
  *   project whose vision route is hosted. Schema and task-prompt reads, figure and chart pages, table-rescue pages,
- *   critique passes, routed (page router) pages and raster uploads keep the hosted route; so does a `local-only` or
- *   `strict-privacy` project, and a run whose configured vision route is a local or operator-private model.
+ *   critique passes, routed (page router) pages, page-task (fan-out) pages, raster uploads and documents without page
+ *   triage keep the hosted route; so does a `local-only` or `strict-privacy` project, and a run whose configured vision
+ *   route is not hosted (a local or operator-private model).
  * - Jobs carry one run of one organization (readPageImagesWithProvider): a run without an organization sends nothing.
- *   They share the OCR reader's per-document page budget and the organization's daily reader cost cap.
+ *   They count against the organization's daily reader cost cap (one fleet-wide ledger with the OCR reader) and a
+ *   per-document page budget kept per activity (as the OCR reader's is).
  * - A page the reader does not return (a failed, refused, timed-out or invalid job, a refused image, the budget or a cap)
  *   goes to the run's hosted vision route as it would without the reader. The hosted route is the run's own configured
  *   model, never an automatic fallback the system picks.
@@ -56,8 +58,11 @@ export function visionPageReaderDecision(
   } catch {
     return { refused: "configured-route" };
   }
-  // A run pinned to a local or operator-private vision model keeps it.
-  if (route.runtime === "local-cli" || route.provider === PRIVATE_MODEL_PROVIDER) return { refused: "configured-route" };
+  // Only a hosted route is replaced: a run pinned to a local model (local-cli, or a loopback OpenAI-compatible server such
+  // as vLLM or Ollama) or an operator-private model keeps it, so the reader never adds egress such a run did not have.
+  if (route.target !== "hosted" || vision.target !== "hosted" || route.runtime === "local-cli" || route.provider === PRIVATE_MODEL_PROVIDER) {
+    return { refused: "configured-route" };
+  }
   return { provider };
 }
 

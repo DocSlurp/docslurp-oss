@@ -149,6 +149,11 @@ export function assertVisionPageReaderConfiguration(env: NodeJS.ProcessEnv): Vis
     throw new Error(`DOCSLURP_VISION_PAGE_READER=${raw} needs a page image reader plugin (pageImageReader in DOCSLURP_EXTRACTOR_PLUGINS); refusing to start rather than read pages anywhere else`);
   }
   provider.assertConfigured();
+  // Vision transcription sends many jobs at once (documents and batches in parallel): each must reserve its cost against
+  // the organization's daily cap, or concurrent jobs could all be admitted under it.
+  if (typeof provider.estimateJobCostCents !== "function") {
+    throw new Error(`DOCSLURP_VISION_PAGE_READER=${raw} needs a reader that estimates its job cost (estimateJobCostCents); refusing to start`);
+  }
   console.log(
     `[vision-extract] page-reader mode=${mode}${tier} provider=${provider.id} maxPages=${ocrPageReaderMaxPages(env)} ` +
       `orgDailyMaxCostCents=${ocrPageReaderOrgDailyMaxCostCents(env)} maxLongEdgePx=${provider.maxLongEdgePx ?? "default"}`,

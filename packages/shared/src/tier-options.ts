@@ -196,8 +196,12 @@ export function selectOcrRoute(tier: RouteTier, available: OcrRouteAvailability,
  * composite on the page-OCR tier benchmark (tolerant-markdown@v1 `content`), compared with the best measured hosted
  * page-ocr option of TIER_OPTIONS. An unmeasured reader is never chosen by a tier.
  *
- * - fastest: the reader (an isolated GPU VM reads a page faster and at more pages per $1 than a hosted request).
- * - balanced: the reader when its composite is within VISION_PAGE_READER_BALANCED_MARGIN of the best hosted option.
+ * - fastest: the reader (an isolated GPU VM reads a page faster and at more pages per $1 than a hosted request), when it
+ *   scores above the OCR recogniser alone (the OCR route's floor).
+ * - balanced: the reader when its composite is within VISION_PAGE_READER_BALANCED_MARGIN of the best hosted option
+ *   (hosted when no hosted option is measured).
+ *
+ * This is a deployment setting: it applies to every eligible run, whatever model a project configured for vision.
  * - smart: the reader only when its composite is at least the best hosted option's.
  *
  * The hosted route stays the fallback for every page the reader does not return, and keeps every page that is not plain
@@ -226,9 +230,12 @@ export function selectVisionTranscriptionRoute(
   const measured = available.pageReader?.evalScore;
   if (typeof measured !== "number" || !Number.isFinite(measured) || measured < 0 || measured > 1) return hosted;
   const reader: VisionTranscriptionRoute = { optionId: "vision-transcription/page-reader", pageReader: true };
+  // Never a reader scoring at or under the OCR recogniser alone, whatever the tier.
+  const floor = OCR_ROUTE_OPTIONS.find((option) => option.reader === "recogniser")?.evalScore ?? 0;
+  if (measured <= floor) return hosted;
   if (tier === "fastest") return reader;
   const best = bestHostedPageOcrScore(options);
-  if (best === null) return tier === "balanced" ? reader : hosted;
+  if (best === null) return hosted;
   if (tier === "balanced") return measured >= best - VISION_PAGE_READER_BALANCED_MARGIN ? reader : hosted;
   return measured >= best ? reader : hosted;
 }

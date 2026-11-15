@@ -187,25 +187,31 @@ cost cap is checked before each job. Each job logs
 ## Vision page reader
 
 The same page image reader can also read vision-extract's plain page transcription, the pages a hosted vision model
-would otherwise transcribe (`DOCSLURP_VISION_PAGE_READER`, off by default):
+would otherwise transcribe (`DOCSLURP_VISION_PAGE_READER`, off by default). It is a deployment setting: it applies to
+every eligible run, whatever vision model a project configured.
 
 - `all` sends them to the reader. A tier word (`fastest`, `balanced`, `smart`) is resolved by `selectVisionTranscriptionRoute`
   (`packages/shared/src/tier-options.ts`) against the reader's `evalScore` and the best measured hosted page-ocr option:
-  `fastest` picks any measured reader, `balanced` one within 0.02 of the best hosted composite, `smart` only one at or
-  above it. An unmeasured reader is never picked. With the flag on and no ready provider, the worker refuses to start.
+  `fastest` picks a measured reader, `balanced` one within 0.02 of the best hosted composite, `smart` only one at or above
+  it. An unmeasured reader, or one scoring at or under the OCR recogniser alone, is never picked. With the flag on, the
+  worker refuses to start without a ready provider that implements `estimateJobCostCents`.
 - Only plain transcription is sent: a transcription prompt template, no output schema, no task prompt, on a PDF page the
-  renderer wrote as PNG, in a `standard` privacy project whose configured vision route is hosted (not `local-cli` and not
-  an operator-private model). Schema and task-prompt reads, pages triage routed as `chart-or-figure` or `image-heavy`,
-  drawn-content and table-rescue pages, routed (page router) pages, raster uploads, `local-only` and `strict-privacy`
-  projects keep the hosted route. A run without an organization sends nothing.
-- Pages render at the provider's `maxLongEdgePx` and go in jobs of at most `maxPagesPerJob`, one run of one organization
-  per job, with the same PNG checks (signature, byte cap, header size within the long edge and 40 million pixels, never
-  decoded), response validation, per-document page budget (`DOCSLURP_OCR_PAGE_READER_MAX_PAGES`, shared with the OCR
-  reader) and organization daily cost cap (`DOCSLURP_OCR_PAGE_READER_ORG_DAILY_MAX_COST_CENTS`, one ledger for both).
-  Documents the reader reads are not fanned out into one-page tasks, so their pages share jobs.
+  renderer wrote as PNG, in a `standard` privacy project whose configured vision route is hosted (not a local model such
+  as `local-cli` or a loopback vLLM or Ollama server, and not an operator-private model), in the legacy whole-document read
+  of a document with page triage. Schema and task-prompt reads, pages triage routed as `chart-or-figure` or `image-heavy`,
+  drawn-content and table-rescue pages, page-router groups and cascade legs, raster uploads, documents without triage,
+  `local-only` and `strict-privacy` projects keep the hosted route. A run without an organization sends nothing.
+- Reader pages are not fanned out into one-page tasks (the document's other pages still are). The run reads them in jobs
+  of at most `maxPagesPerJob`, two in flight per document, each rendered at the provider's `maxLongEdgePx`, one run of one
+  organization per job, with the same PNG checks (signature, byte cap, header size within the long edge and 40 million
+  pixels, never decoded), response validation and organization daily cost cap
+  (`DOCSLURP_OCR_PAGE_READER_ORG_DAILY_MAX_COST_CENTS`, one ledger for both readers). `DOCSLURP_OCR_PAGE_READER_MAX_PAGES`
+  bounds the pages a document sends in one activity; nothing past it is rendered at the reader's size, and no further
+  batch starts once a budget, a cap or the ledger stopped one.
 - A page the reader does not return (a failed, refused or timed-out job, a failed page, empty or invalid Markdown, a
-  refused image, the budget or a cap, a render or download error) goes to the run's hosted vision route as it would
-  without the reader. That route is the run's own configured model, never one the system picks as a fallback.
+  refused image, the budget or a cap) goes to the run's hosted vision route as it would without the reader. That route is
+  the run's own configured model, never one the system picks as a fallback. A render or download error propagates as it
+  would on the hosted route; only reader errors fall back.
 - Usage: `[ai-usage] vision-page-reader model=<model> input_tokens=<n> output_tokens=<n>` per job, provider cost on the
   ledger at 0 credits; each page read is one Rich page, charged once per run.
 - The reader's Markdown passes through vision-extract's own post-processing: HTML tables are rebuilt in the parser VM and
