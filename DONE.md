@@ -344,3 +344,5 @@ Council-reviewed error contracts: allowlisted validation constraints, full Retry
 
 - Materialize runs use UUIDs accepted by the realtime run resource, retaining `kind=materialize`; regression checks validate generated ids against the unchanged protocol. Shared extractor schemas import in a browser without `process`, while Node callers retain live environment validation (2026-11-14, #390).
 - Vision credential destination guard: the OpenAI billing label alone no longer releases the platform key; the destination must match the operator-configured OpenAI endpoint. Added loopback, foreign-host, port, path, query, fragment and userinfo negatives plus operator endpoint positives. This defense-in-depth closes a helper bypass; it does not establish a remote exploit or complete the broader endpoint-policy audit.
+
+- Fixed vision self-critique prompt delivery using bounded per-call task text on both primary and fallback routes; UTF-8 bounded candidates and provider-request regression coverage (2026-11-14).
