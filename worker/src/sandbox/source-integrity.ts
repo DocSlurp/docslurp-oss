@@ -86,10 +86,13 @@ interface HashedDocument {
  * lib/parse-source.ts assertParseSourceDecided (which imports this module): an unscanned document, or its unreadable key
  * (lib/parse-source.ts unscannedParseSourceKey starts with a NUL byte), is refused before any byte is read.
  */
-function assertDecided(document: HashedDocument): void {
-  // A document with no decision field was not built by the loader (which always sets one): unscanned in production (I-1).
-  const missing = document.parseSourceDecision === undefined && !isDevelopmentEnvironment();
-  if (missing || document.parseSourceDecision === "unscanned" || (typeof document.sourceKey === "string" && document.sourceKey.startsWith("\u0000"))) {
+export function assertDecided(document: HashedDocument): void {
+  const invalid = !isDevelopmentEnvironment() && (
+    !["original", "scanned-copy"].includes(document.parseSourceDecision ?? "")
+    || typeof document.sourceSha256 !== "string"
+    || !SHA256_HEX.test(document.sourceSha256)
+  );
+  if (invalid || document.parseSourceDecision === "unscanned" || (typeof document.sourceKey === "string" && document.sourceKey.startsWith("\u0000"))) {
     console.error(`[worker-source] status=parse-source-unscanned metric=parse_source_unscanned document=${document.id}`);
     throw new UnscannedParseSourceError(document.id);
   }

@@ -31,7 +31,7 @@
 
 import { hasCurrentParseDecision, isDevelopmentEnvironment, PARSE_SOURCE_SCAN_VERSION, quarantineRequired } from "@docslurp/shared";
 
-import { claimQuarantineUploadIssuer, type QuarantineUpload, UnscannedParseSourceError } from "../sandbox/source-integrity.js";
+import { assertDecided, claimQuarantineUploadIssuer, type QuarantineUpload, UnscannedParseSourceError } from "../sandbox/source-integrity.js";
 
 /** The scan version and the shared decision predicate live in @docslurp/shared (the API reports rescans with them). */
 export { PARSE_SOURCE_SCAN_VERSION, quarantineRequired };
@@ -166,7 +166,8 @@ export function bindDocumentUpload(document: SourcedDocument, row: Pick<ParseSou
  * Throw unless the document may be parsed: refused when it has no decision from this build's quarantine. Every stage but
  * quarantine, the deferred page renderer and materialization call it before reading a byte.
  */
-export function assertParseSourceDecided(document: Pick<SourcedDocument, "id" | "parseSourceDecision" | "sourceKey">): void {
+export function assertParseSourceDecided(document: SourcedDocument): void {
+  assertDecided(document);
   if (effectiveParseSourceDecision(document) === "unscanned" || isUnscannedParseSourceKey(document.sourceKey)) {
     console.error(`[worker-source] status=parse-source-unscanned metric=parse_source_unscanned document=${document.id}`);
     throw new UnscannedParseSourceError(document.id);
@@ -193,7 +194,7 @@ export function originalSourceForQuarantine(document: SourcedDocument): Quaranti
   const upload = uploads.get(document);
   if (upload) return issueQuarantineUpload({ id: document.id, sourceKey: upload.key, sourceSha256: upload.sha256 });
   const decision = effectiveParseSourceDecision(document);
-  if (decision !== undefined && decision !== "unscanned-allowed") throw new Error(`document ${document.id}: quarantine has no upload binding for a loaded document`);
+  if (!isDevelopmentEnvironment() || (decision !== undefined && decision !== "unscanned-allowed")) throw new Error(`document ${document.id}: quarantine has no upload binding for a loaded document`);
   return issueQuarantineUpload({ id: document.id, sourceKey: document.sourceKey, sourceSha256: document.sourceSha256 ?? null });
 }
 
