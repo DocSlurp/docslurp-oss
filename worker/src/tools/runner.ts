@@ -17,7 +17,7 @@ import {
   type InstalledVendorBundle,
 } from "./vendor-bundles.js";
 import { recordUnrecordedUsageTelemetry, withObservation } from "@docslurp/shared/observability";
-import { DEFAULT_LOCAL_OCR_MODEL, DEFAULT_IMAGE_CLASSIFICATION_MODEL } from "@docslurp/shared";
+import { isDevelopmentEnvironment, DEFAULT_LOCAL_OCR_MODEL, DEFAULT_IMAGE_CLASSIFICATION_MODEL } from "@docslurp/shared";
 import { existsSync, readFileSync, readdirSync, readlinkSync, lstatSync, realpathSync, statSync } from "node:fs";
 import { access, chmod, copyFile, lstat, mkdtemp, open, readFile, readdir, rm, stat } from "node:fs/promises";
 import { createReadStream } from "node:fs";
@@ -2953,7 +2953,9 @@ export function resolveMalwareScanPolicy(
     // Fails closed by default everywhere; only an explicit development opt-in warns instead (#398).
     failOpenOnStaleDefinitions: unsafeOverrideEnabled("DOCSLURP_CLAMAV_FAIL_OPEN_ON_STALE_DB", env),
     maxSignatureAgeHours:
-      readPositiveNumber(env.DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS) ?? 24,
+      isDevelopmentEnvironment(env)
+        ? readPositiveNumber(env.DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS) ?? 24
+        : Math.min(readPositiveNumber(env.DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS) ?? 24, 24),
     databaseDirectory: env.DOCSLURP_CLAMAV_DB_DIR?.trim() || "/var/lib/clamav",
   };
 }

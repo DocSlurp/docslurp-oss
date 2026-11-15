@@ -3,6 +3,14 @@ import { describe, expect, it } from "vitest";
 import { assessClamDatabaseHealth, resolveMalwareScanPolicy } from "../tools/runner.js";
 
 describe("malware scan policy", () => {
+  it.each(["production", "staging", "preview", "prodution"])("caps signature age even when startup was skipped in %s", (NODE_ENV) => {
+    const policy = resolveMalwareScanPolicy({ NODE_ENV, DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS: "999999" });
+    expect(policy.maxSignatureAgeHours).toBe(24);
+  });
+  it("retains stricter deployed ages and development controls", () => {
+    expect(resolveMalwareScanPolicy({ NODE_ENV: "staging", DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS: "12" }).maxSignatureAgeHours).toBe(12);
+    expect(resolveMalwareScanPolicy({ NODE_ENV: "development", DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS: "72" }).maxSignatureAgeHours).toBe(72);
+  });
   it("uses VM-local scanning and fails closed on stale definitions in production by default", () => {
     const policy = resolveMalwareScanPolicy({ NODE_ENV: "production" });
 
