@@ -17,6 +17,10 @@
 - Now, from one config module (`packages/shared/src/figure-resume-limits.ts`, env-overridable with bounds): launches 1.5 × expected passes (3..128), a per-document VM budget of 2 × expected passes × one unit's pass time (180 s..4 h) charged with measured VM time and capping each launch's timeout, per-unit resumes from the passes the unit's share needs (3..128), per-unit failure and no-progress strikes (units run fewest strikes first, so one poisoned shard never blocks the others), and a no-progress stop after 3 launched resumes in a row, across units, that add nothing. Org concurrency and the org daily budget are unchanged.
 - Every stop is a reason code (`attempts`, `vm-budget`, `no-progress`) with `resume_blocked_at`, a log line with its numbers and the `resume.capped` counter. A reprocess clears all; a single-document request grants a bounded extension (at most 2 per run). Migration 0161 adds `resume_vm_ms`, `resume_stalls`, `resume_grants` and `resume_blocked_at`.
 
+## Scanner freshness enforcement (2026-11-15)
+
+- ClamAV policy (#406): deployed startup refuses disabled scanning and age limits outside 1–24 hours; runtime scanning caps definition age at 24 hours even if startup validation is skipped. Development overrides remain available. Both independent council approvals are recorded; deployment remains pending.
+
 ## Managed models: callers choose categories, never a backend model (2026-11-13, draft, needs council)
 
 - Chat takes `tier` (`fastest`, `balanced`, `smart`) and `reasoning` on `/v1/chat`, `/v1/chat/stream`, chat operations, MCP `chat` and `docslurp.tier`/`docslurp.reasoning` on `/v1/chat/completions`. A backend `model` is operator-evaluation only (platform admins, `DOCSLURP_CHAT_EVAL_ORG_IDS`); everyone else gets 400 `model_not_allowed` naming the tiers. Chat responses report the tier; backend ids stay in usage events, traces and logs.
