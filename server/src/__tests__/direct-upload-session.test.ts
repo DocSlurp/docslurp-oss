@@ -1,3 +1,4 @@
+import { uploadContentIdentitySchema } from "@docslurp/shared";
 import { describe, expect, it, vi } from "vitest";
 
 const lockMock = vi.hoisted(() => Object.assign(vi.fn(async () => [{ acquired: true }]), { release: vi.fn() }));
@@ -5,16 +6,20 @@ const sqlMock = vi.hoisted(() => Object.assign(vi.fn(), { json: (value: unknown)
 const listMultipartUploadParts = vi.hoisted(() => vi.fn());
 const completeMultipartUpload = vi.hoisted(() => vi.fn());
 const abortMultipartUpload = vi.hoisted(() => vi.fn());
+const signMultipartUploadPart = vi.hoisted(() => vi.fn(async () => "https://storage.example/part"));
 const signSingleUploadPut = vi.hoisted(() => vi.fn(async ({ key }: { key: string }) => `https://storage.example/${key}`));
 const getUploadedObjectMetadata = vi.hoisted(() => vi.fn());
 const deleteUploadedObject = vi.hoisted(() => vi.fn(async () => {}));
 const createMultipartUpload = vi.hoisted(() => vi.fn());
 const copyUploadedObject = vi.hoisted(() => vi.fn(async () => ({ etag: "sealed-etag" })));
 vi.mock("../lib/direct-upload-locks.js", () => ({ reserveDirectUploadLockConnection: async () => ({ connection: lockMock, release: lockMock.release }) }));
-vi.mock("../lib/storage.js", async (importOriginal) => ({ ...await importOriginal<typeof import("../lib/storage.js")>(), signSingleUploadPut, createMultipartUpload, getUploadedObjectMetadata, deleteUploadedObject, copyUploadedObject, listMultipartUploadParts, completeMultipartUpload, abortMultipartUpload }));
+vi.mock("../lib/storage.js", async (importOriginal) => ({ ...await importOriginal<typeof import("../lib/storage.js")>(), signMultipartUploadPart, signSingleUploadPut, createMultipartUpload, getUploadedObjectMetadata, deleteUploadedObject, copyUploadedObject, listMultipartUploadParts, completeMultipartUpload, abortMultipartUpload }));
 vi.mock("../db.js", async (importOriginal) => ({ ...await importOriginal<typeof import("../db.js")>(), sql: sqlMock }));
 
 import {
+  getDirectUploadSessionDescription,
+  assertUploadSessionActive,
+  buildDirectUploadFileDescriptor,
   createDirectUploadSession,
   validMultipartLayout,
   queueAbandonedDirectUploadCleanup,
@@ -48,6 +53,7 @@ function directUploadSessionFixture(
       template_key: null,
       pipeline: {} as LoadedDirectUploadSession["session"]["pipeline"],
       status: "uploading",
+      expires_at: new Date(Date.now() + 3600_000),
       ...(overrides.session ?? {}),
     },
     files: overrides.files ?? [
@@ -124,7 +130,7 @@ describe("Direct Upload Session Module", () => {
     sqlMock.mockImplementation(async (strings: TemplateStringsArray, ...values: unknown[]) => {
       const query = strings.join("?");
       if (query.includes("insert into upload_session_files")) stored.push({ filename: values[2], index: values[13], clientId: values[14] });
-      if (query.includes("from upload_sessions")) return [{ id: "s", user_id: "user-1", org_id: "org-1", status: "pending" }];
+      if (query.includes("from upload_sessions")) return [{ id: "s", user_id: "user-1", org_id: "org-1", expires_at: new Date(Date.now() + 3600_000), status: "pending" }];
       if (query.includes("from upload_session_files")) return stored.map((file, i) => ({ id: `file-${i}`, session_id: "s", filename: file.filename, mime_type: "application/pdf", size_bytes: 10, source_key: `k${i}`, upload_mode: "single", status: "pending", request_index: file.index, client_id: file.clientId }));
       return [];
     });
@@ -145,7 +151,7 @@ describe("Direct Upload Session Module", () => {
     sqlMock.mockReset();
     sqlMock.mockImplementation(async (strings: TemplateStringsArray) => {
       const query = strings.join("?");
-      if (query.includes("from upload_sessions")) return [{ id: "s", user_id: "user-1", org_id: "org-1", status: "pending" }];
+      if (query.includes("from upload_sessions")) return [{ id: "s", user_id: "user-1", org_id: "org-1", expires_at: new Date(Date.now() + 3600_000), status: "pending" }];
       if (query.includes("from upload_session_files")) return [{ id: "f", session_id: "s", filename: "ok.pdf", mime_type: "application/pdf", size_bytes: 10, source_key: "k", upload_mode: "single", status: "pending", request_index: 1, client_id: "ok" }];
       return [];
     });
@@ -186,7 +192,7 @@ describe("Direct Upload Session Module", () => {
         expect(sqlMock.mock.calls.some(([strings]) => strings.join("?").includes("set status = 'completed'"))).toBe(true);
       } else {
         await expect(completing).rejects.toThrow();
-        expect(sqlMock).toHaveBeenCalledTimes(2);
+        expect(sqlMock).toHaveBeenCalledTimes(3);
       }
     }
   });
@@ -365,5 +371,108 @@ describe("Direct Upload Session Module", () => {
       statusCode: 409,
       message: "late.pdf did not finish uploading",
     });
+  });
+});
+
+
+describe("authoritative recovery evidence", () => {
+  it("refuses expired sessions before the sweeper and caps live URL lifetime", () => {
+    const fixture = directUploadSessionFixture();
+    expect(assertUploadSessionActive(fixture.session)).toBe(900);
+    expect(assertUploadSessionActive({ ...fixture.session, expires_at: new Date(Date.now() + 60_000) })).toBeLessThanOrEqual(60);
+    expect(() => assertUploadSessionActive({ ...fixture.session, expires_at: new Date(0) })).toThrow("expired");
+    expect(() => assertUploadSessionActive({ ...fixture.session, expires_at: undefined })).toThrow("expired");
+  });
+  it.each(["AccessDenied", "TimeoutError", "NoSuchUpload"])("never signs retry URLs when inventory fails: %s", async name => {
+    const file = { ...directUploadSessionFixture().files[0], status: "pending", upload_mode: "multipart", upload_id: "u", part_size: 8 };
+    listMultipartUploadParts.mockRejectedValueOnce(Object.assign(new Error("private provider detail"), { name }));
+    await expect(buildDirectUploadFileDescriptor(file)).rejects.toThrow();
+  });
+  it("retries a wrong-sized part despite a stale completed receipt", async () => {
+    const file = { ...directUploadSessionFixture().files[0], status: "pending", upload_mode: "multipart", upload_id: "u", part_size: 42, completed_parts: [{ partNumber: 1, etag: "stale" }] };
+    listMultipartUploadParts.mockResolvedValueOnce([{ partNumber: 1, etag: "wrong", sizeBytes: 41 }]);
+    expect(await buildDirectUploadFileDescriptor(file)).toMatchObject({ verifiedBytes: 0, pendingParts: [{ partNumber: 1, sizeBytes: 42 }] });
+  });
+  it("does not let stale DB completed parts suppress missing storage parts", async () => {
+    const file = { ...directUploadSessionFixture().files[0], status: "pending", upload_mode: "multipart", upload_id: "u", part_size: 42, completed_parts: [{ partNumber: 1, etag: "stale" }] };
+    listMultipartUploadParts.mockResolvedValueOnce([]);
+    const result = await buildDirectUploadFileDescriptor(file);
+    expect(result).toMatchObject({ verifiedBytes: 0, transferState: "missing", pendingParts: [{ partNumber: 1, sizeBytes: 42 }] });
+  });
+});
+
+
+describe("full recovery inspection", () => {
+  function installSession() {
+    const fixture = directUploadSessionFixture();
+    fixture.files[0].status = "pending";
+    sqlMock.mockReset().mockImplementation(async (strings: TemplateStringsArray) => {
+      const query = strings.join("?");
+      if (query.includes("update upload_session_files")) { fixture.files[0].status = "completed"; return [{ id: fixture.files[0].id, source_key: sealedSourceKey(fixture.files[0]) }]; }
+      if (query.includes("from upload_sessions")) return [fixture.session];
+      if (query.includes("from upload_session_files")) return fixture.files;
+      return [{ one: 1 }];
+    });
+    signSingleUploadPut.mockClear();
+    signMultipartUploadPart.mockClear();
+    getUploadedObjectMetadata.mockReset();
+    return fixture;
+  }
+  it.each(["AccessDenied", "TimeoutError"])("returns public-safe unavailable and zero URLs for HEAD %s", async name => {
+    installSession();
+    getUploadedObjectMetadata.mockRejectedValue(Object.assign(new Error("secret storage detail"), { name }));
+    await expect(getDirectUploadSessionDescription("session-1", "user-1")).rejects.toMatchObject({ statusCode: 503, code: "upload_storage_unavailable" });
+    expect(signSingleUploadPut).not.toHaveBeenCalled();
+    expect(signMultipartUploadPart).not.toHaveBeenCalled();
+  });
+  it.each(["AccessDenied", "TimeoutError", "InvalidPagination"])("returns no retry URLs when ListParts evidence fails: %s", async name => {
+    const fixture = installSession();
+    Object.assign(fixture.files[0], { upload_mode: "multipart", upload_id: "open", part_size: 42 });
+    getUploadedObjectMetadata.mockRejectedValue(Object.assign(new Error("missing"), { name: "NotFound" }));
+    listMultipartUploadParts.mockRejectedValueOnce(Object.assign(new Error("secret provider detail"), { name }));
+    const failure = await getDirectUploadSessionDescription("session-1", "user-1").catch(error => error);
+    expect(failure).toMatchObject({ statusCode: 503, code: "upload_storage_unavailable" });
+    expect(failure.message).not.toContain("secret provider detail");
+    expect(signSingleUploadPut).not.toHaveBeenCalled();
+    expect(signMultipartUploadPart).not.toHaveBeenCalled();
+  });
+  it("seals a single PUT with a lost acknowledgement without signing another PUT", async () => {
+    installSession();
+    getUploadedObjectMetadata.mockResolvedValue({ contentLength: 42, etag: "original" });
+    const recovered = await getDirectUploadSessionDescription("session-1", "user-1");
+    expect(recovered?.files[0]).toMatchObject({ transferState: "complete", verifiedBytes: 42 });
+    expect(signSingleUploadPut).not.toHaveBeenCalled();
+  });
+  it("authorizes a whole PUT only on provider-confirmed absence", async () => {
+    installSession();
+    getUploadedObjectMetadata.mockRejectedValue(Object.assign(new Error("missing"), { name: "NotFound" }));
+    expect((await getDirectUploadSessionDescription("session-1", "user-1"))?.files[0]).toMatchObject({ transferState: "missing", verifiedBytes: 0 });
+    expect(signSingleUploadPut).toHaveBeenCalledTimes(1);
+  });
+  it("refuses a lost multipart upload without silently creating another", async () => {
+    const fixture = installSession();
+    Object.assign(fixture.files[0], { upload_mode: "multipart", upload_id: "lost", part_size: 42 });
+    getUploadedObjectMetadata.mockRejectedValue(Object.assign(new Error("missing"), { name: "NotFound" }));
+    listMultipartUploadParts.mockRejectedValueOnce(Object.assign(new Error("lost"), { name: "NoSuchUpload" }));
+    await expect(getDirectUploadSessionDescription("session-1", "user-1")).rejects.toMatchObject({ statusCode: 409, code: "intake_reconciliation_required" });
+    expect(signMultipartUploadPart).not.toHaveBeenCalled();
+  });
+  it("keeps statusOnly metadata-only, even while storage is down", async () => {
+    installSession();
+    await getDirectUploadSessionDescription("session-1", "user-1", true);
+    expect(getUploadedObjectMetadata).not.toHaveBeenCalled();
+    expect(signSingleUploadPut).not.toHaveBeenCalled();
+  });
+});
+
+
+describe("content identity input", () => {
+  it.each([
+    { algorithm: "md5", digest: "a".repeat(64) },
+    { algorithm: "sha256", digest: "A".repeat(64) },
+    { algorithm: "sha256", digest: "a".repeat(65) },
+    { algorithm: "sha256", digest: "a".repeat(64), extra: true },
+  ])("rejects malformed identity %j", input => {
+    expect(uploadContentIdentitySchema.safeParse(input).success).toBe(false);
   });
 });

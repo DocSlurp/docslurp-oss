@@ -389,4 +389,6 @@ Council-reviewed error contracts: allowlisted validation constraints, full Retry
 
 - Reserve measured reindex/full-index workloads and refuse unspecified active-run reservations; retain stable intake responses beyond cache expiry and refuse ambiguous response recovery.
 - Fixed vision self-critique prompt delivery using bounded per-call task text on both primary and fallback routes; UTF-8 bounded candidates and provider-request regression coverage (2026-11-14).
+
+- Add storage-authoritative direct-upload refresh, transfer expiry checks, original-key binding and immutable client-claimed re-selection identity.
 - Provider response validation no longer trusts upstream MIME: bounded JSON validation or SSE framing precedes byte release, including mislabeled SDK error responses; lazy reads and cancellation remain covered. Database discovery conservatively joins container/return provenance, refuses environment property stores, and invalidates destructuring and loop key writes without adding exemptions.

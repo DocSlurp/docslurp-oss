@@ -1,3 +1,4 @@
+import { uploadContentIdentitySchema } from "@docslurp/shared";
 import { reportPublicError } from "../lib/public-errors.js";
 import { CHART_EXPORT_TIER_UNAVAILABLE_CODE, chartExportOverrideSchema } from "@docslurp/shared";
 import { chartExportOverrideError } from "../services/chart-export-availability.js";
@@ -34,7 +35,6 @@ import {
   abortDirectUploadSession,
   completeDirectUploadFile,
   createDirectUploadSession,
-  describeDirectUploadSession,
   getDirectUploadSessionDescription,
   loadDirectUploadSession,
   directUploadSessionBelongsToOrganization,
@@ -120,6 +120,7 @@ export const directUploadFileSchema = z.object({
   filename: z.string().min(1).max(512),
   mimeType: z.string().min(1).max(256),
   sizeBytes: z.number().int().nonnegative().optional(),
+  identity: uploadContentIdentitySchema.optional(),
   sha256: z.string().min(16).max(128).optional(),
   canonicalId: canonicalIdSchema.optional(),
   /** Folder path inside the upload; with the filename it is the version key. */
@@ -254,7 +255,7 @@ export const createUploadsRoutes = (ports: ProjectIntakePorts = projectIntakePor
     }
     if (actor.type === "apiKey") {
       if (!actor.apiKey.orgId) return apiStatusError(c, 403, "Forbidden");
-      if (sessionMatch && !await directUploadSessionBelongsToOrganization(sessionMatch[1], actor.userId, actor.apiKey.orgId, actorAllowedProjectIds(actor))) {
+      if (sessionMatch && !await directUploadSessionBelongsToOrganization(sessionMatch[1], actor.userId, actor.apiKey.orgId, actorAllowedProjectIds(actor), actor.apiKey.keyId)) {
         return apiStatusError(c, 404, "Upload session not found");
       }
       if (c.req.method === "POST" && /\/(bulk|url|direct\/sessions)\/?$/.test(c.req.path)) {
@@ -339,7 +340,7 @@ export const createUploadsRoutes = (ports: ProjectIntakePorts = projectIntakePor
             assertSessionReplayable(loaded.session, { orgId, apiKeyId: actor.type === "apiKey" ? actor.apiKey.keyId : null, allowedProjectIds: actorAllowedProjectIds(actor) });
             // ... and the user may still contribute to that project (a share revoked since gets no URLs).
             await assertSessionProjectStillContributable(loaded.session, userId);
-            return await describeDirectUploadSession(loaded);
+            return await getDirectUploadSessionDescription(sessionId, userId);
           },
         });
         if (replayed) c.header("Idempotency-Replayed", "true");
@@ -354,11 +355,13 @@ export const createUploadsRoutes = (ports: ProjectIntakePorts = projectIntakePor
   .get("/direct/sessions/:sessionId", async (c) => {
     const userId = c.get("sessionUser").id;
     const sessionId = c.req.param("sessionId");
+    try {
     const session = await getDirectUploadSessionDescription(sessionId, userId, c.req.query("statusOnly") === "true");
     if (!session) {
       return apiStatusError(c, 404, "Upload session not found");
     }
     return c.json(await withPayloadCanEdit(c, session));
+    } catch (error) { return projectIntakeErrorResponse(c, error) ?? apiStatusError(c, 500, reportPublicError(error)); }
   })
   .post("/direct/sessions/:sessionId/files/:fileId/parts/sign",
     zValidator("json", z.object({ partNumbers: z.array(z.number().int().min(1).max(10000)).min(1).max(100) }), validationHook),

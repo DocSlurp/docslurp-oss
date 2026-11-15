@@ -1199,7 +1199,12 @@ function apiErrorEnvelope(body: unknown): { code?: string; requestId?: string; l
  */
 export const DIRECT_UPLOAD_THRESHOLD_BYTES = 20 * 1024 * 1024;
 
+export type UploadContentIdentity = { algorithm: "sha256"; digest: string };
+
 export type DirectUploadDescriptor = {
+  identity?: UploadContentIdentity | null;
+  transferState?: "complete" | "missing" | "incomplete" | "unavailable";
+  verifiedBytes?: number | null;
   /** Position of the file in the create request; the server sanitizes filenames, so match by this, never by name. */
   index?: number | null;
   /** The client id sent with the file, echoed back. */
@@ -1218,9 +1223,10 @@ export type DirectUploadDescriptor = {
 };
 
 export type UploadSessionInput = Omit<UploadInput, "files" | "idempotencyKey"> & {
-  files: Array<{ clientId?: string; filename: string; mimeType: string; sizeBytes?: number; canonicalId?: string; singlePart?: boolean }>;
+  files: Array<{ identity?: UploadContentIdentity; clientId?: string; filename: string; mimeType: string; sizeBytes?: number; canonicalId?: string; singlePart?: boolean }>;
 };
 export type UploadSession = {
+  expiresAt?: string | null;
   sessionId: string;
   status: string;
   files: DirectUploadDescriptor[];

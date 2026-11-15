@@ -1,3 +1,9 @@
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { fileURLToPath } from "node:url";
+import { Pool } from "pg";
+import { assertDisposableTestDatabaseUrl } from "@docslurp/shared";
+import { readFileSync } from "node:fs";
 import { Hono } from "hono";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createMigratedDatabase } from "@docslurp/worker/testing";
@@ -24,7 +30,13 @@ const { createUploadsRoutes } = await import("../routes/uploads.js");
 const id = "11111111-1111-4111-8111-111111111111";
 // A session 'other' made in 'excluded', which it may upload into only through a project share.
 const sharedId = "33333333-3333-4333-8333-333333333333";
-let db: Awaited<ReturnType<typeof createMigratedDatabase>>;
+// Default to PGlite; an explicit disposable loopback URL runs the same authorization
+// and migration assertions on real PostgreSQL, without application credentials.
+let db: {
+  query(text: string, values?: unknown[]): Promise<{ rows: Record<string, unknown>[] }>;
+  exec(text: string): Promise<unknown>;
+  close(): Promise<void>;
+};
 const app = new Hono().use("*", apiKeyAuth).route("/uploads", createUploadsRoutes());
 let rawKey: string;
 async function seedKey(overrides: { keyType?: string; scopes?: string[]; orgId?: string | null; projectIds?: string[]; userId?: string } = {}) {
@@ -43,7 +55,21 @@ async function seedKey(overrides: { keyType?: string; scopes?: string[]; orgId?:
 const ownershipQueries = () => mocks.query.mock.calls.filter(([sql]) => /from upload_sessions/i.test(sql));
 beforeAll(async () => {
   vi.stubEnv("API_RATE_LIMIT_ENABLED", "false");
-  db = await createMigratedDatabase();
+  const testUrl = process.env.TEST_DATABASE_URL;
+  if (testUrl) {
+    assertDisposableTestDatabaseUrl(testUrl);
+    await promisify(execFile)(process.execPath, [fileURLToPath(new URL("../../db/migrate.mjs", import.meta.url))], {
+      env: { ...process.env, DATABASE_URL: testUrl, MIGRATION_DATABASE_URL: testUrl },
+    });
+    const pool = new Pool({ connectionString: testUrl, max: 2 });
+    db = {
+      query: (text, values) => pool.query<Record<string, unknown>>(text, values),
+      exec: (text) => pool.query(text),
+      close: () => pool.end(),
+    };
+  } else {
+    db = await createMigratedDatabase();
+  }
   await db.exec(LIFT_ONE_ORG_PER_USER_POLICY);
   await db.exec(`
     insert into "user" (id,name,email) values ('u','Test','upload@example.test'), ('other','Other','other@example.test');
@@ -59,6 +85,7 @@ afterAll(async () => { await (await import("../services/api-key-usage.js")).flus
 beforeEach(async () => {
   vi.clearAllMocks();
   await seedKey();
+  await db.query("update upload_sessions set api_key_id = 'key'");
   mocks.describe.mockResolvedValue({ id, files: [{ uploadUrl: "https://signed.example/put" }] });
   mocks.sign.mockResolvedValue({ parts: [{ partNumber: 1, url: "https://signed.example/part" }] });
 });
@@ -84,6 +111,12 @@ describe.each([false, true])("direct session authorization, statusOnly=%s", stat
   ])("rejects %s before serialization or signing", async (_label, overrides, status) => {
     await seedKey(overrides);
     expect((await request()).status).toBe(status);
+    expect(mocks.describe).not.toHaveBeenCalled();
+  });
+  it("refuses a different original key and returns no URLs", async () => {
+    await db.query("update upload_sessions set api_key_id = null where id = $1", [id]);
+    const response = await request();
+    expect(response.status).toBe(404);
     expect(mocks.describe).not.toHaveBeenCalled();
   });
   it("hides an absent session before serialization", async () => {
@@ -234,5 +267,20 @@ describe("direct confirmation cached receipt route authorization", () => {
     if (change === "membership") await db.query("delete from org_memberships where org_id='o' and user_id='u'");
     try { expect([401,403,404]).toContain((await confirm()).status); }
     finally { if(change === "membership") await db.query("insert into org_memberships(org_id,user_id,role) values('o','u','owner')"); }
+  });
+});
+
+
+describe("upload identity migration", () => {
+  it("reapplies twice and refuses identity mutation or malformed claims", async () => {
+    const migration = readFileSync(new URL("../../db/migrations/0176_upload_content_identity.sql", import.meta.url), "utf8");
+    await db.exec(migration);
+    await db.exec(migration);
+    const identity = { algorithm: "sha256", digest: "a".repeat(64) };
+    await db.query(`insert into upload_session_files (id,session_id,filename,mime_type,size_bytes,source_key,upload_mode,status,content_identity)
+      values ('identity-file',$1,'file.pdf','application/pdf',42,'test/key','single','pending',$2)`, [id, JSON.stringify(identity)]);
+    await expect(db.query("update upload_session_files set content_identity = null where id = 'identity-file'")).rejects.toThrow("immutable");
+    await expect(db.query(`insert into upload_session_files (id,session_id,filename,mime_type,size_bytes,source_key,upload_mode,status,content_identity)
+      values ('invalid-identity',$1,'file.pdf','application/pdf',42,'test/key2','single','pending',$2)`, [id, JSON.stringify({ algorithm: "sha256", digest: "INVALID" })])).rejects.toThrow("Invalid");
   });
 });

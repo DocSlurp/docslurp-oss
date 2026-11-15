@@ -2321,6 +2321,7 @@ export const uploadSessionFiles = pgTable(
     etag: text(),
     completedParts: jsonb("completed_parts").default([]).notNull(),
     sha256: text(),
+    contentIdentity: jsonb("content_identity").$type<{ algorithm: "sha256"; digest: string }>(),
     canonicalId: text("canonical_id"),
     sourcePath: text("source_path").default("").notNull(),
     requestIndex: integer("request_index"),

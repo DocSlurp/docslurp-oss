@@ -136,3 +136,5 @@ export * from "./managed-pipeline-models.js";
 export * from "./model-call-policy.js";
 export * from "./vision-request-profile.js";
 export * from "./document-failure.js";
+
+export * from "./upload-recovery.js";
