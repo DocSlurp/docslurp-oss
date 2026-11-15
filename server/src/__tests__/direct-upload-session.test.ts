@@ -1,3 +1,4 @@
+import { uploadContentIdentitySchema } from "@docslurp/shared";
 import { describe, expect, it, vi } from "vitest";
 
 const lockMock = vi.hoisted(() => Object.assign(vi.fn(async () => [{ acquired: true }]), { release: vi.fn() }));
@@ -437,10 +438,30 @@ describe("full recovery inspection", () => {
     expect((await getDirectUploadSessionDescription("session-1", "user-1"))?.files[0]).toMatchObject({ transferState: "missing", verifiedBytes: 0 });
     expect(signSingleUploadPut).toHaveBeenCalledTimes(1);
   });
+  it("refuses a lost multipart upload without silently creating another", async () => {
+    const fixture = installSession();
+    Object.assign(fixture.files[0], { upload_mode: "multipart", upload_id: "lost", part_size: 42 });
+    getUploadedObjectMetadata.mockRejectedValue(Object.assign(new Error("missing"), { name: "NotFound" }));
+    listMultipartUploadParts.mockRejectedValueOnce(Object.assign(new Error("lost"), { name: "NoSuchUpload" }));
+    await expect(getDirectUploadSessionDescription("session-1", "user-1")).rejects.toMatchObject({ statusCode: 409, code: "intake_reconciliation_required" });
+    expect(signMultipartUploadPart).not.toHaveBeenCalled();
+  });
   it("keeps statusOnly metadata-only, even while storage is down", async () => {
     installSession();
     await getDirectUploadSessionDescription("session-1", "user-1", true);
     expect(getUploadedObjectMetadata).not.toHaveBeenCalled();
     expect(signSingleUploadPut).not.toHaveBeenCalled();
+  });
+});
+
+
+describe("content identity input", () => {
+  it.each([
+    { algorithm: "md5", digest: "a".repeat(64) },
+    { algorithm: "sha256", digest: "A".repeat(64) },
+    { algorithm: "sha256", digest: "a".repeat(65) },
+    { algorithm: "sha256", digest: "a".repeat(64), extra: true },
+  ])("rejects malformed identity %j", input => {
+    expect(uploadContentIdentitySchema.safeParse(input).success).toBe(false);
   });
 });

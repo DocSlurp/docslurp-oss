@@ -430,7 +430,7 @@ export async function describeDirectUploadSession(
 /** A native key may only operate on sessions created in its organization. */
 export async function directUploadSessionBelongsToOrganization(sessionId: string, userId: string, orgId: string, allowedProjectIds?: readonly string[] | null, apiKeyId?: string): Promise<boolean> {
   const loaded = await loadDirectUploadSession(sessionId, userId);
-  return loaded?.session.org_id === orgId && loaded.session.api_key_id === apiKeyId && (!allowedProjectIds?.length || Boolean(loaded.session.project_id && allowedProjectIds.includes(loaded.session.project_id)));
+  return Boolean(apiKeyId) && loaded?.session.org_id === orgId && loaded.session.api_key_id === apiKeyId && (!allowedProjectIds?.length || Boolean(loaded.session.project_id && allowedProjectIds.includes(loaded.session.project_id)));
 }
 
 export async function getDirectUploadSessionDescription(
