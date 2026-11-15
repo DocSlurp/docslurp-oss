@@ -92,7 +92,7 @@ async function embedOnce(env: Record<string, string>, documents = ["doc"], pipel
       parserArtifactUri: `s3://t/u1/run/parser/${id}.json`, sourceArtifactUri: `s3://t/u1/run/source/${id}.pdf` };
     await storage.putJson(key, canonical);
     artifacts[`${id}:canonical-document`] = storage.uri(key);
-    docs.push({ id, userId: "u1", runId: "run", filename: "manual.pdf", mimeType: "application/pdf", sourceKey: "unused", parseSourceDecision: "unscanned-allowed",
+    docs.push({ id, userId: "u1", runId: "run", filename: "manual.pdf", mimeType: "application/pdf", sourceKey: "unused", parseSourceDecision: "original", sourceSha256: createHash("sha256").update(text).digest("hex"),
       status: "processing", extractionMode: "hybrid", pageCount: PAGES, createdAt: new Date(), updatedAt: new Date() });
   }
   const run = {
