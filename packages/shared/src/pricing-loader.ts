@@ -115,7 +115,9 @@ export const RUNTIME_SECURITY_DEFINER_ALLOWLIST: readonly string[] = Object.free
   "public.realtime_statement_changed()",
   "public.realtime_search_session_changed()",
   "public.realtime_materialization_changed()",
-  "public.realtime_compact_revisions(text)",
+  "public.realtime_compact_revisions(pg_catalog.text)",
+  // Trigger-only deploy fence: EXECUTE and its private schema remain revoked from runtime roles.
+  "docslurp_deploy.check_ingest_admission()",
 ]);
 
 /**
@@ -139,7 +141,7 @@ export const RUNTIME_SECURITY_DEFINER_ALLOWLIST: readonly string[] = Object.free
  */
 export const RUNTIME_IDENTITY_SQL = `
   with me as (select * from pg_roles where rolname = current_user),
-  held as (select r.* from pg_roles r, me where r.oid = me.oid or (r.rolname = any($1::text[]) and pg_has_role(me.oid, r.oid, 'MEMBER'))),
+  held as (select r.* from pg_roles r, me where r.oid = me.oid or (r.rolname = any($1::pg_catalog.text[]) and pg_has_role(me.oid, r.oid, 'MEMBER'))),
   system_ns as (select oid from pg_namespace where nspname in ('pg_catalog', 'information_schema') or nspname like 'pg_toast%' or nspname like 'pg_temp%'),
   extension_members as (select d.objid from pg_depend d join pg_extension e on e.oid = d.refobjid
     where d.deptype = 'e' and d.classid = 'pg_proc'::regclass and e.extname = any (array['pgcrypto', 'plpgsql'])),
@@ -170,8 +172,8 @@ export const RUNTIME_IDENTITY_SQL = `
     (select bool_or(rolsuper) from held) as superuser,
     (select bool_or(rolcreaterole or rolcreatedb or rolreplication or rolbypassrls) from held) as elevated,
     coalesce((select string_agg(r.rolname::text, ',' order by r.rolname) from pg_roles r
-      where r.oid <> me.oid and not (r.rolname = any($1::text[])) and pg_has_role(me.oid, r.oid, 'MEMBER')), '') as other_memberships,
-    coalesce((select string_agg(rolname::text, ',' order by rolname) from held where rolname = any($1::text[])), '') as allowed_held,
+      where r.oid <> me.oid and not (r.rolname = any($1::pg_catalog.text[])) and pg_has_role(me.oid, r.oid, 'MEMBER')), '') as other_memberships,
+    coalesce((select string_agg(rolname::text, ',' order by rolname) from held where rolname = any($1::pg_catalog.text[])), '') as allowed_held,
     coalesce((select string_agg(distinct m.roleid::regrole::text, ',' order by m.roleid::regrole::text) from pg_auth_members m
       where m.member in (select oid from held) and m.admin_option), '') as admin_memberships,
     (select bool_or(has_database_privilege(h.oid, current_database(), 'CREATE')) from held h) as can_create_in_database,
@@ -225,11 +227,15 @@ export const RUNTIME_IDENTITY_SQL = `
         case when (select bool_or(has_any_column_privilege(h.oid, 'public.pricing_provider_state', 'UPDATE')) from held h) then 'update' end,
         case when (select bool_or(has_table_privilege(h.oid, 'public.pricing_provider_state', 'DELETE')) from held h) then 'delete' end,
         case when (select bool_or(has_table_privilege(h.oid, 'public.pricing_provider_state', 'TRUNCATE')) from held h) then 'truncate' end) end as writes_state,
-    case when to_regprocedure('public.pricing_state_raise(text, bigint)') is null then false
-      else (select bool_or(has_function_privilege(h.oid, 'public.pricing_state_raise(text, bigint)', 'EXECUTE')) from held h) end as raises_state,
+    case when to_regprocedure('public.pricing_state_raise(pg_catalog.text, pg_catalog.int8)') is null then false
+      else (select bool_or(has_function_privilege(h.oid, 'public.pricing_state_raise(pg_catalog.text, pg_catalog.int8)', 'EXECUTE')) from held h) end as raises_state,
     coalesce((select string_agg(distinct p.oid::regprocedure::text, ',' order by p.oid::regprocedure::text) from pg_proc p
       where p.prosecdef and p.pronamespace not in (select oid from system_ns) and p.oid not in (select objid from extension_members)
-        and not (p.oid = any (array(select to_regprocedure(a) from unnest($2::text[]) a where to_regprocedure(a) is not null)))
+        and not ((select quote_ident(n.nspname) from pg_namespace n where n.oid = p.pronamespace) || '.' || quote_ident(p.proname) || '(' || coalesce((
+          select string_agg(quote_ident(tn.nspname) || '.' || quote_ident(t.typname), ', ' order by arg.position)
+          from unnest(p.proargtypes) with ordinality arg(type_oid, position)
+          join pg_type t on t.oid = arg.type_oid join pg_namespace tn on tn.oid = t.typnamespace
+        ), '') || ')' = any ($2::pg_catalog.text[]))
         and (exists (select 1 from held h where has_function_privilege(h.oid, p.oid, 'EXECUTE'))
           or exists (select 1 from pg_trigger t where t.tgfoid = p.oid and t.tgrelid in (select oid from touched)))), '') as definer_functions,
     case when (select oid from state) is null then ''

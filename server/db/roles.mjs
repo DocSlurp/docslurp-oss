@@ -222,7 +222,9 @@ export const RUNTIME_SECURITY_DEFINER_ALLOWLIST = Object.freeze([
   "public.realtime_statement_changed()",
   "public.realtime_search_session_changed()",
   "public.realtime_materialization_changed()",
-  "public.realtime_compact_revisions(text)",
+  "public.realtime_compact_revisions(pg_catalog.text)",
+  // Trigger-only deploy fence: EXECUTE and its private schema remain revoked from runtime roles.
+  "docslurp_deploy.check_ingest_admission()",
 ]);
 
 export function quoteIdent(name) {
