@@ -132,3 +132,68 @@ test("reviewed setup helpers are content pinned and cannot exempt new gates", ()
     assert.match(rejected, /NEW_DATABASE_URL/);
   } finally { rmSync(dir, {recursive: true, force: true}); }
 });
+
+test("mutable computed keys retain every possible gate and invalidate unknown writes", () => {
+  for (const key of ["OTHER_DATABASE_URL", "TEST_DATABASE_URL"]) {
+    for (const assignment of [`key = "${key}"`, `if (flag) key = "${key}"`, `key = flag ? "HOME" : "${key}"`]) {
+      const result = classifyTestSource(`let key = "HOME"; ${assignment}; it.runIf(process.env[key]);`);
+      assert.equal(key === "TEST_DATABASE_URL" ? result.db : result.other.includes(key), true, assignment);
+    }
+  }
+  for (const assignment of ['key = dynamic()', 'key += suffix', 'key++']) {
+    assert.ok(classifyTestSource(`let key = "HOME"; ${assignment}; it.runIf(process.env[key]);`).other.includes("<unresolved environment access>"), assignment);
+  }
+});
+
+test("environment copies and returned aliases preserve gate provenance", () => {
+  for (const setup of [
+    'const env = {...process.env}',
+    'const env = Object.assign({}, process.env)',
+    'const env = {}; Object.assign(env, process.env)',
+    'const env = flag ? process.env : {}',
+    'const env = flag ? {} : process.env',
+    'function getEnv() { return process.env; } const env = getEnv()',
+    'const getEnv = () => process.env; const env = getEnv()',
+    'const env = (() => process.env)()',
+    'function gate(env = process.env) { env.OTHER_DATABASE_URL; } const env = process.env',
+    'function identity(value) { return value; } const env = identity(process.env)',
+  ]) {
+    assert.deepEqual(classifyTestSource(`${setup}; env.OTHER_DATABASE_URL`).other, ["OTHER_DATABASE_URL"], setup);
+    assert.equal(classifyTestSource(`${setup}; env.TEST_DATABASE_URL`).db, true, setup);
+    assert.ok(classifyTestSource(`${setup}; env[dynamicKey]`).other.includes("<unresolved environment access>"), setup);
+  }
+});
+
+test("passing environment to configuration, spies and subprocesses is not a gate read", () => {
+  for (const source of [
+    'configure(process.env)',
+    'spy(process.env, "HOME")',
+    'spawn("node", [], {env: {...process.env, HOME: "test"}})',
+    'const env = {...process.env}; spawn("node", [], {env})',
+    'const env = Object.assign({}, process.env); configure(env)',
+    'const env = flag ? process.env : {}; env.HOME',
+    'function identity(value) { return value; } const env = identity(process.env); env.HOME',
+    'function f(process) { const env = {...process.env}; env.OTHER_DATABASE_URL }',
+    'import {env} from "unrelated-config"; env.HOME',
+  ]) assert.deepEqual(classifyTestSource(source), {db: false, redis: false, other: []}, source);
+  assert.deepEqual(classifyTestSource('const env = {...process.env}; configure(env); env.OTHER_DATABASE_URL').other, ["OTHER_DATABASE_URL"]);
+});
+
+
+test("unknown environment transformations refuse gate reads without refusing config use", () => {
+  for (const source of [
+    'const env = unknownFactory(process.env); env.OTHER_DATABASE_URL',
+    'const env = unknownFactory(process.env); env.TEST_DATABASE_URL',
+    'const config = {env: process.env}; config.env.OTHER_DATABASE_URL',
+    'function use(env) { return env[dynamicKey]; } use(process.env)',
+    'visit(process.env, env => env.OTHER_DATABASE_URL)',
+    'const env = flag ? process : process.env; env.OTHER_DATABASE_URL',
+  ]) assert.ok(classifyTestSource(source).other.includes("<unresolved environment access>"), source);
+  for (const source of [
+    'const env = unknownFactory(process.env); configure(env)',
+    'const config = {...options(process.env)}; configure(config)',
+    'const previous = {...process.env}; process.env = previous',
+    'const child = spawn(process.execPath, [], {env: {...process.env}}); child[dynamicMethod]()',
+    'const child = configure({env: process.env}); child[dynamicMethod]()',
+  ]) assert.deepEqual(classifyTestSource(source).other, [], source);
+});

@@ -1,3 +1,4 @@
+- Database test discovery: accumulate mutable key possibilities, invalidate unknown writes, preserve environment copy/local-call provenance, and refuse uncertain gate reads without treating subprocess/config arguments as gates. Keep content-pinned reviews unchanged; 15 discovery tests and workspace typechecks pass.
 - Security remainder: refuse tenant loopback inference by default, bind API embedding credentials to the operator destination, block provider redirects, redact HTTP/vision errors, exclude billing-only default-project contributions, and cover alias/optional-access/package database-test guards. Regression execution beyond Node script tests awaits installable dependencies.
 ## Fast scan preview selection (2026-11-14, draft, needs council)
 

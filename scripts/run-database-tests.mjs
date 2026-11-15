@@ -42,10 +42,20 @@ export const NOT_RUN = {
 /** A database or Redis URL variable name; the runner sets only the two above. */
 const GATE_NAME = /^[A-Z0-9_]*(?:DATABASE_URL|_PG_URL|REDIS_URL)$/;
 const STANDARD = new Set(["DATABASE_URL", "TEST_DATABASE_URL", "TEST_REDIS_URL"]);
-/** Discover static environment access through typed expressions and nested bindings. */
+/**
+ * File-local, flow-insensitive provenance analysis: key writes accumulate possible
+ * literals; unknown/compound writes invalidate key precision. Scope uses TS symbols.
+ * Copies, conditional aliases and local function parameters/returns retain env
+ * provenance. Unknown calls with a direct env argument yield uncertain provenance:
+ * passing it is harmless, but reading a gate or an unknown key refuses discovery.
+ * Container provenance is kept separate so subprocess options do not taint the
+ * subprocess result. This does not resolve imports beyond node:process/process,
+ * execute arbitrary helpers, or model reflection/prototype mutation.
+ */
 export function environmentReads(source) {
   const names = new Set();
-  if (!/\bprocess\b/.test(source)) return names;
+  if (!/\b(?:process|env)\b/.test(source)) return names;
+
   let tree = ts.createSourceFile("test.tsx", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
   if (tree.parseDiagnostics.length) {
     const plain = ts.createSourceFile("test.tsx", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
@@ -56,29 +66,99 @@ export function environmentReads(source) {
   const checker = ts.createProgram(["test.tsx"], { noLib: true, noResolve: true, types: [] }, host).getTypeChecker();
   const aliases = new Map();
   const constants = new Map();
+  const uncertainKeys = new Set();
+  const functions = new Map();
+  const resolving = new Set();
+  const functionAt = node => {
+    while (ts.isParenthesizedExpression(node)) node = node.expression;
+    return ts.isFunctionLike(node) ? node : functions.get(symbol(node));
+  };
   const symbol = node => ts.isShorthandPropertyAssignment(node.parent) ? checker.getShorthandAssignmentValueSymbol(node.parent) : checker.getSymbolAtLocation(node);
   const keyOf = node => {
     if (!node) return;
-    if (ts.isStringLiteralLike(node)) return node.text;
+    if (ts.isStringLiteralLike(node) || ts.isNumericLiteral(node)) return new Set([node.text]);
     if (ts.isComputedPropertyName(node)) return keyOf(node.expression);
-    if (ts.isIdentifier(node)) return constants.get(symbol(node));
+    if (ts.isIdentifier(node)) return uncertainKeys.has(symbol(node)) ? undefined : constants.get(symbol(node));
+    if (ts.isConditionalExpression(node)) {
+      const a = keyOf(node.whenTrue), b = keyOf(node.whenFalse);
+      if (a && b) return new Set([...a, ...b]);
+    }
   };
   let final = false;
   const unknown = () => { if (final) names.add("<unresolved environment access>"); };
   const record = (parts) => {
+    if (parts?.[0] === "unknown-env" && parts.slice(1).some(key => GATE_NAME.test(key))) unknown();
     if (parts?.[0] === "process" && parts[1] === "env" && parts[2]) names.add(parts[2]);
     return parts;
   };
-  const resolve = (node) => {
+  const carriesEnv = parts => parts && (parts[0] === "process" && (parts.length === 1 || parts.length === 2 && parts[1] === "env") || parts[0] === "unknown-env" || parts[0] === "env-container");
+  let resolved = new Map();
+  const resolve = node => {
+    if (!node) return;
+    if (resolved.has(node)) return resolved.get(node);
+    const value = resolveExpression(node);
+    resolved.set(node, value);
+    return value;
+  };
+  const resolveExpression = (node) => {
     if (!node) return;
     if (ts.isIdentifier(node)) return aliases.get(symbol(node)) ?? (node.text === "process" && !symbol(node) ? ["process"] : undefined);
-    if (ts.isParenthesizedExpression(node) || ts.isAsExpression(node) || ts.isTypeAssertionExpression(node) || ts.isNonNullExpression(node) || ts.isSatisfiesExpression(node)) return resolve(node.expression);
+    if (ts.isParenthesizedExpression(node) || ts.isAsExpression(node) || ts.isTypeAssertionExpression(node) || ts.isNonNullExpression(node) || ts.isSatisfiesExpression(node) || ts.isAwaitExpression(node)) return resolve(node.expression);
+    if (ts.isConditionalExpression(node)) {
+      const left = resolve(node.whenTrue), right = resolve(node.whenFalse);
+      if (carriesEnv(left) && carriesEnv(right) && left.join(".") !== right.join(".")) return ["unknown-env"];
+      return left ?? right;
+    }
+    if (ts.isBinaryExpression(node)) return resolve(node.left) ?? resolve(node.right);
+    if (ts.isArrayLiteralExpression(node) && node.elements.some(element => carriesEnv(resolve(element)))) return ["unknown-env"];
+    if (ts.isObjectLiteralExpression(node)) {
+      for (const property of node.properties) {
+        if (ts.isSpreadAssignment(property)) {
+          const parts = resolve(property.expression);
+          if (carriesEnv(parts)) return parts;
+        }
+      }
+      for (const property of node.properties) {
+        const value = ts.isPropertyAssignment(property) ? property.initializer : ts.isShorthandPropertyAssignment(property) ? property.name : undefined;
+        if (carriesEnv(resolve(value))) return ["env-container", property.name?.text ?? "<computed>"];
+      }
+    }
+    if (ts.isCallExpression(node)) {
+      const fn = functionAt(node.expression);
+      if (fn && !resolving.has(fn)) {
+        resolving.add(fn);
+        let result;
+        const returns = n => {
+          if (n !== fn && ts.isFunctionLike(n)) return;
+          if (ts.isReturnStatement(n) || n === fn.body && !ts.isBlock(n)) {
+            const parts = resolve(ts.isReturnStatement(n) ? n.expression : n);
+            if (carriesEnv(parts)) result = parts;
+          } else ts.forEachChild(n, returns);
+        };
+        returns(fn);
+        resolving.delete(fn);
+        return result;
+      }
+      if (fn) return;
+      // Unknown calls may return their environment argument. Merely passing it
+      // (subprocess/config/spy setup) is not an environment property read.
+      for (const argument of node.arguments) {
+        const parts = resolve(argument);
+        if (carriesEnv(parts) && parts[0] !== "env-container") {
+          const assign = ts.isPropertyAccessExpression(node.expression) && node.expression.expression.getText(tree) === "Object" && !symbol(node.expression.expression) && node.expression.name.text === "assign";
+          return assign ? parts : ["unknown-env"];
+        }
+      }
+    }
     const base = (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) && resolve(node.expression);
     if (!base) return;
-    const key = ts.isPropertyAccessExpression(node) ? node.name.text :
-      keyOf(node.argumentExpression);
-    if (key) return record([...base, key]);
-    if (base[0] === "process" && base.length <= 2) unknown();
+    const keys = ts.isPropertyAccessExpression(node) ? new Set([node.name.text]) : keyOf(node.argumentExpression);
+    if (keys?.size) {
+      if (base[0] === "env-container") return keys.has(base[1]) ? ["unknown-env"] : undefined;
+      for (const key of keys) record([...base, key]);
+      return base[0] === "unknown-env" ? base : [...base, [...keys][0]];
+    }
+    if ((base[0] === "process" && base.length <= 2) || base[0] === "unknown-env" || base[0] === "env-container") unknown();
   };
   let changed = true;
   const bind = (name, parts) => {
@@ -88,29 +168,51 @@ export function environmentReads(source) {
     if (ts.isIdentifier(name)) {
       const id = symbol(name);
       if (id && !aliases.has(id)) { aliases.set(id, parts); changed = true; }
-      else if (id && aliases.get(id).join(".") !== parts.join(".")) unknown();
+      else if (id && aliases.get(id).join(".") !== parts.join(".") && aliases.get(id)[0] !== "unknown-env") {
+        aliases.set(id, ["unknown-env"]);
+        changed = true;
+      }
     } else if (ts.isObjectBindingPattern(name)) {
       for (const element of name.elements) {
         if (element.dotDotDotToken) { bind(element.name, parts); continue; }
         const key = element.propertyName ?? element.name;
-        const property = ts.isIdentifier(key) || ts.isStringLiteralLike(key) ? key.text : keyOf(key);
-        if (property) bind(element.name, [...parts, property]); else unknown();
+        const keys = ts.isIdentifier(key) || ts.isStringLiteralLike(key) ? new Set([key.text]) : keyOf(key);
+        if (keys) for (const property of keys) bind(element.name, [...parts, property]); else unknown();
       }
     } else if (ts.isObjectLiteralExpression(name)) {
       for (const property of name.properties) {
         if (ts.isShorthandPropertyAssignment(property)) bind(property.name, [...parts, property.name.text]);
         else if (ts.isPropertyAssignment(property)) {
-          const key = ts.isIdentifier(property.name) ? property.name.text : keyOf(property.name);
-          if (key) bind(property.initializer, [...parts, key]); else unknown();
+          const keys = ts.isIdentifier(property.name) ? new Set([property.name.text]) : keyOf(property.name);
+          if (keys) for (const key of keys) bind(property.initializer, [...parts, key]); else unknown();
         } else unknown();
       }
     } else unknown();
+  };
+  const collectFunctions = node => {
+    if (ts.isFunctionDeclaration(node) && node.name) functions.set(symbol(node.name), node);
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer && ts.isFunctionLike(node.initializer)) functions.set(symbol(node.name), node.initializer);
+    ts.forEachChild(node, collectFunctions);
+  };
+  collectFunctions(tree);
+  const writeKey = (name, value) => {
+    if (!ts.isIdentifier(name)) return;
+    const id = symbol(name);
+    if (!id) return;
+    if (!value) {
+      if (!uncertainKeys.has(id)) { uncertainKeys.add(id); changed = true; }
+      return;
+    }
+    const previous = constants.get(id) ?? new Set();
+    for (const key of value) if (!previous.has(key)) { previous.add(key); changed = true; }
+    constants.set(id, previous);
   };
   let passes = 0;
   while (changed || !final) {
     if (++passes > 32) { names.add("<unresolved environment access>"); break; }
     if (!changed) final = true;
     changed = false;
+    resolved = new Map();
     const visit = (node) => {
       if (ts.isImportDeclaration(node) && ts.isStringLiteralLike(node.moduleSpecifier) && ["process", "node:process"].includes(node.moduleSpecifier.text)) {
         const clause = node.importClause;
@@ -120,15 +222,34 @@ export function environmentReads(source) {
           else for (const item of clause.namedBindings.elements) bind(item.name, ["process", (item.propertyName ?? item.name).text]);
         }
       }
+      if (ts.isParameter(node) && node.initializer) bind(node.name, resolve(node.initializer));
       if (ts.isVariableDeclaration(node)) {
         bind(node.name, resolve(node.initializer));
-        if (ts.isIdentifier(node.name)) {
-          const value = keyOf(node.initializer), id = symbol(node.name);
-          if (value && id && !constants.has(id)) { constants.set(id, value); changed = true; }
-        }
+        if (node.initializer) writeKey(node.name, keyOf(node.initializer));
+        const fn = node.initializer && functions.get(symbol(node.initializer));
+        if (fn && !functions.has(symbol(node.name))) { functions.set(symbol(node.name), fn); changed = true; }
       }
       if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
-        bind(node.left, resolve(node.right));
+        if (!ts.isPropertyAccessExpression(node.left) && !ts.isElementAccessExpression(node.left)) bind(node.left, resolve(node.right));
+        writeKey(node.left, keyOf(node.right));
+      } else if (ts.isBinaryExpression(node) && node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment && node.operatorToken.kind <= ts.SyntaxKind.LastAssignment) {
+        writeKey(node.left, undefined);
+      }
+      if (ts.isPostfixUnaryExpression(node) || ts.isPrefixUnaryExpression(node)) {
+        if ([ts.SyntaxKind.PlusPlusToken, ts.SyntaxKind.MinusMinusToken].includes(node.operator)) writeKey(node.operand, undefined);
+      }
+      if (ts.isCallExpression(node)) {
+        const fn = functionAt(node.expression);
+        if (fn) for (let i = 0; i < fn.parameters.length; i++) bind(fn.parameters[i].name, resolve(node.arguments[i]));
+        else if (node.arguments.some(argument => carriesEnv(resolve(argument)))) {
+          for (const argument of node.arguments) if (ts.isFunctionLike(argument)) {
+            for (const parameter of argument.parameters) bind(parameter.name, ["unknown-env"]);
+          }
+        }
+        // Object.assign mutates its first argument as well as returning it.
+        if (ts.isPropertyAccessExpression(node.expression) && node.expression.expression.getText(tree) === "Object" && !symbol(node.expression.expression) && node.expression.name.text === "assign") {
+          for (const argument of node.arguments.slice(1)) bind(node.arguments[0], resolve(argument));
+        }
       }
       resolve(node);
       ts.forEachChild(node, visit);
