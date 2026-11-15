@@ -162,12 +162,17 @@ export class RenderImagesStage implements Stage {
     if (!qualityAllowsPageReading(state.run.pipeline.quality)) {
       if (!isPdf && !isImage) return { pageNumbers: [], request, routed: null, keptAsImage: [], unreadPages: [] };
       const caps = fastPageImageCaps();
-      const selection = pagesKeptAsImage({
-        canonicalDocument: await this.loadCanonicalDocument(state, document.id),
+      const canonicalDocument = await this.loadCanonicalDocument(state, document.id);
+      const selectionArgs = {
+        canonicalDocument,
         pageCount: Math.max(1, document.pageCount),
         isImage,
         routing: request,
         maxPages: caps.perDocument,
+      };
+      const textless = new Set(pagesKeptAsImage(selectionArgs).kept);
+      const selection = pagesKeptAsImage({ ...selectionArgs,
+        requiredImagePages: isPdf ? await this.hostPageImagePages(state, document) : [],
       });
       // The per-run cap is a Postgres reservation shared by every worker (db/fast-page-image-budget.ts). Without a
       // store to reserve from, nothing renders (fail closed).
@@ -175,7 +180,9 @@ export class RenderImagesStage implements Stage {
       const granted = selection.kept.length === 0 || !reserve
         ? 0
         : await reserve({ runId: state.run.id, documentId: document.id, wanted: selection.kept.length, perRun: caps.perRun });
-      const keptAsImage = selection.kept.slice(0, granted);
+      const pageNumbers = selection.kept.slice(0, granted);
+      // Extra ledger pages can contain valid text. Render their preview without replacing that text.
+      const keptAsImage = pageNumbers.filter((page) => textless.has(page));
       const unreadPages = [...selection.unread, ...selection.kept.slice(granted)].sort((a, b) => a - b);
       if (selection.reason || granted < selection.kept.length) {
         const reason = granted < selection.kept.length ? (reserve ? "run-cap" : "run-budget-unavailable") : selection.reason;
@@ -185,7 +192,7 @@ export class RenderImagesStage implements Stage {
             `capPerDocument=${caps.perDocument} capPerRun=${caps.perRun}`,
         );
       }
-      return { pageNumbers: keptAsImage, request, routed: null, keptAsImage, unreadPages };
+      return { pageNumbers, request, routed: null, keptAsImage, unreadPages };
     }
     // Native text-only runs leave previews on demand. Classification can
     // suggest images, but must not override the project feature choices.
