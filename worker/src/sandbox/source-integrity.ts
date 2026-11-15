@@ -1,3 +1,5 @@
+import { isDevelopmentEnvironment } from "@docslurp/shared";
+
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { rm } from "node:fs/promises";
@@ -86,7 +88,7 @@ interface HashedDocument {
  */
 function assertDecided(document: HashedDocument): void {
   // A document with no decision field was not built by the loader (which always sets one): unscanned in production (I-1).
-  const missing = document.parseSourceDecision === undefined && (process.env.NODE_ENV ?? "").trim().toLowerCase() === "production";
+  const missing = document.parseSourceDecision === undefined && !isDevelopmentEnvironment();
   if (missing || document.parseSourceDecision === "unscanned" || (typeof document.sourceKey === "string" && document.sourceKey.startsWith("\u0000"))) {
     console.error(`[worker-source] status=parse-source-unscanned metric=parse_source_unscanned document=${document.id}`);
     throw new UnscannedParseSourceError(document.id);

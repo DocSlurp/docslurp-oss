@@ -1,5 +1,7 @@
 ## Ingest version tagging and typed unavailable states (2026-11-13, draft, needs council)
 
+- Security #406 (partial): refuse hand-built documents without a scan decision in every non-development environment and service profile, before source storage reads; normalize sandbox provider ids with the shared ASCII rule. Regression coverage executes the real source modules. ClamAV startup age/disable and database-test guard follow-ups remain open.
+
 - Documents and runs record `ingest_version` and `ingest_capabilities` (migration 0160; existing rows backfill to 0 with no capabilities). The worker stamps them on statements a run already makes: documents with capabilities measured from stored rows (`parseSourceDecision`, `pageFacts`, `figureLedger`), runs with the build's. `GET /v1/ingest-version` (SDK `getIngestVersion`) reports the current version; `GET /v1/documents/:id` adds `ingest.updateAvailable`.
 - Page images, structured results, the figure ledger and search materialization answer data the caller may see but cannot be shown with a typed `{ status: "unavailable", reason, message, canReprocess, ingestVersion, currentIngestVersion }` (HTTP 200) instead of 409/404/500. The source-unscanned refusal is unchanged. Materialization now reports pages of documents the caller cannot reach as `unseen`. See docs/ingest-version.md.
 
