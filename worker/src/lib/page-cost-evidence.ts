@@ -5,6 +5,8 @@ export interface PageCostEvidence {
   /** Observable nominations, never semantic confirmation. */
   chartCandidates: number | null;
   confirmedCharts: number | null;
+  /** Complete bounded nomination regions; area is square points, never decoded pixels. */
+  chartRegions: { areaPt2: number; source: "image" | "vector"; repeated: boolean | null }[] | null;
   /** Complete placement identities only; null for partial/truncated listings. */
   imageObjects: number[] | null;
   copyClasses: { copy: number; decode: number; render: number } | null;
@@ -21,6 +23,8 @@ export function parsePageCostEvidence(value: unknown): PageCostEvidence {
   return {
     vectorPaths: count(p.vectorPaths), vectorClusters: count(p.vectorClusters),
     chartCandidates: count(p.chartCandidates), confirmedCharts: count(p.confirmedCharts),
+    chartRegions: Array.isArray(p.chartRegions) && p.chartRegions.length <= 64 && p.chartRegions.every(r => r && typeof r === "object" && Number.isFinite(r.areaPt2) && r.areaPt2 > 0 && r.areaPt2 <= 4e8 && ["image", "vector"].includes(r.source) && (r.repeated === null || typeof r.repeated === "boolean"))
+      ? p.chartRegions.map(r => ({ areaPt2: r.areaPt2, source: r.source, repeated: r.repeated })) : null,
     imageObjects: Array.isArray(p.imageObjects) && p.imageObjects.length <= 64 && p.imageObjects.every(v => count(v) !== null) ? [...p.imageObjects] : null,
     copyClasses: copy !== null && copy !== undefined && decode !== null && decode !== undefined && render !== null && render !== undefined ? { copy, decode, render } : null,
     lexicalText: typeof p.lexicalText === "boolean" ? p.lexicalText : null,

@@ -180,6 +180,17 @@ fn probe_document(rules: &Rules, document: &Document, file_bytes: usize, mut res
         profile.observed_image_placements = profile.observed_image_placements.saturating_add(reading.images.len() as u32);
         profile.lexical_pages[match reading.lexical { Some(true) => 0, Some(false) => 1, None => 2 }] += 1;
         profile.chart_candidate_unknown_pages += 1;
+        for image in &reading.images {
+            let repeated_image = image.id.is_some_and(|id| repeated.contains(&id));
+            if repeated_image { profile.repeated_image_placements += 1; }
+            let mp = image.width_px * image.height_px / 1_000_000.0;
+            let bin = [0.0625, 0.25, 1.0, 4.0].iter().filter(|floor| mp >= **floor).count();
+            profile.image_region_sizes[bin] += 1;
+            let class = if image.placement.is_none() || image.width_px <= 0.0 || image.height_px <= 0.0 { 3 }
+                else if repeated_image || image.width_px.min(image.height_px) < 32.0 || image.coverage < 0.02 { 0 }
+                else if image.coverage >= 0.5 { 2 } else { 1 };
+            profile.image_region_classes[class] += 1;
+        }
         let facts = page_layout(rules, reading, &repeated);
         profile.glyphs_over_images = profile.glyphs_over_images.saturating_add(count(facts.glyphs_over_images));
         if facts.glyphs_over_images >= 20.0 {

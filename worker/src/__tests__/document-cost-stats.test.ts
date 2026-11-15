@@ -17,8 +17,8 @@ describe("settings-independent structural cost observations", () => {
         bbox: null, ppi: [null, null], wordsInside: null, bytesPerPixel: null, bitsPerComponent: null,
         colorSpace: "other", encoding: "other" }] };
     const stats = documentCostStats(new Map([[1, page]]), 2);
-    expect(stats.routes.table).toBe(1);
-    expect(stats.routes.unknown).toBe(1);
+    expect(stats.routes.table).toBe(0);
+    expect(stats.routes.unknown).toBe(2);
     expect(stats.textLayers.invisible).toBe(1);
     expect(stats.images.placements).toBe(1);
     expect(stats.images.repeatedPlacements).toBe(1);

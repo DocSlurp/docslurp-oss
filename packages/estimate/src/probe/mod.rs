@@ -145,6 +145,11 @@ pub struct PdfProfile {
     pub observed_image_placements: u32,
     pub lexical_pages: [u32; 3],
     pub chart_candidate_unknown_pages: u32,
+    /// Raw sampled region observations, before semantic nomination. Size bins: <.0625, <.25, <1, <4, >=4 MP.
+    pub image_region_sizes: [u32; 5],
+    /// Structural classes: decorative, picture, scan-like, unknown.
+    pub image_region_classes: [u32; 4],
+    pub repeated_image_placements: u32,
 }
 
 /// Facts about an Office or EPUB package.

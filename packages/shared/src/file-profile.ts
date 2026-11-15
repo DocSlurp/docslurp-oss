@@ -147,6 +147,9 @@ export const pdfProfileSchema = z.strictObject({
   observedImagePlacements: count.optional(),
   lexicalPages: z.array(count).length(3).optional(),
   chartCandidateUnknownPages: count.optional(),
+  imageRegionSizes: z.array(count).length(5).optional(),
+  imageRegionClasses: z.array(count).length(4).optional(),
+  repeatedImagePlacements: count.optional(),
 });
 export type PdfProfile = z.infer<typeof pdfProfileSchema>;
 

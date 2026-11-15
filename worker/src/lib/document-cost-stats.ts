@@ -18,6 +18,7 @@ export function documentCostStats(facts: ReadonlyMap<number, PageLayoutFacts> | 
     copyClasses: { copy: 0, decode: 0, render: 0, unknownPages: 0 },
     identities: { uniqueObjects: 0, extraPlacements: 0, unknownPages: 0 },
   };
+  const candidates = { count: 0, unknownPages: 0, areaPt2: [0, 0, 0, 0], classes: { image: 0, vector: 0 }, repeats: 0, repeatsUnknown: 0 };
   const identities = new Map<number, number>();
   for (let number = 1; number <= pages; number += 1) {
     const page = facts?.get(number);
@@ -33,8 +34,16 @@ export function documentCostStats(facts: ReadonlyMap<number, PageLayoutFacts> | 
     else for (const key of ["copy", "decode", "render"] as const) observations.copyClasses[key] += observed.copyClasses[key];
     if (observed.imageObjects === null) observations.identities.unknownPages += 1;
     else for (const id of observed.imageObjects) identities.set(id, (identities.get(id) ?? 0) + 1);
+    if (observed.chartRegions === null || observed.chartCandidates !== observed.chartRegions.length) candidates.unknownPages += 1;
+    else for (const region of observed.chartRegions) {
+      candidates.count += 1;
+      candidates.classes[region.source] += 1;
+      candidates.areaPt2[[2500, 10000, 40000].filter(floor => region.areaPt2 >= floor).length]! += 1;
+      if (region.repeated === null) candidates.repeatsUnknown += 1;
+      else if (region.repeated) candidates.repeats += 1;
+    }
     // This evidence has no path count. A wordless page without images may still contain a vector drawing.
-    routes[pageCostRoute({ words: observed.lexicalText === null ? page?.words ?? null : observed.lexicalText ? Math.max(1, page?.words ?? 1) : 0, images: page?.images?.length ?? null,
+    routes[page?.gridsUnknown === true && observed.lexicalText === true ? "table" : pageCostRoute({ words: observed.lexicalText === null ? page?.words ?? null : observed.lexicalText ? Math.max(1, page?.words ?? 1) : 0, images: page?.images?.length ?? null,
       vectorPaths: observed.vectorPaths, grids: page?.grids ?? null, gridCoverage: page?.tableCoverage ?? null })] += 1;
     if (page?.textLayer) textLayers[page.textLayer] += 1; else textLayers.unknownPages += 1;
     if (page?.grids) tables.grids += page.grids.length; else tables.unknownPages += 1;
@@ -59,6 +68,6 @@ export function documentCostStats(facts: ReadonlyMap<number, PageLayoutFacts> | 
   observations.identities.uniqueObjects = identities.size;
   for (const placements of identities.values()) observations.identities.extraPlacements += placements - 1;
   return { observations, schema: 1, pages, routes, images, tables, textLayers,
-    charts: { count: null, classes: null, sizes: null, repeats: null },
+    charts: { count: null, classes: null, sizes: null, repeats: null, candidates },
     vectors: { paths: null, clusters: null }, scanCopy: null };
 }

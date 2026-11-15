@@ -1,3 +1,5 @@
+import { candidatesFromPageFacts, FACTS_CANDIDATE_RULES } from "../chart-export/facts-candidates.js";
+import { classifyAdaptivePage } from "../stages/classify-route.js";
 import { parsePageCostEvidence } from "../lib/page-cost-evidence.js";
 /*
  * Extractor plugins: optional providers a deployment loads by configuration, never by import.
@@ -361,7 +363,7 @@ export interface ExtractorPlugin {
   apiVersion: typeof EXTRACTOR_PLUGIN_API_VERSION;
   name: string;
   /** Count-only observations from already validated results; never source bytes. */
-  costEvidence?: (facts: unknown, text: ReadonlyMap<number, string>) => ReadonlyMap<number, unknown>;
+  costEvidence?: (facts: unknown, text: ReadonlyMap<number, string>, tools: { nominate: typeof candidatesFromPageFacts; rules: typeof FACTS_CANDIDATE_RULES; classify: typeof classifyAdaptivePage }) => ReadonlyMap<number, unknown>;
   sandboxedPdf?: SandboxedPdfExtractorProvider;
   imageOrientation?: ImageOrientationProvider;
   sandboxedOcr?: SandboxedOcrProvider;
@@ -375,7 +377,7 @@ export function providerCostEvidence(facts: unknown, text: ReadonlyMap<number, s
   for (const plugin of plugins) {
     if (!plugin.costEvidence) continue;
     try {
-      for (const [page, value] of plugin.costEvidence(facts, text)) {
+      for (const [page, value] of plugin.costEvidence(facts, text, { nominate: candidatesFromPageFacts, rules: FACTS_CANDIDATE_RULES, classify: classifyAdaptivePage })) {
         if (Number.isSafeInteger(page) && page >= 1 && page <= pageCount) out.set(page, parsePageCostEvidence(value));
       }
     } catch { /* A refused observation stays unknown; extraction is independent. */ }
