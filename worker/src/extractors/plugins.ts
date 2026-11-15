@@ -271,10 +271,8 @@ export interface SandboxedOcrJob {
 export type SandboxedOcrResult = SandboxResult;
 
 /**
- * Who a sandboxed OCR job belongs to, from the stage's run context. A provider that keeps a VM warm across jobs may reuse
- * it only for jobs with the same `tenantKey` (the run's organization) and must give a job without one a VM of its own,
- * destroyed after it. `affinityKey` (the document) only prefers a VM that already holds the document's source; it is never
- * a security boundary.
+ * Job ownership from the stage run context, for accounting and placement hints. Organization membership alone
+ * does not establish equal project/API-key access. Neither key authorizes VM reuse: each job gets a fresh VM.
  */
 export interface SandboxedOcrRunContext {
   tenantKey?: string;
