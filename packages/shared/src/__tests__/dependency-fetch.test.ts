@@ -106,3 +106,30 @@ it("redacts provider response bodies before SDK errors can expose them", async (
   expect(response.status).toBe(401);
   expect(await response.text()).not.toContain("sentinel-platform-secret");
 });
+
+it.each(["text/event-stream", "application/json"])("redacts HTTP 200 error envelopes (%s)", async (contentType) => {
+  const payload = JSON.stringify({ error: { message: "sentinel-platform-secret", code: 401 }, debug: "sentinel-platform-secret" });
+  const raw = contentType === "text/event-stream" ? `event: error\ndata: ${payload}\n\n` : payload;
+  for (const width of [1, 7, raw.length]) {
+    let offset = 0;
+    const response = await instrumentFetch("test", "failed-success", async () => new Response(new ReadableStream({
+      pull(controller) {
+        if (offset === raw.length) { controller.close(); return; }
+        controller.enqueue(new TextEncoder().encode(raw.slice(offset, offset += Math.min(width, raw.length - offset))));
+      },
+    }), { headers: { "content-type": contentType } }))("https://example.test");
+    const publicBody = await response.text();
+    expect(publicBody).not.toContain("sentinel-platform-secret");
+    expect(publicBody).toContain("Provider request failed");
+  }
+});
+
+it("preserves successful SSE content and refuses oversized or malformed events before exposure", async () => {
+  const frame = 'data: {"choices":[{"delta":{"content":"error is ordinary prose ☃"}}]}\r\n\r\ndata: [DONE]\r\n\r\n';
+  const response = await instrumentFetch("test", "ok", async () => new Response(frame, { headers: { "content-type": "text/event-stream" } }))("https://example.test");
+  expect(await response.text()).toBe(frame);
+  for (const frame of ['data: {broken sentinel-secret}\n\n', `data: ${"x".repeat(1024 * 1024 + 1)}`]) {
+    const response = await instrumentFetch("test", "invalid", async () => new Response(frame, { headers: { "content-type": "text/event-stream" } }))("https://example.test");
+    await expect(response.text()).rejects.toThrow(/Invalid provider response|exceeds limit/);
+  }
+});

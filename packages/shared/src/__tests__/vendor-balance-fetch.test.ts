@@ -5,12 +5,12 @@ import { instrumentFetch } from "../dependency-fetch.js";
 import { vendorBalanceMonitor } from "../vendor-balance-alerts.js";
 afterEach(() => { vi.unstubAllEnvs(); vi.clearAllMocks(); });
 
-it("observes real upstream quota bodies without consuming or changing SDK response bytes", async () => {
+it("classifies upstream quota bodies while redacting SDK error bytes", async () => {
   vi.stubEnv("OPENAI_API_KEY", "platform-test");
   const body = '{"error":{"code":"insufficient_quota","message":"never log my secret"}}';
   const transport = vi.fn(async () => new Response(body, { status: 429 }));
   const response = await instrumentFetch("openai", "embedding", transport)("https://api.openai.com/v1/embeddings", { headers: { authorization: "Bearer platform-test" } });
-  expect(await response.text()).toBe(body);
+  expect(await response.text()).not.toContain("never log my secret");
   expect(vendorBalanceMonitor.observe).toHaveBeenLastCalledWith(expect.stringMatching(/^openai:/), "openai", "embedding", 429, body);
 });
 
@@ -67,6 +67,9 @@ it("alerts on HTTP200 SSE upstream billing errors, never assistant-generated bil
   const body = 'data: {"choices":[{"delta":{"content":"{\\"error\\":{\\"code\\":402}} insufficient_quota"}}]}\n\ndata: {"error":{"code":402,"message":"Insufficient credits"}}\n\n';
   const transport = vi.fn(async () => new Response(body, { headers: { "content-type": "text/event-stream" } }));
   const response = await instrumentFetch("openrouter", "chat", transport)("https://openrouter.ai/api/v1/chat/completions", { headers: { authorization: "Bearer router-platform" } });
-  expect(await response.text()).toBe(body);
+  const output = await response.text();
+  expect(output).toContain(body.split("\n\n")[0]);
+  expect(output).not.toContain("Insufficient credits");
+  expect(output).toContain("Provider request failed");
   expect(vendorBalanceMonitor.observe).toHaveBeenCalledExactlyOnceWith(expect.stringMatching(/^openrouter:/), "openrouter", "chat", 200, '{"error":{"code":402,"message":"Insufficient credits"}}');
 });

@@ -20,6 +20,7 @@
 //
 // The server and worker test setups refuse a TEST_DATABASE_URL off loopback or naming a database that does not look
 // disposable (packages/shared/src/test-database-guard.ts); the dbtest_<n> databases made here pass.
+import ts from "typescript-compiler-api";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -40,35 +41,47 @@ const REDIS = /(?<![A-Za-z0-9_])TEST_REDIS_URL(?![A-Za-z0-9_])/;
 /** A database or Redis URL variable name; the runner sets only the two above. */
 const GATE_NAME = /^[A-Z0-9_]*(?:DATABASE_URL|_PG_URL|REDIS_URL)$/;
 const STANDARD = new Set(["DATABASE_URL", "TEST_DATABASE_URL", "TEST_REDIS_URL"]);
-/** Environment reads: `process.env.X`, `process.env["X"]` (any quote) and `const { X, Y: y } = process.env`. */
-const DOT_READ = /process\.env\.([A-Za-z0-9_]+)/g;
-const INDEX_READ = /process\.env\[\s*(["'`])([A-Za-z0-9_]+)\1\s*\]/g;
-const DESTRUCTURED_READ = /\{([^{}]*)\}\s*=\s*process\.env\b/g;
-
-/** Every environment variable name the source reads, by any of the forms above. */
+/** Discover static environment access through typed expressions and nested bindings. */
 export function environmentReads(source) {
   const names = new Set();
-  // Follow simple environment aliases, including transitive aliases. Expand
-  // them before scanning so optional access and destructuring share one path.
-  const aliases = new Set(["process.env"]);
+  const tree = ts.createSourceFile("test.tsx", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const aliases = new Map([["process", ["process"]]]);
+  const record = (parts) => {
+    if (parts?.[0] === "process" && parts[1] === "env" && parts[2]) names.add(parts[2]);
+    return parts;
+  };
+  const resolve = (node) => {
+    if (!node) return;
+    if (ts.isIdentifier(node)) return aliases.get(node.text);
+    if (ts.isParenthesizedExpression(node) || ts.isAsExpression(node) || ts.isTypeAssertionExpression(node) || ts.isNonNullExpression(node) || ts.isSatisfiesExpression(node)) return resolve(node.expression);
+    const base = (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) && resolve(node.expression);
+    if (!base) return;
+    const key = ts.isPropertyAccessExpression(node) ? node.name.text :
+      node.argumentExpression && (ts.isStringLiteralLike(node.argumentExpression) ? node.argumentExpression.text : undefined);
+    if (key) return record([...base, key]);
+  };
   let changed = true;
+  const bind = (name, parts) => {
+    if (!parts) return;
+    record(parts);
+    if (ts.isIdentifier(name)) {
+      if (!aliases.has(name.text)) { aliases.set(name.text, parts); changed = true; }
+    } else if (ts.isObjectBindingPattern(name)) {
+      for (const element of name.elements) {
+        if (element.dotDotDotToken) { bind(element.name, parts); continue; }
+        const key = element.propertyName ?? element.name;
+        if (ts.isIdentifier(key) || ts.isStringLiteralLike(key)) bind(element.name, [...parts, key.text]);
+      }
+    }
+  };
   while (changed) {
     changed = false;
-    for (const m of source.matchAll(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*([A-Za-z_$][\w$]*(?:\.env)?)\s*(?=[;,\n]|$)/g)) {
-      if (aliases.has(m[2]) && !aliases.has(m[1])) { aliases.add(m[1]); changed = true; }
-    }
-  }
-  for (const alias of [...aliases].filter((v) => v !== "process.env")) {
-    source = source.replace(new RegExp(`\\b${alias.replace(/[$]/g, "\\$")}\\b`, "g"), "process.env");
-  }
-  source = source.replace(/process\.env\?\./g, "process.env.").replace(/process\.env\.\[/g, "process.env[");
-  for (const m of source.matchAll(DOT_READ)) names.add(m[1]);
-  for (const m of source.matchAll(INDEX_READ)) names.add(m[2]);
-  for (const m of source.matchAll(DESTRUCTURED_READ)) {
-    for (const part of m[1].split(",")) {
-      const name = part.replace(/^\s*\.\.\.\s*/, "").split(/[:=]/)[0].trim();
-      if (/^[A-Za-z0-9_]+$/.test(name)) names.add(name);
-    }
+    const visit = (node) => {
+      if (ts.isVariableDeclaration(node)) bind(node.name, resolve(node.initializer));
+      resolve(node);
+      ts.forEachChild(node, visit);
+    };
+    visit(tree);
   }
   return names;
 }

@@ -86,3 +86,12 @@ test("discovers JavaScript and TSX package tests", () => {
     assert.equal(gatedFiles(scanTestFiles(dir)).length, 5);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test("typed, nested and destructured aliases report unsupported gates", () => {
+  for (const source of [
+    "const {env} = process; env.OTHER_DATABASE_URL",
+    "const env = process.env as NodeJS.ProcessEnv; env.OTHER_DATABASE_URL",
+    "const {env: {OTHER_DATABASE_URL: url}} = process;",
+    "const p = process; const {env: environment} = p; const next = (environment!); next.OTHER_DATABASE_URL",
+  ]) assert.deepEqual(classifyTestSource(source).other, ["OTHER_DATABASE_URL"], source);
+});

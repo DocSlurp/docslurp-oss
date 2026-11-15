@@ -4,6 +4,43 @@ import { LlmResponseScanner, llmRequestAttributes } from "./llm-span-attributes.
 
 const LLM_GENERATION_PATHS = new Set(["/api/v1/chat/completions", "/api/v1/completions", "/api/v1/responses"]);
 
+const GENERIC_ERROR = JSON.stringify({ error: { message: "Provider request failed", type: "provider_error" } });
+
+/** Buffer one SSE event (or one JSON envelope) before releasing any of its bytes. */
+function redactProviderBody(body: ReadableStream<Uint8Array>, eventStream: boolean): ReadableStream<Uint8Array> {
+  const decoder = new TextDecoder();
+  const encoder = new TextEncoder();
+  let pending = "";
+  const sanitize = (frame: string) => {
+    const data = eventStream ? frame.split(/\r?\n/).filter(line => line.startsWith("data:")).map(line => line.slice(5).trimStart()).join("\n") : frame;
+    if (!data.trim() || data.trim() === "[DONE]") return frame;
+    let value: unknown;
+    try { value = JSON.parse(data); }
+    catch { throw new Error("Invalid provider response"); }
+    if (value && typeof value === "object" && ("error" in value || ("type" in value && value.type === "error"))) {
+      return eventStream ? `data: ${GENERIC_ERROR}\n\n` : GENERIC_ERROR;
+    }
+    return frame;
+  };
+  const drain = (controller: TransformStreamDefaultController<Uint8Array>, finish: boolean) => {
+    if (eventStream) {
+      let match: RegExpExecArray | null;
+      while ((match = /\r?\n\r?\n/.exec(pending))) {
+        const end = match.index + match[0].length;
+        const frame = pending.slice(0, end); pending = pending.slice(end);
+        if (frame.length > 1024 * 1024) throw new Error("Provider response exceeds limit");
+        controller.enqueue(encoder.encode(sanitize(frame)));
+      }
+    }
+    if (pending.length > (eventStream ? 1024 * 1024 : 16 * 1024 * 1024)) throw new Error("Provider response exceeds limit");
+    if (finish && pending) { controller.enqueue(encoder.encode(sanitize(pending))); pending = ""; }
+  };
+  return body.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
+    transform(chunk, controller) { pending += decoder.decode(chunk, { stream: true }); drain(controller, false); },
+    flush(controller) { pending += decoder.decode(); drain(controller, true); },
+  }));
+}
+
 /** Instrument provider transport through response consumption, including streamed output. */
 export function instrumentFetch(provider: string, operation: string, http: typeof fetch = globalThis.fetch): typeof fetch {
   return async (input, init) => {
@@ -115,7 +152,11 @@ export function instrumentFetch(provider: string, operation: string, http: typeo
         finally { span.end(statusError ?? Object.assign(new Error(), { name: "AbortError" })); }
       },
     }, { highWaterMark: 0 });
-    const wrapped = new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers });
+    const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
+    const redacted = contentType.includes("text/event-stream") || contentType.includes("application/json");
+    const outputHeaders = new Headers(response.headers);
+    if (redacted) { outputHeaders.delete("content-length"); outputHeaders.delete("content-encoding"); }
+    const wrapped = new Response(redacted ? redactProviderBody(body, contentType.includes("text/event-stream")) : body, { status: response.status, statusText: response.statusText, headers: outputHeaders });
     for (const key of ["url", "redirected", "type"] as const) Object.defineProperty(wrapped, key, { value: response[key] });
     return wrapped;
   };
