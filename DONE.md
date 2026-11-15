@@ -5,6 +5,11 @@
 - Focused selection/render regression suites: 32 tests pass, including invalid page numbers, missing canonical evidence, organization scope, reservation caps and text preservation.
 
 - Asset ledger: reject repeat references on new or updated unlinked rows with an idempotent NOT VALID database constraint; retain historical rows for separate cleanup.
+## Endpoint and database-test boundary follow-ups
+
+- Database test discovery: accumulate mutable key possibilities, invalidate unknown writes, preserve environment copy/local-call provenance, and refuse uncertain gate reads without treating subprocess/config arguments as gates. Keep content-pinned reviews unchanged; 17 discovery tests and workspace typechecks pass.
+- Security remainder: refuse tenant loopback inference by default, bind API embedding credentials to the operator destination, block provider redirects, redact HTTP/vision errors, exclude billing-only default-project contributions, and cover alias/optional-access/package database-test guards. Scoped independent runtime and discovery council reviews pass; full exact-head CI remains the merge gate.
+
 ## Ingest version tagging and typed unavailable states (2026-11-13, draft, needs council)
 
 - Security #406 (partial): refuse hand-built documents without a scan decision in every non-development environment and service profile, before source storage reads; normalize sandbox provider ids with the shared ASCII rule. Regression coverage executes the real source modules. ClamAV startup age/disable and database-test guard follow-ups remain open.
@@ -371,5 +376,11 @@ Council-reviewed error contracts: allowlisted validation constraints, full Retry
 
 - Materialize runs use UUIDs accepted by the realtime run resource, retaining `kind=materialize`; regression checks validate generated ids against the unchanged protocol. Shared extractor schemas import in a browser without `process`, while Node callers retain live environment validation (2026-11-14, #390).
 - Vision credential destination guard: the OpenAI billing label alone no longer releases the platform key; the destination must match the operator-configured OpenAI endpoint. Added loopback, foreign-host, port, path, query, fragment and userinfo negatives plus operator endpoint positives. This defense-in-depth closes a helper bypass; it does not establish a remote exploit or complete the broader endpoint-policy audit.
+- SAML callbacks: validate every response against the exact atomically consumed browser-bound request, including ordinary sign-in, and require an explicit IdP issuer. Added ordinary callback binding/replay and signed wrong-issuer negatives. Independent review and deployment remain outstanding.
+- Parser source hardening follow-up: require VM isolation in every non-development environment, affirmatively require an original/scanned-copy decision and SHA-256 before source reads, retain loader-owned quarantine upload bindings, and cover development plus production/staging/service lifecycles. Independent re-review and full integration validation remain required.
+- ClamAV policy (#406): deployed startup refuses disabled scanning and age limits outside 1–24 hours; runtime scanning caps definition age at 24 hours even if startup validation is skipped. Development overrides remain available. Independent security review remains required.
+
+- Normalize SSE and Responses provider errors before SDK consumption, support bounded CR/LF/CRLF parsing, and detect computed/assignment database-test aliases with explicit refusal of unresolved reads.
 
 - Fixed vision self-critique prompt delivery using bounded per-call task text on both primary and fallback routes; UTF-8 bounded candidates and provider-request regression coverage (2026-11-14).
+- Provider response validation no longer trusts upstream MIME: bounded JSON validation or SSE framing precedes byte release, including mislabeled SDK error responses; lazy reads and cancellation remain covered. Database discovery conservatively joins container/return provenance, refuses environment property stores, and invalidates destructuring and loop key writes without adding exemptions.

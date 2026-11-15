@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PrivacyModeViolationError } from "@docslurp/shared";
 
 const mocks = vi.hoisted(() => ({
@@ -23,6 +23,8 @@ beforeEach(() => {
   vi.clearAllMocks();
   mocks.sql.mockImplementation(() => Promise.resolve([]));
 });
+
+afterEach(() => vi.unstubAllEnvs());
 
 function auditCalls() {
   return mocks.sql.mock.calls.filter((call) => Array.isArray(call[0]) && (call[0] as string[]).join("").includes("insert into privacy_audit_log"));
@@ -60,6 +62,11 @@ describe("app AI clients refuse hosted calls outside standard mode", () => {
     await expect(embedConfiguredText({ value: "q", runtime: "remote", provider: "openai", model: "text-embedding-3-small", apiKey: "k", privacyMode: "local-only" }))
       .rejects.toBeInstanceOf(PrivacyModeViolationError);
     expect(mocks.embed).not.toHaveBeenCalled();
+    vi.stubEnv("DOCSLURP_ALLOW_TENANT_LOCAL_MODEL_ENDPOINTS", "false");
+    await expect(embedConfiguredText({ value: "q", runtime: "remote", provider: "ollama", model: "nomic", baseURL: "http://127.0.0.1:11434/v1", privacyMode: "local-only" }))
+      .rejects.toThrow("Tenant-selected local model endpoints are disabled");
+    expect(mocks.embed).not.toHaveBeenCalled();
+    vi.stubEnv("DOCSLURP_ALLOW_TENANT_LOCAL_MODEL_ENDPOINTS", "true");
     mocks.embed.mockResolvedValue({ embedding: [0.1, 0.2], usage: { tokens: 1 } });
     await expect(embedConfiguredText({ value: "q", runtime: "remote", provider: "ollama", model: "nomic", baseURL: "http://127.0.0.1:11434/v1", privacyMode: "local-only" }))
       .resolves.toMatchObject({ embedding: [0.1, 0.2] });

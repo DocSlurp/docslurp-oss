@@ -55,6 +55,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.unstubAllEnvs();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
@@ -90,7 +91,18 @@ const vision = (modelUri: string, remoteFallbackModelUri?: string) =>
   visionConfigSchema.parse({ modelUri, ...(remoteFallbackModelUri ? { remoteFallbackModelUri } : {}) });
 
 describe("vision usage priced on the served route", () => {
+  it("refuses a disabled local primary before sending, falling back or recording spend", async () => {
+    vi.stubEnv("DOCSLURP_ALLOW_TENANT_LOCAL_MODEL_ENDPOINTS", "false");
+    stubFetch(() => answer("stop"));
+    const { outcome, recorded } = await guardedRead(vision(LOOPBACK, OPENAI));
+    expect(outcome).toBeInstanceOf(Error);
+    expect((outcome as Error).message).toContain("Tenant-selected local model endpoints are disabled");
+    expect(sends).toEqual([]);
+    expect(recorded).toEqual([]);
+  });
+
   it("a loopback primary whose OpenAI fallback is billed and rejected records the spend under the fallback model", async () => {
+    vi.stubEnv("DOCSLURP_ALLOW_TENANT_LOCAL_MODEL_ENDPOINTS", "true");
     stubFetch((route) => (route === "loopback" ? badRequest() : answer("length")));
     const { outcome, recorded } = await guardedRead(vision(LOOPBACK, OPENAI));
     expect(outcome).toBeInstanceOf(Error);
@@ -105,6 +117,7 @@ describe("vision usage priced on the served route", () => {
   });
 
   it("a local-to-hosted fallback success is priced and labelled on the hosted route", async () => {
+    vi.stubEnv("DOCSLURP_ALLOW_TENANT_LOCAL_MODEL_ENDPOINTS", "true");
     stubFetch((route) => (route === "loopback" ? badRequest() : answer("stop")));
     const { outcome, recorded } = await guardedRead(vision(LOOPBACK, OPENAI));
     const result = (outcome as { admitted: true; result: VisionExecutionResult }).result;
@@ -203,6 +216,7 @@ describe("vision usage priced on the served route", () => {
     const text = "Readable streamed paragraph text. ".repeat(40);
 
     it("a loopback stream cut off mid-response records 0 cents, never the configured rates", async () => {
+    vi.stubEnv("DOCSLURP_ALLOW_TENANT_LOCAL_MODEL_ENDPOINTS", "true");
       stubFetch(() => broken([delta(text)]));
       const { outcome, recorded } = await guardedRead(vision(LOOPBACK), streamingCfg);
       expect(outcome).toBeInstanceOf(Error);

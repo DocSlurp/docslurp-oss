@@ -795,7 +795,7 @@ export function canEditProject(access: ProjectAccess, userId: string): boolean {
  */
 export function canContributeToProject(access: ProjectAccess, userId: string): boolean {
   return canEditProject(access, userId)
-    || (access.isDefaultProject === true && access.orgRole !== null);
+    || (access.isDefaultProject === true && access.orgRole !== null && access.orgRole !== "billing");
 }
 
 export function canManageProject(access: ProjectAccess, userId: string): boolean {
