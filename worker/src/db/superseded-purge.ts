@@ -6,6 +6,7 @@ import {
   isLanceDbVectorTable,
   LANCEDB_CHUNKS_TABLE,
   LANCEDB_SUMMARIES_TABLE,
+  SUMMARY_TREE_BUILD_STALE_MS,
   SUMMARY_TREE_CLEANUP_KIND,
   MAX_RETAINED_VERSIONS,
   MIN_RETAINED_VERSIONS,
@@ -114,6 +115,11 @@ export interface SupersededPurgeOptions {
   lancedbRoot: string;
   deleteVectorRows?: DeleteVectorRows;
   dropVectorTable?: DropVectorTable;
+  /**
+   * Compacts a table and prunes every older version now, without deleting a current row (strict: rejects unless both
+   * succeeded). Used when a queued summary-tree removal finds a tree rebuilt after it was asked for.
+   */
+  pruneVectorHistory?: (args: { uri: string; table: string }) => Promise<unknown>;
   /** Deletes LanceDB rows by id (`vector_rows` queue entries). Defaults to deleteLanceDbRecords. */
   deleteVectorIds?: (args: { uri: string; table: string; ids: string[] }) => Promise<void>;
   /** Cleanup-queue rows claimed per batch; vector and storage work is grouped per batch. */
@@ -1239,14 +1245,27 @@ function safeSummaryTreeArtifactRoot(root: unknown, documentId: string): string 
  * (lancedb-summaries.ts writeSummaryRows) and holds off the next one, so nothing is written behind this removal. A
  * tree state that still says `ready` or `building` afterwards would name rows that are gone: it becomes `partial`
  * (never served), its registry rows go, and a builder that still held it is refused at its next write.
+ *
+ * A tree rebuilt after the removal was asked for is not this entry's to delete. The entry carries the document's
+ * build generation at the time it was queued (`payload.generation`); when the document's tree state is of a later
+ * generation and is not `skipped`:
+ * - a build that still reports (`building`, touched within the staleness window): `deferred`. Nothing is removed
+ *   under a live build; the entry is looked at again in a few minutes.
+ * - `ready`: `kept`. The finished build already replaced what the removal was asked about: its last step rewrote the
+ *   text artifact with the current nodes only and deleted the rows of every node it did not produce. What is left of
+ *   the earlier tree is in older versions of the table, so those are pruned (strict), and artifact folders other than
+ *   the tree's own are emptied. The tree's rows, registry and state are untouched.
+ * - anything else (`partial`, `pending`, an abandoned `building` row): removed as before. An unfinished rebuild may
+ *   still sit beside rows and text of the earlier tree, and nothing of that may stay.
+ * An entry without a generation (queued before the column existed) is removed as before.
  */
 async function removeDocumentSummaryTree(
   client: Sql<Record<string, unknown>>,
   storage: PurgeStorage,
   options: SupersededPurgeOptions,
   row: StorageCleanupRow,
-): Promise<void> {
-  const payload = row.payload as { documentId?: unknown; spaces?: unknown; artifactRoots?: unknown };
+): Promise<"removed" | "kept" | "deferred"> {
+  const payload = row.payload as { documentId?: unknown; spaces?: unknown; artifactRoots?: unknown; generation?: unknown };
   const documentId = typeof payload.documentId === "string" ? payload.documentId : "";
   const orgId = row.org_id ?? "";
   const projectId = payloadProjectId(row.payload);
@@ -1295,15 +1314,41 @@ async function removeDocumentSummaryTree(
     }
   }
 
+  // A tree of a later build generation than the one this removal was asked at (see the note above).
+  const queuedGeneration = typeof payload.generation === "number" && Number.isFinite(payload.generation) ? payload.generation : null;
+  const [tree] = doc && queuedGeneration !== null ? await client<{ status: string; live: boolean; root: string | null }[]>`
+    select t.status,
+      (t.status = 'building' and t.updated_at > now() - ${`${SUMMARY_TREE_BUILD_STALE_MS} milliseconds`}::interval) as live,
+      (select coalesce(r.storage_prefix, d.user_id || '/' || r.id) || '/summary-tree/' || d.id
+        from documents d join project_runs r on r.id = t.run_id and r.project_id = d.project_id where d.id = t.document_id) as root
+    from document_summary_trees t
+    where t.document_id = ${documentId} and t.org_id = ${orgId} and t.project_id = ${projectId}
+      and t.status <> 'skipped' and t.build_generation > ${queuedGeneration}
+  ` : [];
+  if (tree?.live) return "deferred";
+  const rebuilt = tree?.status === "ready";
+  const currentRoot = rebuilt ? safeSummaryTreeArtifactRoot(tree!.root, documentId) : null;
+  // A rebuilt tree whose own folder cannot be named is not kept: nothing is skipped on a guess.
+  const keep = rebuilt && currentRoot !== null;
+
   const deleteVectorRows = options.deleteVectorRows ?? deleteLanceDbDocumentRows;
+  const pruneVectorHistory = options.pruneVectorHistory ?? pruneLanceDbHistory;
   const seen = new Set<string>();
   for (const space of spaces.values()) {
     const location = VectorNamespaceManager.getEmbeddingLocation(options.lancedbRoot, orgId, projectId, space.embeddingModel, space.dimension, LANCEDB_SUMMARIES_TABLE);
     if (seen.has(location.uri)) continue;
     seen.add(location.uri);
-    await deleteVectorRows({ uri: location.uri, table: location.table, documentIds: [documentId], purgeHistory: true });
+    if (keep) await pruneVectorHistory({ uri: location.uri, table: location.table });
+    else await deleteVectorRows({ uri: location.uri, table: location.table, documentIds: [documentId], purgeHistory: true });
   }
-  for (const root of roots) await purgePrefix(storage, `${root}/`, () => false);
+  for (const root of roots) {
+    if (keep && root === currentRoot) continue;
+    await purgePrefix(storage, `${root}/`, () => false);
+  }
+  if (keep) {
+    console.log(`[storage-cleanup] summary-tree kept=rebuilt document=${documentId} queued_generation=${queuedGeneration}`);
+    return "kept";
+  }
 
   if (doc) {
     await client`
@@ -1313,7 +1358,19 @@ async function removeDocumentSummaryTree(
     `;
     await client`delete from document_summary_tree_nodes where document_id = ${documentId}`;
   }
+  return "removed";
 }
+
+/** Compacts a LanceDB table and prunes every older version now; a missing table has no history. Strict. */
+const pruneLanceDbHistory = async ({ uri, table }: { uri: string; table: string }): Promise<void> => {
+  const db = await connectLanceDb(uri);
+  try {
+    if (!(await db.tableNames()).includes(table)) return;
+  } finally {
+    db.close();
+  }
+  await requireLanceDbMaintenance(uri, table, { ...lanceDbMaintenanceSettings(resolveLanceDbConfig().params), versionRetentionMs: 0 });
+};
 
 /** `<userId>/<runId>/`: two safe segments, never a bucket root or a whole user. */
 const SAFE_RUN_PREFIX = /^[A-Za-z0-9_.@-]+\/[A-Za-z0-9_-]+\/$/;
@@ -1435,7 +1492,12 @@ export async function drainStorageCleanupQueue(
         } else if (row.kind === "vector_rows") {
           await deleteOrphanVectorRows(client, options, row);
         } else if (row.kind === SUMMARY_TREE_CLEANUP_KIND) {
-          await removeDocumentSummaryTree(client, txStorage, options, row);
+          if ((await removeDocumentSummaryTree(client, txStorage, options, row)) === "deferred") {
+            // A build is writing this document's tree right now: decided again once it has ended.
+            await client`update storage_cleanup_queue set not_before = now() + interval '2 minutes' where id = ${row.id}`;
+            result.deferred = (result.deferred ?? 0) + 1;
+            return;
+          }
         } else {
           // Queued before projects had their own databases (migration 0082 marks them):
           // a deleted org's org-level tables, dropped with their legacy names.

@@ -3818,6 +3818,8 @@ export const documentSummaryTrees = pgTable(
     error: text(),
     /** Who holds a `building` row (migration 0165). */
     buildOwner: text("build_owner"),
+    /** Builds that took the document (migration 0168); a queued removal carries the value it was asked at. */
+    buildGeneration: bigint("build_generation", { mode: "number" }).default(0).notNull(),
     builtAt: timestamp("built_at", { withTimezone: true, mode: "string" }),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),

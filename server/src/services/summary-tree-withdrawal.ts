@@ -16,15 +16,23 @@ import type { SqlClient } from "../db.js";
  *   (`storage_cleanup_queue`, kind `summary_tree_document`; worker/src/db/superseded-purge.ts).
  */
 
-/** Queues strict removal of the document's summary rows and text artifact. A queued entry becomes due again. */
-async function queueSummaryTreeRemoval(tx: SqlClient, documentId: string, reason: string): Promise<void> {
+/**
+ * Queues strict removal of the document's summary rows and text artifact. A queued entry becomes due again. The entry
+ * carries the document's build generation at this moment (0 without a tree state): the sweep does not delete a tree
+ * that a later build finished (worker/src/db/superseded-purge.ts).
+ */
+export async function queueSummaryTreeRemoval(tx: SqlClient, documentId: string, reason: string): Promise<void> {
   await tx`
     insert into storage_cleanup_queue (kind, org_id, target, payload, reason)
     select ${SUMMARY_TREE_CLEANUP_KIND}, d.org_id, d.org_id || '|' || d.project_id || '|' || d.id,
-      jsonb_build_object('projectId', d.project_id, 'documentId', d.id), ${reason}
+      jsonb_build_object('projectId', d.project_id, 'documentId', d.id, 'generation', coalesce((
+        select t.build_generation from document_summary_trees t where t.document_id = d.id
+      ), 0)), ${reason}
     from documents d
     where d.id = ${documentId} and d.org_id is not null and d.project_id is not null
-    on conflict (kind, target) do update set reason = excluded.reason, not_before = now(), attempts = 0, last_error = null
+    on conflict (kind, target) do update set
+      payload = storage_cleanup_queue.payload || jsonb_build_object('generation', excluded.payload -> 'generation'),
+      reason = excluded.reason, not_before = now(), attempts = 0, last_error = null
   `;
 }
 

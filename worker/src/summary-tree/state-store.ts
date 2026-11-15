@@ -105,20 +105,24 @@ export interface SummaryTreeStateWrite {
  * tenant's (and, with `expectOwner`, still held by that builder), and never over a `corrected` row: the check is part
  * of the write itself, so a correction that commits while a build runs wins whichever order the two arrive in.
  * `built_at` is set only by a `ready` write, so a rebuild that ends `ready` again always carries a later `built_at`.
- * Every write is also the build's heartbeat (`updated_at`).
+ * Every write is also the build's heartbeat (`updated_at`). A `building` write raises `build_generation`: a queued
+ * removal of the document's summary data carries the generation it was asked at (`enqueueSummaryTreeCleanup`), and
+ * the sweep leaves a tree of a later generation alone.
  */
 export async function writeSummaryTreeState(sql: Client, write: SummaryTreeStateWrite): Promise<void> {
   assertScope(write.scope);
   const rows = await sql<{ document_id: string }[]>`
     insert into document_summary_trees (
       document_id, org_id, project_id, run_id, status, skip_reason, tree_key_version, config_hash,
-      embedding_model, dimension, leaf_count, node_count, level_count, root_node_id, error, build_owner, built_at, updated_at
+      embedding_model, dimension, leaf_count, node_count, level_count, root_node_id, error, build_owner, built_at, updated_at,
+      build_generation
     )
     select d.id, d.org_id, d.project_id, ${write.runId}, ${write.status}, ${write.skipReason ?? null}, ${SUMMARY_TREE_KEY_VERSION},
       ${write.configHash ?? null}, ${write.space?.model ?? null}, ${write.space?.dimensions ?? null}::int,
       ${write.leafCount ?? 0}::int, ${write.nodeCount ?? 0}::int, ${write.levelCount ?? 0}::int, ${write.rootNodeId ?? null},
       ${write.error ?? null}, ${write.status === "building" ? write.buildOwner ?? null : null},
-      case when ${write.status} = 'ready' then now() else null end, now()
+      case when ${write.status} = 'ready' then now() else null end, now(),
+      case when ${write.status} = 'building' then 1 else 0 end
     from documents d
     where d.id = ${write.documentId} and d.org_id = ${write.scope.orgId} and d.project_id = ${write.scope.projectId}
       and d.purged_at is null and d.superseded_at is null and d.archived_at is null
@@ -128,7 +132,9 @@ export async function writeSummaryTreeState(sql: Client, write: SummaryTreeState
       embedding_model = excluded.embedding_model, dimension = excluded.dimension,
       leaf_count = excluded.leaf_count, node_count = excluded.node_count, level_count = excluded.level_count,
       root_node_id = excluded.root_node_id, error = excluded.error, build_owner = excluded.build_owner,
-      built_at = excluded.built_at, updated_at = now()
+      built_at = excluded.built_at, updated_at = now(),
+      -- A build taking the row is a new generation (a heartbeat is not a write of this statement).
+      build_generation = document_summary_trees.build_generation + excluded.build_generation
     where document_summary_trees.org_id = excluded.org_id and document_summary_trees.project_id = excluded.project_id
       and document_summary_trees.skip_reason is distinct from ${SUMMARY_TREE_CORRECTED_SKIP_REASON}
       and (${write.expectOwner ?? null}::text is null or document_summary_trees.build_owner is not distinct from ${write.expectOwner ?? null}::text)
@@ -188,6 +194,10 @@ export async function summaryTreeDocumentStanding(sql: Client, scope: SummaryTre
  * wrote; for a document that still has rows in Postgres the sweep also finds them itself. Queuing again while an
  * entry waits makes that entry due now and resets its attempts, so a removal asked for after a failed one is not
  * lost to the first one's count.
+ *
+ * The entry is stamped with the document's build generation at this moment (0 when it has no tree state). A tree
+ * that a later build finished is not this removal's to delete: the sweep keeps it and only prunes what was there
+ * before (superseded-purge.ts `removeDocumentSummaryTree`).
  */
 export async function enqueueSummaryTreeCleanup(sql: Client, args: {
   scope: SummaryTreeScope;
@@ -206,11 +216,16 @@ export async function enqueueSummaryTreeCleanup(sql: Client, args: {
   await sql`
     insert into storage_cleanup_queue (kind, org_id, target, payload, reason)
     values (${SUMMARY_TREE_CLEANUP_KIND}, ${args.scope.orgId}, ${`${args.scope.orgId}|${args.scope.projectId}|${args.documentId}`},
-      ${JSON.stringify(payload)}::text::jsonb, ${args.reason})
+      ${JSON.stringify(payload)}::text::jsonb || jsonb_build_object('generation', coalesce((
+        select t.build_generation from document_summary_trees t
+        where t.document_id = ${args.documentId} and t.org_id = ${args.scope.orgId} and t.project_id = ${args.scope.projectId}
+      ), 0)), ${args.reason})
     on conflict (kind, target) do update set
       payload = jsonb_build_object(
         'projectId', excluded.payload -> 'projectId',
         'documentId', excluded.payload -> 'documentId',
+        -- The latest request decides: a removal asked for again covers every build up to now.
+        'generation', excluded.payload -> 'generation',
         'spaces', coalesce(storage_cleanup_queue.payload -> 'spaces', '[]'::jsonb) || coalesce(excluded.payload -> 'spaces', '[]'::jsonb),
         'artifactRoots', coalesce(storage_cleanup_queue.payload -> 'artifactRoots', '[]'::jsonb) || coalesce(excluded.payload -> 'artifactRoots', '[]'::jsonb)
       ),

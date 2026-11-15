@@ -24,7 +24,7 @@ import {
   SummaryRowsRefused,
   writeSummaryRows,
 } from "../stages/lancedb-summaries.js";
-import { enqueueSummaryTreeCleanup, withdrawSummaryTreeForPii } from "../summary-tree/state-store.js";
+import { enqueueSummaryTreeCleanup, withdrawSummaryTreeForPii, writeSummaryTreeState } from "../summary-tree/state-store.js";
 import { createMigratedDatabase } from "../test/migrated-db.js";
 import { serveOnRandomPort } from "../test/migrated-postgres.js";
 
@@ -490,6 +490,81 @@ describe("queued removal of one document's summary tree (summary_tree_document)"
     expect(await sql`select status, error, built_at, build_owner from document_summary_trees where document_id = 'a'`)
       .toEqual([{ status: "partial", error: "rows-removed", built_at: null, build_owner: null }]);
     expect(await registry("a")).toEqual({ trees: 1, nodes: 0 });
+  });
+
+  it("keeps a tree that was rebuilt after the removal was asked for, and still removes what the earlier tree left", async () => {
+    await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline)
+      values ('run-1', 'o1', 'u1', 'w', 'bulk-upload', 'completed', 'completed', '{}') on conflict (id) do nothing`;
+    await seedDocument("a", W);
+    await seedTree("a", W, (index) => `ERASEME-${index} text that was withheld`);
+    const store = objectStore(["u1/run-1/summary-tree/a/summaries.jsonl", "u1/run-0/summary-tree/a/summaries.jsonl"]);
+    // The removal is asked for (generation 0 at that moment) ...
+    expect(await withdrawSummaryTreeForPii(sql, "a")).toBe(true);
+    await sql`update storage_cleanup_queue set payload = payload || ${sql.json({ artifactRoots: ["u1/run-1/summary-tree/a", "u1/run-0/summary-tree/a"] })}`;
+    expect((await sql`select payload -> 'generation' as generation from storage_cleanup_queue`)[0]).toEqual({ generation: 0 });
+
+    // ... and before the sweep runs, a build takes the document (a new generation) and is still writing.
+    await writeSummaryTreeState(sql, { scope: W, documentId: "a", runId: "run-1", status: "building", space, buildOwner: "job:j1#c1" });
+    expect((await sql`select build_generation::int as generation from document_summary_trees where document_id = 'a'`)[0]).toEqual({ generation: 1 });
+    expect(await drainStorageCleanupQueue(sql, store, options())).toEqual({ purged: 0, failed: 0, deferred: 1 });
+    expect(await summaryDocuments(W)).toEqual(["a"]);
+    expect(store.objects.size).toBe(2);
+    expect((await sql`select attempts, not_before > now() as later from storage_cleanup_queue`)[0]).toEqual({ attempts: 0, later: true });
+
+    // The build finishes: every row rewritten from the text as it is now.
+    await writeSummaryRows({ sql, scope: W, space, documentId: "a", runId: "run-1", rows: rowsFor("a", (index) => `REBUILT-${index}`), owner: "job:j1#c1", root });
+    await writeSummaryTreeState(sql, { scope: W, documentId: "a", runId: "run-1", status: "ready", space, nodeCount: 6, expectOwner: "job:j1#c1" });
+    expect((await filesContaining("ERASEME-")).length).toBeGreaterThan(0);
+    await sql`update storage_cleanup_queue set not_before = now()`;
+    const deleted: string[] = [];
+    expect(await drainStorageCleanupQueue(sql, store, options({
+      deleteVectorRows: async (args) => { deleted.push(args.table); return await deleteLanceDbDocumentRows(args); },
+    }))).toEqual({ purged: 1, failed: 0 });
+    // The rebuilt tree is whole: rows, registry, state and its own artifact folder.
+    expect(deleted).toEqual([]);
+    expect(await summaryDocuments(W)).toEqual(["a"]);
+    expect((await filesContaining("REBUILT-")).length).toBeGreaterThan(0);
+    expect(await registry("a")).toEqual({ trees: 1, nodes: 6 });
+    expect(await sql`select status from document_summary_trees where document_id = 'a'`).toEqual([{ status: "ready" }]);
+    // What the removal was asked about is gone: the withheld text is in no file of the table, and the other folder is empty.
+    expect(await filesContaining("ERASEME-")).toEqual([]);
+    expect([...store.objects]).toEqual(["u1/run-1/summary-tree/a/summaries.jsonl"]);
+    expect(await sql`select kind from storage_cleanup_queue`).toEqual([]);
+
+    // A history prune that fails keeps the entry: nothing is skipped on a failure.
+    await enqueueSummaryTreeCleanup(sql, { scope: W, documentId: "a", reason: "pii_withheld" });
+    await sql`update storage_cleanup_queue set payload = jsonb_set(payload, '{generation}', '0')`;
+    expect(await drainStorageCleanupQueue(sql, store, options({ pruneVectorHistory: async () => { throw new Error("prune failed"); } }))).toEqual({ purged: 0, failed: 1 });
+    expect(await sql`select attempts, last_error from storage_cleanup_queue`).toEqual([{ attempts: 1, last_error: "prune failed" }]);
+    await sql`delete from storage_cleanup_queue`;
+  });
+
+  it("still removes everything when the later build did not finish, or the removal was asked for after it", async () => {
+    await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline)
+      values ('run-1', 'o1', 'u1', 'w', 'bulk-upload', 'completed', 'completed', '{}') on conflict (id) do nothing`;
+    const outcomes: Record<string, unknown> = {};
+    for (const [name, after] of [
+      // A later build that stopped half way: rows and text of the earlier tree may still sit beside its own.
+      ["partial", async () => { await sql`update document_summary_trees set status = 'partial', build_generation = 1 where document_id = 'a'`; }],
+      // A later build whose worker died: its `building` row stopped reporting.
+      ["abandoned", async () => { await sql`update document_summary_trees set status = 'building', build_generation = 1, updated_at = now() - interval '1 hour' where document_id = 'a'`; }],
+      // The removal was asked for after the build that made this tree: it is the tree the removal is about.
+      ["same-generation", async () => { await sql`update document_summary_trees set build_generation = 0 where document_id = 'a'`; }],
+      // An entry queued before entries carried a generation.
+      ["no-generation", async () => { await sql`update storage_cleanup_queue set payload = payload - 'generation'`; await sql`update document_summary_trees set build_generation = 5 where document_id = 'a'`; }],
+    ] as const) {
+      await sql`delete from documents where id = 'a'`;
+      await sql`delete from document_cleanup_queue`;
+      await sql`delete from storage_cleanup_queue`;
+      await rm(root, { recursive: true, force: true });
+      await seedDocument("a", W);
+      await seedTree("a", W, (index) => `ERASEME-${index}`);
+      await enqueueSummaryTreeCleanup(sql, { scope: W, documentId: "a", reason: "pii_withheld" });
+      await after();
+      expect(await drainStorageCleanupQueue(sql, storage, options()), name).toEqual({ purged: 1, failed: 0 });
+      outcomes[name] = [await summaryDocuments(W), await filesContaining("ERASEME-"), (await registry("a")).nodes];
+    }
+    for (const outcome of Object.values(outcomes)) expect(outcome).toEqual([[], [], 0]);
   });
 
   it("refuses an entry that names another tenant's document, a folder that is not the document's, or a malformed target", async () => {
