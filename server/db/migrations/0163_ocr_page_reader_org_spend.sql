@@ -16,3 +16,12 @@ CREATE TABLE IF NOT EXISTS ocr_page_reader_org_spend (
 );
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS ocr_page_reader_org_spend_org_day_idx ON ocr_page_reader_org_spend (org_id, day);
+--> statement-breakpoint
+-- The worker admits, settles and purges tickets; server/db/roles.mjs reconciles the same grants after every migration.
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'docslurp_worker') THEN
+    REVOKE ALL ON public.ocr_page_reader_org_spend FROM docslurp_worker;
+    GRANT SELECT, INSERT, UPDATE, DELETE ON public.ocr_page_reader_org_spend TO docslurp_worker;
+  END IF;
+END $$;
