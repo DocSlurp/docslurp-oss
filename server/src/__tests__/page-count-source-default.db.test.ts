@@ -8,6 +8,9 @@ const seed = `
   insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, total_documents)
   values ('r', 'o', 'u', 'w', 'bulk-upload', 'queued', 'queued', 2);
 `;
+// Current-schema fixture declares its own capacity; historical migration inputs retain their old columns.
+const currentSeed = seed.replace("total_documents)", "total_documents, monthly_reservation_cents)")
+  .replace("'queued', 'queued', 2)", "'queued', 'queued', 2, 100)");
 // This seed precedes 0130 and therefore also precedes the 0132 rename.
 const historicalSeed = seed.replaceAll("project_runs", "workspace_runs").replaceAll("projects", "workspaces").replaceAll("project_id", "workspace_id");
 
@@ -59,7 +62,7 @@ it("captures intake_page_count at insert and keeps it immutable through measurem
 it("allows billing_pages 0 and still refuses a negative count", async () => {
   const db = await createMigratedDatabase();
   try {
-    await db.exec(`${seed}
+    await db.exec(`${currentSeed}
       insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, billing_pages, billing_pages_method)
       values ('empty', 'o', 'u', 'w', 'r', 'e.docx', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'raw/e', 'queued', 1, 0, 'empty');
     `);
