@@ -21,7 +21,9 @@ test('database triggers fence all tenants, sessions and run readmission while al
   await assert.rejects(db.exec("UPDATE public.ingest_admission SET holder=NULL"), /permission denied/);
   await db.exec('RESET ROLE');
   await admission(db,'pause','deploy-12345');
+  await db.exec('SET ROLE admission_untrusted');
   for(const sql of ["INSERT INTO documents VALUES ('tenant-b')", "INSERT INTO upload_sessions VALUES ('tenant-a')", "INSERT INTO project_runs VALUES ('new','queued')"] ) await assert.rejects(db.exec(sql),/Ingestion temporarily paused/);
+  await db.exec('RESET ROLE');
   await assert.rejects(admission(db,'drain','deploy-12345'),/not drained/);
   await db.exec("UPDATE project_runs SET status='completed' WHERE id='existing'");
   await assert.rejects(db.exec("UPDATE project_runs SET status='queued' WHERE id='existing'"),/Ingestion temporarily paused/);

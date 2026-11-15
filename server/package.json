@@ -21,7 +21,7 @@
     "typecheck": "pnpm --filter @docslurp/shared build && pnpm --filter @docslurp/sdk build && tsc -p tsconfig.json --noEmit",
     "build:mcp-ui": "node scripts/build-mcp-ui.mjs",
     "test": "vitest run && pnpm test:db",
-    "test:db": "pnpm --filter @docslurp/shared build && tsx db/tests/run.mjs",
+    "test:db": "pnpm --filter @docslurp/shared build && tsx db/tests/run.mjs && node --test --test-concurrency=2 db/ingest-admission.test.mjs",
     "db:migrate": "node db/migrate.mjs",
     "db:seed": "tsx db/seed.ts",
     "catalog:feed": "tsx scripts/stripe-catalog-feed.ts",
