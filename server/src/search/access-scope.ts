@@ -16,12 +16,21 @@ import { searchModeOfScopes } from "../lib/search-tiers.js";
  * - `modeCeiling`: the most an API key may search (`search:<mode>` scope);
  *   null for sessions. Searches a chat turn runs belong to the answer and are
  *   governed by the `chat` scope instead (search/search-mode.ts).
+ * - `actor`: who is asking, for the decisions that belong to a project's editors (summary-tree-ceiling.ts): a
+ *   signed-in user, or an API key by its id (a delegated OAuth token is such a key, marked `delegated`). Set by
+ *   `searchAccessScopeFor` from the request's actor. A scope without one names no caller, and such a caller is never
+ *   given more than the project's stored settings allow.
  */
 export interface SearchAccessScope {
   readonly orgId: string;
   readonly projectIds: readonly string[] | "org";
   readonly modeCeiling: SearchMode | null;
+  readonly actor?: SearchScopeActor;
 }
+
+export type SearchScopeActor =
+  | { readonly type: "session" }
+  | { readonly type: "apiKey"; readonly apiKeyId: string | null; readonly delegated: boolean };
 
 /** No (or a malformed) search scope was passed: refused, never widened. */
 export class MissingSearchAccessScopeError extends Error {
@@ -63,7 +72,7 @@ export function searchScopeAllowsProject(scope: SearchAccessScope, project: { pr
 
 type ScopeActor =
   | { type: "session" }
-  | { type: "apiKey"; apiKey: { orgId: string | null; projectIds?: readonly string[]; keyType?: string; scopes: readonly string[] } };
+  | { type: "apiKey"; apiKey: { keyId?: string | null; oauth?: unknown; orgId: string | null; projectIds?: readonly string[]; keyType?: string; scopes: readonly string[] } };
 
 /**
  * The scope of a request actor working in `project`'s organization. Sessions
@@ -73,7 +82,7 @@ type ScopeActor =
  * actor can never search there (a key without an org, or another org).
  */
 export function searchAccessScopeFor(actor: ScopeActor, project: { orgId: string }): SearchAccessScope | null {
-  if (actor.type === "session") return { orgId: project.orgId, projectIds: "org", modeCeiling: null };
+  if (actor.type === "session") return { orgId: project.orgId, projectIds: "org", modeCeiling: null, actor: { type: "session" } };
   const key = actor.apiKey;
   if (!key.orgId || key.orgId !== project.orgId) return null;
   const allowlist = key.projectIds ?? [];
@@ -82,5 +91,6 @@ export function searchAccessScopeFor(actor: ScopeActor, project: { orgId: string
     projectIds: allowlist.length > 0 ? [...allowlist] : key.keyType === "client" ? [] : "org",
     // A key without a search scope reaches search only inside a chat turn (exempt), so outside one it is held to keyword.
     modeCeiling: searchModeOfScopes(key.scopes) ?? "keyword",
+    actor: { type: "apiKey", apiKeyId: typeof key.keyId === "string" && key.keyId ? key.keyId : null, delegated: Boolean(key.oauth) },
   };
 }

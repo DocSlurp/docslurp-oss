@@ -1,4 +1,4 @@
-import type { Table } from "@lancedb/lancedb";
+import { Index, type Table } from "@lancedb/lancedb";
 import { LANCE_HYDRATION_COLUMN_SPECS } from "@docslurp/shared/lancedb-hydration";
 
 import { connectLanceDb } from "./lancedb-connection.js";
@@ -150,6 +150,52 @@ async function writeLanceDbRecordsNow(
   } finally {
     db.close();
   }
+}
+
+/**
+ * Makes a BTREE scalar index exist on `column`, in this process's turn for the table. For a column every query
+ * filters by: the chunks table gets its `documentId` index from maintenance once it is large enough to matter
+ * (lancedb-maintenance.ts); a table whose every read is `documentId IN (...)` asks for it from its first write.
+ * Rows written later are folded in by `optimize()`. Returns true when this call built the index. A missing table
+ * is nothing to index.
+ */
+export async function ensureLanceScalarIndex(
+  uri: string,
+  collection: string,
+  column: string,
+  retry: LanceWriteRetryOptions = {},
+): Promise<boolean> {
+  const retries = retry.retries ?? 10;
+  const baseDelayMs = retry.baseDelayMs ?? 200;
+  const maxDelayMs = retry.maxDelayMs ?? 15_000;
+  const attemptTimeoutMs = retry.attemptTimeoutMs ?? lanceWriteAttemptTimeoutMs();
+  return await inTableQueue(`${uri}\u0000${collection}`, async () => {
+    const db = await connectLanceDb(uri);
+    try {
+      if (!(await withAttemptTimeout(db.tableNames(), attemptTimeoutMs)).includes(collection)) return false;
+      for (let attempt = 0; ; attempt += 1) {
+        try {
+          const table = await withAttemptTimeout(db.openTable(collection), attemptTimeoutMs);
+          try {
+            if ((await withAttemptTimeout(table.listIndices(), attemptTimeoutMs)).some((index) => index.columns.includes(column))) return false;
+            // replace=false: a concurrent writer that already built the index wins.
+            await withAttemptTimeout(table.createIndex(column, { config: Index.btree(), replace: false }), attemptTimeoutMs);
+            return true;
+          } finally {
+            table.close();
+          }
+        } catch (error) {
+          // Lost the race to another machine: the index exists.
+          if (/already exists/i.test(error instanceof Error ? error.message : String(error))) return false;
+          if (attempt >= retries || !isRetryableLanceCommitError(error)) throw error;
+          const cap = Math.min(maxDelayMs, baseDelayMs * 2 ** attempt);
+          await delay(Math.round(cap / 2 + Math.random() * (cap / 2)));
+        }
+      }
+    } finally {
+      db.close();
+    }
+  });
 }
 
 /**

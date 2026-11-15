@@ -88,11 +88,14 @@ function usage(): void {
   docslurp extract-download <extractId>
   docslurp full-index [--project <id|slug|name>] [--document <id>] [--estimate] [--watch]
   docslurp reprocess <runId> [--stage-from <stage>] [--chart-export <off|free|models>] [--estimate] [--watch]
+  docslurp summary-tree backfill [--project <id|slug|name>] --max-cost-cents <n> [--estimate] [--watch] [--json]
+  docslurp summary-tree status [--project <id|slug|name>] [--json]
+  docslurp summary-tree cancel <jobId> [--project <id|slug|name>] [--json]
   docslurp jobs get <jobId> [--json]
   docslurp jobs watch <jobId> [--timeout <seconds>]
   docslurp status <runId> [--api-url <url>] [--watch] [--timeout <seconds>]
   docslurp runs [--limit <1-100>] [--cursor <nextCursor>] [--api-url <url>]
-  docslurp search <query> [--project <id|slug|name>] [--min-score <0..1>] [--mode <keyword|hybrid|deep>] [--stream [--stats]] [--json | --context]
+  docslurp search <query> [--project <id|slug|name>] [--min-score <0..1>] [--mode <keyword|hybrid|deep>] [--summary-tree <off|guide|include>] [--stream [--stats]] [--json | --context]
   docslurp search --queries-file <queries.json> [--project <id|slug|name>] [--concurrency <1..4>] [--json | --context]
   docslurp chat <question> [--project <id|slug|name>] [--session <id>] [--tier fastest|balanced|smart] [--reasoning none|minimal|low|medium|high] [--json]
   docslurp mcp-server [--api-url <url>] [--api-key <key>]   (alias: docslurp mcp)
@@ -299,7 +302,8 @@ const BOOLEAN_FLAGS: Readonly<Record<string, string>> = {
 const VALUE_FLAGS: ReadonlySet<string> = new Set([
   "project", "api-url", "api-key", "run", "source", "out", "queries-file", "concurrency", "min-score", "session", "canonical-id", "path",
   "template", "document", "stage-from", "retention-days", "download", "quality", "chart-export", "idempotency-key",
-  "timeout", "limit", "cursor", "mode", "tier", "reasoning", "months", "indexing", "model", "scopes", "profile",
+  "timeout", "limit", "cursor", "mode", "summary-tree", "tier", "reasoning", "months", "indexing", "model", "scopes", "profile",
+  "max-cost-cents",
 ]);
 
 const camel = (name: string) => name.replace(/-([a-z])/g, (_, c: string) => c.toUpperCase());
@@ -815,6 +819,80 @@ async function startWork(pathname: string, body: unknown, flags: Record<string, 
   if (flags.watch === true && runId) await statusCommand(runId, flags);
 }
 
+type SummaryTreeJobView = {
+  id: string; status: string; blockedReason: string | null; maxCostCents: number; costCents: number; costBasis?: "billed" | "provider";
+  documentsTotal: number; documentsReady: number; documentsSkipped: number; documentsPartial: number;
+  nodesBuilt: number; modelCalls: number; error: string | null; job?: JobStatus;
+};
+
+function printSummaryTreeJob(job: SummaryTreeJobView): void {
+  const done = job.documentsReady + job.documentsSkipped + job.documentsPartial;
+  console.log(`Job ${job.id}: summary-tree-backfill ${job.status}${job.blockedReason ? ` (${job.blockedReason})` : ""}`);
+  console.log(`Documents: ${done} of ${job.documentsTotal} (${job.documentsReady} built, ${job.documentsSkipped} need no tree, ${job.documentsPartial} incomplete)`);
+  console.log(`Summaries: ${job.nodesBuilt} sections, ${job.modelCalls} model calls`);
+  console.log(`Spend:     ${job.costCents.toFixed(2)} of ${job.maxCostCents.toFixed(2)} cents (cap${job.costBasis === "billed" ? ", billed credits" : job.costBasis === "provider" ? ", model cost" : ""})`);
+  if (job.error) console.log(`Note:      ${job.error}`);
+}
+
+/**
+ * Summary tree backfill: builds the tree for a project's already indexed documents (turning the tree on only covers
+ * new uploads). `backfill` needs --max-cost-cents: the job stops before the model call that would pass it.
+ */
+async function summaryTreeCommand(action: string | undefined, jobId: string | undefined, flags: Record<string, string | boolean>): Promise<void> {
+  const base = `/v1/projects/${encodeURIComponent(resolveProject(flags))}/summary-tree/backfill`;
+  const read = async (pathname: string, init?: RequestInit): Promise<unknown | null> => {
+    const response = await apiFetch(pathname, flags, init);
+    if (!response.ok) {
+      printFailure(await responseFailure(response));
+      process.exitCode = 1;
+      return null;
+    }
+    return await response.json();
+  };
+  const post = { method: "POST", headers: { "Content-Type": "application/json" } };
+  // Only `backfill` has an estimate; anywhere else the flag would run the command instead.
+  if (flags.estimate === true && action !== "backfill") throw new Error("--estimate is only supported by summary-tree backfill.");
+  if (action === "backfill") {
+    if (flags.estimate === true) return runEstimate(`${base}/estimate`, {}, flags);
+    const maxCostCents = Number(flags.maxCostCents);
+    if (typeof flags.maxCostCents !== "string" || !Number.isFinite(maxCostCents) || maxCostCents <= 0) {
+      throw new Error("--max-cost-cents is required: the most this backfill may spend, in cents. Use --estimate to see what it would cost.");
+    }
+    const job = await read(base, { ...post, body: JSON.stringify({ maxCostCents }) }) as SummaryTreeJobView | null;
+    if (!job) return;
+    if (flags.json === true) console.log(JSON.stringify(job, null, 2));
+    else {
+      printSummaryTreeJob(job);
+      if (job.job?.estimate) console.log(formatEstimate(job.job.estimate));
+    }
+    if (flags.watch === true) await jobsCommand("watch", job.id, flags);
+    return;
+  }
+  if (action === "status") {
+    const status = await read(base) as { estimate: { documents: number; documentsToBuild: number; nodes: number } | null; activeJob: SummaryTreeJobView | null; lastJob: SummaryTreeJobView | null } | null;
+    if (!status) return;
+    if (flags.json === true) {
+      console.log(JSON.stringify(status, null, 2));
+      return;
+    }
+    if (status.estimate) console.log(`Without a tree: ${status.estimate.documents} documents (${status.estimate.documentsToBuild} long enough to get one, about ${status.estimate.nodes} section summaries)`);
+    else console.log("No estimate: this deployment has no price for the summary tree.");
+    if (status.activeJob) printSummaryTreeJob(status.activeJob);
+    else if (status.lastJob) printSummaryTreeJob(status.lastJob);
+    else console.log("No backfill has run for this project.");
+    return;
+  }
+  if (action === "cancel" && jobId) {
+    const job = await read(`${base}/${encodeURIComponent(jobId)}/cancel`, { ...post, body: "{}" }) as SummaryTreeJobView | null;
+    if (!job) return;
+    if (flags.json === true) console.log(JSON.stringify(job, null, 2));
+    else printSummaryTreeJob(job);
+    return;
+  }
+  console.error("Usage: docslurp summary-tree backfill --max-cost-cents <n> | status | cancel <jobId>");
+  process.exitCode = 1;
+}
+
 const TERMINAL_JOB_STATUSES = new Set(["completed", "failed", "cancelled"]);
 
 async function jobsCommand(action: string | undefined, jobId: string | undefined, flags: Record<string, string | boolean>): Promise<void> {
@@ -989,7 +1067,7 @@ async function urlEstimateFiles(urls: string[]): Promise<Array<{ name: string; s
 }
 
 /** Commands that read `--estimate`; anywhere else the flag is refused, so it can never silently run billed work. */
-const ESTIMATE_COMMANDS: ReadonlySet<string> = new Set(["upload", "ingest-url", "full-index", "reprocess"]);
+const ESTIMATE_COMMANDS: ReadonlySet<string> = new Set(["upload", "ingest-url", "full-index", "reprocess", "summary-tree"]);
 
 /** `docslurp extract`: files or URLs (not both), with the retention options. */
 async function extractCommand(inputs: string[], flags: Record<string, string | boolean>): Promise<void> {
@@ -1221,7 +1299,34 @@ type CliSearchResponse = {
   }>;
   availability?: { message?: string | null };
   noMatch?: boolean;
+  summaryTree?: { requested: string; applied: string; skipped?: string; ms: number };
+  /** --summary-tree include: section summaries. Model-written, never passages. */
+  summaries?: Array<{ kind: "summary"; filename: string; level: number; summary: string; pageStart: number | null; pageEnd: number | null }>;
 };
+
+/**
+ * Text from a response, safe to print: no C0 or C1 control characters (ESC and CSI sequences would move the cursor,
+ * recolor or retitle the terminal) and no bidirectional controls (they reorder what is read). Whitespace controls
+ * become a space.
+ */
+export function printable(text: string): string {
+  return String(text)
+    .replace(/[\t\n\r\u000b\u000c\u0085\u2028\u2029]+/g, " ")
+    .replace(/[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, "");
+}
+
+/** Section summaries are printed apart from the passages and marked, so they are never read as quotes. */
+function printSummaries(data: CliSearchResponse): void {
+  if (data.summaryTree?.skipped) console.error(`Summary tree not used (${printable(data.summaryTree.skipped)}).`);
+  if (!data.summaries?.length) return;
+  console.log("\nSection summaries (model-written, not quotes):");
+  for (const item of data.summaries) {
+    const pages = item.pageStart == null ? "" : item.pageEnd != null && item.pageEnd !== item.pageStart ? ` (pp.${item.pageStart}-${item.pageEnd})` : ` (p.${item.pageStart})`;
+    // Model-written text over document text, and a filename: neither reaches the terminal with a control character.
+    console.log(`  [summary] ${printable(item.filename)}${pages}`);
+    console.log(`     ${printable(item.summary).slice(0, 400)}`);
+  }
+}
 
 function printSearch(data: CliSearchResponse, flags: Record<string, string | boolean>): void {
   if (data.availability?.message) console.error(data.availability.message);
@@ -1231,15 +1336,17 @@ function printSearch(data: CliSearchResponse, flags: Record<string, string | boo
       const source = [hit.citation.filename, pages == null ? undefined : `pages ${pages}`, hit.citation.documentId ? `document ${hit.citation.documentId}` : undefined].filter(Boolean).join(" · ");
       return `[${index + 1}] ${source}\n${hit.text}`;
     }).join("\n\n"));
+    printSummaries(data);
     return;
   }
-  if (!data.results.length) { console.log(data.noMatch ? "No relevant match found. Lower --min-score (0 disables the floor) to see weaker passages." : "No results found."); return; }
+  if (!data.results.length) { console.log(data.noMatch ? "No relevant match found. Lower --min-score (0 disables the floor) to see weaker passages." : "No results found."); printSummaries(data); return; }
   for (const [index, hit] of data.results.entries()) {
     const page = hit.citation.pageNumbers?.length ? hit.citation.pageNumbers.join(", ") : hit.citation.pageNumber ?? "-";
     console.log(`${String(index + 1).padStart(3)}. [${hit.score.toFixed(4)}] ${hit.citation.filename} (p.${page})`);
     console.log(`     ${hit.text.slice(0, 200).replace(/\n/g, " ")}`);
     if (index < data.results.length - 1) console.log("");
   }
+  printSummaries(data);
 }
 
 async function searchCommand(query: string, flags: Record<string, string | boolean>): Promise<void> {
@@ -1276,12 +1383,14 @@ async function searchCommand(query: string, flags: Record<string, string | boole
   if (minScore !== undefined && !(minScore >= 0 && minScore <= 1)) throw new Error("--min-score must be a number from 0 to 1.");
   const mode = typeof flags.mode === "string" ? flags.mode.trim() : undefined;
   if (flags.mode !== undefined && !["keyword", "hybrid", "deep"].includes(mode ?? "")) throw new Error("--mode must be keyword, hybrid or deep.");
+  const summaryTree = typeof flags.summaryTree === "string" ? flags.summaryTree.trim() : undefined;
+  if (flags.summaryTree !== undefined && !["off", "guide", "include"].includes(summaryTree ?? "")) throw new Error("--summary-tree must be off, guide or include.");
   if (flags.stats && !flags.stream) throw new Error("--stats requires --stream.");
   if (flags.stream) {
-    await searchStreamCommand({ q: query, ...(project ? { project } : {}), ...(minScore === undefined ? {} : { minScore }), ...(mode ? { mode } : {}), ...(flags.stats ? { stats: true } : {}) }, flags);
+    await searchStreamCommand({ q: query, ...(project ? { project } : {}), ...(minScore === undefined ? {} : { minScore }), ...(mode ? { mode } : {}), ...(summaryTree ? { summaryTree } : {}), ...(flags.stats ? { stats: true } : {}) }, flags);
     return;
   }
-  const params = new URLSearchParams({ q: query, ...(project ? { project } : {}), ...(minScore === undefined ? {} : { minScore: String(minScore) }), ...(mode ? { mode } : {}) });
+  const params = new URLSearchParams({ q: query, ...(project ? { project } : {}), ...(minScore === undefined ? {} : { minScore: String(minScore) }), ...(mode ? { mode } : {}), ...(summaryTree ? { summaryTree } : {}) });
   const response = await apiFetch(`/v1/search?${params.toString()}`, flags);
   if (!response.ok) throw await responseFailure(response);
   const data = await response.json() as CliSearchResponse;
@@ -1329,7 +1438,7 @@ async function* sseFrames(body: AsyncIterable<Uint8Array>, maxFrameBytes = 1_048
  * event stream, or a connection failure before any response. After the first event a drop, a malformed or oversized frame, or a stream that
  * ends without `search.results` is an error and never a second search; a drop after `search.results` still prints the answer.
  */
-async function searchStreamCommand(input: { q: string; project?: string; minScore?: number; mode?: string; stats?: boolean }, flags: Record<string, string | boolean>): Promise<void> {
+async function searchStreamCommand(input: { q: string; project?: string; minScore?: number; mode?: string; summaryTree?: string; stats?: boolean }, flags: Record<string, string | boolean>): Promise<void> {
   const json = flags.json === true;
   const started = Date.now();
   let final: CliSearchResponse | undefined;
@@ -1417,7 +1526,7 @@ async function searchStreamCommand(input: { q: string; project?: string; minScor
   }
   if (!final) {
     note(`Falling back to the JSON search (${fallbackReason ?? "stream unavailable"}).`);
-    const params = new URLSearchParams({ q: input.q, ...(input.project ? { project: input.project } : {}), ...(input.minScore === undefined ? {} : { minScore: String(input.minScore) }), ...(input.mode ? { mode: input.mode } : {}) });
+    const params = new URLSearchParams({ q: input.q, ...(input.project ? { project: input.project } : {}), ...(input.minScore === undefined ? {} : { minScore: String(input.minScore) }), ...(input.mode ? { mode: input.mode } : {}), ...(input.summaryTree ? { summaryTree: input.summaryTree } : {}) });
     const response = await apiFetch(`/v1/search?${params.toString()}`, flags);
     if (!response.ok) throw await responseFailure(response);
     final = await response.json() as CliSearchResponse;
@@ -1664,6 +1773,9 @@ async function main(): Promise<void> {
       break;
     case "reprocess":
       await reprocessCommand(positional[0], flags);
+      break;
+    case "summary-tree":
+      await summaryTreeCommand(positional[0], positional[1], flags);
       break;
     case "jobs":
       await jobsCommand(positional[0], positional[1], flags);

@@ -3,7 +3,7 @@ import { runOriginOf } from "../lib/run-origin.js";
 import { SEARCH_SCOPES } from "../lib/search-tiers.js";
 import { projectRecommendationVisitsRoutes } from "./project-recommendation-visits.js";
 import { ChatToolBlockedError } from "../services/chat-tool-error.js";
-import { applyProjectSettingsProposalSchema } from "@docslurp/shared";
+import { applyProjectSettingsProposalSchema, SummaryTreeConfigError } from "@docslurp/shared";
 import { applySettingsProposal, SettingsProposalError } from "../services/project-settings-proposals.js";
 import { reportPublicError } from "../lib/public-errors.js";
 import { isCancellation } from "@docslurp/shared/cancellation";
@@ -1513,6 +1513,8 @@ export const projectsRoutes = new Hono()
         if (error instanceof ProjectSlugError) return apiStatusError(c, error.status, error.message);
         if (error instanceof ConfigConflictError) return apiStatusError(c, error.status, error.message, { details: { category: error.code } });
         if (error instanceof ChartExportUnavailableError) return apiStatusError(c, error.status, error.message, { code: error.code, details: { field: "chartExport.tier" } });
+        // The project's summary tree is on and this save would leave it without vectors, or under a template that keeps summaries off.
+        if (error instanceof SummaryTreeConfigError) return apiStatusError(c, error.status, error.message, { code: error.code, details: { field: "summaryTree" } });
         return fail(error);
       }
 

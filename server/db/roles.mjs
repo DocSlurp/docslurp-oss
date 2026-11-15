@@ -57,6 +57,8 @@ export const WORKER_TABLES = Object.freeze({
   document_propositions: { privileges: DML, evidence: "worker/src/db/store.ts propositions" },
   document_run_stage_states: { privileges: DML, evidence: "worker/src/db/store.ts stage state" },
   document_summaries: { privileges: DML, evidence: "worker/src/db/store.ts summaries" },
+  document_summary_tree_nodes: { privileges: DML, evidence: "worker/src/summary-tree/state-store.ts node registry; superseded-purge.ts" },
+  document_summary_trees: { privileges: DML, evidence: "worker/src/summary-tree/state-store.ts per-document tree state; backfill-job.ts; superseded-purge.ts" },
   documents: { privileges: DML, evidence: "worker/src/db/store.ts and most stages" },
   embedding_reuse_refs: { privileges: DML, evidence: "worker/src/db/store.ts embedding reuse" },
   graph_jobs: { privileges: DML, evidence: "worker/src/graph/rebuild-job.ts" },
@@ -87,6 +89,7 @@ export const WORKER_TABLES = Object.freeze({
   run_fast_page_image_grants: { privileges: ["select", "insert"], evidence: "worker/src/db/fast-page-image-budget.ts per-document Fast render grants" },
   search_index_staleness: { privileges: DML, evidence: "worker/src/db/superseded-purge.ts DERIVED_TABLES" },
   upload_cleanup_owners: { privileges: ["select"], evidence: "worker/src/db/superseded-purge.ts original-upload ownership verification" },
+  summary_tree_jobs: { privileges: DML, evidence: "worker/src/summary-tree/backfill-job.ts" },
   storage_cleanup_queue: { privileges: DML, evidence: "worker/src/db/superseded-purge.ts drainStorageCleanupQueue; project_runs trigger" },
   upload_session_files: { privileges: ["select"], evidence: "worker/src/db/superseded-purge.ts retained source keys" },
   upload_sessions: { privileges: ["select"], evidence: "worker/src/db/superseded-purge.ts" },
@@ -219,7 +222,7 @@ export const RUNTIME_SECURITY_DEFINER_ALLOWLIST = Object.freeze([
   "public.realtime_statement_changed()",
   "public.realtime_search_session_changed()",
   "public.realtime_materialization_changed()",
-  "public.realtime_compact_revisions(text)",
+  "public.realtime_compact_revisions(pg_catalog.text)",
   // Trigger-only deploy fence: EXECUTE and its private schema remain revoked from runtime roles.
   "docslurp_deploy.check_ingest_admission()",
 ]);

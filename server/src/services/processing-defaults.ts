@@ -10,6 +10,9 @@
  * - piiReviewMode       -> pipeline.piiPolicy enabled with flag_for_review
  * - defaultAnswerStyle  -> searchSettings.chat.answerStyle
  *
+ * The summary tree (pipeline.summaryTree) is deliberately not a processing default: a project turns it on through
+ * its own endpoint only (services/project-summary-tree.ts).
+ *
  * Opt-in toggles only switch a feature on; a template or upload override that
  * already enables it is left alone. Template locks are re-applied afterwards.
  */

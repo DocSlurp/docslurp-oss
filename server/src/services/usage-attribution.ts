@@ -194,6 +194,7 @@ export const INGEST_UNIT_METRICS: readonly string[] = [
   BILLABLE_UNIT_METRICS.knowledgeGraph,
   BILLABLE_UNIT_METRICS.propositions,
   BILLABLE_UNIT_METRICS.chartExport,
+  BILLABLE_UNIT_METRICS.summaryTree,
 ];
 
 /**

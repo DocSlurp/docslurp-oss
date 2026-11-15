@@ -13,13 +13,13 @@ test('database triggers fence all tenants, sessions and run readmission while al
  const db = new PGlite();
  try {
   await db.exec("CREATE TABLE project_runs(id text, status text); CREATE TABLE documents(id text); CREATE TABLE upload_sessions(id text);");
-  await db.exec(readFileSync(new URL('./migrations/0166_ingest_admission.sql',import.meta.url),'utf8'));
+  await db.exec(readFileSync(new URL('./migrations/0173_ingest_admission.sql',import.meta.url),'utf8'));
   await db.exec("INSERT INTO project_runs VALUES ('existing','queued');");
   await db.exec("CREATE ROLE admission_untrusted; GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO admission_untrusted; SET ROLE admission_untrusted");
   await assert.rejects(db.exec("UPDATE docslurp_deploy.ingest_admission SET holder=NULL"), /permission denied/);
   await db.exec('RESET ROLE');
   await admission(db,'pause','deploy-12345');
-  await db.exec(readFileSync(new URL('./migrations/0166_ingest_admission.sql',import.meta.url),'utf8'));
+  await db.exec(readFileSync(new URL('./migrations/0173_ingest_admission.sql',import.meta.url),'utf8'));
   assert.equal((await db.query('SELECT holder FROM docslurp_deploy.ingest_admission')).rows[0].holder, 'deploy-12345');
   await db.exec('SET ROLE admission_untrusted');
   for(const sql of ["INSERT INTO documents VALUES ('tenant-b')", "INSERT INTO upload_sessions VALUES ('tenant-a')", "INSERT INTO project_runs VALUES ('new','queued')"] ) await assert.rejects(db.exec(sql),/Ingestion temporarily paused/);
