@@ -197,3 +197,34 @@ test("unknown environment transformations refuse gate reads without refusing con
     'const child = configure({env: process.env}); child[dynamicMethod]()',
   ]) assert.deepEqual(classifyTestSource(source).other, [], source);
 });
+
+test("conservative provenance covers stores, alternate returns and write targets", () => {
+  for (const source of [
+    'let env; env ||= process.env; env.OTHER_DATABASE_URL',
+    'let env; env ??= process.env; env.OTHER_DATABASE_URL',
+    'let env = process; env &&= process.env; env.OTHER_DATABASE_URL',
+    'const box = {}; box.env = process.env; box.env.OTHER_DATABASE_URL',
+    'const box = {}; box["env"] = process.env; box.env.OTHER_DATABASE_URL',
+    'const box = {safe:process, env:process.env}; box.env.OTHER_DATABASE_URL',
+    'const x = {a:process.env, b:process.env}; x.b.OTHER_DATABASE_URL',
+    'const box = {}; const alias = box; alias.env = process.env; box.env.OTHER_DATABASE_URL',
+    'const box = {env:process.env, safe:process}; box.env.OTHER_DATABASE_URL',
+    'function f(){if(flag)return process.env;return process} const env=f(); env.OTHER_DATABASE_URL',
+    'function f(){if(flag)return process;return process.env} const env=f(); env.OTHER_DATABASE_URL',
+    'let key="HOME"; ({key} = {key:"OTHER_DATABASE_URL"}); process.env[key]',
+    'let key="HOME"; ({x:key} = {x:"OTHER_DATABASE_URL"}); process.env[key]',
+    'let key="HOME"; [key] = ["OTHER_DATABASE_URL"]; process.env[key]',
+    'let key="HOME"; for(key of ["OTHER_DATABASE_URL"]) process.env[key]',
+    'var key="HOME"; for(var key of ["OTHER_DATABASE_URL"]) process.env[key]',
+    'let key="HOME"; for(key in {OTHER_DATABASE_URL:1}) process.env[key]',
+  ]) for (const gate of ["OTHER_DATABASE_URL", "TEST_DATABASE_URL", "TEST_REDIS_URL"]) {
+    const result = classifyTestSource(source.replaceAll("OTHER_DATABASE_URL", gate));
+    assert.ok(result.other.includes("<unresolved environment access>") || (gate === "TEST_DATABASE_URL" ? result.db : gate === "TEST_REDIS_URL" ? result.redis : result.other.includes(gate)), source);
+  }
+  for (const source of [
+    'let env; env ||= process.env; env.HOME',
+    'const box = {safe:process, env:process.env}; configure(box)',
+    'let key="HOME"; ({key} = {key:"OTHER_DATABASE_URL"}); ordinary[key]',
+    'const box = {}; box.env = {}; box.env.OTHER_DATABASE_URL',
+  ]) assert.deepEqual(classifyTestSource(source), {db:false, redis:false, other:[]}, source);
+});

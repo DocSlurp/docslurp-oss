@@ -353,3 +353,4 @@ Council-reviewed error contracts: allowlisted validation constraints, full Retry
 - Normalize SSE and Responses provider errors before SDK consumption, support bounded CR/LF/CRLF parsing, and detect computed/assignment database-test aliases with explicit refusal of unresolved reads.
 
 - Fixed vision self-critique prompt delivery using bounded per-call task text on both primary and fallback routes; UTF-8 bounded candidates and provider-request regression coverage (2026-11-14).
+- Provider response validation no longer trusts upstream MIME: bounded JSON validation or SSE framing precedes byte release, including mislabeled SDK error responses; lazy reads and cancellation remain covered. Database discovery conservatively joins container/return provenance, refuses environment property stores, and invalidates destructuring and loop key writes without adding exemptions.

@@ -24,7 +24,7 @@ function redactProviderBody(body: ReadableStream<Uint8Array>, eventStream: boole
     const data = eventStream ? fields.filter(([key]) => key === "data").map(([, value]) => value).join("\n") : frame[0];
     if (["error", "response.failed", "response.error"].includes(event ?? "")) return failure();
     if (!data?.trim()) return "";
-    if (data.trim() === "[DONE]") return "data: [DONE]\n\n";
+    if (eventStream && data.trim() === "[DONE]") return "data: [DONE]\n\n";
     let value: unknown;
     try { value = JSON.parse(data); } catch { throw new Error("Invalid provider response"); }
     if (value && typeof value === "object") {
@@ -49,7 +49,7 @@ function redactProviderBody(body: ReadableStream<Uint8Array>, eventStream: boole
       } else line += character;
     }
   };
-  return body.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
+  const sanitized = () => body.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
     transform(chunk, controller) {
       // Decode bounded slices; never concatenate an unbounded upstream chunk.
       try { for (let offset = 0; offset < chunk.byteLength; offset += 16384) consume(decoder.decode(chunk.subarray(offset, offset + 16384), { stream: true }), controller); }
@@ -63,6 +63,17 @@ function redactProviderBody(body: ReadableStream<Uint8Array>, eventStream: boole
       } catch { throw new Error("Invalid provider response"); }
     },
   }));
+  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      reader ??= sanitized().getReader();
+      try {
+        const result = await reader.read();
+        if (result.done) controller.close(); else controller.enqueue(result.value);
+      } catch { controller.error(new Error("Invalid provider response or response exceeds limit")); }
+    },
+    async cancel(reason) { await (reader ? reader.cancel(reason) : body.cancel(reason)); },
+  }, { highWaterMark: 0 });
 }
 
 /** Instrument provider transport through response consumption, including streamed output. */
@@ -177,10 +188,11 @@ export function instrumentFetch(provider: string, operation: string, http: typeo
       },
     }, { highWaterMark: 0 });
     const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
-    const redacted = contentType.includes("text/event-stream") || contentType.includes("application/json");
+    // MIME is controlled by the provider. Validate every representation before release.
+
     const outputHeaders = new Headers(response.headers);
-    if (redacted) { outputHeaders.delete("content-length"); outputHeaders.delete("content-encoding"); }
-    const wrapped = new Response(redacted ? redactProviderBody(body, contentType.includes("text/event-stream")) : body, { status: response.status, statusText: response.statusText, headers: outputHeaders });
+    outputHeaders.delete("content-length"); outputHeaders.delete("content-encoding");
+    const wrapped = new Response(redactProviderBody(body, contentType.includes("text/event-stream")), { status: response.status, statusText: response.statusText, headers: outputHeaders });
     for (const key of ["url", "redirected", "type"] as const) Object.defineProperty(wrapped, key, { value: response[key] });
     return wrapped;
   };

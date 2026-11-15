@@ -84,3 +84,29 @@ it("normalizes non-SSE Responses failure equivalents before actual SDK consumpti
     expect(JSON.stringify(result)).toContain("Provider request failed");
   }
 });
+
+it.each(["application/problem+json", "text/plain", "application/octet-stream", "", "application/json; charset=utf-8"])("validates provider bytes independently of MIME %s", async (mime) => {
+  for (const payload of [{error:{message:secret}}, {type:"response.failed", response:{error:{message:secret}}}]) {
+    const client = new OpenAI({apiKey:"unused", maxRetries:0, fetch:instrumentFetch("test", "mime", async () => chunked(JSON.stringify(payload), 1, mime))});
+    const result = await client.chat.completions.create({model:"test", messages:[]});
+    expect(JSON.stringify(result)).not.toContain(secret);
+    expect(JSON.stringify(result)).toContain("Provider request failed");
+  }
+  const content = {choices:[{message:{content:"legitimate error prose ☃"}}], usage:{total_tokens:2}};
+  const http = instrumentFetch("test", "valid", async () => chunked(JSON.stringify(content), 1, mime));
+  expect(await (await http("https://example.test")).json()).toEqual(content);
+  for (const raw of [secret, `<html>${secret}</html>`, "x".repeat(17 * 1024 * 1024)]) {
+    const fetcher = instrumentFetch("test", "unsafe", async () => new Response(raw, {headers:{"content-type":mime}}));
+    await expect((await fetcher("https://example.test")).text()).rejects.toThrow(/Invalid provider response/);
+  }
+});
+
+it.each(["text/plain", "application/problem+json", "application/octet-stream", ""])("refuses mislabeled SSE before SDK error consumption: %s", async (mime) => {
+  const client = new OpenAI({apiKey:"unused", maxRetries:0, fetch:instrumentFetch("test", "mislabeled-stream", async () => chunked(`data: {"error":{"message":"${secret}"}}\n\n`, 1, mime))});
+  let caught;
+  try { for await (const item of await client.chat.completions.create({model:"test", messages:[], stream:true})) void item; }
+  catch (error) { caught = error; }
+  expect(caught).toBeInstanceOf(Error);
+  expect(String(caught)).not.toContain(secret);
+  expect(JSON.stringify(caught)).not.toContain(secret);
+});

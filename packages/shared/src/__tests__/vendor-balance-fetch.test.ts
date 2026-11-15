@@ -29,7 +29,7 @@ it("does not recover from headers alone or an error embedded late in a successfu
   const transport = vi.fn(async () => new Response('data: ' + 'x'.repeat(20000) + '\n{"error":{"code":"insufficient_quota"}}'));
   const response = await instrumentFetch("openai", "chat", transport)("https://api.openai.com/v1/chat", { headers: { authorization: "Bearer platform-test" } });
   expect(vendorBalanceMonitor.observe).not.toHaveBeenCalled();
-  await response.text();
+  await expect(response.text()).rejects.toThrow("Invalid provider response");
   expect(vendorBalanceMonitor.observe).not.toHaveBeenCalled();
 });
 

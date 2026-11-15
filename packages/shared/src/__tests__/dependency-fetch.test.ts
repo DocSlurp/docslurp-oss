@@ -11,20 +11,20 @@ afterAll(async () => { await shutdownObservability(); vi.unstubAllEnvs(); });
 it("keeps streaming lazy and spans open until consumed, with request-chain correlation", async () => {
   let reads = 0;
   const http = vi.fn(async () => new Response(new ReadableStream({
-    pull(controller) { reads++; controller.enqueue(new TextEncoder().encode("answer")); controller.close(); },
+    pull(controller) { reads++; controller.enqueue(new TextEncoder().encode('"answer"')); controller.close(); },
   }, { highWaterMark: 0 }), { headers: { "x-request-id": "provider-id" } }));
   await withObservation({ name: "stream-root", metadata: { runId: "run-stream", projectId: "project-stream" } }, async () => {
     const response = await instrumentFetch("deepinfra", "embedding", http)("https://api.example.test/v1/inference?key=secret");
     expect(reads).toBe(0);
     expect(exporter.getFinishedSpans().some(span => span.name === "deepinfra.embedding")).toBe(false);
-    expect(await response.text()).toBe("answer");
+    expect(await response.text()).toBe('"answer"');
   });
   expect(http).toHaveBeenCalledTimes(1);
   const spans = exporter.getFinishedSpans();
   const child = spans.find(span => span.name === "deepinfra.embedding")!;
   const root = spans.find(span => span.name === "stream-root")!;
   expect(child.parentSpanContext?.spanId).toBe(root.spanContext().spanId);
-  expect(child.attributes).toMatchObject({ "server.address": "api.example.test", "http.response.body.size": 6,
+  expect(child.attributes).toMatchObject({ "server.address": "api.example.test", "http.response.body.size": 8,
     "docslurp.runId": "run-stream", "docslurp.projectId": "project-stream" });
   expect(JSON.stringify(child.attributes)).not.toContain("secret");
 });
@@ -32,11 +32,11 @@ it("keeps streaming lazy and spans open until consumed, with request-chain corre
 it("normalizes transport and body errors without repeating requests", async () => {
   const error = new Error("transport failure");
   const http = vi.fn(async () => { throw error; });
-  await expect(instrumentFetch("test", "failed", http)("https://example.test")).rejects.toThrow("Provider request failed");
+  await expect(instrumentFetch("test", "failed", http)("https://example.test")).rejects.toThrow(/Provider request failed|Invalid provider response/);
   expect(http).toHaveBeenCalledTimes(1);
   const brokenBody = new Response(new ReadableStream({ pull(controller) { controller.error(error); } }));
   const response = await instrumentFetch("test", "body-failed", async () => brokenBody)("https://example.test");
-  await expect(response.text()).rejects.toThrow("Provider request failed");
+  await expect(response.text()).rejects.toThrow(/Provider request failed|Invalid provider response/);
   for (const name of ["test.failed", "test.body-failed"]) expect(exporter.getFinishedSpans().find(span => span.name === name)?.status.code).toBe(2);
 });
 
