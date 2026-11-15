@@ -83,6 +83,8 @@ export type FileProfile = {
     scanBesideTextUnknownPages: number;
     /** Pages table-heavy from their ruled grids alone (a grid of 5+ rows, or grids covering 40% of the page). */
     ruledTablePages: number;
+    /** Sampled pages per cost route: ocr-read, ocr-blank, table, text, unknown (`pageCostRoute`). */
+    routePages: [number, number, number, number, number];
   };
   /** Package structure: slide and worksheet parts, body bytes; `declaredPages` is authored metadata, informational only. */
   office?: { embeddedImages: number; slides?: number; sheets?: number; bodyBytes: number; declaredPages?: number };
