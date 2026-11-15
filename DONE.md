@@ -69,6 +69,10 @@
 
 - Restrict the pinned transcription profile and its pricing catalog to the remaining approved hosts. Initial requests and refusal retries preserve that allowlist, latency preference and existing price ceiling; request-body fixtures remain immutable.
 
+## Parser source policy hardening (2026-11-15)
+
+- Parser source hardening follow-up: require VM isolation in every non-development environment, affirmatively require an original/scanned-copy decision and SHA-256 before source reads, retain loader-owned quarantine upload bindings, and cover development plus production/staging/service lifecycles. Both independent council approvals are recorded; full deployed VM integration remains unverified.
+
 ## Independent native admission pause (2026-11-10)
 
 - Add a strict optional admission switch for new native root, child and retry attempts while preserving authorized discovery, retained output and Stop. Recover a lost ACK during pause with real native ownership and migrated SQL authorization, without a duplicate task or paid model call. Council findings, resolutions and limits: `docs/native-admission-review-20261110.md`. Host activation remains separate.
