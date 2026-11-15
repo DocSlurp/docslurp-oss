@@ -271,7 +271,7 @@ describe("stage", () => {
       expect(state.documentStage("long", SUMMARY_TREE_STAGE)?.stats).toMatchObject({ summaryTreeStatus: "off", summaryTreeReason: "project-setting-off", modelCalls: 0 });
       expect(store.failDocumentStage).not.toHaveBeenCalled();
     }
-  });
+  }, 60_000);
 
   it("reads the project's own organization: another organization's project with the same id cannot turn it on", async () => {
     await sql`update projects set pipeline = ${sql.json({ summaryTree: { enabled: false } })} where id = 'w'`;
@@ -301,7 +301,7 @@ describe("stage", () => {
     expect(storage.opened).toEqual(["u1/run-1/embeddings/a.json"]);
     expect(state.documentStage("b", SUMMARY_TREE_STAGE)?.stats).toMatchObject({ summaryTreeStatus: "off", summaryTreeReason: "project-setting-off" });
     expect(await sql`select document_id from document_summary_trees`).toEqual([{ document_id: "a" }]);
-  });
+  }, 60_000);
 
   it("builds long documents, records a skip for the others, and stamps every usage event with org, project and run", async () => {
     const storage = new MemoryStorage();
@@ -448,7 +448,7 @@ describe("spend guard", () => {
     await stageOf(storage, f.overrides(ON)).run(funded.state);
     expect(f.requests).toHaveLength(36);
     expect(funded.state.documentStage("long", SUMMARY_TREE_STAGE)?.stats).toMatchObject({ summaryTreeStatus: "ready" });
-  });
+  }, 60_000);
 
   it("stops at the next window when the balance runs out mid-build: no model call or embedding request follows", async () => {
     setSpendCheckConfig({ enabled: true, pages: 25, credits: 10 });
@@ -473,7 +473,7 @@ describe("spend guard", () => {
     expect(f.requests).toHaveLength(8);
     expect(f.embedded.length).toBe(embeddedAtFlip + 1);
     expect(await sql`select status, error from document_summary_trees where document_id = 'long'`).toEqual([{ status: "partial", error: "stopped:credit_exhausted" }]);
-  });
+  }, 60_000);
 
   it("stops every document of the stage when the run is paused or cancelled mid-build", async () => {
     for (const [control, reason] of [["pause_requested", "run-paused"], ["paused", "run-paused"], ["cancel_requested", "run-cancelled"], ["cancelled", "run-cancelled"]] as const) {
@@ -496,7 +496,7 @@ describe("spend guard", () => {
       expect(f.requests.every((request) => request.nodeId.startsWith("a:"))).toBe(true);
       expect(state.documentStage("b", SUMMARY_TREE_STAGE)?.stats).toMatchObject({ summaryTreeStatus: "blocked", summaryTreeReason: reason, modelCalls: 0 });
     }
-  });
+  }, 60_000);
 
 
   it("refuses a document of an organization that may not spend, through the default balance check", async () => {

@@ -50,10 +50,20 @@ END $$;
 --> statement-breakpoint
 -- An earlier run's figure folder (`<root>/doppler/<doc>/`), queued when a newer run's full figure write commits; the
 -- drainer re-checks that no ledger row or current level uses it before purging (worker/src/db/superseded-purge.ts).
-ALTER TABLE storage_cleanup_queue DROP CONSTRAINT IF EXISTS storage_cleanup_queue_kind_check;
---> statement-breakpoint
-ALTER TABLE storage_cleanup_queue ADD CONSTRAINT storage_cleanup_queue_kind_check
-  CHECK (kind IN ('storage_prefix', 'vector_table', 'vector_prefix', 'vector_rows', 'upload_original', 'doppler_folder'));
+-- Replaced only while the constraint does not allow the kind yet: a second run after a later migration added another
+-- kind (0166) must not narrow the list back, which would refuse that kind's rows.
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'storage_cleanup_queue_kind_check' AND conrelid = 'storage_cleanup_queue'::regclass
+      AND pg_get_constraintdef(oid) LIKE '%''doppler_folder''%'
+  ) THEN
+    ALTER TABLE storage_cleanup_queue DROP CONSTRAINT IF EXISTS storage_cleanup_queue_kind_check;
+    ALTER TABLE storage_cleanup_queue ADD CONSTRAINT storage_cleanup_queue_kind_check
+      CHECK (kind IN ('storage_prefix', 'vector_table', 'vector_prefix', 'vector_rows', 'upload_original', 'doppler_folder'));
+  END IF;
+END $$;
 --> statement-breakpoint
 -- One index probe per withheld key when the meter subtracts PII-withheld figures (R3-M1), whatever join the planner picks.
 CREATE INDEX IF NOT EXISTS document_assets_storage_key_idx ON document_assets (document_id, storage_key) WHERE storage_key IS NOT NULL;
