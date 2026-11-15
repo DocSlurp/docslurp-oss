@@ -458,6 +458,17 @@ describe("runtime database identity gate (council N #1)", () => {
     expect(await check(worker, worker)).toEqual([]);
   });
 
+  it("recognizes the admission trigger without granting runtime access to the fence", async () => {
+    for (const role of [app, worker]) {
+      const { rows: [privileges] } = await db.query<{ execute: boolean; schema: boolean }>(
+        "select has_function_privilege($1, 'docslurp_deploy.check_ingest_admission()', 'EXECUTE') as execute, has_schema_privilege($1, 'docslurp_deploy', 'USAGE') as schema",
+        [role],
+      );
+      expect(privileges).toEqual({ execute: false, schema: false });
+      expect(await denied(role, "update docslurp_deploy.ingest_admission set holder = null")).toBe(true);
+    }
+  });
+
   it("refuses the owner or a superuser, whatever role it claims", async () => {
     const problems = (await check(null, app)).join("\n");
     expect(problems).toMatch(/superuser/);
