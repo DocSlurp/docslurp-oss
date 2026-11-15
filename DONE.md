@@ -352,3 +352,4 @@ Council-reviewed error contracts: allowlisted validation constraints, full Retry
 - Reauthorize direct confirmation receipts against live contribution and original-key policy; reserve explicit bounded materialization capacity, resume exact-cap reservations through locked readmission, and allow safe interrupted intake preparation to retry while reporting ambiguous external effects explicitly. Includes real PostgreSQL allocator contention and sweep coverage; migration numbering remains coordinated with open dependencies.
 
 - Reserve measured reindex/full-index workloads and refuse unspecified active-run reservations; retain stable intake responses beyond cache expiry and refuse ambiguous response recovery.
+- Fixed vision self-critique prompt delivery using bounded per-call task text on both primary and fallback routes; UTF-8 bounded candidates and provider-request regression coverage (2026-11-14).
