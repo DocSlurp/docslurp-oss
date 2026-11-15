@@ -82,7 +82,7 @@ function redactProviderBody(body: ReadableStream<Uint8Array>, eventStream: boole
       try {
         const result = await reader.read();
         if (result.done) controller.close(); else controller.enqueue(result.value);
-      } catch { controller.error(new InvalidProviderResponseError()); }
+      } catch (error) { controller.error(error instanceof InvalidProviderResponseError ? error : new Error("Provider request failed")); }
     },
     async cancel(reason) { await (reader ? reader.cancel(reason) : body.cancel(reason)); },
   }, { highWaterMark: 0 });
