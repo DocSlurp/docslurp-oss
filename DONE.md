@@ -327,3 +327,5 @@ Council-reviewed error contracts: allowlisted validation constraints, full Retry
 - Make successful Temporal finalization atomic with the ownership-fenced terminal receipt, progress, usage/page charges, document cutover, completion events and webhook intents; retain pending usage on rollback (2026-11-03). Council review pending in #277.
 - Make the maskable app icon the primary icon: `favicon.svg`, raster favicons, apple-touch, PWA and Claude plugin icons are all rendered from `docslurp-app-icon-maskable.svg`.
 - Give the favicon its own artwork: the maskable icon's 60% cup was a faint smudge at tab size, so `favicon.svg` and the raster favicons now fill a rounded Deck tile at 96% with a heavier straw. App, PWA and plugin icons still use the maskable icon.
+
+- Fixed vision self-critique prompt delivery using bounded per-call task text on both primary and fallback routes; UTF-8 bounded candidates and provider-request regression coverage (2026-11-14).
