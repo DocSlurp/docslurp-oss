@@ -77,7 +77,8 @@ export const defaultMaterializeDeps: MaterializeDeps = {
     return canSpend(orgId, projectId);
   },
   async createRun(args) {
-    const id = `mat_${randomUUID()}`;
+    // Run resources use UUIDs in the realtime protocol; kind carries the materialize identity.
+    const id = randomUUID();
     // The run carries the source document's pipeline (its ingest run, else the project's), so the
     // worker applies the same PII policy, privacy mode and embedding model as the original ingest.
     // It is inserted `processing` with a confirmed workflow start: run-start recovery and the stale

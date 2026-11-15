@@ -28,6 +28,7 @@ export default defineConfig({
       "@docslurp/shared/env-flags": shared("env-flags"),
       "@docslurp/shared/observability": shared("observability"),
       "@docslurp/shared/lancedb-s3-trace": shared("lancedb-s3-trace"),
+      "@docslurp/shared/lancedb-query-tuning": shared("lancedb-query-tuning"),
       "@docslurp/shared/lancedb-session": shared("lancedb-session"),
       "@docslurp/shared/lancedb-hydration": shared("lancedb-hydration"),
       "@docslurp/shared/lancedb-ddb": shared("lancedb-ddb"),
