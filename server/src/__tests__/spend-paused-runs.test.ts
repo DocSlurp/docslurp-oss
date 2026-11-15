@@ -37,7 +37,7 @@ describe("spend-paused run sweep", () => {
         return Promise.resolve([{ id, org_id: id === "run-ok" ? "org-ok" : "org-blocked", project_id: "ws", user_id: "u1", pause_reason: "credit_exhausted" }]);
       }
       if (query.includes("from grant_credit_lease(")) return Promise.resolve([lease]);
-      if (query.includes("org_spend_status")) return Promise.resolve([status(available[values[0] as string] ?? 0)]);
+      if (query.includes("org_spend_status")) return Promise.resolve([status(available[values.find(value => typeof value === "string" && value.startsWith("org-")) as string] ?? 0)]);
       if (query.includes("update project_runs")) {
         updates.push(values.find((value) => typeof value === "string" && value.startsWith("run-")) as string);
         return Promise.resolve([{ id: "run-ok", user_id: "u1", pause_reason: "credit_exhausted" }]);
@@ -46,6 +46,17 @@ describe("spend-paused run sweep", () => {
     });
     return updates;
   }
+
+  it("takes org admission lock before run lock and live spend check", async () => {
+    respond({ "org-ok": 112, "org-blocked": -3 });
+    await sweepSpendPausedRuns({ sql: sqlMock as never, signals });
+    const queries = sqlMock.mock.calls.map(call => text(call[0]));
+    const org = queries.findIndex(query => query.includes("spend_admission_lock_key"));
+    const run = queries.findIndex(query => query.includes("pg_advisory_xact_lock(90105"));
+    expect(org).toBeGreaterThanOrEqual(0);
+    expect(run).toBeGreaterThan(org);
+    expect(queries.slice(run + 1).some(query => query.includes("org_spend_status"))).toBe(true);
+  });
 
   it("resumes runs whose org may spend again and re-sends pause to the rest", async () => {
     // Free orgs keep 100 credits for chat: runs resume only above that.

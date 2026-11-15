@@ -2,7 +2,7 @@ import { withBackgroundSpan } from "@docslurp/shared/observability";
 import { apiPool, sql as defaultSql, type SqlClient } from "../db.js";
 import { signalPipelinePause, signalPipelineResume } from "../lib/temporal.js";
 import { RUN_EVENTS_CHANNEL } from "./run-event-hub.js";
-import { loadSpendStatus, spendBlockReason, spendGuardsSkipped } from "./billing/spend-guard.js";
+import { loadSpendStatus, runAdmissionReserveCredits, spendBlockReason, spendGuardsSkipped } from "./billing/spend-guard.js";
 import { creditLeasesEnabled, grantRunCreditLease } from "./billing/credit-leases.js";
 import { fleetSupports, taskQueueForOrgKey } from "./worker-fleet.js";
 
@@ -65,16 +65,19 @@ export async function resumeSpendPausedRunOutcome(runId: string, deps: SpendPaus
   try {
     return await sql.begin(async tx => {
       const client = tx as unknown as SqlClient;
+      // Admission always locks org before run. Serializing only the run lets
+      // two paused runs reuse the same available capacity.
+      await tx`select pg_advisory_xact_lock(spend_admission_lock_key(${candidate.org_id}))`;
       await tx`select pg_advisory_xact_lock(90105, hashtext(${runId}))`;
       const [row] = await tx<PausedRunRow[]>`
         select id, org_id, project_id, user_id, pause_reason from project_runs
-        where id = ${runId} and status = 'processing' and control_state = 'paused'
+        where id = ${runId} and org_id = ${candidate.org_id} and status = 'processing' and control_state = 'paused'
           and pause_reason in ('credit_exhausted', 'project_budget_paused', 'org_budget_paused', 'plan_not_entitled')
         for no key update
       `;
       if (!row) return { status: "not-spend-paused" } as const;
       if (!spendGuardsSkipped()) {
-        const reason = spendBlockReason(await loadSpendStatus(row.org_id, row.project_id, { client }));
+        const reason = spendBlockReason(await loadSpendStatus(row.org_id, row.project_id, { client, runReserveCredits: leases ? 0 : runAdmissionReserveCredits() }));
         if (reason) return { status: "blocked", reason: reason.code } as const;
       }
       await tx`

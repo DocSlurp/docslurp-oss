@@ -25,6 +25,8 @@ import { sql } from "../db.js";
 import { discardUnstartedRun } from "./run-creation.js";
 import { mapDocument, mapProjectRun, type DocumentRow, type ProjectRunRow } from "./run-records.js";
 import { getProject } from "./projects.js";
+import { canContributeToProject, getProjectAccess } from "./organizations.js";
+import { getLiveApiKeyById } from "./api-keys.js";
 
 import { enforceRequestContentLength } from "../lib/upload-policy.js";
 import {
@@ -146,6 +148,22 @@ async function idempotently(
       throw new ProjectIntakeError(error instanceof Error ? error.message : "Idempotency conflict", 409);
     }
     if (cached) {
+      const payload = cached.body as ProjectIntakePayload;
+      // Authorize the actual persisted target, including an omitted/default
+      // target. A cache namespace is identity, never current permission.
+      const projectId = payload.project?.id;
+      const access = projectId ? await getProjectAccess(projectId, args.userId) : null;
+      if (!access || !canContributeToProject(access, args.userId)
+        || (args.orgId && access.orgId !== args.orgId)) {
+        throw new ProjectIntakeError("Upload project is no longer accessible", 403);
+      }
+      if (args.apiKeyId) {
+        const key = await getLiveApiKeyById(args.apiKeyId);
+        if (!key || key.orgId !== access.orgId || !key.scopes.includes("ingest")
+          || (key.projectIds.length > 0 && !key.projectIds.includes(projectId))) {
+          throw new ProjectIntakeError("API key no longer permits this upload", 403);
+        }
+      }
       return {
         payload: cached.body as ProjectIntakePayload,
         status: cached.status as 201,
