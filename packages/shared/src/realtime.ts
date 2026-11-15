@@ -1,3 +1,4 @@
+import { documentFailureSchema } from "./document-failure.js";
 import { z } from "zod";
 
 export const REALTIME_VERSION = 1 as const;
@@ -65,7 +66,7 @@ export const realtimeViewerSnapshotSchema = z.object({
   }).strict(),
   tags: z.array(z.string().max(128)).max(64),
   stages: z.array(z.object({ stage_name: z.string().max(128), status: z.string().max(64), attempts: count,
-    error: z.string().max(2048).nullable(), updated_at: stamp }).strict()).max(64),
+    failure: documentFailureSchema.nullable().optional(), error: z.string().max(2048).nullable(), updated_at: stamp }).strict()).max(64),
   pageStats: z.object({ pageCount: count, chunkCount: count, pageTextCount: count }).strict(),
   run: z.object({ id: z.string().max(128), projectId: z.string().max(128), stage: z.string().max(128),
     status: z.string().max(64), updatedAt: stamp }).strict().nullable(),

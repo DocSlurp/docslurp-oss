@@ -132,3 +132,4 @@ export * from "./reserved-email.js";
 export * from "./managed-pipeline-models.js";
 export * from "./model-call-policy.js";
 export * from "./vision-request-profile.js";
+export * from "./document-failure.js";

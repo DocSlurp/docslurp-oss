@@ -1,3 +1,4 @@
+import { trustedDocumentFailure } from "../lib/trusted-document-failure.js";
 import { disposePendingAssetLedger } from "../db/document-asset-ledger.js";
 import type { GeoFinalSource } from "../db/geo-final-source.js";
 import { recordExtractorFallback } from "../lib/extractor-fallback.js";
@@ -526,7 +527,8 @@ export async function runDocumentStage(
       stageName,
       finalMessage,
       finalArtifactUri,
-      finalStats
+      finalStats,
+      trustedDocumentFailure(cause)
     );
     await state.store.updateProgress(state);
     await state.store.appendEvent(
