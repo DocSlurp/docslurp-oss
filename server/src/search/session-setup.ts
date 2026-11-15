@@ -5,6 +5,7 @@ import {
   normalizePipelineFeatures,
   normalizeStoredPipelineFeatures,
   privacyModeAllowsHosted,
+  summaryTreeSearchModeSchema,
   type PrivacyMode,
   type PipelineFeatures,
   type ProjectSearchSettings,
@@ -24,6 +25,8 @@ import { resolveProjectRetrievalControls } from "./project-retrieval-session.js"
 import { parseIndexConfigs, type IndexConfigMap } from "./index-serving.js";
 import { earlyLexicalDocument, fullyIndexedDocument, servableInProgressVersion } from "./eligibility.js";
 import { clampToSearchMode, effectiveSearchMode } from "./search-mode.js";
+import { planSummaryTreeSearch, type SummaryTreeSearchPlan } from "./summary-tree.js";
+import { callerMayRaiseSummaryTree, exceedsSummaryTreeCeiling, knownSummaryTreeMode } from "./summary-tree-ceiling.js";
 
 /**
  * The project does not exist or the caller may not see it (the two are indistinguishable by design).
@@ -69,6 +72,8 @@ export interface SearchSetup {
   privacyMode: PrivacyMode;
   /** SEARCH_LANCEDB_NATIVE for this project: lexical, vector and hydration come from LanceDB. */
   lanceNative?: boolean;
+  /** How this search uses the project's summary tree; null when it plays no part (search/summary-tree.ts). */
+  summaryTree?: SummaryTreeSearchPlan | null;
 }
 
 export type SearchAvailabilityRow = {
@@ -144,6 +149,27 @@ export async function resolveSearchSetup(
   // Clamped after project defaults, so no project setting runs more than the mode (and the key) allows.
   const resolvedOptions = clampToSearchMode(retrievalControls.options, effectiveSearchMode(options, accessScope.modeCeiling));
   session.recordDiagnostic("searchMode", resolvedOptions.searchMode);
+  // The request's own value wins over the project default; neither runs unless the pipeline and the deployment allow it.
+  // The project default is also a ceiling: a request may ask for less, and for more only when its caller may change
+  // the project's settings (summary-tree-ceiling.ts). Asked only when the request does ask for more.
+  const treeDefault = knownSummaryTreeMode(projectSettings.retrievalDefaults?.summaryTree);
+  const treeAsked = options.summaryTree === undefined ? undefined : summaryTreeSearchModeSchema.safeParse(options.summaryTree);
+  const treeCeiling = treeAsked?.success && exceedsSummaryTreeCeiling(treeAsked.data, treeDefault)
+    && !(await callerMayRaiseSummaryTree({ userId, projectId: normalizedScope.projectId, orgId: normalizedScope.orgId, actor: accessScope.actor }))
+    ? treeDefault
+    : undefined;
+  if (treeCeiling !== undefined) session.recordDiagnostic("summaryTreeCeiling", { asked: treeAsked!.data, ceiling: treeCeiling });
+  const summaryTree = planSummaryTreeSearch({
+    explicit: options.summaryTree,
+    ceiling: treeCeiling,
+    projectDefault: projectSettings.retrievalDefaults?.summaryTree,
+    pipeline: projectPipeline,
+    env: process.env,
+    searchMode: resolvedOptions.searchMode ?? "deep",
+    native: lanceNative,
+    filters: resolvedOptions.filters,
+    subSearch: Boolean(options.rootSessionId),
+  });
   const availabilityPromise = (lanceNative ? loadCachedSearchAvailability : loadSearchAvailability)({
     projectId: normalizedScope.projectId,
     runId:
@@ -202,6 +228,7 @@ export async function resolveSearchSetup(
     indexConfigs: projectIndexing.indexConfigs,
     privacyMode,
     lanceNative,
+    summaryTree,
   };
 }
 

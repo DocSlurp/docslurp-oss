@@ -695,7 +695,7 @@ describe("searchRoutes", () => {
       projectId: "ws-chat",
       userId: "user-1",
       // The explicit search scope from the route's one access read.
-      scope: { orgId: expect.any(String), projectIds: "org", modeCeiling: null },
+      scope: { orgId: expect.any(String), projectIds: "org", modeCeiling: null, actor: { type: "session" } },
       query: "test",
       sessionId: undefined,
       model: undefined,

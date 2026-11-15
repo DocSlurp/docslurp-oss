@@ -235,3 +235,59 @@ describe("retrying a run from before managed models", () => {
     expect(stored!.pipeline.textGeneration).toMatchObject({ model: null });
   });
 });
+
+describe("the summary tree follows the project's stored setting, not a run snapshot", () => {
+  const TREE_ON = { ...defaultPipelineFeatures, summarize: true, embed: true, indexVectors: true, summaryTree: { enabled: true } };
+  const storedTree = async (runId: string) =>
+    (await sql<{ tree: unknown }[]>`select pipeline -> 'summaryTree' as tree from project_runs where id = ${runId}`)[0]?.tree;
+  const setProject = (tree: unknown) => sql`update projects set pipeline = ${sql.json({ ...TREE_ON, summaryTree: tree } as unknown as postgres.JSONValue)} where id = 'w'`;
+
+  async function seedTreeRun(status: "completed" | "failed" = "completed") {
+    await seedSource({ docStatus: status });
+    await sql`update project_runs set pipeline = ${sql.json(TREE_ON as unknown as postgres.JSONValue)},
+      status = ${status}, stage = ${status === "failed" ? "embed" : "completed"} where id = 'run-src'`;
+  }
+
+  it("reprocess and bulk reprocess of a run created while the tree was on build no tree once the project turned it off", async () => {
+    await seedTreeRun();
+    await setProject({ enabled: false });
+    try {
+      const run = (await reprocessRun("run-src", "u1"))!.run;
+      expect(await storedTree(run.id)).toEqual({ enabled: false });
+      expect(run.pipeline.summaryTree).toEqual({ enabled: false });
+      const { bulkReprocessDocuments } = await import("../services/documents.js");
+      const [bulk] = (await bulkReprocessDocuments(["src"], "u1")).runs;
+      expect(await storedTree(bulk!.id)).toEqual({ enabled: false });
+      // A project that never stored the setting is off too.
+      await sql`update projects set pipeline = '{}'::jsonb where id = 'w'`;
+      expect(await storedTree((await reprocessRun("run-src", "u1"))!.run.id)).toEqual({ enabled: false });
+    } finally {
+      await sql`update projects set pipeline = '{}'::jsonb where id = 'w'`;
+    }
+  });
+
+  it("retry in place rewrites the run's snapshot with the project's current setting", async () => {
+    await seedTreeRun("failed");
+    await setProject({ enabled: false });
+    try {
+      const result = await retryRun("run-src", "u1");
+      expect(result?.outcome.status).not.toBe("not-retryable");
+      expect(await storedTree("run-src")).toEqual({ enabled: false });
+    } finally {
+      await sql`update projects set pipeline = '{}'::jsonb where id = 'w'`;
+    }
+  });
+
+  it("a replayed snapshot that says off does not hide a tree the project has since turned on, and nothing else turns it on", async () => {
+    await seedSource();
+    await setProject({ enabled: true });
+    try {
+      expect(await storedTree((await reprocessRun("run-src", "u1"))!.run.id)).toEqual({ enabled: true });
+      // Anything but an explicit stored `true` is off.
+      await setProject({ enabled: "true" });
+      expect(await storedTree((await reprocessRun("run-src", "u1"))!.run.id)).toEqual({ enabled: false });
+    } finally {
+      await sql`update projects set pipeline = '{}'::jsonb where id = 'w'`;
+    }
+  });
+});

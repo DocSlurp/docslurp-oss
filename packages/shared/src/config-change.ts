@@ -193,6 +193,9 @@ export const PIPELINE_FIELD_IMPACT: Record<keyof PipelineFeatures, FieldImpact> 
   visualPages: "new-uploads",
   restartFromStage: "new-uploads",
   stageSubset: "new-uploads",
+  // Changed only through its own endpoint, and never re-runs stored documents: existing documents get a tree from the
+  // summary-tree job, with its own estimate and cap.
+  summaryTree: "new-uploads",
 };
 
 const EFFECTS: Partial<Record<ConfigChangeKind, string>> = {
@@ -301,6 +304,7 @@ const STAGE_WEIGHT: Record<PipelineRunStage, number> = {
   "page-index": 0.02,
   "proposition-index": 0.06,
   index: 0.04,
+  "summary-tree": 0.08,
 };
 
 
