@@ -1,30 +1,11 @@
 import type postgres from "postgres";
-import type { ComputePriceObservation, ComputeCalibrationObservation, ComputeObservations } from "@docslurp/shared";
+import { computePriceColumns, computeCalibrationColumns, decodeComputeObservation as decode, type ComputePriceObservation, type ComputeCalibrationObservation, type ComputeObservations } from "@docslurp/shared";
 
 type Sql = postgres.Sql;
-const priceColumns = {
-  id: "id", offerId: "offer_id", provider: "provider", sku: "sku", region: "region", market: "market",
-  observedAt: "observed_at", validUntil: "valid_until", sourceUrl: "source_url", sourceHash: "source_hash",
-  nativeCurrency: "native_currency", nativePerHour: "native_per_hour", usdPerNative: "usd_per_native",
-  fxObservedAt: "fx_observed_at", fxSourceUrl: "fx_source_url", usdPerHour: "usd_per_hour",
-  egressUsdPerGiB: "egress_usd_per_gib", billingMinimumSeconds: "billing_minimum_seconds", billingQuantumSeconds: "billing_quantum_seconds",
-} as const;
-const calibrationColumns = {
-  id: "id", profileId: "profile_id", priceId: "price_id", offerId: "offer_id", imageHash: "image_hash", isolationPolicy: "isolation_policy",
-  engine: "engine", workload: "workload", observedAt: "observed_at", validUntil: "valid_until", attempted: "attempted",
-  succeeded: "succeeded", failed: "failed", slots: "slots", startupP95Ms: "startup_p95_ms",
-  serviceP95MsPerPage: "service_p95_ms_per_page", transferMsPerMiB: "transfer_ms_per_mib", idleTailMs: "idle_tail_ms",
-  allocatedMs: "allocated_ms", sourceHash: "source_hash",
-} as const;
+const priceColumns = computePriceColumns;
+const calibrationColumns = computeCalibrationColumns;
 const numericFields = new Set(["nativePerHour", "usdPerNative", "usdPerHour", "egressUsdPerGiB", "billingMinimumSeconds", "billingQuantumSeconds", "attempted", "succeeded", "failed", "slots", "startupP95Ms", "serviceP95MsPerPage", "transferMsPerMiB", "idleTailMs", "allocatedMs"]);
 const dateFields = new Set(["observedAt", "validUntil", "fxObservedAt"]);
-
-function decode<T>(row: Record<string, unknown>, columns: Record<string, string>): T {
-  return Object.fromEntries(Object.entries(columns).map(([key, column]) => [key,
-    dateFields.has(key) ? new Date(row[column] as string | Date).toISOString()
-      : numericFields.has(key) ? Number(row[column]) : row[column],
-  ])) as T;
-}
 
 function encode(row: object, columns: Record<string, string>): Record<string, string | number> {
   const input = row as Record<string, unknown>;
@@ -32,6 +13,7 @@ function encode(row: object, columns: Record<string, string>): Record<string, st
     const value = input[key];
     if (numericFields.has(key)) {
       if (typeof value !== "number" || !Number.isFinite(value)) throw new Error(`Invalid compute observation ${key}`);
+      if (key === "allocatedMs" && !Number.isSafeInteger(value)) throw new Error("Invalid compute observation allocatedMs");
       return [column, value];
     }
     if (typeof value !== "string" || !value.length || value.length > 2000) throw new Error(`Invalid compute observation ${key}`);
@@ -75,6 +57,7 @@ export async function readComputeObservations(sql: Sql, profileIds: readonly str
   const calibrations = await sql`
     select distinct on (profile_id) * from compute_calibration_observations
     where profile_id = any(${[...profileIds]}) and observed_at <= ${now} and valid_until > ${now}
+      and observed_at > ${now} - interval '7 days'
     order by profile_id, observed_at desc, id desc`;
   const offers = calibrations.map((row) => String(row.offer_id));
   const prices = offers.length ? await sql`

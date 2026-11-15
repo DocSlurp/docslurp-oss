@@ -407,12 +407,19 @@ export interface ExtractorPluginHost {
    * database bound (setExtractorDocumentOwners): a provider must then refuse the batch, never skip the check.
    */
   documentOwners(documentIds: readonly string[]): Promise<ReadonlyMap<string, { orgId: string | null; runId: string }>>;
+  /** Bounded, content-free operational observations; unavailable storage refuses automatic host selection. */
+  computeObservations(profileIds: readonly string[]): Promise<import("@docslurp/shared").ComputeObservations>;
   /** The figure outcomes this core accepts: a provider reports `partial` (exit 5, folder kept) only when it is listed. */
   figureOutcomes: readonly ("extracted" | "partial" | "failed")[];
 }
 
 type DocumentOwnersLookup = ExtractorPluginHost["documentOwners"];
 let documentOwnersLookup: DocumentOwnersLookup | undefined;
+let computeObservationsLookup: ExtractorPluginHost["computeObservations"] | undefined;
+
+export function setExtractorComputeObservations(lookup: ExtractorPluginHost["computeObservations"] | undefined): void {
+  computeObservationsLookup = lookup;
+}
 
 /** Bind the database lookup behind ExtractorPluginHost.documentOwners (worker startup; tests). */
 export function setExtractorDocumentOwners(lookup: DocumentOwnersLookup | undefined): void {
@@ -434,6 +441,10 @@ export function createExtractorPluginHost(): ExtractorPluginHost {
     documentOwners: async (documentIds) => {
       if (!documentOwnersLookup) throw new SandboxRunError("Document ownership lookup is not bound in this worker");
       return await documentOwnersLookup(documentIds);
+    },
+    computeObservations: async (profileIds) => {
+      if (!computeObservationsLookup) throw new SandboxRunError("Compute observations lookup is not bound in this worker");
+      return await computeObservationsLookup(profileIds);
     },
     figureOutcomes: SANDBOXED_PDF_FIGURE_OUTCOMES,
   };

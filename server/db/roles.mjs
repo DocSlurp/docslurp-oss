@@ -261,6 +261,13 @@ export function roleGrantStatements({ owner, roles = DEFAULT_DB_ROLES, present, 
       `alter default privileges for role ${ownerIdent} in schema public grant usage, select, update on sequences to ${app}`,
       `alter default privileges for role ${ownerIdent} in schema public grant execute on functions to ${app}`,
     );
+    // Compute prices are operator-owned; measurements are append-only even after schema-wide reconciliation.
+    for (const table of ["compute_price_observations", "compute_calibration_observations"]) {
+      if (!relations.includes(table)) continue;
+      const target = `public.${quoteIdent(table)}`;
+      statements.push(`revoke all on ${target} from ${app}`, `grant select on ${target} to ${app}`);
+      if (table === "compute_calibration_observations") statements.push(`grant insert on ${target} to ${app}`);
+    }
   }
   if (has(roles.worker)) {
     const worker = quoteIdent(roles.worker);

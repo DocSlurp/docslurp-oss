@@ -1,3 +1,4 @@
+import { computePriceColumns, computeCalibrationColumns, decodeComputeObservation, type ComputeObservations, type ComputePriceObservation, type ComputeCalibrationObservation } from "@docslurp/shared";
 import { sandboxedPdfBatchProvider } from "../extractors/sandboxed-pdf-batch.js";
 import { buildRunCompletedEvent } from "../pipeline/run-ledger.js";
 import { assertPlanningOwnership, assertExecutionOwnership, type ExecutionOwner, StaleExecutionError } from "./execution-ownership.js";
@@ -710,6 +711,26 @@ export class Store {
    * document, run, user or org identifiers, so one tenant's plan cannot learn anything about another's content.
    * Served by performance_log_shard_timing_idx (0098).
    */
+  async computeObservations(profileIds: readonly string[]): Promise<ComputeObservations> {
+    if (profileIds.length > 100 || profileIds.some((id) => !id || id.length > 200)) throw new Error("Invalid compute profile selection");
+    if (!profileIds.length) return { prices: [], calibrations: [] };
+    const calibrations = await this.sql`
+      select distinct on (profile_id) * from compute_calibration_observations
+      where profile_id = any(${[...profileIds]}) and observed_at <= now() and valid_until > now()
+        and observed_at > now() - interval '7 days'
+      order by profile_id, observed_at desc, id desc`;
+    const offers = calibrations.map((row) => String(row.offer_id));
+    const prices = offers.length ? await this.sql`
+      select distinct on (offer_id) * from compute_price_observations
+      where offer_id = any(${offers}) and observed_at <= now() and valid_until > now()
+      order by offer_id, observed_at desc, id desc` : [];
+    const valid = new Set(prices.map((row) => row.offer_id));
+    return {
+      prices: prices.map((row) => decodeComputeObservation<ComputePriceObservation>(row, computePriceColumns)),
+      calibrations: calibrations.filter((row) => valid.has(row.offer_id)).map((row) => decodeComputeObservation<ComputeCalibrationObservation>(row, computeCalibrationColumns)),
+    };
+  }
+
   async loadShardObservations(profileKey: string, limit = 200): Promise<Array<{ pages: number; ms: number; maxRssMiB?: number }>> {
     const rows = await this.sql<Array<{ ms: string | number; pages: string | number | null; max_rss_mib: string | number | null }>>`
       select perf.value as ms,
