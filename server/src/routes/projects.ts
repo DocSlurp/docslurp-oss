@@ -694,6 +694,8 @@ export const projectsRoutes = new Hono()
       return c.json({ ...result, snapshot: { ...result.snapshot, project: publicProjectView((await withCanEdit(c, [result.snapshot.project]))[0], getRequestActor(c)), settings: customerSearchSettingsView(result.snapshot.settings) } });
     } catch (error) {
       if (error instanceof SettingsPublicationError) return apiStatusError(c, error.status, error.message, { code: error.code });
+      if (error instanceof IndexingModeError) return indexingModeErrorResponse(c, error);
+      if (error instanceof ProjectSlugError) return apiStatusError(c, error.status, error.message);
       if (error instanceof z.ZodError) return apiStatusError(c, 400, "Invalid project settings", { details: { issues: error.issues } });
       if (error instanceof ChartExportUnavailableError || error instanceof SummaryTreeConfigError) return apiStatusError(c, 400, error.message, { code: error.code });
       throw error;

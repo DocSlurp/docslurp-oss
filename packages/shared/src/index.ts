@@ -138,3 +138,5 @@ export * from "./vision-request-profile.js";
 export * from "./document-failure.js";
 
 export * from "./upload-recovery.js";
+
+export * from "./settings-projection.js";

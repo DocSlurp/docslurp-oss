@@ -808,6 +808,7 @@ export type Reranker = (typeof RERANKERS)[number];
 
 /** Public search-settings updates: `retrievalDefaults.reranker` in place of a rerank provider and model. */
 export const publicUpdateProjectSearchSettingsSchema = updateProjectSearchSettingsSchema.extend({
+  chat: updateProjectSearchChatSettingsSchema.strict().optional(),
   retrievalDefaults: updateProjectSearchRetrievalDefaultsSchema.omit({ rerankProvider: true, rerankModel: true })
     .extend({ reranker: z.enum(RERANKERS).optional() }).strict().optional(),
 }).strict().transform(({ retrievalDefaults, ...rest }): UpdateProjectSearchSettingsInput => {
@@ -991,11 +992,29 @@ export const updateProjectSchema = z.object({
 });
 export type UpdateProjectInput = z.infer<typeof updateProjectSchema>;
 
+/** Walk the installed contract shape without injecting defaults into a sparse publication. Records stay open. */
+function rejectUnknownPatchKeys(value: unknown, schema: z.ZodType, ctx: z.RefinementCtx, path: (string | number)[] = []): void {
+  if (!value || typeof value !== "object") return;
+  if (schema instanceof z.ZodPipe) return rejectUnknownPatchKeys(value, schema.in as z.ZodType, ctx, path);
+  if (schema instanceof z.ZodOptional || schema instanceof z.ZodNullable || schema instanceof z.ZodDefault) return rejectUnknownPatchKeys(value, schema.unwrap() as z.ZodType, ctx, path);
+  if (schema instanceof z.ZodArray && Array.isArray(value)) {
+    value.forEach((entry, index) => rejectUnknownPatchKeys(entry, schema.element as z.ZodType, ctx, [...path, index]));
+  } else if (schema instanceof z.ZodObject && !Array.isArray(value)) {
+    for (const [key, child] of Object.entries(value)) {
+      const childSchema = schema.shape[key] as z.ZodType | undefined;
+      if (!childSchema) ctx.addIssue({ code: "custom", path: [...path, key], message: `Unknown pipeline setting '${[...path, key].join(".")}'` });
+      else rejectUnknownPatchKeys(child, childSchema, ctx, [...path, key]);
+    }
+  }
+}
+const publicationPipelinePatchSchema = pipelineFeatureOverridesSchema.superRefine((value, ctx) => rejectUnknownPatchKeys(value, pipelineFeaturesSchema, ctx));
+
 /** A sparse, revision-preconditioned publication; presets never confer authority. */
 export const publishProjectSettingsSchema = z.object({
   requestId: z.string().uuid(),
+  clearOutputSchema: z.boolean().optional(),
   expected: z.object({ project: z.string().min(1).max(100), search: z.string().min(1).max(100) }).strict(),
-  project: updateProjectSchema.omit({ pipeline: true }).extend({ pipeline: pipelineFeatureOverridesSchema.optional() }).strict(),
+  project: updateProjectSchema.omit({ pipeline: true }).extend({ pipeline: publicationPipelinePatchSchema.optional() }).strict(),
   search: publicUpdateProjectSearchSettingsSchema,
 }).strict();
 export type PublishProjectSettingsInput = z.infer<typeof publishProjectSettingsSchema>;

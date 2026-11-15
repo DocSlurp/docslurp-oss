@@ -1,3 +1,4 @@
+import { HTTPException } from "hono/http-exception";
 import { assertTenantModelEndpointAllowed } from "@docslurp/shared";
 import { EDITOR_REQUIRED_CODE, EDITOR_REQUIRED_MESSAGE, deferredProfilesEnabled, isBillingEnforced, PUBLIC_ERROR_MESSAGES, publicDiagnostics, publicDocumentError, resolveManagedPipeline, parseManagedPipelineOverrides, storedManagedPipeline, stripManagedPipelineFields, type ManagedPipelineOverrides } from "@docslurp/shared";
 import { chartExportDefaults, upgradeStoredPipelineChartExport } from "@docslurp/shared";
@@ -1012,7 +1013,14 @@ export async function listProjectBoardRecords(userId: string): Promise<ProjectBo
 
 type ProjectSqlClient = typeof sql;
 
+export class ProjectSettingsStaleError extends HTTPException {
+  readonly code = "settings_stale" as const;
+  constructor() { super(409, { message: "Project settings changed. Reload before saving." }); }
+}
+
 export type ProjectUpdateOptions = {
+  /** Snapshot used to construct a whole-pipeline patch outside this service. */
+  expectedUpdatedAt?: string;
   indexingMode?: PipelineFeatures["indexingMode"];
   /**
    * The summary-tree setting to store. Only services/project-summary-tree.ts passes it. Without it every update keeps
@@ -1103,6 +1111,22 @@ export async function updateProject(
     await validateModeSwitch({ current, nextPipeline: pipeline });
   }
 
+  if (options.expectedUpdatedAt !== undefined && options.expectedUpdatedAt !== current.updatedAt) throw new ProjectSettingsStaleError();
+  if (!options.client) {
+    // All project preference writers share publication's lock, including graph, history and section summaries.
+    // Resolution/validation stays outside the transaction; a stale resolution is refused rather than replayed.
+    return await sql.begin(async tx => {
+      const client = tx as unknown as typeof sql;
+      await client`select pg_advisory_xact_lock(hashtextextended(${`config-change:${projectId}`}, 0))`;
+      const [revision] = await client<{ version: string }[]>`select updated_at::text as version from projects where id=${projectId}`;
+      if (revision?.version !== current.updatedAt) throw new ProjectSettingsStaleError();
+      const access = await getProjectAccess(projectId, userId, client);
+      if (!access || !canEditProject(access, userId)) return null;
+      await updateProject(projectId, userId, parsed, { ...options, client, precomputed: { current, pipeline } });
+      return getProject(projectId, userId, client);
+    }) as ProjectRecord | null;
+  }
+
   const nextSlug = parsed.slug === undefined ? current.slug : parsed.slug.toLowerCase();
   if (nextSlug !== current.slug) {
     const problem = projectSlugProblem(nextSlug);
@@ -1173,7 +1197,7 @@ export async function updateProject(
   if (parsed.allowChinaProviders !== undefined) forgetProjectProviderPolicy(projectId);
   // Settings, pipeline and privacy changes drop cached search answers in every API process (on commit inside a transaction).
   await notifySearchEligibilityChanged(client, [projectId]);
-  return options.client ? current : await getProject(projectId, userId);
+  return current;
 }
 
 async function mutateProjectArchiveState(args: {

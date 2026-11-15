@@ -264,6 +264,7 @@ export async function planProjectChange(args: {
   env?: EstimateEnv;
   /** Merge a narrow trusted proposal against the same project snapshot this plan versions. */
   pipelineOverrides?: PipelineFeatureOverrides;
+  clearOutputSchema?: boolean;
   /**
    * The caller's surface (`runOriginOf`): an unset chart export tier resolves to its default for the impact, the estimate
    * and the re-index runs this plan queues. Unset: machine.
@@ -278,6 +279,10 @@ export async function planProjectChange(args: {
   const project = await getProject(args.projectId, args.userId);
   if (!project) return null;
   if (args.pipelineOverrides) input.pipeline = mergePipelineFeatures(project.pipeline, args.pipelineOverrides);
+  if (args.clearOutputSchema) {
+    input.pipeline = { ...(input.pipeline ?? project.pipeline) };
+    delete input.pipeline.outputSchema;
+  }
   const nextPipeline = await resolveUpdatedPipeline(project.id, project, input, { indexingMode: args.indexingMode });
   // The deployment kill switch: chart export cannot be turned on while it is off (a stored "on" stays inert).
   assertChartExportChangeAllowed(project.pipeline, nextPipeline, args.env ?? process.env);
@@ -733,13 +738,8 @@ async function applyPlannedChange(args: {
     });
     if (!saved) return null;
     if (plan.recordsIndexChange) {
-      // Documents indexed before hashes were recorded belong to the config that was current until now.
-      await tx`
-        update documents d set index_config_hash = ${beforeHash}
-        where d.project_id = ${project.id} and d.index_config_hash is null and ${LIVE_DOCUMENT}
-          and (d.indexing_mode is null or d.indexing_mode = 'full')
-          and exists (select 1 from vector_indexes v where v.document_id = d.id)
-      `;
+      // A missing historical hash cannot prove the vector inputs. Keep it unknown until a real rebuild;
+      // stamping the currently selected recipe here would manufacture compatibility.
       // Native search caches each document's owner index config hash.
       await notifySearchEligibilityChanged(tx as unknown as typeof sql, [project.id]);
       await tx`

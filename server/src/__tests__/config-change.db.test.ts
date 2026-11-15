@@ -237,3 +237,22 @@ it("atomic settings publication rolls back its search write and receipt when sea
   expect(await sql`select * from credit_leases where org_id='o1'`).toEqual(beforeLeases);
   expect(await sql`select count(*)::int n from project_settings_publications where project_id='w'`).toEqual([{ n: 0 }]);
 });
+
+it("does not manufacture normalization provenance for legacy unhashed vectors during publication", async () => {
+  await seed({ credits: 10000, vectorized: true });
+  const applied = await patch(embeddingChange());
+  expect(applied.applied).not.toBeNull();
+  expect(await sql`select index_config_hash from documents where id in ('d0','d1')`).toEqual([{ index_config_hash: null }, { index_config_hash: null }]);
+});
+
+it("refuses policy tightening that would require fencing retained artifacts", async () => {
+  await seed({ credits: 10000, vectorized: true });
+  const publication = await import("../services/settings-publication.js");
+  const actor: import("../lib/request-actor.js").RequestActor = { type: 'session', userId: 'u1', sessionId: 'policy-test', user: { id: 'u1', name: 'A', email: 'config-admission@example.com' } };
+  const before = await publication.readSettingsSnapshot(actor, 'w');
+  await expect(publication.publishSettings({ actor, projectId: 'w', input: {
+    requestId: '3c41ace4-c977-4933-a966-4efcb4f77177', expected: before.revision,
+    project: { pipeline: { piiPolicy: { enabled: true, action: 'block_indexing' } }, apply: 'reindex' }, search: {},
+  } })).rejects.toMatchObject({ status: 409, code: 'policy_publication_unavailable' });
+  expect(await publication.readSettingsSnapshot(actor, 'w')).toEqual(before);
+});

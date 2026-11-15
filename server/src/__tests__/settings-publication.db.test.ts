@@ -44,7 +44,7 @@ it("publishes sparse false/null values and retries without duplicate effects", a
   const retry = await service.publishSettings({ ...f, input: body });
   expect(retry).toMatchObject({ replayed: true, snapshot: first.snapshot });
   expect(await sql`select count(*)::int n from project_settings_publications where project_id=${f.projectId}`).toEqual([{ n: 1 }]);
-  await expect(service.publishSettings({ ...f, input: { ...body, search: {} } })).rejects.toMatchObject({ status: 409, code: 'idempotency_conflict' });
+  await expect(service.publishSettings({ ...f, input: { ...body, search: {} } })).rejects.toMatchObject({ status: 409, code: 'settings_idempotency_conflict' });
 });
 it("rolls back pipeline, both revisions and receipts when search persistence fails", async () => {
   const f = await fixture(); failSearch = true;
@@ -74,6 +74,44 @@ it("rejects cross-tenant actors and read-only members", async () => {
 it("rejects unknown keys, oversized instructions and execution controls", async () => {
   const f = await fixture(), body = input(f);
   await expect(service.publishSettings({ ...f, input: { ...body, surprise: true } })).rejects.toThrow();
+  await expect(service.publishSettings({ ...f, input: { ...body, project: { pipeline: { embedding: { unexpected: true } } } } })).rejects.toThrow();
+  await expect(service.publishSettings({ ...f, input: { ...body, search: { chat: { unexpected: true } } } })).rejects.toThrow();
   await expect(service.publishSettings({ ...f, input: { ...body, search: { chat: { searchInstructions: 'x'.repeat(100000) } } } })).rejects.toThrow();
   await expect(service.publishSettings({ ...f, input: { ...body, project: { pipeline: { stageSubset: ['embed'] } } } })).rejects.toThrow();
+});
+it("refuses impossible candidate counts atomically", async () => {
+  const f = await fixture();
+  await expect(service.publishSettings({ ...f, input: { ...input(f), search: { retrievalDefaults: { resultCount: 20, candidateDepth: 2 } } } })).rejects.toMatchObject({ status: 400, code: 'unsupported_search_settings' });
+  expect(await service.readSettingsSnapshot(f.actor, f.projectId)).toEqual(f.snapshot);
+});
+it("clears an output schema only with explicit reset, preserving it on omission", async () => {
+  const f = await fixture();
+  await sql`update projects set pipeline=pipeline || ${sql.json({ outputSchema: { type: 'object', properties: { reference: { type: 'string' } } } })}::jsonb where id=${f.projectId}`;
+  const snapshot = await service.readSettingsSnapshot(f.actor, f.projectId);
+  const first = await service.publishSettings({ ...f, input: { ...input(f), expected: snapshot.revision } });
+  expect(first.snapshot.project.pipeline.outputSchema).toBeDefined();
+  const next = await service.publishSettings({ ...f, input: { ...input(f), requestId: randomUUID(), expected: first.snapshot.revision, clearOutputSchema: true } });
+  expect(next.snapshot.project.pipeline.outputSchema).toBeUndefined();
+});
+it("refuses an older whole-pipeline writer after a publication commits", async () => {
+  const f = await fixture();
+  const projects = await import('../services/projects.js');
+  const stale = await projects.getProject(f.projectId, f.actor.userId);
+  const published = await service.publishSettings({ ...f, input: input(f) });
+  await expect(projects.updateProject(f.projectId, f.actor.userId, { pipeline: stale!.pipeline }, { expectedUpdatedAt: stale!.updatedAt })).rejects.toMatchObject({ status: 409, code: 'settings_stale' });
+  const latest = await service.readSettingsSnapshot(f.actor, f.projectId);
+  expect(latest.project.pipeline.preserveCode).toBe(false);
+  expect(latest.revision).toEqual(published.snapshot.revision);
+});
+it("reports unknown vector coverage, then clears rebuild-required state after a real current-generation write", async () => {
+  const f = await fixture();
+  const runId = randomUUID(), docId = randomUUID();
+  await sql`insert into project_runs(id,org_id,user_id,project_id,kind,status,stage,pipeline) values (${runId},${f.projectId},${f.actor.userId},${f.projectId},'upload','completed','index','{}')`;
+  await sql`insert into documents(id,org_id,user_id,project_id,run_id,filename,mime_type,source_key,status,page_count) values (${docId},${f.projectId},${f.actor.userId},${f.projectId},${runId},'synthetic.txt','text/plain','synthetic','completed',1)`;
+  await sql`insert into vector_indexes(id,document_id,backend,bucket,path,embedding_model,dimension) values (${randomUUID()},${docId},'lancedb','test','synthetic','test',384)`;
+  expect((await service.readSettingsSnapshot(f.actor, f.projectId)).legacyIndexes).toEqual({ documents: 1, documentIds: [docId] });
+  const { indexConfigHash, indexConfigOf } = await import('@docslurp/shared');
+  const rebuiltHash = indexConfigHash(indexConfigOf(f.snapshot.project.pipeline));
+  await sql`update documents set index_config_hash=${rebuiltHash} where id=${docId}`;
+  expect((await service.readSettingsSnapshot(f.actor, f.projectId)).legacyIndexes).toEqual({ documents: 0, documentIds: [] });
 });

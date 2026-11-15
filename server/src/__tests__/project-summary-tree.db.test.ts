@@ -171,8 +171,8 @@ describe("summary tree setting", () => {
     expect(before.pipeline.summaryTree).toEqual({ enabled: true });
     await tree.updateProjectSummaryTree("ws", "owner", { enabled: false }, ON);
 
-    // config-change applies a plan with a precomputed pipeline; the UPDATE itself keeps the row's current value.
-    await projects.updateProject("ws", "owner", {}, { precomputed: { current: before, pipeline: before.pipeline } });
+    // A precomputed writer without the original transaction must refuse its stale snapshot.
+    await expect(projects.updateProject("ws", "owner", {}, { precomputed: { current: before, pipeline: before.pipeline } })).rejects.toMatchObject({ status: 409, code: "settings_stale" });
     expect((await stored()).tree).toEqual({ enabled: false });
   });
 

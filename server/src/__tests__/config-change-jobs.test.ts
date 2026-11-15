@@ -217,8 +217,8 @@ describe("config-change jobs", () => {
 
     const first = await patch({ pipeline: B });
     expect(first.applied!.job).toMatchObject({ status: "queued" });
-    // Legacy documents (no hash yet) are stamped with the config that was current.
-    expect((await sql<{ h: string | null }[]>`select index_config_hash h from documents where run_id = 'src'`).map((r) => r.h)).toEqual([hashes.A, hashes.A, hashes.A]);
+    // Legacy documents retain unknown provenance until actual reprocessing; the current recipe cannot prove historical normalization.
+    expect((await sql<{ h: string | null }[]>`select index_config_hash h from documents where run_id = 'src'`).map((r) => r.h)).toEqual([null, null, null]);
 
     // d0 is re-indexed on B mid-flight; the B run is still processing.
     const [kid] = await sql<{ id: string }[]>`select id from documents where previous_version_id = 'd0'`;
@@ -240,7 +240,7 @@ describe("config-change jobs", () => {
 
     // Every live document (the B-indexed d0 replacement and the still-A d1, d2) is queued for C.
     const live = await sql<{ id: string; h: string | null }[]>`select id, index_config_hash h from documents where superseded_at is null and status = 'completed' order by id`;
-    expect(live.map((r) => r.h).sort()).toEqual([hashes.A, hashes.A, hashes.B].sort());
+    expect(live.map((r) => r.h).sort()).toEqual([null, null, hashes.B].sort());
     const queued = await sql<{ previous_version_id: string }[]>`select previous_version_id from documents where run_id in (select id from project_runs where job_id = ${second.applied!.job!.id})`;
     expect(queued.map((r) => r.previous_version_id).sort()).toEqual(["d1", "d2", kid!.id].sort());
     const [ws] = await sql<{ index_configs: Record<string, unknown> }[]>`select index_configs from projects where id = 'w'`;

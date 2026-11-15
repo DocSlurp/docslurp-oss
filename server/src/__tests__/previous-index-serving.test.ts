@@ -80,7 +80,7 @@ describe("servedVectorSearch", () => {
 
   beforeEach(() => vi.clearAllMocks());
 
-  it("runs no query and no extra search when only one config exists", async () => {
+  it("checks compatibility and runs one vector search when only one config exists", async () => {
     await seed([hash(C)], { [hash(C)]: cfg(C) });
     const search = vi.fn(async () => [chunk("a")]);
     const embed = vi.fn(async () => [1]);
@@ -88,13 +88,31 @@ describe("servedVectorSearch", () => {
     const result = await serving.servedVectorSearch({
       projectId: "w", pipeline: C, indexConfigs: { [hash(C)]: cfg(C) }, queryVector: [0], query: "q", deps: { search, embed },
     });
-    expect(queries).toBe(0);
+    expect(queries).toBe(2);
     expect(result).toEqual([chunk("a")]);
     expect(search).toHaveBeenCalledTimes(1);
-    expect(search).toHaveBeenCalledWith([0], null);
+    expect(search).toHaveBeenCalledWith([0], expect.objectContaining({ hash: { op: "eq", value: hash(C) } }));
     expect(embed).not.toHaveBeenCalled();
   });
 
+  it("refuses live legacy vectors instead of using the current query vector", async () => {
+    const { normalize: _normalize, ...legacy } = cfg(C);
+    await seed(["legacy"], { legacy });
+    const search = vi.fn(async () => [chunk("unsafe")]);
+    await expect(serving.servedVectorSearch({ projectId: "w", pipeline: C, indexConfigs: { legacy }, queryVector: [0], query: "q", deps: { search, embed: vi.fn() } })).rejects.toThrow("rebuild required");
+    expect(search).not.toHaveBeenCalled();
+    await seed([null], {});
+    await expect(serving.servedVectorSearch({ projectId: "w", pipeline: C, indexConfigs: {}, queryVector: [0], query: "q", deps: { search, embed: vi.fn() } })).rejects.toThrow("rebuild required");
+  });
+  it("embeds separately when only normalization differs", async () => {
+    const raw = { ...C, embedding: { ...C.embedding, normalize: false } };
+    await seed([hash(C), hash(raw)], { [hash(C)]: cfg(C), [hash(raw)]: cfg(raw) }, raw);
+    const embed = vi.fn(async () => [7]);
+    const search = vi.fn(async () => [chunk("x")]);
+    await serving.servedVectorSearch({ projectId: "w", pipeline: raw, indexConfigs: { [hash(C)]: cfg(C), [hash(raw)]: cfg(raw) }, queryVector: [0], query: "q", deps: { search, embed } });
+    expect(embed).toHaveBeenCalledWith("q", expect.objectContaining({ normalize: true }));
+    expect(search).toHaveBeenCalledTimes(2);
+  });
   it("loads the config map with the pipeline in a single query", async () => {
     await seed([hash(C)], { [hash(C)]: cfg(C) });
     queries = 0;

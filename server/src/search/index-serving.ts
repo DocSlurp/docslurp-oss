@@ -1,3 +1,4 @@
+import { HTTPException } from "hono/http-exception";
 import {
   embeddingModelBaseUri,
   embeddingModelCatalogByUri,
@@ -21,6 +22,11 @@ import { reciprocalRankFusionScored } from "./rrf.js";
  * embedded once per distinct vector space, the ranked lists fused with RRF. Their raw scores live in
  * different vector spaces and are never compared.
  */
+
+export class IndexRebuildRequiredError extends HTTPException {
+  readonly code = "index_rebuild_required" as const;
+  constructor() { super(409, { message: "Vector index rebuild required: stored normalization is unknown. Reprocess affected documents before vector search." }); }
+}
 
 export type HashFilter = { op: "eq" | "neq"; value: string };
 
@@ -48,6 +54,7 @@ export function parseIndexConfigs(value: unknown): IndexConfigMap {
   const out: IndexConfigMap = {};
   for (const [hash, config] of Object.entries(value as Record<string, unknown>)) {
     if (config && typeof config === "object" && typeof (config as IndexConfig).embeddingModel === "string") {
+      if ((config as IndexConfig).normalize !== undefined && typeof (config as IndexConfig).normalize !== "boolean") continue;
       out[hash] = config as IndexConfig;
     }
   }
@@ -81,7 +88,7 @@ export async function documentCountsByIndexConfig(projectId: string, sql: SqlCli
     where d.project_id = ${projectId} and ${LIVE_VECTORIZED(sql)}
     group by d.index_config_hash
   `;
-  return new Map(rows.filter((row) => row.hash).map((row) => [row.hash!, row.n]));
+  return new Map(rows.map((row) => [row.hash ?? "unknown", row.n]));
 }
 
 /**
@@ -134,7 +141,7 @@ export async function pruneDrainedIndexConfigs(sql: SqlClient = defaultSql, limi
 function spaceKey(embedding: EmbeddingConfig): string {
   const route = resolveEmbeddingRoute(embedding);
   // modelUri, not model: two poolings of one model embed queries differently.
-  return `${route.modelUri}\u0000${route.dimensions}`;
+  return `${route.modelUri}\u0000${route.dimensions}\u0000${embedding.normalize}`;
 }
 
 /**
@@ -154,13 +161,17 @@ export async function servedVectorSearch<T extends ChunkLike>(args: {
 }): Promise<T[]> {
   const currentHash = indexConfigHash(indexConfigOf(args.pipeline));
   const hashes = Object.keys(args.indexConfigs).filter((hash) => hash !== currentHash);
-  if (hashes.length === 0) return await args.deps.search(args.queryVector, null);
-
   const counts = await documentCountsByIndexConfig(args.projectId, args.sql);
+  const unknown = [...counts].filter(([hash]) => hash !== currentHash && (!args.indexConfigs[hash] || args.indexConfigs[hash].normalize === undefined));
+  if (unknown.length) {
+    args.deps.diagnostic?.("indexRebuildRequired", { reason: "normalization-unknown", documents: unknown.reduce((sum, [, n]) => sum + n, 0) });
+    throw new IndexRebuildRequiredError();
+  }
+  if (hashes.length === 0) return await args.deps.search(args.queryVector, { embedding: args.pipeline.embedding, hash: { op: "eq", value: currentHash } });
   const drained = hashes.filter((hash) => !counts.get(hash));
   if (drained.length > 0) void pruneIndexConfigs(args.projectId, args.sql).catch(() => undefined);
   const others = hashes.filter((hash) => counts.get(hash));
-  if (others.length === 0) return await args.deps.search(args.queryVector, null);
+  if (others.length === 0) return await args.deps.search(args.queryVector, { embedding: args.pipeline.embedding, hash: { op: "eq", value: currentHash } });
 
   // Serve at most MAX_SERVED_INDEX_CONFIGS configs: the ones with the most documents.
   const candidates = [currentHash, ...others].sort((a, b) => (counts.get(b) ?? 0) - (counts.get(a) ?? 0));

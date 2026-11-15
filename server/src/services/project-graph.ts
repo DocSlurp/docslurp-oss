@@ -314,7 +314,7 @@ export async function updateProjectGraph(
   if (next.graphRag && !next.embed) {
     throw new ProjectGraphError("The knowledge graph needs embeddings; enable embedding for this project first", 400);
   }
-  const updated = await updateProject(project.id, userId, { pipeline: next });
+  const updated = await updateProject(project.id, userId, { pipeline: next }, { expectedUpdatedAt: project.updatedAt });
   if (!updated) throw new ProjectGraphError("Project not found", 404);
   return await buildGraphStatus(updated);
 }
