@@ -553,6 +553,79 @@ describe("summary tree: tenant boundary", () => {
   });
 });
 
+describe("summary tree: the project default is a ceiling for callers who may not change it", () => {
+  beforeAll(async () => {
+    // Members of the project's organization without edit rights: a plain member the project is shared with as a
+    // viewer, and (for contrast) a project editor.
+    await sql`insert into "user" (id, name, email) values ('viewer', 'Viewer', 'tree-viewer@example.test'), ('editor', 'Editor', 'tree-editor@example.test')`;
+    await sql`insert into org_memberships (org_id, user_id, role) values ('org1', 'viewer', 'member'), ('org1', 'editor', 'member')`;
+    await sql`insert into project_members (project_id, user_id, role) values ('w', 'viewer', 'viewer'), ('w', 'editor', 'editor')`;
+  });
+  afterEach(async () => { await setDefault("w", "u", { summaryTree: "off" }); });
+
+  it("holds a viewer to the stored default: no summaries and no guide above it; an editor may ask for more", async () => {
+    // Default off: the viewer's request for `include` or `guide` reads nothing of the tree.
+    await setDefault("w", "u", { summaryTree: "off" });
+    const plain = await run({ documentIds: MAIN, userId: "viewer" });
+    for (const asked of ["include", "guide"] as const) {
+      summaryReads.calls.length = 0;
+      const refused = await run({ documentIds: MAIN, userId: "viewer", summaryTree: asked });
+      expect(refused.summaryTree).toMatchObject({ requested: asked, applied: "off", skipped: "mode" });
+      expect(refused).not.toHaveProperty("summaries");
+      expect(summaryReads.calls).toHaveLength(0);
+      expect(ids(refused)).toEqual(ids(plain));
+    }
+    // Default guide: `include` runs as guide. Real chunks, and never a summary.
+    await setDefault("w", "u", { summaryTree: "guide" });
+    const clamped = await run({ documentIds: MAIN, userId: "viewer", summaryTree: "include" });
+    expect(clamped.summaryTree).toMatchObject({ requested: "include", applied: "guide" });
+    expect(clamped).not.toHaveProperty("summaries");
+    expect(documentsOf(clamped)).toContain("docA");
+    // Asking for less is always allowed.
+    expect((await run({ documentIds: MAIN, userId: "viewer", summaryTree: "off" })).summaryTree).toBeUndefined();
+    // Default include: the viewer gets what the project's editors chose to show.
+    await setDefault("w", "u", { summaryTree: "include" });
+    expect((await run({ documentIds: MAIN, userId: "viewer" })).summaries?.length).toBeGreaterThan(0);
+
+    // An editor and the owner may raise it per request, from any default.
+    await setDefault("w", "u", { summaryTree: "off" });
+    for (const userId of ["editor", "u"]) {
+      const raised = await run({ documentIds: MAIN, userId, summaryTree: "include" });
+      expect([userId, raised.summaryTree?.applied]).toEqual([userId, "include"]);
+      expect(raised.summaries?.length).toBeGreaterThan(0);
+    }
+  });
+
+  it("judges an API key by the key: only a server key with projects:manage in the project's organization may raise", async () => {
+    const ceiling = await import("../search/summary-tree-ceiling.js");
+    const key = async (id: string, orgId: string, userId: string, keyType: string, scopes: string[], revoked = false) => {
+      await sql`insert into api_keys (id, user_id, org_id, key_hash, name, key_type, scopes, revoked_at)
+        values (${id}, ${userId}, ${orgId}, ${`hash-${id}`}, ${id}, ${keyType}, ${sql.array(scopes)}, ${revoked ? new Date() : null})
+        on conflict (id) do nothing`;
+      return id;
+    };
+    // Every key belongs to the owner, who could raise it as a signed-in user: the key's own type and scopes decide.
+    const may = (apiKeyId: string | null, userId = "u") => ceiling.callerMayRaiseSummaryTree({ userId, projectId: "w", orgId: "org1", apiKeyId });
+    expect(await may(await key("k-manage", "org1", "u", "server", ["projects:manage", "search:deep"]))).toBe(true);
+    expect(await may(await key("k-search", "org1", "u", "server", ["search:deep"]))).toBe(false);
+    expect(await may(await key("k-chat", "org1", "u", "server", ["chat"]))).toBe(false);
+    expect(await may(await key("k-client", "org1", "u", "client", ["projects:manage", "search:deep"]))).toBe(false);
+    expect(await may(await key("k-revoked", "org1", "u", "server", ["projects:manage"], true))).toBe(false);
+    expect(await may(await key("k-other-org", "org2", "v", "server", ["projects:manage"]))).toBe(false);
+    // Not an API key at all (an OAuth token id).
+    expect(await may("oauth-token-id")).toBe(false);
+    // Signed-in users: edit rights on this project.
+    expect(await may(null, "u")).toBe(true);
+    expect(await may(null, "editor")).toBe(true);
+    expect(await may(null, "viewer")).toBe(false);
+    expect(await may(null, "v")).toBe(false);
+    expect(ceiling.clampSummaryTreeMode("include", "guide")).toBe("guide");
+    expect(ceiling.clampSummaryTreeMode("guide", "include")).toBe("guide");
+    expect(ceiling.clampSummaryTreeMode("include", "off")).toBe("off");
+    expect(ceiling.knownSummaryTreeMode("always")).toBe("off");
+  });
+});
+
 describe("summary tree: switches and modes", () => {
   it("serve switch off answers exactly as a project without a tree, and reads nothing", async () => {
     await setDefault("w", "u", { summaryTree: "guide" });

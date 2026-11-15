@@ -65,6 +65,33 @@ that is indexed in that embedding space and has a tree state row
 (`worker/src/stages/lancedb-summaries.ts`), so a row cannot exist where these
 paths would not find it.
 
+**What stops serving a tree without removing it.** Search reads a document's
+summaries only while its tree state is `ready` for the document's current run,
+the document is completed, current and uncorrected, the project has the tree
+turned on and the deployment serves it. Each of the following stops serving at
+once; what happens to the stored rows differs:
+
+| Event | Summary rows and artifact |
+| --- | --- |
+| The project turns the summary tree off, or the deployment's serve or build switch goes off | Kept. Nothing reads them, and no build or backfill adds to them. They go when each document is deleted, superseded and purged, or archived, or when the project is deleted. Turning the tree back on serves them again. |
+| A document is blocked or redacted by the PII policy and already has a tree (a rescan, a retry in place) | The tree state leaves `ready` in the PII stage itself (`partial`, `pii-withheld`) and strict removal is queued (`summary_tree_document`). A blocked document then gets no tree (`skipped`, `pii`); a redacted one is rebuilt from the redacted text. |
+| A document blocked by the PII policy on its first ingestion | It never had a tree: the stage records `skipped` / `pii` and writes nothing. |
+| A correction reindex | Removed: strict removal is queued in the correction's own transaction (the `summary_tree_document` row of the table above). |
+| A build that ends `partial`, or is taken over | Kept for the build that resumes it; never served while not `ready`. |
+
+So turning the feature off is not an erasure. To remove a project's summaries
+while keeping its documents, delete and re-upload the documents, or delete the
+project; there is no "drop the tree" operation yet (`TODO.md`).
+
+**A cleanup entry that keeps failing.** A queue row (`document_cleanup_queue`,
+`storage_cleanup_queue`) is tried `CLEANUP_ATTEMPT_LIMIT` (10) times and then
+left in place, unclaimed. For a strict summaries delete that means a deleted
+document's summary text is still in the table. The sweep logs one line at error
+level when a row reaches the limit:
+`[cleanup] status=attempt-limit-reached queue=<queue> id=<id> ... action=manual-reconciliation-required`.
+After fixing the cause, reset the row's `attempts` to 0 and the next sweep
+retries it. Alerting on that line is not wired yet (`TODO.md`).
+
 **A document deleted while its tree is being built.** The cleanup of a completed
 document is due the moment it is deleted, so the sweep can finish while a model
 call or a write of the build is still in flight. Two things keep a late write

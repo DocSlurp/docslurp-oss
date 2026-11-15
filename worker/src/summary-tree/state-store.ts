@@ -219,6 +219,31 @@ export async function enqueueSummaryTreeCleanup(sql: Client, args: {
 }
 
 /**
+ * A document that already has a tree was blocked or redacted by the PII policy (a rescan of a document processed
+ * before the policy, a retry in place): what the tree says was written from the text that is now withheld. Its state
+ * leaves `ready` at once (search reads only `ready` trees) and strict removal of its summary rows and artifact is
+ * queued; a later build of a redacted document starts from nothing and reads the redacted text. A document without
+ * a tree (every first ingestion) is left alone, so its own build is not disturbed. Returns whether a tree was withdrawn.
+ */
+export async function withdrawSummaryTreeForPii(sql: Client, documentId: string): Promise<boolean> {
+  const [document] = await sql<{ org_id: string | null; project_id: string | null }[]>`
+    select org_id, project_id from documents where id = ${documentId}
+  `;
+  if (!document?.org_id || !document.project_id) return false;
+  const scope = { orgId: document.org_id, projectId: document.project_id };
+  const withdrawn = await sql<{ document_id: string }[]>`
+    update document_summary_trees
+    set status = 'partial', error = 'pii-withheld', build_owner = null, built_at = null, root_node_id = null, updated_at = now()
+    where document_id = ${documentId} and org_id = ${scope.orgId} and project_id = ${scope.projectId}
+      and status <> 'skipped'
+    returning document_id
+  `;
+  if (withdrawn.length === 0) return false;
+  await enqueueSummaryTreeCleanup(sql, { scope, documentId, reason: "pii_withheld" });
+  return true;
+}
+
+/**
  * Whether a builder may still write for its document, read at the moment of asking:
  * - `holding`: the document is a live document of this tenant and its `building` row is this builder's;
  * - `taken-over`: the document is live and uncorrected, but another build (or a cleanup) holds its tree now;
@@ -438,6 +463,11 @@ export interface SummaryReusePredecessor {
   documentId: string;
   /** The stage artifact its build registered (`.../summary-tree/<documentId>/summaries.jsonl`). */
   artifactUri: string;
+  /**
+   * `<run root>` of the run the predecessor's tree was built in, from its own rows: the run's storage prefix, else
+   * `<the predecessor's user>/<that run>`. Its artifact can only be `<runRoot>/summary-tree/<documentId>/…`.
+   */
+  runRoot: string;
 }
 
 export type SummaryReuseRefusal =
@@ -471,7 +501,7 @@ export async function findSummaryReusePredecessor(sql: Client, scope: SummaryTre
   `;
   if (!current?.canonical_id) return { refused: "no-canonical-chain" };
   const candidates = await sql<{
-    id: string; purged: boolean; pii: boolean; tree_status: string | null; artifact_uri: string | null;
+    id: string; purged: boolean; pii: boolean; tree_status: string | null; artifact_uri: string | null; run_root: string | null;
   }[]>`
     select p.id,
       (p.purged_at is not null or p.archived_at is not null or coalesce(r.artifacts_purged_at is not null, false)) as purged,
@@ -483,7 +513,10 @@ export async function findSummaryReusePredecessor(sql: Client, scope: SummaryTre
         or exists (select 1 from pii_detections pd where pd.document_id = p.id and pd.redacted)
       ) as pii,
       t.status as tree_status,
-      s.artifact_uri
+      s.artifact_uri,
+      -- The tree's own run, of the predecessor's own project.
+      (select coalesce(tr.storage_prefix, p.user_id || '/' || tr.id) from project_runs tr
+        where tr.id = t.run_id and tr.project_id = p.project_id and tr.org_id = p.org_id) as run_root
     from documents d
     join documents p
       on p.org_id = d.org_id and p.project_id = d.project_id and p.canonical_id = d.canonical_id and p.id <> d.id
@@ -505,8 +538,8 @@ export async function findSummaryReusePredecessor(sql: Client, scope: SummaryTre
   if (candidate.purged) return { refused: "predecessor-purged" };
   if (candidate.pii) return { refused: "predecessor-pii" };
   if (candidate.tree_status !== "ready" && candidate.tree_status !== "partial") return { refused: "predecessor-has-no-tree" };
-  if (!candidate.artifact_uri) return { refused: "predecessor-artifact-unregistered" };
-  return { predecessor: { documentId: candidate.id, artifactUri: candidate.artifact_uri } };
+  if (!candidate.artifact_uri || !candidate.run_root) return { refused: "predecessor-artifact-unregistered" };
+  return { predecessor: { documentId: candidate.id, artifactUri: candidate.artifact_uri, runRoot: candidate.run_root } };
 }
 
 /**

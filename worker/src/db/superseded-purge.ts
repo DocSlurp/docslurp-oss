@@ -914,14 +914,33 @@ async function cleanOneDocument(
   }
 }
 
+/**
+ * A cleanup queue row is tried this many times, then left in place and never claimed again. A row that stops here
+ * holds data that should be gone (a deleted document's summary rows whose strict delete keeps failing, an artifact
+ * folder that cannot be listed): `logCleanupAttemptLimit` says so once, at error level, with a fixed message to
+ * alert on.
+ */
+export const CLEANUP_ATTEMPT_LIMIT = 10;
+
+/** The stable error line for a cleanup row that reached `CLEANUP_ATTEMPT_LIMIT`. Ids only; never an error message. */
+function logCleanupAttemptLimit(queue: "document_cleanup_queue" | "storage_cleanup_queue", row: { id: string; kind?: string; orgId?: string | null }): void {
+  console.error(
+    `[cleanup] status=attempt-limit-reached queue=${queue} id=${row.id}${row.kind ? ` kind=${row.kind}` : ""}${row.orgId ? ` org=${row.orgId}` : ""}` +
+      ` attempts=${CLEANUP_ATTEMPT_LIMIT} action=manual-reconciliation-required`,
+  );
+}
+
 async function recordDocumentCleanupFailure(sql: Sql<Record<string, unknown>>, documentIds: string[], error: unknown) {
   const message = error instanceof Error ? error.message.split("\n")[0] ?? "" : String(error);
   if (documentIds.length > 0) {
-    await sql`
+    const rows = await sql<{ document_id: string; org_id: string | null; attempts: number }[]>`
       update document_cleanup_queue
       set attempts = attempts + 1, last_error = ${message.slice(0, 2000)}
       where document_id = any(${sql.array(documentIds)})
-    `.catch(() => {});
+      returning document_id, org_id, attempts
+    `.catch(() => []);
+    // Exactly at the limit: said once, when the row stops being retried.
+    for (const row of rows) if (Number(row.attempts) === CLEANUP_ATTEMPT_LIMIT) logCleanupAttemptLimit("document_cleanup_queue", { id: row.document_id, orgId: row.org_id });
   }
   console.warn(`[document-cleanup] failed documents=${documentIds.join(",") || "?"} error=${message}`);
 }
@@ -1442,13 +1461,18 @@ export async function drainStorageCleanupQueue(
       const row = claimed as StorageCleanupRow | null;
       if (row) {
         failedIds.push(row.id);
-        await sql`
+        const updated = await sql<{ attempts: number }[]>`
           update storage_cleanup_queue
           set attempts = attempts + 1, last_error = ${message.slice(0, 2000)},
             not_before = case when kind = 'upload_original' and ${message === 'Original upload ownership cannot be verified'} then 'infinity'::timestamptz
               when kind = 'upload_original' then now() + interval '1 hour' else not_before end
           where id = ${row.id}
-        `.catch(() => {});
+          returning attempts
+        `.catch(() => []);
+        // An original-upload row is retried without a limit; every other kind stops being claimed here.
+        if (row.kind !== "upload_original" && Number(updated[0]?.attempts) === CLEANUP_ATTEMPT_LIMIT) {
+          logCleanupAttemptLimit("storage_cleanup_queue", { id: row.id, kind: row.kind, orgId: row.org_id });
+        }
       }
       if (row?.kind === "upload_original" && message === "Original upload ownership cannot be verified") {
         console.error(`[storage-cleanup] status=ownership-quarantined id=${row.id} org=${row.org_id} action=manual-reconciliation-required`);

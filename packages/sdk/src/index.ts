@@ -666,8 +666,10 @@ export type SearchInput = {
   /**
    * How this search uses the project's summary tree (section summaries built beside the chunks): `off`, `guide`
    * (summaries pick extra chunks; `results` stay real chunks) or `include` (the matching summaries are also returned in
-   * `summaries`). Omitted: the project's retrieval default. Hybrid and deep mode only, and only for a project that
-   * builds the tree; `SearchResponse.summaryTree` says what ran.
+   * `summaries`). Omitted: the project's retrieval default. That default is also the most a request may ask for,
+   * unless the caller may edit the project (or is a server key with `projects:manage`): a request above it runs at
+   * the default. Hybrid and deep mode only, and only for a project that builds the tree;
+   * `SearchResponse.summaryTree` says what ran.
    */
   summaryTree?: SummaryTreeSearchMode;
   /**

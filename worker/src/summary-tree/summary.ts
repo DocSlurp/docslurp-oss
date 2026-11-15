@@ -60,12 +60,28 @@ export function buildSummaryTreePrompt(args: {
   });
 }
 
+/**
+ * Characters a summary never keeps: C0 controls except the line feed (ESC, NUL, backspace, bell...), DEL, C1 controls
+ * (CSI and the other 8-bit escapes) and the Unicode bidirectional controls (marks, embeddings, overrides, isolates).
+ * A model can be made to emit them by the document it summarizes; stored, they would rewrite a terminal's screen
+ * or reorder what a reader sees in a list of summaries.
+ */
+const SUMMARY_CONTROL_CHARACTERS_RE = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
+
+/** `text` without control characters; a tab becomes a space, a line feed stays. */
+export function stripSummaryControlCharacters(text: string): string {
+  return text.replace(/\t/g, " ").replace(SUMMARY_CONTROL_CHARACTERS_RE, "");
+}
+
 export type SummaryParseFailure = "empty" | "reasoning-leak" | "missing-title" | "missing-body";
 export type ParsedSummary = { ok: true; summary: StoredSummary } | { ok: false; reason: SummaryParseFailure };
 
-/** Line 1 is the title, the rest is the summary. Light markdown on the title line is removed, not rejected. */
+/**
+ * Line 1 is the title, the rest is the summary. Light markdown on the title line is removed, not rejected. Control
+ * characters are removed here, once, so no stored summary (artifact, summaries table, a reused copy) carries one.
+ */
 export function parseSummaryTreeOutput(output: string): ParsedSummary {
-  const text = output.normalize("NFC").replace(/\r\n?/g, "\n").trim();
+  const text = stripSummaryControlCharacters(output.normalize("NFC").replace(/\r\n?/g, "\n")).trim();
   if (!text) return { ok: false, reason: "empty" };
   if (/<think>|^\s*thinking process:/im.test(text)) return { ok: false, reason: "reasoning-leak" };
   const lineEnd = text.indexOf("\n");

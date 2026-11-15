@@ -58,7 +58,7 @@ export const searchInputSchema = z.object({
   minScore: z.number().min(0).max(1).optional().describe("Relevance floor: drop weaker matches (0 disables). The response reports noMatch when nothing relevant remains."),
   parentRetrieval: z.boolean().optional(),
   summarySeed: z.boolean().optional().describe("Narrow retrieval to the five documents whose chunks score highest for the query. It searches chunks, not summaries, and is unrelated to summaryTree."),
-  summaryTree: summaryTreeSearchModeSchema.optional().describe("How this search uses the project's summary tree: off, guide (section summaries pick extra chunks; results stay real chunks) or include (the matching summaries are also returned in summaries, labelled, never as results). Omitted: the project's retrieval default. Hybrid and deep mode only, and only for a project that builds the tree; the response's summaryTree field says what ran."),
+  summaryTree: summaryTreeSearchModeSchema.optional().describe("How this search uses the project's summary tree: off, guide (section summaries pick extra chunks; results stay real chunks) or include (the matching summaries are also returned in summaries, labelled, never as results). Omitted: the project's retrieval default. That default is also the most a request may ask for, unless the caller may edit the project (or is a server key with projects:manage); a request above it runs at the default. Hybrid and deep mode only, and only for a project that builds the tree; the response's summaryTree field says what ran."),
   compression: z.boolean().optional(),
   queryRewrite: z.boolean().optional(),
   queryDecompose: z.boolean().optional(),

@@ -351,12 +351,18 @@ describe("search response cache and the summary tree", () => {
       const second = await post({ key: "a1" }, body);
       expect([skipped, cachedReplay(second.json), hybridSearch.mock.calls.length]).toEqual([skipped, false, 2]);
       expect(second.json.summaryTree).toMatchObject({ applied: "include" });
-      // That one is stored and replayed with its summaries.
-      const third = await post({ key: "a1" }, body);
-      expect(cachedReplay(third.json)).toBe(true);
-      expect(third.json.summaries).toEqual([summary]);
-      expect(hybridSearch).toHaveBeenCalledTimes(2);
     }
+    // A `guide` answer that applied as requested is stored and replayed: its results are chunks only.
+    routes.clearSearchResponseCacheForTests();
+    hybridSearch.mockClear();
+    const guideBody = { ...body, summaryTree: "guide" as const };
+    hybridSearch.mockImplementationOnce(answer({ requested: "guide", applied: "guide", ms: 9 }));
+    await post({ key: "a1" }, guideBody);
+    const replayed = await post({ key: "a1" }, guideBody);
+    expect(cachedReplay(replayed.json)).toBe(true);
+    expect(replayed.json.summaryTree).toMatchObject({ applied: "guide" });
+    expect(replayed.json).not.toHaveProperty("summaries");
+    expect(hybridSearch).toHaveBeenCalledTimes(1);
     // A sub-search answer that applied `guide` for an `include` request is not what was asked either.
     routes.clearSearchResponseCacheForTests();
     hybridSearch.mockClear();
@@ -374,6 +380,27 @@ describe("search response cache and the summary tree", () => {
     }
   });
 
+  it("never stores a response that carries summaries: deleted or corrected text cannot replay from the cache", async () => {
+    // `include` applied exactly as requested, complete, nothing pending: everything the store rule otherwise needs.
+    hybridSearch.mockImplementationOnce(answer({ requested: "include", applied: "include", ms: 9 }, [summary]));
+    const first = await post({ key: "a1" }, body);
+    expect(first.json.summaries).toEqual([summary]);
+    expect((await import("../search/response-cache.js")).searchResponseCacheStatsForTests().entries).toBe(0);
+    // The document is deleted (or corrected): the next identical request runs retrieval again and gets no summary.
+    hybridSearch.mockImplementationOnce(answer({ requested: "include", applied: "include", ms: 9 }, []));
+    const second = await post({ key: "a1" }, body);
+    expect(cachedReplay(second.json)).toBe(false);
+    expect(second.json.summaries).toEqual([]);
+    expect(JSON.stringify(second.json)).not.toContain("A model-written section summary.");
+    expect(hybridSearch).toHaveBeenCalledTimes(2);
+    // An empty summaries list is still an `include` answer, and is not stored either.
+    expect((await import("../search/response-cache.js")).searchResponseCacheStatsForTests().entries).toBe(0);
+    // Nor a response that says `include` applied but lists none.
+    hybridSearch.mockImplementationOnce(answer({ requested: "include", applied: "include", ms: 9 }));
+    await post({ key: "a1" }, body);
+    expect((await import("../search/response-cache.js")).searchResponseCacheStatsForTests().entries).toBe(0);
+  });
+
   it("keys on summaryTree: an answer shaped by the tree is never replayed for a request that did not ask", async () => {
     hybridSearch.mockImplementationOnce(answer({ requested: "include", applied: "include", ms: 9 }, [summary]));
     await post({ key: "a1" }, body);
@@ -388,17 +415,19 @@ describe("search response cache and the summary tree", () => {
   it("drops cached tree answers on a readiness hint: a withdrawal at once, an arrival within the debounce window", async () => {
     vi.stubEnv("SEARCH_ELIGIBLE_DEBOUNCE_MS", "0");
     const { handleSearchEligibilityHint } = await import("../search/eligible-documents.js");
-    hybridSearch.mockImplementation(answer({ requested: "include", applied: "include", ms: 9 }, [summary]));
+    // Answers shaped by the tree that are stored at all: `guide` (an `include` answer never is).
+    const guided = { ...body, summaryTree: "guide" as const };
+    hybridSearch.mockImplementation(answer({ requested: "guide", applied: "guide", ms: 9 }));
     try {
-      await post({ key: "a1" }, body);
-      expect(cachedReplay((await post({ key: "a1" }, body)).json)).toBe(true);
+      await post({ key: "a1" }, guided);
+      expect(cachedReplay((await post({ key: "a1" }, guided)).json)).toBe(true);
       // The trigger of migration 0164 sends this when a tree leaves `ready`.
       handleSearchEligibilityHint(JSON.stringify({ projectIds: [WS.std] }));
-      expect(cachedReplay((await post({ key: "a1" }, body)).json)).toBe(false);
-      expect(cachedReplay((await post({ key: "a1" }, body)).json)).toBe(true);
+      expect(cachedReplay((await post({ key: "a1" }, guided)).json)).toBe(false);
+      expect(cachedReplay((await post({ key: "a1" }, guided)).json)).toBe(true);
       // And this when one becomes `ready`.
       handleSearchEligibilityHint(JSON.stringify({ projectIds: [WS.std], debounce: true }));
-      expect(cachedReplay((await post({ key: "a1" }, body)).json)).toBe(false);
+      expect(cachedReplay((await post({ key: "a1" }, guided)).json)).toBe(false);
     } finally {
       hybridSearch.mockImplementation(async (_q: string, userId: string, options: { filters?: { projectId?: string } }) => ({
         results: [{ id: `hit-for-${userId}-in-${options.filters?.projectId}` }],
@@ -413,7 +442,11 @@ describe("search response cache and the summary tree", () => {
     keys.tree = { id: created.key.id, raw: created.rawKey };
     hybridSearch.mockImplementationOnce(answer({ requested: "include", applied: "include", ms: 9 }, [summary]));
     expect((await post({ key: "tree" }, body)).json.summaries).toEqual([summary]);
-    expect(cachedReplay((await post({ key: "tree" }, body)).json)).toBe(true);
+    // The cache is warm for this key with a `guide` answer of the same search (summaries themselves are never stored).
+    const guided = { ...body, summaryTree: "guide" as const };
+    hybridSearch.mockImplementationOnce(answer({ requested: "guide", applied: "guide", ms: 9 }));
+    await post({ key: "tree" }, guided);
+    expect(cachedReplay((await post({ key: "tree" }, guided)).json)).toBe(true);
 
     // Scope without search: refused before the cache is read or a search runs.
     await sql`update api_keys set scopes = ${sql.array(["chat"])} where id = ${created.key.id}`;
@@ -428,9 +461,12 @@ describe("search response cache and the summary tree", () => {
     await apiKeys.revokeApiKey(created.key.id, "alice");
     const revoked = await post({ key: "tree" }, body);
     expect([revoked.status, revoked.json.summaries, revoked.json.results]).toEqual([401, undefined, undefined]);
+    for (const refusedBody of [guided]) {
+      expect((await post({ key: "tree" }, refusedBody)).status).toBe(401);
+    }
     // Another organization's key with the identical body: no cached node, no access.
     const foreign = await post({ key: "c1" }, body);
     expect([foreign.json.summaries, foreign.json.results]).toEqual([undefined, undefined]);
-    expect(hybridSearch).toHaveBeenCalledTimes(1);
+    expect(hybridSearch).toHaveBeenCalledTimes(2);
   });
 });

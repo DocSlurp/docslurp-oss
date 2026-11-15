@@ -475,7 +475,12 @@ async function lookupRetrieve(body: SearchInput & { projectId: string }, scope: 
     // A response with pages still materializing must not be replayed as final. Nor one the summary tree was asked
     // to shape and did not (deadline, not ready, error, mode): only `applied === requested` is the answer to replay.
     const treeApplied = !data.summaryTree || data.summaryTree.applied === data.summaryTree.requested;
-    if (ticket && treeApplied && data.availability?.status === "complete" && !(data.deferred && data.deferred.pendingPages > 0)) {
+    // A response that carries section summaries (`include`) is never stored. A summary is model-written text about a
+    // document; replayed from this cache it would outlive the document's deletion or correction for the cache's
+    // lifetime, where every fresh search re-validates each summary against Postgres. Chunk results are replayed as
+    // before; an `include` search pays for its retrieval every time.
+    const carriesSummaries = data.summaries !== undefined || data.summaryTree?.applied === "include";
+    if (ticket && treeApplied && !carriesSummaries && data.availability?.status === "complete" && !(data.deferred && data.deferred.pendingPages > 0)) {
       await storeResponse(ticket, data, data.availability?.scope?.projectId);
     }
     return data;

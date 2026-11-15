@@ -439,7 +439,7 @@ In-process caches cut repeated-query latency. Each is per server process and nev
   - **Privacy.** Searches of a `strict-privacy` project (including the default project when the request names none) are never cached or served from the cache. The project's access and privacy mode are read again on every request, and once more just before a response is stored, so a project switched to strict-privacy while a search runs gets no entry. A lookup that fails or takes longer than `SEARCH_RESPONSE_CACHE_LOOKUP_TIMEOUT_MS` (default 250) skips the cache.
   - **Authorization.** Authentication, key scopes, the key's project allowlist and project access are checked on every request before the cache is read, so a revoked or narrowed key, or a user removed from the project, is refused rather than served a cached answer. Entries are keyed on a hash of the organization, user, API key, resolved project and the request.
   - **Staleness.** A cached answer can be up to one TTL (30 seconds by default) old. Document deletes and moves, project setting, pipeline and privacy changes, and search-setting changes drop the project's entries in every API process through the `search_eligibility` and run-event hints, but those hints are best effort, so the TTL is the bound. Set `SEARCH_RESPONSE_CACHE_TTL_MS=0` where that is too stale.
-  - **Summary tree.** A response is stored only when its `summaryTree.applied` equals `summaryTree.requested` (or it has no `summaryTree` field). One whose tree leg was skipped is never replayed, so the next identical request tries the tree again. A document's tree becoming ready, or ceasing to be, drops the project's entries through the same `search_eligibility` hint.
+  - **Summary tree.** A response is stored only when its `summaryTree.applied` equals `summaryTree.requested` (or it has no `summaryTree` field). One whose tree leg was skipped is never replayed, so the next identical request tries the tree again. A response that carries `summaries` (`include`) is never stored at all: a summary is re-validated against Postgres on every search, and a replayed one could outlive its document's deletion or correction for the cache's lifetime. `guide` responses, whose results are chunks only, are stored as before. A document's tree becoming ready, or ceasing to be, drops the project's entries through the same `search_eligibility` hint.
   - **Memory.** Entries are partitioned by organization (at most 100 entries and 8 MB each, 500 entries and 32 MB in total); a response over 1 MB is not kept, and global pressure evicts from the largest organization first, so one tenant cannot push out another's entries.
 
 - **Query-embedding cache** (on by default). Keyed by organization, provider, runtime, endpoint, model, dimensions, normalization and the query text after trimming and collapsing whitespace (case is preserved). The cache stores only a hash of that key. A hit skips the provider call and records no usage event, so `usage` and `usage_events` still count only provider calls actually made. Projects in `strict-privacy` mode always call through, because that mode writes an audit row for every private embedding call; `standard` and `local-only` use the cache. Set `SEARCH_EMBEDDING_CACHE_MAX_ENTRIES` (default 1000, `0` disables) and `SEARCH_EMBEDDING_CACHE_TTL_SECONDS` (default 3600).
@@ -463,6 +463,16 @@ matches a section's summary better than any single chunk of it.
 Send it per request (`"summaryTree": "guide"` on `POST /v1/search` and the stream, `?summaryTree=guide` on `GET`,
 `retrieval.summaryTree` on `/v1/chat`), or store it as the project's retrieval default. The request wins. It never
 turns itself on: a project that builds a tree still searches without it until a request or the default asks.
+
+**The stored default is a ceiling** (`off` < `guide` < `include`). Any caller may ask for less than the project's
+retrieval default. Asking for more decides what the project's readers are shown, so it is allowed only to a caller
+who may change the project's settings: a signed-in user with edit rights on the project, or a server API key with
+the `projects:manage` scope. For everyone else (a member or viewer without edit rights, a browser key whatever its
+scopes, a search- or chat-scoped server key, an OAuth token) a request above the default runs at the default:
+`include` against a default of `guide` returns `"requested": "include", "applied": "guide"` and no `summaries`;
+anything against a default of `off` returns `"applied": "off", "skipped": "mode"` and reads nothing of the tree. A
+request made with an API key is judged by the key, never by its owner's rights. To give readers `include`, an editor
+stores it as the project's retrieval default.
 
 - **Where it runs.** Hybrid and deep mode. Not in keyword mode, not with a spatial (`geo`) filter or a chunk-level
   filter (page range, heading, language, date), and never on the Algolia, Meilisearch, Typesense and Pagefind

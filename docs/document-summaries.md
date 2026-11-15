@@ -301,6 +301,14 @@ version of it is processed.
 - `coverage:<checks>`: the invariant did not hold.
 - `embedding-space-mismatch`, `leaf-vectors-unusable`: the embed artifact is not
   in the project's embedding space, or a leaf has no usable vector.
+- `error:<ErrorName>`, `stopped:aborted`: the build threw (a storage or database
+  failure, a cancelled activity). The row is written `partial` before the error
+  reaches the caller, so the document does not sit in `building` until the
+  staleness rule finds it; only the error's name is stored. A worker that dies
+  outright still leaves `building`, which the staleness rule covers.
+- `pii-withheld`, `rows-removed`: the tree was withdrawn (the PII policy blocked
+  or redacted a document that already had one; a queued removal deleted its
+  rows).
 
 The stage's own checkpoint is `completed` in every case above: a `partial` or
 `blocked` tree never fails the document or the run. The stage stats
@@ -365,6 +373,10 @@ later build.
 - Requests go through the fleet rate limiter (`runWithProviderRateLimit`). A
   rate rule for the text route is deployment configuration (`AI_RATE_LIMITS`);
   without one the limiter passes requests through.
+- The model's answer is parsed once: control characters (C0 except the
+  paragraph break, DEL, C1) and bidirectional controls are removed before the
+  summary is stored, so no artifact, table row or reused copy carries one. The
+  CLI also strips them from what it prints.
 - A content refusal by the model's host is a failed group with the reason
   `content-refusal`. Worker text calls have no content-refusal fallback route,
   so a group refused twice leaves the document `partial`.
@@ -412,7 +424,12 @@ Reuse from the predecessor is refused, and every node is generated, when:
 - the predecessor, or its run's artifacts, is purged or archived;
 - the predecessor is PII-blocked, redacted, or withholds artifacts;
 - the predecessor has no tree, or its build registered no artifact, or the
-  registered artifact is not that document's own tree artifact.
+  registered artifact is not exactly that document's own tree artifact:
+  `<run root>/summary-tree/<documentId>/summaries.jsonl`, with the run root
+  taken from the predecessor's own rows (the storage prefix of the run its tree
+  was built in, else `<its user>/<that run>`). A registered key that only ends
+  in the same folder name, under another run, user or organization, is not
+  read.
 
 A deleted document has no row, and a version superseded by a since-deleted
 document names that document, so delete then re-upload regenerates. Another

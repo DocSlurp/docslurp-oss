@@ -430,9 +430,10 @@ describe("build", () => {
       await expect(h.build("d1", W, { concurrency, signal: controller.signal })).rejects.toThrow("worker shutting down");
       const returned = first.usages.length;
       expect(returned).toBeGreaterThanOrEqual(killAt);
-      // Every call that returned is on disk as its own part; nothing is served.
+      // Every call that returned is on disk as its own part; nothing is served. The stopped build says so itself
+      // (a worker that dies outright leaves `building`, which the staleness rule covers).
       expect(artifactRecords(h.storage, W, "d1").parts).toHaveLength(returned);
-      expect(await stateOf("d1")).toMatchObject({ status: "building" });
+      expect(await stateOf("d1")).toMatchObject({ status: "partial", error: "stopped:aborted", built_at: null });
 
       // The resumed build has a fresh model: it is asked only for what was never answered.
       const second = fakeModel();
@@ -595,6 +596,40 @@ describe("controls", () => {
     expect(result).toMatchObject({ status: "partial", reason: "stopped:org_budget_paused" });
     expect(h.embedded).toHaveLength(1);
     expect(h.rowWrites).toHaveLength(1);
+  });
+
+  it("does not leave the tree building after an unexpected error: the row says partial with a named reason, and the error still reaches the caller", async () => {
+    const h = harness();
+    await seedDocument("d1", W);
+    h.putArtifact("d1", W, book());
+    class StorageUnavailableError extends Error { override name = "StorageUnavailableError"; }
+    let writes = 0;
+    await expect(h.build("d1", W, {
+      concurrency: 4,
+      deps: { writeRows: async (write) => { if (++writes === 2) throw new StorageUnavailableError("s3: connection reset while writing customer text"); return await writeSummaryRows(write); } },
+    })).rejects.toThrow(StorageUnavailableError);
+    const state = await stateOf("d1");
+    expect(state).toMatchObject({ status: "partial", error: "error:StorageUnavailableError", build_owner: null, built_at: null });
+    // The reason is a name: no message text is stored.
+    expect(JSON.stringify(state)).not.toContain("customer text");
+    // Not waiting out the staleness window: another builder may start at once, and resumes what was paid for.
+    const calls = h.model.requests.length;
+    const resumed = await h.build("d1", W, { input: { owner: "job:j1#c1", takeOverLiveBuild: false } });
+    expect(resumed.status).toBe("ready");
+    expect(h.model.requests.length).toBe(BOOK_NODES + (calls - 8));
+
+    // A cancelled activity: `stopped:aborted`. An error with an unusable name: `error:Error`.
+    await seedDocument("d2", W);
+    h.putArtifact("d2", W, book());
+    const controller = new AbortController();
+    h.model.respond = (request, call) => { if (request.nodeId.startsWith("d2:") && !controller.signal.aborted) controller.abort(new Error("activity cancelled")); return ok(request, call); };
+    await expect(h.build("d2", W, { signal: controller.signal })).rejects.toThrow("activity cancelled");
+    expect(await stateOf("d2")).toMatchObject({ status: "partial", error: "stopped:aborted", build_owner: null });
+    h.model.respond = (request, call) => ok(request, call);
+    await seedDocument("d3", W);
+    h.putArtifact("d3", W, book());
+    await expect(h.build("d3", W, { deps: { embed: async () => { throw Object.assign(new Error("boom"), { name: "bad name; drop table" }); } } })).rejects.toThrow("boom");
+    expect(await stateOf("d3")).toMatchObject({ status: "partial", error: "error:Error" });
   });
 
   it("refuses a document over the node cap before any call", async () => {
@@ -967,7 +1002,7 @@ describe("reuse boundary", () => {
   it("reuses the replaced version's summaries for unchanged sections and copies them into its own artifact", async () => {
     const h = harness();
     const first = await seedChain(h, W, { edit: (paragraphs) => { paragraphs[125]!.text = "A rewritten paragraph about the Lisbon office opening."; } });
-    expect(await findSummaryReusePredecessor(sql, W, "v2")).toEqual({ predecessor: { documentId: "v1", artifactUri: first.artifactUri } });
+    expect(await findSummaryReusePredecessor(sql, W, "v2")).toEqual({ predecessor: { documentId: "v1", artifactUri: first.artifactUri, runRoot: "u1/run-v1" } });
 
     const result = await h.build("v2", W);
     expect(result.status).toBe("ready");
@@ -1050,7 +1085,7 @@ describe("reuse boundary", () => {
       await change();
       await expectNoReuse(h, W, refusal);
     }
-  });
+  }, 30_000);
 
   it("regenerates after delete and re-upload: a deleted document is never a source", async () => {
     const h = harness();
@@ -1081,13 +1116,45 @@ describe("reuse boundary", () => {
     const result = await h.build("v2", W);
     expect(result.stats).toMatchObject({ reusedFromPredecessor: 0, modelCalls: BOOK_NODES, predecessorReuse: "predecessor-artifact-unregistered" });
 
+    // A registered URI that ends in the predecessor's own folder name but lives under another run root, another
+    // user's root or another organization's: every one holds a full copy of the matching summaries, and none is read.
+    const own = "u1/run-v1/summary-tree/v1/summaries.jsonl";
+    for (const foreign of [
+      "u1/run-other/summary-tree/v1/summaries.jsonl",
+      "u2/run-v1/summary-tree/v1/summaries.jsonl",
+      "extracts/o2/ext_0123456789abcdef0123456789abcdef/summary-tree/v1/summaries.jsonl",
+      "u1/run-v1/nested/u1/run-v1/summary-tree/v1/summaries.jsonl",
+      "x/u1/run-v1/summary-tree/v1/summaries.jsonl",
+    ]) {
+      await sql`delete from documents`;
+      await sql`delete from project_runs`;
+      const planted = harness();
+      await seedChain(planted, W);
+      planted.storage.objects.set(foreign, planted.storage.objects.get(own)!);
+      planted.storage.opened.length = 0;
+      const reads: string[] = [];
+      const getBytes = planted.storage.getBytes.bind(planted.storage);
+      planted.storage.getBytes = async (key: string) => { reads.push(key); return await getBytes(key); };
+      await sql`update document_run_stage_states set artifact_uri = ${artifactUri(BUCKET, foreign)} where document_id = 'v1' and stage_name = 'summary-tree'`;
+      const refused = await planted.build("v2", W);
+      expect([foreign, refused.stats.predecessorReuse, refused.stats.reusedFromPredecessor, refused.stats.modelCalls])
+        .toEqual([foreign, "predecessor-artifact-unregistered", 0, BOOK_NODES]);
+      expect(reads).not.toContain(foreign);
+    }
+    // Its own pack, registered as it is, is read.
+    await sql`delete from documents`;
+    await sql`delete from project_runs`;
+    const honest = harness();
+    await seedChain(honest, W);
+    expect((await honest.build("v2", W)).stats).toMatchObject({ predecessorReuse: "used", reusedFromPredecessor: BOOK_NODES, modelCalls: 0 });
+
     await sql`delete from documents`;
     await sql`delete from project_runs`;
     const unregistered = harness();
     await seedChain(unregistered, W);
     await sql`delete from document_run_stage_states where document_id = 'v1' and stage_name = 'summary-tree'`;
     await expectNoReuse(unregistered, W, "predecessor-artifact-unregistered");
-  });
+  }, 30_000);
 
   it("gives a dedup copy its own tree and shares no row or summary with its source", async () => {
     const h = harness();
@@ -1463,7 +1530,7 @@ describe("predecessor lookup", () => {
   it("names the version a document directly replaces, before and after it is superseded", async () => {
     const h = harness();
     const first = await seedChain(h, W);
-    const expected = { predecessor: { documentId: "v1", artifactUri: first.artifactUri } };
+    const expected = { predecessor: { documentId: "v1", artifactUri: first.artifactUri, runRoot: "u1/run-v1" } };
     expect(await findSummaryReusePredecessor(sql, W, "v2")).toEqual(expected);
     // Once v2 completes, v1 is superseded by it: still the direct predecessor (a backfill of v2).
     await complete("v2");

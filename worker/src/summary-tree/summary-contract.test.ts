@@ -138,6 +138,27 @@ describe("summary output parser", () => {
     });
   });
 
+  it("removes terminal and bidirectional control characters from the title and the summary", () => {
+    const ESC = "\u001b";
+    const hostile = `${ESC}]0;owned${"\u0007"}Quarter${ESC}[2J results\u202e\n` +
+      `Revenue${ESC}[31m rose\u0000 14%.\u009b1;1H\u0085 \u2066Margins\u2069 widened\u200f.\tDone\u007f.\n\nHiring\u061c doubled\u202a.`;
+    const parsed = parseSummaryTreeOutput(hostile);
+    expect(parsed).toEqual({
+      ok: true,
+      summary: { title: "]0;ownedQuarter[2J results", text: "Revenue[31m rose 14%.1;1H Margins widened. Done.\n\nHiring doubled." },
+    });
+    const stored = JSON.stringify(parsed);
+    // Nothing in C0 (but the paragraph break), DEL, C1 or the bidi controls survives.
+    expect(stored.replace(/\\n/g, "")).not.toMatch(/\\u00[0-1][0-9a-f]|\\u007f|[\u0080-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/i);
+    // Text that is only control characters is no summary.
+    expect(parseSummaryTreeOutput(`${ESC}\u0000\n\u009b\u202e\u2066`)).toEqual({ ok: false, reason: "empty" });
+    expect(parseSummaryTreeOutput(`Title\n\u0000\u009b\u202e`)).toEqual({ ok: false, reason: "missing-body" });
+    // Ordinary non-ASCII text, emoji joiners and combining marks are kept.
+    expect(parseSummaryTreeOutput("Résumé 四半期\nL'été: 売上高は14%増加。👩‍💻 joined.")).toEqual({
+      ok: true, summary: { title: "Résumé 四半期", text: "L'été: 売上高は14%増加。👩‍💻 joined." },
+    });
+  });
+
   it("rejects output that breaks the contract", () => {
     expect(parseSummaryTreeOutput("  \n ")).toEqual({ ok: false, reason: "empty" });
     expect(parseSummaryTreeOutput("Only one line with no body")).toEqual({ ok: false, reason: "missing-body" });

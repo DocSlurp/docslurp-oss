@@ -24,7 +24,7 @@ import {
   SummaryRowsRefused,
   writeSummaryRows,
 } from "../stages/lancedb-summaries.js";
-import { enqueueSummaryTreeCleanup } from "../summary-tree/state-store.js";
+import { enqueueSummaryTreeCleanup, withdrawSummaryTreeForPii } from "../summary-tree/state-store.js";
 import { createMigratedDatabase } from "../test/migrated-db.js";
 import { serveOnRandomPort } from "../test/migrated-postgres.js";
 
@@ -509,5 +509,61 @@ describe("queued removal of one document's summary tree (summary_tree_document)"
     expect(store.objects.size).toBe(3);
     expect(await registry("a")).toEqual({ trees: 1, nodes: 6 });
     expect(await registry("x1")).toEqual({ trees: 1, nodes: 6 });
+  });
+
+  it("withdraws the tree of a document the PII policy blocks or redacts, and leaves a document without a tree alone", async () => {
+    await seedDocument("a", W);
+    await seedTree("a", W, (index) => `ERASEME-${index} written before the policy`);
+    await seedDocument("b", W);
+    await seedTree("b", W, (index) => `KEEPME-b-${index}`);
+    await seedDocument("c", W);
+    // First ingestion: no tree yet, nothing to withdraw, and nothing queued that could disturb the build to come.
+    expect(await withdrawSummaryTreeForPii(sql, "c")).toBe(false);
+    expect(await withdrawSummaryTreeForPii(sql, "missing")).toBe(false);
+    expect(await sql`select 1 from storage_cleanup_queue`).toEqual([]);
+
+    expect(await withdrawSummaryTreeForPii(sql, "a")).toBe(true);
+    // Not served from this moment, before any sweep.
+    expect(await sql`select status, error, built_at from document_summary_trees where document_id = 'a'`).toEqual([{ status: "partial", error: "pii-withheld", built_at: null }]);
+    expect(await sql`select kind, target, reason from storage_cleanup_queue`).toEqual([{ kind: "summary_tree_document", target: "o1|w|a", reason: "pii_withheld" }]);
+    expect(await drainStorageCleanupQueue(sql, storage, options())).toEqual({ purged: 1, failed: 0 });
+    expect(await summaryDocuments(W)).toEqual(["b"]);
+    expect(await filesContaining("ERASEME-")).toEqual([]);
+    expect(await registry("a")).toEqual({ trees: 1, nodes: 0 });
+    expect(await registry("b")).toEqual({ trees: 1, nodes: 6 });
+  });
+
+  it("says once, at error level, when a cleanup row reaches its attempt limit and will not be retried", async () => {
+    await seedDocument("a", W);
+    await seedTree("a", W, (index) => `ERASEME-${index}`);
+    await seedDocument("d", W);
+    await seedTree("d", W, (index) => `ERASEME-d-${index}`);
+    // A queued removal of a live document's tree, and a deleted document's own cleanup: both strict deletes keep failing.
+    await enqueueSummaryTreeCleanup(sql, { scope: W, documentId: "a", reason: "document_corrected" });
+    await sql`delete from documents where id = 'd'`;
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const failing: DeleteVectorRows = async () => { throw new Error("history prune failed for s3://bucket/secret-path"); };
+    const limitLines = () => errors.mock.calls.map((call) => String(call[0])).filter((line) => line.includes("status=attempt-limit-reached"));
+    for (let attempt = 1; attempt <= 9; attempt++) {
+      await drainStorageCleanupQueue(sql, storage, options({ deleteVectorRows: failing }));
+      await drainDocumentCleanupQueue(sql, storage, options({ deleteVectorRows: failing }));
+    }
+    expect(limitLines()).toEqual([]);
+    await drainStorageCleanupQueue(sql, storage, options({ deleteVectorRows: failing }));
+    await drainDocumentCleanupQueue(sql, storage, options({ deleteVectorRows: failing }));
+    const [queued] = await sql<{ id: string }[]>`select id::text from storage_cleanup_queue`;
+    expect(limitLines().sort()).toEqual([
+      "[cleanup] status=attempt-limit-reached queue=document_cleanup_queue id=d org=o1 attempts=10 action=manual-reconciliation-required",
+      `[cleanup] status=attempt-limit-reached queue=storage_cleanup_queue id=${queued!.id} kind=summary_tree_document org=o1 attempts=10 action=manual-reconciliation-required`,
+    ]);
+    // Stable and free of the failure's own text.
+    expect(limitLines().join(" ")).not.toContain("secret-path");
+    // The rows stay (the data is still there) and are not claimed again: nothing more is logged.
+    await drainStorageCleanupQueue(sql, storage, options({ deleteVectorRows: failing }));
+    await drainDocumentCleanupQueue(sql, storage, options({ deleteVectorRows: failing }));
+    expect(limitLines()).toHaveLength(2);
+    expect(await sql`select attempts from storage_cleanup_queue`).toEqual([{ attempts: 10 }]);
+    expect(await sql`select attempts from document_cleanup_queue`).toEqual([{ attempts: 10 }]);
+    expect(await summaryDocuments(W)).toEqual(["a", "d"]);
   });
 });

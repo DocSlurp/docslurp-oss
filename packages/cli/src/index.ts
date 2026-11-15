@@ -1303,15 +1303,27 @@ type CliSearchResponse = {
   summaries?: Array<{ kind: "summary"; filename: string; level: number; summary: string; pageStart: number | null; pageEnd: number | null }>;
 };
 
+/**
+ * Text from a response, safe to print: no C0 or C1 control characters (ESC and CSI sequences would move the cursor,
+ * recolor or retitle the terminal) and no bidirectional controls (they reorder what is read). Whitespace controls
+ * become a space.
+ */
+export function printable(text: string): string {
+  return String(text)
+    .replace(/[\t\n\r\u000b\u000c\u0085\u2028\u2029]+/g, " ")
+    .replace(/[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, "");
+}
+
 /** Section summaries are printed apart from the passages and marked, so they are never read as quotes. */
 function printSummaries(data: CliSearchResponse): void {
-  if (data.summaryTree?.skipped) console.error(`Summary tree not used (${data.summaryTree.skipped}).`);
+  if (data.summaryTree?.skipped) console.error(`Summary tree not used (${printable(data.summaryTree.skipped)}).`);
   if (!data.summaries?.length) return;
   console.log("\nSection summaries (model-written, not quotes):");
   for (const item of data.summaries) {
     const pages = item.pageStart == null ? "" : item.pageEnd != null && item.pageEnd !== item.pageStart ? ` (pp.${item.pageStart}-${item.pageEnd})` : ` (p.${item.pageStart})`;
-    console.log(`  [summary] ${item.filename}${pages}`);
-    console.log(`     ${item.summary.slice(0, 400).replace(/\n/g, " ")}`);
+    // Model-written text over document text, and a filename: neither reaches the terminal with a control character.
+    console.log(`  [summary] ${printable(item.filename)}${pages}`);
+    console.log(`     ${printable(item.summary).slice(0, 400)}`);
   }
 }
 

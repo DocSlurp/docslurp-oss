@@ -383,6 +383,25 @@ test("full-index and reprocess --estimate hit estimate routes only", async () =>
   assert.deepEqual(JSON.parse(re.requests[0].body), { stageFrom: "embed" });
 });
 
+test("search --summary-tree include never prints a control character from a summary or its filename", async () => {
+  const ESC = "\u001b";
+  const body = {
+    results: [{ score: 0.9, text: "A real passage.", citation: { filename: "report.pdf", pageNumber: 4 } }],
+    summaryTree: { requested: "include", applied: "include", ms: 12 },
+    summaries: [{
+      kind: "summary", level: 1, pageStart: 3, pageEnd: 6,
+      filename: `re${ESC}[2Jport\u202e.pdf`,
+      summary: `Growth${ESC}]0;owned\u0007 summary.${ESC}[1;1H\u009b31m\nSecond\u2066 line\u2069\u0000 here.\rEnd\u200f.`,
+    }],
+  };
+  const ok = await invoke(["search", "question", "--summary-tree", "include"], () => ({ body }), { project: "project" });
+  assert.equal(ok.code, 0, ok.stderr);
+  const printed = ok.stdout.slice(ok.stdout.indexOf("Section summaries"));
+  assert.match(printed, /\[summary\] re\[2Jport\.pdf \(pp\.3-6\)\n {5}Growth\]0;owned summary\.\[1;1H31m Second line here\. End\.\n/);
+  // No C0 control but the line feeds the CLI itself wrote, no DEL, no C1, no bidirectional control.
+  assert.doesNotMatch(printed, /[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/);
+});
+
 test("summary-tree backfill needs a cap, estimates without starting, and reads and cancels its job", async () => {
   const job = (status, extra = {}) => ({
     id: "tj1", projectId: "w", status, blockedReason: null, maxCostCents: 500, costCents: 12.5, documentsTotal: 10, documentsReady: 3, documentsSkipped: 5,

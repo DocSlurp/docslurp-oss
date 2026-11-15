@@ -24,6 +24,7 @@ import type { SearchFilters } from "./filters.js";
 import { lanceDbSummarySearch, type LanceDbSummaryHit } from "./lancedb.js";
 import { embeddingNoiseBaseline, resolveMinScore, vectorRelevance } from "./relevance.js";
 import { rerankBM25 } from "./rerank.js";
+import { clampSummaryTreeMode } from "./summary-tree-ceiling.js";
 import { retrievalScope } from "./retrieval-scope.js";
 import { countSearchEvent, recordSearchPhase } from "./timings.js";
 import { estimateTextTokens } from "./token-estimate.js";
@@ -80,6 +81,10 @@ export interface SummaryTreeSearchPlan {
  *
  * A sub-search of decomposition, stepback or multi-hop runs `guide` even when `include` was asked: its results are
  * fused as chunks by the parent, and a summary must never enter that list.
+ *
+ * `ceiling` is the most this caller may run (summary-tree-ceiling.ts: the project's retrieval default, for a caller
+ * who may not raise it). A request above it runs at the ceiling and the response says what applied; with a ceiling
+ * of `off` it does not run at all (`applied: "off"`, `skipped: "mode"`).
  */
 export function planSummaryTreeSearch(args: {
   /** The request's own `summaryTree`, undefined when it sent none. */
@@ -93,6 +98,8 @@ export function planSummaryTreeSearch(args: {
   /** The request's filters, before the project scope is added. */
   filters: SearchFilters | undefined;
   subSearch: boolean;
+  /** The most the caller may run; omitted: no ceiling. */
+  ceiling?: SummaryTreeSearchMode;
 }): SummaryTreeSearchPlan | null {
   const explicit = args.explicit === undefined ? undefined : summaryTreeSearchModeSchema.safeParse(args.explicit);
   // An unparseable request value asks for nothing; it never falls through to the project default.
@@ -100,9 +107,12 @@ export function planSummaryTreeSearch(args: {
   const projectDefault = summaryTreeSearchModeSchema.safeParse(args.projectDefault ?? "off");
   const asked = explicit ? explicit.data : projectDefault.success ? projectDefault.data : "off";
   if (asked === "off") return null;
-  const servable = effectiveSummaryTreeSearchMode({ pipeline: args.pipeline, requested: asked, env: args.env }) !== "off";
-  const runnable = servable && args.searchMode !== "keyword" && args.native && !args.filters?.geo && nativeScopeSupported(args.filters);
-  if (runnable) return { requested: asked, run: args.subSearch ? "guide" : asked };
+  const allowed = args.ceiling === undefined ? asked : clampSummaryTreeMode(asked, args.ceiling);
+  if (allowed !== "off") {
+    const servable = effectiveSummaryTreeSearchMode({ pipeline: args.pipeline, requested: allowed, env: args.env }) !== "off";
+    const runnable = servable && args.searchMode !== "keyword" && args.native && !args.filters?.geo && nativeScopeSupported(args.filters);
+    if (runnable) return { requested: asked, run: args.subSearch ? "guide" : allowed };
+  }
   return explicit ? { requested: asked, run: null } : null;
 }
 

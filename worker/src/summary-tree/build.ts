@@ -927,14 +927,23 @@ export async function buildDocumentSummaryTree(deps: SummaryTreeBuildDeps, input
         stats.predecessorReuse = found.refused;
         return null;
       }
-      // The registered artifact must be the predecessor's own tree artifact in this bucket, and nothing else.
+      // The registered artifact must be the predecessor's own tree artifact in this bucket, and nothing else: exactly
+      // the pack under the run root its own rows name. A suffix match alone would accept a registered URI under
+      // any other run, user or organization that ends in the same folder name.
       const key = deps.artifacts.keyFromUri(found.predecessor.artifactUri);
-      const suffix = `/summary-tree/${found.predecessor.documentId}/summaries.jsonl`;
-      if (!key || !key.endsWith(suffix)) {
+      let expectedRoot: string;
+      try {
+        expectedRoot = summaryTreeArtifactRoot(found.predecessor.runRoot, found.predecessor.documentId);
+      } catch (error) {
+        if (!(error instanceof SummaryTreeInputError)) throw error;
         stats.predecessorReuse = "predecessor-artifact-unregistered";
         return null;
       }
-      const contents = await readSummaryTreeArtifact(deps.artifacts, key.slice(0, -"/summaries.jsonl".length));
+      if (!key || key !== summaryTreePackKey(expectedRoot)) {
+        stats.predecessorReuse = "predecessor-artifact-unregistered";
+        return null;
+      }
+      const contents = await readSummaryTreeArtifact(deps.artifacts, expectedRoot);
       stats.predecessorReuse = contents.entries.size > 0 ? "used" : "predecessor-artifact-empty";
       return {
         entries: contents.entries,
@@ -960,6 +969,22 @@ export async function buildDocumentSummaryTree(deps: SummaryTreeBuildDeps, input
       if (everHeld && (standing === "gone" || standing === "corrected")) await removeWhatWasWritten(standing);
       return finish("refused", { reason: standing === "corrected" ? "document-corrected" : "document-not-live" });
     }
+    // Anything else (a storage or database failure, an unusable provider answer, a cancelled activity): the build
+    // does not leave its row `building` for the staleness rule to find ten minutes later. The row says `partial`
+    // with a named reason, so a later build resumes at once; then the error goes to the caller as before. The
+    // staleness rule remains the backstop for a worker that dies without reaching this.
+    if (holding && !takenOver) {
+      const name = error instanceof Error && /^[A-Za-z][A-Za-z0-9_]{0,60}$/.test(error.name) ? error.name : "Error";
+      const reason = signal?.aborted ? "stopped:aborted" : `error:${name}`;
+      try {
+        await writeSummaryTreeState(deps.sql, { scope, documentId, runId, status: "partial", configHash: contextKey, space: space.dimensions > 0 ? space : null, error: reason });
+        stats.summaryTreeStatus = "partial";
+        stats.summaryTreeReason = reason;
+      } catch (stateError) {
+        console.warn(`[summary-tree] document=${documentId} state=building-left reason=${reason} error=${stateError instanceof Error ? stateError.name : "error"}`);
+      }
+    }
+    await deps.flushUsage?.().catch(() => undefined);
     throw error;
   } finally {
     if (heartbeat) clearInterval(heartbeat);
