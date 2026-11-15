@@ -18,7 +18,7 @@ export default defineConfig({
     setupFiles: ["./src/test-setup.ts"],
   },
   resolve: {
-    alias: {
+    alias: Object.entries({
       "@docslurp/shared/page-table-routing": shared("page-table-routing"),
       "@docslurp/worker/testing": resolve(__dirname, "../worker/src/testing.ts"),
       "@docslurp/shared/cancellation": shared("cancellation"),
@@ -44,6 +44,10 @@ export default defineConfig({
       "@docslurp/sdk/embed": resolve(__dirname, "../packages/sdk/src/embed/index.tsx"),
       "@docslurp/sdk/search-adapters": resolve(__dirname, "../packages/sdk/src/search-adapters.ts"),
       "@docslurp/sdk": resolve(__dirname, "../packages/sdk/src/index.ts"),
-    },
+    }).map(([find, replacement]) => ({
+      // Match the root exactly so package-exported subpaths resolve normally.
+      find: find === "@docslurp/shared" ? /^@docslurp\/shared$/ : find,
+      replacement,
+    })),
   },
 });
