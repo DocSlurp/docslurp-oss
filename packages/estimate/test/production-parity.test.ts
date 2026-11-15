@@ -2,11 +2,11 @@ import { existsSync } from "node:fs";
 import { deflateSync } from "node:zlib";
 import { expect, it } from "vitest";
 import { scanFillPageNumbers } from "@docslurp/shared";
-import { classifyAdaptivePage } from "../stages/classify-route.js";
+import { classifyAdaptivePage } from "../../../worker/src/stages/classify-route.js";
 // @ts-expect-error The built WASM JS facade has a .d.ts declaration, not .d.mts.
-import { createEstimator } from "../../../packages/estimate/js/index.mjs";
+import { createEstimator } from "../js/index.mjs";
 
-const wasmAvailable = existsSync(new URL("../../../packages/estimate/dist/docslurp_estimate.wasm", import.meta.url));
+const wasmAvailable = existsSync(new URL("../dist/docslurp_estimate.wasm", import.meta.url));
 
 function pdf(text: string, drawing = "", image = false) {
   const stream = `BT /F1 12 Tf 40 700 Td (${text}) Tj ET ${drawing}`;
