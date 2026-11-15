@@ -55,6 +55,11 @@ import { deleteDocumentSummaryRows, deleteSummaryRowsById, scheduleSummariesMain
  * when the project turned the tree on, the pipeline embeds and indexes vectors and the deployment's build switch
  * (`DOCSLURP_SUMMARY_TREE_BUILD`) is on; otherwise it makes no model call and writes nothing.
  *
+ * "The project turned the tree on" is read twice. The run's own pipeline is a snapshot from when the run was created
+ * (the API stamps it with the project's stored setting, also on reprocess and retry). The project's stored setting is
+ * then read again before every document: a project that turned the tree off after the run was created, or whose run
+ * replays an older snapshot, builds nothing more.
+ *
  * This file is the adapter: the model route (fleet rate limiter, privacy mode, lowest reasoning), the embedder,
  * the usage ledger and the spend decision. The build itself is `buildDocumentSummaryTree` (summary-tree/build.ts),
  * which the backfill job calls through `runSummaryTreeForDocument` as well.
@@ -145,6 +150,18 @@ export function summaryTreeArtifactIO(storage: SummaryTreeStorage): SummaryTreeB
     },
   };
   return { ...io, uri: (key) => storage.uri(key), keyFromUri: (uri) => keyFromStorageUri(uri, storage.bucket) };
+}
+
+/**
+ * The project's stored `pipeline.summaryTree.enabled`, read now. Fails closed: a project that does not exist, is not
+ * this organization's, or stores anything but an explicit `true` is off.
+ */
+export async function projectSummaryTreeEnabled(sql: Client, scope: { orgId: string; projectId: string }): Promise<boolean> {
+  const [row] = await sql<{ enabled: boolean | null }[]>`
+    select (pipeline -> 'summaryTree' -> 'enabled') = 'true'::jsonb as enabled
+    from projects where id = ${scope.projectId} and org_id = ${scope.orgId}
+  `;
+  return row?.enabled === true;
 }
 
 export function summaryTreeConcurrency(env: Env = process.env): number {
@@ -423,6 +440,11 @@ export class SummaryTreeStage implements Stage {
             // Not started: no artifact is read and no state row is written, so the document counts as having no tree yet.
             console.log(`[summary-tree] run=${state.run.id} document=${document.id} status=blocked reason=stage-time-budget`);
             return { stats: { summaryTreeStatus: "blocked", summaryTreeReason: "stage-time-budget", modelCalls: 0 }, message: "Summary tree not started (stage-time-budget)" };
+          }
+          // The project's setting as it is stored now, not as the run's snapshot has it.
+          if (!(await projectSummaryTreeEnabled(sql, { orgId, projectId }))) {
+            console.log(`[summary-tree] run=${state.run.id} document=${document.id} status=off reason=project-setting-off`);
+            return { stats: { summaryTreeStatus: "off", summaryTreeReason: "project-setting-off", modelCalls: 0 }, message: "Summary tree off (project-setting-off)" };
           }
           const embedStage = state.documentStage(document.id, "embed");
           const chunks = (embedStage?.stats as { chunks?: unknown } | undefined)?.chunks;

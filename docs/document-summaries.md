@@ -132,7 +132,19 @@ The stage runs only when all three hold (`summaryTreeBuildActive`):
 
 Otherwise it reads nothing, writes nothing and makes no model call. The switch is
 asked again before every model call, so turning it off stops a build at its next
-call. A project with the tree on always re-runs this stage in a partial
+call.
+
+**The project's setting is the stored one, never a snapshot.** A run's pipeline
+is a snapshot, and reprocess, bulk reprocess, retry, the re-index after a
+settings change and indexing-mode switches all start from a stored one. The API
+therefore writes the project's stored `summaryTree` into every run's pipeline
+when the run row is written or rewritten
+(`server/src/services/run-summary-tree.ts`), whatever the source carried, and
+the stage reads the project's stored setting again before each document
+(`projectSummaryTreeEnabled`). A project that turned the tree off builds
+nothing more: not on a replayed run, and not for the remaining documents of a
+run that is already in progress (`summaryTreeStatus: off`, reason
+`project-setting-off`). A project with the tree on always re-runs this stage in a partial
 reprocess: summary rows belong to one document version and are never copied from
 another.
 

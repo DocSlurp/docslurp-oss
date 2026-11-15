@@ -27,6 +27,7 @@ import { WorkflowState, type CheckpointStore } from "../pipeline/pipeline.js";
 import type { CommandRunner } from "../tools/runner.js";
 import { createStages } from "../stages/index.js";
 import {
+  projectSummaryTreeEnabled,
   runSummaryTreeForDocument,
   SUMMARY_TREE_EMBEDDING_USAGE_METRIC,
   SUMMARY_TREE_STAGE,
@@ -85,7 +86,8 @@ beforeEach(async () => {
   lanceRoot = await mkdtemp(path.join(tmpdir(), "docslurp-summary-stage-lance-"));
   spoolRoot = await mkdtemp(path.join(tmpdir(), "docslurp-summary-stage-spool-"));
   await sql`delete from projects`;
-  await sql`insert into projects(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W')`;
+  // The project's stored setting is on: the stage reads it before every document, whatever the run's snapshot says.
+  await sql`insert into projects(id, org_id, user_id, name, pipeline) values ('w', 'o1', 'u1', 'W', ${sql.json({ summaryTree: { enabled: true } })})`;
 });
 
 afterEach(async () => {
@@ -249,6 +251,56 @@ describe("stage", () => {
     await stageOf(storage, overrides(ON)).run(state);
     expect(requests).toEqual([]);
     expect(store.startDocumentStage).not.toHaveBeenCalled();
+  });
+
+  it("builds nothing on a replayed run snapshot once the project turned the tree off", async () => {
+    // A reprocess or retry of a run created while the tree was on: the snapshot still says enabled.
+    for (const stored of [{ summaryTree: { enabled: false } }, {}, { summaryTree: { enabled: "true" } }, { summaryTree: null }]) {
+      await sql`delete from documents`;
+      await sql`delete from project_runs`;
+      await sql`update projects set pipeline = ${sql.json(stored)} where id = 'w'`;
+      const storage = new MemoryStorage();
+      const f = fakes();
+      const { state, store } = await seed(storage, enabledPipeline(), [{ id: "long", leaves: 60 }, { id: "long2", leaves: 60 }]);
+      await stageOf(storage, f.overrides(ON)).run(state);
+      expect(f.requests).toEqual([]);
+      expect(f.embedded).toEqual([]);
+      expect(storage.opened).toEqual([]);
+      expect(await sql`select 1 from document_summary_trees`).toEqual([]);
+      expect(state.usageLedger.pendingCount).toBe(0);
+      expect(state.documentStage("long", SUMMARY_TREE_STAGE)?.stats).toMatchObject({ summaryTreeStatus: "off", summaryTreeReason: "project-setting-off", modelCalls: 0 });
+      expect(store.failDocumentStage).not.toHaveBeenCalled();
+    }
+  });
+
+  it("reads the project's own organization: another organization's project with the same id cannot turn it on", async () => {
+    await sql`update projects set pipeline = ${sql.json({ summaryTree: { enabled: false } })} where id = 'w'`;
+    await sql`insert into "user"(id, name, email) values ('u9', 'Z', 'z@example.com') on conflict do nothing`;
+    await sql`insert into organizations(id, name, slug, created_by_user_id) values ('o9', 'Other', 'other9', 'u9') on conflict do nothing`;
+    await sql`insert into projects(id, org_id, user_id, name, pipeline) values ('w9', 'o9', 'u9', 'W9', ${sql.json({ summaryTree: { enabled: true } })})`;
+    expect(await projectSummaryTreeEnabled(sql, { orgId: "o1", projectId: "w" })).toBe(false);
+    expect(await projectSummaryTreeEnabled(sql, { orgId: "o1", projectId: "w9" })).toBe(false);
+    expect(await projectSummaryTreeEnabled(sql, { orgId: "o9", projectId: "w9" })).toBe(true);
+    expect(await projectSummaryTreeEnabled(sql, { orgId: "o1", projectId: "missing" })).toBe(false);
+  });
+
+  it("stops building the run's remaining documents when the project turns the tree off mid-stage", async () => {
+    const storage = new MemoryStorage();
+    const f = fakes();
+    const { state } = await seed(storage, enabledPipeline(), [{ id: "a", leaves: 60 }, { id: "b", leaves: 60 }]);
+    state.docConcurrency = 1;
+    const overrides = f.overrides(ON);
+    const summarize = overrides.summarize!;
+    overrides.summarize = async (request) => {
+      // Turned off while the first document's last call is in flight.
+      if (request.nodeId.startsWith("a:") && request.level > 1) await sql`update projects set pipeline = ${sql.json({ summaryTree: { enabled: false } })} where id = 'w'`;
+      return await summarize(request);
+    };
+    await stageOf(storage, overrides).run(state);
+    expect(f.requests.some((request) => request.nodeId.startsWith("b:"))).toBe(false);
+    expect(storage.opened).toEqual(["u1/run-1/embeddings/a.json"]);
+    expect(state.documentStage("b", SUMMARY_TREE_STAGE)?.stats).toMatchObject({ summaryTreeStatus: "off", summaryTreeReason: "project-setting-off" });
+    expect(await sql`select document_id from document_summary_trees`).toEqual([{ document_id: "a" }]);
   });
 
   it("builds long documents, records a skip for the others, and stamps every usage event with org, project and run", async () => {
