@@ -1,5 +1,5 @@
 import { realtimeMetrics } from "./realtime/broker.js";
-import { chartExportDefaultsWarnings, chartExportSwitchWarning } from "@docslurp/shared";
+import { chartExportDefaultsWarnings, chartExportSwitchWarning, summaryTreeSwitchWarnings } from "@docslurp/shared";
 import { loadPricingProvider, pricingDurableStateFromSql } from "@docslurp/shared/pricing-loader";
 import { sql as pricingStateSql } from "./db.js";
 import { closeDirectUploadLockPool } from "./lib/direct-upload-locks.js";
@@ -53,6 +53,7 @@ import { apiKeysRoutes } from "./routes/api-keys.js";
 import { searchRoutes, searchesRoutes, projectChatRoutes } from "./routes/search.js";
 import { webRoutes } from "./routes/web.js";
 import { projectGraphRoutes } from "./routes/project-graph.js";
+import { projectSummaryTreeRoutes } from "./routes/project-summary-tree.js";
 import { artifactsRoutes } from "./routes/artifacts.js";
 import { inviteRoutes, metaRoutes, dashboardRoutes, waitlistRoutes } from "./routes/frontend.js";
 import { customerPipelineGuard } from "./middleware/customer-pipeline-guard.js";
@@ -197,7 +198,7 @@ export function createApiApp(): Hono {
   app.use("/dashboard/*", customerPipelineGuard);
   app.use("/v1/*", rejectLegacyProjectSelection);
   // `/v1/projects/:slug|default/...` → resolved project UUID routes.
-  const projectRefs = projectRefPath([projectsRoutes, chatInstructionsRoutes, connectorsRoutes, secretsRoutes, projectGraphRoutes]);
+  const projectRefs = projectRefPath([projectsRoutes, chatInstructionsRoutes, connectorsRoutes, secretsRoutes, projectGraphRoutes, projectSummaryTreeRoutes]);
   app.use("/v1/projects/:projectRef", projectRefs);
   app.use("/v1/projects/:projectRef/*", projectRefs);
 
@@ -251,6 +252,7 @@ export function createApiApp(): Hono {
   app.route("/v1/admin/projects", adminProjectsRoutes);
   app.route("/v1/projects", secretsRoutes);
   app.route("/v1/projects", projectGraphRoutes);
+  app.route("/v1/projects", projectSummaryTreeRoutes);
   app.route("/v1/user-settings", userSettingsRoutes);
   app.route("/v1/account", accountRoutes);
   app.route("/v1/whoami", whoamiRoutes);
@@ -320,6 +322,8 @@ export function ensureApiStartup(): Promise<void> {
       const chartExportWarning = chartExportSwitchWarning(process.env);
       if (chartExportWarning) console.warn(chartExportWarning);
       for (const warning of chartExportDefaultsWarnings(process.env)) console.warn(warning);
+      // The same for the two summary tree switches (build, serve).
+      for (const warning of summaryTreeSwitchWarnings(process.env)) console.warn(warning);
       // The pricing provider (DOCSLURP_PRICING_PLUGIN) prices every quote and charge; the service profile refuses to
       // start without one rather than price with the open default.
       // Its durable state (pricing_provider_state, 0131) is read-only through this process's pool; only the operator raises it.

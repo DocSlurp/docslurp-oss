@@ -26,6 +26,7 @@ export const PUBLIC_ERROR_MESSAGES = {
   unreadableSource: "This file couldn’t be read. It may be corrupt, truncated or password-protected.",
   processing: "We couldn’t finish processing this document. Please try again.",
   graphRebuildFailed: "The knowledge graph rebuild failed. Start it again; if it keeps failing, contact support.",
+  summaryTreeBackfillFailed: "The summary tree backfill failed. Start it again; what was already built is kept. If it keeps failing, contact support.",
   silentVideo: "This video has no audio track, and video frame reading is disabled for this project or server.",
   imageNeedsVision: "This image can only be read with OCR or vision, and neither is available for this project. Check the project's vision and privacy settings.",
   imageTooManyFrames: "This image has more than 64 frames (pages), the most one image file can hold. Split it into files of 64 frames or fewer, or upload it as a PDF.",

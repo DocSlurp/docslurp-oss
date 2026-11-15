@@ -1,0 +1,183 @@
+{
+  "grouping": "product library (key version 1, summary-tree-prompt@1)",
+  "options": {
+    "minLeavesPerGroup": 4,
+    "maxLeavesPerGroup": 16,
+    "minFanIn": 3,
+    "maxFanIn": 10,
+    "minDocumentLeaves": 24,
+    "maxTableLeafShare": 0.5,
+    "summaryLengthWords": 150
+  },
+  "build": {
+    "pages": 2304,
+    "nodes": 1395,
+    "nodesPerPage": 0.605,
+    "level1Groups": 1067,
+    "singleLeafGroups": 340,
+    "calls": 1396,
+    "truncationRetries": 1,
+    "contentRefusalFallbacks": 0,
+    "inputTokens": 2357061,
+    "outputTokens": 265027,
+    "sumCallSeconds": 2469.4,
+    "listPriceUsd": 0.2221,
+    "pagesPerDollar": 10373,
+    "pagesPerMinutePerConcurrentCall": 56.0,
+    "summaryTextBytes": 1430265,
+    "vectorBytesFloat32": 5713920
+  },
+  "trees": [
+    {
+      "document": "federalist-papers",
+      "leaves": 1020,
+      "nodes": 285,
+      "byLevel": {
+        "1": 178,
+        "2": 85,
+        "3": 16,
+        "4": 3,
+        "5": 2,
+        "6": 1
+      },
+      "summaryChars": 299608,
+      "treeSha256": "588e9b8748c305d676a58bedce48061fe81d5be07e3453437fb41dc75ba52294"
+    },
+    {
+      "document": "frankenstein",
+      "leaves": 306,
+      "nodes": 38,
+      "byLevel": {
+        "1": 33,
+        "2": 4,
+        "3": 1
+      },
+      "summaryChars": 38471,
+      "treeSha256": "1e09c10fd41ecfe138ef1cb3cdbc5ef055296c1adcfc577c82ece63f5c1f3ff5"
+    },
+    {
+      "document": "huckleberry-finn",
+      "leaves": 386,
+      "nodes": 48,
+      "byLevel": {
+        "1": 40,
+        "2": 7,
+        "3": 1
+      },
+      "summaryChars": 47956,
+      "treeSha256": "cd874dff7c6daf34f02ea51045cf911d40526e53a4cd0004e709c879c5e2eb29"
+    },
+    {
+      "document": "leviathan",
+      "leaves": 951,
+      "nodes": 114,
+      "byLevel": {
+        "1": 94,
+        "2": 16,
+        "3": 3,
+        "4": 1
+      },
+      "summaryChars": 127903,
+      "treeSha256": "558f9c93b0fe51135bc0c82f9841d5472e67bbbd12357e88b68334d6a56cac25"
+    },
+    {
+      "document": "origin-of-species",
+      "leaves": 772,
+      "nodes": 109,
+      "byLevel": {
+        "1": 88,
+        "2": 17,
+        "3": 2,
+        "4": 1,
+        "5": 1
+      },
+      "summaryChars": 123851,
+      "treeSha256": "c0246beada816f734a94ad28c366219b84030070f8561f40a227cd05377539db"
+    },
+    {
+      "document": "rfc9110",
+      "leaves": 518,
+      "nodes": 392,
+      "byLevel": {
+        "1": 315,
+        "2": 48,
+        "3": 18,
+        "4": 6,
+        "5": 3,
+        "6": 1,
+        "7": 1
+      },
+      "summaryChars": 364784,
+      "treeSha256": "aa4e5d446374593d3c5ceb7a380d07ac22ea60e563b4cbdf6404fdf15affb009"
+    },
+    {
+      "document": "rfc9293",
+      "leaves": 190,
+      "nodes": 119,
+      "byLevel": {
+        "1": 92,
+        "2": 15,
+        "3": 5,
+        "4": 2,
+        "5": 1,
+        "6": 1,
+        "7": 1,
+        "8": 1,
+        "9": 1
+      },
+      "summaryChars": 116781,
+      "treeSha256": "af48a60dba7e425e85a02429c1f0e20b19981c54857d717385eba44eb1188cc3"
+    },
+    {
+      "document": "second-treatise",
+      "leaves": 258,
+      "nodes": 34,
+      "byLevel": {
+        "1": 28,
+        "2": 5,
+        "3": 1
+      },
+      "summaryChars": 37382,
+      "treeSha256": "7bae9ba8d6b1054121f80ff4fa80f85d639be45e08c32873ea7cf99938b6f37f"
+    },
+    {
+      "document": "sherlock-holmes",
+      "leaves": 378,
+      "nodes": 47,
+      "byLevel": {
+        "1": 40,
+        "2": 6,
+        "3": 1
+      },
+      "summaryChars": 47698,
+      "treeSha256": "184c6340172ab570f96a137e4ec0b669731be97c1654bd6f86f19302353f9602"
+    },
+    {
+      "document": "voyage-of-the-beagle",
+      "leaves": 982,
+      "nodes": 130,
+      "byLevel": {
+        "1": 102,
+        "2": 23,
+        "3": 4,
+        "4": 1
+      },
+      "summaryChars": 144116,
+      "treeSha256": "8331ff5e038164d1c3677446b9390c460c8f50d340060c2534099579c72669d5"
+    },
+    {
+      "document": "walden",
+      "leaves": 520,
+      "nodes": 79,
+      "byLevel": {
+        "1": 57,
+        "2": 17,
+        "3": 3,
+        "4": 1,
+        "5": 1
+      },
+      "summaryChars": 81715,
+      "treeSha256": "0af9b35119eec009c930b258cc0869a021da76339be661a3e4ab0ca50e6b4af7"
+    }
+  ]
+}

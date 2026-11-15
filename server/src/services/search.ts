@@ -41,7 +41,15 @@ import { effectiveSearchMode } from "../search/search-mode.js";
 import { consumeSearchModeLimit } from "../search/search-mode-limits.js";
 import { currentRequestId, currentRequestOrgId, currentRequestSignal } from "../lib/request-context.js";
 import { jsonRecord } from "../lib/json-record.js";
-import { lanceDbFullTextSearch, lanceDbVectorSearch, warmLanceDbSearch, type LanceDbSearchHit } from "../search/lancedb.js";
+import { lanceDbFullTextSearch, lanceDbVectorSearch, warmLanceDbSearch, warmLanceDbSummaries, type LanceDbSearchHit } from "../search/lancedb.js";
+import type { SummaryTreeSearchMode, SummaryTreeSearchOutcome, SummaryTreeSummary } from "@docslurp/shared";
+import {
+  combineSummaryTreeOutcomes,
+  runSummaryTreeLegWithDeadline,
+  summaryTreeLeg,
+  summaryTreeLegChunks,
+  summaryTreeOutcome,
+} from "../search/summary-tree.js";
 import { decodeLanceChunkHydration } from "@docslurp/shared/lancedb-hydration";
 import {
   loadEligibleDocuments,
@@ -173,7 +181,17 @@ export interface SearchOptions {
   filters?: SearchFilters;
   variant?: string;
   parentRetrieval?: boolean;
+  /**
+   * Narrows retrieval to the five documents whose chunks score highest for the query (session-planner.ts). Despite
+   * its name it searches chunks, never summaries, and has nothing to do with the summary tree: see `summaryTree`.
+   */
   summarySeed?: boolean;
+  /**
+   * This request's use of the project's summary tree (search/summary-tree.ts): `off`, `guide` or `include`.
+   * Undefined: the project's retrieval default. It runs only in hybrid and deep mode, and only when the project's
+   * pipeline builds the tree and the deployment serves it; it is never derived "on".
+   */
+  summaryTree?: SummaryTreeSearchMode;
   queryRewrite?: boolean;
   queryDecompose?: boolean;
   stepback?: boolean;
@@ -380,6 +398,10 @@ export interface SearchResponse {
   searchMode?: SearchMode;
   /** Keyword fan-out: each query as sent and the chunks it matched before fusion. */
   keywordQueries?: KeywordQueryOutcome[];
+  /** What the summary tree did for this search. Absent when neither the request nor a runnable project default asked for it. */
+  summaryTree?: SummaryTreeSearchOutcome;
+  /** `include` mode: section summaries beside the results. Model-written, labelled, never citable source text. */
+  summaries?: SummaryTreeSummary[];
   /** Internal: the organization the search was scoped to (billing stamps it on the charge). Not public. */
   scopeOrgId?: string | null;
   /** Internal: the turn's calibrated vector relevance, for the chat scope decline. Not part of the public response. */
@@ -2086,6 +2108,11 @@ async function executeHybridSearch(
     return set.pageOnlyCompletedDocuments > 0;
   };
 
+  // The summary tree: a leg beside the chunk legs on the native path only (its deadline is relative to the vector leg).
+  const treePlan = setup.summaryTree ?? null;
+  const treeMode = native && !keywordOnly ? treePlan?.run ?? null : null;
+  const subSearchTreeOutcomes: SummaryTreeSearchOutcome[] = [];
+
   // Streaming: one 0-based index per sub-search of this search (decomposition, stepback, multi-hop).
   let subSearches = 0;
   const labelSubSearch = <T>(run: () => Promise<T>): Promise<T> =>
@@ -2100,6 +2127,14 @@ async function executeHybridSearch(
       warmVectorIndex: native && !keywordOnly && process.env.SEARCH_LANCE_WARM !== "0" ? () => {
         const embedding = resolveEmbeddingRoute(native.pipeline.embedding);
         void warmLanceDbSearch({ orgId: native.orgId, projectId: native.projectId, embeddingModel: embedding.model, dimension: embedding.dimensions, hydrate: true });
+        // The summaries table too, but only when Postgres (the cached eligible set) reports ready trees: never a probe.
+        if (treeMode) {
+          void loadEligibleDocuments({ projectId: native.projectId, embeddingModel: embedding.model, dimension: embedding.dimensions }).then((set) => {
+            const documentIds = set.documents.filter((document) => document.treeReady && !document.lanceStale).map((document) => document.id);
+            if (documentIds.length === 0) return;
+            return warmLanceDbSummaries({ orgId: native.orgId, projectId: native.projectId, embeddingModel: embedding.model, dimension: embedding.dimensions, documentIds });
+          }).catch(() => undefined);
+        }
       } : undefined,
       buildAvailability: (chunks, effectiveOptions) =>
         buildSearchAvailability(
@@ -2111,7 +2146,10 @@ async function executeHybridSearch(
           chunks,
         ),
       // Sub-searches (decomposition, stepback, multi-hop) stay inside the same access scope.
-      runSearch: (subQuery, subUserId, subOptions) => labelSubSearch(() => hybridSearch(subQuery, subUserId, subOptions, scope)),
+      runSearch: (subQuery, subUserId, subOptions) => labelSubSearch(() => hybridSearch(subQuery, subUserId, subOptions, scope)).then((subResponse) => {
+        if (subResponse.summaryTree) subSearchTreeOutcomes.push(subResponse.summaryTree);
+        return subResponse;
+      }),
       vectorSearch: ({ queryVector, userId, projectId, options, query }) => keywordOnly
         ? Promise.resolve(skippedLeg())
         : timePhase("vector", () => servedVectorSearch({
@@ -2151,6 +2189,33 @@ async function executeHybridSearch(
           : completedPageSearch(args);
       },
       wholeCorpusFallback,
+      ...(native && treeMode
+        ? {
+            summaryTreeSearch: async (treeArgs: Parameters<NonNullable<SearchSessionRunnerAdapters["summaryTreeSearch"]>>[0]) => {
+              const result = await runSummaryTreeLegWithDeadline({
+                startedAt: treeArgs.timing.startedAt,
+                vectorSettled: treeArgs.timing.vectorSettled,
+                run: async (expired) => {
+                  // No vector, no leg: the tree never embeds the query itself.
+                  if (!treeArgs.queryVector || treeArgs.projectId !== native.projectId) return { applied: "off", skipped: "mode", ms: 0, guided: [], summaries: [], stats: { candidateDocuments: 0, hits: 0, staleDropped: 0, belowFloor: 0, validated: 0 } };
+                  return await summaryTreeLeg({
+                    mode: treeMode,
+                    query: treeArgs.query,
+                    queryVector: treeArgs.queryVector,
+                    projectId: native.projectId,
+                    orgId: native.orgId,
+                    pipeline: native.pipeline,
+                    embeddingPipeline: treeArgs.embeddingPipeline,
+                    options: treeArgs.options,
+                    expired,
+                    deps: { mapChunk },
+                  });
+                },
+              });
+              return summaryTreeLegChunks(result);
+            },
+          }
+        : {}),
       ...(deferredProfilesEnabled() && mode === "deep"
         ? {
             deferredPageSearch: async (deferredArgs: Parameters<NonNullable<SearchSessionRunnerAdapters["deferredPageSearch"]>>[0]) => {
@@ -2185,6 +2250,11 @@ async function executeHybridSearch(
   }));
   // The mode the search ran in: billing categories and the public response read it.
   response.searchMode = mode;
+  // Every search with a plan reports what the tree did: its own leg, its sub-searches' legs, or why none ran.
+  if (treePlan && !response.summaryTree) {
+    response.summaryTree = subSearchTreeOutcomes.length > 0 ? combineSummaryTreeOutcomes(treePlan, subSearchTreeOutcomes) : summaryTreeOutcome(treePlan, null);
+    if (response.summaryTree.skipped) countSearchEvent("summaryTreeSkipped");
+  }
   fanout?.annotate(response);
   response.scopeOrgId = setup.normalizedScope.orgId;
   return response;

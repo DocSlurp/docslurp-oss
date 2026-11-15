@@ -8,3 +8,7 @@ export { drainDocumentCleanupQueue, drainStorageCleanupQueue, type SupersededPur
 export { legacyEmbeddingLocations, legacyOrgTable } from "./stages/lancedb-legacy-layout.js";
 export { buildCanonicalChunksFromDocument } from "./lib/canonical-document.js";
 export { buildMediaCanonicalDocument } from "./media/canonical.js";
+// The summary tree's build and backfill, for the server's end-to-end test of build -> search against one database
+// and one LanceDB directory.
+export { runSummaryTreeForDocument, type SummaryTreeDocumentRun, type SummaryTreeOverrides, type SummaryTreeStorage } from "./stages/summary-tree.js";
+export { registerSummaryTreeArtifact } from "./summary-tree/state-store.js";

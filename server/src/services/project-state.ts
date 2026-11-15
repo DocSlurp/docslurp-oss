@@ -1,6 +1,7 @@
 import type { ProjectState } from "@docslurp/shared";
 import { sql, type SqlClient } from "../db.js";
 import { attributedUsage } from "./usage-attribution.js";
+import { getProjectSummaryTreeState } from "./project-summary-tree.js";
 
 export type ProjectStateRow = Record<string, unknown>;
 
@@ -16,7 +17,7 @@ function nullableNumber(value: unknown): number | null {
 function distribution(row: ProjectStateRow, prefix: string) {
   return { sampleCount: number(row[`${prefix}_samples`]), p50: nullableNumber(row[`${prefix}_p50`]), p95: nullableNumber(row[`${prefix}_p95`]), max: nullableNumber(row[`${prefix}_max`]) };
 }
-export function mapProjectState(row: ProjectStateRow, args: { projectId: string; orgId: string; recentWindowHours: number }): ProjectState {
+export function mapProjectState(row: ProjectStateRow, args: { projectId: string; orgId: string; recentWindowHours: number }): Omit<ProjectState, "summaryTree"> {
   const observedAt = new Date(String(row.observed_at)).toISOString();
   const total = number(row.total_pages);
   const indexed = Math.min(total, number(row.indexed_pages));
@@ -129,5 +130,7 @@ export async function getProjectState(args: { projectId: string; orgId: string; 
       (select count(*) from valid_pages) as indexed_pages
     from clock cross join document_summary ds cross join text_summary ts cross join run_summary rs cross join search_summary ss cross join usage_summary us
   `;
-  return mapProjectState(row!, args);
+  // Read-only summary tree block: stored setting, deployment switches, build status, document counts, server constants.
+  const summaryTree = await getProjectSummaryTreeState({ projectId: args.projectId, orgId: args.orgId }, client);
+  return { ...mapProjectState(row!, args), summaryTree };
 }
