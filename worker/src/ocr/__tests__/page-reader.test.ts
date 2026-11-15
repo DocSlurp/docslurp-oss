@@ -98,6 +98,32 @@ describe("configuration", () => {
     for (const mode of ["off", "escalation", "all"]) expect(ocrPageReaderMode({ DOCSLURP_OCR_PAGE_READER: mode.toUpperCase() })).toBe(mode);
   });
 
+  it("resolves a tier word through the reviewed OCR route options and the registered reader's measured score", () => {
+    const register = (extra: Partial<PageImageReaderProvider>) => {
+      resetExtractorPluginsForTest();
+      registerExtractorPlugin({ apiVersion: EXTRACTOR_PLUGIN_API_VERSION, name: "tier-reader", pageImageReader: reader(echo, extra) });
+    };
+    // No reader registered: every tier keeps the recogniser route.
+    for (const tier of ["fastest", "balanced", "smart"]) expect(ocrPageReaderMode({ DOCSLURP_OCR_PAGE_READER: tier })).toBe("off");
+    register({ evalScore: 0.925, evalRef: "tier-benchmark-v1/page-ocr/development/run" });
+    expect(ocrPageReaderMode({ DOCSLURP_OCR_PAGE_READER: "fastest" })).toBe("off");
+    expect(ocrPageReaderMode({ DOCSLURP_OCR_PAGE_READER: "balanced" })).toBe("escalation");
+    expect(ocrPageReaderMode({ DOCSLURP_OCR_PAGE_READER: "smart", DOCSLURP_OCR_ESCALATION: "on" })).toBe("all");
+    // A reader measured under the hosted escalation reader is not smart while escalation is on.
+    register({ evalScore: 0.5, evalRef: "tier-benchmark-v1/page-ocr/development/run" });
+    expect(ocrPageReaderMode({ DOCSLURP_OCR_PAGE_READER: "smart", DOCSLURP_OCR_ESCALATION: "on" })).toBe("off");
+    // An unmeasured reader is never chosen by a tier.
+    register({});
+    expect(ocrPageReaderMode({ DOCSLURP_OCR_PAGE_READER: "smart" })).toBe("off");
+  });
+
+  it("refuses a reader whose eval score is out of range or lacks its run", () => {
+    for (const extra of [{ evalScore: 1.5, evalRef: "r" }, { evalScore: 0.9 }, { evalRef: "r" }, { evalScore: 0.9, evalRef: " " }]) {
+      resetExtractorPluginsForTest();
+      expect(() => registerExtractorPlugin({ apiVersion: EXTRACTOR_PLUGIN_API_VERSION, name: "bad-reader", pageImageReader: reader(echo, extra as never) })).toThrow(/evalScore|evalRef/);
+    }
+  });
+
   it("refuses an unknown mode", () => {
     for (const value of ["on", "true", "1", "fast", "escalation,all"]) {
       expect(() => ocrPageReaderMode({ DOCSLURP_OCR_PAGE_READER: value }), value).toThrow(/DOCSLURP_OCR_PAGE_READER must be one of/);

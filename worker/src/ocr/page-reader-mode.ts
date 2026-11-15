@@ -2,6 +2,8 @@
  * Page reader configuration (page-reader.ts): the operator flag, the per-document page budget and the startup check.
  * Kept apart from the reader so the OCR mode check (mode.ts) can run it without importing the pipeline.
  */
+import { ROUTE_TIERS, selectOcrRoute, type RouteTier } from "@docslurp/shared";
+
 import { pageImageReaderProvider } from "../extractors/plugins.js";
 import type { OcrMode } from "./mode.js";
 
@@ -13,14 +15,27 @@ export const OCR_PAGE_READER_METRIC = "ocr-page-reader";
 export const DEFAULT_OCR_PAGE_READER_MAX_PAGES = 2000;
 export const OCR_PAGE_READER_MAX_PAGES_LIMIT = 20_000;
 
-/** `DOCSLURP_OCR_PAGE_READER`: `off` (default, also unset), `escalation` or `all`. Throws on anything else. */
+/**
+ * `DOCSLURP_OCR_PAGE_READER`: `off` (default, also unset), `escalation` or `all`, or a tier word (`fastest`, `balanced`,
+ * `smart`) resolved by the reviewed OCR route options (@docslurp/shared selectOcrRoute) against the registered reader and
+ * its measured eval composite. Throws on anything else.
+ */
 export function ocrPageReaderMode(env: NodeJS.ProcessEnv = process.env): OcrPageReaderMode {
   const raw = env.DOCSLURP_OCR_PAGE_READER?.trim().toLowerCase();
   if (!raw) return "off";
+  if ((ROUTE_TIERS as readonly string[]).includes(raw)) return ocrPageReaderRoute(raw as RouteTier, env).pageReader;
   if (!(OCR_PAGE_READER_MODES as readonly string[]).includes(raw)) {
-    throw new Error(`DOCSLURP_OCR_PAGE_READER must be one of ${OCR_PAGE_READER_MODES.join(", ")}; got ${JSON.stringify(raw)}`);
+    throw new Error(`DOCSLURP_OCR_PAGE_READER must be one of ${[...OCR_PAGE_READER_MODES, ...ROUTE_TIERS].join(", ")}; got ${JSON.stringify(raw)}`);
   }
   return raw as OcrPageReaderMode;
+}
+
+/** The OCR route a tier word selects for this deployment: the registered reader (and its score) and hosted escalation. */
+export function ocrPageReaderRoute(tier: RouteTier, env: NodeJS.ProcessEnv = process.env) {
+  const provider = pageImageReaderProvider();
+  // DOCSLURP_OCR_ESCALATION, read as hosted-reader.ts ocrEscalationEnabled does (not imported: this module stays free of the pipeline).
+  const escalation = ["on", "1", "true"].includes(env.DOCSLURP_OCR_ESCALATION?.trim().toLowerCase() ?? "");
+  return selectOcrRoute(tier, { pageReader: provider ? { evalScore: provider.evalScore ?? null } : null, hostedEscalation: escalation });
 }
 
 /** `DOCSLURP_OCR_PAGE_READER_MAX_PAGES`: the per-document page budget, 0..20000 (default 2000). Throws on anything else. */
@@ -77,6 +92,8 @@ export function assertOcrPageReaderConfiguration(env: NodeJS.ProcessEnv, ocrMode
     throw new Error(`DOCSLURP_OCR_PAGE_READER=${mode} needs a page image reader plugin (pageImageReader in DOCSLURP_EXTRACTOR_PLUGINS); refusing to start rather than read pages anywhere else`);
   }
   provider.assertConfigured();
-  console.log(`[ocr] page-reader mode=${mode} provider=${provider.id} maxPages=${maxPages} orgDailyMaxCostCents=${orgDailyMaxCostCents}`);
+  const raw = env.DOCSLURP_OCR_PAGE_READER?.trim().toLowerCase() ?? "";
+  const tier = (ROUTE_TIERS as readonly string[]).includes(raw) ? ` tier=${raw} option=${ocrPageReaderRoute(raw as RouteTier, env).optionId}` : "";
+  console.log(`[ocr] page-reader mode=${mode}${tier} provider=${provider.id} maxPages=${maxPages} orgDailyMaxCostCents=${orgDailyMaxCostCents}`);
   return mode;
 }

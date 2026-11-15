@@ -133,6 +133,13 @@ before hosted escalation.
   The boundary keeps their PNGs even when hosted escalation is off.
 - `all`: every page the boundary read. The boundary keeps a PNG of every frame it found text or text regions on; blank
   frames have nothing to read.
+- A tier word, `fastest`, `balanced` or `smart`: the reviewed OCR route options (`OCR_ROUTE_OPTIONS` and `selectOcrRoute`
+  in `packages/shared/src/tier-options.ts`) pick the mode. `fastest` is the recogniser alone (`off`). `smart` ranks the
+  measured readers by their composite on the page-OCR tier benchmark: the registered reader's own `evalScore` against the
+  hosted escalation reader's recorded score (when escalation is on); the page reader, if it scores higher, reads every
+  page (`all`), else `off`. `balanced` sends the pages escalation would read to a measured page reader (`escalation`),
+  else `off`. A reader without `evalScore` is never chosen by a tier. Hosted escalation remains the fallback for every
+  page the reader does not return.
 
 A page the reader returns Markdown for takes that text (reader `page-reader:<provider id>`) and leaves hosted escalation.
 A page it fails, answers empty, or never reaches keeps the recogniser's text and stays an escalation candidate, so the
@@ -269,7 +276,8 @@ not install unstructured at all; it comes with the `unstructured` vendor bundle.
 | `DOCSLURP_OCR_ESCALATION_MODEL` | `llm://deepinfra/Qwen/Qwen3-VL-30B-A3B-Instruct` | Hosted reader for escalation and `hosted` mode. |
 | `DOCSLURP_OCR_ESCALATION_MAX_PAGES` | `25` | Hosted reads per document. |
 | `DOCSLURP_OCR_ESCALATION_MAX_ATTEMPTS` | pages + a fifth (`30`) | Hosted requests per document, every page and retry included, counted in the durable vision attempt ledger. |
-| `DOCSLURP_OCR_PAGE_READER` | `off` | `escalation` or `all` to read pages with the page image reader plugin first (see [Page reader](#page-reader)). |
+| `DOCSLURP_OCR_PAGE_READER` | `off` | `escalation` or `all` to read pages with the page image reader plugin first, or a tier word (`fastest`, `balanced`, `smart`) resolved by the OCR route options (see [Page reader](#page-reader)). |
+| `DOCSLURP_OCR_PAGE_READER_ORG_DAILY_MAX_COST_CENTS` | `2000` | Reader provider cost one organization may commit per UTC day, across workers (0 to 10000000; 0 sends nothing). |
 | `DOCSLURP_OCR_PAGE_READER_MAX_PAGES` | `2000` | Most pages one document sends to the page reader (0 to 20000). |
 | `DOCSLURP_OCR_MAX_ATTEMPTS` | `3` | Recogniser attempts per page under `auto` (1 to 7). |
 | `DOCSLURP_OCR_LANGUAGE` | `auto` | Default language for projects left on `auto`. |

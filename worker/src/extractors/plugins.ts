@@ -329,6 +329,13 @@ export interface PageImageReaderProvider {
    */
   estimateJobCostCents?(pages: number): number;
   /**
+   * Optional: the reader's composite on the page-OCR tier benchmark (0-1, tolerant-markdown@v1 `content`) from a recorded
+   * run (`evalRef`). A tier word in DOCSLURP_OCR_PAGE_READER ranks the reader by it (@docslurp/shared selectOcrRoute);
+   * without it the reader is unmeasured and never chosen by a tier.
+   */
+  evalScore?: number;
+  evalRef?: string;
+  /**
    * Read the job's pages. Resolves with one result per page it answers (at most one per key) and the provider cost of
    * every VM or request it ran. A rejection that spent compute carries that cost as `pageReaderUsage` (PAGE_READER_USAGE_PROPERTY,
    * read with pageReaderUsageOf); set `ocrRefused: true` when the reader refused the job's input rather than failing to run.
@@ -458,6 +465,10 @@ export function registerExtractorPlugin(plugin: ExtractorPlugin): void {
       if (typeof reader[name] !== "function") throw new Error(`Page image reader provider lacks ${name}()`);
     }
     if (reader.estimateJobCostCents !== undefined && typeof reader.estimateJobCostCents !== "function") throw new Error("Page image reader provider's estimateJobCostCents must be a function");
+    if (reader.evalScore !== undefined && !(typeof reader.evalScore === "number" && reader.evalScore >= 0 && reader.evalScore <= 1)) throw new Error("Page image reader provider's evalScore must be from 0 to 1");
+    if ((reader.evalScore === undefined) !== (reader.evalRef === undefined) || (reader.evalRef !== undefined && (typeof reader.evalRef !== "string" || !reader.evalRef.trim()))) {
+      throw new Error("Page image reader provider needs evalScore and evalRef together");
+    }
   }
   plugins.push(plugin);
   if (pdf?.shardProfile) registerShardProfile(pdf.shardProfile.key, pdf.shardProfile.prior);

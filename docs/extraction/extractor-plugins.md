@@ -173,6 +173,9 @@ flag on and no provider (or `assertConfigured()` throwing), the worker refuses t
 - Optional `estimateJobCostCents(pages)`: an upper estimate of one job's provider cost. The host reserves it against the
   organization's daily reader budget (`DOCSLURP_OCR_PAGE_READER_ORG_DAILY_MAX_COST_CENTS`, [OCR](ocr.md#page-reader))
   before sending the job, so concurrent jobs cannot pass the cap together; without it the host reserves 0.
+- Optional `evalScore` (0 to 1) and `evalRef`, together: the reader's composite on the page-OCR tier benchmark and the
+  recorded run it comes from. A tier word in `DOCSLURP_OCR_PAGE_READER` ranks the reader by it against the hosted
+  escalation reader ([OCR](ocr.md#page-reader)); a reader without it is never chosen by a tier.
 
 At load the worker lists the capability as `page-reader`.
 
