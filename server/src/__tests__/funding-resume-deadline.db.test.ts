@@ -53,6 +53,8 @@ beforeAll(async () => {
   await sql`insert into projects(id, org_id, user_id, name) values ('deadline-ws', 'deadline-org', 'deadline-user', 'Deadline')`;
   await sql`insert into project_runs(monthly_reservation_cents,id, org_id, project_id, user_id, kind, status, stage, pipeline, control_state, pause_reason)
     values (100, 'deadline-run', 'deadline-org', 'deadline-ws', 'deadline-user', 'bulk-upload', 'processing', 'vision-extract', '{}', 'paused', 'credit_exhausted')`;
+  await sql`insert into documents(id,org_id,project_id,user_id,run_id,filename,mime_type,source_key,status,file_size)
+    values('deadline-doc','deadline-org','deadline-ws','deadline-user','deadline-run','measured.txt','text/plain','raw/measured','processing',1000)`;
 }, 60000);
 
 afterAll(async () => {

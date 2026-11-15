@@ -595,6 +595,7 @@ export function createRunLifecycle(deps: RunLifecycleDeps) {
     }
 
     if (input.action === "resume") {
+      await restoreRunMonthlyCapacity(transaction!, run.id);
       if (!transaction) await signals.resume(run.id).catch(() => {});
       const [row] = await query<{ id: string }[]>`
         update project_runs
