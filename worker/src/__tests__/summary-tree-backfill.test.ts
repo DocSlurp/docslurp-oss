@@ -520,6 +520,53 @@ describe("stopping and parking", () => {
   });
 });
 
+describe("spend and the project setting, between windows of a running job", () => {
+  it("parks at the next window when the organization's budget pauses mid-build, and resumes without repeating a call", async () => {
+    const f = fakes();
+    await seedDocument(f.storage, "w", "a-big", BIG_LEAVES);
+    await seedDocument(f.storage, "w", "b-big", BIG_LEAVES);
+    const jobId = await queueJob("w");
+    setSpendCheckConfig({ enabled: true, pages: 25, credits: 10 });
+    await sql`update organizations set credit_balance_cents = 1000000 where id = 'o1'`;
+    try {
+      f.beforeAnswer = async (_request, call) => {
+        if (call === 2) await sql`update organizations set budget_paused = true where id = 'o1'`;
+      };
+      await f.run();
+      // One call a window (concurrency 1): the call in flight finished, the next window asked and was refused.
+      expect(f.requests).toHaveLength(2);
+      expect(await jobOf(jobId)).toMatchObject({ status: "blocked", blocked_reason: "credits", model_calls: 2, documents_ready: 0, cursor: null });
+      expect(await treeOf("a-big")).toMatchObject({ status: "partial", error: "stopped:org_budget_paused" });
+      expect(await treeOf("b-big")).toBeNull();
+
+      await sql`update organizations set budget_paused = false where id = 'o1'`;
+      f.beforeAnswer = () => undefined;
+      await f.run();
+      expect(await jobOf(jobId)).toMatchObject({ status: "completed", documents_ready: 2 });
+      expect(f.requests).toHaveLength(2 * BIG_NODES);
+    } finally {
+      setSpendCheckConfig({ enabled: false, pages: 0, credits: 0 });
+      await sql`update organizations set budget_paused = false, credit_balance_cents = 0 where id = 'o1'`;
+    }
+  });
+
+  it("ends the job at the next window when the project turns the tree off mid-build, and starts no other document", async () => {
+    const f = fakes();
+    await seedDocument(f.storage, "w", "a-big", BIG_LEAVES);
+    await seedDocument(f.storage, "w", "b-big", BIG_LEAVES);
+    const jobId = await queueJob("w");
+    f.beforeAnswer = async (_request, call) => {
+      if (call === 3) await sql`update projects set pipeline = jsonb_set(pipeline, '{summaryTree}', '{"enabled": false}'::jsonb) where id = 'w'`;
+    };
+    await f.run();
+    expect(f.requests).toHaveLength(3);
+    expect(await jobOf(jobId)).toMatchObject({ status: "cancelled", error: SUMMARY_TREE_JOB_NOTES.disabled, model_calls: 3, documents_ready: 0 });
+    expect(await treeOf("a-big")).toMatchObject({ status: "partial", error: "stopped:project-setting-off" });
+    expect(await treeOf("b-big")).toBeNull();
+    expect(f.storage.opened).toEqual(["u1/run-w/embeddings/a-big.json"]);
+  });
+});
+
 describe("lease", () => {
   it("is resumed by another worker after its lease expires, repeating no call whose answer was kept", async () => {
     const f = fakes();

@@ -536,6 +536,67 @@ describe("controls", () => {
     expect(await stateOf("d1")).toMatchObject({ status: "partial" });
   });
 
+  it("asks the spend check again before every commit window: a balance that flips mid-build stops it there", async () => {
+    const h = harness();
+    let asked = 0;
+    let embeddedAtFlip = -1;
+    h.model.respond = (request, call) => {
+      // The organization runs out while the sixth call (second window of four) is in flight.
+      if (call === 6) {
+        h.env.spendRefusal = "credit_exhausted";
+        embeddedAtFlip = h.embedded.length;
+      }
+      return ok(request, call);
+    };
+    await seedDocument("d1", W);
+    h.putArtifact("d1", W, book());
+    const result = await h.build("d1", W, {
+      concurrency: 4,
+      deps: { spendRefusal: async () => { asked++; return h.env.spendRefusal; } },
+    });
+    expect(result).toMatchObject({ status: "partial", reason: "stopped:credit_exhausted" });
+    // The window in flight (calls 5 to 8) finished and was committed with one embedding request; nothing followed.
+    expect(h.model.requests).toHaveLength(8);
+    expect(h.embedded.length).toBe(embeddedAtFlip + 1);
+    expect(h.rowWrites).toEqual([4, 4]);
+    // Once before the first call, once before the second window, once before the third (refused).
+    expect(asked).toBe(3);
+    expect(await stateOf("d1")).toMatchObject({ status: "partial", error: "stopped:credit_exhausted", built_at: null });
+    // Paid work is kept: the next build resumes without repeating a call.
+    h.env.spendRefusal = null;
+    expect((await h.build("d1", W)).status).toBe("ready");
+    expect(h.model.requests).toHaveLength(BOOK_NODES);
+  });
+
+  it("makes no embedding request for a window of resumed summaries once a stop reason holds", async () => {
+    const h = harness();
+    await seedDocument("d1", W);
+    h.putArtifact("d1", W, book());
+    // A first build whose embedding route is down: the four summaries of its first window are in the artifact,
+    // their rows are not committed.
+    await expect(h.build("d1", W, { concurrency: 4, deps: { embed: async () => { throw new Error("embedding route down"); } } })).rejects.toThrow("embedding route down");
+    expect(artifactRecords(h.storage, W, "d1").parts).toHaveLength(4);
+    expect(h.model.requests).toHaveLength(4);
+
+    // Resumed past the caller's budget: the first window holds only stored text, which would cost an embedding request.
+    for (const [stop, reason] of [[() => { h.env.stopReason = "stage-time-budget"; }, "stopped:stage-time-budget"], [() => { h.env.stopReason = null; h.env.buildActive = false; }, "off"]] as const) {
+      stop();
+      const result = await h.build("d1", W, { concurrency: 4 });
+      if (reason === "off") expect(result.status).toBe("off");
+      else expect(result).toMatchObject({ status: "partial", reason });
+      expect(h.embedded).toEqual([]);
+      expect(h.model.requests).toHaveLength(4);
+      expect(h.rowWrites).toEqual([]);
+    }
+    // And when the spend check refuses from the second window on, exactly one window is embedded and committed.
+    h.env.buildActive = true;
+    let asked = 0;
+    const result = await h.build("d1", W, { concurrency: 4, deps: { spendRefusal: async () => (asked++ === 0 ? null : "org_budget_paused") } });
+    expect(result).toMatchObject({ status: "partial", reason: "stopped:org_budget_paused" });
+    expect(h.embedded).toHaveLength(1);
+    expect(h.rowWrites).toHaveLength(1);
+  });
+
   it("refuses a document over the node cap before any call", async () => {
     const h = harness();
     await seedDocument("d1", W);

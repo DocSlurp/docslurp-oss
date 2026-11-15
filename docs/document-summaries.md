@@ -287,6 +287,11 @@ version of it is processed.
   `stopped:stage-time-budget`, and from the backfill job `stopped:cost-cap`,
   `stopped:cancelled`, `stopped:lease-lost`: the build stopped before its next
   call.
+- `stopped:credit_exhausted`, `stopped:org_budget_paused`,
+  `stopped:project_budget_paused`, `stopped:run-paused`,
+  `stopped:run-cancelled`, `stopped:project-setting-off`: refused between two
+  commit windows (the organization may no longer spend, the run was paused or
+  cancelled, the project turned the tree off).
 - `node-cap`: the document needs more nodes than its cap. The cap scales with
   the document (`summaryTreeNodeCap`: `SUMMARY_TREE_MAX_NODES_PER_LEAF` nodes a
   leaf, at least `SUMMARY_TREE_BASE_NODES_PER_DOCUMENT`, at most
@@ -372,7 +377,18 @@ later build.
 - Before the first call: the project's privacy mode must allow a hosted model,
   a model key must exist, and the organization must be allowed to spend
   (`org_spend_status`, read-only). A refusal makes no call.
-- Before every call: the run's cost cap (`pipeline.maxCostCents`).
+- Before every commit window (up to `WORKER_SUMMARY_TREE_CONCURRENCY` model
+  calls, or a batch of resumed summaries that only need embedding): the same
+  spend check again, the project's stored setting, and for a run its pause and
+  cancel state. A refusal stops the build there (`partial`,
+  `stopped:<reason>`): the window in flight finishes and is committed, and no
+  model call or embedding request follows. A pause, a cancel or the setting
+  going off also stops the other documents of the same stage at their next
+  call. The backfill job parks on a spend refusal and ends when the project
+  turned the tree off.
+- Before every call, before every window and before every embedding request
+  outside a window: the build switch, the run's cost cap
+  (`pipeline.maxCostCents`) and the stage's time budget.
 - Usage events: `summary-tree-generation` per model attempt and
   `summary-tree-embedding` per embedding request, with `orgId`, `projectId`,
   `runId`, `documentId`, node and attempt in the metadata, through the run's

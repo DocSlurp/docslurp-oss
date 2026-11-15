@@ -419,6 +419,86 @@ describe("stage time budget", () => {
 });
 
 describe("spend guard", () => {
+  /** The organization's balance as the shared spend rule reads it (`org_spend_status`), far below any running-job floor or well above it. */
+  const setBalance = (cents: number) => sql`update organizations set credit_balance_cents = ${cents} where id = 'o1'`;
+  afterEach(async () => { await setBalance(0); });
+
+  it("makes no call for an organization that is out of credits, through the stage's own default balance check", async () => {
+    // Nothing is injected: the stage reaches `orgSpendRefusal` by itself, with the real spend rule switched on.
+    setSpendCheckConfig({ enabled: true, pages: 25, credits: 10 });
+    await setBalance(-1_000_000);
+    expect(await orgSpendRefusal(sql, { orgId: "o1", projectId: "w" })).toBe("credit_exhausted");
+    const storage = new MemoryStorage();
+    const f = fakes();
+    const { state, store } = await seed(storage, enabledPipeline(), [{ id: "long", leaves: 300 }]);
+    await stageOf(storage, f.overrides(ON)).run(state);
+    expect(f.requests).toEqual([]);
+    expect(f.embedded).toEqual([]);
+    expect(state.usageLedger.pendingCount).toBe(0);
+    expect(state.documentStage("long", SUMMARY_TREE_STAGE)?.stats).toMatchObject({ summaryTreeStatus: "blocked", summaryTreeReason: "credit_exhausted", modelCalls: 0 });
+    expect(await sql`select status, error from document_summary_trees where document_id = 'long'`).toEqual([{ status: "pending", error: "credit_exhausted" }]);
+    expect(store.failDocumentStage).not.toHaveBeenCalled();
+
+    // The same organization with credits builds: the refusal above was the balance, not the fixture.
+    await setBalance(1_000_000);
+    expect(await orgSpendRefusal(sql, { orgId: "o1", projectId: "w" })).toBeNull();
+    await sql`delete from documents`;
+    await sql`delete from project_runs`;
+    const funded = await seed(storage, enabledPipeline(), [{ id: "long", leaves: 300 }]);
+    await stageOf(storage, f.overrides(ON)).run(funded.state);
+    expect(f.requests).toHaveLength(36);
+    expect(funded.state.documentStage("long", SUMMARY_TREE_STAGE)?.stats).toMatchObject({ summaryTreeStatus: "ready" });
+  });
+
+  it("stops at the next window when the balance runs out mid-build: no model call or embedding request follows", async () => {
+    setSpendCheckConfig({ enabled: true, pages: 25, credits: 10 });
+    await setBalance(1_000_000);
+    const storage = new MemoryStorage();
+    const f = fakes();
+    const { state } = await seed(storage, enabledPipeline(), [{ id: "long", leaves: 300 }]);
+    const overrides = f.overrides(ON);
+    const summarize = overrides.summarize!;
+    let embeddedAtFlip = -1;
+    overrides.summarize = async (request) => {
+      // The organization's balance goes below its floor while the sixth call (the second window) is in flight.
+      if (f.requests.length === 5) {
+        await setBalance(-1_000_000);
+        embeddedAtFlip = f.embedded.length;
+      }
+      return await summarize(request);
+    };
+    await stageOf(storage, overrides).run(state);
+    expect(state.documentStage("long", SUMMARY_TREE_STAGE)?.stats).toMatchObject({ summaryTreeStatus: "partial", summaryTreeReason: "stopped:credit_exhausted" });
+    // The window of four in flight finished and was committed with one embedding request.
+    expect(f.requests).toHaveLength(8);
+    expect(f.embedded.length).toBe(embeddedAtFlip + 1);
+    expect(await sql`select status, error from document_summary_trees where document_id = 'long'`).toEqual([{ status: "partial", error: "stopped:credit_exhausted" }]);
+  });
+
+  it("stops every document of the stage when the run is paused or cancelled mid-build", async () => {
+    for (const [control, reason] of [["pause_requested", "run-paused"], ["paused", "run-paused"], ["cancel_requested", "run-cancelled"], ["cancelled", "run-cancelled"]] as const) {
+      await sql`delete from documents`;
+      await sql`delete from project_runs`;
+      const storage = new MemoryStorage();
+      const f = fakes();
+      const { state } = await seed(storage, enabledPipeline(), [{ id: "a", leaves: 300 }, { id: "b", leaves: 300 }]);
+      state.docConcurrency = 1;
+      const overrides = f.overrides(ON);
+      const summarize = overrides.summarize!;
+      overrides.summarize = async (request) => {
+        if (f.requests.length === 1) await sql`update project_runs set control_state = ${control} where id = 'run-1'`;
+        return await summarize(request);
+      };
+      await stageOf(storage, overrides).run(state);
+      expect([control, state.documentStage("a", SUMMARY_TREE_STAGE)?.stats]).toEqual([control, expect.objectContaining({ summaryTreeStatus: "partial", summaryTreeReason: `stopped:${reason}` })]);
+      // The first window of four finished; the second document made no call at all.
+      expect(f.requests).toHaveLength(4);
+      expect(f.requests.every((request) => request.nodeId.startsWith("a:"))).toBe(true);
+      expect(state.documentStage("b", SUMMARY_TREE_STAGE)?.stats).toMatchObject({ summaryTreeStatus: "blocked", summaryTreeReason: reason, modelCalls: 0 });
+    }
+  });
+
+
   it("refuses a document of an organization that may not spend, through the default balance check", async () => {
     setSpendCheckConfig({ enabled: true, pages: 25, credits: 10 });
     const storage = new MemoryStorage();

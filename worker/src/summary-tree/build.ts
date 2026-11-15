@@ -176,9 +176,19 @@ export interface SummaryTreeBuildDeps {
   flushUsage?(): Promise<void>;
   /** Whether this deployment and project still build trees. Asked before every model call; false makes none. */
   buildActive(): boolean;
-  /** Null when the organization may spend, otherwise a named reason. Asked once, before the first model call. */
+  /**
+   * Null while the build may spend, otherwise a named reason (the organization is out of credits or over a budget,
+   * the run was paused or cancelled, the project turned the tree off). Asked before the first model call, where a
+   * refusal means nothing is called (`blocked`), and again before every commit window, where it stops the build
+   * (`partial`, `stopped:<reason>`): the window in flight finishes, and no model call or embedding request follows.
+   */
   spendRefusal(): Promise<string | null>;
-  /** A named reason to stop before the next model call (a cost cap), or null. */
+  /**
+   * A named reason to stop (a cost cap, a time budget), or null. Asked before every model call, before every
+   * commit window (including windows that only reuse stored text and pay for an embedding request alone), and
+   * before every embedding request outside a window. A window that has started finishes: its calls' summaries are
+   * embedded and committed.
+   */
   stopReason?(): string | null;
   /**
    * Admission of one model call: awaited before `stopReason` is asked, and may wait (a caller that reserves budget
@@ -549,6 +559,8 @@ export async function buildDocumentSummaryTree(deps: SummaryTreeBuildDeps, input
     const nodeIds: string[] = [];
     const budget = summaryOutputTokenBudget(limits.summaryLengthWords);
     let stopped: string | null = null;
+    /** Commit windows started so far, across layers. */
+    let windowsStarted = 0;
 
     const nodeRecord = (nodeIndex: number, status: SummaryTreeNodeRecord["status"]): SummaryTreeNodeRecord => {
       const node = builder.nodes[nodeIndex]!;
@@ -558,12 +570,20 @@ export async function buildDocumentSummaryTree(deps: SummaryTreeBuildDeps, input
       };
     };
 
-    const embedSummaries = async (nodeIndexes: readonly number[]): Promise<void> => {
+    /**
+     * Embeds the summaries of `nodeIndexes`. `windowInFlight`: they are the summaries of the commit window that is
+     * being committed, which passed the stop checks when it started and finishes whatever happened during its calls.
+     * Every other request (the vectors a next layer is grouped by) is asked about first.
+     */
+    const embedSummaries = async (nodeIndexes: readonly number[], windowInFlight = false): Promise<void> => {
       for (let from = 0; from < nodeIndexes.length; from += REUSE_COMMIT_BATCH) {
         const batch = nodeIndexes.slice(from, from + REUSE_COMMIT_BATCH);
         // One embedding per distinct text.
         const distinct = [...new Set(batch.map((nodeIndex) => summaryRowText(summaries.get(nodeIndex)!)))];
-        signal?.throwIfAborted();
+        // An embedding request is paid work too: the same stop check as before a model call (`SummaryTreeStopped`).
+        // The summaries it would have embedded stay in the artifact, and a later build embeds them.
+        if (windowInFlight) signal?.throwIfAborted();
+        else beforeCall();
         const embedded = await deps.embed(distinct, signal);
         if (embedded.length !== distinct.length) throw new Error(`summary embedding returned ${embedded.length} vectors for ${distinct.length} texts`);
         const byText = new Map<string, ArrayLike<number>>();
@@ -585,7 +605,7 @@ export async function buildDocumentSummaryTree(deps: SummaryTreeBuildDeps, input
         return !(stored && stored.status === "ready" && stored.nodeHash === hashes[nodeIndex] && stored.runId === runId);
       });
       if (pending.length === 0) return;
-      await embedSummaries(pending);
+      await embedSummaries(pending, true);
       // The registry row exists before the summary row does, so a row in the table always has a registry row that
       // names it: a later rebuild finds and removes it even if this build dies between the two writes.
       await upsertSummaryTreeNodes(deps.sql, { scope, documentId, runId, rows: pending.map((nodeIndex) => nodeRecord(nodeIndex, "pending")) });
@@ -731,6 +751,20 @@ export async function buildDocumentSummaryTree(deps: SummaryTreeBuildDeps, input
           stopped = "build-taken-over";
           return;
         }
+        // Every window, with model calls or without: the switch, the caller's cap or budget, then whether the build
+        // may still spend. The first window of the build was just asked (before the `building` row was written).
+        const stop = !deps.buildActive() ? "build-switch-off" : deps.stopReason?.() ?? null;
+        if (stop) {
+          stopped = stop;
+          return;
+        }
+        if (windowsStarted++ > 0) {
+          const refusal = await deps.spendRefusal();
+          if (refusal) {
+            stopped = refusal;
+            return;
+          }
+        }
         const copied = window.filter((item) => item.origin === "predecessor");
         if (copied.length > 0) {
           // Copied into this version's own artifact: nothing later reads the predecessor's.
@@ -818,7 +852,15 @@ export async function buildDocumentSummaryTree(deps: SummaryTreeBuildDeps, input
       }
       if (builder.done) break;
       const needed = builder.vectorsNeeded().filter((nodeIndex) => !vectors.has(nodeIndex));
-      if (needed.length > 0) await embedSummaries(needed);
+      if (needed.length > 0) {
+        try {
+          await embedSummaries(needed);
+        } catch (error) {
+          if (!(error instanceof SummaryTreeStopped)) throw error;
+          partialReason = `stopped:${error.reason}`;
+          break;
+        }
+      }
       created = builder.advance((nodeIndex) => vectors.get(nodeIndex));
       // Vectors are kept only for nodes that still wait for a parent.
       for (const nodeIndex of [...vectors.keys()]) if (builder.nodes[nodeIndex]!.parent !== null) vectors.delete(nodeIndex);

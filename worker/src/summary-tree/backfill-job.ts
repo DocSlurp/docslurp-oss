@@ -27,6 +27,7 @@ import { providerBalanceProbe, readProviderBalance, type ProviderBalanceProbe } 
 import { projectProviderScope, runWithProviderRateScope } from "../lib/provider-rate-limit.js";
 import { textUsageLabels } from "../lib/text-model-route.js";
 import {
+  projectSummaryTreeEnabled,
   runSummaryTreeForDocument,
   SUMMARY_TREE_USAGE_METRIC,
   summaryTreeConcurrency,
@@ -83,6 +84,11 @@ export const SUMMARY_TREE_JOB_DEFAULT_PARK_MS = 60_000;
 export const SUMMARY_TREE_JOB_DEFAULT_PROBE_TTL_MS = 15_000;
 /** A reserve of this many times the largest call seen so far is held for every call in flight. */
 const RESERVE_FACTOR = 2;
+/** `partial` reasons of a build that the job itself (or another builder) caused; every other `stopped:` is a refusal to spend. */
+const JOB_OWN_STOPS: ReadonlySet<string> = new Set([
+  "stopped:build-switch-off", "stopped:cost-cap", "stopped:cancelled", "stopped:lease-lost", "stopped:job-halted",
+  "stopped:build-taken-over", "stopped:project-setting-off",
+]);
 /** This many documents in a row failing with an error ends the job: the fault is not the documents'. */
 const MAX_CONSECUTIVE_DOCUMENT_ERRORS = 5;
 
@@ -448,6 +454,8 @@ async function runClaimedJob(
             usage: { record, flush },
             // The job decided once; the build asks before its first call.
             hostedCallRefusal: async () => null,
+            // With the balance, before the first call and before every commit window: the project's stored setting.
+            gate: async () => ((await projectSummaryTreeEnabled(sql, scope)) ? null : "project-setting-off"),
             stopReason,
             acquireCall,
             callLimiter,
@@ -486,7 +494,9 @@ async function runClaimedJob(
           case "blocked":
             // Another build holds it and still reports: left to that build (and to the next job if it dies).
             if (result.reason === "build-in-progress") return { outcome: "partial", result };
-            halt ??= { kind: "park", reason: blockedReason(result.reason) };
+            halt ??= result.reason === "project-setting-off"
+              ? { kind: "finish", status: "cancelled", note: SUMMARY_TREE_JOB_NOTES.disabled }
+              : { kind: "park", reason: blockedReason(result.reason) };
             return null;
           case "partial": {
             const reason = result.reason ?? "";
@@ -494,6 +504,10 @@ async function runClaimedJob(
             else if (reason === "stopped:cost-cap") halt ??= { kind: "finish", status: "cancelled", note: SUMMARY_TREE_JOB_NOTES.costCap };
             else if (reason === "stopped:cancelled") halt ??= { kind: "finish", status: "cancelled", note: SUMMARY_TREE_JOB_NOTES.cancelled };
             else if (reason === "stopped:lease-lost") halt ??= { kind: "lease-lost" };
+            else if (reason === "stopped:project-setting-off") halt ??= { kind: "finish", status: "cancelled", note: SUMMARY_TREE_JOB_NOTES.disabled };
+            // Refused between two windows by the build's spend check (the organization ran out of credits or hit a
+            // budget while the job ran): the job parks exactly as it does when the refusal comes before a first call.
+            else if (reason.startsWith("stopped:") && !JOB_OWN_STOPS.has(reason)) halt ??= { kind: "park", reason: blockedReason(reason.slice("stopped:".length)) };
             // Stopped by the job itself (its own halt or another document's): not finished, the cursor stays before it.
             if (halt && reason.startsWith("stopped:") && reason !== "stopped:build-taken-over") return null;
             // A failed group: the build already retried it once; one more pass pays only for what is still missing.
@@ -514,6 +528,11 @@ async function runClaimedJob(
       }
       if (!summaryTreeBuildAvailable(env)) {
         await park("build-off");
+        return;
+      }
+      // The project's stored setting, every batch: a project that turned the tree off pays for nothing more.
+      if (!(await projectSummaryTreeEnabled(sql, scope))) {
+        await finish("cancelled", SUMMARY_TREE_JOB_NOTES.disabled);
         return;
       }
       if (!summaryTreeServeAvailable(env)) {

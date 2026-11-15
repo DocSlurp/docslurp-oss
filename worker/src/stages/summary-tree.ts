@@ -193,8 +193,16 @@ export interface SummaryTreeDocumentRun {
   usage: { record(input: WorkerAiUsageInput): void; flush?(): Promise<void> };
   /** A named reason hosted calls are not allowed for this project (privacy mode), or null. */
   hostedCallRefusal?: () => Promise<string | null>;
-  /** Replaces the organization balance check (the default reads `org_spend_status`). */
+  /**
+   * Replaces the organization balance check (the default reads `org_spend_status`). Like the default, it is asked
+   * before the first model call and again before every commit window of the build.
+   */
   spendRefusal?: () => Promise<string | null>;
+  /**
+   * A named reason of the caller's own to refuse or stop the build (the run was paused or cancelled, the project
+   * turned the tree off), or null. Asked with the balance check: before the first call and before every window.
+   */
+  gate?: () => Promise<string | null>;
   /** A named reason to stop before the next model call (the caller's cost cap), or null. */
   stopReason?: () => string | null;
   /** Admission of one model call (may wait); the returned function is called when the call has settled. */
@@ -316,10 +324,14 @@ export async function runSummaryTreeForDocument(args: SummaryTreeDocumentRun): P
     return embedded.vectors;
   };
 
+  // Asked before the first call and before every commit window (build.ts `spendRefusal`): a balance that runs out,
+  // a budget pause or the caller's own gate stops the build at its next window, not only before its first call.
   const spendRefusal = async (): Promise<string | null> => {
     const hosted = await args.hostedCallRefusal?.();
     if (hosted) return hosted;
     if (!overrides.summarize && !textModelApiKey(args.config.openRouterApiKey, model)) return "no-text-model-key";
+    const gated = await args.gate?.();
+    if (gated) return gated;
     return await (args.spendRefusal ? args.spendRefusal() : orgSpendRefusal(args.sql, scope));
   };
 
@@ -413,7 +425,23 @@ export class SummaryTreeStage implements Stage {
     const callLimiter = createConcurrencyLimiter(this.overrides.concurrency ?? summaryTreeConcurrency(env));
     const now = this.overrides.now ?? Date.now;
     const deadline = now() + (this.overrides.stageBudgetMs ?? summaryTreeStageBudgetMs(env));
-    const stopReason = () => (isCostCapExceeded(state) ? "run-cost-cap" : now() >= deadline ? "stage-time-budget" : null);
+    // A pause or cancel of the run, and the project turning the tree off, are read from Postgres with the balance
+    // before every commit window (`gate`). Once seen they also stop the calls of every other document of this
+    // stage at their next call (`stopReason`), not only the document whose window asked.
+    let runStop: string | null = null;
+    const stopReason = () => runStop ?? (isCostCapExceeded(state) ? "run-cost-cap" : now() >= deadline ? "stage-time-budget" : null);
+    const gate = async (): Promise<string | null> => {
+      const [row] = await sql<{ enabled: boolean | null; control_state: string | null }[]>`
+        select (p.pipeline -> 'summaryTree' -> 'enabled') = 'true'::jsonb as enabled, r.control_state
+        from projects p
+        left join project_runs r on r.id = ${state.run.id} and r.project_id = p.id
+        where p.id = ${projectId} and p.org_id = ${orgId}
+      `;
+      if (row?.enabled !== true) runStop ??= "project-setting-off";
+      else if (row.control_state === "cancel_requested" || row.control_state === "cancelled") runStop ??= "run-cancelled";
+      else if (row.control_state === "pause_requested" || row.control_state === "paused") runStop ??= "run-paused";
+      return runStop;
+    };
     let lastFlushAt = Date.now();
     let flushing: Promise<void> | null = null;
     const flush = async () => {
@@ -468,6 +496,7 @@ export class SummaryTreeStage implements Stage {
               || this.storage.uri(`${runArtifactRoot(state.run, document.userId)}/embeddings/${document.id}.json`),
             usage: { record: (input) => { state.usageLedger.record(input); }, flush },
             hostedCallRefusal,
+            gate,
             stopReason,
             callLimiter,
             signal,
