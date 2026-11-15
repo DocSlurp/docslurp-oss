@@ -22,6 +22,8 @@ import {
   parseSummaryTreeRecords,
   registerSummaryTreeArtifact,
   summaryTreeArtifactRoot,
+  summaryTreeBuildStanding,
+  writeSummaryTreeState,
   summaryTreePackKey,
   summaryTreePartsPrefix,
   type SummaryCallResult,
@@ -1455,6 +1457,33 @@ describe("serving contract and ownership of a building row", () => {
     const nodes = await nodesOf("d1");
     expect(new Set((await summaryRows(W))!.map((row) => row.id))).toEqual(new Set(nodes.map((node) => node.id)));
     expect(nodes.every((node) => node.status === "ready" && node.run_id === "run-d1")).toBe(true);
+  });
+
+  it("takes a live builder's row before it deletes a single row of that builder's tree", async () => {
+    const h = harness();
+    await seedDocument("d1", W);
+    h.putArtifact("d1", W, book());
+    // Another builder (a backfill job) is half way through a tree with other settings, and still reports.
+    await sql`insert into document_summary_trees (document_id, org_id, project_id, run_id, status, build_owner, config_hash, embedding_model, dimension)
+      values ('d1', 'o1', 'w', 'run-d1', 'building', 'job:j1#c1', 'other-settings', ${MODEL}, ${DIM})`;
+    await sql`insert into document_summary_tree_nodes (id, document_id, org_id, project_id, run_id, node_hash, level, status, chunk_start, chunk_end)
+      values ('d1:L1:0-9', 'd1', 'o1', 'w', 'run-d1', 'h-old', 1, 'ready', 0, 9)`;
+    const atWipe: unknown[] = [];
+    const result = await h.build("d1", W, {
+      deps: {
+        deleteDocumentRows: async (args) => {
+          const state = (await stateOf("d1"))!;
+          // The row is this build's already, still naming the earlier settings; the other builder may write no more.
+          atWipe.push(state.status, state.build_owner, state.config_hash, await summaryTreeBuildStanding(sql, W, "d1", "job:j1#c1"), (await nodesOf("d1")).length);
+          return await deleteDocumentSummaryRows(args);
+        },
+      },
+    });
+    expect(atWipe).toEqual(["building", "run:run-d1", "other-settings", "taken-over", 1]);
+    expect(result.status).toBe("ready");
+    // The builder that lost the row is refused at its next write, so nothing of it lands after the wipe.
+    await expect(writeSummaryTreeState(sql, { scope: W, documentId: "d1", runId: "run-d1", status: "partial", expectOwner: "job:j1#c1" })).rejects.toThrow(/took its tree over/);
+    expect((await nodesOf("d1")).some((node) => node.id === "d1:L1:0-9" && node.node_hash === "h-old")).toBe(false);
   });
 
   it("leaves ready before wiping the tree of a document that no longer qualifies", async () => {

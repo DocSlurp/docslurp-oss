@@ -439,15 +439,16 @@ export async function buildDocumentSummaryTree(deps: SummaryTreeBuildDeps, input
   };
 
   /**
-   * Removes every summary row and registry row an earlier build left for this document. A tree that is being
-   * served leaves `ready` first (keeping the earlier build's settings and embedding space on the row, so a build
-   * that dies here is still found by the next one): search never reads a tree that is being taken apart.
+   * Removes every summary row and registry row an earlier build left for this document. This build takes the row
+   * first, whatever state it was in: `building`, in this build's name, with the earlier build's settings and
+   * embedding space kept on it (so a build that dies here is still found by the next one). A tree that was being
+   * served has then left `ready` (search never reads a tree that is being taken apart), and a builder that still
+   * held the row has lost it before a single row of its tree is deleted: its next write is refused instead of
+   * landing beside rows that are being removed.
    */
   const wipeEarlierTree = async () => {
     if (!prior) return;
-    if (prior.status === "ready") {
-      await writeSummaryTreeState(deps.sql, { scope, documentId, runId: prior.runId ?? runId, status: "building", configHash: prior.configHash, space: priorSpace });
-    }
+    await writeSummaryTreeState(deps.sql, { scope, documentId, runId: prior.runId ?? runId, status: "building", configHash: prior.configHash, space: priorSpace });
     if (priorSpace) await deps.deleteDocumentRows({ scope, space: priorSpace, documentIds: [documentId], root: deps.lanceRoot });
     await deleteSummaryTreeNodes(deps.sql, scope, documentId, "all");
   };
