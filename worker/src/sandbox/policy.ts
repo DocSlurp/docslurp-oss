@@ -10,8 +10,7 @@ const UNISOLATED_WARNING = "[parser-sandbox] status=unisolated";
  * Local namespace providers and the unisolated development override never qualify in production.
  * Provider `none` (no filesystem or network isolation at all) is development and test only (#398): any other
  * environment, staging or preview included, is refused, whether `none` was chosen explicitly or by the platform default.
- * bubblewrap and landlock stay allowed outside production: both confine the filesystem, deny network egress and
- * give each command its own PID namespace.
+ * bubblewrap and landlock qualify only in development; namespaces never replace the VM boundary elsewhere.
  */
 export function assertSandboxPolicy(args: {
   providerId: string;
