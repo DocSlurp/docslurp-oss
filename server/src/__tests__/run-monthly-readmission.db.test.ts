@@ -53,3 +53,10 @@ it.skipIf(!url)("serializes competing reactivations and rolls back the losing ma
   expect((await sql`select status from project_runs order by status`).map(r=>r.status)).toEqual(['failed','queued']);
   expect((await sql`select count(*)::int as n from documents where status='failed'`)[0]!.n).toBe(1);
 });
+
+it.skipIf(!url)("refuses reactivation without measured documents even with a stored reservation", async () => {
+  await sql`insert into project_runs(id,org_id,project_id,user_id,kind,status,stage,pipeline,monthly_reservation_cents)
+    values('empty','readmit-o','readmit-p','readmit-u','upload','failed','extract-markdown',${sql.json(defaultPipelineFeatures as never)},100)`;
+  await expect(retry('empty')).rejects.toThrow(/measured positive workload/);
+  expect((await sql`select status,monthly_reservation_cents from project_runs where id='empty'`)[0]).toMatchObject({status:'failed',monthly_reservation_cents:'100'});
+});

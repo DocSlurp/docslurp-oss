@@ -25,13 +25,13 @@ beforeAll(async () => {
     insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, processed_documents, stats, creation_ready_at)
       values ('run-failed', 'o1', 'u1', 'w', 'upload', 'failed', 'index', '{}', 3, 0, '{}', now()),
              ('run-partial', 'o1', 'u1', 'w', 'upload', 'completed', 'completed', '{}', 3, 3, '{"failedDocuments":2}', now());
-    insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, lexical_searchable_at)
-      values ('f-embed-failed', 'o1', 'u1', 'w', 'run-failed', 'a.pdf', 'application/pdf', 'k1', 'failed', 1, now()),
-             ('f-index-failed', 'o1', 'u1', 'w', 'run-failed', 'b.pdf', 'application/pdf', 'k2', 'failed', 1, now()),
-             ('f-done', 'o1', 'u1', 'w', 'run-failed', 'c.pdf', 'application/pdf', 'k3', 'completed', 1, now()),
-             ('p-embed-failed', 'o1', 'u1', 'w', 'run-partial', 'd.pdf', 'application/pdf', 'k4', 'failed', 1, now()),
-             ('p-index-failed', 'o1', 'u1', 'w', 'run-partial', 'e.pdf', 'application/pdf', 'k5', 'failed', 1, now()),
-             ('p-done', 'o1', 'u1', 'w', 'run-partial', 'f.pdf', 'application/pdf', 'k6', 'completed', 1, now());
+    insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, file_size, page_count, lexical_searchable_at)
+      values ('f-embed-failed', 'o1', 'u1', 'w', 'run-failed', 'a.pdf', 'application/pdf', 'k1', 'failed', 1000, 1, now()),
+             ('f-index-failed', 'o1', 'u1', 'w', 'run-failed', 'b.pdf', 'application/pdf', 'k2', 'failed', 1000, 1, now()),
+             ('f-done', 'o1', 'u1', 'w', 'run-failed', 'c.pdf', 'application/pdf', 'k3', 'completed', 1000, 1, now()),
+             ('p-embed-failed', 'o1', 'u1', 'w', 'run-partial', 'd.pdf', 'application/pdf', 'k4', 'failed', 1000, 1, now()),
+             ('p-index-failed', 'o1', 'u1', 'w', 'run-partial', 'e.pdf', 'application/pdf', 'k5', 'failed', 1000, 1, now()),
+             ('p-done', 'o1', 'u1', 'w', 'run-partial', 'f.pdf', 'application/pdf', 'k6', 'completed', 1000, 1, now());
     insert into document_run_stage_states (run_id, document_id, stage_name, status) values
       ('run-failed', 'f-embed-failed', 'embed', 'failed'),
       ('run-failed', 'f-index-failed', 'embed', 'completed'), ('run-failed', 'f-index-failed', 'index', 'failed'),

@@ -18,23 +18,24 @@ export async function restoreRunMonthlyCapacity(tx: TransactionSql, runId: strin
   const docs = await tx`select filename,mime_type,file_size,page_count,billing_pages,page_count_source
     from documents where run_id=${runId} and org_id=${run.org_id} and project_id=${run.project_id}
       and superseded_at is null and status not in ('completed','cancelled')`;
-  let forecast: number;
-  if (docs.length) {
-    const files = docs.map(doc => {
-      const pages = countedPagesForForecast({ pageCount: doc.page_count, billingPages: doc.billing_pages, pageCountSource: doc.page_count_source });
-      const sizeBytes = Number(doc.file_size);
-      if (!(Number.isSafeInteger(pages) && (pages ?? 0)>0) && !(Number.isFinite(sizeBytes) && sizeBytes>0)) {
-        throw new Error("Monthly readmission requires measured positive workload evidence");
-      }
-      return { filename: doc.filename, mimeType: doc.mime_type, sizeBytes: Number.isFinite(sizeBytes) && sizeBytes>0 ? sizeBytes : 0, ...(pages ? {pages} : {}) };
+  if (!docs.length) throw new Error("Monthly readmission requires measured positive workload evidence");
+  const files = docs.map(doc => {
+    const pages = countedPagesForForecast({
+      pageCount: doc.page_count, billingPages: doc.billing_pages, pageCountSource: doc.page_count_source,
     });
-    forecast = buildRunProcessingPreview({ request: { project: run.project_id, pipeline: run.pipeline, urls: [], files } }).current.estimatedCost.maxCents;
-  } else {
-    // An explicitly declared durable forecast remains evidence for document-free jobs.
-    // Missing/zero legacy reservations are never replaced by an invented one-cent workload.
-    forecast = Number(run.monthly_reservation_cents);
-    if (!Number.isFinite(forecast) || forecast<1) throw new Error("Monthly readmission requires measured positive workload evidence");
-  }
+    const sizeBytes = Number(doc.file_size);
+    if (!(Number.isSafeInteger(pages) && (pages ?? 0) > 0) && !(Number.isFinite(sizeBytes) && sizeBytes > 0)) {
+      throw new Error("Monthly readmission requires measured positive workload evidence");
+    }
+    return {
+      filename: doc.filename, mimeType: doc.mime_type,
+      sizeBytes: Number.isFinite(sizeBytes) && sizeBytes > 0 ? sizeBytes : 0,
+      ...(pages ? { pages } : {}),
+    };
+  });
+  const forecast = buildRunProcessingPreview({
+    request: { project: run.project_id, pipeline: run.pipeline, urls: [], files },
+  }).current.estimatedCost.maxCents;
   if (!Number.isFinite(forecast) || forecast < 0) throw new Error("Invalid monthly readmission forecast");
   // Capacity includes historical charges because pending_monthly_capacity subtracts them.
   await tx`update project_runs set monthly_reservation_cents=(

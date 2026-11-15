@@ -57,11 +57,15 @@ beforeEach(async () => {
 });
 
 function admit(runId: string, speedBoost = true, projectId = "admission-w1") {
-  return guard.admitRunSpend("admission-org", projectId, tx => tx`
-    insert into project_runs(monthly_reservation_cents, id, org_id, user_id, project_id, kind, status, stage, pipeline)
-    values (100, ${runId}, 'admission-org', 'admission-user', ${projectId}, 'upload', 'queued', 'queued', ${tx.json({ speedBoost })})
-    returning id
-  `, { leaseRunId: runId, speedBoost });
+  return guard.admitRunSpend("admission-org", projectId, async tx => {
+    const rows = await tx`
+      insert into project_runs(monthly_reservation_cents, id, org_id, user_id, project_id, kind, status, stage, pipeline)
+      values (100, ${runId}, 'admission-org', 'admission-user', ${projectId}, 'upload', 'queued', 'queued', ${tx.json({ speedBoost })})
+      returning id`;
+    await tx`insert into documents(id,org_id,user_id,project_id,run_id,filename,mime_type,source_key,status,file_size)
+      values(${runId},'admission-org','admission-user',${projectId},${runId},'fixture.txt','text/plain','synthetic','queued',1000)`;
+    return rows;
+  }, { leaseRunId: runId, speedBoost });
 }
 
 // Admission mechanics below are sized for a $1 starter chat reserve (the default is lower).
