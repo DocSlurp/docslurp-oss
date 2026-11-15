@@ -28,6 +28,8 @@ import {
   resolveVisionRoute,
   splitTextIntoPagesStrict,
   parserPlaybookCatalog,
+  documentLadderPolicy,
+  effectiveLadder,
   parserPlaybookForQuality,
   qualityAllowsPageReading,
   documentExtractionForQuality,
@@ -115,6 +117,7 @@ import { allowHostedCall } from "../lib/privacy-guard.js";
 import { resolveRunRoutingV2 } from "../lib/vision-routing-v2.js";
 import { createHostedOcrReader } from "../ocr/hosted-reader.js";
 import { affordableImageFrames, authorizeImageFrames, authorizeImageRead, authorizeOcrRead, refuseUnfundedImageFrames } from "../ocr/image-frames.js";
+import { inheritExtractEscalatedPages, recordExtractEscalatedPages } from "../routing/auto-ladder.js";
 import { OCR_FAILED_PAGES_KEY, OcrInfrastructureError, OcrRefusedError, ocrFailedPages, recordOcrFailedPages, resolveOcrMode } from "../ocr/mode.js";
 import { ocrDocument } from "../ocr/read-document.js";
 import { recordMeasuredPageCount, type PageCountResult } from "../lib/office-page-count.js";
@@ -339,19 +342,25 @@ export class ExtractMarkdownStage implements Stage {
       async (document) => {
         const manifestKey = `${runArtifactRoot(state.run, document.userId)}/markdown/${document.id}.json`;
         const artifactSlot = `${document.id}:markdown`;
+        // The Auto ladder (pipeline.ladder): a document none of whose pages may go above fast reads exactly as Fast; one
+        // whose above-fast share is smaller than the document runs text-layer extractors only, and the OCR engine reads
+        // at most its budget of scanned pages (ocrScannedPdfPages), so no extractor reads pages past the cap.
+        const ladderPolicy = documentLadderPolicy(state.run.pipeline, document.pageCount);
+        const pageQuality = ladderPolicy.quality;
+        const ladderBinding = pageQuality === "auto" && ladderPolicy.aboveFastBinding;
         const playbook =
           (state.artifactLedger.readDocument(document.id, "parser-playbook") as
             | keyof typeof parserPlaybookCatalog
             | undefined) ??
-          parserPlaybookForQuality(state.run.pipeline.quality);
+          parserPlaybookForQuality(pageQuality);
         // Fast runs only text-layer extractors with OCR off, whatever the request or project asked for.
         const { config: extractionConfig, removed: fastRemoved } = documentExtractionForQuality(
           { ...defaultDocumentExtractionConfig, ...(state.run.pipeline.documentExtraction ?? {}) },
-          state.run.pipeline.quality,
+          ladderBinding ? "fast" : pageQuality,
         );
         if (fastRemoved.length > 0) {
           console.warn(
-            `[extract-markdown] quality fast removed page-reading extraction settings run=${state.run.id} ` +
+            `[extract-markdown] ${ladderBinding ? "ladder share cap" : "quality fast"} removed page-reading extraction settings run=${state.run.id} ` +
               `document=${document.id} removed=${fastRemoved.join(",")}`,
           );
         }
@@ -443,6 +452,7 @@ export class ExtractMarkdownStage implements Stage {
                 if (existingUri) {
                   const inheritedFailures = state.artifactLedger.read(`${OCR_FAILED_PAGES_KEY}:${contentHash}`);
                   if (inheritedFailures) state.artifactLedger.recordDocument(document.id, OCR_FAILED_PAGES_KEY, inheritedFailures);
+                  inheritExtractEscalatedPages(state.artifactLedger, document.id, contentHash);
                   // A copy of a measured Office, EPUB or spreadsheet file bills its original's count, never intake's one page.
                   const inheritedPages = measuredPagesOf(state.artifactLedger.read(`${MEASURED_PAGES_KEY}:${contentHash}`));
                   if (inheritedPages) await recordMeasuredPageCount(state, document, format, inheritedPages);
@@ -468,8 +478,10 @@ export class ExtractMarkdownStage implements Stage {
                 // Fast never OCRs: an image file keeps its page image (render-images) and has no extracted text.
                 // The same image test billing and render-images use (MIME image/*), so an image MIME the format map
                 // does not know is kept unread too instead of reaching an OCR-capable extractor.
+                // Under an above-fast share smaller than the image's frames, the OCR engine (which reads every frame) does not
+                // run either: the image is kept unread, as Fast keeps it (render-images keeps its page image).
                 const keepImageUnread = (format === "image" || (document.mimeType ?? "").startsWith("image/")) &&
-                  !qualityAllowsPageReading(state.run.pipeline.quality);
+                  (!qualityAllowsPageReading(pageQuality) || ladderBinding);
                 // An Office file no reader here can open fails now, loudly and for good, never through a weaker reader.
                 const unsupported = keepImageUnread ? null : await unsupportedSourceReason(tempFile, {
                   format, mimeType: document.fileFacts?.sniffedMimeType ?? document.mimeType, filename: document.filename,
@@ -492,9 +504,9 @@ export class ExtractMarkdownStage implements Stage {
                 // Why an image continues without extracted text (reported in the manifest and stats).
                 let textlessFallback: string | null = null;
                 if (keepImageUnread) {
-                  textlessFallback = "quality fast keeps images unread";
+                  textlessFallback = ladderBinding ? "ladder share cap keeps images unread" : "quality fast keeps images unread";
                   plannedExtractors = {
-                    primary: this.textlessImageExtractor(state, document, textlessFallback),
+                    primary: this.textlessImageExtractor(state, document, textlessFallback, true),
                     secondary: null,
                     tableAware: false,
                   };
@@ -709,8 +721,9 @@ export class ExtractMarkdownStage implements Stage {
                   // text-layer extractors never OCR. The engine charges each page it reads.
                   const sourceLexical = new Map((splitTextIntoPagesStrict(winningText, document.pageCount) ?? [])
                     .map((text, index) => [index + 1, winningCandidate.ocrPages?.includes(index + 1) ? null : ocrPageHasWords(text)] as const));
-                  const scanFill = isPdf && qualityAllowsPageReading(state.run.pipeline.quality)
-                    ? await this.ocrScannedPdfPages(state, document, { sourcePath: tempFile, text: winningText, textKey: winningCandidate.textKey, ocrLanguage: extractionConfig.ocr.language, contentHash }, signal)
+                  const scanFill = isPdf && qualityAllowsPageReading(pageQuality)
+                    ? await this.ocrScannedPdfPages(state, document, { sourcePath: tempFile, text: winningText, textKey: winningCandidate.textKey, ocrLanguage: extractionConfig.ocr.language, contentHash,
+                      ...(ladderPolicy.ladder.active ? { ladderBudget: ladderPolicy.aboveFastBudget } : {}) }, signal)
                     : null;
                   if (scanFill) {
                     winningText = scanFill.text;
@@ -1418,7 +1431,7 @@ export class ExtractMarkdownStage implements Stage {
   private async ocrScannedPdfPages(
     state: import("../pipeline/pipeline.js").WorkflowState,
     document: import("../models.js").Document,
-    args: { sourcePath: string; text: string; textKey: string; ocrLanguage?: string; contentHash: string },
+    args: { sourcePath: string; text: string; textKey: string; ocrLanguage?: string; contentHash: string; ladderBudget?: number },
     signal?: AbortSignal,
   ): Promise<{ text: string; textUri: string; pages: number[] } | null> {
     const pageCount = Math.max(1, Math.trunc(document.pageCount) || 1);
@@ -1432,7 +1445,18 @@ export class ExtractMarkdownStage implements Stage {
       return null;
     }
     const hasWords = ocrPageHasWords;
-    const empty = scanFillPageNumbers(split)!;
+    const scanned = scanFillPageNumbers(split)!;
+    // Auto ladder above-fast share: the OCR engine reads at most the document's budget of scanned pages, in document order
+    // (every one lacks native text alike); the rest stay unread here and are kept as page images (render-images).
+    const empty = args.ladderBudget === undefined ? scanned : scanned.slice(0, Math.max(0, args.ladderBudget));
+    if (empty.length < scanned.length) {
+      console.warn(`[ocr] ladder share cap document=${document.id} scanned=${scanned.length} read=${empty.length} budget=${args.ladderBudget}`);
+      pushPerfMetric({ metric: "ladder-capped-pages", value: scanned.length - empty.length, unit: "count", tags: ["ocr", "ladder"], metadata: { documentId: document.id, stage: this.name } });
+    }
+    if (empty.length > 0 && args.ladderBudget !== undefined) {
+      // Recorded before the read: a page sent to the OCR engine counts against the cap whether or not it returns text.
+      recordExtractEscalatedPages(state.artifactLedger, document.id, empty, args.contentHash);
+    }
     if (empty.length === 0) return null;
     const mode = resolveOcrMode();
     if (mode === "off" || mode === "hosted") {
@@ -1988,10 +2012,11 @@ export class ExtractMarkdownStage implements Stage {
     state: import("../pipeline/pipeline.js").WorkflowState,
     document: import("../models.js").Document,
     cause: string,
+    keptOnPurpose = false,
   ): PreparedExtractor {
     const pipeline = state.run.pipeline;
-    // Fast keeps the image as its page image on purpose; nothing has to read it.
-    const keptAsImage = !qualityAllowsPageReading(pipeline.quality);
+    // Fast (or an Auto ladder cap) keeps the image as its page image on purpose; nothing has to read it.
+    const keptAsImage = keptOnPurpose || !qualityAllowsPageReading(pipeline.quality);
     const visionAllowed =
       pipeline.visionFallback &&
       isProviderCallAllowed(pipeline.privacyMode, visionCall(resolveVisionRoute(pipeline.vision)));
@@ -2355,8 +2380,9 @@ export class ExtractMarkdownStage implements Stage {
     if (!critiqueEnabled() || !Number.isFinite(maxCostCents) || maxCostCents <= 0) {
       return null;
     }
-    // Self-critique re-reads page rasters with a vision model; fast never reads a page.
-    if (!qualityAllowsPageReading(args.state.run.pipeline.quality)) {
+    // Self-critique re-reads page rasters with a vision model; fast never reads a page, and an Auto ladder limit
+    // (pipeline.ladder) plans every model read of a page, which an extra critique read would escape.
+    if (!qualityAllowsPageReading(args.state.run.pipeline.quality) || effectiveLadder(args.state.run.pipeline).active) {
       return null;
     }
     const maxCostPerPageCents = Number.parseFloat(

@@ -1,6 +1,7 @@
 import {
   adaptiveRoutingDecisionSurfaceSchema,
   canonicalDocumentSchema,
+  documentLadderPolicy,
   qualityAllowsPageReading,
   VISUAL_CANDIDATE_STATS_KEY,
   type AdaptiveRoutingDecisionSurface,
@@ -14,6 +15,7 @@ import { type ArtifactStore, keyFromStorageUri } from "../tools/storage.js";
 import { runArtifactRoot } from "../lib/artifact-root.js";
 import type { Config } from "../config.js";
 import { loadActiveRoutePlan } from "../routing/active-plan.js";
+import { visionLadderSelection } from "../routing/auto-ladder.js";
 import { pagesNeedingPixels } from "../routing/runtime.js";
 import { prioritizePagesWithoutNativeText, selectLegacyVisionPages } from "./classify-route.js";
 import { resolveRunRoutingV2 } from "../lib/vision-routing-v2.js";
@@ -158,8 +160,12 @@ export class RenderImagesStage implements Stage {
     const isPdf = mimeType === "application/pdf";
     const isImage = mimeType.startsWith("image/");
     // Fast never reads a page: render exactly the pages without a text layer, which keep their page image, up to
-    // the per-document and per-run caps. Every other textless page stays unread.
-    if (!qualityAllowsPageReading(state.run.pipeline.quality)) {
+    // the per-document and per-run caps. Every other textless page stays unread. A document the Auto ladder keeps
+    // entirely at the fast rung (pipeline.ladder: no page may go above fast, or an image whose frames the share cannot
+    // cover, which extraction kept unread) is kept the same way.
+    const ladderPolicy = documentLadderPolicy(state.run.pipeline, Math.max(1, document.pageCount));
+    const ladderFast = ladderPolicy.quality === "auto" && isImage && ladderPolicy.aboveFastBinding;
+    if (!qualityAllowsPageReading(ladderPolicy.quality) || ladderFast) {
       if (!isPdf && !isImage) return { pageNumbers: [], request, routed: null, keptAsImage: [], unreadPages: [] };
       const caps = fastPageImageCaps();
       const canonicalDocument = await this.loadCanonicalDocument(state, document.id);
@@ -222,10 +228,25 @@ export class RenderImagesStage implements Stage {
     // Pages Doppler left to the host's page image (a scan `--scan-pages copy` could not copy, or a scan copy that failed
     // its checks): the Markdown has no image for them, so a project that keeps page images renders them here.
     const hostPages = state.run.pipeline.preserveImages && isPdf ? await this.hostPageImagePages(state, document) : [];
+    // Auto ladder: pages a limit keeps off every model whose content is pixels only are kept as their page image, as Fast
+    // keeps them; pages a limit keeps off a model that have a text layer are not rendered for vision.
+    const ladder = !routed && isPdf && ladderPolicy.ladder.active && request?.status === "ready"
+      ? visionLadderSelection({
+        pipeline: state.run.pipeline, documentId: document.id, pageCount: Math.max(1, document.pageCount),
+        triage: request.pages, routingV2: resolveRunRoutingV2(state), ledger: state.artifactLedger,
+      })
+      : null;
+    // Only pages with no extracted text are kept as images (the same test Fast uses), so a reference never replaces text.
+    const textless = ladder && ladder.keepAsImage.length > 0
+      ? new Set(pagesKeptAsImage({ canonicalDocument: await this.loadCanonicalDocument(state, document.id), pageCount: Math.max(1, document.pageCount), isImage: false, routing: request }).kept)
+      : new Set<number>();
+    const keepAsImage = new Set<number>((ladder?.keepAsImage ?? []).filter((page) => textless.has(page)));
+    const unselected = new Set<number>(ladder?.plan.decisions.filter((decision) => decision.rung === "fast" && !keepAsImage.has(decision.pageNumber)).map((decision) => decision.pageNumber) ?? []);
+    const withKept = ladder ? [...new Set([...selected.filter((page) => !unselected.has(page)), ...keepAsImage])].sort((a, b) => a - b) : selected;
     const pageNumbers = isImage
-      ? selected.filter((pageNumber) => pageNumber === 1)
-      : hostPages.length > 0 ? [...new Set([...selected, ...hostPages])].sort((a, b) => a - b) : selected;
-    return { pageNumbers, request, routed, keptAsImage: [] as number[], unreadPages: [] as number[] };
+      ? withKept.filter((pageNumber) => pageNumber === 1)
+      : hostPages.length > 0 ? [...new Set([...withKept, ...hostPages])].sort((a, b) => a - b) : withKept;
+    return { pageNumbers, request, routed, keptAsImage: [...keepAsImage].sort((a, b) => a - b), unreadPages: [] as number[] };
   }
 
   /**

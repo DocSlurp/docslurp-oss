@@ -3,6 +3,7 @@ import { z } from "zod";
 import { migrateStoredModelSettings } from "./stored-model-settings.js";
 import { dropRetiredExtractorIds, normalizeDocumentExtractionAliases } from "./extractor-aliases.js";
 import { DEFAULT_QUALITY_MODE, migrateLegacyQualitySettings, qualityModeSchema } from "./quality.js";
+import { defaultPipelineLadder, pipelineLadderSchema } from "./auto-ladder.js";
 import {
   defaultDocumentExtractionConfig,
   documentExtractionConfigSchema,
@@ -518,6 +519,9 @@ export const pipelineFeaturesSchema = z
     // parser playbook and vision page selection from it. Retired `parserPlaybook` and `vision.forceAllPages`
     // inputs are mapped onto it by migrateLegacyQualitySettings.
     quality: qualityModeSchema.default(DEFAULT_QUALITY_MODE),
+    // Auto ladder limits (auto-ladder.ts): the highest rung a page may be read on and per-document escalation share caps.
+    // Defaults change nothing; ignored outside `auto`.
+    ladder: pipelineLadderSchema.default(defaultPipelineLadder),
     documentExtraction: documentExtractionConfigSchema.default(
       defaultDocumentExtractionConfig,
     ),
@@ -745,6 +749,7 @@ export const defaultPipelineFeatures: PipelineFeatures = {
   inferenceLane: "standard",
   textGeneration: defaultTextGenerationConfig,
   quality: DEFAULT_QUALITY_MODE,
+  ladder: defaultPipelineLadder,
   documentExtraction: defaultDocumentExtractionConfig,
   visionFallback: true,
   vision: defaultVisionConfig,
@@ -1015,8 +1020,9 @@ export const pipelineStageLabels: Record<RunStage, string> = {
 
 export type PipelineFeatureOverrides = Omit<
   Partial<PipelineFeatures>,
-  "vision" | "embedding" | "piiPolicy" | "documentExtraction" | "textGeneration" | "graph" | "structuredExtraction" | "webhooks" | "chartExport"
+  "vision" | "embedding" | "piiPolicy" | "documentExtraction" | "textGeneration" | "graph" | "structuredExtraction" | "webhooks" | "chartExport" | "ladder"
 > & {
+  ladder?: Partial<PipelineFeatures["ladder"]> | null;
   chartExport?: Partial<PipelineFeatures["chartExport"]> | null;
   structuredExtraction?: Partial<PipelineFeatures["structuredExtraction"]> | null;
   webhooks?: Partial<ProjectWebhookSettings> | null;
@@ -1061,6 +1067,10 @@ export function normalizePipelineFeatures(
     textGeneration: {
       ...defaultTextGenerationConfig,
       ...(source?.textGeneration ?? {}),
+    },
+    ladder: {
+      ...defaultPipelineLadder,
+      ...(source?.ladder ?? {}),
     },
     vision: {
       ...visionBase,
@@ -1699,6 +1709,7 @@ const FIELD_SEED_STAGES: Record<keyof PipelineFeatures, readonly PipelineRunStag
   inferenceLane: [],
   textGeneration: [],
   quality: ["extract-markdown", "vision-extract"],
+  ladder: ["extract-markdown", "vision-extract"],
   documentExtraction: ["extract-markdown"],
   visionFallback: ["vision-extract"],
   vision: ["vision-extract"],

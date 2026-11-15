@@ -10,6 +10,8 @@ import { rm } from "node:fs/promises";
 import {
   adaptiveRoutingDecisionSurfaceSchema,
   canonicalDocumentSchema,
+  effectiveLadder,
+  ladderPlanSummary,
   parserPlaybookCatalog,
   parserPlaybookForQuality,
   qualityAllowsPageReading,
@@ -17,6 +19,7 @@ import {
   resolveVisionRoute,
   visionListPriceCents,
   visionModelTokenPricing,
+  type LadderPlan,
   type ParserPlaybookKey,
   type VisionConfig,
   type VisionRuntime,
@@ -40,7 +43,8 @@ import { healthyDocuments } from "../pipeline/document-health.js";
 import type { CommandRunner } from "../tools/runner.js";
 import { type ArtifactStore, cleanupTempFile, keyFromStorageUri } from "../tools/storage.js";
 import { runArtifactRoot } from "../lib/artifact-root.js";
-import { configuredVisionServedRoute, executeVisionRuntime, visionCall, visionRenderLongEdge, VisionImageOverBudgetError } from "../tools/vision-runtime.js";
+import { ladderPinAllows, planDocumentLadder, pinLadderPlan, LADDER_PLAN_KEY } from "../routing/auto-ladder.js";
+import { configuredVisionServedRoute, executeVisionRuntime, isPageTranscription, visionCall, visionRenderLongEdge, VisionImageOverBudgetError } from "../tools/vision-runtime.js";
 import { findVisionBilledUsage, findVisionOutputRejected } from "../tools/vision-stream.js";
 import { primaryFailureUsages, priceVisionResult, visionFailureUsages, type VisionFailureUsage } from "../lib/guarded-vision-call.js";
 import { allowHostedCall } from "../lib/privacy-guard.js";
@@ -283,6 +287,11 @@ export class VisionExtractStage implements Stage {
       fallbackTextPages: new Set(task.fallbackText ? [task.pageNumber] : []),
       vmOcrPages: new Set(task.vmOcr ? [task.pageNumber] : []),
     };
+    // Defense in depth: page tasks come from the ladder plan (planPageTasks), and a page outside a pinned plan is not read.
+    if (effectiveLadder(state.run.pipeline).active && !ladderPinAllows(state.artifactLedger.readDocument(document.id, LADDER_PLAN_KEY), task.pageNumber)) {
+      console.warn(`[ladder] page task outside the document's plan document=${document.id} page=${task.pageNumber}: not read`);
+      return { pageNumber: task.pageNumber, outcome: "ladder-capped", fallbackText: task.fallbackText === true } satisfies VisionPageSkip;
+    }
     const outputs = await this.extractVisionPagesFromCache(state, document, task.vision, [task.pageNumber], signal,
       undefined, undefined, false, { hints, skips });
     // An optional fail-open result is also a checkpoint; do not repeatedly call the provider. A
@@ -416,6 +425,7 @@ export class VisionExtractStage implements Stage {
                 selectedPages: needsVision.selectedPages,
                 routing: needsVision.routing,
                 routingVersion: routingVersion(routingV2),
+                ...(needsVision.ladder ? { ladder: needsVision.ladder } : {}),
               });
 
               await recordPageFacts(state.store, buildVisionPageFacts({
@@ -431,6 +441,7 @@ export class VisionExtractStage implements Stage {
                   selectedPages: needsVision.selectedPages,
                   reason: needsVision.reason,
                   routingVersion: routingVersion(routingV2),
+                  ...(needsVision.ladder ? { ladder: needsVision.ladder.summary } : {}),
                 },
               };
             }
@@ -559,6 +570,7 @@ export class VisionExtractStage implements Stage {
               routing: needsVision.routing,
               ...(routed ? { pageRouter: this.routedSummary(routed, routedResult, routedValidation) } : {}),
               routingVersion: routingVersion(routingV2),
+              ...(needsVision.ladder ? { ladder: needsVision.ladder } : {}),
               processedPages: outputs.length,
               // Selected pages without vision output and why; their model text (if any) is never kept.
               failedPages: failedPages,
@@ -664,6 +676,8 @@ export class VisionExtractStage implements Stage {
                 failedPageCount: failedPages.length,
                 routingPolicy: needsVision.routing?.visionPolicy ?? null,
                 routingVersion: routingVersion(routingV2),
+                // Each page's Auto ladder rung and why (counts, limits and the first pages; the manifest keeps every page).
+                ...(needsVision.ladder ? { ladder: needsVision.ladder.summary } : {}),
                 failedPages: failedPages.map((page) => ({ pageNumber: page.pageNumber, reason: page.outcome, fallbackText: page.fallbackText })),
                 visionGuard: guardStop?.reason ?? null,
                 reconciledPages: reconciliation.changedPages,
@@ -714,6 +728,8 @@ export class VisionExtractStage implements Stage {
       dominantRoutes: string[];
     } | null;
     hints: LegacyPageHints;
+    /** The document's Auto ladder plan (auto quality on the triage path): each page's rung and why. */
+    ladder?: { summary: Record<string, unknown>; decisions: LadderPlan["decisions"] };
   }> {
     const routing = await this.loadAdaptiveRouting(state, document.id);
     const routingV2 = resolveRunRoutingV2(state);
@@ -776,6 +792,21 @@ export class VisionExtractStage implements Stage {
       console.warn(`[ocr] vision skips pages whose OCR failed document=${document.id} pages=${[...ocrFailed].join(",")}`);
     }
 
+    // The Auto ladder: every selected page gets a rung from page triage; the project's limits (pipeline.ladder) cap it.
+    // Without limits the plan keeps every selected page on the rung it asked for, so the reads are unchanged.
+    let hints: LegacyPageHints = routing ? legacyPageHints(routing.pages) : NO_HINTS;
+    let ladder: { summary: Record<string, unknown>; decisions: LadderPlan["decisions"] } | undefined;
+    if (state.run.pipeline.quality === "auto") {
+      const planned = this.planLadder(state, document, pageCount, routing?.pages ?? [], needed ? selectedPages : [], hints);
+      ladder = { summary: planned.summary, decisions: planned.decisions };
+      if (planned.active) {
+        selectedPages = planned.selectedPages;
+        hints = planned.hints;
+        if (needed && selectedPages.length === 0) reason = "ladder-capped";
+        needed = needed && selectedPages.length > 0;
+      }
+    }
+
     if (!needed) {
       selectedPages = [];
     }
@@ -805,7 +836,8 @@ export class VisionExtractStage implements Stage {
       score,
       selectedPages,
       reason,
-      hints: routing ? legacyPageHints(routing.pages) : NO_HINTS,
+      hints,
+      ...(ladder ? { ladder } : {}),
       routing: routing
         ? {
             documentComplexity: routing.documentComplexity,
@@ -814,6 +846,58 @@ export class VisionExtractStage implements Stage {
           }
         : null,
     };
+  }
+
+  /**
+   * The document's ladder plan over the pages vision selected (routing/auto-ladder.ts), and, under a limit, the pages and
+   * hints vision reads with: pages a limit kept at `fast` are dropped, and pages lowered from `intelligent` to `ocr` are
+   * read by an OCR-rung reader: the OCR engine in its VM (as mixed scans are), else the vision page reader, else the run's
+   * vision route when it is plain page transcription. With none of those the page is not read and keeps its text layer.
+   * The first plan of the run is pinned (pinLadderPlan): page tasks, retries and the whole-document pass read within it.
+   */
+  private planLadder(
+    state: WorkflowState,
+    document: import("../models.js").Document,
+    pageCount: number,
+    triage: readonly import("@docslurp/shared").AdaptivePageRoutingEntry[],
+    selectedPages: readonly number[],
+    hints: LegacyPageHints,
+  ): { active: boolean; selectedPages: number[]; hints: LegacyPageHints; summary: Record<string, unknown>; decisions: LadderPlan["decisions"] } {
+    const { policy, plan } = planDocumentLadder({
+      pipeline: state.run.pipeline, documentId: document.id, pageCount, selectedPages, triage, ledger: state.artifactLedger,
+    });
+    const active = policy.ladder.active;
+    if (!active) {
+      return { active, selectedPages: [...selectedPages], hints, summary: ladderPlanSummary(plan, policy.ladder), decisions: plan.decisions };
+    }
+    const pinned = pinLadderPlan(state.artifactLedger, document.id, plan);
+    const decisions = plan.decisions.map((decision) => {
+      if (decision.rung === "fast" || pinned.escalated.has(decision.pageNumber)) return decision;
+      return { ...decision, rung: "fast" as const, cappedBy: decision.cappedBy ?? "share-above-fast" as const, reason: `${decision.reason};pinned-plan` };
+    });
+    const lowered = decisions.filter((decision) => decision.need === "intelligent" && decision.rung === "ocr").map((decision) => decision.pageNumber);
+    const vmOcr = resolveOcrMode() === "vm" && document.mimeType === "application/pdf";
+    const vision = state.run.pipeline.vision;
+    const reader = !vmOcr && document.mimeType === "application/pdf" && hints.triaged ? visionPageReaderFor(state, vision) : null;
+    const transcription = isPageTranscription({ vision, outputSchema: state.run.pipeline.outputSchema ?? null });
+    const unread = new Set<number>();
+    if (!vmOcr && !reader && !transcription) for (const page of lowered) unread.add(page);
+    const finalDecisions = decisions.map((decision) => unread.has(decision.pageNumber)
+      ? { ...decision, rung: "fast" as const, reason: `${decision.reason};no-ocr-reader` }
+      : decision);
+    const allowed = new Set(finalDecisions.filter((decision) => decision.rung !== "fast").map((decision) => decision.pageNumber));
+    const loweredRead = lowered.filter((page) => !unread.has(page));
+    const nextHints: LegacyPageHints = {
+      ...hints,
+      ...(vmOcr ? { vmOcrPages: new Set([...(hints.vmOcrPages ?? []), ...loweredRead]) } : {}),
+      ...(hints.figurePages ? { figurePages: new Set([...hints.figurePages].filter((page) => !loweredRead.includes(page))) } : {}),
+    };
+    const finalPlan = { ...plan, decisions: finalDecisions };
+    const summary = { ...ladderPlanSummary(finalPlan, policy.ladder), loweredReader: vmOcr ? "ocr-vm" : reader ? "page-reader" : transcription ? "vision-transcription" : "none" };
+    console.log(`[ladder] document=${document.id} pages=${pageCount} selected=${selectedPages.length} read=${allowed.size} ` +
+      `intelligent=${finalDecisions.filter((decision) => decision.rung === "intelligent").length} capped=${finalDecisions.filter((decision) => decision.cappedBy).length} ` +
+      `maxRung=${policy.ladder.maxRung} aboveFast=${policy.ladder.aboveFast ?? "none"} aboveOcr=${policy.ladder.aboveOcr ?? "none"}`);
+    return { active, selectedPages: selectedPages.filter((page) => allowed.has(page)), hints: nextHints, summary, decisions: finalDecisions };
   }
 
   private async loadPersistedExtractionText(

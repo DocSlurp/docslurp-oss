@@ -1,5 +1,5 @@
 import type { Sql } from "postgres";
-import { applyDefaultVisionOverride, normalizeStoredPipelineFeatures, parseManagedPipelineOverrides, resolveManagedPipeline, type MaterializePagesInput } from "@docslurp/shared";
+import { applyDefaultVisionOverride, applyLadderLimits, normalizeStoredPipelineFeatures, parseManagedPipelineOverrides, resolveManagedPipeline, type MaterializePagesInput } from "@docslurp/shared";
 
 import { isMissingDocumentError } from "../db/missing-document.js";
 import { recordMaterializedPageFee, staleStampSql } from "../db/page-base-fee.js";
@@ -69,7 +69,8 @@ async function withSourcePipeline<R extends { id: string; kind?: string; pipelin
     parseManagedPipelineOverrides(source.managed, `project of document ${documentId}`),
     label,
   );
-  return { ...run, pipeline: applyDefaultVisionOverride(managed.pipeline) };
+  // The Auto ladder's limits apply to query-time reads as to ingest (store.ts).
+  return { ...run, pipeline: applyLadderLimits(applyDefaultVisionOverride(managed.pipeline)) };
 }
 
 /**
