@@ -1,3 +1,5 @@
+import { LANCEDB_SUMMARIES_TABLE } from "@docslurp/shared";
+
 import { sql as defaultSql, type SqlClient } from "../db.js";
 import { signalPipelineCancel } from "../lib/temporal.js";
 import { notifySearchEligibilityChanged } from "../search/eligibility-hint.js";
@@ -114,6 +116,27 @@ async function enqueueProjectVectorTableDrops(sql: DataDeletionDeps["sql"], proj
     join documents d on d.id = o.document_id
     join projects w on w.id = d.project_id
     where w.id = ${projectId}
+    on conflict (kind, target) do nothing
+  `;
+  // The summary tree's table (`summaries`) beside each of those chunks tables, and in every embedding space a tree
+  // state row names. Queued by name, like the chunks tables, so it is dropped even where the prefix purge below
+  // cannot reach the LanceDB root. A project that never built a tree has no such table; the drop is then a no-op.
+  await sql`
+    insert into storage_cleanup_queue (kind, org_id, target, payload, reason, not_before)
+    select 'vector_table', w.org_id, w.org_id || '|' || w.id || '|' || s.embedding_model || '|' || s.dimension || '|' || ${LANCEDB_SUMMARIES_TABLE}::text,
+      jsonb_build_object('projectId', w.id, 'embeddingModel', s.embedding_model, 'dimension', s.dimension, 'table', ${LANCEDB_SUMMARIES_TABLE}::text),
+      'project_deleted', now() + make_interval(secs => ${graceSeconds})
+    from (
+      select d.project_id, vi.embedding_model, vi.dimension
+      from vector_indexes vi
+      join documents d on d.id = vi.document_id
+      where d.project_id = ${projectId} and vi.backend = 'lancedb'
+      union
+      select t.project_id, t.embedding_model, t.dimension
+      from document_summary_trees t
+      where t.project_id = ${projectId} and t.embedding_model is not null and t.dimension is not null
+    ) s
+    join projects w on w.id = s.project_id
     on conflict (kind, target) do nothing
   `;
   // Then everything else under <root>/<org>/<project>/: tables of models no

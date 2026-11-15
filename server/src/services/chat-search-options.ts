@@ -5,6 +5,7 @@ import {
   type ChatRetrievalOverrides,
   type PrivacyMode,
   type ProjectSearchSettings,
+  type SummaryTreeSearchMode,
 } from "@docslurp/shared";
 import { sql } from "../db.js";
 import { generateOpenRouterText } from "../lib/ai.js";
@@ -89,6 +90,25 @@ export function withThreadRetrieval(
     // Tuning retrieval for a thread means the thread wants retrieved passages.
     chat: { ...settings.chat, mode: "retrieval" },
   };
+}
+
+/**
+ * The summary-tree mode a chat turn sends with its searches: the thread's or request's override when it differs from
+ * the project's stored default, otherwise undefined so the project default decides inside search. Search treats a
+ * value sent with the request as an explicit ask (it reports and does not cache a search that cannot run it), which
+ * a project default must not become.
+ *
+ * One exception: chat never asks for `include`. Section summaries are model-written text over document text and
+ * have no isolated, citable place in a chat turn, so `include` (from the thread, the request or the project default)
+ * is sent as an explicit `guide`: the summaries still pick passages, and only passages reach the model.
+ */
+export function chatSummaryTreeOverride(
+  effective: Pick<ProjectSearchSettings, "retrievalDefaults">,
+  project: Pick<ProjectSearchSettings, "retrievalDefaults">,
+): SummaryTreeSearchMode | undefined {
+  const mode = effective.retrievalDefaults.summaryTree;
+  if (mode === "include") return "guide";
+  return mode === project.retrievalDefaults.summaryTree ? undefined : mode;
 }
 
 /** The retrieval overrides saved on a chat thread, or {} when none (or unreadable). */

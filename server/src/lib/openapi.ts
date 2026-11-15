@@ -1,6 +1,7 @@
 import { stateManagementPaths, stateManagementSchemas } from "./state-management-openapi.js";
 import { configChangePaths } from "./config-change-openapi.js";
 import { projectGraphPaths, projectGraphSchemas } from "./project-graph-openapi.js";
+import { projectSummaryTreePaths, projectSummaryTreeSchemas } from "./project-summary-tree-openapi.js";
 import { simpleServicePaths, simpleServiceSchemas } from "./simple-service-openapi.js";
 import { webhookEventCatalog } from "./webhook-events.js";
 import { searchCompatibilityPaths, searchCompatibilitySchemas } from "./search-compat-openapi.js";
@@ -25,7 +26,7 @@ export function buildOpenApiDocument(baseUrl: string) {
         bearerAuth: { type: "http", scheme: "bearer", description: "DocSlurp API key. Server keys start with dslp_priv_ and must stay secret; browser/embed client keys start with dslp_pub_, are domain-restricted and search-only unless granted chat (answers) or, with a project allowlist, web, ingest or artifacts. Keys issued before typed prefixes (dslp_...) remain valid." },
         sessionAuth: { type: "apiKey", in: "cookie", name: "better-auth.session_token", description: "Authenticated dashboard session" },
       },
-      schemas: { ApiError: apiErrorSchema, ...simpleServiceSchemas, ...stateManagementSchemas, ...projectGraphSchemas, ...searchCompatibilitySchemas },
+      schemas: { ApiError: apiErrorSchema, ...simpleServiceSchemas, ...stateManagementSchemas, ...projectGraphSchemas, ...projectSummaryTreeSchemas, ...searchCompatibilitySchemas },
     },
     tags: [
       { name: "health" },
@@ -232,6 +233,7 @@ export function buildOpenApiDocument(baseUrl: string) {
       ...simpleServicePaths,
       ...stateManagementPaths,
       ...projectGraphPaths,
+      ...projectSummaryTreePaths,
       ...configChangePaths,
     }
   };
