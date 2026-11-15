@@ -26,9 +26,11 @@ describe("project summary tree OpenAPI contract", () => {
     expect(Object.keys(document.paths["/v1/projects/{projectId}/summary-tree/backfill/estimate"])).toEqual(["post"]);
     expect(Object.keys(document.paths["/v1/projects/{projectId}/summary-tree/backfill/{jobId}"])).toEqual(["get"]);
     expect(Object.keys(document.paths["/v1/projects/{projectId}/summary-tree/backfill/{jobId}/cancel"])).toEqual(["post"]);
-    const schemas = document.components.schemas as Record<string, { properties: Record<string, { enum?: string[]; exclusiveMinimum?: number }>; required?: string[]; additionalProperties?: boolean }>;
+    const schemas = document.components.schemas as Record<string, { properties: Record<string, { enum?: string[]; minimum?: number }>; required?: string[]; additionalProperties?: boolean }>;
     expect(schemas.StartSummaryTreeBackfill).toMatchObject({ required: ["maxCostCents"], additionalProperties: false });
-    expect(schemas.StartSummaryTreeBackfill.properties.maxCostCents.exclusiveMinimum).toBe(0);
+    // A cap that would round to nothing in storage is refused by the schema.
+    expect(schemas.StartSummaryTreeBackfill.properties.maxCostCents.minimum).toBe(0.01);
+    expect(schemas.SummaryTreeJob.properties.blockedReason).toBeDefined();
     expect(schemas.SummaryTreeJob.properties.status.enum).toEqual(["queued", "running", "blocked", "completed", "failed", "cancelled"]);
     const start = document.paths["/v1/projects/{projectId}/summary-tree/backfill"].post;
     expect(start.responses).toHaveProperty("202");

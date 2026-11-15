@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 import * as lancedb from "@lancedb/lancedb";
-import { artifactUri, normalizePipelineFeatures, resolveEmbeddingRoute, VectorNamespaceManager, type PipelineFeatures } from "@docslurp/shared";
+import { artifactUri, DISTINCT_TEST_PRICING, installTestPricing, normalizePipelineFeatures, resolveEmbeddingRoute, VectorNamespaceManager, type PipelineFeatures } from "@docslurp/shared";
 import postgres from "postgres";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
@@ -32,7 +32,8 @@ const route = resolveEmbeddingRoute(PIPELINE.embedding);
 const DIM = route.dimensions;
 const BUCKET = "test-bucket";
 const ENV = { DOCSLURP_SUMMARY_TREE_BUILD: "on" };
-const SCOPE = { orgId: "org1", projectIds: "org", modeCeiling: null } as const;
+/** A signed-in user's scope, as `searchAccessScopeFor` builds it. */
+const SCOPE = { orgId: "org1", projectIds: "org", modeCeiling: null, actor: { type: "session" } } as const;
 const config = { costPer1kInputTokens: 0.001, costPer1kOutputTokens: 0.002, openRouterApiKey: "test-key" } as never;
 
 let sql: postgres.Sql<Record<string, unknown>>;
@@ -154,6 +155,7 @@ const cited = (response: Awaited<ReturnType<typeof guide>>, documentId: string) 
   response.results.filter((result) => result.citation.documentId === documentId).map((result) => result.citation.chunkIndex);
 
 beforeAll(async () => {
+  installTestPricing({ ...DISTINCT_TEST_PRICING, summaryTreeCallCredits: () => 0.1 });
   lanceDir = await mkdtemp(path.join(process.env.TMPDIR ?? tmpdir(), "docslurp-summary-tree-e2e-lance-"));
   spoolDir = await mkdtemp(path.join(process.env.TMPDIR ?? tmpdir(), "docslurp-summary-tree-e2e-spool-"));
   vi.stubEnv("LANCEDB_URI", lanceDir);

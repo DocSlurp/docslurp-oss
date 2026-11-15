@@ -93,8 +93,8 @@ describe("human-correction reindex", () => {
     const queued = await sql`select kind, org_id, target, payload, reason, attempts, not_before <= now() as due
       from storage_cleanup_queue where kind = 'summary_tree_document' and target in ('o|w|d2', 'o|w|d3') order by target`;
     expect(queued).toEqual([
-      { kind: "summary_tree_document", org_id: "o", target: "o|w|d2", payload: { projectId: "w", documentId: "d2" }, reason: "document_corrected", attempts: 0, due: true },
-      { kind: "summary_tree_document", org_id: "o", target: "o|w|d3", payload: { projectId: "w", documentId: "d3" }, reason: "document_corrected", attempts: 0, due: true },
+      { kind: "summary_tree_document", org_id: "o", target: "o|w|d2", payload: { projectId: "w", documentId: "d2", generation: 0 }, reason: "document_corrected", attempts: 0, due: true },
+      { kind: "summary_tree_document", org_id: "o", target: "o|w|d3", payload: { projectId: "w", documentId: "d3", generation: 0 }, reason: "document_corrected", attempts: 0, due: true },
     ]);
     // A second reindex makes a removal that had been failing due again.
     await sql`update storage_cleanup_queue set attempts = 10, last_error = 'x' where target = 'o|w|d2'`;
