@@ -421,7 +421,7 @@ describe("search response cache and the summary tree", () => {
     try {
       await post({ key: "a1" }, guided);
       expect(cachedReplay((await post({ key: "a1" }, guided)).json)).toBe(true);
-      // The trigger of migration 0164 sends this when a tree leaves `ready`.
+      // The trigger of migration 0165 sends this when a tree leaves `ready`.
       handleSearchEligibilityHint(JSON.stringify({ projectIds: [WS.std] }));
       expect(cachedReplay((await post({ key: "a1" }, guided)).json)).toBe(false);
       expect(cachedReplay((await post({ key: "a1" }, guided)).json)).toBe(true);

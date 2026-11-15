@@ -1073,7 +1073,7 @@ export const documentChunks = pgTable(
       "gin",
       table.tsContent.asc().nullsLast().op("tsvector_ops"),
     ),
-    // Chunk ranges of one document (summary-tree guide mode), migration 0164.
+    // Chunk ranges of one document (summary-tree guide mode), migration 0165.
     index("document_chunks_document_chunk_index_idx").using(
       "btree",
       table.documentId.asc().nullsLast().op("text_ops"),
@@ -3797,7 +3797,7 @@ export const documentMaps = pgTable(
   ],
 );
 
-/** Summary tree build state, one row per document (migration 0163; packages/shared/src/summary-tree.ts). No text. */
+/** Summary tree build state, one row per document (migration 0164; packages/shared/src/summary-tree.ts). No text. */
 export const documentSummaryTrees = pgTable(
   "document_summary_trees",
   {
@@ -3816,9 +3816,9 @@ export const documentSummaryTrees = pgTable(
     levelCount: integer("level_count").default(0).notNull(),
     rootNodeId: text("root_node_id"),
     error: text(),
-    /** Who holds a `building` row (migration 0165). */
+    /** Who holds a `building` row (migration 0166). */
     buildOwner: text("build_owner"),
-    /** Builds that took the document (migration 0168); a queued removal carries the value it was asked at. */
+    /** Builds that took the document (migration 0169); a queued removal carries the value it was asked at. */
     buildGeneration: bigint("build_generation", { mode: "number" }).default(0).notNull(),
     builtAt: timestamp("built_at", { withTimezone: true, mode: "string" }),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
@@ -3838,7 +3838,7 @@ export const documentSummaryTrees = pgTable(
   ],
 );
 
-/** Summary tree node registry (migration 0163): hash, level, parent, status and chunk range. No summary text. */
+/** Summary tree node registry (migration 0164): hash, level, parent, status and chunk range. No summary text. */
 export const documentSummaryTreeNodes = pgTable(
   "document_summary_tree_nodes",
   {
@@ -3880,7 +3880,7 @@ export const documentSummaryTreeNodes = pgTable(
   ],
 );
 
-/** Summary tree backfill jobs (migration 0165; worker/src/summary-tree/backfill-job.ts). Counters and settings only. */
+/** Summary tree backfill jobs (migration 0166; worker/src/summary-tree/backfill-job.ts). Counters and settings only. */
 export const summaryTreeJobs = pgTable(
   "summary_tree_jobs",
   {
@@ -3911,7 +3911,7 @@ export const summaryTreeJobs = pgTable(
     startedAt: timestamp("started_at", { withTimezone: true, mode: "string" }),
     finishedAt: timestamp("finished_at", { withTimezone: true, mode: "string" }),
     updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
-    // Fair claiming and parking (migration 0167).
+    // Fair claiming and parking (migration 0168).
     lastAttemptAt: timestamp("last_attempt_at", { withTimezone: true, mode: "string" }),
     parkCount: integer("park_count").default(0).notNull(),
     parkedSince: timestamp("parked_since", { withTimezone: true, mode: "string" }),

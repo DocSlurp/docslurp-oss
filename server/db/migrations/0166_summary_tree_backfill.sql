@@ -4,7 +4,7 @@
 --    `job:<jobId>` for the backfill job). A build keeps its row alive by touching `updated_at`; a `building` row that
 --    has not been touched for SUMMARY_TREE_BUILD_STALE_MS was left by a dead worker and blocks nothing. The owner lets
 --    a build notice that another one took its document over, and lets a resumed job recognise its own documents.
---    Neither column is in the readiness trigger's column list (migration 0164), so a heartbeat sends no hint.
+--    Neither column is in the readiness trigger's column list (migration 0165), so a heartbeat sends no hint.
 ALTER TABLE document_summary_trees ADD COLUMN IF NOT EXISTS build_owner text;
 --> statement-breakpoint
 -- 2. summary_tree_jobs: builds trees for a project's already indexed documents. A sibling of graph_jobs: leased, so a

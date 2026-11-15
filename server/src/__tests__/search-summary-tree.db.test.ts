@@ -862,7 +862,7 @@ describe("summaries table access", () => {
   });
 });
 
-describe("summary tree readiness hint (migration 0164)", () => {
+describe("summary tree readiness hint (migration 0165)", () => {
   it("document_chunks has the (document_id, chunk_index) index", async () => {
     const rows = await sql<{ indexdef: string }[]>`select indexdef from pg_indexes where tablename = 'document_chunks' and indexname = 'document_chunks_document_chunk_index_idx'`;
     expect(rows[0]?.indexdef).toMatch(/\(document_id, chunk_index\)/);

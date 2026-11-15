@@ -22,7 +22,7 @@ import { envInt, TtlLruCache } from "./ttl-lru.js";
  *   blocked, failed, cancelled, corrected, purged, or served early by a run that
  *   stopped before completing it). Dropped immediately, always. A run that
  *   finishes with every document completed withdraws nothing and sends none.
- *   A hint carrying `"debounce": true` is an arrival instead (a summary tree became ready, migration 0164) and is
+ *   A hint carrying `"debounce": true` is an arrival instead (a summary tree became ready, migration 0165) and is
  *   debounced like run progress.
  * - `run_events` (worker run progress): mostly documents arriving. During a bulk
  *   ingest these fire many times a second, and reloading a 10,000-document set on

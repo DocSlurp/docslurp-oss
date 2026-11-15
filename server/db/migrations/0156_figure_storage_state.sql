@@ -51,7 +51,7 @@ END $$;
 -- An earlier run's figure folder (`<root>/doppler/<doc>/`), queued when a newer run's full figure write commits; the
 -- drainer re-checks that no ledger row or current level uses it before purging (worker/src/db/superseded-purge.ts).
 -- Replaced only while the constraint does not allow the kind yet: a second run after a later migration added another
--- kind (0166) must not narrow the list back, which would refuse that kind's rows.
+-- kind (0167) must not narrow the list back, which would refuse that kind's rows.
 DO $$
 BEGIN
   IF NOT EXISTS (

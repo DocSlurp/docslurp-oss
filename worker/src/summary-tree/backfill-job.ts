@@ -49,7 +49,7 @@ import { SUMMARY_TREE_TEXT_OPERATION } from "./limits.js";
 import { markSummaryTreesSkipped, registerSummaryTreeArtifact } from "./state-store.js";
 
 /*
- * Summary tree backfill job (summary_tree_jobs, migration 0165): builds trees for a project's already indexed
+ * Summary tree backfill job (summary_tree_jobs, migration 0166): builds trees for a project's already indexed
  * documents. The build stage only sees new uploads, stops after its time budget, and never returns to a document it
  * left partial; this job does. It is a sibling of the graph rebuild job (graph/rebuild-job.ts): leased, with a
  * cursor, cancellable, capped. Each document is built by `runSummaryTreeForDocument`, the same function the stage

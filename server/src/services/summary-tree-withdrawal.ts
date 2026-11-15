@@ -66,7 +66,7 @@ let reconcileIdleUntil = 0;
 /**
  * Marks and withdraws corrected documents that lack the mark. Every completed correction reindex leaves the
  * document's tree state `skipped` / `corrected` in its own transaction (`withdrawSummaryTreeForCorrection`), and
- * migration 0166 did the same for corrections completed before it. A correction completed after that migration by a
+ * migration 0167 did the same for corrections completed before it. A correction completed after that migration by a
  * server instance that predates the withdrawal (a rolling deploy) leaves none, and such a document's tree would be
  * built, or kept, from the text the correction replaced. This pass finds those documents and does for each what the
  * reindex would have done: the mark, the registry rows, and the queued strict removal.
