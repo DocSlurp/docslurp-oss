@@ -1662,6 +1662,7 @@ export class Store {
         set status = 'processing',
             attempts = document_run_stage_states.attempts + 1,
             error = null,
+            failure = null,
             started_at = now(),
             completed_at = null,
             updated_at = now()
@@ -1740,6 +1741,7 @@ export class Store {
             artifact_uri = ${artifactUri || null},
             stats = ${this.toJson(stats)}::jsonb,
             error = null,
+            failure = null,
             completed_at = now(),
             updated_at = now()
         where run_id = ${state.run.id} and document_id = ${documentId} and stage_name = ${stage}`;
@@ -1895,6 +1897,7 @@ export class Store {
     message: string,
     artifactUri?: string,
     stats?: Record<string, unknown>,
+    failure?: import("@docslurp/shared").DocumentFailure,
   ): Promise<void> {
     // Checkpoint and document status in one statement (one commit).
     await this.sql`
@@ -1908,6 +1911,7 @@ export class Store {
         artifact_uri,
         stats,
         error,
+        failure,
         started_at,
         updated_at
       )
@@ -1920,6 +1924,7 @@ export class Store {
         ${artifactUri || null},
         ${this.toJson(stats ?? {})}::jsonb,
         ${message},
+        ${this.toJson(failure ?? null)}::jsonb,
         now(),
         now()
       )
@@ -1928,6 +1933,7 @@ export class Store {
           artifact_uri = ${artifactUri || null},
           stats = ${this.toJson(stats ?? {})}::jsonb,
           error = ${message},
+          failure = ${this.toJson(failure ?? null)}::jsonb,
           updated_at = now()
       returning 1
       )

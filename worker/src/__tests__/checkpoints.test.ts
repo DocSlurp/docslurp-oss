@@ -248,7 +248,8 @@ describe("runDocumentStage", () => {
       "quarantine",
       "quarantined: mime mismatch",
       "s3://docslurp/quarantine/doc-1.json",
-      { decision: "quarantined", reasonCodes: ["mime-mismatch"] }
+      { decision: "quarantined", reasonCodes: ["mime-mismatch"] },
+      { code: "processing_failed", retryable: null }
     );
   });
 

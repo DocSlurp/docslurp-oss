@@ -1,3 +1,4 @@
+- Recovery council fixes (#425): document-stage restart clears prior typed failure; upload status-only metadata reads require current project/org read access. Migrated database negatives cover revoked shares/memberships and invalid API-key scopes; no parser or OCR checkpoint changes.
 ## Fast scan preview selection (2026-11-14, draft, needs council)
 
 - Fast includes ledger-backed unavailable scan images in its bounded page render selection, using the existing organization-scoped ledger read. The per-document and per-run caps still apply. Pages with canonical text receive previews without replacing their text with a page-image reference. Missing canonical evidence still refuses selection.

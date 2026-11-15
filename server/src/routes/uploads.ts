@@ -40,7 +40,7 @@ import {
   directUploadSessionBelongsToOrganization,
   signDirectUploadParts,
 } from "../services/direct-upload-session.js";
-import { assertSessionReplayable, assertSessionProjectStillContributable, createSessionIdempotently } from "../services/direct-session-idempotency.js";
+import { assertSessionReplayable, assertSessionProjectStillReadable, assertSessionProjectStillContributable, createSessionIdempotently } from "../services/direct-session-idempotency.js";
 import { parseIdempotencyKey } from "../services/idempotency.js";
 import { isRunCreationBlockedError } from "../services/runs.js";
 import { UnreadableSourceError } from "../services/source-metadata.js";
@@ -271,6 +271,16 @@ export const createUploadsRoutes = (ports: ProjectIntakePorts = projectIntakePor
           return apiStatusError(c, 403, "Forbidden");
         }
         // The `project` value itself is resolved inside the key's org and allowlist by intake.
+      }
+    }
+    if (sessionMatch && c.req.method === "GET" && c.req.query("statusOnly") === "true") {
+      const loaded = await loadDirectUploadSession(sessionMatch[1], actor.userId);
+      if (loaded) {
+        try {
+          await assertSessionProjectStillReadable(loaded.session, actor.userId);
+        } catch (error) {
+          return projectIntakeErrorResponse(c, error) ?? apiStatusError(c, 403, "Forbidden");
+        }
       }
     }
     // Every route that mints signed upload URLs for an existing session, or ingests it, re-checks that this user may still

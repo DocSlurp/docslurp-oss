@@ -56,7 +56,8 @@ export interface CheckpointStore {
     stage: string,
     message: string,
     artifactUri?: string,
-    stats?: Record<string, unknown>
+    stats?: Record<string, unknown>,
+    failure?: import("@docslurp/shared").DocumentFailure
   ): Promise<void>;
   appendEvent(event: ProjectRunEvent): Promise<void>;
   /**

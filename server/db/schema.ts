@@ -3223,6 +3223,7 @@ export const documentRunStageStates = pgTable(
     artifactUri: text("artifact_uri"),
     stats: jsonb().default({}).notNull(),
     error: text(),
+    failure: jsonb(),
     startedAt: timestamp("started_at", { withTimezone: true, mode: "string" }),
     completedAt: timestamp("completed_at", {
       withTimezone: true,
