@@ -20,6 +20,9 @@ use super::{PdfProfile, ProbeInput, ProbeKind, ProbeResult, AREA_EQUIVALENT_BUCK
 use super::layout;
 use crate::rules::{PageRasterRouting, Rules};
 
+#[path = "detail.rs"]
+pub mod detail;
+
 /// Decompressed bytes of one content stream or form XObject.
 const MAX_STREAM_BYTES: usize = 8 * 1024 * 1024;
 /// Content bytes interpreted per page, page content and every form invocation together.
@@ -332,7 +335,10 @@ impl FormCache {
         if limit == 0 {
             return None;
         }
-        let content = stream.decompressed_content_with_limit(limit).ok()?;
+        let content = match stream.decompressed_content_with_limit(limit) {
+            Ok(content) => content,
+            Err(_) => { self.charge(limit); return None; }
+        };
         self.charge(content.len());
         Some(Rc::new(content))
     }
@@ -725,6 +731,7 @@ fn lookup_xobject<'a>(document: &'a Document, resources: &[&'a Dictionary], name
 }
 
 struct PageReading {
+    operations: usize,
     words: f64,
     lexical: Option<bool>,
     path_operations: usize,
@@ -756,7 +763,15 @@ impl PageReading {
 }
 
 fn classify_page(routing: &PageRasterRouting, document: &Document, page_id: ObjectId, forms: &mut FormCache) -> Option<PageReading> {
-    let content = document.get_page_content_with_limit(page_id, forms.stream_limit()).ok()?;
+    classify_page_checked(routing, document, page_id, forms, false)
+}
+
+fn classify_page_checked(routing: &PageRasterRouting, document: &Document, page_id: ObjectId, forms: &mut FormCache, strict_validation: bool) -> Option<PageReading> {
+    let limit = forms.stream_limit();
+    let content = match document.get_page_content_with_limit(page_id, limit) {
+        Ok(content) => content,
+        Err(_) => { forms.charge(limit); return None; }
+    };
     forms.charge(content.len());
     let resources = page_resources(document, page_id);
     let area = page_area(document, page_id);
@@ -767,7 +782,7 @@ fn classify_page(routing: &PageRasterRouting, document: &Document, page_id: Obje
     let limits = ExtractionLimitsCopy { tiny_points: rules.tiny_glyph_points, tiny_per_page: rules.tiny_glyphs_per_page };
     let mut stats = PageStats::default();
     let display = layout::DisplaySpace::new(media, visible, page_rotate(document, page_id));
-    let mut context = Context { document, routing, forms, area, visible, media, limits, display, layout: &bundled.layout };
+    let mut context = Context { document, routing, forms, area, visible, media, limits, display, layout: &bundled.layout, strict_validation };
     context.interpret(&content, &resources, IDENTITY, 0, &mut stats);
     if stats.exhausted && stats.text.chars > 0.0 {
         // A page with text that was not read to the end: estimate its glyphs from its own content stream's size (forms it
@@ -780,7 +795,7 @@ fn classify_page(routing: &PageRasterRouting, document: &Document, page_id: Obje
         stats.text.estimated = true;
     }
     let (width, height) = ((visible[2] - visible[0]).max(0.0), (visible[3] - visible[1]).max(0.0));
-    Some(PageReading { lexical: if stats.exhausted || stats.unmapped_text || stats.words.encoding_unknown { None } else { Some(stats.words.characters > 0.0) }, words: stats.words.words(), path_operations: stats.path_operations, images: stats.images, exhausted: stats.exhausted, unmapped_text: stats.unmapped_text, area, width, height, text: stats.text, words_at: stats.words_at, words_overflow: stats.words_overflow, rules: stats.rules, display_visible: display.visible })
+    Some(PageReading { operations: stats.operations, lexical: if stats.exhausted || stats.unmapped_text || stats.words.encoding_unknown { None } else { Some(stats.words.characters > 0.0) }, words: stats.words.words(), path_operations: stats.path_operations, images: stats.images, exhausted: stats.exhausted, unmapped_text: stats.unmapped_text, area, width, height, text: stats.text, words_at: stats.words_at, words_overflow: stats.words_overflow, rules: stats.rules, display_visible: display.visible })
 }
 
 /// The worker's drawn-content rule (`classify-route.ts`): a document with no extractable text anywhere whose bytes,
@@ -933,6 +948,7 @@ fn is_raster_page(routing: &PageRasterRouting, words: f64, images: &ImageTotals)
 }
 
 struct Context<'a, 'f> {
+    strict_validation: bool,
     document: &'a Document,
     routing: &'a PageRasterRouting,
     forms: &'f mut FormCache,
@@ -1085,6 +1101,7 @@ impl<'a> Context<'a, '_> {
         if stats.images.len() < MAX_TRACKED_IMAGES_PER_PAGE {
             stats.images.push(image);
         } else if let Some(smallest) = stats.images.iter_mut().min_by(|a, b| a.coverage.total_cmp(&b.coverage)) {
+            stats.exhausted = true;
             // A page of hundreds of images keeps the largest ones: they decide the class.
             if coverage > smallest.coverage {
                 *smallest = image;
@@ -1125,7 +1142,7 @@ impl<'a> Context<'a, '_> {
         let mut font_unmapped = false;
         let mut text = TextState::default();
         for operation in Content::decode_iter(content) {
-            let Ok(operation) = operation else { break };
+            let Ok(operation) = operation else { stats.exhausted = true; break };
             stats.operations += 1;
             if stats.operations > MAX_OPERATIONS_PER_PAGE {
                 stats.exhausted = true;
@@ -1263,7 +1280,7 @@ impl<'a> Context<'a, '_> {
                 }
                 "Do" => {
                     let Some(Object::Name(name)) = operands.first() else { continue };
-                    let Some((id, Object::Stream(xobject))) = lookup_xobject(self.document, resources, name) else { continue };
+                    let Some((id, Object::Stream(xobject))) = lookup_xobject(self.document, resources, name) else { stats.exhausted = true; continue };
                     let subtype = xobject.dict.get(b"Subtype").ok().and_then(|object| deref(self.document, object)).map(|(_, value)| value);
                     match subtype {
                         Some(Object::Name(kind)) if kind == b"Image" => {
@@ -1283,7 +1300,7 @@ impl<'a> Context<'a, '_> {
                                 Some(id) => self.forms.get(id, xobject),
                                 None => self.forms.decompress(xobject),
                             };
-                            let Some(form_content) = form_content else { continue };
+                            let Some(form_content) = form_content else { stats.exhausted = true; continue };
                             let matrix = xobject
                                 .dict
                                 .get(b"Matrix")
@@ -1301,11 +1318,20 @@ impl<'a> Context<'a, '_> {
                                 return;
                             }
                         }
+                        Some(Object::Name(kind)) if kind == b"Form" => { stats.exhausted = true; }
                         _ => {}
                     }
                 }
                 _ => {}
             }
+        }
+        // lopdf's streaming iterator tolerates trailing malformed input. Its strict
+        // decoder collects operations, so use it only on a small bounded stream.
+        // Larger detailed streams remain explicitly partial rather than claiming
+        // that the iterator verified complete consumption.
+        if self.strict_validation && !stats.exhausted
+            && (content.len() > 256 * 1024 || Content::decode_strict(content).is_err()) {
+            stats.exhausted = true;
         }
     }
 }
@@ -1379,6 +1405,7 @@ mod tests {
         let routing = routing();
         let id = |number: u32| (number, 0);
         let page = |ids: &[u32]| PageReading {
+            operations: 0,
             words: 0.0,
             lexical: Some(false),
             path_operations: 0,

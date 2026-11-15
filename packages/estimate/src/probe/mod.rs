@@ -12,6 +12,7 @@ pub mod layout;
 mod pdf;
 pub mod cost_route;
 pub use pdf::{layout_pages, LayoutImage, LayoutPage};
+pub use pdf::detail::{Options as DetailOptions, Session as DetailSession};
 
 use serde::{Deserialize, Serialize};
 

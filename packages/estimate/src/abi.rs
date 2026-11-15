@@ -15,6 +15,55 @@ use serde::Serialize;
 use crate::error::Error;
 use crate::probe::{probe, read_plan, FileMeta, ProbeInput};
 use crate::rules::{Rules, PROFILE_SCHEMA};
+use crate::probe::{DetailOptions, DetailSession};
+use std::cell::RefCell;
+
+thread_local! {
+    // One active detailed session per module; explicit close and trap recovery release it.
+    static DETAIL: RefCell<Option<DetailSession>> = const { RefCell::new(None) };
+}
+
+pub fn detail_open_json(options: &[u8], bytes: &[u8]) -> String {
+    envelope((|| {
+        DETAIL.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            if slot.is_some() { return Err(Error::invalid_request("close the active detail session first")); }
+            let options: DetailOptions = parse("detail options", options)?;
+            let (session, header) = DetailSession::open(bytes, options)?;
+            *slot = Some(session);
+            Ok(header)
+        })
+    })())
+}
+
+pub fn detail_next_json() -> String {
+    envelope(DETAIL.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let session = slot.as_mut().ok_or_else(||Error::invalid_request("no active detail session"))?;
+        let output = session.next();
+        if output.is_none() { *slot = None; }
+        Ok(output)
+    }))
+}
+
+pub fn detail_close_json() -> String {
+    DETAIL.with(|slot| *slot.borrow_mut() = None);
+    envelope(Ok::<_, Error>(true))
+}
+
+#[cfg(target_arch = "wasm32")]
+#[no_mangle]
+pub unsafe extern "C" fn ds_detail_open(options: *const u8, options_len: usize, bytes: *const u8, bytes_len: usize) -> u64 {
+    into_host(detail_open_json(slice(options, options_len), slice(bytes, bytes_len)))
+}
+
+#[cfg(target_arch = "wasm32")]
+#[no_mangle]
+pub extern "C" fn ds_detail_next() -> u64 { into_host(detail_next_json()) }
+
+#[cfg(target_arch = "wasm32")]
+#[no_mangle]
+pub extern "C" fn ds_detail_close() -> u64 { into_host(detail_close_json()) }
 
 /// Envelope JSON for a result.
 pub fn envelope<T: Serialize>(result: Result<T, Error>) -> String {

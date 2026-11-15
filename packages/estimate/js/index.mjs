@@ -45,8 +45,10 @@ export async function createEstimator(options = {}) {
   const instantiate = () => new WebAssembly.Instance(module, { env: { memory } });
   let instance = instantiate();
   const health = { calls: 0, crashes: 0, resets: 0 };
+  let detailActive = null;
 
   function call(name, ...inputs) {
+    if (detailActive && name === "ds_probe") throw new EstimatorError("invalid_request", "close the detailed profile before a legacy probe");
     const exports = instance.exports;
     let packed;
     health.calls += 1;
@@ -70,6 +72,7 @@ export async function createEstimator(options = {}) {
         // A trap (a panic, an input larger than the memory, or a file that hit the memory cap) leaves the heap
         // inconsistent: zero the memory and instantiate the module into it again, exactly as on first load.
         health.crashes += 1;
+        detailActive = null;
         new Uint8Array(memory.buffer).fill(0);
         instance = instantiate();
         health.resets += 1;
@@ -113,6 +116,43 @@ export async function createEstimator(options = {}) {
       const head = new Uint8Array(await blob.slice(0, plan.head).arrayBuffer());
       const tail = plan.tail > 0 ? new Uint8Array(await blob.slice(blob.size - plan.tail).arrayBuffer()) : undefined;
       return estimator.profile(file, head, tail);
+    },
+    /** Incrementally profile a local PDF. Yields complete JSONL lines; no upload or pricing. */
+    async *profileJsonl(blob, options = {}) {
+      if (detailActive) throw new EstimatorError("invalid_request", "a detailed profile is already active");
+      if (blob.size > 64 * 1024 * 1024) throw new EstimatorError("invalid_request", "detailed PDF input exceeds 64 MiB");
+      const { signal, ...config } = options;
+      const cancelled = () => signal?.aborted;
+      if (cancelled()) return;
+      const token = {};
+      detailActive = token;
+      let opened = false;
+      try {
+        const bytes = new Uint8Array(await blob.arrayBuffer());
+        if (cancelled()) return;
+        const header = call("ds_detail_open", json(config), bytes);
+        opened = true;
+        yield header;
+        while (!cancelled()) {
+          // Yield to cancellation/UI between bounded work batches; never queue the document output.
+          await new Promise((resolve) => setTimeout(resolve, 0));
+          if (cancelled()) break;
+          if (detailActive !== token) throw new EstimatorError("crashed", "detailed profile session was reset");
+          const batch = call("ds_detail_next");
+          if (batch === null) break;
+          for (const record of batch.trimEnd().split("\n")) {
+            const terminal = JSON.parse(record).t === "end";
+            yield `${record}\n`;
+            if (terminal) return;
+          }
+        }
+        if (cancelled()) yield `${JSON.stringify({ t: "end", complete: false, reason: "cancelled" })}\n`;
+      } finally {
+        if (detailActive === token) {
+          if (opened) call("ds_detail_close");
+          detailActive = null;
+        }
+      }
     },
     /** Profile files with progress events, cancellation and per-file fallbacks; see `estimateFiles`. */
     estimateFiles(blobs, options) {

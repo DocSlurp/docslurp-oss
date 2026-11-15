@@ -71,7 +71,8 @@ class Estimator:
     def _instantiate(self) -> None:
         instance = wasmtime.Instance(self._store, self._module, [self._memory])
         exports = instance.exports(self._store)
-        self._fn = {name: exports[name] for name in ("ds_alloc", "ds_free", "ds_info", "ds_read_plan", "ds_probe")}
+        self._fn = {name: exports[name] for name in ("ds_alloc", "ds_free", "ds_info", "ds_read_plan", "ds_probe", "ds_detail_open", "ds_detail_next", "ds_detail_close")}
+        self._detail_token = None
 
     def _reset(self) -> None:
         # A store keeps a little bookkeeping per instance; start a new one now and then so it stays bounded.
@@ -86,6 +87,8 @@ class Estimator:
         self._instantiate()
 
     def _call(self, name: str, *inputs: Optional[bytes]) -> Any:
+        if self._detail_token is not None and name == "ds_probe":
+            raise EstimatorError("invalid_request", "close the detailed profile before a legacy probe")
         store = self._store
         try:
             args: list[int] = []
@@ -150,6 +153,51 @@ class Estimator:
     def health(self) -> dict:
         """Traps (``crashed``) and the fresh instances made after them."""
         return {"crashes": self._crashes, "resets": self._total_resets}
+
+    def profile_jsonl(self, path: str | os.PathLike, *, max_deep_pages: int = 1000,
+                      batch_pages: int = 64, groups: Optional[list[str]] = None, cancel: Optional[Cancel] = None):
+        """Yield content-free PDF JSONL lines. Input cap 64 MiB; never uploads or quotes.
+
+        Close the generator when stopping early. One active session per estimator;
+        use separate instances on separate threads. Cancellation is checked between batches.
+        """
+        if self._detail_token is not None:
+            raise EstimatorError("invalid_request", "a detailed profile is already active")
+        cancelled = (cancel.is_set if isinstance(cancel, threading.Event) else cancel) or (lambda: False)
+        if cancelled():
+            return
+        token = object()
+        self._detail_token = token
+        opened = False
+        try:
+            with open(path, "rb") as handle:
+                if os.fstat(handle.fileno()).st_size > 64 * 1024 * 1024:
+                    raise EstimatorError("invalid_request", "detailed PDF input exceeds 64 MiB")
+                data = handle.read(64 * 1024 * 1024 + 1)
+            options = {"maxDeepPages": max_deep_pages, "batchPages": batch_pages}
+            if groups is not None:
+                options["groups"] = groups
+            header = self._call("ds_detail_open", json.dumps(options).encode(), data)
+            opened = True
+            del data
+            yield header
+            while not cancelled():
+                if self._detail_token is not token:
+                    raise EstimatorError("crashed", "detailed profile session was reset")
+                batch = self._call("ds_detail_next")
+                if batch is None:
+                    return
+                for line in batch.splitlines():
+                    terminal = json.loads(line).get("t") == "end"
+                    yield line + "\n"
+                    if terminal:
+                        return
+            yield json.dumps({"t": "end", "complete": False, "reason": "cancelled"}) + "\n"
+        finally:
+            if self._detail_token is token:
+                if opened:
+                    self._call("ds_detail_close")
+                self._detail_token = None
 
     def estimate_paths(
         self,

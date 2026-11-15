@@ -111,6 +111,8 @@ export type Estimator = {
   readPlan(file: FileMeta): ReadPlan;
   profile(file: FileMeta, head: Uint8Array, tail?: Uint8Array): FileProfile;
   profileBlob(blob: Blob, name?: string): Promise<FileProfile>;
+  /** Local PDF evidence, JSONL lines. Detailed input is currently capped at 64 MiB. */
+  profileJsonl(blob: Blob, options?: { maxDeepPages?: number; batchPages?: number; groups?: Array<"text" | "images" | "vectors" | "tables">; signal?: AbortSignal }): AsyncGenerator<string>;
   estimateFiles(files: ArrayLike<Blob & { name: string }> | Iterable<Blob & { name: string }>, options?: EstimateOptions): Promise<EstimateResult>;
   /** Calls into the module, traps (`crashed`) and fresh instances made after them. */
   health(): EstimatorHealth;
