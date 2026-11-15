@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -83,10 +84,24 @@ describe("VM deterministic extractor adapter", () => {
     expect(run).not.toHaveBeenCalled();
   });
 
+  it("refuses a production source without its scan hash before downloading or booting a VM", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    const store = storage({ "src/deck.pptx": pptx([[1, slideChart]]) });
+    const run = vi.fn();
+    const extract = createVmDeterministicVisualExtractor({ runner: { run }, storage: store, log: () => {} });
+    await expect(extract({
+      document: { id: "doc", mimeType: PPTX, pageCount: 1, sourceKey: "src/deck.pptx", parseSourceDecision: "original" },
+      candidates: [], artifacts: { dopplerFiguresIndexUri: null, mediaMapUri: null }, signals: { officeChartParts: 1 },
+    })).rejects.toThrow("parse-source-unscanned");
+    expect(store.downloads).toEqual([]);
+    expect(run).not.toHaveBeenCalled();
+  });
+
   it("in production sends each input to the parser VM and fails closed (no host parsing) when the VM is down", async () => {
     vi.stubEnv("NODE_ENV", "production");
+    const source = pptx([[1, slideChart]]);
     const store = storage(
-      { "src/deck.pptx": pptx([[1, slideChart]]), "fig/a.svg": genericBar(["a", "b"], [1, 2], 4), "fig/b.svg": genericBar(["a"], [1], 2) },
+      { "src/deck.pptx": source, "fig/a.svg": genericBar(["a", "b"], [1, 2], 4), "fig/b.svg": genericBar(["a"], [1], 2) },
       { "run/index.json": figureIndex([{ id: "p2.g0", page: 2, format: "svg" }, { id: "p2.g1", page: 2, format: "svg" }]) },
     );
     const logs: string[] = [];
@@ -94,7 +109,7 @@ describe("VM deterministic extractor adapter", () => {
     const run = vi.fn(async () => { throw new Error("no parser VM provider"); });
     const extract = createVmDeterministicVisualExtractor({ runner: { run }, storage: store, log: (m) => logs.push(m) });
     const result = await extract({
-      document: { id: "doc", mimeType: PPTX, pageCount: 2, sourceKey: "src/deck.pptx", parseSourceDecision: "original" },
+      document: { id: "doc", mimeType: PPTX, pageCount: 2, sourceKey: "src/deck.pptx", parseSourceDecision: "original", sourceSha256: createHash("sha256").update(source).digest("hex") },
       candidates: [],
       artifacts: { dopplerFiguresIndexUri: "s3://b/run/index.json", mediaMapUri: null, artifactUri: (slot) => (slot.endsWith("p2.g0") ? "s3://b/fig/a.svg" : "s3://b/fig/b.svg") },
       signals: { officeChartParts: 1 },

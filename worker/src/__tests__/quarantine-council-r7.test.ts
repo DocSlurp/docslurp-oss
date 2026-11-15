@@ -15,7 +15,7 @@ import { Store } from "../db/store.js";
 import { materializePageRange } from "../deferred/materialize-pages.js";
 import { renderDocumentPage } from "../deferred/render-page.js";
 import { inspectArchive } from "../lib/quarantine-bytes.js";
-import { assertParseSourceDecided, originalSourceForQuarantine, PARSE_SOURCE_SCAN_VERSION, resolveDocumentSource, UnscannedParseSourceError, unscannedParseSourceKey } from "../lib/parse-source.js";
+import { bindDocumentUpload, assertParseSourceDecided, originalSourceForQuarantine, PARSE_SOURCE_SCAN_VERSION, resolveDocumentSource, UnscannedParseSourceError, unscannedParseSourceKey } from "../lib/parse-source.js";
 import { runDocumentStage, runDocuments } from "../pipeline/checkpoints.js";
 import { PdfSourceCache } from "../pipeline/pdf-asset-cache.js";
 import type { Stage } from "../pipeline/pipeline.js";
@@ -775,9 +775,13 @@ describe("production: quarantine decides a fresh upload under NODE_ENV=productio
       // An object quarantine did not get from originalSourceForQuarantine is refused before any check, even a perfect copy.
       const forged = { id: "x", sourceKey: "raw/x.pdf", sourceSha256: sha256Bytes(benign) };
       expect(() => verifyQuarantineUpload(forged, sha256Bytes(benign))).toThrow(/not issued by originalSourceForQuarantine/);
-      // In-memory documents (no loader binding): only "unscanned-allowed" ones are their own upload, even in production.
-      const issue = (sourceKey: string, sourceSha256: string | null) =>
-        originalSourceForQuarantine({ id: "x", sourceKey, sourceSha256, parseSourceDecision: "unscanned-allowed" });
+      // Non-development uploads must retain the loader binding, even with a development-only decision.
+      expect(() => originalSourceForQuarantine({ ...forged, parseSourceDecision: "unscanned-allowed" })).toThrow(/no upload binding/);
+      const issue = (sourceKey: string, sourceSha256: string | null) => {
+        const document = { id: "x", sourceKey, sourceSha256 };
+        bindDocumentUpload(document, { source_key: sourceKey, source_sha256: sourceSha256 });
+        return originalSourceForQuarantine(document);
+      };
       const issued = issue("raw/x.pdf", sha256Bytes(benign));
       expect(Object.isFrozen(issued)).toBe(true);
       expect(() => verifyQuarantineUpload({ ...issued }, sha256Bytes(benign))).toThrow(/not issued/);
