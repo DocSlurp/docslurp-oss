@@ -361,7 +361,7 @@ export interface LanceS3Proxy {
   /** Loopback address only; authentication is carried in a header, never in a URL. */
   endpoint: string;
   /** Ephemeral local credentials; never log these or pass them upstream. */
-  credentials: Credentials;
+  credentials: Credentials & { sessionToken: string };
   /** The listener's address, safe for logs. */
   address: string;
   port: number;
@@ -640,9 +640,9 @@ function option(options: Record<string, string>, ...names: string[]): string | u
  * cache would see nothing. The option of the same name wins over the variable (lancedb 0.41;
  * lancedb-s3-proxy-env.test.ts holds it to that).
  */
-export function lanceS3ProxyStorageOptions(storageOptions: Record<string, string>, proxied: string, credentials: Credentials): Record<string, string> {
-  const next = Object.fromEntries(Object.entries(storageOptions).filter(([name]) => !ENDPOINT_KEYS.includes(name.toLowerCase()) && (!["aws_access_key_id", "access_key_id", "aws_secret_access_key", "secret_access_key", "aws_session_token", "session_token", "aws_skip_signature", "skip_signature"].includes(name.toLowerCase()))));
-  return { ...next, ...{ aws_access_key_id: credentials.accessKeyId, aws_secret_access_key: credentials.secretAccessKey, aws_session_token: credentials.sessionToken!, aws_skip_signature: "false" }, endpoint: proxied, aws_endpoint_url_s3: proxied, allow_http: "true", virtual_hosted_style_request: "false" };
+export function lanceS3ProxyStorageOptions(storageOptions: Record<string, string>, proxied: string, credentials: Credentials & { sessionToken: string }): Record<string, string> {
+  const next = Object.fromEntries(Object.entries(storageOptions).filter(([name]) => !ENDPOINT_KEYS.includes(name.toLowerCase()) && !["aws_access_key_id", "access_key_id", "aws_secret_access_key", "secret_access_key", "aws_session_token", "session_token", "aws_skip_signature", "skip_signature"].includes(name.toLowerCase())));
+  return { ...next, aws_access_key_id: credentials.accessKeyId, aws_secret_access_key: credentials.secretAccessKey, aws_session_token: credentials.sessionToken, aws_skip_signature: "false", endpoint: proxied, aws_endpoint_url_s3: proxied, allow_http: "true", virtual_hosted_style_request: "false" };
 }
 
 /**

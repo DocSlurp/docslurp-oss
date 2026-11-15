@@ -307,7 +307,7 @@ async function stopApiBackgroundTasks(): Promise<void> {
   });
 }
 
-const awaitSearchBootWarm = createBootWarmGate(() => warmRecentSearchIndexes());
+const awaitSearchBootWarm = createBootWarmGate((signal) => warmRecentSearchIndexes({ signal }));
 
 export function ensureApiStartup(): Promise<void> {
   if (!startupPromise) {

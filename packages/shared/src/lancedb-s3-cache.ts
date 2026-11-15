@@ -527,34 +527,41 @@ async function serveCachedRequestInner(request: CachedRequest): Promise<CachedRe
     // One shared request per run; each block registers in the coalescing table so concurrent identical misses wait for it.
     let runPromise: Promise<Map<number, Buffer>> | undefined;
     const runOnce = (): Promise<Map<number, Buffer>> => (runPromise ??= (async () => {
-      const upstream = await request.fetchUpstream("GET", upstreamRange);
-      upstreamRequests++;
-      cache.count("fillRequests");
-      if (upstream.status !== 206) { failure = upstream; throw new UpstreamFailure(); }
-      const meta = metaFromUpstream(request, upstream);
-      const contentRange = /^bytes (\d+)-(\d+)\/(\d+)$/.exec(headerValue(upstream.headers["content-range"]) ?? "");
-      if (!meta || !contentRange || Number(contentRange[1]) !== first * B || Number(contentRange[2]) - Number(contentRange[1]) + 1 !== upstream.body.length) throw new Error("unexpected upstream range response");
-      if (!lease.valid) throw new CacheInvalidated();
-      await cache.setMeta(id, meta);
-      if (!lease.valid) throw new CacheInvalidated();
-      const out = new Map<number, Buffer>();
-      const writes: Promise<void>[] = [];
-      for (let index = first; index <= last; index++) {
-        const length = blockLength(index, meta.size, B);
-        const offset = (index - first) * B;
-        if (length === 0) continue;
-        const data = upstream.body.subarray(offset, offset + length);
-        if (data.length !== length) throw new Error("short upstream block");
-        out.set(index, data);
-        writes.push(cache.writeBlock(id, index, Buffer.from(data)));
+      try {
+        const upstream = await request.fetchUpstream("GET", upstreamRange);
+        upstreamRequests++;
+        cache.count("fillRequests");
+        if (upstream.status !== 206) { failure = upstream; throw new UpstreamFailure(); }
+        const meta = metaFromUpstream(request, upstream);
+        const contentRange = /^bytes (\d+)-(\d+)\/(\d+)$/.exec(headerValue(upstream.headers["content-range"]) ?? "");
+        if (!meta || !contentRange || Number(contentRange[1]) !== first * B || Number(contentRange[2]) - Number(contentRange[1]) + 1 !== upstream.body.length) throw new Error("unexpected upstream range response");
+        if (!lease.valid) throw new CacheInvalidated();
+        await cache.setMeta(id, meta);
+        if (!lease.valid) throw new CacheInvalidated();
+        const out = new Map<number, Buffer>();
+        const writes: Promise<void>[] = [];
+        for (let index = first; index <= last; index++) {
+          const length = blockLength(index, meta.size, B);
+          const offset = (index - first) * B;
+          if (length === 0) continue;
+          const data = upstream.body.subarray(offset, offset + length);
+          if (data.length !== length) throw new Error("short upstream block");
+          out.set(index, data);
+          writes.push(cache.writeBlock(id, index, Buffer.from(data)));
+        }
+        try { await Promise.all(writes); }
+        finally { if (!lease.valid) await cache.dropObject(id); }
+        if (!lease.valid) throw new CacheInvalidated();
+        cache.markValidated(id);
+        bytesFilled += upstream.body.length;
+        cache.count("bytesFilled", upstream.body.length);
+        return out;
+      } catch (error) {
+        // A refusal/error on any missing range revokes every cached range and
+        // every older in-flight fill, even before the ordinary HEAD lease expires.
+        await cache.dropObject(id);
+        throw error;
       }
-      try { await Promise.all(writes); }
-      finally { if (!lease.valid) await cache.dropObject(id); }
-      if (!lease.valid) throw new CacheInvalidated();
-      cache.markValidated(id);
-      bytesFilled += upstream.body.length;
-      cache.count("bytesFilled", upstream.body.length);
-      return out;
     })());
     try {
       const parts = await Promise.all(Array.from({ length: last - first + 1 }, (_, i) => cache.coalesce(id, first + i, async () => {

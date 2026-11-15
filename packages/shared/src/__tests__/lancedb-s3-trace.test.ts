@@ -374,3 +374,26 @@ it("isolates cache bytes and validation leases between upstream credential ident
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+
+it("bounds oversized buffered origin responses before caching them", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "proxy-oversize-cache-"));
+  const cache = new DiskBlockCache({ dir, maxBytes: 1_000_000, blockBytes: 4096, maxSpanBlocks: 1 });
+  const upstream = createServer((req, res) => {
+    req.resume();
+    res.writeHead(206, { "content-range": "bytes 0-8191/8192" });
+    res.end(Buffer.alloc(8192));
+  });
+  await new Promise<void>((r) => upstream.listen(0, "127.0.0.1", r));
+  const proxy = await startLanceS3Proxy({ endpoint: `http://127.0.0.1:${(upstream.address() as { port: number }).port}`, region: "auto", credentials: { accessKeyId: "AK", secretAccessKey: "SK" }, logIntervalMs: 0, cache });
+  try {
+    const response = await proxyFetch(proxy, `${proxy.endpoint}/bkt/t.lance/data/a.lance`, { headers: { range: "bytes=0-1" } });
+    expect(response.status).toBe(502);
+    expect(await response.text()).toContain("response too large");
+    expect(cache.entries).toBe(0);
+  } finally {
+    await proxy.close();
+    await new Promise<void>((r) => { upstream.close(() => r()); upstream.closeAllConnections(); });
+    await rm(dir, { recursive: true, force: true });
+  }
+});

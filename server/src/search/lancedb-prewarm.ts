@@ -1,3 +1,4 @@
+import { withIndexWarmSlot } from "./lancedb-prewarm-pool.js";
 import { availableMemoryBytes, resolveLanceSessionConfig, type LanceSessionConfig } from "@docslurp/shared/lancedb-session";
 
 /** Columns the search path reads from raw data files (refine, `documentId` filters). */
@@ -46,6 +47,17 @@ export async function prewarmSkipReason(table: Pick<PrewarmableTable, "stats">):
  * Best effort: failures are logged and returned, never thrown, because search works without it.
  */
 export async function prewarmTable(
+  table: PrewarmableTable,
+  name: string,
+  config: Pick<LanceSessionConfig, "prewarmIndex" | "prewarmData">,
+  log: (line: string) => void = console.log,
+  signal?: AbortSignal,
+): Promise<PrewarmResult> {
+  return await withIndexWarmSlot(() => prewarmTableInner(table, name, config, log), signal ? AbortSignal.any([signal, AbortSignal.timeout(60_000)]) : AbortSignal.timeout(60_000))
+    .catch(() => ({ indexes: [], dataColumns: [], errors: ["warm-up admission expired"], ms: 0 }));
+}
+
+async function prewarmTableInner(
   table: PrewarmableTable,
   name: string,
   config: Pick<LanceSessionConfig, "prewarmIndex" | "prewarmData">,

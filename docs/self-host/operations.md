@@ -415,3 +415,45 @@ or oversized tables skip eager loading and search them on demand. At most two na
 loads run concurrently; a caller timeout does not release a still-running native load's slot,
 and expired queued jobs do not begin native work. These conservative estimates are admission
 limits, not a guarantee of exact allocator memory use.
+
+### Partitioned vector indexes and index-only reindexing
+
+New and consolidated HNSW-SQ indexes target 1,000 rows per partition, rounded up to a
+power of two, at most 4,096 partitions and with at least 256 training rows per partition.
+`LANCEDB_VECTOR_PARTITION_ROWS` changes this target; 0 restores the former one-partition
+per million-row policy. Existing indexes are not rebuilt merely because the setting changes.
+
+Search uses L2 with scalar quantization, at least 100 HNSW candidates for unfiltered
+queries, 32 probes and refinement of two candidates per returned hit. Document/page filters
+probe all partitions (up to the build cap) and remain prefilters. This preserves narrow-scope
+recall at the cost of cold-read savings for filtered searches. `LANCEDB_REFINE_FACTOR` can
+explicitly select 1–16. Recall and latency remain corpus-dependent: validate a new corpus
+before changing build policy, and retain the per-scope results rather than only an average.
+
+Reindexing replaces only the vector index, without extraction, embedding calls, table
+replacement, compaction, pruning, or touching the FTS index. Stop writers to the selected
+project while applying it: the row/memory estimate is a preflight check, not a transactional
+limit on concurrent ingestion. Use the deployment's normal storage environment:
+
+```sh
+pnpm --filter @docslurp/worker exec tsx scripts/reindex-vector.ts \
+  --org ORG_ID --project PROJECT_ID --model provider/model --dimensions 1024
+# Review the dry-run plan, then repeat with --apply.
+```
+
+The default row budget is 100,000; `--max-rows` raises it explicitly, while the machine-memory
+check still applies. A catalogued legacy URI may be selected with `--uri`, but must remain
+inside that exact organization's project root and its vector dimension must match. Apply
+one project at a time. Replacement commits a new index version atomically; older table
+versions remain available for the configured retention window. A rollback changes the build
+policy and rebuilds the vector index again; rolling back application code alone does not
+restore the previous on-disk index layout.
+
+For a bounded local comparison, prepare a local table with only `id`, `documentId` and
+`vector` columns and run `worker/scripts/vector-index-recall.ts --database PATH --table NAME
+--output NEW_DIRECTORY --tuned`. It holds out 64 real vectors, compares both arms against
+exact flat search, reports screening/confirmation separately for unfiltered and document
+scopes, records production query policy, and exits nonzero if either scope misses 95% mean
+recall@10 or regresses more than one percentage point. Its output stays local; do not publish
+customer vectors/identifiers. `vector-index-cold.ts` measures process-cold local read bytes;
+these are neither physical I/O nor a production S3 latency measurement.

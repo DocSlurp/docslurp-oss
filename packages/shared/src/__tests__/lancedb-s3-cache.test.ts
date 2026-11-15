@@ -101,7 +101,23 @@ describe("serveCachedRequest", () => {
     expect(await restarted.getMeta(DiskBlockCache.objectId("ns", "bkt", KEY))).toBeUndefined();
   });
 
-  it.each([403, 404])("never lets a pre-refusal fill resurrect bytes or renew an invalidated authorization lease (%s)", async (refusal) => {
+  it.each([403, 404, 503])("a missing-block origin refusal revokes every cached range immediately (%s)", async (status) => {
+    const cache = cacheOf();
+    await get(cache, fakeUpstream({ [KEY]: object }), "bytes=0-9");
+    const denied = { calls: [], fetchUpstream: async () => ({ status, headers: {}, body: Buffer.alloc(0) }) };
+    expect(bytes(await get(cache, denied, "bytes=16-25")).status).toBe(status);
+    expect(cache.entries).toBe(0);
+    expect(bytes(await get(cache, denied, "bytes=0-9")).status).toBe(status);
+  });
+
+  it("a failed missing-block origin connection invalidates previously cached ranges", async () => {
+    const cache = cacheOf();
+    await get(cache, fakeUpstream({ [KEY]: object }), "bytes=0-9");
+    await expect(get(cache, { calls: [], fetchUpstream: async () => { throw new Error("offline"); } }, "bytes=16-25")).rejects.toThrow("offline");
+    expect(cache.entries).toBe(0);
+  });
+
+  it.each([{ refusal: 403, viaHead: true }, { refusal: 404, viaHead: true }, { refusal: 403, viaHead: false }, { refusal: 404, viaHead: false }])("never lets a pre-refusal fill resurrect bytes or renew an invalidated authorization lease (%j)", async ({ refusal, viaHead }) => {
     let now = 0;
     const cache = new DiskBlockCache({ dir, maxBytes: 1_000_000, blockBytes: B, now: () => now });
     const up = fakeUpstream({ [KEY]: object });
@@ -115,9 +131,9 @@ describe("serveCachedRequest", () => {
       started(); await gate; return up.fetchUpstream(method, range);
     } }, "bytes=16-25");
     await fetching;
-    now = 30_000;
+    now = viaHead ? 30_000 : 29_999;
     const denied = { calls: [], fetchUpstream: async () => ({ status: refusal, headers: {}, body: Buffer.alloc(0) }) };
-    expect(bytes(await get(cache, denied, "bytes=0-9")).status).toBe(refusal);
+    expect(bytes(await get(cache, denied, viaHead ? "bytes=0-9" : "bytes=32-41")).status).toBe(refusal);
     release();
     expect(await delayed).toMatchObject({ kind: "bypass", reason: "object-invalidated" });
     expect(bytes(await get(cache, denied, "bytes=16-25")).status).toBe(refusal);

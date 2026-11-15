@@ -103,8 +103,9 @@ export async function recentSearchTargets(limit: number): Promise<BootWarmTarget
  */
 export async function warmRecentSearchIndexes(deps: {
   limit?: number;
+  signal?: AbortSignal;
   targets?: (limit: number) => Promise<BootWarmTarget[]>;
-  warm?: (target: BootWarmTarget & { hydrate: boolean }) => Promise<void>;
+  warm?: (target: BootWarmTarget & { hydrate: boolean; signal?: AbortSignal }) => Promise<void>;
   log?: (line: string) => void;
 } = {}): Promise<{ projects: number; ms: number }> {
   const started = performance.now();
@@ -114,8 +115,9 @@ export async function warmRecentSearchIndexes(deps: {
   try {
     if (limit > 0) {
       for (const target of await (deps.targets ?? recentSearchTargets)(limit)) {
+        if (deps.signal?.aborted) break;
         // warmLanceDbSearch is best effort and swallows its own failures; guard the injected one too.
-        await (deps.warm ?? warmLanceDbSearch)({ ...target, hydrate: true }).catch(() => undefined);
+        await (deps.warm ?? warmLanceDbSearch)({ ...target, hydrate: true, ...(deps.signal ? { signal: deps.signal } : {}) }).catch(() => undefined);
         projects += 1;
       }
     }
@@ -132,14 +134,15 @@ export async function warmRecentSearchIndexes(deps: {
  * be cancelled; keep the one attempt shared so health probes cannot spawn retries.
  * Operators can disable warming explicitly with SEARCH_BOOT_WARM_PROJECTS=0.
  */
-export function createBootWarmGate(warm: () => Promise<unknown>, timeoutMs = 30_000): () => Promise<void> {
+export function createBootWarmGate(warm: (signal: AbortSignal) => Promise<unknown>, timeoutMs = 30_000): () => Promise<void> {
   let attempt: Promise<void> | undefined;
   return () => attempt ??= (async () => {
     let timer: ReturnType<typeof setTimeout> | undefined;
+    const controller = new AbortController();
     try {
       await Promise.race([
-        warm(),
-        new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("Search boot warm-up exceeded readiness deadline")), timeoutMs); }),
+        warm(controller.signal),
+        new Promise<never>((_, reject) => { timer = setTimeout(() => { controller.abort(); reject(new Error("Search boot warm-up exceeded readiness deadline")); }, timeoutMs); }),
       ]);
     } finally { clearTimeout(timer); }
   })();

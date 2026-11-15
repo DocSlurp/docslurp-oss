@@ -1,3 +1,4 @@
+import { withIndexWarmSlot } from "./lancedb-prewarm-pool.js";
 import { startDependencySpan, withDependencySpan } from "@docslurp/shared/observability";
 /**
  * LanceDB vector search service for query-time ANN retrieval.
@@ -247,8 +248,8 @@ function getDb(uri: string): Promise<lancedb.Connection> {
   return connection;
 }
 
-async function getTable(uri: string, name: string): Promise<lancedb.Table | null> {
-  return (await openTarget(uri, name)).table;
+async function getTable(uri: string, name: string, signal?: AbortSignal): Promise<lancedb.Table | null> {
+  return (await openTarget(uri, name, signal)).table;
 }
 
 /**
@@ -256,7 +257,7 @@ async function getTable(uri: string, name: string): Promise<lancedb.Table | null
  * (cached for missingTableTtlMs()), `failed` true when opening it failed for
  * another reason (not cached; the next search retries).
  */
-async function openTarget(uri: string, name: string): Promise<{ table: lancedb.Table | null; failed: boolean }> {
+async function openTarget(uri: string, name: string, signal?: AbortSignal): Promise<{ table: lancedb.Table | null; failed: boolean }> {
   const key = `${connectionKey(uri)}\u0000${name}`;
   const missingUntil = missingTables.get(key);
   if (missingUntil && missingUntil > Date.now()) return { table: null, failed: false };
@@ -275,7 +276,7 @@ async function openTarget(uri: string, name: string): Promise<{ table: lancedb.T
       const { config } = lanceSession();
       if (config.prewarmIndex || config.prewarmData) {
         lastPrewarm.set(key, Date.now());
-        const warming = prewarmTable(opened, name, config);
+        const warming = prewarmTable(opened, name, config, undefined, signal);
         // Background by default: the first query reads from storage as it would without prewarm.
         if (config.prewarmBlocking) await warming;
       }
@@ -286,7 +287,7 @@ async function openTarget(uri: string, name: string): Promise<{ table: lancedb.T
   }
   try {
     const opened = await table;
-    refreshPrewarm(key, name, opened);
+    refreshPrewarm(key, name, opened, signal);
     return { table: opened, failed: false };
   } catch (error) {
     if (tables.get(key) === table) tables.delete(key);
@@ -303,11 +304,11 @@ async function openTarget(uri: string, name: string): Promise<{ table: lancedb.T
 }
 
 /** Re-prewarm periodically: the worker rebuilds indexes in another process, which this cache has not seen. */
-function refreshPrewarm(key: string, name: string, table: lancedb.Table): void {
+function refreshPrewarm(key: string, name: string, table: lancedb.Table, signal?: AbortSignal): void {
   const { config } = lanceSession();
   if (!config.prewarmIndex || config.prewarmRefreshSeconds <= 0 || Date.now() - (lastPrewarm.get(key) ?? 0) < config.prewarmRefreshSeconds * 1_000) return;
   lastPrewarm.set(key, Date.now());
-  void prewarmTable(table, name, { prewarmIndex: true, prewarmData: false });
+  void prewarmTable(table, name, { prewarmIndex: true, prewarmData: false }, undefined, signal);
 }
 
 /**
@@ -375,8 +376,6 @@ export function resetLanceDbConnectionForTests(): void {
   missingTables.clear();
   missingWithDocumentsLoggedAt.clear();
   lastPrewarm.clear();
-  indexWarmActive = 0;
-  indexWarmQueue.length = 0;
   if (sessionState) clearInterval(sessionState.timer);
   sessionState = undefined;
 }
@@ -454,33 +453,19 @@ export function filterLanceDbRowsByDocumentIds(
  * - A failed load is retried no sooner than INDEX_WARM_RETRY_MS later; search works without it.
  * SEARCH_LANCE_WARM_INDEX=0 turns it off (the warm-up then reads version and schema only).
  */
-const INDEX_WARM_CONCURRENCY = 2;
 const INDEX_WARM_RETRY_MS = 60_000;
 interface IndexWarmup { signature: string; done: Promise<boolean>; settled: boolean; loading?: boolean; failedAt?: number }
 const indexWarmups = new WeakMap<lancedb.Table, IndexWarmup>();
-let indexWarmActive = 0;
-const indexWarmQueue: Array<() => void> = [];
 
 const INDEX_WARM_TIMEOUT_MS = 60_000;
 
-async function withIndexWarmSlot<T>(run: () => Promise<T>): Promise<T> {
-  // A released slot is handed straight to the next waiter, so the count never exceeds the limit.
-  if (indexWarmActive >= INDEX_WARM_CONCURRENCY) await new Promise<void>((resolve) => indexWarmQueue.push(resolve));
-  else indexWarmActive += 1;
-  try {
-    return await run();
-  } finally {
-    const next = indexWarmQueue.shift();
-    if (next) next(); else indexWarmActive -= 1;
-  }
-}
 
 /**
  * Timings vocabulary ([search-timing]): `lanceIndexCold` this search started or joined an index
  * load and `lanceIndexLoad` (ms) how long it lasted; `lanceIndexWarm` the indexes were already
  * loaded in this process; `lanceIndexWarmFailed` the load failed (the legs read on demand).
  */
-async function warmSearchIndexes(table: lancedb.Table, uri: string, capabilities: LanceTableCapabilities): Promise<void> {
+async function warmSearchIndexes(table: lancedb.Table, uri: string, capabilities: LanceTableCapabilities, signal?: AbortSignal): Promise<void> {
   if (process.env.SEARCH_LANCE_WARM_INDEX === "0" || capabilities.searchIndexes.length === 0) return;
   let warmup = indexWarmups.get(table);
   const retry = !warmup?.loading && warmup?.failedAt !== undefined && Date.now() - warmup.failedAt >= INDEX_WARM_RETRY_MS;
@@ -498,13 +483,16 @@ async function warmSearchIndexes(table: lancedb.Table, uri: string, capabilities
       // slot belongs to the actual load until it ends, never to the timeout.
       done: (async () => {
         let timer: ReturnType<typeof setTimeout> | undefined;
-        let expired = false;
+        const controller = new AbortController();
+        const cancel = () => controller.abort();
+        signal?.addEventListener("abort", cancel, { once: true });
+        if (signal?.aborted) controller.abort();
         try {
           return await Promise.race([
-            withIndexWarmSlot(() => expired ? Promise.resolve(false) : prewarmSearchIndexes(table, capabilities.searchIndexes, lanceNamespace(uri)).then((result) => result.errors.length === 0 && !result.skipped, () => false)).finally(() => { entry.loading = false; }),
-            new Promise<boolean>((resolve) => { timer = setTimeout(() => { expired = true; resolve(false); }, INDEX_WARM_TIMEOUT_MS); timer.unref?.(); }),
+            withIndexWarmSlot(() => prewarmSearchIndexes(table, capabilities.searchIndexes, lanceNamespace(uri)).then((result) => result.errors.length === 0 && !result.skipped, () => false), controller.signal).catch(() => false).finally(() => { entry.loading = false; }),
+            new Promise<boolean>((resolve) => { timer = setTimeout(() => { controller.abort(); resolve(false); }, INDEX_WARM_TIMEOUT_MS); timer.unref?.(); }),
           ]);
-        } finally { clearTimeout(timer); }
+        } finally { clearTimeout(timer); signal?.removeEventListener("abort", cancel); }
       })(),
     };
     void entry.done.then((ok) => {
@@ -527,15 +515,15 @@ async function warmSearchIndexes(table: lancedb.Table, uri: string, capabilities
  * vector and full-text indexes (warmSearchIndexes), so the legs that follow do not start with those
  * storage round trips. `lanceWarm` (ms) covers all of it. Best effort; never throws.
  */
-export async function warmLanceDbSearch(args: { orgId: string; projectId: string; embeddingModel: string; dimension: number; hydrate?: boolean }): Promise<void> {
+export async function warmLanceDbSearch(args: { orgId: string; projectId: string; embeddingModel: string; dimension: number; hydrate?: boolean; signal?: AbortSignal }): Promise<void> {
   if (!args.orgId.trim() || !args.projectId.trim()) return;
   const started = performance.now();
   try {
     const target = searchTarget(args);
-    const table = await getTable(target.uri, target.name);
+    const table = await getTable(target.uri, target.name, args.signal);
     if (table) {
       const [capabilities] = await Promise.all([lanceTableCapabilities(table), table.version(), args.hydrate ? undefined : resultColumns(table)]);
-      await warmSearchIndexes(table, target.uri, capabilities);
+      await warmSearchIndexes(table, target.uri, capabilities, args.signal);
     }
   } catch {
     // The search itself reopens or drops the handle on failure.
@@ -616,7 +604,7 @@ export async function lanceDbVectorSearch(args: {
         limit: args.limit,
         refineFactor: refineFactor ?? undefined,
         embeddingModel: args.embeddingModel,
-        tuning: present.map((target) => lanceDbQueryTuning(args.limit, target.documentIds?.length ?? 0, refineFactor)),
+        tuning: present.map((target) => lanceDbQueryTuning(args.limit, target.documentIds?.length ?? 0, refineFactor, target.documentIds !== undefined || Boolean(args.where))),
         variant,
       });
       const cached = cache.get(cacheKey);
@@ -662,7 +650,8 @@ export async function lanceDbVectorSearch(args: {
         if (filter) query.where(filter);
         // Both plans keep the scoped search breadth (ef) of the in-scope document count, so
         // dropping the IN list changes the predicate, never the recall budget.
-        const tuning = lanceDbQueryTuning(fetchLimit, documentIds?.length ?? 0, refineFactor);
+        const tuning = lanceDbQueryTuning(fetchLimit, documentIds?.length ?? 0, refineFactor, documentIds !== undefined || Boolean(args.where));
+        query.nprobes(tuning.nprobes);
         if (tuning.ef !== undefined) query.ef(tuning.ef);
         if (tuning.refineFactor !== undefined) query.refineFactor(tuning.refineFactor);
         return (await lanceSpan("search", () => query.toArray(), uri)) as LanceDbRow[];
