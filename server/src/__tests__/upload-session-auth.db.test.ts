@@ -216,8 +216,11 @@ describe("cookie receipt recovery uses live access", () => {
     mocks.describe.mockClear();
     expect((await status()).status).toBe(403);
     expect(mocks.describe).not.toHaveBeenCalled();
+    await db.query("insert into project_members (project_id,user_id,role) values ('excluded','other','viewer')");
+    expect((await status()).status).toBe(200);
     await db.query("delete from org_memberships where org_id='o' and user_id='other'");
     expect((await status()).status).toBe(403);
     await db.query("insert into org_memberships (org_id,user_id,role) values ('o','other','member')");
+    await db.query("delete from project_members where project_id='excluded' and user_id='other'");
   });
 });
