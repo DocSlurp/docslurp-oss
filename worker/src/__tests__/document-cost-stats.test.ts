@@ -26,3 +26,14 @@ describe("settings-independent structural cost observations", () => {
     expect(stats.images.bytesUnknown).toBe(1);
   });
 });
+
+it("keeps source lexical evidence separate from successful OCR output", () => {
+  const page: PageLayoutFacts = { words: 0, tables: null, grids: [], tableCoverage: 0, textLayer: "none", images: [{ widthPx: 1000, heightPx: 1000, coverage: 1, repeated: false, bbox: null, ppi: [null, null], wordsInside: null, bytesPerPixel: null, bitsPerComponent: null, colorSpace: "other", encoding: "other" }] };
+  const facts = new Map([[1, page]]);
+  const finalTextEvidence = new Map([[1, { lexicalText: true, vectorPaths: 0 }]]);
+  const stats = documentCostStats(facts, 1, finalTextEvidence, new Map([[1, false]]));
+  expect(stats.routes["ocr-read"]).toBe(1);
+  expect(stats.routes.text).toBe(0);
+  expect(stats.observations.lexicalText.absentPages).toBe(1);
+  expect(documentCostStats(facts, 1, finalTextEvidence, new Map([[1, null]])).observations.lexicalText.unknownPages).toBe(1);
+});

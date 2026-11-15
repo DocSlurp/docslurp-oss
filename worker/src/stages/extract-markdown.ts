@@ -707,6 +707,8 @@ export class ExtractMarkdownStage implements Stage {
                   }
                   // Scanned pages (no words in the winner's text) are read by the OCR engine in its boundary; the
                   // text-layer extractors never OCR. The engine charges each page it reads.
+                  const sourceLexical = new Map((splitTextIntoPagesStrict(winningText, document.pageCount) ?? [])
+                    .map((text, index) => [index + 1, winningCandidate.ocrPages?.includes(index + 1) ? null : ocrPageHasWords(text)] as const));
                   const scanFill = isPdf && qualityAllowsPageReading(state.run.pipeline.quality)
                     ? await this.ocrScannedPdfPages(state, document, { sourcePath: tempFile, text: winningText, textKey: winningCandidate.textKey, ocrLanguage: extractionConfig.ocr.language, contentHash }, signal)
                     : null;
@@ -1259,7 +1261,7 @@ export class ExtractMarkdownStage implements Stage {
                       ...(winningCandidate.layoutGrids ? { layoutGrids: winningCandidate.layoutGrids } : {}),
                       // What the document holds that a setting can change the cost of, counted from its page facts whatever this
                       // run's settings skipped (chart export, figures, walker, scan copy): what a quote for other settings reads.
-                      ...(isPdf ? { costFacts: documentCostStats(winningCandidate.layoutFacts, document.pageCount, providerCostEvidence(winningCandidate.pageFacts, new Map((splitTextIntoPagesStrict(winningText, document.pageCount) ?? []).map((text, index) => [index + 1, text])), document.pageCount)) } : {}),
+                      ...(isPdf ? { costFacts: documentCostStats(winningCandidate.layoutFacts, document.pageCount, providerCostEvidence(winningCandidate.pageFacts, new Map((splitTextIntoPagesStrict(winningText, document.pageCount) ?? []).map((text, index) => [index + 1, text])), document.pageCount), sourceLexical) } : {}),
                       ...ocrReadStats(ocrReadPages, winningCandidate.ocrPages ? "extractor-reported" : "inferred", scanFill?.pages ?? [], ocrFailedPages(state.artifactLedger, document.id).size),
                     },
                   };

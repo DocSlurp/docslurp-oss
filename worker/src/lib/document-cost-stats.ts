@@ -3,7 +3,7 @@ import { parsePageCostEvidence } from "./page-cost-evidence.js";
 import type { PageLayoutFacts } from "./page-layout-facts.js";
 
 /** Settings-independent structural observations. Null means this evidence source cannot measure the quantity. */
-export function documentCostStats(facts: ReadonlyMap<number, PageLayoutFacts> | undefined, pageCount: number, evidence?: ReadonlyMap<number, unknown>) {
+export function documentCostStats(facts: ReadonlyMap<number, PageLayoutFacts> | undefined, pageCount: number, evidence?: ReadonlyMap<number, unknown>, sourceLexical?: ReadonlyMap<number, boolean | null>) {
   const pages = Math.max(0, Math.min(100_000, (Number.isFinite(pageCount) ? Math.trunc(pageCount) : 0)));
   const routes = Object.fromEntries(PAGE_COST_ROUTES.map((route) => [route, 0])) as Record<PageCostRoute, number>;
   const images = { placements: 0, unknownPages: 0, sizeUnknown: 0, declaredBytes: 0, bytesUnknown: 0,
@@ -23,6 +23,8 @@ export function documentCostStats(facts: ReadonlyMap<number, PageLayoutFacts> | 
   for (let number = 1; number <= pages; number += 1) {
     const page = facts?.get(number);
     const observed = parsePageCostEvidence(evidence?.get(number));
+    // Final OCR text can nominate charts, but cannot prove a source text layer existed.
+    if (sourceLexical) observed.lexicalText = sourceLexical.get(number) ?? null;
     for (const key of ["vectorPaths", "vectorClusters", "chartCandidates", "confirmedCharts"] as const) {
       const value = observed[key];
       if (value === null) observations[key].unknownPages += 1;
