@@ -76,12 +76,15 @@ describe("human-correction reindex", () => {
       values ('d2', 'o', 'w', 'r', 'ready', 'model/x', 4, 1, 'd2:L1:0-3', now(), null)`;
     await sql`insert into document_summary_tree_nodes (id, document_id, org_id, project_id, run_id, node_hash, level, status, chunk_start, chunk_end)
       values ('d2:L1:0-3', 'd2', 'o', 'w', 'r', 'h', 1, 'ready', 0, 3)`;
+    await sql`insert into document_summaries (id, document_id, run_id, user_id, summary)
+      values ('root-d2', 'd2', 'r', 'u', 'Root from withdrawn text')`;
     // A correction that is saved but not reindexed changes no chunk and withdraws nothing.
     expect(await sql`select status from document_summary_trees where document_id = 'd2'`).toEqual([{ status: "ready" }]);
 
     await reindexDocumentCorrection({ docId: "d2", userId: "u" });
     await reindexDocumentCorrection({ docId: "d3", userId: "u" });
 
+    expect(await sql`select 1 from document_summaries where document_id = 'd2'`).toHaveLength(0);
     const trees = await sql`select document_id, status, skip_reason, built_at, root_node_id, node_count, embedding_model, dimension
       from document_summary_trees where document_id in ('d2', 'd3') order by document_id`;
     expect(trees).toEqual([

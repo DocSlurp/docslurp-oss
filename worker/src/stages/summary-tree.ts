@@ -220,7 +220,7 @@ export interface SummaryTreeDocumentRun {
   /** A named reason to stop before the next model call (the caller's cost cap), or null. */
   stopReason?: () => string | null;
   /** Admission of one model call (may wait); the returned function is called when the call has settled. */
-  acquireCall?: () => Promise<() => void>;
+  acquireCall?: () => Promise<(outcome?: "not-started" | "returned" | "unknown") => void>;
   /** Who builds (`job:<jobId>`); default `run:<runId>`. */
   owner?: string;
   /** False: leave a document another builder is working on (`blocked`, `build-in-progress`). Default true. */

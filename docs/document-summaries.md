@@ -116,7 +116,10 @@ LanceDB table beside `chunks`. This section covers how the tree is built.
 Settings, the kill switches and the state block are in
 `packages/shared/src/summary-tree.ts`; deletion is in
 [data deletion](data-deletion.md#the-summary-trees-table). The document summary
-described above is unchanged: the tree's root does not replace it yet.
+is replaced by the complete tree root when the tree becomes ready, in the same
+transaction as readiness. Partial or skipped trees keep the earlier document
+summary. The original sampled stage artifact remains historical evidence; API,
+chat overview and naming readers use the updated `document_summaries` row.
 
 ### When the stage runs
 
@@ -690,13 +693,27 @@ phase-0 eval measured.
 
 ### Not done yet
 
-- The tree root does not replace the document summary.
-- A summary request that fails before the model answers (a network error, a
-  provider error) bills no unit. Such failures are bounded per document by the
-  build's retries, not by a cap.
+- A summary request with an unknown transport outcome has no confirmed receipt.
+  Backfill retains a durable outstanding-call reservation and refuses further
+  work for that organization until the receipt is reconciled. Never clear
+  `summary_tree_jobs.outstanding_calls` merely to unblock a job: first reconcile
+  provider receipts and persisted usage/debits, then release only resolved
+  reservations. This fail-closed state also survives worker lease expiry.
 - The upload estimate and quote do not include the tree's units; only the
   backfill estimate does.
 - Backfill jobs run one at a time, on the maintenance leader; they share that
   one runner by time slice.
 - The scan parses the whole embed artifact; a vectors-only sidecar would remove
   most of that time for very large documents.
+
+### Recovery after interrupted writes
+
+Before writing tree text, the builder records an artifact watch in the cleanup
+queue. A live, eligible document keeps its artifacts, including resumable partial
+trees. After deletion, correction or PII withdrawal, the watch removes the
+registered roots and remains as a daily tombstone to catch object writes that
+complete after a worker dies. Failed cleanup is retried; physical erasure occurs
+on a successful sweep, not atomically with the database transaction. These
+watch rows are intentionally retained. Corrected or in-place PII-redacted/
+withheld documents cannot rebuild from stale embed artifacts; ingest an eligible
+new version first.

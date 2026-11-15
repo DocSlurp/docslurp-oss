@@ -206,6 +206,8 @@ describe("summary tree: the built tree is what search serves", () => {
 
     // The short document is skipped; the long one gets four section nodes and a root.
     expect(await build("docB")).toMatchObject({ status: "skipped", skipReason: "short" });
+    await sql`insert into document_summaries (id, document_id, run_id, user_id, summary)
+      values ('docT-sampled', 'docT', 'run-w', 'u', 'Earlier sampled summary')`;
     const built = await build("docT");
     expect(built).toMatchObject({ status: "ready", stats: { leaves: 40, groups: 4, nodes: 5, modelCalls: 5 } });
     const [state] = await sql<Array<Record<string, unknown>>>`
@@ -213,6 +215,10 @@ describe("summary tree: the built tree is what search serves", () => {
       from document_summary_trees t join documents d on d.id = t.document_id where t.document_id = 'docT'`;
     expect(state).toMatchObject({ status: "ready", run_id: "run-w", document_run_id: "run-w", org_id: "org1", project_id: "w", embedding_model: route.model, dimension: DIM });
     expect(state!.built_at).not.toBeNull();
+    const summaries = await sql`select summary from document_summaries where document_id = 'docT' and run_id = 'run-w'`;
+    expect(summaries).toHaveLength(1);
+    expect(summaries[0]!.summary).toContain(':L2:0-39');
+    expect(summaries[0]!.summary).not.toContain('Earlier sampled summary');
 
     // The retrieval leg reads that tree: three chunks of the nearest section, after the chunk legs' protected prefix.
     const served = await guide({ resetCaches: true });

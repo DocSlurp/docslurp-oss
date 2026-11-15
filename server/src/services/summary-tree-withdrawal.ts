@@ -54,6 +54,9 @@ export async function withdrawSummaryTreeForCorrection(tx: SqlClient, documentId
       build_owner = null, built_at = null, root_node_id = null, node_count = 0, level_count = 0, error = null, updated_at = now()
   `;
   await tx`delete from document_summary_tree_nodes where document_id = ${documentId}`;
+  // Readers consume the tree root through document_summaries too. The caller holds
+  // the document lock, so a completing builder cannot republish withdrawn text.
+  await tx`delete from document_summaries where document_id = ${documentId}`;
   await queueSummaryTreeRemoval(tx, documentId, "document_corrected");
 }
 
