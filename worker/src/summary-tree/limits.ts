@@ -57,7 +57,7 @@ export const DEFAULT_SUMMARY_TREE_LIMITS: SummaryTreeLimits = {
 /** Part of every node hash; owned by @docslurp/shared so the server reports the same number. */
 export { SUMMARY_TREE_KEY_VERSION };
 /** Bump whenever the instruction, the output contract or the way source text is laid out in the prompt changes. */
-export const SUMMARY_TREE_PROMPT_VERSION = "summary-tree-prompt@2";
+export const SUMMARY_TREE_PROMPT_VERSION = "summary-tree-prompt@3";
 /** Name of the text operation the stage records its model calls under. */
 export const SUMMARY_TREE_TEXT_OPERATION = "summary-tree" satisfies PipelineTextOperation;
 /** Summaries are written at the reasoning floor; a cut-off answer gets more output tokens, never more reasoning. */

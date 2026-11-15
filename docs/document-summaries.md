@@ -364,8 +364,11 @@ later build.
   `content-refusal`. Worker text calls have no content-refusal fallback route,
   so a group refused twice leaves the document `partial`.
 - Everything from the document (leaf text, headings, child summaries) is inside
-  the prompt's untrusted block. The block's own delimiter is removed from that
-  text first, so a document cannot close the block.
+  the prompt's untrusted block. The block is delimited by a tag generated for
+  that one request (`untrusted-` plus 72 random bits, never a tag the content
+  contains), announced in the user prompt, so the system prompt is the same
+  for every call. A document cannot predict the tag, so it cannot close the
+  block; its text is passed verbatim and nothing is stripped from it.
 - Before the first call: the project's privacy mode must allow a hosted model,
   a model key must exist, and the organization must be allowed to spend
   (`org_spend_status`, read-only). A refusal makes no call.
