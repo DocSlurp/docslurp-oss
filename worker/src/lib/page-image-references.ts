@@ -52,6 +52,8 @@ export function pagesKeptAsImage(args: {
   isImage: boolean;
   routing?: AdaptiveRoutingDecisionSurface | null;
   maxPages?: number;
+  /** Ledger-backed pages whose scan image was unavailable; also need a bounded raster. */
+  requiredImagePages?: number[];
 }): { kept: number[]; unread: number[]; reason: string | null } {
   const maxPages = Math.max(0, Math.trunc(args.maxPages ?? Number.POSITIVE_INFINITY));
   const textBlocks = (args.canonicalDocument?.blocks ?? [])
@@ -68,6 +70,7 @@ export function pagesKeptAsImage(args: {
     return { kept: [], unread: [], reason: "unpaged-text" };
   }
   const withText = new Set(textBlocks.map((block) => block.pageNumber ?? 1));
+  const required = new Set(args.requiredImagePages ?? []);
   const blank = new Set(
     args.routing?.status === "ready"
       ? args.routing.pages
@@ -78,8 +81,8 @@ export function pagesKeptAsImage(args: {
   const kept: number[] = [];
   const unread: number[] = [];
   for (let pageNumber = 1; pageNumber <= pageCount; pageNumber++) {
-    if (withText.has(pageNumber)) continue;
-    if (!blank.has(pageNumber) && kept.length < maxPages) kept.push(pageNumber);
+    if (withText.has(pageNumber) && !required.has(pageNumber)) continue;
+    if ((required.has(pageNumber) || !blank.has(pageNumber)) && kept.length < maxPages) kept.push(pageNumber);
     else unread.push(pageNumber);
   }
   return { kept, unread, reason: unread.length > 0 && kept.length >= maxPages ? "cap" : null };

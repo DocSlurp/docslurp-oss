@@ -1,0 +1,6 @@
+{"mode":"legacy","node":"v24.22.2","bytes":10485760,"whitespaceCount":1823610,"words":1823611,"ms":364.985321,"maxRssKiB":312112}
+{"mode":"legacy","node":"v24.22.2","bytes":10485760,"whitespaceCount":1823610,"words":1823611,"ms":403.507747,"maxRssKiB":297520}
+{"mode":"legacy","node":"v24.22.2","bytes":10485760,"whitespaceCount":1823610,"words":1823611,"ms":391.65725599999996,"maxRssKiB":297572}
+{"mode":"bounded","node":"v24.22.2","bytes":10485760,"whitespaceCount":1823610,"words":1823611,"ms":84.075142,"maxRssKiB":67860}
+{"mode":"bounded","node":"v24.22.2","bytes":10485760,"whitespaceCount":1823610,"words":1823611,"ms":120.54609199999999,"maxRssKiB":67700}
+{"mode":"bounded","node":"v24.22.2","bytes":10485760,"whitespaceCount":1823610,"words":1823611,"ms":70.474785,"maxRssKiB":67828}

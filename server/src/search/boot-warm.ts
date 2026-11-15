@@ -7,7 +7,7 @@ import { warmLanceDbSearch } from "./lancedb.js";
  * search of a table: loading the LanceDB library, the first storage connection, opening the
  * table and loading its vector and full-text indexes (seconds, even from the local disk
  * cache). Every cold search seen in production came within minutes of a process start, so
- * the process does that work itself, in the background, for the projects searched most in
+ * the process does that work itself, before startup completes, for the projects searched most in
  * the last week. It opens tables and loads indexes only: no query runs and nothing is returned.
  *
  * SEARCH_BOOT_WARM_PROJECTS: how many projects (default 5, at most 50; 0 turns it off, as
@@ -103,8 +103,9 @@ export async function recentSearchTargets(limit: number): Promise<BootWarmTarget
  */
 export async function warmRecentSearchIndexes(deps: {
   limit?: number;
+  signal?: AbortSignal;
   targets?: (limit: number) => Promise<BootWarmTarget[]>;
-  warm?: (target: BootWarmTarget & { hydrate: boolean }) => Promise<void>;
+  warm?: (target: BootWarmTarget & { hydrate: boolean; signal?: AbortSignal }) => Promise<void>;
   log?: (line: string) => void;
 } = {}): Promise<{ projects: number; ms: number }> {
   const started = performance.now();
@@ -114,8 +115,9 @@ export async function warmRecentSearchIndexes(deps: {
   try {
     if (limit > 0) {
       for (const target of await (deps.targets ?? recentSearchTargets)(limit)) {
+        if (deps.signal?.aborted) break;
         // warmLanceDbSearch is best effort and swallows its own failures; guard the injected one too.
-        await (deps.warm ?? warmLanceDbSearch)({ ...target, hydrate: true }).catch(() => undefined);
+        await (deps.warm ?? warmLanceDbSearch)({ ...target, hydrate: true, ...(deps.signal ? { signal: deps.signal } : {}) }).catch(() => undefined);
         projects += 1;
       }
     }
@@ -125,4 +127,23 @@ export async function warmRecentSearchIndexes(deps: {
   const ms = Math.round(performance.now() - started);
   if (limit > 0) log(`[search] boot warm projects=${projects} limit=${limit} ms=${ms}`);
   return { projects, ms };
+}
+
+
+/** Startup never announces readiness after a timed-out warm-up. Native loads cannot
+ * be cancelled; keep the one attempt shared so health probes cannot spawn retries.
+ * Operators can disable warming explicitly with SEARCH_BOOT_WARM_PROJECTS=0.
+ */
+export function createBootWarmGate(warm: (signal: AbortSignal) => Promise<unknown>, timeoutMs = 30_000): () => Promise<void> {
+  let attempt: Promise<void> | undefined;
+  return () => attempt ??= (async () => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const controller = new AbortController();
+    try {
+      await Promise.race([
+        warm(controller.signal),
+        new Promise<never>((_, reject) => { timer = setTimeout(() => { controller.abort(); reject(new Error("Search boot warm-up exceeded readiness deadline")); }, timeoutMs); }),
+      ]);
+    } finally { clearTimeout(timer); }
+  })();
 }

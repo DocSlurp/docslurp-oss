@@ -110,8 +110,12 @@ maintenance is switched off (`maintenance=off`).
 
 With the [local disk cache](self-host/operations.md#local-disk-cache-for-lancedb) on, each
 API machine also keeps a copy of the index and data files it has read. Files that cleanup or
-compaction later remove from the bucket stay in that directory until its size limit evicts
-them; no search reads them again. Delete the cache directory to remove them at once.
+compaction later remove from the bucket are revalidated on their next cached read, at most
+30 seconds after the previous origin check. A missing object or access refusal discards the
+cached copy; an older in-flight fill cannot restore its authorization lease. Objects nobody
+reads again, including orphan blocks, are purged after five idle minutes plus the proxy's
+30-second sweep interval. These are disk-cache limits, separate from native memory caches.
+Delete the cache directory to remove disk copies at once.
 
 ### Community summaries
 
