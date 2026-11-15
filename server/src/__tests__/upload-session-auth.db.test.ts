@@ -1,3 +1,8 @@
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { fileURLToPath } from "node:url";
+import { Pool } from "pg";
+import { assertDisposableTestDatabaseUrl } from "@docslurp/shared";
 import { readFileSync } from "node:fs";
 import { Hono } from "hono";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -25,7 +30,13 @@ const { createUploadsRoutes } = await import("../routes/uploads.js");
 const id = "11111111-1111-4111-8111-111111111111";
 // A session 'other' made in 'excluded', which it may upload into only through a project share.
 const sharedId = "33333333-3333-4333-8333-333333333333";
-let db: Awaited<ReturnType<typeof createMigratedDatabase>>;
+// Default to PGlite; an explicit disposable loopback URL runs the same authorization
+// and migration assertions on real PostgreSQL, without application credentials.
+let db: {
+  query(text: string, values?: unknown[]): Promise<{ rows: Record<string, unknown>[] }>;
+  exec(text: string): Promise<unknown>;
+  close(): Promise<void>;
+};
 const app = new Hono().use("*", apiKeyAuth).route("/uploads", createUploadsRoutes());
 let rawKey: string;
 async function seedKey(overrides: { keyType?: string; scopes?: string[]; orgId?: string | null; projectIds?: string[]; userId?: string } = {}) {
@@ -44,7 +55,21 @@ async function seedKey(overrides: { keyType?: string; scopes?: string[]; orgId?:
 const ownershipQueries = () => mocks.query.mock.calls.filter(([sql]) => /from upload_sessions/i.test(sql));
 beforeAll(async () => {
   vi.stubEnv("API_RATE_LIMIT_ENABLED", "false");
-  db = await createMigratedDatabase();
+  const testUrl = process.env.TEST_DATABASE_URL;
+  if (testUrl) {
+    assertDisposableTestDatabaseUrl(testUrl);
+    await promisify(execFile)(process.execPath, [fileURLToPath(new URL("../../db/migrate.mjs", import.meta.url))], {
+      env: { ...process.env, DATABASE_URL: testUrl, MIGRATION_DATABASE_URL: testUrl },
+    });
+    const pool = new Pool({ connectionString: testUrl, max: 2 });
+    db = {
+      query: (text, values) => pool.query<Record<string, unknown>>(text, values),
+      exec: (text) => pool.query(text),
+      close: () => pool.end(),
+    };
+  } else {
+    db = await createMigratedDatabase();
+  }
   await db.exec(LIFT_ONE_ORG_PER_USER_POLICY);
   await db.exec(`
     insert into "user" (id,name,email) values ('u','Test','upload@example.test'), ('other','Other','other@example.test');

@@ -425,6 +425,17 @@ describe("full recovery inspection", () => {
     expect(signSingleUploadPut).not.toHaveBeenCalled();
     expect(signMultipartUploadPart).not.toHaveBeenCalled();
   });
+  it.each(["AccessDenied", "TimeoutError", "InvalidPagination"])("returns no retry URLs when ListParts evidence fails: %s", async name => {
+    const fixture = installSession();
+    Object.assign(fixture.files[0], { upload_mode: "multipart", upload_id: "open", part_size: 42 });
+    getUploadedObjectMetadata.mockRejectedValue(Object.assign(new Error("missing"), { name: "NotFound" }));
+    listMultipartUploadParts.mockRejectedValueOnce(Object.assign(new Error("secret provider detail"), { name }));
+    const failure = await getDirectUploadSessionDescription("session-1", "user-1").catch(error => error);
+    expect(failure).toMatchObject({ statusCode: 503, code: "upload_storage_unavailable" });
+    expect(failure.message).not.toContain("secret provider detail");
+    expect(signSingleUploadPut).not.toHaveBeenCalled();
+    expect(signMultipartUploadPart).not.toHaveBeenCalled();
+  });
   it("seals a single PUT with a lost acknowledgement without signing another PUT", async () => {
     installSession();
     getUploadedObjectMetadata.mockResolvedValue({ contentLength: 42, etag: "original" });
