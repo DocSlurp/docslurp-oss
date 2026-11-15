@@ -31,8 +31,8 @@ async function withStore<T>(fn: (store: Store) => Promise<T>): Promise<T> {
 describe("late run checkpoints", () => {
   it.each(["cancelled", "failed", "completed"])("refuses completion after external %s while settling usage once", async status => {
     const id = `external-${status}`;
-    await db.query(`insert into project_runs (id,org_id,user_id,project_id,kind,status,stage,pipeline,total_documents)
-      values ($1,'terminal-o','terminal-u','terminal-w','upload','processing','embed','{}',0)`, [id]);
+    await db.query(`insert into project_runs (monthly_reservation_cents,id,org_id,user_id,project_id,kind,status,stage,pipeline,total_documents)
+      values (100, $1,'terminal-o','terminal-u','terminal-w','upload','processing','embed','{}',0)`, [id]);
     await withStore(async store => {
       const state = await loadRunState(store, id);
       const token = (await db.query<{ execution_generation: string }>("select execution_generation from project_runs where id=$1", [id])).rows[0]!.execution_generation;
@@ -48,8 +48,8 @@ describe("late run checkpoints", () => {
   });
   it.each(["failed", "completed"])("preserves a concurrent %s outcome while settling paid usage", async (terminal) => {
     const id = `terminal-${terminal}`;
-    await db.query(`insert into project_runs (id,org_id,user_id,project_id,kind,status,stage,pipeline,total_documents)
-      values ($1,'terminal-o','terminal-u','terminal-w','upload','processing','embed','{}',0)`, [id]);
+    await db.query(`insert into project_runs (monthly_reservation_cents,id,org_id,user_id,project_id,kind,status,stage,pipeline,total_documents)
+      values (100, $1,'terminal-o','terminal-u','terminal-w','upload','processing','embed','{}',0)`, [id]);
     const stale = await withStore(store => loadRunState(store, id));
     stale.usageLedger.record({ provider: "openai", model: "text-embedding-3-small", metric: "embedding-tokens", inputTokens: 7, costCents: 0.01, logOutputTokens: false });
     await db.query(`update project_runs set status=$2,stage=$2,lease_expires_at=null,last_heartbeat_at=null where id=$1`, [id,terminal]);
@@ -77,8 +77,8 @@ describe("late run checkpoints", () => {
 describe("initialization execution fence", () => {
   it("rejects delayed init after failure, cancellation and a newer intent", async () => {
     const id = "init-generation";
-    await db.exec(`insert into project_runs (id,org_id,user_id,project_id,kind,status,stage,pipeline,total_documents)
-      values ('init-generation','terminal-o','terminal-u','terminal-w','upload','queued','queued','{}',0)`);
+    await db.exec(`insert into project_runs (monthly_reservation_cents,id,org_id,user_id,project_id,kind,status,stage,pipeline,total_documents)
+      values (100, 'init-generation','terminal-o','terminal-u','terminal-w','upload','queued','queued','{}',0)`);
     const token = (await db.query<{ execution_generation: string }>("select execution_generation from project_runs where id=$1", [id])).rows[0]!.execution_generation;
     expect(token).toBeTruthy();
     await withStore(async store => {

@@ -19,12 +19,12 @@ beforeAll(async () => {
 afterAll(async () => { await sql?.end(); await stop?.(); });
 
 async function run(id: string, status: string) {
-  await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, creation_ready_at)
-    values (${id}, 'o', 'u', 'w', 'upload', ${status}, 'embed', '{}'::jsonb, now())`;
+  await sql`insert into project_runs (monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage, pipeline, creation_ready_at)
+    values (100, ${id}, 'o', 'u', 'w', 'upload', ${status}, 'embed', '{}'::jsonb, now())`;
 }
 async function doc(id: string, runId: string, status: string, retired = false) {
-  await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, superseded_at)
-    values (${id}, 'o', 'u', 'w', ${runId}, 'a.txt', 'text/plain', ${id}, ${status}, ${retired ? new Date() : null})`;
+  await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, file_size, superseded_at)
+    values (${id}, 'o', 'u', 'w', ${runId}, 'a.txt', 'text/plain', ${id}, ${status}, 1000, ${retired ? new Date() : null})`;
 }
 function lifecycle() {
   return createRunLifecycle({ sql: sql as unknown as SqlClient, startWorkflow: vi.fn(async () => {}), failureThreshold: 3 });

@@ -38,8 +38,8 @@ beforeEach(async () => {
     insert into "user"(id, name, email) values ('u1', 'A', 'a@x') on conflict do nothing;
     insert into organizations(id, name, slug, created_by_user_id) values ('o1', 'Org', 'org', 'u1') on conflict do nothing;
     insert into projects(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W') on conflict do nothing;
-    insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
-      values ('r1', 'o1', 'u1', 'w', 'upload', 'processing', 'extract', '{}', 2, 4);
+    insert into project_runs (monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
+      values (100, 'r1', 'o1', 'u1', 'w', 'upload', 'processing', 'extract', '{}', 2, 4);
     insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, parse_source_scan_version, parse_source_sha256)
       values ('keep', 'o1', 'u1', 'w', 'r1', 'a.pdf', 'application/pdf', 'k1', 'processing', 2, 1, repeat('0', 64)),
              ('gone', 'o1', 'u1', 'w', 'r1', 'b.pdf', 'application/pdf', 'k2', 'processing', 2, 1, repeat('0', 64));

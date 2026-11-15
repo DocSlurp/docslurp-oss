@@ -21,10 +21,11 @@ beforeAll(async () => {
   db = await createMigratedDatabase();
   await db.exec(`
     insert into "user"(id, name, email) values ('u1', 'A', 'a@x');
-    insert into projects(id, org_id, user_id, name) values ('w', null, 'u1', 'W');
-    insert into project_runs (id, user_id, project_id, kind, status, stage, pipeline) values
-      ('run-a', 'u1', 'w', 'bulk-upload', 'processing', 'embed', '{}'),
-      ('run-b', 'u1', 'w', 'bulk-upload', 'processing', 'embed', '{}');
+    insert into organizations(id,name,created_by_user_id) values ('events-o','Events','u1');
+    insert into projects(id, org_id, user_id, name) values ('w', 'events-o', 'u1', 'W');
+    insert into project_runs (id, org_id, monthly_reservation_cents, user_id, project_id, kind, status, stage, pipeline) values
+      ('run-a', 'events-o', 100, 'u1', 'w', 'bulk-upload', 'processing', 'embed', '{}'),
+      ('run-b', 'events-o', 100, 'u1', 'w', 'bulk-upload', 'processing', 'embed', '{}');
   `);
   const served = await serveOnRandomPort(db);
   server = served.server;

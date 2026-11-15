@@ -159,6 +159,8 @@ export const WORKER_DENIED_TABLES = Object.freeze({
   figure_resume_proposal_uses: "single-use chat figure resume proposal tokens (API apply path only)",
   feedback_reports: "support reports filed by users (API only)",
   idempotency_cache: "API request replay cache",
+  intake_request_receipts: "durable API intake replay identity and response (API only)",
+  pending_monthly_capacity: "API admission capacity view (API only)",
   interactive_spend_holds: "API interactive spend admission",
   mcp_oauth_clients: "MCP OAuth credentials",
   mcp_oauth_device_attempts: "MCP OAuth credentials",

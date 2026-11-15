@@ -36,8 +36,8 @@ async function setup() {
   await sql`insert into organizations(id, name, slug, created_by_user_id, worker_slots, credit_balance_cents)
     values ('bench-org', 'Bench', 'bench-org', 'bench-u', ${slots}, 100000000)`;
   await sql`insert into projects(id, org_id, user_id, name) values ('bench-ws', 'bench-org', 'bench-u', 'B') on conflict do nothing`;
-  await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline)
-    values ('bench-run', 'bench-org', 'bench-u', 'bench-ws', 'bulk-upload', 'processing', 'x', '{}') on conflict do nothing`;
+  await sql`insert into project_runs (monthly_reservation_cents, id, org_id, user_id, project_id, kind, status, stage, pipeline)
+    values (100, 'bench-run', 'bench-org', 'bench-u', 'bench-ws', 'bulk-upload', 'processing', 'x', '{}') on conflict do nothing`;
   await sql`delete from credit_debits_pending where org_id = 'bench-org'`.catch(() => undefined); // absent before 0030
 }
 

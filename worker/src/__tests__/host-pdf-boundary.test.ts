@@ -131,6 +131,7 @@ describe("which extractor runs a PDF through the stage", () => {
   };
 
   it("explicit local opt-in: doppler-md runs on the host at Doppler's path, and the choice is logged at startup", async () => {
+    vi.stubEnv("DOCSLURP_DOPPLER_BIN_DIR", "/usr/lib/doppler/bin");
     vi.stubEnv("DOCSLURP_PDF_MODE", "local");
     vi.stubEnv("DOCSLURP_SERVICE_PROFILE", "self-hosted");
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);

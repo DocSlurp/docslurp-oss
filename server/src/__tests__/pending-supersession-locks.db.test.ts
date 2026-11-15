@@ -14,8 +14,8 @@ async function seed(client: Client, prefix: string) {
   await client.query(`insert into "user" (id,name,email) values ($1,'Test',$2)`, [prefix, `${prefix}@example.test`]);
   await client.query(`insert into organizations (id,name,slug,created_by_user_id) values ($1,'Test',$1,$1)`, [prefix]);
   await client.query(`insert into projects (id,org_id,user_id,name) values ($1,$1,$1,'Test')`, [prefix]);
-  await client.query(`insert into project_runs (id,org_id,user_id,project_id,kind,status,stage,pipeline)
-    values ($1,$2,$2,$2,'upload','failed','embed','{}'),($3,$2,$2,$2,'upload','processing','index','{}')`, [`${prefix}-old`, prefix, `${prefix}-new`]);
+  await client.query(`insert into project_runs (monthly_reservation_cents, id,org_id,user_id,project_id,kind,status,stage,pipeline)
+    values (100, $1,$2,$2,$2,'upload','failed','embed','{}'),(100, $3,$2,$2,$2,'upload','processing','index','{}')`, [`${prefix}-old`, prefix, `${prefix}-new`]);
   await client.query(`insert into documents (id,org_id,user_id,project_id,run_id,filename,mime_type,source_key,status,canonical_id,created_at)
     values ($1,$2,$2,$2,$3,'a.txt','text/plain','old','queued','/a','2026-01-01'),
       ($4,$2,$2,$2,$5,'a.txt','text/plain','new','queued','/a','2026-01-02')`,

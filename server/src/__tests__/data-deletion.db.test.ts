@@ -51,8 +51,8 @@ beforeEach(async () => {
 
 async function seedRun(id: string, status: string) {
   await sql`
-    insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, total_documents, pipeline)
-    values (${id}, 'org', 'owner', 'ws', 'bulk-upload', ${status}, ${status}, 1, '{}'::jsonb)
+    insert into project_runs (monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage, total_documents, pipeline)
+    values (100, ${id}, 'org', 'owner', 'ws', 'bulk-upload', ${status}, ${status}, 1, '{}'::jsonb)
   `;
 }
 

@@ -66,8 +66,8 @@ beforeEach(async () => {
 async function seedDocument(id: string, text: string) {
   const run = `run-${id}`;
   await sql`
-    insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, total_documents, pipeline)
-    values (${run}, 'o1', 'u1', 'w', 'bulk-upload', 'completed', 'completed', 1, '{}'::jsonb)
+    insert into project_runs (monthly_reservation_cents, id, org_id, user_id, project_id, kind, status, stage, total_documents, pipeline)
+    values (100, ${run}, 'o1', 'u1', 'w', 'bulk-upload', 'completed', 'completed', 1, '{}'::jsonb)
   `;
   await sql`
     insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status)

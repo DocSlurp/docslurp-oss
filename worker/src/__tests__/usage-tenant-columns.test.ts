@@ -27,7 +27,9 @@ async function seedTenants(db: PGlite, legacy = false) {
     insert into search_sessions (id, user_id, query, metadata) values
       ('sess-b', 'u1', 'q', to_jsonb('{"projectId":"ws-b"}'::text));
   `;
-  await db.exec(legacy ? seed.replaceAll("projects", "workspaces").replaceAll("project_", "workspace_").replaceAll("projectId", "workspaceId") : seed);
+  const currentSeed = seed.replace("insert into project_runs (id,", "insert into project_runs (monthly_reservation_cents, id,")
+    .replace("('run-a',", "(100, 'run-a',");
+  await db.exec(legacy ? seed.replaceAll("projects", "workspaces").replaceAll("project_", "workspace_").replaceAll("projectId", "workspaceId") : currentSeed);
 }
 
 type Columns = { id: string; org_id: string | null; project_id: string | null; api_key_id: string | null };

@@ -46,11 +46,11 @@ beforeAll(async () => {
     insert into "user"(id, name, email) values ('ua', 'A', 'a@example.com'), ('ub', 'B', 'b@example.com');
     insert into organizations(id, name, slug, created_by_user_id) values ('org-a', 'A', 'a', 'ua'), ('org-b', 'B', 'b', 'ub');
     insert into projects(id, org_id, user_id, name) values ('proj-a', 'org-a', 'ua', 'A'), ('proj-a2', 'org-a', 'ua', 'A2'), ('proj-b', 'org-b', 'ub', 'B');
-    insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, created_at) values
-      ('run-a-old', 'org-a', 'ua', 'proj-a', 'upload', 'completed', 'completed', '{}', 1, now() - interval '2 hours'),
-      ('run-a', 'org-a', 'ua', 'proj-a', 'upload', 'processing', 'extract', '{}', 1, now() - interval '1 hour'),
-      ('run-a-new', 'org-a', 'ua', 'proj-a', 'upload', 'processing', 'extract', '{}', 1, now()),
-      ('run-b', 'org-b', 'ub', 'proj-b', 'upload', 'processing', 'extract', '{}', 1, now());
+    insert into project_runs (monthly_reservation_cents, id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, created_at) values
+      (100, 'run-a-old', 'org-a', 'ua', 'proj-a', 'upload', 'completed', 'completed', '{}', 1, now() - interval '2 hours'),
+      (100, 'run-a', 'org-a', 'ua', 'proj-a', 'upload', 'processing', 'extract', '{}', 1, now() - interval '1 hour'),
+      (100, 'run-a-new', 'org-a', 'ua', 'proj-a', 'upload', 'processing', 'extract', '{}', 1, now()),
+      (100, 'run-b', 'org-b', 'ub', 'proj-b', 'upload', 'processing', 'extract', '{}', 1, now());
     insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count) values
       ('doc-a', 'org-a', 'ua', 'proj-a', 'run-a', 'a.pdf', 'application/pdf', 'ka', 'processing', 3),
       ('doc-b', 'org-b', 'ub', 'proj-b', 'run-b', 'b.pdf', 'application/pdf', 'kb', 'processing', 3),
@@ -337,7 +337,7 @@ describe("runs: only the document's current run writes (MEDIUM-5)", () => {
     await sql`delete from project_runs where id = 'run-a-new'`;
     expect(await level("doc-a")).toMatchObject({ run_id: null, org_id: "org-a" });
     expect((await sql<{ run_id: string | null }[]>`select distinct run_id from document_assets where document_id = 'doc-a'`)).toEqual([{ run_id: null }]);
-    await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents) values ('run-a-new', 'org-a', 'ua', 'proj-a', 'upload', 'processing', 'extract', '{}', 1)`;
+    await sql`insert into project_runs (monthly_reservation_cents, id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents) values (100, 'run-a-new', 'org-a', 'ua', 'proj-a', 'upload', 'processing', 'extract', '{}', 1)`;
   });
 });
 

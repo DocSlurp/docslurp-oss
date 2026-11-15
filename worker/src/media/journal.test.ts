@@ -23,8 +23,8 @@ describe("remote media admission and accounting on migrated Postgres", () => {
     await sql`insert into organizations(id,name,slug,created_by_user_id,credit_balance_cents)
       values ('media-org','Media','media-test','media-u',100)`;
     await sql`insert into projects(id,org_id,user_id,name) values ('media-ws','media-org','media-u','Media')`;
-    await sql`insert into project_runs(id,org_id,user_id,project_id,kind,status,stage,pipeline)
-      values ('media-run','media-org','media-u','media-ws','bulk-upload','processing','extract-markdown','{}')`;
+    await sql`insert into project_runs(monthly_reservation_cents,id,org_id,user_id,project_id,kind,status,stage,pipeline)
+      values (100, 'media-run','media-org','media-u','media-ws','bulk-upload','processing','extract-markdown','{}')`;
     await sql`insert into documents(id,user_id,project_id,run_id,filename,mime_type,source_key,status)
       values ('media-doc','media-u','media-ws','media-run','sample.wav','audio/wav','source','uploaded')`;
   }, 120000);

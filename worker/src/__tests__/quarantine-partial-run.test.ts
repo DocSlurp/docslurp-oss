@@ -65,9 +65,9 @@ beforeAll(async () => {
     insert into "user"(id, name, email) values ('u1', 'A', 'a@example.com');
     insert into organizations(id, name, slug, created_by_user_id) values ('o1', 'Org', 'org', 'u1');
     insert into projects(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W');
-    insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, execution_generation)
-      values ('run-mixed', 'o1', 'u1', 'w', 'upload', 'processing', 'quarantine', '{}', 2, null),
-             ('run-enc', 'o1', 'u1', 'w', 'upload', 'processing', 'quarantine', '{}', 1, null);
+    insert into project_runs (monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, execution_generation)
+      values (100, 'run-mixed', 'o1', 'u1', 'w', 'upload', 'processing', 'quarantine', '{}', 2, null),
+             (100, 'run-enc', 'o1', 'u1', 'w', 'upload', 'processing', 'quarantine', '{}', 1, null);
     insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, created_at)
       values ('doc-bad', 'o1', 'u1', 'w', 'run-mixed', 'board-pack.pdf', 'application/pdf', 'k-bad', 'processing', 1, '2026-01-01'),
              ('doc-good', 'o1', 'u1', 'w', 'run-mixed', 'q3-notes.txt', 'text/plain', 'k-good', 'processing', 1, '2026-01-02'),

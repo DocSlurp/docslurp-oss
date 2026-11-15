@@ -56,12 +56,12 @@ beforeAll(async () => {
     ('proj-a', 'org-a', 'ua', 'A', 'proj-a', true, ${sql.json({ ...defaultPipelineFeatures, indexingMode: "map" } as never)}),
     ('proj-b', 'org-b', 'ub', 'B', 'proj-b', true, '{}')`;
   await sql`insert into project_members (project_id, user_id, role) values ('proj-a', 'ue', 'editor'), ('proj-a', 'uv', 'viewer')`;
-  await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total) values
-    ('run-a', 'org-a', 'uv', 'proj-a', 'bulk-upload', 'failed', 'failed', ${sql.json(defaultPipelineFeatures as never)}, 1, 4),
-    ('run-b', 'org-b', 'ub', 'proj-b', 'bulk-upload', 'failed', 'failed', ${sql.json(defaultPipelineFeatures as never)}, 1, 4),
-    ('run-mine', 'org-a', 'um', 'proj-a', 'bulk-upload', 'processing', 'extract-markdown', ${sql.json(defaultPipelineFeatures as never)}, 1, 4),
-    ('run-mine-reprocess', 'org-a', 'um', 'proj-a', 'bulk-reprocess', 'processing', 'extract-markdown', ${sql.json(defaultPipelineFeatures as never)}, 1, 4),
-    ('run-dead', 'org-a', 'um', 'proj-a', 'bulk-upload', 'failed', 'failed', ${sql.json(defaultPipelineFeatures as never)}, 1, 4)`;
+  await sql`insert into project_runs (monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total) values
+    (100, 'run-a', 'org-a', 'uv', 'proj-a', 'bulk-upload', 'failed', 'failed', ${sql.json(defaultPipelineFeatures as never)}, 1, 4),
+    (100, 'run-b', 'org-b', 'ub', 'proj-b', 'bulk-upload', 'failed', 'failed', ${sql.json(defaultPipelineFeatures as never)}, 1, 4),
+    (100, 'run-mine', 'org-a', 'um', 'proj-a', 'bulk-upload', 'processing', 'extract-markdown', ${sql.json(defaultPipelineFeatures as never)}, 1, 4),
+    (100, 'run-mine-reprocess', 'org-a', 'um', 'proj-a', 'bulk-reprocess', 'processing', 'extract-markdown', ${sql.json(defaultPipelineFeatures as never)}, 1, 4),
+    (100, 'run-dead', 'org-a', 'um', 'proj-a', 'bulk-upload', 'failed', 'failed', ${sql.json(defaultPipelineFeatures as never)}, 1, 4)`;
   await sql`update project_runs set control_state = 'dead-letter' where id = 'run-dead'`;
   await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, indexing_mode) values
     ('doc-a', 'org-a', 'uv', 'proj-a', 'run-a', 'a.pdf', 'application/pdf', 'uv/raw/a.pdf', 'completed', 4, 'map'),

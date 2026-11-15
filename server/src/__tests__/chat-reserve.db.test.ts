@@ -64,8 +64,8 @@ const balance = (credits: number, account: "starter" | "funded" = "starter") =>
 
 async function admit(id: string) {
   return await guard.admitRunSpend("o1", "w", (tx) => tx`
-    insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline)
-    values (${id}, 'o1', 'u1', 'w', 'bulk-upload', 'queued', 'queued', '{}')
+    insert into project_runs (monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage, pipeline)
+    values (100, ${id}, 'o1', 'u1', 'w', 'bulk-upload', 'queued', 'queued', '{}')
     returning id
   `, { leaseRunId: id });
 }
@@ -223,16 +223,16 @@ describe("interactive overdraft", () => {
 describe("Speed boost admission", () => {
   it("reserves each mixed run's own immutable opt-in and rejects malformed or changed flags", async () => {
     await balance(200);
-    await sql`insert into project_runs(id,org_id,user_id,project_id,kind,status,stage,pipeline)
-      values ('base-run','o1','u1','w','bulk-upload','queued','queued','{}'),
-        ('boost-run','o1','u1','w','bulk-upload','queued','queued','{"speedBoost":true}')`;
+    await sql`insert into project_runs(monthly_reservation_cents,id,org_id,user_id,project_id,kind,status,stage,pipeline)
+      values (100, 'base-run','o1','u1','w','bulk-upload','queued','queued','{}'),
+        (100, 'boost-run','o1','u1','w','bulk-upload','queued','queued','{"speedBoost":true}')`;
     const status = await guard.loadSpendStatus("o1", "w", { runReserveCredits: 1 });
     expect(status?.reserved).toBe(5);
     await sql`update project_runs set spent_cents=1 where id='boost-run'`;
     expect((await guard.loadSpendStatus("o1", "w", { runReserveCredits: 1 }))?.reserved).toBe(4);
     await expect(sql`update project_runs set pipeline='{"speedBoost":false}' where id='boost-run'`).rejects.toThrow("immutable");
-    await expect(sql`insert into project_runs(id,org_id,user_id,project_id,kind,status,stage,pipeline)
-      values ('malformed-run','o1','u1','w','bulk-upload','queued','queued','{"speedBoost":"true"}')`).rejects.toThrow("boolean");
+    await expect(sql`insert into project_runs(monthly_reservation_cents,id,org_id,user_id,project_id,kind,status,stage,pipeline)
+      values (100, 'malformed-run','o1','u1','w','bulk-upload','queued','queued','{"speedBoost":"true"}')`).rejects.toThrow("boolean");
     expect((await guard.loadSpendStatus("wrong-org", "w", { runReserveCredits: 1 }))).toBeNull();
     await leases.grantRunCreditLease(sql as never, { runId: "base-run", orgId: "o1", projectId: "w" });
     await leases.grantRunCreditLease(sql as never, { runId: "boost-run", orgId: "o1", projectId: "w" });

@@ -6,7 +6,9 @@ const hybridSearch = vi.fn();
 const chatProject = vi.fn();
 const projectChatDisabledBody = vi.fn(async (_projectId: string, _userId: string): Promise<{ error: string; code: "chat_disabled" } | null> => null);
 const aggregateProjectRagSearch = vi.fn();
-const sqlMock = vi.fn();
+const sqlMock = Object.assign(vi.fn(), {
+  begin: vi.fn(async <T>(work: (client: ReturnType<typeof vi.fn>) => Promise<T>): Promise<T> => work(sqlMock)),
+});
 const enforceActorCategoryRateLimit = vi.fn(async (..._args: unknown[]): Promise<Response | null> => null);
 
 vi.mock("../middleware/rate-limit.js", async (importOriginal) => ({
@@ -92,6 +94,7 @@ describe("searchRoutes", () => {
   let app: Hono;
 
   beforeEach(() => {
+    sqlMock.begin.mockClear();
     app = buildApp();
     hybridSearch.mockReset();
     chatProject.mockReset();
@@ -538,6 +541,7 @@ describe("searchRoutes", () => {
       expect(refused.status).toBe(403);
       expect(await refused.json()).toMatchObject({ error: { code: "chat_session_forbidden" } });
       expect(chatProject).not.toHaveBeenCalled();
+      expect(sqlMock.begin).not.toHaveBeenCalled();
       // A funded organization for the stream's spend pre-check.
       sqlMock.mockResolvedValue([{ org_id: "org", funded: true, auto_top_up_on: false, available: 1_000_000, reserved: 0, project_budget_paused: false, org_budget_paused: false, project_in_org: true, has_credit_grants: true }]);
       chatProject.mockResolvedValueOnce({ id: "a", answer: "Supported", sessionId: session, sessionToken: "next", searchSessionId: null });

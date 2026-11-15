@@ -17,8 +17,8 @@ beforeAll(async()=>{
   await sql`insert into organizations(id,name,slug,created_by_user_id) values('load-org','Test','load','load-owner')`;
   await sql`insert into org_memberships(org_id,user_id,role) values('load-org','load-owner','owner') on conflict do nothing`;
   await sql`insert into projects(id,org_id,user_id,name) values('load-w','load-org','load-owner','Test')`;
-  for(let n=0;n<10;n++) await sql`insert into project_runs(id,org_id,user_id,project_id,kind,status,stage)
-    values(${`load-${n}`},'load-org','load-owner','load-w','upload','processing','vision-extract')`;
+  for(let n=0;n<10;n++) await sql`insert into project_runs(monthly_reservation_cents,id,org_id,user_id,project_id,kind,status,stage)
+    values(100, ${`load-${n}`},'load-org','load-owner','load-w','upload','processing','vision-extract')`;
 },120000);
 afterAll(async()=>{await sql?.end();await stop?.();});
 
