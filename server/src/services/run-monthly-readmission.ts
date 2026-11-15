@@ -17,7 +17,8 @@ export async function restoreRunMonthlyCapacity(tx: TransactionSql, runId: strin
   if (!run || ["queued", "processing"].includes(run.status)) return;
   const docs = await tx`select filename,mime_type,file_size,page_count,billing_pages,page_count_source
     from documents where run_id=${runId} and org_id=${run.org_id} and project_id=${run.project_id}
-      and superseded_at is null and status not in ('completed','cancelled')`;
+      and superseded_at is null and status not in ('completed','cancelled')
+      and (${run.status} <> 'completed' or status='failed')`;
   if (!docs.length) throw new Error("Monthly readmission requires measured positive workload evidence");
   const files = docs.map(doc => {
     const pages = countedPagesForForecast({

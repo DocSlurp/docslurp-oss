@@ -60,3 +60,13 @@ it.skipIf(!url)("refuses reactivation without measured documents even with a sto
   await expect(retry('empty')).rejects.toThrow(/measured positive workload/);
   expect((await sql`select status,monthly_reservation_cents from project_runs where id='empty'`)[0]).toMatchObject({status:'failed',monthly_reservation_cents:'100'});
 });
+
+it.skipIf(!url)("forecasts only failed documents when retrying a completed run", async () => {
+  await seed('partial',1000);
+  await sql`update project_runs set status='completed' where id='partial'`;
+  await sql`insert into documents(id,org_id,project_id,user_id,run_id,filename,mime_type,source_key,status,file_size)
+    values('not-retried','readmit-o','readmit-p','readmit-u','partial','unrelated.txt','text/plain','synthetic','queued',0)`;
+  await expect(guard.admitRunSpend('readmit-o','readmit-p',tx => lifecycle.prepareRetry({id:'partial',pipeline:defaultPipelineFeatures,status:'completed'},tx),
+    {readmission:true,leaseRunId:'partial',speedBoost:false})).resolves.toBe('resumed');
+  expect((await sql`select status from documents where id='not-retried'`)[0]!.status).toBe('queued');
+});
