@@ -9,7 +9,7 @@ beforeAll(async () => {
  const url=process.env.TEST_DATABASE_URL;
  if (!url || new URL(url).hostname!=="127.0.0.1") throw new Error("Requires isolated loopback TEST_DATABASE_URL");
  sql=postgres(url,{max:5,prepare:false,onnotice:()=>{}});
- for (let repeat=0;repeat<2;repeat++) await sql.unsafe(await readFile(new URL("../../db/migrations/0166_monthly_admission_receipts.sql",import.meta.url),"utf8"));
+ for (let repeat=0;repeat<2;repeat++) await sql.unsafe(await readFile(new URL("../../db/migrations/0168_monthly_admission_receipts.sql",import.meta.url),"utf8"));
  vi.doMock("../db.js",()=>({sql}));
  guard=await import("../services/billing/spend-guard.js");
  await sql`insert into "user"(id,name,email) values('capacity-u','U','capacity@example.test')`;
