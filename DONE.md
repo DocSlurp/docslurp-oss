@@ -351,3 +351,5 @@ Council-reviewed error contracts: allowlisted validation constraints, full Retry
 - ClamAV policy (#406): deployed startup refuses disabled scanning and age limits outside 1–24 hours; runtime scanning caps definition age at 24 hours even if startup validation is skipped. Development overrides remain available. Independent security review remains required.
 
 - Normalize SSE and Responses provider errors before SDK consumption, support bounded CR/LF/CRLF parsing, and detect computed/assignment database-test aliases with explicit refusal of unresolved reads.
+
+- Fixed vision self-critique prompt delivery using bounded per-call task text on both primary and fallback routes; UTF-8 bounded candidates and provider-request regression coverage (2026-11-14).
