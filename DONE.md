@@ -1,6 +1,8 @@
 - Asset ledger: reject repeat references on new or updated unlinked rows with an idempotent NOT VALID database constraint; retain historical rows for separate cleanup.
 ## Ingest version tagging and typed unavailable states (2026-11-13, draft, needs council)
 
+- Security #406 (partial): refuse hand-built documents without a scan decision in every non-development environment and service profile, before source storage reads; normalize sandbox provider ids with the shared ASCII rule. Regression coverage executes the real source modules. ClamAV startup age/disable and database-test guard follow-ups remain open.
+
 - Documents and runs record `ingest_version` and `ingest_capabilities` (migration 0160; existing rows backfill to 0 with no capabilities). The worker stamps them on statements a run already makes: documents with capabilities measured from stored rows (`parseSourceDecision`, `pageFacts`, `figureLedger`), runs with the build's. `GET /v1/ingest-version` (SDK `getIngestVersion`) reports the current version; `GET /v1/documents/:id` adds `ingest.updateAvailable`.
 - Page images, structured results, the figure ledger and search materialization answer data the caller may see but cannot be shown with a typed `{ status: "unavailable", reason, message, canReprocess, ingestVersion, currentIngestVersion }` (HTTP 200) instead of 409/404/500. The source-unscanned refusal is unchanged. Materialization now reports pages of documents the caller cannot reach as `unseen`. See docs/ingest-version.md.
 
@@ -335,3 +337,4 @@ Council-reviewed error contracts: allowlisted validation constraints, full Retry
 
 - Vision credential destination guard: the OpenAI billing label alone no longer releases the platform key; the destination must match the operator-configured OpenAI endpoint. Added loopback, foreign-host, port, path, query, fragment and userinfo negatives plus operator endpoint positives. This defense-in-depth closes a helper bypass; it does not establish a remote exploit or complete the broader endpoint-policy audit.
 - SAML callbacks: validate every response against the exact atomically consumed browser-bound request, including ordinary sign-in, and require an explicit IdP issuer. Added ordinary callback binding/replay and signed wrong-issuer negatives. Independent review and deployment remain outstanding.
+- Parser source hardening follow-up: require VM isolation in every non-development environment, affirmatively require an original/scanned-copy decision and SHA-256 before source reads, retain loader-owned quarantine upload bindings, and cover development plus production/staging/service lifecycles. Independent re-review and full integration validation remain required.

@@ -1,3 +1,5 @@
+import { normalizeEnvSetting } from "@docslurp/shared";
+
 import type { ParserSandboxProvider } from "./types.js";
 import { vmOnlyParsing } from "../lib/vm-only-parsing.js";
 
@@ -5,7 +7,7 @@ export const SANDBOX_PROVIDER_IDS = ["bubblewrap", "landlock", "modal", "none"] 
 export type SandboxProviderId = (typeof SANDBOX_PROVIDER_IDS)[number];
 
 export function resolveSandboxProviderId(env: NodeJS.ProcessEnv, platform: NodeJS.Platform): SandboxProviderId {
-  const raw = env.DOCSLURP_PARSER_SANDBOX?.trim().toLowerCase();
+  const raw = normalizeEnvSetting(env.DOCSLURP_PARSER_SANDBOX);
   if (!raw) {
     if (vmOnlyParsing(env)) return "modal";
     if (platform === "linux") return "bubblewrap";
