@@ -30,7 +30,7 @@ export interface PageState {
 export interface MaterializeDeps {
   loadPageStates(pairs: Array<{ documentId: string; page: number }>): Promise<Map<string, PageState>>;
   canSpend(orgId: string, projectId: string): Promise<boolean>;
-  createRun(args: { orgId: string; userId: string; projectId: string; documentId: string; documents: number; pages: number; pageNumbers?: number[] }): Promise<string>;
+  createRun(args: { orgId: string; userId: string; projectId: string; documentId: string; documents: number; pages: number; maxCredits: number; pageNumbers?: number[] }): Promise<string>;
   /** Marks a run whose workflow start was deduplicated; the winning workflow owns the real work. */
   closeDedupedRun(runId: string): Promise<void>;
   /** Marks a run whose workflow could not be started. */
@@ -78,6 +78,11 @@ export const defaultMaterializeDeps: MaterializeDeps = {
   },
   async createRun(args) {
     const id = `mat_${randomUUID()}`;
+    const maxCredits = args.maxCredits;
+    if (!Number.isSafeInteger(args.pages) || args.pages < 1 || !Number.isFinite(maxCredits) || maxCredits <= 0) {
+      throw new Error("Invalid bounded materialization workload");
+    }
+    const reservationCents = Math.max(1, Math.ceil(Math.max(maxCredits, args.pages * pageCredits("rich", 1))));
     // The run carries the source document's pipeline (its ingest run, else the project's), so the
     // worker applies the same PII policy, privacy mode and embedding model as the original ingest.
     // It is inserted `processing` with a confirmed workflow start: run-start recovery and the stale
@@ -107,10 +112,10 @@ export const defaultMaterializeDeps: MaterializeDeps = {
     return acceptChatRunDependency({ ...args, pages: args.pageNumbers ?? [] }, async tx => {
     await assertCanSpend(args.orgId, args.projectId, { client: tx, kind: "interactive", hold: false });
     await tx`
-      insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, total_documents, pages_total, pipeline, workflow_started_at, lease_expires_at, creation_ready_at, creation_expires_at, origin)
+      insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, total_documents, pages_total, pipeline, workflow_started_at, lease_expires_at, creation_ready_at, creation_expires_at, origin, monthly_reservation_cents)
       values (${id}, ${args.orgId}, ${args.userId}, ${args.projectId}, 'materialize', 'processing', 'materialize',
              ${args.documents}, ${args.pages}, ${tx.json(pipeline as never)}, now(),
-             now() + interval '15 minutes', now(), null, ${origin})
+             now() + interval '15 minutes', now(), null, ${origin}, ${reservationCents})
     `;
     return { runId: id, value: id };
     });
@@ -231,7 +236,7 @@ export async function materializeForQuery(
     try {
       args.signal?.throwIfAborted();
       runId = await deps.createRun({
-        orgId: args.orgId, userId: args.userId, projectId: args.projectId, documentId, documents: 1, pages: pages.length, pageNumbers: pages,
+        orgId: args.orgId, userId: args.userId, projectId: args.projectId, documentId, documents: 1, pages: pages.length, pageNumbers: pages, maxCredits: (policy.maxCreditsPerQuery * pages.length) / pending.length,
       });
       args.signal?.throwIfAborted();
       const outcome = await deps.startWorkflow(

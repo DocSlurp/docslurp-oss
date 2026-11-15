@@ -221,3 +221,15 @@ describe("cookie receipt recovery uses live access", () => {
     await db.query("insert into org_memberships (org_id,user_id,role) values ('o','other','member')");
   });
 });
+
+describe("direct confirmation cached receipt route authorization", () => {
+  const confirm = () => app.request(`/uploads/direct/sessions/${id}/confirm`, { method: "POST", headers: { authorization: `Bearer ${rawKey}` } });
+  it.each(["revoked", "scope", "project", "membership"])("rejects %s before receipt delivery", async change => {
+    if (change === "revoked") await db.query("update api_keys set revoked_at=now() where id='key'");
+    if (change === "scope") await db.query("update api_keys set scopes=ARRAY['search:deep'] where id='key'");
+    if (change === "project") await db.query("update api_keys set project_ids=ARRAY['excluded'] where id='key'");
+    if (change === "membership") await db.query("delete from org_memberships where org_id='o' and user_id='u'");
+    try { expect([401,403,404]).toContain((await confirm()).status); }
+    finally { if(change === "membership") await db.query("insert into org_memberships(org_id,user_id,role) values('o','u','owner')"); }
+  });
+});

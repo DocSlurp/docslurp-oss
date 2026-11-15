@@ -33,7 +33,7 @@ await sql`delete from chat_operations`;await sql`delete from project_runs`;await
 afterAll(async()=>{await sql?.end();await stop?.();});
 const actor = {type:"session" as const,userId:"u",sessionId:"session",user:{id:"u",email:"u@example.test",name:"U"}};
 async function task(){await ops.launchChatOperation({userId:"u",orgId:"o",projectId:"w",key:"dependency_test",input:{q:"question",authSessionId:"session"}});return {...(await ops.claimChatOperation())!,signal:new AbortController().signal};}
-const allocate=()=>deps.createRun({userId:"u",orgId:"o",projectId:"w",documentId:"d",documents:1,pages:1,pageNumbers:[1]});
+const allocate=()=>deps.createRun({userId:"u",orgId:"o",projectId:"w",documentId:"d",documents:1,pages:1,maxCredits:1,pageNumbers:[1]});
 it("recovers shared work after parent completion and cancellation, then observes durable page results",async()=>{
   const t=await task();const run=await links.withChatRunOwner(t,allocate);
   await ops.appendChatOperation(t.id,t.attempt_id!,"result",{answer:"parent available"},"completed");

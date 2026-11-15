@@ -62,4 +62,24 @@ it("enforces a project cap independently and refuses a foreign billing scope",as
  await expect(guard.admitRunSpend('capacity-o','capacity-project-only',async()=>{})).rejects.toMatchObject({code:'plan_not_entitled'});
 });
 
+it("production materialization reserves pending workflow capacity across five connections", async () => {
+ await sql`update project_runs set status='failed' where org_id='capacity-o'`;
+ await sql`update organizations set monthly_budget_cents=10 where id='capacity-o'`;
+ await sql`update projects set monthly_budget_cents=10 where id='capacity-p'`;
+ vi.doMock("../lib/temporal.js", () => ({ startMaterializeWorkflow: vi.fn(), signalPipelinePause: vi.fn(), signalPipelineResume: vi.fn() }));
+ const { defaultMaterializeDeps } = await import("../search/deferred/materialize-client.js");
+ const results = await Promise.allSettled(Array.from({length:8}, () => defaultMaterializeDeps.createRun({ orgId:'capacity-o', projectId:'capacity-p', userId:'capacity-u', documentId:'missing', documents:1, pages:20, maxCredits:6 })));
+ expect(results.filter(r=>r.status==='fulfilled')).toHaveLength(1);
+ expect(Number((await sql`select sum(cents) as n from pending_monthly_capacity where org_id='capacity-o'`)[0]!.n)).toBe(6);
+ const runId=(results.find(r=>r.status==='fulfilled') as PromiseFulfilledResult<string>).value;
+ // Two posted cents from the earlier test + six pending cents exactly fill both caps.
+ await sql`update organizations set monthly_budget_cents=8 where id='capacity-o'`;
+ await sql`update projects set monthly_budget_cents=8 where id='capacity-p'`;
+ await sql`update project_runs set control_state='paused', pause_reason='credit_exhausted' where id=${runId}`;
+ const { sweepSpendPausedRuns }=await import('../services/spend-paused-runs.js');
+ const signals={pause:vi.fn(async()=>{}),resume:vi.fn(async()=>{})};
+ expect(await sweepSpendPausedRuns({sql:sql as never,signals,orgId:'capacity-o'})).toEqual({resumed:1,stillBlocked:0});
+ expect(signals.resume).toHaveBeenCalledWith(runId);
+});
+
 });

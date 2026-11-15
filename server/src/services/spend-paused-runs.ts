@@ -137,14 +137,10 @@ export async function sweepSpendPausedRuns(
   let resumed = 0;
   let stillBlocked = 0;
   for (const row of rows) {
-    const allowed = spendGuardsSkipped()
-      || spendBlockReason(await loadSpendStatus(row.org_id, row.project_id, { client: sql })) === null;
-    if (allowed) {
-      if (await resumeSpendPausedRun(row.id, { sql, signals })) resumed += 1;
-      else stillBlocked += 1;
-    } else {
+    const outcome = await resumeSpendPausedRunOutcome(row.id, { sql, signals });
+    if (outcome.status === "resumed") resumed += 1;
+    else {
       stillBlocked += 1;
-      // Idempotent: covers a pause signal the worker could not deliver.
       await signals.pause(row.id).catch(() => undefined);
     }
   }

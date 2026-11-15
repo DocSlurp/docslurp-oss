@@ -128,6 +128,20 @@ function actionResult(
   };
 }
 
+async function authorizeReceiptProject(projectId: string, userId: string, orgId?: string | null, apiKeyId?: string | null): Promise<void> {
+  const access = await getProjectAccess(projectId, userId);
+  if (!access || !canContributeToProject(access, userId) || (orgId && access.orgId !== orgId)) {
+    throw new ProjectIntakeError("Upload project is no longer accessible", 403);
+  }
+  if (apiKeyId) {
+    const key = await getLiveApiKeyById(apiKeyId);
+    if (!key || key.orgId !== access.orgId || !key.scopes.includes("ingest")
+      || (key.projectIds.length > 0 && !key.projectIds.includes(projectId))) {
+      throw new ProjectIntakeError("API key no longer permits this upload", 403);
+    }
+  }
+}
+
 /** Replays a cached response for a repeated Idempotency-Key, or runs and caches the action. */
 async function idempotently(
   args: { idempotencyKey?: string; routeKey: string; requestHash: string; userId: string; orgId?: string | null; apiKeyId?: string | null; project?: string | null },
@@ -149,12 +163,20 @@ async function idempotently(
       throw new ProjectIntakeError(error instanceof Error ? error.message : "Idempotency conflict", 409);
     }
     if (!cached) {
-      const [receipt] = await sql`select r.*, p.creation_ready_at from intake_request_receipts r
+      const receipts = await sql`select r.*, p.creation_ready_at from intake_request_receipts r
         left join project_runs p on p.id = r.run_id
         where r.idempotency_key = ${idempotencyKey} and r.route_key = ${args.routeKey}`;
+      let receipt: (typeof receipts)[number] | undefined = receipts[0];
       if (receipt) {
         if (receipt.request_hash !== args.requestHash) throw new ProjectIntakeError("Idempotency conflict", 409);
-        if (!receipt.creation_ready_at) throw new ProjectIntakeError("Committed intake is still recovering; retry shortly", 409);
+        if (!receipt.creation_ready_at) {
+          if (receipt.external_effect_started !== false) throw new ProjectIntakeError("Intake outcome is uncertain; reconciliation required", 409, undefined, "intake_reconciliation_required");
+          if (receipt.run_id && !await discardUnstartedRun(receipt.run_id)) throw new ProjectIntakeError("Committed intake is still recovering; retry shortly", 409);
+          await sql`delete from intake_request_receipts where idempotency_key = ${idempotencyKey} and route_key = ${args.routeKey} and run_id is null and external_effect_started = false`;
+          receipt = undefined;
+        }
+      }
+      if (receipt) {
         const [run] = await sql<ProjectRunRow[]>`select * from project_runs where id = ${receipt.run_id} and user_id = ${args.userId}`;
         const project = run ? await getProject(run.project_id, args.userId) : null;
         if (!run || !project) throw new ProjectIntakeError("Upload project is no longer accessible", 403);
@@ -167,18 +189,8 @@ async function idempotently(
       // Authorize the actual persisted target, including an omitted/default
       // target. A cache namespace is identity, never current permission.
       const projectId = payload.project?.id;
-      const access = projectId ? await getProjectAccess(projectId, args.userId) : null;
-      if (!access || !canContributeToProject(access, args.userId)
-        || (args.orgId && access.orgId !== args.orgId)) {
-        throw new ProjectIntakeError("Upload project is no longer accessible", 403);
-      }
-      if (args.apiKeyId) {
-        const key = await getLiveApiKeyById(args.apiKeyId);
-        if (!key || key.orgId !== access.orgId || !key.scopes.includes("ingest")
-          || (key.projectIds.length > 0 && !key.projectIds.includes(projectId))) {
-          throw new ProjectIntakeError("API key no longer permits this upload", 403);
-        }
-      }
+      if (!projectId) throw new ProjectIntakeError("Upload project is no longer accessible", 403);
+      await authorizeReceiptProject(projectId, args.userId, args.orgId, args.apiKeyId);
       return {
         payload: cached.body as ProjectIntakePayload,
         status: cached.status as 201,
@@ -187,11 +199,10 @@ async function idempotently(
       };
     }
 
-    // Claim before crawl/download side effects as well as run creation. A
-    // process death leaves a durable, fail-closed pending receipt, never a new
-    // attempt that repeats already billable work.
-    await sql`insert into intake_request_receipts (idempotency_key, route_key, request_hash, user_id)
-      values (${idempotencyKey}, ${args.routeKey}, ${args.requestHash}, ${args.userId})`;
+    // Claim before work. Safe preparation can retry under this same lock; a crawl
+    // durably marks its uncertain external-effect boundary before invocation.
+    await sql`insert into intake_request_receipts (idempotency_key, route_key, request_hash, user_id, external_effect_started)
+      values (${idempotencyKey}, ${args.routeKey}, ${args.requestHash}, ${args.userId}, false)`;
     const result = await intakeReceiptContext.run({ key: idempotencyKey, route: args.routeKey, hash: args.requestHash, userId: args.userId }, run);
     await storeIdempotentResponse({
       idempotencyKey,
@@ -259,13 +270,18 @@ export async function confirmDirectUploadProjectIntake(
     const loaded = await loadDirectUploadSession(args.sessionId, args.userId);
     if (!loaded) throw new ProjectIntakeError("Upload session not found", 404);
     if (["aborted", "failed"].includes(loaded.session.status)) throw new ProjectIntakeError("Upload session is closed", 409);
-    if (loaded.session.result) return loaded.session.result as ProjectIntakeActionResult;
+    if (loaded.session.result) {
+      const result = loaded.session.result as ProjectIntakeActionResult;
+      await authorizeReceiptProject(result.payload.project.id, args.userId, loaded.session.org_id, loaded.session.api_key_id);
+      return result;
+    }
     if (!loaded.files.every(file => file.status === "completed")) throw new ProjectIntakeError("Upload session still has incomplete files", 409);
 
     // Run identity is chosen before intake. A process crash after publication can
     // recover the same manifest rather than creating a second billable run.
     const [existing] = await sql<Array<ProjectRunRow & { creation_ready_at?: string | null }>>`select * from project_runs where id = ${args.sessionId} and user_id = ${args.userId}`;
     if (existing && existing.creation_ready_at) {
+      await authorizeReceiptProject(existing.project_id, args.userId, loaded.session.org_id, loaded.session.api_key_id);
       const project = await getProject(existing.project_id, args.userId);
       if (!project) throw new ProjectIntakeError("Upload project is no longer accessible", 403);
       const documents = await sql<DocumentRow[]>`select * from documents where run_id = ${args.sessionId} order by created_at, id`;
@@ -472,6 +488,9 @@ export async function createWebsiteProjectIntake(
       project: args.project,
     },
     async () => {
+      const receipt = intakeReceiptContext.getStore();
+      if (receipt) await sql`update intake_request_receipts set external_effect_started = true
+        where idempotency_key = ${receipt.key} and route_key = ${receipt.route}`;
       const crawled = await crawl();
       const pages = crawled.pages.filter((page) => page.markdown?.trim());
       if (!pages.length) throw new ProjectIntakeError("The crawl found no readable pages at this URL.", 422);

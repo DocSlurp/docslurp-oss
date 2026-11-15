@@ -1,3 +1,4 @@
+import { pageCredits } from "@docslurp/shared";
 import { describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({ calls: [] as Array<{ text: string; values: unknown[] }>, sourcePipeline: null as Record<string, unknown> | null }));
@@ -32,7 +33,7 @@ const { defaultMaterializeDeps } = await import("../search/deferred/materialize-
 describe("materialize run rows", () => {
   it("inherit the source document's run pipeline (then the project's), never an empty default", async () => {
     mocks.calls.length = 0;
-    await defaultMaterializeDeps.createRun({ orgId: "o", userId: "u", projectId: "w", documentId: "d1", documents: 1, pages: 3 });
+    await defaultMaterializeDeps.createRun({ orgId: "o", userId: "u", projectId: "w", documentId: "d1", documents: 1, pages: 3, maxCredits: 3 });
     const { text, values } = mocks.calls[0]!;
     expect(text).toMatch(/join documents d on d\.id = \?/);
     expect(text).toMatch(/r\.pipeline.*w\.pipeline/s);
@@ -44,7 +45,7 @@ describe("materialize run rows", () => {
     mocks.sourcePipeline = { quality: "good", documentExtraction: { options: { dolphin: { mode: "page", repoPath: "/tmp/attacker" }, liteparse: {} } } };
     const errors = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
-      await defaultMaterializeDeps.createRun({ orgId: "o", userId: "u", projectId: "w", documentId: "d1", documents: 1, pages: 3 });
+      await defaultMaterializeDeps.createRun({ orgId: "o", userId: "u", projectId: "w", documentId: "d1", documents: 1, pages: 3, maxCredits: 3 });
     } finally {
       mocks.sourcePipeline = null;
       errors.mockRestore();
@@ -60,7 +61,7 @@ describe("materialize run rows", () => {
 
   it("start `processing` with a confirmed workflow start so recovery and sweepers never pick them up", async () => {
     mocks.calls.length = 0;
-    await defaultMaterializeDeps.createRun({ orgId: "o", userId: "u", projectId: "w", documentId: "d1", documents: 1, pages: 3 });
+    await defaultMaterializeDeps.createRun({ orgId: "o", userId: "u", projectId: "w", documentId: "d1", documents: 1, pages: 3, maxCredits: 3 });
     const { text } = mocks.calls.find((call) => call.text.includes("insert into project_runs"))!;
     expect(text).toContain("'processing'");
     expect(text).toContain("workflow_started_at");
@@ -69,7 +70,7 @@ describe("materialize run rows", () => {
 
   it("start with a lease so stale-lease alerts only fire when the worker stops renewing it", async () => {
     mocks.calls.length = 0;
-    await defaultMaterializeDeps.createRun({ orgId: "o", userId: "u", projectId: "w", documentId: "d1", documents: 1, pages: 3 });
+    await defaultMaterializeDeps.createRun({ orgId: "o", userId: "u", projectId: "w", documentId: "d1", documents: 1, pages: 3, maxCredits: 3 });
     const insert = mocks.calls.find((call) => call.text.includes("insert into project_runs"))!;
     expect(insert.text).toMatch(/lease_expires_at[\s\S]*now\(\) \+ interval '15 minutes'/);
     expect(insert.text).not.toMatch(/interval '[1-5] minutes?'/);
@@ -108,7 +109,24 @@ describe("materialize spend gate", () => {
 it("refuses the materialization insert when live admission fails inside its transaction", async () => {
   mocks.calls.length = 0;
   spend.assertCanSpend.mockRejectedValueOnce(new BlockedError("project_budget_paused"));
-  await expect(defaultMaterializeDeps.createRun({ orgId: "o", userId: "u", projectId: "w", documentId: "d1", documents: 1, pages: 3 }))
+  await expect(defaultMaterializeDeps.createRun({ orgId: "o", userId: "u", projectId: "w", documentId: "d1", documents: 1, pages: 3, maxCredits: 3 }))
     .rejects.toMatchObject({ code: "project_budget_paused" });
   expect(mocks.calls.some(call => call.text.includes("insert into project_runs"))).toBe(false);
+});
+
+it("reserves the complete bounded workflow credit allowance", async () => {
+  mocks.calls.length = 0;
+  await defaultMaterializeDeps.createRun({ orgId: "o", userId: "u", projectId: "w", documentId: "d1", documents: 1, pages: 100, maxCredits: 37.25 });
+  const insert = mocks.calls.find(c => c.text.includes("insert into project_runs"))!;
+  expect(insert.text).toContain("monthly_reservation_cents");
+  expect(insert.values.at(-1)).toBe(38);
+});
+it.each([NaN, Infinity, -1, 0])("rejects invalid workload capacity %s", async maxCredits => {
+  await expect(defaultMaterializeDeps.createRun({ orgId: "o", userId: "u", projectId: "w", documentId: "d1", documents: 1, pages: 1, maxCredits })).rejects.toThrow("Invalid bounded");
+});
+
+it("retains the whole-page cost floor when a small credit bound can overshoot within a page", async () => {
+  mocks.calls.length = 0;
+  await defaultMaterializeDeps.createRun({orgId:"o",userId:"u",projectId:"w",documentId:"d",documents:1,pages:256,maxCredits:1});
+  expect(mocks.calls.find(c=>c.text.includes("insert into project_runs"))!.values.at(-1)).toBe(Math.ceil(pageCredits("rich",256)));
 });

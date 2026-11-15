@@ -770,7 +770,7 @@ it.runIf(enabled)("keeps shared materialization visible after the native parent 
   let runId="";
   state.chat.mockImplementation(async(args)=>{
     runId=await defaultMaterializeDeps.createRun({userId:actor.userId,orgId:"native-api-org",
-      projectId:project,documentId:"native-linked-document",documents:1,pages:1,pageNumbers:[1]});
+      projectId:project,documentId:"native-linked-document",documents:1,pages:1,maxCredits:1,pageNumbers:[1]});
     await args.onTextDelta("parent answer");
     return {answer:"parent answer",citations:[]};
   });

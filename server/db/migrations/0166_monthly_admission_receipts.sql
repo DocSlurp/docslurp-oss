@@ -46,3 +46,6 @@ CREATE TABLE IF NOT EXISTS intake_request_receipts (
  created_at timestamptz NOT NULL DEFAULT now(),
  PRIMARY KEY (idempotency_key,route_key)
 );
+
+-- Existing interrupted claims are ambiguous; only new explicit safe claims may retry.
+ALTER TABLE intake_request_receipts ADD COLUMN IF NOT EXISTS external_effect_started boolean NOT NULL DEFAULT true;
