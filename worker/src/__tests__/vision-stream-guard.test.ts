@@ -331,3 +331,16 @@ it("sums prompt-cache reads and writes over every attempt into the usage metadat
     expect.objectContaining({ generationId: "gen-cached-failure", cachedInputTokens: 600 }),
   ]));
 });
+
+ it("does not expose provider error bodies and disables redirects", async () => {
+  const fetch = vi.fn(async (_input: unknown, init?: RequestInit) => {
+    expect(init?.redirect).toBe("error");
+    return new Response("sentinel-platform-secret", { status: 401 });
+  });
+  vi.stubGlobal("fetch", fetch);
+  try { await run(); throw new Error("expected refusal"); }
+  catch (error) {
+    expect(String(error)).not.toContain("sentinel-platform-secret");
+    expect(String(error)).toContain("401");
+  }
+});

@@ -4,8 +4,92 @@ import { LlmResponseScanner, llmRequestAttributes } from "./llm-span-attributes.
 
 const LLM_GENERATION_PATHS = new Set(["/api/v1/chat/completions", "/api/v1/completions", "/api/v1/responses"]);
 
+const GENERIC_ERROR = JSON.stringify({ error: { message: "Provider request failed", type: "provider_error" } });
+
+/** Safe local classification; never includes upstream bytes or exception messages. */
+export class InvalidProviderResponseError extends Error {
+  constructor() { super("Invalid provider response or response exceeds limit"); this.name = "InvalidProviderResponseError"; }
+}
+
+/** Buffer one SSE event (or one JSON envelope) before releasing any of its bytes. */
+function redactProviderBody(body: ReadableStream<Uint8Array>, eventStream: boolean, responseFormat: "json" | "password-range"): ReadableStream<Uint8Array> {
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  const encoder = new TextEncoder();
+  let pending = "", line = "";
+  let lines: string[] = [];
+  let afterCR = false, size = 0;
+  const failure = () => eventStream ? `data: ${GENERIC_ERROR}\n\n` : GENERIC_ERROR;
+  const sanitize = (frame: string[]) => {
+    // Only data and protocol event names belong to the public generated stream.
+    const fields = frame.map(raw => {
+      const colon = raw.indexOf(":");
+      return [colon < 0 ? raw : raw.slice(0, colon), colon < 0 ? "" : raw.slice(colon + 1).replace(/^ /, "")];
+    });
+    const event = fields.filter(([key]) => key === "event").at(-1)?.[1];
+    const data = eventStream ? fields.filter(([key]) => key === "data").map(([, value]) => value).join("\n") : frame[0];
+    if (["error", "response.failed", "response.error"].includes(event ?? "")) return failure();
+    if (!data?.trim()) return "";
+    if (eventStream && data.trim() === "[DONE]") return "data: [DONE]\n\n";
+    // The password-range service returns only SHA-1 suffix/count records.
+    // Validate the representation before releasing it, regardless of upstream MIME.
+    if (responseFormat === "password-range") {
+      const records = data.split(/\r?\n/).filter(record => record.trim());
+      if (!records.length || records.some(record => !/^[0-9A-F]{35}:\d{1,12}$/i.test(record))) throw new InvalidProviderResponseError();
+      return data;
+    }
+    let value: unknown;
+    try { value = JSON.parse(data); } catch { throw new InvalidProviderResponseError(); }
+    if (value && typeof value === "object") {
+      const envelope = value as Record<string, unknown>;
+      const response = envelope.response as Record<string, unknown> | undefined;
+      if (envelope.error != null || ["error", "response.failed", "response.error"].includes(String(envelope.type)) ||
+          (response && typeof response === "object" && (response.error != null || response.status === "failed"))) return failure();
+    }
+    if (!eventStream) return data;
+    if (event && !/^(?:message|completion|ping|content_block_(?:start|delta|stop)|message_(?:start|delta|stop)|response\.[a-z0-9_.]+)$/.test(event)) throw new InvalidProviderResponseError();
+    return `${event ? `event: ${event}\n` : ""}${fields.filter(([key]) => key === "data").map(([, value]) => `data: ${value}\n`).join("")}\n`;
+  };
+  const consume = (text: string, controller: TransformStreamDefaultController<Uint8Array>) => {
+    if (!eventStream) { pending += text; if (pending.length > 16 * 1024 * 1024) throw new InvalidProviderResponseError(); return; }
+    for (const character of text) {
+      if (afterCR) { afterCR = false; if (character === "\n") continue; }
+      if (++size > 1024 * 1024) throw new InvalidProviderResponseError();
+      if (character === "\r" || character === "\n") {
+        afterCR = character === "\r";
+        if (line) { lines.push(line); line = ""; }
+        else { const output = sanitize(lines); if (output) controller.enqueue(encoder.encode(output)); lines = []; size = 0; }
+      } else line += character;
+    }
+  };
+  const sanitized = () => body.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
+    transform(chunk, controller) {
+      // Decode bounded slices; never concatenate an unbounded upstream chunk.
+      try { for (let offset = 0; offset < chunk.byteLength; offset += 16384) consume(decoder.decode(chunk.subarray(offset, offset + 16384), { stream: true }), controller); }
+      catch { throw new InvalidProviderResponseError(); }
+    },
+    flush(controller) {
+      try {
+        consume(decoder.decode(), controller);
+        if (eventStream) { if (line) lines.push(line); if (lines.length) controller.enqueue(encoder.encode(sanitize(lines))); }
+        else if (pending) controller.enqueue(encoder.encode(sanitize([pending])));
+      } catch { throw new InvalidProviderResponseError(); }
+    },
+  }));
+  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      reader ??= sanitized().getReader();
+      try {
+        const result = await reader.read();
+        if (result.done) controller.close(); else controller.enqueue(result.value);
+      } catch (error) { controller.error(error instanceof InvalidProviderResponseError ? error : new Error("Provider request failed")); }
+    },
+    async cancel(reason) { await (reader ? reader.cancel(reason) : body.cancel(reason)); },
+  }, { highWaterMark: 0 });
+}
+
 /** Instrument provider transport through response consumption, including streamed output. */
-export function instrumentFetch(provider: string, operation: string, http: typeof fetch = globalThis.fetch): typeof fetch {
+export function instrumentFetch(provider: string, operation: string, http: typeof fetch = globalThis.fetch, responseFormat: "json" | "password-range" = "json"): typeof fetch {
   return async (input, init) => {
     const url = new URL(input instanceof Request ? input.url : String(input));
     const method = init?.method ?? (input instanceof Request ? input.method : "GET");
@@ -20,8 +104,8 @@ export function instrumentFetch(provider: string, operation: string, http: typeo
     if (llm) span.set(llmRequestAttributes(init?.body));
     const started = performance.now();
     let response: Response;
-    try { response = await span.run(() => http(input, init)); }
-    catch (error) { span.end(error); throw error; }
+    try { response = await span.run(() => http(input, { ...init, redirect: "error" })); }
+    catch (error) { span.end(error); throw new Error("Provider request failed"); }
     span.set({ "http.response.status_code": response.status,
       ...(llm ? { "docslurp.llm.time_to_headers_ms": Math.round(performance.now() - started) } : {}),
       "docslurp.providerRequestId": response.headers.get("x-request-id") ?? response.headers.get("request-id") ?? undefined,
@@ -47,6 +131,15 @@ export function instrumentFetch(provider: string, operation: string, http: typeo
         } catch { /* Missing/unreadable evidence is not a billing incident. */ }
         finally { clearTimeout(timer); void reader.cancel().catch(() => {}); }
       }
+    }
+    // Provider bodies may repeat Authorization headers or internal service data.
+    // Billing classification above consumes only a bounded operator-side preview.
+    if (!response.ok && response.status >= 400) {
+      void response.body?.cancel().catch(() => {});
+      span.end(Object.assign(new Error(), { name: `HTTP_${response.status}` }));
+      return new Response(JSON.stringify({ error: { message: "Provider request failed", type: "provider_error" } }), {
+        status: response.status, headers: { "content-type": "application/json" },
+      });
     }
     let upstreamError = false;
     let errorTail = "";
@@ -99,14 +192,19 @@ export function instrumentFetch(provider: string, operation: string, http: typeo
             }
             bytes += result.value.byteLength; controller.enqueue(result.value);
           }
-        } catch (error) { span.end(error); controller.error(error); }
+        } catch (error) { span.end(error); controller.error(new Error("Provider request failed")); }
       },
       async cancel(reason) {
         try { await reader.cancel(reason); }
         finally { span.end(statusError ?? Object.assign(new Error(), { name: "AbortError" })); }
       },
     }, { highWaterMark: 0 });
-    const wrapped = new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers });
+    const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
+    // MIME is controlled by the provider. Validate every representation before release.
+
+    const outputHeaders = new Headers(response.headers);
+    outputHeaders.delete("content-length"); outputHeaders.delete("content-encoding");
+    const wrapped = new Response(redactProviderBody(body, responseFormat === "json" && contentType.includes("text/event-stream"), responseFormat), { status: response.status, statusText: response.statusText, headers: outputHeaders });
     for (const key of ["url", "redirected", "type"] as const) Object.defineProperty(wrapped, key, { value: response[key] });
     return wrapped;
   };

@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 
 import { getBetterAuthVersion, tryGetCurrentAuthEndpointContext } from "@better-auth/core/context";
-import { instrumentFetch } from "@docslurp/shared/observability";
+import { instrumentFetch, InvalidProviderResponseError } from "@docslurp/shared/observability";
 import type { BetterAuthPlugin } from "better-auth";
 import { APIError } from "better-auth/api";
 
@@ -92,13 +92,17 @@ export function compromiseCount(body: string, hashSuffix: string): number {
   const suffix = hashSuffix.toUpperCase();
   let lines = 0;
   let count = 0;
+  const seen = new Set<string>();
   for (const raw of body.split(/\r?\n/)) {
     const line = raw.trim();
     if (!line) continue;
     const match = RANGE_LINE.exec(line);
     if (!match) throw new BreachLookupError("malformed");
+    const key = match[1]!.toUpperCase();
+    if (seen.has(key)) throw new BreachLookupError("malformed");
+    seen.add(key);
     lines += 1;
-    if (match[1]!.toUpperCase() === suffix) count = Number(match[2]);
+    if (key === suffix) count = Number(match[2]);
   }
   if (lines === 0) throw new BreachLookupError("malformed");
   return count;
@@ -123,19 +127,19 @@ export function createBreachLookup(policy: Pick<BreachedPasswordPolicy, "timeout
         const signal = AbortSignal.timeout(policy.timeoutMs);
         let response: Response;
         try {
-          response = await instrumentFetch("hibp", "password-range")(`${RANGE_API}${digest.slice(0, 5)}`, {
+          response = await instrumentFetch("hibp", "password-range", globalThis.fetch, "password-range")(`${RANGE_API}${digest.slice(0, 5)}`, {
             headers: { "Add-Padding": "true", "User-Agent": "DocSlurp password check" },
             signal,
           });
         } catch (error) {
-          throw new BreachLookupError(isAbort(error) ? "timeout" : "network");
+          throw new BreachLookupError(signal.aborted || isAbort(error) ? "timeout" : "network");
         }
         if (!response.ok) {
           await response.body?.cancel().catch(() => undefined);
           throw new BreachLookupError("upstream_status", response.status);
         }
         let body: string;
-        try { body = await response.text(); } catch (error) { throw new BreachLookupError(isAbort(error) ? "timeout" : "network"); }
+        try { body = await response.text(); } catch (error) { throw new BreachLookupError(signal.aborted || isAbort(error) ? "timeout" : error instanceof InvalidProviderResponseError ? "malformed" : "network"); }
         return compromiseCount(body, digest.slice(5)) > 0;
       } finally {
         inFlight -= 1;

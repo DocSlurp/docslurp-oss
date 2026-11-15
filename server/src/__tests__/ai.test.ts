@@ -50,6 +50,7 @@ it("streams extracted evidence as text without interpreting document prefixes as
 });
 
 describe("embedConfiguredText", () => {
+  afterEach(() => vi.unstubAllEnvs());
   beforeEach(() => {
     extractorMock.mockReset();
     pipelineMock.mockReset();
@@ -164,7 +165,17 @@ describe("embedConfiguredText", () => {
     } finally { vi.unstubAllGlobals(); }
   });
 
+  it("refuses a disabled tenant local service before creating a client or sending embedding calls", async () => {
+    vi.stubEnv("DOCSLURP_ALLOW_TENANT_LOCAL_MODEL_ENDPOINTS", "false");
+    await expect(embedConfiguredText({ privacyMode: "standard", value: "generic query", runtime: "remote",
+      provider: "ollama", model: "nomic-embed-text", dimensions: 2, baseURL: "http://127.0.0.1:11434/v1",
+    })).rejects.toThrow("Tenant-selected local model endpoints are disabled");
+    expect(createOpenAIMock).not.toHaveBeenCalled();
+    expect(embedMock).not.toHaveBeenCalled();
+  });
+
   it("uses the URI-selected local OpenAI-compatible service", async () => {
+    vi.stubEnv("DOCSLURP_ALLOW_TENANT_LOCAL_MODEL_ENDPOINTS", "true");
     embedMock.mockResolvedValue({
       embedding: [0.1, 0.2, 0.3],
       usage: { tokens: 4 },
@@ -197,6 +208,7 @@ describe("embedConfiguredText", () => {
   });
 
   it("requests configured Matryoshka dimensions from vLLM and renormalizes any client-side cut", async () => {
+    vi.stubEnv("DOCSLURP_ALLOW_TENANT_LOCAL_MODEL_ENDPOINTS", "true");
     embedMock.mockResolvedValueOnce({ embedding: [0.6, 0.8], usage: { tokens: 3 } });
     const exact = await embedConfiguredText({
       value: "hello vllm",

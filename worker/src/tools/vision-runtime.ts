@@ -1,3 +1,4 @@
+import { assertTenantModelEndpointAllowed } from "@docslurp/shared";
 import { currentProviderPolicy } from "../lib/provider-rate-limit.js";
 import { nitroBaseModel, speedBoostModel, type OpenRouterReasoning, withOpenRouterProviderPreferences, resolveSupportedModelIdWithWarning, withServedProviderRegion, withPromptCacheBreakpoints, needsExplicitPromptCache, assertAutomaticModelCallAllowed } from "@docslurp/shared";
 import { withObservation } from "@docslurp/shared/observability";
@@ -629,6 +630,7 @@ function normalizeVisionConfig(
   outputSchema?: Record<string, unknown> | null,
 ): VisionExecutionConfig {
   // Configs are validated (visionConfigSchema); a route built some other way is checked again before use.
+  assertTenantModelEndpointAllowed(vision.modelUri);
   const problem = visionModelUriProblem(vision.modelUri);
   if (problem) throw new UnpricedVisionRouteError(vision.modelUri, `is refused: ${problem}`);
   if (vision.remoteFallbackModelUri) {

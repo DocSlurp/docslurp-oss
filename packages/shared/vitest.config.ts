@@ -5,6 +5,7 @@ export default defineConfig({
     // CI stops at the first failing test; local runs report every failure.
     bail: process.env.CI ? 1 : 0,
     environment: "node",
+    setupFiles: ["./src/test-setup.ts"],
     include: ["src/**/*.test.ts"],
   },
 });
