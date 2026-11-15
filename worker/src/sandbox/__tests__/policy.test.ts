@@ -63,8 +63,8 @@ describe("assertSandboxPolicy outside development, short of production", () => {
     );
   });
 
-  it.each(["bubblewrap", "landlock"])("keeps %s allowed in staging (filesystem confined, egress denied, own PID namespace)", (providerId) => {
-    expect(assertSandboxPolicy({ providerId, isolation: iso(true, "tcp-only"), env: { NODE_ENV: "staging" } })).toEqual({ warnings: [] });
+  it.each(["bubblewrap", "landlock"])("refuses %s in staging even with a successful namespace probe", (providerId) => {
+    expect(() => assertSandboxPolicy({ providerId, isolation: iso(true, "full"), env: { NODE_ENV: "staging" } })).toThrow(/VM boundary/);
   });
 
   it("refuses none under the service profile without NODE_ENV", () => {
