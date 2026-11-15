@@ -4,9 +4,13 @@ import { run } from "node:test";
 import { spec } from "node:test/reporters";
 import { resolve } from "node:path";
 
-import { assertDisposableTestDatabaseUrl } from "../packages/shared/src/test-database-guard.ts";
-
-if (process.env.TEST_DATABASE_URL) assertDisposableTestDatabaseUrl(process.env.TEST_DATABASE_URL);
+// Public package tests support Node 20, which cannot import TypeScript source.
+// Database-gated runs require the compiled canonical guard; a missing build
+// refuses before any test starts rather than bypassing database validation.
+if (process.env.TEST_DATABASE_URL) {
+  const { assertDisposableTestDatabaseUrl } = await import("../packages/shared/dist/test-database-guard.js");
+  assertDisposableTestDatabaseUrl(process.env.TEST_DATABASE_URL);
+}
 
 const files = process.argv.slice(2).map(file => resolve(file));
 if (!files.length) throw new Error("Pass at least one test file");
