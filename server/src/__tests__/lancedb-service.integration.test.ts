@@ -2,7 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import * as lance from "@lancedb/lancedb";
-import { VectorNamespaceManager } from "@docslurp/shared";
+import { indexConfigHash, indexConfigOf, normalizePipelineFeatures, VectorNamespaceManager } from "@docslurp/shared";
 import { startMigratedPostgres } from "@docslurp/worker/testing";
 import { afterAll, beforeAll, expect, it, vi } from "vitest";
 /** The explicit search access scope every search caller passes (search/access-scope.ts). */
@@ -52,6 +52,8 @@ beforeAll(async () => {
   await sql`insert into project_runs(id,user_id,project_id,kind,status,stage) values('refine-run','refine-user','refine-ws','ingest','completed','completed')`;
   await sql`insert into documents(id,user_id,project_id,run_id,filename,mime_type,source_key,status,org_id,page_count) values('refine-doc','refine-user','refine-ws','refine-run','local.txt','text/plain','local','completed','refine-org',2)`;
   await sql`insert into vector_indexes(id,document_id,backend,bucket,path,embedding_model,dimension) values('refine-index','refine-doc','lancedb','local','local','text-embedding-3-small',1536)`;
+  const fixtureRecipe = normalizePipelineFeatures({ privacyMode: "standard", embedding: { profile: "cheapest-hosted", target: "hosted", modelUri: "llm://openai/text-embedding-3-small" } });
+  await sql`update documents set index_config_hash=${indexConfigHash(indexConfigOf(fixtureRecipe))} where id='refine-doc'`;
   await sql`insert into document_chunks(id,document_id,run_id,user_id,chunk_index,text,page_number) values('refine-chunk','refine-doc','refine-run','refine-user',0,'Authoritative hydrated content',1)`;
   const location = VectorNamespaceManager.getEmbeddingLocation(directory, "refine-org", "refine-ws", "text-embedding-3-small", 1536);
   db = await lance.connect(location.uri);
