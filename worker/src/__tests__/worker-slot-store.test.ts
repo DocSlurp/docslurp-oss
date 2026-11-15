@@ -6,7 +6,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { Store } from "../db/store.js";
 import { WorkerSlotStore, resolveWorkerSlotOptions } from "../db/worker-slot-store.js";
-import { createMigratedDatabase } from "../test/migrated-db.js";
+import { createMigratedDatabase, applyRemainingMigrations } from "../test/migrated-db.js";
 import { serveOnRandomPort } from "../test/migrated-postgres.js";
 import { withWorkerSlot } from "../temporal/activities.js";
 import { WORKER_SLOT_UNAVAILABLE } from "../temporal/shared.js";
@@ -24,21 +24,24 @@ let sql: postgres.Sql<Record<string, unknown>>;
 const options = { ttlMs: 60_000, globalCap: 0, defaultOrgSlots: 2 };
 
 beforeAll(async () => {
-  db = await createMigratedDatabase();
+  // The project-only semaphore case is historical data, not permission to admit new unscoped work.
+  db = await createMigratedDatabase({ stopBefore: "monthly_admission_receipts" });
+  await db.exec(`insert into "user"(id,name,email) values('u1','A','worker-slots@example.test');
+    insert into organizations(id,name,slug,created_by_user_id,worker_slots)
+      values('free','Free','free','u1',2),('gold','Gold','gold','u1',5);
+    insert into projects(id,org_id,user_id,name) values('wf','free','u1','F'),('wg','gold','u1','G'),('wn',null,'u1','N');
+    insert into project_runs(id,org_id,user_id,project_id,kind,status,stage,pipeline)
+      values('run-orgless',null,'u1','wn','bulk-upload','processing','vision-extract','{}');`);
+  await applyRemainingMigrations(db, "monthly_admission_receipts");
   const served = await serveOnRandomPort(db);
   server = served.server;
   const port = served.port;
   store = new Store(`postgres://postgres@127.0.0.1:${port}/postgres`, 60_000, { poolMax: 1, workerSlots: options });
   sql = (store as unknown as { sql: postgres.Sql<Record<string, unknown>> }).sql;
-  await sql`insert into "user"(id, name, email) values ('u1', 'A', 'a@x')`;
-  await sql`insert into organizations(id, name, slug, created_by_user_id, worker_slots)
-    values ('free', 'Free', 'free', 'u1', 2), ('gold', 'Gold', 'gold', 'u1', 5)`;
-  await sql`insert into projects(id, org_id, user_id, name) values ('wf', 'free', 'u1', 'F'), ('wg', 'gold', 'u1', 'G'), ('wn', null, 'u1', 'N')`;
   await sql`insert into project_runs (monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage, pipeline) values
     (100, 'run-free-1', 'free', 'u1', 'wf', 'bulk-upload', 'processing', 'vision-extract', '{}'),
     (100, 'run-free-2', 'free', 'u1', 'wf', 'bulk-upload', 'processing', 'vision-extract', '{}'),
-    (100, 'run-gold', 'gold', 'u1', 'wg', 'bulk-upload', 'processing', 'vision-extract', '{}'),
-    (100, 'run-orgless', null, 'u1', 'wn', 'bulk-upload', 'processing', 'vision-extract', '{}')`;
+    (100, 'run-gold', 'gold', 'u1', 'wg', 'bulk-upload', 'processing', 'vision-extract', '{}')`;
 }, 120_000);
 
 afterAll(async () => {
@@ -228,4 +231,10 @@ describe("resolveWorkerSlotOptions", () => {
     expect(resolveWorkerSlotOptions({ WORKER_SLOT_ENFORCEMENT: "false", WORKER_SLOT_LEASE_TTL_MS: "10", WORKER_GLOBAL_SLOT_CAP: "1000" }))
       .toEqual({ enabled: false, ttlMs: 15_000, globalCap: 1_000, defaultOrgSlots: 50 });
   });
+});
+
+it("refuses new project-only active work after monthly admission migration", async () => {
+  await expect(sql`insert into project_runs(id,org_id,user_id,project_id,kind,status,stage,pipeline,monthly_reservation_cents)
+    values('new-orgless',null,'u1','wn','bulk-upload','processing','vision-extract','{}',100)`)
+    .rejects.toThrow(/billing scope mismatch/);
 });
