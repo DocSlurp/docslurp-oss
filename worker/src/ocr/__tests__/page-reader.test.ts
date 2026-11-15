@@ -397,7 +397,7 @@ describe("readPagesWithProvider", () => {
     missing.pageReaderBudget = null;
     expect((await readPagesWithProvider(await outcomeWith([{ pageNumber: 1 }]), provider, ctx(missing))).skipped).toEqual({ "budget-ledger-unavailable": 1 });
     const broken = runState();
-    broken.pageReaderBudget = { admit: async () => { throw new Error("database down"); }, settle: async () => undefined };
+    broken.pageReaderBudget = { admit: async () => { throw new Error("database down"); }, settle: async () => undefined, committedCents: async () => { throw new Error("database down"); } };
     expect((await readPagesWithProvider(await outcomeWith([{ pageNumber: 1 }]), provider, ctx(broken))).skipped).toEqual({ "budget-ledger-unavailable": 1 });
     expect(provider.read).not.toHaveBeenCalled();
   });

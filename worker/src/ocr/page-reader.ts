@@ -209,13 +209,17 @@ function jobFailureReason(error: unknown): "job-refused" | "job-failed" {
   return (error as { ocrRefused?: unknown } | null)?.ocrRefused === true ? "job-refused" : "job-failed";
 }
 
+function release(sent: Map<string, number>, documentId: string, pages: number): void {
+  sent.set(documentId, Math.max(0, (sent.get(documentId) ?? 0) - pages));
+}
+
 /** Pages of `documentId` the reader may still be sent in this run state (the per-document budget, `maxPages`). */
 export function pageReaderPagesRemaining(ledger: object, documentId: string, maxPages: number): number {
   return Math.max(0, maxPages - (pagesSent.get(ledger)?.get(documentId) ?? 0));
 }
 
 /** Skip reasons after which no further job of this document (or organization) can be sent now. */
-export const PAGE_READER_STOP_REASONS = ["no-scope", "budget", "cost-cap", "org-daily-cost-cap", "budget-ledger-unavailable"] as const;
+export const PAGE_READER_STOP_REASONS = ["no-scope", "budget", "cost-cap", "org-daily-cost-cap", "budget-ledger-unavailable", "no-cost-estimate"] as const;
 
 /** One page image the host sends to the reader. */
 export interface PageImageInput {
@@ -231,6 +235,8 @@ export interface PageImageReadUse {
   metric: string;
   /** Log line prefix, e.g. `[ocr] page-reader`. */
   logTag: string;
+  /** Refuse a job (skip `no-cost-estimate`) unless the provider estimates a positive, finite cost to reserve. */
+  requireCostEstimate?: boolean;
   /** Longest edge a PNG without `expect` may report (default PAGE_READER_MAX_EDGE_PX). */
   maxLongEdgePx?: number;
   /** Called for each page the reader returned non-empty, validated text for, before its Rich page charge. */
@@ -297,12 +303,15 @@ export async function readPageImagesWithProvider(
     if (isCostCapExceeded(ctx.state as WorkflowState)) {
       bump(summary.skipped, "cost-cap", ready.length - start);
       console.warn(`${use.logTag} stopped document=${ctx.documentId}: run cost cap reached`);
+      release(sent, ctx.documentId, ready.length - start);
       break;
     }
     // The organization's daily reader spend, fleet-wide: admitted atomically with this job's reservation, or not sent.
     const admission = await admitJob(provider, ctx, run.orgId, chunk.length, use);
     if ("skip" in admission) {
       bump(summary.skipped, admission.skip, ready.length - start);
+      // Never sent: the pages go back to the document's budget (a later batch may send them once the cap allows).
+      release(sent, ctx.documentId, ready.length - start);
       break;
     }
     const { ticket, reservedCents } = admission;
@@ -408,7 +417,7 @@ export async function readPagesWithProvider(outcome: OcrReadOutcome, provider: P
  * when the day's committed cost plus this job's reservation would pass the cap, `budget-ledger-unavailable` when the ledger
  * cannot answer (fail closed: no answer, no job).
  */
-async function admitJob(provider: PageImageReaderProvider, ctx: PageReaderContext, orgId: string, pages: number, use: Pick<PageImageReadUse, "logTag">): Promise<{ ticket: string; reservedCents: number } | { skip: "org-daily-cost-cap" | "budget-ledger-unavailable" }> {
+async function admitJob(provider: PageImageReaderProvider, ctx: PageReaderContext, orgId: string, pages: number, use: Pick<PageImageReadUse, "logTag" | "requireCostEstimate">): Promise<{ ticket: string; reservedCents: number } | { skip: "org-daily-cost-cap" | "budget-ledger-unavailable" | "no-cost-estimate" }> {
   const budget = ctx.state.pageReaderBudget === undefined ? processPageReaderOrgBudget : ctx.state.pageReaderBudget;
   if (!budget) {
     console.error(`${use.logTag} stopped document=${ctx.documentId}: no organization spend ledger`);
@@ -421,6 +430,11 @@ async function admitJob(provider: PageImageReaderProvider, ctx: PageReaderContex
     reserveCents = typeof estimate === "number" && Number.isFinite(estimate) && estimate > 0 ? estimate : 0;
   } catch (error) {
     console.warn(`${use.logTag} cost estimate failed provider=${provider.id}: ${(error instanceof Error ? error.message : String(error)).slice(0, 200)}`);
+  }
+  // A reader whose route must reserve (vision) never sends a job it cannot bound: no estimate, 0 or NaN refuses.
+  if (use.requireCostEstimate && !(reserveCents > 0)) {
+    console.error(`${use.logTag} stopped document=${ctx.documentId}: provider=${provider.id} gave no positive cost estimate to reserve`);
+    return { skip: "no-cost-estimate" };
   }
   try {
     const admission = await budget.admit({ orgId, reserveCents, capCents });
@@ -482,5 +496,20 @@ export async function readOcrPagesWithConfiguredReader(
     if (ctx.signal?.aborted) throw error;
     console.error(`[ocr] page-reader error document=${ctx.documentId}; pages keep their reads: ${(error instanceof Error ? error.stack ?? error.message : String(error)).slice(0, 600)}`);
     return null;
+  }
+}
+
+/**
+ * Whether the organization can still admit a reader job today (DOCSLURP_OCR_PAGE_READER_ORG_DAILY_MAX_COST_CENTS), for
+ * planning only: false when the day's committed spend has reached the cap or the ledger cannot answer (fail closed).
+ * Admission (admitJob) stays the authority; this only decides whether pages are held back for the reader.
+ */
+export async function pageReaderOrgHasHeadroom(state: PageReaderContext["state"], orgId: string, capCents: number): Promise<boolean> {
+  const budget = state.pageReaderBudget === undefined ? processPageReaderOrgBudget : state.pageReaderBudget;
+  if (!budget || capCents <= 0) return false;
+  try {
+    return (await budget.committedCents(orgId)) < capCents;
+  } catch {
+    return false;
   }
 }

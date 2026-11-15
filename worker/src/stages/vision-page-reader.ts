@@ -11,6 +11,8 @@
  *   critique passes, routed (page router) pages, page-task (fan-out) pages, raster uploads and documents without page
  *   triage keep the hosted route; so does a `local-only` or `strict-privacy` project, and a run whose configured vision
  *   route is not hosted (a local or operator-private model).
+ * - The reader must declare its host country (`hostCountry`), and the organization's provider-region policy must admit it
+ *   (China-based hosts need allowChinaProviders); otherwise the run keeps its hosted route.
  * - Jobs carry one run of one organization (readPageImagesWithProvider): a run without an organization sends nothing.
  *   They count against the organization's daily reader cost cap (one fleet-wide ledger with the OCR reader) and a
  *   per-document page budget kept per activity (as the OCR reader's is).
@@ -23,11 +25,25 @@ import { PRIVATE_MODEL_PROVIDER, resolveVisionRoute, type VisionConfig } from "@
 import { pageImageReaderProvider, type PageImageReaderProvider } from "../extractors/plugins.js";
 import { visionPageReaderMode } from "../ocr/page-reader-mode.js";
 import type { WorkflowState } from "../pipeline/pipeline.js";
+import { currentProviderPolicy } from "../lib/provider-rate-limit.js";
 import { isPageTranscription } from "../tools/vision-runtime.js";
 
 export { VISION_PAGE_READER_METRIC } from "../ocr/page-reader-mode.js";
 
-export type VisionPageReaderRefusal = "off" | "no-provider" | "privacy-mode" | "no-org-scope" | "not-transcription" | "configured-route";
+export type VisionPageReaderRefusal = "off" | "no-provider" | "privacy-mode" | "no-org-scope" | "not-transcription" | "configured-route" | "region-policy";
+
+/** Countries whose hosts the provider-region policy treats as China-based (provider-regions.ts `cn`). */
+const CHINA_HOST_COUNTRIES = new Set(["CN", "HK", "MO"]);
+
+/**
+ * Whether the organization's provider-region policy (the job's currentProviderPolicy) admits the reader's host country.
+ * A reader that does not declare one is refused (fail closed).
+ */
+export function visionPageReaderRegionAllowed(provider: Pick<PageImageReaderProvider, "hostCountry">, policy = currentProviderPolicy()): boolean {
+  const country = provider.hostCountry;
+  if (typeof country !== "string" || !/^[A-Z]{2}$/.test(country)) return false;
+  return policy.allowChinaProviders || !CHINA_HOST_COUNTRIES.has(country);
+}
 
 /**
  * The reader for this run's plain page transcription, or why the run keeps its hosted route. Never throws: a
@@ -63,6 +79,8 @@ export function visionPageReaderDecision(
   if (route.target !== "hosted" || vision.target !== "hosted" || route.runtime === "local-cli" || route.provider === PRIVATE_MODEL_PROVIDER) {
     return { refused: "configured-route" };
   }
+  // The organization's provider-region policy applies to the reader's host as to every hosted provider.
+  if (!visionPageReaderRegionAllowed(provider)) return { refused: "region-policy" };
   return { provider };
 }
 

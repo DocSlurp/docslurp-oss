@@ -15,7 +15,7 @@ import { InMemoryPageReaderOrgBudget } from "../ocr/page-reader-budget.js";
 import { assertVisionPageReaderConfiguration, visionPageReaderMode } from "../ocr/page-reader-mode.js";
 import { WorkflowState } from "../pipeline/pipeline.js";
 import { VisionExtractStage, legacyPageHints, type LegacyPageHints } from "../stages/vision-extract.js";
-import { visionPageReaderDecision } from "../stages/vision-page-reader.js";
+import { visionPageReaderDecision, visionPageReaderRegionAllowed } from "../stages/vision-page-reader.js";
 import { visionConfigForModel } from "../routing/routed-vision.js";
 import { pngHeader } from "../test/fake-ocr.js";
 import type { Config } from "../config.js";
@@ -47,7 +47,7 @@ function reader(read: ReadImpl, overrides: Partial<PageImageReaderProvider> = {}
   const provider = {
     id: "test-page-reader", model: "test-reader-model", maxPagesPerJob: 8, maxImageBytes: 1 << 20, maxMarkdownBytes: 4096,
     maxLongEdgePx: 2048, evalScore: 0.925, evalRef: "tier-benchmark-v1/page-ocr/development/test",
-    assertConfigured: vi.fn(), estimateJobCostCents: () => 0.01,
+    assertConfigured: vi.fn(), estimateJobCostCents: () => 0.01, hostCountry: "US",
     read: vi.fn(async (job: PageImageReadJob, signal?: AbortSignal) => {
       jobs.push({ scope: { ...job.scope }, files: job.pages.map((page) => path.basename(page.imagePath)) });
       return await read(job, signal);
@@ -551,6 +551,116 @@ describe("hostile images", () => {
     const h = harness();
     const outputs = await extract(h, state, document, [1]);
     expect(outputs[0]!.text).toBe("abc");
+  });
+});
+
+describe("council round 2", () => {
+  beforeEach(() => vi.stubEnv("DOCSLURP_VISION_PAGE_READER", "all"));
+
+  it("applies the organization's provider-region policy to the reader's host country, and refuses an undeclared one", async () => {
+    const policy = (allowChinaProviders: boolean) => ({ allowChinaProviders, speedBoost: false });
+    expect(visionPageReaderRegionAllowed({ hostCountry: "US" }, policy(false))).toBe(true);
+    expect(visionPageReaderRegionAllowed({ hostCountry: "FR" }, policy(false))).toBe(true);
+    for (const country of ["CN", "HK", "MO"]) {
+      expect(visionPageReaderRegionAllowed({ hostCountry: country }, policy(false)), country).toBe(false);
+      expect(visionPageReaderRegionAllowed({ hostCountry: country }, policy(true)), country).toBe(true);
+    }
+    expect(visionPageReaderRegionAllowed({}, policy(true))).toBe(false);
+    expect(visionPageReaderRegionAllowed({ hostCountry: "us" }, policy(true))).toBe(false);
+    // End to end: an undeclared or China-hosted reader (default policy) never reads; pages go hosted.
+    for (const hostCountry of [undefined, "CN"]) {
+      resetExtractorPluginsForTest();
+      const { provider } = reader(echo, { hostCountry });
+      register(provider);
+      const document = pdf();
+      const state = runState(document);
+      const h = harness();
+      await extract(h, state, document, [1, 2]);
+      expect(provider.read).not.toHaveBeenCalled();
+      expect(h.hosted).toHaveLength(2);
+    }
+    resetExtractorPluginsForTest();
+    expect(() => register(reader(echo, { hostCountry: "USA" }).provider)).toThrow(/hostCountry/);
+  });
+
+  it.each([0, Number.NaN, -1])("refuses to send a job whose cost estimate is %s (fail closed), sending its pages hosted", async (estimate) => {
+    const { provider } = reader(echo, { estimateJobCostCents: () => estimate });
+    register(provider);
+    const document = pdf();
+    const state = runState(document);
+    const h = harness();
+    await extract(h, state, document, [1, 2]);
+    expect(provider.read).not.toHaveBeenCalled();
+    expect(h.hosted).toHaveLength(2);
+  });
+
+  it("stops the other batch when one batch's render fails, and rethrows only after both finished", async () => {
+    let resolveSlow!: () => void;
+    const slowStarted = new Promise<void>((resolve) => { resolveSlow = resolve; });
+    const { provider } = reader(async (job, signal) => {
+      resolveSlow();
+      // Holds until aborted by the failing sibling.
+      await new Promise<void>((_resolve, reject) => signal?.addEventListener("abort", () => reject(signal.reason), { once: true }));
+      return await echo(job);
+    }, { maxPagesPerJob: 1 });
+    register(provider);
+    const document = pdf();
+    const state = runState(document);
+    const h = harness();
+    const rasters = (h.stage as unknown as { rasters: { renderSelectedPages: (args: { pageNumbers: number[]; maxLongEdgePx?: number }) => Promise<unknown> } }).rasters;
+    const render = rasters.renderSelectedPages.bind(rasters);
+    vi.spyOn(rasters, "renderSelectedPages").mockImplementation(async (args) => {
+      if (args.pageNumbers[0] === 2) { await slowStarted; throw new Error("renderer crashed on page 2"); }
+      return await render(args);
+    });
+    await expect(extract(h, state, document, [1, 2, 3, 4])).rejects.toThrow(/renderer crashed/);
+    // Page 1's job started and was aborted; pages 3 and 4 were never sent after the failure.
+    expect(provider.read).toHaveBeenCalledTimes(1);
+    expect(h.hosted).toEqual([]);
+  });
+
+  it("returns unsent pages to the document's budget when a cap stops the loop", async () => {
+    vi.stubEnv("DOCSLURP_OCR_PAGE_READER_ORG_DAILY_MAX_COST_CENTS", "1");
+    vi.stubEnv("DOCSLURP_OCR_PAGE_READER_MAX_PAGES", "4");
+    const { provider } = reader(echo, { maxPagesPerJob: 2, estimateJobCostCents: () => 0.9 });
+    register(provider);
+    const document = pdf();
+    const state = runState(document);
+    const h = harness();
+    await extract(h, state, document, [1, 2, 3, 4]);
+    const { pageReaderPagesRemaining } = await import("../ocr/page-reader.js");
+    // Two pages were sent; the two the org cap stopped count no more against the 4-page budget.
+    expect(pageReaderPagesRemaining(state.usageLedger, document.id, 4)).toBe(2);
+  });
+
+  it("never uses the reader in a cost-capped run (one hosted admission per page)", async () => {
+    const { provider } = reader(echo);
+    register(provider);
+    const document = pdf();
+    const state = runState(document, {}, { maxCostCents: 1000 });
+    const h = harness();
+    const outputs = await extract(h, state, document, [1, 2, 3]);
+    expect(provider.read).not.toHaveBeenCalled();
+    expect(readerOutputs(outputs)).toEqual([]);
+    expect(h.hosted.map((call) => call.page)).toEqual([1, 2, 3]);
+  });
+
+  it("holds back from fan-out at most the remaining reader budget, and nothing when the org cap is spent", async () => {
+    vi.stubEnv("DOCSLURP_OCR_PAGE_READER_MAX_PAGES", "2");
+    const { provider } = reader(echo);
+    register(provider);
+    const document = pdf();
+    const state = runState(document);
+    const h = harness();
+    vi.spyOn(h.internals, "visionAllowed").mockResolvedValue(true);
+    vi.spyOn(h.internals, "loadRoutedExecution").mockResolvedValue(null);
+    vi.spyOn(h.internals, "checkNeedsVision").mockResolvedValue({ needed: true, selectedPages: [1, 2, 3, 4, 5], hints: NO_HINTS });
+    expect((await h.stage.planPageTasks(state)).map((task) => task.pageNumber)).toEqual([3, 4, 5]);
+    vi.stubEnv("DOCSLURP_OCR_PAGE_READER_ORG_DAILY_MAX_COST_CENTS", "0");
+    expect((await h.stage.planPageTasks(state)).map((task) => task.pageNumber)).toEqual([1, 2, 3, 4, 5]);
+    vi.stubEnv("DOCSLURP_OCR_PAGE_READER_ORG_DAILY_MAX_COST_CENTS", "100");
+    state.pageReaderBudget = null;
+    expect((await h.stage.planPageTasks(state)).map((task) => task.pageNumber)).toEqual([1, 2, 3, 4, 5]);
   });
 });
 

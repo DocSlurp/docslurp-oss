@@ -200,9 +200,9 @@ export function selectOcrRoute(tier: RouteTier, available: OcrRouteAvailability,
  *   scores above the OCR recogniser alone (the OCR route's floor).
  * - balanced: the reader when its composite is within VISION_PAGE_READER_BALANCED_MARGIN of the best hosted option
  *   (hosted when no hosted option is measured).
+ * - smart: the reader only when its composite is at least the best hosted option's.
  *
  * This is a deployment setting: it applies to every eligible run, whatever model a project configured for vision.
- * - smart: the reader only when its composite is at least the best hosted option's.
  *
  * The hosted route stays the fallback for every page the reader does not return, and keeps every page that is not plain
  * transcription (schemas, task prompts, figure and chart pages, critique passes).

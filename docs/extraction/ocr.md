@@ -200,14 +200,22 @@ every eligible run, whatever vision model a project configured.
   as `local-cli` or a loopback vLLM or Ollama server, and not an operator-private model), in the legacy whole-document read
   of a document with page triage. Schema and task-prompt reads, pages triage routed as `chart-or-figure` or `image-heavy`,
   drawn-content and table-rescue pages, page-router groups and cascade legs, raster uploads, documents without triage,
-  `local-only` and `strict-privacy` projects keep the hosted route. A run without an organization sends nothing.
-- Reader pages are not fanned out into one-page tasks (the document's other pages still are). The run reads them in jobs
+  `local-only` and `strict-privacy` projects keep the hosted route. A run without an organization sends nothing. So does
+  a cost-capped run (`maxCostCents`), which reads one page per admission on the hosted route.
+- The reader must declare its host country (`hostCountry`, ISO 3166-1 alpha-2), and the organization's provider-region
+  policy must admit it: a China-based host (`CN`, `HK`, `MO`) needs `allowChinaProviders`, and a reader that declares no
+  country is never used for vision transcription.
+- Planning holds back from one-page task fan-out at most the document's remaining reader page budget, and nothing when
+  the organization's daily reader cap has no headroom or its ledger cannot answer; every other page still fans out. The run reads them in jobs
   of at most `maxPagesPerJob`, two in flight per document, each rendered at the provider's `maxLongEdgePx`, one run of one
   organization per job, with the same PNG checks (signature, byte cap, header size within the long edge and 40 million
   pixels, never decoded), response validation and organization daily cost cap
   (`DOCSLURP_OCR_PAGE_READER_ORG_DAILY_MAX_COST_CENTS`, one ledger for both readers). `DOCSLURP_OCR_PAGE_READER_MAX_PAGES`
-  bounds the pages a document sends in one activity; nothing past it is rendered at the reader's size, and no further
-  batch starts once a budget, a cap or the ledger stopped one.
+  bounds the pages a document sends in one activity; nothing past it is rendered at the reader's size, no further batch
+  starts once a budget, a cap or the ledger stopped one, and pages a stop left unsent return to the budget. Every job
+  reserves the provider's cost estimate: an estimate that is missing, 0 or not finite sends nothing. When one batch's
+  render or download fails, the other batch is aborted and the error is raised once both have stopped. The budget is
+  kept per activity: a retried activity can send a document's pages again, bounded by the organization's daily cap.
 - A page the reader does not return (a failed, refused or timed-out job, a failed page, empty or invalid Markdown, a
   refused image, the budget or a cap) goes to the run's hosted vision route as it would without the reader. That route is
   the run's own configured model, never one the system picks as a fallback. A render or download error propagates as it
