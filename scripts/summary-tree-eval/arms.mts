@@ -12,6 +12,8 @@
  *   long-context    the whole gold document(s) as context, when they fit the reader's window; answer only
  *   tree-guide      SIMULATED: summary hits select chunk ranges, fused with the chunk leg; real chunks only
  *   tree-include    SIMULATED: tree-guide with the top summaries returned in a capped share of the slots
+ *   product-guide   product summary-tree leg, real fusion and provisional deadline
+ *   product-include product leg with separately capped generated summaries
  *   closed-book     no context; measures how much the reader already knows (answer only)
  *
  * The tree arms are a harness simulation over the frozen stand-in tree: the
@@ -24,7 +26,6 @@
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-import postgres from "postgres";
 
 import { scoreCase } from "../multisearch-quality/score.mjs";
 import { score } from "../retrieval-quality/eval.mjs";
@@ -39,7 +40,7 @@ export const TREE_RULE = { summaryHits: 5, chunksPerHit: 3, includeSummarySlots:
 const READER_TOKENS = 400;
 /** Reader context budget in characters for long-context (the default text model's window, less headroom). */
 const LONG_CONTEXT_MAX_CHARS = 3_200_000;
-const ALL_ARMS = ["current-default", "current", "summary-seed", "document-order", "long-context", "tree-guide", "tree-include", "closed-book"] as const;
+const ALL_ARMS = ["current-default", "current", "summary-seed", "document-order", "long-context", "tree-guide", "tree-include", "product-guide", "product-include", "closed-book"] as const;
 type Arm = typeof ALL_ARMS[number];
 type Result = { text: string; citation: { documentId: string; chunkIndex?: number; pageNumber: number | null; pageNumbers: number[] }; kind?: "chunk" | "summary"; summary?: { id: string; level: number; chunkStart: number; chunkEnd: number } };
 
@@ -48,7 +49,7 @@ const BASE_OPTIONS = {
   stepback: false, iterativeMultiHop: false, enableGraphExpansion: false, enableCommunityExpansion: false, summarySeed: false, queryDecompose: false,
   useMmr: false, resultOrder: "relevance" as const, searchMode: "hybrid" as const, suppressSessionLog: true,
 };
-const SCOPE = { orgId: ORG, projectIds: "org", modeCeiling: null } as const;
+const SCOPE = { orgId: ORG, projectIds: "org", modeCeiling: null, actor: { type: "session" } } as const;
 
 const documents = new Map<string, EvalDocument>();
 const document = (id: string) => { if (!documents.has(id)) documents.set(id, loadDocument(id)); return documents.get(id)!; };
@@ -84,14 +85,16 @@ if (process.argv[1]?.endsWith("arms.mts")) {
   const answers = !args.includes("--no-answers");
   const { split, cases } = loadCases(casesPath!, { confirmation: args.includes("--confirmation") });
   mkdirSync(runDir!, { recursive: true });
-  const sql = postgres(need("DATABASE_URL"), { max: 8, prepare: false, onnotice: () => {} });
+  if (arms.some(arm => arm.startsWith("product-"))) process.env.DOCSLURP_SUMMARY_TREE_SERVE = "on";
+  const { sql } = await import("../../server/src/db.js");
   const documentIds = (await sql<{ id: string }[]>`select id from documents where project_id = ${PROJECT}`).map((row) => row.id);
   const trees = documentIds.filter((id) => existsSync(treePath(id))).map((id) => readJson<StoredTree>(treePath(id)));
   const nodes = trees.flatMap((tree) => tree.nodes);
-  const treeArms = arms.some((arm) => arm.startsWith("tree-"));
+  const treeArms = arms.some((arm) => arm.startsWith("tree-") || arm.startsWith("product-"));
   // A document the grouping library skipped has no nodes and is served by the chunk leg alone, as in the product.
   const untreed = documentIds.filter((id) => !existsSync(treePath(id)) && !existsSync(skipPath(id)));
   if (treeArms && untreed.length) throw new Error(`No frozen tree or recorded skip for ${untreed.length} of ${documentIds.length} documents`);
+  if (arms.some(arm => arm.startsWith("product-"))) process.env.DOCSLURP_SUMMARY_TREE_SERVE = "on";
   const search = await import("../../server/src/services/search.js");
   const controls = await import("../../server/src/services/search-controls.js");
   let dedupeNow: boolean | null = null;
@@ -110,7 +113,9 @@ if (process.argv[1]?.endsWith("arms.mts")) {
       await setDedupe(dedupe);
       const started = performance.now();
       const response = await search.hybridSearch(item.question, USER, { ...BASE_OPTIONS, ...options, queryVector, filters: { projectId: PROJECT } } as never, SCOPE);
-      return { results: response.results as unknown as Result[], ms: performance.now() - started };
+      const ms = performance.now() - started;
+      await session.drainSearchSessionWrites();
+      return { results: response.results as unknown as Result[], ms, outcome: response.summaryTree, summaries: response.summaries ?? [], timings: response.timings };
     };
     const cache = new Map<string, Awaited<ReturnType<typeof run>>>();
     const once = async (key: string, options: Record<string, unknown>) => { if (!cache.has(key)) cache.set(key, await run(options)); return cache.get(key)!; };
@@ -125,6 +130,18 @@ if (process.argv[1]?.endsWith("arms.mts")) {
         const base = await once("current", {});
         results = [...base.results].sort((a, b) => a.citation.documentId.localeCompare(b.citation.documentId) || (a.citation.chunkIndex ?? 0) - (b.citation.chunkIndex ?? 0));
         ms = base.ms;
+      } else if (arm === "product-guide" || arm === "product-include") {
+        const actual = await run({ summaryTree: arm === "product-guide" ? "guide" : "include" });
+        results = actual.results;
+        ms = actual.ms;
+        trace = { outcome: actual.outcome, timings: actual.timings, summaries: actual.summaries };
+        // Product include carries summaries separately; strict retrieval still scores its real cited chunks.
+        // Mapped evidence is an additional diagnostic, never substituted into the strict component.
+        if (arm === "product-include") mapped = [...results, ...actual.summaries.map(summary => {
+          const chunks = document(summary.documentId).chunks.filter(chunk => chunk.index >= summary.chunkStart && chunk.index <= summary.chunkEnd);
+          return { kind: "summary" as const, text: chunks.map(chunk => chunk.text).join("\n\n"),
+            citation: { documentId: summary.documentId, pageNumber: summary.pageStart, pageNumbers: [...new Set(chunks.flatMap(chunk => chunk.pageNumbers))] } };
+        })];
       } else if (arm === "tree-guide" || arm === "tree-include") {
         const started = performance.now();
         const leg = await once("deep", { limit: TREE_RULE.chunkLegDepth, candidateDepth: TREE_RULE.chunkLegDepth });
@@ -163,7 +180,7 @@ if (process.argv[1]?.endsWith("arms.mts")) {
       }
       // The strict component reads returned text only; a summary cannot contain the gold quote and is never rewritten to.
       const retrieval = results ? score(item, results.map((result) => result.kind === "summary" ? { ...result, text: "" } : result), K) : null;
-      const mappedRetrieval = mapped ? score(item, mapped, K) : null;
+      const mappedRetrieval = mapped ? score(item, mapped, arm === "product-include" ? mapped.length : K) : null;
       let answer: Record<string, unknown> | null = null;
       if (answers && !skipped) {
         const prompt = arm === "closed-book" ? `Question: ${item.question}` : `Context:\n${context ?? contextBlock(results!)}\n\nQuestion: ${item.question}`;

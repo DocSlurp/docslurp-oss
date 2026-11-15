@@ -24,6 +24,7 @@ import { readJson } from "./lib.mts";
 
 type Scored = { correct: boolean; primaryPageCorrect: boolean; reciprocalRank: number; premises: Array<{ rank: number | null }> };
 type Row = { id: string; arm: string; class: string; slice: string; searchMs: number; skipped?: string; retrieval: Scored | null; mappedRetrieval: Scored | null;
+  trace?: { outcome?: { requested: string; applied: string; skipped?: string; ms: number } };
   answer: { answerCheck: boolean; inputTokens: number; outputTokens: number; ms: number } | null };
 
 const mean = (values: number[]) => values.length ? Math.round((1000 * values.reduce((a, b) => a + b, 0)) / values.length) / 10 : null;
@@ -40,15 +41,20 @@ export function aggregate(rows: Row[]) {
     const pick = (parts: Array<ReturnType<typeof retrievalParts>>, key: "support" | "coverage" | "reciprocalRank" | "primaryPage") => mean(parts.map((part) => part?.[key] ?? 0));
     const answer = hasAnswer ? mean(measured.map((row) => row.answer?.answerCheck ? 1 : 0)) : null;
     const basis = hasMapped ? mapped : strict;
+    const expandedMapped = subset.some(row => row.arm === "product-include");
     const compositeParts = [hasRetrieval ? pick(basis, "support") : null, hasRetrieval ? pick(basis, "coverage") : null, hasRetrieval ? pick(basis, "reciprocalRank") : null, answer].filter((value): value is number => value !== null);
     return {
       n: subset.length, measured: measured.length, skipped: subset.length - measured.length,
       supportAt10: hasRetrieval ? pick(strict, "support") : null, premiseCoverage: hasRetrieval ? pick(strict, "coverage") : null,
       reciprocalRank: hasRetrieval ? pick(strict, "reciprocalRank") : null, primaryPage: hasRetrieval ? pick(strict, "primaryPage") : null,
-      mappedSupportAt10: hasMapped ? pick(mapped, "support") : null, mappedPremiseCoverage: hasMapped ? pick(mapped, "coverage") : null, mappedReciprocalRank: hasMapped ? pick(mapped, "reciprocalRank") : null,
+      mappedSupportAt10: hasMapped && !expandedMapped ? pick(mapped, "support") : null, mappedSupportAtReturnedBudget: hasMapped && expandedMapped ? pick(mapped, "support") : null, mappedPremiseCoverage: hasMapped ? pick(mapped, "coverage") : null, mappedReciprocalRank: hasMapped ? pick(mapped, "reciprocalRank") : null, mappedPrimaryPage: hasMapped ? pick(mapped, "primaryPage") : null,
+      deadlineGatedSupportAt10: subset.some(row => row.arm === "product-guide") ? mean(subset.map(row => row.trace?.outcome?.skipped === "deadline" ? 0 : retrievalParts(row.retrieval)?.support ?? 0)) : null,
       answerCheck: answer, composite: compositeParts.length ? Math.round((10 * compositeParts.reduce((a, b) => a + b, 0)) / compositeParts.length) / 10 : null,
-      compositeOf: [...(hasRetrieval ? [hasMapped ? "mapped support@10, mapped premise coverage, mapped reciprocal rank" : "support@10, premise coverage, reciprocal rank"] : []), ...(answer !== null ? ["answer check"] : [])].join(", "),
+      compositeOf: [...(hasRetrieval ? [hasMapped ? `mapped support${expandedMapped ? " at returned evidence budget" : "@10"}, mapped premise coverage, mapped reciprocal rank` : "support@10, premise coverage, reciprocal rank"] : []), ...(answer !== null ? ["answer check"] : [])].join(", "),
       readerInputTokens: measured.reduce((sum, row) => sum + (row.answer?.inputTokens ?? 0), 0), readerOutputTokens: measured.reduce((sum, row) => sum + (row.answer?.outputTokens ?? 0), 0),
+      treeOutcomes: Object.fromEntries([...new Set(subset.map(row => row.trace?.outcome).filter(Boolean).map(outcome => outcome!.skipped ?? outcome!.applied))]
+        .map(key => [key, subset.filter(row => (row.trace?.outcome?.skipped ?? row.trace?.outcome?.applied) === key).length])),
+      p95SearchMs: measured.length ? [...measured.map(row => row.searchMs)].sort((a, b) => a - b)[Math.min(measured.length - 1, Math.floor(measured.length * 0.95))]! : null,
       medianSearchMs: measured.length ? [...measured.map((row) => row.searchMs)].sort((a, b) => a - b)[Math.floor(measured.length / 2)]! : null,
     };
   };
@@ -68,10 +74,10 @@ if (process.argv[1]?.endsWith("report.mts")) {
   writeFileSync(output!, JSON.stringify({ cases: new Set(rows.map((row) => row.id)).size, rows: rows.length, summary }, null, 2) + "\n");
   const show = (value: number | null) => value === null ? "n/a" : value.toFixed(1);
   for (const group of ["fact", "multi-section", "whole-document", "broad", "broad, headed", "broad, heading-less", "all"]) {
-    console.log(`\n### ${group}\n\n| Arm | n | support@10 | premise coverage | reciprocal rank | primary page | mapped support@10 | mapped coverage | answer check | composite |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |`);
+    console.log(`\n### ${group}\n\n| Arm | n | support@10 | premise coverage | reciprocal rank | primary page | mapped support (returned budget) | mapped coverage | answer check | composite |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |`);
     for (const [arm, cells] of Object.entries(summary)) {
       const c = (cells as Record<string, ReturnType<typeof aggregate>[string][string]>)[group]!;
-      console.log(`| ${arm} | ${c.measured}${c.skipped ? ` (+${c.skipped} skipped)` : ""} | ${show(c.supportAt10)} | ${show(c.premiseCoverage)} | ${show(c.reciprocalRank)} | ${show(c.primaryPage)} | ${show(c.mappedSupportAt10)} | ${show(c.mappedPremiseCoverage)} | ${show(c.answerCheck)} | ${show(c.composite)} |`);
+      console.log(`| ${arm} | ${c.measured}${c.skipped ? ` (+${c.skipped} skipped)` : ""} | ${show(c.supportAt10)} | ${show(c.premiseCoverage)} | ${show(c.reciprocalRank)} | ${show(c.primaryPage)} | ${show(c.mappedSupportAtReturnedBudget ?? c.mappedSupportAt10)} | ${show(c.mappedPremiseCoverage)} | ${show(c.answerCheck)} | ${show(c.composite)} |`);
     }
   }
 }

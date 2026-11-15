@@ -18,7 +18,8 @@ gate (`scripts/evaluation-integrity-judge.mjs`) checks that.
 | Answer check | Existing deterministic check: `scripts/multisearch-quality/score.mjs` `scoreCase` (`answer`) |
 | Grouping, hashing, summary prompt | Either the product summary-tree library (`tree-product.mts`, loaded at run time from `worker/src/summary-tree` or `SUMMARY_TREE_EVAL_LIB`) or the **stand-in** (`grouping-standin.mts`, `tree.mts`) written before the library existed |
 | `tree-guide`, `tree-include` | **Simulation** in `arms.mts`: the retrieval leg does not exist yet; the fusion rule is fixed in `TREE_RULE` |
-| Production deadline for `guide` | Not modelled: needs the phase-0 latency experiment |
+| `product-guide`, `product-include` | Real product retrieval over frozen summaries seeded into the separate Lance table, with real readiness, fusion, context cap and provisional deadline |
+| Production deadline for `guide` | Product arms enforce the provisional constants; production calibration still needs the phase-0 latency experiment |
 
 ## Layout
 
@@ -69,3 +70,31 @@ Only public-domain or permissively licensed documents, recorded with URL and
 licence in the manifest. Source bytes stay outside the repository. Text
 sources are paged with the product's text page rule (`measuredTextPages`),
 breaks on paragraph boundaries, so page citations can be scored.
+
+## Zero-cost local product replay
+
+```sh
+export TMPDIR=/path/to/configured/scratch
+export TMP="$TMPDIR" TEMP="$TMPDIR"
+export SUMMARY_TREE_EVAL_ROOT=/path/to/existing/external/cache
+export SUMMARY_TREE_EVAL_ADMIN_URL=postgres://postgres@127.0.0.1:5432/postgres
+pnpm exec tsx scripts/summary-tree-eval/run-local.mts \
+  docs/evals/summary-tree/development-cases.json /path/to/new/external/run
+```
+
+The admin URL must be loopback-only and allow creating a disposable database.
+An existing env file may instead be named by `SUMMARY_TREE_EVAL_ADMIN_ENV`; only
+its `DATABASE_URL` is read, and the same loopback check applies. No existing
+application tables are changed. This creates a migrated disposable local database and fresh Lance directory,
+seeds cached `tree-product` summaries, and runs the three zero-build baselines
+and `product-guide`/`product-include`. It permits no provider spend: cache misses
+refuse, and answer generation is off. The database and fresh Lance directory are
+removed on exit; raw responses, timings and the summary stay in the output directory.
+
+The original `tree-*` arms remain labelled simulations for comparison with
+historical reports. Frozen trees may predate current build constants: retain
+that distinction in the report. Product `include` returns ten real chunks plus
+separately capped summaries. Its strict component scores those ten chunks; its
+mapped diagnostic scores the complete returned evidence, including summaries
+mapped to leaves, so that component has a larger candidate budget and is not a
+like-for-like top-ten retrieval score. Local timings are not S3 calibration.
