@@ -179,8 +179,10 @@ flag on and no provider (or `assertConfigured()` throwing), the worker refuses t
   before sending the job, so concurrent jobs cannot pass the cap together; without it the host reserves 0. It is required
   with `DOCSLURP_VISION_PAGE_READER` (the worker refuses to start without it), and a vision job whose estimate is 0 or not
   finite is not sent.
-- Optional `hostCountry`: the ISO 3166-1 alpha-2 country where the reader's VMs process pages (`US`, `FR`). Vision page
-  reads require it and apply the organization's provider-region policy to it ([OCR](ocr.md#vision-page-reader)).
+- Optional `hostCountry` and `operatorCountry`: ISO 3166-1 alpha-2 codes for where the reader's VMs process pages and for
+  the company that operates them, by ownership and jurisdiction (`CN` for a Chinese-owned cloud wherever it is listed).
+  Vision page reads require both and apply the organization's provider-region policy to each
+  ([OCR](ocr.md#vision-page-reader)).
 - Optional `maxLongEdgePx` (256 to 4000): the longest page edge the reader's model reads at. Vision page reads render
   PDF pages at this size and refuse a PNG whose header reports a longer edge ([OCR](ocr.md#vision-page-reader)).
 - Optional `evalScore` (0 to 1) and `evalRef`, together: the reader's composite on the page-OCR tier benchmark and the

@@ -202,9 +202,11 @@ every eligible run, whatever vision model a project configured.
   drawn-content and table-rescue pages, page-router groups and cascade legs, raster uploads, documents without triage,
   `local-only` and `strict-privacy` projects keep the hosted route. A run without an organization sends nothing. So does
   a cost-capped run (`maxCostCents`), which reads one page per admission on the hosted route.
-- The reader must declare its host country (`hostCountry`, ISO 3166-1 alpha-2), and the organization's provider-region
-  policy must admit it: a China-based host (`CN`, `HK`, `MO`) needs `allowChinaProviders`, and a reader that declares no
-  country is never used for vision transcription.
+- The reader must declare where it processes pages (`hostCountry`) and the country of the company that operates its VMs
+  by ownership and jurisdiction (`operatorCountry`), both ISO 3166-1 alpha-2, and the organization's provider-region
+  policy must admit both: China (`CN`, `HK`, `MO`) needs `allowChinaProviders`, and a reader missing either is never used
+  for vision transcription. Planning runs without the run's provider-policy scope, so a reader that needs
+  `allowChinaProviders` is not held back at planning (stricter, never looser, than the read).
 - Planning holds back from one-page task fan-out at most the document's remaining reader page budget, and nothing when
   the organization's daily reader cap has no headroom or its ledger cannot answer; every other page still fans out. The run reads them in jobs
   of at most `maxPagesPerJob`, two in flight per document, each rendered at the provider's `maxLongEdgePx`, one run of one

@@ -432,7 +432,8 @@ async function admitJob(provider: PageImageReaderProvider, ctx: PageReaderContex
     console.warn(`${use.logTag} cost estimate failed provider=${provider.id}: ${(error instanceof Error ? error.message : String(error)).slice(0, 200)}`);
   }
   // A reader whose route must reserve (vision) never sends a job it cannot bound: no estimate, 0 or NaN refuses.
-  if (use.requireCostEstimate && !(reserveCents > 0)) {
+  // Below the ledger's 0.0001-cent resolution a reservation is stored as 0: that is no estimate either.
+  if (use.requireCostEstimate && !(reserveCents >= 0.0001)) {
     console.error(`${use.logTag} stopped document=${ctx.documentId}: provider=${provider.id} gave no positive cost estimate to reserve`);
     return { skip: "no-cost-estimate" };
   }
