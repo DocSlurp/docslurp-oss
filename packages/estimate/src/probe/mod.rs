@@ -10,6 +10,7 @@ mod media;
 mod office;
 pub mod layout;
 mod pdf;
+pub mod cost_route;
 pub use pdf::{layout_pages, LayoutImage, LayoutPage};
 
 use serde::{Deserialize, Serialize};
@@ -135,6 +136,10 @@ pub struct PdfProfile {
     /// Sampled pages table-heavy from their ruled grids alone (a grid of 5+ rows, or grids covering 40% of the page). The
     /// extractor's own tables can make more pages table-heavy; the profiler cannot see them.
     pub ruled_table_pages: u32,
+    /// Sampled pages per cost route (`pageCostRoute`, in `PAGE_COST_ROUTES` order: ocr-read, ocr-blank, table, text,
+    /// unknown): a page with no text-layer word is OCR'd (billed when something is drawn on it), a page whose ruled grids
+    /// are unknown or make it table-heavy takes the table path, the rest keep their text layer.
+    pub route_pages: [u32; cost_route::PAGE_COST_ROUTES],
 }
 
 /// Facts about an Office or EPUB package.

@@ -172,6 +172,8 @@ export class ClassifyRouteStage implements Stage {
               nonStraightforwardPages: surface.pages.filter((page) => page.route !== "straightforward-text").length,
               // Ingest report: tables observed (heuristic, from the extracted text).
               tablePages: surface.pages.filter((page) => page.route === "table-heavy").length,
+              // Of those, pages routed as tables because neither the walker nor the page facts knew their grids (#409).
+              gridsUnknownPages: surface.pages.filter((page) => page.signals.includes("grids-unknown")).length,
               // What the routing decided, per document, so operators can see it in stage stats and SigNoz.
               ...decisions,
             }

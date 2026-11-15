@@ -190,6 +190,16 @@ fn probe_document(rules: &Rules, document: &Document, file_bytes: usize, mut res
         if facts.ruled_table_heavy {
             profile.ruled_table_pages += 1;
         }
+        // `pageCostRoute`: what production does with the page (scan-fill OCR, table path or text layer).
+        let grids: Option<Vec<(u32, Option<f64>)>> = facts.grids.as_ref().map(|grids| grids.iter().map(|grid| (grid.0, Some(grid.2))).collect());
+        let route = super::cost_route::page_cost_route(&rules.page_table_routing, &super::cost_route::PageCostFacts {
+            words: (!reading.exhausted).then_some(reading.words),
+            images: (!reading.exhausted).then_some(reading.images.len() as f64),
+            vector_paths: (!reading.exhausted).then_some(reading.path_operations as f64),
+            grids: grids.as_deref(),
+            grid_coverage: facts.grid_coverage,
+        });
+        profile.route_pages[route as usize] += 1;
     }
     let points = |value: f64| value.round().clamp(0.0, 10_000_000.0) as u32;
     let median = |mut values: Vec<f64>| { values.sort_by(f64::total_cmp); values[values.len() / 2] };
