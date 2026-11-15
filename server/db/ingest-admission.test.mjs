@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { admission } from './ingest-admission.mjs';
+import { admission, waitForDrain } from './ingest-admission.mjs';
 function client({holder='deploy-12345',open=0,rowCount=1}={}) { const calls=[];return {calls,query:async(sql,args)=>{calls.push([sql,args]); if(sql.startsWith('SELECT holder')) return {rows:[{holder}]};if(sql.includes('count(*)'))return {rows:[{open}]};return {rowCount};}}; }
 test('pause refuses competing deployment',async()=>{await assert.rejects(admission(client({rowCount:0}),'pause','deploy-12345'));});
 test('resume never opens when runs remain or ownership changed',async()=>{for(const state of [{open:1},{open:null},{holder:'other-deploy'}]){const c=client(state);await assert.rejects(admission(c,'resume','deploy-12345'));assert.ok(!c.calls.some(([s])=>s.includes('SET holder=NULL')));assert.equal(c.calls.at(-1)[0],'ROLLBACK');}});
@@ -31,4 +31,11 @@ test('database triggers fence all tenants, sessions and run readmission while al
   await admission(db,'resume','deploy-12345');
   await db.exec("INSERT INTO documents VALUES ('after'); INSERT INTO upload_sessions VALUES ('after'); INSERT INTO project_runs VALUES ('after','queued')");
  } finally {await db.close();}
+});
+
+test('drain timeout never resumes and database errors never retry', async()=>{
+ let time=0; const c=client({open:1});
+ await assert.rejects(waitForDrain(c,'deploy-12345',{timeoutMs:5,now:()=>time,sleep:async ms=>{time+=ms;}}),/timed out/);
+ assert.ok(!c.calls.some(([sql])=>sql.includes('SET holder=NULL')));
+ let calls=0; await assert.rejects(waitForDrain({query:async()=>{calls++;throw Error('database unavailable');}},'deploy-12345',{sleep:async()=>assert.fail('must not retry errors')}),/unavailable/);assert.equal(calls,1);
 });

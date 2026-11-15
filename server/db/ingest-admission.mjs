@@ -19,15 +19,27 @@ export async function admission(client, mode, holder) {
     } catch (error) { await client.query('ROLLBACK'); throw error; }
   }
 }
+export async function waitForDrain(client, holder, { timeoutMs = 240000, now = Date.now, sleep = ms => new Promise(resolve => setTimeout(resolve, ms)) } = {}) {
+  const deadline = now() + timeoutMs;
+  for (;;) {
+    try { await admission(client, 'drain', holder); return; }
+    catch (error) {
+      if (error.code !== 'RUNS_OPEN') throw error;
+      const remaining = deadline - now();
+      if (remaining <= 0) throw new Error('Ingestion drain timed out; admission remains closed');
+      await sleep(Math.min(2000, remaining));
+    }
+  }
+}
 if (import.meta.url === pathToFileURL(process.argv[1] || '').href) {
   const require = createRequire(import.meta.url);
   const { Client } = require('pg');
   const client = new Client({ connectionString: process.env.DATABASE_URL });
-  try { await client.connect(); const deadline = Date.now() + 240000;
-    for (;;) {
-      try { await admission(client, process.argv[2], process.argv[3]); break; }
-      catch (error) { if (process.argv[2] !== 'drain' || error.code !== 'RUNS_OPEN' || Date.now() >= deadline) throw error; await new Promise(resolve => setTimeout(resolve, 2000)); }
-    } }
+  try {
+    await client.connect();
+    if (process.argv[2] === 'drain') await waitForDrain(client, process.argv[3]);
+    else await admission(client, process.argv[2], process.argv[3]);
+  }
   catch { console.error('Ingestion fence refused; admission remains closed if acquired'); process.exitCode = 1; }
   finally { await client.end(); }
 }
