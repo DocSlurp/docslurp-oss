@@ -307,6 +307,15 @@ beforeEach(() => {
 });
 
 describe("ssoRoutes security hardening", () => {
+  it("refuses ordinary SAML metadata without an issuer before redirecting to the IdP", async () => {
+    seedOrg({ enabled: true, providerType: "saml", metadataUrl: "https://idp.acme.com/saml/metadata", emailDomain: "acme.com" });
+    verifiedDomain("org-1");
+    vi.mocked(fetch).mockResolvedValue(new Response(`<EntityDescriptor xmlns="urn:oasis:names:tc:SAML:2.0:metadata"><IDPSSODescriptor protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol"><KeyDescriptor use="signing"><KeyInfo xmlns="http://www.w3.org/2000/09/xmldsig#"><X509Data><X509Certificate>MIIFAKE</X509Certificate></X509Data></KeyInfo></KeyDescriptor><SingleSignOnService Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect" Location="https://idp.acme.com/saml/login"/></IDPSSODescriptor></EntityDescriptor>`));
+    const result = await buildApp().request("/v1/auth/saml/org-1/init");
+    expect(result.status).toBeGreaterThanOrEqual(400);
+    expect(result.headers.get("location")).toBeNull();
+    expect(createSessionMock).not.toHaveBeenCalled();
+  });
   it("binds ordinary SAML callbacks to the exact consumed RelayState request", async () => {
     seedOrg({ enabled: true, providerType: "saml", metadataUrl: "https://idp.acme.com/saml/metadata", emailDomain: "acme.com" });
     seedRequest("request-a"); seedRequest("request-b");
