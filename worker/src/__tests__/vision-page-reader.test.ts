@@ -47,7 +47,7 @@ function reader(read: ReadImpl, overrides: Partial<PageImageReaderProvider> = {}
   const provider = {
     id: "test-page-reader", model: "test-reader-model", maxPagesPerJob: 8, maxImageBytes: 1 << 20, maxMarkdownBytes: 4096,
     maxLongEdgePx: 2048, evalScore: 0.925, evalRef: "tier-benchmark-v1/page-ocr/development/test",
-    assertConfigured: vi.fn(), estimateJobCostCents: () => 0.01, hostCountry: "US",
+    assertConfigured: vi.fn(), estimateJobCostCents: () => 0.01, hostCountry: "US", operatorCountry: "US",
     read: vi.fn(async (job: PageImageReadJob, signal?: AbortSignal) => {
       jobs.push({ scope: { ...job.scope }, files: job.pages.map((page) => path.basename(page.imagePath)) });
       return await read(job, signal);
@@ -559,14 +559,17 @@ describe("council round 2", () => {
 
   it("applies the organization's provider-region policy to the reader's host country, and refuses an undeclared one", async () => {
     const policy = (allowChinaProviders: boolean) => ({ allowChinaProviders, speedBoost: false });
-    expect(visionPageReaderRegionAllowed({ hostCountry: "US" }, policy(false))).toBe(true);
-    expect(visionPageReaderRegionAllowed({ hostCountry: "FR" }, policy(false))).toBe(true);
+    expect(visionPageReaderRegionAllowed({ hostCountry: "US", operatorCountry: "US" }, policy(false))).toBe(true);
+    expect(visionPageReaderRegionAllowed({ hostCountry: "FR", operatorCountry: "FR" }, policy(false))).toBe(true);
     for (const country of ["CN", "HK", "MO"]) {
-      expect(visionPageReaderRegionAllowed({ hostCountry: country }, policy(false)), country).toBe(false);
-      expect(visionPageReaderRegionAllowed({ hostCountry: country }, policy(true)), country).toBe(true);
+      expect(visionPageReaderRegionAllowed({ hostCountry: country, operatorCountry: "US" }, policy(false)), country).toBe(false);
+      // A Chinese-owned operator with VMs elsewhere is China-based under the policy.
+      expect(visionPageReaderRegionAllowed({ hostCountry: "SG", operatorCountry: country }, policy(false)), country).toBe(false);
+      expect(visionPageReaderRegionAllowed({ hostCountry: country, operatorCountry: country }, policy(true)), country).toBe(true);
     }
     expect(visionPageReaderRegionAllowed({}, policy(true))).toBe(false);
-    expect(visionPageReaderRegionAllowed({ hostCountry: "us" }, policy(true))).toBe(false);
+    expect(visionPageReaderRegionAllowed({ hostCountry: "US" }, policy(true))).toBe(false);
+    expect(visionPageReaderRegionAllowed({ hostCountry: "us", operatorCountry: "US" }, policy(true))).toBe(false);
     // End to end: an undeclared or China-hosted reader (default policy) never reads; pages go hosted.
     for (const hostCountry of [undefined, "CN"]) {
       resetExtractorPluginsForTest();
@@ -583,7 +586,7 @@ describe("council round 2", () => {
     expect(() => register(reader(echo, { hostCountry: "USA" }).provider)).toThrow(/hostCountry/);
   });
 
-  it.each([0, Number.NaN, -1])("refuses to send a job whose cost estimate is %s (fail closed), sending its pages hosted", async (estimate) => {
+  it.each([0, Number.NaN, -1, 0.00004])("refuses to send a job whose cost estimate is %s (fail closed), sending its pages hosted", async (estimate) => {
     const { provider } = reader(echo, { estimateJobCostCents: () => estimate });
     register(provider);
     const document = pdf();
@@ -643,6 +646,11 @@ describe("council round 2", () => {
     expect(provider.read).not.toHaveBeenCalled();
     expect(readerOutputs(outputs)).toEqual([]);
     expect(h.hosted.map((call) => call.page)).toEqual([1, 2, 3]);
+    // A single uncached page of a capped run stays hosted too.
+    const one = harness();
+    await extract(one, runState(pdf("doc-2"), { id: "run-capped-1" }, { maxCostCents: 1000 }), pdf("doc-2"), [1]);
+    expect(provider.read).not.toHaveBeenCalled();
+    expect(one.hosted).toHaveLength(1);
   });
 
   it("holds back from fan-out at most the remaining reader budget, and nothing when the org cap is spent", async () => {

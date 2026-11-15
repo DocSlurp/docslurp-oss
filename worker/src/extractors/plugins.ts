@@ -346,6 +346,12 @@ export interface PageImageReaderProvider {
    * allowChinaProviders); a reader without it is never used for vision transcription (fail closed).
    */
   hostCountry?: string;
+  /**
+   * Optional: the ISO 3166-1 alpha-2 country of the company that operates those VMs, by controlling ownership and
+   * jurisdiction as packages/shared/src/provider-regions.ts classifies providers (`CN` for a Chinese-owned cloud wherever
+   * it is listed). Vision page reads require it beside `hostCountry`; both must pass the organization's region policy.
+   */
+  operatorCountry?: string;
   /** Throw when the deployment is not ready (unpinned image, missing endpoint). The worker then refuses to start. */
   assertConfigured(): void;
   /**
@@ -532,8 +538,11 @@ export function registerExtractorPlugin(plugin: ExtractorPlugin): void {
     if (reader.maxLongEdgePx !== undefined && !(Number.isSafeInteger(reader.maxLongEdgePx) && reader.maxLongEdgePx >= 256 && reader.maxLongEdgePx <= 4000)) {
       throw new Error("Page image reader provider's maxLongEdgePx must be an integer from 256 to 4000");
     }
-    if (reader.hostCountry !== undefined && !(typeof reader.hostCountry === "string" && /^[A-Z]{2}$/.test(reader.hostCountry))) {
-      throw new Error("Page image reader provider's hostCountry must be an ISO 3166-1 alpha-2 code such as US");
+    for (const field of ["hostCountry", "operatorCountry"] as const) {
+      const value = reader[field];
+      if (value !== undefined && !(typeof value === "string" && /^[A-Z]{2}$/.test(value))) {
+        throw new Error(`Page image reader provider's ${field} must be an ISO 3166-1 alpha-2 code such as US`);
+      }
     }
     if (reader.estimateJobCostCents !== undefined && typeof reader.estimateJobCostCents !== "function") throw new Error("Page image reader provider's estimateJobCostCents must be a function");
     if (reader.evalScore !== undefined && !(typeof reader.evalScore === "number" && reader.evalScore >= 0 && reader.evalScore <= 1)) throw new Error("Page image reader provider's evalScore must be from 0 to 1");

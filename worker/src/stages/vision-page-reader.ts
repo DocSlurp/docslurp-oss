@@ -11,8 +11,9 @@
  *   critique passes, routed (page router) pages, page-task (fan-out) pages, raster uploads and documents without page
  *   triage keep the hosted route; so does a `local-only` or `strict-privacy` project, and a run whose configured vision
  *   route is not hosted (a local or operator-private model).
- * - The reader must declare its host country (`hostCountry`), and the organization's provider-region policy must admit it
- *   (China-based hosts need allowChinaProviders); otherwise the run keeps its hosted route.
+ * - The reader must declare where it processes pages (`hostCountry`) and who operates its VMs (`operatorCountry`), and the
+ *   organization's provider-region policy must admit both (China needs allowChinaProviders); otherwise the run keeps its
+ *   hosted route. Cost-capped runs keep it too.
  * - Jobs carry one run of one organization (readPageImagesWithProvider): a run without an organization sends nothing.
  *   They count against the organization's daily reader cost cap (one fleet-wide ledger with the OCR reader) and a
  *   per-document page budget kept per activity (as the OCR reader's is).
@@ -30,7 +31,7 @@ import { isPageTranscription } from "../tools/vision-runtime.js";
 
 export { VISION_PAGE_READER_METRIC } from "../ocr/page-reader-mode.js";
 
-export type VisionPageReaderRefusal = "off" | "no-provider" | "privacy-mode" | "no-org-scope" | "not-transcription" | "configured-route" | "region-policy";
+export type VisionPageReaderRefusal = "off" | "no-provider" | "privacy-mode" | "no-org-scope" | "not-transcription" | "configured-route" | "region-policy" | "cost-capped";
 
 /** Countries whose hosts the provider-region policy treats as China-based (provider-regions.ts `cn`). */
 const CHINA_HOST_COUNTRIES = new Set(["CN", "HK", "MO"]);
@@ -39,10 +40,13 @@ const CHINA_HOST_COUNTRIES = new Set(["CN", "HK", "MO"]);
  * Whether the organization's provider-region policy (the job's currentProviderPolicy) admits the reader's host country.
  * A reader that does not declare one is refused (fail closed).
  */
-export function visionPageReaderRegionAllowed(provider: Pick<PageImageReaderProvider, "hostCountry">, policy = currentProviderPolicy()): boolean {
-  const country = provider.hostCountry;
-  if (typeof country !== "string" || !/^[A-Z]{2}$/.test(country)) return false;
-  return policy.allowChinaProviders || !CHINA_HOST_COUNTRIES.has(country);
+export function visionPageReaderRegionAllowed(provider: Pick<PageImageReaderProvider, "hostCountry" | "operatorCountry">, policy = currentProviderPolicy()): boolean {
+  // Where pages are processed and who operates the VMs (ownership and jurisdiction): both declared, both admitted.
+  for (const country of [provider.hostCountry, provider.operatorCountry]) {
+    if (typeof country !== "string" || !/^[A-Z]{2}$/.test(country)) return false;
+    if (!policy.allowChinaProviders && CHINA_HOST_COUNTRIES.has(country)) return false;
+  }
+  return true;
 }
 
 /**
@@ -66,6 +70,8 @@ export function visionPageReaderDecision(
   // Only a project that allows hosted vision may have its pages read by the reader: local-only and strict-privacy keep
   // the route their own policy admits.
   if ((state.run.pipeline.privacyMode ?? "standard") !== "standard") return { refused: "privacy-mode" };
+  // A cost-capped run admits one hosted page at a time; a reader job of many pages could pass the cap by its batch.
+  if ((state.run.pipeline.maxCostCents ?? 0) > 0) return { refused: "cost-capped" };
   if (typeof state.run.orgId !== "string" || !state.run.orgId || !state.run.id) return { refused: "no-org-scope" };
   if (!isPageTranscription({ vision, outputSchema: state.run.pipeline.outputSchema ?? null })) return { refused: "not-transcription" };
   let route: ReturnType<typeof resolveVisionRoute>;
