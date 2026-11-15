@@ -1,5 +1,10 @@
 # TODO
 
+- Project activity counters (0165), council follow-ups 2026-11-14:
+  - Bulk chat-session delete is quadratic in a surviving project: the row-level delete trigger removes each session's turns and rewrites the same counter row per session (20,000 sessions 7.5 s against 0.3 s without the trigger; account offboarding hits it). Make it statement-level with a transition table.
+  - The drift sweep's cursor is per process and restarts at the first id, so with regular deploys later projects are rarely sampled; persist or randomise it, and bisect a batch whose check timed out.
+  - All 1,024 writer slots held makes search and chat writes block with no statement timeout; needs over 1,024 concurrent writing transactions or a database role doing it on purpose.
+  - Document `pg_restore --data-only` into a live schema in `docs/self-host/operations.md` (triggers fire during the load: rebuild afterwards).
 - Figure resume budget constants: alert on `resume.capped{reason="vm-budget"}` so a low estimate never silently drops completeness, and re-check the defaults (measured 2026-11-14) against the `resume pass … msPerPage estimateMs` log lines once the runner is on.
 - First pass (sandboxed PDF batches, 2026-11-11; `DOCSLURP_FIRST_PASS`, default off). Remaining before it is on by default:
   council review of the seam, the activity and the workflow wiring (one organization per batch, the publish gate, page-count

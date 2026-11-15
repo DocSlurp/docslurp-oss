@@ -1,3 +1,4 @@
+import { providerCostEvidence } from "../extractors/plugins.js";
 import { FIGURE_CHARTS_SCHEMA, FIGURE_CHARTS_SLOT, figureChartsHaveWork, figureChartsObjectName, figureChartsRequest, takeFigureCharts, validateFigureCharts, type TakenFigureCharts } from "../chart-export/figure-charts.js";
 import { createHash } from "node:crypto";
 import { committedDocumentUris, countDeferredPdfPages, firstPassServesDocument, primeFirstPassResults, readMarkdownSlotBytes } from "../pipeline/first-pass.js";
@@ -32,7 +33,9 @@ import {
   documentExtractionForQuality,
   deriveDocumentTitle,
   htmlDocumentTitle,
-  imageAnchorsToAltText,
+  ocrLedgerPageText,
+  ocrPageHasWords,
+  scanFillPageNumbers,
   resolvePdfExtractorSetting,
   hostPdfExtractorsUnderSandbox,
   sandboxedPdfConfigured,
@@ -122,6 +125,7 @@ import { routingFactsWithDopplerFacts } from "../lib/doppler-page-facts-layout.j
 import { dopplerPageFactsJsonl } from "../lib/doppler-page-facts.js";
 import { sandboxedPdfPageFacts } from "../extractors/sandboxed-pdf-page-facts.js";
 import { dopplerPageFactsMode } from "../lib/doppler-page-facts.js";
+import { documentCostStats } from "../lib/document-cost-stats.js";
 import { DOPPLER_FACTS_EVIDENCE_SOURCE, dopplerFactsCoverEvidence, dopplerFactsTextDisagreement, pageFactRowsFromDopplerFacts, pageImageEvidenceFromDopplerFacts } from "../lib/doppler-page-facts-evidence.js";
 import { runBillsScansAtCompletion } from "../db/page-base-fee.js";
 import { PAGE_RENDITION, pageRenditionKey } from "../lib/page-rendition.js";
@@ -237,11 +241,7 @@ export const OCR_MAX_CONSECUTIVE_FAILED_BATCHES = 3;
 /** Bound on the OCR ledger's own `pdftotext` probe (the text layer is light work; a slow one is a hostile file). */
 export const OCR_LEDGER_PROBE_TIMEOUT_MS = 20_000;
 
-/** Text a page holds for a "has words" test: image references and `<!-- page N -->` markers are not words read. */
-export function ocrLedgerPageText(text: string | null | undefined): string {
-  if (typeof text !== "string") return "";
-  return imageAnchorsToAltText(text).replace(/<!--\s*page\s+\d+\s*-->/gi, "");
-}
+export { ocrLedgerPageText, ocrPageHasWords, scanFillPageNumbers } from "@docslurp/shared";
 
 /**
  * Whether the winning candidate ran OCR, so empty-native pages holding words could only be OCR reads. Only these
@@ -707,6 +707,8 @@ export class ExtractMarkdownStage implements Stage {
                   }
                   // Scanned pages (no words in the winner's text) are read by the OCR engine in its boundary; the
                   // text-layer extractors never OCR. The engine charges each page it reads.
+                  const sourceLexical = new Map((splitTextIntoPagesStrict(winningText, document.pageCount) ?? [])
+                    .map((text, index) => [index + 1, winningCandidate.ocrPages?.includes(index + 1) ? null : ocrPageHasWords(text)] as const));
                   const scanFill = isPdf && qualityAllowsPageReading(state.run.pipeline.quality)
                     ? await this.ocrScannedPdfPages(state, document, { sourcePath: tempFile, text: winningText, textKey: winningCandidate.textKey, ocrLanguage: extractionConfig.ocr.language, contentHash }, signal)
                     : null;
@@ -1251,6 +1253,9 @@ export class ExtractMarkdownStage implements Stage {
                       ...(winningCandidate.layoutWalkerUnknown ? { layoutWalkerUnknown: winningCandidate.layoutWalkerUnknown } : {}),
                       // Pages whose unknown walker grids the page facts settled, and pages neither knew (routed as tables).
                       ...(winningCandidate.layoutGrids ? { layoutGrids: winningCandidate.layoutGrids } : {}),
+                      // What the document holds that a setting can change the cost of, counted from its page facts whatever this
+                      // run's settings skipped (chart export, figures, walker, scan copy): what a quote for other settings reads.
+                      ...(isPdf ? { costFacts: documentCostStats(winningCandidate.layoutFacts, document.pageCount, providerCostEvidence(winningCandidate.pageFacts, new Map((splitTextIntoPagesStrict(winningText, document.pageCount) ?? []).map((text, index) => [index + 1, text])), document.pageCount), sourceLexical) } : {}),
                       ...ocrReadStats(ocrReadPages, winningCandidate.ocrPages ? "extractor-reported" : "inferred", scanFill?.pages ?? [], ocrFailedPages(state.artifactLedger, document.id).size),
                     },
                   };
@@ -1426,8 +1431,8 @@ export class ExtractMarkdownStage implements Stage {
       pushPerfMetric({ metric: "ocr-pages-refused", value: 1, unit: "count", tags: ["ocr", "no-page-breaks"], metadata: { documentId: document.id } });
       return null;
     }
-    const hasWords = (text: string | undefined) => /[\p{L}\p{N}]/u.test(ocrLedgerPageText(text ?? ""));
-    const empty = split.map((text, index) => (hasWords(text) ? 0 : index + 1)).filter((page) => page > 0);
+    const hasWords = ocrPageHasWords;
+    const empty = scanFillPageNumbers(split)!;
     if (empty.length === 0) return null;
     const mode = resolveOcrMode();
     if (mode === "off" || mode === "hosted") {
@@ -2177,7 +2182,7 @@ export class ExtractMarkdownStage implements Stage {
       ...(ocrPages ? { ocrPages: [...ocrPages] } : {}),
       ...(layoutFacts ? { layoutFacts, ...(layoutFactsSource ? { layoutFactsSource } : {}) } : {}),
       ...(layoutWalkerUnknown ? { layoutWalkerUnknown } : {}),
-      ...(layoutGrids && (layoutGrids.fromFacts > 0 || layoutGrids.unknown > 0 || layoutGrids.filled > 0) ? { layoutGrids } : {}),
+      ...(layoutGrids ? { layoutGrids } : {}),
       ...(pageFacts ? { pageFacts } : {}),
       ...(plan.sandboxedPdf?.figures && figureOutcome ? { figures: { dir: plan.sandboxedPdf.figures.dir, outcome: figureOutcome, ...(plan.sandboxedPdf.figures.charts ? { charts: true } : {}) } } : {}),
     };
