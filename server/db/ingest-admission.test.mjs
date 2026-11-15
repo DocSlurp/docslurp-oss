@@ -8,10 +8,8 @@ test('drain is read-only under ownership lock; resume checks drain before reopen
 test('invalid requests and query failures fail closed',async()=>{await assert.rejects(admission(client(),'resume','bad'));await assert.rejects(admission({query:async()=>{throw Error('offline');}},'pause','deploy-12345'));});
 
 test('database triggers fence all tenants, sessions and run readmission while allowing existing work to finish', async()=>{
- const { createRequire } = await import('node:module');
  const { readFileSync } = await import('node:fs');
- const require = createRequire(new URL('../../worker/package.json',import.meta.url));
- const { PGlite } = require('@electric-sql/pglite');
+ const { PGlite } = await import('@electric-sql/pglite');
  const db = new PGlite();
  try {
   await db.exec("CREATE TABLE project_runs(id text, status text); CREATE TABLE documents(id text); CREATE TABLE upload_sessions(id text);");
