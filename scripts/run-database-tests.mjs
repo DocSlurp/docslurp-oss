@@ -161,7 +161,11 @@ export function environmentReads(source) {
   let changed = true;
   const bind = (name, parts) => {
     if (!parts) return;
+    // Destructuring projects a container property into a possible environment.
+    // Retain that provenance before the ordinary property-path depth cutoff.
+    if (parts[0] === "env-container" && parts.length > 2) parts = ["unknown-env"];
     record(parts);
+    if (parts[0] === "unknown-env") parts = ["unknown-env"];
     if (parts.length > 2) return;
     if (ts.isIdentifier(name)) {
       const id = symbol(name);

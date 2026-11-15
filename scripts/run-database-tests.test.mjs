@@ -228,3 +228,22 @@ test("conservative provenance covers stores, alternate returns and write targets
     'const box = {}; box.env = {}; box.env.OTHER_DATABASE_URL',
   ]) assert.deepEqual(classifyTestSource(source), {db:false, redis:false, other:[]}, source);
 });
+
+
+test("container destructuring retains possible environment provenance", () => {
+  for (const setup of [
+    'const {env} = {env: process.env}',
+    'let env; ({env} = {env: process.env})',
+    'const box = {env: process.env}; const {env} = box',
+    'const box = {env: process.env}; let env; ({env} = box)',
+    'function f(){return {env:process.env}} const {env} = f()',
+    'const {env} = {safe:process, env:process.env}',
+    'const {env:{nested:env}} = {env:process.env}',
+  ]) {
+    for (const gate of ["OTHER_DATABASE_URL", "TEST_DATABASE_URL", "TEST_REDIS_URL"]) {
+      const result = classifyTestSource(`${setup}; env.${gate}`);
+      assert.ok(result.other.includes("<unresolved environment access>") || (gate === "TEST_DATABASE_URL" ? result.db : gate === "TEST_REDIS_URL" ? result.redis : result.other.includes(gate)), `${setup}; env.${gate}`);
+    }
+    assert.deepEqual(classifyTestSource(`${setup}; configure(env)`), {db:false, redis:false, other:[]}, setup);
+  }
+});
