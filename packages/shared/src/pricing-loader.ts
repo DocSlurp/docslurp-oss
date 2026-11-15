@@ -116,6 +116,8 @@ export const RUNTIME_SECURITY_DEFINER_ALLOWLIST: readonly string[] = Object.free
   "public.realtime_search_session_changed()",
   "public.realtime_materialization_changed()",
   "public.realtime_compact_revisions(text)",
+  // Trigger-only deploy fence: EXECUTE and its private schema remain revoked from runtime roles.
+  "docslurp_deploy.check_ingest_admission()",
 ]);
 
 /**
@@ -229,7 +231,7 @@ export const RUNTIME_IDENTITY_SQL = `
       else (select bool_or(has_function_privilege(h.oid, 'public.pricing_state_raise(text, bigint)', 'EXECUTE')) from held h) end as raises_state,
     coalesce((select string_agg(distinct p.oid::regprocedure::text, ',' order by p.oid::regprocedure::text) from pg_proc p
       where p.prosecdef and p.pronamespace not in (select oid from system_ns) and p.oid not in (select objid from extension_members)
-        and not (p.oid = any (array(select to_regprocedure(a) from unnest($2::text[]) a where to_regprocedure(a) is not null)))
+        and not ((select quote_ident(n.nspname) from pg_namespace n where n.oid = p.pronamespace) || '.' || quote_ident(p.proname) || '(' || oidvectortypes(p.proargtypes) || ')' = any ($2::text[]))
         and (exists (select 1 from held h where has_function_privilege(h.oid, p.oid, 'EXECUTE'))
           or exists (select 1 from pg_trigger t where t.tgfoid = p.oid and t.tgrelid in (select oid from touched)))), '') as definer_functions,
     case when (select oid from state) is null then ''
