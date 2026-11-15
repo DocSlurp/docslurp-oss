@@ -28,6 +28,7 @@ export default defineConfig({
       "@docslurp/shared/observability": path.resolve(__dirname, "../packages/shared/src/observability.ts"),
       "@docslurp/shared/lancedb-s3-cache": path.resolve(__dirname, "../packages/shared/src/lancedb-s3-cache.ts"),
       "@docslurp/shared/lancedb-s3-trace": path.resolve(__dirname, "../packages/shared/src/lancedb-s3-trace.ts"),
+      "@docslurp/shared/lancedb-query-tuning": path.resolve(__dirname, "../packages/shared/src/lancedb-query-tuning.ts"),
       "@docslurp/shared/lancedb-session": path.resolve(__dirname, "../packages/shared/src/lancedb-session.ts"),
       "@docslurp/shared/lancedb-hydration": path.resolve(__dirname, "../packages/shared/src/lancedb-hydration.ts"),
       "@docslurp/shared/lancedb-ddb": path.resolve(__dirname, "../packages/shared/src/lancedb-ddb.ts"),

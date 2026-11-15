@@ -1,3 +1,4 @@
+# Requires Python >=3.11.5 for the security-fixed selector dependency.
 beautifulsoup4
 ebooklib
 openpyxl

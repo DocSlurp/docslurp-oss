@@ -63,6 +63,7 @@ import { enforceRunSpend, enforceRunSpendForCharge, largestFundedCharge, pauseRu
 import { retryTransaction } from "./transaction-retry.js";
 import { consumeRunCreditLease, creditLeasesActive, RunCreditLeases, type LeaseObservation } from "./credit-lease.js";
 import { PostgresVisionAttemptBackend } from "./vision-attempt-store.js";
+import { PostgresPageReaderOrgBudget } from "../ocr/page-reader-budget.js";
 import { assertParseSourceRecord, bindDocumentUpload, PARSE_SOURCE_SCAN_VERSION, resolveDocumentSource, type ParseSourceDecisionRecord, type ResolvedDocumentSource } from "../lib/parse-source.js";
 import {
   lexicalColumnProbe,
@@ -2696,6 +2697,14 @@ export class Store {
   get visionAttempts(): PostgresVisionAttemptBackend {
     this.visionAttemptBackend ??= new PostgresVisionAttemptBackend(this.sql);
     return this.visionAttemptBackend;
+  }
+
+  private pageReaderBudgetBackend: PostgresPageReaderOrgBudget | null = null;
+
+  /** The page reader's fleet-wide org daily spend ledger (ocr/page-reader-budget.ts, migration 0163). */
+  get pageReaderBudget(): PostgresPageReaderOrgBudget {
+    this.pageReaderBudgetBackend ??= new PostgresPageReaderOrgBudget(this.sql);
+    return this.pageReaderBudgetBackend;
   }
 
   /** Reserves a document's share of the run's Fast page-image render budget, shared by every worker (fast-page-image-budget.ts). */
