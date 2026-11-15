@@ -402,7 +402,7 @@ export function createPrivateEndpointFetch(
         body = JSON.stringify({ ...parsed, chat_template_kwargs: { ...options.chatTemplateKwargs, ...existing } });
       } catch { /* Not JSON: send unchanged. */ }
     }
-    return await baseFetch(input, { ...init, headers, body });
+    return await baseFetch(input, { ...init, headers, body, redirect: "error" });
   }) as typeof fetch;
 }
 
