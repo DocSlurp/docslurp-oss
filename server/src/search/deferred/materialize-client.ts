@@ -1,4 +1,4 @@
-import { pageCredits, sanitizeStoredPipeline, parseManagedPipelineOverrides, resolveManagedPipeline } from "@docslurp/shared";
+import { pageCredits, speedBoostMultiplier, sanitizeStoredPipeline, parseManagedPipelineOverrides, resolveManagedPipeline } from "@docslurp/shared";
 import { stampRunChartExport } from "../../services/chart-export-availability.js";
 import type { PipelineFeatures } from "@docslurp/shared";
 import { randomUUID } from "node:crypto";
@@ -17,6 +17,7 @@ import { startMaterializeWorkflow } from "../../lib/temporal.js";
 import { assertCanSpend, canSpend, isSpendBlockedError } from "../../services/billing/spend-guard.js";
 import { enforceLiveBudgetCaps } from "../../services/run-creation.js";
 import { storedSummaryTree, withProjectSummaryTree } from "../../services/run-summary-tree.js";
+import { createMaterializationPlan, materializationForecast } from "../../services/materialization-capacity.js";
 import type { MaterializeEvent } from "./deferred-context.js";
 
 export const MATERIALIZE_POLL_MS = 250;
@@ -83,7 +84,9 @@ export const defaultMaterializeDeps: MaterializeDeps = {
     if (!Number.isSafeInteger(args.pages) || args.pages < 1 || !Number.isFinite(maxCredits) || maxCredits <= 0) {
       throw new Error("Invalid bounded materialization workload");
     }
-    const reservationCents = Math.max(1, Math.ceil(Math.max(maxCredits, args.pages * pageCredits("rich", 1))));
+    return acceptChatRunDependency({ ...args, pages: args.pageNumbers ?? [] }, async tx => {
+    await tx`select pg_advisory_xact_lock(spend_admission_lock_key(${args.orgId}))`;
+    const plan = await createMaterializationPlan(tx as import("postgres").TransactionSql, args);
     // The run carries the source document's pipeline (its ingest run, else the project's), so the
     // worker applies the same PII policy, privacy mode and embedding model as the original ingest.
     // It is inserted `processing` with a confirmed workflow start: run-start recovery and the stale
@@ -92,13 +95,12 @@ export const defaultMaterializeDeps: MaterializeDeps = {
     // so the stale-lease alerts and health counts flag a materialize run only when its worker really died.
     // The stored source pipeline may predate the strict extractor schemas: drop what they reject (a Dolphin
     // repoPath, an unknown extractor id) before it is copied into the new run, as every other run path does.
-    const [source] = await sql<{ pipeline: Record<string, unknown> | null; managed: unknown; origin: string | null; summary_tree: unknown }[]>`
+    const [source] = await tx<{ pipeline: Record<string, unknown> | null; managed: unknown; origin: string | null; summary_tree: unknown }[]>`
       select coalesce(nullif(r.pipeline, '{}'::jsonb), nullif(w.pipeline, '{}'::jsonb), '{}'::jsonb) as pipeline,
         w.managed_models -> 'pipeline' as managed, r.origin, w.pipeline -> 'summaryTree' as summary_tree
-      from (select 1) one
-      left join documents d on d.id = ${args.documentId} and d.project_id = ${args.projectId}
-      left join project_runs r on r.id = d.run_id and r.project_id = ${args.projectId}
-      left join projects w on w.id = ${args.projectId}
+      from documents d join projects w on w.id=d.project_id and w.org_id=d.org_id
+      left join project_runs r on r.id = d.run_id and r.project_id = d.project_id and r.org_id=d.org_id
+      where d.id=${args.documentId} and d.org_id=${args.orgId} and d.project_id=${args.projectId}
     `;
     // Its model values are history, never configuration: the project's explicit overrides and current defaults apply.
     const resolved = resolveManagedPipeline(
@@ -114,13 +116,13 @@ export const defaultMaterializeDeps: MaterializeDeps = {
       storedSummaryTree({ summaryTree: source?.summary_tree }),
     );
     const origin = source?.origin === "app" ? "app" : "machine";
-    return acceptChatRunDependency({ ...args, pages: args.pageNumbers ?? [] }, async tx => {
+    const reservationCents = materializationForecast(plan.pages.length, maxCredits * speedBoostMultiplier(pipeline.speedBoost), pipeline.speedBoost === true);
     await assertCanSpend(args.orgId, args.projectId, { client: tx, kind: "interactive", hold: false });
     await tx`
-      insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, total_documents, pages_total, pipeline, workflow_started_at, lease_expires_at, creation_ready_at, creation_expires_at, origin, monthly_reservation_cents)
+      insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, total_documents, pages_total, pipeline, workflow_started_at, lease_expires_at, creation_ready_at, creation_expires_at, origin, stats, monthly_reservation_cents)
       values (${id}, ${args.orgId}, ${args.userId}, ${args.projectId}, 'materialize', 'processing', 'materialize',
              ${args.documents}, ${args.pages}, ${tx.json(pipeline as never)}, now(),
-             now() + interval '15 minutes', now(), null, ${origin}, ${reservationCents})
+             now() + interval '15 minutes', now(), null, ${origin}, ${tx.json({ materialization: plan })}, ${reservationCents})
     `;
     return { runId: id, value: id };
     });

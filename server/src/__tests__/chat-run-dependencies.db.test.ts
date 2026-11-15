@@ -22,8 +22,8 @@ beforeAll(async () => {
   await sql`insert into "user"(id,name,email) values('u','U','u@example.test')`;
   await sql`insert into organizations(id,name,slug,created_by_user_id,credit_balance_cents) values('o','O','o','u',1000)`;
   await sql`insert into projects(id,org_id,user_id,name) values('w','o','u','W')`;
-  await sql`insert into documents(id,org_id,user_id,project_id,filename,mime_type,source_key,status)
-    values('d','o','u','w','d.pdf','application/pdf','private','completed')`;
+  await sql`insert into documents(id,org_id,user_id,project_id,filename,mime_type,source_key,status,page_count,billing_pages,page_count_source)
+    values('d','o','u','w','d.pdf','application/pdf','private','completed',1,1,'counted')`;
 },120000);
 beforeEach(async()=>{allowed=true;
   await sql`delete from session`;
