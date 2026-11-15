@@ -59,8 +59,8 @@ async function seedDocument(id: string, pipeline: object) {
     insert into project_runs (monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
     values (100, ${runId}, 'o', 'u', 'w', 'bulk-upload', 'completed', 'completed', ${sql.json(pipeline as postgres.JSONValue)}, 1, 2)`;
   await sql`
-    insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count)
-    values (${id}, 'o', 'u', 'w', ${runId}, ${`${id}.pdf`}, 'application/pdf', ${`u/raw/${id}.pdf`}, 'completed', 2)`;
+    insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, file_size, page_count)
+    values (${id}, 'o', 'u', 'w', ${runId}, ${`${id}.pdf`}, 'application/pdf', ${`u/raw/${id}.pdf`}, 'completed', 1000, 2)`;
 }
 
 describe("bulkReprocessDocuments", () => {

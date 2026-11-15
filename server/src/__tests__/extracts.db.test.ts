@@ -422,7 +422,7 @@ describe("extract sweep", () => {
       const creation = createRunCreation({ sql: sql as never, start: async () => ({ status: "started" }) as never });
       await expect(creation.create({
         userId: "u", projectId: "w", kind: "direct-upload", pipeline: {} as never, extract,
-        sources: { kind: "files", files: [{ filename: "r.pdf", mimeType: "application/pdf", sourceKey: `${extract.storagePrefix}/raw/r.pdf` }] },
+        sources: { kind: "files", files: [{ filename: "r.pdf", mimeType: "application/pdf", sourceKey: `${extract.storagePrefix}/raw/r.pdf`, fileSize: 1000 }] },
       })).rejects.toMatchObject({ status: 410, code: "extract_expired" });
     } finally {
       vi.unstubAllEnvs();
