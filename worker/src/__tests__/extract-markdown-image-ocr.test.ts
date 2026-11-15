@@ -69,6 +69,12 @@ async function harness(args: {
   const objects = new Map<string, Buffer>();
   const manifests = new Map<string, any>();
   const storage = {
+    getBytes: async (key: string) => {
+      const value = objects.get(key);
+      if (!value) throw Object.assign(new Error("missing"), { name: "NoSuchKey" });
+      return value;
+    },
+    deleteKeys: async (keys: string[]) => { keys.forEach(key => objects.delete(key)); },
     uri: (key: string) => `s3://test/${key}`,
     putBytes: async (key: string, data: Uint8Array) => {
       const failure = args.putFails?.(key);
@@ -648,12 +654,15 @@ describe("scanned PDF pages are filled by the OCR engine", () => {
       expect(error).toMatchObject({ code: "ECONNRESET" });
       expect(error?.name).not.toBe("DocumentStageError");
       expect(h.checkpoint()?.status).not.toBe("failed");
+      expect([...h.objects.keys()].some(key => key.includes("/ocr-retry/"))).toBe(true);
       const firstIds = h.richIds();
       expect(firstIds).toEqual(["rich:run-1:doc-1:2", "rich:run-1:doc-1:3"]);
       // The activity's retry: the same document again, the same pages read, the same charge ids (the ledger keeps one each).
       await h.stage.run(h.state);
       expect(h.checkpoint()?.status).toBe("completed");
       expect(new Set(h.richIds())).toEqual(new Set(firstIds));
+      expect([...h.objects.keys()].some(key => key.includes("/ocr-retry/"))).toBe(false);
+      expect(h.jobs).toHaveLength(1);
       expect(h.text().some((text) => text === "Native page\fScan 2\fScan 3")).toBe(true);
     } finally { await h.cleanup(); }
   });
