@@ -22,6 +22,7 @@ export default defineConfig({
       "@docslurp/shared/page-table-routing": shared("page-table-routing"),
       "@docslurp/worker/testing": resolve(__dirname, "../worker/src/testing.ts"),
       "@docslurp/shared/cancellation": shared("cancellation"),
+      "@docslurp/shared/page-table-routing": shared("page-table-routing"),
       "@docslurp/shared/pricing-loader": shared("pricing-loader"),
       "@docslurp/shared/error-reporting": shared("error-reporting"),
       "@docslurp/shared/error-response": shared("error-response"),
