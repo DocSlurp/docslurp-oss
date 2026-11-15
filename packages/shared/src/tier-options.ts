@@ -188,3 +188,47 @@ export function selectOcrRoute(tier: RouteTier, available: OcrRouteAvailability,
   const hosted = eligible.find((option) => option.reader === "hosted-escalation");
   return hosted ? { optionId: hosted.id, pageReader: "off", hostedEscalation: true } : fallback;
 }
+
+/**
+ * Plain page transcription in vision-extract (a transcription prompt, no output schema, no task prompt): whether the
+ * registered page image reader plugin (extractors/plugins.ts pageImageReader, in its own isolated VM) reads those pages
+ * in place of the run's hosted vision route. Same vocabulary and rule as above: the reader's score is the provider's own
+ * composite on the page-OCR tier benchmark (tolerant-markdown@v1 `content`), compared with the best measured hosted
+ * page-ocr option of TIER_OPTIONS. An unmeasured reader is never chosen by a tier.
+ *
+ * - fastest: the reader (an isolated GPU VM reads a page faster and at more pages per $1 than a hosted request).
+ * - balanced: the reader when its composite is within VISION_PAGE_READER_BALANCED_MARGIN of the best hosted option.
+ * - smart: the reader only when its composite is at least the best hosted option's.
+ *
+ * The hosted route stays the fallback for every page the reader does not return, and keeps every page that is not plain
+ * transcription (schemas, task prompts, figure and chart pages, critique passes).
+ */
+export const VISION_PAGE_READER_BALANCED_MARGIN = 0.02;
+
+export interface VisionTranscriptionRoute {
+  readonly optionId: string;
+  readonly pageReader: boolean;
+}
+
+export function bestHostedPageOcrScore(options: readonly TierOption[] = TIER_OPTIONS): number | null {
+  const scores = options
+    .filter((option) => option.capability === "page-ocr" && typeof option.evalScore === "number" && Number.isFinite(option.evalScore))
+    .map((option) => option.evalScore as number);
+  return scores.length ? Math.max(...scores) : null;
+}
+
+export function selectVisionTranscriptionRoute(
+  tier: RouteTier,
+  available: { readonly pageReader: { readonly evalScore: number | null } | null },
+  options: readonly TierOption[] = TIER_OPTIONS,
+): VisionTranscriptionRoute {
+  const hosted: VisionTranscriptionRoute = { optionId: "vision-transcription/hosted", pageReader: false };
+  const measured = available.pageReader?.evalScore;
+  if (typeof measured !== "number" || !Number.isFinite(measured) || measured < 0 || measured > 1) return hosted;
+  const reader: VisionTranscriptionRoute = { optionId: "vision-transcription/page-reader", pageReader: true };
+  if (tier === "fastest") return reader;
+  const best = bestHostedPageOcrScore(options);
+  if (best === null) return tier === "balanced" ? reader : hosted;
+  if (tier === "balanced") return measured >= best - VISION_PAGE_READER_BALANCED_MARGIN ? reader : hosted;
+  return measured >= best ? reader : hosted;
+}

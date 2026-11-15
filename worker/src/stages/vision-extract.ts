@@ -102,6 +102,9 @@ import { deterministicSourceKind } from "../chart-export/vm-extractor.js";
 import chartSharp from "../tools/isolated-image.js";
 import type { DocumentStageResult } from "../pipeline/checkpoints.js";
 import { sanitizeVisionPageTables } from "../pipeline/vision-tables-vm.js";
+import type { PageImageReaderProvider } from "../extractors/plugins.js";
+import { ocrPageReaderMaxPages, ocrPageReaderOrgDailyMaxCostCents, readPageImagesWithProvider, type PageImageInput } from "../ocr/page-reader.js";
+import { VISION_PAGE_READER_METRIC, visionPageReaderFor } from "./vision-page-reader.js";
 
 export interface VisionPageOutput {
   pageNumber: number;
@@ -150,6 +153,11 @@ export interface LegacyPageHints {
    * budget of tableLeakPageCap(pages) distinct pages per document, so retries and restarts cannot widen the cap.
    */
   tableRescuePages?: ReadonlySet<number>;
+  /**
+   * Pages page triage routed as figure- or chart-bearing (`chart-or-figure`, `image-heavy`): the vision page reader, an
+   * OCR specialist that skips image insets, leaves them to the hosted route (vision-page-reader.ts).
+   */
+  figurePages?: ReadonlySet<number>;
 }
 
 export { VisionGuardStopError } from "../lib/vision-attempt-guard.js";
@@ -163,12 +171,14 @@ export function isVisionPageSkip(value: unknown): value is VisionPageSkip {
 const USABLE_FALLBACK_DENSITY = 0.02;
 
 export function legacyPageHints(pages: Array<{ pageNumber: number; textDensityScore: number; signals: string[];
-  ocrDecision?: { signals: string[] } }>): LegacyPageHints {
+  route?: string; ocrDecision?: { signals: string[] } }>): LegacyPageHints {
   const inkCheckPages = new Set<number>();
   const fallbackTextPages = new Set<number>();
   const vmOcrPages = new Set<number>();
   const tableRescuePages = new Set<number>();
+  const figurePages = new Set<number>();
   for (const page of pages) {
+    if (page.route === "chart-or-figure" || page.route === "image-heavy") figurePages.add(page.pageNumber);
     if (page.ocrDecision?.signals.includes(TABLE_LEAK_ONLY_SIGNAL)) tableRescuePages.add(page.pageNumber);
     if (page.ocrDecision?.signals.includes(DRAWN_CONTENT_SIGNAL)) inkCheckPages.add(page.pageNumber);
     if (page.ocrDecision?.signals.includes(MIXED_SCAN_IMAGE_SIGNAL)) vmOcrPages.add(page.pageNumber);
@@ -176,7 +186,7 @@ export function legacyPageHints(pages: Array<{ pageNumber: number; textDensitySc
       fallbackTextPages.add(page.pageNumber);
     }
   }
-  return { inkCheckPages, fallbackTextPages, vmOcrPages, tableRescuePages };
+  return { inkCheckPages, fallbackTextPages, vmOcrPages, tableRescuePages, figurePages };
 }
 
 /** Errors whose vision attempt `recordFailedVisionAttempt` already recorded (once per call). */
@@ -238,6 +248,9 @@ export class VisionExtractStage implements Stage {
         }
         continue;
       }
+      // Plain transcription read by the vision page reader: run() reads the document's pages in batched reader jobs (one
+      // job per page would pay the reader's per-job admission and reservation for every page).
+      if (document.mimeType === "application/pdf" && visionPageReaderFor(state, vision)) continue;
       const routing = await this.checkNeedsVision(document, maxInt(1, document.pageCount), state, signal);
       checkpoint();
       if (!routing.needed) continue;
@@ -1290,6 +1303,20 @@ export class VisionExtractStage implements Stage {
       if (rest.length === 0) return completed.sort((a, b) => a.pageNumber - b.pageNumber);
       missing.splice(0, missing.length, ...rest);
     }
+    // Plain page transcription goes to the vision page reader first (vision-page-reader.ts); the pages it does not return
+    // continue to the hosted route below, unchanged.
+    const pageReader = document.mimeType === "application/pdf" ? visionPageReaderFor(state, vision) : null;
+    if (pageReader) {
+      const readerPages = missing.filter((page) => !hints.inkCheckPages.has(page) && !hints.tableRescuePages?.has(page) && !hints.figurePages?.has(page));
+      if (readerPages.length > 0) {
+        const read = await this.readPagesWithPageReader(state, document, pageReader, readerPages, signal);
+        completed.push(...read);
+        const done = new Set(read.map((output) => output.pageNumber));
+        const rest = missing.filter((page) => !done.has(page));
+        if (rest.length === 0) return completed.sort((a, b) => a.pageNumber - b.pageNumber);
+        missing.splice(0, missing.length, ...rest);
+      }
+    }
     // A vision model trained on a set page size gets PDF pages rendered no larger (the renderer lowers each page's DPI
     // from its point size). Raster uploads go as uploaded: resizing one would decode it, which only an isolated
     // provider may do.
@@ -1416,6 +1443,81 @@ export class VisionExtractStage implements Stage {
         error: message,
       },
     });
+  }
+
+  /**
+   * Read plain-transcription PDF pages with the vision page reader (vision-page-reader.ts), in jobs of the provider's page
+   * cap: each batch rendered at the reader's long edge, downloaded to temp files and sent under the run's tenant scope by
+   * readPageImagesWithProvider (budget, caps, validation, usage, Rich page charge). Returns the pages it read; every other
+   * page is the caller's, for the hosted route. Never fails the document: a render, download or reader error is logged and
+   * its pages go hosted. Only an abort propagates.
+   */
+  private async readPagesWithPageReader(
+    state: WorkflowState,
+    document: import("../models.js").Document,
+    provider: PageImageReaderProvider,
+    pages: number[],
+    signal?: AbortSignal,
+  ): Promise<VisionPageOutput[]> {
+    const outputs: VisionPageOutput[] = [];
+    const maxLongEdgePx = provider.maxLongEdgePx;
+    let maxPages: number;
+    let orgDailyMaxCostCents: number;
+    try {
+      maxPages = ocrPageReaderMaxPages();
+      orgDailyMaxCostCents = ocrPageReaderOrgDailyMaxCostCents();
+    } catch (error) {
+      console.error(`[vision-extract] page-reader configuration invalid document=${document.id}; pages go hosted: ${toError(error).message.slice(0, 300)}`);
+      return outputs;
+    }
+    for (let start = 0; start < pages.length; start += provider.maxPagesPerJob) {
+      signal?.throwIfAborted();
+      const batch = pages.slice(start, start + provider.maxPagesPerJob);
+      const temps: string[] = [];
+      try {
+        const rasters = await this.rasters.renderSelectedPages({
+          document, runId: state.run.id, pageNumbers: batch, ...(maxLongEdgePx !== undefined ? { maxLongEdgePx } : {}), signal,
+        });
+        const inputs: Array<PageImageInput & { artifactUri: string }> = [];
+        for (const raster of rasters) {
+          if (raster.mimeType !== "image/png" || !batch.includes(raster.pageNumber)) continue;
+          const imagePath = await this.storage.downloadToTempFile(raster.artifactKey, trustedTempDownloadPattern("docslurp-vision-reader-", document));
+          temps.push(imagePath);
+          inputs.push({ pageNumber: raster.pageNumber, imagePath, artifactUri: raster.artifactUri });
+        }
+        const started = Date.now();
+        const read: Array<PageImageInput & { artifactUri: string }> = [];
+        await readPageImagesWithProvider(inputs, provider, {
+          state, documentId: document.id, mode: "all", maxPages, orgDailyMaxCostCents, ...(signal ? { signal } : {}),
+        }, {
+          metric: VISION_PAGE_READER_METRIC,
+          logTag: "[vision-extract] page-reader",
+          ...(maxLongEdgePx !== undefined ? { maxLongEdgePx } : {}),
+          // Kept as soon as it is validated: a later error in this batch never sends a read page to the hosted route too.
+          onRead: (page, result) => {
+            read.push(page as PageImageInput & { artifactUri: string });
+            outputs.push({
+              pageNumber: page.pageNumber, runtime: "page-reader", model: provider.model, prompt: "", baseUrl: null,
+              latencyMs: Date.now() - started, inputTokens: result.inputTokens, outputTokens: result.outputTokens,
+              usageSource: "page-reader", fallbackUsed: false, fallbackReason: null, text: result.text,
+              // Provider cost is on the usage ledger (vision-page-reader, 0 credits); the page's charge is its Rich page.
+              costCents: 0,
+            });
+          },
+        });
+        for (const page of read) {
+          state.artifactLedger.recordDocument(document.id, `page-${page.pageNumber}`, page.artifactUri);
+          await emitDocumentPageProgress(state, document, this.name, page.pageNumber, pages.length, "completed");
+        }
+      } catch (error) {
+        if (signal?.aborted) throw error;
+        console.error(`[vision-extract] page-reader batch error document=${document.id} pages=${batch.join(",")}; unread pages go hosted: ${toError(error).message.slice(0, 300)}`);
+      } finally {
+        for (const temp of temps) await cleanupTempFile(temp);
+      }
+    }
+    console.log(`[vision-extract] page-reader document=${document.id} read=${outputs.length}/${pages.length} provider=${provider.id}`);
+    return outputs;
   }
 
   /**

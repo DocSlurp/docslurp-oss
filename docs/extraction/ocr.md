@@ -184,6 +184,33 @@ cost cap is checked before each job. Each job logs
 `[ai-usage] ocr-page-reader model=<model> input_tokens=<n> output_tokens=<n>`, and once per document
 `[ocr] page-reader document=... attempted=... replaced=... failed={...} skipped={...}`.
 
+## Vision page reader
+
+The same page image reader can also read vision-extract's plain page transcription, the pages a hosted vision model
+would otherwise transcribe (`DOCSLURP_VISION_PAGE_READER`, off by default):
+
+- `all` sends them to the reader. A tier word (`fastest`, `balanced`, `smart`) is resolved by `selectVisionTranscriptionRoute`
+  (`packages/shared/src/tier-options.ts`) against the reader's `evalScore` and the best measured hosted page-ocr option:
+  `fastest` picks any measured reader, `balanced` one within 0.02 of the best hosted composite, `smart` only one at or
+  above it. An unmeasured reader is never picked. With the flag on and no ready provider, the worker refuses to start.
+- Only plain transcription is sent: a transcription prompt template, no output schema, no task prompt, on a PDF page the
+  renderer wrote as PNG, in a `standard` privacy project whose configured vision route is hosted (not `local-cli` and not
+  an operator-private model). Schema and task-prompt reads, pages triage routed as `chart-or-figure` or `image-heavy`,
+  drawn-content and table-rescue pages, routed (page router) pages, raster uploads, `local-only` and `strict-privacy`
+  projects keep the hosted route. A run without an organization sends nothing.
+- Pages render at the provider's `maxLongEdgePx` and go in jobs of at most `maxPagesPerJob`, one run of one organization
+  per job, with the same PNG checks (signature, byte cap, header size within the long edge and 40 million pixels, never
+  decoded), response validation, per-document page budget (`DOCSLURP_OCR_PAGE_READER_MAX_PAGES`, shared with the OCR
+  reader) and organization daily cost cap (`DOCSLURP_OCR_PAGE_READER_ORG_DAILY_MAX_COST_CENTS`, one ledger for both).
+  Documents the reader reads are not fanned out into one-page tasks, so their pages share jobs.
+- A page the reader does not return (a failed, refused or timed-out job, a failed page, empty or invalid Markdown, a
+  refused image, the budget or a cap, a render or download error) goes to the run's hosted vision route as it would
+  without the reader. That route is the run's own configured model, never one the system picks as a fallback.
+- Usage: `[ai-usage] vision-page-reader model=<model> input_tokens=<n> output_tokens=<n>` per job, provider cost on the
+  ledger at 0 credits; each page read is one Rich page, charged once per run.
+- The reader's Markdown passes through vision-extract's own post-processing: HTML tables are rebuilt in the parser VM and
+  `$...$` / `$$...$$` math is kept, the conventions the hosted transcription prompts ask for.
+
 ## Billing and usage
 
 - An uploaded image: every frame the engine read is one Rich page read, metric `page-ocr`, with or without text in it
@@ -282,6 +309,7 @@ not install unstructured at all; it comes with the `unstructured` vendor bundle.
 | `DOCSLURP_OCR_PAGE_READER` | `off` | `escalation` or `all` to read pages with the page image reader plugin first, or a tier word (`fastest`, `balanced`, `smart`) resolved by the OCR route options (see [Page reader](#page-reader)). |
 | `DOCSLURP_OCR_PAGE_READER_ORG_DAILY_MAX_COST_CENTS` | `2000` | Reader provider cost one organization may commit per UTC day, across workers (0 to 10000000; 0 sends nothing). |
 | `DOCSLURP_OCR_PAGE_READER_MAX_PAGES` | `2000` | Most pages one document sends to the page reader (0 to 20000). |
+| `DOCSLURP_VISION_PAGE_READER` | `off` | `all` to read vision-extract's plain page transcription with the page image reader plugin, or a tier word (`fastest`, `balanced`, `smart`); see [Vision page reader](#vision-page-reader). |
 | `DOCSLURP_OCR_MAX_ATTEMPTS` | `3` | Recogniser attempts per page under `auto` (1 to 7). |
 | `DOCSLURP_OCR_LANGUAGE` | `auto` | Default language for projects left on `auto`. |
 | `DOCSLURP_OCR_MAX_LONG_EDGE` | `2000` | Long-edge cap in pixels (640 to 4000). Above 2000 is an explicit opt-in (see [Sizing](#sizing)). |

@@ -2,7 +2,7 @@
  * Page reader configuration (page-reader.ts): the operator flag, the per-document page budget and the startup check.
  * Kept apart from the reader so the OCR mode check (mode.ts) can run it without importing the pipeline.
  */
-import { ROUTE_TIERS, type RouteTier, selectOcrRoute } from "@docslurp/shared";
+import { ROUTE_TIERS, type RouteTier, selectOcrRoute, selectVisionTranscriptionRoute } from "@docslurp/shared";
 
 import { pageImageReaderProvider } from "../extractors/plugins.js";
 import type { OcrMode } from "./mode.js";
@@ -99,5 +99,59 @@ export function assertOcrPageReaderConfiguration(env: NodeJS.ProcessEnv, ocrMode
   const raw = env.DOCSLURP_OCR_PAGE_READER?.trim().toLowerCase() ?? "";
   const tier = (ROUTE_TIERS as readonly string[]).includes(raw) ? ` tier=${raw} option=${ocrPageReaderRoute(raw as RouteTier, env).optionId}` : "";
   console.log(`[ocr] page-reader mode=${mode}${tier} provider=${provider.id} maxPages=${maxPages} orgDailyMaxCostCents=${orgDailyMaxCostCents}`);
+  return mode;
+}
+
+/*
+ * Vision page reader (DOCSLURP_VISION_PAGE_READER): vision-extract's plain page transcription read by the same registered
+ * page image reader (vision-page-reader.ts). Shares the reader's per-document page budget and organization daily cost cap.
+ */
+export const VISION_PAGE_READER_MODES = ["off", "all"] as const;
+export type VisionPageReaderMode = (typeof VISION_PAGE_READER_MODES)[number];
+export const VISION_PAGE_READER_METRIC = "vision-page-reader";
+
+/**
+ * `DOCSLURP_VISION_PAGE_READER`: `off` (default, also unset) or `all`, or a tier word (`fastest`, `balanced`, `smart`)
+ * resolved by @docslurp/shared selectVisionTranscriptionRoute against the registered reader's measured eval composite.
+ * Throws on anything else.
+ */
+export function visionPageReaderMode(env: NodeJS.ProcessEnv = process.env): VisionPageReaderMode {
+  const raw = env.DOCSLURP_VISION_PAGE_READER?.trim().toLowerCase();
+  if (!raw) return "off";
+  if ((ROUTE_TIERS as readonly string[]).includes(raw)) return visionPageReaderRoute(raw as RouteTier).pageReader ? "all" : "off";
+  if (!(VISION_PAGE_READER_MODES as readonly string[]).includes(raw)) {
+    throw new Error(`DOCSLURP_VISION_PAGE_READER must be one of ${[...VISION_PAGE_READER_MODES, ...ROUTE_TIERS].join(", ")}; got ${JSON.stringify(raw)}`);
+  }
+  return raw as VisionPageReaderMode;
+}
+
+/** The vision transcription route a tier word selects for this deployment's registered reader. */
+export function visionPageReaderRoute(tier: RouteTier) {
+  const provider = pageImageReaderProvider();
+  return selectVisionTranscriptionRoute(tier, { pageReader: provider ? { evalScore: provider.evalScore ?? null } : null });
+}
+
+/**
+ * Startup check, run with the OCR mode check. Throws (the worker does not start) when the vision page reader is on but
+ * cannot run: an unknown value, no registered reader, or a reader that is not ready. A tier word that resolves to the
+ * hosted route is logged and starts.
+ */
+export function assertVisionPageReaderConfiguration(env: NodeJS.ProcessEnv): VisionPageReaderMode {
+  const raw = env.DOCSLURP_VISION_PAGE_READER?.trim().toLowerCase() ?? "";
+  const mode = visionPageReaderMode(env);
+  const tier = (ROUTE_TIERS as readonly string[]).includes(raw) ? ` tier=${raw} option=${visionPageReaderRoute(raw as RouteTier).optionId}` : "";
+  if (mode === "off") {
+    if (tier) console.log(`[vision-extract] page-reader mode=off${tier}`);
+    return mode;
+  }
+  const provider = pageImageReaderProvider();
+  if (!provider) {
+    throw new Error(`DOCSLURP_VISION_PAGE_READER=${raw} needs a page image reader plugin (pageImageReader in DOCSLURP_EXTRACTOR_PLUGINS); refusing to start rather than read pages anywhere else`);
+  }
+  provider.assertConfigured();
+  console.log(
+    `[vision-extract] page-reader mode=${mode}${tier} provider=${provider.id} maxPages=${ocrPageReaderMaxPages(env)} ` +
+      `orgDailyMaxCostCents=${ocrPageReaderOrgDailyMaxCostCents(env)} maxLongEdgePx=${provider.maxLongEdgePx ?? "default"}`,
+  );
   return mode;
 }

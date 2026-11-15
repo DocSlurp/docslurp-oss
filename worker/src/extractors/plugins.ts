@@ -334,6 +334,12 @@ export interface PageImageReaderProvider {
   maxImageBytes: number;
   /** Largest Markdown (UTF-8 bytes) one page may return; a larger result fails the job. */
   maxMarkdownBytes: number;
+  /**
+   * Optional: the longest page-image edge, in pixels, the reader's model reads at (256..4000). vision-extract renders PDF
+   * pages for the reader at this size and refuses a PNG whose header reports a longer edge. Without it pages render at the
+   * renderer's default size.
+   */
+  maxLongEdgePx?: number;
   /** Throw when the deployment is not ready (unpinned image, missing endpoint). The worker then refuses to start. */
   assertConfigured(): void;
   /**
@@ -516,6 +522,9 @@ export function registerExtractorPlugin(plugin: ExtractorPlugin): void {
     }
     for (const name of ["assertConfigured", "read"] as const) {
       if (typeof reader[name] !== "function") throw new Error(`Page image reader provider lacks ${name}()`);
+    }
+    if (reader.maxLongEdgePx !== undefined && !(Number.isSafeInteger(reader.maxLongEdgePx) && reader.maxLongEdgePx >= 256 && reader.maxLongEdgePx <= 4000)) {
+      throw new Error("Page image reader provider's maxLongEdgePx must be an integer from 256 to 4000");
     }
     if (reader.estimateJobCostCents !== undefined && typeof reader.estimateJobCostCents !== "function") throw new Error("Page image reader provider's estimateJobCostCents must be a function");
     if (reader.evalScore !== undefined && !(typeof reader.evalScore === "number" && reader.evalScore >= 0 && reader.evalScore <= 1)) throw new Error("Page image reader provider's evalScore must be from 0 to 1");

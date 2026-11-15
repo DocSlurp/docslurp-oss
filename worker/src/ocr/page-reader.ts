@@ -37,7 +37,8 @@ import { ocrPageReaderMaxPages, ocrPageReaderMode, ocrPageReaderOrgDailyMaxCostC
 export * from "./page-reader-mode.js";
 
 export interface PageReaderSummary {
-  mode: Exclude<OcrPageReaderMode, "off">;
+  /** The reader's mode for this route (`escalation` / `all` for OCR, `all` for vision transcription). */
+  mode: string;
   provider: string;
   /** Pages sent to the provider. */
   attempted: number;
@@ -61,7 +62,7 @@ export interface PageReaderContext {
     pageReaderBudget?: PageReaderOrgBudget | null;
   };
   documentId: string;
-  mode: Exclude<OcrPageReaderMode, "off">;
+  mode: string;
   maxPages: number;
   /** Provider cost (cents) one organization's reader jobs may commit per UTC day (DOCSLURP_OCR_PAGE_READER_ORG_DAILY_MAX_COST_CENTS). */
   orgDailyMaxCostCents?: number;
@@ -70,6 +71,9 @@ export interface PageReaderContext {
 
 /** No page reports more tokens than this; a larger count is not a real read (a provider bug or a hostile VM). */
 export const MAX_PAGE_READER_TOKENS_PER_PAGE = 100_000;
+/** Longest edge and pixel count a page PNG may report when the host has no exact size to expect (a rendered page). */
+export const PAGE_READER_MAX_EDGE_PX = 10_000;
+export const PAGE_READER_MAX_PIXELS = 40_000_000;
 
 /** Markdown from the boundary without NUL and other C0 control characters (tab, newline and carriage return stay). */
 export function stripControlCharacters(text: string): string {
@@ -79,7 +83,7 @@ export function stripControlCharacters(text: string): string {
 
 /**
  * Pages of each document the reader has been sent in this worker, per run state (the per-document budget across the
- * document's OCR batches). Keyed by the run's usage ledger, so it lives exactly as long as the activity's state.
+ * document's OCR batches and vision reads). Keyed by the run's usage ledger, so it lives exactly as long as the activity's state.
  */
 const pagesSent = new WeakMap<object, Map<string, number>>();
 
@@ -156,6 +160,7 @@ function recordProviderUsage(
   events: unknown,
   provider: PageImageReaderProvider,
   ctx: PageReaderContext,
+  metric: string,
   details: { pages: number; outcome: "completed" | "failed" },
 ): { inputTokens: number; outputTokens: number; costCents: number } {
   const totals = { inputTokens: 0, outputTokens: 0, costCents: 0 };
@@ -176,7 +181,7 @@ function recordProviderUsage(
     const priced = priceAiUsageEvent({
       provider: typeof event.provider === "string" && SAFE_LABEL.test(event.provider) ? event.provider : `page-reader:${provider.id}`,
       model: provider.model,
-      metric: OCR_PAGE_READER_METRIC,
+      metric,
       amount: number(event.amount) || details.pages,
       unit: typeof event.unit === "string" && SAFE_LABEL.test(event.unit) ? event.unit : "page",
       costCents,
@@ -187,7 +192,7 @@ function recordProviderUsage(
         runId: run.id,
         ...(run.projectId ? { projectId: run.projectId } : {}),
         documentId: ctx.documentId,
-        purpose: OCR_PAGE_READER_METRIC,
+        purpose: metric,
         reader: provider.id,
         pages: details.pages,
         outcome: details.outcome,
@@ -204,49 +209,74 @@ function jobFailureReason(error: unknown): "job-refused" | "job-failed" {
   return (error as { ocrRefused?: unknown } | null)?.ocrRefused === true ? "job-refused" : "job-failed";
 }
 
-/** Which pages of `outcome` the reader should read, in page order. */
-function candidatePages(outcome: OcrReadOutcome): OcrPageRead[] {
-  return outcome.pages.filter((page) => page.image);
+/** One page image the host sends to the reader. */
+export interface PageImageInput {
+  pageNumber: number;
+  imagePath: string;
+  /** The exact size the host expects the PNG to report (the OCR boundary's frame). */
+  expect?: { width: number; height: number };
+}
+
+/** What a reader route (OCR or vision transcription) asks of the shared job loop. */
+export interface PageImageReadUse {
+  /** Usage event metric, `purpose`, Rich page `readBy` and `[ai-usage]` metric. */
+  metric: string;
+  /** Log line prefix, e.g. `[ocr] page-reader`. */
+  logTag: string;
+  /** Longest edge a PNG without `expect` may report (default PAGE_READER_MAX_EDGE_PX). */
+  maxLongEdgePx?: number;
+  /** Called for each page the reader returned non-empty, validated text for, before its Rich page charge. */
+  onRead(page: PageImageInput, read: { text: string; inputTokens: number; outputTokens: number }): void;
 }
 
 /**
- * Read the outcome's candidate pages with `provider`, replacing a page's text (in `outcome.pages`) when the reader returned
- * Markdown. Replaced pages leave hosted escalation candidacy; every other page is left as the recogniser read it.
+ * Send `pages` to `provider` in jobs of at most `maxPagesPerJob`, all under the run's explicit tenant scope (organization
+ * and run): never a job without an organization, never pages of another run. Each PNG is re-checked by signature, byte
+ * size and header size (never decoded); the per-document page budget, the run cost cap and the organization's daily reader
+ * spend admit each job. Every answer is validated whole; a page with text is handed to `use.onRead` and charged one Rich
+ * page. Pages not handed to `onRead` were not read, and the caller keeps its own fallback for them.
  */
-export async function readPagesWithProvider(outcome: OcrReadOutcome, provider: PageImageReaderProvider, ctx: PageReaderContext): Promise<PageReaderSummary> {
+export async function readPageImagesWithProvider(
+  pages: readonly PageImageInput[],
+  provider: PageImageReaderProvider,
+  ctx: PageReaderContext,
+  use: PageImageReadUse,
+): Promise<PageReaderSummary> {
   const summary: PageReaderSummary = {
     mode: ctx.mode, provider: provider.id, attempted: 0, replaced: 0, empty: 0, failed: {}, skipped: {}, jobs: 0, inputTokens: 0, outputTokens: 0,
   };
-  const candidates = candidatePages(outcome);
-  if (!candidates.length) return summary;
+  if (!pages.length) return summary;
   const run = ctx.state.run;
   // Never a call without an explicit tenant scope: the provider binds its VM to this organization.
   if (!run?.id || typeof run.orgId !== "string" || !run.orgId) {
-    bump(summary.skipped, "no-scope", candidates.length);
-    console.error(`[ocr] page-reader skipped document=${ctx.documentId} pages=${candidates.length}: the run has no organization scope`);
-    return logSummary(summary, ctx);
+    bump(summary.skipped, "no-scope", pages.length);
+    console.error(`${use.logTag} skipped document=${ctx.documentId} pages=${pages.length}: the run has no organization scope`);
+    return logSummary(summary, ctx, use);
   }
   const scope = { orgId: run.orgId, runId: run.id };
   let sent = pagesSent.get(ctx.state.usageLedger);
   if (!sent) pagesSent.set(ctx.state.usageLedger, (sent = new Map()));
 
-  const ready: Array<{ page: OcrPageRead; imagePath: string }> = [];
-  for (const page of candidates) {
-    const image = page.image!;
-    // Re-checked here against the provider's own cap: the PNG the boundary wrote, still that PNG, never decoded.
-    const png = await checkedPng(image.imagePath, provider.maxImageBytes);
-    if (!png || png.width !== image.width || png.height !== image.height) {
+  const maxEdge = use.maxLongEdgePx ?? PAGE_READER_MAX_EDGE_PX;
+  const ready: PageImageInput[] = [];
+  for (const page of pages) {
+    // Re-checked here against the provider's own cap: still a PNG, of the size the host expects, never decoded.
+    const png = await checkedPng(page.imagePath, provider.maxImageBytes);
+    const fits = png && (page.expect
+      ? png.width === page.expect.width && png.height === page.expect.height
+      : png.width >= 1 && png.height >= 1 && Math.max(png.width, png.height) <= maxEdge && png.width * png.height <= PAGE_READER_MAX_PIXELS);
+    if (!fits) {
       bump(summary.skipped, "image-refused");
-      console.warn(`[ocr] page-reader image refused document=${ctx.documentId} page=${page.pageNumber}: not the boundary's PNG or over ${provider.maxImageBytes} bytes`);
+      console.warn(`${use.logTag} image refused document=${ctx.documentId} page=${page.pageNumber}: not the expected PNG, over ${provider.maxImageBytes} bytes or over its size bound`);
       continue;
     }
-    ready.push({ page, imagePath: image.imagePath });
+    ready.push(page);
   }
   const used = sent.get(ctx.documentId) ?? 0;
   const allowed = Math.max(0, ctx.maxPages - used);
   if (ready.length > allowed) {
     bump(summary.skipped, "budget", ready.length - allowed);
-    console.warn(`[ocr] page-reader budget spent document=${ctx.documentId} max=${ctx.maxPages}: ${ready.length - allowed} pages keep the recogniser read`);
+    console.warn(`${use.logTag} budget spent document=${ctx.documentId} max=${ctx.maxPages}: ${ready.length - allowed} pages are not sent`);
     ready.length = allowed;
   }
 
@@ -255,11 +285,11 @@ export async function readPagesWithProvider(outcome: OcrReadOutcome, provider: P
     const chunk = ready.slice(start, start + provider.maxPagesPerJob);
     if (isCostCapExceeded(ctx.state as WorkflowState)) {
       bump(summary.skipped, "cost-cap", ready.length - start);
-      console.warn(`[ocr] page-reader stopped document=${ctx.documentId}: run cost cap reached`);
+      console.warn(`${use.logTag} stopped document=${ctx.documentId}: run cost cap reached`);
       break;
     }
     // The organization's daily reader spend, fleet-wide: admitted atomically with this job's reservation, or not sent.
-    const admission = await admitJob(provider, ctx, run.orgId, chunk.length);
+    const admission = await admitJob(provider, ctx, run.orgId, chunk.length, use);
     if ("skip" in admission) {
       bump(summary.skipped, admission.skip, ready.length - start);
       break;
@@ -270,12 +300,12 @@ export async function readPagesWithProvider(outcome: OcrReadOutcome, provider: P
     // least its reservation, so cancelling jobs never releases spend the ledger did not see.
     let jobFailed = true;
     try {
-      const byKey = new Map<string, OcrPageRead>();
+      const byKey = new Map<string, PageImageInput>();
       const job: PageImageReadJob = { scope: { ...scope }, pages: [] };
-      for (const item of chunk) {
+      for (const page of chunk) {
         const key = randomUUID();
-        byKey.set(key, item.page);
-        job.pages.push({ key, imagePath: item.imagePath });
+        byKey.set(key, page);
+        job.pages.push({ key, imagePath: page.imagePath });
       }
       sent.set(ctx.documentId, (sent.get(ctx.documentId) ?? 0) + chunk.length);
       summary.attempted += chunk.length;
@@ -284,13 +314,13 @@ export async function readPagesWithProvider(outcome: OcrReadOutcome, provider: P
       try {
         response = await provider.read(job, ctx.signal);
       } catch (error) {
-        const tokens = recordProviderUsage(pageReaderUsageOf(error), provider, ctx, { pages: chunk.length, outcome: "failed" });
+        const tokens = recordProviderUsage(pageReaderUsageOf(error), provider, ctx, use.metric, { pages: chunk.length, outcome: "failed" });
         jobCostCents += tokens.costCents;
-        logAiUsage(provider, tokens, summary);
+        logAiUsage(provider, tokens, summary, use.metric);
         if (ctx.signal?.aborted) throw error;
         const reason = jobFailureReason(error);
         bump(summary.failed, reason, chunk.length);
-        console.warn(`[ocr] page-reader job failed document=${ctx.documentId} pages=${chunk.map((item) => item.page.pageNumber).join(",")} reason=${reason}: ${(error instanceof Error ? error.message : String(error)).slice(0, 300)}`);
+        console.warn(`${use.logTag} job failed document=${ctx.documentId} pages=${chunk.map((page) => page.pageNumber).join(",")} reason=${reason}: ${(error instanceof Error ? error.message : String(error)).slice(0, 300)}`);
         continue;
       }
       const usage = (response as { usage?: unknown } | null)?.usage;
@@ -298,15 +328,15 @@ export async function readPagesWithProvider(outcome: OcrReadOutcome, provider: P
       try {
         results = validatePageReadResults((response as { results?: unknown } | null)?.results, new Set(byKey.keys()), provider.maxMarkdownBytes);
       } catch (error) {
-        const tokens = recordProviderUsage(usage, provider, ctx, { pages: chunk.length, outcome: "failed" });
+        const tokens = recordProviderUsage(usage, provider, ctx, use.metric, { pages: chunk.length, outcome: "failed" });
         jobCostCents += tokens.costCents;
-        logAiUsage(provider, tokens, summary);
+        logAiUsage(provider, tokens, summary, use.metric);
         bump(summary.failed, "invalid-response", chunk.length);
-        // Raw details go to telemetry only; the pages keep the recogniser's text.
-        console.error(`[ocr] page-reader response rejected document=${ctx.documentId} provider=${provider.id}: ${(error instanceof Error ? error.message : String(error)).slice(0, 300)}`);
+        // Raw details go to telemetry only; the pages keep the caller's fallback.
+        console.error(`${use.logTag} response rejected document=${ctx.documentId} provider=${provider.id}: ${(error instanceof Error ? error.message : String(error)).slice(0, 300)}`);
         continue;
       }
-      let tokens = recordProviderUsage(usage, provider, ctx, { pages: chunk.length, outcome: "completed" });
+      let tokens = recordProviderUsage(usage, provider, ctx, use.metric, { pages: chunk.length, outcome: "completed" });
       jobCostCents += tokens.costCents;
       jobFailed = false;
       if (!tokens.inputTokens && !tokens.outputTokens) {
@@ -315,27 +345,51 @@ export async function readPagesWithProvider(outcome: OcrReadOutcome, provider: P
           tokens = { ...tokens, inputTokens: tokens.inputTokens + (result.inputTokens ?? 0), outputTokens: tokens.outputTokens + (result.outputTokens ?? 0) };
         }
       }
-      logAiUsage(provider, tokens, summary);
+      logAiUsage(provider, tokens, summary, use.metric);
       for (const [key, page] of byKey) {
         const result = results.get(key);
         if (!result) { bump(summary.failed, "missing"); continue; }
         if (result.status === "failed") { bump(summary.failed, result.reason); continue; }
         const text = stripControlCharacters(result.markdown).trim();
         if (!text) { summary.empty += 1; continue; }
-        page.text = text;
-        page.recogniser = `page-reader:${provider.id}`;
-        // Read by the reader: the hosted escalation reader does not read it again.
-        page.escalation = null;
-        // One Rich page, once per run: the recogniser's read usually charged it already (the ledger dedups); a PDF page the
-        // recogniser found no words on is charged now that it has text.
-        ctx.state.usageLedger.chargeRichPage({ documentId: ctx.documentId, pageNumber: page.pageNumber, readBy: OCR_PAGE_READER_METRIC, model: provider.model });
+        use.onRead(page, { text, inputTokens: result.inputTokens ?? 0, outputTokens: result.outputTokens ?? 0 });
+        // One Rich page, once per run: an earlier read of the page (the recogniser's) usually charged it already (the
+        // ledger dedups); a page nothing else read is charged now that it has text.
+        ctx.state.usageLedger.chargeRichPage({ documentId: ctx.documentId, pageNumber: page.pageNumber, readBy: use.metric, model: provider.model });
         summary.replaced += 1;
       }
     } finally {
-      await settleJob(ctx, ticket, jobFailed ? Math.max(reservedCents, jobCostCents) : jobCostCents);
+      await settleJob(ctx, ticket, jobFailed ? Math.max(reservedCents, jobCostCents) : jobCostCents, use);
     }
   }
-  return logSummary(summary, ctx);
+  return logSummary(summary, ctx, use);
+}
+
+const OCR_READ_USE = { metric: OCR_PAGE_READER_METRIC, logTag: "[ocr] page-reader" } as const;
+
+/**
+ * Read the outcome's candidate pages (each OCR'd page with a kept boundary PNG) with `provider`, replacing a page's text
+ * (in `outcome.pages`) when the reader returned Markdown. Replaced pages leave hosted escalation candidacy; every other
+ * page is left as the recogniser read it.
+ */
+export async function readPagesWithProvider(outcome: OcrReadOutcome, provider: PageImageReaderProvider, ctx: PageReaderContext): Promise<PageReaderSummary> {
+  const byNumber = new Map<number, OcrPageRead>();
+  const inputs: PageImageInput[] = [];
+  for (const page of outcome.pages) {
+    if (!page.image) continue;
+    byNumber.set(page.pageNumber, page);
+    inputs.push({ pageNumber: page.pageNumber, imagePath: page.image.imagePath, expect: { width: page.image.width, height: page.image.height } });
+  }
+  return await readPageImagesWithProvider(inputs, provider, ctx, {
+    ...OCR_READ_USE,
+    onRead(input, read) {
+      const page = byNumber.get(input.pageNumber)!;
+      page.text = read.text;
+      page.recogniser = `page-reader:${provider.id}`;
+      // Read by the reader: the hosted escalation reader does not read it again.
+      page.escalation = null;
+    },
+  });
 }
 
 /**
@@ -343,10 +397,10 @@ export async function readPagesWithProvider(outcome: OcrReadOutcome, provider: P
  * when the day's committed cost plus this job's reservation would pass the cap, `budget-ledger-unavailable` when the ledger
  * cannot answer (fail closed: no answer, no job).
  */
-async function admitJob(provider: PageImageReaderProvider, ctx: PageReaderContext, orgId: string, pages: number): Promise<{ ticket: string; reservedCents: number } | { skip: "org-daily-cost-cap" | "budget-ledger-unavailable" }> {
+async function admitJob(provider: PageImageReaderProvider, ctx: PageReaderContext, orgId: string, pages: number, use: Pick<PageImageReadUse, "logTag">): Promise<{ ticket: string; reservedCents: number } | { skip: "org-daily-cost-cap" | "budget-ledger-unavailable" }> {
   const budget = ctx.state.pageReaderBudget === undefined ? processPageReaderOrgBudget : ctx.state.pageReaderBudget;
   if (!budget) {
-    console.error(`[ocr] page-reader stopped document=${ctx.documentId}: no organization spend ledger`);
+    console.error(`${use.logTag} stopped document=${ctx.documentId}: no organization spend ledger`);
     return { skip: "budget-ledger-unavailable" };
   }
   const capCents = ctx.orgDailyMaxCostCents ?? ocrPageReaderOrgDailyMaxCostCents();
@@ -355,41 +409,41 @@ async function admitJob(provider: PageImageReaderProvider, ctx: PageReaderContex
     const estimate = provider.estimateJobCostCents?.(pages);
     reserveCents = typeof estimate === "number" && Number.isFinite(estimate) && estimate > 0 ? estimate : 0;
   } catch (error) {
-    console.warn(`[ocr] page-reader cost estimate failed provider=${provider.id}: ${(error instanceof Error ? error.message : String(error)).slice(0, 200)}`);
+    console.warn(`${use.logTag} cost estimate failed provider=${provider.id}: ${(error instanceof Error ? error.message : String(error)).slice(0, 200)}`);
   }
   try {
     const admission = await budget.admit({ orgId, reserveCents, capCents });
     if (admission.admitted) return { ticket: admission.ticket, reservedCents: reserveCents };
     console.warn(
-      `[ocr] page-reader stopped document=${ctx.documentId}: organization reader cost today ${admission.committedCents.toFixed(2)} cents ` +
+      `${use.logTag} stopped document=${ctx.documentId}: organization reader cost today ${admission.committedCents.toFixed(2)} cents ` +
         `plus this job's ${reserveCents.toFixed(2)} reaches the daily cap ${capCents}`,
     );
     return { skip: "org-daily-cost-cap" };
   } catch (error) {
-    console.error(`[ocr] page-reader stopped document=${ctx.documentId}: organization spend ledger failed: ${(error instanceof Error ? error.message : String(error)).slice(0, 300)}`);
+    console.error(`${use.logTag} stopped document=${ctx.documentId}: organization spend ledger failed: ${(error instanceof Error ? error.message : String(error)).slice(0, 300)}`);
     return { skip: "budget-ledger-unavailable" };
   }
 }
 
 /** Settle a job's ticket with the cost it recorded. A failure leaves the reservation standing for the day (fail closed). */
-async function settleJob(ctx: PageReaderContext, ticket: string, costCents: number): Promise<void> {
+async function settleJob(ctx: PageReaderContext, ticket: string, costCents: number, use: Pick<PageImageReadUse, "logTag">): Promise<void> {
   const budget = ctx.state.pageReaderBudget === undefined ? processPageReaderOrgBudget : ctx.state.pageReaderBudget;
   try {
     await budget?.settle(ticket, costCents);
   } catch (error) {
-    console.error(`[ocr] page-reader spend settle failed document=${ctx.documentId}; the reservation stands: ${(error instanceof Error ? error.message : String(error)).slice(0, 300)}`);
+    console.error(`${use.logTag} spend settle failed document=${ctx.documentId}; the reservation stands: ${(error instanceof Error ? error.message : String(error)).slice(0, 300)}`);
   }
 }
 
-function logAiUsage(provider: PageImageReaderProvider, tokens: { inputTokens: number; outputTokens: number }, summary: PageReaderSummary): void {
+function logAiUsage(provider: PageImageReaderProvider, tokens: { inputTokens: number; outputTokens: number }, summary: PageReaderSummary, metric: string): void {
   summary.inputTokens += tokens.inputTokens;
   summary.outputTokens += tokens.outputTokens;
-  console.log(`[ai-usage] ${OCR_PAGE_READER_METRIC} model=${provider.model} input_tokens=${tokens.inputTokens} output_tokens=${tokens.outputTokens}`);
+  console.log(`[ai-usage] ${metric} model=${provider.model} input_tokens=${tokens.inputTokens} output_tokens=${tokens.outputTokens}`);
 }
 
-function logSummary(summary: PageReaderSummary, ctx: PageReaderContext): PageReaderSummary {
+function logSummary(summary: PageReaderSummary, ctx: PageReaderContext, use: Pick<PageImageReadUse, "logTag">): PageReaderSummary {
   console.log(
-    `[ocr] page-reader document=${ctx.documentId} mode=${summary.mode} provider=${summary.provider} jobs=${summary.jobs} attempted=${summary.attempted} ` +
+    `${use.logTag} document=${ctx.documentId} mode=${summary.mode} provider=${summary.provider} jobs=${summary.jobs} attempted=${summary.attempted} ` +
       `replaced=${summary.replaced} empty=${summary.empty} failed=${JSON.stringify(summary.failed)} skipped=${JSON.stringify(summary.skipped)}`,
   );
   return summary;
