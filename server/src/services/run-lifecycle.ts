@@ -1,3 +1,4 @@
+import { lockRunReadmission, restoreRunMonthlyCapacity } from "./run-monthly-readmission.js";
 import { WorkflowExecutionAlreadyStartedError } from "@temporalio/client";
 import type { TransactionSql } from "postgres";
 import {
@@ -276,10 +277,12 @@ export function createRunLifecycle(deps: RunLifecycleDeps) {
   /** Atomically move a failed Run back to queued, keeping completed checkpoints and paid work. */
   async function resumeFailed(runId: string, transaction?: TransactionSql): Promise<boolean> {
     const transition = async (tx: TransactionSql) => {
+      await lockRunReadmission(tx, runId);
       const [locked] = await tx<{ status: string }[]>`
         select status from project_runs where id = ${runId} for update
       `;
       if (locked?.status !== "failed") return [];
+      await restoreRunMonthlyCapacity(tx, runId);
       await tx`
         delete from document_run_stage_states
         where run_id = ${runId} and status <> 'completed'
@@ -331,12 +334,14 @@ export function createRunLifecycle(deps: RunLifecycleDeps) {
   async function resumeCompletedWithFailures(run: RunLifecycleRun, transaction?: TransactionSql): Promise<boolean> {
     const stageOrder: readonly string[] = getPipelineStageOrder(run.pipeline);
     const transition = async (tx: TransactionSql) => {
+      await lockRunReadmission(tx, run.id);
       const [locked] = await tx<{ status: string; failed: number }[]>`
         select status,
                (select count(*)::int from documents d where d.run_id = ${run.id} and d.status = 'failed' and d.superseded_at is null) as failed
         from project_runs where id = ${run.id} for update
       `;
       if (locked?.status !== "completed" || !(locked.failed > 0)) return [];
+      await restoreRunMonthlyCapacity(tx, run.id);
       const failedStages = await tx<{ stage_name: string }[]>`
         select distinct s.stage_name from document_run_stage_states s
         join documents d on d.id = s.document_id
@@ -533,6 +538,12 @@ export function createRunLifecycle(deps: RunLifecycleDeps) {
     input: { action: RunControlAction; priority?: number },
     transaction?: TransactionSql,
   ): Promise<string | null> {
+    if (!transaction && (input.action === "recover" || input.action === "resume")) {
+      const changed = await sql.begin(tx => control(run, input, tx));
+      if (changed && input.action === "resume") await signals.resume(run.id).catch(() => {});
+      return changed;
+    }
+    if (transaction && (input.action === "recover" || input.action === "resume")) await lockRunReadmission(transaction, run.id);
     const query = transaction ?? sql;
     if (transaction && (input.action === "resume" || input.action === "recover")) {
       const [current] = await query<{ status: ProjectRun["status"]; control_state: string | null; priority: number; error: string | null }[]>`
@@ -556,6 +567,7 @@ export function createRunLifecycle(deps: RunLifecycleDeps) {
     }
 
     if (input.action === "recover") {
+      await restoreRunMonthlyCapacity(transaction!, run.id);
       const [row] = await query<{ id: string }[]>`
         update project_runs
         set
@@ -583,6 +595,7 @@ export function createRunLifecycle(deps: RunLifecycleDeps) {
     }
 
     if (input.action === "resume") {
+      await restoreRunMonthlyCapacity(transaction!, run.id);
       if (!transaction) await signals.resume(run.id).catch(() => {});
       const [row] = await query<{ id: string }[]>`
         update project_runs

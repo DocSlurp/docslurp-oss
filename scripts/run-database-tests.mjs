@@ -20,11 +20,15 @@
 //
 // The server and worker test setups refuse a TEST_DATABASE_URL off loopback or naming a database that does not look
 // disposable (packages/shared/src/test-database-guard.ts); the dbtest_<n> databases made here pass.
+import { createHash } from "node:crypto";
+import ts from "typescript-compiler-api";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+
+const reviewed = JSON.parse(readFileSync(new URL("./database-discovery-reviewed.json", import.meta.url), "utf8"));
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -35,34 +39,261 @@ export const NOT_RUN = {
     "manual migration reproducer: needs an empty database (not the migrated template) whose owner holds the cutover roles",
 };
 
-const DB = /(?<![A-Za-z0-9_])TEST_DATABASE_URL(?![A-Za-z0-9_])/;
-const REDIS = /(?<![A-Za-z0-9_])TEST_REDIS_URL(?![A-Za-z0-9_])/;
 /** A database or Redis URL variable name; the runner sets only the two above. */
 const GATE_NAME = /^[A-Z0-9_]*(?:DATABASE_URL|_PG_URL|REDIS_URL)$/;
 const STANDARD = new Set(["DATABASE_URL", "TEST_DATABASE_URL", "TEST_REDIS_URL"]);
-/** Environment reads: `process.env.X`, `process.env["X"]` (any quote) and `const { X, Y: y } = process.env`. */
-const DOT_READ = /process\.env\.([A-Za-z0-9_]+)/g;
-const INDEX_READ = /process\.env\[\s*(["'`])([A-Za-z0-9_]+)\1\s*\]/g;
-const DESTRUCTURED_READ = /\{([^{}]*)\}\s*=\s*process\.env\b/g;
-
-/** Every environment variable name the source reads, by any of the forms above. */
+/**
+ * File-local, flow-insensitive provenance analysis: key writes accumulate possible
+ * literals; unknown/compound writes invalidate key precision. Scope uses TS symbols.
+ * Copies, conditional aliases and local function parameters/returns retain env
+ * provenance. Unknown calls with a direct env argument yield uncertain provenance:
+ * passing it is harmless, but reading a gate or an unknown key refuses discovery.
+ * Container provenance is kept separate so subprocess options do not taint the
+ * subprocess result. This does not resolve imports beyond node:process/process,
+ * execute arbitrary helpers, or model reflection/prototype mutation.
+ */
 export function environmentReads(source) {
   const names = new Set();
-  for (const m of source.matchAll(DOT_READ)) names.add(m[1]);
-  for (const m of source.matchAll(INDEX_READ)) names.add(m[2]);
-  for (const m of source.matchAll(DESTRUCTURED_READ)) {
-    for (const part of m[1].split(",")) {
-      const name = part.replace(/^\s*\.\.\.\s*/, "").split(/[:=]/)[0].trim();
-      if (/^[A-Za-z0-9_]+$/.test(name)) names.add(name);
-    }
+  if (!/\b(?:process|env)\b/.test(source)) return names;
+
+  let tree = ts.createSourceFile("test.tsx", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  if (tree.parseDiagnostics.length) {
+    const plain = ts.createSourceFile("test.tsx", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+    if (plain.parseDiagnostics.length < tree.parseDiagnostics.length) tree = plain;
   }
+  const host = ts.createCompilerHost({ noLib: true, noResolve: true, types: [] });
+  host.getSourceFile = name => name === "test.tsx" ? tree : undefined;
+  const checker = ts.createProgram(["test.tsx"], { noLib: true, noResolve: true, types: [] }, host).getTypeChecker();
+  const aliases = new Map();
+  const constants = new Map();
+  const uncertainKeys = new Set();
+  const functions = new Map();
+  const resolving = new Set();
+  const functionAt = node => {
+    while (ts.isParenthesizedExpression(node)) node = node.expression;
+    return ts.isFunctionLike(node) ? node : functions.get(symbol(node));
+  };
+  const symbol = node => ts.isShorthandPropertyAssignment(node.parent) ? checker.getShorthandAssignmentValueSymbol(node.parent) : checker.getSymbolAtLocation(node);
+  const keyOf = node => {
+    if (!node) return;
+    if (ts.isStringLiteralLike(node) || ts.isNumericLiteral(node)) return new Set([node.text]);
+    if (ts.isComputedPropertyName(node)) return keyOf(node.expression);
+    if (ts.isIdentifier(node)) return uncertainKeys.has(symbol(node)) ? undefined : constants.get(symbol(node));
+    if (ts.isConditionalExpression(node)) {
+      const a = keyOf(node.whenTrue), b = keyOf(node.whenFalse);
+      if (a && b) return new Set([...a, ...b]);
+    }
+  };
+  let final = false;
+  const unknown = () => { if (final) names.add("<unresolved environment access>"); };
+  const record = (parts) => {
+    if (parts?.[0] === "unknown-env" && parts.slice(1).some(key => GATE_NAME.test(key))) unknown();
+    if (parts?.[0] === "process" && parts[1] === "env" && parts[2]) names.add(parts[2]);
+    return parts;
+  };
+  const carriesEnv = parts => parts && (parts[0] === "process" && (parts.length === 1 || parts.length === 2 && parts[1] === "env") || parts[0] === "unknown-env" || parts[0] === "env-container");
+  const union = (a, b) => !a ? b : !b ? a : a.join(".") === b.join(".") ? a : ["unknown-env"];
+  let resolved = new Map();
+  const resolve = node => {
+    if (!node) return;
+    if (resolved.has(node)) return resolved.get(node);
+    const value = resolveExpression(node);
+    resolved.set(node, value);
+    return value;
+  };
+  const resolveExpression = (node) => {
+    if (!node) return;
+    if (ts.isIdentifier(node)) return aliases.get(symbol(node)) ?? (node.text === "process" && !symbol(node) ? ["process"] : undefined);
+    if (ts.isParenthesizedExpression(node) || ts.isAsExpression(node) || ts.isTypeAssertionExpression(node) || ts.isNonNullExpression(node) || ts.isSatisfiesExpression(node) || ts.isAwaitExpression(node)) return resolve(node.expression);
+    if (ts.isConditionalExpression(node)) {
+      const left = resolve(node.whenTrue), right = resolve(node.whenFalse);
+      if (carriesEnv(left) && carriesEnv(right) && left.join(".") !== right.join(".")) return ["unknown-env"];
+      return left ?? right;
+    }
+    if (ts.isBinaryExpression(node)) return union(resolve(node.left), resolve(node.right));
+    if (ts.isArrayLiteralExpression(node) && node.elements.some(element => carriesEnv(resolve(element)))) return ["unknown-env"];
+    if (ts.isObjectLiteralExpression(node)) {
+      let result;
+      for (const property of node.properties) {
+        const value = ts.isSpreadAssignment(property) ? property.expression : ts.isPropertyAssignment(property) ? property.initializer : ts.isShorthandPropertyAssignment(property) ? property.name : undefined;
+        const parts = resolve(value);
+        if (carriesEnv(parts)) result = union(result, ts.isSpreadAssignment(property) ? parts : ["env-container", "*"]);
+      }
+      return result;
+    }
+    if (ts.isCallExpression(node)) {
+      const fn = functionAt(node.expression);
+      if (fn && !resolving.has(fn)) {
+        resolving.add(fn);
+        let result;
+        const returns = n => {
+          if (n !== fn && ts.isFunctionLike(n)) return;
+          if (ts.isReturnStatement(n) || n === fn.body && !ts.isBlock(n)) {
+            const parts = resolve(ts.isReturnStatement(n) ? n.expression : n);
+            if (carriesEnv(parts)) result = union(result, parts);
+          } else ts.forEachChild(n, returns);
+        };
+        returns(fn);
+        resolving.delete(fn);
+        return result;
+      }
+      if (fn) return;
+      // Unknown calls may return their environment argument. Merely passing it
+      // (subprocess/config/spy setup) is not an environment property read.
+      for (const argument of node.arguments) {
+        const parts = resolve(argument);
+        if (carriesEnv(parts) && parts[0] !== "env-container") {
+          const assign = ts.isPropertyAccessExpression(node.expression) && node.expression.expression.getText(tree) === "Object" && !symbol(node.expression.expression) && node.expression.name.text === "assign";
+          return assign ? parts : ["unknown-env"];
+        }
+      }
+    }
+    const base = (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) && resolve(node.expression);
+    if (!base) return;
+    const keys = ts.isPropertyAccessExpression(node) ? new Set([node.name.text]) : keyOf(node.argumentExpression);
+    if (keys?.size) {
+      if (base[0] === "env-container") return (base[1] === "*" || keys.has(base[1])) ? ["unknown-env"] : undefined;
+      for (const key of keys) record([...base, key]);
+      return base[0] === "unknown-env" ? base : [...base, [...keys][0]];
+    }
+    if ((base[0] === "process" && base.length <= 2) || base[0] === "unknown-env" || base[0] === "env-container") unknown();
+  };
+  let changed = true;
+  const bind = (name, parts) => {
+    if (!parts) return;
+    // Destructuring projects a container property into a possible environment.
+    // Retain that provenance before the ordinary property-path depth cutoff.
+    if (parts[0] === "env-container" && parts.length > 2) parts = ["unknown-env"];
+    record(parts);
+    if (parts[0] === "unknown-env") parts = ["unknown-env"];
+    if (parts.length > 2) return;
+    if (ts.isIdentifier(name)) {
+      const id = symbol(name);
+      if (id && !aliases.has(id)) { aliases.set(id, parts); changed = true; }
+      else if (id && aliases.get(id).join(".") !== parts.join(".") && aliases.get(id)[0] !== "unknown-env") {
+        aliases.set(id, ["unknown-env"]);
+        changed = true;
+      }
+    } else if (ts.isPropertyAccessExpression(name) || ts.isElementAccessExpression(name)) {
+      // A store can introduce provenance through any alias of its container.
+      // Explicitly refuse these stores: container identity/alias mutation is
+      // not modeled. This also covers reads through a different object alias.
+      const destination = resolve(name);
+      if (destination?.join(".") === "process.env" && parts.join(".") === "process.env") return;
+      if (carriesEnv(parts)) { unknown(); bind(name.expression, ["env-container", "*"]); }
+    } else if (ts.isObjectBindingPattern(name)) {
+      for (const element of name.elements) {
+        if (element.dotDotDotToken) { bind(element.name, parts); continue; }
+        const key = element.propertyName ?? element.name;
+        const keys = ts.isIdentifier(key) || ts.isStringLiteralLike(key) ? new Set([key.text]) : keyOf(key);
+        if (keys) for (const property of keys) bind(element.name, [...parts, property]); else unknown();
+      }
+    } else if (ts.isObjectLiteralExpression(name)) {
+      for (const property of name.properties) {
+        if (ts.isShorthandPropertyAssignment(property)) bind(property.name, [...parts, property.name.text]);
+        else if (ts.isPropertyAssignment(property)) {
+          const keys = ts.isIdentifier(property.name) ? new Set([property.name.text]) : keyOf(property.name);
+          if (keys) for (const key of keys) bind(property.initializer, [...parts, key]); else unknown();
+        } else unknown();
+      }
+    } else unknown();
+  };
+  const collectFunctions = node => {
+    if (ts.isFunctionDeclaration(node) && node.name) functions.set(symbol(node.name), node);
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer && ts.isFunctionLike(node.initializer)) functions.set(symbol(node.name), node.initializer);
+    ts.forEachChild(node, collectFunctions);
+  };
+  collectFunctions(tree);
+  const writeKey = (name, value) => {
+    if (!ts.isIdentifier(name)) {
+      // Destructuring writes invalidate only targets, never source property names.
+      if (ts.isObjectBindingPattern(name) || ts.isArrayBindingPattern(name)) for (const element of name.elements) { if (ts.isBindingElement(element)) writeKey(element.name, undefined); }
+      else if (ts.isObjectLiteralExpression(name)) for (const property of name.properties) {
+        if (ts.isShorthandPropertyAssignment(property)) writeKey(property.name, undefined);
+        else if (ts.isPropertyAssignment(property)) writeKey(property.initializer, undefined);
+        else if (ts.isSpreadAssignment(property)) writeKey(property.expression, undefined);
+      }
+      else if (ts.isArrayLiteralExpression(name)) for (const element of name.elements) writeKey(element, undefined);
+      else if (ts.isSpreadElement(name) || ts.isParenthesizedExpression(name)) writeKey(name.expression, undefined);
+      else if (ts.isBinaryExpression(name)) writeKey(name.left, undefined);
+      return;
+    }
+    const id = symbol(name);
+    if (!id) return;
+    if (!value) {
+      if (!uncertainKeys.has(id)) { uncertainKeys.add(id); changed = true; }
+      return;
+    }
+    const previous = constants.get(id) ?? new Set();
+    for (const key of value) if (!previous.has(key)) { previous.add(key); changed = true; }
+    constants.set(id, previous);
+  };
+  let passes = 0;
+  while (changed || !final) {
+    if (++passes > 32) { names.add("<unresolved environment access>"); break; }
+    if (!changed) final = true;
+    changed = false;
+    resolved = new Map();
+    const visit = (node) => {
+      if (ts.isImportDeclaration(node) && ts.isStringLiteralLike(node.moduleSpecifier) && ["process", "node:process"].includes(node.moduleSpecifier.text)) {
+        const clause = node.importClause;
+        if (clause?.name) bind(clause.name, ["process"]);
+        if (clause?.namedBindings) {
+          if (ts.isNamespaceImport(clause.namedBindings)) bind(clause.namedBindings.name, ["process"]);
+          else for (const item of clause.namedBindings.elements) bind(item.name, ["process", (item.propertyName ?? item.name).text]);
+        }
+      }
+      if (ts.isParameter(node) && node.initializer) bind(node.name, resolve(node.initializer));
+      if (ts.isVariableDeclaration(node)) {
+        bind(node.name, resolve(node.initializer));
+        if (node.initializer) writeKey(node.name, keyOf(node.initializer));
+        const fn = node.initializer && functions.get(symbol(node.initializer));
+        if (fn && !functions.has(symbol(node.name))) { functions.set(symbol(node.name), fn); changed = true; }
+      }
+      if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
+        bind(node.left, resolve(node.right));
+        writeKey(node.left, keyOf(node.right));
+      } else if (ts.isBinaryExpression(node) && node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment && node.operatorToken.kind <= ts.SyntaxKind.LastAssignment) {
+        bind(node.left, resolve(node.right));
+        writeKey(node.left, undefined);
+      }
+      if (ts.isForOfStatement(node) || ts.isForInStatement(node)) {
+        const targets = ts.isVariableDeclarationList(node.initializer) ? node.initializer.declarations.map(declaration => declaration.name) : [node.initializer];
+        for (const target of targets) {
+          writeKey(target, undefined);
+          bind(target, carriesEnv(resolve(node.expression)) ? ["unknown-env"] : undefined);
+        }
+      }
+      if (ts.isPostfixUnaryExpression(node) || ts.isPrefixUnaryExpression(node)) {
+        if ([ts.SyntaxKind.PlusPlusToken, ts.SyntaxKind.MinusMinusToken].includes(node.operator)) writeKey(node.operand, undefined);
+      }
+      if (ts.isCallExpression(node)) {
+        const fn = functionAt(node.expression);
+        if (fn) for (let i = 0; i < fn.parameters.length; i++) bind(fn.parameters[i].name, resolve(node.arguments[i]));
+        else if (node.arguments.some(argument => carriesEnv(resolve(argument)))) {
+          for (const argument of node.arguments) if (ts.isFunctionLike(argument)) {
+            for (const parameter of argument.parameters) bind(parameter.name, ["unknown-env"]);
+          }
+        }
+        // Object.assign mutates its first argument as well as returning it.
+        if (ts.isPropertyAccessExpression(node.expression) && node.expression.expression.getText(tree) === "Object" && !symbol(node.expression.expression) && node.expression.name.text === "assign") {
+          for (const argument of node.arguments.slice(1)) bind(node.arguments[0], resolve(argument));
+        }
+      }
+      resolve(node);
+      ts.forEachChild(node, visit);
+    };
+    visit(tree);
+  }
+  if (tree.parseDiagnostics.length && /\bprocess\b/.test(source)) names.add("<unresolved environment access>");
   return names;
 }
 
 /** What a test file's source needs from the runner, and any gate variable it would never get. */
 export function classifyTestSource(source) {
-  const other = [...environmentReads(source)].filter((v) => GATE_NAME.test(v) && !STANDARD.has(v));
-  return { db: DB.test(source), redis: REDIS.test(source), other };
+  const reads = environmentReads(source);
+  const other = [...reads].filter(v => v === "<unresolved environment access>" || GATE_NAME.test(v) && !STANDARD.has(v));
+  return { db: reads.has("TEST_DATABASE_URL"), redis: reads.has("TEST_REDIS_URL"), other };
 }
 
 /**
@@ -78,10 +309,19 @@ export function scanTestFiles(dir = root) {
       if (name === "node_modules" || name === "dist") continue;
       const full = path.join(current, name);
       if (statSync(full).isDirectory()) walk(full, pattern, extra);
-      else if (pattern.test(name)) found.push({ file: path.relative(dir, full), ...classifyTestSource(readFileSync(full, "utf8")), ...extra });
+      else if (pattern.test(name)) {
+        const file = path.relative(dir, full), source = readFileSync(full, "utf8");
+        const entry = classifyTestSource(source);
+        // Explicit, content-pinned review of existing setup helpers. A changed or
+        // new dynamic access fails closed; concrete gates are never exempted.
+        if (reviewed[file]?.sha256 === createHash("sha256").update(source).digest("hex")) {
+          entry.other = entry.other.filter(name => name !== "<unresolved environment access>");
+        }
+        found.push({ file, ...entry, ...extra });
+      }
     }
   };
-  for (const top of ["server/src", "worker/src", "packages"]) walk(path.join(dir, top), /\.test\.(ts|mjs)$/, {});
+  for (const top of ["server/src", "worker/src", "packages"]) walk(path.join(dir, top), /\.test\.(?:[cm]?[jt]s|tsx|jsx)$/, {});
   walk(path.join(dir, "server/db/tests"), /\.(ts|mjs)$/, { script: true });
   return found.sort((a, b) => a.file.localeCompare(b.file));
 }
@@ -98,6 +338,7 @@ export function unsupportedGatedFiles(scanned) {
 
 function main() {
   const scanned = scanTestFiles();
+  console.error("[database-tests] dynamic setup helpers are explicitly reviewed in scripts/database-discovery-reviewed.json; modified/unlisted unresolved syntax is refused");
   const unsupported = unsupportedGatedFiles(scanned);
   if (unsupported.length) {
     console.error(`[database-tests] test files gated on a variable this runner never sets; read TEST_DATABASE_URL / TEST_REDIS_URL instead (or list the file in NOT_RUN):\n  ${unsupported.join("\n  ")}`);
@@ -135,9 +376,9 @@ function main() {
         env.TEST_DATABASE_URL = `${admin}/${name}`;
       }
       if (needsRedis) env.TEST_REDIS_URL = redis;
-      const pkg = file.split("/")[0];
+      const pkg = file.startsWith("packages/") ? file.split("/").slice(0, 2).join("/") : file.split("/")[0];
       const report = path.join(scratch, `${index}.json`);
-      const run = spawnSync("pnpm", ["exec", "vitest", "run", file.slice(pkg.length + 1), "--reporter=default", "--reporter=json", `--outputFile.json=${report}`], { cwd: path.join(root, pkg), env, stdio: "inherit" });
+      const run = spawnSync("pnpm", ["exec", "vitest", "run", file.slice(pkg.length + 1), "--maxWorkers=2", "--reporter=default", "--reporter=json", `--outputFile.json=${report}`], { cwd: path.join(root, pkg), env, stdio: "inherit" });
       let result = null;
       try { result = JSON.parse(readFileSync(report, "utf8")); } catch { /* reported below */ }
       const skipped = (result?.numPendingTests ?? 0) + (result?.numTodoTests ?? 0);

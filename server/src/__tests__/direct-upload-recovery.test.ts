@@ -3,6 +3,8 @@ const mocks = vi.hoisted(() => ({
   sql: Object.assign(vi.fn(), { json: (v: unknown) => v, array: (v: unknown) => v }),
   load: vi.fn(), prepare: vi.fn(), intake: vi.fn(), discard: vi.fn(), project: vi.fn(), multipart: vi.fn(),
 }));
+vi.mock("../services/organizations.js", () => ({ getProjectAccess: async () => ({ orgId: "org" }), canContributeToProject: () => true }));
+vi.mock("../services/api-keys.js", () => ({ getLiveApiKeyById: async () => ({ orgId: "org", scopes: ["ingest"], projectIds: ["project"] }) }));
 vi.mock("../db.js", () => ({ sql: mocks.sql }));
 vi.mock("../services/run-creation.js", () => ({ discardUnstartedRun: mocks.discard }));
 vi.mock("../services/projects.js", () => ({ getProject: mocks.project }));
@@ -40,18 +42,16 @@ describe("durable direct upload acceptance", () => {
     expect(await confirmDirectUploadProjectIntake({ sessionId: "session", userId: "user" }, ports)).toBe(saved);
     expect(mocks.sql).not.toHaveBeenCalled(); expect(mocks.intake).not.toHaveBeenCalled();
   });
-  it("recovers a published run after a crash without creating a second run", async () => {
+  it("refuses reconciliation after publication without the exact durable response", async () => {
     const published = { id: "session", project_id: "project", creation_ready_at: "2026-10-23", pipeline: {} };
     mocks.sql.mockImplementation(async (strings: TemplateStringsArray) => {
       if (strings.join("").includes("from project_runs")) return [published];
       if (strings.join("").includes("from documents")) return [{ id: "document", run_id: "session" }];
       return [];
     });
-    const result = await confirmDirectUploadProjectIntake({ sessionId: "session", userId: "user" }, ports);
-    expect(result.payload.run.id).toBe("session");
-    expect(result.payload.documents).toEqual([{ id: "document", run_id: "session" }]);
+    await expect(confirmDirectUploadProjectIntake({ sessionId: "session", userId: "user" }, ports)).rejects.toMatchObject({ statusCode: 409 });
     expect(mocks.intake).not.toHaveBeenCalled(); expect(mocks.discard).not.toHaveBeenCalled();
-    expect(mocks.sql.mock.calls.some(([s]) => s.join("").includes("result ="))).toBe(true);
+    expect(mocks.sql.mock.calls.some(([s]) => s.join("").includes("result ="))).toBe(false);
   });
   it("reuses durable identity and original key scope after incomplete run recovery", async () => {
     mocks.sql.mockImplementation(async (s: TemplateStringsArray) => s.join("").includes("from project_runs") ? [{ id: "session", creation_ready_at: null }] : []);

@@ -161,9 +161,9 @@ export function classifyAttempt(attempt: VisionAttempt): { kind: RetryableOutcom
   const refusal = attempt.finishReason === "content_filter"
     || attempt.error?.metadata?.error_type === "refusal"
     || /content[ -]?filter|blocked|refus/i.test(message);
-  if (refusal) return { kind: "refusal", detail: message || attempt.finishReason || "content filtered" };
+  if (refusal) return { kind: "refusal", detail: "provider content filtered" };
   if (attempt.finishReason === "error" || attempt.error) {
-    return { kind: "provider-error", detail: message || "provider returned an error body" };
+    return { kind: "provider-error", detail: "provider returned an error body" };
   }
   if (attempt.finishReason === "length") return { kind: "length", detail: "finish_reason=length" };
   return null;
@@ -534,6 +534,7 @@ async function runAttempt(args: GuardedCompletionArgs, body: Record<string, unkn
   try {
     const response = await fetchWithProviderRetry(args.url, {
       method: "POST",
+      redirect: "error",
       headers: args.headers,
       body: JSON.stringify(streaming ? { ...body, stream: true, stream_options: { include_usage: true } } : body),
     }, {
@@ -556,14 +557,14 @@ async function runAttempt(args: GuardedCompletionArgs, body: Record<string, unkn
       ...(args.gate ? { gate: args.gate } : {}),
     });
     if (!response.ok) {
-      const text = await response.text();
+      void response.body?.cancel().catch(() => {});
       if (streaming && STREAM_UNSUPPORTED_STATUSES.has(response.status)) {
         // Refused before acceptance: no page admission, no breaker failure, no org count.
         await args.gate?.unbilled("unsupported", { provider: args.providerLabel, status: response.status });
-        throw new StreamUnsupportedError(`${response.status} ${text.slice(0, 200)}`, response.status);
+        throw new StreamUnsupportedError(`vision stream unsupported: ${response.status}`, response.status);
       }
       args.gate?.failed();
-      throw new Error(`vision request failed: ${response.status} ${text}`);
+      throw new Error(`vision request failed: ${response.status}`);
     }
     const isSse = streaming && (response.headers.get("content-type") ?? "").includes("text/event-stream");
     try {

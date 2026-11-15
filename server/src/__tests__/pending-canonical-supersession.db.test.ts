@@ -21,9 +21,9 @@ afterAll(async () => { await sql?.end(); await stop?.(); });
 
 describe("canonical replacement of failed-run pending history", () => {
   it("retires an unflagged queued old document and restores exact search availability when its replacement completes", async () => {
-    await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline)
-      values ('old', 'o', 'u', 'w', 'upload', 'failed', 'embed', '{}'::jsonb),
-        ('new', 'o', 'u', 'w', 'upload', 'processing', 'index', '{}'::jsonb)`;
+    await sql`insert into project_runs (monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage, pipeline)
+      values (100, 'old', 'o', 'u', 'w', 'upload', 'failed', 'embed', '{}'::jsonb),
+        (100, 'new', 'o', 'u', 'w', 'upload', 'processing', 'index', '{}'::jsonb)`;
     await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, canonical_id, page_count, created_at)
       values ('old-doc', 'o', 'u', 'w', 'old', 'a.txt', 'text/plain', 'old-key', 'queued', '/a.txt', 4, '2026-01-01'),
         ('new-doc', 'o', 'u', 'w', 'new', 'a.txt', 'text/plain', 'new-key', 'queued', '/a.txt', 4, '2026-01-02')`;
@@ -40,9 +40,9 @@ describe("canonical replacement of failed-run pending history", () => {
 
   it("preserves an active cancelling run until it ends, then retires its replaced queued history", async () => {
     await sql`insert into projects (id, org_id, user_id, name) values ('active-w', 'o', 'u', 'Active')`;
-    await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, control_state)
-      values ('active-old', 'o', 'u', 'active-w', 'upload', 'processing', 'embed', '{}'::jsonb, 'cancel_requested'),
-        ('active-new', 'o', 'u', 'active-w', 'upload', 'processing', 'index', '{}'::jsonb, null)`;
+    await sql`insert into project_runs (monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage, pipeline, control_state)
+      values (100, 'active-old', 'o', 'u', 'active-w', 'upload', 'processing', 'embed', '{}'::jsonb, 'cancel_requested'),
+        (100, 'active-new', 'o', 'u', 'active-w', 'upload', 'processing', 'index', '{}'::jsonb, null)`;
     await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, canonical_id, created_at)
       values ('active-old-doc', 'o', 'u', 'active-w', 'active-old', 'a.txt', 'text/plain', 'old-key', 'queued', '/a.txt', '2026-01-01'),
         ('active-new-doc', 'o', 'u', 'active-w', 'active-new', 'a.txt', 'text/plain', 'new-key', 'completed', '/a.txt', '2026-01-02')`;
@@ -56,10 +56,10 @@ describe("canonical replacement of failed-run pending history", () => {
   it("never guesses replacements across organizations, projects, canonical source identities or older versions", async () => {
     await sql`insert into organizations (id, name, slug, created_by_user_id) values ('o2', 'Other', 'pending-other', 'u')`;
     await sql`insert into projects (id, org_id, user_id, name) values ('scope-w', 'o', 'u', 'Scope'), ('scope-other', 'o2', 'u', 'Other')`;
-    await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline)
-      values ('scope-old', 'o', 'u', 'scope-w', 'upload', 'failed', 'embed', '{}'::jsonb),
-        ('scope-new', 'o', 'u', 'scope-w', 'upload', 'processing', 'index', '{}'::jsonb),
-        ('scope-foreign', 'o2', 'u', 'scope-other', 'upload', 'processing', 'index', '{}'::jsonb)`;
+    await sql`insert into project_runs (monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage, pipeline)
+      values (100, 'scope-old', 'o', 'u', 'scope-w', 'upload', 'failed', 'embed', '{}'::jsonb),
+        (100, 'scope-new', 'o', 'u', 'scope-w', 'upload', 'processing', 'index', '{}'::jsonb),
+        (100, 'scope-foreign', 'o2', 'u', 'scope-other', 'upload', 'processing', 'index', '{}'::jsonb)`;
     await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, canonical_id, created_at)
       values ('scope-target', 'o', 'u', 'scope-w', 'scope-old', 'a.txt', 'text/plain', 'target', 'queued', '/dir-a/a.txt', '2026-01-03'),
         ('scope-foreign-doc', 'o2', 'u', 'scope-other', 'scope-foreign', 'a.txt', 'text/plain', 'foreign', 'completed', '/dir-a/a.txt', '2026-01-04'),

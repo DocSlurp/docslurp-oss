@@ -37,10 +37,10 @@ beforeAll(async () => {
     insert into "user"(id, name, email) values ('u1', 'A', 'a@x');
     insert into organizations(id, name, slug, created_by_user_id) values ('o1', 'Org', 'org', 'u1');
     insert into projects(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W');
-    insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents)
-      values ('up', 'o1', 'u1', 'w', 'upload', 'processing', 'extract', '{"indexingMode":"map"}', 2),
-             ('m1', 'o1', 'u1', 'w', 'materialize', 'processing', 'materialize', '{}', 1),
-             ('m2', 'o1', 'u1', 'w', 'materialize', 'processing', 'materialize', '{}', 1);
+    insert into project_runs (monthly_reservation_cents, id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents)
+      values (100, 'up', 'o1', 'u1', 'w', 'upload', 'processing', 'extract', '{"indexingMode":"map"}', 2),
+             (100, 'm1', 'o1', 'u1', 'w', 'materialize', 'processing', 'materialize', '{}', 1),
+             (100, 'm2', 'o1', 'u1', 'w', 'materialize', 'processing', 'materialize', '{}', 1);
     insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, indexing_mode, page_count_source, parse_source_scan_version, parse_source_sha256)
       values ('full', 'o1', 'u1', 'w', 'up', 'a.pdf', 'application/pdf', 'k1', 'processing', 3, 'full', 'counted', 1, repeat('0', 64)),
              ('mapped', 'o1', 'u1', 'w', 'up', 'b.pdf', 'application/pdf', 'k2', 'processing', 5, 'map', 'counted', 1, repeat('0', 64)),
@@ -165,8 +165,8 @@ describe("worker run load (round 4 M2)", () => {
     const original = console.error;
     console.error = (...args: unknown[]) => { errors.push(args.join(" ")); };
     try {
-      await db.exec(`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents)
-        values ('stale-x', 'o1', 'u1', 'w', 'upload', 'processing', 'extract',
+      await db.exec(`insert into project_runs (monthly_reservation_cents, id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents)
+        values (100, 'stale-x', 'o1', 'u1', 'w', 'upload', 'processing', 'extract',
           '{"quality":"fast","documentExtraction":{"options":{"dolphin":{"mode":"page","repoPath":"/tmp/attacker"},"liteparse":{}},"ocr":{"language":"en"}}}', 1)`);
       const run = await store.loadRun("stale-x");
       expect(run.pipeline.quality).toBe("fast");
@@ -396,8 +396,8 @@ describe("runMaterializeRange activity", () => {
   it("applies the source document's ingest pipeline when the materialize run row carries none (C1)", async () => {
     // An app-style insert with the empty default pipeline, as the unfixed client wrote it.
     await db.exec(`
-      insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents)
-        values ('m-empty', 'o1', 'u1', 'w', 'materialize', 'processing', 'materialize', '{}', 1);
+      insert into project_runs (monthly_reservation_cents, id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents)
+        values (100, 'm-empty', 'o1', 'u1', 'w', 'materialize', 'processing', 'materialize', '{}', 1);
       update project_runs set pipeline = '{"indexingMode":"map","privacyMode":"local-only","embedding":{"profile":"cheapest-local"},
         "piiPolicy":{"enabled":true,"patterns":["ssn"],"action":"block_indexing"}}'::jsonb where id = 'up';`);
     const seen: Array<{ privacyMode: string; profile: string }> = [];
@@ -420,8 +420,8 @@ describe("runMaterializeRange activity", () => {
 
   it("drops model values from the source pipeline it falls back to: the profile's current model embeds (round 3)", async () => {
     await db.exec(`
-      insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents)
-        values ('m-stale', 'o1', 'u1', 'w', 'materialize', 'processing', 'materialize', '{}', 1);
+      insert into project_runs (monthly_reservation_cents, id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents)
+        values (100, 'm-stale', 'o1', 'u1', 'w', 'materialize', 'processing', 'materialize', '{}', 1);
       update project_runs set pipeline = '{"indexingMode":"map","privacyMode":"local-only",
         "embedding":{"profile":"cheapest-local","modelUri":"llm://transformers.js/Xenova/bge-m3","target":"local"}}'::jsonb where id = 'up';`);
     const seen: string[] = [];
@@ -439,9 +439,9 @@ describe("runMaterializeRange activity", () => {
 
   it("refuses to run on defaults when neither the run nor its source carries a pipeline", async () => {
     await db.exec(`
-      insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents)
-        values ('m-bare', 'o1', 'u1', 'w', 'materialize', 'processing', 'materialize', '{}', 1),
-               ('up-bare', 'o1', 'u1', 'w', 'upload', 'processing', 'extract', '{}', 1);
+      insert into project_runs (monthly_reservation_cents, id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents)
+        values (100, 'm-bare', 'o1', 'u1', 'w', 'materialize', 'processing', 'materialize', '{}', 1),
+               (100, 'up-bare', 'o1', 'u1', 'w', 'upload', 'processing', 'extract', '{}', 1);
       insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, indexing_mode, page_count_source, parse_source_scan_version, parse_source_sha256)
         values ('bare', 'o1', 'u1', 'w', 'up-bare', 'z.pdf', 'application/pdf', 'kz', 'processing', 2, 'map', 'counted', 1, repeat('0', 64));`);
     await expect(runMaterializeRange(deps() as never, { ...input("m-bare", [1]), documentId: "bare" })).rejects.toThrow(/refusing to run on defaults/);
@@ -451,8 +451,8 @@ describe("runMaterializeRange activity", () => {
     process.env.DOCSLURP_DEFERRED_PROFILES = "1";
     await db.exec(`
       delete from usage_events where run_id in ('fi'); delete from documents where id = 'd1-full'; delete from project_runs where id = 'fi';
-      insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents)
-        values ('fi', 'o1', 'u1', 'w', 'full-index', 'processing', 'extract', '{"indexingMode":"full"}', 1);
+      insert into project_runs (monthly_reservation_cents, id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents)
+        values (100, 'fi', 'o1', 'u1', 'w', 'full-index', 'processing', 'extract', '{"indexingMode":"full"}', 1);
       insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, previous_version_id, indexing_mode, page_count_source, parse_source_scan_version, parse_source_sha256)
         values ('d1-full', 'o1', 'u1', 'w', 'fi', 'c.pdf', 'application/pdf', 'k3', 'processing', 12, 'd1', 'full', 'counted', 1, repeat('0', 64));`);
     await ensurePageRows(sql, "d1", 12);
@@ -914,8 +914,8 @@ describe("runMaterializeRange activity", () => {
           await db.exec(`
             update project_runs set pipeline = '{"quality":"good","piiPolicy":{"enabled":true,"patterns":["ssn"],"action":"block_indexing","allowlistPatterns":[]}}' where id = 'm1';
             delete from documents where id = 'd1-full'; delete from project_runs where id = 'fi';
-            insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents)
-              values ('fi', 'o1', 'u1', 'w', 'full-index', 'processing', 'extract', '{"indexingMode":"full"}', 1);
+            insert into project_runs (monthly_reservation_cents, id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents)
+              values (100, 'fi', 'o1', 'u1', 'w', 'full-index', 'processing', 'extract', '{"indexingMode":"full"}', 1);
             insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, previous_version_id, indexing_mode, page_count_source, parse_source_scan_version, parse_source_sha256)
               values ('d1-full', 'o1', 'u1', 'w', 'fi', 'c.pdf', 'application/pdf', 'k3', 'processing', 12, 'd1', 'full', 'counted', 1, repeat('0', 64));`);
           try {
@@ -1148,8 +1148,8 @@ describe("runMaterializeRange activity", () => {
       await reset();
       await db.exec(`
         delete from documents where id = 'd1-full'; delete from project_runs where id = 'fi';
-        insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents)
-          values ('fi', 'o1', 'u1', 'w', 'full-index', 'processing', 'extract', '{"indexingMode":"full"}', 1);
+        insert into project_runs (monthly_reservation_cents, id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents)
+          values (100, 'fi', 'o1', 'u1', 'w', 'full-index', 'processing', 'extract', '{"indexingMode":"full"}', 1);
         insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, previous_version_id, indexing_mode, page_count_source, parse_source_scan_version, parse_source_sha256)
           values ('d1-full', 'o1', 'u1', 'w', 'fi', 'c.pdf', 'application/pdf', 'k3', 'processing', 12, 'd1', 'full', 'counted', 1, repeat('0', 64));`);
       try {
@@ -1170,8 +1170,8 @@ describe("runMaterializeRange activity", () => {
     process.env.DOCSLURP_DEFERRED_PROFILES = "1";
     await db.exec(`
       delete from usage_events where run_id in ('m1', 'fi'); delete from documents where id = 'd1-full'; delete from project_runs where id = 'fi';
-      insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents)
-        values ('fi', 'o1', 'u1', 'w', 'full-index', 'processing', 'extract', '{"indexingMode":"full"}', 1);
+      insert into project_runs (monthly_reservation_cents, id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents)
+        values (100, 'fi', 'o1', 'u1', 'w', 'full-index', 'processing', 'extract', '{"indexingMode":"full"}', 1);
       insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, previous_version_id, indexing_mode, page_count_source, parse_source_scan_version, parse_source_sha256)
         values ('d1-full', 'o1', 'u1', 'w', 'fi', 'c.pdf', 'application/pdf', 'k3', 'processing', 12, 'd1', 'full', 'counted', 1, repeat('0', 64));`);
     try {
@@ -1195,8 +1195,8 @@ describe("runMaterializeRange activity", () => {
     process.env.DOCSLURP_DEFERRED_PROFILES = "1";
     await db.exec(`
       delete from usage_events where run_id in ('m1', 'fi'); delete from documents where id = 'd1-full'; delete from project_runs where id = 'fi';
-      insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents)
-        values ('fi', 'o1', 'u1', 'w', 'full-index', 'processing', 'extract', '{"indexingMode":"full"}', 1);
+      insert into project_runs (monthly_reservation_cents, id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents)
+        values (100, 'fi', 'o1', 'u1', 'w', 'full-index', 'processing', 'extract', '{"indexingMode":"full"}', 1);
       insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, previous_version_id, indexing_mode, page_count_source, parse_source_scan_version, parse_source_sha256)
         values ('d1-full', 'o1', 'u1', 'w', 'fi', 'c.pdf', 'application/pdf', 'k3', 'processing', 12, 'd1', 'full', 'counted', 1, repeat('0', 64));`);
     try {

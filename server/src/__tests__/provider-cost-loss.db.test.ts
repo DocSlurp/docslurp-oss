@@ -45,9 +45,9 @@ describe("providerCostLossItems", () => {
     await event({ ...o1, providerCost: 2, metadata: { chatTurnId: "tC", costSource: "provider", chatTurnRefund: { reason: "error", credits: 1 } } });
     // A finished run priced from estimates, and a run still processing.
     const tenMinutesAgo = new Date(Date.now() - 10 * 60_000);
-    await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, updated_at) values
-      ('r-done', 'o1', 'u1', 'w1', 'bulk-upload', 'completed', 'completed', '{}', ${tenMinutesAgo}),
-      ('r-busy', 'o1', 'u1', 'w1', 'bulk-upload', 'processing', 'embed', '{}', ${tenMinutesAgo})`;
+    await sql`insert into project_runs (monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage, pipeline, updated_at) values
+      (100, 'r-done', 'o1', 'u1', 'w1', 'bulk-upload', 'completed', 'completed', '{}', ${tenMinutesAgo}),
+      (100, 'r-busy', 'o1', 'u1', 'w1', 'bulk-upload', 'processing', 'embed', '{}', ${tenMinutesAgo})`;
     await event({ ...o1, runId: "r-done", providerCost: 10, metadata: { costSource: "estimate" } });
     await event({ ...o1, runId: "r-done", credits: 4 });
     await event({ ...o1, runId: "r-busy", providerCost: 10, metadata: { costSource: "provider" } });
@@ -72,9 +72,9 @@ describe("providerCostLossItems", () => {
   it("flags a run whose sandbox and escalation provider costs together exceed its unit charge", async () => {
     const o1 = { org: "o1", project: "w1", user: "u1" };
     const tenMinutesAgo = new Date(Date.now() - 10 * 60_000);
-    await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, updated_at) values
-      ('r-heavy', 'o1', 'u1', 'w1', 'bulk-upload', 'completed', 'completed', '{}', ${tenMinutesAgo}),
-      ('r-light', 'o1', 'u1', 'w1', 'bulk-upload', 'completed', 'completed', '{}', ${tenMinutesAgo})`;
+    await sql`insert into project_runs (monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage, pipeline, updated_at) values
+      (100, 'r-heavy', 'o1', 'u1', 'w1', 'bulk-upload', 'completed', 'completed', '{}', ${tenMinutesAgo}),
+      (100, 'r-light', 'o1', 'u1', 'w1', 'bulk-upload', 'completed', 'completed', '{}', ${tenMinutesAgo})`;
     // Arbitrary test amounts: a sandbox_compute event, an escalation read and one unit charge per run.
     for (const [runId, sandboxCents] of [["r-heavy", 0.2], ["r-light", 0.1]] as const) {
       await event({ ...o1, runId, model: "ocr-vm", metric: "sandbox_compute", providerCost: sandboxCents, metadata: { costSource: "estimate" } });
@@ -89,8 +89,8 @@ describe("providerCostLossItems", () => {
   });
 
   it("judges a run at its terminal status change, even long after its last event", async () => {
-    await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, updated_at)
-      values ('r-late', 'o1', 'u1', 'w1', 'bulk-upload', 'failed', 'failed', '{}', ${new Date(Date.now() - 5 * 60_000)})`;
+    await sql`insert into project_runs (monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage, pipeline, updated_at)
+      values (100, 'r-late', 'o1', 'u1', 'w1', 'bulk-upload', 'failed', 'failed', '{}', ${new Date(Date.now() - 5 * 60_000)})`;
     await event({ org: "o1", project: "w1", user: "u1", runId: "r-late", providerCost: 3, at: new Date(Date.now() - 3 * 60 * 60_000) });
     const { items } = await attribution.providerCostLossItems(window());
     expect(items.map((item) => item.key)).toEqual(["r-late"]);

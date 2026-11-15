@@ -31,8 +31,8 @@ beforeAll(async () => {
   await sql`insert into org_memberships(org_id, user_id, role) values ('o1', 'u1', 'owner')`;
   await sql`insert into projects(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W')`;
   await sql`
-    insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, processed_documents, pages_total, pages_processed, stats)
-    values ('r1', 'o1', 'u1', 'w', 'bulk-upload', 'processing', 'extract-markdown', ${sql.json(defaultPipelineFeatures as unknown as postgres.JSONValue)}, 1, 0, 10, 4,
+    insert into project_runs (monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, processed_documents, pages_total, pages_processed, stats)
+    values (100, 'r1', 'o1', 'u1', 'w', 'bulk-upload', 'processing', 'extract-markdown', ${sql.json(defaultPipelineFeatures as unknown as postgres.JSONValue)}, 1, 0, 10, 4,
       ${sql.json({ documents: 1, workerId: "machine-91" } as postgres.JSONValue)})
   `;
   await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count)

@@ -34,17 +34,17 @@ beforeAll(async () => {
     insert into "user"(id, name, email) values ('u1', 'A', 'a@example.com');
     insert into organizations(id, name, slug, created_by_user_id, worker_slots, credit_balance_cents) values ('o1', 'Org', 'org', 'u1', 8, 100000), ('o2', 'Poor', 'poor', 'u1', 8, 20), ('o3', 'Ten', 'ten', 'u1', 8, 10);
     insert into projects(id, org_id, user_id, name) values ('w1', 'o1', 'u1', 'W'), ('w2', 'o2', 'u1', 'P'), ('w3', 'o3', 'u1', 'T');
-    insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
-      values ('run1', 'o1', 'u1', 'w1', 'bulk-upload', 'processing', 'embed', '${pipeline}', 1, 1),
-             ('run2', 'o2', 'u1', 'w2', 'bulk-upload', 'processing', 'to-canonical', '${withFeatures}', 1, 1),
-             ('run3', 'o3', 'u1', 'w3', 'bulk-upload', 'processing', 'to-canonical', '${pipeline}', 10, 10);
+    insert into project_runs (monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
+      values (100, 'run1', 'o1', 'u1', 'w1', 'bulk-upload', 'processing', 'embed', '${pipeline}', 1, 1),
+             (100, 'run2', 'o2', 'u1', 'w2', 'bulk-upload', 'processing', 'to-canonical', '${withFeatures}', 1, 1),
+             (100, 'run3', 'o3', 'u1', 'w3', 'bulk-upload', 'processing', 'to-canonical', '${pipeline}', 10, 10);
     insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count)
       select 'big' || n, 'o3', 'u1', 'w3', 'run3', 'big' || n || '.docx', '${DOCX}', 'raw/b' || n, 'processing', 1 from generate_series(1, 10) n;
     insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count) values
       ('docx1', 'o1', 'u1', 'w1', 'run1', 'contract.docx', '${DOCX}', 'raw/c1', 'completed', 1),
       ('docx2', 'o2', 'u1', 'w2', 'run2', 'huge.docx', '${DOCX}', 'raw/c2', 'processing', 1);
-    insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
-      values ('run4', 'o1', 'u1', 'w1', 'bulk-upload', 'processing', 'embed', '${withFeatures}', 2, 2);
+    insert into project_runs (monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
+      values (100, 'run4', 'o1', 'u1', 'w1', 'bulk-upload', 'processing', 'embed', '${withFeatures}', 2, 2);
     insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source) values
       ('blank', 'o1', 'u1', 'w1', 'run4', 'blank.docx', '${DOCX}', 'raw/blank', 'completed', 1, 'assumed'),
       ('sheetless', 'o1', 'u1', 'w1', 'run4', 'notes.xlsx', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'raw/sheetless', 'completed', 1, 'assumed');

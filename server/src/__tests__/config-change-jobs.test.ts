@@ -59,8 +59,8 @@ async function seed(args: { credits: number; autoConfirm?: boolean; documents?: 
   await sql`insert into projects(id, org_id, user_id, name, pipeline, auto_confirm_reindex)
     values ('w', 'o1', 'u1', 'W', ${sql.json(JSON.parse(JSON.stringify(pipeline())))}, ${args.autoConfirm ?? false})`;
   await sql`insert into project_search_settings(project_id, user_id) values ('w', 'u1') on conflict do nothing`.catch(() => undefined);
-  await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, artifacts)
-    values ('src', 'o1', 'u1', 'w', 'upload', 'completed', 'index', ${sql.json(JSON.parse(JSON.stringify(pipeline())))}, ${args.documents ?? 2}, ${sql.json(Object.fromEntries(Array.from({ length: args.documents ?? 2 }, (_, i) => [`d${i}:markdown`, `s3://b/d${i}.md`])))})`;
+  await sql`insert into project_runs (monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, artifacts)
+    values (100, 'src', 'o1', 'u1', 'w', 'upload', 'completed', 'index', ${sql.json(JSON.parse(JSON.stringify(pipeline())))}, ${args.documents ?? 2}, ${sql.json(Object.fromEntries(Array.from({ length: args.documents ?? 2 }, (_, i) => [`d${i}:markdown`, `s3://b/d${i}.md`])))})`;
   for (let i = 0; i < (args.documents ?? 2); i += 1) {
     await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, canonical_id)
       values (${`d${i}`}, 'o1', 'u1', 'w', 'src', ${`f${i}.pdf`}, 'application/pdf', ${`k${i}`}, 'completed', 5, ${`c${i}`})`;
@@ -146,8 +146,8 @@ describe("config-change jobs", () => {
     const prefix = `extracts/o1/${extractId}`;
     await sql`insert into extracts (id, org_id, project_id, user_id, storage_prefix, retention_hours, expires_at)
       values (${extractId}, 'o1', 'w', 'u1', ${prefix}, 48, now() + interval '2 days')`;
-    await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, extract_id, storage_prefix)
-      values ('ext-run', 'o1', 'u1', 'w', 'bulk-upload', 'completed', 'index', ${sql.json(JSON.parse(JSON.stringify(pipeline())))}, 1, ${extractId}, ${prefix})`;
+    await sql`insert into project_runs (monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, extract_id, storage_prefix)
+      values (100, 'ext-run', 'o1', 'u1', 'w', 'bulk-upload', 'completed', 'index', ${sql.json(JSON.parse(JSON.stringify(pipeline())))}, 1, ${extractId}, ${prefix})`;
     await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, canonical_id)
       values ('dx', 'o1', 'u1', 'w', 'ext-run', 'secret.pdf', 'application/pdf', ${`${prefix}/raw/secret.pdf`}, 'completed', 5, ${`docslurp:extract:${extractId}:dx`})`;
 
@@ -293,8 +293,8 @@ describe("config-change jobs", () => {
   it("finds a job's runs by job_id", async () => {
     await seed({ credits: 10_000 });
     const { applied } = await patch(embeddingChange());
-    await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, job_id)
-      values ('second-run', 'o1', 'u1', 'w', 'reindex', 'queued', 'queued', '{}', 1, ${applied!.job!.id})`;
+    await sql`insert into project_runs (monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, job_id)
+      values (100, 'second-run', 'o1', 'u1', 'w', 'reindex', 'queued', 'queued', '{}', 1, ${applied!.job!.id})`;
     const status = await jobs.getJobStatus(applied!.job!.id, "u1");
     expect(status!.runIds.sort()).toEqual([applied!.job!.id, "second-run"].sort());
     // The lookup uses the job_id index (a seq scan on a tiny table is disabled for the plan check).
@@ -370,8 +370,8 @@ describe("config-change jobs", () => {
   it("leaves in-flight full-index runs alone: they build the previous config, which stays served", async () => {
     await seed({ credits: 10_000, documents: 2, vectorized: true });
     // A full index (map -> full) is in flight for a deferred document; it indexes with the config current when it started.
-    await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents)
-      values ('fi', 'o1', 'u1', 'w', 'full-index', 'processing', 'embed', '{}', 1)`;
+    await sql`insert into project_runs (monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents)
+      values (100, 'fi', 'o1', 'u1', 'w', 'full-index', 'processing', 'embed', '{}', 1)`;
     const { applied } = await patch(embeddingChange());
     expect(applied!.cancelledRunIds).toEqual([]);
     const [run] = await sql<{ status: string; control_state: string | null }[]>`select status, control_state from project_runs where id = 'fi'`;

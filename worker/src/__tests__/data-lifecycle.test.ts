@@ -61,8 +61,8 @@ const KEEP_TABLE_URI = "/tmp/lance/o1/keep/vectors-model%2Fx-4";
 
 async function seedRun(id: string, projectId = "w", status = "completed") {
   await sql`
-    insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, total_documents, pipeline, artifacts)
-    values (${id}, 'o1', 'u1', ${projectId}, 'bulk-upload', ${status}, ${status}, 1, '{}'::jsonb,
+    insert into project_runs (monthly_reservation_cents, id, org_id, user_id, project_id, kind, status, stage, total_documents, pipeline, artifacts)
+    values (100, ${id}, 'o1', 'u1', ${projectId}, 'bulk-upload', ${status}, ${status}, 1, '{}'::jsonb,
       ${sql.json({ "knowledge-graph": `s3://b/u1/${id}/graph/project-graph.json` })})
   `;
 }

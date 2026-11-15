@@ -15,7 +15,7 @@ import { Store } from "../db/store.js";
 import { materializePageRange } from "../deferred/materialize-pages.js";
 import { renderDocumentPage } from "../deferred/render-page.js";
 import { inspectArchive } from "../lib/quarantine-bytes.js";
-import { assertParseSourceDecided, originalSourceForQuarantine, PARSE_SOURCE_SCAN_VERSION, resolveDocumentSource, UnscannedParseSourceError, unscannedParseSourceKey } from "../lib/parse-source.js";
+import { bindDocumentUpload, assertParseSourceDecided, originalSourceForQuarantine, PARSE_SOURCE_SCAN_VERSION, resolveDocumentSource, UnscannedParseSourceError, unscannedParseSourceKey } from "../lib/parse-source.js";
 import { runDocumentStage, runDocuments } from "../pipeline/checkpoints.js";
 import { PdfSourceCache } from "../pipeline/pdf-asset-cache.js";
 import type { Stage } from "../pipeline/pipeline.js";
@@ -142,8 +142,8 @@ const ORIGINAL_SHA = sha256Bytes(attackPdf);
  */
 async function seedLegacySourceRun() {
   await sql`
-    insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, artifacts, total_documents, pages_total)
-    values ('run-src', 'o1', 'u1', 'w', 'bulk-upload', 'completed', 'completed', ${sql.json(pipeline as unknown as postgres.JSONValue)},
+    insert into project_runs (monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage, pipeline, artifacts, total_documents, pages_total)
+    values (100, 'run-src', 'o1', 'u1', 'w', 'bulk-upload', 'completed', 'completed', ${sql.json(pipeline as unknown as postgres.JSONValue)},
       ${sql.json({ "src:markdown": "s3://b/u1/run-src/markdown/src.md", "src:normalizedFormat": "pdf" })}, 1, 2)
   `;
   await sql`
@@ -161,8 +161,8 @@ async function seedLegacySourceRun() {
 
 async function seedReprocess(features: PipelineFeatures) {
   await sql`
-    insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total, execution_generation)
-    values ('run-re', 'o1', 'u1', 'w', 'bulk-upload', 'queued', 'queued', ${sql.json(features as unknown as postgres.JSONValue)}, 1, 2, 'test-generation')
+    insert into project_runs (monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total, execution_generation)
+    values (100, 'run-re', 'o1', 'u1', 'w', 'bulk-upload', 'queued', 'queued', ${sql.json(features as unknown as postgres.JSONValue)}, 1, 2, 'test-generation')
   `;
   await sql`
     insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, source_sha256, status, page_count,
@@ -270,8 +270,8 @@ describe("R7-H1: a reprocess re-runs quarantine and parses its own scanned copy,
 
   it("a pipeline stage refuses a document with no decision; a completed quarantine from an earlier build re-runs and decides it", async () => {
     await sql`
-      insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, execution_generation)
-      values ('run-old', 'o1', 'u1', 'w', 'upload', 'processing', 'format-detect', '{}', 1, null)`;
+      insert into project_runs (monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, execution_generation)
+      values (100, 'run-old', 'o1', 'u1', 'w', 'upload', 'processing', 'format-detect', '{}', 1, null)`;
     await sql`
       insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, source_sha256, status, page_count)
       values ('old', 'o1', 'u1', 'w', 'run-old', 'board-pack.pdf', 'application/pdf', 'raw/a.pdf', ${ORIGINAL_SHA}, 'processing', 2)`;
@@ -311,8 +311,8 @@ describe("R7-H1: a reprocess re-runs quarantine and parses its own scanned copy,
 describe("R7-H1: a document quarantined before this build is never read by the page renderer or materialization", () => {
   beforeEach(async () => {
     await sql`
-      insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents)
-      values ('run-legacy', 'o1', 'u1', 'w', 'upload', 'completed', 'completed', ${sql.json(pipeline as unknown as postgres.JSONValue)}, 1)`;
+      insert into project_runs (monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents)
+      values (100, 'run-legacy', 'o1', 'u1', 'w', 'upload', 'completed', 'completed', ${sql.json(pipeline as unknown as postgres.JSONValue)}, 1)`;
     await sql`
       insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, source_sha256, status, page_count)
       values ('legacy', 'o1', 'u1', 'w', 'run-legacy', 'board-pack.pdf', 'application/pdf', 'raw/legacy.pdf', ${ORIGINAL_SHA}, 'completed', 2)`;
@@ -385,8 +385,8 @@ describe("R7-H1: a document quarantined before this build is never read by the p
 describe("R7-L2: no reader reaches the upload by building a name at runtime", () => {
   it("a loaded document with a scanned copy carries neither the upload's key nor a property that names it", async () => {
     await sql`
-      insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents)
-      values ('run-copy', 'o1', 'u1', 'w', 'upload', 'completed', 'completed', '{}', 1)`;
+      insert into project_runs (monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents)
+      values (100, 'run-copy', 'o1', 'u1', 'w', 'upload', 'completed', 'completed', '{}', 1)`;
     await sql`
       insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, source_sha256, status, page_count,
         parse_source_key, parse_source_sha256, parse_source_scan_version)
@@ -438,8 +438,8 @@ describe("R7-L1: a pax global size record is refused", () => {
 
 describe("R8-L1: an 'original' decision binds parsers to the bytes quarantine scanned, with or without a server hash", () => {
   async function seedNullHashRow() {
-    await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, execution_generation)
-      values ('run-swap', 'o1', 'u1', 'w', 'upload', 'processing', 'quarantine', '{}', 1, null)`;
+    await sql`insert into project_runs (monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, execution_generation)
+      values (100, 'run-swap', 'o1', 'u1', 'w', 'upload', 'processing', 'quarantine', '{}', 1, null)`;
     await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, source_sha256, status, page_count)
       values ('swap', 'o1', 'u1', 'w', 'run-swap', 'notes.pdf', 'application/pdf', 'raw/swap.pdf', null, 'processing', 1)`;
   }
@@ -529,8 +529,8 @@ describe("production: quarantine decides a fresh upload under NODE_ENV=productio
 
   async function seedFreshUpload(id: string, key: string, sha: string | null, features: PipelineFeatures = pipeline) {
     await sql`
-      insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total, execution_generation)
-      values (${`run-${id}`}, 'o1', 'u1', 'w', 'upload', 'queued', 'queued', ${sql.json(features as unknown as postgres.JSONValue)}, 1, 1, 'test-generation')`;
+      insert into project_runs (monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total, execution_generation)
+      values (100, ${`run-${id}`}, 'o1', 'u1', 'w', 'upload', 'queued', 'queued', ${sql.json(features as unknown as postgres.JSONValue)}, 1, 1, 'test-generation')`;
     await sql`
       insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, source_sha256, status, page_count)
       values (${id}, 'o1', 'u1', 'w', ${`run-${id}`}, 'upload.pdf', 'application/pdf', ${key}, ${sha}, 'queued', 1)`;
@@ -687,8 +687,8 @@ describe("production: quarantine decides a fresh upload under NODE_ENV=productio
   /** Several uploads in one run; bytes starting "INFECTED" are what the fake scanner flags. */
   async function seedRun(runId: string, uploads: Array<[id: string, bytes: Buffer]>) {
     await sql`
-      insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total, execution_generation)
-      values (${runId}, 'o1', 'u1', 'w', 'bulk-upload', 'processing', 'quarantine', ${sql.json(pipeline as unknown as postgres.JSONValue)}, ${uploads.length}, ${uploads.length}, 'test-generation')`;
+      insert into project_runs (monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total, execution_generation)
+      values (100, ${runId}, 'o1', 'u1', 'w', 'bulk-upload', 'processing', 'quarantine', ${sql.json(pipeline as unknown as postgres.JSONValue)}, ${uploads.length}, ${uploads.length}, 'test-generation')`;
     for (const [id, bytes] of uploads) {
       await sql`
         insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, source_sha256, status, page_count)
@@ -775,9 +775,13 @@ describe("production: quarantine decides a fresh upload under NODE_ENV=productio
       // An object quarantine did not get from originalSourceForQuarantine is refused before any check, even a perfect copy.
       const forged = { id: "x", sourceKey: "raw/x.pdf", sourceSha256: sha256Bytes(benign) };
       expect(() => verifyQuarantineUpload(forged, sha256Bytes(benign))).toThrow(/not issued by originalSourceForQuarantine/);
-      // In-memory documents (no loader binding): only "unscanned-allowed" ones are their own upload, even in production.
-      const issue = (sourceKey: string, sourceSha256: string | null) =>
-        originalSourceForQuarantine({ id: "x", sourceKey, sourceSha256, parseSourceDecision: "unscanned-allowed" });
+      // Non-development uploads must retain the loader binding, even with a development-only decision.
+      expect(() => originalSourceForQuarantine({ ...forged, parseSourceDecision: "unscanned-allowed" })).toThrow(/no upload binding/);
+      const issue = (sourceKey: string, sourceSha256: string | null) => {
+        const document = { id: "x", sourceKey, sourceSha256 };
+        bindDocumentUpload(document, { source_key: sourceKey, source_sha256: sourceSha256 });
+        return originalSourceForQuarantine(document);
+      };
       const issued = issue("raw/x.pdf", sha256Bytes(benign));
       expect(Object.isFrozen(issued)).toBe(true);
       expect(() => verifyQuarantineUpload({ ...issued }, sha256Bytes(benign))).toThrow(/not issued/);

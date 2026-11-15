@@ -38,8 +38,8 @@ beforeEach(async () => {
     insert into "user"(id, name, email) values ('u1', 'A', 'a@x') on conflict do nothing;
     insert into organizations(id, name, slug, created_by_user_id) values ('o1', 'Org', 'org', 'u1'), ('o2', 'Other', 'other', 'u1');
     insert into projects(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W'), ('w2', 'o2', 'u1', 'W2');
-    insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
-      values ('r1', 'o1', 'u1', 'w', 'upload', 'processing', 'graph-enrich', '{}', 0, 0);
+    insert into project_runs (monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
+      values (100, 'r1', 'o1', 'u1', 'w', 'upload', 'processing', 'graph-enrich', '{}', 0, 0);
   `);
   vi.spyOn(console, "log").mockImplementation(() => {});
   vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -74,8 +74,8 @@ describe("run-level stage provider scope", () => {
 
   it("keeps concurrent runs' scopes apart", async () => {
     await db.exec(`update organizations set allow_china_providers = true; update projects set allow_china_providers = (id = 'w');
-      insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
-        values ('r2', 'o2', 'u1', 'w2', 'upload', 'processing', 'graph-enrich', '{}', 0, 0);`);
+      insert into project_runs (monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
+        values (100, 'r2', 'o2', 'u1', 'w2', 'upload', 'processing', 'graph-enrich', '{}', 0, 0);`);
     const seen = new Map<string, { allow: boolean; org: string | null }>();
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });

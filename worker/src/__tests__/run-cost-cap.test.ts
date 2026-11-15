@@ -35,9 +35,9 @@ beforeAll(async () => {
     insert into "user"(id, name, email) values ('u1', 'A', 'a@x');
     insert into organizations(id, name, slug, created_by_user_id, worker_slots, credit_balance_cents) values ('o1', 'Org', 'org', 'u1', 8, 100000);
     insert into projects(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W');
-    insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
-      values ('r1', 'o1', 'u1', 'w', 'bulk-upload', 'processing', 'vision-extract', '${pipeline(null)}', 4, 8),
-             ('r2', 'o1', 'u1', 'w', 'bulk-upload', 'processing', 'embed', '${pipeline(5)}', 4, 8);
+    insert into project_runs (monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
+      values (100, 'r1', 'o1', 'u1', 'w', 'bulk-upload', 'processing', 'vision-extract', '${pipeline(null)}', 4, 8),
+             (100, 'r2', 'o1', 'u1', 'w', 'bulk-upload', 'processing', 'embed', '${pipeline(5)}', 4, 8);
     insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count) values
       ${DOCS.map((id) => `('${id}', 'o1', 'u1', 'w', 'r1', '${id}.pdf', 'application/pdf', 'raw/${id}', 'processing', 2)`).join(", ")},
       ${DOCS.map((id) => `('r2-${id}', 'o1', 'u1', 'w', 'r2', '${id}.pdf', 'application/pdf', 'raw/${id}', 'processing', 2)`).join(", ")};
@@ -197,8 +197,8 @@ describe("run cost cap figure", () => {
 
   it("counts boosted credits before and after persistence, without changing provider costs or double-charging retries", async () => {
     const boostPipeline = JSON.stringify({ ...defaultPipelineFeatures, speedBoost: true, maxCostCents: 1 });
-    await db.query(`insert into project_runs (id,org_id,user_id,project_id,kind,status,stage,pipeline)
-      values ('r-boost','o1','u1','w','bulk-upload','processing','embed',$1::jsonb)`, [boostPipeline]);
+    await db.query(`insert into project_runs (monthly_reservation_cents,id,org_id,user_id,project_id,kind,status,stage,pipeline)
+      values (100, 'r-boost','o1','u1','w','bulk-upload','processing','embed',$1::jsonb)`, [boostPipeline]);
     const state = WorkflowState.create(await store.loadRun("r-boost"), []);
     state.run.pipeline.speedBoost = false; // persisted opt-in was captured before mutable stage state changes
     state.usageLedger.record({ provider: "openrouter", model: "z-ai/glm-5.3-flash:nitro", metric: "page-analysis",
@@ -219,8 +219,8 @@ describe("run cost cap figure", () => {
   });
 
   it("ignores the deprecated run-row counters", async () => {
-    await db.exec(`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, input_cost_cents, output_cost_cents)
-      values ('r-old', 'o1', 'u1', 'w', 'bulk-upload', 'processing', 'embed', '${pipeline(10)}', 40, 40)`);
+    await db.exec(`insert into project_runs (monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage, pipeline, input_cost_cents, output_cost_cents)
+      values (100, 'r-old', 'o1', 'u1', 'w', 'bulk-upload', 'processing', 'embed', '${pipeline(10)}', 40, 40)`);
     const state = WorkflowState.create(await store.loadRun("r-old"), []);
     expect(state.run.spentCents).toBe(0);
     expect(isCostCapExceeded(state)).toBe(false);

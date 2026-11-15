@@ -22,8 +22,8 @@ afterAll(async () => { await sql?.end(); await stop?.(); });
 it("rechecks live attributed spend during serialized run admissions and interactive materialization", async () => {
   const results = await Promise.allSettled(Array.from({ length: 8 }, (_, i) =>
     guard.admitRunSpend("o", "p", async (tx) => {
-      await tx`insert into project_runs (id,org_id,project_id,user_id,kind,status,stage,pipeline)
-        values (${`run-${i}`},'o','p','u','bulk-upload','queued','queued','{}')`;
+      await tx`insert into project_runs (id,org_id,project_id,user_id,kind,status,stage,pipeline,monthly_reservation_cents)
+        values (${`run-${i}`},'o','p','u','bulk-upload','queued','queued','{}',1)`;
       await tx`insert into usage_events (id,user_id,org_id,project_id,metric,provider,model,unit,amount,cost_cents)
         values (${`usage-${i}`},'u','o','p','ingest-page-fast','docslurp','unit','page',1,1)`;
     })));
@@ -41,4 +41,10 @@ it("rechecks live attributed spend during serialized run admissions and interact
   await expect(guard.assertCanSpend("other", "other-p", { kind: "interactive" })).resolves.toBeUndefined();
   await expect(guard.assertCanSpend("other", "p", { kind: "interactive" }))
     .rejects.toMatchObject({ code: "plan_not_entitled" });
+});
+
+it("refuses active runs with an omitted monthly reservation", async () => {
+  await expect(sql`insert into project_runs (id,org_id,project_id,user_id,kind,status,stage,pipeline)
+    values ('missing-reservation','other','other-p','u','bulk-upload','queued','queued','{}')`)
+    .rejects.toThrow(/Invalid monthly capacity/);
 });

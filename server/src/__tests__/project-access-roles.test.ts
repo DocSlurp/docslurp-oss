@@ -28,6 +28,12 @@ describe("project edit and contribute rights", () => {
     expect(canEditProject(viewer, userId)).toBe(false);
   });
 
+  it("does not grant a billing member default-project content or settings rights", () => {
+    const member = access({ isDefaultProject: true, orgRole: "billing" });
+    expect(canContributeToProject(member, userId)).toBe(false);
+    expect(canEditProject(member, userId)).toBe(false);
+  });
+
   it("gives no default-project rights to someone outside the org", () => {
     expect(canContributeToProject(access({ isDefaultProject: true, orgRole: null }), userId)).toBe(false);
   });

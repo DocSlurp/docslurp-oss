@@ -143,8 +143,8 @@ let clock = 0;
 
 async function run(id: string, args: { status?: string; projectId?: string; leaseMinutes?: number } = {}) {
   await sql`
-    insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, lease_expires_at)
-    values (${id}, 'o1', 'u1', ${args.projectId ?? "w"}, 'bulk-upload', ${args.status ?? "processing"}, 'embed', '{}'::jsonb,
+    insert into project_runs (monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage, pipeline, lease_expires_at)
+    values (100, ${id}, 'o1', 'u1', ${args.projectId ?? "w"}, 'bulk-upload', ${args.status ?? "processing"}, 'embed', '{}'::jsonb,
       now() + make_interval(mins => ${args.leaseMinutes ?? 5}))
   `;
 }

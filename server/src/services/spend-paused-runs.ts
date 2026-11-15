@@ -5,6 +5,7 @@ import { RUN_EVENTS_CHANNEL } from "./run-event-hub.js";
 import { loadSpendStatus, runAdmissionReserveCredits, spendBlockReason, spendGuardsSkipped } from "./billing/spend-guard.js";
 import { creditLeasesEnabled, grantRunCreditLease } from "./billing/credit-leases.js";
 import { fleetSupports, taskQueueForOrgKey } from "./worker-fleet.js";
+import { restoreRunMonthlyCapacity } from "./run-monthly-readmission.js";
 
 /**
  * Runs the worker paused mid-run because their org could no longer spend
@@ -76,9 +77,14 @@ export async function resumeSpendPausedRunOutcome(runId: string, deps: SpendPaus
         for no key update
       `;
       if (!row) return { status: "not-spend-paused" } as const;
+      await restoreRunMonthlyCapacity(tx, row.id);
       if (!spendGuardsSkipped()) {
         const reason = spendBlockReason(await loadSpendStatus(row.org_id, row.project_id, { client, reusingRunId: row.id, runReserveCredits: leases ? 0 : runAdmissionReserveCredits() }));
-        if (reason) return { status: "blocked", reason: reason.code } as const;
+        if (reason) {
+          blockedReason = reason.code;
+          // Restoration must roll back together with the refused pause/lease.
+          throw new Error("Resume spend refused");
+        }
       }
       await tx`
         update project_runs set control_state = null, control_requested_at = null,
@@ -111,7 +117,9 @@ export async function resumeSpendPausedRunOutcome(runId: string, deps: SpendPaus
       `;
       return { status: "resumed" } as const;
     });
-  } catch {
+  } catch (error) {
+    const code = (error as { code?: string }).code;
+    if (code === "P4021" || code === "P4022") return { status: "blocked", reason: code === "P4021" ? "org_budget_paused" : "project_budget_paused" };
     if (blockedReason) return { status: "blocked", reason: blockedReason };
     console.error(`[spend-paused-runs] run=${runId} resume_delivery_deferred=true pause_preserved=true`);
     return { status: "deferred" };

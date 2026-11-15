@@ -10,7 +10,7 @@ beforeAll(async()=>{
  await db.exec(`insert into "user"(id,name,email) values ('u','U','geo@example.com');
  insert into organizations(id,name,slug,created_by_user_id) values('o','O','geo','u');
  insert into projects(id,org_id,user_id,name) values('w','o','u','W');
- insert into project_runs(id,org_id,user_id,project_id,kind,status,stage,pipeline) values('r','o','u','w','upload','processing','structured-extract','{}');
+ insert into project_runs(monthly_reservation_cents,id,org_id,user_id,project_id,kind,status,stage,pipeline) values(100, 'r','o','u','w','upload','processing','structured-extract','{}');
  insert into documents(id,org_id,user_id,project_id,run_id,filename,mime_type,source_key,status)
  values('d','o','u','w','r','d.txt','text/plain','source','processing');`);
 },60000);

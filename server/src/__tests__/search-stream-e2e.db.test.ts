@@ -67,11 +67,11 @@ beforeAll(async () => {
     values ('org-a', 'Org A', 'stream-a', 'user-a', 100000), ('org-b', 'Org B', 'stream-b', 'user-b', 100000)`;
   await sql`insert into org_memberships (org_id, user_id, role) values ('org-a', 'user-a', 'owner'), ('org-b', 'user-b', 'owner')`;
   await sql`insert into projects (id, org_id, user_id, name, is_default) values ('proj-a', 'org-a', 'user-a', 'Alpha', true), ('proj-b', 'org-b', 'user-b', 'Zenith', true)`;
-  await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline) values
-    ('run-a', 'org-a', 'user-a', 'proj-a', 'bulk-upload', 'completed', 'completed', '{}'),
-    ('run-a-live', 'org-a', 'user-a', 'proj-a', 'bulk-upload', 'processing', 'page-index', '{}'),
-    ('run-b', 'org-b', 'user-b', 'proj-b', 'bulk-upload', 'completed', 'completed', '{}'),
-    ('run-b-live', 'org-b', 'user-b', 'proj-b', 'bulk-upload', 'processing', 'page-index', '{}')`;
+  await sql`insert into project_runs (monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage, pipeline) values
+    (100, 'run-a', 'org-a', 'user-a', 'proj-a', 'bulk-upload', 'completed', 'completed', '{}'),
+    (100, 'run-a-live', 'org-a', 'user-a', 'proj-a', 'bulk-upload', 'processing', 'page-index', '{}'),
+    (100, 'run-b', 'org-b', 'user-b', 'proj-b', 'bulk-upload', 'completed', 'completed', '{}'),
+    (100, 'run-b-live', 'org-b', 'user-b', 'proj-b', 'bulk-upload', 'processing', 'page-index', '{}')`;
 
   const doc = (id: string, org: string, user: string, project: string, run: string, status: string) => sql`
     insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status)

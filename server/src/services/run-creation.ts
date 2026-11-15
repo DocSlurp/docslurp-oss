@@ -996,8 +996,9 @@ export function createRunCreation(deps: RunCreationDeps) {
     // committed, not after the Run and its document versions exist (an orphan run recovery would retry forever).
     // The forecast prices the files and pages the run actually has (counted pages where known, sizes otherwise), not placeholders.
     type ForecastFile = { filename: string; mimeType: string; sizeBytes: number; pages?: number };
+    const executionPipeline = platformRunPipeline(sources.kind === "files" ? withoutStageSelection(input.pipeline) : input.pipeline);
     const costForecastFor = (files: ForecastFile[]) => buildRunProcessingPreview({
-      request: { project: input.projectId, pipeline: input.pipeline, files, urls: [] },
+      request: { project: input.projectId, pipeline: executionPipeline, speedBoost: executionPipeline.speedBoost === true, files, urls: [] },
     }).current.estimatedCost;
     const forecastFilesOfSources = (): ForecastFile[] => sources.kind === "files"
       ? sources.files.map((file) => ({ filename: file.filename, mimeType: file.mimeType, sizeBytes: Math.max(0, Math.round(file.fileSize ?? 0)) }))
@@ -1008,7 +1009,14 @@ export function createRunCreation(deps: RunCreationDeps) {
         ...forecastPages(doc),
       }));
     // The preview schema needs at least one file; with none (an empty run) the call only validates the pipeline.
+    if (sources.kind === "files" && sources.files.some(file => !Number.isFinite(file.fileSize) || (file.fileSize ?? 0) <= 0)) {
+      throw new Error("Monthly admission requires trusted positive source size evidence");
+    }
     const validationFiles = forecastFilesOfSources();
+    if (validationFiles.some(file => !(Number.isFinite(file.sizeBytes) && file.sizeBytes > 0) &&
+        !(Number.isSafeInteger(file.pages) && (file.pages ?? 0) > 0))) {
+      throw new Error("Monthly admission requires trusted positive workload evidence");
+    }
     const admissionForecast = costForecastFor(validationFiles.length > 0 ? validationFiles : [{ filename: "validation.pdf", mimeType: "application/pdf", sizeBytes: 1, pages: 1 }]);
 
     const runId = input.runId ?? randomUUID();
@@ -1022,7 +1030,7 @@ export function createRunCreation(deps: RunCreationDeps) {
       sourceKeys: sources.kind === "files" ? sources.files.map((file) => file.sourceKey) : [],
       // New files always run every enabled stage; a caller re-running existing
       // Documents chooses its own stage selection.
-      pipeline: platformRunPipeline(sources.kind === "files" ? withoutStageSelection(input.pipeline) : input.pipeline),
+      pipeline: executionPipeline,
     });
 
     // Stamped on every Document so a later project mode switch never rewrites how it was indexed.

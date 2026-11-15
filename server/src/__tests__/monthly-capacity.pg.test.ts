@@ -68,7 +68,11 @@ it("production materialization reserves pending workflow capacity across five co
  await sql`update projects set monthly_budget_cents=10 where id='capacity-p'`;
  vi.doMock("../lib/temporal.js", () => ({ startMaterializeWorkflow: vi.fn(), signalPipelinePause: vi.fn(), signalPipelineResume: vi.fn() }));
  const { defaultMaterializeDeps } = await import("../search/deferred/materialize-client.js");
- const results = await Promise.allSettled(Array.from({length:8}, () => defaultMaterializeDeps.createRun({ orgId:'capacity-o', projectId:'capacity-p', userId:'capacity-u', documentId:'missing', documents:1, pages:20, maxCredits:6 })));
+ await sql`insert into project_runs(id,org_id,project_id,user_id,kind,status,stage,pipeline)
+   values('materialize-source-run','capacity-o','capacity-p','capacity-u','upload','completed','completed','{}')`;
+ await sql`insert into documents(id,org_id,project_id,user_id,run_id,filename,mime_type,source_key,status,page_count,billing_pages,page_count_source)
+   values('materialize-source','capacity-o','capacity-p','capacity-u','materialize-source-run','source.pdf','application/pdf','raw/source','completed',20,20,'counted')`;
+ const results = await Promise.allSettled(Array.from({length:8}, () => defaultMaterializeDeps.createRun({ orgId:'capacity-o', projectId:'capacity-p', userId:'capacity-u', documentId:'materialize-source', documents:1, pages:20, pageNumbers:Array.from({length:20},(_,i)=>i+1), maxCredits:6 })));
  expect(results.filter(r=>r.status==='fulfilled')).toHaveLength(1);
  expect(Number((await sql`select sum(cents) as n from pending_monthly_capacity where org_id='capacity-o'`)[0]!.n)).toBe(6);
  const runId=(results.find(r=>r.status==='fulfilled') as PromiseFulfilledResult<string>).value;

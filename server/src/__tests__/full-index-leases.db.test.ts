@@ -122,3 +122,17 @@ it("refuses unspecified reservations on insertion and terminal-run readmission",
   await expect(sql`update project_runs set status='queued' where id='run-fx-a-0'`)
     .rejects.toThrow('Invalid monthly capacity');
 });
+
+it.each([true, false])("uses current summary-tree setting %s in forecast and persisted pipeline", async enabled => {
+  const prepared = await seed('fx-a');
+  await sql`update organizations set credit_balance_cents=1000 where id='fx-org'`;
+  prepared.batches = prepared.batches.map(batch => ({ ...batch, pipeline: { ...batch.pipeline, summaryTree: { enabled: !enabled } } }));
+  await sql`update projects set pipeline=jsonb_set(pipeline, '{summaryTree}', ${sql.json({ enabled })}) where id='fx-a'`;
+  const { runIds, pipelines } = await svc.commitIndexJobs(prepared, 'fx-user');
+  const [run] = await sql`select pipeline, monthly_reservation_cents from project_runs where id=${runIds[0]!}`;
+  expect(run!.pipeline.summaryTree).toEqual({ enabled });
+  expect(pipelines.get(runIds[0]!)).toEqual(run!.pipeline);
+  const { buildRunProcessingPreview } = await import('../services/run-processing-preview.js');
+  const expected = buildRunProcessingPreview({ request: { project: 'fx-a', pipeline: run!.pipeline, speedBoost: run!.pipeline.speedBoost === true, urls: [], files: prepared.batches[0]!.docs.map(doc => ({ filename: doc.filename, mimeType: doc.mime_type, sizeBytes: 0, pages: doc.billing_pages ?? doc.page_count })) } }).current.estimatedCost.maxCents;
+  expect(Number(run!.monthly_reservation_cents)).toBe(Math.max(1, expected));
+});

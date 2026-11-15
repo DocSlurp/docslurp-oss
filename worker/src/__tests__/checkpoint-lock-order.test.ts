@@ -53,8 +53,8 @@ async function seed(pg: Sql) {
   await pg`insert into organizations (id, name, slug, created_by_user_id, credit_balance_cents)
     values (${`${prefix}-org`}, 'Lock', ${`${prefix}-org`}, 'lock-u1', 1000000)`;
   await pg`insert into projects (id, org_id, user_id, name) values (${`${prefix}-ws`}, ${`${prefix}-org`}, 'lock-u1', 'W')`;
-  await pg`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, artifacts)
-    values (${runId}, ${`${prefix}-org`}, 'lock-u1', ${`${prefix}-ws`}, 'bulk-upload', 'processing', 'extract-markdown', '{}', '{}')`;
+  await pg`insert into project_runs (monthly_reservation_cents, id, org_id, user_id, project_id, kind, status, stage, pipeline, artifacts)
+    values (100, ${runId}, ${`${prefix}-org`}, 'lock-u1', ${`${prefix}-ws`}, 'bulk-upload', 'processing', 'extract-markdown', '{}', '{}')`;
   for (const id of docIds) {
     await pg`insert into documents (id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count)
       values (${id}, 'lock-u1', ${`${prefix}-ws`}, ${runId}, ${`${id}.pdf`}, 'application/pdf', ${`k/${id}`}, 'processing', 10)`;

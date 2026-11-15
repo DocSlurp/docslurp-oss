@@ -24,8 +24,7 @@ import {
 
 import { sql } from "../db.js";
 import { discardUnstartedRun } from "./run-creation.js";
-import { mapDocument, mapProjectRun, type DocumentRow, type ProjectRunRow } from "./run-records.js";
-import { getProject } from "./projects.js";
+import { type ProjectRunRow } from "./run-records.js";
 import { canContributeToProject, getProjectAccess } from "./organizations.js";
 import { getLiveApiKeyById } from "./api-keys.js";
 
@@ -191,12 +190,13 @@ async function idempotently(
       await authorizeReceiptProject(projectId, args.userId, args.orgId, args.apiKeyId);
       const [stableReceipt] = await sql`select stable_result from intake_request_receipts
         where idempotency_key = ${idempotencyKey} and route_key = ${args.routeKey}`;
-      return {
-        payload: cached.body as ProjectIntakePayload,
-        status: cached.status as 201,
-        temporalDeferred: Boolean((stableReceipt?.stable_result as ProjectIntakeActionResult | undefined)?.temporalDeferred),
-        idempotencyReplayed: true,
-      };
+      const stable = stableReceipt?.stable_result as ProjectIntakeActionResult | undefined;
+      if (!stable || stable.status !== 201 || typeof stable.temporalDeferred !== "boolean" ||
+          !stable.payload || stable.payload.project?.id !== projectId ||
+          !stable.payload.run?.id || !Array.isArray(stable.payload.documents) || !Array.isArray(stable.payload.warnings)) {
+        throw new ProjectIntakeError("Committed intake response requires reconciliation", 409, undefined, "intake_reconciliation_required");
+      }
+      return { ...stable, idempotencyReplayed: true };
     }
 
     // Claim before work. Safe preparation can retry under this same lock; a crawl
@@ -287,14 +287,7 @@ export async function confirmDirectUploadProjectIntake(
     const [existing] = await sql<Array<ProjectRunRow & { creation_ready_at?: string | null }>>`select * from project_runs where id = ${args.sessionId} and user_id = ${args.userId}`;
     if (existing && existing.creation_ready_at) {
       await authorizeReceiptProject(existing.project_id, args.userId, loaded.session.org_id, loaded.session.api_key_id);
-      const project = await getProject(existing.project_id, args.userId);
-      if (!project) throw new ProjectIntakeError("Upload project is no longer accessible", 403);
-      const documents = await sql<DocumentRow[]>`select * from documents where run_id = ${args.sessionId} order by created_at, id`;
-      if (loaded.session.extract_id) await attachExtractRun(loaded.session.extract_id, args.sessionId);
-      const extract = loaded.session.extract_id ? await describeExtractById(loaded.session.extract_id) : null;
-      const result = actionResult({ project, run: mapProjectRun(existing), documents: documents.map(mapDocument), pipeline: existing.pipeline, deferredReason: null, rejected: [], ...(extract ? { extract } : {}) });
-      await persistDirectUploadResult(args.sessionId, result);
-      return result;
+      throw new ProjectIntakeError("Committed intake response requires reconciliation", 409, undefined, "intake_reconciliation_required");
     }
     if (existing) await discardUnstartedRun(args.sessionId);
     const { session, items } = await prepareDirectUploadProjectIntake(args.sessionId, args.userId);

@@ -66,8 +66,8 @@ async function documentRun(pages: number, mime = "application/pdf", facts: objec
   seq += 1;
   const runId = `run-${seq}`, documentId = `doc-${seq}`;
   await db.exec(`
-    insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
-      values ('${runId}', '${org.org}', 'u1', '${org.project}', 'bulk-upload', 'processing', 'extract-markdown', '${pipeline}', 1, ${pages});
+    insert into project_runs (monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
+      values (100, '${runId}', '${org.org}', 'u1', '${org.project}', 'bulk-upload', 'processing', 'extract-markdown', '${pipeline}', 1, ${pages});
     insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source, file_facts, parse_source_scan_version, parse_source_sha256)
       values ('${documentId}', '${org.org}', 'u1', '${org.project}', '${runId}', 'f', '${mime}', 'raw/${documentId}', 'processing', ${pages}, 'counted', '${JSON.stringify(facts)}', 1, '${STAGED_SHA}');`);
   const document = (await store.loadDocument(documentId))!;
