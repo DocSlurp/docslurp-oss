@@ -56,6 +56,31 @@ export type ProjectState = {
   searches: { total: number; recentCount: number; recentZeroResultCount: number; latencyMs: DistributionStats };
   performance: { completedRuns: number; failedRuns: number; completedPages: number; durationMs: DistributionStats; pagesPerMinute: number | null; minutesPer100Pages: number | null; basis: "run-wall-time-including-queue" };
   usage: RunUsage;
+  /**
+   * Summary tree (section summaries searched beside the chunks): the project's stored setting, whether this deployment
+   * builds and serves trees, the build status, document counts and the read-only server constants.
+   */
+  summaryTree: ProjectSummaryTreeState;
+};
+export type SummaryTreeSearchMode = "off" | "guide" | "include";
+export type ProjectSummaryTreeState = {
+  enabled: boolean; buildAvailable: boolean;
+  /** False: the deployment charges for work but has no price for the tree, so it cannot be turned on or built. */
+  buildPriced: boolean;
+  serveAvailable: boolean;
+  searchMode: SummaryTreeSearchMode; effectiveSearchMode: SummaryTreeSearchMode;
+  status: "off" | "building" | "partial" | "ready";
+  documents: { total: number; ready: number; building: number; partial: number; skipped: number; missing: number };
+  nodes: number;
+  constants: {
+    keyVersion: number; minGroupSize: number; maxGroupSize: number; minFanIn: number; maxFanIn: number; minDocumentLeaves: number;
+    /** Node cap of one document: `maxNodesPerLeaf` per leaf, at least `baseNodesPerDocument`, at most `maxNodesPerDocument`. */
+    baseNodesPerDocument: number; maxNodesPerLeaf: number; maxNodesPerDocument: number;
+    maxLevels: number; summaryTargetWords: number; maxTableLeafShare: number;
+    includeContextShare: number; deadlineFactor: number; deadlineGraceMs: number; deadlineCalibrated: boolean;
+    searchHits: number; guideHits: number; guideChunksPerHit: number; guideMaxRange: number; guideResultShare: number;
+    buildStaleSeconds: number; skippedFormats: string[];
+  };
 };
 export type OrganizationRole = "owner" | "admin" | "member" | "billing";
 export type OrganizationRecord = {

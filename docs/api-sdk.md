@@ -286,6 +286,7 @@ curl -X PATCH "$api_url/v1/projects/amber-falcon-ridge" \
 | Who am I | `GET /v1/whoami` | Use HTTP | `whoami` |
 | Retention | `PATCH /v1/organizations/:orgId` or `/v1/projects/:project` with `retainDocumentVersions` | `setRetention` | Use SDK/HTTP |
 | Estimate work before starting it | `POST …/estimate` twins of each work-creating route | `updateProjectEstimate`, `reprocessEstimate`, `fullIndexEstimate`, `uploadEstimate`, … | `--estimate` on `upload`, `full-index`, `reprocess` |
+| Summary tree backfill (trees for documents a project already holds) | `GET` / `POST /v1/projects/:project/summary-tree/backfill` (start needs `maxCostCents`), `POST …/backfill/estimate`, `GET …/backfill/:jobId`, `POST …/backfill/:jobId/cancel` | `getSummaryTreeBackfill`, `summaryTreeBackfillEstimate`, `startSummaryTreeBackfill`, `getSummaryTreeBackfillJob`, `cancelSummaryTreeBackfill` | `summary-tree backfill --max-cost-cents <n>`, `summary-tree status`, `summary-tree cancel <jobId>` |
 | Follow a background job | `GET /v1/jobs/:id`, `GET /v1/jobs/:id/events` (SSE) | `getJob` / `streamJob` | `jobs get` / `jobs watch` |
 | List / create organizations | `GET` / `POST /v1/organizations` | `listOrganizations` / `createOrganization` | Use SDK/HTTP |
 | Read / update organization (name, slug, retention, `allowChinaProviders`) | `GET` / `PATCH /v1/organizations/:orgId` | `getOrganization` / `updateOrganization` | Use SDK/HTTP |

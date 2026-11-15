@@ -1,6 +1,7 @@
 import {
   costEstimateSchema,
   isBillingEnforced,
+  summaryTreeBuildEstimateSchema,
   type CostEstimate,
   type GraphBuildEstimate,
   type JobKind,
@@ -10,10 +11,11 @@ import {
 import { sql } from "../db.js";
 import { apiKeyCanUseProject, type ApiKeyProjectScope } from "../lib/api-key-project-scope.js";
 import { getProjectAccess } from "./organizations.js";
+import { costEstimateFromSummaryTree } from "./project-summary-tree-jobs.js";
 
 /**
  * Shared job resource: a thin, read-only view over `project_runs` (re-index, full-index, reprocess,
- * backfill jobs) and `graph_jobs` (graph rebuilds). One job is one or more runs; the job id is the first
+ * backfill jobs), `graph_jobs` (graph rebuilds) and `summary_tree_jobs` (summary tree backfills). One job is one or more runs; the job id is the first
  * run's id and every run of the job carries `stats.job = { id, kind, estimate?, estimateUrl? }`.
  */
 
@@ -156,12 +158,57 @@ function jobFromGraphRow(row: GraphJobRow, env: Record<string, string | undefine
   };
 }
 
+type SummaryTreeJobRow = {
+  id: string;
+  org_id: string;
+  project_id: string;
+  status: "queued" | "running" | "blocked" | "completed" | "failed" | "cancelled";
+  blocked_reason: string | null;
+  estimate: unknown;
+  documents_total: number;
+  documents_ready: number;
+  documents_skipped: number;
+  documents_partial: number;
+};
+
+/** A parked summary tree job's reason in the shared vocabulary. */
+const SUMMARY_TREE_BLOCKED_REASON: Record<string, NonNullable<JobStatus["reason"]>> = {
+  "build-off": "unavailable",
+  balance: "capacity",
+  credits: "credits",
+  policy: "policy",
+  // The deployment has no price for the tree: nothing the caller can change.
+  unpriced: "unavailable",
+};
+
+function jobFromSummaryTreeRow(row: SummaryTreeJobRow, env: Record<string, string | undefined> = process.env): JobStatusWithProgress {
+  const raw = summaryTreeBuildEstimateSchema.safeParse(row.estimate);
+  const state = { queued: "queued", running: "processing", blocked: "blocked", completed: "completed", failed: "failed", cancelled: "cancelled" } as const;
+  const reason = row.status === "blocked" ? SUMMARY_TREE_BLOCKED_REASON[row.blocked_reason ?? ""] : undefined;
+  return {
+    id: row.id,
+    kind: "summary-tree-backfill",
+    status: state[row.status],
+    ...(reason ? { reason } : {}),
+    queue: { position: row.status === "queued" ? 1 : null, ahead: row.status === "queued" ? 0 : null },
+    runIds: [],
+    estimate: raw.success ? costEstimateFromSummaryTree(raw.data, env) : null,
+    statusUrl: jobStatusUrl(row.id),
+    progress: {
+      documents: row.documents_ready + row.documents_skipped + row.documents_partial,
+      documentsTotal: row.documents_total,
+      pages: 0,
+      pagesTotal: 0,
+    },
+  };
+}
+
 export const isJobTerminal = (job: Pick<JobStatus, "status">) =>
   job.status === "completed" || job.status === "failed" || job.status === "cancelled";
 
 /**
- * Reads one job (a run, any run of a multi-run job, or a graph job) the user may see; null when it does not
- * exist or the project is not accessible. A single query reads the job's runs with their queue position.
+ * Reads one job (a run, any run of a multi-run job, a graph job or a summary tree job) the user may see; null when
+ * it does not exist or the project is not accessible. A summary tree job is never readable with a client key. A single query reads the job's runs with their queue position.
  */
 export async function getJobStatus(
   jobId: string,
@@ -192,10 +239,23 @@ export async function getJobStatus(
     select id, org_id, project_id, status, estimate, documents_total, documents_processed, documents_failed
     from graph_jobs where id = ${jobId}
   `;
-  if (!graph) return null;
-  if (options.apiKey && !apiKeyCanUseProject(options.apiKey, { id: graph.project_id, orgId: graph.org_id })) return null;
-  if (!(await getProjectAccess(graph.project_id, userId))) return null;
-  return jobFromGraphRow(graph, options.env);
+  if (graph) {
+    if (options.apiKey && !apiKeyCanUseProject(options.apiKey, { id: graph.project_id, orgId: graph.org_id })) return null;
+    if (!(await getProjectAccess(graph.project_id, userId))) return null;
+    return jobFromGraphRow(graph, options.env);
+  }
+  const [tree] = await sql<SummaryTreeJobRow[]>`
+    select id, org_id, project_id, status, blocked_reason, estimate, documents_total, documents_ready, documents_skipped, documents_partial
+    from summary_tree_jobs where id = ${jobId}
+  `;
+  if (!tree) return null;
+  // The same answer for a job that does not exist and one the caller may not see.
+  // A summary tree job's status and estimate are read with a server key, as under the project's own route
+  // (routes/project-summary-tree.ts): a browser (client) key gets nothing here, whatever its scopes.
+  if (options.apiKey && options.apiKey.keyType !== "server") return null;
+  if (options.apiKey && !apiKeyCanUseProject(options.apiKey, { id: tree.project_id, orgId: tree.org_id })) return null;
+  if (!(await getProjectAccess(tree.project_id, userId))) return null;
+  return jobFromSummaryTreeRow(tree, options.env);
 }
 
 /** Stamps job metadata on freshly created runs (before they start, so the worker reads it with the run). */

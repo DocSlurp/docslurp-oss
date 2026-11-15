@@ -66,6 +66,7 @@ import {
 import { processSingleton } from "../lib/process-singleton.js";
 import { toPublicRunStage } from "../lib/public-run-stage.js";
 import { extractNotReprocessable, ReprocessRejectedError } from "./reprocess-errors.js";
+import { loadProjectSummaryTree, withProjectSummaryTree } from "./run-summary-tree.js";
 
 export { summarizeRunUsageCost };
 export { isRunCreationBlockedError, RunCreationBlockedError } from "./run-creation.js";
@@ -521,7 +522,8 @@ export async function retryRun(
   // A retried run keeps its categories and stage selection, but its model values are re-resolved: a run from before
   // managed models (0158) must not replay a stored model (the former DeepSeek vision default is refused at call time).
   const managed = resolveManagedPipeline(run.pipeline, await loadManagedPipelineOverrides(run.projectId), `run ${run.id} retry`);
-  const retried = { ...run, pipeline: { ...managed.pipeline, speedBoost: run.pipeline.speedBoost === true } };
+  // The summary tree follows the project's stored setting as it is now, not the run's snapshot (run-summary-tree.ts).
+  const retried = { ...run, pipeline: withProjectSummaryTree({ ...managed.pipeline, speedBoost: run.pipeline.speedBoost === true }, await loadProjectSummaryTree(run.projectId)) };
 
   // All retries retain their immutable original mode. Admission, checkpoint reset,
   // queued transition and lease acquisition commit together; Temporal starts only afterward.

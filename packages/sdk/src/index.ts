@@ -84,7 +84,7 @@ export type CreateCapabilityInput = {
 
 export type FullIndexResponse = { runId: string; pages: number; estimatedCredits: number | null; billing?: "enforced" | "disabled"; job?: JobStatus };
 
-export type JobKind = "reindex" | "full-index" | "backfill" | "graph-rebuild" | "reprocess";
+export type JobKind = "reindex" | "full-index" | "backfill" | "graph-rebuild" | "summary-tree-backfill" | "reprocess";
 export type JobState = "queued" | "blocked" | "processing" | "completed" | "failed" | "cancelled";
 
 /** Work estimate. With billing disabled (self-hosted) `credits` is null; pages and time still apply. */
@@ -102,12 +102,63 @@ export type JobStatus = {
   id: string;
   kind: JobKind;
   status: JobState;
-  reason?: "credits" | "budget" | "policy";
+  /**
+   * Why the job is blocked. `unavailable` (the deployment has the feature paused) and `capacity` (the model provider
+   * cannot take more work right now) clear on their own: the job resumes without a new request.
+   */
+  reason?: "credits" | "budget" | "policy" | "unavailable" | "capacity";
   queue: { position: number | null; ahead: number | null };
   runIds: string[];
   estimate: CostEstimate | null;
   estimateUrl?: string;
   statusUrl: string;
+};
+
+/** What a summary tree backfill would cover and cost. Ranges are wide until finished builds calibrate them. */
+export type SummaryTreeBuildEstimate = {
+  /** Documents without a tree search can read. */
+  documents: number;
+  /** Of those, documents long enough to get a tree; the rest are marked skipped without a model call. */
+  documentsToBuild: number;
+  pages: number; leaves: number; nodes: number; modelCalls: number; inputTokens: number; outputTokens: number;
+  costCents: number; costCentsLow: number; costCentsHigh: number;
+  /**
+   * What the cost figures (and the job's `maxCostCents` cap) count. `billed`: credits billed to the organization, one
+   * summary tree unit per summary model call. `provider`: the model's own cost, on a deployment that does not charge.
+   */
+  costBasis: "billed" | "provider";
+  seconds: number; secondsLow: number; secondsHigh: number;
+  basis: "observed" | "default";
+};
+
+/** A summary tree backfill job (`startSummaryTreeBackfill`). */
+export type SummaryTreeJob = {
+  id: string;
+  projectId: string;
+  status: "queued" | "running" | "blocked" | "completed" | "failed" | "cancelled";
+  /** While `blocked`: the deployment paused building, the model provider cannot take more work, the organization may not spend, the project's policy does not allow the summary model, or the deployment has no price for the tree (`unpriced`). */
+  blockedReason: "build-off" | "balance" | "credits" | "policy" | "unpriced" | null;
+  estimate: SummaryTreeBuildEstimate | null;
+  /** The cap the job was started with, in cents. */
+  maxCostCents: number;
+  documentsTotal: number; documentsReady: number; documentsSkipped: number; documentsPartial: number;
+  nodesBuilt: number; modelCalls: number; inputTokens: number; outputTokens: number;
+  /** What counted against `maxCostCents` so far, on `costBasis`. */
+  costCents: number;
+  costBasis: "billed" | "provider";
+  etaSeconds: number | null;
+  error: string | null;
+  cancelRequested: boolean;
+  createdAt: string; startedAt: string | null; finishedAt: string | null; updatedAt: string;
+};
+
+/** `getSummaryTreeBackfill`: what a job started now would cover, the active job and the last finished one. */
+export type ProjectSummaryTreeBackfill = {
+  projectId: string;
+  /** A recent estimate (refreshed about once a minute). Null on a deployment that has no price for the tree. */
+  estimate: SummaryTreeBuildEstimate | null;
+  activeJob: SummaryTreeJob | null;
+  lastJob: SummaryTreeJob | null;
 };
 
 export type ConfigChangeKind = "none" | "search-only" | "new-uploads" | "reindex-recommended" | "reindex-required";
@@ -622,6 +673,15 @@ export type SearchInput = {
    */
   mode?: "keyword" | "hybrid" | "deep";
   /**
+   * How this search uses the project's summary tree (section summaries built beside the chunks): `off`, `guide`
+   * (summaries pick extra chunks; `results` stay real chunks) or `include` (the matching summaries are also returned in
+   * `summaries`). Omitted: the project's retrieval default. That default is also the most a request may ask for,
+   * unless the caller may edit the project (or is a server key with `projects:manage`): a request above it runs at
+   * the default. Hybrid and deep mode only, and only for a project that builds the tree;
+   * `SearchResponse.summaryTree` says what ran.
+   */
+  summaryTree?: SummaryTreeSearchMode;
+  /**
    * Query text, or up to 100 keyword queries run in parallel as one keyword-mode search and fused into one ranked
    * list (`mode` must be `keyword` or omitted). Each result's `matchedQueries` lists the queries it matched.
    */
@@ -676,6 +736,44 @@ export type SearchUsage = {
   scope: "retrieval";
 };
 
+export type SummaryTreeSearchMode = "off" | "guide" | "include";
+
+/** What the summary tree did for one search. `applied` differs from `requested` when the leg was skipped. */
+export type SummaryTreeSearchOutcome = {
+  requested: SummaryTreeSearchMode;
+  applied: SummaryTreeSearchMode;
+  /**
+   * Why it contributed nothing: it missed its deadline, no document in scope has a ready tree, this search cannot use
+   * the tree (keyword mode, a filter it does not support, or a project without one), or it failed.
+   */
+  skipped?: "deadline" | "not-ready" | "mode" | "error";
+  /** Wall time of the tree's part of retrieval, in milliseconds. */
+  ms: number;
+};
+
+/**
+ * A section summary returned by `summaryTree: "include"`. It is model-written text about part of a document, not a
+ * passage from it: it has no `text` and no `citation`. Show it as a summary and cite the chunks in `results`.
+ */
+export type SearchSummary = {
+  kind: "summary";
+  id: string;
+  documentId: string;
+  filename: string;
+  /** 1 is a section of the document; higher levels summarize the levels below. */
+  level: number;
+  /** The model-written summary. Not source text. */
+  summary: string;
+  headingPath: string[];
+  pageStart: number | null;
+  pageEnd: number | null;
+  /** Inclusive chunk positions the summary covers. */
+  chunkStart: number;
+  chunkEnd: number;
+  /** Match strength against the query, 0..1. */
+  relevance: number;
+};
+
 export type SearchResponse = {
   usage: SearchUsage;
   availability: SearchAvailability | null;
@@ -691,6 +789,10 @@ export type SearchResponse = {
   sessionId: string;
   /** Present for deferred (map/visual) projects. */
   deferred?: DeferredSearchStats;
+  /** Present when the request, or a project default this search could run, asked for the summary tree. */
+  summaryTree?: SummaryTreeSearchOutcome;
+  /** `summaryTree: "include"`: section summaries beside `results`, capped to a quarter of the returned context. */
+  summaries?: SearchSummary[];
 };
 
 export type SearchBatchOptions = {
@@ -2409,6 +2511,32 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
       rejectLegacyProjectOptions(input);
       const { project, ...body } = input;
       return estimateAt(`${wsPath(typeof project === "string" ? project : undefined)}/graph/jobs/estimate`, body, requestOptions);
+    },
+    /**
+     * Summary tree backfill: what building trees for the project's existing documents would cover and cost, the
+     * active job and the last one. Computed from stored counts; no model is called.
+     */
+    getSummaryTreeBackfill(input: { project?: string } = {}, requestOptions?: RequestOptions): Promise<ProjectSummaryTreeBackfill> {
+      return request<ProjectSummaryTreeBackfill>(`${wsPath(input.project)}/summary-tree/backfill`, undefined, requestOptions);
+    },
+    /** The estimate {@link startSummaryTreeBackfill} would carry, without starting it. Server keys need `projects:manage`. */
+    summaryTreeBackfillEstimate(input: { project?: string } = {}, requestOptions?: RequestOptions): Promise<EstimateResponse> {
+      return estimateAt(`${wsPath(input.project)}/summary-tree/backfill/estimate`, {}, requestOptions);
+    },
+    /**
+     * Builds summary trees for the project's already indexed documents. `maxCostCents` is required: the job stops
+     * before the model call that would pass it. One active job per project. Follow it with `getJob(job.id)` or
+     * `streamJob(job.id)`. Server keys need `projects:manage`.
+     */
+    startSummaryTreeBackfill(input: { project?: string; maxCostCents: number }, requestOptions?: RequestOptions): Promise<SummaryTreeJob & { job: JobStatus }> {
+      return request<SummaryTreeJob & { job: JobStatus }>(`${wsPath(input.project)}/summary-tree/backfill`, jsonRequest("POST", { maxCostCents: input.maxCostCents }), requestOptions);
+    },
+    getSummaryTreeBackfillJob(jobId: string, input: { project?: string } = {}, requestOptions?: RequestOptions): Promise<SummaryTreeJob> {
+      return request<SummaryTreeJob>(`${wsPath(input.project)}/summary-tree/backfill/${encodeURIComponent(jobId)}`, undefined, requestOptions);
+    },
+    /** A queued or blocked job is cancelled at once; a running one stops before its next model call. What was built is kept. */
+    cancelSummaryTreeBackfill(jobId: string, input: { project?: string } = {}, requestOptions?: RequestOptions): Promise<SummaryTreeJob> {
+      return request<SummaryTreeJob>(`${wsPath(input.project)}/summary-tree/backfill/${encodeURIComponent(jobId)}/cancel`, jsonRequest("POST", {}), requestOptions);
     },
     /** Cost of an upload before sending any bytes. */
     uploadEstimate(input: UploadEstimateInput, requestOptions?: RequestOptions): Promise<EstimateResponse> {

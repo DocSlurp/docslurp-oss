@@ -31,6 +31,7 @@ import { QuarantineStage } from "./quarantine.js";
 import { GraphEnrichStage } from "./graph-enrich.js";
 import { PiiDetectStage } from "./pii-detect.js";
 import { PageEmbedStage } from "./page-embed.js";
+import { SummaryTreeStage } from "./summary-tree.js";
 import { configurePageAreaSink, createPageAreaSink } from "../pipeline/page-area-sink.js";
 import { setDeterministicVisualExtractor } from "../chart-export/types.js";
 import { createVmDeterministicVisualExtractor } from "../chart-export/vm-extractor.js";
@@ -90,7 +91,11 @@ export function createStages(args: {
       return args.sql;
     }),
     "proposition-index": () => new PropositionIndexStage(args.runner, args.storage, args.config),
-    index: () => new IndexStage(args.runner, args.storage, args.config)
+    index: () => new IndexStage(args.runner, args.storage, args.config),
+    "summary-tree": () => new SummaryTreeStage(args.runner, args.storage, args.config, () => {
+      if (!args.sql) throw new Error("summary-tree requires a database client");
+      return args.sql;
+    }),
   };
 
   return pipelineStageOrder.map((stage) => stages[stage]());

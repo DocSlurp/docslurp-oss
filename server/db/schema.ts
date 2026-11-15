@@ -1097,6 +1097,12 @@ export const documentChunks = pgTable(
       "gin",
       table.tsContent.asc().nullsLast().op("tsvector_ops"),
     ),
+    // Chunk ranges of one document (summary-tree guide mode), migration 0165.
+    index("document_chunks_document_chunk_index_idx").using(
+      "btree",
+      table.documentId.asc().nullsLast().op("text_ops"),
+      table.chunkIndex.asc().nullsLast().op("int4_ops"),
+    ),
     index("document_chunks_user_id_run_id_idx").using(
       "btree",
       table.userId.asc().nullsLast().op("text_ops"),
@@ -3814,6 +3820,138 @@ export const documentMaps = pgTable(
       foreignColumns: [documents.id],
       name: "document_maps_document_id_fkey",
     }).onDelete("cascade"),
+  ],
+);
+
+/** Summary tree build state, one row per document (migration 0164; packages/shared/src/summary-tree.ts). No text. */
+export const documentSummaryTrees = pgTable(
+  "document_summary_trees",
+  {
+    documentId: text("document_id").primaryKey().notNull(),
+    orgId: text("org_id").notNull(),
+    projectId: text("project_id").notNull(),
+    runId: text("run_id"),
+    status: text().default("pending").notNull(),
+    skipReason: text("skip_reason"),
+    treeKeyVersion: integer("tree_key_version").default(1).notNull(),
+    configHash: text("config_hash"),
+    embeddingModel: text("embedding_model"),
+    dimension: integer(),
+    leafCount: integer("leaf_count").default(0).notNull(),
+    nodeCount: integer("node_count").default(0).notNull(),
+    levelCount: integer("level_count").default(0).notNull(),
+    rootNodeId: text("root_node_id"),
+    error: text(),
+    /** Who holds a `building` row (migration 0166). */
+    buildOwner: text("build_owner"),
+    /** Builds that took the document (migration 0169); a queued removal carries the value it was asked at. */
+    buildGeneration: bigint("build_generation", { mode: "number" }).default(0).notNull(),
+    builtAt: timestamp("built_at", { withTimezone: true, mode: "string" }),
+    createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
+  },
+  (table) => [
+    index("document_summary_trees_project_status_idx").using(
+      "btree",
+      table.projectId.asc().nullsLast().op("text_ops"),
+      table.status.asc().nullsLast().op("text_ops"),
+    ),
+    foreignKey({
+      columns: [table.documentId],
+      foreignColumns: [documents.id],
+      name: "document_summary_trees_document_id_fkey",
+    }).onDelete("cascade"),
+  ],
+);
+
+/** Summary tree node registry (migration 0164): hash, level, parent, status and chunk range. No summary text. */
+export const documentSummaryTreeNodes = pgTable(
+  "document_summary_tree_nodes",
+  {
+    id: text().primaryKey().notNull(),
+    documentId: text("document_id").notNull(),
+    orgId: text("org_id").notNull(),
+    projectId: text("project_id").notNull(),
+    runId: text("run_id"),
+    nodeHash: text("node_hash").notNull(),
+    level: integer().notNull(),
+    parentId: text("parent_id"),
+    ordinal: integer().default(0).notNull(),
+    status: text().default("pending").notNull(),
+    chunkStart: integer("chunk_start").notNull(),
+    chunkEnd: integer("chunk_end").notNull(),
+    pageStart: integer("page_start"),
+    pageEnd: integer("page_end"),
+    createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
+  },
+  (table) => [
+    index("document_summary_tree_nodes_document_idx").using(
+      "btree",
+      table.documentId.asc().nullsLast().op("text_ops"),
+      table.level.asc().nullsLast().op("int4_ops"),
+      table.ordinal.asc().nullsLast().op("int4_ops"),
+    ),
+    index("document_summary_tree_nodes_hash_idx").using(
+      "btree",
+      table.documentId.asc().nullsLast().op("text_ops"),
+      table.nodeHash.asc().nullsLast().op("text_ops"),
+    ),
+    index("document_summary_tree_nodes_parent_idx").using("btree", table.parentId.asc().nullsLast().op("text_ops")).where(sql`parent_id IS NOT NULL`),
+    foreignKey({
+      columns: [table.documentId],
+      foreignColumns: [documents.id],
+      name: "document_summary_tree_nodes_document_id_fkey",
+    }).onDelete("cascade"),
+  ],
+);
+
+/** Summary tree backfill jobs (migration 0166; worker/src/summary-tree/backfill-job.ts). Counters and settings only. */
+export const summaryTreeJobs = pgTable(
+  "summary_tree_jobs",
+  {
+    id: text().primaryKey().notNull(),
+    orgId: text("org_id").notNull(),
+    projectId: text("project_id").notNull(),
+    userId: text("user_id").notNull(),
+    status: text().default("queued").notNull(),
+    blockedReason: text("blocked_reason"),
+    resumeAfter: timestamp("resume_after", { withTimezone: true, mode: "string" }),
+    estimate: jsonb().default({}).notNull(),
+    maxCostCents: numeric("max_cost_cents", { precision: 12, scale: 4, mode: "number" }).notNull(),
+    documentsTotal: integer("documents_total").default(0).notNull(),
+    documentsReady: integer("documents_ready").default(0).notNull(),
+    documentsSkipped: integer("documents_skipped").default(0).notNull(),
+    documentsPartial: integer("documents_partial").default(0).notNull(),
+    nodesBuilt: integer("nodes_built").default(0).notNull(),
+    modelCalls: integer("model_calls").default(0).notNull(),
+    inputTokens: bigint("input_tokens", { mode: "number" }).default(0).notNull(),
+    outputTokens: bigint("output_tokens", { mode: "number" }).default(0).notNull(),
+    costCents: numeric("cost_cents", { precision: 12, scale: 4, mode: "number" }).default(0).notNull(),
+    cursor: text(),
+    error: text(),
+    leaseOwner: text("lease_owner"),
+    leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true, mode: "string" }),
+    cancelRequestedAt: timestamp("cancel_requested_at", { withTimezone: true, mode: "string" }),
+    createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
+    startedAt: timestamp("started_at", { withTimezone: true, mode: "string" }),
+    finishedAt: timestamp("finished_at", { withTimezone: true, mode: "string" }),
+    updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
+    outstandingCalls: integer("outstanding_calls").default(0).notNull(),
+    // Fair claiming and parking (migration 0168).
+    lastAttemptAt: timestamp("last_attempt_at", { withTimezone: true, mode: "string" }),
+    parkCount: integer("park_count").default(0).notNull(),
+    parkedSince: timestamp("parked_since", { withTimezone: true, mode: "string" }),
+  },
+  (table) => [
+    check("summary_tree_jobs_outstanding_calls_nonnegative", sql`${table.outstandingCalls} >= 0`),
+    index("summary_tree_jobs_org_attempt_idx").using("btree", table.orgId.asc().nullsLast().op("text_ops"), table.lastAttemptAt.asc().nullsLast().op("timestamptz_ops")),
+    uniqueIndex("summary_tree_jobs_one_active_per_project").using("btree", table.projectId.asc().nullsLast().op("text_ops")).where(sql`status IN ('queued', 'running', 'blocked')`),
+    index("summary_tree_jobs_claim_idx").using("btree", table.status.asc().nullsLast().op("text_ops"), table.createdAt.asc().nullsLast().op("timestamptz_ops")),
+    index("summary_tree_jobs_project_idx").using("btree", table.projectId.asc().nullsLast().op("text_ops"), table.createdAt.asc().nullsLast().op("timestamptz_ops")),
+    foreignKey({ columns: [table.orgId], foreignColumns: [organizations.id], name: "summary_tree_jobs_org_id_fkey" }).onDelete("cascade"),
+    foreignKey({ columns: [table.projectId], foreignColumns: [projects.id], name: "summary_tree_jobs_project_id_fkey" }).onDelete("cascade"),
+    foreignKey({ columns: [table.userId], foreignColumns: [user.id], name: "summary_tree_jobs_user_id_fkey" }).onDelete("cascade"),
   ],
 );
 

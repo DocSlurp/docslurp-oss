@@ -17,6 +17,7 @@ export const PATCHED_FALLBACK_STAGES = [
   { stage: "route-pages", patchId: "page-router-stage" },
   { stage: "document-map", patchId: "document-map-stage" },
   { stage: "page-embed", patchId: "page-embed-stage" },
+  { stage: "summary-tree", patchId: "summary-tree-stage" },
 ] as const satisfies ReadonlyArray<{ stage: WorkflowStageName; patchId: string }>;
 
 export function resolvePipelineWorkflowStageOrder(
