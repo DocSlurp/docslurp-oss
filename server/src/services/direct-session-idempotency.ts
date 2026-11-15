@@ -51,6 +51,17 @@ async function isOrgMemberNow(orgId: string, userId: string): Promise<boolean> {
   return rows.length > 0;
 }
 
+/** Status receipts expose metadata and require current read access, even for their original uploader. */
+export async function assertSessionProjectStillReadable(
+  session: { project_id: string | null; org_id?: string | null },
+  userId: string,
+): Promise<void> {
+  const allowed = session.project_id
+    ? await getProjectAccess(session.project_id, userId) !== null
+    : !!session.org_id && await isOrgMemberNow(session.org_id, userId);
+  if (!allowed) throw new ProjectIntakeError("You can no longer read this upload session's project", 403);
+}
+
 /**
  * The live access check before anything hands out upload URLs for, or ingests into, an existing session (the idempotent replay,
  * GET /direct/sessions/:id, part signing, file completion, confirm): the session's project must still accept uploads from

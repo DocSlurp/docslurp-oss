@@ -47,6 +47,7 @@ export type DocumentVersionChangelog = {
 /** Stage diagnostics retain the API's database column names. */
 export type DocumentViewerStage = {
   stage_name: string; status: string; attempts: number;
+  failure?: { code: "source_encrypted" | "source_rejected" | "capability_unavailable" | "infrastructure_unavailable" | "processing_failed"; retryable: boolean | null } | null;
   artifact_uri: string | null; stats: JsonObject | null; error: string | null; updated_at: string;
 };
 export type DocumentViewerPayload = {

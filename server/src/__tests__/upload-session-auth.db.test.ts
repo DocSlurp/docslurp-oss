@@ -177,8 +177,8 @@ describe("signed URLs for an existing session need current contribute access", (
     }
     expect(mocks.describe).not.toHaveBeenCalled();
     expect(mocks.sign).not.toHaveBeenCalled();
-    // A status-only read carries no URLs and stays available.
-    expect((await get(sharedId, true)).status).toBe(200);
+    // Metadata reads require current read access; a viewer may still read.
+    expect((await get(sharedId, true)).status).toBe(role ? 200 : 403);
   });
 
   it.each([
@@ -187,7 +187,7 @@ describe("signed URLs for an existing session need current contribute access", (
     ["key whose allowlist excludes the project", async () => { await seedKey({ userId: "other", projectIds: ["w"] }); }, 404],
   ])("refuses part signing for a %s and mints nothing", async (_label, setup, status) => {
     await setup();
-    for (const response of [await get(sharedId), await sign(sharedId)]) {
+    for (const response of [await get(sharedId), await get(sharedId, true), await sign(sharedId)]) {
       expect(response.status).toBe(status);
       await noUrls(response);
     }
@@ -200,5 +200,24 @@ describe("signed URLs for an existing session need current contribute access", (
     await expect(assertSessionProjectStillContributable({ project_id: null, org_id: "o" }, "other")).resolves.toBeUndefined();
     await expect(assertSessionProjectStillContributable({ project_id: null, org_id: "foreign" }, "other")).rejects.toMatchObject({ statusCode: 403 });
     await expect(assertSessionProjectStillContributable({ project_id: null, org_id: null }, "other")).rejects.toMatchObject({ statusCode: 403 });
+  });
+});
+
+describe("cookie receipt recovery uses live access", () => {
+  const cookieApp = new Hono().use("*", async (c, next) => {
+    c.set("sessionUser", { id: "other", name: "Other", email: "other@example.test" });
+    await next();
+  }).route("/uploads", createUploadsRoutes());
+  const status = () => cookieApp.request(`/uploads/direct/sessions/${sharedId}?statusOnly=true`);
+  it("rejects recovery after uploader share removal and organization removal", async () => {
+    await db.query("insert into project_members (project_id,user_id,role) values ('excluded','other','editor') on conflict do nothing");
+    expect((await status()).status).toBe(200);
+    await db.query("delete from project_members where project_id='excluded' and user_id='other'");
+    mocks.describe.mockClear();
+    expect((await status()).status).toBe(403);
+    expect(mocks.describe).not.toHaveBeenCalled();
+    await db.query("delete from org_memberships where org_id='o' and user_id='other'");
+    expect((await status()).status).toBe(403);
+    await db.query("insert into org_memberships (org_id,user_id,role) values ('o','other','member')");
   });
 });
