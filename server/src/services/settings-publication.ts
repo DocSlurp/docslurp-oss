@@ -2,7 +2,7 @@ import { prepareModeSwitchJobs, commitIndexJobs } from "./project-indexing-mode.
 import { resolveMaterializationPolicy } from "./materialization-policy.js";
 import { enforceLiveBudgetCaps } from "./run-creation.js";
 import { createHash } from "node:crypto";
-import { publishProjectSettingsSchema, indexConfigHash, indexConfigOf, analyzePipelineChange, privacyModeAllowsHosted, projectSettingsProjection, managedPipelineModelPaths, type ProjectRecord, type ProjectSearchSettings } from "@docslurp/shared";
+import { publishProjectSettingsSchema, indexConfigHash, indexConfigOf, privacyModeAllowsHosted, projectSettingsProjection, managedPipelineModelPaths, type ProjectRecord, type ProjectSearchSettings } from "@docslurp/shared";
 import { sql } from "../db.js";
 import { searchModeOfScopes } from "../lib/search-tiers.js";
 import { env } from "../config.js";
@@ -95,12 +95,6 @@ export async function publishSettings(args: { actor: RequestActor; projectId: st
   if (plan.rowVersion !== input.expected.project) {
     const retry = await receipt(); if (retry) return { ...retry, replayed: true, job: null, queuedRunIds: [] as string[] };
     throw conflict();
-  }
-  // Ordinary index migrations are not a safe policy withdrawal. Until the artifact fencing lifecycle exists,
-  // this publication surface refuses tightening over retained documents rather than serving prohibited old artifacts.
-  for (const field of ["privacyMode", "piiPolicy"] as const) {
-    const policyImpact = analyzePipelineChange(plan.project.pipeline, { ...plan.project.pipeline, [field]: plan.nextPipeline[field] }, { documents: plan.impact.documents, pages: plan.impact.pages });
-    if (policyImpact.kind === "reindex-required" && plan.impact.documents > 0) throw new SettingsPublicationError(409, "policy_publication_unavailable", "Tightening privacy or PII policy over existing documents requires artifact fencing. This publication surface cannot safely perform that transition yet; no settings or jobs were saved.");
   }
   let prepared: Awaited<ReturnType<typeof prepareModeSwitchJobs>> | undefined;
   if (indexingMode && indexingMode !== plan.project.pipeline.indexingMode) {

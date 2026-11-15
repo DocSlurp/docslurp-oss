@@ -1,3 +1,4 @@
+import { assertPolicyTransitionAllowed } from "./policy-transition.js";
 import { HTTPException } from "hono/http-exception";
 import { assertTenantModelEndpointAllowed } from "@docslurp/shared";
 import { EDITOR_REQUIRED_CODE, EDITOR_REQUIRED_MESSAGE, deferredProfilesEnabled, isBillingEnforced, PUBLIC_ERROR_MESSAGES, publicDiagnostics, publicDocumentError, resolveManagedPipeline, parseManagedPipelineOverrides, storedManagedPipeline, stripManagedPipelineFields, type ManagedPipelineOverrides } from "@docslurp/shared";
@@ -1068,6 +1069,13 @@ export async function resolveUpdatedPipeline(
   const draftPipeline = normalizePipelineFeatures(draftSource);
   // The tree keeps document summaries on (summary-tree.ts); `summaries: false` cannot turn them off under it.
   if (parsed.summaries !== undefined) draftPipeline.summarize = parsed.summaries || summaryTree.enabled;
+  // Reject a bypassed read-only control instead of silently reporting a successful save.
+  if (parsed.pipeline && (parsed.templateKey === undefined || parsed.templateKey === current.templateKey) && template) {
+    const at = (source: unknown, path: string): unknown => path.split(".").reduce<unknown>((value, key) => value && typeof value === "object" ? (value as Record<string, unknown>)[key] : undefined, source);
+    if (template.lockedSettings.some(path => JSON.stringify(at(draftPipeline, path)) !== JSON.stringify(at(current.pipeline, path)))) {
+      throw new HTTPException(409, { message: "This setting is locked by the project template." });
+    }
+  }
   // Managed model fields (backend models, providers, routes) are never a customer choice: keep the stored ones
   // (platform-admin settings) across every edit; the routes refuse them in requests.
   // Managed model fields (backend models, providers, routes) are never a customer choice: whatever the draft holds
@@ -1126,6 +1134,8 @@ export async function updateProject(
       return getProject(projectId, userId, client);
     }) as ProjectRecord | null;
   }
+
+  await assertPolicyTransitionAllowed(options.client, current, pipeline);
 
   const nextSlug = parsed.slug === undefined ? current.slug : parsed.slug.toLowerCase();
   if (nextSlug !== current.slug) {

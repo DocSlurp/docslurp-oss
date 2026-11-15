@@ -1191,6 +1191,13 @@
       "when": 1798700000000,
       "tag": "0177_settings_publications",
       "breakpoints": true
+    },
+    {
+      "idx": 170,
+      "version": "7",
+      "when": 1798800000000,
+      "tag": "0178_policy_admission_fence",
+      "breakpoints": true
     }
   ]
 }

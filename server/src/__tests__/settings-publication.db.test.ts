@@ -1,16 +1,17 @@
 import { randomUUID } from "node:crypto";
 import postgres from "postgres";
 import { beforeAll, afterAll, it, expect, vi } from "vitest";
-import { defaultPipelineFeatures } from "@docslurp/shared";
+import { defaultPipelineFeatures, normalizePipelineFeatures } from "@docslurp/shared";
 import { startMigratedPostgres } from "@docslurp/worker/testing";
 import type { RequestActor } from "../lib/request-actor.js";
 let sql: postgres.Sql;
 let stop: () => Promise<void>;
 let service: typeof import("../services/settings-publication.js");
 let failSearch = false;
+let policyBarrier: ((phase: 'before' | 'after', client: typeof sql) => Promise<void>) | undefined;
 beforeAll(async () => {
-  const db = await startMigratedPostgres(); stop = db.stop;
-  sql = postgres(db.url, { max: 1, prepare: false, onnotice: () => {} });
+  const db = process.env.TEST_DATABASE_URL ? null : await startMigratedPostgres(); stop = db?.stop ?? (async () => {});
+  sql = postgres(process.env.TEST_DATABASE_URL ?? db!.url, { max: process.env.TEST_DATABASE_URL ? 4 : 1, prepare: false, onnotice: () => {} });
   vi.doMock("../db.js", () => ({ sql }));
   vi.doMock("../lib/auth.js", () => ({ auth: { api: { getSession: async () => null } }, appDbPool: null }));
   vi.doMock("../services/search-controls.js", async () => {
@@ -18,6 +19,14 @@ beforeAll(async () => {
     return { ...actual, upsertProjectSearchSettings: async (...args: Parameters<typeof actual.upsertProjectSearchSettings>) => {
       await actual.upsertProjectSearchSettings(...args);
       if (failSearch) throw new Error("injected search failure");
+    } };
+  });
+  vi.doMock("../services/policy-transition.js", async () => {
+    const actual = await vi.importActual<typeof import("../services/policy-transition.js")>("../services/policy-transition.js");
+    return { ...actual, assertPolicyTransitionAllowed: async (...args: Parameters<typeof actual.assertPolicyTransitionAllowed>) => {
+      await policyBarrier?.('before', args[0]);
+      await actual.assertPolicyTransitionAllowed(...args);
+      await policyBarrier?.('after', args[0]);
     } };
   });
   service = await import("../services/settings-publication.js");
@@ -106,7 +115,7 @@ it("refuses an older whole-pipeline writer after a publication commits", async (
 it("reports unknown vector coverage, then clears rebuild-required state after a real current-generation write", async () => {
   const f = await fixture();
   const runId = randomUUID(), docId = randomUUID();
-  await sql`insert into project_runs(id,org_id,user_id,project_id,kind,status,stage,pipeline) values (${runId},${f.projectId},${f.actor.userId},${f.projectId},'upload','completed','index','{}')`;
+  await sql`insert into project_runs(id,org_id,user_id,project_id,kind,status,stage,pipeline,monthly_reservation_cents) values (${runId},${f.projectId},${f.actor.userId},${f.projectId},'upload','completed','index','{}',1)`;
   await sql`insert into documents(id,org_id,user_id,project_id,run_id,filename,mime_type,source_key,status,page_count) values (${docId},${f.projectId},${f.actor.userId},${f.projectId},${runId},'synthetic.txt','text/plain','synthetic','completed',1)`;
   await sql`insert into vector_indexes(id,document_id,backend,bucket,path,embedding_model,dimension) values (${randomUUID()},${docId},'lancedb','test','synthetic','test',384)`;
   expect((await service.readSettingsSnapshot(f.actor, f.projectId)).legacyIndexes).toEqual({ documents: 1, documentIds: [docId] });
@@ -114,4 +123,133 @@ it("reports unknown vector coverage, then clears rebuild-required state after a 
   const rebuiltHash = indexConfigHash(indexConfigOf(f.snapshot.project.pipeline));
   await sql`update documents set index_config_hash=${rebuiltHash} where id=${docId}`;
   expect((await service.readSettingsSnapshot(f.actor, f.projectId)).legacyIndexes).toEqual({ documents: 0, documentIds: [] });
+});
+
+for (const state of ['processing', 'deferred', 'busy', 'archived', 'superseded', 'unindexed', 'old-generation', 'run-only']) {
+  it(`refuses policy tightening over all retained corpus: ${state}`, async () => {
+    const f = await fixture();
+    const local = normalizePipelineFeatures({ ...defaultPipelineFeatures, embedding: { profile: 'fastest-local' } });
+    await sql`update projects set pipeline=${sql.json(JSON.parse(JSON.stringify(local)))} where id=${f.projectId}`;
+    f.snapshot = await service.readSettingsSnapshot(f.actor, f.projectId);
+    const runId = randomUUID();
+    await sql`insert into project_runs(id,org_id,user_id,project_id,kind,status,stage,pipeline,monthly_reservation_cents) values (${runId},${f.projectId},${f.actor.userId},${f.projectId},'upload',${state === 'processing' ? 'processing' : 'completed'},'index',${sql.json(JSON.parse(JSON.stringify(f.snapshot.project.pipeline)))},1)`;
+    if (state !== 'run-only') {
+      await sql`insert into documents(id,org_id,user_id,project_id,run_id,filename,mime_type,source_key,status,indexing_mode,archived_at,superseded_at,index_config_hash) values (${randomUUID()},${f.projectId},${f.actor.userId},${f.projectId},${runId},'synthetic.txt','text/plain','synthetic',${state === 'processing' ? 'processing' : 'completed'},${state === 'deferred' ? 'map' : 'full'},${state === 'archived' ? new Date() : null},${state === 'superseded' ? new Date() : null},${state === 'old-generation' ? 'historical' : null})`;
+    }
+    if (state === 'busy') await sql`insert into project_runs(id,org_id,user_id,project_id,kind,status,stage,pipeline,monthly_reservation_cents) values (${randomUUID()},${f.projectId},${f.actor.userId},${f.projectId},'full-index','processing','index',${sql.json(JSON.parse(JSON.stringify(f.snapshot.project.pipeline)))},1)`;
+    const before = await service.readSettingsSnapshot(f.actor, f.projectId);
+    const [balance] = await sql`select credit_balance_cents from organizations where id=${f.projectId}`;
+    const runs = await sql`select id,monthly_reservation_cents from project_runs where project_id=${f.projectId} order by id`;
+    for (const pipeline of [{ privacyMode: 'local-only', embed: false, indexVectors: false }, { piiPolicy: { enabled: true, action: 'redact_artifacts' } }]) {
+      await expect(service.publishSettings({ ...f, input: { ...input(f), project: { pipeline, monthlyBudgetCents: 1, apply: 'reindex' } } })).rejects.toMatchObject({ status: 409, code: 'policy_publication_unavailable' });
+      expect(await service.readSettingsSnapshot(f.actor, f.projectId)).toEqual(before);
+      expect(await sql`select id,monthly_reservation_cents from project_runs where project_id=${f.projectId} order by id`).toEqual(runs);
+      expect(await sql`select credit_balance_cents from organizations where id=${f.projectId}`).toEqual([balance]);
+      expect(await sql`select count(*)::int n from project_settings_publications where project_id=${f.projectId}`).toEqual([{ n: 0 }]);
+    }
+    const { updateProject } = await import('../services/projects.js');
+    await expect(updateProject(f.projectId, f.actor.userId, { pipeline: { ...f.snapshot.project.pipeline, piiPolicy: { ...f.snapshot.project.pipeline.piiPolicy, enabled: true } } })).rejects.toMatchObject({ status: 409, code: 'policy_publication_unavailable' });
+  });
+}
+it('allows tightening an actually empty project, but refuses stale-policy intake after it', async () => {
+  const f = await fixture();
+  const result = await service.publishSettings({ ...f, input: { ...input(f), project: { pipeline: { piiPolicy: { enabled: true, action: 'redact_artifacts' } } } } });
+  expect(result.snapshot.project.pipeline.piiPolicy.enabled).toBe(true);
+  await expect(sql`insert into project_runs(id,org_id,user_id,project_id,kind,status,stage,pipeline,monthly_reservation_cents) values (${randomUUID()},${f.projectId},${f.actor.userId},${f.projectId},'upload','queued','queued',${sql.json(JSON.parse(JSON.stringify(f.snapshot.project.pipeline)))},1)`).rejects.toThrow(/policy/);
+});
+it('rejects bypassed template locks atomically instead of silently restoring them', async () => {
+  const f = await fixture(); const { getProjectTemplate } = await import('@docslurp/shared');
+  const template = getProjectTemplate('engineering-docs')!;
+  await sql`update projects set template_key='engineering-docs',pipeline=${sql.json(JSON.parse(JSON.stringify(template.pipeline)))} where id=${f.projectId}`;
+  f.snapshot = await service.readSettingsSnapshot(f.actor, f.projectId);
+  for (const pipeline of [{ chunkOverlap: !template.pipeline.chunkOverlap }, { embedding: { normalize: !template.pipeline.embedding.normalize } }]) {
+    await expect(service.publishSettings({ ...f, input: { ...input(f), project: { pipeline } } })).rejects.toMatchObject({ status: 409 });
+    expect(await service.readSettingsSnapshot(f.actor, f.projectId)).toEqual(f.snapshot);
+    expect(await sql`select count(*)::int n from project_settings_publications where project_id=${f.projectId}`).toEqual([{ n: 0 }]);
+  }
+});
+
+function barrier() {
+  let release!: () => void;
+  const promise = new Promise<void>(resolve => { release = resolve; });
+  return { promise, release };
+}
+async function waitForLock(pid: number) {
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline) {
+    const [row] = await sql`select wait_event_type from pg_stat_activity where pid=${pid}`;
+    if (row?.wait_event_type === 'Lock') return;
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  throw new Error('Expected independent transaction to wait for the policy fence');
+}
+const native = it.runIf(!!process.env.TEST_DATABASE_URL);
+native('native: arrival commits first, then publication rechecks and refuses without side effects', async () => {
+  const f = await fixture(); const inserted = barrier(), releaseArrival = barrier(), checking = barrier();
+  let publicationPid = 0;
+  const arrival = sql.begin(async tx => {
+    await tx`insert into project_runs(id,org_id,user_id,project_id,kind,status,stage,pipeline,monthly_reservation_cents) values (${randomUUID()},${f.projectId},${f.actor.userId},${f.projectId},'upload','processing','index',${tx.json(JSON.parse(JSON.stringify(f.snapshot.project.pipeline)))},1)`;
+    inserted.release(); await releaseArrival.promise;
+  });
+  await inserted.promise;
+  policyBarrier = async (phase, client) => {
+    if (phase === 'before') { const [row] = await client`select pg_backend_pid() pid`; publicationPid = row!.pid; checking.release(); }
+  };
+  const publication = service.publishSettings({ ...f, input: { ...input(f), project: { pipeline: { piiPolicy: { enabled: true, action: 'redact_artifacts' } } } } });
+  const refused = expect(publication).rejects.toMatchObject({ status: 409, code: 'policy_publication_unavailable' });
+  try { await checking.promise; await waitForLock(publicationPid); }
+  finally { releaseArrival.release(); }
+  try { await arrival; await refused; } finally { policyBarrier = undefined; }
+  expect((await service.readSettingsSnapshot(f.actor, f.projectId)).revision).toEqual(f.snapshot.revision);
+  expect(await sql`select count(*)::int n from project_settings_publications where project_id=${f.projectId}`).toEqual([{ n: 0 }]);
+});
+native('native: publication fences empty corpus first and rejects stale-policy arrival after commit', async () => {
+  const f = await fixture(); const checked = barrier(), releasePublication = barrier(), attempting = barrier();
+  policyBarrier = async phase => { if (phase === 'after') { checked.release(); await releasePublication.promise; } };
+  const publication = service.publishSettings({ ...f, input: { ...input(f), project: { pipeline: { piiPolicy: { enabled: true, action: 'redact_artifacts' } } } } });
+  await checked.promise;
+  let arrivalPid = 0;
+  const arrival = sql.begin(async tx => {
+    const [row] = await tx`select pg_backend_pid() pid`; arrivalPid = row!.pid; attempting.release();
+    await tx`insert into project_runs(id,org_id,user_id,project_id,kind,status,stage,pipeline,monthly_reservation_cents) values (${randomUUID()},${f.projectId},${f.actor.userId},${f.projectId},'upload','processing','index',${tx.json(JSON.parse(JSON.stringify(f.snapshot.project.pipeline)))},1)`;
+  });
+  const refused = expect(arrival).rejects.toThrow(/policy/);
+  try { await attempting.promise; await waitForLock(arrivalPid); }
+  finally { releasePublication.release(); }
+  try { expect((await publication).snapshot.project.pipeline.piiPolicy.enabled).toBe(true); await refused; }
+  finally { policyBarrier = undefined; }
+  expect(await sql`select count(*)::int n from project_runs where project_id=${f.projectId}`).toEqual([{ n: 0 }]);
+});
+native('native: concurrent identical publications commit once and replay the receipt', async () => {
+  const f = await fixture(), body = input(f);
+  const results = await Promise.all([service.publishSettings({ ...f, input: body }), service.publishSettings({ ...f, input: body })]);
+  expect(results.filter(r => r.replayed)).toHaveLength(1);
+  expect(results[0].snapshot).toEqual(results[1].snapshot);
+  expect(await sql`select count(*)::int n from project_settings_publications where project_id=${f.projectId}`).toEqual([{ n: 1 }]);
+});
+it('run admission checks tenant scope and each policy dimension without weakening stricter requests', async () => {
+  const f = await fixture(), other = await fixture();
+  await expect(sql`insert into project_runs(id,org_id,user_id,project_id,kind,status,stage,pipeline) values (${randomUUID()},${other.projectId},${f.actor.userId},${f.projectId},'upload','completed','index','{}')`).rejects.toThrow(/policy/);
+  const required = { privacyMode: 'local-only', piiPolicy: { enabled: true, action: 'redact_artifacts', patterns: ['ssn'], allowlistPatterns: ['permitted'] } };
+  for (const [candidate, covers] of [
+    [required, true],
+    [{ ...required, privacyMode: 'standard' }, false],
+    [{ ...required, privacyMode: 'strict-privacy' }, true],
+    [{ ...required, piiPolicy: { ...required.piiPolicy, enabled: false } }, false],
+    [{ ...required, piiPolicy: { ...required.piiPolicy, action: 'flag_for_review' } }, false],
+    [{ ...required, piiPolicy: { ...required.piiPolicy, patterns: [] } }, false],
+    [{ ...required, piiPolicy: { ...required.piiPolicy, allowlistPatterns: ['permitted', 'bypass'] } }, false],
+    [{ ...required, piiPolicy: { ...required.piiPolicy, patterns: ['ssn', 'credit-card'], allowlistPatterns: [], action: 'block_indexing' } }, true],
+  ] as const) {
+    const [row] = await sql`select docslurp_pipeline_policy_covers(${sql.json(candidate)},${sql.json(required)}) as covers`;
+    expect(row!.covers).toBe(covers);
+  }
+});
+native('native: concurrent conflicting request IDs produce one commit and one conflict', async () => {
+  const f = await fixture(), body = input(f);
+  const results = await Promise.allSettled([service.publishSettings({ ...f, input: body }), service.publishSettings({ ...f, input: { ...body, search: {} } })]);
+  expect(results.filter(r => r.status === 'fulfilled')).toHaveLength(1);
+  const rejected = results.find(r => r.status === 'rejected') as PromiseRejectedResult;
+  expect(rejected.reason).toMatchObject({ status: 409, code: 'settings_idempotency_conflict' });
+  expect(await sql`select count(*)::int n from project_settings_publications where project_id=${f.projectId}`).toEqual([{ n: 1 }]);
 });
