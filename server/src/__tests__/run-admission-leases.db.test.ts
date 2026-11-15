@@ -58,8 +58,8 @@ beforeEach(async () => {
 
 function admit(runId: string, speedBoost = true, projectId = "admission-w1") {
   return guard.admitRunSpend("admission-org", projectId, tx => tx`
-    insert into project_runs(id, org_id, user_id, project_id, kind, status, stage, pipeline)
-    values (${runId}, 'admission-org', 'admission-user', ${projectId}, 'upload', 'queued', 'queued', ${tx.json({ speedBoost })})
+    insert into project_runs(monthly_reservation_cents, id, org_id, user_id, project_id, kind, status, stage, pipeline)
+    values (100, ${runId}, 'admission-org', 'admission-user', ${projectId}, 'upload', 'queued', 'queued', ${tx.json({ speedBoost })})
     returning id
   `, { leaseRunId: runId, speedBoost });
 }

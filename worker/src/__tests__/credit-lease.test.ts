@@ -56,8 +56,8 @@ async function seedOrg(client: Sql, orgId: string, credits: number) {
 async function seedRuns(client: Sql, orgId: string, count: number, prefix = orgId): Promise<string[]> {
   const ids = Array.from({ length: count }, (_, index) => `${prefix}-run-${index}`);
   for (const id of ids) {
-    await client`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline)
-      values (${id}, ${orgId}, 'u1', ${`ws-${orgId}`}, 'bulk-upload', 'processing', 'vision-extract', '{}')`;
+    await client`insert into project_runs (monthly_reservation_cents, id, org_id, user_id, project_id, kind, status, stage, pipeline)
+      values (100, ${id}, ${orgId}, 'u1', ${`ws-${orgId}`}, 'bulk-upload', 'processing', 'vision-extract', '{}')`;
   }
   return ids;
 }

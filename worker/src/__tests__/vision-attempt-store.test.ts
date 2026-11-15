@@ -8,7 +8,7 @@ import { debitRunUsageCredits, persistRunUsageEvents } from "../db/usage-event-s
 import { recordVisionRead, VisionRunGuard, type VisionAttemptPurpose, type VisionGuardConfig } from "../lib/vision-attempt-guard.js";
 import { WorkflowState } from "../pipeline/pipeline.js";
 import type { VisionPageTask } from "../temporal/shared.js";
-import { createMigratedDatabase } from "../test/migrated-db.js";
+import { createMigratedDatabase, applyRemainingMigrations } from "../test/migrated-db.js";
 import { serveOnRandomPort } from "../test/migrated-postgres.js";
 
 /** The Postgres vision attempt ledger (migration 0105) behind the vision guard. */
@@ -21,9 +21,14 @@ const config: VisionGuardConfig = {
 };
 
 async function insertRuns(rows: Array<[runId: string, orgId: string | null, projectId: string]>): Promise<void> {
-  const values = rows.map(([id, org, ws]) =>
-    `('${id}', ${org ? `'${org}'` : "null"}, 'u1', '${ws}', 'upload', 'processing', 'vision-extract', '{}', '{}')`);
-  await db.exec(`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, artifacts) values ${values.join(", ")};`);
+  // Null-org rows are historical fixtures seeded before monthly admission existed.
+  for (const [id, org, ws] of rows.filter(([, org]) => org === null)) {
+    const existing = await db.query("select id from project_runs where id=$1 and org_id is null and project_id=$2", [id, ws]);
+    expect(existing.rows).toHaveLength(1);
+  }
+  const values = rows.filter(([, org]) => org !== null).map(([id, org, ws]) =>
+    `(100, '${id}', ${org ? `'${org}'` : "null"}, 'u1', '${ws}', 'upload', 'processing', 'vision-extract', '{}', '{}')`);
+  if (values.length) await db.exec(`insert into project_runs (monthly_reservation_cents, id, org_id, user_id, project_id, kind, status, stage, pipeline, artifacts) values ${values.join(", ")};`);
 }
 
 const count = async (query: string) => Number((await db.query<{ n: number }>(query)).rows[0]?.n ?? 0);
@@ -50,7 +55,7 @@ async function call(guard: VisionRunGuard, pageNumber: number, requests: number,
 }
 
 beforeAll(async () => {
-  db = await createMigratedDatabase();
+  db = await createMigratedDatabase({ stopBefore: "monthly_admission_receipts" });
   await db.exec(`
     insert into "user"(id, name, email) values ('u1', 'A', 'a@x');
     insert into organizations(id, name, slug, created_by_user_id)
@@ -58,6 +63,16 @@ beforeAll(async () => {
     insert into projects(id, org_id, user_id, name)
       values ('w1', 'o1', 'u1', 'W'), ('w2', 'o2', 'u1', 'W2'), ('w3', 'o3', 'u1', 'W3'), ('w4', 'o4', 'u1', 'W4'), ('w-budget', 'o-budget', 'u1', 'WB'), ('w-none', null, 'u1', 'Orphan');
   `);
+  await db.exec(`
+    insert into organizations(id,name,slug,created_by_user_id) values ('o9','Nine','nine','u1'),('o11','Eleven','eleven','u1');
+    insert into projects(id,org_id,user_id,name) values ('w9','o9','u1','W9'),('w11','o11','u1','W11');
+    insert into project_runs(id,org_id,user_id,project_id,kind,status,stage,pipeline) values
+      ('null-org',null,'u1','w4','upload','processing','vision-extract','{}'),
+      ('no-org-at-all',null,'u1','w-none','upload','processing','vision-extract','{}'),
+      ('null-org-billed',null,'u1','w9','upload','processing','vision-extract','{}'),
+      ('null-org-fee',null,'u1','w11','upload','processing','materialize','{}');
+  `);
+  await applyRemainingMigrations(db, "monthly_admission_receipts");
   const served = await serveOnRandomPort(db);
   server = served.server;
   const url = `postgres://postgres@127.0.0.1:${served.port}/postgres`;
@@ -359,8 +374,8 @@ describe("PostgresVisionAttemptBackend", () => {
     }, 60_000);
 
     it("a run without an org bills, attributes and releases under its project's org", async () => {
-      await db.exec(`insert into organizations(id, name, slug, created_by_user_id) values ('o9', 'Nine', 'nine', 'u1');
-        insert into projects(id, org_id, user_id, name) values ('w9', 'o9', 'u1', 'W9');`);
+      await db.exec(`insert into organizations(id, name, slug, created_by_user_id) values ('o9', 'Nine', 'nine', 'u1') on conflict do nothing;
+        insert into projects(id, org_id, user_id, name) values ('w9', 'o9', 'u1', 'W9') on conflict do nothing;`);
       await insertRuns([["null-org-billed", null, "w9"]]);
       await insertDocument("null-org-doc", "o9", "w9", "null-org-billed");
       const state = await stateOf("null-org-billed");
@@ -425,8 +440,8 @@ describe("PostgresVisionAttemptBackend", () => {
     });
 
     it("bills a null-org run's materialized pages under its project's org", async () => {
-      await db.exec(`insert into organizations(id, name, slug, created_by_user_id) values ('o11', 'Eleven', 'eleven', 'u1');
-        insert into projects(id, org_id, user_id, name) values ('w11', 'o11', 'u1', 'W11');`);
+      await db.exec(`insert into organizations(id, name, slug, created_by_user_id) values ('o11', 'Eleven', 'eleven', 'u1') on conflict do nothing;
+        insert into projects(id, org_id, user_id, name) values ('w11', 'o11', 'u1', 'W11') on conflict do nothing;`);
       await insertRuns([["null-org-fee", null, "w11"]]);
       await insertDocument("null-org-fee-doc", "o11", "w11", "null-org-fee");
       const sql = (store as unknown as { sql: import("postgres").Sql<Record<string, unknown>> }).sql;
@@ -493,4 +508,9 @@ describe("startup schema check", () => {
     }
     await expect(store.visionAttempts.assertSchema()).resolves.toBeUndefined();
   }, 60_000);
+});
+
+it("refuses new unscoped active work after migration", async () => {
+  await expect(db.exec(`insert into project_runs(id,org_id,user_id,project_id,kind,status,stage,pipeline,monthly_reservation_cents)
+    values('new-unscoped',null,'u1','w4','upload','processing','vision-extract','{}',100)`)).rejects.toThrow(/billing scope mismatch/);
 });

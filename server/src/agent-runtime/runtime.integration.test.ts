@@ -54,7 +54,7 @@ beforeAll(async()=>{
   await sql`insert into "user"(id,name,email) values('native-api-owner','Native','native-api@example.test')`;
   await sql`insert into session(id,token,"userId","expiresAt","createdAt","updatedAt")
     values('native-api-session','native-api-test-token','native-api-owner',now()+interval '1 day',now(),now())`;
-  await sql`insert into organizations(id,name,slug,created_by_user_id) values('native-api-org','Native','native-api-org','native-api-owner')`;
+  await sql`insert into organizations(id,name,slug,created_by_user_id,credit_balance_cents) values('native-api-org','Native','native-api-org','native-api-owner',1000)`;
   await sql`insert into org_memberships(org_id,user_id,role) values('native-api-org','native-api-owner','owner') on conflict do nothing`;
   await sql`insert into projects(id,org_id,user_id,name) values(${project},'native-api-org','native-api-owner','Native')`;
   runtime=await import("./runtime.js");

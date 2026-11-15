@@ -40,10 +40,10 @@ beforeAll(async () => {
     insert into "user"(id, name, email) values ('ua', 'A', 'a@example.com'), ('ub', 'B', 'b@example.com');
     insert into organizations(id, name, slug, created_by_user_id) values ('org-a', 'A', 'a', 'ua'), ('org-b', 'B', 'b', 'ub');
     insert into projects(id, org_id, user_id, name) values ('proj-a', 'org-a', 'ua', 'A'), ('proj-b', 'org-b', 'ub', 'B');
-    insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, created_at) values
-      ('run-a', 'org-a', 'ua', 'proj-a', 'upload', 'processing', 'extract', '{}', 1, now() - interval '1 hour'),
-      ('run-a2', 'org-a', 'ua', 'proj-a', 'upload', 'processing', 'extract', '{}', 1, now()),
-      ('run-b', 'org-b', 'ub', 'proj-b', 'upload', 'processing', 'extract', '{}', 1, now());
+    insert into project_runs (monthly_reservation_cents, id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, created_at) values
+      (100, 'run-a', 'org-a', 'ua', 'proj-a', 'upload', 'processing', 'extract', '{}', 1, now() - interval '1 hour'),
+      (100, 'run-a2', 'org-a', 'ua', 'proj-a', 'upload', 'processing', 'extract', '{}', 1, now()),
+      (100, 'run-b', 'org-b', 'ub', 'proj-b', 'upload', 'processing', 'extract', '{}', 1, now());
     insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count) values
       ('doc-a', 'org-a', 'ua', 'proj-a', 'run-a', 'a.pdf', 'application/pdf', 'ka', 'processing', 3),
       ('doc-b', 'org-b', 'ub', 'proj-b', 'run-b', 'b.pdf', 'application/pdf', 'kb', 'processing', 3);

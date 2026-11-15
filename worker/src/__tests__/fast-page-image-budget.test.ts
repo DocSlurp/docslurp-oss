@@ -34,8 +34,8 @@ beforeAll(async () => {
     insert into "user"(id, name, email) values ('u1', 'A', 'a@example.com');
     insert into organizations(id, name, slug, created_by_user_id, worker_slots, credit_balance_cents) values ('o1', 'Org', 'org', 'u1', 8, 100000);
     insert into projects(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W');
-    insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
-      values ('run', 'o1', 'u1', 'w', 'bulk-upload', 'processing', 'render-images', '{}', ${DOCUMENTS}, ${DOCUMENTS * 40});
+    insert into project_runs (monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
+      values (100, 'run', 'o1', 'u1', 'w', 'bulk-upload', 'processing', 'render-images', '{}', ${DOCUMENTS}, ${DOCUMENTS * 40});
     insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count) values ${documents};
   `);
   // Several connections, like several worker processes; PGlite serializes them, transactions included.
@@ -92,9 +92,9 @@ describe("Fast page-image render budget (Postgres, shared by workers)", () => {
         insert into "user"(id, name, email) values ('u2', 'B', 'b@example.com');
         insert into organizations(id, name, slug, created_by_user_id) values ('o2', 'Other', 'other', 'u2');
         insert into projects(id, org_id, user_id, name) values ('w2', 'o2', 'u2', 'W2'), ('w1b', 'o1', 'u1', 'W1b');
-        insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents)
-          values ('other-run', 'o2', 'u2', 'w2', 'bulk-upload', 'processing', 'render-images', '{}', 1),
-                 ('fresh', 'o1', 'u1', 'w', 'bulk-upload', 'processing', 'render-images', '{}', 1);
+        insert into project_runs (monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents)
+          values (100, 'other-run', 'o2', 'u2', 'w2', 'bulk-upload', 'processing', 'render-images', '{}', 1),
+                 (100, 'fresh', 'o1', 'u1', 'w', 'bulk-upload', 'processing', 'render-images', '{}', 1);
         insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count)
           values ('foreign', 'o2', 'u2', 'w2', 'other-run', 'f.pdf', 'application/pdf', 'raw/f', 'processing', 40),
                  ('moved', 'o1', 'u1', 'w1b', 'fresh', 'm.pdf', 'application/pdf', 'raw/m', 'processing', 40);

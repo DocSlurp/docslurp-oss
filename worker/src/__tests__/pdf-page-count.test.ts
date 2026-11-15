@@ -49,9 +49,9 @@ beforeAll(async () => {
     insert into "user"(id, name, email) values ('u1', 'A', 'a@example.com');
     insert into organizations(id, name, slug, created_by_user_id, worker_slots, credit_balance_cents) values ('o1', 'Org', 'org', 'u1', 8, 100000), ('o2', 'Low', 'low', 'u1', 8, 1);
     insert into projects(id, org_id, user_id, name) values ('w1', 'o1', 'u1', 'W'), ('w2', 'o2', 'u1', 'L');
-    insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
-      values ('run1', 'o1', 'u1', 'w1', 'bulk-upload', 'processing', 'format-detect', '${pipeline}', 4, 4),
-             ('run2', 'o2', 'u1', 'w2', 'bulk-upload', 'processing', 'format-detect', '${pipeline}', 1, 1);
+    insert into project_runs (monthly_reservation_cents, id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
+      values (100, 'run1', 'o1', 'u1', 'w1', 'bulk-upload', 'processing', 'format-detect', '${pipeline}', 4, 4),
+             (100, 'run2', 'o2', 'u1', 'w2', 'bulk-upload', 'processing', 'format-detect', '${pipeline}', 1, 1);
     insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source, file_facts, parse_source_scan_version, parse_source_sha256) values
       ('local', 'o1', 'u1', 'w1', 'run1', 'a.pdf', 'application/pdf', 'raw/a', 'processing', 3, 'assumed', '${JSON.stringify(pdfFacts)}', 1, repeat('0', 64)),
       ('vm', 'o1', 'u1', 'w1', 'run1', 'b.pdf', 'application/pdf', 'raw/b', 'processing', 3, 'assumed', '${JSON.stringify(pdfFacts)}', 1, repeat('0', 64)),
@@ -252,8 +252,8 @@ describe.skipIf(!realTool)("walked vs extracted with the real tools (owner decis
     const processed = processedPdfPages(text, "poppler-text");
     expect(processed).toBe(1);
     await db.exec(`
-      insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
-        values ('run-p', 'o1', 'u1', 'w1', 'bulk-upload', 'processing', 'extract-markdown', '${pipeline}', 1, 50);
+      insert into project_runs (monthly_reservation_cents, id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
+        values (100, 'run-p', 'o1', 'u1', 'w1', 'bulk-upload', 'processing', 'extract-markdown', '${pipeline}', 1, 50);
       insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source, file_facts, parse_source_scan_version, parse_source_sha256)
         values ('partial', 'o1', 'u1', 'w1', 'run-p', 'p.pdf', 'application/pdf', 'raw/p', 'processing', 50, 'counted', '${JSON.stringify(pdfFacts)}', 1, repeat('0', 64));`);
     const { state, document } = await stateFor("run-p", "partial");
@@ -404,8 +404,8 @@ describe("PDF page counts are measured by the worker, never parsed by the API", 
 
   it("a page-count VM that ran and failed records its provider cost (0 credits) before the refusal propagates", async () => {
     await db.exec(`
-      insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
-        values ('run-fail', 'o1', 'u1', 'w1', 'bulk-upload', 'processing', 'format-detect', '${pipeline}', 1, 3);
+      insert into project_runs (monthly_reservation_cents, id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
+        values (100, 'run-fail', 'o1', 'u1', 'w1', 'bulk-upload', 'processing', 'format-detect', '${pipeline}', 1, 3);
       insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source, file_facts, parse_source_scan_version, parse_source_sha256)
         values ('vm-fail', 'o1', 'u1', 'w1', 'run-fail', 'e.pdf', 'application/pdf', 'raw/e', 'processing', 3, 'assumed', '${JSON.stringify(pdfFacts)}', 1, repeat('0', 64));`);
     const usage = { provider: "modal", model: "doppler-vm", metric: "sandbox_compute", amount: 12, unit: "second", costCents: 0.42, inputTokens: 0, outputTokens: 0, metadata: { costRollup: "authoritative" } };
@@ -432,8 +432,8 @@ describe("PDF page counts are measured by the worker, never parsed by the API", 
   it("a retry after a failed balance check re-authorizes the persisted measurement from durable state, and charges nothing", async () => {
     setSpendCheckConfig({ enabled: true, pages: 25, credits: 10 });
     await db.exec(`
-      insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
-        values ('run-retry', 'o2', 'u1', 'w2', 'bulk-upload', 'processing', 'format-detect', '${pipeline}', 1, 3);
+      insert into project_runs (monthly_reservation_cents, id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
+        values (100, 'run-retry', 'o2', 'u1', 'w2', 'bulk-upload', 'processing', 'format-detect', '${pipeline}', 1, 3);
       insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source, file_facts, parse_source_scan_version, parse_source_sha256)
         values ('retry', 'o2', 'u1', 'w2', 'run-retry', 'r.pdf', 'application/pdf', 'raw/r', 'processing', 3, 'assumed', '${JSON.stringify(pdfFacts)}', 1, repeat('0', 64));`);
     // Attempt 1: the count is measured and persisted, then the balance query fails (a dropped connection).
@@ -468,8 +468,8 @@ describe("PDF page counts are measured by the worker, never parsed by the API", 
     const STAGED_SHA = createHash("sha256").update("%PDF-1.7\n").digest("hex");
     // As run creation writes them: the PDF's size estimate is assumed, the small text file was counted from its bytes.
     await db.exec(`
-      insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
-        values ('run-e2e', 'o1', 'u1', 'w1', 'bulk-upload', 'processing', 'format-detect', '${pipeline}', 2, 4);
+      insert into project_runs (monthly_reservation_cents, id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
+        values (100, 'run-e2e', 'o1', 'u1', 'w1', 'bulk-upload', 'processing', 'format-detect', '${pipeline}', 2, 4);
       insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source, file_facts, parse_source_scan_version, parse_source_sha256)
         values ('e2e-pdf', 'o1', 'u1', 'w1', 'run-e2e', 'f.pdf', 'application/pdf', 'raw/f', 'processing', 2, 'assumed', '${JSON.stringify(pdfFacts)}', 1, '${STAGED_SHA}'),
                ('e2e-txt', 'o1', 'u1', 'w1', 'run-e2e', 'g.txt', 'text/plain', 'raw/g', 'processing', 2, 'counted', '${JSON.stringify(textFacts)}', 1, '${STAGED_SHA}');`);
@@ -498,8 +498,8 @@ describe("PDF page counts are measured by the worker, never parsed by the API", 
     vi.stubEnv("DOCSLURP_PDF_MODE", "");
     vi.stubEnv("DOCSLURP_PDF_EXTRACTOR", "");
     await db.exec(`
-      insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
-        values ('run-off', 'o1', 'u1', 'w1', 'bulk-upload', 'processing', 'format-detect', '${pipeline}', 1, 2);
+      insert into project_runs (monthly_reservation_cents, id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
+        values (100, 'run-off', 'o1', 'u1', 'w1', 'bulk-upload', 'processing', 'format-detect', '${pipeline}', 1, 2);
       insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source, file_facts, parse_source_scan_version, parse_source_sha256)
         values ('off-pdf', 'o1', 'u1', 'w1', 'run-off', 'h.pdf', 'application/pdf', 'raw/h', 'processing', 2, 'assumed', '${JSON.stringify(pdfFacts)}', 1, repeat('0', 64));`);
     const storage = { putJson: vi.fn(async () => undefined), uri: (key: string) => `s3://b/${key}`, downloadSourceToTempFile: vi.fn(), downloadToTempFile: vi.fn(), getBytes: vi.fn() } as unknown as ArtifactStore;
@@ -516,8 +516,8 @@ describe("PDF page counts are measured by the worker, never parsed by the API", 
 
   it("bills what was processed: raised when extraction processed more than the tree, lowered (and flagged) when fewer", async () => {
     await db.exec(`
-      insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
-        values ('run-x', 'o1', 'u1', 'w1', 'bulk-upload', 'processing', 'extract-markdown', '${pipeline}', 2, 13);
+      insert into project_runs (monthly_reservation_cents, id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
+        values (100, 'run-x', 'o1', 'u1', 'w1', 'bulk-upload', 'processing', 'extract-markdown', '${pipeline}', 2, 13);
       insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source, file_facts, parse_source_scan_version, parse_source_sha256)
         values ('x-more', 'o1', 'u1', 'w1', 'run-x', 'm.pdf', 'application/pdf', 'raw/m', 'processing', 3, 'counted', '${JSON.stringify(pdfFacts)}', 1, repeat('0', 64)),
                ('x-less', 'o1', 'u1', 'w1', 'run-x', 'l.pdf', 'application/pdf', 'raw/l', 'processing', 10, 'counted', '${JSON.stringify(pdfFacts)}', 1, repeat('0', 64));`);
@@ -548,8 +548,8 @@ describe("PDF page counts are measured by the worker, never parsed by the API", 
 
   it("a blank last page counts N under both form-feed conventions, with no false partial-extraction flag (council E #4)", async () => {
     await db.exec(`
-      insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
-        values ('run-blank', 'o1', 'u1', 'w1', 'bulk-upload', 'processing', 'extract-markdown', '${pipeline}', 2, 6);
+      insert into project_runs (monthly_reservation_cents, id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
+        values (100, 'run-blank', 'o1', 'u1', 'w1', 'bulk-upload', 'processing', 'extract-markdown', '${pipeline}', 2, 6);
       insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, page_count_source, file_facts, parse_source_scan_version, parse_source_sha256)
         values ('blank-term', 'o1', 'u1', 'w1', 'run-blank', 't.pdf', 'application/pdf', 'raw/t', 'processing', 3, 'counted', '${JSON.stringify(pdfFacts)}', 1, repeat('0', 64)),
                ('blank-sep', 'o1', 'u1', 'w1', 'run-blank', 's.pdf', 'application/pdf', 'raw/s', 'processing', 3, 'counted', '${JSON.stringify(pdfFacts)}', 1, repeat('0', 64));`);

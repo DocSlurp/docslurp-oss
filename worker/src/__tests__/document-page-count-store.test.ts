@@ -17,8 +17,8 @@ beforeAll(async () => {
     insert into "user"(id, name, email) values ('u1', 'A', 'a@x');
     insert into organizations(id, name, slug, created_by_user_id) values ('o1', 'One', 'one', 'u1');
     insert into projects(id, org_id, user_id, name) values ('w1', 'o1', 'u1', 'W');
-    insert into project_runs(id, org_id, user_id, project_id, kind, status, stage) values ('run1', 'o1', 'u1', 'w1', 'bulk', 'processing', 'queued');
-    insert into project_runs(id, org_id, user_id, project_id, kind, status, stage) values ('run2', 'o1', 'u1', 'w1', 'bulk', 'processing', 'queued');
+    insert into project_runs(monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage) values (100, 'run1', 'o1', 'u1', 'w1', 'bulk', 'processing', 'queued');
+    insert into project_runs(monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage) values (100, 'run2', 'o1', 'u1', 'w1', 'bulk', 'processing', 'queued');
     insert into documents(id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, file_facts)
       values ('long-docx', 'o1', 'u1', 'w1', 'run1', 'contract.docx',
         'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'k1', 'processing', 1,

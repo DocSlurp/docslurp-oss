@@ -27,8 +27,8 @@ if (process.env.TEST_DATABASE_URL) {
       const status = action === 'resume' ? 'processing' : 'failed';
       const controlState = action === 'recover' ? 'dead-letter' : action === 'resume' ? 'paused' : null;
       const run = { id: runId, status, priority: 0, controlState, error: null, pipeline: { ...defaultPipelineFeatures, speedBoost: boost } };
-      await sql`insert into project_runs(id,org_id,user_id,project_id,kind,status,stage,control_state,pipeline)
-        values (${runId},${id},${id},${id},'bulk-upload',${status},'queued',${controlState},${sql.json(run.pipeline)})`;
+      await sql`insert into project_runs(monthly_reservation_cents, id,org_id,user_id,project_id,kind,status,stage,control_state,pipeline)
+        values (100, ${runId},${id},${id},${id},'bulk-upload',${status},'queued',${controlState},${sql.json(run.pipeline)})`;
       const prepare = tx => action === 'retry' ? lifecycle.prepareRetry(run, tx) : lifecycle.control(run, { action }, tx);
       await assert.rejects(sql.begin(async tx => {
         await tx`select pg_advisory_xact_lock(spend_admission_lock_key(${id}))`;

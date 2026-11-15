@@ -29,9 +29,9 @@ beforeAll(async () => {
   await sql`insert into "user"(id, name, email) values ('u1', 'A', 'a@x')`;
   await sql`insert into organizations(id, name, slug, created_by_user_id, worker_slots, credit_balance_cents) values ('big', 'Big', 'big', 'u1', 64, 1000), ('small', 'Small', 'small', 'u1', 2, 1000)`;
   await sql`insert into projects(id, org_id, user_id, name) values ('wb', 'big', 'u1', 'B'), ('ws', 'small', 'u1', 'S')`;
-  await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, artifacts) values
-    ('run-big', 'big', 'u1', 'wb', 'bulk-upload', 'processing', 'document-summary', '{}', '{"doc-0:markdown":"s3://m0"}'),
-    ('run-small', 'small', 'u1', 'ws', 'bulk-upload', 'processing', 'document-summary', '{}', '{}')`;
+  await sql`insert into project_runs (monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage, pipeline, artifacts) values
+    (100, 'run-big', 'big', 'u1', 'wb', 'bulk-upload', 'processing', 'document-summary', '{}', '{"doc-0:markdown":"s3://m0"}'),
+    (100, 'run-small', 'small', 'u1', 'ws', 'bulk-upload', 'processing', 'document-summary', '{}', '{}')`;
   // Spend from before the shards, counted by the usage_events trigger (0056).
   await sql`insert into usage_events (id, user_id, run_id, provider, model, metric, amount, unit, cost_cents)
     values ('ue-prior', 'u1', 'run-big', 'openrouter', 'm', 'page-analysis', 1, 'request', 10)`;
@@ -88,8 +88,8 @@ describe("document shard checkpoints", () => {
   });
 
   it("count a shard's cost once when its documents checkpoint concurrently", async () => {
-    await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, artifacts)
-      values ('run-cost', 'small', 'u1', 'ws', 'bulk-upload', 'completed', 'index', '{}', '{}')`;
+    await sql`insert into project_runs (monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage, pipeline, artifacts)
+      values (100, 'run-cost', 'small', 'u1', 'ws', 'bulk-upload', 'completed', 'index', '{}', '{}')`;
     const state = await shardState("run-cost", ["doc-9"]);
     state.usageLedger.enqueue({ provider: "docslurp", model: "price-card", metric: "ingest-page-rich", amount: 20, unit: "page", costCents: 5,
       metadata: { billable: true, unitCharge: true } });
@@ -123,9 +123,9 @@ describe("scaler demand for runs between activities", () => {
     await sql`insert into organizations(id, name, slug, created_by_user_id, worker_slots, credit_balance_cents) values ('lease', 'Lease', 'lease', 'u1', 8, 1000)`;
     await sql`insert into projects(id, org_id, user_id, name) values ('wl', 'lease', 'u1', 'L')`;
     // A run waiting in the task queue for its next activity has no worker renewing its lease.
-    await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, artifacts, lease_expires_at) values
-      ('run-waiting', 'lease', 'u1', 'wl', 'bulk-upload', 'processing', 'format-detect', '{}', '{}', now() - interval '2 minutes'),
-      ('run-dead', 'lease', 'u1', 'wl', 'bulk-upload', 'processing', 'format-detect', '{}', '{}', now() - interval '20 minutes')`;
+    await sql`insert into project_runs (monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage, pipeline, artifacts, lease_expires_at) values
+      (100, 'run-waiting', 'lease', 'u1', 'wl', 'bulk-upload', 'processing', 'format-detect', '{}', '{}', now() - interval '2 minutes'),
+      (100, 'run-dead', 'lease', 'u1', 'wl', 'bulk-upload', 'processing', 'format-detect', '{}', '{}', now() - interval '20 minutes')`;
     const params = { pageFanout: 128, defaultOrgSlots: 2, loadtestMaxMachines: 125 };
     const demand = async (graceSeconds?: number) => {
       const snapshot = await queryWorkerScalerSnapshot(sql, graceSeconds === undefined ? params : { ...params, staleLeaseGraceSeconds: graceSeconds });
@@ -142,8 +142,8 @@ describe("autoscaler demand follows runnable page work", () => {
     await sql`insert into organizations(id, name, slug, created_by_user_id, worker_slots, credit_balance_cents)
       values ('runnable', 'Runnable', 'runnable', 'u1', 250, 1000)`;
     await sql`insert into projects(id, org_id, user_id, name) values ('runnable-project', 'runnable', 'u1', 'Runnable')`;
-    await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, pages_total, lease_expires_at)
-      values ('runnable-run', 'runnable', 'u1', 'runnable-project', 'bulk-upload', 'queued', 'quarantine',
+    await sql`insert into project_runs (monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage, pipeline, pages_total, lease_expires_at)
+      values (100, 'runnable-run', 'runnable', 'u1', 'runnable-project', 'bulk-upload', 'queued', 'quarantine',
         '{"visionFallback":true,"maxCostCents":0}', 500, now() + interval '1 minute')`;
     const params = { pageFanout: 128, defaultOrgSlots: 2, loadtestMaxMachines: 125 };
     const read = async () => {

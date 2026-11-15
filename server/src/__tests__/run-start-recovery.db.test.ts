@@ -80,8 +80,8 @@ function recovery(sql: SqlClient, temporal: ReturnType<typeof fakeTemporal>) {
 
 async function insertRun(sql: SqlClient, tenant: Tenant, name: string, values: { ageMs?: number; status?: string; controlState?: string; started?: boolean } = {}) {
   await sql`
-    insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, control_state, created_at, workflow_started_at, creation_ready_at)
-    values (
+    insert into project_runs (monthly_reservation_cents, id, org_id, user_id, project_id, kind, status, stage, control_state, created_at, workflow_started_at, creation_ready_at)
+    values (100,
       ${tenant.runId(name)}, ${tenant.orgId}, ${tenant.userId}, ${tenant.projectId}, 'bulk-upload',
       ${values.status ?? "queued"}, 'queued', ${values.controlState ?? null},
       now() - (${values.ageMs ?? 0} * interval '1 millisecond'),
