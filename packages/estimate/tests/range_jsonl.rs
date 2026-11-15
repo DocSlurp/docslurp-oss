@@ -110,6 +110,9 @@ fn repeated_contents_execute_twice_but_stored_bytes_are_deduplicated() {
 }
 
 fn hybrid_pdf() -> Vec<u8> {
+    hybrid_pdf_with_supplemental_prev(false)
+}
+fn hybrid_pdf_with_supplemental_prev(with_prev: bool) -> Vec<u8> {
     let mut bytes = b"%PDF-1.7\n".to_vec();
     let mut offsets = [0usize; 7];
     fn object(bytes: &mut Vec<u8>, offsets: &mut [usize], id: usize, body: &[u8]) {
@@ -145,8 +148,9 @@ fn hybrid_pdf() -> Vec<u8> {
     stream.extend(b"\nendstream");
     object(&mut bytes, &mut offsets, 5, &stream);
     let row = [2u8, 0, 0, 0, 5, 0, 0];
+    let supplemental_prev = if with_prev { "/Prev 1" } else { "" };
     let mut hybrid = format!(
-        "<< /Type /XRef /Size 7 /Index [4 1] /W [1 4 2] /Length {} >> stream\n",
+        "<< /Type /XRef /Size 7 {supplemental_prev} /Index [4 1] /W [1 4 2] /Length {} >> stream\n",
         row.len()
     )
     .into_bytes();
@@ -176,6 +180,25 @@ fn hybrid_xref_stream_overrides_same_revision_free_placeholders() {
     let records = run(&hybrid_pdf());
     assert_eq!(records.last().unwrap()["deepMeasured"], 1);
     assert_eq!(records.last().unwrap()["deepComplete"], true);
+}
+
+#[test]
+fn hybrid_ignores_supplemental_prev_but_follows_owning_revision_chain() {
+    let mut bytes = hybrid_pdf_with_supplemental_prev(true);
+    let tail = String::from_utf8_lossy(&bytes);
+    let previous: usize = tail.rsplit("startxref\n").next().unwrap().lines().next().unwrap().parse().unwrap();
+    let updated = bytes.len();
+    bytes.extend(b"2 0 obj\n<< /Type /Pages /Kids [4 0 R] /Count 1 /MediaBox [0 0 700 792] >>\nendobj\n");
+    let xref = bytes.len();
+    write!(bytes, "xref\n2 1\n{updated:010} 00000 n \ntrailer << /Size 7 /Root 1 0 R /Prev {previous} >>\nstartxref\n{xref}\n%%EOF\n").unwrap();
+    let records = run(&bytes);
+    let page = records.iter().find(|r| r["t"] == "pages").unwrap();
+    assert_eq!(page["inventory"][0][1], 7000);
+    assert_eq!(records.last().unwrap()["deepMeasured"], 1);
+    let mut cycle = hybrid_pdf();
+    let cyclic = cycle.len();
+    write!(cycle, "xref\n0 1\n0000000000 65535 f \ntrailer << /Size 7 /Root 1 0 R /Prev {cyclic} >>\nstartxref\n{cyclic}\n%%EOF\n").unwrap();
+    assert!(rejects(&cycle));
 }
 
 fn rejects(bytes: &[u8]) -> bool {

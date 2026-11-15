@@ -1,3 +1,4 @@
+- Real-document offline profiler calibration (2026-11-15, draft #431): three repetitions each on table/vector-heavy publisher PDFs, native text-extraction baseline, numeric cost scenarios and retained failed baseline. Correct supplemental hybrid-xref Prev handling; validate calibration runtime/count identity. No semantic-quality or full-deep completion claim.
 - Recovery council fixes (#425): document-stage restart clears prior typed failure; upload status-only metadata reads require current project/org read access. Migrated database negatives cover revoked shares/memberships and invalid API-key scopes; no parser or OCR checkpoint changes.
 ## Fast scan preview selection (2026-11-14, draft, needs council)
 

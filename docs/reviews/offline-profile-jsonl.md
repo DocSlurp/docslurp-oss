@@ -1,5 +1,17 @@
 # JSONL offline profiler council — 2026-11-15
 
+## Real-document continuation
+
+Independent source reviewers real_hybrid_adversarial and real_hybrid_correctness reviewed the supplemental-xref Prev correction and benchmark/calibration against hostile-input, bounded-work and evidence-truth boundaries. Both found no high issue; neither approved merging.
+
+- Adversarial P2 test gap: added owning-chain precedence/cycle rejection, retaining absent and differing supplemental pointers.
+- Correctness P2 runtime pooling: require one identified runtime/configuration; retain module hash/options.
+- Correctness P2 forged completion: independently require deepComplete, zero partial pages, measured count and consistent selected/attempted counts.
+- Adversarial low validation concern: reject invalid counts/rates, zero elapsed times and inconsistent page counts.
+- Both measurement advisories: document warmed hash/oracle I/O, harness/retained-output RSS, sampled peaks and partial-evidence denominators.
+
+Author validation: 81 Rust, 57 JS and 7 Python tests pass. Separate integrity gate passes on the external four-document page-count corpus. Raw evidence and cost caveats are under docs/performance/offline-profile-real-2026-11-15/. Native extraction timing added after source review is execution-only, not semantic quality. Reviewers did not re-approve final author fixes. No merge/deployment.
+
 ## Range-reader continuation (supersedes the initial scope limits below)
 
 The continuation removes the 64 MiB whole-input constraint from the public JSONL APIs. The new cooperative range reader accepts up to 2 GiB, uses pinned public `otf-pdf-syntax` low-level grammar, and reuses the existing evidence engine on bounded per-page graphs. Browser, Node, Python and native adapters share the protocol. Schema v3 adds compact summary vectors, rich geometric candidates, exclusive text-byte composition and bounded rankings. No private engine source or internals were used.

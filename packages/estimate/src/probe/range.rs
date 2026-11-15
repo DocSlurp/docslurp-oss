@@ -923,11 +923,12 @@ impl RangeSession {
                                 return bad("hybrid xref cycle");
                             }
                             let (extra, extra_dict) = self.reader.section(hybrid)?;
-                            if extra_dict.contains_key(b"Encrypt")
-                                || extra_dict.get(b"Prev") != dict.get(b"Prev")
-                            {
+                            if extra_dict.contains_key(b"Encrypt") {
                                 return bad("inconsistent hybrid xref revision");
                             }
+                            // Follow the owning table's Prev chain. A supplemental
+                            // stream may omit Prev or carry a different pointer;
+                            // QPDF likewise ignores that supplemental pointer.
                             entries.extend(extra);
                             Some(hybrid)
                         } else {
