@@ -104,6 +104,8 @@ export const WORKER_TABLES = Object.freeze({
   // Escalation reads are written once per call (insert ... on conflict do nothing) and read back on retry; never updated or
   // deleted by the worker: rows go with their run (ON DELETE CASCADE, as the table owner).
   ocr_escalation_reads: { privileges: ["select", "insert"], evidence: "worker/src/db/store.ts ocrEscalationReads / recordOcrEscalationRead (worker/src/ocr/hosted-reader.ts)" },
+  // Page reader org daily spend: admit inserts a ticket, settle updates it, admit purges days older than yesterday.
+  ocr_page_reader_org_spend: { privileges: DML, evidence: "worker/src/ocr/page-reader-budget.ts PostgresPageReaderOrgBudget (admit, settle, purge)" },
   ready_geo_projection_generations: { optional: true, privileges: ["select"], evidence: "optional PostGIS readiness" },
   vector_index_tables: { privileges: DML, evidence: "worker/src/stages LanceDB tables; superseded-purge.ts" },
   vector_indexes: { privileges: DML, evidence: "worker/src/db/store.ts vector index rows" },
