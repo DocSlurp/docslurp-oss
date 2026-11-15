@@ -1,6 +1,6 @@
 # TODO
 
-- Offline profiler real-corpus follow-ups (draft #431): expose bounded partial-reason diagnostics; calibrate font/word and table/chart candidate accuracy independently of throughput; all four real-document benchmark cases still contain partial pages, so full-deep throughput/cost calibration remains unavailable. Do not infer production OCR routing from candidate counts.
+- Offline profiler follow-ups (#431): independently calibrate font/CMap Unicode fidelity and table/chart candidate accuracy; native measurements remain encoded-glyph/geometric estimates. Real-corpus full-deep coverage, refusal diagnostics and compute calibration are complete; do not infer production OCR routing from candidate counts.
 
 - Project activity counters (0165), council follow-ups 2026-11-14:
   - Bulk chat-session delete is quadratic in a surviving project: the row-level delete trigger removes each session's turns and rewrites the same counter row per session (20,000 sessions 7.5 s against 0.3 s without the trigger; account offboarding hits it). Make it statement-level with a transition table.

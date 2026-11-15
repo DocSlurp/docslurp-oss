@@ -19,6 +19,8 @@ lopdf = { version = "0.47", default-features = false }
 # Only the public bounded object/xref grammar; the high-level loader eagerly owns streams.
 # The subcrate API is not semver-stable, so pin it behind our range-reader adapter.
 otf-pdf-syntax = "=0.2.0"
+fax = "=0.3.0"
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 # Raw deflate for Office/EPUB entries (already in the tree through lopdf's flate2).
 miniz_oxide = { version = "0.9", default-features = false, features = ["with-alloc"] }
 

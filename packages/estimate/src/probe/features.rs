@@ -314,12 +314,13 @@ pub fn analyze(
                 && w.height > 0.0
                 && w.glyphs >= 0.0
                 && w.glyphs <= 1e12
-                && bounds(*w).iter().all(|n| n.is_finite())
-                && contains(page, centre(*w));
+                && bounds(*w).iter().all(|n| n.is_finite());
             if !valid {
                 partial = true;
             }
-            valid
+            // Text outside the visible crop is not missing evidence. Its
+            // glyphs remain in the caller's unattributed text denominator.
+            valid && contains(page, centre(*w))
         })
         .collect();
     let mut heights: Vec<f64> = words.iter().map(|w| w.height).collect();

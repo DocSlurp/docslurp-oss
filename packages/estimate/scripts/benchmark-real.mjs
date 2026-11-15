@@ -17,6 +17,7 @@ const estimator = await createEstimator({ module });
 const runtime = { t: "runtime", observedAt: new Date().toISOString(), node: process.version,
   cpu: cpus()[0]?.model, logicalCpusVisible: cpus().length, memoryVisible: totalmem(),
   moduleSha256: createHash("sha256").update(module).digest("hex"), moduleBytes: module.length,
+  harnessSha256: createHash("sha256").update(await readFile(new URL(import.meta.url))).digest("hex"),
   initMs: performance.now() - initAt, repetitions: 3, options: { maxDeepPages: 1000 } };
 const results = [runtime];
 const save = () => writeFile(join(output, "measurements.jsonl"), results.map(x => JSON.stringify(x)).join("\n") + "\n");
@@ -35,6 +36,7 @@ for (let repeat = 0; repeat < 3; repeat++) {
     let end, reads = 0, readBytes = 0, outputBytes = 0, firstMs = null, peakRss = 0, peakWasm = 0;
     let header, vectors = 0, words = 0;
     const statusCounts = {}, chunks = [];
+    const featureUnknown = new Set();
     const raw = await nodePathRangeSource(path);
     const observed = { ...raw, async read(offset, length) { reads++; readBytes += length; return raw.read(offset, length); } };
     const cpuAt = process.cpuUsage(), started = performance.now();
@@ -51,6 +53,12 @@ for (let repeat = 0; repeat < 3; repeat++) {
           for (const page of row.inventory) statusCounts[page[4]] = (statusCounts[page[4]] ?? 0) + 1;
           for (const [, values] of row.features?.vectors ?? []) vectors += values[0] ?? 0;
           for (const [, values] of row.features?.text ?? []) words += values[0] ?? 0;
+          for (const [name, entries] of Object.entries(row.features ?? {})) {
+            if (["diagnostics", "work"].includes(name)) continue;
+            for (const [page, values] of entries) {
+              if (values.some(v => v === null) || name === "composition" && values.at(-1) !== 1) featureUnknown.add(page);
+            }
+          }
         }
         peakRss = Math.max(peakRss, process.memoryUsage().rss);
         peakWasm = Math.max(peakWasm, estimator.health().memoryBytes);
@@ -58,10 +66,10 @@ for (let repeat = 0; repeat < 3; repeat++) {
     } catch (e) { error = String(e.message).slice(0, 1000); }
     const elapsedMs = performance.now() - started, cpu = process.cpuUsage(cpuAt);
     const validInventory = !error && end?.complete === true && end.inventoryPages === oraclePages;
-    const fullDeep = validInventory && end.deepComplete === true && end.deepMeasured === oraclePages;
+    const fullDeep = validInventory && end.deepComplete === true && end.deepMeasured === oraclePages && featureUnknown.size === 0;
     const record = { t: "measurement", id: source.id, kind: source.kind, repeat, cache: repeat === 0 ? "first-pass-not-guaranteed-cold" : "warm-reused-module",
       observedAt: new Date().toISOString(), oraclePages, headerPages: header?.pages, elapsedMs, firstMs,
-      cpuMs: (cpu.user + cpu.system) / 1000, validInventory, fullDeep, statusCounts,
+      cpuMs: (cpu.user + cpu.system) / 1000, validInventory, fullDeep, featureUnknownPages: featureUnknown.size, statusCounts,
       inventoryPagesPerSec: validInventory ? oraclePages * 1000 / elapsedMs : null,
       fullDeepPagesPerSec: fullDeep ? oraclePages * 1000 / elapsedMs : null,
       reads, readBytes, outputBytes, peakRss, peakWasm, vectors, words, end, error };

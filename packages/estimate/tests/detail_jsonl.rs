@@ -30,6 +30,28 @@ fn pdf(pages: usize) -> Vec<u8> {
     bytes
 }
 
+#[test]
+fn optional_layout_work_failures_cannot_be_complete() {
+    let mut separated=String::new();
+    for n in 0..150 {
+        let x=(n%15)*35+5;let y=(n/15)*60+5;
+        for offset in [0,15,30] {separated.push_str(&format!("{x} {} m {} {} l S\n",y+offset,x+20,y+offset));}
+        for offset in [0,10,20] {separated.push_str(&format!("{} {y} m {} {} l S\n",x+offset,x+offset,y+30));}
+    }
+    let mut dense=String::new();
+    for n in 0..300 {dense.push_str(&format!("0 {n} m 500 {n} l S\n{n} 0 m {n} 500 l S\n"));}
+    for group in ["captions","charts"] {
+        let options:DetailOptions=serde_json::from_value(serde_json::json!({"groups":[group]})).unwrap();
+        for content in [&separated,&dense] {
+            let rows=records(&rewrite_content(1,content.as_bytes().to_vec(),None),options.clone());
+            assert_eq!(rows.last().unwrap()["deepComplete"],false);
+            assert_eq!(rows.last().unwrap()["deepPartial"],1);
+            let page=rows.iter().find(|r|r["t"]=="pages").unwrap();
+            assert_eq!(page["inventory"][0][4],2);
+        }
+    }
+}
+
 fn records(bytes: &[u8], options: DetailOptions) -> Vec<Value> {
     let (mut session, header) = DetailSession::open(bytes, options).unwrap();
     let mut output = header;

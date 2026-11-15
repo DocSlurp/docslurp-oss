@@ -1,5 +1,20 @@
 # JSONL offline profiler council — 2026-11-15
 
+## Complete-measurement merge review
+
+Council N=3: complete_architect, complete_minimalist and complete_performance independently proposed repairs; raw outputs and attributed synthesis are preserved in the private companion PR. Adopted eligibility-before-retention, exact orthogonal sweep, single grid computation and truthful requested-stage completion. No global budget inflation or source recognition.
+
+| Independent reviewers | Findings | Resolution / negative evidence |
+| --- | --- | --- |
+| complete_security_review / complete_correctness_review | P1 half-EOF/junk ambiguity and derived false completion; P2 malformed rows, alias/EI ambiguity, path truncation | Exact positioned prefix-code traversal, full24-bitEOFB, row bounds, aliases/separators; every optional support/grid failure remains partial; relevant path overflow is explicit |
+| complete_security_recheck / complete_correctness_recheck | P1 raw-inline fallback bypass; P2 invalid raw image dictionaries, diagnostics width mismatch, short-rule metric ambiguity | Completeness exception restricted to adapter-generated normalized streams; arbitrary raw recovery stays partial;8 declared/emitted columns; metric renamed shortEligibleRules |
+| complete_final_adversarial / complete_final_correctness | Adversarial: no blockers. Correctness: P2 malformed explicit BPC defaulting | Default only absent mask BPC; reject invalid/non-one explicit mask values. New negatives pass |
+
+Final source reviewers found no high/P1 after boundary fixes. Last P2 narrowing was author-fixed/regression-tested, not re-reviewed; no unresolved finding remains. Tests cover lone EOF half+junk+later EOFB, oversized runs/invalid vertical deltas, aliases, EI separators, zlib checksum/junk/predictors/colors, path truncation and optional-group unknowns. Files ran only in credential-free network-blocked VMs, without host fallback.
+
+Author verification:91 Rust,58 JS,7 Python tests and the independent integrity gate pass. Same four real PDFs now return all 168 pages and requested fields complete in3 repetitions. Runtime/producer hashes, prior failed/partial attempts, captures and cleanup receipts are retained. Completion is under declared encoded-glyph/geometric methods, not Unicode/OCR semantic accuracy. User explicitly authorized squash merges after checks; deployment/core-pin changes remain outside scope.
+
+
 ## Real-document continuation
 
 Independent source reviewers real_hybrid_adversarial and real_hybrid_correctness reviewed the supplemental-xref Prev correction and benchmark/calibration against hostile-input, bounded-work and evidence-truth boundaries. Both found no high issue; neither approved merging.

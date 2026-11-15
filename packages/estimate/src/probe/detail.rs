@@ -333,17 +333,20 @@ pub(super) fn header(
         json!({"t":"header","schema":"docslurp-page-profile@3","format":"jsonl",
         "fileBytes":file_bytes,"pages":pages,"deepSelected":selected,"chunkPages":chunk,
         "groups":options.groups,"selection":"stratified-v1+largest-content-v1","populationExtrapolated":false,
-        "limits":{"fileBytes":WHOLE_FILE_MAX_BYTES,"pages":MAX_PAGES,"decodedBytes":MAX_DECODED,"operations":MAX_DOCUMENT_OPERATIONS,"strictValidationStreamBytes":MAX_STREAM_BYTES,"gridComparisonsPerPage":MAX_GRID_COMPARISONS_PER_PAGE,"layoutComparisonsPerPage":100000},
+        "limits":{"fileBytes":WHOLE_FILE_MAX_BYTES,"pages":MAX_PAGES,"decodedBytes":MAX_DECODED,"operations":MAX_DOCUMENT_OPERATIONS,"strictValidationStreamBytes":MAX_STREAM_BYTES,"strictInlineStreamBytes":262144,"gridComparisonsPerPage":MAX_GRID_COMPARISONS_PER_PAGE,"layoutComparisonsPerPage":100000,"layoutWordsPerPage":4096},
         "status":{"0":"not-selected","1":"complete","2":"partial","3":"unreadable","4":"budget-exhausted"},
         "columns":{"inventory":["page","widthPt10","heightPt10","directContentStoredBytes","status","rotation"],
+        "diagnostics":["interpretationIncomplete","wordRetentionOverflow","ruleRetentionOverflow","unmappedText","gridWorkExhausted","interpreterFailureFlags","derivedWorkIncomplete","strictFailureClass"],
+        "work":["retainedWords","retainedEligibleRules","derivedComparisons","assignedGlyphs","totalEstimatedGlyphs"],
         "text":["words","glyphs","lines","estimatedTextBytes"],"images":["placements","estimatedDrawnStoredBytes","coverage10000","raster"],
         "vectors":["pathOperations","boundsCoverage10000"],"tables":["ruledCandidates","maxRows","coverage10000","estimatedTableTextBytes"],
         "tableCandidates":["count","coverage10000","estimatedTextBytes","confidence"],"unruledTables":["count","coverage10000","estimatedTextBytes","confidence"],
-        "captions":["count","coverage10000","estimatedTextBytes","confidence"],"charts":["vectorFigureCandidates","coverage10000","axisEvidence","shortRules","confidence"],
+        "captions":["count","coverage10000","estimatedTextBytes","confidence"],"charts":["vectorFigureCandidates","coverage10000","axisEvidence","shortEligibleRules","confidence"],
         "composition":["totalEstimatedTextBytes","tableCandidateBytes","captionCandidateBytes","otherWordBytes","unattributedBytes","known"]},
         "confidence":{"0":"unknown","1":"weak-geometric-evidence","2":"repeated-geometric-evidence","calibrated":false},
         "summaryColumns":["pages","measured","partial","unknown","contentKnownPages","directContentStoredBytes","textKnownPages","estimatedTextBytes","tableKnownPages","estimatedRuledTableTextBytes","layoutKnownPages","allTableCandidateTextBytes","captionCandidateTextBytes","tableCandidatePages","imageKnownPages","imagePages","vectorKnownPages","vectorHeavyPages","unruledCandidatePages","captionCandidatePages","vectorFigureCandidatePages"],
-        "methods":{"textBytes":"glyph-count-times-2-v1","tableTextBytes":"word-glyph-centres-in-ruled-grids-times-2-v1",
+        "interpreterFailureFlags":{"1":"interpreted-byte-budget","2":"invalid-transform","4":"content-decoder","8":"operation-budget","16":"missing-xobject","32":"form-call-budget","64":"form-decode","128":"form-depth","256":"strict-content-validation","512":"image-retention"},
+        "methods":{"text":"encoded-string-glyph-estimates-not-unicode-extraction","grid":"orthogonal-contact-sweep-v1","textBytes":"glyph-count-times-2-v1","tableTextBytes":"word-glyph-centres-in-ruled-grids-times-2-v1",
         "tables":"ruled-and-repeated-short-cell-alignment-candidates-v1","captions":"adjacent-short-text-candidates-v1","charts":"non-table-vector-footprint-with-axis-evidence-v1-not-semantic-chart",
         "composition":"exclusive-word-glyphs-table-then-caption-then-other; remainder-unattributed; two-bytes-per-glyph",
         "images":"drawn-significant-includes-furniture","byteTotals":"per-page-references-not-physical-file-allocation"}}),
@@ -554,6 +557,16 @@ impl Session {
             }
         }
         self.operations += reading.operations;
+        out.extra.insert("diagnostics", vec![
+            Some(u64::from(reading.exhausted)),
+            Some(u64::from(reading.words_overflow)),
+            Some(u64::from(reading.rules.overflow)),
+            Some(u64::from(reading.unmapped_text)),
+            Some(0),
+            Some(reading.failure_bits & 65535),
+            Some(0),
+            Some(reading.failure_bits >> 16),
+        ]);
         out.status = if reading.exhausted
             || reading.words_overflow
             || reading.rules.overflow
@@ -619,16 +632,20 @@ impl Session {
                 )),
             ]);
         }
+        let grids = if self.options.groups.iter().any(|g| matches!(g, Group::Tables | Group::Captions | Group::Charts)) {
+            layout::ruled_grids_checked(&reading.rules.rules, &Rules::bundled().layout, MAX_GRID_COMPARISONS_PER_PAGE)
+        } else { None };
+        if grids.is_none() && self.options.groups.iter().any(|g| matches!(g, Group::Tables | Group::Captions | Group::Charts)) {
+            out.extra.get_mut("diagnostics").unwrap()[4] = Some(1);
+            if out.status == 1 { out.status=2;self.measured-=1;self.partial+=1; }
+        }
         if self.options.groups.contains(&Group::Tables) {
             if reading.rules.overflow || reading.exhausted {
                 out.tables = Some([None; 4]);
             } else {
-                let Some(grids) = layout::ruled_grids_checked(
-                    &reading.rules.rules,
-                    &Rules::bundled().layout,
-                    MAX_GRID_COMPARISONS_PER_PAGE,
-                ) else {
+                let Some(grids) = grids.as_ref() else {
                     out.tables = Some([None; 4]);
+                    out.extra.get_mut("diagnostics").unwrap()[4] = Some(1);
                     if out.status == 1 {
                         out.status = 2;
                         self.measured -= 1;
@@ -669,15 +686,14 @@ impl Session {
             .iter()
             .any(|group| matches!(group, Group::Tables | Group::Captions | Group::Charts))
         {
-            let grids = layout::ruled_grids_checked(
-                &reading.rules.rules,
-                &Rules::bundled().layout,
-                MAX_GRID_COMPARISONS_PER_PAGE,
-            );
             let supported = grids
                 .as_ref()
                 .and_then(|grids| supported_grids(grids, &reading.rules.rules));
             let grid_known = supported.is_some() && !reading.rules.overflow;
+            if !grid_known {
+                out.extra.get_mut("diagnostics").unwrap()[6] = Some(1);
+                if out.status == 1 { out.status=2;self.measured-=1;self.partial+=1; }
+            }
             let boxes = supported.unwrap_or_default();
             let images: Vec<_> = reading
                 .images
@@ -708,6 +724,13 @@ impl Session {
                 reading.words,
                 &reading.totals(&HashSet::new()),
             );
+            out.extra.get_mut("diagnostics").unwrap()[6] = Some(u64::from(layout.partial || !grid_known));
+            if layout.partial && out.status == 1 {
+                out.status = 2;
+                self.measured -= 1;
+                self.partial += 1;
+            }
+            out.extra.insert("work", vec![Some(reading.words_at.len() as u64), Some(reading.rules.rules.len() as u64), Some(layout.pair_comparisons as u64), Some(layout.text.total_glyphs as u64), Some(reading.text.chars as u64)]);
             let known = out.status == 1
                 && grid_known
                 && !layout.partial

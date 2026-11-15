@@ -44,7 +44,7 @@ export function calibrate(records, rates) {
     if (valid.some(r => r.oraclePages !== pages)) throw new Error("inconsistent page counts");
     const seconds = valid.map(r => r.elapsedMs / 1000);
     if (seconds.some(s => s <= 0)) throw new Error("zero elapsed time");
-    const mid = median(seconds), fullyMeasured = valid.every(r => r.fullDeep && r.end.deepComplete === true && r.end.deepPartial === 0 && r.end.deepMeasured === pages);
+    const mid = median(seconds), fullyMeasured = valid.every(r => r.fullDeep && r.featureUnknownPages === 0 && r.end.deepComplete === true && r.end.deepPartial === 0 && r.end.deepMeasured === pages);
     const costs = seconds.map(s => s / pages * 1000 * perSecond);
     const native = valid.map(r => r.nativeTextExtraction).filter(r => r && !r.error && r.outputBytes > 0 && Number.isFinite(r.elapsedMs) && r.elapsedMs > 0);
     documents.push({ id, kind: valid[0].kind, pages, validRuns: valid.length, failedRuns: failed,

@@ -28,3 +28,8 @@ test("mixed runtimes and forged completion cannot yield full-deep calibration", 
   assert.throws(() => calculate([{ ...run, end: { ...run.end, deepPartial: 99 } }]));
   assert.equal(calculate([{ ...run, fullDeep: true }]).documents[0].fullDeepUsdPer1000Pages, null);
 });
+test("full-deep calibration requires no unknown requested feature page", () => {
+  const complete={...run, fullDeep:true, featureUnknownPages:0, end:{...run.end,deepMeasured:10,deepPartial:0,deepComplete:true}};
+  assert.ok(calculate([complete]).documents[0].fullDeepUsdPer1000Pages>0);
+  assert.equal(calculate([{...complete,featureUnknownPages:1}]).documents[0].fullDeepUsdPer1000Pages,null);
+});
