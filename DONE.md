@@ -1,11 +1,15 @@
-- Database test discovery: accumulate mutable key possibilities, invalidate unknown writes, preserve environment copy/local-call provenance, and refuse uncertain gate reads without treating subprocess/config arguments as gates. Keep content-pinned reviews unchanged; 15 discovery tests and workspace typechecks pass.
-- Security remainder: refuse tenant loopback inference by default, bind API embedding credentials to the operator destination, block provider redirects, redact HTTP/vision errors, exclude billing-only default-project contributions, and cover alias/optional-access/package database-test guards. Regression execution beyond Node script tests awaits installable dependencies.
+- Recovery council fixes (#425): document-stage restart clears prior typed failure; upload status-only metadata reads require current project/org read access. Migrated database negatives cover revoked shares/memberships and invalid API-key scopes; no parser or OCR checkpoint changes.
 ## Fast scan preview selection (2026-11-14, draft, needs council)
 
 - Fast includes ledger-backed unavailable scan images in its bounded page render selection, using the existing organization-scoped ledger read. The per-document and per-run caps still apply. Pages with canonical text receive previews without replacing their text with a page-image reference. Missing canonical evidence still refuses selection.
 - Focused selection/render regression suites: 32 tests pass, including invalid page numbers, missing canonical evidence, organization scope, reservation caps and text preservation.
 
 - Asset ledger: reject repeat references on new or updated unlinked rows with an idempotent NOT VALID database constraint; retain historical rows for separate cleanup.
+## Endpoint and database-test boundary follow-ups
+
+- Database test discovery: accumulate mutable key possibilities, invalidate unknown writes, preserve environment copy/local-call provenance, and refuse uncertain gate reads without treating subprocess/config arguments as gates. Keep content-pinned reviews unchanged; 17 discovery tests and workspace typechecks pass.
+- Security remainder: refuse tenant loopback inference by default, bind API embedding credentials to the operator destination, block provider redirects, redact HTTP/vision errors, exclude billing-only default-project contributions, and cover alias/optional-access/package database-test guards. Scoped independent runtime and discovery council reviews pass; full exact-head CI remains the merge gate.
+
 ## Ingest version tagging and typed unavailable states (2026-11-13, draft, needs council)
 
 - Security #406 (partial): refuse hand-built documents without a scan decision in every non-development environment and service profile, before source storage reads; normalize sandbox provider ids with the shared ASCII rule. Regression coverage executes the real source modules. ClamAV startup age/disable and database-test guard follow-ups remain open.

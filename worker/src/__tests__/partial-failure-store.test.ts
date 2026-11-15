@@ -184,7 +184,9 @@ describe("partial Document failure in the store", () => {
     await withStore(async (store) => {
       const state = await loadRunState(store, "run-fail");
       await store.startDocumentStage(state, "run-fail-bad", "embed");
-      await store.failDocumentStage(state, "run-fail-bad", "embed", "unparseable");
+      await store.failDocumentStage(state, "run-fail-bad", "embed", "unparseable", undefined, undefined, { code: "source_rejected", retryable: false });
+      const saved = await db.query<{ failure: unknown }>("select failure from document_run_stage_states where run_id='run-fail' and document_id='run-fail-bad' and stage_name='embed'");
+      expect(saved.rows[0]?.failure).toEqual({ code: "source_rejected", retryable: false });
       await store.startDocumentStage(state, "run-fail-mid", "extract");
       await store.completeDocumentStage(state, "run-fail-mid", "extract", "s3://x", {});
       await store.failRun("run-fail", "embed", "database went away", { runId: "run-fail", orgId: "o1", projectId: "w" });
@@ -216,4 +218,26 @@ describe("partial Document failure in the store", () => {
       `select payload from webhook_outbox where event_type = 'run.completed' and payload->>'runId' = 'run-ok'`);
     expect(outbox.rows[0]!.payload).toMatchObject({ runId: "run-ok", status: "completed", failedDocuments: 1 });
   });
+});
+
+it.each(["interruption", "completion"])("clears previous failure through restart and %s", async ending => {
+  const run = "restart-" + ending;
+  await seedRun(run);
+  await withStore(async store => {
+    const state = await loadRunState(store, run);
+    const document = run + "-bad";
+    await store.startDocumentStage(state, document, "embed");
+    await store.failDocumentStage(state, document, "embed", "rejected", undefined, undefined, { code: "source_rejected", retryable: false });
+    await store.startDocumentStage(state, document, "embed");
+    const processing = (await db.query<{ status: string; failure: unknown }>(
+      "select status,failure from document_run_stage_states where run_id=$1 and document_id=$2", [run, document])).rows[0];
+    expect(processing).toEqual({ status: "processing", failure: null });
+    expect(state.documentStages.get(document)?.get("embed")?.status).toBe("processing");
+    if (ending === "completion") await store.completeDocumentStage(state, document, "embed", "s3://result", {});
+    else await store.failRunStage(state, "embed", "worker interrupted", { countFailure: false });
+  });
+  const row = (await db.query<{ status: string; failure: unknown }>(
+    "select status,failure from document_run_stage_states where run_id=$1 and document_id=$2", [run, run + "-bad"])).rows[0];
+  expect(row?.failure).toBeNull();
+  expect(row?.status).toBe(ending === "completion" ? "completed" : "failed");
 });
