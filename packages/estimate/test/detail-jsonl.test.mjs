@@ -2,6 +2,10 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { createEstimator } from "../js/index.mjs";
+import { nodePathRangeSource } from "../js/range.mjs";
+import { mkdtemp, writeFile, rm, truncate } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const fixture = new URL("../tests/fixtures/vector_page_in_text_doc.pdf", import.meta.url);
 const blob = async () => new Blob([await readFile(fixture)]);
@@ -41,8 +45,8 @@ test("invalid options and oversized input fail before a session is retained", as
   const estimator = await createEstimator();
   const input = await blob();
   await assert.rejects(estimator.profileJsonl(input, { maxDeepPages: 1001 }).next(), /maxDeepPages/);
-  const tooLarge = { size: 67108865, arrayBuffer() { throw new Error("must not read"); } };
-  await assert.rejects(estimator.profileJsonl(tooLarge).next(), /64 MiB/);
+  const tooLarge = { size: 2147483649, slice() { throw new Error("must not read"); } };
+  await assert.rejects(estimator.profileJsonl(tooLarge).next(), /2 GiB/);
   const stream = estimator.profileJsonl(input, { maxDeepPages: 0 });
   const records = [];
   for await (const line of stream) records.push(JSON.parse(line));
@@ -61,4 +65,48 @@ test("aborting after the terminal record does not emit another terminal", async 
   }
   assert.equal(records.filter((r) => r.t === "end").length, 1);
   assert.equal(records.at(-1).complete, true);
+});
+
+test("Blob profiling uses bounded slices and never whole-file arrayBuffer", async () => {
+  const estimator = await createEstimator();
+  const input = await blob();
+  let reads = 0;
+  const source = { size: input.size, arrayBuffer() { throw new Error("whole read forbidden"); }, slice(start, end) {
+    assert.ok(end - start <= 1024 * 1024);
+    reads += 1;
+    return input.slice(start, end);
+  } };
+  const records = [];
+  for await (const line of estimator.profileJsonl(source)) records.push(JSON.parse(line));
+  assert.ok(reads > 0);
+  assert.equal(records.at(-1).complete, true);
+});
+
+test("range read failure closes the source and permits reuse", async () => {
+  const estimator = await createEstimator();
+  let closed = 0;
+  const source = { size: 1000, async read() { throw new Error("synthetic read refusal"); }, async close() { closed += 1; } };
+  await assert.rejects(estimator.profileSourceJsonl(source).next(), /synthetic read refusal/);
+  assert.equal(closed, 1);
+  const next = estimator.profileJsonl(await blob());
+  assert.equal(JSON.parse((await next.next()).value).t, "header");
+  await next.return();
+});
+
+test("local file source detects mutation and rejects reads after close", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "docslurp-jsonl-source-"));
+  const path = join(dir, "input.pdf");
+  let source;
+  try {
+    await writeFile(path, await readFile(fixture));
+    source = await nodePathRangeSource(path);
+    assert.equal((await source.read(0, 16)).length, 16);
+    await truncate(path, 10);
+    await assert.rejects(source.read(0, 10), /changed/);
+    await source.close();
+    await assert.rejects(source.read(0, 10), /changed/);
+  } finally {
+    await source?.close();
+    await rm(dir, { recursive: true, force: true });
+  }
 });

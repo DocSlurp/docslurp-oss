@@ -217,6 +217,16 @@ pub struct Grid {
 /// `rule_min_length_pt` long, meeting within `rule_touch_pt`) with at least two distinct horizontals and three distinct
 /// verticals.
 pub fn ruled_grids(rules: &[[f64; 4]], limits: &LayoutRules) -> Vec<Grid> {
+    // Preserve the existing unrestricted geometry contract for legacy callers.
+    ruled_grids_checked(rules, limits, usize::MAX).unwrap_or_default()
+}
+
+/// The same grid detection, refusing before all-pairs work exceeds the supplied
+/// comparison allowance. `None` is unknown evidence, not an empty table list.
+/// The allowance counts every pair visited, including same-axis pairs.
+/// Grouping preserves legacy first-seen order and uses a lookup map so it does
+/// not introduce a second, uncharged quadratic scan.
+pub fn ruled_grids_checked(rules: &[[f64; 4]], limits: &LayoutRules, max_comparisons: usize) -> Option<Vec<Grid>> {
     let thin = limits.rule_thickness_pt;
     let long = limits.rule_min_length_pt;
     let mut lines: Vec<(bool, [f64; 4])> = Vec::new();
@@ -229,6 +239,12 @@ pub fn ruled_grids(rules: &[[f64; 4]], limits: &LayoutRules) -> Vec<Grid> {
         if r[2] - r[0] <= thin && r[3] - r[1] >= long {
             lines.push((false, *r));
         }
+    }
+    // Reject large inputs in O(n), before allocating union-find state or
+    // spending the allowance on a prefix whose result must be discarded.
+    let comparisons = lines.len().checked_mul(lines.len().saturating_sub(1))? / 2;
+    if comparisons > max_comparisons {
+        return None;
     }
     let mut parent: Vec<usize> = (0..lines.len()).collect();
     fn find(parent: &mut [usize], mut i: usize) -> usize {
@@ -249,12 +265,15 @@ pub fn ruled_grids(rules: &[[f64; 4]], limits: &LayoutRules) -> Vec<Grid> {
         }
     }
     let mut groups: Vec<(usize, Vec<usize>)> = Vec::new();
+    let mut group_indices = std::collections::HashMap::new();
     for i in 0..lines.len() {
         let root = find(&mut parent, i);
-        match groups.iter_mut().find(|(r, _)| *r == root) {
-            Some((_, members)) => members.push(i),
-            None => groups.push((root, vec![i])),
-        }
+        let index = *group_indices.entry(root).or_insert_with(|| {
+            let index = groups.len();
+            groups.push((root, Vec::new()));
+            index
+        });
+        groups[index].1.push(i);
     }
     let mut grids = Vec::new();
     for (_, members) in groups {
@@ -269,7 +288,7 @@ pub fn ruled_grids(rules: &[[f64; 4]], limits: &LayoutRules) -> Vec<Grid> {
         });
         grids.push(Grid { rows: ys as u32 - 1, columns: xs as u32 - 1, bbox });
     }
-    grids
+    Some(grids)
 }
 
 fn distinct(mut values: Vec<f64>, tolerance: f64) -> usize {
@@ -349,6 +368,36 @@ mod tests {
         assert_eq!(grids.len(), 1);
         assert_eq!((grids[0].rows, grids[0].columns), (2, 3));
         assert!(union_coverage(&[grids[0].bbox], visible, 200) > 0.0);
+    }
+
+    #[test]
+    fn checked_grid_work_refuses_before_a_large_pair_scan() {
+        let rules: Vec<[f64; 4]> = (0..4096)
+            .map(|y| [0.0, y as f64, 600.0, y as f64])
+            .collect();
+        // Even same-axis pairs consume loop work. Refusal happens before
+        // visiting any of the 8,386,560 pairs.
+        assert_eq!(ruled_grids_checked(&rules, &limits(), 65_536), None);
+        assert_eq!(ruled_grids_checked(&[], &limits(), 0), Some(Vec::new()));
+        assert_eq!(ruled_grids_checked(&rules[..1], &limits(), 0), Some(Vec::new()));
+    }
+
+    #[test]
+    fn checked_grid_boundary_preserves_normal_and_legacy_results() {
+        let rules = [
+            [72.0, 100.0, 372.0, 100.0],
+            [72.0, 120.0, 372.0, 120.0],
+            [72.0, 140.0, 372.0, 140.0],
+            [72.0, 100.0, 72.0, 140.0],
+            [172.0, 100.0, 172.0, 140.0],
+            [272.0, 100.0, 272.0, 140.0],
+            [372.0, 100.0, 372.0, 140.0],
+        ];
+        assert_eq!(ruled_grids_checked(&rules, &limits(), 20), None);
+        let checked = ruled_grids_checked(&rules, &limits(), 21).unwrap();
+        assert_eq!(checked, ruled_grids(&rules, &limits()));
+        assert_eq!(checked.len(), 1);
+        assert_eq!((checked[0].rows, checked[0].columns), (2, 3));
     }
 
     #[test]

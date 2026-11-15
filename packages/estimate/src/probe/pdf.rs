@@ -22,6 +22,10 @@ use crate::rules::{PageRasterRouting, Rules};
 
 #[path = "detail.rs"]
 pub mod detail;
+#[path = "range.rs"]
+pub mod range;
+#[path = "features.rs"]
+mod features;
 
 /// Decompressed bytes of one content stream or form XObject.
 const MAX_STREAM_BYTES: usize = 8 * 1024 * 1024;
@@ -478,6 +482,7 @@ impl WordCounter {
 
 #[derive(Default)]
 struct PageStats {
+    vector_bounds: Option<[f64;4]>,
     words: WordCounter,
     path_operations: usize,
     operations: usize,
@@ -530,6 +535,8 @@ struct WordAt {
     x: f64,
     y: f64,
     glyphs: f64,
+    width: f64,
+    height: f64,
 }
 
 /// Words in one shown string as text extraction splits them, as (first glyph, glyph count): whitespace-separated runs,
@@ -731,6 +738,7 @@ fn lookup_xobject<'a>(document: &'a Document, resources: &[&'a Dictionary], name
 }
 
 struct PageReading {
+    vector_bounds: Option<[f64;4]>,
     operations: usize,
     words: f64,
     lexical: Option<bool>,
@@ -795,7 +803,7 @@ fn classify_page_checked(routing: &PageRasterRouting, document: &Document, page_
         stats.text.estimated = true;
     }
     let (width, height) = ((visible[2] - visible[0]).max(0.0), (visible[3] - visible[1]).max(0.0));
-    Some(PageReading { operations: stats.operations, lexical: if stats.exhausted || stats.unmapped_text || stats.words.encoding_unknown { None } else { Some(stats.words.characters > 0.0) }, words: stats.words.words(), path_operations: stats.path_operations, images: stats.images, exhausted: stats.exhausted, unmapped_text: stats.unmapped_text, area, width, height, text: stats.text, words_at: stats.words_at, words_overflow: stats.words_overflow, rules: stats.rules, display_visible: display.visible })
+    Some(PageReading { vector_bounds:stats.vector_bounds, operations: stats.operations, lexical: if stats.exhausted || stats.unmapped_text || stats.words.encoding_unknown { None } else { Some(stats.words.characters > 0.0) }, words: stats.words.words(), path_operations: stats.path_operations, images: stats.images, exhausted: stats.exhausted, unmapped_text: stats.unmapped_text, area, width, height, text: stats.text, words_at: stats.words_at, words_overflow: stats.words_overflow, rules: stats.rules, display_visible: display.visible })
 }
 
 /// The worker's drawn-content rule (`classify-route.ts`): a document with no extractable text anywhere whose bytes,
@@ -1027,6 +1035,7 @@ impl<'a> Context<'a, '_> {
             return;
         }
         let device = multiply(&text.matrix, ctm);
+        if device.iter().any(|value|!value.is_finite()){stats.exhausted=true;return;}
         text.matrix = multiply(&[1.0, 0.0, 0.0, 1.0, all * 0.5 * font_size, 0.0], &text.matrix);
         let volume = &mut stats.text;
         let (x, y) = (device[4], device[5]);
@@ -1066,7 +1075,13 @@ impl<'a> Context<'a, '_> {
             let v = 0.3 * font_size;
             let (ux, uy) = (u * device[0] + v * device[2] + device[4], u * device[1] + v * device[3] + device[5]);
             let (dx, dy) = self.display.point(ux, uy);
-            stats.words_at.push(WordAt { x: dx, y: dy, glyphs: count as f64 });
+            let left=first as f64*0.5*font_size;let right=(first+count) as f64*0.5*font_size;
+            let corners=[(left,-0.2*font_size),(right,-0.2*font_size),(right,0.8*font_size),(left,0.8*font_size)]
+                .map(|(u,v)|self.display.point(u*device[0]+v*device[2]+device[4],u*device[1]+v*device[3]+device[5]));
+            let width=corners.iter().map(|p|p.0).fold(f64::NEG_INFINITY,f64::max)-corners.iter().map(|p|p.0).fold(f64::INFINITY,f64::min);
+            let height=corners.iter().map(|p|p.1).fold(f64::NEG_INFINITY,f64::max)-corners.iter().map(|p|p.1).fold(f64::INFINITY,f64::min);
+            if !width.is_finite() || !height.is_finite() || width<=0.0 || height<=0.0{stats.words_overflow=true;continue;}
+            stats.words_at.push(WordAt { x: dx, y: dy, glyphs: count as f64, width,height });
         }
         let volume = &mut stats.text;
         if text.new_line {
@@ -1248,6 +1263,14 @@ impl<'a> Context<'a, '_> {
                         let (ux, uy) = (x * ctm[0] + y * ctm[2] + ctm[4], x * ctm[1] + y * ctm[3] + ctm[5]);
                         self.display.point(ux, uy)
                     };
+                    let points:Vec<_>=if operation.operator=="re" && values.len()==4 {
+                        let (x,y,w,h)=(values[0],values[1],values[2],values[3]);vec![shown(x,y),shown(x+w,y),shown(x+w,y+h),shown(x,y+h)]
+                    }else{values.chunks_exact(2).map(|xy|shown(xy[0],xy[1])).collect()};
+                    for (x,y) in points {
+                        if x.is_finite() && y.is_finite() {
+                            stats.vector_bounds=Some(match stats.vector_bounds {Some(b)=>[b[0].min(x),b[1].min(y),b[2].max(x),b[3].max(y)],None=>[x,y,x,y]});
+                        }else{stats.exhausted=true;}
+                    }
                     match (operation.operator.as_str(), values.as_slice()) {
                         ("m", [x, y]) => path.move_to(shown(*x, *y)),
                         ("l", [x, y]) => path.line_to(shown(*x, *y)),
@@ -1325,20 +1348,63 @@ impl<'a> Context<'a, '_> {
                 _ => {}
             }
         }
-        // lopdf's streaming iterator tolerates trailing malformed input. Its strict
-        // decoder collects operations, so use it only on a small bounded stream.
-        // Larger detailed streams remain explicitly partial rather than claiming
-        // that the iterator verified complete consumption.
-        if self.strict_validation && !stats.exhausted
-            && (content.len() > 256 * 1024 || Content::decode_strict(content).is_err()) {
+        // Verify complete consumption without collecting a page's operations.
+        if self.strict_validation && !stats.exhausted && !strict_content_complete(content) {
             stats.exhausted = true;
         }
     }
 }
 
+fn strict_content_complete(content:&[u8])->bool {
+    use otf_pdf_syntax::{parser::Parser,lexer::Token,Limits,Strictness};
+    let limits=Limits{max_depth:32,max_object_size:MAX_STREAM_BYTES as u64,..Limits::default()};
+    let mut parser=Parser::new(content,0,&limits,Strictness::Strict);
+    let mut operands=0usize;
+    let mut compatibility=0usize;
+    for _ in 0..1_000_000 {
+        let at=parser.lexer().pos();
+        let token=match parser.lexer().next_token(){Ok(token)=>token,Err(_)=>return false};
+        match token {
+            Token::Eof=>return operands==0 && compatibility==0,
+            // Inline binary data cannot be validated by the syntax lexer alone.
+            Token::Keyword(b"BI"|b"ID"|b"EI"|b"obj"|b"endobj"|b"stream"|b"endstream")=>return false,
+            Token::Keyword(word) if !matches!(word,b"true"|b"false"|b"null")=>{
+                if word==b"BX"{compatibility+=1;if compatibility>256{return false;}}
+                else if word==b"EX"{if compatibility==0{return false;}compatibility-=1;}
+                else if compatibility==0 && !matches!(word,b"q"|b"Q"|b"cm"|b"w"|b"J"|b"j"|b"M"|b"d"|b"ri"|b"i"|b"gs"|b"m"|b"l"|b"c"|b"v"|b"y"|b"h"|b"re"|b"S"|b"s"|b"f"|b"F"|b"f*"|b"B"|b"B*"|b"b"|b"b*"|b"n"|b"W"|b"W*"|b"BT"|b"ET"|b"Tc"|b"Tw"|b"Tz"|b"TL"|b"Tf"|b"Tr"|b"Ts"|b"Td"|b"TD"|b"Tm"|b"T*"|b"Tj"|b"TJ"|b"'"|b"\""|b"d0"|b"d1"|b"CS"|b"cs"|b"SC"|b"SCN"|b"sc"|b"scn"|b"G"|b"g"|b"RG"|b"rg"|b"K"|b"k"|b"sh"|b"Do"|b"MP"|b"DP"|b"BMC"|b"BDC"|b"EMC"){return false;}
+                operands=0;
+            }
+            _=>{parser.lexer().set_pos(at);if parser.parse_object().is_err(){return false;}operands+=1;if operands>1024{return false;}}
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn estimated_word_boxes_follow_page_rotation_and_anisotropic_text_transforms() {
+        let reading=|rotate:i64,prefix:&str|{
+            let mut document=Document::with_version("1.7");
+            let content=document.add_object(lopdf::Stream::new(Dictionary::new(),format!("{prefix} BT 1 0 0 1 100 100 Tm (abcdef) Tj ET").into_bytes()));
+            let mut dict=Dictionary::new();dict.set("Type",Object::Name(b"Page".to_vec()));dict.set("MediaBox",Object::Array(vec![0.into(),0.into(),612.into(),792.into()]));dict.set("Rotate",rotate);dict.set("Contents",content);
+            let page=document.add_object(dict);classify_page_checked(&routing(),&document,page,&mut FormCache::default(),true).unwrap()
+        };
+        let normal=reading(0,"");let rotated=reading(90,"");let scaled=reading(0,"2 0 0 0.5 0 0 cm");
+        assert!((normal.words_at[0].width-36.0).abs()<1e-6);assert!((normal.words_at[0].height-12.0).abs()<1e-6);
+        assert!((rotated.words_at[0].width-12.0).abs()<1e-6);assert!((rotated.words_at[0].height-36.0).abs()<1e-6);
+        assert!((scaled.words_at[0].width-72.0).abs()<1e-6);assert!((scaled.words_at[0].height-6.0).abs()<1e-6);
+    }
+
+    #[test]
+    fn strict_streaming_verification_accepts_large_streams_and_refuses_malformed_tails() {
+        assert!(strict_content_complete(&b"q Q\n".repeat(70000)));
+        assert!(!strict_content_complete(b"q Q (unterminated"));
+        assert!(!strict_content_complete(b"q Q unknownOperator"));
+        assert!(strict_content_complete(b"BX unknownOperator EX"));
+    }
 
     fn routing() -> PageRasterRouting {
         Rules::bundled().page_raster_routing.clone()
@@ -1405,6 +1471,7 @@ mod tests {
         let routing = routing();
         let id = |number: u32| (number, 0);
         let page = |ids: &[u32]| PageReading {
+            vector_bounds:None,
             operations: 0,
             words: 0.0,
             lexical: Some(false),

@@ -3,6 +3,7 @@
 // WebAssembly module with a plain JSON ABI (src/abi.rs); this file loads it in browsers, Node, Deno and edge runtimes.
 
 import { blobSource, eventStream, runEstimate } from "./run.mjs";
+import { blobRangeSource, driveRangeJsonl } from "./range.mjs";
 
 export { yieldToEventLoop } from "./run.mjs";
 
@@ -117,41 +118,30 @@ export async function createEstimator(options = {}) {
       const tail = plan.tail > 0 ? new Uint8Array(await blob.slice(blob.size - plan.tail).arrayBuffer()) : undefined;
       return estimator.profile(file, head, tail);
     },
-    /** Incrementally profile a local PDF. Yields complete JSONL lines; no upload or pricing. */
+    /** Incrementally profile an immutable Blob through bounded range reads. */
     async *profileJsonl(blob, options = {}) {
-      if (detailActive) throw new EstimatorError("invalid_request", "a detailed profile is already active");
-      if (blob.size > 64 * 1024 * 1024) throw new EstimatorError("invalid_request", "detailed PDF input exceeds 64 MiB");
+      yield* estimator.profileSourceJsonl(blobRangeSource(blob), options);
+    },
+    /** Local range source: only requested bounded byte slices enter WASM. */
+    async *profileSourceJsonl(source, options = {}) {
+      if (detailActive) {
+        await source.close?.();
+        throw new EstimatorError("invalid_request", "a detailed profile is already active");
+      }
       const { signal, ...config } = options;
-      const cancelled = () => signal?.aborted;
-      if (cancelled()) return;
       const token = {};
       detailActive = token;
-      let opened = false;
+      const ownedCall = (name, ...inputs) => {
+        if (detailActive !== token) {
+          if (name === "ds_range_close") return true;
+          throw new EstimatorError("crashed", "detailed profile session was reset");
+        }
+        return call(name, ...inputs);
+      };
       try {
-        const bytes = new Uint8Array(await blob.arrayBuffer());
-        if (cancelled()) return;
-        const header = call("ds_detail_open", json(config), bytes);
-        opened = true;
-        yield header;
-        while (!cancelled()) {
-          // Yield to cancellation/UI between bounded work batches; never queue the document output.
-          await new Promise((resolve) => setTimeout(resolve, 0));
-          if (cancelled()) break;
-          if (detailActive !== token) throw new EstimatorError("crashed", "detailed profile session was reset");
-          const batch = call("ds_detail_next");
-          if (batch === null) break;
-          for (const record of batch.trimEnd().split("\n")) {
-            const terminal = JSON.parse(record).t === "end";
-            yield `${record}\n`;
-            if (terminal) return;
-          }
-        }
-        if (cancelled()) yield `${JSON.stringify({ t: "end", complete: false, reason: "cancelled" })}\n`;
+        yield* driveRangeJsonl(ownedCall, null, source, config, signal);
       } finally {
-        if (detailActive === token) {
-          if (opened) call("ds_detail_close");
-          detailActive = null;
-        }
+        if (detailActive === token) detailActive = null;
       }
     },
     /** Profile files with progress events, cancellation and per-file fallbacks; see `estimateFiles`. */
@@ -160,7 +150,7 @@ export async function createEstimator(options = {}) {
     },
     /** Calls into the module, and how many trapped and were recovered by a fresh instance. */
     health() {
-      return { ...health };
+      return { ...health, memoryBytes: memory.buffer.byteLength };
     },
   };
   return estimator;

@@ -1,5 +1,29 @@
 # JSONL offline profiler council — 2026-11-15
 
+## Range-reader continuation (supersedes the initial scope limits below)
+
+The continuation removes the 64 MiB whole-input constraint from the public JSONL APIs. The new cooperative range reader accepts up to 2 GiB, uses pinned public `otf-pdf-syntax` low-level grammar, and reuses the existing evidence engine on bounded per-page graphs. Browser, Node, Python and native adapters share the protocol. Schema v3 adds compact summary vectors, rich geometric candidates, exclusive text-byte composition and bounded rankings. No private engine source or internals were used.
+
+Three independent council proposals (Architect, Ruthless Minimalist, Performance Wizard) were synthesized before implementation. Architect/Performance supplied the sparse grammar/resolver design; Minimalist supplied the retained accumulator and bounded candidate module. A second native engine build, eager high-level loaders and simply raising memory limits were rejected. Raw proposals are preserved in the private application repository; this public record describes only the generic seam.
+
+Independent new boundary reviewers `range_security_review` (adversarial) and `range_semantics_review` (correctness) received the diff, threat model and mandatory boundary rules. Source-only findings and author-verified resolutions:
+
+- **High: unbounded dependency queue/materialization.** Deduplicate on enqueue, cap unique dependencies at 512 and traversed reference slots at 10,000, and charge/cap materialized metadata before conversion. A 30,000-reference resource fixture refuses deep work without exhausting memory.
+- **High: inherited resource cloning on inventory pages bypassed work accounting.** Inventory never resolves/materializes Resources. Copy/conversion/traversal is charged, independently of parser I/O. The same resource fixture inventories successfully with deep inspection disabled.
+- **P1: hybrid xref precedence.** Merge a revision's hybrid stream over its classic placeholders before merging older revisions. Synthetic compressed-page hybrid fixture passes; truncated rows refuse.
+- **P2: payload replay thrashing.** Retain bounded page payload progress across range suspension, separately from the raw cache; a two-near-8-MiB-form fixture completes with bounded reads. Clear retained payloads after each page.
+- **Medium: repeated Contents lost execution semantics.** Preserve ordered duplicate stream references for execution, deduplicate only stored-byte accounting and graph loading. The regression doubles glyph counts while retaining stored bytes.
+- **Medium: prefix-only stream terminators.** Parse exact endstream/endobj tokens and reject overlap with another indexed object. Truncated xrefs and terminator-prefix attacks refuse.
+- **P2: rotated/anisotropic text boxes.** Transform all estimated box corners through text and page matrices. Unit tests cover rotation and unequal axis scaling.
+
+Additional author checks: reject stale range epochs after close/reopen; bound compressed-member syntax before parsing; strictly validate xref widths/row counts/generations; verify large content streams without collecting all operations; avoid classifying plot ticks as table cells; and stop metadata coalescing before large indexed stream bodies. A distributed-image regression catches read-ahead that would otherwise copy scan payloads.
+
+The new reviewers did not independently execute tests or approve the final fixes. The author ran targeted negatives and package checks. No known high-severity finding remains open in this bounded implementation; this is a draft pending human merge approval, not a deployment approval.
+
+Validation now includes 80 Rust tests, 53 JS tests, 3 synthetic production-routing parity tests and 7 Python tests, plus declaration checks and package builds. Scale observations and exact WASM hashes are retained under `docs/performance/offline-profile-jsonl-2026-11-15/`: 20,000-page shared-image and 10,000-page separate-image ~1 GiB inputs, and 10,000 variable-size local snapshots. These do not establish real-corpus semantic accuracy. Pixel OCR, calibrated semantic classification, confidence-aware population estimates and budgeted damaged-xref recovery remain explicit follow-ups.
+
+## Initial bounded implementation review
+
 Scope: new local page-feature sessions in `packages/estimate`, host bindings and bounded interpretation changes. Threat model: malicious PDFs, decompression amplification, partial evidence misrepresented as complete, memory/work exhaustion and session lifetime confusion. No server routes, tenant authorization, credentials, pricing rules or storage permissions change. Existing local WASM isolation remains; server use still requires a credential-free VM boundary. Cross-tenant/wrong-key tests are not applicable to this local-only API.
 
 Two independent source reviewers received the diff, threat model and boundary rules without the author's conclusion:

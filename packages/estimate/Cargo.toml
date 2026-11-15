@@ -2,7 +2,7 @@
 name = "docslurp-estimate"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.88"
 description = "Offline DocSlurp file profiler: measure files locally (pages, page facts, media duration) for a server quote."
 license = "MIT"
 homepage = "https://docslurp.io/docs/packages/estimate"
@@ -16,6 +16,9 @@ crate-type = ["cdylib", "rlib"]
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 lopdf = { version = "0.47", default-features = false }
+# Only the public bounded object/xref grammar; the high-level loader eagerly owns streams.
+# The subcrate API is not semver-stable, so pin it behind our range-reader adapter.
+otf-pdf-syntax = "=0.2.0"
 # Raw deflate for Office/EPUB entries (already in the tree through lopdf's flate2).
 miniz_oxide = { version = "0.9", default-features = false, features = ["with-alloc"] }
 
