@@ -1,3 +1,4 @@
+- Asset ledger: reject repeat references on new or updated unlinked rows with an idempotent NOT VALID database constraint; retain historical rows for separate cleanup.
 ## Ingest version tagging and typed unavailable states (2026-11-13, draft, needs council)
 
 - Documents and runs record `ingest_version` and `ingest_capabilities` (migration 0160; existing rows backfill to 0 with no capabilities). The worker stamps them on statements a run already makes: documents with capabilities measured from stored rows (`parseSourceDecision`, `pageFacts`, `figureLedger`), runs with the build's. `GET /v1/ingest-version` (SDK `getIngestVersion`) reports the current version; `GET /v1/documents/:id` adds `ingest.updateAvailable`.
