@@ -15,8 +15,8 @@ let url: string;
 
 async function seedRun(runId: string) {
   await db.exec(`
-    insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, execution_generation)
-      values ('${runId}', 'o1', 'u1', 'w', 'upload', 'processing', 'embed', '{}', 3, null);
+    insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, execution_generation, monthly_reservation_cents)
+      values ('${runId}', 'o1', 'u1', 'w', 'upload', 'processing', 'embed', '{}', 3, null, 1);
     insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, created_at)
       values ('${runId}-bad', 'o1', 'u1', 'w', '${runId}', 'bad.pdf', 'application/pdf', 'k1', 'processing', 2, '2026-01-01'),
              ('${runId}-mid', 'o1', 'u1', 'w', '${runId}', 'mid.pdf', 'application/pdf', 'k2', 'processing', 1, '2026-01-02'),
@@ -143,8 +143,8 @@ describe("partial Document failure in the store", () => {
     await db.exec(`
       update documents set status = 'cancelled' where id = '${runId}-bad';
       update documents set canonical_id = '/${runId}' where id = '${runId}-mid';
-      insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline)
-        values ('${runId}-replacement', 'o1', 'u1', 'w', 'upload', 'processing', 'index', '{}');
+      insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, monthly_reservation_cents)
+        values ('${runId}-replacement', 'o1', 'u1', 'w', 'upload', 'processing', 'index', '{}', 1);
       insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, canonical_id, created_at)
         values ('${runId}-replacement-doc', 'o1', 'u1', 'w', '${runId}-replacement', 'mid.pdf', 'application/pdf', 'replacement', 'completed', '/${runId}', '2026-01-04');
     `);

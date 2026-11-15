@@ -14,9 +14,9 @@ beforeAll(async () => {
   await sql`insert into organizations(id,name,slug,created_by_user_id) values ('org','Org','realtime-org','owner'),('foreign','Foreign','realtime-foreign','stranger')`;
   await sql`insert into org_memberships(org_id,user_id,role) values ('org','owner','owner'),('org','member','member'),('foreign','stranger','owner') on conflict do nothing`;
   await sql`insert into projects(id,org_id,user_id,name) values ('project','org','owner','Private'),('foreign-w','foreign','stranger','Foreign')`;
-  await sql`insert into project_runs(id,org_id,user_id,project_id,kind,status,stage,job_id) values
-    ('run-a','org','owner','project','upload','processing','vision-extract','parent'),
-    ('run-b','org','owner','project','reindex','completed','completed','parent')`;
+  await sql`insert into project_runs(monthly_reservation_cents,id,org_id,user_id,project_id,kind,status,stage,job_id) values
+    (100, 'run-a','org','owner','project','upload','processing','vision-extract','parent'),
+    (100, 'run-b','org','owner','project','reindex','completed','completed','parent')`;
 }, 60_000);
 afterAll(async () => { await sql?.end(); await stop?.(); });
 it("denies cross-tenant runs, projects, documents and billing", async () => {
@@ -54,11 +54,11 @@ it("reads economics from maintained counters with exactly the former per-project
   const current = async () => ((await backend.project("owner", { kind: "economics", orgId: "org", page: 0 })) as { projects: Array<Record<string, unknown>> })
     .projects.map(({ usage: _usage, ...row }) => row);
   await sql`insert into projects(id,org_id,user_id,name) values ('econ-2','org','owner','Second')`;
-  await sql`insert into project_runs(id,org_id,user_id,project_id,kind,status,stage,job_id,pages_processed,created_at,updated_at) values
-    ('econ-run-1','org','owner','project','upload','completed','completed','j',40,'2026-11-01 10:00:00.123456+00','2026-11-01 10:07:31.987654+00'),
-    ('econ-run-2','org','owner','econ-2','upload','completed','completed','j',7,'2026-11-01 10:00:00+00','2026-11-01 09:59:00+00'),
-    ('econ-run-3','org','owner','econ-2','upload','queued','queued','j',0,now(),now()),
-    ('econ-run-4','org','owner','econ-2','upload','processing','extract','j',3,'2026-11-01 11:00:00+00','2026-11-01 11:00:05+00')`;
+  await sql`insert into project_runs(monthly_reservation_cents,id,org_id,user_id,project_id,kind,status,stage,job_id,pages_processed,created_at,updated_at) values
+    (100, 'econ-run-1','org','owner','project','upload','completed','completed','j',40,'2026-11-01 10:00:00.123456+00','2026-11-01 10:07:31.987654+00'),
+    (100, 'econ-run-2','org','owner','econ-2','upload','completed','completed','j',7,'2026-11-01 10:00:00+00','2026-11-01 09:59:00+00'),
+    (100, 'econ-run-3','org','owner','econ-2','upload','queued','queued','j',0,now(),now()),
+    (100, 'econ-run-4','org','owner','econ-2','upload','processing','extract','j',3,'2026-11-01 11:00:00+00','2026-11-01 11:00:05+00')`;
   const statuses = ["completed", "completed", "processing", "queued", "failed", "cancelled", "pii_blocked"];
   for (const [index, status] of statuses.entries()) {
     for (const projectId of ["project", "econ-2"]) {
@@ -224,8 +224,8 @@ describe("customer realtime frames carry no backend models (council round 4)", (
     await sql`insert into projects(id,org_id,user_id,name,pipeline,managed_models) values
       ('models','org','owner','Models',${sql.json(JSON.parse(JSON.stringify(pipeline)))},${sql.json({ pipeline: { vision: { modelUri: privateRoute } } })})`;
     await sql`insert into project_members(project_id,user_id,role) values ('models','customer','viewer'),('models','custadmin','editor'),('models','operator','viewer')`;
-    await sql`insert into project_runs(id,org_id,user_id,project_id,kind,status,stage,job_id,pipeline,error,stats) values
-      ('run-m','org','owner','models','upload','failed','vision-extract','job-m',${sql.json(JSON.parse(JSON.stringify(runPipeline)))},
+    await sql`insert into project_runs(monthly_reservation_cents,id,org_id,user_id,project_id,kind,status,stage,job_id,pipeline,error,stats) values
+      (100, 'run-m','org','owner','models','upload','failed','vision-extract','job-m',${sql.json(JSON.parse(JSON.stringify(runPipeline)))},
        ${`DeepSeek V4.1 Flash and GPT-6.1 Sol refused; ${privateRoute} timed out; ${hidden.ids.join(" ")}`},
        ${sql.json({ pages: 3, decisionModel: "typesafe/jev-1.13", embeddingModel: "perplexity/pplx-embed-v1-0.6b", routerNote: `decision-chain:${hidden.ids[0]}=served` })})`;
   });

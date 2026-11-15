@@ -172,8 +172,8 @@ function embedArtifact(documentId: string, paragraphs: Paragraph[], options: { m
 }
 
 async function seedRun(runId: string, scope: Scope) {
-  await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline)
-    values (${runId}, ${scope.orgId}, ${userOf(scope)}, ${scope.projectId}, 'bulk-upload', 'processing', 'summary-tree', '{}')
+  await sql`insert into project_runs (monthly_reservation_cents, id, org_id, user_id, project_id, kind, status, stage, pipeline)
+    values (100, ${runId}, ${scope.orgId}, ${userOf(scope)}, ${scope.projectId}, 'bulk-upload', 'processing', 'summary-tree', '{}')
     on conflict (id) do nothing`;
 }
 

@@ -2418,6 +2418,7 @@ export const projectRuns = pgTable(
     deadLetterReason: text("dead_letter_reason"),
     // Creation publishes this only after every Document is durable.
     creationSourceKeys: text("creation_source_keys").array().default([]).notNull(),
+    monthlyReservationCents: numeric("monthly_reservation_cents", { mode: "number" }).default(0).notNull(),
     creationReadyAt: timestamp("creation_ready_at", { withTimezone: true, mode: "string" }),
     creationExpiresAt: timestamp("creation_expires_at", { withTimezone: true, mode: "string" })
       .default(sql`now() + interval '5 minutes'`),
@@ -3982,3 +3983,14 @@ export const documentPageVectors = pgTable(
     }).onDelete("cascade"),
   ],
 );
+
+/** Durable intake identity; response cache expiry never authorizes new work. */
+export const intakeRequestReceipts = pgTable("intake_request_receipts", {
+  idempotencyKey: text("idempotency_key").notNull(),
+  routeKey: text("route_key").notNull(),
+  requestHash: text("request_hash").notNull(),
+  stableResult: jsonb("stable_result"),
+  userId: text("user_id").notNull().references(() => user.id, { onDelete: "cascade" }),
+  runId: text("run_id").unique().references(() => projectRuns.id, { onDelete: "set null" }),
+  createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
+}, table => [primaryKey({ columns: [table.idempotencyKey, table.routeKey] })]);

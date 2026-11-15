@@ -1,3 +1,4 @@
+import { bindIntakeReceipt } from "./intake-receipt-context.js";
 import { randomUUID } from "node:crypto";
 
 import { chartExportModelsAllowed, minChartExportTier, projectChartExportTierCap, upgradeStoredChartExport, type ChartExportTier, type ResolvedChartExportConfig, type RunOrigin } from "@docslurp/shared";
@@ -28,13 +29,13 @@ import { currentRequestApiKeyId, currentRequestId } from "../lib/request-context
 import { getAvailableCredits } from "./billing/credits.js";
 import {
   admitRunSpend,
+  loadSpendStatus,
   assertCanSpend,
   SpendBlockedError,
   type SpendBlockedCode,
 } from "./billing/spend-guard.js";
 import { canContributeToProject, canEditProject, getProjectAccessWithPipeline } from "./organizations.js";
 import { EditorRequiredError } from "../lib/editor-required.js";
-import { attributedUsage } from "./usage-attribution.js";
 import { buildRunProcessingPreview } from "./run-processing-preview.js";
 import { RunPipelineInvalidError, runLifecycle, type RunLifecycleRun, type RunStartOutcome } from "./run-lifecycle.js";
 import { mapDocument, mapProjectRun, type DocumentRow, type ProjectRunRow } from "./run-records.js";
@@ -190,89 +191,14 @@ export async function enforceLiveBudgetCaps(
   projectId: string,
   orgId: string,
 ): Promise<void> {
-  const sql = defaultSql;
-  if (
-    process.env.NODE_ENV === "development" &&
-    SKIP_RUN_BUDGET_GUARDS_IN_DEV
-  ) {
-    return;
-  }
-
-  // Credits are checked atomically when the run row is inserted
-  // (admitRunSpend). An admitted run is paused, not failed, once the org
-  // balance goes negative mid-run (docs/billing/credits.md, run admission).
-
-  // Budgets first: summing a month of attributed usage is the most expensive
-  // statement on the ingest path (67% of app-database time at 576 slots in the
-  // 2026-10-09 load-test re-run), so only sum spend for a cap that exists.
-  const [limits] = await sql<
-    { project_budget_cents: number | null; org_budget_cents: number | null }[]
-  >`
-    select
-      w.monthly_budget_cents as project_budget_cents,
-      o.monthly_budget_cents as org_budget_cents
-    from projects w
-    join organizations o on o.id = w.org_id
-    where w.id = ${projectId}
-    limit 1
-  `;
-
-  if (!limits) {
-    throw new Error("Project not found");
-  }
-
-  const monthSpendCents = async (scope: "project" | "org"): Promise<number> => {
-    const [row] = await sql<{ spend_cents: number }[]>`
-      select coalesce(sum(au.cost_cents), 0)::double precision as spend_cents
-      from ${attributedUsage("month")} au
-      where ${scope === "project" ? sql`au.project_id = ${projectId}` : sql`au.org_id = ${orgId}`}
-    `;
-    return Number(row?.spend_cents ?? 0);
-  };
-  const budget = {
-    project_budget_cents: limits.project_budget_cents,
-    project_spend_cents: limits.project_budget_cents == null ? 0 : await monthSpendCents("project"),
-    org_budget_cents: limits.org_budget_cents,
-    org_spend_cents: limits.org_budget_cents == null ? 0 : await monthSpendCents("org"),
-  };
-
-  const projectPaused =
-    budget.project_budget_cents != null &&
-    budget.project_spend_cents >= budget.project_budget_cents;
-  const orgPaused =
-    budget.org_budget_cents != null &&
-    budget.org_spend_cents >= budget.org_budget_cents;
-
-  // Write only on a change: every ingest runs this, and the org row is the
-  // one every credit debit in the org locks.
-  await sql`
-    update projects
-    set budget_paused = ${projectPaused}, updated_at = now()
-    where id = ${projectId} and budget_paused is distinct from ${projectPaused}
-  `;
-  await sql`
-    update organizations
-    set budget_paused = ${orgPaused}, updated_at = now()
-    where id = ${orgId} and budget_paused is distinct from ${orgPaused}
-  `;
-
-  if (projectPaused) {
-    throw new RunCreationBlockedError(
-      "This project has reached its monthly budget cap and new runs are paused. " +
-        "Increase the budget in project settings to resume processing.",
-      402,
-      "project_budget_paused",
-    );
-  }
-
-  if (orgPaused) {
-    throw new RunCreationBlockedError(
-      "This organization has reached its monthly budget cap and new runs are paused. " +
-        "Increase the org budget to resume processing.",
-      402,
-      "org_budget_paused",
-    );
-  }
+  if (process.env.NODE_ENV === "development" && SKIP_RUN_BUDGET_GUARDS_IN_DEV) return;
+  await defaultSql.begin(async tx => {
+    await tx`select pg_advisory_xact_lock(spend_admission_lock_key(${orgId}))`;
+    const status = await loadSpendStatus(orgId, projectId, { client: tx });
+    if (!status?.projectInOrg) throw new RunCreationBlockedError("Project not found", 402, "plan_not_entitled");
+    if (status.projectBudgetPaused) throw new RunCreationBlockedError("This project has reached its monthly budget cap", 402, "project_budget_paused");
+    if (status.orgBudgetPaused) throw new RunCreationBlockedError("This organization has reached its monthly budget cap", 402, "org_budget_paused");
+  });
 }
 
 // Optional floor on available credits (MIN_CREDIT_BALANCE_CENTS, 1 credit = 1
@@ -695,6 +621,7 @@ export function createRunCreation(deps: RunCreationDeps) {
     totalDocuments: number;
     sourceKeys: string[];
     pipeline: PipelineFeatures;
+    budgetCents: number;
   }): Promise<ProjectRunRow> {
     const { input } = args;
     const requestId = currentRequestId();
@@ -710,7 +637,7 @@ export function createRunCreation(deps: RunCreationDeps) {
           id, org_id, user_id, project_id, kind, status, priority, control_state,
           control_requested_at, stage, total_documents, processed_documents,
           pages_total, pages_processed, stats, creation_source_keys, pipeline,
-          extract_id, storage_prefix, origin
+          extract_id, storage_prefix, origin, monthly_reservation_cents
         )
         values (
           ${args.id},
@@ -736,7 +663,7 @@ export function createRunCreation(deps: RunCreationDeps) {
           ${sql.json(JSON.parse(JSON.stringify(args.pipeline)))},
           ${input.extract?.id ?? null},
           ${input.extract?.storagePrefix ?? null},
-          ${input.origin ?? "machine"}
+          ${input.origin ?? "machine"}, ${args.budgetCents}
         )
         returning *
       )
@@ -744,6 +671,7 @@ export function createRunCreation(deps: RunCreationDeps) {
       from inserted
       join projects on projects.id = inserted.project_id
     `;
+      await bindIntakeReceipt(tx, args.id);
       // The extract learns its run in the same transaction, so a failure after commit never orphans the run.
       if (input.extract) await tx`update extracts set run_id = ${args.id}, updated_at = now() where id = ${input.extract.id} and (run_id is null or run_id = ${args.id})`;
       return rows;
@@ -1059,7 +987,6 @@ export function createRunCreation(deps: RunCreationDeps) {
     // One admission path for every caller: credit floor, live budget caps, then
     // the reserved insert.
     await assertCreditFloor(access.orgId);
-    await enforceLiveBudgetCaps(input.projectId, access.orgId);
     // Reading charts with AI bills model reads: the same spend admission as other model-calling work.
     if (chartExportModelsAllowed(input.pipeline.chartExport as ResolvedChartExportConfig, process.env)) {
       await assertCanSpend(access.orgId, input.projectId, { kind: "job" });
@@ -1069,8 +996,9 @@ export function createRunCreation(deps: RunCreationDeps) {
     // committed, not after the Run and its document versions exist (an orphan run recovery would retry forever).
     // The forecast prices the files and pages the run actually has (counted pages where known, sizes otherwise), not placeholders.
     type ForecastFile = { filename: string; mimeType: string; sizeBytes: number; pages?: number };
+    const executionPipeline = platformRunPipeline(sources.kind === "files" ? withoutStageSelection(input.pipeline) : input.pipeline);
     const costForecastFor = (files: ForecastFile[]) => buildRunProcessingPreview({
-      request: { project: input.projectId, pipeline: input.pipeline, files, urls: [] },
+      request: { project: input.projectId, pipeline: executionPipeline, speedBoost: executionPipeline.speedBoost === true, files, urls: [] },
     }).current.estimatedCost;
     const forecastFilesOfSources = (): ForecastFile[] => sources.kind === "files"
       ? sources.files.map((file) => ({ filename: file.filename, mimeType: file.mimeType, sizeBytes: Math.max(0, Math.round(file.fileSize ?? 0)) }))
@@ -1081,20 +1009,28 @@ export function createRunCreation(deps: RunCreationDeps) {
         ...forecastPages(doc),
       }));
     // The preview schema needs at least one file; with none (an empty run) the call only validates the pipeline.
+    if (sources.kind === "files" && sources.files.some(file => !Number.isFinite(file.fileSize) || (file.fileSize ?? 0) <= 0)) {
+      throw new Error("Monthly admission requires trusted positive source size evidence");
+    }
     const validationFiles = forecastFilesOfSources();
-    costForecastFor(validationFiles.length > 0 ? validationFiles : [{ filename: "validation.pdf", mimeType: "application/pdf", sizeBytes: 1, pages: 1 }]);
+    if (validationFiles.some(file => !(Number.isFinite(file.sizeBytes) && file.sizeBytes > 0) &&
+        !(Number.isSafeInteger(file.pages) && (file.pages ?? 0) > 0))) {
+      throw new Error("Monthly admission requires trusted positive workload evidence");
+    }
+    const admissionForecast = costForecastFor(validationFiles.length > 0 ? validationFiles : [{ filename: "validation.pdf", mimeType: "application/pdf", sizeBytes: 1, pages: 1 }]);
 
     const runId = input.runId ?? randomUUID();
     const reuse = sources.kind === "versionsOf" && sources.reuse === true;
     const row = await insertRun({
       id: runId,
+      budgetCents: Math.max(1, admissionForecast.maxCents),
       orgId: access.orgId,
       input,
       totalDocuments: sources.kind === "files" ? sources.files.length : sourceDocuments.length,
       sourceKeys: sources.kind === "files" ? sources.files.map((file) => file.sourceKey) : [],
       // New files always run every enabled stage; a caller re-running existing
       // Documents chooses its own stage selection.
-      pipeline: platformRunPipeline(sources.kind === "files" ? withoutStageSelection(input.pipeline) : input.pipeline),
+      pipeline: executionPipeline,
     });
 
     // Stamped on every Document so a later project mode switch never rewrites how it was indexed.

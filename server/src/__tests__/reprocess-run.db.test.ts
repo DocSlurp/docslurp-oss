@@ -61,9 +61,9 @@ async function seedSource(args: { artifacts?: Record<string, string>; docStatus?
   `;
   await sql`
     insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status,
-      page_count, source_sha256)
+      file_size, page_count, source_sha256)
     values ('src', 'o1', 'u1', 'w', 'run-src', 'a.pdf', 'application/pdf', 'raw/a.pdf', ${args.docStatus ?? "completed"},
-      2, 'sha-a')
+      1000, 2, 'sha-a')
   `;
 }
 
@@ -85,8 +85,8 @@ describe("reprocess keeps the deferred indexing mode", () => {
           ${sql.json({ ...defaultPipelineFeatures, indexingMode: "map" } as unknown as postgres.JSONValue)}, '{}'::jsonb, 1, 2)
       `;
       await sql`
-        insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, indexing_mode)
-        values ('src-map', 'o1', 'u1', 'w', 'run-map', 'm.pdf', 'application/pdf', 'raw/m.pdf', 'completed', 2, 'map')
+        insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, file_size, page_count, indexing_mode)
+        values ('src-map', 'o1', 'u1', 'w', 'run-map', 'm.pdf', 'application/pdf', 'raw/m.pdf', 'completed', 1000, 2, 'map')
       `;
       const created = await reprocessRun("run-map", "u1");
       const [doc] = await sql<{ indexing_mode: string }[]>`select indexing_mode from documents where run_id = ${created!.run.id}`;
@@ -113,8 +113,8 @@ describe("reprocess after a mode-switch backfill adopted the source", () => {
           ${sql.json({ ...defaultPipelineFeatures, indexingMode: "map" } as unknown as postgres.JSONValue)}, '{}'::jsonb, 1, 2)
       `;
       await sql`
-        insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, indexing_mode)
-        values ('src-adopted', 'o1', 'u1', 'w', 'run-old', 'v.pdf', 'application/pdf', 'raw/v.pdf', 'completed', 2, 'visual')
+        insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, file_size, page_count, indexing_mode)
+        values ('src-adopted', 'o1', 'u1', 'w', 'run-old', 'v.pdf', 'application/pdf', 'raw/v.pdf', 'completed', 1000, 2, 'visual')
       `;
       const created = await reprocessRun("run-old", "u1");
       expect(created?.run.pipeline.indexingMode).toBe("visual");

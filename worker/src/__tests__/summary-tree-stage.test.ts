@@ -143,8 +143,8 @@ function embedArtifact(documentId: string, leaves: number): Buffer {
 }
 
 async function seed(storage: MemoryStorage, pipeline: PipelineFeatures, documents: Array<{ id: string; leaves: number; mimeType?: string; format?: string }>) {
-  await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline)
-    values ('run-1', 'o1', 'u1', 'w', 'bulk-upload', 'processing', 'summary-tree', '{}')`;
+  await sql`insert into project_runs (monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage, pipeline)
+    values (100, 'run-1', 'o1', 'u1', 'w', 'bulk-upload', 'processing', 'summary-tree', '{}')`;
   const run = {
     id: "run-1", orgId: "o1", userId: "u1", projectId: "w", kind: "bulk-upload", status: "processing", stage: SUMMARY_TREE_STAGE,
     totalDocuments: documents.length, processedDocuments: 0, pagesTotal: 1, pagesProcessed: 0, spentCents: 0,
@@ -614,8 +614,8 @@ describe("spend guard", () => {
     setSpendCheckConfig({ enabled: true, pages: 25, credits: 10 });
     const storage = new MemoryStorage();
     const { requests, embedded, overrides } = fakes();
-    await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline)
-      values ('run-1', 'o1', 'u1', 'w', 'bulk-upload', 'processing', 'summary-tree', '{}')`;
+    await sql`insert into project_runs (monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage, pipeline)
+      values (100, 'run-1', 'o1', 'u1', 'w', 'bulk-upload', 'processing', 'summary-tree', '{}')`;
     await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, canonical_id, page_count, file_size)
       values ('d1', 'o1', 'u1', 'w', 'run-1', 'd1.md', 'text/markdown', 'u1/src/d1', 'processing', '/d1', 10, 10)`;
     storage.objects.set("u1/run-1/embeddings/d1.json", embedArtifact("d1", 300));

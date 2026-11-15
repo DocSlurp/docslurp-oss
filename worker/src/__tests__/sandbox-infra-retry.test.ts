@@ -41,8 +41,8 @@ beforeEach(async () => {
     insert into organizations(id, name, slug, created_by_user_id, worker_slots, credit_balance_cents) values ('o1', 'Org', 'org', 'u1', 8, 1000000) on conflict do nothing;
     insert into projects(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W') on conflict do nothing;
     delete from run_terminal_receipts;
-    insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total, execution_generation)
-      values ('r1', 'o1', 'u1', 'w', 'upload', 'processing', 'extract', '{}', 2, 4, 'g1');
+    insert into project_runs (monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total, execution_generation)
+      values (100, 'r1', 'o1', 'u1', 'w', 'upload', 'processing', 'extract', '{}', 2, 4, 'g1');
     insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, parse_source_scan_version, parse_source_sha256)
       values ('x', 'o1', 'u1', 'w', 'r1', 'x.pdf', 'application/pdf', 'k1', 'processing', 2, 1, repeat('0', 64)),
              ('y', 'o1', 'u1', 'w', 'r1', 'y.pdf', 'application/pdf', 'k2', 'processing', 2, 1, repeat('0', 64));

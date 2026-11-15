@@ -57,8 +57,8 @@ beforeEach(async () => {
   await sql`delete from documents`;
   await sql`delete from project_runs`;
   await sql`update organizations set credit_balance_cents = 5, budget_paused = false where id = 'org-1'`;
-  await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline)
-    values ('run-1', 'org-1', 'u1', 'ws-1', 'bulk-upload', 'processing', 'vision-extract', '{}')`;
+  await sql`insert into project_runs (monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage, pipeline)
+    values (100, 'run-1', 'org-1', 'u1', 'ws-1', 'bulk-upload', 'processing', 'vision-extract', '{}')`;
 });
 
 async function addUsage(pages: number, credits: number): Promise<boolean> {

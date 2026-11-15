@@ -41,7 +41,7 @@ describe("jsonb values are stored as objects, not JSON strings", () => {
     const { runCreation } = await import("../services/run-creation.js");
     await runCreation.create({
       userId: "u", projectId: "w", kind: "bulk-upload", pipeline: defaultPipelineFeatures,
-      sources: { kind: "files", files: [{ filename: "a.pdf", mimeType: "application/pdf", sourceKey: "u/raw/a.pdf", metadata: { connectorFileId: "f1", connectorEtag: "e1" } }] },
+      sources: { kind: "files", files: [{ filename: "a.pdf", mimeType: "application/pdf", sourceKey: "u/raw/a.pdf", fileSize: 1000, metadata: { connectorFileId: "f1", connectorEtag: "e1" } }] },
     });
     const rows = await sql`select jsonb_typeof(metadata) as t, metadata->>'connectorFileId' as id from documents`;
     expect(rows).toEqual([{ t: "object", id: "f1" }]);

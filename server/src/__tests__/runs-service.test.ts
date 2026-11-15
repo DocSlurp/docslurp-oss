@@ -171,33 +171,19 @@ describe("createRun", () => {
     await expect(createRun(input)).rejects.toMatchObject({ statusCode: 402, code: "plan_not_entitled" });
   });
 
-  it("sums monthly spend only for budget caps that exist", async () => {
+  it("uses the transactional monthly budget decision before inserting a run", async () => {
     getProjectAccessMock.mockResolvedValue({ orgId: "org-1" });
-    const texts: string[] = [];
-    const respond = (limits: { project_budget_cents: number | null; org_budget_cents: number | null }) =>
-      sqlMock.mockImplementation((strings: TemplateStringsArray | string) => {
-        const text = Array.isArray(strings) ? strings.join("?") : String(strings);
-        texts.push(text);
-        if (text.includes("as project_budget_cents")) return Promise.resolve([limits]);
-        if (text.includes("as spend_cents")) return Promise.resolve([{ spend_cents: 150 }]);
-        if (text.includes("budget_paused")) return Promise.resolve([]);
-        if (text.includes("insert into project_runs")) return Promise.reject(new Error("stop-after-budget"));
-        return Promise.resolve([]);
-      });
     const input = { userId: "user-1", projectId: "ws-1", kind: "bulk-upload" as const, totalDocuments: 1, pipeline: defaultPipelineFeatures };
-
-    // No caps: the month-of-usage sum (the costliest ingest statement) is skipped.
-    respond({ project_budget_cents: null, org_budget_cents: null });
-    await createRun(input).catch(() => undefined);
-    expect(texts.some((text) => text.includes("as project_budget_cents"))).toBe(true);
-    expect(texts.filter((text) => text.includes("as spend_cents"))).toHaveLength(0);
-
-    // A project cap sums project spend only, and pauses once spend reaches it.
+    const texts = respondToAdmission(spendStatus());
+    await expect(createRun(input)).rejects.toThrow("inserted");
+    expect(texts.filter(text => text.includes("org_spend_status"))).toHaveLength(1);
+    expect(texts.filter(text => text.includes("as spend_cents"))).toHaveLength(0);
+    // Actual no-cap/capped scan execution is verified by spend-cap-query.db.test.ts.
     texts.length = 0;
-    respond({ project_budget_cents: 100, org_budget_cents: null });
-    const error = await createRun(input).catch((caught: unknown) => caught);
-    expect(error).toMatchObject({ statusCode: 402, code: "project_budget_paused" });
-    expect(texts.filter((text) => text.includes("as spend_cents"))).toHaveLength(1);
+    respondToAdmission(spendStatus({ project_budget_paused: true }), texts);
+    await expect(createRun(input)).rejects.toMatchObject({statusCode:402,code:"project_budget_paused"});
+    expect(texts.filter(text => text.includes("org_spend_status"))).toHaveLength(1);
+    expect(texts.some(text => text.includes("insert into project_runs"))).toBe(false);
   });
 
 });

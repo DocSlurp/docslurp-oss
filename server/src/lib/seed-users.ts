@@ -242,6 +242,7 @@ export async function seedNonProductionUsers({ includeFixtures = false } = {}): 
           processed_documents,
           pages_total,
           pages_processed,
+          monthly_reservation_cents,
           pipeline
         )
         values (
@@ -256,6 +257,7 @@ export async function seedNonProductionUsers({ includeFixtures = false } = {}): 
           0,
           0,
           0,
+          1,
           '{}'::jsonb
         )
         on conflict (id) do update

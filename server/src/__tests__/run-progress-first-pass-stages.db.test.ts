@@ -37,9 +37,9 @@ beforeAll(async () => {
   await sql`insert into projects(id, org_id, user_id, name) values ('p', 'o1', 'u1', 'P')`;
   const pipeline = sql.json(defaultPipelineFeatures as unknown as postgres.JSONValue);
   await sql`
-    insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, processed_documents, pages_total, pages_processed)
-    values ('fp', 'o1', 'u1', 'p', 'bulk-upload', 'processing', 'extract-markdown', ${pipeline}, 1, 0, 10, 4),
-           ('odd', 'o1', 'u1', 'p', 'bulk-upload', 'processing', ${UNKNOWN_STAGE}, ${pipeline}, 1, 0, 10, 0)
+    insert into project_runs (monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, processed_documents, pages_total, pages_processed)
+    values (100, 'fp', 'o1', 'u1', 'p', 'bulk-upload', 'processing', 'extract-markdown', ${pipeline}, 1, 0, 10, 4),
+           (100, 'odd', 'o1', 'u1', 'p', 'bulk-upload', 'processing', ${UNKNOWN_STAGE}, ${pipeline}, 1, 0, 10, 0)
   `;
   await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count)
     values ('d1', 'o1', 'u1', 'p', 'fp', 'a.pdf', 'application/pdf', 'raw/a', 'processing', 10),

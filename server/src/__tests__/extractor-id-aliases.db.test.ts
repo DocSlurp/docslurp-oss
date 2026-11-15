@@ -79,11 +79,11 @@ describe("stored legacy-id pipelines under the alias", () => {
   it("reprocessing a document from a pre-deploy run writes the new run with the canonical id and keeps its options", async () => {
     const errors = vi.spyOn(console, "error").mockImplementation(() => {});
     await sql`
-      insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
-      values ('run-old', 'o', 'u', 'w', 'bulk-upload', 'completed', 'completed', ${sql.json(legacy as unknown as postgres.JSONValue)}, 1, 2)`;
+      insert into project_runs (monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
+      values (100, 'run-old', 'o', 'u', 'w', 'bulk-upload', 'completed', 'completed', ${sql.json(legacy as unknown as postgres.JSONValue)}, 1, 2)`;
     await sql`
-      insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count)
-      values ('d', 'o', 'u', 'w', 'run-old', 'd.pdf', 'application/pdf', 'u/raw/d.pdf', 'completed', 2)`;
+      insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, file_size, page_count)
+      values ('d', 'o', 'u', 'w', 'run-old', 'd.pdf', 'application/pdf', 'u/raw/d.pdf', 'completed', 1000, 2)`;
     const result = await bulkReprocessDocuments(["d"], "u");
     expect(result.failed).toEqual([]);
     const [row] = await sql<{ pipeline: unknown }[]>`select pipeline from project_runs where id = ${result.runs[0]!.id}`;
@@ -95,8 +95,8 @@ describe("stored legacy-id pipelines under the alias", () => {
 
   it("a run queued before the deploy starts with the canonical id", async () => {
     await sql`
-      insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, creation_ready_at)
-      values ('q-old', 'o', 'u', 'w', 'bulk-upload', 'queued', 'queued', ${sql.json(legacy as unknown as postgres.JSONValue)}, 0, now())`;
+      insert into project_runs (monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, creation_ready_at)
+      values (100, 'q-old', 'o', 'u', 'w', 'bulk-upload', 'queued', 'queued', ${sql.json(legacy as unknown as postgres.JSONValue)}, 0, now())`;
     const { createRunLifecycle } = await import("../services/run-lifecycle.js");
     const { createRunStartRecovery } = await import("../services/run-start-recovery.js");
     const lifecycle = createRunLifecycle({ sql: sql as never, startWorkflow, failureThreshold: 3 });
@@ -113,11 +113,11 @@ describe("stored legacy-id pipelines under the alias", () => {
       const host = { ...defaultPipelineFeatures, documentExtraction: { ...defaultPipelineFeatures.documentExtraction,
         order: { pdf: ["poppler-text", "native-pdf"] }, pages: ["ocr"], enrich: ["poppler-text"], voting: { enabled: true, secondary: "native-pdf" } } };
       await sql`
-        insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
-        values ('run-host', 'o', 'u', 'w', 'bulk-upload', 'completed', 'completed', ${sql.json(host as unknown as postgres.JSONValue)}, 1, 2)`;
+        insert into project_runs (monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, pages_total)
+        values (100, 'run-host', 'o', 'u', 'w', 'bulk-upload', 'completed', 'completed', ${sql.json(host as unknown as postgres.JSONValue)}, 1, 2)`;
       await sql`
-        insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count)
-        values ('dh', 'o', 'u', 'w', 'run-host', 'dh.pdf', 'application/pdf', 'u/raw/dh.pdf', 'completed', 2)`;
+        insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, file_size, page_count)
+        values ('dh', 'o', 'u', 'w', 'run-host', 'dh.pdf', 'application/pdf', 'u/raw/dh.pdf', 'completed', 1000, 2)`;
       const result = await bulkReprocessDocuments(["dh"], "u");
       expect(result.failed).toEqual([]);
       const [row] = await sql<{ pipeline: { documentExtraction: Record<string, unknown> } }[]>`select pipeline from project_runs where id = ${result.runs[0]!.id}`;

@@ -1,19 +1,22 @@
-import { realtimeResourceSchema } from "@docslurp/shared";
+import { pageCredits, realtimeResourceSchema } from "@docslurp/shared";
 import { describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({ calls: [] as Array<{ text: string; values: unknown[] }>, sourcePipeline: null as Record<string, unknown> | null }));
-vi.mock("../db.js", () => ({
-  sql: Object.assign(
+vi.mock("../db.js", () => {
+  const sql = Object.assign(
     async (strings: TemplateStringsArray, ...values: unknown[]) => {
       mocks.calls.push({ text: strings.join("?"), values });
+      if (strings.join("?").includes("select d.run_id,d.source_key")) return [{ run_id: "source-run", source_key: "raw/source", source_sha256: null, materialization_generation: 0, page_count: 1000 }];
       return /as pipeline/.test(strings.join("?")) ? [{ pipeline: mocks.sourcePipeline ?? {} }] : [];
     },
     { array: (v: unknown[]) => v, json: (v: unknown) => v },
-  ),
-}));
+  );
+  return { sql: Object.assign(sql, { begin: async (fn: (tx: typeof sql) => Promise<unknown>) => fn(sql) }) };
+});
 vi.mock("../lib/temporal.js", () => ({ startMaterializeWorkflow: vi.fn() }));
 const spend = vi.hoisted(() => ({
   canSpend: vi.fn(async () => true),
+  assertCanSpend: vi.fn(async () => undefined),
   enforceLiveBudgetCaps: vi.fn(async () => undefined),
 }));
 class BlockedError extends Error {
@@ -21,6 +24,7 @@ class BlockedError extends Error {
 }
 vi.mock("../services/billing/spend-guard.js", () => ({
   canSpend: spend.canSpend,
+  assertCanSpend: spend.assertCanSpend,
   isSpendBlockedError: (error: unknown) => error instanceof BlockedError,
 }));
 vi.mock("../services/run-creation.js", () => ({ enforceLiveBudgetCaps: spend.enforceLiveBudgetCaps }));
@@ -30,7 +34,7 @@ const { defaultMaterializeDeps } = await import("../search/deferred/materialize-
 describe("materialize run rows", () => {
   it("creates distinct run ids accepted by the realtime protocol and stores the returned id", async () => {
     mocks.calls.length = 0;
-    const args = { orgId: "o", userId: "u", projectId: "w", documentId: "d1", documents: 1, pages: 3 };
+    const args = { orgId: "o", userId: "u", projectId: "w", documentId: "d1", documents: 1, pages: 3, pageNumbers: [1, 2, 3], maxCredits: 3 };
     const ids = [await defaultMaterializeDeps.createRun(args), await defaultMaterializeDeps.createRun(args)];
     expect(new Set(ids).size).toBe(2);
     for (const id of ids) {
@@ -42,9 +46,9 @@ describe("materialize run rows", () => {
 
   it("inherit the source document's run pipeline (then the project's), never an empty default", async () => {
     mocks.calls.length = 0;
-    await defaultMaterializeDeps.createRun({ orgId: "o", userId: "u", projectId: "w", documentId: "d1", documents: 1, pages: 3 });
-    const { text, values } = mocks.calls[0]!;
-    expect(text).toMatch(/join documents d on d\.id = \?/);
+    await defaultMaterializeDeps.createRun({ orgId: "o", userId: "u", projectId: "w", documentId: "d1", documents: 1, pages: 3, pageNumbers: [1, 2, 3], maxCredits: 3 });
+    const { text, values } = mocks.calls.find(call => call.text.includes("as pipeline"))!;
+    expect(text).toMatch(/where d\.id=\?/);
     expect(text).toMatch(/r\.pipeline.*w\.pipeline/s);
     expect(values).toContain("d1");
   });
@@ -54,7 +58,7 @@ describe("materialize run rows", () => {
     mocks.sourcePipeline = { quality: "good", documentExtraction: { options: { dolphin: { mode: "page", repoPath: "/tmp/attacker" }, liteparse: {} } } };
     const errors = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
-      await defaultMaterializeDeps.createRun({ orgId: "o", userId: "u", projectId: "w", documentId: "d1", documents: 1, pages: 3 });
+      await defaultMaterializeDeps.createRun({ orgId: "o", userId: "u", projectId: "w", documentId: "d1", documents: 1, pages: 3, pageNumbers: [1, 2, 3], maxCredits: 3 });
     } finally {
       mocks.sourcePipeline = null;
       errors.mockRestore();
@@ -70,7 +74,7 @@ describe("materialize run rows", () => {
 
   it("start `processing` with a confirmed workflow start so recovery and sweepers never pick them up", async () => {
     mocks.calls.length = 0;
-    await defaultMaterializeDeps.createRun({ orgId: "o", userId: "u", projectId: "w", documentId: "d1", documents: 1, pages: 3 });
+    await defaultMaterializeDeps.createRun({ orgId: "o", userId: "u", projectId: "w", documentId: "d1", documents: 1, pages: 3, pageNumbers: [1, 2, 3], maxCredits: 3 });
     const { text } = mocks.calls.find((call) => call.text.includes("insert into project_runs"))!;
     expect(text).toContain("'processing'");
     expect(text).toContain("workflow_started_at");
@@ -79,7 +83,7 @@ describe("materialize run rows", () => {
 
   it("start with a lease so stale-lease alerts only fire when the worker stops renewing it", async () => {
     mocks.calls.length = 0;
-    await defaultMaterializeDeps.createRun({ orgId: "o", userId: "u", projectId: "w", documentId: "d1", documents: 1, pages: 3 });
+    await defaultMaterializeDeps.createRun({ orgId: "o", userId: "u", projectId: "w", documentId: "d1", documents: 1, pages: 3, pageNumbers: [1, 2, 3], maxCredits: 3 });
     const insert = mocks.calls.find((call) => call.text.includes("insert into project_runs"))!;
     expect(insert.text).toMatch(/lease_expires_at[\s\S]*now\(\) \+ interval '15 minutes'/);
     expect(insert.text).not.toMatch(/interval '[1-5] minutes?'/);
@@ -113,4 +117,29 @@ describe("materialize spend gate", () => {
     spend.enforceLiveBudgetCaps.mockRejectedValueOnce(new Error("Project not found"));
     await expect(defaultMaterializeDeps.canSpend("org-1", "ws-1")).rejects.toThrow("Project not found");
   });
+});
+
+it("refuses the materialization insert when live admission fails inside its transaction", async () => {
+  mocks.calls.length = 0;
+  spend.assertCanSpend.mockRejectedValueOnce(new BlockedError("project_budget_paused"));
+  await expect(defaultMaterializeDeps.createRun({ orgId: "o", userId: "u", projectId: "w", documentId: "d1", documents: 1, pages: 3, pageNumbers: [1, 2, 3], maxCredits: 3 }))
+    .rejects.toMatchObject({ code: "project_budget_paused" });
+  expect(mocks.calls.some(call => call.text.includes("insert into project_runs"))).toBe(false);
+});
+
+it("reserves the complete bounded workflow credit allowance", async () => {
+  mocks.calls.length = 0;
+  await defaultMaterializeDeps.createRun({ orgId: "o", userId: "u", projectId: "w", documentId: "d1", documents: 1, pages: 100, pageNumbers: Array.from({ length: 100 }, (_, i) => i + 1), maxCredits: 37.25 });
+  const insert = mocks.calls.find(c => c.text.includes("insert into project_runs"))!;
+  expect(insert.text).toContain("monthly_reservation_cents");
+  expect(insert.values.at(-1)).toBe(38);
+});
+it.each([NaN, Infinity, -1, 0])("rejects invalid workload capacity %s", async maxCredits => {
+  await expect(defaultMaterializeDeps.createRun({ orgId: "o", userId: "u", projectId: "w", documentId: "d1", documents: 1, pages: 1, maxCredits })).rejects.toThrow("Invalid bounded");
+});
+
+it("retains the whole-page cost floor when a small credit bound can overshoot within a page", async () => {
+  mocks.calls.length = 0;
+  await defaultMaterializeDeps.createRun({orgId:"o",userId:"u",projectId:"w",documentId:"d",documents:1,pages:256,pageNumbers:Array.from({length:256},(_,i)=>i+1),maxCredits:1});
+  expect(mocks.calls.find(c=>c.text.includes("insert into project_runs"))!.values.at(-1)).toBe(Math.ceil(pageCredits("rich",256)));
 });

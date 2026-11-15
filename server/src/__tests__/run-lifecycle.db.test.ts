@@ -51,11 +51,11 @@ async function insertRun(
 ): Promise<string> {
   const id = tenant.id(name);
   await sql`
-    insert into project_runs (
+    insert into project_runs (monthly_reservation_cents,
       id, org_id, user_id, project_id, kind, status, stage, stats, control_state, error, failure_count,
       dead_letter_reason, creation_ready_at
     )
-    values (
+    values (100,
       ${id}, ${tenant.orgId}, ${tenant.userId}, ${tenant.projectId}, 'bulk-upload', ${values.status}, ${values.stage},
       ${sql.json((values.stats ?? {}) as postgres.JSONValue)}, ${values.controlState ?? null}, ${values.error ?? null},
       ${values.failureCount ?? 0}, ${values.deadLetterReason ?? null}, now()
@@ -67,9 +67,9 @@ async function insertRun(
 async function insertDocument(sql: SqlClient, tenant: Tenant, runId: string, name: string, status: string): Promise<string> {
   const id = tenant.id(name);
   await sql`
-    insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status)
+    insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, file_size)
     values (${id}, ${tenant.orgId}, ${tenant.userId}, ${tenant.projectId}, ${runId}, ${`${name}.pdf`}, 'application/pdf',
-      ${`${tenant.userId}/raw/${id}.pdf`}, ${status})
+      ${`${tenant.userId}/raw/${id}.pdf`}, ${status}, 1000)
   `;
   return id;
 }

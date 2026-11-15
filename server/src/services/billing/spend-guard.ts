@@ -1,3 +1,4 @@
+import { attributedUsage } from "../usage-attribution.js";
 import { reportPublicError } from "../../lib/public-errors.js";
 import { upgradeLinkHeader, upgradeLinksFor } from "../../lib/upgrade-links.js";
 import { PipelineSpeedBoostRequiredError, publicApiErrorDetails, publicErrorForStatus } from "@docslurp/shared";
@@ -121,7 +122,7 @@ export function spendGuardsSkipped(env: NodeJS.ProcessEnv = process.env): boolea
 export async function loadSpendStatus(
   orgId: string | null | undefined,
   projectId: string | null | undefined,
-  options: { client?: Client; runReserveCredits?: number } = {},
+  options: { client?: Client; runReserveCredits?: number; reusingRunId?: string } = {},
 ): Promise<SpendStatus | null> {
   const client = (options.client ?? sql) as SqlClient;
   const [row] = await client<{
@@ -135,13 +136,26 @@ export async function loadSpendStatus(
     project_in_org: boolean;
     has_credit_grants: boolean | null;
   }[]>`
-    select s.*, org_has_credit_grants(s.org_id) as has_credit_grants,
+    select s.org_id, s.funded, s.available, s.reserved, s.project_in_org,
+      s.project_budget_paused or case when p.monthly_budget_cents is not null then
+        case when ${Boolean(options.reusingRunId)} then (select coalesce(sum(au.cost_cents), 0) from ${attributedUsage("month", client)} au
+          where au.org_id = s.org_id and au.project_id = p.id) + (select coalesce(sum(cents),0) from pending_monthly_capacity where org_id=s.org_id and project_id=p.id) > p.monthly_budget_cents else (select coalesce(sum(au.cost_cents), 0) from ${attributedUsage("month", client)} au
+          where au.org_id = s.org_id and au.project_id = p.id) + (select coalesce(sum(cents),0) from pending_monthly_capacity where org_id=s.org_id and project_id=p.id) >= p.monthly_budget_cents end
+        else false end as project_budget_paused,
+      s.org_budget_paused or case when o.monthly_budget_cents is not null then
+        case when ${Boolean(options.reusingRunId)} then (select coalesce(sum(au.cost_cents), 0) from ${attributedUsage("month", client)} au
+          where au.org_id = s.org_id) + (select coalesce(sum(cents),0) from pending_monthly_capacity where org_id=s.org_id) > o.monthly_budget_cents else (select coalesce(sum(au.cost_cents), 0) from ${attributedUsage("month", client)} au
+          where au.org_id = s.org_id) + (select coalesce(sum(cents),0) from pending_monthly_capacity where org_id=s.org_id) >= o.monthly_budget_cents end
+        else false end as org_budget_paused,
+      org_has_credit_grants(s.org_id) as has_credit_grants,
       (select o.auto_recharge_enabled from organizations o where o.id = s.org_id) as auto_top_up_on
     from org_spend_status(
       ${orgId ?? null}::text,
       ${projectId ?? null}::text,
       ${options.runReserveCredits ?? 0}::numeric
     ) s
+    join organizations o on o.id = s.org_id
+    left join projects p on p.id = ${projectId ?? null} and p.org_id = s.org_id
   `;
   if (!row) return null;
   return {
@@ -298,6 +312,15 @@ async function spendDecision(
   projectId: string | null | undefined,
   options: SpendCheckOptions,
 ): Promise<{ code: SpendBlockedCode; message: string; autoTopUpOn?: boolean; details?: Record<string, unknown> } | null> {
+  if (!options.client) {
+    return await sql.begin((tx) => spendDecision(orgId, projectId, { ...options, client: tx }));
+  }
+  // Lock before taking the live usage snapshot, including high-balance search
+  // and materialization calls which previously skipped interactive admission.
+  const client = options.client as SqlClient;
+  const [scope] = await client`select coalesce(${orgId ?? null}::text,
+    (select org_id from projects where id = ${projectId ?? null})) as org_id`;
+  if (scope?.org_id) await client`select pg_advisory_xact_lock(spend_admission_lock_key(${scope.org_id}))`;
   const kind = options.kind ?? "job";
   const current = currentChatTurn();
   speedBoostMultiplier(options.speedBoost);
@@ -386,7 +409,7 @@ export async function admitRunSpend<T>(
     }
     if (guarded) {
       const status = await loadSpendStatus(orgId, projectId, {
-        client: tx,
+        client: tx, reusingRunId: options.readmission ? options.leaseRunId : undefined,
         // Leases replace the per-run reservation: `reserved` holds them all.
         runReserveCredits: leases ? 0 : runAdmissionReserveCredits(),
       });
@@ -415,6 +438,10 @@ export async function admitRunSpend<T>(
       await requireRunCreditLease(tx, { runId: options.leaseRunId, orgId, projectId });
     }
     return admitted!;
+  }).catch((error: unknown) => {
+    const code = (error as { code?: string }).code;
+    if (code === "P4021" || code === "P4022") throw new SpendBlockedError("Monthly budget capacity is reserved by pending work", code === "P4021" ? "org_budget_paused" : "project_budget_paused");
+    throw error;
   })) as T;
 }
 

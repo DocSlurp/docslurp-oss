@@ -58,7 +58,7 @@ async function upload(projectId: string, filename: string, path = "", extra: { c
     projectId,
     kind: "bulk-upload",
     pipeline: defaultPipelineFeatures,
-    sources: { kind: "files", files: [{ filename, mimeType: "application/pdf", sourceKey: `raw/${counter}`, path, ...extra }] },
+    sources: { kind: "files", files: [{ filename, mimeType: "application/pdf", sourceKey: `raw/${counter}`, fileSize: 1000, path, ...extra }] },
   });
   const runId = created.run.id;
   const doc = created.documents[0];

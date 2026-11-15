@@ -2,9 +2,10 @@ import { withBackgroundSpan } from "@docslurp/shared/observability";
 import { apiPool, sql as defaultSql, type SqlClient } from "../db.js";
 import { signalPipelinePause, signalPipelineResume } from "../lib/temporal.js";
 import { RUN_EVENTS_CHANNEL } from "./run-event-hub.js";
-import { loadSpendStatus, spendBlockReason, spendGuardsSkipped } from "./billing/spend-guard.js";
+import { loadSpendStatus, runAdmissionReserveCredits, spendBlockReason, spendGuardsSkipped } from "./billing/spend-guard.js";
 import { creditLeasesEnabled, grantRunCreditLease } from "./billing/credit-leases.js";
 import { fleetSupports, taskQueueForOrgKey } from "./worker-fleet.js";
+import { restoreRunMonthlyCapacity } from "./run-monthly-readmission.js";
 
 /**
  * Runs the worker paused mid-run because their org could no longer spend
@@ -65,17 +66,25 @@ export async function resumeSpendPausedRunOutcome(runId: string, deps: SpendPaus
   try {
     return await sql.begin(async tx => {
       const client = tx as unknown as SqlClient;
+      // Admission always locks org before run. Serializing only the run lets
+      // two paused runs reuse the same available capacity.
+      await tx`select pg_advisory_xact_lock(spend_admission_lock_key(${candidate.org_id}))`;
       await tx`select pg_advisory_xact_lock(90105, hashtext(${runId}))`;
       const [row] = await tx<PausedRunRow[]>`
         select id, org_id, project_id, user_id, pause_reason from project_runs
-        where id = ${runId} and status = 'processing' and control_state = 'paused'
+        where id = ${runId} and org_id = ${candidate.org_id} and status = 'processing' and control_state = 'paused'
           and pause_reason in ('credit_exhausted', 'project_budget_paused', 'org_budget_paused', 'plan_not_entitled')
         for no key update
       `;
       if (!row) return { status: "not-spend-paused" } as const;
+      await restoreRunMonthlyCapacity(tx, row.id);
       if (!spendGuardsSkipped()) {
-        const reason = spendBlockReason(await loadSpendStatus(row.org_id, row.project_id, { client }));
-        if (reason) return { status: "blocked", reason: reason.code } as const;
+        const reason = spendBlockReason(await loadSpendStatus(row.org_id, row.project_id, { client, reusingRunId: row.id, runReserveCredits: leases ? 0 : runAdmissionReserveCredits() }));
+        if (reason) {
+          blockedReason = reason.code;
+          // Restoration must roll back together with the refused pause/lease.
+          throw new Error("Resume spend refused");
+        }
       }
       await tx`
         update project_runs set control_state = null, control_requested_at = null,
@@ -108,7 +117,9 @@ export async function resumeSpendPausedRunOutcome(runId: string, deps: SpendPaus
       `;
       return { status: "resumed" } as const;
     });
-  } catch {
+  } catch (error) {
+    const code = (error as { code?: string }).code;
+    if (code === "P4021" || code === "P4022") return { status: "blocked", reason: code === "P4021" ? "org_budget_paused" : "project_budget_paused" };
     if (blockedReason) return { status: "blocked", reason: blockedReason };
     console.error(`[spend-paused-runs] run=${runId} resume_delivery_deferred=true pause_preserved=true`);
     return { status: "deferred" };
@@ -134,14 +145,10 @@ export async function sweepSpendPausedRuns(
   let resumed = 0;
   let stillBlocked = 0;
   for (const row of rows) {
-    const allowed = spendGuardsSkipped()
-      || spendBlockReason(await loadSpendStatus(row.org_id, row.project_id, { client: sql })) === null;
-    if (allowed) {
-      if (await resumeSpendPausedRun(row.id, { sql, signals })) resumed += 1;
-      else stillBlocked += 1;
-    } else {
+    const outcome = await resumeSpendPausedRunOutcome(row.id, { sql, signals });
+    if (outcome.status === "resumed") resumed += 1;
+    else {
       stillBlocked += 1;
-      // Idempotent: covers a pause signal the worker could not deliver.
       await signals.pause(row.id).catch(() => undefined);
     }
   }
