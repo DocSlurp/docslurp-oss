@@ -763,8 +763,8 @@ it.runIf(enabled)("permits explicit new child work after native parent failure w
 },20000);
 
 it.runIf(enabled)("keeps shared materialization visible after the native parent answer completes and tree cancellation",async()=>{
-  await sql`insert into documents(id,user_id,org_id,project_id,filename,mime_type,source_key,status)
-    values('native-linked-document','native-api-owner','native-api-org',${project},'fixture.txt','text/plain','synthetic','completed')
+  await sql`insert into documents(id,user_id,org_id,project_id,filename,mime_type,source_key,status,page_count,billing_pages,page_count_source)
+    values('native-linked-document','native-api-owner','native-api-org',${project},'fixture.txt','text/plain','synthetic','completed',1,1,'counted')
     on conflict do nothing`;
   const {defaultMaterializeDeps}=await import("../search/deferred/materialize-client.js");
   let runId="";

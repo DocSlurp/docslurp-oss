@@ -32,15 +32,13 @@ afterAll(async () => { await sql?.end(); await stop?.(); });
 
 describe("materialize run source pipeline", () => {
   it("never copies another project's document pipeline into the run", async () => {
-    const id = await defaultMaterializeDeps.createRun({ orgId: "o", userId: "u", projectId: "mine", documentId: "their-doc", documents: 1, pages: 3, maxCredits: 3 });
-    const [run] = await sql<{ project_id: string; pipeline: Record<string, unknown> }[]>`select project_id, pipeline from project_runs where id = ${id}`;
-    expect(run!.project_id).toBe("mine");
-    expect(run!.pipeline).toMatchObject({ quality: "fast" });
-    expect(run!.pipeline.quality).not.toBe("good");
+    await expect(defaultMaterializeDeps.createRun({ orgId: "o", userId: "u", projectId: "mine", documentId: "their-doc", documents: 1, pages: 3, pageNumbers: [1, 2, 3], maxCredits: 3 }))
+      .rejects.toThrow("current scoped source");
+    expect(await sql`select id from project_runs where kind='materialize'`).toHaveLength(0);
   });
 
   it("uses the document's own run pipeline inside its project", async () => {
-    const id = await defaultMaterializeDeps.createRun({ orgId: "o", userId: "u", projectId: "theirs", documentId: "their-doc", documents: 1, pages: 3, maxCredits: 3 });
+    const id = await defaultMaterializeDeps.createRun({ orgId: "o", userId: "u", projectId: "theirs", documentId: "their-doc", documents: 1, pages: 3, pageNumbers: [1, 2, 3], maxCredits: 3 });
     const [run] = await sql<{ pipeline: Record<string, unknown> }[]>`select pipeline from project_runs where id = ${id}`;
     expect(run!.pipeline).toMatchObject({ quality: "good" });
   });
@@ -55,7 +53,7 @@ describe("materialize run source pipeline", () => {
     await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count)
       values ('legacy-doc', 'o', 'u', 'mine', 'run-legacy', 'b.pdf', 'application/pdf', 'k2', 'completed', 3)`;
     await sql`update projects set managed_models = ${sql.json({ pipeline: { textGeneration: { model: "llm://private/gpu1/acme/text" } } })} where id = 'mine'`;
-    const id = await defaultMaterializeDeps.createRun({ orgId: "o", userId: "u", projectId: "mine", documentId: "legacy-doc", documents: 1, pages: 3, maxCredits: 3 });
+    const id = await defaultMaterializeDeps.createRun({ orgId: "o", userId: "u", projectId: "mine", documentId: "legacy-doc", documents: 1, pages: 3, pageNumbers: [1, 2, 3], maxCredits: 3 });
     const [run] = await sql<{ pipeline: Record<string, Record<string, unknown>> }[]>`select pipeline from project_runs where id = ${id}`;
     expect(run!.pipeline).toMatchObject({ quality: "good" });
     expect(run!.pipeline.vision!.modelUri).not.toMatch(/deepseek/);
