@@ -73,6 +73,40 @@ describe("quality fast: pages without a text layer", () => {
     expect(pagesKeptAsImage({ canonicalDocument: null, pageCount: 1, isImage: true }).kept).toEqual([1]);
   });
 
+  it("selects ledger-backed scan pages despite canonical text, within the same cap", () => {
+    const { canonical } = fastState();
+    expect(pagesKeptAsImage({ canonicalDocument: canonical, pageCount: 2, isImage: false,
+      requiredImagePages: [1, 0, 3, 1.5] })).toEqual({ kept: [1, 2], unread: [], reason: null });
+    expect(pagesKeptAsImage({ canonicalDocument: canonical, pageCount: 2, isImage: false,
+      requiredImagePages: [1], maxPages: 1 })).toEqual({ kept: [1], unread: [2], reason: "cap" });
+    expect(pagesKeptAsImage({ canonicalDocument: null, pageCount: 2, isImage: false,
+      requiredImagePages: [1] }).kept).toEqual([]);
+  });
+
+  it("renders ledger scan pages in Fast without replacing valid canonical text", async () => {
+    const { state, storage } = fastState();
+    const listHostPageImagePages = vi.fn(async () => [1, 0, 3, 1.5]);
+    const reserveFastPageImageRenders = vi.fn(async ({ wanted }: { wanted: number }) => wanted);
+    (state as unknown as { store: unknown }).store = { listHostPageImagePages, reserveFastPageImageRenders };
+    const stage = new RenderImagesStage({} as never, storage);
+    const select = (stage as unknown as { selectPages: (s: WorkflowState, d: Document) => Promise<{
+      pageNumbers: number[]; keptAsImage: number[];
+    }> }).selectPages.bind(stage);
+    const selected = await select(state, document);
+    expect(selected.pageNumbers).toEqual([1, 2]);
+    expect(selected.keptAsImage).toEqual([2]);
+    expect(listHostPageImagePages).toHaveBeenCalledWith({ orgId: "org", documentId: "doc" });
+    expect(reserveFastPageImageRenders).toHaveBeenCalledWith(expect.objectContaining({ wanted: 2 }));
+    reserveFastPageImageRenders.mockResolvedValueOnce(1);
+    expect((await select(state, document)).pageNumbers).toEqual([1]);
+    reserveFastPageImageRenders.mockResolvedValueOnce(0);
+    expect((await select(state, document)).pageNumbers).toEqual([]);
+    listHostPageImagePages.mockClear();
+    state.run.orgId = null as never;
+    expect((await select(state, document)).pageNumbers).toEqual([2]);
+    expect(listHostPageImagePages).not.toHaveBeenCalled();
+  });
+
   it("emits the page image reference with alt text naming the page", async () => {
     const { state, storage, objects } = fastState();
     const changed = await applyPageImageReferences({ state, document, storage, pages: [{ pageNumber: 2, artifactUri: "s3://bucket/images/doc/v2-150dpi/page-2.png" }], manifestUri: "s3://bucket/images/manifest.json" });

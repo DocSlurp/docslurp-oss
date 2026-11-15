@@ -54,6 +54,7 @@ export * from "./page-table-routing.js";
 export * from "./file-formats.js";
 export * from "./file-sniff.js";
 export * from "./page-raster-routing.js";
+export * from "./page-cost-route.js";
 export * from "./text-layer-quality.js";
 export { buildProfilerRules, type ProfilerRules } from "./estimate-profiler-rules.js";
 export * from "./upload-quote.js";
