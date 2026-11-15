@@ -155,7 +155,7 @@ export async function resolveSearchSetup(
   const treeDefault = knownSummaryTreeMode(projectSettings.retrievalDefaults?.summaryTree);
   const treeAsked = options.summaryTree === undefined ? undefined : summaryTreeSearchModeSchema.safeParse(options.summaryTree);
   const treeCeiling = treeAsked?.success && exceedsSummaryTreeCeiling(treeAsked.data, treeDefault)
-    && !(await callerMayRaiseSummaryTree({ userId, projectId: normalizedScope.projectId, orgId: normalizedScope.orgId }))
+    && !(await callerMayRaiseSummaryTree({ userId, projectId: normalizedScope.projectId, orgId: normalizedScope.orgId, actor: accessScope.actor }))
     ? treeDefault
     : undefined;
   if (treeCeiling !== undefined) session.recordDiagnostic("summaryTreeCeiling", { asked: treeAsked!.data, ceiling: treeCeiling });

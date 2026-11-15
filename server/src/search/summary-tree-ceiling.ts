@@ -3,6 +3,7 @@ import { SUMMARY_TREE_SEARCH_MODES, summaryTreeSearchModeSchema, type SummaryTre
 import { sql } from "../db.js";
 import { currentRequestApiKeyId } from "../lib/request-context.js";
 import { canEditProject, getProjectAccess } from "../services/organizations.js";
+import type { SearchScopeActor } from "./access-scope.js";
 
 /*
  * The project's stored retrieval default (`retrievalDefaults.summaryTree`) is a ceiling on what a request may ask for:
@@ -13,10 +14,14 @@ import { canEditProject, getProjectAccess } from "../services/organizations.js";
  * - a server API key with the `projects:manage` scope, in the project's own organization.
  *
  * Everyone else is held to the stored default: a project member or viewer without edit rights, a browser (client) key
- * whatever its scopes, a search- or chat-scoped server key, and an OAuth token. Editors who want `include` for their
- * readers store it as the project's retrieval default.
+ * whatever its scopes, a search- or chat-scoped server key, a delegated OAuth token whatever scopes its grant holds
+ * (a grant is consent to act for a user in a client, not a decision of the project's editors), and a caller the
+ * search was not told about. Editors who want `include` for their readers store it as the project's retrieval
+ * default.
  *
- * The check costs a query, and runs only for a request that asks for more than the default.
+ * The caller is named by the search's access scope (`SearchAccessScope.actor`), which the request's own actor builds;
+ * it is never inferred from who owns a key. The check costs a query, and runs only for a request that asks for more
+ * than the default.
  */
 
 const rank = (mode: SummaryTreeSearchMode): number => SUMMARY_TREE_SEARCH_MODES.indexOf(mode);
@@ -38,28 +43,37 @@ export function clampSummaryTreeMode(asked: SummaryTreeSearchMode, ceiling: Summ
 }
 
 /**
- * Whether the caller of this request may ask for a summary-tree mode above the project's retrieval default. Fails
- * closed: a request made with an API key is judged by the key alone (never by its owner's rights), and a key that is
- * revoked, a browser key, lacks `projects:manage`, belongs to another organization or is not an API key at all (an
- * OAuth token id) may not.
+ * Whether the caller of this search may ask for a summary-tree mode above the project's retrieval default. Fails
+ * closed:
+ *
+ * - no actor (the search's scope names no caller): no;
+ * - an API key is judged by the key alone, never by its owner's rights: only a live server key of the project's
+ *   organization with `projects:manage`. A key without an id, a delegated OAuth token, a revoked key, a browser key
+ *   and a key of another organization may not;
+ * - a signed-in user needs edit rights on the project. A scope that says "signed-in user" while the request itself
+ *   was authenticated with an API key is not believed: the key's owner's rights are never used for a key's request.
  */
 export async function callerMayRaiseSummaryTree(args: {
   userId: string;
   projectId: string;
   orgId: string;
-  /** The request's API key id; defaults to the current request's. Null: a signed-in user. */
-  apiKeyId?: string | null;
+  /** Who is asking, from the search's access scope. Undefined: unknown, and refused. */
+  actor: SearchScopeActor | undefined;
 }): Promise<boolean> {
-  const apiKeyId = args.apiKeyId === undefined ? currentRequestApiKeyId() : args.apiKeyId;
-  if (apiKeyId) {
+  const actor = args.actor;
+  if (!actor) return false;
+  if (actor.type === "apiKey") {
+    if (!actor.apiKeyId || actor.delegated) return false;
     const [key] = await sql<{ id: string }[]>`
       select id from api_keys
-      where id = ${apiKeyId} and org_id = ${args.orgId} and revoked_at is null
+      where id = ${actor.apiKeyId} and org_id = ${args.orgId} and revoked_at is null
         and key_type = 'server' and scopes @> array['projects:manage']::text[]
       limit 1
     `;
     return Boolean(key);
   }
+  if (actor.type !== "session") return false;
+  if (currentRequestApiKeyId()) return false;
   const access = await getProjectAccess(args.projectId, args.userId);
   return Boolean(access && access.projectId === args.projectId && access.orgId === args.orgId && canEditProject(access, args.userId));
 }

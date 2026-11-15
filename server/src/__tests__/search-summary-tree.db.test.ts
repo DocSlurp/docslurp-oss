@@ -58,7 +58,8 @@ let tree: typeof import("../search/summary-tree.js");
 
 const route = resolveEmbeddingRoute(normalizePipelineFeatures(null).embedding);
 const DIM = route.dimensions;
-const SCOPE = { orgId: "org1", projectIds: "org", modeCeiling: null } as const;
+/** A signed-in user's scope, as `searchAccessScopeFor` builds it. */
+const SCOPE = { orgId: "org1", projectIds: "org", modeCeiling: null, actor: { type: "session" } } as const;
 const TREE_PIPELINE = normalizePipelineFeatures({ embed: true, indexVectors: true, summaryTree: { enabled: true } } as never);
 const PLAIN_PIPELINE = normalizePipelineFeatures({ embed: true, indexVectors: true } as never);
 
@@ -421,7 +422,7 @@ describe("summary tree: tenant boundary", () => {
     }
     // The other organization searches its own project and gets only its own nodes.
     summaryReads.calls.length = 0;
-    const other = await run({ projectId: "x", userId: "v", scope: { orgId: "org2", projectIds: "org", modeCeiling: null }, summaryTree: "include" });
+    const other = await run({ projectId: "x", userId: "v", scope: { orgId: "org2", projectIds: "org", modeCeiling: null, actor: { type: "session" } }, summaryTree: "include" });
     expect(summaryReads.calls).toEqual([{ projectId: "x", documentIds: ["docX"] }]);
     expect([...documentsOf(other)]).toEqual(["docX"]);
     expect(other.summaries!.every((summary) => summary.documentId === "docX")).toBe(true);
@@ -596,6 +597,22 @@ describe("summary tree: the project default is a ceiling for callers who may not
     }
   });
 
+  it("holds a search whose scope names no caller to the project's default, whoever the user is", async () => {
+    // The owner could raise it as a signed-in user. A scope that does not say who is asking gets the default.
+    await setDefault("w", "u", { summaryTree: "off" });
+    const anonymous = await run({ documentIds: MAIN, userId: "u", summaryTree: "include", scope: { orgId: "org1", projectIds: "org", modeCeiling: null } });
+    expect(anonymous.summaryTree?.applied ?? "off").toBe("off");
+    expect(anonymous).not.toHaveProperty("summaries");
+    await setDefault("w", "u", { summaryTree: "guide" });
+    try {
+      const clamped = await run({ documentIds: MAIN, userId: "u", summaryTree: "include", scope: { orgId: "org1", projectIds: "org", modeCeiling: null } });
+      expect(clamped.summaryTree?.applied).toBe("guide");
+      expect(clamped).not.toHaveProperty("summaries");
+    } finally {
+      await setDefault("w", "u", { summaryTree: "off" });
+    }
+  });
+
   it("judges an API key by the key: only a server key with projects:manage in the project's organization may raise", async () => {
     const ceiling = await import("../search/summary-tree-ceiling.js");
     const key = async (id: string, orgId: string, userId: string, keyType: string, scopes: string[], revoked = false) => {
@@ -605,15 +622,38 @@ describe("summary tree: the project default is a ceiling for callers who may not
       return id;
     };
     // Every key belongs to the owner, who could raise it as a signed-in user: the key's own type and scopes decide.
-    const may = (apiKeyId: string | null, userId = "u") => ceiling.callerMayRaiseSummaryTree({ userId, projectId: "w", orgId: "org1", apiKeyId });
+    const requestContext = await import("../lib/request-context.js");
+    const { searchAccessScopeFor } = await import("../search/access-scope.js");
+    const ask = (actor: Parameters<typeof ceiling.callerMayRaiseSummaryTree>[0]["actor"], userId = "u") =>
+      ceiling.callerMayRaiseSummaryTree({ userId, projectId: "w", orgId: "org1", actor });
+    const may = (apiKeyId: string | null, userId = "u") => ask(apiKeyId === null ? { type: "session" } : { type: "apiKey", apiKeyId, delegated: false }, userId);
     expect(await may(await key("k-manage", "org1", "u", "server", ["projects:manage", "search:deep"]))).toBe(true);
     expect(await may(await key("k-search", "org1", "u", "server", ["search:deep"]))).toBe(false);
     expect(await may(await key("k-chat", "org1", "u", "server", ["chat"]))).toBe(false);
     expect(await may(await key("k-client", "org1", "u", "client", ["projects:manage", "search:deep"]))).toBe(false);
     expect(await may(await key("k-revoked", "org1", "u", "server", ["projects:manage"], true))).toBe(false);
     expect(await may(await key("k-other-org", "org2", "v", "server", ["projects:manage"]))).toBe(false);
-    // Not an API key at all (an OAuth token id).
+    // Not an API key at all (an OAuth token id), and a delegated token whatever its id or its grant's scopes.
     expect(await may("oauth-token-id")).toBe(false);
+    expect(await ask({ type: "apiKey", apiKeyId: "k-manage", delegated: true })).toBe(false);
+    // A key that carries no id is not judged by its owner (the owner could raise it as a signed-in user).
+    expect(await ask({ type: "apiKey", apiKeyId: null, delegated: false })).toBe(false);
+    // A caller the search was not told about, or of a kind it does not know.
+    expect(await ask(undefined)).toBe(false);
+    expect(await ask({ type: "service" } as never)).toBe(false);
+    // "Signed-in user" inside a request that was authenticated with a key is not believed.
+    const keyRequest = vi.spyOn(requestContext, "currentRequestApiKeyId").mockReturnValue("k-search");
+    expect(await ask({ type: "session" }, "u")).toBe(false);
+    keyRequest.mockRestore();
+    expect(await ask({ type: "session" }, "u")).toBe(true);
+    // The scope the request's actor builds names the caller: a key by its own id, a delegated token as delegated.
+    expect(searchAccessScopeFor({ type: "session" }, { orgId: "org1" })?.actor).toEqual({ type: "session" });
+    expect(searchAccessScopeFor({ type: "apiKey", apiKey: { keyId: "k-search", orgId: "org1", scopes: ["search:deep"] } }, { orgId: "org1" })?.actor)
+      .toEqual({ type: "apiKey", apiKeyId: "k-search", delegated: false });
+    expect(searchAccessScopeFor({ type: "apiKey", apiKey: { keyId: "tok", oauth: { clientId: "c" }, orgId: "org1", scopes: ["projects:manage"] } }, { orgId: "org1" })?.actor)
+      .toEqual({ type: "apiKey", apiKeyId: "tok", delegated: true });
+    expect(searchAccessScopeFor({ type: "apiKey", apiKey: { orgId: "org1", scopes: ["projects:manage"] } }, { orgId: "org1" })?.actor)
+      .toEqual({ type: "apiKey", apiKeyId: null, delegated: false });
     // Signed-in users: edit rights on this project.
     expect(await may(null, "u")).toBe(true);
     expect(await may(null, "editor")).toBe(true);
