@@ -140,7 +140,10 @@ to start; it never moves OCR to the worker host or to a hosted model instead. Se
   pinned in `worker/ocr-models.json`, and copies back the CLI's JSON result to `output` and the PNGs it wrote (bounded
   by `maxLongEdge`) to the image directory.
 - It must isolate every job in a fresh VM or microVM, with the requirements below. One job never sees another
-  job's files.
+  job's files. Organization membership alone does not establish equal project or API-key authorization; do not reuse
+  a VM across jobs on the basis of `tenantKey`.
+- `run(job, signal, context)` receives `tenantKey` (the run's organization) and `affinityKey` (the document) for
+  accounting and placement hints. Neither permits sharing a VM security boundary across jobs.
 - `maxSourceBytes` refuses larger inputs before any VM work; `timeoutMs(frames)` bounds one run's wall time;
   `assertConfigured()` throws when the image, models or credentials are missing, which stops the worker at start.
 - The host validates everything it gets back: the result against the shared OCR result schema, page numbers, sizes,
