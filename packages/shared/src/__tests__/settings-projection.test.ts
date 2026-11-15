@@ -7,6 +7,7 @@ it("intersects deployment, privacy and organization ceilings without exposing mo
   expect(rows.find(r => r.field === 'allowChinaProviders')).toMatchObject({ effective: false, status: 'locked' });
   expect(rows.find(r => r.field === 'search.chat.answerStyle')).toMatchObject({ origin: 'search-default' });
   expect(rows.some(r => /modelUri|baseUrl|decisionModel/.test(r.field))).toBe(false);
+  expect(rows.find(r => r.field === 'pipeline.embedding.task')).toMatchObject({ status: 'inactive' });
 });
 it("shows template locks and inactive chat preferences without treating future builds as corpus coverage", () => {
   const rows = projectSettingsProjection({ project: { ...base, templateKey: 'legal-contracts', pipeline: getProjectTemplate('legal-contracts')!.pipeline }, settings: { ...defaultProjectSearchSettings, chat: { ...defaultProjectSearchSettings.chat, enabled: false } }, searchStored: true, capabilities: { webEnabled: true, webChatEnabled: true, organizationAllowsChina: true } });

@@ -75,3 +75,28 @@ Mutations that queue work return a `job`:
 const { job } = await client.updateProject("legal", { embedding: { model: "…" } });
 if (job) for await (const event of client.streamJob(job.id)) console.log(event.event, event.job.status);
 ```
+
+## Coherent settings publication
+
+`GET /v1/projects/:projectId/settings-publication` reads the public project and search/chat settings under the config lock and returns opaque `revision.project` and `revision.search` preconditions. The search revision is `absent` before the first stored row. The endpoint requires edit access; a live server API key additionally needs `projects:manage` and the matching organization/project allowlist. Browser and delegated OAuth keys cannot use it.
+
+`POST` to that path publishes one sparse intent:
+
+```json
+{
+  "requestId": "617a1ce0-bf14-429b-bbc8-7f0c72c71562",
+  "expected": { "project": "opaque-from-get", "search": "absent" },
+  "project": { "pipeline": { "chunkOverlap": true }, "apply": "reindex" },
+  "search": { "chat": { "citations": true }, "retrievalDefaults": { "resultCount": 6 } }
+}
+```
+
+The server checks both revisions under the existing config lock. Pipeline, search/chat, admitted work, reservations, audit and actor-scoped retry receipt commit together or roll back. Retry an unchanged intent with the same request ID; changing its parameters requires a new ID. A stale project or search row returns 409, including a concurrent first search-row insertion. Existing independent preference writers also serialize with publication.
+
+Omitted fields retain their stored values; `false` remains explicit. Supported nullable search fields reset to inherited behavior with `null`. Arrays replace. `clearOutputSchema: true` explicitly removes the output schema; omission preserves it. Unknown keys and managed model/provider bindings are refused. The body is limited to 128 KiB. Existing estimates, billing and scope checks remain authoritative; this endpoint does not grant new execution authority. A deferred-mode change that queues work requires explicit `project.apply: "reindex"` consent.
+
+The snapshot includes safe effective-value explanations and bounded legacy-index coverage. Resolved values cannot reconstruct whether an old normalized setting was explicitly chosen or defaulted, so their origin is labeled `project-resolved`. Template locks, independent organization/key ceilings and unavailable/inactive preferences are explained without exporting managed bindings or secrets. Saving desired settings is not proof that existing documents have migrated.
+
+Normalization is part of vector generation identity and query-vector cache identity. Historical records without normalization cannot establish compatibility. Vector retrieval returns `index_rebuild_required` rather than reproducing an unknown space with current settings; keyword retrieval does not reproduce vectors. Use existing authorized document reprocessing, with an estimate and explicit confirmation, to rebuild bounded batches. Missing hashes are not backfilled by assuming the current recipe. A worker-written current-generation hash clears the rebuild-required condition for that document.
+
+Privacy/PII tightening over retained documents requires immediate artifact fencing. This publication interface explicitly refuses that transition until fencing is supported: ordinary migration fallback cannot authorize serving prohibited old artifacts. Full desired/building/serving lifecycle, policy purge/fencing, retained-extraction compatibility and playground workflows remain separate work.

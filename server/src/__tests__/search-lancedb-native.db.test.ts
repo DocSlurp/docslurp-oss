@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 import * as lancedb from "@lancedb/lancedb";
-import { normalizePipelineFeatures, resolveEmbeddingRoute, VectorNamespaceManager } from "@docslurp/shared";
+import { indexConfigHash, indexConfigOf, normalizePipelineFeatures, resolveEmbeddingRoute, VectorNamespaceManager } from "@docslurp/shared";
 import { encodeLanceChunkHydration, LANCE_HYDRATION_COLUMN_SPECS } from "@docslurp/shared/lancedb-hydration";
 import postgres from "postgres";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
@@ -17,7 +17,7 @@ const TEST_SEARCH_SCOPE = { orgId: "org1", projectIds: "org", modeCeiling: null 
  * table: native retrieval returns the same citations as the Postgres path
  * (hydration from LanceDB columns, Postgres only for rows without them and
  * for dedup copies), keyword search is BM25 top-k over the whole scope, a
- * warm search runs at most one SQL statement before it answers, and tables
+ * warm search includes one recipe read, one generation-compatibility summary and bounded hit checks; tables
  * without an FTS index fall back to Postgres FTS.
  */
 vi.mock("../lib/ai.js", async (original) => ({
@@ -94,8 +94,8 @@ beforeAll(async () => {
   await sql`insert into projects (id, org_id, user_id, name) values ('w', 'org1', 'u', 'Native')`;
   await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline) values ('run1', 'org1', 'u', 'w', 'bulk-upload', 'completed', 'completed', '{}')`;
   for (let d = 1; d <= DOCS; d += 1) {
-    await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status)
-      values (${`doc${d}`}, 'org1', 'u', 'w', 'run1', ${`doc${d}.pdf`}, 'application/pdf', ${`k${d}`}, 'completed')`;
+    await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, index_config_hash)
+      values (${`doc${d}`}, 'org1', 'u', 'w', 'run1', ${`doc${d}.pdf`}, 'application/pdf', ${`k${d}`}, 'completed', ${indexConfigHash(indexConfigOf(normalizePipelineFeatures(null)))})`;
     await sql`insert into vector_indexes (id, document_id, backend, bucket, path, embedding_model, dimension)
       values (${`vi${d}`}, ${`doc${d}`}, 'lancedb', 'b', 'p', ${route.model}, ${DIM})`;
     for (let c = 0; c < CHUNKS; c += 1) {
@@ -114,8 +114,8 @@ beforeAll(async () => {
     }
   }
   // A dedup copy of doc2: chunks in Postgres only, vectors owned by doc2.
-  await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, deduped_from_document_id)
-    values ('copy2', 'org1', 'u', 'w', 'run1', 'copy2.pdf', 'application/pdf', 'kc', 'completed', 'doc2')`;
+  await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, deduped_from_document_id, index_config_hash)
+    values ('copy2', 'org1', 'u', 'w', 'run1', 'copy2.pdf', 'application/pdf', 'kc', 'completed', 'doc2', ${indexConfigHash(indexConfigOf(normalizePipelineFeatures(null)))})`;
   await sql`insert into vector_indexes (id, document_id, backend, bucket, path, embedding_model, dimension)
     values ('vic', 'copy2', 'lancedb', 'b', 'p', ${route.model}, ${DIM})`;
   for (const chunk of chunks.filter((item) => item.documentId === "doc2")) {
@@ -257,7 +257,7 @@ describe("SEARCH_LANCEDB_NATIVE", () => {
     }
   });
 
-  it("answers a warm search with one SQL read plus chunk-id checks", { timeout: 30_000 }, async () => {
+  it("answers a warm search with a recipe read, compatibility check and chunk-id checks", { timeout: 30_000 }, async () => {
     const queryVector = near("doc5-2");
     // Original documents only: hits serving a dedup copy are hydrated from Postgres by design.
     const filters = { documentIds: ["doc1", "doc2", "doc3", "doc4", "doc5", "doc6"] };
@@ -272,9 +272,11 @@ describe("SEARCH_LANCEDB_NATIVE", () => {
     // The one: access, settings and pipeline (never cached).
     // Plus, per retrieval branch (vector, keyword; run in parallel), one primary-key check that the
     // LanceDB-hydrated hits' chunks still exist.
-    expect(reads.length).toBeLessThanOrEqual(3);
+    expect(reads.length).toBeLessThanOrEqual(4);
     expect(reads[0]).toMatch(/from projects w/);
-    for (const read of reads.slice(1)) expect(read).toMatch(/select id from document_chunks where id in/);
+    const compatibility = reads.slice(1).filter(read => /group by d.index_config_hash/.test(read));
+    expect(compatibility).toHaveLength(1);
+    for (const read of reads.slice(1).filter(read => !compatibility.includes(read))) expect(read).toMatch(/select id from document_chunks where id in/);
     expect(statements.some((statement) => /insert into search_sessions/.test(statement))).toBe(true);
   });
 

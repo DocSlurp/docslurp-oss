@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import postgres from "postgres";
 import * as lancedb from "@lancedb/lancedb";
-import { normalizePipelineFeatures, resolveEmbeddingRoute, VectorNamespaceManager } from "@docslurp/shared";
+import { indexConfigHash, indexConfigOf, normalizePipelineFeatures, resolveEmbeddingRoute, VectorNamespaceManager } from "@docslurp/shared";
 import { startMigratedPostgres } from "@docslurp/worker/testing";
 /** The explicit search access scope every search caller passes (search/access-scope.ts). */
 const TEST_SEARCH_SCOPE = { orgId: "rank-org", projectIds: "org", modeCeiling: null } as const;
@@ -55,6 +55,7 @@ beforeAll(async () => {
   await sql`insert into document_chunks (id, document_id, run_id, user_id, chunk_index, text, heading_path, token_estimate, page_number, metadata)
     values ('foreign-chunk', 'foreign-doc', 'foreign-run', 'rank-user', 0, 'Pump maintenance cobalt calibration', '{}', 10, 1, '{}'::jsonb)`;
   await sql`insert into vector_indexes (id, document_id, backend, bucket, path, embedding_model, dimension) values ('rank-index', 'rank-doc', 'lancedb', 'local', 'local/rank', ${model}, 3), ('foreign-index', 'foreign-doc', 'lancedb', 'local', 'local/foreign', ${model}, 3)`;
+  await sql`update documents set index_config_hash=${indexConfigHash(indexConfigOf(normalizePipelineFeatures(pipeline)))} where id in ('rank-doc','foreign-doc')`;
   const location = VectorNamespaceManager.getEmbeddingLocation(directory, 'rank-org', 'rank-ws', model, 3);
   const db = await lancedb.connect(location.uri);
   const table = await db.createTable(location.table, [

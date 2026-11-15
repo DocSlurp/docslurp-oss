@@ -38,6 +38,7 @@ export function projectSettingsProjection(input: {
   };
   if (!capabilities.webEnabled || !capabilities.webChatEnabled) constrain("pipeline.webTools", false, "unavailable", "Deployment disables web tools for chat");
   else if (!privacyModeAllowsHosted(project.pipeline.privacyMode)) constrain("pipeline.webTools", false, "unavailable", "Privacy policy prevents hosted web calls");
+  constrain("pipeline.embedding.task", project.pipeline.embedding.task, "inactive", "Task labels are metadata; current embedding adapters do not consume them to alter vectors");
   if (!project.pipeline.embed) for (const row of rows.filter(row => row.field.startsWith("pipeline.embedding."))) Object.assign(row, { status: "inactive", reason: "Embedding is disabled for new uploads" });
   if (!settings.chat.enabled) for (const row of rows.filter(row => row.field.startsWith("search.chat.") && row.field !== "search.chat.enabled")) Object.assign(row, { status: "inactive", reason: "Project chat is disabled" });
   rows.push({ field: "allowChinaProviders", requested: project.allowChinaProviders, effective: project.allowChinaProviders && capabilities.organizationAllowsChina, origin: "project-resolved", status: capabilities.organizationAllowsChina ? "active" : "locked", ...(capabilities.organizationAllowsChina ? {} : { reason: "Organization policy is a ceiling" }), effect: "Future provider calls; does not rewrite retained artifacts" });
