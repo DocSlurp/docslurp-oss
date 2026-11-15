@@ -57,7 +57,7 @@ it("measures the frozen matched local workload without provider calls",async()=>
         const rejoin=scenario==="reconnect"&&second===8;
         if(rejoin&&arm==="broker") await subscribe();
         const tick=performance.now();
-        if(arm==="broker") await broker.tick();
+        if(arm==="broker") while(!await broker.tick()) await new Promise(done=>setTimeout(done,2)); // a subscribe's own first-snapshot sweep may still be running
         else if(second===0||rejoin||changed||second-refresh>=10){
           for(const resource of resources){const data=await measured.project("load-owner",resource);for(let n=0;n<10;n++)deliver(resource,data);}
           refresh=second;
