@@ -147,3 +147,11 @@ it("malformed checkpoint page numbers refuse reuse before a provider call", asyn
   await expect(ocrDocument(input)).rejects.toThrow("Invalid OCR checkpoint page");
   expect(fake.jobs).toHaveLength(1);
 });
+
+it("binds auto language to its effective environment setting", async () => {
+  const { input, fake } = await fixture();
+  const first = { ...input, languageSetting: "auto", env: { ...input.env, DOCSLURP_OCR_LANGUAGE: "eng" } };
+  await ocrDocument(first);
+  await ocrDocument({ ...first, env: { ...first.env, DOCSLURP_OCR_LANGUAGE: "kor" } });
+  expect(fake.jobs).toHaveLength(2);
+});

@@ -5,6 +5,7 @@
  */
 import { baseOcrCheckpoint, type OcrCheckpointStorage } from "./checkpoint.js";
 import { ocrMaxLongEdge } from "./engine.js";
+import { effectiveOcrLanguageSetting } from "./languages.js";
 import { pinnedOcrModelEntries } from "./models.js";
 import { lstat, readFile } from "node:fs/promises";
 
@@ -92,7 +93,7 @@ export async function ocrDocument(input: OcrDocumentInput): Promise<OcrDocumentR
   const checkpoint = mode === "vm" && input.checkpointStorage && run ? await baseOcrCheckpoint({
     storage: input.checkpointStorage, state: input.state, scope: [run.orgId ?? run.userId, run.userId, run.id],
     documentId: input.documentId, stage: input.stage, source: input.source, signal: input.signal,
-    settings: { kind: input.kind, pages: input.pages ?? null, language: input.languageSetting ?? env.DOCSLURP_OCR_LANGUAGE ?? "auto",
+    settings: { kind: input.kind, pages: input.pages ?? null, language: effectiveOcrLanguageSetting(input.languageSetting, env),
       maxLongEdge: ocrMaxLongEdge(env), models: [...pinnedOcrModelEntries()], budget, hostedEscalation, pageReaderMode, keepFrames, rendition: input.rendition ?? null },
   }) : null;
   try {
