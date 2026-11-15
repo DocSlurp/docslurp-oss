@@ -16,6 +16,30 @@ class EstimatorTest(unittest.TestCase):
     def test_reports_its_profile_schema(self):
         self.assertEqual(self.estimator.info()["profileSchema"], 1)
 
+    def test_jsonl_header_close_releases_session(self):
+        stream = self.estimator.profile_jsonl(FIXTURES / "scan_plain.pdf")
+        self.assertEqual(json.loads(next(stream))["t"], "header")
+        stream.close()
+        records = [json.loads(line) for line in self.estimator.profile_jsonl(FIXTURES / "scan_plain.pdf")]
+        self.assertTrue(records[-1]["complete"])
+        self.assertEqual(records[-1]["deepMeasured"], 1)
+
+    def test_jsonl_cancellation_and_terminal_are_unambiguous(self):
+        cancel = threading.Event()
+        stream = self.estimator.profile_jsonl(FIXTURES / "scan_plain.pdf", cancel=cancel)
+        next(stream)
+        cancel.set()
+        self.assertFalse(json.loads(next(stream))["complete"])
+        stream.close()
+        cancel.clear()
+        records = []
+        for line in self.estimator.profile_jsonl(FIXTURES / "scan_plain.pdf", cancel=cancel):
+            record = json.loads(line)
+            records.append(record)
+            if record["t"] == "end":
+                cancel.set()
+        self.assertEqual(len([r for r in records if r["t"] == "end"]), 1)
+
     def test_profiles_files_on_disk_with_neutral_facts_only(self):
         scan = self.estimator.profile_path(FIXTURES / "scan_plain.pdf")
         text = self.estimator.profile_path(FIXTURES / "text_wrapped_with_photo.pdf")

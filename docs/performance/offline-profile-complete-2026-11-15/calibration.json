@@ -1,0 +1,256 @@
+{
+  "schema": "offline-profiler-cost-calibration@1",
+  "generatedAt": "2026-11-15T20:21:50.660Z",
+  "runtime": {
+    "t": "runtime",
+    "observedAt": "2026-11-15T20:20:30.220Z",
+    "node": "v24.22.2",
+    "cpu": "AMD EPYC 9655P 96-Core Processor",
+    "logicalCpusVisible": 1,
+    "memoryVisible": 2071932928,
+    "moduleSha256": "5f988e12dc2fac4213b238f7f43b3dcd1ae7e318dad9ca599e8df63a78cd9e2b",
+    "moduleBytes": 1407099,
+    "harnessSha256": "62b14e664727fde2a752d0d2af7d31bbefe7e6024a25276b31932b57ef4fe429",
+    "initMs": 11.830659000000004,
+    "repetitions": 3,
+    "options": {
+      "maxDeepPages": 1000
+    }
+  },
+  "rates": {
+    "cpuCores": 1,
+    "memoryGiB": 2,
+    "cpuUsdPerCoreSecond": 0.00003942,
+    "memoryUsdPerGiBSecond": 0.00000667,
+    "ocrUsdPerPage": 0.0015,
+    "tableWithOcrUsdPerPage": 0.015,
+    "checkedAt": "2026-11-15",
+    "computeSource": "https://modal.com/pricing",
+    "downstreamSource": "https://aws.amazon.com/textract/pricing/",
+    "downstreamRegion": "US West (Oregon)",
+    "downstreamTier": "first million pages per month; alternatives; no free-tier credits"
+  },
+  "estimatedAllocationUsdPerSecond": 0.000052759999999999996,
+  "documents": [
+    {
+      "id": "irs-tax-tables",
+      "kind": "table",
+      "pages": 28,
+      "validRuns": 3,
+      "failedRuns": 0,
+      "scope": "inventory-all-pages-and-attempt-selected-deep-pages",
+      "fullyMeasured": true,
+      "deepMeasuredPerRun": [
+        28,
+        28,
+        28
+      ],
+      "partialPerRun": [
+        0,
+        0,
+        0
+      ],
+      "medianSeconds": 0.746569735,
+      "pagesPerSecond": 37.504868851936514,
+      "pagesPerMinute": 2250.292131116191,
+      "observedSecondsRange": [
+        0.7431944819999999,
+        0.900943363
+      ],
+      "estimatedProfilerUsdPer1000InventoryPages": 0.0014067506863785714,
+      "observedCostRangeUsdPer1000InventoryPages": [
+        0.0014003907453685714,
+        0.0016976347082814285
+      ],
+      "estimatedProfilerUsdPerDocument": 0.0000393890192186,
+      "fullDeepUsdPer1000Pages": 0.0014067506863785714,
+      "nativeTextExtraction": {
+        "tool": "pdftotext -layout",
+        "validRuns": 3,
+        "qualityValidated": false,
+        "medianSeconds": 0.22559359399999995,
+        "pagesPerSecond": 124.11699952792102,
+        "estimatedUsdPer1000Pages": 0.00042508278640857126,
+        "outputBytes": [
+          319462,
+          319462,
+          319462
+        ]
+      },
+      "downstreamScenarios": {
+        "allPagesOcrOnlyUsd": 0.042,
+        "allPagesTablesIncludingOcrUsd": 0.42,
+        "ocrOnlyUsdPer1000Pages": 1.5,
+        "tablesIncludingOcrUsdPer1000Pages": 15,
+        "chartInterpretationUsd": null
+      }
+    },
+    {
+      "id": "census-population",
+      "kind": "table",
+      "pages": 62,
+      "validRuns": 3,
+      "failedRuns": 0,
+      "scope": "inventory-all-pages-and-attempt-selected-deep-pages",
+      "fullyMeasured": true,
+      "deepMeasuredPerRun": [
+        62,
+        62,
+        62
+      ],
+      "partialPerRun": [
+        0,
+        0,
+        0
+      ],
+      "medianSeconds": 0.583629019,
+      "pagesPerSecond": 106.2318664452838,
+      "pagesPerMinute": 6373.911986717028,
+      "observedSecondsRange": [
+        0.5798679059999995,
+        0.6100868290000001
+      ],
+      "estimatedProfilerUsdPer1000InventoryPages": 0.0004966494684264515,
+      "observedCostRangeUsdPer1000InventoryPages": [
+        0.000493448882589677,
+        0.0005191642112587098
+      ],
+      "estimatedProfilerUsdPerDocument": 0.00003079226704244,
+      "fullDeepUsdPer1000Pages": 0.0004966494684264515,
+      "nativeTextExtraction": {
+        "tool": "pdftotext -layout",
+        "validRuns": 3,
+        "qualityValidated": false,
+        "medianSeconds": 0.2262404040000006,
+        "pagesPerSecond": 274.0447723033585,
+        "estimatedUsdPer1000Pages": 0.0001925232857264521,
+        "outputBytes": [
+          653274,
+          653274,
+          653274
+        ]
+      },
+      "downstreamScenarios": {
+        "allPagesOcrOnlyUsd": 0.093,
+        "allPagesTablesIncludingOcrUsd": 0.9299999999999999,
+        "ocrOnlyUsdPer1000Pages": 1.5,
+        "tablesIncludingOcrUsdPer1000Pages": 15,
+        "chartInterpretationUsd": null
+      }
+    },
+    {
+      "id": "ti-tps54302",
+      "kind": "vector",
+      "pages": 32,
+      "validRuns": 3,
+      "failedRuns": 0,
+      "scope": "inventory-all-pages-and-attempt-selected-deep-pages",
+      "fullyMeasured": true,
+      "deepMeasuredPerRun": [
+        32,
+        32,
+        32
+      ],
+      "partialPerRun": [
+        0,
+        0,
+        0
+      ],
+      "medianSeconds": 0.22459795299999952,
+      "pagesPerSecond": 142.47681055223183,
+      "pagesPerMinute": 8548.60863313391,
+      "observedSecondsRange": [
+        0.22046324999999978,
+        0.2298649569999998
+      ],
+      "estimatedProfilerUsdPer1000InventoryPages": 0.0003703058750087492,
+      "observedCostRangeUsdPer1000InventoryPages": [
+        0.00036348878343749963,
+        0.0003789898478537496
+      ],
+      "estimatedProfilerUsdPerDocument": 0.000011849788000279973,
+      "fullDeepUsdPer1000Pages": 0.0003703058750087492,
+      "nativeTextExtraction": {
+        "tool": "pdftotext -layout",
+        "validRuns": 3,
+        "qualityValidated": false,
+        "medianSeconds": 0.08290482399999928,
+        "pagesPerSecond": 385.9847769533927,
+        "estimatedUsdPer1000Pages": 0.0001366893285699988,
+        "outputBytes": [
+          114246,
+          114246,
+          114246
+        ]
+      },
+      "downstreamScenarios": {
+        "allPagesOcrOnlyUsd": 0.048,
+        "allPagesTablesIncludingOcrUsd": 0.48,
+        "ocrOnlyUsdPer1000Pages": 1.5,
+        "tablesIncludingOcrUsdPer1000Pages": 15,
+        "chartInterpretationUsd": null
+      }
+    },
+    {
+      "id": "ti-bq25570",
+      "kind": "vector",
+      "pages": 46,
+      "validRuns": 3,
+      "failedRuns": 0,
+      "scope": "inventory-all-pages-and-attempt-selected-deep-pages",
+      "fullyMeasured": true,
+      "deepMeasuredPerRun": [
+        46,
+        46,
+        46
+      ],
+      "partialPerRun": [
+        0,
+        0,
+        0
+      ],
+      "medianSeconds": 0.264465913,
+      "pagesPerSecond": 173.9354591228549,
+      "pagesPerMinute": 10436.127547371294,
+      "observedSecondsRange": [
+        0.2583956189999999,
+        0.2653840440000004
+      ],
+      "estimatedProfilerUsdPer1000InventoryPages": 0.00030333090369304345,
+      "observedCostRangeUsdPer1000InventoryPages": [
+        0.00029636854040086943,
+        0.00030438396003130475
+      ],
+      "estimatedProfilerUsdPerDocument": 0.000013953221569879999,
+      "fullDeepUsdPer1000Pages": 0.00030333090369304345,
+      "nativeTextExtraction": {
+        "tool": "pdftotext -layout",
+        "validRuns": 3,
+        "qualityValidated": false,
+        "medianSeconds": 0.08922698800000034,
+        "pagesPerSecond": 515.5390877925838,
+        "estimatedUsdPer1000Pages": 0.00010233947580173953,
+        "outputBytes": [
+          214313,
+          214313,
+          214313
+        ]
+      },
+      "downstreamScenarios": {
+        "allPagesOcrOnlyUsd": 0.069,
+        "allPagesTablesIncludingOcrUsd": 0.69,
+        "ocrOnlyUsdPer1000Pages": 1.5,
+        "tablesIncludingOcrUsdPer1000Pages": 15,
+        "chartInterpretationUsd": null
+      }
+    }
+  ],
+  "caveats": [
+    "Compute uses requested allocation times measured wall time, not a provider invoice.",
+    "Per-1000-page values normalize these exact document shapes; they do not predict scaling or whole-file deep inspection beyond 1000 pages.",
+    "Observed ranges across three runs are not confidence intervals; first pass is not guaranteed disk-cold.",
+    "Startup, staging, output transfer, rendering, retries, idle time, storage, egress and orchestration are excluded from marginal profiler cost; lifecycle receipt reports whole VM allocation separately.",
+    "Downstream API prices are hypothetical alternatives, not measured DocSlurp routing, billing, extraction quality or latency. Table API includes OCR; do not add both prices.",
+    "No paid OCR/model calls were made. Vector-chart interpretation has no calibrated cost; missing evidence stays null."
+  ]
+}

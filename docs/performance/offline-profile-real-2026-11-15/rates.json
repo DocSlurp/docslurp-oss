@@ -1,0 +1,13 @@
+{
+  "cpuCores": 1,
+  "memoryGiB": 2,
+  "cpuUsdPerCoreSecond": 3.942e-05,
+  "memoryUsdPerGiBSecond": 6.67e-06,
+  "ocrUsdPerPage": 0.0015,
+  "tableWithOcrUsdPerPage": 0.015,
+  "checkedAt": "2026-11-15",
+  "computeSource": "https://modal.com/pricing",
+  "downstreamSource": "https://aws.amazon.com/textract/pricing/",
+  "downstreamRegion": "US West (Oregon)",
+  "downstreamTier": "first million pages per month; alternatives; no free-tier credits"
+}

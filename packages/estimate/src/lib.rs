@@ -12,6 +12,8 @@ pub mod abi;
 pub mod error;
 pub mod probe;
 pub mod rules;
+#[cfg(not(target_arch="wasm32"))]
+pub mod local;
 
 pub use error::{Error, ErrorCode};
 pub use probe::{probe, read_plan, FileMeta, FileProfile, OfficeProfile, PdfProfile, ProbeInput, ProbeKind, ReadPlan};
