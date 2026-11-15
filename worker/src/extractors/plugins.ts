@@ -270,6 +270,15 @@ export interface SandboxedOcrJob {
 /** What a sandboxed OCR run returns: the command result. The host reads and validates `job.output` itself. */
 export type SandboxedOcrResult = SandboxResult;
 
+/**
+ * Job ownership from the stage run context, for accounting and placement hints. Organization membership alone
+ * does not establish equal project/API-key access. Neither key authorizes VM reuse: each job gets a fresh VM.
+ */
+export interface SandboxedOcrRunContext {
+  tenantKey?: string;
+  affinityKey?: string;
+}
+
 export interface SandboxedOcrProvider {
   /** Stable id for telemetry and ledger metadata, chosen by the plugin. */
   id: string;
@@ -284,7 +293,7 @@ export interface SandboxedOcrProvider {
    * killed by its own resource limits), throw an error carrying `ocrRefused: true`: the page fails without a retry. Any
    * other throw (VM creation, capacity, a deadline, a dropped transfer) is treated as infrastructure and retried later.
    */
-  run(job: SandboxedOcrJob, signal?: AbortSignal): Promise<SandboxedOcrResult>;
+  run(job: SandboxedOcrJob, signal?: AbortSignal, context?: SandboxedOcrRunContext): Promise<SandboxedOcrResult>;
   /** Upper bound on one run's wall time for this many frames: the remote command budget. */
   timeoutMs(frames: number): number;
 }
