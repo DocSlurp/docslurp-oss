@@ -1,3 +1,4 @@
+import { assertTenantModelEndpointAllowed } from "@docslurp/shared";
 import { decodeDelimitedBytes, delimitedTableMarkdown } from "../lib/delimited-table.js";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -1321,6 +1322,7 @@ export function packEmbeddingBatches(chunks: readonly string[], maxInputs: numbe
 }
 
 function createRemoteEmbeddingModel(profile: EmbeddingProfile, config: Config) {
+  assertTenantModelEndpointAllowed(`llm://${profile.provider}/local`);
   switch (profile.provider) {
     case "deepinfra":
       if (profile.model !== "BAAI/bge-m3" || profile.dimensions !== 1024) throw new Error("DeepInfra BGE-M3 requires its native 1024 dimensions");

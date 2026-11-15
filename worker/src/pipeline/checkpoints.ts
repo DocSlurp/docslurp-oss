@@ -1,3 +1,4 @@
+import { cleanOcrCheckpoint } from "../ocr/checkpoint.js";
 import { trustedDocumentFailure } from "../lib/trusted-document-failure.js";
 import { disposePendingAssetLedger } from "../db/document-asset-ledger.js";
 import type { GeoFinalSource } from "../db/geo-final-source.js";
@@ -436,6 +437,9 @@ export async function runDocumentStage(
           }),
         );
       }
+      await cleanOcrCheckpoint(state, document.id, stageName).catch(error => {
+        console.error(`[ocr] checkpoint-cleanup-failed document=${document.id} stage=${stageName} error=${String(error)}`);
+      });
       return;
     } catch (caught) {
       // A teardown failure (thrown or latched) is the worker's, not the Document's: never retried

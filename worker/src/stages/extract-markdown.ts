@@ -1453,7 +1453,7 @@ export class ExtractMarkdownStage implements Stage {
       await authorizeOcrRead(state, document.id, batch.length, "pdf-batch");
       let result: Awaited<ReturnType<typeof ocrDocument>>;
       try {
-        result = await ocrDocument({
+        result = await ocrDocument({ checkpointStorage: this.storage,
           runner: this.runner, state, documentId: document.id, source: args.sourcePath, kind: "pdf", pages: batch,
           ...(args.ocrLanguage ? { languageSetting: args.ocrLanguage } : {}),
           hostedReader, stage: this.name, ...(signal ? { signal } : {}),
@@ -1933,7 +1933,7 @@ export class ExtractMarkdownStage implements Stage {
     const state = context.state;
     // The read starts a VM: authorized before it (cost cap, balance for its Rich page), not only after the frames are counted.
     await authorizeImageRead(state, context.documentId);
-    const result = await ocrDocument({
+    const result = await ocrDocument({ checkpointStorage: this.storage,
       runner: this.runner,
       state,
       documentId: context.documentId,

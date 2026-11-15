@@ -3,6 +3,10 @@
  * (ledger.ts), then the optional page reader (page-reader.ts) and the escalation reads (escalation.ts). In `hosted` mode, a stored image's bytes go to the hosted reader
  * as uploaded. Every refusal throws; the caller fails the page or document and never substitutes another reader.
  */
+import { baseOcrCheckpoint, type OcrCheckpointStorage } from "./checkpoint.js";
+import { ocrMaxLongEdge } from "./engine.js";
+import { effectiveOcrLanguageSetting } from "./languages.js";
+import { pinnedOcrModelEntries } from "./models.js";
 import { lstat, readFile } from "node:fs/promises";
 
 import type { WorkflowState } from "../pipeline/pipeline.js";
@@ -20,6 +24,7 @@ export interface OcrDocumentInput {
   runner: Pick<CommandRunner, "run" | "sandboxedOcrRead" | "localOcrRead">;
   /** The run state: its usage ledger, and its run (tenant scope and cost cap) for the page reader, which never reads without it. */
   state: Pick<WorkflowState, "usageLedger"> & { run?: WorkflowState["run"] };
+  checkpointStorage?: OcrCheckpointStorage;
   documentId: string;
   /** Stored file (private temp copy); never decoded on the host. */
   source: string;
@@ -84,8 +89,17 @@ export async function ocrDocument(input: OcrDocumentInput): Promise<OcrDocumentR
   const hostedEscalation = Boolean(input.hostedReader) && ocrEscalationEnabled(env);
   const keepFrames = ocrPageReaderKeepFrames(pageReaderMode);
   const budget = input.kind === "image" && input.frameBudget ? Math.max(1, Math.min(OCR_DEFAULT_MAX_FRAMES, await input.frameBudget(OCR_DEFAULT_MAX_FRAMES))) : null;
+  const run = input.state.run;
+  const checkpoint = mode === "vm" && input.checkpointStorage && run ? await baseOcrCheckpoint({
+    storage: input.checkpointStorage, state: input.state, scope: [run.orgId ?? run.userId, run.userId, run.id],
+    documentId: input.documentId, stage: input.stage, source: input.source, signal: input.signal,
+    settings: { kind: input.kind, pages: input.pages ?? null, language: effectiveOcrLanguageSetting(input.languageSetting, env),
+      maxLongEdge: ocrMaxLongEdge(env), models: [...pinnedOcrModelEntries()], budget, hostedEscalation, pageReaderMode, keepFrames, rendition: input.rendition ?? null },
+  }) : null;
   try {
-    outcome = await readWithOcr(input.runner, {
+    outcome = await checkpoint?.load() ?? null;
+    const reused = outcome !== null;
+    outcome ??= await readWithOcr(input.runner, {
       ...(budget !== null && budget < OCR_DEFAULT_MAX_FRAMES ? { maxFrames: budget } : {}),
       source: input.source,
       kind: input.kind,
@@ -108,9 +122,12 @@ export async function ocrDocument(input: OcrDocumentInput): Promise<OcrDocumentR
       throw imageTooManyFramesError(input.documentId);
     }
     await input.beforeCharging?.(outcome.pages.length);
+    if (!reused) await checkpoint?.save(outcome);
     // The recogniser's reads are billed first; an escalation read of the same page is the same Rich page (the ledger sums
     // readers per page), with its own provider cost.
-    const chargedPages = recordOcrReads(input.state.usageLedger, input.documentId, outcome, { stage: input.stage, kind: input.kind });
+    const chargedPages = recordOcrReads(input.state.usageLedger, input.documentId, outcome, {
+      stage: input.stage, kind: input.kind, replay: reused,
+    });
     // The page reader reads first, in its own VM; a page it read leaves escalation, the rest keep the recogniser's text.
     const pageReader = pageReaderMode === "off" ? null : await readOcrPagesWithConfiguredReader(outcome, {
       state: input.state, documentId: input.documentId, ...(input.signal ? { signal: input.signal } : {}),

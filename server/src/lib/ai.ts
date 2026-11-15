@@ -1,3 +1,4 @@
+import { assertTenantModelEndpointAllowed } from "@docslurp/shared";
 import { DEFAULT_CHAT_REASONING, type ChatReasoningLevel } from "@docslurp/shared/project-chat-models";
 import { assertProviderAllowed, authorizePrivateModelCall, createOpenRouterReasoningFetch, createOpenRouterRoutingFetch, createOpenRouterUsageCapture, createOpenRouterChargeTotal, createOpenRouterPromptCacheFetch, needsExplicitPromptCache, chatModelPromptAddendum, isPrivateModelUri, readProviderCharge, PRIVATE_MODEL_PROVIDER, resolveOpenRouterUsage, servedTextModel, regionFallbackUsageMetadata, resolveSupportedModelIdWithWarning, type PrivacyMode, type PrivateCallAuditScope, type ProviderTextUsage } from "@docslurp/shared";
 import { createHmac, randomBytes } from "node:crypto";
@@ -463,6 +464,7 @@ export async function embedOpenAiText(args: {
   signal?: AbortSignal;
   observability?: AiObservabilityContext;
 }): Promise<{ embedding: number[]; usage: EmbeddingUsage }> {
+  assertOpenAiEmbeddingDestination(args.baseURL);
   return withObservation(
     {
       name: "api.embedding.openai",
@@ -518,6 +520,7 @@ async function embedOpenAiCompatibleText(args: {
   provider: string;
   observability?: AiObservabilityContext;
 }): Promise<{ embedding: number[]; usage: EmbeddingUsage }> {
+  assertTenantModelEndpointAllowed(`llm://${args.provider}/local`);
   return withObservation(
     {
       name: "api.embedding.compatible",
@@ -529,7 +532,7 @@ async function embedOpenAiCompatibleText(args: {
     async () => {
       const provider = createOpenAI({
         fetch: instrumentFetch(args.provider, "embedding"),
-        apiKey: args.apiKey || "local",
+        apiKey: "local",
         baseURL: args.baseURL,
       });
       const result = await embed({
@@ -722,6 +725,7 @@ export async function embedConfiguredTexts(args: Omit<Parameters<typeof embedCon
     return { embeddings: result.embeddings, usage: { inputTokens: result.usage.tokens } };
   }
   if (args.provider === "openai") {
+    assertOpenAiEmbeddingDestination(args.baseURL);
     if (!args.apiKey) throw new Error("OPENAI_API_KEY is required for remote OpenAI embeddings");
     const provider = createOpenAI({ fetch: instrumentFetch("openai", "embedding"), apiKey: args.apiKey, ...(args.baseURL && args.baseURL !== DEFAULT_OPENAI_BASE_URL ? { baseURL: args.baseURL } : {}) });
     const result = await many(provider, args.model ?? SEARCH_EMBEDDING_MODEL, "api.embedding.openai.batch",
@@ -729,8 +733,9 @@ export async function embedConfiguredTexts(args: Omit<Parameters<typeof embedCon
     return { embeddings: result.embeddings, usage: { inputTokens: result.usage.tokens ?? 0 } };
   }
   if (["ollama", "vllm", "lmstudio"].includes(args.provider)) {
+    assertTenantModelEndpointAllowed(`llm://${args.provider}/local`);
     if (!args.baseURL || !args.model) throw new Error(`${args.provider} embeddings require a model and base URL`);
-    const provider = createOpenAI({ fetch: instrumentFetch(args.provider, "embedding"), apiKey: args.apiKey || "local", baseURL: args.baseURL });
+    const provider = createOpenAI({ fetch: instrumentFetch(args.provider, "embedding"), apiKey: "local", baseURL: args.baseURL });
     const result = await many(provider, args.model, "api.embedding.compatible.batch",
       args.provider === "vllm" && typeof args.requestedDimensions === "number" ? { providerOptions: { openai: { dimensions: args.requestedDimensions } } } : {});
     return { embeddings: result.embeddings.map((vector) => fitEmbeddingDimensions(vector, args.dimensions, args.normalize)), usage: { inputTokens: result.usage.tokens ?? 0 } };
@@ -903,4 +908,10 @@ function readEmbeddingVector(output: {
 function estimateTokens(value: string): number {
   const words = value.trim() ? value.trim().split(/\s+/).length : 0;
   return words === 0 ? 0 : Math.floor(words * 1.3);
+}
+
+/** A caller-supplied route may not move the platform credential. */
+export function assertOpenAiEmbeddingDestination(baseURL?: string): void {
+  const configured = (process.env.OPENAI_BASE_URL || DEFAULT_OPENAI_BASE_URL).replace(/\/+$/, "");
+  if (baseURL && baseURL.replace(/\/+$/, "") !== configured) throw new Error("OpenAI embedding destination is not operator configured");
 }
