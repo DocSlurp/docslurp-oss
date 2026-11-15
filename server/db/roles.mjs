@@ -131,6 +131,8 @@ export const WORKER_TABLES = Object.freeze({
   // Route tiers (0136): the worker reads current observations to rank vision hosts and records served latency.
   provider_endpoint_observations: { privileges: ["select", "insert"], evidence: "server/src/services/provider-observations.ts recordServedLatency (traffic rows); tier selection" },
   provider_endpoint_current: { privileges: ["select"], evidence: "server/src/services/provider-observations.ts readProviderObservations (view)" },
+  compute_price_observations: { privileges: ["select"], evidence: "operator-owned compute prices; runtime lookup only" },
+  compute_calibration_observations: { privileges: ["select", "insert"], evidence: "append-only operational compute measurements" },
 });
 
 /** Relations the worker must not touch, and why. */
