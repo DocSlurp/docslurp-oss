@@ -104,6 +104,8 @@ test("typed, nested and destructured aliases report unsupported gates", () => {
     'let env, next; env = process.env; next = env; next?.OTHER_DATABASE_URL;',
     'let url; ({["OTHER_DATABASE_URL"]: url} = process.env);',
     'let env; ({env} = process); env?.OTHER_DATABASE_URL;',
+    'import process from "node:process"; process.env.OTHER_DATABASE_URL;',
+    'import {env as environment} from "node:process"; environment?.OTHER_DATABASE_URL;',
     'let url; ({env: {["OTHER_DATABASE_URL"]: url}} = process);',
   ]) {
     const entry = {file: "negative.test.ts", ...classifyTestSource(source)};

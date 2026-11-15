@@ -112,6 +112,14 @@ export function environmentReads(source) {
     if (!changed) final = true;
     changed = false;
     const visit = (node) => {
+      if (ts.isImportDeclaration(node) && ts.isStringLiteralLike(node.moduleSpecifier) && ["process", "node:process"].includes(node.moduleSpecifier.text)) {
+        const clause = node.importClause;
+        if (clause?.name) bind(clause.name, ["process"]);
+        if (clause?.namedBindings) {
+          if (ts.isNamespaceImport(clause.namedBindings)) bind(clause.namedBindings.name, ["process"]);
+          else for (const item of clause.namedBindings.elements) bind(item.name, ["process", (item.propertyName ?? item.name).text]);
+        }
+      }
       if (ts.isVariableDeclaration(node)) {
         bind(node.name, resolve(node.initializer));
         if (ts.isIdentifier(node.name)) {
