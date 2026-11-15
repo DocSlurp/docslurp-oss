@@ -177,6 +177,8 @@ const SUMMARY_TREE_BLOCKED_REASON: Record<string, NonNullable<JobStatus["reason"
   balance: "capacity",
   credits: "credits",
   policy: "policy",
+  // The deployment has no price for the tree: nothing the caller can change.
+  unpriced: "unavailable",
 };
 
 function jobFromSummaryTreeRow(row: SummaryTreeJobRow, env: Record<string, string | undefined> = process.env): JobStatusWithProgress {

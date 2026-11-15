@@ -10,15 +10,21 @@ import {
   normalizePipelineFeatures,
   PUBLIC_ERROR_MESSAGES,
   resolveEmbeddingRoute,
+  SUMMARY_TREE_BACKFILL_CAP_TOO_HIGH_CODE,
+  SUMMARY_TREE_BACKFILL_COST_CEILING_ENV,
   SUMMARY_TREE_BUILD_ENV_FLAG,
   SUMMARY_TREE_BUILD_STALE_MS,
   SUMMARY_TREE_BUILD_UNAVAILABLE_CODE,
   SUMMARY_TREE_JOB_NOTES,
   SUMMARY_TREE_REQUIRES_VECTORS_CODE,
   SUMMARY_TREE_REQUIRES_VECTORS_MESSAGE,
+  SUMMARY_TREE_UNPRICED_CODE,
+  SUMMARY_TREE_UNPRICED_MESSAGE,
+  summaryTreeBackfillCostCeilingCents,
   summaryTreeBuildAvailable,
   summaryTreeBuildEstimateSchema,
   summaryTreeEnabled,
+  summaryTreeUnitPrice,
   summaryTreeVectorProblem,
   type CostEstimate,
   type PipelineFeatures,
@@ -94,7 +100,8 @@ const JOB_NOTES: readonly string[] = Object.values(SUMMARY_TREE_JOB_NOTES);
 export function summaryTreeJobPublicError(status: string, stored: string | null): string | null {
   if (!stored) return null;
   if (status === "cancelled") return JOB_NOTES.includes(stored) ? stored : null;
-  if (status === "failed") return PUBLIC_ERROR_MESSAGES.summaryTreeBackfillFailed;
+  // A job the worker ended on purpose (parked too long) says so; any other failure text stays internal.
+  if (status === "failed") return stored === SUMMARY_TREE_JOB_NOTES.parkedTooLong ? stored : PUBLIC_ERROR_MESSAGES.summaryTreeBackfillFailed;
   return null;
 }
 
@@ -124,6 +131,7 @@ export function mapSummaryTreeJob(row: JobRow, now = Date.now()): SummaryTreeJob
     inputTokens: Number(row.input_tokens),
     outputTokens: Number(row.output_tokens),
     costCents: Number(row.cost_cents),
+    costBasis: estimate?.costBasis ?? "provider",
     etaSeconds,
     error: summaryTreeJobPublicError(row.status, row.error),
     cancelRequested: row.cancel_requested_at !== null,
@@ -134,14 +142,20 @@ export function mapSummaryTreeJob(row: JobRow, now = Date.now()): SummaryTreeJob
   };
 }
 
-/** The estimate in the shared shape every job reports. Credits are cents, as for the other background jobs. */
+/**
+ * The estimate in the shared shape every job reports. Credits are cents, as for the other background jobs, and are
+ * what the organization is billed: one summary tree unit per expected model call (`costBasis: "billed"`). An estimate
+ * on the model's own cost is never shown as credits; where billing is enforced such an estimate can only be one stored
+ * before the deployment priced the tree, and it reports no credits to bill.
+ */
 export function costEstimateFromSummaryTree(estimate: SummaryTreeBuildEstimate, env: Env = process.env): CostEstimate {
   const billing = isBillingEnforced(env) ? "enforced" : "disabled";
+  const billed = estimate.costBasis === "billed";
   return costEstimateSchema.parse({
     pages: estimate.pages,
     documents: estimate.documentsToBuild,
     billing,
-    credits: billing === "disabled" ? null : { low: estimate.costCentsLow, high: estimate.costCentsHigh },
+    credits: billing === "disabled" ? null : { low: billed ? estimate.costCentsLow : 0, high: billed ? estimate.costCentsHigh : 0 },
     seconds: { low: estimate.secondsLow, high: estimate.secondsHigh },
     basis: `Summary tree, ${estimate.nodes} section summaries over ${estimate.leaves} passages in ${estimate.documentsToBuild} long documents; ${estimate.documents - estimate.documentsToBuild} shorter documents get none (${estimate.basis} timings)`,
   });
@@ -240,10 +254,15 @@ async function documentsToBackfill(project: ProjectRecord, pipeline: PipelineFea
 /** One computation of what a backfill covers and costs; the estimate route, the status and the start all use it. */
 async function planBackfill(project: ProjectRecord, env: Env): Promise<SummaryTreeBuildEstimate> {
   const pipeline = normalizePipelineFeatures(project.pipeline);
+  const price = summaryTreeUnitPrice(env);
+  // Never priced from a default: a deployment that charges and has no price for the unit has no estimate.
+  if (price.billing === "unpriced") throw new SummaryTreeJobError(SUMMARY_TREE_UNPRICED_MESSAGE, 400, SUMMARY_TREE_UNPRICED_CODE);
   const documents = await documentsToBackfill(project, pipeline);
   return estimateSummaryTreeBuild({
     documents: documents.map((document) => ({ leaves: document.leaves, leafTokens: document.leaf_tokens, pages: document.pages })),
     pricing: resolveApiAiUsagePricing(),
+    // Where the deployment charges: the billed credits of the expected calls, the basis the job's cap is counted in.
+    unitCredits: price.billing === "active" ? price.credits : null,
     concurrency: workerConcurrency(env),
     calibration: await calibrationFor(project),
   });
@@ -257,6 +276,10 @@ function assertBuildable(project: ProjectRecord, env: Env): void {
   if (!summaryTreeBuildAvailable(env)) {
     console.warn(`[summary-tree] refused a backfill project=${project.id}: ${SUMMARY_TREE_BUILD_ENV_FLAG} is off`);
     throw new SummaryTreeJobError(SUMMARY_TREE_UNAVAILABLE_MESSAGE, 400, SUMMARY_TREE_BUILD_UNAVAILABLE_CODE);
+  }
+  if (summaryTreeUnitPrice(env).billing === "unpriced") {
+    console.warn(`[summary-tree] refused a backfill project=${project.id}: the pricing provider has no price for the summary tree unit`);
+    throw new SummaryTreeJobError(SUMMARY_TREE_UNPRICED_MESSAGE, 400, SUMMARY_TREE_UNPRICED_CODE);
   }
 }
 
@@ -273,11 +296,56 @@ async function jobRows(project: ProjectRecord) {
   return { active: active[0] ? mapSummaryTreeJob(active[0]) : null, last: last[0] ? mapSummaryTreeJob(last[0]) : null };
 }
 
-/** What a job started now would cover and cost, plus the active and the last job. */
+/**
+ * The status read's estimate is kept this long per project: the plan is one aggregate over the chunks of every
+ * document that needs a tree, and any member or read key of the project may ask for the status as often as it likes.
+ * The estimate route and a job's start always plan afresh.
+ */
+export const SUMMARY_TREE_BACKFILL_STATUS_ESTIMATE_TTL_MS = 60_000;
+const STATUS_ESTIMATE_CACHE_MAX = 500;
+const statusEstimates = new Map<string, { key: string; at: number; estimate: Promise<SummaryTreeBuildEstimate | null> }>();
+
+/** Tests: forget the cached status estimates. */
+export function resetSummaryTreeBackfillEstimateCache(): void {
+  statusEstimates.clear();
+}
+
+/**
+ * The estimate of the status read: planned at most once per project every `SUMMARY_TREE_BACKFILL_STATUS_ESTIMATE_TTL_MS`
+ * (concurrent readers share one computation), and again at once when the project's pipeline or the unit's price
+ * changed. Null where the deployment charges for work but has no price for the tree: there is nothing to quote.
+ */
+async function statusEstimate(project: ProjectRecord, env: Env, now = Date.now()): Promise<SummaryTreeBuildEstimate | null> {
+  const price = summaryTreeUnitPrice(env);
+  if (price.billing === "unpriced") return null;
+  const pipeline = normalizePipelineFeatures(project.pipeline);
+  const route = resolveEmbeddingRoute(pipeline.embedding);
+  const key = `${project.orgId}|${route.model}|${route.dimensions}|${price.billing}|${price.credits}`;
+  const cached = statusEstimates.get(project.id);
+  if (cached && cached.key === key && now - cached.at < SUMMARY_TREE_BACKFILL_STATUS_ESTIMATE_TTL_MS) return await cached.estimate;
+  const estimate = planBackfill(project, env);
+  const entry = { key, at: now, estimate };
+  statusEstimates.delete(project.id);
+  statusEstimates.set(project.id, entry);
+  // Bounded: the oldest entries go first (a Map keeps insertion order).
+  while (statusEstimates.size > STATUS_ESTIMATE_CACHE_MAX) statusEstimates.delete(statusEstimates.keys().next().value!);
+  try {
+    return await estimate;
+  } catch (error) {
+    // A failed plan is not kept.
+    if (statusEstimates.get(project.id) === entry) statusEstimates.delete(project.id);
+    throw error;
+  }
+}
+
+/**
+ * What a job started now would cover and cost (a recent estimate, see `statusEstimate`), plus the active and the last
+ * job. The estimate is null on a deployment that has no price for the tree.
+ */
 export async function getProjectSummaryTreeBackfill(projectRef: string, userId: string, env: Env = process.env): Promise<ProjectSummaryTreeBackfill> {
   const project = await requireProject(projectRef, userId, false);
   const jobs = await jobRows(project);
-  return { projectId: project.id, estimate: await planBackfill(project, env), activeJob: jobs.active, lastJob: jobs.last };
+  return { projectId: project.id, estimate: await statusEstimate(project, env), activeJob: jobs.active, lastJob: jobs.last };
 }
 
 /** The estimate of a backfill in the shared estimate shape (the started job's `job.estimate` is the same value). */
@@ -299,6 +367,12 @@ export async function startSummaryTreeBackfill(
 ): Promise<SummaryTreeJob> {
   const project = await requireProject(projectRef, userId, true);
   assertBuildable(project, env);
+  // The operator's ceiling on one job's cap, whatever the caller asks for.
+  const ceiling = summaryTreeBackfillCostCeilingCents(env);
+  if (input.maxCostCents > ceiling) {
+    console.warn(`[summary-tree] refused a backfill project=${project.id}: cap above ${SUMMARY_TREE_BACKFILL_COST_CEILING_ENV}`);
+    throw new SummaryTreeJobError(`maxCostCents is above this deployment's limit of ${ceiling} cents for one job; start another job after this one stops at its cap`, 400, SUMMARY_TREE_BACKFILL_CAP_TOO_HIGH_CODE);
+  }
   // Throws SpendBlockedError (402) when the organization may not start paid work.
   await assertCanSpend(project.orgId, project.id);
   const estimate = await planBackfill(project, env);
@@ -312,6 +386,7 @@ export async function startSummaryTreeBackfill(
       )
       returning *
     `;
+    statusEstimates.delete(project.id);
     return mapSummaryTreeJob(row!);
   } catch (error) {
     if (error && typeof error === "object" && "code" in error && error.code === "23505") {

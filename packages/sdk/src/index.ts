@@ -122,6 +122,11 @@ export type SummaryTreeBuildEstimate = {
   documentsToBuild: number;
   pages: number; leaves: number; nodes: number; modelCalls: number; inputTokens: number; outputTokens: number;
   costCents: number; costCentsLow: number; costCentsHigh: number;
+  /**
+   * What the cost figures (and the job's `maxCostCents` cap) count. `billed`: credits billed to the organization, one
+   * summary tree unit per summary model call. `provider`: the model's own cost, on a deployment that does not charge.
+   */
+  costBasis: "billed" | "provider";
   seconds: number; secondsLow: number; secondsHigh: number;
   basis: "observed" | "default";
 };
@@ -131,13 +136,16 @@ export type SummaryTreeJob = {
   id: string;
   projectId: string;
   status: "queued" | "running" | "blocked" | "completed" | "failed" | "cancelled";
-  /** While `blocked`: the deployment paused building, the model provider cannot take more work, the organization may not spend, or the project's policy does not allow the summary model. */
-  blockedReason: "build-off" | "balance" | "credits" | "policy" | null;
+  /** While `blocked`: the deployment paused building, the model provider cannot take more work, the organization may not spend, the project's policy does not allow the summary model, or the deployment has no price for the tree (`unpriced`). */
+  blockedReason: "build-off" | "balance" | "credits" | "policy" | "unpriced" | null;
   estimate: SummaryTreeBuildEstimate | null;
   /** The cap the job was started with, in cents. */
   maxCostCents: number;
   documentsTotal: number; documentsReady: number; documentsSkipped: number; documentsPartial: number;
-  nodesBuilt: number; modelCalls: number; inputTokens: number; outputTokens: number; costCents: number;
+  nodesBuilt: number; modelCalls: number; inputTokens: number; outputTokens: number;
+  /** What counted against `maxCostCents` so far, on `costBasis`. */
+  costCents: number;
+  costBasis: "billed" | "provider";
   etaSeconds: number | null;
   error: string | null;
   cancelRequested: boolean;
@@ -147,7 +155,8 @@ export type SummaryTreeJob = {
 /** `getSummaryTreeBackfill`: what a job started now would cover, the active job and the last finished one. */
 export type ProjectSummaryTreeBackfill = {
   projectId: string;
-  estimate: SummaryTreeBuildEstimate;
+  /** A recent estimate (refreshed about once a minute). Null on a deployment that has no price for the tree. */
+  estimate: SummaryTreeBuildEstimate | null;
   activeJob: SummaryTreeJob | null;
   lastJob: SummaryTreeJob | null;
 };

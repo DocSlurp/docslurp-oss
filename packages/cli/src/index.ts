@@ -820,7 +820,7 @@ async function startWork(pathname: string, body: unknown, flags: Record<string, 
 }
 
 type SummaryTreeJobView = {
-  id: string; status: string; blockedReason: string | null; maxCostCents: number; costCents: number;
+  id: string; status: string; blockedReason: string | null; maxCostCents: number; costCents: number; costBasis?: "billed" | "provider";
   documentsTotal: number; documentsReady: number; documentsSkipped: number; documentsPartial: number;
   nodesBuilt: number; modelCalls: number; error: string | null; job?: JobStatus;
 };
@@ -830,7 +830,7 @@ function printSummaryTreeJob(job: SummaryTreeJobView): void {
   console.log(`Job ${job.id}: summary-tree-backfill ${job.status}${job.blockedReason ? ` (${job.blockedReason})` : ""}`);
   console.log(`Documents: ${done} of ${job.documentsTotal} (${job.documentsReady} built, ${job.documentsSkipped} need no tree, ${job.documentsPartial} incomplete)`);
   console.log(`Summaries: ${job.nodesBuilt} sections, ${job.modelCalls} model calls`);
-  console.log(`Spend:     ${job.costCents.toFixed(2)} of ${job.maxCostCents.toFixed(2)} cents (cap)`);
+  console.log(`Spend:     ${job.costCents.toFixed(2)} of ${job.maxCostCents.toFixed(2)} cents (cap${job.costBasis === "billed" ? ", billed credits" : job.costBasis === "provider" ? ", model cost" : ""})`);
   if (job.error) console.log(`Note:      ${job.error}`);
 }
 
@@ -869,13 +869,14 @@ async function summaryTreeCommand(action: string | undefined, jobId: string | un
     return;
   }
   if (action === "status") {
-    const status = await read(base) as { estimate: { documents: number; documentsToBuild: number; nodes: number }; activeJob: SummaryTreeJobView | null; lastJob: SummaryTreeJobView | null } | null;
+    const status = await read(base) as { estimate: { documents: number; documentsToBuild: number; nodes: number } | null; activeJob: SummaryTreeJobView | null; lastJob: SummaryTreeJobView | null } | null;
     if (!status) return;
     if (flags.json === true) {
       console.log(JSON.stringify(status, null, 2));
       return;
     }
-    console.log(`Without a tree: ${status.estimate.documents} documents (${status.estimate.documentsToBuild} long enough to get one, about ${status.estimate.nodes} section summaries)`);
+    if (status.estimate) console.log(`Without a tree: ${status.estimate.documents} documents (${status.estimate.documentsToBuild} long enough to get one, about ${status.estimate.nodes} section summaries)`);
+    else console.log("No estimate: this deployment has no price for the summary tree.");
     if (status.activeJob) printSummaryTreeJob(status.activeJob);
     else if (status.lastJob) printSummaryTreeJob(status.lastJob);
     else console.log("No backfill has run for this project.");

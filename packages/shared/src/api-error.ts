@@ -2,7 +2,7 @@ import { SPEED_BOOST_UNAVAILABLE_MESSAGE } from "./project-chat-models.js";
 import { z } from "zod";
 import { PUBLIC_ERROR_MESSAGES } from "./public-errors.js";
 import { PARSE_SOURCE_RESCAN_MESSAGE } from "./parse-source-decision.js";
-import { SUMMARY_TREE_REQUIRES_VECTORS_MESSAGE, SUMMARY_TREE_SUMMARIZE_LOCKED_MESSAGE } from "./summary-tree.js";
+import { SUMMARY_TREE_REQUIRES_VECTORS_MESSAGE, SUMMARY_TREE_SUMMARIZE_LOCKED_MESSAGE, SUMMARY_TREE_UNPRICED_MESSAGE } from "./summary-tree.js";
 
 /**
  * The one refusal for work that needs edit access to the project: reprocessing, re-indexing, full index, figure resume,
@@ -85,6 +85,8 @@ export const API_ERROR_CODES = [
   "summary_tree_unavailable",
   "summary_tree_requires_vectors",
   "summary_tree_summarize_locked",
+  "summary_tree_unpriced",
+  "summary_tree_backfill_cap_too_high",
   "chat_deadline_exceeded",
   "chat_tool_failed",
   "chat_capacity_unavailable",
@@ -196,6 +198,8 @@ export const API_ERROR_PUBLIC_MESSAGES: Record<ApiErrorCode, string> = {
   summary_tree_unavailable: "The summary tree isn’t available on this deployment.",
   summary_tree_requires_vectors: SUMMARY_TREE_REQUIRES_VECTORS_MESSAGE,
   summary_tree_summarize_locked: SUMMARY_TREE_SUMMARIZE_LOCKED_MESSAGE,
+  summary_tree_unpriced: SUMMARY_TREE_UNPRICED_MESSAGE,
+  summary_tree_backfill_cap_too_high: "That cost cap is above this deployment’s limit for one summary tree backfill. Start with a lower cap; another job continues where this one stops.",
   chat_deadline_exceeded: PUBLIC_ERROR_MESSAGES.chatDeadline,
   chat_tool_failed: PUBLIC_ERROR_MESSAGES.chatToolFailed,
   chat_capacity_unavailable: PUBLIC_ERROR_MESSAGES.chatCapacityUnavailable,

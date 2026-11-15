@@ -3,6 +3,9 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 
 import {
   defaultPipelineFeatures,
+  DISTINCT_TEST_PRICING,
+  installTestPricing,
+  resetPricingProviderForTests,
   projectStateSchema,
   projectSummaryTreeStateSchema,
   SUMMARY_TREE_CONSTANTS,
@@ -55,8 +58,12 @@ afterAll(async () => {
   await stop?.();
 });
 
+/** A deployment that charges for work and prices the summary tree unit (an arbitrary test price). */
+const priced = () => installTestPricing({ ...DISTINCT_TEST_PRICING, summaryTreeCallCredits: () => 0.75 });
+
 beforeEach(async () => {
   vi.spyOn(console, "warn").mockImplementation(() => undefined);
+  priced();
   await sql`delete from projects`;
   await sql`delete from document_cleanup_queue`;
   await sql`delete from storage_cleanup_queue`;
@@ -94,9 +101,37 @@ describe("summary tree setting", () => {
     expect((await projects.getProject("ws", "owner"))!.pipeline.summaryTree).toEqual({ enabled: false });
   });
 
+  it("refuses to enable on a deployment that charges for work but has no price for the tree", async () => {
+    // A pricing provider without a price for the tree's unit; billing enforced with no provider at all; a provider whose
+    // price is not a usable number. None falls back to a default price, and none enables.
+    const unpriced: Array<[() => unknown, Record<string, string>]> = [
+      [() => installTestPricing(DISTINCT_TEST_PRICING), BUILD_ONLY],
+      [() => resetPricingProviderForTests(), { ...BUILD_ONLY, STRIPE_SECRET_KEY: "sk_test_x" }],
+      [() => resetPricingProviderForTests(), { ...BUILD_ONLY, DOCSLURP_BILL_INGEST: "true" }],
+      [() => installTestPricing({ ...DISTINCT_TEST_PRICING, summaryTreeCallCredits: () => 0 }), BUILD_ONLY],
+      [() => installTestPricing({ ...DISTINCT_TEST_PRICING, summaryTreeCallCredits: () => Number.NaN }), BUILD_ONLY],
+      [() => installTestPricing({ ...DISTINCT_TEST_PRICING, summaryTreeCallCredits: () => -1 }), BUILD_ONLY],
+      [() => installTestPricing({ ...DISTINCT_TEST_PRICING, summaryTreeCallCredits: () => { throw new Error("no price"); } }), BUILD_ONLY],
+    ];
+    for (const [install, env] of unpriced) {
+      install();
+      await expect(tree.updateProjectSummaryTree("ws", "owner", { enabled: true }, env))
+        .rejects.toMatchObject({ status: 400, code: "summary_tree_unpriced" });
+      expect(await tree.getProjectSummaryTree("ws", "owner", env)).toMatchObject({ enabled: false, buildAvailable: true, buildPriced: false });
+    }
+    expect((await stored()).tree ?? { enabled: false }).toEqual({ enabled: false });
+
+    // A deployment that does not charge at all (self-hosted: no pricing provider, no billing) keeps the feature.
+    resetPricingProviderForTests();
+    expect(await tree.updateProjectSummaryTree("ws", "owner", { enabled: true }, BUILD_ONLY)).toMatchObject({ enabled: true, buildPriced: true });
+    // Turning it off is allowed whatever the price says.
+    installTestPricing(DISTINCT_TEST_PRICING);
+    expect(await tree.updateProjectSummaryTree("ws", "owner", { enabled: false }, BUILD_ONLY)).toMatchObject({ enabled: false, buildPriced: false });
+  });
+
   it("enables through its own endpoint, turns summaries on, and queues nothing", async () => {
     const state = await tree.updateProjectSummaryTree("ws", "owner", { enabled: true }, BUILD_ONLY);
-    expect(state).toMatchObject({ enabled: true, buildAvailable: true, serveAvailable: false, status: "ready" });
+    expect(state).toMatchObject({ enabled: true, buildAvailable: true, buildPriced: true, serveAvailable: false, status: "ready" });
     expect(await stored()).toEqual({ tree: { enabled: true }, summarize: true });
     expect(await sql`select count(*)::int as count from project_runs`).toEqual([{ count: 0 }]);
     expect(await sql`select count(*)::int as count from document_summary_trees`).toEqual([{ count: 0 }]);

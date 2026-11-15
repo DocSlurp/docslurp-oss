@@ -5,6 +5,9 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 import {
   costEstimateSchema,
   defaultPipelineFeatures,
+  DISTINCT_TEST_PRICING,
+  installTestPricing,
+  resetPricingProviderForTests,
   jobStatusSchema,
   projectSummaryTreeBackfillSchema,
   resolveEmbeddingRoute,
@@ -41,6 +44,7 @@ let stop: () => Promise<void>;
 let sql: postgres.Sql<Record<string, unknown>>;
 let treeRoutes: typeof import("../routes/project-summary-tree.js").projectSummaryTreeRoutes;
 let jobsRoutes: typeof import("../routes/jobs.js").jobsRoutes;
+let treeJobs: typeof import("../services/project-summary-tree-jobs.js");
 let apiKeys: typeof import("../services/api-keys.js");
 let apiKeyAuth: typeof import("../middleware/api-key-auth.js").apiKeyAuth;
 
@@ -62,6 +66,7 @@ beforeAll(async () => {
   await sql`insert into org_memberships(org_id, user_id, role) values ('o1', 'u1', 'owner'), ('o2', 'u2', 'owner')`;
   ({ projectSummaryTreeRoutes: treeRoutes } = await import("../routes/project-summary-tree.js"));
   ({ jobsRoutes } = await import("../routes/jobs.js"));
+  treeJobs = await import("../services/project-summary-tree-jobs.js");
   apiKeys = await import("../services/api-keys.js");
   ({ apiKeyAuth } = await import("../middleware/api-key-auth.js"));
 }, 180_000);
@@ -96,9 +101,17 @@ async function seedDocument(projectId: string, orgId: string, userId: string, id
     from generate_series(0, ${chunks - 1}) as n`;
 }
 
+/** An arbitrary test price for the summary tree unit: no deployment's price. */
+const UNIT = 0.75;
+/** A deployment that charges for work and prices the tree's unit: the default of these tests. */
+const priced = () => installTestPricing({ ...DISTINCT_TEST_PRICING, summaryTreeCallCredits: () => UNIT });
+
 async function seed() {
   spend.calls.length = 0;
   spend.blocked = false;
+  priced();
+  treeJobs.resetSummaryTreeBackfillEstimateCache();
+  vi.unstubAllEnvs();
   vi.stubEnv("DOCSLURP_SUMMARY_TREE_BUILD", "on");
   await sql`delete from summary_tree_jobs`;
   await sql`delete from projects`;
@@ -133,12 +146,16 @@ describe("estimate", () => {
     const body = projectSummaryTreeBackfillSchema.parse(await status.json());
     // long-a (96 leaves), long-b (80 leaves once its overlap chunks are left out) and the short document.
     expect(body).toMatchObject({ projectId: "w", activeJob: null, lastJob: null, estimate: { documents: 3, documentsToBuild: 2, leaves: 176, basis: "default" } });
-    expect(body.estimate.nodes).toBeGreaterThan(176 / 12);
-    expect(body.estimate.modelCalls).toBeGreaterThanOrEqual(body.estimate.nodes);
+    const planned = body.estimate!;
+    expect(planned.nodes).toBeGreaterThan(176 / 12);
+    expect(planned.modelCalls).toBeGreaterThanOrEqual(planned.nodes);
     // Every leaf is read once: the input estimate is at least the stored tokens of the leaves.
-    expect(body.estimate.inputTokens).toBeGreaterThan(176 * 100);
-    expect(body.estimate.costCentsLow).toBeLessThanOrEqual(body.estimate.costCents);
-    expect(body.estimate.costCentsHigh).toBeGreaterThanOrEqual(body.estimate.costCents);
+    expect(planned.inputTokens).toBeGreaterThan(176 * 100);
+    expect(planned.costCentsLow).toBeLessThanOrEqual(planned.costCents);
+    expect(planned.costCentsHigh).toBeGreaterThanOrEqual(planned.costCents);
+    // The cost is what the organization would be billed: one unit per expected model call, the basis of a job's cap.
+    expect(planned.costBasis).toBe("billed");
+    expect(planned.costCents).toBeCloseTo(planned.modelCalls * UNIT, 9);
 
     const twin = await post(app, "/v1/projects/w/summary-tree/backfill/estimate");
     expect(twin.status).toBe(200);
@@ -156,11 +173,120 @@ describe("estimate", () => {
       values ('run-x', 'other-org', 'summary-tree', 'completed', 1, ${stats(1_000, 1_000)}, now())`;
     const app = appFor("u1");
     const before = projectSummaryTreeBackfillSchema.parse(await (await app.request("/v1/projects/w/summary-tree/backfill")).json());
-    expect(before.estimate.basis).toBe("default");
+    expect(before.estimate!.basis).toBe("default");
+    // The status read keeps its estimate for a minute; the next read here must plan again.
+    treeJobs.resetSummaryTreeBackfillEstimateCache();
     await sql`insert into document_run_stage_states (run_id, document_id, stage_name, status, attempts, stats, completed_at)
       values ('run-w', 'ready', 'summary-tree', 'completed', 1, ${stats(40, 80_000)}, now())`;
     const after = projectSummaryTreeBackfillSchema.parse(await (await app.request("/v1/projects/w/summary-tree/backfill")).json());
     expect(after.estimate).toMatchObject({ basis: "observed", nodes: 18, modelCalls: 18, inputTokens: 36_000, outputTokens: 3_600, seconds: 36 });
+  });
+});
+
+describe("billing", () => {
+  it("quotes billed credits where billing is enforced, and the model's own cost only where nothing is charged", async () => {
+    const app = appFor("u1");
+    vi.stubEnv("DOCSLURP_BILL_INGEST", "true");
+    const enforced = await (await post(app, "/v1/projects/w/summary-tree/backfill/estimate")).json() as { estimate: { billing: string; credits: { low: number; high: number } } };
+    const status = projectSummaryTreeBackfillSchema.parse(await (await app.request("/v1/projects/w/summary-tree/backfill")).json());
+    expect(enforced.estimate.billing).toBe("enforced");
+    expect(enforced.estimate.credits).toEqual({ low: status.estimate!.costCentsLow, high: status.estimate!.costCentsHigh });
+    expect(status.estimate!.costCentsLow).toBeCloseTo(status.estimate!.modelCalls * UNIT * 0.5, 9);
+    vi.unstubAllEnvs();
+    vi.stubEnv("DOCSLURP_SUMMARY_TREE_BUILD", "on");
+
+    // A deployment that does not charge (no provider, no billing): the estimate is the model's cost, and says so.
+    resetPricingProviderForTests();
+    treeJobs.resetSummaryTreeBackfillEstimateCache();
+    const free = projectSummaryTreeBackfillSchema.parse(await (await app.request("/v1/projects/w/summary-tree/backfill")).json());
+    expect(free.estimate).toMatchObject({ costBasis: "provider", documents: 3 });
+    const quote = await (await post(app, "/v1/projects/w/summary-tree/backfill/estimate")).json() as { estimate: { billing: string; credits: unknown } };
+    expect(quote.estimate).toMatchObject({ billing: "disabled", credits: null });
+    const started = await post(app, "/v1/projects/w/summary-tree/backfill", { maxCostCents: 500 });
+    expect(started.status).toBe(202);
+    expect(await started.json()).toMatchObject({ costBasis: "provider", estimate: { costBasis: "provider" } });
+  });
+
+  it("refuses the estimate and the start, and quotes nothing, while the deployment has no price for the tree", async () => {
+    const app = appFor("u1");
+    const unpriced: Array<() => void> = [
+      () => { installTestPricing(DISTINCT_TEST_PRICING); },
+      () => { resetPricingProviderForTests(); vi.stubEnv("STRIPE_SECRET_KEY", "sk_test_x"); },
+      () => { installTestPricing({ ...DISTINCT_TEST_PRICING, summaryTreeCallCredits: () => 0 }); },
+    ];
+    for (const install of unpriced) {
+      install();
+      treeJobs.resetSummaryTreeBackfillEstimateCache();
+      for (const response of [
+        await post(app, "/v1/projects/w/summary-tree/backfill/estimate"),
+        await post(app, "/v1/projects/w/summary-tree/backfill", { maxCostCents: 500 }),
+      ]) {
+        expect(response.status).toBe(400);
+        expect(await response.json()).toMatchObject({ error: { code: "summary_tree_unpriced" } });
+      }
+      // The status still answers, with no estimate: nothing is priced from a default.
+      const status = await app.request("/v1/projects/w/summary-tree/backfill");
+      expect(status.status).toBe(200);
+      expect(projectSummaryTreeBackfillSchema.parse(await status.json())).toMatchObject({ estimate: null, activeJob: null });
+    }
+    expect(spend.calls).toEqual([]);
+    expect(await sql`select 1 from summary_tree_jobs`).toHaveLength(0);
+  });
+
+  it("holds a job's cap under the operator's ceiling and above a cap that would round to nothing", async () => {
+    const app = appFor("u1");
+    // Below one hundredth of a cent: refused by the request schema, never a constraint violation from the database.
+    for (const maxCostCents of [0.00001, 0.001, 0.0099]) {
+      const response = await post(app, "/v1/projects/w/summary-tree/backfill", { maxCostCents });
+      expect(response.status, String(maxCostCents)).toBe(400);
+    }
+    // Above the default ceiling: refused with a named error that states the limit.
+    const high = await post(app, "/v1/projects/w/summary-tree/backfill", { maxCostCents: 10_000.01 });
+    expect(high.status).toBe(400);
+    expect(await high.json()).toMatchObject({ error: { code: "summary_tree_backfill_cap_too_high" } });
+    expect(spend.calls).toEqual([]);
+    expect(await sql`select 1 from summary_tree_jobs`).toHaveLength(0);
+
+    // The operator's own ceiling replaces the default, lower or higher; a value that is not a ceiling does not lift it.
+    vi.stubEnv("DOCSLURP_SUMMARY_TREE_BACKFILL_MAX_COST_CENTS", "200");
+    expect((await post(app, "/v1/projects/w/summary-tree/backfill", { maxCostCents: 201 })).status).toBe(400);
+    for (const bad of ["", "0", "-5", "lots", "Infinity"]) {
+      vi.stubEnv("DOCSLURP_SUMMARY_TREE_BACKFILL_MAX_COST_CENTS", bad);
+      expect((await post(app, "/v1/projects/w/summary-tree/backfill", { maxCostCents: 10_001 })).status, bad).toBe(400);
+    }
+    vi.stubEnv("DOCSLURP_SUMMARY_TREE_BACKFILL_MAX_COST_CENTS", "200");
+    const started = await post(app, "/v1/projects/w/summary-tree/backfill", { maxCostCents: 200 });
+    expect(started.status).toBe(202);
+    expect(await started.json()).toMatchObject({ maxCostCents: 200, costBasis: "billed" });
+    // The smallest cap is stored as given.
+    await sql`delete from summary_tree_jobs`;
+    expect((await post(app, "/v1/projects/w/summary-tree/backfill", { maxCostCents: 0.01 })).status).toBe(202);
+    expect((await sql`select max_cost_cents::float8 as cap from summary_tree_jobs`)[0]).toEqual({ cap: 0.01 });
+  });
+});
+
+describe("status estimate", () => {
+  it("is planned at most once a minute per project, however often the status is read", async () => {
+    const app = appFor("u1");
+    const read = async () => projectSummaryTreeBackfillSchema.parse(await (await app.request("/v1/projects/w/summary-tree/backfill")).json());
+    const first = await read();
+    expect(first.estimate).toMatchObject({ documents: 3 });
+    // A document arrives: the cached estimate is what every reader gets until it expires.
+    await seedDocument("w", "o1", "u1", "long-c", 96);
+    for (let i = 0; i < 5; i++) expect((await read()).estimate).toEqual(first.estimate);
+    // The estimate route and a job's start always plan afresh.
+    const fresh = await treeJobs.estimateSummaryTreeBackfill("w", "u1");
+    expect(fresh.documents).toBe(3);
+    // Another project of the same organization has its own entry, and never another project's numbers.
+    expect((projectSummaryTreeBackfillSchema.parse(await (await app.request("/v1/projects/w2/summary-tree/backfill")).json())).estimate).toMatchObject({ documents: 1 });
+    // Past the window, the status plans again.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(Date.now() + treeJobs.SUMMARY_TREE_BACKFILL_STATUS_ESTIMATE_TTL_MS + 1);
+      expect((await read()).estimate).toMatchObject({ documents: 4 });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

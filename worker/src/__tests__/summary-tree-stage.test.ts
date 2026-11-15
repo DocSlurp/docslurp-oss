@@ -8,7 +8,12 @@ import {
   artifactUri,
   executionStageOrder,
   getPipelineStageOrder,
+  BILLABLE_UNIT_METRICS,
+  DISTINCT_TEST_PRICING,
+  installTestPricing,
   normalizePipelineFeatures,
+  resetPricingProviderForTests,
+  UNIT_CHARGE_PROVIDER,
   pipelineStageOrder,
   pipelineTextOperationSchema,
   postIndexStages,
@@ -23,6 +28,8 @@ import { orgSpendRefusal, setSpendCheckConfig } from "../db/spend-check.js";
 import { resolveEmbeddingModel } from "../embeddings/resolver.js";
 import { artifactExportPath } from "../exports/build-document-export.js";
 import type { Document, ProjectRun } from "../models.js";
+import { runUsageEventStatements } from "../db/usage-event-store.js";
+import { runSpentCents } from "../pipeline/checkpoints.js";
 import { WorkflowState, type CheckpointStore } from "../pipeline/pipeline.js";
 import type { CommandRunner } from "../tools/runner.js";
 import { createStages } from "../stages/index.js";
@@ -83,6 +90,8 @@ beforeEach(async () => {
   vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => { logs.push(args.join(" ")); });
   vi.spyOn(console, "warn").mockImplementation(() => undefined);
   setSpendCheckConfig({ enabled: false, pages: 0, credits: 0 });
+  // Every test starts as a deployment that does not charge; the "billing" tests install a pricing provider.
+  resetPricingProviderForTests();
   lanceRoot = await mkdtemp(path.join(tmpdir(), "docslurp-summary-stage-lance-"));
   spoolRoot = await mkdtemp(path.join(tmpdir(), "docslurp-summary-stage-spool-"));
   await sql`delete from projects`;
@@ -386,6 +395,108 @@ describe("stage", () => {
     await stageOf(storage, overrides(ON)).run(state);
     expect(requests).toEqual([]);
     expect(state.documentStage("long", SUMMARY_TREE_STAGE)?.stats).toMatchObject({ summaryTreeStatus: "partial", summaryTreeReason: "stopped:run-cost-cap", modelCalls: 0 });
+  });
+});
+
+/** An arbitrary test price for the summary tree unit: no deployment's price. */
+const UNIT = 0.75;
+const charging = () => installTestPricing({ ...DISTINCT_TEST_PRICING, summaryTreeCallCredits: () => UNIT });
+
+describe("billing: a deployment that charges for the tree", () => {
+  beforeEach(async () => {
+    await sql`delete from usage_events`;
+    await sql`delete from credit_debits_pending`;
+  });
+
+  it("bills one unit per model call in the run's ledger, and the run's checkpoint writes and debits it for the run's organization", async () => {
+    charging();
+    const storage = new MemoryStorage();
+    const { requests, overrides } = fakes();
+    const { state } = await seed(storage, enabledPipeline(), [{ id: "long", leaves: 300 }]);
+    await stageOf(storage, overrides(ON)).run(state);
+    expect(state.documentStage("long", SUMMARY_TREE_STAGE)?.stats).toMatchObject({ summaryTreeStatus: "ready", modelCalls: 36 });
+    expect(requests).toHaveLength(36);
+
+    const events = state.usageLedger.snapshot();
+    const charges = events.filter((event) => event.metric === BILLABLE_UNIT_METRICS.summaryTree);
+    expect(charges).toHaveLength(36);
+    for (const charge of charges) {
+      expect(charge).toMatchObject({ provider: UNIT_CHARGE_PROVIDER, unit: "summary-call", amount: 1, costCents: UNIT });
+      expect(charge.metadata).toMatchObject({ unitCharge: true, billable: true, feature: "summaryTree", orgId: "o1", projectId: "w", runId: "run-1", documentId: "long" });
+    }
+    // The run's spend (what its cost cap reads) is the billed units; the model's own cost bills nothing.
+    expect(state.usageLedger.pendingBillableCents).toBeCloseTo(36 * UNIT, 9);
+    expect(runSpentCents(state)).toBeCloseTo(36 * UNIT, 9);
+
+    // The checkpoint's own statements (db/usage-event-store.ts): the events, and the organization's pending debit.
+    const batch = state.usageLedger.checkpoint();
+    const write = runUsageEventStatements({ client: sql, state, usageEvents: batch.events });
+    for (const statement of write.statements) await statement;
+    batch.commit();
+    const rows = await sql<Array<{ org_id: string; project_id: string; run_id: string; cost_cents: number }>>`
+      select org_id, project_id, run_id, cost_cents::float8 as cost_cents from usage_events where metric = ${BILLABLE_UNIT_METRICS.summaryTree}`;
+    expect(rows).toHaveLength(36);
+    for (const row of rows) expect(row).toMatchObject({ org_id: "o1", project_id: "w", run_id: "run-1", cost_cents: UNIT });
+    expect((await sql`select coalesce(sum(cost_cents), 0)::float8 as cents from usage_events`)[0]!.cents).toBeCloseTo(36 * UNIT, 9);
+    const [debit] = await sql<Array<{ credits: number; orgs: string[]; runs: string[] }>>`
+      select sum(credits)::float8 as credits, array_agg(distinct org_id) as orgs, array_agg(distinct run_id) as runs from credit_debits_pending`;
+    expect(debit).toMatchObject({ orgs: ["o1"], runs: ["run-1"] });
+    expect(debit!.credits).toBeCloseTo(36 * UNIT, 9);
+  }, 60_000);
+
+  it("never bills past the run's cost cap by more than one unit, with four calls in flight", async () => {
+    charging();
+    const storage = new MemoryStorage();
+    const { requests, overrides } = fakes();
+    const cap = 9.5 * UNIT;
+    const { state } = await seed(storage, { ...enabledPipeline(), maxCostCents: cap }, [{ id: "long", leaves: 300 }, { id: "longer", leaves: 300 }]);
+    await stageOf(storage, overrides(ON)).run(state);
+    const billed = runSpentCents(state);
+    expect(billed).toBeGreaterThanOrEqual(cap);
+    expect(billed).toBeLessThan(cap + UNIT);
+    expect(requests).toHaveLength(10);
+    expect(state.usageLedger.snapshot().filter((event) => event.metric === BILLABLE_UNIT_METRICS.summaryTree)).toHaveLength(10);
+    const reasons = ["long", "longer"].map((id) => (state.documentStage(id, SUMMARY_TREE_STAGE)?.stats as { summaryTreeReason?: string }).summaryTreeReason);
+    expect(reasons).toContain("stopped:run-cost-cap");
+  }, 60_000);
+
+  it("makes no call and reads nothing while the deployment has no price for the tree, and says why", async () => {
+    // A pricing provider without a price for the tree's unit, then billing switched on with no provider at all.
+    for (const setup of [() => ({ env: ON, install: true }), () => ({ env: { ...ON, DOCSLURP_BILL_INGEST: "true" }, install: false })]) {
+      await sql`delete from documents`;
+      await sql`delete from project_runs`;
+      const { env, install } = setup();
+      if (install) installTestPricing(DISTINCT_TEST_PRICING);
+      else resetPricingProviderForTests();
+      const storage = new MemoryStorage();
+      const { requests, embedded, overrides } = fakes();
+      const { state } = await seed(storage, enabledPipeline(), [{ id: "long", leaves: 300 }]);
+      await stageOf(storage, overrides(env)).run(state);
+      expect(requests).toEqual([]);
+      expect(embedded).toEqual([]);
+      expect(storage.opened).toEqual([]);
+      expect(state.usageLedger.pendingCount).toBe(0);
+      expect(state.documentStage("long", SUMMARY_TREE_STAGE)?.stats).toMatchObject({ summaryTreeStatus: "blocked", summaryTreeReason: "unpriced", modelCalls: 0 });
+      expect((await sql`select count(*)::int as n from document_summary_trees`)[0]).toMatchObject({ n: 0 });
+    }
+  });
+
+  it("refuses through the build's own check too: a caller that skips the stage's check still makes no call", async () => {
+    installTestPricing(DISTINCT_TEST_PRICING);
+    const storage = new MemoryStorage();
+    const { requests, overrides } = fakes();
+    await seed(storage, enabledPipeline(), [{ id: "long", leaves: 300 }]);
+    const recorded: unknown[] = [];
+    const result = await runSummaryTreeForDocument({
+      sql, storage, config, pipeline: enabledPipeline(), scope: { orgId: "o1", projectId: "w" }, runId: "run-1", runRoot: "u1/run-1",
+      document: { id: "long", normalizedFormat: "markdown", mimeType: "text/markdown", chunkCount: 300 },
+      embeddingArtifactUri: storage.uri("u1/run-1/embeddings/long.json"),
+      usage: { record: (input, charge) => { recorded.push(input, charge); } },
+      overrides: overrides(ON),
+    });
+    expect(result).toMatchObject({ status: "blocked", reason: "unpriced" });
+    expect(requests).toEqual([]);
+    expect(recorded).toEqual([]);
   });
 });
 

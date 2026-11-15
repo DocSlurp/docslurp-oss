@@ -5,12 +5,24 @@ import path from "node:path";
 import type { PGlite } from "@electric-sql/pglite";
 import type { PGLiteSocketServer } from "@electric-sql/pglite-socket";
 import { connect } from "@lancedb/lancedb";
-import { artifactUri, normalizePipelineFeatures, SUMMARY_TREE_JOB_NOTES, type PipelineFeatures } from "@docslurp/shared";
+import {
+  artifactUri,
+  BILLABLE_UNIT_METRICS,
+  DISTINCT_TEST_PRICING,
+  installTestPricing,
+  normalizePipelineFeatures,
+  resetPricingProviderForTests,
+  SUMMARY_TREE_JOB_NOTES,
+  UNIT_CHARGE_PROVIDER,
+  type PipelineFeatures,
+} from "@docslurp/shared";
 import postgres from "postgres";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { Config } from "../config.js";
+import { jobCreditReserve } from "../db/chat-reserve.js";
 import { orgSpendRefusal, setSpendCheckConfig } from "../db/spend-check.js";
+import { flushPendingCreditDebits } from "../db/usage-event-store.js";
 import { resolveEmbeddingModel } from "../embeddings/resolver.js";
 import { providerBalanceProbe, readProviderBalance, setProviderBalanceProbe, type ProviderBalanceProbe } from "../lib/provider-balance-probe.js";
 import { projectSummariesLocation } from "../stages/lancedb-summaries.js";
@@ -26,6 +38,10 @@ import { serveOnRandomPort } from "../test/migrated-postgres.js";
  *
  * Costs: every fake model call reports 100 input and 50 output tokens, priced by the test config at 1 cent per
  * 1,000 input tokens and 2 cents per 1,000 output tokens, so one call costs 0.2 cents.
+ *
+ * Billing: every test starts as a deployment that does not charge (no pricing provider, no billing in the job's
+ * environment), where the job's cap counts the model's own cost. The "billing" tests install a pricing provider: with
+ * a price for the summary tree unit (an arbitrary test number), or without one.
  */
 
 const config = { costPer1kInputTokens: 1, costPer1kOutputTokens: 2, openRouterApiKey: "test-key" } as unknown as Config;
@@ -72,6 +88,7 @@ beforeEach(async () => {
   vi.spyOn(console, "warn").mockImplementation(() => undefined);
   vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => { logs.push(`ERROR ${args.join(" ")}`); });
   setSpendCheckConfig({ enabled: false, pages: 0, credits: 0 });
+  resetPricingProviderForTests();
   lanceRoot = await mkdtemp(path.join(tmpdir(), "docslurp-summary-job-lance-"));
   spoolRoot = await mkdtemp(path.join(tmpdir(), "docslurp-summary-job-spool-"));
   await sql`delete from usage_events`;
@@ -406,6 +423,173 @@ describe("cost cap", () => {
     await f.run();
     expect(await jobOf(jobId)).toMatchObject({ status: "cancelled", error: SUMMARY_TREE_JOB_NOTES.costCap, model_calls: 0 });
     expect(f.requests).toEqual([]);
+  });
+});
+
+/** An arbitrary test price for the summary tree unit: no deployment's price. */
+const UNIT = 0.75;
+const charging = (unit: number = UNIT) => installTestPricing({ ...DISTINCT_TEST_PRICING, summaryTreeCallCredits: () => unit });
+/** A deployment that charges for work (a pricing provider is installed) but whose provider has no price for the tree. */
+const chargingWithoutTreePrice = () => installTestPricing(DISTINCT_TEST_PRICING);
+const unitCharges = async () => await sql<Array<{ org_id: string; project_id: string; run_id: string | null; provider: string; unit: string; cost_cents: number; metadata: Record<string, unknown> }>>`
+  select org_id, project_id, run_id, provider, unit, cost_cents::float8 as cost_cents, metadata from usage_events where metric = ${BILLABLE_UNIT_METRICS.summaryTree} order by created_at`;
+const billedCents = async () => (await sql<Array<{ cents: number }>>`select coalesce(sum(cost_cents), 0)::float8 as cents from usage_events`)[0]!.cents;
+const pendingDebits = async (orgId: string) => (await sql<Array<{ credits: number; n: number }>>`
+  select coalesce(sum(credits), 0)::float8 as credits, count(*)::int as n from credit_debits_pending where org_id = ${orgId}`)[0]!;
+
+describe("billing: a deployment that charges for the tree", () => {
+  beforeEach(async () => {
+    await sql`delete from credit_debits_pending`;
+    await sql`delete from credit_ledger`;
+  });
+
+  it("bills one unit per model call to the job's organization and project, and debits it as the graph rebuild's charge is", async () => {
+    charging();
+    const f = fakes();
+    await seedDocument(f.storage, "w", "a-big", BIG_LEAVES);
+    await seedDocument(f.storage, "x", "other-org-big", BIG_LEAVES);
+    const jobId = await queueJob("w");
+    await sql`update organizations set credit_balance_cents = 1000 where id in ('o1', 'o2')`;
+    try {
+      await f.run();
+      const job = await jobOf(jobId);
+      expect(job).toMatchObject({ status: "completed", documents_ready: 1, model_calls: BIG_NODES });
+      expect(f.requests).toHaveLength(BIG_NODES);
+
+      // One price-card unit charge per call, stamped with the job's own organization and project.
+      const charges = await unitCharges();
+      expect(charges).toHaveLength(BIG_NODES);
+      for (const charge of charges) {
+        expect(charge).toMatchObject({ org_id: "o1", project_id: "w", run_id: null, provider: UNIT_CHARGE_PROVIDER, unit: "summary-call", cost_cents: UNIT });
+        expect(charge.metadata).toMatchObject({ unitCharge: true, billable: true, feature: "summaryTree", documentId: "a-big", summaryTreeJobId: jobId, priceCard: "test-1" });
+      }
+      // The calls themselves stay internal cost: recorded, never billed.
+      for (const call of await modelUsage()) expect(call.metadata).toMatchObject({ billable: false });
+      expect(await billedCents()).toBeCloseTo(BIG_NODES * UNIT, 9);
+      // The job's spend is what was billed, not what the model cost.
+      expect(Number(job.cost_cents)).toBeCloseTo(BIG_NODES * UNIT, 4);
+
+      // The debit: pending rows for this organization only (the hot path never locks the organization's row), ...
+      expect(await pendingDebits("o1")).toMatchObject({ n: BIG_NODES });
+      expect((await pendingDebits("o1")).credits).toBeCloseTo(BIG_NODES * UNIT, 9);
+      expect(await pendingDebits("o2")).toMatchObject({ n: 0, credits: 0 });
+      const [pending] = await sql<Array<{ row: Record<string, unknown> }>>`select to_jsonb(p) as row from credit_debits_pending p where org_id = 'o1' limit 1`;
+      expect(pending!.row).toMatchObject({ reason: "usage", run_id: null, metadata: { summaryTreeJobId: jobId } });
+      expect(Object.values(pending!.row)).toContain("w");
+      // ... which the flusher applies to the organization's balance and writes to the credit ledger.
+      const flushed = await flushPendingCreditDebits(sql);
+      expect(flushed.credits).toBeCloseTo(BIG_NODES * UNIT, 9);
+      const [balances] = await sql<Array<{ o1: number; o2: number }>>`
+        select (select credit_balance_cents::float8 from organizations where id = 'o1') as o1, (select credit_balance_cents::float8 from organizations where id = 'o2') as o2`;
+      expect(balances!.o1).toBeCloseTo(1000 - BIG_NODES * UNIT, 6);
+      expect(balances!.o2).toBe(1000);
+      // The ledger is in dollars (credits / 100).
+      const [ledger] = await sql<Array<{ dollars: number; orgs: string[] }>>`
+        select coalesce(sum(-delta), 0)::float8 as dollars, array_agg(distinct org_id) as orgs from credit_ledger where delta < 0`;
+      expect(ledger!.orgs).toEqual(["o1"]);
+      expect(ledger!.dollars * 100).toBeCloseTo(BIG_NODES * UNIT, 6);
+    } finally {
+      await sql`update organizations set credit_balance_cents = 0 where id in ('o1', 'o2')`;
+    }
+  });
+
+  it("never bills past the cap by more than one unit, with calls in flight", async () => {
+    charging();
+    const f = fakes();
+    for (const id of ["a", "b", "c", "d"]) await seedDocument(f.storage, "w", `${id}-big`, BIG_LEAVES);
+    // Room for nine units and a half: the model's own cost (0.2 cents a call) would never reach this cap.
+    const cap = 9.5 * UNIT;
+    const jobId = await queueJob("w", cap);
+    await f.run({ concurrency: 4, documentConcurrency: 2 });
+    const job = await jobOf(jobId);
+    expect(job).toMatchObject({ status: "cancelled", error: SUMMARY_TREE_JOB_NOTES.costCap, model_calls: 10 });
+    const billed = await billedCents();
+    expect(billed).toBeGreaterThanOrEqual(cap);
+    expect(billed).toBeLessThan(cap + UNIT);
+    expect(Number(job.cost_cents)).toBeCloseTo(billed, 4);
+    expect((await pendingDebits("o1")).credits).toBeCloseTo(billed, 9);
+    // Every call that was made is billed: no paid call without its unit.
+    expect(await unitCharges()).toHaveLength(f.requests.length);
+  });
+
+  it("stops when the organization's balance runs out mid-job, because the units it billed moved the balance", async () => {
+    const unit = 5;
+    charging(unit);
+    const f = fakes();
+    await seedDocument(f.storage, "w", "a-big", BIG_LEAVES);
+    await seedDocument(f.storage, "w", "b-big", BIG_LEAVES);
+    const jobId = await queueJob("w");
+    const balance = 10;
+    setSpendCheckConfig({ enabled: true, pages: 25, credits: 10 });
+    await sql`update organizations set credit_balance_cents = ${balance} where id = 'o1'`;
+    try {
+      expect(await orgSpendRefusal(sql, { orgId: "o1", projectId: "w" })).toBeNull();
+      await f.run();
+      // A running job may finish down to the running-job floor; the first window that finds the balance below it stops.
+      const calls = Math.floor((balance - jobCreditReserve()) / unit) + 1;
+      expect(calls).toBeLessThan(2 * BIG_NODES);
+      expect(f.requests).toHaveLength(calls);
+      expect(await jobOf(jobId)).toMatchObject({ status: "blocked", blocked_reason: "credits", model_calls: calls });
+      // Nothing but the job's own units changed the organization: no budget pause, no manual balance edit.
+      const [status] = await sql<Array<{ available: number; org_budget_paused: boolean }>>`
+        select available::float8 as available, org_budget_paused from org_spend_status('o1', 'w', 0)`;
+      expect(status).toMatchObject({ org_budget_paused: false });
+      expect(status!.available).toBeCloseTo(balance - calls * unit, 6);
+      expect(await orgSpendRefusal(sql, { orgId: "o1", projectId: "w" })).toBe("credit_exhausted");
+
+      // A parked job does not spend: looked at again, it makes no call until the organization has credits.
+      await f.run();
+      expect(f.requests).toHaveLength(calls);
+      await sql`update organizations set credit_balance_cents = 1000 where id = 'o1'`;
+      await f.run();
+      expect(await jobOf(jobId)).toMatchObject({ status: "completed", documents_ready: 2, model_calls: 2 * BIG_NODES });
+      expect(await billedCents()).toBeCloseTo(2 * BIG_NODES * unit, 6);
+    } finally {
+      setSpendCheckConfig({ enabled: false, pages: 0, credits: 0 });
+      await sql`update organizations set credit_balance_cents = 0 where id = 'o1'`;
+    }
+  });
+
+  it("claims and calls nothing while the deployment has no price for the tree", async () => {
+    chargingWithoutTreePrice();
+    const f = fakes();
+    await seedDocument(f.storage, "w", "a-big", BIG_LEAVES);
+    const jobId = await queueJob("w");
+    expect(await f.run()).toBe(0);
+    expect(await jobOf(jobId)).toMatchObject({ status: "blocked", blocked_reason: "unpriced", model_calls: 0, lease_owner: null, started_at: null });
+    expect(f.requests).toEqual([]);
+    expect(f.storage.opened).toEqual([]);
+    expect((await sql`select count(*)::int as n from usage_events`)[0]).toMatchObject({ n: 0 });
+    expect(await treeOf("a-big")).toBeNull();
+
+    // Billing switched on by the environment alone, with no provider at all, is unpriced too: never the open default.
+    resetPricingProviderForTests();
+    f.env.DOCSLURP_BILL_INGEST = "true";
+    expect(await f.run()).toBe(0);
+    expect(f.requests).toEqual([]);
+    delete f.env.DOCSLURP_BILL_INGEST;
+
+    // With a price, the same job runs and bills.
+    charging();
+    await f.run();
+    expect(await jobOf(jobId)).toMatchObject({ status: "completed", documents_ready: 1 });
+    expect(await unitCharges()).toHaveLength(BIG_NODES);
+  });
+
+  it("parks at the next window when the price goes missing mid-job, and bills the call that was in flight", async () => {
+    charging();
+    const f = fakes();
+    await seedDocument(f.storage, "w", "a-big", BIG_LEAVES);
+    const jobId = await queueJob("w");
+    f.beforeAnswer = (_request, call) => {
+      if (call === 2) chargingWithoutTreePrice();
+    };
+    await f.run();
+    expect(f.requests).toHaveLength(2);
+    expect(await jobOf(jobId)).toMatchObject({ status: "blocked", blocked_reason: "unpriced", model_calls: 2, documents_ready: 0, cursor: null });
+    expect(await treeOf("a-big")).toMatchObject({ status: "partial", error: "stopped:unpriced" });
+    // Both calls were admitted under a price, and both are billed at it.
+    expect((await unitCharges()).map((charge) => charge.cost_cents)).toEqual([UNIT, UNIT]);
   });
 });
 

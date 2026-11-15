@@ -9,12 +9,15 @@ import {
   SUMMARY_TREE_CONSTANTS,
   SUMMARY_TREE_REQUIRES_VECTORS_CODE,
   SUMMARY_TREE_REQUIRES_VECTORS_MESSAGE,
+  SUMMARY_TREE_UNPRICED_CODE,
+  SUMMARY_TREE_UNPRICED_MESSAGE,
   summaryTreeBuildAvailable,
   summaryTreeBuildStatus,
   SummaryTreeConfigError,
   summaryTreeEnabled,
   summaryTreeSearchModeSchema,
   summaryTreeServeAvailable,
+  summaryTreeUnitPrice,
   summaryTreeVectorProblem,
   type PipelineFeatures,
   type ProjectSummaryTreeState,
@@ -115,6 +118,7 @@ export async function getProjectSummaryTreeState(
   return {
     enabled,
     buildAvailable: summaryTreeBuildAvailable(env),
+    buildPriced: summaryTreeUnitPrice(env).billing !== "unpriced",
     serveAvailable: summaryTreeServeAvailable(env),
     searchMode,
     effectiveSearchMode: effectiveSummaryTreeSearchMode({ pipeline, projectDefault: searchMode, env }),
@@ -142,7 +146,8 @@ export async function getProjectSummaryTree(projectRef: string, userId: string, 
 
 /**
  * Turns the project's summary tree on or off. Turning it on is refused while the deployment's build switch is off
- * (nothing would ever build), without embeddings and the vector index, and under a template that keeps document
+ * (nothing would ever build), while the deployment charges for work but has no price for the tree
+ * (`summary_tree_unpriced`), without embeddings and the vector index, and under a template that keeps document
  * summaries off. Turning it off is always allowed. Nothing is queued either way.
  */
 export async function updateProjectSummaryTree(
@@ -157,6 +162,12 @@ export async function updateProjectSummaryTree(
     if (!summaryTreeBuildAvailable(env)) {
       console.warn(`[summary-tree] refused to enable project=${project.id}: ${SUMMARY_TREE_BUILD_ENV_FLAG} is off`);
       throw new ProjectSummaryTreeError(SUMMARY_TREE_UNAVAILABLE_MESSAGE, 400, SUMMARY_TREE_BUILD_UNAVAILABLE_CODE);
+    }
+    // A deployment that charges for work but has no price for the tree's unit: builds could not be billed, so the
+    // setting stays off. The price is the pricing provider's; nothing here supplies one.
+    if (summaryTreeUnitPrice(env).billing === "unpriced") {
+      console.warn(`[summary-tree] refused to enable project=${project.id}: the pricing provider has no price for the summary tree unit`);
+      throw new ProjectSummaryTreeError(SUMMARY_TREE_UNPRICED_MESSAGE, 400, SUMMARY_TREE_UNPRICED_CODE);
     }
     if (summaryTreeVectorProblem({ ...pipeline, summaryTree: { enabled: true } })) {
       throw new ProjectSummaryTreeError(SUMMARY_TREE_REQUIRES_VECTORS_MESSAGE, 400, SUMMARY_TREE_REQUIRES_VECTORS_CODE);

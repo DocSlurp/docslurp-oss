@@ -143,6 +143,14 @@ export function summaryTreeSearchRefusal(args: { pipeline: TreePipeline; env: En
 export const SUMMARY_TREE_BUILD_UNAVAILABLE_CODE = "summary_tree_unavailable";
 export const SUMMARY_TREE_REQUIRES_VECTORS_CODE = "summary_tree_requires_vectors";
 export const SUMMARY_TREE_SUMMARIZE_LOCKED_CODE = "summary_tree_summarize_locked";
+/**
+ * The deployment charges for work but its pricing provider has no price for the summary tree unit (billing.ts
+ * `summaryTreeUnitPrice`): the tree cannot be turned on, a stored "on" builds nothing and no backfill starts.
+ */
+export const SUMMARY_TREE_UNPRICED_CODE = "summary_tree_unpriced";
+export const SUMMARY_TREE_UNPRICED_MESSAGE = "The summary tree has no price on this deployment yet, so it cannot be built.";
+/** The named reason a build or a job carries for the same refusal. */
+export const SUMMARY_TREE_UNPRICED_REASON = "unpriced";
 
 export const SUMMARY_TREE_REQUIRES_VECTORS_MESSAGE =
   "The summary tree needs embeddings and the vector index; enable embed and indexVectors for this project first";
@@ -406,6 +414,12 @@ export const projectSummaryTreeStateSchema = z.object({
   enabled: z.boolean(),
   /** The deployment builds trees (`DOCSLURP_SUMMARY_TREE_BUILD`). False: the setting cannot be turned on and builds nothing. */
   buildAvailable: z.boolean(),
+  /**
+   * The deployment can account for a build: it bills the tree's unit, or it does not charge for work at all. False:
+   * it charges for work but has no price for the tree (`summary_tree_unpriced`), so the setting cannot be turned on,
+   * a stored "on" builds nothing and no backfill starts.
+   */
+  buildPriced: z.boolean(),
   /** The deployment lets search read trees (`DOCSLURP_SUMMARY_TREE_SERVE`). */
   serveAvailable: z.boolean(),
   /** The project's stored retrieval default. */

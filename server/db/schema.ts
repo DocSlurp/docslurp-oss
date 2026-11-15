@@ -3909,8 +3909,13 @@ export const summaryTreeJobs = pgTable(
     startedAt: timestamp("started_at", { withTimezone: true, mode: "string" }),
     finishedAt: timestamp("finished_at", { withTimezone: true, mode: "string" }),
     updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
+    // Fair claiming and parking (migration 0167).
+    lastAttemptAt: timestamp("last_attempt_at", { withTimezone: true, mode: "string" }),
+    parkCount: integer("park_count").default(0).notNull(),
+    parkedSince: timestamp("parked_since", { withTimezone: true, mode: "string" }),
   },
   (table) => [
+    index("summary_tree_jobs_open_idx").using("btree", table.orgId.asc().nullsLast().op("text_ops"), table.lastAttemptAt.asc().nullsLast().op("timestamptz_ops")).where(sql`status IN ('queued', 'running', 'blocked')`),
     uniqueIndex("summary_tree_jobs_one_active_per_project").using("btree", table.projectId.asc().nullsLast().op("text_ops")).where(sql`status IN ('queued', 'running', 'blocked')`),
     index("summary_tree_jobs_claim_idx").using("btree", table.status.asc().nullsLast().op("text_ops"), table.createdAt.asc().nullsLast().op("timestamptz_ops")),
     index("summary_tree_jobs_project_idx").using("btree", table.projectId.asc().nullsLast().op("text_ops"), table.createdAt.asc().nullsLast().op("timestamptz_ops")),

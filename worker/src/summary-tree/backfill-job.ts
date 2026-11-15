@@ -8,9 +8,11 @@ import {
   SUMMARY_TREE_JOB_NOTES,
   SUMMARY_TREE_MIN_DOCUMENT_LEAVES,
   SUMMARY_TREE_SERVE_ENV_FLAG,
+  SUMMARY_TREE_UNPRICED_REASON,
   summaryTreeBuildAvailable,
   summaryTreeEnabled,
   summaryTreeServeAvailable,
+  summaryTreeUnitPrice,
   summaryTreeVectorProblem,
   type PipelineFeatures,
   type SummaryTreeJobBlockedReason,
@@ -21,6 +23,7 @@ import type { Config } from "../config.js";
 import { persistScopedUsageEvents } from "../db/usage-event-store.js";
 import { resolveEmbeddingModel } from "../embeddings/resolver.js";
 import type { WorkerAiUsageInput } from "../lib/ai-usage.js";
+import type { UsageEvent } from "../models.js";
 import { createConcurrencyLimiter } from "../lib/bounded-concurrency.js";
 import { allowHostedCallForProject, openRouterTextCall, runWithPrivacyAuditScope } from "../lib/privacy-guard.js";
 import { providerBalanceProbe, readProviderBalance, type ProviderBalanceProbe } from "../lib/provider-balance-probe.js";
@@ -51,12 +54,18 @@ import { markSummaryTreesSkipped, registerSummaryTreeArtifact } from "./state-st
  *
  * - Scope. Every statement that reads or writes documents names the job's organization and project. The cursor is
  *   only a position inside that scope: a cursor naming another tenant's document selects nothing of theirs.
- * - Cap. The cap is mandatory. A model call is admitted only while the spend so far, plus a reserve for every call
- *   in flight, is under the cap, so the job passes it by less than one group. The check runs before each group
- *   (the build's `stopReason` hook), not after a batch.
- * - Usage. Every model attempt and embedding request is written to `usage_events`, and added to the job's own
- *   totals, in one transaction as soon as it returns: a worker that dies loses no record of a paid call, and the
- *   worker that takes the job over starts from the true spend.
+ * - Billing. Where the deployment charges for work (`summaryTreeUnitPrice`), every summary model call that returned
+ *   bills one summary tree unit at the pricing provider's price, as a price-card unit charge beside the call's own
+ *   usage event: the same events, written and debited the same way (`persistScopedUsageEvents`), as the knowledge
+ *   graph rebuild's feature charge. A deployment that charges but has no price for the unit builds nothing: the job
+ *   parks (`blocked`, `unpriced`) before the claim, before every batch and before every window.
+ * - Cap. The cap is mandatory, and counts billed credits where the deployment charges (the model's own cost where
+ *   it does not). A model call is admitted only while the spend so far, plus one unit for every call in flight, is
+ *   under the cap, so the job passes it by less than one unit. The check runs before each call (the build's
+ *   `stopReason` and `acquireCall` hooks), not after a batch.
+ * - Usage. Every model attempt and embedding request is written to `usage_events`, with the call's unit charge and
+ *   its credit debit, and added to the job's own totals, in one transaction as soon as it returns: a worker that
+ *   dies loses no record of a paid call, and the worker that takes the job over starts from the true spend.
  * - Resume. The lease is renewed while the job runs. When it expires the next worker claims the job, starts after
  *   the cursor and resumes the document in progress from its artifact: groups whose call returned are read back,
  *   never called again. A worker that lost its lease stops at its next call.
@@ -157,6 +166,7 @@ const interval = (ms: number) => `${Math.max(0, Math.round(ms))} milliseconds`;
 
 /** `blocked` reasons of a build that made no call, as the job's parking reason. */
 function blockedReason(reason: string | undefined): SummaryTreeJobBlockedReason {
+  if (reason === SUMMARY_TREE_UNPRICED_REASON) return "unpriced";
   return reason === "privacy-mode" || reason === "no-text-model-key" ? "policy" : "credits";
 }
 
@@ -187,6 +197,11 @@ export async function runSummaryTreeJobs(sql: Client, options: SummaryTreeJobRun
   // Both kill switches, before the claim. Build off: nothing is claimed and nothing is called.
   if (!summaryTreeBuildAvailable(env)) {
     await parkUnclaimed("build-off");
+    return 0;
+  }
+  // A deployment that charges for work but has no price for the tree's unit: nothing is claimed and nothing is called.
+  if (summaryTreeUnitPrice(env).billing === "unpriced") {
+    await parkUnclaimed("unpriced");
     return 0;
   }
   const probe = options.balanceProbe === undefined ? await providerBalanceProbe(env) : options.balanceProbe;
@@ -315,6 +330,14 @@ async function runClaimedJob(
   };
 
   // --- Spend. Recorded per call; the cap is checked against it before every call. ---
+  // What the cap counts. Where the deployment charges for the tree: billed credits, one unit per summary call that
+  // returned, so the reserve for a call in flight is exactly one unit. Where it does not charge: the model's own cost,
+  // whose size is known only once calls have reported it.
+  const unitCredits = (): number | null => {
+    const price = summaryTreeUnitPrice(env);
+    return price.billing === "active" ? price.credits : null;
+  };
+  const countsProviderCost = () => summaryTreeUnitPrice(env).billing === "inactive";
   let spentCents = Number(job.cost_cents);
   let inFlight = 0;
   // Until a call has reported its cost the reserve is unknown: calls are admitted one at a time.
@@ -322,7 +345,11 @@ async function runClaimedJob(
   let largestCallCents = estimatedCallCents > 0 ? estimatedCallCents : null as number | null;
   let settled: Array<() => void> = [];
   const wake = () => { const waiting = settled; settled = []; for (const resolve of waiting) resolve(); };
-  const reserved = () => (largestCallCents === null ? (inFlight > 0 ? Number.POSITIVE_INFINITY : 0) : inFlight * largestCallCents * RESERVE_FACTOR);
+  const reserved = () => {
+    const unit = unitCredits();
+    if (unit !== null) return inFlight * unit;
+    return largestCallCents === null ? (inFlight > 0 ? Number.POSITIVE_INFINITY : 0) : inFlight * largestCallCents * RESERVE_FACTOR;
+  };
   const acquireCall = async (): Promise<() => void> => {
     // Wait while calls in flight could still take the job past its cap; with none in flight the next call is the one
     // the cap is allowed to be passed by.
@@ -342,20 +369,24 @@ async function runClaimedJob(
 
   let persisting: Promise<void> = Promise.resolve();
   let persistError: unknown = null;
-  const record = (input: WorkerAiUsageInput) => {
+  const record = (input: WorkerAiUsageInput, charge?: UsageEvent) => {
     const inputTokens = input.inputTokens ?? 0;
     const outputTokens = input.outputTokens ?? 0;
-    const costCents = input.costCents ?? 0;
+    const providerCents = input.costCents ?? 0;
     const isModelCall = input.metric === SUMMARY_TREE_USAGE_METRIC;
+    // What this event adds to the job's spend: its billed unit where the deployment charges, else the model's cost.
+    const costCents = charge ? Math.max(0, Number(charge.costCents) || 0) : countsProviderCost() ? providerCents : 0;
     console.log(`[ai-usage] ${input.metric} model=${input.model} input_tokens=${inputTokens}${input.logOutputTokens === false ? "" : ` output_tokens=${outputTokens}`}`);
     // The cap sees the call the moment it returns, before anything is awaited.
     spentCents += costCents;
-    // Known from the first call on, also when calls cost nothing (an unpriced deployment reserves nothing).
+    // Known from the first call on, also when calls cost nothing (a deployment without prices reserves nothing).
     if (isModelCall) largestCallCents = Math.max(largestCallCents ?? 0, costCents);
     persisting = persisting.then(async () => {
       try {
         await sql.begin(async (tx) => {
           const client = tx as unknown as Client;
+          // The call's own usage (provider cost, never billed) and its unit charge, with the organization's credit
+          // debit for the unit, in one transaction: the same write the knowledge graph rebuild's charge goes through.
           await persistScopedUsageEvents({
             client,
             userId: job.user_id,
@@ -367,11 +398,11 @@ async function runClaimedJob(
               metric: input.metric,
               amount: input.amount ?? inputTokens + outputTokens,
               unit: input.unit ?? "token",
-              costCents,
+              costCents: providerCents,
               inputTokens,
               outputTokens,
               metadata: { ...input.metadata, summaryTreeJobId: job.id },
-            }],
+            }, ...(charge ? [{ ...charge, id: charge.id ?? randomUUID(), metadata: { ...charge.metadata, summaryTreeJobId: job.id } }] : [])],
             debitMetadata: { summaryTreeJobId: job.id },
           });
           // Not fenced by the lease: the call was paid for, whoever holds the job now.
@@ -528,6 +559,11 @@ async function runClaimedJob(
       }
       if (!summaryTreeBuildAvailable(env)) {
         await park("build-off");
+        return;
+      }
+      // The unit's price, every batch: a deployment whose price went missing builds nothing more.
+      if (summaryTreeUnitPrice(env).billing === "unpriced") {
+        await park("unpriced");
         return;
       }
       // The project's stored setting, every batch: a project that turned the tree off pays for nothing more.

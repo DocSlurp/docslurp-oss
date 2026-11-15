@@ -64,7 +64,10 @@ export type ProjectState = {
 };
 export type SummaryTreeSearchMode = "off" | "guide" | "include";
 export type ProjectSummaryTreeState = {
-  enabled: boolean; buildAvailable: boolean; serveAvailable: boolean;
+  enabled: boolean; buildAvailable: boolean;
+  /** False: the deployment charges for work but has no price for the tree, so it cannot be turned on or built. */
+  buildPriced: boolean;
+  serveAvailable: boolean;
   searchMode: SummaryTreeSearchMode; effectiveSearchMode: SummaryTreeSearchMode;
   status: "off" | "building" | "partial" | "ready";
   documents: { total: number; ready: number; building: number; partial: number; skipped: number; missing: number };

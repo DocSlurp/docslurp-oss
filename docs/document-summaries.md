@@ -404,7 +404,47 @@ later build.
 - Usage events: `summary-tree-generation` per model attempt and
   `summary-tree-embedding` per embedding request, with `orgId`, `projectId`,
   `runId`, `documentId`, node and attempt in the metadata, through the run's
-  usage ledger.
+  usage ledger. These record the model's own cost and bill nothing.
+
+### Billing
+
+The billable unit of the tree is **one summary model call that returned**: a
+first answer, the one retry of a cut-off answer and the retry of a failed group
+each count, kept or not. A request that failed before the model answered is not
+a unit. Embedding requests are part of the unit and are not billed separately.
+A document's units are bounded by its node cap, and a unit is known before its
+call is made, so a cap can hold one unit back for every call in flight.
+
+- Each unit is a price-card unit charge: usage event `feature-summary-tree`
+  (provider `docslurp`, unit `summary-call`, `unitCharge: true`), written with
+  the call's own usage event and debited from the organization through the
+  pending-debit path, exactly as the knowledge graph rebuild's feature charge
+  is. In a run the charge goes through the run's usage ledger and checkpoint,
+  so it counts toward the run's spend and `pipeline.maxCostCents`; in a
+  backfill job it is written in the same transaction as the call's usage.
+- **The price is the pricing provider's.** A provider prices the unit with the
+  optional method `summaryTreeCallCredits()`
+  ([pricing provider](billing/pricing-provider.md)). This repository holds no
+  price for it, and the open pricing default has none.
+- **A deployment that charges but has no price builds nothing.** A deployment
+  charges for work when billing is enforced (`STRIPE_SECRET_KEY`, or a
+  `DOCSLURP_BILL_*` flag set to `true`), when pricing is required
+  (`DOCSLURP_SERVICE_PROFILE=service` or `DOCSLURP_PRICING_REQUIRED=1`), or when
+  a pricing provider is installed (`DOCSLURP_PRICING_PLUGIN`). There, a provider
+  without the method, one that throws, and any answer that is not a finite
+  number above zero all mean `unpriced`:
+  - `PATCH …/summary-tree` refuses to turn the tree on
+    (`400 summary_tree_unpriced`), and the state reports `buildPriced: false`;
+  - the stage makes no call and records `blocked` / `unpriced` per document;
+  - the backfill estimate and start are refused (`400 summary_tree_unpriced`),
+    the status returns no estimate, and a job parks as `blocked` / `unpriced`
+    before its claim, before every batch and before every window.
+- **A deployment that does not charge** (self-hosted, none of the three above)
+  runs as before: no unit is recorded, nothing is billed, and a backfill job's
+  cap counts the model's own cost from the configured token rates.
+- The run's cost cap and a backfill job's cap are passed by less than one unit:
+  a call is admitted only while the spend so far, plus one unit for every call
+  in flight, is under the cap.
 
 ### Reuse
 
@@ -483,8 +523,12 @@ Reading needs project access (a server key with any project scope); estimating,
 starting and cancelling need edit access (a server key with `projects:manage`).
 
 **Start.** Refused unless the tree is on for the project, the deployment builds
-trees, and the organization may spend. `maxCostCents` is required; there is no
-uncapped job. One active job per project.
+trees and can account for them (see Billing), and the organization may spend.
+`maxCostCents` is required; there is no uncapped job. It must be at least 0.01
+and at most the operator's ceiling for one job,
+`DOCSLURP_SUMMARY_TREE_BACKFILL_MAX_COST_CENTS` (default 10,000 cents;
+`400 summary_tree_backfill_cap_too_high` above it). A job that needs more is
+started again after it stops at its cap. One active job per project.
 
 **What it builds.** The project's current documents (completed, not superseded,
 purged or archived) that have no tree search can read for their current run:
@@ -502,17 +546,27 @@ chunks of the documents that need work, on `document_chunks (document_id,
 chunk_index)`. Node and call counts use the middle of the group and fan-in
 ranges until finished builds calibrate them: builds register their stats on the
 document's `summary-tree` stage row, and the estimate reads whole builds of the
-same organization (this project's first). Cost uses the server's configured
-token rates. It assumes no reuse.
+same organization (this project's first). It assumes no reuse. `costBasis` says
+what the cost figures and the job's cap count: `billed` where the deployment
+charges for the tree (the expected model calls times the unit's price, so the
+shared estimate's `credits` are what the organization would be billed), or
+`provider` where it does not (the server's configured token rates). The status
+read returns a recent estimate, planned at most once a minute per project; the
+estimate route and a started job's own estimate are always current.
 
 **Spend.**
 
+- The cap counts billed credits where the deployment charges for the tree, and
+  the model's own cost where it does not (`costBasis` on the job and its
+  estimate). `costCents` on the job is what counted so far.
 - The cap is checked before every model call, with a reserve held for each call
-  in flight (twice the largest call seen), so the job passes its cap by less
-  than one group whatever the concurrency.
-- Every model attempt and embedding request is written to `usage_events` and
-  added to the job's totals in one transaction when it returns. A worker that
-  dies loses no record of a paid call.
+  in flight: exactly one unit where the deployment charges, twice the largest
+  call seen where it does not. The job passes its cap by less than one unit
+  (one group, where nothing is charged) whatever the concurrency.
+- Every model attempt and embedding request is written to `usage_events`, with
+  its unit charge and the organization's debit, and added to the job's totals
+  in one transaction when it returns. A worker that dies loses no record of a
+  paid call.
 - A group that fails is retried by the build and once more by the job. Then the
   document stays `partial` and unserved. No text is written in a summary's
   place.
@@ -529,6 +583,7 @@ minute.
 | `balance` | the deployment's provider balance probe reports below its floor, or could not answer | `capacity` |
 | `credits` | the organization may not spend | `credits` |
 | `policy` | the project's privacy mode does not allow the summary model | `policy` |
+| `unpriced` | the deployment charges for work but has no price for the tree's unit | `unavailable` |
 
 **Provider balance probe.** Nothing else at runtime reads a model provider's
 live balance. A deployment may name a module in
@@ -582,9 +637,11 @@ phase-0 eval measured.
 ### Not done yet
 
 - The tree root does not replace the document summary.
-- There is no price-card unit for the tree: summary calls record provider usage
-  and bill nothing by themselves. The run cost cap sees other spend only, and
-  the backfill job's cap counts provider cost.
+- A summary request that fails before the model answers (a network error, a
+  provider error) bills no unit. Such failures are bounded per document by the
+  build's retries, not by a cap.
+- The upload estimate and quote do not include the tree's units; only the
+  backfill estimate does.
 - Backfill jobs run one at a time, on the maintenance leader.
 - The scan parses the whole embed artifact; a vectors-only sidecar would remove
   most of that time for very large documents.

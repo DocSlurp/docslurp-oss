@@ -88,7 +88,7 @@ export const projectStateExample = projectStateSchema.parse({
   performance: { completedRuns: 1, failedRuns: 0, completedPages: 3, durationMs: { sampleCount: 1, p50: 60_000, p95: 60_000, max: 60_000 }, pagesPerMinute: 3, minutesPer100Pages: 100 / 3, basis: "run-wall-time-including-queue" },
   usage: { inputTokens: 100, outputTokens: 20, costCents: 0.005 },
   summaryTree: {
-    enabled: false, buildAvailable: false, serveAvailable: false, searchMode: "off", effectiveSearchMode: "off", status: "off",
+    enabled: false, buildAvailable: false, buildPriced: true, serveAvailable: false, searchMode: "off", effectiveSearchMode: "off", status: "off",
     documents: { total: 1, ready: 0, building: 0, partial: 0, skipped: 0, missing: 1 }, nodes: 0, constants: SUMMARY_TREE_CONSTANTS,
   },
 });

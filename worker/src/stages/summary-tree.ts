@@ -1,11 +1,17 @@
 import {
+  BILLABLE_UNIT_METRICS,
   isPrivateModelUri,
   resolveAllowedPipelineTextModel,
   resolvePipelineTextGenerationOptions,
   resolveSupportedModelIdWithWarning,
+  speedBoostMultiplier,
   SUMMARY_TREE_BUILD_ENV_FLAG,
+  SUMMARY_TREE_UNPRICED_REASON,
   summaryTreeBuildActive,
   summaryTreeEnabled,
+  summaryTreeUnitPrice,
+  UNIT_CHARGE_PROVIDER,
+  unitChargeMetadata,
   type PipelineFeatures,
 } from "@docslurp/shared";
 import type { Sql } from "postgres";
@@ -23,10 +29,11 @@ import { runWithProviderRateLimit } from "../lib/provider-rate-limit.js";
 import { toProviderRetryableError } from "../lib/provider-retry.js";
 import { textFallbackCost, textModelApiKey, textUsageLabels } from "../lib/text-model-route.js";
 import { noteWorkProgress } from "../lib/work-progress.js";
-import { isCostCapExceeded, runDocumentStage, runDocuments } from "../pipeline/checkpoints.js";
+import { isCostCapExceeded, runDocumentStage, runDocuments, runSpentCents } from "../pipeline/checkpoints.js";
 import { hasFailedDocumentStage } from "../pipeline/document-health.js";
 import { isPiiBlockedDocument } from "../pipeline/pii-gate.js";
 import type { Stage, WorkflowState } from "../pipeline/pipeline.js";
+import type { UsageEvent } from "../models.js";
 import {
   buildDocumentSummaryTree,
   SUMMARY_TREE_REASONING_EFFORT,
@@ -68,6 +75,8 @@ import { deleteDocumentSummaryRows, deleteSummaryRowsById, scheduleSummariesMain
 export const SUMMARY_TREE_STAGE = "summary-tree";
 /** Usage metric of one summary model attempt. */
 export const SUMMARY_TREE_USAGE_METRIC = "summary-tree-generation";
+/** Unit of the billable summary tree charge: one summary model call that returned. */
+export const SUMMARY_TREE_CHARGE_UNIT = "summary-call";
 /** Usage metric of one summary embedding request. */
 export const SUMMARY_TREE_EMBEDDING_USAGE_METRIC = "summary-tree-embedding";
 /** Model calls in flight at once across the stage (`WORKER_SUMMARY_TREE_CONCURRENCY`). */
@@ -189,8 +198,13 @@ export interface SummaryTreeDocumentRun {
   document: { id: string; normalizedFormat?: string | null; mimeType?: string | null; chunkCount?: number | null; piiBlocked?: boolean };
   /** The embed stage's artifact for this document (its `embed` checkpoint's `artifactUri`). */
   embeddingArtifactUri: string | null;
-  /** Records usage with the caller's scope. Every model attempt and every embedding request goes through it. */
-  usage: { record(input: WorkerAiUsageInput): void; flush?(): Promise<void> };
+  /**
+   * Records usage with the caller's scope. Every model attempt and every embedding request goes through it. `charge`
+   * is the billable summary tree unit of a model call that returned, present where the deployment charges for the
+   * tree: the caller records it with the call's own usage (one transaction, or one ledger buffer), so a paid call is
+   * never recorded without its charge.
+   */
+  usage: { record(input: WorkerAiUsageInput, charge?: UsageEvent): void; flush?(): Promise<void> };
   /** A named reason hosted calls are not allowed for this project (privacy mode), or null. */
   hostedCallRefusal?: () => Promise<string | null>;
   /**
@@ -249,7 +263,31 @@ export async function runSummaryTreeForDocument(args: SummaryTreeDocumentRun): P
   const labels = model ? textUsageLabels(model) : { provider: "openrouter", model: "" };
   const usageMetadata = { orgId: scope.orgId, projectId: scope.projectId, runId: args.runId, documentId: document.id, operation: SUMMARY_TREE_TEXT_OPERATION };
 
+  /** The last price a call of this build was admitted under (`spendRefusal` reads the price before every window). */
+  let admittedCredits: number | null = null;
+  /** Credits one returned call bills now; null where the deployment does not charge. */
+  const unitCreditsNow = (): number | null => {
+    const price = summaryTreeUnitPrice(env);
+    if (price.billing === "active") admittedCredits = price.credits;
+    return price.billing === "inactive" ? null : admittedCredits;
+  };
+
   const recordUsage = (usage: SummaryCallUsage, detail: SummaryTreeUsageDetail) => {
+    // The billable unit of this call: one per summary model call that returned, kept or not, at the deployment's price
+    // read now. A deployment that does not charge records none. A call whose price went missing while it was in flight
+    // bills the price it was admitted under, and the next window's check stops the build (`unpriced`).
+    const credits = unitCreditsNow();
+    const charge: UsageEvent | undefined = credits !== null ? {
+      provider: UNIT_CHARGE_PROVIDER,
+      model: "price-card",
+      metric: BILLABLE_UNIT_METRICS.summaryTree,
+      amount: 1,
+      unit: SUMMARY_TREE_CHARGE_UNIT,
+      costCents: credits,
+      inputTokens: 0,
+      outputTokens: 0,
+      metadata: unitChargeMetadata({ ...usageMetadata, feature: "summaryTree", nodeId: detail.nodeId, level: detail.level, attempt: detail.attempt }),
+    } : undefined;
     args.usage.record({
       ...labels,
       metric: SUMMARY_TREE_USAGE_METRIC,
@@ -265,7 +303,7 @@ export async function runSummaryTreeForDocument(args: SummaryTreeDocumentRun): P
       inputTokens: usage.inputTokens,
       outputTokens: usage.outputTokens,
       metadata: { ...usage.metadata, ...usageMetadata, nodeId: detail.nodeId, level: detail.level, attempt: detail.attempt, finishReason: detail.finishReason },
-    });
+    }, charge);
   };
 
   const summarize: SummaryTreeModel = overrides.summarize ?? (async (request) => {
@@ -327,6 +365,10 @@ export async function runSummaryTreeForDocument(args: SummaryTreeDocumentRun): P
   // Asked before the first call and before every commit window (build.ts `spendRefusal`): a balance that runs out,
   // a budget pause or the caller's own gate stops the build at its next window, not only before its first call.
   const spendRefusal = async (): Promise<string | null> => {
+    // A deployment that charges for work but has no price for the tree's unit builds nothing: a call made now could
+    // not be billed.
+    if (summaryTreeUnitPrice(env).billing === "unpriced") return SUMMARY_TREE_UNPRICED_REASON;
+    unitCreditsNow();
     const hosted = await args.hostedCallRefusal?.();
     if (hosted) return hosted;
     if (!overrides.summarize && !textModelApiKey(args.config.openRouterApiKey, model)) return "no-text-model-key";
@@ -430,6 +472,28 @@ export class SummaryTreeStage implements Stage {
     // stage at their next call (`stopReason`), not only the document whose window asked.
     let runStop: string | null = null;
     const stopReason = () => runStop ?? (isCostCapExceeded(state) ? "run-cost-cap" : now() >= deadline ? "stage-time-budget" : null);
+    // The run's cost cap counts billed credits, and a summary call bills one unit when it returns. A call is admitted
+    // only while the run's spend, plus one unit for every call in flight, is under the cap: the run passes its cap by
+    // less than one unit however many calls run at once. Without a cap, or where the tree is not charged, nothing waits.
+    let callsInFlight = 0;
+    let admissionWaiters: Array<() => void> = [];
+    const acquireCall = async (): Promise<() => void> => {
+      const cap = pipeline.maxCostCents;
+      const held = () => {
+        const price = summaryTreeUnitPrice(env);
+        return price.billing === "active" ? callsInFlight * price.credits * speedBoostMultiplier(state.usageLedger.speedBoost) : 0;
+      };
+      while (typeof cap === "number" && cap > 0 && callsInFlight > 0 && runSpentCents(state) < cap && runSpentCents(state) + held() >= cap && !runStop) {
+        await new Promise<void>((resolve) => admissionWaiters.push(resolve));
+      }
+      callsInFlight += 1;
+      return () => {
+        callsInFlight -= 1;
+        const waiting = admissionWaiters;
+        admissionWaiters = [];
+        for (const resolve of waiting) resolve();
+      };
+    };
     const gate = async (): Promise<string | null> => {
       const [row] = await sql<{ enabled: boolean | null; control_state: string | null }[]>`
         select (p.pipeline -> 'summaryTree' -> 'enabled') = 'true'::jsonb as enabled, r.control_state
@@ -469,6 +533,11 @@ export class SummaryTreeStage implements Stage {
             console.log(`[summary-tree] run=${state.run.id} document=${document.id} status=blocked reason=stage-time-budget`);
             return { stats: { summaryTreeStatus: "blocked", summaryTreeReason: "stage-time-budget", modelCalls: 0 }, message: "Summary tree not started (stage-time-budget)" };
           }
+          // A deployment that charges for work and has no price for the tree's unit: nothing is read and no call is made.
+          if (summaryTreeUnitPrice(env).billing === "unpriced") {
+            console.warn(`[summary-tree] run=${state.run.id} document=${document.id} status=blocked reason=${SUMMARY_TREE_UNPRICED_REASON}`);
+            return { stats: { summaryTreeStatus: "blocked", summaryTreeReason: SUMMARY_TREE_UNPRICED_REASON, modelCalls: 0 }, message: `Summary tree not started (${SUMMARY_TREE_UNPRICED_REASON})` };
+          }
           // The project's setting as it is stored now, not as the run's snapshot has it.
           if (!(await projectSummaryTreeEnabled(sql, { orgId, projectId }))) {
             console.log(`[summary-tree] run=${state.run.id} document=${document.id} status=off reason=project-setting-off`);
@@ -494,10 +563,13 @@ export class SummaryTreeStage implements Stage {
             },
             embeddingArtifactUri: embedStage?.artifactUri || state.artifactLedger.readDocument(document.id, "embeddings")
               || this.storage.uri(`${runArtifactRoot(state.run, document.userId)}/embeddings/${document.id}.json`),
-            usage: { record: (input) => { state.usageLedger.record(input); }, flush },
+            // The call's usage and its billable unit go into the run's ledger together: one checkpoint writes both,
+            // debits the organization for the unit and adds it to the run's spend (the cost cap reads that).
+            usage: { record: (input, charge) => { state.usageLedger.record(input); if (charge) state.usageLedger.enqueue(charge); }, flush },
             hostedCallRefusal,
             gate,
             stopReason,
+            acquireCall,
             callLimiter,
             signal,
             overrides: this.overrides,
