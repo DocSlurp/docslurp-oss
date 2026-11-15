@@ -127,42 +127,44 @@ function actionResult(
 
 /** Replays a cached response for a repeated Idempotency-Key, or runs and caches the action. */
 async function idempotently(
-  args: { idempotencyKey?: string; routeKey: string; requestHash: string; userId: string; orgId?: string | null },
+  args: { idempotencyKey?: string; routeKey: string; requestHash: string; userId: string; orgId?: string | null; apiKeyId?: string | null; project?: string | null },
   run: () => Promise<ProjectIntakeActionResult>,
 ): Promise<ProjectIntakeActionResult> {
   if (!args.idempotencyKey) return await run();
   // Clients choose their keys, so two tenants will pick the same one: the cache key is scoped to organization and user.
-  const idempotencyKey = scopedIdempotencyKey({ orgId: args.orgId, userId: args.userId }, args.idempotencyKey);
+  const idempotencyKey = scopedIdempotencyKey({ orgId: args.orgId, userId: args.userId, apiKeyId: args.apiKeyId, project: args.project }, args.idempotencyKey);
 
-  let cached;
-  try {
-    cached = await getCachedIdempotentResponse({
+  return await withDirectUploadLock(`intake:${args.routeKey}:${idempotencyKey}`, async () => {
+    let cached;
+    try {
+      cached = await getCachedIdempotentResponse({
+        idempotencyKey,
+        routeKey: args.routeKey,
+        requestHash: args.requestHash,
+      });
+    } catch (error) {
+      throw new ProjectIntakeError(error instanceof Error ? error.message : "Idempotency conflict", 409);
+    }
+    if (cached) {
+      return {
+        payload: cached.body as ProjectIntakePayload,
+        status: cached.status as 201,
+        temporalDeferred: false,
+        idempotencyReplayed: true,
+      };
+    }
+
+    const result = await run();
+    await storeIdempotentResponse({
       idempotencyKey,
       routeKey: args.routeKey,
       requestHash: args.requestHash,
+      userId: args.userId,
+      status: result.status,
+      body: result.payload as unknown as Record<string, unknown>,
     });
-  } catch (error) {
-    throw new ProjectIntakeError(error instanceof Error ? error.message : "Idempotency conflict", 409);
-  }
-  if (cached) {
-    return {
-      payload: cached.body as ProjectIntakePayload,
-      status: cached.status as 201,
-      temporalDeferred: false,
-      idempotencyReplayed: true,
-    };
-  }
-
-  const result = await run();
-  await storeIdempotentResponse({
-    idempotencyKey,
-    routeKey: args.routeKey,
-    requestHash: args.requestHash,
-    userId: args.userId,
-    status: result.status,
-    body: result.payload as unknown as Record<string, unknown>,
-  });
-  return result;
+    return result;
+  }, "A request with this Idempotency-Key is still being processed; retry shortly", "idempotency_in_flight");
 }
 
 /**
@@ -337,7 +339,7 @@ export async function createBulkProjectIntake(
   });
 
   return await idempotently(
-    { idempotencyKey, routeKey: target.extract ? "extracts.bulk" : "uploads.bulk", requestHash, userId: args.userId, orgId: args.orgId },
+    { idempotencyKey, routeKey: target.extract ? "extracts.bulk" : "uploads.bulk", requestHash, userId: args.userId, orgId: args.orgId, apiKeyId: args.apiKeyId, project: args.project },
     async () =>
       actionResult(
         await requiredIntake(
@@ -372,6 +374,8 @@ export async function createRemoteUrlProjectIntake(
       requestHash: hashIdempotencyPayload({ ...hashedTarget, canonicalIds: canonicalIds ?? null, idempotencyKey }),
       userId: args.userId,
       orgId: args.orgId,
+      apiKeyId: args.apiKeyId,
+      project: args.project,
     },
     async () => {
       const intake = await requiredIntake(
@@ -426,6 +430,8 @@ export async function createWebsiteProjectIntake(
       requestHash: hashIdempotencyPayload({ ...target, startUrl, crawlOptions, idempotencyKey }),
       userId: args.userId,
       orgId: args.orgId,
+      apiKeyId: args.apiKeyId,
+      project: args.project,
     },
     async () => {
       const crawled = await crawl();

@@ -14,7 +14,7 @@ import {
 import { acceptChatRunDependency } from "../../services/chat-run-dependencies.js";
 import { sql } from "../../db.js";
 import { startMaterializeWorkflow } from "../../lib/temporal.js";
-import { canSpend, isSpendBlockedError } from "../../services/billing/spend-guard.js";
+import { assertCanSpend, canSpend, isSpendBlockedError } from "../../services/billing/spend-guard.js";
 import { enforceLiveBudgetCaps } from "../../services/run-creation.js";
 import type { MaterializeEvent } from "./deferred-context.js";
 
@@ -105,6 +105,7 @@ export const defaultMaterializeDeps: MaterializeDeps = {
     const pipeline = stampRunChartExport(resolved as PipelineFeatures, "machine", process.env, { stamped: true });
     const origin = source?.origin === "app" ? "app" : "machine";
     return acceptChatRunDependency({ ...args, pages: args.pageNumbers ?? [] }, async tx => {
+    await assertCanSpend(args.orgId, args.projectId, { client: tx, kind: "interactive", hold: false });
     await tx`
       insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, total_documents, pages_total, pipeline, workflow_started_at, lease_expires_at, creation_ready_at, creation_expires_at, origin)
       values (${id}, ${args.orgId}, ${args.userId}, ${args.projectId}, 'materialize', 'processing', 'materialize',

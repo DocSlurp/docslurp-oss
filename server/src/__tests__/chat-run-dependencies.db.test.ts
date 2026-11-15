@@ -20,7 +20,7 @@ beforeAll(async () => {
   snapshots=await import("../services/chat-operation-access.js");
   ({defaultMaterializeDeps:deps}=await import("../search/deferred/materialize-client.js"));
   await sql`insert into "user"(id,name,email) values('u','U','u@example.test')`;
-  await sql`insert into organizations(id,name,slug,created_by_user_id) values('o','O','o','u')`;
+  await sql`insert into organizations(id,name,slug,created_by_user_id,credit_balance_cents) values('o','O','o','u',1000)`;
   await sql`insert into projects(id,org_id,user_id,name) values('w','o','u','W')`;
   await sql`insert into documents(id,org_id,user_id,project_id,filename,mime_type,source_key,status)
     values('d','o','u','w','d.pdf','application/pdf','private','completed')`;

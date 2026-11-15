@@ -1,18 +1,20 @@
 import { describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({ calls: [] as Array<{ text: string; values: unknown[] }>, sourcePipeline: null as Record<string, unknown> | null }));
-vi.mock("../db.js", () => ({
-  sql: Object.assign(
+vi.mock("../db.js", () => {
+  const sql = Object.assign(
     async (strings: TemplateStringsArray, ...values: unknown[]) => {
       mocks.calls.push({ text: strings.join("?"), values });
       return /as pipeline/.test(strings.join("?")) ? [{ pipeline: mocks.sourcePipeline ?? {} }] : [];
     },
     { array: (v: unknown[]) => v, json: (v: unknown) => v },
-  ),
-}));
+  );
+  return { sql: Object.assign(sql, { begin: async (fn: (tx: typeof sql) => Promise<unknown>) => fn(sql) }) };
+});
 vi.mock("../lib/temporal.js", () => ({ startMaterializeWorkflow: vi.fn() }));
 const spend = vi.hoisted(() => ({
   canSpend: vi.fn(async () => true),
+  assertCanSpend: vi.fn(async () => undefined),
   enforceLiveBudgetCaps: vi.fn(async () => undefined),
 }));
 class BlockedError extends Error {
@@ -20,6 +22,7 @@ class BlockedError extends Error {
 }
 vi.mock("../services/billing/spend-guard.js", () => ({
   canSpend: spend.canSpend,
+  assertCanSpend: spend.assertCanSpend,
   isSpendBlockedError: (error: unknown) => error instanceof BlockedError,
 }));
 vi.mock("../services/run-creation.js", () => ({ enforceLiveBudgetCaps: spend.enforceLiveBudgetCaps }));
@@ -100,4 +103,12 @@ describe("materialize spend gate", () => {
     spend.enforceLiveBudgetCaps.mockRejectedValueOnce(new Error("Project not found"));
     await expect(defaultMaterializeDeps.canSpend("org-1", "ws-1")).rejects.toThrow("Project not found");
   });
+});
+
+it("refuses the materialization insert when live admission fails inside its transaction", async () => {
+  mocks.calls.length = 0;
+  spend.assertCanSpend.mockRejectedValueOnce(new BlockedError("project_budget_paused"));
+  await expect(defaultMaterializeDeps.createRun({ orgId: "o", userId: "u", projectId: "w", documentId: "d1", documents: 1, pages: 3 }))
+    .rejects.toMatchObject({ code: "project_budget_paused" });
+  expect(mocks.calls.some(call => call.text.includes("insert into project_runs"))).toBe(false);
 });

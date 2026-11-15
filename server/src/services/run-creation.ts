@@ -28,13 +28,13 @@ import { currentRequestApiKeyId, currentRequestId } from "../lib/request-context
 import { getAvailableCredits } from "./billing/credits.js";
 import {
   admitRunSpend,
+  loadSpendStatus,
   assertCanSpend,
   SpendBlockedError,
   type SpendBlockedCode,
 } from "./billing/spend-guard.js";
 import { canContributeToProject, canEditProject, getProjectAccessWithPipeline } from "./organizations.js";
 import { EditorRequiredError } from "../lib/editor-required.js";
-import { attributedUsage } from "./usage-attribution.js";
 import { buildRunProcessingPreview } from "./run-processing-preview.js";
 import { RunPipelineInvalidError, runLifecycle, type RunLifecycleRun, type RunStartOutcome } from "./run-lifecycle.js";
 import { mapDocument, mapProjectRun, type DocumentRow, type ProjectRunRow } from "./run-records.js";
@@ -189,89 +189,14 @@ export async function enforceLiveBudgetCaps(
   projectId: string,
   orgId: string,
 ): Promise<void> {
-  const sql = defaultSql;
-  if (
-    process.env.NODE_ENV === "development" &&
-    SKIP_RUN_BUDGET_GUARDS_IN_DEV
-  ) {
-    return;
-  }
-
-  // Credits are checked atomically when the run row is inserted
-  // (admitRunSpend). An admitted run is paused, not failed, once the org
-  // balance goes negative mid-run (docs/billing/credits.md, run admission).
-
-  // Budgets first: summing a month of attributed usage is the most expensive
-  // statement on the ingest path (67% of app-database time at 576 slots in the
-  // 2026-10-09 load-test re-run), so only sum spend for a cap that exists.
-  const [limits] = await sql<
-    { project_budget_cents: number | null; org_budget_cents: number | null }[]
-  >`
-    select
-      w.monthly_budget_cents as project_budget_cents,
-      o.monthly_budget_cents as org_budget_cents
-    from projects w
-    join organizations o on o.id = w.org_id
-    where w.id = ${projectId}
-    limit 1
-  `;
-
-  if (!limits) {
-    throw new Error("Project not found");
-  }
-
-  const monthSpendCents = async (scope: "project" | "org"): Promise<number> => {
-    const [row] = await sql<{ spend_cents: number }[]>`
-      select coalesce(sum(au.cost_cents), 0)::double precision as spend_cents
-      from ${attributedUsage("month")} au
-      where ${scope === "project" ? sql`au.project_id = ${projectId}` : sql`au.org_id = ${orgId}`}
-    `;
-    return Number(row?.spend_cents ?? 0);
-  };
-  const budget = {
-    project_budget_cents: limits.project_budget_cents,
-    project_spend_cents: limits.project_budget_cents == null ? 0 : await monthSpendCents("project"),
-    org_budget_cents: limits.org_budget_cents,
-    org_spend_cents: limits.org_budget_cents == null ? 0 : await monthSpendCents("org"),
-  };
-
-  const projectPaused =
-    budget.project_budget_cents != null &&
-    budget.project_spend_cents >= budget.project_budget_cents;
-  const orgPaused =
-    budget.org_budget_cents != null &&
-    budget.org_spend_cents >= budget.org_budget_cents;
-
-  // Write only on a change: every ingest runs this, and the org row is the
-  // one every credit debit in the org locks.
-  await sql`
-    update projects
-    set budget_paused = ${projectPaused}, updated_at = now()
-    where id = ${projectId} and budget_paused is distinct from ${projectPaused}
-  `;
-  await sql`
-    update organizations
-    set budget_paused = ${orgPaused}, updated_at = now()
-    where id = ${orgId} and budget_paused is distinct from ${orgPaused}
-  `;
-
-  if (projectPaused) {
-    throw new RunCreationBlockedError(
-      "This project has reached its monthly budget cap and new runs are paused. " +
-        "Increase the budget in project settings to resume processing.",
-      402,
-      "project_budget_paused",
-    );
-  }
-
-  if (orgPaused) {
-    throw new RunCreationBlockedError(
-      "This organization has reached its monthly budget cap and new runs are paused. " +
-        "Increase the org budget to resume processing.",
-      402,
-      "org_budget_paused",
-    );
-  }
+  if (process.env.NODE_ENV === "development" && SKIP_RUN_BUDGET_GUARDS_IN_DEV) return;
+  await defaultSql.begin(async tx => {
+    await tx`select pg_advisory_xact_lock(spend_admission_lock_key(${orgId}))`;
+    const status = await loadSpendStatus(orgId, projectId, { client: tx });
+    if (!status?.projectInOrg) throw new RunCreationBlockedError("Project not found", 402, "plan_not_entitled");
+    if (status.projectBudgetPaused) throw new RunCreationBlockedError("This project has reached its monthly budget cap", 402, "project_budget_paused");
+    if (status.orgBudgetPaused) throw new RunCreationBlockedError("This organization has reached its monthly budget cap", 402, "org_budget_paused");
+  });
 }
 
 // Optional floor on available credits (MIN_CREDIT_BALANCE_CENTS, 1 credit = 1
@@ -1055,7 +980,6 @@ export function createRunCreation(deps: RunCreationDeps) {
     // One admission path for every caller: credit floor, live budget caps, then
     // the reserved insert.
     await assertCreditFloor(access.orgId);
-    await enforceLiveBudgetCaps(input.projectId, access.orgId);
     // Reading charts with AI bills model reads: the same spend admission as other model-calling work.
     if (chartExportModelsAllowed(input.pipeline.chartExport as ResolvedChartExportConfig, process.env)) {
       await assertCanSpend(access.orgId, input.projectId, { kind: "job" });
