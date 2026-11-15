@@ -1,3 +1,4 @@
+import { SAML } from "@node-saml/node-saml";
 import { Hono } from "hono";
 import { inflateRawSync } from "node:zlib";
 import { createHash } from "node:crypto";
@@ -306,6 +307,28 @@ beforeEach(() => {
 });
 
 describe("ssoRoutes security hardening", () => {
+  it("binds ordinary SAML callbacks to the exact consumed RelayState request", async () => {
+    seedOrg({ enabled: true, providerType: "saml", metadataUrl: "https://idp.acme.com/saml/metadata", emailDomain: "acme.com" });
+    seedRequest("request-a"); seedRequest("request-b");
+    for (const request of db.requests) { request.provider = "saml"; request.created_at = new Date().toISOString(); request.expires_at = new Date(Date.now() + 600_000).toISOString(); }
+    vi.mocked(fetch).mockResolvedValue(new Response(`<EntityDescriptor xmlns="urn:oasis:names:tc:SAML:2.0:metadata" entityID="urn:company"><IDPSSODescriptor protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol"><KeyDescriptor use="signing"><KeyInfo xmlns="http://www.w3.org/2000/09/xmldsig#"><X509Data><X509Certificate>MIIFAKE</X509Certificate></X509Data></KeyInfo></KeyDescriptor><SingleSignOnService Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect" Location="https://idp.acme.com/saml/login"/></IDPSSODescriptor></EntityDescriptor>`));
+    let inspected = false;
+    const validation = vi.spyOn(SAML.prototype, "validatePostResponseAsync").mockImplementation(async function (this: SAML) {
+      expect(await this.options.cacheProvider.getAsync("request-a")).toBeNull();
+      expect(await this.options.cacheProvider.getAsync("request-b")).toBeTruthy();
+      expect(this.options.idpIssuer).toBe("urn:company");
+      inspected = true;
+      throw new Error("synthetic validation refusal");
+    });
+    try {
+      await buildApp().request("/v1/auth/saml/org-1/callback", { method: "POST", headers: { ...ssoCookie("request-b"), "Content-Type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ RelayState: "request-b", SAMLResponse: "synthetic" }).toString() });
+      expect(inspected).toBe(true);
+      expect(createSessionMock).not.toHaveBeenCalled();
+      // A new browser-bound request must not turn the response for the old request into a fresh login.
+      expect(await (await buildApp().request("/v1/auth/saml/org-1/callback", { method: "POST", headers: { ...ssoCookie("request-b"), "Content-Type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ RelayState: "request-b", SAMLResponse: "synthetic" }).toString() })).status).toBe(400);
+    } finally { validation.mockRestore(); }
+  });
+
   it("prefers configured API origin over spoofable forwarded headers", () => {
     process.env.PUBLIC_API_URL = "https://api.docslurp.example/v1";
     const origin = inferApiOrigin(new Request("https://internal.local/v1/auth/oidc/org/callback", {
