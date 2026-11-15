@@ -1,12 +1,14 @@
 # Extractor plugins
 
-DocSlurp ships an open default for every extraction path. A deployment can add three optional providers without
+DocSlurp ships an open default for every extraction path. A deployment can add four optional providers without
 changing core code:
 
 - a **sandboxed PDF extractor**, served as the `vm-pdf` extractor id;
 - an **image orientation provider**, used for quarter-turn correction of page and embedded images;
 - a **sandboxed OCR provider** (`sandboxedOcr`), which runs OCR when `DOCSLURP_OCR_MODE=vm` (see
-  [OCR](ocr.md)).
+  [OCR](ocr.md));
+- a **page image reader** (`pageImageReader`), which reads OCR page images in its own VM when
+  `DOCSLURP_OCR_PAGE_READER` is on (see [OCR](ocr.md#page-reader)).
 
 Plugins are loaded by configuration, never imported by core. Core builds, typechecks and tests with none present.
 
@@ -150,6 +152,36 @@ to start; it never moves OCR to the worker host or to a hosted model instead. Se
   is no fallback.
 
 At load the worker lists the capability as `vm-ocr` (`[extractor-plugins] loaded api=1 providers=...,vm-ocr`).
+
+## Page image reader (pageImageReader)
+
+`DOCSLURP_OCR_PAGE_READER=escalation|all` reads OCR'd pages through this provider before hosted escalation. With the
+flag on and no provider (or `assertConfigured()` throwing), the worker refuses to start. Off by default.
+
+- The provider receives a `PageImageReadJob` (`worker/src/extractors/plugins.ts`): `scope` (`orgId`, `runId`) and
+  `pages`, each an opaque `key` and the absolute path of a PNG the OCR boundary wrote and the host checked by signature
+  and size. It never receives the customer's stored file, a document id or credentials.
+- It reads the pages in a VM or microVM bound to `scope.orgId` for that VM's whole life. The VM may serve several jobs
+  of that organization, never another's, and refuses a job for another organization. The VM has no network beyond the job's own connection, no credentials and no cloud metadata access.
+- `read(job, signal)` resolves with `results` (at most one per key: `{ key, status: "read", markdown, inputTokens?,
+  outputTokens? }` or `{ key, status: "failed", reason }`, reason one of `timeout`, `refused`, `oversized`, `invalid`,
+  `vm-lost`, `capacity`) and `usage`, the provider cost of the job as usage events.
+- A rejection that spent compute carries it as `pageReaderUsage` (an array of usage events, read with
+  `pageReaderUsageOf`); set `ocrRefused: true` when the input was refused rather than the job failing to run. Either way
+  the host keeps the recogniser's text: a page reader never fails a page.
+- `maxPagesPerJob`, `maxImageBytes` and `maxMarkdownBytes` bound each job; the host never sends more or larger, and
+  rejects a job whose answer is larger. `model` is logged in `[ai-usage]` and stored on usage events; it is never shown
+  in the product.
+- The host validates every response and records usage under its own metric (`ocr-page-reader`) and scope, at provider
+  cost and 0 credits.
+- Optional `estimateJobCostCents(pages)`: an upper estimate of one job's provider cost. The host reserves it against the
+  organization's daily reader budget (`DOCSLURP_OCR_PAGE_READER_ORG_DAILY_MAX_COST_CENTS`, [OCR](ocr.md#page-reader))
+  before sending the job, so concurrent jobs cannot pass the cap together; without it the host reserves 0.
+- Optional `evalScore` (0 to 1) and `evalRef`, together: the reader's composite on the page-OCR tier benchmark and the
+  recorded run it comes from. A tier word in `DOCSLURP_OCR_PAGE_READER` ranks the reader by it against the hosted
+  escalation reader ([OCR](ocr.md#page-reader)); a reader without it is never chosen by a tier.
+
+At load the worker lists the capability as `page-reader`.
 
 ## Sandboxed PDF batch (`sandboxedPdf.batch`)
 

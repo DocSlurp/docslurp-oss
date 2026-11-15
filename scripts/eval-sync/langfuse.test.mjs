@@ -85,9 +85,12 @@ function fakeLangfuse({ failOn = null, experimentScoresWithoutConfig = false, sc
       }));
       return { data: rows, meta: {} };
     }
-    if (route === "/v2/scores") {
-      const ids = (params.get("scoreIds") ?? "").split(",").filter(Boolean);
-      return { data: ids.map((id) => state.scores.get(id)).filter((score) => score && !scoreLookupDrops(score)).map((score) => structuredClone(score)), meta: { totalPages: 1 } };
+    // events_only v4 deployments 404 /v2/scores; /v3/scores returns configId only with fields=details.
+    if (route === "/v2/scores") return null;
+    if (route === "/v3/scores") {
+      const ids = (params.get("id") ?? "").split(",").filter(Boolean);
+      const details = (params.get("fields") ?? "").split(",").includes("details");
+      return { data: ids.map((id) => state.scores.get(id)).filter((score) => score && !scoreLookupDrops(score)).map(({ configId, ...rest }) => structuredClone(details ? { configId, ...rest } : rest)), meta: {} };
     }
     throw new Error(`fake: unhandled ${route}`);
   };
@@ -430,7 +433,7 @@ test("benchmark kind: s3 inputs, verified local bytes, categories flattened into
   await assert.rejects(loadManifest(await manifest("escape.json")), /escapes the corpus root|ENOENT/);
 });
 
-test("run readback fills a missing ScoreV3 configId from /v2/scores and still fails closed without it", async () => {
+test("run readback fills a missing ScoreV3 configId from /v3/scores and still fails closed without it", async () => {
   const setup = async (options) => {
     const fake = fakeLangfuse(options);
     const items = buildRecordItems({ name: "fixture/corpus-v1/development", split: "development", records: [{ id: "doc-1", split: "development", input: { caseId: "doc-1" }, expectedOutput: null, metadata: {} }], commit: "c" });

@@ -2,8 +2,8 @@
  * Extractor plugins: optional providers a deployment loads by configuration, never by import.
  *
  * DocSlurp ships an open default for everything here. A deployment may add one sandboxed PDF extractor (served as the
- * `vm-pdf` extractor id), one image orientation provider and one sandboxed OCR provider (`DOCSLURP_OCR_MODE=vm`) by naming
- * plugin modules in DOCSLURP_EXTRACTOR_PLUGINS (comma-separated absolute paths or file: URLs). Each module exports
+ * `vm-pdf` extractor id), one image orientation provider, one sandboxed OCR provider (`DOCSLURP_OCR_MODE=vm`) and one page
+ * image reader (`DOCSLURP_OCR_PAGE_READER`, a second read of OCR page images in its own VM) by naming plugin modules in DOCSLURP_EXTRACTOR_PLUGINS (comma-separated absolute paths or file: URLs). Each module exports
  * `register(host)`, which returns the plugin.
  *
  * Rules the host enforces:
@@ -300,12 +300,80 @@ export interface SandboxedOcrProvider {
   timeoutMs(frames: number): number;
 }
 
+/**
+ * One page image read job: Markdown for page PNGs the OCR boundary (sandboxedOcr VM or the self-hosted sandbox) already
+ * wrote and the host validated by PNG signature and size. The provider reads them in a VM or microVM bound to `scope.orgId`
+ * for that VM's whole life (it may serve several jobs of that organization, never another's), reads them there, and returns only bounded Markdown per page. The VM gets no
+ * credentials, no metadata endpoint and no network beyond the job's own connection.
+ */
+export interface PageImageReadJob {
+  /** Tenant scope of every page. A provider binds an isolated VM to one organization and refuses a job for another. */
+  scope: { orgId: string; runId: string };
+  /** Opaque keys (never document ids) and absolute paths of PNGs the OCR boundary wrote and the host validated by signature and size. */
+  pages: Array<{ key: string; imagePath: string }>;
+}
+
+export const PAGE_IMAGE_READ_FAILURES = ["timeout", "refused", "oversized", "invalid", "vm-lost", "capacity"] as const;
+export type PageImageReadFailure = (typeof PAGE_IMAGE_READ_FAILURES)[number];
+
+export type PageImageReadResult =
+  | { key: string; status: "read"; markdown: string; inputTokens?: number; outputTokens?: number }
+  | { key: string; status: "failed"; reason: PageImageReadFailure };
+
+export interface PageImageReaderProvider {
+  /** Stable id for telemetry and ledger metadata, chosen by the plugin. */
+  id: string;
+  /** Model id logged in `[ai-usage]` and usage events; never shown in the product UI. */
+  model: string;
+  /** Pages one job carries at most. */
+  maxPagesPerJob: number;
+  /** Largest PNG the provider accepts; the host never sends a larger one. */
+  maxImageBytes: number;
+  /** Largest Markdown (UTF-8 bytes) one page may return; a larger result fails the job. */
+  maxMarkdownBytes: number;
+  /** Throw when the deployment is not ready (unpinned image, missing endpoint). The worker then refuses to start. */
+  assertConfigured(): void;
+  /**
+   * Optional upper estimate of one job's provider cost in cents, for `pages` pages. The host reserves it against the
+   * organization's daily reader budget before sending the job (DOCSLURP_OCR_PAGE_READER_ORG_DAILY_MAX_COST_CENTS), so
+   * concurrent jobs cannot pass the cap together; the job's recorded cost replaces it. Without it the host reserves 0.
+   */
+  estimateJobCostCents?(pages: number): number;
+  /**
+   * Optional: the reader's composite on the page-OCR tier benchmark (0-1, tolerant-markdown@v1 `content`) from a recorded
+   * run (`evalRef`). A tier word in DOCSLURP_OCR_PAGE_READER ranks the reader by it (@docslurp/shared selectOcrRoute);
+   * without it the reader is unmeasured and never chosen by a tier.
+   */
+  evalScore?: number;
+  evalRef?: string;
+  /**
+   * Read the job's pages. Resolves with one result per page it answers (at most one per key) and the provider cost of
+   * every VM or request it ran. A rejection that spent compute carries that cost as `pageReaderUsage` (PAGE_READER_USAGE_PROPERTY,
+   * read with pageReaderUsageOf); set `ocrRefused: true` when the reader refused the job's input rather than failing to run.
+   * Either way the host keeps the recogniser's text for the job's pages: a page reader never fails a page or document.
+   */
+  read(job: PageImageReadJob, signal?: AbortSignal): Promise<{ results: PageImageReadResult[]; usage: UsageEvent[] }>;
+}
+
+/** The property a page reader's rejection carries its incurred usage on (PageImageReaderProvider.read). */
+export const PAGE_READER_USAGE_PROPERTY = "pageReaderUsage";
+
+/** The usage a page reader rejection carries (shape-checked; never throws). A single SandboxRunError `usage` counts too. */
+export function pageReaderUsageOf(error: unknown): UsageEvent[] {
+  if (!error || (typeof error !== "object" && typeof error !== "function")) return [];
+  const isEvent = (event: unknown): event is UsageEvent => !!event && typeof event === "object" && typeof (event as { metric?: unknown }).metric === "string";
+  const raw = (error as Record<string, unknown>)[PAGE_READER_USAGE_PROPERTY];
+  if (!Array.isArray(raw)) { const single = (error as { usage?: unknown }).usage; return isEvent(single) ? [single] : []; }
+  return raw.filter(isEvent);
+}
+
 export interface ExtractorPlugin {
   apiVersion: typeof EXTRACTOR_PLUGIN_API_VERSION;
   name: string;
   sandboxedPdf?: SandboxedPdfExtractorProvider;
   imageOrientation?: ImageOrientationProvider;
   sandboxedOcr?: SandboxedOcrProvider;
+  pageImageReader?: PageImageReaderProvider;
 }
 
 /** Host values a plugin uses at runtime. Plugins import only types from the worker. */
@@ -358,6 +426,8 @@ const plugins: ExtractorPlugin[] = [];
 let loadedFrom: string | undefined;
 
 const PROVIDER_ID = /^[a-z][a-z0-9-]{1,63}$/;
+/** A model id safe to log and store: no spaces or control characters. */
+const PAGE_READER_MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,127}$/;
 
 /** Register a plugin. Exactly one provider per capability; a second one is a configuration error. */
 export function registerExtractorPlugin(plugin: ExtractorPlugin): void {
@@ -392,6 +462,23 @@ export function registerExtractorPlugin(plugin: ExtractorPlugin): void {
     if (!Number.isSafeInteger(ocr.maxSourceBytes) || ocr.maxSourceBytes < 1) throw new Error("Sandboxed OCR provider needs maxSourceBytes");
     for (const name of ["assertConfigured", "run", "timeoutMs"] as const) {
       if (typeof ocr[name] !== "function") throw new Error(`Sandboxed OCR provider lacks ${name}()`);
+    }
+  }
+  const reader = plugin.pageImageReader;
+  if (reader) {
+    if (pageImageReaderProvider()) throw new Error("Only one page image reader provider may be registered");
+    if (!PROVIDER_ID.test(reader.id ?? "")) throw new Error("Page image reader provider needs a lowercase id");
+    if (typeof reader.model !== "string" || !PAGE_READER_MODEL_ID.test(reader.model)) throw new Error("Page image reader provider needs a model id");
+    for (const name of ["maxPagesPerJob", "maxImageBytes", "maxMarkdownBytes"] as const) {
+      if (!Number.isSafeInteger(reader[name]) || reader[name] < 1) throw new Error(`Page image reader provider needs a positive ${name}`);
+    }
+    for (const name of ["assertConfigured", "read"] as const) {
+      if (typeof reader[name] !== "function") throw new Error(`Page image reader provider lacks ${name}()`);
+    }
+    if (reader.estimateJobCostCents !== undefined && typeof reader.estimateJobCostCents !== "function") throw new Error("Page image reader provider's estimateJobCostCents must be a function");
+    if (reader.evalScore !== undefined && !(typeof reader.evalScore === "number" && reader.evalScore >= 0 && reader.evalScore <= 1)) throw new Error("Page image reader provider's evalScore must be from 0 to 1");
+    if ((reader.evalScore === undefined) !== (reader.evalRef === undefined) || (reader.evalRef !== undefined && (typeof reader.evalRef !== "string" || !reader.evalRef.trim()))) {
+      throw new Error("Page image reader provider needs evalScore and evalRef together");
     }
   }
   plugins.push(plugin);
@@ -673,12 +760,17 @@ export function requireSandboxedOcrProvider(): SandboxedOcrProvider {
   return provider;
 }
 
-/** The generic ids of the capabilities registered plugins provide (`vm-pdf`, `image-orientation`, `vm-ocr`). */
+export function pageImageReaderProvider(): PageImageReaderProvider | null {
+  return plugins.find((plugin) => plugin.pageImageReader)?.pageImageReader ?? null;
+}
+
+/** The generic ids of the capabilities registered plugins provide (`vm-pdf`, `image-orientation`, `vm-ocr`, `page-reader`). */
 export function loadedPluginCapabilities(): string[] {
   return [
     ...(sandboxedPdfProvider() ? [VM_PDF_EXTRACTOR_ID] : []),
     ...(imageOrientationProvider() ? ["image-orientation"] : []),
     ...(sandboxedOcrProvider() ? ["vm-ocr"] : []),
+    ...(pageImageReaderProvider() ? ["page-reader"] : []),
   ];
 }
 

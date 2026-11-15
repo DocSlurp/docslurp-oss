@@ -12,6 +12,3 @@ onlyBuiltDependencies:
   - sharp
 
 minimumReleaseAge: 1440
-minimumReleaseAgeExclude:
-  - mastra
-  - '@mastra/*'

@@ -176,7 +176,7 @@ S3-compatible provider.
 The proxy and the cache directory serve this process only:
 
 - The proxy listens on `127.0.0.1` and answers only requests that carry its own per-process
-  secret, for keys under the bucket and first path segment of `LANCEDB_URI` (`lancedb/` in
+  session-token header (never a URL capability), for keys under the bucket and first path segment of `LANCEDB_URI` (`lancedb/` in
   `s3://bucket/lancedb`). Anything else gets 403 and counts as `refused` on
   the `[lancedb-s3]` line; a non-zero count means something else on the host is probing it.
 - The cache directory must be owned by the server's user and not writable by group or others.
@@ -188,9 +188,17 @@ The proxy and the cache directory serve this process only:
   (logged), because Lance would send its loopback requests to that proxy.
 - The proxy sends to the endpoint a direct connection would use: `AWS_ENDPOINT_URL_S3` when
   set, then the storage URI's endpoint.
-- Deleted documents: files removed from the bucket by another process (the worker's cleanup
-  and compaction) stay in this directory until the size limit evicts them. Nothing requests
-  them again, but the bytes remain on the volume. Delete the directory to clear them at once.
+- Cache bytes and validation leases are isolated by a nonreversible fingerprint of the upstream
+  endpoint and credentials; a less privileged credential cannot reuse another caller's cache.
+- Each object is checked against origin before its first cached read after process start,
+  then at most every 30 seconds. Set `LANCEDB_S3_CACHE_REVALIDATE_SECONDS=0` to check every
+  cached read (allowed range 0–30). A refusal, missing object or failed check drops cached
+  bytes and never serves a stale response. Changed ETags invalidate outstanding fills.
+- A sweep every 30 seconds removes objects idle for five minutes, including orphan blocks
+  whose metadata was evicted. Thus external deletions are noticed on active reads within
+  the validation interval, and unused disk copies disappear within five minutes plus the
+  sweep interval. This is a disk-cache bound; native memory caches and request result caches
+  have their own lifetimes. Delete the cache directory to clear disk bytes immediately.
 
 What is cached, and what is not:
 
@@ -390,3 +398,62 @@ Merge this rule into any existing lifecycle configuration (such as incomplete-mu
 ## Worker notification events
 
 Workers never send email. Run completed/failed, extraction plausibility warnings, budget alerts and secret-expiry alerts are written to the in-app notification inbox and emitted as `notification.<event>` OTLP log records (logger `docslurp.events`), so they show up in SigNoz with the run, document, project and organization IDs as attributes. The API sends email only for sign-in codes and links, organization and project invites, and export or extract downloads, and it never sends to reserved domains (`*.local`, `*.test`, `*.invalid`, `*.example`, `localhost`, `example.com/net/org`); those sends are logged as `provider=suppressed`.
+
+
+### Search readiness and warm-up admission
+
+In production, startup awaits the most recently searched projects' selected indexes before
+standalone listening or embedded `/ready` can succeed. `SEARCH_BOOT_WARM_PROJECTS` defaults
+to 5 (maximum 50); 0 disables this readiness warm-up. The startup attempt is shared across
+requests and has a 30-second deadline. Exceeding it keeps readiness unsuccessful for that
+process, even if a native load later completes: restart after resolving storage/size trouble,
+or explicitly set the warm-up limit to 0. Liveness remains separate in the embedded app.
+
+Eager loading requires known manifest size. Twice the table's total on-disk bytes must fit
+within both half the configured index cache and one eighth of usable machine RAM. Unknown
+or oversized tables skip eager loading and search them on demand. At most two native eager
+loads run concurrently; a caller timeout does not release a still-running native load's slot,
+and expired queued jobs do not begin native work. These conservative estimates are admission
+limits, not a guarantee of exact allocator memory use.
+
+### Partitioned vector indexes and index-only reindexing
+
+New and consolidated HNSW-SQ indexes target 1,000 rows per partition, rounded up to a
+power of two, at most 4,096 partitions and with at least 256 training rows per partition.
+`LANCEDB_VECTOR_PARTITION_ROWS` changes this target; 0 restores the former one-partition
+per million-row policy. Existing indexes are not rebuilt merely because the setting changes.
+
+Search uses L2 with scalar quantization, at least 100 HNSW candidates for unfiltered
+queries, 32 probes and refinement of two candidates per returned hit. Document/page filters
+probe all partitions (up to the build cap) and remain prefilters. This preserves narrow-scope
+recall at the cost of cold-read savings for filtered searches. `LANCEDB_REFINE_FACTOR` can
+explicitly select 1–16. Recall and latency remain corpus-dependent: validate a new corpus
+before changing build policy, and retain the per-scope results rather than only an average.
+
+Reindexing replaces only the vector index, without extraction, embedding calls, table
+replacement, compaction, pruning, or touching the FTS index. Stop writers to the selected
+project while applying it: the row/memory estimate is a preflight check, not a transactional
+limit on concurrent ingestion. Use the deployment's normal storage environment:
+
+```sh
+pnpm --filter @docslurp/worker exec tsx scripts/reindex-vector.ts \
+  --org ORG_ID --project PROJECT_ID --model provider/model --dimensions 1024
+# Review the dry-run plan, then repeat with --apply.
+```
+
+The default row budget is 100,000; `--max-rows` raises it explicitly, while the machine-memory
+check still applies. A catalogued legacy URI may be selected with `--uri`, but must remain
+inside that exact organization's project root and its vector dimension must match. Apply
+one project at a time. Replacement commits a new index version atomically; older table
+versions remain available for the configured retention window. A rollback changes the build
+policy and rebuilds the vector index again; rolling back application code alone does not
+restore the previous on-disk index layout.
+
+For a bounded local comparison, prepare a local table with only `id`, `documentId` and
+`vector` columns and run `worker/scripts/vector-index-recall.ts --database PATH --table NAME
+--output NEW_DIRECTORY --tuned`. It holds out 64 real vectors, compares both arms against
+exact flat search, reports screening/confirmation separately for unfiltered and document
+scopes, records production query policy, and exits nonzero if either scope misses 95% mean
+recall@10 or regresses more than one percentage point. Its output stays local; do not publish
+customer vectors/identifiers. `vector-index-cold.ts` measures process-cold local read bytes;
+these are neither physical I/O nor a production S3 latency measurement.
