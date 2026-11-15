@@ -77,7 +77,7 @@ export const defaultMaterializeDeps: MaterializeDeps = {
     return canSpend(orgId, projectId);
   },
   async createRun(args) {
-    const id = `mat_${randomUUID()}`;
+    const id = randomUUID();
     const maxCredits = args.maxCredits;
     if (!Number.isSafeInteger(args.pages) || args.pages < 1 || !Number.isFinite(maxCredits) || maxCredits <= 0) {
       throw new Error("Invalid bounded materialization workload");

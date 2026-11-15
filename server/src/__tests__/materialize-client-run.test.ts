@@ -1,4 +1,4 @@
-import { pageCredits } from "@docslurp/shared";
+import { pageCredits, realtimeResourceSchema } from "@docslurp/shared";
 import { describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({ calls: [] as Array<{ text: string; values: unknown[] }>, sourcePipeline: null as Record<string, unknown> | null }));
@@ -31,6 +31,18 @@ vi.mock("../services/run-creation.js", () => ({ enforceLiveBudgetCaps: spend.enf
 const { defaultMaterializeDeps } = await import("../search/deferred/materialize-client.js");
 
 describe("materialize run rows", () => {
+  it("creates distinct run ids accepted by the realtime protocol and stores the returned id", async () => {
+    mocks.calls.length = 0;
+    const args = { orgId: "o", userId: "u", projectId: "w", documentId: "d1", documents: 1, pages: 3, maxCredits: 3 };
+    const ids = [await defaultMaterializeDeps.createRun(args), await defaultMaterializeDeps.createRun(args)];
+    expect(new Set(ids).size).toBe(2);
+    for (const id of ids) {
+      expect(realtimeResourceSchema.safeParse({ kind: "run", runId: id }).success).toBe(true);
+      expect(mocks.calls.filter(call => call.text.includes("insert into project_runs")).some(call => call.values[0] === id)).toBe(true);
+    }
+    expect(realtimeResourceSchema.safeParse({ kind: "run", runId: `mat_${ids[0]}` }).success).toBe(false);
+  });
+
   it("inherit the source document's run pipeline (then the project's), never an empty default", async () => {
     mocks.calls.length = 0;
     await defaultMaterializeDeps.createRun({ orgId: "o", userId: "u", projectId: "w", documentId: "d1", documents: 1, pages: 3, maxCredits: 3 });

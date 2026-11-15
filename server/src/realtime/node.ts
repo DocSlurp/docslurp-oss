@@ -185,7 +185,9 @@ export function attachRealtimeServer(server: Server, options: RealtimeHostOption
             if (++messages > LIMITS.messagesPerMinute || ++inFlight > 16) return close(1008, "rate_limit");
             chain = chain.then(async () => {
               if (controller.signal.aborted) return;
-              const frame = parseRealtimeClientFrame(raw.toString());
+              // invalid_frame tells the client its frame can never succeed, so only a frame that fails to parse earns it.
+              let frame: ReturnType<typeof parseRealtimeClientFrame>;
+              try { frame = parseRealtimeClientFrame(raw.toString()); } catch { return close(1008, "invalid_frame"); }
               if (frame.type === "heartbeat") { send({ v: 1, type: "heartbeat", epoch }); return; }
               if (frame.type === "unsubscribe") {
                 if (subscriptions.get(frame.subscriptionId)?.generation === frame.generation) {
@@ -232,7 +234,7 @@ export function attachRealtimeServer(server: Server, options: RealtimeHostOption
                 await subscription.close(); subscriptions.delete(frame.subscriptionId);
                 send(frameFor(frame.subscriptionId, frame.generation, frame.resource, "error", 0, undefined, "subscription_unavailable"));
               }
-            }).catch(() => close(1008, "invalid_frame")).finally(() => { inFlight--; });
+            }).catch(() => close(1011, "frame_failed")).finally(() => { inFlight--; });
           });
           const verifyTimer = setInterval(() => {
             // A stalled authorization backend cannot prolong an old decision.
