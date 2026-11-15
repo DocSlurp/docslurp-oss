@@ -1182,7 +1182,7 @@ export class VisionExtractStage implements Stage {
       const started = Date.now();
       let result: Awaited<ReturnType<typeof ocrDocument>>;
       try {
-        result = await ocrDocument({ runner: this.runner, state, documentId: document.id, source, kind: "pdf", pages: batch, hostedReader,
+        result = await ocrDocument({ checkpointStorage: this.storage, runner: this.runner, state, documentId: document.id, source, kind: "pdf", pages: batch, hostedReader,
           stage: this.name, ...(signal ? { signal } : {}) });
       } catch (error) {
         if (signal?.aborted || error instanceof OcrInfrastructureError) throw error;

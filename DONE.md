@@ -27,6 +27,10 @@
 
 - ClamAV policy (#406): deployed startup refuses disabled scanning and age limits outside 1–24 hours; runtime scanning caps definition age at 24 hours even if startup validation is skipped. Development overrides remain available. Both independent council approvals are recorded; deployment remains pending.
 
+## Base OCR retry reuse (2026-11-15)
+
+- Reuse base VM OCR after publication failures through bounded, tenant/run/document/source/settings-bound object checkpoints, including frames for existing second-read paths. Replay deterministic Rich charges through the existing ledger without new base compute; delete checkpoints after document-stage publication commits. No per-page database rows.
+
 ## Managed models: callers choose categories, never a backend model (2026-11-13, draft, needs council)
 
 - Chat takes `tier` (`fastest`, `balanced`, `smart`) and `reasoning` on `/v1/chat`, `/v1/chat/stream`, chat operations, MCP `chat` and `docslurp.tier`/`docslurp.reasoning` on `/v1/chat/completions`. A backend `model` is operator-evaluation only (platform admins, `DOCSLURP_CHAT_EVAL_ORG_IDS`); everyone else gets 400 `model_not_allowed` naming the tiers. Chat responses report the tier; backend ids stay in usage events, traces and logs.
