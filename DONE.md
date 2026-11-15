@@ -1,3 +1,4 @@
+- Recovery council fixes (#425): document-stage restart clears prior typed failure; upload status-only metadata reads require current project/org read access. Migrated database negatives cover revoked shares/memberships and invalid API-key scopes; no parser or OCR checkpoint changes.
 - Asset ledger: reject repeat references on new or updated unlinked rows with an idempotent NOT VALID database constraint; retain historical rows for separate cleanup.
 ## Ingest version tagging and typed unavailable states (2026-11-13, draft, needs council)
 
