@@ -14,6 +14,7 @@
  *   it reads no OCR rather than refusing to start).
  */
 import { sandboxedOcrProvider } from "../extractors/plugins.js";
+import { assertOcrPageReaderConfiguration } from "./page-reader-mode.js";
 
 export const OCR_MODES = ["vm", "local", "hosted", "off"] as const;
 export type OcrMode = (typeof OCR_MODES)[number];
@@ -147,7 +148,7 @@ export function localOcrRefusal(env: NodeJS.ProcessEnv = process.env): string | 
 
 /**
  * Startup check, run after extractor plugins load. Throws (the worker does not start) when the chosen mode cannot run as
- * configured: `vm` without a provider, `local` outside a self-hosted profile.
+ * configured: `vm` without a provider, `local` outside a self-hosted profile, or the page reader on without what it needs.
  */
 export function assertOcrConfiguration(env: NodeJS.ProcessEnv = process.env): OcrMode {
   const mode = resolveOcrMode(env);
@@ -172,6 +173,8 @@ export function assertOcrConfiguration(env: NodeJS.ProcessEnv = process.env): Oc
     if (refusal) throw new Error(`${refusal}; refusing to start`);
   }
   console.log(`[ocr] mode=${mode} profile=${profile ?? "unset"}${mode === "vm" ? " boundary=vm" : mode === "local" ? " boundary=local-sandbox" : ""}`);
+  // The optional page reader (DOCSLURP_OCR_PAGE_READER): refuses to start when on without a ready provider or boundary PNGs.
+  assertOcrPageReaderConfiguration(env, mode);
   const longEdge = ocrLongEdgeOptIn(env);
   if (longEdge !== null) {
     console.warn(
