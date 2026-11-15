@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import {
   detectFileFormat,
   normalizeStoredPipelineFeatures,
+  privacyModeAllowsHosted,
   resolveAllowedPipelineTextModel,
   SUMMARY_TREE_BUILD_STALE_MS,
   SUMMARY_TREE_JOB_MAX_PARKED_MS,
@@ -76,8 +77,13 @@ import { markSummaryTreesSkipped, registerSummaryTreeArtifact } from "./state-st
  *   never called again. A worker that lost its lease stops at its next call.
  * - Switches. Both deployment switches are read before the claim and before every batch, and the build reads the
  *   build switch before every call. Build off parks the job (`blocked`, `build-off`) with no further call.
- * - Balance. The deployment's provider balance probe, when one is configured, is asked before the claim and before
- *   every batch; below its floor (or unable to answer) the job parks (`blocked`, `balance`).
+ * - Balance. The deployment's provider balance probe, when one is configured, is asked before the claim, before
+ *   every batch and before every commit window of a document (a sufficient reading is reused for a few seconds);
+ *   below its floor (or unable to answer) the job parks (`blocked`, `balance`).
+ * - Current settings. The project's pipeline (its model, its privacy mode) and the hosted-call decision are read
+ *   again before every batch and before every commit window. A project that leaves `standard` privacy mode while
+ *   its job runs gets no further hosted call from the next window on (`blocked`, `policy`); a changed model stops
+ *   the document in progress, and the next batch builds with the model the project has now.
  * - No fallback text. A group whose call fails is retried by the build and once more by the job; then the document
  *   stays `partial`, is not served, and the next job picks it up. Nothing is written in a summary's place.
  *
@@ -118,7 +124,8 @@ const RESERVE_FACTOR = 2;
 /** `partial` reasons of a build that the job itself (or another builder) caused; every other `stopped:` is a refusal to spend. */
 const JOB_OWN_STOPS: ReadonlySet<string> = new Set([
   "stopped:build-switch-off", "stopped:cost-cap", "stopped:cancelled", "stopped:lease-lost", "stopped:job-halted",
-  "stopped:build-taken-over", "stopped:project-setting-off", "stopped:time-slice",
+  "stopped:build-taken-over", "stopped:project-setting-off", "stopped:time-slice", "stopped:pipeline-changed",
+  "stopped:provider-balance",
 ]);
 /** This many documents in a row failing with an error ends the job: the fault is not the documents'. */
 const MAX_CONSECUTIVE_DOCUMENT_ERRORS = 5;
@@ -183,7 +190,9 @@ type DocumentRow = {
 
 type Outcome = "ready" | "skipped" | "partial";
 type Halt =
-  | { kind: "park"; reason: SummaryTreeJobBlockedReason }
+  | { kind: "park"; reason: SummaryTreeJobBlockedReason; waitMs?: number }
+  /** The project's model or privacy mode changed under a document: the batch ends and the next one reads them again. */
+  | { kind: "reload" }
   /** The slice is over and another job is waiting: back in the queue, behind it. */
   | { kind: "requeue" }
   | { kind: "finish"; status: "cancelled"; note: string }
@@ -348,7 +357,7 @@ async function runClaimedJob(
   sql: Client,
   job: JobRow,
   options: SummaryTreeJobRunnerOptions & { env: Env; leaseMs: number; parkMs: number; parkMaxMs: number },
-  gate: ReturnType<typeof balanceGate>,
+  balance: ReturnType<typeof balanceGate>,
 ): Promise<void> {
   const { env, leaseMs, parkMs, parkMaxMs, workerId, config } = options;
   const scope = { orgId: job.org_id, projectId: job.project_id };
@@ -534,27 +543,66 @@ async function runClaimedJob(
   };
 
   try {
-    const [project] = await sql<{ pipeline: unknown }[]>`
-      select pipeline from projects where id = ${job.project_id} and org_id = ${job.org_id}
-    `;
-    if (!project) throw new Error("Project no longer exists");
-    const pipeline: PipelineFeatures = normalizeStoredPipelineFeatures(project.pipeline as PipelineFeatures, `project ${job.project_id}`);
-    if (!summaryTreeEnabled(pipeline) || summaryTreeVectorProblem(pipeline)) {
+    /**
+     * The project as it is stored now: its pipeline, the summary model and embedding space that follow from it, and
+     * whether a hosted call of that model is allowed under its privacy mode. Read before every batch and before every
+     * commit window, never once per claim: a setting changed while the job runs applies from the next window on.
+     */
+    type Settings = { pipeline: PipelineFeatures; model: string; labels: { provider: string; model: string }; space: { model: string; dimensions: number } };
+    const readSettings = async (): Promise<Settings | "gone" | "disabled"> => {
+      const [project] = await sql<{ pipeline: unknown; enabled: boolean | null }[]>`
+        select pipeline, (pipeline -> 'summaryTree' -> 'enabled') = 'true'::jsonb as enabled
+        from projects where id = ${job.project_id} and org_id = ${job.org_id}
+      `;
+      if (!project) return "gone";
+      if (project.enabled !== true) return "disabled";
+      const pipeline: PipelineFeatures = normalizeStoredPipelineFeatures(project.pipeline as PipelineFeatures, `project ${job.project_id}`);
+      if (!summaryTreeEnabled(pipeline) || summaryTreeVectorProblem(pipeline)) return "disabled";
+      const model = resolveAllowedPipelineTextModel(pipeline, SUMMARY_TREE_TEXT_OPERATION, config.textGenerationModel);
+      const profile = resolveEmbeddingModel(config, pipeline);
+      return { pipeline, model, labels: textUsageLabels(model), space: { model: profile.model, dimensions: profile.dimensions } };
+    };
+    /**
+     * Outside `standard` privacy mode a hosted summary model is not called. Decided from the privacy mode as it is
+     * stored at this moment, read on its own (not through the pipeline's validation, which a stored pipeline in a
+     * stricter mode may not pass): null when the project is gone, which the callers treat as a refusal.
+     */
+    const hostedAllowedNow = async (model: string): Promise<boolean | null> => {
+      const [project] = await sql<{ privacy_mode: string | null }[]>`
+        select pipeline ->> 'privacyMode' as privacy_mode from projects where id = ${job.project_id} and org_id = ${job.org_id}
+      `;
+      if (!project) return null;
+      return await allowHostedCallForProject(sql, {
+        privacyMode: project.privacy_mode ?? "standard", projectId: job.project_id, call: openRouterTextCall(SUMMARY_TREE_TEXT_OPERATION, model),
+      });
+    };
+    /**
+     * `readSettings`, for the job's own checks. A stored pipeline that cannot be read under a privacy mode other than
+     * `standard` (its routes do not satisfy that mode) is a policy refusal, not a failed job: `policy`.
+     */
+    const readSettingsOrPolicy = async (): Promise<Settings | "gone" | "disabled" | "policy"> => {
+      try {
+        return await readSettings();
+      } catch (error) {
+        const [project] = await sql<{ privacy_mode: string | null }[]>`
+          select pipeline ->> 'privacyMode' as privacy_mode from projects where id = ${job.project_id} and org_id = ${job.org_id}
+        `;
+        if (project && !privacyModeAllowsHosted(project.privacy_mode)) return "policy";
+        throw error;
+      }
+    };
+    const first = await readSettingsOrPolicy();
+    if (first === "gone") throw new Error("Project no longer exists");
+    if (first === "disabled") {
       await finish("cancelled", SUMMARY_TREE_JOB_NOTES.disabled);
       return;
     }
-    const model = resolveAllowedPipelineTextModel(pipeline, SUMMARY_TREE_TEXT_OPERATION, config.textGenerationModel);
-    const labels = textUsageLabels(model);
-    const profile = resolveEmbeddingModel(config, pipeline);
-    const space = { model: profile.model, dimensions: profile.dimensions };
-    // One decision for the job: outside `standard` privacy mode a hosted summary model is not called.
-    const hostedAllowed = options.overrides?.summarize ? true : await allowHostedCallForProject(sql, {
-      privacyMode: pipeline.privacyMode, projectId: job.project_id, call: openRouterTextCall(SUMMARY_TREE_TEXT_OPERATION, model),
-    });
-    if (!hostedAllowed) {
+    if (first === "policy") {
       await park("policy");
       return;
     }
+    /** The settings the current batch builds with; replaced by every batch's own read. */
+    let settings: Settings = first;
     const concurrency = Math.max(1, options.concurrency ?? options.overrides?.concurrency ?? summaryTreeConcurrency(env));
     const callLimiter = createConcurrencyLimiter(concurrency);
     const batchSize = Math.max(1, options.batchSize ?? SUMMARY_TREE_JOB_DEFAULT_BATCH_SIZE);
@@ -567,6 +615,8 @@ async function runClaimedJob(
     /** Builds one document; the outcome it is counted under, or null when the job has to stop first. */
     const buildDocument = async (document: DocumentRow): Promise<{ outcome: Outcome; result?: SummaryTreeBuildResult } | null> => {
       const runRoot = document.storage_prefix ?? `${document.user_id}/${document.run_id}`;
+      // The settings this document is built with. The build's checks compare them with what is stored at each window.
+      const { pipeline, model, labels } = settings;
       for (let attempt = 1; ; attempt++) {
         let result: SummaryTreeBuildResult;
         try {
@@ -588,12 +638,35 @@ async function runClaimedJob(
             },
             embeddingArtifactUri: document.embed_artifact_uri ?? options.storage.uri(`${runRoot}/embeddings/${document.id}.json`),
             usage: { record, flush },
-            // The job decided once; the build asks before its first call.
-            hostedCallRefusal: async () => null,
-            // With the balance, before the first call and before every commit window: the project's stored setting,
-            // and whether this job's slice is over while another job waits.
+            // Before the first call and before every commit window, from the project as it is stored at that moment:
+            // the privacy mode may have changed since the batch began, and the model this build sends to must still
+            // be allowed under it. A refusal stops further hosted calls at this window.
+            hostedCallRefusal: async () => ((await hostedAllowedNow(model)) === true ? null : "privacy-mode"),
+            // With the organization's balance, before the first call and before every commit window: the project's
+            // stored setting and model, the provider's balance, and whether this job's slice is over while another
+            // job waits.
             gate: async () => {
-              if (!(await projectSummaryTreeEnabled(sql, scope))) return "project-setting-off";
+              let now: Settings | "gone" | "disabled";
+              try {
+                now = await readSettings();
+              } catch {
+                // The stored model is not one this deployment allows: the document stops, and the next batch's own
+                // read decides what the job does.
+                halt ??= { kind: "reload" };
+                return "pipeline-changed";
+              }
+              if (now === "gone" || now === "disabled") return "project-setting-off";
+              // Another model (or embedding space) than this document is being built with: its remaining summaries
+              // are written with what the project has now, by the next batch.
+              if (now.model !== model || now.space.model !== settings.space.model || now.space.dimensions !== settings.space.dimensions) {
+                halt ??= { kind: "reload" };
+                return "pipeline-changed";
+              }
+              const reading = await balance.check(labels);
+              if (!reading.sufficient) {
+                halt ??= { kind: "park", reason: "balance", ...(reading.retryAfterSeconds ? { waitMs: reading.retryAfterSeconds * 1_000 } : {}) };
+                return "provider-balance";
+              }
               if (await shouldYield()) {
                 halt ??= { kind: "requeue" };
                 return "time-slice";
@@ -638,8 +711,9 @@ async function runClaimedJob(
           case "blocked":
             // Another build holds it and still reports: left to that build (and to the next job if it dies).
             if (result.reason === "build-in-progress") return { outcome: "partial", result };
-            // The slice ended before this document's first call: the job goes back in the queue (set by the gate).
-            if (result.reason === "time-slice") return null;
+            // The slice ended, the settings changed or the provider's balance fell before this document's first call:
+            // the gate set what the job does next.
+            if (result.reason === "time-slice" || result.reason === "pipeline-changed" || result.reason === "provider-balance") return null;
             halt ??= result.reason === "project-setting-off"
               ? { kind: "finish", status: "cancelled", note: SUMMARY_TREE_JOB_NOTES.disabled }
               : { kind: "park", reason: blockedReason(result.reason) };
@@ -681,18 +755,38 @@ async function runClaimedJob(
         await park("unpriced");
         return;
       }
-      // The project's stored setting, every batch: a project that turned the tree off pays for nothing more.
-      if (!(await projectSummaryTreeEnabled(sql, scope))) {
+      // The project as it is stored now, every batch: a project that turned the tree off pays for nothing more, and
+      // its model, embedding space and privacy mode are the current ones, not the ones the claim began with.
+      // The privacy mode first, against the model in use: a project that left `standard` mode gets no hosted call.
+      const previousModel = settings.model;
+      if ((await hostedAllowedNow(previousModel)) === false) {
+        await park("policy");
+        return;
+      }
+      const current = await readSettingsOrPolicy();
+      if (current === "gone") throw new Error("Project no longer exists");
+      if (current === "disabled") {
         await finish("cancelled", SUMMARY_TREE_JOB_NOTES.disabled);
+        return;
+      }
+      if (current === "policy") {
+        await park("policy");
+        return;
+      }
+      settings = current;
+      const { labels, space } = settings;
+      // And against the model the project has now, when it changed.
+      if (current.model !== previousModel && (await hostedAllowedNow(current.model)) !== true) {
+        await park("policy");
         return;
       }
       if (!summaryTreeServeAvailable(env)) {
         // Building while search does not read trees yet is a normal rollout order; it is logged, not a reason to stop.
         console.log(`[summary-tree-job] job=${job.id} note=serve-switch-off flag=${SUMMARY_TREE_SERVE_ENV_FLAG}`);
       }
-      const balance = await gate.check(labels);
-      if (!balance.sufficient) {
-        await park("balance", balance.retryAfterSeconds ? balance.retryAfterSeconds * 1_000 : undefined);
+      const reading = await balance.check(labels);
+      if (!reading.sufficient) {
+        await park("balance", reading.retryAfterSeconds ? reading.retryAfterSeconds * 1_000 : undefined);
         return;
       }
       // Whether the organization may spend, before any document is selected or any artifact is read: a job parked for
@@ -834,9 +928,11 @@ async function runClaimedJob(
         return;
       }
       if (stopped?.kind === "park") {
-        await park(stopped.reason);
+        await park(stopped.reason, stopped.waitMs);
         return;
       }
+      // The project's settings changed under a document: nothing ends; the next batch reads them again.
+      if (stopped?.kind === "reload") halt = null;
       // The slice is over and another job is waiting: this one goes back in the queue behind it.
       if (stopped?.kind === "requeue" || await shouldYield()) {
         await requeue();

@@ -662,19 +662,19 @@ describe("stopping and parking", () => {
     expect(f.requests).toEqual([]);
     expect(asked).toEqual(["summary-tree-backfill"]);
 
-    // Enough again: the job runs; the balance drops while the first batch is being built.
+    // Enough again: the job runs; the balance drops while the first document is being built.
     sufficient = true;
     f.beforeAnswer = (_request, call) => { if (call === 2) sufficient = false; };
     expect(await f.run({ balanceProbe: probe, batchSize: 1 })).toBe(1);
-    expect(await jobOf(jobId)).toMatchObject({ status: "blocked", blocked_reason: "balance", documents_ready: 1, model_calls: BIG_NODES, lease_owner: null });
-    // The batch in progress finished (its calls were already admitted); the next one never started.
-    expect(f.requests).toHaveLength(BIG_NODES);
+    expect(await jobOf(jobId)).toMatchObject({ status: "blocked", blocked_reason: "balance", documents_ready: 0, model_calls: 2, lease_owner: null });
+    // The window in flight finished (its call was already admitted); the next window never started.
+    expect(f.requests).toHaveLength(2);
 
     // A probe that cannot answer reads as below the floor.
     const broken: ProviderBalanceProbe = { check: async () => { throw new Error("unreachable"); } };
     expect(await f.run({ balanceProbe: broken })).toBe(0);
     expect(await jobOf(jobId)).toMatchObject({ status: "blocked", blocked_reason: "balance" });
-    expect(f.requests).toHaveLength(BIG_NODES);
+    expect(f.requests).toHaveLength(2);
 
     sufficient = true;
     f.beforeAnswer = () => undefined;
@@ -753,6 +753,114 @@ describe("spend and the project setting, between windows of a running job", () =
     expect(await treeOf("a-big")).toMatchObject({ status: "partial", error: "stopped:project-setting-off" });
     expect(await treeOf("b-big")).toBeNull();
     expect(f.storage.opened).toEqual(["u1/run-w/embeddings/a-big.json"]);
+  });
+});
+
+describe("settings that change while a job runs", () => {
+  const setPipeline = async (path: string, value: unknown) =>
+    await sql`update projects set pipeline = jsonb_set(pipeline, ${`{${path}}`}::text[], ${JSON.stringify(value)}::text::jsonb) where id = 'w'`;
+
+  it("makes no further hosted call from the next window on once the project leaves standard privacy mode", async () => {
+    for (const mode of ["local-only", "strict-privacy"]) {
+      await sql`delete from summary_tree_jobs`;
+      await sql`delete from documents`;
+      await setPipeline("privacyMode", "standard");
+      const f = fakes();
+      await seedDocument(f.storage, "w", "a-big", BIG_LEAVES);
+      await seedDocument(f.storage, "w", "b-big", BIG_LEAVES);
+      const jobId = await queueJob("w");
+      f.beforeAnswer = async (_request, call) => {
+        if (call === 2) await setPipeline("privacyMode", mode);
+      };
+      await f.run();
+      // One call a window: the call in flight when the mode changed finished; the next window asked and was refused.
+      expect(f.requests, mode).toHaveLength(2);
+      expect(await jobOf(jobId)).toMatchObject({ status: "blocked", blocked_reason: "policy", model_calls: 2, documents_ready: 0, cursor: null });
+      expect(await treeOf("a-big")).toMatchObject({ status: "partial", error: "stopped:privacy-mode" });
+      expect(await treeOf("b-big")).toBeNull();
+      // strict-privacy records the blocked attempt, attributed to the project.
+      const [audit] = await sql<Array<{ n: number }>>`select count(*)::int as n from privacy_audit_log where project_id = 'w'`;
+      expect(audit!.n > 0, mode).toBe(mode === "strict-privacy");
+      await sql`delete from privacy_audit_log`;
+
+      // Looked at again while the mode stands: parked before any document is selected, and no call.
+      f.beforeAnswer = () => undefined;
+      await f.run();
+      expect(f.requests).toHaveLength(2);
+      expect(await jobOf(jobId)).toMatchObject({ status: "blocked", blocked_reason: "policy", park_count: 2 });
+      expect(f.storage.opened).toEqual(["u1/run-w/embeddings/a-big.json"]);
+
+      // Back in standard mode the job continues and repeats no call.
+      await setPipeline("privacyMode", "standard");
+      await f.run();
+      expect(await jobOf(jobId)).toMatchObject({ status: "completed", documents_ready: 2 });
+      expect(f.requests).toHaveLength(2 * BIG_NODES);
+    }
+  });
+
+  it("does not claim a hosted call for a job whose project is already outside standard mode", async () => {
+    const f = fakes();
+    await seedDocument(f.storage, "w", "a-big", BIG_LEAVES);
+    await setPipeline("privacyMode", "strict-privacy");
+    const jobId = await queueJob("w");
+    await f.run();
+    expect(await jobOf(jobId)).toMatchObject({ status: "blocked", blocked_reason: "policy", model_calls: 0 });
+    expect(f.requests).toEqual([]);
+    expect(f.storage.opened).toEqual([]);
+  });
+
+  it("builds the rest with the model the project has now when it changes mid-job", async () => {
+    const f = fakes();
+    await seedDocument(f.storage, "w", "a-big", BIG_LEAVES);
+    const jobId = await queueJob("w");
+    f.beforeAnswer = async (_request, call) => {
+      if (call === 2) await setPipeline("textGeneration", { model: "vendor/other-model", models: {} });
+    };
+    await f.run();
+    const job = await jobOf(jobId);
+    expect(job).toMatchObject({ status: "completed", documents_ready: 1 });
+    // The document stopped at the window after the change and was rebuilt by the next batch: the two answers written
+    // by the earlier model are not part of the tree (a node's hash covers the model), so every node was asked again.
+    expect(f.requests).toHaveLength(2 + BIG_NODES);
+    const models = (await modelUsage()).map((call) => String((call.metadata as { model?: string }).model ?? ""));
+    expect(models).toHaveLength(2 + BIG_NODES);
+    const usage = await sql<Array<{ model: string; n: number }>>`select model, count(*)::int as n from usage_events where metric = ${SUMMARY_TREE_USAGE_METRIC} group by model order by min(created_at)`;
+    expect(usage.map((row) => row.n)).toEqual([2, BIG_NODES]);
+    expect(usage[1]!.model).toContain("other-model");
+    expect(await treeOf("a-big")).toMatchObject({ status: "ready" });
+  });
+
+  it("asks the provider balance probe before every window, not once a batch", async () => {
+    const f = fakes();
+    await seedDocument(f.storage, "w", "a-big", BIG_LEAVES);
+    await seedDocument(f.storage, "w", "b-big", BIG_LEAVES);
+    const jobId = await queueJob("w");
+    let sufficient = true;
+    let asked = 0;
+    const probe: ProviderBalanceProbe = { check: async () => { asked += 1; return sufficient ? { sufficient: true } : { sufficient: false, retryAfterSeconds: 90 }; } };
+    f.beforeAnswer = (_request, call) => {
+      if (call === 3) sufficient = false;
+    };
+    // Both documents are in one batch: a probe asked once a batch would let all fourteen calls through.
+    await f.run({ balanceProbe: probe, probeTtlMs: 0 });
+    expect(f.requests).toHaveLength(3);
+    const job = await jobOf(jobId);
+    expect(job).toMatchObject({ status: "blocked", blocked_reason: "balance", model_calls: 3, documents_ready: 0, cursor: null });
+    expect(await treeOf("a-big")).toMatchObject({ status: "partial", error: "stopped:provider-balance" });
+    // The probe's own retry interval is the job's wait.
+    const [wait] = await sql<Array<{ seconds: number }>>`select extract(epoch from (resume_after - updated_at))::float8 as seconds from summary_tree_jobs where id = ${jobId}`;
+    expect(wait!.seconds).toBeCloseTo(90, 0);
+    // Before the claim, before the batch, and before each of the windows that started.
+    expect(asked).toBeGreaterThanOrEqual(5);
+
+    // A sufficient reading is reused within its lifetime: many windows, few questions.
+    sufficient = true;
+    asked = 0;
+    f.beforeAnswer = () => undefined;
+    await sql`update summary_tree_jobs set resume_after = now() where id = ${jobId}`;
+    await f.run({ balanceProbe: probe, probeTtlMs: 60_000 });
+    expect(await jobOf(jobId)).toMatchObject({ status: "completed", documents_ready: 2 });
+    expect(asked).toBe(1);
   });
 });
 

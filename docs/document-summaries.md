@@ -595,12 +595,29 @@ credits costs one small query and reads no artifact.
 live balance. A deployment may name a module in
 `DOCSLURP_PROVIDER_BALANCE_PROBE` (an absolute path or `file:` URL) that exports
 `createProviderBalanceProbe(host)` and returns `{ check(request) }`
-(`worker/src/lib/provider-balance-probe.ts`). The job asks it before the claim
-and before every batch with the usage-ledger provider and model labels of the
-summary route. The module decides which account it reads and what is enough; no
+(`worker/src/lib/provider-balance-probe.ts`). The job asks it before the claim,
+before every batch and before every commit window of a document, with the
+usage-ledger provider and model labels of the summary route; a sufficient
+reading is reused for fifteen seconds. A reading below the floor stops the
+document at that window (`stopped:provider-balance`) and parks the job for the
+probe's own retry interval when it gives one. The module decides which account it reads and what is enough; no
 probe, provider code or floor ships with this repository. Unset means no check.
 A module that cannot be loaded, and a probe that throws or takes longer than ten
 seconds, read as not sufficient.
+
+**Settings that change while a job runs.** The project's pipeline, the model
+and embedding space that follow from it, and the hosted-call decision are read
+before every batch and before every commit window, never once per claim.
+
+- A project that leaves `standard` privacy mode gets no further hosted call
+  from the next window on: the document stops (`stopped:privacy-mode`) and the
+  job parks as `policy`. The privacy mode is read on its own, so a stored
+  pipeline that does not validate under the stricter mode is still a `policy`
+  park, not a failed job.
+- A changed summary model or embedding space stops the document in progress
+  (`stopped:pipeline-changed`); the next batch builds it with what the project
+  has now. A node's hash covers the model, so summaries written by the earlier
+  model are not reused.
 
 **Lease and resume.** The job is leased for five minutes and renews while it
 runs. When a worker dies, another claims the job after the lease expires,
