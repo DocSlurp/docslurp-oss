@@ -40,6 +40,12 @@ async function harness(args: {
   const scratch = await mkdtemp(path.join(tmpdir(), "docslurp-ocr-ledger-test-"));
   const objects = new Map<string, Buffer>();
   const storage = {
+    getBytes: async (key: string) => {
+      const value = objects.get(key);
+      if (!value) throw Object.assign(new Error("missing"), { name: "NoSuchKey" });
+      return value;
+    },
+    deleteKeys: async (keys: string[]) => { keys.forEach(key => objects.delete(key)); },
     uri: (key: string) => `s3://test/${key}`,
     putBytes: async (key: string, data: Uint8Array) => { objects.set(key, Buffer.from(data)); },
     putJson: async () => undefined,

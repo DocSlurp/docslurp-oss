@@ -20,13 +20,14 @@ type OcrLedger = Pick<PipelineUsageEventLedger, "chargeRichPage" | "enqueue">;
  * Charge the job's pages as Rich reads (every frame of an image; each PDF page with words) and record the job's measured
  * compute. Returns the pages charged.
  */
-export function recordOcrReads(ledger: OcrLedger, documentId: string, outcome: OcrReadOutcome, context: { stage: string; kind: "image" | "pdf" }): number[] {
+export function recordOcrReads(ledger: OcrLedger, documentId: string, outcome: OcrReadOutcome, context: { stage: string; kind: "image" | "pdf"; replay?: boolean }): number[] {
   const charged: number[] = [];
   for (const page of outcome.pages) {
     if (context.kind === "pdf" && !HAS_WORDS.test(page.text)) continue;
     ledger.chargeRichPage({ documentId, pageNumber: page.pageNumber, readBy: "page-ocr", model: `ppocr:${page.recogniser}` });
     charged.push(page.pageNumber);
   }
+  if (context.replay) return charged;
   ledger.enqueue({
     provider: outcome.mode === "vm" ? `ocr-vm:${outcome.engine}` : "ocr-local-sandbox",
     model: "ppocr-v6-small",
