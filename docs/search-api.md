@@ -476,6 +476,11 @@ turns itself on: a project that builds a tree still searches without it until a 
   document, heading path, page range and chunk range it covers, and a `relevance`. It has no `text` and no
   `citation`: show it as a summary, and cite the chunks in `results`. Summaries take at most a quarter of the returned
   context (their tokens against the result text plus theirs), best first.
+- **Chat uses `guide` at most.** `/v1/chat`, `/v1/chat/completions` and the chat tools never ask for `include`: a
+  thread, request or project setting of `include` runs as `guide` for a chat turn, and the model's own `summaryTree`
+  argument is ignored. Summaries are model-written text over document text with a verbatim heading trail; a chat
+  turn has no isolated, citable place for them, so only passages reach the model. A `summaries` list in a tool
+  result is withheld from the model whatever produced it, and the tool result says so (`summaryTreeNotice`).
 - **One result per file.** A project's `dedupeByFilename` control (on by default) keeps one result per file once
   results span more than one file. The tree never changes what that control does to the chunk search's results: when
   they all come from one file, only guided chunks of that file are added; when they span files, a guided chunk is
