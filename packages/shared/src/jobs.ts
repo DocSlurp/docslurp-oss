@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const jobKindSchema = z.enum(["reindex", "full-index", "backfill", "graph-rebuild", "reprocess"]);
+export const jobKindSchema = z.enum(["reindex", "full-index", "backfill", "graph-rebuild", "summary-tree-backfill", "reprocess"]);
 export type JobKind = z.infer<typeof jobKindSchema>;
 
 export const jobStateSchema = z.enum(["queued", "blocked", "processing", "completed", "failed", "cancelled"]);
@@ -31,7 +31,11 @@ export const jobStatusSchema = z.object({
   id: z.string(),
   kind: jobKindSchema,
   status: jobStateSchema,
-  reason: z.enum(["credits", "budget", "policy"]).optional(),
+  /**
+   * Why a job is blocked. `unavailable`: the deployment has the feature switched off. `capacity`: the deployment's
+   * model provider cannot take more work right now. Both clear on their own; the job resumes without a new request.
+   */
+  reason: z.enum(["credits", "budget", "policy", "unavailable", "capacity"]).optional(),
   queue: z.object({ position: z.number().int().nullable(), ahead: z.number().int().nullable() }),
   runIds: z.array(z.string()),
   /** The same estimate `estimateUrl` returns; null when the work has none. */

@@ -86,9 +86,33 @@ describe("project delete", () => {
       from storage_cleanup_queue order by target`).toEqual([
       { kind: "vector_prefix", target: "org|ws", payload: { projectId: "ws" }, reason: "project_deleted", deferred: true },
       { kind: "vector_table", target: "org|ws|m|4", payload: { projectId: "ws", embeddingModel: "m", dimension: 4 }, reason: "project_deleted", deferred: true },
+      // The summary tree's table beside the chunks table, queued by name with the same grace.
+      { kind: "vector_table", target: "org|ws|m|4|summaries", payload: { projectId: "ws", embeddingModel: "m", dimension: 4, table: "summaries" }, reason: "project_deleted", deferred: true },
       { kind: "storage_prefix", target: "owner/done/", payload: { projectId: "ws" }, reason: "run_deleted", deferred: false },
       { kind: "storage_prefix", target: "owner/live/", payload: { projectId: "ws" }, reason: "run_deleted", deferred: false },
     ]);
+  });
+
+  it("queues a drop of the summaries table in every embedding space a tree state row names, for this project only", async () => {
+    await sql`insert into projects(id, org_id, user_id, name) values ('other', 'org', 'owner', 'Other')`;
+    await seedRun("done", "completed");
+    await seedDocument("d1", "done");
+    await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status)
+      values ('o1', 'org', 'owner', 'other', null, 'o1.pdf', 'application/pdf', 'owner/up/raw/o1.pdf', 'completed')`;
+    // d1's tree was built in an embedding space its vector index row no longer names.
+    await sql`insert into document_summary_trees (document_id, org_id, project_id, status, embedding_model, dimension) values
+      ('d1', 'org', 'ws', 'ready', 'old-model', 8), ('o1', 'org', 'other', 'ready', 'other-model', 16)`;
+    const { deleteProjectData } = await import("../services/data-deletion.js");
+
+    await deleteProjectData("ws", { sql, cancelWorkflow });
+
+    expect(await sql`select target, payload from storage_cleanup_queue where kind = 'vector_table' order by target`).toEqual([
+      { target: "org|ws|m|4", payload: { projectId: "ws", embeddingModel: "m", dimension: 4 } },
+      { target: "org|ws|m|4|summaries", payload: { projectId: "ws", embeddingModel: "m", dimension: 4, table: "summaries" } },
+      { target: "org|ws|old-model|8|summaries", payload: { projectId: "ws", embeddingModel: "old-model", dimension: 8, table: "summaries" } },
+    ]);
+    // The registry rows cascade with the documents; the other project keeps its own.
+    expect(await sql`select document_id from document_summary_trees`).toEqual([{ document_id: "o1" }]);
   });
 
   it("deletes in batches without losing documents", async () => {

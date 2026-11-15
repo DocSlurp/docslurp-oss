@@ -1,5 +1,6 @@
 import "./env.js";
 import { warnChartExportSwitch } from "./chart-export/config.js";
+import { summaryTreeSwitchWarnings } from "@docslurp/shared";
 
 import { existsSync } from "node:fs";
 import { defaultDocConcurrency, resolveActivityConcurrency } from "./concurrency.js";
@@ -127,6 +128,10 @@ export interface Config {
   graphJobPollIntervalMs?: number;
   /** Documents a graph rebuild extracts at once. */
   graphJobConcurrency?: number;
+  /** How often the maintenance leader looks for summary tree backfill jobs; 0 disables. */
+  summaryTreeJobPollIntervalMs?: number;
+  /** Documents a summary tree backfill job builds at once (their model calls share `WORKER_SUMMARY_TREE_CONCURRENCY`). */
+  summaryTreeJobDocumentConcurrency?: number;
   retentionSweepBatchSize: number;
   apiKeyUsageRetentionDays: number;
   perfLogRetentionDays: number;
@@ -252,9 +257,20 @@ function parseDurationMs(value: string | undefined, fallback: number): number {
   return Number.isFinite(total) && total > 0 ? total : fallback;
 }
 
+let summaryTreeSwitchesWarned = false;
+function warnSummaryTreeSwitches(env: Readonly<Record<string, string | undefined>>): void {
+  if (summaryTreeSwitchesWarned) return;
+  const warnings = summaryTreeSwitchWarnings(env);
+  if (warnings.length === 0) return;
+  summaryTreeSwitchesWarned = true;
+  for (const warning of warnings) console.warn(warning);
+}
+
 export function fromEnv(): Config {
   // An unknown DOCSLURP_CHART_EXPORT value is off (fail closed); say so once per process.
   warnChartExportSwitch(process.env);
+  // The same for the summary tree build switch (DOCSLURP_SUMMARY_TREE_BUILD): unknown is off.
+  warnSummaryTreeSwitches(process.env);
   const storage = resolveObjectStorageConfig();
   const lancedb = resolveLanceDbConfig(process.env, storage);
   const maintenance = lanceDbMaintenanceSettings(lancedb.params);
@@ -345,6 +361,11 @@ export function fromEnv(): Config {
       5_000,
     ),
     graphJobConcurrency: Math.max(1, readNumber(process.env.WORKER_GRAPH_JOB_CONCURRENCY, 4)),
+    summaryTreeJobPollIntervalMs: parseDurationMs(
+      process.env.WORKER_SUMMARY_TREE_JOB_POLL_INTERVAL,
+      5_000,
+    ),
+    summaryTreeJobDocumentConcurrency: Math.max(1, readNumber(process.env.WORKER_SUMMARY_TREE_JOB_DOCUMENT_CONCURRENCY, 2)),
     retentionSweepBatchSize: readNumber(
       process.env.WORKER_RETENTION_SWEEP_BATCH_SIZE,
       25,

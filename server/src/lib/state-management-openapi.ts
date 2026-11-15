@@ -4,7 +4,7 @@ import {
   organizationAccessSchema, organizationDetailsSchema, organizationMemberSchema,
   organizationMembershipSchema, organizationRoleSchema, organizationSchema,
   updateOrganizationSchema, projectRunProgressSnapshotSchema, projectStateSchema,
-  applyIngestRecommendationSchema, ingestReportSchema,
+  applyIngestRecommendationSchema, ingestReportSchema, SUMMARY_TREE_CONSTANTS,
 } from "@docslurp/shared";
 import { apiErrorOpenApiResponse } from "./api-error-openapi.js";
 
@@ -87,6 +87,10 @@ export const projectStateExample = projectStateSchema.parse({
   searches: { total: 0, recentCount: 0, recentZeroResultCount: 0, latencyMs: { sampleCount: 0, p50: null, p95: null, max: null } },
   performance: { completedRuns: 1, failedRuns: 0, completedPages: 3, durationMs: { sampleCount: 1, p50: 60_000, p95: 60_000, max: 60_000 }, pagesPerMinute: 3, minutesPer100Pages: 100 / 3, basis: "run-wall-time-including-queue" },
   usage: { inputTokens: 100, outputTokens: 20, costCents: 0.005 },
+  summaryTree: {
+    enabled: false, buildAvailable: false, buildPriced: true, serveAvailable: false, searchMode: "off", effectiveSearchMode: "off", status: "off",
+    documents: { total: 1, ready: 0, building: 0, partial: 0, skipped: 0, missing: 1 }, nodes: 0, constants: SUMMARY_TREE_CONSTANTS,
+  },
 });
 const orgGet = (summary: string, name: string, description = orgRead) => ({
   tags: ["organizations"], summary, description, security: serviceSecurity, parameters: [parameter("orgId")],
@@ -111,7 +115,7 @@ export const stateManagementPaths = {
   } },
   "/v1/projects/{projectId}/state": { get: {
     tags: ["projects"], summary: "Read current project corpus and recent performance",
-    description: `${readScopes} Requires a server key for bearer access. documents.total/completed, pages.total, and storage cover the current corpus: completed documents not superseded by a newer version, so a re-ingest never double counts. documents.queued/processing count in-flight documents in any non-terminal status; documents.failed counts failed documents. Pages indexed are unique nonempty text-searchable pages in completed current documents; notIndexed = known total minus indexed. Unknown page counts are counted separately. Source bytes are measured logical document bytes; documentsWithUnknownSize makes missing measurements explicit, so sourceMb can be a lower bound. Text bytes cover persisted page/chunk text, not physical object or index storage. MB = bytes/1,000,000; vector/artifact bytes are unknown (null). Searches include scalar and multi-project sessions. Recent search latency and completed-run wall-time distributions use the selected window. Run throughput includes queue time and reruns; corpus coverage never sums run history. Empty latency/throughput samples yield null. Usage is all-time attributed recorded usage, not a complete economic-price estimate.`,
+    description: `${readScopes} Requires a server key for bearer access. documents.total/completed, pages.total, and storage cover the current corpus: completed documents not superseded by a newer version, so a re-ingest never double counts. documents.queued/processing count in-flight documents in any non-terminal status; documents.failed counts failed documents. Pages indexed are unique nonempty text-searchable pages in completed current documents; notIndexed = known total minus indexed. Unknown page counts are counted separately. Source bytes are measured logical document bytes; documentsWithUnknownSize makes missing measurements explicit, so sourceMb can be a lower bound. Text bytes cover persisted page/chunk text, not physical object or index storage. MB = bytes/1,000,000; vector/artifact bytes are unknown (null). Searches include scalar and multi-project sessions. Recent search latency and completed-run wall-time distributions use the selected window. Run throughput includes queue time and reruns; corpus coverage never sums run history. Empty latency/throughput samples yield null. Usage is all-time attributed recorded usage, not a complete economic-price estimate. summaryTree reports the project's summary tree: its stored setting, whether the deployment builds and serves trees, the build status (off, building, partial, ready), document counts by tree status and the read-only server constants.`,
     security: serviceSecurity, parameters: [projectRefParameter, { in: "query", name: "recentWindowHours", schema: { type: "integer", minimum: 1, maximum: 720, default: 24 } }],
     responses: { "200": { ...response("Current counts and storage, recent search/runtime distributions, and all-time usage", ref("ProjectState"), projectStateExample), headers: projectRefHeaders }, "400": apiErrorOpenApiResponse("recentWindowHours must be an integer from 1 to 720"), ...authErrors },
   } },
