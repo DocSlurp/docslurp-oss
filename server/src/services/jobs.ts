@@ -207,8 +207,8 @@ export const isJobTerminal = (job: Pick<JobStatus, "status">) =>
   job.status === "completed" || job.status === "failed" || job.status === "cancelled";
 
 /**
- * Reads one job (a run, any run of a multi-run job, or a graph job) the user may see; null when it does not
- * exist or the project is not accessible. A single query reads the job's runs with their queue position.
+ * Reads one job (a run, any run of a multi-run job, a graph job or a summary tree job) the user may see; null when
+ * it does not exist or the project is not accessible. A summary tree job is never readable with a client key. A single query reads the job's runs with their queue position.
  */
 export async function getJobStatus(
   jobId: string,
@@ -250,6 +250,9 @@ export async function getJobStatus(
   `;
   if (!tree) return null;
   // The same answer for a job that does not exist and one the caller may not see.
+  // A summary tree job's status and estimate are read with a server key, as under the project's own route
+  // (routes/project-summary-tree.ts): a browser (client) key gets nothing here, whatever its scopes.
+  if (options.apiKey && options.apiKey.keyType !== "server") return null;
   if (options.apiKey && !apiKeyCanUseProject(options.apiKey, { id: tree.project_id, orgId: tree.org_id })) return null;
   if (!(await getProjectAccess(tree.project_id, userId))) return null;
   return jobFromSummaryTreeRow(tree, options.env);

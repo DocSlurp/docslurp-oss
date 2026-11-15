@@ -485,6 +485,19 @@ describe("authorization", () => {
       expect((await post(app, `/v1/projects/w/summary-tree/backfill/${id}/cancel`)).status).toBe(403);
     }
     expect((await appFor("u1", { orgId: "o1", scopes: [] }).request(`/v1/jobs/${id}`)).status).toBe(403);
+    // The shared job resource holds a summary tree job to the project route's rule: a browser key with a search
+    // scope (which may read its own runs' jobs there) gets neither the status nor the estimate, nor the event stream.
+    for (const key of [
+      { orgId: "o1", scopes: ["search:deep"], keyType: "client", projectIds: ["w"] },
+      { orgId: "o1", scopes: ["projects:manage", "search:deep"], keyType: "client", projectIds: ["w"] },
+    ] satisfies Key[]) {
+      const browser = appFor("u1", key);
+      expect((await browser.request(`/v1/jobs/${id}`)).status, JSON.stringify(key)).toBe(404);
+      expect((await browser.request(`/v1/jobs/${id}/events`)).status).toBe(404);
+      expect((await browser.request(`/v1/projects/w/summary-tree/backfill/${id}`)).status).toBe(403);
+    }
+    // The same key shape as a server key reads it.
+    expect((await appFor("u1", { orgId: "o1", scopes: ["search:deep"], keyType: "server", projectIds: ["w"] }).request(`/v1/jobs/${id}`)).status).toBe(200);
 
     // A managing key restricted to another project, and one bound to another organization: the project is not theirs.
     for (const key of [{ orgId: "o1", scopes: ["projects:manage"], projectIds: ["w2"] }, { orgId: "o2", scopes: ["projects:manage"] }] satisfies Key[]) {
