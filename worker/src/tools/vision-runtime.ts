@@ -609,14 +609,17 @@ function readBoolean(value: string | undefined, fallback: boolean): boolean {
  * only to DeepInfra's official OpenAI-compatible endpoint, the OpenAI key only to the configured OpenAI base URL,
  * and no key anywhere else (loopback servers, local runtimes).
  */
-export function resolveVisionApiKey(billing: VisionRouteBilling, baseUrl: string | null, cfg: Pick<Config, "openRouterApiKey" | "openAiApiKey" | "deepInfraApiKey">): string {
+export function resolveVisionApiKey(billing: VisionRouteBilling, baseUrl: string | null, cfg: Pick<Config, "openRouterApiKey" | "openAiApiKey" | "deepInfraApiKey" | "openAiBaseUrl">): string {
   if (billing === "openrouter") {
     return baseUrl?.replace(/\/+$/, "") === OPENROUTER_BASE_URL ? cfg.openRouterApiKey : "";
   }
   if (billing === "deepinfra") {
     return baseUrl?.replace(/\/+$/, "") === DEEPINFRA_VISION_BASE_URL ? cfg.deepInfraApiKey ?? "" : "";
   }
-  if (billing === "openai") return cfg.openAiApiKey;
+  if (billing === "openai") {
+    const configured = configuredOpenAiBaseUrl(cfg).replace(/\/+$/, "");
+    return (baseUrl ?? configured).replace(/\/+$/, "") === configured ? cfg.openAiApiKey : "";
+  }
   return "";
 }
 

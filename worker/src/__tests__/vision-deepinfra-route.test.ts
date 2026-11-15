@@ -113,6 +113,23 @@ describe("DeepInfra vision route billing classification", () => {
     }
   });
 
+  it("binds the OpenAI key to its operator-configured destination even with a forged billing label", () => {
+    for (const url of [
+      "http://127.0.0.1:8080/v1", "http://localhost/v1", "http://[::1]/v1",
+      "https://api.openai.com.evil.test/v1", "https://evil.test/v1",
+      "https://api.openai.com:8443/v1", "http://api.openai.com/v1",
+      "https://user:pw@api.openai.com/v1", "https://api.openai.com/v1?secret=1",
+      "https://api.openai.com/v1#fragment", "https://api.openai.com/other",
+      OPENROUTER_BASE_URL, DEEPINFRA_VISION_BASE_URL,
+    ]) expect(resolveVisionApiKey("openai", url, cfg), url).toBe("");
+    expect(resolveVisionApiKey("openai", "https://api.openai.com/v1", cfg)).toBe("sk-test");
+    expect(resolveVisionApiKey("openai", "https://api.openai.com/v1/", cfg)).toBe("sk-test");
+    expect(resolveVisionApiKey("openai", null, cfg)).toBe("sk-test");
+    const custom = { ...cfg, openAiBaseUrl: "https://operator.example.com/v1" };
+    expect(resolveVisionApiKey("openai", custom.openAiBaseUrl, custom)).toBe("sk-test");
+    expect(resolveVisionApiKey("openai", "https://api.openai.com/v1", custom)).toBe("");
+  });
+
   it("attaches the DeepInfra key only to DeepInfra, and the OpenRouter key never to DeepInfra (and vice versa)", () => {
     expect(resolveVisionApiKey("deepinfra", DEEPINFRA_VISION_BASE_URL, cfg)).toBe("di-key");
     expect(resolveVisionApiKey("deepinfra", `${DEEPINFRA_VISION_BASE_URL}/`, cfg)).toBe("di-key");
