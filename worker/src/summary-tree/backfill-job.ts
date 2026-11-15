@@ -70,11 +70,12 @@ import { markSummaryTreesSkipped, registerSummaryTreeArtifact } from "./state-st
  *   under the cap, so the job passes it by less than one unit. The check runs before each call (the build's
  *   `stopReason` and `acquireCall` hooks), not after a batch.
  * - Usage. Every model attempt and embedding request is written to `usage_events`, with the call's unit charge and
- *   its credit debit, and added to the job's own totals, in one transaction as soon as it returns: a worker that
- *   dies loses no record of a paid call, and the worker that takes the job over starts from the true spend.
- * - Resume. The lease is renewed while the job runs. When it expires the next worker claims the job, starts after
- *   the cursor and resumes the document in progress from its artifact: groups whose call returned are read back,
- *   never called again. A worker that lost its lease stops at its next call.
+ *   its credit debit, and added to the job's own totals, in one transaction as soon as it returns. That transaction
+ *   clears the pre-call reservation. A crash before a receipt leaves explicit unresolved exposure, never free budget.
+ * - Resume. The lease is renewed while the job runs. On expiry another worker may claim only after all submitted
+ *   calls have durable receipts. Outstanding calls survive crashes and prevent takeover spending; an unknown
+ *   provider outcome requires operator reconciliation. The cursor and paid artifacts resume without another call.
+ *   A worker that lost its lease stops at its next call.
  * - Switches. Both deployment switches are read before the claim and before every batch, and the build reads the
  *   build switch before every call. Build off parks the job (`blocked`, `build-off`) with no further call.
  * - Balance. The deployment's provider balance probe, when one is configured, is asked before the claim, before
@@ -231,10 +232,10 @@ export async function runSummaryTreeJobs(sql: Client, options: SummaryTreeJobRun
     set last_attempt_at = now()
     where j.id = (
       select c.id from summary_tree_jobs c
-      where ${claimable(sql)}
+      where ${claimable(sql)} and c.outstanding_calls = 0
         and (
           select count(*) from summary_tree_jobs r
-          where r.org_id = c.org_id and r.id <> c.id and r.status = 'running' and r.lease_expires_at >= now()
+          where r.org_id = c.org_id and r.id <> c.id and (r.outstanding_calls > 0 or (r.status = 'running' and r.lease_expires_at >= now()))
         ) < ${maxRunningPerOrg}
       order by
         (select max(o.last_attempt_at) from summary_tree_jobs o where o.org_id = c.org_id) asc nulls first,
@@ -291,25 +292,38 @@ export async function runSummaryTreeJobs(sql: Client, options: SummaryTreeJobRun
     return 0;
   }
 
-  const [job] = await sql<JobRow[]>`
-    update summary_tree_jobs
-    set status = 'running', blocked_reason = null, resume_after = null,
-        lease_owner = ${options.workerId},
-        lease_expires_at = now() + ${interval(leaseMs)}::interval,
-        started_at = coalesce(started_at, now()),
-        last_attempt_at = now(),
-        updated_at = now()
-    where id = (
-      select id from summary_tree_jobs where id = ${candidate.id} and ${claimable(sql)} for update skip locked
-    )
-    returning id, org_id, project_id, user_id, max_cost_cents, cost_cents, cursor, estimate, park_count
-  `;
+  // Serialize the admission with other jobs of this organization. The earlier candidate
+  // pick is only a scheduling hint: its lock ended before the provider probe.
+  const leaseOwner = `${options.workerId}:${randomUUID()}`;
+  const job = await sql.begin(async (tx) => {
+    const client = tx as unknown as Client;
+    await client`select id from organizations where id = ${candidate.org_id} for no key update`;
+    const [running] = await client<{ count: number }[]>`
+      select count(*)::int as count from summary_tree_jobs
+      where org_id = ${candidate.org_id} and id <> ${candidate.id}
+        and (outstanding_calls > 0 or (status = 'running' and lease_expires_at >= now()))
+    `;
+    if (Number(running?.count ?? 0) >= maxRunningPerOrg) return undefined;
+    const [claimed] = await client<JobRow[]>`
+      update summary_tree_jobs
+      set status = 'running', blocked_reason = null, resume_after = null,
+          lease_owner = ${leaseOwner},
+          lease_expires_at = now() + ${interval(leaseMs)}::interval,
+          started_at = coalesce(started_at, now()), last_attempt_at = now(), updated_at = now()
+      where id = (
+        select id from summary_tree_jobs where id = ${candidate.id}
+          and outstanding_calls = 0 and ${claimable(client)} for update skip locked
+      )
+      returning id, org_id, project_id, user_id, max_cost_cents, cost_cents, cursor, estimate, park_count
+    `;
+    return claimed;
+  });
   if (!job) return 0;
 
   try {
     const providers = await projectProviderScope(sql, job.project_id);
     await runWithPrivacyAuditScope({ projectId: job.project_id },
-      () => runWithProviderRateScope(providers, () => runClaimedJob(sql, job, { ...options, env, leaseMs, parkMs, parkMaxMs }, gate)));
+      () => runWithProviderRateScope(providers, () => runClaimedJob(sql, job, { ...options, workerId: leaseOwner, env, leaseMs, parkMs, parkMaxMs }, gate)));
   } catch (error) {
     // The first line only, to the worker log and the job row; API callers get closed copy (raw errors stay in telemetry).
     const message = error instanceof Error ? error.message.split("\n")[0] ?? "" : String(error);
@@ -318,7 +332,7 @@ export async function runSummaryTreeJobs(sql: Client, options: SummaryTreeJobRun
       update summary_tree_jobs
       set status = 'failed', error = ${message.slice(0, 2000)}, finished_at = now(), updated_at = now(),
           lease_owner = null, lease_expires_at = null
-      where id = ${job.id} and lease_owner = ${options.workerId}
+      where id = ${job.id} and lease_owner = ${leaseOwner}
     `;
   }
   return 1;
@@ -453,6 +467,7 @@ async function runClaimedJob(
   const countsProviderCost = () => summaryTreeUnitPrice(env).billing === "inactive";
   let spentCents = Number(job.cost_cents);
   let inFlight = 0;
+  let unsettledCalls = 0;
   // Until a call has reported its cost the reserve is unknown: calls are admitted one at a time.
   const estimatedCallCents = job.estimate?.costCents && job.estimate.modelCalls ? job.estimate.costCents / job.estimate.modelCalls : 0;
   let largestCallCents = estimatedCallCents > 0 ? estimatedCallCents : null as number | null;
@@ -463,14 +478,50 @@ async function runClaimedJob(
     if (unit !== null) return inFlight * unit;
     return largestCallCents === null ? (inFlight > 0 ? Number.POSITIVE_INFINITY : 0) : inFlight * largestCallCents * RESERVE_FACTOR;
   };
-  const acquireCall = async (): Promise<() => void> => {
+  const acquireCall = async (): Promise<(outcome?: "not-started" | "returned" | "unknown") => void> => {
     // Wait while calls in flight could still take the job past its cap; with none in flight the next call is the one
     // the cap is allowed to be passed by.
     while (inFlight > 0 && spentCents < cap && spentCents + reserved() >= cap && !leaseLost && !cancelRequested) {
       await new Promise<void>((resolve) => settled.push(resolve));
     }
+    // Reserve before sending bytes to a provider. A takeover cannot spend while an
+    // earlier call has an unknown outcome; only its atomic usage receipt clears it.
     inFlight += 1;
-    return () => { inFlight -= 1; wake(); };
+    try {
+      const [reservedCall] = await sql<{ id: string }[]>`
+        update summary_tree_jobs set outstanding_calls = outstanding_calls + 1
+        where id = ${job.id} and lease_owner = ${workerId} and status = 'running'
+          and lease_expires_at >= now() and cancel_requested_at is null
+        returning id
+      `;
+      if (!reservedCall) {
+        leaseLost = true;
+        throw new Error("Summary tree call admission lost its lease or was cancelled");
+      }
+      unsettledCalls += 1;
+    } catch (error) {
+      inFlight -= 1;
+      wake();
+      throw error;
+    }
+    return (outcome) => {
+      inFlight -= 1;
+      if (outcome === "not-started") {
+        unsettledCalls -= 1;
+        // No request was submitted. It is safe to release this reservation without a receipt.
+        persisting = persisting.then(async () => {
+          try {
+            await sql`update summary_tree_jobs set outstanding_calls = outstanding_calls - 1 where id = ${job.id}`;
+          } catch (error) { persistError ??= error; abort.abort(error); }
+        });
+      } else if (outcome === "unknown") {
+        // A transport error is not proof the provider did no work. Keep the durable
+        // reservation and stop rather than retrying an unaccounted request.
+        persistError ??= new Error("Summary tree call outcome is unknown; reconcile outstanding calls before retrying");
+        abort.abort(persistError);
+      }
+      wake();
+    };
   };
   let halt: Halt | null = null;
   const stopReason = (): string | null => {
@@ -494,7 +545,7 @@ async function runClaimedJob(
     spentCents += costCents;
     // Known from the first call on, also when calls cost nothing (a deployment without prices reserves nothing).
     if (isModelCall) largestCallCents = Math.max(largestCallCents ?? 0, costCents);
-    if (isModelCall) callsThisClaim += 1;
+    if (isModelCall) { callsThisClaim += 1; unsettledCalls -= 1; }
     persisting = persisting.then(async () => {
       try {
         await sql.begin(async (tx) => {
@@ -523,7 +574,8 @@ async function runClaimedJob(
           const [row] = await client<{ cancel_requested_at: Date | null; lease_owner: string | null }[]>`
             update summary_tree_jobs
             set cost_cents = cost_cents + ${costCents}, input_tokens = input_tokens + ${inputTokens},
-                output_tokens = output_tokens + ${outputTokens}, model_calls = model_calls + ${isModelCall ? 1 : 0}, updated_at = now()
+                output_tokens = output_tokens + ${outputTokens}, model_calls = model_calls + ${isModelCall ? 1 : 0},
+                outstanding_calls = outstanding_calls - ${isModelCall ? 1 : 0}, updated_at = now()
             where id = ${job.id}
             returning cancel_requested_at, lease_owner
           `;
@@ -540,6 +592,10 @@ async function runClaimedJob(
   const flush = async () => {
     await persisting;
     if (persistError) throw persistError instanceof Error ? persistError : new Error("summary tree usage could not be recorded");
+    if (unsettledCalls > inFlight) {
+      abort.abort();
+      throw new Error("Summary tree call outcome is unknown; reconcile outstanding calls before retrying");
+    }
   };
 
   try {
@@ -883,6 +939,7 @@ async function runClaimedJob(
       await Promise.allSettled(Array.from({ length: Math.min(documentConcurrency, Math.max(1, large.length)) }, worker));
       if (fatal) throw fatal;
       await flush();
+      if (leaseLost) return;
 
       // --- Progress: the documents of the batch's finished prefix, with the cursor, in one fenced write. ---
       const delta = { ready: 0, skipped: 0, partial: 0, nodes: 0 };

@@ -999,6 +999,38 @@ describe("fair claiming, parking and time slices", () => {
     expect(await jobOf("o1-waiting")).toMatchObject({ status: "completed" });
   });
 
+  it("serializes two claims that passed their candidate checks before either took a lease", async () => {
+    const a = fakes();
+    const b = fakes();
+    await seedDocument(a.storage, "w", "a-big", BIG_LEAVES);
+    await seedDocument(a.storage, "w2", "b-big", BIG_LEAVES);
+    await queueJob("w");
+    await queueJob("w2");
+    let probes = 0;
+    let releaseProbes!: () => void;
+    const probeBarrier = new Promise<void>((resolve) => { releaseProbes = resolve; });
+    let releaseCall!: () => void;
+    const callBarrier = new Promise<void>((resolve) => { releaseCall = resolve; });
+    const probe: ProviderBalanceProbe = { check: async () => {
+      probes += 1;
+      if (probes === 2) releaseProbes();
+      await probeBarrier;
+      return { sufficient: true };
+    } };
+    a.beforeAnswer = b.beforeAnswer = () => callBarrier;
+    const first = a.run({ workerId: "worker-a", balanceProbe: probe, probeTtlMs: 60_000 });
+    const second = b.run({ workerId: "worker-b", storage: a.storage, balanceProbe: probe, probeTtlMs: 60_000 });
+    try {
+      // The losing claimant returns while the winner is held inside its first call.
+      expect(await Promise.race([first, second])).toBe(0);
+      const [row] = await sql<{ n: number }[]>`select count(*)::int as n from summary_tree_jobs where org_id = 'o1' and status = 'running'`;
+      expect(row!.n).toBe(1);
+    } finally {
+      releaseCall();
+      await Promise.all([first, second]);
+    }
+  });
+
   it("gives the runner up after its slice when another job waits, so two organizations' long jobs interleave", async () => {
     const f = fakes();
     for (const id of ["a", "b", "c"]) {
@@ -1058,43 +1090,30 @@ describe("fair claiming, parking and time slices", () => {
 });
 
 describe("lease", () => {
-  it("is resumed by another worker after its lease expires, repeating no call whose answer was kept", async () => {
+  it("refuses takeover with an outstanding paid call, then resumes within the shared cap after its receipt", async () => {
+    charging();
     const f = fakes();
     await seedDocument(f.storage, "w", "a-big", BIG_LEAVES);
-    await seedDocument(f.storage, "w", "b-big", BIG_LEAVES);
-    const jobId = await queueJob("w");
-    // The second worker is another process over the same bucket and tables.
+    const cap = 1.5 * UNIT;
+    const jobId = await queueJob("w", cap);
     const second = fakes();
-    let takeover: Promise<number> | null = null;
-    const committedByFirst: string[] = [];
     f.beforeAnswer = async (_request, call) => {
-      if (call <= 3) return;
-      if (call === 4) {
-        committedByFirst.push(...f.requests.slice(0, 3).map((earlier) => earlier.nodeId));
-        // The first worker stalls inside its fourth call; its lease runs out and another worker claims the job.
-        await sql`update summary_tree_jobs set lease_expires_at = now() - interval '1 second' where id = ${jobId}`;
-        takeover = second.run({ workerId: "worker-b", storage: f.storage });
-        await takeover;
-      }
+      if (call !== 1) return;
+      expect(await jobOf(jobId)).toMatchObject({ outstanding_calls: 1 });
+      await sql`update summary_tree_jobs set lease_expires_at = now() - interval '1 second' where id = ${jobId}`;
+      // A replacement must not treat the unsettled call as free budget.
+      expect(await second.run({ workerId: "worker-b", storage: f.storage })).toBe(0);
+      expect(second.requests).toHaveLength(0);
     };
     await f.run({ workerId: "worker-a" });
-    expect(await takeover).toBe(1);
-
+    expect(await jobOf(jobId)).toMatchObject({ outstanding_calls: 0, model_calls: 1 });
+    expect(await second.run({ workerId: "worker-b", storage: f.storage })).toBe(1);
     const job = await jobOf(jobId);
-    expect(job).toMatchObject({ status: "completed", documents_ready: 2, documents_partial: 0, lease_owner: null });
-    expect(await treeStatuses()).toEqual({ "a-big": "ready", "b-big": "ready" });
-    // The three calls the first worker had committed were read back from the artifact, never called again.
-    const secondCalls = second.requests.map((request) => request.nodeId);
-    expect(secondCalls.filter((nodeId) => committedByFirst.includes(nodeId))).toEqual([]);
-    expect(new Set(secondCalls).size).toBe(secondCalls.length);
-    expect(secondCalls).toHaveLength(2 * BIG_NODES - 3);
-    // The first worker noticed it no longer held the lease: its stalled call was its last, and it changed no state.
-    expect(f.requests).toHaveLength(4);
-    // Every call either worker paid for is in the ledger and in the job's totals.
-    expect(await modelUsage()).toHaveLength(f.requests.length + second.requests.length);
-    expect(job.model_calls).toBe(f.requests.length + second.requests.length);
-    const rows = (await summaryRowsOf("w"))!;
-    expect(new Set(rows.map((row) => row.id)).size).toBe(2 * BIG_NODES);
+    expect(job).toMatchObject({ status: "cancelled", error: SUMMARY_TREE_JOB_NOTES.costCap, outstanding_calls: 0, model_calls: 2 });
+    expect(await billedCents()).toBeCloseTo(2 * UNIT, 6);
+    expect(await billedCents()).toBeLessThan(cap + UNIT);
+    expect(second.requests).toHaveLength(1);
+    expect(second.requests[0]!.nodeId).not.toBe(f.requests[0]!.nodeId);
   });
 
   it("keeps its lease while it runs longer than the lease lasts", async () => {
@@ -1206,35 +1225,27 @@ describe("documents that change under the job", () => {
     expect(failed.error).toBeTruthy();
   });
 
-  it("retries a failed group once more, then leaves the document partial with no fallback text", async () => {
+  it("retains unknown provider outcomes and refuses further claims until reconciliation", async () => {
     const f = fakes();
     await seedDocument(f.storage, "w", "a-big", BIG_LEAVES);
-    await seedDocument(f.storage, "w", "b-big", BIG_LEAVES);
     const jobId = await queueJob("w");
-    let failures = 0;
-    f.beforeAnswer = (request) => {
-      // One section of a-big fails three times (the build's two attempts, then the job's first retry attempt).
-      if (request.nodeId === "a-big:L1:10-19" && failures < 3) {
-        failures += 1;
-        throw new Error("model unavailable");
-      }
-      // One section of b-big never succeeds.
-      if (request.nodeId === "b-big:L1:10-19") throw new Error("model unavailable");
-    };
+    f.beforeAnswer = () => { throw new Error("connection lost after submission"); };
     await f.run();
-    expect(await jobOf(jobId)).toMatchObject({ status: "completed", documents_ready: 1, documents_partial: 1 });
-    expect(await treeStatuses()).toEqual({ "a-big": "ready", "b-big": "partial" });
-    // Nothing stands in for the missing summary: the failed node has no row and no text.
-    const rows = (await summaryRowsOf("w"))!;
-    expect(rows.some((row) => row.id === "b-big:L1:10-19")).toBe(false);
-    expect([...f.storage.objects.entries()].filter(([key]) => key.includes("/summary-tree/b-big/")).some(([, value]) => value.toString("utf8").includes("L1:10-19"))).toBe(false);
-    expect(await treeOf("b-big")).toMatchObject({ status: "partial", built_at: null });
-    // The sections that succeeded were called once each; only the failing one was retried.
-    const counts = new Map<string, number>();
-    for (const request of f.requests) counts.set(request.nodeId, (counts.get(request.nodeId) ?? 0) + 1);
-    expect(counts.get("b-big:L1:10-19")).toBe(4);
-    expect([...counts].filter(([nodeId, count]) => count > 1 && !nodeId.endsWith(":L1:10-19"))).toEqual([]);
+    const failed = await jobOf(jobId);
+    expect(failed).toMatchObject({ status: "failed", documents_ready: 0 });
+    expect(Number(failed.outstanding_calls)).toBeGreaterThan(0);
+    // A new job cannot bypass the unresolved exposure of the failed job, even in another project of that org.
+    await queueJob("w2");
+    const next = fakes();
+    expect(await next.run()).toBe(0);
+    expect(next.requests).toHaveLength(0);
+    // Other organizations remain eligible.
+    await seedDocument(next.storage, "x", "other-small", 5);
+    const other = await queueJob("x");
+    expect(await next.run()).toBe(1);
+    expect(await jobOf(other)).toMatchObject({ status: "completed" });
   });
+
 });
 
 describe("provider balance probe", () => {
