@@ -6,6 +6,11 @@ const LLM_GENERATION_PATHS = new Set(["/api/v1/chat/completions", "/api/v1/compl
 
 const GENERIC_ERROR = JSON.stringify({ error: { message: "Provider request failed", type: "provider_error" } });
 
+/** Safe local classification; never includes upstream bytes or exception messages. */
+export class InvalidProviderResponseError extends Error {
+  constructor() { super("Invalid provider response or response exceeds limit"); this.name = "InvalidProviderResponseError"; }
+}
+
 /** Buffer one SSE event (or one JSON envelope) before releasing any of its bytes. */
 function redactProviderBody(body: ReadableStream<Uint8Array>, eventStream: boolean, responseFormat: "json" | "password-range"): ReadableStream<Uint8Array> {
   const decoder = new TextDecoder("utf-8", { fatal: true });
@@ -29,11 +34,11 @@ function redactProviderBody(body: ReadableStream<Uint8Array>, eventStream: boole
     // Validate the representation before releasing it, regardless of upstream MIME.
     if (responseFormat === "password-range") {
       const records = data.split(/\r?\n/).filter(record => record.trim());
-      if (!records.length || records.some(record => !/^[0-9A-F]{35}:\d{1,12}$/i.test(record))) throw new Error("Invalid provider response");
+      if (!records.length || records.some(record => !/^[0-9A-F]{35}:\d{1,12}$/i.test(record))) throw new InvalidProviderResponseError();
       return data;
     }
     let value: unknown;
-    try { value = JSON.parse(data); } catch { throw new Error("Invalid provider response"); }
+    try { value = JSON.parse(data); } catch { throw new InvalidProviderResponseError(); }
     if (value && typeof value === "object") {
       const envelope = value as Record<string, unknown>;
       const response = envelope.response as Record<string, unknown> | undefined;
@@ -41,14 +46,14 @@ function redactProviderBody(body: ReadableStream<Uint8Array>, eventStream: boole
           (response && typeof response === "object" && (response.error != null || response.status === "failed"))) return failure();
     }
     if (!eventStream) return data;
-    if (event && !/^(?:message|completion|ping|content_block_(?:start|delta|stop)|message_(?:start|delta|stop)|response\.[a-z0-9_.]+)$/.test(event)) throw new Error("Invalid provider response");
+    if (event && !/^(?:message|completion|ping|content_block_(?:start|delta|stop)|message_(?:start|delta|stop)|response\.[a-z0-9_.]+)$/.test(event)) throw new InvalidProviderResponseError();
     return `${event ? `event: ${event}\n` : ""}${fields.filter(([key]) => key === "data").map(([, value]) => `data: ${value}\n`).join("")}\n`;
   };
   const consume = (text: string, controller: TransformStreamDefaultController<Uint8Array>) => {
-    if (!eventStream) { pending += text; if (pending.length > 16 * 1024 * 1024) throw new Error("Provider response exceeds limit"); return; }
+    if (!eventStream) { pending += text; if (pending.length > 16 * 1024 * 1024) throw new InvalidProviderResponseError(); return; }
     for (const character of text) {
       if (afterCR) { afterCR = false; if (character === "\n") continue; }
-      if (++size > 1024 * 1024) throw new Error("Provider response exceeds limit");
+      if (++size > 1024 * 1024) throw new InvalidProviderResponseError();
       if (character === "\r" || character === "\n") {
         afterCR = character === "\r";
         if (line) { lines.push(line); line = ""; }
@@ -60,14 +65,14 @@ function redactProviderBody(body: ReadableStream<Uint8Array>, eventStream: boole
     transform(chunk, controller) {
       // Decode bounded slices; never concatenate an unbounded upstream chunk.
       try { for (let offset = 0; offset < chunk.byteLength; offset += 16384) consume(decoder.decode(chunk.subarray(offset, offset + 16384), { stream: true }), controller); }
-      catch { throw new Error("Invalid provider response or response exceeds limit"); }
+      catch { throw new InvalidProviderResponseError(); }
     },
     flush(controller) {
       try {
         consume(decoder.decode(), controller);
         if (eventStream) { if (line) lines.push(line); if (lines.length) controller.enqueue(encoder.encode(sanitize(lines))); }
         else if (pending) controller.enqueue(encoder.encode(sanitize([pending])));
-      } catch { throw new Error("Invalid provider response"); }
+      } catch { throw new InvalidProviderResponseError(); }
     },
   }));
   let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
@@ -77,7 +82,7 @@ function redactProviderBody(body: ReadableStream<Uint8Array>, eventStream: boole
       try {
         const result = await reader.read();
         if (result.done) controller.close(); else controller.enqueue(result.value);
-      } catch { controller.error(new Error("Invalid provider response or response exceeds limit")); }
+      } catch { controller.error(new InvalidProviderResponseError()); }
     },
     async cancel(reason) { await (reader ? reader.cancel(reason) : body.cancel(reason)); },
   }, { highWaterMark: 0 });

@@ -52,6 +52,18 @@ describe("breached-password policy", () => {
   });
 });
 
+describe("ambiguous range records", () => {
+  it("refuses duplicate suffixes in either order and casing", async () => {
+    const password = "duplicate-range-evidence";
+    const suffix = sha1(password).slice(5);
+    for (const body of [`${suffix}:7\n${suffix}:0`, `${suffix}:0\n${suffix}:7`, `${suffix}:7\n${suffix.toLowerCase()}:0`, `${pad("A")}\n${pad("A")}`]) {
+      expect(() => compromiseCount(body, suffix)).toThrow(BreachLookupError);
+      vi.stubGlobal("fetch", async () => new Response(body));
+      await expect(createBreachLookup({ timeoutMs: 1000, maxInFlight: 1 }).isCompromised(password)).rejects.toMatchObject({ reason: "malformed" });
+    }
+  });
+});
+
 describe("range lookup", () => {
   it("sends only a padded five-character prefix and detects a listed password", async () => {
     const digest = sha1("hunter2-secret");
