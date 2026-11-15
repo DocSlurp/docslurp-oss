@@ -25,7 +25,7 @@ vi.mock("../services/direct-upload-session.js", async original => ({
 import { confirmDirectUploadProjectIntake } from "../services/project-intake-actions.js";
 import { createDirectUploadSession, directUploadSessionBelongsToOrganization } from "../services/direct-upload-session.js";
 import type { ProjectIntakePorts } from "../services/project-intake.js";
-const session = { id: "session", user_id: "user", org_id: "org", project_id: "project", status: "ingesting", pipeline: {}, api_key_id: "key", allowed_project_ids: ["project"] };
+const session = { id: "session", user_id: "user", org_id: "org", project_id: "project", expires_at: new Date(Date.now() + 3600_000), status: "ingesting", pipeline: {}, api_key_id: "key", allowed_project_ids: ["project"] };
 const loaded = { session, files: [{ status: "completed" }] };
 const payload = { project: { id: "project", orgId: "org" }, run: { id: "session" }, documents: [], warnings: [] };
 const ports = { records: {} } as ProjectIntakePorts;
@@ -71,8 +71,9 @@ describe("session scope and initialization", () => {
   it("denies sessions outside the current key's organization or project scope", async () => {
     mocks.sql.mockImplementation(async (s: TemplateStringsArray) => s.join("").includes("from upload_sessions") ? [session] : []);
     await expect(directUploadSessionBelongsToOrganization("session", "user", "org", ["other"])).resolves.toBe(false);
-    await expect(directUploadSessionBelongsToOrganization("session", "user", "org", ["project"])).resolves.toBe(true);
+    await expect(directUploadSessionBelongsToOrganization("session", "user", "org", ["project"], "key")).resolves.toBe(true);
     await expect(directUploadSessionBelongsToOrganization("session", "user", "other-org", null)).resolves.toBe(false);
+    await expect(directUploadSessionBelongsToOrganization("session", "user", "org", ["project"], "other-key")).resolves.toBe(false);
     mocks.sql.mockImplementation(async (s: TemplateStringsArray) => s.join("").includes("from upload_sessions") ? [{ ...session, project_id: null }] : []);
     await expect(directUploadSessionBelongsToOrganization("session", "user", "org", ["project"])).resolves.toBe(false);
   });

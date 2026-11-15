@@ -370,3 +370,5 @@ Council-reviewed error contracts: allowlisted validation constraints, full Retry
 
 - Reserve measured reindex/full-index workloads and refuse unspecified active-run reservations; retain stable intake responses beyond cache expiry and refuse ambiguous response recovery.
 - Fixed vision self-critique prompt delivery using bounded per-call task text on both primary and fallback routes; UTF-8 bounded candidates and provider-request regression coverage (2026-11-14).
+
+- Add storage-authoritative direct-upload refresh, transfer expiry checks, original-key binding and immutable client-claimed re-selection identity.

@@ -25,7 +25,7 @@ const { uploadsRoutes } = await import("../routes/uploads.js");
 function app(orgId: string | null = "org-a", projectIds: string[] = [], keyType = "server", scopes = ["ingest"]) {
   const server = new Hono(); server.use("*", async (c, next) => {
     c.set("sessionUser", { id: "user-a", email: "", name: "" });
-    c.set("apiKey", { orgId, projectIds, keyType, scopes } as never); await next();
+    c.set("apiKey", { keyId: "key-a", orgId, projectIds, keyType, scopes } as never); await next();
   }); return server.route("/uploads", uploadsRoutes);
 }
 function upload(fields: Record<string, string | undefined> = {}) {
@@ -100,7 +100,7 @@ describe("native key ingestion organization isolation", () => {
   it.each(["/uploads/direct/sessions/11111111-1111-4111-8111-111111111111", "/uploads/direct/sessions/11111111-1111-4111-8111-111111111111/abort", "/uploads/direct/sessions/11111111-1111-4111-8111-111111111111/confirm", "/uploads/direct/sessions/11111111-1111-4111-8111-111111111111/files/complete"])("hides foreign direct-upload sessions at %s", async path => {
     mocks.sessionAccess.mockResolvedValue(false);
     expect((await app().request(path, { method: path.endsWith("/11111111-1111-4111-8111-111111111111") ? "GET" : "POST" })).status).toBe(404);
-    expect(mocks.sessionAccess).toHaveBeenCalledWith("11111111-1111-4111-8111-111111111111", "user-a", "org-a", null);
+    expect(mocks.sessionAccess).toHaveBeenCalledWith("11111111-1111-4111-8111-111111111111", "user-a", "org-a", null, "key-a");
   });
   it("rejects keys without an organization", async () => {
     expect((await app(null).request("/uploads/bulk", upload())).status).toBe(403);

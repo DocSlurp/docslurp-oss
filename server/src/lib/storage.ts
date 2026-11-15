@@ -269,7 +269,8 @@ export async function getUploadedObjectMetadata(key: string): Promise<{
     new HeadObjectCommand({
       Bucket: env.s3Bucket,
       Key: key
-    })
+    }),
+    { abortSignal: AbortSignal.timeout(30_000) }
   );
 
   return {
