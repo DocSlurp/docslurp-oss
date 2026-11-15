@@ -2,10 +2,11 @@ import { describe, expect, it } from "vitest";
 import { lanceDbQueryTuning } from "../search/lancedb-query-tuning.js";
 
 describe("Lance candidate refinement", () => {
-  it("preserves default scoped budgets and leaves unscoped defaults alone", () => {
-    expect(lanceDbQueryTuning(10, 0)).toEqual({ ef: undefined });
-    expect(lanceDbQueryTuning(10, 2)).toEqual({ ef: 150 });
-    expect(lanceDbQueryTuning(10, 200)).toEqual({ ef: 1500 });
+  it("budgets graph exploration and probes enough partitions for narrow scopes", () => {
+    expect(lanceDbQueryTuning(10, 0)).toEqual({ ef: 100, refineFactor: 2, nprobes: 32 });
+    expect(lanceDbQueryTuning(10, 2)).toEqual({ ef: 150, refineFactor: 2, nprobes: 4096 });
+    expect(lanceDbQueryTuning(10, 0, undefined, true).nprobes).toBe(4096); // page-only filter
+    expect(lanceDbQueryTuning(10, 200)).toEqual({ ef: 1500, refineFactor: 2, nprobes: 4096 });
   });
   it("covers refined candidates even beyond the previous ceiling", () => {
     for (const k of [1, 10, 50, 100, 1000]) {
@@ -22,6 +23,6 @@ describe("Lance candidate refinement", () => {
     for (const raw of ["0", "-1", "17", "1.5", "NaN", "Infinity", "4junk"]) {
       expect(() => lanceDbQueryTuning(10, 1, raw)).toThrow("LANCEDB_REFINE_FACTOR");
     }
-    expect(lanceDbQueryTuning(10, 0, " ")).toEqual({ ef: undefined });
+    expect(lanceDbQueryTuning(10, 0, " ")).toEqual({ ef: 100, refineFactor: 2, nprobes: 32 });
   });
 });
