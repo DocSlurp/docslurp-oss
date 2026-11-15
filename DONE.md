@@ -1,3 +1,4 @@
+- Asset ledger: reject repeat references on new or updated unlinked rows with an idempotent NOT VALID database constraint; retain historical rows for separate cleanup.
 ## Ingest version tagging and typed unavailable states (2026-11-13, draft, needs council)
 
 - Security #406 (partial): refuse hand-built documents without a scan decision in every non-development environment and service profile, before source storage reads; normalize sandbox provider ids with the shared ASCII rule. Regression coverage executes the real source modules. ClamAV startup age/disable and database-test guard follow-ups remain open.
