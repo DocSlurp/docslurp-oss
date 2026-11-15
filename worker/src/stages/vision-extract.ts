@@ -102,6 +102,9 @@ import { deterministicSourceKind } from "../chart-export/vm-extractor.js";
 import chartSharp from "../tools/isolated-image.js";
 import type { DocumentStageResult } from "../pipeline/checkpoints.js";
 import { sanitizeVisionPageTables } from "../pipeline/vision-tables-vm.js";
+import type { PageImageReaderProvider } from "../extractors/plugins.js";
+import { ocrPageReaderMaxPages, ocrPageReaderOrgDailyMaxCostCents, PAGE_READER_STOP_REASONS, pageReaderOrgHasHeadroom, pageReaderPagesRemaining, readPageImagesWithProvider, type PageImageInput } from "../ocr/page-reader.js";
+import { VISION_PAGE_READER_METRIC, visionPageReaderFor } from "./vision-page-reader.js";
 
 export interface VisionPageOutput {
   pageNumber: number;
@@ -150,6 +153,13 @@ export interface LegacyPageHints {
    * budget of tableLeakPageCap(pages) distinct pages per document, so retries and restarts cannot widen the cap.
    */
   tableRescuePages?: ReadonlySet<number>;
+  /**
+   * Pages page triage routed as figure- or chart-bearing (`chart-or-figure`, `image-heavy`): the vision page reader, an
+   * OCR specialist that skips image insets, leaves them to the hosted route (vision-page-reader.ts).
+   */
+  figurePages?: ReadonlySet<number>;
+  /** Built from page triage (legacyPageHints): without it no page is known not to be a figure, so none goes to the reader. */
+  triaged?: boolean;
 }
 
 export { VisionGuardStopError } from "../lib/vision-attempt-guard.js";
@@ -163,12 +173,14 @@ export function isVisionPageSkip(value: unknown): value is VisionPageSkip {
 const USABLE_FALLBACK_DENSITY = 0.02;
 
 export function legacyPageHints(pages: Array<{ pageNumber: number; textDensityScore: number; signals: string[];
-  ocrDecision?: { signals: string[] } }>): LegacyPageHints {
+  route?: string; ocrDecision?: { signals: string[] } }>): LegacyPageHints {
   const inkCheckPages = new Set<number>();
   const fallbackTextPages = new Set<number>();
   const vmOcrPages = new Set<number>();
   const tableRescuePages = new Set<number>();
+  const figurePages = new Set<number>();
   for (const page of pages) {
+    if (page.route === "chart-or-figure" || page.route === "image-heavy") figurePages.add(page.pageNumber);
     if (page.ocrDecision?.signals.includes(TABLE_LEAK_ONLY_SIGNAL)) tableRescuePages.add(page.pageNumber);
     if (page.ocrDecision?.signals.includes(DRAWN_CONTENT_SIGNAL)) inkCheckPages.add(page.pageNumber);
     if (page.ocrDecision?.signals.includes(MIXED_SCAN_IMAGE_SIGNAL)) vmOcrPages.add(page.pageNumber);
@@ -176,7 +188,7 @@ export function legacyPageHints(pages: Array<{ pageNumber: number; textDensitySc
       fallbackTextPages.add(page.pageNumber);
     }
   }
-  return { inkCheckPages, fallbackTextPages, vmOcrPages, tableRescuePages };
+  return { inkCheckPages, fallbackTextPages, vmOcrPages, tableRescuePages, figurePages, triaged: true };
 }
 
 /** Errors whose vision attempt `recordFailedVisionAttempt` already recorded (once per call). */
@@ -241,7 +253,10 @@ export class VisionExtractStage implements Stage {
       const routing = await this.checkNeedsVision(document, maxInt(1, document.pageCount), state, signal);
       checkpoint();
       if (!routing.needed) continue;
-      const pages = [...routing.selectedPages].sort((a, b) => a - b);
+      // Pages the vision page reader will read are not fanned out: run() reads them in batched reader jobs (one job per
+      // page would pay the reader's admission and reservation per page). The document's other pages still fan out.
+      const readerPages = new Set(await this.plannedReaderPages(state, document, vision, routing.selectedPages, routing.hints));
+      const pages = [...routing.selectedPages].filter((page) => !readerPages.has(page)).sort((a, b) => a - b);
       for (const pageNumber of pages) {
         if (tasks.length % 100 === 0) {
           await new Promise<void>((resolve) => setImmediate(resolve));
@@ -438,7 +453,9 @@ export class VisionExtractStage implements Stage {
                   key,
                   undefined,
                   false,
-                  { hints: needsVision.hints, skips },
+                  // Only this legacy, whole-document read may use the vision page reader: routed groups, cascade legs and
+                  // page tasks always keep the hosted route they were planned on.
+                  { hints: needsVision.hints, skips, pageReader: true },
                 );
               }
             } catch (error) {
@@ -1216,7 +1233,7 @@ export class VisionExtractStage implements Stage {
     storageKey?: string,
     usageSink?: (event: UsageEvent | null, pageNumber: number) => void,
     bypassCache = false,
-    pageOptions: { hints?: LegacyPageHints; skips?: Map<number, VisionPageSkip> } = {},
+    pageOptions: { hints?: LegacyPageHints; skips?: Map<number, VisionPageSkip>; pageReader?: boolean } = {},
   ): Promise<VisionPageOutput[]> {
     const hints = pageOptions.hints ?? NO_HINTS;
     const skip = (pageNumber: number, outcome: VisionPageSkip["outcome"]): VisionPageSkip => {
@@ -1258,8 +1275,10 @@ export class VisionExtractStage implements Stage {
         for (const pageNumber of missing) {
           if (isCostCapExceeded(state)) break;
           try {
+            // Capped runs read one page per admission on the hosted route: a reader job of many pages could pass the cap by
+            // its whole batch, and a one-page job pays the reader's per-job reservation for every page.
             completed.push(...await this.extractVisionPagesFromCache(
-              state, document, vision, [pageNumber], signal, storageKey, usageSink, bypassCache, pageOptions,
+              state, document, vision, [pageNumber], signal, storageKey, usageSink, bypassCache, { ...pageOptions, pageReader: false },
             ));
           } catch (error) {
             // Infrastructure, cancellation and quarantine errors retain their
@@ -1289,6 +1308,20 @@ export class VisionExtractStage implements Stage {
       const rest = missing.filter((page) => !vmOcr.includes(page));
       if (rest.length === 0) return completed.sort((a, b) => a.pageNumber - b.pageNumber);
       missing.splice(0, missing.length, ...rest);
+    }
+    // Plain page transcription goes to the vision page reader first (vision-page-reader.ts); the pages it does not return
+    // continue to the hosted route below, unchanged.
+    const pageReader = pageOptions.pageReader && !bypassCache ? visionPageReaderFor(state, vision) : null;
+    if (pageReader) {
+      const readerPages = this.pageReaderCandidates(state, document, vision, missing, hints);
+      if (readerPages.length > 0) {
+        const read = await this.readPagesWithPageReader(state, document, pageReader, readerPages, signal);
+        completed.push(...read);
+        const done = new Set(read.map((output) => output.pageNumber));
+        const rest = missing.filter((page) => !done.has(page));
+        if (rest.length === 0) return completed.sort((a, b) => a.pageNumber - b.pageNumber);
+        missing.splice(0, missing.length, ...rest);
+      }
     }
     // A vision model trained on a set page size gets PDF pages rendered no larger (the renderer lowers each page's DPI
     // from its point size). Raster uploads go as uploaded: resizing one would decode it, which only an isolated
@@ -1416,6 +1449,150 @@ export class VisionExtractStage implements Stage {
         error: message,
       },
     });
+  }
+
+  /**
+   * The pages of `pages` the vision page reader may read for this run and document (vision-page-reader.ts): a PDF with page
+   * triage, pages not routed as figures or charts, not drawn-content (ink-checked) and not table rescue. Empty when the
+   * run's reads stay hosted.
+   */
+  private pageReaderCandidates(state: WorkflowState, document: import("../models.js").Document, vision: VisionConfig, pages: readonly number[], hints: LegacyPageHints): number[] {
+    if (document.mimeType !== "application/pdf" || !hints.triaged || !visionPageReaderFor(state, vision)) return [];
+    return pages.filter((page) => !hints.inkCheckPages.has(page) && !hints.tableRescuePages?.has(page) && !hints.figurePages?.has(page));
+  }
+
+  /**
+   * The reader candidates planPageTasks holds back from fan-out for run() to read in batches: at most the document's
+   * remaining reader page budget, and none when the organization's daily reader cap has no headroom (or the ledger cannot
+   * say). Every other page fans out to the hosted route as without the reader.
+   */
+  private async plannedReaderPages(state: WorkflowState, document: import("../models.js").Document, vision: VisionConfig, pages: readonly number[], hints: LegacyPageHints): Promise<number[]> {
+    const candidates = this.pageReaderCandidates(state, document, vision, pages, hints);
+    if (!candidates.length || !state.run.orgId) return [];
+    let maxPages: number;
+    let capCents: number;
+    try {
+      maxPages = ocrPageReaderMaxPages();
+      capCents = ocrPageReaderOrgDailyMaxCostCents();
+    } catch {
+      return [];
+    }
+    if (!(await pageReaderOrgHasHeadroom(state, state.run.orgId, capCents))) return [];
+    return candidates.slice(0, pageReaderPagesRemaining(state.usageLedger, document.id, maxPages));
+  }
+
+  /**
+   * Read plain-transcription PDF pages with the vision page reader (vision-page-reader.ts), in jobs of the provider's page
+   * cap, two in flight: each batch rendered at the reader's long edge, downloaded to temp files and sent under the run's
+   * tenant scope by readPageImagesWithProvider (budget, caps, validation, usage, Rich page charge). Returns the pages it
+   * read; every other page is the caller's, for the hosted route. Nothing is rendered past the document's remaining reader
+   * budget, and no batch starts once a budget, cap or ledger stopped one. A reader failure never fails the document; render
+   * and download errors propagate as they would on the hosted route (which renders the same pages).
+   */
+  private async readPagesWithPageReader(
+    state: WorkflowState,
+    document: import("../models.js").Document,
+    provider: PageImageReaderProvider,
+    pages: number[],
+    signal?: AbortSignal,
+  ): Promise<VisionPageOutput[]> {
+    const outputs: VisionPageOutput[] = [];
+    const maxLongEdgePx = provider.maxLongEdgePx;
+    let maxPages: number;
+    let orgDailyMaxCostCents: number;
+    try {
+      maxPages = ocrPageReaderMaxPages();
+      orgDailyMaxCostCents = ocrPageReaderOrgDailyMaxCostCents();
+    } catch (error) {
+      console.error(`[vision-extract] page-reader configuration invalid document=${document.id}; pages go hosted: ${toError(error).message.slice(0, 300)}`);
+      return outputs;
+    }
+    // Never render pages the per-document budget cannot send.
+    const sendable = pages.slice(0, pageReaderPagesRemaining(state.usageLedger, document.id, maxPages));
+    const batches: number[][] = [];
+    for (let start = 0; start < sendable.length; start += provider.maxPagesPerJob) batches.push(sendable.slice(start, start + provider.maxPagesPerJob));
+    let stopped: string | null = null;
+    // Two batches in flight. The first error (a render or download failure) stops the other worker and aborts its job, and
+    // is rethrown only once both workers have finished: no batch keeps reading after the stage failed.
+    const local = new AbortController();
+    const batchSignal = signal ? AbortSignal.any([signal, local.signal]) : local.signal;
+    let failure: { error: unknown } | null = null;
+    let next = 0;
+    const work = async () => {
+      while (next < batches.length && !failure && !stopped) {
+        const batch = batches[next++]!;
+        try {
+          await readBatch(batch);
+        } catch (error) {
+          failure ??= { error };
+          local.abort();
+        }
+      }
+    };
+    const readBatch = async (batch: number[]) => {
+      batchSignal.throwIfAborted();
+      if (stopped) return;
+      const temps: string[] = [];
+      try {
+        const rasters = await this.rasters.renderSelectedPages({
+          document, runId: state.run.id, pageNumbers: batch, ...(maxLongEdgePx !== undefined ? { maxLongEdgePx } : {}), signal: batchSignal,
+        });
+        const inputs: Array<PageImageInput & { artifactUri: string }> = [];
+        for (const raster of rasters) {
+          if (raster.mimeType !== "image/png" || !batch.includes(raster.pageNumber)) continue;
+          const imagePath = await this.storage.downloadToTempFile(raster.artifactKey, trustedTempDownloadPattern("docslurp-vision-reader-", document));
+          temps.push(imagePath);
+          inputs.push({ pageNumber: raster.pageNumber, imagePath, artifactUri: raster.artifactUri });
+        }
+        if (stopped) return;
+        for (const input of inputs) await emitDocumentPageProgress(state, document, this.name, input.pageNumber, pages.length, "processing");
+        const started = Date.now();
+        const read: Array<{ page: PageImageInput & { artifactUri: string }; output: VisionPageOutput }> = [];
+        let summary: Awaited<ReturnType<typeof readPageImagesWithProvider>> | null = null;
+        try {
+          summary = await readPageImagesWithProvider(inputs, provider, {
+            state, documentId: document.id, mode: "all", maxPages, orgDailyMaxCostCents, signal: batchSignal,
+          }, {
+            metric: VISION_PAGE_READER_METRIC,
+            logTag: "[vision-extract] page-reader",
+            requireCostEstimate: true,
+            ...(maxLongEdgePx !== undefined ? { maxLongEdgePx } : {}),
+            // Kept as soon as it is validated: a later error in this batch never sends a read page to the hosted route too.
+            onRead: (page, result) => {
+              const output: VisionPageOutput = {
+                pageNumber: page.pageNumber, runtime: "page-reader", model: provider.model, prompt: "", baseUrl: null,
+                latencyMs: 0, inputTokens: result.inputTokens, outputTokens: result.outputTokens,
+                usageSource: "page-reader", fallbackUsed: false, fallbackReason: null, text: result.text,
+                // Provider cost is on the usage ledger (vision-page-reader, 0 credits); the page's charge is its Rich page.
+                costCents: 0,
+              };
+              read.push({ page: page as PageImageInput & { artifactUri: string }, output });
+              outputs.push(output);
+            },
+          });
+        } catch (error) {
+          // readPageImagesWithProvider never fails a page; anything it throws (a ledger write) is telemetry, and the unread
+          // pages go hosted. Only an abort propagates.
+          if (batchSignal.aborted) throw error;
+          console.error(`[vision-extract] page-reader error document=${document.id} pages=${batch.join(",")}; unread pages go hosted: ${toError(error).message.slice(0, 300)}`);
+        }
+        const stop = summary && PAGE_READER_STOP_REASONS.find((reason) => (summary!.skipped[reason] ?? 0) > 0);
+        if (stop) stopped = stop;
+        // The job's wall time, shared by the pages it read (pages per minute stay comparable with hosted reads).
+        const latencyMs = read.length ? Math.round((Date.now() - started) / read.length) : 0;
+        for (const { page, output } of read) {
+          output.latencyMs = latencyMs;
+          state.artifactLedger.recordDocument(document.id, `page-${page.pageNumber}`, page.artifactUri);
+          await emitDocumentPageProgress(state, document, this.name, page.pageNumber, pages.length, "completed", { inputTokens: output.inputTokens, outputTokens: output.outputTokens, latencyMs });
+        }
+      } finally {
+        for (const temp of temps) await cleanupTempFile(temp);
+      }
+    };
+    await Promise.all([work(), work()]);
+    if (failure) throw (failure as { error: unknown }).error;
+    console.log(`[vision-extract] page-reader document=${document.id} read=${outputs.length}/${pages.length} provider=${provider.id}${stopped ? ` stopped=${stopped}` : ""}`);
+    return outputs;
   }
 
   /**

@@ -154,7 +154,8 @@ At load the worker lists the capability as `vm-ocr` (`[extractor-plugins] loaded
 
 ## Page image reader (pageImageReader)
 
-`DOCSLURP_OCR_PAGE_READER=escalation|all` reads OCR'd pages through this provider before hosted escalation. With the
+`DOCSLURP_OCR_PAGE_READER=escalation|all` reads OCR'd pages through this provider before hosted escalation, and
+`DOCSLURP_VISION_PAGE_READER=all` reads vision-extract's plain page transcription through it before the hosted vision route. With the
 flag on and no provider (or `assertConfigured()` throwing), the worker refuses to start. Off by default.
 
 - The provider receives a `PageImageReadJob` (`worker/src/extractors/plugins.ts`): `scope` (`orgId`, `runId`) and
@@ -171,11 +172,19 @@ flag on and no provider (or `assertConfigured()` throwing), the worker refuses t
 - `maxPagesPerJob`, `maxImageBytes` and `maxMarkdownBytes` bound each job; the host never sends more or larger, and
   rejects a job whose answer is larger. `model` is logged in `[ai-usage]` and stored on usage events; it is never shown
   in the product.
-- The host validates every response and records usage under its own metric (`ocr-page-reader`) and scope, at provider
+- The host validates every response and records usage under its own metric (`ocr-page-reader`, or `vision-page-reader`) and scope, at provider
   cost and 0 credits.
 - Optional `estimateJobCostCents(pages)`: an upper estimate of one job's provider cost. The host reserves it against the
   organization's daily reader budget (`DOCSLURP_OCR_PAGE_READER_ORG_DAILY_MAX_COST_CENTS`, [OCR](ocr.md#page-reader))
-  before sending the job, so concurrent jobs cannot pass the cap together; without it the host reserves 0.
+  before sending the job, so concurrent jobs cannot pass the cap together; without it the host reserves 0. It is required
+  with `DOCSLURP_VISION_PAGE_READER` (the worker refuses to start without it), and a vision job whose estimate is 0 or not
+  finite is not sent.
+- Optional `hostCountry` and `operatorCountry`: ISO 3166-1 alpha-2 codes for where the reader's VMs process pages and for
+  the company that operates them, by ownership and jurisdiction (`CN` for a Chinese-owned cloud wherever it is listed).
+  Vision page reads require both and apply the organization's provider-region policy to each
+  ([OCR](ocr.md#vision-page-reader)).
+- Optional `maxLongEdgePx` (256 to 4000): the longest page edge the reader's model reads at. Vision page reads render
+  PDF pages at this size and refuse a PNG whose header reports a longer edge ([OCR](ocr.md#vision-page-reader)).
 - Optional `evalScore` (0 to 1) and `evalRef`, together: the reader's composite on the page-OCR tier benchmark and the
   recorded run it comes from. A tier word in `DOCSLURP_OCR_PAGE_READER` ranks the reader by it against the hosted
   escalation reader ([OCR](ocr.md#page-reader)); a reader without it is never chosen by a tier.

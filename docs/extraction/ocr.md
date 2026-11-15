@@ -184,6 +184,49 @@ cost cap is checked before each job. Each job logs
 `[ai-usage] ocr-page-reader model=<model> input_tokens=<n> output_tokens=<n>`, and once per document
 `[ocr] page-reader document=... attempted=... replaced=... failed={...} skipped={...}`.
 
+## Vision page reader
+
+The same page image reader can also read vision-extract's plain page transcription, the pages a hosted vision model
+would otherwise transcribe (`DOCSLURP_VISION_PAGE_READER`, off by default). It is a deployment setting: it applies to
+every eligible run, whatever vision model a project configured.
+
+- `all` sends them to the reader. A tier word (`fastest`, `balanced`, `smart`) is resolved by `selectVisionTranscriptionRoute`
+  (`packages/shared/src/tier-options.ts`) against the reader's `evalScore` and the best measured hosted page-ocr option:
+  `fastest` picks a measured reader, `balanced` one within 0.02 of the best hosted composite, `smart` only one at or above
+  it. An unmeasured reader, or one scoring at or under the OCR recogniser alone, is never picked. With the flag on, the
+  worker refuses to start without a ready provider that implements `estimateJobCostCents`.
+- Only plain transcription is sent: a transcription prompt template, no output schema, no task prompt, on a PDF page the
+  renderer wrote as PNG, in a `standard` privacy project whose configured vision route is hosted (not a local model such
+  as `local-cli` or a loopback vLLM or Ollama server, and not an operator-private model), in the legacy whole-document read
+  of a document with page triage. Schema and task-prompt reads, pages triage routed as `chart-or-figure` or `image-heavy`,
+  drawn-content and table-rescue pages, page-router groups and cascade legs, raster uploads, documents without triage,
+  `local-only` and `strict-privacy` projects keep the hosted route. A run without an organization sends nothing. So does
+  a cost-capped run (`maxCostCents`), which reads one page per admission on the hosted route.
+- The reader must declare where it processes pages (`hostCountry`) and the country of the company that operates its VMs
+  by ownership and jurisdiction (`operatorCountry`), both ISO 3166-1 alpha-2, and the organization's provider-region
+  policy must admit both: China (`CN`, `HK`, `MO`) needs `allowChinaProviders`, and a reader missing either is never used
+  for vision transcription. Planning runs without the run's provider-policy scope, so a reader that needs
+  `allowChinaProviders` is not held back at planning (stricter, never looser, than the read).
+- Planning holds back from one-page task fan-out at most the document's remaining reader page budget, and nothing when
+  the organization's daily reader cap has no headroom or its ledger cannot answer; every other page still fans out. The run reads them in jobs
+  of at most `maxPagesPerJob`, two in flight per document, each rendered at the provider's `maxLongEdgePx`, one run of one
+  organization per job, with the same PNG checks (signature, byte cap, header size within the long edge and 40 million
+  pixels, never decoded), response validation and organization daily cost cap
+  (`DOCSLURP_OCR_PAGE_READER_ORG_DAILY_MAX_COST_CENTS`, one ledger for both readers). `DOCSLURP_OCR_PAGE_READER_MAX_PAGES`
+  bounds the pages a document sends in one activity; nothing past it is rendered at the reader's size, no further batch
+  starts once a budget, a cap or the ledger stopped one, and pages a stop left unsent return to the budget. Every job
+  reserves the provider's cost estimate: an estimate that is missing, 0 or not finite sends nothing. When one batch's
+  render or download fails, the other batch is aborted and the error is raised once both have stopped. The budget is
+  kept per activity: a retried activity can send a document's pages again, bounded by the organization's daily cap.
+- A page the reader does not return (a failed, refused or timed-out job, a failed page, empty or invalid Markdown, a
+  refused image, the budget or a cap) goes to the run's hosted vision route as it would without the reader. That route is
+  the run's own configured model, never one the system picks as a fallback. A render or download error propagates as it
+  would on the hosted route; only reader errors fall back.
+- Usage: `[ai-usage] vision-page-reader model=<model> input_tokens=<n> output_tokens=<n>` per job, provider cost on the
+  ledger at 0 credits; each page read is one Rich page, charged once per run.
+- The reader's Markdown passes through vision-extract's own post-processing: HTML tables are rebuilt in the parser VM and
+  `$...$` / `$$...$$` math is kept, the conventions the hosted transcription prompts ask for.
+
 ## Billing and usage
 
 - An uploaded image: every frame the engine read is one Rich page read, metric `page-ocr`, with or without text in it
@@ -282,6 +325,7 @@ not install unstructured at all; it comes with the `unstructured` vendor bundle.
 | `DOCSLURP_OCR_PAGE_READER` | `off` | `escalation` or `all` to read pages with the page image reader plugin first, or a tier word (`fastest`, `balanced`, `smart`) resolved by the OCR route options (see [Page reader](#page-reader)). |
 | `DOCSLURP_OCR_PAGE_READER_ORG_DAILY_MAX_COST_CENTS` | `2000` | Reader provider cost one organization may commit per UTC day, across workers (0 to 10000000; 0 sends nothing). |
 | `DOCSLURP_OCR_PAGE_READER_MAX_PAGES` | `2000` | Most pages one document sends to the page reader (0 to 20000). |
+| `DOCSLURP_VISION_PAGE_READER` | `off` | `all` to read vision-extract's plain page transcription with the page image reader plugin, or a tier word (`fastest`, `balanced`, `smart`); see [Vision page reader](#vision-page-reader). |
 | `DOCSLURP_OCR_MAX_ATTEMPTS` | `3` | Recogniser attempts per page under `auto` (1 to 7). |
 | `DOCSLURP_OCR_LANGUAGE` | `auto` | Default language for projects left on `auto`. |
 | `DOCSLURP_OCR_MAX_LONG_EDGE` | `2000` | Long-edge cap in pixels (640 to 4000). Above 2000 is an explicit opt-in (see [Sizing](#sizing)). |
