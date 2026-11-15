@@ -512,3 +512,21 @@ test("development runs no managed updater by default", async (t) => {
   assert.equal(r.status, 0, r.stdout + r.stderr);
   assert.ok(!(await f.readCalls()).some((c) => c.args.includes("--daemon")));
 });
+
+for (const nodeEnv of ["production", "staging", "preview", "prodution", "\u00a0development"]) {
+  for (const [name, value] of [
+    ["DOCSLURP_CLAMAV_ENABLED", "false"],
+    ["DOCSLURP_CLAMAV_ENABLED", "typo"],
+    ["DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS", "999999"],
+    ["DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS", "25"],
+    ["DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS", "0"],
+    ["DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS", "1+999"],
+  ]) {
+    test(`startup refuses ${name}=${value} in ${nodeEnv}`, () => {
+      const result = spawnSync("bash", [startup], { env: { ...process.env, NODE_ENV: nodeEnv, [name]: value }, encoding: "utf8", timeout: 5000 });
+      assert.equal(result.status, 1, result.stderr);
+      assert.match(result.stderr, new RegExp(name));
+      assert.match(result.stderr, /Refusing to start/);
+    });
+  }
+}

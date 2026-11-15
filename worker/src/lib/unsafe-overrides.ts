@@ -33,7 +33,7 @@ export const UNSAFE_OVERRIDES = [
 export type UnsafeOverride = (typeof UNSAFE_OVERRIDES)[number];
 
 /** Settings whose value weakens protection: quarantine turned off, or the unisolated `none` parser sandbox. */
-export const UNSAFE_VALUE_SETTINGS = ["QUARANTINE_ENABLED", "DOCSLURP_PARSER_SANDBOX"] as const;
+export const UNSAFE_VALUE_SETTINGS = ["QUARANTINE_ENABLED", "DOCSLURP_PARSER_SANDBOX", "DOCSLURP_CLAMAV_ENABLED", "DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS"] as const;
 
 /** Every development-only setting the startup check refuses outside development. */
 export const UNSAFE_SETTINGS = [...UNSAFE_OVERRIDES, ...UNSAFE_VALUE_SETTINGS] as const;
@@ -49,6 +49,8 @@ const UNSAFE_WHEN: Record<UnsafeSetting, (value: string) => boolean> = {
   QUARANTINE_FAIL_OPEN_ON_TOOL_MISSING: (value) => !OFF_VALUES.has(value),
   DOCSLURP_CLAMAV_FAIL_OPEN_ON_STALE_DB: (value) => !OFF_VALUES.has(value),
   // Inverted: unset or an on value keeps quarantine; anything else (off values, typos) is refused, loudly.
+  DOCSLURP_CLAMAV_ENABLED: (value) => value !== "" && !ON_VALUES.has(value),
+  DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS: (value) => value !== "" && !/^(?:[1-9]|1[0-9]|2[0-4])$/.test(value),
   QUARANTINE_ENABLED: (value) => value !== "" && !ON_VALUES.has(value),
   DOCSLURP_PARSER_SANDBOX: (value) => value === "none",
 };
