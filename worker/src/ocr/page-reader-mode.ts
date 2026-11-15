@@ -2,7 +2,7 @@
  * Page reader configuration (page-reader.ts): the operator flag, the per-document page budget and the startup check.
  * Kept apart from the reader so the OCR mode check (mode.ts) can run it without importing the pipeline.
  */
-import { ROUTE_TIERS, selectOcrRoute, type RouteTier } from "@docslurp/shared";
+import { ROUTE_TIERS, type RouteTier, selectOcrRoute } from "@docslurp/shared";
 
 import { pageImageReaderProvider } from "../extractors/plugins.js";
 import type { OcrMode } from "./mode.js";
