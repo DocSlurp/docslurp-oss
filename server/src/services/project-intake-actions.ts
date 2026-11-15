@@ -1,3 +1,4 @@
+import { intakeReceiptContext } from "./intake-receipt-context.js";
 import { CHART_EXPORT_TIER_UNAVAILABLE_CODE } from "@docslurp/shared";
 /**
  * HTTP-facing Project Intake actions: request parsing, idempotency, and the
@@ -147,6 +148,20 @@ async function idempotently(
     } catch (error) {
       throw new ProjectIntakeError(error instanceof Error ? error.message : "Idempotency conflict", 409);
     }
+    if (!cached) {
+      const [receipt] = await sql`select r.*, p.creation_ready_at from intake_request_receipts r
+        left join project_runs p on p.id = r.run_id
+        where r.idempotency_key = ${idempotencyKey} and r.route_key = ${args.routeKey}`;
+      if (receipt) {
+        if (receipt.request_hash !== args.requestHash) throw new ProjectIntakeError("Idempotency conflict", 409);
+        if (!receipt.creation_ready_at) throw new ProjectIntakeError("Committed intake is still recovering; retry shortly", 409);
+        const [run] = await sql<ProjectRunRow[]>`select * from project_runs where id = ${receipt.run_id} and user_id = ${args.userId}`;
+        const project = run ? await getProject(run.project_id, args.userId) : null;
+        if (!run || !project) throw new ProjectIntakeError("Upload project is no longer accessible", 403);
+        const documents = await sql<DocumentRow[]>`select * from documents where run_id = ${run.id} order by created_at, id`;
+        cached = { status: 201, body: actionResult({ project, run: mapProjectRun(run), documents: documents.map(mapDocument), pipeline: run.pipeline, deferredReason: null, rejected: [] }).payload as unknown as Record<string, unknown> };
+      }
+    }
     if (cached) {
       const payload = cached.body as ProjectIntakePayload;
       // Authorize the actual persisted target, including an omitted/default
@@ -172,7 +187,12 @@ async function idempotently(
       };
     }
 
-    const result = await run();
+    // Claim before crawl/download side effects as well as run creation. A
+    // process death leaves a durable, fail-closed pending receipt, never a new
+    // attempt that repeats already billable work.
+    await sql`insert into intake_request_receipts (idempotency_key, route_key, request_hash, user_id)
+      values (${idempotencyKey}, ${args.routeKey}, ${args.requestHash}, ${args.userId})`;
+    const result = await intakeReceiptContext.run({ key: idempotencyKey, route: args.routeKey, hash: args.requestHash, userId: args.userId }, run);
     await storeIdempotentResponse({
       idempotencyKey,
       routeKey: args.routeKey,

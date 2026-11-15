@@ -1107,6 +1107,13 @@
       "when": 1797500000000,
       "tag": "0165_document_failure_contract",
       "breakpoints": true
+    },
+    {
+      "idx": 158,
+      "version": "7",
+      "when": 1797600000000,
+      "tag": "0166_monthly_admission_receipts",
+      "breakpoints": true
     }
   ]
 }

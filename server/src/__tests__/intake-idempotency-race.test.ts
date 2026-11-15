@@ -1,5 +1,13 @@
 import { beforeEach, expect, it, vi } from "vitest";
-const state = vi.hoisted(() => ({ locks: new Set<string>(), cache: new Map<string, { status: number; body: Record<string, unknown> }>(), executions: 0, access: true, contribute: true, keyLive: true, keyProjects: [] as string[], keyScopes: ["ingest"] as string[] }));
+const state = vi.hoisted(() => ({ durable: null as null | Record<string, unknown>, persistReceipt: false, cacheFailure: false, locks: new Set<string>(), cache: new Map<string, { status: number; body: Record<string, unknown> }>(), executions: 0, access: true, contribute: true, keyLive: true, keyProjects: [] as string[], keyScopes: ["ingest"] as string[] }));
+vi.mock("../db.js", () => ({ sql: async (parts: TemplateStringsArray) => {
+  const query = parts.join("?");
+  if (query.includes("intake_request_receipts")) return state.durable ? [state.durable] : [];
+  if (query.includes("project_runs")) return [{ id: "r", project_id: "p", user_id: "u", pipeline: {} }];
+  return [];
+} }));
+vi.mock("../services/projects.js", async load => ({ ...await load<typeof import("../services/projects.js")>(), getProject: async () => ({ id: "p", orgId: "o" }) }));
+vi.mock("../services/run-records.js", async load => ({ ...await load<typeof import("../services/run-records.js")>(), mapProjectRun: (row: {id:string}) => ({id: row.id}) }));
 vi.mock("../services/organizations.js", () => ({
   getProjectAccess: async () => state.access ? { orgId: "o" } : null,
   canContributeToProject: () => state.contribute,
@@ -17,19 +25,24 @@ vi.mock("../services/direct-upload-session.js", () => ({
 vi.mock("../services/idempotency.js", async (original) => ({
   ...await original<typeof import("../services/idempotency.js")>(),
   getCachedIdempotentResponse: async (a: { idempotencyKey: string }) => state.cache.get(a.idempotencyKey) ?? null,
-  storeIdempotentResponse: async (a: { idempotencyKey: string; status: number; body: Record<string, unknown> }) => { state.cache.set(a.idempotencyKey, a); },
+  storeIdempotentResponse: async (a: { idempotencyKey: string; status: number; body: Record<string, unknown> }) => { if (state.cacheFailure) throw new Error("cache write fault"); state.cache.set(a.idempotencyKey, a); },
 }));
 vi.mock("../services/project-intake.js", async (original) => ({
   ...await original<typeof import("../services/project-intake.js")>(),
   intakeIntoProject: async () => {
     state.executions++;
+    if (state.persistReceipt) {
+      const { intakeReceiptContext } = await import("../services/intake-receipt-context.js");
+      const receipt = intakeReceiptContext.getStore()!;
+      state.durable = { request_hash: receipt.hash, run_id: "r", creation_ready_at: new Date() };
+    }
     await new Promise(resolve => setTimeout(resolve, 10));
     return { project: { id: "p" }, run: { id: "r" }, documents: [], rejected: [] };
   },
 }));
 const { createBulkProjectIntake } = await import("../services/project-intake-actions.js");
 const args = { userId: "u", orgId: "o", project: "p", idempotencyKey: "same", files: [new File(["hello"], "a.txt", { type: "text/plain" })] };
-beforeEach(() => { state.cache.clear(); state.locks.clear(); state.executions = 0; state.access = true; state.contribute = true; state.keyLive = true; state.keyProjects = []; state.keyScopes = ["ingest"]; });
+beforeEach(() => { state.durable = null; state.persistReceipt = false; state.cacheFailure = false; state.cache.clear(); state.locks.clear(); state.executions = 0; state.access = true; state.contribute = true; state.keyLive = true; state.keyProjects = []; state.keyScopes = ["ingest"]; });
 it("executes exactly one concurrent same-key intake and replays after completion", async () => {
   const results = await Promise.allSettled(Array.from({ length: 8 }, () => createBulkProjectIntake(args)));
   expect(state.executions).toBe(1);
@@ -69,4 +82,32 @@ it.each(["revoked", "project", "scope"])("rechecks current API key policy: %s", 
 it("refuses a cached payload whose resolved project now belongs to another org", async () => {
   await createBulkProjectIntake({ ...args, orgId: "other" });
   await expect(createBulkProjectIntake({ ...args, orgId: "other" })).rejects.toMatchObject({ statusCode: 403 });
+});
+
+it("denies a bulk HTTP replay after live contribution access is revoked", async () => {
+  const { Hono } = await import("hono");
+  const { withTestSession } = await import("./helpers/session-app.js");
+  const { createUploadsRoutes } = await import("../routes/uploads.js");
+  const app = withTestSession(new Hono(), { id: "u", name: "U", email: "u@example.test" });
+  app.route("/uploads", createUploadsRoutes());
+  const request = () => {
+    const body = new FormData();
+    body.set("project", "p"); body.set("orgId", "o");
+    body.append("files", new File(["hello"], "a.txt", { type: "text/plain" }));
+    return app.request("/uploads/bulk", { method: "POST", headers: { "Idempotency-Key": "http-replay" }, body });
+  };
+  expect((await request()).status).toBe(201);
+  state.contribute = false;
+  expect((await request()).status).toBe(403);
+  expect(state.executions).toBe(1);
+});
+
+it("recovers committed intake after response-cache failure without executing it again", async () => {
+  state.persistReceipt = true; state.cacheFailure = true;
+  await expect(createBulkProjectIntake(args)).rejects.toThrow("cache write fault");
+  state.cacheFailure = false;
+  expect((await createBulkProjectIntake(args)).idempotencyReplayed).toBe(true);
+  expect(state.executions).toBe(1);
+  state.access = false;
+  await expect(createBulkProjectIntake(args)).rejects.toMatchObject({ statusCode: 403 });
 });

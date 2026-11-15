@@ -77,7 +77,7 @@ export async function resumeSpendPausedRunOutcome(runId: string, deps: SpendPaus
       `;
       if (!row) return { status: "not-spend-paused" } as const;
       if (!spendGuardsSkipped()) {
-        const reason = spendBlockReason(await loadSpendStatus(row.org_id, row.project_id, { client, runReserveCredits: leases ? 0 : runAdmissionReserveCredits() }));
+        const reason = spendBlockReason(await loadSpendStatus(row.org_id, row.project_id, { client, reusingRunId: row.id, runReserveCredits: leases ? 0 : runAdmissionReserveCredits() }));
         if (reason) return { status: "blocked", reason: reason.code } as const;
       }
       await tx`

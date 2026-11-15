@@ -1,3 +1,4 @@
+import { bindIntakeReceipt } from "./intake-receipt-context.js";
 import { randomUUID } from "node:crypto";
 
 import { chartExportModelsAllowed, minChartExportTier, projectChartExportTierCap, upgradeStoredChartExport, type ChartExportTier, type ResolvedChartExportConfig, type RunOrigin } from "@docslurp/shared";
@@ -619,6 +620,7 @@ export function createRunCreation(deps: RunCreationDeps) {
     totalDocuments: number;
     sourceKeys: string[];
     pipeline: PipelineFeatures;
+    budgetCents: number;
   }): Promise<ProjectRunRow> {
     const { input } = args;
     const requestId = currentRequestId();
@@ -634,7 +636,7 @@ export function createRunCreation(deps: RunCreationDeps) {
           id, org_id, user_id, project_id, kind, status, priority, control_state,
           control_requested_at, stage, total_documents, processed_documents,
           pages_total, pages_processed, stats, creation_source_keys, pipeline,
-          extract_id, storage_prefix, origin
+          extract_id, storage_prefix, origin, monthly_reservation_cents
         )
         values (
           ${args.id},
@@ -660,7 +662,7 @@ export function createRunCreation(deps: RunCreationDeps) {
           ${sql.json(JSON.parse(JSON.stringify(args.pipeline)))},
           ${input.extract?.id ?? null},
           ${input.extract?.storagePrefix ?? null},
-          ${input.origin ?? "machine"}
+          ${input.origin ?? "machine"}, ${args.budgetCents}
         )
         returning *
       )
@@ -668,6 +670,7 @@ export function createRunCreation(deps: RunCreationDeps) {
       from inserted
       join projects on projects.id = inserted.project_id
     `;
+      await bindIntakeReceipt(tx, args.id);
       // The extract learns its run in the same transaction, so a failure after commit never orphans the run.
       if (input.extract) await tx`update extracts set run_id = ${args.id}, updated_at = now() where id = ${input.extract.id} and (run_id is null or run_id = ${args.id})`;
       return rows;
@@ -1002,12 +1005,13 @@ export function createRunCreation(deps: RunCreationDeps) {
       }));
     // The preview schema needs at least one file; with none (an empty run) the call only validates the pipeline.
     const validationFiles = forecastFilesOfSources();
-    costForecastFor(validationFiles.length > 0 ? validationFiles : [{ filename: "validation.pdf", mimeType: "application/pdf", sizeBytes: 1, pages: 1 }]);
+    const admissionForecast = costForecastFor(validationFiles.length > 0 ? validationFiles : [{ filename: "validation.pdf", mimeType: "application/pdf", sizeBytes: 1, pages: 1 }]);
 
     const runId = input.runId ?? randomUUID();
     const reuse = sources.kind === "versionsOf" && sources.reuse === true;
     const row = await insertRun({
       id: runId,
+      budgetCents: Math.max(1, admissionForecast.maxCents),
       orgId: access.orgId,
       input,
       totalDocuments: sources.kind === "files" ? sources.files.length : sourceDocuments.length,
