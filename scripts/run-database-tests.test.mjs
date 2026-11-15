@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
@@ -64,4 +64,24 @@ test("server/db/tests scripts are scanned but never run directly", () => {
   assert.ok(!gatedFiles(scanned).some((entry) => entry.file.startsWith("server/db/tests/")), "scripts run through their wrappers");
   const unlisted = [{ file: "server/db/tests/new-script.mjs", script: true, ...classifyTestSource("process.env.NEW_SCRIPT_DATABASE_URL") }];
   assert.deepEqual(unsupportedGatedFiles(unlisted), ["server/db/tests/new-script.mjs (NEW_SCRIPT_DATABASE_URL)"]);
+});
+
+ test("aliases and optional reads cannot hide foreign database gates", () => {
+  for (const source of [
+    "const env = process.env; env.FOREIGN_DATABASE_URL",
+    "const env = process.env; const next = env; next?.FOREIGN_DATABASE_URL",
+    "process.env?.FOREIGN_DATABASE_URL",
+    'process.env?.["FOREIGN_DATABASE_URL"]',
+    'const env = process.env; env?.["FOREIGN_DATABASE_URL"]',
+    'const env = process.env; const { FOREIGN_DATABASE_URL: url } = env;',
+  ]) assert.deepEqual(classifyTestSource(source).other, ["FOREIGN_DATABASE_URL"], source);
+});
+
+test("discovers JavaScript and TSX package tests", () => {
+  const dir = mkdtempSync(path.join(process.env.TMPDIR || "/home/dan/tmp/agents", "database-discovery-"));
+  try {
+    for (const name of ["server/src", "worker/src", "packages/sample/src", "server/db/tests"]) mkdirSync(path.join(dir, name), { recursive: true });
+    for (const ext of ["js", "tsx", "jsx", "cjs", "mts"]) writeFileSync(path.join(dir, `packages/sample/src/db.test.${ext}`), "process.env.TEST_DATABASE_URL");
+    assert.equal(gatedFiles(scanTestFiles(dir)).length, 5);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

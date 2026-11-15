@@ -87,3 +87,22 @@ it("records the routed model, upstream host, timing and usage of OpenRouter gene
   await (await instrumentFetch("openrouter", "embed", async () => Response.json({ provider: "X" }))("https://openrouter.ai/api/v1/embeddings", { method: "POST", body })).json();
   expect(exporter.getFinishedSpans().find((item) => item.name === "openrouter.embed")!.attributes["docslurp.llm.upstream_provider"]).toBeUndefined();
 });
+
+ it("refuses redirect following even when callers request it", async () => {
+  const http = vi.fn(async (_input: unknown, init?: RequestInit) => {
+    expect(init?.redirect).toBe("error");
+    return new Response(null, { status: 302, headers: { location: "http://127.0.0.1/private" } });
+  });
+  const response = await instrumentFetch("openai", "embedding", http)("https://api.openai.com/v1/embeddings", {
+    redirect: "follow", headers: { authorization: "Bearer sentinel-platform-key" },
+  });
+  expect(response.status).toBe(302);
+  await response.body?.cancel();
+  expect(http).toHaveBeenCalledTimes(1);
+});
+
+it("redacts provider response bodies before SDK errors can expose them", async () => {
+  const response = await instrumentFetch("openai", "embedding", async () => new Response("sentinel-platform-secret", { status: 401 }))("https://api.openai.com/v1/embeddings");
+  expect(response.status).toBe(401);
+  expect(await response.text()).not.toContain("sentinel-platform-secret");
+});

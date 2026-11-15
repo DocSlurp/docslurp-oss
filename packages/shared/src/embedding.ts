@@ -1596,3 +1596,12 @@ export function isLoopbackModelBaseUrl(value: string): boolean {
     return false;
   }
 }
+
+/** Server-side admission for tenant-selected loopback services; opt in only on trusted single-tenant hosts. */
+export function assertTenantModelEndpointAllowed(modelUri: string): void {
+  const provider = parseLlmModelUri(modelUri).provider;
+  if (["ollama", "vllm", "lmstudio"].includes(provider)
+      && process.env.DOCSLURP_ALLOW_TENANT_LOCAL_MODEL_ENDPOINTS !== "true") {
+    throw new Error("Tenant-selected local model endpoints are disabled");
+  }
+}

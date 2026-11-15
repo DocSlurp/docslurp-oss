@@ -1,3 +1,4 @@
+- Security remainder: refuse tenant loopback inference by default, bind API embedding credentials to the operator destination, block provider redirects, redact HTTP/vision errors, exclude billing-only default-project contributions, and cover alias/optional-access/package database-test guards. Regression execution beyond Node script tests awaits installable dependencies.
 - Asset ledger: reject repeat references on new or updated unlinked rows with an idempotent NOT VALID database constraint; retain historical rows for separate cleanup.
 ## Ingest version tagging and typed unavailable states (2026-11-13, draft, needs council)
 

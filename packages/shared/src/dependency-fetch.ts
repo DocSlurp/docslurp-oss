@@ -20,7 +20,7 @@ export function instrumentFetch(provider: string, operation: string, http: typeo
     if (llm) span.set(llmRequestAttributes(init?.body));
     const started = performance.now();
     let response: Response;
-    try { response = await span.run(() => http(input, init)); }
+    try { response = await span.run(() => http(input, { ...init, redirect: "error" })); }
     catch (error) { span.end(error); throw error; }
     span.set({ "http.response.status_code": response.status,
       ...(llm ? { "docslurp.llm.time_to_headers_ms": Math.round(performance.now() - started) } : {}),
@@ -47,6 +47,15 @@ export function instrumentFetch(provider: string, operation: string, http: typeo
         } catch { /* Missing/unreadable evidence is not a billing incident. */ }
         finally { clearTimeout(timer); void reader.cancel().catch(() => {}); }
       }
+    }
+    // Provider bodies may repeat Authorization headers or internal service data.
+    // Billing classification above consumes only a bounded operator-side preview.
+    if (!response.ok && response.status >= 400) {
+      void response.body?.cancel().catch(() => {});
+      span.end(Object.assign(new Error(), { name: `HTTP_${response.status}` }));
+      return new Response(JSON.stringify({ error: { message: "Provider request failed", type: "provider_error" } }), {
+        status: response.status, headers: { "content-type": "application/json" },
+      });
     }
     let upstreamError = false;
     let errorTail = "";

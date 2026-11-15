@@ -48,6 +48,20 @@ const DESTRUCTURED_READ = /\{([^{}]*)\}\s*=\s*process\.env\b/g;
 /** Every environment variable name the source reads, by any of the forms above. */
 export function environmentReads(source) {
   const names = new Set();
+  // Follow simple environment aliases, including transitive aliases. Expand
+  // them before scanning so optional access and destructuring share one path.
+  const aliases = new Set(["process.env"]);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const m of source.matchAll(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*([A-Za-z_$][\w$]*(?:\.env)?)\s*(?=[;,\n]|$)/g)) {
+      if (aliases.has(m[2]) && !aliases.has(m[1])) { aliases.add(m[1]); changed = true; }
+    }
+  }
+  for (const alias of [...aliases].filter((v) => v !== "process.env")) {
+    source = source.replace(new RegExp(`\\b${alias.replace(/[$]/g, "\\$")}\\b`, "g"), "process.env");
+  }
+  source = source.replace(/process\.env\?\./g, "process.env.").replace(/process\.env\.\[/g, "process.env[");
   for (const m of source.matchAll(DOT_READ)) names.add(m[1]);
   for (const m of source.matchAll(INDEX_READ)) names.add(m[2]);
   for (const m of source.matchAll(DESTRUCTURED_READ)) {
@@ -81,7 +95,7 @@ export function scanTestFiles(dir = root) {
       else if (pattern.test(name)) found.push({ file: path.relative(dir, full), ...classifyTestSource(readFileSync(full, "utf8")), ...extra });
     }
   };
-  for (const top of ["server/src", "worker/src", "packages"]) walk(path.join(dir, top), /\.test\.(ts|mjs)$/, {});
+  for (const top of ["server/src", "worker/src", "packages"]) walk(path.join(dir, top), /\.test\.(?:[cm]?[jt]s|tsx|jsx)$/, {});
   walk(path.join(dir, "server/db/tests"), /\.(ts|mjs)$/, { script: true });
   return found.sort((a, b) => a.file.localeCompare(b.file));
 }
@@ -135,9 +149,9 @@ function main() {
         env.TEST_DATABASE_URL = `${admin}/${name}`;
       }
       if (needsRedis) env.TEST_REDIS_URL = redis;
-      const pkg = file.split("/")[0];
+      const pkg = file.startsWith("packages/") ? file.split("/").slice(0, 2).join("/") : file.split("/")[0];
       const report = path.join(scratch, `${index}.json`);
-      const run = spawnSync("pnpm", ["exec", "vitest", "run", file.slice(pkg.length + 1), "--reporter=default", "--reporter=json", `--outputFile.json=${report}`], { cwd: path.join(root, pkg), env, stdio: "inherit" });
+      const run = spawnSync("pnpm", ["exec", "vitest", "run", file.slice(pkg.length + 1), "--maxWorkers=2", "--reporter=default", "--reporter=json", `--outputFile.json=${report}`], { cwd: path.join(root, pkg), env, stdio: "inherit" });
       let result = null;
       try { result = JSON.parse(readFileSync(report, "utf8")); } catch { /* reported below */ }
       const skipped = (result?.numPendingTests ?? 0) + (result?.numTodoTests ?? 0);

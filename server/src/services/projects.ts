@@ -1,3 +1,4 @@
+import { assertTenantModelEndpointAllowed } from "@docslurp/shared";
 import { EDITOR_REQUIRED_CODE, EDITOR_REQUIRED_MESSAGE, deferredProfilesEnabled, isBillingEnforced, PUBLIC_ERROR_MESSAGES, publicDiagnostics, publicDocumentError, resolveManagedPipeline, parseManagedPipelineOverrides, storedManagedPipeline, stripManagedPipelineFields, type ManagedPipelineOverrides } from "@docslurp/shared";
 import { chartExportDefaults, upgradeStoredPipelineChartExport } from "@docslurp/shared";
 import { markProjectAutoNamed } from "./project-naming.js";
@@ -380,6 +381,7 @@ async function assertProjectAccess(projectId: string, userId: string) {
 
 export async function createProject(input: CreateProjectInput): Promise<ProjectRecord> {
   const parsed = createProjectSchema.parse(input);
+  if (parsed.pipeline) assertTenantPipelineEndpoints(parsed.pipeline);
   // No chosen name: start as the placeholder and let automatic naming take over.
   const untitled = isUntitledProjectName(parsed.name);
   const name = untitled ? UNTITLED_PROJECT_NAME : parsed.name!;
@@ -1061,6 +1063,7 @@ export async function updateProject(
   options: ProjectUpdateOptions = {},
 ): Promise<ProjectRecord | null> {
   const parsed = updateProjectSchema.parse(input);
+  if (parsed.pipeline) assertTenantPipelineEndpoints(parsed.pipeline);
   let current: ProjectRecord;
   let pipeline: PipelineFeatures;
   if (options.precomputed) {
@@ -1766,4 +1769,10 @@ export async function getProjectTraceFeed(
       } satisfies ProjectChatTrace;
     }),
   };
+}
+
+function assertTenantPipelineEndpoints(pipeline: PipelineFeatures): void {
+  for (const modelUri of [pipeline.embedding?.modelUri, pipeline.vision?.modelUri]) {
+    if (modelUri) assertTenantModelEndpointAllowed(modelUri);
+  }
 }

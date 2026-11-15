@@ -4,10 +4,14 @@ import { run } from "node:test";
 import { spec } from "node:test/reporters";
 import { resolve } from "node:path";
 
+import { assertDisposableTestDatabaseUrl } from "../packages/shared/src/test-database-guard.ts";
+
+if (process.env.TEST_DATABASE_URL) assertDisposableTestDatabaseUrl(process.env.TEST_DATABASE_URL);
+
 const files = process.argv.slice(2).map(file => resolve(file));
 if (!files.length) throw new Error("Pass at least one test file");
 const controller = new AbortController();
-const tests = run({ files, concurrency: process.env.CI ? 1 : true, signal: controller.signal });
+const tests = run({ files, concurrency: process.env.CI ? 1 : 2, signal: controller.signal });
 tests.on("test:fail", event => {
   if (event.todo) return;
   process.exitCode = 1;
