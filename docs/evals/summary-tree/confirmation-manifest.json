@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "split": "confirmation",
+  "sealed": true,
+  "location": "outside the repository, under the eval root: sealed/confirmation-cases.json",
+  "sha256": "00dfdb5bf164473a5ffc238e507838e4dcfab6bc5ea97b7677b10771fdacecbe",
+  "authoredSha256": "1a63503be33abd1bd1e49cfb467297ad57305487c548748153c1331c58434402",
+  "cases": 22,
+  "byClass": { "fact": 11, "multi-section": 9, "whole-document": 2 },
+  "bySlice": { "headed": 10, "heading-less": 12 },
+  "documents": 11,
+  "authored": "2026-11-14, before any arm was run, by the same author as the development set and on the same frozen corpus",
+  "runs": [],
+  "rules": "No tuning step may read the sealed file. The harness refuses it without --confirmation. Record every confirmation run here with its date, harness commit and the frozen tree hash; a run against a changed tree or prompt is a new entry, never an overwrite."
+}

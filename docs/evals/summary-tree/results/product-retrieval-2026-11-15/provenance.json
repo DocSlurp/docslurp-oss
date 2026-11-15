@@ -1,0 +1,25 @@
+{
+  "observedAt": "2026-11-15T02:29:31.871Z",
+  "storage": "fresh local LanceDB",
+  "database": "migrated disposable PostgreSQL",
+  "providerSpendCapUsd": 0,
+  "sourceCommit": "b2213c6b57b5d9afc6475b5571be2884e6daa500",
+  "sourceDiffSha256": "0f88aad845deb30d6a6b04b03cd7432e2d300bc489a99050f2d9962304d0bf20",
+  "treeHashes": {
+    "federalist-papers.tree.json": "350fa8cc9495fe7911d3e327cad090d1584312f82f14d138c3b55025985f0c6f",
+    "frankenstein.tree.json": "067605e4185a387eef8787e21d5b1a535bd7bf58a08ba57a80c2ed2127a2fbcf",
+    "huckleberry-finn.tree.json": "f2cd5e10f2b94d4d046e6e4e055dd9c4f8b17dc39763c9b2ff168136d8c0e8bf",
+    "leviathan.tree.json": "aa20785220ffa073c55d5608c64396e93185f3de00a6b9676542a195f0703740",
+    "origin-of-species.tree.json": "14e72f97901b27ead952b4c7ffbb59ed74c118a613e69154da9cc1fa0e2a5e0e",
+    "rfc9110.tree.json": "bfe673c480d1baba392b3630e62ffb6b4a646bcc31ff61f345465f4b1bdbe830",
+    "rfc9293.tree.json": "52aeb214eee2b862b808b9fad31760ecc6ced1bc85635b1b940aadf29baa4d4b",
+    "second-treatise.tree.json": "45f9ed252d312c5e60a1639709c815b24b0aa38a984cff3baa44f009e70c21bb",
+    "sherlock-holmes.tree.json": "d852ec70a2a416b788d71cc316bb3b1fed0d056487e8a0a0b84c4daed4bd5c22",
+    "voyage-of-the-beagle.tree.json": "153d2ab894e03ce0007d80483d5af0e33952fd48a92d893ce6fb887cd4e9cfae",
+    "walden.tree.json": "d573ae377d1d36b8be91f36f4f51a3664d82ac6f50f600b553d6fb93ae7d6ec3"
+  },
+  "treeDirectory": "tree-product",
+  "answers": false,
+  "cases": "docs/evals/summary-tree/development-cases.json",
+  "productionCalibration": false
+}

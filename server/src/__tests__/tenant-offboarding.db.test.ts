@@ -124,6 +124,8 @@ describe("organization deletion", () => {
       { kind: "vector_table", target: "team|legacy" },
       { kind: "vector_table", target: "team|legacy|model-x|4" },
       { kind: "vector_table", target: "team|ws|model-x|4" },
+      // The summary tree's table beside it: organization deletion drops it by name as well.
+      { kind: "vector_table", target: "team|ws|model-x|4|summaries" },
     ]);
     const [org] = await sql`select name, slug, deleted_at is not null as deleted, offboarded_at is not null as offboarded,
       stripe_customer_id, auto_recharge_enabled from organizations where id = 'team'`;

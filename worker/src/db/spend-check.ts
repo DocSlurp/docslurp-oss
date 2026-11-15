@@ -155,6 +155,27 @@ export function spendBlockCode(row: {
 }
 
 /**
+ * Whether an org may spend on optional paid work for a project right now: the block code (`spendBlockCode`), or
+ * null when it may. Read-only: nothing is paused. For work that is asked before it starts and simply not done when
+ * refused (the summary tree). Fails closed: no organization is `plan_not_entitled`, and a failed read throws.
+ */
+export async function orgSpendRefusal(client: Client, scope: { orgId: string | null; projectId?: string | null }): Promise<string | null> {
+  if (!spendCheckConfig().enabled) return null;
+  if (!scope.orgId) return "plan_not_entitled";
+  const [row] = await client<{
+    funded: boolean | null;
+    available: string | number;
+    project_budget_paused: boolean;
+    org_budget_paused: boolean;
+    project_in_org: boolean;
+  }[]>`
+    select funded, available, project_budget_paused, org_budget_paused, project_in_org
+    from org_spend_status(${scope.orgId}, ${scope.projectId ?? null}::text, 0)
+  `;
+  return spendBlockCode(row ? { ...row, org_id: scope.orgId } : row);
+}
+
+/**
  * Check the run's org and pause the run when it may no longer spend. Mid-run
  * the rule is "available below 0" (admission already required > 0), so a run
  * finishing a page exactly at 0 continues. Never throws: a failed check is

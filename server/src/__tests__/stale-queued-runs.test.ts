@@ -38,13 +38,12 @@ describe("stale queued run sweeper", () => {
     // two for hourly feedback retention on the first tick, and six for
     // the extract sweep (settle, charge, queue downloads, claim emails, claim expired extracts, re-list deleted ones),
     // and one for expired API search history, and one for the figure-resume backstop (first tick only: it runs at most
-    // every 10 minutes), and one for the project-activity counter drift check (first tick only, same cadence: it
-    // lists the next projects to compare and finds none).
+    // every 10 minutes), plus corrected summary trees and project-activity drift on their first tick.
     await vi.advanceTimersByTimeAsync(60_000);
-    expect(sqlMock).toHaveBeenCalledTimes(25);
+    expect(sqlMock).toHaveBeenCalledTimes(26);
 
     await vi.advanceTimersByTimeAsync(60_000);
-    expect(sqlMock).toHaveBeenCalledTimes(45);
+    expect(sqlMock).toHaveBeenCalledTimes(46);
     vi.unstubAllEnvs();
   });
 

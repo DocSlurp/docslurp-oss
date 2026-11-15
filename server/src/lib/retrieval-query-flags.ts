@@ -1,4 +1,4 @@
-import { searchCandidateDepthSchema, searchModeSchema, searchResultOrderSchema, type SearchMode } from "@docslurp/shared";
+import { searchCandidateDepthSchema, searchModeSchema, searchResultOrderSchema, summaryTreeSearchModeSchema, type SearchMode, type SummaryTreeSearchMode } from "@docslurp/shared";
 
 /**
  * Retrieval flags from a query string, shared by GET /v1/search and the
@@ -15,6 +15,7 @@ export interface RetrievalQueryFlags {
   useMmr?: boolean;
   parentRetrieval?: boolean;
   summarySeed?: boolean;
+  summaryTree?: SummaryTreeSearchMode;
   useContextualCompression?: boolean;
   queryRewrite?: boolean;
   queryDecompose?: boolean;
@@ -76,8 +77,13 @@ export function parseRetrievalQueryFlags(read: (name: string) => string | undefi
   if (rawMode && !searchModeSchema.safeParse(rawMode).success) {
     throw new InvalidRetrievalQueryError("mode must be keyword, hybrid or deep");
   }
+  const rawSummaryTree = read("summaryTree")?.trim();
+  if (rawSummaryTree && !summaryTreeSearchModeSchema.safeParse(rawSummaryTree).success) {
+    throw new InvalidRetrievalQueryError("summaryTree must be off, guide or include");
+  }
   return {
     searchMode: (rawMode || undefined) as SearchMode | undefined,
+    summaryTree: (rawSummaryTree || undefined) as SummaryTreeSearchMode | undefined,
     candidateDepth,
     resultOrder: resultOrder as RetrievalQueryFlags["resultOrder"],
     useHyDE: flag("hyde"),

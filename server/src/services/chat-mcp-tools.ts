@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { dynamicTool, jsonSchema, type ToolSet } from "ai";
-import { figureResumeChatEnabled, figureResumeProposalSchema, projectSettingsProposalSchema, type FigureResumeProposal, type ProjectSettingsProposal, CHAT_AGENT_LIMIT_DEFAULTS, CHAT_MAX_RETRIEVED_PASSAGES, searchResultSchema, type SearchResult, type ProjectSearchRetrievalDefaults } from "@docslurp/shared";
+import { figureResumeChatEnabled, figureResumeProposalSchema, projectSettingsProposalSchema, type FigureResumeProposal, type ProjectSettingsProposal, CHAT_AGENT_LIMIT_DEFAULTS, CHAT_MAX_RETRIEVED_PASSAGES, searchResultSchema, type SearchResult, type ProjectSearchRetrievalDefaults, type SummaryTreeSearchMode } from "@docslurp/shared";
 import type { WebToolActivity } from "@docslurp/shared/project-chat-ui";
 import { startTelemetrySpan, type TelemetrySpan } from "@docslurp/shared/observability";
 import type { McpDispatch, McpManifest } from "../lib/mcp-http.js";
@@ -369,11 +369,50 @@ const MODEL_RESULT_MAX_CHARS = 12_000;
 /** Ceiling for one evidence passage shown to the model. */
 const EVIDENCE_TEXT_MAX_CHARS = 4_000;
 
-/** The tool result without its search passages (they are sent once, as `evidence`); undefined when nothing else is left. */
+/**
+ * A section summary of the summary tree (`summaryTree: "include"`): model-written text over document text, with a
+ * heading trail that is document text verbatim. Recognised by its label alone, so a malformed one is withheld too.
+ */
+const isSectionSummary = (item: unknown) => Boolean(item) && typeof item === "object" && (item as { kind?: unknown }).kind === "summary";
+
+/** What the model is told when a search asked for section summaries: they are never shown in chat. */
+export const SUMMARY_TREE_CHAT_NOTICE = "Section summaries are not shown in chat. The search used them only to pick passages (summaryTree ran as \"guide\"). Answer and cite from the evidence passages.";
+
+/** The chat's summary-tree mode for a search: `include` runs as `guide`. Summaries never enter a chat turn. */
+export function chatToolSummaryTree(mode: SummaryTreeSearchMode | undefined): SummaryTreeSearchMode | undefined {
+  return mode === "include" ? "guide" : mode;
+}
+
+/**
+ * A search tool result without any `summaries` list, and how many summaries that removed. Chat sends `guide`, so a
+ * response should carry none; this holds whatever the search route returns.
+ */
+export function withoutSectionSummaries(value: unknown): { value: unknown; removed: number } {
+  let removed = 0;
+  const walk = (node: unknown): unknown => {
+    if (Array.isArray(node)) return node.map(walk);
+    if (!node || typeof node !== "object") return node;
+    const out: Record<string, unknown> = {};
+    for (const [key, item] of Object.entries(node as Record<string, unknown>)) {
+      if (key === "summaries") {
+        removed += Array.isArray(item) ? item.length : 1;
+        continue;
+      }
+      out[key] = walk(item);
+    }
+    return out;
+  };
+  return { value: walk(value), removed };
+}
+
+/**
+ * The tool result without its search passages (they are sent once, as `evidence`); undefined when nothing else is left.
+ * Section summaries are dropped as well: they are untrusted text that has no isolated block and is never citable.
+ */
 export function withoutEvidence(value: unknown): unknown {
   if (Array.isArray(value)) {
     if (!value.length) return value;
-    const kept = value.filter(item => !searchResultSchema.safeParse(item).success).map(withoutEvidence).filter(item => item !== undefined);
+    const kept = value.filter(item => !searchResultSchema.safeParse(item).success && !isSectionSummary(item)).map(withoutEvidence).filter(item => item !== undefined);
     return kept.length ? kept : undefined;
   }
   if (!value || typeof value !== "object") return value;
@@ -390,6 +429,8 @@ export function createChatMcpTools(args: {
   dispatch: McpDispatch;
   projectId: string;
   retrievalDefaults?: ProjectSearchRetrievalDefaults;
+  /** This thread's summary-tree override (chatSummaryTreeOverride); undefined: the project default decides. */
+  summaryTree?: SummaryTreeSearchMode;
   signal: AbortSignal;
   onActivity?: (activity: ChatToolActivity) => void;
   onEvidence?: (citations: SearchResult[]) => void;
@@ -447,6 +488,13 @@ export function createChatMcpTools(args: {
   const tools: ToolSet = {};
   const defaults = args.retrievalDefaults;
   const limit = defaults ? Math.min(defaults.resultCount, CHAT_MAX_RETRIEVED_PASSAGES) : undefined;
+  // Section summaries never reach the chat model: they are model-written text over document text plus a verbatim
+  // heading trail, and a tool result has no isolated, citable place for them. A thread, request or project setting of
+  // `include` therefore runs as `guide` for every search of the turn (sent explicitly, so the project default cannot
+  // bring `include` back), the model's own `summaryTree` argument is dropped, and a `summaries` list in a result is
+  // withheld whatever produced it.
+  const requestedSummaryTree = args.summaryTree ?? defaults?.summaryTree;
+  const turnSummaryTree = requestedSummaryTree === "include" ? chatToolSummaryTree(requestedSummaryTree) : args.summaryTree;
   const searchDefaults = defaults ? {
     limit, hyde: defaults.useHyDE, rerank: defaults.useRerank, mmr: defaults.useMmr,
     candidateDepth: defaults.candidateDepth, resultOrder: defaults.resultOrder,
@@ -593,11 +641,20 @@ export function createChatMcpTools(args: {
         const joinFanout = (value: Record<string, unknown>) => Array.isArray(value.q)
           ? { ...value, q: value.q.filter((term): term is string => typeof term === "string").join(" ") }
           : value;
-        const modelSupplied = definition.id === "search" ? joinFanout(withoutProject(supplied)) : withoutProject(supplied);
+        // The summary-tree mode is the turn's, never the model's: its own argument is dropped (and noted when it asked
+        // for summaries), then the turn's mode is applied.
+        let modelAskedForSummaries = false;
+        const withTurnSummaryTree = (value: Record<string, unknown>): Record<string, unknown> => {
+          const { summaryTree: asked, ...rest } = value;
+          if (asked === "include") modelAskedForSummaries = true;
+          return rest;
+        };
+        const treeMode = turnSummaryTree === undefined ? {} : { summaryTree: turnSummaryTree };
+        const modelSupplied = definition.id === "search" ? withTurnSummaryTree(joinFanout(withoutProject(supplied))) : withoutProject(supplied);
         const body = definition.id === "search"
           ? Array.isArray(supplied.queries)
-            ? { ...modelSupplied, concurrency, queries: (supplied.queries as unknown[]).map(q => ({ ...joinFanout(withoutProject(q)), ...searchDefaults, project: args.projectId })) }
-            : { ...modelSupplied, ...searchDefaults, project: args.projectId }
+            ? { ...modelSupplied, concurrency, queries: (supplied.queries as unknown[]).map(q => ({ ...withTurnSummaryTree(joinFanout(withoutProject(q))), ...searchDefaults, ...treeMode, project: args.projectId })) }
+            : { ...modelSupplied, ...searchDefaults, ...treeMode, project: args.projectId }
           : { ...modelSupplied, project: args.projectId };
         const queries = definition.id === "search" ? modelQueries(supplied) : undefined;
         let settingsProposal: ProjectSettingsProposal | undefined;
@@ -697,7 +754,10 @@ export function createChatMcpTools(args: {
           // Passages reach the model once, as this call's numbered evidence. Every
           // later step re-sends the whole history, so repeating the raw hits or the
           // turn's earlier evidence here multiplied input tokens per answer.
-          const stripped = settingsProposal ? { settingsProposal: { ...settingsProposal, token: undefined } } : withoutEvidence(result);
+          const withheld = definition.id === "search" ? withoutSectionSummaries(result) : { value: result, removed: 0 };
+          if (withheld.removed > 0) console.warn(`[chat-tools] section summaries withheld from the model count=${withheld.removed} tool=${definition.id}`);
+          const summariesNotShown = definition.id === "search" && (requestedSummaryTree === "include" || modelAskedForSummaries || withheld.removed > 0);
+          const stripped = settingsProposal ? { settingsProposal: { ...settingsProposal, token: undefined } } : withoutEvidence(withheld.value);
           const isolatedWeb = definition.id === "webSearch" || definition.id === "webFetch" ? isolateWebText(evidenceTag, stripped) : { value: stripped, wrapped: false };
           const modelResult = isolatedWeb.value;
           const serialized = JSON.stringify(modelResult) ?? "";
@@ -705,6 +765,7 @@ export function createChatMcpTools(args: {
           return {
             ok, status: response.status,
             ...(evidence.length || isolatedWeb.wrapped ? { dataNotice: dataNotice(evidenceTag) } : {}),
+            ...(summariesNotShown ? { summaryTreeNotice: SUMMARY_TREE_CHAT_NOTICE } : {}),
             ...(fetchFailed?.length ? { unread: fetchFailed.slice(0, 10).map(item => ({ url: item.url, reason: webFailureCause(item.reason) })),
               instruction: "Some pages could not be read. Answer from the pages that were read, and tell the user plainly which pages could not be retrieved and why." } : {}),
             ...(modelResult === undefined ? {} : { result: serialized.length <= MODEL_RESULT_MAX_CHARS ? modelResult : { truncated: true, preview: serialized.slice(0, MODEL_RESULT_MAX_CHARS) } }),

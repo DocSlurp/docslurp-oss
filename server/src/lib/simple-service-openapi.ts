@@ -96,6 +96,31 @@ export const simpleServiceSchemas = {
       relevanceFloor: { type: "object", description: "The relevance floor applied to this search. Each result's relevance (0..1) is a raw match strength that does not depend on the other hits.", properties: {
         minScore: { type: "number", minimum: 0, maximum: 1, description: "Floor applied; 0 means disabled." }, dropped: { type: "integer", minimum: 0, description: "Retrieved candidates removed for being below the floor." },
       } },
+      summaryTree: ref("SummaryTreeSearchOutcome"),
+      summaries: { type: "array", description: "summaryTree include only: section summaries that matched the query, best first, taking at most a quarter of the returned context. They are model-written text, not passages: they are never in results and carry no citation.", items: ref("SearchSummary") },
+    },
+  },
+  SummaryTreeSearchOutcome: {
+    type: "object", required: ["requested", "applied", "ms"],
+    description: "What the project's summary tree did for this search. Present when the request asked for guide or include, or the project's retrieval default did and this search could run it. A request that does not ask, on a project whose default cannot run (keyword mode, a project without a tree), gets no field.",
+    properties: {
+      requested: { enum: ["off", "guide", "include"], description: "The mode asked for: the request's summaryTree, else the project's retrieval default." },
+      applied: { enum: ["off", "guide", "include"], description: "The mode that shaped this response; off when the tree was skipped. A search that ran as sub-searches (decomposition, stepback, multi-hop) applies guide at most." },
+      skipped: { enum: ["deadline", "not-ready", "mode", "error"], description: "Why the tree contributed nothing. deadline: it had not finished in time beside the vector search. not-ready: no document in scope has a finished tree. mode: this search cannot use the tree (keyword mode, a spatial or chunk-level filter, or a project that does not build or serve one). error: it failed and the search answered without it." },
+      ms: { type: "number", minimum: 0, description: "Wall time of the tree's part of retrieval, in milliseconds." },
+    },
+  },
+  SearchSummary: {
+    type: "object", required: ["kind", "id", "documentId", "filename", "level", "summary", "headingPath", "pageStart", "pageEnd", "chunkStart", "chunkEnd", "relevance"],
+    description: "A section summary from the project's summary tree. Model-written text about a range of one document; never show it as a quote or cite it. Cite the chunks in results.",
+    properties: {
+      kind: { const: "summary" }, id: { type: "string" }, documentId: { type: "string" }, filename: { type: "string" },
+      level: { type: "integer", minimum: 1, description: "1 is a section of the document; higher levels summarize the levels below." },
+      summary: { type: "string", description: "The model-written summary. Not source text." },
+      headingPath: { type: "array", items: { type: "string" } },
+      pageStart: { type: ["integer", "null"] }, pageEnd: { type: ["integer", "null"] },
+      chunkStart: { type: "integer", minimum: 0 }, chunkEnd: { type: "integer", minimum: 0 },
+      relevance: { type: "number", minimum: 0, maximum: 1 },
     },
   },
   BatchSearchResponse: {
@@ -181,6 +206,7 @@ const canonicalServicePaths = {
     get: { tags: ["search"], summary: "Search a project", security: serviceSecurity, parameters: [
       { in: "query", name: "q", required: true, schema: { type: "string" } }, { in: "query", name: "project", description: projectRef.description, schema: { type: "string" } }, { in: "query", name: "limit", schema: { type: "integer", minimum: 1, maximum: 100 } },
       { in: "query", name: "minScore", description: minScoreDescription, schema: { type: "number", minimum: 0, maximum: 1 } },
+      { in: "query", name: "summaryTree", description: "How this search uses the project's summary tree: off, guide (section summaries pick extra chunks; results stay real chunks) or include (the matching summaries are also returned in summaries). Omitted: the project's retrieval default, which is also the most a request may ask for unless the caller may edit the project (or is a server key with projects:manage); a request above it runs at the default. Hybrid and deep mode only, for a project that builds the tree. The unrelated summarySeed flag narrows retrieval to the best-matching documents by their chunks and reads no summaries.", schema: { enum: ["off", "guide", "include"] } },
     ], responses: { "200": response("Cited passages with corpus availability", ref("SearchResponse")), ...errors } },
     post: { tags: ["search"], summary: "Search a project", security: serviceSecurity, requestBody: request({ oneOf: [scopedQuery, z.toJSONSchema(batchSearchInputSchema)] }), responses: { "200": response("Single-query passages or ordered batch outcomes", { oneOf: [ref("SearchResponse"), ref("BatchSearchResponse")] }), ...errors } },
   },

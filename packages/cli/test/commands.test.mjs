@@ -73,6 +73,34 @@ test("search --min-score validates its value instead of silently disabling the f
   }
 });
 
+test("search --summary-tree sends the mode and prints summaries apart from passages", async () => {
+  const body = {
+    results: [{ score: 1, text: "A real passage about expansion.", citation: { documentId: "d1", filename: "report.pdf", pageNumber: 4 } }],
+    summaryTree: { requested: "include", applied: "include", ms: 12 },
+    summaries: [{ kind: "summary", filename: "report.pdf", level: 1, summary: "The section covers record growth.", pageStart: 3, pageEnd: 6 }],
+  };
+  const ok = await invoke(["search", "question", "--summary-tree", "include"], () => ({ body }), { project: "project" });
+  assert.equal(ok.code, 0, ok.stderr);
+  assert.equal(new URL(ok.requests[0].url, "http://localhost").searchParams.get("summaryTree"), "include");
+  assert.match(ok.stdout, /A real passage about expansion/);
+  // The summary is marked as model-written and printed after the passages, never as one of them.
+  assert.match(ok.stdout, /Section summaries \(model-written, not quotes\):\n  \[summary\] report\.pdf \(pp\.3-6\)\n     The section covers record growth\./);
+  assert.ok(ok.stdout.indexOf("A real passage") < ok.stdout.indexOf("Section summaries"));
+
+  const skipped = await invoke(["search", "question", "--summary-tree", "guide"], () => ({ body: { results: [], summaryTree: { requested: "guide", applied: "off", skipped: "not-ready", ms: 0 } } }), { project: "project" });
+  assert.match(skipped.stderr, /Summary tree not used \(not-ready\)/);
+
+  // Omitted: no parameter, so the project default decides.
+  const plain = await invoke(["search", "question"], () => ({ body: { results: [] } }), { project: "project" });
+  assert.equal(new URL(plain.requests[0].url, "http://localhost").searchParams.has("summaryTree"), false);
+  for (const args of [["--summary-tree"], ["--summary-tree", "always"]]) {
+    const bad = await invoke(["search", "question", ...args], () => ({ body: { results: [] } }), { project: "project" });
+    assert.notEqual(bad.code, 0, JSON.stringify(args));
+    assert.match(bad.stderr, /--summary-tree must be off, guide or include|--summary-tree needs a value/);
+    assert.deepEqual(bad.requests, []);
+  }
+});
+
 test("search without a project uses the default project; API commands require a key before network access", async () => {
   let result = await invoke(["search", "question"], () => ({ body: { results: [] } }));
   assert.equal(result.code, 0, result.stderr);
@@ -353,6 +381,76 @@ test("full-index and reprocess --estimate hit estimate routes only", async () =>
   const re = await invoke(["reprocess", "run1", "--stage-from", "embed", "--estimate"], () => ({ body }));
   assert.equal(re.requests[0].url, "/v1/runs/run1/reprocess/estimate");
   assert.deepEqual(JSON.parse(re.requests[0].body), { stageFrom: "embed" });
+});
+
+test("search --summary-tree include never prints a control character from a summary or its filename", async () => {
+  const ESC = "\u001b";
+  const body = {
+    results: [{ score: 0.9, text: "A real passage.", citation: { filename: "report.pdf", pageNumber: 4 } }],
+    summaryTree: { requested: "include", applied: "include", ms: 12 },
+    summaries: [{
+      kind: "summary", level: 1, pageStart: 3, pageEnd: 6,
+      filename: `re${ESC}[2Jport\u202e.pdf`,
+      summary: `Growth${ESC}]0;owned\u0007 summary.${ESC}[1;1H\u009b31m\nSecond\u2066 line\u2069\u0000 here.\rEnd\u200f.`,
+    }],
+  };
+  const ok = await invoke(["search", "question", "--summary-tree", "include"], () => ({ body }), { project: "project" });
+  assert.equal(ok.code, 0, ok.stderr);
+  const printed = ok.stdout.slice(ok.stdout.indexOf("Section summaries"));
+  assert.match(printed, /\[summary\] re\[2Jport\.pdf \(pp\.3-6\)\n {5}Growth\]0;owned summary\.\[1;1H31m Second line here\. End\.\n/);
+  // No C0 control but the line feeds the CLI itself wrote, no DEL, no C1, no bidirectional control.
+  assert.doesNotMatch(printed, /[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/);
+});
+
+test("summary-tree backfill needs a cap, estimates without starting, and reads and cancels its job", async () => {
+  const job = (status, extra = {}) => ({
+    id: "tj1", projectId: "w", status, blockedReason: null, maxCostCents: 500, costCents: 12.5, documentsTotal: 10, documentsReady: 3, documentsSkipped: 5,
+    documentsPartial: 0, nodesBuilt: 42, modelCalls: 44, error: null, ...extra,
+  });
+  // No cap: refused before any request.
+  const uncapped = await invoke(["summary-tree", "backfill", "--project", "w"], () => ({ body: {} }));
+  assert.notEqual(uncapped.code, 0);
+  assert.match(uncapped.stderr, /--max-cost-cents is required/);
+  assert.deepEqual(uncapped.requests, []);
+  for (const bad of ["0", "-5", "abc"]) {
+    const refused = await invoke(["summary-tree", "backfill", "--project", "w", "--max-cost-cents", bad], () => ({ body: {} }));
+    assert.notEqual(refused.code, 0, bad);
+    assert.deepEqual(refused.requests, [], bad);
+  }
+
+  const estimate = { estimate: { pages: 90, documents: 2, billing: "enforced", credits: { low: 2, high: 4 }, seconds: { low: 30, high: 60 }, basis: "b" }, billing: "enforced" };
+  const estimated = await invoke(["summary-tree", "backfill", "--project", "w", "--estimate"], () => ({ body: estimate }));
+  assert.equal(estimated.code, 0, estimated.stderr);
+  assert.deepEqual(estimated.requests.map((r) => [r.method, r.url]), [["POST", "/v1/projects/w/summary-tree/backfill/estimate"]]);
+  assert.match(estimated.stdout, /nothing was started/);
+
+  const started = await invoke(["summary-tree", "backfill", "--project", "w", "--max-cost-cents", "500"], () => ({ status: 202, body: job("queued") }));
+  assert.equal(started.code, 0, started.stderr);
+  assert.deepEqual(started.requests.map((r) => [r.method, r.url]), [["POST", "/v1/projects/w/summary-tree/backfill"]]);
+  assert.deepEqual(JSON.parse(started.requests[0].body), { maxCostCents: 500 });
+  assert.match(started.stdout, /Job tj1: summary-tree-backfill queued/);
+  assert.match(started.stdout, /12\.50 of 500\.00 cents \(cap\)/);
+
+  const status = await invoke(["summary-tree", "status", "--project", "w"], () => ({ body: { projectId: "w", estimate: { documents: 2, documentsToBuild: 1, nodes: 9 }, activeJob: job("blocked", { blockedReason: "balance" }), lastJob: null } }));
+  assert.deepEqual(status.requests.map((r) => [r.method, r.url]), [["GET", "/v1/projects/w/summary-tree/backfill"]]);
+  assert.match(status.stdout, /Without a tree: 2 documents/);
+  assert.match(status.stdout, /summary-tree-backfill blocked \(balance\)/);
+  assert.match(status.stdout, /8 of 10 \(3 built, 5 need no tree, 0 incomplete\)/);
+
+  const cancelled = await invoke(["summary-tree", "cancel", "tj1", "--project", "w"], () => ({ body: job("cancelled", { error: "Cancelled by request" }) }));
+  assert.deepEqual(cancelled.requests.map((r) => [r.method, r.url]), [["POST", "/v1/projects/w/summary-tree/backfill/tj1/cancel"]]);
+  assert.match(cancelled.stdout, /cancelled/);
+  assert.match(cancelled.stdout, /Cancelled by request/);
+
+  const refused = await invoke(["summary-tree", "backfill", "--project", "w", "--max-cost-cents", "500"], () => ({ status: 403, body: { error: { code: "forbidden", message: "This endpoint requires a server API key with the projects:manage scope" } } }));
+  assert.notEqual(refused.code, 0);
+  // --estimate never turns a cancel into a request.
+  const guarded = await invoke(["summary-tree", "cancel", "tj1", "--project", "w", "--estimate"], () => ({ body: {} }));
+  assert.notEqual(guarded.code, 0);
+  assert.deepEqual(guarded.requests, []);
+  const usage = await invoke(["summary-tree", "cancel"], () => ({ body: {} }));
+  assert.notEqual(usage.code, 0);
+  assert.deepEqual(usage.requests, []);
 });
 
 test("jobs get prints the job and watch polls to completion", async () => {

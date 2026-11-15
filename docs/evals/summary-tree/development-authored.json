@@ -1,0 +1,784 @@
+{
+  "note": "Authored for the summary-tree phase-0 eval. Quotes are verbatim from the prepared public-domain sources; pages and slices are derived by cases.mts build.",
+  "cases": [
+    {
+      "id": "dev-walden-fact",
+      "class": "fact",
+      "question": "What did Thoreau measure the greatest depth of Walden Pond to be?",
+      "expectedAnswer": "Exactly one hundred and two feet.",
+      "requiredPatterns": [
+        "one hundred and two|102"
+      ],
+      "premises": [
+        {
+          "doc": "walden",
+          "quotes": [
+            "The greatest depth was exactly one hundred and two feet"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "dev-walden-multi",
+      "class": "multi-section",
+      "question": "Why does Thoreau say he went to the woods, and why does he say he left them?",
+      "expectedAnswer": "He went to live deliberately; he left for as good a reason as he went, having more lives to live.",
+      "requiredPatterns": [
+        "deliberate",
+        "as good a reason|more lives"
+      ],
+      "premises": [
+        {
+          "doc": "walden",
+          "quotes": [
+            "I went to the woods because I wished to live deliberately"
+          ]
+        },
+        {
+          "doc": "walden",
+          "quotes": [
+            "I left the woods for as good a reason as I went there"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "dev-walden-whole",
+      "class": "whole-document",
+      "question": "Across the whole book, what does Thoreau conclude about how most people live and how they should live instead?",
+      "expectedAnswer": "Most men lead lives of quiet desperation; he urges simplicity, and says one who advances confidently toward his dreams meets unexpected success.",
+      "requiredPatterns": [
+        "desperation",
+        "simpl"
+      ],
+      "premises": [
+        {
+          "doc": "walden",
+          "quotes": [
+            "The mass of men lead lives of quiet desperation"
+          ]
+        },
+        {
+          "doc": "walden",
+          "quotes": [
+            "Simplicity, simplicity, simplicity"
+          ]
+        },
+        {
+          "doc": "walden",
+          "quotes": [
+            "if one advances confidently in the direction of his dreams"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "dev-origin-fact",
+      "class": "fact",
+      "question": "What name does Darwin give to the preservation of favourable variations and the rejection of injurious ones?",
+      "expectedAnswer": "Natural Selection.",
+      "requiredPatterns": [
+        "natural selection"
+      ],
+      "premises": [
+        {
+          "doc": "origin-of-species",
+          "quotes": [
+            "This preservation of favourable variations and the rejection of injurious variations, I call Natural Selection"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "dev-origin-multi",
+      "class": "multi-section",
+      "question": "Whose doctrine does Darwin apply to explain the struggle for existence, and which organ does he discuss as an apparent difficulty for his theory?",
+      "expectedAnswer": "The doctrine of Malthus; the eye.",
+      "requiredPatterns": [
+        "malthus",
+        "\\beye"
+      ],
+      "premises": [
+        {
+          "doc": "origin-of-species",
+          "quotes": [
+            "It is the doctrine of Malthus applied with manifold force to the whole animal and vegetable kingdoms"
+          ]
+        },
+        {
+          "doc": "origin-of-species",
+          "quotes": [
+            "To suppose that the eye, with all its inimitable contrivances"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "dev-origin-whole",
+      "class": "whole-document",
+      "question": "How does the argument of the book develop from its opening observations on cultivated varieties, through the geological record, to its closing view of life?",
+      "expectedAnswer": "It starts from variation among cultivated plants and animals, treats the geological record as an imperfectly kept history, and closes on the grandeur of life having evolved from simple beginnings.",
+      "requiredPatterns": [
+        "cultivat|domestic",
+        "imperfect",
+        "grandeur|endless forms"
+      ],
+      "premises": [
+        {
+          "doc": "origin-of-species",
+          "quotes": [
+            "When we look to the individuals of the same variety or sub-variety of our older cultivated plants and animals"
+          ]
+        },
+        {
+          "doc": "origin-of-species",
+          "quotes": [
+            "I look at the natural geological record, as a history of the world imperfectly kept"
+          ]
+        },
+        {
+          "doc": "origin-of-species",
+          "quotes": [
+            "There is grandeur in this view of life"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "dev-federalist-fact",
+      "class": "fact",
+      "question": "How does Federalist No. 10 define a faction?",
+      "expectedAnswer": "A number of citizens, a majority or minority, united by a common passion or interest adverse to the rights of others or the community.",
+      "requiredPatterns": [
+        "passion|interest"
+      ],
+      "premises": [
+        {
+          "doc": "federalist-papers",
+          "quotes": [
+            "By a faction, I understand a number of citizens"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "dev-federalist-multi",
+      "class": "multi-section",
+      "question": "What do the papers say must counteract ambition within government, and how do they rank the judiciary as a danger to the political rights of the Constitution?",
+      "expectedAnswer": "Ambition must counteract ambition; the judiciary will always be the least dangerous branch.",
+      "requiredPatterns": [
+        "ambition",
+        "least dangerous"
+      ],
+      "premises": [
+        {
+          "doc": "federalist-papers",
+          "quotes": [
+            "Ambition must be made to counteract ambition"
+          ]
+        },
+        {
+          "doc": "federalist-papers",
+          "quotes": [
+            "will always be the least dangerous to the political rights of the Constitution"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "dev-federalist-whole",
+      "class": "whole-document",
+      "question": "What question does the first paper say the country must decide, why do the papers say government is needed at all, and how does the final paper describe a nation without a national government?",
+      "expectedAnswer": "Whether societies can establish good government from reflection and choice; men are not angels; a nation without a national government is an awful spectacle.",
+      "requiredPatterns": [
+        "reflection and choice",
+        "angels",
+        "awful spectacle"
+      ],
+      "premises": [
+        {
+          "doc": "federalist-papers",
+          "quotes": [
+            "capable or not of establishing good government from reflection and choice"
+          ]
+        },
+        {
+          "doc": "federalist-papers",
+          "quotes": [
+            "If men were angels, no government would be necessary"
+          ]
+        },
+        {
+          "doc": "federalist-papers",
+          "quotes": [
+            "A NATION, without a NATIONAL GOVERNMENT, is, in my view, an awful spectacle"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "dev-beagle-fact",
+      "class": "fact",
+      "question": "On what date did the Beagle sail from Devonport?",
+      "expectedAnswer": "27 December 1831.",
+      "requiredPatterns": [
+        "27(th)?( of)? December,? 1831|December 27(th)?,? 1831"
+      ],
+      "premises": [
+        {
+          "doc": "voyage-of-the-beagle",
+          "quotes": [
+            "sailed from Devonport on the 27th of December, 1831"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "dev-beagle-multi",
+      "class": "multi-section",
+      "question": "What did Darwin fancy had happened to the birds of the Galapagos archipelago, and what does he say a bad earthquake destroys?",
+      "expectedAnswer": "That one species had been taken and modified for different ends; an earthquake destroys our oldest associations.",
+      "requiredPatterns": [
+        "modified",
+        "oldest associations"
+      ],
+      "premises": [
+        {
+          "doc": "voyage-of-the-beagle",
+          "quotes": [
+            "one species had been taken and modified for different ends"
+          ]
+        },
+        {
+          "doc": "voyage-of-the-beagle",
+          "quotes": [
+            "A bad earthquake at once destroys our oldest associations"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "dev-beagle-whole",
+      "class": "whole-document",
+      "question": "Where did the voyage begin, how does Darwin characterise the natural history of the Galapagos, and where did he finally leave the ship?",
+      "expectedAnswer": "It began at Devonport; the natural history of the Galapagos is eminently curious; he left the Beagle at Falmouth.",
+      "requiredPatterns": [
+        "devonport",
+        "eminently curious",
+        "falmouth"
+      ],
+      "premises": [
+        {
+          "doc": "voyage-of-the-beagle",
+          "quotes": [
+            "sailed from Devonport on the 27th of December, 1831"
+          ]
+        },
+        {
+          "doc": "voyage-of-the-beagle",
+          "quotes": [
+            "The natural history of these islands is eminently curious"
+          ]
+        },
+        {
+          "doc": "voyage-of-the-beagle",
+          "quotes": [
+            "at Falmouth I left the Beagle"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "dev-rfc9110-fact",
+      "class": "fact",
+      "question": "Should a client automatically retry a request that uses a non-idempotent method?",
+      "expectedAnswer": "No: a client SHOULD NOT, unless it has some means to know the semantics are idempotent or that the request was never applied.",
+      "requiredPatterns": [
+        "should not|must not|not automatically"
+      ],
+      "premises": [
+        {
+          "doc": "rfc9110",
+          "quotes": [
+            "A client SHOULD NOT automatically retry a request with a non-idempotent method"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "dev-rfc9110-multi",
+      "class": "multi-section",
+      "question": "In which responses must a server not send a Content-Length header field, and what does the specification say about responses whose status codes are heuristically cacheable?",
+      "expectedAnswer": "Not in 1xx or 204 responses; heuristically cacheable status codes can be reused by a cache with heuristic expiration unless otherwise indicated.",
+      "requiredPatterns": [
+        "1xx|informational",
+        "204|no content",
+        "heuristic"
+      ],
+      "premises": [
+        {
+          "doc": "rfc9110",
+          "quotes": [
+            "A server MUST NOT send a Content-Length header field in any response with a status code of"
+          ]
+        },
+        {
+          "doc": "rfc9110",
+          "quotes": [
+            "Responses with status codes that are defined as heuristically cacheable"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "dev-rfc9110-whole",
+      "class": "whole-document",
+      "question": "Give an overview of this specification: what kind of protocol it describes, which common property its safe request methods share, and how a response's status is expressed.",
+      "expectedAnswer": "A stateless application-level protocol for distributed, collaborative, hypertext information systems; safe methods are idempotent; the status code is a three-digit integer.",
+      "requiredPatterns": [
+        "stateless",
+        "idempotent",
+        "three-digit"
+      ],
+      "premises": [
+        {
+          "doc": "rfc9110",
+          "quotes": [
+            "stateless application-level protocol for distributed, collaborative, hypertext information systems"
+          ]
+        },
+        {
+          "doc": "rfc9110",
+          "quotes": [
+            "and safe request methods are idempotent"
+          ]
+        },
+        {
+          "doc": "rfc9110",
+          "quotes": [
+            "The status code of a response is a three-digit integer code"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "dev-rfc9293-fact",
+      "class": "fact",
+      "question": "What default send MSS must a TCP implementation assume for IPv4 when no MSS Option is received at connection setup?",
+      "expectedAnswer": "536.",
+      "requiredPatterns": [
+        "536"
+      ],
+      "premises": [
+        {
+          "doc": "rfc9293",
+          "quotes": [
+            "MUST assume a default send MSS of 536"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "dev-rfc9293-multi",
+      "class": "multi-section",
+      "question": "What value is the Maximum Segment Lifetime taken to be, and must an implementation support simultaneous open attempts?",
+      "expectedAnswer": "2 minutes; yes, it MUST.",
+      "requiredPatterns": [
+        "2 minutes|two minutes",
+        "must"
+      ],
+      "premises": [
+        {
+          "doc": "rfc9293",
+          "quotes": [
+            "the MSL is taken to be 2 minutes"
+          ]
+        },
+        {
+          "doc": "rfc9293",
+          "quotes": [
+            "A TCP implementation MUST support simultaneous open attempts"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "dev-rfc9293-whole",
+      "class": "whole-document",
+      "question": "Describe the life of a connection as the specification presents it: the procedure that establishes it, what the TIME-WAIT state represents, and what the CLOSE operation means.",
+      "expectedAnswer": "The three-way handshake establishes it; TIME-WAIT waits long enough to be sure the peer received the acknowledgment of its termination request; CLOSE means 'I have no more data to send'.",
+      "requiredPatterns": [
+        "three-way handshake",
+        "acknowledg",
+        "no more data"
+      ],
+      "premises": [
+        {
+          "doc": "rfc9293",
+          "quotes": [
+            "is the procedure used to establish a connection"
+          ]
+        },
+        {
+          "doc": "rfc9293",
+          "quotes": [
+            "represents waiting for enough time to pass to be sure the remote TCP peer received the acknowledgment"
+          ]
+        },
+        {
+          "doc": "rfc9293",
+          "quotes": [
+            "CLOSE is an operation meaning"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "dev-huck-fact",
+      "class": "fact",
+      "question": "How much money did Huck and Tom each get from what the robbers hid in the cave?",
+      "expectedAnswer": "Six thousand dollars apiece.",
+      "requiredPatterns": [
+        "six thousand|6,?000"
+      ],
+      "premises": [
+        {
+          "doc": "huckleberry-finn",
+          "quotes": [
+            "six thousand dollars apiece"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "dev-huck-multi",
+      "class": "multi-section",
+      "question": "What does Huck do with the letter he wrote to Miss Watson, and what does he plan to do at the very end of the book?",
+      "expectedAnswer": "He tears it up; he plans to light out for the Territory ahead of the rest.",
+      "requiredPatterns": [
+        "tore|tear|rip",
+        "territory"
+      ],
+      "premises": [
+        {
+          "doc": "huckleberry-finn",
+          "quotes": [
+            "and tore it up"
+          ]
+        },
+        {
+          "doc": "huckleberry-finn",
+          "quotes": [
+            "light out for the Territory ahead of the rest"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "dev-huck-whole",
+      "class": "whole-document",
+      "question": "Follow Jim through the whole story: what makes him run away near the start, and how does it turn out at the end that he is free?",
+      "expectedAnswer": "He overheard that Miss Watson would sell him down to Orleans; Miss Watson died and set him free in her will.",
+      "requiredPatterns": [
+        "orleans",
+        "will"
+      ],
+      "premises": [
+        {
+          "doc": "huckleberry-finn",
+          "quotes": [
+            "sell me down to Orleans"
+          ]
+        },
+        {
+          "doc": "huckleberry-finn",
+          "quotes": [
+            "set him free in her will"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "dev-holmes-fact",
+      "class": "fact",
+      "question": "What weekly salary did the Red-Headed League advertise?",
+      "expectedAnswer": "Four pounds a week.",
+      "requiredPatterns": [
+        "£ ?4|four pounds|4 pounds"
+      ],
+      "premises": [
+        {
+          "doc": "sherlock-holmes",
+          "quotes": [
+            "4 a week for purely nominal services"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "dev-holmes-multi",
+      "class": "multi-section",
+      "question": "How does Watson describe Holmes's view of Irene Adler compared with other women, and what creature is the speckled band revealed to be?",
+      "expectedAnswer": "In his eyes she eclipses and predominates the whole of her sex; the band is a swamp adder.",
+      "requiredPatterns": [
+        "eclipses|predominates|the woman",
+        "adder"
+      ],
+      "premises": [
+        {
+          "doc": "sherlock-holmes",
+          "quotes": [
+            "In his eyes she eclipses and predominates the whole of her sex"
+          ]
+        },
+        {
+          "doc": "sherlock-holmes",
+          "quotes": [
+            "It is a swamp adder"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "dev-holmes-whole",
+      "class": "whole-document",
+      "question": "In which cases in this collection does Holmes choose not to hand the culprit over to justice, and what does he say when he does so?",
+      "expectedAnswer": "In the Blue Carbuncle he lets the thief go, saying he may be commuting a felony but saving a soul; in the Boscombe Valley Mystery he keeps the confession unless it is needed.",
+      "requiredPatterns": [
+        "carbuncle|ryder",
+        "boscombe|mccarthy|turner"
+      ],
+      "premises": [
+        {
+          "doc": "sherlock-holmes",
+          "quotes": [
+            "I suppose that I am commuting a felony, but it is just possible that I am saving a soul"
+          ]
+        },
+        {
+          "doc": "sherlock-holmes",
+          "quotes": [
+            "I will keep your confession"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "dev-frankenstein-fact",
+      "class": "fact",
+      "question": "From which city is Walton's first letter written?",
+      "expectedAnswer": "St. Petersburgh.",
+      "requiredPatterns": [
+        "petersburg"
+      ],
+      "premises": [
+        {
+          "doc": "frankenstein",
+          "quotes": [
+            "St. Petersburgh, Dec. 11th, 17"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "dev-frankenstein-multi",
+      "class": "multi-section",
+      "question": "What does the creature demand that Victor create for him, and what does Victor later do to that work?",
+      "expectedAnswer": "A female companion; Victor tears it to pieces.",
+      "requiredPatterns": [
+        "female|companion|mate",
+        "tore|tear|destroy"
+      ],
+      "premises": [
+        {
+          "doc": "frankenstein",
+          "quotes": [
+            "You must create a female for me"
+          ]
+        },
+        {
+          "doc": "frankenstein",
+          "quotes": [
+            "tore to pieces the thing on which I was engaged"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "dev-frankenstein-whole",
+      "class": "whole-document",
+      "question": "How does the story move from the creature's first moment of life, through what happens to Elizabeth, to the creature's final disappearance?",
+      "expectedAnswer": "Victor sees the dull yellow eye open; Elizabeth is killed on her wedding night; the creature is borne away by the waves and lost in darkness and distance.",
+      "requiredPatterns": [
+        "yellow eye|eye",
+        "elizabeth",
+        "darkness"
+      ],
+      "premises": [
+        {
+          "doc": "frankenstein",
+          "quotes": [
+            "I saw the dull yellow eye of the creature open"
+          ]
+        },
+        {
+          "doc": "frankenstein",
+          "quotes": [
+            "had ceased to be the Elizabeth whom I had loved and cherished"
+          ]
+        },
+        {
+          "doc": "frankenstein",
+          "quotes": [
+            "lost in darkness and distance"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "dev-locke-fact",
+      "class": "fact",
+      "question": "What state does Locke say all men are naturally in?",
+      "expectedAnswer": "A state of perfect freedom to order their actions and dispose of their possessions within the law of nature.",
+      "requiredPatterns": [
+        "perfect freedom"
+      ],
+      "premises": [
+        {
+          "doc": "second-treatise",
+          "quotes": [
+            "a state of perfect freedom to order their actions"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "dev-locke-multi",
+      "class": "multi-section",
+      "question": "What does Locke say is properly a man's own that grounds property, and what are the people at liberty to do when the government is dissolved?",
+      "expectedAnswer": "The labour of his body and the work of his hands; they may provide for themselves by erecting a new legislative.",
+      "requiredPatterns": [
+        "labou?r",
+        "new legislative"
+      ],
+      "premises": [
+        {
+          "doc": "second-treatise",
+          "quotes": [
+            "The labour of his body, and the work of his hands, we may say, are properly his"
+          ]
+        },
+        {
+          "doc": "second-treatise",
+          "quotes": [
+            "by erecting a new legislative"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "dev-locke-whole",
+      "class": "whole-document",
+      "question": "Trace the overall argument: how the state of war is defined, what the chief end of uniting into commonwealths is, and where tyranny begins.",
+      "expectedAnswer": "The state of war is a state of enmity and destruction; the chief end of commonwealths is the preservation of property; tyranny begins wherever law ends.",
+      "requiredPatterns": [
+        "enmity|destruction",
+        "property",
+        "law ends|tyranny"
+      ],
+      "premises": [
+        {
+          "doc": "second-treatise",
+          "quotes": [
+            "state of war is a state of enmity and destruction"
+          ]
+        },
+        {
+          "doc": "second-treatise",
+          "quotes": [
+            "The great and chief end, therefore, of"
+          ]
+        },
+        {
+          "doc": "second-treatise",
+          "quotes": [
+            "tyranny begins"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "dev-leviathan-fact",
+      "class": "fact",
+      "question": "How does Hobbes describe the life of man in the condition of war?",
+      "expectedAnswer": "Solitary, poor, nasty, brutish, and short.",
+      "requiredPatterns": [
+        "nasty",
+        "brutish"
+      ],
+      "premises": [
+        {
+          "doc": "leviathan",
+          "quotes": [
+            "solitary, poore, nasty, brutish, and short"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "dev-leviathan-multi",
+      "class": "multi-section",
+      "question": "What does Hobbes say covenants are without the sword, and how does he define liberty?",
+      "expectedAnswer": "Covenants without the sword are but words; liberty is the absence of opposition, meaning external impediments of motion.",
+      "requiredPatterns": [
+        "words",
+        "absence of|impediment"
+      ],
+      "premises": [
+        {
+          "doc": "leviathan",
+          "quotes": [
+            "Covenants, without the Sword, are but Words"
+          ]
+        },
+        {
+          "doc": "leviathan",
+          "quotes": [
+            "signifieth (properly) the absence of Opposition"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "dev-leviathan-whole",
+      "class": "whole-document",
+      "question": "Summarise the arc of the whole work: what the commonwealth is said to be at the outset, what it is called when it is generated, and what the papacy is compared to near the end.",
+      "expectedAnswer": "An artificial man created by art; a mortal god; the ghost of the deceased Roman Empire.",
+      "requiredPatterns": [
+        "artificial",
+        "mortal god",
+        "ghost"
+      ],
+      "premises": [
+        {
+          "doc": "leviathan",
+          "quotes": [
+            "For by Art is created that great LEVIATHAN"
+          ]
+        },
+        {
+          "doc": "leviathan",
+          "quotes": [
+            "that Mortall God"
+          ]
+        },
+        {
+          "doc": "leviathan",
+          "quotes": [
+            "Ghost of the deceased Romane Empire"
+          ]
+        }
+      ]
+    }
+  ]
+}
