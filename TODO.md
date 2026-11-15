@@ -5,7 +5,6 @@
   - The drift sweep's cursor is per process and restarts at the first id, so with regular deploys later projects are rarely sampled; persist or randomise it, and bisect a batch whose check timed out.
   - All 1,024 writer slots held makes search and chat writes block with no statement timeout; needs over 1,024 concurrent writing transactions or a database role doing it on purpose.
   - Document `pg_restore --data-only` into a live schema in `docs/self-host/operations.md` (triggers fire during the load: rebuild afterwards).
-- Materialize runs have non-UUID ids (`mat_<uuid>`, `server/src/search/deferred/materialize-client.ts`), yet the realtime `run` resource requires a UUID and the activity projection lists them. A first-party client that watches active runs sends `run:mat_…` and the socket is closed with 1008 `invalid_frame` (reproduced 2026-11-14). Give materialize runs UUID ids or keep them out of the activity inventory; do not loosen `realtimeResourceSchema`.
 - Figure resume budget constants: alert on `resume.capped{reason="vm-budget"}` so a low estimate never silently drops completeness, and re-check the defaults (measured 2026-11-14) against the `resume pass … msPerPage estimateMs` log lines once the runner is on.
 - First pass (sandboxed PDF batches, 2026-11-11; `DOCSLURP_FIRST_PASS`, default off). Remaining before it is on by default:
   council review of the seam, the activity and the workflow wiring (one organization per batch, the publish gate, page-count

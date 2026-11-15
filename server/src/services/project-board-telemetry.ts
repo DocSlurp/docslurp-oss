@@ -160,7 +160,7 @@ export async function listProjectBoardSummaries(
       group by docs.project_id
     ),
     search_summary as (
-      -- Trigger-maintained counters (0163), never the sessions themselves. The duration sum is exact numeric,
+      -- Trigger-maintained counters (0165), never the sessions themselves. The duration sum is exact numeric,
       -- so sum / count is the same double avg() returned for the integer milliseconds searches record.
       select
         a.project_id,

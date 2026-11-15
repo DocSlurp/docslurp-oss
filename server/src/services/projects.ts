@@ -747,7 +747,7 @@ async function readProject(projectId: string, orgId: string): Promise<ProjectRec
     from projects w
     -- Current corpus totals are trigger-maintained; never aggregate documents here.
     left join project_corpus_stats cs on cs.project_id = w.id
-    -- Search-session and chat-turn totals are trigger-maintained too (0163): a few counter rows per project (one per
+    -- Search-session and chat-turn totals are trigger-maintained too (0165): a few counter rows per project (one per
     -- concurrent writer, folded back by the maintenance sweep),
     -- keyed by the project already authorized above, so history is never counted here.
     left join lateral (
@@ -855,7 +855,7 @@ export async function listProjects(userId: string): Promise<ProjectRecord[]> {
     from projects w
     -- Current corpus totals are trigger-maintained; never aggregate documents here.
     left join project_corpus_stats cs on cs.project_id = w.id
-    -- Search-session and chat-turn totals are trigger-maintained too (0163): a few counter rows per project (one per
+    -- Search-session and chat-turn totals are trigger-maintained too (0165): a few counter rows per project (one per
     -- concurrent writer, folded back by the maintenance sweep),
     -- keyed by the project already authorized above, so history is never counted here.
     left join lateral (

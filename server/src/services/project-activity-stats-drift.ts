@@ -31,7 +31,7 @@ let lastRunAt = 0;
 let running = false;
 
 /**
- * Compares stored project_activity_stats counters with search and chat history (migration 0163,
+ * Compares stored project_activity_stats counters with search and chat history (migration 0165,
  * project_activity_stats_drift()). `projectIds` limits the comparison to those projects; without it every project
  * is compared, which reads all history: maintenance only, never a request path. Read-only and lock-free.
  */

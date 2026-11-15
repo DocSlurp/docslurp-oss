@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Checks and repairs the per-project search and chat counters (project_activity_stats, migration 0163):
+// Checks and repairs the per-project search and chat counters (project_activity_stats, migration 0165):
 //
 //   node server/db/project-activity-stats.mjs [--project <id>]...   compare counters with history (exit 1 on drift)
 //   node server/db/project-activity-stats.mjs --rebuild             recompute every counter from history, then check
