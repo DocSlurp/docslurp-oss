@@ -2354,6 +2354,7 @@ export const uploadSessionFiles = pgTable(
 export const projectRuns = pgTable(
   "project_runs",
   {
+    computeInputManifestHash: text("compute_input_manifest_hash"),
     id: text().primaryKey().notNull(),
     userId: text("user_id").notNull(),
     projectId: text("project_id").notNull(),
@@ -3995,3 +3996,34 @@ export const intakeRequestReceipts = pgTable("intake_request_receipts", {
   runId: text("run_id").unique().references(() => projectRuns.id, { onDelete: "set null" }),
   createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
 }, table => [primaryKey({ columns: [table.idempotencyKey, table.routeKey] })]);
+
+
+/** Global operational records contain no customer content or tenant identifiers. */
+export const computePriceObservations = pgTable("compute_price_observations", {
+  id: text().primaryKey().notNull(), offerId: text("offer_id").notNull(),
+  provider: text().notNull(), sku: text().notNull(), region: text().notNull(), market: text().notNull(),
+  observedAt: timestamp("observed_at", { withTimezone: true, mode: "string" }).notNull(),
+  validUntil: timestamp("valid_until", { withTimezone: true, mode: "string" }).notNull(),
+  sourceUrl: text("source_url").notNull(), sourceHash: text("source_hash").notNull(),
+  nativeCurrency: text("native_currency").notNull(), nativePerHour: numeric("native_per_hour").notNull(),
+  usdPerNative: numeric("usd_per_native").notNull(),
+  fxObservedAt: timestamp("fx_observed_at", { withTimezone: true, mode: "string" }).notNull(),
+  fxSourceUrl: text("fx_source_url").notNull(), usdPerHour: numeric("usd_per_hour").notNull(),
+  egressUsdPerGiB: numeric("egress_usd_per_gib").notNull(),
+  billingMinimumSeconds: integer("billing_minimum_seconds").notNull(),
+  billingQuantumSeconds: integer("billing_quantum_seconds").notNull(),
+}, (table) => [unique("compute_price_id_offer_unique").on(table.id, table.offerId)]);
+
+export const computeCalibrationObservations = pgTable("compute_calibration_observations", {
+  id: text().primaryKey().notNull(), profileId: text("profile_id").notNull(),
+  priceId: text("price_id").notNull(),
+  offerId: text("offer_id").notNull(),
+  imageHash: text("image_hash").notNull(), isolationPolicy: text("isolation_policy").notNull(),
+  engine: text().notNull(), workload: text().notNull(),
+  observedAt: timestamp("observed_at", { withTimezone: true, mode: "string" }).notNull(),
+  validUntil: timestamp("valid_until", { withTimezone: true, mode: "string" }).notNull(),
+  attempted: integer().notNull(), succeeded: integer().notNull(), failed: integer().notNull(), slots: integer().notNull(),
+  startupP95Ms: integer("startup_p95_ms").notNull(), serviceP95MsPerPage: integer("service_p95_ms_per_page").notNull(),
+  transferMsPerMiB: numeric("transfer_ms_per_mib").notNull(), idleTailMs: integer("idle_tail_ms").notNull(),
+  allocatedMs: bigint("allocated_ms", { mode: "number" }).notNull(), sourceHash: text("source_hash").notNull(),
+}, (table) => [foreignKey({ columns: [table.priceId, table.offerId], foreignColumns: [computePriceObservations.id, computePriceObservations.offerId] })]);

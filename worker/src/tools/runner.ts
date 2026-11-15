@@ -1,3 +1,4 @@
+import { authorizeComputeCohort } from "../extractors/plugins.js";
 import { serveFirstPassResult } from "../pipeline/first-pass.js";
 import { dopplerBinDir } from "./doppler.js";
 import {
@@ -1868,7 +1869,13 @@ export class CommandRunner {
       const frames = plan.pages ?? plan.sandboxedOcr.maxFrames;
       // Ownership hints come from trusted run state; neither authorizes sharing a VM across jobs.
       const context = currentPerfContext();
-      const ocrContext = { ...(context?.orgId ? { tenantKey: context.orgId } : {}), ...(context?.documentId ? { affinityKey: context.documentId } : {}) };
+      const scope = context?.orgId && context.projectId && context.documentId && context.executionGeneration !== undefined
+        ? { orgId: context.orgId, projectId: context.projectId, runId: context.runId, documentId: context.documentId, executionGeneration: context.executionGeneration }
+        : null;
+      const ocrContext = {
+        ...(context?.orgId ? { tenantKey: context.orgId } : {}), ...(context?.documentId ? { affinityKey: context.documentId } : {}),
+        ...(scope ? { authorizeCohort: () => authorizeComputeCohort(scope) } : {}),
+      };
       return { remote: provider.run(plan.sandboxedOcr, signal, ocrContext), timeoutMs: provider.timeoutMs(frames), release: async () => {} };
     }
     if (plan.sandboxedPdf) {

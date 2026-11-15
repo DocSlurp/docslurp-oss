@@ -11,6 +11,7 @@ export type JsonMap = Record<string, unknown>;
 
 export interface ProjectRun {
   id: string;
+  executionGeneration?: string | null;
   orgId: string | null;
   /** The billed org's plan, so AI on bonus plans carries the plan-neutral credit factor. */
   /** Whether the run's org has ever had a paid grant (organizations.funded_at). */
