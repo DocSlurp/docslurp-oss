@@ -2425,20 +2425,18 @@ export class ExtractMarkdownStage implements Stage {
         );
         try {
           const originalText = pageTexts[pageNumber - 1] ?? "";
-          const critiqueVision = {
-            ...args.state.run.pipeline.vision,
-            prompt: buildCritiquePrompt(
-              originalText,
-              args.state.run.pipeline.preserveTables,
-              args.state.run.pipeline.preserveCode,
-            ),
-          };
+          const critiqueRequest = selfCritiqueVisionRequest(
+            args.state.run.pipeline.vision,
+            originalText,
+            args.state.run.pipeline.preserveTables,
+            args.state.run.pipeline.preserveCode,
+          );
           // The run's vision attempt guard admits every critique request like every other vision
           // request; critique never creates a customer charge, so its requests stay uncharged. A
           // rejected or failed call records its spend there.
           const guarded = await guardedVisionCall({
             host: args.state,
-            vision: critiqueVision,
+            vision: critiqueRequest.vision,
             cfg: this.cfg,
             target: { documentId: args.document.id, pageNumber, purpose: "critique" },
             record: (input) => args.state.usageLedger.record(input),
@@ -2447,7 +2445,7 @@ export class ExtractMarkdownStage implements Stage {
               imagePath,
               outputPath: `${imagePath}.json`,
               privacyMode: args.state.run.pipeline.privacyMode,
-              vision: critiqueVision,
+              ...critiqueRequest,
               cfg: this.cfg,
               runner: this.runner,
               signal: args.signal,
@@ -3697,6 +3695,16 @@ function normalizeCritiqueText(text: string): string {
     .trim();
 }
 
+/** A critique is task text, never a transcription template key. */
+export function selfCritiqueVisionRequest(
+  vision: Parameters<typeof executeVisionRuntime>[0]["vision"],
+  originalText: string,
+  preserveTables: boolean,
+  preserveCode: boolean,
+): Pick<Parameters<typeof executeVisionRuntime>[0], "vision" | "promptText"> {
+  return { vision, promptText: buildCritiquePrompt(originalText, preserveTables, preserveCode) };
+}
+
 function buildCritiquePrompt(
   pageMarkdown: string,
   preserveTables: boolean,
@@ -3716,7 +3724,8 @@ function buildCritiquePrompt(
     "Do not add commentary or explanations.",
     "",
     "First-pass markdown:",
-    pageMarkdown.slice(0, 12_000),
+    // Bound UTF-8 bytes (not UTF-16 units), leaving room for instructions under the runtime prompt cap.
+    Buffer.from(pageMarkdown.slice(0, 12_000), "utf8").subarray(0, 12_000).toString("utf8"),
   ].filter(Boolean);
   return constraints.join("\n");
 }
