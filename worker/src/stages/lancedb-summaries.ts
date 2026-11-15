@@ -110,6 +110,11 @@ export async function writeSummaryRows(args: WriteSummaryRowsArgs): Promise<Vect
       from documents d
       where d.id = ${args.documentId} and d.org_id = ${args.scope.orgId} and d.project_id = ${args.scope.projectId}
         and d.purged_at is null and d.superseded_at is null and d.archived_at is null
+        and not coalesce((d.metadata->'pii'->>'blocked')::boolean, false)
+        and not coalesce((d.metadata->'pii'->>'redacted')::boolean, false)
+        and coalesce(jsonb_array_length(case when jsonb_typeof(d.metadata->'pii'->'withheldArtifactUris') = 'array'
+          then d.metadata->'pii'->'withheldArtifactUris' else '[]'::jsonb end), 0) = 0
+        and not exists (select 1 from pii_detections pd where pd.document_id = d.id and pd.redacted)
       for key share of d
     `;
     if (!owner) throw new SummaryRowsRefused("The document is not a live document of this project");

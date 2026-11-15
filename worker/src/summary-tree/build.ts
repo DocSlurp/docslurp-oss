@@ -10,6 +10,7 @@ import {
   type SummaryTreeArtifactIO,
   type SummaryTreeRecord,
 } from "./artifact.js";
+import { publishSummaryTreeRoot } from "./document-summary.js";
 import { checkSummaryTreeCoverage } from "./coverage.js";
 import { SummaryTreeBuilder, type SummaryTreeNode } from "./grouping.js";
 import { hashSummaryTreeNodes, leafHash, summaryTreeContextKey, type SummaryTreeHashContext } from "./hash.js";
@@ -30,7 +31,10 @@ import {
   summaryTreeCoverageProblems,
   summaryTreeDocumentStanding,
   SummaryTreeStateRefused,
+  SummaryTreeBuildInProgress,
   touchSummaryTreeBuild,
+  watchSummaryTreeArtifact,
+  withSummaryTreeDocumentLock,
   upsertSummaryTreeNodes,
   writeSummaryTreeState as writeSummaryTreeStateRow,
   type SummaryTreeStateWrite,
@@ -59,7 +63,7 @@ import {
  *
  * What is committed when:
  *
- * - A summary's text is written to the artifact as its own immutable part the moment its model call returns.
+ * - A summary's text is written as an immutable artifact part only after its usage receipt is durable.
  *   A build killed after N calls and started again reads those N parts back and makes exactly total - N calls.
  * - Registry rows and summary rows (text and vector) are written once per window of at most `concurrency`
  *   model calls: one embedding request and one table commit for the window instead of one per summary. A kill
@@ -78,7 +82,8 @@ import {
  *   is found by the second check: the build then removes everything it wrote for the document (summary rows,
  *   strictly, and the artifact folder) before it returns `refused`, with a queued removal behind it in case that
  *   fails (`enqueueSummaryTreeCleanup`). After a text part the second check runs at once, and the removal with it.
- *   What remains: a worker that dies between writing a part and that check leaves the part (TODO.md). The row writer additionally holds a lock on the document's row across its
+ *   A durable artifact watch exists before any PUT and keeps a daily erasure tombstone after withdrawal; it
+ *   catches late PUTs even if the process dies before its post-check. The row writer holds the document row across its
  *   table write (lancedb-summaries.ts), so a delete or correction waits for a write in flight.
  *
  * Nothing is skipped silently: every outcome is a status with a named reason and counts.
@@ -132,6 +137,10 @@ class SummaryTreeStopped extends Error {
   }
 }
 
+class SummaryTreeUsagePersistenceError extends Error {
+  constructor(cause: unknown) { super("Summary tree usage could not be persisted", { cause }); this.name = "SummaryTreeUsagePersistenceError"; }
+}
+
 export interface SummaryTreeModelRequest {
   system: string;
   prompt: string;
@@ -173,7 +182,7 @@ export interface SummaryTreeBuildDeps {
   embed: SummaryTreeEmbedder;
   /** Called for every model attempt that returned, kept or not, with the provider's own token counts. */
   recordUsage(usage: SummaryCallUsage, detail: SummaryTreeUsageDetail): void;
-  /** Persists what was recorded so far. Called after every committed window and before the build returns. */
+  /** Persists recorded usage before a returned model call can publish reusable text, and at window/end boundaries. */
   flushUsage?(): Promise<void>;
   /** Whether this deployment and project still build trees. Asked before every model call; false makes none. */
   buildActive(): boolean;
@@ -196,12 +205,12 @@ export interface SummaryTreeBuildDeps {
    * for calls in flight holds a call back until one of them has reported its cost). The returned function is called
    * once when the call has settled, sent or not, after its usage was recorded.
    */
-  acquireCall?(): Promise<() => void>;
+  acquireCall?(): Promise<(outcome?: "not-started" | "returned" | "unknown") => void>;
   writeRows: SummaryTreeRowWriter;
   /** Strict delete of summary rows by id (nodes a rebuild replaced). */
-  deleteRowsById(args: { scope: SummaryTreeScope; space: { model: string; dimensions: number }; ids: string[]; root?: string }): Promise<void>;
+  deleteRowsById(args: { sql?: Client; scope: SummaryTreeScope; space: { model: string; dimensions: number }; ids: string[]; root?: string }): Promise<void>;
   /** Strict delete of every summary row of the document in one embedding space. */
-  deleteDocumentRows(args: { scope: SummaryTreeScope; space: { model: string; dimensions: number }; documentIds: string[]; root?: string }): Promise<unknown>;
+  deleteDocumentRows(args: { sql?: Client; scope: SummaryTreeScope; space: { model: string; dimensions: number }; documentIds: string[]; root?: string }): Promise<unknown>;
   /** Called once when a build that wrote or removed summary rows ends `ready`: the table has many small commits to compact. */
   tableChanged?(args: { scope: SummaryTreeScope; space: { model: string; dimensions: number }; root?: string }): void;
   /** LanceDB root override (tests). */
@@ -406,7 +415,9 @@ export async function buildDocumentSummaryTree(deps: SummaryTreeBuildDeps, input
   /** Whether this build ever held the row, i.e. may have written text parts or summary rows. */
   let everHeld = false;
   const writeSummaryTreeState = async (_sql: Client, write: SummaryTreeStateWrite): Promise<void> => {
-    await writeSummaryTreeStateRow(deps.sql, { ...write, buildOwner: owner, ...(holding ? { expectOwner: owner } : {}) });
+    await writeSummaryTreeStateRow(_sql, { ...write, buildOwner: owner,
+      refuseLiveOwner: !holding && input.takeOverLiveBuild === false, buildStaleMs: input.buildStaleMs,
+      ...(holding ? { expectOwner: owner } : {}) });
     holding = write.status === "building";
     everHeld ||= holding;
   };
@@ -449,8 +460,10 @@ export async function buildDocumentSummaryTree(deps: SummaryTreeBuildDeps, input
   const wipeEarlierTree = async () => {
     if (!prior) return;
     await writeSummaryTreeState(deps.sql, { scope, documentId, runId: prior.runId ?? runId, status: "building", configHash: prior.configHash, space: priorSpace });
-    if (priorSpace) await deps.deleteDocumentRows({ scope, space: priorSpace, documentIds: [documentId], root: deps.lanceRoot });
-    await deleteSummaryTreeNodes(deps.sql, scope, documentId, "all");
+    await withSummaryTreeDocumentLock(deps.sql, scope, documentId, owner, async (tx) => {
+      if (priorSpace) await deps.deleteDocumentRows({ sql: tx, scope, space: priorSpace, documentIds: [documentId], root: deps.lanceRoot });
+      await deleteSummaryTreeNodes(tx, scope, documentId, "all");
+    });
   };
 
   const skip = async (detail: NonNullable<SummaryTreeBuildStats["summaryTreeSkipDetail"]>, skipReason: SummaryTreeSkipReason): Promise<SummaryTreeBuildResult> => {
@@ -460,6 +473,7 @@ export async function buildDocumentSummaryTree(deps: SummaryTreeBuildDeps, input
       if (prior && prior.status !== "skipped") await wipeEarlierTree();
       await writeSummaryTreeState(deps.sql, { scope, documentId, runId, status: "skipped", skipReason });
     } catch (error) {
+      if (error instanceof SummaryTreeBuildInProgress) return finish("blocked", { reason: "build-in-progress" });
       if (error instanceof SummaryTreeStateRefused) return finish("refused", { reason: "document-not-live" });
       throw error;
     }
@@ -529,6 +543,7 @@ export async function buildDocumentSummaryTree(deps: SummaryTreeBuildDeps, input
       if (prior && !sameBuild) await wipeEarlierTree();
       await writeSummaryTreeState(deps.sql, { scope, documentId, runId, status: "building", configHash: contextKey, space, leafCount: index.leaves.length });
     } catch (error) {
+      if (error instanceof SummaryTreeBuildInProgress) return finish("blocked", { reason: "build-in-progress" });
       if (error instanceof SummaryTreeStateRefused) return finish("refused", { reason: "document-not-live" });
       throw error;
     }
@@ -542,6 +557,7 @@ export async function buildDocumentSummaryTree(deps: SummaryTreeBuildDeps, input
     heartbeat.unref?.();
 
     const registry: Map<string, StoredSummaryTreeNode> = sameBuild ? await loadSummaryTreeNodes(deps.sql, scope, documentId) : new Map();
+    await watchSummaryTreeArtifact(deps.sql, { scope, documentId, artifactRoot });
     const own = await readSummaryTreeArtifact(deps.artifacts, artifactRoot);
     const ownSource: SummaryReuseSource = {
       entries: own.entries,
@@ -610,7 +626,7 @@ export async function buildDocumentSummaryTree(deps: SummaryTreeBuildDeps, input
       await embedSummaries(pending, true);
       // The registry row exists before the summary row does, so a row in the table always has a registry row that
       // names it: a later rebuild finds and removes it even if this build dies between the two writes.
-      await upsertSummaryTreeNodes(deps.sql, { scope, documentId, runId, rows: pending.map((nodeIndex) => nodeRecord(nodeIndex, "pending")) });
+      await upsertSummaryTreeNodes(deps.sql, { scope, documentId, runId, owner, rows: pending.map((nodeIndex) => nodeRecord(nodeIndex, "pending")) });
       const rows: SummaryRow[] = pending.map((nodeIndex) => {
         const node = builder.nodes[nodeIndex]!;
         return {
@@ -625,7 +641,7 @@ export async function buildDocumentSummaryTree(deps: SummaryTreeBuildDeps, input
       await deps.writeRows({ sql: deps.sql, scope, space, documentId, runId, rows, owner, root: deps.lanceRoot, signal });
       // The writer checks under a lock; this covers a writer that holds none and a document that left right after.
       await assertMayWrite();
-      await upsertSummaryTreeNodes(deps.sql, { scope, documentId, runId, rows: pending.map((nodeIndex) => nodeRecord(nodeIndex, "ready")) });
+      await upsertSummaryTreeNodes(deps.sql, { scope, documentId, runId, owner, rows: pending.map((nodeIndex) => nodeRecord(nodeIndex, "ready")) });
       for (const nodeIndex of pending) registry.set(nodeIds[nodeIndex]!, { id: nodeIds[nodeIndex]!, nodeHash: hashes[nodeIndex]!, status: "ready", runId });
       stats.rowsWritten += rows.length;
     };
@@ -683,20 +699,29 @@ export async function buildDocumentSummaryTree(deps: SummaryTreeBuildDeps, input
           maxOutputTokens: budget,
           call: async (maxOutputTokens, attempt) => {
             const release = await deps.acquireCall?.();
+            let outcome: "not-started" | "returned" | "unknown" = "not-started";
             try {
               beforeCall();
               stats.modelCalls++;
               if (attempt > 1) stats.truncationRetries++;
+              outcome = "unknown";
               const response = await deps.summarize({ system: prompt.system, prompt: prompt.prompt, maxOutputTokens, attempt, nodeId: nodeIds[nodeIndex]!, level: node.level, signal });
               // Billed whether or not the answer is kept.
-              deps.recordUsage(response.usage, { nodeId: nodeIds[nodeIndex]!, level: node.level, attempt, finishReason: response.finishReason });
+              // A reusable object is never published before its usage debit is durable.
+              // Failure is fatal to the build, not a reason to buy the same model call again.
+              try {
+                deps.recordUsage(response.usage, { nodeId: nodeIds[nodeIndex]!, level: node.level, attempt, finishReason: response.finishReason });
+                await deps.flushUsage?.();
+              }
+              catch (error) { throw new SummaryTreeUsagePersistenceError(error); }
+              outcome = "returned";
               stats.inputTokens += response.usage.inputTokens;
               stats.outputTokens += response.usage.outputTokens;
               deps.noteProgress?.("summary-tree:model-call");
               if (response.finishReason === "content-filter") throw new SummaryContentRefusalError();
               return response;
             } finally {
-              release?.();
+              release?.(outcome);
             }
           },
         });
@@ -721,7 +746,7 @@ export async function buildDocumentSummaryTree(deps: SummaryTreeBuildDeps, input
           return;
         }
         if (result.status === "error") {
-          if (result.error instanceof SummaryTreeStopped) throw result.error;
+          if (result.error instanceof SummaryTreeStopped || result.error instanceof SummaryTreeUsagePersistenceError) throw result.error;
           if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : result.error;
           item.failure = isSummaryContentRefusal(result.error) ? "content-refusal" : "model-error";
         } else {
@@ -833,7 +858,7 @@ export async function buildDocumentSummaryTree(deps: SummaryTreeBuildDeps, input
           return;
         }
         if (failedNodes.length > 0) {
-          await upsertSummaryTreeNodes(deps.sql, { scope, documentId, runId, rows: failedNodes.map((nodeIndex) => nodeRecord(nodeIndex, "failed")) });
+          await upsertSummaryTreeNodes(deps.sql, { scope, documentId, runId, owner, rows: failedNodes.map((nodeIndex) => nodeRecord(nodeIndex, "failed")) });
         }
         await deps.flushUsage?.();
         await beat();
@@ -907,28 +932,33 @@ export async function buildDocumentSummaryTree(deps: SummaryTreeBuildDeps, input
     }
 
     // Rows of nodes this build did not produce (an earlier build of the same settings over other leaves).
-    const keep = nodeIds.slice(0, tree.nodes.length);
-    const stale = await staleSummaryTreeNodeIds(deps.sql, scope, documentId, keep);
-    if (stale.length > 0) {
-      await deps.deleteRowsById({ scope, space, ids: stale, root: deps.lanceRoot });
-      await deleteSummaryTreeNodes(deps.sql, scope, documentId, stale);
-      stats.staleRowsDeleted = stale.length;
-    }
-    await linkSummaryTreeNodes(deps.sql, {
-      scope, documentId,
-      links: tree.nodes.map((node, nodeIndex) => ({ id: nodeIds[nodeIndex]!, parentId: node.parent === null ? null : nodeIds[node.parent]!, ordinal: nodeIndex })),
+    const finalProblems = await withSummaryTreeDocumentLock(deps.sql, scope, documentId, owner, async (tx) => {
+      const keep = nodeIds.slice(0, tree.nodes.length);
+      const stale = await staleSummaryTreeNodeIds(tx, scope, documentId, keep);
+      if (stale.length > 0) {
+        await deps.deleteRowsById({ sql: tx, scope, space, ids: stale, root: deps.lanceRoot });
+        await deleteSummaryTreeNodes(tx, scope, documentId, stale);
+        stats.staleRowsDeleted = stale.length;
+      }
+      await linkSummaryTreeNodes(tx, {
+        scope, documentId,
+        links: tree.nodes.map((node, nodeIndex) => ({ id: nodeIds[nodeIndex]!, parentId: node.parent === null ? null : nodeIds[node.parent]!, ordinal: nodeIndex })),
     });
     await compactSummaryTreeArtifact(deps.artifacts, artifactRoot, tree.nodes.map((_, nodeIndex) => ({ hash: hashes[nodeIndex]!, ...summaries.get(nodeIndex)! })));
 
     // The invariant is read back from Postgres, after the last write, and decides whether the tree is served.
-    const coverage = await readSummaryTreeCoverage(deps.sql, { scope, documentId, leafChunkIndexes: tree.leafChunkIndexes });
-    const problems = summaryTreeCoverageProblems(coverage, { nodes: tree.nodes.length, rootId: nodeIds[tree.root]! });
-    if (problems.length > 0) return await writePartial(`coverage:${problems.join(",")}`);
+    const coverage = await readSummaryTreeCoverage(tx, { scope, documentId, leafChunkIndexes: tree.leafChunkIndexes });
+    const problems = summaryTreeCoverageProblems(coverage, { nodes: tree.nodes.length, rootId: nodeIds[tree.root!]! });
+    if (problems.length > 0) return problems;
 
-    await writeSummaryTreeState(deps.sql, {
+    await publishSummaryTreeRoot(tx, { scope, documentId, runId, owner, summary: summaries.get(tree.root!)! });
+    await writeSummaryTreeState(tx, {
       scope, documentId, runId, status: "ready", configHash: contextKey, space,
-      leafCount: index.leaves.length, nodeCount: tree.nodes.length, levelCount: stats.levels, rootNodeId: nodeIds[tree.root]!,
+      leafCount: index.leaves.length, nodeCount: tree.nodes.length, levelCount: stats.levels, rootNodeId: nodeIds[tree.root!]!,
     });
+    return [];
+    });
+    if (finalProblems.length > 0) return await writePartial(`coverage:${finalProblems.join(",")}`);
     await deps.flushUsage?.();
     if (stats.rowsWritten > 0 || stats.staleRowsDeleted > 0) deps.tableChanged?.({ scope, space, root: deps.lanceRoot });
     return finish("ready", { artifactUri });
@@ -1017,6 +1047,7 @@ export async function buildDocumentSummaryTree(deps: SummaryTreeBuildDeps, input
         });
       }
     } catch (error) {
+      if (error instanceof SummaryTreeBuildInProgress) return finish("blocked", { reason: "build-in-progress" });
       if (error instanceof SummaryTreeStateRefused) return finish("refused", { reason: "document-not-live" });
       throw error;
     }

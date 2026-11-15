@@ -24,7 +24,7 @@ import {
   SummaryRowsRefused,
   writeSummaryRows,
 } from "../stages/lancedb-summaries.js";
-import { enqueueSummaryTreeCleanup, withdrawSummaryTreeForPii, writeSummaryTreeState } from "../summary-tree/state-store.js";
+import { watchSummaryTreeArtifact, enqueueSummaryTreeCleanup, withdrawSummaryTreeForPii, writeSummaryTreeState } from "../summary-tree/state-store.js";
 import { createMigratedDatabase } from "../test/migrated-db.js";
 import { serveOnRandomPort } from "../test/migrated-postgres.js";
 
@@ -428,6 +428,52 @@ describe("queued removal of one document's summary tree (summary_tree_document)"
     };
   }
 
+  it("recovers a crash before the artifact post-check and retains a tombstone for late PUTs", async () => {
+    await seedDocument("a", W);
+    const artifactRoot = "u1/run-1/summary-tree/a";
+    await watchSummaryTreeArtifact(sql, { scope: W, documentId: "a", artifactRoot });
+    const store = objectStore([`${artifactRoot}/parts/paid.jsonl`, "u1/run-1/summary-tree/b/parts/kept.jsonl"]);
+    const due = () => sql`update storage_cleanup_queue set not_before = now() where payload->>'artifactWatch' = 'true'`;
+    await due();
+    expect(await drainStorageCleanupQueue(sql, store, options())).toMatchObject({ purged: 0, deferred: 1 });
+    // Crash left a paid part, no post-check and no completed stage registration.
+    await sql`delete from documents where id = 'a'`;
+    await due();
+    expect(await drainStorageCleanupQueue(sql, store, options())).toMatchObject({ purged: 1, failed: 0 });
+    expect(store.objects.has(`${artifactRoot}/parts/paid.jsonl`)).toBe(false);
+    expect(store.objects.has("u1/run-1/summary-tree/b/parts/kept.jsonl")).toBe(true);
+    // An already-sent PUT finishes after the recovery pass: the retained intent catches it too.
+    store.objects.add(`${artifactRoot}/parts/late.jsonl`);
+    await due();
+    expect(await drainStorageCleanupQueue(sql, store, options())).toMatchObject({ purged: 1, failed: 0 });
+    expect(store.objects.has(`${artifactRoot}/parts/late.jsonl`)).toBe(false);
+    expect(await sql`select target from storage_cleanup_queue where payload->>'artifactWatch' = 'true'`).toHaveLength(1);
+  });
+
+  it("withdraws the published document root with PII state, and refuses an in-place rebuild", async () => {
+    await seedDocument("a", W);
+    await seedTree("a", W, () => "WITHDRAWN");
+    await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline)
+      values ('run-root', 'o1', 'u1', 'w', 'bulk-upload', 'completed', 'completed', '{}')`;
+    await sql`update documents set run_id = 'run-root' where id = 'a'`;
+    await sql`insert into document_summaries (id, document_id, run_id, user_id, summary)
+      select 'root-a', d.id, d.run_id, d.user_id, 'WITHDRAWN root' from documents d where d.id = 'a'`;
+    expect(await withdrawSummaryTreeForPii(sql, "a")).toBe(true);
+    expect(await sql`select summary from document_summaries where document_id = 'a'`).toEqual([]);
+    await expect(writeSummaryTreeState(sql, { scope: W, documentId: "a", runId: "run-1", status: "building", buildOwner: "replacement" })).rejects.toThrow(/not live/);
+  });
+
+  it("keeps erasing late artifact writes after PII redaction without blocked=true", async () => {
+    await seedDocument("a", W);
+    const artifactRoot = "u1/run-1/summary-tree/a";
+    await watchSummaryTreeArtifact(sql, { scope: W, documentId: "a", artifactRoot });
+    await sql`update documents set metadata = '{"pii":{"redacted":true,"blocked":false}}'::jsonb where id = 'a'`;
+    const store = objectStore([`${artifactRoot}/parts/late.jsonl`]);
+    await sql`update storage_cleanup_queue set not_before = now() where payload->>'artifactWatch' = 'true'`;
+    expect(await drainStorageCleanupQueue(sql, store, options())).toMatchObject({ purged: 1, failed: 0 });
+    expect(store.objects.size).toBe(0);
+  });
+
   it("removes the document's rows strictly, its artifact and its registry rows, and nothing of another document", async () => {
     await seedDocument("a", W);
     await seedTree("a", W, (index) => `ERASEME-${index} text from before the correction`);
@@ -496,10 +542,10 @@ describe("queued removal of one document's summary tree (summary_tree_document)"
     await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline)
       values ('run-1', 'o1', 'u1', 'w', 'bulk-upload', 'completed', 'completed', '{}') on conflict (id) do nothing`;
     await seedDocument("a", W);
-    await seedTree("a", W, (index) => `ERASEME-${index} text that was withheld`);
+    await seedTree("a", W, (index) => `ERASEME-${index} text from an obsolete build`);
     const store = objectStore(["u1/run-1/summary-tree/a/summaries.jsonl", "u1/run-0/summary-tree/a/summaries.jsonl"]);
     // The removal is asked for (generation 0 at that moment) ...
-    expect(await withdrawSummaryTreeForPii(sql, "a")).toBe(true);
+    await enqueueSummaryTreeCleanup(sql, { scope: W, documentId: "a", reason: "obsolete-build" });
     await sql`update storage_cleanup_queue set payload = payload || ${sql.json({ artifactRoots: ["u1/run-1/summary-tree/a", "u1/run-0/summary-tree/a"] })}`;
     expect((await sql`select payload -> 'generation' as generation from storage_cleanup_queue`)[0]).toEqual({ generation: 0 });
 

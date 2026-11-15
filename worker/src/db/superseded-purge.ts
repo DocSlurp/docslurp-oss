@@ -1401,7 +1401,7 @@ export async function drainStorageCleanupQueue(
         const txStorage = forgettingEmbeddingReuseRefs(client, storage);
         const [row] = await client<StorageCleanupRow[]>`
           select id::text, kind, org_id, target, payload, artifact_uris from storage_cleanup_queue
-          where (attempts < 10 or kind = 'upload_original') and not_before <= now()
+          where (attempts < 10 or kind = 'upload_original' or (kind = 'summary_tree_document' and payload->>'artifactWatch' = 'true')) and not_before <= now()
             and id::text <> all(${client.array(failedIds)}::text[])
           order by created_at, id
           limit 1
@@ -1492,6 +1492,35 @@ export async function drainStorageCleanupQueue(
         } else if (row.kind === "vector_rows") {
           await deleteOrphanVectorRows(client, options, row);
         } else if (row.kind === SUMMARY_TREE_CLEANUP_KIND) {
+          if (row.payload.artifactWatch === true) {
+            const documentId = typeof row.payload.documentId === "string" ? row.payload.documentId : "";
+            const orgId = row.org_id ?? "";
+            const projectId = payloadProjectId(row.payload);
+            if (!SAFE_DOCUMENT_ID.test(documentId) || !SAFE_ID.test(orgId) || !SAFE_ID.test(projectId)
+              || row.target !== `${orgId}|${projectId}|${documentId}|artifact-watch`) throw new Error("Refusing malformed summary tree artifact watch");
+            const roots = Array.isArray(row.payload.artifactRoots) ? row.payload.artifactRoots : [];
+            if (roots.length === 0 || roots.some((root) => !safeSummaryTreeArtifactRoot(root, documentId))) throw new Error("Refusing unsafe summary tree artifact watch roots");
+            const [doc] = await client<{ org_id: string; project_id: string; withdrawn: boolean }[]>`
+              select d.org_id, d.project_id,
+                (d.purged_at is not null or coalesce((d.metadata->'pii'->>'blocked')::boolean, false)
+                 or coalesce((d.metadata->'pii'->>'redacted')::boolean, false)
+                 or coalesce(jsonb_array_length(case when jsonb_typeof(d.metadata->'pii'->'withheldArtifactUris') = 'array'
+                    then d.metadata->'pii'->'withheldArtifactUris' else '[]'::jsonb end), 0) > 0
+                 or exists (select 1 from pii_detections pd where pd.document_id = d.id and pd.redacted)
+                 or exists (select 1 from document_summary_trees t where t.document_id = d.id
+                    and (t.skip_reason = 'corrected' or t.error = 'pii-withheld'))) as withdrawn
+              from documents d where d.id = ${documentId} for update of d`;
+            if (doc && (doc.org_id !== orgId || doc.project_id !== projectId)) throw new Error("Artifact watch document belongs to another project");
+            if (!doc || doc.withdrawn) {
+              for (const root of roots) await purgePrefix(txStorage, `${root}/`, () => false);
+              result.purged += 1;
+            } else result.deferred = (result.deferred ?? 0) + 1;
+            // Deliberately retain the tombstone: an S3 PUT can complete after a crashed
+            // process loses its DB connection, including after the first erasure pass.
+            await client`update storage_cleanup_queue set attempts = 0, last_error = null,
+              not_before = now() + interval '1 day' where id = ${row.id}`;
+            return;
+          }
           if ((await removeDocumentSummaryTree(client, txStorage, options, row)) === "deferred") {
             // A build is writing this document's tree right now: decided again once it has ended.
             await client`update storage_cleanup_queue set not_before = now() + interval '2 minutes' where id = ${row.id}`;
@@ -1527,12 +1556,12 @@ export async function drainStorageCleanupQueue(
           update storage_cleanup_queue
           set attempts = attempts + 1, last_error = ${message.slice(0, 2000)},
             not_before = case when kind = 'upload_original' and ${message === 'Original upload ownership cannot be verified'} then 'infinity'::timestamptz
-              when kind = 'upload_original' then now() + interval '1 hour' else not_before end
+              when kind = 'upload_original' or payload->>'artifactWatch' = 'true' then now() + interval '1 hour' else not_before end
           where id = ${row.id}
           returning attempts
         `.catch(() => []);
-        // An original-upload row is retried without a limit; every other kind stops being claimed here.
-        if (row.kind !== "upload_original" && Number(updated[0]?.attempts) === CLEANUP_ATTEMPT_LIMIT) {
+        // Original-upload and artifact-watch tombstones retry without a limit.
+        if (row.kind !== "upload_original" && row.payload.artifactWatch !== true && Number(updated[0]?.attempts) === CLEANUP_ATTEMPT_LIMIT) {
           logCleanupAttemptLimit("storage_cleanup_queue", { id: row.id, kind: row.kind, orgId: row.org_id });
         }
       }

@@ -97,6 +97,9 @@ export interface SummaryTreeStateWrite {
    * over cannot write its outcome over the newer build's state.
    */
   expectOwner?: string;
+  /** Refuse a fresh different builder at the atomic claim, not only the earlier scan. */
+  refuseLiveOwner?: boolean;
+  buildStaleMs?: number;
 }
 
 /**
@@ -109,42 +112,96 @@ export interface SummaryTreeStateWrite {
  * removal of the document's summary data carries the generation it was asked at (`enqueueSummaryTreeCleanup`), and
  * the sweep leaves a tree of a later generation alone.
  */
+export class SummaryTreeBuildInProgress extends SummaryTreeStateRefused {
+  constructor() { super("Another live builder holds the tree"); this.name = "SummaryTreeBuildInProgress"; }
+}
+
+/** Serialize tree ownership and mutations with deletion and summary-row writes. Pass the
+ * transaction client into work; never obtain another connection while holding this lock. */
+export async function withSummaryTreeDocumentLock<T>(sql: Client, scope: SummaryTreeScope, documentId: string, owner: string | undefined, work: (tx: Client) => Promise<T>): Promise<T> {
+  assertScope(scope);
+  const run = async (tx: Client): Promise<T> => {
+    const [document] = await tx`
+      select id from documents where id = ${documentId} and org_id = ${scope.orgId} and project_id = ${scope.projectId}
+        and purged_at is null and superseded_at is null and archived_at is null
+        and not coalesce((metadata->'pii'->>'blocked')::boolean, false)
+        and not coalesce((metadata->'pii'->>'redacted')::boolean, false)
+        and coalesce(jsonb_array_length(case when jsonb_typeof(metadata->'pii'->'withheldArtifactUris') = 'array'
+          then metadata->'pii'->'withheldArtifactUris' else '[]'::jsonb end), 0) = 0
+        and not exists (select 1 from pii_detections pd where pd.document_id = documents.id and pd.redacted)
+        and not exists (select 1 from document_summary_trees t where t.document_id = documents.id and t.error = 'pii-withheld')
+        for update
+    `;
+    if (!document) throw new SummaryTreeStateRefused("The document is not live in this project");
+    if (owner !== undefined) {
+      const [held] = await tx`select document_id from document_summary_trees
+        where document_id = ${documentId} and org_id = ${scope.orgId} and project_id = ${scope.projectId}
+          and status = 'building' and build_owner = ${owner}`;
+      if (!held) throw new SummaryTreeStateRefused("Another builder or withdrawal took the tree");
+    }
+    return work(tx);
+  };
+  return typeof (sql as { begin?: unknown }).begin === "function"
+    ? await sql.begin((tx) => run(tx as unknown as Client)) as T
+    : await run(sql);
+}
+
+/** A durable recovery watch exists before the first object PUT. It survives document deletion,
+ * and its cleanup tombstone keeps catching PUTs that complete after a worker loses its DB connection. */
+export async function watchSummaryTreeArtifact(sql: Client, args: { scope: SummaryTreeScope; documentId: string; artifactRoot: string }): Promise<void> {
+  assertScope(args.scope);
+  await sql`insert into storage_cleanup_queue (kind, org_id, target, payload, reason, not_before)
+    values (${SUMMARY_TREE_CLEANUP_KIND}, ${args.scope.orgId}, ${`${args.scope.orgId}|${args.scope.projectId}|${args.documentId}|artifact-watch`},
+      ${JSON.stringify({ projectId: args.scope.projectId, documentId: args.documentId, artifactWatch: true, artifactRoots: [args.artifactRoot] })}::text::jsonb,
+      'summary_tree_artifact_watch', now() + interval '1 day')
+    on conflict (kind, target) do update set payload = storage_cleanup_queue.payload || jsonb_build_object('artifactRoots',
+      (select jsonb_agg(distinct root) from jsonb_array_elements(coalesce(storage_cleanup_queue.payload->'artifactRoots', '[]'::jsonb) || excluded.payload->'artifactRoots') root))`;
+}
+
 export async function writeSummaryTreeState(sql: Client, write: SummaryTreeStateWrite): Promise<void> {
   assertScope(write.scope);
-  const rows = await sql<{ document_id: string }[]>`
-    insert into document_summary_trees (
-      document_id, org_id, project_id, run_id, status, skip_reason, tree_key_version, config_hash,
-      embedding_model, dimension, leaf_count, node_count, level_count, root_node_id, error, build_owner, built_at, updated_at,
-      build_generation
-    )
-    select d.id, d.org_id, d.project_id, ${write.runId}, ${write.status}, ${write.skipReason ?? null}, ${SUMMARY_TREE_KEY_VERSION},
-      ${write.configHash ?? null}, ${write.space?.model ?? null}, ${write.space?.dimensions ?? null}::int,
-      ${write.leafCount ?? 0}::int, ${write.nodeCount ?? 0}::int, ${write.levelCount ?? 0}::int, ${write.rootNodeId ?? null},
-      ${write.error ?? null}, ${write.status === "building" ? write.buildOwner ?? null : null},
-      case when ${write.status} = 'ready' then now() else null end, now(),
-      case when ${write.status} = 'building' then 1 else 0 end
-    from documents d
-    where d.id = ${write.documentId} and d.org_id = ${write.scope.orgId} and d.project_id = ${write.scope.projectId}
-      and d.purged_at is null and d.superseded_at is null and d.archived_at is null
-    on conflict (document_id) do update set
-      run_id = excluded.run_id, status = excluded.status, skip_reason = excluded.skip_reason,
-      tree_key_version = excluded.tree_key_version, config_hash = excluded.config_hash,
-      embedding_model = excluded.embedding_model, dimension = excluded.dimension,
-      leaf_count = excluded.leaf_count, node_count = excluded.node_count, level_count = excluded.level_count,
-      root_node_id = excluded.root_node_id, error = excluded.error, build_owner = excluded.build_owner,
-      built_at = excluded.built_at, updated_at = now(),
-      -- A build taking the row is a new generation (a heartbeat is not a write of this statement).
-      build_generation = document_summary_trees.build_generation + excluded.build_generation
-    where document_summary_trees.org_id = excluded.org_id and document_summary_trees.project_id = excluded.project_id
-      and document_summary_trees.skip_reason is distinct from ${SUMMARY_TREE_CORRECTED_SKIP_REASON}
-      and (${write.expectOwner ?? null}::text is null or document_summary_trees.build_owner is not distinct from ${write.expectOwner ?? null}::text)
-    returning document_id
-  `;
-  if (rows.length !== 1) {
-    throw new SummaryTreeStateRefused(write.expectOwner
-      ? "The document is not a live document of this project, was corrected, or another build took its tree over"
-      : "The document is not a live document of this project, or was corrected");
-  }
+  return withSummaryTreeDocumentLock(sql, write.scope, write.documentId, undefined, async (sql) => {
+    if (write.refuseLiveOwner) {
+      const [busy] = await sql`select document_id from document_summary_trees where document_id = ${write.documentId}
+        and status = 'building' and build_owner is distinct from ${write.buildOwner ?? null}
+        and updated_at > now() - ${`${write.buildStaleMs ?? SUMMARY_TREE_BUILD_STALE_MS} milliseconds`}::interval`;
+      if (busy) throw new SummaryTreeBuildInProgress();
+    }
+    const rows = await sql<{ document_id: string }[]>`
+      insert into document_summary_trees (
+        document_id, org_id, project_id, run_id, status, skip_reason, tree_key_version, config_hash,
+        embedding_model, dimension, leaf_count, node_count, level_count, root_node_id, error, build_owner, built_at, updated_at,
+        build_generation
+      )
+      select d.id, d.org_id, d.project_id, ${write.runId}, ${write.status}, ${write.skipReason ?? null}, ${SUMMARY_TREE_KEY_VERSION},
+        ${write.configHash ?? null}, ${write.space?.model ?? null}, ${write.space?.dimensions ?? null}::int,
+        ${write.leafCount ?? 0}::int, ${write.nodeCount ?? 0}::int, ${write.levelCount ?? 0}::int, ${write.rootNodeId ?? null},
+        ${write.error ?? null}, ${write.status === "building" ? write.buildOwner ?? null : null},
+        case when ${write.status} = 'ready' then now() else null end, now(),
+        case when ${write.status} = 'building' then 1 else 0 end
+      from documents d
+      where d.id = ${write.documentId} and d.org_id = ${write.scope.orgId} and d.project_id = ${write.scope.projectId}
+        and d.purged_at is null and d.superseded_at is null and d.archived_at is null
+      on conflict (document_id) do update set
+        run_id = excluded.run_id, status = excluded.status, skip_reason = excluded.skip_reason,
+        tree_key_version = excluded.tree_key_version, config_hash = excluded.config_hash,
+        embedding_model = excluded.embedding_model, dimension = excluded.dimension,
+        leaf_count = excluded.leaf_count, node_count = excluded.node_count, level_count = excluded.level_count,
+        root_node_id = excluded.root_node_id, error = excluded.error, build_owner = excluded.build_owner,
+        built_at = excluded.built_at, updated_at = now(),
+        -- A build taking the row is a new generation (a heartbeat is not a write of this statement).
+        build_generation = document_summary_trees.build_generation + excluded.build_generation
+      where document_summary_trees.org_id = excluded.org_id and document_summary_trees.project_id = excluded.project_id
+        and document_summary_trees.skip_reason is distinct from ${SUMMARY_TREE_CORRECTED_SKIP_REASON}
+        and (${write.expectOwner ?? null}::text is null or document_summary_trees.build_owner is not distinct from ${write.expectOwner ?? null}::text)
+      returning document_id
+    `;
+    if (rows.length !== 1) {
+      throw new SummaryTreeStateRefused(write.expectOwner
+        ? "The document is not a live document of this project, was corrected, or another build took its tree over"
+        : "The document is not a live document of this project, or was corrected");
+    }
+  });
 }
 
 /**
@@ -237,12 +294,16 @@ export async function enqueueSummaryTreeCleanup(sql: Client, args: {
  * A document that already has a tree was blocked or redacted by the PII policy (a rescan of a document processed
  * before the policy, a retry in place): what the tree says was written from the text that is now withheld. Its state
  * leaves `ready` at once (search reads only `ready` trees) and strict removal of its summary rows and artifact is
- * queued; a later build of a redacted document starts from nothing and reads the redacted text. A document without
+ * queued; an in-place redacted/withheld document cannot build again. A new document/version is required,
+ * so an old in-flight object write can never overwrite a safe replacement under the same artifact root. A document without
  * a tree (every first ingestion) is left alone, so its own build is not disturbed. Returns whether a tree was withdrawn.
  */
 export async function withdrawSummaryTreeForPii(sql: Client, documentId: string): Promise<boolean> {
+  if (typeof (sql as { begin?: unknown }).begin === "function") {
+    return await sql.begin((tx) => withdrawSummaryTreeForPii(tx as unknown as Client, documentId)) as boolean;
+  }
   const [document] = await sql<{ org_id: string | null; project_id: string | null }[]>`
-    select org_id, project_id from documents where id = ${documentId}
+    select org_id, project_id from documents where id = ${documentId} for update
   `;
   if (!document?.org_id || !document.project_id) return false;
   const scope = { orgId: document.org_id, projectId: document.project_id };
@@ -253,6 +314,11 @@ export async function withdrawSummaryTreeForPii(sql: Client, documentId: string)
       and status <> 'skipped'
     returning document_id
   `;
+  // The full-tree root is also the document summary. Erase that derived text in the
+  // same transaction that withdraws serving, including a tree previously skipped.
+  await sql`delete from document_summaries s using documents d
+    where s.document_id = d.id and d.id = ${documentId} and d.org_id = ${scope.orgId} and d.project_id = ${scope.projectId}
+      and exists (select 1 from document_summary_trees t where t.document_id = d.id)`;
   if (withdrawn.length === 0) return false;
   await enqueueSummaryTreeCleanup(sql, { scope, documentId, reason: "pii_withheld" });
   return true;
@@ -311,40 +377,42 @@ export async function loadSummaryTreeNodes(sql: Client, scope: SummaryTreeScope,
  * tree state row of this tenant, and an existing row is replaced only if it is this document's and this
  * tenant's. Parent links are written once, by `linkSummaryTreeNodes`, when the tree is complete.
  */
-export async function upsertSummaryTreeNodes(sql: Client, args: { scope: SummaryTreeScope; documentId: string; runId: string; rows: readonly SummaryTreeNodeRecord[] }): Promise<void> {
+export async function upsertSummaryTreeNodes(sql: Client, args: { scope: SummaryTreeScope; documentId: string; runId: string; owner?: string; rows: readonly SummaryTreeNodeRecord[] }): Promise<void> {
   assertScope(args.scope);
   if (args.rows.length === 0) return;
-  const payload = JSON.stringify(args.rows.map((row) => ({
-    id: row.id, node_hash: row.nodeHash, level: row.level, ordinal: row.ordinal, status: row.status,
-    chunk_start: row.chunkStart, chunk_end: row.chunkEnd, page_start: row.pageStart, page_end: row.pageEnd,
-  })));
-  const written = await sql<{ id: string }[]>`
-    insert into document_summary_tree_nodes (
-      id, document_id, org_id, project_id, run_id, node_hash, level, ordinal, status,
-      chunk_start, chunk_end, page_start, page_end, updated_at
-    )
-    select r.id, ${args.documentId}, ${args.scope.orgId}, ${args.scope.projectId}, ${args.runId}, r.node_hash, r.level, r.ordinal, r.status,
-      r.chunk_start, r.chunk_end, r.page_start, r.page_end, now()
-    from jsonb_to_recordset(${payload}::text::jsonb) as r(
-      id text, node_hash text, level int, ordinal int, status text, chunk_start int, chunk_end int, page_start int, page_end int
-    )
-    where exists (
-      select 1 from document_summary_trees t
-      where t.document_id = ${args.documentId} and t.org_id = ${args.scope.orgId} and t.project_id = ${args.scope.projectId}
-        and t.status <> 'skipped'
-    )
-    on conflict (id) do update set
-      run_id = excluded.run_id, node_hash = excluded.node_hash, level = excluded.level, ordinal = excluded.ordinal,
-      status = excluded.status, chunk_start = excluded.chunk_start, chunk_end = excluded.chunk_end,
-      page_start = excluded.page_start, page_end = excluded.page_end, updated_at = now()
-    where document_summary_tree_nodes.document_id = excluded.document_id
-      and document_summary_tree_nodes.org_id = excluded.org_id
-      and document_summary_tree_nodes.project_id = excluded.project_id
-    returning id
-  `;
-  if (written.length !== args.rows.length) {
-    throw new SummaryTreeStateRefused("Summary tree nodes were not written: the document has no tree being built in this project, or a node id belongs elsewhere");
-  }
+  return withSummaryTreeDocumentLock(sql, args.scope, args.documentId, args.owner, async (sql) => {
+    const payload = JSON.stringify(args.rows.map((row) => ({
+      id: row.id, node_hash: row.nodeHash, level: row.level, ordinal: row.ordinal, status: row.status,
+      chunk_start: row.chunkStart, chunk_end: row.chunkEnd, page_start: row.pageStart, page_end: row.pageEnd,
+    })));
+    const written = await sql<{ id: string }[]>`
+      insert into document_summary_tree_nodes (
+        id, document_id, org_id, project_id, run_id, node_hash, level, ordinal, status,
+        chunk_start, chunk_end, page_start, page_end, updated_at
+      )
+      select r.id, ${args.documentId}, ${args.scope.orgId}, ${args.scope.projectId}, ${args.runId}, r.node_hash, r.level, r.ordinal, r.status,
+        r.chunk_start, r.chunk_end, r.page_start, r.page_end, now()
+      from jsonb_to_recordset(${payload}::text::jsonb) as r(
+        id text, node_hash text, level int, ordinal int, status text, chunk_start int, chunk_end int, page_start int, page_end int
+      )
+      where exists (
+        select 1 from document_summary_trees t
+        where t.document_id = ${args.documentId} and t.org_id = ${args.scope.orgId} and t.project_id = ${args.scope.projectId}
+          and t.status <> 'skipped'
+      )
+      on conflict (id) do update set
+        run_id = excluded.run_id, node_hash = excluded.node_hash, level = excluded.level, ordinal = excluded.ordinal,
+        status = excluded.status, chunk_start = excluded.chunk_start, chunk_end = excluded.chunk_end,
+        page_start = excluded.page_start, page_end = excluded.page_end, updated_at = now()
+      where document_summary_tree_nodes.document_id = excluded.document_id
+        and document_summary_tree_nodes.org_id = excluded.org_id
+        and document_summary_tree_nodes.project_id = excluded.project_id
+      returning id
+    `;
+    if (written.length !== args.rows.length) {
+      throw new SummaryTreeStateRefused("Summary tree nodes were not written: the document has no tree being built in this project, or a node id belongs elsewhere");
+    }
+  });
 }
 
 /** Sets every node's parent and ordinal from the finished tree, in one statement. */

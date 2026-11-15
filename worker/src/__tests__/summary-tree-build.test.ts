@@ -36,6 +36,7 @@ import {
   type SummaryTreeModelRequest,
   type SummaryTreeUsageDetail,
 } from "../summary-tree/index.js";
+import { withSummaryTreeDocumentLock } from "../summary-tree/state-store.js";
 import { createMigratedDatabase } from "../test/migrated-db.js";
 import { serveOnRandomPort } from "../test/migrated-postgres.js";
 
@@ -309,13 +310,13 @@ function harness(model: FakeModel = fakeModel()): Harness {
   };
 }
 
-async function stateOf(documentId: string) {
-  const [row] = await sql<Array<Record<string, unknown>>>`select * from document_summary_trees where document_id = ${documentId}`;
+async function stateOf(documentId: string, client = sql) {
+  const [row] = await client<Array<Record<string, unknown>>>`select * from document_summary_trees where document_id = ${documentId}`;
   return row ?? null;
 }
 
-async function nodesOf(documentId: string) {
-  return await sql<Array<{ id: string; node_hash: string; level: number; parent_id: string | null; status: string; chunk_start: number; chunk_end: number; run_id: string }>>`
+async function nodesOf(documentId: string, client = sql) {
+  return await client<Array<{ id: string; node_hash: string; level: number; parent_id: string | null; status: string; chunk_start: number; chunk_end: number; run_id: string }>>`
     select id, node_hash, level, parent_id, status, chunk_start, chunk_end, run_id from document_summary_tree_nodes where document_id = ${documentId} order by ordinal`;
 }
 
@@ -810,9 +811,9 @@ describe("a document deleted while its tree is being built", () => {
     expect(await rowsOf(W, "d1")).toEqual([]);
     expect(await stateOf("d1")).toBeNull();
     // The queued removal behind the inline one finds nothing left and clears itself.
-    expect(await sql`select kind, target, reason from storage_cleanup_queue`).toEqual([{ kind: "summary_tree_document", target: "o1|w|d1", reason: "document_gone" }]);
+    expect(await sql`select kind, target, reason from storage_cleanup_queue where payload->>'artifactWatch' is distinct from 'true'`).toEqual([{ kind: "summary_tree_document", target: "o1|w|d1", reason: "document_gone" }]);
     expect(await drainStorageCleanupQueue(sql, h.storage, { graceSeconds: 0, batchSize: 10, deleteSources: false, lancedbRoot: lanceRoot })).toEqual({ purged: 1, failed: 0 });
-    expect(await sql`select 1 from storage_cleanup_queue`).toEqual([]);
+    expect(await sql`select 1 from storage_cleanup_queue where payload->>'artifactWatch' is distinct from 'true'`).toEqual([]);
   });
 
   it("removes a late text part at once, while the window's other calls are still in flight", async () => {
@@ -1001,15 +1002,16 @@ describe("failed groups", () => {
     const h = harness();
     await seedDocument("d1", W);
     h.putArtifact("d1", W, book());
-    // Compaction is the last write before the check: by then every registry row is written and linked.
-    h.storage.onPut = async (key) => {
-      if (!key.endsWith("/summaries.jsonl")) return;
+    let writes = 0;
+    const result = await h.build("d1", W, { deps: { writeRows: async (args) => {
+      await writeSummaryRows(args);
+      writes += args.rows.length;
+      if (writes !== BOOK_NODES) return;
       await sql`update document_summary_tree_nodes set chunk_end = chunk_end + 15
         where id = (select id from document_summary_tree_nodes where document_id = 'd1' and level = 1 order by chunk_start limit 1)`;
       await sql`update document_summary_tree_nodes set status = 'pending'
         where id = (select id from document_summary_tree_nodes where document_id = 'd1' and level = 2 order by chunk_start limit 1)`;
-    };
-    const result = await h.build("d1", W);
+    } } });
     expect(result.status).toBe("partial");
     expect(result.reason).toBe("coverage:node-not-ready,node-parent,leaf-in-multiple-groups");
     expect(await stateOf("d1")).toMatchObject({ status: "partial", built_at: null });
@@ -1019,12 +1021,14 @@ describe("failed groups", () => {
     const h = harness();
     await seedDocument("d1", W);
     h.putArtifact("d1", W, book());
-    h.storage.onPut = async (key) => {
-      if (!key.endsWith("/summaries.jsonl")) return;
+    let writes = 0;
+    const result = await h.build("d1", W, { deps: { writeRows: async (args) => {
+      await writeSummaryRows(args);
+      writes += args.rows.length;
+      if (writes !== BOOK_NODES) return;
       await sql`update document_summary_tree_nodes set chunk_end = chunk_end - 3
         where id = (select id from document_summary_tree_nodes where document_id = 'd1' and level = 1 order by chunk_start desc limit 1)`;
-    };
-    const result = await h.build("d1", W);
+    } } });
     expect(result).toMatchObject({ status: "partial", reason: "coverage:parent-range,leaf-without-group" });
   });
 });
@@ -1428,7 +1432,38 @@ describe("scale", () => {
   }, 300_000);
 });
 
+describe("durable summary usage", () => {
+  it("publishes no reusable summary and makes no retry when usage persistence fails", async () => {
+    const h = harness();
+    await seedDocument("d1", W);
+    h.putArtifact("d1", W, book());
+    const outcomes: unknown[] = [];
+    await expect(h.build("d1", W, { concurrency: 1, deps: {
+      acquireCall: async () => (outcome) => { outcomes.push(outcome); },
+      flushUsage: async () => { throw new Error("ledger unavailable"); },
+    } })).rejects.toThrow("ledger unavailable");
+    expect(h.model.requests).toHaveLength(1);
+    expect([...h.storage.objects.keys()].filter((key) => key.includes("/summary-tree/"))).toEqual([]);
+    expect(outcomes).toEqual(["unknown"]);
+  });
+});
+
 describe("serving contract and ownership of a building row", () => {
+  it("refuses destructive work from an owner replaced before it acquired the document lock", async () => {
+    await seedDocument("d1", W);
+    await writeSummaryTreeState(sql, { scope: W, documentId: "d1", runId: "run-d1", status: "building", buildOwner: "old" });
+    await writeSummaryTreeState(sql, { scope: W, documentId: "d1", runId: "run-d1", status: "building", buildOwner: "new" });
+    const destructive = vi.fn();
+    await expect(withSummaryTreeDocumentLock(sql, W, "d1", "old", destructive)).rejects.toThrow(/took the tree/);
+    expect(destructive).not.toHaveBeenCalled();
+    expect(await stateOf("d1")).toMatchObject({ status: "building", build_owner: "new" });
+    // Nested operations use the transaction's one connection (the test pool has max: 1).
+    await withSummaryTreeDocumentLock(sql, W, "d1", "new", async (tx) => {
+      await writeSummaryTreeState(tx, { scope: W, documentId: "d1", runId: "run-d1", status: "partial", expectOwner: "new" });
+    });
+    expect(await stateOf("d1")).toMatchObject({ status: "partial", build_owner: null });
+  });
+
   it("leaves ready before a rebuild with other settings removes a single row, and bumps built_at", async () => {
     const h = harness();
     await seedDocument("d1", W);
@@ -1442,7 +1477,7 @@ describe("serving contract and ownership of a building row", () => {
       hashContext: { ...HASH_CONTEXT, modelId: "text/model-b" },
       deps: {
         deleteDocumentRows: async (args) => {
-          statusAtWipe.push((await stateOf("d1"))!.status, (await stateOf("d1"))!.built_at);
+          statusAtWipe.push((await stateOf("d1", args.sql))!.status, (await stateOf("d1", args.sql))!.built_at);
           return await deleteDocumentSummaryRows(args);
         },
       },
@@ -1472,9 +1507,9 @@ describe("serving contract and ownership of a building row", () => {
     const result = await h.build("d1", W, {
       deps: {
         deleteDocumentRows: async (args) => {
-          const state = (await stateOf("d1"))!;
+          const state = (await stateOf("d1", args.sql))!;
           // The row is this build's already, still naming the earlier settings; the other builder may write no more.
-          atWipe.push(state.status, state.build_owner, state.config_hash, await summaryTreeBuildStanding(sql, W, "d1", "job:j1#c1"), (await nodesOf("d1")).length);
+          atWipe.push(state.status, state.build_owner, state.config_hash, await summaryTreeBuildStanding(args.sql!, W, "d1", "job:j1#c1"), (await nodesOf("d1", args.sql)).length);
           return await deleteDocumentSummaryRows(args);
         },
       },
@@ -1494,7 +1529,7 @@ describe("serving contract and ownership of a building row", () => {
     const statusAtWipe: unknown[] = [];
     const result = await h.build("d1", W, {
       document: { normalizedFormat: "office-excel" },
-      deps: { deleteDocumentRows: async (args) => { statusAtWipe.push((await stateOf("d1"))!.status); return await deleteDocumentSummaryRows(args); } },
+      deps: { deleteDocumentRows: async (args) => { statusAtWipe.push((await stateOf("d1", args.sql))!.status); return await deleteDocumentSummaryRows(args); } },
     });
     expect(result).toMatchObject({ status: "skipped", skipReason: "format" });
     expect(statusAtWipe).toEqual(["building"]);
@@ -1534,6 +1569,38 @@ describe("serving contract and ownership of a building row", () => {
     const taken = await h.build("d1", W, { input: { owner: "job:j1", takeOverLiveBuild: false } });
     expect(taken.status).toBe("ready");
     expect(h.model.requests).toHaveLength(BOOK_NODES);
+  });
+
+  it("refuses in-place redacted or withheld documents before model calls even without an input flag", async () => {
+    for (const pii of [{ redacted: true, blocked: false }, { withheldArtifactUris: ["s3://b/old"] }]) {
+      const h = harness();
+      await seedDocument("d1", W);
+      h.putArtifact("d1", W, book());
+      await sql`update documents set metadata = ${JSON.stringify({ pii })}::text::jsonb where id = 'd1'`;
+      const result = await h.build("d1", W, { register: false });
+      expect(result).toMatchObject({ status: "refused", reason: "document-not-live" });
+      expect(h.model.requests).toEqual([]);
+      expect(await summaryRows(W)).toBeNull();
+      expect(await sql`select summary from document_summaries where document_id = 'd1'`).toEqual([]);
+      await sql`delete from documents where id = 'd1'`;
+      await sql`delete from project_runs where id = 'run-d1'`;
+    }
+  });
+
+  it("does not take over a live owner that appeared after the initial state read", async () => {
+    const h = harness();
+    await seedDocument("d1", W);
+    const key = h.putArtifact("d1", W, book());
+    const result = await h.build("d1", W, {
+      input: { owner: "job:second", takeOverLiveBuild: false },
+      deps: { openEmbeddingArtifact: async () => {
+        await writeSummaryTreeState(sql, { scope: W, documentId: "d1", runId: "run-d1", status: "building", buildOwner: "job:first" });
+        return (await h.storage.openStream(key)).stream;
+      } },
+    });
+    expect(result).toMatchObject({ status: "blocked", reason: "build-in-progress" });
+    expect(h.model.requests).toEqual([]);
+    expect(await stateOf("d1")).toMatchObject({ status: "building", build_owner: "job:first" });
   });
 
   it("the document's own run takes a live build over; the build it replaced stops and writes no outcome", async () => {
