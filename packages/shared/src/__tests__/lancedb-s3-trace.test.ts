@@ -1,8 +1,16 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { DiskBlockCache } from "../lancedb-s3-cache.js";
 import { createServer, request as httpRequest, type IncomingHttpHeaders } from "node:http";
 import { afterAll, expect, it, vi } from "vitest";
 import type { ReadableSpan } from "@opentelemetry/sdk-trace-base";
 import { initializeObservability, shutdownObservability } from "../observability.js";
 import { LanceS3Stats, beginSearchReadScope, bulkDeleteKeys, classifyS3Request, lanceObjectClass, rangeSizeBucket, searchReadAttributes, withLanceSearchSpan, getLanceS3TraceStats, keyPrefix, signUpstreamRequest, startLanceS3Proxy, withLanceS3Proxy } from "../lancedb-s3-trace.js";
+
+function proxyFetch(proxy: Awaited<ReturnType<typeof startLanceS3Proxy>>, url: string, init: RequestInit = {}) {
+  return fetch(url, { ...init, headers: { "x-amz-security-token": proxy.credentials.sessionToken!, ...init.headers } });
+}
 
 vi.stubEnv("OTEL_ENABLED", "true");
 vi.stubEnv("LANGFUSE_ENABLED", "false");
@@ -80,17 +88,19 @@ it("proxies bodies and conditional statuses unchanged, emits spans and counters"
   const lines: string[] = [];
   const proxy = await startLanceS3Proxy({ endpoint: `http://127.0.0.1:${port}`, region: "us-east-1", credentials: { accessKeyId: "AK", secretAccessKey: "SK" }, stats, logIntervalMs: 0, log: (l) => lines.push(l) });
   try {
-    const put = await fetch(`${proxy.endpoint}/bkt/idx/t.lance/_versions/1.manifest`, { method: "PUT", headers: { "if-none-match": "*" }, body: "payload" });
+    const put = await proxyFetch(proxy, `${proxy.endpoint}/bkt/idx/t.lance/_versions/1.manifest`, { method: "PUT", headers: { "if-none-match": "*" }, body: "payload" });
     expect(put.status).toBe(200);
-    const conflict = await fetch(`${proxy.endpoint}/bkt/idx/t.lance/exists`, { method: "PUT", headers: { "if-none-match": "*" }, body: "x" });
+    const conflict = await proxyFetch(proxy, `${proxy.endpoint}/bkt/idx/t.lance/exists`, { method: "PUT", headers: { "if-none-match": "*" }, body: "x" });
     expect(conflict.status).toBe(412);
     expect(await conflict.text()).toBe("<Error/>");
-    const get = await fetch(`${proxy.endpoint}/bkt/idx/t.lance/data/a.lance`, { headers: { range: "bytes=0-5" } });
+    const get = await proxyFetch(proxy, `${proxy.endpoint}/bkt/idx/t.lance/data/a.lance`, { headers: { range: "bytes=0-5" } });
     expect(get.status).toBe(206);
     expect(await get.text()).toBe("answer");
     expect(seen[0].body).toBe("payload");
     expect(seen[0].headers["if-none-match"]).toBe("*");
     expect(seen[0].headers.authorization).toMatch(/Credential=AK\//);
+    expect(seen[0].headers["x-amz-security-token"]).toBeUndefined();
+    expect(JSON.stringify(spans)).not.toContain(proxy.credentials.sessionToken);
     expect(seen[0].headers.host).toBe(`127.0.0.1:${port}`);
     expect(seen[2].headers.range).toBe("bytes=0-5");
     // The failed conditional PUT is not a retry; an identical repeat after a 5xx would be.
@@ -122,8 +132,8 @@ it("flags a repeat of a failed request as a suspected retry and reports upstream
   const stats = new LanceS3Stats();
   const proxy = await startLanceS3Proxy({ endpoint: `http://127.0.0.1:${(upstream.address() as { port: number }).port}`, region: "us-east-1", credentials: { accessKeyId: "AK", secretAccessKey: "SK" }, stats, logIntervalMs: 0 });
   try {
-    expect((await fetch(`${proxy.endpoint}/b/k`)).status).toBe(503);
-    expect((await fetch(`${proxy.endpoint}/b/k`)).status).toBe(200);
+    expect((await proxyFetch(proxy, `${proxy.endpoint}/b/k`)).status).toBe(503);
+    expect((await proxyFetch(proxy, `${proxy.endpoint}/b/k`)).status).toBe(200);
     expect(stats.cumulative.retries).toBe(1);
     expect(stats.cumulative.errors).toBe(1);
   } finally {
@@ -131,7 +141,7 @@ it("flags a repeat of a failed request as a suspected retry and reports upstream
     await new Promise<void>((r) => { upstream.close(() => r()); upstream.closeAllConnections(); });
   }
   const dead = await startLanceS3Proxy({ endpoint: "http://127.0.0.1:1", region: "us-east-1", credentials: { accessKeyId: "AK", secretAccessKey: "SK" }, stats: new LanceS3Stats(), logIntervalMs: 0 });
-  try { expect((await fetch(`${dead.endpoint}/b/k`)).status).toBe(502); } finally { await dead.close(); }
+  try { expect((await proxyFetch(dead, `${dead.endpoint}/b/k`)).status).toBe(502); } finally { await dead.close(); }
 });
 
 it("is off unless LANCEDB_S3_TRACE is set and only rewrites s3 roots", async () => {
@@ -169,10 +179,10 @@ it("counts proxied requests per search by object class and flags overlapping sea
   const stats = new LanceS3Stats();
   const proxy = await startLanceS3Proxy({ endpoint: `http://127.0.0.1:${(upstream.address() as { port: number }).port}`, region: "us-east-1", credentials: { accessKeyId: "AK", secretAccessKey: "SK" }, stats, logIntervalMs: 0 });
   try {
-    const get = async (path: string, range?: string) => (await fetch(`${proxy.endpoint}/bkt/${path}`, { headers: range ? { range } : {} })).text();
+    const get = async (path: string, range?: string) => (await proxyFetch(proxy, `${proxy.endpoint}/bkt/${path}`, { headers: range ? { range } : {} })).text();
     await get("t.lance/_versions/1.manifest"); // outside any search: not counted
     const first = beginSearchReadScope();
-    await fetch(`${proxy.endpoint}/bkt?list-type=2&prefix=t.lance%2F_versions%2F`).then((r) => r.text());
+    await proxyFetch(proxy, `${proxy.endpoint}/bkt?list-type=2&prefix=t.lance%2F_versions%2F`).then((r) => r.text());
     await get("t.lance/_indices/u/index.idx", "bytes=0-2097151");
     await get("t.lance/data/a.lance", "bytes=0-99");
     const alone = first.end();
@@ -208,8 +218,8 @@ it("puts search request counts on the search span and in the summary line", asyn
   const proxy = await startLanceS3Proxy({ endpoint: `http://127.0.0.1:${(upstream.address() as { port: number }).port}`, region: "us-east-1", credentials: { accessKeyId: "AK", secretAccessKey: "SK" }, stats, logIntervalMs: 0 });
   try {
     await withLanceSearchSpan("lancedb.search", { "docslurp.dependency.operation": "search" }, async () => {
-      await fetch(`${proxy.endpoint}/bkt?list-type=2`).then((r) => r.text());
-      await fetch(`${proxy.endpoint}/bkt/t.lance/_indices/u/index.idx`, { headers: { range: "bytes=0-9" } }).then((r) => r.text());
+      await proxyFetch(proxy, `${proxy.endpoint}/bkt?list-type=2`).then((r) => r.text());
+      await proxyFetch(proxy, `${proxy.endpoint}/bkt/t.lance/_indices/u/index.idx`, { headers: { range: "bytes=0-9" } }).then((r) => r.text());
     }, stats);
     await withLanceSearchSpan("lancedb.search", {}, async () => {}, stats); // no proxied requests: nothing recorded
     await expect(withLanceSearchSpan("lancedb.search", {}, async () => { throw new Error("boom"); }, stats)).rejects.toThrow("boom");
@@ -233,15 +243,19 @@ it("serves only its own client: no secret, another bucket or root, a dot segment
   await new Promise<void>((r) => upstream.listen(0, "127.0.0.1", r));
   const stats = new LanceS3Stats();
   const proxy = await startLanceS3Proxy({ endpoint: `http://127.0.0.1:${(upstream.address() as { port: number }).port}`, region: "us-east-1", credentials: { accessKeyId: "AK", secretAccessKey: "SK" }, stats, logIntervalMs: 0, roots: ["bkt/idx"] });
-  const status = async (url: string, init?: RequestInit) => (await fetch(url, init)).status;
+  const status = async (url: string, init?: RequestInit) => (await proxyFetch(proxy, url, init)).status;
   try {
-    expect(proxy.endpoint.startsWith(`${proxy.address}/`)).toBe(true);
-    expect(proxy.endpoint.length - proxy.address.length).toBeGreaterThan(40);
+    expect(proxy.endpoint).toBe(proxy.address);
+    expect(new URL(proxy.endpoint).pathname).toBe("/");
+    expect(proxy.endpoint).not.toContain(proxy.credentials.sessionToken);
     // No secret, a wrong one, and a right-length wrong one: all refused, whatever Authorization or Host they carry.
-    for (const url of [`${proxy.address}/bkt/idx/k`, `${proxy.address}/nope/bkt/idx/k`, `${proxy.address}/${"0".repeat(64)}/bkt/idx/k`, `${proxy.endpoint}x/bkt/idx/k`]) {
-      expect(await status(url, { headers: { authorization: "AWS4-HMAC-SHA256 Credential=AK/20260101/us-east-1/s3/aws4_request" } }), url.replace(proxy.endpoint, "<endpoint>")).toBe(403);
+    for (const url of [`${proxy.address}/bkt/idx/k`, `${proxy.address}/nope/bkt/idx/k`, `${proxy.address}/${"0".repeat(64)}/bkt/idx/k`, `${proxy.address}/bkt/idx/k`]) {
+      expect((await fetch(url, { headers: { authorization: "AWS4-HMAC-SHA256 Credential=AK/20260101/us-east-1/s3/aws4_request" } })).status, url.replace(proxy.endpoint, "<endpoint>")).toBe(403);
     }
-    for (const method of ["PUT", "DELETE"]) expect(await status(`${proxy.address}/bkt/idx/k`, { method, body: method === "PUT" ? "x" : undefined })).toBe(403);
+    for (const method of ["PUT", "DELETE"]) expect(await fetch(`${proxy.address}/bkt/idx/k`, { method, body: method === "PUT" ? "x" : undefined }).then((r) => r.status)).toBe(403);
+    for (const token of ["wrong", "0".repeat(64)]) {
+      expect(await status(`${proxy.endpoint}/bkt/idx/k`, { headers: { "x-amz-security-token": token } })).toBe(403);
+    }
     // The right secret, but outside the root: another bucket (also percent-encoded), another prefix, dot segments.
     const outside = ["/other/idx/k", "/%6fther/idx/k", "/bkt/uploads/k", "/bkt/idxx/k", "/bkt/idx/../uploads/k"];
     for (const path of outside) expect(await status(`${proxy.endpoint}${path}`), path).toBe(403);
@@ -256,7 +270,7 @@ it("serves only its own client: no secret, another bucket or root, a dot segment
     // Dot segments, sent as written (fetch would resolve them first): the store must never be the one to resolve them.
     const raw = (path: string) => new Promise<number>((resolve, reject) => {
       const url = new URL(proxy.endpoint);
-      httpRequest({ host: url.hostname, port: url.port, path: `${url.pathname}${path}`, method: "GET" }, (response) => { response.resume(); resolve(response.statusCode ?? 0); }).on("error", reject).end();
+      httpRequest({ host: url.hostname, port: url.port, path, method: "GET", headers: { "x-amz-security-token": proxy.credentials.sessionToken! } }, (response) => { response.resume(); resolve(response.statusCode ?? 0); }).on("error", reject).end();
     });
     const dotted = ["/bkt/idx/../uploads/k", "/bkt/idx/%2e%2e/uploads/k", "/bkt/idx/./k", "/bkt/idx/%2E/k", "/bkt/../other/idx/k"];
     for (const path of dotted) expect(await raw(path), path).toBe(403);
@@ -265,7 +279,7 @@ it("serves only its own client: no secret, another bucket or root, a dot segment
     expect(await bulk(["idx/t.lance/data/a.lance", "uploads/secret.pdf"])).toBe(403);
     expect(await bulk(["idx/../uploads/secret.pdf"])).toBe(403);
     expect(seen).toEqual([]);
-    expect(stats.refused).toBe(6 + outside.length + bucketLevel.length + 4 + 1 + dotted.length + 2);
+    expect(stats.refused).toBe(8 + outside.length + bucketLevel.length + 4 + 1 + dotted.length + 2);
     expect(await bulk(["idx/t.lance/data/a.lance", "idx/t.lance/_indices/u/a&amp;b.idx"])).toBe(200);
     expect(bulkDeleteKeys(Buffer.from("<Delete><Object><Key>a&amp;b/&#x41;&#66;&lt;</Key></Object><Object><Key>c</Key></Object></Delete>"))).toEqual(["a&b/AB<", "c"]);
     seen.length = 0;
@@ -295,9 +309,9 @@ it("stays off behind a forward proxy that would take loopback requests, and drop
   ]) expect(await withLanceS3Proxy("s3://b/lancedb", options, { ...on, ...env }), JSON.stringify(env)).toBe(options);
   for (const env of [{ HTTP_PROXY: "http://egress:3128", NO_PROXY: "localhost, 127.0.0.1" }, { http_proxy: "http://egress:3128", no_proxy: "127.0.0.1" }, { HTTPS_PROXY: "http://egress:3128" }]) {
     const routed = await withLanceS3Proxy("s3://b/lancedb", options, { ...on, ...env });
-    expect(routed!.endpoint, JSON.stringify(env)).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/[0-9a-f]{64}$/);
+    expect(routed!.endpoint, JSON.stringify(env)).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
     expect(routed!.aws_endpoint_url_s3).toBe(routed!.endpoint);
-    expect(Object.keys(routed!).sort()).toEqual(["allow_http", "aws_access_key_id", "aws_endpoint_url_s3", "aws_secret_access_key", "endpoint", "region", "virtual_hosted_style_request"]);
+    expect(Object.keys(routed!).sort()).toEqual(["allow_http", "aws_access_key_id", "aws_endpoint_url_s3", "aws_secret_access_key", "aws_session_token", "aws_skip_signature", "endpoint", "region", "virtual_hosted_style_request"]);
   }
 });
 
@@ -316,8 +330,8 @@ it("sends to the endpoint a direct Lance connection would use, in Lance's order"
     a.seen.length = 0; b.seen.length = 0;
     // A fresh key id per case: proxies are shared per upstream and credential set.
     const routed = await withLanceS3Proxy("s3://envbkt/lancedb", { ...base, aws_access_key_id: `case-${n++}`, ...options }, { ...on, ...env });
-    expect((await fetch(`${routed!.endpoint}/envbkt/lancedb/k`)).status).toBe(200);
-    expect((await fetch(`${routed!.endpoint}/envbkt/elsewhere/k`)).status).toBe(403);
+    expect((await fetch(`${routed!.endpoint}/envbkt/lancedb/k`, { headers: { "x-amz-security-token": routed!.aws_session_token! } })).status).toBe(200);
+    expect((await fetch(`${routed!.endpoint}/envbkt/elsewhere/k`, { headers: { "x-amz-security-token": routed!.aws_session_token! } })).status).toBe(403);
     return a.seen.length ? "a" : b.seen.length ? "b" : "none";
   };
   try {
@@ -329,5 +343,34 @@ it("sends to the endpoint a direct Lance connection would use, in Lance's order"
     expect(await reaches({}, { AWS_ENDPOINT_URL: a.url })).toBe("a");
   } finally {
     await a.close(); await b.close();
+  }
+});
+
+
+it("isolates cache bytes and validation leases between upstream credential identities", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "proxy-credential-cache-"));
+  const cache = new DiskBlockCache({ dir, maxBytes: 1_000_000, blockBytes: 4096 });
+  const upstream = createServer((req, res) => {
+    req.resume();
+    if (!req.headers.authorization?.includes("Credential=allowed/")) { res.writeHead(403); res.end(); return; }
+    res.writeHead(req.method === "HEAD" ? 200 : 206, { "content-range": "bytes 0-3/4", "content-length": "4", etag: '"e"' });
+    res.end(req.method === "HEAD" ? undefined : "data");
+  });
+  await new Promise<void>((r) => upstream.listen(0, "127.0.0.1", r));
+  const config = { endpoint: `http://127.0.0.1:${(upstream.address() as { port: number }).port}`, region: "auto", logIntervalMs: 0, cache, roots: ["bkt/org-a"] };
+  const allowed = await startLanceS3Proxy({ ...config, credentials: { accessKeyId: "allowed", secretAccessKey: "a" } });
+  const denied = await startLanceS3Proxy({ ...config, credentials: { accessKeyId: "revoked", secretAccessKey: "b" } });
+  try {
+    const key = "/bkt/org-a/t.lance/data/a.lance";
+    expect(await (await proxyFetch(allowed, allowed.endpoint + key, { headers: { range: "bytes=0-3" } })).text()).toBe("data");
+    const refused = await proxyFetch(denied, denied.endpoint + key, { headers: { range: "bytes=0-3" } });
+    expect(refused.status).toBe(403);
+    expect(await refused.text()).not.toContain("data");
+    // Local auth is per proxy, not a bearer usable against every listener.
+    expect((await fetch(denied.endpoint + key, { headers: { "x-amz-security-token": allowed.credentials.sessionToken! } })).status).toBe(403);
+  } finally {
+    await allowed.close(); await denied.close();
+    await new Promise<void>((r) => { upstream.close(() => r()); upstream.closeAllConnections(); });
+    await rm(dir, { recursive: true, force: true });
   }
 });

@@ -6,8 +6,8 @@ import type { IncomingHttpHeaders } from "node:http";
 
 /**
  * Lance never rewrites `data/*.lance` or `_indices/**`: a new version adds files and `_versions/` manifests, and
- * cleanup deletes whole files. A cached byte range of an immutable object cannot go stale, so there is no TTL and no
- * invalidation protocol. Everything else (`_versions/`, `_latest`, `_transactions/`, `_deletions/`, LIST, writes,
+ * cleanup deletes whole files. Cached objects have a bounded origin-validation lease and idle-retention limit,
+ * so external deletion or access revocation cannot authorize cached responses indefinitely. Everything else (`_versions/`, `_latest`, `_transactions/`, `_deletions/`, LIST, writes,
  * multipart) is never cached.
  *
  * Objects are cached as fixed-size aligned blocks, so overlapping and adjacent ranges share entries. Each cached
@@ -81,7 +81,7 @@ interface IndexEntry { size: number; touchedAt: number }
 export interface CacheCounters { hits: number; misses: number; bypass: number; bytesServed: number; bytesFilled: number; fillRequests: number; evictions: number; evictedBytes: number }
 const newCounters = (): CacheCounters => ({ hits: 0, misses: 0, bypass: 0, bytesServed: 0, bytesFilled: 0, fillRequests: 0, evictions: 0, evictedBytes: 0 });
 
-export interface DiskBlockCacheOptions { dir: string; maxBytes: number; blockBytes?: number; maxSpanBlocks?: number; log?: (line: string) => void }
+export interface DiskBlockCacheOptions { dir: string; maxBytes: number; blockBytes?: number; maxSpanBlocks?: number; revalidateMs?: number; now?: () => number; log?: (line: string) => void }
 
 const TEMP_MARK = ".tmp-";
 /** Records the block size the directory was filled at; not a cache entry. */
@@ -104,10 +104,18 @@ export class DiskBlockCache {
   private evicting: Promise<void> | undefined;
   private warnedWriteFailure = false;
   readonly ready: Promise<void>;
+  readonly revalidateMs: number;
+  private readonly now: () => number;
+  private readonly validatedAt = new Map<string, number>();
+  private readonly leases = new Map<string, { valid: boolean }>();
+  private readonly validating = new Map<string, Promise<BufferedUpstream>>();
   private readonly log: (line: string) => void;
 
   constructor(options: DiskBlockCacheOptions) {
     this.dir = resolve(options.dir);
+    this.revalidateMs = options.revalidateMs ?? 30_000;
+    if (!Number.isFinite(this.revalidateMs) || this.revalidateMs < 0) throw new Error("cache revalidateMs must be nonnegative");
+    this.now = options.now ?? Date.now;
     this.maxBytes = Math.max(0, Math.floor(options.maxBytes));
     this.blockBytes = options.blockBytes ?? DEFAULT_BLOCK_BYTES;
     this.maxSpanBlocks = options.maxSpanBlocks ?? DEFAULT_MAX_SPAN_BLOCKS;
@@ -183,7 +191,7 @@ export class DiskBlockCache {
     if (!entry) return;
     this.index.delete(rel);
     this.index.set(rel, entry);
-    const now = Date.now();
+    const now = this.now();
     if (now - entry.touchedAt > TOUCH_INTERVAL_MS) {
       entry.touchedAt = now;
       // Persist recency so a restart rebuilds a useful LRU order. Best effort.
@@ -205,7 +213,7 @@ export class DiskBlockCache {
     }
     const previous = this.index.get(rel);
     if (previous) { this.totalBytes -= previous.size; this.index.delete(rel); }
-    this.index.set(rel, { size: data.length, touchedAt: Date.now() });
+    this.index.set(rel, { size: data.length, touchedAt: this.now() });
     this.totalBytes += data.length;
     await this.evictToLimit();
   }
@@ -264,9 +272,63 @@ export class DiskBlockCache {
 
   /** Drops every cached file of an object (after a DELETE or PUT through the proxy, or an ETag change). */
   async dropObject(id: string): Promise<void> {
+    const lease = this.leases.get(id);
+    if (lease) lease.valid = false;
+    this.leases.delete(id);
+    this.validating.delete(id);
+    this.validatedAt.delete(id);
     this.metaMemory.delete(id);
     const prefix = `${id.slice(0, 2)}/${id}/`;
     for (const rel of [...this.index.keys()]) if (rel.startsWith(prefix)) await this.remove(rel);
+  }
+
+  objectLease(id: string): { valid: boolean } {
+    let lease = this.leases.get(id);
+    if (!lease) {
+      if (this.leases.size >= 10_000) {
+        const oldest = this.leases.keys().next().value!;
+        this.leases.get(oldest)!.valid = false;
+        this.leases.delete(oldest);
+      }
+      lease = { valid: true };
+      this.leases.set(id, lease);
+    }
+    return lease;
+  }
+
+  /** A bounded existence/ETag lease. A failed check never authorizes stale bytes. */
+  needsValidation(id: string): boolean {
+    const at = this.validatedAt.get(id);
+    return at === undefined || this.now() - at >= this.revalidateMs;
+  }
+
+  markValidated(id: string): void {
+    // Keep lease bookkeeping bounded with the cache metadata, including after eviction.
+    if (this.validatedAt.size >= 10_000 && !this.validatedAt.has(id)) this.validatedAt.delete(this.validatedAt.keys().next().value!);
+    this.validatedAt.set(id, this.now());
+  }
+
+  validate(id: string, load: () => Promise<BufferedUpstream>): Promise<BufferedUpstream> {
+    const pending = this.validating.get(id);
+    if (pending) return pending;
+    const promise = load().finally(() => { if (this.validating.get(id) === promise) this.validating.delete(id); });
+    this.validating.set(id, promise);
+    return promise;
+  }
+
+  /** Purge idle objects after at most five minutes plus the proxy sweep's 30s
+   * cadence, including objects deleted by another process that nobody rereads.
+   * Active objects are checked against the origin by the shorter existence lease.
+   */
+  async expireIdleObjects(): Promise<void> {
+    await this.ready;
+    const before = this.now() - 5 * 60_000;
+    const newest = new Map<string, number>();
+    for (const [rel, entry] of this.index) {
+      const id = rel.split("/")[1]!;
+      newest.set(id, Math.max(newest.get(id) ?? -Infinity, entry.touchedAt));
+    }
+    for (const [id, touchedAt] of newest) if (touchedAt <= before) await this.dropObject(id);
   }
 
   // ---- Blocks
@@ -383,6 +445,14 @@ function passthrough(upstream: BufferedUpstream, upstreamRequests: number, bytes
  * upstream answers are returned as-is and never stored.
  */
 export async function serveCachedRequest(request: CachedRequest): Promise<CachedResult> {
+  try { return await serveCachedRequestInner(request); }
+  catch (error) {
+    if (error instanceof CacheInvalidated) return { kind: "bypass", reason: "object-invalidated" };
+    throw error;
+  }
+}
+
+async function serveCachedRequestInner(request: CachedRequest): Promise<CachedResult> {
   const { cache } = request;
   await cache.ready;
   const bypass = (reason: string): CachedResult => { cache.count("bypass"); return { kind: "bypass", reason }; };
@@ -392,20 +462,52 @@ export async function serveCachedRequest(request: CachedRequest): Promise<Cached
   if (CONDITIONAL_HEADERS.some((name) => request.headers[name] !== undefined)) return bypass("conditional");
   if (Object.keys(request.headers).some((name) => name.startsWith("x-amz-server-side-encryption-customer-"))) return bypass("sse-c");
   const id = DiskBlockCache.objectId(request.namespace, request.bucket, request.key);
+  const lease = cache.objectLease(id);
   const B = cache.blockBytes;
   let upstreamRequests = 0, bytesFilled = 0;
+
+  // External deletes and permission changes do not pass through this process.
+  // Revalidate on first use after restart and every 30s thereafter (0 = every use).
+  // On ANY origin failure drop the cached copy and return the refusal, never stale data.
+  const existing = await cache.getMeta(id);
+  if (existing && cache.needsValidation(id)) {
+    let checked: BufferedUpstream;
+    try { checked = await cache.validate(id, () => request.fetchUpstream("HEAD")); }
+    catch (error) { await cache.dropObject(id); throw error; }
+    upstreamRequests++;
+    if (checked.status !== 200) {
+      await cache.dropObject(id);
+      // A HEAD response has no XML body; don't forward its object content-length on a GET.
+      return passthrough({ ...checked, headers: { ...checked.headers, "content-length": String(checked.body.length) } }, upstreamRequests);
+    }
+    const fresh = metaFromUpstream(request, checked);
+    if (!fresh || !Number.isSafeInteger(fresh.size) || fresh.size < 0) {
+      await cache.dropObject(id);
+      return bypass("validation-metadata");
+    }
+    if (!lease.valid) return bypass("object-invalidated");
+    await cache.setMeta(id, fresh);
+    if (!lease.valid) return bypass("object-changed");
+    cache.markValidated(id);
+  }
 
   if (request.method === "HEAD") {
     const meta = await cache.getMeta(id);
     if (meta) {
+      if (!lease.valid) return bypass("object-invalidated");
       cache.count("hits");
-      return { kind: "response", status: 200, headers: responseHeaders(meta, meta.size), body: Buffer.alloc(0), outcome: "hit", bytesFromCache: 0, bytesFilled: 0, upstreamRequests: 0 };
+      return { kind: "response", status: 200, headers: responseHeaders(meta, meta.size), body: Buffer.alloc(0), outcome: "hit", bytesFromCache: 0, bytesFilled: 0, upstreamRequests };
     }
     cache.count("misses");
     const upstream = await request.fetchUpstream("HEAD");
     if (upstream.status === 200) {
       const fresh = metaFromUpstream(request, upstream);
-      if (fresh && Number.isSafeInteger(fresh.size)) await cache.setMeta(id, fresh);
+      if (fresh && Number.isSafeInteger(fresh.size)) {
+        if (!lease.valid) return bypass("object-invalidated");
+        await cache.setMeta(id, fresh);
+        if (!lease.valid) return bypass("object-changed");
+        cache.markValidated(id);
+      }
     }
     return passthrough(upstream, 1);
   }
@@ -432,7 +534,9 @@ export async function serveCachedRequest(request: CachedRequest): Promise<Cached
       const meta = metaFromUpstream(request, upstream);
       const contentRange = /^bytes (\d+)-(\d+)\/(\d+)$/.exec(headerValue(upstream.headers["content-range"]) ?? "");
       if (!meta || !contentRange || Number(contentRange[1]) !== first * B || Number(contentRange[2]) - Number(contentRange[1]) + 1 !== upstream.body.length) throw new Error("unexpected upstream range response");
+      if (!lease.valid) throw new CacheInvalidated();
       await cache.setMeta(id, meta);
+      if (!lease.valid) throw new CacheInvalidated();
       const out = new Map<number, Buffer>();
       const writes: Promise<void>[] = [];
       for (let index = first; index <= last; index++) {
@@ -444,7 +548,10 @@ export async function serveCachedRequest(request: CachedRequest): Promise<Cached
         out.set(index, data);
         writes.push(cache.writeBlock(id, index, Buffer.from(data)));
       }
-      await Promise.all(writes);
+      try { await Promise.all(writes); }
+      finally { if (!lease.valid) await cache.dropObject(id); }
+      if (!lease.valid) throw new CacheInvalidated();
+      cache.markValidated(id);
       bytesFilled += upstream.body.length;
       cache.count("bytesFilled", upstream.body.length);
       return out;
@@ -505,7 +612,8 @@ export async function serveCachedRequest(request: CachedRequest): Promise<Cached
       for (const [index, data] of filled.blocks) have.set(index, data);
     }
     // An ETag change during a fill drops the old object: re-read the metadata so headers match the bytes served.
-    const current = (await cache.getMeta(id)) ?? known;
+    const current = await cache.getMeta(id);
+    if (!current || !lease.valid) return bypass("object-invalidated");
     if (current.size !== known.size || current.etag !== known.etag) return bypass("object-changed");
     const parts: Buffer[] = [];
     for (let index = first; index <= last; index++) {
@@ -515,8 +623,9 @@ export async function serveCachedRequest(request: CachedRequest): Promise<Cached
       const { from, to } = slice(index);
       parts.push(data.subarray(from, to));
     }
+    if (!lease.valid) return bypass("object-invalidated");
     const body = Buffer.concat(parts);
-    const hit = upstreamRequests === 0;
+    const hit = bytesFilled === 0;
     cache.count(hit ? "hits" : "misses");
     if (hit) cache.count("bytesServed", body.length);
     const status = parsed ? 206 : 200;
@@ -526,6 +635,7 @@ export async function serveCachedRequest(request: CachedRequest): Promise<Cached
 }
 
 class UpstreamFailure extends Error {}
+class CacheInvalidated extends Error {}
 
 function splitRun(start: number, end: number, maxBlocks: number): Array<[number, number]> {
   const out: Array<[number, number]> = [];
@@ -541,7 +651,7 @@ export async function invalidateCachedObject(cache: DiskBlockCache, namespace: s
 
 // ---- Configuration ------------------------------------------------------------------------------------------------
 
-export interface LanceS3CacheConfig { dir: string; maxBytes: number; blockBytes: number }
+export interface LanceS3CacheConfig { dir: string; maxBytes: number; blockBytes: number; revalidateMs?: number }
 
 /** LANCEDB_S3_CACHE_DIR enables the cache; LANCEDB_S3_CACHE_MAX_GB (default 10) bounds it; LANCEDB_S3_CACHE_BLOCK_KB (default 1024) sets the block size. */
 export function lanceS3CacheConfig(env: Record<string, string | undefined> = process.env): LanceS3CacheConfig | undefined {
@@ -550,7 +660,9 @@ export function lanceS3CacheConfig(env: Record<string, string | undefined> = pro
   const gb = Number(env.LANCEDB_S3_CACHE_MAX_GB?.trim() || 10);
   const blockKb = Number(env.LANCEDB_S3_CACHE_BLOCK_KB?.trim() || DEFAULT_BLOCK_BYTES / 1024);
   if (!Number.isFinite(gb) || gb <= 0) { console.warn(`[lancedb-s3] LANCEDB_S3_CACHE_MAX_GB=${env.LANCEDB_S3_CACHE_MAX_GB} is not a positive number; cache disabled`); return undefined; }
-  return { dir, maxBytes: Math.floor(gb * 1024 ** 3), blockBytes: Number.isFinite(blockKb) && blockKb >= 4 ? Math.floor(blockKb * 1024) : DEFAULT_BLOCK_BYTES };
+  const revalidateSeconds = Number(env.LANCEDB_S3_CACHE_REVALIDATE_SECONDS?.trim() || 30);
+  if (!Number.isFinite(revalidateSeconds) || revalidateSeconds < 0 || revalidateSeconds > 30) throw new Error("LANCEDB_S3_CACHE_REVALIDATE_SECONDS must be between 0 and 30");
+  return { dir, revalidateMs: revalidateSeconds * 1000, maxBytes: Math.floor(gb * 1024 ** 3), blockBytes: Number.isFinite(blockKb) && blockKb >= 4 ? Math.floor(blockKb * 1024) : DEFAULT_BLOCK_BYTES };
 }
 
 const caches = new Map<string, DiskBlockCache>();
@@ -558,7 +670,7 @@ const caches = new Map<string, DiskBlockCache>();
 export function sharedDiskBlockCache(config: LanceS3CacheConfig): DiskBlockCache {
   const dir = resolve(config.dir);
   let cache = caches.get(dir);
-  if (!cache) { cache = new DiskBlockCache({ dir, maxBytes: config.maxBytes, blockBytes: config.blockBytes }); caches.set(dir, cache); }
+  if (!cache) { cache = new DiskBlockCache({ dir, maxBytes: config.maxBytes, blockBytes: config.blockBytes, revalidateMs: config.revalidateMs }); caches.set(dir, cache); }
   return cache;
 }
 export async function rmCacheDirForTests(dir: string): Promise<void> { caches.delete(resolve(dir)); await rm(dir, { recursive: true, force: true }); }

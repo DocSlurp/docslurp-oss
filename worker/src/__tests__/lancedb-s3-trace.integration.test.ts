@@ -18,7 +18,7 @@ initializeObservability({ spanProcessors: [{ onStart() {}, onEnd(span) { spans.p
 const bucket = `lance-trace-${Date.now()}`;
 let proxy: LanceS3Proxy;
 let direct: Record<string, string>;
-const open = (): Promise<Connection> => connect(`s3://${bucket}/idx`, { storageOptions: lanceS3ProxyStorageOptions(direct, proxy.endpoint) });
+const open = (): Promise<Connection> => connect(`s3://${bucket}/idx`, { storageOptions: lanceS3ProxyStorageOptions(direct, proxy.endpoint, proxy.credentials) });
 
 beforeAll(async () => {
   if (!reachable) return;
@@ -32,7 +32,7 @@ afterAll(async () => { await proxy?.close(); await shutdownObservability(); vi.u
 it.skipIf(!reachable)("withLanceS3Proxy rewrites storage options to the local proxy", async () => {
   const rewritten = await withLanceS3Proxy(`s3://${bucket}/idx`, { ...direct, endpoint }, { LANCEDB_S3_TRACE: "1" });
   expect(rewritten).toMatchObject({ allow_http: "true", virtual_hosted_style_request: "false" });
-  expect(rewritten!.endpoint).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/[0-9a-f]{64}$/);
+  expect(rewritten!.endpoint).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
   expect(rewritten!.endpoint).not.toBe(endpoint);
   // Everything Lance does on a table fits inside the root the proxy allows for this URI.
   const db = await connect(`s3://${bucket}/idx`, { storageOptions: rewritten });

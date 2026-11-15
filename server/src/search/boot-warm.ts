@@ -7,7 +7,7 @@ import { warmLanceDbSearch } from "./lancedb.js";
  * search of a table: loading the LanceDB library, the first storage connection, opening the
  * table and loading its vector and full-text indexes (seconds, even from the local disk
  * cache). Every cold search seen in production came within minutes of a process start, so
- * the process does that work itself, in the background, for the projects searched most in
+ * the process does that work itself, before startup completes, for the projects searched most in
  * the last week. It opens tables and loads indexes only: no query runs and nothing is returned.
  *
  * SEARCH_BOOT_WARM_PROJECTS: how many projects (default 5, at most 50; 0 turns it off, as
@@ -125,4 +125,22 @@ export async function warmRecentSearchIndexes(deps: {
   const ms = Math.round(performance.now() - started);
   if (limit > 0) log(`[search] boot warm projects=${projects} limit=${limit} ms=${ms}`);
   return { projects, ms };
+}
+
+
+/** Startup never announces readiness after a timed-out warm-up. Native loads cannot
+ * be cancelled; keep the one attempt shared so health probes cannot spawn retries.
+ * Operators can disable warming explicitly with SEARCH_BOOT_WARM_PROJECTS=0.
+ */
+export function createBootWarmGate(warm: () => Promise<unknown>, timeoutMs = 30_000): () => Promise<void> {
+  let attempt: Promise<void> | undefined;
+  return () => attempt ??= (async () => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        warm(),
+        new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("Search boot warm-up exceeded readiness deadline")), timeoutMs); }),
+      ]);
+    } finally { clearTimeout(timer); }
+  })();
 }

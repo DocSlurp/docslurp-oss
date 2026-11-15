@@ -456,7 +456,7 @@ export function filterLanceDbRowsByDocumentIds(
  */
 const INDEX_WARM_CONCURRENCY = 2;
 const INDEX_WARM_RETRY_MS = 60_000;
-interface IndexWarmup { signature: string; done: Promise<boolean>; settled: boolean; failedAt?: number }
+interface IndexWarmup { signature: string; done: Promise<boolean>; settled: boolean; loading?: boolean; failedAt?: number }
 const indexWarmups = new WeakMap<lancedb.Table, IndexWarmup>();
 let indexWarmActive = 0;
 const indexWarmQueue: Array<() => void> = [];
@@ -483,7 +483,7 @@ async function withIndexWarmSlot<T>(run: () => Promise<T>): Promise<T> {
 async function warmSearchIndexes(table: lancedb.Table, uri: string, capabilities: LanceTableCapabilities): Promise<void> {
   if (process.env.SEARCH_LANCE_WARM_INDEX === "0" || capabilities.searchIndexes.length === 0) return;
   let warmup = indexWarmups.get(table);
-  const retry = warmup?.failedAt !== undefined && Date.now() - warmup.failedAt >= INDEX_WARM_RETRY_MS;
+  const retry = !warmup?.loading && warmup?.failedAt !== undefined && Date.now() - warmup.failedAt >= INDEX_WARM_RETRY_MS;
   if (warmup && warmup.signature === capabilities.searchIndexSignature && !retry) {
     if (warmup.settled) {
       countSearchEvent(warmup.failedAt === undefined ? "lanceIndexWarm" : "lanceIndexWarmFailed");
@@ -493,11 +493,19 @@ async function warmSearchIndexes(table: lancedb.Table, uri: string, capabilities
     const entry: IndexWarmup = {
       signature: capabilities.searchIndexSignature,
       settled: false,
-      // A stalled object-store read must not hold one of the two slots forever: past the limit it counts as failed.
-      done: withIndexWarmSlot(() => Promise.race([
-        prewarmSearchIndexes(table, capabilities.searchIndexes, lanceNamespace(uri)).then((result) => result.errors.length === 0, () => false),
-        new Promise<boolean>((resolve) => { setTimeout(() => resolve(false), INDEX_WARM_TIMEOUT_MS).unref?.(); }),
-      ])),
+      loading: true,
+      // The caller has a deadline, but native loading cannot be cancelled. The
+      // slot belongs to the actual load until it ends, never to the timeout.
+      done: (async () => {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        let expired = false;
+        try {
+          return await Promise.race([
+            withIndexWarmSlot(() => expired ? Promise.resolve(false) : prewarmSearchIndexes(table, capabilities.searchIndexes, lanceNamespace(uri)).then((result) => result.errors.length === 0 && !result.skipped, () => false)).finally(() => { entry.loading = false; }),
+            new Promise<boolean>((resolve) => { timer = setTimeout(() => { expired = true; resolve(false); }, INDEX_WARM_TIMEOUT_MS); timer.unref?.(); }),
+          ]);
+        } finally { clearTimeout(timer); }
+      })(),
     };
     void entry.done.then((ok) => {
       entry.settled = true;
