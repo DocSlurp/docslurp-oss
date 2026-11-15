@@ -19,6 +19,7 @@ import {
   normalizePipelineFeatures,
   organizationRoleSchema,
   pipelineFeaturesSchema,
+  pipelineFeatureOverridesSchema,
   pipelineRunStageSchema,
   runStatusSchema,
   projectMemberRoleSchema,
@@ -809,7 +810,7 @@ export type Reranker = (typeof RERANKERS)[number];
 export const publicUpdateProjectSearchSettingsSchema = updateProjectSearchSettingsSchema.extend({
   retrievalDefaults: updateProjectSearchRetrievalDefaultsSchema.omit({ rerankProvider: true, rerankModel: true })
     .extend({ reranker: z.enum(RERANKERS).optional() }).strict().optional(),
-}).transform(({ retrievalDefaults, ...rest }): UpdateProjectSearchSettingsInput => {
+}).strict().transform(({ retrievalDefaults, ...rest }): UpdateProjectSearchSettingsInput => {
   if (!retrievalDefaults) return rest;
   const { reranker, ...defaults } = retrievalDefaults;
   return {
@@ -989,6 +990,16 @@ export const updateProjectSchema = z.object({
   allowChinaProviders: z.boolean().optional(),
 });
 export type UpdateProjectInput = z.infer<typeof updateProjectSchema>;
+
+/** A sparse, revision-preconditioned publication; presets never confer authority. */
+export const publishProjectSettingsSchema = z.object({
+  requestId: z.string().uuid(),
+  expected: z.object({ project: z.string().min(1).max(100), search: z.string().min(1).max(100) }).strict(),
+  project: updateProjectSchema.omit({ pipeline: true }).extend({ pipeline: pipelineFeatureOverridesSchema.optional() }).strict(),
+  search: publicUpdateProjectSearchSettingsSchema,
+}).strict();
+export type PublishProjectSettingsInput = z.infer<typeof publishProjectSettingsSchema>;
+
 
 type TemplatePipelineOverrides = Omit<
   Partial<import("./pipeline.js").PipelineFeatures>,

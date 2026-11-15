@@ -732,7 +732,6 @@ async function applyPlannedChange(args: {
       precomputed: { current: project, pipeline: plan.nextPipeline },
     });
     if (!saved) return null;
-    await args.afterSave?.(tx as unknown as typeof sql);
     if (plan.recordsIndexChange) {
       // Documents indexed before hashes were recorded belong to the config that was current until now.
       await tx`
@@ -751,14 +750,20 @@ async function applyPlannedChange(args: {
         where id = ${project.id}
       `;
     }
-    if (!plan.willReindex) return { runs: null as ReindexRunResult | null, cancelled };
+    if (!plan.willReindex) {
+      await args.afterSave?.(tx as unknown as typeof sql);
+      return { runs: null as ReindexRunResult | null, cancelled };
+    }
     // Re-read the targets under the lock: another PATCH or upload may have changed them since planning.
     const targets = await loadTargets(tx, project.id, {
       hashNot: plan.reindex === "required" && plan.hashChanged ? afterHash : null,
       ignoreReindexRuns: supersedesInFlight,
     });
     if (args.expectedTargetSignature !== undefined && reindexTargetSignature(targets) !== args.expectedTargetSignature) throw new ConfigConflictError();
-    if (targets.length === 0) return { runs: null as ReindexRunResult | null, cancelled };
+    if (targets.length === 0) {
+      await args.afterSave?.(tx as unknown as typeof sql);
+      return { runs: null as ReindexRunResult | null, cancelled };
+    }
     // Documents that appeared since planning re-run in full (their reusability was not checked).
     const split: ReusableSplit = { partial: [], full: [] };
     const planned = new Map<string, { stages: PipelineRunStage[]; docs: ReindexTarget[] }>();
@@ -774,6 +779,7 @@ async function applyPlannedChange(args: {
       tx, project: { ...project, pipeline: plan.nextPipeline }, pipeline: stampRunChartExport({ ...plan.nextPipeline, speedBoost: plan.input.speedBoost === true }, plan.origin), userId,
       meta: jobMeta, blockedReason, reusable: split, origin: plan.origin,
     });
+    await args.afterSave?.(tx as unknown as typeof sql);
     return { runs, cancelled };
   });
   if (result === STALE_PLAN) return STALE_PLAN;

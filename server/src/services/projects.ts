@@ -682,13 +682,13 @@ export async function ensurePersonalDefaultProject(userId: string): Promise<void
 }
 
 /** Read-only: automatic titles advance after ingest (project-naming.ts sweepProjectAutoTitles), never on a read. */
-export async function getProject(projectId: string, userId: string): Promise<ProjectRecord | null> {
-  const access = await getProjectAccess(projectId, userId);
+export async function getProject(projectId: string, userId: string, client: typeof sql = sql): Promise<ProjectRecord | null> {
+  const access = await getProjectAccess(projectId, userId, client);
   if (!access) {
     return null;
   }
 
-  return await readProject(projectId, access.orgId);
+  return await readProject(projectId, access.orgId, client);
 }
 
 /**
@@ -700,8 +700,8 @@ export async function getAuthorizedProjectRecord(projectId: string, orgId: strin
   return await readProject(projectId, orgId);
 }
 
-async function readProject(projectId: string, orgId: string): Promise<ProjectRecord | null> {
-  const [row] = await sql<ProjectRow[]>`
+async function readProject(projectId: string, orgId: string, client: typeof sql = sql): Promise<ProjectRecord | null> {
+  const [row] = await client<ProjectRow[]>`
     select
       w.id,
       w.org_id,

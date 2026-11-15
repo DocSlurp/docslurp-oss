@@ -7,6 +7,7 @@ import { startMigratedPostgres } from "@docslurp/worker/testing";
 let stop: () => Promise<void>;
 let sql: postgres.Sql<Record<string, unknown>>;
 let change: typeof import("../services/config-change.js");
+let failPublicationSearch = false;
 let failLease: "none" | "throw-after-grant" | "refuse" = "none";
 beforeAll(async () => {
   // A real migrated database is required for concurrent transactions. PGlite's
@@ -26,6 +27,13 @@ beforeAll(async () => {
     } };
   });
   await sql`insert into "user"(id, name, email) values ('u1', 'A', 'config-admission@example.com') on conflict (id) do nothing`;
+  vi.doMock("../services/search-controls.js", async () => {
+    const actual = await vi.importActual<typeof import("../services/search-controls.js")>("../services/search-controls.js");
+    return { ...actual, upsertProjectSearchSettings: async (...args: Parameters<typeof actual.upsertProjectSearchSettings>) => {
+      await actual.upsertProjectSearchSettings(...args);
+      if (failPublicationSearch) throw new Error("injected publication search failure after job admission");
+    } };
+  });
   change = await import("../services/config-change.js");
 }, 120_000);
 afterAll(async () => { await sql?.end(); await stop?.(); });
@@ -208,4 +216,24 @@ it.each(["organization", "project"])("refuses reindex with measured pages beyond
   else await sql`update projects set monthly_budget_cents=1 where id='w'`;
   await expect(patch(embeddingChange())).rejects.toThrow();
   expect(await sql`select id from project_runs where kind='reindex'`).toHaveLength(0);
+});
+
+it("atomic settings publication rolls back its search write and receipt when search persistence fails after job admission", async () => {
+  await seed({ credits: 10000, vectorized: true });
+  vi.stubEnv("WORKER_CREDIT_LEASES", "on");
+  const publications = await import("../services/settings-publication.js");
+  const actor: import("../lib/request-actor.js").RequestActor = { type: "session", userId: "u1", sessionId: "publication-test", user: { id: "u1", name: "A", email: "config-admission@example.com" } };
+  const before = await publications.readSettingsSnapshot(actor, "w");
+  const beforeRuns = await sql`select id, monthly_reservation_cents from project_runs where project_id='w' order by id`;
+  const beforeLeases = await sql`select * from credit_leases where org_id='o1'`;
+  failPublicationSearch = true;
+  try { await expect(publications.publishSettings({ actor, projectId: "w", input: {
+    requestId: "9f92442a-e214-4b59-a293-fa85be45b317", expected: before.revision,
+    project: { pipeline: { embedding: { profile: "fastest-local" } }, speedBoost: true, apply: "reindex" },
+    search: { chat: { enabled: false } },
+  } })).rejects.toThrow("injected publication search failure after job admission"); } finally { failPublicationSearch = false; }
+  expect(await publications.readSettingsSnapshot(actor, "w")).toEqual(before);
+  expect(await sql`select id, monthly_reservation_cents from project_runs where project_id='w' order by id`).toEqual(beforeRuns);
+  expect(await sql`select * from credit_leases where org_id='o1'`).toEqual(beforeLeases);
+  expect(await sql`select count(*)::int n from project_settings_publications where project_id='w'`).toEqual([{ n: 0 }]);
 });
