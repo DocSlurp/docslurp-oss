@@ -299,6 +299,39 @@ describe("authorization", () => {
     expect(await sql`select 1 from summary_tree_jobs`).toHaveLength(1);
   });
 
+  it("gives a member or viewer without edit rights the status, and 403 for estimate, start and cancel", async () => {
+    // Signed-in users of the project's own organization (no API key): the real services and their access check.
+    await sql`insert into "user"(id, name, email) values ('m1', 'M', 'tree-m@example.com'), ('v1', 'V', 'tree-v@example.com') on conflict (id) do nothing`;
+    await sql`insert into org_memberships(org_id, user_id, role) values ('o1', 'm1', 'member'), ('o1', 'v1', 'member') on conflict do nothing`;
+    await sql`insert into project_members(project_id, user_id, role) values ('w', 'm1', 'viewer'), ('w', 'v1', 'viewer')`;
+    const jobId = await startedJob();
+    for (const userId of ["m1", "v1"]) {
+      const app = appFor(userId);
+      // Reading is allowed: they are members of the project.
+      expect((await app.request("/v1/projects/w/summary-tree/backfill")).status, userId).toBe(200);
+      expect((await app.request(`/v1/projects/w/summary-tree/backfill/${jobId}`)).status).toBe(200);
+      // Everything that spends or stops spending is the editors'.
+      for (const response of [
+        await post(app, "/v1/projects/w/summary-tree/backfill/estimate"),
+        await post(app, "/v1/projects/w/summary-tree/backfill", { maxCostCents: 500 }),
+        await post(app, `/v1/projects/w/summary-tree/backfill/${jobId}/cancel`),
+      ]) {
+        expect(response.status, userId).toBe(403);
+        expect(await response.json()).toMatchObject({ error: { code: "editor_required" } });
+      }
+    }
+    await unchanged(jobId);
+    expect(await sql`select 1 from summary_tree_jobs`).toHaveLength(1);
+    // The service itself, without a route in front of it.
+    const jobs = await import("../services/project-summary-tree-jobs.js");
+    await expect(jobs.startSummaryTreeBackfill("w", "v1", { maxCostCents: 500 })).rejects.toMatchObject({ status: 403 });
+    await expect(jobs.estimateSummaryTreeBackfill("w", "v1")).rejects.toMatchObject({ status: 403 });
+    await expect(jobs.cancelSummaryTreeJob("w", "v1", jobId)).rejects.toMatchObject({ status: 403 });
+    await unchanged(jobId);
+    // No spend admission was asked on their behalf.
+    expect(spend.calls.filter(([, project]) => project === "w")).toHaveLength(1);
+  });
+
   it("lets only a managing server key start, estimate and cancel; other keys read or get nothing", async () => {
     const jobId = await startedJob();
     await sql`delete from summary_tree_jobs`;

@@ -183,6 +183,30 @@ describe("summary tree setting", () => {
     expect((await stored()).tree ?? { enabled: false }).toEqual({ enabled: false });
   });
 
+  it("is readable but not writable by an organization member or project viewer without edit rights", async () => {
+    // The real service and its real access check: no route, no mock. A plain organization member (the project is
+    // shared with the organization), a project viewer, and for contrast a project editor.
+    await sql`insert into "user"(id, name, email) values ('member', 'M', 'member@example.com'), ('viewer', 'V', 'viewer@example.com'), ('editor', 'E', 'editor@example.com')
+      on conflict (id) do nothing`;
+    await sql`insert into org_memberships(org_id, user_id, role) values ('org', 'member', 'member'), ('org', 'viewer', 'member'), ('org', 'editor', 'member')
+      on conflict do nothing`;
+    await sql`insert into project_members(project_id, user_id, role) values ('ws', 'member', 'viewer'), ('ws', 'viewer', 'viewer'), ('ws', 'editor', 'editor')`;
+    for (const userId of ["member", "viewer"]) {
+      // They can see the project and its tree state.
+      expect(await tree.getProjectSummaryTree("ws", userId, ON)).toMatchObject({ enabled: false });
+      // Turning it on is refused with 403 and stores nothing.
+      await expect(tree.updateProjectSummaryTree("ws", userId, { enabled: true }, ON)).rejects.toMatchObject({ status: 403, code: "editor_required" });
+      expect((await stored()).tree ?? { enabled: false }).toEqual({ enabled: false });
+    }
+    // An editor may; and then a viewer cannot turn it off either.
+    expect(await tree.updateProjectSummaryTree("ws", "editor", { enabled: true }, ON)).toMatchObject({ enabled: true });
+    for (const userId of ["member", "viewer"]) {
+      await expect(tree.updateProjectSummaryTree("ws", userId, { enabled: false }, ON)).rejects.toMatchObject({ status: 403, code: "editor_required" });
+      await expect(tree.updateProjectSummaryTree("ws", userId, { enabled: false }, OFF)).rejects.toMatchObject({ status: 403 });
+    }
+    expect((await stored()).tree).toEqual({ enabled: true });
+  });
+
   it("is not readable or writable by a user outside the project's organization", async () => {
     await expect(tree.getProjectSummaryTree("ws", "stranger", ON)).rejects.toMatchObject({ status: 404 });
     await expect(tree.updateProjectSummaryTree("ws", "stranger", { enabled: true }, ON)).rejects.toMatchObject({ status: 404 });
