@@ -1,3 +1,4 @@
+import { lockProjectConfigurationWrite } from "./project-write-lock.js";
 import { assertPolicyTransitionAllowed } from "./policy-transition.js";
 import { HTTPException } from "hono/http-exception";
 import { assertTenantModelEndpointAllowed } from "@docslurp/shared";
@@ -1125,7 +1126,7 @@ export async function updateProject(
     // Resolution/validation stays outside the transaction; a stale resolution is refused rather than replayed.
     return await sql.begin(async tx => {
       const client = tx as unknown as typeof sql;
-      await client`select pg_advisory_xact_lock(hashtextextended(${`config-change:${projectId}`}, 0))`;
+      await lockProjectConfigurationWrite(client, projectId, current.orgId);
       const [revision] = await client<{ version: string }[]>`select updated_at::text as version from projects where id=${projectId}`;
       if (revision?.version !== current.updatedAt) throw new ProjectSettingsStaleError();
       const access = await getProjectAccess(projectId, userId, client);
@@ -1135,6 +1136,8 @@ export async function updateProject(
     }) as ProjectRecord | null;
   }
 
+  // Also covers internal transaction callers; acquire before any project write, not only on tightening.
+  await lockProjectConfigurationWrite(options.client, projectId, current.orgId);
   await assertPolicyTransitionAllowed(options.client, current, pipeline);
 
   const nextSlug = parsed.slug === undefined ? current.slug : parsed.slug.toLowerCase();

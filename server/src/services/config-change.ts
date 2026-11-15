@@ -1,3 +1,4 @@
+import { lockProjectConfigurationWrite } from "./project-write-lock.js";
 import { buildRunProcessingPreview } from "./run-processing-preview.js";
 import { randomUUID } from "node:crypto";
 
@@ -53,8 +54,9 @@ import { loadProjectSummaryTree, withProjectSummaryTree } from "./run-summary-tr
 /**
  * Config-change jobs (spec 6.2). A project PATCH is classified by `analyzePipelineChange`; changes that
  * make the existing index inconsistent ("reindex-required") save and automatically queue a minimal re-index,
- * "reindex-recommended" changes re-index on request. The change is never rejected: if spend admission blocks
+ * "reindex-recommended" changes re-index on request. If spend admission blocks
  * the job, the config is still saved and the runs wait as `blocked` until the org can spend again.
+ * Unsafe policy transitions over retained data remain an explicit refusal, not an ordinary rebuild.
  */
 
 type Tx = Parameters<Parameters<typeof sql.begin>[1]>[0];
@@ -665,7 +667,7 @@ async function applyPlannedChange(args: {
   if (deferredProfilesEnabled() && (plan.nextPipeline.indexingMode !== project.pipeline.indexingMode || (plan.nextPipeline.indexingMode === "visual" && plan.nextPipeline.quality === "fast"))) {
     await validateModeSwitch({ current: project, nextPipeline: plan.nextPipeline });
   }
-  const lock = (tx: Tx) => tx`select pg_advisory_xact_lock(hashtextextended(${`config-change:${project.id}`}, 0))`;
+  const lock = (tx: Tx) => lockProjectConfigurationWrite(tx as unknown as typeof sql, project.id, project.orgId);
   if (!plan.willReindex && !plan.recordsIndexChange) {
     const editAccess = await getProjectAccess(project.id, userId);
     if (!editAccess || !canEditProject(editAccess, userId)) return null;

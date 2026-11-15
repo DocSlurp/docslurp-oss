@@ -8,6 +8,8 @@ let sql: postgres.Sql;
 let stop: () => Promise<void>;
 let service: typeof import("../services/settings-publication.js");
 let failSearch = false;
+let beforeConfigurationLock: ((client: typeof sql) => Promise<void>) | undefined;
+let afterProjectWrite: ((client: typeof sql) => Promise<void>) | undefined;
 let policyBarrier: ((phase: 'before' | 'after', client: typeof sql) => Promise<void>) | undefined;
 beforeAll(async () => {
   const db = process.env.TEST_DATABASE_URL ? null : await startMigratedPostgres(); stop = db?.stop ?? (async () => {});
@@ -27,6 +29,21 @@ beforeAll(async () => {
       await policyBarrier?.('before', args[0]);
       await actual.assertPolicyTransitionAllowed(...args);
       await policyBarrier?.('after', args[0]);
+    } };
+  });
+  vi.doMock("../services/project-write-lock.js", async () => {
+    const actual = await vi.importActual<typeof import("../services/project-write-lock.js")>("../services/project-write-lock.js");
+    return { ...actual, lockProjectConfigurationWrite: async (...args: Parameters<typeof actual.lockProjectConfigurationWrite>) => {
+      await beforeConfigurationLock?.(args[0]);
+      return actual.lockProjectConfigurationWrite(...args);
+    } };
+  });
+  vi.doMock("../services/projects.js", async () => {
+    const actual = await vi.importActual<typeof import("../services/projects.js")>("../services/projects.js");
+    return { ...actual, updateProject: async (...args: Parameters<typeof actual.updateProject>) => {
+      const result = await actual.updateProject(...args);
+      if (args[3]?.client) await afterProjectWrite?.(args[3].client);
+      return result;
     } };
   });
   service = await import("../services/settings-publication.js");
@@ -192,14 +209,14 @@ native('native: arrival commits first, then publication rechecks and refuses wit
     inserted.release(); await releaseArrival.promise;
   });
   await inserted.promise;
-  policyBarrier = async (phase, client) => {
-    if (phase === 'before') { const [row] = await client`select pg_backend_pid() pid`; publicationPid = row!.pid; checking.release(); }
+  beforeConfigurationLock = async client => {
+    const [row] = await client`select pg_backend_pid() pid`; publicationPid = row!.pid; checking.release();
   };
   const publication = service.publishSettings({ ...f, input: { ...input(f), project: { pipeline: { piiPolicy: { enabled: true, action: 'redact_artifacts' } } } } });
   const refused = expect(publication).rejects.toMatchObject({ status: 409, code: 'policy_publication_unavailable' });
   try { await checking.promise; await waitForLock(publicationPid); }
   finally { releaseArrival.release(); }
-  try { await arrival; await refused; } finally { policyBarrier = undefined; }
+  try { await arrival; await refused; } finally { beforeConfigurationLock = undefined; }
   expect((await service.readSettingsSnapshot(f.actor, f.projectId)).revision).toEqual(f.snapshot.revision);
   expect(await sql`select count(*)::int n from project_settings_publications where project_id=${f.projectId}`).toEqual([{ n: 0 }]);
 });
@@ -253,3 +270,64 @@ native('native: concurrent conflicting request IDs produce one commit and one co
   expect(rejected.reason).toMatchObject({ status: 409, code: 'settings_idempotency_conflict' });
   expect(await sql`select count(*)::int n from project_settings_publications where project_id=${f.projectId}`).toEqual([{ n: 1 }]);
 });
+
+native.each([false, true])('native: ordinary rebuild and active intake obey spend-before-project ordering (search failure: %s)', async injectedFailure => {
+  const f = await fixture(), sourceId = randomUUID(), docId = randomUUID(), intakeId = randomUUID();
+  await sql`insert into project_runs(id,org_id,user_id,project_id,kind,status,stage,pipeline) values (${sourceId},${f.projectId},${f.actor.userId},${f.projectId},'upload','completed','index',${sql.json(JSON.parse(JSON.stringify(f.snapshot.project.pipeline)))})`;
+  await sql`insert into documents(id,org_id,user_id,project_id,run_id,filename,mime_type,source_key,status,page_count,canonical_id) values (${docId},${f.projectId},${f.actor.userId},${f.projectId},${sourceId},'synthetic.txt','text/plain','synthetic','completed',2,${docId})`;
+  await sql`insert into vector_indexes(id,document_id,backend,bucket,path,embedding_model,dimension) values (${randomUUID()},${docId},'lancedb','test','synthetic','test',384)`;
+  f.snapshot = await service.readSettingsSnapshot(f.actor, f.projectId);
+  const persistedBefore = await sql`select pipeline,index_configs,updated_at::text,monthly_budget_cents from projects where id=${f.projectId}`;
+  const body = { ...input(f), project: { pipeline: { chunkOverlap: !f.snapshot.project.pipeline.chunkOverlap }, apply: 'reindex' } };
+  const updated = barrier(), releasePublication = barrier(), attempting = barrier();
+  let publicationPid = 0, intakePid = 0;
+  afterProjectWrite = async client => {
+    const [row] = await client`select pg_backend_pid() pid`; publicationPid = row!.pid;
+    updated.release(); await releasePublication.promise;
+  };
+  failSearch = injectedFailure;
+  const publication = service.publishSettings({ ...f, input: body });
+  // Attach handlers before either transaction may reject, including the pre-fix 40P01 reproduction.
+  const publicationResult = publication.then(value => ({ ok: true as const, value }), error => ({ ok: false as const, error }));
+  await updated.promise;
+  const intake = sql.begin(async tx => {
+    const [row] = await tx`select pg_backend_pid() pid`; intakePid = row!.pid; attempting.release();
+    await tx`insert into project_runs(id,org_id,user_id,project_id,kind,status,stage,pipeline,monthly_reservation_cents) values (${intakeId},${f.projectId},${f.actor.userId},${f.projectId},'upload','queued','queued',${tx.json(JSON.parse(JSON.stringify(f.snapshot.project.pipeline)))},5)`;
+  });
+  const intakeResult = intake.then(() => ({ ok: true as const }), error => ({ ok: false as const, error }));
+  let waiting: { wait_event: string } | undefined;
+  try {
+    await attempting.promise; await waitForLock(intakePid);
+    [waiting] = await sql<{ wait_event: string }[]>`select wait_event from pg_stat_activity where pid=${intakePid} and ${publicationPid}=any(pg_blocking_pids(pid))`;
+  } finally { releasePublication.release(); }
+  const [published, admitted] = await Promise.all([publicationResult, intakeResult]);
+  afterProjectWrite = undefined; failSearch = false;
+  expect([published, admitted].filter(r => !r.ok).map(r => r.ok ? null : r.error.code)).not.toContain('40P01');
+  expect(waiting?.wait_event).toBe('advisory');
+  expect(admitted.ok).toBe(true);
+  const [receipt] = await sql`select count(*)::int n from project_settings_publications where project_id=${f.projectId}`;
+  const active = await sql<{ id: string; monthly_reservation_cents: string }[]>`select id,monthly_reservation_cents::text from project_runs where project_id=${f.projectId} and status in ('queued','processing') order by id`;
+  const [capacity] = await sql`select coalesce(sum(cents),0)::text cents from pending_monthly_capacity where project_id=${f.projectId}`;
+  expect(Number(capacity!.cents)).toBe(active.reduce((sum, row) => sum + Number(row.monthly_reservation_cents), 0));
+  const [balance] = await sql`select credit_balance_cents::text cents from organizations where id=${f.projectId}`;
+  expect(Number(balance!.cents)).toBe(10000);
+  if (injectedFailure) {
+    expect(published).toMatchObject({ ok: false, error: { message: 'injected search failure' } });
+    expect(receipt!.n).toBe(0);
+    expect(active).toEqual([{ id: intakeId, monthly_reservation_cents: '5' }]);
+    expect(await sql`select pipeline,index_configs,updated_at::text,monthly_budget_cents from projects where id=${f.projectId}`).toEqual(persistedBefore);
+    const after = await service.readSettingsSnapshot(f.actor, f.projectId);
+    expect(after.settings).toEqual(f.snapshot.settings); expect(after.revision).toEqual(f.snapshot.revision);
+    expect(after.project.latestRunId).toBe(intakeId);
+    expect(after.project.runCount).toBe(f.snapshot.project.runCount + 1);
+    expect(await sql`select count(*)::int n from project_runs where project_id=${f.projectId} and kind='reindex'`).toEqual([{ n: 0 }]);
+  } else {
+    expect(published.ok).toBe(true);
+    if (!published.ok) throw published.error;
+    expect(published.value.queuedRunIds).toHaveLength(1);
+    expect(receipt!.n).toBe(1); expect(active).toHaveLength(2);
+    expect(active.some(row => row.id === published.value.queuedRunIds[0] && Number(row.monthly_reservation_cents) > 0)).toBe(true);
+    expect((await service.publishSettings({ ...f, input: body })).replayed).toBe(true);
+    expect(await sql`select count(*)::int n from project_settings_publications where project_id=${f.projectId}`).toEqual([{ n: 1 }]);
+  }
+}, 30_000);

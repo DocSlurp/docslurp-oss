@@ -49,7 +49,8 @@ beforeAll(async () => {
   await sql`insert into organizations(id,name,created_by_user_id) values('refine-org','Local test','refine-user')`;
   await sql`insert into org_memberships(org_id,user_id,role) values('refine-org','refine-user','owner')`;
   await sql`insert into projects(id,user_id,name,org_id,pipeline) values('refine-ws','refine-user','Local test','refine-org',${sql.json({ privacyMode: "standard", embedding: { profile: "cheapest-hosted", target: "hosted", modelUri: "llm://openai/text-embedding-3-small" } })})`;
-  await sql`insert into project_runs(id,user_id,project_id,kind,status,stage) values('refine-run','refine-user','refine-ws','ingest','completed','completed')`;
+  // Real intake stamps the tenant explicitly before the policy-admission fence runs.
+  await sql`insert into project_runs(id,org_id,user_id,project_id,kind,status,stage) values('refine-run','refine-org','refine-user','refine-ws','ingest','completed','completed')`;
   await sql`insert into documents(id,user_id,project_id,run_id,filename,mime_type,source_key,status,org_id,page_count) values('refine-doc','refine-user','refine-ws','refine-run','local.txt','text/plain','local','completed','refine-org',2)`;
   await sql`insert into vector_indexes(id,document_id,backend,bucket,path,embedding_model,dimension) values('refine-index','refine-doc','lancedb','local','local','text-embedding-3-small',1536)`;
   const fixtureRecipe = normalizePipelineFeatures({ privacyMode: "standard", embedding: { profile: "cheapest-hosted", target: "hosted", modelUri: "llm://openai/text-embedding-3-small" } });

@@ -42,7 +42,8 @@ beforeAll(async () => {
   await sql`insert into organizations (id, name, slug, created_by_user_id) values ('rank-org', 'Ranking', 'ranking', 'rank-user')`;
   await sql`insert into org_memberships (org_id, user_id, role) values ('rank-org', 'rank-user', 'owner')`;
   await sql`insert into projects (id, org_id, user_id, name, pipeline) values ('rank-ws', 'rank-org', 'rank-user', 'Ranking', ${sql.json(pipeline)}), ('other-ws', 'rank-org', 'rank-user', 'Other', ${sql.json(pipeline)})`;
-  await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline) values ('rank-run', 'rank-org', 'rank-user', 'rank-ws', 'bulk-upload', 'completed', 'completed', '{}'::jsonb), ('foreign-run', 'rank-org', 'rank-user', 'other-ws', 'bulk-upload', 'completed', 'completed', '{}'::jsonb)`;
+  // The fixture run was admitted under the same local-only policy as its project.
+  await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline) values ('rank-run', 'rank-org', 'rank-user', 'rank-ws', 'bulk-upload', 'completed', 'completed', ${sql.json(pipeline)}), ('foreign-run', 'rank-org', 'rank-user', 'other-ws', 'bulk-upload', 'completed', 'completed', ${sql.json(pipeline)})`;
   await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count)
     values ('rank-doc', 'rank-org', 'rank-user', 'rank-ws', 'rank-run', 'manual.txt', 'text/plain', 'local/manual', 'completed', 240),
     ('foreign-doc', 'rank-org', 'rank-user', 'other-ws', 'foreign-run', 'other.txt', 'text/plain', 'local/other', 'completed', 1)`;

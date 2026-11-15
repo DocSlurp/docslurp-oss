@@ -10,7 +10,7 @@ import { startMigratedPostgres } from "@docslurp/worker/testing";
 import { withTestSession } from "./helpers/session-app.js";
 
 /**
- * Config-change jobs against a migrated database: PATCH bodies that succeed on main still succeed, required
+ * Config-change jobs against a migrated database: supported sparse preferences persist, safe required
  * re-indexes auto-queue, blocked jobs resume, estimates equal the job's, and the job resource reads the runs.
  */
 const cancelSignal = vi.fn(async () => undefined);
@@ -49,7 +49,8 @@ const pipeline = (patch: Partial<PipelineFeatures> = {}): PipelineFeatures => ({
 const profileEmbedding = (profile: "fastest-local" | "cheapest-local") =>
   normalizePipelineFeatures({ ...defaultPipelineFeatures, embedding: { profile } } as never).embedding;
 
-async function seed(args: { credits: number; autoConfirm?: boolean; documents?: number; vectorized?: boolean }) {
+async function seed(args: { credits: number; autoConfirm?: boolean; documents?: number; vectorized?: boolean; pipeline?: PipelineFeatures }) {
+  const storedPipeline = args.pipeline ?? pipeline();
   await sql`delete from project_runs`;
   await sql`delete from documents`;
   await sql`delete from projects`;
@@ -57,10 +58,10 @@ async function seed(args: { credits: number; autoConfirm?: boolean; documents?: 
   await sql`insert into organizations(id, name, slug, created_by_user_id, credit_balance_cents) values ('o1', 'Org', 'org', 'u1', ${args.credits})`;
   await sql`insert into org_memberships(org_id, user_id, role) values ('o1', 'u1', 'owner')`;
   await sql`insert into projects(id, org_id, user_id, name, pipeline, auto_confirm_reindex)
-    values ('w', 'o1', 'u1', 'W', ${sql.json(JSON.parse(JSON.stringify(pipeline())))}, ${args.autoConfirm ?? false})`;
+    values ('w', 'o1', 'u1', 'W', ${sql.json(JSON.parse(JSON.stringify(storedPipeline)))}, ${args.autoConfirm ?? false})`;
   await sql`insert into project_search_settings(project_id, user_id) values ('w', 'u1') on conflict do nothing`.catch(() => undefined);
   await sql`insert into project_runs (monthly_reservation_cents,id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents, artifacts)
-    values (100, 'src', 'o1', 'u1', 'w', 'upload', 'completed', 'index', ${sql.json(JSON.parse(JSON.stringify(pipeline())))}, ${args.documents ?? 2}, ${sql.json(Object.fromEntries(Array.from({ length: args.documents ?? 2 }, (_, i) => [`d${i}:markdown`, `s3://b/d${i}.md`])))})`;
+    values (100, 'src', 'o1', 'u1', 'w', 'upload', 'completed', 'index', ${sql.json(JSON.parse(JSON.stringify(storedPipeline)))}, ${args.documents ?? 2}, ${sql.json(Object.fromEntries(Array.from({ length: args.documents ?? 2 }, (_, i) => [`d${i}:markdown`, `s3://b/d${i}.md`])))})`;
   for (let i = 0; i < (args.documents ?? 2); i += 1) {
     await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, canonical_id)
       values (${`d${i}`}, 'o1', 'u1', 'w', 'src', ${`f${i}.pdf`}, 'application/pdf', ${`k${i}`}, 'completed', 5, ${`c${i}`})`;
@@ -79,7 +80,7 @@ async function patch(input: Record<string, unknown>) {
   return { plan: plan!, applied: await change.applyProjectChange({ plan: plan!, userId: "u1" }) };
 }
 
-describe("PATCH /v1/projects/:id is non-breaking", () => {
+describe("PATCH /v1/projects/:id preserves supported sparse preferences", () => {
   beforeEach(() => seed({ credits: 10_000 }));
 
   const validBodies: Array<[string, Record<string, unknown>]> = [
@@ -310,26 +311,35 @@ describe("config-change jobs", () => {
   // An embedding change is a profile change (a category): raw model URIs are managed, never a caller's choice.
   const embeddingTo = (pl: PipelineFeatures) => ({ pipeline: { ...pl, embedding: profileEmbedding("cheapest-local") } });
 
-  it("keeps a cancelled PII re-index's stages when an embedding change supersedes it", async () => {
-    await seed({ credits: 10_000, documents: 2, vectorized: true });
-    const pii = { ...pipeline(), piiPolicy: { ...defaultPipelineFeatures.piiPolicy, enabled: true, action: "block_indexing" as const } };
-    const first = await patch({ pipeline: pii });
-    expect(first.plan.impact.kind).toBe("reindex-required");
-    const firstStages = await stagesOf(first.applied!.job!.id);
-    expect(firstStages).toContain("pii-detect");
+  // Existing work under an already-selected PII policy: exercise cancellation/carry without
+  // pretending that tightening a populated project's policy can safely queue an ordinary rebuild.
+  async function seedPendingPiiReindex() {
+    const pii = pipeline({ piiPolicy: { ...defaultPipelineFeatures.piiPolicy, enabled: true, action: "block_indexing" } });
+    await seed({ credits: 10_000, documents: 2, vectorized: true, pipeline: pii });
+    const planned = (await change.planProjectChange({ projectId: "w", userId: "u1", input: embeddingTo(pii) }))!;
+    expect(planned.targets).toHaveLength(2);
+    const pending = await sql.begin(tx => change.createReindexRuns({
+      tx, project: planned.project, pipeline: planned.project.pipeline, userId: "u1",
+      meta: { kind: "reindex", estimate: null }, blockedReason: null,
+      reusable: { partial: [{ stages: ["pii-detect"], docs: planned.targets }], full: [] },
+    }));
+    expect(pending.runIds).toHaveLength(1);
+    expect(await stagesOf(pending.runIds[0]!)).toEqual(["pii-detect"]);
+    return { pii, jobId: pending.runIds[0]!, runIds: pending.runIds };
+  }
 
+  it("keeps a cancelled PII re-index's stages when an embedding change supersedes it", async () => {
+    const { pii, runIds } = await seedPendingPiiReindex();
     const second = await patch(embeddingTo(pii));
-    expect(second.applied!.cancelledRunIds).toEqual(first.applied!.job!.runIds);
+    expect(second.applied!.cancelledRunIds).toEqual(runIds);
+    expect(await sql`select status,control_state from project_runs where id=${runIds[0]!}`).toEqual([{ status: "failed", control_state: "cancelled" }]);
     const secondStages = await stagesOf(second.applied!.job!.id);
     expect(secondStages).toEqual(expect.arrayContaining(["pii-detect", ...second.plan.impact.stages]));
     expect(second.plan.impact.stages).toContain("embed");
   });
 
   it("prices the carried-over stages: estimate covers PII plus embed and equals job.estimate", async () => {
-    await seed({ credits: 10_000, documents: 2, vectorized: true });
-    const pii = { ...pipeline(), piiPolicy: { ...defaultPipelineFeatures.piiPolicy, enabled: true, action: "block_indexing" as const } };
-    const first = await patch({ pipeline: pii });
-    expect(first.applied!.job).not.toBeNull();
+    const { pii, runIds } = await seedPendingPiiReindex();
 
     const body = embeddingTo(pii);
     const twin = await change.estimateProjectChange({ projectId: "w", userId: "u1", input: body as never });
@@ -343,7 +353,7 @@ describe("config-change jobs", () => {
     expect(twin!.estimate!.seconds!.high).toBeGreaterThanOrEqual(embedOnly.seconds!.high);
 
     const second = await patch(body);
-    expect(second.applied!.cancelledRunIds).toEqual(first.applied!.job!.runIds);
+    expect(second.applied!.cancelledRunIds).toEqual(runIds);
     expect(await stagesOf(second.applied!.job!.id)).toEqual(expect.arrayContaining(["pii-detect", "embed"]));
     expect(second.applied!.job!.estimate).toEqual(twin!.estimate);
   });
