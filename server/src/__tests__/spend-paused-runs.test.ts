@@ -37,8 +37,14 @@ describe("spend-paused run sweep", () => {
         return Promise.resolve([{ id, org_id: id === "run-ok" ? "org-ok" : "org-blocked", project_id: "ws", user_id: "u1", pause_reason: "credit_exhausted" }]);
       }
       if (query.includes("from grant_credit_lease(")) return Promise.resolve([lease]);
+      if (query.includes("select * from project_runs")) return Promise.resolve([{
+        id: values[0], org_id: values[0] === "run-ok" ? "org-ok" : "org-blocked", project_id: "ws", status: "processing", pipeline: {},
+      }]);
+      if (query.includes("from documents where run_id=")) return Promise.resolve([{
+        filename: "measured.txt", mime_type: "text/plain", file_size: 1000, page_count: 1, billing_pages: null, page_count_source: "assumed",
+      }]);
       if (query.includes("org_spend_status")) return Promise.resolve([status(available[values.find(value => typeof value === "string" && value.startsWith("org-")) as string] ?? 0)]);
-      if (query.includes("update project_runs")) {
+      if (query.includes("update project_runs set control_state")) {
         updates.push(values.find((value) => typeof value === "string" && value.startsWith("run-")) as string);
         return Promise.resolve([{ id: "run-ok", user_id: "u1", pause_reason: "credit_exhausted" }]);
       }

@@ -310,10 +310,10 @@ export async function commitIndexJobs(prepared: PreparedIndexJobs, userId: strin
       const pages = docs.reduce((sum, doc) => sum + Math.max(0, doc.page_count ?? 0), 0);
       // A direct insert, so the same managed-model resolution as runCreation.create: model values in the pipeline
       // are dropped and only the project's explicit admin overrides apply.
-const runPipeline = withProjectSummaryTree(resolveManagedPipeline(batch.pipeline, managedOverrides, `full index in project ${prepared.projectId}`).pipeline, summaryTree);
+      const runPipeline = withProjectSummaryTree(resolveManagedPipeline(batch.pipeline, managedOverrides, `full index in project ${prepared.projectId}`).pipeline, summaryTree);
       if (docs.some(doc => !Number.isFinite(doc.billing_pages ?? doc.page_count) || (doc.billing_pages ?? doc.page_count ?? 0) <= 0)) throw new Error("Monthly admission requires known positive page counts");
       const reservation = Math.max(1, buildRunProcessingPreview({
-        request: { project: prepared.projectId, pipeline: runPipeline, urls: [], files: docs.map(doc => ({
+        request: { project: prepared.projectId, pipeline: runPipeline, speedBoost: runPipeline.speedBoost === true, urls: [], files: docs.map(doc => ({
           filename: doc.filename, mimeType: doc.mime_type, sizeBytes: 0,
           pages: Math.max(1, doc.billing_pages ?? doc.page_count ?? 1),
         })) },

@@ -133,6 +133,6 @@ it.each([true, false])("uses current summary-tree setting %s in forecast and per
   expect(run!.pipeline.summaryTree).toEqual({ enabled });
   expect(pipelines.get(runIds[0]!)).toEqual(run!.pipeline);
   const { buildRunProcessingPreview } = await import('../services/run-processing-preview.js');
-  const expected = buildRunProcessingPreview({ request: { project: 'fx-a', pipeline: run!.pipeline, urls: [], files: prepared.batches[0]!.docs.map(doc => ({ filename: doc.filename, mimeType: doc.mime_type, sizeBytes: 0, pages: doc.billing_pages ?? doc.page_count })) } }).current.estimatedCost.maxCents;
+  const expected = buildRunProcessingPreview({ request: { project: 'fx-a', pipeline: run!.pipeline, speedBoost: run!.pipeline.speedBoost === true, urls: [], files: prepared.batches[0]!.docs.map(doc => ({ filename: doc.filename, mimeType: doc.mime_type, sizeBytes: 0, pages: doc.billing_pages ?? doc.page_count })) } }).current.estimatedCost.maxCents;
   expect(Number(run!.monthly_reservation_cents)).toBe(Math.max(1, expected));
 });

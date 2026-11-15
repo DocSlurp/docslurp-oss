@@ -428,7 +428,7 @@ export async function createReindexRuns(args: {
     const pages = batch.docs.reduce((sum, doc) => sum + Math.max(0, doc.page_count ?? 0), 0);
     if (batch.docs.some(doc => !Number.isFinite(doc.billing_pages ?? doc.page_count) || (doc.billing_pages ?? doc.page_count ?? 0) <= 0)) throw new Error("Monthly admission requires known positive page counts");
     const reservation = Math.max(1, buildRunProcessingPreview({
-      request: { project: project.id, pipeline: batch.pipeline, urls: [], files: batch.docs.map(doc => ({
+      request: { project: project.id, pipeline: batch.pipeline, speedBoost: batch.pipeline.speedBoost === true, urls: [], files: batch.docs.map(doc => ({
         filename: doc.filename, mimeType: doc.mime_type, sizeBytes: 0,
         pages: Math.max(1, doc.billing_pages ?? doc.page_count ?? 1),
       })) },
