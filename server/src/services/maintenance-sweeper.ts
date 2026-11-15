@@ -16,6 +16,7 @@ import { resumeOrganizationDeletions } from "./tenant-offboarding.js";
 import { requestWebhookOutboxDrain } from "./webhooks.js";
 import { sweepFigureResumeQueue } from "./figure-resume.js";
 import { sweepProjectAutoTitles } from "./project-naming.js";
+import { sweepProjectActivityStatsDrift } from "./project-activity-stats-drift.js";
 
 /**
  * Periodic in-process recovery for work that can otherwise get stuck: queued
@@ -66,6 +67,8 @@ const sweeps: Array<[name: string, run: () => Promise<unknown>]> = [
   ["search-session-project-backfill", () => sweepSearchSessionProjectBackfill()],
   // Automatic project titles from ingested content; project reads never rename (project-naming.ts).
   ["project-auto-titles", () => sweepProjectAutoTitles()],
+  // project_activity_stats counters against history for a few projects (every 10 min at most); logs any difference.
+  ["project-activity-stats-drift", () => sweepProjectActivityStatsDrift()],
 ];
 
 let timer: ReturnType<typeof setInterval> | null = null;
