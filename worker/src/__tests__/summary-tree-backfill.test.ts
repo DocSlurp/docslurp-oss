@@ -686,16 +686,21 @@ describe("stopping and parking", () => {
     const f = fakes();
     await seedDocument(f.storage, "w", "a-big", BIG_LEAVES);
     const jobId = await queueJob("w");
-    // The build asks before its first call; a refusal parks the job with the document untouched.
+    // The job asks before it selects a document: a refusal parks it with no document touched and no artifact read,
+    // however often the parked job is looked at again.
     setSpendCheckConfig({ enabled: true, pages: 25, credits: 10 });
     await sql`update organizations set budget_paused = true where id = 'o1'`;
-    expect(await orgSpendRefusal(sql, { orgId: "o1", projectId: "w" })).toBe("org_budget_paused");
-    await f.run();
-    expect(await jobOf(jobId)).toMatchObject({ status: "blocked", blocked_reason: "credits", model_calls: 0, documents_ready: 0, cursor: null });
-    expect(f.requests).toEqual([]);
-    expect(await treeOf("a-big")).toMatchObject({ status: "pending" });
-    setSpendCheckConfig({ enabled: false, pages: 0, credits: 0 });
-    await sql`update organizations set budget_paused = false where id = 'o1'`;
+    try {
+      expect(await orgSpendRefusal(sql, { orgId: "o1", projectId: "w" })).toBe("org_budget_paused");
+      for (let look = 0; look < 3; look++) await f.run();
+      expect(await jobOf(jobId)).toMatchObject({ status: "blocked", blocked_reason: "credits", model_calls: 0, documents_ready: 0, cursor: null, park_count: 3 });
+      expect(f.requests).toEqual([]);
+      expect(f.storage.opened).toEqual([]);
+      expect(await treeOf("a-big")).toBeNull();
+    } finally {
+      setSpendCheckConfig({ enabled: false, pages: 0, credits: 0 });
+      await sql`update organizations set budget_paused = false where id = 'o1'`;
+    }
 
     await sql`update projects set pipeline = ${sql.json(normalizePipelineFeatures(null) as unknown as postgres.JSONValue)} where id = 'w'`;
     await f.run();
@@ -748,6 +753,199 @@ describe("spend and the project setting, between windows of a running job", () =
     expect(await treeOf("a-big")).toMatchObject({ status: "partial", error: "stopped:project-setting-off" });
     expect(await treeOf("b-big")).toBeNull();
     expect(f.storage.opened).toEqual(["u1/run-w/embeddings/a-big.json"]);
+  });
+});
+
+describe("fair claiming, parking and time slices", () => {
+  /** One more project of an organization, with its run, so the organization can hold another active job. */
+  async function addProject(id: string, org: "o1" | "o2") {
+    const user = org === "o1" ? "u1" : "u2";
+    await sql`insert into projects(id, org_id, user_id, name, pipeline) values (${id}, ${org}, ${user}, ${id}, ${sql.json(TREE as unknown as postgres.JSONValue)})`;
+    await sql`insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, pipeline)
+      values (${`run-${id}`}, ${org}, ${user}, ${id}, 'bulk-upload', 'completed', 'completed', '{}')`;
+  }
+  const insertJob = async (id: string, project: string, org: "o1" | "o2", createdSecondsAgo: number) => {
+    await sql`insert into summary_tree_jobs (id, org_id, project_id, user_id, max_cost_cents, documents_total, created_at)
+      values (${id}, ${org}, ${project}, ${org === "o1" ? "u1" : "u2"}, 1000, 0, now() - ${`${createdSecondsAgo} seconds`}::interval)`;
+  };
+  const statuses = async () => Object.fromEntries((await sql<Array<{ id: string; status: string }>>`select id, status from summary_tree_jobs`).map((row) => [row.id, row.status]));
+
+  it("claims a fresh job of another organization next, whatever one organization has parked", async () => {
+    const f = fakes();
+    // Organization o1 may not spend: every job of its twenty projects parks, and is due again at once.
+    setSpendCheckConfig({ enabled: true, pages: 25, credits: 10 });
+    await sql`update organizations set budget_paused = true where id = 'o1'`;
+    try {
+      for (let n = 1; n <= 20; n++) {
+        const project = `p${String(n).padStart(2, "0")}`;
+        await addProject(project, "o1");
+        await insertJob(`parked-${project}`, project, "o1", 1_000 - n);
+      }
+      for (let tick = 0; tick < 20; tick++) expect(await f.run({ parkMs: 60_000 })).toBe(1);
+      const parked = await sql<Array<{ status: string; blocked_reason: string; park_count: number; due: boolean }>>`
+        select status, blocked_reason, park_count, resume_after <= now() as due from summary_tree_jobs`;
+      expect(parked).toHaveLength(20);
+      for (const row of parked) expect(row).toEqual({ status: "blocked", blocked_reason: "credits", park_count: 1, due: false });
+      // No artifact was read to find that out, and no call was made.
+      expect(f.storage.opened).toEqual([]);
+      expect(f.requests).toEqual([]);
+
+      // A minute later all twenty are due again, each older than the job another organization starts now.
+      await sql`update summary_tree_jobs set resume_after = now() - interval '1 second'`;
+      await seedDocument(f.storage, "x", "x-big", BIG_LEAVES);
+      const fresh = await queueJob("x");
+      expect(await f.run({ parkMs: 60_000 })).toBe(1);
+      expect(await jobOf(fresh)).toMatchObject({ status: "completed", documents_ready: 1, model_calls: BIG_NODES });
+      // None of the parked jobs was looked at in that tick.
+      expect((await sql`select count(*)::int as n from summary_tree_jobs where park_count > 1`)[0]).toMatchObject({ n: 0 });
+
+      // The parked jobs are then looked at one a tick, each waiting twice as long as before.
+      for (let tick = 0; tick < 20; tick++) await f.run({ parkMs: 60_000 });
+      const again = await sql<Array<{ park_count: number; wait: number }>>`
+        select park_count, extract(epoch from (resume_after - updated_at))::float8 as wait from summary_tree_jobs where status = 'blocked'`;
+      expect(again).toHaveLength(20);
+      for (const row of again) {
+        expect(row.park_count).toBe(2);
+        expect(row.wait).toBeCloseTo(120, 0);
+      }
+      expect(f.storage.opened).toEqual(["u2/run-x/embeddings/x-big.json"]);
+    } finally {
+      setSpendCheckConfig({ enabled: false, pages: 0, credits: 0 });
+      await sql`update organizations set budget_paused = false where id = 'o1'`;
+    }
+  });
+
+  it("bounds a parked job's wait, and ends a job that has been parked too long with a note", async () => {
+    const f = fakes();
+    f.env.DOCSLURP_SUMMARY_TREE_BUILD = "off";
+    const jobId = await queueJob("w");
+    // The twelfth park in a row would wait for days at a plain doubling; the bound holds it.
+    await sql`update summary_tree_jobs set status = 'blocked', blocked_reason = 'build-off', park_count = 11, parked_since = now() - interval '2 hours', resume_after = now() where id = ${jobId}`;
+    expect(await f.run({ parkMs: 60_000, parkMaxMs: 30 * 60_000 })).toBe(0);
+    const [bounded] = await sql<Array<{ park_count: number; wait: number; parked_hours: number }>>`
+      select park_count, extract(epoch from (resume_after - now()))::float8 as wait, extract(epoch from (now() - parked_since))::float8 / 3600 as parked_hours from summary_tree_jobs where id = ${jobId}`;
+    expect(bounded!.park_count).toBe(12);
+    expect(bounded!.wait).toBeGreaterThan(29 * 60);
+    expect(bounded!.wait).toBeLessThanOrEqual(30 * 60);
+    // The row of parks keeps its start: a later park does not restart the clock.
+    expect(bounded!.parked_hours).toBeGreaterThanOrEqual(2);
+
+    // Past the longest a job may stay parked: it ends, says why in closed copy, and keeps its last parking reason.
+    await sql`update summary_tree_jobs set resume_after = now(), parked_since = now() - interval '25 hours' where id = ${jobId}`;
+    expect(await f.run({ maxParkedMs: 24 * 60 * 60_000 })).toBe(0);
+    expect(await jobOf(jobId)).toMatchObject({ status: "failed", error: SUMMARY_TREE_JOB_NOTES.parkedTooLong, blocked_reason: "build-off", lease_owner: null });
+    expect((await jobOf(jobId)).finished_at).not.toBeNull();
+    // The project can start another job: the ended one no longer counts as active.
+    f.env.DOCSLURP_SUMMARY_TREE_BUILD = "on";
+    await queueJob("w");
+    expect(f.requests).toEqual([]);
+  });
+
+  it("resets the row of parks when the job makes progress", async () => {
+    const f = fakes();
+    await seedDocument(f.storage, "w", "a-small", 5);
+    const jobId = await queueJob("w");
+    await sql`update summary_tree_jobs set status = 'blocked', blocked_reason = 'balance', park_count = 6, parked_since = now() - interval '3 hours', resume_after = now() where id = ${jobId}`;
+    await f.run();
+    expect(await jobOf(jobId)).toMatchObject({ status: "completed", documents_skipped: 1, park_count: 0, parked_since: null });
+  });
+
+  it("serves organizations in turn: the one served longest ago first, never-attempted jobs before any other", async () => {
+    const f = fakes();
+    await addProject("w3", "o1");
+    for (const [project, document] of [["w", "a-small"], ["w2", "b-small"], ["w3", "c-small"], ["x", "x-small"]] as const) await seedDocument(f.storage, project as Project, document, 5);
+    // Three jobs of o1, all older than the one job of o2.
+    await insertJob("o1-first", "w", "o1", 400);
+    await insertJob("o1-second", "w2", "o1", 300);
+    await insertJob("o1-third", "w3", "o1", 200);
+    await insertJob("o2-only", "x", "o2", 100);
+    const order: string[] = [];
+    for (let tick = 0; tick < 4; tick++) {
+      const before = await statuses();
+      await f.run();
+      const after = await statuses();
+      order.push(...Object.keys(after).filter((id) => before[id] !== after[id]));
+    }
+    expect(order).toEqual(["o1-first", "o2-only", "o1-second", "o1-third"]);
+    expect(Object.values(await statuses())).toEqual(["completed", "completed", "completed", "completed"]);
+  });
+
+  it("runs at most one job of an organization at a time", async () => {
+    const f = fakes();
+    await seedDocument(f.storage, "w2", "b-small", 5);
+    await seedDocument(f.storage, "x", "x-small", 5);
+    // Another worker holds a live job of o1.
+    await insertJob("o1-running", "w", "o1", 300);
+    await sql`update summary_tree_jobs set status = 'running', lease_owner = 'worker-b', lease_expires_at = now() + interval '5 minutes', last_attempt_at = now() - interval '1 hour' where id = 'o1-running'`;
+    await insertJob("o1-waiting", "w2", "o1", 200);
+    expect(await f.run()).toBe(0);
+    expect(await jobOf("o1-waiting")).toMatchObject({ status: "queued", last_attempt_at: null });
+    // Another organization's job is not held back by it.
+    await insertJob("o2-job", "x", "o2", 100);
+    expect(await f.run()).toBe(1);
+    expect(await jobOf("o2-job")).toMatchObject({ status: "completed" });
+    expect(await jobOf("o1-waiting")).toMatchObject({ status: "queued" });
+    // Once the running job's lease is over, the organization's next job may run (the abandoned one is claimable too).
+    await sql`update summary_tree_jobs set status = 'completed', lease_owner = null, lease_expires_at = null where id = 'o1-running'`;
+    expect(await f.run()).toBe(1);
+    expect(await jobOf("o1-waiting")).toMatchObject({ status: "completed" });
+  });
+
+  it("gives the runner up after its slice when another job waits, so two organizations' long jobs interleave", async () => {
+    const f = fakes();
+    for (const id of ["a", "b", "c"]) {
+      await seedDocument(f.storage, "w", `w-${id}`, BIG_LEAVES);
+      await seedDocument(f.storage, "x", `x-${id}`, BIG_LEAVES);
+    }
+    await insertJob("job-w", "w", "o1", 200);
+    await insertJob("job-x", "x", "o2", 100);
+    // One document a batch, one batch a slice.
+    const slice = { batchSize: 1, sliceBatches: 1 };
+    const built: string[] = [];
+    for (let tick = 0; tick < 6; tick++) {
+      const from = f.requests.length;
+      expect(await f.run(slice)).toBe(1);
+      built.push(...new Set(f.requests.slice(from).map((request) => request.nodeId.split(":")[0]!)));
+    }
+    expect(built).toEqual(["w-a", "x-a", "w-b", "x-b", "w-c", "x-c"]);
+    // A yielded job is queued, holds no lease and kept its cursor; it is not parked.
+    expect(await jobOf("job-w")).toMatchObject({ documents_ready: 3, park_count: 0, lease_owner: null });
+    for (let tick = 0; tick < 2; tick++) await f.run(slice);
+    expect(await statuses()).toEqual({ "job-w": "completed", "job-x": "completed" });
+    expect(f.requests).toHaveLength(6 * BIG_NODES);
+    expect(new Set(f.requests.map((request) => request.nodeId)).size).toBe(6 * BIG_NODES);
+  });
+
+  it("yields in the middle of a long document at its next window, and resumes it without repeating a call", async () => {
+    const f = fakes();
+    await seedDocument(f.storage, "w", "w-long", BIG_LEAVES);
+    await seedDocument(f.storage, "x", "x-long", BIG_LEAVES);
+    await insertJob("job-w", "w", "o1", 200);
+    await insertJob("job-x", "x", "o2", 100);
+    // The slice is over as soon as the job has made a call: every window gives way to the other job.
+    const slice = { sliceMs: 0 };
+    const turns: string[] = [];
+    for (let tick = 0; tick < 40 && Object.values(await statuses()).some((status) => status !== "completed"); tick++) {
+      const from = f.requests.length;
+      await f.run(slice);
+      const documents = [...new Set(f.requests.slice(from).map((request) => request.nodeId.split(":")[0]!))];
+      expect(documents.length).toBeLessThanOrEqual(1);
+      turns.push(...documents);
+    }
+    expect(await statuses()).toEqual({ "job-w": "completed", "job-x": "completed" });
+    // Neither job waited for the other to finish: their calls alternate.
+    expect(turns.slice(0, 6)).toEqual(["w-long", "x-long", "w-long", "x-long", "w-long", "x-long"]);
+    expect(f.requests).toHaveLength(2 * BIG_NODES);
+    expect(new Set(f.requests.map((request) => request.nodeId)).size).toBe(2 * BIG_NODES);
+    expect(await treeStatuses()).toEqual({ "w-long": "ready", "x-long": "ready" });
+  });
+
+  it("keeps the runner while no other job waits", async () => {
+    const f = fakes();
+    for (const id of ["a", "b", "c"]) await seedDocument(f.storage, "w", `w-${id}`, BIG_LEAVES);
+    const jobId = await queueJob("w");
+    expect(await f.run({ batchSize: 1, sliceBatches: 1, sliceMs: 0 })).toBe(1);
+    expect(await jobOf(jobId)).toMatchObject({ status: "completed", documents_ready: 3 });
   });
 });
 

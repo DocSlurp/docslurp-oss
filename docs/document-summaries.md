@@ -574,8 +574,14 @@ estimate route and a started job's own estimate are always current.
   a later job continues from what was built.
 
 **Parking.** A job that cannot proceed for a reason that clears on its own is
-`blocked`: it holds no lease, makes no call, and is looked at again after a
-minute.
+`blocked`: it holds no lease and makes no call. It is looked at again after a
+minute the first time and after twice as long for every further park in a row,
+up to thirty minutes; progress resets the count. A job that stays parked for
+three days without progress ends `failed` with the note `Parked too long
+without being able to continue; start it again once the cause is resolved`,
+and its last parking reason stays on the row. Whether the organization may
+spend is asked before any document is selected, so looking at a job parked for
+credits costs one small query and reads no artifact.
 
 | `blockedReason` | Cause | `/v1/jobs` reason |
 | --- | --- | --- |
@@ -615,6 +621,21 @@ and nothing it writes afterwards lands on the new holder's rows.
   `WORKER_SUMMARY_TREE_JOB_DOCUMENT_CONCURRENCY` at a time and share
   `WORKER_SUMMARY_TREE_CONCURRENCY` model calls.
 
+**Fairness between organizations.**
+
+- The claim picks the job attempted longest ago (never attempted first), from
+  the organization served longest ago, with `for update skip locked`, and
+  stamps the attempt at once. A job that is parked again goes to the back, so
+  one organization's parked jobs cannot keep another organization's job
+  waiting.
+- A running job has a slice of five batches or five minutes. When the slice is
+  over and another job is waiting, it releases its lease and goes back in the
+  queue behind it; the next claim continues at its cursor. Inside a long
+  document the check runs before every commit window: the document stops
+  `partial` (`stopped:time-slice`) and resumes from its artifact with no call
+  repeated. A job that is alone keeps the runner.
+- At most one job of an organization runs at a time.
+
 **Tenant boundary.** Every statement that selects or writes documents names the
 job's organization and project. The cursor is a position inside that scope
 only. A document deleted while its tree is being built is skipped, and the
@@ -642,6 +663,7 @@ phase-0 eval measured.
   build's retries, not by a cap.
 - The upload estimate and quote do not include the tree's units; only the
   backfill estimate does.
-- Backfill jobs run one at a time, on the maintenance leader.
+- Backfill jobs run one at a time, on the maintenance leader; they share that
+  one runner by time slice.
 - The scan parses the whole embed artifact; a vectors-only sidecar would remove
   most of that time for very large documents.

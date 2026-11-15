@@ -28,8 +28,8 @@ ALTER TABLE summary_tree_jobs ADD COLUMN IF NOT EXISTS park_count integer NOT NU
 --> statement-breakpoint
 ALTER TABLE summary_tree_jobs ADD COLUMN IF NOT EXISTS parked_since timestamptz;
 --> statement-breakpoint
--- Jobs that are not finished, for the claim and for the per-organization "last served" lookup.
-CREATE INDEX IF NOT EXISTS summary_tree_jobs_open_idx ON summary_tree_jobs (org_id, last_attempt_at) WHERE status IN ('queued', 'running', 'blocked');
+-- The claim's per-organization lookups: when an organization was last served, and how many of its jobs run now.
+CREATE INDEX IF NOT EXISTS summary_tree_jobs_org_attempt_idx ON summary_tree_jobs (org_id, last_attempt_at);
 --> statement-breakpoint
 -- The worker claims and runs the jobs. server/db/roles.mjs reconciles the same grant after every migration.
 DO $$

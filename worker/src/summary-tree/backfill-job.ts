@@ -5,12 +5,16 @@ import {
   normalizeStoredPipelineFeatures,
   resolveAllowedPipelineTextModel,
   SUMMARY_TREE_BUILD_STALE_MS,
+  SUMMARY_TREE_JOB_MAX_PARKED_MS,
   SUMMARY_TREE_JOB_NOTES,
+  SUMMARY_TREE_JOB_PARK_BASE_MS,
+  SUMMARY_TREE_JOB_PARK_MAX_MS,
   SUMMARY_TREE_MIN_DOCUMENT_LEAVES,
   SUMMARY_TREE_SERVE_ENV_FLAG,
   SUMMARY_TREE_UNPRICED_REASON,
   summaryTreeBuildAvailable,
   summaryTreeEnabled,
+  summaryTreeJobParkDelayMs,
   summaryTreeServeAvailable,
   summaryTreeUnitPrice,
   summaryTreeVectorProblem,
@@ -20,6 +24,7 @@ import {
 import type { Sql } from "postgres";
 
 import type { Config } from "../config.js";
+import { orgSpendRefusal } from "../db/spend-check.js";
 import { persistScopedUsageEvents } from "../db/usage-event-store.js";
 import { resolveEmbeddingModel } from "../embeddings/resolver.js";
 import type { WorkerAiUsageInput } from "../lib/ai-usage.js";
@@ -76,7 +81,17 @@ import { markSummaryTreesSkipped, registerSummaryTreeArtifact } from "./state-st
  * - No fallback text. A group whose call fails is retried by the build and once more by the job; then the document
  *   stays `partial`, is not served, and the next job picks it up. Nothing is written in a summary's place.
  *
- * A parked job holds no lease. It is looked at again after `resume_after`, by any worker.
+ * - Fair claiming. Jobs are claimed least recently attempted first (never attempted before any other), and among
+ *   organizations the one served longest ago first, so one organization's jobs, parked or long, cannot keep another
+ *   organization's job waiting. The pick locks its row (`for update skip locked`) and stamps the attempt before
+ *   anything else is decided, so a job that is parked again without being claimed still goes to the back.
+ * - Parking. A parked job holds no lease. It waits `parkMs` the first time and twice as long after every further
+ *   park in a row (up to `parkMaxMs`); progress resets the count. A job that has been parked for `maxParkedMs`
+ *   without progress ends `failed` with a fixed note and its last parking reason kept on the row.
+ * - Time slice. A running job that has used its slice (a number of batches, or minutes) gives the runner up when
+ *   another job is waiting: it releases its lease and goes back in the queue behind the others, also in the middle
+ *   of a long document (at its next commit window; the document resumes from its artifact). At most
+ *   `maxRunningPerOrg` jobs of one organization run at once.
  */
 
 type Client = Sql<Record<string, unknown>>;
@@ -87,8 +102,15 @@ export const SUMMARY_TREE_JOB_DEFAULT_LEASE_MS = 5 * 60_000;
 export const SUMMARY_TREE_JOB_DEFAULT_BATCH_SIZE = 200;
 /** Documents built at once; their model calls share one limiter. */
 export const SUMMARY_TREE_JOB_DEFAULT_DOCUMENT_CONCURRENCY = 2;
-/** How long a parked job waits before it is looked at again. */
-export const SUMMARY_TREE_JOB_DEFAULT_PARK_MS = 60_000;
+/** How long a parked job waits before it is looked at again the first time; later parks in a row wait longer. */
+export const SUMMARY_TREE_JOB_DEFAULT_PARK_MS = SUMMARY_TREE_JOB_PARK_BASE_MS;
+/** A job gives the runner up after this many batches, or this long, when another job is waiting. */
+export const SUMMARY_TREE_JOB_DEFAULT_SLICE_BATCHES = 5;
+export const SUMMARY_TREE_JOB_DEFAULT_SLICE_MS = 5 * 60_000;
+/** Jobs of one organization that may run at once (several workers may run jobs; one worker runs one). */
+export const SUMMARY_TREE_JOB_MAX_RUNNING_PER_ORG = 1;
+/** While a slice is over, how often the job asks whether another job is waiting. */
+const SLICE_RECHECK_MS = 5_000;
 /** A sufficient balance reading is reused this long, so a run of small batches does not ask the probe each time. */
 export const SUMMARY_TREE_JOB_DEFAULT_PROBE_TTL_MS = 15_000;
 /** A reserve of this many times the largest call seen so far is held for every call in flight. */
@@ -96,7 +118,7 @@ const RESERVE_FACTOR = 2;
 /** `partial` reasons of a build that the job itself (or another builder) caused; every other `stopped:` is a refusal to spend. */
 const JOB_OWN_STOPS: ReadonlySet<string> = new Set([
   "stopped:build-switch-off", "stopped:cost-cap", "stopped:cancelled", "stopped:lease-lost", "stopped:job-halted",
-  "stopped:build-taken-over", "stopped:project-setting-off",
+  "stopped:build-taken-over", "stopped:project-setting-off", "stopped:time-slice",
 ]);
 /** This many documents in a row failing with an error ends the job: the fault is not the documents'. */
 const MAX_CONSECUTIVE_DOCUMENT_ERRORS = 5;
@@ -113,7 +135,15 @@ export interface SummaryTreeJobRunnerOptions {
   documentConcurrency?: number;
   /** Model calls in flight at once across the job (`WORKER_SUMMARY_TREE_CONCURRENCY`). */
   concurrency?: number;
+  /** First wait of a parked job; doubled for every further park in a row, up to `parkMaxMs`. */
   parkMs?: number;
+  parkMaxMs?: number;
+  /** A job parked this long without progress ends `failed`. */
+  maxParkedMs?: number;
+  /** The slice after which a running job yields to a waiting one: batches, and milliseconds. */
+  sliceBatches?: number;
+  sliceMs?: number;
+  maxRunningPerOrg?: number;
   probeTtlMs?: number;
   /** Replaces the deployment's balance probe. Null: no probe. */
   balanceProbe?: ProviderBalanceProbe | null;
@@ -133,6 +163,7 @@ type JobRow = {
   cost_cents: number | string;
   cursor: string | null;
   estimate: { costCents?: number; modelCalls?: number } | null;
+  park_count: number;
 };
 
 type DocumentRow = {
@@ -153,6 +184,8 @@ type DocumentRow = {
 type Outcome = "ready" | "skipped" | "partial";
 type Halt =
   | { kind: "park"; reason: SummaryTreeJobBlockedReason }
+  /** The slice is over and another job is waiting: back in the queue, behind it. */
+  | { kind: "requeue" }
   | { kind: "finish"; status: "cancelled"; note: string }
   | { kind: "lease-lost" };
 
@@ -178,16 +211,53 @@ export async function runSummaryTreeJobs(sql: Client, options: SummaryTreeJobRun
   const env = options.env ?? options.overrides?.env ?? process.env;
   const leaseMs = options.leaseMs ?? SUMMARY_TREE_JOB_DEFAULT_LEASE_MS;
   const parkMs = options.parkMs ?? SUMMARY_TREE_JOB_DEFAULT_PARK_MS;
-  const [candidate] = await sql<{ id: string; project_id: string }[]>`
-    select id, project_id from summary_tree_jobs where ${claimable(sql)} order by created_at limit 1
+  const parkMaxMs = options.parkMaxMs ?? SUMMARY_TREE_JOB_PARK_MAX_MS;
+  const maxParkedMs = options.maxParkedMs ?? SUMMARY_TREE_JOB_MAX_PARKED_MS;
+  const maxRunningPerOrg = Math.max(1, options.maxRunningPerOrg ?? SUMMARY_TREE_JOB_MAX_RUNNING_PER_ORG);
+  // The pick. One statement chooses the job, locks its row against another worker's pick (`skip locked`) and stamps
+  // the attempt, so whatever happens next (a park before the claim, a claim, an expiry) this job is now the most
+  // recently attempted of its organization and the next pick goes to another.
+  const [candidate] = await sql<{ id: string; org_id: string; project_id: string; status: string; blocked_reason: string | null; park_count: number; expired: boolean }[]>`
+    update summary_tree_jobs j
+    set last_attempt_at = now()
+    where j.id = (
+      select c.id from summary_tree_jobs c
+      where ${claimable(sql)}
+        and (
+          select count(*) from summary_tree_jobs r
+          where r.org_id = c.org_id and r.id <> c.id and r.status = 'running' and r.lease_expires_at >= now()
+        ) < ${maxRunningPerOrg}
+      order by
+        (select max(o.last_attempt_at) from summary_tree_jobs o where o.org_id = c.org_id) asc nulls first,
+        c.last_attempt_at asc nulls first, c.created_at, c.id
+      limit 1
+      for update of c skip locked
+    )
+    returning j.id, j.org_id, j.project_id, j.status, j.blocked_reason, j.park_count,
+      (j.status = 'blocked' and j.parked_since is not null and j.parked_since <= now() - ${interval(maxParkedMs)}::interval) as expired
   `;
   if (!candidate) return 0;
 
-  /** Parks the candidate without taking its lease. */
-  const parkUnclaimed = async (reason: SummaryTreeJobBlockedReason, waitMs = parkMs) => {
+  // Parked too long without progress: the job ends instead of being looked at for ever. Its last parking reason
+  // stays on the row.
+  if (candidate.expired) {
     await sql`
       update summary_tree_jobs
-      set status = 'blocked', blocked_reason = ${reason}, resume_after = now() + ${interval(waitMs)}::interval,
+      set status = 'failed', error = ${SUMMARY_TREE_JOB_NOTES.parkedTooLong}, finished_at = now(), updated_at = now(),
+          resume_after = null, lease_owner = null, lease_expires_at = null
+      where id = ${candidate.id} and status = 'blocked'
+    `;
+    console.warn(`[summary-tree-job] failed job=${candidate.id} project=${candidate.project_id} reason=parked-too-long last=${candidate.blocked_reason ?? "unknown"}`);
+    return 0;
+  }
+
+  /** Parks the candidate without taking its lease. */
+  const parkUnclaimed = async (reason: SummaryTreeJobBlockedReason, waitMs?: number) => {
+    const wait = waitMs ?? summaryTreeJobParkDelayMs(Number(candidate.park_count) + 1, parkMs, parkMaxMs);
+    await sql`
+      update summary_tree_jobs
+      set status = 'blocked', blocked_reason = ${reason}, resume_after = now() + ${interval(wait)}::interval,
+          park_count = park_count + 1, parked_since = coalesce(parked_since, now()), last_attempt_at = now(),
           lease_owner = null, lease_expires_at = null, updated_at = now()
       where id = ${candidate.id} and ${claimable(sql)}
     `;
@@ -208,7 +278,7 @@ export async function runSummaryTreeJobs(sql: Client, options: SummaryTreeJobRun
   const gate = balanceGate(probe, options.probeTtlMs ?? SUMMARY_TREE_JOB_DEFAULT_PROBE_TTL_MS);
   const first = probe ? await gate.check(await candidateRouteLabels(sql, candidate.project_id, options.config)) : { sufficient: true };
   if (!first.sufficient) {
-    await parkUnclaimed("balance", first.retryAfterSeconds ? first.retryAfterSeconds * 1_000 : parkMs);
+    await parkUnclaimed("balance", first.retryAfterSeconds ? first.retryAfterSeconds * 1_000 : undefined);
     return 0;
   }
 
@@ -218,18 +288,19 @@ export async function runSummaryTreeJobs(sql: Client, options: SummaryTreeJobRun
         lease_owner = ${options.workerId},
         lease_expires_at = now() + ${interval(leaseMs)}::interval,
         started_at = coalesce(started_at, now()),
+        last_attempt_at = now(),
         updated_at = now()
     where id = (
       select id from summary_tree_jobs where id = ${candidate.id} and ${claimable(sql)} for update skip locked
     )
-    returning id, org_id, project_id, user_id, max_cost_cents, cost_cents, cursor, estimate
+    returning id, org_id, project_id, user_id, max_cost_cents, cost_cents, cursor, estimate, park_count
   `;
   if (!job) return 0;
 
   try {
     const providers = await projectProviderScope(sql, job.project_id);
     await runWithPrivacyAuditScope({ projectId: job.project_id },
-      () => runWithProviderRateScope(providers, () => runClaimedJob(sql, job, { ...options, env, leaseMs, parkMs }, gate)));
+      () => runWithProviderRateScope(providers, () => runClaimedJob(sql, job, { ...options, env, leaseMs, parkMs, parkMaxMs }, gate)));
   } catch (error) {
     // The first line only, to the worker log and the job row; API callers get closed copy (raw errors stay in telemetry).
     const message = error instanceof Error ? error.message.split("\n")[0] ?? "" : String(error);
@@ -276,10 +347,10 @@ function balanceGate(probe: ProviderBalanceProbe | null, ttlMs: number) {
 async function runClaimedJob(
   sql: Client,
   job: JobRow,
-  options: SummaryTreeJobRunnerOptions & { env: Env; leaseMs: number; parkMs: number },
+  options: SummaryTreeJobRunnerOptions & { env: Env; leaseMs: number; parkMs: number; parkMaxMs: number },
   gate: ReturnType<typeof balanceGate>,
 ): Promise<void> {
-  const { env, leaseMs, parkMs, workerId, config } = options;
+  const { env, leaseMs, parkMs, parkMaxMs, workerId, config } = options;
   const scope = { orgId: job.org_id, projectId: job.project_id };
   // The builder name on a document's `building` row: the job, then this claim. A worker that lost the lease still
   // carries the earlier claim's name, so nothing it writes after the takeover lands on the new holder's rows.
@@ -319,14 +390,47 @@ async function runClaimedJob(
     `;
     console.log(`[summary-tree-job] ${status} job=${job.id} project=${job.project_id}${note ? ` note="${note}"` : ""}`);
   };
-  const park = async (reason: SummaryTreeJobBlockedReason, waitMs = parkMs) => {
+  // Parks in a row since the job last made progress: each waits twice as long as the one before, up to the bound.
+  let parkCount = Number(job.park_count) || 0;
+  const park = async (reason: SummaryTreeJobBlockedReason, waitMs?: number) => {
+    const wait = waitMs ?? summaryTreeJobParkDelayMs(parkCount + 1, parkMs, parkMaxMs);
     await sql`
       update summary_tree_jobs
-      set status = 'blocked', blocked_reason = ${reason}, resume_after = now() + ${interval(waitMs)}::interval,
+      set status = 'blocked', blocked_reason = ${reason}, resume_after = now() + ${interval(wait)}::interval,
+          park_count = ${parkCount + 1}, parked_since = coalesce(parked_since, now()), last_attempt_at = now(),
           lease_owner = null, lease_expires_at = null, updated_at = now()
       where id = ${job.id} and lease_owner = ${workerId}
     `;
     console.log(`[summary-tree-job] parked job=${job.id} project=${job.project_id} reason=${reason}`);
+  };
+
+  // --- Time slice. A job that has used its slice yields to a waiting job; alone, it keeps the runner. ---
+  const sliceMs = Math.max(0, options.sliceMs ?? SUMMARY_TREE_JOB_DEFAULT_SLICE_MS);
+  const sliceBatches = Math.max(1, options.sliceBatches ?? SUMMARY_TREE_JOB_DEFAULT_SLICE_BATCHES);
+  const sliceStartedAt = Date.now();
+  let batchesDone = 0;
+  /** Model calls that returned in this claim. */
+  let callsThisClaim = 0;
+  let othersCheckedAt = 0;
+  const sliceOver = () => batchesDone >= sliceBatches || Date.now() - sliceStartedAt >= sliceMs;
+  /** Whether the slice is over and another job (of any organization) could be claimed now. Asked at most every few seconds. */
+  const shouldYield = async (): Promise<boolean> => {
+    // Never before this claim has done something: two jobs that yield to each other at once would both stand still.
+    if (batchesDone === 0 && callsThisClaim === 0) return false;
+    if (!sliceOver()) return false;
+    if (othersCheckedAt > 0 && Date.now() - othersCheckedAt < Math.min(SLICE_RECHECK_MS, Math.max(0, sliceMs))) return false;
+    othersCheckedAt = Date.now();
+    const [waiting] = await sql<{ id: string }[]>`select id from summary_tree_jobs where id <> ${job.id} and ${claimable(sql)} limit 1`;
+    return Boolean(waiting);
+  };
+  /** Back in the queue behind the jobs that are waiting; the next claim resumes at the cursor. */
+  const requeue = async () => {
+    await sql`
+      update summary_tree_jobs
+      set status = 'queued', last_attempt_at = now(), lease_owner = null, lease_expires_at = null, updated_at = now()
+      where id = ${job.id} and lease_owner = ${workerId}
+    `;
+    console.log(`[summary-tree-job] yielded job=${job.id} project=${job.project_id} reason=time-slice`);
   };
 
   // --- Spend. Recorded per call; the cap is checked against it before every call. ---
@@ -381,6 +485,7 @@ async function runClaimedJob(
     spentCents += costCents;
     // Known from the first call on, also when calls cost nothing (a deployment without prices reserves nothing).
     if (isModelCall) largestCallCents = Math.max(largestCallCents ?? 0, costCents);
+    if (isModelCall) callsThisClaim += 1;
     persisting = persisting.then(async () => {
       try {
         await sql.begin(async (tx) => {
@@ -485,8 +590,16 @@ async function runClaimedJob(
             usage: { record, flush },
             // The job decided once; the build asks before its first call.
             hostedCallRefusal: async () => null,
-            // With the balance, before the first call and before every commit window: the project's stored setting.
-            gate: async () => ((await projectSummaryTreeEnabled(sql, scope)) ? null : "project-setting-off"),
+            // With the balance, before the first call and before every commit window: the project's stored setting,
+            // and whether this job's slice is over while another job waits.
+            gate: async () => {
+              if (!(await projectSummaryTreeEnabled(sql, scope))) return "project-setting-off";
+              if (await shouldYield()) {
+                halt ??= { kind: "requeue" };
+                return "time-slice";
+              }
+              return null;
+            },
             stopReason,
             acquireCall,
             callLimiter,
@@ -525,6 +638,8 @@ async function runClaimedJob(
           case "blocked":
             // Another build holds it and still reports: left to that build (and to the next job if it dies).
             if (result.reason === "build-in-progress") return { outcome: "partial", result };
+            // The slice ended before this document's first call: the job goes back in the queue (set by the gate).
+            if (result.reason === "time-slice") return null;
             halt ??= result.reason === "project-setting-off"
               ? { kind: "finish", status: "cancelled", note: SUMMARY_TREE_JOB_NOTES.disabled }
               : { kind: "park", reason: blockedReason(result.reason) };
@@ -577,7 +692,13 @@ async function runClaimedJob(
       }
       const balance = await gate.check(labels);
       if (!balance.sufficient) {
-        await park("balance", balance.retryAfterSeconds ? balance.retryAfterSeconds * 1_000 : parkMs);
+        await park("balance", balance.retryAfterSeconds ? balance.retryAfterSeconds * 1_000 : undefined);
+        return;
+      }
+      // Whether the organization may spend, before any document is selected or any artifact is read: a job parked for
+      // credits is looked at again with one small query, not by re-reading a document's embed artifact.
+      if (await orgSpendRefusal(sql, scope)) {
+        await park("credits");
         return;
       }
       if (spentCents >= cap) {
@@ -679,6 +800,7 @@ async function runClaimedJob(
         delta.nodes += done.nodes;
         reached = document.id;
       }
+      const progressed = delta.ready + delta.skipped + delta.partial > 0;
       const [state] = await sql<{ cancel_requested_at: Date | null }[]>`
         update summary_tree_jobs
         set documents_ready = documents_ready + ${delta.ready},
@@ -686,6 +808,9 @@ async function runClaimedJob(
             documents_partial = documents_partial + ${delta.partial},
             nodes_built = nodes_built + ${delta.nodes},
             cursor = ${reached},
+            -- Progress ends a row of parks: the next park waits the base interval again.
+            park_count = case when ${progressed} then 0 else park_count end,
+            parked_since = case when ${progressed} then null else parked_since end,
             lease_expires_at = now() + ${interval(leaseMs)}::interval,
             updated_at = now()
         where id = ${job.id} and lease_owner = ${workerId}
@@ -696,6 +821,8 @@ async function runClaimedJob(
         return;
       }
       cursor = reached;
+      if (progressed) parkCount = 0;
+      batchesDone += 1;
       if (state.cancel_requested_at || cancelRequested) {
         await finish("cancelled", SUMMARY_TREE_JOB_NOTES.cancelled);
         return;
@@ -708,6 +835,11 @@ async function runClaimedJob(
       }
       if (stopped?.kind === "park") {
         await park(stopped.reason);
+        return;
+      }
+      // The slice is over and another job is waiting: this one goes back in the queue behind it.
+      if (stopped?.kind === "requeue" || await shouldYield()) {
+        await requeue();
         return;
       }
     }
