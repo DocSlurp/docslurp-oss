@@ -7,6 +7,7 @@
 - Asset ledger: reject repeat references on new or updated unlinked rows with an idempotent NOT VALID database constraint; retain historical rows for separate cleanup.
 ## Ingest version tagging and typed unavailable states (2026-11-13, draft, needs council)
 
+- Security #406 (partial): refuse hand-built documents without a scan decision in every non-development environment and service profile, before source storage reads; normalize sandbox provider ids with the shared ASCII rule. Regression coverage executes the real source modules. ClamAV startup age/disable and database-test guard follow-ups remain open.
 - Extraction metadata allocation (2026-11-14): count whitespace and word runs without temporary arrays; defer critique heatmaps and reuse unchanged final maps. Exhaustive UTF-16 equivalence and focused extraction tests; local diagnostic in `performance/text-counts-2026-11-14/`. Full ingestion throughput remains unmeasured.
 
 - Documents and runs record `ingest_version` and `ingest_capabilities` (migration 0160; existing rows backfill to 0 with no capabilities). The worker stamps them on statements a run already makes: documents with capabilities measured from stored rows (`parseSourceDecision`, `pageFacts`, `figureLedger`), runs with the build's. `GET /v1/ingest-version` (SDK `getIngestVersion`) reports the current version; `GET /v1/documents/:id` adds `ingest.updateAvailable`.
@@ -70,6 +71,10 @@
 ## Constrained image-transcription endpoint selection (2026-11-10)
 
 - Restrict the pinned transcription profile and its pricing catalog to the remaining approved hosts. Initial requests and refusal retries preserve that allowlist, latency preference and existing price ceiling; request-body fixtures remain immutable.
+
+## Parser source policy hardening (2026-11-15)
+
+- Parser source hardening follow-up: require VM isolation in every non-development environment, affirmatively require an original/scanned-copy decision and SHA-256 before source reads, retain loader-owned quarantine upload bindings, and cover development plus production/staging/service lifecycles. Both independent council approvals are recorded; full deployed VM integration remains unverified.
 
 ## Independent native admission pause (2026-11-10)
 

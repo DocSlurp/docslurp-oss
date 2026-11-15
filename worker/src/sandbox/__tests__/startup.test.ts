@@ -8,7 +8,7 @@ import {
   type InitializedParserSandbox,
 } from "../startup.js";
 import { probePidNamespace, spawnContained } from "../teardown.js";
-import { SandboxPolicyError } from "../types.js";
+import { resolveSandboxProviderId } from "../registry.js";
 import { UNSAFE_OVERRIDES, UnsafeOverrideError } from "../../lib/unsafe-overrides.js";
 
 describe("initializeParserSandbox", () => {
@@ -53,11 +53,14 @@ describe("initializeParserSandbox", () => {
     expect(probe).not.toHaveBeenCalled();
   });
 
-  it("refuses the platform-default none provider outside development", async () => {
+  it("defaults to the VM outside development and refuses an explicit none provider", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
     const { default: none } = await import("../providers/none/index.js");
     vi.spyOn(none, "probe").mockResolvedValue({ ok: true, detail: "test", isolation: { filesystem: false, network: "none", processes: true, location: "local" } });
-    await expect(initializeParserSandbox({ NODE_ENV: "staging" }, "darwin")).rejects.toBeInstanceOf(SandboxPolicyError);
+    expect(resolveSandboxProviderId({ NODE_ENV: "staging" }, "darwin")).toBe("modal");
+    await expect(initializeParserSandbox({ NODE_ENV: "staging", DOCSLURP_PARSER_SANDBOX: "none" }, "darwin"))
+      .rejects.toBeInstanceOf(UnsafeOverrideError);
+    expect(none.probe).not.toHaveBeenCalled();
     await expect(initializeParserSandbox({ NODE_ENV: "development" }, "darwin")).resolves.toMatchObject({ provider: none });
   });
 

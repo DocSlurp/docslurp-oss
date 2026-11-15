@@ -29,9 +29,9 @@
  * document parses its upload ("unscanned-allowed"), exactly as before.
  */
 
-import { hasCurrentParseDecision, PARSE_SOURCE_SCAN_VERSION, quarantineRequired } from "@docslurp/shared";
+import { hasCurrentParseDecision, isDevelopmentEnvironment, PARSE_SOURCE_SCAN_VERSION, quarantineRequired } from "@docslurp/shared";
 
-import { claimQuarantineUploadIssuer, type QuarantineUpload, UnscannedParseSourceError } from "../sandbox/source-integrity.js";
+import { assertDecided, claimQuarantineUploadIssuer, type QuarantineUpload, UnscannedParseSourceError } from "../sandbox/source-integrity.js";
 
 /** The scan version and the shared decision predicate live in @docslurp/shared (the API reports rescans with them). */
 export { PARSE_SOURCE_SCAN_VERSION, quarantineRequired };
@@ -93,10 +93,6 @@ const SHA256_HEX = /^[0-9a-f]{64}$/;
 /** A NUL byte: no object store, filesystem or URL accepts it, and storage.ts refuses the prefix by name first. */
 const UNSCANNED_KEY_PREFIX = "\u0000unscanned-parse-source/";
 
-function isProduction(env: NodeJS.ProcessEnv): boolean {
-  return (env.NODE_ENV ?? "").trim().toLowerCase() === "production";
-}
-
 export { UnscannedParseSourceError };
 
 export function unscannedParseSourceKey(documentId: string): string {
@@ -142,16 +138,16 @@ export interface SourcedDocument {
   sourceKey: string;
   sourceSha256?: string | null;
   originalSourceSha256?: string | null;
-  /** Required on loader documents (models.ts Document). Absent at runtime (a hand-built object): unscanned in production. */
+  /** Required on loader documents (models.ts Document). Absent at runtime (a hand-built object): unscanned outside development. */
   parseSourceDecision?: ParseSourceDecision;
 }
 
 /**
  * The document's decision as the gates read it (informational I-1 tripwire): an object with no decision field was not
- * built by the loader, which always sets one, so in production it is unscanned, never "its own upload".
+ * built by the loader, which always sets one, so outside development it is unscanned, never "its own upload".
  */
 export function effectiveParseSourceDecision(document: Pick<SourcedDocument, "parseSourceDecision">, env: NodeJS.ProcessEnv = process.env): ParseSourceDecision | undefined {
-  if (document.parseSourceDecision === undefined && isProduction(env)) return "unscanned";
+  if (document.parseSourceDecision === undefined && !isDevelopmentEnvironment(env)) return "unscanned";
   return document.parseSourceDecision;
 }
 
@@ -170,7 +166,8 @@ export function bindDocumentUpload(document: SourcedDocument, row: Pick<ParseSou
  * Throw unless the document may be parsed: refused when it has no decision from this build's quarantine. Every stage but
  * quarantine, the deferred page renderer and materialization call it before reading a byte.
  */
-export function assertParseSourceDecided(document: Pick<SourcedDocument, "id" | "parseSourceDecision" | "sourceKey">): void {
+export function assertParseSourceDecided(document: SourcedDocument): void {
+  assertDecided(document);
   if (effectiveParseSourceDecision(document) === "unscanned" || isUnscannedParseSourceKey(document.sourceKey)) {
     console.error(`[worker-source] status=parse-source-unscanned metric=parse_source_unscanned document=${document.id}`);
     throw new UnscannedParseSourceError(document.id);
@@ -191,13 +188,13 @@ export function hasScannedParseCopy(document: Pick<SourcedDocument, "parseSource
 /**
  * The upload itself, for the quarantine stage only: it scans the original (and makes the copy). A loader document whose
  * binding is missing (copied or serialized after loading) fails: its key is not the upload's. A document built in memory
- * (no decision field outside production, or "unscanned-allowed": tests) is its own upload.
+ * (no decision field in development, or "unscanned-allowed": tests) is its own upload.
  */
 export function originalSourceForQuarantine(document: SourcedDocument): QuarantineUpload {
   const upload = uploads.get(document);
   if (upload) return issueQuarantineUpload({ id: document.id, sourceKey: upload.key, sourceSha256: upload.sha256 });
   const decision = effectiveParseSourceDecision(document);
-  if (decision !== undefined && decision !== "unscanned-allowed") throw new Error(`document ${document.id}: quarantine has no upload binding for a loaded document`);
+  if (!isDevelopmentEnvironment() || (decision !== undefined && decision !== "unscanned-allowed")) throw new Error(`document ${document.id}: quarantine has no upload binding for a loaded document`);
   return issueQuarantineUpload({ id: document.id, sourceKey: document.sourceKey, sourceSha256: document.sourceSha256 ?? null });
 }
 
