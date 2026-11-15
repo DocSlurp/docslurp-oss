@@ -1,3 +1,6 @@
+// Shared schemas are evaluated in browsers too; server callers still read the live environment.
+const extractorEnvironment = (): Record<string, string | undefined> => typeof process === "undefined" ? {} : process.env;
+
 /** Maximum PDF source size the isolated VM PDF route (`vm-pdf`) accepts. */
 export const VM_PDF_MAX_SOURCE_BYTES = 500 * 1024 * 1024;
 
@@ -9,7 +12,7 @@ export type PdfExtractorSetting = (typeof PDF_EXTRACTOR_SETTINGS)[number];
  * DOCSLURP_PDF_EXTRACTOR, trimmed: null for the built-in order, or a known id. Any other value throws, so a typo or a
  * retired value stops the process instead of silently parsing PDFs on the worker host. Worker and API both use this.
  */
-export function resolvePdfExtractorSetting(env: Record<string, string | undefined> = process.env): PdfExtractorSetting | null {
+export function resolvePdfExtractorSetting(env: Record<string, string | undefined> = extractorEnvironment()): PdfExtractorSetting | null {
   const raw = env.DOCSLURP_PDF_EXTRACTOR?.trim() ?? "";
   if (!raw) return null;
   if ((PDF_EXTRACTOR_SETTINGS as readonly string[]).includes(raw)) return raw as PdfExtractorSetting;
@@ -32,7 +35,7 @@ function explicitPdfMode(env: Record<string, string | undefined>): (typeof PDF_M
  * DOCSLURP_PDF_EXTRACTOR=vm-pdf, DOCSLURP_VM_PDF_INSTALLED=1, or DOCSLURP_SERVICE_PROFILE=service (a multi-tenant service never
  * parses customer PDFs on the worker host; without a provider the worker refuses to start). Throws on an unknown value.
  */
-export function sandboxedPdfConfigured(env: Record<string, string | undefined> = process.env): boolean {
+export function sandboxedPdfConfigured(env: Record<string, string | undefined> = extractorEnvironment()): boolean {
   const installed = env.DOCSLURP_VM_PDF_INSTALLED?.trim() ?? "";
   if (!["", "0", "1"].includes(installed)) throw new Error("DOCSLURP_VM_PDF_INSTALLED must be empty, 0 or 1");
   const serviceProfile = env.DOCSLURP_SERVICE_PROFILE?.trim().toLowerCase() === "service";
@@ -48,13 +51,13 @@ export function sandboxedPdfConfigured(env: Record<string, string | undefined> =
  *  - `off`: neither. PDF extraction is refused (no host parser runs instead) and the worker logs it at startup.
  * A VM selection wins over `local`, and the worker refuses to start with both.
  */
-export function resolvePdfMode(env: Record<string, string | undefined> = process.env): PdfMode {
+export function resolvePdfMode(env: Record<string, string | undefined> = extractorEnvironment()): PdfMode {
   if (sandboxedPdfConfigured(env)) return "vm";
   return explicitPdfMode(env) === "local" ? "local" : "off";
 }
 
 /** DOCSLURP_PDF_MODE=local was asked for (whether or not the rest of the configuration allows it). */
-export function localPdfModeRequested(env: Record<string, string | undefined> = process.env): boolean {
+export function localPdfModeRequested(env: Record<string, string | undefined> = extractorEnvironment()): boolean {
   return explicitPdfMode(env) === "local";
 }
 
@@ -264,7 +267,7 @@ export const SANDBOXED_PDF_EXTRACTOR_ID = "vm-pdf";
  */
 export function hostPdfExtractorsUnderSandbox(
   config: unknown,
-  env: Record<string, string | undefined> = process.env,
+  env: Record<string, string | undefined> = extractorEnvironment(),
 ): Array<{ path: Array<string | number>; id: string }> {
   if (!sandboxedPdfConfigured(env) || typeof config !== "object" || config === null) return [];
   const value = config as { order?: unknown; pages?: unknown; enrich?: unknown; voting?: unknown };
