@@ -458,6 +458,32 @@ describe("runtime database identity gate (council N #1)", () => {
     expect(await check(worker, worker)).toEqual([]);
   });
 
+  it("recognizes the admission trigger without granting runtime access to the fence", async () => {
+    for (const role of [app, worker]) {
+      const { rows: [privileges] } = await db.query<{ execute: boolean; schema: boolean }>(
+        "select has_function_privilege($1, 'docslurp_deploy.check_ingest_admission()', 'EXECUTE') as execute, has_schema_privilege($1, 'docslurp_deploy', 'USAGE') as schema",
+        [role],
+      );
+      expect(privileges).toEqual({ execute: false, schema: false });
+      expect(await denied(role, "update docslurp_deploy.ingest_admission set holder = null")).toBe(true);
+    }
+  });
+
+  it("refuses custom-type definer overloads regardless of search_path", async () => {
+    await db.exec(`create domain public.text as pg_catalog.text;
+      create function public.pricing_state_raise(public.text,bigint) returns bigint language sql as 'select $2';
+      revoke all on function public.pricing_state_raise(public.text,bigint) from public;
+      create function public.realtime_compact_revisions(public.text) returns int language sql security definer as 'select 1'`);
+    try {
+      for (const searchPath of ["public,pg_catalog", "pg_catalog,public"]) {
+        await db.exec(`set search_path=${searchPath}`);
+        expect((await check(app, app)).join("\n")).toMatch(/SECURITY DEFINER/);
+      }
+    } finally {
+      await db.exec("set search_path=public; drop function public.realtime_compact_revisions(public.text); drop function public.pricing_state_raise(public.text,bigint); drop domain public.text");
+    }
+  });
+
   it("refuses the owner or a superuser, whatever role it claims", async () => {
     const problems = (await check(null, app)).join("\n");
     expect(problems).toMatch(/superuser/);
