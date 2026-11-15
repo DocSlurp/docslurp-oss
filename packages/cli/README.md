@@ -155,6 +155,7 @@ Run `docslurp` with no arguments, or `docslurp --help`, for built-in usage.
 | `extract-download <extract-id>` | Print a two-minute signed URL for the extract's results zip (a server key with `artifacts`, or a login with `read`) | None |
 | `full-index` | Index every remaining page of a project (or one document) | `--project`, `--document`, `--estimate`, `--watch`, `--json` |
 | `reprocess <run-id>` | Re-run a run, optionally from a stage | `--stage-from`, `--chart-export`, `--estimate`, `--watch`, `--json` |
+| `summary-tree backfill` / `summary-tree status` / `summary-tree cancel <job-id>` | Build the summary tree for a project's already indexed documents, read the backfill's estimate and job, or stop it | `--project`, `--max-cost-cents` (required to start), `--estimate`, `--watch`, `--json` |
 | `jobs get <job-id>` / `jobs watch <job-id>` | Print a background job, or follow it (SSE, polling fallback) until it ends | `--json` (get), `--timeout` (watch; never applies while the job is blocked) |
 | `status <run-id>` | Print progress for a run | `--watch` |
 | `runs` | List the runs you can access | None |

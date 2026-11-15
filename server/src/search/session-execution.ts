@@ -11,7 +11,7 @@ import { reportPublicError } from "../lib/public-errors.js";
 import { startTelemetrySpan } from "@docslurp/shared/observability";
 import { calibrateSearchConfidence } from "./confidence.js";
 import { compressChunks } from "./contextual-compression.js";
-import { emitSearchPhase, recordSearchPhase, timePhase } from "./timings.js";
+import { countSearchEvent, emitSearchPhase, recordSearchPhase, timePhase } from "./timings.js";
 import { mmrSelectWithDiagnostics } from "./mmr.js";
 import { lostInTheMiddleReorder } from "./position-reorder.js";
 import { rerankHosted } from "./hosted-rerank.js";
@@ -38,6 +38,7 @@ import {
   recordZeroResultDiagnostics,
 } from "../services/search-controls.js";
 import { leanSearchHistory } from "./lean-logging.js";
+import { capIncludedSummaries, placeGuidedChunks, summaryTreeOutcome, type SummaryTreeLegResult, type SummaryTreeSearchPlan } from "./summary-tree.js";
 
 export { searchChunkToResult };
 
@@ -86,6 +87,11 @@ export interface SearchSessionRetrievalInput
   rerankScope?: { orgId: string; projectId: string };
   openRouterApiKey?: string | null;
   privacyMode: PrivacyMode;
+  /**
+   * The summary-tree leg of this search (search/summary-tree.ts). `result()` is read after `retrieveCandidateLists`
+   * settles; null means the leg did not run.
+   */
+  summaryTree?: { plan: SummaryTreeSearchPlan; result(): SummaryTreeLegResult | null };
 }
 
 export function searchResultsToChunks(results: SearchResult[]): SearchChunk[] {
@@ -285,7 +291,7 @@ export async function executeSearchSessionRetrieval(
       input.options.useMmr ||
       input.options.useContextualCompression ||
       input.options.resultOrder === "prompt");
-  const chunks = shouldPostProcess
+  const rankedChunks = shouldPostProcess
     ? await applySearchPostRetrievalProcessing({
         query: input.retrievalQuery ?? input.query,
         chunks: fused,
@@ -301,8 +307,40 @@ export async function executeSearchSessionRetrieval(
         .slice(0, input.limit)
         .map((chunk, index) => ({ ...chunk, score: 1 / (1 + index) }));
 
+  // The tree leg's chunks are placed last, after a protected prefix of the list above (placeGuidedChunks): they are
+  // never a fusion list, so they cannot outrank or push out what the chunk legs ranked first.
+  const tree = input.summaryTree?.result() ?? null;
+  let chunks = rankedChunks;
+  if (input.summaryTree) {
+    // A leg that never started (this search's mode cannot run it) is a skip too; one that ran counted its own.
+    if (!tree) countSearchEvent("summaryTreeSkipped");
+    let placed = 0;
+    let protectedPrefix = rankedChunks.length;
+    if (tree && tree.applied !== "off" && tree.guided.length > 0) {
+      const placement = placeGuidedChunks({
+        base: rankedChunks,
+        guided: tree.guided,
+        limit: input.limit,
+        // One result per file (search-controls.ts) runs in finalize: a guided chunk it would remove is not placed.
+        dedupeKey: input.projectSettings?.dedupeByFilename ? (chunk) => chunk.filename || chunk.documentId : undefined,
+      });
+      placed = placement.placed;
+      protectedPrefix = placement.protectedPrefix;
+      if (placed > 0) chunks = placement.results.map((chunk, index) => ({ ...chunk, score: 1 / (1 + index) }));
+    }
+    input.session.recordDiagnostic("summaryTree", {
+      requested: input.summaryTree.plan.requested,
+      applied: tree?.applied ?? "off",
+      skipped: tree ? tree.skipped ?? null : "mode",
+      ...(tree ? tree.stats : {}),
+      guided: tree?.guided.length ?? 0,
+      placed,
+      protectedPrefix,
+    });
+  }
+
   recordSearchPhase("fuse", performance.now() - fuseStarted);
-  return timePhase("finalize", () => finalizeSearchSessionExecution({
+  const response = await timePhase("finalize", () => finalizeSearchSessionExecution({
     query: input.query,
     retrievalQuery: input.retrievalQuery,
     userId: input.userId,
@@ -320,6 +358,13 @@ export async function executeSearchSessionRetrieval(
     wholeCorpusFallback: input.wholeCorpusFallback,
     relevanceFloor: { minScore: floor.minScore, dropped: floor.dropped },
   }));
+  if (!input.summaryTree) return response;
+  return {
+    ...response,
+    summaryTree: summaryTreeOutcome(input.summaryTree.plan, tree),
+    // `include`: summaries ride beside the results in their own labelled list, never inside it.
+    ...(tree?.applied === "include" ? { summaries: capIncludedSummaries(tree.summaries, response.results.map((result) => result.text)) } : {}),
+  };
 }
 
 /**

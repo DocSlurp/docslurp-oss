@@ -138,8 +138,26 @@ export const pdfProfileSchema = z.strictObject({
    * grids). The extractor's own tables can make more pages table-heavy.
    */
   ruledTablePages: count,
+  /**
+   * Sampled pages per cost route (page-cost-route.ts `pageCostRoute`, in PAGE_COST_ROUTES order: ocr-read, ocr-blank,
+   * table, text, unknown): what production does with the page. Absent from profilers before it.
+   */
+  routePages: z.array(count).length(5).optional(),
+  observedVectorPaths: z.number().int().nonnegative().max(10 ** 12).optional(),
+  observedImagePlacements: count.optional(),
+  lexicalPages: z.array(count).length(3).optional(),
+  chartCandidateUnknownPages: count.optional(),
+  imageRegionSizes: z.array(count).length(5).optional(),
+  imageRegionClasses: z.array(count).length(4).optional(),
+  repeatedImagePlacements: count.optional(),
 });
 export type PdfProfile = z.infer<typeof pdfProfileSchema>;
+
+/** Counts that partition `total`: kept in order, each cut to what is left. */
+function clampPartition(counts: readonly number[], total: number): number[] {
+  let left = Math.max(0, total);
+  return counts.map((value) => { const kept = Math.min(value, left); left -= kept; return kept; });
+}
 
 export const fileProfileSchema = z.strictObject({
   schema: z.literal(FILE_PROFILE_SCHEMA),
@@ -247,6 +265,8 @@ export function normalizeFileProfile(profile: FileProfile, file: { size: number 
         // Only pages with native text, and never a page already held by a full-page image.
         scanBesideTextUnknownPages: Math.min(pdf.scanBesideTextUnknownPages, sampled),
         ruledTablePages: Math.min(pdf.ruledTablePages, sampled),
+        // Routes are a partition of the sampled pages: a profile whose routes sum past them is cut back route by route.
+        ...(pdf.routePages ? { routePages: clampPartition(pdf.routePages, sampled) } : {}),
         scanBesideTextPages: Math.min(pdf.scanBesideTextPages, Math.max(0, sampled - Math.min(sampled, pdf.rasterPages)), pdf.textLayerPages),
         medianPageWidthPt: Math.min(pdf.medianPageWidthPt, pdf.maxPageWidthPt),
         medianPageHeightPt: Math.min(pdf.medianPageHeightPt, pdf.maxPageHeightPt),

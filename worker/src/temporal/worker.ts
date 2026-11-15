@@ -553,6 +553,36 @@ async function main(): Promise<void> {
     : null;
   graphJobTimer?.unref();
 
+  // Summary tree backfill (summary_tree_jobs, summary-tree/backfill-job.ts): one job at a time on the maintenance
+  // leader, leased so a crashed worker's job resumes elsewhere. A no-op while no job is queued; a job parks itself
+  // while DOCSLURP_SUMMARY_TREE_BUILD is off or the deployment's balance probe reports below its floor.
+  let summaryTreeJobRunning = false;
+  const runSummaryTreeJobs = () => {
+    if (summaryTreeJobRunning) return;
+    summaryTreeJobRunning = true;
+    withBackgroundSpan("worker.summary-tree-jobs", () => store.runSummaryTreeJobs({
+      workerId: workerIdentity,
+      config: cfg,
+      storage,
+      runner,
+      documentConcurrency: cfg.summaryTreeJobDocumentConcurrency,
+    }))
+      .catch((err) => {
+        console.error(
+          "summary tree job sweep failed:",
+          err instanceof Error ? err.message : String(err)
+        );
+      })
+      .finally(() => {
+        summaryTreeJobRunning = false;
+      });
+  };
+  const summaryTreeJobPollIntervalMs = cfg.summaryTreeJobPollIntervalMs ?? 5_000;
+  const summaryTreeJobTimer = summaryTreeJobPollIntervalMs > 0
+    ? setInterval(onLeader(runSummaryTreeJobs), summaryTreeJobPollIntervalMs)
+    : null;
+  summaryTreeJobTimer?.unref();
+
   // Figure resumes (figures/resume-runner.ts): every worker runs the runner (the fenced lease makes that safe), at most
   // DOCSLURP_FIGURE_RESUME_CONCURRENCY at once here and one per organization fleet-wide; a no-op unless
   // DOCSLURP_FIGURE_RESUME and DOCSLURP_DOPPLER_IMAGE_EXTRACT are on and the PDF provider can resume. The leader runs the
@@ -702,6 +732,7 @@ async function main(): Promise<void> {
     clearInterval(retentionTimer);
     if (purgeTimer) clearInterval(purgeTimer);
     if (graphJobTimer) clearInterval(graphJobTimer);
+    if (summaryTreeJobTimer) clearInterval(summaryTreeJobTimer);
     clearInterval(figureResumeTimer);
     clearInterval(figureAuditTimer);
     clearInterval(figureBacklogTimer);

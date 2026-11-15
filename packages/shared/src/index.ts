@@ -39,6 +39,8 @@ export * from "./artifacts.js";
 export * from "./pii.js";
 export * from "./temporal-connection.js";
 export * from "./vector-namespace.js";
+export * from "./summary-tree.js";
+export * from "./summary-tree-job.js";
 
 // Sub-modules created during refactor
 export * from "./embedding.js";
@@ -54,6 +56,7 @@ export * from "./page-table-routing.js";
 export * from "./file-formats.js";
 export * from "./file-sniff.js";
 export * from "./page-raster-routing.js";
+export * from "./page-cost-route.js";
 export * from "./text-layer-quality.js";
 export { buildProfilerRules, type ProfilerRules } from "./estimate-profiler-rules.js";
 export * from "./upload-quote.js";

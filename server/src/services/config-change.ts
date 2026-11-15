@@ -47,6 +47,7 @@ import {
 import { enforceLiveBudgetCaps } from "./run-creation.js";
 import { assertBackfillReusableMany, isReprocessRejectedError } from "./runs.js";
 import { getProject, loadManagedPipelineOverrides, resolveUpdatedPipeline, updateProject, type ProjectUpdateOptions } from "./projects.js";
+import { loadProjectSummaryTree, withProjectSummaryTree } from "./run-summary-tree.js";
 
 /**
  * Config-change jobs (spec 6.2). A project PATCH is classified by `analyzePipelineChange`; changes that
@@ -373,7 +374,12 @@ export async function createReindexRuns(args: {
   const { tx, project } = args;
   // This path inserts its runs directly, so it applies the same managed-model resolution as runCreation.create:
   // model values in the pipeline are dropped and only the project's explicit admin overrides apply.
-  const pipeline = resolveManagedPipeline(args.pipeline, await loadManagedPipelineOverrides(project.id, tx as never), `re-index in project ${project.id}`).pipeline;
+  // The summary tree is the project's stored setting, read in this transaction (run-summary-tree.ts): a settings save
+  // never changes it, so neither does the re-index that save starts.
+  const pipeline = withProjectSummaryTree(
+    resolveManagedPipeline(args.pipeline, await loadManagedPipelineOverrides(project.id, tx as never), `re-index in project ${project.id}`).pipeline,
+    await loadProjectSummaryTree(project.id, tx as never),
+  );
   // A project with no chart tier: each document keeps the tier its source run stamped (as reprocess does), not the
   // tier of the surface that triggered this reindex (council M5). An explicit project tier applies to every document.
   // "Explicit" uses the same rule as run resolution: a stored free the deployment does not allow counts as unset (R2-L4).

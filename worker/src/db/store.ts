@@ -49,6 +49,7 @@ import {
 } from "../graph/communities.js";
 import { lockProjectGraph, replaceDocumentGraph, type ReplaceDocumentGraphInput } from "../graph/graph-store.js";
 import { runGraphJobs, type GraphJobRunnerOptions } from "../graph/rebuild-job.js";
+import { runSummaryTreeJobs, type SummaryTreeJobRunnerOptions } from "../summary-tree/backfill-job.js";
 import {
   drainDocumentCleanupQueue,
   drainStorageCleanupQueue,
@@ -3437,6 +3438,11 @@ export class Store {
     return await figureResumeBacklog(this.sql);
   }
 
+  /** Claims and runs one queued, parked or lease-expired summary tree backfill job (see summary-tree/backfill-job.ts). */
+  async runSummaryTreeJobs(options: SummaryTreeJobRunnerOptions): Promise<number> {
+    return await runSummaryTreeJobs(this.sql, options);
+  }
+
   /** Claims and runs queued project graph rebuilds (see graph/rebuild-job.ts). */
   async runGraphJobs(options: GraphJobRunnerOptions): Promise<number> {
     return await runGraphJobs(this.sql, options);
@@ -3850,6 +3856,18 @@ export class Store {
         await this.sql`
           delete from document_summaries
           where run_id = ${row.run_id}
+        `;
+      }
+      if (await this.tableExists("document_summary_trees")) {
+        // The summary tree is derived from this run's chunks. Its registry rows go here; its rows in the project's
+        // summaries table go with the vector targets handed to the cleanup sweep below (strict delete).
+        await this.sql`
+          delete from document_summary_tree_nodes
+          where document_id in (select id from documents where run_id = ${row.run_id})
+        `;
+        await this.sql`
+          delete from document_summary_trees
+          where document_id in (select id from documents where run_id = ${row.run_id})
         `;
       }
       if (await this.tableExists("document_chunks")) {
