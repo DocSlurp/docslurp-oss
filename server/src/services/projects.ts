@@ -717,22 +717,13 @@ async function readProject(projectId: string, orgId: string): Promise<ProjectRec
       coalesce(inflight.document_count, 0)::int as pending_document_count,
       coalesce(inflight.page_count, 0)::int as pending_page_count,
       coalesce(j.run_count, 0)::int as run_count,
-      coalesce((
-        select count(*)::int
-        from search_sessions s
-        where s.project_id = w.id
-      ), 0) as search_session_count,
+      coalesce(act.search_sessions, 0)::int as search_session_count,
       coalesce((
         select count(*)::int
         from chat_sessions cs
         where cs.project_id = w.id
       ), 0) as chat_thread_count,
-      coalesce((
-        select count(*)::int
-        from chat_turns ct
-        join chat_sessions cs on cs.id = ct.session_id
-        where cs.project_id = w.id
-      ), 0) as chat_message_count,
+      coalesce(act.chat_turns, 0)::int as chat_message_count,
       recent.id as latest_run_id,
       recent.status as latest_run_status,
       w.archived_at::text as archived_at,
@@ -758,6 +749,14 @@ async function readProject(projectId: string, orgId: string): Promise<ProjectRec
     from projects w
     -- Current corpus totals are trigger-maintained; never aggregate documents here.
     left join project_corpus_stats cs on cs.project_id = w.id
+    -- Search-session and chat-turn totals are trigger-maintained too (0165): a few counter rows per project (one per
+    -- concurrent writer, folded back by the maintenance sweep),
+    -- keyed by the project already authorized above, so history is never counted here.
+    left join lateral (
+      select sum(a.search_sessions) as search_sessions, sum(a.chat_turns) as chat_turns
+      from project_activity_stats a
+      where a.project_id = w.id
+    ) act on true
     -- Searchable pages: only deferred documents can be partly indexed (skipped while the flag is off).
     left join lateral (
       select coalesce(sum(greatest(d.page_count - coalesce(ps.indexed, 0), 0)), 0)::int as unindexed_pages
@@ -826,22 +825,13 @@ export async function listProjects(userId: string): Promise<ProjectRecord[]> {
       coalesce(inflight.document_count, 0)::int as pending_document_count,
       coalesce(inflight.page_count, 0)::int as pending_page_count,
       coalesce(j.run_count, 0)::int as run_count,
-      coalesce((
-        select count(*)::int
-        from search_sessions s
-        where s.project_id = w.id
-      ), 0) as search_session_count,
+      coalesce(act.search_sessions, 0)::int as search_session_count,
       coalesce((
         select count(*)::int
         from chat_sessions cs
         where cs.project_id = w.id
       ), 0) as chat_thread_count,
-      coalesce((
-        select count(*)::int
-        from chat_turns ct
-        join chat_sessions cs on cs.id = ct.session_id
-        where cs.project_id = w.id
-      ), 0) as chat_message_count,
+      coalesce(act.chat_turns, 0)::int as chat_message_count,
       recent.id as latest_run_id,
       recent.status as latest_run_status,
       w.archived_at::text as archived_at,
@@ -867,6 +857,14 @@ export async function listProjects(userId: string): Promise<ProjectRecord[]> {
     from projects w
     -- Current corpus totals are trigger-maintained; never aggregate documents here.
     left join project_corpus_stats cs on cs.project_id = w.id
+    -- Search-session and chat-turn totals are trigger-maintained too (0165): a few counter rows per project (one per
+    -- concurrent writer, folded back by the maintenance sweep),
+    -- keyed by the project already authorized above, so history is never counted here.
+    left join lateral (
+      select sum(a.search_sessions) as search_sessions, sum(a.chat_turns) as chat_turns
+      from project_activity_stats a
+      where a.project_id = w.id
+    ) act on true
     -- Searchable pages: only deferred documents can be partly indexed (skipped while the flag is off).
     left join lateral (
       select coalesce(sum(greatest(d.page_count - coalesce(ps.indexed, 0), 0)), 0)::int as unindexed_pages
@@ -1458,9 +1456,9 @@ export async function getProjectCockpit(
   const [telemetryRow] = await sql<Array<Record<string, number>>>`
     select
       coalesce((
-        select count(*)::int
-        from search_sessions s
-        where s.project_id = ${projectId}
+        select sum(a.search_sessions)::int
+        from project_activity_stats a
+        where a.project_id = ${projectId}
       ), 0) as search_sessions,
       coalesce((
         select count(*)::int
