@@ -101,6 +101,15 @@ refuse_unsafe_overrides() {
     ""|1|true|yes|on) ;;
     *) refused+=(QUARANTINE_ENABLED) ;;
   esac
+  value="$(normalize_env_setting "${DOCSLURP_CLAMAV_ENABLED:-}")"
+  case "${value}" in
+    ""|1|true|yes|on) ;;
+    *) refused+=(DOCSLURP_CLAMAV_ENABLED) ;;
+  esac
+  value="$(normalize_env_setting "${DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS:-}")"
+  if [[ -n "${value}" && ! "${value}" =~ ^([1-9]|1[0-9]|2[0-4])$ ]]; then
+    refused+=(DOCSLURP_CLAMAV_MAX_DB_AGE_HOURS)
+  fi
   value="$(normalize_env_setting "${DOCSLURP_PARSER_SANDBOX:-}")"
   if [[ "${value}" == "none" ]]; then
     refused+=(DOCSLURP_PARSER_SANDBOX)
@@ -112,6 +121,8 @@ refuse_unsafe_overrides() {
 }
 
 refuse_unsafe_overrides
+CLAMAV_ENABLED="$(normalize_env_setting "${CLAMAV_ENABLED}")"
+CLAMAV_MAX_DB_AGE_HOURS="$(normalize_env_setting "${CLAMAV_MAX_DB_AGE_HOURS}")"
 
 # Stale or missing signatures stop startup unless a developer explicitly opts in (only reachable in development).
 if [[ -z "${CLAMAV_FAIL_OPEN_ON_STALE_DB}" ]]; then
