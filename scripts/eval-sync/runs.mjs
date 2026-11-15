@@ -97,7 +97,8 @@ async function listExperimentItems(api, prepared) {
 
 /**
  * Some Langfuse v4 builds return experiment-item scores (ScoreV3) without `configId`. Read those scores back by id from
- * GET /v2/scores, which carries it, and copy only `configId` onto the matching score. A score the lookup does not
+ * GET /v3/scores?fields=details, which carries it, and copy only `configId` onto the matching score. GET /v2/scores is
+ * not used: v4 deployments in events_only mode (self-hosted v4.78) answer it with 404; /v3/scores exists from v4.54 on. A score the lookup does not
  * return keeps no config and still fails verification (fail closed); nothing else from the lookup is trusted here.
  */
 async function fillScoreConfigIds(api, rows) {
@@ -106,7 +107,7 @@ async function fillScoreConfigIds(api, rows) {
   const ids = [...new Set(missing.map((score) => score.id))];
   for (let i = 0; i < ids.length; i += 50) {
     const batch = ids.slice(i, i + 50);
-    const page = await api(`/v2/scores?${new URLSearchParams({ scoreIds: batch.join(","), limit: "50" })}`);
+    const page = await api(`/v3/scores?${new URLSearchParams({ id: batch.join(","), fields: "details", limit: "50" })}`);
     if (!page || !Array.isArray(page.data)) throw new Error("Score readback failed");
     for (const score of page.data) if (batch.includes(score.id) && typeof score.configId === "string") configOf.set(score.id, score.configId);
   }
