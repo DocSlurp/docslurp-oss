@@ -177,11 +177,9 @@ async function idempotently(
         }
       }
       if (receipt) {
-        const [run] = await sql<ProjectRunRow[]>`select * from project_runs where id = ${receipt.run_id} and user_id = ${args.userId}`;
-        const project = run ? await getProject(run.project_id, args.userId) : null;
-        if (!run || !project) throw new ProjectIntakeError("Upload project is no longer accessible", 403);
-        const documents = await sql<DocumentRow[]>`select * from documents where run_id = ${run.id} order by created_at, id`;
-        cached = { status: 201, body: actionResult({ project, run: mapProjectRun(run), documents: documents.map(mapDocument), pipeline: run.pipeline, deferredReason: null, rejected: [] }).payload as unknown as Record<string, unknown> };
+        if (!receipt.stable_result) throw new ProjectIntakeError("Committed intake response requires reconciliation", 409, undefined, "intake_reconciliation_required");
+        const stable = receipt.stable_result as ProjectIntakeActionResult;
+        cached = { status: stable.status, body: stable.payload as unknown as Record<string, unknown> };
       }
     }
     if (cached) {
@@ -191,10 +189,12 @@ async function idempotently(
       const projectId = payload.project?.id;
       if (!projectId) throw new ProjectIntakeError("Upload project is no longer accessible", 403);
       await authorizeReceiptProject(projectId, args.userId, args.orgId, args.apiKeyId);
+      const [stableReceipt] = await sql`select stable_result from intake_request_receipts
+        where idempotency_key = ${idempotencyKey} and route_key = ${args.routeKey}`;
       return {
         payload: cached.body as ProjectIntakePayload,
         status: cached.status as 201,
-        temporalDeferred: false,
+        temporalDeferred: Boolean((stableReceipt?.stable_result as ProjectIntakeActionResult | undefined)?.temporalDeferred),
         idempotencyReplayed: true,
       };
     }
@@ -204,6 +204,11 @@ async function idempotently(
     await sql`insert into intake_request_receipts (idempotency_key, route_key, request_hash, user_id, external_effect_started)
       values (${idempotencyKey}, ${args.routeKey}, ${args.requestHash}, ${args.userId}, false)`;
     const result = await intakeReceiptContext.run({ key: idempotencyKey, route: args.routeKey, hash: args.requestHash, userId: args.userId }, run);
+    const [saved] = await sql`update intake_request_receipts set stable_result = ${sql.json(JSON.parse(JSON.stringify(result)))}
+      where idempotency_key = ${idempotencyKey} and route_key = ${args.routeKey}
+        and request_hash = ${args.requestHash} and user_id = ${args.userId}
+      returning run_id`;
+    if (!saved) throw new ProjectIntakeError("Intake response requires reconciliation", 409, undefined, "intake_reconciliation_required");
     await storeIdempotentResponse({
       idempotencyKey,
       routeKey: args.routeKey,

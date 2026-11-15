@@ -1,3 +1,4 @@
+import { buildRunProcessingPreview } from "./run-processing-preview.js";
 import { randomUUID } from "node:crypto";
 
 import type { RunOrigin } from "@docslurp/shared";
@@ -307,13 +308,20 @@ export async function commitIndexJobs(prepared: PreparedIndexJobs, userId: strin
       // A direct insert, so the same managed-model resolution as runCreation.create: model values in the pipeline
       // are dropped and only the project's explicit admin overrides apply.
       const runPipeline = resolveManagedPipeline(batch.pipeline, managedOverrides, `full index in project ${prepared.projectId}`).pipeline;
+      if (docs.some(doc => !Number.isFinite(doc.billing_pages ?? doc.page_count) || (doc.billing_pages ?? doc.page_count ?? 0) <= 0)) throw new Error("Monthly admission requires known positive page counts");
+      const reservation = Math.max(1, buildRunProcessingPreview({
+        request: { project: prepared.projectId, pipeline: runPipeline, urls: [], files: docs.map(doc => ({
+          filename: doc.filename, mimeType: doc.mime_type, sizeBytes: 0,
+          pages: Math.max(1, doc.billing_pages ?? doc.page_count ?? 1),
+        })) },
+      }).current.estimatedCost.maxCents);
       await tx`
         insert into project_runs (id, org_id, user_id, project_id, kind, status, priority, stage,
           total_documents, processed_documents, pages_total, pages_processed, pipeline,
-          creation_ready_at, creation_expires_at, origin)
+          creation_ready_at, creation_expires_at, origin, monthly_reservation_cents)
         -- The documents are inserted in this transaction, so the manifest is complete when it commits.
         values (${runId}, ${prepared.orgId}, ${userId}, ${prepared.projectId}, 'full-index', 'queued', 0, 'queued',
-          ${docs.length}, 0, ${pages}, 0, ${tx.json(JSON.parse(JSON.stringify(runPipeline)))}, now(), null, ${origin})
+          ${docs.length}, 0, ${pages}, 0, ${tx.json(JSON.parse(JSON.stringify(runPipeline)))}, now(), null, ${origin}, ${reservation})
       `;
       for (const doc of docs) {
         const canonicalId = doc.canonical_id ?? doc.id;

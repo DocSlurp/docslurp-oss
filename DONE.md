@@ -350,3 +350,5 @@ Council-reviewed error contracts: allowlisted validation constraints, full Retry
 - Vision credential destination guard: the OpenAI billing label alone no longer releases the platform key; the destination must match the operator-configured OpenAI endpoint. Added loopback, foreign-host, port, path, query, fragment and userinfo negatives plus operator endpoint positives. This defense-in-depth closes a helper bypass; it does not establish a remote exploit or complete the broader endpoint-policy audit.
 
 - Reauthorize direct confirmation receipts against live contribution and original-key policy; reserve explicit bounded materialization capacity, resume exact-cap reservations through locked readmission, and allow safe interrupted intake preparation to retry while reporting ambiguous external effects explicitly. Includes real PostgreSQL allocator contention and sweep coverage; migration numbering remains coordinated with open dependencies.
+
+- Reserve measured reindex/full-index workloads and refuse unspecified active-run reservations; retain stable intake responses beyond cache expiry and refuse ambiguous response recovery.

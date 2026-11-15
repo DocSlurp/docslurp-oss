@@ -200,3 +200,12 @@ describe("re-index versions of measured documents", () => {
     expect(plan.estimate?.pages).toBe(2);
   });
 });
+
+it.each(["organization", "project"])("refuses reindex with measured pages beyond %s monthly capacity", async scope => {
+  await seed({credits:100000});
+  await sql`update documents set page_count=300, billing_pages=300`;
+  if (scope === 'organization') await sql`update organizations set monthly_budget_cents=1 where id='o1'`;
+  else await sql`update projects set monthly_budget_cents=1 where id='w'`;
+  await expect(patch(embeddingChange())).rejects.toThrow();
+  expect(await sql`select id from project_runs where kind='reindex'`).toHaveLength(0);
+});

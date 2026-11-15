@@ -1,12 +1,17 @@
 import { beforeEach, expect, it, vi } from "vitest";
-const state = vi.hoisted(() => ({ durable: null as null | Record<string, unknown>, preRunFault: false, persistReceipt: false, cacheFailure: false, locks: new Set<string>(), cache: new Map<string, { status: number; body: Record<string, unknown> }>(), executions: 0, access: true, contribute: true, keyLive: true, keyProjects: [] as string[], keyScopes: ["ingest"] as string[] }));
-vi.mock("../db.js", () => ({ sql: async (parts: TemplateStringsArray) => {
+const state = vi.hoisted(() => ({ durable: null as null | Record<string, unknown>, preRunFault: false, persistReceipt: false, cacheFailure: false, stableFailure: false, rich: false, locks: new Set<string>(), cache: new Map<string, { status: number; body: Record<string, unknown> }>(), executions: 0, access: true, contribute: true, keyLive: true, keyProjects: [] as string[], keyScopes: ["ingest"] as string[] }));
+vi.mock("../db.js", () => ({ sql: Object.assign(async (parts: TemplateStringsArray, ...values: unknown[]) => {
   const query = parts.join("?");
+  if (query.includes("set stable_result")) {
+    if (state.stableFailure) throw new Error("receipt write fault");
+    if (state.persistReceipt) state.durable = { ...state.durable, stable_result: values[0] };
+    return [{ run_id: "r" }];
+  }
   if (query.includes("delete from intake_request_receipts")) { state.durable = null; return []; }
   if (query.includes("intake_request_receipts")) return state.durable ? [state.durable] : [];
   if (query.includes("project_runs")) return [{ id: "r", project_id: "p", user_id: "u", pipeline: {} }];
   return [];
-} }));
+}, { json: (value: unknown) => value }) }));
 vi.mock("../services/projects.js", async load => ({ ...await load<typeof import("../services/projects.js")>(), getProject: async () => ({ id: "p", orgId: "o" }) }));
 vi.mock("../services/run-records.js", async load => ({ ...await load<typeof import("../services/run-records.js")>(), mapProjectRun: (row: {id:string}) => ({id: row.id}) }));
 vi.mock("../services/organizations.js", () => ({
@@ -23,6 +28,11 @@ vi.mock("../services/direct-upload-session.js", () => ({
     state.locks.add(name);
     try { return await run(); } finally { state.locks.delete(name); }
   },
+}));
+vi.mock("../services/extracts.js", async load => ({
+  ...await load<typeof import("../services/extracts.js")>(),
+  chargeExtractRetention: vi.fn(async () => {}),
+  describeExtractById: async (id: string) => ({id, state:"active"}),
 }));
 vi.mock("../services/idempotency.js", async (original) => ({
   ...await original<typeof import("../services/idempotency.js")>(),
@@ -44,12 +54,12 @@ vi.mock("../services/project-intake.js", async (original) => ({
       state.durable = { request_hash: receipt.hash, run_id: "r", creation_ready_at: new Date() };
     }
     await new Promise(resolve => setTimeout(resolve, 10));
-    return { project: { id: "p" }, run: { id: "r" }, documents: [], rejected: [] };
+    return { project: { id: "p" }, run: { id: "r" }, documents: [], rejected: state.rich ? [{filename:"bad.exe",code:"unsupported_format",message:"Unsupported"}] : [], deferredReason: state.rich ? "Workflow deferred" : null };
   },
 }));
 const { createBulkProjectIntake } = await import("../services/project-intake-actions.js");
 const args = { userId: "u", orgId: "o", project: "p", idempotencyKey: "same", files: [new File(["hello"], "a.txt", { type: "text/plain" })] };
-beforeEach(() => { state.preRunFault = false; state.durable = null; state.persistReceipt = false; state.cacheFailure = false; state.cache.clear(); state.locks.clear(); state.executions = 0; state.access = true; state.contribute = true; state.keyLive = true; state.keyProjects = []; state.keyScopes = ["ingest"]; });
+beforeEach(() => { state.rich = false; state.stableFailure = false; state.preRunFault = false; state.durable = null; state.persistReceipt = false; state.cacheFailure = false; state.cache.clear(); state.locks.clear(); state.executions = 0; state.access = true; state.contribute = true; state.keyLive = true; state.keyProjects = []; state.keyScopes = ["ingest"]; });
 it("executes exactly one concurrent same-key intake and replays after completion", async () => {
   const results = await Promise.allSettled(Array.from({ length: 8 }, () => createBulkProjectIntake(args)));
   expect(state.executions).toBe(1);
@@ -142,5 +152,32 @@ it("does not repeat an ambiguous external effect after restart", async () => {
   state.preRunFault = false;
   state.durable!.external_effect_started = true;
   await expect(createBulkProjectIntake(args)).rejects.toMatchObject({ statusCode: 409, code: "intake_reconciliation_required" });
+  expect(state.executions).toBe(1);
+});
+
+it("preserves mixed rejections and deferred warnings after cache loss or expiry", async () => {
+  state.rich = true; state.persistReceipt = true;
+  const original = await createBulkProjectIntake(args);
+  state.cache.clear();
+  const replay = await createBulkProjectIntake(args);
+  expect(replay.payload).toEqual(original.payload);
+  expect(replay.temporalDeferred).toBe(true);
+  expect(state.executions).toBe(1);
+});
+it("refuses a published run missing its stable response without repeating effects", async () => {
+  state.persistReceipt = true; state.stableFailure = true;
+  await expect(createBulkProjectIntake(args)).rejects.toThrow("receipt write fault");
+  state.stableFailure = false;
+  await expect(createBulkProjectIntake(args)).rejects.toMatchObject({code:"intake_reconciliation_required"});
+  expect(state.executions).toBe(1);
+});
+
+it("keeps the original extract receipt after cache expiry", async () => {
+  state.persistReceipt = true;
+  const original = await createBulkProjectIntake({...args, extract: {id:"original-extract"} as never});
+  expect(original.payload.extract).toMatchObject({id:"original-extract"});
+  state.cache.clear();
+  const replay = await createBulkProjectIntake({...args, extract: {id:"retry-extract"} as never});
+  expect(replay.payload.extract).toEqual(original.payload.extract);
   expect(state.executions).toBe(1);
 });

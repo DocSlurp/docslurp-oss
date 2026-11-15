@@ -1,6 +1,8 @@
 -- Pending work reserves its forecast upper bound (minimum one cent). Usage
 -- replaces capacity as it arrives; terminal runs release the unused remainder.
 ALTER TABLE project_runs ADD COLUMN IF NOT EXISTS monthly_reservation_cents numeric NOT NULL DEFAULT 1;
+-- Existing rows retain their backfill; zero is a sentinel refused by the active-admission trigger.
+ALTER TABLE project_runs ALTER COLUMN monthly_reservation_cents SET DEFAULT 0;
 
 CREATE OR REPLACE VIEW pending_monthly_capacity AS
 SELECT r.id AS run_id, r.org_id, r.project_id,
@@ -14,7 +16,7 @@ DECLARE org_cap numeric; project_cap numeric; org_used numeric; project_used num
 BEGIN
  IF NEW.status NOT IN ('queued','processing') THEN RETURN NEW; END IF;
  IF TG_OP='UPDATE' AND OLD.status IN ('queued','processing') AND OLD.monthly_reservation_cents=NEW.monthly_reservation_cents THEN RETURN NEW; END IF;
- IF NEW.monthly_reservation_cents < 1 THEN RAISE EXCEPTION 'Invalid monthly capacity'; END IF;
+ IF NEW.monthly_reservation_cents IS NULL OR NEW.monthly_reservation_cents < 1 THEN RAISE EXCEPTION 'Invalid monthly capacity'; END IF;
  PERFORM pg_advisory_xact_lock(spend_admission_lock_key(NEW.org_id));
  SELECT monthly_budget_cents INTO org_cap FROM organizations WHERE id=NEW.org_id;
  SELECT monthly_budget_cents INTO project_cap FROM projects WHERE id=NEW.project_id AND org_id=NEW.org_id;
@@ -49,3 +51,6 @@ CREATE TABLE IF NOT EXISTS intake_request_receipts (
 
 -- Existing interrupted claims are ambiguous; only new explicit safe claims may retry.
 ALTER TABLE intake_request_receipts ADD COLUMN IF NOT EXISTS external_effect_started boolean NOT NULL DEFAULT true;
+
+-- Full stable response, independent of the expiring HTTP response cache.
+ALTER TABLE intake_request_receipts ADD COLUMN IF NOT EXISTS stable_result jsonb;

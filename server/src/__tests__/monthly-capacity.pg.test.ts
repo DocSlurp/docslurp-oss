@@ -39,14 +39,14 @@ it("binds receipt atomically and survives an absent response cache",async()=>{
  await sql`update project_runs set status='failed' where org_id='capacity-o'`;
  await sql`insert into intake_request_receipts(idempotency_key,route_key,request_hash,user_id) values('capacity-key','uploads.bulk','hash','capacity-u')`;
  await intakeReceiptContext.run({ key: 'capacity-key', route: 'uploads.bulk', hash: 'hash', userId: 'capacity-u' },()=>sql.begin(async tx=>{
- await tx`insert into project_runs(id,org_id,project_id,user_id,kind,status,stage,pipeline) values('capacity-receipt','capacity-o','capacity-p','capacity-u','bulk-upload','queued','queued','{}')`;
+ await tx`insert into project_runs(id,org_id,project_id,user_id,kind,status,stage,pipeline,monthly_reservation_cents) values('capacity-receipt','capacity-o','capacity-p','capacity-u','bulk-upload','queued','queued','{}',1)`;
  await bindIntakeReceipt(tx,'capacity-receipt');
  }));
  // Simulated process death: no response cache write occurs after commit.
  expect((await sql`select run_id from intake_request_receipts where idempotency_key='capacity-key'`)[0]!.run_id).toBe('capacity-receipt');
  await sql`insert into intake_request_receipts(idempotency_key,route_key,request_hash,user_id) values('capacity-rollback','uploads.bulk','hash','capacity-u')`;
  await expect(intakeReceiptContext.run({key:'capacity-rollback',route:'uploads.bulk',hash:'hash',userId:'capacity-u'},()=>sql.begin(async tx=>{
- await tx`insert into project_runs(id,org_id,project_id,user_id,kind,status,stage,pipeline) values('capacity-rollback','capacity-o','capacity-p','capacity-u','bulk-upload','queued','queued','{}')`;
+ await tx`insert into project_runs(id,org_id,project_id,user_id,kind,status,stage,pipeline,monthly_reservation_cents) values('capacity-rollback','capacity-o','capacity-p','capacity-u','bulk-upload','queued','queued','{}',1)`;
  await bindIntakeReceipt(tx,'capacity-rollback');
  throw new Error('commit boundary fault');
  }))).rejects.toThrow('commit boundary fault');

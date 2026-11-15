@@ -103,3 +103,22 @@ it("a full-index run drops model values from the stored pipeline it copies (mana
   const [run] = await sql<{ pipeline: unknown }[]>`select pipeline from project_runs where id = ${runIds[0]!}`;
   expect(JSON.stringify(run!.pipeline)).not.toMatch(/bge-m3|stale-decider/);
 });
+
+it.each(["organization", "project"])("refuses full index with measured pages beyond %s monthly capacity", async scope => {
+  const prepared = await seed('fx-a');
+  for (const batch of prepared.batches) for (const doc of batch.docs) { doc.page_count=300; doc.billing_pages=300; }
+  await sql`update organizations set credit_balance_cents=100000 where id='fx-org'`;
+  if (scope === 'organization') await sql`update organizations set monthly_budget_cents=1 where id='fx-org'`;
+  else await sql`update projects set monthly_budget_cents=1 where id='fx-a'`;
+  await expect(svc.commitIndexJobs(prepared,'fx-user')).rejects.toThrow();
+  expect(await queued()).toBe(0);
+});
+
+it("refuses unspecified reservations on insertion and terminal-run readmission", async () => {
+  await seed('fx-a');
+  await expect(sql`insert into project_runs(id,org_id,user_id,project_id,kind,status,stage,pipeline,pages_total)
+    values('missing-reservation','fx-org','fx-user','fx-a','full-index','queued','queued','{}',300)`)
+    .rejects.toThrow('Invalid monthly capacity');
+  await expect(sql`update project_runs set status='queued' where id='run-fx-a-0'`)
+    .rejects.toThrow('Invalid monthly capacity');
+});
