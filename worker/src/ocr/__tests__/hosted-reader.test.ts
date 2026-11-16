@@ -96,7 +96,7 @@ describe("OCR escalation reads", () => {
     expect(events).toHaveLength(1);
     const expectedCost = priceVisionResult({ route: { ...ROUTE }, inputTokens: 1_234, outputTokens: 321, costCents: 0.42 } as never, CFG);
     expect(expectedCost).toBeGreaterThan(0);
-    // Provider spend rides in metadata (the customer is charged the Rich page, not the provider's cost).
+    // Provider spend rides in metadata (the customer is charged the Rich page, not the provider's cost): escalation upgrades the page to Rich.
     expect(events[0]).toMatchObject({ provider: "deepinfra", model: MODEL, inputTokens: 1_234, outputTokens: 321, costCents: 0 });
     expect(events[0]!.metadata).toMatchObject({ documentId: "doc-1", pageNumber: 1, purpose: "ocr-escalation", outcome: "completed", providerCostCents: expectedCost, costRole: "provider" });
     expect(state.usageLedger.snapshot().filter((event) => event.metric === "ingest-page-rich").map((event) => event.id)).toEqual(["rich:run-1:doc-1:1"]);
@@ -214,7 +214,9 @@ describe("DOCSLURP_OCR_MODE=hosted", () => {
     expect(runner.run).not.toHaveBeenCalled();
     expect(runner.sandboxedOcrRead).not.toHaveBeenCalled();
     expect(state.usageLedger.snapshot().filter((event) => event.metric === "hosted-ocr")).toHaveLength(1);
-    expect(state.usageLedger.snapshot().filter((event) => event.metric === "ingest-page-rich").map((event) => event.id)).toEqual(["rich:run-1:doc-1:1"]);
+    // The operator's hosted OCR model reads in the OCR engine's place: one flat OCR page, not Rich.
+    expect(state.usageLedger.snapshot().filter((event) => event.metric === "ingest-page-ocr").map((event) => event.id)).toEqual(["ocr:run-1:doc-1:1"]);
+    expect(state.usageLedger.snapshot().filter((event) => event.metric === "ingest-page-rich")).toEqual([]);
   });
 
   it.each([

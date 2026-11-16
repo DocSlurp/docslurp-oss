@@ -4,7 +4,7 @@ import path from "node:path";
 import { Writable } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { defaultPipelineFeatures, pageCredits, pricing, PUBLIC_ERROR_MESSAGES, publicDocumentError } from "@docslurp/shared";
+import { defaultPipelineFeatures, pageCredits, pricing, PUBLIC_ERROR_MESSAGES, publicDocumentError, TEST_PAGE_CREDITS } from "@docslurp/shared";
 
 import { enforceRunSpendForCharge, SpendCheckUnavailableError, setSpendCheckConfig } from "../db/spend-check.js";
 import { pushUsageEvent } from "../lib/perf-context.js";
@@ -132,7 +132,7 @@ async function harness(args: {
   const state = WorkflowState.create(createRun(args.pipeline, pageCount), [document]);
   state.usageLedger.runId = "run-1";
   state.artifactLedger.recordDocument("doc-1", "normalizedFormat", args.format);
-  const richEvents = () => state.usageLedger.snapshot().filter((event) => event.metric === "ingest-page-rich");
+  const richEvents = () => state.usageLedger.snapshot().filter((event) => event.metric === "ingest-page-ocr");
   return {
     stage, state, attempted, configs, objects, manifests, runner, jobs: ocr.jobs, richEvents,
     richIds: () => richEvents().map((event) => event.id),
@@ -163,7 +163,7 @@ describe("image documents are read by the OCR extractor", () => {
       expect(h.jobs[0]).toMatchObject({ kind: "image", recognisers: expect.any(Array) });
       expect(h.jobs[0]!.pages).toBeUndefined();
       expect(h.text()).toContain("Invoice total 4200");
-      expect(h.richIds()).toEqual(["rich:run-1:doc-1:1"]);
+      expect(h.richIds()).toEqual(["ocr:run-1:doc-1:1"]);
       expect(h.richEvents()[0]?.metadata).toMatchObject({ readBy: "page-ocr" });
     } finally { await h.cleanup(); }
   });
@@ -183,7 +183,7 @@ describe("image documents are read by the OCR extractor", () => {
       // The page basis is the frames read, so the Markdown's three pages, page rows and the bill agree.
       expect(h.state.documents[0]!.pageCount).toBe(3);
       // An uploaded image bills Rich per frame read, words or not (0.75 credits; 0.5 under the earlier words rule).
-      expect(h.richIds()).toEqual(["rich:run-1:doc-1:1", "rich:run-1:doc-1:2", "rich:run-1:doc-1:3"]);
+      expect(h.richIds()).toEqual(["ocr:run-1:doc-1:1", "ocr:run-1:doc-1:2", "ocr:run-1:doc-1:3"]);
     } finally { await h.cleanup(); }
   });
 
@@ -213,12 +213,12 @@ describe("image documents are read by the OCR extractor", () => {
       const checkpoint = h.checkpoint();
       expect(checkpoint?.status).toBe("failed");
       expect(publicDocumentError(checkpoint?.error)).toBe(PUBLIC_ERROR_MESSAGES.imageFramesUnfunded);
-      // 39 frames beyond intake's one page, Rich: 9.75 credits checked against a 1-credit balance, and nothing charged.
+      // 39 frames beyond intake's one page, OCR: checked against a 1-credit balance they exceed, and nothing charged.
       expect(calls.pageCounts).toEqual([40]);
-      // Two checks: the pre-read one for the first Rich page (0.25, fits), then the counted frames.
+      // Two checks: the pre-read one for the first OCR page (fits), then the counted frames.
       expect(calls.checks).toHaveLength(2);
-      expect(calls.checks[0]).toBeCloseTo(0.25);
-      expect(calls.checks[1]).toBeGreaterThanOrEqual(9.75);
+      expect(calls.checks[0]).toBeCloseTo(TEST_PAGE_CREDITS.ocr);
+      expect(calls.checks[1]).toBeGreaterThanOrEqual(39 * TEST_PAGE_CREDITS.ocr);
       expect(h.richIds()).toEqual([]);
     } finally { await h.cleanup(); }
   });
@@ -230,7 +230,8 @@ describe("image documents are read by the OCR extractor", () => {
     const h = await harness({ format: "image", filename: "deposition.tiff", mimeType: "image/tiff", pageCount: 1,
       frames: (job) => all.slice(0, job.maxFrames),
       result: (job) => ocrResultFor(job, all.slice(0, job.maxFrames), { truncatedFrames: all.length > job.maxFrames }) });
-    const { store, calls } = spendStore(1);
+    // Enough for the first OCR page, not for the five frames past it.
+    const { store, calls } = spendStore(TEST_PAGE_CREDITS.ocr * 2.5);
     const sized: number[] = [];
     // The balance covers 5 frames (the read-only sizing query); the run is not paused by asking.
     (store as any).largestFundedCharge = async (_run: unknown, max: number) => { sized.push(max); return 5; };
@@ -279,7 +280,7 @@ describe("image documents are read by the OCR extractor", () => {
       expect(sized[1]).toBeGreaterThan(0);
       expect(sized[1]).toBeCloseTo(sized[0]!);
       // ...and the frame check ran again and refused the image: run paused, nothing charged.
-      expect(calls.checks.at(-1)).toBeGreaterThanOrEqual(9.75);
+      expect(calls.checks.at(-1)).toBeGreaterThanOrEqual(39 * TEST_PAGE_CREDITS.ocr);
       expect(h.checkpoint()?.status).toBe("failed");
       expect(publicDocumentError(h.checkpoint()?.error)).toBe(PUBLIC_ERROR_MESSAGES.imageFramesUnfunded);
       expect(h.richIds()).toEqual([]);
@@ -468,14 +469,14 @@ describe("image documents are read by the OCR extractor", () => {
       expect(vmEvents(capped)).toEqual([]);
       noCustomerCharge(capped);
     } finally { await capped.cleanup(); }
-    // A balance that cannot cover the image's Rich page: the run pauses before the VM.
+    // A balance that cannot cover the image's OCR page: the run pauses before the VM.
     const unfunded = await harness({ format: "image", filename: "fax.tiff", mimeType: "image/tiff" });
     withVmUsage(unfunded);
-    const { store, calls } = spendStore(0.1);
+    const { store, calls } = spendStore(TEST_PAGE_CREDITS.ocr / 4);
     (unfunded.state as any).store = store;
     try {
       await expect(unfunded.stage.run(unfunded.state)).rejects.toMatchObject({ name: "RunPolicyError" });
-      expect(calls.checks).toEqual([0.25]);
+      expect(calls.checks).toEqual([TEST_PAGE_CREDITS.ocr]);
       expect(unfunded.runner.run).not.toHaveBeenCalled();
       expect(vmEvents(unfunded)).toEqual([]);
       expect(unfunded.checkpoint()?.status).not.toBe("failed");
@@ -611,7 +612,7 @@ describe("scanned PDF pages are filled by the OCR engine", () => {
       expect(h.jobs).toHaveLength(1);
       expect(h.jobs[0]).toMatchObject({ kind: "pdf", pages: [2, 4] });
       expect(h.text().some((text) => text === "Native text layer page\fScanned words 2\fThird page native\fScanned words 4")).toBe(true);
-      expect(h.richIds()).toEqual(["rich:run-1:doc-1:2", "rich:run-1:doc-1:4"]);
+      expect(h.richIds()).toEqual(["ocr:run-1:doc-1:2", "ocr:run-1:doc-1:4"]);
       expect(new Set(h.richEvents().map((event) => event.metadata?.readBy))).toEqual(new Set(["page-ocr"]));
     } finally { await h.cleanup(); }
   });
@@ -632,7 +633,7 @@ describe("scanned PDF pages are filled by the OCR engine", () => {
       expect(h.checkpoint()?.status).toBe("completed");
       expect(h.jobs.flatMap((job) => job.pages)).toEqual(Array.from({ length: 29 }, (_, i) => i + 2));
       expect(h.richIds()).toHaveLength(29);
-      expect(h.richIds()).toContain("rich:run-1:doc-1:30");
+      expect(h.richIds()).toContain("ocr:run-1:doc-1:30");
       const text = h.text().find((value) => value.startsWith("Cover page native text"))!;
       expect(text.split("\f")).toHaveLength(30);
       expect(text.split("\f")[29]).toBe("Scan 30");
@@ -656,7 +657,7 @@ describe("scanned PDF pages are filled by the OCR engine", () => {
       expect(h.checkpoint()?.status).not.toBe("failed");
       expect([...h.objects.keys()].some(key => key.includes("/ocr-retry/"))).toBe(true);
       const firstIds = h.richIds();
-      expect(firstIds).toEqual(["rich:run-1:doc-1:2", "rich:run-1:doc-1:3"]);
+      expect(firstIds).toEqual(["ocr:run-1:doc-1:2", "ocr:run-1:doc-1:3"]);
       // The activity's retry: the same document again, the same pages read, the same charge ids (the ledger keeps one each).
       await h.stage.run(h.state);
       expect(h.checkpoint()?.status).toBe("completed");
@@ -687,7 +688,7 @@ describe("scanned PDF pages are filled by the OCR engine", () => {
       const ids = h.richIds();
       expect(ids).toHaveLength(40);
       expect(new Set(ids).size).toBe(40);
-      expect(ids).not.toContain("rich:run-1:doc-1:1");
+      expect(ids).not.toContain("ocr:run-1:doc-1:1");
     } finally { await h.cleanup(); }
   });
 
@@ -704,7 +705,7 @@ describe("scanned PDF pages are filled by the OCR engine", () => {
       };
       return { store: new Proxy(known, { get: (target, key: string) => target[key] ?? (async () => undefined) }), checks };
     };
-    const batchCredits = pageCredits("rich", OCR_PDF_BATCH_PAGES);
+    const batchCredits = pageCredits("ocr", OCR_PDF_BATCH_PAGES);
     // A 1-credit balance covers no batch: the run pauses before any VM starts, nothing is read or charged.
     const poor = await harness({ format: "pdf", pageCount, extract: scan });
     const unfunded = store(1);
@@ -820,7 +821,7 @@ describe("scanned PDF pages are filled by the OCR engine", () => {
       expect(h.checkpoint()?.status).toBe("completed");
       // Page 3 is blank: read (no failure), no words, no Rich charge.
       expect(h.checkpoint()?.stats).toMatchObject({ ocrReadPages: 1, ocrReadSource: "scan-fill", scanFilledPages: 1, ocrFailedPages: 0 });
-      expect(h.richIds()).toEqual(["rich:run-1:doc-1:2"]);
+      expect(h.richIds()).toEqual(["ocr:run-1:doc-1:2"]);
     } finally { await h.cleanup(); }
   });
 

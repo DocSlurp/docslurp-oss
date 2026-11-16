@@ -5,6 +5,7 @@ import {
   pageCredits,
   speedBoostMultiplier,
   textPageCount,
+  type PageMode,
   type PipelineFeatures,
 } from "@docslurp/shared";
 
@@ -185,12 +186,12 @@ export function extraCreditsForMeasuredPages(
   intakePages: number,
   measuredPages: number,
   method?: string | null,
-  options: { features?: boolean; mode?: "fast" | "rich" } = {},
+  options: { features?: boolean; mode?: PageMode } = {},
 ): number {
   const before = Math.max(1, intakePages);
   if (!(measuredPages > before)) return 0;
   const features = estimateProfileFor(pipeline, { env: {} }).documentFeatures;
-  // Office pages bill Fast; a multi-frame image's frames are each read by OCR and bill Rich.
+  // Office pages bill Fast; a multi-frame image's frames are each read by OCR and bill OCR.
   let credits = pageCredits(options.mode ?? "fast", measuredPages - before);
   if (options.features !== false && method !== "size-estimate") {
     for (const feature of DOCUMENT_FEATURES) {

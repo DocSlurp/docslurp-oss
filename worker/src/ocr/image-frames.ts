@@ -1,6 +1,6 @@
 /*
  * The page basis of a multi-frame image (a TIFF). Intake counts every image as one page; the OCR engine reads each frame as
- * a page (up to IMAGE_MAX_FRAMES) and bills each one Rich. The frames read become the document's page count, so page rows,
+ * a page (up to IMAGE_MAX_FRAMES) and bills each one OCR. The frames read become the document's page count, so page rows,
  * citations, strict page splitting and the completion charge agree with the Markdown (one form-feed page per frame) and the bill.
  */
 import { DOCUMENT_FAILURE_MARKERS, IMAGE_MAX_FRAMES, pageCredits, speedBoostMultiplier } from "@docslurp/shared";
@@ -20,7 +20,7 @@ export function imageTooManyFramesError(documentId: string): OcrRefusedError {
 }
 
 /**
- * Before an uploaded image's OCR read starts a VM: the run's cost cap, then the balance for the image's first Rich page plus the
+ * Before an uploaded image's OCR read starts a VM: the run's cost cap, then the balance for the image's first OCR page plus the
  * run's charges still buffered in this activity. Admission checked the org once for the whole run; this holds for each read.
  * Fails closed: an unfunded run is paused and stopped here (a run-policy stop: the image stays unread, not failed, and runs again
  * once the run resumes), and a check that cannot decide throws SpendCheckUnavailableError (retryable). No VM cost is incurred
@@ -31,7 +31,7 @@ export async function authorizeImageRead(state: WorkflowState, documentId: strin
 }
 
 /**
- * Before an OCR read starts a VM for `pages` Rich pages of a document (an image's first frame, a batch of a scanned PDF's
+ * Before an OCR read starts a VM for `pages` OCR pages of a document (an image's first frame, a batch of a scanned PDF's
  * pages): the run's cost cap, then the balance for those pages plus the run's charges still buffered in this activity (the
  * pages earlier batches read included). Fails closed like authorizeImageRead: an unfunded run is paused and stopped here
  * (RunPolicyError, before any VM cost), and a check that cannot decide throws SpendCheckUnavailableError (retryable).
@@ -45,7 +45,7 @@ export async function authorizeOcrRead(state: WorkflowState, documentId: string,
   }
   const store = state.store;
   if (!store?.enforceSpendForCharge || !state.run.userId) return;
-  const credits = pageCredits("rich", Math.max(1, pages)) * speedBoostMultiplier(state.run.pipeline.speedBoost === true) + state.usageLedger.pendingBillableCents;
+  const credits = pageCredits("ocr", Math.max(1, pages)) * speedBoostMultiplier(state.run.pipeline.speedBoost === true) + state.usageLedger.pendingBillableCents;
   const outcome = await store.enforceSpendForCharge({ id: state.run.id, orgId: state.run.orgId ?? null, projectId: state.run.projectId, userId: state.run.userId }, credits);
   if (outcome.paused || outcome.blocked) {
     console.warn(`[ocr] ${label} run=${state.run.id} document=${documentId} pages=${pages} reason=unfunded credits=${credits.toFixed(2)}`);
@@ -56,7 +56,7 @@ export async function authorizeOcrRead(state: WorkflowState, documentId: string,
 /**
  * Before an image's OCR read starts a VM: how many frames the run can pay for, so the read never covers frames the org could
  * not afford (the boundary stops at this cap; ocr/read-document.ts refuses the image if it had more). The same credits
- * authorizeImageFrames checks after the read: this image's Rich frames past intake plus every other TIFF of the run's uncovered
+ * authorizeImageFrames checks after the read: this image's OCR frames past intake plus every other TIFF of the run's uncovered
  * frames and the charges still buffered here. At least 1 (authorizeImageRead already covered the first frame) and at most `max`.
  */
 export async function affordableImageFrames(state: WorkflowState, documentId: string, max: number): Promise<number> {
@@ -69,19 +69,19 @@ export async function affordableImageFrames(state: WorkflowState, documentId: st
   const rows = store.countedImageFrames ? await store.countedImageFrames(state.run.id) : [];
   const others = rows
     .filter((row) => row.documentId !== documentId)
-    .reduce((sum, row) => sum + extraCreditsForMeasuredPages(pipeline, Math.max(1, row.chargedPages), row.pageCount, null, { mode: "rich", features: false }), 0);
+    .reduce((sum, row) => sum + extraCreditsForMeasuredPages(pipeline, Math.max(1, row.chargedPages), row.pageCount, null, { mode: "ocr", features: false }), 0);
   const pending = state.usageLedger.pendingBillableCents;
   const frames = await store.largestFundedCharge(
     { id: state.run.id, orgId: state.run.orgId ?? null, projectId: state.run.projectId },
     max,
-    (n) => extraCreditsForMeasuredPages(pipeline, intake, n, null, { mode: "rich" }) + others + pending,
+    (n) => extraCreditsForMeasuredPages(pipeline, intake, n, null, { mode: "ocr" }) + others + pending,
   );
   return Math.max(1, Math.min(max, frames));
 }
 
 /**
  * After the boundary counted an image's frames and before any is charged or escalated: record them as the page basis, report
- * progress over them, and check the balance for the Rich frames admission never priced (intake counted one page). The check adds
+ * progress over them, and check the balance for the OCR frames admission never priced (intake counted one page). The check adds
  * the uncharged frames of every TIFF of the run (the store's rows, this document's included once recorded), as the measured
  * Office page check does, so concurrent documents cannot each fit alone and together overdraw. When they no longer fit the run
  * is paused and the image is refused before anything is charged. The count itself needs the boundary's read: the host never
@@ -104,13 +104,13 @@ export async function authorizeImageFrames(state: WorkflowState, documentId: str
   const store = state.store;
   if (!store?.enforceSpendForCharge || !state.run.userId) return;
   const pipeline = state.run.pipeline;
-  const own = extraCreditsForMeasuredPages(pipeline, intake, frames, null, { mode: "rich" });
+  const own = extraCreditsForMeasuredPages(pipeline, intake, frames, null, { mode: "ocr" });
   if (!(own > 0)) return;
-  const ownRich = extraCreditsForMeasuredPages(pipeline, intake, frames, null, { mode: "rich", features: false });
+  const ownRead = extraCreditsForMeasuredPages(pipeline, intake, frames, null, { mode: "ocr", features: false });
   const rows = store.countedImageFrames ? await store.countedImageFrames(state.run.id) : [];
-  // Frames of the run's TIFFs no Rich charge covers yet (page 1 was priced at admission).
-  const runRich = rows.reduce((sum, row) => sum + extraCreditsForMeasuredPages(pipeline, Math.max(1, row.chargedPages), row.pageCount, null, { mode: "rich", features: false }), 0);
-  const extra = own - ownRich + Math.max(ownRich, runRich);
+  // Frames of the run's TIFFs no OCR or Rich charge covers yet (page 1 was priced at admission).
+  const runRead = rows.reduce((sum, row) => sum + extraCreditsForMeasuredPages(pipeline, Math.max(1, row.chargedPages), row.pageCount, null, { mode: "ocr", features: false }), 0);
+  const extra = own - ownRead + Math.max(ownRead, runRead);
   // Fails closed: a check that cannot decide throws SpendCheckUnavailableError (retryable) out of the stage, before any charge.
   const outcome = await store.enforceSpendForCharge({ id: state.run.id, orgId: state.run.orgId ?? null, projectId: state.run.projectId, userId: state.run.userId }, extra);
   if (!outcome.paused && !outcome.blocked) return;

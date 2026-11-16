@@ -11,7 +11,7 @@ import { dbTraceStatementHook } from "../lib/db-trace.js";
 import { pipelineTransaction, pipelineInTransaction } from "./transaction-pipeline.js";
 import { PostgresCapacityLeaseStore } from "../media/capacity/store.js";
 import { PostgresMediaJournal } from "../media/journal.js";
-import { BILLABLE_UNIT_METRICS, DOCUMENT_FAILURE_MARKERS, INFRASTRUCTURE_RETRIES_EXHAUSTED_TEXT, PUBLIC_ERROR_MESSAGES } from "@docslurp/shared";
+import { PAGE_READ_METRICS, DOCUMENT_FAILURE_MARKERS, INFRASTRUCTURE_RETRIES_EXHAUSTED_TEXT, PUBLIC_ERROR_MESSAGES } from "@docslurp/shared";
 import { DocumentNotFoundError, isMissingDocumentError } from "./missing-document.js";
 import { recordPageBaseFee } from "./page-base-fee.js";
 import { reserveFastPageImageRenders } from "./fast-page-image-budget.js";
@@ -2956,14 +2956,14 @@ export class Store {
 
   /**
    * The run's multi-frame images (TIFF) whose counted frames raised their page basis above intake's one page, with the distinct
-   * pages a Rich charge of this run already covers (read through usage_attribution). The frame-count spend check adds up the
+   * pages an OCR or Rich charge of this run already covers (read through usage_attribution). The frame-count spend check adds up the
    * frames not yet charged, so concurrent documents of one run cannot each fit the balance alone and together overdraw it.
    */
   async countedImageFrames(runId: string): Promise<Array<{ documentId: string; pageCount: number; chargedPages: number }>> {
     const rows = await this.sql<{ id: string; page_count: number; charged: number }[]>`
       select d.id, d.page_count,
         coalesce((select count(distinct (au.metadata ->> 'pageNumber')) from usage_attribution au
-          where au.run_id = ${runId} and au.metric = ${BILLABLE_UNIT_METRICS.richPage} and au.metadata ->> 'documentId' = d.id), 0)::int as charged
+          where au.run_id = ${runId} and au.metric = any(${[...PAGE_READ_METRICS]}::text[]) and au.metadata ->> 'documentId' = d.id), 0)::int as charged
       from documents d
       where d.run_id = ${runId} and d.deduped_from_document_id is null and d.page_count > 1
         and lower(split_part(coalesce(d.mime_type, ''), ';', 1)) in ('image/tiff', 'image/tiff-fx')

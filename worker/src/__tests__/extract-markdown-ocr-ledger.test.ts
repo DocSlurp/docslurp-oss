@@ -96,7 +96,7 @@ async function harness(args: {
   const state = WorkflowState.create(run(args.pipeline), [document]);
   state.usageLedger.runId = "run-1";
   state.artifactLedger.recordDocument("doc-1", "normalizedFormat", args.format);
-  const richEvents = () => state.usageLedger.snapshot().filter((event) => event.metric === "ingest-page-rich");
+  const richEvents = () => state.usageLedger.snapshot().filter((event) => event.metric === "ingest-page-ocr");
   const record = (candidate: Record<string, unknown>, winningText: string, extra: Record<string, unknown> = {}) =>
     internals.recordOcrPageReads(state, state.documents[0], { format: args.format, isPdf: args.format === "pdf", winningText, candidate, sourcePath: "unused", ...extra });
   return {
@@ -120,11 +120,11 @@ describe("OCR reads on the usage ledger", () => {
     const read = await harness({ format: "image", frames: () => [{ frame: 1, text: "Invoice total 4200" }] });
     try {
       await read.stage.run(read.state);
-      expect(read.richIds()).toEqual(["rich:run-1:doc-1:1"]);
+      expect(read.richIds()).toEqual(["ocr:run-1:doc-1:1"]);
       expect(read.richEvents()[0]?.metadata).toMatchObject({ readBy: "page-ocr", model: "ppocr:multi" });
       // The stage's own ledger pass sees an engine-charged candidate and charges nothing more.
       expect(await read.record({ label: "ocr", plan: { binary: "in-process:ocr", args: [] }, ocrPages: [1], ocrCharged: true }, "Invoice total 4200")).toEqual([1]);
-      expect(read.richIds()).toEqual(["rich:run-1:doc-1:1"]);
+      expect(read.richIds()).toEqual(["ocr:run-1:doc-1:1"]);
       const compute = read.state.usageLedger.snapshot().filter((event) => event.metric === "ocr-compute");
       expect(compute).toHaveLength(1);
       expect(compute[0]?.metadata).toMatchObject({ cpuMs: 1_200, peakRssKb: 660_000, chargedPages: [1] });
@@ -133,7 +133,7 @@ describe("OCR reads on the usage ledger", () => {
     try {
       await blank.stage.run(blank.state);
       // An uploaded image bills its OCR read whether or not it found text (owner decision, 2026-11-05).
-      expect(blank.richIds()).toEqual(["rich:run-1:doc-1:1"]);
+      expect(blank.richIds()).toEqual(["ocr:run-1:doc-1:1"]);
     } finally { await blank.cleanup(); }
   });
 
@@ -147,11 +147,11 @@ describe("OCR reads on the usage ledger", () => {
     try {
       await h.stage.run(h.state);
       expect(h.jobs.map((job) => job.pages)).toEqual([[2, 3, 4]]);
-      expect(h.richIds()).toEqual(["rich:run-1:doc-1:2", "rich:run-1:doc-1:4"]);
+      expect(h.richIds()).toEqual(["ocr:run-1:doc-1:2", "ocr:run-1:doc-1:4"]);
       expect(new Set(h.richEvents().map((event) => event.metadata?.readBy))).toEqual(new Set(["page-ocr"]));
       // A text-layer extractor won and never OCRs: the stage's own pass records nothing more.
       expect(await h.record({ label: "poppler-text", plan: { binary: "pdftotext", args: [] } }, "Native text layer page\fScanned page 2\f\fScanned page 4\f")).toEqual([]);
-      expect(h.richIds()).toEqual(["rich:run-1:doc-1:2", "rich:run-1:doc-1:4"]);
+      expect(h.richIds()).toEqual(["ocr:run-1:doc-1:2", "ocr:run-1:doc-1:4"]);
     } finally { await h.cleanup(); }
   });
 
@@ -194,7 +194,7 @@ describe("OCR reads on the usage ledger", () => {
       for (const label of ["native-pdf", "poppler-text", "pandoc", "pptx", "xlsx"]) expect(await h.record({ label, plan: { binary: "x", args: ["--ocr"] } }, "x\fScanned words\f")).toEqual([]);
       expect(h.richIds()).toEqual([]);
       expect(await h.record({ label: "dolphin", plan: { binary: "python", args: [] } }, "x\fScanned words\f")).toEqual([2]);
-      expect(h.richIds()).toEqual(["rich:run-1:doc-1:2"]);
+      expect(h.richIds()).toEqual(["ocr:run-1:doc-1:2"]);
       expect(h.richEvents()[0]?.metadata).toMatchObject({ readBy: "pdf-ocr" });
     } finally { await h.cleanup(); }
   });
@@ -232,7 +232,7 @@ describe("OCR reads on the usage ledger", () => {
       expect(await h.record({ label: "vm-pdf", plan: { binary: "vm", args: [] } }, "a\fb\fc\f", { sandboxedRoute: true })).toEqual([]);
       expect(await h.record({ label: "vm-pdf", plan: { binary: "vm", args: [] }, ocrPages: [3, 1, 9] }, "a\fb\fc\f", { sandboxedRoute: true })).toEqual([1, 3]);
       expect(probe).not.toHaveBeenCalled();
-      expect(h.richIds()).toEqual(["rich:run-1:doc-1:1", "rich:run-1:doc-1:3"]);
+      expect(h.richIds()).toEqual(["ocr:run-1:doc-1:1", "ocr:run-1:doc-1:3"]);
     } finally { await h.cleanup(); }
   });
 
@@ -241,7 +241,7 @@ describe("OCR reads on the usage ledger", () => {
     try {
       const pages = await h.record({ label: "graph-local", ocrPages: [1, 2] }, "<!-- page 1 -->\n\nWords");
       expect(pages).toEqual([1, 2]);
-      expect(h.richIds()).toEqual(["rich:run-1:doc-1:1", "rich:run-1:doc-1:2"]);
+      expect(h.richIds()).toEqual(["ocr:run-1:doc-1:1", "ocr:run-1:doc-1:2"]);
       expect(new Set(h.richEvents().map((event) => event.metadata?.readBy))).toEqual(new Set(["page-ocr"]));
     } finally { await h.cleanup(); }
   });

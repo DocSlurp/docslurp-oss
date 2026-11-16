@@ -225,8 +225,10 @@ describe("readPagesWithProvider", () => {
     expect(events[0]).toMatchObject({ metric: "ocr-page-reader", model: "test-reader-model", costCents: 0, inputTokens: 20, outputTokens: 10,
       metadata: { providerCostCents: 0.3, billable: false, orgId: "org-1", runId: "run-1", projectId: "proj-1", documentId: "doc-1" } });
     expect(console.log).toHaveBeenCalledWith("[ai-usage] ocr-page-reader model=test-reader-model input_tokens=20 output_tokens=10");
-    // Charged as one Rich page each, at most once (no extra unit for the reader).
-    expect(state.usageLedger.richPagesCharged("doc-1", 1)).toBe(1);
+    // Charged as one OCR page each, at most once (no extra unit for the reader), never Rich.
+    expect(state.usageLedger.pageChargeClass("doc-1", 1)).toBe("ocr");
+    expect(state.usageLedger.snapshot().filter((event) => event.metric === "ingest-page-ocr" && event.metadata?.pageNumber === 1).map((event) => event.id)).toEqual(["ocr:run-1:doc-1:1"]);
+    expect(state.usageLedger.richPagesCharged("doc-1", 1)).toBe(0);
   });
 
   it("never lets a provider event become a billable unit charge", async () => {
@@ -527,8 +529,8 @@ describe("ocrDocument with the page reader", () => {
     const { runner } = fakeOcrRunner(() => [{ frame: 1, text: "low", meanConfidence: 0.3, image: true }]);
     const state = runState();
     // The reader's own charge (made after its text is applied) throws; the recogniser's charges go through.
-    const original = state.usageLedger.chargeRichPage.bind(state.usageLedger);
-    vi.spyOn(state.usageLedger, "chargeRichPage").mockImplementation((charge) => {
+    const original = state.usageLedger.chargeOcrPage.bind(state.usageLedger);
+    vi.spyOn(state.usageLedger, "chargeOcrPage").mockImplementation((charge) => {
       if (charge.readBy === "ocr-page-reader") throw new Error("ledger down");
       return original(charge);
     });

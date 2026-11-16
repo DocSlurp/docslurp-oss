@@ -1,6 +1,8 @@
 import type { Sql } from "postgres";
 import {
   BILLABLE_UNIT_METRICS,
+  PAGE_CHARGE_METRICS,
+  PAGE_READ_METRICS,
   UNIT_CHARGE_PROVIDER,
   speedBoostMultiplier,
   compilePipelinePlan,
@@ -22,9 +24,10 @@ import { debitRunUsageCredits, persistRunUsageEvents, runUsageEventStatements, t
 
 /**
  * Ingest page charges (priced by the pricing provider). Runs started by this release pin the per-read rule below
- * (`pinRunPageBillingRules`, from `startRun`). One rule, per page: a page bills Rich only when a vision/OCR model read it, and
- * the usage ledger records that read per page (pipeline/usage-ledger.ts, charged as the page is read). When the run
- * completes, every other page of its completed documents is charged here, Fast. Nothing about a page's content
+ * (`pinRunPageBillingRules`, from `startRun`). One rule, per page: a page bills OCR when the OCR route read it and Rich when a
+ * vision model read it (an OCR page a vision model then reads is upgraded to Rich, once), and the usage ledger records that
+ * read per page (pipeline/usage-ledger.ts, charged as the page is read). When the run completes, every other page of its
+ * completed documents is charged here, Fast. Nothing about a page's content
  * (a scan, an image, a missing text layer) bills Rich by itself: those facts are best effort (page facts can be
  * disabled, capped or fail) and an unknown fact must never raise a charge. An uploaded image file is read by OCR or
  * vision, which the extraction stage records on the ledger like any other read.
@@ -47,9 +50,9 @@ export function pageBaseFeeMultiplier(plan: Pick<CompiledPipelinePlan, "stageOrd
 }
 
 /**
- * Fast pages of a completed document: its pages (1..page_count) that no Rich read of this run covers. `richRead` is
- * the number of distinct pages in that range a read charged Rich, counted by page number, so a read outside the
- * document's pages (or a page read twice) can never cancel another page's Fast charge.
+ * Fast pages of a completed document: its pages (1..page_count) that no OCR or Rich read of this run covers. `richRead` is
+ * the number of distinct pages in that range a read charged (OCR or Rich), counted by page number, so a read outside the
+ * document's pages (or a page read twice, or by OCR then vision) can never cancel another page's Fast charge.
  */
 export function remainingFastPages(row: { pages: number; richRead: number }): number {
   return Math.max(0, row.pages - Math.min(row.richRead, row.pages));
@@ -93,10 +96,11 @@ export function splitLegacyRemainingPages(
 }
 
 /**
- * What the completion charge decided: `fastPages` it charged now, `richPages` already charged as they were read (counted, not
- * charged here), the share of the fee this run pays and the Fast credits it charged.
+ * What the completion charge decided: `fastPages` it charged now, `ocrPages` and `richPages` already charged as they were read
+ * (counted, not charged here; a page upgraded from OCR to Rich counts as Rich), the share of the fee this run pays and the
+ * Fast credits it charged.
  */
-export type RunPageCharges = { fastPages: number; richPages: number; multiplier: number; credits: number };
+export type RunPageCharges = { fastPages: number; ocrPages: number; richPages: number; multiplier: number; credits: number };
 
 /**
  * Charge the run's remaining pages once it completes (deterministic ids per
@@ -105,7 +109,7 @@ export type RunPageCharges = { fastPages: number; richPages: number; multiplier:
  */
 export async function recordPageBaseFee(sql: Sql<Record<string, unknown>>, state: WorkflowState, transaction?: { afterCommit: Array<() => void> }): Promise<RunPageCharges> {
   const multiplier = pageBaseFeeMultiplier(compilePipelinePlan(state.run.pipeline));
-  let charges: RunPageCharges = { fastPages: 0, richPages: 0, multiplier, credits: 0 };
+  let charges: RunPageCharges = { fastPages: 0, ocrPages: 0, richPages: 0, multiplier, credits: 0 };
   const legacy = runBillsScansAtCompletion(state);
   const legacyPagesRead = legacy && qualityAllowsPageReading(state.run.pipeline.quality);
   if (legacy) console.warn(`[page-charges] run=${state.run.id} has no page billing pin: billing image files and scanned pages at completion (earlier release's rule)`);
@@ -118,8 +122,8 @@ export async function recordPageBaseFee(sql: Sql<Record<string, unknown>>, state
       // materialization (stamped on the source version's ledger). Those pages are not charged twice.
       // A stamped page this run read again is already left out through rich_read, so it is not subtracted
       // twice (which would leave another page unbilled).
-      // Rich reads are read through usage_attribution (the one spend reader the worker may use).
-      client<{ document_id: string; pages: number; rich_read: number; image: boolean; scanned: number }[]>`
+      // OCR and Rich reads are read through usage_attribution (the one spend reader the worker may use).
+      client<{ document_id: string; pages: number; rich_read: number; rich_only: number; image: boolean; scanned: number }[]>`
       with docs as (
         -- billing_pages: the worker's measured count of an Office, slide, sheet or EPUB file; page_count (the page basis the text
         -- splits into) bills for every other document.
@@ -130,7 +134,7 @@ export async function recordPageBaseFee(sql: Sql<Record<string, unknown>>, state
               -- A page whose read was charged and then failed (read_billed_run) paid its one charge.
               and ((s.fee_billed_run is not null and not ${staleStampSql(client)}) or s.read_billed_run is not null)
               and not exists (select 1 from usage_attribution au
-                where au.run_id = ${state.run.id} and au.metric = ${BILLABLE_UNIT_METRICS.richPage}
+                where au.run_id = ${state.run.id} and au.metric = any(${[...PAGE_READ_METRICS]}::text[])
                   and au.metadata ->> 'documentId' = d.id and au.metadata ->> 'pageNumber' = s.page_number::text)
           ) else 0 end)::int as pages
         from documents d
@@ -145,12 +149,18 @@ export async function recordPageBaseFee(sql: Sql<Record<string, unknown>>, state
         -- Runs started before the per-read rule only (splitLegacyRemainingPages): pages the facts show as scans.
         case when ${legacyPagesRead} then coalesce((select count(*) from document_page_facts f
           where f.document_id = docs.id and coalesce(f.text_bytes, 0) = 0 and coalesce(f.image_count, 0) > 0), 0) else 0 end::int as scanned,
-        -- Distinct pages of this document a Rich read charged: by page number, inside the document's pages.
+        -- Distinct pages of this document a read charged (OCR or Rich): by page number, inside the document's pages.
+        coalesce((select count(distinct (au.metadata ->> 'pageNumber')::int) from usage_attribution au
+          where au.run_id = ${state.run.id} and au.metric = any(${[...PAGE_READ_METRICS]}::text[])
+            and au.metadata ->> 'documentId' = docs.id
+            and (au.metadata ->> 'pageNumber') ~ '^[0-9]{1,9}$'
+            and (au.metadata ->> 'pageNumber')::int between 1 and docs.page_count), 0)::int as rich_read,
+        -- Of those, the pages a Rich read charged (an OCR page upgraded to Rich counts here), for the report.
         coalesce((select count(distinct (au.metadata ->> 'pageNumber')::int) from usage_attribution au
           where au.run_id = ${state.run.id} and au.metric = ${BILLABLE_UNIT_METRICS.richPage}
             and au.metadata ->> 'documentId' = docs.id
             and (au.metadata ->> 'pageNumber') ~ '^[0-9]{1,9}$'
-            and (au.metadata ->> 'pageNumber')::int between 1 and docs.page_count), 0)::int as rich_read
+            and (au.metadata ->> 'pageNumber')::int between 1 and docs.page_count), 0)::int as rich_only
       from docs
     `,
     ], async (client, [lockedRows, rows]) => {
@@ -167,12 +177,16 @@ export async function recordPageBaseFee(sql: Sql<Record<string, unknown>>, state
         scanPages += rich;
         if (fast > 0 || rich > 0) documents[row.document_id] = { fast, rich };
       }
-      // Rich pages are charged as they are read (the ledger); here they are only counted, for the report: the distinct pages of the
-      // completed documents a Rich read charged this run, inside each document's pages (plus a legacy run's scan pages).
-      const richPages = scanPages + rows.reduce((sum, row) => sum + Math.min(Number(row.rich_read) || 0, Number(row.pages) || 0), 0);
+      // OCR and Rich pages are charged as they are read (the ledger); here they are only counted, for the report: the distinct
+      // pages of the completed documents a read charged this run, inside each document's pages (plus a legacy run's scan
+      // pages, Rich). A page OCR read and a vision model then upgraded counts as Rich.
+      const readPages = rows.reduce((sum, row) => sum + Math.min(Number(row.rich_read) || 0, Number(row.pages) || 0), 0);
+      const richReadPages = rows.reduce((sum, row) => sum + Math.min(Number(row.rich_only) || 0, Number(row.rich_read) || 0, Number(row.pages) || 0), 0);
+      const richPages = scanPages + richReadPages;
+      const ocrPages = Math.max(0, readPages - richReadPages);
       const fastCredits = pageCredits("fast", fastPages) * multiplier;
       const scanCredits = pageCredits("rich", scanPages) * multiplier;
-      charges = { fastPages, richPages, multiplier: multiplier * speedBoostMultiplier(state.usageLedger.speedBoost),
+      charges = { fastPages, ocrPages, richPages, multiplier: multiplier * speedBoostMultiplier(state.usageLedger.speedBoost),
         credits: (fastCredits + scanCredits) * speedBoostMultiplier(state.usageLedger.speedBoost) };
       const base = { projectId: state.run.projectId, multiplier, documents: Object.keys(documents).length <= 200 ? documents : undefined };
       // The insert and its pending debit (for exactly the rows it inserted) are one statement.
@@ -267,19 +281,19 @@ export async function lockPageRows(client: Sql<Record<string, unknown>>, documen
  * The billing decision for materialized pages, inside the caller's transaction, with the pages' ledger rows already
  * locked (lockPageRows). The rule (one customer charge per indexed page):
  *
- * - The `fee_billed_run` stamp is each page's single billing decision, Fast or Rich. Only pages `moved` (the
+ * - The `fee_billed_run` stamp is each page's single billing decision, Fast, OCR or Rich. Only pages `moved` (the
  *   transition this run committed in the same transaction) are stamped and charged; a run that lost its claim
  *   bills nothing for those pages.
- * - Rich when this run read the page with a model: the ledger's pending Rich charges for the pages it stamps are
- *   persisted here, with the stamps, and a page with a Rich read already recorded for the run (a retry finds the
- *   read an earlier attempt persisted) gets no Fast charge.
+ * - OCR or Rich when this run read the page (the OCR route, or a vision model): the ledger's pending read charges for the
+ *   pages it stamps are persisted here, with the stamps, and a page with a read already recorded for the run (a retry
+ *   finds the read an earlier attempt persisted) gets no Fast charge.
  * - Rich, not Fast, when another run's genuine model read of this page of this document version is recorded on the
  *   ledger row (`model_read_run`: a run that read the page, lost its claim and published nothing). The winner's
  *   content came from the text layer, but the read was real and is billed once, through this decision.
  * - Fast otherwise.
  * - `modelReads`: pages this run read with a model (non-empty content) but does not own. If another run's committed
- *   decision for such a page is Fast, this run upgrades it to Rich with one event carrying only the difference
- *   (`rich-upgrade:<document>:<page>`, once per page). If the owner already charged Rich, nothing is added.
+ *   decision for such a page is Fast or OCR, this run upgrades it to Rich with one event carrying only the difference
+ *   from that decision (`rich-upgrade:<document>:<page>`, once per page). If the owner already charged Rich, nothing is added.
  * - This run's pending Rich charges for pages it does not own (lost claim, or another run's stamp stands) are dropped
  *   from the ledger: they stay provider usage (the read's AI usage event), never a customer charge.
  * - `failedReads`: pages this run holds, read with a model (a pending Rich charge) and then failed after the read
@@ -366,7 +380,7 @@ export async function billLockedMaterializedPages(
   const needCommitted = undecidedFailedReads.filter((page) => !pendingRichPages.has(page));
   const committedRichPages = new Set(needCommitted.length === 0 ? [] : (await client<{ page: number }[]>`
     select distinct (au.metadata ->> 'pageNumber')::int as page from usage_attribution au
-    where au.run_id = ${runId} and au.metric = ${BILLABLE_UNIT_METRICS.richPage} and au.cost_cents > 0
+    where au.run_id = ${runId} and au.metric = any(${[...PAGE_READ_METRICS]}::text[]) and au.cost_cents > 0
       and au.metadata ->> 'documentId' = ${documentId}
       and au.metadata ->> 'pageNumber' = any(${needCommitted.map(String)}::text[])
   `).map((r) => Number(r.page)));
@@ -390,7 +404,7 @@ export async function billLockedMaterializedPages(
   const richInserted = await persistRunUsageEvents({ client, state, usageEvents: chargeable });
   const readRows = await client<{ page: number }[]>`
     select distinct (au.metadata ->> 'pageNumber')::int as page from usage_attribution au
-    where au.run_id = ${runId} and au.metric = ${BILLABLE_UNIT_METRICS.richPage}
+    where au.run_id = ${runId} and au.metric = any(${[...PAGE_READ_METRICS]}::text[])
       and au.metadata ->> 'documentId' = ${documentId}
       and (au.metadata ->> 'pageNumber') ~ '^[0-9]{1,9}$'
   `;
@@ -421,16 +435,18 @@ export async function billLockedMaterializedPages(
       metadata: unitChargeMetadata({ projectId: row.project_id, documentId, page, materialized: true }),
     })),
   ] });
-  // This run read pages another run decided Fast: upgrade those decisions to Rich (the difference only, once).
+  // This run read pages another run decided Fast or OCR: upgrade those decisions to Rich (the difference only, once).
   const upgradeCandidates = [...modelReads.keys()].filter((page) => !ownedSet.has(page));
-  const upgrades = upgradeCandidates.length === 0 ? [] : await client<{ page_number: number; fee_billed_run: string; fast_id: string }[]>`
-    select s.page_number, s.fee_billed_run, fast.id as fast_id
+  const upgrades = upgradeCandidates.length === 0 ? [] : await client<{ page_number: number; fee_billed_run: string; fast_id: string; decided_metric: string }[]>`
+    select s.page_number, s.fee_billed_run, fast.id as fast_id, fast.metric as decided_metric
     from document_page_states s
     join lateral (
-      select au.id from usage_attribution au
-      where au.run_id = s.fee_billed_run and au.metric = ${BILLABLE_UNIT_METRICS.fastPage}
+      select au.id, au.metric from usage_attribution au
+      where au.run_id = s.fee_billed_run and au.metric in (${BILLABLE_UNIT_METRICS.fastPage}, ${BILLABLE_UNIT_METRICS.ocrPage})
         and au.metadata ->> 'documentId' = s.document_id
         and coalesce(au.metadata ->> 'pageNumber', au.metadata ->> 'page') = s.page_number::text
+      -- An OCR decision is the dearer of the two: the upgrade owes the difference from it.
+      order by (au.metric = ${BILLABLE_UNIT_METRICS.ocrPage}) desc, au.id
       limit 1
     ) fast on true
     where s.document_id = ${documentId} and s.page_number = any(${upgradeCandidates}::int[])
@@ -444,12 +460,13 @@ export async function billLockedMaterializedPages(
   `;
   const upgradeInserted = await persistRunUsageEvents({ client, state, usageEvents: upgrades.map((upgrade) => {
     const pagesRead = Math.max(1, modelReads.get(upgrade.page_number) ?? 1);
+    const from = upgrade.decided_metric === BILLABLE_UNIT_METRICS.ocrPage ? "ocr" as const : "fast" as const;
     return {
       id: `rich-upgrade:${documentId}:${upgrade.page_number}`, provider: UNIT_CHARGE_PROVIDER, model: "price-card",
       metric: BILLABLE_UNIT_METRICS.richPage, amount: pagesRead, unit: "page",
-      costCents: Math.max(0, pageCredits("rich", pagesRead) - rateCents),
+      costCents: Math.max(0, pageCredits("rich", pagesRead) - pageCredits(from, 1)),
       metadata: unitChargeMetadata({ projectId: row.project_id, documentId, pageNumber: upgrade.page_number, readBy: "model-read",
-        upgradeOf: upgrade.fast_id, decidedBy: upgrade.fee_billed_run, materialized: true }),
+        upgradeOf: upgrade.fast_id, upgradeFrom: from, decidedBy: upgrade.fee_billed_run, materialized: true }),
     };
   }) });
   const inserted = richInserted + decidedInserted + upgradeInserted;
@@ -462,7 +479,7 @@ export async function billLockedMaterializedPages(
   const charges = new Map(reported.length === 0 ? [] : (await client<{ page: number; credits: number | string }[]>`
     select (coalesce(au.metadata ->> 'pageNumber', au.metadata ->> 'page'))::int as page, sum(au.cost_cents) as credits
     from usage_attribution au
-    where au.run_id = ${runId} and au.metric in (${BILLABLE_UNIT_METRICS.fastPage}, ${BILLABLE_UNIT_METRICS.richPage})
+    where au.run_id = ${runId} and au.metric = any(${[...PAGE_CHARGE_METRICS]}::text[])
       and au.metadata ->> 'documentId' = ${documentId} and au.id not like 'rich-upgrade:%'
       and coalesce(au.metadata ->> 'pageNumber', au.metadata ->> 'page') = any(${reported.map(String)}::text[])
     group by 1
@@ -482,8 +499,8 @@ export async function billLockedMaterializedPages(
 const TERMINAL_RUN_STATUSES = ["completed", "failed", "cancelled"];
 
 /**
- * SQL condition on a `document_page_states s` row: a stale stamp. Its stamping run recorded neither a Fast nor
- * a Rich charge for the page, and that run can no longer commit one: it is gone, terminal (completed, failed,
+ * SQL condition on a `document_page_states s` row: a stale stamp. Its stamping run recorded no Fast, OCR or
+ * Rich charge for the page, and that run can no longer commit one: it is gone, terminal (completed, failed,
  * cancelled) or its worker's lease expired. Stamps and charges commit together (recordMaterializedPageFee), so
  * such a stamp is a failed fee write, a cancelled run, or a stamp from before that rule; recovery may take the
  * page over (billUnbilled, recordMaterializedPageFee) and a full index charges it (recordPageBaseFee). A live
@@ -494,7 +511,7 @@ export function staleStampSql(client: Sql<Record<string, unknown>>) {
   return client`(s.fee_billed_run is not null and s.read_billed_run is null and not exists (
     select 1 from usage_attribution au
     where au.run_id = s.fee_billed_run
-      and au.metric in (${BILLABLE_UNIT_METRICS.fastPage}, ${BILLABLE_UNIT_METRICS.richPage})
+      and au.metric = any(${[...PAGE_CHARGE_METRICS]}::text[])
       and au.metadata ->> 'documentId' = s.document_id
       and coalesce(au.metadata ->> 'pageNumber', au.metadata ->> 'page') = s.page_number::text
   ) and not exists (

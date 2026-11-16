@@ -10,7 +10,7 @@
  * - Every answer is untrusted: a malformed job response is rejected whole and its pages keep the recogniser's text.
  * - A failed or refused job never fails a page or a document, and never moves the read to the worker host or a weaker
  *   boundary: its pages keep the recogniser's text and stay hosted escalation candidates.
- * - Provider cost is recorded on the usage ledger (`ocr-page-reader`, 0 credits); the page itself is one Rich page,
+ * - Provider cost is recorded on the usage ledger (`ocr-page-reader`, 0 credits); the page itself is one OCR page,
  *   charged once per run like the recogniser read of it.
  */
 import { constants } from "node:fs";
@@ -30,6 +30,7 @@ import {
 import type { UsageEvent } from "../models.js";
 import { isCostCapExceeded } from "../pipeline/checkpoints.js";
 import type { WorkflowState } from "../pipeline/pipeline.js";
+import { OCR_PAGE_READ_METRICS } from "../pipeline/usage-ledger.js";
 import type { OcrPageRead, OcrReadOutcome } from "./engine.js";
 import { processPageReaderOrgBudget, type PageReaderOrgBudget } from "./page-reader-budget.js";
 import { logPageReaderWarmSummary, pageReaderWarmGate, pageReaderWarmPolicy, recordPageReaderWarmRouting, releasePageReaderWarmReservation } from "./page-reader-warm.js";
@@ -382,9 +383,12 @@ export async function readPageImagesWithProvider(
         const text = stripControlCharacters(result.markdown).trim();
         if (!text) { summary.empty += 1; continue; }
         use.onRead(page, { text, inputTokens: result.inputTokens ?? 0, outputTokens: result.outputTokens ?? 0 });
-        // One Rich page, once per run: an earlier read of the page (the recogniser's) usually charged it already (the
-        // ledger dedups); a page nothing else read is charged now that it has text.
-        ctx.state.usageLedger.chargeRichPage({ documentId: ctx.documentId, pageNumber: page.pageNumber, readBy: use.metric, model: provider.model });
+        // The OCR route's reader bills one OCR page, once per run: the recogniser's read of the page usually charged it
+        // already (the ledger dedups); a page nothing else read is charged now that it has text. The vision page reader
+        // (vision-extract) interprets the page: one Rich page, once per run.
+        const charge = { documentId: ctx.documentId, pageNumber: page.pageNumber, readBy: use.metric, model: provider.model };
+        if (OCR_PAGE_READ_METRICS.has(use.metric)) ctx.state.usageLedger.chargeOcrPage(charge);
+        else ctx.state.usageLedger.chargeRichPage(charge);
         summary.replaced += 1;
       }
     } finally {

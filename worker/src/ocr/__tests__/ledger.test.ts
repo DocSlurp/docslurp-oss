@@ -1,3 +1,4 @@
+import { TEST_PAGE_CREDITS } from "@docslurp/shared";
 import { describe, expect, it } from "vitest";
 
 import { PipelineUsageEventLedger } from "../../pipeline/usage-ledger.js";
@@ -19,6 +20,7 @@ function ledger(): PipelineUsageEventLedger {
   return usage;
 }
 
+const ocr = (usage: PipelineUsageEventLedger) => usage.snapshot().filter((event) => event.metric === "ingest-page-ocr");
 const rich = (usage: PipelineUsageEventLedger) => usage.snapshot().filter((event) => event.metric === "ingest-page-rich");
 
 describe("recordOcrReads", () => {
@@ -31,17 +33,18 @@ describe("recordOcrReads", () => {
       { pageNumber: 4, text: "東京" },
     ]);
     expect(recordOcrReads(usage, "doc-1", read, { stage: "extract-markdown", kind: "pdf" })).toEqual([1, 4]);
-    expect(rich(usage).map((event) => event.id)).toEqual(["rich:run-1:doc-1:1", "rich:run-1:doc-1:4"]);
-    expect(rich(usage).every((event) => event.metadata?.readBy === "page-ocr" && event.metadata?.model === "ppocr:multi")).toBe(true);
+    expect(ocr(usage).map((event) => event.id)).toEqual(["ocr:run-1:doc-1:1", "ocr:run-1:doc-1:4"]);
+    expect(ocr(usage).every((event) => event.metadata?.readBy === "page-ocr" && event.metadata?.model === "ppocr:multi")).toBe(true);
+    expect(rich(usage)).toEqual([]);
   });
 
-  it("charges every frame of an uploaded image as a Rich read, with or without words", () => {
+  it("charges every frame of an uploaded image as an OCR read, with or without words", () => {
     const usage = ledger();
     const read = outcome([{ pageNumber: 1, text: "Receipt" }, { pageNumber: 2, text: "" }, { pageNumber: 3, text: " · " }]);
     expect(recordOcrReads(usage, "img-1", read, { stage: "extract-markdown", kind: "image" })).toEqual([1, 2, 3]);
-    expect(rich(usage).map((event) => event.id)).toEqual(["rich:run-1:img-1:1", "rich:run-1:img-1:2", "rich:run-1:img-1:3"]);
-    // 3 frames: 0.75 credits (was 0.25 when only the frame with words billed).
-    expect(usage.pendingBillableCents).toBeCloseTo(0.75);
+    expect(ocr(usage).map((event) => event.id)).toEqual(["ocr:run-1:img-1:1", "ocr:run-1:img-1:2", "ocr:run-1:img-1:3"]);
+    // 3 frames, each one flat OCR page at the test price.
+    expect(usage.pendingBillableCents).toBeCloseTo(3 * TEST_PAGE_CREDITS.ocr);
     expect(usage.snapshot().find((event) => event.metric === "ocr-compute")!.metadata).toMatchObject({ kind: "image", chargedPages: [1, 2, 3] });
   });
 
@@ -51,11 +54,11 @@ describe("recordOcrReads", () => {
     recordOcrReads(usage, "doc-1", read, { stage: "extract-markdown", kind: "pdf" });
     recordOcrReads(usage, "doc-1", read, { stage: "extract-markdown", kind: "pdf" });
     recordOcrReads(usage, "doc-1", outcome([{ pageNumber: 2, text: "Words again" }]), { stage: "extract-markdown", kind: "pdf" });
-    expect(rich(usage).map((event) => event.id)).toEqual(["rich:run-1:doc-1:1", "rich:run-1:doc-1:2"]);
+    expect(ocr(usage).map((event) => event.id)).toEqual(["ocr:run-1:doc-1:1", "ocr:run-1:doc-1:2"]);
     // A second ledger for the same run (a retried activity) produces the same ids, so persistence dedupes them.
     const retry = ledger();
     recordOcrReads(retry, "doc-1", read, { stage: "extract-markdown", kind: "pdf" });
-    expect(rich(retry).map((event) => event.id)).toEqual(rich(usage).map((event) => event.id));
+    expect(ocr(retry).map((event) => event.id)).toEqual(ocr(usage).map((event) => event.id));
   });
 
   it("enqueues one ocr-compute event per job with the boundary's measured cpu, memory and wall time", () => {
@@ -83,6 +86,6 @@ describe("recordOcrReads", () => {
   it("charges nothing without a run id (an unknown fact never raises a charge)", () => {
     const usage = new PipelineUsageEventLedger();
     expect(recordOcrReads(usage, "doc-1", outcome([{ pageNumber: 1, text: "Words" }]), { stage: "s", kind: "pdf" })).toEqual([1]);
-    expect(rich(usage)).toEqual([]);
+    expect(ocr(usage)).toEqual([]);
   });
 });

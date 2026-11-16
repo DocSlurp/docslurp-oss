@@ -862,18 +862,18 @@ export async function withVisionCall<T>(
   }
 }
 
-/** A usage ledger that charges Rich pages (pipeline/usage-ledger.ts). */
+/** A usage ledger that charges OCR and Rich pages (pipeline/usage-ledger.ts). */
 export interface RichChargingLedger<I, E> {
   record(input: I, options?: { visionAttemptTicket?: string | null }): E;
-  hasRichCharge(documentId: string, pageNumber: number): boolean;
+  pageChargeClass(documentId: string, pageNumber: number): "ocr" | "rich" | null;
 }
 
 /**
- * Record a successful page read. When it buffers the run's Rich charge for the page, the charge
- * carries the read's request ticket, and the checkpoint that persists the charge (first insert of
- * `rich:<run>:<document>:<page>` wins) removes that request from the org's uncharged count.
- * Critique, second reads of a page this ledger already charged and metrics that charge nothing stay
- * uncharged.
+ * Record a successful page read. When it buffers a new charge class for the page (its first OCR or
+ * Rich charge, or the upgrade of an OCR page to Rich), the charge carries the read's request ticket,
+ * and the checkpoint that persists the charge (first insert of its deterministic id wins) removes that
+ * request from the org's uncharged count. Critique, second reads of a page this ledger already charged
+ * in that class and metrics that charge nothing stay uncharged.
  */
 export function recordVisionRead<I, E>(
   ledger: RichChargingLedger<I, E>,
@@ -881,9 +881,9 @@ export function recordVisionRead<I, E>(
   page: { documentId: string; pageNumber: number },
   input: I,
 ): E {
-  const before = ledger.hasRichCharge(page.documentId, page.pageNumber);
+  const before = ledger.pageChargeClass(page.documentId, page.pageNumber);
   const event = ledger.record(input, { visionAttemptTicket: gate.readTicket });
-  if (!before && ledger.hasRichCharge(page.documentId, page.pageNumber)) gate.charged();
+  if (ledger.pageChargeClass(page.documentId, page.pageNumber) !== before) gate.charged();
   return event;
 }
 
