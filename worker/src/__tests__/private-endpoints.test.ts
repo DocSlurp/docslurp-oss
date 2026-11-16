@@ -33,6 +33,7 @@ const registry = [{
   auth: { tokenEnv: "TEST_WORKER_GPU1_TOKEN" },
   models: [
     { id: "Qwen/Qwen3.6-35B-A3B-FP8", capability: "text", chatTemplateKwargs: { enable_thinking: false } },
+    { id: "acme/no-system-llm", capability: "text", systemMessage: false },
     { id: "lightonai/LightOnOCR-3-0.8B", capability: "vision" },
     { id: "acme/plain-vlm", capability: "vision" },
     { id: "acme/tuned-vlm", capability: "vision", vision: { temperature: 0.1, topP: 0.8, maxOutputTokens: 4_096, maxLongEdgePx: 1_540 } },
@@ -184,6 +185,42 @@ describe("worker private endpoint text", () => {
     expect(audit.map((entry) => entry.endpoint)).toEqual(["private:gpu1:worker.text.structured-extraction"]);
   });
 
+  it("salts the system line per organization for a model with the system role, and sends no cache_salt", async () => {
+    const { runWithProviderRateScope } = await import("../lib/provider-rate-limit.js");
+    const calls = mockPrivateServer();
+    const send = (orgId: string | null) => runWithProviderRateScope({ orgId }, () => generateOpenRouterText({
+      operation: "document-summary", apiKey: "private-endpoint", model: "llm://private/gpu1/Qwen/Qwen3.6-35B-A3B-FP8",
+      system: "Summarize the document.", prompt: "Identical tenant text.", maxOutputTokens: 8, privacyMode: "standard",
+    }));
+    await send("org-a"); await send("org-a"); await send("org-b");
+    const systems = calls.map((call) => (call.body.messages as Array<{ role: string; content: string }>).find((m) => m.role === "system")!.content);
+    expect(systems[0]).toMatch(/^Workspace [0-9a-f]{16}\.\n\nSummarize the document\./);
+    expect(systems[1]).toBe(systems[0]);
+    expect(systems[2]).not.toBe(systems[0]);
+    expect(calls.every((call) => !("cache_salt" in call.body))).toBe(true);
+  });
+
+  it("sends a no-system-role model no system message: instructions open the user turn, the org salt goes as cache_salt", async () => {
+    const { runWithProviderRateScope } = await import("../lib/provider-rate-limit.js");
+    const calls = mockPrivateServer();
+    const send = (orgId: string | null) => runWithProviderRateScope({ orgId }, () => generateOpenRouterText({
+      operation: "document-summary", apiKey: "private-endpoint", model: "llm://private/gpu1/acme/no-system-llm",
+      system: "Summarize the document.", prompt: "Identical tenant text.", maxOutputTokens: 8, privacyMode: "standard",
+    }));
+    await send("org-a"); await send("org-a"); await send("org-b"); await send(null); await send(null);
+    for (const call of calls) {
+      const messages = call.body.messages as Array<{ role: string; content: unknown }>;
+      expect(messages.some((m) => m.role === "system")).toBe(false);
+      expect(JSON.stringify(messages[0]!.content)).toContain("Summarize the document.");
+      expect(JSON.stringify(messages)).not.toContain("Workspace ");
+      expect(call.body.cache_salt).toMatch(/^[0-9a-f]{16}$/);
+    }
+    const salts = calls.map((call) => call.body.cache_salt);
+    expect(salts[1]).toBe(salts[0]);
+    expect(salts[2]).not.toBe(salts[0]);
+    expect(salts[3]).not.toBe(salts[4]); // no org: random, nothing shared
+  });
+
   it("refuses strict-privacy calls outside an audit scope", async () => {
     const calls = mockPrivateServer();
     await expect(generateOpenRouterText({
@@ -254,7 +291,7 @@ describe("worker private endpoint vision request profiles", () => {
     const { runWithProviderRateScope } = await import("../lib/provider-rate-limit.js");
     const salt = async (orgId: string | null) => (await runWithProviderRateScope({ orgId }, () => sendPage("llm://private/gpu1/lightonai/LightOnOCR-3-0.8B")) as { cache_salt?: string }).cache_salt;
     const a = await salt("org-a");
-    expect(a).toMatch(/^Workspace [0-9a-f]{16}\.$/);
+    expect(a).toMatch(/^[0-9a-f]{16}$/);
     expect(await salt("org-a")).toBe(a);
     expect(await salt("org-b")).not.toBe(a);
     expect(await salt(null)).not.toBe(await salt(null));

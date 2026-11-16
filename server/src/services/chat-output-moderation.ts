@@ -1,5 +1,6 @@
 import { instrumentFetch } from "@docslurp/shared/observability";
 import { createOpenRouterRoutingFetch, liveModelPrice, readProviderCharge, type PrivacyMode, type ProjectChatResponse } from "@docslurp/shared";
+import { orgPromptSaltLine } from "@docslurp/shared/org-prompt-salt";
 
 import { recordUsageEvent } from "../lib/ai-usage.js";
 import { assertCanSpend } from "./billing/spend-guard.js";
@@ -33,7 +34,8 @@ export interface ModerationVerdict {
 
 export interface OutputModerator {
   readonly name: string;
-  moderate(input: { question: string; answer: string }, signal?: AbortSignal): Promise<ModerationVerdict>;
+  /** `orgId`: the tenant whose question and answer are sent; its prompt salt opens the request (null: random salt). */
+  moderate(input: { question: string; answer: string; orgId?: string | null }, signal?: AbortSignal): Promise<ModerationVerdict>;
 }
 
 export const noopOutputModerator: OutputModerator = {
@@ -62,8 +64,12 @@ export function llamaGuardOutputModerator(args: { apiKey: string; fetch?: typeof
         headers: { authorization: `Bearer ${args.apiKey}`, "content-type": "application/json" },
         body: JSON.stringify({
           model: LLAMA_GUARD_MODEL,
+          // The org salt opens the user turn: the hosted model's fixed policy preamble stays a shared prefix, but the
+          // tenant's question never shares a provider prefix cache with another organization's identical question.
+          // Llama Guard's chat template takes only alternating user/assistant turns (no system role), so the salt is a
+          // line of the user turn; verdicts were checked with and without it (PR notes).
           messages: [
-            { role: "user", content: input.question },
+            { role: "user", content: `${orgPromptSaltLine(input.orgId)}\n\n${input.question}` },
             { role: "assistant", content: input.answer },
           ],
           max_tokens: 16,
@@ -156,7 +162,7 @@ export async function moderateChatAnswer(response: ProjectChatResponse, args: {
   let verdict: ModerationVerdict;
   try {
     await assertCanSpend(args.orgId ?? null, args.projectId, { kind: "interactive", hold: false });
-    verdict = await moderator.moderate({ question: args.question, answer: response.answer }, args.signal);
+    verdict = await moderator.moderate({ question: args.question, answer: response.answer, orgId: args.orgId ?? null }, args.signal);
   } catch (error) {
     console.error(`[chat-moderation] failed project=${args.projectId}; answer withheld:`, error instanceof Error ? error.message : String(error));
     return { ...response, answer: MODERATION_UNAVAILABLE_ANSWER, citations: [], evidenceSpans: [] };

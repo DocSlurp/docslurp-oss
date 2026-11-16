@@ -49,6 +49,26 @@ describe("output moderation", () => {
     expect(safe.flagged).toBe(false);
   });
 
+  it("opens the user turn with the org salt (no system role): identical questions never share a prefix across orgs", async () => {
+    const sent: Array<Array<{ role: string; content: string }>> = [];
+    const fetch = vi.fn(async (_url: string, init: RequestInit) => {
+      sent.push(JSON.parse(String(init.body)).messages);
+      return new Response(JSON.stringify({ choices: [{ message: { content: "safe" } }], usage: { prompt_tokens: 800, completion_tokens: 5 } }), { status: 200 });
+    });
+    const moderator = llamaGuardOutputModerator({ apiKey: "k", fetch: fetch as never });
+    for (const orgId of ["org-a", "org-a", "org-b", null, null]) await moderator.moderate({ question: "Same question", answer: "Same answer", orgId });
+    expect(sent.every((messages) => messages.map((m) => m.role).join() === "user,assistant")).toBe(true);
+    expect(sent.every((messages) => messages[1]!.content === "Same answer")).toBe(true);
+    const users = sent.map((messages) => messages[0]!.content);
+    expect(users[0]).toMatch(/^Workspace [0-9a-f]{16}\.\n\nSame question$/);
+    expect(users[1]).toBe(users[0]);
+    expect(users[2]).not.toBe(users[0]);
+    expect(users[3]).not.toBe(users[4]);
+    // moderateChatAnswer passes the request org.
+    await moderateChatAnswer(response, { actor: browserKey, question: "Same question", userId: "u", projectId: "ws-1", orgId: "org-b", privacyMode: "standard", moderator });
+    expect(sent[5]![0]!.content).toBe(users[2]);
+  });
+
   it("records the provider-reported charge when the response carries one", async () => {
     const fetch = async () => new Response(JSON.stringify({ choices: [{ message: { content: "safe" } }], usage: { prompt_tokens: 800, completion_tokens: 5, cost: 0.0002 } }), { status: 200 });
     const verdict = await llamaGuardOutputModerator({ apiKey: "k", fetch: fetch as never }).moderate({ question: "q", answer: "a" });

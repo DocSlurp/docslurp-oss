@@ -1,16 +1,17 @@
 # Repository guidelines for coding agents
 
-DocSlurp is a document and media ingestion service: files go through a configurable pipeline that produces page-by-page Markdown, chunks, embeddings and structured fields, served through search, RAG context and a cited chat endpoint. This repository is pre-release: breaking changes to APIs and data models are acceptable, so prefer the cleanest design over compatibility shims.
+DocSlurp is a document and media ingestion service: files go through a configurable pipeline that produces page-by-page Markdown, chunks, embeddings and structured fields, served through search, RAG context and a cited chat endpoint. DocSlurp is live: production holds customer data, so ship schema changes as migrations and keep API and data-model changes compatible unless the owner approves a break.
 
 ## Source of truth
 
-This repository (`DocSlurp/docslurp-oss`) owns the server, worker, packages and migrations. The private web application and production operations live in `DocSlurp/app`, which pins this repository at `core/`. Merge core changes to this repository's main before updating the app pin. The former `DocSlurp/docslurp` repository is a read-only historical archive; do not develop or release there. Work directly here; exports from the archive are retired.
+This repository (`DocSlurp/docslurp-oss`) owns the server, worker, packages and migrations. The private web application and production operations live in `DocSlurp/app`, which pins this repository at `core/`. Merge core changes to this repository's main before updating the app pin. The former `DocSlurp/docslurp` repository is a read-only historical archive; do not develop or release there. Work directly here.
 
 ## Layout
 
 - `server/`: Hono API (`@docslurp/server`). Routes in `server/src/routes/`, services in `server/src/services/`, the Drizzle schema, Postgres migrations, `migrate.mjs` and `seed.ts` in `server/db/`.
 - `worker/`: TypeScript ingestion pipeline. Stages live in `worker/src/stages/`.
-- `packages/`: `sdk` (with the `@docslurp/sdk/embed` subpath), `cli`, `contrib-astro`, `contrib-search-compat`, `contrib-algolia-server`, `contrib-wordpress` and `shared` (contracts shared by server and clients).
+- `packages/`: `sdk` (with the `@docslurp/sdk/embed` subpath), `cli`, `contrib-astro`, `contrib-search-compat`, `contrib-algolia-server`, `contrib-wordpress`, `estimate` (offline file profiler; the server quotes from its profiles) and `shared` (contracts shared by server and clients).
+- `plugins/docslurp`: the DocSlurp plugin for Claude (skills and MCP setup).
 - `docs/`: public documentation. Self-host instructions are in `docs/self-host/`.
 
 Keep new code in the package that owns it. `server/` must not import from outside the project packages it declares.
@@ -50,7 +51,7 @@ These rules are mandatory and override speed and convenience. When in doubt, tre
 
 **Boundaries in scope:**
 
-- **Untrusted file processing:** anything that reads customer bytes. This covers parsers, converters, OCR, media tools, archive and Office handling, rasterizers, native bindings such as the private PDF engine, and the code that stages inputs and outputs for them.
+- **Untrusted file processing:** anything that reads customer bytes. This covers parsers, converters, OCR, media tools, archive and Office handling, rasterizers, native PDF engine bindings, and the code that stages inputs and outputs for them.
 - **Tenant data boundaries:** organization, project, user and API-key scoping in queries, search and vector indexes, storage prefixes, caches, exports, webhooks, MCP tools and chat retrieval.
 - **Identity and access:** sessions, API keys and their scopes, OAuth and MCP consent, SSO, CSRF and origin checks.
 - **Secrets and egress:** credential storage and distribution, user-supplied URLs, connectors and any outbound fetch driven by user input.
@@ -68,7 +69,8 @@ These rules are mandatory and override speed and convenience. When in doubt, tre
 - Every cache, memo, dedup or reuse key and every storage key includes the organization id, or an id (project, run, document, API key, or user, since a user belongs to one organization) that belongs to exactly one organization and is used only after its access was checked. Build new cache and reuse keys with `orgScopedCacheKey` from `@docslurp/shared`, which throws without an organization; never fall back to a shared or null scope.
 - No cross-organization dedup or reuse of any customer-derived value: uploaded bytes, renders, page images, OCR or vision output, embeddings, model outputs, figures, exports, VM or sandbox state. Identical bytes from two organizations are stored and processed twice.
 - Reuse lookups by content hash (embeddings, renders, extraction checkpoints) filter by organization in the query itself; a hash match is never proof of ownership.
-- Provider prompt caches may share only tenant-free prefixes (fixed system prompts, tool schemas). Prompts that carry tenant content start with the per-organization salt line (`orgPromptSaltLine` / `chatSystemSaltLine`) before any tenant text; a request that cannot carry one (no system message, image first) sends it as the endpoint's cache salt (`cache_salt`). Any provider cache key or user id sent with tenant content is per organization. Open gaps are listed in `TODO.md`.
+- Provider prompt caches may share only tenant-free prefixes (fixed system prompts, tool schemas). Prompts that carry tenant content start with the per-organization salt (`@docslurp/shared/org-prompt-salt`, the only salt helper) before any tenant text; a request that cannot carry a leading line (no system role, image first) sends it as the endpoint's cache salt (`cache_salt`). Where the salt is model input to a calibrated or classifying model, measure answers with and without it before shipping. Any provider cache key or user id sent with tenant content is per organization and never the raw org id. Open gaps are listed in `TODO.md`.
+- Shared in-memory caches holding tenant-derived values give each organization a bounded partition (`OrgPartitionedTtlLru`, or per-org caps as in the search response cache): a write evicts only its own organization's entries (or is not kept), never another's, and total memory stays bounded. Older caches not yet partitioned are listed in `TODO.md`.
 - Cache statistics shown to a caller (hits, sizes, timings) are that organization's own, never process-wide.
 - A new module-level cache map must be classified in `server/src/__tests__/org-isolation-caches.test.ts`; caches the test cannot see (class fields on long-lived instances, Sets, database tables and storage keyed by content) get the same review in the pull request. Any new cache or reuse path ships with a negative test: organization B never gets organization A's entry with identical inputs, and an unscoped key is refused.
 - Reviewers check this rule on every change that adds or changes a cache, a reuse or dedup path, a storage key, a prompt layout or a tenant query.
@@ -105,6 +107,7 @@ These rules are mandatory and override speed and convenience. When in doubt, tre
 - Log every LLM or embedding call as `[ai-usage] <metric> model=<id> input_tokens=<n> output_tokens=<n>` (plus `cached_input_tokens=<n>` / `cache_write_input_tokens=<n>` when the provider reports prompt-cache use) and persist usage through the existing recorder with an explicit scope. Keep prompts static first, per-request last, so prefixes stay cacheable; Claude via OpenRouter caches only with `createOpenRouterPromptCacheFetch` on Chat Completions.
 - Never commit secrets, `.env` files, model weights or test fixtures with unclear licenses. Third-party fixtures are fetched on first use with `pnpm fixtures:fetch` into the gitignored `.cache/`.
 - Fake, QA and agent-created accounts use a reserved email domain (`@example.com`, `@<run>.invalid`, `@<name>.test`) so `docslurp_reserved_test_email` (migration 0094) marks them `test` and admin customer metrics exclude them; for an address you cannot choose, use `TEST_ACCOUNT_EMAIL_PATTERNS`.
+- Pricing mechanics (credit multipliers, zero-rated routes, infrastructure costs, margins) stay in `DocSlurp/app`. Core exposes neutral usage and profile data, and a generic seam with an open default for quoting; the customer-visible price list is the only pricing published here.
 - Benchmark and evaluation inputs are held-out evidence. Do not hard-code document names, field names or expected values from an evaluation into production code or prompts.
 
 ## Scale targets

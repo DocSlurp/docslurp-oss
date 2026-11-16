@@ -754,7 +754,7 @@ export async function lanceDbVectorSearch(args: {
         tuning: present.map((target) => lanceDbQueryTuning(args.limit, target.documentIds?.length ?? 0, refineFactor, target.documentIds !== undefined || Boolean(args.where))),
         variant,
       });
-      const cached = cache.get(cacheKey);
+      const cached = cache.get(args.orgId, cacheKey);
       const span = startDependencySpan("lancedb.result_cache", {
         "db.system.name": "lancedb", "docslurp.dependency.type": "cache", "docslurp.dependency.provider": "memory",
         "docslurp.dependency.operation": "result_cache", "docslurp.dependency.phase": "adapter",
@@ -829,7 +829,7 @@ export async function lanceDbVectorSearch(args: {
   }
 
   // Never cache a degraded answer from a target that errored.
-  if (cacheKey && !failed) cache.set(cacheKey, results.map((hit) => ({ ...hit })));
+  if (cacheKey && !failed) cache.set(args.orgId, cacheKey, results.map((hit) => ({ ...hit })));
   return results;
 }
 

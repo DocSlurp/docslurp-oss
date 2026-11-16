@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 const { classifyUntrustedEvidenceText } = await import("../services/prompt-injection.js");
+const { orgPromptSaltLine } = await import("@docslurp/shared/org-prompt-salt");
 const { chatSystemSaltLine, evidenceNonce, evidenceTagNonce, formatEvidenceBlocks, namesNonce, resetEvidenceTagKeyForTests, withoutEvidenceTags } = await import("../lib/ai.js");
 
 describe("prompt injection signals", () => {
@@ -113,6 +114,8 @@ describe("evidence blocks", () => {
     expect(chatSystemSaltLine("org-b")).not.toBe(a);
     // No scope: random each call, so nothing is shared.
     expect(chatSystemSaltLine(null)).not.toBe(chatSystemSaltLine(null));
+    // One helper: the server's chat salt is the worker's org prompt salt, so both sides salt an org identically.
+    expect(a).toBe(orgPromptSaltLine("org-a"));
     vi.unstubAllEnvs();
     resetEvidenceTagKeyForTests();
   });

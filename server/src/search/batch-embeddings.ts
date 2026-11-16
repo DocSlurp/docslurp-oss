@@ -60,7 +60,7 @@ export async function prefetchBatchQueryEmbeddings(
         const resolved = resolveProjectRetrievalControls({ options: item.options, projectId, settings: context.settings, pipeline }).options;
         if (!embedsQueryText(resolved)) continue;
         const key = queryEmbeddingCacheKey(item.query, pipeline.embedding, privacyMode, orgId);
-        if (!key || cache.get(key) || texts.has(key)) continue;
+        if (!key || !orgId || cache.get(orgId, key) || texts.has(key)) continue;
         texts.set(key, item.query);
       }
       if (texts.size < 2) return;
@@ -88,7 +88,7 @@ export async function prefetchBatchQueryEmbeddings(
           metadata: { ...result.usage.metadata, usageSource: METERED_EMBEDDING_PROVIDERS.has(route.provider) || (route.runtime === "remote" && result.usage.inputTokens > 0) ? "provider" : "estimate", batchSize: values.length, batch: true },
         },
       });
-      [...texts.keys()].forEach((key, index) => cache.set(key, result.embeddings[index]!.slice()));
+      [...texts.keys()].forEach((key, index) => cache.set(orgId!, key, result.embeddings[index]!.slice()));
       prefetched += values.length;
     } catch (error) {
       // Non-fatal: the searches embed one by one and surface provider errors themselves.

@@ -179,6 +179,7 @@ Keep `DOCSLURP_PDF_ENGINE=off` (or `shadow`) until the gate passes.
 | `PAGE_ROUTER_MODEL_PRICES_PATH` | shipped list | path | Price list override for estimates. |
 | `DOCSLURP_DECISION_HEALTH_HISTORY` | in memory | path | Multi-day canary history for quarantined decision models. |
 | `DECISION_LOCAL_SIDECAR_CMD` | none | command | Local decision-model sidecar (eval). |
+| `ROUTING_DECISION_STATE_SALT` | off | 1 | Open every hosted decision state with the organization's salt line (provider prefix-cache isolation). Leave off until a policy pack is fit on salted states: the line changes calibrated answers. Hosted calls always send the per-organization `user` field on OpenRouter. |
 | `DOCSLURP_PDF_ENGINE` | `off` (production: `shadow`) | off, shadow, native-pdf | Native PDF engine shadow runs; when installed the engine is the first PDF extractor (poppler-text fallback). |
 | `DOCSLURP_NATIVE_PDF_INSTALLED` | unset | 1 | Set in images that ship the binding so `/extractors` lists native-pdf. |
 | `DOCSLURP_NATIVE_PDF_MODULE`, `DOCSLURP_NATIVE_PDF_DIR` | vendor dir | path | Binding discovery overrides (dev, bench). |
