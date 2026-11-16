@@ -1,7 +1,9 @@
 import "../src/env.js";
 import { loadPricingProvider, pricingDurableStateFromSql } from "@docslurp/shared/pricing-loader";
+import { startAutomaticCallPriceRefresh } from "@docslurp/shared";
 
 import { sql } from "../src/db.js";
+import { PROJECT_CHAT_FAILOVER_MODELS } from "../src/services/project-chat.js";
 import { NATIVE_CHAT_TEARDOWN_MS, nativeChatDrainMs, runNativeChatWorker } from "../src/agent-runtime/runtime.js";
 const shutdown = new AbortController();
 const force = new AbortController();
@@ -28,6 +30,8 @@ try {
   await sql.end({ timeout: 1 }).catch(() => undefined);
   process.exit(1);
 }
+// Chat failover is an automatic call: the margin gate needs current endpoint prices for its candidates.
+startAutomaticCallPriceRefresh(PROJECT_CHAT_FAILOVER_MODELS);
 try {
   await runNativeChatWorker(shutdown.signal, { force: force.signal, drainMs });
   await sql.end({ timeout: 1 });

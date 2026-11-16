@@ -118,14 +118,15 @@ describe("managed pipeline models", () => {
     expect((await storedPipeline()).vision).not.toHaveProperty("remoteFallbackModelUri");
   });
 
-  it("refuses a denied, unpriced or uncatalogued admin model before writing", async () => {
+  // DeepSeek V4.1 Flash is no longer refused by name (2026-11-15): an admin's pick is explicit; automatic calls on it
+  // pass the margin gate.
+  it("refuses a prohibited, unpriced or uncatalogued admin model before writing", async () => {
     for (const pipeline of [
-      { vision: { modelUri: DEEPSEEK_VISION } },
       { textGeneration: { model: "openai/gpt-6-sol-pro?reasoning=high" } },
       { textGeneration: { model: "acme/unpriced-model" } },
       { vision: { modelUri: "llm://openrouter/acme/unlisted-vision" } },
     ]) {
-      await expect(managedModels.setProjectManagedModels("w", { pipeline }, { userId: "u1" })).rejects.toThrow(/never selected automatically|prohibited|no verified price|not a reviewed/);
+      await expect(managedModels.setProjectManagedModels("w", { pipeline }, { userId: "u1" })).rejects.toThrow(/prohibited|no verified price|not a reviewed/);
     }
     expect((await sql`select managed_models from projects where id = 'w'`)[0]!.managed_models).toEqual({});
   });

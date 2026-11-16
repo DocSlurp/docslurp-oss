@@ -1,4 +1,4 @@
-import { isAutomaticSelectionDenied } from "@docslurp/shared";
+import { admitAutomaticCall, isAutomaticSelectionDenied } from "@docslurp/shared";
 import { isSpeedBoostEligible, speedBoostModel } from "@docslurp/shared";
 import { SPEED_BOOST_MODEL_SWAPS } from "@docslurp/shared/project-chat-models";
 import {
@@ -232,5 +232,7 @@ export function resolveSpeedBoostChatModel(model: string, enabled: boolean = fal
   // The message names the tiers that have a fast route under this project's mapping, not just the managed defaults.
   if (enabled && !isSpeedBoostEligible(model)) throw new SpeedBoostUnavailableError(speedBoostUnavailableMessage(speedBoostChatTiers(tierModels)));
   const swap = enabled ? SPEED_BOOST_MODEL_SWAPS[model] : undefined;
-  return (swap && !isAutomaticSelectionDenied(swap) ? swap : undefined) ?? speedBoostModel(model, enabled);
+  // A swap is an automatic call: taken only when it keeps the margin at its current price (automatic-call-margin.ts).
+  const admitted = swap && !isAutomaticSelectionDenied(swap) && admitAutomaticCall("chat-answer", { model: swap }, "speed boost swap", { role: "pick" }).allowed;
+  return (admitted ? swap : undefined) ?? speedBoostModel(model, enabled);
 }

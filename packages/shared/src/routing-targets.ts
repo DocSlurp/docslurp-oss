@@ -340,7 +340,7 @@ export function buildRoutingTargetCatalog(
       continue;
     }
     // The page router picks among admitted targets on its own: a model that is never selected automatically is never one.
-    if (idsToCheck.some(isAutomaticSelectionDenied)) {
+    if (idsToCheck.some((id) => isAutomaticSelectionDenied(id))) {
       reject(candidate.id, "automatic-selection-denied", "never selected automatically (automatic-model-selection.ts)");
       continue;
     }

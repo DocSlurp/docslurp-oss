@@ -1,3 +1,8 @@
+## Automatic-call margin gate (2026-11-15)
+
+- Automatic model calls (vision fallback, OCR escalation, chart generators, page-router targets, route tiers, chat failover, Speed boost swaps) are allowed only when the pricing provider's billed value covers planning tokens times the route's highest current price (per OpenRouter endpoint, time-of-day overrides, verified host schedules) by `DOCSLURP_AUTOMATIC_MIN_MARGIN` (1.3). Unknown or stale prices fail closed; refused candidates are skipped with a logged reason; losing calls log `[automatic-margin] overrun loss=true`.
+- DeepSeek V4.1 Flash leaves the never-automatic denylist (owner decision); the denylist mechanism stays, empty.
+
 ## Durable compute fleet admission
 
 - Added operator-owned fleet limits and durable reservation slots before provider launch. The database rejects oversubscription, stale policy snapshots, identity changes and released-ID reuse. Runtime application roles cannot access the platform ledger; workers cannot edit fleet limits or erase reservations.

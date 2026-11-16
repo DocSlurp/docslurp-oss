@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { visionConfigSchema, visionListPriceCents, type VisionConfig } from "@docslurp/shared";
+import { installTestPricing, resetPricingProviderForTests, visionConfigSchema, visionListPriceCents, type VisionConfig } from "@docslurp/shared";
 
 import type { Config } from "../config.js";
 import type { WorkerAiUsageInput } from "../lib/ai-usage.js";
@@ -114,6 +114,26 @@ describe("vision usage priced on the served route", () => {
     // The OpenAI fallback billed every attempt at gpt-4.1-mini's list price; the loopback primary billed nothing.
     expect(event!.costCents!).toBeGreaterThan(0);
     expect(event!.costCents!).toBeCloseTo(visionListPriceCents("gpt-4.1-mini", { inputTokens: event!.inputTokens!, outputTokens: event!.outputTokens! })!, 10);
+  });
+
+  it("a fallback that misses the automatic-call margin is never sent: the primary's error stands", async () => {
+    vi.stubEnv("DOCSLURP_ALLOW_TENANT_LOCAL_MODEL_ENDPOINTS", "true");
+    stubFetch((route) => (route === "loopback" ? badRequest() : answer("stop")));
+    // A billed value no page read on the fallback's list price covers by the minimum margin.
+    installTestPricing({ automaticCallValueUsd: () => 1e-9 });
+    try {
+      const { outcome, recorded } = await guardedRead(vision(LOOPBACK, OPENAI));
+      expect(outcome).toBeInstanceOf(Error);
+      expect(sends.some((send) => send.route === "openai")).toBe(false);
+      expect(recorded).toEqual([]);
+      expect(console.warn).toHaveBeenCalledWith(expect.stringMatching(/\[automatic-margin\] skipped label=vision fallback model kind=page-transcription/));
+      // A value that covers it: the fallback answers.
+      installTestPricing({ automaticCallValueUsd: () => 1 });
+      const allowed = await guardedRead(vision(LOOPBACK, OPENAI));
+      expect((allowed.outcome as { result: VisionExecutionResult }).result.fallbackUsed).toBe(true);
+    } finally {
+      resetPricingProviderForTests();
+    }
   });
 
   it("a local-to-hosted fallback success is priced and labelled on the hosted route", async () => {

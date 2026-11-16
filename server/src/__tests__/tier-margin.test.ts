@@ -8,7 +8,9 @@ const obs = (endpoint: string, input: number, output: number): EndpointObservati
   model: "acme/ocr", endpoint, observedAt: NOW, inputUsdPerMTok: input, outputUsdPerMTok: output, uptime30m: 100, status: 0, latencyP50Ms: null,
 });
 const options = defineTierOptions([{ id: "ocr", capability: "page-ocr", pool: ["llm://openrouter/acme/ocr?_provider=parasail"], tiers: ["balanced"], evalScore: null, evalRef: null }]);
-const select = (unitRevenueUsd: number) => selectTierRoute({ capability: "page-ocr", tier: "balanced", options, observations: [obs("parasail", 0.25, 1.0)], unitRevenueUsd, unit: PAGE, now: NOW });
+// The warning layer on its own: the automatic-call margin gate (minimum ratio, default 1.3) is set to break even here so
+// thin picks reach it; with the gate on, a pick under its ratio is never made at all.
+const select = (unitRevenueUsd: number) => selectTierRoute({ capability: "page-ocr", tier: "balanced", options, observations: [obs("parasail", 0.25, 1.0)], unitRevenueUsd, unit: PAGE, now: NOW, minMarginRatio: 1 });
 const context = { tier: "balanced", capability: "page-ocr", requestId: "req-1" };
 
 describe("tier margin warnings", () => {

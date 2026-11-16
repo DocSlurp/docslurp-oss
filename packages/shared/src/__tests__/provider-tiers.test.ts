@@ -17,7 +17,7 @@ const [ocrA, ocrB, chat] = defineTierOptions([
 ]) as [TierOption, TierOption, TierOption];
 const options = [ocrA, ocrB, chat];
 const problems = (uris: string[]) => parseProviderPool(uris).problems;
-const base = (over: Partial<TierSelectionInput>): TierSelectionInput => ({ capability: "page-ocr", tier: "balanced", options, observations: [], unitRevenueUsd: null, unit: PAGE, now: NOW, ...over });
+const base = (over: Partial<TierSelectionInput>): TierSelectionInput => ({ capability: "page-ocr", tier: "balanced", options, observations: [], unitRevenueUsd: null, unit: PAGE, now: NOW, minMarginRatio: 1, ...over });
 
 describe("provider pools", () => {
   it("parses llm:// entries: model from the path, model options from the query, pool options from _ params or the fragment", () => {

@@ -541,8 +541,8 @@ export const DEEPINFRA_VISION_BASE_URL = DEEPINFRA_EMBEDDING_BASE_URL;
  * change here: the profile label and description, the default config and the default-derived values follow.
  * It must be a hosted `visionModelCatalog` id (checked by the catalog tests).
  */
-// Tuned GPT-6 Luna since 2026-11-13 (owner decision: the default is never DeepSeek V4.1 Flash, which is never selected
-// automatically; it stays an explicit catalog choice). On the 2026-10-22 vision holdout Luna had no significant deficit
+// Tuned GPT-6 Luna since 2026-11-13 (owner decision: the default is not DeepSeek V4.1 Flash; it stays an explicit
+// catalog choice, and automatic calls on it pass the margin gate, automatic-call-margin.ts). On the 2026-10-22 vision holdout Luna had no significant deficit
 // against DeepSeek V4.1 Flash 1017 on content, reading order or math (math 0.994 vs 0.982), and a significant tolerant
 // tables deficit (-0.032); it is the cheapest allowed model at its most expensive host and about 3x slower per page.
 // Override without a deploy via DOCSLURP_VISION_MODEL_URI (app and worker).

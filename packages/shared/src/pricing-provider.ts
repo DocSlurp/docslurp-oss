@@ -119,6 +119,27 @@ export type ComputeRateOverrides = Partial<{
   storageCentsPerGbMonth: number;
 }>;
 
+/**
+ * Model calls the system makes on its own choice (a fallback, an escalation, a failover, a chart generator, a tier pool):
+ * each is margin-checked before it is made (automatic-call-margin.ts).
+ */
+export const AUTOMATIC_CALL_KINDS = ["page-transcription", "chart-read", "chat-answer"] as const;
+export type AutomaticCallKind = (typeof AUTOMATIC_CALL_KINDS)[number];
+/** One automatic call as the margin gate plans it: the kind, the model and its planning token shape. */
+export type AutomaticCallValueInput = {
+  kind: AutomaticCallKind;
+  model: string;
+  /**
+   * Why the system makes the call: `fallback` (a second try of a read the primary may already have billed),
+   * `escalation` (a better read of a page already charged), `failover` (a second try of a chat answer), `pick` (the
+   * system's choice of model for a first call). A provider states the value the call adds: a retry of an already
+   * charged unit may add none (0).
+   */
+  role: "fallback" | "escalation" | "failover" | "pick";
+  inputTokens: number;
+  outputTokens: number;
+};
+
 /** Price ceilings for a chart & diagram export generator, USD per million tokens. */
 export type ChartGeneratorPriceCeiling = { inputUsdPerMTok: number; outputUsdPerMTok: number };
 
@@ -180,6 +201,13 @@ export interface PricingProvider {
    * (`summaryTreeBillingActive`) then builds no summary tree: the unit is never priced from a default.
    */
   summaryTreeCallCredits?(): number;
+  /**
+   * What one automatic call of this kind, role and planning shape bills the customer, in USD, or null when this
+   * deployment does not bill it (no margin check then). Required where pricing is required (pricingRequired): a provider
+   * without it is refused at install, and a null answer there refuses the call (fail closed). Core compares it with the call's worst-case provider
+   * cost at the highest current price the route can reach (automatic-call-margin.ts).
+   */
+  automaticCallValueUsd?(call: AutomaticCallValueInput): number | null;
   /** Multiplier on unit charges for the opt-in speed boost (1 when off). */
   speedBoostMultiplier(speedBoost: boolean): number;
   /** Share of the completion page charge a run pays, given the stages it executes and reuses. */
@@ -249,6 +277,11 @@ export function assertPricingProvider(value: unknown): asserts value is PricingP
   if (!plans || !Array.isArray(plans.creditPacksCents) || !(plans.workerSlots?.starter >= 1) || !(plans.workerSlots?.funded >= 1)
     || !(plans.starterCredits >= 0)) {
     throw new Error(`pricing provider ${provider.id} has invalid plans`);
+  }
+  // Where pricing is required, every automatic call is margin-checked against the provider's value: a provider that
+  // cannot state one would silently stop every fallback, escalation and failover. Refused at install (startup).
+  if (pricingRequired() && typeof provider.automaticCallValueUsd !== "function") {
+    throw new Error(`pricing provider ${provider.id} has no automaticCallValueUsd(), required where pricing is required`);
   }
   const cost = provider.internalCost;
   if (!cost || typeof cost.computeRates !== "function" || typeof cost.listCredits !== "function"
