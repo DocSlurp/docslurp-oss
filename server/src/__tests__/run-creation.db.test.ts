@@ -514,6 +514,20 @@ describe("quality and visuals at run creation (extraction config R0, council #44
     expect(await sql`select id from project_runs`).toHaveLength(0);
   });
 
+  it("a default-project contributor (may upload, may not edit) is refused smart and charts-ai even with the billed scope", async () => {
+    await sql`insert into projects (id, org_id, user_id, name, is_default, pipeline) values ('wd', 'o', 'u', 'Default', true, ${sql.json(JSON.parse(JSON.stringify(defaultPipelineFeatures)))}) on conflict (id) do nothing`;
+    const contributor = { ...input, userId: "member", projectId: "wd", apiKeyId: "k-member" };
+    expect(await code(runCreation.create({ ...contributor, pipeline: defaultPipelineFeatures }))).toBe("ok");
+    expect(await code(runCreation.create({ ...contributor, pipeline: smart }))).toBe("quality_smart_forbidden");
+    process.env.DOCSLURP_CHART_EXPORT = "on";
+    try {
+      const chartsAi = { ...defaultPipelineFeatures, chartExport: { ...defaultPipelineFeatures.chartExport, tier: "models" as const } };
+      expect(await code(runCreation.create({ ...contributor, pipeline: chartsAi }))).toBe("chart_export_models_forbidden");
+      expect(await code(runCreation.create({ ...input, pipeline: chartsAi, apiKeyId: "k-ingest" }))).toBe("chart_export_models_forbidden");
+      expect(await code(runCreation.create({ ...input, pipeline: chartsAi, apiKeyId: "k-billed" }))).toBe("ok");
+    } finally { delete process.env.DOCSLURP_CHART_EXPORT; }
+  });
+
   it("a project saved on figures off with AI chart reads runs as saved for an ingest key (stored, not a raise)", async () => {
     const saved = { ...defaultPipelineFeatures, figures: false, chartExport: { ...defaultPipelineFeatures.chartExport, tier: "models" as const } };
     await sql`update projects set pipeline = ${sql.json(JSON.parse(JSON.stringify(saved)))} where id = 'w'`;

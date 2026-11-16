@@ -28,7 +28,8 @@ export function runReadsPagesSql(runAlias: string): string {
 
 /**
  * The run's quality in the deprecated words (`fast` | `auto` | `good`), for queries that group history by quality:
- * the stamp, else a new-shape word, else the legacy keys (`parserPlaybook`, `vision.forceAllPages` before `quality`).
+ * the stamp, else a new-shape word, else the legacy keys as `legacyQualityMode` reads them (`vision.forceAllPages:
+ * true` is good, `parserPlaybook: fast` is fast, every other playbook is auto).
  */
 export function runLegacyQualitySql(runAlias: string): string {
   const r = alias(runAlias);
@@ -38,7 +39,7 @@ export function runLegacyQualitySql(runAlias: string): string {
     ${word(`${r}.pipeline->>'quality'`)},
     case when ${r}.pipeline->>'quality' in ('fast', 'auto', 'good') then ${r}.pipeline->>'quality' else null end,
     case
-      when ${r}.pipeline->'vision'->>'forceAllPages' = 'true' or ${r}.pipeline->>'parserPlaybook' = 'review-grade' then 'good'
+      when ${r}.pipeline->'vision'->>'forceAllPages' = 'true' then 'good'
       when ${r}.pipeline->>'parserPlaybook' = 'fast' then 'fast'
       else 'auto'
     end

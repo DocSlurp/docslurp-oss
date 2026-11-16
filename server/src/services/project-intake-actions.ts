@@ -316,6 +316,7 @@ export async function confirmDirectUploadProjectIntake(
     const sessionPipeline = session.pipeline ? sanitizeStoredPipeline(session.pipeline, `upload session ${args.sessionId}`) : undefined;
     // Re-checked at confirm: a session opened before the deployment stopped offering a tier (or before migration 0151
     // mapped enabled:true to models) is refused with the same code, not run at a tier no estimate showed.
+    // A stored session pipeline is already converted; the deprecated tier code stays for it (the request named a tier then).
     assertIntakeChartExportTier((sessionPipeline as { chartExport?: { tier?: ChartExportTier } } | undefined)?.chartExport?.tier, `upload session ${args.sessionId}`);
     const intake = await requiredIntake({
       userId: args.userId,

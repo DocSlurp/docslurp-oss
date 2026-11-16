@@ -196,10 +196,14 @@ function intakeFailure(c: Context, error: unknown): Response {
 }
 
 /** `ports` lets tests drive the real routes against fake storage, records, and workflow start. */
-/** Only the request's chart export override (for a run into a project the request just created), or undefined. */
+/**
+ * The request overrides a run into a project the request just created still needs: its chart export and quality (a new
+ * project is never seeded with billed rungs, so run creation's raise check sees them), or undefined.
+ */
 function chartExportOnly(pipeline: PipelineFeatureOverrides | undefined): PipelineFeatureOverrides | undefined {
-  const chartExport = (pipeline as { chartExport?: unknown } | undefined)?.chartExport;
-  return chartExport ? ({ chartExport } as PipelineFeatureOverrides) : undefined;
+  const { chartExport, quality } = (pipeline ?? {}) as { chartExport?: unknown; quality?: unknown };
+  const out = { ...(chartExport ? { chartExport } : {}), ...(quality ? { quality } : {}) };
+  return Object.keys(out).length ? (out as PipelineFeatureOverrides) : undefined;
 }
 
 export const createExtractsRoutes = (ports: ProjectIntakePorts = projectIntakePorts) => acceptApiKeys(new Hono()
@@ -300,7 +304,7 @@ export const createExtractsRoutes = (ports: ProjectIntakePorts = projectIntakePo
     let target: { project: ProjectRecord; created: boolean } | null = null;
     let extractId: string | null = null;
     try {
-      assertIntakeChartExportTier(body.pipeline?.chartExport?.tier, "extract url");
+      assertIntakeChartExportTier(body.pipeline?.chartExport?.tier, "extract url", (await c.req.json().catch(() => null) as { pipeline?: { visuals?: unknown } } | null)?.pipeline?.visuals != null);
       target = await extractProject(actor, body, c.get("apiKey")?.orgId ?? body.orgId ?? null, inferProjectTitleFromUrls(urls), ports);
       const extract = await createExtract({
         userId: actor.userId,

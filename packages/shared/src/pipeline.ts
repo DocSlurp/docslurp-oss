@@ -1307,8 +1307,10 @@ const pipelineFeatureKeys = new Set(Object.keys(defaultPipelineFeatures).concat(
 export const pipelineFeatureOverridesSchema = z
   .preprocess((value, ctx) => {
     const migrated = withCanonicalExtractorIds(migrateLegacyQualitySettings(value as never)) as unknown;
-    if (isPlainRecord(migrated) && "visuals" in migrated && migrated.visuals !== null && migrated.visuals !== undefined && !isVisualsLevel(migrated.visuals)) {
-      ctx.addIssue({ code: "custom", path: ["visuals"], message: "visuals must be one of none, figures, charts, charts-ai", input: value });
+    // A per-request override (upload, extract, publication patch) merges onto the project and cannot express "reset to
+    // the default": `visuals: null` is refused, like any value outside the ladder.
+    if (isPlainRecord(migrated) && "visuals" in migrated && migrated.visuals !== undefined && !isVisualsLevel(migrated.visuals)) {
+      ctx.addIssue({ code: "custom", path: ["visuals"], message: "visuals must be one of none, figures, charts, charts-ai (omit it for the project's setting)", input: value });
       const { visuals: _visuals, ...rest } = migrated;
       return rest;
     }

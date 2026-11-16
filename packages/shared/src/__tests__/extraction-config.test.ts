@@ -114,6 +114,8 @@ describe("input conversion (R0 writes the legacy shape)", () => {
   it("the override schema converts, rejects bad values and conflicts", () => {
     expect(pipelineFeatureOverridesSchema.parse({ quality: "fastest", visuals: "charts" })).toEqual({ quality: "fast", figures: true, chartExport: { tier: "free" } });
     expect(pipelineFeatureOverridesSchema.safeParse({ visuals: "everything" }).success).toBe(false);
+    // A per-request override cannot reset visuals to the default (it merges onto the project).
+    expect(pipelineFeatureOverridesSchema.safeParse({ visuals: null }).success).toBe(false);
     expect(pipelineFeatureOverridesSchema.safeParse({ quality: "best" }).success).toBe(false);
     expect(pipelineFeatureOverridesSchema.safeParse({ visuals: "none", figures: true }).success).toBe(false);
     // Clients never inject a stamped value.
