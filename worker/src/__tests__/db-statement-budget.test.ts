@@ -220,8 +220,10 @@ const STATEMENTS_PER_PAGE_BUDGET = 24;
 // 2026-11-16: four run milestones (worker started, first page extracted, first page completed, outcome recorded;
 // pipeline/run-milestones.ts) are each one conditional UPDATE per run, so +4 flights and +4 statements whatever the
 // page count. Measured: 210 flights, 245 statements for this 10-page run. The per-page slope is unchanged.
-const TERMINAL_ROUND_TRIP_ALLOWANCE = 10;
-const TERMINAL_STATEMENT_ALLOWANCE = 5;
+// 2026-11-16: the run's page-class pin (pipeline/ocr-page-class.ts) asks once per run whether every live worker
+// advertises the OCR page class: +1 flight, +1 statement whatever the page count. Measured: 211 flights, 246 statements.
+const TERMINAL_ROUND_TRIP_ALLOWANCE = 11;
+const TERMINAL_STATEMENT_ALLOWANCE = 6;
 const TERMINAL_NOTIFY_STATEMENT_ALLOWANCE = 3;
 // The same stages as one stage group: 14.9 after.
 const GROUPED_ROUND_TRIPS_PER_PAGE_BUDGET = 16.5;
