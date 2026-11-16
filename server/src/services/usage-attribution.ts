@@ -187,6 +187,7 @@ export const STORAGE_USAGE_METRIC = BILLABLE_UNIT_METRICS.storage;
 /** Ingest spend: pages, media minutes, the optional per-document features and exported charts and diagrams. */
 export const INGEST_UNIT_METRICS: readonly string[] = [
   BILLABLE_UNIT_METRICS.fastPage,
+  BILLABLE_UNIT_METRICS.ocrPage,
   BILLABLE_UNIT_METRICS.richPage,
   BILLABLE_UNIT_METRICS.mediaMinutes,
   BILLABLE_UNIT_METRICS.documentSummary,
@@ -234,6 +235,8 @@ export interface OrgUnitUsage {
   chatAnswers: number;
   chatCredits: number;
   fastPages: number;
+  /** Pages the OCR route read, one per page and run (a page later upgraded to Rich is counted in both). */
+  ocrPages: number;
   /** Rich pages, including media minutes counted as Rich pages. */
   richPages: number;
   ingestCredits: number;
@@ -265,6 +268,7 @@ export async function orgUnitUsage(orgId: string, since: UsageWindow, client: Sq
     chatAnswers: get(BILLABLE_UNIT_METRICS.chatAnswer).events,
     chatCredits: get(BILLABLE_UNIT_METRICS.chatAnswer).cost,
     fastPages: get(BILLABLE_UNIT_METRICS.fastPage).amount,
+    ocrPages: get(BILLABLE_UNIT_METRICS.ocrPage).amount,
     richPages: get(BILLABLE_UNIT_METRICS.richPage).amount + get(BILLABLE_UNIT_METRICS.mediaMinutes).amount,
     ingestCredits,
   };

@@ -18,6 +18,7 @@ import { isDocumentLevelFailure } from "../lib/document-failure.js";
 import { runWithProviderRateScope } from "../lib/provider-rate-limit.js";
 import type { WorkflowState } from "./pipeline.js";
 import { noteDocumentStageComplete, noteRunPageStage, recordDocumentStageFailure, recordDocumentStageRetry } from "./run-milestones.js";
+import { OCR_ESCALATION_STAGE_STAT, ocrEscalationStageStats } from "../ocr/escalation-stats.js";
 import {
   buildRunProgressEvent,
   recordPageProgress,
@@ -389,15 +390,19 @@ export async function runDocumentStage(
       // A command teardown that failed in this activity ends it, even if the stage swallowed it.
       const latched = latchedTeardownError();
       if (latched) throw latched;
+      // The document's OCR escalation record (pages a second read covered, pages the per-document cap left on their first
+      // read), so the ingest report sees it on whichever stage read the document.
+      const escalation = ocrEscalationStageStats(state.artifactLedger, document.id);
+      const resultStats = escalation ? { ...(result.stats ?? {}), [OCR_ESCALATION_STAGE_STAT]: escalation } : result.stats;
       const stats = state.firstPassShard
         // The first pass's checkpoints are provisional: the ordinary loop re-runs them when the content they read changed.
-        ? { ...(result.stats ?? {}), [FIRST_PASS_CHECKPOINT]: {
+        ? { ...(resultStats ?? {}), [FIRST_PASS_CHECKPOINT]: {
           markdown: state.artifactLedger.readDocument(document.id, "markdown") ?? null,
           markdownSha256: stageName === "extract-markdown"
             ? (result.stats as { markdownSha256?: unknown } | undefined)?.markdownSha256 ?? null
             : (state.documentStage(document.id, "extract-markdown")?.stats as { markdownSha256?: unknown } | undefined)?.markdownSha256 ?? null,
         } }
-        : result.stats ?? {};
+        : resultStats ?? {};
 
       const plausibilityDecision = shouldEscalateForLowPlausibility(stats, attempt);
       if (plausibilityDecision.escalate) {

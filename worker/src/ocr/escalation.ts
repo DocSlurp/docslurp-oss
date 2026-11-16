@@ -12,22 +12,34 @@ export interface EscalationSummary {
   replaced: number;
   skipped: Record<string, number>;
   failed: number;
+  /**
+   * Candidate pages that kept their first OCR read because the per-document second-read cap was spent: the page that hit
+   * the cap and every candidate after it (the loop stops there).
+   */
+  capped: number;
 }
 
-/** Escalate every candidate page in order; pages are replaced in `outcome.pages` when the hosted read has text. */
+/**
+ * Escalate every candidate page in order; pages are replaced in `outcome.pages` when the hosted read has text. The pages read
+ * and the pages the per-document cap left on their first read are recorded on the reader (`recordEscalation`) for the
+ * ingest report.
+ */
 export async function escalateOcrPages(
   outcome: OcrReadOutcome,
   reader: HostedOcrReader,
   documentId: string,
   signal?: AbortSignal,
 ): Promise<EscalationSummary> {
-  const summary: EscalationSummary = { attempted: 0, replaced: 0, skipped: {}, failed: 0 };
-  for (const page of outcome.pages) {
-    if (!page.escalation) continue;
+  const summary: EscalationSummary = { attempted: 0, replaced: 0, skipped: {}, failed: 0, capped: 0 };
+  const escalated: number[] = [];
+  const capped: number[] = [];
+  const candidates = outcome.pages.filter((page) => page.escalation);
+  for (const [index, page] of candidates.entries()) {
     if (signal?.aborted) break;
     summary.attempted += 1;
     try {
-      const read = await reader.read({ documentId, pageNumber: page.pageNumber, imagePath: page.escalation.imagePath, mimeType: "image/png" }, "ocr-escalation", signal);
+      const read = await reader.read({ documentId, pageNumber: page.pageNumber, imagePath: page.escalation!.imagePath, mimeType: "image/png" }, "ocr-escalation", signal);
+      escalated.push(page.pageNumber);
       const text = read.text.trim();
       if (text) {
         page.text = text;
@@ -37,6 +49,8 @@ export async function escalateOcrPages(
     } catch (error) {
       if (error instanceof HostedOcrSkipped) {
         summary.skipped[error.reason] = (summary.skipped[error.reason] ?? 0) + 1;
+        // The per-document cap: this page and every later candidate keep their first OCR read.
+        if (error.reason === "budget") capped.push(...candidates.slice(index).map((candidate) => candidate.pageNumber));
         // Once disabled, refused, capped or out of budget, later pages of this document would be skipped the same way.
         if (error.reason !== "guard") break;
         continue;
@@ -46,11 +60,13 @@ export async function escalateOcrPages(
       console.warn(`[ocr] escalation failed document=${documentId} page=${page.pageNumber}: ${error instanceof Error ? error.message.slice(0, 300) : String(error)}`);
     }
   }
+  summary.capped = capped.length;
+  if (escalated.length || capped.length) reader.recordEscalation?.(documentId, { escalated, capped });
   if (summary.attempted) {
     recordPageEscalation("ocr-hosted", "replaced", summary.replaced);
     recordPageEscalation("ocr-hosted", "failed", summary.failed);
     for (const [reason, count] of Object.entries(summary.skipped)) recordPageEscalation("ocr-hosted", `skipped-${reason}`, count);
-    console.log(`[ocr] escalation document=${documentId} attempted=${summary.attempted} replaced=${summary.replaced} failed=${summary.failed} skipped=${JSON.stringify(summary.skipped)}`);
+    console.log(`[ocr] escalation document=${documentId} attempted=${summary.attempted} replaced=${summary.replaced} failed=${summary.failed} capped=${summary.capped} skipped=${JSON.stringify(summary.skipped)}`);
   }
   return summary;
 }

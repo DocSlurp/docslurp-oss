@@ -13,6 +13,7 @@ import type { CommandRunner } from "../../tools/runner.js";
 import type { executeVisionRuntime, VisionExecutionResult } from "../../tools/vision-runtime.js";
 import type { OcrPageRead, OcrReadOutcome } from "../engine.js";
 import { escalateOcrPages } from "../escalation.js";
+import { ocrEscalationStageStats } from "../escalation-stats.js";
 import { createHostedOcrReader, DEFAULT_OCR_ESCALATION_MODEL, HOSTED_OCR_MAX_BYTES, HostedOcrSkipped, ocrEscalationModel } from "../hosted-reader.js";
 import { installTestPricing, isAutomaticSelectionDenied, resetPricingProviderForTests } from "@docslurp/shared";
 import { ocrDocument } from "../read-document.js";
@@ -86,7 +87,7 @@ describe("OCR escalation reads", () => {
     const reader = createHostedOcrReader({ state, cfg: CFG, runner: {} as CommandRunner, env: ON, execute });
     const outcome = await outcomeWith([{ pageNumber: 1, text: "b1urry", escalate: true }, { pageNumber: 2, text: "crisp", escalate: false }]);
     const summary = await escalateOcrPages(outcome, reader, "doc-1");
-    expect(summary).toEqual({ attempted: 1, replaced: 1, skipped: {}, failed: 0 });
+    expect(summary).toEqual({ attempted: 1, replaced: 1, skipped: {}, failed: 0, capped: 0 });
     expect(outcome.pages[0]).toMatchObject({ text: "Hosted transcription", recogniser: `escalated:${MODEL}` });
     expect(outcome.pages[1]!.text).toBe("crisp");
     expect(execute).toHaveBeenCalledTimes(1);
@@ -108,7 +109,9 @@ describe("OCR escalation reads", () => {
     const reader = createHostedOcrReader({ state, cfg: CFG, runner: {} as CommandRunner, env: { ...ON, DOCSLURP_OCR_ESCALATION_MAX_PAGES: "2" }, execute });
     const outcome = await outcomeWith([1, 2, 3].map((pageNumber) => ({ pageNumber, text: `ocr ${pageNumber}`, escalate: true })));
     const summary = await escalateOcrPages(outcome, reader, "doc-1");
-    expect(summary).toMatchObject({ attempted: 3, replaced: 2, skipped: { budget: 1 } });
+    expect(summary).toMatchObject({ attempted: 3, replaced: 2, skipped: { budget: 1 }, capped: 1 });
+    // The document's record for the ingest report: two pages read a second time, one left on its first OCR read by the cap.
+    expect(ocrEscalationStageStats(state.artifactLedger, "doc-1")).toEqual({ escalatedPages: 2, cappedPages: 1, capped: [3] });
     // The third read is refused at its first request's admission: nothing was sent and nothing is recorded for it.
     expect(execute).toHaveBeenCalledTimes(3);
     expect(state.usageLedger.snapshot().filter((event) => event.metric === "ocr-escalation")).toHaveLength(2);

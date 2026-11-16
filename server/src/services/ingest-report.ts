@@ -15,6 +15,8 @@ import { EDITOR_REQUIRED_CODE, EDITOR_REQUIRED_MESSAGE,
   INGEST_REPORT_TEXT_BYTE_EDGES,
   applyDefaultVisionOverride,
   mergePipelineFeatures,
+  pageCredits,
+  pageUpgradeCredits,
   qualityAllowsPageReading,
   qualityModePriceRange,
   QUALITY_MODES,
@@ -107,6 +109,11 @@ export interface IngestReportStageRow {
   pdfPagesMismatch?: string | null;
   /** Raw `stats.visualCandidates` (VisualCandidateStats the worker records), validated before use. */
   visualCandidates?: unknown;
+  /**
+   * Raw `stats.ocrEscalation` (worker ocr/escalation-stats.ts): pages a hosted second read covered and pages the per-document
+   * second-read cap left on their first OCR read. Validated before use.
+   */
+  ocrEscalation?: unknown;
 }
 
 export interface IngestReportRunRow {
@@ -789,6 +796,7 @@ export const INGEST_RECOMMENDATION_CATALOG = {
   "reprocess-with-vision": { proposal: "reprocess-only", note: "The setting is already in place; only reprocessing the affected files helps." },
   "retry-vision-failures": { proposal: "reprocess-only", note: "Nothing to change; reprocessing retries the failed pages." },
   "vision-cost-cap": { proposal: "outside-allowlist", note: "maxCostCents is a budget control the proposal tool never changes." },
+  "ocr-escalation-cap": { proposal: "pipeline-patch", note: "quality is proposable; reprocess the affected files after the change (or reprocess them with quality good)." },
   "vision-stopped": { proposal: "outside-allowlist", note: "The per-page vision attempt bound, rejection breaker and organization attempt limit are operator settings." },
   "vision-rejected-pages": { proposal: "informational", note: "Pages kept their own text; nothing to change." },
   "preserve-tables": { proposal: "pipeline-patch", note: "preserveTables is proposable." },
@@ -951,6 +959,27 @@ export function recommendIngestChanges(pipeline: PipelineFeatures, observed: Obs
     });
   }
 
+  const capped = ocrEscalationCapped(observed);
+  // Under Good a vision model reads every page anyway: the cap is not what kept these pages on their OCR read.
+  if (capped.pages > 0 && pipeline.quality !== "good") {
+    const rich = pageCredits("rich", capped.pages);
+    const extra = pageUpgradeCredits("ocr", "rich", capped.pages);
+    recs.push({
+      id: "ocr-escalation-cap", severity: "medium",
+      title: "Some scanned pages kept their first OCR read",
+      reason: `${plural(capped.pages, "page")} in ${plural(capped.documentIds.length, "file")} read poorly by OCR kept ${agree(capped.pages, "its", "their")} first OCR read because the per-document second-read cap was reached, so ${agree(capped.pages, "its", "their")} text may be incomplete or garbled.`,
+      effect: `Reprocess the ${plural(capped.documentIds.length, "affected file")} with quality Good (or switch the project to Good) so a vision model reads every page, these included. Good reads bill Rich (${qualityModePriceRange("good")} per 1,000 pages).`,
+      affectedPages: capped.pages, affectedDocuments: capped.documentIds.length,
+      cost: {
+        centsPer100Pages: round(pageCredits("rich", 100), 2),
+        reprocessCents: round(rich, 2),
+        basis: `Reading these ${plural(capped.pages, "page")} with a vision model bills Rich, about ${formatCents(rich)} (${formatCents(extra)} more than their OCR charge); reprocessing at Good also reads the files' other pages with vision.`,
+      },
+      patch: { quality: "good" },
+      reprocessDocumentIds: capped.documentIds,
+    });
+  }
+
   if (observed.tablePages > 0 && !pipeline.preserveTables) {
     recs.push({
       id: "preserve-tables", severity: "medium",
@@ -1091,6 +1120,32 @@ export function recommendIngestChanges(pipeline: PipelineFeatures, observed: Obs
 
   const order = { high: 0, medium: 1, info: 2 } as const;
   return recs.sort((a, b) => order[a.severity] - order[b.severity]);
+}
+
+const ocrEscalationStatsSchema = z.object({
+  escalatedPages: z.number().int().nonnegative().max(1_000_000),
+  cappedPages: z.number().int().nonnegative().max(1_000_000),
+}).passthrough();
+
+/**
+ * Pages the per-document OCR second-read cap left on their first OCR read, per document (the largest count any of its stages
+ * recorded: each stage copies the run's whole record), for documents that did not fail.
+ */
+function ocrEscalationCapped(observed: Pick<Observed, "docs" | "stagesByDoc">): { pages: number; documentIds: string[] } {
+  let pages = 0;
+  const documentIds: string[] = [];
+  for (const doc of observed.docs) {
+    if (statusBucket(doc.status) === "failed") continue;
+    let capped = 0;
+    for (const stage of observed.stagesByDoc.get(doc.id) ?? []) {
+      const parsed = ocrEscalationStatsSchema.safeParse(stage.ocrEscalation);
+      if (parsed.success) capped = Math.max(capped, parsed.data.cappedPages);
+    }
+    if (capped === 0) continue;
+    pages += Math.min(capped, Math.max(1, doc.pageCount));
+    documentIds.push(doc.id);
+  }
+  return { pages, documentIds };
 }
 
 /** User-controlled names go into Markdown as plain text: no links, images, HTML or emphasis. */
@@ -1279,7 +1334,7 @@ export async function loadIngestReport(args: {
       table_pages: string | number | null; duration_seconds: string | number | null; error: string | null; extractor_fallback: unknown;
       page_equivalents: string | number | null; dense_pages: unknown; dense_page_count: string | number | null;
       pdf_pages_measured: string | number | null; pdf_pages_processed: string | number | null; pdf_pages_mismatch: string | null;
-      visual_candidates: unknown;
+      visual_candidates: unknown; ocr_escalation: unknown;
     }[]>`
       select s.document_id, s.stage_name, s.status, left(s.error, 1000) as error,
         coalesce(s.stats -> 'skipped' = 'true'::jsonb, false) as skipped,
@@ -1296,7 +1351,8 @@ export async function loadIngestReport(args: {
         case when s.stage_name = 'extract-markdown' and jsonb_typeof(s.stats -> 'pdfPagesMeasured') = 'number' then (s.stats ->> 'pdfPagesMeasured')::numeric end as pdf_pages_measured,
         case when s.stage_name = 'extract-markdown' and jsonb_typeof(s.stats -> 'pdfPagesProcessed') = 'number' then (s.stats ->> 'pdfPagesProcessed')::numeric end as pdf_pages_processed,
         case when s.stage_name = 'extract-markdown' and jsonb_typeof(s.stats -> 'pdfPagesMismatch') = 'string' then left(s.stats ->> 'pdfPagesMismatch', 40) end as pdf_pages_mismatch,
-        case when jsonb_typeof(s.stats -> 'visualCandidates') = 'object' then s.stats -> 'visualCandidates' end as visual_candidates
+        case when jsonb_typeof(s.stats -> 'visualCandidates') = 'object' then s.stats -> 'visualCandidates' end as visual_candidates,
+        case when jsonb_typeof(s.stats -> 'ocrEscalation') = 'object' then s.stats -> 'ocrEscalation' end as ocr_escalation
       from document_run_stage_states s
       join documents d on d.id = s.document_id and d.run_id = s.run_id
       where d.project_id = ${projectId} and d.id = any(${client.array(ids)}::text[])
@@ -1355,6 +1411,7 @@ export async function loadIngestReport(args: {
       pdfPagesProcessed: numOrNull(row.pdf_pages_processed),
       pdfPagesMismatch: row.pdf_pages_mismatch,
       visualCandidates: row.visual_candidates ?? null,
+      ocrEscalation: row.ocr_escalation ?? null,
     })),
     runs: runRows.map((row) => ({ id: row.id, status: row.status, pagesProcessed: num(row.pages_processed), durationMs: num(row.duration_ms), ...(Array.isArray(row.caps_applied) ? { capsApplied: row.caps_applied as ExtractionCap[] } : {}) })),
     costCents: cost?.costCents ?? null,

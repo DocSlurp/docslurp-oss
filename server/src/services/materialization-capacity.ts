@@ -78,7 +78,7 @@ export async function remainingMaterializationForecast(tx: TransactionSql, run: 
       s.materialized_by in ('ingest','full-index') or exists(select 1 from usage_attribution u
         where u.org_id=${run.org_id} and u.project_id=${run.project_id}
           and u.source_run_id in (s.fee_billed_run,s.read_billed_run)
-          and u.metric in (${BILLABLE_UNIT_METRICS.fastPage},${BILLABLE_UNIT_METRICS.richPage})
+          and u.metric in (${BILLABLE_UNIT_METRICS.fastPage},${BILLABLE_UNIT_METRICS.ocrPage},${BILLABLE_UNIT_METRICS.richPage})
           and u.metadata->>'documentId'=${plan.documentId}
           and coalesce(u.metadata->>'pageNumber',u.metadata->>'page')=target.page::text)),false)`;
   if (!work || work.pages < 1) throw new Error("Materialization has no unfinished bounded page work");

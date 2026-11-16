@@ -23,6 +23,7 @@ import { findVisionGuardStop, recordVisionRead, withVisionCall } from "../lib/vi
 import { visionConfigForModel } from "../routing/routed-vision.js";
 import type { CommandRunner } from "../tools/runner.js";
 import { executeVisionRuntime, visionCall } from "../tools/vision-runtime.js";
+import { recordOcrEscalationPages } from "./escalation-stats.js";
 
 export const DEFAULT_OCR_ESCALATION_MODEL = "llm://deepinfra/Qwen/Qwen3-VL-30B-A3B-Instruct";
 /** Escalation reads per document unless `DOCSLURP_OCR_ESCALATION_MAX_PAGES` says otherwise. */
@@ -70,6 +71,8 @@ export class HostedOcrSkipped extends Error {
 
 export interface HostedOcrReader {
   read(page: HostedOcrPage, purpose: HostedOcrPurpose, signal?: AbortSignal): Promise<HostedOcrRead>;
+  /** Record a document's escalated pages and the pages the per-document cap left on their first read (escalation-stats.ts). */
+  recordEscalation?(documentId: string, pages: { escalated: readonly number[]; capped: readonly number[] }): void;
 }
 
 /** Whether escalation runs (`DOCSLURP_OCR_ESCALATION=on`): an explicit operator opt-in, off by default. */
@@ -114,6 +117,9 @@ export function createHostedOcrReader(args: {
   const execute = args.execute ?? executeVisionRuntime;
   const { state } = args;
   return {
+    recordEscalation(documentId, pages) {
+      recordOcrEscalationPages(state.artifactLedger, documentId, pages);
+    },
     async read(page, purpose, signal) {
       if (purpose === "ocr-escalation" && !ocrEscalationEnabled(env)) throw new HostedOcrSkipped("disabled", "OCR escalation is off");
       if (!HOSTED_OCR_MIME_TYPES.has(page.mimeType)) throw new Error(`hosted OCR refuses ${page.mimeType}: it would need host decoding`);
