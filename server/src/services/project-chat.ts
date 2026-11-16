@@ -3,7 +3,8 @@ import { resolveSpeedBoostChatModel, ChatModelNotAllowedError } from "../lib/cha
 import { reportPublicError } from "../lib/public-errors.js";
 import { getDeferredContext } from "../search/deferred/deferred-context.js";
 import { hostedApiKeyForProject, openRouterCall, privateTextModelForProject } from "../lib/privacy.js";
-import { admitAutomaticCall, BILLABLE_UNIT_METRICS, chatAnswerCredits, chatAnswerUnits, chatModelTier, ingestReportFocusPages, parsePrivateModelUri, prepareAutomaticCallPrices, reportAutomaticCallOutcome, requestsIngestReport, withoutAutomaticSelectionDenied } from "@docslurp/shared";
+import { type admitAutomaticCall, BILLABLE_UNIT_METRICS, chatAnswerCredits, chatAnswerUnits, chatModelTier, ingestReportFocusPages, parsePrivateModelUri, reportAutomaticCallOutcome, requestsIngestReport } from "@docslurp/shared";
+import { admittedChatFailover, failoverCandidates } from "./chat-failover.js";
 import type { PrivacyMode } from "@docslurp/shared";
 import { env } from "../config.js";
 import type { RequestActor } from "../lib/request-actor.js";
@@ -127,7 +128,7 @@ export const PROJECT_CHAT_FAILOVER_MODEL: ProjectChatModelId =
   "openai/gpt-6-luna";
 /**
  * Failover candidates in order (all standard answer tier). A turn retries on the first that is not the project's own
- * model and is not denied, so a Luna project fails over to Claude Haiku 5.5, a different vendor stack. Haiku comes
+ * model, is not denylisted and keeps the automatic-call margin then (chat-failover.ts), so a Luna project fails over to Claude Haiku 5.5, a different vendor stack. Haiku comes
  * before GLM 5.3 Flash: in the 2026-11-13 chat-answer comparison (#343 harness, 30 cases, blind pairwise judge) it beat
  * GLM on quality (held-out mean 5.00 vs 4.56) and latency (p50 0.88 s vs 2.8 s, p90 2.3 s vs 19.8 s), at parity with Luna.
  */
@@ -520,29 +521,10 @@ export function buildModelFailoverOrder(
 
 /** Failover candidates for a turn on `preferredModel`, in order (none when failover is off). One of them answers at most. */
 export function projectChatFailoverCandidates(preferredModel: string, failover = true): string[] {
-  if (!failover) return [];
-  // A Speed boost variant is the same model: a Luna Nitro project fails over to Haiku, never to plain Luna.
-  const base = nitroBaseModel(preferredModel) ?? preferredModel;
-  return withoutAutomaticSelectionDenied(PROJECT_CHAT_FAILOVER_MODELS).filter((model) => model !== base);
+  return failoverCandidates(PROJECT_CHAT_FAILOVER_MODELS, preferredModel, failover);
 }
 
-/**
- * The first failover candidate that keeps the automatic-call margin now, or null. Each refusal is logged with its reason
- * by the gate; a refused candidate is skipped, never sent.
- */
-export async function admittedChatFailover(
-  candidates: readonly string[],
-  turn: { inputTokens?: number; outputTokens?: number } = {},
-): Promise<{ model: string; decision: ReturnType<typeof admitAutomaticCall> } | null> {
-  if (candidates.length === 0) return null;
-  await prepareAutomaticCallPrices("chat-answer", candidates.map((model) => ({ model })));
-  for (const model of candidates) {
-    // Priced at this turn's own size (its prompt and output cap) when larger than the planning shape.
-    const decision = admitAutomaticCall("chat-answer", { model }, "chat failover", { role: "failover", tokens: turn });
-    if (decision.allowed) return { model, decision };
-  }
-  return null;
-}
+export { admittedChatFailover };
 
 /**
  * Wraps a caller's text-delta handler to record whether any answer text has
