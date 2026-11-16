@@ -36,6 +36,12 @@ function operation(path: string, tag: string, summary: string, scope: string, su
 }
 
 const jsonBody = { requestBody: { required: true, content: { "application/json": { schema: { type: "object" } } } } };
+const reprocessBody = { requestBody: { required: true, content: { "application/json": { schema: { type: "object", properties: {
+  stageFrom: { type: "string" }, stages: { type: "array", items: { type: "string" } }, speedBoost: { type: "boolean" },
+  quality: { type: "string", enum: ["fastest", "balanced", "smart"] },
+  visuals: { type: "string", enum: ["none", "figures", "charts", "charts-ai"] },
+  chartExport: { type: "object", deprecated: true, properties: { tier: { type: "string", enum: ["off", "free", "models"] } } },
+} } } } } };
 
 const entries: Array<[path: string, method: Method, tag: string, summary: string, scope: string, success: string, extra?: Record<string, unknown>]> = [
   ["/v1/admin/projects/{projectId}/managed-models", "get", "admin", "Read a project's managed models (platform admins)", "admin:models", "The tier mapping and pipeline model overrides"],
@@ -60,7 +66,7 @@ const entries: Array<[path: string, method: Method, tag: string, summary: string
   ["/v1/documents/{docId}/tags", "put", "documents", "Replace a document's tags. Server keys only", "ingest", "Document ID and tags", jsonBody],
   ["/v1/documents/bulk", "post", "documents", "Act on up to many documents at once: reprocess (new versions with each run's pipeline; spends credits), apply-tags, remove-tags, delete, or export-artifacts. Server keys only; export-artifacts needs artifacts instead of ingest. Every document must be in a project the key can use (404 otherwise, before any change)", "ingest", "Per-action result: runs, updated or deleted counts, or artifacts", jsonBody],
   ["/v1/projects/{projectId}/documents/bulk/estimate", "post", "documents", "What a bulk document action would cost, without starting it. Server keys only", "ingest", "{ estimate, billing }", jsonBody],
-  ["/v1/runs/{runId}/reprocess", "post", "runs", "Re-run a run's documents as new versions, all stages or from stageFrom / only stages. Server keys only; spends credits. Use it to pick up extraction fixes for files whose bytes did not change (uploads of identical bytes reuse the earlier extraction)", "ingest", "The new run and its job", jsonBody],
+  ["/v1/runs/{runId}/reprocess", "post", "runs", "Re-run a run's documents as new versions, all stages or from stageFrom / only stages. Server keys only; spends credits. Use it to pick up extraction fixes for files whose bytes did not change (uploads of identical bytes reuse the earlier extraction). Optional quality (fastest | balanced | smart) and visuals (none | figures | charts | charts-ai); omitted, the source run's values capped at the project's now. smart or charts-ai above the project's setting needs editor rights and pipeline:billed-features (403 quality_smart_forbidden / chart_export_models_forbidden); chartExport { tier } is a deprecated alias of visuals", "ingest", "The new run and its job", reprocessBody],
   ["/v1/runs/{runId}/reprocess/estimate", "post", "runs", "What reprocessing a run would cost, without starting it. Server keys only", "ingest", "{ estimate, billing }", jsonBody],
   ["/v1/documents/{docId}/correction-workbench", "get", "documents", "Get the correction workbench for a document", "artifacts", "Correction workbench"],
   ["/v1/web/search", "post", "web", "Search the public web. Returns ranked URLs, titles and snippets (optionally page Markdown); charged web-search credits", "search:deep", "Web results, cache flag and credits charged", jsonBody],
