@@ -65,21 +65,21 @@ export function envInt(name: string, fallback: number, env: NodeJS.ProcessEnv = 
 type PartitionEntry<V> = { value: V; expiresAt: number };
 
 /**
- * Bounded LRU with a per-entry TTL, partitioned by organization, so one organization's traffic cannot push out
- * another's entries (a volume side channel: org B would see its own hits turn into misses when org A is busy).
+ * Bounded LRU with a per-entry TTL, partitioned by organization, so one organization's traffic never evicts another's
+ * entries (a volume side channel: org B would see its own hits turn into misses when org A is busy).
  *
  * - Each organization holds at most `perOrgMaxEntries` and evicts only its own oldest entry past that.
- * - The whole cache holds at most `maxEntries`. When it is full, expired entries go first. Then an organization at or
- *   above an equal share (`maxEntries / active organizations`) evicts its own oldest entry; one below it evicts from
- *   the largest organization, which is necessarily above its share. So an organization's entries are never evicted by
- *   another organization while it holds no more than an equal share; within that they leave only by its own writes,
- *   expiry or deletion. With the default per-organization cap (a quarter of the cache) no eviction crosses
- *   organizations at all until more than four are active.
+ * - The whole cache holds at most `maxEntries`. When it is full, expired entries are reclaimed (at most once per
+ *   tenth of the TTL, so a full cache does not scan on every write), then the writer evicts its own oldest entry; a
+ *   writer with no other entry is not cached. No write ever removes another organization's live entry: entries leave
+ *   only by their own organization's writes, expiry or deletion. The residual signal is that a write can go uncached
+ *   while other organizations fill the cache; the per-org cap (default a quarter) means that takes several of them.
  * - Every read and write names the organization; a blank one is refused (no shared or null partition).
  */
 export class OrgPartitionedTtlLru<V> {
   private readonly partitions = new Map<string, Map<string, PartitionEntry<V>>>();
   private total = 0;
+  private lastPurgeAt = Number.NEGATIVE_INFINITY;
   hits = 0;
   misses = 0;
   readonly perOrgMaxEntries: number;
@@ -136,11 +136,8 @@ export class OrgPartitionedTtlLru<V> {
     this.total += 1;
     while (partition.size > this.perOrgMaxEntries) this.evictOldest(org);
     if (this.total > this.maxEntries) this.purgeExpired();
-    while (this.total > this.maxEntries) {
-      const own = this.partitions.get(org)?.size ?? 0;
-      const share = this.maxEntries / this.partitions.size;
-      this.evictOldest(own >= share ? org : this.largestPartition(org) ?? org);
-    }
+    // Only the writer's own entries make room: its oldest first, and finally the new entry itself (not cached).
+    while (this.total > this.maxEntries && this.partitions.has(org)) this.evictOldest(org);
   }
 
   delete(orgId: string, key: string): void {
@@ -168,21 +165,10 @@ export class OrgPartitionedTtlLru<V> {
     if (partition && oldest !== undefined) this.remove(orgId, partition, oldest);
   }
 
-  /** The largest partition other than `except` (it is above its equal share whenever the caller is below its own). */
-  private largestPartition(except: string): string | null {
-    let largest: string | null = null;
-    let size = -1;
-    for (const [org, partition] of this.partitions) {
-      if (org !== except && partition.size > size) {
-        largest = org;
-        size = partition.size;
-      }
-    }
-    return largest;
-  }
-
   private purgeExpired(): void {
     const now = this.now();
+    if (now - this.lastPurgeAt < Math.max(1, this.ttlMs / 10)) return;
+    this.lastPurgeAt = now;
     for (const [org, partition] of this.partitions) {
       for (const [key, entry] of partition) if (entry.expiresAt <= now) this.remove(org, partition, key);
     }

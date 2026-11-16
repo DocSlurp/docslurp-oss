@@ -3,6 +3,7 @@ import { PrivacyModeViolationError, setLiveModelPricesForTests } from "@docslurp
 
 import { PipelineUsageEventLedger } from "../pipeline/usage-ledger.js";
 import {
+  DECISION_CANARY_STATE,
   DecisionRequestError,
   DecisionUnavailableError,
   LIQUID_SYSTEMONE_URL,
@@ -211,13 +212,14 @@ describe("organization isolation of decision calls", () => {
     expect((bodyOf(fetchImpl).state as unknown[]).slice(1)).toEqual(pageState());
   });
 
-  it("only a fixed text state (health canary) may skip the salt and the isolation fields", async () => {
+  it("only the fixed health-canary state may skip the salt and the isolation fields", async () => {
     const fetchImpl = mockFetch();
     const client = createDecisionClient({ privacyMode: "standard", env: { ...env, ROUTING_DECISION_STATE_SALT: "1" }, fetchImpl, retry });
     const model = catalogModel("cloudflare/clef-flash");
-    await inAllowingRun(() => client.ask(model, "Synthetic health-check page.", questions, { tenantFree: true }));
-    expect(bodyOf(fetchImpl)).toEqual({ model: "cloudflare/clef-flash", state: "Synthetic health-check page.", questions });
-    await expect(inAllowingRun(() => client.ask(model, pageState(), questions, { tenantFree: true }))).rejects.toThrow(/fixed text state/);
+    await inAllowingRun(() => client.ask(model, DECISION_CANARY_STATE, questions, { tenantFree: true }));
+    expect(bodyOf(fetchImpl)).toEqual({ model: "cloudflare/clef-flash", state: DECISION_CANARY_STATE, questions });
+    await expect(inAllowingRun(() => client.ask(model, pageState(), questions, { tenantFree: true }))).rejects.toThrow(/health-canary state/);
+    await expect(inAllowingRun(() => client.ask(model, "Tenant page text.", questions, { tenantFree: true }))).rejects.toThrow(/health-canary state/);
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 });

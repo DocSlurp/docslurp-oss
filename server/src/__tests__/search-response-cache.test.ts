@@ -184,7 +184,7 @@ describe("storeResponse", () => {
     expect(cache.readCachedResponse(victim, 60_000)).toEqual(data("victim"));
   });
 
-  it("evicts from the largest organization under global byte pressure", async () => {
+  it("under global byte pressure the writer evicts only its own answers", async () => {
     cache.configureSearchResponseCacheLimitsForTests({ maxBytes: 400 });
     const victim = (await ticket(["ws-other"]))!;
     await cache.storeResponse(victim, data("victim"), "ws-other");
@@ -210,7 +210,7 @@ describe("storeResponse", () => {
     for (const t of held) expect(cache.readCachedResponse(t!, 60_000)).toBeDefined();
   });
 
-  it("never evicts an organization within its equal share, even when many busy organizations fill the cache", async () => {
+  it("never evicts another organization's answer, even when many busy organizations fill the cache", async () => {
     // Six organizations each at the per-org cap would hold 18 entries in a 10-entry cache. The small org (1 entry, under
     // its equal share of 10 / 6) keeps its answer; the global cap still holds.
     cache.configureSearchResponseCacheLimitsForTests({ perOrgMaxEntries: 3, maxEntries: 10 });

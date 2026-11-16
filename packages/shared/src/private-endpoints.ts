@@ -383,6 +383,14 @@ function requestUrl(input: Parameters<typeof fetch>[0]): string {
   return (input as Request).url;
 }
 
+function chatCompletionsPath(url: string): boolean {
+  try {
+    return new URL(url).pathname.replace(/\/+$/, "").endsWith("/chat/completions");
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Messages with every system message removed and its text placed at the start of the first user turn, for a model
  * whose chat template rejects the system role. A guard: callers already lay such requests out without one.
@@ -439,12 +447,21 @@ export function createPrivateEndpointFetch(
     headers.delete("authorization");
     for (const [key, value] of Object.entries(privateEndpointAuthHeaders(route.endpoint, options.env))) headers.set(key, value);
     let body = init?.body;
-    const rewrites = options.chatTemplateKwargs || options.cacheSalt || options.systemMessage === false;
-    if (rewrites && url.endsWith("/chat/completions") && typeof body === "string") {
+    const isolation = Boolean(options.cacheSalt) || options.systemMessage === false;
+    const rewrites = options.chatTemplateKwargs || isolation;
+    const chat = rewrites && chatCompletionsPath(url);
+    if (isolation && !chat && body !== undefined && body !== null) {
+      // Fail closed: a no-system-role model's request must carry the org cache salt and no system message.
+      throw new PrivateEndpointResolutionError(`refusing request to ${url}: only chat/completions requests can carry the organization cache salt`);
+    }
+    if (chat) {
       let parsed: Record<string, unknown> | null = null;
       try {
-        parsed = JSON.parse(body) as Record<string, unknown>;
-      } catch { /* Not JSON: send unchanged. */ }
+        parsed = typeof body === "string" ? JSON.parse(body) as Record<string, unknown> : null;
+      } catch { /* Not JSON. */ }
+      if (isolation && (!parsed || typeof parsed !== "object" || Array.isArray(parsed))) {
+        throw new PrivateEndpointResolutionError(`refusing request to ${url}: the body could not be given the organization cache salt`);
+      }
       if (parsed && typeof parsed === "object") {
         if (options.chatTemplateKwargs) {
           const existing = parsed.chat_template_kwargs && typeof parsed.chat_template_kwargs === "object" ? parsed.chat_template_kwargs as Record<string, unknown> : {};

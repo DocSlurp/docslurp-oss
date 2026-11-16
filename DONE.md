@@ -1,10 +1,10 @@
 ## Organization isolation follow-ups (2026-11-16)
 
 - Llama Guard output moderation opens the user turn with the per-org salt line (its template takes no system role; a system message changed a verdict category). Verdicts and categories were identical with and without the line on 12 safe and unsafe pairs.
-- Page-router decision calls send OpenRouter a per-org `user` (an HMAC) and keep the state unsalted: a salt part changed calibrated answers. `ROUTING_DECISION_STATE_SALT=1` turns the state salt on once a policy pack is fit with it; health canaries (fixed text) stay unsalted.
+- Page-router decision calls send OpenRouter a per-org `user` (an HMAC), but their states remain unsalted (open gap, `TODO.md`): a salt part changed calibrated answers. `ROUTING_DECISION_STATE_SALT=1` turns the state salt on once a policy pack is fit with it; only the fixed health-canary state may skip it.
 - One salt helper (`@docslurp/shared/org-prompt-salt`): server chat, search helpers and worker prompts salt an org identically, from one key derivation that refuses a short `EVIDENCE_TAG_KEY` in production (server config, worker startup and on use).
-- Query-embedding and vector-result caches are partitioned per organization (`OrgPartitionedTtlLru`): a per-org cap, and global pressure evicts expired entries first and never takes from an organization within its equal share. The search response cache uses the same rule.
-- Private text models can be registered with `systemMessage: false`: no system message is sent, instructions open the user turn and the org salt goes as `cache_salt`; a call without the salt is refused.
+- Query-embedding and vector-result caches are partitioned per organization (`OrgPartitionedTtlLru`): a per-org cap, and under global pressure a write reclaims expired entries and then evicts only its own organization's entries (or is not kept). The search response cache uses the same rule.
+- Private text models can be registered with `systemMessage: false`: no system message is sent, instructions open the user turn and the org salt goes as `cache_salt`; a call without the salt, or a request that cannot carry it, is refused.
 
 ## Organization isolation for compute reuse (2026-11-16)
 

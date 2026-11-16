@@ -72,11 +72,16 @@ export type DecisionAnswer =
   | { type: "choice"; choice: string; confidence: number; probabilities: Record<string, number> }
   | { type: "score"; score: number; confidence: number; legend?: Record<string, string>; probabilities: Record<string, number> };
 
+/** The health canary's fixed, tenant-free state: the only state a call may send without the organization salt. */
+export const DECISION_CANARY_STATE =
+  "Synthetic health-check page. It reads: Let x and y satisfy x^2 + y^2 = z^2. Then the integral of 2x dx " +
+  "from 0 to 1 equals 1. This page is a short passage of printed algebra. It contains no pictures.";
+
 export interface DecisionCallOptions {
   signal?: AbortSignal;
   /**
-   * The state is fixed, tenant-free text (health canaries): send it unsalted so its calibration and shared prefix
-   * stay as they are. Never set this for a state that carries a page, a crop, a transcription or document facts.
+   * The state is the fixed health-canary text (`DECISION_CANARY_STATE`, the only state allowed): send it unsalted so
+   * its calibration and shared prefix stay as they are.
    */
   tenantFree?: boolean;
 }
@@ -363,7 +368,7 @@ export function createDecisionClient(options: DecisionClientOptions): DecisionCl
       // on salted states, the salt line as the first state part (saltDecisionState). A local sidecar runs per call on
       // this machine and gets neither.
       const hosted = model.endpoint !== "local-transformers";
-      if (opts.tenantFree && typeof state !== "string") throw new DecisionRequestError("only a fixed text state may skip the organization salt");
+      if (opts.tenantFree && state !== DECISION_CANARY_STATE) throw new DecisionRequestError("only the fixed health-canary state may skip the organization salt");
       const tenant = hosted && !opts.tenantFree;
       const orgSalt = tenant ? orgPromptSalt((options.orgId ?? currentProviderRateOrg)()) : "";
       const sentState = tenant && env.ROUTING_DECISION_STATE_SALT?.trim() === "1" ? saltDecisionState(state, `Workspace ${orgSalt}.`) : state;

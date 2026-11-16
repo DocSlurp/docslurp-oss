@@ -27,10 +27,9 @@ import { ensureInvalidationListener, onSearchProjectInvalidated } from "./eligib
  *   options, the query as sent), so answers never cross callers, keys,
  *   tenants, projects or options.
  * - Entries are partitioned by organization with per-organization entry and
- *   byte caps. Global pressure drops expired answers first, then evicts only
- *   from an organization above an equal share of the cache (`evict`), so one
- *   tenant cannot push out another's entries while that one holds no more than
- *   its share. Oversized answers are not kept.
+ *   byte caps. Global pressure drops expired answers, then only the writer's
+ *   own answers (`evict`): one tenant never pushes out another's live entries.
+ *   Oversized answers are not kept.
  * - Settings, pipeline and document changes drop a project's entries through
  *   the search invalidation hints (eligible-documents.ts); answers are otherwise
  *   at most one TTL old.
@@ -104,6 +103,7 @@ export function clearSearchResponseCacheForTests(): void {
   generations.clear();
   totalEntries = 0;
   totalBytes = 0;
+  lastPurgeAt = Number.NEGATIVE_INFINITY;
   limits = { ...defaultLimits };
 }
 
@@ -274,36 +274,25 @@ function evictOldest(orgKey: string): void {
 }
 
 /**
- * An organization first trims to its own caps. Global pressure then drops expired answers, and after that an
- * organization at or above an equal share of the exceeded limit (`limit / active organizations`) evicts its own
- * oldest answer; one below it evicts from the organization largest in that limit, which is above its share. So an
- * organization never loses answers to another's traffic while it holds no more than an equal share.
+ * An organization first trims to its own caps. Global pressure then reclaims expired answers (at most once per tenth
+ * of the TTL), and after that the writer evicts its own oldest answers, finally the new one (not kept). No write ever
+ * removes another organization's live answer.
  */
 function evict(orgKey: string): void {
   while ((partitions.get(orgKey)?.size ?? 0) > limits.perOrgMaxEntries || (partitionBytes.get(orgKey) ?? 0) > limits.perOrgMaxBytes) {
     evictOldest(orgKey);
   }
   if (totalEntries > limits.maxEntries || totalBytes > limits.maxBytes) purgeExpired(searchResponseCacheTtlMs());
-  while (totalEntries > limits.maxEntries || totalBytes > limits.maxBytes) {
-    const byBytes = totalBytes > limits.maxBytes;
-    const sizeOf = (org: string) => byBytes ? partitionBytes.get(org) ?? 0 : partitions.get(org)?.size ?? 0;
-    const share = (byBytes ? limits.maxBytes : limits.maxEntries) / Math.max(1, partitions.size);
-    let victim = orgKey;
-    if (sizeOf(orgKey) < share) {
-      let largest: string | null = null;
-      for (const candidate of partitions.keys()) {
-        if (candidate !== orgKey && (largest === null || sizeOf(candidate) > sizeOf(largest))) largest = candidate;
-      }
-      if (largest !== null) victim = largest;
-    }
-    if (!partitions.has(victim)) return;
-    evictOldest(victim);
-  }
+  while ((totalEntries > limits.maxEntries || totalBytes > limits.maxBytes) && partitions.has(orgKey)) evictOldest(orgKey);
 }
 
+let lastPurgeAt = Number.NEGATIVE_INFINITY;
+
 function purgeExpired(ttlMs: number): void {
-  if (ttlMs <= 0) return;
-  const cutoff = Date.now() - ttlMs;
+  const now = Date.now();
+  if (ttlMs <= 0 || now - lastPurgeAt < Math.max(1, ttlMs / 10)) return;
+  lastPurgeAt = now;
+  const cutoff = now - ttlMs;
   for (const [orgKey, entries] of partitions) {
     for (const [key, entry] of entries) if (entry.at <= cutoff) removeEntry(orgKey, key);
   }

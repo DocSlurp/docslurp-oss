@@ -11,11 +11,9 @@
 
 import type { DecisionModel } from "@docslurp/shared";
 
-import type { DecisionCallResult, DecisionClient, DecisionQuestion } from "../decision-client.js";
+import { DECISION_CANARY_STATE, type DecisionCallResult, type DecisionClient, type DecisionQuestion } from "../decision-client.js";
 
-export const CANARY_STATE =
-  "Synthetic health-check page. It reads: Let x and y satisfy x^2 + y^2 = z^2. Then the integral of 2x dx " +
-  "from 0 to 1 equals 1. This page is a short passage of printed algebra. It contains no pictures.";
+export const CANARY_STATE = DECISION_CANARY_STATE;
 
 export const CANARY_QUESTIONS: Record<string, DecisionQuestion> = {
   has_math: { type: "noul", instructions: "Does the state contain a mathematical equation?" },
