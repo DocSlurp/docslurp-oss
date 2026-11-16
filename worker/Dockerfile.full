@@ -7,7 +7,7 @@
 #     wheel-only venv (/opt/docslurp/ocr-venv, RapidOCR + onnxruntime, ~351 MiB)
 #     and the eight PP-OCRv6/v5 models pinned in worker/ocr-models.json
 #     (/opt/docslurp/ocr-models, 84 MB), root-owned and read-only. Used only when the
-#     operator sets DOCSLURP_SERVICE_PROFILE=self-hosted DOCSLURP_OCR_MODE=local.
+#     operator sets DOCSLURP_PROFILE=selfhost DOCSLURP_OCR_MODE=local.
 #   - LibreOffice headless for office format conversion
 #   - Wheel-only Python venv with the base parsers (trafilatura,
 #     ebooklib, python-pptx, openpyxl, xlsx2csv) baked in
@@ -273,7 +273,7 @@ ENV DOCSLURP_ALLOCATED_MEMORY_GB=4
 ENV PYTHON_VENV=/app/.venv
 ENV DOCSLURP_VENDOR_BUNDLE_DIR=/home/docslurp/.cache/docslurp/vendor-bundles
 # Where local OCR finds its runtime. The image does not choose the OCR mode or the service
-# profile: operators set DOCSLURP_OCR_MODE and DOCSLURP_SERVICE_PROFILE (docs/extraction/ocr.md).
+# profile: operators set DOCSLURP_OCR_MODE and DOCSLURP_PROFILE (docs/extraction/ocr.md).
 ENV DOCSLURP_OCR_MODEL_DIR=/opt/docslurp/ocr-models
 ENV DOCSLURP_OCR_PYTHON=/opt/docslurp/ocr-venv/bin/python3
 

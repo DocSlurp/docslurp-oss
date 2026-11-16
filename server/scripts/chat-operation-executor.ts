@@ -1,4 +1,5 @@
 import "../src/env.js";
+import { resolveDeploymentProfile } from "@docslurp/shared";
 import { loadPricingProvider, pricingDurableStateFromSql } from "@docslurp/shared/pricing-loader";
 import { startAutomaticCallPriceRefresh } from "@docslurp/shared";
 
@@ -24,9 +25,11 @@ process.on("SIGTERM", stop);
 // claiming any operation. DOCSLURP_PRICING_REQUIRED=1 (fly.chat-executor.toml) without a provider refuses to start, so
 // the executor never prices an answer with the open default (or at 0).
 try {
+  // The deployment posture first (retired variables, profile, switches): refuses before anything prices or runs.
+  resolveDeploymentProfile(process.env);
   await loadPricingProvider(process.env, { durableState: pricingDurableStateFromSql(sql), sql });
 } catch (error) {
-  console.error("[native-chat] startup_refused pricing:", error instanceof Error ? error.message : String(error));
+  console.error("[native-chat] startup_refused:", error instanceof Error ? error.message : String(error));
   await sql.end({ timeout: 1 }).catch(() => undefined);
   process.exit(1);
 }
