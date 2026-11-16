@@ -6,10 +6,11 @@
 -- none can observe another's uploads through it. Supersedes migration 0101's
 -- "deliberately global" table: one hostile file may now cost one worker per
 -- uploading organization, bounded per organization by org_teardown_failures.
--- The denylist expires within 7 days anyway; earlier rows are dropped.
-DROP TABLE IF EXISTS quarantined_sources;
---> statement-breakpoint
-CREATE TABLE quarantined_sources (
+-- Expand step: a new table, so release N-1 keeps using quarantined_sources
+-- (0101) until it is gone; a later release drops that table (contract).
+-- Listings do not carry over: they expire within 7 days and the per-org
+-- breaker bounds re-listing.
+CREATE TABLE IF NOT EXISTS org_quarantined_sources (
   source_sha256 text NOT NULL,
   org_id text NOT NULL,
   -- First attribution within the organization.
@@ -27,11 +28,11 @@ CREATE TABLE quarantined_sources (
   PRIMARY KEY (source_sha256, org_id)
 );
 --> statement-breakpoint
-REVOKE ALL ON public.quarantined_sources FROM PUBLIC;
+REVOKE ALL ON public.org_quarantined_sources FROM PUBLIC;
 --> statement-breakpoint
 DO $$
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'docslurp_worker') THEN
-    GRANT SELECT, INSERT, UPDATE ON public.quarantined_sources TO docslurp_worker;
+    GRANT SELECT, INSERT, UPDATE ON public.org_quarantined_sources TO docslurp_worker;
   END IF;
 END $$;

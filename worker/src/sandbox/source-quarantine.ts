@@ -6,7 +6,7 @@ import { SourceRefusalError, stagedSourceSha256 } from "./source-integrity.js";
 import { onUnverifiedTeardown, type CommandTeardownError } from "./teardown.js";
 
 /**
- * Source quarantine: a per-organization content-hash denylist (migrations 0101 and 0184, `quarantined_sources`).
+ * Source quarantine: a per-organization content-hash denylist (migrations 0101 and 0184, `org_quarantined_sources`).
  *
  * A command whose teardown could not be verified quarantines its worker (teardown-breaker.ts). A
  * hostile file that can do that once can do it on every worker that picks it up, so when the failure
@@ -146,7 +146,7 @@ export function postgresSourceQuarantine(sql: Sql<Record<string, unknown>>): Sou
       const rows = await sql`
         select coalesce(${stagedSha256}::text, d.source_sha256, '') as source_sha256, d.org_id, d.project_id
         from documents d
-        left join quarantined_sources q on q.org_id = d.org_id
+        left join org_quarantined_sources q on q.org_id = d.org_id
           and q.source_sha256 = coalesce(${stagedSha256}::text, d.source_sha256) and q.expires_at > now()
         where d.id = ${documentId} and (d.org_id is null or q.source_sha256 is not null)
         limit 1`;
@@ -156,7 +156,7 @@ export function postgresSourceQuarantine(sql: Sql<Record<string, unknown>>): Sou
       // One row per (hash, organization). Within the organization the first attribution is kept; a later failure
       // extends the expiry (an expired row is listed again, keeping its first attribution and counts).
       const rows = await sql`
-        insert into quarantined_sources as q (
+        insert into org_quarantined_sources as q (
           source_sha256, org_id, project_id, run_id, document_id, stage, detail, expires_at, last_document_id
         )
         select coalesce(${stagedSha256}::text, d.source_sha256), d.org_id, d.project_id, ${runId ?? null}, d.id, ${stage ?? null},
@@ -173,7 +173,7 @@ export function postgresSourceQuarantine(sql: Sql<Record<string, unknown>>): Sou
     },
     async noteRefusal({ documentId, sourceSha256 }) {
       await sql`
-        update quarantined_sources q set
+        update org_quarantined_sources q set
           last_document_id = d.id,
           last_seen_at = now(),
           refused_count = q.refused_count + 1
