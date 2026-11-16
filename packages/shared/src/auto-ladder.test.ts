@@ -255,7 +255,7 @@ describe("estimates under the ladder", () => {
         const total = (input.mix.text ?? 0) + (input.mix.complex ?? 0) + (input.mix.scanned ?? 0) || 1;
         const read = input.profile === "fast" ? 0 : ((input.mix.complex ?? 0) + (input.mix.scanned ?? 0)) / total;
         const totalCredits = input.pages * (read * 0.25 + (1 - read) * 0.005);
-        return { ...base, credits: { totalCredits, breakdown: { fast: totalCredits, rich: 0, media: 0, features: 0 } } };
+        return { ...base, credits: { totalCredits, breakdown: { fast: totalCredits, ocr: 0, rich: 0, media: 0, features: 0 } } };
       },
     });
     const env = { DOCSLURP_BILLING: "enforced", STRIPE_SECRET_KEY: "sk_test" };
