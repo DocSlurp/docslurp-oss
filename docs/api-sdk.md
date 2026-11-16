@@ -245,6 +245,7 @@ So `client.search({ q: "question" })`, `client.getProjectState()` and `docslurp 
 - Reserved words such as `default`, `board`, `templates` and `invites` return 400.
 - A slug that another project uses, or used before, returns 409.
 - API keys need the opt-in `projects:manage` scope, which only server keys can have. The key owner's project role still decides what may change. The same scope covers the other project settings (name, prompt, pipeline, budget).
+- `PATCH /v1/projects/:project` and `PATCH /v1/projects/:project/search-settings` each save one record. To change ingestion and search/chat settings together, with no partial save and no lost update from a concurrent editor, read `GET /v1/projects/:project/settings-publication` and send its revisions back with one `POST` to the same path; a stale revision answers `409 settings_stale`. The dashboard's project settings use this route. See [coherent settings publication](config-change-jobs.md#coherent-settings-publication).
 
 ```bash
 curl -X PATCH "$api_url/v1/projects/amber-falcon-ridge" \
@@ -272,6 +273,7 @@ curl -X PATCH "$api_url/v1/projects/amber-falcon-ridge" \
 | List projects | `GET /v1/projects` | `listProjects()` | Use HTTP |
 | Read project | `GET /v1/projects/:project` | `getProject(id)` | Use HTTP |
 | Update or rename project | `PATCH /v1/projects/:project` (session or `projects:manage` key) | `updateProject(id, { slug })` | Use HTTP |
+| Read settings with revisions, or save project and search/chat settings in one commit | `GET` / `POST /v1/projects/:project/settings-publication` ([publication](config-change-jobs.md#coherent-settings-publication)) | Use HTTP | Use HTTP |
 | Retrieve passages | `POST /v1/search` or `GET /v1/search` | `search` | `search` |
 | Batch retrieval | `POST /v1/search` with `{ queries }` | `search({ queries })` | `search --queries-file` |
 | Streaming retrieval (SSE, each leg as it lands) | `POST /v1/search/stream` ([events](search-api.md#streaming-search)) | `searchStream` | `search --stream` |
