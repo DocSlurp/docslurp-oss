@@ -98,7 +98,7 @@ The page reader still refuses to start when it is on without a ready page image 
 
 ### Model overrides
 
-Deploy-wide emergency switches for the model behind a reader, for every project that did not choose one. Per-project
+The `models.overrides` fields are deploy-wide emergency switches for the model behind a reader, for every project that did not choose one. Per-project
 model mappings stay an administrator setting.
 
 | Field | Variable | Who reads it | Must be |
@@ -106,8 +106,6 @@ model mappings stay an administrator setting.
 | `vision` | `DOCSLURP_VISION_MODEL_URI` | API and worker | a hosted entry of the vision model catalog |
 | `ocrEscalation` | `DOCSLURP_OCR_ESCALATION_MODEL` | worker | a hosted vision catalog entry on a hosted OCR provider |
 | `chartGenerator` | `CHART_EXPORT_GENERATOR_MODEL` | worker | an `llm://openrouter/` vision catalog entry that is one of the worker's chart generator candidates |
-
-The `models.overrides` fields:
 
 Every override must also have a verified catalog price with an output price under $50 per million tokens, must not be
 an OpenAI Pro or Ultra model (checked after decoding, and with any query removed), must not be a model family that is
