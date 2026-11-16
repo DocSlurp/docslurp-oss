@@ -256,7 +256,7 @@ describe("environment overlay", () => {
       { DOCSLURP_OCR_PAGE_READER_ORG_DAILY_MAX_COST_CENTS: "02000" },
       { DOCSLURP_OCR_PAGE_READER_ORG_DAILY_MAX_COST_CENTS: "2e3" },
       { DOCSLURP_OCR_PAGE_READER_ORG_DAILY_MAX_COST_CENTS: "2000.0" },
-      // An empty value means something to some readers (Number("") is 0): never overwritten.
+      // An empty escalation cap reads as 0 (Number("")): never overwritten.
       { DOCSLURP_OCR_ESCALATION_MAX_PAGES: "" },
       { DOCSLURP_OCR_ESCALATION_MAX_PAGES: "  " },
     ]) {
@@ -264,6 +264,12 @@ describe("environment overlay", () => {
       expect(() => applyOperatorConfigEnvironment(config, env, "worker"), JSON.stringify(conflicting)).toThrow(/disagree/);
       expect(env).toEqual(conflicting);
     }
+  });
+
+  it("fills in empty variables whose readers read empty as unset", () => {
+    const env: Record<string, string | undefined> = { DOCSLURP_OCR_PAGE_READER: "", DOCSLURP_OCR_MAX_CONCURRENT: " " };
+    expect(applyOperatorConfigEnvironment(config, env, "worker").applied).toEqual(expect.arrayContaining(["DOCSLURP_OCR_PAGE_READER", "DOCSLURP_OCR_MAX_CONCURRENT"]));
+    expect(env).toMatchObject({ DOCSLURP_OCR_PAGE_READER: "all", DOCSLURP_OCR_MAX_CONCURRENT: "2" });
   });
 
   it("applies only the variables the API reads for the server role", () => {

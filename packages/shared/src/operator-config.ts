@@ -185,6 +185,8 @@ interface KnobSpec {
   get: (config: OperatorConfig) => unknown;
   /** The environment value for a file value; null means "the variable must stay unset". */
   render: (value: never) => string | null;
+  /** The reader gives an empty value its own meaning (not "unset"), so "" is compared instead of filled in. */
+  emptyIsValue?: boolean;
   /** A canonical form of an environment value, for comparison; undefined when the reader would not accept it. */
   canonical: (raw: string) => string | undefined;
 }
@@ -257,8 +259,8 @@ export const OPERATOR_CONFIG_KNOBS: readonly KnobSpec[] = [
   intKnob("vision.guards.routeOverrunLimit", "VISION_ROUTE_OVERRUN_LIMIT", "worker", (c) => c.vision?.guards?.routeOverrunLimit),
   numKnob("vision.guards.routeWeightCorrectionMax", "VISION_ROUTE_WEIGHT_CORRECTION_MAX", "worker", (c) => c.vision?.guards?.routeWeightCorrectionMax),
   boolKnob("ai.escalation.enabled", "DOCSLURP_OCR_ESCALATION", "worker", (c) => c.ai?.escalation?.enabled),
-  intKnob("ai.escalation.maxPagesPerDocument", "DOCSLURP_OCR_ESCALATION_MAX_PAGES", "worker", (c) => c.ai?.escalation?.maxPagesPerDocument),
-  intKnob("ai.escalation.maxAttemptsPerDocument", "DOCSLURP_OCR_ESCALATION_MAX_ATTEMPTS", "worker", (c) => c.ai?.escalation?.maxAttemptsPerDocument),
+  { ...intKnob("ai.escalation.maxPagesPerDocument", "DOCSLURP_OCR_ESCALATION_MAX_PAGES", "worker", (c) => c.ai?.escalation?.maxPagesPerDocument), emptyIsValue: true },
+  { ...intKnob("ai.escalation.maxAttemptsPerDocument", "DOCSLURP_OCR_ESCALATION_MAX_ATTEMPTS", "worker", (c) => c.ai?.escalation?.maxAttemptsPerDocument), emptyIsValue: true },
   stringKnob("models.overrides.vision", "DOCSLURP_VISION_MODEL_URI", "both", (c) => c.models?.overrides?.vision),
   stringKnob("models.overrides.ocrEscalation", "DOCSLURP_OCR_ESCALATION_MODEL", "worker", (c) => c.models?.overrides?.ocrEscalation),
   stringKnob("models.overrides.chartGenerator", "CHART_EXPORT_GENERATOR_MODEL", "worker", (c) => c.models?.overrides?.chartGenerator),
@@ -538,8 +540,10 @@ export function applyOperatorConfigEnvironment(
   const conflicts: string[] = [];
   for (const [name, { path, value }] of operatorConfigEnvironment(config, role)) {
     const raw = env[name];
-    // An empty value is a value: some readers give "" a meaning (Number("") is 0), so it is compared, never overwritten.
-    if (raw === undefined) {
+    const knob = knobs.get(name)!;
+    // Empty reads as unset for most readers (and .env.example ships many knobs empty), so the file fills it in. Where the
+    // reader gives "" its own meaning (escalation caps: Number("") is 0), it is compared and never overwritten.
+    if (raw === undefined || (raw.trim() === "" && !knob.emptyIsValue && value !== null)) {
       if (value !== null) applied.push([name, value]);
       continue;
     }
@@ -547,7 +551,6 @@ export function applyOperatorConfigEnvironment(
       agreed.push(name);
       continue;
     }
-    const knob = knobs.get(name)!;
     const envCanonical = knob.canonical(raw);
     if (value !== null && envCanonical !== undefined && envCanonical === knob.canonical(value)) {
       agreed.push(name);
