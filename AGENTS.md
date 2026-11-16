@@ -4,13 +4,14 @@ DocSlurp is a document and media ingestion service: files go through a configura
 
 ## Source of truth
 
-This repository (`DocSlurp/docslurp-oss`) owns the server, worker, packages and migrations. The private web application and production operations live in `DocSlurp/app`, which pins this repository at `core/`. Merge core changes to this repository's main before updating the app pin. The former `DocSlurp/docslurp` repository is a read-only historical archive; do not develop or release there. Work directly here; exports from the archive are retired.
+This repository (`DocSlurp/docslurp-oss`) owns the server, worker, packages and migrations. The private web application and production operations live in `DocSlurp/app`, which pins this repository at `core/`. Merge core changes to this repository's main before updating the app pin. The former `DocSlurp/docslurp` repository is a read-only historical archive; do not develop or release there. Work directly here.
 
 ## Layout
 
 - `server/`: Hono API (`@docslurp/server`). Routes in `server/src/routes/`, services in `server/src/services/`, the Drizzle schema, Postgres migrations, `migrate.mjs` and `seed.ts` in `server/db/`.
 - `worker/`: TypeScript ingestion pipeline. Stages live in `worker/src/stages/`.
-- `packages/`: `sdk` (with the `@docslurp/sdk/embed` subpath), `cli`, `contrib-astro`, `contrib-search-compat`, `contrib-algolia-server`, `contrib-wordpress` and `shared` (contracts shared by server and clients).
+- `packages/`: `sdk` (with the `@docslurp/sdk/embed` subpath), `cli`, `contrib-astro`, `contrib-search-compat`, `contrib-algolia-server`, `contrib-wordpress`, `estimate` (offline file profiler; the server quotes from its profiles) and `shared` (contracts shared by server and clients).
+- `plugins/docslurp`: the DocSlurp plugin for Claude (skills and MCP setup).
 - `docs/`: public documentation. Self-host instructions are in `docs/self-host/`.
 
 Keep new code in the package that owns it. `server/` must not import from outside the project packages it declares.
@@ -50,7 +51,7 @@ These rules are mandatory and override speed and convenience. When in doubt, tre
 
 **Boundaries in scope:**
 
-- **Untrusted file processing:** anything that reads customer bytes. This covers parsers, converters, OCR, media tools, archive and Office handling, rasterizers, native bindings such as the private PDF engine, and the code that stages inputs and outputs for them.
+- **Untrusted file processing:** anything that reads customer bytes. This covers parsers, converters, OCR, media tools, archive and Office handling, rasterizers, native PDF engine bindings, and the code that stages inputs and outputs for them.
 - **Tenant data boundaries:** organization, project, user and API-key scoping in queries, search and vector indexes, storage prefixes, caches, exports, webhooks, MCP tools and chat retrieval.
 - **Identity and access:** sessions, API keys and their scopes, OAuth and MCP consent, SSO, CSRF and origin checks.
 - **Secrets and egress:** credential storage and distribution, user-supplied URLs, connectors and any outbound fetch driven by user input.
@@ -106,6 +107,7 @@ These rules are mandatory and override speed and convenience. When in doubt, tre
 - Log every LLM or embedding call as `[ai-usage] <metric> model=<id> input_tokens=<n> output_tokens=<n>` (plus `cached_input_tokens=<n>` / `cache_write_input_tokens=<n>` when the provider reports prompt-cache use) and persist usage through the existing recorder with an explicit scope. Keep prompts static first, per-request last, so prefixes stay cacheable; Claude via OpenRouter caches only with `createOpenRouterPromptCacheFetch` on Chat Completions.
 - Never commit secrets, `.env` files, model weights or test fixtures with unclear licenses. Third-party fixtures are fetched on first use with `pnpm fixtures:fetch` into the gitignored `.cache/`.
 - Fake, QA and agent-created accounts use a reserved email domain (`@example.com`, `@<run>.invalid`, `@<name>.test`) so `docslurp_reserved_test_email` (migration 0094) marks them `test` and admin customer metrics exclude them; for an address you cannot choose, use `TEST_ACCOUNT_EMAIL_PATTERNS`.
+- Pricing mechanics (credit multipliers, zero-rated routes, infrastructure costs, margins) stay in `DocSlurp/app`. Core exposes neutral usage and profile data, and a generic seam with an open default for quoting; the customer-visible price list is the only pricing published here.
 - Benchmark and evaluation inputs are held-out evidence. Do not hard-code document names, field names or expected values from an evaluation into production code or prompts.
 
 ## Scale targets
