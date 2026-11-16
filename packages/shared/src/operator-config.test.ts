@@ -325,9 +325,11 @@ describe("initializeOperatorConfig", () => {
     expect(() => initializeOperatorConfig("worker", { ...PRODUCTION, [OPERATOR_CONFIG_ENV]: path, DOCSLURP_OCR_MAX_CONCURRENT: "3" }, () => {})).toThrow(/disagree/);
   });
 
-  it("an empty explicit-free variable (which reads as auto) never agrees with off", () => {
+  it("an empty explicit-free variable (which reads as auto) is filled in, never taken as agreeing with off", () => {
     const config = parseOperatorConfig({ version: 1, charts: { explicitFree: "off" } }, PRODUCTION);
-    expect(() => applyOperatorConfigEnvironment(config, { DOCSLURP_CHART_EXPORT_FREE_EXPLICIT: " " }, "server")).toThrow(/disagree/);
+    const env: Record<string, string | undefined> = { DOCSLURP_CHART_EXPORT_FREE_EXPLICIT: " " };
+    expect(applyOperatorConfigEnvironment(config, env, "server")).toEqual({ applied: ["DOCSLURP_CHART_EXPORT_FREE_EXPLICIT"], agreed: [] });
+    expect(env.DOCSLURP_CHART_EXPORT_FREE_EXPLICIT).toBe("off");
   });
 
   it("a call without the variable keeps the loaded config's digest", () => {
