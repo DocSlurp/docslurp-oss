@@ -991,7 +991,7 @@ export function assertExtractorPluginConfiguration(env: NodeJS.ProcessEnv = proc
     if (sandboxed) throw new Error(`DOCSLURP_PDF_MODE=local parses PDFs on the worker host, and this deployment runs PDFs only in ${VM_PDF_EXTRACTOR_ID}; unset it`);
     const devMachine = normalizeEnvSetting(env.DOCSLURP_PROFILE) === "dev" && isDevelopmentEnvironment(env);
     if (serviceProfileFromEnv(env) !== "self-hosted" && !devMachine) {
-      throw new Error("DOCSLURP_PDF_MODE=local parses customer PDFs on the worker host and is only for customer-owned execution: it needs DOCSLURP_PROFILE=selfhost (or DOCSLURP_SERVICE_PROFILE=self-hosted); refusing to start");
+      throw new Error("DOCSLURP_PDF_MODE=local parses customer PDFs on the worker host and is only for customer-owned execution: it needs DOCSLURP_PROFILE=selfhost; refusing to start");
     }
     if (!(deps.dopplerInstalled ?? (() => dopplerConverterInstalled(env)))()) {
       throw new Error(`DOCSLURP_PDF_MODE=local needs Doppler's pdftomarkdown and pdfpagecount at ${dopplerBinDir(env)}, and prlimit on PATH (worker images ship them; DOCSLURP_DOPPLER_BIN_DIR points elsewhere); refusing to start`);

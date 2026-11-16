@@ -132,22 +132,13 @@ export function resolveOcrMode(env: NodeJS.ProcessEnv = process.env): OcrMode {
 }
 
 /**
- * The legacy profile (`service` | `self-hosted`), from `DOCSLURP_PROFILE` (`service`, `selfhost`) or the old
- * `DOCSLURP_SERVICE_PROFILE`, or null when neither is set (or `DOCSLURP_PROFILE=dev`). Throws on an unknown value or a
- * disagreement between the two names (startup refuses those first: @docslurp/shared resolveDeploymentProfile).
+ * The profile in the legacy vocabulary (`service` | `self-hosted`), from `DOCSLURP_PROFILE` (`service`, `selfhost`), or
+ * null when unset (or `dev`). Throws on an unknown value (startup refuses it first: resolveDeploymentProfile).
  */
 export function resolveServiceProfile(env: NodeJS.ProcessEnv = process.env): ServiceProfile | null {
-  const raw = normalizeEnvSetting(env.DOCSLURP_SERVICE_PROFILE);
-  if (raw && !(SERVICE_PROFILES as readonly string[]).includes(raw)) {
-    throw new Error(`DOCSLURP_SERVICE_PROFILE must be one of ${SERVICE_PROFILES.join(", ")}; got ${JSON.stringify(raw)}`);
-  }
   const profile = normalizeEnvSetting(env.DOCSLURP_PROFILE);
   if (profile && !(DEPLOYMENT_PROFILES as readonly string[]).includes(profile)) {
     throw new Error(`DOCSLURP_PROFILE must be one of ${DEPLOYMENT_PROFILES.join(", ")}; got ${JSON.stringify(profile)}`);
-  }
-  const mappedNew = profile === "service" ? "service" : profile === "selfhost" ? "self-hosted" : null;
-  if (raw && profile && mappedNew !== raw) {
-    throw new Error(`DOCSLURP_PROFILE=${profile} conflicts with DOCSLURP_SERVICE_PROFILE=${raw}`);
   }
   return serviceProfileFromEnv(env);
 }
@@ -163,7 +154,7 @@ export function localOcrRefusal(env: NodeJS.ProcessEnv = process.env): string | 
   if (profile === null && normalizeEnvSetting(env.DOCSLURP_PROFILE) === "dev" && isDevelopmentEnvironment(env)) return null;
   return profile === "service"
     ? "DOCSLURP_OCR_MODE=local runs OCR inside the worker host, which does not meet the VM boundary required for service-managed customer files (DOCSLURP_PROFILE=service)"
-    : "DOCSLURP_OCR_MODE=local is only for customer-owned execution and needs DOCSLURP_PROFILE=selfhost (or DOCSLURP_SERVICE_PROFILE=self-hosted)";
+    : "DOCSLURP_OCR_MODE=local is only for customer-owned execution and needs DOCSLURP_PROFILE=selfhost";
 }
 
 /**

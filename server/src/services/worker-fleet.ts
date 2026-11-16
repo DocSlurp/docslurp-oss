@@ -379,7 +379,7 @@ export function extractionConfigFleetView(
 ): ExtractionConfigFleetView {
   let app: ExtractionConfigFleetView["app"];
   try {
-    const posture = resolveDeploymentProfile(env, { requireProfile: false });
+    const posture = resolveDeploymentProfile(env);
     app = { extractionConfig: 1, profile: posture.profile, disabled: [...posture.disabled] };
   } catch (error) {
     app = { extractionConfig: 1, profile: null, disabled: [], error: errorMessage(error) };
