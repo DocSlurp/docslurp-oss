@@ -5,7 +5,16 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { startMigratedPostgres } from "../test/migrated-postgres.js";
 import { computeAllocationAdmission } from "../db/compute-fleet-store.js";
 import { createExtractorPluginHost, setExtractorComputeAllocationAdmission } from "../extractors/plugins.js";
-import { reconcileRoleGrants } from "../../../server/db/roles.mjs";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
+
+// server/db/roles.mjs is outside the worker package: load it at run time (as ocr-escalation-retry.test.ts does) so the
+// worker's own build, which compiles src/**, never resolves a server path (the worker image has no server/).
+type ReconcileRoleGrants = (client: unknown, options: { roles?: Record<string, string>; log: () => void }) => Promise<unknown>;
+async function loadReconcileRoleGrants(): Promise<ReconcileRoleGrants> {
+  const rolesModule = pathToFileURL(path.resolve(import.meta.dirname, "../../../server/db/roles.mjs")).href;
+  return ((await import(/* @vite-ignore */ rolesModule)) as { reconcileRoleGrants: ReconcileRoleGrants }).reconcileRoleGrants;
+}
 
 let sql: ReturnType<typeof postgres>, stop: () => Promise<void>;
 beforeAll(async () => {
@@ -21,6 +30,7 @@ beforeAll(async () => {
     has_table_privilege('custom_app','compute_allocation_reservations','SELECT') as ledger_read`;
   expect(upgrade).toEqual({cap_write:false,ledger_delete:false,ledger_read:false});
   const client={query:async(statement:string,params:unknown[]=[])=>({rows:await sql.unsafe(statement,params as postgres.ParameterOrJSON<never>[])})};
+  const reconcileRoleGrants = await loadReconcileRoleGrants();
   await reconcileRoleGrants(client,{log:()=>{}});
   await reconcileRoleGrants(client,{roles:{owner:"postgres",app:"custom_app",worker:"custom_worker",backup:"custom_backup"},log:()=>{}});
 },120_000);
