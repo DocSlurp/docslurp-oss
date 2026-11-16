@@ -36,7 +36,8 @@ beforeAll(async () => {
   await db.exec(`
     insert into "user"(id, name, email) values ('u1', 'A', 'a@x');
     insert into organizations(id, name, slug, created_by_user_id) values ('o1', 'Org', 'org', 'u1');
-    insert into projects(id, org_id, user_id, name) values ('w', 'o1', 'u1', 'W');
+    -- Saved on good: materialize runs are capped at the project's quality (extraction-config.ts), and these runs read at Good.
+    insert into projects(id, org_id, user_id, name, pipeline) values ('w', 'o1', 'u1', 'W', '{"quality":"good"}');
     insert into project_runs (monthly_reservation_cents, id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents)
       values (100, 'up', 'o1', 'u1', 'w', 'upload', 'processing', 'extract', '{"indexingMode":"map"}', 2),
              (100, 'm1', 'o1', 'u1', 'w', 'materialize', 'processing', 'materialize', '{}', 1),
@@ -444,7 +445,27 @@ describe("runMaterializeRange activity", () => {
                (100, 'up-bare', 'o1', 'u1', 'w', 'upload', 'processing', 'extract', '{}', 1);
       insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, page_count, indexing_mode, page_count_source, parse_source_scan_version, parse_source_sha256)
         values ('bare', 'o1', 'u1', 'w', 'up-bare', 'z.pdf', 'application/pdf', 'kz', 'processing', 2, 'map', 'counted', 1, repeat('0', 64));`);
-    await expect(runMaterializeRange(deps() as never, { ...input("m-bare", [1]), documentId: "bare" })).rejects.toThrow(/refusing to run on defaults/);
+    // The project's own pipeline is the last fallback: an empty one leaves nothing to run on.
+    await db.exec(`update projects set pipeline = '{}' where id = 'w'`);
+    try {
+      await expect(runMaterializeRange(deps() as never, { ...input("m-bare", [1]), documentId: "bare" })).rejects.toThrow(/refusing to run on defaults/);
+    } finally {
+      await db.exec(`update projects set pipeline = '{"quality":"good"}' where id = 'w'`);
+    }
+  });
+
+  it("a materialize run never reads above the project's quality as it is now (council #440 M2)", async () => {
+    const { withSourcePipeline } = await import("../deferred/materialize-activity.js");
+    await db.exec(`
+      insert into project_runs (monthly_reservation_cents, id, org_id, user_id, project_id, kind, status, stage, pipeline, total_documents)
+        values (100, 'm-cap', 'o1', 'u1', 'w', 'materialize', 'processing', 'materialize', '{"quality":"good"}', 1);
+      update projects set pipeline = '{"quality":"auto"}' where id = 'w';`);
+    try {
+      const run = await withSourcePipeline(sql as never, { id: "m-cap", kind: "materialize", pipeline: { quality: "good" } as never }, "d1");
+      expect((run.pipeline as { quality: string }).quality).toBe("auto");
+    } finally {
+      await db.exec(`update projects set pipeline = '{"quality":"good"}' where id = 'w'; delete from project_runs where id = 'm-cap'`);
+    }
   });
 
   it("charges a page's base fee once across query materialization and a later full index (I6)", async () => {

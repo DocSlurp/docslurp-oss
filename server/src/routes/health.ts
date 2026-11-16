@@ -1,4 +1,5 @@
 import { realtimeMetricLines } from "../realtime/metrics.js";
+import { runReadsPagesSql } from "@docslurp/shared";
 import { Hono } from "hono";
 import { timingSafeEqual } from "node:crypto";
 
@@ -128,7 +129,7 @@ async function buildPrometheusPayload(): Promise<string> {
               least(${SCALER_QUERY.pageFanout}, coalesce(o.worker_slots, ${SCALER_QUERY.defaultOrgSlots}), 128) as fanout_cap,
               greatest(
                 (select count(*) from page_work_tasks p where p.run_id = r.id and p.status in ('queued','processing')),
-                case when coalesce((r.pipeline->>'visionFallback')::boolean,false)
+                case when ${sql.unsafe(runReadsPagesSql("r"))}
                   and coalesce((r.pipeline->>'maxCostCents')::numeric,0)=0
                   and not exists(select 1 from project_run_stage_states s where s.run_id=r.id and s.stage_name='vision-extract' and s.status='completed')
                 then r.pages_total else 0 end

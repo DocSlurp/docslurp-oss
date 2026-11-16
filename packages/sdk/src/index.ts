@@ -31,11 +31,44 @@ export type JsonObject = Record<string, unknown>;
 export type IndexingMode = "full" | "map" | "visual";
 
 /**
- * Processing quality (`pipeline.quality`): `fast` reads the text layer only and keeps scanned pages as page
- * images, never read (lowest price); `auto` (default) reads each page the cheapest faithful way (its price depends on
- * the mix of pages); `good` reads every page with a vision model (highest price). Prices: https://docslurp.io/pricing
+ * Processing quality (`pipeline.quality`): `fastest` reads the text layer only and keeps pages without one as page
+ * images, never read (lowest price); `balanced` (default) reads each page the cheapest faithful way (its price depends
+ * on the mix of pages); `smart` reads every page with AI (highest price). `smart` above the project's quality needs
+ * project editor rights or an API key with the `pipeline:billed-features` scope. Prices: https://docslurp.io/pricing
  */
-export type QualityMode = "fast" | "auto" | "good";
+export type Quality = "fastest" | "balanced" | "smart";
+
+/**
+ * Figures and charts (`pipeline.visuals`), an ordered ladder: `none`; `figures` (PDF figures as files); `charts` (also
+ * chart data from files that carry it, no model, no charge); `charts-ai` (also reads other charts with AI, billed per
+ * chart). Unset: the deployment's default for the caller (`ProjectRecord.visualsDefaults`). Replaces `figures` and
+ * `chartExport.tier`.
+ */
+export type Visuals = "none" | "figures" | "charts" | "charts-ai";
+
+/**
+ * @deprecated The former quality words; use {@link Quality} (`fast` = `fastest`, `auto` = `balanced`, `good` = `smart`).
+ * Still accepted; the server answers with a `Deprecation` header and `warnings`.
+ */
+export type LegacyQualityMode = "fast" | "auto" | "good";
+
+/** A quality value the API accepts: {@link Quality}, or a deprecated {@link LegacyQualityMode} word. */
+export type QualityMode = Quality | LegacyQualityMode;
+
+/** A deprecated request field the server mapped (its `Deprecation: true` response carries these in `warnings`). */
+export type DeprecatedFieldWarning = { code: "deprecated_field"; field: string; replacement: string; message: string };
+
+/** A project's extraction settings in the current names (`ProjectRecord.extraction`). */
+export type ExtractionSettings = { quality: Quality; visuals: Visuals | null };
+
+/** What unset visuals run as on this deployment per origin, and the rungs a caller may choose (`ProjectRecord.visualsDefaults`). */
+export type VisualsDefaults = { app: Visuals; machine: Visuals; available: Visuals[] };
+
+/** A lowering a run recorded: by the project's privacy mode, a deployment switch, the vision profile, or a replay cap. */
+export type ExtractionCap = { field: "quality" | "visuals"; from: string; to: string; reason: "privacy" | "switch" | "profile" | "replay" | string };
+
+/** What a run executes (`ProjectRun.extraction`): its stamp, or for older runs its settings mapped on read (`legacy: true`). */
+export type RunExtraction = { quality: Quality; visuals: Visuals; readsPages: boolean; capsApplied: ExtractionCap[]; legacy: boolean };
 
 /**
  * Auto ladder rung (`pipeline.ladder`): `fast` reads the text layer only; `ocr` transcribes pixels (scans, table rescue)
@@ -64,6 +97,12 @@ export type ProjectRecord = JsonObject & {
   indexedPageCount?: number;
   /** False when the service has deferred indexing profiles off; hide indexing controls. */
   deferredIndexingAvailable?: boolean;
+  /** Quality and visuals in the current names (the stored `pipeline` keeps the deprecated fields during the window). */
+  extraction?: ExtractionSettings;
+  /** What unset visuals run as on this deployment, and the rungs a caller may choose. */
+  visualsDefaults?: VisualsDefaults;
+  /** Present when the request used a deprecated field. */
+  warnings?: DeprecatedFieldWarning[];
 };
 
 export type RetrievalStage = "chunk" | "page-text" | "map-node" | "page-image";
@@ -266,7 +305,9 @@ export type UploadEstimateInput = {
   }>;
   /** Knobs to quote with instead of the project's own; the answer's `quote` reflects them. */
   settings?: Partial<QuoteSettings>;
-  /** Price the upload with this chart export tier instead of the project's (or the API default, off). */
+  /** Price the upload with these visuals instead of the project's (or the deployment's default). */
+  visuals?: Visuals;
+  /** @deprecated Use `visuals`. Price the upload with this chart export tier instead of the project's. */
   chartExport?: ChartExportOverride;
   project?: string };
 
@@ -277,7 +318,10 @@ export type ChartExportOverride = { tier: ChartExportTier };
 
 /** The knobs of a quote, in customer terms; omitted ones take a new project's defaults. */
 export type QuoteSettings = {
-  quality: "fast" | "auto" | "good";
+  /** `fastest`, `balanced` or `smart` (deprecated `fast`, `auto`, `good` accepted; quotes still answer with those). */
+  quality: QualityMode;
+  /** Visuals to quote with (`charts-ai` adds a `charts` line); replaces `chartExport`. */
+  visuals?: Visuals;
   /**
    * `full` indexes every page on upload; `on-demand` indexes pages when a query first needs them; `visual` embeds every
    * page image on upload (a read of every page; not with `fast` quality).
@@ -293,6 +337,7 @@ export type QuoteSettings = {
    * Chart and diagram export tier. Omitted: the project's, else off for API callers. `models` (reading charts with AI)
    * adds a `charts` line; `free` costs nothing. Refused where the deployment does not offer `models`.
    */
+  /** @deprecated Use `visuals`. */
   chartExport: ChartExportTier;
   /** Auto ladder above-fast share (0..1): the largest share of each document's pages a model may read. Omitted: the project's. */
   aboveFastShare?: number | null;
@@ -339,6 +384,8 @@ export type StreamJobOptions = RequestOptions & { pollIntervalMs?: number };
 
 export type ProjectRun = JsonObject & {
   id: string;
+  /** The quality and visuals this run executes, with any `capsApplied` lowering. */
+  extraction?: RunExtraction;
   status: "queued" | "processing" | "completed" | "failed";
   controlState?: string | null;
   /** Why the worker paused the run for spend (credit_exhausted, project_budget_paused, org_budget_paused, plan_not_entitled); it resumes by itself once the org may spend. */
@@ -538,8 +585,10 @@ export type UploadOptions = RequestOptions & {
   /** Folder path for a single-file or streamed upload. Use UploadFileInput.path for several files. */
   path?: string;
   indexingMode?: IndexingMode;
-  /** Processing quality for these files (`pipeline.quality`); omitted uses the project's (auto by default). */
+  /** Processing quality for these files (`pipeline.quality`); omitted uses the project's (balanced by default). */
   quality?: QualityMode;
+  /** Figures and charts for these files (`pipeline.visuals`); omitted uses the project's, else the deployment default. */
+  visuals?: Visuals;
   /**
    * Chart and diagram export for this request. Omitted: the project's setting; a project with no setting is `off` for
    * API, SDK, CLI and MCP calls. `free` exports charts that carry their own data at no charge; `models` also reads
@@ -574,8 +623,10 @@ export type UploadInput = {
   idempotencyKey?: string;
   /** Stamp these documents with an indexing mode instead of the project's. */
   indexingMode?: IndexingMode;
-  /** Processing quality for these files (`pipeline.quality`); omitted uses the project's (auto by default). */
+  /** Processing quality for these files (`pipeline.quality`); omitted uses the project's (balanced by default). */
   quality?: QualityMode;
+  /** Figures and charts for these files (`pipeline.visuals`); omitted uses the project's, else the deployment default. */
+  visuals?: Visuals;
   /**
    * Chart and diagram export for this request. Omitted: the project's setting; a project with no setting is `off` for
    * API, SDK, CLI and MCP calls. `free` exports charts that carry their own data at no charge; `models` also reads
@@ -652,8 +703,10 @@ export type UploadUrlsInput = {
   tags?: string[];
   idempotencyKey?: string;
   indexingMode?: IndexingMode;
-  /** Processing quality for these files (`pipeline.quality`); omitted uses the project's (auto by default). */
+  /** Processing quality for these files (`pipeline.quality`); omitted uses the project's (balanced by default). */
   quality?: QualityMode;
+  /** Figures and charts for these files (`pipeline.visuals`); omitted uses the project's, else the deployment default. */
+  visuals?: Visuals;
   /**
    * Chart and diagram export for this request. Omitted: the project's setting; a project with no setting is `off` for
    * API, SDK, CLI and MCP calls. `free` exports charts that carry their own data at no charge; `models` also reads
@@ -991,7 +1044,15 @@ export type ProjectFigureResumeRequest = {
 };
 
 /** Input of {@link DocSlurpClient.reprocessRun}: all stages, from one stage on, or only the listed stages. */
-export type ReprocessRunInput = { stageFrom?: string; stages?: string[]; speedBoost?: boolean; chartExport?: ChartExportOverride };
+export type ReprocessRunInput = {
+  stageFrom?: string; stages?: string[]; speedBoost?: boolean;
+  /** Quality for the reprocess; omitted: the source run's, capped at the project's now. */
+  quality?: Quality;
+  /** Visuals for the reprocess; omitted: the source run's, capped at the project's now. */
+  visuals?: Visuals;
+  /** @deprecated Use `visuals`. */
+  chartExport?: ChartExportOverride;
+};
 /** The run created by {@link DocSlurpClient.reprocessRun}, its job, and warnings when its start was deferred. */
 export type ReprocessRunResult = { run: ProjectRun; job?: JobStatus; warnings: string[] };
 export type BulkDocumentsInput = {
@@ -1903,8 +1964,12 @@ export function createDocSlurpClient(options: DocSlurpClientOptions = {}) {
   }
 
   /** Quality is a pipeline override; Speed boost is an explicit request-level opt-in. */
-  function pipelineFields(metadata: { quality?: QualityMode; speedBoost?: boolean; chartExport?: ChartExportOverride }): { pipeline?: { quality?: QualityMode; chartExport?: ChartExportOverride }; speedBoost?: boolean } {
-    const pipeline = { ...(metadata.quality ? { quality: metadata.quality } : {}), ...(metadata.chartExport ? { chartExport: { tier: metadata.chartExport.tier } } : {}) };
+  function pipelineFields(metadata: { quality?: QualityMode; visuals?: Visuals; speedBoost?: boolean; chartExport?: ChartExportOverride }): { pipeline?: { quality?: QualityMode; visuals?: Visuals; chartExport?: ChartExportOverride }; speedBoost?: boolean } {
+    const pipeline = {
+      ...(metadata.quality ? { quality: metadata.quality } : {}),
+      ...(metadata.visuals ? { visuals: metadata.visuals } : {}),
+      ...(metadata.chartExport ? { chartExport: { tier: metadata.chartExport.tier } } : {}),
+    };
     return { ...(Object.keys(pipeline).length ? { pipeline } : {}),
       ...(metadata.speedBoost !== undefined ? { speedBoost: metadata.speedBoost } : {}) };
   }

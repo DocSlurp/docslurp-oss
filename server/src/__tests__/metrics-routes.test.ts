@@ -3,6 +3,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const sqlMock = Object.assign(vi.fn(), {
   json: vi.fn((value: unknown) => value),
+  // SQL fragments (packages/shared/src/pipeline-sql.ts) are embedded with `unsafe`.
+  unsafe: vi.fn((text: string) => text),
   begin: async (callback: (tx: unknown) => Promise<unknown>): Promise<unknown> => callback(sqlMock),
 });
 const startPipelineWorkflowMock = vi.fn(async () => undefined);

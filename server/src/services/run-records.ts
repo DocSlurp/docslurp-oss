@@ -1,3 +1,4 @@
+import { runExtractionView } from "@docslurp/shared";
 import {
   publicDocumentError,
   parseStoredPipelineFeatures,
@@ -118,6 +119,17 @@ function failedDocumentsOf(stats: Record<string, unknown>): number {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
 }
 
+/** A run row's pipeline for display: never fails a run list on one row (an unsupported configVersion shows defaults). */
+function readRunPipeline(row: ProjectRunRow): ReturnType<typeof parseStoredPipelineFeatures> {
+  const stored = typeof row.pipeline === "string" ? jsonRecord(row.pipeline) : row.pipeline ?? defaultPipelineFeatures;
+  try {
+    return parseStoredPipelineFeatures(stored, `run ${row.id}`);
+  } catch (error) {
+    console.error(`[runs] run ${row.id} pipeline unreadable by this release: ${error instanceof Error ? error.message : String(error)}`);
+    return parseStoredPipelineFeatures(null, `run ${row.id}`);
+  }
+}
+
 export function mapProjectRun(row: ProjectRunRow, cost?: Pick<RunUsageCostSummary, "costCents" | "computeEstimated" | "billedCostCents">): ProjectRun {
   return projectRunSchema.parse({
     id: row.id,
@@ -142,7 +154,8 @@ export function mapProjectRun(row: ProjectRunRow, cost?: Pick<RunUsageCostSummar
     computeEstimated: cost?.computeEstimated ?? false,
     billedCostCents: cost?.billedCostCents ?? 0,
     // Historical snapshots may predate the schema; never fail a run list on one row.
-    pipeline: parseStoredPipelineFeatures(typeof row.pipeline === "string" ? jsonRecord(row.pipeline) : row.pipeline ?? defaultPipelineFeatures, `run ${row.id}`),
+    pipeline: readRunPipeline(row),
+    extraction: runExtractionView(typeof row.pipeline === "string" ? jsonRecord(row.pipeline) : row.pipeline),
     stats: publicDiagnostics(jsonRecord(row.stats)),
     artifacts: jsonRecord(row.artifacts),
     error: publicDocumentError(row.error),

@@ -391,6 +391,13 @@ export interface PageImageReaderProvider {
    * it is listed). Vision page reads require it beside `hostCountry`; both must pass the organization's region policy.
    */
   operatorCountry?: string;
+  /**
+   * Optional: the operator-registered private model route (`llm://private/<alias>/<model>`) this reader serves, with the
+   * capability it is registered for. Projects whose privacy mode is `local-only` or `strict-privacy` have pages read by
+   * the reader only when this resolves in the operator registry exactly as `privacy.ts` resolves `llm://private` routes
+   * (`pageReaderAllowedForPrivacy`); a reader without it, or with a route the registry does not hold, is skipped for them.
+   */
+  privateRoute?: { modelUri: string; capability: "vision" | "text"; baseUrl?: string };
   /** Throw when the deployment is not ready (unpinned image, missing endpoint). The worker then refuses to start. */
   assertConfigured(): void;
   /**

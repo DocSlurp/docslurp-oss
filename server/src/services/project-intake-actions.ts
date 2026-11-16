@@ -1,5 +1,6 @@
 import { intakeReceiptContext } from "./intake-receipt-context.js";
-import { CHART_EXPORT_TIER_UNAVAILABLE_CODE } from "@docslurp/shared";
+import { deprecatedPipelineFields, markDeprecatedFields } from "../lib/deprecation.js";
+import { CHART_EXPORT_TIER_UNAVAILABLE_CODE, VISUALS_UNAVAILABLE_CODE } from "@docslurp/shared";
 /**
  * HTTP-facing Project Intake actions: request parsing, idempotency, and the
  * response payload. Each action is a thin source adapter over
@@ -226,6 +227,7 @@ async function idempotently(
  * pipeline (and its template locks) instead of replacing it.
  */
 export function parseProjectIntakePipeline(raw: unknown): PipelineFeatureOverrides {
+  markDeprecatedFields(null, deprecatedPipelineFields(raw));
   const parsed = publicPipelineFeatureOverridesSchema.safeParse(raw === undefined || raw === null ? {} : raw);
   if (!parsed.success) {
     throw new ProjectIntakeError("Invalid pipeline payload", 422, parsed.error.issues.map((issue) => ({
@@ -234,7 +236,8 @@ export function parseProjectIntakePipeline(raw: unknown): PipelineFeatureOverrid
       code: issue.code,
     })));
   }
-  assertIntakeChartExportTier((parsed.data as { chartExport?: { tier?: ChartExportTier } }).chartExport?.tier, "intake");
+  const usedVisuals = !!raw && typeof raw === "object" && (raw as { visuals?: unknown }).visuals != null;
+  assertIntakeChartExportTier((parsed.data as { chartExport?: { tier?: ChartExportTier } }).chartExport?.tier, "intake", usedVisuals);
   return parsed.data;
 }
 
@@ -242,8 +245,11 @@ export function parseProjectIntakePipeline(raw: unknown): PipelineFeatureOverrid
  * Refuses an upload, URL ingest, extract or crawl override for a tier the deployment does not offer: 400
  * `chart_export_tier_unavailable`, the same code and status as reprocess, estimates and project changes.
  */
-export function assertIntakeChartExportTier(tier: ChartExportTier | null | undefined, context: string): void {
+export function assertIntakeChartExportTier(tier: ChartExportTier | null | undefined, context: string, usedVisuals = false): void {
   const refused = chartExportOverrideError(tier, context);
+  if (refused && usedVisuals) {
+    throw new ProjectIntakeError(refused, 400, [{ path: "pipeline.visuals", message: refused, code: VISUALS_UNAVAILABLE_CODE }], VISUALS_UNAVAILABLE_CODE);
+  }
   if (refused) {
     throw new ProjectIntakeError(refused, 400, [{ path: "pipeline.chartExport.tier", message: refused, code: CHART_EXPORT_TIER_UNAVAILABLE_CODE }], CHART_EXPORT_TIER_UNAVAILABLE_CODE);
   }
@@ -310,6 +316,7 @@ export async function confirmDirectUploadProjectIntake(
     const sessionPipeline = session.pipeline ? sanitizeStoredPipeline(session.pipeline, `upload session ${args.sessionId}`) : undefined;
     // Re-checked at confirm: a session opened before the deployment stopped offering a tier (or before migration 0151
     // mapped enabled:true to models) is refused with the same code, not run at a tier no estimate showed.
+    // A stored session pipeline is already converted; the deprecated tier code stays for it (the request named a tier then).
     assertIntakeChartExportTier((sessionPipeline as { chartExport?: { tier?: ChartExportTier } } | undefined)?.chartExport?.tier, `upload session ${args.sessionId}`);
     const intake = await requiredIntake({
       userId: args.userId,

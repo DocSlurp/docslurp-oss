@@ -1,4 +1,5 @@
 import { bodyLimit } from "hono/body-limit";
+import { deprecatedPipelineFields, markDeprecatedFields } from "../lib/deprecation.js";
 import { readSettingsSnapshot, publishSettings, SettingsPublicationError } from "../services/settings-publication.js";
 import { quoteStoredDocuments } from "../services/stored-quote.js";
 import { runOriginOf } from "../lib/run-origin.js";
@@ -1050,6 +1051,7 @@ export const projectsRoutes = new Hono()
     // mode in the raw body may override the organization default.
     const raw = await c.req.json().catch(() => null) as { pipeline?: { indexingMode?: unknown } } | null;
     const managed = refuseManagedPipelineFields(c, raw?.pipeline);
+    markDeprecatedFields(c, deprecatedPipelineFields(raw?.pipeline));
     if (managed) return managed;
     const prohibitedModel = findProhibitedModelId(valid.pipeline);
     if (prohibitedModel) {
@@ -1495,7 +1497,9 @@ export const projectsRoutes = new Hono()
         const editAccess = await getProjectAccess(projectId, userId);
         if (!editAccess || !canEditProject(editAccess, userId)) return editorRequired(c);
       }
-      const managed = refuseManagedPipelineFields(c, (await c.req.json().catch(() => null) as { pipeline?: unknown } | null)?.pipeline);
+      const bodyPipeline = (await c.req.json().catch(() => null) as { pipeline?: unknown } | null)?.pipeline;
+      markDeprecatedFields(c, deprecatedPipelineFields(bodyPipeline));
+      const managed = refuseManagedPipelineFields(c, bodyPipeline);
       if (managed) return managed;
       const prohibitedModel = findProhibitedModelId(c.req.valid("json").pipeline);
       if (prohibitedModel) {
@@ -1602,7 +1606,9 @@ export const projectsRoutes = new Hono()
     "/:projectId/estimate",
     zValidator("json", updateProjectSchema, validationHook),
     async (c) => {
-      const managed = refuseManagedPipelineFields(c, (await c.req.json().catch(() => null) as { pipeline?: unknown } | null)?.pipeline);
+      const bodyPipeline = (await c.req.json().catch(() => null) as { pipeline?: unknown } | null)?.pipeline;
+      markDeprecatedFields(c, deprecatedPipelineFields(bodyPipeline));
+      const managed = refuseManagedPipelineFields(c, bodyPipeline);
       if (managed) return managed;
       const userId = c.get("sessionUser").id;
       const project = await getProject(c.req.param("projectId"), userId);

@@ -1,3 +1,4 @@
+import { visionReaderIsLocal, type ExtractionCap } from "@docslurp/shared";
 import { EDITOR_REQUIRED_CODE, EDITOR_REQUIRED_MESSAGE,
   buildByteHistogram,
   classifyIngestFailure,
@@ -113,6 +114,8 @@ export interface IngestReportRunRow {
   status: string;
   pagesProcessed: number;
   durationMs: number;
+  /** What the run's stamped extraction settings lowered (privacy, switches, replay caps); absent for older runs. */
+  capsApplied?: ExtractionCap[];
 }
 
 export interface IngestReportInput {
@@ -448,6 +451,7 @@ export function buildIngestReport(input: IngestReportInput): IngestReport {
     textPages: textPages.length,
     visuals,
     chartExportAvailable: input.chartExportAvailable ?? chartExportEnabledOnServer(),
+    capsApplied: [...new Map(input.runs.flatMap((run) => run.capsApplied ?? []).map((cap) => [`${cap.field}:${cap.from}:${cap.to}:${cap.reason}`, cap])).values()],
   };
 
   return {
@@ -671,6 +675,8 @@ type Observed = {
   visuals: ProjectVisualCandidates;
   /** The deployment's chart export kill switch: off, export-charts is never recommended. */
   chartExportAvailable?: boolean;
+  /** Distinct lowerings the covered runs recorded (`pipeline.effective.capsApplied`). */
+  capsApplied?: ExtractionCap[];
 };
 
 function onOff(value: boolean | undefined) {
@@ -732,6 +738,14 @@ export function buildConfigItems(pipeline: PipelineFeatures, observed: Observed)
   }
   if (pipeline.maxCostCents !== null) {
     items.push({ key: "maxCostCents", label: "Cost cap per run", value: formatCents(pipeline.maxCostCents), note: "Vision stops for the rest of a run once its spend reaches the cap." });
+  }
+  if (observed.capsApplied?.length) {
+    const reasons: Record<string, string> = { privacy: "the project's privacy mode", switch: "a deployment switch", profile: "the vision profile", replay: "the project's current setting" };
+    items.push({
+      key: "capsApplied", label: "Settings lowered for these runs",
+      value: observed.capsApplied.map((cap) => `${cap.field} ${cap.from} → ${cap.to}`).join(", "),
+      note: `Lowered by ${[...new Set(observed.capsApplied.map((cap) => reasons[cap.reason] ?? cap.reason))].join(" and ")}; the stored project settings are unchanged.`,
+    });
   }
   if (pipeline.privacyMode !== "standard") {
     items.push({ key: "privacyMode", label: "Privacy mode", value: pipeline.privacyMode, note: "Hosted vision models are skipped unless a private route is configured." });
@@ -817,8 +831,11 @@ export function recommendIngestChanges(pipeline: PipelineFeatures, observed: Obs
   const totalScanned = observed.scannedPages.length;
   const recordedPages = observed.textPages;
 
-  if (affected.length > 0) {
-    const patch = { visionFallback: true, quality: "good" as const };
+  // Never suggest a rung the project's constraints rule out (design 5): smart needs a reader the privacy mode allows.
+  const smartAllowed = pipeline.privacyMode === "standard" || visionReaderIsLocal(pipeline.vision);
+  const patchForAffected = { visionFallback: true, quality: "good" as const };
+  if (affected.length > 0 && (smartAllowed || patchHolds(pipeline, patchForAffected))) {
+    const patch = patchForAffected;
     // Already configured this way: the pages predate the setting, so only reprocessing helps.
     const settingInPlace = patchHolds(pipeline, patch);
     const estimate = reprocessEstimate(observed, affectedDocIds, (doc) => Math.max(0, doc.pageCount), vision.cents);
@@ -976,7 +993,8 @@ export function recommendIngestChanges(pipeline: PipelineFeatures, observed: Obs
   }
 
   const visuals = observed.visuals;
-  if (observed.chartExportAvailable === true && visuals.unexported > 0 && pipeline.chartExport?.tier !== "models") {
+  // charts-ai is a hosted read: never suggested under local-only or strict-privacy.
+  if (observed.chartExportAvailable === true && visuals.unexported > 0 && pipeline.chartExport?.tier !== "models" && pipeline.privacyMode === "standard") {
     // Exports are not split by kind, so name the kind only when the project has just one.
     const what = visuals.diagrams === 0 ? plural(visuals.unexported, "chart")
       : visuals.charts === 0 ? plural(visuals.unexported, "diagram")
@@ -1295,8 +1313,8 @@ export async function loadIngestReport(args: {
 
   const runIds = [...new Set(docRows.map((row) => row.run_id).filter((id): id is string => Boolean(id)))];
   const [runRows, cost] = await Promise.all([
-    runIds.length === 0 ? Promise.resolve([]) : client<{ id: string; status: string; pages_processed: number; duration_ms: string | number }[]>`
-      select r.id, r.status, greatest(r.pages_processed, 0) as pages_processed,
+    runIds.length === 0 ? Promise.resolve([]) : client<{ id: string; status: string; pages_processed: number; duration_ms: string | number; caps_applied: unknown }[]>`
+      select r.id, r.status, greatest(r.pages_processed, 0) as pages_processed, r.pipeline -> 'effective' -> 'capsApplied' as caps_applied,
         greatest(extract(epoch from (r.updated_at - r.created_at)) * 1000, 0) as duration_ms
       from project_runs r
       where r.project_id = ${projectId} and r.id = any(${client.array(runIds)}::text[])
@@ -1338,7 +1356,7 @@ export async function loadIngestReport(args: {
       pdfPagesMismatch: row.pdf_pages_mismatch,
       visualCandidates: row.visual_candidates ?? null,
     })),
-    runs: runRows.map((row) => ({ id: row.id, status: row.status, pagesProcessed: num(row.pages_processed), durationMs: num(row.duration_ms) })),
+    runs: runRows.map((row) => ({ id: row.id, status: row.status, pagesProcessed: num(row.pages_processed), durationMs: num(row.duration_ms), ...(Array.isArray(row.caps_applied) ? { capsApplied: row.caps_applied as ExtractionCap[] } : {}) })),
     costCents: cost?.costCents ?? null,
     billedCostCents: cost?.billedCostCents ?? null,
     computeEstimated: cost?.computeEstimated ?? false,

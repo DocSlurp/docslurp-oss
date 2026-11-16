@@ -229,8 +229,10 @@ export function createRunLifecycle(deps: RunLifecycleDeps) {
   ): Promise<RunStartOutcome> {
     // Recovery passes the raw stored row: drop extractor settings the strict schemas now reject, then validate.
     // A pipeline that still does not compile will never start, so the Run fails once instead of retrying forever.
-    const pipeline = sanitizeStoredPipeline(run.pipeline, `run ${run.id}`);
+    // An unsupported `configVersion` (a newer release's run) refuses here too: never executed under rules that might widen it.
+    let pipeline: ReturnType<typeof sanitizeStoredPipeline<typeof run.pipeline>> = run.pipeline;
     try {
+      pipeline = sanitizeStoredPipeline(run.pipeline, `run ${run.id}`);
       compilePipelinePlan(pipeline);
     } catch (cause) {
       const error = new RunPipelineInvalidError(run.id, cause);

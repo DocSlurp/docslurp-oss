@@ -30,6 +30,7 @@ import {
 import { isPrivateModelUri, parsePrivateModelUri } from "./private-endpoints.js";
 import { normalizeHostedModelRef } from "./model-uri.js";
 import { chartExportConfigSchema, defaultChartExportConfig, upgradeStoredPipelineChartExport } from "./chart-export.js";
+import { convertExtractionConfigInput, ExtractionConfigConflictError, isVisualsLevel, UnsupportedConfigVersionError } from "./extraction-config.js";
 import {
   defaultSummaryTreePipelineConfig,
   summaryTreeEnabled,
@@ -487,7 +488,7 @@ export class PipelineSpeedBoostRequiredError extends Error {
   constructor() { super("Configured Nitro models require explicit speedBoost: true"); this.name = "PipelineSpeedBoostRequiredError"; }
 }
 
-export const pipelineFeaturesSchema = z
+const pipelineFeaturesObjectSchema = z
   .object({
     // Deferred indexing: `full` indexes eagerly; `map`/`visual` defer parsing until a query needs pages.
     speedBoost: z.boolean().default(false),
@@ -736,6 +737,27 @@ export const pipelineFeaturesSchema = z
       });
     }
   });
+/**
+ * The project/run pipeline. Accepts both extraction shapes (extraction-config.ts): the new `quality` words
+ * (`fastest`/`balanced`/`smart`) and `visuals` are rewritten onto the legacy fields R0 stores, and a `visuals` that
+ * disagrees with `figures` or `chartExport.tier` in the same object is a validation error.
+ */
+export const pipelineFeaturesSchema = z.preprocess((value, ctx) => {
+  if (isPlainRecord(value) && "visuals" in value && value.visuals !== null && value.visuals !== undefined && !isVisualsLevel(value.visuals)) {
+    ctx.addIssue({ code: "custom", path: ["visuals"], message: "visuals must be one of none, figures, charts, charts-ai", input: value });
+    return value;
+  }
+  try {
+    // A whole pipeline (create, PATCH) carries the stored legacy fields: visuals wins over them.
+    return convertExtractionConfigInput(value, { preferNew: true }).value;
+  } catch (error) {
+    if (!(error instanceof ExtractionConfigConflictError) && !(error instanceof UnsupportedConfigVersionError)) throw error;
+    ctx.addIssue({ code: "custom", path: [error instanceof UnsupportedConfigVersionError ? "configVersion" : error.field], message: error.message, input: value });
+    return value;
+  }
+}, pipelineFeaturesObjectSchema);
+/** The pipeline object schema itself (no shape conversion), for introspection. */
+export const pipelineFeaturesShape = pipelineFeaturesObjectSchema.shape;
 export type PipelineFeatures = z.infer<typeof pipelineFeaturesSchema>;
 
 export const defaultPipelineFeatures: PipelineFeatures = {
@@ -1037,7 +1059,7 @@ export type PipelineFeatureOverrides = Omit<
 export function normalizePipelineFeatures(
   source?: PipelineFeatureOverrides | PipelineFeatures | null,
 ): PipelineFeatures {
-  source = migrateLegacyQualitySettings(migrateStoredModelSettings(source));
+  source = convertExtractionConfigInput(migrateLegacyQualitySettings(migrateStoredModelSettings(source))).value;
   // Privacy-only configuration must never opt into a hosted embedding call.
   // Explicit model/profile selections still pass through the privacy validator.
   const fallbackEmbedding = source?.privacyMode && source.privacyMode !== "standard"
@@ -1173,7 +1195,7 @@ export function sanitizeStoredPipeline<T>(stored: T, source: string): T {
   // Canonical ids drop retired extractors silently; a stored read reports what they named.
   const retired = isPlainRecord(stored.documentExtraction) ? dropRetiredExtractorIds(stored.documentExtraction).dropped : [];
   // Legacy chart export keys (rows from before migration 0151 or from an older API during a deploy): mapped, not dropped.
-  let next: Record<string, unknown> = upgradeStoredPipelineChartExport(withCanonicalExtractorIds(stored));
+  let next: Record<string, unknown> = readStoredExtractionShape(upgradeStoredPipelineChartExport(withCanonicalExtractorIds(stored)), source);
   const dropped: string[] = retired.map((entry) => `documentExtraction.${entry}`);
   if (isPlainRecord(next.documentExtraction)) {
     const extraction = sanitizeStoredDocumentExtraction(next.documentExtraction);
@@ -1194,6 +1216,22 @@ export function sanitizeStoredPipeline<T>(stored: T, source: string): T {
   if (dropped.length === 0) return next as T;
   console.error(`[pipeline] stored pipeline of ${source} has settings the schema rejects; dropped ${dropped.join(", ")}`);
   return next as T;
+}
+
+/**
+ * A stored row in either extraction shape, read onto the legacy fields (extraction-config.ts). A row holding both names
+ * that disagree keeps its legacy fields and logs (never a raise from the newer name). An unsupported `configVersion`
+ * throws (fail closed).
+ */
+function readStoredExtractionShape(stored: Record<string, unknown>, source: string): Record<string, unknown> {
+  try {
+    return convertExtractionConfigInput(stored).value;
+  } catch (error) {
+    if (!(error instanceof ExtractionConfigConflictError)) throw error;
+    console.error(`[pipeline] stored pipeline of ${source} has conflicting extraction names; kept the legacy fields: ${error.message}`);
+    const { visuals: _visuals, ...rest } = stored;
+    return convertExtractionConfigInput(rest).value;
+  }
 }
 
 /** Keys whose override value replaces the base value instead of merging into it. */
@@ -1226,7 +1264,9 @@ export function mergePipelineFeatures(
   overrides?: PipelineFeatureOverrides | null,
 ): PipelineFeatures {
   const normalizedBase = normalizePipelineFeatures(base ?? defaultPipelineFeatures);
-  overrides = migrateLegacyQualitySettings(overrides);
+  // New names (`quality` words, `visuals`) become legacy fields; `visuals: null` unsets the base's chart tier.
+  const converted = convertExtractionConfigInput(migrateLegacyQualitySettings(overrides));
+  overrides = converted.value;
   // The summary tree is never an override: the base's stored value always wins (summary-tree.ts). An upload, a chat
   // proposal or a report recommendation that names it changes nothing.
   if (overrides && "summaryTree" in overrides) {
@@ -1237,6 +1277,10 @@ export function mergePipelineFeatures(
   // A profile override changes the model: the base's model URI and target (its old profile's, or an admin override of
   // it) go, so the new profile's default applies, unless the override names its own.
   const baseRecord = { ...(normalizedBase as unknown as Record<string, unknown>) };
+  if (converted.tierUnset && isPlainRecord(baseRecord.chartExport)) {
+    const { tier: _tier, ...chartExport } = baseRecord.chartExport;
+    baseRecord.chartExport = chartExport;
+  }
   for (const section of ["embedding", "vision"] as const) {
     const override = (overrides as Record<string, unknown>)[section] as Record<string, unknown> | undefined;
     const current = baseRecord[section] as Record<string, unknown> | undefined;
@@ -1261,7 +1305,23 @@ const pipelineFeatureKeys = new Set(Object.keys(defaultPipelineFeatures).concat(
  * filling in defaults, so they can be merged onto the project pipeline.
  */
 export const pipelineFeatureOverridesSchema = z
-  .preprocess((value) => withCanonicalExtractorIds(migrateLegacyQualitySettings(value as never)), z.record(z.string(), z.unknown()))
+  .preprocess((value, ctx) => {
+    const migrated = withCanonicalExtractorIds(migrateLegacyQualitySettings(value as never)) as unknown;
+    // A per-request override (upload, extract, publication patch) merges onto the project and cannot express "reset to
+    // the default": `visuals: null` is refused, like any value outside the ladder.
+    if (isPlainRecord(migrated) && "visuals" in migrated && migrated.visuals !== undefined && !isVisualsLevel(migrated.visuals)) {
+      ctx.addIssue({ code: "custom", path: ["visuals"], message: "visuals must be one of none, figures, charts, charts-ai (omit it for the project's setting)", input: value });
+      const { visuals: _visuals, ...rest } = migrated;
+      return rest;
+    }
+    try {
+      return convertExtractionConfigInput(migrated).value;
+    } catch (error) {
+      if (!(error instanceof ExtractionConfigConflictError) && !(error instanceof UnsupportedConfigVersionError)) throw error;
+      ctx.addIssue({ code: "custom", path: [error instanceof UnsupportedConfigVersionError ? "configVersion" : error.field], message: error.message, input: value });
+      return migrated;
+    }
+  }, z.record(z.string(), z.unknown()))
   .superRefine((value, ctx) => {
     const unknownKeys = Object.keys(value).filter((key) => !pipelineFeatureKeys.has(key));
     for (const key of unknownKeys) {

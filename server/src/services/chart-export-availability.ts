@@ -6,6 +6,7 @@ import {
   CHART_EXPORT_TIER_UNAVAILABLE_CODE,
   defaultChartExportConfig,
   minChartExportTier,
+  runChartTierSql,
   upgradeStoredChartExport,
   chartExportModelsAvailable,
   chartExportOverrideRefusal,
@@ -135,14 +136,14 @@ export function stampRunChartExport<T extends PipelineFeatures>(
  * Reads only runs of the given documents, scoped to the project and organization.
  */
 export async function sourceRunChartTiers(
-  client: { <T extends readonly unknown[]>(strings: TemplateStringsArray, ...values: unknown[]): Promise<T> },
+  client: { <T extends readonly unknown[]>(strings: TemplateStringsArray, ...values: unknown[]): Promise<T>; unsafe(query: string): unknown },
   scope: { orgId: string; projectId: string },
   documentIds: readonly string[],
 ): Promise<Map<string, ChartExportTier>> {
   const out = new Map<string, ChartExportTier>();
   if (documentIds.length === 0) return out;
   const rows = await client<Array<{ id: string; tier: string | null }>>`
-    select d.id, r.pipeline -> 'chartExport' ->> 'tier' as tier
+    select d.id, ${client.unsafe(runChartTierSql("r"))} as tier
     from documents d join project_runs r on r.id = d.run_id
     where d.id = any(${[...documentIds]}) and d.project_id = ${scope.projectId} and d.org_id = ${scope.orgId}
       and r.project_id = ${scope.projectId} and r.org_id = ${scope.orgId}

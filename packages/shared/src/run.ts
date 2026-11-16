@@ -5,6 +5,7 @@ import {
   runStatusSchema,
   stageExecutionStatusSchema,
 } from "./pipeline.js";
+import { qualityLevelSchema, visualsLevelSchema } from "./extraction-config.js";
 
 export const projectRunSchema = z.object({
   id: z.string(),
@@ -47,6 +48,18 @@ export const projectRunSchema = z.object({
    */
   billedCostCents: z.number().nonnegative().default(0),
   pipeline: pipelineFeaturesSchema,
+  /**
+   * The quality and visuals this run executes, in the current names: its stamp (`pipeline.effective`, with any
+   * `capsApplied` lowering by privacy, switches or replay caps), or for a run stamped before this release its settings
+   * mapped on read with `legacy: true`. Stored snapshots are never rewritten.
+   */
+  extraction: z.object({
+    quality: qualityLevelSchema,
+    visuals: visualsLevelSchema,
+    readsPages: z.boolean(),
+    capsApplied: z.array(z.object({ field: z.enum(["quality", "visuals"]), from: z.string(), to: z.string(), reason: z.string() })),
+    legacy: z.boolean(),
+  }).optional(),
   stats: z.record(z.string(), z.unknown()).default({}),
   artifacts: z.record(z.string(), z.string()).default({}),
   error: z.string().nullable(),

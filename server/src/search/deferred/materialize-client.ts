@@ -1,4 +1,5 @@
 import { pageCredits, speedBoostMultiplier, sanitizeStoredPipeline, parseManagedPipelineOverrides, resolveManagedPipeline } from "@docslurp/shared";
+import { withRunEffective } from "../../services/extraction-settings.js";
 import { stampRunChartExport } from "../../services/chart-export-availability.js";
 import type { PipelineFeatures } from "@docslurp/shared";
 import { randomUUID } from "node:crypto";
@@ -121,7 +122,7 @@ export const defaultMaterializeDeps: MaterializeDeps = {
     await tx`
       insert into project_runs (id, org_id, user_id, project_id, kind, status, stage, total_documents, pages_total, pipeline, workflow_started_at, lease_expires_at, creation_ready_at, creation_expires_at, origin, stats, monthly_reservation_cents)
       values (${id}, ${args.orgId}, ${args.userId}, ${args.projectId}, 'materialize', 'processing', 'materialize',
-             ${args.documents}, ${args.pages}, ${tx.json(pipeline as never)}, now(),
+             ${args.documents}, ${args.pages}, ${tx.json(withRunEffective(pipeline) as never)}, now(),
              now() + interval '15 minutes', now(), null, ${origin}, ${tx.json({ materialization: plan })}, ${reservationCents})
     `;
     return { runId: id, value: id };

@@ -66,7 +66,7 @@ export type ProjectIntakeStatusCode = 400 | 403 | 404 | 409 | 413 | 415 | 422 | 
  * processed, so retry with the same key. `idempotency_key_reused`: the key was used for a different request. `upload_session_closed`:
  * the session remembered for the key can no longer take uploads, so use a new key.
  */
-export type ProjectIntakeErrorCode = "upload_storage_unavailable" | "intake_reconciliation_required" | "remote_format_disabled" | "idempotency_in_flight" | "idempotency_key_reused" | "upload_session_closed" | "chart_export_tier_unavailable";
+export type ProjectIntakeErrorCode = "upload_storage_unavailable" | "intake_reconciliation_required" | "remote_format_disabled" | "idempotency_in_flight" | "idempotency_key_reused" | "upload_session_closed" | "chart_export_tier_unavailable" | "visuals_unavailable";
 
 export class ProjectIntakeError extends Error {
   constructor(
@@ -284,6 +284,22 @@ export const objectStorage: RawSourceStorage = {
   remove: deleteUploadedObject,
 };
 
+/**
+ * Upload overrides without the billed rungs a new project must not be seeded with: `quality` `good` (smart) and chart
+ * tier `models` (charts-ai). Other overrides are kept. Input is already converted to the stored (legacy) shape.
+ */
+export function withoutBilledRaises<T extends Record<string, unknown> | null | undefined>(overrides: T): T {
+  if (!overrides) return overrides;
+  const next: Record<string, unknown> = { ...overrides };
+  if (next.quality === "good") delete next.quality;
+  const chartExport = next.chartExport;
+  if (chartExport && typeof chartExport === "object" && (chartExport as { tier?: unknown }).tier === "models") {
+    const { tier: _tier, ...rest } = chartExport as Record<string, unknown>;
+    next.chartExport = rest;
+  }
+  return next as T;
+}
+
 export const postgresIntakeRecords: ProjectIntakeRecords = {
   async findProject(ref, scope) {
     const found = await findProjectForInput(ref, scope);
@@ -299,7 +315,10 @@ export const postgresIntakeRecords: ProjectIntakeRecords = {
       normalizePipelineFeatures(template?.pipeline ?? defaultPipelineFeatures),
       defaults,
     );
-    const pipeline = applyProjectPipelineOverrides(base, overrides, template);
+    // Billed rungs (quality good/smart, AI chart reads) are never seeded from an upload's overrides: the run still carries
+    // them, so run creation's raise check (editor session, or an editor's key with pipeline:billed-features) decides,
+    // instead of the new project's stored value making the request look like no raise at all.
+    const pipeline = applyProjectPipelineOverrides(base, withoutBilledRaises(overrides), template);
     // Leave the mode unset unless the upload chose one, so createProject applies the plan default.
     const { indexingMode, ...pipelineWithoutMode } = pipeline;
     const project = await createProject({
@@ -638,10 +657,11 @@ export async function intakeIntoProject(
         autoNamed: !chosenName,
       }));
     if (!existing) createdProjectId = project.id;
-    // A new project already carries the overrides; an existing one merges them.
+    // The request's overrides apply to the run whether the project is new or existing (a new project was seeded without
+    // its billed raises, so they reach run creation's raise check).
     pipeline = applyProjectPipelineOverrides(
       project.pipeline ?? defaultPipelineFeatures,
-      existing ? request.pipeline : undefined,
+      request.pipeline,
       project.templateKey,
     );
     // Per-request mode wins over the project's; both are pinned to full while the flag is off.

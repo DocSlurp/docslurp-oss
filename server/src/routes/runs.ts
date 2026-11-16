@@ -1,4 +1,6 @@
 import { managedPipelineFieldMessage, managedPipelineModelPaths } from "@docslurp/shared";
+import { reprocessRequestedTier, VISUALS_UNAVAILABLE_CODE } from "@docslurp/shared";
+import { deprecatedReprocessFields, markDeprecatedFields } from "../lib/deprecation.js";
 import { quoteStoredDocuments } from "../services/stored-quote.js";
 import { chartExportOverrideError } from "../services/chart-export-availability.js";
 import { CHART_EXPORT_TIER_UNAVAILABLE_CODE } from "@docslurp/shared";
@@ -345,18 +347,24 @@ export const runsRoutes = new Hono()
     // Access first: a run the caller cannot see is a 404 before the tier is looked at.
     const run = await getRun(c.req.param("runId"), userId, { cost: false });
     if (!run) return apiStatusError(c, 404, "Run not found");
-    const refused = chartExportOverrideError(body.chartExport?.tier, `reprocess estimate run=${c.req.param("runId")}`);
-    if (refused) return apiStatusError(c, 400, refused, { code: CHART_EXPORT_TIER_UNAVAILABLE_CODE, details: { field: "chartExport.tier" } });
+    const requestedTier = reprocessRequestedTier(body);
+    const refused = chartExportOverrideError(requestedTier, `reprocess estimate run=${c.req.param("runId")}`);
+    if (refused) {
+      return body.visuals
+        ? apiStatusError(c, 400, refused, { code: VISUALS_UNAVAILABLE_CODE, details: { field: "visuals" } })
+        : apiStatusError(c, 400, refused, { code: CHART_EXPORT_TIER_UNAVAILABLE_CODE, details: { field: "chartExport.tier" } });
+    }
+    markDeprecatedFields(c, deprecatedReprocessFields(body));
     const estimate = await estimateRunReprocess({ runId: c.req.param("runId"), userId, options: body });
     if (!estimate) return apiStatusError(c, 404, "Run not found");
     // The same quote shape as POST /v1/estimate, from the run's measured documents, quoting the pipeline the reprocess
     // would run (the override, else the run's tier capped at what the project resolves to now), so
     // `quote.settings.chartExport` labels the tier the estimate priced, never an old uncapped one (R3-L1).
-    const replayed = await replayedRunPipeline(run, body.chartExport?.tier ?? null);
+    const replayed = await replayedRunPipeline(run, requestedTier, undefined, { quality: body.quality ?? null, visuals: body.visuals ?? null });
     const quote = run.orgId
       ? await quoteStoredDocuments({
         scope: { orgId: run.orgId, projectId: run.projectId, runId: run.id }, pipeline: replayed, estimate, origin: runOriginOf(c),
-        ...(body.chartExport ? { settings: { chartExport: body.chartExport.tier } } : {}),
+        ...(requestedTier ? { settings: { chartExport: requestedTier } } : {}),
       })
       : null;
     return c.json({ estimate, quote, billing: billingState() });
@@ -367,6 +375,7 @@ export const runsRoutes = new Hono()
     const denied = await denyRunContentUpdate(c, c.req.param("runId")) ?? await denyRunReprocess(c, c.req.param("runId"));
     if (denied) return denied;
     const actor = getRequestActor(c);
+    markDeprecatedFields(c, deprecatedReprocessFields(body));
     const inline = await inlineEstimate(
       () => estimateRunReprocess({ runId: c.req.param("runId"), userId, options: body }),
       `/v1/runs/${c.req.param("runId")}/reprocess/estimate`,

@@ -2,9 +2,9 @@
  * Page reader configuration (page-reader.ts): the operator flag, the per-document page budget and the startup check.
  * Kept apart from the reader so the OCR mode check (mode.ts) can run it without importing the pipeline.
  */
-import { ROUTE_TIERS, type RouteTier, selectOcrRoute, selectVisionTranscriptionRoute } from "@docslurp/shared";
+import { isPrivateModelUri, PRIVATE_MODEL_PROVIDER, privacyModeAllowsHosted, resolveProviderTarget, ROUTE_TIERS, type RouteTier, selectOcrRoute, selectVisionTranscriptionRoute } from "@docslurp/shared";
 
-import { pageImageReaderProvider } from "../extractors/plugins.js";
+import { pageImageReaderProvider, type PageImageReaderProvider } from "../extractors/plugins.js";
 import type { OcrMode } from "./mode.js";
 import { pageReaderWarmMinPages } from "./page-reader-warm.js";
 
@@ -163,4 +163,31 @@ export function assertVisionPageReaderConfiguration(env: NodeJS.ProcessEnv): Vis
       `warmMinPages=${pageReaderWarmMinPages(provider, env) ?? "off"}`,
   );
   return mode;
+}
+
+
+/**
+ * Whether the page image reader may read this project's pages under its privacy mode (design Q14). `standard` (or
+ * unset): yes. `local-only` / `strict-privacy`: only when the provider declares an operator-registered private route
+ * (`privateRoute`) that resolves as `private` under the same registration test `privacy.ts` applies to `llm://private`
+ * routes. Anything else (no declaration, an unregistered or mismatched route, an unknown mode) is refused: fail closed.
+ */
+export function pageReaderAllowedForPrivacy(
+  provider: Pick<PageImageReaderProvider, "privateRoute">,
+  privacyMode: string | null | undefined,
+): boolean {
+  if (privacyModeAllowsHosted(privacyMode ?? "standard")) return true;
+  const route = provider.privateRoute;
+  if (!route || typeof route.modelUri !== "string" || !isPrivateModelUri(route.modelUri)) return false;
+  try {
+    return resolveProviderTarget({
+      provider: PRIVATE_MODEL_PROVIDER,
+      target: "private",
+      modelUri: route.modelUri,
+      capability: route.capability,
+      ...(route.baseUrl ? { baseUrl: route.baseUrl } : {}),
+    }) === "private";
+  } catch {
+    return false;
+  }
 }

@@ -146,6 +146,12 @@ A page it fails, answers empty, or never reaches keeps the recogniser's text and
 hosted reader handles it exactly as it would without a page reader. Markdown tables in a read are rebuilt in the parser
 VM, as for escalation reads.
 
+Privacy modes: a `local-only` or `strict-privacy` project's pages go to the reader only when its provider declares an
+operator-registered private route (`privateRoute`, [extractor plugins](extractor-plugins.md)) that resolves as private;
+otherwise the project skips the reader, before any reader VM is started, and its pages keep the recogniser's text and
+stay escalation candidates (the hosted escalation reader applies its own privacy check). A run whose pipeline cannot be
+read is treated as restricted.
+
 What fails closed:
 
 - An unknown `DOCSLURP_OCR_PAGE_READER` or `DOCSLURP_OCR_PAGE_READER_MAX_PAGES` stops the worker at start.

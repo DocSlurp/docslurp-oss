@@ -54,6 +54,8 @@ type RequestContextState = {
   apiKeySearchLimits?: { keyId: string; rules: ApiKeyRateLimitRule[] } | null;
   /** Aborts when the client disconnects before the response finished (search cancels its SQL). */
   signal?: AbortSignal;
+  /** Deprecated request fields the request used (lib/deprecation.ts): a `Deprecation` header and `warnings[]` on the response. */
+  deprecatedFields?: Array<{ code: "deprecated_field"; field: string; replacement: string; message: string }>;
   performanceEvents: Array<{
     scope: string;
     stageName: string;
@@ -142,6 +144,22 @@ export function getRequestId(c: Context): string | null {
 /** The current request's abort signal (client disconnected early), if any. */
 export function currentRequestSignal(): AbortSignal | undefined {
   return requestContextStorage.getStore()?.signal;
+}
+
+/** Records deprecated request fields for this request's response; outside a request it does nothing. */
+export function recordDeprecatedRequestFields(fields: ReadonlyArray<{ code: "deprecated_field"; field: string; replacement: string; message: string }>): void {
+  const store = requestContextStorage.getStore();
+  if (!store || fields.length === 0) return;
+  const list = (store.deprecatedFields ??= []);
+  for (const field of fields) if (!list.some((entry) => entry.field === field.field)) list.push(field);
+}
+
+/** The deprecated fields recorded for this request, removed from it. */
+export function takeDeprecatedRequestFields(): Array<{ code: "deprecated_field"; field: string; replacement: string; message: string }> {
+  const store = requestContextStorage.getStore();
+  const list = store?.deprecatedFields ?? [];
+  if (store) store.deprecatedFields = [];
+  return list;
 }
 
 export function currentRequestId(): string | null {

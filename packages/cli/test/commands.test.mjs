@@ -538,33 +538,40 @@ test("--json emits a safe typed HTTP error without raw body diagnostics", async 
   assert.doesNotMatch(result.stderr, /secret|private/);
 });
 
-test("--chart-export sends pipeline.chartExport on upload and ingest-url, chartExport on reprocess and estimates, and rejects unknown tiers", async () => {
+test("--visuals (and the deprecated --chart-export / --no-figures) sends visuals on upload, ingest-url, reprocess and estimates, and rejects unknown values", async () => {
   const dir = await mkdtemp(join(tmpdir(), "docslurp-cli-"));
   try {
     const file = join(dir, "note.txt");
     await writeFile(file, "Plain text");
     const respond = () => ({ body: { run: { id: "run" }, project: { id: "project", name: "Docs" }, documents: [{}], estimate: { pages: 1, documents: 1, credits: null, seconds: null, basis: "x" } } });
-    let result = await invoke(["upload", file, "--chart-export", "free", "--quality", "fast"], respond);
+    let result = await invoke(["upload", file, "--visuals", "charts", "--quality", "fastest"], respond);
     assert.equal(result.code, 0, result.stderr);
-    assert.match(result.requests[0].body, /name="pipeline"\r\n\r\n\{"quality":"fast","chartExport":\{"tier":"free"\}\}/);
+    assert.match(result.requests[0].body, /name="pipeline"\r\n\r\n\{"quality":"fastest","visuals":"charts"\}/);
 
+    // The deprecated alias maps onto visuals, with a note.
     result = await invoke(["ingest-url", "https://example.test/a.pdf", "--chart-export", "models"], respond);
     assert.equal(result.code, 0, result.stderr);
-    assert.deepEqual(JSON.parse(result.requests[0].body).pipeline, { chartExport: { tier: "models" } });
+    assert.deepEqual(JSON.parse(result.requests[0].body).pipeline, { visuals: "charts-ai" });
+    assert.match(result.stderr, /--chart-export is deprecated; use --visuals charts-ai/);
+    result = await invoke(["upload", file, "--no-figures"], respond);
+    assert.match(result.requests[0].body, /\{"visuals":"none"\}/);
+    result = await invoke(["upload", file, "--visuals", "charts", "--chart-export", "models"], respond);
+    assert.notEqual(result.code, 0);
+    assert.match(result.stderr, /disagree/);
 
-    result = await invoke(["reprocess", "run-1", "--chart-export", "off"], respond);
-    assert.deepEqual(JSON.parse(result.requests[0].body), { chartExport: { tier: "off" } });
-    result = await invoke(["reprocess", "run-1", "--chart-export", "models", "--estimate"], respond);
+    result = await invoke(["reprocess", "run-1", "--visuals", "figures", "--quality", "smart"], respond);
+    assert.deepEqual(JSON.parse(result.requests[0].body), { quality: "smart", visuals: "figures" });
+    result = await invoke(["reprocess", "run-1", "--visuals", "charts-ai", "--estimate"], respond);
     assert.match(result.requests[0].url, /\/reprocess\/estimate$/);
-    assert.deepEqual(JSON.parse(result.requests[0].body), { chartExport: { tier: "models" } });
+    assert.deepEqual(JSON.parse(result.requests[0].body), { visuals: "charts-ai" });
 
-    result = await invoke(["upload", file, "--chart-export", "models", "--estimate"], respond);
+    result = await invoke(["upload", file, "--visuals", "charts-ai", "--estimate"], respond);
     assert.match(result.requests[0].url, /\/v1\/uploads\/estimate$/);
-    assert.deepEqual(JSON.parse(result.requests[0].body).chartExport, { tier: "models" });
+    assert.equal(JSON.parse(result.requests[0].body).visuals, "charts-ai");
 
     // Without the flag the project's setting (or the API default, off) applies: nothing is sent.
     result = await invoke(["upload", file], respond);
-    assert.doesNotMatch(result.requests[0].body, /chartExport/);
+    assert.doesNotMatch(result.requests[0].body, /chartExport|visuals/);
 
     for (const bad of ["smart", "on", ""]) {
       result = await invoke(["upload", file, "--chart-export", bad], respond);
@@ -572,6 +579,9 @@ test("--chart-export sends pipeline.chartExport on upload and ingest-url, chartE
       assert.match(result.stderr, /--chart-export must be off, free or models|--chart-export needs a value/);
       assert.deepEqual(result.requests, []);
     }
+    result = await invoke(["upload", file, "--visuals", "everything"], respond);
+    assert.notEqual(result.code, 0);
+    assert.match(result.stderr, /--visuals must be none, figures, charts or charts-ai/);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
@@ -581,13 +591,19 @@ test("--quality sends pipeline.quality on upload and ingest-url, and rejects unk
     const file = join(dir, "note.txt");
     await writeFile(file, "Plain text");
     const respond = () => ({ body: { run: { id: "run" }, project: { id: "project", name: "Docs" }, documents: [{}] } });
-    let result = await invoke(["upload", file, "--quality", "fast"], respond);
+    let result = await invoke(["upload", file, "--quality", "fastest"], respond);
     assert.equal(result.code, 0, result.stderr);
-    assert.match(result.requests[0].body, /name="pipeline"\r\n\r\n\{"quality":"fast"\}/);
+    assert.match(result.requests[0].body, /name="pipeline"\r\n\r\n\{"quality":"fastest"\}/);
 
-    result = await invoke(["ingest-url", "https://example.test/a.pdf", "--quality", "good"], respond);
+    result = await invoke(["ingest-url", "https://example.test/a.pdf", "--quality", "smart"], respond);
     assert.equal(result.code, 0, result.stderr);
-    assert.deepEqual(JSON.parse(result.requests[0].body).pipeline, { quality: "good" });
+    assert.deepEqual(JSON.parse(result.requests[0].body).pipeline, { quality: "smart" });
+
+    // Deprecated words still work and send the current word, with a note.
+    result = await invoke(["upload", file, "--quality", "good"], respond);
+    assert.equal(result.code, 0, result.stderr);
+    assert.match(result.requests[0].body, /\{"quality":"smart"\}/);
+    assert.match(result.stderr, /--quality good is deprecated; use --quality smart/);
 
     // Without --quality the project setting applies.
     result = await invoke(["upload", file], respond);
@@ -595,7 +611,7 @@ test("--quality sends pipeline.quality on upload and ingest-url, and rejects unk
 
     result = await invoke(["upload", file, "--quality", "deep"], respond);
     assert.notEqual(result.code, 0);
-    assert.match(result.stderr, /--quality must be fast, auto or good/);
+    assert.match(result.stderr, /--quality must be fastest, balanced or smart/);
     assert.deepEqual(result.requests, []);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
@@ -609,7 +625,7 @@ test("ingest-url --estimate prices the URLs and never starts an ingest (council 
   assert.equal(result.code, 0, result.stderr);
   assert.deepEqual(result.requests.map((r) => [r.method, r.url]), [["HEAD", "/files/q3-earnings.pdf"], ["POST", "/v1/uploads/estimate"]]);
   assert.deepEqual(JSON.parse(result.requests[1].body), {
-    files: [{ name: "q3-earnings.pdf", size: 2400000, type: "application/pdf" }], project: "w", chartExport: { tier: "models" }, settings: { quality: "good" },
+    files: [{ name: "q3-earnings.pdf", size: 2400000, type: "application/pdf" }], project: "w", visuals: "charts-ai", settings: { quality: "smart" },
   });
   assert.ok(!result.requests.some((r) => r.url === "/v1/uploads/url"));
   assert.match(result.stdout, /nothing was started/);
@@ -654,7 +670,7 @@ test("a flag can never swallow --estimate: unknown flags, --flag=value and missi
     const ok = await invoke(["ingest-url", url, "--chart-export=models", "--project=w", "--estimate"], respond);
     assert.equal(ok.code, 0, ok.stderr);
     assert.deepEqual(ok.requests.map((r) => [r.method, r.url]), [["HEAD", "/files/q3.pdf"], ["POST", "/v1/uploads/estimate"]]);
-    assert.deepEqual(JSON.parse(ok.requests[1].body), { files: [{ name: "q3.pdf", size: 123456, type: "application/pdf" }], project: "w", chartExport: { tier: "models" } });
+    assert.deepEqual(JSON.parse(ok.requests[1].body), { files: [{ name: "q3.pdf", size: 123456, type: "application/pdf" }], project: "w", visuals: "charts-ai" });
     const upload = await invoke(["upload", file, "--chart-export=free", "--estimate"], respond);
     assert.equal(upload.code, 0, upload.stderr);
     assert.deepEqual(upload.requests.map((r) => r.url), ["/v1/uploads/estimate"]);

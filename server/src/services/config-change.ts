@@ -1,4 +1,5 @@
 import { lockProjectConfigurationWrite } from "./project-write-lock.js";
+import { withRunEffective } from "./extraction-settings.js";
 import { buildRunProcessingPreview } from "./run-processing-preview.js";
 import { randomUUID } from "node:crypto";
 
@@ -448,7 +449,7 @@ export async function createReindexRuns(args: {
       -- The documents are inserted in this transaction, so the manifest is complete when it commits; without
       -- creation_ready_at neither runLifecycle.start nor run-start recovery would ever start the run.
       values (${runId}, ${project.orgId}, ${args.userId}, ${project.id}, 'reindex', ${status}, ${batchBlockedReason}, ${jobId}, 0, 'queued',
-        ${batch.docs.length}, 0, ${pages}, 0, 0, 0, ${tx.json(JSON.parse(JSON.stringify(batch.pipeline)))}, ${tx.json(JSON.parse(JSON.stringify(stats)))},
+        ${batch.docs.length}, 0, ${pages}, 0, 0, 0, ${tx.json(JSON.parse(JSON.stringify(withRunEffective(batch.pipeline))))}, ${tx.json(JSON.parse(JSON.stringify(stats)))},
         now(), null, ${args.origin ?? "machine"}, ${reservation})
     `;
     for (const doc of batch.docs) {

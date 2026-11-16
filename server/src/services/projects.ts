@@ -3,7 +3,7 @@ import { assertPolicyTransitionAllowed } from "./policy-transition.js";
 import { HTTPException } from "hono/http-exception";
 import { assertTenantModelEndpointAllowed } from "@docslurp/shared";
 import { EDITOR_REQUIRED_CODE, EDITOR_REQUIRED_MESSAGE, deferredProfilesEnabled, isBillingEnforced, PUBLIC_ERROR_MESSAGES, publicDiagnostics, publicDocumentError, resolveManagedPipeline, parseManagedPipelineOverrides, storedManagedPipeline, stripManagedPipelineFields, type ManagedPipelineOverrides } from "@docslurp/shared";
-import { chartExportDefaults, effectiveLadder, pageReadingQuality, upgradeStoredPipelineChartExport } from "@docslurp/shared";
+import { chartExportDefaults, effectiveLadder, extractionPolicyFromEnv, pageReadingQuality, projectExtractionView, projectTemplateLockedPaths, upgradeStoredPipelineChartExport, visualsDefaults } from "@docslurp/shared";
 import {
   defaultSummaryTreePipelineConfig, SUMMARY_TREE_REQUIRES_VECTORS_CODE, SUMMARY_TREE_REQUIRES_VECTORS_MESSAGE, SummaryTreeConfigError,
   type SummaryTreePipelineConfig,
@@ -336,6 +336,8 @@ function mapProject(row: ProjectRow): ProjectRecord {
     billingEnforced: isBillingEnforced(),
     // The deployment's actual defaults (switch, app/API defaults, explicit-free gate), never a code default.
     chartExportDefaults: chartExportDefaults(process.env),
+    extraction: projectExtractionView(row.pipeline, process.env),
+    visualsDefaults: visualsDefaults(extractionPolicyFromEnv(process.env)),
     sourceBytes: Number(row.source_bytes ?? 0),
     pendingDocumentCount: row.pending_document_count ?? 0,
     pendingPageCount: row.pending_page_count ?? 0,
@@ -1073,7 +1075,7 @@ export async function resolveUpdatedPipeline(
   // Reject a bypassed read-only control instead of silently reporting a successful save.
   if (parsed.pipeline && (parsed.templateKey === undefined || parsed.templateKey === current.templateKey) && template) {
     const at = (source: unknown, path: string): unknown => path.split(".").reduce<unknown>((value, key) => value && typeof value === "object" ? (value as Record<string, unknown>)[key] : undefined, source);
-    if (template.lockedSettings.some(path => JSON.stringify(at(draftPipeline, path)) !== JSON.stringify(at(current.pipeline, path)))) {
+    if (projectTemplateLockedPaths(template).some(path => JSON.stringify(at(draftPipeline, path)) !== JSON.stringify(at(current.pipeline, path)))) {
       throw new HTTPException(409, { message: "This setting is locked by the project template." });
     }
   }

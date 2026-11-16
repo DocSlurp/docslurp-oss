@@ -49,20 +49,31 @@ function resolveIntakeTarget(flags: Record<string, string | boolean>): IntakeTar
   return { newProject: false, project: resolveProject(flags) };
 }
 
-const QUALITY_MODES = ["fast", "auto", "good"] as const;
+const QUALITY_LEVELS = ["fastest", "balanced", "smart"] as const;
+type Quality = (typeof QUALITY_LEVELS)[number];
+/** Deprecated `--quality` words and their replacements (still accepted during the window, with a note on stderr). */
+const LEGACY_QUALITY: Readonly<Record<string, Quality>> = { fast: "fastest", auto: "balanced", good: "smart" };
 
-/** `--quality fast|auto|good` as a pipeline override, or {} when the project setting applies. */
-export function resolveQualityPipeline(flags: Record<string, string | boolean>): { pipeline?: { quality: (typeof QUALITY_MODES)[number] } } {
+/** `--quality fastest|balanced|smart` (or a deprecated fast|auto|good) as a pipeline override, or {} when the project setting applies. */
+export function resolveQualityPipeline(flags: Record<string, string | boolean>): { pipeline?: { quality: Quality } } {
   if (flags.quality === undefined) return {};
-  const quality = typeof flags.quality === "string" ? flags.quality.trim().toLowerCase() : "";
-  if (!(QUALITY_MODES as readonly string[]).includes(quality)) throw new Error("--quality must be fast, auto or good.");
-  return { pipeline: { quality: quality as (typeof QUALITY_MODES)[number] } };
+  const raw = typeof flags.quality === "string" ? flags.quality.trim().toLowerCase() : "";
+  const legacy = LEGACY_QUALITY[raw];
+  if (legacy) {
+    console.error(`Note: --quality ${raw} is deprecated; use --quality ${legacy}.`);
+    return { pipeline: { quality: legacy } };
+  }
+  if (!(QUALITY_LEVELS as readonly string[]).includes(raw)) throw new Error("--quality must be fastest, balanced or smart.");
+  return { pipeline: { quality: raw as Quality } };
 }
 
+const VISUALS_LEVELS = ["none", "figures", "charts", "charts-ai"] as const;
+type Visuals = (typeof VISUALS_LEVELS)[number];
 const CHART_EXPORT_TIERS = ["off", "free", "models"] as const;
 type ChartExportTier = (typeof CHART_EXPORT_TIERS)[number];
+const VISUALS_FOR_TIER: Readonly<Record<ChartExportTier, Visuals>> = { off: "figures", free: "charts", models: "charts-ai" };
 
-/** `--chart-export off|free|models` as a per-request override, or null when the project setting (or the API default, off) applies. */
+/** The deprecated `--chart-export off|free|models`, as the tier it names, or null when not given. */
 export function resolveChartExportFlag(flags: Record<string, string | boolean>): { tier: ChartExportTier } | null {
   if (flags.chartExport === undefined) return null;
   const tier = typeof flags.chartExport === "string" ? flags.chartExport.trim().toLowerCase() : "";
@@ -70,24 +81,60 @@ export function resolveChartExportFlag(flags: Record<string, string | boolean>):
   return { tier: tier as ChartExportTier };
 }
 
-/** `--quality` and `--chart-export` as one pipeline override, or {} when neither is given. */
-export function resolveIntakePipeline(flags: Record<string, string | boolean>): { pipeline?: { quality?: (typeof QUALITY_MODES)[number]; chartExport?: { tier: ChartExportTier } } } {
-  const quality = resolveQualityPipeline(flags).pipeline?.quality;
+/**
+ * `--visuals none|figures|charts|charts-ai`, or the deprecated `--chart-export` / `--no-figures` it replaces, or null
+ * when the project setting (or the deployment default) applies. Two flags that disagree are an error.
+ */
+export function resolveVisualsFlag(flags: Record<string, string | boolean>): Visuals | null {
+  const named: Array<{ flag: string; visuals: Visuals }> = [];
+  if (flags.visuals !== undefined) {
+    const raw = typeof flags.visuals === "string" ? flags.visuals.trim().toLowerCase() : "";
+    if (!(VISUALS_LEVELS as readonly string[]).includes(raw)) throw new Error("--visuals must be none, figures, charts or charts-ai.");
+    named.push({ flag: "--visuals", visuals: raw as Visuals });
+  }
   const chartExport = resolveChartExportFlag(flags);
-  const pipeline = { ...(quality ? { quality } : {}), ...(chartExport ? { chartExport } : {}) };
+  if (chartExport) {
+    console.error(`Note: --chart-export is deprecated; use --visuals ${VISUALS_FOR_TIER[chartExport.tier]}.`);
+    named.push({ flag: "--chart-export", visuals: VISUALS_FOR_TIER[chartExport.tier] });
+  }
+  if (flags.noFigures === true) {
+    console.error("Note: --no-figures is deprecated; use --visuals none.");
+    named.push({ flag: "--no-figures", visuals: "none" });
+  }
+  const values = new Set(named.map((entry) => entry.visuals));
+  if (values.size > 1) throw new Error(`${named.map((entry) => entry.flag).join(" and ")} disagree; use --visuals only.`);
+  return named[0]?.visuals ?? null;
+}
+
+/** `--quality` and `--visuals` (or their deprecated aliases) as one pipeline override, or {} when neither is given. */
+export function resolveIntakePipeline(flags: Record<string, string | boolean>): { pipeline?: { quality?: Quality; visuals?: Visuals } } {
+  const quality = resolveQualityPipeline(flags).pipeline?.quality;
+  const visuals = resolveVisualsFlag(flags);
+  const pipeline = { ...(quality ? { quality } : {}), ...(visuals ? { visuals } : {}) };
   return Object.keys(pipeline).length ? { pipeline } : {};
+}
+
+/** Prints deprecation warnings a response carries (`warnings[]` with code `deprecated_field`) to stderr. */
+export function printDeprecationWarnings(body: unknown): void {
+  const warnings = body && typeof body === "object" ? (body as { warnings?: unknown }).warnings : undefined;
+  if (!Array.isArray(warnings)) return;
+  for (const warning of warnings) {
+    if (warning && typeof warning === "object" && (warning as { code?: unknown }).code === "deprecated_field") {
+      console.error(`Warning: ${String((warning as { message?: unknown }).message ?? "a deprecated field was used")}`);
+    }
+  }
 }
 
 function usage(): void {
   console.log(`Usage:
-  docslurp estimate <files...> [--quality <fast|auto|good>] [--indexing <full|on-demand|visual>] [--chart-export <off|free|models>] [--months <n>] [--json]
-  docslurp upload <files...> [--project <id|slug|name> | --new-project] [--template <key>] [--quality <fast|auto|good>] [--chart-export <off|free|models>] [--canonical-id <id>] [--path <folder>] [--idempotency-key <key>] [--estimate] [--watch] [--api-url <url>]
-  docslurp ingest-url <urls...> [--project <id|slug|name> | --new-project] [--template <key>] [--quality <fast|auto|good>] [--chart-export <off|free|models>] [--estimate] [--watch] [--api-url <url>]
+  docslurp estimate <files...> [--quality <fastest|balanced|smart>] [--indexing <full|on-demand|visual>] [--visuals <none|figures|charts|charts-ai>] [--months <n>] [--json]
+  docslurp upload <files...> [--project <id|slug|name> | --new-project] [--template <key>] [--quality <fastest|balanced|smart>] [--visuals <none|figures|charts|charts-ai>] [--canonical-id <id>] [--path <folder>] [--idempotency-key <key>] [--estimate] [--watch] [--api-url <url>]
+  docslurp ingest-url <urls...> [--project <id|slug|name> | --new-project] [--template <key>] [--quality <fastest|balanced|smart>] [--visuals <none|figures|charts|charts-ai>] [--estimate] [--watch] [--api-url <url>]
   docslurp extract <files...|urls...> [--retention-days <n>] [--no-email] [--download <markdown|all>] [upload options]
   docslurp extract-status <extractId> [--json]
   docslurp extract-download <extractId>
   docslurp full-index [--project <id|slug|name>] [--document <id>] [--estimate] [--watch]
-  docslurp reprocess <runId> [--stage-from <stage>] [--chart-export <off|free|models>] [--estimate] [--watch]
+  docslurp reprocess <runId> [--stage-from <stage>] [--quality <fastest|balanced|smart>] [--visuals <none|figures|charts|charts-ai>] [--estimate] [--watch]
   docslurp summary-tree backfill [--project <id|slug|name>] --max-cost-cents <n> [--estimate] [--watch] [--json]
   docslurp summary-tree status [--project <id|slug|name>] [--json]
   docslurp summary-tree cancel <jobId> [--project <id|slug|name>] [--json]
@@ -122,14 +169,18 @@ commands use the "default" project: your organization's default project.
 the same project. Uploads and URL ingests into a name that matches no project create
 it with that name (and --template, if given); other commands answer project not found.
 --new-project (or --template alone) uploads into a fresh self-titled project.
---quality sets processing quality for the upload (default: the project's, auto unless changed):
-fast reads the text layer only and keeps scanned pages as images, not read (lowest price);
-auto reads each page the cheapest faithful way (its price depends on the mix of pages);
-good reads every page with a vision model (highest price). Prices: https://docslurp.io/pricing
---chart-export sets chart and diagram export for this request (default: the project's setting,
-off for CLI and API calls when the project has none): off; free exports charts that carry
-their own data (Office charts, embedded chart specs, vector graphics) at no charge; models
-also reads other charts with AI, billed per chart read. upload --estimate and estimate price it.
+--quality sets processing quality for the upload (default: the project's, balanced unless changed):
+fastest reads the text layer only and keeps pages without one as images, not read (lowest price);
+balanced reads each page the cheapest faithful way (its price depends on the mix of pages);
+smart reads every page with AI (highest price). Prices: https://docslurp.io/pricing
+(fast, auto and good are deprecated aliases.)
+--visuals sets figures and charts for this request (default: the project's setting, else the
+deployment's default, figures): none; figures keeps PDF figures as files; charts also exports
+charts that carry their own data (Office charts, embedded chart specs, vector graphics) at no
+charge; charts-ai also reads other charts with AI, billed per chart read. upload --estimate and
+estimate price it. --chart-export off|free|models and --no-figures are deprecated aliases.
+smart and charts-ai above the project's setting need project editor rights (or a key with
+the pipeline:billed-features scope).
 --estimate prints the work estimate (pages, documents, credits, time) for the operation and exits without doing it.
 Mutations that queue background work print their job; follow it with docslurp jobs watch <jobId>.
 --watch waits up to five minutes by default; --timeout sets its limit.
@@ -295,13 +346,13 @@ function normalizeCompatImportPayload(args: {
 /** Flags that take no value, by their command-line name, and the key commands read them as. */
 const BOOLEAN_FLAGS: Readonly<Record<string, string>> = {
   watch: "watch", json: "json", context: "context", estimate: "estimate", device: "device", force: "force", stream: "stream", stats: "stats",
-  "no-browser": "noBrowser", "no-email": "noEmail", "new-project": "newProject",
+  "no-browser": "noBrowser", "no-email": "noEmail", "new-project": "newProject", "no-figures": "noFigures",
 };
 
 /** Flags that take a value (`--flag value` or `--flag=value`); the key is the camelCase name. */
 const VALUE_FLAGS: ReadonlySet<string> = new Set([
   "project", "api-url", "api-key", "run", "source", "out", "queries-file", "concurrency", "min-score", "session", "canonical-id", "path",
-  "template", "document", "stage-from", "retention-days", "download", "quality", "chart-export", "idempotency-key",
+  "template", "document", "stage-from", "retention-days", "download", "quality", "visuals", "chart-export", "idempotency-key",
   "timeout", "limit", "cursor", "mode", "summary-tree", "tier", "reasoning", "months", "indexing", "model", "scopes", "profile",
   "max-cost-cents",
 ]);
@@ -619,8 +670,9 @@ async function uploadCommand(files: string[], flags: Record<string, string | boo
   if (flags.estimate === true && intake === UPLOAD_MODE) {
     const target = resolveIntakeTarget(flags);
     const estimateFiles = await profiledEstimateFiles(files);
-    const chartExport = resolveChartExportFlag(flags);
-    await runEstimate("/v1/uploads/estimate", { files: estimateFiles, ...(target.project ? { project: target.project } : {}), ...(chartExport ? { chartExport } : {}) }, flags);
+    const visuals = resolveVisualsFlag(flags);
+    const quality = resolveQualityPipeline(flags).pipeline?.quality;
+    await runEstimate("/v1/uploads/estimate", { files: estimateFiles, ...(target.project ? { project: target.project } : {}), ...(visuals ? { visuals } : {}), ...(quality ? { settings: { quality } } : {}) }, flags);
     return;
   }
 
@@ -729,8 +781,8 @@ async function estimateCommand(files: string[], flags: Record<string, string | b
   if (typeof flags.quality === "string") settings.quality = resolveQualityPipeline(flags).pipeline?.quality;
   if (typeof flags.indexing === "string") settings.indexing = flags.indexing;
   if (typeof flags.months === "string") settings.hostingMonths = Number.parseInt(flags.months, 10);
-  const chartExport = resolveChartExportFlag(flags);
-  if (chartExport) settings.chartExport = chartExport.tier;
+  const visuals = resolveVisualsFlag(flags);
+  if (visuals) settings.visuals = visuals;
   const body = { files: await profiledEstimateFiles(files), ...(Object.keys(settings).length ? { settings } : {}) };
   const base = (typeof flags.apiUrl === "string" ? flags.apiUrl : process.env.DOCSLURP_API_URL ?? "https://docslurp.io").replace(/\/$/, "");
   const response = await fetch(`${base}/v1/estimate`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
@@ -766,6 +818,7 @@ async function runEstimate(pathname: string, body: unknown, flags: Record<string
     return;
   }
   const result = await response.json() as { estimate: CostEstimate; impact?: { kind: string } };
+  printDeprecationWarnings(result);
   if (flags.json === true) console.log(JSON.stringify(result, null, 2));
   else {
     if (result.impact) console.log(`Impact:    ${result.impact.kind}`);
@@ -794,8 +847,13 @@ async function reprocessCommand(runId: string | undefined, flags: Record<string,
     return;
   }
   const base = `/v1/runs/${encodeURIComponent(runId)}/reprocess`;
-  const chartExport = resolveChartExportFlag(flags);
-  const body = { ...(typeof flags.stageFrom === "string" && flags.stageFrom ? { stageFrom: flags.stageFrom } : {}), ...(chartExport ? { chartExport } : {}) };
+  const visuals = resolveVisualsFlag(flags);
+  const quality = resolveQualityPipeline(flags).pipeline?.quality;
+  const body = {
+    ...(typeof flags.stageFrom === "string" && flags.stageFrom ? { stageFrom: flags.stageFrom } : {}),
+    ...(quality ? { quality } : {}),
+    ...(visuals ? { visuals } : {}),
+  };
   if (flags.estimate === true) return runEstimate(`${base}/estimate`, body, flags);
   await startWork(base, body, flags);
 }
@@ -809,6 +867,7 @@ async function startWork(pathname: string, body: unknown, flags: Record<string, 
   }
   // Reprocess answers the run itself, or { run, warnings } when its start was deferred.
   const result = await response.json() as { runId?: string; id?: string; run?: { id?: string }; job?: JobStatus };
+  printDeprecationWarnings(result);
   if (flags.json === true) console.log(JSON.stringify(result, null, 2));
   else {
     const runId = result.runId ?? result.id ?? result.run?.id;
@@ -1006,9 +1065,9 @@ async function ingestUrlCommand(urls: string[], flags: Record<string, string | b
     // An estimate never starts an ingest (council #387 M1): sizes come from each URL's own headers, read from here.
     const files = await urlEstimateFiles(urls);
     const target = resolveIntakeTarget(flags);
-    const chartExport = resolveChartExportFlag(flags);
+    const visuals = resolveVisualsFlag(flags);
     const quality = resolveQualityPipeline(flags).pipeline?.quality;
-    await runEstimate("/v1/uploads/estimate", { files, ...(target.project ? { project: target.project } : {}), ...(chartExport ? { chartExport } : {}), ...(quality ? { settings: { quality } } : {}) }, flags);
+    await runEstimate("/v1/uploads/estimate", { files, ...(target.project ? { project: target.project } : {}), ...(visuals ? { visuals } : {}), ...(quality ? { settings: { quality } } : {}) }, flags);
     return;
   }
   const response = await apiFetch(`${intake.base}/url`, flags, {

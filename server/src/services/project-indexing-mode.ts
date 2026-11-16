@@ -1,4 +1,5 @@
 import { buildRunProcessingPreview } from "./run-processing-preview.js";
+import { withRunEffective } from "./extraction-settings.js";
 import { randomUUID } from "node:crypto";
 
 import type { RunOrigin } from "@docslurp/shared";
@@ -333,7 +334,7 @@ export async function commitIndexJobs(prepared: PreparedIndexJobs, userId: strin
           creation_ready_at, creation_expires_at, origin, monthly_reservation_cents)
         -- The documents are inserted in this transaction, so the manifest is complete when it commits.
         values (${runId}, ${prepared.orgId}, ${userId}, ${prepared.projectId}, 'full-index', 'queued', 0, 'queued',
-          ${docs.length}, 0, ${pages}, 0, ${tx.json(JSON.parse(JSON.stringify(runPipeline)))}, now(), null, ${origin}, ${reservation})
+          ${docs.length}, 0, ${pages}, 0, ${tx.json(JSON.parse(JSON.stringify(withRunEffective(runPipeline))))}, now(), null, ${origin}, ${reservation})
       `;
       for (const doc of docs) {
         const canonicalId = doc.canonical_id ?? doc.id;
@@ -356,7 +357,7 @@ export async function commitIndexJobs(prepared: PreparedIndexJobs, userId: strin
         await requireRunCreditLease(tx, { runId, orgId: prepared.orgId, projectId: prepared.projectId });
       }
       result.runIds.push(runId);
-      result.pipelines.set(runId, runPipeline);
+      result.pipelines.set(runId, withRunEffective(runPipeline));
     }
   };
   if (transaction) await commit(transaction);

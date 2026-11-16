@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 const sqlMock = vi.fn();
 
 vi.mock("../db.js", () => ({
-  sql: Object.assign(sqlMock, { json: (value: unknown) => value }),
+  sql: Object.assign(sqlMock, { json: (value: unknown) => value, unsafe: (text: string) => text }),
 }));
 
 vi.mock("../lib/temporal.js", () => ({
