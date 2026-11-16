@@ -36,7 +36,7 @@ import { onTeardownBreakerOpen, quarantineForceExitMs, scheduleQuarantineForceEx
 import { initializeParserSandbox, setDefaultParserSandbox } from "../sandbox/startup.js";
 import { assertNoUnsafeOverrides } from "../lib/unsafe-overrides.js";
 import { loadPricingThenParserSandbox } from "./startup-order.js";
-import { loadExtractorPlugins, setExtractorDocumentOwners, setExtractorComputeObservations, setExtractorComputeCohortAuthorizer } from "../extractors/plugins.js";
+import { loadExtractorPlugins, setExtractorDocumentOwners, setExtractorComputeObservations, setExtractorComputeCohortAuthorizer, setExtractorComputeAllocationAdmission } from "../extractors/plugins.js";
 import { loadPricingProvider, pricingDurableStateFromSql } from "@docslurp/shared/pricing-loader";
 import { ocrLanguageSettingFromEnv } from "../ocr/languages.js";
 import { assertOcrConfiguration } from "../ocr/mode.js";
@@ -158,6 +158,7 @@ async function main(): Promise<void> {
   setExtractorDocumentOwners((documentIds) => store.documentScopes(documentIds));
   setExtractorComputeObservations((profileIds) => store.computeObservations(profileIds));
   setExtractorComputeCohortAuthorizer((scope) => store.authorizeComputeCohort(scope));
+  setExtractorComputeAllocationAdmission(store.computeAllocationAdmission());
   await loadExtractorPlugins(process.env).catch((error) => {
     throw new FatalWorkerError("startup", error instanceof Error ? error.message : String(error), { cause: error });
   });

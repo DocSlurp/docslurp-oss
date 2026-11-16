@@ -1,3 +1,4 @@
+import { computeAllocationAdmission } from "./compute-fleet-store.js";
 import { computePriceColumns, computeCalibrationColumns, decodeComputeObservation, type ComputeObservations, type ComputePriceObservation, type ComputeCalibrationObservation } from "@docslurp/shared";
 import { sandboxedPdfBatchProvider } from "../extractors/sandboxed-pdf-batch.js";
 import { buildRunCompletedEvent } from "../pipeline/run-ledger.js";
@@ -712,6 +713,8 @@ export class Store {
    * document, run, user or org identifiers, so one tenant's plan cannot learn anything about another's content.
    * Served by performance_log_shard_timing_idx (0098).
    */
+  computeAllocationAdmission(): import("@docslurp/shared").ComputeAllocationAdmission { return computeAllocationAdmission(this.sql); }
+
   async authorizeComputeCohort(scope: import("@docslurp/shared").ComputeExecutionScope): Promise<import("@docslurp/shared").ComputeCohortGrant | null> {
     for (const value of [scope.orgId, scope.projectId, scope.runId, scope.documentId]) {
       if (!value || value.length > 200) throw new Error("Invalid compute execution scope");

@@ -3,6 +3,12 @@
 - Automatic model calls (vision fallback, OCR escalation, chart generators, page-router targets, route tiers, chat failover, Speed boost swaps) are allowed only when the pricing provider's billed value covers planning tokens times the route's highest current price (per OpenRouter endpoint, time-of-day overrides, verified host schedules) by `DOCSLURP_AUTOMATIC_MIN_MARGIN` (1.3). Unknown or stale prices fail closed; refused candidates are skipped with a logged reason; losing calls log `[automatic-margin] overrun loss=true`.
 - DeepSeek V4.1 Flash leaves the never-automatic denylist (owner decision); the denylist mechanism stays, empty.
 
+## Durable compute fleet admission
+
+- Added operator-owned fleet limits and durable reservation slots before provider launch. The database rejects oversubscription, stale policy snapshots, identity changes and released-ID reuse. Runtime application roles cannot access the platform ledger; workers cannot edit fleet limits or erase reservations.
+- Added a content-free worker plugin admission interface and startup binding. Unbound storage fails closed. Provider lifecycle adapters must retain uncertain reservations and release only on definite non-creation or confirmed deletion; this seam does not authorize customer file access or change provider defaults.
+- Two independent security reviews found stale operator-policy reads and inherited custom application ACLs. Both were fixed with real PostgreSQL regression tests. See `docs/design/compute-fleet-admission.md`.
+
 ## Compute price and calibration observation storage
 
 - Added bounded, content-free operational price/calibration histories, stable offer identities, source and currency/FX provenance, expiry, idempotent receipts and a worker lookup callback.
