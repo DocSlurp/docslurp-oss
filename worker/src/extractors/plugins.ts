@@ -314,6 +314,45 @@ export interface PageImageReadJob {
   scope: { orgId: string; runId: string };
   /** Opaque keys (never document ids) and absolute paths of PNGs the OCR boundary wrote and the host validated by signature and size. */
   pages: Array<{ key: string; imagePath: string }>;
+  /**
+   * Set by the host when it sent the job because `warm.status` reported the scope's reader ready: the provider must not
+   * start or wait for a VM for this job. With no ready VM for the scope it rejects the job at once (a `capacity`
+   * failure), and the host reads the pages its other way.
+   */
+  requireReady?: boolean;
+}
+
+export const PAGE_READER_WARM_STATES = ["none", "booting", "ready", "failed", "refused"] as const;
+export type PageReaderWarmState = (typeof PAGE_READER_WARM_STATES)[number];
+
+/** A provider's answer about the reader for one tenant scope. Telemetry fields are provider-reported and only logged. */
+export interface PageReaderWarmStatus {
+  /** `none`: nothing started; `booting`; `ready`: a job would start without waiting for a boot; `failed`: the last start failed; `refused`: a cap refused it. */
+  state: PageReaderWarmState;
+  /** Launch to ready, in milliseconds, once ready. */
+  bootMs?: number;
+  /** The provider's cost of that boot, in cents (telemetry only; the first job served by the warmed reader records it). */
+  bootCostCents?: number;
+}
+
+/**
+ * Optional non-blocking warm-up of a page image reader (docs/extraction/ocr.md, "Warm start"). The host calls `start`
+ * when a run's reader demand reaches its threshold and keeps reading pages its other way (the hosted route) until
+ * `status` reports `ready`; only then does it send jobs, marked `requireReady`. Neither method may block, throw for a
+ * capacity or boot failure, or send any page or user data: a warm-up starts a VM bound to `scope` exactly as a job's
+ * lease would, and nothing else.
+ */
+export interface PageImageReaderWarm {
+  /**
+   * Optional: the reader pages a run should expect before a warm-up pays for itself, from the provider's own cost model
+   * (boot and idle cost against the per-page saving over the hosted route). The host uses it unless the operator sets
+   * DOCSLURP_PAGE_READER_WARM_MIN_PAGES.
+   */
+  minPages?: number;
+  /** Begin making a reader ready for `scope` (no-op when one is booting or ready), within the provider's own caps. */
+  start(scope: { orgId: string; runId: string }): PageReaderWarmStatus;
+  /** The reader's state for `scope`, answered from memory. */
+  status(scope: { orgId: string; runId: string }): PageReaderWarmStatus;
 }
 
 export const PAGE_IMAGE_READ_FAILURES = ["timeout", "refused", "oversized", "invalid", "vm-lost", "capacity"] as const;
@@ -367,6 +406,11 @@ export interface PageImageReaderProvider {
    */
   evalScore?: number;
   evalRef?: string;
+  /**
+   * Optional non-blocking warm-up. Without it the host sends jobs as soon as pages are ready to read, and a job waits for
+   * whatever start-up the provider needs.
+   */
+  warm?: PageImageReaderWarm;
   /**
    * Read the job's pages. Resolves with one result per page it answers (at most one per key) and the provider cost of
    * every VM or request it ran. A rejection that spent compute carries that cost as `pageReaderUsage` (PAGE_READER_USAGE_PROPERTY,
@@ -548,6 +592,11 @@ export function registerExtractorPlugin(plugin: ExtractorPlugin): void {
     if (reader.evalScore !== undefined && !(typeof reader.evalScore === "number" && reader.evalScore >= 0 && reader.evalScore <= 1)) throw new Error("Page image reader provider's evalScore must be from 0 to 1");
     if ((reader.evalScore === undefined) !== (reader.evalRef === undefined) || (reader.evalRef !== undefined && (typeof reader.evalRef !== "string" || !reader.evalRef.trim()))) {
       throw new Error("Page image reader provider needs evalScore and evalRef together");
+    }
+    if (reader.warm !== undefined) {
+      const warm = reader.warm;
+      if (!warm || typeof warm.start !== "function" || typeof warm.status !== "function") throw new Error("Page image reader provider's warm needs start() and status()");
+      if (warm.minPages !== undefined && !(Number.isSafeInteger(warm.minPages) && warm.minPages >= 1)) throw new Error("Page image reader provider's warm.minPages must be a positive integer");
     }
   }
   plugins.push(plugin);
