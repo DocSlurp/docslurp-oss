@@ -1,3 +1,4 @@
+import { figuresOnSqlText } from "@docslurp/shared";
 /*
  * On-demand figure resumes (docs/extraction/doppler-figures.md, "Resuming partial figures"): queue a document, or a
  * project's resumable documents (capped), for the worker's resume runner. Only queues: the runner claims under its own
@@ -227,8 +228,7 @@ export async function sweepFigureResumeQueue(now = Date.now()): Promise<number> 
         and d.status = 'completed' and d.superseded_at is null and d.archived_at is null and d.purged_at is null
         and l2.updated_at < now() - interval '5 minutes'
         and coalesce(p.pipeline ->> 'figureResume', 'auto') = 'auto'
-        and coalesce(p.pipeline -> 'figures', 'true'::jsonb) not in ('false'::jsonb, '"off"'::jsonb)
-        and coalesce(p.pipeline -> 'figures' ->> 'enabled', 'true') <> 'false'
+        and ${sql.unsafe(figuresOnSqlText("p"))}
       order by l2.updated_at
       limit 200)
     returning l.document_id`;

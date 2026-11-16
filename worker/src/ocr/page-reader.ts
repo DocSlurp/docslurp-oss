@@ -33,7 +33,7 @@ import type { WorkflowState } from "../pipeline/pipeline.js";
 import type { OcrPageRead, OcrReadOutcome } from "./engine.js";
 import { processPageReaderOrgBudget, type PageReaderOrgBudget } from "./page-reader-budget.js";
 import { logPageReaderWarmSummary, pageReaderWarmGate, pageReaderWarmPolicy, recordPageReaderWarmRouting, releasePageReaderWarmReservation } from "./page-reader-warm.js";
-import { ocrPageReaderMaxPages, ocrPageReaderMode, ocrPageReaderOrgDailyMaxCostCents, OCR_PAGE_READER_METRIC, type OcrPageReaderMode } from "./page-reader-mode.js";
+import { ocrPageReaderMaxPages, ocrPageReaderMode, ocrPageReaderOrgDailyMaxCostCents, OCR_PAGE_READER_METRIC, pageReaderAllowedForPrivacy, type OcrPageReaderMode } from "./page-reader-mode.js";
 
 export * from "./page-reader-mode.js";
 
@@ -220,7 +220,7 @@ export function pageReaderPagesRemaining(ledger: object, documentId: string, max
 }
 
 /** Skip reasons after which no further job of this document (or organization) can be sent now. */
-export const PAGE_READER_STOP_REASONS = ["no-scope", "budget", "cost-cap", "org-daily-cost-cap", "budget-ledger-unavailable", "no-cost-estimate"] as const;
+export const PAGE_READER_STOP_REASONS = ["no-scope", "privacy", "budget", "cost-cap", "org-daily-cost-cap", "budget-ledger-unavailable", "no-cost-estimate"] as const;
 
 /** One page image the host sends to the reader. */
 export interface PageImageInput {
@@ -268,6 +268,13 @@ export async function readPageImagesWithProvider(
   if (!run?.id || typeof run.orgId !== "string" || !run.orgId) {
     bump(summary.skipped, "no-scope", pages.length);
     console.error(`${use.logTag} skipped document=${ctx.documentId} pages=${pages.length}: the run has no organization scope`);
+    return logSummary(summary, ctx, use);
+  }
+  // Q14: under local-only / strict-privacy only an operator-registered private reader may read the pages; the recogniser's
+  // text (or the caller's own fallback) stands otherwise. A run whose pipeline is unknown is treated as restricted.
+  if (!readerAllowedForRun(provider, run)) {
+    bump(summary.skipped, "privacy", pages.length);
+    console.warn(`${use.logTag} skipped document=${ctx.documentId} pages=${pages.length}: the project's privacy mode admits only a registered private reader`);
     return logSummary(summary, ctx, use);
   }
   const scope = { orgId: run.orgId, runId: run.id };
@@ -479,6 +486,12 @@ function logSummary(summary: PageReaderSummary, ctx: PageReaderContext, use: Pic
   return summary;
 }
 
+/** The reader may read this run's pages under its privacy mode; an unknown pipeline counts as restricted (fail closed). */
+function readerAllowedForRun(provider: PageImageReaderProvider, run: PageReaderContext["state"]["run"]): boolean {
+  const pipeline = run?.pipeline as { privacyMode?: string | null } | undefined;
+  return pageReaderAllowedForPrivacy(provider, pipeline ? (pipeline.privacyMode ?? "standard") : "unknown");
+}
+
 /** Run the configured reader over an OCR outcome, when DOCSLURP_OCR_PAGE_READER is on; null when off. */
 export async function readOcrPagesWithConfiguredReader(
   outcome: OcrReadOutcome,
@@ -491,6 +504,11 @@ export async function readOcrPagesWithConfiguredReader(
   if (!provider) {
     // Startup refuses this configuration; a worker that got here anyway keeps the recogniser's reads (never another reader).
     console.error(`[ocr] page-reader mode=${mode} has no provider; document=${ctx.documentId} keeps the recogniser read`);
+    return null;
+  }
+  // Checked before any warm gate, so a restricted project never starts a reader VM (Q14).
+  if (!readerAllowedForRun(provider, ctx.state.run)) {
+    console.warn(`[ocr] page-reader skipped document=${ctx.documentId}: the project's privacy mode admits only a registered private reader`);
     return null;
   }
   try {

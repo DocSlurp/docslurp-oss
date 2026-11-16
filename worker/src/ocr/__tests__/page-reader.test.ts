@@ -2,7 +2,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { BILLABLE_UNIT_METRICS, UNIT_CHARGE_PROVIDER } from "@docslurp/shared";
+import { BILLABLE_UNIT_METRICS, setPrivateModelEndpointRegistryForTests, UNIT_CHARGE_PROVIDER } from "@docslurp/shared";
 
 import {
   EXTRACTOR_PLUGIN_API_VERSION, loadedPluginCapabilities, PAGE_READER_USAGE_PROPERTY, pageReaderUsageOf, registerExtractorPlugin, resetExtractorPluginsForTest,
@@ -19,7 +19,7 @@ import {
   readOcrPagesWithConfiguredReader, MAX_PAGE_READER_TOKENS_PER_PAGE, type PageReaderContext,
 } from "../page-reader.js";
 import { InMemoryPageReaderOrgBudget } from "../page-reader-budget.js";
-import { ocrPageReaderOrgDailyMaxCostCents } from "../page-reader-mode.js";
+import { ocrPageReaderOrgDailyMaxCostCents, pageReaderAllowedForPrivacy } from "../page-reader-mode.js";
 import { ocrDocument } from "../read-document.js";
 
 let scratch: string;
@@ -568,5 +568,74 @@ describe("ocrDocument with the page reader", () => {
     expect(result.pages.map((page) => page.reader)).toEqual(["page-reader:test-page-reader", "page-reader:test-page-reader"]);
     // Confident pages were never hosted escalation candidates.
     expect(hosted.read).not.toHaveBeenCalled();
+  });
+});
+
+describe("privacy mode (design Q14): only a registered private reader reads restricted projects", () => {
+  const privateEndpoint = {
+    alias: "reader1",
+    baseUrl: "https://reader1.example.com/v1",
+    auth: { tokenEnv: "TEST_PRIVATE_READER1_TOKEN" },
+    models: [{ id: "example/page-reader", capability: "vision" }],
+    attestation: { tenancy: "single-tenant", hostProvider: "example", region: "us-east", note: "test" },
+    pricing: { usdPerHour: 1 },
+  };
+  const registered = { modelUri: "llm://private/reader1/example/page-reader", capability: "vision" as const };
+  afterEach(() => setPrivateModelEndpointRegistryForTests(undefined));
+
+  it("the helper fails closed for restricted modes and passes standard", () => {
+    setPrivateModelEndpointRegistryForTests([privateEndpoint]);
+    const plain = reader(echo);
+    expect(pageReaderAllowedForPrivacy(plain, "standard")).toBe(true);
+    expect(pageReaderAllowedForPrivacy(plain, undefined)).toBe(true);
+    for (const mode of ["local-only", "strict-privacy", "unknown"]) {
+      expect(pageReaderAllowedForPrivacy(plain, mode)).toBe(false);
+      expect(pageReaderAllowedForPrivacy(reader(echo, { privateRoute: { modelUri: "llm://private/other/example/page-reader", capability: "vision" } }), mode)).toBe(false);
+      expect(pageReaderAllowedForPrivacy(reader(echo, { privateRoute: { modelUri: "https://reader1.example.com/v1", capability: "vision" } }), mode)).toBe(false);
+      expect(pageReaderAllowedForPrivacy(reader(echo, { privateRoute: { ...registered, capability: "text" } }), mode)).toBe(false);
+      expect(pageReaderAllowedForPrivacy(reader(echo, { privateRoute: registered }), mode === "unknown" ? "local-only" : mode)).toBe(true);
+    }
+    setPrivateModelEndpointRegistryForTests([]);
+    expect(pageReaderAllowedForPrivacy(reader(echo, { privateRoute: registered }), "strict-privacy")).toBe(false);
+  });
+
+  it.each(["local-only", "strict-privacy"])("%s: an undeclared reader is sent no pages and the recogniser text stands", async (privacyMode) => {
+    const provider = reader(echo);
+    const state = runState({ pipeline: { privacyMode } });
+    const outcome = await outcomeWith([{ pageNumber: 1, escalate: true }, { pageNumber: 2, escalate: true }]);
+    const summary = await readPagesWithProvider(outcome, provider, ctx(state, { mode: "all" }));
+    expect(provider.read).not.toHaveBeenCalled();
+    expect(summary.skipped.privacy).toBe(2);
+    expect(outcome.pages.map((page) => page.text)).toEqual(["recogniser 1", "recogniser 2"]);
+    expect(outcome.pages.every((page) => page.escalation)).toBe(true);
+    expect(readerEvents(state)).toEqual([]);
+  });
+
+  it("a run without a known pipeline is treated as restricted", async () => {
+    const provider = reader(echo);
+    const state = runState();
+    (state.run as { pipeline?: unknown }).pipeline = undefined;
+    const summary = await readPagesWithProvider(await outcomeWith([{ pageNumber: 1 }]), provider, ctx(state, { mode: "all" }));
+    expect(provider.read).not.toHaveBeenCalled();
+    expect(summary.skipped.privacy).toBe(1);
+  });
+
+  it("the configured OCR entry point refuses before any warm gate or VM start", async () => {
+    const warmStart = vi.fn();
+    registerExtractorPlugin({ apiVersion: EXTRACTOR_PLUGIN_API_VERSION, name: "privacy-reader", pageImageReader: reader(echo, { warm: { start: warmStart, status: vi.fn(() => "cold") } as never }) });
+    const state = runState({ pipeline: { privacyMode: "strict-privacy" } });
+    const result = await readOcrPagesWithConfiguredReader(await outcomeWith([{ pageNumber: 1, escalate: true }]), { state, documentId: "doc-1" }, { DOCSLURP_OCR_PAGE_READER: "all" });
+    expect(result).toBeNull();
+    expect(warmStart).not.toHaveBeenCalled();
+  });
+
+  it("a registered private reader reads restricted projects", async () => {
+    setPrivateModelEndpointRegistryForTests([privateEndpoint]);
+    const provider = reader(echo, { privateRoute: registered });
+    const state = runState({ pipeline: { privacyMode: "local-only" } });
+    const outcome = await outcomeWith([{ pageNumber: 1 }]);
+    const summary = await readPagesWithProvider(outcome, provider, ctx(state, { mode: "all" }));
+    expect(provider.read).toHaveBeenCalledTimes(1);
+    expect(summary.replaced).toBe(1);
   });
 });

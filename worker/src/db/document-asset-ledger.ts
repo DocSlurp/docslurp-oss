@@ -1,3 +1,4 @@
+import { figuresOnSqlText } from "@docslurp/shared";
 /*
  * The document asset ledger (migration 0141): one `document_assets` row per image Doppler reports for a document and one
  * `document_extraction_levels` row per document, written together in one transaction with an explicit organization and
@@ -1272,9 +1273,8 @@ export function figureLedgerHooks(
  * closed on malformed shapes too (`"off"`, `{ enabled: false }`), so discovery never lists more than figuresEnabled runs.
  */
 export function figuresOnSql(sql: Sql<Record<string, unknown>>, projectAlias: string /* a projects or project_runs row: both carry `pipeline` */) {
-  const p = sql(projectAlias);
-  return sql`(coalesce(${p}.pipeline -> 'figures', 'true'::jsonb) not in ('false'::jsonb, '"off"'::jsonb)
-    and coalesce(${p}.pipeline -> 'figures' ->> 'enabled', 'true') <> 'false')`;
+  // Both shapes (a new-shape `visuals: none` too): packages/shared/src/pipeline-sql.ts.
+  return sql`${sql.unsafe(figuresOnSqlText(projectAlias))}`;
 }
 
 /**

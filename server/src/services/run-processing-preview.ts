@@ -1,3 +1,4 @@
+import { runLegacyQualitySql } from "@docslurp/shared";
 import {
   defaultPipelineFeatures,
   detectFileFormat,
@@ -404,14 +405,7 @@ export async function getRunProcessingPreview(
   const historyRows = await sql<RunPreviewHistoryRow[]>`
     select
       -- Runs stored before pipeline.quality carry the retired parserPlaybook / vision.forceAllPages keys.
-      coalesce(
-        runs.pipeline->>'quality',
-        case
-          when runs.pipeline->'vision'->>'forceAllPages' = 'true' or runs.pipeline->>'parserPlaybook' = 'review-grade' then 'good'
-          when runs.pipeline->>'parserPlaybook' = 'fast' then 'fast'
-          else 'auto'
-        end
-      ) as quality,
+      ${sql.unsafe(runLegacyQualitySql("runs"))} as quality,
       count(distinct runs.id)::int as completed_runs,
       count(distinct d.id)::int as sampled_documents,
       avg(nullif(drss.stats->>'plausibilityScore', '')::numeric)::float8 as avg_plausibility_score,
