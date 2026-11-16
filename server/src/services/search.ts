@@ -2263,7 +2263,7 @@ async function executeHybridSearch(
   // The mode the search ran in: billing categories and the public response read it.
   response.searchMode = mode;
   // Page-scoped PII: nothing on a withheld page is served, whichever index or leg returned it.
-  response.results = await filterPiiWithheldResults(response.results);
+  response.results = await filterPiiWithheldResults(response.results, setup.normalizedScope.orgId);
   // Every search with a plan reports what the tree did: its own leg, its sub-searches' legs, or why none ran.
   if (treePlan && !response.summaryTree) {
     response.summaryTree = subSearchTreeOutcomes.length > 0 ? combineSummaryTreeOutcomes(treePlan, subSearchTreeOutcomes) : summaryTreeOutcome(treePlan, null);

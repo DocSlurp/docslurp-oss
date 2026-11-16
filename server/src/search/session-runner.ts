@@ -281,9 +281,9 @@ async function executeSearchSession(args: Parameters<typeof runSearchSession>[0]
                 queryVector: resolvedVector,
                 userId,
                 options: { ...effectiveOptions, limit: options.limit ?? 20 },
-              })).then((result) => {
+              })).then(async (result) => {
                 // A scope without deferred documents (null) or a failed leg (below) reports nothing.
-                if (result) emitLegHits({ leg: "deferred", chunks: result.chunks, startedAt: deferredStartedAt, policy: provisional });
+                if (result) await emitLegHits({ leg: "deferred", chunks: result.chunks, startedAt: deferredStartedAt, policy: provisional });
                 return result;
               }).catch(() => null)
             : Promise.resolve(null);

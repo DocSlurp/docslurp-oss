@@ -65,7 +65,7 @@ function canonical(documentId: string, pageTexts: string[]): CanonicalDocument {
 }
 
 /** A PDF of `pageTexts.length` pages: Markdown with `\f` page breaks, canonical blocks per page, page images and figures. */
-function setup(action: PiiPolicy["action"], pageTexts: string[], options: { markdown?: string; documentId?: string; storage?: MemoryStore; canonicalBlocks?: boolean } = {}) {
+function setup(action: PiiPolicy["action"], pageTexts: string[], options: { markdown?: string; documentId?: string; storage?: MemoryStore; canonicalBlocks?: boolean; patterns?: PiiPolicy["patterns"] } = {}) {
   const storage = options.storage ?? new MemoryStore();
   const sink = new RecordingSink();
   const documentId = options.documentId ?? "doc-1";
@@ -91,7 +91,7 @@ function setup(action: PiiPolicy["action"], pageTexts: string[], options: { mark
     artifacts[`${documentId}:page-${page}`] = storage.uri(`${prefix}/pages/${documentId}/page-${page}.png`);
     artifacts[`${documentId}:doppler-figure:p${page}.0`] = storage.uri(`${prefix}/doppler-figures/${documentId}/p${page}.0.webp`);
   });
-  const pipeline = normalizePipelineFeatures({ piiPolicy: { enabled: true, patterns: ["ssn"], action, allowlistPatterns: [] } });
+  const pipeline = normalizePipelineFeatures({ piiPolicy: { enabled: true, patterns: options.patterns ?? ["ssn"], action, allowlistPatterns: [] } });
   const run = { id: "run-1", userId: "u1", orgId: "o1", projectId: "w1", stage: "pii-detect", status: "processing", pipeline, stats: {}, artifacts } as unknown as ProjectRun;
   const state = WorkflowState.create(run, [document]);
   const stage = new PiiDetectStage({} as CommandRunner, storage as unknown as ArtifactStore, fromEnv(), sink);
@@ -164,6 +164,19 @@ describe("block_indexing withholds the page, not the document", () => {
     expect([...located.pages].sort()).toEqual([2, 3]);
     expect(located.unattributed).toEqual([]);
     expect(planPiiWithholding("block_indexing", findings, true)).toEqual({ scope: "pages", pages: [2, 3], carriedPages: [] });
+  });
+
+  it("a match whose span crosses a page break never merges pages: later pages keep their numbers", async () => {
+    // A PEM key from page 2 into page 3, and an SSN on page 5 of 6: redacting the key's span before withholding would
+    // drop the break between pages 2 and 3 and shift page 5's text onto page 4.
+    const key = "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC";
+    const texts = ["p1 clean", `p2 ${key}`, "AAAAAAAAAAAAAAAAAAAAAAAA\n-----END PRIVATE KEY----- p3", "p4 clean", `p5 Jane Doe 12 Elm St SSN ${SSN}`, "p6 clean"];
+    const f = setup("block_indexing", texts, { patterns: ["ssn", "private-key"], canonicalBlocks: false });
+    await f.stage.run(f.state);
+    expect(outcome(f)).toMatchObject({ scope: "pages", withheldPages: [2, 3, 5] });
+    const pages = f.storage.objects.get(f.markdownKey)!.split("\f");
+    expect(pages).toEqual(["p1 clean", piiWithheldPageText(2), piiWithheldPageText(3), "p4 clean", piiWithheldPageText(5), "p6 clean"]);
+    expect(f.storage.objects.get(f.markdownKey)).not.toContain("Jane Doe");
   });
 
   it("every page withheld: the document is blocked", async () => {

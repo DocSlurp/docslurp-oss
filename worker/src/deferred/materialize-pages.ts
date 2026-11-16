@@ -16,6 +16,7 @@ import {
   type MaterializePagesInput,
   type PipelineFeatures,
   isPageWithheld,
+  PII_BLOCKED_DOCUMENT_STATUS,
 } from "@docslurp/shared";
 
 import type { Config } from "../config.js";
@@ -492,7 +493,8 @@ export async function materializePageRange(
       const scanned = scan(entry.text, entry.page);
       if (scanned.matches.length === 0) continue;
       piiMatched.add(entry.page);
-      // Deferred pages are read one by one, so both blocking actions withhold the page that matched.
+      // Deferred pages are read one by one: block_indexing withholds the page that matched; block_document (below)
+      // blocks the whole document.
       if (policy.action === "block_indexing" || policy.action === "block_document") {
         prepared.delete(entry.page);
         blocked.push(entry.page);
@@ -500,6 +502,20 @@ export async function materializePageRange(
         entry.text = scanned.redacted;
       }
     }
+  }
+
+  // The project chose whole-document blocking: a match on any page read here blocks the document, as pii-detect does
+  // at ingest (its status and outcome; every reader fails closed on both). Nothing of this batch is indexed.
+  if (policy.action === "block_document" && blocked.some((page) => !isPageWithheld(recorded, page))) {
+    for (const entry of [...prepared.values()]) { prepared.delete(entry.page); blocked.push(entry.page); }
+    const outcome = { scope: "document", blocked: true, action: "block_document", reason: "deferred-page-match", detectedAt: new Date().toISOString() };
+    await deps.sql`
+      update documents
+      set status = ${PII_BLOCKED_DOCUMENT_STATUS},
+          metadata = coalesce(metadata, '{}'::jsonb) || jsonb_build_object('pii', coalesce(metadata->'pii', '{}'::jsonb) || ${deps.sql.json(outcome)}::jsonb),
+          updated_at = now()
+      where id = ${documentId}
+    `;
   }
 
   // 3. Chunk, with map headings when a document map exists.

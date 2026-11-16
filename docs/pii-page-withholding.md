@@ -89,7 +89,11 @@ Every reader asks `piiWithholding()` and `isPageWithheld()` from `@docslurp/shar
   - Non-page slots (`doppler-markdown`, `doppler-figures`, `doppler-manifest*`) stay all-or-nothing.
   - `document.md` is the scanned Markdown slot (withheld pages already replaced). It is stored only when every withheld page is verified to be the placeholder; otherwise it is not stored.
 - **Doppler's folder** (`<root>/doppler/<doc>/images/page-NNNN/(image|figure)-MMM.<ext>`): the file proxy reads the page from the key. Under `images/`, a key it cannot parse is refused while the document withholds pages. The assets route refuses an image on a withheld page, or one that shows a file from a withheld page.
-- **Later stages and resumes** (figure resume, chart export, reindex, the first-pass reprocess) consult the worker's `documentPiiWithholding()` and `isPageWithheldInRun()` in a run, or `loadDocumentPiiWithholding()` outside one.
+- **Later stages and resumes**: the figure resume and the first-pass reprocess read the stored outcome (`loadDocumentPiiWithholding()`, `Store.documentPiiWithholding()`); in a run, `documentPiiWithholding()` and `isPageWithheldInRun()` are available to stages that run after pii-detect. Chart export runs inside vision-extract, before the scan, so its output is scanned like any other text.
+- **Streamed search** (`/v1/search/stream`) drops provisional hits on withheld pages with the final path's filter before it sends them; if the outcomes cannot be read, the leg sends no hit bodies.
+- **Rows written before the scan**: a page-scoped outcome deletes the withheld pages' rough-text rows (`document_pages`, written by the document map from the text layer it scanned itself), clears kept model reads and marks those page states `blocked-pii`. An existing summary tree is withdrawn, as for blocking and redaction.
+- **Dedup and backfill**: a document with a PII outcome is never a dedup source, and a temporary backfill version with one is never adopted (neither copy would carry the outcome).
+- **`block_document`**: the document map drops matched rough-text pages, and a match found by deferred materialization blocks the whole document (`pii_blocked`).
 
 ## Rescans
 

@@ -24,7 +24,7 @@ import { createPiiTextScanner, isStructuralKey, redactCanonicalDocument, redactJ
 import {
   applyPlanToCanonical,
   applyPlanToJson,
-  applyPlanToText,
+  applyPlanToText, withholdPagesThenRedact,
   locateMatches,
   perPageArtifactServable,
   planPiiWithholding,
@@ -180,7 +180,21 @@ export function createPostgresPiiDetectionSink(databaseUrl: string): PiiDetectio
         : null;
       // A summary tree the document already has was written from the text this outcome withholds: it stops being
       // served now and its rows and artifact are queued for strict removal (summary-tree/state-store.ts).
-      if (outcome.blocked || outcome.redacted) await withdrawSummaryTreeForPii(db as never, documentId);
+      if (outcome.blocked || outcome.redacted || outcome.scope === "pages" || outcome.scope === "sections") await withdrawSummaryTreeForPii(db as never, documentId);
+      if (outcome.scope === "pages" && outcome.withheldPages.length > 0) {
+        // Rows written before this scan (the map's rough text, a kept model read) of a page it withholds are removed:
+        // the map scanned only its own text, and this outcome may place a hit it never saw (OCR, a cross-page span).
+        const pages = [...outcome.withheldPages];
+        await db`
+          update document_page_states set state = 'blocked-pii', failure_reason = 'pii-policy', updated_at = now()
+          where document_id = ${documentId} and page_number = any(${pages}::int[]) and state in ('unseen', 'failed', 'parsed')
+        `;
+        await db`delete from document_pages where document_id = ${documentId} and page_number = any(${pages}::int[])`;
+        await db`
+          update document_page_states set read_text = null
+          where document_id = ${documentId} and page_number = any(${pages}::int[]) and read_text is not null
+        `;
+      }
       if (outcome.blocked) {
         await db`
           update documents
@@ -415,8 +429,11 @@ export class PiiDetectStage implements Stage {
         redactedArtifacts.push(canonical.slot);
       }
       if (markdown && markdownResult && (markdownResult.matches.length > 0 || withholding)) {
-        const base = withholding && plan.scope === "sections" ? markdown.text : markdownResult.redacted;
-        currentMarkdown = withholding ? applyPlanToText(plan, base, markdownResult.matches) : base;
+        // Pages: withhold on the original text, then redact each clean page alone (a redacted span that crossed a
+        // page break would otherwise drop the break and shift every later page).
+        currentMarkdown = plan.scope === "pages"
+          ? withholdPagesThenRedact(markdown.text, new Set(plan.pages), (page) => scan(page).redacted)
+          : withholding ? applyPlanToText(plan, markdown.text, markdownResult.matches) : markdownResult.redacted;
         await this.storage.streamText(markdown.key, currentMarkdown, markdown.contentType);
         redactedArtifacts.push(markdown.slot);
       }
@@ -432,9 +449,9 @@ export class PiiDetectStage implements Stage {
       if (fallbackResult && (fallbackResult.matches.length > 0 || withholding)) {
         // Embed, summary and page index read the markdown slot before the source file.
         const key = `${runArtifactRoot(state.run, document.userId)}/pii/${document.id}.redacted.md`;
-        currentMarkdown = withholding
-          ? applyPlanToText(plan, plan.scope === "sections" ? fallbackText : fallbackResult.redacted, fallbackResult.matches)
-          : fallbackResult.redacted;
+        currentMarkdown = plan.scope === "pages"
+          ? withholdPagesThenRedact(fallbackText!, new Set(plan.pages), (page) => scan(page).redacted)
+          : withholding ? applyPlanToText(plan, fallbackText!, fallbackResult.matches) : fallbackResult.redacted;
         await this.storage.streamText(key, currentMarkdown, "text/markdown");
         ledger.recordDocument(document.id, "markdown", this.storage.uri(key));
         redactedArtifacts.push("markdown");

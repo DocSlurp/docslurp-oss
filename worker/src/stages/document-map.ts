@@ -504,7 +504,8 @@ export class DocumentMapStage implements Stage {
       coarseRows = coarseRows.flatMap(([pageNumber, text]): Array<[number, string]> => {
         const scanned = scan(text, pageNumber);
         if (scanned.matches.length === 0) return [[pageNumber, text]];
-        if (policy.action === "block_indexing") { blockedPages.push(pageNumber); return []; }
+        // Page-scoped withholding drops the page; `block_document` drops it too (pii-detect then blocks the document).
+        if (policy.action === "block_indexing" || policy.action === "block_document") { blockedPages.push(pageNumber); return []; }
         return [[pageNumber, policy.action === "redact_artifacts" ? scanned.redacted : text]];
       });
     }

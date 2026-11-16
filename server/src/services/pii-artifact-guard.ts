@@ -53,12 +53,12 @@ export function documentWithholdsUri(uris: string[]) {
  * Page-scoped withholding of each document (packages/shared/src/pii-withholding.ts), read from the live rows. A
  * document the query does not return is absent from the map, which the filters treat as withheld whole.
  */
-export async function loadPiiWithholdings(documentIds: readonly string[]): Promise<Map<string, PiiWithholding>> {
+export async function loadPiiWithholdings(documentIds: readonly string[], orgId?: string | null): Promise<Map<string, PiiWithholding>> {
   const ids = [...new Set(documentIds)].filter((id) => typeof id === "string" && id.length > 0);
   const out = new Map<string, PiiWithholding>();
   if (ids.length === 0) return out;
   const rows = await sql<{ id: string; status: string | null; pii: unknown }[]>`
-    select d.id, d.status, d.metadata->'pii' as pii from documents d where d.id = any(${sql.array(ids)})
+    select d.id, d.status, case when jsonb_typeof(d.metadata->'pii') = 'object' then (d.metadata->'pii') - 'withheldArtifactUris' else d.metadata->'pii' end as pii from documents d where d.id = any(${sql.array(ids)}) and (${orgId === undefined} or d.org_id = ${orgId ?? null})
   `;
   for (const row of rows) out.set(row.id, piiWithholding({ status: row.status, metadata: row.pii === null || row.pii === undefined ? {} : { pii: row.pii } }));
   return out;
@@ -69,12 +69,12 @@ export async function loadPiiWithholdings(documentIds: readonly string[]): Promi
  * withheld page, hits without a page on a document that withholds pages, and every hit of a blocked document are
  * dropped. The worker already replaced those pages' text before indexing; this is the serving-side check.
  */
-export async function filterPiiWithheldResults<T extends WithholdableHit>(results: readonly T[]): Promise<T[]> {
+export async function filterPiiWithheldResults<T extends WithholdableHit>(results: readonly T[], orgId?: string | null): Promise<T[]> {
   const documentIds = results
     .filter((result) => (result.citation.source ?? "document") === "document")
     .map((result) => result.citation.documentId);
   if (documentIds.length === 0) return [...results];
-  const { kept, dropped } = filterPiiWithheldHits(results, await loadPiiWithholdings(documentIds));
+  const { kept, dropped } = filterPiiWithheldHits(results, await loadPiiWithholdings(documentIds, orgId));
   if (dropped > 0) console.info(`[pii] withheld-hits-dropped count=${dropped}`);
   return kept;
 }
@@ -87,7 +87,7 @@ export async function filterPiiWithheldResults<T extends WithholdableHit>(result
 export async function artifactOnWithheldPage(uri: string, projectIds: readonly string[], orgId?: string | null): Promise<boolean> {
   if (projectIds.length === 0) return false;
   const rows = await sql<{ document_id: string; slot: string | null; status: string | null; pii: unknown }[]>`
-    select d.id as document_id, artifact.slot, d.status, d.metadata->'pii' as pii
+    select d.id as document_id, artifact.slot, d.status, case when jsonb_typeof(d.metadata->'pii') = 'object' then (d.metadata->'pii') - 'withheldArtifactUris' else d.metadata->'pii' end as pii
     from project_runs runs
     cross join lateral jsonb_each_text(coalesce(runs.artifacts, '{}'::jsonb)) as artifact(slot, value)
     join documents d on d.run_id = runs.id and starts_with(artifact.slot, d.id || ':')
@@ -109,7 +109,7 @@ export async function artifactOnWithheldPage(uri: string, projectIds: readonly s
   if (folder) {
     const [, documentId, rest] = folder;
     const [doc] = await sql<{ status: string | null; pii: unknown }[]>`
-      select d.status, d.metadata->'pii' as pii from documents d
+      select d.status, case when jsonb_typeof(d.metadata->'pii') = 'object' then (d.metadata->'pii') - 'withheldArtifactUris' else d.metadata->'pii' end as pii from documents d
       where d.id = ${documentId!} and d.project_id = any(${sql.array([...projectIds])})
     `;
     if (doc) {

@@ -175,6 +175,16 @@ function planSections(findings: PiiScanFindings): PiiWithholdingPlan {
 }
 
 /** Markdown or source text with the plan applied. */
+/**
+ * Page-scoped rewrite of `\f`-separated text: withheld pages become their placeholder, and every other page is
+ * redacted on its own. Withholding runs on the original text, before any redaction, and redaction never sees a page
+ * break, so a match whose span crosses a break can never merge pages and shift later ones (the page count is kept by
+ * construction).
+ */
+export function withholdPagesThenRedact(text: string, pages: ReadonlySet<number>, redact: (page: string) => string): string {
+  return text.split("\f").map((page, index) => (pages.has(index + 1) ? piiWithheldPageText(index + 1) : redact(page))).join("\f");
+}
+
 export function applyPlanToText(plan: PiiWithholdingPlan, text: string, matches: readonly PiiMatch[]): string {
   if (plan.scope === "pages") return withholdTextPages(text, new Set(plan.pages));
   if (plan.scope === "sections") return withholdTextSections(text, matches).text;

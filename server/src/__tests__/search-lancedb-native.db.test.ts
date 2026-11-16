@@ -275,7 +275,7 @@ describe("SEARCH_LANCEDB_NATIVE", () => {
     // (page-scoped PII: hits on withheld pages are dropped whichever index served them).
     expect(reads.length).toBeLessThanOrEqual(4);
     expect(reads[0]).toMatch(/from projects w/);
-    const pii = reads.filter((read) => /d\.metadata->'pii' as pii from documents d where d\.id = any/.test(read));
+    const pii = reads.filter((read) => /as pii from documents d where d\.id = any/.test(read));
     expect(pii).toHaveLength(1);
     for (const read of reads.slice(1).filter((read) => !pii.includes(read))) expect(read).toMatch(/select id from document_chunks where id in/);
     expect(statements.some((statement) => /insert into search_sessions/.test(statement))).toBe(true);

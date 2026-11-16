@@ -1,5 +1,11 @@
 # TODO
 
+- Page-scoped PII follow-ups (council on #374, 2026-11-15; none blocks page scoping):
+  - Pre-existing: run artifacts written before the scan (page images, raw vision output) are served by the file proxy until pii-detect records the withheld list; refuse a run's pre-scan artifacts while the project policy is on and that document's pii-detect has not completed. `artifactOnWithheldPage` checks slots only on the document's current run.
+  - `sections` scope has no serve-time check: a stale index row from before a rescan is not filtered. Drop hits of `sections` documents from runs older than the pii-detect run.
+  - Contract/canonical nodes are keyed by their own `pageNumber`: unmatched text of a withheld page nested under a node tagged with a clean page (a table spanning pages) stays; under `sections`, contract and canonical keep the rest of the section. Structural-key fields (`*Url`, `*Id`, `mailto:`) are never scanned (pre-existing for redaction).
+  - `artifactOnWithheldPage` expands every run's artifacts of the accessible projects per file-proxy request; fold the slot lookup into `userCanAccessArtifactUri`'s existing query.
+
 - Offline profiler follow-ups (#431): independently calibrate font/CMap Unicode fidelity and table/chart candidate accuracy; native measurements remain encoded-glyph/geometric estimates. Real-corpus full-deep coverage, refusal diagnostics and compute calibration are complete; do not infer production OCR routing from candidate counts.
 
 - Project activity counters (0165), council follow-ups 2026-11-14:

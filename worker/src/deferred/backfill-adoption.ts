@@ -29,6 +29,9 @@ export async function adoptBackfillDocuments(
     select t.id as temp_id, s.id as source_id, t.indexing_mode as mode, s.run_id as source_run_id,
       (s.id is not null and s.superseded_at is null and s.purged_at is null and s.status = 'completed'
         and t.status not in ('failed', 'cancelled', 'pii_blocked')
+        -- A temporary version the PII policy touched is never adopted: its page vectors and rows would land on a
+        -- source whose metadata does not record what the policy withheld. It is retired instead (fail closed).
+        and t.metadata->'pii' is null
         and not exists (
           select 1 from document_run_stage_states st
           where st.document_id = t.id and st.run_id = t.run_id and st.status = 'failed'

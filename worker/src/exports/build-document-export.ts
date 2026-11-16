@@ -232,8 +232,9 @@ export async function* documentExportEntries(
       }
     }
     // A withheld page's stored text is already the placeholder; it is replaced here as well, never read through.
-    const pages = (completed ? await source.pages(row.id) : []).map((page) =>
-      isPageWithheld(piiState, page.page_number) && piiState.scope !== "document"
+    // A document withheld whole (including an outcome that cannot be read) exports no page text (fail closed).
+    const pages = (completed && piiState.scope !== "document" ? await source.pages(row.id) : []).map((page) =>
+      isPageWithheld(piiState, page.page_number)
         ? { ...page, text: piiWithheldPageText(page.page_number) }
         : page);
     const imagePlan = completed ? await documentImagePlan(source, artifacts, withheld, artifactKey("artifact-graph"), args.content === "all") : null;

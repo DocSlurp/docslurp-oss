@@ -141,6 +141,19 @@ describe("backfill completion when the source changed mid-run", () => {
     expect(tmp!.canonical_id).toBeNull();
   });
 
+  it("never adopts a temporary version whose pages the PII policy withheld: its vectors stay off the source", async () => {
+    await seedPair("piiw");
+    await db.exec(`update documents set metadata = '{"pii": {"scope": "pages", "withheldPages": [2]}}' where id = 'tmp-piiw'`);
+
+    await completeRun("bf-piiw");
+
+    expect(await rows(`select 1 from document_page_vectors where document_id = 'src-piiw'`)).toHaveLength(0);
+    expect((await rows<{ indexing_mode: string }>(`select indexing_mode from documents where id = 'src-piiw'`))[0]!.indexing_mode).toBe("map");
+    const [tmp] = await rows<{ superseded_at: string | null; canonical_id: string | null }>(`select superseded_at, canonical_id from documents where id = 'tmp-piiw'`);
+    expect(tmp!.superseded_at).not.toBeNull();
+    expect(tmp!.canonical_id).toBeNull();
+  });
+
   it("skips a purged source", async () => {
     await seedPair("pur");
     await db.exec(`update documents set purged_at = now() where id = 'src-pur'`);

@@ -1,4 +1,5 @@
 import {
+  filterPiiWithheldHits,
   searchResultId,
   type SearchStreamHit,
   type SearchStreamLeg,
@@ -10,6 +11,7 @@ import { annotateEvidenceRelevance, applyRelevanceFloor } from "./relevance.js";
 import type { SearchFilters } from "./filters.js";
 import { qualifyCommunityResults, searchChunkToResult } from "./search-result.js";
 import { currentSearchStreamSink, emitSearchStreamEvent } from "./stream-events.js";
+import { loadPiiWithholdings } from "../services/pii-artifact-guard.js";
 
 /**
  * Provisional hits for `/v1/search/stream`.
@@ -20,7 +22,8 @@ import { currentSearchStreamSink, emitSearchStreamEvent } from "./stream-events.
  * final path uses (the per-leg candidate window, the relevance floor and the
  * community-summary scope qualification). Access, document eligibility and PII
  * blocking are applied inside each leg's query, so a leg result is already
- * scoped. Ranking-only steps (fusion, rerank, MMR, project search controls,
+ * scoped; page-scoped PII withholding is applied in `emitLegHits` with the
+ * final path's filter before anything is selected. Ranking-only steps (fusion, rerank, MMR, project search controls,
  * parent text) are skipped on purpose.
  */
 export interface ProvisionalSelection {
@@ -120,7 +123,24 @@ export function emitLegHits(args: {
   startedAt: number;
   policy: ProvisionalHitPolicy | undefined;
   timedOut?: () => boolean;
-}): void {
+}): Promise<void> {
+  if (!currentSearchStreamSink()) return Promise.resolve();
+  // Page-scoped PII: hits on a withheld page are dropped before selection, with the filter the final results use
+  // (search.ts). If the withholdings cannot be read, the leg's hits are not streamed (fail closed).
+  return withheldPagesDropped(args.chunks).then(
+    (chunks) => emitSelectedLegHits({ ...args, chunks }),
+    () => emitSelectedLegHits({ ...args, chunks: args.chunks, policy: undefined }),
+  );
+}
+
+async function withheldPagesDropped(chunks: SearchChunk[]): Promise<SearchChunk[]> {
+  const documentIds = chunks.filter((chunk) => (chunk.source ?? "document") === "document").map((chunk) => chunk.documentId);
+  if (documentIds.length === 0) return chunks;
+  const withholdings = await loadPiiWithholdings(documentIds);
+  return filterPiiWithheldHits(chunks.map((chunk) => ({ chunk, citation: chunk })), withholdings).kept.map(({ chunk }) => chunk);
+}
+
+function emitSelectedLegHits(args: Parameters<typeof emitLegHits>[0]): void {
   emitSearchStreamEvent((sink) => {
     const selection = args.policy
       ? args.policy.select(args.leg, args.chunks, {
