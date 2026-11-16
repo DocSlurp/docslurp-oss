@@ -239,8 +239,11 @@ export interface VisionAttemptBackend {
   recordOverrun(request: VisionOverrunRequest): Promise<VisionOverrunResult>;
 }
 
-/** Why a request leaves the counts: refused before acceptance, or cancelled before it was sent. */
-export type VisionUnbilledKind = "throttle" | "unsupported" | "cancelled";
+/**
+ * Why a request leaves the counts: refused before acceptance (a throttle, a capability error, or `routing`: no host met
+ * the request's routing constraints, such as its `max_price` ceiling), or cancelled before it was sent.
+ */
+export type VisionUnbilledKind = "throttle" | "unsupported" | "cancelled" | "routing";
 
 /** One request admission per HTTP request a vision call sends (`executeVisionRuntime` requires one). */
 export interface VisionRequestGate {
@@ -254,8 +257,9 @@ export interface VisionRequestGate {
   /**
    * The provider refused the latest admitted request before accepting it: a throttle (429, 503/529)
    * or, on a streaming request, a capability error. It leaves the page bound, breaker and org count.
-   * `cancelled` hands back a request the caller aborted after admission and before sending it.
-   * Returns false once the call's throttle allowance is spent (`unsupported` and `cancelled` are not
+   * `cancelled` hands back a request the caller aborted after admission and before sending it; `routing` one no host
+   * would serve under its routing constraints (nothing billed).
+   * Returns false once the call's throttle allowance is spent (`unsupported`, `cancelled` and `routing` are not
    * limited).
    */
   unbilled(kind: VisionUnbilledKind, detail?: VisionUnbilledDetail): Promise<boolean>;

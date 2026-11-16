@@ -560,7 +560,9 @@ async function runAttempt(args: GuardedCompletionArgs, body: Record<string, unkn
       const routingBody = response.status === 503 || response.status === 404 ? await response.clone().text().catch(() => "") : "";
       void response.body?.cancel().catch(() => {});
       if (routingBody && isRoutingExclusion(response.status, routingBody)) {
-        args.gate?.failed();
+        // Refused before acceptance, nothing billed: handed back, never a failed request (a no-op when the retry layer
+        // already handed it back).
+        await args.gate?.unbilled("routing", { provider: args.providerLabel, status: response.status });
         throw new ProviderRoutingExclusionError(response.status, routingBody);
       }
       if (streaming && STREAM_UNSUPPORTED_STATUSES.has(response.status)) {

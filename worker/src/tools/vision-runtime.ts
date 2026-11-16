@@ -568,6 +568,11 @@ async function sendRouteVisionRequest(
     imageTokens: visionImageTokenBound(imageSize, model),
     outputTokens: outputCap.bound,
   });
+  // A price ceiling or host restriction must be sent as one: a route that cannot carry it (not OpenRouter, or no catalog
+  // price to send as max_price) is refused before anything is admitted or sent, never sent unrestricted.
+  if (args.priceCeiling && (isPrivate || billing !== "openrouter" || !pricing.maxPrice)) {
+    throw new UnpricedVisionRouteError(model, "cannot carry the request's price ceiling and host restriction");
+  }
   const knownSize = Boolean(imageSize?.widthPx && imageSize.heightPx);
   console.log(
     `[vision-weight] model=${model} billing=${billing} weightCents=${pricing.weightCents.toFixed(4)} ` +

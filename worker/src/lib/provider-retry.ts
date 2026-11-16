@@ -230,7 +230,7 @@ export interface ProviderRetryOptions {
 export interface ProviderRequestGate {
   admit(): Promise<void>;
   failed(): void;
-  unbilled(kind: "throttle" | "cancelled", detail?: { provider: string; status: number }): Promise<boolean>;
+  unbilled(kind: "throttle" | "cancelled" | "routing", detail?: { provider: string; status: number }): Promise<boolean>;
 }
 
 /**
@@ -332,7 +332,8 @@ export async function fetchWithProviderRetry(url: string, init: RequestInit, opt
           `[provider-routing-exclusion] provider=${options.provider} label="${options.label}" status=${status} ` +
             `detail=${JSON.stringify(body.slice(0, 200))}`,
         );
-        options.gate?.failed();
+        // Nothing was billed: the request leaves the page bound, the breaker and the org count (never a failure).
+        if (options.gate) await options.gate.unbilled("routing", { provider: options.provider, status });
         if (lease) options.rateLimit?.onLease?.(lease);
         return new Response(body, { status, headers: response.headers });
       }

@@ -125,4 +125,20 @@ describe("GLM 5.3 Flash vision profile", () => {
         return false;
       });
   });
+
+  it("refuses a price-ceiling request on a route that cannot carry it, sending nothing", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const dir = await mkdtemp(join(tmpdir(), "vision-glm-"));
+    const imagePath = join(dir, "page.png");
+    await writeFile(imagePath, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+    const ceiling = { inputUsdPerMillion: 0.065, outputUsdPerMillion: 0.24, imageUsd: 0, hosts: ["wafer/nvfp4", "wafer/us"] };
+    // DeepInfra's own API takes no max_price or host allowlist.
+    await expect(inAllowingRun(() => executeVisionRuntime({
+      imagePath, outputPath: `${imagePath}.json`, gate: null,
+      vision: visionConfigSchema.parse({ modelUri: "llm://deepinfra/Qwen/Qwen3-VL-30B-A3B-Instruct" }),
+      cfg: { ...cfg, deepInfraApiKey: "di-key" } as Config, runner: new CommandRunner(), privacyMode: "standard", priceCeiling: ceiling,
+    }))).rejects.toThrow(/cannot carry the request's price ceiling/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
 });

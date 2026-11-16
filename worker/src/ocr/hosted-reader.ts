@@ -25,6 +25,7 @@ import type { CommandRunner } from "../tools/runner.js";
 import { executeVisionRuntime, visionCall } from "../tools/vision-runtime.js";
 import { recordOcrEscalationPages, type OcrEscalationSkipReason } from "./escalation-stats.js";
 import { findProviderRoutingExclusion } from "../lib/provider-retry.js";
+import { findVisionBilledUsage, findVisionOutputRejected } from "../tools/vision-stream.js";
 
 export { DEFAULT_OCR_ESCALATION_MODEL } from "@docslurp/shared";
 /** Escalation reads per document unless `DOCSLURP_OCR_ESCALATION_MAX_PAGES` says otherwise. */
@@ -224,7 +225,8 @@ export function createHostedOcrReader(args: {
               const event = usage.kind === "rejected"
                 ? state.usageLedger.record(usage.input)
                 : state.usageLedger.enqueue({ ...usage.input, amount: usage.input.amount ?? 1, unit: usage.input.unit ?? "attempt", costCents: usage.input.costCents ?? 0, inputTokens: usage.input.inputTokens ?? 0, outputTokens: usage.input.outputTokens ?? 0 }, { logAiUsage: true });
-              if (event) event.id = `${callId}:failed:${index}`;
+              // Per reader: a failed GLM read and a failed Qwen read of one page never share an id (both costs are kept).
+              if (event) event.id = `${callId}:${candidate.route.optionId}:failed:${index}`;
               failed.push(event);
             }
             if (failed.some((event) => event !== null)) await persist("failed", null, candidate.route.model, failed);
@@ -271,6 +273,9 @@ export function createHostedOcrReader(args: {
           // No host could serve this reader under its price ceiling (nothing billed): the next reader, else skip. Never sent
           // to a pricier host.
           if (!findProviderRoutingExclusion(error)) throw error;
+          // A refusal after an attempt of this reader was served and billed (its output rejected, then the retry refused):
+          // that read happened, so the page is not read again by the next reader; it fails like any rejected read.
+          if (findVisionBilledUsage(error) || findVisionOutputRejected(error)) throw error;
           console.warn(`[ocr] ${purpose} reader=${candidate.route.optionId} document=${page.documentId} page=${page.pageNumber} no host under its price ceiling`);
           if (index === candidates.length - 1) throw new HostedOcrSkipped("margin", `${purpose}: no host can serve the read under its price ceiling`);
         }

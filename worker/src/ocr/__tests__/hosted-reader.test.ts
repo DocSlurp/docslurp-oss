@@ -5,7 +5,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { Config } from "../../config.js";
 import { priceVisionResult } from "../../lib/guarded-vision-call.js";
-import { MemoryVisionAttemptBackend, type VisionRequestGate } from "../../lib/vision-attempt-guard.js";
+import { MemoryVisionAttemptBackend, visionGuardFor, withVisionCall, type VisionRequestGate } from "../../lib/vision-attempt-guard.js";
+import { attachVisionBilledUsage } from "../../tools/vision-stream.js";
 import type { ProjectRun } from "../../models.js";
 import { WorkflowState } from "../../pipeline/pipeline.js";
 import { pngHeader } from "../../test/fake-ocr.js";
@@ -198,6 +199,47 @@ describe("OCR escalation reads", () => {
     expect(execute).toHaveBeenCalledTimes(2);
     expect(state.usageLedger.snapshot().filter((event) => event.metric === "ingest-page-rich")).toEqual([]);
     expect(ocrEscalationStageStats(state.artifactLedger, "doc-1")).toMatchObject({ skippedPages: { "price-check": 2 } });
+  });
+
+  it("hands GLM's routing refusals back unbilled: 30 refused pages leave the breaker closed and the attempt budget whole", async () => {
+    const state = runState();
+    const env = { ...ON, DOCSLURP_OCR_ESCALATION_MAX_PAGES: "40" } as NodeJS.ProcessEnv;
+    // As the runtime does: each request is admitted, a routing refusal is handed back unbilled, a Qwen read succeeds.
+    const execute = vi.fn(async (args: ExecuteArgs): Promise<VisionExecutionResult> => {
+      const gate = args.gate as VisionRequestGate;
+      await gate.admit();
+      if (args.vision.modelUri === OCR_ESCALATION_GLM_MODEL) {
+        await gate.unbilled("routing", { provider: "openrouter", status: 404 });
+        throw new ProviderRoutingExclusionError(404, "No endpoints found matching your data policy and max_price");
+      }
+      return { runtime: "openai-compatible", provider: "deepinfra", model: MODEL, prompt: "p", text: "Qwen read", raw: "", latencyMs: 5,
+        inputTokens: 10, outputTokens: 10, usageSource: "provider", costCents: 0.01, baseUrl: ROUTE.baseUrl, fallbackUsed: false, route: { ...ROUTE } } as unknown as VisionExecutionResult;
+    });
+    const reader = createHostedOcrReader({ state, cfg: CFG, runner: {} as CommandRunner, env, execute });
+    const outcome = await outcomeWith(Array.from({ length: 30 }, (_, index) => ({ pageNumber: index + 1, text: `ocr ${index + 1}`, escalate: true })));
+    expect(await escalateOcrPages(outcome, reader, "doc-1")).toMatchObject({ attempted: 30, replaced: 30, failed: 0, skipped: {} });
+    expect(execute).toHaveBeenCalledTimes(60);
+    // The run's other vision reads are unaffected: the breaker is closed and a new call is admitted.
+    expect(visionGuardFor(state).stop).toBeNull();
+    await expect(withVisionCall(state, { documentId: "doc-2", pageNumber: 1, purpose: "page" }, async (gate) => { await gate.admit(); })).resolves.toBeUndefined();
+  });
+
+  it("does not fall back to Qwen after a GLM attempt of the page was billed: the read fails like any rejected read", async () => {
+    const state = runState();
+    const execute = stubExecute((args) => {
+      if (args.vision.modelUri !== OCR_ESCALATION_GLM_MODEL) return "Qwen read";
+      // Attempt 1 served and rejected (billed), the retry refused for routing.
+      const error = new ProviderRoutingExclusionError(503, "There is no available model provider that meets your routing requirements");
+      attachVisionBilledUsage(error, { inputTokens: 2_000, outputTokens: 8_000, costMetadata: {}, costCents: 0.3, usageSource: "provider" } as never);
+      return error;
+    });
+    const reader = createHostedOcrReader({ state, cfg: CFG, runner: {} as CommandRunner, env: ON, execute });
+    expect(await escalateOcrPages(await outcomeWith([{ pageNumber: 1, text: "ocr 1", escalate: true }]), reader, "doc-1")).toMatchObject({ replaced: 0, failed: 1 });
+    expect(execute.mock.calls.map((call) => call[0].vision.modelUri)).toEqual([OCR_ESCALATION_GLM_MODEL]);
+    // The billed GLM attempt is recorded under the GLM reader's own id.
+    const failedIds = state.usageLedger.snapshot().map((event) => event.id ?? "").filter((id) => id.includes(":failed:"));
+    expect(failedIds.length).toBeGreaterThan(0);
+    expect(failedIds.every((id) => id.includes(":scan-ocr/hosted-escalation-glm:failed:"))).toBe(true);
   });
 
   it("gates each reader on its own: a refused GLM falls back to Qwen, both refused skip the read", async () => {
