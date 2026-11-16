@@ -3,6 +3,7 @@ import { z } from "zod";
 import { migrateStoredModelSettings } from "./stored-model-settings.js";
 import { dropRetiredExtractorIds, normalizeDocumentExtractionAliases } from "./extractor-aliases.js";
 import { DEFAULT_QUALITY_MODE, migrateLegacyQualitySettings, qualityModeSchema } from "./quality.js";
+import { defaultPipelineLadder, effectiveLadder, pipelineLadderSchema } from "./auto-ladder.js";
 import {
   defaultDocumentExtractionConfig,
   documentExtractionConfigSchema,
@@ -518,6 +519,9 @@ export const pipelineFeaturesSchema = z
     // parser playbook and vision page selection from it. Retired `parserPlaybook` and `vision.forceAllPages`
     // inputs are mapped onto it by migrateLegacyQualitySettings.
     quality: qualityModeSchema.default(DEFAULT_QUALITY_MODE),
+    // Auto ladder limits (auto-ladder.ts): the highest rung a page may be read on and per-document escalation share caps.
+    // Defaults change nothing; ignored outside `auto`.
+    ladder: pipelineLadderSchema.default(defaultPipelineLadder),
     documentExtraction: documentExtractionConfigSchema.default(
       defaultDocumentExtractionConfig,
     ),
@@ -745,6 +749,7 @@ export const defaultPipelineFeatures: PipelineFeatures = {
   inferenceLane: "standard",
   textGeneration: defaultTextGenerationConfig,
   quality: DEFAULT_QUALITY_MODE,
+  ladder: defaultPipelineLadder,
   documentExtraction: defaultDocumentExtractionConfig,
   visionFallback: true,
   vision: defaultVisionConfig,
@@ -1015,8 +1020,9 @@ export const pipelineStageLabels: Record<RunStage, string> = {
 
 export type PipelineFeatureOverrides = Omit<
   Partial<PipelineFeatures>,
-  "vision" | "embedding" | "piiPolicy" | "documentExtraction" | "textGeneration" | "graph" | "structuredExtraction" | "webhooks" | "chartExport"
+  "vision" | "embedding" | "piiPolicy" | "documentExtraction" | "textGeneration" | "graph" | "structuredExtraction" | "webhooks" | "chartExport" | "ladder"
 > & {
+  ladder?: Partial<PipelineFeatures["ladder"]> | null;
   chartExport?: Partial<PipelineFeatures["chartExport"]> | null;
   structuredExtraction?: Partial<PipelineFeatures["structuredExtraction"]> | null;
   webhooks?: Partial<ProjectWebhookSettings> | null;
@@ -1061,6 +1067,10 @@ export function normalizePipelineFeatures(
     textGeneration: {
       ...defaultTextGenerationConfig,
       ...(source?.textGeneration ?? {}),
+    },
+    ladder: {
+      ...defaultPipelineLadder,
+      ...(source?.ladder ?? {}),
     },
     vision: {
       ...visionBase,
@@ -1520,7 +1530,7 @@ export function withoutStageSelection<T extends { restartFromStage?: unknown; st
  * `indexingMode`/`materialization`/`visualPages`, so switching modes (or the
  * new `visualPages` default appearing on stored pipelines) never marks chunks stale.
  * `summaryTree` is dropped too: the tree is a separate index built from the chunks, so
- * turning it on or off (or the key appearing on stored pipelines) changes no chunk.
+ * turning it on or off (or the key appearing on stored pipelines) changes no chunk. `ladder` is dropped at its defaults.
  * The stored pipeline keeps those fields (use `withoutStageSelection` there).
  */
 export function pipelineVersionFeatures<T extends object>(
@@ -1535,6 +1545,14 @@ export function pipelineVersionFeatures<T extends object>(
     summaryTree: _summaryTree,
     ...rest
   } = features as T & Record<string, unknown>;
+  // The Auto ladder at its defaults (no limit) changes no output: dropped, so the key appearing on stored pipelines never
+  // changes a version hash. A limit stays in the hash.
+  if ("ladder" in rest) {
+    // Hashed as its effective limits, so equal limits written differently (an explicit null, a share of 1) hash alike.
+    const { active, ...limits } = effectiveLadder({ quality: "auto", ladder: rest.ladder as never });
+    if (active) (rest as Record<string, unknown>).ladder = limits;
+    else delete (rest as Record<string, unknown>).ladder;
+  }
   return rest as Omit<T, "restartFromStage" | "stageSubset" | "indexingMode" | "materialization" | "visualPages" | "summaryTree">;
 }
 
@@ -1699,6 +1717,7 @@ const FIELD_SEED_STAGES: Record<keyof PipelineFeatures, readonly PipelineRunStag
   inferenceLane: [],
   textGeneration: [],
   quality: ["extract-markdown", "vision-extract"],
+  ladder: ["extract-markdown", "vision-extract"],
   documentExtraction: ["extract-markdown"],
   visionFallback: ["vision-extract"],
   vision: ["vision-extract"],

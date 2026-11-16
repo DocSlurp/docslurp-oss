@@ -1,5 +1,5 @@
 import type { Sql } from "postgres";
-import { applyDefaultVisionOverride, normalizeStoredPipelineFeatures, parseManagedPipelineOverrides, resolveManagedPipeline, type MaterializePagesInput } from "@docslurp/shared";
+import { applyDefaultVisionOverride, applyLadderLimits, normalizeStoredPipelineFeatures, clampRunLadder, qualityModeSchema, type PipelineFeatures, parseManagedPipelineOverrides, resolveManagedPipeline, type MaterializePagesInput } from "@docslurp/shared";
 
 import { isMissingDocumentError } from "../db/missing-document.js";
 import { recordMaterializedPageFee, staleStampSql } from "../db/page-base-fee.js";
@@ -46,10 +46,28 @@ async function withSourcePipeline<R extends { id: string; kind?: string; pipelin
   documentId: string,
 ): Promise<R> {
   if (run.kind !== "materialize") return run;
+  // Query-time reads follow the project's Auto ladder as it is now, never looser: a materialize run carries an older
+  // snapshot of the pipeline (pipeline.ladder), so the project's current limits tighten it.
+  // Quality is capped at the project's while it has a limit (clampRunLadder), so a source run at Good cannot read past it.
+  const [project] = await sql<{ ladder: unknown; quality: string | null }[]>`
+    select w.pipeline -> 'ladder' as ladder, w.pipeline ->> 'quality' as quality
+    from documents d join projects w on w.id = d.project_id where d.id = ${documentId}
+  `;
+  const projectQuality = qualityModeSchema.safeParse(project?.quality ?? "auto");
+  const tighten = <T extends { pipeline: unknown }>(value: T): T => {
+    const pipeline = value.pipeline as PipelineFeatures;
+    if (!pipeline || typeof pipeline !== "object") return value;
+    const clamped = clampRunLadder(pipeline, {
+      // An unreadable project quality is treated as the tightest (fail closed).
+      quality: projectQuality.success ? projectQuality.data : "fast",
+      ladder: (project?.ladder ?? null) as never,
+    }, false);
+    return { ...value, pipeline: applyLadderLimits(clamped) };
+  };
   const [own] = await sql<{ empty: boolean }[]>`
     select (pipeline = '{}'::jsonb) as empty from project_runs where id = ${run.id}
   `;
-  if (own && !own.empty) return run;
+  if (own && !own.empty) return tighten(run);
   const [source] = await sql<{ pipeline: Record<string, unknown> | null; managed: unknown }[]>`
     select coalesce(nullif(r.pipeline, '{}'::jsonb), nullif(w.pipeline, '{}'::jsonb)) as pipeline,
       w.managed_models -> 'pipeline' as managed
@@ -69,7 +87,8 @@ async function withSourcePipeline<R extends { id: string; kind?: string; pipelin
     parseManagedPipelineOverrides(source.managed, `project of document ${documentId}`),
     label,
   );
-  return { ...run, pipeline: applyDefaultVisionOverride(managed.pipeline) };
+  // The Auto ladder's limits apply to query-time reads as to ingest (store.ts).
+  return tighten({ ...run, pipeline: applyDefaultVisionOverride(managed.pipeline) });
 }
 
 /**

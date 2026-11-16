@@ -1,4 +1,4 @@
-import { defaultPageRouterConfig, type RoutePlan } from "@docslurp/shared";
+import { defaultPageRouterConfig, effectiveLadder, type RoutePlan } from "@docslurp/shared";
 
 import type { Config } from "../config.js";
 import type { WorkflowState } from "../pipeline/pipeline.js";
@@ -33,6 +33,9 @@ export async function loadActiveRoutePlan(
   cfg: Pick<Config, "pageRouterMode"> | undefined,
 ): Promise<RoutePlan | null> {
   if (effectivePageRouterMode(state, cfg) !== "active") return null;
+  // An Auto ladder limit (pipeline.ladder) plans every page read from page triage; a router plan would read pages outside
+  // it, so documents of a run with a limit take the triage path (the router still records its plan).
+  if (effectiveLadder(state.run.pipeline).active) return null;
   assertSupportedActiveMargin((state.run.pipeline.pageRouter ?? defaultPageRouterConfig).marginFloor);
   const uri = state.artifactLedger.readDocument(documentId, PAGE_ROUTE_PLAN_SLOT);
   const key = uri ? keyFromStorageUri(uri, storage.bucket) : null;

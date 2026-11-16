@@ -21,7 +21,7 @@ import { randomUUID, createHmac } from "node:crypto";
 
 import postgres, { type JSONValue, type PendingQuery, type Sql } from "postgres";
 import { adoptPendingAssets, flushAssetLedger, listHostPageImagePages, markAssetsLost, markAssetsPending, markAssetsStored, replaceUnvouchedObject, writeDocumentAssetLedger, type FigureObjectReader, type DocumentAssetLedgerResult, type DocumentAssetLedgerWrite } from "./document-asset-ledger.js";
-import { applyDefaultVisionOverride, defaultPipelineFeatures, normalizeStoredPipelineFeatures, PII_BLOCKED_DOCUMENT_STATUS, planRunFailure, type DerivedDocumentTitle, type PrivacyAuditEntry } from "@docslurp/shared";
+import { applyDefaultVisionOverride, applyLadderLimits, defaultPipelineFeatures, normalizeStoredPipelineFeatures, PII_BLOCKED_DOCUMENT_STATUS, planRunFailure, type DerivedDocumentTitle, type PrivacyAuditEntry } from "@docslurp/shared";
 
 import { adoptBackfillDocuments } from "../deferred/backfill-adoption.js";
 import { completingDocumentStamp, runReusesExtraction, runStamp, runStampsIngestVersion, stampDocumentIngestVersion } from "./ingest-version.js";
@@ -4402,7 +4402,9 @@ function mapRun(row: ProjectRunRow): ProjectRun {
     pagesProcessed: row.pages_processed,
     spentCents: Number(row.spent_cents ?? 0) || 0,
     // DOCSLURP_VISION_MODEL_URI replaces the built-in default vision model at run time, never in stored settings.
-    pipeline: applyDefaultVisionOverride(normalizeStoredPipelineFeatures(row.pipeline ?? defaultPipelineFeatures, `run ${row.id}`)),
+    // The Auto ladder's limits (pipeline.ladder) are applied once here: Auto capped at the fast rung reads as Fast, and
+    // chart export below the intelligent rung keeps its free tier. Every stage reads this pipeline.
+    pipeline: applyLadderLimits(applyDefaultVisionOverride(normalizeStoredPipelineFeatures(row.pipeline ?? defaultPipelineFeatures, `run ${row.id}`))),
     error: row.error,
     stats: row.stats ?? {},
     artifacts: row.artifacts ?? {},

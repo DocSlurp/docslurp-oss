@@ -1,8 +1,8 @@
 import { bindIntakeReceipt } from "./intake-receipt-context.js";
 import { randomUUID } from "node:crypto";
 
-import { chartExportModelsAllowed, minChartExportTier, projectChartExportTierCap, upgradeStoredChartExport, type ChartExportTier, type ResolvedChartExportConfig, type RunOrigin } from "@docslurp/shared";
-import { assertChartExportModelsCeiling, stampRunChartExport } from "./chart-export-availability.js";
+import { chartExportModelsAllowed, clampRunLadder, defaultPipelineLadder, effectiveLadder, minChartExportTier, type PipelineLadder, type QualityMode, projectChartExportTierCap, upgradeStoredChartExport, type ChartExportTier, type ResolvedChartExportConfig, type RunOrigin } from "@docslurp/shared";
+import { assertChartExportModelsCeiling, BILLED_FEATURES_SCOPE, stampRunChartExport } from "./chart-export-availability.js";
 import {
   assertPipelineSpeedBoost,
   countedPagesForForecast,
@@ -950,6 +950,28 @@ export function createRunCreation(deps: RunCreationDeps) {
       storedSummaryTree(access.pipeline)),
     };
     assertPipelineSpeedBoost(input.pipeline);
+    // The project's Auto ladder limits (pipeline.ladder) are a ceiling for callers who cannot change the project's spend
+    // settings (non-editors, and API keys without the billed-features or projects:manage scope, as for chart export):
+    // their run override may tighten the limits (a lower rung, a smaller share), never loosen them, and while the project
+    // has a limit it may not raise quality above the project's (auto -> good would read every page). Clamped, not refused.
+    {
+      const projectPipeline = (access.pipeline ?? null) as { quality?: QualityMode | null; ladder?: Partial<PipelineLadder> | null } | null;
+      const apiKeyId = input.apiKeyId ?? currentRequestApiKeyId();
+      let mayLoosen = canEditProject(access, input.userId);
+      if (mayLoosen && apiKeyId) {
+        const scopes = await activeApiKeyScopes(apiKeyId).catch(() => null);
+        mayLoosen = !!scopes && (scopes.includes(BILLED_FEATURES_SCOPE) || scopes.includes("projects:manage"));
+      }
+      let clamped = clampRunLadder(input.pipeline, projectPipeline, mayLoosen);
+      // A replay (reprocess, bulk reprocess, retry as new) carries an older run's snapshot: the project's limits as they are
+      // now tighten it whoever asks, as the chart tier caps a replay at what the project resolves to now.
+      // Quality is capped too while the project has a limit, so a snapshot at Good cannot read past it.
+      if (reprocessing || request.chartExportReplay) clamped = clampRunLadder(clamped, projectPipeline, false);
+      if (clamped !== input.pipeline && (JSON.stringify(clamped.ladder) !== JSON.stringify(input.pipeline.ladder) || clamped.quality !== input.pipeline.quality)) {
+        console.log(`[run-creation] ladder override clamped to the project's limits project=${input.projectId} quality=${input.pipeline.quality}->${clamped.quality}`);
+      }
+      input.pipeline = clamped;
+    }
     // The project's explicit chart tier is a ceiling: `models` above a stored `off`/`free` needs editor rights (and, for
     // an API key, the billed-features scope). Every run (upload, URL, extract, MCP, reprocess) lands here.
     await assertChartExportModelsCeiling({
@@ -964,6 +986,15 @@ export function createRunCreation(deps: RunCreationDeps) {
     // Every caller (upload, extract, MCP, reprocess) lands here: a run pipeline that combines visual indexing
     // with Fast (or a refused privacy/PII policy) is refused whatever the project or request says
     // (IndexingModeError visual_mode_quality / visual_mode_privacy, 400).
+    // Visual mode embeds every page, which no ladder limit allows: a limit the project does not have (a run override)
+    // is dropped for a visual run rather than refusing the upload; a project limit is refused below as before.
+    if (effectiveIndexingMode(input.pipeline.indexingMode) === "visual" && effectiveLadder(input.pipeline).active) {
+      const projectLadder = (access.pipeline as { ladder?: PipelineFeatures["ladder"] } | null | undefined)?.ladder;
+      if (!effectiveLadder({ quality: input.pipeline.quality, ladder: projectLadder ?? null }).active) {
+        console.warn(`[run-creation] ladder override ignored on a visual-mode run project=${input.projectId}`);
+        input.pipeline = { ...input.pipeline, ladder: projectLadder ?? defaultPipelineLadder };
+      }
+    }
     if (effectiveIndexingMode(input.pipeline.indexingMode) === "visual") assertVisualModeAllowed(input.pipeline);
 
     const { sources } = input;

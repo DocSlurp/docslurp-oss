@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { QUALITY_RANK } from "./quality.js";
+import { applyLadderLimits, ladderAllowsMore, ladderChartExportTier, ladderEstimateMix, pageReadingQuality } from "./auto-ladder.js";
 import { expectedVisualExportCredits, FIXED_OVERHEAD_SECONDS, estimateIngest, isBillingEnforced, workerSlotsFor, type PipelineProfileId } from "./billing.js";
 import type { VisualCandidateStats } from "./chart-export.js";
 import { chartExportDefaults, chartExportModelsAvailable, CONSERVATIVE_CHART_EXPORT_DEFAULTS, effectiveTierFromDefaults, type ChartExportDefaults, type ChartExportTier, type RunOrigin } from "./chart-export.js";
@@ -156,6 +157,8 @@ export const PIPELINE_FIELD_IMPACT: Record<keyof PipelineFeatures, FieldImpact> 
   structuredExtraction: "reindex-recommended",
   outputSchema: "reindex-recommended",
   quality: (before, after) => (QUALITY_RANK[after.quality] > QUALITY_RANK[before.quality] ? "reindex-recommended" : "new-uploads"),
+  // Raising a limit (a higher rung, a larger share) reads more pages of old documents; lowering one only saves on new uploads.
+  ladder: (before, after) => (ladderAllowsMore(before, after) ? "reindex-recommended" : "new-uploads"),
   documentExtraction: "reindex-recommended",
   vision: "reindex-recommended",
   visionFallback: toggled("visionFallback"),
@@ -347,7 +350,8 @@ export function freeChartTierSeconds(documents: number, workerSlots: number): { 
   return { low: pass / slots, high: (pass + vm) / slots };
 }
 
-const profileFor = (features: PipelineFeatures): PipelineProfileId => features.quality;
+/** The quality the run reads pages with: Auto capped at the fast rung (pipeline.ladder) is estimated as Fast. */
+const profileFor = (features: PipelineFeatures): PipelineProfileId => pageReadingQuality(features);
 
 /** Stages whose run re-exports charts and diagrams: the generator runs at the end of vision-extract (worker chart-export/stage.ts). */
 export const CHART_EXPORT_CHARGING_STAGES: readonly string[] = ["vision-extract"];
@@ -440,22 +444,24 @@ export function estimatePipelineWork(args: {
     knowledgeGraph: selected.includes("graph-enrich") && Boolean(args.features.graphRag),
     propositions: selected.includes("proposition-index"),
   };
+  // A page beyond the ladder's above-fast share is never estimated as a read page (ladderEstimateMix).
   const run = (mix: { text: number; complex: number; scanned: number }) =>
-    estimateIngest({ pages, documents: Math.max(1, documents), mix, profile, features, ...(args.workerSlots ? { workerSlots: args.workerSlots } : {}) });
+    estimateIngest({ pages, documents: Math.max(1, documents), mix: ladderEstimateMix(mix, args.features), profile, features, ...(args.workerSlots ? { workerSlots: args.workerSlots } : {}) });
   const priced = (estimate: ReturnType<typeof run>) =>
     (estimate.credits.totalCredits - estimate.credits.breakdown.features) * share + estimate.credits.breakdown.features;
   const low = run({ text: 1, complex: 0, scanned: 0 });
   const high = run({ text: 0.2, complex: 0.3, scanned: 0.5 });
   // Chart & diagram export is charged per visual a model read whenever a charging stage runs (not by stage share).
   const visuals = chartExportCredits({
-    features: args.features,
+    // Below the intelligent rung no chart is read by a model (applyLadderLimits): the free tier prices nothing.
+    features: applyLadderLimits(args.features),
     stages: selected,
     pages,
     documents: Math.max(1, documents),
     env: args.env,
     visualStats: args.visualStats ?? null,
     ...(args.chartExportModes ? { modes: args.chartExportModes } : {}),
-    ...(args.chartExportTier ? { tier: args.chartExportTier } : {}),
+    ...(args.chartExportTier ? { tier: ladderChartExportTier(args.features, args.chartExportTier) } : {}),
   });
   const scaleSeconds = (wall: number) => (share > 0 && pages > 0 ? Math.max(0, wall - FIXED_OVERHEAD_SECONDS) * share + FIXED_OVERHEAD_SECONDS : 0);
   // The free chart tier bills nothing but takes time: its pass and parser-VM runs (only when vision-extract runs at free).
