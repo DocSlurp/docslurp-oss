@@ -827,7 +827,7 @@ export class VisionExtractStage implements Stage {
     let ladder: { summary: Record<string, unknown>; decisions: LadderPlan["decisions"] } | undefined;
     // An image the ladder kept unread in extraction (a format that can hold several frames, under an above-fast share) is
     // not read here either: it stays its page image, as quoted.
-    if (state.run.pipeline.quality === "auto" && document.mimeType.startsWith("image/") && needed
+    if (state.run.pipeline.quality === "auto" && (document.mimeType ?? "").startsWith("image/") && needed
       && ladderKeepsImageUnread(documentLadderPolicy(state.run.pipeline, pageCount), { filename: document.filename, mimeType: document.mimeType, sniffedMimeType: document.fileFacts?.sniffedMimeType ?? null })) {
       needed = false;
       reason = "ladder-kept-image";
