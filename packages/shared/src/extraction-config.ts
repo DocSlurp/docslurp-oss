@@ -507,6 +507,40 @@ export function resolveExtractionSettings(input: ExtractionResolutionInput): Ext
   return { ok: true, quality, visuals, capsApplied };
 }
 
+/** The rungs a caller may ask for on a new run in one project (`project.extractionChoices`). */
+export type ExtractionChoices = { quality: QualityLevel[]; visuals: VisualsLevel[] };
+
+/**
+ * The `quality` and `visuals` rungs this caller may request on a new run in this project (upload, URL ingest, extract),
+ * from this origin: exactly the rungs `resolveExtractionSettings` accepts as a request, so a client that offers only
+ * these never offers a choice the server refuses (403 for a billed raise, 400 for privacy, locality or a switch). Rungs
+ * at or below the project's own are always offered unless a constraint blocks them. Clients show these; the server
+ * still resolves every request. The project's stored values are read as run creation reads them.
+ */
+export function extractionChoicesFor(input: {
+  pipeline: unknown;
+  origin: RunOrigin;
+  caller: ExtractionCaller;
+  policy: ExtractionPolicy;
+}): ExtractionChoices {
+  const record = isRecord(input.pipeline) ? input.pipeline : {};
+  // Stored values as run creation compares them: no privacy lowering here (privacy refuses the request below).
+  const stored = mapLegacyExtractionSettings({ ...record, privacyMode: "standard" }, { explicitFreeAllowed: input.policy.explicitChartsAllowed });
+  const constraints = { privacyMode: record.privacyMode, vision: record.vision };
+  const accepts = (request: { quality?: QualityLevel; visuals?: VisualsLevel }) => resolveExtractionSettings({
+    request,
+    project: stored,
+    origin: input.origin,
+    caller: input.caller,
+    constraints,
+    policy: input.policy,
+  }).ok;
+  return {
+    quality: QUALITY_LEVELS.filter((quality) => accepts({ quality })),
+    visuals: VISUALS_LEVELS.filter((visuals) => accepts({ visuals })),
+  };
+}
+
 // ---- The run's stamped effective values (`run.pipeline.effective`) --------------------------------------------------
 
 export type RunEffectiveExtraction = {
