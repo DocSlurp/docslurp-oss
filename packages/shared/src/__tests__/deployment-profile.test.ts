@@ -29,7 +29,7 @@ describe("resolveDeploymentProfile: refusals (fail closed)", () => {
   it("refuses service under a development NODE_ENV (and anything but production)", () => {
     for (const nodeEnv of ["development", "test", "", "staging"]) {
       expect(() => resolveDeploymentProfile({ NODE_ENV: nodeEnv, DOCSLURP_PROFILE: "service" }), nodeEnv).toThrow(/service requires NODE_ENV=production/);
-      expect(() => resolveDeploymentProfile({ NODE_ENV: nodeEnv, DOCSLURP_SERVICE_PROFILE: "service" }), nodeEnv).toThrow(/service requires NODE_ENV=production/);
+      expect(() => resolveDeploymentProfile({ NODE_ENV: nodeEnv, DOCSLURP_PROFILE: "service" }), nodeEnv).toThrow(/service requires NODE_ENV=production/);
     }
   });
 
@@ -37,14 +37,6 @@ describe("resolveDeploymentProfile: refusals (fail closed)", () => {
     expect(() => resolveDeploymentProfile(PROD)).toThrow(/DOCSLURP_PROFILE is required outside development/);
     expect(() => resolveDeploymentProfile({ NODE_ENV: "staging" })).toThrow(/required outside development/);
     expect(() => resolveDeploymentProfile({ NODE_ENV: "production", DOCSLURP_PROFILE: "  " })).toThrow(/required/);
-  });
-
-  it("only warns for an unset profile outside development when the caller opts out (the R0 API), still VM-only", () => {
-    const posture = resolveDeploymentProfile(PROD, { requireProfile: false });
-    expect(posture.vmOnlyParsing).toBe(true);
-    expect(posture.hostSandboxAllowed).toBe(false);
-    expect(posture.inProcessReadersAllowed).toBe(false);
-    expect(posture.warnings.join(" ")).toMatch(/unset outside development/);
   });
 
   it("warns that selfhost with NODE_ENV unset is development", () => {
@@ -64,20 +56,15 @@ describe("resolveDeploymentProfile: refusals (fail closed)", () => {
   it("refuses unknown profile values on either name", () => {
     expect(() => resolveDeploymentProfile({ ...PROD, DOCSLURP_PROFILE: "self-hosted" })).toThrow(/must be one of service, selfhost, dev/);
     expect(() => resolveDeploymentProfile({ ...PROD, DOCSLURP_PROFILE: "services" })).toThrow(/must be one of/);
-    expect(() => resolveDeploymentProfile({ ...PROD, DOCSLURP_SERVICE_PROFILE: "selfhost" })).toThrow(/must be one of service, self-hosted/);
   });
 
-  it("refuses the old and new names disagreeing, and warns when they agree", () => {
-    expect(() => resolveDeploymentProfile({ ...PROD, DOCSLURP_PROFILE: "selfhost", DOCSLURP_SERVICE_PROFILE: "service" })).toThrow(/conflicts/);
-    expect(() => resolveDeploymentProfile({ ...PROD, DOCSLURP_PROFILE: "service", DOCSLURP_SERVICE_PROFILE: "self-hosted" })).toThrow(/conflicts/);
-    expect(() => resolveDeploymentProfile({ NODE_ENV: "development", DOCSLURP_PROFILE: "dev", DOCSLURP_SERVICE_PROFILE: "self-hosted" })).toThrow(/conflicts/);
-    const agree = resolveDeploymentProfile({ ...PROD, DOCSLURP_PROFILE: "service", DOCSLURP_SERVICE_PROFILE: " Service " });
-    expect(agree.profile).toBe("service");
-    expect(agree.profileSource).toBe("both");
-    expect(agree.warnings.join(" ")).toMatch(/repeats DOCSLURP_PROFILE=service/);
-    const old = resolveDeploymentProfile({ ...PROD, DOCSLURP_SERVICE_PROFILE: "self-hosted" });
-    expect(old.profile).toBe("selfhost");
-    expect(old.warnings.join(" ")).toMatch(/deprecated; set DOCSLURP_PROFILE=selfhost/);
+  it("refuses the retired DOCSLURP_SERVICE_PROFILE whatever its value (R1 tombstone), even when it agrees", () => {
+    for (const value of ["service", "self-hosted", "x", " "]) {
+      const env = { ...PROD, DOCSLURP_PROFILE: "service", DOCSLURP_SERVICE_PROFILE: value };
+      if (value.trim()) expect(() => resolveDeploymentProfile(env), value).toThrow(/retired environment variable.*DOCSLURP_SERVICE_PROFILE.*use DOCSLURP_PROFILE/);
+      else expect(resolveDeploymentProfile(env).profile).toBe("service");
+    }
+    expect(() => resolveDeploymentProfile({ NODE_ENV: "development", DOCSLURP_SERVICE_PROFILE: "self-hosted" })).toThrow(/retired/);
   });
 
   it("refuses a typo in DOCSLURP_DISABLE", () => {
@@ -140,14 +127,14 @@ describe("isolation floor: VM-only in every non-development environment, whateve
 });
 
 describe("serviceProfileFromEnv: the legacy view every pre-R0 reader uses", () => {
-  it("maps the new names and prefers the stricter reading on disagreement (startup refuses it first)", () => {
+  it("maps DOCSLURP_PROFILE to the legacy vocabulary and reads any service value as service", () => {
     expect(serviceProfileFromEnv({ DOCSLURP_PROFILE: "service" })).toBe("service");
     expect(serviceProfileFromEnv({ DOCSLURP_PROFILE: "selfhost" })).toBe("self-hosted");
     expect(serviceProfileFromEnv({ DOCSLURP_PROFILE: "dev" })).toBeNull();
     expect(serviceProfileFromEnv({})).toBeNull();
-    expect(serviceProfileFromEnv({ DOCSLURP_PROFILE: "selfhost", DOCSLURP_SERVICE_PROFILE: "service" })).toBe("service");
-    expect(serviceProfileFromEnv({ DOCSLURP_PROFILE: "service", DOCSLURP_SERVICE_PROFILE: "self-hosted" })).toBe("service");
-    expect(serviceProfileFromEnv({ DOCSLURP_PROFILE: "dev", DOCSLURP_SERVICE_PROFILE: "self-hosted" })).toBe("self-hosted");
+    expect(serviceProfileFromEnv({ DOCSLURP_PROFILE: " services " })).toBe("service");
+    // The retired name is not read (startup refuses it).
+    expect(serviceProfileFromEnv({ DOCSLURP_SERVICE_PROFILE: "service" })).toBeNull();
   });
 });
 
@@ -249,7 +236,7 @@ describe("kill switches only lower: no env or request path raises a rung", () =>
 describe("posture fingerprint", () => {
   it("is stable for equal postures and changes with the switches", () => {
     const a = resolveDeploymentProfile({ ...PROD, DOCSLURP_PROFILE: "service", DOCSLURP_DISABLE: "ocr,ai" });
-    const b = resolveDeploymentProfile({ ...PROD, DOCSLURP_SERVICE_PROFILE: "service", DOCSLURP_DISABLE: "AI, ocr" });
+    const b = resolveDeploymentProfile({ ...PROD, DOCSLURP_PROFILE: "service", DOCSLURP_DISABLE: "AI, ocr" });
     expect(postureFingerprint(a)).toBe(postureFingerprint(b));
     const c = resolveDeploymentProfile({ ...PROD, DOCSLURP_PROFILE: "service", DOCSLURP_DISABLE: "ocr" });
     expect(postureFingerprint(c)).not.toBe(postureFingerprint(a));

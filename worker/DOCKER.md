@@ -24,7 +24,7 @@ Self-host image for every document type, about 2.9 GB uncompressed (estimate, no
   PP-OCRv6/v5 models pinned by sha256 in `worker/ocr-models.json` (`/opt/docslurp/ocr-models`,
   84 MB per the manifest). Both are root-owned and read-only, and the build runs `docslurp_ocr.py --self-test`.
   The image sets `DOCSLURP_OCR_PYTHON` and `DOCSLURP_OCR_MODEL_DIR` but not the OCR mode: local OCR
-  runs only when the operator sets `DOCSLURP_SERVICE_PROFILE=self-hosted DOCSLURP_OCR_MODE=local`
+  runs only when the operator sets `DOCSLURP_PROFILE=selfhost DOCSLURP_OCR_MODE=local`
   ([OCR](../docs/extraction/ocr.md)).
 - **LibreOffice headless** - office format conversion (pptx, xlsx, doc, rtf)
 - **ghostscript, imagemagick, qpdf, catdoc, unrtf** (no ocrmypdf: it depends on a system OCR engine)

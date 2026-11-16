@@ -49,7 +49,7 @@ describe("service profile: model HTML tables are parsed only in the VM", () => {
 
   it("DOCSLURP_SERVICE_PROFILE=service alone also refuses host parsing", async () => {
     vi.stubEnv("NODE_ENV", "test");
-    vi.stubEnv("DOCSLURP_SERVICE_PROFILE", "service");
+    vi.stubEnv("DOCSLURP_PROFILE", "service");
     const { texts } = await sanitizeVisionPageTables(["<table><tr><td>x</td></tr></table>"], null);
     expect(texts[0]).toBe("&lt;table>&lt;tr>&lt;td>x&lt;/td>&lt;/tr>&lt;/table>");
     expect(guest.hostCalls).toBe(0);

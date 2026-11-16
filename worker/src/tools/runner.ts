@@ -1225,7 +1225,7 @@ export class CommandRunner {
 
   /**
    * The fixed OCR CLI under the parser sandbox (DOCSLURP_OCR_MODE=local). Customer-owned execution only: refused unless
-   * DOCSLURP_SERVICE_PROFILE=self-hosted, so a service deployment can never run OCR on the worker host.
+   * DOCSLURP_PROFILE=selfhost, so a service deployment can never run OCR on the worker host.
    */
   async localOcrRead(job: SandboxedOcrJob, env: NodeJS.ProcessEnv = process.env): Promise<CommandPlan> {
     if (resolveOcrMode(env) !== "local") throw new OcrRefusedError("local OCR is refused: DOCSLURP_OCR_MODE is not local", "mode");

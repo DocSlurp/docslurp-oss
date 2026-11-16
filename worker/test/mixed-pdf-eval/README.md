@@ -12,7 +12,7 @@ DocSlurp customer's files.
   That sandbox is bubblewrap: defence in depth, not the isolation boundary DocSlurp requires for customer bytes. In the
   service, customer files are OCR'd only in a fresh VM per job ([OCR](../../../docs/extraction/ocr.md)).
 - `execution_guard.py` enforces this:
-  - it refuses to run under `DOCSLURP_SERVICE_PROFILE=service`;
+  - it refuses to run under `DOCSLURP_PROFILE=service`;
   - `measure.py` and `timing.py` refuse a `--dataset`, or any case PDF in it (symlinks resolved), outside the data
     roots: this directory, plus the absolute paths in `MIXED_EVAL_DATA_ROOTS` (separated by `:`).
 - Point `MIXED_EVAL_DATA_ROOTS` only at directories of generated fixtures (`generate.py --out`), public corpora or your

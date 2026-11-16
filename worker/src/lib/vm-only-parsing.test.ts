@@ -18,18 +18,18 @@ describe("vmOnlyParsing", () => {
     vi.stubEnv("DOCSLURP_SERVICE_PROFILE", "");
     expect(vmOnlyParsing({})).toBe(false);
     expect(vmOnlyParsing({ NODE_ENV: "production" })).toBe(true);
-    expect(vmOnlyParsing({ DOCSLURP_SERVICE_PROFILE: "service" })).toBe(true);
-    expect(vmOnlyParsing({ DOCSLURP_SERVICE_PROFILE: "self-hosted" })).toBe(false);
-    vi.stubEnv("DOCSLURP_SERVICE_PROFILE", "service");
+    expect(vmOnlyParsing({ DOCSLURP_PROFILE: "service" })).toBe(true);
+    expect(vmOnlyParsing({ DOCSLURP_PROFILE: "selfhost" })).toBe(false);
+    vi.stubEnv("DOCSLURP_PROFILE", "service");
     expect(vmOnlyParsing({})).toBe(true);
   });
 
   it("refuses in-process parsing under the service profile without NODE_ENV", async () => {
     vi.stubEnv("NODE_ENV", "test");
-    vi.stubEnv("DOCSLURP_SERVICE_PROFILE", "service");
+    vi.stubEnv("DOCSLURP_PROFILE", "service");
     expect(() => detectHtmlEmbeds("<p>x</p>")).toThrow(/requires the parser VM/);
     expect(() => structuredJsonToMarkdown("{}")).toThrow(/requires the parser VM/);
-    expect(resolveSandboxProviderId({ DOCSLURP_SERVICE_PROFILE: "service" }, "linux")).toBe("modal");
+    expect(resolveSandboxProviderId({ DOCSLURP_PROFILE: "service" }, "linux")).toBe("modal");
     // Quarantine inspection goes to the VM runner, never the in-process inspector.
     const run = vi.fn(async () => { throw new Error("vm runner reached"); });
     await expect(inspectQuarantine({ bytes: Buffer.from("PK\u0003\u0004"), filename: "a.zip", tempFile: "/nonexistent", runner: { run } as never, policy: {} as never })).rejects.toThrow();
@@ -39,12 +39,12 @@ describe("vmOnlyParsing", () => {
 
 describe("assertServiceProfileRuntime", () => {
   it("refuses the service profile unless NODE_ENV=production", async () => {
-    expect(() => assertServiceProfileRuntime({ DOCSLURP_SERVICE_PROFILE: "service" })).toThrow(/requires NODE_ENV=production \(got unset\)/);
-    expect(() => assertServiceProfileRuntime({ DOCSLURP_SERVICE_PROFILE: "service", NODE_ENV: "development" })).toThrow(/got 'development'/);
-    expect(() => assertServiceProfileRuntime({ DOCSLURP_SERVICE_PROFILE: "service", NODE_ENV: "production" })).not.toThrow();
-    expect(() => assertServiceProfileRuntime({ DOCSLURP_SERVICE_PROFILE: "self-hosted" })).not.toThrow();
+    expect(() => assertServiceProfileRuntime({ DOCSLURP_PROFILE: "service" })).toThrow(/requires NODE_ENV=production \(got unset\)/);
+    expect(() => assertServiceProfileRuntime({ DOCSLURP_PROFILE: "service", NODE_ENV: "development" })).toThrow(/got 'development'/);
+    expect(() => assertServiceProfileRuntime({ DOCSLURP_PROFILE: "service", NODE_ENV: "production" })).not.toThrow();
+    expect(() => assertServiceProfileRuntime({ DOCSLURP_PROFILE: "selfhost" })).not.toThrow();
     expect(() => assertServiceProfileRuntime({})).not.toThrow();
-    await expect(initializeParserSandbox({ DOCSLURP_SERVICE_PROFILE: "service", DOCSLURP_PARSER_SANDBOX: "none" }, "linux")).rejects.toThrow(/refusing to start/);
+    await expect(initializeParserSandbox({ DOCSLURP_PROFILE: "service", DOCSLURP_PARSER_SANDBOX: "none" }, "linux")).rejects.toThrow(/refusing to start/);
   });
 });
 
@@ -56,7 +56,7 @@ describe("deployment profile (DOCSLURP_PROFILE) and the VM-only floor", () => {
     expect(() => assertServiceProfileRuntime({ NODE_ENV: "development", DOCSLURP_PROFILE: "service" })).toThrow(/requires NODE_ENV=production/);
     expect(() => assertServiceProfileRuntime({ NODE_ENV: "production" })).toThrow(/DOCSLURP_PROFILE is required outside development/);
     expect(() => assertServiceProfileRuntime({ NODE_ENV: "production", DOCSLURP_PROFILE: "service", DOCSLURP_DISABLE: "ocr,figuers" })).toThrow(/unknown token/);
-    expect(() => assertServiceProfileRuntime({ NODE_ENV: "production", DOCSLURP_PROFILE: "selfhost", DOCSLURP_SERVICE_PROFILE: "service" })).toThrow(/conflicts/);
+    expect(() => assertServiceProfileRuntime({ NODE_ENV: "production", DOCSLURP_PROFILE: "selfhost", DOCSLURP_SERVICE_PROFILE: "self-hosted" })).toThrow(/retired environment variable/);
     expect(assertServiceProfileRuntime({ NODE_ENV: "production", DOCSLURP_PROFILE: "selfhost" }).vmOnlyParsing).toBe(true);
   });
 

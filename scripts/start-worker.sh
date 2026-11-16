@@ -33,7 +33,8 @@ CLAMD_BIN="${DOCSLURP_CLAMD_BIN:-}"
 # One rule for "development" in this script and the worker (packages/shared/src/runtime-environment.ts; a parity test
 # in worker/src/lib/unsafe-overrides.test.ts runs both over odd values): trim ASCII whitespace from both ends and
 # lower-case ASCII letters only, then NODE_ENV development, test or empty is development and any other value is not.
-# A DOCSLURP_PROFILE or DOCSLURP_SERVICE_PROFILE containing "service" is never development; no other profile value
+# A DOCSLURP_PROFILE or (retired, still read here only to stay strict) DOCSLURP_SERVICE_PROFILE containing "service"
+# is never development; no other profile value
 # (dev, selfhost) makes a non-development NODE_ENV development (the worker refuses dev outside development at startup).
 normalize_env_setting() {
   local LC_ALL=C

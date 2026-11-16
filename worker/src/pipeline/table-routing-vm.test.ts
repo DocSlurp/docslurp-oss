@@ -10,9 +10,9 @@ import { GUEST_NODE_FLAGS } from "../sandbox/guest-node-flags.js";
 
 /** Run `fn` as the VM guest does: outside the service profile (the guest process has no production host environment). */
 function asGuest<T>(fn: () => T): T {
-  const saved = { NODE_ENV: process.env.NODE_ENV, DOCSLURP_SERVICE_PROFILE: process.env.DOCSLURP_SERVICE_PROFILE };
+  const saved = { NODE_ENV: process.env.NODE_ENV, DOCSLURP_PROFILE: process.env.DOCSLURP_PROFILE };
   process.env.NODE_ENV = "test";
-  delete process.env.DOCSLURP_SERVICE_PROFILE;
+  delete process.env.DOCSLURP_PROFILE;
   try {
     return fn();
   } finally {
@@ -37,7 +37,7 @@ function vmRunner(transform?: (result: unknown[]) => unknown) {
   };
 }
 
-const production = () => { vi.stubEnv("NODE_ENV", "production"); vi.stubEnv("DOCSLURP_SERVICE_PROFILE", "service"); };
+const production = () => { vi.stubEnv("NODE_ENV", "production"); vi.stubEnv("DOCSLURP_PROFILE", "service"); };
 afterEach(() => vi.unstubAllEnvs());
 
 const LIST_TABLE = "<table><tr><td>-</td><td>ALPHA</td></tr><tr><td>-</td><td>BETA</td></tr><tr><td>-</td><td>GAMMA</td></tr></table>";

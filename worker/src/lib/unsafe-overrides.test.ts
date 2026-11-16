@@ -23,15 +23,15 @@ const REFUSED_ENVIRONMENTS: Array<[string, NodeJS.ProcessEnv]> = [
   ["NODE_ENV padded with a no-break space", { NODE_ENV: "\u00a0development" }],
   ["NODE_ENV of a byte-order mark", { NODE_ENV: "\ufeff" }],
   ["NODE_ENV with an inner space", { NODE_ENV: "dev elopment" }],
-  ["the service profile without NODE_ENV", { DOCSLURP_SERVICE_PROFILE: "service" }],
-  ["the service profile in development", { NODE_ENV: "development", DOCSLURP_SERVICE_PROFILE: "service" }],
+  ["the service profile without NODE_ENV", { DOCSLURP_PROFILE: "service" }],
+  ["the service profile in development", { NODE_ENV: "development", DOCSLURP_PROFILE: "service" }],
 ];
 const ALLOWED_ENVIRONMENTS: Array<[string, NodeJS.ProcessEnv]> = [
   ["development", { NODE_ENV: "development" }],
   ["test", { NODE_ENV: "test" }],
   ["development, padded with ASCII whitespace and upper case", { NODE_ENV: " \tDevelopment\n" }],
   ["unset NODE_ENV", {}],
-  ["the self-hosted profile in development", { NODE_ENV: "development", DOCSLURP_SERVICE_PROFILE: "self-hosted" }],
+  ["the self-hosted profile in development", { NODE_ENV: "development", DOCSLURP_PROFILE: "selfhost" }],
 ];
 
 describe("unsafe overrides", () => {

@@ -320,10 +320,9 @@ export function ensureApiStartup(): Promise<void> {
       // Environment only, so it runs first: production refuses to start when chat concurrency caps
       // would be counted per process (no shared Redis, or half of a REST pair) without the explicit opt-out.
       assertChatConcurrencyBackend();
-      // The deployment posture (DOCSLURP_PROFILE, DOCSLURP_DISABLE): refuses an unknown switch, an unknown or conflicting
-      // profile, dev outside development and service without NODE_ENV=production. Release R0 warns (R1 refuses) when
-      // the API runs outside development with no profile; the worker, which reads customer bytes, always refuses.
-      const posture = resolveDeploymentProfile(process.env, { requireProfile: false });
+      // The deployment posture (DOCSLURP_PROFILE, DOCSLURP_DISABLE): refuses a retired variable, an unknown switch, an
+      // unknown profile, no profile outside development, dev outside development and service without NODE_ENV=production.
+      const posture = resolveDeploymentProfile(process.env);
       for (const warning of posture.warnings) console.warn(`[deployment-profile] ${warning}`);
       console.log(`[deployment-profile] api profile=${posture.profile} source=${posture.profileSource} vmOnlyParsing=${posture.vmOnlyParsing} disabled=${posture.disabled.join(",") || "none"}`);
       initializeObservability({ serviceName: "docslurp-api" });

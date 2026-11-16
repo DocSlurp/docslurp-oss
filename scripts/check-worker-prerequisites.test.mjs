@@ -75,22 +75,18 @@ test('DOCSLURP_OCR_MODE=local fails without the OCR venv and models, and outside
   const bin = mkdtempSync(path.join(os.tmpdir(), 'docslurp-prereq-'));
   try {
     let result = spawnSync(process.execPath, [script, '--profile=lean'], {
-      encoding: 'utf8', env: { ...process.env, PATH: bin, ...noOcr, DOCSLURP_OCR_MODE: 'local', DOCSLURP_SERVICE_PROFILE: 'self-hosted' },
+      encoding: 'utf8', env: { ...process.env, PATH: bin, ...noOcr, DOCSLURP_OCR_MODE: 'local', DOCSLURP_PROFILE: 'selfhost' },
     });
     assert.equal(result.status, 1);
     assert.match(result.stderr, /DOCSLURP_OCR_MODE=local needs the OCR venv/);
     assert.doesNotMatch(result.stderr, /requires DOCSLURP_PROFILE/);
     result = spawnSync(process.execPath, [script, '--profile=lean'], {
-      encoding: 'utf8', env: { ...process.env, PATH: bin, ...noOcr, DOCSLURP_OCR_MODE: 'local', DOCSLURP_SERVICE_PROFILE: 'service' },
+      encoding: 'utf8', env: { ...process.env, PATH: bin, ...noOcr, DOCSLURP_OCR_MODE: 'local', DOCSLURP_PROFILE: 'service' },
     });
     assert.match(result.stderr, /DOCSLURP_OCR_MODE=local requires DOCSLURP_PROFILE=selfhost/);
-    // The new name works alone; a service reading on either name refuses.
+    // The retired name no longer counts (the worker refuses it at startup).
     result = spawnSync(process.execPath, [script, '--profile=lean'], {
-      encoding: 'utf8', env: { ...process.env, PATH: bin, ...noOcr, DOCSLURP_OCR_MODE: 'local', DOCSLURP_PROFILE: 'selfhost', DOCSLURP_SERVICE_PROFILE: '' },
-    });
-    assert.doesNotMatch(result.stderr, /requires DOCSLURP_PROFILE/);
-    result = spawnSync(process.execPath, [script, '--profile=lean'], {
-      encoding: 'utf8', env: { ...process.env, PATH: bin, ...noOcr, DOCSLURP_OCR_MODE: 'local', DOCSLURP_PROFILE: 'service', DOCSLURP_SERVICE_PROFILE: 'self-hosted' },
+      encoding: 'utf8', env: { ...process.env, PATH: bin, ...noOcr, DOCSLURP_OCR_MODE: 'local', DOCSLURP_PROFILE: '', DOCSLURP_SERVICE_PROFILE: 'self-hosted' },
     });
     assert.match(result.stderr, /requires DOCSLURP_PROFILE=selfhost/);
   } finally { rmSync(bin, { recursive: true, force: true }); }

@@ -32,7 +32,7 @@ function explicitPdfMode(env: Record<string, string | undefined>): (typeof PDF_M
 
 /**
  * True when the deployment runs PDFs only in the sandboxed PDF provider (Doppler in a VM): DOCSLURP_PDF_MODE=vm,
- * DOCSLURP_PDF_EXTRACTOR=vm-pdf, DOCSLURP_VM_PDF_INSTALLED=1, or DOCSLURP_SERVICE_PROFILE=service (a multi-tenant service never
+ * DOCSLURP_PDF_EXTRACTOR=vm-pdf, DOCSLURP_VM_PDF_INSTALLED=1, or DOCSLURP_PROFILE=service (a multi-tenant service never
  * parses customer PDFs on the worker host; without a provider the worker refuses to start). Throws on an unknown value.
  */
 export function sandboxedPdfConfigured(env: Record<string, string | undefined> = extractorEnvironment()): boolean {
@@ -47,7 +47,7 @@ export function sandboxedPdfConfigured(env: Record<string, string | undefined> =
  * Where PDFs are extracted. Doppler is the PDF extractor either way:
  *  - `vm`: in the sandboxed PDF provider's VM (`vm-pdf`), the default wherever one is configured (sandboxedPdfConfigured);
  *  - `local`: Doppler's `doppler-md` on the worker host, in the parser sandbox. Customer-owned execution only: it needs
- *    DOCSLURP_PDF_MODE=local and DOCSLURP_SERVICE_PROFILE=self-hosted (the worker refuses to start otherwise), like local OCR;
+ *    DOCSLURP_PDF_MODE=local and DOCSLURP_PROFILE=selfhost (the worker refuses to start otherwise), like local OCR;
  *  - `off`: neither. PDF extraction is refused (no host parser runs instead) and the worker logs it at startup.
  * A VM selection wins over `local`, and the worker refuses to start with both.
  */
@@ -64,7 +64,7 @@ export function localPdfModeRequested(env: Record<string, string | undefined> = 
 /** Why PDF extraction is refused under this environment: the public reason for a document, and the startup log. */
 export const PDF_EXTRACTION_UNCONFIGURED =
   "PDF extraction is not configured: run Doppler in a VM (a sandboxed PDF provider, DOCSLURP_PDF_MODE=vm) or, for customer-owned " +
-  "execution only, on this host (DOCSLURP_PDF_MODE=local with DOCSLURP_SERVICE_PROFILE=self-hosted)";
+  "execution only, on this host (DOCSLURP_PDF_MODE=local with DOCSLURP_PROFILE=selfhost)";
 
 import type { ExtractionImage, ExtractionTable } from "./extraction.js";
 import type { UsageEvent } from "./usage.js";

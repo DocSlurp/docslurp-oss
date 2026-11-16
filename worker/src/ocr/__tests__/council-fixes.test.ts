@@ -44,7 +44,7 @@ describe("council fixes", () => {
 
   it("starts a stock self-hosted install (NODE_ENV=production, no mode, no plugin) with OCR off", () => {
     expect(assertOcrConfiguration({ NODE_ENV: "production" })).toBe("off");
-    expect(() => assertOcrConfiguration({ NODE_ENV: "production", DOCSLURP_SERVICE_PROFILE: "service" })).toThrow(/OCR provider plugin/);
+    expect(() => assertOcrConfiguration({ NODE_ENV: "production", DOCSLURP_PROFILE: "service" })).toThrow(/OCR provider plugin/);
   });
 
   it("refuses a result whose character count does not match its text", async () => {

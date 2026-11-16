@@ -35,7 +35,7 @@ function fakeSdk(): ModalSdk {
 
 describe("service-profile worker boot: pricing, then the parser probe (validation N2)", () => {
   beforeEach(() => {
-    vi.stubEnv("DOCSLURP_SERVICE_PROFILE", "service");
+    vi.stubEnv("DOCSLURP_PROFILE", "service");
     vi.stubEnv("NODE_ENV", "production");
     resetPricingProviderForTests();
     vi.spyOn(console, "log").mockImplementation(() => {});

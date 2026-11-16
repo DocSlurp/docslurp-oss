@@ -7,7 +7,7 @@
  *
  * Fail closed:
  * - a named plugin that cannot load, or returns an invalid provider, is a startup error;
- * - DOCSLURP_SERVICE_PROFILE=service or DOCSLURP_PRICING_REQUIRED=1 without DOCSLURP_PRICING_PLUGIN is a startup error, so
+ * - DOCSLURP_PROFILE=service or DOCSLURP_PRICING_REQUIRED=1 without DOCSLURP_PRICING_PLUGIN is a startup error, so
  *   a deployment that bills never prices with the open default;
  * Without a plugin and outside the service profile, the open default prices (a flat, published rule).
  */
@@ -361,7 +361,7 @@ export async function loadPricingProvider(
   }
   if (!specifier) {
     if (pricingRequired(env)) {
-      throw new Error("DOCSLURP_SERVICE_PROFILE=service or DOCSLURP_PRICING_REQUIRED=1 needs a pricing provider in DOCSLURP_PRICING_PLUGIN; refusing to start with the open pricing default");
+      throw new Error("DOCSLURP_PROFILE=service or DOCSLURP_PRICING_REQUIRED=1 needs a pricing provider in DOCSLURP_PRICING_PLUGIN; refusing to start with the open pricing default");
     }
     loadedFrom = null;
     console.warn("[pricing] provider=open: no DOCSLURP_PRICING_PLUGIN; charges follow the open default's flat per-page rule");

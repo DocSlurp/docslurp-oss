@@ -77,7 +77,7 @@ describe("a polyglot x.pdf sniffed as HTML never reaches a PDF parser", () => {
 });
 
 describe("the in-process native engine is refused wherever PDFs run only in vm-pdf", () => {
-  for (const env of [{ DOCSLURP_PDF_EXTRACTOR: "vm-pdf" }, { DOCSLURP_VM_PDF_INSTALLED: "1" }, { DOCSLURP_SERVICE_PROFILE: "service" }]) {
+  for (const env of [{ DOCSLURP_PDF_EXTRACTOR: "vm-pdf" }, { DOCSLURP_VM_PDF_INSTALLED: "1" }, { DOCSLURP_PROFILE: "service" }]) {
     it(`never loads or resolves it under ${JSON.stringify(env)}, nor the host Poppler subset`, async () => {
       const { engine, openPath } = spyEngine();
       setNativePdfEngineForTesting(engine);
@@ -91,7 +91,7 @@ describe("the in-process native engine is refused wherever PDFs run only in vm-p
 
   it("refuses to start when the image ships the engine (or a mode asks for it) beside vm-pdf", async () => {
     await expect(assertNativePdfEngineAtStartup({ DOCSLURP_PDF_EXTRACTOR: "vm-pdf", DOCSLURP_NATIVE_PDF_INSTALLED: "1" })).rejects.toThrow(/runs PDFs only in vm-pdf/);
-    await expect(assertNativePdfEngineAtStartup({ DOCSLURP_SERVICE_PROFILE: "service", DOCSLURP_PDF_ENGINE: "shadow" })).rejects.toThrow(/lacks a VM boundary/);
+    await expect(assertNativePdfEngineAtStartup({ DOCSLURP_PROFILE: "service", DOCSLURP_PDF_ENGINE: "shadow" })).rejects.toThrow(/lacks a VM boundary/);
     await expect(assertNativePdfEngineAtStartup({ DOCSLURP_PDF_EXTRACTOR: "vm-pdf" })).resolves.toMatchObject({ ok: false });
   });
 });

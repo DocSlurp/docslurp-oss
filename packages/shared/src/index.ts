@@ -117,6 +117,7 @@ export * from "./public-errors.js";
 export * from "./parse-source-decision.js";
 export * from "./runtime-environment.js";
 export * from "./deployment-profile.js";
+export * from "./retired-env.js";
 export * from "./test-database-guard.js";
 export * from "./ingest-version.js";
 export * from "./api-error.js";

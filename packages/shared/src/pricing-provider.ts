@@ -7,7 +7,7 @@
  *
  * Core ships an open default (`OPEN_PRICING`, pricing-open.ts): a flat, transparent per-page rule a self-hosted
  * deployment can live with. A deployment replaces it with a provider module named in DOCSLURP_PRICING_PLUGIN
- * (`@docslurp/shared/pricing-loader`). Fail closed: under DOCSLURP_SERVICE_PROFILE=service nothing here falls back to
+ * (`@docslurp/shared/pricing-loader`). Fail closed: under DOCSLURP_PROFILE=service nothing here falls back to
  * the open default; `pricing()` throws until a non-default provider is installed.
  *
  * Contract: docs/billing/pricing-provider.md.
@@ -297,7 +297,7 @@ export const OPEN_PRICING_ID = "open";
 
 let installed: PricingProvider | null = null;
 
-/** Whether this process runs the hosted service profile (DOCSLURP_PROFILE or DOCSLURP_SERVICE_PROFILE), where the open default is never allowed. */
+/** Whether this process runs the hosted service profile (DOCSLURP_PROFILE), where the open default is never allowed. */
 export function pricingServiceProfile(env: Record<string, string | undefined> | undefined = processEnv()): boolean {
   return env !== undefined && serviceProfileActive(env);
 }
@@ -322,7 +322,7 @@ export function pricingRequired(env: Record<string, string | undefined> | undefi
 export function pricing(): PricingProvider {
   if (installed) return installed;
   if (pricingRequired()) {
-    throw new Error("pricing is required here (DOCSLURP_SERVICE_PROFILE=service or DOCSLURP_PRICING_REQUIRED=1) but no pricing provider is installed (DOCSLURP_PRICING_PLUGIN); refusing to price with the open default");
+    throw new Error("pricing is required here (DOCSLURP_PROFILE=service or DOCSLURP_PRICING_REQUIRED=1) but no pricing provider is installed (DOCSLURP_PRICING_PLUGIN); refusing to price with the open default");
   }
   return OPEN_PRICING;
 }

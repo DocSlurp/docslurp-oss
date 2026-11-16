@@ -188,7 +188,7 @@ export async function assertNativePdfEngineAtStartup(env: NodeJS.ProcessEnv = pr
   if (nativePdfRefusal(env) && (nativePdfEngineRequired(env) || popplerFallbackEnabled(env))) {
     throw new Error(
       "native-pdf engine (DOCSLURP_NATIVE_PDF_INSTALLED, DOCSLURP_PDF_ENGINE or DOCSLURP_NATIVE_PDF_POPPLER) is configured, but this " +
-        "deployment runs PDFs only in vm-pdf (DOCSLURP_PDF_EXTRACTOR=vm-pdf, DOCSLURP_VM_PDF_INSTALLED=1 or DOCSLURP_SERVICE_PROFILE=service); " +
+        "deployment runs PDFs only in vm-pdf (DOCSLURP_PDF_EXTRACTOR=vm-pdf, DOCSLURP_VM_PDF_INSTALLED=1 or DOCSLURP_PROFILE=service); " +
         "build the image without DOCSLURP_NATIVE_PDF and unset the engine settings",
     );
   }

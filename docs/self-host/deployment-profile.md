@@ -14,9 +14,8 @@ does not add up.
 | In-process native engine, page probe, `local-cli` vision reader | refused | refused under VM-only; development opt-in otherwise | development opt-in |
 | OCR default | `vm` (a VM OCR provider is required) | `off` until you choose a mode | `off` |
 
-`service` requires `NODE_ENV=production` exactly. Unset: the worker refuses to start outside development (from this
-release: worker images set `NODE_ENV=production`, so a worker started outside `compose.selfhost.yml` needs
-`DOCSLURP_PROFILE`, or the old `DOCSLURP_SERVICE_PROFILE`, before it upgrades); the API logs a warning instead. In
+`service` requires `NODE_ENV=production` exactly. Unset: the API and the worker refuse to start outside development (worker images
+set `NODE_ENV=production`, so a worker started outside `compose.selfhost.yml` needs `DOCSLURP_PROFILE`). In
 development an unset profile runs as `dev` with a warning. `compose.selfhost.yml` sets `DOCSLURP_PROFILE=selfhost`.
 `selfhost` with `NODE_ENV` unset counts as development (host sandboxes allowed) and logs a warning: set
 `NODE_ENV=production` on a real install.
@@ -56,13 +55,11 @@ A switch and an older variable combine to the lower of the two. Turning a switch
 an older setting it overrides (an emergency switch must not take the deployment down); with the reader or mode switched
 off, its readiness checks no longer apply.
 
-## Old names (compatibility release)
+## Retired names
 
-This release reads both the old and the new names. `DOCSLURP_SERVICE_PROFILE=service` means `DOCSLURP_PROFILE=service`
-and `DOCSLURP_SERVICE_PROFILE=self-hosted` means `DOCSLURP_PROFILE=selfhost`. Setting both is allowed when they agree
-(a warning asks you to drop the old one) and refused when they disagree. An older variable that repeats a switch (for
-example `DOCSLURP_OCR_MODE=off` beside `DOCSLURP_DISABLE=ocr`) logs a warning. A later release refuses the retired
-variables at startup, so move to the new names now.
+`DOCSLURP_SERVICE_PROFILE` is retired: set (to any non-empty value), it refuses startup on the API and the worker,
+naming its replacement (`service` → `DOCSLURP_PROFILE=service`, `self-hosted` → `DOCSLURP_PROFILE=selfhost`). The
+refusal stays indefinitely. The previous (compatibility) release read both names; roll back only to it.
 
 ## Mixed fleets and the worker-fleet view
 
