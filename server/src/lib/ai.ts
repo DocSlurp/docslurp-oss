@@ -4,6 +4,7 @@ import { assertProviderAllowed, authorizePrivateModelCall, createOpenRouterReaso
 import { createHmac, randomBytes } from "node:crypto";
 import { chatSystemSaltLine, EVIDENCE_TAG_KEY_MIN_LENGTH, evidenceTagKeyBytes, resetEvidenceTagKeyForTests } from "./chat-prompt-salt.js";
 import { currentRequestOrgId } from "./request-context.js";
+import { orgPromptSalt, privateChatLayout } from "@docslurp/shared/org-prompt-salt";
 
 export { chatSystemSaltLine, EVIDENCE_TAG_KEY_MIN_LENGTH, resetEvidenceTagKeyForTests };
 import { homedir } from "node:os";
@@ -53,7 +54,10 @@ const PRIVATE_ENDPOINT_API_KEY = "private-endpoint";
 async function generatePrivateEndpointText(args: {
   operation: string;
   modelUri: string;
+  /** Instructions, without the salt: the org salt is added here (a system line, or cache_salt for a model without the system role). */
   system?: string;
+  /** The tenant whose content is sent; null gives a random salt (nothing shared). */
+  orgId: string | null | undefined;
   prompt: string;
   maxOutputTokens: number;
   privacyMode: PrivacyMode;
@@ -68,13 +72,16 @@ async function generatePrivateEndpointText(args: {
     capability: "text",
     operation: args.operation,
     auditScope: args.auditScope,
+    cacheSalt: orgPromptSalt(args.orgId),
   });
+  // A shared private endpoint may prefix-cache (vLLM does by default): the org salt goes first (privateChatLayout).
+  const layout = privateChatLayout(call.route.model, { orgId: args.orgId, system: args.system, prompt: args.prompt });
   return withObservation(
     {
       name: args.operation,
       type: "generation",
       model: call.model,
-      input: { system: args.system, prompt: args.prompt },
+      input: { system: layout.system, prompt: layout.prompt },
       metadata: { provider: PRIVATE_MODEL_PROVIDER, endpointAlias: call.route.alias, maxOutputTokens: args.maxOutputTokens },
       result: aiResultDetails,
     },
@@ -84,8 +91,8 @@ async function generatePrivateEndpointText(args: {
       const result = streamText({
         ...posthogAiTelemetry({ functionId: args.operation, provider: PRIVATE_MODEL_PROVIDER, context: args.observability }),
         model: provider.chat(call.model),
-        system: args.system,
-        prompt: args.prompt,
+        system: layout.system,
+        prompt: layout.prompt,
         maxOutputTokens: args.maxOutputTokens,
         abortSignal: args.signal,
       });
@@ -190,10 +197,11 @@ export async function generateOpenRouterText(args: {
    */
   orgId?: string | null;
 }): Promise<{ text: string; usage: TextGenerationUsage }> {
-  const saltLine = chatSystemSaltLine(args.orgId ?? currentRequestOrgId());
+  const orgId = args.orgId ?? currentRequestOrgId();
+  const saltLine = chatSystemSaltLine(orgId);
   // `llm://private/<alias>/<model>` routes go to the operator-registered endpoint.
   if (isPrivateModelUri(args.model)) {
-    const generated = await generatePrivateEndpointText({ ...args, system: saltLine, operation: args.operation ?? "api.text.private", modelUri: args.model });
+    const generated = await generatePrivateEndpointText({ ...args, system: undefined, orgId, operation: args.operation ?? "api.text.private", modelUri: args.model });
     return { text: generated.text, usage: generated.usage };
   }
   assertProviderAllowed(args.privacyMode, { provider: "openrouter", model: args.model ?? SEARCH_OPENROUTER_MODEL, operation: args.operation ?? "api.text.openrouter", target: "hosted" });
@@ -355,8 +363,10 @@ export async function generateOpenRouterDocumentText(args: {
       operation: "api.chat.documents",
       modelUri: args.model,
       // A shared private endpoint may prefix-cache (vLLM does by default): the org salt goes first, before the project's
-      // instructions. Private routes keep the question-first order and a random per-call evidence tag.
-      system: [chatSystemSaltLine(args.evidenceScope), args.system].filter(Boolean).join("\n\n"),
+      // instructions (generatePrivateEndpointText). Private routes keep the question-first order and a random per-call
+      // evidence tag.
+      system: args.system,
+      orgId: args.evidenceScope,
       prompt: `${withoutEvidenceTags(args.prompt)}\n\nProject evidence:\n\n${inlineDocuments}`,
       maxOutputTokens: args.maxOutputTokens,
       privacyMode: args.privacyMode,

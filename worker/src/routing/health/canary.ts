@@ -145,7 +145,7 @@ export async function runCanary(
   model: DecisionModel,
   options: { signal?: AbortSignal; thresholds?: CanaryThresholds } = {},
 ): Promise<CanaryResult> {
-  const result = await client.ask(model, CANARY_STATE, CANARY_QUESTIONS, { signal: options.signal });
+  const result = await client.ask(model, CANARY_STATE, CANARY_QUESTIONS, { signal: options.signal, tenantFree: true });
   const verdict = judgeCanary(result.answers, options.thresholds);
   return {
     ...verdict,

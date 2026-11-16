@@ -1,3 +1,11 @@
+## Organization isolation follow-ups (2026-11-16)
+
+- Llama Guard output moderation opens the user turn with the per-org salt line (its template takes no system role; a system message changed a verdict category). Verdicts and categories were identical with and without the line on 12 safe and unsafe pairs.
+- Page-router decision calls send OpenRouter a per-org `user` (an HMAC) and keep the state unsalted: a salt part changed calibrated answers. `ROUTING_DECISION_STATE_SALT=1` turns the state salt on once a policy pack is fit with it; health canaries (fixed text) stay unsalted.
+- One salt helper (`@docslurp/shared/org-prompt-salt`): server chat, search helpers and worker prompts salt an org identically, from one key derivation that refuses a short `EVIDENCE_TAG_KEY` in production (server config, worker startup and on use).
+- Query-embedding and vector-result caches are partitioned per organization (`OrgPartitionedTtlLru`): a per-org cap, and global pressure evicts expired entries first and never takes from an organization within its equal share. The search response cache uses the same rule.
+- Private text models can be registered with `systemMessage: false`: no system message is sent, instructions open the user turn and the org salt goes as `cache_salt`; a call without the salt is refused.
+
 ## Automatic-call margin gate (2026-11-15)
 
 - Automatic model calls (vision fallback, OCR escalation, chart generators, page-router targets, route tiers, chat failover, Speed boost swaps) are allowed only when the pricing provider's billed value covers planning tokens times the route's highest current price (per OpenRouter endpoint, time-of-day overrides, verified host schedules) by `DOCSLURP_AUTOMATIC_MIN_MARGIN` (1.3). Unknown or stale prices fail closed; refused candidates are skipped with a logged reason; losing calls log `[automatic-margin] overrun loss=true`.

@@ -56,9 +56,18 @@ export const privateEndpointModelSchema = z.object({
    * model id: prompt mode, sampling, output cap and page-image long edge.
    */
   vision: visionRequestProfileSchema.optional(),
+  /**
+   * Text models only. `false` for a model whose chat template rejects (or misreads) the system role: requests carry
+   * no system message, the instructions open the user turn, and the per-organization prompt salt goes as vLLM's
+   * `cache_salt` instead of a system line. Default true. Vision models set this in `vision`.
+   */
+  systemMessage: z.boolean().optional(),
 }).strict().superRefine((value, ctx) => {
   if (value.vision !== undefined && value.capability !== "vision") {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["vision"], message: "vision only applies to vision models" });
+  }
+  if (value.systemMessage !== undefined && value.capability !== "text") {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["systemMessage"], message: "systemMessage only applies to text models (vision models set vision.systemMessage)" });
   }
   if (value.capability === "embedding" && value.dimensions === undefined) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["dimensions"], message: "Embedding models must declare dimensions" });
@@ -375,13 +384,48 @@ function requestUrl(input: Parameters<typeof fetch>[0]): string {
 }
 
 /**
+ * Messages with every system message removed and its text placed at the start of the first user turn, for a model
+ * whose chat template rejects the system role. A guard: callers already lay such requests out without one.
+ */
+export function foldSystemMessages(messages: unknown[]): unknown[] {
+  const system: string[] = [];
+  const rest: unknown[] = [];
+  for (const message of messages) {
+    const m = message as { role?: unknown; content?: unknown } | null;
+    if (m && m.role === "system") {
+      if (typeof m.content === "string") system.push(m.content);
+      else if (Array.isArray(m.content)) {
+        for (const part of m.content) if (part && typeof part === "object" && typeof (part as { text?: unknown }).text === "string") system.push((part as { text: string }).text);
+      }
+    } else rest.push(message);
+  }
+  if (system.length === 0) return messages;
+  const text = system.filter(Boolean).join("\n\n");
+  const first = rest.findIndex((message) => (message as { role?: unknown } | null)?.role === "user");
+  if (first < 0) return [{ role: "user", content: text }, ...rest];
+  const user = rest[first] as { content?: unknown };
+  const content = typeof user.content === "string"
+    ? `${text}\n\n${user.content}`
+    : Array.isArray(user.content) ? [{ type: "text", text }, ...user.content] : text;
+  return rest.map((message, index) => index === first ? { ...(message as object), content } : message);
+}
+
+/**
  * A fetch bound to one registered endpoint: it refuses any URL outside the
  * registered base URL, injects the operator auth header, and strips any
  * Authorization header the SDK added from a placeholder API key.
  */
 export function createPrivateEndpointFetch(
   route: Pick<PrivateModelRoute, "endpoint" | "baseUrl">,
-  options: { baseFetch?: typeof fetch; env?: EnvLike; chatTemplateKwargs?: Record<string, unknown> } = {},
+  options: {
+    baseFetch?: typeof fetch;
+    env?: EnvLike;
+    chatTemplateKwargs?: Record<string, unknown>;
+    /** Sent as `cache_salt` on chat/completions requests (vLLM prefix-cache isolation per organization). */
+    cacheSalt?: string;
+    /** `false`: fold any system message into the first user turn, for models whose template rejects the system role. */
+    systemMessage?: boolean;
+  } = {},
 ): typeof fetch {
   const baseFetch = options.baseFetch ?? fetch;
   const prefix = `${route.baseUrl}/`;
@@ -395,12 +439,21 @@ export function createPrivateEndpointFetch(
     headers.delete("authorization");
     for (const [key, value] of Object.entries(privateEndpointAuthHeaders(route.endpoint, options.env))) headers.set(key, value);
     let body = init?.body;
-    if (options.chatTemplateKwargs && url.endsWith("/chat/completions") && typeof body === "string") {
+    const rewrites = options.chatTemplateKwargs || options.cacheSalt || options.systemMessage === false;
+    if (rewrites && url.endsWith("/chat/completions") && typeof body === "string") {
+      let parsed: Record<string, unknown> | null = null;
       try {
-        const parsed = JSON.parse(body) as Record<string, unknown>;
-        const existing = parsed.chat_template_kwargs && typeof parsed.chat_template_kwargs === "object" ? parsed.chat_template_kwargs as Record<string, unknown> : {};
-        body = JSON.stringify({ ...parsed, chat_template_kwargs: { ...options.chatTemplateKwargs, ...existing } });
+        parsed = JSON.parse(body) as Record<string, unknown>;
       } catch { /* Not JSON: send unchanged. */ }
+      if (parsed && typeof parsed === "object") {
+        if (options.chatTemplateKwargs) {
+          const existing = parsed.chat_template_kwargs && typeof parsed.chat_template_kwargs === "object" ? parsed.chat_template_kwargs as Record<string, unknown> : {};
+          parsed = { ...parsed, chat_template_kwargs: { ...options.chatTemplateKwargs, ...existing } };
+        }
+        if (options.systemMessage === false && Array.isArray(parsed.messages)) parsed = { ...parsed, messages: foldSystemMessages(parsed.messages) };
+        if (options.cacheSalt) parsed = { ...parsed, cache_salt: options.cacheSalt };
+        body = JSON.stringify(parsed);
+      }
     }
     return await baseFetch(input, { ...init, headers, body, redirect: "error" });
   }) as typeof fetch;

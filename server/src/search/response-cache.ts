@@ -27,8 +27,10 @@ import { ensureInvalidationListener, onSearchProjectInvalidated } from "./eligib
  *   options, the query as sent), so answers never cross callers, keys,
  *   tenants, projects or options.
  * - Entries are partitioned by organization with per-organization entry and
- *   byte caps; global pressure evicts from the largest organization, so one
- *   tenant cannot push out another's entries. Oversized answers are not kept.
+ *   byte caps. Global pressure drops expired answers first, then evicts only
+ *   from an organization above an equal share of the cache (`evict`), so one
+ *   tenant cannot push out another's entries while that one holds no more than
+ *   its share. Oversized answers are not kept.
  * - Settings, pipeline and document changes drop a project's entries through
  *   the search invalidation hints (eligible-documents.ts); answers are otherwise
  *   at most one TTL old.
@@ -271,20 +273,38 @@ function evictOldest(orgKey: string): void {
   if (oldest !== undefined) removeEntry(orgKey, oldest);
 }
 
-/** An organization first trims to its own caps; global pressure then evicts from the largest organization. */
+/**
+ * An organization first trims to its own caps. Global pressure then drops expired answers, and after that an
+ * organization at or above an equal share of the exceeded limit (`limit / active organizations`) evicts its own
+ * oldest answer; one below it evicts from the organization largest in that limit, which is above its share. So an
+ * organization never loses answers to another's traffic while it holds no more than an equal share.
+ */
 function evict(orgKey: string): void {
   while ((partitions.get(orgKey)?.size ?? 0) > limits.perOrgMaxEntries || (partitionBytes.get(orgKey) ?? 0) > limits.perOrgMaxBytes) {
     evictOldest(orgKey);
   }
+  if (totalEntries > limits.maxEntries || totalBytes > limits.maxBytes) purgeExpired(searchResponseCacheTtlMs());
   while (totalEntries > limits.maxEntries || totalBytes > limits.maxBytes) {
-    let largest: string | null = null;
-    for (const [candidate, entries] of partitions) {
-      if (largest === null) { largest = candidate; continue; }
-      const bytes = partitionBytes.get(candidate) ?? 0;
-      const best = partitionBytes.get(largest) ?? 0;
-      if (bytes > best || (bytes === best && entries.size > (partitions.get(largest)?.size ?? 0))) largest = candidate;
+    const byBytes = totalBytes > limits.maxBytes;
+    const sizeOf = (org: string) => byBytes ? partitionBytes.get(org) ?? 0 : partitions.get(org)?.size ?? 0;
+    const share = (byBytes ? limits.maxBytes : limits.maxEntries) / Math.max(1, partitions.size);
+    let victim = orgKey;
+    if (sizeOf(orgKey) < share) {
+      let largest: string | null = null;
+      for (const candidate of partitions.keys()) {
+        if (candidate !== orgKey && (largest === null || sizeOf(candidate) > sizeOf(largest))) largest = candidate;
+      }
+      if (largest !== null) victim = largest;
     }
-    if (largest === null) return;
-    evictOldest(largest);
+    if (!partitions.has(victim)) return;
+    evictOldest(victim);
+  }
+}
+
+function purgeExpired(ttlMs: number): void {
+  if (ttlMs <= 0) return;
+  const cutoff = Date.now() - ttlMs;
+  for (const [orgKey, entries] of partitions) {
+    for (const [key, entry] of entries) if (entry.at <= cutoff) removeEntry(orgKey, key);
   }
 }

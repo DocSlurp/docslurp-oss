@@ -36,6 +36,7 @@ import { onTeardownBreakerOpen, quarantineForceExitMs, scheduleQuarantineForceEx
 import { initializeParserSandbox, setDefaultParserSandbox } from "../sandbox/startup.js";
 import { assertNoUnsafeOverrides } from "../lib/unsafe-overrides.js";
 import { assertWorkerOperatorConfig } from "../lib/operator-config.js";
+import { assertServerSecretKeyConfig } from "@docslurp/shared/org-prompt-salt";
 import { loadPricingThenParserSandbox } from "./startup-order.js";
 import { loadExtractorPlugins, setExtractorDocumentOwners, setExtractorComputeObservations, setExtractorComputeCohortAuthorizer, setExtractorComputeAllocationAdmission } from "../extractors/plugins.js";
 import { loadPricingProvider, pricingDurableStateFromSql } from "@docslurp/shared/pricing-loader";
@@ -95,6 +96,8 @@ async function main(): Promise<void> {
     // variables every later check reads.
     assertWorkerOperatorConfig(process.env);
     assertNoUnsafeOverrides(process.env);
+    // A short EVIDENCE_TAG_KEY would make the per-org prompt salt guessable; refuse it before any job runs.
+    assertServerSecretKeyConfig(process.env);
   } catch (error) {
     throw new FatalWorkerError("startup", error instanceof Error ? error.message : String(error), { cause: error });
   }

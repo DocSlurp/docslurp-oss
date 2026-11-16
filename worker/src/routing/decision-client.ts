@@ -42,6 +42,8 @@ import { fetchWithProviderRetry, type ProviderRetryOptions } from "../lib/provid
 import type { PipelineUsageEventLedger } from "../pipeline/usage-ledger.js";
 import { readRoutingFlags } from "./flags.js";
 import { vmOnlyParsing } from "../lib/vm-only-parsing.js";
+import { currentProviderRateOrg } from "../lib/provider-rate-limit.js";
+import { orgPromptSalt } from "@docslurp/shared/org-prompt-salt";
 
 export const PAGE_ROUTE_DECISION_METRIC = "page-route-decision";
 /** Health-canary probes of a decision model (see health/canary.ts). */
@@ -72,6 +74,11 @@ export type DecisionAnswer =
 
 export interface DecisionCallOptions {
   signal?: AbortSignal;
+  /**
+   * The state is fixed, tenant-free text (health canaries): send it unsalted so its calibration and shared prefix
+   * stay as they are. Never set this for a state that carries a page, a crop, a transcription or document facts.
+   */
+  tenantFree?: boolean;
 }
 
 export interface DecisionCallResult {
@@ -119,6 +126,32 @@ export function imageDataUrlPart(png: Buffer | Uint8Array, mime = "image/png"): 
     type: "image_url",
     image_url: { url: `data:${mime};base64,${Buffer.from(png).toString("base64")}` },
   };
+}
+
+/**
+ * `state` opening with the organization's salt line, used only when `ROUTING_DECISION_STATE_SALT=1`.
+ *
+ * Decision endpoints serve every organization from one provider account, and a state that opens with a page image or
+ * document text could share a provider prefix cache across organizations. A leading salt part isolates that, but it
+ * is model input: measured on 22 fixture pages (PR notes), it moved calibrated answers by up to 0.46 and flipped 5 of
+ * 66 answers at 0.5 on the production primary, and made two organizations get different answers for the same page.
+ * The policy pack's Platt calibrations were fit without it, so it stays off until a pack is refit on salted states.
+ * Meanwhile the per-organization field each endpoint accepts is sent instead (`decisionIsolationFields`).
+ */
+export function saltDecisionState(state: DecisionState, saltLine: string): DecisionState {
+  if (Array.isArray(state)) return [saltLine, ...state];
+  if (typeof state === "string") return `${saltLine}\n${state}`;
+  if (Object.hasOwn(state, "workspace")) throw new DecisionRequestError("decision state may not use the reserved key 'workspace'");
+  return { workspace: saltLine, ...state };
+}
+
+/**
+ * Request fields that key a call to its organization without changing model input. OpenRouter's `/systemone` takes a
+ * `user` (an opaque per-org HMAC, never the org id; answers verified identical with and without it). Perplexity
+ * rejects unknown top-level fields and has no cache-isolation field; Liquid documents none: they get nothing.
+ */
+export function decisionIsolationFields(model: DecisionModel, orgSalt: string): Record<string, string> {
+  return model.endpoint === "openrouter-systemone" ? { user: orgSalt } : {};
 }
 
 function countImages(state: DecisionState): number {
@@ -254,6 +287,8 @@ export interface DecisionClientOptions {
   retry?: Partial<Omit<ProviderRetryOptions, "provider" | "label" | "signal" | "fetchImpl">>;
   /** Called once per successful request, e.g. to record usage. */
   onUsage?: (model: DecisionModel, result: DecisionCallResult) => void;
+  /** The organization whose content is sent (default: the job's provider scope); null gives a random salt. */
+  orgId?: () => string | null;
   /** Local sidecar runner override (tests). */
   runSidecar?: (command: string[], request: unknown, signal?: AbortSignal) => Promise<unknown>;
   now?: () => number;
@@ -323,8 +358,16 @@ export function createDecisionClient(options: DecisionClientOptions): DecisionCl
         );
       }
 
-      const request = { model: wireModelId(model), state, questions };
       const started = now();
+      // Hosted tenant calls carry the org's isolation fields (decisionIsolationFields) and, once a policy pack is fit
+      // on salted states, the salt line as the first state part (saltDecisionState). A local sidecar runs per call on
+      // this machine and gets neither.
+      const hosted = model.endpoint !== "local-transformers";
+      if (opts.tenantFree && typeof state !== "string") throw new DecisionRequestError("only a fixed text state may skip the organization salt");
+      const tenant = hosted && !opts.tenantFree;
+      const orgSalt = tenant ? orgPromptSalt((options.orgId ?? currentProviderRateOrg)()) : "";
+      const sentState = tenant && env.ROUTING_DECISION_STATE_SALT?.trim() === "1" ? saltDecisionState(state, `Workspace ${orgSalt}.`) : state;
+      const request = { model: wireModelId(model), state: sentState, questions, ...(tenant ? decisionIsolationFields(model, orgSalt) : {}) };
 
       let body: unknown;
       let provider: string;

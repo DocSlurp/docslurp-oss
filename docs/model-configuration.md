@@ -414,6 +414,12 @@ The rules are:
   reason by default and can spend a stage's whole output budget on reasoning,
   which returns empty summaries. Set `{ "enable_thinking": false }` for them, or
   start vLLM with `--default-chat-template-kwargs '{"enable_thinking":false}'`.
+- `systemMessage` (optional, text models): `false` for a model whose chat
+  template rejects the system role. Its requests then carry no system message:
+  the instructions open the user turn, and the organization's prompt salt is
+  sent as `cache_salt` (vLLM) so the endpoint's prefix cache stays per
+  organization. The server must accept `cache_salt`. Vision models set this in
+  their `vision` profile.
 - `vision` (optional, vision models only): how page requests to this model are
   shaped, applied over any built-in profile for the same model id
   (`packages/shared/src/vision-request-profile.ts`). Fields:

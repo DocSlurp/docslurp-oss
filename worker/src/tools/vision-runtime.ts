@@ -1,7 +1,7 @@
 import { assertTenantModelEndpointAllowed } from "@docslurp/shared";
 import { assertLocalCliReaderAllowed } from "../lib/vm-only-parsing.js";
 import { currentProviderPolicy, currentProviderRateOrg } from "../lib/provider-rate-limit.js";
-import { orgPromptSaltLine } from "@docslurp/shared/org-prompt-salt";
+import { orgPromptSalt, orgPromptSaltLine } from "@docslurp/shared/org-prompt-salt";
 import { nitroBaseModel, speedBoostModel, type OpenRouterReasoning, withOpenRouterProviderPreferences, resolveSupportedModelIdWithWarning, withServedProviderRegion, withPromptCacheBreakpoints, needsExplicitPromptCache, assertAutomaticModelCallAllowed, AutomaticCallRefusedError, prepareAutomaticCallPrices, reportAutomaticCallOutcome, visionAutomaticRoute } from "@docslurp/shared";
 import { withObservation } from "@docslurp/shared/observability";
 import { ProviderRetryableError, providerFromBaseUrl } from "../lib/provider-retry.js";
@@ -925,7 +925,7 @@ export async function runVisionRequest(args: {
       const body = {
         model: args.model,
         messages,
-        ...(shaped ? { cache_salt: orgPromptSaltLine(currentProviderRateOrg()) } : {}),
+        ...(shaped ? { cache_salt: orgPromptSalt(currentProviderRateOrg()) } : {}),
         temperature: profile?.temperature ?? 0,
         ...(profile?.topP !== undefined ? { top_p: profile.topP } : {}),
         // null (`server`, no call cap): no max_tokens, so the served context limit applies; admission weighed contextTokens.
