@@ -79,6 +79,32 @@ describe("PdfSourceCache", () => {
     await cache.clear();
   });
 
+  it("never serves a cached source to another organization's run or another run, even under the same storage key", async () => {
+    let downloads = 0;
+    const storage = {
+      async downloadToTempFile(_key: string, pattern: string) {
+        downloads += 1;
+        const root = await mkdtemp(path.join(tmpdir(), "source-cache-test-"));
+        tempRoots.push(root);
+        const filePath = path.join(root, pattern.replace("*", "fixture"));
+        await writeFile(filePath, "same pdf bytes");
+        return filePath;
+      },
+    };
+    const cache = new PdfSourceCache(storage as any, 8);
+    // A run belongs to one organization; another organization's user is another requester, its run another run.
+    const orgA = await cache.get({ ...makeDocument(), userId: "user-a", runId: "run-1" });
+    const orgB = await cache.get({ ...makeDocument(), userId: "user-b", runId: "run-1" });
+    const otherRun = await cache.get({ ...makeDocument(), userId: "user-a", runId: "run-2" });
+    const sameRun = await cache.get({ ...makeDocument(), userId: "user-a", runId: "run-1" });
+    expect(downloads).toBe(3);
+    expect(new Set([orgA.path, orgB.path, otherRun.path]).size).toBe(3);
+    expect(orgB.cacheHit).toBe(false);
+    expect(otherRun.cacheHit).toBe(false);
+    expect(sameRun).toMatchObject({ path: orgA.path, cacheHit: true });
+    await cache.clear();
+  });
+
   it("renders only ready triage pages that need visual evidence", () => {
     expect(selectRasterPagesFromClassification({
       status: "ready",

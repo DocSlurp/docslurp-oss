@@ -75,6 +75,12 @@ export interface SandboxCommand {
    * commands of its own organization and refuses any other, or one without it.
    */
   tenantKey?: string;
+  /**
+   * The run the command's document belongs to. A remote provider that reuses a VM between commands binds the VM to
+   * `tenantKey` and `runKey` together at its first command and never gives it a command of any other organization or
+   * run; a command without both gets a VM no other command ever uses (fail closed to a fresh unit).
+   */
+  runKey?: string;
   /** The command needs the scanner VM's malware daemon: only a scanner session may run it; any other refuses. */
   requiresScanner?: boolean;
 }
