@@ -47,6 +47,12 @@ describe("resolveDeploymentProfile: refusals (fail closed)", () => {
     expect(posture.warnings.join(" ")).toMatch(/unset outside development/);
   });
 
+  it("warns that selfhost with NODE_ENV unset is development", () => {
+    const posture = resolveDeploymentProfile({ NODE_ENV: "", DOCSLURP_PROFILE: "selfhost" });
+    expect(posture.vmOnlyParsing).toBe(false);
+    expect(posture.warnings.join(" ")).toMatch(/selfhost with NODE_ENV unset counts as development/);
+  });
+
   it("defaults to dev with a warning in development", () => {
     const posture = resolveDeploymentProfile({ NODE_ENV: "development" });
     expect(posture.profile).toBe("dev");
@@ -206,6 +212,8 @@ describe("kill switches only lower: no env or request path raises a rung", () =>
     }
     expect(applyKillSwitchesToPipeline({ quality: "good", visionFallback: true }, { DOCSLURP_DISABLE: "ai" })).toEqual({ quality: "auto", visionFallback: false });
     expect(applyKillSwitchesToPipeline({ quality: "auto", visionFallback: true }, { DOCSLURP_DISABLE: "ai-rescue" })).toEqual({ quality: "auto", visionFallback: false });
+    // ai-rescue alone leaves smart's every-page reads alone (they are not rescue reads); ai lowers smart first.
+    expect(applyKillSwitchesToPipeline({ quality: "good", visionFallback: true }, { DOCSLURP_DISABLE: "ai-rescue" })).toEqual({ quality: "good", visionFallback: true });
     const untouched = { quality: "good", visionFallback: true };
     expect(applyKillSwitchesToPipeline(untouched, {})).toBe(untouched);
   });

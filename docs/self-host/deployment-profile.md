@@ -14,8 +14,12 @@ does not add up.
 | In-process native engine, page probe, `local-cli` vision reader | refused | refused under VM-only; development opt-in otherwise | development opt-in |
 | OCR default | `vm` (a VM OCR provider is required) | `off` until you choose a mode | `off` |
 
-`service` requires `NODE_ENV=production` exactly. Unset: the worker refuses to start outside development; in
-development it runs as `dev` and logs a warning. `compose.selfhost.yml` sets `DOCSLURP_PROFILE=selfhost`.
+`service` requires `NODE_ENV=production` exactly. Unset: the worker refuses to start outside development (from this
+release: worker images set `NODE_ENV=production`, so a worker started outside `compose.selfhost.yml` needs
+`DOCSLURP_PROFILE`, or the old `DOCSLURP_SERVICE_PROFILE`, before it upgrades); the API logs a warning instead. In
+development an unset profile runs as `dev` with a warning. `compose.selfhost.yml` sets `DOCSLURP_PROFILE=selfhost`.
+`selfhost` with `NODE_ENV` unset counts as development (host sandboxes allowed) and logs a warning: set
+`NODE_ENV=production` on a real install.
 
 **Isolation floor.** Parsing customer files is VM-only in every non-development environment, whatever the profile says.
 Development means `NODE_ENV` empty, `development` or `test` (trimmed, ASCII case ignored) in both the configured and the
@@ -37,12 +41,12 @@ Switches only ever lower what runs; a project keeps its stored settings.
 
 | Token | Turns off |
 |---|---|
-| `ai` | Every model read in extraction: rescue reads, OCR escalation, the page image reader, decision models (deterministic routing only), AI chart reads, `hosted` OCR and the `local-cli` reader. `smart` runs as `balanced` without AI. |
-| `ai-rescue` | Vision rescue reads of pages the text layer or OCR could not read (`visionFallback`). |
+| `ai` | Every model read in extraction: rescue reads (also at query time), OCR escalation, the page image reader, the page router (deterministic extraction only), the document-map siphon, self-critique re-reads, AI chart reads, vision reads of video frames, `hosted` OCR and the `local-cli` reader. `smart` runs as `balanced` without AI. Audio and video transcription keep running (the baseline read of media, like OCR for scans). |
+| `ai-rescue` | Vision rescue reads of pages the text layer or OCR could not read (`visionFallback`, at ingest and at query time) and self-critique re-reads. A `smart` run keeps its every-page reads (use `ai` to stop them). |
 | `ai-escalation` | Hosted OCR escalation (as `DOCSLURP_OCR_ESCALATION=off`). |
 | `page-reader` | The page image reader, in its OCR and vision-transcription modes. |
-| `ocr` | OCR (as `DOCSLURP_OCR_MODE=off`); the OCR page reader has nothing to read. |
-| `router` | The page router (as `PAGE_ROUTER_MODE=off`). |
+| `ocr` | OCR (as `DOCSLURP_OCR_MODE=off`); the OCR page reader has nothing to read. As with `DOCSLURP_OCR_MODE=off` today, a document that only OCR could read (an image, a scan without a text layer) fails rather than being kept as an image. |
+| `router` | The page router (as `PAGE_ROUTER_MODE=off`): this release turns the whole router off, which is stricter than "deterministic rules only". |
 | `figures` | The PDF figure pass (as `DOCSLURP_DOPPLER_IMAGE_EXTRACT=0`). |
 | `charts` | All chart export (as `DOCSLURP_CHART_EXPORT=off`). |
 | `charts-ai` | AI chart reads (as `DOCSLURP_CHART_EXPORT=free`). |
@@ -78,7 +82,7 @@ variables, so keep those set during a rolling upgrade.
 ## Upgrading and rolling back
 
 1. Upgrade to the compatibility release with your current variables; it starts with the old names and logs what to
-   change.
+   change. A worker outside development needs a profile on either name (the stock compose file sets one).
 2. Set `DOCSLURP_PROFILE` (and `DOCSLURP_DISABLE` for any switches) on the API and the worker, then remove the old
    variables once every worker reports `extraction.config-v1`.
 3. A later release refuses the retired variables. Roll back from it only to the compatibility release, with the image,

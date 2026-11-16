@@ -42,8 +42,7 @@ import {
   hostPdfExtractorsUnderSandbox,
   sandboxedPdfConfigured,
   type ExtractionContract,
-  type ExtractionArtifactRef,
-} from "@docslurp/shared";
+  type ExtractionArtifactRef, switchDisabled } from "@docslurp/shared";
 import { keyFromStorageUri, readJsonFile } from "../tools/storage.js";
 import { documentArtifactRoot, runArtifactRoot } from "../lib/artifact-root.js";
 import { pushPerfMetric } from "../lib/perf-context.js";
@@ -2384,6 +2383,8 @@ export class ExtractMarkdownStage implements Stage {
     if (!critiqueEnabled() || !Number.isFinite(maxCostCents) || maxCostCents <= 0) {
       return null;
     }
+    // DOCSLURP_DISABLE=ai (or ai-rescue): no critique re-reads.
+    if (switchDisabled(process.env, "ai-rescue")) return null;
     // Self-critique re-reads page rasters with a vision model; fast never reads a page, and an Auto ladder limit
     // (pipeline.ladder) plans every model read of a page, which an extra critique read would escape.
     if (!qualityAllowsPageReading(args.state.run.pipeline.quality) || effectiveLadder(args.state.run.pipeline).active) {

@@ -9,8 +9,7 @@ import {
   ladderAllowsOffPlanReads,
   qualityAllowsPageReading,
   resolveAllowedPipelineTextModel,
-  type MaterializationPolicy,
-} from "@docslurp/shared";
+  type MaterializationPolicy, switchDisabled } from "@docslurp/shared";
 
 import type { Config } from "../config.js";
 import { calibrateSegments, intToRoman, parseLabel, readPrintedPageNumber, resolvePrintedPage, segmentsFromPageLabels, type LabelSegment } from "../deferred/page-labels.js";
@@ -389,6 +388,8 @@ export class DocumentMapStage implements Stage {
     if (!(await allowHostedCall(state, openRouterTextCall("document-map", model), [document.id]))) return null;
     const maxSiphonPages = Math.min(60, Math.ceil(0.05 * pageCount));
     if (maxSiphonPages < 1) return null;
+    // DOCSLURP_DISABLE=ai: the siphon's decisions and map OCR are model reads; none run.
+    if (switchDisabled(process.env, "ai")) return null;
     return await runSiphonLoop({
       pageCount, maxSiphonPages, seed: args.draft, initialObservations: args.initialObservations, shouldStop: () => isCostCapExceeded(state), signal: args.signal,
       readWindow: async (first, last) => {
@@ -428,7 +429,7 @@ export class DocumentMapStage implements Stage {
     // Vision already stopped for the run: render nothing, call nothing.
     if (visionGuardFor(state).stop) return { pageTexts: pageNumbers.map(() => ""), costCents: 0 };
     // Fail closed: Fast never sends a page to a vision model, whoever asks.
-    if (!qualityAllowsPageReading(state.run.pipeline.quality) || !ladderAllowsOffPlanReads(state.run.pipeline).pageReads) return { pageTexts: pageNumbers.map(() => ""), costCents: 0 };
+    if (!qualityAllowsPageReading(state.run.pipeline.quality) || !ladderAllowsOffPlanReads(state.run.pipeline).pageReads || switchDisabled(process.env, "ai")) return { pageTexts: pageNumbers.map(() => ""), costCents: 0 };
 
     const maxLongEdgePx = visionRenderLongEdge(state.run.pipeline.vision);
     const artifacts = await this.rasters.renderSelectedPages({ document, runId: state.run.id, pageNumbers, dpi: OCR_DPI, ...(maxLongEdgePx !== undefined ? { maxLongEdgePx } : {}), signal: args.signal });

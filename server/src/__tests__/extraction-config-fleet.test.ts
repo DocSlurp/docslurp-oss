@@ -29,7 +29,7 @@ function record(identity: string, capabilities: readonly string[], config: Worke
   };
 }
 
-const r0Config = (disabled: string[], digest = "sha256:aaaa") => ({ extractionConfig: 1, postureDigest: digest, profile: "service", disabled });
+const r0Config = (disabled: string[], digest = "sha256:aaaa") => ({ extractionConfig: 1, postureDigest: digest, profile: "service", disabled: disabled.length const r0Config = (disabled: string[], digest = "sha256:aaaa") => ({ extractionConfig: 1, postureDigest: digest, profile: "service", disabled });const r0Config = (disabled: string[], digest = "sha256:aaaa") => ({ extractionConfig: 1, postureDigest: digest, profile: "service", disabled }); disabled[0] === "ai" && disabled.length === 1 ? ["ai", "ai-rescue", "ai-escalation", "page-reader", "router", "charts-ai"] : disabled });
 
 function snapshot(records: WorkerCapabilityRecord[]) {
   return intersectFleetCapabilities({
@@ -79,6 +79,14 @@ describe("extraction config across a mixed fleet", () => {
     expect(fleet.extractionConfigFleetView(rolled, ENV).fleetEnforcesSwitches).toBe(false);
     // Every token is known from R0, so an R1 env rolled back onto R0 never meets an unknown token.
     expect(parseDisableList(DISABLE_TOKENS.join(",")).unknown).toEqual([]);
+  });
+
+  it("ignores the stale config of a machine rolled back to a pre-R0 build (same instance id)", () => {
+    const view = snapshot([record("new-1", R0, r0Config(["ai"], "sha256:aaaa")), record("rolled-back", PRE_R0, r0Config([], "sha256:stale"))]);
+    const report = fleet.extractionConfigFleetView(view, { ...ENV, DOCSLURP_DISABLE: "ai" });
+    expect(report.workerPostureDigests).toEqual(["sha256:aaaa"]);
+    expect(report.switchSkew).toEqual([]);
+    expect(report.fleetEnforcesSwitches).toBe(false);
   });
 
   it("an unknown fleet (Temporal or registry down) never counts as enforcing", () => {

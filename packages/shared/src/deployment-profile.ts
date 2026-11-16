@@ -3,8 +3,10 @@
  *
  * `DOCSLURP_PROFILE` (`service` | `selfhost` | `dev`) says who runs this deployment; `DOCSLURP_DISABLE` is a closed list
  * of kill switches. `resolveDeploymentProfile(env)` turns them, with the isolation floor, into one frozen posture object
- * that the worker and the server read at startup. It replaces the scattered startup checks (`assertServiceProfileRuntime`,
- * the profile reads beside `vmOnlyParsing` and the host-PDF guard) with one function.
+ * that the worker and the server read at startup. It replaces the startup check (`assertServiceProfileRuntime` now
+ * resolves it) and every legacy profile read (`serviceProfileFromEnv`). Enforcement points (sandbox policy, host-PDF
+ * guard, probe and engine loaders) keep calling `vmOnlyParsing` / `isDevelopmentEnvironment`, the same floor the
+ * posture's `vmOnlyParsing` reports; routing them through the posture object is follow-up work, not a behaviour change.
  *
  * **Isolation floor.** Parsing is VM-only in every non-development environment (`isDevelopmentEnvironment`, #398/#419),
  * whatever the profile. Development means NODE_ENV empty, `development` or `test` in both the given and the process
@@ -240,6 +242,9 @@ export function resolveDeploymentProfile(env: Env, options: ResolveDeploymentPro
   if (profile === "dev" && !development) {
     throw new DeploymentProfileError(`${DEPLOYMENT_PROFILE_ENV}=dev is only for development (NODE_ENV empty, development or test); got NODE_ENV=${nodeEnv || "unset"}`);
   }
+  if (profile === "selfhost" && development && !nodeEnv) {
+    warnings.push(`${DEPLOYMENT_PROFILE_ENV}=selfhost with NODE_ENV unset counts as development: host sandboxes and in-process readers may be selected; set NODE_ENV=production for VM-only parsing`);
+  }
   if (profile === "service" && nodeEnv !== "production") {
     throw new DeploymentProfileError(`${DEPLOYMENT_PROFILE_ENV}=service requires NODE_ENV=production (got ${nodeEnv ? `'${nodeEnv}'` : "unset"})`);
   }
@@ -300,7 +305,8 @@ export type KillSwitchPipeline = {
 
 /**
  * `pipeline` as a run executes it under the deployment's switches. Only lowers: `ai` runs `smart` (`good`) as `balanced`
- * (`auto`) and drops rescue reads and the chart model tier; `ai-rescue` drops rescue reads (`visionFallback`);
+ * (`auto`) and drops rescue reads and the chart model tier; `ai-rescue` drops rescue reads (`visionFallback`) on
+ * `fastest`/`balanced` runs (a `smart` run's every-page reads are not rescue reads);
  * `charts-ai` keeps chart export on its free tier. Returns the same object when nothing changes.
  */
 export function applyKillSwitchesToPipeline<T extends KillSwitchPipeline>(pipeline: T, env: Env): T {
@@ -315,7 +321,8 @@ export function applyKillSwitchesToPipeline<T extends KillSwitchPipeline>(pipeli
     const vision = next.vision as { forceAllPages?: unknown } | null | undefined;
     if (vision?.forceAllPages) set({ vision: { ...vision, forceAllPages: false } });
   }
-  if (off.has("ai-rescue") && next.visionFallback !== false) set({ visionFallback: false });
+  // `ai-rescue` alone leaves `smart` its every-page reads (those are not rescue reads); `ai` lowered smart above.
+  if (off.has("ai-rescue") && next.visionFallback !== false && next.quality !== "good") set({ visionFallback: false });
   if (off.has("charts-ai") && next.chartExport?.tier === "models") set({ chartExport: { ...next.chartExport, tier: "free" } });
   if (off.has("charts") && next.chartExport && next.chartExport.tier && next.chartExport.tier !== "off") {
     set({ chartExport: { ...next.chartExport, tier: "off" } });

@@ -21,7 +21,7 @@ import { parsePageCostEvidence } from "../lib/page-cost-evidence.js";
  */
 import { accessSync, constants as fsConstants } from "node:fs";
 import { pathToFileURL } from "node:url";
-import { serviceProfileFromEnv } from "@docslurp/shared";
+import { isDevelopmentEnvironment, normalizeEnvSetting, serviceProfileFromEnv } from "@docslurp/shared";
 import { dopplerBinDir, dopplerConverterPath } from "../tools/doppler.js";
 import path from "node:path";
 import { dopplerImageExtractEnabled } from "./doppler-figures.js";
@@ -989,7 +989,8 @@ export function assertExtractorPluginConfiguration(env: NodeJS.ProcessEnv = proc
   }
   if (local) {
     if (sandboxed) throw new Error(`DOCSLURP_PDF_MODE=local parses PDFs on the worker host, and this deployment runs PDFs only in ${VM_PDF_EXTRACTOR_ID}; unset it`);
-    if (serviceProfileFromEnv(env) !== "self-hosted") {
+    const devMachine = normalizeEnvSetting(env.DOCSLURP_PROFILE) === "dev" && isDevelopmentEnvironment(env);
+    if (serviceProfileFromEnv(env) !== "self-hosted" && !devMachine) {
       throw new Error("DOCSLURP_PDF_MODE=local parses customer PDFs on the worker host and is only for customer-owned execution: it needs DOCSLURP_PROFILE=selfhost (or DOCSLURP_SERVICE_PROFILE=self-hosted); refusing to start");
     }
     if (!(deps.dopplerInstalled ?? (() => dopplerConverterInstalled(env)))()) {

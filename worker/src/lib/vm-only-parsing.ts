@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-import { type DeploymentPosture, isDevelopmentEnvironment, postureFingerprint, resolveDeploymentProfile } from "@docslurp/shared";
+import { type DeploymentPosture, isDevelopmentEnvironment, postureFingerprint, resolveDeploymentProfile, switchDisabled } from "@docslurp/shared";
 
 /**
  * The isolation floor: every non-development environment requires the audited VM boundary, including the real process
@@ -59,4 +59,14 @@ export function advertisedWorkerConfig(): { extractionConfig: number; postureDig
   } catch {
     return null;
   }
+}
+
+/**
+ * Before running the `local-cli` vision reader (an in-process-class reader: a local model on this host). It is a
+ * development opt-in only: refused under the VM-only floor (every non-development environment, whatever DOCSLURP_PROFILE
+ * says) and under DOCSLURP_DISABLE=ai. Called where the reader executes, never where a command is only planned.
+ */
+export function assertLocalCliReaderAllowed(env: NodeJS.ProcessEnv = process.env): void {
+  if (vmOnlyParsing(env)) throw new Error("the local-cli vision reader is refused outside development (VM-only parsing); configure a hosted or private vision route");
+  if (switchDisabled(env, "ai")) throw new Error("the local-cli vision reader is off (DOCSLURP_DISABLE=ai)");
 }

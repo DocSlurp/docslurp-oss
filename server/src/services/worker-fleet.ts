@@ -237,7 +237,9 @@ export class WorkerFleetCapabilities {
     for (const state of heldBack) {
       const blocker = snapshot.workers.find((worker) => !worker.capabilities.includes(state.capability));
       this.deps.log(
-        `[worker-fleet] ${state.flag} is configured on but held back on queue=${taskQueue}: ` +
+        (state.flag === "DOCSLURP_DISABLE"
+          ? `[worker-fleet] DOCSLURP_DISABLE applies on the app, but not every worker enforces it yet on queue=${taskQueue} (older workers read only their old variables): `
+          : `[worker-fleet] ${state.flag} is configured on but held back on queue=${taskQueue}: `) +
         (blocker
           ? `worker ${blocker.identity} (build ${blocker.buildId ?? "unknown"}) lacks ${state.capability}${blocker.note ? ` (${blocker.note})` : ""}`
           : snapshot.reason),
@@ -385,6 +387,9 @@ export function extractionConfigFleetView(
   const digests = new Set<string>();
   const skew: string[] = [];
   for (const worker of snapshot.workers) {
+    // A row's config counts only while the worker advertises extraction.config-v1: a machine rolled back to an older
+    // build keeps its row (same instance id) and the stale config of the build it replaced.
+    if (!worker.capabilities.includes("extraction.config-v1")) continue;
     const digest = worker.config?.postureDigest;
     if (digest) digests.add(digest);
     const workerSwitches = worker.config?.disabled ? [...worker.config.disabled].sort().join(",") : null;

@@ -50,7 +50,7 @@ deleted and not rollback-safe, the mixed-version window and SigNoz signals are i
 `DOCSLURP_SERVICE_PROFILE` and several older variables in two releases:
 
 - **R0 (compatibility).** Reads both the old and the new names: a warning when they agree, a startup refusal when they
-  disagree. Knows the whole `DOCSLURP_DISABLE` vocabulary. Workers advertise `extraction.config-v1` and their posture
+  disagree. A worker outside development refuses to start with no profile on either name. Knows the whole `DOCSLURP_DISABLE` vocabulary. Workers advertise `extraction.config-v1` and their posture
   digest (migration 0182, additive); `GET /ops/worker-fleet` shows whether the whole fleet enforces the switches.
 - **R1 (cutover).** Retired variables refuse startup. Deploy R1 only after R0 runs everywhere and every deployment's
   configuration has moved to the new names.

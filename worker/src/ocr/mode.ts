@@ -13,7 +13,7 @@
  * - `off`: no OCR. The default everywhere else (a stock self-hosted install runs with NODE_ENV=production and no plugin;
  *   it reads no OCR rather than refusing to start).
  */
-import { DEPLOYMENT_PROFILES, serviceProfileFromEnv, switchDisabled } from "@docslurp/shared";
+import { DEPLOYMENT_PROFILES, isDevelopmentEnvironment, normalizeEnvSetting, serviceProfileFromEnv, switchDisabled } from "@docslurp/shared";
 
 import { sandboxedOcrProvider } from "../extractors/plugins.js";
 import { assertOcrPageReaderConfiguration, assertVisionPageReaderConfiguration } from "./page-reader-mode.js";
@@ -137,11 +137,11 @@ export function resolveOcrMode(env: NodeJS.ProcessEnv = process.env): OcrMode {
  * disagreement between the two names (startup refuses those first: @docslurp/shared resolveDeploymentProfile).
  */
 export function resolveServiceProfile(env: NodeJS.ProcessEnv = process.env): ServiceProfile | null {
-  const raw = env.DOCSLURP_SERVICE_PROFILE?.trim().toLowerCase();
+  const raw = normalizeEnvSetting(env.DOCSLURP_SERVICE_PROFILE);
   if (raw && !(SERVICE_PROFILES as readonly string[]).includes(raw)) {
     throw new Error(`DOCSLURP_SERVICE_PROFILE must be one of ${SERVICE_PROFILES.join(", ")}; got ${JSON.stringify(raw)}`);
   }
-  const profile = env.DOCSLURP_PROFILE?.trim().toLowerCase();
+  const profile = normalizeEnvSetting(env.DOCSLURP_PROFILE);
   if (profile && !(DEPLOYMENT_PROFILES as readonly string[]).includes(profile)) {
     throw new Error(`DOCSLURP_PROFILE must be one of ${DEPLOYMENT_PROFILES.join(", ")}; got ${JSON.stringify(profile)}`);
   }
@@ -159,6 +159,8 @@ export function localOcrRefusal(env: NodeJS.ProcessEnv = process.env): string | 
   if (provider) return `DOCSLURP_OCR_MODE=local runs OCR on the worker host, and the ${provider.id} VM OCR provider is loaded`;
   const profile = resolveServiceProfile(env);
   if (profile === "self-hosted") return null;
+  // DOCSLURP_PROFILE=dev: a developer machine may opt in too, in development only.
+  if (profile === null && normalizeEnvSetting(env.DOCSLURP_PROFILE) === "dev" && isDevelopmentEnvironment(env)) return null;
   return profile === "service"
     ? "DOCSLURP_OCR_MODE=local runs OCR inside the worker host, which does not meet the VM boundary required for service-managed customer files (DOCSLURP_PROFILE=service)"
     : "DOCSLURP_OCR_MODE=local is only for customer-owned execution and needs DOCSLURP_PROFILE=selfhost (or DOCSLURP_SERVICE_PROFILE=self-hosted)";
