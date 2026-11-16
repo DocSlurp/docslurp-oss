@@ -22,13 +22,15 @@
  * Readers on hot paths never throw: `disabledSwitches(env)` reads an unparseable `DOCSLURP_DISABLE` as every switch on
  * (fail closed), and `serviceProfileFromEnv(env)` reads a disagreement as the stricter value. Startup refuses both.
  */
+import { DISABLE_ENV, DISABLE_TOKENS, type DisableToken, disabledSwitches, expandDisableTokens, parseDisableList } from "./kill-switches.js";
 import { isDevelopmentEnvironment, normalizeEnvSetting } from "./runtime-environment.js";
+
+export * from "./kill-switches.js";
 
 type Env = Readonly<Record<string, string | undefined>>;
 
 export const DEPLOYMENT_PROFILE_ENV = "DOCSLURP_PROFILE";
 export const LEGACY_SERVICE_PROFILE_ENV = "DOCSLURP_SERVICE_PROFILE";
-export const DISABLE_ENV = "DOCSLURP_DISABLE";
 
 export const DEPLOYMENT_PROFILES = ["service", "selfhost", "dev"] as const;
 export type DeploymentProfile = (typeof DEPLOYMENT_PROFILES)[number];
@@ -36,34 +38,6 @@ export type DeploymentProfile = (typeof DEPLOYMENT_PROFILES)[number];
 /** `DOCSLURP_SERVICE_PROFILE` values, the vocabulary every pre-R0 reader understands. */
 export const LEGACY_SERVICE_PROFILES = ["service", "self-hosted"] as const;
 export type LegacyServiceProfile = (typeof LEGACY_SERVICE_PROFILES)[number];
-
-/**
- * The closed `DOCSLURP_DISABLE` vocabulary (design 2.5). Every token is known from R0, so a rollback to R0 never meets
- * an unknown token.
- */
-export const DISABLE_TOKENS = [
-  "ai",
-  "ai-rescue",
-  "ai-escalation",
-  "page-reader",
-  "ocr",
-  "router",
-  "figures",
-  "charts",
-  "charts-ai",
-  "figure-resume",
-] as const;
-export type DisableToken = (typeof DISABLE_TOKENS)[number];
-
-/**
- * What each switch also turns off. `ai` turns off every model read in extraction: rescue, escalation, the page image
- * reader, decision models (deterministic routing only) and AI chart reads; `smart` runs as `balanced` without AI
- * (applyKillSwitchesToPipeline). `charts` turns off all chart export, including AI chart reads.
- */
-const IMPLIES: Readonly<Partial<Record<DisableToken, readonly DisableToken[]>>> = {
-  ai: ["ai-rescue", "ai-escalation", "page-reader", "router", "charts-ai"],
-  charts: ["charts-ai"],
-};
 
 const LEGACY_TO_PROFILE: Readonly<Record<LegacyServiceProfile, DeploymentProfile>> = { service: "service", "self-hosted": "selfhost" };
 const PROFILE_TO_LEGACY: Readonly<Record<DeploymentProfile, LegacyServiceProfile | null>> = { service: "service", selfhost: "self-hosted", dev: null };
@@ -73,54 +47,6 @@ export class DeploymentProfileError extends Error {
     super(`${message}; refusing to start`);
     this.name = "DeploymentProfileError";
   }
-}
-
-export function isDisableToken(value: string): value is DisableToken {
-  return (DISABLE_TOKENS as readonly string[]).includes(value);
-}
-
-/** Parse `DOCSLURP_DISABLE`: comma list, trimmed, lower-cased; empty entries ignored. Unknown tokens are returned apart. */
-export function parseDisableList(raw: string | undefined | null): { tokens: DisableToken[]; unknown: string[] } {
-  const tokens = new Set<DisableToken>();
-  const unknown: string[] = [];
-  for (const entry of (raw ?? "").split(",")) {
-    const token = normalizeEnvSetting(entry);
-    if (!token) continue;
-    if (isDisableToken(token)) tokens.add(token);
-    else unknown.push(token.slice(0, 40));
-  }
-  return { tokens: DISABLE_TOKENS.filter((token) => tokens.has(token)), unknown };
-}
-
-/** The switches the given tokens turn off, with their implications, in vocabulary order. */
-export function expandDisableTokens(tokens: Iterable<DisableToken>): DisableToken[] {
-  const off = new Set<DisableToken>();
-  for (const token of tokens) {
-    off.add(token);
-    for (const implied of IMPLIES[token] ?? []) off.add(implied);
-  }
-  return DISABLE_TOKENS.filter((token) => off.has(token));
-}
-
-const ALL_OFF: ReadonlySet<DisableToken> = new Set(DISABLE_TOKENS);
-let lastParsed: { raw: string; set: ReadonlySet<DisableToken> } | null = null;
-
-/**
- * The switches that are off under `env` (`DOCSLURP_DISABLE` with implications). Never throws: a value with an unknown
- * token reads as every switch off (fail closed); startup refuses it (resolveDeploymentProfile).
- */
-export function disabledSwitches(env: Env): ReadonlySet<DisableToken> {
-  const raw = env[DISABLE_ENV] ?? "";
-  if (lastParsed?.raw === raw) return lastParsed.set;
-  const parsed = parseDisableList(raw);
-  const set: ReadonlySet<DisableToken> = parsed.unknown.length > 0 ? ALL_OFF : new Set(expandDisableTokens(parsed.tokens));
-  lastParsed = { raw, set };
-  return set;
-}
-
-/** True when `token` (or a switch that implies it) is in `DOCSLURP_DISABLE`. */
-export function switchDisabled(env: Env, token: DisableToken): boolean {
-  return disabledSwitches(env).has(token);
 }
 
 function rawProfile(env: Env): string {

@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { switchDisabled } from "./deployment-profile.js";
+import { switchDisabled } from "./kill-switches.js";
 
 /*
  * Figure resume (docs/extraction/doppler-figures.md, "Resuming partial figures"): when the worker finishes the images a

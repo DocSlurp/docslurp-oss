@@ -13,7 +13,7 @@
  */
 import { z } from "zod";
 
-import { switchDisabled } from "./deployment-profile.js";
+import { switchDisabled } from "./kill-switches.js";
 
 /** The worker flag that turns figure extraction on for VM PDF runs (default off). */
 export const DOPPLER_IMAGE_EXTRACT_ENV = "DOCSLURP_DOPPLER_IMAGE_EXTRACT";

@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { switchDisabled } from "./deployment-profile.js";
+import { switchDisabled } from "./kill-switches.js";
 
 /**
  * Chart & diagram export: shared contract.
