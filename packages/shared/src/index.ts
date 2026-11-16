@@ -3,6 +3,7 @@
 // re-exports everything so existing imports from "@docslurp/shared" continue to work.
 
 export * from "./layout.js";
+export * from "./org-scope.js";
 export * from "./citation-locator.js";
 export * from "./media-summary.js";
 export * from "./anthropic-models.js";

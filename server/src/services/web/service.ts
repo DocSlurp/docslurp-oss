@@ -1,6 +1,6 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 
-import { BILLABLE_UNIT_METRICS, webMapCredits, webPageCredits, webSearchCredits } from "@docslurp/shared";
+import { BILLABLE_UNIT_METRICS, orgScopedCacheKey, webMapCredits, webPageCredits, webSearchCredits } from "@docslurp/shared";
 import { startTelemetrySpan, type TelemetrySpan } from "@docslurp/shared/observability";
 
 import { env } from "../../config.js";
@@ -137,8 +137,9 @@ function cacheDelete(key: string): void {
   cache.delete(key);
 }
 
+/** Per organization, project and user: one tenant's web results are never served to another. Throws without an org. */
 function cacheKey(capability: WebCapability, input: unknown, ctx: WebCallContext): string {
-  return createHash("sha256").update(JSON.stringify([ctx.orgId, ctx.projectId, ctx.userId, capability, input])).digest("hex");
+  return orgScopedCacheKey(ctx.orgId, "web-tool", ctx.projectId, ctx.userId, capability, input);
 }
 
 function cacheGet<T>(key: string, now: number): T | undefined {
@@ -327,9 +328,10 @@ export async function runWebCapability<C extends WebCapability>(
     }
     await d.assertCanSpend(ctx.orgId, ctx.projectId);
 
-    // Deep fetches ask for a fresh render, so they bypass the cache.
-    const cacheable = !(capability === "fetch" && (input as WebInput<"fetch">).depth === "deep");
-    const key = cacheKey(capability, input, ctx);
+    // Deep fetches ask for a fresh render, so they bypass the cache. A call without an
+    // organization has no tenant scope to key by, so it neither reads nor writes the cache.
+    const cacheable = Boolean(ctx.orgId?.trim()) && !(capability === "fetch" && (input as WebInput<"fetch">).depth === "deep");
+    const key = cacheable ? cacheKey(capability, input, ctx) : "";
     let output = cacheable ? cacheGet<WebOutput<C>>(key, started) : undefined;
     const cached = output !== undefined;
     let provider: WebProviderId | undefined;
