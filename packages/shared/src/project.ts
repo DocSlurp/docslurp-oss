@@ -1061,6 +1061,25 @@ const projectTemplateLockedSettingPaths: Record<
   inferenceLane: ["inferenceLane"],
 };
 
+/**
+ * Fields a lock holds beyond its own path. `quality` is the one extraction knob (extraction-config.ts): locking it also
+ * locks `visionFallback`, which R0 still stores beside it, so an upload or patch cannot turn a locked template's
+ * rescue reads off (or on) under its quality. The `visionFallback` lock itself is deprecated; templates lock `quality`.
+ */
+const projectTemplateCoLockedPaths: Partial<Record<ProjectTemplateLockedSetting, string[][]>> = {
+  quality: [["visionFallback"]],
+};
+
+/** Every dotted pipeline path a template's locks hold (its locked settings plus the paths they co-lock). */
+export function projectTemplateLockedPaths(template: Pick<ProjectTemplate, "lockedSettings">): string[] {
+  const paths = new Set<string>();
+  for (const setting of template.lockedSettings) {
+    paths.add(projectTemplateLockedSettingPaths[setting].join("."));
+    for (const extra of projectTemplateCoLockedPaths[setting] ?? []) paths.add(extra.join("."));
+  }
+  return [...paths];
+}
+
 function readNestedValue(source: unknown, path: string[]): unknown {
   let current = source;
   for (const segment of path) {
@@ -1134,10 +1153,12 @@ export function applyProjectTemplateLocks(
   >;
 
   for (const lockedSetting of template.lockedSettings) {
-    const path = projectTemplateLockedSettingPaths[lockedSetting];
-    const lockedValue = readNestedValue(template.pipeline, path);
-    if (lockedValue !== undefined) {
-      writeNestedValue(nextPipeline, path, lockedValue);
+    for (const path of [projectTemplateLockedSettingPaths[lockedSetting], ...(projectTemplateCoLockedPaths[lockedSetting] ?? [])]) {
+      // A template that leaves a co-locked field unset locks its schema default.
+      const lockedValue = readNestedValue(pipelineFeaturesSchema.parse(template.pipeline), path);
+      if (lockedValue !== undefined) {
+        writeNestedValue(nextPipeline, path, lockedValue);
+      }
     }
   }
 
@@ -1235,7 +1256,6 @@ export const projectTemplates: ProjectTemplate[] = [
     }),
     lockedSettings: [
       "quality",
-      "visionFallback",
       "vision.benchmarkProfile",
       "preserveTables",
       "pageIndex",
@@ -1317,7 +1337,6 @@ export const projectTemplates: ProjectTemplate[] = [
     }),
     lockedSettings: [
       "quality",
-      "visionFallback",
       "summarize",
       "propositionIndex",
       "inferenceLane",

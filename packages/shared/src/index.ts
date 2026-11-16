@@ -23,6 +23,7 @@ export * from "./extractors.js";
 export * from "./extractor-aliases.js";
 export * from "./visual-artifacts.js";
 export * from "./chart-export.js";
+export * from "./extraction-config.js";
 export * from "./chart-export-estimate.js";
 export * from "./chart-export-render.js";
 export * from "./visual-intent.js";
