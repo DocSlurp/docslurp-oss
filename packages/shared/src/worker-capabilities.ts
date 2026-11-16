@@ -120,6 +120,11 @@ export interface WorkerAdvertisedConfig {
   profile?: string;
   /** The switches that are off on the worker, with implications. */
   disabled?: string[];
+  /**
+   * Digest of the worker's operator config file (DOCSLURP_OPERATOR_CONFIG, operator-config.ts): null when the worker runs
+   * without one, absent from builds that do not report it (which the skew check counts as skew).
+   */
+  operatorConfig?: string | null;
 }
 
 /** Parse a registry row's `config` defensively: anything malformed is dropped, never trusted. */
@@ -131,6 +136,7 @@ export function parseWorkerAdvertisedConfig(value: unknown): WorkerAdvertisedCon
   if (typeof record.postureDigest === "string" && record.postureDigest.length <= 100) out.postureDigest = record.postureDigest;
   if (typeof record.profile === "string" && record.profile.length <= 20) out.profile = record.profile;
   if (Array.isArray(record.disabled)) out.disabled = record.disabled.filter((entry): entry is string => typeof entry === "string" && entry.length <= 40).slice(0, 20);
+  if (record.operatorConfig === null || (typeof record.operatorConfig === "string" && record.operatorConfig.length <= 100)) out.operatorConfig = record.operatorConfig;
   return out;
 }
 

@@ -21,6 +21,7 @@ import { pinnedOcrModels } from "../ocr/models.js";
 import { initializeParserSandbox } from "../sandbox/startup.js";
 import { assertServiceProfileRuntime, vmOnlyParsing } from "../lib/vm-only-parsing.js";
 import { assertNoUnsafeOverrides } from "../lib/unsafe-overrides.js";
+import { assertWorkerOperatorConfig } from "../lib/operator-config.js";
 
 export interface PreflightStepResult {
   step: string;
@@ -73,6 +74,11 @@ export async function runWorkerPreflight(env: NodeJS.ProcessEnv = process.env, d
     }
   };
 
+  // First: the operator config sets variables every later check reads (DOCSLURP_OPERATOR_CONFIG).
+  await step("operator config", () => {
+    const state = assertWorkerOperatorConfig(env);
+    return state.path ? `path=${state.path} digest=${state.digest}` : "unset (code defaults)";
+  });
   await step("runtime environment", () => {
     assertServiceProfileRuntime(env);
     assertNoUnsafeOverrides(env);

@@ -1,3 +1,4 @@
+import { currentOperatorConfigDigest } from "@docslurp/shared/operator-config";
 import { createHash } from "node:crypto";
 
 import { type DeploymentPosture, isDevelopmentEnvironment, postureFingerprint, resolveDeploymentProfile, switchDisabled } from "@docslurp/shared";
@@ -52,10 +53,14 @@ export function deploymentPosture(): DeploymentPosture {
  * What this worker advertises in its capability-registry row (`/ops/worker-fleet`): extraction config version, posture
  * digest, profile and the switches that are off. Null when the posture does not resolve (startup refuses that first).
  */
-export function advertisedWorkerConfig(): { extractionConfig: number; postureDigest: string; profile: string; disabled: string[] } | null {
+export function advertisedWorkerConfig(): { extractionConfig: number; postureDigest: string; profile: string; disabled: string[]; operatorConfig: string | null } | null {
   try {
     const posture = deploymentPosture();
-    return { extractionConfig: posture.extractionConfig, postureDigest: postureDigest(posture), profile: posture.profile, disabled: [...posture.disabled] };
+    return {
+      extractionConfig: posture.extractionConfig, postureDigest: postureDigest(posture), profile: posture.profile, disabled: [...posture.disabled],
+      // The operator config file's digest (null without one): /ops/worker-fleet compares it with the app's.
+      operatorConfig: currentOperatorConfigDigest(),
+    };
   } catch {
     return null;
   }

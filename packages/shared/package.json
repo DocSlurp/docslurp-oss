@@ -26,6 +26,10 @@
       "types": "./dist/temporal-connection.d.ts",
       "import": "./dist/temporal-connection.js"
     },
+    "./operator-config": {
+      "types": "./dist/operator-config.d.ts",
+      "import": "./dist/operator-config.js"
+    },
     "./env-flags": {
       "types": "./dist/env-flags.d.ts",
       "import": "./dist/env-flags.js"

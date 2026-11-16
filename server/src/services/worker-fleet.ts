@@ -15,6 +15,8 @@ import {
   type WorkerCapabilityRecord,
 } from "@docslurp/shared";
 
+import { assessOperatorConfigSkew, currentOperatorConfigDigest, type OperatorConfigSkew } from "@docslurp/shared/operator-config";
+
 import { sql } from "../db.js";
 
 /**
@@ -359,6 +361,11 @@ export interface WorkerFleetReport {
   workers: FleetCapabilitySnapshot["workers"];
   /** Extraction config (release R0): the app's posture beside what each worker advertises. */
   extractionConfig: ExtractionConfigFleetView;
+  /**
+   * The operator config digest this API process runs with against every live worker's (`skew` when any differs or
+   * reports none; `unknown` without live pollers). The deploy's skew check fails on anything but `ok`.
+   */
+  operatorConfig: OperatorConfigSkew;
   checkedAt: string;
 }
 
@@ -403,6 +410,17 @@ export function extractionConfigFleetView(
   };
 }
 
+/** Pure: the operator config skew for a fleet snapshot. Only live pollers count; anything else is unknown. */
+export function operatorConfigSkewOf(snapshot: FleetCapabilitySnapshot, appDigest: string | null): OperatorConfigSkew {
+  if (snapshot.basis !== "pollers") return { app: appDigest, status: "unknown", workers: [] };
+  return assessOperatorConfigSkew(appDigest, snapshot.workers.map((worker) => ({
+    identity: worker.identity,
+    // A worker whose registry row is stale, stopped or from another build cannot vouch for its digest (an N-1 image keeps
+    // the row's old digest after a rollback): it counts as unknown, which is skew.
+    digest: !worker.note && worker.registered && worker.config && "operatorConfig" in worker.config ? worker.config.operatorConfig : undefined,
+  })));
+}
+
 /** Operator view (GET /ops/worker-fleet, /metrics): configured vs effective flags. */
 export async function workerFleetReport(taskQueue?: string, env: Env = process.env): Promise<WorkerFleetReport> {
   const queue = taskQueue ?? defaultPipelineTaskQueue(env);
@@ -417,6 +435,8 @@ export async function workerFleetReport(taskQueue?: string, env: Env = process.e
     features: gatedFeatureStates(configuredGatedFlags(env), gate ? new Set(snapshot.capabilities) : null),
     workers: snapshot.workers,
     extractionConfig: extractionConfigFleetView(snapshot, env),
+    // Skew is checked whether or not the capability gate is on.
+    operatorConfig: operatorConfigSkewOf(gate ? snapshot : await workerFleet().resolve(queue), currentOperatorConfigDigest()),
     checkedAt: new Date().toISOString(),
   };
 }

@@ -27,6 +27,7 @@ export default defineConfig({
       "@docslurp/shared/error-response": shared("error-response"),
       "@docslurp/shared/file-token-path": shared("file-token-path"),
       "@docslurp/shared/env-flags": shared("env-flags"),
+      "@docslurp/shared/operator-config": shared("operator-config"),
       "@docslurp/shared/observability": shared("observability"),
       "@docslurp/shared/lancedb-s3-trace": shared("lancedb-s3-trace"),
       "@docslurp/shared/lancedb-query-tuning": shared("lancedb-query-tuning"),

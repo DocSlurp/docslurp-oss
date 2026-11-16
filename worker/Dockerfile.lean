@@ -227,6 +227,9 @@ COPY --from=native-pdf /app/vendor-artifacts ./vendor-artifacts
 # Optional extractor plugins a deployment stages into the build context; the worker loads only the ones
 # DOCSLURP_EXTRACTOR_PLUGINS names (docs/extraction/extractor-plugins.md). Absent by default.
 COPY vendor-artifact[s]/extractor-plugin[s] ./vendor-artifacts/extractor-plugins/
+# Optional operator config file a deployment stages into the build context (docs/self-host/operator-config.md); read only
+# when DOCSLURP_OPERATOR_CONFIG names it, and a set but missing file refuses startup. Absent by default.
+COPY vendor-artifact[s]/operator-confi[g] ./vendor-artifacts/operator-config/
 COPY --from=native-pdf-assets /opt/native-pdf /opt/native-pdf
 COPY worker/LICENSE ./worker/LICENSE
 COPY worker/scripts ./worker/scripts

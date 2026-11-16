@@ -35,6 +35,7 @@ import { configureSourceQuarantine, postgresSourceQuarantine } from "../sandbox/
 import { onTeardownBreakerOpen, quarantineForceExitMs, scheduleQuarantineForceExit, workerShutdownForceMs } from "../sandbox/teardown-breaker.js";
 import { initializeParserSandbox, setDefaultParserSandbox } from "../sandbox/startup.js";
 import { assertNoUnsafeOverrides } from "../lib/unsafe-overrides.js";
+import { assertWorkerOperatorConfig } from "../lib/operator-config.js";
 import { loadPricingThenParserSandbox } from "./startup-order.js";
 import { loadExtractorPlugins, setExtractorDocumentOwners, setExtractorComputeObservations, setExtractorComputeCohortAuthorizer, setExtractorComputeAllocationAdmission } from "../extractors/plugins.js";
 import { loadPricingProvider, pricingDurableStateFromSql } from "@docslurp/shared/pricing-loader";
@@ -90,6 +91,9 @@ async function main(): Promise<void> {
   // Development-only fail-open settings stop startup before anything else outside development (#398).
   // initializeParserSandbox repeats the check for CLIs and preflight that start there.
   try {
+    // The operator config file (env.ts applied it on import; this adds the worker-only checks) comes first: it sets
+    // variables every later check reads.
+    assertWorkerOperatorConfig(process.env);
     assertNoUnsafeOverrides(process.env);
   } catch (error) {
     throw new FatalWorkerError("startup", error instanceof Error ? error.message : String(error), { cause: error });
