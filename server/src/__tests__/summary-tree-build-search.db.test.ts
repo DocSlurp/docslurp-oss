@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 import * as lancedb from "@lancedb/lancedb";
-import { artifactUri, DISTINCT_TEST_PRICING, installTestPricing, normalizePipelineFeatures, resolveEmbeddingRoute, VectorNamespaceManager, type PipelineFeatures } from "@docslurp/shared";
+import { artifactUri, indexConfigHash, indexConfigOf, DISTINCT_TEST_PRICING, installTestPricing, normalizePipelineFeatures, resolveEmbeddingRoute, VectorNamespaceManager, type PipelineFeatures } from "@docslurp/shared";
 import postgres from "postgres";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
@@ -83,8 +83,8 @@ const lanceChunks: Chunk[] = [];
 
 /** A completed, indexed document: Postgres rows, chunk vectors for the chunk legs, and its embed-stage artifact. */
 async function seedDocument(id: string, chunks: number, heat: (index: number) => number): Promise<void> {
-  await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, canonical_id)
-    values (${id}, 'org1', 'u', 'w', 'run-w', ${`${id}.md`}, 'text/markdown', ${`u/src/${id}`}, 'completed', ${`/${id}`})`;
+  await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, canonical_id, index_config_hash)
+    values (${id}, 'org1', 'u', 'w', 'run-w', ${`${id}.md`}, 'text/markdown', ${`u/src/${id}`}, 'completed', ${`/${id}`}, ${indexConfigHash(indexConfigOf(PIPELINE))})`;
   await sql`insert into vector_indexes (id, document_id, backend, bucket, path, embedding_model, dimension)
     values (${`vi-${id}`}, ${id}, 'lancedb', 'b', 'p', ${route.model}, ${DIM})`;
   const rows: Chunk[] = [];

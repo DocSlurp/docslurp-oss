@@ -64,6 +64,8 @@ const KIND_RANK: Record<ConfigChangeKind, number> = {
 export type IndexConfig = {
   embeddingModel: string;
   dims: number | null;
+  /** Absent in legacy records; normalization cannot be reconstructed from those records. */
+  normalize?: boolean;
   chunking: {
     chunkOverlap: boolean;
     contextualChunkPreambles: boolean;
@@ -79,6 +81,7 @@ export function indexConfigOf(features: PipelineFeatures): IndexConfig {
   return {
     embeddingModel: modelUri,
     dims: embedding.dimensions ?? embeddingModelCatalogByUri[embeddingModelBaseUri(modelUri)]?.dimensions ?? null,
+    normalize: embedding.normalize ?? embeddingProfileCatalog[embedding.profile].config.normalize,
     chunking: {
       chunkOverlap: features.chunkOverlap,
       contextualChunkPreambles: features.contextualChunkPreambles,
@@ -97,6 +100,8 @@ export function indexConfigHash(config: IndexConfig): string {
     config.dims,
     [chunking.chunkOverlap, chunking.contextualChunkPreambles, chunking.lateChunking, chunking.lateChunkingWindow],
     [...config.vectorBackends].sort(),
+    // Version the identity: legacy records did not record this material input.
+    ["normalization-v1", config.normalize ?? null],
   ])).slice(0, 32);
 }
 

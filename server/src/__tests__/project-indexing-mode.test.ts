@@ -399,3 +399,20 @@ describe("upload indexingMode", () => {
     expect(doc?.indexing_mode).toBe("visual");
   });
 });
+
+it("publishes a mode switch and search defaults atomically and does not queue twice on retry", async () => {
+  await seedProject("t-publication", "gold", "map");
+  await seedDoc("t-publication-doc", "t-publication", "gold", 3, 0);
+  const publication = await import("../services/settings-publication.js");
+  const snapshot = await publication.readSettingsSnapshot(actor, "t-publication");
+  const input = { requestId: '37a159c6-4160-4e2e-af45-914cc4b5b005', expected: snapshot.revision,
+    project: { pipeline: { indexingMode: 'visual' }, apply: 'reindex' }, search: { chat: { enabled: false } } };
+  await expect(publication.publishSettings({ actor, projectId: 't-publication', input: { ...input, project: { pipeline: { indexingMode: 'visual' } } } })).rejects.toMatchObject({ status: 409 });
+  const result = await publication.publishSettings({ actor, projectId: 't-publication', input });
+  expect(result.snapshot.project.pipeline.indexingMode).toBe('visual');
+  expect(result.snapshot.settings.chat.enabled).toBe(false);
+  expect(result.queuedRunIds).toHaveLength(1);
+  const retry = await publication.publishSettings({ actor, projectId: 't-publication', input });
+  expect(retry.replayed).toBe(true);
+  expect(await sql`select count(*)::int n from project_runs where project_id='t-publication' and kind='full-index'`).toEqual([{ n: 1 }]);
+});

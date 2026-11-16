@@ -7,6 +7,8 @@ import {
   LANCEDB_SUMMARIES_TABLE,
   SUMMARY_TREE_INCLUDE_CONTEXT_SHARE,
   normalizePipelineFeatures,
+  indexConfigHash,
+  indexConfigOf,
   resolveEmbeddingRoute,
   summaryTreeGuideSlots,
   summaryTreeSummarySchema,
@@ -89,8 +91,9 @@ async function seedDocument(args: {
   text?: Record<number, string>;
 }): Promise<void> {
   const runId = args.runId ?? `run-${args.projectId}`;
-  await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status)
-    values (${args.id}, ${args.orgId}, ${args.userId}, ${args.projectId}, ${runId}, ${`${args.id}.pdf`}, 'application/pdf', ${`k-${args.id}`}, 'completed')`;
+  // Synthetic vectors below are generated with this explicit current recipe; they are not legacy artifacts.
+  await sql`insert into documents (id, org_id, user_id, project_id, run_id, filename, mime_type, source_key, status, index_config_hash)
+    values (${args.id}, ${args.orgId}, ${args.userId}, ${args.projectId}, ${runId}, ${`${args.id}.pdf`}, 'application/pdf', ${`k-${args.id}`}, 'completed', ${indexConfigHash(indexConfigOf(TREE_PIPELINE))})`;
   await sql`insert into vector_indexes (id, document_id, backend, bucket, path, embedding_model, dimension)
     values (${`vi-${args.id}`}, ${args.id}, 'lancedb', 'b', 'p', ${route.model}, ${DIM})`;
   const rows = chunkRows.get(projectKey(args.orgId, args.projectId)) ?? [];
