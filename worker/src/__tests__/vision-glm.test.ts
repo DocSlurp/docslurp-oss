@@ -9,7 +9,8 @@ import type { Config } from "../config.js";
 import { CommandRunner } from "../tools/runner.js";
 import { insertMissingTableDelimiters } from "../tools/vision-table-delimiter.js";
 import { openRouterProviderParams, postProcessVisionText, visionModelProfile, visionOutputCapForModel, visionPromptKeyForModel, visionReasoningParams } from "../tools/vision-model-profiles.js";
-import { executeVisionRuntime, visionPromptTemplates } from "../tools/vision-runtime.js";
+import { executeVisionRuntime, visionPromptTemplates, type VisionPriceCeiling } from "../tools/vision-runtime.js";
+import { ProviderRoutingExclusionError } from "../lib/provider-retry.js";
 import { visionMaxPrice } from "../test/vision-max-price.js";
 import { inAllowingRun } from "../test/provider-scope.js";
 
@@ -20,10 +21,11 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-async function requestBody(model: string, prompt?: string) {
+async function requestBody(model: string, prompt?: string, extra: { priceCeiling?: VisionPriceCeiling; response?: () => Response } = {}) {
   const bodies: Array<Record<string, any>> = [];
   vi.stubGlobal("fetch", vi.fn(async (_url: string, init: RequestInit) => {
     bodies.push(JSON.parse(String(init.body)));
+    if (extra.response) return extra.response();
     return new Response(JSON.stringify({ choices: [{ message: { content: "x" }, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1 } }));
   }));
   const dir = await mkdtemp(join(tmpdir(), "vision-glm-"));
@@ -36,6 +38,7 @@ async function requestBody(model: string, prompt?: string) {
     cfg,
     runner: new CommandRunner(),
     privacyMode: "standard",
+    ...(extra.priceCeiling ? { priceCeiling: extra.priceCeiling } : {}),
   }));
   const body = bodies[0]!;
   body.messages[1].content[1].image_url.url = "<image>";
@@ -103,5 +106,23 @@ describe("GLM 5.3 Flash vision profile", () => {
     expect(body.provider).toEqual({ only: ["wafer/nvfp4", "friendli", "inference-net/fp4"], sort: "price", allow_fallbacks: true, max_price: visionMaxPrice(GLM) });
     expect(body.reasoning).toEqual({ effort: "minimal" });
     expect(body.max_tokens).toBe(8_192);
+  });
+
+  it("a price-ceiling request sends max_price at the ceiling and is restricted to the ceiling's hosts", async () => {
+    const ceiling = { inputUsdPerMillion: 0.065, outputUsdPerMillion: 0.24, imageUsd: 0, hosts: ["wafer/nvfp4", "wafer/us"] };
+    const body = await requestBody(GLM, undefined, { priceCeiling: ceiling });
+    expect(body.provider).toMatchObject({ only: ["wafer/nvfp4", "wafer/us"], sort: "price", allow_fallbacks: true,
+      max_price: { prompt: 0.065, completion: 0.24, image: 0 } });
+  });
+
+  it("a request no host can serve under its ceiling fails as a routing exclusion, not a model failure", async () => {
+    const ceiling = { inputUsdPerMillion: 0.001, outputUsdPerMillion: 0.001, imageUsd: 0, hosts: ["wafer/nvfp4", "wafer/us"] };
+    await expect(requestBody(GLM, undefined, { priceCeiling: ceiling, response: () => new Response(JSON.stringify({ error: { message: "No endpoints found matching your data policy and max_price" } }), { status: 404 }) }))
+      .rejects.toSatisfy((error: unknown) => {
+        for (let current = error, depth = 0; current && depth < 8; current = (current as { cause?: unknown }).cause, depth += 1) {
+          if (current instanceof ProviderRoutingExclusionError) return true;
+        }
+        return false;
+      });
   });
 });

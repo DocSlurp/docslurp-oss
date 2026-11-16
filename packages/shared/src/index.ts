@@ -152,3 +152,4 @@ export { computePriceColumns, computeCalibrationColumns, decodeComputeObservatio
 export type { ComputeExecutionScope, ComputeCohortGrant } from "./compute-observations.js";
 
 export type { ComputeAllocationAdmission, ComputeAllocationReservation, ComputeAllocationReleaseReason } from "./compute-observations.js";
+export * from "./ocr-escalation-routes.js";

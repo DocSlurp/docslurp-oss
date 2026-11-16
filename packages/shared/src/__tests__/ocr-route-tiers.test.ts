@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { DEFAULT_OCR_ESCALATION_MODEL, OCR_ESCALATION_ROUTES } from "../ocr-escalation-routes.js";
 import { OCR_ROUTE_OPTIONS, selectOcrRoute } from "../tier-options.js";
 
 const measured = { evalScore: 0.95 };
@@ -13,7 +14,7 @@ describe("scanned-page OCR route tiers", () => {
   it("smart takes the best-scored reader for every page and keeps hosted escalation as the fallback", () => {
     expect(selectOcrRoute("smart", { pageReader: measured, hostedEscalation: true })).toEqual({ optionId: "scan-ocr/page-reader", pageReader: "all", hostedEscalation: true });
     // A page reader that scores under the hosted escalation reader is not smart.
-    expect(selectOcrRoute("smart", { pageReader: { evalScore: 0.5 }, hostedEscalation: true })).toEqual({ optionId: "scan-ocr/hosted-escalation", pageReader: "off", hostedEscalation: true });
+    expect(selectOcrRoute("smart", { pageReader: { evalScore: 0.5 }, hostedEscalation: true })).toEqual({ optionId: "scan-ocr/hosted-escalation-glm", pageReader: "off", hostedEscalation: true });
   });
 
   it("never picks an unmeasured or missing page reader", () => {
@@ -36,13 +37,25 @@ describe("scanned-page OCR route tiers", () => {
     expect(selectOcrRoute("smart", { ...other, pageReader: { evalScore: 0.6 } }).pageReader).toBe("all");
   });
 
+  it("measures both escalation readers: GLM first by default, Qwen when it is the one configured", () => {
+    const hosted = OCR_ROUTE_OPTIONS.filter((option) => option.reader === "hosted-escalation");
+    expect(hosted.map((option) => option.model)).toEqual(OCR_ESCALATION_ROUTES.map((route) => route.model));
+    expect(hosted.map((option) => option.id)).toEqual(OCR_ESCALATION_ROUTES.map((route) => route.optionId));
+    expect(DEFAULT_OCR_ESCALATION_MODEL).toBe("llm://openrouter/z-ai/glm-5.3-flash");
+    for (const tier of ["balanced", "smart"] as const) {
+      expect(selectOcrRoute(tier, { pageReader: null, hostedEscalation: true }).optionId).toBe("scan-ocr/hosted-escalation-glm");
+      expect(selectOcrRoute(tier, { pageReader: null, hostedEscalation: true, hostedEscalationModel: DEFAULT_OCR_ESCALATION_MODEL }).optionId).toBe("scan-ocr/hosted-escalation-glm");
+      expect(selectOcrRoute(tier, { pageReader: null, hostedEscalation: true, hostedEscalationModel: "llm://deepinfra/Qwen/Qwen3-VL-30B-A3B-Instruct" }).optionId).toBe("scan-ocr/hosted-escalation");
+    }
+  });
+
   it("falls back to the recogniser when nothing else is available", () => {
     expect(selectOcrRoute("smart", { pageReader: null, hostedEscalation: false })).toEqual({ optionId: "scan-ocr/recogniser", pageReader: "off", hostedEscalation: false });
   });
 
   it("balanced sends the doubted pages to the page reader when one is measured, else to hosted escalation", () => {
     expect(selectOcrRoute("balanced", { pageReader: measured, hostedEscalation: true })).toEqual({ optionId: "scan-ocr/page-reader", pageReader: "escalation", hostedEscalation: true });
-    expect(selectOcrRoute("balanced", { pageReader: null, hostedEscalation: true })).toEqual({ optionId: "scan-ocr/hosted-escalation", pageReader: "off", hostedEscalation: true });
+    expect(selectOcrRoute("balanced", { pageReader: null, hostedEscalation: true })).toEqual({ optionId: "scan-ocr/hosted-escalation-glm", pageReader: "off", hostedEscalation: true });
   });
 
   it("records every measured option's composite and run", () => {

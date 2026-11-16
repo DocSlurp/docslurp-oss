@@ -259,6 +259,25 @@ export function isRoutingExclusion(status: number, body: string): boolean {
 }
 
 /**
+ * A request no provider could serve under its routing constraints (`isRoutingExclusion`: a `max_price` ceiling or a host
+ * allowlist excluded every host). Nothing was billed; retrying the same request cannot help.
+ */
+export class ProviderRoutingExclusionError extends Error {
+  constructor(readonly status: number, detail: string) {
+    super(`no provider meets the request's routing constraints (${status}): ${detail.replace(/\s+/g, " ").slice(0, 200)}`);
+    this.name = "ProviderRoutingExclusionError";
+  }
+}
+
+/** Find a ProviderRoutingExclusionError in an error or its causes. */
+export function findProviderRoutingExclusion(error: unknown): ProviderRoutingExclusionError | null {
+  for (let current = error, depth = 0; current && depth < 8; current = (current as { cause?: unknown }).cause, depth += 1) {
+    if (current instanceof ProviderRoutingExclusionError) return current;
+  }
+  return null;
+}
+
+/**
  * fetch() with provider back-pressure. Returns the first non-retryable
  * response (callers still check `response.ok`); throws ProviderRetryableError
  * when 429/5xx/network failures outlast the retry budget.

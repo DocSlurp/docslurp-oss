@@ -122,6 +122,18 @@ export const OCR_ROUTE_OPTIONS: readonly OcrRouteOption[] = Object.freeze([
     evalRef: "tier-benchmark-v1/page-ocr/development/dev-page-ocr-20261113-runpod",
   },
   {
+    // The default escalation reader (ocr-escalation-routes.ts), behind its per-request price ceiling.
+    id: "scan-ocr/hosted-escalation-glm",
+    reader: "hosted-escalation",
+    model: "llm://openrouter/z-ai/glm-5.3-flash",
+    tiers: ["balanced", "smart"],
+    // Tier benchmark v1, development page OCR (67 items), production pool: composite 0.934 (tolerant text 0.919,
+    // tables 0.930, math 1.000).
+    evalScore: 0.934,
+    evalRef: "tier-benchmark-v1/page-ocr/development/dev-page-ocr-20261112-r2",
+  },
+  {
+    // The second escalation reader, tried when the first is refused or no host can serve it.
     id: "scan-ocr/hosted-escalation",
     reader: "hosted-escalation",
     model: "llm://deepinfra/Qwen/Qwen3-VL-30B-A3B-Instruct",
@@ -160,7 +172,7 @@ export interface OcrRouteAvailability {
  * smart: the best-scored available reader of every scanned page, the hosted escalation reader as the fallback.
  * balanced: the page reader on the pages the recogniser doubts when one is registered and measured, else hosted
  * escalation of those pages. A reader without a score, or scoring at or under the recogniser alone, is never chosen; a
- * hosted escalation model other than the one measured is unmeasured.
+ * hosted escalation model other than the measured ones (ocr-escalation-routes.ts) is unmeasured.
  */
 export function selectOcrRoute(tier: RouteTier, available: OcrRouteAvailability, options: readonly OcrRouteOption[] = OCR_ROUTE_OPTIONS): OcrRoute {
   const escalation = available.hostedEscalation;

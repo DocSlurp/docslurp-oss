@@ -551,7 +551,7 @@ export function qualityModeInfo(mode: QualityMode): QualityModeInfo {
 
 const formatUsdPer1k = (credits: number): string => `$${creditsToDollars(credits).toFixed(2)}`;
 
-/** "$0.05", "$0.05 to $2.50" or "$2.50" per 1,000 pages for a quality mode. */
+/** "$0.10", "$0.10 to $1.50" or "$1.50" per 1,000 pages for a quality mode (whatever the pricing provider sets). */
 export function qualityModePriceRange(mode: QualityMode): string {
   const { min, max } = qualityModeInfo(mode).creditsPer1kPages;
   return min === max ? formatUsdPer1k(min) : `${formatUsdPer1k(min)} to ${formatUsdPer1k(max)}`;

@@ -16,7 +16,8 @@ import { escalateOcrPages } from "../escalation.js";
 import { ocrEscalationStageStats } from "../escalation-stats.js";
 import { SpendCheckUnavailableError } from "../../db/spend-check.js";
 import { createHostedOcrReader, DEFAULT_OCR_ESCALATION_MODEL, HOSTED_OCR_MAX_BYTES, HostedOcrSkipped, ocrEscalationModel } from "../hosted-reader.js";
-import { installTestPricing, isAutomaticSelectionDenied, resetPricingProviderForTests, TEST_PAGE_CREDITS } from "@docslurp/shared";
+import { DISTINCT_TEST_PRICING, installTestPricing, isAutomaticSelectionDenied, OCR_ESCALATION_GLM_MODEL, OCR_ESCALATION_QWEN_MODEL, OCR_ESCALATION_ROUTES, resetPricingProviderForTests, TEST_PAGE_CREDITS } from "@docslurp/shared";
+import { ProviderRoutingExclusionError } from "../../lib/provider-retry.js";
 import { ocrDocument } from "../read-document.js";
 
 const MODEL = "Qwen/Qwen3-VL-30B-A3B-Instruct";
@@ -170,6 +171,51 @@ describe("OCR escalation reads", () => {
     const fundedOutcome = await outcomeWith([{ pageNumber: 1, text: "ocr 1", escalate: true }]);
     expect(await escalateOcrPages(fundedOutcome, createHostedOcrReader({ state: funded, cfg: CFG, runner: {} as CommandRunner, env: ON, execute: fundedExecute }), "doc-1")).toMatchObject({ replaced: 1 });
     expect(fundedExecute).toHaveBeenCalledTimes(1);
+  });
+
+  it("reads with GLM under its price ceiling first, and with Qwen when no host can serve GLM under it", async () => {
+    const state = runState();
+    const execute = stubExecute((args) => args.vision.modelUri === OCR_ESCALATION_GLM_MODEL
+      ? new ProviderRoutingExclusionError(404, "No endpoints found matching your data policy and max_price")
+      : "Qwen transcription");
+    const reader = createHostedOcrReader({ state, cfg: CFG, runner: {} as CommandRunner, env: ON, execute });
+    const outcome = await outcomeWith([{ pageNumber: 1, text: "ocr 1", escalate: true }]);
+    expect(await escalateOcrPages(outcome, reader, "doc-1")).toMatchObject({ replaced: 1, failed: 0 });
+    expect(execute.mock.calls.map((call) => call[0].vision.modelUri)).toEqual([OCR_ESCALATION_GLM_MODEL, OCR_ESCALATION_QWEN_MODEL]);
+    // GLM's request carries the ceiling and its hosts; Qwen's carries none.
+    const ceiling = OCR_ESCALATION_ROUTES[0]!.priceCeiling!;
+    expect(execute.mock.calls[0]![0].priceCeiling).toEqual({ inputUsdPerMillion: ceiling.inputUsdPerMTok, outputUsdPerMillion: ceiling.outputUsdPerMTok, imageUsd: 0, hosts: ceiling.hosts });
+    expect(execute.mock.calls[1]![0].priceCeiling).toBeUndefined();
+    expect(outcome.pages[0]!.text).toBe("Qwen transcription");
+  });
+
+  it("skips the read, never sending it to a pricier host, when no reader can be served under its ceiling", async () => {
+    const state = runState();
+    const execute = stubExecute(() => new ProviderRoutingExclusionError(503, "There is no available model provider that meets your routing requirements"));
+    const reader = createHostedOcrReader({ state, cfg: CFG, runner: {} as CommandRunner, env: ON, execute });
+    const outcome = await outcomeWith([1, 2].map((pageNumber) => ({ pageNumber, text: `ocr ${pageNumber}`, escalate: true })));
+    expect(await escalateOcrPages(outcome, reader, "doc-1")).toMatchObject({ replaced: 0, failed: 0, skipped: { margin: 1 } });
+    expect(execute).toHaveBeenCalledTimes(2);
+    expect(state.usageLedger.snapshot().filter((event) => event.metric === "ingest-page-rich")).toEqual([]);
+    expect(ocrEscalationStageStats(state.artifactLedger, "doc-1")).toMatchObject({ skippedPages: { "price-check": 2 } });
+  });
+
+  it("gates each reader on its own: a refused GLM falls back to Qwen, both refused skip the read", async () => {
+    const state = runState();
+    installTestPricing({ automaticCallValueUsd: (call) => (call.model.includes("glm") ? 0 : 1) });
+    try {
+      const execute = stubExecute();
+      const reader = createHostedOcrReader({ state, cfg: CFG, runner: {} as CommandRunner, env: ON, execute });
+      expect(await escalateOcrPages(await outcomeWith([{ pageNumber: 1, text: "ocr 1", escalate: true }]), reader, "doc-1")).toMatchObject({ replaced: 1 });
+      expect(execute.mock.calls.map((call) => call[0].vision.modelUri)).toEqual([OCR_ESCALATION_QWEN_MODEL]);
+      installTestPricing({ automaticCallValueUsd: () => 0 });
+      const none = stubExecute();
+      const refused = createHostedOcrReader({ state: runState(), cfg: CFG, runner: {} as CommandRunner, env: ON, execute: none });
+      expect(await escalateOcrPages(await outcomeWith([{ pageNumber: 1, text: "ocr 1", escalate: true }]), refused, "doc-1")).toMatchObject({ skipped: { margin: 1 } });
+      expect(none).not.toHaveBeenCalled();
+    } finally {
+      installTestPricing(DISTINCT_TEST_PRICING);
+    }
   });
 
   it("keeps the per-document budget across an activity retry or a worker restart (a new state on the same attempt ledger)", async () => {
