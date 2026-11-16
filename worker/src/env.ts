@@ -3,6 +3,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { config as loadEnv } from "dotenv";
+import { initializeOperatorConfig } from "@docslurp/shared/operator-config";
 
 let loaded = false;
 
@@ -43,6 +44,9 @@ export function loadProjectEnv(fromMetaUrl: string): void {
   }
 
   loaded = true;
+  // The operator config file (DOCSLURP_OPERATOR_CONFIG) sets its variables now, before anything reads them; an invalid
+  // or unreadable file, or one that disagrees with the environment, stops the process here.
+  initializeOperatorConfig("worker");
 }
 
 loadProjectEnv(import.meta.url);

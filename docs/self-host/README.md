@@ -51,6 +51,7 @@ flowchart LR
 
 - [Docker Compose](docker-compose.md): install on one host, start, check and stop the stack, and switch between the lean and full worker.
 - [Configuration](configuration.md): environment options, storage and vector index URIs, and AI providers.
+- [Operator config file](operator-config.md): one versioned JSON file for extraction tuning knobs and deploy-wide model overrides.
 - [Public access](public-access.md): TLS reverse proxy, forwarded headers and client IP handling.
 - [Operations](operations.md): backups and restore, upgrades, and troubleshooting.
 - [Architecture](architecture.md): system map, ingest sequence, trust boundaries and Compose topology.
